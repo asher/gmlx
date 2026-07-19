@@ -1,0 +1,104 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly run against the newest in-range mlx-lm / mlx-vlm releases, so a
+    # dependency release that breaks the seam patches surfaces without a push.
+    - cron: "0 6 * * 1"
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # macos-26, not older images: the published mlx-kquant wheels are tagged
+    # macosx_26_0_arm64 (built with MACOSX_DEPLOYMENT_TARGET=26.2 for the
+    # Xcode 26.5 SDK miscompile workaround) - an older runner can't install
+    # them and would fall back to compiling the Metal extension from sdist.
+    runs-on: macos-26
+    strategy:
+      matrix:
+        # 3.11 is the requires-python floor; 3.13 the newest qualified release
+        # (3.12, the development version, sits between).
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: |
+          pip install "mlx==0.31.2"
+          pip install "mlx-kquant>=0.3.4"
+          # `assistant` pulls the MCP SDK: without it the stdio tool-server
+          # tests (env isolation especially) importorskip themselves away.
+          pip install -e ".[vlm,chat,assistant]" pytest httpx build
+      - name: Import canary
+        # A broken package import must fail the build loudly — the test files
+        # importorskip only true optionals, never gmlx itself.
+        run: python -c "import gmlx, gmlx.cli, gmlx.server, gmlx.server_patches, gmlx.spec_engine, gmlx.speculative"
+      - name: Wheel completeness
+        # The editable install above can't catch packaging drops: build the
+        # wheel (via sdist, so a stale build/ dir can't leak deleted modules
+        # into it) and require it to ship exactly the tracked package modules,
+        # plus every tracked file matching the pyproject package-data globs
+        # (upstream_seams.json, the vendored misaki data).
+        run: |
+          python -m build
+          python - <<'EOF'
+          import fnmatch, glob, subprocess, sys, tomllib, zipfile
+          wheel = glob.glob("dist/*.whl")[0]
+          shipped = set(zipfile.ZipFile(wheel).namelist())
+          tracked = subprocess.run(
+              ["git", "ls-files", "gmlx/*.py"],
+              capture_output=True, text=True, check=True,
+          ).stdout.split()
+          missing = [m for m in tracked if m not in shipped]
+          if missing:
+              sys.exit(f"wheel is missing tracked modules: {missing}")
+          extra = [m for m in shipped if m.startswith("gmlx/")
+                   and m.endswith(".py") and m not in tracked]
+          if extra:
+              sys.exit(f"wheel ships untracked modules (stale build/?): {extra}")
+          with open("pyproject.toml", "rb") as f:
+              globs = tomllib.load(f)["tool"]["setuptools"]["package-data"]["gmlx"]
+          tracked_all = subprocess.run(
+              ["git", "ls-files", "gmlx"],
+              capture_output=True, text=True, check=True,
+          ).stdout.split()
+          data = [t for t in tracked_all
+                  if any(fnmatch.fnmatch(t, "gmlx/" + g) for g in globs)]
+          if not data:
+              sys.exit("package-data globs matched no tracked files")
+          missing_data = [d for d in data if d not in shipped]
+          if missing_data:
+              sys.exit(f"wheel is missing package-data files: {missing_data}")
+          print(f"wheel ships all {len(tracked)} tracked modules"
+                f" + {len(data)} package-data files, nothing else")
+          EOF
+      - name: Arch coverage doc
+        # docs/arch-coverage.md is generated; a new arch (or an mlx-lm release
+        # renaming a model_type - the weekly cron catches those) must not leave
+        # the committed doc lying about what loads.
+        run: python scripts/check-coverage.py --check --strict
+      - name: Run CPU logic tests
+        env:
+          # Hosted runners have no dependable Metal device; the conftest flips
+          # the default device to CPU when this is set.
+          KQUANT_FORCE_CPU: "1"
+        run: pytest -q
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      # Pinned: a new ruff's new default rules shouldn't fail an untouched repo.
+      - run: pip install ruff==0.15.20
+      - run: ruff check .

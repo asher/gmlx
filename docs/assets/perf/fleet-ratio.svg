@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="620" viewBox="0 0 960 620" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<rect x="0" y="0" width="960" height="620" fill="#fcfcfb"/>
+<text x="21.0" y="40.5" font-size="21.8" fill="#0b0b0b" font-weight="600">gmlx vs llama.cpp -- throughput speedup across the fleet</text>
+<line x1="75.0" y1="214.0" x2="699.8" y2="214.0" stroke="#e1e0d9" stroke-width="1.0"/>
+<text x="67.5" y="219.2" font-size="13.5" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">2x</text>
+<line x1="75.0" y1="169.5" x2="699.8" y2="169.5" stroke="#e1e0d9" stroke-width="1.0"/>
+<text x="67.5" y="174.8" font-size="13.5" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">4x</text>
+<line x1="75.0" y1="125.0" x2="699.8" y2="125.0" stroke="#e1e0d9" stroke-width="1.0"/>
+<text x="67.5" y="130.3" font-size="13.5" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">6x</text>
+<line x1="75.0" y1="80.6" x2="699.8" y2="80.6" stroke="#e1e0d9" stroke-width="1.0"/>
+<text x="67.5" y="85.8" font-size="13.5" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">8x</text>
+<line x1="75.0" y1="248.5" x2="699.8" y2="248.5" stroke="#c3c2b7" stroke-width="1.2"/>
+<line x1="75.0" y1="236.2" x2="699.8" y2="236.2" stroke="#52514e" stroke-width="1.6" stroke-dasharray="2,3"/>
+<text x="696.8" y="231.0" font-size="12.0" fill="#898781" text-anchor="end">1x</text>
+<line x1="112.5" y1="248.5" x2="112.5" y2="248.5" stroke="#c3c2b7" stroke-width="1.0"/>
+<line x1="308.6" y1="248.5" x2="308.6" y2="248.5" stroke="#c3c2b7" stroke-width="1.0"/>
+<line x1="435.2" y1="248.5" x2="435.2" y2="248.5" stroke="#c3c2b7" stroke-width="1.0"/>
+<line x1="561.6" y1="248.5" x2="561.6" y2="248.5" stroke="#c3c2b7" stroke-width="1.0"/>
+<line x1="588.8" y1="248.5" x2="588.8" y2="248.5" stroke="#c3c2b7" stroke-width="1.0"/>
+<line x1="607.3" y1="248.5" x2="607.3" y2="248.5" stroke="#c3c2b7" stroke-width="1.0"/>
+<line x1="662.4" y1="248.5" x2="662.4" y2="248.5" stroke="#c3c2b7" stroke-width="1.0"/>
+<path d="M112.5,226.5 L308.6,221.0 L435.2,214.5 L561.6,192.9 L607.3,189.5" fill="none" stroke="#009e73" stroke-width="2.8" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="112.5" cy="226.5" r="3.9" fill="#009e73" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="308.6" cy="221.0" r="3.9" fill="#009e73" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="435.2" cy="214.5" r="3.9" fill="#009e73" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="561.6" cy="192.9" r="3.9" fill="#009e73" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="607.3" cy="189.5" r="3.9" fill="#009e73" stroke="#fcfcfb" stroke-width="2.0"/>
+<path d="M112.5,223.0 L308.6,187.6 L435.2,154.7 L561.6,100.1 L607.3,82.8" fill="none" stroke="#e69f00" stroke-width="2.8" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="112.5" cy="223.0" r="3.9" fill="#e69f00" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="308.6" cy="187.6" r="3.9" fill="#e69f00" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="435.2" cy="154.7" r="3.9" fill="#e69f00" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="561.6" cy="100.1" r="3.9" fill="#e69f00" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="607.3" cy="82.8" r="3.9" fill="#e69f00" stroke="#fcfcfb" stroke-width="2.0"/>
+<path d="M112.5,227.2 L308.6,230.1 L435.2,226.1 L561.6,213.0" fill="none" stroke="#d55e00" stroke-width="2.8" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="112.5" cy="227.2" r="3.9" fill="#d55e00" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="308.6" cy="230.1" r="3.9" fill="#d55e00" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="435.2" cy="226.1" r="3.9" fill="#d55e00" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="561.6" cy="213.0" r="3.9" fill="#d55e00" stroke="#fcfcfb" stroke-width="2.0"/>
+<path d="M112.5,231.6 L308.6,222.8 L435.2,207.1 L561.6,171.1 L607.3,154.7" fill="none" stroke="#898781" stroke-width="1.3" opacity="0.32" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M112.5,235.3 L308.6,230.2 L435.2,216.6 L561.6,185.9 L607.3,175.8" fill="none" stroke="#898781" stroke-width="1.3" opacity="0.32" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M112.5,232.3 L308.6,227.1 L435.2,223.3 L561.6,209.0 L607.3,199.6" fill="none" stroke="#898781" stroke-width="1.3" opacity="0.32" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M112.5,229.4 L308.6,228.4 L435.2,225.1 L561.6,212.5 L607.3,203.7 L662.4,197.2" fill="none" stroke="#898781" stroke-width="1.3" opacity="0.32" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M112.5,234.7 L308.6,224.5 L435.2,210.3 L561.6,177.2 L607.3,160.4" fill="none" stroke="#898781" stroke-width="1.3" opacity="0.32" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M112.5,226.1 L308.6,218.1 L435.2,206.5 L561.6,180.5 L588.8,171.8" fill="none" stroke="#898781" stroke-width="1.3" opacity="0.32" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M112.5,216.9 L308.6,219.0 L435.2,207.3 L561.6,170.0 L588.8,160.9" fill="none" stroke="#898781" stroke-width="1.3" opacity="0.32" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M112.5,233.3 L308.6,220.4 L435.2,213.8 L561.6,207.7 L607.3,206.3 L662.4,207.1" fill="none" stroke="#898781" stroke-width="1.3" opacity="0.32" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M112.5,234.2 L308.6,228.4 L435.2,226.9 L561.6,218.4 L607.3,211.3 L662.4,203.2" fill="none" stroke="#898781" stroke-width="1.3" opacity="0.32" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M112.5,231.5 L308.6,222.8 L435.2,216.2 L561.6,203.1 L607.3,202.0 L662.4,202.7" fill="none" stroke="#898781" stroke-width="1.3" opacity="0.32" stroke-linejoin="round" stroke-linecap="round"/>
+<text x="30.0" y="159.5" font-size="14.2" fill="#898781" text-anchor="middle" transform="rotate(-90.0 30.0 159.5)">prefill speedup</text>
+<text x="707.3" y="87.6" font-size="12.3" fill="#e69f00" font-weight="600">gemma-4-E2B-it UD-Q6_K_XL 7.90x</text>
+<text x="707.3" y="194.3" font-size="12.3" fill="#009e73" font-weight="600">gemma-4-26B-A4B-it Q6_K 3.10x</text>
+<text x="707.3" y="217.8" font-size="12.3" fill="#d55e00" font-weight="600">Qwen3.5-9B Q6_K 2.05x</text>
+<line x1="75.0" y1="459.2" x2="699.8" y2="459.2" stroke="#e1e0d9" stroke-width="1.0"/>
+<text x="67.5" y="464.5" font-size="13.5" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">1x</text>
+<line x1="75.0" y1="392.7" x2="699.8" y2="392.7" stroke="#e1e0d9" stroke-width="1.0"/>
+<text x="67.5" y="397.9" font-size="13.5" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">1.5x</text>
+<line x1="75.0" y1="326.1" x2="699.8" y2="326.1" stroke="#e1e0d9" stroke-width="1.0"/>
+<text x="67.5" y="331.3" font-size="13.5" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">2x</text>
+<line x1="75.0" y1="471.5" x2="699.8" y2="471.5" stroke="#c3c2b7" stroke-width="1.2"/>
+<line x1="75.0" y1="459.2" x2="699.8" y2="459.2" stroke="#52514e" stroke-width="1.6" stroke-dasharray="2,3"/>
+<text x="696.8" y="454.0" font-size="12.0" fill="#898781" text-anchor="end">1x</text>
+<line x1="112.5" y1="471.5" x2="112.5" y2="476.8" stroke="#c3c2b7" stroke-width="1.0"/>
+<text x="112.5" y="492.5" font-size="12.8" fill="#898781" text-anchor="middle" style="font-variant-numeric: tabular-nums">512</text>
+<line x1="308.6" y1="471.5" x2="308.6" y2="476.8" stroke="#c3c2b7" stroke-width="1.0"/>
+<text x="308.6" y="492.5" font-size="12.8" fill="#898781" text-anchor="middle" style="font-variant-numeric: tabular-nums">4.3k</text>
+<line x1="435.2" y1="471.5" x2="435.2" y2="476.8" stroke="#c3c2b7" stroke-width="1.0"/>
+<text x="435.2" y="492.5" font-size="12.8" fill="#898781" text-anchor="middle" style="font-variant-numeric: tabular-nums">17k</text>
+<line x1="561.6" y1="471.5" x2="561.6" y2="476.8" stroke="#c3c2b7" stroke-width="1.0"/>
+<text x="561.6" y="492.5" font-size="12.8" fill="#898781" text-anchor="middle" style="font-variant-numeric: tabular-nums">67k</text>
+<line x1="588.8" y1="471.5" x2="588.8" y2="476.8" stroke="#c3c2b7" stroke-width="1.0"/>
+<text x="588.8" y="492.5" font-size="12.8" fill="#898781" text-anchor="middle" style="font-variant-numeric: tabular-nums">90k</text>
+<line x1="607.3" y1="471.5" x2="607.3" y2="476.8" stroke="#c3c2b7" stroke-width="1.0"/>
+<line x1="662.4" y1="471.5" x2="662.4" y2="476.8" stroke="#c3c2b7" stroke-width="1.0"/>
+<text x="662.4" y="492.5" font-size="12.8" fill="#898781" text-anchor="middle" style="font-variant-numeric: tabular-nums">200k</text>
+<path d="M112.5,415.2 L308.6,437.0 L435.2,421.7 L561.6,349.9 L607.3,305.8" fill="none" stroke="#e69f00" stroke-width="2.8" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="112.5" cy="415.2" r="3.9" fill="#e69f00" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="308.6" cy="437.0" r="3.9" fill="#e69f00" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="435.2" cy="421.7" r="3.9" fill="#e69f00" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="561.6" cy="349.9" r="3.9" fill="#e69f00" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="607.3" cy="305.8" r="3.9" fill="#e69f00" stroke="#fcfcfb" stroke-width="2.0"/>
+<path d="M112.5,395.9 L308.6,424.9 L435.2,426.8 L561.6,434.8" fill="none" stroke="#d55e00" stroke-width="2.8" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="112.5" cy="395.9" r="3.9" fill="#d55e00" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="308.6" cy="424.9" r="3.9" fill="#d55e00" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="435.2" cy="426.8" r="3.9" fill="#d55e00" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="561.6" cy="434.8" r="3.9" fill="#d55e00" stroke="#fcfcfb" stroke-width="2.0"/>
+<path d="M112.5,425.4 L308.6,414.4 L435.2,411.3 L561.6,413.2 L607.3,393.5 L662.4,386.8" fill="none" stroke="#009e73" stroke-width="2.8" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="112.5" cy="425.4" r="3.9" fill="#009e73" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="308.6" cy="414.4" r="3.9" fill="#009e73" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="435.2" cy="411.3" r="3.9" fill="#009e73" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="561.6" cy="413.2" r="3.9" fill="#009e73" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="607.3" cy="393.5" r="3.9" fill="#009e73" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="662.4" cy="386.8" r="3.9" fill="#009e73" stroke="#fcfcfb" stroke-width="2.0"/>
+<path d="M112.5,429.2 L308.6,444.3 L435.2,427.0 L561.6,361.7 L607.3,373.7" fill="none" stroke="#898781" stroke-width="1.3" opacity="0.32" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M112.5,430.6 L308.6,431.6 L435.2,412.0 L561.6,368.6 L607.3,356.8 L662.4,335.2" fill="none" stroke="#898781" stroke-width="1.3" opacity="0.32" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M112.5,428.0 L308.6,425.1 L435.2,399.1 L561.6,372.7 L607.3,369.3 L662.4,389.7" fill="none" stroke="#898781" stroke-width="1.3" opacity="0.32" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M112.5,436.8 L308.6,420.3 L435.2,414.8 L561.6,418.1 L607.3,417.2 L662.4,431.1" fill="none" stroke="#898781" stroke-width="1.3" opacity="0.32" stroke-linejoin="round" stroke-linecap="round"/>
+<text x="30.0" y="382.5" font-size="14.2" fill="#898781" text-anchor="middle" transform="rotate(-90.0 30.0 382.5)">decode speedup</text>
+<text x="707.3" y="310.6" font-size="12.3" fill="#e69f00" font-weight="600">gemma-4-12B-it Q6_K 2.15x</text>
+<text x="707.3" y="391.6" font-size="12.3" fill="#009e73" font-weight="600">Qwen3.6-35B-A3B Q6_K 1.54x</text>
+<text x="707.3" y="439.6" font-size="12.3" fill="#d55e00" font-weight="600">Qwen3.5-9B Q6_K 1.18x</text>
+<text x="387.4" y="510.5" font-size="14.2" fill="#898781" text-anchor="middle">KV depth (tokens, log scale)</text>
+<text x="75.0" y="531.5" font-size="11.7" fill="#898781">Each ghosted line is one model; fastest / median / slowest are highlighted and labeled. Every line stays above 1.0x.</text>
+<text x="75.0" y="549.5" font-size="11.7" fill="#898781">Prefill: baseline, 13 models. Decode: speculative (MTP), 7 models (gpt-oss / gemma-4-E4B / DeepSeek have no MTP arm on both engines).</text>
+</svg>

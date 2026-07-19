@@ -1,0 +1,2645 @@
+{
+  "hardware": "Apple M5 Max, 128 GB unified memory (MacBook Pro)",
+  "builds": {
+    "gmlx": "0.1.0",
+    "mlx-kquant": "0.3.5",
+    "llama.cpp": "b9967",
+    "ds4-server": "80ebbc3"
+  },
+  "order": [
+    "qwen3.5-122b-a10b-ud-q5km",
+    "qwen3.6-35b-a3b-heretic-q6k",
+    "qwen3.6-27b-q6k",
+    "qwen3.5-9b-q6k",
+    "gemma-4-31b-q6k",
+    "gemma-4-26b-a4b-q6k",
+    "gemma-4-12b-q6k",
+    "gemma-4-e4b-q6k",
+    "gemma-4-e2b-q6kxl",
+    "gpt-oss-120b-heretic-mxfp4",
+    "gpt-oss-20b-mxfp4",
+    "dolphin3-llama3.1-8b-q6k",
+    "deepseek-v4-flash-unsloth-udiq3xxs",
+    "deepseek-v4-flash-antirez-iq2xxs"
+  ],
+  "models": {
+    "qwen3.5-122b-a10b-ud-q5km": {
+      "label": "Qwen3.5-122B-A10B UD-Q5_K_M",
+      "comparison": "llama.cpp",
+      "mtp": true,
+      "mtp_kind": "native",
+      "gguf": "Qwen3.5-122B-A10B-UD-Q5_K_M-00001-of-00003.gguf",
+      "source": "https://huggingface.co/unsloth/Qwen3.5-122B-A10B-MTP-GGUF",
+      "rows": [
+        {
+          "depth": 512,
+          "gmlx_decode_base": 47.8,
+          "gmlx_decode_mtp": 59.0,
+          "llama_decode_base": 38.4,
+          "llama_decode_mtp": 47.8,
+          "gmlx_prefill_base": 643.9,
+          "llama_prefill_base": 568.8,
+          "range": {
+            "gmlx_decode_base": [
+              47.4,
+              48.0
+            ],
+            "gmlx_decode_mtp": [
+              55.6,
+              67.3
+            ],
+            "llama_decode_base": [
+              38.0,
+              38.5
+            ],
+            "llama_decode_mtp": [
+              42.3,
+              51.0
+            ],
+            "gmlx_prefill_base": [
+              482.2,
+              706.7
+            ],
+            "llama_prefill_base": [
+              546.6,
+              612.4
+            ]
+          }
+        },
+        {
+          "depth": 4300,
+          "gmlx_decode_base": 45.9,
+          "gmlx_decode_mtp": 58.3,
+          "llama_decode_base": 37.3,
+          "llama_decode_mtp": 46.4,
+          "gmlx_prefill_base": 950.3,
+          "llama_prefill_base": 555.0,
+          "range": {
+            "gmlx_decode_base": [
+              45.7,
+              46.2
+            ],
+            "gmlx_decode_mtp": [
+              55.6,
+              62.8
+            ],
+            "llama_decode_base": [
+              37.1,
+              37.5
+            ],
+            "llama_decode_mtp": [
+              44.7,
+              48.0
+            ],
+            "gmlx_prefill_base": [
+              935.3,
+              956.4
+            ],
+            "llama_prefill_base": [
+              496.5,
+              607.6
+            ]
+          }
+        },
+        {
+          "depth": 17000,
+          "gmlx_decode_base": 42.2,
+          "gmlx_decode_mtp": 56.0,
+          "llama_decode_base": 33.8,
+          "llama_decode_mtp": 38.6,
+          "gmlx_prefill_base": 957.6,
+          "llama_prefill_base": 476.3,
+          "range": {
+            "gmlx_decode_base": [
+              42.1,
+              42.4
+            ],
+            "gmlx_decode_mtp": [
+              46.6,
+              61.2
+            ],
+            "llama_decode_base": [
+              33.7,
+              34.0
+            ],
+            "llama_decode_mtp": [
+              37.4,
+              40.7
+            ],
+            "gmlx_prefill_base": [
+              945.2,
+              968.5
+            ],
+            "llama_prefill_base": [
+              449.9,
+              491.7
+            ]
+          }
+        },
+        {
+          "depth": 67000,
+          "gmlx_decode_base": 33.6,
+          "gmlx_decode_mtp": 42.0,
+          "llama_decode_base": 25.6,
+          "llama_decode_mtp": 25.4,
+          "gmlx_prefill_base": 649.5,
+          "llama_prefill_base": 284.8,
+          "range": {
+            "gmlx_decode_base": [
+              32.8,
+              33.9
+            ],
+            "gmlx_decode_mtp": [
+              38.5,
+              44.7
+            ],
+            "llama_decode_base": [
+              25.4,
+              25.8
+            ],
+            "llama_decode_mtp": [
+              24.4,
+              31.2
+            ],
+            "gmlx_prefill_base": [
+              628.0,
+              654.5
+            ],
+            "llama_prefill_base": [
+              276.0,
+              289.7
+            ]
+          }
+        },
+        {
+          "depth": 110000,
+          "gmlx_decode_base": 28.4,
+          "gmlx_decode_mtp": 36.7,
+          "llama_decode_base": 21.1,
+          "llama_decode_mtp": 21.9,
+          "gmlx_prefill_base": 474.2,
+          "llama_prefill_base": 202.2,
+          "range": {
+            "gmlx_decode_base": [
+              27.9,
+              28.8
+            ],
+            "gmlx_decode_mtp": [
+              34.4,
+              38.2
+            ],
+            "llama_decode_base": [
+              21.0,
+              21.1
+            ],
+            "llama_decode_mtp": [
+              21.1,
+              24.7
+            ],
+            "gmlx_prefill_base": [
+              463.2,
+              478.4
+            ],
+            "llama_prefill_base": [
+              201.2,
+              207.3
+            ]
+          }
+        },
+        {
+          "depth": 200000,
+          "gmlx_decode_base": 21.9,
+          "gmlx_decode_mtp": 22.0,
+          "llama_decode_base": 15.6,
+          "llama_decode_mtp": 14.4,
+          "gmlx_prefill_base": 300.3,
+          "llama_prefill_base": 129.9,
+          "range": {
+            "gmlx_decode_base": [
+              21.8,
+              22.0
+            ],
+            "gmlx_decode_mtp": [
+              20.6,
+              23.8
+            ],
+            "llama_decode_base": [
+              15.5,
+              15.8
+            ],
+            "llama_decode_mtp": [
+              13.9,
+              15.9
+            ],
+            "gmlx_prefill_base": [
+              297.5,
+              301.3
+            ],
+            "llama_prefill_base": [
+              129.3,
+              130.0
+            ]
+          }
+        }
+      ]
+    },
+    "qwen3.6-35b-a3b-heretic-q6k": {
+      "label": "Qwen3.6-35B-A3B Q6_K",
+      "comparison": "llama.cpp",
+      "mtp": true,
+      "mtp_kind": "native",
+      "gguf": "Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-Q6_K.gguf",
+      "source": "https://huggingface.co/llmfan46/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-GGUF",
+      "rows": [
+        {
+          "depth": 512,
+          "gmlx_decode_base": 128.8,
+          "gmlx_decode_mtp": 138.1,
+          "llama_decode_base": 89.3,
+          "llama_decode_mtp": 110.1,
+          "gmlx_prefill_base": 2106.6,
+          "llama_prefill_base": 1737.9,
+          "range": {
+            "gmlx_decode_base": [
+              126.7,
+              130.0
+            ],
+            "gmlx_decode_mtp": [
+              131.4,
+              143.1
+            ],
+            "llama_decode_base": [
+              88.2,
+              94.8
+            ],
+            "llama_decode_mtp": [
+              99.9,
+              115.3
+            ],
+            "gmlx_prefill_base": [
+              1554.9,
+              2319.9
+            ],
+            "llama_prefill_base": [
+              1166.7,
+              1756.3
+            ]
+          }
+        },
+        {
+          "depth": 4300,
+          "gmlx_decode_base": 128.1,
+          "gmlx_decode_mtp": 139.0,
+          "llama_decode_base": 94.4,
+          "llama_decode_mtp": 104.0,
+          "gmlx_prefill_base": 2764.5,
+          "llama_prefill_base": 1722.3,
+          "range": {
+            "gmlx_decode_base": [
+              127.5,
+              128.7
+            ],
+            "gmlx_decode_mtp": [
+              123.1,
+              151.3
+            ],
+            "llama_decode_base": [
+              93.2,
+              95.3
+            ],
+            "llama_decode_mtp": [
+              96.9,
+              111.1
+            ],
+            "gmlx_prefill_base": [
+              2636.6,
+              2849.5
+            ],
+            "llama_prefill_base": [
+              1478.8,
+              1823.7
+            ]
+          }
+        },
+        {
+          "depth": 17000,
+          "gmlx_decode_base": 114.3,
+          "gmlx_decode_mtp": 118.8,
+          "llama_decode_base": 85.7,
+          "llama_decode_mtp": 87.4,
+          "gmlx_prefill_base": 2736.4,
+          "llama_prefill_base": 1440.5,
+          "range": {
+            "gmlx_decode_base": [
+              113.9,
+              114.5
+            ],
+            "gmlx_decode_mtp": [
+              117.1,
+              130.5
+            ],
+            "llama_decode_base": [
+              85.2,
+              86.4
+            ],
+            "llama_decode_mtp": [
+              83.4,
+              103.3
+            ],
+            "gmlx_prefill_base": [
+              2685.6,
+              2761.8
+            ],
+            "llama_prefill_base": [
+              1403.8,
+              1459.5
+            ]
+          }
+        },
+        {
+          "depth": 67000,
+          "gmlx_decode_base": 83.4,
+          "gmlx_decode_mtp": 85.0,
+          "llama_decode_base": 58.4,
+          "llama_decode_mtp": 63.2,
+          "gmlx_prefill_base": 1841.4,
+          "llama_prefill_base": 739.0,
+          "range": {
+            "gmlx_decode_base": [
+              82.8,
+              84.7
+            ],
+            "gmlx_decode_mtp": [
+              80.7,
+              89.8
+            ],
+            "llama_decode_base": [
+              57.6,
+              59.9
+            ],
+            "llama_decode_mtp": [
+              52.4,
+              70.1
+            ],
+            "gmlx_prefill_base": [
+              1834.8,
+              1849.8
+            ],
+            "llama_prefill_base": [
+              727.1,
+              798.2
+            ]
+          }
+        },
+        {
+          "depth": 110000,
+          "gmlx_decode_base": 68.5,
+          "gmlx_decode_mtp": 72.6,
+          "llama_decode_base": 47.3,
+          "llama_decode_mtp": 48.6,
+          "gmlx_prefill_base": 1364.7,
+          "llama_prefill_base": 537.6,
+          "range": {
+            "gmlx_decode_base": [
+              68.4,
+              69.1
+            ],
+            "gmlx_decode_mtp": [
+              66.0,
+              80.3
+            ],
+            "llama_decode_base": [
+              46.9,
+              48.8
+            ],
+            "llama_decode_mtp": [
+              40.9,
+              50.8
+            ],
+            "gmlx_prefill_base": [
+              1338.3,
+              1374.4
+            ],
+            "llama_prefill_base": [
+              517.0,
+              561.6
+            ]
+          }
+        },
+        {
+          "depth": 200000,
+          "gmlx_decode_base": 46.8,
+          "gmlx_decode_mtp": 48.3,
+          "llama_decode_base": 33.9,
+          "llama_decode_mtp": 31.3,
+          "gmlx_prefill_base": 805.1,
+          "llama_prefill_base": 321.1,
+          "range": {
+            "gmlx_decode_base": [
+              46.5,
+              48.2
+            ],
+            "gmlx_decode_mtp": [
+              46.2,
+              50.7
+            ],
+            "llama_decode_base": [
+              33.6,
+              34.3
+            ],
+            "llama_decode_mtp": [
+              27.2,
+              36.3
+            ],
+            "gmlx_prefill_base": [
+              785.0,
+              835.0
+            ],
+            "llama_prefill_base": [
+              315.8,
+              324.3
+            ]
+          }
+        }
+      ]
+    },
+    "qwen3.6-27b-q6k": {
+      "label": "Qwen3.6-27B Q6_K",
+      "comparison": "llama.cpp",
+      "mtp": true,
+      "mtp_kind": "native",
+      "gguf": "Qwen_Qwen3.6-27B-Q6_K.gguf",
+      "source": "https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF",
+      "rows": [
+        {
+          "depth": 512,
+          "gmlx_decode_base": 20.7,
+          "gmlx_decode_mtp": 36.8,
+          "llama_decode_base": 18.7,
+          "llama_decode_mtp": 31.5,
+          "gmlx_prefill_base": 430.2,
+          "llama_prefill_base": 394.6,
+          "range": {
+            "gmlx_decode_base": [
+              20.7,
+              20.8
+            ],
+            "gmlx_decode_mtp": [
+              35.1,
+              39.9
+            ],
+            "llama_decode_base": [
+              18.6,
+              19.2
+            ],
+            "llama_decode_mtp": [
+              31.1,
+              32.6
+            ],
+            "gmlx_prefill_base": [
+              407.4,
+              489.8
+            ],
+            "llama_prefill_base": [
+              335.7,
+              446.8
+            ]
+          }
+        },
+        {
+          "depth": 4300,
+          "gmlx_decode_base": 19.8,
+          "gmlx_decode_mtp": 37.1,
+          "llama_decode_base": 18.1,
+          "llama_decode_mtp": 28.7,
+          "gmlx_prefill_base": 600.9,
+          "llama_prefill_base": 443.9,
+          "range": {
+            "gmlx_decode_base": [
+              19.7,
+              20.1
+            ],
+            "gmlx_decode_mtp": [
+              33.9,
+              47.0
+            ],
+            "llama_decode_base": [
+              18.0,
+              18.3
+            ],
+            "llama_decode_mtp": [
+              27.5,
+              56.4
+            ],
+            "gmlx_prefill_base": [
+              596.0,
+              606.2
+            ],
+            "llama_prefill_base": [
+              412.5,
+              464.4
+            ]
+          }
+        },
+        {
+          "depth": 17000,
+          "gmlx_decode_base": 18.8,
+          "gmlx_decode_mtp": 34.1,
+          "llama_decode_base": 17.3,
+          "llama_decode_mtp": 25.6,
+          "gmlx_prefill_base": 575.9,
+          "llama_prefill_base": 405.4,
+          "range": {
+            "gmlx_decode_base": [
+              18.7,
+              18.8
+            ],
+            "gmlx_decode_mtp": [
+              29.5,
+              39.3
+            ],
+            "llama_decode_base": [
+              17.3,
+              17.4
+            ],
+            "llama_decode_mtp": [
+              24.1,
+              29.8
+            ],
+            "gmlx_prefill_base": [
+              570.1,
+              587.6
+            ],
+            "llama_prefill_base": [
+              399.7,
+              425.8
+            ]
+          }
+        },
+        {
+          "depth": 67000,
+          "gmlx_decode_base": 15.8,
+          "gmlx_decode_mtp": 24.6,
+          "llama_decode_base": 14.1,
+          "llama_decode_mtp": 18.8,
+          "gmlx_prefill_base": 454.5,
+          "llama_prefill_base": 252.1,
+          "range": {
+            "gmlx_decode_base": [
+              15.5,
+              16.2
+            ],
+            "gmlx_decode_mtp": [
+              21.8,
+              31.3
+            ],
+            "llama_decode_base": [
+              14.0,
+              14.1
+            ],
+            "llama_decode_mtp": [
+              17.6,
+              21.6
+            ],
+            "gmlx_prefill_base": [
+              436.6,
+              466.1
+            ],
+            "llama_prefill_base": [
+              247.9,
+              255.7
+            ]
+          }
+        },
+        {
+          "depth": 110000,
+          "gmlx_decode_base": 14.5,
+          "gmlx_decode_mtp": 22.2,
+          "llama_decode_base": 12.1,
+          "llama_decode_mtp": 16.9,
+          "gmlx_prefill_base": 387.7,
+          "llama_prefill_base": 182.6,
+          "range": {
+            "gmlx_decode_base": [
+              14.5,
+              14.6
+            ],
+            "gmlx_decode_mtp": [
+              18.5,
+              23.8
+            ],
+            "llama_decode_base": [
+              10.9,
+              12.2
+            ],
+            "llama_decode_mtp": [
+              13.1,
+              18.5
+            ],
+            "gmlx_prefill_base": [
+              384.6,
+              389.3
+            ],
+            "llama_prefill_base": [
+              160.3,
+              185.0
+            ]
+          }
+        },
+        {
+          "depth": 200000,
+          "gmlx_decode_base": 12.1,
+          "gmlx_decode_mtp": 16.3,
+          "llama_decode_base": 9.6,
+          "llama_decode_mtp": 13.5,
+          "gmlx_prefill_base": 280.3,
+          "llama_prefill_base": 112.8,
+          "range": {
+            "gmlx_decode_base": [
+              11.7,
+              12.4
+            ],
+            "gmlx_decode_mtp": [
+              15.3,
+              17.1
+            ],
+            "llama_decode_base": [
+              9.6,
+              9.6
+            ],
+            "llama_decode_mtp": [
+              11.2,
+              14.8
+            ],
+            "gmlx_prefill_base": [
+              273.1,
+              285.8
+            ],
+            "llama_prefill_base": [
+              112.5,
+              114.5
+            ]
+          }
+        }
+      ]
+    },
+    "qwen3.5-9b-q6k": {
+      "label": "Qwen3.5-9B Q6_K",
+      "comparison": "llama.cpp",
+      "mtp": true,
+      "mtp_kind": "native",
+      "gguf": "Qwen3.5-9B-Q6_K.gguf",
+      "source": "https://huggingface.co/unsloth/Qwen3.5-9B-MTP-GGUF",
+      "rows": [
+        {
+          "depth": 512,
+          "gmlx_decode_base": 70.3,
+          "gmlx_decode_mtp": 111.9,
+          "llama_decode_base": 58.1,
+          "llama_decode_mtp": 75.8,
+          "gmlx_prefill_base": 1595.0,
+          "llama_prefill_base": 1136.4,
+          "range": {
+            "gmlx_decode_base": [
+              69.1,
+              72.4
+            ],
+            "gmlx_decode_mtp": [
+              102.9,
+              126.7
+            ],
+            "llama_decode_base": [
+              57.5,
+              58.3
+            ],
+            "llama_decode_mtp": [
+              72.8,
+              80.9
+            ],
+            "gmlx_prefill_base": [
+              1407.5,
+              2267.2
+            ],
+            "llama_prefill_base": [
+              1075.4,
+              1142.4
+            ]
+          }
+        },
+        {
+          "depth": 4300,
+          "gmlx_decode_base": 69.1,
+          "gmlx_decode_mtp": 96.6,
+          "llama_decode_base": 58.2,
+          "llama_decode_mtp": 76.8,
+          "gmlx_prefill_base": 1817.4,
+          "llama_prefill_base": 1424.0,
+          "range": {
+            "gmlx_decode_base": [
+              69.0,
+              69.6
+            ],
+            "gmlx_decode_mtp": [
+              85.7,
+              103.0
+            ],
+            "llama_decode_base": [
+              58.0,
+              59.2
+            ],
+            "llama_decode_mtp": [
+              69.5,
+              86.7
+            ],
+            "gmlx_prefill_base": [
+              1786.1,
+              1916.4
+            ],
+            "llama_prefill_base": [
+              1342.0,
+              1582.0
+            ]
+          }
+        },
+        {
+          "depth": 17000,
+          "gmlx_decode_base": 62.7,
+          "gmlx_decode_mtp": 85.1,
+          "llama_decode_base": 53.4,
+          "llama_decode_mtp": 68.4,
+          "gmlx_prefill_base": 1962.4,
+          "llama_prefill_base": 1350.5,
+          "range": {
+            "gmlx_decode_base": [
+              62.0,
+              63.5
+            ],
+            "gmlx_decode_mtp": [
+              76.7,
+              91.9
+            ],
+            "llama_decode_base": [
+              53.3,
+              53.7
+            ],
+            "llama_decode_mtp": [
+              61.3,
+              73.6
+            ],
+            "gmlx_prefill_base": [
+              1920.0,
+              1997.6
+            ],
+            "llama_prefill_base": [
+              1306.0,
+              1375.9
+            ]
+          }
+        },
+        {
+          "depth": 67000,
+          "gmlx_decode_base": 49.8,
+          "gmlx_decode_mtp": 58.5,
+          "llama_decode_base": 39.6,
+          "llama_decode_mtp": 49.4,
+          "gmlx_prefill_base": 1551.7,
+          "llama_prefill_base": 758.7,
+          "range": {
+            "gmlx_decode_base": [
+              49.3,
+              50.7
+            ],
+            "gmlx_decode_mtp": [
+              52.5,
+              64.1
+            ],
+            "llama_decode_base": [
+              39.0,
+              40.8
+            ],
+            "llama_decode_mtp": [
+              43.9,
+              59.4
+            ],
+            "gmlx_prefill_base": [
+              1540.2,
+              1600.1
+            ],
+            "llama_prefill_base": [
+              740.7,
+              798.9
+            ]
+          }
+        }
+      ]
+    },
+    "gemma-4-31b-q6k": {
+      "label": "gemma-4-31B-it Q6_K",
+      "comparison": "llama.cpp",
+      "mtp": true,
+      "mtp_kind": "drafter",
+      "gguf": "gemma-4-31B-it-Q6_K.gguf",
+      "source": null,
+      "rows": [
+        {
+          "depth": 512,
+          "gmlx_decode_base": 17.8,
+          "gmlx_decode_mtp": 34.5,
+          "llama_decode_base": 16.4,
+          "llama_decode_mtp": 28.4,
+          "gmlx_prefill_base": 367.5,
+          "llama_prefill_base": 281.1,
+          "range": {
+            "gmlx_decode_base": [
+              17.6,
+              18.0
+            ],
+            "gmlx_decode_mtp": [
+              32.5,
+              37.5
+            ],
+            "llama_decode_base": [
+              16.4,
+              16.9
+            ],
+            "llama_decode_mtp": [
+              25.1,
+              28.8
+            ],
+            "gmlx_prefill_base": [
+              360.3,
+              384.2
+            ],
+            "llama_prefill_base": [
+              261.0,
+              283.8
+            ]
+          }
+        },
+        {
+          "depth": 4300,
+          "gmlx_decode_base": 16.1,
+          "gmlx_decode_mtp": 30.0,
+          "llama_decode_base": 15.6,
+          "llama_decode_mtp": 24.8,
+          "gmlx_prefill_base": 461.8,
+          "llama_prefill_base": 341.7,
+          "range": {
+            "gmlx_decode_base": [
+              15.2,
+              17.0
+            ],
+            "gmlx_decode_mtp": [
+              26.5,
+              31.7
+            ],
+            "llama_decode_base": [
+              15.5,
+              15.8
+            ],
+            "llama_decode_mtp": [
+              21.5,
+              27.1
+            ],
+            "gmlx_prefill_base": [
+              439.0,
+              490.4
+            ],
+            "llama_prefill_base": [
+              317.1,
+              354.5
+            ]
+          }
+        },
+        {
+          "depth": 17000,
+          "gmlx_decode_base": 15.2,
+          "gmlx_decode_mtp": 29.1,
+          "llama_decode_base": 14.5,
+          "llama_decode_mtp": 21.5,
+          "gmlx_prefill_base": 439.0,
+          "llama_prefill_base": 292.4,
+          "range": {
+            "gmlx_decode_base": [
+              13.9,
+              16.1
+            ],
+            "gmlx_decode_mtp": [
+              27.4,
+              34.4
+            ],
+            "llama_decode_base": [
+              14.4,
+              14.7
+            ],
+            "llama_decode_mtp": [
+              18.6,
+              25.6
+            ],
+            "gmlx_prefill_base": [
+              407.9,
+              463.6
+            ],
+            "llama_prefill_base": [
+              284.9,
+              295.8
+            ]
+          }
+        },
+        {
+          "depth": 67000,
+          "gmlx_decode_base": 12.4,
+          "gmlx_decode_mtp": 23.6,
+          "llama_decode_base": 11.1,
+          "llama_decode_mtp": 14.1,
+          "gmlx_prefill_base": 343.1,
+          "llama_prefill_base": 166.0,
+          "range": {
+            "gmlx_decode_base": [
+              11.1,
+              13.2
+            ],
+            "gmlx_decode_mtp": [
+              19.9,
+              25.5
+            ],
+            "llama_decode_base": [
+              11.1,
+              11.2
+            ],
+            "llama_decode_mtp": [
+              13.2,
+              18.2
+            ],
+            "gmlx_prefill_base": [
+              319.2,
+              363.7
+            ],
+            "llama_prefill_base": [
+              163.9,
+              166.7
+            ]
+          }
+        },
+        {
+          "depth": 110000,
+          "gmlx_decode_base": 11.3,
+          "gmlx_decode_mtp": 18.2,
+          "llama_decode_base": 9.5,
+          "llama_decode_mtp": 10.3,
+          "gmlx_prefill_base": 292.3,
+          "llama_prefill_base": 118.7,
+          "range": {
+            "gmlx_decode_base": [
+              11.2,
+              11.4
+            ],
+            "gmlx_decode_mtp": [
+              17.0,
+              19.6
+            ],
+            "llama_decode_base": [
+              9.5,
+              9.8
+            ],
+            "llama_decode_mtp": [
+              9.6,
+              13.5
+            ],
+            "gmlx_prefill_base": [
+              290.5,
+              293.3
+            ],
+            "llama_prefill_base": [
+              116.9,
+              122.8
+            ]
+          }
+        },
+        {
+          "depth": 200000,
+          "gmlx_decode_base": 9.0,
+          "gmlx_decode_mtp": 12.4,
+          "llama_decode_base": 7.3,
+          "llama_decode_mtp": 6.4,
+          "gmlx_prefill_base": 204.2,
+          "llama_prefill_base": 74.1,
+          "range": {
+            "gmlx_decode_base": [
+              9.0,
+              9.1
+            ],
+            "gmlx_decode_mtp": [
+              11.8,
+              13.5
+            ],
+            "llama_decode_base": [
+              6.9,
+              7.7
+            ],
+            "llama_decode_mtp": [
+              6.0,
+              8.2
+            ],
+            "gmlx_prefill_base": [
+              192.2,
+              207.7
+            ],
+            "llama_prefill_base": [
+              72.1,
+              75.4
+            ]
+          }
+        }
+      ]
+    },
+    "gemma-4-26b-a4b-q6k": {
+      "label": "gemma-4-26B-A4B-it Q6_K",
+      "comparison": "llama.cpp",
+      "mtp": true,
+      "mtp_kind": "drafter",
+      "gguf": "google_gemma-4-26B-A4B-it-Q6_K.gguf",
+      "source": "https://huggingface.co/bartowski/google_gemma-4-26B-A4B-it-GGUF",
+      "rows": [
+        {
+          "depth": 512,
+          "gmlx_decode_base": 97.8,
+          "gmlx_decode_mtp": 113.9,
+          "llama_decode_base": 82.6,
+          "llama_decode_mtp": 93.0,
+          "gmlx_prefill_base": 1821.3,
+          "llama_prefill_base": 1268.3,
+          "range": {
+            "gmlx_decode_base": [
+              96.9,
+              98.8
+            ],
+            "gmlx_decode_mtp": [
+              104.2,
+              127.1
+            ],
+            "llama_decode_base": [
+              80.0,
+              82.6
+            ],
+            "llama_decode_mtp": [
+              90.4,
+              93.5
+            ],
+            "gmlx_prefill_base": [
+              1531.2,
+              2125.0
+            ],
+            "llama_prefill_base": [
+              1104.3,
+              1480.1
+            ]
+          }
+        },
+        {
+          "depth": 4300,
+          "gmlx_decode_base": 97.2,
+          "gmlx_decode_mtp": 107.1,
+          "llama_decode_base": 85.5,
+          "llama_decode_mtp": 96.3,
+          "gmlx_prefill_base": 2610.2,
+          "llama_prefill_base": 1549.2,
+          "range": {
+            "gmlx_decode_base": [
+              97.1,
+              97.3
+            ],
+            "gmlx_decode_mtp": [
+              98.1,
+              117.7
+            ],
+            "llama_decode_base": [
+              81.9,
+              90.5
+            ],
+            "llama_decode_mtp": [
+              79.2,
+              109.9
+            ],
+            "gmlx_prefill_base": [
+              2514.4,
+              2668.2
+            ],
+            "llama_prefill_base": [
+              1400.0,
+              1650.7
+            ]
+          }
+        },
+        {
+          "depth": 17000,
+          "gmlx_decode_base": 90.4,
+          "gmlx_decode_mtp": 95.9,
+          "llama_decode_base": 75.9,
+          "llama_decode_mtp": 77.2,
+          "gmlx_prefill_base": 2679.4,
+          "llama_prefill_base": 1355.5,
+          "range": {
+            "gmlx_decode_base": [
+              90.1,
+              90.9
+            ],
+            "gmlx_decode_mtp": [
+              89.5,
+              124.4
+            ],
+            "llama_decode_base": [
+              72.7,
+              78.5
+            ],
+            "llama_decode_mtp": [
+              65.6,
+              97.0
+            ],
+            "gmlx_prefill_base": [
+              2647.9,
+              2731.0
+            ],
+            "llama_prefill_base": [
+              1281.5,
+              1413.2
+            ]
+          }
+        },
+        {
+          "depth": 67000,
+          "gmlx_decode_base": 68.6,
+          "gmlx_decode_mtp": 69.7,
+          "llama_decode_base": 50.5,
+          "llama_decode_mtp": 40.2,
+          "gmlx_prefill_base": 1992.6,
+          "llama_prefill_base": 676.3,
+          "range": {
+            "gmlx_decode_base": [
+              67.9,
+              69.3
+            ],
+            "gmlx_decode_mtp": [
+              65.7,
+              75.5
+            ],
+            "llama_decode_base": [
+              49.4,
+              51.0
+            ],
+            "llama_decode_mtp": [
+              36.1,
+              47.8
+            ],
+            "gmlx_prefill_base": [
+              1964.0,
+              2010.6
+            ],
+            "llama_prefill_base": [
+              622.2,
+              722.3
+            ]
+          }
+        },
+        {
+          "depth": 110000,
+          "gmlx_decode_base": 57.9,
+          "gmlx_decode_mtp": 53.8,
+          "llama_decode_base": 41.3,
+          "llama_decode_mtp": 32.8,
+          "gmlx_prefill_base": 1558.0,
+          "llama_prefill_base": 502.0,
+          "range": {
+            "gmlx_decode_base": [
+              57.5,
+              58.5
+            ],
+            "gmlx_decode_mtp": [
+              49.9,
+              70.2
+            ],
+            "llama_decode_base": [
+              41.1,
+              43.0
+            ],
+            "llama_decode_mtp": [
+              30.0,
+              33.6
+            ],
+            "gmlx_prefill_base": [
+              1541.4,
+              1564.8
+            ],
+            "llama_prefill_base": [
+              491.3,
+              533.6
+            ]
+          }
+        }
+      ]
+    },
+    "gemma-4-12b-q6k": {
+      "label": "gemma-4-12B-it Q6_K",
+      "comparison": "llama.cpp",
+      "mtp": true,
+      "mtp_kind": "drafter",
+      "gguf": "gemma-4-12b-it-Q6_K.gguf",
+      "source": null,
+      "rows": [
+        {
+          "depth": 512,
+          "gmlx_decode_base": 43.9,
+          "gmlx_decode_mtp": 71.9,
+          "llama_decode_base": 39.9,
+          "llama_decode_mtp": 54.0,
+          "gmlx_prefill_base": 854.4,
+          "llama_prefill_base": 726.2,
+          "range": {
+            "gmlx_decode_base": [
+              43.3,
+              44.0
+            ],
+            "gmlx_decode_mtp": [
+              66.3,
+              87.3
+            ],
+            "llama_decode_base": [
+              38.5,
+              40.4
+            ],
+            "llama_decode_mtp": [
+              51.4,
+              55.3
+            ],
+            "gmlx_prefill_base": [
+              808.8,
+              965.4
+            ],
+            "llama_prefill_base": [
+              589.4,
+              773.2
+            ]
+          }
+        },
+        {
+          "depth": 4300,
+          "gmlx_decode_base": 42.9,
+          "gmlx_decode_mtp": 67.1,
+          "llama_decode_base": 39.8,
+          "llama_decode_mtp": 57.5,
+          "gmlx_prefill_base": 1208.0,
+          "llama_prefill_base": 856.8,
+          "range": {
+            "gmlx_decode_base": [
+              42.8,
+              43.3
+            ],
+            "gmlx_decode_mtp": [
+              62.9,
+              76.9
+            ],
+            "llama_decode_base": [
+              39.2,
+              40.8
+            ],
+            "llama_decode_mtp": [
+              52.4,
+              65.4
+            ],
+            "gmlx_prefill_base": [
+              1185.8,
+              1228.8
+            ],
+            "llama_prefill_base": [
+              772.5,
+              899.7
+            ]
+          }
+        },
+        {
+          "depth": 17000,
+          "gmlx_decode_base": 40.2,
+          "gmlx_decode_mtp": 67.6,
+          "llama_decode_base": 35.7,
+          "llama_decode_mtp": 52.7,
+          "gmlx_prefill_base": 1219.7,
+          "llama_prefill_base": 771.2,
+          "range": {
+            "gmlx_decode_base": [
+              40.0,
+              40.5
+            ],
+            "gmlx_decode_mtp": [
+              63.8,
+              77.0
+            ],
+            "llama_decode_base": [
+              35.1,
+              36.7
+            ],
+            "llama_decode_mtp": [
+              46.9,
+              56.5
+            ],
+            "gmlx_prefill_base": [
+              1209.2,
+              1239.5
+            ],
+            "llama_prefill_base": [
+              761.8,
+              811.0
+            ]
+          }
+        },
+        {
+          "depth": 67000,
+          "gmlx_decode_base": 34.4,
+          "gmlx_decode_mtp": 50.1,
+          "llama_decode_base": 26.9,
+          "llama_decode_mtp": 27.5,
+          "gmlx_prefill_base": 961.2,
+          "llama_prefill_base": 431.9,
+          "range": {
+            "gmlx_decode_base": [
+              33.9,
+              34.9
+            ],
+            "gmlx_decode_mtp": [
+              47.1,
+              66.6
+            ],
+            "llama_decode_base": [
+              26.4,
+              27.1
+            ],
+            "llama_decode_mtp": [
+              23.7,
+              33.2
+            ],
+            "gmlx_prefill_base": [
+              944.2,
+              976.6
+            ],
+            "llama_prefill_base": [
+              411.5,
+              438.0
+            ]
+          }
+        },
+        {
+          "depth": 110000,
+          "gmlx_decode_base": 30.1,
+          "gmlx_decode_mtp": 46.2,
+          "llama_decode_base": 22.3,
+          "llama_decode_mtp": 21.5,
+          "gmlx_prefill_base": 821.0,
+          "llama_prefill_base": 310.1,
+          "range": {
+            "gmlx_decode_base": [
+              30.0,
+              30.7
+            ],
+            "gmlx_decode_mtp": [
+              38.6,
+              53.1
+            ],
+            "llama_decode_base": [
+              22.2,
+              22.5
+            ],
+            "llama_decode_mtp": [
+              17.9,
+              22.8
+            ],
+            "gmlx_prefill_base": [
+              806.1,
+              827.9
+            ],
+            "llama_prefill_base": [
+              306.7,
+              326.3
+            ]
+          }
+        }
+      ]
+    },
+    "gemma-4-e4b-q6k": {
+      "label": "gemma-4-E4B-it Q6_K",
+      "comparison": "llama.cpp",
+      "mtp": false,
+      "mtp_kind": null,
+      "gguf": "gemma-4-E4B-it-Q6_K.gguf",
+      "source": null,
+      "rows": [
+        {
+          "depth": 512,
+          "gmlx_decode_base": 91.9,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 92.6,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 2317.7,
+          "llama_prefill_base": 2168.9,
+          "range": {
+            "gmlx_decode_base": [
+              91.2,
+              92.1
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              92.3,
+              93.5
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              2223.7,
+              2456.6
+            ],
+            "llama_prefill_base": [
+              1974.8,
+              2547.6
+            ]
+          }
+        },
+        {
+          "depth": 4300,
+          "gmlx_decode_base": 91.3,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 89.9,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 4564.5,
+          "llama_prefill_base": 2984.5,
+          "range": {
+            "gmlx_decode_base": [
+              90.2,
+              91.8
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              85.9,
+              90.8
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              4367.5,
+              4613.2
+            ],
+            "llama_prefill_base": [
+              2769.6,
+              3247.5
+            ]
+          }
+        },
+        {
+          "depth": 17000,
+          "gmlx_decode_base": 84.1,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 75.5,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 4810.2,
+          "llama_prefill_base": 2221.4,
+          "range": {
+            "gmlx_decode_base": [
+              82.9,
+              85.0
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              74.3,
+              81.1
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              4662.7,
+              4954.0
+            ],
+            "llama_prefill_base": [
+              2200.4,
+              2314.9
+            ]
+          }
+        },
+        {
+          "depth": 67000,
+          "gmlx_decode_base": 62.8,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 57.1,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 4095.1,
+          "llama_prefill_base": 1119.9,
+          "range": {
+            "gmlx_decode_base": [
+              61.1,
+              63.5
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              54.2,
+              60.9
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              4031.9,
+              4239.9
+            ],
+            "llama_prefill_base": [
+              1084.2,
+              1159.4
+            ]
+          }
+        },
+        {
+          "depth": 110000,
+          "gmlx_decode_base": 51.9,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 45.7,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 3326.1,
+          "llama_prefill_base": 754.2,
+          "range": {
+            "gmlx_decode_base": [
+              51.2,
+              52.2
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              45.2,
+              46.0
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              3266.9,
+              3420.2
+            ],
+            "llama_prefill_base": [
+              717.8,
+              783.8
+            ]
+          }
+        }
+      ]
+    },
+    "gemma-4-e2b-q6kxl": {
+      "label": "gemma-4-E2B-it UD-Q6_K_XL",
+      "comparison": "llama.cpp",
+      "mtp": false,
+      "mtp_kind": null,
+      "gguf": "gemma-4-E2B-it-UD-Q6_K_XL.gguf",
+      "source": null,
+      "rows": [
+        {
+          "depth": 512,
+          "gmlx_decode_base": 155.3,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 145.1,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 5217.0,
+          "llama_prefill_base": 3273.8,
+          "range": {
+            "gmlx_decode_base": [
+              155.0,
+              156.0
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              143.7,
+              146.0
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              5037.3,
+              5527.0
+            ],
+            "llama_prefill_base": [
+              3080.6,
+              3759.2
+            ]
+          }
+        },
+        {
+          "depth": 4300,
+          "gmlx_decode_base": 153.9,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 140.1,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 16620.1,
+          "llama_prefill_base": 5212.7,
+          "range": {
+            "gmlx_decode_base": [
+              153.7,
+              163.0
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              138.9,
+              141.5
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              16156.5,
+              17589.0
+            ],
+            "llama_prefill_base": [
+              5061.9,
+              5636.2
+            ]
+          }
+        },
+        {
+          "depth": 17000,
+          "gmlx_decode_base": 140.4,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 123.4,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 16188.3,
+          "llama_prefill_base": 3469.4,
+          "range": {
+            "gmlx_decode_base": [
+              139.6,
+              141.8
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              120.5,
+              124.1
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              15211.5,
+              19019.1
+            ],
+            "llama_prefill_base": [
+              3412.9,
+              3619.4
+            ]
+          }
+        },
+        {
+          "depth": 67000,
+          "gmlx_decode_base": 107.2,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 84.6,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 10403.4,
+          "llama_prefill_base": 1460.4,
+          "range": {
+            "gmlx_decode_base": [
+              106.6,
+              107.7
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              83.4,
+              85.0
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              9910.2,
+              11056.5
+            ],
+            "llama_prefill_base": [
+              1417.8,
+              1464.6
+            ]
+          }
+        },
+        {
+          "depth": 110000,
+          "gmlx_decode_base": 88.6,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 65.0,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 7706.8,
+          "llama_prefill_base": 975.4,
+          "range": {
+            "gmlx_decode_base": [
+              84.6,
+              90.2
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              64.3,
+              65.5
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              7288.2,
+              8190.8
+            ],
+            "llama_prefill_base": [
+              966.9,
+              983.2
+            ]
+          }
+        }
+      ]
+    },
+    "gpt-oss-120b-heretic-mxfp4": {
+      "label": "gpt-oss-120b MXFP4",
+      "comparison": "llama.cpp",
+      "mtp": false,
+      "mtp_kind": null,
+      "gguf": "gpt-oss-120b-heretic-v2-MXFP4.gguf",
+      "source": "https://huggingface.co/llmfan46/gpt-oss-120b-heretic-v2-GGUF",
+      "rows": [
+        {
+          "depth": 512,
+          "gmlx_decode_base": 89.9,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 83.7,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 875.5,
+          "llama_prefill_base": 601.1,
+          "range": {
+            "gmlx_decode_base": [
+              87.6,
+              91.2
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              83.7,
+              84.1
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              764.8,
+              1078.1
+            ],
+            "llama_prefill_base": [
+              581.9,
+              622.7
+            ]
+          }
+        },
+        {
+          "depth": 4300,
+          "gmlx_decode_base": 88.5,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 66.3,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 1502.4,
+          "llama_prefill_base": 827.5,
+          "range": {
+            "gmlx_decode_base": [
+              86.8,
+              91.6
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              65.6,
+              69.6
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              1423.3,
+              1558.5
+            ],
+            "llama_prefill_base": [
+              780.3,
+              870.2
+            ]
+          }
+        },
+        {
+          "depth": 17000,
+          "gmlx_decode_base": 77.9,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 59.2,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 1658.1,
+          "llama_prefill_base": 709.5,
+          "range": {
+            "gmlx_decode_base": [
+              76.7,
+              78.5
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              58.5,
+              59.7
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              1579.1,
+              1676.7
+            ],
+            "llama_prefill_base": [
+              683.0,
+              737.3
+            ]
+          }
+        },
+        {
+          "depth": 67000,
+          "gmlx_decode_base": 57.0,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 40.9,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 1374.5,
+          "llama_prefill_base": 391.8,
+          "range": {
+            "gmlx_decode_base": [
+              54.0,
+              65.9
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              39.6,
+              41.4
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              1340.1,
+              1386.8
+            ],
+            "llama_prefill_base": [
+              386.9,
+              395.4
+            ]
+          }
+        },
+        {
+          "depth": 90000,
+          "gmlx_decode_base": 49.8,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 35.9,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 1229.0,
+          "llama_prefill_base": 315.2,
+          "range": {
+            "gmlx_decode_base": [
+              48.7,
+              51.3
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              35.9,
+              35.9
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              1219.9,
+              1241.3
+            ],
+            "llama_prefill_base": [
+              308.4,
+              321.2
+            ]
+          }
+        }
+      ]
+    },
+    "gpt-oss-20b-mxfp4": {
+      "label": "gpt-oss-20b MXFP4",
+      "comparison": "llama.cpp",
+      "mtp": false,
+      "mtp_kind": null,
+      "gguf": "gpt-oss-20b-mxfp4.gguf",
+      "source": null,
+      "rows": [
+        {
+          "depth": 512,
+          "gmlx_decode_base": 128.4,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 122.0,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 2307.5,
+          "llama_prefill_base": 1235.5,
+          "range": {
+            "gmlx_decode_base": [
+              126.5,
+              130.5
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              116.0,
+              122.0
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              2149.1,
+              2689.5
+            ],
+            "llama_prefill_base": [
+              1055.5,
+              1666.8
+            ]
+          }
+        },
+        {
+          "depth": 4300,
+          "gmlx_decode_base": 133.4,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 119.1,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 3441.8,
+          "llama_prefill_base": 1937.4,
+          "range": {
+            "gmlx_decode_base": [
+              131.3,
+              135.1
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              112.9,
+              121.6
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              3269.6,
+              3525.8
+            ],
+            "llama_prefill_base": [
+              1717.7,
+              1973.9
+            ]
+          }
+        },
+        {
+          "depth": 17000,
+          "gmlx_decode_base": 121.7,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 107.0,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 3520.6,
+          "llama_prefill_base": 1529.7,
+          "range": {
+            "gmlx_decode_base": [
+              119.7,
+              122.6
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              104.0,
+              107.8
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              3354.2,
+              3607.7
+            ],
+            "llama_prefill_base": [
+              1507.3,
+              1553.0
+            ]
+          }
+        },
+        {
+          "depth": 67000,
+          "gmlx_decode_base": 88.2,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 65.8,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 2636.2,
+          "llama_prefill_base": 662.8,
+          "range": {
+            "gmlx_decode_base": [
+              84.2,
+              92.7
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              64.6,
+              68.6
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              2453.0,
+              2655.5
+            ],
+            "llama_prefill_base": [
+              653.4,
+              703.2
+            ]
+          }
+        },
+        {
+          "depth": 90000,
+          "gmlx_decode_base": 77.5,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 56.4,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 2285.5,
+          "llama_prefill_base": 520.9,
+          "range": {
+            "gmlx_decode_base": [
+              74.8,
+              82.8
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              55.7,
+              57.9
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              2258.9,
+              2333.2
+            ],
+            "llama_prefill_base": [
+              517.3,
+              547.0
+            ]
+          }
+        }
+      ]
+    },
+    "dolphin3-llama3.1-8b-q6k": {
+      "label": "Dolphin3.0-Llama3.1-8B Q6_K",
+      "comparison": "llama.cpp",
+      "mtp": false,
+      "mtp_kind": null,
+      "gguf": "Dolphin3.0-Llama3.1-8B-abliterated.Q6_K.gguf",
+      "source": "https://huggingface.co/RavichandranJ/Dolphin3-Cyber-8B-GGUF",
+      "rows": [
+        {
+          "depth": 512,
+          "gmlx_decode_base": 80.2,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 76.7,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 2384.4,
+          "llama_prefill_base": 2290.8,
+          "range": {
+            "gmlx_decode_base": [
+              78.9,
+              82.1
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              75.3,
+              78.7
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              2279.7,
+              2462.6
+            ],
+            "llama_prefill_base": [
+              2206.5,
+              2481.0
+            ]
+          }
+        },
+        {
+          "depth": 4300,
+          "gmlx_decode_base": 71.3,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 67.9,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 2120.1,
+          "llama_prefill_base": 1669.2,
+          "range": {
+            "gmlx_decode_base": [
+              70.5,
+              71.8
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              65.3,
+              70.2
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              1940.1,
+              2236.3
+            ],
+            "llama_prefill_base": [
+              1566.4,
+              1810.8
+            ]
+          }
+        },
+        {
+          "depth": 17000,
+          "gmlx_decode_base": 53.4,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 50.1,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 1846.2,
+          "llama_prefill_base": 980.1,
+          "range": {
+            "gmlx_decode_base": [
+              52.7,
+              54.6
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              48.9,
+              50.4
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              1752.2,
+              1902.3
+            ],
+            "llama_prefill_base": [
+              943.4,
+              1006.4
+            ]
+          }
+        },
+        {
+          "depth": 67000,
+          "gmlx_decode_base": 28.7,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 26.6,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 1065.5,
+          "llama_prefill_base": 326.4,
+          "range": {
+            "gmlx_decode_base": [
+              26.7,
+              29.1
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              23.3,
+              27.4
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              1009.8,
+              1087.3
+            ],
+            "llama_prefill_base": [
+              308.1,
+              345.4
+            ]
+          }
+        },
+        {
+          "depth": 110000,
+          "gmlx_decode_base": 20.7,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 17.4,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 765.6,
+          "llama_prefill_base": 205.9,
+          "range": {
+            "gmlx_decode_base": [
+              19.4,
+              21.9
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              16.6,
+              17.6
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              742.2,
+              776.3
+            ],
+            "llama_prefill_base": [
+              200.7,
+              208.8
+            ]
+          }
+        }
+      ]
+    },
+    "deepseek-v4-flash-unsloth-udiq3xxs": {
+      "label": "DeepSeek-V4-Flash UD-IQ3_XXS",
+      "comparison": "llama.cpp",
+      "mtp": false,
+      "mtp_kind": null,
+      "gguf": "DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
+      "source": "https://huggingface.co/unsloth/DeepSeek-V4-Flash-GGUF",
+      "rows": [
+        {
+          "depth": 512,
+          "gmlx_decode_base": 34.9,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 12.9,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 377.9,
+          "llama_prefill_base": 312.5,
+          "range": {
+            "gmlx_decode_base": [
+              34.1,
+              35.0
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              12.7,
+              13.1
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              334.7,
+              438.4
+            ],
+            "llama_prefill_base": [
+              280.6,
+              336.8
+            ]
+          }
+        },
+        {
+          "depth": 4300,
+          "gmlx_decode_base": 32.5,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 12.5,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 572.3,
+          "llama_prefill_base": 356.7,
+          "range": {
+            "gmlx_decode_base": [
+              32.3,
+              32.7
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              12.4,
+              12.7
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              567.3,
+              582.8
+            ],
+            "llama_prefill_base": [
+              342.2,
+              370.7
+            ]
+          }
+        },
+        {
+          "depth": 17000,
+          "gmlx_decode_base": 31.0,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 12.4,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 614.1,
+          "llama_prefill_base": 265.7,
+          "range": {
+            "gmlx_decode_base": [
+              30.6,
+              31.8
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              12.0,
+              12.5
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              610.0,
+              619.6
+            ],
+            "llama_prefill_base": [
+              248.9,
+              279.8
+            ]
+          }
+        },
+        {
+          "depth": 67000,
+          "gmlx_decode_base": 30.1,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 10.9,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 597.4,
+          "llama_prefill_base": 152.1,
+          "range": {
+            "gmlx_decode_base": [
+              29.1,
+              30.5
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              10.6,
+              10.9
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              591.0,
+              610.5
+            ],
+            "llama_prefill_base": [
+              142.2,
+              157.1
+            ]
+          }
+        },
+        {
+          "depth": 110000,
+          "gmlx_decode_base": 28.3,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": 9.9,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 543.8,
+          "llama_prefill_base": 116.5,
+          "range": {
+            "gmlx_decode_base": [
+              28.0,
+              28.9
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": [
+              9.7,
+              9.9
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              492.2,
+              569.6
+            ],
+            "llama_prefill_base": [
+              112.0,
+              118.7
+            ]
+          }
+        },
+        {
+          "depth": 200000,
+          "gmlx_decode_base": 24.9,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": null,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 484.3,
+          "llama_prefill_base": null,
+          "range": {
+            "gmlx_decode_base": [
+              24.8,
+              25.1
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": null,
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              450.0,
+              493.2
+            ],
+            "llama_prefill_base": null
+          }
+        },
+        {
+          "depth": 384000,
+          "gmlx_decode_base": 22.3,
+          "gmlx_decode_mtp": null,
+          "llama_decode_base": null,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 411.1,
+          "llama_prefill_base": null,
+          "range": {
+            "gmlx_decode_base": [
+              20.7,
+              22.9
+            ],
+            "gmlx_decode_mtp": null,
+            "llama_decode_base": null,
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              397.2,
+              431.8
+            ],
+            "llama_prefill_base": null
+          }
+        }
+      ]
+    },
+    "deepseek-v4-flash-antirez-iq2xxs": {
+      "label": "DeepSeek-V4-Flash IQ2_XXS",
+      "comparison": "ds4-server",
+      "mtp": false,
+      "mtp_kind": null,
+      "gguf": "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf",
+      "source": "https://huggingface.co/antirez/deepseek-v4-gguf",
+      "rows": [
+        {
+          "depth": 512,
+          "gmlx_decode_base": 35.5,
+          "gmlx_decode_mtp": null,
+          "ds4_decode_base": 33.8,
+          "ds4_decode_mtp": null,
+          "gmlx_prefill_base": 417.5,
+          "ds4_prefill_base": 219.5,
+          "range": {
+            "gmlx_decode_base": [
+              35.3,
+              35.7
+            ],
+            "gmlx_decode_mtp": null,
+            "ds4_decode_base": [
+              33.6,
+              34.6
+            ],
+            "ds4_decode_mtp": null,
+            "gmlx_prefill_base": [
+              408.9,
+              422.2
+            ],
+            "ds4_prefill_base": [
+              210.2,
+              274.8
+            ]
+          }
+        },
+        {
+          "depth": 4300,
+          "gmlx_decode_base": 32.8,
+          "gmlx_decode_mtp": null,
+          "ds4_decode_base": 28.8,
+          "ds4_decode_mtp": null,
+          "gmlx_prefill_base": 649.3,
+          "ds4_prefill_base": 369.6,
+          "range": {
+            "gmlx_decode_base": [
+              32.7,
+              33.0
+            ],
+            "gmlx_decode_mtp": null,
+            "ds4_decode_base": [
+              28.7,
+              29.7
+            ],
+            "ds4_decode_mtp": null,
+            "gmlx_prefill_base": [
+              645.6,
+              660.4
+            ],
+            "ds4_prefill_base": [
+              362.0,
+              372.6
+            ]
+          }
+        },
+        {
+          "depth": 17000,
+          "gmlx_decode_base": 31.7,
+          "gmlx_decode_mtp": null,
+          "ds4_decode_base": 27.8,
+          "ds4_decode_mtp": null,
+          "gmlx_prefill_base": 633.0,
+          "ds4_prefill_base": 373.0,
+          "range": {
+            "gmlx_decode_base": [
+              31.7,
+              31.7
+            ],
+            "gmlx_decode_mtp": null,
+            "ds4_decode_base": [
+              27.5,
+              28.9
+            ],
+            "ds4_decode_mtp": null,
+            "gmlx_prefill_base": [
+              632.5,
+              633.5
+            ],
+            "ds4_prefill_base": [
+              344.7,
+              380.5
+            ]
+          }
+        },
+        {
+          "depth": 67000,
+          "gmlx_decode_base": 30.5,
+          "gmlx_decode_mtp": null,
+          "ds4_decode_base": 25.2,
+          "ds4_decode_mtp": null,
+          "gmlx_prefill_base": 572.8,
+          "ds4_prefill_base": 326.0,
+          "range": {
+            "gmlx_decode_base": [
+              30.1,
+              30.8
+            ],
+            "gmlx_decode_mtp": null,
+            "ds4_decode_base": [
+              24.1,
+              26.4
+            ],
+            "ds4_decode_mtp": null,
+            "gmlx_prefill_base": [
+              570.2,
+              575.4
+            ],
+            "ds4_prefill_base": [
+              303.9,
+              328.3
+            ]
+          }
+        },
+        {
+          "depth": 110000,
+          "gmlx_decode_base": 28.6,
+          "gmlx_decode_mtp": null,
+          "ds4_decode_base": 23.6,
+          "ds4_decode_mtp": null,
+          "gmlx_prefill_base": 592.9,
+          "ds4_prefill_base": 292.8,
+          "range": {
+            "gmlx_decode_base": [
+              28.5,
+              29.3
+            ],
+            "gmlx_decode_mtp": null,
+            "ds4_decode_base": [
+              23.2,
+              23.9
+            ],
+            "ds4_decode_mtp": null,
+            "gmlx_prefill_base": [
+              588.1,
+              598.3
+            ],
+            "ds4_prefill_base": [
+              282.6,
+              294.3
+            ]
+          }
+        },
+        {
+          "depth": 200000,
+          "gmlx_decode_base": 27.3,
+          "gmlx_decode_mtp": null,
+          "ds4_decode_base": 19.8,
+          "ds4_decode_mtp": null,
+          "gmlx_prefill_base": 545.0,
+          "ds4_prefill_base": 233.2,
+          "range": {
+            "gmlx_decode_base": [
+              27.2,
+              27.5
+            ],
+            "gmlx_decode_mtp": null,
+            "ds4_decode_base": [
+              18.9,
+              20.7
+            ],
+            "ds4_decode_mtp": null,
+            "gmlx_prefill_base": [
+              530.0,
+              549.5
+            ],
+            "ds4_prefill_base": [
+              224.2,
+              238.6
+            ]
+          }
+        },
+        {
+          "depth": 384000,
+          "gmlx_decode_base": 24.0,
+          "gmlx_decode_mtp": null,
+          "ds4_decode_base": 15.7,
+          "ds4_decode_mtp": null,
+          "gmlx_prefill_base": 459.7,
+          "ds4_prefill_base": 171.9,
+          "range": {
+            "gmlx_decode_base": [
+              23.9,
+              24.1
+            ],
+            "gmlx_decode_mtp": null,
+            "ds4_decode_base": [
+              15.6,
+              15.8
+            ],
+            "ds4_decode_mtp": null,
+            "gmlx_prefill_base": [
+              456.3,
+              460.6
+            ],
+            "ds4_prefill_base": [
+              168.7,
+              172.1
+            ]
+          }
+        },
+        {
+          "depth": 500000,
+          "gmlx_decode_base": 20.7,
+          "gmlx_decode_mtp": null,
+          "ds4_decode_base": 13.2,
+          "ds4_decode_mtp": null,
+          "gmlx_prefill_base": 402.0,
+          "ds4_prefill_base": 141.1,
+          "range": {
+            "gmlx_decode_base": [
+              20.5,
+              21.6
+            ],
+            "gmlx_decode_mtp": null,
+            "ds4_decode_base": [
+              13.1,
+              13.7
+            ],
+            "ds4_decode_mtp": null,
+            "gmlx_prefill_base": [
+              390.0,
+              404.5
+            ],
+            "ds4_prefill_base": [
+              131.4,
+              141.1
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,112 @@
+License text copyright (c) 2020 MariaDB Corporation Ab, All Rights Reserved.
+"Business Source License" is a trademark of MariaDB Corporation Ab.
+
+Parameters
+
+Licensor:               Asher Feldman
+Licensed Work:          gmlx 0.0.1 and later versions
+                        Copyright © 2026 Asher Feldman
+Additional Use Grant:   You may make production use of the Licensed Work, including for commercial
+                        and professional purposes, provided that you do not (a) sell the Licensed
+                        Work or any derivative work of it, or charge any fee for its distribution;
+                        (b) incorporate the Licensed Work or any derivative work of it, in whole
+                        or in part and in source or binary form, into any commercial software
+                        product or service; or (c) offer the Licensed Work or any derivative work
+                        of it to third parties as a hosted, managed, or cloud-based service. For
+                        the avoidance of doubt: running the Licensed Work to perform your own or
+                        your organization's work, including paid or professional work, is
+                        permitted, and redistributing unmodified copies of the Licensed Work free
+                        of charge, including through package managers, is permitted.
+                        Absolutely no claims are made against inference outputs. Downloaded weights
+                        may carry their own use license.
+Change Date:            Four years from the date the Licensed Work is published.
+Change License:         Apache License, Version 2.0
+
+For information about alternative licensing arrangements for the Licensed Work,
+please contact asher_feldman@icloud.com.
+
+Notice
+
+Business Source License 1.1
+
+Terms
+
+The Licensor hereby grants you the right to copy, modify, create derivative
+works, redistribute, and make non-production use of the Licensed Work. The
+Licensor may make an Additional Use Grant, above, permitting limited production use.
+
+Effective on the Change Date, or the fourth anniversary of the first publicly
+available distribution of a specific version of the Licensed Work under this
+License, whichever comes first, the Licensor hereby grants you rights under
+the terms of the Change License, and the rights granted in the paragraph
+above terminate.
+
+If your use of the Licensed Work does not comply with the requirements
+currently in effect as described in this License, you must purchase a
+commercial license from the Licensor, its affiliated entities, or authorized
+resellers, or you must refrain from using the Licensed Work.
+
+All copies of the original and modified Licensed Work, and derivative works
+of the Licensed Work, are subject to this License. This License applies
+separately for each version of the Licensed Work and the Change Date may vary
+for each version of the Licensed Work released by Licensor.
+
+You must conspicuously display this License on each original or modified copy
+of the Licensed Work. If you receive the Licensed Work in original or
+modified form from a third party, the terms and conditions set forth in this
+License apply to your use of that work.
+
+Any use of the Licensed Work in violation of this License will automatically
+terminate your rights under this License for the current and all other
+versions of the Licensed Work.
+
+This License does not grant you any right in any trademark or logo of
+Licensor or its affiliates (provided that you may use a trademark or logo of
+Licensor as expressly required by this License).
+
+TO THE EXTENT PERMITTED BY APPLICABLE LAW, THE LICENSED WORK IS PROVIDED ON
+AN "AS IS" BASIS. LICENSOR HEREBY DISCLAIMS ALL WARRANTIES AND CONDITIONS,
+EXPRESS OR IMPLIED, INCLUDING (WITHOUT LIMITATION) WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, AND
+TITLE.
+
+================================================================================
+THIRD-PARTY NOTES
+================================================================================
+
+gmlx is pure Python. Most third-party code arrives as installed
+dependencies, each under its own license: mlx-kquant (MIT; supplies the
+K-quant Metal kernels and the C++ GGUF reader, with its own attributions to
+MLX, ggml/llama.cpp, and gguf-tools), MLX and mlx-lm (MIT, Copyright ©
+Apple Inc.), mlx-vlm (MIT, Copyright © Prince Canuma), and the GGUF file
+format defined by the ggml/llama.cpp project (MIT, Copyright (c) Georgi
+Gerganov).
+
+Some third-party code is vendored or adapted into the gmlx tree. Each such
+source file states its provenance in its header, and the licenses/
+directory reproduces every upstream license together with a note on what
+was taken:
+
+- gmlx/_vendor/misaki: a snapshot of the misaki grapheme-to-phoneme
+  library (Apache License 2.0, Copyright © hexgrad; see
+  gmlx/_vendor/misaki/LICENSE and licenses/misaki-LICENSE), which itself
+  incorporates components adapted from g2pK and PaddleSpeech as noted in
+  its subdirectory READMEs.
+- Model and cache classes vendored from unmerged mlx-lm pull requests
+  (MIT, Copyright © Apple Inc.; licenses/mlx-lm-LICENSE):
+  gmlx/deepseek_v4_model.py, gmlx/deepseek_v4_hyper_connection.py, and
+  gmlx/deepseek_v4_cache.py (PR #1192), gmlx/minimax_m3_model.py
+  (PR #1401), and gmlx/hy_v3_model.py (PR #1485).
+- DeepSeek-V4-Flash MTP, cache-rollback, and stochastic-acceptance code
+  ported from omlx (Apache License 2.0; licenses/omlx-LICENSE), with
+  QAT and sink-attention semantics reimplemented from the ds4.c reference
+  engine (MIT; licenses/ds4.c-LICENSE).
+- gmlx/server_patches/apc.py and gmlx/thinking_budget.py carry code
+  copied or ported from mlx-vlm (MIT, Copyright © Prince Canuma;
+  licenses/mlx-vlm-LICENSE).
+- The pre-tokenizer split regex patterns in gmlx/tokenizer.py come from
+  llama.cpp (MIT; licenses/llama.cpp-LICENSE).
+
+The test asset tests/e2e/assets/cats.jpg is reproduced from the mlx-vlm
+repository (MIT License, Copyright © Prince Canuma); see
+tests/e2e/assets/README.md.

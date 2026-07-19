@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="720" viewBox="0 0 960 720" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<rect x="0" y="0" width="960" height="720" fill="#1a1a19"/>
+<text x="21.0" y="40.5" font-size="21.8" fill="#ffffff" font-weight="600">gemma-4-31B-it Q6_K -- prefill &amp; decode vs KV depth</text>
+<line x1="21.0" y1="68.9" x2="47.3" y2="68.9" stroke="#9a9a95" stroke-width="2.5" stroke-dasharray="5,4"/>
+<circle cx="34.2" cy="68.9" r="4.5" fill="#9a9a95" stroke="#1a1a19" stroke-width="1.5"/>
+<text x="55.4" y="75.0" font-size="20.2" fill="#c3c2b7">llama.cpp baseline</text>
+<line x1="301.3" y1="68.9" x2="327.6" y2="68.9" stroke="#9a9a95" stroke-width="2.5"/>
+<circle cx="314.4" cy="68.9" r="4.5" fill="#9a9a95" stroke="#1a1a19" stroke-width="1.5"/>
+<text x="335.7" y="75.0" font-size="20.2" fill="#c3c2b7">llama.cpp speculative (MTP)</text>
+<line x1="687.2" y1="68.9" x2="713.5" y2="68.9" stroke="#56b4e9" stroke-width="2.5" stroke-dasharray="5,4"/>
+<circle cx="700.4" cy="68.9" r="4.5" fill="#56b4e9" stroke="#1a1a19" stroke-width="1.5"/>
+<text x="721.6" y="75.0" font-size="20.2" fill="#c3c2b7">gmlx baseline</text>
+<line x1="21.0" y1="103.3" x2="47.3" y2="103.3" stroke="#56b4e9" stroke-width="2.5"/>
+<circle cx="34.2" cy="103.3" r="4.5" fill="#56b4e9" stroke="#1a1a19" stroke-width="1.5"/>
+<text x="55.4" y="109.4" font-size="20.2" fill="#c3c2b7">gmlx speculative (MTP)</text>
+<line x1="75.0" y1="360.7" x2="939.0" y2="360.7" stroke="#2c2c2a" stroke-width="1.0"/>
+<text x="67.5" y="365.9" font-size="13.5" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="75.0" y1="317.5" x2="939.0" y2="317.5" stroke="#2c2c2a" stroke-width="1.0"/>
+<text x="67.5" y="322.8" font-size="13.5" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">100</text>
+<line x1="75.0" y1="274.3" x2="939.0" y2="274.3" stroke="#2c2c2a" stroke-width="1.0"/>
+<text x="67.5" y="279.6" font-size="13.5" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">200</text>
+<line x1="75.0" y1="231.2" x2="939.0" y2="231.2" stroke="#2c2c2a" stroke-width="1.0"/>
+<text x="67.5" y="236.4" font-size="13.5" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">300</text>
+<line x1="75.0" y1="188.0" x2="939.0" y2="188.0" stroke="#2c2c2a" stroke-width="1.0"/>
+<text x="67.5" y="193.2" font-size="13.5" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">400</text>
+<line x1="75.0" y1="360.7" x2="939.0" y2="360.7" stroke="#383835" stroke-width="1.2"/>
+<line x1="126.8" y1="360.7" x2="126.8" y2="360.7" stroke="#383835" stroke-width="1.0"/>
+<line x1="398.0" y1="360.7" x2="398.0" y2="360.7" stroke="#383835" stroke-width="1.0"/>
+<line x1="573.1" y1="360.7" x2="573.1" y2="360.7" stroke="#383835" stroke-width="1.0"/>
+<line x1="747.8" y1="360.7" x2="747.8" y2="360.7" stroke="#383835" stroke-width="1.0"/>
+<line x1="811.0" y1="360.7" x2="811.0" y2="360.7" stroke="#383835" stroke-width="1.0"/>
+<line x1="887.2" y1="360.7" x2="887.2" y2="360.7" stroke="#383835" stroke-width="1.0"/>
+<path d="M126.8,239.3 L398.0,213.2 L573.1,234.5 L747.8,289.0 L811.0,309.4 L887.2,328.7" fill="none" stroke="#9a9a95" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="126.8" cy="239.3" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="398.0" cy="213.2" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="573.1" cy="234.5" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="747.8" cy="289.0" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="811.0" cy="309.4" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="887.2" cy="328.7" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
+<path d="M126.8,202.0 L398.0,161.3 L573.1,171.2 L747.8,212.6 L811.0,234.5 L887.2,272.5" fill="none" stroke="#56b4e9" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="126.8" cy="202.0" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="398.0" cy="161.3" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="573.1" cy="171.2" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="747.8" cy="212.6" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="811.0" cy="234.5" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="887.2" cy="272.5" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
+<text x="894.7" y="265.8" font-size="12.8" fill="#56b4e9" font-weight="600" style="font-variant-numeric: tabular-nums">204</text>
+<text x="30.0" y="253.0" font-size="14.2" fill="#898781" text-anchor="middle" transform="rotate(-90.0 30.0 253.0)">prefill tok/s (baseline)</text>
+<line x1="75.0" y1="621.0" x2="939.0" y2="621.0" stroke="#2c2c2a" stroke-width="1.0"/>
+<text x="67.5" y="626.2" font-size="13.5" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="75.0" y1="563.3" x2="939.0" y2="563.3" stroke="#2c2c2a" stroke-width="1.0"/>
+<text x="67.5" y="568.5" font-size="13.5" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">10</text>
+<line x1="75.0" y1="505.6" x2="939.0" y2="505.6" stroke="#2c2c2a" stroke-width="1.0"/>
+<text x="67.5" y="510.8" font-size="13.5" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">20</text>
+<line x1="75.0" y1="447.8" x2="939.0" y2="447.8" stroke="#2c2c2a" stroke-width="1.0"/>
+<text x="67.5" y="453.1" font-size="13.5" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">30</text>
+<line x1="75.0" y1="621.0" x2="939.0" y2="621.0" stroke="#383835" stroke-width="1.2"/>
+<line x1="126.8" y1="621.0" x2="126.8" y2="626.2" stroke="#383835" stroke-width="1.0"/>
+<text x="126.8" y="642.0" font-size="12.8" fill="#898781" text-anchor="middle" style="font-variant-numeric: tabular-nums">512</text>
+<line x1="398.0" y1="621.0" x2="398.0" y2="626.2" stroke="#383835" stroke-width="1.0"/>
+<text x="398.0" y="642.0" font-size="12.8" fill="#898781" text-anchor="middle" style="font-variant-numeric: tabular-nums">4.3k</text>
+<line x1="573.1" y1="621.0" x2="573.1" y2="626.2" stroke="#383835" stroke-width="1.0"/>
+<text x="573.1" y="642.0" font-size="12.8" fill="#898781" text-anchor="middle" style="font-variant-numeric: tabular-nums">17k</text>
+<line x1="747.8" y1="621.0" x2="747.8" y2="626.2" stroke="#383835" stroke-width="1.0"/>
+<text x="747.8" y="642.0" font-size="12.8" fill="#898781" text-anchor="middle" style="font-variant-numeric: tabular-nums">67k</text>
+<line x1="811.0" y1="621.0" x2="811.0" y2="626.2" stroke="#383835" stroke-width="1.0"/>
+<text x="811.0" y="642.0" font-size="12.8" fill="#898781" text-anchor="middle" style="font-variant-numeric: tabular-nums">110k</text>
+<line x1="887.2" y1="621.0" x2="887.2" y2="626.2" stroke="#383835" stroke-width="1.0"/>
+<text x="887.2" y="642.0" font-size="12.8" fill="#898781" text-anchor="middle" style="font-variant-numeric: tabular-nums">200k</text>
+<path d="M126.8,526.2 L398.0,531.1 L573.1,537.2 L747.8,556.7 L811.0,565.9 L887.2,579.2" fill="none" stroke="#9a9a95" stroke-width="2.4" stroke-dasharray="6,5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="126.8" cy="526.2" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="398.0" cy="531.1" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="573.1" cy="537.2" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="747.8" cy="556.7" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="811.0" cy="565.9" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="887.2" cy="579.2" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
+<path d="M126.8,456.9 L398.0,477.7 L573.1,496.9 L747.8,539.8 L811.0,561.5 L887.2,583.8" fill="none" stroke="#9a9a95" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="126.8" cy="456.9" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="398.0" cy="477.7" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="573.1" cy="496.9" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="747.8" cy="539.8" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="811.0" cy="561.5" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="887.2" cy="583.8" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
+<path d="M126.8,518.4 L398.0,527.8 L573.1,533.3 L747.8,549.5 L811.0,555.9 L887.2,568.8" fill="none" stroke="#56b4e9" stroke-width="2.4" stroke-dasharray="6,5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="126.8" cy="518.4" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="398.0" cy="527.8" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="573.1" cy="533.3" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="747.8" cy="549.5" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="811.0" cy="555.9" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="887.2" cy="568.8" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
+<path d="M126.8,421.6 L398.0,447.9 L573.1,453.0 L747.8,484.6 L811.0,515.7 L887.2,549.2" fill="none" stroke="#56b4e9" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="126.8" cy="421.6" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="398.0" cy="447.9" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="573.1" cy="453.0" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="747.8" cy="484.6" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="811.0" cy="515.7" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="887.2" cy="549.2" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
+<text x="894.7" y="542.5" font-size="12.8" fill="#56b4e9" font-weight="600" style="font-variant-numeric: tabular-nums">12.4</text>
+<text x="30.0" y="513.3" font-size="14.2" fill="#898781" text-anchor="middle" transform="rotate(-90.0 30.0 513.3)">decode tok/s</text>
+<text x="507.0" y="660.0" font-size="14.2" fill="#898781" text-anchor="middle">KV depth (tokens, log scale)</text>
+</svg>

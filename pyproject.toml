@@ -1,0 +1,153 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gmlx"
+version = "0.0.1"
+description = "A local inference platform for Apple Silicon: run, chat with, serve, and fine-tune the GGUF ecosystem's quantized models natively on MLX, straight off the file."
+readme = "README.md"
+requires-python = ">=3.11"  # 3.10 EOLs 2026-10; mlx-kquant's lower floor is a library floor
+license = "BUSL-1.1"
+license-files = ["LICENSE", "licenses/*"]
+authors = [{ name = "Asher Feldman" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# mlx-kquant supplies the K-quant ops/kernels + the C++ GGUF wire-byte reader.
+# mlx-lm carries a floor only (a source/git install still satisfies it);
+# check_upstream_versions (gmlx.upstream_seams) enforces the same floor at
+# runtime and warns on versions newer than the qualified set - a stale venv
+# resolves these constraints only once, so the pip pin alone can't catch it.
+# mlx / mlx-lm / mlx-vlm move in lockstep with the exact mlx-vlm pin; bump them
+# together per docs/upstream-upgrades.md.
+dependencies = [
+    "mlx-kquant>=0.3.4",
+    "mlx-lm>=0.31",
+    # Direct imports of both throughout (mx.*, np.*); declared explicitly
+    # rather than inherited through mlx-lm.
+    "mlx",
+    "numpy",
+    # Exact pin: gmlx patches ~30 private mlx-vlm symbols (see
+    # gmlx/upstream_seams.py); point releases move them (0.6.4 vendored
+    # switch_layers and rewrote the cache module - see
+    # gmlx/cache_compat.py for the dual-origin cache-class rules).
+    "mlx-vlm==0.6.4",
+    # Encoder embedders (the EmbeddingGemma GGUF path + the safetensors BERT /
+    # ModernBERT / XLM-RoBERTa `/v1/embeddings` backends) build from mlx-embeddings
+    # model classes. Lazy-imported only when an encoder embedder loads (no CLI
+    # startup cost); every transitive dep is already pulled by mlx-vlm/transformers.
+    "mlx-embeddings",
+    # >=4.52: vlm.py imports transformers.BaseVideoProcessor at module top
+    # (mlx-vlm itself pins transformers>=5.5.0, so the resolved floor is higher).
+    # <5.13: transformers 5.13 AutoTokenizer.register() requires a config
+    # class, and mlx-lm (<=0.31.3) registers its NewlineTokenizer by string
+    # name -- `import mlx_lm` crashes. Lift once mlx-lm ships the fix.
+    "transformers>=4.52,<5.13",
+    "tokenizers",
+    "gguf",
+    # comment-preserving YAML round-trip for `gmlx sync-models`.
+    "ruamel.yaml",
+    # config.py loads model/profile YAML with PyYAML at module top.
+    "pyyaml",
+    "fastapi",
+    "uvicorn",
+    # `gmlx menubar`: a macOS status-bar monitor for a backgrounded server.
+    "rumps>=0.4,<0.5; sys_platform == 'darwin'",
+    # Menu bar tap-to-talk hotkey: CGEventTap (Quartz) for the active
+    # <modifier>+Space tap, AXIsProcessTrusted (ApplicationServices) for
+    # the Accessibility permission it needs.
+    "pyobjc-framework-Quartz; sys_platform == 'darwin'",
+    "pyobjc-framework-ApplicationServices; sys_platform == 'darwin'",
+]
+
+[project.optional-dependencies]
+# mlx-vlm moved to core `dependencies` (the serve engine hard-requires it for every
+# model, vision or text-only). This empty extra is kept for back-compat so an
+# existing `pip install 'gmlx[vlm]'` still resolves.
+vlm = []
+# `gmlx chat` line-editor upgrade: completion menus while typing, history
+# ghost-suggestions, bottom toolbar. Falls back to readline without it.
+chat = ["prompt_toolkit", "rich"]
+# Speech-to-text: POST /v1/audio/transcriptions on the server, backed by
+# mlx-whisper (MLX-format Whisper checkpoints - not GGUFs; whisper.cpp uses its
+# own ggml container). python-multipart parses the OpenAI multipart upload.
+# Audio decoding additionally needs ffmpeg on PATH.
+stt = ["mlx-whisper", "python-multipart"]
+# Text-to-speech: POST /v1/audio/speech on the server, backed by mlx-audio
+# (MLX-format TTS checkpoints - Kokoro, Qwen3-TTS, ... - not GGUFs). WAV encodes
+# via miniaudio; mp3/flac/opus additionally need ffmpeg on PATH.
+# Kokoro's grapheme->phoneme front-end is the vendored misaki snapshot
+# (gmlx/_vendor - PyPI misaki caps at Python <3.13, and its [en] extra
+# drags torch for a transformer mode Kokoro never enables); listed here are
+# misaki's runtime deps for the English path. spacy<4: unmarked, pip
+# backtracks onto the unbuildable spacy 4.0.0.devN sdist; <3.14: no cp314
+# wheels yet, so Kokoro needs Python <= 3.13 (qwen3-tts needs none of this).
+# phonemizer-fork (not phonemizer): espeak data-path support, without which
+# OOD words hard-exit the server. `espeakng-loader` bundles libespeak-ng +
+# data (GPLv3 - fine in this optional extra, keep it out of core deps).
+tts = [
+    "mlx-audio",
+    "spacy<4; python_version < '3.14'",
+    "num2words",
+    "addict",
+    "phonemizer-fork",
+    "espeakng-loader",
+]
+# `gmlx talk` voice chat: client-side mic capture + playback (sounddevice
+# bundles PortAudio on macOS) and wake-word / VAD (sherpa-onnx: keyword
+# spotting from a plain-text phrase + silero VAD in one wheel with bundled
+# onnxruntime). Self-references [stt,tts] so a single install covers the whole
+# single-machine loop - client audio plus the server-side whisper/kokoro the
+# loop talks to (a remote-server client technically needs only the first two).
+talk = ["sounddevice", "sherpa-onnx", "gmlx[stt,tts]"]
+# The built-in tool-loop assistant (talk.brain: assistant, chat --assistant,
+# server.assistants): the official Model Context Protocol SDK, used to connect
+# the configured `assistant.mcp` tool servers (stdio + streamable HTTP). The
+# tool loop and memory need nothing extra.
+assistant = ["mcp"]
+# mlx-embeddings moved to core `dependencies` (the `/v1/embeddings` encoder
+# backends - safetensors and the EmbeddingGemma GGUF path - build from its model
+# classes). This empty extra is kept for back-compat so an existing
+# `pip install 'gmlx[embeddings]'` still resolves.
+embeddings = []
+
+[project.urls]
+Homepage = "https://github.com/asher/gmlx"
+Repository = "https://github.com/asher/gmlx"
+Changelog = "https://github.com/asher/gmlx/blob/main/CHANGELOG.md"
+Issues = "https://github.com/asher/gmlx/issues"
+
+[project.scripts]
+# `gmlx <verb>` (run / chat / serve / init / sync-models / ...) is the umbrella command.
+gmlx = "gmlx.cli:umbrella_main"
+
+[tool.setuptools.packages.find]
+include = ["gmlx*"]
+
+[tool.setuptools.package-data]
+gmlx = ["upstream_seams.json", "_vendor/misaki/LICENSE", "_vendor/misaki/data/*",
+            "_vendor/misaki/g2pkc/*.csv", "_vendor/misaki/g2pkc/*.txt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: end-to-end test needing a real GGUF (and, for parity, a llama.cpp binary); skipped unless KQUANT_TEST_GGUF_DIR is set",
+    "slow: long-running (large prompts / long generation)",
+]
+
+[tool.ruff]
+# Vendored third-party code is linted upstream, not here.
+extend-exclude = ["gmlx/_vendor"]
+
+[tool.ruff.lint.per-file-ignores]
+# Lambda assignment is idiomatic for the tests' one-line monkeypatch stubs.
+"tests/*" = ["E731"]

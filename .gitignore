@@ -1,0 +1,21 @@
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.so
+*.dylib
+*.metallib
+*.air
+.DS_Store
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+*.gguf
+.coverage
+# local server config (the first default config path; never commit it)
+/gmlx.yaml
+
+# Open WebUI writes this if `gmlx launch open-webui` runs from the repo root
+.webui_secret_key

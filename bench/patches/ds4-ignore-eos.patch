@@ -1,0 +1,77 @@
+ds4-server ignore-eos patch (for the serve-bench.py --vs ds4 arm)
+
+Adds an "ignore_eos" bool to ds4-server's OpenAI request parsers (chat +
+completions) so serve-bench.py can force fixed-length decode, matching the
+--ignore-eos launch flags used on the gmlx and llama-server arms. When set:
+the sampled-token EOS break and the spec-batch EOS break are skipped (finish
+stays "length" at max_tokens), and the speculative eval gets a never-matching
+eos_token so drafting is not EOS-capped.
+
+Baseline: ds4 @ 80ebbc3. Apply + rebuild in your ds4 checkout:
+  git apply /path/to/bench/patches/ds4-ignore-eos.patch
+  make
+
+diff --git a/ds4_server.c b/ds4_server.c
+index 34a9d50..1f5dc0f 100644
+--- a/ds4_server.c
++++ b/ds4_server.c
+@@ -612,6 +612,7 @@ typedef struct {
+     uint64_t seed;
+     bool stream;
+     bool stream_include_usage;
++    bool ignore_eos;   /* benchmarking: decode past EOS to max_tokens */
+     int cache_read_tokens;
+     int cache_write_tokens;
+     ds4_think_mode think_mode;
+@@ -2757,6 +2758,11 @@ static bool parse_chat_request(ds4_engine *e, server *s, const char *body, int d
+                 goto bad;
+             }
+             got_thinking = true;
++        } else if (!strcmp(key, "ignore_eos")) {
++            if (!json_bool(&p, &r->ignore_eos)) {
++                free(key);
++                goto bad;
++            }
+         } else if (!strcmp(key, "stop")) {
+             if (!parse_stop(&p, &r->stops)) {
+                 free(key);
+@@ -4088,6 +4094,11 @@ static bool parse_completion_request(ds4_engine *e, const char *body, int def_to
+                 goto bad;
+             }
+             got_thinking = true;
++        } else if (!strcmp(key, "ignore_eos")) {
++            if (!json_bool(&p, &r->ignore_eos)) {
++                free(key);
++                goto bad;
++            }
+         } else if (!strcmp(key, "stop")) {
+             if (!parse_stop(&p, &r->stops)) {
+                 free(key);
+@@ -10408,7 +10419,7 @@ decode_again:
+             temperature = 0.0f;
+         }
+         int token = ds4_session_sample(s->session, temperature, top_k, top_p, min_p, &rng);
+-        if (token == ds4_token_eos(s->engine)) {
++        if (!j->req.ignore_eos && token == ds4_token_eos(s->engine)) {
+             finish = "stop";
+             break;
+         }
+@@ -10422,7 +10433,8 @@ decode_again:
+             ntok = ds4_session_eval_speculative_argmax(s->session,
+                                                        token,
+                                                        max_tokens - completion,
+-                                                       ds4_token_eos(s->engine),
++                                                       j->req.ignore_eos ? -1 :
++                                                           ds4_token_eos(s->engine),
+                                                        toks,
+                                                        (int)(sizeof(toks) / sizeof(toks[0])),
+                                                        err,
+@@ -10443,7 +10455,7 @@ decode_again:
+         bool stop_decode = false;
+         for (int ti = 0; ti < ntok && completion < max_tokens; ti++) {
+             token = toks[ti];
+-            if (token == ds4_token_eos(s->engine)) {
++            if (!j->req.ignore_eos && token == ds4_token_eos(s->engine)) {
+                 finish = "stop";
+                 stop_decode = true;
+                 break;

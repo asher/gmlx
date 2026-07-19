@@ -1,0 +1,11 @@
+# sdist contents: ship a checkout-equivalent tree — the default test*.py
+# pattern would grab the test files but drop conftest.py, tests/e2e/, and
+# docs/ (which test_docs_config.py reads), leaving an sdist that can't run
+# its own suite.
+include CHANGELOG.md
+include CONTRIBUTING.md
+graft licenses
+graft bench
+graft docs
+graft tests
+global-exclude __pycache__ *.py[cod] .DS_Store
