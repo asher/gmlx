@@ -605,7 +605,7 @@ def chart_panels(args):
             lbl = "%s speculative (MTP)" % eng
         items.append((lbl, s["color"], "dash" if s["dash"] else "line",
                       "circle"))
-    fig = Fig(args, "%s -- prefill & decode vs KV depth"
+    fig = Fig(args, "%s: prefill & decode vs KV depth"
               % relabel(model, args.labels))
     pleft, top, pright, pbottom = fig.layout(items, left=fig.fs * 3.6)
     fx = log_x(depths, pleft, pright)
@@ -680,7 +680,7 @@ def chart_fleet_ratio(args):
     depths = sorted({d for pts in pre.values() for d in pts}
                     | {d for pts in dec.values() for d in pts})
     n_pre, n_dec = len(pre), len(dec)
-    fig = Fig(args, "gmlx vs %s -- throughput speedup across the fleet"
+    fig = Fig(args, "gmlx vs %s: throughput speedup across the fleet"
               % REF_NAME.get(vs, vs))
 
     def pick_exemplars(dct):

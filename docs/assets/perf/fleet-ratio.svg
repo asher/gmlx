@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="960" height="620" viewBox="0 0 960 620" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
 <rect x="0" y="0" width="960" height="620" fill="#fcfcfb"/>
-<text x="21.0" y="40.5" font-size="21.8" fill="#0b0b0b" font-weight="600">gmlx vs llama.cpp -- throughput speedup across the fleet</text>
+<text x="21.0" y="40.5" font-size="21.8" fill="#0b0b0b" font-weight="600">gmlx vs llama.cpp: throughput speedup across the fleet</text>
 <line x1="75.0" y1="214.0" x2="699.8" y2="214.0" stroke="#e1e0d9" stroke-width="1.0"/>
 <text x="67.5" y="219.2" font-size="13.5" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">2x</text>
 <line x1="75.0" y1="169.5" x2="699.8" y2="169.5" stroke="#e1e0d9" stroke-width="1.0"/>

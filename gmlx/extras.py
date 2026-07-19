@@ -40,6 +40,12 @@ EXTRA_PACKAGES = {
              "spacy<4; python_version < '3.14'", "num2words", "addict",
              "phonemizer-fork", "espeakng-loader"],
     "assistant": ["mcp"],
+    # Everything: chat TUI + full voice stack + MCP assistant. Mirrors
+    # pyproject's `all = gmlx[chat,talk,assistant]`, flattened.
+    "all": ["prompt_toolkit", "rich", "sounddevice", "sherpa-onnx",
+            "mlx-whisper", "python-multipart", "mlx-audio",
+            "spacy<4; python_version < '3.14'", "num2words", "addict",
+            "phonemizer-fork", "espeakng-loader", "mcp"],
 }
 
 # The feature-critical imports each extra provides - all must be importable to
@@ -55,10 +61,12 @@ _PROBE_MODULES = {
     "embeddings": ("mlx_embeddings",),
     "talk": ("sounddevice", "sherpa_onnx", "mlx_whisper", "mlx_audio"),
     "assistant": ("mcp",),
+    "all": ("prompt_toolkit", "sounddevice", "sherpa_onnx", "mlx_whisper",
+            "mlx_audio", "mcp"),
 }
 
 # Extras whose runtime additionally needs ffmpeg on PATH (audio decode/encode).
-FFMPEG_EXTRAS = frozenset({"stt", "tts", "talk"})
+FFMPEG_EXTRAS = frozenset({"stt", "tts", "talk", "all"})
 
 
 def extra_packages(extra: str) -> list[str]:

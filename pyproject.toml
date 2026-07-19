@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gmlx"
-version = "0.0.1"
+version = "0.1.0"
 description = "A local inference platform for Apple Silicon: run, chat with, serve, and fine-tune the GGUF ecosystem's quantized models natively on MLX, straight off the file."
 readme = "README.md"
 requires-python = ">=3.11"  # 3.10 EOLs 2026-10; mlx-kquant's lower floor is a library floor
@@ -114,6 +114,9 @@ talk = ["sounddevice", "sherpa-onnx", "gmlx[stt,tts]"]
 # the configured `assistant.mcp` tool servers (stdio + streamable HTTP). The
 # tool loop and memory need nothing extra.
 assistant = ["mcp"]
+# Everything: the chat TUI, the full voice stack, and the MCP assistant in one
+# install. Self-references only, so the leaf extras stay the source of truth.
+all = ["gmlx[chat,talk,assistant]"]
 # mlx-embeddings moved to core `dependencies` (the `/v1/embeddings` encoder
 # backends - safetensors and the EmbeddingGemma GGUF path - build from its model
 # classes). This empty extra is kept for back-compat so an existing

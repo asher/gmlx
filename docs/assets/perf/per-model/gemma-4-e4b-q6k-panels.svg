@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="960" height="720" viewBox="0 0 960 720" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
 <rect x="0" y="0" width="960" height="720" fill="#fcfcfb"/>
-<text x="21.0" y="40.5" font-size="21.8" fill="#0b0b0b" font-weight="600">gemma-4-E4B-it Q6_K -- prefill &amp; decode vs KV depth</text>
+<text x="21.0" y="40.5" font-size="21.8" fill="#0b0b0b" font-weight="600">gemma-4-E4B-it Q6_K: prefill &amp; decode vs KV depth</text>
 <line x1="21.0" y1="68.9" x2="47.3" y2="68.9" stroke="#6f6f6d" stroke-width="2.5"/>
 <circle cx="34.2" cy="68.9" r="4.5" fill="#6f6f6d" stroke="#fcfcfb" stroke-width="1.5"/>
 <text x="55.4" y="75.0" font-size="20.2" fill="#52514e">llama.cpp</text>

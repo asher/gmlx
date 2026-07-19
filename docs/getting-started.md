@@ -29,8 +29,7 @@ and the arithmetic for estimating the cache.
 ```sh
 mkdir ~/gmlx && cd ~/gmlx
 python3 -m venv .venv && source .venv/bin/activate
-git clone https://github.com/asher/gmlx
-pip install "./gmlx[chat]"
+pip install "gmlx[chat]"
 ```
 
 That is the whole install. One venv habit to know: the `gmlx` command exists
@@ -52,8 +51,9 @@ The `[chat]` extra upgrades the chat REPL's line editor. Other extras, all optio
 | `tts` | misaki[en] phoneme front-end (plus ffmpeg for non-wav) | server text-to-speech |
 | `talk` | client audio + wake word, includes stt and tts | `gmlx talk` voice chat |
 | `assistant` | the MCP SDK | tools for the built-in [assistant](assistant.md) (talk, `chat --assistant`, served assistants) |
+| `all` | chat + talk + assistant in one | every optional feature |
 
-The `tts` and `talk` extras need Python 3.11-3.13 (on 3.14 the Kokoro
+The `tts`, `talk`, and `all` extras need Python 3.11-3.13 (on 3.14 the Kokoro
 voice is unavailable until spacy ships wheels - the `qwen3-tts` model
 still works). Everything else runs on any supported Python.
 

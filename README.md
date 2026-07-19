@@ -33,6 +33,27 @@ generating within seconds of launch, and a MoE bigger than RAM still runs,
 streaming its experts from disk while everything every token needs stays on
 the GPU ([bigger than memory](#bigger-than-memory)).
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/perf/fleet-ratio-dark.svg">
+  <img src="https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/perf/fleet-ratio.svg" alt="gmlx vs llama.cpp: fleet throughput speedup vs KV depth">
+</picture>
+
+| Prefill | Decode (speculation on both engines) | MTP lift at depth |
+|---|---|---|
+| faster on every model at every depth; 2-4x past 100k tokens | 1.1-2x ahead, widening with depth | 1.4-1.8x held from 17k to 110k |
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/perf/mtp-lift-dark.svg">
+  <img src="https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/perf/mtp-lift.svg" alt="MTP decode lift vs KV depth: gmlx holds its speedup where llama.cpp's decays">
+</picture>
+
+The depth curve is the point: coding harnesses and agent sessions live at
+50-200k tokens of context, and that is where the gap is widest. Full data and
+methodology:
+[benchmarks.md](https://github.com/asher/gmlx/blob/main/docs/benchmarks.md);
+what makes it fast: the
+[performance guide](https://github.com/asher/gmlx/blob/main/docs/performance.md).
+
 The rest of the platform:
 
 - hands-free voice chat with a built-in assistant that calls MCP tools
@@ -73,8 +94,7 @@ Command Line Tools, a few minutes).
 ```sh
 mkdir ~/gmlx && cd ~/gmlx
 python3 -m venv .venv && source .venv/bin/activate
-git clone https://github.com/asher/gmlx
-pip install "./gmlx[chat]"
+pip install "gmlx[chat]"        # [chat] = upgraded chat TUI, optional
 
 # start small: a ~0.4 GB model, downloaded into the current directory
 gmlx pull hf:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q4_K_M.gguf --to .
@@ -87,6 +107,11 @@ curl localhost:8080/v1/chat/completions -d \
 gmlx stop                                       # the server ran detached
 ```
 
+The core install carries the whole platform - serving, vision, embeddings,
+the menu bar. Voice chat and the MCP assistant are extras (`gmlx[talk]`,
+`gmlx[assistant]`), and `gmlx[all]` turns on everything; the full list is in
+the
+[getting-started guide](https://github.com/asher/gmlx/blob/main/docs/getting-started.md).
 In new terminals, `source ~/gmlx/.venv/bin/activate` brings the `gmlx` command
 back. A model typically needs roughly its file size in memory, plus the KV cache;
 the exception is MoE models, which can run

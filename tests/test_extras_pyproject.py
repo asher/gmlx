@@ -14,22 +14,25 @@ _SELF_REF = re.compile(r"^gmlx\[([^\]]+)\]$")
 
 def _pyproject_extras() -> dict[str, set[str]]:
     """The declared optional-dependency sets, with self-referential entries
-    like ``gmlx[stt,tts]`` flattened into the component extras' packages."""
+    like ``gmlx[stt,tts]`` flattened into the component extras' packages -
+    recursively, since ``all`` nests ``talk`` which nests ``stt,tts``."""
     root = Path(extras.__file__).resolve().parent.parent
     with open(root / "pyproject.toml", "rb") as f:
         declared = tomllib.load(f)["project"]["optional-dependencies"]
-    out: dict[str, set[str]] = {}
-    for name, pkgs in declared.items():
-        flat: set[str] = set()
-        for p in pkgs:
+
+    def flat(name: str, stack: tuple[str, ...] = ()) -> set[str]:
+        assert name not in stack, f"extra self-reference cycle: {stack + (name,)}"
+        out: set[str] = set()
+        for p in declared[name]:
             m = _SELF_REF.match(p)
             if m:
                 for sub in m.group(1).split(","):
-                    flat |= set(declared[sub.strip()])
+                    out |= flat(sub.strip(), stack + (name,))
             else:
-                flat.add(p)
-        out[name] = flat
-    return out
+                out.add(p)
+        return out
+
+    return {name: flat(name) for name in declared}
 
 
 def test_extra_packages_match_pyproject():
