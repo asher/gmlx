@@ -450,6 +450,60 @@ def test_wrapper_decode_feeder_branch(monkeypatch):
         mx.set_wired_limit = real_set_wired
 
 
+def test_arena_call_lifts_cpu_pin(monkeypatch):
+    """The arena-backed decode call lifts ``_kq_cpu_only`` for its scope:
+    the fused kq decode path gates on the pin via ``_kq_fused_device_ok``,
+    so without the lift every streaming decode ran the stock triple-gather.
+    The pin is restored after the call, and the overflow fallback (which
+    may genuinely land on the CPU stream) never sees it lifted."""
+    mx.random.seed(3)
+    glu = SwitchGLU(16, 32, 4)
+    mx.eval(glu.parameters())
+    model = _holder_model(glu)
+    model.parameters = lambda: {"glu": glu.parameters()}
+    monkeypatch.setattr(
+        mx, "device_info", lambda: {"max_recommended_working_set_size": 1024}
+    )
+    real_set_wired = mx.set_wired_limit
+    try:
+        install_expert_streaming(model)
+        assert getattr(glu, "_kq_cpu_only", False)
+        pin_in_swap = []
+
+        class _DF:
+            overflow = False
+
+            def covers(self, li):
+                return True
+
+            def stage(self, li, ids):
+                return None if self.overflow else ids.astype(np.uint32)
+
+            def wedged_at(self, li):
+                return False
+
+            @contextmanager
+            def swapped(self, li):
+                pin_in_swap.append(glu._kq_cpu_only)
+                yield
+
+        df = _DF()
+        object.__setattr__(glu, "_kq_decode_feeder", df)
+        object.__setattr__(glu, "_kq_li", 2)
+        x1 = mx.random.normal((1, 1, 16))
+        i1 = mx.array([[[0, 2]]], dtype=mx.uint32)
+        mx.eval(glu(x1, i1))
+        assert pin_in_swap == [False]  # lifted for the arena scope
+        assert glu._kq_cpu_only  # restored after
+
+        df.overflow = True
+        mx.eval(glu(x1, i1))
+        assert pin_in_swap == [False]  # fallback never entered swapped
+        assert glu._kq_cpu_only
+    finally:
+        mx.set_wired_limit = real_set_wired
+
+
 def test_stage_read_failure_leaves_no_poisoned_slot(monkeypatch, tmp_path):
     """A failed read must not commit the expert->slot mapping: the victim
     slot holds partial bytes, so its old owner is evicted and the miss stays

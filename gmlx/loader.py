@@ -1253,6 +1253,68 @@ def _kq_expert_gpu_ok(module) -> bool:
     return True
 
 
+# Decode phase stats (GMLX_DECODE_PHASE_STATS=1): wall seconds per wrapper
+# phase, per decode token, dumped at exit. Buckets: ev = the router eval
+# (GPU segment for the previous layer's gather plus this layer's every-token
+# work, plus the host sync); la = lookahead router replica; stage_wait =
+# demand-read join inside stage(); stage_book = stage() minus the join;
+# prestage = speculative-read submission; build = gather graph build + slot
+# upload. resid = per-token wall (first-MoE-layer to first-MoE-layer) minus
+# the buckets: head matmul eval, sampling, detokenize, serve-loop glue.
+# First token after any non-decode call is skipped (prefill contamination);
+# its buckets still land in the sums, a <=1/N skew.
+_PHASE_KEYS = ("ev", "la", "stage_wait", "stage_book", "prestage", "build")
+_PHASE = (
+    {k: 0.0 for k in _PHASE_KEYS}
+    | {"tokens": 0, "wall": 0.0, "last": None, "first_li": None, "dirty": True}
+    if env_bool("GMLX_DECODE_PHASE_STATS", False)
+    else None
+)
+
+
+def _phase_token(ph, li, n_tokens):
+    """Token-boundary bookkeeping: a decode call on the first covered MoE
+    layer opens a new token; the previous boundary-to-boundary wall lands in
+    the per-token average unless a non-decode call dirtied the window."""
+    now = time.perf_counter()
+    if n_tokens != 1:
+        ph["dirty"] = True
+        return
+    if li is None:
+        return
+    if ph["first_li"] is None:
+        ph["first_li"] = li
+    if li != ph["first_li"]:
+        return
+    last = ph["last"]
+    ph["last"] = now
+    if last is not None and not ph["dirty"]:
+        ph["tokens"] += 1
+        ph["wall"] += now - last
+    ph["dirty"] = False
+
+
+def _phase_dump():
+    ph = _PHASE
+    if not ph or not ph["tokens"]:
+        return
+    n = ph["tokens"]
+    ms = {k: 1e3 * ph[k] / n for k in _PHASE_KEYS}
+    tot = 1e3 * ph["wall"] / n
+    print(
+        f"[phase] decode per-token ms over {n} tokens: total {tot:.1f} | "
+        + " ".join(f"{k} {v:.1f}" for k, v in ms.items())
+        + f" | resid {tot - sum(ms.values()):.1f}",
+        flush=True,
+    )
+
+
+if _PHASE is not None:
+    import atexit
+
+    atexit.register(_phase_dump)
+
+
 def install_expert_streaming(
     model,
     n_layers: int | None = None,
@@ -1335,13 +1397,24 @@ def install_expert_streaming(
                     small = n_tokens <= _arena_stage_max_tokens()
                     la = getattr(self, "_kq_lookahead", None)
                     la_pred = None
+                    ph = _PHASE
+                    if ph is not None:
+                        _phase_token(
+                            ph, getattr(self, "_kq_li", None), n_tokens)
+                        if n_tokens != 1:
+                            ph = None
                     if la is not None and cpu_only and small:
                         # Lookahead: run the NEXT MoE layer's router on this
                         # layer's input and evaluate it together with the
                         # router read below (one sync either way). The
                         # prediction feeds nothing downstream - it only
                         # records recall (probe) or drives prestage reads.
-                        la_pred = la.on_call(x, indices)
+                        if ph is not None:
+                            t_la = time.perf_counter()
+                            la_pred = la.on_call(x, indices)
+                            ph["la"] += time.perf_counter() - t_la
+                        else:
+                            la_pred = la.on_call(x, indices)
                     if (
                         dfr is not None
                         and cpu_only
@@ -1358,8 +1431,18 @@ def install_expert_streaming(
                         # safety fence (see decode_feeder.py). ``stage``
                         # returns None when the call routes to more distinct
                         # experts than the arena has slots - fall through.
+                        t0 = time.perf_counter() if ph is not None else 0.0
                         mx.eval(indices)
+                        if ph is not None:
+                            t1 = time.perf_counter()
+                            ph["ev"] += t1 - t0
+                            wait0 = getattr(dfr, "_t_demand", 0.0)
                         slots = dfr.stage(self._kq_li, np.array(indices))
+                        if ph is not None:
+                            t2 = time.perf_counter()
+                            w = getattr(dfr, "_t_demand", 0.0) - wait0
+                            ph["stage_wait"] += w
+                            ph["stage_book"] += (t2 - t1) - w
                         if la_pred is not None:
                             # This layer's demand misses have joined
                             # (stage returned); the next layer's predicted
@@ -1368,12 +1451,29 @@ def install_expert_streaming(
                             # work compute - speculation never competes with
                             # demand traffic for the SSD.
                             dfr.prestage(la.predictor.dst_li, la_pred)
+                            if ph is not None:
+                                ph["prestage"] += time.perf_counter() - t2
                         if slots is not None:
-                            with dfr.swapped(self._kq_li):
-                                with mx.stream(mx.gpu):
-                                    return super().__call__(
-                                        x, mx.array(slots),
-                                        *args, **kwargs)
+                            # Arena call: the expert weights are wired GPU
+                            # arena views for this scope, so the fused kq
+                            # decode kernels are safe - lift the streaming
+                            # CPU pin, which _kq_fused_device_ok vetoes on.
+                            # Without the lift every streaming decode ran
+                            # the stock triple-gather chain.
+                            self._kq_cpu_only = False
+                            try:
+                                t3 = (time.perf_counter()
+                                      if ph is not None else 0.0)
+                                with dfr.swapped(self._kq_li):
+                                    with mx.stream(mx.gpu):
+                                        y = super().__call__(
+                                            x, mx.array(slots),
+                                            *args, **kwargs)
+                                if ph is not None:
+                                    ph["build"] += time.perf_counter() - t3
+                                return y
+                            finally:
+                                self._kq_cpu_only = True
                     wedged = dfr is not None and dfr.wedged_at(self._kq_li)
                     if wedged and dfr.has_dead(self._kq_li):
                         # A wedged read poisoned part of this layer's file
