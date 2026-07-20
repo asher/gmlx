@@ -1699,11 +1699,12 @@ def install_moe_experts_override(model, k: int) -> int:
     shapes offloaded prefill/decode traffic, not as a general sampler).
 
     The override rewrites the router's own top-k attribute (``top_k`` /
-    ``num_experts_per_tok`` on the block, and on a DeepSeek-style ``gate``
-    submodule when present), so expert selection and the arch's weight
-    renormalization run unchanged at the new k. Outputs differ from the
-    trained model by design; parity gates will fail. Returns the number of
-    MoE blocks overridden; raises on k < 1 or k > the expert count.
+    ``num_experts_per_tok`` on the block, and on a DeepSeek-style gate
+    submodule when present - named ``gate``, or ``router`` on hy_v3), so
+    expert selection and the arch's weight renormalization run unchanged
+    at the new k. Outputs differ from the trained model by design; parity
+    gates will fail. Returns the number of MoE blocks overridden; raises
+    on k < 1 or k > the expert count.
     """
     if k < 1:
         raise ValueError(f"MoE top-k override must be >= 1, got {k}")
@@ -1732,7 +1733,11 @@ def install_moe_experts_override(model, k: int) -> int:
                     "stack on an offloaded layer"
                 )
             hit = False
-            for target in (owner, getattr(owner, "gate", None)):
+            for target in (
+                owner,
+                getattr(owner, "gate", None),
+                getattr(owner, "router", None),
+            ):
                 if target is None:
                     continue
                 for attr in ("top_k", "num_experts_per_tok"):

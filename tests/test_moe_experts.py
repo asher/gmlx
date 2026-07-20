@@ -371,3 +371,54 @@ def test_mass_composes_with_fixed_k(monkeypatch):
     mx.eval(inds, weights)
     assert inds.shape == (1, 5, 1)  # mass filter ran within the lowered k
     assert (np.array(weights) > 0).all()  # sum preserved, single survivor
+
+
+def _hy_v3_moe():
+    """Real hy_v3 MoE block (its gate submodule sits at ``router``), the
+    SwitchGLU swapped for the kquant fixture the offload installer wraps."""
+    from gmlx.hy_v3_model import MoE
+
+    args = SimpleNamespace(
+        hidden_size=32,
+        expert_hidden_dim=64,
+        num_experts=4,
+        num_experts_per_tok=2,
+        num_shared_experts=0,
+        route_norm=True,
+        router_scaling_factor=1.5,
+        enable_moe_fp32_combine=False,
+    )
+    block = MoE(args)
+    block.switch_mlp = _kquant_glu()
+    mx.eval(block.parameters())
+    return block
+
+
+def test_hy_v3_router_attr_is_hooked(monkeypatch):
+    """hy_v3 names its DeepSeek-shaped gate ``router``: the mass installer
+    must find it there, and the fixed-k override must reach the live
+    ``router.top_k`` (the block-level num_experts_per_tok is dead in the
+    hy_v3 forward)."""
+    mx.random.seed(9)
+    block = _hy_v3_moe()
+    model = _shell(block)
+    monkeypatch.setattr(
+        mx, "device_info", lambda: {"max_recommended_working_set_size": 1024}
+    )
+    install_expert_streaming(model)
+
+    assert install_moe_expert_mass(model, 1e-6) == 1
+    assert type(block.router).__name__ == "MoEGate_ExpertCtl"
+    assert block.router._kq_li == 0
+
+    x = mx.random.normal((1, 5, 32))
+    inds, weights = block.router(x)
+    mx.eval(inds, weights)
+    assert inds.shape == (1, 5, 2)
+    for t in range(5):
+        assert len(set(np.array(inds)[0, t].tolist())) == 1  # collapsed to top-1
+    assert np.allclose(np.array(weights)[..., 1], 0.0)
+    mx.eval(block(x))  # end-to-end through the offloaded gather
+
+    install_moe_experts_override(model, 1)
+    assert block.router.top_k == 1  # live attr, not the dead block-level one

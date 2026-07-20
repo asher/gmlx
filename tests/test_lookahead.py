@@ -316,5 +316,38 @@ def test_wrapper_gate_trims_prestage(monkeypatch):
     assert len(df.calls) == n  # no prestage submitted at all
 
 
+class _FakeRouterMoE(nn.Module):
+    """hy_v3-shaped block: the DeepSeek-shaped gate submodule sits at
+    ``router`` (no ``gate`` attribute at all)."""
+
+    def __init__(self):
+        super().__init__()
+        self.router = _FakeGate()
+        self.switch_mlp = SwitchGLU(DIM, HID, NE)
+
+    def __call__(self, x):
+        inds, w = self.router(x)
+        y = self.switch_mlp(x, inds)
+        return (y * w[..., None]).sum(axis=-2)
+
+
+def test_router_attr_gate_drives_predictor(monkeypatch):
+    """A gate submodule named ``router`` (hy_v3) is recognized and wires
+    the same layer-pair predictor a ``gate``-named submodule gets."""
+    mx.random.seed(7)
+    model = _FakeModel(2)
+    for layer in model.layers:
+        layer.mlp = _FakeRouterMoE()
+    mx.eval(model.parameters())
+    monkeypatch.setattr(
+        mx, "device_info", lambda: {"max_recommended_working_set_size": 1024}
+    )
+    install_expert_streaming(model)
+    assert _router_fn_for(model.layers[1].mlp) is not None
+    assert install_lookahead(model, model.layers, probe=True) == 1
+    la0 = model.layers[0].mlp.switch_mlp._kq_lookahead
+    assert la0.predictor is not None and la0.predictor.dst_li == 1
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

@@ -28,7 +28,6 @@ from __future__ import annotations
 import atexit
 
 import mlx.core as mx
-import mlx.nn as nn
 import numpy as np
 
 from .envflags import env_choice, env_float
@@ -176,12 +175,10 @@ def _base_block_name(owner) -> str:
 def _router_fn_for(owner):
     """Selection closure for ``owner`` (a MoE block), or None when the
     arch's routing seam is not recognized."""
-    gate = getattr(owner, "gate", None)
-    if (
-        isinstance(gate, nn.Module)
-        and not isinstance(gate, nn.Linear)
-        and isinstance(getattr(gate, "top_k", None), int)
-    ):
+    from .moe_experts import _gate_submodule
+
+    gate = _gate_submodule(owner)
+    if gate is not None:
         return _gate_module_select(gate)
     name = _base_block_name(owner)
     if name in _SIGMOID_BIAS_BLOCKS:

@@ -22,6 +22,8 @@ loader.install_moe_experts_override):
 - DeepSeek-family blocks route through a gate submodule returning
   ``(inds, weights)`` - one generic gate subclass covers deepseek_v4
   (hash-routed layers included), deepseek_v2/v3, glm_moe_dsa and glm4_moe.
+  hy_v3 names the same-shaped submodule ``router``; ``_gate_submodule``
+  finds it under either attribute.
 - qwen3_moe / qwen3_next / minimax / minimax_m3 select inline in the block
   forward - each gets a subclass with the stock forward plus the filter
   inserted between selection and the expert gather.
@@ -312,6 +314,23 @@ _INLINE_SWAPS = {
 }
 
 
+def _gate_submodule(owner):
+    """The owner's DeepSeek-shaped routing submodule (callable ->
+    ``(inds, weights)``, int ``top_k``), whichever attribute holds it:
+    ``gate`` on the deepseek/glm families, ``router`` on hy_v3's MoE.
+    Plain-Linear routers (qwen3/minimax/gpt-oss shapes) never qualify -
+    those archs hook at the block seam instead."""
+    for attr in ("gate", "router"):
+        g = getattr(owner, attr, None)
+        if not isinstance(g, nn.Module) or isinstance(g, nn.Linear):
+            continue
+        if type(g).__name__.endswith("_ExpertCtl") or isinstance(
+            getattr(g, "top_k", None), int
+        ):
+            return g
+    return None
+
+
 def _offloaded_moe_owners(model):
     """Yield (layer index, owning block) for every MoE block whose expert
     container install_expert_streaming wrapped (same walk as the fixed-k
@@ -332,14 +351,10 @@ def _install(model, *, mass=None, probe=None) -> int:
     hooked = 0
     unsupported: set = set()
     for li, owner in _offloaded_moe_owners(model):
-        gate = getattr(owner, "gate", None)
-        if isinstance(gate, nn.Module) and type(gate).__name__.endswith("_ExpertCtl"):
+        gate = _gate_submodule(owner)
+        if gate is not None and type(gate).__name__.endswith("_ExpertCtl"):
             target = gate  # already swapped by an earlier install
-        elif (
-            isinstance(gate, nn.Module)
-            and not isinstance(gate, nn.Linear)
-            and isinstance(getattr(gate, "top_k", None), int)
-        ):
+        elif gate is not None:
             target = gate
             gate.__class__ = _expert_ctl_gate_class(type(gate))
         elif type(owner).__name__ in ("_NormTopKMoE", "_FusedKQuantMoeBlock"):
