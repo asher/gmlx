@@ -53,6 +53,8 @@ from .feeder_common import ATTRS, KINDS, read_range, swapped_weights, verify_zer
 
 # Miss-pull parallelism: per layer, up to top_k experts x 3 stacks of
 # MB-scale slices; enough in-flight preads for SSD sequential bandwidth.
+# GMLX_DECODE_READ_WORKERS overrides (a high-fan-out model at a mid hit
+# rate can queue more than 12 slices in one demand wave).
 _READ_WORKERS = 12
 
 # Lookahead prestage (see ``prestage``): predictions from the lookahead
@@ -328,13 +330,14 @@ class DecodeFeeder:
         # slack on both ends.
         self._aligned = os.environ.get("GMLX_DECODE_ALIGNED_READS", "1") != "0"
         self._sizes = {p: os.fstat(fd).st_size for p, fd in self._fds.items()}
+        read_workers = env_int("GMLX_DECODE_READ_WORKERS", _READ_WORKERS)
         if self._aligned:
             max_stride = max(
                 stride for entry in self._layers.values()
                 for (_, _, _, stride, _) in entry.values())
             self._bounce_bytes = max_stride + 2 * _PAGE
             self._bounce: queue.Queue = queue.Queue()
-            for _ in range(_READ_WORKERS):
+            for _ in range(read_workers):
                 self._bounce.put(kq.arena_alloc([self._bounce_bytes]))
 
         # Residency state per layer. slot_of[e] is e's arena slot or -1;
@@ -354,7 +357,7 @@ class DecodeFeeder:
         self._lookups = 0
         self._layer_hits = {li: 0 for li in self._layers}
         self._layer_lookups = {li: 0 for li in self._layers}
-        self._read_pool = _DaemonReadPool(_READ_WORKERS)
+        self._read_pool = _DaemonReadPool(read_workers)
 
         # Lookahead prestage state (constants above; pool and bounce
         # buffers are lazy - most runs never prestage). _pending maps
