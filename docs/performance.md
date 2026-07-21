@@ -363,6 +363,34 @@ the matching `serve` flags for a single positional model) - the probe stays
 CLI-only, so size P with a `gmlx run --moe-expert-probe` pass before
 pinning it in a config.
 
+No lossy lever is ever on by default: absent flags and absent config keys
+mean lossless routing. Measured settings, from a 299B-A21B MoE (161 GB
+IQ4_XS streaming on a 128 GB machine, 80 GB decode arena at a ~92% hit
+rate; decode-only tok/s from alternated A/B rounds of 512-token
+generations; quality scored on a 12-task goal battery - JSON extraction,
+constrained format, code with asserts, multi-step arithmetic, length
+control - plus a repetition check):
+
+| setting | decode | quality |
+|---|---|---|
+| `moe_layer_shed: 0.10` | +8% | clean |
+| `moe_miss_shed: 0.90` | +4% | clean |
+| both together | +13% | clean |
+
+The two compose because they cut different costs: layer-shed removes whole
+routed-layer walls (compute, per-layer sync, and IO), miss-shed removes
+only demand stalls. Miss-shed's payoff scales with the miss rate - +4% at
+a 92% hit rate, much more when the arena is small relative to the model -
+and a shed expert earns no popularity credit, so the arena keeps its hot
+set. The first capability these levers break is multi-step arithmetic,
+well before coherence, formatting, or code degrade: `moe_layer_shed: 0.20`
+alone drops arithmetic tasks, and so does `moe_layer_shed: 0.10` combined
+with `moe_miss_shed: 0.75` even though each is clean alone - stacked
+levers compound onto the same cliff, so leave margin on both. On the same
+battery, `moe_miss_shed` alone stayed clean down to 0.75 and
+`moe_expert_mass` down to 0.70. If a workload leans on chained arithmetic,
+put that in the test set before sizing any of these.
+
 Models with MXFP4/NVFP4 expert tensors (gpt-oss, DeepSeek-V4-Flash Q4_K_XL
 quants) participate in all of the above on equal terms. By default these
 tensors are eagerly repacked into MLX's packed layout at load - fine in RAM,
