@@ -451,6 +451,7 @@ def load_mtp_model(
     chat_template: str | None = None,
     zero_copy: bool = True,
     verbose: bool = False,
+    wire: bool = True,
 ):
     """Load an MTP target+drafter pair: the text target on mlx-vlm classes plus
     a drafter. Two drafter-acquisition shapes:
@@ -466,6 +467,12 @@ def load_mtp_model(
     ``run_speculative_server_rounds``). The plain-text ``load_model`` path is
     untouched; this is a separate entry so the proven text load stays
     byte-identical.
+
+    ``wire=False`` skips the sticky wired limit for callers that will install
+    expert streaming: ``mx.set_wired_limit`` actively wires the resident
+    buffer set, and on an over-RAM zero-copy target that wires the whole
+    model's mmap views - a fast march straight through the free-page floor.
+    The streaming installers manage their own (arena) wiring.
     """
 
     _log = loadlog.verbose_print
@@ -632,7 +639,8 @@ def load_mtp_model(
     eos_ids = getattr(raw_tokenizer, "_gguf_eos_token_ids", None)
     tokenizer = TokenizerWrapper(raw_tokenizer, eos_token_ids=eos_ids)
 
-    _wire_big_model(model)
+    if wire:
+        _wire_big_model(model)
     wait_for_populate(pf.shards, log=_log)
 
     return model, drafter, config, tokenizer

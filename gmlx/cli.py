@@ -993,6 +993,7 @@ def _run_bench_depths(args) -> int:
                 chat_template=args.chat_template,
                 zero_copy=not args.no_zero_copy,
                 verbose=args.verbose,
+                wire=not getattr(args, "stream_experts", False),
             )
     else:
         with loadlog.load_ui(args.verbose, args.gguf):
@@ -1178,6 +1179,7 @@ def _run_generate(args) -> int:
                 chat_template=args.chat_template,
                 zero_copy=not args.no_zero_copy,
                 verbose=args.verbose,
+                wire=not args.stream_experts,
             )
         # Streaming placement applies to the target trunk only (the drafter
         # block is small and stays resident); the verify calls ride the
