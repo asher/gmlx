@@ -1133,6 +1133,7 @@ def _stream_scores_glu(monkeypatch, recorded):
             self.stage_calls = []
             self.shed_calls = []
             self.keep = None
+            self.overflow = False
             self._layer_shed_n = 0
 
         def covers(self, li):
@@ -1144,7 +1145,7 @@ def _stream_scores_glu(monkeypatch, recorded):
 
         def stage(self, li, ids):
             self.stage_calls.append((li, ids.copy()))
-            return ids.astype(np.uint32)
+            return None if self.overflow else ids.astype(np.uint32)
 
         def wedged_at(self, li):
             return False
@@ -1188,6 +1189,17 @@ def test_wrapper_miss_shed_stages_survivors(monkeypatch):
     mx.eval(glu(x1, i1, sc))
     assert df.stage_calls[-1][1].reshape(-1).tolist() == [1, 3]
     assert np.allclose(recorded[-1][1].reshape(-1), [0.75, 0.25])
+
+    # arena overflow after a shed: the page-cache fallback must run the
+    # ORIGINAL routed set and scores (shed applies to the arena path only)
+    df.keep = np.array([False, True])
+    df.overflow = True
+    mx.eval(glu(x1, i1, sc))
+    df.overflow = False
+    assert df.stage_calls[-1][1].reshape(-1).tolist() == [3]  # staged shed set
+    got_ids, got_scores = recorded[-1]
+    assert got_ids.reshape(-1).tolist() == [1, 3]
+    assert np.allclose(got_scores.reshape(-1), [0.75, 0.25])
 
     # multi-token calls never shed (decode-only lever)
     n_shed = len(df.shed_calls)

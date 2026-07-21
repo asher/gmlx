@@ -1473,21 +1473,24 @@ def install_expert_streaming(
                             wait0 = getattr(dfr, "_t_demand", 0.0)
                         ids = np.array(indices)
                         ms = getattr(self, "_kq_miss_shed", None)
+                        shed_args = None
                         if ms is not None and args and n_tokens == 1:
                             sc = np.asarray(
                                 args[0].astype(mx.float32)).reshape(-1)
                             keep = dfr.shed_misses(
                                 self._kq_li, ids.reshape(-1), sc, ms)
                             if keep is not None:
+                                # Arena-path only: the overflow fallback
+                                # below keeps the original routed set.
                                 kept = ids.reshape(-1)[keep]
                                 shp = ids.shape[:-1] + (kept.size,)
                                 ids = np.ascontiguousarray(kept.reshape(shp))
-                                indices = mx.array(ids)
                                 scn = sc[keep]
                                 # survivors keep the token's full mass
                                 scn = scn * (sc.sum() / max(scn.sum(), 1e-20))
-                                args = (mx.array(scn.reshape(shp)).astype(
-                                    args[0].dtype),) + args[1:]
+                                shed_args = (mx.array(
+                                    scn.reshape(shp)).astype(
+                                        args[0].dtype),) + args[1:]
                         slots = dfr.stage(self._kq_li, ids)
                         if ph is not None:
                             t2 = time.perf_counter()
@@ -1508,6 +1511,8 @@ def install_expert_streaming(
                             # arena call: weights are wired GPU views for
                             # this scope, so lift the streaming CPU pin
                             # and let the fused kq kernels run
+                            if shed_args is not None:
+                                args = shed_args
                             self._kq_cpu_only = False
                             try:
                                 t3 = (time.perf_counter()
