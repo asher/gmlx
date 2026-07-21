@@ -1466,17 +1466,24 @@ def install_expert_streaming(
                         # returns None when the call routes to more distinct
                         # experts than the arena has slots - fall through.
                         t0 = time.perf_counter() if ph is not None else 0.0
-                        mx.eval(indices)
+                        ms = getattr(self, "_kq_miss_shed", None)
+                        sc_f32 = None
+                        if ms is not None and args and n_tokens == 1:
+                            # Shed reads the scores host-side; fold them into
+                            # the router eval so the hook adds a small D2H
+                            # copy, not a second per-layer graph flush.
+                            sc_f32 = args[0].astype(mx.float32)
+                            mx.eval(indices, sc_f32)
+                        else:
+                            mx.eval(indices)
                         if ph is not None:
                             t1 = time.perf_counter()
                             ph["ev"] += t1 - t0
                             wait0 = getattr(dfr, "_t_demand", 0.0)
                         ids = np.array(indices)
-                        ms = getattr(self, "_kq_miss_shed", None)
                         shed_args = None
-                        if ms is not None and args and n_tokens == 1:
-                            sc = np.asarray(
-                                args[0].astype(mx.float32)).reshape(-1)
+                        if sc_f32 is not None:
+                            sc = np.asarray(sc_f32).reshape(-1)
                             keep = dfr.shed_misses(
                                 self._kq_li, ids.reshape(-1), sc, ms)
                             if keep is not None:
