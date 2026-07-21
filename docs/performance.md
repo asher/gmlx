@@ -278,6 +278,8 @@ Two placements run MoE models whose files exceed what the GPU can wire:
   prefill reads expert stacks at sequential bandwidth instead of demand-faulting
   them.
 
+### The feeder paths
+
 Streaming models engage two *feeder* paths by default:
 
 - The **prefill feeder** (`--no-prefill-feeder` disables) stages each layer's
@@ -302,6 +304,12 @@ Streaming models engage two *feeder* paths by default:
   tok/s for `--stream-cpu` - so `--stream-experts` now matches `--stream-cpu`
   on short generations and pulls ahead roughly 1.5x once the arena warms,
   before the KV-cache advantage at depth.
+
+In server configs the placement is the per-model `stream: experts | cpu`
+key and the feeder opt-outs are `prefill_feeder: false` /
+`decode_feeder: false`.
+
+### Lookahead prestage
 
 With the decode feeder on, arena misses are also *prestaged by lookahead*
 (`GMLX_DECODE_LOOKAHEAD=0` disables): each MoE layer runs the next MoE layer's router
@@ -329,44 +337,68 @@ When a larger-than-RAM model is released, its page cache is also released, via
 `msync(MS_INVALIDATE)` over the shards - at process exit, or at unload on a
 running server (`GMLX_RELEASE_PAGECACHE=0` disables).
 
-Lossy speed levers reduce the expert bytes consulted per token on over-RAM
-models. `--moe-experts K` caps the router at a fixed K experts per token. `--moe-expert-mass P` is the adaptive version and usually the
-better trade: each token keeps only the smallest set of its routed experts
-covering share P of the router's gate mass, so the dropped mass is bounded by
-1-P and lands only on tokens where the router was already confident - a token
-whose top 3 experts carry 92% of the mass reads 3 experts at P=0.9 while an
-uncertain token keeps the full fan-out. To choose P, run once with
-`--moe-expert-probe` (lossless): it prints, per candidate P, the average
-experts/token, the implied expert-read fraction, and the mass actually
-dropped - decode and prefill tokens tabled separately, and the decode table
-is the one to size P against. Start at 0.95 and step down while outputs stay
-acceptable; with the decode feeder on, its exit line reports the achieved
-average unique experts per token-layer. The two levers compose
-(`--moe-experts 6 --moe-expert-mass 0.9` caps at 6, then drops within the 6).
+### Lossy levers
 
-Two further lossy levers act at decode staging rather than at the router.
-`--moe-miss-shed P` drops routed experts that would demand-miss the decode
+Four levers trade a bounded amount of output quality for decode speed on
+streamed MoE models. None is ever on by default: absent flags and absent
+config keys mean lossless routing. All are decode-side - a large prefill
+chunk routes to nearly every expert either way - and all act only on
+streamed layers.
+
+A streamed decode token pays three distinct costs, and each lever cuts a
+different one. Experts that miss the decode arena are read from disk at
+demand latency - the dominant cost when the hit rate is low. Experts
+already resident in the arena cost only gather compute, which is small.
+And every streamed MoE layer pays a fixed per-layer overhead (kernel
+launches plus a host synchronization) that does not shrink when fewer
+experts are routed.
+
+The router-side levers thin the routed set itself, cutting reads and
+compute in proportion. `--moe-experts K` caps the router at a fixed K
+experts per token. `--moe-expert-mass P` is the adaptive version and
+usually the better trade of the two: each token keeps the smallest set of
+its routed experts covering share P of the gate mass, so the dropped mass
+is bounded by 1-P and lands on tokens where the router was already
+confident - a token whose top 3 experts carry 92% of the mass reads 3
+experts at P=0.9, while an uncertain token keeps the full fan-out. How
+much expert-mass buys is a property of the model's router. On a
+concentrated router it is the strongest lever available: most reads
+disappear for a few percent of dropped mass. On a flat router it buys
+almost nothing - a 299B model we measured keeps 7.1 of its 8 experts at
+P=0.90. Measure rather than guess: `--moe-expert-probe` runs the trained
+routing losslessly and prints, per candidate P, the experts kept, the
+implied read fraction, and the mass actually dropped - decode and prefill
+tabled separately; size P against the decode table. The two router levers
+compose (`--moe-experts 6 --moe-expert-mass 0.9` caps at 6, then drops
+within the 6).
+
+The staging levers act at the decode feeder instead of the router.
+`--moe-miss-shed P` drops routed experts that would demand-miss the
 arena - lowest scores first, keeping at least share P of the token's gate
-mass - so its quality budget is spent exactly where the disk stalls are: an
-arena-resident or prestage-inflight expert is never dropped, and a shed
-expert earns no popularity credit, so the arena's long tail stays cold. It
-acts on blocks that hand the router's scores to the expert call (the fused
-scores path). `--moe-layer-shed P` skips a streamed MoE layer's routed
-experts entirely with probability P per token - the layer's shared expert
-still runs - the blunt end of the scale. All of these are decode-side
-levers: a large prefill chunk routes to nearly every expert either way. In
-server configs the placement is the per-model `stream: experts | cpu` key
-and the feeder opt-outs are `prefill_feeder: false` / `decode_feeder:
-false`; the lossy levers are the per-model `moe_experts: K` /
-`moe_expert_mass: P` / `moe_miss_shed: P` / `moe_layer_shed: P` keys (or
-the matching `serve` flags for a single positional model) - the probe stays
-CLI-only, so size P with a `gmlx run --moe-expert-probe` pass before
-pinning it in a config.
+mass - so its quality budget is spent exactly where the disk stalls are:
+an arena-resident or prestage-inflight expert is never dropped, and a
+shed expert earns no popularity credit, so the arena keeps its hot set.
+It needs the decode feeder and a block that hands router scores to the
+expert call; where it engages, it is the most targeted lever per point of
+quality spent, and its payoff scales directly with the miss rate.
+`--moe-layer-shed P` skips a streamed MoE layer's routed experts entirely
+with probability P per token (the layer's shared expert still runs). It
+is the blunt end of the scale, and the only lever that also cuts the
+per-layer overhead - which makes it the one that still pays when the
+arena hit rate is high and misses are rare.
 
-No lossy lever is ever on by default: absent flags and absent config keys
-mean lossless routing. Measured settings, from a 299B-A21B MoE (161 GB
-IQ4_XS streaming on a 128 GB machine, 80 GB decode arena at a ~92% hit
-rate; decode-only tok/s from alternated A/B rounds of 512-token
+Which to reach for is a measurement, not a doctrine. Run the probe once,
+and read the decode feeder's exit line (arena hit rate) from a
+representative session. A concentrated router points to
+`--moe-expert-mass` first, whatever the hit rate: it removes reads and
+compute together at minimal dropped mass. A flat router takes it off the
+table. A low hit rate - an arena small relative to the model - makes
+`--moe-miss-shed` valuable; a high hit rate leaves the per-layer overhead
+as the standing cost, which only `--moe-layer-shed` touches.
+
+One measured point, from the flat-router end of that space: a 299B-A21B
+MoE (161 GB IQ4_XS streaming on a 128 GB machine, decode arena at a ~92%
+hit rate; decode-only tok/s from alternated A/B rounds of 512-token
 generations; quality scored on a 12-task goal battery - JSON extraction,
 constrained format, code with asserts, multi-step arithmetic, length
 control - plus a repetition check):
@@ -376,34 +408,35 @@ control - plus a repetition check):
 | `moe_layer_shed: 0.10` | +8% | clean |
 | `moe_miss_shed: 0.90` | +4% | clean |
 | both together | +13% | clean |
+| `moe_expert_mass: 0.90` | ~0%, alone or stacked | clean |
 
-The two compose because they cut different costs: layer-shed removes whole
-routed-layer walls (compute, per-layer sync, and IO), miss-shed removes
-only demand stalls. Miss-shed's payoff scales with the miss rate - +4% at
-a 92% hit rate, much more when the arena is small relative to the model -
-and a shed expert earns no popularity credit, so the arena keeps its hot
-set. The first capability these levers break is multi-step arithmetic,
-well before coherence, formatting, or code degrade: `moe_layer_shed: 0.20`
-alone drops arithmetic tasks, and so does `moe_layer_shed: 0.10` combined
-with `moe_miss_shed: 0.75` even though each is clean alone - stacked
-levers compound onto the same cliff, so leave margin on both. On the same
-battery, `moe_miss_shed` alone stayed clean down to 0.75 and
-`moe_expert_mass` down to 0.70. If a workload leans on chained arithmetic,
-put that in the test set before sizing any of these.
+That ordering is this model's, not a law. With a flat router,
+expert-mass had nothing cheap to drop; at a 92% hit rate, misses were
+rare enough that the per-layer overhead was the standing cost, so
+layer-shed led and the shed pair composed (+8% and +4% multiply to
+roughly the observed +13%: they cut disjoint costs). On a
+concentrated-router model the probe will show the inversion - most reads
+removed for a few percent of mass - before any lossy run needs to be
+made.
 
-Which lever, when: on a `stream: experts` model start with
-`moe_layer_shed: 0.10`, and add `moe_miss_shed: 0.90` whenever the decode
-feeder is on - miss-shed only ever spends quality where a disk stall would
-have happened, which is why the pair stacks cleanly. Do not add
-`moe_expert_mass` on top of that pair: measured on the same setup it
-contributed no further speed (its drops fall mostly on arena-resident
-experts, which are already cheap - the expensive experts are the misses,
-and miss-shed handles exactly those) while still spending quality budget.
-Reach for `moe_expert_mass` (sized with the lossless
-`--moe-expert-probe`) where miss-shed cannot engage: `stream: cpu`
-placements, which have no decode arena, and model families whose MoE
-blocks do not hand router scores to the expert call. A third lever on top
-of a working pair mostly adds quality risk, not speed.
+On that same model, quality degraded in a consistent order as the levers
+hardened: multi-step arithmetic broke first, well before coherence,
+formatting, or code. `moe_layer_shed: 0.20` alone dropped arithmetic
+tasks, and so did
+`moe_layer_shed: 0.10` combined with `moe_miss_shed: 0.75` even though
+each setting is clean alone - stacked levers compound onto the same
+cliff, so leave margin on both. On the same battery `moe_miss_shed`
+alone stayed clean down to 0.75 and `moe_expert_mass` down to 0.70. If a
+workload leans on chained arithmetic, put that in the test set before
+sizing any of these.
+
+In server configs the lossy levers are the per-model `moe_experts: K` /
+`moe_expert_mass: P` / `moe_miss_shed: P` / `moe_layer_shed: P` keys (or
+the matching `serve` flags for a single positional model); the probe
+stays CLI-only, so size P with a `gmlx run --moe-expert-probe` pass
+before pinning a value in a config.
+
+### Native-fp experts (MXFP4/NVFP4)
 
 Models with MXFP4/NVFP4 expert tensors (gpt-oss, DeepSeek-V4-Flash Q4_K_XL
 quants) participate in all of the above on equal terms. By default these
