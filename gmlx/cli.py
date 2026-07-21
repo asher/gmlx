@@ -972,6 +972,7 @@ def _run_bench_depths(args) -> int:
     """``tg@depth`` benchmark: decode tok/s measured at each context depth,
     with an optional MTP speculative A/B (accept-rate + speedup) per depth."""
     from .benchmarks import _ChatPromptSource, _load_chat_dataset, bench_tg_depth
+    from .chat import parse_template_config
     from .loader import load_model, preset_native_fp_wire_env
     from .mtp_load import load_mtp_model
 
@@ -986,6 +987,19 @@ def _run_bench_depths(args) -> int:
     speculative = bool(args.speculative) and not args.no_speculative
 
     from . import loadlog
+
+    # load the chat corpus BEFORE the model: dataset prepare can spike
+    # several GB, which an over-RAM wired load leaves no headroom for
+    convs = None
+    chat_ds = getattr(args, "bench_chat_dataset", "") or ""
+    if chat_ds:
+        if ":" in chat_ds:
+            ds_id, ds_split = chat_ds.rsplit(":", 1)
+        else:
+            ds_id, ds_split = chat_ds, "train_sft"
+        print(f"[bench] loading chat dataset {ds_id}:{ds_split} ...")
+        convs = _load_chat_dataset(ds_id, ds_split)
+        print(f"[bench] {len(convs)} conversations loaded")
 
     preset_native_fp_wire_env(args)
     drafter = None
@@ -1014,19 +1028,14 @@ def _run_bench_depths(args) -> int:
     _apply_placement(args, getattr(model, "language_model", model))
     print_family_note(args)
 
-    # build a chat-prompt source when --bench-chat-dataset is given
     prompt_source = None
-    chat_ds = getattr(args, "bench_chat_dataset", "") or ""
-    if chat_ds:
-        if ":" in chat_ds:
-            ds_id, ds_split = chat_ds.rsplit(":", 1)
-        else:
-            ds_id, ds_split = chat_ds, "train_sft"
-        print(f"[bench] loading chat dataset {ds_id}:{ds_split} ...")
-        convs = _load_chat_dataset(ds_id, ds_split)
+    if convs is not None:
         seed = int(getattr(args, "bench_chat_seed", 42))
-        prompt_source = _ChatPromptSource(convs, tok, seed=seed)
-        print(f"[bench] {len(convs)} conversations loaded (slice seed {seed})")
+        tkw = parse_template_config(args.chat_template_config)
+        prompt_source = _ChatPromptSource(
+            convs, tok, seed=seed, template_kwargs=tkw)
+        print(f"[bench] prompt slice seed {seed}"
+              + (f" template_config={tkw}" if tkw else ""))
 
     corpus_label = chat_ds if chat_ds else "synthetic"
     print(

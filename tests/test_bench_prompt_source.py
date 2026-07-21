@@ -54,6 +54,26 @@ def test_seed_changes_slice():
     assert a.get(400) != c.get(400)
 
 
+def test_template_kwargs_reach_every_render():
+    class _KwTok(_StubTok):
+        def __init__(self):
+            self.kws = []
+
+        def apply_chat_template(self, msgs, add_generation_prompt=True,
+                                tokenize=True, **kw):
+            self.kws.append(kw)
+            return super().apply_chat_template(
+                msgs, add_generation_prompt, tokenize)
+
+    tok = _KwTok()
+    src = _ChatPromptSource(
+        _convs(), tok, seed=42,
+        template_kwargs={"reasoning_effort": "low"})
+    src.get(400)
+    assert tok.kws and all(
+        kw == {"reasoning_effort": "low"} for kw in tok.kws)
+
+
 class _StrictTok(_StubTok):
     """A Mistral/Llama-2-style template: roles must alternate, user first."""
 
