@@ -12,7 +12,17 @@ import mlx.nn as nn
 import numpy as np
 import pytest
 
-from gmlx.modules import install_fused_moe_glu, install_hyv3_shexp_fold
+import mlx_kquant as _kq
+
+from gmlx.modules import (
+    install_fused_moe_glu,
+    install_hyv3_router_fuse,
+    install_hyv3_shexp_fold,
+)
+
+_ROUTER_OK = '"sigmoid"' in (getattr(_kq.moe_router_topk, "__doc__", "") or "")
+router_cap = pytest.mark.skipif(
+    not _ROUTER_OK, reason="installed mlx_kquant lacks sigmoid router scoring")
 
 
 class _Shell(nn.Module):
@@ -223,3 +233,96 @@ def test_mix_env_off_keeps_scores_out(monkeypatch):
     mx.eval(y)
     assert y.shape == (1, 4, 256)
     assert blk.switch_mlp.saw_scores == [False]  # called without scores
+
+
+# sigmoid router fuse
+
+
+@router_cap
+def test_router_fuse_installs():
+    blk = _kq_moe()
+    shell = _Shell(blk)
+    assert install_hyv3_router_fuse(shell) == 1
+    assert type(blk.router).__name__ == "_FusedHyV3Router"
+    assert install_hyv3_router_fuse(shell) == 0  # swapped class is not MoEGate
+
+
+@router_cap
+def test_fused_router_rides_kernel(monkeypatch):
+    from gmlx import modules
+
+    blk = _kq_moe()
+    install_hyv3_router_fuse(_Shell(blk))
+    monkeypatch.setattr(modules, "_kq_fused_device_ok", lambda *m: True)
+
+    seen = {}
+
+    def fake_router(logits, top_k, norm, **kw):
+        seen["logits"] = tuple(logits.shape)
+        seen["top_k"] = top_k
+        seen["norm"] = norm
+        seen["kw"] = kw
+        t = logits.shape[0]
+        return (mx.zeros((t, top_k), mx.uint32),
+                mx.ones((t, top_k), mx.float32))
+
+    monkeypatch.setattr(_kq, "moe_router_topk", fake_router)
+
+    x = mx.random.normal((1, 1, 256)).astype(mx.bfloat16)
+    inds, sc = blk.router(x)
+    mx.eval(inds, sc)
+    assert inds.shape == (1, 1, 2) and sc.shape == (1, 1, 2)
+    assert seen["logits"] == (1, 4)  # [t, E]
+    assert seen["top_k"] == 2 and seen["norm"] is True
+    assert seen["kw"]["scoring"] == "sigmoid"
+    assert seen["kw"]["shared_gate"] is False
+    assert seen["kw"]["scale"] == 1.5
+    assert seen["kw"]["bias"].dtype == mx.float32
+
+    # top_k = 1 must not renorm (stock skips it: single score stays raw)
+    blk.router.top_k = 1
+    blk.router(x)
+    assert seen["norm"] is False and seen["top_k"] == 1
+
+
+@router_cap
+def test_fused_router_prefill_falls_back(monkeypatch):
+    blk = _kq_moe()
+    install_hyv3_router_fuse(_Shell(blk))
+    monkeypatch.setattr(
+        _kq, "moe_router_topk",
+        lambda *a, **k: pytest.fail("prefill must keep the stock epilogue"))
+
+    x = mx.random.normal((1, 64, 256)).astype(mx.bfloat16)
+    inds, sc = blk.router(x)
+    mx.eval(inds, sc)
+    assert inds.shape == (1, 64, 2) and sc.shape == (1, 64, 2)
+
+
+@router_cap
+def test_fused_router_matches_expert_select():
+    if mx.default_device() == mx.cpu:
+        pytest.skip("fused router kernel is Metal-only")
+    from gmlx.hy_v3_model import expert_select
+
+    mx.random.seed(11)
+    blk = _kq_moe(experts=16, top_k=4)
+    blk.router.expert_bias = mx.random.normal((16,)) * 0.1
+    install_hyv3_router_fuse(_Shell(blk))
+
+    x = mx.random.normal((2, 1, 256)).astype(mx.bfloat16)
+    inds, sc = blk.router(x)
+    ri, rs = expert_select(
+        blk.router.gate(x), blk.router.expert_bias, 4, 1.5, True)
+    mx.eval(inds, sc, ri, rs)
+
+    got = np.array(inds).reshape(2, 4)
+    want = np.array(ri).reshape(2, 4)
+    gsc = np.array(sc.astype(mx.float32)).reshape(2, 4)
+    wsc = np.array(rs.astype(mx.float32)).reshape(2, 4)
+    for t in range(2):
+        assert set(got[t]) == set(want[t])  # slot order may differ
+        gd = dict(zip(got[t].tolist(), gsc[t].tolist()))
+        wd = dict(zip(want[t].tolist(), wsc[t].tolist()))
+        for e in gd:
+            assert abs(gd[e] - wd[e]) < 1e-5

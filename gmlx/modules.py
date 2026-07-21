@@ -214,8 +214,12 @@ class _FusedMoeCaps:
             os.environ.get("GMLX_FUSED_MOE_ROUTER", "1") != "0"
             and hasattr(kq, "moe_router_topk")
         )
-        self.router_pes_ok = self.router_ok and "per_expert_scale" in (
+        router_doc = (
             getattr(getattr(kq, "moe_router_topk", None), "__doc__", "") or "")
+        self.router_pes_ok = self.router_ok and "per_expert_scale" in router_doc
+        # quoted: the pre-sigmoid docstring already says "sigmoid" for the
+        # shared-gate column
+        self.router_sigmoid_ok = self.router_ok and '"sigmoid"' in router_doc
         self.block_env_on = (
             os.environ.get("GMLX_FUSED_MOE_BLOCK", "1") != "0")
         self.glue_env_on = (
@@ -874,6 +878,88 @@ def install_hyv3_shexp_fold(model) -> int:
         if not _eligible_hyv3_shexp(m, caps):
             continue
         object.__setattr__(m.switch_mlp, "_kq_shexp_mod", m.shared_mlp)
+        n += 1
+    return n
+
+
+def _eligible_hyv3_router(m, caps):
+    """hy_v3 MoEGate: sigmoid scoring + selection bias + renorm + scale is
+    exactly kq.moe_router_topk(scoring="sigmoid")."""
+    if not caps.router_sigmoid_ok:
+        return False
+    if type(m).__name__ != "MoEGate":
+        return False
+    if "hy_v3" not in type(m).__module__:
+        return False
+    for attr in ("gate", "expert_bias", "top_k", "norm_topk_prob",
+                 "routed_scaling_factor"):
+        if not hasattr(m, attr):
+            return False
+    w = getattr(m.gate, "weight", None)
+    if w is None or w.ndim != 2:
+        return False
+    return w.shape[0] <= 1024 and int(m.top_k) <= 16
+
+
+def _make_fused_hyv3_router(base_cls, caps):
+    kq = caps.kq
+
+    class _FusedHyV3Router(base_cls):
+        """hy_v3 router epilogue in one dispatch
+        (kq.moe_router_topk(scoring="sigmoid")): selection ranked by
+        sigmoid(logits) + expert_bias, emitted scores unbiased,
+        renormalized with the 1e-20 guard, scaled by
+        routed_scaling_factor. Decode-shaped calls only; prefill keeps
+        the stock compiled epilogue."""
+
+        def __call__(self, x):
+            d = x.shape[-1]
+            t = x.size // d
+            if not (
+                _FUSED_MOE_ENABLED
+                and _FUSED_MOE_ROUTER_ENABLED
+                and t < 64
+                and not self.training
+                and _kq_fused_device_ok(self)
+            ):
+                return super().__call__(x)
+            b32 = getattr(self, "_kq_bias32", None)
+            if b32 is None:
+                # built on first use: at install time expert_bias is a
+                # load_weights placeholder
+                b32 = self.expert_bias.astype(mx.float32)
+                mx.eval(b32)
+                object.__setattr__(self, "_kq_bias32", b32)
+            k = int(self.top_k)
+            inds, sc = kq.moe_router_topk(
+                self.gate(x).reshape(t, -1),
+                k,
+                bool(self.norm_topk_prob) and k > 1,
+                shared_gate=False,
+                bias=b32,
+                scoring="sigmoid",
+                scale=float(self.routed_scaling_factor),
+            )
+            shp = x.shape[:-1]
+            return inds.reshape(*shp, k), sc.reshape(*shp, k)
+
+    _FusedHyV3Router.__name__ = "_FusedHyV3Router"
+    return _FusedHyV3Router
+
+
+def install_hyv3_router_fuse(model) -> int:
+    """Class-swap eligible hy_v3 MoEGates onto the fused sigmoid-router
+    epilogue. Disable with GMLX_FUSED_MOE_ROUTER=0. Returns the number of
+    routers swapped."""
+    caps = _FusedMoeCaps()
+    if not caps.enabled or not caps.has_base:
+        return 0
+    classes: dict = {}
+    n = 0
+    for _, m in model.named_modules():
+        if not _eligible_hyv3_router(m, caps):
+            continue
+        _swap_class(m, classes, _make_fused_hyv3_router, caps)
         n += 1
     return n
 
