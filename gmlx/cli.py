@@ -521,6 +521,11 @@ def resolve_speculative(args, gguf_path: str) -> tuple[bool, str]:
     # flags above (--mmproj/--adapter/--stream-cpu/...) force plain decoding.
     if _mtp_hard_incompatible(args):
         return False, ""
+    if getattr(args, "stream_experts", False):
+        # Streaming decode: auto-MTP stays off (measured wash at typical
+        # no-think acceptance, and verify widths add miss IO); explicit
+        # --speculative/--mtp above still opts in.
+        return False, ""
     if not _has_native_mtp_head(gguf_path):
         companion = _deepseek4_mtp_companion(gguf_path)
         if companion is None:
@@ -1737,10 +1742,13 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    if args.speculative and (args.stream_cpu or args.stream_experts):
-        which = "--stream-cpu" if args.stream_cpu else "--stream-experts"
+    if args.speculative and args.stream_cpu:
+        # --stream-experts composes with MTP (streaming placement after
+        # load_mtp_model; auto-MTP still defers under streaming, explicit
+        # --speculative opts in). CPU-stream verify stays unsupported.
         print(
-            f"error: {which} on a --speculative/MTP base is not supported yet.",
+            "error: --stream-cpu on a --speculative/MTP base is not "
+            "supported yet.",
             file=sys.stderr,
         )
         return 2

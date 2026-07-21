@@ -114,11 +114,12 @@ def test_run_codec_refusal_exits_1(gguf, monkeypatch, capsys):
     assert "TQ1_0" in str(exc)
 
 
-# exit 2 = flag conflicts refused before any load
+# exit 2 = flag conflicts refused before any load. --speculative
+# --stream-experts is NOT here anymore: streaming composes with MTP
+# (placement after load_mtp_model; see resolve_speculative).
 @pytest.mark.parametrize("extra,named", [
     (["--adapter", "/x.gguf", "--speculative"], "--speculative"),
     (["--speculative", "--stream-cpu"], "--stream-cpu"),
-    (["--speculative", "--stream-experts"], "--stream-experts"),
 ])
 def test_run_adapter_conflicts_exit_2(gguf, extra, named, capsys):
     assert cli.main([gguf, *extra]) == 2
