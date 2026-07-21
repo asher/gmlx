@@ -1158,7 +1158,9 @@ def _apply_placement(args, model) -> None:
     else:
         from .loader import install_expert_streaming
 
-        n, _ = install_expert_streaming(model, gguf_path=gguf_path, **feeders)
+        n, _ = install_expert_streaming(
+            model, gguf_path=gguf_path,
+            stats_verbose=bool(getattr(args, "verbose", False)), **feeders)
         if n == 0:
             print(
                 "[stream] warning: no MoE expert stacks found - "

@@ -388,8 +388,9 @@ per-layer overhead - which makes it the one that still pays when the
 arena hit rate is high and misses are rare.
 
 Which to reach for is a measurement, not a doctrine. Run the probe once,
-and read the decode feeder's exit line (arena hit rate) from a
-representative session. A concentrated router points to
+and read the decode feeder's exit stats (arena hit rate; printed by
+`run`/`chat` at `-v`, and always in server logs) from a representative
+session. A concentrated router points to
 `--moe-expert-mass` first, whatever the hit rate: it removes reads and
 compute together at minimal dropped mass. A flat router takes it off the
 table. A low hit rate - an arena small relative to the model - makes

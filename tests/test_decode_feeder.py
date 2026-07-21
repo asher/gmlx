@@ -1027,10 +1027,9 @@ def test_exit_close_hook_holds_only_weakref(monkeypatch, tmp_path):
     hooks[0]()  # hook on a collected feeder is a quiet no-op
 
 
-def test_close_stats_gated_on_session_verbosity(capsys):
-    """Aggregate arena hit rate always prints; the per-layer breakdown and
-    stall accounting follow the load session's verbosity captured at
-    construction."""
+def test_close_stats_gated_on_stats_verbose(capsys):
+    """All end-of-run stat lines follow _stats_verbose (the CLI's -v); the
+    wedge anomaly warning prints regardless."""
     import time as _time
 
     from gmlx.decode_feeder import DecodeFeeder
@@ -1044,6 +1043,7 @@ def test_close_stats_gated_on_session_verbosity(capsys):
         f._layer_lookups = {0: 5, 1: 5}
         f._t_start = _time.monotonic()
         f._t_demand = f._t_settle = 0.5
+        f._wedges = 1
         f._locked = {}
         f._fds = {}
         f.locked_bytes = 0
@@ -1051,13 +1051,16 @@ def test_close_stats_gated_on_session_verbosity(capsys):
 
     bare(False).close()
     out = capsys.readouterr().out
-    assert "arena hit rate" in out
+    assert "arena hit rate" not in out
     assert "per-layer hit rate" not in out
     assert "stalls" not in out
+    assert "wedged" in out
     bare(True).close()
     out = capsys.readouterr().out
+    assert "arena hit rate" in out
     assert "per-layer hit rate" in out
     assert "stalls" in out
+    assert "wedged" in out
 
 
 # Lossy miss-shed (--moe-miss-shed): residency-aware expert drop

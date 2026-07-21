@@ -228,12 +228,13 @@ class DecodeFeeder:
         offsets: dict[int, list[tuple[str, int, int, int, str]]],
         modules: dict[int, list],
         arena_bytes: int,
+        stats_verbose: bool | None = None,
     ):
         import mlx_kquant as kq
 
-        # Construction happens inside the load session; capture its verbosity
-        # for the end-of-run stat prints in close() (the session is gone then).
-        self._stats_verbose = loadlog.is_verbose()
+        # None = follow loadlog; the CLI passes -v (built after its session).
+        self._stats_verbose = (
+            loadlog.is_verbose() if stats_verbose is None else stats_verbose)
         # li -> kind -> (module, path, file_off, stride, shape)
         self._layers: dict[int, dict] = {}
         per_expert: dict[int, int] = {}  # li -> bytes per expert, all kinds
@@ -1150,6 +1151,9 @@ class DecodeFeeder:
         if getattr(self, "_closed", False):
             return
         self._closed = True
+        if not getattr(self, "_stats_verbose", True):
+            self._print_wedges()
+            return
         if getattr(self, "_lookups", 0):
             print(
                 f"[stream] decode feeder arena hit rate: "
@@ -1161,20 +1165,19 @@ class DecodeFeeder:
             # The cross-layer spread is what decides whether a
             # popularity-weighted per-layer budget split would beat the
             # even split: a flat spread says no.
-            if getattr(self, "_stats_verbose", False):
-                rates = {
-                    li: self._layer_hits[li] / n
-                    for li, n in self._layer_lookups.items() if n
-                }
-                if len(rates) > 1:
-                    vals = sorted(rates.values())
-                    cold = sorted(rates, key=rates.get)[:3]
-                    print(
-                        "[stream] decode feeder per-layer hit rate: "
-                        f"median {100 * vals[len(vals) // 2]:.1f}% / "
-                        f"max {100 * vals[-1]:.1f}%; coldest: "
-                        + ", ".join(
-                            f"L{li} {100 * rates[li]:.1f}%" for li in cold))
+            rates = {
+                li: self._layer_hits[li] / n
+                for li, n in self._layer_lookups.items() if n
+            }
+            if len(rates) > 1:
+                vals = sorted(rates.values())
+                cold = sorted(rates, key=rates.get)[:3]
+                print(
+                    "[stream] decode feeder per-layer hit rate: "
+                    f"median {100 * vals[len(vals) // 2]:.1f}% / "
+                    f"max {100 * vals[-1]:.1f}%; coldest: "
+                    + ", ".join(
+                        f"L{li} {100 * rates[li]:.1f}%" for li in cold))
             self._lookups = 0
         if getattr(self, "_la_submitted", 0):
             adopted = self._la_adopted + self._la_waited
@@ -1185,7 +1188,7 @@ class DecodeFeeder:
                 f"joined), {self._la_cancelled} cancelled unstarted, "
                 f"{self._la_wasted} discarded (failed or part-cancelled)"
             )
-        if getattr(self, "_calls", 0) and getattr(self, "_stats_verbose", False):
+        if getattr(self, "_calls", 0):
             wall = time.monotonic() - self._t_start
             print(
                 f"[stream] decode feeder stalls: demand reads "
@@ -1202,6 +1205,9 @@ class DecodeFeeder:
             print(
                 f"[stream] layer-shed: {self._layer_shed_n} token-layer "
                 "routed paths skipped (shared expert only)")
+        self._print_wedges()
+
+    def _print_wedges(self) -> None:
         wedges = getattr(self, "_wedges", 0)
         if wedges:
             print(
@@ -1253,7 +1259,7 @@ def _register_exit_close(feeder) -> None:
 
 
 def maybe_make_decode_feeder(
-    offsets, modules, arena_bytes: int
+    offsets, modules, arena_bytes: int, stats_verbose: bool | None = None
 ) -> DecodeFeeder | None:
     """A DecodeFeeder over the coverable layers, or None with a printed
     reason (opt-in feature: silence would read as 'enabled')."""
@@ -1273,7 +1279,7 @@ def maybe_make_decode_feeder(
         if arena_bytes < (1 << 30):
             raise RuntimeError(
                 f"arena budget too small ({arena_bytes / 1e9:.1f} GB)")
-        feeder = DecodeFeeder(offsets, modules, arena_bytes)
+        feeder = DecodeFeeder(offsets, modules, arena_bytes, stats_verbose)
         # CLI runs never tear the feeder down explicitly and __del__ is
         # not reliable at interpreter exit, so the hit-rate/prestage stats
         # lines would silently vanish; close() is idempotent, so the

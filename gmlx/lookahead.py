@@ -97,7 +97,7 @@ class RankGate:
         return k
 
     def report(self) -> None:
-        if not self._ema:
+        if not self._ema or not getattr(self, "_stats_verbose", True):
             return
         widths = [len(e) for e in self._ema.values()]
         w = max(set(widths), key=widths.count)
@@ -393,7 +393,8 @@ class LookaheadHook:
 
 
 def install_lookahead(model, layers, *, probe: bool = False,
-                      prefetch: bool = False) -> int:
+                      prefetch: bool = False,
+                      stats_verbose: bool | None = None) -> int:
     """Wire lookahead hooks onto every offloaded MoE module whose next
     offloaded MoE layer has a recognizable router. The last MoE layer (and
     any layer followed by an unsupported arch) still gets a hook when
@@ -420,6 +421,8 @@ def install_lookahead(model, layers, *, probe: bool = False,
     gate = (
         RankGate(env_float("GMLX_DECODE_LOOKAHEAD_MIN_P", 0.5))
         if prefetch else None)
+    if gate is not None and stats_verbose is not None:
+        gate._stats_verbose = stats_verbose
     n_pred = 0
     unsupported: set = set()
     for pos, li in enumerate(lis):

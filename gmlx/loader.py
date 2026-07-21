@@ -1338,6 +1338,7 @@ def install_expert_streaming(
     force_stream: bool = False,
     feeder_prefill: bool | None = None,
     feeder_decode: bool | None = None,
+    stats_verbose: bool | None = None,
 ):
     """Run routed-expert stacks (SwitchGLU) on the CPU stream.
 
@@ -1716,7 +1717,8 @@ def install_expert_streaming(
         from .decode_feeder import maybe_make_decode_feeder
 
         arena = _decode_arena_bytes(total_bytes, prefetcher.offsets, budget)
-        dfeeder = maybe_make_decode_feeder(prefetcher.offsets, moe_modules, arena)
+        dfeeder = maybe_make_decode_feeder(
+            prefetcher.offsets, moe_modules, arena, stats_verbose)
         if dfeeder is not None:
             n_cov = sum(dfeeder.covers(li) for li in moe_modules)
             for li, mods in moe_modules.items():
@@ -1744,7 +1746,8 @@ def install_expert_streaming(
         from .lookahead import install_lookahead
 
         n_la = install_lookahead(
-            model, layers, probe=la_probe, prefetch=la_prefetch
+            model, layers, probe=la_probe, prefetch=la_prefetch,
+            stats_verbose=stats_verbose,
         )
         if n_la and la_prefetch:
             print(
