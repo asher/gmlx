@@ -30,7 +30,7 @@ from .envflags import env_bool, env_choice, env_float, env_int
 from .attn_hd512 import install_hd512_sdpa
 from .prefill_decay import install_prefill_decay, note_untracked_weights
 from . import gpt_oss_prefill  # noqa: F401  (registers gpt_oss score profile)
-from .modules import install_fused_moe_glu
+from .modules import install_fused_moe_glu, install_hyv3_shexp_fold
 from .qkv_fuse import install_fused_qkv
 from .qwen35_verify_fold import install_qwen35_verify_fold
 from .rotating_cache_fix import install_rotating_cache_fix
@@ -1465,12 +1465,9 @@ def install_expert_streaming(
                             if ph is not None:
                                 ph["prestage"] += time.perf_counter() - t2
                         if slots is not None:
-                            # Arena call: the expert weights are wired GPU
-                            # arena views for this scope, so the fused kq
-                            # decode kernels are safe - lift the streaming
-                            # CPU pin, which _kq_fused_device_ok vetoes on.
-                            # Without the lift every streaming decode ran
-                            # the stock triple-gather chain.
+                            # arena call: weights are wired GPU views for
+                            # this scope, so lift the streaming CPU pin
+                            # and let the fused kq kernels run
                             self._kq_cpu_only = False
                             try:
                                 t3 = (time.perf_counter()
@@ -2216,6 +2213,9 @@ def _install_and_load(
     n_fused_moe = install_fused_moe_glu(model)
     if n_fused_moe:
         log(f"[install] fused mxfp4 MoE GLU decode on {n_fused_moe} layers")
+    n_shexp = install_hyv3_shexp_fold(model)
+    if n_shexp:
+        log(f"[install] hy3 shared-expert fold on {n_shexp} MoE layers")
     n_fused_qkv = install_fused_qkv(model)
     if n_fused_qkv:
         log(f"[install] fused QKV decode projection on {n_fused_qkv} layers")
@@ -2634,6 +2634,9 @@ def load_model(
     n_fused_moe = install_fused_moe_glu(model)
     if n_fused_moe:
         _log(f"[install] fused mxfp4 MoE GLU decode on {n_fused_moe} layers")
+    n_shexp = install_hyv3_shexp_fold(model)
+    if n_shexp:
+        _log(f"[install] hy3 shared-expert fold on {n_shexp} MoE layers")
     n_fused_qkv = install_fused_qkv(model)
     if n_fused_qkv:
         _log(f"[install] fused QKV decode projection on {n_fused_qkv} layers")
