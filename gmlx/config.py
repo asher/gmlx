@@ -11,7 +11,7 @@ Shape (see ``docs/server-config.md`` for the full reference)::
     server:    {host, port, api_key, no_auth, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, rerank, menubar, token_queue_timeout_s, prefill_step_size, cache_limit_gb, family_defaults, stochastic_mtp, assistants, assistant_allow_remote}
     profiles:  {<name>: {extends, sampling, load, cache, system}}
     rules:     [{match: <glob>, profile: <name>}]
-    models:    {<id>: {path, profile, family, profiles, mmproj, draft_gguf, adapter, stream, moe_expert_mass, speculative, overrides, pin, ttl_s}}
+    models:    {<id>: {path, profile, family, profiles, mmproj, draft_gguf, adapter, stream, moe_experts, moe_expert_mass, moe_miss_shed, moe_layer_shed, speculative, overrides, pin, ttl_s}}
     aliases:   {<name>: <id> | <id>@<profile>}    # friendly name / profile preset
     discover:  [{dir, recursive, pair_mmproj, speculative}]
     talk:      {model, voice, speed, system, language, max_tokens, mode, wake_word, wake_threshold, vad, input_device, output_device, chime, brain, push_to_talk_modifier}
@@ -111,7 +111,8 @@ _OVERRIDE_KEYS = frozenset({"sampling", "load", "cache", "system",
 _MODEL_KEYS = frozenset({"path", "profile", "family", "profiles", "mmproj",
                          "draft_gguf", "adapter", "stream",
                          "cpu_moe",  # deprecated alias for `stream:`
-                         "moe_expert_mass",
+                         "moe_experts", "moe_expert_mass",
+                         "moe_miss_shed", "moe_layer_shed",
                          "prefill_feeder", "decode_feeder", "speculative",
                          "overrides", "pin", "ttl_s"})
 _RULE_KEYS = frozenset({"match", "profile"})
@@ -210,11 +211,14 @@ class ModelCfg:
     # stay on GPU); "cpu" runs the whole model on the CPU device, all weights
     # streamed through the page cache. None = all-GPU.
     stream: Any = None
-    # Adaptive lossy MoE fan-out on the streamed expert stacks (the
-    # `--moe-expert-mass P` CLI lever): each token keeps only the smallest
-    # set of its routed experts covering share P of the router's gate mass.
-    # Requires stream; None = trained fan-out.
+    # Lossy MoE fan-out levers on the streamed expert stacks (the
+    # `--moe-experts K` / `--moe-expert-mass P` / `--moe-miss-shed P` /
+    # `--moe-layer-shed P` CLI levers). Require stream; None = trained
+    # fan-out / no shedding.
+    moe_experts: int | None = None
     moe_expert_mass: float | None = None
+    moe_miss_shed: float | None = None
+    moe_layer_shed: float | None = None
     # Streaming-model feeder overrides (tri-state: None = loader default -
     # prefill feeder on, decode feeder on under `stream: experts`).
     prefill_feeder: bool | None = None
@@ -449,9 +453,12 @@ class ResolvedModel:
     # + KV on GPU; "cpu" = whole model on CPU); load-affecting - it restructures
     # which device/stream the model runs on (and what gets wired).
     stream: Any = None
-    # Adaptive lossy MoE fan-out share for the streamed expert stacks;
-    # load-affecting - the filter is installed over the routers at load.
+    # Lossy MoE fan-out levers for the streamed expert stacks; load-affecting -
+    # the filters/hooks are installed over the routers and wrappers at load.
+    moe_experts: int | None = None
     moe_expert_mass: float | None = None
+    moe_miss_shed: float | None = None
+    moe_layer_shed: float | None = None
     # Feeder overrides for streaming models (None = loader default); load-
     # affecting - they decide the ring slots / wired arena built at load.
     prefill_feeder: bool | None = None
@@ -476,7 +483,10 @@ class ResolvedModel:
             self.chat_template,
             self.adapter,
             str(self.stream),
+            str(self.moe_experts),
             str(self.moe_expert_mass),
+            str(self.moe_miss_shed),
+            str(self.moe_layer_shed),
             str(self.prefill_feeder),
             str(self.decode_feeder),
             tuple(sorted((k, str(v)) for k, v in self.load.items())),
@@ -793,7 +803,10 @@ def resolve_model(
         draft_gguf=resolve_path(model.draft_gguf, cfg.model_dirs),
         adapter=resolve_path(model.adapter, cfg.model_dirs),
         stream=model.stream or None,
+        moe_experts=model.moe_experts,
         moe_expert_mass=model.moe_expert_mass,
+        moe_miss_shed=model.moe_miss_shed,
+        moe_layer_shed=model.moe_layer_shed,
         prefill_feeder=model.prefill_feeder,
         decode_feeder=model.decode_feeder,
         pin=bool(model.pin),
@@ -975,14 +988,35 @@ def _normalize_optional_bool(value, key: str, where: str = "model"):
     return None
 
 
-def _normalize_moe_expert_mass(value, where: str = "model"):
-    """Validate a ``moe_expert_mass`` value: a gate-mass share in (0, 1].
-    ``None`` passes; a non-numeric or out-of-range value raises - a lossy
-    knob must fail fast, not be silently reinterpreted."""
-    p = _coerce_num("moe_expert_mass", value, float, where=where)
+def _normalize_moe_expert_mass(value, where: str = "model",
+                               key: str = "moe_expert_mass"):
+    """Validate a gate-mass share in (0, 1] (``moe_expert_mass`` /
+    ``moe_miss_shed``). ``None`` passes; a non-numeric or out-of-range value
+    raises - a lossy knob must fail fast, not be silently reinterpreted."""
+    p = _coerce_num(key, value, float, where=where)
     if p is not None and not 0.0 < p <= 1.0:
         raise ConfigError(
-            f"{where}.moe_expert_mass: expected a mass share in (0, 1], "
+            f"{where}.{key}: expected a mass share in (0, 1], "
+            f"got {value!r}")
+    return p
+
+
+def _normalize_moe_experts(value, where: str = "model"):
+    """Validate a ``moe_experts`` per-token expert cap: a positive int."""
+    k = _coerce_num("moe_experts", value, int, where=where)
+    if k is not None and k < 1:
+        raise ConfigError(
+            f"{where}.moe_experts: expected a positive expert count, "
+            f"got {value!r}")
+    return k
+
+
+def _normalize_moe_layer_shed(value, where: str = "model"):
+    """Validate a ``moe_layer_shed`` skip probability in (0, 1)."""
+    p = _coerce_num("moe_layer_shed", value, float, where=where)
+    if p is not None and not 0.0 < p < 1.0:
+        raise ConfigError(
+            f"{where}.moe_layer_shed: expected a probability in (0, 1), "
             f"got {value!r}")
     return p
 
@@ -1198,8 +1232,15 @@ def _parse_model(model_id: str, raw: dict) -> ModelCfg:
         adapter=raw.get("adapter"),
         stream=_normalize_stream(raw.get("stream"), f"model {model_id!r}",
                                  legacy=raw.get("cpu_moe")),
+        moe_experts=_normalize_moe_experts(
+            raw.get("moe_experts"), f"model {model_id!r}"),
         moe_expert_mass=_normalize_moe_expert_mass(
             raw.get("moe_expert_mass"), f"model {model_id!r}"),
+        moe_miss_shed=_normalize_moe_expert_mass(
+            raw.get("moe_miss_shed"), f"model {model_id!r}",
+            key="moe_miss_shed"),
+        moe_layer_shed=_normalize_moe_layer_shed(
+            raw.get("moe_layer_shed"), f"model {model_id!r}"),
         prefill_feeder=_normalize_optional_bool(
             raw.get("prefill_feeder"), "prefill_feeder", f"model {model_id!r}"),
         decode_feeder=_normalize_optional_bool(

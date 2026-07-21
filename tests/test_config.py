@@ -230,6 +230,44 @@ def test_moe_expert_mass_bad_value_fails_fast():
             build_config(doc)
 
 
+def test_moe_lossy_levers_parsed_and_resolved():
+    """The other lossy levers ride the same per-model config path as
+    moe_expert_mass: parsed, validated, resolved, and load-affecting."""
+    doc = _doc()
+    doc["models"]["m-moe"] = {"path": "/abs/big.gguf", "stream": "experts",
+                              "moe_experts": 6, "moe_miss_shed": 0.95,
+                              "moe_layer_shed": "0.1"}
+    cfg = build_config(doc)
+    rm = resolve_model("m-moe", cfg)
+    assert rm.moe_experts == 6
+    assert rm.moe_miss_shed == 0.95
+    assert rm.moe_layer_shed == 0.1
+    bare = resolve_model("m-named", cfg)
+    assert (bare.moe_experts is None and bare.moe_miss_shed is None
+            and bare.moe_layer_shed is None)
+    # Each lever is load-affecting: same GGUF, different value => distinct
+    # resident entries.
+    common = dict(path="/p", sampling={}, load={}, cache={}, system=None,
+                  speculative=False, mmproj=None, draft_gguf=None, pin=False,
+                  ttl_s=None, stream="experts")
+    base_sig = cfgmod.ResolvedModel(id="x", **common).load_signature()
+    for key in ("moe_experts", "moe_expert_mass", "moe_miss_shed",
+                "moe_layer_shed"):
+        sig = cfgmod.ResolvedModel(
+            id="x", **{key: 2 if key == "moe_experts" else 0.5},
+            **common).load_signature()
+        assert sig != base_sig, key
+
+    for key, bad in (("moe_experts", 0), ("moe_experts", "many"),
+                     ("moe_miss_shed", 1.5), ("moe_miss_shed", 0),
+                     ("moe_layer_shed", 1.0), ("moe_layer_shed", 0)):
+        doc = _doc()
+        doc["models"]["m-moe"] = {"path": "/abs/big.gguf",
+                                  "stream": "experts", key: bad}
+        with pytest.raises(ConfigError, match=key):
+            build_config(doc)
+
+
 def test_stream_legacy_cpu_moe_alias_warns_and_maps():
     """`cpu_moe:` still works (old semantics: hybrid -> experts, true/full ->
     cpu) but warns about the rename; an explicit `stream:` wins silently."""

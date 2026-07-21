@@ -403,6 +403,73 @@ def install_moe_expert_mass(model, p: float) -> int:
     return hooked
 
 
+def _streamed_modules(model):
+    """Yield every module under the model's layers once (same roots as
+    :func:`_offloaded_moe_owners`; the wrapped expert containers live there)."""
+    layers = getattr(model, "layers", None)
+    if layers is None:
+        layers = model.model.layers
+    seen: set = set()
+    for layer in layers:
+        for m in layer.modules():
+            if id(m) not in seen:
+                seen.add(id(m))
+                yield m
+
+
+def install_moe_miss_shed(model, p: float) -> int:
+    """Shed routed experts that would demand-miss the decode arena, up to
+    ``1 - p`` of each token's score mass (lowest scores first; resident
+    and prestage-inflight experts never shed). Lossy; acts only on decode
+    calls that carry routing scores (the fused scores path). Returns the
+    number of layers hooked; raises on p outside (0, 1]."""
+    if not 0.0 < p <= 1.0:
+        raise ValueError(f"MoE miss-shed share must be in (0, 1], got {p}")
+    n = 0
+    for m in _streamed_modules(model):
+        if getattr(m, "_kq_decode_feeder", None) is not None:
+            object.__setattr__(m, "_kq_miss_shed", float(p))
+            n += 1
+    if n:
+        print(
+            f"[stream] MoE miss-shed {p:g}: demand-miss experts shed up to "
+            f"{100 * (1 - p):g}% of each token's gate mass on {n} offloaded "
+            "MoE layers (lossy - outputs differ from the trained router)"
+        )
+    else:
+        print(
+            "[stream] MoE miss-shed found no decode-feeder MoE layer - "
+            "no effect"
+        )
+    return n
+
+
+def install_moe_layer_shed(model, p: float) -> int:
+    """Skip each streamed MoE layer's routed path with probability ``p``
+    per decode token; the layer's shared expert still runs. Lossy.
+    Returns the number of layers hooked; raises on p outside (0, 1)."""
+    if not 0.0 < p < 1.0:
+        raise ValueError(
+            f"MoE layer-shed probability must be in (0, 1), got {p}")
+    n = 0
+    for m in _streamed_modules(model):
+        if hasattr(m, "_kq_li") and hasattr(m, "_kq_cpu_only"):
+            object.__setattr__(m, "_kq_layer_shed", float(p))
+            n += 1
+    if n:
+        print(
+            f"[stream] MoE layer-shed {p:g}: each of {n} streamed MoE "
+            "layers skips its routed experts with that probability per "
+            "token (lossy - shared expert only on shed layers)"
+        )
+    else:
+        print(
+            "[stream] MoE layer-shed found no streamed MoE layer - "
+            "no effect"
+        )
+    return n
+
+
 def install_moe_expert_probe(model, grid=None) -> int:
     """Record lossless fan-out counterfactuals on every offloaded MoE block
     and print the table at exit. Returns the number of blocks hooked."""

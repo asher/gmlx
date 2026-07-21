@@ -329,7 +329,7 @@ When a larger-than-RAM model is released, its page cache is also released, via
 `msync(MS_INVALIDATE)` over the shards - at process exit, or at unload on a
 running server (`GMLX_RELEASE_PAGECACHE=0` disables).
 
-Two lossy speed levers reduce the expert bytes consulted per token on over-RAM
+Lossy speed levers reduce the expert bytes consulted per token on over-RAM
 models. `--moe-experts K` caps the router at a fixed K experts per token. `--moe-expert-mass P` is the adaptive version and usually the
 better trade: each token keeps only the smallest set of its routed experts
 covering share P of the router's gate mass, so the dropped mass is bounded by
@@ -343,13 +343,25 @@ is the one to size P against. Start at 0.95 and step down while outputs stay
 acceptable; with the decode feeder on, its exit line reports the achieved
 average unique experts per token-layer. The two levers compose
 (`--moe-experts 6 --moe-expert-mass 0.9` caps at 6, then drops within the 6).
-These are decode-side levers: a large prefill chunk routes to nearly every
-expert either way. In server configs the placement is the per-model
-`stream: experts | cpu` key and the feeder opt-outs are
-`prefill_feeder: false` / `decode_feeder: false`; the adaptive lever is the
-per-model `moe_expert_mass: P` key (or `serve --moe-expert-mass` for a single
-positional model) - the fixed cap and the probe stay CLI-only, so size P with
-a `gmlx run --moe-expert-probe` pass before pinning it in a config.
+
+Two further lossy levers act at decode staging rather than at the router.
+`--moe-miss-shed P` drops routed experts that would demand-miss the decode
+arena - lowest scores first, keeping at least share P of the token's gate
+mass - so its quality budget is spent exactly where the disk stalls are: an
+arena-resident or prestage-inflight expert is never dropped, and a shed
+expert earns no popularity credit, so the arena's long tail stays cold. It
+acts on blocks that hand the router's scores to the expert call (the fused
+scores path). `--moe-layer-shed P` skips a streamed MoE layer's routed
+experts entirely with probability P per token - the layer's shared expert
+still runs - the blunt end of the scale. All of these are decode-side
+levers: a large prefill chunk routes to nearly every expert either way. In
+server configs the placement is the per-model `stream: experts | cpu` key
+and the feeder opt-outs are `prefill_feeder: false` / `decode_feeder:
+false`; the lossy levers are the per-model `moe_experts: K` /
+`moe_expert_mass: P` / `moe_miss_shed: P` / `moe_layer_shed: P` keys (or
+the matching `serve` flags for a single positional model) - the probe stays
+CLI-only, so size P with a `gmlx run --moe-expert-probe` pass before
+pinning it in a config.
 
 Models with MXFP4/NVFP4 expert tensors (gpt-oss, DeepSeek-V4-Flash Q4_K_XL
 quants) participate in all of the above on equal terms. By default these

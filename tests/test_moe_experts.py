@@ -422,3 +422,53 @@ def test_hy_v3_router_attr_is_hooked(monkeypatch):
 
     install_moe_experts_override(model, 1)
     assert block.router.top_k == 1  # live attr, not the dead block-level one
+
+
+# miss-shed / layer-shed installers (--moe-miss-shed / --moe-layer-shed)
+def test_miss_shed_install_targets_decode_feeder_layers(monkeypatch, capsys):
+    from gmlx.moe_experts import install_moe_miss_shed
+
+    block = _Block(_kquant_glu(), _TupleGate())
+    model = _shell(block)
+    monkeypatch.setattr(
+        mx, "device_info", lambda: {"max_recommended_working_set_size": 1024}
+    )
+    install_expert_streaming(model)
+
+    for bad in (0.0, 1.5):
+        with pytest.raises(ValueError):
+            install_moe_miss_shed(model, bad)
+
+    # no decode feeder attached => announced no-effect
+    assert install_moe_miss_shed(model, 0.9) == 0
+    assert "no effect" in capsys.readouterr().out
+
+    object.__setattr__(block.switch_mlp, "_kq_decode_feeder", object())
+    assert install_moe_miss_shed(model, 0.9) == 1
+    assert block.switch_mlp._kq_miss_shed == 0.9
+    assert not hasattr(block.gate, "_kq_miss_shed")
+    assert "miss-shed 0.9" in capsys.readouterr().out
+
+
+def test_layer_shed_install_targets_streamed_glus(monkeypatch, capsys):
+    from gmlx.moe_experts import install_moe_layer_shed
+
+    block = _Block(_kquant_glu(), _TupleGate())
+    model = _shell(block)
+
+    for bad in (0.0, 1.0):
+        with pytest.raises(ValueError):
+            install_moe_layer_shed(model, bad)
+
+    assert install_moe_layer_shed(model, 0.1) == 0  # nothing streamed yet
+    assert "no effect" in capsys.readouterr().out
+
+    monkeypatch.setattr(
+        mx, "device_info", lambda: {"max_recommended_working_set_size": 1024}
+    )
+    install_expert_streaming(model)
+    assert install_moe_layer_shed(model, 0.1) == 1
+    assert block.switch_mlp._kq_layer_shed == 0.1
+    # routers/gates never shed: the hook lives on the wrapped container only
+    assert not hasattr(block.gate, "_kq_layer_shed")
+    assert "layer-shed 0.1" in capsys.readouterr().out

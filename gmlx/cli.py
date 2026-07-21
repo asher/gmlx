@@ -89,6 +89,26 @@ def add_moe_expert_args(ap: argparse.ArgumentParser) -> None:
         "fan-out while recording how many experts each token needed at "
         "candidate P values; prints decode and prefill tables at exit.",
     )
+    grp.add_argument(
+        "--moe-miss-shed",
+        type=mass_share,
+        default=None,
+        metavar="P",
+        help="Lossy: at decode, drop routed experts that would demand-miss "
+        "the expert arena, lowest scores first, keeping at least share P "
+        "(0 < P <= 1) of each token's gate mass. Targets IO stalls "
+        "directly; resident experts are never dropped. Composes with "
+        "--moe-expert-mass.",
+    )
+    grp.add_argument(
+        "--moe-layer-shed",
+        type=float,
+        default=None,
+        metavar="P",
+        help="Lossy: at decode, skip each streamed MoE layer's routed "
+        "experts with probability P (0 < P < 1) per token; the shared "
+        "expert still runs on shed layers.",
+    )
 
 
 def add_speculative_args(ap: argparse.ArgumentParser) -> None:
@@ -477,6 +497,8 @@ def _mtp_hard_incompatible(args) -> str | None:
         ("--moe-experts", getattr(args, "moe_experts", None) is not None),
         ("--moe-expert-mass", getattr(args, "moe_expert_mass", None) is not None),
         ("--moe-expert-probe", getattr(args, "moe_expert_probe", False)),
+        ("--moe-miss-shed", getattr(args, "moe_miss_shed", None) is not None),
+        ("--moe-layer-shed", getattr(args, "moe_layer_shed", None) is not None),
     ):
         if on:
             return name
@@ -1101,6 +1123,14 @@ def _apply_placement(args, model) -> None:
                     getattr(args, "moe_expert_mass", None) is not None,
                 ),
                 ("--moe-expert-probe", getattr(args, "moe_expert_probe", False)),
+                (
+                    "--moe-miss-shed",
+                    getattr(args, "moe_miss_shed", None) is not None,
+                ),
+                (
+                    "--moe-layer-shed",
+                    getattr(args, "moe_layer_shed", None) is not None,
+                ),
             )
             if on
         ]
@@ -1148,6 +1178,14 @@ def _apply_placement(args, model) -> None:
         from .moe_experts import install_moe_expert_probe
 
         install_moe_expert_probe(model)
+    if getattr(args, "moe_miss_shed", None) is not None:
+        from .moe_experts import install_moe_miss_shed
+
+        install_moe_miss_shed(model, args.moe_miss_shed)
+    if getattr(args, "moe_layer_shed", None) is not None:
+        from .moe_experts import install_moe_layer_shed
+
+        install_moe_layer_shed(model, args.moe_layer_shed)
 
 
 def _run_generate(args) -> int:
@@ -1609,6 +1647,13 @@ def _apply_resolved_to_args(args, rm, explicit: set) -> list[str]:
             and not getattr(args, "moe_expert_probe", False)):
         args.moe_expert_mass = rm.moe_expert_mass
         applied.append("moe-expert-mass")
+    for dest, label in (("moe_experts", "moe-experts"),
+                        ("moe_miss_shed", "moe-miss-shed"),
+                        ("moe_layer_shed", "moe-layer-shed")):
+        if (getattr(rm, dest, None) is not None and dest not in explicit
+                and hasattr(args, dest)):
+            setattr(args, dest, getattr(rm, dest))
+            applied.append(label)
     return applied
 
 

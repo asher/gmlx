@@ -15,6 +15,7 @@ arch-generic.
 from __future__ import annotations
 
 import os
+import random
 import re
 import time
 
@@ -1418,6 +1419,24 @@ def install_expert_streaming(
                             ph, getattr(self, "_kq_li", None), n_tokens)
                         if n_tokens != 1:
                             ph = None
+                    lsp = getattr(self, "_kq_layer_shed", None)
+                    if lsp is not None and cpu_only and n_tokens == 1:
+                        rng = getattr(self, "_kq_shed_rng", None)
+                        if rng is None:
+                            # per-layer seed: reproducible shed pattern
+                            rng = random.Random(
+                                0x5EED ^ (getattr(self, "_kq_li", 0) or 0))
+                            object.__setattr__(self, "_kq_shed_rng", rng)
+                        if rng.random() < lsp:
+                            # Skip the routed path entirely (gather, stage
+                            # and this layer's eval fence). The unmixed
+                            # zeros return makes the block mix nothing and
+                            # still add its shared expert.
+                            if dfr is not None:
+                                dfr._layer_shed_n += 1
+                            return mx.zeros(
+                                (*x.shape[:-1], indices.shape[-1],
+                                 x.shape[-1]), dtype=x.dtype)
                     if la is not None and cpu_only and small:
                         # Lookahead: run the NEXT MoE layer's router on this
                         # layer's input and evaluate it together with the
@@ -1452,7 +1471,24 @@ def install_expert_streaming(
                             t1 = time.perf_counter()
                             ph["ev"] += t1 - t0
                             wait0 = getattr(dfr, "_t_demand", 0.0)
-                        slots = dfr.stage(self._kq_li, np.array(indices))
+                        ids = np.array(indices)
+                        ms = getattr(self, "_kq_miss_shed", None)
+                        if ms is not None and args and n_tokens == 1:
+                            sc = np.asarray(
+                                args[0].astype(mx.float32)).reshape(-1)
+                            keep = dfr.shed_misses(
+                                self._kq_li, ids.reshape(-1), sc, ms)
+                            if keep is not None:
+                                kept = ids.reshape(-1)[keep]
+                                shp = ids.shape[:-1] + (kept.size,)
+                                ids = np.ascontiguousarray(kept.reshape(shp))
+                                indices = mx.array(ids)
+                                scn = sc[keep]
+                                # survivors keep the token's full mass
+                                scn = scn * (sc.sum() / max(scn.sum(), 1e-20))
+                                args = (mx.array(scn.reshape(shp)).astype(
+                                    args[0].dtype),) + args[1:]
+                        slots = dfr.stage(self._kq_li, ids)
                         if ph is not None:
                             t2 = time.perf_counter()
                             w = getattr(dfr, "_t_demand", 0.0) - wait0
@@ -1591,11 +1627,11 @@ def install_expert_streaming(
             m.__class__ = _wrapped_class(m.__class__)
             if streaming:
                 m._kq_cpu_only = True
+                object.__setattr__(m, "_kq_li", li)
                 if gpu_ok:
                     moe_modules.setdefault(li, []).append(m)
                 if prefetcher is not None:
                     object.__setattr__(m, "_kq_prefetcher", prefetcher)
-                    object.__setattr__(m, "_kq_li", li)
             elif gpu_ok:
                 # All-GPU auto-policy: in-RAM, the residency sweep wires the
                 # whole model regardless of where expert calls run, so the

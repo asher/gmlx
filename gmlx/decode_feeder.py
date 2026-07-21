@@ -385,6 +385,12 @@ class DecodeFeeder:
         self._t_settle = 0.0
         self._t_start = time.monotonic()
 
+        # Lossy-lever accounting (shed_misses + the wrapper's layer shed).
+        self._shed_n = 0
+        self._shed_mass = 0.0
+        self._shed_tokens = 0
+        self._layer_shed_n = 0
+
         # GMLX_DECODE_FEEDER_VERIFY=1: sample-compare arena slots against
         # their file bytes at every publish and every routed use, and
         # re-check the previous call's routed slots on the next call (a
@@ -676,6 +682,44 @@ class DecodeFeeder:
                 for _ in range(n):
                     self._la_bounce.put(kq.arena_alloc([self._bounce_bytes]))
         return self._la_pool
+
+    def shed_misses(self, li: int, ids: np.ndarray, scores: np.ndarray,
+                    keep_mass: float) -> np.ndarray | None:
+        """Lossy: bool keep-mask over ``ids`` dropping routed experts that
+        are neither arena-resident nor prestage-inflight, lowest score
+        first, capped at ``1 - keep_mass`` of the token's score mass.
+        Returns None when nothing sheds. A shed expert is never staged, so
+        it also earns no popularity credit (self-reinforcing by design:
+        the arena's long tail stays cold)."""
+        slot_of = self._slot_of.get(li)
+        if slot_of is None:
+            return None
+        miss = slot_of[ids] < 0
+        pend = self._pending.get(li)
+        if pend and miss.any():
+            miss &= np.array([e not in pend for e in ids])
+        if not miss.any():
+            return None
+        total = float(scores.sum())
+        budget = total * max(0.0, 1.0 - keep_mass)
+        keep = np.ones(ids.size, dtype=bool)
+        shed_mass = 0.0
+        shed_n = 0
+        for j in np.argsort(scores, kind="stable"):
+            if not miss[j] or keep.sum() <= 1:
+                continue
+            s = float(scores[j])
+            if shed_mass + s > budget:
+                break
+            keep[j] = False
+            shed_mass += s
+            shed_n += 1
+        if not shed_n:
+            return None
+        self._shed_n += shed_n
+        self._shed_mass += shed_mass / max(total, 1e-20)
+        self._shed_tokens += 1
+        return keep
 
     def prestage(self, li: int, pred_ids: np.ndarray) -> None:
         """Asynchronously pre-read predicted experts into layer ``li``'s
@@ -1148,6 +1192,16 @@ class DecodeFeeder:
                 f"{self._t_demand:.1f}s, prestage settle "
                 f"{self._t_settle:.1f}s, over {wall:.0f}s wall"
             )
+        if getattr(self, "_shed_tokens", 0):
+            print(
+                f"[stream] miss-shed: {self._shed_n} experts shed over "
+                f"{self._shed_tokens} token-layers (avg "
+                f"{100 * self._shed_mass / self._shed_tokens:.1f}% of "
+                "routed mass where shed)")
+        if getattr(self, "_layer_shed_n", 0):
+            print(
+                f"[stream] layer-shed: {self._layer_shed_n} token-layer "
+                "routed paths skipped (shared expert only)")
         wedges = getattr(self, "_wedges", 0)
         if wedges:
             print(
