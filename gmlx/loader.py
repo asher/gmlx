@@ -1307,6 +1307,17 @@ def _phase_dump():
         + f" | resid {tot - sum(ms.values()):.1f}",
         flush=True,
     )
+    try:
+        from .lookahead import _LA_PHASE as lap
+    except Exception:
+        lap = None
+    if lap is not None:
+        b, s = 1e3 * lap["build"] / n, 1e3 * lap["sync"] / n
+        print(
+            f"[phase] la split: build {b:.1f} | sync {s:.1f} | "
+            f"post {ms['la'] - b - s:.1f}",
+            flush=True,
+        )
 
 
 if _PHASE is not None:

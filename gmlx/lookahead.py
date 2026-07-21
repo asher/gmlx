@@ -26,13 +26,25 @@ worth building for a given model before any bytes move.
 from __future__ import annotations
 
 import atexit
+import time
 
 import mlx.core as mx
 import numpy as np
 
-from .envflags import env_choice, env_float
+from .envflags import env_bool, env_choice, env_float
 
 _VARIANTS = ("ratio", "raw")
+
+# Sub-split of the loader's per-token ``la`` phase bucket
+# (GMLX_DECODE_PHASE_STATS=1): ``build`` = replica prediction graph
+# construction, ``sync`` = the shared ``mx.eval`` (the per-layer GPU
+# segment wall). The numpy/gate tail is derived at dump time as
+# la - build - sync. Read by loader._phase_dump.
+_LA_PHASE = (
+    {"build": 0.0, "sync": 0.0}
+    if env_bool("GMLX_DECODE_PHASE_STATS", False)
+    else None
+)
 
 
 class RankGate:
@@ -321,12 +333,20 @@ class LookaheadHook:
         rank gate's reliable prefix - else None."""
         pred = self.predictor
         lazy: dict = {}
+        ph = _LA_PHASE
+        t0 = time.perf_counter() if ph is not None else 0.0
         if pred is not None and not pred.dead:
             probing = self.probe is not None
             try:
                 for variant in pred.variants(probing):
                     lazy[variant] = pred.predict(x, variant)
-                mx.eval(indices, *lazy.values())
+                if ph is not None:
+                    t1 = time.perf_counter()
+                    ph["build"] += t1 - t0
+                    mx.eval(indices, *lazy.values())
+                    ph["sync"] += time.perf_counter() - t1
+                else:
+                    mx.eval(indices, *lazy.values())
             except Exception as exc:  # unsupported gate signature, bad dims
                 pred.dead = True
                 lazy = {}
@@ -335,6 +355,11 @@ class LookaheadHook:
                     f"disabled: {type(exc).__name__}: {exc}"
                 )
                 mx.eval(indices)
+        elif ph is not None:
+            t1 = time.perf_counter()
+            ph["build"] += t1 - t0
+            mx.eval(indices)
+            ph["sync"] += time.perf_counter() - t1
         else:
             mx.eval(indices)
         preds_np = {v: np.array(a) for v, a in lazy.items()}

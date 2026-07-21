@@ -193,6 +193,14 @@ def test_resolve_hard_flag_defers_silently(native_head, gguf):
     assert not on and note == ""        # no note: respecting an incompatible request
 
 
+def test_resolve_auto_on_with_stream_experts(native_head, gguf):
+    # --stream-experts composes with MTP (run/bench apply streaming placement
+    # after load_mtp_model); --stream-cpu still defers to plain decoding.
+    on, note = cli.resolve_speculative(_args([gguf, "--stream-experts"]), gguf)
+    assert on and "native MTP head detected" in note
+    assert cli.resolve_speculative(_args([gguf, "--stream-cpu"]), gguf)[0] is False
+
+
 def test_resolve_explicit_mtp_forces_on_despite_flag(native_head, gguf):
     on, note = cli.resolve_speculative(
         _args([gguf, "--mtp", "--repetition-penalty", "1.3"]), gguf)

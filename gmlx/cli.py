@@ -463,11 +463,16 @@ def mtp_dropped_chat_flags(args) -> list[str]:
 
 def _mtp_hard_incompatible(args) -> str | None:
     """A flag that can't run on the text-only MTP path at all (not merely dropped):
-    auto defers, and an explicit --speculative plus one of these errors upstream."""
+    auto defers, and an explicit --speculative plus one of these errors upstream.
+
+    ``--stream-experts`` is NOT here: streaming composes with MTP (the
+    decode-feeder arena serves any call <= its token cap, which covers the
+    verify widths, and the drafter block stays resident) - the run/bench
+    entry points apply placement after ``load_mtp_model``. ``--stream-cpu``
+    stays blocked: the verify forward on the CPU stream is untested."""
     for name, on in (
         ("--mmproj", getattr(args, "mmproj", None) is not None),
         ("--adapter", getattr(args, "adapter", None) is not None),
-        ("--stream-experts", getattr(args, "stream_experts", False)),
         ("--stream-cpu", getattr(args, "stream_cpu", False)),
         ("--moe-experts", getattr(args, "moe_experts", None) is not None),
         ("--moe-expert-mass", getattr(args, "moe_expert_mass", None) is not None),
@@ -497,9 +502,10 @@ def resolve_speculative(args, gguf_path: str) -> tuple[bool, str]:
 
     Precedence: --no-speculative/--no-mtp (off) > explicit --speculative/--mtp or
     --draft-gguf (on) > auto. Auto enables MTP iff the GGUF has a native head and no
-    hard-incompatible flag (--mmproj/--adapter/--stream-*) is set; sampler flags the MTP
-    walk can't honor are dropped with a warning at generation (--no-mtp honors them
-    via plain decoding), not deferred. The note is empty when the user was explicit."""
+    hard-incompatible flag (--mmproj/--adapter/--stream-cpu/--moe-*) is set; sampler
+    flags the MTP walk can't honor are dropped with a warning at generation (--no-mtp
+    honors them via plain decoding), not deferred. The note is empty when the user
+    was explicit."""
     if getattr(args, "no_speculative", False):
         return False, ""
     spec = getattr(args, "speculative", None)
@@ -512,7 +518,7 @@ def resolve_speculative(args, gguf_path: str) -> tuple[bool, str]:
     # Flags the verify walk can't honor are dropped with a warning at generation
     # (set --no-mtp to honor them via plain decoding) -- not deferred, so a
     # habitual penalty never silently disables MTP. Only the hard-incompatible
-    # flags above (--mmproj/--adapter/--stream-*/...) force plain decoding.
+    # flags above (--mmproj/--adapter/--stream-cpu/...) force plain decoding.
     if _mtp_hard_incompatible(args):
         return False, ""
     if not _has_native_mtp_head(gguf_path):
@@ -999,7 +1005,7 @@ def _run_bench_depths(args) -> int:
                 zero_copy=not args.no_zero_copy,
                 verbose=args.verbose,
             )
-        _apply_placement(args, model)
+    _apply_placement(args, getattr(model, "language_model", model))
     print_family_note(args)
 
     # build a chat-prompt source when --bench-chat-dataset is given
@@ -1173,6 +1179,10 @@ def _run_generate(args) -> int:
                 zero_copy=not args.no_zero_copy,
                 verbose=args.verbose,
             )
+        # Streaming placement applies to the target trunk only (the drafter
+        # block is small and stays resident); the verify calls ride the
+        # decode-feeder arena like any small chunk.
+        _apply_placement(args, getattr(model, "language_model", model))
         print_family_note(args)
         print(
             f"[generate] MTP speculative: max_tokens={max_tokens_label(args)} "
