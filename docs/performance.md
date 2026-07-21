@@ -391,6 +391,20 @@ battery, `moe_miss_shed` alone stayed clean down to 0.75 and
 `moe_expert_mass` down to 0.70. If a workload leans on chained arithmetic,
 put that in the test set before sizing any of these.
 
+Which lever, when: on a `stream: experts` model start with
+`moe_layer_shed: 0.10`, and add `moe_miss_shed: 0.90` whenever the decode
+feeder is on - miss-shed only ever spends quality where a disk stall would
+have happened, which is why the pair stacks cleanly. Do not add
+`moe_expert_mass` on top of that pair: measured on the same setup it
+contributed no further speed (its drops fall mostly on arena-resident
+experts, which are already cheap - the expensive experts are the misses,
+and miss-shed handles exactly those) while still spending quality budget.
+Reach for `moe_expert_mass` (sized with the lossless
+`--moe-expert-probe`) where miss-shed cannot engage: `stream: cpu`
+placements, which have no decode arena, and model families whose MoE
+blocks do not hand router scores to the expert call. A third lever on top
+of a working pair mostly adds quality risk, not speed.
+
 Models with MXFP4/NVFP4 expert tensors (gpt-oss, DeepSeek-V4-Flash Q4_K_XL
 quants) participate in all of the above on equal terms. By default these
 tensors are eagerly repacked into MLX's packed layout at load - fine in RAM,
