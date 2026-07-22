@@ -359,7 +359,7 @@ experts per token. `--moe-expert-mass P` is the adaptive version and
 usually the better trade of the two: each token keeps the smallest set of
 its routed experts covering share P of the gate mass, so the dropped mass
 is bounded by 1-P and lands on tokens where the router was already
-confident - a token whose top 3 experts carry 92% of the mass reads 3
+confident. A token whose top 3 experts carry 92% of the mass reads 3
 experts at P=0.9, while an uncertain token keeps the full fan-out. How
 much expert-mass buys is a property of the model's router. On a
 concentrated router it is the strongest lever available: most reads
@@ -367,15 +367,15 @@ disappear for a few percent of dropped mass. On a flat router it buys
 almost nothing - a 299B model we measured keeps 7.1 of its 8 experts at
 P=0.90. Measure rather than guess: `--moe-expert-probe` runs the trained
 routing losslessly and prints, per candidate P, the experts kept, the
-implied read fraction, and the mass actually dropped - decode and prefill
-tabled separately; size P against the decode table. The two router levers
+implied read fraction, and the mass actually dropped, with decode and
+prefill tabled separately. Size P against the decode table. The two router levers
 compose (`--moe-experts 6 --moe-expert-mass 0.9` caps at 6, then drops
 within the 6).
 
 The staging levers act at the decode feeder instead of the router.
 `--moe-miss-shed P` drops routed experts that would demand-miss the
-arena - lowest scores first, keeping at least share P of the token's gate
-mass - so its quality budget is spent exactly where the disk stalls are:
+arena, lowest scores first, keeping at least share P of the token's gate
+mass, so its quality budget is spent exactly where the disk stalls are:
 an arena-resident or prestage-inflight expert is never dropped, and a
 shed expert earns no popularity credit, so the arena keeps its hot set.
 It needs the decode feeder and a block that hands router scores to the
@@ -401,8 +401,8 @@ One measured point, from the flat-router end of that space: a 299B-A21B
 MoE (161 GB IQ4_XS streaming on a 128 GB machine, decode arena at a ~92%
 hit rate; decode-only tok/s from alternated A/B rounds of 512-token
 generations; quality scored at temperature 0.6 / top-p 0.95 on a 12-task
-goal battery - JSON extraction, constrained format, code with asserts,
-multi-step arithmetic, length control - plus a repetition check):
+goal battery of JSON extraction, constrained format, code with asserts,
+multi-step arithmetic, and length control, plus a repetition check):
 
 | setting | decode | quality |
 |---|---|---|
@@ -432,7 +432,8 @@ workload leans on chained arithmetic, put that in the test set before
 sizing any of these.
 
 Past the edge, long generations add a second signature: stray token
-substitutions - wrong-script digits, a bullet character inside code. The
+substitutions such as wrong-script digits or a bullet character inside
+code. The
 levers widen the low-probability tail that sampling can reach, so their
 safe range depends on the sampling regime: untruncated sampling (top-p
 1.0, which some model cards recommend) exposes the whole perturbed tail
