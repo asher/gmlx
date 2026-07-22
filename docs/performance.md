@@ -397,8 +397,8 @@ table. A low hit rate - an arena small relative to the model - makes
 `--moe-miss-shed` valuable; a high hit rate leaves the per-layer overhead
 as the standing cost, which only `--moe-layer-shed` touches.
 
-One measured point, from the flat-router end of that space: a 299B-A21B
-MoE (161 GB IQ4_XS streaming on a 128 GB machine, decode arena at a ~92%
+One measured point, from the flat-router end of that space: Hy3, a
+299B-A21B MoE (161 GB IQ4_XS streaming on a 128 GB machine, decode arena at a ~92%
 hit rate; decode-only tok/s from alternated A/B rounds of 512-token
 generations; quality scored at temperature 0.6 / top-p 0.95 on a 12-task
 goal battery of JSON extraction, constrained format, code with asserts,
@@ -448,8 +448,8 @@ checks suggest.
 
 The cost is easier to see than to score. The same one-shot prompt (a
 single-file HTML canvas animation of a car driving through parallax
-scenery) was run once per setting on the 299B model above, at the model
-card's temperature of 0.9 with low reasoning effort, and each generated
+scenery) was run once per setting on the same Hy3 IQ4_XS build, at the
+model card's temperature of 0.9 with low reasoning effort, and each generated
 page screenshotted. These are single samples at high temperature, so
 read them as an illustration, not a certification.
 
