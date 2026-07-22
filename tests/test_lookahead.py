@@ -73,6 +73,30 @@ def _streaming_model(monkeypatch, n_layers=2):
     return model
 
 
+def test_lookahead_family_default(monkeypatch):
+    """glm_moe_dsa / deepseek_v32 default lookahead OFF (replica-router sync
+    tax measured above its stall savings there); everything else defaults ON;
+    an explicit GMLX_DECODE_LOOKAHEAD always wins."""
+    from gmlx.envflags import env_bool
+    from gmlx.loader import _lookahead_default
+
+    m = _FakeModel(1)
+    assert _lookahead_default(m)  # no model_type: on
+    for fam in ("glm_moe_dsa", "deepseek_v32"):
+        m.model_type = fam
+        assert not _lookahead_default(m), fam
+    for fam in ("minimax_m3", "hunyuan_v3_moe", "qwen3_moe"):
+        m.model_type = fam
+        assert _lookahead_default(m), fam
+
+    m.model_type = "glm_moe_dsa"
+    monkeypatch.setenv("GMLX_DECODE_LOOKAHEAD", "1")
+    assert env_bool("GMLX_DECODE_LOOKAHEAD", _lookahead_default(m))
+    m.model_type = "qwen3_moe"
+    monkeypatch.setenv("GMLX_DECODE_LOOKAHEAD", "0")
+    assert not env_bool("GMLX_DECODE_LOOKAHEAD", _lookahead_default(m))
+
+
 def test_norm_gains_plain_rmsnorm():
     norm = nn.RMSNorm(DIM)
     norm.weight = mx.arange(1, DIM + 1).astype(mx.float32)

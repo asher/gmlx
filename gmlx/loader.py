@@ -1328,6 +1328,18 @@ if _PHASE is not None:
     atexit.register(_phase_dump)
 
 
+# Families where lookahead prestage defaults OFF: the replica router's
+# per-layer sync tax measured above its stall savings there (see the
+# la_default comment in install_expert_streaming).
+_LA_DEFAULT_OFF_FAMILIES = frozenset({"glm_moe_dsa", "deepseek_v32"})
+
+
+def _lookahead_default(model) -> bool:
+    """Family default for GMLX_DECODE_LOOKAHEAD when the env is unset."""
+    return getattr(
+        model, "model_type", None) not in _LA_DEFAULT_OFF_FAMILIES
+
+
 def install_expert_streaming(
     model,
     n_layers: int | None = None,
@@ -1766,7 +1778,21 @@ def install_expert_streaming(
                 "(--no-decode-feeder disables, GMLX_DECODE_ARENA_GB sizes)"
             )
     la_probe = env_bool("GMLX_DECODE_LOOKAHEAD_PROBE", False)
-    la_prefetch = env_bool("GMLX_DECODE_LOOKAHEAD", True) and dfeeder is not None
+    # Lookahead's replica router folds into the per-layer sync; whether its
+    # stall savings cover that tax is a per-family measurement. On
+    # glm_moe_dsa (GLM-5.2, 75 layers, top-8) it measured net negative
+    # (~40ms/tok sync for ~18ms of stalls), so those families default off.
+    # An explicit GMLX_DECODE_LOOKAHEAD always wins.
+    la_default = _lookahead_default(model)
+    la_prefetch = (
+        env_bool("GMLX_DECODE_LOOKAHEAD", la_default) and dfeeder is not None)
+    if (streaming and dfeeder is not None and not la_default
+            and "GMLX_DECODE_LOOKAHEAD" not in os.environ):
+        print(
+            "[stream] lookahead prestage: off by family default (replica-"
+            "router sync tax measured above its stall savings; "
+            "GMLX_DECODE_LOOKAHEAD=1 enables)"
+        )
     if streaming and (la_probe or la_prefetch):
         from .lookahead import install_lookahead
 
