@@ -517,10 +517,12 @@ class MiniMaxM3SparseMoeBlock(nn.Module):
         weights = (weights * self.routed_scaling_factor).astype(x.dtype)
 
         # Hand the normalized routing weights to the swapped module when
-        # it accepts them (the mix seam is also what feeds miss-shed its
-        # scores); an unmixed return keeps the stock python-side sum.
-        if _MOE_MIX_SCORES and getattr(
-                self.switch_mlp, "_kq_mix_scores", False):
+        # it accepts them (mix seam) or consumes them (the streaming
+        # offload wrapper feeds miss-shed and strips them for a stock
+        # base); an unmixed return keeps the python-side sum here.
+        if _MOE_MIX_SCORES and (
+                getattr(self.switch_mlp, "_kq_mix_scores", False)
+                or getattr(self.switch_mlp, "_kq_scores_sink", False)):
             y = self.switch_mlp(x, inds, weights)
         else:
             y = self.switch_mlp(x, inds)

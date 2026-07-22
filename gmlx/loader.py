@@ -1387,11 +1387,26 @@ def install_expert_streaming(
     def _wrapped_class(cls):
         sub = _CPU_OFFLOAD_CLASS_CACHE.get(cls)
         if sub is None:
+            # A fused base consumes routing scores itself (mix seam); a
+            # stock base (unrecognized activation, e.g. minimax-m3's
+            # SwiGLUOAI) takes (x, indices) only. The wrapper still
+            # advertises _kq_scores_sink so blocks hand scores over for
+            # miss-shed; it strips them before forwarding and applies
+            # the shed mix python-side.
+            _fwd_scores = bool(getattr(cls, "_kq_mix_scores", False))
 
             class _CPUOffload(cls):
+                _kq_scores_sink = True
+
                 def __call__(self, x, indices, *args, **kwargs):
                     # Extra args pass through untouched (e.g. deepseek-v4
-                    # hands the fused SwitchGLU its routing scores).
+                    # hands the fused SwitchGLU its routing scores). A base
+                    # without the mix seam takes (x, indices) only: keep the
+                    # scores for the miss-shed hook and strip them from what
+                    # gets forwarded.
+                    scores_arg = args[0] if args else None
+                    if args and not _fwd_scores:
+                        args = args[1:]
                     # Threshold read per call (cheap; once per MoE layer per
                     # forward) so env changes A/B without a reload. Streaming
                     # mode pins everything to CPU: a GPU expert call would
@@ -1465,11 +1480,12 @@ def install_expert_streaming(
                         t0 = time.perf_counter() if ph is not None else 0.0
                         ms = getattr(self, "_kq_miss_shed", None)
                         sc_f32 = None
-                        if ms is not None and args and n_tokens == 1:
+                        if (ms is not None and scores_arg is not None
+                                and n_tokens == 1):
                             # Shed reads the scores host-side; fold them into
                             # the router eval so the hook adds a small D2H
                             # copy, not a second per-layer graph flush.
-                            sc_f32 = args[0].astype(mx.float32)
+                            sc_f32 = scores_arg.astype(mx.float32)
                             mx.eval(indices, sc_f32)
                         else:
                             mx.eval(indices)
@@ -1479,6 +1495,7 @@ def install_expert_streaming(
                             wait0 = getattr(dfr, "_t_demand", 0.0)
                         ids = np.array(indices)
                         shed_args = None
+                        shed_mix = None
                         if sc_f32 is not None:
                             sc = np.asarray(sc_f32).reshape(-1)
                             keep = dfr.shed_misses(
@@ -1492,9 +1509,16 @@ def install_expert_streaming(
                                 scn = sc[keep]
                                 # survivors keep the token's full mass
                                 scn = scn * (sc.sum() / max(scn.sum(), 1e-20))
-                                shed_args = (mx.array(
-                                    scn.reshape(shp)).astype(
-                                        args[0].dtype),) + args[1:]
+                                sc_mx = mx.array(scn.reshape(shp)).astype(
+                                    scores_arg.dtype)
+                                if _fwd_scores:
+                                    shed_args = (sc_mx,) + args[1:]
+                                else:
+                                    # Stock base returns per-expert outputs;
+                                    # the block's weights still cover the
+                                    # full routed set, so mix the shed
+                                    # survivors here instead.
+                                    shed_mix = sc_mx
                         slots = dfr.stage(self._kq_li, ids)
                         if ph is not None:
                             t2 = time.perf_counter()
@@ -1526,6 +1550,10 @@ def install_expert_streaming(
                                         y = super().__call__(
                                             x, mx.array(slots),
                                             *args, **kwargs)
+                                        if (shed_mix is not None
+                                                and y.ndim == x.ndim + 1):
+                                            y = (y * shed_mix[..., None]).sum(
+                                                axis=-2)
                                 if ph is not None:
                                     ph["build"] += time.perf_counter() - t3
                                 return y

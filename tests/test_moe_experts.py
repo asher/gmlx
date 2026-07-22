@@ -291,6 +291,37 @@ def test_inline_swaps_match_stock():
             assert len(set(low[0, t].tolist())) == 1, name  # collapsed to top-1
 
 
+def test_m3_block_hands_scores_to_scores_sink():
+    """The m3 block passes its routing weights to a module advertising
+    _kq_scores_sink (the streaming offload wrapper around a stock base:
+    m3's SwiGLUOAI stack never gets the fused mix-seam class); an
+    unmixed return keeps the block's python-side sum, so the output
+    matches the stock forward."""
+    mx.random.seed(13)
+    block = _arch_fixtures()[-1]
+    mx.eval(block.parameters())
+    x = mx.random.normal((1, 3, 16))
+    ref = np.array(block(x))
+
+    seen = []
+    inner = block.switch_mlp
+
+    class _Sink(nn.Module):
+        _kq_scores_sink = True
+
+        def __call__(self, x, inds, scores=None):
+            seen.append(None if scores is None else np.array(scores))
+            return inner(x, inds)
+
+    block.switch_mlp = _Sink()
+    out = np.array(block(x))
+    assert seen and seen[-1] is not None
+    assert seen[-1].shape == (1, 3, 4)
+    # normalized top-k weights scaled by routed_scaling_factor
+    assert np.allclose(seen[-1].sum(-1), 1.5, atol=1e-3)
+    assert np.allclose(out, ref, atol=1e-6)
+
+
 def test_hunyuan_seam_gated_by_attrs():
     from gmlx.loader import _patch_hunyuan_norm_topk
 

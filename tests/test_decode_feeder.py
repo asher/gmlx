@@ -1111,16 +1111,27 @@ def test_shed_misses_keeps_at_least_one_expert(monkeypatch, tmp_path):
     assert keep.tolist() == [True, False]
 
 
-def _stream_scores_glu(monkeypatch, recorded):
+def _stream_scores_glu(monkeypatch, recorded, stock=False):
     """A wrapped scores-carrying SwitchGLU with a recording fake feeder -
-    the shared setup for the wrapper-hook tests."""
-    class _ScoresGLU(SwitchGLU):
-        def __call__(self, x, indices, scores=None):
-            recorded.append((np.array(indices),
-                             None if scores is None else np.array(scores)))
-            return super().__call__(x, indices)
+    the shared setup for the wrapper-hook tests. stock=True builds a base
+    without the mix seam: it takes (x, indices) only, so a forwarded
+    scores positional would raise TypeError."""
+    if stock:
+        class _BaseGLU(SwitchGLU):
+            def __call__(self, x, indices):
+                recorded.append((np.array(indices), None))
+                return super().__call__(x, indices)
+    else:
+        class _BaseGLU(SwitchGLU):
+            _kq_mix_scores = True  # real fused class advertises the seam
 
-    glu = _ScoresGLU(16, 32, 4)
+            def __call__(self, x, indices, scores=None):
+                recorded.append((np.array(indices),
+                                 None if scores is None
+                                 else np.array(scores)))
+                return super().__call__(x, indices)
+
+    glu = _BaseGLU(16, 32, 4)
     mx.eval(glu.parameters())
     model = _holder_model(glu)
     model.parameters = lambda: {"glu": glu.parameters()}
@@ -1215,6 +1226,56 @@ def test_wrapper_miss_shed_stages_survivors(monkeypatch):
     # score-less calls (stock unmixed path) never shed
     mx.eval(glu(x1, i1))
     assert len(df.shed_calls) == n_shed
+
+
+def test_wrapper_scores_sink_on_stock_base(monkeypatch):
+    """A base without the mix seam (e.g. minimax-m3's SwiGLUOAI stack)
+    takes (x, indices) only: the wrapper advertises _kq_scores_sink so
+    the block still hands over its routing weights, consumes them for
+    miss-shed, strips them from every forwarded call and mixes shed
+    survivors python-side (the block's weights cover the full routed
+    set, so its own mix would be the wrong width)."""
+    mx.random.seed(11)
+    recorded = []
+    glu, df = _stream_scores_glu(monkeypatch, recorded, stock=True)
+    assert getattr(glu, "_kq_scores_sink", False)
+    object.__setattr__(glu, "_kq_miss_shed", 0.9)
+
+    x1 = mx.random.normal((1, 1, 16))
+    i1 = mx.array([[[1, 3]]], dtype=mx.uint32)
+    sc = mx.array([[[0.75, 0.25]]], dtype=mx.float32)
+
+    # shed declines: scores reached the hook, base saw (x, indices) only,
+    # unmixed full-set return leaves the mix to the block
+    df.keep = None
+    out = glu(x1, i1, sc)
+    mx.eval(out)
+    li, ids, scs, km = df.shed_calls[0]
+    assert li == 3 and ids.tolist() == [1, 3] and km == 0.9
+    assert np.allclose(scs, [0.75, 0.25])
+    assert recorded[-1][0].reshape(-1).tolist() == [1, 3]
+    assert out.shape == (1, 1, 2, 16)
+
+    # shed engages: survivor mixed here with the token's full mass, the
+    # reduced ndim tells the block to skip its own mix
+    df.keep = np.array([False, True])
+    out = glu(x1, i1, sc)
+    mx.eval(out)
+    assert recorded[-1][0].reshape(-1).tolist() == [3]
+    assert out.shape == (1, 1, 16)
+    ref = super(type(glu), glu).__call__(
+        x1, mx.array([[[3]]], dtype=mx.uint32))
+    assert np.allclose(np.array(out),
+                       np.array(ref[..., 0, :]), atol=1e-6)
+
+    # arena overflow after a shed: fallback runs the ORIGINAL routed set,
+    # still without a scores positional
+    df.overflow = True
+    out = glu(x1, i1, sc)
+    mx.eval(out)
+    df.overflow = False
+    assert recorded[-1][0].reshape(-1).tolist() == [1, 3]
+    assert out.shape == (1, 1, 2, 16)
 
 
 def test_wrapper_layer_shed_returns_unmixed_zeros(monkeypatch):
