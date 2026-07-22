@@ -444,6 +444,34 @@ rate too small for it to see still accumulates over a 10k-token
 generation, so size levers softer for long-form code than short-form
 checks suggest.
 
+#### One prompt, four settings
+
+The cost is easier to see than to score. The same one-shot prompt (a
+single-file HTML canvas animation of a car driving through parallax
+scenery) was run once per setting on the 299B model above, at the model
+card's temperature of 0.9 with low reasoning effort, and each generated
+page screenshotted. These are single samples at high temperature, so
+read them as an illustration, not a certification.
+
+| | |
+|---|---|
+| <img src="assets/perf/lossy-hy3-baseline.png" alt="lossless baseline: detailed sunset scene with streetlight, lane markings, and layered trees"><br>lossless, top-p 1.0. 13.2k tokens at 3.0 tok/s. | <img src="assets/perf/lossy-hy3-shed-0.07-0.93.png" alt="layer-shed 0.07 with miss-shed 0.93: simpler but coherent mountain scene"><br>`moe_layer_shed 0.07` + `moe_miss_shed 0.93`, top-p 0.97. 10.6k tokens at 3.5 tok/s. |
+| <img src="assets/perf/lossy-hy3-shed-0.10-0.90.png" alt="layer-shed 0.10 with miss-shed 0.90: flatter, darker scene with simpler shapes"><br>`moe_layer_shed 0.10` + `moe_miss_shed 0.90`, top-p 0.95. 11.1k tokens at 3.6 tok/s. | <img src="assets/perf/lossy-hy3-shed-0.20-0.80.png" alt="layer-shed 0.20 with miss-shed 0.80: black page, the script crashed on a stray token"><br>`moe_layer_shed 0.20` + `moe_miss_shed 0.80`, top-p 1.0. 10.0k tokens at 4.2 tok/s. |
+
+The scene simplifies as the levers harden, well before anything breaks.
+The first three pages ran clean. The black frame is the past-the-edge
+signature in the wild: that page died on its first stray token, a bullet
+character where an operator belonged, with CJK characters spliced into
+two identifiers further down the same file. The middle setting also
+shows the sampling interaction from above. Its page was generated clean
+at top-p 0.95, while the same setting sampled untruncated put one
+wrong-script token into an 11k-token run. The tok/s figures are
+whole-run averages of these single generations at different lengths,
+not controlled A/B numbers; the table above is the measured comparison.
+The generated pages are committed beside the screenshots in
+`docs/assets/perf/` (GitHub shows their source; download one to watch
+the animation).
+
 In server configs the lossy levers are the per-model `moe_experts: K` /
 `moe_expert_mass: P` / `moe_miss_shed: P` / `moe_layer_shed: P` keys (or
 the matching `serve` flags for a single positional model); the probe
