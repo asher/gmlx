@@ -428,6 +428,12 @@ at 5.6 or better. Note also that softening the pair keeps its quality
 margin but not its speed: miss-shed's payoff falls steeply as P rises
 (at 0.93 it sheds only a third of the experts it sheds at 0.90), so the
 softened pair returned a few percent where the full pair returned +13.
+The soft edge is real. In single long-generation checks at this model
+card's temperature of 0.9, the pair at 0.09/0.91 emitted a stray token
+into code even under top-p 0.97, while 0.07/0.93 ran clean, so the
+high-temperature envelope on this model is the softened pair and its
+few percent. The larger wins belong to workloads that can run cooler
+sampling or accept an occasional stray.
 
 That ordering is this model's, not a law. With a flat router,
 expert-mass had nothing cheap to drop; at a 92% hit rate, misses were
