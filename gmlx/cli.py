@@ -428,6 +428,15 @@ def add_placement_args(ap: argparse.ArgumentParser) -> None:
         "layers on GPU, so never under --stream-cpu); "
         "GMLX_DECODE_ARENA_GB caps the arena size.",
     )
+    grp.add_argument(
+        "--gpu-keepwarm",
+        action="store_true",
+        help="Hold GPU clocks up during streamed decode with a tiny "
+        "background heartbeat kernel. Streamed decode idles the GPU "
+        "between per-layer bursts and each burst pays the clock ramp; "
+        "the heartbeat removes that (lossless, costs a few watts). "
+        "Default off. Env: GMLX_GPU_KEEPWARM=1.",
+    )
 
 
 # MTP / speculative auto-enable (shared by run + chat)
@@ -1142,6 +1151,8 @@ def _apply_placement(args, model) -> None:
         return
 
     gguf_path = getattr(args, "gguf", None)
+    if getattr(args, "gpu_keepwarm", False):
+        os.environ["GMLX_GPU_KEEPWARM"] = "1"
     feeders = dict(
         feeder_prefill=getattr(args, "prefill_feeder", None),
         feeder_decode=getattr(args, "decode_feeder", None),
