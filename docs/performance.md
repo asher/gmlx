@@ -431,6 +431,14 @@ alone stayed clean down to 0.75 and `moe_expert_mass` down to 0.70. If a
 workload leans on chained arithmetic, put that in the test set before
 sizing any of these.
 
+Past the edge, long generations add a second signature: stray token
+substitutions - wrong-script digits, a bullet character inside code.
+Truncated sampling (the default top-p 0.95 / min-p 0.05) suppresses much
+of that perturbed tail; lossy levers with top-p 1.0 compound it. And a
+short battery certifies short answers: a per-token slip rate too small
+for it to see still accumulates over a 10k-token generation, so size
+levers softer for long-form code than short-form checks suggest.
+
 In server configs the lossy levers are the per-model `moe_experts: K` /
 `moe_expert_mass: P` / `moe_miss_shed: P` / `moe_layer_shed: P` keys (or
 the matching `serve` flags for a single positional model); the probe
