@@ -399,12 +399,15 @@ arena hit rate is high and misses are rare.
 Which to reach for is a measurement, not a doctrine. Run the probe once,
 and read the decode feeder's exit stats (arena hit rate; printed by
 `run`/`chat` at `-v`, and always in server logs) from a representative
-session. A concentrated router points to
-`--moe-expert-mass` first, whatever the hit rate: it removes reads and
-compute together at minimal dropped mass. A flat router takes it off the
-table. A low hit rate - an arena small relative to the model - makes
-`--moe-miss-shed` valuable; a high hit rate leaves the per-layer overhead
-as the standing cost, which only `--moe-layer-shed` touches.
+session. The hit rate decides first. A low hit rate - an arena small
+relative to the model - makes `--moe-miss-shed` the lead lever whatever
+the router looks like: it spends only on calls that would stall, so it
+beats expert-mass on cost at equal reads saved, and a probe-attractive
+concentration number can still lose to it outright (measured below). At
+a healthy hit rate, a concentrated router points to `--moe-expert-mass`,
+which removes reads and compute together at minimal dropped mass; a flat
+router takes it off the table and leaves the per-layer overhead as the
+standing cost, which only `--moe-layer-shed` touches.
 
 One measured point, from the flat-router end of that space: Hy3, a
 299B-A21B MoE (161 GB IQ4_XS streaming on a 128 GB machine, decode arena at a ~92%
@@ -440,11 +443,39 @@ expert-mass had nothing cheap to drop; at a 92% hit rate, misses were
 rare enough that the per-layer overhead was the standing cost, so
 layer-shed led and the shed pair composed (+8% and +4% multiply to
 roughly the observed +13%: they cut disjoint costs). On a
-concentrated-router model the probe will show the inversion - most reads
-removed for a few percent of mass - before any lossy run needs to be
-made.
+concentrated-router model with a healthy hit rate the probe will show
+the inversion - most reads removed for a few percent of mass - before
+any lossy run needs to be made.
 
-On that same model, quality degraded in a consistent order as the levers
+A second measured point, from the low-hit-rate end of the space:
+MiniMax-M3, a 4-of-128-expert MoE (264 GB Q4_K_M streaming on the same
+128 GB machine, decode arena at an ~87% hit rate; same alternated A/B
+method, decode-only medians over 512-token generations). A layer
+stalls when any one of its four routed experts misses, so at 87%
+per-expert residency roughly half of all token-layer calls stall, and
+the miss-targeted lever leads:
+
+| setting | decode | disk stall time |
+|---|---|---|
+| `moe_miss_shed: 0.85` | +1% | -14% |
+| `moe_miss_shed: 0.80` | +6.5% | -31% |
+| `moe_expert_mass: 0.85` | ~-3% | -9% |
+
+The probe put this router in the middle of the concentration range
+(P=0.85 keeps 3.7 of 4 experts on decode for 4% dropped mass), and
+expert-mass did remove reads. But most of the reads it removed were
+arena hits that cost nothing, and its router-side filtering cost more
+than the stalls it saved. Miss-shed spends the same budget only where
+a stall is otherwise certain, which also means its realized cost sits
+far below the probe's unconditional number: at P=0.80 the probe
+predicts 12% dropped mass, while the residency-aware shed dropped
+2.9%, shedding 8% of routed experts across a third of token-layer
+calls. Two 10k-token generations at temperature 0.6 / top-p 0.95 ran
+clean, producing complete working artifacts with no stray tokens. The
+probe sizes expert-mass, but it cannot see residency; when the exit
+stats show a low hit rate, reach for miss-shed first.
+
+Back on Hy3, quality degraded in a consistent order as the levers
 hardened: multi-step arithmetic broke first, well before coherence,
 formatting, or code. `moe_layer_shed: 0.20` alone dropped arithmetic
 tasks, and so did
