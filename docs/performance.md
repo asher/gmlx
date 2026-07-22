@@ -418,7 +418,16 @@ multi-step arithmetic, and length control, plus a repetition check):
 | `moe_layer_shed: 0.10` | +8% | clean |
 | `moe_miss_shed: 0.90` | +4% | clean |
 | both together | +13% | clean |
+| the pair softened to 0.07 / 0.93 | +2-4% | clean |
 | `moe_expert_mass: 0.90` | ~0%, alone or stacked | clean |
+
+Those are sustained-regime medians. Per the cool-box transient note
+under Measuring, a rested 14-inch machine ran the same arms 15-25%
+faster for its first twenty minutes, baseline at 5.0 tok/s and the pair
+at 5.6 or better. Note also that softening the pair keeps its quality
+margin but not its speed: miss-shed's payoff falls steeply as P rises
+(at 0.93 it sheds only a third of the experts it sheds at 0.90), so the
+softened pair returned a few percent where the full pair returned +13.
 
 That ordering is this model's, not a law. With a flat router,
 expert-mass had nothing cheap to drop; at a 92% hit rate, misses were
