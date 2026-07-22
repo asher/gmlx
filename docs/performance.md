@@ -32,6 +32,15 @@ degraded repeat from dragging the number. Back-to-back A/B comparisons still
 hand the second arm a hotter chip - let the machine cool between arms you
 intend to compare.
 
+The cool-box transient runs long, and it is chassis-dependent. A rested
+14-inch M5 Max held full boost clocks for roughly twenty minutes of
+streamed MoE decode before heat-soaking into a sustained rate about 20%
+lower; the 16-inch chassis cools better and holds boost longer still.
+Both regimes are real. Book sustained numbers for anything long-running,
+and size A/B warmup in minutes of decode rather than tokens, but a
+chat-length session on a rested machine genuinely runs at the faster
+rate the whole time.
+
 A note on `pp512`-style numbers: prefill throughput at a 512-token prompt is the
 conventional benchmark figure, and it is a short-context number. If your real
 workload is a coding agent with a 30k-token prompt, compare engines and models at
@@ -50,8 +59,8 @@ is where serve-path numbers must be measured (`GMLX_ROUND_PROFILE=1` +
 
 ## Reference numbers
 
-Measured on an M5 Max MacBook Pro (128 GB), 512-token prompts, medians of
-repeated runs:
+Measured on a 14-inch M5 Max MacBook Pro (128 GB), 512-token prompts,
+medians of repeated runs:
 
 | Model | File | Decode | Decode (MTP) | llama.cpp decode (spec) | Prefill | llama.cpp prefill |
 |-------|------|--------|--------------|-------------------------|---------|-------------------|
