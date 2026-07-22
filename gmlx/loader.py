@@ -1598,14 +1598,15 @@ def install_expert_streaming(
                             w = getattr(dfr, "_t_demand", 0.0) - wait0
                             ph["stage_wait"] += w
                             ph["stage_book"] += (t2 - t1) - w
-                        if la_pred is not None:
+                        if la_pred:
                             # This layer's demand misses have joined
-                            # (stage returned); the next layer's predicted
+                            # (stage returned); the predicted layers'
                             # misses now read in the background while this
-                            # layer's gather and the next layer's every-token
+                            # layer's gather and the next layers' every-token
                             # work compute - speculation never competes with
                             # demand traffic for the SSD.
-                            dfr.prestage(la.predictor.dst_li, la_pred)
+                            for _dst, _ids in la_pred.items():
+                                dfr.prestage(_dst, _ids)
                             if ph is not None:
                                 ph["prestage"] += time.perf_counter() - t2
                         if slots is not None:
@@ -1900,16 +1901,22 @@ def install_expert_streaming(
             model, layers, probe=la_probe, prefetch=la_prefetch,
             stats_verbose=stats_verbose,
         )
+        la_depth = max(1, min(3, env_int("GMLX_DECODE_LOOKAHEAD_DEPTH", 1)))
+        la_what = (
+            "next-layer router predictions"
+            if la_depth == 1
+            else f"router predictions {la_depth} layers deep"
+        )
         if n_la and la_prefetch:
             print(
-                f"[stream] lookahead prestage: next-layer router "
-                f"predictions pre-read arena misses on {n_la} MoE layer "
-                "pairs (lossless; GMLX_DECODE_LOOKAHEAD=0 disables)"
+                f"[stream] lookahead prestage: {la_what} pre-read arena "
+                f"misses on {n_la} MoE layer pairs (lossless; "
+                "GMLX_DECODE_LOOKAHEAD=0 disables)"
             )
         if n_la and la_probe:
             print(
-                f"[stream] lookahead probe: recording next-layer router "
-                f"recall on {n_la} MoE layer pairs (lossless; table at exit)"
+                f"[stream] lookahead probe: recording {la_what} recall "
+                f"on {n_la} MoE layer pairs (lossless; table at exit)"
             )
     if streaming:
         # The context line printed above and the feeder lines cover the
