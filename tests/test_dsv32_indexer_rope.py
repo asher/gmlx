@@ -283,3 +283,76 @@ def test_gate_fp32_kill_switch_skips_patch():
         else:
             os.environ["GMLX_DSV32_GATE_FP32"] = prev
     assert not any(getattr(g, "_dsv32_gate_fp32", False) for g in _gates(model))
+
+
+def _moes(model: Model):
+    from mlx_lm.models.deepseek_v32 import DeepseekV32MoE
+
+    return [m for m in model.modules() if isinstance(m, DeepseekV32MoE)]
+
+
+def test_moe_scores_patch_installs_and_flags_every_block():
+    from mlx_lm.models.deepseek_v32 import DeepseekV32MoE
+
+    model = _build()
+    n = len(_moes(model))
+    assert n > 0
+
+    dsv32_patches._patch_dsv32_moe_scores(model)
+
+    assert dsv32_patches._MOE_SCORES_PATCH.installed
+    assert DeepseekV32MoE.__call__ is dsv32_patches._dsv32_moe_scores_call
+    assert sum(
+        getattr(b, "_dsv32_moe_scores", False) for b in _moes(model)) == n
+
+
+def test_moe_scores_seam_matches_stock_and_feeds_sink():
+    # Without a scores-taking switch the patched forward reproduces the stock
+    # forward; a switch advertising _kq_scores_sink (the streaming offload
+    # wrapper) receives the gate scores, and its unmixed return keeps the
+    # stock python-side sum, so the output is unchanged either way.
+    model = _build()
+    dsv32_patches._patch_dsv32_moe_scores(model)
+    blk = _moes(model)[0]
+    g = blk.gate
+    g.weight = mx.random.normal(g.weight.shape, key=mx.random.key(9))
+    g.e_score_correction_bias = mx.random.normal(
+        g.e_score_correction_bias.shape, key=mx.random.key(10))
+    mx.eval(model.parameters())
+    x = mx.random.normal((1, 3, g.weight.shape[1]), key=mx.random.key(11))
+
+    blk._dsv32_moe_scores = False
+    ref = blk(x)
+    blk._dsv32_moe_scores = True
+    assert bool(mx.allclose(blk(x), ref, atol=1e-6))
+
+    seen = []
+    inner = blk.switch_mlp
+
+    class _Sink(nn.Module):
+        _kq_scores_sink = True
+
+        def __call__(self, x, inds, scores=None):
+            seen.append(None if scores is None else mx.array(scores))
+            return inner(x, inds)
+
+    blk.switch_mlp = _Sink()
+    out = blk(x)
+    assert seen and seen[-1] is not None
+    assert seen[-1].shape == (1, 3, blk.num_experts_per_tok)
+    assert bool(mx.allclose(out, ref, atol=1e-6))
+
+
+def test_moe_scores_kill_switch_skips_patch():
+    model = _build()
+    prev = os.environ.get("GMLX_DSV32_MOE_MIX")
+    os.environ["GMLX_DSV32_MOE_MIX"] = "0"
+    try:
+        dsv32_patches._patch_dsv32_moe_scores(model)
+    finally:
+        if prev is None:
+            os.environ.pop("GMLX_DSV32_MOE_MIX", None)
+        else:
+            os.environ["GMLX_DSV32_MOE_MIX"] = prev
+    assert not any(
+        getattr(b, "_dsv32_moe_scores", False) for b in _moes(model))

@@ -48,6 +48,7 @@ from .dsv32_patches import (
     _patch_dsv32_indexer_rope,
     _patch_dsv32_mask_decode,
     _patch_dsv32_moe_gate_fp32,
+    _patch_dsv32_moe_scores,
 )
 from .gdn_patches import (
     _needs_tiled_v_patch,
@@ -2657,6 +2658,7 @@ def load_model(
         _patch_dsv32_indexer_rope(model)
         _patch_dsv32_indexer_fp32(model)
         _patch_dsv32_moe_gate_fp32(model)
+        _patch_dsv32_moe_scores(model)
         _patch_dsv32_mask_decode(model)
         _patch_dsv32_dense_default(model)  # exact default; GMLX_DSV32_SPARSE=1 -> sparse (experimental)
 
