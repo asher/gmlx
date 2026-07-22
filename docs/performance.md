@@ -400,9 +400,9 @@ as the standing cost, which only `--moe-layer-shed` touches.
 One measured point, from the flat-router end of that space: a 299B-A21B
 MoE (161 GB IQ4_XS streaming on a 128 GB machine, decode arena at a ~92%
 hit rate; decode-only tok/s from alternated A/B rounds of 512-token
-generations; quality scored on a 12-task goal battery - JSON extraction,
-constrained format, code with asserts, multi-step arithmetic, length
-control - plus a repetition check):
+generations; quality scored at temperature 0.6 / top-p 0.95 on a 12-task
+goal battery - JSON extraction, constrained format, code with asserts,
+multi-step arithmetic, length control - plus a repetition check):
 
 | setting | decode | quality |
 |---|---|---|
@@ -432,12 +432,16 @@ workload leans on chained arithmetic, put that in the test set before
 sizing any of these.
 
 Past the edge, long generations add a second signature: stray token
-substitutions - wrong-script digits, a bullet character inside code.
-Truncated sampling (the default top-p 0.95 / min-p 0.05) suppresses much
-of that perturbed tail; lossy levers with top-p 1.0 compound it. And a
-short battery certifies short answers: a per-token slip rate too small
-for it to see still accumulates over a 10k-token generation, so size
-levers softer for long-form code than short-form checks suggest.
+substitutions - wrong-script digits, a bullet character inside code. The
+levers widen the low-probability tail that sampling can reach, so their
+safe range depends on the sampling regime: untruncated sampling (top-p
+1.0, which some model cards recommend) exposes the whole perturbed tail
+that nucleus truncation would mask. Certify at the temperature and top-p
+you deploy with - a check run at a lower temperature does not cover a
+hotter one. And a short check certifies short answers: a per-token slip
+rate too small for it to see still accumulates over a 10k-token
+generation, so size levers softer for long-form code than short-form
+checks suggest.
 
 In server configs the lossy levers are the per-model `moe_experts: K` /
 `moe_expert_mass: P` / `moe_miss_shed: P` / `moe_layer_shed: P` keys (or
