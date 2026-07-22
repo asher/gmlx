@@ -485,6 +485,9 @@ class MiniMaxM3Attention(nn.Module):
         return outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=2)
 
 
+_MOE_MIX_SCORES = os.environ.get("GMLX_M3_MOE_MIX", "1") != "0"
+
+
 class MiniMaxM3SparseMoeBlock(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
@@ -513,8 +516,16 @@ class MiniMaxM3SparseMoeBlock(nn.Module):
         weights = weights / (mx.sum(weights, axis=-1, keepdims=True) + 1e-20)
         weights = (weights * self.routed_scaling_factor).astype(x.dtype)
 
-        y = self.switch_mlp(x, inds)
-        y = (y * weights[..., None]).sum(axis=-2)
+        # Hand the normalized routing weights to the swapped module when
+        # it accepts them (the mix seam is also what feeds miss-shed its
+        # scores); an unmixed return keeps the stock python-side sum.
+        if _MOE_MIX_SCORES and getattr(
+                self.switch_mlp, "_kq_mix_scores", False):
+            y = self.switch_mlp(x, inds, weights)
+        else:
+            y = self.switch_mlp(x, inds)
+        if y.ndim == weights.ndim + 1:
+            y = (y * weights[..., None]).sum(axis=-2)
         return y + self.shared_experts(x)
 
 
