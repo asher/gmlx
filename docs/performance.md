@@ -516,6 +516,19 @@ The generated pages are committed beside the screenshots in
 `docs/assets/perf/` (GitHub shows their source; download one to watch
 the animation).
 
+The sampling interaction also has a constructive reading. The full pair
+was rerun once on the same prompt and build with cooled sampling, at
+temperature 0.6 and top-p 0.95 instead of the model card's 0.9:
+
+<img src="assets/perf/lossy-hy3-shed-0.10-0.90-cool.png" alt="layer-shed 0.10 with miss-shed 0.90 at temperature 0.6: layered sunset scene with a red car, lampposts, treeline, and the sun setting behind the hills"><br>`moe_layer_shed 0.10` + `moe_miss_shed 0.90`, temperature 0.6, top-p 0.95. 10.2k tokens at 3.8 tok/s.
+
+It ran clean and produced one of the strongest scenes of the whole set,
+from the same full pair that needed softening to survive temperature
+0.9. This is a single sample like the others, but it points at the
+practical recipe on this model: keep the full pair and its entire +13%,
+and cool the sampling slightly, rather than giving up most of the speed
+win by softening the levers at the card's temperature.
+
 In server configs the lossy levers are the per-model `moe_experts: K` /
 `moe_expert_mass: P` / `moe_miss_shed: P` / `moe_layer_shed: P` keys (or
 the matching `serve` flags for a single positional model); the probe

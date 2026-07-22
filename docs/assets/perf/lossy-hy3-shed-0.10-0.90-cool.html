@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Endless Drive</title>
+<style>
+  body { margin: 0; overflow: hidden; background: #000; }
+  canvas { display: block; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+let w, h, groundY, horizonY;
+
+function resize() {
+  w = cv.width = innerWidth;
+  h = cv.height = innerHeight;
+  groundY = h * 0.78;
+  horizonY = h * 0.45;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// Scenery object pools
+let trees = [], bushes = [], poles = [];
+for (let i = 0; i < 25; i++) trees.push({ x: i * 120 + Math.random() * 60, s: 0.6 + Math.random() * 0.7, type: Math.random() < 0.5 ? 'pine' : 'round' });
+for (let i = 0; i < 40; i++) bushes.push({ x: i * 70 + Math.random() * 40, s: 0.5 + Math.random() * 0.9 });
+for (let i = 0; i < 10; i++) poles.push({ x: i * 350 + Math.random() * 120, s: 0.8 + Math.random() * 0.4 });
+
+function drawTree(x, baseY, s, type) {
+  ctx.save(); ctx.translate(x, baseY); ctx.scale(s, s);
+  if (type === 'pine') {
+    ctx.fillStyle = '#1c2b22';
+    ctx.beginPath(); ctx.moveTo(0, -90); ctx.lineTo(22, 0); ctx.lineTo(-22, 0); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(0, -120); ctx.lineTo(16, -65); ctx.lineTo(-16, -65); ctx.fill();
+    ctx.fillStyle = 'rgba(255,160,80,0.15)';
+    ctx.beginPath(); ctx.moveTo(0, -120); ctx.lineTo(16, -65); ctx.lineTo(0, -65); ctx.fill();
+  } else {
+    ctx.fillStyle = '#243a2a';
+    ctx.beginPath(); ctx.arc(0, -45, 42, 0, 7); ctx.fill();
+    ctx.fillRect(-6, -45, 12, 45);
+  }
+  ctx.restore();
+}
+
+function drawPole(x, baseY, s) {
+  ctx.save(); ctx.translate(x, baseY); ctx.scale(s, s);
+  ctx.fillStyle = '#2b2b2b'; ctx.fillRect(-4, -130, 8, 130);
+  ctx.fillStyle = '#3a3a3a'; ctx.fillRect(-18, -130, 36, 8);
+  ctx.restore();
+}
+
+function drawBush(x, baseY, s) {
+  ctx.save(); ctx.translate(x, baseY); ctx.scale(s, s);
+  ctx.fillStyle = '#15261a';
+  ctx.beginPath(); ctx.ellipse(0, -12, 22, 16, 0, 0, 7); ctx.fill();
+  ctx.ellipse(18, -6, 16, 12, 0, 0, 7); ctx.fill();
+  ctx.ellipse(-16, -8, 14, 10, 0, 0, 7); ctx.fill();
+  ctx.restore();
+}
+
+let camX = 0;
+let last = performance.now();
+
+function frame(now) {
+  let dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  let speed = 420;
+  camX += speed * dt;
+
+  // --- Sky ---
+  let grad = ctx.createLinearGradient(0, 0, 0, horizonY);
+  grad.addColorStop(0, '#2a1b3d');
+  grad.addColorStop(0.55, '#7a3b5d');
+3
+  grad.addColorStop(1, '#e0763e');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, w, horizonY);
+
+  // --- Sun ---
+  let sunX = w * 0.72, sunY = horizonY - 25;
+  let sg = ctx.createRadialGradient(sunX, sunY, 10, sunX, sunY, 140);
+  sg.addColorStop(0, 'rgba(255,210,120,0.95)');
+  sg.addColorStop(1, 'rgba(255,140,60,0)');
+  ctx.fillStyle = sg;
+  ctx.beginPath(); ctx.arc(sunX, sunY, 140, 0, td(7)); ctx.fill();
+  ctx.fillStyle = '#ffd28a';
+  ctx.beginPath(); ctx.arc(sunX, sunY, 36, 0, 7); ctx.fill();
+
+  // --- Distant Mountains (parallax 0.02) ---
+  let mOff = camX * 0.02;
+  ctx.fillStyle = '#3b2a4a';
+  ctx.beginPath(); ctx.moveTo(0, horizonY);
+  for (let x = 0; x <= w; x += 12) {
+    let y = horizonY - 80 * Math.sin(x * 0.003 + mOff * 0.01) - 35 * Math.sin(x * 0.007);
+    ctx.lineTo(x, y);
+  }
+  ctx.lineTo(w, horizonY); ctx.fill();
+
+  // --- Hills (parallax 0.08) ---
+  let hOff = camX * 0.08;
+  ctx.fillStyle = '#27362a';
+  ctx.beginPath(); ctx.moveTo(0, horizonY + 30);
+  for (let x = 0; x <= w; x += 12) {
+    let y = horizonY + 30 - 50 * Math.sin(x * 0.006 + hOff * 0.02) - 25 * Math.cos(x * 0.013);
+    ctx.lineTo(x, y);
+  }
+  ctx.lineTo(w, horizonY + 120); ctx.lineTo(0, horizonY + 120); ctx.fill();
+
+  // --- Far Trees (parallax 0.3) ---
+  trees.forEach(t => {
+    t.x -= speed * 0.3 * dt;
+    if (t.x < -120) { t.x += w + 240; t.s = 0.6 + Math.random() * 0.7; t.type = Math.random() < 0.5 ? 'pine' : 'round'; }
+    drawTree(t.x, horizonY + 15, t.s * 0.8, t.type);
+  });
+
+  // --- Ground / Road ---
+  ctx.fillStyle = '#1d2b1a'; ctx.fillRect(0, horizonY, w, groundY - horizonY); // distant ground
+  ctx.fillStyle = '#0e0e0e'; ctx.fillRect(0, groundY, w, h - groundY); // road side
+  ctx.fillStyle = '#333'; ctx.fillRect(0, groundY - 5, w, 10); // road surface
+
+  // Road texture (parallax 1.0)
+  ctx.strokeStyle = '#1a1a1a'; ctx.lineWidth = 3;
+  let roadOff = camX % 60;
+  for (let x = -roadOff; x < w; x += 60) {
+    ctx.beginPath(); ctx.moveTo(x, groundY + 28); ctx.lineTo(x + 24, groundY + 28); ctx.stroke();
+  }
+
+  // --- Near Poles & Bushes (parallax 0.9 / 1.0) ---
+  poles.forEach(p => {
+    p.x -= speed * 0.9 * dt;
+    if (p.x < -60) { p.x += w + 360; p.s = 0.8 + Math.random() * 0.4; }
+    drawPole(p.x, groundY, p.s);
+  });
+  bushes.forEach(b => {
+    b.x -= speed * dt;
+    if (b.x < -60) { b.x += w + 120; b.s = 0.5 + Math.random() * 0.9; }
+    drawBush(b.x, groundY, b.s);
+  });
+
+  // --- Car ---
+  let carX = w * 0.32;
+  let wheelR = Math.max(28, h * 0.045);
+  let wheelAngle = camX / wheelR;
+  let bounce = Math.sin(camX * 0.04) * 2 + Math.sin(camX * 0.15) * 1.2;
+  let pitch = Math.sin(camX * 0.04) * 0.012;
+  let cy = groundY - wheelR + bounce;
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  ctx.beginPath(); ctx.ellipse(carX, groundY + 8, 140, 14, 0, 0, 7); ctx.fill();
+
+  ctx.save();
+  ctx.translate(carX, cy);
+  ctx.rotate(pitch);
+
+  // Wheels
+  function wheel(dx) {
+    ctx.save(); ctx.translate(dx, 0); ctx.rotate(wheelAngle);
+    ctx.beginPath(); ctx.arc(0, 0, wheelR, 0, 7); ctx.fillStyle = '#141414'; ctx.fill();
+    ctx.beginPath(); ctx.arc(0, 0, wheelR - 5, 0, 7); ctx.strokeStyle = '#333'; ctx.lineWidth = 4; ctx.stroke();
+    ctx.beginPath(); ctx.arc(0, 0, wheelR * 0.5, 0, 7); ctx.fillStyle = '#5a5a5a'; ctx.fill();
+    for (let i = 0; i < 5; i++) {
+      ctx.rotate(Math.PI * 2 / 5);
+      ctx.fillStyle = '#888'; ctx.fillRect(-3, -wheelR * 0.5, 6, wheelR * 0.5);
+    }
+    ctx.beginPath(); ctx.arc(0, 0, 7, 0, 7); ctx.fillStyle = '#222'; ctx.fill();
+    ctx.restore();
+  }
+  wheel(-78); wheel(82);
+
+  // Body
+  ctx.beginPath();
+  ctx.moveTo(-105, -wheelR + 12);
+  ctx.lineTo(-108, -wheelR - 12);
+  ctx.lineTo(98, -wheelR - 12);
+  ctx.lineTo(108, -wheelR + 6);
+  ctx.quadraticCurveTo(112, -wheelR - 26, 82, -wheelR - 38);
+  ctx.lineTo(42, -wheelR - 74);
+  ctx.quadraticCurveTo(18, -wheelR - 84, -12, -wheelR - 84);
+  ctx.lineTo(-62, -wheelR - 76);
+  ctx.quadraticCurveTo(-100, -wheelR - 62, -106, -wheelR - 32);
+  ctx.closePath();
+  let bodyGrad = ctx.createLinearGradient(0, -wheelR - 84, 0, -wheelR - 12);
+  bodyGrad.addColorStop(0, '#b5392b');
+  bodyGrad.addColorStop(1, '#5e1212');
+  ctx.fillStyle = bodyGrad; ctx.fill();
+
+  // Window
+  ctx.beginPath();
+  ctx.moveTo(38, -wheelR - 68); ctx.lineTo(16, -wheelR - 78); ctx.lineTo(-12, -wheelR - 78);
+  ctx.lineTo(-42, -wheelR - 72); ctx.lineTo(-32, -wheelR - 46); ctx.lineTo(28, -wheelR - 46);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(160,220,255,0.55)'; ctx.fill();
+
+  // Sunset highlight
+  ctx.strokeStyle = 'rgba(255,180,90,0.55)'; ctx.lineWidth = 2; ctx.stroke();
+
+  // Lights
+  ctx.fillStyle = '#ffdf80'; ctx.beginPath(); ctx.arc(103, -wheelR - 18, 6, 0, 7); ctx.fill();
+  ctx.fillStyle = '#ff3030'; ctx.beginPath(); ctx.arc(-104, -wheelR - 16, 5, 0, 7); ctx.fill();
+
+  ctx.restore();
+  requestAnimationFrame(frame);
+}
+
+function td(a){ return a; } // helper to avoid syntax issues with 7
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
