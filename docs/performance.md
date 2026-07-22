@@ -453,6 +453,26 @@ card's temperature of 0.9 with low reasoning effort, and each generated
 page screenshotted. These are single samples at high temperature, so
 read them as an illustration, not a certification.
 
+<details>
+<summary>The prompt (identical for all four runs)</summary>
+
+> Write a single HTML file with a full-page canvas and no libraries.
+> Simulate a realistic side-view of a moving car as the main subject.
+> Keep the car visible in the foreground while the background landscape
+> scrolls continuously to create the feeling that the car is driving
+> forward. Use layered scenery for depth: nearby ground, roadside
+> elements, trees, poles, and distant hills or mountains should move at
+> different speeds for a natural parallax effect. Animate the wheels
+> spinning realistically and add subtle body motion so the car feels
+> connected to the road. Let the environment pass smoothly behind it,
+> with repeating but varied scenery that makes the movement feel
+> believable. Use cinematic lighting and a cohesive sky, such as sunset,
+> dusk, or daylight, to enhance atmosphere. The overall motion should
+> feel calm, immersive, and realistic, with a seamless looping
+> animation.
+
+</details>
+
 | | |
 |---|---|
 | <img src="assets/perf/lossy-hy3-baseline.png" alt="lossless baseline: detailed sunset scene with streetlight, lane markings, and layered trees"><br>lossless, top-p 1.0. 13.2k tokens at 3.0 tok/s. | <img src="assets/perf/lossy-hy3-shed-0.07-0.93.png" alt="layer-shed 0.07 with miss-shed 0.93: simpler but coherent mountain scene"><br>`moe_layer_shed 0.07` + `moe_miss_shed 0.93`, top-p 0.97. 10.6k tokens at 3.5 tok/s. |
