@@ -798,6 +798,61 @@ def _mtp_lift(cells, rt):
     return out
 
 
+def chart_batch_scaling(args):
+    def cells_from(paths):
+        out = []
+        for path in paths:
+            out.extend(parse_serve(path, load_json(path)))
+        return out
+
+    def pick(cells, where):
+        sel = [c for c in cells if c["arm"] == args.arm
+               and c["runtime"] == args.runtime
+               and (args.model in c["model"] if args.model else True)]
+        models = sorted({c["model"] for c in sel})
+        if len(models) > 1:
+            die("multiple models in %s (%s); pick one with --model"
+                % (where, ", ".join(models)))
+        return sel
+
+    main_cells = pick(cells_from(args.inputs), ", ".join(args.inputs))
+    if not main_cells:
+        die("no cells match arm=%s runtime=%s" % (args.arm, args.runtime))
+    ref_cells = pick(cells_from([args.ref]), args.ref) if args.ref else []
+    rows = []
+    for cells, is_ref in ((main_cells, False), (ref_cells, True)):
+        per = {}
+        for c in cells:
+            per.setdefault(c["depth"], {})[c["conc"]] = (
+                c["conc"] * c["decode_tps"], c["decode_tps_cv"])
+        for depth, pts in per.items():
+            raw = fmt_depth_k(depth) + " ctx"
+            if is_ref:
+                raw += " (%s)" % args.ref_label
+            rows.append({"raw": raw, "depth": depth, "dash": is_ref,
+                         "pts": pts})
+    rows = [r for r in rows if keep(r["raw"], args.include, args.exclude)]
+    if not rows:
+        die("no series left after --include/--exclude")
+    rows.sort(key=lambda r: (r["depth"], r["dash"]))
+    fig = Fig(args, "Aggregate decode throughput vs concurrent streams")
+    ci = {d: i for i, d in enumerate(sorted({r["depth"] for r in rows}))}
+    items = []
+    for r in rows:
+        r["label"] = relabel(r["raw"], args.labels)
+        r["color"] = fig.color(ci[r["depth"]])
+        items.append((r["label"], r["color"], "dash" if r["dash"] else "line"))
+    px0, py0, px1, py1 = fig.layout(items, left=fig.fs * 3.4)
+    concs = sorted({c for r in rows for c in r["pts"]})
+    xpos = {c: px0 + (px1 - px0) * ((i + 0.5) / len(concs))
+            for i, c in enumerate(concs)}
+    _lines_panel(fig, (px0, py0, px1, py1), rows, "aggregate decode tok/s",
+                 concs, lambda c: xpos[c], zero=True)
+    fig.svg.text((px0 + px1) / 2, py1 + fig.fs * 2.5, "concurrent streams",
+                 fig.fs * 0.95, fig.t["muted"], anchor="middle")
+    fig.save()
+
+
 # ---------------------------------------------------------------- cli
 
 def lbl_pair(s):
@@ -867,6 +922,19 @@ def main():
     p.add_argument("--with-ref", action="store_true",
                    help="also plot llama.cpp own mtp/base lift (dashed)")
     p.set_defaults(fn=chart_mtp_lift)
+
+    p = sub.add_parser("batch-scaling",
+                       help="aggregate decode (c x per-stream median) vs "
+                            "concurrency, one line per depth; --ref overlays "
+                            "a second run dashed")
+    add_common(p)
+    p.add_argument("--arm", default="baseline", help="default baseline")
+    p.add_argument("--runtime", default="gmlx", help="default gmlx")
+    p.add_argument("--model", help="substring filter when inputs carry several")
+    p.add_argument("--ref", help="serve-bench JSON overlaid dashed")
+    p.add_argument("--ref-label", default="strict alternation",
+                   help="legend suffix for --ref series")
+    p.set_defaults(fn=chart_batch_scaling)
 
     args = ap.parse_args()
     _DROP_DEPTHS.update(getattr(args, "drop_depth", []) or [])

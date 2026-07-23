@@ -8,7 +8,7 @@ partial reruns. Pure stdlib besides `gmlx` itself and `requests`;
 | File | What it does |
 |---|---|
 | `serve-bench.py` | gmlx vs llama.cpp (or ds4-server) through each server's OpenAI API: prefill + decode at KV depth, baseline + speculative (MTP) arms. Writes a md report, a raw JSON, and the same SVG charts the docs publish. |
-| `plot-bench.py` | Stdlib SVG renderer for the three published chart grammars: `panels`, `fleet-ratio`, `mtp-lift`. Invoked automatically by `serve-bench.py` (`--no-svg` to skip). |
+| `plot-bench.py` | Stdlib SVG renderer for the published chart grammars: `panels`, `fleet-ratio`, `mtp-lift`, `batch-scaling`. The first three are invoked automatically by `serve-bench.py` (`--no-svg` to skip); `batch-scaling` (aggregate decode vs concurrent streams, optional `--ref` overlay of a second run) is rendered by hand from a concurrency-sweep JSON. |
 | `merge.py` | Folds many `serve-bench-*.json` into per-model files, newest cell wins. Use after partial reruns, then re-render charts from the merged files. |
 | `example.json` | Config template (three models: native-MTP, drafter-MTP, no MTP). |
 | `patches/ds4-ignore-eos.patch` | Required on the ds4-server arm for forced-length decode. |
