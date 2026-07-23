@@ -53,6 +53,28 @@ def route_shed_op():
     return getattr(kq, "route_shed", None)
 
 
+def register_exit_stats(gt: GpuTokenState) -> None:
+    """Print the autonomous ledger at exit. Weakref, like the feeder's own
+    exit hook: a strong reference would pin an unloaded model's state."""
+    import atexit
+    import weakref
+
+    wref = weakref.ref(gt)
+
+    def _stats_at_exit():
+        g = wref()
+        if g is None:
+            return
+        # A partial final token never hit a boundary; fold it in.
+        if g._records:
+            g.boundary()
+        line = g.close_stats()
+        if line:
+            print(line)
+
+    atexit.register(_stats_at_exit)
+
+
 class GpuTokenState:
     """Per-model autonomous-token bookkeeping around one decode feeder."""
 

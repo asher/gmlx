@@ -1837,6 +1837,7 @@ def install_expert_streaming(
                 )
             else:
                 gt = gpu_token.GpuTokenState(dfeeder)
+                gpu_token.register_exit_stats(gt)
                 for li, mods in moe_modules.items():
                     if dfeeder.covers(li):
                         for m in mods:
