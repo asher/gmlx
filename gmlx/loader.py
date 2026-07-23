@@ -1462,6 +1462,54 @@ def install_expert_streaming(
                             return mx.zeros(
                                 (*x.shape[:-1], indices.shape[-1],
                                  x.shape[-1]), dtype=x.dtype)
+                    gt = getattr(self, "_kq_gpu_token", None)
+                    if (
+                        gt is not None
+                        and gt._route_shed is not None
+                        and cpu_only
+                        and n_tokens == 1
+                        and scores_arg is not None
+                        and dfr is not None
+                        and dfr.covers(self._kq_li)
+                        and not dfr.wedged_at(self._kq_li)
+                    ):
+                        # GPU-autonomous token (gpu-dispatch Tier 2): no
+                        # per-layer eval. route_shed remaps ids to arena
+                        # slots and sheds non-resident experts on the GPU;
+                        # the token flushes once at the logits, and the
+                        # host consumes recorded misses at the boundary
+                        # (popularity + prestage + fresh slot tables) - see
+                        # gpu_token.py for the fence argument.
+                        gt.on_layer_entry(
+                            self._kq_li,
+                            getattr(self, "_kq_miss_shed", None))
+                        tbl = gt.table(self._kq_li)
+                        self._kq_cpu_only = False
+                        try:
+                            with dfr.swapped(self._kq_li):
+                                with mx.stream(mx.gpu):
+                                    sc_f32 = scores_arg.astype(mx.float32)
+                                    slots, mix, m_ids, m_sc = (
+                                        gt._route_shed(
+                                            indices.astype(mx.uint32),
+                                            sc_f32, tbl))
+                                    gt.record(
+                                        self._kq_li, indices, sc_f32,
+                                        m_ids, m_sc)
+                                    mix_c = mix.astype(x.dtype)
+                                    if _fwd_scores:
+                                        y = super().__call__(
+                                            x, slots, mix_c,
+                                            *args[1:], **kwargs)
+                                    else:
+                                        y = super().__call__(
+                                            x, slots, *args, **kwargs)
+                                        if y.ndim == x.ndim + 1:
+                                            y = (y * mix_c[..., None]).sum(
+                                                axis=-2)
+                            return y
+                        finally:
+                            self._kq_cpu_only = True
                     if la is not None and cpu_only and small:
                         # Lookahead: run the NEXT MoE layer's router on this
                         # layer's input and evaluate it together with the
@@ -1777,6 +1825,29 @@ def install_expert_streaming(
                 f"popularity-managed expert arena ({wired}){cov} "
                 "(--no-decode-feeder disables, GMLX_DECODE_ARENA_GB sizes)"
             )
+    if streaming and dfeeder is not None:
+        from . import gpu_token
+
+        if gpu_token.autonomous_enabled():
+            if gpu_token.route_shed_op() is None:
+                print(
+                    "[stream] gpu-autonomous: requested but the installed "
+                    "mlx_kquant has no route_shed op; falling back to "
+                    "per-layer staging"
+                )
+            else:
+                gt = gpu_token.GpuTokenState(dfeeder)
+                for li, mods in moe_modules.items():
+                    if dfeeder.covers(li):
+                        for m in mods:
+                            object.__setattr__(m, "_kq_gpu_token", gt)
+                object.__setattr__(model, "_kq_gpu_token", gt)
+                print(
+                    "[stream] gpu-autonomous token: route_shed remaps + "
+                    "sheds on GPU, one flush per token, misses prestage at "
+                    "token boundaries (lossy at low hit rates; "
+                    "GMLX_GPU_AUTONOMOUS=1 enables)"
+                )
     if streaming and dfeeder is not None and env_bool(
             "GMLX_GPU_KEEPWARM", False):
         from . import keepwarm
