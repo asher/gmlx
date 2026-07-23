@@ -1463,26 +1463,38 @@ def install_expert_streaming(
                                 (*x.shape[:-1], indices.shape[-1],
                                  x.shape[-1]), dtype=x.dtype)
                     gt = getattr(self, "_kq_gpu_token", None)
-                    if (
+                    gt_live = (
                         gt is not None
                         and gt._route_shed is not None
                         and cpu_only
                         and n_tokens == 1
-                        and scores_arg is not None
                         and dfr is not None
                         and dfr.covers(self._kq_li)
-                        and not dfr.wedged_at(self._kq_li)
-                    ):
-                        # GPU-autonomous token (gpu-dispatch Tier 2): no
-                        # per-layer eval. route_shed remaps ids to arena
-                        # slots and sheds non-resident experts on the GPU;
-                        # the token flushes once at the logits, and the
-                        # host consumes recorded misses at the boundary
-                        # (popularity + prestage + fresh slot tables) - see
-                        # gpu_token.py for the fence argument.
+                    )
+                    if gt_live:
+                        # Token tick for EVERY covered decode layer, stage
+                        # path included: boundary detection and the
+                        # adaptive hot-set refresh live here.
                         gt.on_layer_entry(
                             self._kq_li,
                             getattr(self, "_kq_miss_shed", None))
+                    if (
+                        gt_live
+                        and scores_arg is not None
+                        and not dfr.wedged_at(self._kq_li)
+                        and gt.layer_autonomous(self._kq_li)
+                    ):
+                        # GPU-autonomous layer (gpu-dispatch Tier 2): no
+                        # per-layer eval. route_shed remaps ids to arena
+                        # slots and sheds non-resident experts on the GPU;
+                        # the graph flushes at the next stage-path layer's
+                        # eval or the logits, and the host consumes the
+                        # recorded misses at the token boundary
+                        # (popularity + prestage + fresh slot tables) - see
+                        # gpu_token.py for the fence argument. In adaptive
+                        # mode only layers with a measured hit rate above
+                        # GMLX_AUTO_HOT_HIT run here, so the shed cost per
+                        # layer is near zero.
                         tbl = gt.table(self._kq_li)
                         self._kq_cpu_only = False
                         try:
@@ -1843,11 +1855,16 @@ def install_expert_streaming(
                         for m in mods:
                             object.__setattr__(m, "_kq_gpu_token", gt)
                 object.__setattr__(model, "_kq_gpu_token", gt)
+                mode_note = (
+                    "all covered layers syncless (shed-heavy diagnostic)"
+                    if gpu_token.autonomous_mode() == "all"
+                    else "adaptive: layers above GMLX_AUTO_HOT_HIT go "
+                    "syncless, the rest keep per-layer staging"
+                )
                 print(
                     "[stream] gpu-autonomous token: route_shed remaps + "
-                    "sheds on GPU, one flush per token, misses prestage at "
-                    "token boundaries (lossy at low hit rates; "
-                    "GMLX_GPU_AUTONOMOUS=1 enables)"
+                    f"sheds on GPU; {mode_note}; misses prestage at "
+                    "token boundaries (GMLX_GPU_AUTONOMOUS=1|all)"
                 )
     if streaming and dfeeder is not None and env_bool(
             "GMLX_GPU_KEEPWARM", False):

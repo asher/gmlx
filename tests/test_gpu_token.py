@@ -112,7 +112,8 @@ def _autonomous_glu(monkeypatch, fake_df):
     install_expert_streaming(model)
     object.__setattr__(glu, "_kq_decode_feeder", fake_df)
     object.__setattr__(glu, "_kq_li", 5)
-    object.__setattr__(glu, "_kq_gpu_token", GpuTokenState(fake_df))
+    object.__setattr__(
+        glu, "_kq_gpu_token", GpuTokenState(fake_df, mode="all"))
     return glu
 
 
@@ -162,6 +163,47 @@ class _FakeDF:
 
     def prestage(self, li, ids, *, demand=False, protect=None):
         self.prestage_calls.append((li, ids.copy(), demand))
+
+
+def test_adaptive_hot_set_from_layer_hit_rates(monkeypatch, tmp_path):
+    """Adaptive mode flips only measured-hot layers syncless, needs the
+    minimum sample, and reverts a layer whose hit rate degrades."""
+    feeder, _ = _make_feeder(monkeypatch, tmp_path)
+    gt = GpuTokenState(feeder, mode="adaptive")
+    gt._min_lookups = 10
+    gt._hot_hit = 0.9
+
+    feeder._layer_lookups = {0: 100, 1: 100, 2: 5}
+    feeder._layer_hits = {0: 95, 1: 50, 2: 5}
+    gt._refresh_auto_layers()
+    assert gt.layer_autonomous(0)  # 95% over 100 lookups
+    assert not gt.layer_autonomous(1)  # cold
+    assert not gt.layer_autonomous(2)  # under min sample
+
+    feeder._layer_hits[0] = 80  # drift: 80% now
+    gt._refresh_auto_layers()
+    assert not gt.layer_autonomous(0)
+
+    gt_all = GpuTokenState(feeder, mode="all")
+    assert gt_all.layer_autonomous(1)  # diagnostic mode ignores stats
+
+
+def test_on_layer_entry_ticks_refresh(monkeypatch, tmp_path):
+    """The hot-set refresh fires on token wraps even when no layer is
+    autonomous yet (stage-path ticks drive it)."""
+    feeder, _ = _make_feeder(monkeypatch, tmp_path)
+    gt = GpuTokenState(feeder, mode="adaptive")
+    gt._min_lookups = 1
+    gt._hot_hit = 0.5
+    feeder._layer_lookups = {0: 10}
+    feeder._layer_hits = {0: 10}
+    import gmlx.gpu_token as gpu_token_mod
+
+    monkeypatch.setattr(gpu_token_mod, "_REFRESH_TOKENS", 2)
+    assert not gt.layer_autonomous(0)
+    for _ in range(3):  # wraps at same li tick the token counter
+        gt.on_layer_entry(0)
+    assert gt.layer_autonomous(0)
 
 
 def test_wrapper_autonomous_all_resident_is_transparent(monkeypatch):

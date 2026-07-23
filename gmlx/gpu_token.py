@@ -30,6 +30,7 @@ buckets do not apply on this path.
 
 from __future__ import annotations
 
+import os
 from concurrent.futures import wait as futures_wait
 
 import numpy as np
@@ -37,13 +38,29 @@ import numpy as np
 import mlx.core as mx
 
 from .decode_feeder import _DECAY_EVERY
-from .envflags import env_bool
+from .envflags import env_bool, env_float, env_int
 
 _ENV = "GMLX_GPU_AUTONOMOUS"
+# Adaptive mode: a layer goes syncless once its measured hit rate clears
+# this bar over at least this many lookups; re-decided every refresh.
+# At hit h an autonomous layer sheds ~(1-h) of its routed experts, so the
+# default bar keeps the per-layer quality cost near zero.
+_HOT_HIT_ENV = "GMLX_AUTO_HOT_HIT"
+_MIN_LOOKUPS_ENV = "GMLX_AUTO_MIN_LOOKUPS"
+_REFRESH_TOKENS = 64
+
+
+def autonomous_mode() -> str:
+    """'' (off), 'adaptive' (hot layers only - default), or 'all'
+    (every covered layer syncless; the shed-heavy diagnostic mode)."""
+    raw = os.environ.get(_ENV, "")
+    if raw.strip().lower() == "all":
+        return "all"
+    return "adaptive" if env_bool(_ENV, False) else ""
 
 
 def autonomous_enabled() -> bool:
-    return env_bool(_ENV, False)
+    return autonomous_mode() != ""
 
 
 def route_shed_op():
@@ -80,7 +97,12 @@ def register_exit_stats(gt: GpuTokenState) -> None:
 class GpuTokenState:
     """Per-model autonomous-token bookkeeping around one decode feeder."""
 
-    def __init__(self, feeder, keep_mass: float | None = None):
+    def __init__(
+        self,
+        feeder,
+        keep_mass: float | None = None,
+        mode: str | None = None,
+    ):
         self._dfr = feeder
         self._route_shed = route_shed_op()
         # Over-budget accounting threshold: the same P the python miss-shed
@@ -90,6 +112,10 @@ class GpuTokenState:
         # Diagnostic: GMLX_AUTO_PRESTAGE=0 freezes residency (no boundary
         # staging or joins) to isolate pure one-flush graph speed.
         self._prestage = env_bool("GMLX_AUTO_PRESTAGE", True)
+        self._mode = mode or autonomous_mode() or "adaptive"
+        self._hot_hit = env_float(_HOT_HIT_ENV, 0.97)
+        self._min_lookups = env_int(_MIN_LOOKUPS_ENV, 500)
+        self._auto_layers: set[int] = set()
         self._tables: dict[int, mx.array] = {}
         # (li, indices, scores, miss_ids, miss_scores) lazy per-layer records
         # of the in-flight token, consumed at the next boundary.
@@ -97,6 +123,7 @@ class GpuTokenState:
             tuple[int, mx.array, mx.array, mx.array, mx.array]
         ] = []
         self._last_li = -1
+        self._token_ticks = 0
         # Stats (reported at feeder close via close_stats()).
         self.tokens = 0
         self.layer_calls = 0
@@ -106,15 +133,30 @@ class GpuTokenState:
     # ---- in-token (graph building) ----
 
     def on_layer_entry(self, li: int, keep_mass: float | None = None) -> None:
-        """Token boundary detection: layer indices increase within a token,
-        so a wrap (li <= last seen) means the previous token flushed.
+        """Called for EVERY covered decode layer call (stage-path or
+        autonomous). Token boundary detection: layer indices increase
+        within a token, so a wrap (li <= last seen) means the previous
+        token flushed. On a wrap: consume records, and periodically
+        re-decide which layers are hot enough to run syncless.
         ``keep_mass`` mirrors the module's --moe-miss-shed P for the
         over-budget ledger (install_moe_miss_shed runs after load)."""
         if keep_mass is not None:
             self._keep_mass = keep_mass
-        if self._records and li <= self._last_li:
-            self.boundary()
+        if li <= self._last_li:
+            if self._records:
+                self.boundary()
+            self._token_ticks += 1
+            if (
+                self._mode == "adaptive"
+                and self._token_ticks % _REFRESH_TOKENS == 0
+            ):
+                self._refresh_auto_layers()
         self._last_li = li
+
+    def layer_autonomous(self, li: int) -> bool:
+        if self._mode == "all":
+            return True
+        return li in self._auto_layers
 
     def table(self, li: int) -> mx.array:
         tbl = self._tables.get(li)
@@ -219,16 +261,38 @@ class GpuTokenState:
             self._tables[li] = self._snapshot(li)
 
     def close_stats(self) -> str | None:
-        if not self.tokens:
+        if not self.tokens and not self._token_ticks:
             return None
+        mode = (
+            f"{len(self._auto_layers)}/{len(self._dfr._slot_of)} layers "
+            f"hot @hit>={self._hot_hit:g}"
+            if self._mode == "adaptive"
+            else "all layers"
+        )
         return (
-            f"[stream] gpu-autonomous: {self.tokens} tokens, "
-            f"{self.layer_calls} layer calls, {self.miss_n} misses shed, "
+            f"[stream] gpu-autonomous ({mode}): {self.tokens} tokens, "
+            f"{self.layer_calls} syncless layer calls, "
+            f"{self.miss_n} misses shed, "
             f"{self.over_budget_layers} over-budget layer calls "
             f"({100.0 * self.over_budget_layers / max(self.layer_calls, 1):.2f}%)"
         )
 
     # ---- internals ----
+
+    def _refresh_auto_layers(self) -> None:
+        """Re-decide the syncless set from measured per-layer hit rates.
+        Both modes keep the stats flowing (stage() on the stage path,
+        boundary() here), so a hot layer that degrades under routing
+        drift reverts to per-layer staging at the next refresh."""
+        dfr = self._dfr
+        hot: set[int] = set()
+        for li in dfr._slot_of:
+            n = dfr._layer_lookups.get(li, 0)
+            if n < self._min_lookups:
+                continue
+            if dfr._layer_hits.get(li, 0) / n >= self._hot_hit:
+                hot.add(li)
+        self._auto_layers = hot
 
     def _snapshot(self, li: int) -> mx.array:
         return mx.array(self._dfr._slot_of[li].astype(np.int32, copy=True))
