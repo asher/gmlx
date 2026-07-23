@@ -207,7 +207,7 @@ def test_wrapper_autonomous_miss_sheds_and_prestages(monkeypatch):
     mx.eval(out2)
     gt = glu._kq_gpu_token
     assert gt.tokens == 1 and gt.miss_n == 1
-    assert df.flush_calls == [5]
+    assert df.flush_calls == [5, 5]  # pre-submit + post-join publish
     assert len(df.prestage_calls) == 1
     li, ids = df.prestage_calls[0]
     assert li == 5 and list(ids.reshape(-1)) == [3]
