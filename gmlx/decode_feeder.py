@@ -722,14 +722,24 @@ class DecodeFeeder:
         self._shed_tokens += 1
         return keep
 
-    def prestage(self, li: int, pred_ids: np.ndarray) -> None:
+    def prestage(self, li: int, pred_ids: np.ndarray, *,
+                 demand: bool = False,
+                 protect: np.ndarray | None = None) -> None:
         """Asynchronously pre-read predicted experts into layer ``li``'s
         arena. Safe under the same fence as ``stage`` (the caller's router
         eval for the *previous* MoE layer of the same token transitively
         fenced every gather that could reference this arena). Slots are
         reserved (-4) at submission and published only when their read has
         completed, so a concurrent lookup can never map an expert to a
-        slot holding partial bytes. Predictions never touch popularity."""
+        slot holding partial bytes. Predictions never touch popularity.
+
+        ``demand=True`` is the gpu-autonomous boundary mode: the ids are
+        certain next-token demand (misses the kernel shed), not guesses,
+        so the guess-grade eviction guard (never displace a more popular
+        resident) is dropped and stage()'s policy applies: evict the
+        least-popular resident outright. ``protect`` lists expert ids
+        whose slots must survive this call (the token's routed set -
+        routing locality makes them next token's likely demand)."""
         if (
             li not in self._layers
             or self._staging_disabled
@@ -747,10 +757,16 @@ class DecodeFeeder:
         # Only the top GMLX_DECODE_LOOKAHEAD_K ranks per row are considered (the
         # ranking head is reliable, the tail is not); residents among them
         # are simply already-good news, not license to dig deeper.
-        rows = pred_ids.reshape(-1, pred_ids.shape[-1])[:, : self._la_k]
+        if demand:
+            rows = pred_ids.reshape(-1, pred_ids.shape[-1])
+        else:
+            rows = pred_ids.reshape(-1, pred_ids.shape[-1])[:, : self._la_k]
         picked: list[int] = []
         seen: set[int] = set()
         protected = np.zeros(len(owner), dtype=bool)
+        if protect is not None:
+            ps = slot_of[protect.reshape(-1)]
+            protected[ps[ps >= 0]] = True
         for e in rows.T.reshape(-1):  # rank-major: every row's head first
             e = int(e)
             if e in seen:
@@ -782,7 +798,10 @@ class DecodeFeeder:
                 if not len(cand):
                     break
                 v = int(np.argmin(counts[owner[cand]]))
-                if counts[owner[cand]][v] > counts[e]:
+                if not demand and counts[owner[cand]][v] > counts[e]:
+                    # Guess-grade guard: a wrong prediction may only cost
+                    # a cold slot, never a hot one. Demand mode evicts
+                    # least-popular outright, like stage().
                     continue
                 s = int(cand[v])
                 old = int(owner[s])

@@ -160,8 +160,8 @@ class _FakeDF:
     def _flush_pending(self, li):
         self.flush_calls.append(li)
 
-    def prestage(self, li, ids):
-        self.prestage_calls.append((li, ids.copy()))
+    def prestage(self, li, ids, *, demand=False, protect=None):
+        self.prestage_calls.append((li, ids.copy(), demand))
 
 
 def test_wrapper_autonomous_all_resident_is_transparent(monkeypatch):
@@ -209,7 +209,7 @@ def test_wrapper_autonomous_miss_sheds_and_prestages(monkeypatch):
     assert gt.tokens == 1 and gt.miss_n == 1
     assert df.flush_calls == [5, 5]  # pre-submit + post-join publish
     assert len(df.prestage_calls) == 1
-    li, ids = df.prestage_calls[0]
-    assert li == 5 and list(ids.reshape(-1)) == [3]
+    li, ids, demand = df.prestage_calls[0]
+    assert li == 5 and list(ids.reshape(-1)) == [3] and demand
     assert df._counts[5][1] > 0 and df._counts[5][3] > 0
     assert df._shed_n == 1

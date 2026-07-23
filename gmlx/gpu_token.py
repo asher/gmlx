@@ -190,7 +190,11 @@ class GpuTokenState:
             # certain-demand misses.
             dfr._flush_pending(li)
             if n_miss:
-                dfr.prestage(li, missed.reshape(-1, 1))
+                # Demand mode: these are certain misses, not guesses -
+                # least-popular eviction, with the token's routed set
+                # shielded (locality makes it next token's likely demand).
+                dfr.prestage(
+                    li, missed.reshape(-1, 1), demand=True, protect=routed)
         # JOIN the submitted reads: all layers' misses read concurrently at
         # SSD queue depth, one boundary wait instead of 75 per-layer stalls.
         # Without this the routing locality across tokens re-routes (and
