@@ -30,6 +30,8 @@ buckets do not apply on this path.
 
 from __future__ import annotations
 
+from concurrent.futures import wait as futures_wait
+
 import numpy as np
 
 import mlx.core as mx
@@ -182,13 +184,29 @@ class GpuTokenState:
                 dfr._shed_n += n_miss
                 dfr._shed_mass += dropped / max(total, 1e-20)
                 dfr._shed_tokens += 1
-            # Publish reads submitted at the previous boundary, then submit
-            # for this token's misses. One id per row: prestage keeps only
-            # the top GMLX_DECODE_LOOKAHEAD_K ranks per row, and unlike
-            # lookahead guesses these are certain-demand misses.
+            # Publish any stragglers, then submit this token's misses. One
+            # id per row: prestage keeps only the top GMLX_DECODE_LOOKAHEAD_K
+            # ranks per row, and unlike lookahead guesses these are
+            # certain-demand misses.
             dfr._flush_pending(li)
             if n_miss:
                 dfr.prestage(li, missed.reshape(-1, 1))
+        # JOIN the submitted reads: all layers' misses read concurrently at
+        # SSD queue depth, one boundary wait instead of 75 per-layer stalls.
+        # Without this the routing locality across tokens re-routes (and
+        # re-sheds) the same experts next token - measured 2x the shed rate
+        # and >50% over-budget on GLM. Publish, then snapshot.
+        deadline = dfr._read_timeout if dfr._read_timeout > 0 else None
+        futs = [
+            f
+            for li, *_ in records
+            for _, fs, _ in dfr._pending.get(li, {}).values()
+            for f in fs
+        ]
+        if futs:
+            futures_wait(futs, timeout=deadline)
+        for li, *_ in records:
+            dfr._flush_pending(li)
         # All mutations done: snapshot every table the next graph will use.
         for li in list(self._tables):
             self._tables[li] = self._snapshot(li)

@@ -67,16 +67,10 @@ def test_boundary_prestages_misses_and_fences_tables(monkeypatch, tmp_path):
     # keep_mass 0.9 allows 10% mass; 0.3 dropped = over budget.
     assert gt.over_budget_layers == 1
 
-    # The boundary snapshot must NOT contain expert 2 (its read is still
-    # in flight / unpublished) and must not map the eviction victim.
-    tbl2 = np.array(gt.table(0))
-    assert tbl2[2] < 0
-
-    # Once the read lands, the NEXT boundary publishes and the snapshot
-    # picks it up.
-    _wait_pending(feeder, 0)
-    gt.record(0, idx, sc, m_ids, m_sc, mix)  # drives the boundary
-    gt.boundary()
+    # The boundary JOINS the prestage reads before snapshotting: the
+    # missed expert is resident for the very next token (1-token lag),
+    # with nothing left in flight when tables are taken.
+    assert not feeder._pending.get(0)
     assert np.array(gt.table(0))[2] >= 0
 
 
@@ -141,6 +135,8 @@ class _FakeDF:
         self._shed_n = 0
         self._shed_mass = 0.0
         self._shed_tokens = 0
+        self._read_timeout = 0
+        self._pending = {}
         self.prestage_calls = []
         self.flush_calls = []
         self.swap_calls = []
