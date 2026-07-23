@@ -199,6 +199,48 @@ instead of re-prefilling the previous reply, and a warm hit restores the
 draft head's state along with the base model's. Details and switches:
 [server-config.md](server-config.md#speculative-decoding--the-prompt-cache).
 
+## Serving concurrent requests
+
+The server decodes all active streams as one batch. Decode is
+bandwidth-bound and the batched step reads the weights once for every
+stream, so aggregate throughput rises with client count while each stream
+gives up less than its proportional share. Steady-state batched decode
+measured on an M5 Max (Qwen3.6-35B-A3B Q6_K): three streams deliver 1.3-1.7x
+the aggregate of one, the ratio narrowing as context deepens because
+attention work is per-stream and does not amortize.
+
+What needs managing is admission: a new request's prompt must prefill while
+existing streams are mid-decode. Prefill runs in 2048-token chunks, and a
+scheduler that simply alternates one decode step with one chunk lets a long
+admission starve live streams, because at depth a chunk costs hundreds of
+decode steps' worth of GPU time. The server paces admissions instead:
+`decode_prefill_ratio` (default `1.0`) admits the next chunk only after the
+decode batch has received that multiple of the previous chunk's GPU time. At
+the default, live streams keep roughly half their throughput while a prompt
+is admitted, and the incoming request's time-to-first-token stretches by up
+to (1 + ratio)x under load. Raise the ratio when live-stream decode matters
+most, lower it toward `0` when time-to-first-token does; `0` restores strict
+alternation. Prefill runs at full speed whenever nothing is decoding, so
+single-client serving is unaffected.
+
+The deeper the context, the more this matters. In our serve benchmarks on
+the same 35B-A3B, adding a second client at 14k tokens used to drop
+aggregate decode to 0.57x of single-stream; paced, it lands above
+single-stream. At 50k tokens each of two streams held ~10 tok/s under
+alternation and ~50 tok/s paced, because a 50k admission previously froze
+live streams for tens of seconds. The key is `server.decode_prefill_ratio`
+([server-config.md](server-config.md)), the `serve` flag is
+`--decode-prefill-ratio`, and the `GMLX_DECODE_PREFILL_RATIO` env is read
+per scheduler tick, so it can be changed on a live server.
+
+Two interactions to know. Pacing applies to speculative (MTP) serving too,
+and the MoE note in the speculation section still holds: verification widens
+expert reads under concurrent load, so benchmark speculation at your real
+client count. And the prompt cache is the strongest admission lever of all:
+a warm prefix skips its prefill outright, leaving pacing to govern only the
+cold suffix. Agent sessions that resend a cached history and add a few
+thousand tokens admit almost for free.
+
 ## Memory and the KV cache
 
 Weights cost about the GGUF file size. The KV cache, for a standard dense model:

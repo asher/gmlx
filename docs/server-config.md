@@ -174,8 +174,9 @@ server:
   token_queue_timeout_s: null # seconds to wait for the NEXT token before aborting a request
                              #   (null => mlx-vlm's own default, 600; 0 => never)
   prefill_step_size: null    # prefill chunk size in tokens for every model on this server
-  decode_prefill_ratio: null # decode GPU-time share per prefill chunk under load (default 1.0)
                              #   (null => the default, 2048; lower caps peak memory on long prompts)
+  decode_prefill_ratio: null # decode GPU-time share per admission prefill chunk under load
+                             #   (null => the default, 1.0; 0 => strict alternation; see below)
   cache_limit_gb: null       # MLX buffer-cache cap in GiB (null => auto: bounded only when the
                              #   biggest model leaves little working-set slack; negative => never bound)
   family_defaults: true      # built-in per-family model-card sampling + @intents (false turns them off)
@@ -245,7 +246,8 @@ Prefill runs at full speed whenever nothing is decoding, so a single-stream
 server is unaffected. Also available as `--decode-prefill-ratio` on `serve`
 (the flag wins over the config) or an exported `GMLX_DECODE_PREFILL_RATIO`
 (read per scheduler tick, so it can be flipped on a live server). Applies to
-speculative (MTP) serving too.
+speculative (MTP) serving too. Background and measured effects:
+[performance.md](performance.md#serving-concurrent-requests).
 
 `cache_limit_gb` caps MLX's buffer cache (the wired pool of freed GPU buffers
 kept for reuse). Left `null`, the server bounds it automatically only when
