@@ -1493,9 +1493,6 @@ def install_expert_streaming(
                                         gt._route_shed(
                                             indices.astype(mx.uint32),
                                             sc_f32, tbl))
-                                    gt.record(
-                                        self._kq_li, indices, sc_f32,
-                                        m_ids, m_sc)
                                     mix_c = mix.astype(x.dtype)
                                     if _fwd_scores:
                                         y = super().__call__(
@@ -1507,6 +1504,9 @@ def install_expert_streaming(
                                         if y.ndim == x.ndim + 1:
                                             y = (y * mix_c[..., None]).sum(
                                                 axis=-2)
+                                    gt.record(
+                                        self._kq_li, indices, sc_f32,
+                                        m_ids, m_sc, y)
                             return y
                         finally:
                             self._kq_cpu_only = True

@@ -55,7 +55,7 @@ def test_boundary_prestages_misses_and_fences_tables(monkeypatch, tmp_path):
     assert np.array(m_ids).reshape(-1)[0] == 2  # non-resident 2 shed
 
     lookups0, calls0 = feeder._lookups, feeder._calls
-    gt.record(0, idx, sc, m_ids, m_sc)
+    gt.record(0, idx, sc, m_ids, m_sc, mix)
     gt.boundary()
 
     # Popularity and ledger credit for the whole routed set.
@@ -75,7 +75,7 @@ def test_boundary_prestages_misses_and_fences_tables(monkeypatch, tmp_path):
     # Once the read lands, the NEXT boundary publishes and the snapshot
     # picks it up.
     _wait_pending(feeder, 0)
-    gt.record(0, idx, sc, m_ids, m_sc)  # any record to drive the boundary
+    gt.record(0, idx, sc, m_ids, m_sc, mix)  # drives the boundary
     gt.boundary()
     assert np.array(gt.table(0))[2] >= 0
 
@@ -90,10 +90,10 @@ def test_on_layer_entry_detects_token_wrap(monkeypatch, tmp_path):
     mx.eval(*outs)
 
     gt.on_layer_entry(0)
-    gt.record(0, idx, sc, outs[2], outs[3])
+    gt.record(0, idx, sc, outs[2], outs[3], outs[1])
     gt.on_layer_entry(1)  # same token, higher layer: no boundary
     assert gt.tokens == 0
-    gt.record(1, idx, sc, outs[2], outs[3])
+    gt.record(1, idx, sc, outs[2], outs[3], outs[1])
     gt.on_layer_entry(0)  # wrap: previous token flushed
     assert gt.tokens == 1
     assert not gt._records

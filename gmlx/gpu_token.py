@@ -125,8 +125,9 @@ class GpuTokenState:
         scores: mx.array,
         miss_ids: mx.array,
         miss_scores: mx.array,
+        y: mx.array,
     ) -> None:
-        self._records.append((li, indices, scores, miss_ids, miss_scores))
+        self._records.append((li, indices, scores, miss_ids, miss_scores, y))
         self.layer_calls += 1
 
     # ---- token boundary (host) ----
@@ -136,10 +137,18 @@ class GpuTokenState:
         dfr = self._dfr
         records, self._records = self._records, []
         self.tokens += 1
+        # JOIN before any arena mutation. The decode loop pipelines: the
+        # next token's graph is being built while the previous one may
+        # still be executing, and np-reading the miss arrays only forces
+        # the routers, not the gathers that read arena slots. Evaluating
+        # every recorded layer output forces those gathers to completion,
+        # so the prestage evictions below can never overwrite a slot a
+        # live gather is reading.
+        mx.eval(*[r[5] for r in records])
         budget = (
             (1.0 - self._keep_mass) if self._keep_mass is not None else 0.0
         )
-        for li, indices, scores, miss_ids, miss_scores in records:
+        for li, indices, scores, miss_ids, miss_scores, _y in records:
             counts = dfr._counts.get(li)
             if counts is None:
                 continue
