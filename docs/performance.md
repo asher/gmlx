@@ -381,9 +381,20 @@ The cost is power, and only while decoding: the heartbeat parks (no GPU
 work) after one second without decode activity and wakes on the next
 streamed decode call (`GMLX_KEEPWARM_IDLE_S` tunes the window; `0` beats
 continuously). An idle server pays nothing; the first token after an idle
-gap pays one clock ramp. It is opt-in because it spends a few watts to
-make the GPU busier for the same output - on battery that trade is yours
-to make, not a default.
+gap pays one clock ramp.
+
+The heartbeat kernel itself is nearly free, and measuring it shows the
+mechanism plainly (powermetrics, M5 Max, heartbeat alone on an otherwise
+idle box): GPU power 199 mW -> 287 mW, while GPU active residency went
+from 58% to 99.8% with the clock still at the 338 MHz floor. The beat
+does not raise clocks - it removes idleness. During decode the model's
+own bursts set the clock level; the heartbeat keeps the GPU from going
+idle in the gaps, so the governor holds that level instead of sagging
+and re-ramping every layer. The real power cost is therefore holding
+the decode-level P-state through the gaps, which scales with how hard
+the workload drives the clock - the ~0.1 W kernel is noise against it.
+It is opt-in because that trade - more watts for the same output,
+faster - is yours to make, not a default, especially on battery.
 
 Four levers trade a bounded amount of output quality for decode speed on
 streamed MoE models. None is ever on by default: absent flags and absent
