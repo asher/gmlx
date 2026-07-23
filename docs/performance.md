@@ -525,6 +525,32 @@ clean, producing complete working artifacts with no stray tokens. The
 probe sizes expert-mass, but it cannot see residency; when the exit
 stats show a low hit rate, reach for miss-shed first.
 
+A third measured point moves one variable: routing width. GLM-5.2
+(278 GB UD-IQ3_XXS, 256 experts top-8, sigmoid gating) streams on the
+same machine at a per-expert hit rate near 88% - healthier than M3's -
+yet stalls more, because a layer stalls when any of eight routed
+experts miss, not four: at hit rate h the stall odds are 1 - h^k, so
+k = 8 roughly doubles them at the same h. That amplification works in
+both directions - every point of hit rate miss-shed buys back is worth
+about twice as much - which is why the same lever measured stronger
+here (+16.5% decode at P=0.80, stalls halved; +10.7% at P=0.85, both
+even-round alternated 512-token medians) and why arena size, flat on
+M3, mattered too (each arena GB bought ~0.2pt of hit rate).
+
+Wider routing also concentrates more meaning per expert, and that
+moved the quality cliff: P=0.80, clean on M3, broke GLM-5.2 - and
+broke it in a way character scans cannot see. A 12k-token
+one-page-app generation completed with no stray tokens, valid markup,
+and working code, but the page it drew was missing its subject (a sky
+with no road and no car, on a prompt asking for a car on a road; the
+lossless twin at the same seed drew the full scene). P=0.85 drew the
+complete scene. Dropped gate mass degrades content before it degrades
+form, so a shed level cannot be certified by scanning the output for
+corruption: render the artifact and look at it, at deploy sampling
+settings, against a lossless twin at the same seed. Miss-shed's safe
+range is per-architecture; re-gate it whenever routing width or
+gating changes.
+
 Back on Hy3, quality degraded in a consistent order as the levers
 hardened: multi-step arithmetic broke first, well before coherence,
 formatting, or code. `moe_layer_shed: 0.20` alone dropped arithmetic
