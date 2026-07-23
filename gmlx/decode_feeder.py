@@ -47,7 +47,7 @@ from functools import lru_cache
 
 import numpy as np
 
-from . import loadlog
+from . import keepwarm, loadlog
 from .envflags import env_int
 from .feeder_common import ATTRS, KINDS, read_range, swapped_weights, verify_zero_copy
 
@@ -545,6 +545,7 @@ class DecodeFeeder:
         Caller contract: ``mx.eval`` of the call's ``indices`` has run, so no
         in-flight gather references this layer's arena (see module docstring).
         """
+        keepwarm.touch()
         if self._pressure_on and self._calls % _PRESSURE_POLL_EVERY == 0:
             self._poll_pressure()
         uniq = np.unique(ids.reshape(-1))

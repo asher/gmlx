@@ -37,6 +37,7 @@ import numpy as np
 
 import mlx.core as mx
 
+from . import keepwarm
 from .decode_feeder import _DECAY_EVERY
 from .envflags import env_bool, env_float, env_int
 
@@ -140,6 +141,7 @@ class GpuTokenState:
         re-decide which layers are hot enough to run syncless.
         ``keep_mass`` mirrors the module's --moe-miss-shed P for the
         over-budget ledger (install_moe_miss_shed runs after load)."""
+        keepwarm.touch()
         if keep_mass is not None:
             self._keep_mass = keep_mass
         if li <= self._last_li:

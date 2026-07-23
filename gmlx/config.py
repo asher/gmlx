@@ -8,7 +8,7 @@ no mlx), so it loads and tests on any machine.
 
 Shape (see ``docs/server-config.md`` for the full reference)::
 
-    server:    {host, port, api_key, no_auth, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, rerank, menubar, token_queue_timeout_s, prefill_step_size, cache_limit_gb, family_defaults, stochastic_mtp, assistants, assistant_allow_remote}
+    server:    {host, port, api_key, no_auth, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, rerank, menubar, token_queue_timeout_s, prefill_step_size, cache_limit_gb, family_defaults, stochastic_mtp, gpu_keepwarm, assistants, assistant_allow_remote}
     profiles:  {<name>: {extends, sampling, load, cache, system}}
     rules:     [{match: <glob>, profile: <name>}]
     models:    {<id>: {path, profile, family, profiles, mmproj, draft_gguf, adapter, stream, moe_experts, moe_expert_mass, moe_miss_shed, moe_layer_shed, speculative, overrides, pin, ttl_s}}
@@ -102,7 +102,7 @@ _SERVER_KEYS = frozenset({"host", "port", "api_key", "no_auth", "model_dirs",
                           "defaults", "stt", "tts", "embeddings", "rerank",
                           "menubar", "token_queue_timeout_s", "prefill_step_size",
                           "cache_limit_gb", "family_defaults", "stochastic_mtp",
-                          "assistants", "assistant_allow_remote"})
+                          "gpu_keepwarm", "assistants", "assistant_allow_remote"})
 _DEFAULTS_KEYS = frozenset({"profile", "ttl_s", "model", "preload"})
 _PROFILE_KEYS = frozenset({"extends", "sampling", "load", "cache", "system",
                            "chat_template", "chat_template_kwargs"})
@@ -407,6 +407,10 @@ class ServerCfg:
     # it; acceptance (and decode speed) rises at temp > 0. Off = default MTP,
     # token-identical. Greedy requests are unaffected either way.
     stochastic_mtp: bool = False
+    # Hold GPU clocks up while a streamed model is decoding (loader gate;
+    # only acts on models with a decode feeder). The heartbeat parks when
+    # no request is decoding, so an idle server pays nothing.
+    gpu_keepwarm: bool = False
     defaults: ServerDefaults = field(default_factory=ServerDefaults)
     profiles: dict[str, Profile] = field(default_factory=dict)
     rules: list[Rule] = field(default_factory=list)
@@ -1511,6 +1515,7 @@ def build_config(doc: dict) -> ServerCfg:
             "cache_limit_gb", srv.get("cache_limit_gb"), float),
         family_defaults=bool(srv.get("family_defaults", True)),
         stochastic_mtp=bool(srv.get("stochastic_mtp", False)),
+        gpu_keepwarm=bool(srv.get("gpu_keepwarm", False)),
         defaults=ServerDefaults(
             profile=dft.get("profile"),
             ttl_s=_coerce_num("defaults.ttl_s", dft.get("ttl_s", 900.0), float),

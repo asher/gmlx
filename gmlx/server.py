@@ -682,6 +682,12 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "non-speculative sampling, not token-identical; higher "
                          "acceptance at temp > 0. Same as config "
                          "server.stochastic_mtp; greedy requests unaffected.")
+    ap.add_argument("--gpu-keepwarm", action="store_true",
+                    help="Hold GPU clocks up while a streamed model is decoding "
+                         "(tiny heartbeat kernel; parks when no request is "
+                         "decoding, so an idle server pays nothing). Only acts "
+                         "on models streaming with a decode feeder. Same as "
+                         "config server.gpu_keepwarm; env GMLX_GPU_KEEPWARM=1.")
     ap.add_argument("--draft-block-size", type=int, default=None, metavar="N",
                     help="MTP draft tokens per round (analogous to llama-server "
                          "--spec-draft-n-max). Default: the drafter's own block "
@@ -1271,7 +1277,8 @@ def _dump_cfg_yaml(cfg: ServerCfg) -> str:
               ("host", "port", "api_key", "no_auth", "model_dirs", "budget_gb",
                "max_models", "hf_cache", "menubar", "token_queue_timeout_s",
                "prefill_step_size", "cache_limit_gb", "family_defaults",
-               "stochastic_mtp", "stt", "tts", "embeddings", "rerank",
+               "stochastic_mtp", "gpu_keepwarm", "stt", "tts", "embeddings",
+               "rerank",
                "defaults", "cache", "assistants", "assistant_allow_remote")}
     # Profile/model names double as dict keys; drop the redundant fields so the
     # entries match the file schema (which has no `name`/`id` keys).
@@ -1411,6 +1418,11 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
         set_stoch_accept(True)
         print("[server] stochastic MTP acceptance: on (sampled requests keep "
               "the sampling distribution but are not token-identical)")
+    if cfg.gpu_keepwarm or getattr(a, "gpu_keepwarm", False):
+        # Startup-only. The loader's gate starts the heartbeat when a
+        # streamed model with a decode feeder loads; the heartbeat itself
+        # parks whenever no request is decoding (keepwarm.touch()).
+        os.environ["GMLX_GPU_KEEPWARM"] = "1"
     # The config's token-queue timeout is authoritative for this server: it drives
     # mlx-vlm's per-request "wait for the next token" guard (default 600s; <=0 waits
     # forever). Read per request from the env, so setting it here is enough.

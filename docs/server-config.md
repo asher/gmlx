@@ -181,6 +181,9 @@ server:
   stochastic_mtp: false      # p/q acceptance for sampled MTP requests: same output
                              #   distribution, higher acceptance, NOT token-identical
                              #   (see performance.md; applied at startup)
+  gpu_keepwarm: false        # hold GPU clocks up while a streamed model is decoding
+                             #   (heartbeat parks between requests, so idle costs nothing;
+                             #   only acts on stream: experts models; applied at startup)
   cache:                     # the prompt cache (APC, automatic prefix cache) + SSD disk tier; see the cache key table
     enabled: true
     disk: {path: ~/.cache/gmlx/apc, max_gb: 200}

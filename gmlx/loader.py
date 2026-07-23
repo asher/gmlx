@@ -1873,8 +1873,9 @@ def install_expert_streaming(
         keepwarm.start()
         print(
             "[stream] gpu keep-warm: background heartbeat holds GPU "
-            "clocks between per-layer decode bursts (lossless, costs "
-            "power; --gpu-keepwarm / GMLX_GPU_KEEPWARM=1 enables)"
+            "clocks between per-layer decode bursts, parked while no "
+            "decode is running (lossless, costs power only during "
+            "decode; --gpu-keepwarm / GMLX_GPU_KEEPWARM=1 enables)"
         )
     la_probe = env_bool("GMLX_DECODE_LOOKAHEAD_PROBE", False)
     # Lookahead's replica router folds into the per-layer sync; whether its

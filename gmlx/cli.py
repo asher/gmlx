@@ -434,8 +434,9 @@ def add_placement_args(ap: argparse.ArgumentParser) -> None:
         help="Hold GPU clocks up during streamed decode with a tiny "
         "background heartbeat kernel. Streamed decode idles the GPU "
         "between per-layer bursts and each burst pays the clock ramp; "
-        "the heartbeat removes that (lossless, costs a few watts). "
-        "Default off. Env: GMLX_GPU_KEEPWARM=1.",
+        "the heartbeat removes that (lossless, costs a few watts while "
+        "decoding; parks after GMLX_KEEPWARM_IDLE_S seconds idle, "
+        "default 1). Default off. Env: GMLX_GPU_KEEPWARM=1.",
     )
 
 
