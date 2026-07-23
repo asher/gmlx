@@ -346,7 +346,44 @@ When a larger-than-RAM model is released, its page cache is also released, via
 `msync(MS_INVALIDATE)` over the shards - at process exit, or at unload on a
 running server (`GMLX_RELEASE_PAGECACHE=0` disables).
 
-### Lossy levers
+### GPU keep-warm (`--gpu-keepwarm`)
+
+Streamed decode has a work pattern the GPU's power management punishes:
+sub-millisecond compute bursts separated by host and disk gaps every MoE
+layer. The GPU races to idle in each gap, its clocks sag, and the next
+burst pays the ramp back up - measured as 3-5x inflation of identical
+per-layer work (0.3 ms warm vs up to 4+ ms ramp-inflated). The more
+per-token host syncs a model's decode path has, the more of its token time
+is ramp rather than work.
+
+`--gpu-keepwarm` (env `GMLX_GPU_KEEPWARM=1`; serve: `--gpu-keepwarm` or
+config `server.gpu_keepwarm: true`) holds clocks up with a tiny heartbeat
+kernel (a 256x256 matmul every 0.5 ms) on its own stream from a background
+thread. It moves no model bytes and changes no outputs - the win is purely
+clock residency. Measured on the production configs of two over-RAM
+models, ABBA-alternated medians over 4 reversed rounds of 512-token
+generations:
+
+| model | config under test | without | with | lift |
+|---|---|---|---|---|
+| GLM-5.2 UD-IQ3_XXS (262 GB, 75 streamed layers) | arena 70 + `--moe-miss-shed 0.85`, lookahead off | 2.51 tok/s | 3.64 tok/s | +45% |
+| Hunyuan3 IQ4_XS (159 GB, 79 streamed layers) | `--moe-layer-shed 0.10` + `--moe-miss-shed 0.90` | 4.01 tok/s | 5.29 tok/s | +32% |
+
+The diagnostic signature is worth knowing because it says whether a given
+model will benefit: stall time and arena hit rate are unchanged by the
+heartbeat (the disk is doing the same work), so if a streamed model's
+per-token time is dominated by the eval/sync bucket rather than stalls
+(`GMLX_DECODE_PHASE_STATS=1` prints the split), clock sag is a candidate
+and keep-warm is the cheap test. Dense in-RAM decode does not have the
+gap pattern and gains nothing.
+
+The cost is power, and only while decoding: the heartbeat parks (no GPU
+work) after one second without decode activity and wakes on the next
+streamed decode call (`GMLX_KEEPWARM_IDLE_S` tunes the window; `0` beats
+continuously). An idle server pays nothing; the first token after an idle
+gap pays one clock ramp. It is opt-in because it spends a few watts to
+make the GPU busier for the same output - on battery that trade is yours
+to make, not a default.
 
 Four levers trade a bounded amount of output quality for decode speed on
 streamed MoE models. None is ever on by default: absent flags and absent
@@ -407,7 +444,9 @@ concentration number can still lose to it outright (measured below). At
 a healthy hit rate, a concentrated router points to `--moe-expert-mass`,
 which removes reads and compute together at minimal dropped mass; a flat
 router takes it off the table and leaves the per-layer overhead as the
-standing cost, which only `--moe-layer-shed` touches.
+standing cost, which only `--moe-layer-shed` touches - though a large
+share of that overhead is clock ramp, which the lossless keep-warm above
+removes first; run it before spending quality here.
 
 One measured point, from the flat-router end of that space: Hy3, a
 299B-A21B MoE (161 GB IQ4_XS streaming on a 128 GB machine, decode arena at a ~92%
