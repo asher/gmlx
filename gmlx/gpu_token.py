@@ -87,6 +87,9 @@ class GpuTokenState:
         # would have used. None = pure-lossless intent (any dropped mass is
         # over-budget).
         self._keep_mass = keep_mass
+        # Diagnostic: GMLX_AUTO_PRESTAGE=0 freezes residency (no boundary
+        # staging or joins) to isolate pure one-flush graph speed.
+        self._prestage = env_bool("GMLX_AUTO_PRESTAGE", True)
         self._tables: dict[int, mx.array] = {}
         # (li, indices, scores, miss_ids, miss_scores) lazy per-layer records
         # of the in-flight token, consumed at the next boundary.
@@ -189,7 +192,7 @@ class GpuTokenState:
             # ranks per row, and unlike lookahead guesses these are
             # certain-demand misses.
             dfr._flush_pending(li)
-            if n_miss:
+            if n_miss and self._prestage:
                 # Demand mode: these are certain misses, not guesses -
                 # least-popular eviction, with the token's routed set
                 # shielded (locality makes it next token's likely demand).
