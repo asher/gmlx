@@ -748,6 +748,12 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "it to cap peak memory on long prompts, at some "
                          "prefill-throughput cost. Also via PREFILL_STEP_SIZE; "
                          "config mode: server.prefill_step_size.")
+    ap.add_argument("--decode-prefill-ratio", type=float, default=None,
+                    metavar="R",
+                    help="Decode GPU-time share per prefill chunk under load "
+                         "(default 1.0 ~= 50/50; 0 = stock scheduling). Also "
+                         "via GMLX_DECODE_PREFILL_RATIO; config mode: "
+                         "server.decode_prefill_ratio.")
     ap.add_argument("--ignore-eos", action="store_true",
                     help="Never stop on EOS; decode every request to max_tokens "
                          "(forced-length throughput benchmarking; mirrors "
@@ -866,6 +872,8 @@ def _bg_serve_args(a, cfg_path) -> list:
         out += ["--max-tokens", str(a.max_tokens)]
     if getattr(a, "prefill_step_size", None) is not None:
         out += ["--prefill-step-size", str(a.prefill_step_size)]
+    if getattr(a, "decode_prefill_ratio", None) is not None:
+        out += ["--decode-prefill-ratio", str(a.decode_prefill_ratio)]
     if getattr(a, "ignore_eos", False):
         out.append("--ignore-eos")
     if a.no_auth:
@@ -1247,7 +1255,8 @@ def _dump_cfg_yaml(cfg: ServerCfg) -> str:
     server = {k: d.pop(k) for k in
               ("host", "port", "api_key", "no_auth", "model_dirs", "budget_gb",
                "max_models", "hf_cache", "menubar", "token_queue_timeout_s",
-               "prefill_step_size", "cache_limit_gb", "family_defaults",
+               "prefill_step_size", "decode_prefill_ratio",
+               "cache_limit_gb", "family_defaults",
                "stochastic_mtp", "stt", "tts", "embeddings", "rerank",
                "defaults", "cache", "assistants", "assistant_allow_remote")}
     # Profile/model names double as dict keys; drop the redundant fields so the
@@ -1418,6 +1427,19 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
         else:
             os.environ["PREFILL_STEP_SIZE"] = str(step)
             print(f"[server] prefill step size: {step} tokens")
+
+    # Decode-priority pacing ratio: flag > config > exported env > default
+    # (1.0 in batch_sched). Read per tick from the env, so setting it here
+    # is enough regardless of patch-install order.
+    ratio = getattr(a, "decode_prefill_ratio", None)
+    if ratio is None:
+        ratio = cfg.decode_prefill_ratio
+    if ratio is not None:
+        if ratio < 0:
+            print(f"[server] ignoring negative decode-prefill ratio {ratio}")
+        else:
+            os.environ["GMLX_DECODE_PREFILL_RATIO"] = str(ratio)
+            print(f"[server] decode-prefill pacing ratio: {ratio}")
 
     resolved = serving.resolved_models()
     preload = _preload_id(cfg)

@@ -76,8 +76,32 @@ def test_pure_decode_passthrough(paced):
     assert g.decodes == 10
 
 
-def test_ratio_zero_no_install(monkeypatch):
+def test_ratio_zero_passthrough(paced, monkeypatch):
     monkeypatch.setenv("GMLX_DECODE_PREFILL_RATIO", "0")
-    orig = ar.BatchGenerator._next
-    batch_sched.install_decode_priority_sched()
-    assert ar.BatchGenerator._next is orig
+    g = FakeGen()
+    for _ in range(10):
+        paced(g)
+    # stock 1 decode : 1 chunk per tick
+    assert g.chunks == 10 and g.decodes == 10
+
+
+def test_ratio_flips_mid_run(paced, monkeypatch):
+    g = FakeGen()
+    for _ in range(40):
+        paced(g)
+    paced_chunks = g.chunks
+    assert g.decodes / g.chunks > 2  # paced at 1.0
+    monkeypatch.setenv("GMLX_DECODE_PREFILL_RATIO", "0")
+    for _ in range(10):
+        paced(g)
+    assert g.chunks == paced_chunks + 10  # per-tick read: now stock
+
+
+def test_bad_ratio_warns_and_defaults(paced, monkeypatch, caplog):
+    monkeypatch.setenv("GMLX_DECODE_PREFILL_RATIO", "banana")
+    g = FakeGen()
+    with caplog.at_level("WARNING"):
+        for _ in range(30):
+            paced(g)
+    assert g.decodes / g.chunks > 2  # behaved as 1.0
+    assert sum("banana" in r.message for r in caplog.records) == 1

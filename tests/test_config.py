@@ -828,6 +828,16 @@ def test_prefill_step_size_parsed_and_defaults_none():
         build_config({"server": {"prefill_step_size": "lots"}})
 
 
+def test_decode_prefill_ratio_parsed_and_defaults_none():
+    assert build_config({}).decode_prefill_ratio is None         # absent => None
+    assert build_config({"server": {"decode_prefill_ratio": "1.5"}}
+                        ).decode_prefill_ratio == 1.5            # coerced to float
+    assert build_config({"server": {"decode_prefill_ratio": 0}}
+                        ).decode_prefill_ratio == 0.0            # 0 => stock sched
+    with pytest.raises(ConfigError):
+        build_config({"server": {"decode_prefill_ratio": "fast"}})
+
+
 def test_load_config_missing_file_raises():
     with pytest.raises(ConfigError) as e:
         cfgmod.load_config("/no/such/config.yaml")

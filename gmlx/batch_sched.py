@@ -21,8 +21,12 @@ APC arms are untouched on non-paced ticks. Chunk cost is observed via the
 ``_prompt_time_counter`` delta, so pacing self-tunes with depth, model,
 and chunk-size policy (prefill_decay etc.) with no per-model constants.
 
-Env:
-  GMLX_DECODE_PREFILL_RATIO  float, default 1.0; 0 disables (stock 1:1).
+Ratio resolution: `gmlx serve --decode-prefill-ratio` / config
+`server.decode_prefill_ratio` both export GMLX_DECODE_PREFILL_RATIO; the
+wrapper reads the env per tick (install order never matters, and a live
+server can be re-paced for an A/B). 0 disables (stock 1:1). Very large
+ratios starve admission at depth: each pending chunk waits ratio x
+chunk_time of decode -- TTFT of queued requests stretches accordingly.
 """
 
 from __future__ import annotations
@@ -36,18 +40,31 @@ _log = logging.getLogger(__name__)
 _INSTALLED_FLAG = "_kq_gguf_decode_priority_sched"
 
 
+_ratio_memo = ("", 1.0)
+
+
 def _ratio() -> float:
+    """Parse GMLX_DECODE_PREFILL_RATIO, memoized on the raw string; warn
+    once per bad value rather than silently defaulting."""
+    global _ratio_memo
+    raw = os.environ.get("GMLX_DECODE_PREFILL_RATIO", "1.0")
+    if raw == _ratio_memo[0]:
+        return _ratio_memo[1]
     try:
-        return float(os.environ.get("GMLX_DECODE_PREFILL_RATIO", "1.0"))
+        val = float(raw)
     except ValueError:
-        return 1.0
+        _log.warning(
+            "GMLX_DECODE_PREFILL_RATIO=%r is not a number; using 1.0", raw)
+        val = 1.0
+    _ratio_memo = (raw, val)
+    return val
 
 
 def install_decode_priority_sched() -> None:
-    """Pace prefill chunks against live decode GPU time. Idempotent."""
-    ratio = _ratio()
-    if ratio <= 0:
-        return
+    """Pace prefill chunks against live decode GPU time. Idempotent.
+
+    Installs unconditionally; the wrapper re-reads the ratio per tick and
+    passes straight through at ratio <= 0 (stock scheduling)."""
     from mlx_vlm.generate import ar as _ar
 
     if getattr(_ar.BatchGenerator._next, _INSTALLED_FLAG, False):
@@ -57,11 +74,12 @@ def install_decode_priority_sched() -> None:
     def _paced_next(self, **kwargs):
         # Pace only when decode AND prefill work are both live; otherwise
         # stock behavior (prefill at full speed, untouched TTFT).
+        ratio = _ratio()
         prefill_live = self._prompt_batch is not None or bool(
             self._unprocessed_sequences
         )
         decode_live = len(self._generation_batch) > 0
-        if not (prefill_live and decode_live):
+        if ratio <= 0 or not (prefill_live and decode_live):
             return _orig_next(self, **kwargs)
 
         last_chunk = getattr(self, "_kq_last_chunk_time", 0.0)
@@ -104,5 +122,5 @@ def install_decode_priority_sched() -> None:
     setattr(_paced_next, _INSTALLED_FLAG, True)
     _ar.BatchGenerator._next = _paced_next
     _log.info(
-        "decode-priority prefill pacing installed (ratio=%.2f)", ratio
+        "decode-priority prefill pacing installed (ratio=%.2f)", _ratio()
     )

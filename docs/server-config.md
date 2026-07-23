@@ -174,6 +174,7 @@ server:
   token_queue_timeout_s: null # seconds to wait for the NEXT token before aborting a request
                              #   (null => mlx-vlm's own default, 600; 0 => never)
   prefill_step_size: null    # prefill chunk size in tokens for every model on this server
+  decode_prefill_ratio: null # decode GPU-time share per prefill chunk under load (default 1.0)
                              #   (null => the default, 2048; lower caps peak memory on long prompts)
   cache_limit_gb: null       # MLX buffer-cache cap in GiB (null => auto: bounded only when the
                              #   biggest model leaves little working-set slack; negative => never bound)
@@ -230,6 +231,21 @@ by design: the engine reads it per request, after the per-model load window has
 closed, so it cannot be a per-model `load:` key. Also available as
 `--prefill-step-size` on `serve` (the flag wins over the config) or an exported
 `PREFILL_STEP_SIZE`. Applies to speculative (MTP) serving too.
+
+`decode_prefill_ratio` paces admission prefills against live decode. Stock
+scheduling runs one decode step per prefill chunk, so while any request
+prefills, every decoding stream advances ~1 token per chunk -- at deep context
+that is a multi-second stall per admission. With pacing (default `1.0`), a
+prefill chunk is admitted only after the decode batch has received that
+multiple of the chunk's GPU time: live streams keep ~half throughput during
+admissions, and the incoming request's time-to-first-token stretches up to
+~(1+ratio)x while decode is busy. Raise the ratio to favor decode further,
+lower it toward `0` for TTFT-critical serving, `0` restores stock scheduling.
+Prefill runs at full speed whenever nothing is decoding, so a single-stream
+server is unaffected. Also available as `--decode-prefill-ratio` on `serve`
+(the flag wins over the config) or an exported `GMLX_DECODE_PREFILL_RATIO`
+(read per scheduler tick, so it can be flipped on a live server). Applies to
+speculative (MTP) serving too.
 
 `cache_limit_gb` caps MLX's buffer cache (the wired pool of freed GPU buffers
 kept for reuse). Left `null`, the server bounds it automatically only when

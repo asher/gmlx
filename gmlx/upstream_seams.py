@@ -53,6 +53,27 @@ class Seam:
 
 
 SEAMS: tuple[Seam, ...] = (
+    # --- batched serve scheduler + ragged decode (batch_sched / ragged_decode) ---
+    Seam("mlx_vlm.generate.ar", "BatchGenerator._next",
+         "batch_sched.install_decode_priority_sched (decode-first tick, "
+         "prompt-arm structure, _prompt_time_counter contract)",
+         critical=True),
+    Seam("mlx_vlm.generate.ar", "BatchGenerator.insert",
+         "batch_sched arrival-merge (_unprocessed_sequences append/rebind)"),
+    Seam("mlx_vlm.models.qwen3_5.language",
+         "_qwen3_5_ragged_decode_attention",
+         "ragged_decode.install_unified_ragged_plan (dispatch body carried)"),
+    Seam("mlx_vlm.models.qwen3_5.language", "_qwen3_5_sdpa_vector_plan",
+         "ragged_decode (plan-bucket semantics)"),
+    Seam("mlx_vlm.models.qwen3_5.language",
+         "_qwen3_5_ragged_sdpa_one_pass_kernel",
+         "ragged_decode (kernel builder reuse)"),
+    Seam("mlx_vlm.models.qwen3_5.language",
+         "_qwen3_5_ragged_sdpa_two_pass_1_kernel",
+         "ragged_decode (kernel builder reuse; grid contract)"),
+    Seam("mlx_vlm.models.qwen3_5.language",
+         "_qwen3_5_ragged_sdpa_two_pass_2_kernel",
+         "ragged_decode (kernel builder reuse)"),
     # --- qwen3_5 MTP-target verify seams (loader + qwen35_verify_fold) ---
     Seam("mlx_vlm.models.qwen3_5.language",
          "_target_verify_left_padded_attention",
