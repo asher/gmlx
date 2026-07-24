@@ -1708,8 +1708,16 @@ def _owned_decode_rounds_batch(
                     logprobs = logits - mx.logsumexp(
                         logits, axis=-1, keepdims=True)
                     toks = sampler(logprobs).reshape(-1)
+            # Profile split for the gated round. Stock GenerationBatch._step
+            # is double-buffered (async_eval; it blocks on the PREVIOUS
+            # step's tokens while the next forward is already dispatched),
+            # so its CPU graph build overlaps GPU execution. This loop is
+            # synchronous, so the two serialize. Under GMLX_ROUND_PROFILE
+            # the columns read as dispatch (CPU build) / wait (GPU) /
+            # emit-prep instead of draft / verify / walk.
+            _td = time.perf_counter() if _ROUND_PROFILE else _t0
             mx.eval(toks)
-            _td = _tv = _t0
+            _tv = time.perf_counter() if _ROUND_PROFILE else _t0
             bs = 1
             accepted_list = [0] * n_active
             new_tokens_list = [[int(t)] for t in toks.tolist()]
