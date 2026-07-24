@@ -754,6 +754,13 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "(default 1.0 ~= 50/50; 0 = stock scheduling). Also "
                          "via GMLX_DECODE_PREFILL_RATIO; config mode: "
                          "server.decode_prefill_ratio.")
+    ap.add_argument("--speculative-width-cap", type=int, default=None,
+                    metavar="N",
+                    help="Run MTP only while the live decode batch is <= N "
+                         "wide (0 = uncapped; default: per drafter family). "
+                         "Process-wide, overriding every model's config key. "
+                         "Also via GMLX_MTP_WIDTH_CAP; config mode: "
+                         "models[].speculative_width_cap.")
     ap.add_argument("--ignore-eos", action="store_true",
                     help="Never stop on EOS; decode every request to max_tokens "
                          "(forced-length throughput benchmarking; mirrors "
@@ -874,6 +881,8 @@ def _bg_serve_args(a, cfg_path) -> list:
         out += ["--prefill-step-size", str(a.prefill_step_size)]
     if getattr(a, "decode_prefill_ratio", None) is not None:
         out += ["--decode-prefill-ratio", str(a.decode_prefill_ratio)]
+    if getattr(a, "speculative_width_cap", None) is not None:
+        out += ["--speculative-width-cap", str(a.speculative_width_cap)]
     if getattr(a, "ignore_eos", False):
         out.append("--ignore-eos")
     if a.no_auth:
@@ -1440,6 +1449,22 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
         else:
             os.environ["GMLX_DECODE_PREFILL_RATIO"] = str(ratio)
             print(f"[server] decode-prefill pacing ratio: {ratio}")
+
+    # MTP width cap: the flag is process-wide and outranks per-model config,
+    # so say so when both are in play rather than letting the key look active.
+    width_cap = getattr(a, "speculative_width_cap", None)
+    if width_cap is not None:
+        if width_cap < 0:
+            print(f"[server] ignoring negative speculative width cap "
+                  f"{width_cap}")
+        else:
+            os.environ["GMLX_MTP_WIDTH_CAP"] = str(width_cap)
+            print(f"[server] speculative width cap: "
+                  f"{width_cap or 'uncapped'} (process-wide)")
+            if any(m.speculative_width_cap is not None
+                   for m in getattr(cfg, "models", {}).values()):
+                print("[server] note: --speculative-width-cap overrides the "
+                      "per-model speculative_width_cap config key")
 
     resolved = serving.resolved_models()
     preload = _preload_id(cfg)

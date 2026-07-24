@@ -22,6 +22,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `bench/plot-bench.py batch-scaling` chart grammar: aggregate decode
   throughput vs concurrent streams, one line per depth, with an optional
   `--ref` overlay of a second run for scheduler A/Bs.
+- Speculative decoding now backs off under concurrency instead of losing
+  throughput: MTP runs while the live decode batch is at or under a
+  per-model width cap, and wider batches finish in plain decode with the
+  drafter left loaded (`models[].speculative_width_cap` /
+  `--speculative-width-cap` / `GMLX_MTP_WIDTH_CAP`; default per drafter
+  family, 0 = uncapped).
 
 ### Fixed
 

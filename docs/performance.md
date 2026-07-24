@@ -142,10 +142,26 @@ and workload:
 gmlx run model.gguf --bench-depths "0,4096" --speculative     # accept rate + speedup
 ```
 
-One interaction to know about: on MoE models under concurrent load, speculation and
-batching compete (verification widens each request's expert reads). If you serve
-many parallel clients on an MoE model, benchmark with speculation off before
-enabling it.
+One interaction to know about: speculation and batching compete for the same
+bandwidth. Verifying a draft widens each request's weight reads, which is
+nearly free while one stream decodes and costly once several do, so the lift
+falls as concurrency rises. The server handles this for you with a per-model
+batch-width cap: speculation runs while the live batch is narrow and the
+batch finishes in plain decode once it grows past the cap, with the drafter
+left loaded for the next one.
+
+Where the trade turns depends on the drafter, not on whether the target is
+dense or MoE. A native head verified by a hybrid-attention target keeps
+winning to the widest batch we measured, so it defaults to uncapped. A
+separate-model drafter pays a full small-model forward per drafted token and
+that cost grows with the batch, so the gemma assistant shape defaults to a cap
+of 2 even though its target is dense. MoE targets default to 2 as well:
+verification multiplies the union of experts each row touches. Two drafters
+(hy3, deepseek4) can only draft a single sequence and are capped at 1.
+
+Per-model `speculative_width_cap` overrides the default; `GMLX_MTP_WIDTH_CAP=0`
+turns the cap off for a measurement run. See
+[server-config.md](server-config.md#speculative_width_cap).
 
 A second: quantizing the KV cache (`--kv-bits`) shifts the target model's verify
 logits away from the draft head and costs accepted drafts -- about a third fewer
@@ -234,12 +250,13 @@ live streams for tens of seconds. The key is `server.decode_prefill_ratio`
 per scheduler tick, so it can be changed on a live server.
 
 Two interactions to know. Pacing applies to speculative (MTP) serving too,
-and the MoE note in the speculation section still holds: verification widens
-expert reads under concurrent load, so benchmark speculation at your real
-client count. And the prompt cache is the strongest admission lever of all:
-a warm prefix skips its prefill outright, leaving pacing to govern only the
-cold suffix. Agent sessions that resend a cached history and add a few
-thousand tokens admit almost for free.
+and the two features divide the work: pacing decides how admissions share
+GPU time, while the width cap decides which decode mode each batch runs in
+(speculative while narrow, plain once it grows past the model's cap). And
+the prompt cache is the strongest admission lever of all: a warm prefix
+skips its prefill outright, leaving pacing to govern only the cold suffix.
+Agent sessions that resend a cached history and add a few thousand tokens
+admit almost for free.
 
 ## Memory and the KV cache
 

@@ -1186,6 +1186,7 @@ This is the supported set:
 | `GMLX_FUSED_GDN=0` | Disable the fused gated-delta Metal kernels used by the Qwen3.5/3.6 hybrid architectures. The fusion is a numerics-affecting runtime patch; set `0` first when debugging those archs to rule it out. |
 | `GMLX_NO_FAMILY_DEFAULTS` | Disable the family model-card sampling defaults on bare-path `run` / `chat` (same as `--no-family-defaults`). |
 | `GMLX_DRAFT_BLOCK_SIZE` | MTP draft tokens per round for `serve` (same as `--draft-block-size`). |
+| `GMLX_MTP_WIDTH_CAP` | `serve`: run MTP only while at most this many requests decode together (`0` = uncapped; same as `--speculative-width-cap`). Overrides every model's `speculative_width_cap`; read per round, so a live server can be re-gated for an A/B. Drafters limited to one sequence clamp it. |
 | `GMLX_IGNORE_EOS=1` | `serve`: never stop on EOS; decode every request to `max_tokens` (same as `--ignore-eos`; forced-length throughput benchmarking). |
 | `GMLX_API_KEY` | Client-side default key for `ps` (sent to `/v1/metrics`) when `--api-key` isn't passed. Not a `serve` source; the server reads its key only from `server.api_key` in the config. |
 | `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | Hugging Face auth for `validate` / `pull` on gated or private repos. |
