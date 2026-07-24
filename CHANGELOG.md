@@ -32,6 +32,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Lookahead prestage defaults off for the `glm_moe_dsa` and `deepseek_v32`
   families.
 - Feeder and lookahead end-of-run stats print only at `-v` on run and chat.
+- `gmlx talk` takes the model as a positional (like `chat`/`run`, replacing
+  `--model`) with tab completion, `max_tokens` now unset by default.
 
 ### Fixed
 

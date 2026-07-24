@@ -323,7 +323,7 @@ class TalkCfg:
     speed: float = 1.0
     system: str | None = DEFAULT_TALK_SYSTEM
     language: str | None = None    # whisper language hint
-    max_tokens: int = 512             # spoken replies should be short
+    max_tokens: int | None = None     # None = until the model stops
     mode: str = "wake"                # wake | vad | ptt | text
     wake_word: str = "hey assistant"  # any text phrase (sherpa-onnx KWS)
     wake_threshold: float = 0.3
@@ -1465,7 +1465,7 @@ def _parse_talk(raw) -> TalkCfg:
         system=(str(raw["system"]) if raw.get("system")
                 else (None if "system" in raw else DEFAULT_TALK_SYSTEM)),
         language=str(raw["language"]) if raw.get("language") else None,
-        max_tokens=num("max_tokens", raw.get("max_tokens"), int, 512),
+        max_tokens=num("max_tokens", raw.get("max_tokens"), int, None),
         mode=mode,
         wake_word=str(raw.get("wake_word") or "hey assistant"),
         wake_threshold=num("wake_threshold", raw.get("wake_threshold"),

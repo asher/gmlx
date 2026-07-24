@@ -1358,7 +1358,7 @@ def test_talk_defaults_when_absent():
     assert t.mode == "wake" and t.wake_word == "hey assistant"
     assert t.voice is None and t.model is None and t.brain == "chat"
     assert t.vad.silence_ms == 550.0 and t.vad.pre_roll_ms == 400.0
-    assert t.chime is True and t.max_tokens == 512
+    assert t.chime is True and t.max_tokens is None   # unset = until EOS
 
 
 def test_talk_vad_must_be_a_mapping():

@@ -251,6 +251,9 @@ def _positional_candidates(verb: str, after_verb: list[str]) -> list[str]:
         if filled:
             return []                       # the model slot is already taken
         return ["::files", *_model_candidates(after_verb)]
+    if verb == "talk":
+        # A served model id, never a path on disk - no ::files fallback.
+        return [] if filled else _model_candidates(after_verb)
     if verb in _FILE_POSITIONAL_VERBS:
         return [] if filled else ["::files"]
     if verb == "launch":

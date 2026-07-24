@@ -223,7 +223,7 @@ talk:
   system: null                  # spoken persona; omit the key for the default speakable-output
                                 #   prompt. A literal null (or "") sets no persona, not the default.
   language: null                # whisper language hint
-  max_tokens: 512               # spoken replies should be short
+  max_tokens: null              # reply cap; unset = until the model stops
   mode: wake                    # wake | vad | ptt | text
   wake_word: "hey assistant"    # any text phrase
   wake_threshold: 0.3           # higher = fewer false fires
@@ -346,7 +346,7 @@ sentence, and Kokoro synthesis (roughly 150 to 300 ms). Replies are chunked at
 sentence boundaries and synthesized one sentence ahead of playback, so long answers
 speak continuously. Tuning options: `vad.silence_ms` down to about 400 trades a
 snappier turn for more mid-sentence cutoffs, `whisper-turbo-q4` shaves the STT step,
-and a short `max_tokens` keeps answers conversational.
+and a short `max_tokens` (e.g. 512) keeps answers conversational.
 
 In wake mode the wake phrase itself barges in: the keyword spotter stays live
 while the assistant transcribes, thinks, and speaks, so saying the wake phrase

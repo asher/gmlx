@@ -971,9 +971,9 @@ def _build_parser(prog: str) -> argparse.ArgumentParser:
                     "your config when none is running.")
     ap.add_argument("--config", default=None, metavar="PATH",
                     help="Server config YAML (default: standard locations).")
-    ap.add_argument("--model", default=None,
-                    help="Chat model id[@profile] (default: talk.model, else "
-                         "the server's default).")
+    ap.add_argument("model", nargs="?", default=None,
+                    help="Served model id[@profile] (default: talk.model, "
+                         "else the server's default).")
     ap.add_argument("--voice", default=None,
                     help="TTS voice (default: talk.voice, else server default).")
     ap.add_argument("--speed", type=float, default=None,
@@ -983,7 +983,8 @@ def _build_parser(prog: str) -> argparse.ArgumentParser:
     ap.add_argument("--system", default=None, metavar="TEXT",
                     help="System prompt override.")
     ap.add_argument("--max-tokens", type=int, default=None,
-                    help="Reply token cap (default 512).")
+                    help="Reply token cap (default: none - replies run until "
+                         "the model stops).")
     ap.add_argument("--mode", choices=("wake", "vad", "ptt", "text"),
                     default=None,
                     help="Activation: wake word, always-on VAD, push-to-talk, "

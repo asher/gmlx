@@ -788,6 +788,14 @@ def test_merged_settings_precedence():
     assert s["chime"] is True
     args = _build_parser("t").parse_args(["--no-chime"])
     assert _merged_settings(args, cfg)["chime"] is False
+    # The model is a positional, like `gmlx chat` - flag wins over talk.model.
+    cfg = TalkCfg(model="from-config")
+    args = _build_parser("t").parse_args(["qwen3@coding"])
+    assert _merged_settings(args, cfg)["model"] == "qwen3@coding"
+    args = _build_parser("t").parse_args([])
+    s = _merged_settings(args, cfg)
+    assert s["model"] == "from-config"
+    assert s["max_tokens"] is None                # unset = until the model stops
 
 
 def test_pick_model_order():

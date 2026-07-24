@@ -448,6 +448,7 @@ tuning, and the in-session keys and `/commands`, is [talk.md](talk.md).
 
 ```sh
 gmlx talk                                     # wake mode: listens for "hey assistant"
+gmlx talk qwen3                               # talk to a specific served model
 gmlx talk --wake-word "okay computer" --voice bf_emma
 gmlx talk --mode vad                          # open mic: any speech starts a turn
 gmlx talk --once                              # one exchange, then exit
@@ -455,14 +456,14 @@ gmlx talk --once                              # one exchange, then exit
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--model ID[@profile]` | server default | Chat model to talk to. |
+| `model` (positional) | `talk.model`, else server default | Served model id[@profile] to talk to. |
 | `--voice NAME` / `--list-voices` | server default | TTS voice / list the server's voices. |
 | `--speed X` | `1.0` | Speech speed (0.25-4). |
 | `--mode {wake,vad,ptt,text}` | `wake` | Listening mode (`--once` skips the wake gate: speak immediately, one exchange). |
 | `--wake-word PHRASE` / `--wake-threshold X` | `hey assistant` / `0.5` | Any text phrase, no training; higher threshold = fewer false fires. |
 | `--vad-threshold` / `--vad-silence-ms` / `--min-speech-ms` | `0.6` / `550` / `300` | Endpointing knobs. |
 | `--input-device` / `--output-device` / `--list-devices` | system default | Audio devices (name substring or index). |
-| `--system TEXT` / `--language L` / `--max-tokens N` | - / - / `512` | Spoken persona / whisper hint / reply cap. |
+| `--system TEXT` / `--language L` / `--max-tokens N` | - / - / until EOS | Spoken persona / whisper hint / reply cap (unset: replies run until the model stops). |
 | `--no-chime` | - | Disable the wake/idle earcons. |
 | `--brain {chat,assistant}` | config `talk.brain`, else `chat` | Turn engine: plain chat, or the built-in assistant with MCP tools and long-term memory ([assistant.md](assistant.md); tools need `pip install 'gmlx[assistant]'`). |
 | `--base-url URL` / `--host` / `--port` / `--api-key` | managed server | Target server (a remote `--base-url` runs STT/TTS there). |
