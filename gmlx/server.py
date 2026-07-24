@@ -1291,7 +1291,8 @@ def _dump_cfg_yaml(cfg: ServerCfg) -> str:
     doc = {"server": server, "profiles": profiles, "rules": d.pop("rules"),
            "models": models, "aliases": d.pop("aliases"),
            "discover": d.pop("discover"), "talk": talk,
-           "assistant": d.pop("assistant")}
+           "assistant": d.pop("assistant"),
+           "theme": d.pop("theme"), "themes": d.pop("themes")}
     assert not d, f"ServerCfg fields missing from --print-config: {sorted(d)}"
     body = yaml.safe_dump(doc, sort_keys=False, default_flow_style=False,
                           width=2 ** 16)

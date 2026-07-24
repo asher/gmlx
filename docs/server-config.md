@@ -139,7 +139,7 @@ turns fall back); `--mmproj` and `--adapter` remain mutually exclusive.
 
 ## Config file reference
 
-A config is a YAML mapping with up to six top-level keys, all optional:
+A config is a YAML mapping with these top-level keys, all optional:
 
 ```text
 server:   bind, residency budget, path roots, HF policy, prompt cache, defaults
@@ -148,6 +148,10 @@ rules:    glob a model id -> a profile
 models:   named entries (id == /v1/models id == request `model`)
 aliases:  friendly names / profile presets (listed in /v1/models)
 discover: opt-in header-only directory scan
+talk:     voice chat defaults (see the talk section)
+assistant: shared tool-loop assistant settings
+theme:    default chat color theme (`gmlx chat`; --theme overrides)
+themes:   user-defined chat color themes (see the chat themes section)
 ```
 
 Unknown keys in the structural namespaces (top-level, `server`, `profiles`,
@@ -1307,6 +1311,37 @@ replies spoken sentence-by-sentence as they stream. Its settings live in a
 top-level `talk:` block of this same YAML (it configures the client, not the
 server, so it is not under `server:`). Setup, the full key table, flags, and
 latency tuning: [talk.md](talk.md).
+
+---
+
+## Chat themes (`theme:` / `themes:`)
+
+Like `talk:`, these configure a client - `gmlx chat` - not the server. A
+top-level `theme:` names the theme every chat starts with (`--theme` and
+`/theme` still override), and `themes:` defines custom themes usable anywhere
+a built-in is:
+
+```yaml
+theme: my-black
+
+themes:
+  my-black:                        # a user name shadows a built-in
+    extends: dark                  # unspecified slots inherit from here (default dark)
+    thinking: {italic: true, fg16: 94}
+    heading:  {bold: true, rgb: "#88c0d0"}   # rgb: "#rrggbb" or [r, g, b]
+    stat:     {fg16: 90}
+    code_theme: nord               # pygments style for rich code fences
+```
+
+Slots: `thinking`, `heading`, `bold`, `italic`, `inline_code`, `code_block`,
+`code_border`, `bullet`, `blockquote`, `link`, `hr`, `stat`, `info`, `error`.
+Style keys per slot: `bold`, `dim`, `italic`, `underline` (booleans), `fg16`
+(an ANSI code 30-37/90-97, follows the terminal palette), `rgb` (truecolor
+with automatic 256-color fallback; wins over `fg16` on capable terminals).
+Meta keys: `extends`, `code_theme`, `code_theme_cb`, `ptk_toolbar`. The
+colorblind modifier (`--colorblind` / `/theme NAME cb`) applies to user themes
+the same way it does to built-ins. A malformed theme definition prints a
+warning at chat startup and is skipped; the rest still register.
 
 ---
 

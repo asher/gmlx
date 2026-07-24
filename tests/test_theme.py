@@ -81,6 +81,83 @@ def test_rich_theme_bridge():
     assert rt.styles["markdown.h1"].color.name == "#88c0d0"
 
 
+@pytest.fixture
+def user_themes():
+    """Registry isolation: user themes registered in a test don't leak."""
+    saved = dict(th._USER_THEMES)
+    yield th._USER_THEMES
+    th._USER_THEMES.clear()
+    th._USER_THEMES.update(saved)
+
+
+def test_user_theme_registers_and_resolves(user_themes):
+    warnings = th.register_user_themes({
+        "my-black": {
+            "thinking": {"italic": True, "fg16": 94},
+            "heading": {"bold": True, "rgb": "#88c0d0"},
+            "stat": {"rgb": [146, 131, 116]},
+        },
+    })
+    assert warnings == []
+    assert "my-black" in th.list_themes()
+    t = th.resolve_theme("my-black", depth=1 << 24)
+    assert t.thinking == "\x1b[3;94m"
+    assert t.heading == "\x1b[1;38;2;136;192;208m"   # hex parsed
+    assert t.stat == "\x1b[38;2;146;131;116m"        # list parsed
+    # Unspecified slots inherit from dark.
+    assert t.error == th.resolve_theme("dark", depth=1 << 24).error
+
+
+def test_user_theme_extends_named_theme_and_shadows_builtins(user_themes):
+    assert th.register_user_themes({
+        "nord": {"extends": "nord", "thinking": {"fg16": 96}},   # shadow
+        "kid": {"extends": "nord", "error": {"bold": True, "fg16": 91}},
+    }) == []
+    t = th.resolve_theme("nord", depth=1 << 24)
+    assert t.thinking == "\x1b[96m"                  # overridden slot
+    assert t.code_theme == "nord"                    # meta inherited
+    kid = th.resolve_theme("kid", depth=1 << 24)
+    assert kid.thinking == "\x1b[96m"                # extends the shadowed nord
+    assert kid.error == "\x1b[1;91m"
+
+
+def test_user_theme_colorblind_remap_applies(user_themes):
+    th.register_user_themes({"my-black": {"thinking": {"fg16": 94}}})
+    cb = th.resolve_theme("my-black", colorblind=True, depth=1 << 24)
+    assert "38;2;213;94;0" in cb.error               # vermillion
+    assert cb.thinking == "\x1b[94m"                 # non-accent slot untouched
+
+
+def test_user_theme_bad_definitions_warn_and_skip(user_themes):
+    warnings = th.register_user_themes({
+        "bad-slot": {"thinkng": {"fg16": 94}},
+        "bad-fg": {"thinking": {"fg16": 12}},
+        "bad-rgb": {"thinking": {"rgb": "#12345"}},
+        "bad-base": {"extends": "neon-zebra"},
+        "good": {"thinking": {"fg16": 94}},
+    })
+    assert len(warnings) == 4
+    assert any("thinkng" in w for w in warnings)
+    assert any("30-37 or 90-97" in w for w in warnings)
+    assert any("#rrggbb" in w for w in warnings)
+    assert any("neon-zebra" in w for w in warnings)
+    assert "good" in th.list_themes()
+    for name in ("bad-slot", "bad-fg", "bad-rgb", "bad-base"):
+        assert name not in th.list_themes()
+
+
+def test_config_carries_theme_keys():
+    from gmlx.config import build_config
+
+    cfg = build_config({
+        "theme": "my-black",
+        "themes": {"my-black": {"thinking": {"fg16": 94}}},
+    })
+    assert cfg.theme == "my-black"
+    assert cfg.themes == {"my-black": {"thinking": {"fg16": 94}}}
+    assert build_config({}).theme is None
+
+
 def test_colorblind_keeps_color_on_a_16_color_terminal():
     """`--colorblind` on TERM=linux used to strip every remapped accent to no
     color at all (RGB-only, fg16=None), leaving the user who asked for the

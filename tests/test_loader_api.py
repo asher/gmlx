@@ -27,11 +27,18 @@ _TOKENS = _SPECIALS + _ALPHABET + _MERGED
 _HID, _LAYERS, _HEADS, _KV, _FFN, _HD = 64, 2, 4, 2, 128, 16
 
 
-def _mint_tiny_llama(path: str) -> None:
+def _mint_tiny_llama(path: str, *, yarn: bool = False) -> None:
     """A complete, loadable llama-arch GGUF: full KV metadata + every tensor
-    the 2-layer model needs (tied embeddings; F32 so no quant kernels)."""
+    the 2-layer model needs (tied embeddings; F32 so no quant kernels).
+    ``yarn`` adds rope-scaling KVs so the built model carries a YarnRoPE with
+    a precomputed ``_freqs`` - a lazy non-parameter array, the gemma-4 shape
+    the background-load test needs."""
     vocab = len(_TOKENS)
     w = GGUFWriter(path, "llama")
+    if yarn:
+        w.add_string("llama.rope.scaling.type", "yarn")
+        w.add_float32("llama.rope.scaling.factor", 2.0)
+        w.add_uint32("llama.rope.scaling.original_context_length", 512)
     w.add_uint32("llama.embedding_length", _HID)
     w.add_uint32("llama.block_count", _LAYERS)
     w.add_uint32("llama.attention.head_count", _HEADS)
@@ -108,3 +115,81 @@ def test_load_model_folds_gguf_eot_into_wrapper_stop_set(loaded):
     _, _, tokenizer = loaded
     assert 1 in tokenizer.eos_token_ids            # primary eos
     assert 2 in tokenizer.eos_token_ids            # declared eot folded in
+
+
+def test_background_thread_load_generates_on_main_thread(tmp_path_factory):
+    """Chat background load and the server preload/keep-warm load on one
+    thread and generate on another. MLX default streams are per-thread: any
+    array a load leaves lazy is bound to a stream only the loading thread can
+    evaluate, and the first forward elsewhere dies with "There is no
+    Stream(gpu, N) in current thread" (gemma-4's ProportionalRoPE ``_freqs``
+    was the first casualty). load_model must hand back a fully materialized
+    tree, non-parameter attributes included."""
+    import threading
+
+    import mlx.core as mx
+    from mlx.utils import tree_flatten
+
+    import gmlx
+
+    p = tmp_path_factory.mktemp("loader_bg") / "tiny-llama-bg.gguf"
+    _mint_tiny_llama(str(p), yarn=True)
+    box: list = []
+    t = threading.Thread(target=lambda: box.append(gmlx.load_model(str(p))))
+    t.start()
+    t.join()
+    model, _config, _tokenizer = box[0]
+    # Deep-eval the FULL module tree (underscore attrs included, which
+    # parameters() filters) and run a forward - all on this thread.
+    mx.eval([a for _, a in tree_flatten(dict(model)) if isinstance(a, mx.array)])
+    mx.eval(model(mx.array([[1, 2, 3]])))
+
+
+def test_materialize_module_arrays_reaches_non_parameters():
+    """The loader guard must materialize arrays parameters() skips. The
+    hazard is pinned first: an unmaterialized lazy from a dead thread raises
+    at eval. The raise comes from Metal's thread-local encoder maps, so where
+    MLX runs on CPU (GPU-less CI runners) or a future mlx makes cross-thread
+    eval legal, the hazard is absent and the pin skips - a skip on Metal means
+    this test and ``materialize_module_arrays`` can both be retired."""
+    import threading
+
+    import mlx.core as mx
+    import mlx.nn as nn
+    from mlx.utils import tree_flatten
+
+    from gmlx.loader import materialize_module_arrays
+
+    class Rope(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self._freqs = 2.0 ** mx.arange(4, dtype=mx.float32)
+
+    # parameters() filters underscore attrs - the reason the load-path
+    # weight evals never reach _freqs and a dedicated guard exists.
+    assert not tree_flatten(Rope().parameters())
+
+    def build(materialize: bool):
+        box: list = []
+
+        def bg():
+            m = Rope()
+            if materialize:
+                materialize_module_arrays(m)
+            box.append(m)
+
+        t = threading.Thread(target=bg)
+        t.start()
+        t.join()
+        return box[0]
+
+    # The guard must be a no-op for correctness everywhere, hazard or not.
+    assert build(materialize=True)._freqs.tolist() == [1.0, 2.0, 4.0, 8.0]
+
+    try:
+        mx.eval(build(materialize=False)._freqs)
+    except RuntimeError as e:
+        assert "in current thread" in str(e)          # the pinned hazard
+    else:
+        pytest.skip("cross-thread eval is legal on this mlx/device - "
+                    "no hazard to pin here")

@@ -1445,11 +1445,13 @@ def cmd_menubar(argv: list | None = None,
               "default dependency", file=sys.stderr)
         return 2
 
-    if lifecycle.menubar_alive():
+    if lifecycle.menubar_alive(ignore_pid=os.getpid()):
         # The detached path no-ops via start_menubar; the foreground path must
         # refuse too - overwriting the machine-wide pidfile would orphan the
         # running bar (invisible to menubar_alive/stop once this process's
-        # exit removes the record).
+        # exit removes the record). ignore_pid: a detached start records this
+        # child's pid before it gets here - its own record is not "already
+        # running".
         print("error: a menu bar is already running - stop it first "
               "(gmlx launch menubar --stop)", file=sys.stderr)
         return 1

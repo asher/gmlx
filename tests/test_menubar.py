@@ -9,6 +9,8 @@ import os
 import types
 import urllib.error
 
+import pytest
+
 from gmlx import menubar as mb  # noqa: E402
 
 
@@ -171,6 +173,26 @@ def test_cmd_menubar_without_rumps(monkeypatch, capsys):
     rc = mb.cmd_menubar(["--foreground"])
     assert rc == 2
     assert "macOS" in capsys.readouterr().err
+
+
+def test_cmd_menubar_foreground_guard_discounts_own_pid(monkeypatch, capsys):
+    """The already-running refusal must pass ignore_pid=os.getpid(): the
+    detached parent records the child's pid before the child boots, and
+    without the exemption every spawned bar refused its own record and died
+    (`serve` and `launch menubar` printed success but no bar appeared)."""
+    pytest.importorskip("rumps")
+    from gmlx import lifecycle as lc
+    seen = {}
+
+    def fake_alive(*, ignore_pid=None):
+        seen["ignore_pid"] = ignore_pid
+        return True                                   # someone else's bar
+
+    monkeypatch.setattr(lc, "menubar_alive", fake_alive)
+    rc = mb.cmd_menubar(["--foreground"])
+    assert rc == 1
+    assert seen["ignore_pid"] == os.getpid()
+    assert "already running" in capsys.readouterr().err
 
 
 # default (no --foreground) detaches via the lifecycle helper - no rumps import here

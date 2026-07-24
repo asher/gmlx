@@ -547,14 +547,17 @@ def menubar_log_path() -> Path:
     return runtime_dir() / "menubar.log"
 
 
-def menubar_alive() -> bool:
-    """True if the one menu-bar process is recorded and still alive + ours."""
+def menubar_alive(*, ignore_pid: int | None = None) -> bool:
+    """True if the one menu-bar process is recorded and still alive + ours.
+    ``ignore_pid`` discounts one pid: the detached-start parent records the
+    child's pid before the child finishes booting, so the child's own
+    already-running check must not count itself as the running bar."""
     try:
         run = json.loads(menubar_run_path().read_text())
     except (OSError, ValueError):
         return False
     pid = run.get("pid") if isinstance(run, dict) else None
-    if not pid_alive(pid):
+    if pid == ignore_pid or not pid_alive(pid):
         return False
     cmd = _proc_cmdline(int(pid))
     return "gmlx" in cmd and "menubar" in cmd

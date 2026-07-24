@@ -2190,6 +2190,19 @@ def _verify_zero_copy_views(model, no_alias, log) -> None:
     log(f"[verify] zero-copy views OK ({len(named)} params)")
 
 
+def materialize_module_arrays(*modules) -> None:
+    """Evaluate every array in the module trees, including the non-parameter
+    attributes ``parameters()`` skips (precomputed RoPE ``_freqs`` and the
+    like). MLX default streams are per-thread: an array a load thread leaves
+    lazy is bound to a stream no other thread can evaluate, and the first
+    forward elsewhere dies with "There is no Stream(gpu, N) in current
+    thread". Loader entry points call this last so a model may load on one
+    thread and generate on another (chat background load, server
+    preload/keep-warm). Cheap: weights are already evaluated, only small
+    stragglers remain, and zero-copy mmap views evaluate without paging."""
+    mx.eval(list(modules))
+
+
 def _warm_touch_threshold_bytes() -> int:
     """Size above which the first forward risks the Metal watchdog and the
     eager GPU touch pass runs. The watchdog is a time limit - how many mmap
@@ -2957,6 +2970,7 @@ def load_model(
     eos_ids = getattr(raw_tokenizer, "_gguf_eos_token_ids", None)
     tokenizer = TokenizerWrapper(raw_tokenizer, eos_token_ids=eos_ids)
 
+    materialize_module_arrays(model)
     wait_for_populate(pf.shards, log=_log)
 
     return model, config, tokenizer
