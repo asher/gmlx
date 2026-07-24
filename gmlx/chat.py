@@ -24,7 +24,8 @@ the terminal it runs in is upgraded:
   shows the current values - all eight are also startup flags, so a model
   card's full sampling recommendation fits on the command line);
 * a reasoning model's thinking is stripped of its control markers and streamed
-  dimmed in a gutter-framed block that closes with a ``thought for Xs * N tok``
+  in the theme's thinking style in a gutter-framed block that closes with a
+  ``thought for Xs * N tok``
   payoff (the answer stays normal-weight); ``hide`` collapses it to a live
   spinner that resolves to the same payoff. **Ctrl-O** toggles expand<->collapse
   live during a reply; ``/reasoning [show|hide|raw]`` (startup ``--reasoning``)
@@ -204,7 +205,7 @@ def _build_parser(prog: str = "gmlx chat") -> argparse.ArgumentParser:
         "--reasoning",
         choices=("show", "hide", "raw"),
         default="show",
-        help="How to display a reasoning model's thinking: 'show' dims it under "
+        help="How to display a reasoning model's thinking: 'show' styles it under "
         "a label and strips the control markers (default), 'hide' drops it and "
         "prints only the answer, 'raw' passes everything through verbatim. "
         "Toggle live with /reasoning.",

@@ -129,7 +129,7 @@ THEMES: dict[str, ThemeSpec] = {
     "dark": ThemeSpec(
         name="dark",
         slots={
-            "thinking": _s(dim=True),
+            "thinking": _s(italic=True, fg16=94),     # bright blue; dim is illegible on many dark palettes
             "heading": _s(bold=True, fg16=36),        # cyan
             "bold": _s(bold=True),
             "italic": _s(italic=True),

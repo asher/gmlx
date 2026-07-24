@@ -350,7 +350,8 @@ every command. The terminal is upgraded on top:
     turns are carried into that re-prefill so nothing is lost.
 - Reasoning display: for thinking models (Qwen3/DeepSeek-R1/GLM `<think>`,
   gpt-oss harmony channels, Gemma `<|channel>thought`), the chain-of-thought
-  is stripped of its control markers and streamed dimmed inside a
+  is stripped of its control markers and streamed in the theme's thinking
+  style (italic bright blue under the default `dark` theme) inside a
   gutter-framed block that closes with a payoff line showing how long the
   model thought and how many tokens it spent; the final answer follows in
   normal weight. `--reasoning hide` collapses the reasoning to a single live
