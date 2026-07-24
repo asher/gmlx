@@ -16,6 +16,8 @@ Shape (see ``docs/server-config.md`` for the full reference)::
     discover:  [{dir, recursive, pair_mmproj, speculative}]
     talk:      {model, voice, speed, system, language, max_tokens, mode, wake_word, wake_threshold, vad, input_device, output_device, chime, brain, push_to_talk_modifier}
     assistant: {max_tool_rounds, tool_timeout_s, mcp, memory}   # shared tool-loop assistant
+    theme:     <name>                             # chat default theme (--theme overrides)
+    themes:    {<name>: {<slot>: {bold, dim, italic, underline, fg16, rgb}, extends, code_theme, ptk_toolbar}}
 
 Precedence (low -> high) for the param groups of a request:
 ``family base (built-in, see profiles.py) -> server.defaults.profile -> matched
@@ -96,7 +98,7 @@ CACHE_DISK_ENV = {
 # leaves a model unpinned) - so we warn loudly instead. Structural breakage (missing
 # path, unknown profile reference, extends cycle) is what *raises*; see _validate.
 _TOP_KEYS = frozenset({"server", "profiles", "rules", "models", "aliases",
-                       "discover", "talk", "assistant"})
+                       "discover", "talk", "assistant", "theme", "themes"})
 _SERVER_KEYS = frozenset({"host", "port", "api_key", "no_auth", "model_dirs",
                           "budget_gb", "max_models", "hf_cache", "cache",
                           "defaults", "stt", "tts", "embeddings", "rerank",
@@ -425,6 +427,12 @@ class ServerCfg:
     # Assistants on a non-loopback bind refuse to start unless this is true:
     # anyone holding the API key can drive tool execution on this host.
     assistant_allow_remote: bool = False
+    # Chat UI: the default color theme (``--theme`` overrides) and user-defined
+    # theme specs (name -> slot/style mapping). Carried raw here; the chat
+    # startup validates and registers them via theme.register_user_themes so a
+    # malformed theme warns in chat instead of failing serve.
+    theme: str | None = None
+    themes: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -1535,6 +1543,8 @@ def build_config(doc: dict) -> ServerCfg:
         assistant=_parse_assistant(doc.get("assistant")),
         assistants=_parse_assistant_aliases(srv.get("assistants")),
         assistant_allow_remote=bool(srv.get("assistant_allow_remote", False)),
+        theme=str(doc["theme"]) if doc.get("theme") else None,
+        themes=_section_mapping("themes", doc.get("themes")),
     )
     cfg.talk.assistant = cfg.assistant   # one shared settings object
     _validate(cfg)

@@ -372,7 +372,9 @@ every command. The terminal is upgraded on top:
   (default; follows the terminal's own colors), `light`, `dark-hc`
   (high-contrast), `nord`, `dracula`, `solarized-dark`, `gruvbox`. The `cb`
   modifier (or `--colorblind`) swaps every accent onto the colorblind-safe
-  Okabe-Ito palette and works with all themes.
+  Okabe-Ito palette and works with all themes. A top-level `theme:` in
+  `gmlx.yaml` sets the default, and a `themes:` section defines custom
+  palettes (see [server-config.md](server-config.md#chat-themes-theme--themes)).
 - Session persistence: every chat autosaves after each turn (schema-v1 JSON
   under `$XDG_DATA_HOME/gmlx/chats`; `--no-autosave` opts out, and
   `/reset` rotates to a fresh file so old conversations survive). `/save

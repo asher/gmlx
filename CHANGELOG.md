@@ -10,27 +10,20 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `detect_arch` and `load_tokenizer_from_gguf` promoted to the stable public
   API (`gmlx.__all__`): synthesize the HF tokenizer from GGUF metadata without
-  loading the model. Consumed by mlx-kld's `[gguf]` scoring extra for
-  tokenizer parity checks ahead of the model load.
+  loading the model. 
 - Lossy MoE decode levers for streamed models: `--moe-miss-shed` drops
   non-resident experts while keeping a configured share of routing mass, and
-  `--moe-layer-shed` probabilistically skips routed MoE paths per token. Both
-  trade output quality for throughput, are never on by default, and are wired
-  through config, serve, and the run/chat overlays.
+  `--moe-layer-shed` probabilistically skips routed MoE paths per token. 
 - GPU keep-warm for streamed decode: `--gpu-keepwarm` (config
-  `server.gpu_keepwarm`) holds the GPU clock up between tokens. The heartbeat
-  is decode-gated, so an idle server pays no power cost. Measured +45% on GLM
-  and +32% on Hunyuan 3 production configs.
+  `server.gpu_keepwarm`) holds the GPU clock up between tokens. 
 - Decode lookahead depth: `GMLX_DECODE_LOOKAHEAD_DEPTH` extends expert
   prestage prediction up to three MoE layers ahead, gated independently per
   layer and depth.
 - Hunyuan 3 MoE fusion: routing-scores fold and shared-expert ride-along on
   the fused streaming path.
-- MiniMax-M3 streaming: normalized routing weights pass through the mix seam,
-  enabling miss-shed on streamed M3 with stock base models.
-- Streaming guide (`docs/streaming.md`), split out of the performance guide:
-  placements, feeders, GPU keep-warm, and the lossy-lever decision procedure
-  with measured settings and sampling-regime certification guidance.
+- MiniMax-M3 streaming enables miss-shed.
+- Streaming MoE guide (`docs/streaming.md`)
+- Chat CLI adds user customizable themes
 
 ### Changed
 

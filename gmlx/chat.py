@@ -220,8 +220,9 @@ def _build_parser(prog: str = "gmlx chat") -> argparse.ArgumentParser:
     )
     ap.add_argument(
         "--theme",
-        default="dark",
-        help="Color theme (see /theme for the list). Default dark.",
+        default=None,
+        help="Color theme (see /theme for the list). Default: the config's "
+        "top-level `theme:`, else dark.",
     )
     ap.add_argument(
         "--colorblind",
@@ -2725,12 +2726,28 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
     state.reasoning = args.reasoning
     from .reasoning import want_color as _want_color
     from .render import resolve_render_mode
-    from .theme import resolve_theme
+    from .theme import register_user_themes, resolve_theme
+
+    # Config-defined themes + default (`themes:` / `theme:` in gmlx.yaml).
+    # Best-effort: chat must start with or without a config, and a malformed
+    # theme definition warns rather than blocking the session.
+    cfg_theme = None
+    try:
+        from . import config as cfgmod
+
+        _theme_cfg, _ = cfgmod.load_cli_config(getattr(args, "config", None))
+    except cfgmod.ConfigError:
+        _theme_cfg = None
+    if _theme_cfg is not None:
+        for w in register_user_themes(_theme_cfg.themes):
+            print(f"warning: {w}", file=sys.stderr)
+        cfg_theme = _theme_cfg.theme
 
     _color = _want_color()
     try:
         state.theme = resolve_theme(
-            args.theme, colorblind=args.colorblind, color=_color
+            args.theme or cfg_theme or "dark",
+            colorblind=args.colorblind, color=_color
         )
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
