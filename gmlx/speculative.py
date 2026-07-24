@@ -135,6 +135,26 @@ def _argmax_sampler(logits: mx.array) -> mx.array:
 #     when the modes match). Measured 61% vs 67% greedy on Qwen3.6-27B ultrachat.
 _FORCE_GREEDY_DRAFT = not env_bool("GMLX_MTP_COUPLED_DRAFT", False)
 _ROUND_PROFILE = env_bool("GMLX_ROUND_PROFILE", False)
+# One-shot cache-shape dump for the batched decode rounds: which cache class
+# the target forward sees, its offset, and the left-padding spread that picks
+# the padded-decode attention path over the plain batched one.
+_SHAPE_DEBUG = env_bool("GMLX_SPEC_SHAPE_DEBUG", False)
+_shape_logged: set[str] = set()
+
+
+def _log_cache_shape_once(tag, prompt_cache, n_active):
+    if tag in _shape_logged:
+        return
+    _shape_logged.add(tag)
+    entry = prompt_cache[0] if prompt_cache else None
+    lp = getattr(entry, "left_padding", None)
+    lp_list = lp.tolist() if isinstance(lp, mx.array) else lp
+    keys = getattr(entry, "keys", None)
+    print(f"[spec] shape-debug {tag}: rows={n_active} "
+          f"cache={type(entry).__name__} offset={getattr(entry, 'offset', None)} "
+          f"left_padding={lp_list} "
+          f"keys={None if keys is None else tuple(keys.shape)} "
+          f"entries={len(prompt_cache)}", file=sys.stderr, flush=True)
 # Walk diagnostics (B=1 loop only). GMLX_WALK_PROFILE=1 splits the walk
 # into graph-build / eval / host tail and prints medians at session end.
 # =2 additionally stages the eval to split lm_head projection from the
@@ -1699,6 +1719,8 @@ def _owned_decode_rounds_batch(
             _gap = (_t0 - _prev_end) * 1e3 if _prev_end else 0.0
             b_arr = mx.array(
                 [b[active_idx[j]] for j in range(n_active)], dtype=token_dtype)
+            if _SHAPE_DEBUG:
+                _log_cache_shape_once("gated", prompt_cache, n_active)
             with mx.stream(generation_stream):
                 out = lm(b_arr[:, None], cache=prompt_cache)
                 logits = getattr(out, "logits", out)[:, -1, :]
