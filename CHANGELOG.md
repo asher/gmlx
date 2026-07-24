@@ -35,6 +35,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `'RotatingKVCache' object has no attribute 'rotated'`; single-sequence
   rotating caches are now lifted to the batch cache class before the join,
   preserving temporal order for windows that had already rotated.
+- Speculative serving: with a shared-KV drafter (gemma assistant GGUF), a
+  request admitted into a live batch crashed it on a shared-KV shape
+  mismatch; injected rows are now aligned and merged into the drafter's
+  view at the new batch width.
 
 ## [0.1.0] - 2026-07-19
 

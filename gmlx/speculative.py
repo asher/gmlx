@@ -1331,6 +1331,68 @@ def _lift_injected_cache(cache, other):
     return other
 
 
+def _pad_shared_kv_seq(arr, seq_len: int):
+    """Tail-pad a (B, H, S, D) shared-KV tensor to seq_len with zeros."""
+    if arr.shape[2] == seq_len:
+        return arr
+    pad = mx.zeros(
+        tuple(arr.shape[:2]) + (seq_len - arr.shape[2],) + tuple(arr.shape[3:]),
+        dtype=arr.dtype)
+    return mx.concatenate([arr, pad], axis=2)
+
+
+def _merge_injected_shared_kv(drafter, shared_kv, inj_states, n_old, n_new):
+    """Widen the shared-KV dict by n_new injected rows, in place.
+
+    Shared-KV drafters (gemma4 assistant) replace their stored view on
+    every set_shared_kv, so injected rows must be merged and re-set before
+    the next draft_block or the drafter runs old-width KV against new-width
+    queries. Base rows prefer the drafter's live view when its width
+    matches n_old: it is current (verify-refreshed) and already in the
+    normalized layout (rows front-aligned, tail zeroed, kv_valid_len
+    masks the rest). The engine dict is the fallback: a stale prefill
+    snapshot, or the 0-row dict of the all-finished adoption path.
+    Injected rows come from a solo prefill (left padding 0), already
+    front-aligned. Seq lengths are ragged across sources (windowed shared
+    layers cap S per prefill), so rows are tail-padded to the max; a
+    missing capture is zero-filled to keep widths consistent, costing
+    draft quality on those rows for one round, never correctness."""
+    live = getattr(drafter, "_shared_kv", None)
+    base = None
+    for cand in (live, shared_kv):
+        if (isinstance(cand, dict) and cand
+                and next(iter(cand.values()))[0].shape[0] == n_old):
+            base = cand
+            break
+    keys = list(base.keys()) if base is not None else list(
+        (inj_states or {}).keys())
+    for k in keys:
+        pair_new = (inj_states or {}).get(k)
+        if base is not None:
+            K_old, V_old = base[k]
+            if pair_new is None:
+                K_new = mx.zeros(
+                    (n_new,) + tuple(K_old.shape[1:]), dtype=K_old.dtype)
+                V_new = mx.zeros(
+                    (n_new,) + tuple(V_old.shape[1:]), dtype=V_old.dtype)
+            else:
+                K_new, V_new = pair_new
+        else:
+            K_new, V_new = pair_new
+            K_old = mx.zeros(
+                (n_old,) + tuple(K_new.shape[1:]), dtype=K_new.dtype)
+            V_old = mx.zeros(
+                (n_old,) + tuple(V_new.shape[1:]), dtype=V_new.dtype)
+        seq_len = max(K_old.shape[2], K_new.shape[2])
+        shared_kv[k] = (
+            mx.concatenate(
+                [_pad_shared_kv_seq(K_old, seq_len),
+                 _pad_shared_kv_seq(K_new, seq_len)], axis=0),
+            mx.concatenate(
+                [_pad_shared_kv_seq(V_old, seq_len),
+                 _pad_shared_kv_seq(V_new, seq_len)], axis=0))
+
+
 def _owned_decode_rounds_batch(
     model,
     drafter,
@@ -1477,14 +1539,22 @@ def _owned_decode_rounds_batch(
                     retired.append(False)
                     B_orig += 1
 
-                if _needs_shared_kv and inj.get("shared_kv_states"):
-                    for k in shared_kv:
-                        K_old, V_old = shared_kv[k]
-                        if k in inj["shared_kv_states"]:
-                            K_new, V_new = inj["shared_kv_states"][k]
-                            shared_kv[k] = (
-                                mx.concatenate([K_old, K_new], axis=0),
-                                mx.concatenate([V_old, V_new], axis=0))
+                if _needs_shared_kv:
+                    # The old raw batch-axis concat crashed on ragged seq
+                    # and, when set_shared_kv had normalized into a copy,
+                    # never reached the drafter anyway -- whose stored
+                    # view, position, and kv_valid_len all stay at the
+                    # old width until re-set.
+                    _merge_injected_shared_kv(
+                        drafter, shared_kv, inj.get("shared_kv_states"),
+                        len(active_idx) - B_new, B_new)
+                    positions_active = [positions[i] for i in active_idx]
+                    drafter.set_shared_kv(
+                        shared_kv, kv_offset=max(positions_active),
+                        position=_mtp_draft_position(
+                            mx.array(positions_active)),
+                        kv_valid_len=mx.array(positions_active),
+                        left_padding=None)
             # Injection grew B; the target caches text mrope deltas at the old
             # width and only handles too-WIDE (slices down), not too-narrow --
             # verify then dies on offsets(B) + rope_deltas(B_old) broadcast.
