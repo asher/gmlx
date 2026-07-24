@@ -139,6 +139,30 @@ Failures raise one of two exceptions, from `preflight` or `load_model` alike:
 `backend`). [arch-coverage.md](arch-coverage.md) is the generated
 human-readable view of the same data, with validation status.
 
+## Tokenizer without the model
+
+```python
+from gguf import GGUFReader
+from gmlx import detect_arch, load_tokenizer_from_gguf
+
+reader = GGUFReader("model.gguf", "r")
+arch = detect_arch(reader)
+tokenizer = load_tokenizer_from_gguf(reader, arch)
+```
+
+`load_tokenizer_from_gguf(meta, arch, *, chat_template_override=None)` builds
+an HF fast tokenizer purely from the GGUF's embedded vocab/merges/scores
+metadata - the same synthesis `load_model` runs internally - without paying
+the model load. `detect_arch(reader)` reads `general.architecture` from the
+header. Both read only GGUF metadata, so they stay cheap on multi-GB files.
+
+Use these when a tool needs the tokenizer before deciding whether to load
+weights at all: eval harnesses doing tokenizer parity checks (mlx-kld's
+GGUF scoring), corpus pre-tokenization, or template inspection.
+`chat_template_override` (an inline Jinja string) replaces the GGUF's chat
+template and is applied before multi-EOS inference, so EOS detection runs
+against the override.
+
 ## mlx-lm server bridge
 
 ```python

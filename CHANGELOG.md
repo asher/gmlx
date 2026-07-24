@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project aims to
 adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `detect_arch` and `load_tokenizer_from_gguf` promoted to the stable public
+  API (`gmlx.__all__`): synthesize the HF tokenizer from GGUF metadata without
+  loading the model. Consumed by mlx-kld's `[gguf]` scoring extra for
+  tokenizer parity checks ahead of the model load.
+
 ## [0.1.0] - 2026-07-19
 
 First public release: a local inference platform for Apple Silicon that runs
