@@ -1,9 +1,63 @@
 # Streaming: MoE models bigger than memory
 
-Every lever specific to streamed decode, and how to choose among them.
+A MoE model whose file exceeds what the GPU can wire - or exceeds RAM
+outright - still runs: gmlx streams the expert weights from disk and
+keeps what every token needs resident. MoE decode is what makes this
+viable: only the routed experts are read per token, so the per-token
+working set is a small slice of the file. The levers in this guide
+exist to keep that slice cheap - fed from the SSD ahead of demand,
+cached where it repeats, and, strictly opt-in, thinned where the
+router can spare it.
+
+Set expectations first. When experts stream from disk, decode is bound
+by the SSD and CPU, not the GPU, and single-digit tokens per second is
+normal - the feeders raise the constant, not the nature of the bound.
+This is a capacity feature that makes a 200B-class MoE usable on a
+64 GB machine, not a speed feature, and it is strictly for the
+over-budget case: a model that fits in memory runs several times
+faster on the normal GPU path.
+
+This guide covers launching a streamed model, choosing between the two
+placements, the lossless levers (the feeders, lookahead prestage, GPU
+keep-warm), and the lossy levers with a measured decision procedure.
 General performance topics - measuring, quant choice, speculative
 decoding, the prompt cache, memory and the KV cache - are in
 [performance.md](performance.md).
+
+## Quick start
+
+```sh
+# sharded files: point at the first shard
+gmlx run GLM-5.2-UD-IQ3_XXS-00001-of-00006.gguf --stream-experts
+```
+
+Or served, with the per-model `stream` key:
+
+```yaml
+models:
+  glm:
+    gguf: ~/models/GLM-5.2-UD-IQ3_XXS-00001-of-00006.gguf
+    stream: experts
+    kv_bits: 8
+```
+
+The load is a mmap, not a read, so generation starts within seconds
+whatever the file size. Prefill stages each layer's experts through the
+prefill feeder. Decode starts at the disk's demand rate and improves
+over the first few dozen tokens as the expert arena converges on the
+model's hot set; the decode feeder's exit stats (printed at `-v` on
+`run` and `chat`, always in server logs) show the arena hit rate a
+session settled at.
+
+Streaming applies to text models - the server rejects `stream` on VLM
+and speculative entries. On the CLI, MTP composes with
+`--stream-experts` but defers by default: auto-MTP stays off and an
+explicit `--speculative` opts in. What stays resident - the every-token
+layers plus the KV cache - follows the normal fit arithmetic in
+[getting-started.md](getting-started.md#will-it-fit), and a quantized
+KV cache (`--kv-bits 8`) is the usual companion at long context.
+
+## Choosing a placement
 
 Two placements run MoE models whose files exceed what the GPU can wire:
 
@@ -18,6 +72,13 @@ Two placements run MoE models whose files exceed what the GPU can wire:
   sequential expert prefetch, advising the kernel a couple of layers ahead so
   prefill reads expert stacks at sequential bandwidth instead of demand-faulting
   them.
+
+With the decode feeder on, `--stream-experts` is the usual choice: it
+matches `--stream-cpu` on short generations, pulls ahead once the arena
+warms (measured below), and keeps the large KV cache on GPU at depth.
+`--stream-cpu` keeps everything on one device; in a server config,
+`stream: cpu` switches the whole process to the CPU device, so it suits
+a single-model setup rather than mixing with GPU-resident models.
 
 ## The feeder paths
 
@@ -390,10 +451,3 @@ Wire mode is a hair slower than packed when the model fits in RAM (gpt-oss
 decode ~5% at depth 0, converging at depth; prefill is at parity or better)
 but is what makes the over-RAM case work at all, and it cuts the load time
 from minutes of repack to a mmap.
-
-Be honest with expectations: when experts stream from disk, decode is bound by SSD
-and CPU, not the GPU, and single-digit tokens per second is normal - the feeders
-raise the constant, not the nature of the bound. This is a capacity feature that
-makes a 200B-class MoE usable on a 64 GB machine, not a speed feature. And it is
-strictly for the over-budget case: a model that fits in memory runs several times
-faster on the normal GPU path.
