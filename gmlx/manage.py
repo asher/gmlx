@@ -1147,16 +1147,15 @@ def cmd_list(argv: list | None = None, prog: str = "gmlx list") -> int:
               "then `gmlx sync-models`.")
         return 0
     print()
-    wid = max(len(r["id"]) for r in rows)
     for r in rows:
         mark = "*" if r["default"] else " "
         extra = list(r["flags"])
         if r["source"] == "discovered":
             extra.append("discovered")
-        note = f"   [{', '.join(extra)}]" if extra else ""
+        note = f"  [{', '.join(extra)}]" if extra else ""
         prof = f"  @{r['profile']}" if r["profile"] else ""
-        print(f"{mark} {r['id']:<{wid}}{prof}{note}")
-        print(f"  {' ' * wid}  {r['path']}")
+        print(f"{mark} {r['id']}{prof}{note}")
+        print(f"      {r['path']}")
     if aliases:
         print("\naliases:")
         wa = max(len(k) for k in aliases)
