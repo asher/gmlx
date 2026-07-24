@@ -1093,6 +1093,69 @@ def test_continuous_batch_injection(mtp_model):
     )
 
 
+def test_width_cap_gated_batch_matches_ungated_greedy(mtp_model, monkeypatch,
+                                                      capfd):
+    """A batch wider than the cap decodes plain, and under greedy that has to
+    be token-identical to the same batch decoded speculatively: MTP is a
+    speed optimization, so gating it may not move a single token.
+
+    Unit coverage for the gate's mechanics is tests/test_mtp_width_cap.py;
+    this is the end-to-end arm through the real engine and a real model.
+    """
+    import gmlx.speculative as spec
+
+    model, drafter, config, tokenizer = mtp_model
+    if not _drafter_supports_batch(drafter):
+        pytest.skip("drafter does not support batched reset (assistant-model)")
+
+    ids = [
+        _build_prompt(tokenizer, 300, seed=_SEED),
+        _build_prompt(tokenizer, 300, seed=_SEED_B),
+        _build_prompt(tokenizer, 300, seed=_SEED_C),
+    ]
+
+    monkeypatch.setenv("GMLX_MTP_WIDTH_CAP", "0")      # uncapped reference
+    spec._width_cap_memo = ("", None)
+    ref = _run_mtp(model, drafter, tokenizer, ids, N_DECODE)
+
+    monkeypatch.setenv("GMLX_MTP_WIDTH_CAP", "2")      # B=3 > 2 -> gated
+    spec._width_cap_memo = ("", None)
+    spec._width_cap_logged.clear()
+    capfd.readouterr()
+    got = _run_mtp(model, drafter, tokenizer, ids, N_DECODE)
+    err = capfd.readouterr().err
+
+    assert "[spec] width-cap" in err, (
+        f"gate never fired at B=3 with cap=2; stderr: {err[-400:]}")
+    for i, (a, b) in enumerate(zip(ref, got)):
+        assert a and b, f"row {i}: empty output (ref {len(a)}, gated {len(b)})"
+        n = min(len(a), len(b))
+        assert a[:n] == b[:n], (
+            f"row {i}: gated decode diverged from speculative decode "
+            f"under greedy: {b[:8]} vs {a[:8]}")
+
+
+def test_width_cap_leaves_single_stream_speculating(mtp_model, monkeypatch,
+                                                    capfd):
+    """A cap only gates batches wider than it: a lone request still drafts,
+    which is where the whole speedup lives."""
+    import gmlx.speculative as spec
+
+    model, drafter, config, tokenizer = mtp_model
+    ids = [_build_prompt(tokenizer, 300, seed=_SEED)]
+
+    monkeypatch.setenv("GMLX_MTP_WIDTH_CAP", "1")
+    spec._width_cap_memo = ("", None)
+    spec._width_cap_logged.clear()
+    capfd.readouterr()
+    out = _run_mtp(model, drafter, tokenizer, ids, N_DECODE)
+    err = capfd.readouterr().err
+
+    assert out and out[0], "no tokens from the single-stream run"
+    assert "[spec] width-cap gate" not in err, (
+        f"B=1 must never gate at cap=1; stderr: {err[-400:]}")
+
+
 def _drain_generator(gen, results, inject_at):
     """Run gen to completion; fire each (trigger_fn, insert_fn) in inject_at
     once its trigger first returns True. Returns injected uid lists."""

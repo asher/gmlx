@@ -1547,10 +1547,13 @@ def _owned_decode_rounds_batch(
                 draft_sampler, token_dtype, **draft_kwargs)
 
     if gated:
-        # Only draft_block reads hidden; dropping it frees the full prefill
-        # [B, L, D] instead of pinning it for the generator's life, and turns
-        # any missed consumer into a loud TypeError.
+        # Only draft_block reads hidden and only the drafter reads shared_kv;
+        # dropping both frees the full prefill [B, L, D] and (on shared-KV
+        # drafters at depth) the prefill K/V capture instead of pinning them
+        # for the generator's life, and turns any missed consumer into a loud
+        # TypeError. Every remaining use of either is behind `not gated`.
         hidden = None
+        shared_kv = None
     else:
         if hidden.shape[1] > 1:
             hidden = hidden[:, -1:, :]

@@ -19,7 +19,6 @@ from gmlx.speculative import (
     _mtp_width_cap,
     _owned_decode_rounds_batch,
     _width_cap_logged,
-    _width_cap_memo,
 )
 import gmlx.speculative as spec
 
@@ -428,6 +427,40 @@ def test_width_transition_stress_both_directions():
     d2 = _StrictDrafter(cap=2)
     with pytest.raises(AssertionError, match="draft_block"):
         _drive(d2, B=2, max_tokens=3)
+
+
+def test_all_finished_adoption_stays_gated():
+    """When every row finishes in the same round and an injection is already
+    queued, the loop drops the finished rows and adopts the newcomers as the
+    batch. That branch touches drafter/hidden/shared-KV state a gated round
+    never built, so it has to stay behind the gate too -- and the adopted
+    batch inherits the latch rather than re-arming."""
+    d = _StrictDrafter(cap=1)
+    model = SimpleNamespace()
+    lm = _FakeLM()
+    cache = _FakeCache(width=2)
+    gen = _owned_decode_rounds_batch(
+        model, d, lm, [cache],
+        hidden=mx.zeros((2, 1, 8)), b=[1, 2],
+        shared_kv={"full": (mx.zeros((2, 2, 4, 4)), mx.zeros((2, 2, 4, 4)))},
+        seed_tokens=None, emitted=[1, 1], max_tokens=2, sampler=None,
+        draft_block_size=None)
+
+    # Round 1 takes both rows to the budget. The yield is the generator's only
+    # suspension point, so queueing here is exactly the race the branch
+    # exists for: the injection lands before the all-finished check runs.
+    first, meta = next(gen)
+    assert meta == {"round_pos": 0, "round_len": 1}
+    _queue_injection(model, lm)
+
+    adopted, meta = next(gen)          # finished rows dropped, newcomer adopted
+    assert meta == {"round_pos": 0, "round_len": 1}
+    # the retired rows go quiet and only the adopted row emits
+    assert adopted[:2] == [None, None] and adopted[2] is not None
+    assert d.forward_calls == []       # no re-arm on the adopted batch
+    assert d.shared_kv_calls == 0
+    assert model._generator_injections == []
+    gen.close()
 
 
 def test_gated_generator_exhausts_rather_than_stranding_rows():
