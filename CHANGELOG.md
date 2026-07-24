@@ -19,6 +19,22 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   streams at different context depths stay on the fused ragged-attention
   kernel instead of a per-row fallback loop
   (`GMLX_RAGGED_UNIFIED_PLAN=0` disables).
+- `bench/plot-bench.py batch-scaling` chart grammar: aggregate decode
+  throughput vs concurrent streams, one line per depth, with an optional
+  `--ref` overlay of a second run for scheduler A/Bs.
+
+### Fixed
+
+- Speculative serving: a request admitted while a qwen3.5/3.6-family
+  speculative prompt batch was mid-prefill could kill every request in
+  flight with a rope-deltas broadcast error; cached text mrope deltas are
+  now zero-padded to the live batch width on the prompt path, matching the
+  existing decode-path guard.
+- Speculative serving: a request admitted into a live speculative batch on
+  sliding-window models (gemma family) could fail with
+  `'RotatingKVCache' object has no attribute 'rotated'`; single-sequence
+  rotating caches are now lifted to the batch cache class before the join,
+  preserving temporal order for windows that had already rotated.
 
 ## [0.1.0] - 2026-07-19
 
