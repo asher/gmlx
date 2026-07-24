@@ -148,8 +148,10 @@ def test_background_thread_load_generates_on_main_thread(tmp_path_factory):
 def test_materialize_module_arrays_reaches_non_parameters():
     """The loader guard must materialize arrays parameters() skips. The
     hazard is pinned first: an unmaterialized lazy from a dead thread raises
-    at eval. If a future mlx makes cross-thread eval legal, this pin and
-    ``materialize_module_arrays`` can both be retired."""
+    at eval. The raise comes from Metal's thread-local encoder maps, so where
+    MLX runs on CPU (GPU-less CI runners) or a future mlx makes cross-thread
+    eval legal, the hazard is absent and the pin skips - a skip on Metal means
+    this test and ``materialize_module_arrays`` can both be retired."""
     import threading
 
     import mlx.core as mx
@@ -181,6 +183,13 @@ def test_materialize_module_arrays_reaches_non_parameters():
         t.join()
         return box[0]
 
-    with pytest.raises(RuntimeError, match="in current thread"):
-        mx.eval(build(materialize=False)._freqs)
+    # The guard must be a no-op for correctness everywhere, hazard or not.
     assert build(materialize=True)._freqs.tolist() == [1.0, 2.0, 4.0, 8.0]
+
+    try:
+        mx.eval(build(materialize=False)._freqs)
+    except RuntimeError as e:
+        assert "in current thread" in str(e)          # the pinned hazard
+    else:
+        pytest.skip("cross-thread eval is legal on this mlx/device - "
+                    "no hazard to pin here")
