@@ -28,8 +28,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the fused streaming path.
 - MiniMax-M3 streaming: normalized routing weights pass through the mix seam,
   enabling miss-shed on streamed M3 with stock base models.
-- Performance guide: lossy-lever decision procedure with measured settings,
-  sampling-regime certification guidance, and the GPU keep-warm section.
+- Streaming guide (`docs/streaming.md`), split out of the performance guide:
+  placements, feeders, GPU keep-warm, and the lossy-lever decision procedure
+  with measured settings and sampling-regime certification guidance.
 
 ### Changed
 

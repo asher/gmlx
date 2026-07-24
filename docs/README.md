@@ -19,7 +19,8 @@ right document for the task at hand.
 | Build a local RAG pipeline (embeddings + rerank) | [rag.md](rag.md) |
 | Run a vision or audio-input model | [vlm.md](vlm.md) |
 | Fine-tune with LoRA on a quantized base | [lora.md](lora.md) |
-| Make it faster, or run a model bigger than RAM | [performance.md](performance.md) |
+| Make it faster | [performance.md](performance.md) |
+| Run a MoE model bigger than RAM | [streaming.md](streaming.md) |
 | Fix something that broke | run `gmlx doctor`, then [troubleshooting.md](troubleshooting.md) |
 | Look up a flag or config key | [cli.md](cli.md), [server-config.md](server-config.md) |
 | Load and generate from your own Python | [python.md](python.md) |
@@ -70,8 +71,11 @@ interoperate with llama.cpp.
 [performance.md](performance.md) explains what actually determines speed on Apple
 Silicon and what each lever buys: quant choice (uniform K-quant files decode
 markedly faster than heavily mixed ones), speculative decoding, the prompt cache,
-KV-cache quantization and sizing, and the over-RAM MoE paths. Includes how to run
-your own benchmarks.
+and KV-cache quantization and sizing. Includes how to run your own benchmarks.
+
+[streaming.md](streaming.md) covers MoE models bigger than RAM: the two
+placements, the feeder paths and lookahead prestage, GPU keep-warm, and the
+lossy levers with their measured decision procedure.
 
 [benchmarks.md](benchmarks.md) is the generated fleet scorecard behind the
 performance claims: gmlx vs llama.cpp on the same GGUF, per-model charts and

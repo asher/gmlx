@@ -511,7 +511,7 @@ smallest set of its routed experts covering share P of the router's gate
 mass, so confident tokens read fewer expert bytes during decode. Same
 semantics as `run --moe-expert-mass`; size P first with a lossless
 `gmlx run --moe-expert-probe` pass on the same GGUF (see
-[performance.md](performance.md#bigger-than-memory-moe-offload)). Requires
+[streaming.md](streaming.md)). Requires
 `stream: experts | cpu` (announced as ignored otherwise), out-of-range
 values fail config validation, and the key is load-affecting: two ids that
 differ only in `moe_expert_mass` are distinct resident entries.
@@ -537,7 +537,7 @@ memory pressure - it shrinks, keeping its most popular experts, and regrows
 once pressure clears - so a `stream: experts` entry coexists with other models loading
 on the same server (`GMLX_DECODE_PRESSURE=0` pins it). Both keys are
 load-affecting. See
-[performance.md](performance.md#bigger-than-memory-moe-offload) for what they
+[streaming.md](streaming.md) for what they
 do and when to turn them off.
 
 ### `aliases`
