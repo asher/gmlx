@@ -73,6 +73,30 @@ def _streaming_model(monkeypatch, n_layers=2):
     return model
 
 
+def test_lookahead_family_default(monkeypatch):
+    """glm_moe_dsa / deepseek_v32 default lookahead OFF (replica-router sync
+    tax measured above its stall savings there); everything else defaults ON;
+    an explicit GMLX_DECODE_LOOKAHEAD always wins."""
+    from gmlx.envflags import env_bool
+    from gmlx.loader import _lookahead_default
+
+    m = _FakeModel(1)
+    assert _lookahead_default(m)  # no model_type: on
+    for fam in ("glm_moe_dsa", "deepseek_v32"):
+        m.model_type = fam
+        assert not _lookahead_default(m), fam
+    for fam in ("minimax_m3", "hunyuan_v3_moe", "qwen3_moe"):
+        m.model_type = fam
+        assert _lookahead_default(m), fam
+
+    m.model_type = "glm_moe_dsa"
+    monkeypatch.setenv("GMLX_DECODE_LOOKAHEAD", "1")
+    assert env_bool("GMLX_DECODE_LOOKAHEAD", _lookahead_default(m))
+    m.model_type = "qwen3_moe"
+    monkeypatch.setenv("GMLX_DECODE_LOOKAHEAD", "0")
+    assert not env_bool("GMLX_DECODE_LOOKAHEAD", _lookahead_default(m))
+
+
 def test_norm_gains_plain_rmsnorm():
     norm = nn.RMSNorm(DIM)
     norm.weight = mx.arange(1, DIM + 1).astype(mx.float32)
@@ -307,13 +331,128 @@ def test_wrapper_gate_trims_prestage(monkeypatch):
     object.__setattr__(glu0, "_kq_decode_feeder", df)
     object.__setattr__(glu0, "_kq_li", 0)
     x = mx.random.normal((1, 1, DIM))
-    gate._ema[1] = np.array([0.9, 0.2, 0.1])  # only rank 0 reliable
+    gate._ema[(1, 1)] = np.array([0.9, 0.2, 0.1])  # only rank 0 reliable
     mx.eval(model.layers[0].mlp(x))
     assert df.calls[-1].shape[-1] == 1
-    gate._ema[1] = np.array([0.1, 0.1, 0.1])  # nothing reliable
+    gate._ema[(1, 1)] = np.array([0.1, 0.1, 0.1])  # nothing reliable
     n = len(df.calls)
     mx.eval(model.layers[0].mlp(x))
     assert len(df.calls) == n  # no prestage submitted at all
+
+
+class _FakeRouterMoE(nn.Module):
+    """hy_v3-shaped block: the DeepSeek-shaped gate submodule sits at
+    ``router`` (no ``gate`` attribute at all)."""
+
+    def __init__(self):
+        super().__init__()
+        self.router = _FakeGate()
+        self.switch_mlp = SwitchGLU(DIM, HID, NE)
+
+    def __call__(self, x):
+        inds, w = self.router(x)
+        y = self.switch_mlp(x, inds)
+        return (y * w[..., None]).sum(axis=-2)
+
+
+def test_router_attr_gate_drives_predictor(monkeypatch):
+    """A gate submodule named ``router`` (hy_v3) is recognized and wires
+    the same layer-pair predictor a ``gate``-named submodule gets."""
+    mx.random.seed(7)
+    model = _FakeModel(2)
+    for layer in model.layers:
+        layer.mlp = _FakeRouterMoE()
+    mx.eval(model.parameters())
+    monkeypatch.setattr(
+        mx, "device_info", lambda: {"max_recommended_working_set_size": 1024}
+    )
+    install_expert_streaming(model)
+    assert _router_fn_for(model.layers[1].mlp) is not None
+    assert install_lookahead(model, model.layers, probe=True) == 1
+    la0 = model.layers[0].mlp.switch_mlp._kq_lookahead
+    assert la0.predictor is not None and la0.predictor.dst_li == 1
+
+
+def test_depth2_installs_second_predictor(monkeypatch):
+    """GMLX_DECODE_LOOKAHEAD_DEPTH=2 gives the first layer predictors for
+    both following MoE layers, labeled with their depth."""
+    monkeypatch.setenv("GMLX_DECODE_LOOKAHEAD_DEPTH", "2")
+    model = _streaming_model(monkeypatch, n_layers=3)
+    install_lookahead(model, model.layers, probe=True)
+    la0 = model.layers[0].mlp.switch_mlp._kq_lookahead
+    assert [(p.dst_li, p.depth) for p in la0.predictors] == [(1, 1), (2, 2)]
+    assert la0.predictor.dst_li == 1  # back-compat surface: depth-1 slot
+    la1 = model.layers[1].mlp.switch_mlp._kq_lookahead
+    assert [(p.dst_li, p.depth) for p in la1.predictors] == [(2, 1)]
+
+
+def test_depth2_probe_merges_both_sources(monkeypatch):
+    """Depth-1 and depth-2 predictions of the same destination land in the
+    probe under distinct labels; both are scored when the layer runs."""
+    monkeypatch.setenv("GMLX_DECODE_LOOKAHEAD_DEPTH", "2")
+    monkeypatch.setenv("GMLX_DECODE_LOOKAHEAD_NORM", "raw")
+    model = _streaming_model(monkeypatch, n_layers=3)
+    install_lookahead(model, model.layers, probe=True)
+    probe = model.layers[0].mlp.switch_mlp._kq_lookahead.probe
+    x = mx.random.normal((1, 1, DIM))
+    mx.eval(model.layers[0].mlp(x))  # notes dst 1 (d1) and dst 2 (d2)
+    assert set(probe._pending[2]) >= {"raw@d2"}
+    mx.eval(model.layers[1].mlp(x))  # notes dst 2 (d1); merge, not clobber
+    assert set(probe._pending[2]) >= {"raw", "raw@d2"}
+    mx.eval(model.layers[2].mlp(x))  # scores both against actual routing
+    assert 2 not in probe._pending
+    assert (2, "raw") in probe._recall and (2, "raw@d2") in probe._recall
+
+
+def test_depth2_gate_keys_are_independent(monkeypatch):
+    """The rank gate scores depth-1 and depth-2 predictions of one layer
+    as separate populations."""
+    from gmlx.lookahead import RankGate
+
+    g = RankGate(0.5)
+    for _ in range(400):
+        g.note(4, np.array([[7, 1, 2]]), depth=1)
+        g.note(4, np.array([[7, 8, 9]]), depth=2)
+        g.observe(4, np.array([[7, 1, 0]]))
+    assert g.k(4, 3, 1) == 2  # d1: ranks 0-1 reliable
+    assert g.k(4, 3, 2) == 1  # d2: only rank 0 reliable
+
+
+def test_depth2_prestage_targets_both_layers(monkeypatch):
+    """With prefetch on, one decode call submits prestage for the next
+    MoE layer and the one after it."""
+    from contextlib import contextmanager
+
+    monkeypatch.setenv("GMLX_DECODE_LOOKAHEAD_DEPTH", "2")
+    model = _streaming_model(monkeypatch, n_layers=3)
+    install_lookahead(model, model.layers, probe=False, prefetch=True)
+    glu0 = model.layers[0].mlp.switch_mlp
+
+    class _FakeDF:
+        calls = []
+
+        def covers(self, li):
+            return True
+
+        def stage(self, li, ids):
+            return ids.astype(np.uint32)
+
+        def prestage(self, li, pred):
+            self.calls.append((li, pred.copy()))
+
+        def wedged_at(self, li):
+            return False
+
+        @contextmanager
+        def swapped(self, li):
+            yield
+
+    df = _FakeDF()
+    object.__setattr__(glu0, "_kq_decode_feeder", df)
+    object.__setattr__(glu0, "_kq_li", 0)
+    x = mx.random.normal((1, 1, DIM))
+    mx.eval(model.layers[0].mlp(x))
+    assert sorted(li for li, _ in df.calls) == [1, 2]
 
 
 if __name__ == "__main__":

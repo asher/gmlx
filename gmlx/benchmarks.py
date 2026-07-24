@@ -98,10 +98,13 @@ class _ChatPromptSource:
     across protocols and across days. Vary ``seed`` (``--bench-chat-seed``)
     to re-check a close decision against a different slice."""
 
-    def __init__(self, convs: list[list[dict]], tokenizer, seed: int = 42):
+    def __init__(self, convs: list[list[dict]], tokenizer, seed: int = 42,
+                 template_kwargs: dict | None = None):
         self._convs = convs
         self._tokenizer = tokenizer
         self._seed = seed
+        # forwarded to apply_chat_template (thinking-mode control etc.)
+        self._tkw = dict(template_kwargs or {})
         self._len_calls: dict[int, int] = {}
 
     def _order_for(self, target_len: int) -> list[int]:
@@ -128,7 +131,7 @@ class _ChatPromptSource:
                 msgs.append(t)
                 safety += 1
             ids = tok.apply_chat_template(
-                msgs, add_generation_prompt=True, tokenize=True
+                msgs, add_generation_prompt=True, tokenize=True, **self._tkw
             )
             total = len(ids)
 
@@ -139,7 +142,7 @@ class _ChatPromptSource:
 
         while len(msgs) > 1:
             ids = tok.apply_chat_template(
-                msgs, add_generation_prompt=True, tokenize=True
+                msgs, add_generation_prompt=True, tokenize=True, **self._tkw
             )
             if len(ids) <= target_len:
                 break
@@ -151,7 +154,7 @@ class _ChatPromptSource:
                 msgs.pop(0)
         else:
             ids = tok.apply_chat_template(
-                msgs, add_generation_prompt=True, tokenize=True
+                msgs, add_generation_prompt=True, tokenize=True, **self._tkw
             )
 
         if len(ids) < target_len:

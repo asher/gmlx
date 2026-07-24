@@ -682,6 +682,12 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "non-speculative sampling, not token-identical; higher "
                          "acceptance at temp > 0. Same as config "
                          "server.stochastic_mtp; greedy requests unaffected.")
+    ap.add_argument("--gpu-keepwarm", action="store_true",
+                    help="Hold GPU clocks up while a streamed model is decoding "
+                         "(tiny heartbeat kernel; parks when no request is "
+                         "decoding, so an idle server pays nothing). Only acts "
+                         "on models streaming with a decode feeder. Same as "
+                         "config server.gpu_keepwarm; env GMLX_GPU_KEEPWARM=1.")
     ap.add_argument("--draft-block-size", type=int, default=None, metavar="N",
                     help="MTP draft tokens per round (analogous to llama-server "
                          "--spec-draft-n-max). Default: the drafter's own block "
@@ -716,6 +722,23 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "of the router's gate mass. Size P with `gmlx run "
                          "--moe-expert-probe` (config mode: set `moe_expert_mass: "
                          "P` per model).")
+    ap.add_argument("--moe-experts", type=int, default=None, metavar="K",
+                    help="Lossy: cap the router at K experts per token for a "
+                         "single positional model on the streamed MoE layers. "
+                         "Composes with --moe-expert-mass (config mode: set "
+                         "`moe_experts: K` per model).")
+    ap.add_argument("--moe-miss-shed", type=mass_share, default=None,
+                    metavar="P",
+                    help="Lossy: at decode, drop routed experts that would "
+                         "demand-miss the expert arena, lowest scores first, "
+                         "keeping at least share P (0 < P <= 1) of each token's "
+                         "gate mass (config mode: set `moe_miss_shed: P` per "
+                         "model).")
+    ap.add_argument("--moe-layer-shed", type=float, default=None, metavar="P",
+                    help="Lossy: at decode, skip each streamed MoE layer's routed "
+                         "experts with probability P (0 < P < 1) per token; the "
+                         "shared expert still runs on shed layers (config mode: "
+                         "set `moe_layer_shed: P` per model).")
     ap.add_argument("--prefill-feeder", action=argparse.BooleanOptionalAction,
                     default=None,
                     help="Faster prompt processing for streaming models "
@@ -856,6 +879,12 @@ def _bg_serve_args(a, cfg_path) -> list:
         out.append("--stream-experts")
     if getattr(a, "moe_expert_mass", None) is not None:
         out += ["--moe-expert-mass", str(a.moe_expert_mass)]
+    if getattr(a, "moe_experts", None) is not None:
+        out += ["--moe-experts", str(a.moe_experts)]
+    if getattr(a, "moe_miss_shed", None) is not None:
+        out += ["--moe-miss-shed", str(a.moe_miss_shed)]
+    if getattr(a, "moe_layer_shed", None) is not None:
+        out += ["--moe-layer-shed", str(a.moe_layer_shed)]
     if a.budget_gb is not None:
         out += ["--budget-gb", str(a.budget_gb)]
     if a.max_models is not None:
@@ -1248,7 +1277,8 @@ def _dump_cfg_yaml(cfg: ServerCfg) -> str:
               ("host", "port", "api_key", "no_auth", "model_dirs", "budget_gb",
                "max_models", "hf_cache", "menubar", "token_queue_timeout_s",
                "prefill_step_size", "cache_limit_gb", "family_defaults",
-               "stochastic_mtp", "stt", "tts", "embeddings", "rerank",
+               "stochastic_mtp", "gpu_keepwarm", "stt", "tts", "embeddings",
+               "rerank",
                "defaults", "cache", "assistants", "assistant_allow_remote")}
     # Profile/model names double as dict keys; drop the redundant fields so the
     # entries match the file schema (which has no `name`/`id` keys).
@@ -1307,7 +1337,10 @@ def _single_model_cfg(a) -> ServerCfg:
         stream=("cpu" if getattr(a, "stream_cpu", False)
                 else ("experts" if getattr(a, "stream_experts", False)
                       else None)),
+        moe_experts=getattr(a, "moe_experts", None),
         moe_expert_mass=getattr(a, "moe_expert_mass", None),
+        moe_miss_shed=getattr(a, "moe_miss_shed", None),
+        moe_layer_shed=getattr(a, "moe_layer_shed", None),
         prefill_feeder=getattr(a, "prefill_feeder", None),
         decode_feeder=getattr(a, "decode_feeder", None),
         pin=True,                            # the single model is always pinned
@@ -1385,6 +1418,11 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
         set_stoch_accept(True)
         print("[server] stochastic MTP acceptance: on (sampled requests keep "
               "the sampling distribution but are not token-identical)")
+    if cfg.gpu_keepwarm or getattr(a, "gpu_keepwarm", False):
+        # Startup-only. The loader's gate starts the heartbeat when a
+        # streamed model with a decode feeder loads; the heartbeat itself
+        # parks whenever no request is decoding (keepwarm.touch()).
+        os.environ["GMLX_GPU_KEEPWARM"] = "1"
     # The config's token-queue timeout is authoritative for this server: it drives
     # mlx-vlm's per-request "wait for the next token" guard (default 600s; <=0 waits
     # forever). Read per request from the env, so setting it here is enough.

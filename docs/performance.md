@@ -32,6 +32,15 @@ degraded repeat from dragging the number. Back-to-back A/B comparisons still
 hand the second arm a hotter chip - let the machine cool between arms you
 intend to compare.
 
+The cool-box transient runs long, and it is chassis-dependent. A rested
+14-inch M5 Max held full boost clocks for roughly twenty minutes of
+streamed MoE decode before heat-soaking into a sustained rate about 20%
+lower; the 16-inch chassis cools better and holds boost longer still.
+Both regimes are real. Book sustained numbers for anything long-running,
+and size A/B warmup in minutes of decode rather than tokens, but a
+chat-length session on a rested machine genuinely runs at the faster
+rate the whole time.
+
 A note on `pp512`-style numbers: prefill throughput at a 512-token prompt is the
 conventional benchmark figure, and it is a short-context number. If your real
 workload is a coding agent with a 30k-token prompt, compare engines and models at
@@ -50,8 +59,8 @@ is where serve-path numbers must be measured (`GMLX_ROUND_PROFILE=1` +
 
 ## Reference numbers
 
-Measured on an M5 Max MacBook Pro (128 GB), 512-token prompts, medians of
-repeated runs:
+Measured on a 14-inch M5 Max MacBook Pro (128 GB), 512-token prompts,
+medians of repeated runs:
 
 | Model | File | Decode | Decode (MTP) | llama.cpp decode (spec) | Prefill | llama.cpp prefill |
 |-------|------|--------|--------------|-------------------------|---------|-------------------|
@@ -235,8 +244,8 @@ context is unremarkable on a 64 GB machine. MLA models (DeepSeek-family) store a
 compressed cache.
 
 macOS also caps how much RAM the GPU may wire, at a machine-dependent majority
-share of total memory. gmlx handles the over-budget MoE case itself (next
-section), and the multi-model server budgets resident weights to a configurable
+share of total memory. gmlx handles the over-budget MoE case itself
+([streaming.md](streaming.md)), and the multi-model server budgets resident weights to a configurable
 share of RAM (`--budget-gb`). If a single dense model plus cache sits right at the
 cap on a high-RAM Mac, the ceiling can be raised at your own risk with
 `sudo sysctl iogpu.wired_limit_mb=<MB>`. It resets at reboot; leave the OS several
@@ -261,112 +270,10 @@ benchmarks should pin it for reproducibility; a negative value (or env
 policy; `0` disables buffer caching entirely. A bounded cache trades a little
 allocator churn for a bounded footprint: transients up to the limit are
 recycled in place, larger ones fall through to fresh allocations.
-
 ## Bigger than memory: MoE offload
 
-Two placements run MoE models whose files exceed what the GPU can wire:
-
-- `--stream-experts` keeps the every-token layers (attention, routers, shared
-  experts, KV cache) on the GPU and streams the routed experts, which run on
-  the CPU stream. Historically slower than `--stream-cpu` at short context
-  because of the per-layer handoff; the decode feeder (below) reverses that,
-  and `--stream-experts` keeps its long-context advantage with a quantized KV
-  cache, where the large KV stays on GPU.
-- `--stream-cpu` runs the whole model on the CPU device, mmap-backed, so the page cache
-  streams weights from disk on demand. Past the wired budget the runtime adds
-  sequential expert prefetch, advising the kernel a couple of layers ahead so
-  prefill reads expert stacks at sequential bandwidth instead of demand-faulting
-  them.
-
-Streaming models engage two *feeder* paths by default:
-
-- The **prefill feeder** (`--no-prefill-feeder` disables) stages each layer's
-  expert stacks straight from the GGUF into GPU-visible ring slots while the
-  previous layer computes, so every byte makes one trip - the page-cache path
-  reads each expert byte twice on a machine that is at memory capacity by
-  definition. Short prompts stage only the experts the router actually chose
-  instead of whole layers (measured on an M3 Max, 162 GB MiniMax Q5_K_M: a
-  53-token prompt's time-to-first-token dropped from 19.4 s to 11.4 s).
-- The **decode feeder** (`--stream-experts` only; `--no-decode-feeder`
-  disables) keeps the most-routed experts of every layer in a wired,
-  popularity-managed GPU arena sized to the machine (`GMLX_DECODE_ARENA_GB`
-  overrides) and reads only the misses from the GGUF, at SSD queue depth. The
-  arena starts empty and converges within a few dozen tokens. The arena is
-  wired, so it also polices itself: under system memory pressure (another
-  model, a build) it shrinks, keeping its most popular experts, and regrows
-  once pressure clears - a long-running model stays a good citizen on a
-  machine that is doing other work (`GMLX_DECODE_PRESSURE=0` pins it instead).
-  Same model and
-  box: decode went from 2.4 tok/s on the page-cache path to 4.0 tok/s averaged
-  over a 512-token generation (~4.7 steady, ~90% arena hits), against 3.0
-  tok/s for `--stream-cpu` - so `--stream-experts` now matches `--stream-cpu`
-  on short generations and pulls ahead roughly 1.5x once the arena warms,
-  before the KV-cache advantage at depth.
-
-With the decode feeder on, arena misses are also *prestaged by lookahead*
-(`GMLX_DECODE_LOOKAHEAD=0` disables): each MoE layer runs the next MoE layer's router
-on its own input and pre-reads the predicted misses on a small dedicated pool
-while the current layer computes. The residual changes little between
-adjacent sublayers, so the prediction lands: measured recall of the next
-layer's actual top-k is ~78% on GLM-5.2 (@8) and MiniMax-M3 (@4), against
-~35% for previous-token routing reuse. Predictions move bytes and nothing
-else - routing and outputs are bit-identical - and speculation is kept off
-the demand path three ways: prestage reads are submitted only after the
-current layer's demand misses have finished, the read threads run at
-utility disk-I/O priority so the kernel services demand misses first
-(`GMLX_DECODE_LOOKAHEAD_IOPOL=0` restores default priority), and every
-layer settles its in-flight prestages before serving. A per-layer rank
-gate watches how often each prediction rank actually lands and stops
-submitting ranks that measure below `GMLX_DECODE_LOOKAHEAD_MIN_P` (default
-`0.5`); predictions the router then does not route to are cancelled before
-they reach the disk when their reads have not started
-(`GMLX_DECODE_LOOKAHEAD_CANCEL=0` disables). Together these keep the
-wasted-read tax near zero on models where the SSD is the bottleneck.
-`GMLX_DECODE_LOOKAHEAD_PROBE=1` prints the per-layer recall table at exit without
-issuing reads, the check worth running on a new model family.
-
-When a larger-than-RAM model is released, its page cache is also released, via
-`msync(MS_INVALIDATE)` over the shards - at process exit, or at unload on a
-running server (`GMLX_RELEASE_PAGECACHE=0` disables).
-
-Two lossy speed levers reduce the expert bytes consulted per token on over-RAM
-models. `--moe-experts K` caps the router at a fixed K experts per token. `--moe-expert-mass P` is the adaptive version and usually the
-better trade: each token keeps only the smallest set of its routed experts
-covering share P of the router's gate mass, so the dropped mass is bounded by
-1-P and lands only on tokens where the router was already confident - a token
-whose top 3 experts carry 92% of the mass reads 3 experts at P=0.9 while an
-uncertain token keeps the full fan-out. To choose P, run once with
-`--moe-expert-probe` (lossless): it prints, per candidate P, the average
-experts/token, the implied expert-read fraction, and the mass actually
-dropped - decode and prefill tokens tabled separately, and the decode table
-is the one to size P against. Start at 0.95 and step down while outputs stay
-acceptable; with the decode feeder on, its exit line reports the achieved
-average unique experts per token-layer. The two levers compose
-(`--moe-experts 6 --moe-expert-mass 0.9` caps at 6, then drops within the 6).
-These are decode-side levers: a large prefill chunk routes to nearly every
-expert either way. In server configs the placement is the per-model
-`stream: experts | cpu` key and the feeder opt-outs are
-`prefill_feeder: false` / `decode_feeder: false`; the adaptive lever is the
-per-model `moe_expert_mass: P` key (or `serve --moe-expert-mass` for a single
-positional model) - the fixed cap and the probe stay CLI-only, so size P with
-a `gmlx run --moe-expert-probe` pass before pinning it in a config.
-
-Models with MXFP4/NVFP4 expert tensors (gpt-oss, DeepSeek-V4-Flash Q4_K_XL
-quants) participate in all of the above on equal terms. By default these
-tensors are eagerly repacked into MLX's packed layout at load - fine in RAM,
-fatal over it (the repack materializes every expert). `GMLX_NATIVE_FP`
-picks the layout: `wire` keeps them as zero-copy GGUF wire bytes served by
-mlx-kquant's fp4 kernels (loads in seconds, streams like any k-quant),
-`packed` forces the repack, and the default `auto` chooses wire whenever a
-CPU placement is requested or the file exceeds ~90% of the wired budget.
-Wire mode is a hair slower than packed when the model fits in RAM (gpt-oss
-decode ~5% at depth 0, converging at depth; prefill is at parity or better)
-but is what makes the over-RAM case work at all, and it cuts the load time
-from minutes of repack to a mmap.
-
-Be honest with expectations: when experts stream from disk, decode is bound by SSD
-and CPU, not the GPU, and single-digit tokens per second is normal - the feeders
-raise the constant, not the nature of the bound. This is a capacity feature that
-makes a 200B-class MoE usable on a 64 GB machine, not a speed feature. And it is
-strictly for the over-budget case: a model that fits in memory runs several times
-faster on the normal GPU path.
+MoE models whose files exceed what the GPU can wire still run, on one of
+two placements (`--stream-experts`, `--stream-cpu`), with feeder paths
+that keep the disk ahead of the compute and a set of levers - lossless
+and lossy - specific to streamed decode. The whole subject has its own
+guide: [streaming.md](streaming.md).

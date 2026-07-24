@@ -22,6 +22,8 @@ loader.install_moe_experts_override):
 - DeepSeek-family blocks route through a gate submodule returning
   ``(inds, weights)`` - one generic gate subclass covers deepseek_v4
   (hash-routed layers included), deepseek_v2/v3, glm_moe_dsa and glm4_moe.
+  hy_v3 names the same-shaped submodule ``router``; ``_gate_submodule``
+  finds it under either attribute.
 - qwen3_moe / qwen3_next / minimax / minimax_m3 select inline in the block
   forward - each gets a subclass with the stock forward plus the filter
   inserted between selection and the expert gather.
@@ -312,6 +314,23 @@ _INLINE_SWAPS = {
 }
 
 
+def _gate_submodule(owner):
+    """The owner's DeepSeek-shaped routing submodule (callable ->
+    ``(inds, weights)``, int ``top_k``), whichever attribute holds it:
+    ``gate`` on the deepseek/glm families, ``router`` on hy_v3's MoE.
+    Plain-Linear routers (qwen3/minimax/gpt-oss shapes) never qualify -
+    those archs hook at the block seam instead."""
+    for attr in ("gate", "router"):
+        g = getattr(owner, attr, None)
+        if not isinstance(g, nn.Module) or isinstance(g, nn.Linear):
+            continue
+        if type(g).__name__.endswith("_ExpertCtl") or isinstance(
+            getattr(g, "top_k", None), int
+        ):
+            return g
+    return None
+
+
 def _offloaded_moe_owners(model):
     """Yield (layer index, owning block) for every MoE block whose expert
     container install_expert_streaming wrapped (same walk as the fixed-k
@@ -332,14 +351,10 @@ def _install(model, *, mass=None, probe=None) -> int:
     hooked = 0
     unsupported: set = set()
     for li, owner in _offloaded_moe_owners(model):
-        gate = getattr(owner, "gate", None)
-        if isinstance(gate, nn.Module) and type(gate).__name__.endswith("_ExpertCtl"):
+        gate = _gate_submodule(owner)
+        if gate is not None and type(gate).__name__.endswith("_ExpertCtl"):
             target = gate  # already swapped by an earlier install
-        elif (
-            isinstance(gate, nn.Module)
-            and not isinstance(gate, nn.Linear)
-            and isinstance(getattr(gate, "top_k", None), int)
-        ):
+        elif gate is not None:
             target = gate
             gate.__class__ = _expert_ctl_gate_class(type(gate))
         elif type(owner).__name__ in ("_NormTopKMoE", "_FusedKQuantMoeBlock"):
@@ -386,6 +401,73 @@ def install_moe_expert_mass(model, p: float) -> int:
             "block - no effect"
         )
     return hooked
+
+
+def _streamed_modules(model):
+    """Yield every module under the model's layers once (same roots as
+    :func:`_offloaded_moe_owners`; the wrapped expert containers live there)."""
+    layers = getattr(model, "layers", None)
+    if layers is None:
+        layers = model.model.layers
+    seen: set = set()
+    for layer in layers:
+        for m in layer.modules():
+            if id(m) not in seen:
+                seen.add(id(m))
+                yield m
+
+
+def install_moe_miss_shed(model, p: float) -> int:
+    """Shed routed experts that would demand-miss the decode arena, up to
+    ``1 - p`` of each token's score mass (lowest scores first; resident
+    and prestage-inflight experts never shed). Lossy; acts only on decode
+    calls that carry routing scores (the fused scores path). Returns the
+    number of layers hooked; raises on p outside (0, 1]."""
+    if not 0.0 < p <= 1.0:
+        raise ValueError(f"MoE miss-shed share must be in (0, 1], got {p}")
+    n = 0
+    for m in _streamed_modules(model):
+        if getattr(m, "_kq_decode_feeder", None) is not None:
+            object.__setattr__(m, "_kq_miss_shed", float(p))
+            n += 1
+    if n:
+        print(
+            f"[stream] MoE miss-shed {p:g}: demand-miss experts shed up to "
+            f"{100 * (1 - p):g}% of each token's gate mass on {n} offloaded "
+            "MoE layers (lossy - outputs differ from the trained router)"
+        )
+    else:
+        print(
+            "[stream] MoE miss-shed found no decode-feeder MoE layer - "
+            "no effect"
+        )
+    return n
+
+
+def install_moe_layer_shed(model, p: float) -> int:
+    """Skip each streamed MoE layer's routed path with probability ``p``
+    per decode token; the layer's shared expert still runs. Lossy.
+    Returns the number of layers hooked; raises on p outside (0, 1)."""
+    if not 0.0 < p < 1.0:
+        raise ValueError(
+            f"MoE layer-shed probability must be in (0, 1), got {p}")
+    n = 0
+    for m in _streamed_modules(model):
+        if hasattr(m, "_kq_li") and hasattr(m, "_kq_cpu_only"):
+            object.__setattr__(m, "_kq_layer_shed", float(p))
+            n += 1
+    if n:
+        print(
+            f"[stream] MoE layer-shed {p:g}: each of {n} streamed MoE "
+            "layers skips its routed experts with that probability per "
+            "token (lossy - shared expert only on shed layers)"
+        )
+    else:
+        print(
+            "[stream] MoE layer-shed found no streamed MoE layer - "
+            "no effect"
+        )
+    return n
 
 
 def install_moe_expert_probe(model, grid=None) -> int:

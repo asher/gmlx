@@ -15,6 +15,7 @@ arch-generic.
 from __future__ import annotations
 
 import os
+import random
 import re
 import time
 
@@ -30,7 +31,7 @@ from .envflags import env_bool, env_choice, env_float, env_int
 from .attn_hd512 import install_hd512_sdpa
 from .prefill_decay import install_prefill_decay, note_untracked_weights
 from . import gpt_oss_prefill  # noqa: F401  (registers gpt_oss score profile)
-from .modules import install_fused_moe_glu
+from .modules import install_fused_moe_glu, install_hyv3_shexp_fold
 from .qkv_fuse import install_fused_qkv
 from .qwen35_verify_fold import install_qwen35_verify_fold
 from .rotating_cache_fix import install_rotating_cache_fix
@@ -47,6 +48,7 @@ from .dsv32_patches import (
     _patch_dsv32_indexer_rope,
     _patch_dsv32_mask_decode,
     _patch_dsv32_moe_gate_fp32,
+    _patch_dsv32_moe_scores,
 )
 from .gdn_patches import (
     _needs_tiled_v_patch,
@@ -1253,6 +1255,91 @@ def _kq_expert_gpu_ok(module) -> bool:
     return True
 
 
+# Decode phase stats (GMLX_DECODE_PHASE_STATS=1): wall seconds per wrapper
+# phase, per decode token, dumped at exit. Buckets: ev = the router eval
+# (GPU segment for the previous layer's gather plus this layer's every-token
+# work, plus the host sync); la = lookahead router replica; stage_wait =
+# demand-read join inside stage(); stage_book = stage() minus the join;
+# prestage = speculative-read submission; build = gather graph build + slot
+# upload. resid = per-token wall (first-MoE-layer to first-MoE-layer) minus
+# the buckets: head matmul eval, sampling, detokenize, serve-loop glue.
+# First token after any non-decode call is skipped (prefill contamination);
+# its buckets still land in the sums, a <=1/N skew.
+_PHASE_KEYS = ("ev", "la", "stage_wait", "stage_book", "prestage", "build")
+_PHASE = (
+    {k: 0.0 for k in _PHASE_KEYS}
+    | {"tokens": 0, "wall": 0.0, "last": None, "first_li": None, "dirty": True}
+    if env_bool("GMLX_DECODE_PHASE_STATS", False)
+    else None
+)
+
+
+def _phase_token(ph, li, n_tokens):
+    """Token-boundary bookkeeping: a decode call on the first covered MoE
+    layer opens a new token; the previous boundary-to-boundary wall lands in
+    the per-token average unless a non-decode call dirtied the window."""
+    now = time.perf_counter()
+    if n_tokens != 1:
+        ph["dirty"] = True
+        return
+    if li is None:
+        return
+    if ph["first_li"] is None:
+        ph["first_li"] = li
+    if li != ph["first_li"]:
+        return
+    last = ph["last"]
+    ph["last"] = now
+    if last is not None and not ph["dirty"]:
+        ph["tokens"] += 1
+        ph["wall"] += now - last
+    ph["dirty"] = False
+
+
+def _phase_dump():
+    ph = _PHASE
+    if not ph or not ph["tokens"]:
+        return
+    n = ph["tokens"]
+    ms = {k: 1e3 * ph[k] / n for k in _PHASE_KEYS}
+    tot = 1e3 * ph["wall"] / n
+    print(
+        f"[phase] decode per-token ms over {n} tokens: total {tot:.1f} | "
+        + " ".join(f"{k} {v:.1f}" for k, v in ms.items())
+        + f" | resid {tot - sum(ms.values()):.1f}",
+        flush=True,
+    )
+    try:
+        from .lookahead import _LA_PHASE as lap
+    except Exception:
+        lap = None
+    if lap is not None:
+        b, s = 1e3 * lap["build"] / n, 1e3 * lap["sync"] / n
+        print(
+            f"[phase] la split: build {b:.1f} | sync {s:.1f} | "
+            f"post {ms['la'] - b - s:.1f}",
+            flush=True,
+        )
+
+
+if _PHASE is not None:
+    import atexit
+
+    atexit.register(_phase_dump)
+
+
+# Families where lookahead prestage defaults OFF: the replica router's
+# per-layer sync tax measured above its stall savings there (see the
+# la_default comment in install_expert_streaming).
+_LA_DEFAULT_OFF_FAMILIES = frozenset({"glm_moe_dsa", "deepseek_v32"})
+
+
+def _lookahead_default(model) -> bool:
+    """Family default for GMLX_DECODE_LOOKAHEAD when the env is unset."""
+    return getattr(
+        model, "model_type", None) not in _LA_DEFAULT_OFF_FAMILIES
+
+
 def install_expert_streaming(
     model,
     n_layers: int | None = None,
@@ -1260,6 +1347,7 @@ def install_expert_streaming(
     force_stream: bool = False,
     feeder_prefill: bool | None = None,
     feeder_decode: bool | None = None,
+    stats_verbose: bool | None = None,
 ):
     """Run routed-expert stacks (SwitchGLU) on the CPU stream.
 
@@ -1312,11 +1400,26 @@ def install_expert_streaming(
     def _wrapped_class(cls):
         sub = _CPU_OFFLOAD_CLASS_CACHE.get(cls)
         if sub is None:
+            # A fused base consumes routing scores itself (mix seam); a
+            # stock base (unrecognized activation, e.g. minimax-m3's
+            # SwiGLUOAI) takes (x, indices) only. The wrapper still
+            # advertises _kq_scores_sink so blocks hand scores over for
+            # miss-shed; it strips them before forwarding and applies
+            # the shed mix python-side.
+            _fwd_scores = bool(getattr(cls, "_kq_mix_scores", False))
 
             class _CPUOffload(cls):
+                _kq_scores_sink = True
+
                 def __call__(self, x, indices, *args, **kwargs):
                     # Extra args pass through untouched (e.g. deepseek-v4
-                    # hands the fused SwitchGLU its routing scores).
+                    # hands the fused SwitchGLU its routing scores). A base
+                    # without the mix seam takes (x, indices) only: keep the
+                    # scores for the miss-shed hook and strip them from what
+                    # gets forwarded.
+                    scores_arg = args[0] if args else None
+                    if args and not _fwd_scores:
+                        args = args[1:]
                     # Threshold read per call (cheap; once per MoE layer per
                     # forward) so env changes A/B without a reload. Streaming
                     # mode pins everything to CPU: a GPU expert call would
@@ -1335,13 +1438,102 @@ def install_expert_streaming(
                     small = n_tokens <= _arena_stage_max_tokens()
                     la = getattr(self, "_kq_lookahead", None)
                     la_pred = None
+                    ph = _PHASE
+                    if ph is not None:
+                        _phase_token(
+                            ph, getattr(self, "_kq_li", None), n_tokens)
+                        if n_tokens != 1:
+                            ph = None
+                    lsp = getattr(self, "_kq_layer_shed", None)
+                    if lsp is not None and cpu_only and n_tokens == 1:
+                        rng = getattr(self, "_kq_shed_rng", None)
+                        if rng is None:
+                            # per-layer seed: reproducible shed pattern
+                            rng = random.Random(
+                                0x5EED ^ (getattr(self, "_kq_li", 0) or 0))
+                            object.__setattr__(self, "_kq_shed_rng", rng)
+                        if rng.random() < lsp:
+                            # Skip the routed path entirely (gather, stage
+                            # and this layer's eval fence). The unmixed
+                            # zeros return makes the block mix nothing and
+                            # still add its shared expert.
+                            if dfr is not None:
+                                dfr._layer_shed_n += 1
+                            return mx.zeros(
+                                (*x.shape[:-1], indices.shape[-1],
+                                 x.shape[-1]), dtype=x.dtype)
+                    gt = getattr(self, "_kq_gpu_token", None)
+                    gt_live = (
+                        gt is not None
+                        and gt._route_shed is not None
+                        and cpu_only
+                        and n_tokens == 1
+                        and dfr is not None
+                        and dfr.covers(self._kq_li)
+                    )
+                    if gt_live:
+                        # Token tick for EVERY covered decode layer, stage
+                        # path included: boundary detection and the
+                        # adaptive hot-set refresh live here.
+                        gt.on_layer_entry(
+                            self._kq_li,
+                            getattr(self, "_kq_miss_shed", None))
+                    if (
+                        gt_live
+                        and scores_arg is not None
+                        and not dfr.wedged_at(self._kq_li)
+                        and gt.layer_autonomous(self._kq_li)
+                    ):
+                        # GPU-autonomous layer (gpu-dispatch Tier 2): no
+                        # per-layer eval. route_shed remaps ids to arena
+                        # slots and sheds non-resident experts on the GPU;
+                        # the graph flushes at the next stage-path layer's
+                        # eval or the logits, and the host consumes the
+                        # recorded misses at the token boundary
+                        # (popularity + prestage + fresh slot tables) - see
+                        # gpu_token.py for the fence argument. In adaptive
+                        # mode only layers with a measured hit rate above
+                        # GMLX_AUTO_HOT_HIT run here, so the shed cost per
+                        # layer is near zero.
+                        tbl = gt.table(self._kq_li)
+                        self._kq_cpu_only = False
+                        try:
+                            with dfr.swapped(self._kq_li):
+                                with mx.stream(mx.gpu):
+                                    sc_f32 = scores_arg.astype(mx.float32)
+                                    slots, mix, m_ids, m_sc = (
+                                        gt._route_shed(
+                                            indices.astype(mx.uint32),
+                                            sc_f32, tbl))
+                                    mix_c = mix.astype(x.dtype)
+                                    if _fwd_scores:
+                                        y = super().__call__(
+                                            x, slots, mix_c,
+                                            *args[1:], **kwargs)
+                                    else:
+                                        y = super().__call__(
+                                            x, slots, *args, **kwargs)
+                                        if y.ndim == x.ndim + 1:
+                                            y = (y * mix_c[..., None]).sum(
+                                                axis=-2)
+                                    gt.record(
+                                        self._kq_li, indices, sc_f32,
+                                        m_ids, m_sc, y)
+                            return y
+                        finally:
+                            self._kq_cpu_only = True
                     if la is not None and cpu_only and small:
                         # Lookahead: run the NEXT MoE layer's router on this
                         # layer's input and evaluate it together with the
                         # router read below (one sync either way). The
                         # prediction feeds nothing downstream - it only
                         # records recall (probe) or drives prestage reads.
-                        la_pred = la.on_call(x, indices)
+                        if ph is not None:
+                            t_la = time.perf_counter()
+                            la_pred = la.on_call(x, indices)
+                            ph["la"] += time.perf_counter() - t_la
+                        else:
+                            la_pred = la.on_call(x, indices)
                     if (
                         dfr is not None
                         and cpu_only
@@ -1358,22 +1550,89 @@ def install_expert_streaming(
                         # safety fence (see decode_feeder.py). ``stage``
                         # returns None when the call routes to more distinct
                         # experts than the arena has slots - fall through.
-                        mx.eval(indices)
-                        slots = dfr.stage(self._kq_li, np.array(indices))
-                        if la_pred is not None:
+                        t0 = time.perf_counter() if ph is not None else 0.0
+                        ms = getattr(self, "_kq_miss_shed", None)
+                        sc_f32 = None
+                        if (ms is not None and scores_arg is not None
+                                and n_tokens == 1):
+                            # Shed reads the scores host-side; fold them into
+                            # the router eval so the hook adds a small D2H
+                            # copy, not a second per-layer graph flush.
+                            sc_f32 = scores_arg.astype(mx.float32)
+                            mx.eval(indices, sc_f32)
+                        else:
+                            mx.eval(indices)
+                        if ph is not None:
+                            t1 = time.perf_counter()
+                            ph["ev"] += t1 - t0
+                            wait0 = getattr(dfr, "_t_demand", 0.0)
+                        ids = np.array(indices)
+                        shed_args = None
+                        shed_mix = None
+                        if sc_f32 is not None:
+                            sc = np.asarray(sc_f32).reshape(-1)
+                            keep = dfr.shed_misses(
+                                self._kq_li, ids.reshape(-1), sc, ms)
+                            if keep is not None:
+                                # Arena-path only: the overflow fallback
+                                # below keeps the original routed set.
+                                kept = ids.reshape(-1)[keep]
+                                shp = ids.shape[:-1] + (kept.size,)
+                                ids = np.ascontiguousarray(kept.reshape(shp))
+                                scn = sc[keep]
+                                # survivors keep the token's full mass
+                                scn = scn * (sc.sum() / max(scn.sum(), 1e-20))
+                                sc_mx = mx.array(scn.reshape(shp)).astype(
+                                    scores_arg.dtype)
+                                if _fwd_scores:
+                                    shed_args = (sc_mx,) + args[1:]
+                                else:
+                                    # Stock base returns per-expert outputs;
+                                    # the block's weights still cover the
+                                    # full routed set, so mix the shed
+                                    # survivors here instead.
+                                    shed_mix = sc_mx
+                        slots = dfr.stage(self._kq_li, ids)
+                        if ph is not None:
+                            t2 = time.perf_counter()
+                            w = getattr(dfr, "_t_demand", 0.0) - wait0
+                            ph["stage_wait"] += w
+                            ph["stage_book"] += (t2 - t1) - w
+                        if la_pred:
                             # This layer's demand misses have joined
-                            # (stage returned); the next layer's predicted
+                            # (stage returned); the predicted layers'
                             # misses now read in the background while this
-                            # layer's gather and the next layer's every-token
+                            # layer's gather and the next layers' every-token
                             # work compute - speculation never competes with
                             # demand traffic for the SSD.
-                            dfr.prestage(la.predictor.dst_li, la_pred)
+                            for _dst, _ids in la_pred.items():
+                                dfr.prestage(_dst, _ids)
+                            if ph is not None:
+                                ph["prestage"] += time.perf_counter() - t2
                         if slots is not None:
-                            with dfr.swapped(self._kq_li):
-                                with mx.stream(mx.gpu):
-                                    return super().__call__(
-                                        x, mx.array(slots),
-                                        *args, **kwargs)
+                            # arena call: weights are wired GPU views for
+                            # this scope, so lift the streaming CPU pin
+                            # and let the fused kq kernels run
+                            if shed_args is not None:
+                                args = shed_args
+                            self._kq_cpu_only = False
+                            try:
+                                t3 = (time.perf_counter()
+                                      if ph is not None else 0.0)
+                                with dfr.swapped(self._kq_li):
+                                    with mx.stream(mx.gpu):
+                                        y = super().__call__(
+                                            x, mx.array(slots),
+                                            *args, **kwargs)
+                                        if (shed_mix is not None
+                                                and y.ndim == x.ndim + 1):
+                                            y = (y * shed_mix[..., None]).sum(
+                                                axis=-2)
+                                if ph is not None:
+                                    ph["build"] += time.perf_counter() - t3
+                                return y
+                            finally:
+                                self._kq_cpu_only = True
                     wedged = dfr is not None and dfr.wedged_at(self._kq_li)
                     if wedged and dfr.has_dead(self._kq_li):
                         # A wedged read poisoned part of this layer's file
@@ -1479,11 +1738,11 @@ def install_expert_streaming(
             m.__class__ = _wrapped_class(m.__class__)
             if streaming:
                 m._kq_cpu_only = True
+                object.__setattr__(m, "_kq_li", li)
                 if gpu_ok:
                     moe_modules.setdefault(li, []).append(m)
                 if prefetcher is not None:
                     object.__setattr__(m, "_kq_prefetcher", prefetcher)
-                    object.__setattr__(m, "_kq_li", li)
             elif gpu_ok:
                 # All-GPU auto-policy: in-RAM, the residency sweep wires the
                 # whole model regardless of where expert calls run, so the
@@ -1556,7 +1815,8 @@ def install_expert_streaming(
         from .decode_feeder import maybe_make_decode_feeder
 
         arena = _decode_arena_bytes(total_bytes, prefetcher.offsets, budget)
-        dfeeder = maybe_make_decode_feeder(prefetcher.offsets, moe_modules, arena)
+        dfeeder = maybe_make_decode_feeder(
+            prefetcher.offsets, moe_modules, arena, stats_verbose)
         if dfeeder is not None:
             n_cov = sum(dfeeder.covers(li) for li in moe_modules)
             for li, mods in moe_modules.items():
@@ -1578,24 +1838,85 @@ def install_expert_streaming(
                 f"popularity-managed expert arena ({wired}){cov} "
                 "(--no-decode-feeder disables, GMLX_DECODE_ARENA_GB sizes)"
             )
+    if streaming and dfeeder is not None:
+        from . import gpu_token
+
+        if gpu_token.autonomous_enabled():
+            if gpu_token.route_shed_op() is None:
+                print(
+                    "[stream] gpu-autonomous: requested but the installed "
+                    "mlx_kquant has no route_shed op; falling back to "
+                    "per-layer staging"
+                )
+            else:
+                gt = gpu_token.GpuTokenState(dfeeder)
+                gpu_token.register_exit_stats(gt)
+                for li, mods in moe_modules.items():
+                    if dfeeder.covers(li):
+                        for m in mods:
+                            object.__setattr__(m, "_kq_gpu_token", gt)
+                object.__setattr__(model, "_kq_gpu_token", gt)
+                mode_note = (
+                    "all covered layers syncless (shed-heavy diagnostic)"
+                    if gpu_token.autonomous_mode() == "all"
+                    else "adaptive: layers above GMLX_AUTO_HOT_HIT go "
+                    "syncless, the rest keep per-layer staging"
+                )
+                print(
+                    "[stream] gpu-autonomous token: route_shed remaps + "
+                    f"sheds on GPU; {mode_note}; misses prestage at "
+                    "token boundaries (GMLX_GPU_AUTONOMOUS=1|all)"
+                )
+    if streaming and dfeeder is not None and env_bool(
+            "GMLX_GPU_KEEPWARM", False):
+        from . import keepwarm
+
+        keepwarm.start()
+        print(
+            "[stream] gpu keep-warm: background heartbeat holds GPU "
+            "clocks between per-layer decode bursts, parked while no "
+            "decode is running (lossless, costs power only during "
+            "decode; --gpu-keepwarm / GMLX_GPU_KEEPWARM=1 enables)"
+        )
     la_probe = env_bool("GMLX_DECODE_LOOKAHEAD_PROBE", False)
-    la_prefetch = env_bool("GMLX_DECODE_LOOKAHEAD", True) and dfeeder is not None
+    # Lookahead's replica router folds into the per-layer sync; whether its
+    # stall savings cover that tax is a per-family measurement. On
+    # glm_moe_dsa (GLM-5.2, 75 layers, top-8) it measured net negative
+    # (~40ms/tok sync for ~18ms of stalls), so those families default off.
+    # An explicit GMLX_DECODE_LOOKAHEAD always wins.
+    la_default = _lookahead_default(model)
+    la_prefetch = (
+        env_bool("GMLX_DECODE_LOOKAHEAD", la_default) and dfeeder is not None)
+    if (streaming and dfeeder is not None and not la_default
+            and "GMLX_DECODE_LOOKAHEAD" not in os.environ):
+        print(
+            "[stream] lookahead prestage: off by family default (replica-"
+            "router sync tax measured above its stall savings; "
+            "GMLX_DECODE_LOOKAHEAD=1 enables)"
+        )
     if streaming and (la_probe or la_prefetch):
         from .lookahead import install_lookahead
 
         n_la = install_lookahead(
-            model, layers, probe=la_probe, prefetch=la_prefetch
+            model, layers, probe=la_probe, prefetch=la_prefetch,
+            stats_verbose=stats_verbose,
+        )
+        la_depth = max(1, min(3, env_int("GMLX_DECODE_LOOKAHEAD_DEPTH", 1)))
+        la_what = (
+            "next-layer router predictions"
+            if la_depth == 1
+            else f"router predictions {la_depth} layers deep"
         )
         if n_la and la_prefetch:
             print(
-                f"[stream] lookahead prestage: next-layer router "
-                f"predictions pre-read arena misses on {n_la} MoE layer "
-                "pairs (lossless; GMLX_DECODE_LOOKAHEAD=0 disables)"
+                f"[stream] lookahead prestage: {la_what} pre-read arena "
+                f"misses on {n_la} MoE layer pairs (lossless; "
+                "GMLX_DECODE_LOOKAHEAD=0 disables)"
             )
         if n_la and la_probe:
             print(
-                f"[stream] lookahead probe: recording next-layer router "
-                f"recall on {n_la} MoE layer pairs (lossless; table at exit)"
+                f"[stream] lookahead probe: recording {la_what} recall "
+                f"on {n_la} MoE layer pairs (lossless; table at exit)"
             )
     if streaming:
         # The context line printed above and the feeder lines cover the
@@ -1699,11 +2020,12 @@ def install_moe_experts_override(model, k: int) -> int:
     shapes offloaded prefill/decode traffic, not as a general sampler).
 
     The override rewrites the router's own top-k attribute (``top_k`` /
-    ``num_experts_per_tok`` on the block, and on a DeepSeek-style ``gate``
-    submodule when present), so expert selection and the arch's weight
-    renormalization run unchanged at the new k. Outputs differ from the
-    trained model by design; parity gates will fail. Returns the number of
-    MoE blocks overridden; raises on k < 1 or k > the expert count.
+    ``num_experts_per_tok`` on the block, and on a DeepSeek-style gate
+    submodule when present - named ``gate``, or ``router`` on hy_v3), so
+    expert selection and the arch's weight renormalization run unchanged
+    at the new k. Outputs differ from the trained model by design; parity
+    gates will fail. Returns the number of MoE blocks overridden; raises
+    on k < 1 or k > the expert count.
     """
     if k < 1:
         raise ValueError(f"MoE top-k override must be >= 1, got {k}")
@@ -1732,7 +2054,11 @@ def install_moe_experts_override(model, k: int) -> int:
                     "stack on an offloaded layer"
                 )
             hit = False
-            for target in (owner, getattr(owner, "gate", None)):
+            for target in (
+                owner,
+                getattr(owner, "gate", None),
+                getattr(owner, "router", None),
+            ):
                 if target is None:
                     continue
                 for attr in ("top_k", "num_experts_per_tok"):
@@ -2100,6 +2426,9 @@ def _install_and_load(
     n_fused_moe = install_fused_moe_glu(model)
     if n_fused_moe:
         log(f"[install] fused mxfp4 MoE GLU decode on {n_fused_moe} layers")
+    n_shexp = install_hyv3_shexp_fold(model)
+    if n_shexp:
+        log(f"[install] hy3 shared-expert fold on {n_shexp} MoE layers")
     n_fused_qkv = install_fused_qkv(model)
     if n_fused_qkv:
         log(f"[install] fused QKV decode projection on {n_fused_qkv} layers")
@@ -2462,6 +2791,7 @@ def load_model(
         _patch_dsv32_indexer_rope(model)
         _patch_dsv32_indexer_fp32(model)
         _patch_dsv32_moe_gate_fp32(model)
+        _patch_dsv32_moe_scores(model)
         _patch_dsv32_mask_decode(model)
         _patch_dsv32_dense_default(model)  # exact default; GMLX_DSV32_SPARSE=1 -> sparse (experimental)
 
@@ -2518,6 +2848,9 @@ def load_model(
     n_fused_moe = install_fused_moe_glu(model)
     if n_fused_moe:
         _log(f"[install] fused mxfp4 MoE GLU decode on {n_fused_moe} layers")
+    n_shexp = install_hyv3_shexp_fold(model)
+    if n_shexp:
+        _log(f"[install] hy3 shared-expert fold on {n_shexp} MoE layers")
     n_fused_qkv = install_fused_qkv(model)
     if n_fused_qkv:
         _log(f"[install] fused QKV decode projection on {n_fused_qkv} layers")

@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Drive By Sunset</title>
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+let dist = 0;
+let lastTime = performance.now();
+
+function hash(n) {
+  let x = Math.sin(n * 12.9898) * 43758.5453;
+  return x - Math.floor(x);
+}
+
+function drawLayer(spacing, speed, fn) {
+  let off = dist * speed;
+  let start = Math.floor(off / spacing) - 2;
+  let count = Math.ceil(W / spacing) + 4;
+  for (let i = 0; i < count; i++) {
+    let idx = start + i;
+    let x = idx * spacing - off;
+    fn(x, idx);
+  }
+}
+
+function drawMountains(speed, baseY, color, spacing, hBase, hVar) {
+  let off = dist * speed;
+  let start = Math.floor(off / spacing) - 2;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(start * spacing - off - spacing, H);
+  for (let i = start; i < start + Math.ceil(W / spacing) + 4; i++) {
+    let x = i * spacing - off;
+    let h = hBase + hash(i) * hVar;
+    ctx.lineTo(x, baseY - h);
+    ctx.lineTo(x + spacing / 2, baseY - (hBase * 0.4 + hash(i + 0.5) * hVar * 0.4));
+  }
+  ctx.lineTo(W + spacing, H);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawFarTrees(speed, baseY) {
+  drawLayer(90, speed, (x, idx) => {
+    let h = 30 + hash(idx) * 40;
+    ctx.fillStyle = '#264d33';
+    ctx.beginPath();
+    ctx.arc(x, baseY - h / 2, h / 2, 0, Math.PI * 2);
+    ctx.fill();
+  });
+}
+
+function drawPoles(speed, baseY) {
+  drawLayer(400, speed, (x, idx) => {
+    if (hash(idx * 3.7) > 0.6) {
+      ctx.fillStyle = '#2c2c2c';
+      ctx.fillRect(x - 4, baseY - 160, 8, 160);
+      ctx.fillRect(x - 15, baseY - 160, 30, 6);
+      ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+      ctx.beginPath(); ctx.moveTo(x, baseY - 157); ctx.lineTo(x - 200, baseY - 120); ctx.stroke();
+    }
+  });
+}
+
+function drawNearTrees(speed, baseY) {
+  drawLayer(220, speed, (x, idx) => {
+    if (hash(idx) < 0.3) return;
+    let r = 40 + hash(idx * 2.1) * 50;
+    ctx.fillStyle = '#3a2a1a';
+    ctx.fillRect(x - 6, baseY - r * 1.6, 12, r * 1.6);
+    ctx.fillStyle = '#1f3614';
+    ctx.beginPath(); ctx.arc(x, baseY - r * 1.6, r, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x - r * 0.4, baseY - r * 1.2, r * 0.6, 0, Math.PI * 2); ctx.fill();
+  });
+}
+
+function drawWheel(x, y, r, rot) {
+  ctx.save(); ctx.translate(x, y);
+  ctx.fillStyle = '#111'; ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#444'; ctx.beginPath(); ctx.arc(0, 0, r * 0.9, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#bbb'; ctx.beginPath(); ctx.arc(0, 0, r * 0.5, 0, Math.PI * 2); ctx.fill();
+  ctx.rotate(rot);
+  ctx.strokeStyle = '#333'; ctx.lineWidth = 4;
+  for (let i = 0; i < 5; i++) {
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(r * 0.8, 0); ctx.stroke();
+    ctx.rotate(Math.PI * 2 / 5);
+  }
+  ctx.fillStyle = '#222'; ctx.beginPath(); ctx.arc(0, 0, r * 0.2, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+function drawCar(cx, roadY) {
+  let wheelR = Math.max(22, H * 0.035);
+  let bounce = Math.sin(dist * 0.02) * 3 + Math.sin(dist * 0.05) * 1.5;
+  let gy = roadY + bounce;
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.beginPath(); ctx.ellipse(cx, gy + 4, 130, 14, 0, 0, Math.PI * 2); ctx.fill();
+
+  drawWheel(cx - 60, gy - wheelR, wheelR, dist / wheelR);
+  drawWheel(cx + 70, gy - wheelR, wheelR, dist / wheelR);
+
+  ctx.save(); ctx.translate(cx, gy - wheelR);
+  let bg = ctx.createLinearGradient(0, -80, 0, 10);
+  bg.addColorStop(0, '#d35400');
+  bg.addColorStop(0.5, '#c0392b');
+  bg.addColorStop(1, '#7b241c');
+  ctx.fillStyle = bg;
+  ctx.beginPath();
+  ctx.moveTo(-120, 12);
+  ctx.lineTo(-115, -15);
+  ctx.quadraticCurveTo(-90, -50, -40, -55);
+  ctx.lineTo(20, -55);
+  ctx.quadraticCurveTo(75, -55, 95, -25);
+  ctx.lineTo(120, -8);
+  ctx.quadraticCurveTo(125, 12, 110, 15);
+  ctx.lineTo(-115, 15);
+  ctx.closePath(); ctx.fill();
+
+  ctx.fillStyle = 'rgba(10,15,25,0.85)';
+  ctx.beginPath();
+  ctx.moveTo(-35, -50); ctx.lineTo(15, -50);
+  ctx.quadraticCurveTo(65, -50, 85, -28);
+  ctx.lineTo(-15, -28); ctx.closePath(); ctx.fill();
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.2)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(-110, -10); ctx.lineTo(110, -2); ctx.stroke();
+
+  ctx.fillStyle = '#f9e79f'; ctx.beginPath(); ctx.arc(118, -2, 5, 0, 7); ctx.fill();
+  ctx.fillStyle = '#e74c3c'; ctx.fillRect(-119, -12, 4, 10);
+  ctx.restore();
+}
+
+function draw() {
+  let roadY = H * 0.82;
+  let horizon = H * 0.55;
+
+  let sky = ctx.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, '#2b1d42');
+  sky.addColorStop(0.5, '#7a3b5b');
+  sky.addColorStop(0.8, '#d9663b');
+  sky.addColorStop(1, '#f2a65a');
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, W, H);
+
+  ctx.fillStyle = 'rgba(255,180,80,0.9)';
+  ctx.beginPath(); ctx.arc(W * 0.75, H * 0.4, 50, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = 'rgba(255,180,80,0.2)';
+  ctx.beginPath(); ctx.arc(W * 0.75, H * 0.4, 90, 0, Math.PI * 2); ctx.fill();
+
+  drawMountains(0.02, horizon + 20, '#3d2b4a', 300, 80, 120);
+  drawMountains(0.05, horizon + 60, '#52385c', 250, 60, 90);
+
+  ctx.fillStyle = '#20421f';
+  ctx.fillRect(0, horizon + 100, W, roadY - (horizon + 100));
+
+  drawFarTrees(0.15, horizon + 100);
+
+  ctx.fillStyle = '#181818';
+  ctx.fillRect(0, roadY, W, H - roadY);
+  ctx.fillStyle = '#555';
+  ctx.fillRect(0, roadY, W, 4);
+
+  drawLayer(100, 1.0, (x, idx) => {
+    if (hash(idx) > 0.6) {
+      ctx.fillStyle = 'rgba(255,255,255,0.04)';
+      ctx.fillRect(x, roadY + 10 + hash(idx + 1) * 40, 30, 3);
+    }
+  });
+
+  drawPoles(1.0, roadY);
+  drawNearTrees(1.0, roadY);
+  drawCar(W * 0.35, roadY);
+
+  let vig = ctx.createRadialGradient(W / 2, H / 2, H * 0.3, W / 2, H / 2, H);
+  vig.addColorStop(0, 'rgba(0,0,0,0)');
+  vig.addColorStop(1, 'rgba(0,0,0,0.5)');
+  ctx.fillStyle = vig; ctx.fillRect(0, 0, W, H);
+}
+
+function loop(now) {
+  let dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+  dist += dt * 400;
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

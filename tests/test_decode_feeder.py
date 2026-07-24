@@ -450,6 +450,60 @@ def test_wrapper_decode_feeder_branch(monkeypatch):
         mx.set_wired_limit = real_set_wired
 
 
+def test_arena_call_lifts_cpu_pin(monkeypatch):
+    """The arena-backed decode call lifts ``_kq_cpu_only`` for its scope:
+    the fused kq decode path gates on the pin via ``_kq_fused_device_ok``,
+    so without the lift every streaming decode ran the stock triple-gather.
+    The pin is restored after the call, and the overflow fallback (which
+    may genuinely land on the CPU stream) never sees it lifted."""
+    mx.random.seed(3)
+    glu = SwitchGLU(16, 32, 4)
+    mx.eval(glu.parameters())
+    model = _holder_model(glu)
+    model.parameters = lambda: {"glu": glu.parameters()}
+    monkeypatch.setattr(
+        mx, "device_info", lambda: {"max_recommended_working_set_size": 1024}
+    )
+    real_set_wired = mx.set_wired_limit
+    try:
+        install_expert_streaming(model)
+        assert getattr(glu, "_kq_cpu_only", False)
+        pin_in_swap = []
+
+        class _DF:
+            overflow = False
+
+            def covers(self, li):
+                return True
+
+            def stage(self, li, ids):
+                return None if self.overflow else ids.astype(np.uint32)
+
+            def wedged_at(self, li):
+                return False
+
+            @contextmanager
+            def swapped(self, li):
+                pin_in_swap.append(glu._kq_cpu_only)
+                yield
+
+        df = _DF()
+        object.__setattr__(glu, "_kq_decode_feeder", df)
+        object.__setattr__(glu, "_kq_li", 2)
+        x1 = mx.random.normal((1, 1, 16))
+        i1 = mx.array([[[0, 2]]], dtype=mx.uint32)
+        mx.eval(glu(x1, i1))
+        assert pin_in_swap == [False]  # lifted for the arena scope
+        assert glu._kq_cpu_only  # restored after
+
+        df.overflow = True
+        mx.eval(glu(x1, i1))
+        assert pin_in_swap == [False]  # fallback never entered swapped
+        assert glu._kq_cpu_only
+    finally:
+        mx.set_wired_limit = real_set_wired
+
+
 def test_stage_read_failure_leaves_no_poisoned_slot(monkeypatch, tmp_path):
     """A failed read must not commit the expert->slot mapping: the victim
     slot holds partial bytes, so its old owner is evicted and the miss stays
@@ -973,10 +1027,9 @@ def test_exit_close_hook_holds_only_weakref(monkeypatch, tmp_path):
     hooks[0]()  # hook on a collected feeder is a quiet no-op
 
 
-def test_close_stats_gated_on_session_verbosity(capsys):
-    """Aggregate arena hit rate always prints; the per-layer breakdown and
-    stall accounting follow the load session's verbosity captured at
-    construction."""
+def test_close_stats_gated_on_stats_verbose(capsys):
+    """All end-of-run stat lines follow _stats_verbose (the CLI's -v); the
+    wedge anomaly warning prints regardless."""
     import time as _time
 
     from gmlx.decode_feeder import DecodeFeeder
@@ -990,6 +1043,7 @@ def test_close_stats_gated_on_session_verbosity(capsys):
         f._layer_lookups = {0: 5, 1: 5}
         f._t_start = _time.monotonic()
         f._t_demand = f._t_settle = 0.5
+        f._wedges = 1
         f._locked = {}
         f._fds = {}
         f.locked_bytes = 0
@@ -997,10 +1051,252 @@ def test_close_stats_gated_on_session_verbosity(capsys):
 
     bare(False).close()
     out = capsys.readouterr().out
-    assert "arena hit rate" in out
+    assert "arena hit rate" not in out
     assert "per-layer hit rate" not in out
     assert "stalls" not in out
+    assert "wedged" in out
     bare(True).close()
     out = capsys.readouterr().out
+    assert "arena hit rate" in out
     assert "per-layer hit rate" in out
     assert "stalls" in out
+    assert "wedged" in out
+
+
+# Lossy miss-shed (--moe-miss-shed): residency-aware expert drop
+def test_shed_misses_drops_cold_lowest_first(monkeypatch, tmp_path):
+    """Only demand-miss experts shed, lowest score first, capped at
+    ``1 - keep_mass`` of the token's routed mass; residents are untouchable."""
+    feeder, _ = _make_feeder(monkeypatch, tmp_path)
+    feeder.stage(0, np.array([[0, 2]], dtype=np.uint32))  # 0,2 resident
+
+    ids = np.array([0, 1, 2, 3], dtype=np.uint32)
+    scores = np.array([0.4, 0.05, 0.4, 0.15], dtype=np.float32)
+    keep = feeder.shed_misses(0, ids, scores, 0.9)
+    # budget 0.1: expert 1 (0.05) sheds, expert 3 (0.15) would overshoot
+    assert keep.tolist() == [True, False, True, True]
+    assert feeder._shed_n == 1 and feeder._shed_tokens == 1
+    assert abs(feeder._shed_mass - 0.05) < 1e-6
+
+    # keep_mass 1.0 => zero budget => nothing sheds
+    assert feeder.shed_misses(0, ids, scores, 1.0) is None
+    # all-resident call => nothing to shed
+    assert feeder.shed_misses(
+        0, np.array([0, 2], dtype=np.uint32),
+        np.array([0.6, 0.4], dtype=np.float32), 0.5) is None
+    # unknown layer => no shed bookkeeping exists
+    assert feeder.shed_misses(99, ids, scores, 0.5) is None
+
+
+def test_shed_misses_spares_prestage_inflight(monkeypatch, tmp_path):
+    """An expert with a pending prestage read is treated as resident: its
+    bytes are already on the way, so shedding it would waste the read."""
+    feeder, _ = _make_feeder(monkeypatch, tmp_path)
+    feeder.stage(0, np.array([[0]], dtype=np.uint32))
+    feeder._pending[0] = {1: (0, [], 0.0)}
+    keep = feeder.shed_misses(
+        0, np.array([0, 1, 3], dtype=np.uint32),
+        np.array([0.5, 0.2, 0.3], dtype=np.float32), 0.5)
+    assert keep.tolist() == [True, True, False]  # only 3 is a true miss
+
+
+def test_shed_misses_keeps_at_least_one_expert(monkeypatch, tmp_path):
+    """A token whose whole routed set misses still computes something: the
+    highest-scored expert always survives, whatever the budget."""
+    feeder, _ = _make_feeder(monkeypatch, tmp_path)
+    feeder.stage(0, np.array([[0]], dtype=np.uint32))
+    keep = feeder.shed_misses(
+        0, np.array([1, 3], dtype=np.uint32),
+        np.array([0.6, 0.4], dtype=np.float32), 0.01)
+    assert keep.tolist() == [True, False]
+
+
+def _stream_scores_glu(monkeypatch, recorded, stock=False):
+    """A wrapped scores-carrying SwitchGLU with a recording fake feeder -
+    the shared setup for the wrapper-hook tests. stock=True builds a base
+    without the mix seam: it takes (x, indices) only, so a forwarded
+    scores positional would raise TypeError."""
+    if stock:
+        class _BaseGLU(SwitchGLU):
+            def __call__(self, x, indices):
+                recorded.append((np.array(indices), None))
+                return super().__call__(x, indices)
+    else:
+        class _BaseGLU(SwitchGLU):
+            _kq_mix_scores = True  # real fused class advertises the seam
+
+            def __call__(self, x, indices, scores=None):
+                recorded.append((np.array(indices),
+                                 None if scores is None
+                                 else np.array(scores)))
+                return super().__call__(x, indices)
+
+    glu = _BaseGLU(16, 32, 4)
+    mx.eval(glu.parameters())
+    model = _holder_model(glu)
+    model.parameters = lambda: {"glu": glu.parameters()}
+    monkeypatch.setattr(
+        mx, "device_info", lambda: {"max_recommended_working_set_size": 1024}
+    )
+    # install replaces mx.set_wired_limit process-wide; restore at teardown
+    monkeypatch.setattr(mx, "set_wired_limit", mx.set_wired_limit)
+    install_expert_streaming(model)
+
+    class _FakeDF:
+        def __init__(self):
+            self.stage_calls = []
+            self.shed_calls = []
+            self.keep = None
+            self.overflow = False
+            self._layer_shed_n = 0
+
+        def covers(self, li):
+            return True
+
+        def shed_misses(self, li, ids, scores, keep_mass):
+            self.shed_calls.append((li, ids.copy(), scores.copy(), keep_mass))
+            return None if self.keep is None else self.keep.copy()
+
+        def stage(self, li, ids):
+            self.stage_calls.append((li, ids.copy()))
+            return None if self.overflow else ids.astype(np.uint32)
+
+        def wedged_at(self, li):
+            return False
+
+        @contextmanager
+        def swapped(self, li):
+            yield
+
+    df = _FakeDF()
+    object.__setattr__(glu, "_kq_decode_feeder", df)
+    object.__setattr__(glu, "_kq_li", 3)
+    return glu, df
+
+
+def test_wrapper_miss_shed_stages_survivors(monkeypatch):
+    """The miss-shed hook drops shed experts before staging and hands the
+    fused call renormalized survivor scores carrying the token's full mass;
+    multi-token calls and score-less calls bypass it."""
+    mx.random.seed(7)
+    recorded = []
+    glu, df = _stream_scores_glu(monkeypatch, recorded)
+    object.__setattr__(glu, "_kq_miss_shed", 0.9)
+
+    x1 = mx.random.normal((1, 1, 16))
+    i1 = mx.array([[[1, 3]]], dtype=mx.uint32)
+    sc = mx.array([[[0.75, 0.25]]], dtype=mx.float32)
+
+    df.keep = np.array([False, True])
+    mx.eval(glu(x1, i1, sc))
+    li, ids, scs, km = df.shed_calls[0]
+    assert li == 3 and ids.tolist() == [1, 3] and km == 0.9
+    assert np.allclose(scs, [0.75, 0.25])
+    assert df.stage_calls[-1][1].reshape(-1).tolist() == [3]
+    got_ids, got_scores = recorded[-1]
+    assert got_ids.reshape(-1).tolist() == [3]
+    # survivor keeps the token's full routed mass
+    assert np.allclose(got_scores.reshape(-1), [1.0], atol=1e-6)
+
+    # shed_misses declining (None) leaves the call untouched
+    df.keep = None
+    mx.eval(glu(x1, i1, sc))
+    assert df.stage_calls[-1][1].reshape(-1).tolist() == [1, 3]
+    assert np.allclose(recorded[-1][1].reshape(-1), [0.75, 0.25])
+
+    # arena overflow after a shed: the page-cache fallback must run the
+    # ORIGINAL routed set and scores (shed applies to the arena path only)
+    df.keep = np.array([False, True])
+    df.overflow = True
+    mx.eval(glu(x1, i1, sc))
+    df.overflow = False
+    assert df.stage_calls[-1][1].reshape(-1).tolist() == [3]  # staged shed set
+    got_ids, got_scores = recorded[-1]
+    assert got_ids.reshape(-1).tolist() == [1, 3]
+    assert np.allclose(got_scores.reshape(-1), [0.75, 0.25])
+
+    # multi-token calls never shed (decode-only lever)
+    n_shed = len(df.shed_calls)
+    x2 = mx.random.normal((1, 2, 16))
+    i2 = mx.array([[[1, 3], [0, 2]]], dtype=mx.uint32)
+    sc2 = mx.array([[[0.6, 0.4], [0.5, 0.5]]], dtype=mx.float32)
+    mx.eval(glu(x2, i2, sc2))
+    assert len(df.shed_calls) == n_shed
+
+    # score-less calls (stock unmixed path) never shed
+    mx.eval(glu(x1, i1))
+    assert len(df.shed_calls) == n_shed
+
+
+def test_wrapper_scores_sink_on_stock_base(monkeypatch):
+    """A base without the mix seam (e.g. minimax-m3's SwiGLUOAI stack)
+    takes (x, indices) only: the wrapper advertises _kq_scores_sink so
+    the block still hands over its routing weights, consumes them for
+    miss-shed, strips them from every forwarded call and mixes shed
+    survivors python-side (the block's weights cover the full routed
+    set, so its own mix would be the wrong width)."""
+    mx.random.seed(11)
+    recorded = []
+    glu, df = _stream_scores_glu(monkeypatch, recorded, stock=True)
+    assert getattr(glu, "_kq_scores_sink", False)
+    object.__setattr__(glu, "_kq_miss_shed", 0.9)
+
+    x1 = mx.random.normal((1, 1, 16))
+    i1 = mx.array([[[1, 3]]], dtype=mx.uint32)
+    sc = mx.array([[[0.75, 0.25]]], dtype=mx.float32)
+
+    # shed declines: scores reached the hook, base saw (x, indices) only,
+    # unmixed full-set return leaves the mix to the block
+    df.keep = None
+    out = glu(x1, i1, sc)
+    mx.eval(out)
+    li, ids, scs, km = df.shed_calls[0]
+    assert li == 3 and ids.tolist() == [1, 3] and km == 0.9
+    assert np.allclose(scs, [0.75, 0.25])
+    assert recorded[-1][0].reshape(-1).tolist() == [1, 3]
+    assert out.shape == (1, 1, 2, 16)
+
+    # shed engages: survivor mixed here with the token's full mass, the
+    # reduced ndim tells the block to skip its own mix
+    df.keep = np.array([False, True])
+    out = glu(x1, i1, sc)
+    mx.eval(out)
+    assert recorded[-1][0].reshape(-1).tolist() == [3]
+    assert out.shape == (1, 1, 16)
+    ref = super(type(glu), glu).__call__(
+        x1, mx.array([[[3]]], dtype=mx.uint32))
+    assert np.allclose(np.array(out),
+                       np.array(ref[..., 0, :]), atol=1e-6)
+
+    # arena overflow after a shed: fallback runs the ORIGINAL routed set,
+    # still without a scores positional
+    df.overflow = True
+    out = glu(x1, i1, sc)
+    mx.eval(out)
+    df.overflow = False
+    assert recorded[-1][0].reshape(-1).tolist() == [1, 3]
+    assert out.shape == (1, 1, 2, 16)
+
+
+def test_wrapper_layer_shed_returns_unmixed_zeros(monkeypatch):
+    """A shed layer skips routing entirely - no stage, no gather - and
+    returns unmixed zeros, so the block mixes nothing and still adds its
+    shared expert; multi-token calls are exempt."""
+    mx.random.seed(9)
+    recorded = []
+    glu, df = _stream_scores_glu(monkeypatch, recorded)
+    object.__setattr__(glu, "_kq_layer_shed", 1.0)  # always shed
+
+    x1 = mx.random.normal((1, 1, 16))
+    i1 = mx.array([[[1, 3]]], dtype=mx.uint32)
+    out = glu(x1, i1, mx.array([[[0.75, 0.25]]], dtype=mx.float32))
+    mx.eval(out)
+    assert out.shape == (1, 1, 2, 16)
+    assert not np.array(mx.abs(out).sum())
+    assert df._layer_shed_n == 1
+    assert df.stage_calls == [] and recorded == []
+
+    x2 = mx.random.normal((1, 2, 16))
+    i2 = mx.array([[[1, 3], [0, 2]]], dtype=mx.uint32)
+    mx.eval(glu(x2, i2))
+    assert df.stage_calls and df._layer_shed_n == 1  # t=2 ran normally

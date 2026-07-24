@@ -138,7 +138,7 @@ The weights plus KV cache exceed comfortable RAM. Check the arithmetic in
 (`--kv-bits 8`), cap it (`--max-kv-size`), pick a smaller quant, or for over-budget
 MoE models use `--stream-cpu` (or `--stream-experts` for long-context work with a
 quantized KV cache; see
-[performance.md](performance.md#bigger-than-memory-moe-offload)). On the
+[streaming.md](streaming.md)). On the
 multi-model server, lower `--budget-gb`
 or `--max-models` so residency stops short of the ceiling.
 

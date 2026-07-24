@@ -291,6 +291,37 @@ def test_inline_swaps_match_stock():
             assert len(set(low[0, t].tolist())) == 1, name  # collapsed to top-1
 
 
+def test_m3_block_hands_scores_to_scores_sink():
+    """The m3 block passes its routing weights to a module advertising
+    _kq_scores_sink (the streaming offload wrapper around a stock base:
+    m3's SwiGLUOAI stack never gets the fused mix-seam class); an
+    unmixed return keeps the block's python-side sum, so the output
+    matches the stock forward."""
+    mx.random.seed(13)
+    block = _arch_fixtures()[-1]
+    mx.eval(block.parameters())
+    x = mx.random.normal((1, 3, 16))
+    ref = np.array(block(x))
+
+    seen = []
+    inner = block.switch_mlp
+
+    class _Sink(nn.Module):
+        _kq_scores_sink = True
+
+        def __call__(self, x, inds, scores=None):
+            seen.append(None if scores is None else np.array(scores))
+            return inner(x, inds)
+
+    block.switch_mlp = _Sink()
+    out = np.array(block(x))
+    assert seen and seen[-1] is not None
+    assert seen[-1].shape == (1, 3, 4)
+    # normalized top-k weights scaled by routed_scaling_factor
+    assert np.allclose(seen[-1].sum(-1), 1.5, atol=1e-3)
+    assert np.allclose(out, ref, atol=1e-6)
+
+
 def test_hunyuan_seam_gated_by_attrs():
     from gmlx.loader import _patch_hunyuan_norm_topk
 
@@ -371,3 +402,104 @@ def test_mass_composes_with_fixed_k(monkeypatch):
     mx.eval(inds, weights)
     assert inds.shape == (1, 5, 1)  # mass filter ran within the lowered k
     assert (np.array(weights) > 0).all()  # sum preserved, single survivor
+
+
+def _hy_v3_moe():
+    """Real hy_v3 MoE block (its gate submodule sits at ``router``), the
+    SwitchGLU swapped for the kquant fixture the offload installer wraps."""
+    from gmlx.hy_v3_model import MoE
+
+    args = SimpleNamespace(
+        hidden_size=32,
+        expert_hidden_dim=64,
+        num_experts=4,
+        num_experts_per_tok=2,
+        num_shared_experts=0,
+        route_norm=True,
+        router_scaling_factor=1.5,
+        enable_moe_fp32_combine=False,
+    )
+    block = MoE(args)
+    block.switch_mlp = _kquant_glu()
+    mx.eval(block.parameters())
+    return block
+
+
+def test_hy_v3_router_attr_is_hooked(monkeypatch):
+    """hy_v3 names its DeepSeek-shaped gate ``router``: the mass installer
+    must find it there, and the fixed-k override must reach the live
+    ``router.top_k`` (the block-level num_experts_per_tok is dead in the
+    hy_v3 forward)."""
+    mx.random.seed(9)
+    block = _hy_v3_moe()
+    model = _shell(block)
+    monkeypatch.setattr(
+        mx, "device_info", lambda: {"max_recommended_working_set_size": 1024}
+    )
+    install_expert_streaming(model)
+
+    assert install_moe_expert_mass(model, 1e-6) == 1
+    assert type(block.router).__name__ == "MoEGate_ExpertCtl"
+    assert block.router._kq_li == 0
+
+    x = mx.random.normal((1, 5, 32))
+    inds, weights = block.router(x)
+    mx.eval(inds, weights)
+    assert inds.shape == (1, 5, 2)
+    for t in range(5):
+        assert len(set(np.array(inds)[0, t].tolist())) == 1  # collapsed to top-1
+    assert np.allclose(np.array(weights)[..., 1], 0.0)
+    mx.eval(block(x))  # end-to-end through the offloaded gather
+
+    install_moe_experts_override(model, 1)
+    assert block.router.top_k == 1  # live attr, not the dead block-level one
+
+
+# miss-shed / layer-shed installers (--moe-miss-shed / --moe-layer-shed)
+def test_miss_shed_install_targets_decode_feeder_layers(monkeypatch, capsys):
+    from gmlx.moe_experts import install_moe_miss_shed
+
+    block = _Block(_kquant_glu(), _TupleGate())
+    model = _shell(block)
+    monkeypatch.setattr(
+        mx, "device_info", lambda: {"max_recommended_working_set_size": 1024}
+    )
+    install_expert_streaming(model)
+
+    for bad in (0.0, 1.5):
+        with pytest.raises(ValueError):
+            install_moe_miss_shed(model, bad)
+
+    # no decode feeder attached => announced no-effect
+    assert install_moe_miss_shed(model, 0.9) == 0
+    assert "no effect" in capsys.readouterr().out
+
+    object.__setattr__(block.switch_mlp, "_kq_decode_feeder", object())
+    assert install_moe_miss_shed(model, 0.9) == 1
+    assert block.switch_mlp._kq_miss_shed == 0.9
+    assert not hasattr(block.gate, "_kq_miss_shed")
+    assert "miss-shed 0.9" in capsys.readouterr().out
+
+
+def test_layer_shed_install_targets_streamed_glus(monkeypatch, capsys):
+    from gmlx.moe_experts import install_moe_layer_shed
+
+    block = _Block(_kquant_glu(), _TupleGate())
+    model = _shell(block)
+
+    for bad in (0.0, 1.0):
+        with pytest.raises(ValueError):
+            install_moe_layer_shed(model, bad)
+
+    assert install_moe_layer_shed(model, 0.1) == 0  # nothing streamed yet
+    assert "no effect" in capsys.readouterr().out
+
+    monkeypatch.setattr(
+        mx, "device_info", lambda: {"max_recommended_working_set_size": 1024}
+    )
+    install_expert_streaming(model)
+    assert install_moe_layer_shed(model, 0.1) == 1
+    assert block.switch_mlp._kq_layer_shed == 0.1
+    # routers/gates never shed: the hook lives on the wrapped container only
+    assert not hasattr(block.gate, "_kq_layer_shed")
+    assert "layer-shed 0.1" in capsys.readouterr().out

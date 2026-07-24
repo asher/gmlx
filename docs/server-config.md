@@ -181,6 +181,9 @@ server:
   stochastic_mtp: false      # p/q acceptance for sampled MTP requests: same output
                              #   distribution, higher acceptance, NOT token-identical
                              #   (see performance.md; applied at startup)
+  gpu_keepwarm: false        # hold GPU clocks up while a streamed model is decoding
+                             #   (heartbeat parks between requests, so idle costs nothing;
+                             #   only acts on stream: experts models; applied at startup)
   cache:                     # the prompt cache (APC, automatic prefix cache) + SSD disk tier; see the cache key table
     enabled: true
     disk: {path: ~/.cache/gmlx/apc, max_gb: 200}
@@ -466,7 +469,8 @@ models:
 ```
 
 Per-model keys: `path` (required), `profile`, `family`, `profiles`, `mmproj`,
-`draft_gguf`, `adapter`, `stream`, `moe_expert_mass`, `prefill_feeder`,
+`draft_gguf`, `adapter`, `stream`, `moe_experts`, `moe_expert_mass`,
+`moe_miss_shed`, `moe_layer_shed`, `prefill_feeder`,
 `decode_feeder`, `speculative`, `overrides` (`{sampling, load, cache, system,
 chat_template, chat_template_kwargs}`), `pin`, `ttl_s`.
 
@@ -507,10 +511,22 @@ smallest set of its routed experts covering share P of the router's gate
 mass, so confident tokens read fewer expert bytes during decode. Same
 semantics as `run --moe-expert-mass`; size P first with a lossless
 `gmlx run --moe-expert-probe` pass on the same GGUF (see
-[performance.md](performance.md#bigger-than-memory-moe-offload)). Requires
+[streaming.md](streaming.md)). Requires
 `stream: experts | cpu` (announced as ignored otherwise), out-of-range
 values fail config validation, and the key is load-affecting: two ids that
 differ only in `moe_expert_mass` are distinct resident entries.
+
+The other lossy MoE levers follow the same rules (require `stream`,
+validated at config load, load-affecting): `moe_experts: K` caps the router
+at a fixed K experts per token (composes with `moe_expert_mass`).
+`moe_miss_shed: P` (a share in `(0, 1]`) drops routed experts that would
+demand-miss the decode arena, lowest scores first, keeping at least share P
+of each token's gate mass - it targets the disk stalls directly and never
+drops an arena-resident expert. `moe_layer_shed: P` (a probability in
+`(0, 1)`) skips a streamed MoE layer's routed experts entirely with
+probability P per token; the layer's shared expert still runs. All three
+change outputs relative to the trained router - evaluate quality on your
+own tasks before serving with them.
 
 `prefill_feeder: false` / `decode_feeder: false` opt a streaming model out of
 the feeder paths that are otherwise on by default (`prefill_feeder`
@@ -521,7 +537,7 @@ memory pressure - it shrinks, keeping its most popular experts, and regrows
 once pressure clears - so a `stream: experts` entry coexists with other models loading
 on the same server (`GMLX_DECODE_PRESSURE=0` pins it). Both keys are
 load-affecting. See
-[performance.md](performance.md#bigger-than-memory-moe-offload) for what they
+[streaming.md](streaming.md) for what they
 do and when to turn them off.
 
 ### `aliases`

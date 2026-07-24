@@ -391,6 +391,70 @@ def _patch_dsv32_moe_gate_fp32(model) -> None:
         loadlog.verbose_print(f"[patch] dsv32: fp32 MoE router selection on {n} layers")
 
 
+# DeepSeek-V3.2 / glm-dsa: hand routing scores to the expert call (mix seam)
+#
+# The stock DeepseekV32MoE mixes python-side: y = switch_mlp(x, inds) then a
+# scores-weighted sum. A swapped switch_mlp that accepts scores (the fused
+# kquant mix seam, or the streaming offload wrapper's scores sink feeding
+# --moe-miss-shed) never sees them through that call, so the miss-shed lever
+# is inert on this family. This forwards the scores when the module
+# advertises either seam; an unmixed (ndim + 1) return keeps the stock
+# python-side sum, so behavior without the levers is unchanged. Kill with
+# GMLX_DSV32_MOE_MIX=0.
+_MOE_SCORES_PATCH = ClassPatch()
+
+
+def _dsv32_moe_scores_call(self, x):
+    """Patched DeepseekV32MoE.__call__ passing gate scores to a scores-taking
+    switch_mlp. No-op fallback to the stock forward for instances without the
+    per-instance ``_dsv32_moe_scores`` flag."""
+    if not getattr(self, "_dsv32_moe_scores", False):
+        return _MOE_SCORES_PATCH.stock(self, x)
+
+    from mlx_lm.models.deepseek_v32 import sum_gradients
+
+    if self.sharding_group is not None:
+        x = sum_gradients(self.sharding_group)(x)
+
+    inds, scores = self.gate(x)
+    sw = self.switch_mlp
+    if (getattr(sw, "_kq_mix_scores", False)
+            or getattr(sw, "_kq_scores_sink", False)):
+        y = sw(x, inds, scores.astype(x.dtype))
+    else:
+        y = sw(x, inds)
+    if y.ndim == scores.ndim + 1:
+        y = (y * scores[..., None]).sum(axis=-2).astype(y.dtype)
+    if self.config.n_shared_experts is not None:
+        y = y + self.shared_experts(x)
+
+    if self.sharding_group is not None:
+        y = mx.distributed.all_sum(y, group=self.sharding_group)
+
+    return y
+
+
+def _patch_dsv32_moe_scores(model) -> None:
+    """Hand MoE routing scores to scores-taking expert modules on every
+    DeepseekV32MoE in ``model``. Installs the class-level dispatch once (a
+    no-op for any instance without the per-instance ``_dsv32_moe_scores``
+    flag) and flags this model's instances. Kill with GMLX_DSV32_MOE_MIX=0."""
+    if not env_bool("GMLX_DSV32_MOE_MIX", True):
+        return
+    from mlx_lm.models.deepseek_v32 import DeepseekV32MoE
+
+    _MOE_SCORES_PATCH.install(
+        DeepseekV32MoE, "__call__", _dsv32_moe_scores_call)
+    n = 0
+    for m in model.modules():
+        if isinstance(m, DeepseekV32MoE):
+            m._dsv32_moe_scores = True
+            n += 1
+    if n:
+        loadlog.verbose_print(
+            f"[patch] dsv32: scores-taking MoE expert call on {n} layers")
+
+
 # DeepSeek-V3.2 / glm-dsa: default the DSA indexer to dormant (dense attention)
 #
 # The DSA "lightning indexer" picks a sparse top-k of keys for the main attention.
