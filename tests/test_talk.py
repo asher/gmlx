@@ -876,6 +876,61 @@ def test_merged_settings_brain_and_assistant():
     assert _merged_settings(args, cfg)["brain"] == "chat"   # flag wins
 
 
+def test_tts_worker_merges_ready_sentences():
+    """Sentences already decoded when the worker gets to them are folded into
+    one synthesis call - the reply is spoken with the text's own cadence, not
+    one isolated utterance (and one round trip) per sentence."""
+    import threading
+    from gmlx.talk import _TURN_END
+
+    loop = _make_loop("vad")
+    cancel = threading.Event()
+    for s in ("One two three four five six seven.", "Eight nine ten.",
+              "Eleven twelve."):
+        loop.tts_q.put((cancel, s))
+    loop.tts_q.put(_TURN_END)
+    loop.tts_q.put(None)
+    loop._tts_worker()
+    merged = "One two three four five six seven. Eight nine ten. " \
+             "Eleven twelve."
+    assert loop._said == [merged]
+    assert loop.play_q.get_nowait()[1] == merged
+    assert loop.play_q.get_nowait() is _TURN_END
+
+
+def test_tts_worker_merge_respects_cap_and_turns():
+    """The merge stops at _MERGE_CHARS and never crosses into another turn's
+    chunks; the boundary item is processed on its own, not dropped."""
+    import threading
+    from gmlx.talk import _MERGE_CHARS
+
+    loop = _make_loop("vad")
+    c1, c2 = threading.Event(), threading.Event()
+    big = "a" * (_MERGE_CHARS + 1)
+    loop.tts_q.put((c1, big))
+    loop.tts_q.put((c1, "Same turn tail."))
+    loop.tts_q.put((c2, "Next turn."))
+    loop.tts_q.put(None)
+    loop._tts_worker()
+    assert loop._said == [big, "Same turn tail.", "Next turn."]
+
+
+def test_tts_worker_merged_chunk_skipped_when_canceled():
+    """A cancel that lands after the merge drain must still silence the
+    whole merged utterance."""
+    import threading
+
+    loop = _make_loop("vad")
+    cancel = threading.Event()
+    loop.tts_q.put((cancel, "Never say this."))
+    loop.tts_q.put((cancel, "Nor this."))
+    cancel.set()
+    loop.tts_q.put(None)
+    loop._tts_worker()
+    assert loop._said == []
+    assert loop.play_q.empty()
+
+
 def test_playback_survives_backend_play_error(capsys):
     from gmlx.talk import IDLE, LISTENING
 

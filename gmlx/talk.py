@@ -1,7 +1,7 @@
 """``gmlx talk`` - hands-free voice chat against a gmlx server.
 
 The loop: mic -> wake word -> VAD endpointing -> ``/v1/audio/transcriptions``
--> streamed ``/v1/chat/completions`` -> per-sentence ``/v1/audio/speech`` ->
+-> streamed ``/v1/chat/completions`` -> chunked ``/v1/audio/speech`` ->
 speaker. The server does all model work (talk is a client, auto-starting a
 background server exactly like ``gmlx launch``); this module owns the audio
 threads, the state machine, and the terminal UX.
@@ -17,10 +17,11 @@ the AudioBackend seam in talk_audio exists for exactly that.
 
 Threads: sounddevice callback (copy frame -> queue) -> listener (wake/VAD/
 endpointer -> events) -> main loop (state machine, keyboard, status line)
--> turn worker (STT + brain -> sentence chunks) -> TTS worker (synthesize
-N+1 while N plays) -> playback. All coordination flows through one events
-queue; the state machine (:class:`TalkStateMachine`) is pure and tested
-against synthetic event sequences.
+-> turn worker (STT + brain -> sentence chunks) -> TTS worker (merge the
+sentences decoded so far, synthesize while earlier audio plays) -> playback.
+All coordination flows through one events queue; the state machine
+(:class:`TalkStateMachine`) is pure and tested against synthetic event
+sequences.
 """
 
 from __future__ import annotations
@@ -365,6 +366,8 @@ class StatusLine:
 
 
 _TURN_END = object()          # tts/playback queue sentinel: reply complete
+_NO_ITEM = object()           # tts worker: no queue item carried over
+_MERGE_CHARS = 400            # cap on one merged synthesis utterance
 
 
 class TalkLoop:
@@ -535,8 +538,12 @@ class TalkLoop:
 
     def _tts_worker(self) -> None:
         from .talk_client import TalkClientError
+        carry = _NO_ITEM
         while not self.done.is_set():
-            item = self.tts_q.get()
+            if carry is not _NO_ITEM:
+                item, carry = carry, _NO_ITEM
+            else:
+                item = self.tts_q.get()
             if item is None:
                 return
             if item is _TURN_END:
@@ -546,6 +553,20 @@ class TalkLoop:
             # slipped in after the cancel-time queue drain must not be
             # spoken into the next turn.
             cancel, text = item
+            # Sentence-sized units only matter for the first audio of a turn;
+            # after that, one-sentence synthesis makes the reply a series of
+            # isolated utterances with a synthesis round trip at every
+            # boundary. Fold whatever the turn has already decoded into one
+            # utterance so the cadence follows the text, not the pipeline.
+            while len(text) < _MERGE_CHARS:
+                try:
+                    nxt = self.tts_q.get_nowait()
+                except queue.Empty:
+                    break
+                if nxt is None or nxt is _TURN_END or nxt[0] is not cancel:
+                    carry = nxt
+                    break
+                text += " " + nxt[1]
             if cancel.is_set():
                 continue
             try:
@@ -946,7 +967,7 @@ def _build_parser(prog: str) -> argparse.ArgumentParser:
         prog=prog,
         description="Voice chat with a served model: wake word (or VAD / "
                     "push-to-talk), whisper STT, streamed replies spoken "
-                    "sentence-by-sentence. Starts a background server from "
+                    "as they decode. Starts a background server from "
                     "your config when none is running.")
     ap.add_argument("--config", default=None, metavar="PATH",
                     help="Server config YAML (default: standard locations).")
