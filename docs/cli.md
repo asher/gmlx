@@ -147,9 +147,12 @@ walk can't honour (`--stop`, `--logit-bias`, the
 repetition/presence/frequency penalties, `--xtc-probability`, `--max-kv-size`,
 the `--kv-*` flags) are dropped, each named in a warning, never silently. To
 apply one of those flags, pass `--no-mtp` to decode on the plain path, which
-honours it exactly. Only hard-incompatible flags (`--mmproj`, `--adapter`,
-`--stream-cpu`/`--stream-experts`, `--moe-experts`, `--moe-expert-mass`,
-`--moe-expert-probe`) make auto-enable step aside to plain decoding. `chat` also keeps `--stop` via a post-hoc stream filter.
+honours it exactly. Only hard-incompatible flags (`--mmproj`, `--adapter`, `--stream-cpu`,
+and the lossy `--moe-*` levers) make auto-enable step aside to plain
+decoding; an explicit `--speculative` with one of these errors out.
+`--stream-experts` is the exception: streaming composes with MTP, but
+auto-MTP defers under it - pass `--speculative` to opt in
+([streaming.md](streaming.md)). `chat` also keeps `--stop` via a post-hoc stream filter.
 
 ### Adapter (LoRA)
 
@@ -181,6 +184,9 @@ gmlx run model.gguf --adapter pirate-lora.gguf --prompt "What's the weather like
 | `--moe-expert-probe` | Lossless companion to `--moe-expert-mass`: run at the trained fan-out while recording how many experts each token needed at candidate P values; prints decode and prefill tables (experts/token, expert-read fraction, dropped mass per P) at exit - size P from the decode table. |
 | `--[no-]prefill-feeder` | Streaming models (`--stream-cpu` / `--stream-experts` past the wired budget): stage each prefill layer's expert stacks straight from the GGUF into GPU-visible ring slots instead of through the page cache - one trip per byte, and short prompts stage only the experts the router chose. Default on; `--no-prefill-feeder` falls back to page-cache prefetch. Details: [streaming.md](streaming.md). |
 | `--[no-]decode-feeder` | Streaming `--stream-experts` models: serve decode from a wired, popularity-managed GPU expert arena; misses read from the GGUF at SSD queue depth. Default on for `--stream-experts` (needs the every-token layers on GPU, so never under `--stream-cpu`); `GMLX_DECODE_ARENA_GB` caps the arena size. Details: [streaming.md](streaming.md). |
+| `--moe-miss-shed P` | Lossy: at decode, drop routed experts that would demand-miss the expert arena, lowest scores first, keeping at least share P (0 < P <= 1) of each token's gate mass - the budget is spent only where a disk stall is otherwise certain, and an arena-resident or prestage-inflight expert is never dropped. Needs the decode feeder. Composes with `--moe-expert-mass`. Choosing P: [streaming.md](streaming.md). |
+| `--moe-layer-shed P` | Lossy: at decode, skip a streamed MoE layer's routed experts entirely with probability P (0 < P < 1) per token; the layer's shared expert still runs. The only lever that also cuts the fixed per-layer overhead. Details: [streaming.md](streaming.md). |
+| `--gpu-keepwarm` | Hold GPU clocks up during streamed decode with a tiny background heartbeat kernel: streamed decode idles the GPU between per-layer bursts and each burst pays the clock ramp back; the heartbeat removes that. Lossless; costs a few watts while decoding; parks after `GMLX_KEEPWARM_IDLE_S` seconds without decode (default 1). Default off. Env: `GMLX_GPU_KEEPWARM=1`. Details: [streaming.md](streaming.md). |
 
 ### Resolving a model from a config
 
@@ -396,7 +402,7 @@ every command. The terminal is upgraded on top:
 | `--stop STR` | - | Stop sequence (trimmed; repeatable). |
 | `--kv-bits` / `--kv-group-size` / `--quantized-kv-start` | off / `64` / `0` | KV-cache quantization: cuts cache memory 2-4x for long chats. |
 | `--prefill-step-size N` | `2048` / `8192` streaming | Prefill chunk size (peak-memory cap for `/load`-ed long prompts). Streaming `--stream-cpu` / `--stream-experts` models default to `8192`, same as `run`. |
-| `--stream-cpu` / `--stream-experts` / `--moe-experts` / `--moe-expert-mass` / `--moe-expert-probe` | - | Execution placement and lossy MoE fan-out, same as [`run`](#loading), including larger-than-RAM streaming `--stream-cpu` chat (text path only). |
+| `--stream-cpu` / `--stream-experts` / `--moe-experts` / `--moe-expert-mass` / `--moe-expert-probe` / `--moe-miss-shed` / `--moe-layer-shed` / `--gpu-keepwarm` | - | Execution placement and lossy MoE fan-out, same as [`run`](#loading), including larger-than-RAM streaming `--stream-cpu` chat (text path only). |
 | `--resize-shape N\|WxH` / `--thinking-budget N` | - | Image resolution (soft-token count, VLM mode) / thinking-token cap (text + VLM; adjustable via `/thinking-budget`). |
 | `--reasoning {show,hide,raw}` | `show` | How a thinking model's reasoning is displayed: gutter-framed with payoff, collapsed spinner, or verbatim. Live toggle: Ctrl-O or `/reasoning`. |
 | `--render {auto,plain,lite,rich}` | `auto` | Reply markdown rendering (`auto`: rich when installed on a color TTY). Switch live with `/render`. |
@@ -517,6 +523,9 @@ gmlx serve Qwen3.6-27B-Q4_K_S.gguf --speculative
 | `--stream-cpu` | Run a single positional model entirely on the CPU device: the over-RAM MoE path, same semantics as [`run --stream-cpu`](#loading). In config mode set `stream: cpu` per model instead; see [server-config.md](server-config.md#models). |
 | `--stream-experts` | Routed-expert stacks stream from disk while the every-token layers and KV cache stay on GPU; the decode feeder (default) serves decode from a wired expert arena and makes this the faster placement once warm. Config mode: `stream: experts`. Mutually exclusive with `--stream-cpu`. |
 | `--moe-expert-mass P` | Lossy, adaptive experts-per-token for a single positional model on the streamed MoE layers (`--stream-experts` / `--stream-cpu`), same semantics as [`run --moe-expert-mass`](#loading). Size P with a `gmlx run --moe-expert-probe` pass first. Config mode: `moe_expert_mass: P` per model; see [server-config.md](server-config.md#models). |
+| `--moe-miss-shed P` | Lossy decode-side miss shed for a single positional model, same semantics as [`run --moe-miss-shed`](#loading). Config mode: `moe_miss_shed: P` per model; see [server-config.md](server-config.md#models). |
+| `--moe-layer-shed P` | Lossy per-token layer skip for a single positional model, same semantics as [`run --moe-layer-shed`](#loading). Config mode: `moe_layer_shed: P` per model. |
+| `--gpu-keepwarm` | Hold GPU clocks up while a streamed model decodes, same semantics as [`run --gpu-keepwarm`](#loading). Config `server.gpu_keepwarm: true`; env `GMLX_GPU_KEEPWARM=1`. |
 | `--chat-template STR\|PATH` | Inline Jinja, or a `.jinja`/`.txt` path, replacing a single positional model's GGUF template. In config mode set it per profile/model (`chat_template:` / `overrides: {chat_template: ...}`) instead; see [server-config.md](server-config.md). |
 | `--host ADDR` | Bind address (default from config or `127.0.0.1`). A non-loopback host refuses to start without `server.api_key` unless `--no-auth` opts out. |
 | `--port N` | Port (default from config or `8080`). |
@@ -1177,6 +1186,8 @@ This is the supported set:
 | `GMLX_DECODE_ARENA_GB` | Decode-feeder arena size override in GB (see `--decode-feeder`). Default: sized from the GPU working-set budget, a physical-RAM fraction (`GMLX_DECODE_ARENA_RAM_FRAC`, default `0.6`), and the memory reclaimable at load, minus the non-expert weights and a KV reserve (`GMLX_DECODE_KV_RESERVE_GB`, default `8`). |
 | `GMLX_ARENA_STAGE_MAX_TOKENS` | Largest expert call served router-aware (decode-feeder arena or partial ring staging) instead of whole-layer staging. Default `64`; above it a chunk routes to nearly every expert anyway. |
 | `GMLX_DECODE_PRESSURE` | Set `0` to keep the decode-feeder arena at its sized capacity regardless of system memory pressure. Default on: the arena shrinks (keeping its most popular experts) when the kernel reports pressure and regrows once pressure clears and reclaimable RAM returns. |
+| `GMLX_GPU_KEEPWARM=1` | Enable GPU keep-warm without the flag (see `--gpu-keepwarm`). |
+| `GMLX_KEEPWARM_IDLE_S` | Seconds without streamed-decode activity before the keep-warm heartbeat parks (default `1`; `0` beats continuously). |
 | `GMLX_DECODE_LOOKAHEAD=0` | Disable lookahead expert prestage on the decode feeder. Default on: each MoE layer runs the *next* MoE layer's router on its own input (the residual moves little between adjacent sublayers, so recall is far above previous-token reuse) and pre-reads the predicted arena misses while the current layer computes. Lossless - predictions move bytes, never routing. `GMLX_DECODE_LOOKAHEAD_K` caps the ranked predictions considered per call (default `6`); `GMLX_DECODE_LOOKAHEAD_WORKERS` sizes the dedicated read pool (default `6`); `GMLX_DECODE_LOOKAHEAD_NORM` picks the prediction input (`ratio` default, `raw` skips the norm-gain rescale); `GMLX_DECODE_LOOKAHEAD_MIN_P` sets the per-rank reliability floor below which a prediction rank stops being submitted (default `0.5`); `GMLX_DECODE_LOOKAHEAD_CANCEL=0` keeps unrouted predictions reading to completion instead of cancelling the unstarted ones at settle; `GMLX_DECODE_LOOKAHEAD_IOPOL=0` runs the read pool at default disk-I/O priority instead of the utility tier. |
 | `GMLX_DECODE_LOOKAHEAD_PROBE` | Lossless recall probe for the lookahead predictor: records predicted-vs-actual routing per layer (plus a previous-token baseline) and prints a table at exit, issuing no reads. Worth a run on a new model family to see whether the prestage pays there. |
 | `GMLX_DECODE_PAGECACHE_GB` | Page-cache reserve inside the decode-arena RAM floor (default `2.5`). Buffered read paths (prefill feeder, CPU-mmap fallback) collapse when the cache is starved; the floor also clamps an oversized `GMLX_DECODE_ARENA_GB` (`GMLX_DECODE_ARENA_FORCE=1` restores the unclamped override). |

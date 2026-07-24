@@ -17,6 +17,17 @@ This is a capacity feature that makes a 200B-class MoE usable on a
 over-budget case: a model that fits in memory runs several times
 faster on the normal GPU path.
 
+The disk is the engine here: demand misses are served at the drive's
+random-read latency and the feeders read at its queue depth, so disk IO
+performance determines inference performance. Keep the GGUF on the
+internal NVMe SSD for the best result; an external drive works, but
+decode follows its latency and bandwidth down.
+
+Unless a different machine is named inline, measured numbers in this
+guide are from a 14-inch M5 Max MacBook Pro (128 GB); the hardware
+scope note under [Reference numbers](performance.md#reference-numbers)
+covers scaling to other chips.
+
 This guide covers launching a streamed model, choosing between the two
 placements, the lossless levers (the feeders, lookahead prestage, GPU
 keep-warm), and the lossy levers with a measured decision procedure.
@@ -36,9 +47,9 @@ Or served, with the per-model `stream` key:
 ```yaml
 models:
   glm:
-    gguf: ~/models/GLM-5.2-UD-IQ3_XXS-00001-of-00006.gguf
+    path: ~/models/GLM-5.2-UD-IQ3_XXS-00001-of-00006.gguf
     stream: experts
-    kv_bits: 8
+    overrides: {load: {kv_bits: 8}}
 ```
 
 The load is a mmap, not a read, so generation starts within seconds
@@ -51,8 +62,10 @@ session settled at.
 
 Streaming applies to text models - the server rejects `stream` on VLM
 and speculative entries. On the CLI, MTP composes with
-`--stream-experts` but defers by default: auto-MTP stays off and an
-explicit `--speculative` opts in. What stays resident - the every-token
+`--stream-experts` (not `--stream-cpu`) but defers by default: auto-MTP
+stays off and an explicit `--speculative` opts in. The lossy `--moe-*`
+levers below are hard-incompatible with MTP and force plain decoding.
+What stays resident - the every-token
 layers plus the KV cache - follows the normal fit arithmetic in
 [getting-started.md](getting-started.md#will-it-fit), and a quantized
 KV cache (`--kv-bits 8`) is the usual companion at long context.
@@ -89,7 +102,7 @@ Streaming models engage two *feeder* paths by default:
   previous layer computes, so every byte makes one trip - the page-cache path
   reads each expert byte twice on a machine that is at memory capacity by
   definition. Short prompts stage only the experts the router actually chose
-  instead of whole layers (measured on an M3 Max, 162 GB MiniMax Q5_K_M: a
+  instead of whole layers (measured on an M3 Max, 162 GB MiniMax-M2 Q5_K_M: a
   53-token prompt's time-to-first-token dropped from 19.4 s to 11.4 s).
 - The **decode feeder** (`--stream-experts` only; `--no-decode-feeder`
   disables) keeps the most-routed experts of every layer in a wired,
@@ -110,6 +123,10 @@ Streaming models engage two *feeder* paths by default:
 In server configs the placement is the per-model `stream: experts | cpu`
 key and the feeder opt-outs are `prefill_feeder: false` /
 `decode_feeder: false`.
+
+When a larger-than-RAM model is released, its page cache is also released, via
+`msync(MS_INVALIDATE)` over the shards - at process exit, or at unload on a
+running server (`GMLX_RELEASE_PAGECACHE=0` disables).
 
 ## Lookahead prestage
 
@@ -135,10 +152,6 @@ wasted-read tax near zero on models where the SSD is the bottleneck.
 `GMLX_DECODE_LOOKAHEAD_PROBE=1` prints the per-layer recall table at exit without
 issuing reads, the check worth running on a new model family.
 
-When a larger-than-RAM model is released, its page cache is also released, via
-`msync(MS_INVALIDATE)` over the shards - at process exit, or at unload on a
-running server (`GMLX_RELEASE_PAGECACHE=0` disables).
-
 ## GPU keep-warm (`--gpu-keepwarm`)
 
 Streamed decode has a work pattern the GPU's power management punishes:
@@ -159,7 +172,7 @@ generations:
 
 | model | config under test | without | with | lift |
 |---|---|---|---|---|
-| GLM-5.2 UD-IQ3_XXS (262 GB, 75 streamed layers) | arena 70 + `--moe-miss-shed 0.85`, lookahead off | 2.51 tok/s | 3.64 tok/s | +45% |
+| GLM-5.2 UD-IQ3_XXS (282 GB, 75 streamed layers) | arena capped at 70 GB (`GMLX_DECODE_ARENA_GB=70`) + `--moe-miss-shed 0.85`, lookahead off | 2.51 tok/s | 3.64 tok/s | +45% |
 | Hunyuan3 IQ4_XS (159 GB, 79 streamed layers) | `--moe-layer-shed 0.10` + `--moe-miss-shed 0.90` | 4.01 tok/s | 5.29 tok/s | +32% |
 
 The diagnostic signature is worth knowing because it says whether a given
@@ -239,6 +252,12 @@ is the blunt end of the scale, and the only lever that also cuts the
 per-layer overhead - which makes it the one that still pays when the
 arena hit rate is high and misses are rare.
 
+In server configs the lossy levers are the per-model `moe_experts: K` /
+`moe_expert_mass: P` / `moe_miss_shed: P` / `moe_layer_shed: P` keys (or
+the matching `serve` flags for a single positional model); the probe
+stays CLI-only, so size P with a `gmlx run --moe-expert-probe` pass
+before pinning a value in a config.
+
 Which to reach for is a measurement, not a doctrine. Run the probe once,
 and read the decode feeder's exit stats (arena hit rate; printed by
 `run`/`chat` at `-v`, and always in server logs) from a representative
@@ -254,8 +273,10 @@ standing cost, which only `--moe-layer-shed` touches - though a large
 share of that overhead is clock ramp, which the lossless keep-warm above
 removes first; run it before spending quality here.
 
+### Hy3: flat router, high hit rate
+
 One measured point, from the flat-router end of that space: Hy3, a
-299B-A21B MoE (161 GB IQ4_XS streaming on a 128 GB machine, decode arena at a ~92%
+299B-A21B MoE (159 GB IQ4_XS streaming on a 128 GB machine, decode arena at a ~92%
 hit rate; decode-only tok/s from alternated A/B rounds of 512-token
 generations; quality scored at temperature 0.6 / top-p 0.95 on a 12-task
 goal battery of JSON extraction, constrained format, code with asserts,
@@ -292,6 +313,8 @@ concentrated-router model with a healthy hit rate the probe will show
 the inversion - most reads removed for a few percent of mass - before
 any lossy run needs to be made.
 
+### MiniMax-M3: low hit rate
+
 A second measured point, from the low-hit-rate end of the space:
 MiniMax-M3, a 4-of-128-expert MoE (264 GB Q4_K_M streaming on the same
 128 GB machine, decode arena at an ~87% hit rate; same alternated A/B
@@ -320,8 +343,10 @@ clean, producing complete working artifacts with no stray tokens. The
 probe sizes expert-mass, but it cannot see residency; when the exit
 stats show a low hit rate, reach for miss-shed first.
 
+### GLM-5.2: wider routing
+
 A third measured point moves one variable: routing width. GLM-5.2
-(278 GB UD-IQ3_XXS, 256 experts top-8, sigmoid gating) streams on the
+(282 GB UD-IQ3_XXS, 256 experts top-8, sigmoid gating) streams on the
 same machine at a per-expert hit rate near 88% - healthier than M3's -
 yet stalls more, because a layer stalls when any of eight routed
 experts miss, not four: at hit rate h the stall odds are 1 - h^k, so
@@ -345,6 +370,8 @@ corruption: render the artifact and look at it, at deploy sampling
 settings, against a lossless twin at the same seed. Miss-shed's safe
 range is per-architecture; re-gate it whenever routing width or
 gating changes.
+
+### Certifying a setting
 
 Back on Hy3, quality degraded in a consistent order as the levers
 hardened: multi-step arithmetic broke first, well before coherence,
@@ -431,12 +458,6 @@ practical recipe on this model: keep the full pair and its entire +13%,
 and cool the sampling slightly, rather than giving up most of the speed
 win by softening the levers at the card's temperature.
 
-In server configs the lossy levers are the per-model `moe_experts: K` /
-`moe_expert_mass: P` / `moe_miss_shed: P` / `moe_layer_shed: P` keys (or
-the matching `serve` flags for a single positional model); the probe
-stays CLI-only, so size P with a `gmlx run --moe-expert-probe` pass
-before pinning a value in a config.
-
 ## Native-fp experts (MXFP4/NVFP4)
 
 Models with MXFP4/NVFP4 expert tensors (gpt-oss, DeepSeek-V4-Flash Q4_K_XL
@@ -446,7 +467,7 @@ fatal over it (the repack materializes every expert). `GMLX_NATIVE_FP`
 picks the layout: `wire` keeps them as zero-copy GGUF wire bytes served by
 mlx-kquant's fp4 kernels (loads in seconds, streams like any k-quant),
 `packed` forces the repack, and the default `auto` chooses wire whenever a
-CPU placement is requested or the file exceeds ~90% of the wired budget.
+streaming placement is requested or the file exceeds ~90% of the wired budget.
 Wire mode is a hair slower than packed when the model fits in RAM (gpt-oss
 decode ~5% at depth 0, converging at depth; prefill is at parity or better)
 but is what makes the over-RAM case work at all, and it cuts the load time
