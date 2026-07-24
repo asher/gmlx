@@ -1077,9 +1077,10 @@ def _pick_model(requested: str | None, caps: dict) -> str | None:
 
 
 def _capability_guidance(caps: dict, *, needs_stt: bool, explicit_url: bool,
-                         out=sys.stderr) -> bool:
+                         out=None) -> bool:
     """Check stt/tts service markers; print fix-it guidance and return False
     when the server can't do voice."""
+    out = out if out is not None else sys.stderr
     missing = [name for name, need in (("stt", needs_stt), ("tts", True))
                if need and not caps.get(name)]
     if not missing:
@@ -1247,6 +1248,9 @@ def cmd_talk(argv: list | None = None, prog: str = "gmlx talk") -> int:
         return 1
 
     if args.list_voices:
+        if not _capability_guidance(caps, needs_stt=False,
+                                    explicit_url=args.base_url is not None):
+            return 1
         voices = list_voices(base_url, api_key)
         print("\n".join(voices) if voices
               else "(the server has no /v1/audio/voices route)")

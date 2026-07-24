@@ -817,6 +817,33 @@ def test_capability_guidance(capsys):
 import sys  # noqa: E402  (used by the capability tests above)
 
 
+def test_list_voices_explains_missing_tts(tmp_path, monkeypatch, capsys):
+    """`--list-voices` against a server with no TTS configured points at the
+    config fix, not at a missing route (which reads as a version mismatch)."""
+    from gmlx import launch as launch_mod
+    from gmlx import talk_client as tc
+    from gmlx.talk import cmd_talk
+
+    cfg = tmp_path / "gmlx.yaml"
+    cfg.write_text("models: {}\n")
+    monkeypatch.setattr(launch_mod, "_ensure_server", lambda ns: None)
+    caps = {"stt": False, "tts": False, "chat_ids": ["m"], "default": "m"}
+    monkeypatch.setattr(tc, "probe_capabilities", lambda *a, **k: caps)
+    monkeypatch.setattr(
+        tc, "list_voices",
+        lambda *a, **k: pytest.fail("must not probe the route without tts"))
+
+    assert cmd_talk(["--list-voices", "--config", str(cfg)]) == 1
+    err = capsys.readouterr().err
+    assert "no tts service enabled" in err
+    assert "tts: true" in err                     # the fix-it guidance
+
+    caps["tts"] = True
+    monkeypatch.setattr(tc, "list_voices", lambda *a, **k: ["af_heart"])
+    assert cmd_talk(["--list-voices", "--config", str(cfg)]) == 0
+    assert capsys.readouterr().out.strip() == "af_heart"
+
+
 def test_slash_wake_swaps_detector(capsys):
     calls = []
 
