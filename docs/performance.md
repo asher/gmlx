@@ -606,8 +606,8 @@ read them as an illustration, not a certification.
 
 | | |
 |---|---|
-| <img src="assets/perf/lossy-hy3-baseline.png" alt="lossless baseline: detailed sunset scene with streetlight, lane markings, and layered trees"><br>lossless, top-p 1.0. 13.2k tokens at 3.0 tok/s. | <img src="assets/perf/lossy-hy3-shed-0.07-0.93.png" alt="layer-shed 0.07 with miss-shed 0.93: simpler but coherent mountain scene"><br>`moe_layer_shed 0.07` + `moe_miss_shed 0.93`, top-p 0.97. 10.6k tokens at 3.5 tok/s. |
-| <img src="assets/perf/lossy-hy3-shed-0.10-0.90.png" alt="layer-shed 0.10 with miss-shed 0.90: flatter, darker scene with simpler shapes"><br>`moe_layer_shed 0.10` + `moe_miss_shed 0.90`, top-p 0.95. 11.1k tokens at 3.6 tok/s. | <img src="assets/perf/lossy-hy3-shed-0.20-0.80.png" alt="layer-shed 0.20 with miss-shed 0.80: black page, the script crashed on a stray token"><br>`moe_layer_shed 0.20` + `moe_miss_shed 0.80`, top-p 1.0. 10.0k tokens at 4.2 tok/s. |
+| <a href="assets/perf/lossy-hy3-baseline.html"><img src="assets/perf/lossy-hy3-baseline.png" alt="lossless baseline: detailed sunset scene with streetlight, lane markings, and layered trees"></a><br>lossless, top-p 1.0. 13.2k tokens at 3.0 tok/s. | <a href="assets/perf/lossy-hy3-shed-0.07-0.93.html"><img src="assets/perf/lossy-hy3-shed-0.07-0.93.png" alt="layer-shed 0.07 with miss-shed 0.93: simpler but coherent mountain scene"></a><br>`moe_layer_shed 0.07` + `moe_miss_shed 0.93`, top-p 0.97. 10.6k tokens at 3.5 tok/s. |
+| <a href="assets/perf/lossy-hy3-shed-0.10-0.90.html"><img src="assets/perf/lossy-hy3-shed-0.10-0.90.png" alt="layer-shed 0.10 with miss-shed 0.90: flatter, darker scene with simpler shapes"></a><br>`moe_layer_shed 0.10` + `moe_miss_shed 0.90`, top-p 0.95. 11.1k tokens at 3.6 tok/s. | <a href="assets/perf/lossy-hy3-shed-0.20-0.80.html"><img src="assets/perf/lossy-hy3-shed-0.20-0.80.png" alt="layer-shed 0.20 with miss-shed 0.80: black page, the script crashed on a stray token"></a><br>`moe_layer_shed 0.20` + `moe_miss_shed 0.80`, top-p 1.0. 10.0k tokens at 4.2 tok/s. |
 
 The scene simplifies as the levers harden, well before anything breaks.
 The first three pages ran clean. The black frame is the past-the-edge
@@ -619,15 +619,15 @@ at top-p 0.95, while the same setting sampled untruncated put one
 wrong-script token into an 11k-token run. The tok/s figures are
 whole-run averages of these single generations at different lengths,
 not controlled A/B numbers; the table above is the measured comparison.
-The generated pages are committed beside the screenshots in
-`docs/assets/perf/` (GitHub shows their source; download one to watch
-the animation).
+Each screenshot links to its generated page, committed beside it in
+`docs/assets/perf/` (GitHub shows the page source; download one to
+watch the animation).
 
 The sampling interaction also has a constructive reading. The full pair
 was rerun once on the same prompt and build with cooled sampling, at
 temperature 0.6 and top-p 0.95 instead of the model card's 0.9:
 
-<img src="assets/perf/lossy-hy3-shed-0.10-0.90-cool.png" alt="layer-shed 0.10 with miss-shed 0.90 at temperature 0.6: layered sunset scene with a red car, lampposts, treeline, and the sun setting behind the hills"><br>`moe_layer_shed 0.10` + `moe_miss_shed 0.90`, temperature 0.6, top-p 0.95. 10.2k tokens at 3.8 tok/s.
+<a href="assets/perf/lossy-hy3-shed-0.10-0.90-cool.html"><img src="assets/perf/lossy-hy3-shed-0.10-0.90-cool.png" alt="layer-shed 0.10 with miss-shed 0.90 at temperature 0.6: layered sunset scene with a red car, lampposts, treeline, and the sun setting behind the hills"></a><br>`moe_layer_shed 0.10` + `moe_miss_shed 0.90`, temperature 0.6, top-p 0.95. 10.2k tokens at 3.8 tok/s.
 
 It ran clean and produced one of the strongest scenes of the whole set,
 from the same full pair that needed softening to survive temperature
