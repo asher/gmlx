@@ -38,6 +38,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Chat died at the first token with `There is no Stream(gpu, N) in current
   thread` on models carrying precomputed RoPE frequencies (Gemma 4 and other
   scaled-RoPE families). 
+- Menu bar pid tracking
 - MoE expert controls (`--moe-experts` mass, probe, fixed-k, lookahead)
   silently no-opped on Hunyuan 3, whose gate submodule is named `router`.
 - Streamed GLM decode could return corrupted output: under async pipelining,
