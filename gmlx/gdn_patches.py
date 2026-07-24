@@ -11,9 +11,26 @@ import mlx.core as mx
 import mlx.nn as nn
 
 
+import sys
+
 from . import loadlog
 from .envflags import env_bool
 from .patching import ClassPatch
+
+
+# One-shot routing dump for the GDN call: which branch each distinct
+# (S, B, sink, mask) shape takes. GMLX_GDN_ROUTE_DEBUG=1.
+_ROUTE_DEBUG = env_bool("GMLX_GDN_ROUTE_DEBUG", False)
+_route_logged: set = set()
+
+
+def _log_gdn_route_once(which, S, B, sink, mask, taken):
+    key = (which, S, B, sink is not None, type(mask).__name__, taken)
+    if key in _route_logged:
+        return
+    _route_logged.add(key)
+    print(f"[gdn] route {which}: S={S} B={B} sink={sink is not None} "
+          f"mask={type(mask).__name__} -> {taken}", file=sys.stderr, flush=True)
 
 
 # GGUF V-head tiling fixup (runtime patch)
@@ -393,7 +410,11 @@ def _gdn_fused_decode_call(self, inputs, mask=None, cache=None):
         or Dv % SG != 0
         or self.head_k_dim % 32 != 0
     ):
+        if _ROUTE_DEBUG:
+            _log_gdn_route_once("lm", S, B, None, mask, "STOCK-unfused")
         return _FUSED_DECODE_PATCH.stock(self, inputs, mask, cache)
+    if _ROUTE_DEBUG:
+        _log_gdn_route_once("lm", S, B, None, mask, "fused-decode")
     return _gdn_fused_decode_body(self, inputs, cache)
 
 
@@ -711,6 +732,8 @@ def _gdn_fused_verify_call(
         and Dv % (16 if B == 1 else 32) == 0
         and self.head_k_dim % 32 == 0
     ):
+        if _ROUTE_DEBUG:
+            _log_gdn_route_once("vlm", S, B, gdn_sink, mask, "fused-decode")
         return _gdn_fused_decode_body(self, inputs, cache, vlm_cache_advance=True)
     if (
         not getattr(self, "_gdn_fused_verify", False)
@@ -720,9 +743,13 @@ def _gdn_fused_verify_call(
         or Dv % 16 != 0
         or self.head_k_dim % 32 != 0
     ):
+        if _ROUTE_DEBUG:
+            _log_gdn_route_once("vlm", S, B, gdn_sink, mask, "STOCK-unfused")
         return _FUSED_VERIFY_PATCH.stock(
             self, inputs, mask, cache, gdn_sink, target_verify
         )
+    if _ROUTE_DEBUG:
+        _log_gdn_route_once("vlm", S, B, gdn_sink, mask, "fused-verify")
 
     import mlx_vlm.models.qwen3_5.language as _L
 
