@@ -1,0 +1,86 @@
+"""Regression for the gemma SWA spec-injection crash (2026-07-23 bench:
+gemma-4-31b mtp@3 lost nearly every c>1 cell on "'RotatingKVCache' object
+has no attribute 'rotated'", x101). Admission prefill hands _drain_injections
+single-sequence RotatingKVCache (or BufferedRotatingKVCache) layers; the
+live batch holds BatchRotatingKVCache, whose extend() needs the batch
+class. The old lift detector keyed on a missing `_idx`, which the single
+rotating classes HAVE (they lack `rotated`), so they slipped through
+unconverted. _lift_injected_cache adds the `rotated` discriminator and
+lifts via the class's own merge (which temporal-orders rotated content)."""
+
+import mlx.core as mx
+from mlx_vlm.models.cache import (
+    BatchKVCache,
+    BatchRotatingKVCache,
+    BufferedRotatingKVCache,
+    KVCache,
+    RotatingKVCache,
+)
+
+from gmlx.speculative import _lift_injected_cache
+
+H, D = 2, 4
+
+
+def _fill(cache, n, start=0):
+    for t in range(start, start + n):
+        k = mx.full((1, H, 1, D), float(t))
+        cache.update_and_fetch(k, k)
+    return cache
+
+
+def _batch_of(*singles):
+    return BatchRotatingKVCache.merge(list(singles))
+
+
+def test_rotating_single_is_lifted_and_extends():
+    live = _batch_of(_fill(RotatingKVCache(max_size=8), 5))
+    injected = _fill(RotatingKVCache(max_size=8), 5)
+    lifted = _lift_injected_cache(live, injected)
+    assert lifted is not injected
+    assert isinstance(lifted, BatchRotatingKVCache)
+    live.extend(lifted)
+    assert live.keys.shape[0] == 2
+    assert live.offset.tolist() == [5, 5]
+
+
+def test_mid_rotation_injected_stream_temporal_order():
+    live = _batch_of(_fill(RotatingKVCache(max_size=8), 3))
+    injected = _fill(RotatingKVCache(max_size=8), 13)  # rotated: 13 > 8
+    lifted = _lift_injected_cache(live, injected)
+    live.extend(lifted)
+    assert live.keys.shape[0] == 2
+    assert int(live.offset[1]) == 13
+    # the injected row's retained window must be the LAST tokens in
+    # temporal order (values 5..12 for max_size 8), newest at the end
+    row = live.keys[1, 0, :, 0].tolist()
+    kept = [v for v in row if v != 0.0] or row
+    assert kept[-1] == 12.0
+    assert kept == sorted(kept)
+
+
+def test_buffered_subclass_lifts_through_same_path():
+    live = _batch_of(_fill(RotatingKVCache(max_size=8), 4))
+    injected = _fill(BufferedRotatingKVCache(max_size=8, buffer_size=4), 4)
+    lifted = _lift_injected_cache(live, injected)
+    assert isinstance(lifted, BatchRotatingKVCache)
+    live.extend(lifted)
+    assert live.keys.shape[0] == 2
+
+
+def test_standard_kv_pair_lifted_as_before():
+    # BatchKVCache HAS _idx and plain KVCache lacks it, so the original
+    # detector fired here all along -- the (working) qwen injection path.
+    # The rotated discriminator must not change that behavior.
+    single = _fill(KVCache(), 4)
+    live = BatchKVCache.merge([_fill(KVCache(), 4)])
+    lifted = _lift_injected_cache(live, single)
+    assert isinstance(lifted, BatchKVCache)
+    live.extend(lifted)
+    assert live.keys.shape[0] == 2
+
+
+def test_already_batch_class_untouched():
+    live = _batch_of(_fill(RotatingKVCache(max_size=8), 4))
+    other = _batch_of(_fill(RotatingKVCache(max_size=8), 4))
+    assert _lift_injected_cache(live, other) is other

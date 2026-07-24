@@ -1316,6 +1316,21 @@ def _retire_batch_row(model, prompt_cache: list, slot: int,
 
 # Batched B>1 owned MTP round
 
+def _lift_injected_cache(cache, other):
+    """Admission prefill builds single-sequence caches; the live batch holds
+    batch-class caches, and extend() requires the batch shape. The old
+    detector keyed on a missing `_idx`, but single-sequence RotatingKVCache
+    (and its Buffered spec subclass) HAS `_idx` and lacks `rotated`, so SWA
+    layers slipped through unconverted and extend died on other.rotated
+    (gemma drafter-MTP c>1, 2026-07-23 bench). Lift via the class's own
+    merge when either batch-only attr is absent; merge temporal-orders
+    rotated content, so mid-rotation injected streams stay correct."""
+    if ((hasattr(cache, "_idx") and not hasattr(other, "_idx"))
+            or (hasattr(cache, "rotated") and not hasattr(other, "rotated"))):
+        return type(other).merge([other])
+    return other
+
+
 def _owned_decode_rounds_batch(
     model,
     drafter,
@@ -1422,9 +1437,8 @@ def _owned_decode_rounds_batch(
                 for i, cache in enumerate(prompt_cache):
                     extend_fn = getattr(cache, "extend", None)
                     if callable(extend_fn):
-                        other = inj["prompt_cache"][i]
-                        if hasattr(cache, "_idx") and not hasattr(other, "_idx"):
-                            other = type(other).merge([other])
+                        other = _lift_injected_cache(
+                            cache, inj["prompt_cache"][i])
                         extend_fn(other)
 
                 inject_fn = getattr(drafter, "inject_rows", None)
