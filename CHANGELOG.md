@@ -13,7 +13,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`server.prefill_tick_ms` / `--prefill-tick-ms` / `GMLX_PREFILL_TICK_MS`,
   default 500 ms; 0 = full chunks), bounding the per-chunk decode hitch that
   pacing's average-share arithmetic cannot. Inert with no live decode, so
-  single-stream TTFT is unchanged.
+  single-stream TTFT is unchanged. Measured (27B dense, 14k context, four
+  streams): worst inter-token gap 3.6 s -> 109 ms, per-stream decode +80%
+  at the contended cell, aggregate throughput and single-stream rates
+  unchanged.
 
 ## [0.1.1] - 2026-07-24
 
