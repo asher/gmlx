@@ -101,6 +101,14 @@ SEAMS: tuple[Seam, ...] = (
          "gemma4_sync.install_gemma4_nosync (body carried, offset wrap)"),
     Seam("mlx_vlm.models.gemma4.language", "scaled_dot_product_attention",
          "gemma4_batched_sdpa (hd512 B>1 row route; left-pad tail slices)"),
+    # --- gemma4 text-only load path (mlx_lm module wrapped in text_only) ---
+    Seam("mlx_lm.models.gemma4_text", "scaled_dot_product_attention",
+         "gemma4_batched_sdpa (same row route at the text-only seam)"),
+    Seam("mlx_lm.models.gemma4_text", "Attention.__call__",
+         "gemma4_batched_sdpa (module-global sdpa call, cache kwarg)"),
+    Seam("mlx_lm.models.gemma4_text", "Gemma4TextModel._make_masks",
+         "gemma4_batched_sdpa (one mask object per layer type; the "
+         "producer->consumer pad relay keys on that identity)"),
     # --- speculative / AR batch engine (spec_engine owns these methods) ---
     Seam("mlx_vlm.generate.ar", "BatchGenerator.__init__",
          "spec_engine._install_apc_manager_stash", critical=True),

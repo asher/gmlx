@@ -11,16 +11,19 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - gemma-4 concurrent decode keeps the global layers on fused attention:
   head_dim-512 batched decode routes each stream through the single-stream
   kernels (left padding honored via per-row K/V tail slices) instead of the
-  stock materialized fallback. Measured in-process on gemma-4-31b at 14k
-  context: whole-step -3.4% at two streams, -6.5% at four
-  (`GMLX_G4_BATCHED_SDPA=0` reverts).
+  stock materialized fallback, on both load paths (text-only GGUFs via the
+  mlx-lm text module, multimodal via the mlx-vlm language module). Measured
+  in-process on gemma-4-31b at 14k context: whole-step -3.4% at two streams,
+  -6.5% at four (`GMLX_G4_BATCHED_SDPA=0` reverts).
 
 ### Changed
 
-- gemma-4 text decode/verify no longer host-syncs per step: the sliding-mask
-  cache probe compares int offsets host-side (array offsets skip the probe),
-  and per-layer rope offsets pass through without a device wrap. Token
-  outputs are bit-identical; `GMLX_G4_NOSYNC=0` restores upstream behavior.
+- multimodal gemma-4 decode/verify no longer host-syncs per step: the
+  sliding-mask cache probe compares int offsets host-side (array offsets skip
+  the probe), and per-layer rope offsets pass through without a device wrap.
+  Token outputs are bit-identical; `GMLX_G4_NOSYNC=0` restores upstream
+  behavior. Text-only gemma-4 loads build from the mlx-lm text module, which
+  has no per-step host syncs to begin with.
 - gemma-4 MTP targets no longer install the three qwen3_5 verify levers
   (module-scoped no-ops on gemma4); the tied quantized head already serves
   verify logits directly.

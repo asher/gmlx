@@ -8,8 +8,13 @@ Measured on gemma-4-31b Q6_K at d14k (in-process, ABBA): the fallback costs
 all of it recoverable by running each row through the existing B=1 kernel
 routes -- the extra launches hide in in-encoder concurrency.
 
-This claims hd512 qL==1 B>1 calls at the gemma4 module-level SDPA seam (the
-only seam where the cache is visible) and loops rows through
+Gemma-4 text attention lives in two upstream modules, one per load path:
+text-only GGUFs build from mlx_lm.models.gemma4_text (wrapped in
+mlx_vlm.models.text_only), multimodal loads from mlx_vlm.models.gemma4's
+language module. Both import a module-level scaled_dot_product_attention and
+call it with the cache in hand -- the only seam where left padding is
+visible -- so the route installs on both, each chained to that module's own
+original. This claims hd512 qL==1 B>1 calls and loops rows through
 mx.fast.scaled_dot_product_attention, i.e. through attn_hd512's wrapper, so
 each row picks sdpa_vector or sdpa_decode_gqa by its own depth. Left
 padding is honored by slicing each padded row's K/V to its visible tail
@@ -17,6 +22,11 @@ padding is honored by slicing each padded row's K/V to its visible tail
 right padding is transient inside update_and_fetch and never live here).
 The pad list is host-read once per left_padding rebinding (identity-keyed
 memo, the qwen35_verify_fold._pads pattern), never per step.
+
+KV-shared consumer layers arrive with cache=None but share the producers'
+per-layer-type mask object (both upstream modules build one mask per layer
+type); a small identity-keyed relay carries the producer's pads to the
+consumer. A cold miss falls through to stock rather than guessing pads.
 
 Tail slices keep the head-dim stride of the parent buffer; the kq kernels
 already consume step-padded cache views in production, and a kernel that
@@ -35,8 +45,12 @@ from . import attn_hd512
 from .envflags import env_bool
 
 _installed = False
-_orig = None
 _CLAIMS = [0]
+
+_MODULES = (
+    ("mlx_lm.models", "gemma4_text"),
+    ("mlx_vlm.models.gemma4", "language"),
+)
 
 
 def claims() -> int:
@@ -60,6 +74,22 @@ def _pads(cache):
     return pads
 
 
+_MASK_PADS: list = []  # ring of (mask_obj, pads): producer -> consumer relay
+
+
+def _remember_mask_pads(mask, pads):
+    _MASK_PADS.append((mask, pads))
+    if len(_MASK_PADS) > 4:
+        _MASK_PADS.pop(0)
+
+
+def _pads_for_mask(mask):
+    for m, p in reversed(_MASK_PADS):
+        if m is mask:
+            return p
+    return None
+
+
 def _mask_claimable(mask):
     if mask is None or (isinstance(mask, str) and mask == "causal"):
         return True
@@ -68,9 +98,9 @@ def _mask_claimable(mask):
     return isinstance(mask, mx.array) and mask.ndim >= 2 and mask.shape[-2] == 1
 
 
-def _batched_rows_sdpa(queries, keys, values, cache=None, scale=1.0,
-                       mask=None, sinks=None):
-    if (
+def _claim(queries, keys, values, cache, scale, mask, sinks):
+    """Batched-row output for a claimable call, else None (fall through)."""
+    if not (
         sinks is None
         and isinstance(keys, mx.array)
         and queries.ndim == 4
@@ -86,49 +116,84 @@ def _batched_rows_sdpa(queries, keys, values, cache=None, scale=1.0,
         and keys.shape[2] >= attn_hd512._MIN_KV
         and _mask_claimable(mask)
     ):
-        pads = _pads(cache)
-        B = queries.shape[0]
-        if pads is None:
+        return None
+    pads = _pads(cache)
+    B = queries.shape[0]
+    if pads is None:
+        if isinstance(mask, mx.array):
+            # kv-shared consumer layers arrive with cache=None but share
+            # the producers' mask object: relay the pads by identity. A
+            # cold miss (no producer claimed this mask) falls through --
+            # the mask may encode padding this route cannot reconstruct.
+            pads = _pads_for_mask(mask)
+            if pads is None:
+                return None
+        else:
             pads = [0] * B
-        if len(pads) >= B and max(pads[:B]) < keys.shape[2]:
-            _CLAIMS[0] += 1
-            outs = []
-            for i in range(B):
-                p = pads[i]
-                if p <= 0:
-                    ki, vi = keys[i:i + 1], values[i:i + 1]
-                else:
-                    ki = keys[i:i + 1, :, p:, :]
-                    vi = values[i:i + 1, :, p:, :]
-                outs.append(mx.fast.scaled_dot_product_attention(
-                    queries[i:i + 1], ki, vi, scale=scale, mask=None))
-            return mx.concatenate(outs, axis=0)
-    return _orig(queries, keys, values, cache=cache, scale=scale, mask=mask,
-                 sinks=sinks)
+    elif isinstance(mask, mx.array):
+        _remember_mask_pads(mask, pads)
+    if len(pads) < B or max(pads[:B]) >= keys.shape[2]:
+        return None
+    _CLAIMS[0] += 1
+    outs = []
+    for i in range(B):
+        p = pads[i]
+        if p <= 0:
+            ki, vi = keys[i:i + 1], values[i:i + 1]
+        else:
+            ki = keys[i:i + 1, :, p:, :]
+            vi = values[i:i + 1, :, p:, :]
+        outs.append(mx.fast.scaled_dot_product_attention(
+            queries[i:i + 1], ki, vi, scale=scale, mask=None))
+    return mx.concatenate(outs, axis=0)
+
+
+def _make_route(orig):
+    def _batched_rows_sdpa(queries, keys, values, cache=None, scale=1.0,
+                           mask=None, sinks=None):
+        out = _claim(queries, keys, values, cache, scale, mask, sinks)
+        if out is not None:
+            return out
+        return orig(queries, keys, values, cache=cache, scale=scale,
+                    mask=mask, sinks=sinks)
+
+    _batched_rows_sdpa._gmlx_orig = orig
+    _batched_rows_sdpa._gmlx_g4_route = True
+    return _batched_rows_sdpa
 
 
 def install_gemma4_batched_sdpa() -> bool:
-    """Route gemma4 hd512 batched decode through per-row B=1 kernel calls.
-    Idempotent; no-op when GMLX_G4_BATCHED_SDPA=0, when the gemma4 module is
-    unavailable, or when the hd512 wrapper is not installed. Returns True if
-    the patch is active."""
-    global _installed, _orig
+    """Route gemma4 hd512 batched decode through per-row B=1 kernel calls,
+    at both upstream seams (mlx_lm gemma4_text for text-only loads, mlx_vlm
+    gemma4 language for multimodal). Idempotent; no-op when
+    GMLX_G4_BATCHED_SDPA=0, when no gemma4 module is importable, or when the
+    hd512 wrapper is not installed. Returns True if the patch is active."""
+    global _installed
     if not env_bool("GMLX_G4_BATCHED_SDPA", True):
         return False
     if _installed:
         return True
     if not attn_hd512._installed:
         return False
-    try:
-        from mlx_vlm.models.gemma4 import language as g4
-    except ImportError as e:
-        print(f"[g4-batched-sdpa] disabled: gemma4 module unavailable ({e})",
+    import importlib
+
+    patched = 0
+    for pkg, name in _MODULES:
+        try:
+            mod = importlib.import_module(f"{pkg}.{name}")
+        except ImportError:
+            continue
+        cur = getattr(mod, "scaled_dot_product_attention", None)
+        if cur is None:
+            continue
+        if getattr(cur, "_gmlx_g4_route", False):
+            patched += 1
+            continue
+        mod.scaled_dot_product_attention = _make_route(cur)
+        patched += 1
+    if not patched:
+        print("[g4-batched-sdpa] disabled: no gemma4 module available",
               flush=True)
         return False
-
-    cur = g4.scaled_dot_product_attention
-    _orig = getattr(cur, "_gmlx_orig", cur)
-    _batched_rows_sdpa._gmlx_orig = _orig
-    g4.scaled_dot_product_attention = _batched_rows_sdpa
     _installed = True
     return True
