@@ -927,6 +927,21 @@ def test_list_config_models_aliases_default(tmp_path, capsys):
     assert "fast" in out and "->" in out      # the alias is listed
     assert "default model" in out             # the default-model footer
     assert "* qwen3-0.6b" in out              # default-marked row
+    assert "NAME" in out and "SIZE" in out    # table header
+    assert "missing" in out                   # paths don't exist in tmp_path
+    assert "qwen.gguf" not in out             # paths hidden by default
+
+
+def test_list_paths_flag_and_size(tmp_path, capsys):
+    cfg = _write_cfg(tmp_path, _LIST_CFG)
+    lib = tmp_path / "lib"
+    (lib / "qwen.gguf").write_bytes(b"x" * 2_000_000)
+    rc = manage.cmd_list(["--config", str(cfg), "-v"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "qwen.gguf" in out                 # -v shows the path lines
+    assert "2 MB" in out                      # size read from disk
+    assert "missing" in out                   # gemma.gguf still absent
 
 
 def test_list_json(tmp_path, capsys):

@@ -79,14 +79,20 @@ def test_exit_joins_thread_on_exception():
 
 def test_println_on_tty_clears_frame_and_emits_line():
     buf = _FakeTTY()
+    def frame_after_line() -> bool:
+        parts = buf.getvalue().split("WARNING: odd tensor\n", 1)
+        return len(parts) == 2 and any(f in parts[1] for f in spinner._FRAMES)
+
     with spinner.Spinner("loading", stream=buf) as s:
         time.sleep(0.12)
         s.println("WARNING: odd tensor")
-        time.sleep(0.12)                         # animation resumes after
+        deadline = time.monotonic() + 5.0        # wait for animation to resume,
+        while not frame_after_line():            # don't guess scheduling latency
+            assert time.monotonic() < deadline, "no frame after println"
+            time.sleep(0.01)
     out = buf.getvalue()
     assert "\r\x1b[KWARNING: odd tensor\n" in out
-    after = out.split("WARNING: odd tensor\n", 1)[1]
-    assert any(f in after for f in spinner._FRAMES)   # frames landed after the line
+    assert frame_after_line()                    # frames landed after the line
 
 
 def test_println_off_tty_is_plain_line():

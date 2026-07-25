@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Endless Drive</title>
+<style>
+  body, html { margin: 0; padding: 0; overflow: hidden; background: #000; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H, groundY;
+
+function resize(){
+  W = canvas.width = innerWidth;
+  H = canvas.height = innerHeight;
+  groundY = H * 0.72;
+}
+addEventListener('resize', resize);
+resize();
+
+let t = 0, last = performance.now(), dist = 0, speed = 320;
+
+// Deterministic pseudo-random for variety
+function rand(n){
+  let x = Math.sin(n * 12.9898) * 43758.5453;
+  return x - Math.floor(x);
+}
+
+function drawWheel(x, y, ang){
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(ang);
+  ctx.fillStyle = '#0a0a0a';
+  ctx.beginPath(); ctx.arc(0, 0, 22, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#333'; ctx.lineWidth = 5; ctx.stroke();
+  ctx.fillStyle = '#555';
+  ctx.beginPath(); ctx.arc(0, 0, 12, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#222'; ctx.lineWidth = 3;
+  for(let i = 0; i < 5; i++){
+    ctx.rotate(Math.PI * 2 / 5);
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(11, 0); ctx.stroke();
+  }
+  ctx.fillStyle = '#999';
+  ctx.beginPath(); ctx.arc(0, 0, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+function drawTree(x, baseY, type){
+  let h = 50 + type * 60;
+  ctx.fillStyle = '#1e3326';
+  ctx.fillRect(x - 5, baseY - h, 10, h);
+  ctx.beginPath(); ctx.arc(x, baseY - h + 10, 25 + type * 15, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x - 15, baseY - h + 25, 18, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + 15, baseY - h + 20, 20, 0, Math.PI * 2); ctx.fill();
+}
+
+function drawPole(x, baseY){
+  ctx.fillStyle = '#333';
+  ctx.fillRect(x - 3, baseY - 140, 6, 140);
+  ctx.fillRect(x - 3, baseY - 140, 50, 5);
+}
+
+function drawBush(x, baseY){
+  ctx.fillStyle = '#2c4a2c';
+  ctx.beginPath();
+  ctx.arc(x, baseY - 12, 16, 0, Math.PI * 2);
+  ctx.arc(x + 14, baseY - 8, 12, 0, Math.PI * 2);
+  ctx.arc(x - 14, baseY - 8, 12, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function frame(now){
+  let dt = (now - last) / 1000;
+  if(dt > 0.1) dt = 0.1;
+  last = now;
+  t += dt;
+  dist += speed * dt;
+
+  ctx.clearRect(0, 0, W, H);
+
+  // Sky gradient (dusk)
+  let g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#1b1b3a');
+  g.addColorStop(0.5, '#843a5a');
+  g.addColorStop(0.75, '#d8603e');
+  g.addColorStop(1, '#ffb86c');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  // Sun
+  ctx.fillStyle = 'rgba(255,220,150,0.9)';
+  ctx.beginPath(); ctx.arc(W * 0.7, groundY - 130, 50, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = 'rgba(255,200,100,0.25)';
+  ctx.beginPath(); ctx.arc(W * 0.7, groundY - 130, 90, 0, Math.PI * 2); ctx.fill();
+
+  // Distant mountains (slow parallax)
+  ctx.fillStyle = '#2a2342';
+  ctx.beginPath();
+  for(let sx = -50; sx <= W + 50; sx += 20){
+    let wx = sx + dist * 0.04;
+    let h = 120 + 80 * Math.sin(wx * 0.002) + 40 * Math.sin(wx * 0.005);
+    sx === -50 ? ctx.moveTo(sx, groundY - h) : ctx.lineTo(sx, groundY - h);
+  }
+  ctx.lineTo(W + 50, groundY);
+  ctx.lineTo(-50, groundY);
+  ctx.closePath(); ctx.fill();
+
+  // Far tree line
+  ctx.fillStyle = '#22332a';
+  ctx.beginPath();
+  for(let sx = -50; sx <= W + 50; sx += 10){
+    let wx = sx + dist * 0.2;
+    let h = 35 + 15 * Math.sin(wx * 0.01) + 8 * Math.cos(wx * 0.02);
+    sx === -50 ? ctx.moveTo(sx, groundY - h) : ctx.lineTo(sx, groundY - h);
+  }
+  ctx.lineTo(W + 50, groundY);
+  ctx.lineTo(-50, groundY);
+  ctx.closePath(); ctx.fill();
+
+  // Ground & road
+  ctx.fillStyle = '#15151a';
+  ctx.fillRect(0, groundY, W, H - groundY);
+  ctx.fillStyle = '#2a3326';
+  ctx.fillRect(0, groundY, W, 6);
+
+  // Mid trees (mid parallax)
+  let sp = 230, mo = dist * 0.5, si = Math.floor(mo / sp) - 1;
+  for(let i = si; i < si + W / sp + 3; i++) drawTree(i * sp - mo, groundY, rand(i));
+
+  // Bushes
+  let bsp = 130, bo = dist * 0.8, bi = Math.floor(bo / bsp) - 1;
+  for(let i = bi; i < bi + W / bsp + 3; i++) drawBush(i * bsp - bo, groundY);
+
+  // Roadside poles (fast parallax)
+  let psp = 380, po = dist, pi = Math.floor(po / psp) - 1;
+  for(let i = pi; i < pi + W / psp + 3; i++) drawPole(i * psp - po, groundY);
+
+  // Car (foreground, fixed horizontally with subtle bounce)
+  let carX = W * 0.4;
+  let bounce = Math.sin(t * 7) * 2 + Math.sin(t * 13) * 0.8;
+  let ang = dist / 22;
+  ctx.save();
+  ctx.translate(carX, groundY - 22 + bounce);
+  ctx.rotate(Math.sin(t * 7) * 0.004);
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.beginPath(); ctx.ellipse(0, 22 - bounce + 2, 120, 12, 0, 0, Math.PI * 2); ctx.fill();
+
+  // Wheels
+  drawWheel(-60, 0, ang);
+  drawWheel(60, 0, ang);
+
+  // Body with sunset gradient
+  let bg = ctx.createLinearGradient(-110, 0, 110, 0);
+  bg.addColorStop(0, '#15151a');
+  bg.addColorStop(0.5, '#3a2530');
+  bg.addColorStop(1, '#ff9a5a');
+  ctx.fillStyle = bg;
+  ctx.beginPath();
+  ctx.moveTo(-105, 10);
+  ctx.lineTo(105, 10);
+  ctx.lineTo(112, -2);
+  ctx.quadraticCurveTo(95, -38, 45, -52);
+  ctx.lineTo(-35, -52);
+  ctx.quadraticCurveTo(-90, -48, -108, -2);
+  ctx.closePath(); ctx.fill();
+
+  // Windows
+  ctx.fillStyle = 'rgba(10,20,30,0.85)';
+  ctx.beginPath();
+  ctx.moveTo(-25, -48);
+  ctx.lineTo(35, -48);
+  ctx.lineTo(48, -32);
+  ctx.lineTo(-35, -32);
+  ctx.closePath(); ctx.fill();
+
+  // Door line
+  ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(-5, -48); ctx.lineTo(-5, 10); ctx.stroke();
+
+  // Lights
+  ctx.fillStyle = '#ffd';
+  ctx.beginPath(); ctx.arc(106, -4, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#f33';
+  ctx.fillRect(-107, -6, 4, 10);
+
+  ctx.restore();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

@@ -37,6 +37,11 @@ _EXPORTS = {
     "KQuantMultiLinear": "modules",
     "install_kquant_modules": "modules",
     "install_gguf_bridge": "server_bridge_lm",
+    # Tokenizer-only entry points: synthesize the HF tokenizer from GGUF
+    # metadata without paying the model load. Used by eval tooling (mlx-kld)
+    # that needs tokenizer parity checks before deciding to load weights.
+    "detect_arch": "remap",
+    "load_tokenizer_from_gguf": "tokenizer",
 }
 
 __all__ = list(_EXPORTS)

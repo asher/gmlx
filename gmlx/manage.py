@@ -1061,6 +1061,25 @@ def _human_gb(n_bytes: int, decimals: int = 1) -> str:
     return human_gb(n_bytes, decimals)
 
 
+def _model_size_bytes(path: str, model_dirs: list[str]) -> int | None:
+    """Total on-disk bytes for a model's GGUF (all shards for a split file)."""
+    from . import config as cfgmod
+    from .preflight import find_split_shards
+    try:
+        resolved = cfgmod.resolve_path(path, model_dirs)
+        return sum(os.path.getsize(p) for p in find_split_shards(resolved))
+    except Exception:                                  # noqa: BLE001 - unresolvable
+        return None
+
+
+def _human_size(n: int | None) -> str:
+    if n is None:
+        return "missing"
+    if n >= 1e9:
+        return f"{n / 1e9:.1f} GB"
+    return f"{n / 1e6:.0f} MB"
+
+
 def _model_flags(m) -> list[str]:
     """The one-line tags for a configured/discovered model (id-addressing aside)."""
     flags = []
@@ -1093,6 +1112,8 @@ def cmd_list(argv: list | None = None, prog: str = "gmlx list") -> int:
                          "e.g. ~/.config/gmlx/gmlx.yaml).")
     ap.add_argument("--json", action="store_true",
                     help="Emit the listing as JSON.")
+    ap.add_argument("-v", "--paths", action="store_true", dest="paths",
+                    help="Also show each model's GGUF path.")
     a = ap.parse_args(argv)
 
     from . import config as cfgmod
@@ -1129,6 +1150,8 @@ def cmd_list(argv: list | None = None, prog: str = "gmlx list") -> int:
 
     rows.sort(key=lambda r: r["id"])
     aliases = dict(cfg.aliases)
+    for r in rows:
+        r["size_bytes"] = _model_size_bytes(r["path"], cfg.model_dirs)
 
     if a.json:
         print(json.dumps({"config": cfg_path, "models": rows, "aliases": aliases,
@@ -1147,16 +1170,31 @@ def cmd_list(argv: list | None = None, prog: str = "gmlx list") -> int:
               "then `gmlx sync-models`.")
         return 0
     print()
-    wid = max(len(r["id"]) for r in rows)
-    for r in rows:
-        mark = "*" if r["default"] else " "
-        extra = list(r["flags"])
+
+    def _cells(r):
+        feats = list(r["flags"])
         if r["source"] == "discovered":
-            extra.append("discovered")
-        note = f"   [{', '.join(extra)}]" if extra else ""
-        prof = f"  @{r['profile']}" if r["profile"] else ""
-        print(f"{mark} {r['id']:<{wid}}{prof}{note}")
-        print(f"  {' ' * wid}  {r['path']}")
+            feats.append("discovered")
+        mark = "*" if r["default"] else " "
+        return (f"{mark} {r['id']}", ", ".join(feats),
+                f"@{r['profile']}" if r["profile"] else "",
+                _human_size(r["size_bytes"]))
+
+    table = [_cells(r) for r in rows]
+    header = ("  NAME", "FEATURES", "PROFILE", "SIZE")
+    keep = [i for i in range(len(header))
+            if i in (0, 3) or any(t[i] for t in table)]
+    widths = [max(len(header[i]), max(len(t[i]) for t in table)) for i in keep]
+
+    def _line(cells):
+        picked = (cells[i] for i in keep)
+        return "    ".join(c.ljust(w) for c, w in zip(picked, widths)).rstrip()
+
+    print(_line(header))
+    for r, t in zip(rows, table):
+        print(_line(t))
+        if a.paths:
+            print(f"      {r['path']}")
     if aliases:
         print("\naliases:")
         wa = max(len(k) for k in aliases)

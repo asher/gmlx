@@ -1007,7 +1007,12 @@ def _scaffold_models_block(models, dirs) -> list[str]:
                  "(whole model on CPU) |")
     lines.append("  #   moe_expert_mass: <P> (adaptive lossy fan-out on "
                  "streamed experts; size P")
-    lines.append("  #   with `gmlx run --moe-expert-probe`)")
+    lines.append("  #   with `gmlx run --moe-expert-probe`) | "
+                 "moe_experts: <K> (fixed cap) |")
+    lines.append("  #   moe_miss_shed: <P> (drop arena-miss experts, keep "
+                 "mass P) |")
+    lines.append("  #   moe_layer_shed: <P> (skip routed path with "
+                 "probability P)")
     if not models:
         lines.append("  # (none discovered) -- point model_dirs at a folder of "
                      ".gguf files")

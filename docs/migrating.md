@@ -20,7 +20,7 @@ Common flag equivalents:
 | `--temp`, `--top-k`, `--top-p`, `--min-p` | same names | defaults come from each model family's card, so bare `run`/`chat` is already tuned |
 | `-c N` (context size) | none | the window comes from the GGUF's own metadata; `--max-kv-size N` bounds cache memory with a rotating cache instead |
 | `--rope-scaling` / `--yarn-*` | none | metadata-driven; `GMLX_ROPE_FACTORS` exists as an expert escape hatch ([cli.md](cli.md#environment-variables)) |
-| `-ngl` (GPU layers) | none needed | everything runs on the GPU; `--stream-experts` / `--stream-cpu` are the deliberate over-RAM MoE placements ([performance.md](performance.md#bigger-than-memory-moe-offload)) |
+| `-ngl` (GPU layers) | none needed | everything runs on the GPU; `--stream-experts` / `--stream-cpu` are the deliberate over-RAM MoE placements ([streaming.md](streaming.md)) |
 | `--cache-type-k/-v q8_0` | `--kv-bits 8` (+ `--kv-group-size`) | same purpose, mlx-lm quantized KV cache |
 | `--draft-model`, `--spec-draft-n-max` | `--draft-gguf`, `--draft-block-size` | native-MTP models (Qwen3.5/3.6, Hy3, DS-V4) need no companion drafter at all |
 | `--chat-template` | `--chat-template STR\|PATH` | per-model in server configs (`overrides: {chat_template: ...}`) |

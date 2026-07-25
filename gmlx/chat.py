@@ -1865,6 +1865,8 @@ _ASSISTANT_NOOP = (
     ("moe_experts", "--moe-experts"),
     ("moe_expert_mass", "--moe-expert-mass"),
     ("moe_expert_probe", "--moe-expert-probe"),
+    ("moe_miss_shed", "--moe-miss-shed"),
+    ("moe_layer_shed", "--moe-layer-shed"),
     ("thinking_budget", "--thinking-budget"),
     ("resize_shape", "--resize-shape"),   # only meaningful with --mmproj (rejected)
 )
@@ -2644,10 +2646,13 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             or args.moe_experts is not None
             or args.moe_expert_mass is not None
             or args.moe_expert_probe
+            or args.moe_miss_shed is not None
+            or args.moe_layer_shed is not None
         ):
             print(
                 "error: --stream-experts/--stream-cpu/--moe-experts/"
-                "--moe-expert-mass/--moe-expert-probe are text-only (no VLM "
+                "--moe-expert-mass/--moe-expert-probe/--moe-miss-shed/"
+                "--moe-layer-shed are text-only (no VLM "
                 "offload plumbing); drop --mmproj or the offload flags.",
                 file=sys.stderr,
             )
@@ -2674,7 +2679,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         if speculative and not vlm_mtp and (
             args.mmproj or args.adapter or args.stream_experts or args.stream_cpu
             or args.moe_experts is not None or args.moe_expert_mass is not None
-            or args.moe_expert_probe
+            or args.moe_expert_probe or args.moe_miss_shed is not None
+            or args.moe_layer_shed is not None
         ):
             which = next(
                 name
@@ -2686,6 +2692,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                     ("--moe-experts", args.moe_experts is not None),
                     ("--moe-expert-mass", args.moe_expert_mass is not None),
                     ("--moe-expert-probe", args.moe_expert_probe),
+                    ("--moe-miss-shed", args.moe_miss_shed is not None),
+                    ("--moe-layer-shed", args.moe_layer_shed is not None),
                 )
                 if on
             )

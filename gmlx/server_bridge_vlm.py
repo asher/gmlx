@@ -490,7 +490,10 @@ def load_serveable_model(
     chat_template: str | None = None,
     adapter_gguf: str | None = None,
     stream=None,
+    moe_experts: int | None = None,
     moe_expert_mass: float | None = None,
+    moe_miss_shed: float | None = None,
+    moe_layer_shed: float | None = None,
     feeder_prefill: bool | None = None,
     feeder_decode: bool | None = None,
 ) -> tuple[object, object, object]:
@@ -526,11 +529,11 @@ def load_serveable_model(
     weights streamed through the page cache). Like the adapter, the VLM and
     MTP paths raise rather than silently dropping it.
 
-    ``moe_expert_mass`` (config ``moe_expert_mass: P``) installs the adaptive
-    lossy fan-out filter over the streamed routers after the placement:
-    each token keeps only the smallest set of its routed experts covering
-    share P of the gate mass. It rides on ``stream`` - without a placement
-    it is announced as ignored (there are no streamed experts to filter).
+    The lossy MoE levers (config ``moe_experts: K`` / ``moe_expert_mass: P`` /
+    ``moe_miss_shed: P`` / ``moe_layer_shed: P``) install their filters/hooks
+    over the streamed layers after the placement. They ride on ``stream`` -
+    without a placement each is announced as ignored (there are no streamed
+    experts to filter).
     """
     def _reject_unwired(base_kind: str) -> None:
         # Raising beats silently dropping the option on bases that don't
@@ -544,12 +547,18 @@ def load_serveable_model(
                 f"stream placement on a {base_kind} base is not wired yet; "
                 f"stream={stream!r}")
 
-    if moe_expert_mass is not None and not stream:
-        print(
-            "[stream] moe_expert_mass ignored: needs stream: experts|cpu "
-            "(it only applies to streamed MoE layers)"
-        )
-        moe_expert_mass = None
+    if not stream:
+        for key, val in (("moe_experts", moe_experts),
+                         ("moe_expert_mass", moe_expert_mass),
+                         ("moe_miss_shed", moe_miss_shed),
+                         ("moe_layer_shed", moe_layer_shed)):
+            if val is not None:
+                print(
+                    f"[stream] {key} ignored: needs stream: experts|cpu "
+                    "(it only applies to streamed MoE layers)"
+                )
+        moe_experts = moe_expert_mass = None
+        moe_miss_shed = moe_layer_shed = None
     if mmproj_path is not None and speculative:
         # VLM x MTP: text-only requests speculate; image/audio requests prefill media
         # into the KV and decode normally (verify is token-only over that cache).
@@ -598,9 +607,18 @@ def load_serveable_model(
         install_expert_streaming(
             raw_model, gguf_path=gguf_path,
             feeder_prefill=feeder_prefill, feeder_decode=feeder_decode)
+    if moe_experts is not None:
+        from .loader import install_moe_experts_override
+        install_moe_experts_override(raw_model, moe_experts)
     if moe_expert_mass is not None:
         from .moe_experts import install_moe_expert_mass
         install_moe_expert_mass(raw_model, moe_expert_mass)
+    if moe_miss_shed is not None:
+        from .moe_experts import install_moe_miss_shed
+        install_moe_miss_shed(raw_model, moe_miss_shed)
+    if moe_layer_shed is not None:
+        from .moe_experts import install_moe_layer_shed
+        install_moe_layer_shed(raw_model, moe_layer_shed)
     processor = _make_text_processor(tokenizer)
     # mlx-lm-arch caches must carry the vlm runtime's class identities or
     # apc/ar isinstance-gates (own classes since mlx-vlm 0.6.4) resolve
@@ -738,12 +756,16 @@ def install_gguf_server_bridge() -> None:
             # applied to the loaded base in load_serveable_model (text path;
             # VLM/MTP raise).
             # The feeder overrides (config `prefill_feeder:`/`decode_feeder:` /
-            # the paired serve flags) and the adaptive fan-out share (config
-            # `moe_expert_mass:` / `serve --moe-expert-mass`) ride along; None
+            # the paired serve flags) and the lossy MoE levers (config
+            # `moe_experts:`/`moe_expert_mass:`/`moe_miss_shed:`/
+            # `moe_layer_shed:` / the paired serve flags) ride along; None
             # keeps the loader default / trained fan-out.
             stream = getattr(spec, "stream", None)
             feeders = dict(
+                moe_experts=getattr(spec, "moe_experts", None),
                 moe_expert_mass=getattr(spec, "moe_expert_mass", None),
+                moe_miss_shed=getattr(spec, "moe_miss_shed", None),
+                moe_layer_shed=getattr(spec, "moe_layer_shed", None),
                 feeder_prefill=getattr(spec, "prefill_feeder", None),
                 feeder_decode=getattr(spec, "decode_feeder", None),
             )

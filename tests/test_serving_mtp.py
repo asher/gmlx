@@ -354,7 +354,8 @@ def installed_bridge(monkeypatch):
 
     def spy(model_path, *, mmproj_path=None, hf_source=None,
             speculative=False, draft_gguf_path=None, chat_template=None,
-            adapter_gguf=None, stream=None, moe_expert_mass=None,
+            adapter_gguf=None, stream=None, moe_experts=None,
+            moe_expert_mass=None, moe_miss_shed=None, moe_layer_shed=None,
             feeder_prefill=None, feeder_decode=None):
         serveable_calls.append(
             (model_path, mmproj_path, hf_source, speculative, draft_gguf_path,

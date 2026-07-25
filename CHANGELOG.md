@@ -6,48 +6,64 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-24
+
 ### Added
 
-- Decode-priority prefill pacing for the batched server: live decode
-  batches keep a configurable GPU-time share while admission prefills run
-  (`server.decode_prefill_ratio` / `--decode-prefill-ratio` /
-  `GMLX_DECODE_PREFILL_RATIO`, default 1.0; 0 = stock). Deep-context
-  concurrent decode no longer stalls behind other requests' prefills
-  (measured: c2 per-stream decode +77% at 14k depth, ~5x at 50k; c1
-  unaffected).
-- Unified ragged-plan batched decode for the qwen3_5 family: concurrent
-  streams at different context depths stay on the fused ragged-attention
-  kernel instead of a per-row fallback loop
-  (`GMLX_RAGGED_UNIFIED_PLAN=0` disables).
-- `bench/plot-bench.py batch-scaling` chart grammar: aggregate decode
-  throughput vs concurrent streams, one line per depth, with an optional
-  `--ref` overlay of a second run for scheduler A/Bs.
-- Speculative decoding now backs off under concurrency instead of losing
-  throughput: MTP runs while the live decode batch is at or under a
-  per-model width cap, and wider batches finish in plain decode with the
-  drafter left loaded (`models[].speculative_width_cap` /
-  `--speculative-width-cap` / `GMLX_MTP_WIDTH_CAP`; default per drafter
-  family, 0 = uncapped). Mixture-of-experts targets default to speculating
-  only at a single stream, since verification multiplies the expert union each
-  drafted position touches; they are detected from the loaded model's stacked
-  expert layers, so the default reaches new MoE architectures unaided.
+- Decode-priority prefill pacing: live decode batches keep a share of GPU time
+  while admission prefills run (`server.decode_prefill_ratio` /
+  `--decode-prefill-ratio`, default 1.0; 0 = stock). Concurrent decode at depth
+  no longer stalls behind other requests' prefills: c2 per-stream +77% at 14k,
+  ~5x at 50k, c1 unaffected.
+- Speculative decoding backs off under concurrency: MTP runs while the live
+  decode batch is at or under a per-model width cap, wider batches finish in
+  plain decode with the drafter loaded (`models[].speculative_width_cap` /
+  `--speculative-width-cap`; per-family default, 0 = uncapped). Mixture-of-experts
+  targets default to a single stream and are detected from the loaded model, so
+  the default reaches new MoE architectures unaided.
+- Unified ragged-plan batched decode for the qwen3_5 family: concurrent streams
+  at different depths stay on the fused ragged-attention kernel instead of a
+  per-row fallback loop.
+- Lossy MoE decode levers for streamed models: `--moe-miss-shed` drops
+  non-resident experts while keeping a share of routing mass, `--moe-layer-shed`
+  skips routed MoE paths per token. Never on by default.
+- GPU keep-warm for streamed decode (`--gpu-keepwarm`) holds the GPU clock up
+  between tokens; decode-gated, so an idle server pays no power cost. Measured
+  +45% on GLM and +32% on Hunyuan 3.
+- Decode lookahead depth (`GMLX_DECODE_LOOKAHEAD_DEPTH`): expert prestage
+  prediction up to three MoE layers ahead.
+- Hunyuan 3 MoE fusion (routing-scores fold, shared-expert ride-along) and
+  MiniMax-M3 streaming via normalized routing weights through the mix seam.
+- `detect_arch` and `load_tokenizer_from_gguf` promoted to the stable public API:
+  synthesize the HF tokenizer from GGUF metadata without loading the model.
+- Streaming guide (`docs/streaming.md`) and a `bench/plot-bench.py batch-scaling`
+  chart grammar for scheduler A/Bs.
+
+### Changed
+
+- `--stream-experts` now composes with MTP speculative decoding. Auto-MTP defers
+  under `--stream-experts`; explicit `--speculative` opts in.
+- Lookahead prestage defaults off for the `glm_moe_dsa` and `deepseek_v32`
+  families; feeder and lookahead end-of-run stats print only at `-v`.
 
 ### Fixed
 
-- Speculative serving: a request admitted while a qwen3.5/3.6-family
-  speculative prompt batch was mid-prefill could kill every request in
-  flight with a rope-deltas broadcast error; cached text mrope deltas are
-  now zero-padded to the live batch width on the prompt path, matching the
-  existing decode-path guard.
-- Speculative serving: a request admitted into a live speculative batch on
-  sliding-window models (gemma family) could fail with
-  `'RotatingKVCache' object has no attribute 'rotated'`; single-sequence
-  rotating caches are now lifted to the batch cache class before the join,
-  preserving temporal order for windows that had already rotated.
-- Speculative serving: with a shared-KV drafter (gemma assistant GGUF), a
-  request admitted into a live batch crashed it on a shared-KV shape
-  mismatch; injected rows are now aligned and merged into the drafter's
-  view at the new batch width.
+- Speculative serving: admitting a request into a live batch could kill every
+  request in flight, in three ways - a rope-deltas broadcast error on the
+  qwen3.5/3.6 prompt path, `'RotatingKVCache' object has no attribute 'rotated'`
+  on sliding-window models, and a shared-KV shape mismatch with the gemma
+  assistant drafter. Deltas are zero-padded to the live width, rotating caches
+  are lifted to the batch class before the join, and injected rows are aligned
+  into the drafter's view at the new width.
+- Streamed GLM decode could return corrupted output: prestage evictions could
+  overwrite arena slots a still-executing gather was reading. Layer outputs are
+  now evaluated before any arena mutation.
+- MoE expert controls silently no-opped on Hunyuan 3, whose gate submodule is
+  named `router`.
+- Loading an MTP model for streaming no longer wires the resident buffer set,
+  which marched wired memory through the free-page floor on over-RAM targets.
+- Miss-shed no longer costs a second per-layer host sync, and streamed decode
+  uses the fused GLU pair instead of falling back to the stock triple-gather.
 
 ## [0.1.0] - 2026-07-19
 

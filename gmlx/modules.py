@@ -526,7 +526,13 @@ def _make_fused_kquant(base_cls, caps):
         With `scores`, the routed weighted sum folds into the down gather
         (gather_qmv_mix_ns_kq, f32 accumulate) and the output comes back
         already mixed over the expert axis; the ineligible path applies
-        the same sum python-side."""
+        the same sum python-side.
+
+        With `scores` and a `_kq_shexp_mod` stamp (install_hyv3_shexp_fold),
+        the shared expert rides the gathers as one extra slot with mix
+        weight 1. Contract with the stamping caller: a mixed return
+        consumed the shared expert; the stamped fallback returns unmixed
+        (skipping the epilogue below) and the caller mixes + adds it."""
 
         _kq_mix_scores = _has_mix_ns
 
@@ -555,6 +561,26 @@ def _make_fused_kquant(base_cls, caps):
                     akw["alpha"] = self._kq_glu_alpha
                     akw["gate_bias"] = self._kq_gb32
                     akw["up_bias"] = self._kq_ub32
+                se = (getattr(self, "_kq_shexp_mod", None)
+                      if scores is not None else None)
+                if se is not None:
+                    skw = ({"shexp_kquant_type": se.gate_proj.kquant_type}
+                           if se.gate_proj.kquant_type != gate.kquant_type
+                           else {})
+                    h = kq.moe_glu_gather_shexp_kq(
+                        x.reshape(t, d_in), gate.weight, up.weight,
+                        se.gate_proj.weight, se.up_proj.weight,
+                        gate.kquant_type, idx, **akw, **skw)
+                    sc = scores.reshape(t, k)
+                    sc = mx.concatenate(
+                        [sc, mx.ones((t, 1), dtype=sc.dtype)], axis=-1)
+                    skw = ({"shexp_kquant_type": se.down_proj.kquant_type}
+                           if se.down_proj.kquant_type != down.kquant_type
+                           else {})
+                    y = kq.gather_qmv_mix_kq(
+                        h, down.weight, se.down_proj.weight,
+                        down.kquant_type, idx, sc, **skw)
+                    return y.reshape(*indices.shape[:-1], y.shape[-1])
                 h = kq.moe_glu_gather_kq(
                     x.reshape(t, d_in),
                     gate.weight, up.weight,
@@ -572,6 +598,8 @@ def _make_fused_kquant(base_cls, caps):
             else:
                 y = super().__call__(x, indices)
             if scores is not None and y.ndim == scores.ndim + 1:
+                if getattr(self, "_kq_shexp_mod", None) is not None:
+                    return y  # unmixed: caller mixes + adds its shexp
                 y = (y * scores[..., None].astype(y.dtype)).sum(-2)
             return y
 
@@ -771,6 +799,81 @@ def _install_kq_block_fusion(model, caps) -> int:
             continue
         _swap_class(m, classes, _make_fused_block, caps)
         object.__setattr__(m, "_kq_router_want", caps.router_ok)
+        n += 1
+    return n
+
+
+# Regime 3b: hy_v3 MoE (sigmoid+bias router, ungated shared expert).
+# Stamps the fused SwitchGLU instead of swapping the block class, so the
+# expert-streaming offload wrapper stays in the call path.
+
+
+def _eligible_hyv3_shexp(m, caps):
+    """hy_v3 MoE whose ungated shared expert can ride the fused SwitchGLU
+    gathers as one extra slot with mix weight 1 (moe_glu_gather_shexp_kq +
+    gather_qmv_mix_kq): K-quant projections shape-matched to the expert
+    stacks (same codec, or a q6_k/q8_0 upcast), SwitchGLU already swapped
+    to the scores-taking fused class."""
+    kq = caps.kq
+    _KQ_SHEXP_UPCAST = caps.shexp_upcast
+    if not hasattr(kq, "moe_glu_gather_shexp_kq"):
+        return False
+    if not hasattr(kq, "gather_qmv_mix_kq"):
+        return False
+    for attr in ("router", "switch_mlp", "shared_mlp", "fp32_combine"):
+        if not hasattr(m, attr):
+            return False
+    if hasattr(m, "shared_expert_gate"):  # qwen3-next shape: regime 3
+        return False
+    se = m.shared_mlp
+    if se is None:
+        return False
+    sw = m.switch_mlp
+    if not getattr(sw, "_kq_mix_scores", False):
+        return False
+    if getattr(sw, "_kq_glu_act", None) != "silu":
+        return False
+    # kernel geometry: K of both matvecs % 256, N (= down K) % 256
+    d_in = _kq_wire_k(sw.gate_proj.weight, sw.gate_proj.kquant_type)
+    inter = sw.gate_proj.weight.shape[1]
+    if d_in <= 0 or d_in % 256 or inter % 256:
+        return False
+    for attr in ("gate_proj", "up_proj", "down_proj"):
+        if not hasattr(se, attr):
+            return False
+    # plain silu(gate) * up shared expert only (hy_v3 MLP shape)
+    if hasattr(se, "activation"):
+        return False
+    # the GLU gather runs both shexp slots with one codec
+    if se.gate_proj.kquant_type != se.up_proj.kquant_type:
+        return False
+    for proj, stack in ((se.gate_proj, sw.gate_proj),
+                        (se.up_proj, sw.up_proj),
+                        (se.down_proj, sw.down_proj)):
+        if not _kq_dense(proj, (stack.kquant_type,) + _KQ_SHEXP_UPCAST):
+            return False
+        # shape-matched in each side's own codec wire bytes
+        if proj.weight.shape[0] != stack.weight.shape[1]:
+            return False
+        if (_kq_wire_k(proj.weight, proj.kquant_type)
+                != _kq_wire_k(stack.weight, stack.kquant_type)):
+            return False
+    return True
+
+
+def install_hyv3_shexp_fold(model) -> int:
+    """Stamp eligible hy_v3 MoE blocks' fused SwitchGLUs with their shared
+    expert (``_kq_shexp_mod``, a module ref: install runs before
+    load_weights). Call after install_fused_moe_glu. Disable with
+    GMLX_FUSED_MOE_BLOCK=0. Returns the number of blocks stamped."""
+    caps = _FusedMoeCaps()
+    if not caps.enabled or not caps.has_base or not caps.block_env_on:
+        return 0
+    n = 0
+    for _, m in model.named_modules():
+        if not _eligible_hyv3_shexp(m, caps):
+            continue
+        object.__setattr__(m.switch_mlp, "_kq_shexp_mod", m.shared_mlp)
         n += 1
     return n
 
@@ -1183,6 +1286,10 @@ def install_fused_moe_glu(model) -> int:
     the routing mix folds into the down gather (kq.moe_glu_gather_shexp_kq +
     kq.gather_qmv_mix_kq). Disable just this level with
     GMLX_FUSED_MOE_BLOCK=0.
+
+    hy_v3 MoE blocks (sigmoid+bias router, ungated shared expert) get the
+    same shared-expert ride-along via install_hyv3_shexp_fold, a separate
+    call that stamps the fused SwitchGLU instead of swapping the block.
 
     gemma-4 MoE layers (separate Router + Experts modules, GeGLU, no shared
     expert): the score-weighted (w * y).sum(-2) mix folds into the down

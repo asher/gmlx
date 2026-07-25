@@ -47,12 +47,14 @@ from functools import lru_cache
 
 import numpy as np
 
-from . import loadlog
+from . import keepwarm, loadlog
 from .envflags import env_int
 from .feeder_common import ATTRS, KINDS, read_range, swapped_weights, verify_zero_copy
 
 # Miss-pull parallelism: per layer, up to top_k experts x 3 stacks of
 # MB-scale slices; enough in-flight preads for SSD sequential bandwidth.
+# GMLX_DECODE_READ_WORKERS overrides (a high-fan-out model at a mid hit
+# rate can queue more than 12 slices in one demand wave).
 _READ_WORKERS = 12
 
 # Lookahead prestage (see ``prestage``): predictions from the lookahead
@@ -226,12 +228,13 @@ class DecodeFeeder:
         offsets: dict[int, list[tuple[str, int, int, int, str]]],
         modules: dict[int, list],
         arena_bytes: int,
+        stats_verbose: bool | None = None,
     ):
         import mlx_kquant as kq
 
-        # Construction happens inside the load session; capture its verbosity
-        # for the end-of-run stat prints in close() (the session is gone then).
-        self._stats_verbose = loadlog.is_verbose()
+        # None = follow loadlog; the CLI passes -v (built after its session).
+        self._stats_verbose = (
+            loadlog.is_verbose() if stats_verbose is None else stats_verbose)
         # li -> kind -> (module, path, file_off, stride, shape)
         self._layers: dict[int, dict] = {}
         per_expert: dict[int, int] = {}  # li -> bytes per expert, all kinds
@@ -328,13 +331,14 @@ class DecodeFeeder:
         # slack on both ends.
         self._aligned = os.environ.get("GMLX_DECODE_ALIGNED_READS", "1") != "0"
         self._sizes = {p: os.fstat(fd).st_size for p, fd in self._fds.items()}
+        read_workers = env_int("GMLX_DECODE_READ_WORKERS", _READ_WORKERS)
         if self._aligned:
             max_stride = max(
                 stride for entry in self._layers.values()
                 for (_, _, _, stride, _) in entry.values())
             self._bounce_bytes = max_stride + 2 * _PAGE
             self._bounce: queue.Queue = queue.Queue()
-            for _ in range(_READ_WORKERS):
+            for _ in range(read_workers):
                 self._bounce.put(kq.arena_alloc([self._bounce_bytes]))
 
         # Residency state per layer. slot_of[e] is e's arena slot or -1;
@@ -354,7 +358,7 @@ class DecodeFeeder:
         self._lookups = 0
         self._layer_hits = {li: 0 for li in self._layers}
         self._layer_lookups = {li: 0 for li in self._layers}
-        self._read_pool = _DaemonReadPool(_READ_WORKERS)
+        self._read_pool = _DaemonReadPool(read_workers)
 
         # Lookahead prestage state (constants above; pool and bounce
         # buffers are lazy - most runs never prestage). _pending maps
@@ -381,6 +385,12 @@ class DecodeFeeder:
         self._t_demand = 0.0
         self._t_settle = 0.0
         self._t_start = time.monotonic()
+
+        # Lossy-lever accounting (shed_misses + the wrapper's layer shed).
+        self._shed_n = 0
+        self._shed_mass = 0.0
+        self._shed_tokens = 0
+        self._layer_shed_n = 0
 
         # GMLX_DECODE_FEEDER_VERIFY=1: sample-compare arena slots against
         # their file bytes at every publish and every routed use, and
@@ -535,6 +545,7 @@ class DecodeFeeder:
         Caller contract: ``mx.eval`` of the call's ``indices`` has run, so no
         in-flight gather references this layer's arena (see module docstring).
         """
+        keepwarm.touch()
         if self._pressure_on and self._calls % _PRESSURE_POLL_EVERY == 0:
             self._poll_pressure()
         uniq = np.unique(ids.reshape(-1))
@@ -674,14 +685,62 @@ class DecodeFeeder:
                     self._la_bounce.put(kq.arena_alloc([self._bounce_bytes]))
         return self._la_pool
 
-    def prestage(self, li: int, pred_ids: np.ndarray) -> None:
+    def shed_misses(self, li: int, ids: np.ndarray, scores: np.ndarray,
+                    keep_mass: float) -> np.ndarray | None:
+        """Lossy: bool keep-mask over ``ids`` dropping routed experts that
+        are neither arena-resident nor prestage-inflight, lowest score
+        first, capped at ``1 - keep_mass`` of the token's score mass.
+        Returns None when nothing sheds. A shed expert is never staged, so
+        it also earns no popularity credit (self-reinforcing by design:
+        the arena's long tail stays cold)."""
+        slot_of = self._slot_of.get(li)
+        if slot_of is None:
+            return None
+        miss = slot_of[ids] < 0
+        pend = self._pending.get(li)
+        if pend and miss.any():
+            miss &= np.array([e not in pend for e in ids])
+        if not miss.any():
+            return None
+        total = float(scores.sum())
+        budget = total * max(0.0, 1.0 - keep_mass)
+        keep = np.ones(ids.size, dtype=bool)
+        shed_mass = 0.0
+        shed_n = 0
+        for j in np.argsort(scores, kind="stable"):
+            if not miss[j] or keep.sum() <= 1:
+                continue
+            s = float(scores[j])
+            if shed_mass + s > budget:
+                break
+            keep[j] = False
+            shed_mass += s
+            shed_n += 1
+        if not shed_n:
+            return None
+        self._shed_n += shed_n
+        self._shed_mass += shed_mass / max(total, 1e-20)
+        self._shed_tokens += 1
+        return keep
+
+    def prestage(self, li: int, pred_ids: np.ndarray, *,
+                 demand: bool = False,
+                 protect: np.ndarray | None = None) -> None:
         """Asynchronously pre-read predicted experts into layer ``li``'s
         arena. Safe under the same fence as ``stage`` (the caller's router
         eval for the *previous* MoE layer of the same token transitively
         fenced every gather that could reference this arena). Slots are
         reserved (-4) at submission and published only when their read has
         completed, so a concurrent lookup can never map an expert to a
-        slot holding partial bytes. Predictions never touch popularity."""
+        slot holding partial bytes. Predictions never touch popularity.
+
+        ``demand=True`` is the gpu-autonomous boundary mode: the ids are
+        certain next-token demand (misses the kernel shed), not guesses,
+        so the guess-grade eviction guard (never displace a more popular
+        resident) is dropped and stage()'s policy applies: evict the
+        least-popular resident outright. ``protect`` lists expert ids
+        whose slots must survive this call (the token's routed set -
+        routing locality makes them next token's likely demand)."""
         if (
             li not in self._layers
             or self._staging_disabled
@@ -699,10 +758,16 @@ class DecodeFeeder:
         # Only the top GMLX_DECODE_LOOKAHEAD_K ranks per row are considered (the
         # ranking head is reliable, the tail is not); residents among them
         # are simply already-good news, not license to dig deeper.
-        rows = pred_ids.reshape(-1, pred_ids.shape[-1])[:, : self._la_k]
+        if demand:
+            rows = pred_ids.reshape(-1, pred_ids.shape[-1])
+        else:
+            rows = pred_ids.reshape(-1, pred_ids.shape[-1])[:, : self._la_k]
         picked: list[int] = []
         seen: set[int] = set()
         protected = np.zeros(len(owner), dtype=bool)
+        if protect is not None:
+            ps = slot_of[protect.reshape(-1)]
+            protected[ps[ps >= 0]] = True
         for e in rows.T.reshape(-1):  # rank-major: every row's head first
             e = int(e)
             if e in seen:
@@ -734,7 +799,10 @@ class DecodeFeeder:
                 if not len(cand):
                     break
                 v = int(np.argmin(counts[owner[cand]]))
-                if counts[owner[cand]][v] > counts[e]:
+                if not demand and counts[owner[cand]][v] > counts[e]:
+                    # Guess-grade guard: a wrong prediction may only cost
+                    # a cold slot, never a hot one. Demand mode evicts
+                    # least-popular outright, like stage().
                     continue
                 s = int(cand[v])
                 old = int(owner[s])
@@ -1103,6 +1171,9 @@ class DecodeFeeder:
         if getattr(self, "_closed", False):
             return
         self._closed = True
+        if not getattr(self, "_stats_verbose", True):
+            self._print_wedges()
+            return
         if getattr(self, "_lookups", 0):
             print(
                 f"[stream] decode feeder arena hit rate: "
@@ -1114,20 +1185,19 @@ class DecodeFeeder:
             # The cross-layer spread is what decides whether a
             # popularity-weighted per-layer budget split would beat the
             # even split: a flat spread says no.
-            if getattr(self, "_stats_verbose", False):
-                rates = {
-                    li: self._layer_hits[li] / n
-                    for li, n in self._layer_lookups.items() if n
-                }
-                if len(rates) > 1:
-                    vals = sorted(rates.values())
-                    cold = sorted(rates, key=rates.get)[:3]
-                    print(
-                        "[stream] decode feeder per-layer hit rate: "
-                        f"median {100 * vals[len(vals) // 2]:.1f}% / "
-                        f"max {100 * vals[-1]:.1f}%; coldest: "
-                        + ", ".join(
-                            f"L{li} {100 * rates[li]:.1f}%" for li in cold))
+            rates = {
+                li: self._layer_hits[li] / n
+                for li, n in self._layer_lookups.items() if n
+            }
+            if len(rates) > 1:
+                vals = sorted(rates.values())
+                cold = sorted(rates, key=rates.get)[:3]
+                print(
+                    "[stream] decode feeder per-layer hit rate: "
+                    f"median {100 * vals[len(vals) // 2]:.1f}% / "
+                    f"max {100 * vals[-1]:.1f}%; coldest: "
+                    + ", ".join(
+                        f"L{li} {100 * rates[li]:.1f}%" for li in cold))
             self._lookups = 0
         if getattr(self, "_la_submitted", 0):
             adopted = self._la_adopted + self._la_waited
@@ -1138,13 +1208,26 @@ class DecodeFeeder:
                 f"joined), {self._la_cancelled} cancelled unstarted, "
                 f"{self._la_wasted} discarded (failed or part-cancelled)"
             )
-        if getattr(self, "_calls", 0) and getattr(self, "_stats_verbose", False):
+        if getattr(self, "_calls", 0):
             wall = time.monotonic() - self._t_start
             print(
                 f"[stream] decode feeder stalls: demand reads "
                 f"{self._t_demand:.1f}s, prestage settle "
                 f"{self._t_settle:.1f}s, over {wall:.0f}s wall"
             )
+        if getattr(self, "_shed_tokens", 0):
+            print(
+                f"[stream] miss-shed: {self._shed_n} experts shed over "
+                f"{self._shed_tokens} token-layers (avg "
+                f"{100 * self._shed_mass / self._shed_tokens:.1f}% of "
+                "routed mass where shed)")
+        if getattr(self, "_layer_shed_n", 0):
+            print(
+                f"[stream] layer-shed: {self._layer_shed_n} token-layer "
+                "routed paths skipped (shared expert only)")
+        self._print_wedges()
+
+    def _print_wedges(self) -> None:
         wedges = getattr(self, "_wedges", 0)
         if wedges:
             print(
@@ -1196,7 +1279,7 @@ def _register_exit_close(feeder) -> None:
 
 
 def maybe_make_decode_feeder(
-    offsets, modules, arena_bytes: int
+    offsets, modules, arena_bytes: int, stats_verbose: bool | None = None
 ) -> DecodeFeeder | None:
     """A DecodeFeeder over the coverable layers, or None with a printed
     reason (opt-in feature: silence would read as 'enabled')."""
@@ -1216,7 +1299,7 @@ def maybe_make_decode_feeder(
         if arena_bytes < (1 << 30):
             raise RuntimeError(
                 f"arena budget too small ({arena_bytes / 1e9:.1f} GB)")
-        feeder = DecodeFeeder(offsets, modules, arena_bytes)
+        feeder = DecodeFeeder(offsets, modules, arena_bytes, stats_verbose)
         # CLI runs never tear the feeder down explicitly and __del__ is
         # not reliable at interpreter exit, so the hit-rate/prestage stats
         # lines would silently vanish; close() is idempotent, so the

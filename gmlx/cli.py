@@ -89,6 +89,26 @@ def add_moe_expert_args(ap: argparse.ArgumentParser) -> None:
         "fan-out while recording how many experts each token needed at "
         "candidate P values; prints decode and prefill tables at exit.",
     )
+    grp.add_argument(
+        "--moe-miss-shed",
+        type=mass_share,
+        default=None,
+        metavar="P",
+        help="Lossy: at decode, drop routed experts that would demand-miss "
+        "the expert arena, lowest scores first, keeping at least share P "
+        "(0 < P <= 1) of each token's gate mass. Targets IO stalls "
+        "directly; resident experts are never dropped. Composes with "
+        "--moe-expert-mass.",
+    )
+    grp.add_argument(
+        "--moe-layer-shed",
+        type=float,
+        default=None,
+        metavar="P",
+        help="Lossy: at decode, skip each streamed MoE layer's routed "
+        "experts with probability P (0 < P < 1) per token; the shared "
+        "expert still runs on shed layers.",
+    )
 
 
 def add_speculative_args(ap: argparse.ArgumentParser) -> None:
@@ -408,6 +428,16 @@ def add_placement_args(ap: argparse.ArgumentParser) -> None:
         "layers on GPU, so never under --stream-cpu); "
         "GMLX_DECODE_ARENA_GB caps the arena size.",
     )
+    grp.add_argument(
+        "--gpu-keepwarm",
+        action="store_true",
+        help="Hold GPU clocks up during streamed decode with a tiny "
+        "background heartbeat kernel. Streamed decode idles the GPU "
+        "between per-layer bursts and each burst pays the clock ramp; "
+        "the heartbeat removes that (lossless, costs a few watts while "
+        "decoding; parks after GMLX_KEEPWARM_IDLE_S seconds idle, "
+        "default 1). Default off. Env: GMLX_GPU_KEEPWARM=1.",
+    )
 
 
 # MTP / speculative auto-enable (shared by run + chat)
@@ -463,15 +493,22 @@ def mtp_dropped_chat_flags(args) -> list[str]:
 
 def _mtp_hard_incompatible(args) -> str | None:
     """A flag that can't run on the text-only MTP path at all (not merely dropped):
-    auto defers, and an explicit --speculative plus one of these errors upstream."""
+    auto defers, and an explicit --speculative plus one of these errors upstream.
+
+    ``--stream-experts`` is NOT here: streaming composes with MTP (the
+    decode-feeder arena serves any call <= its token cap, which covers the
+    verify widths, and the drafter block stays resident) - the run/bench
+    entry points apply placement after ``load_mtp_model``. ``--stream-cpu``
+    stays blocked: the verify forward on the CPU stream is untested."""
     for name, on in (
         ("--mmproj", getattr(args, "mmproj", None) is not None),
         ("--adapter", getattr(args, "adapter", None) is not None),
-        ("--stream-experts", getattr(args, "stream_experts", False)),
         ("--stream-cpu", getattr(args, "stream_cpu", False)),
         ("--moe-experts", getattr(args, "moe_experts", None) is not None),
         ("--moe-expert-mass", getattr(args, "moe_expert_mass", None) is not None),
         ("--moe-expert-probe", getattr(args, "moe_expert_probe", False)),
+        ("--moe-miss-shed", getattr(args, "moe_miss_shed", None) is not None),
+        ("--moe-layer-shed", getattr(args, "moe_layer_shed", None) is not None),
     ):
         if on:
             return name
@@ -497,9 +534,10 @@ def resolve_speculative(args, gguf_path: str) -> tuple[bool, str]:
 
     Precedence: --no-speculative/--no-mtp (off) > explicit --speculative/--mtp or
     --draft-gguf (on) > auto. Auto enables MTP iff the GGUF has a native head and no
-    hard-incompatible flag (--mmproj/--adapter/--stream-*) is set; sampler flags the MTP
-    walk can't honor are dropped with a warning at generation (--no-mtp honors them
-    via plain decoding), not deferred. The note is empty when the user was explicit."""
+    hard-incompatible flag (--mmproj/--adapter/--stream-cpu/--moe-*) is set; sampler
+    flags the MTP walk can't honor are dropped with a warning at generation (--no-mtp
+    honors them via plain decoding), not deferred. The note is empty when the user
+    was explicit."""
     if getattr(args, "no_speculative", False):
         return False, ""
     spec = getattr(args, "speculative", None)
@@ -512,8 +550,13 @@ def resolve_speculative(args, gguf_path: str) -> tuple[bool, str]:
     # Flags the verify walk can't honor are dropped with a warning at generation
     # (set --no-mtp to honor them via plain decoding) -- not deferred, so a
     # habitual penalty never silently disables MTP. Only the hard-incompatible
-    # flags above (--mmproj/--adapter/--stream-*/...) force plain decoding.
+    # flags above (--mmproj/--adapter/--stream-cpu/...) force plain decoding.
     if _mtp_hard_incompatible(args):
+        return False, ""
+    if getattr(args, "stream_experts", False):
+        # Streaming decode: auto-MTP stays off (measured wash at typical
+        # no-think acceptance, and verify widths add miss IO); explicit
+        # --speculative/--mtp above still opts in.
         return False, ""
     if not _has_native_mtp_head(gguf_path):
         companion = _deepseek4_mtp_companion(gguf_path)
@@ -961,6 +1004,7 @@ def _run_bench_depths(args) -> int:
     """``tg@depth`` benchmark: decode tok/s measured at each context depth,
     with an optional MTP speculative A/B (accept-rate + speedup) per depth."""
     from .benchmarks import _ChatPromptSource, _load_chat_dataset, bench_tg_depth
+    from .chat import parse_template_config
     from .loader import load_model, preset_native_fp_wire_env
     from .mtp_load import load_mtp_model
 
@@ -976,6 +1020,19 @@ def _run_bench_depths(args) -> int:
 
     from . import loadlog
 
+    # load the chat corpus BEFORE the model: dataset prepare can spike
+    # several GB, which an over-RAM wired load leaves no headroom for
+    convs = None
+    chat_ds = getattr(args, "bench_chat_dataset", "") or ""
+    if chat_ds:
+        if ":" in chat_ds:
+            ds_id, ds_split = chat_ds.rsplit(":", 1)
+        else:
+            ds_id, ds_split = chat_ds, "train_sft"
+        print(f"[bench] loading chat dataset {ds_id}:{ds_split} ...")
+        convs = _load_chat_dataset(ds_id, ds_split)
+        print(f"[bench] {len(convs)} conversations loaded")
+
     preset_native_fp_wire_env(args)
     drafter = None
     if speculative:
@@ -987,6 +1044,7 @@ def _run_bench_depths(args) -> int:
                 chat_template=args.chat_template,
                 zero_copy=not args.no_zero_copy,
                 verbose=args.verbose,
+                wire=not getattr(args, "stream_experts", False),
             )
     else:
         with loadlog.load_ui(args.verbose, args.gguf):
@@ -999,22 +1057,17 @@ def _run_bench_depths(args) -> int:
                 zero_copy=not args.no_zero_copy,
                 verbose=args.verbose,
             )
-        _apply_placement(args, model)
+    _apply_placement(args, getattr(model, "language_model", model))
     print_family_note(args)
 
-    # build a chat-prompt source when --bench-chat-dataset is given
     prompt_source = None
-    chat_ds = getattr(args, "bench_chat_dataset", "") or ""
-    if chat_ds:
-        if ":" in chat_ds:
-            ds_id, ds_split = chat_ds.rsplit(":", 1)
-        else:
-            ds_id, ds_split = chat_ds, "train_sft"
-        print(f"[bench] loading chat dataset {ds_id}:{ds_split} ...")
-        convs = _load_chat_dataset(ds_id, ds_split)
+    if convs is not None:
         seed = int(getattr(args, "bench_chat_seed", 42))
-        prompt_source = _ChatPromptSource(convs, tok, seed=seed)
-        print(f"[bench] {len(convs)} conversations loaded (slice seed {seed})")
+        tkw = parse_template_config(args.chat_template_config)
+        prompt_source = _ChatPromptSource(
+            convs, tok, seed=seed, template_kwargs=tkw)
+        print(f"[bench] prompt slice seed {seed}"
+              + (f" template_config={tkw}" if tkw else ""))
 
     corpus_label = chat_ds if chat_ds else "synthetic"
     print(
@@ -1080,6 +1133,14 @@ def _apply_placement(args, model) -> None:
                     getattr(args, "moe_expert_mass", None) is not None,
                 ),
                 ("--moe-expert-probe", getattr(args, "moe_expert_probe", False)),
+                (
+                    "--moe-miss-shed",
+                    getattr(args, "moe_miss_shed", None) is not None,
+                ),
+                (
+                    "--moe-layer-shed",
+                    getattr(args, "moe_layer_shed", None) is not None,
+                ),
             )
             if on
         ]
@@ -1091,6 +1152,8 @@ def _apply_placement(args, model) -> None:
         return
 
     gguf_path = getattr(args, "gguf", None)
+    if getattr(args, "gpu_keepwarm", False):
+        os.environ["GMLX_GPU_KEEPWARM"] = "1"
     feeders = dict(
         feeder_prefill=getattr(args, "prefill_feeder", None),
         feeder_decode=getattr(args, "decode_feeder", None),
@@ -1107,7 +1170,9 @@ def _apply_placement(args, model) -> None:
     else:
         from .loader import install_expert_streaming
 
-        n, _ = install_expert_streaming(model, gguf_path=gguf_path, **feeders)
+        n, _ = install_expert_streaming(
+            model, gguf_path=gguf_path,
+            stats_verbose=bool(getattr(args, "verbose", False)), **feeders)
         if n == 0:
             print(
                 "[stream] warning: no MoE expert stacks found - "
@@ -1127,6 +1192,14 @@ def _apply_placement(args, model) -> None:
         from .moe_experts import install_moe_expert_probe
 
         install_moe_expert_probe(model)
+    if getattr(args, "moe_miss_shed", None) is not None:
+        from .moe_experts import install_moe_miss_shed
+
+        install_moe_miss_shed(model, args.moe_miss_shed)
+    if getattr(args, "moe_layer_shed", None) is not None:
+        from .moe_experts import install_moe_layer_shed
+
+        install_moe_layer_shed(model, args.moe_layer_shed)
 
 
 def _run_generate(args) -> int:
@@ -1172,7 +1245,12 @@ def _run_generate(args) -> int:
                 chat_template=args.chat_template,
                 zero_copy=not args.no_zero_copy,
                 verbose=args.verbose,
+                wire=not args.stream_experts,
             )
+        # Streaming placement applies to the target trunk only (the drafter
+        # block is small and stays resident); the verify calls ride the
+        # decode-feeder arena like any small chunk.
+        _apply_placement(args, getattr(model, "language_model", model))
         print_family_note(args)
         print(
             f"[generate] MTP speculative: max_tokens={max_tokens_label(args)} "
@@ -1583,6 +1661,13 @@ def _apply_resolved_to_args(args, rm, explicit: set) -> list[str]:
             and not getattr(args, "moe_expert_probe", False)):
         args.moe_expert_mass = rm.moe_expert_mass
         applied.append("moe-expert-mass")
+    for dest, label in (("moe_experts", "moe-experts"),
+                        ("moe_miss_shed", "moe-miss-shed"),
+                        ("moe_layer_shed", "moe-layer-shed")):
+        if (getattr(rm, dest, None) is not None and dest not in explicit
+                and hasattr(args, dest)):
+            setattr(args, dest, getattr(rm, dest))
+            applied.append(label)
     return applied
 
 
@@ -1725,10 +1810,13 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    if args.speculative and (args.stream_cpu or args.stream_experts):
-        which = "--stream-cpu" if args.stream_cpu else "--stream-experts"
+    if args.speculative and args.stream_cpu:
+        # --stream-experts composes with MTP (streaming placement after
+        # load_mtp_model; auto-MTP still defers under streaming, explicit
+        # --speculative opts in). CPU-stream verify stays unsupported.
         print(
-            f"error: {which} on a --speculative/MTP base is not supported yet.",
+            "error: --stream-cpu on a --speculative/MTP base is not "
+            "supported yet.",
             file=sys.stderr,
         )
         return 2

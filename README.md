@@ -169,7 +169,7 @@ with a build or a second model. Expect single-digit decode on what the SSD can
 deliver: this is a capacity feature that makes a 200B-class MoE usable on a
 64 GB machine, not a speed feature. Placements, feeder mechanics, and measured
 numbers: the
-[performance guide](https://github.com/asher/gmlx/blob/main/docs/performance.md#bigger-than-memory-moe-offload).
+[streaming guide](https://github.com/asher/gmlx/blob/main/docs/streaming.md).
 
 ### Accuracy per byte
 

@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Calm Driving Side-View</title>
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #000; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<script>
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+let W, H, groundY;
+
+function resize() {
+  W = cv.width = window.innerWidth;
+  H = cv.height = window.innerHeight;
+  ground的关系Y = Math.floor(H * 0.78);
+  groundY = Math.floor(H * 0.78);
+}
+window.addEventListener('resize', resize);
+resize();
+
+// Pseudo-random but deterministic hash for varied scenery
+function hash(i) {
+  let x = Math.sin(i * 127.34 + 11.7) * 43758.545;
+  return x - Math.floor(x);
+}
+
+let t = 0;
+let last = performance.now();
+function loop(now) {
+  let dt = Math.min((now - last) / 1000, 0.05);
+  last = now;
+  t += dt;
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+function draw() {
+  // --- Sky (sunset/dusk) ---
+  let horizon = groundY - 40;
+  let g = ctx.createLinearGradient(0, 0, 0, horizon);
+  g.addColorStop(0, '#20143a');
+  g.addColorStop(0.5, '#6b2b5e');
+  g.addColorStop(0.8, '#e0633b');
+  g.addColorStop(1, '#f7a05a');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, horizon);
+
+  // Sun glow
+  ctx.fillStyle = 'rgba(255,210,120,0.9)';
+  ctx.beginPath(); ctx.arc(W * 0.75, horizon * 0.7, 70, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = 'rgba(255,230,160,0.25)';
+  ctx.beginPath(); ctx.arc(W * 0.75, horizon * 0.7, 110, 0, Math.PI * 2); ctx.fill();
+
+  // Clouds (slow parallax)
+  let cloudOff = t * 20;
+  ctx.fillStyle = 'rgba(250,180,200,0.22)';
+  for (let i = 0; i < 8; i++) {
+    let wx = ((i * 350 - cloudOff) % (W + 400) + W + 400) % (W + 400) - 200;
+    let cy = 50 + hash(i * 2) * 70;
+    ctx.beginPath(); ctx.ellipse(wx, cy, 70, 26, 0, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // Distant Mountains (slow)
+  let mOff = t * 40;
+  ctx.fillStyle = '#322148';
+  ctx.beginPath();
+  let msp = 260;
+  let ms = Math.floor(mOff / msp);
+  ctx.moveTo(-100, horizon);
+  for (let i = ms; i <= ms + (W / msp) + 2; i++) {
+    let wx = i * msp - mOff;
+    let h = 100 + hash(i) * 160;
+    ctx.lineTo(wx + msp * 0.5, horizon - h);
+    ctx.lineTo(wx + msp, horizon);
+  }
+  ctx.lineTo(W + 100, H); ctx.lineTo(-100, H); ctx.fill();
+
+  // Hills (medium-slow)
+  let hOff = t * 90;
+  ctx.fillStyle = '#4a2860';
+  ctx.beginPath();
+  let hsp = 200;
+  let hs = Math.floor(hOff / hsp);
+  ctx.moveTo(-100, horizon);
+  for (let i = hs; i <= hs + (W / hsp) + 2; i++) {
+    let wx = i * hsp - hOff;
+ •
+    let h = 40 + hash(i + 3) * 70;
+    ctx.quadraticCurveTo(wx + hsp * 0.5, horizon - h, wx + hsp, horizon);
+  }
+  ctx.lineTo(W + 100, H); ctx.lineTo(-100, H); ctx.fill();
+
+  // Midground Trees (medium)
+  let tOff = t * 180;
+  let tsp = 160;
+  let ts = Math.floor(tOff / tsp);
+  for (let i = ts; i <= ts + (W / tsp) + 3; i++) {
+    let wx = i * tsp - tOff;
+    let r = hash(i + 1);
+    let th = 50 + r * 120;
+    let tw = 5 + r * 4;
+    ctx.fillStyle = '#241a2e';
+    ctx.fillRect(wx, groundY - th, tw, th);
+    ctx.fillStyle = '#382247';
+    ctx.beginPath(); ctx.arc(wx + tw / 2, groundY - th, 18 + r * 22, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // Roadside Poles (fast)
+  let pOff = t * 240;
+  let psp = 300;
+  let ps = Math.floor(pOff / psp);
+  for (let i = ps; i <= ps + (W / psp) + 2; i++) {
+    let wx = i * psp - pOff;
+    if (hash(i + 7) > 0.4) {
+      ctx.fillStyle = '#151525';
+      ctx.fillRect(wx, groundY - 90, 5, 90);
+      ctx.fillRect(wx - 14, groundY - 92, 34, 4);
+    }
+  }
+
+  // Ground / Road (fastest, closest)
+  let gOff = t * 300;
+  ctx.fillStyle = '#1a1a20';
+  ctx.fillRect(0, groundY, W, H - groundY);
+  ctx.fillStyle = '#333';
+  ctx.fillRect(0, groundY, W, 5);
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+  let gsp = 60;
+  let gs = Math.floor(gOff / gsp);
+  for (let i = gs; i <= gs + (W / gsp) + 2; i++) {
+    let wx = i * gsp - gOff;
+    ctx.beginPath(); ctx.moveTo(wx, groundY + 12); ctx.lineTo(wx + 15, H); ctx.stroke();
+  }
+
+  // Car (foreground)
+  drawCar(W * 0.32, groundY);
+
+  // Cinematic vignette
+  let v = ctx.createRadialGradient(W / 正, H / 2, H * 0.2, W / 2, H / 2, H * 0.85);
+  v.addColorStop(0, 'rgba(0,0,0,0)');
+  v.addColorStop(1, 'rgba(10,5,20,0.55)');
+  ctx.fillStyle = v;
+  ctx.fillRect(0, 0, W, H);
+}
+
+function drawCar(x, gy) {
+  let wheelR = 24;
+  let angle = t * (300 / wheelR); // wheel spins with ground speed
+
+  // Wheels stay planted on the road (only rotate)
+  drawWheel(x - 55, gy - wheelR, wheelR, angle);
+  drawWheel(x + 55, gy - wheelR, wheelR, angle);
+
+  // Subtle body motion (suspension bounce & pitch)
+  let bounce = Math.sin(t * 2.2) * 3 + Math.sin(t * 5.7) * 1.5;
+  let pitch = Math.sin(t * 2.2) * 0.015;
+  ctx.save();
+  ctx.translate(x, gy - wheelR - 28 + bounce);
+  ctx.rotate(pitch);
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.beginPath(); ctx.ellipse(0, 28, 80, 10, 0, 0, Math.PI * 2); ctx.fill();
+
+  // Body
+  ctx.fillStyle = '#b23a2b';
+  ctx.beginPath();
+  ctx.moveTo(-75, 0);
+  ctx.lineTo(75, 0);
+  ctx.lineTo(65, -28);
+  ctx.lineTo(20, -34);
+  ctx.lineTo(10, -58);
+  ctx.lineTo(-35, -58);
+  ctx.lineTo(-55, -34);
+  ctx.lineTo(-70, -30);
+  ctx.closePath();
+  ctx.fill();
+
+  // Window
+  ctx.fillStyle = '#9fd8ff';
+  ctx.beginPath();
+  ctx.moveTo(15, -52);
+  ctx.lineTo(-30, -52);
+  ctx.lineTo(-48, -36);
+  ctx.lineTo(22, -36);
+  ctx.closePath();
+  ctx.fill();
+
+  // Door seam
+  ctx.strokeStyle = '#7a1f15';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(0, -52); ctx.lineTo(-5, -36); ctx.lineTo(-5, 0); ctx.stroke();
+
+  // Lights
+  ctx.fillStyle = '#ffe9a0';
+  ctx.beginPath(); ctx.arc(70, -12, 5, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#ff5544';
+  ctx.beginPath(); ctx.arc(-72, -14, 4, 0, Math.PI * 2); ctx.fill();
+
+  // Bumpers
+  ctx.fillStyle = '#222';
+  ctx.fillRect(-78, -4, 8, 8);
+  ctx.fillRect(72, -4, 8, 8);
+
+  ctx.restore();
+}
+
+function drawWheel(x, y, r, angle) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+  ctx.fillStyle = '#111';
+  ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#444';
+  ctx.beginPath(); ctx.arc(0, 0, r * 0.6, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#ddd';
+  for (let i = 0; i < 5; i++) {
+    ctx.rotate(Math.PI * 2 / 5);
+    ctx.fillRect(-3, -r * 0.6, 6, r * 0.6);
+  }
+  ctx.fillStyle = '#777';
+  ctx.beginPath(); ctx.arc(0, 0, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+</script>
+</body>
+</html>

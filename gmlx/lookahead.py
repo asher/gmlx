@@ -26,14 +26,25 @@ worth building for a given model before any bytes move.
 from __future__ import annotations
 
 import atexit
+import time
 
 import mlx.core as mx
-import mlx.nn as nn
 import numpy as np
 
-from .envflags import env_choice, env_float
+from .envflags import env_bool, env_choice, env_float, env_int
 
 _VARIANTS = ("ratio", "raw")
+
+# Sub-split of the loader's per-token ``la`` phase bucket
+# (GMLX_DECODE_PHASE_STATS=1): ``build`` = replica prediction graph
+# construction, ``sync`` = the shared ``mx.eval`` (the per-layer GPU
+# segment wall). The numpy/gate tail is derived at dump time as
+# la - build - sync. Read by loader._phase_dump.
+_LA_PHASE = (
+    {"build": 0.0, "sync": 0.0}
+    if env_bool("GMLX_DECODE_PHASE_STATS", False)
+    else None
+)
 
 
 class RankGate:
@@ -52,30 +63,36 @@ class RankGate:
 
     def __init__(self, min_p: float):
         self.min_p = min_p
-        self._ema: dict[int, np.ndarray] = {}  # li -> per-rank hit EMA
-        self._last: dict[int, np.ndarray] = {}  # li -> last predicted row
+        # (li, depth) -> per-rank hit EMA / last predicted row. Depth-2
+        # predictions of a layer are scored apart from depth-1 ones: two
+        # residual sublayers of drift make them a different reliability
+        # population, and the gate must be able to trim them harder.
+        self._ema: dict[tuple, np.ndarray] = {}
+        self._last: dict[tuple, np.ndarray] = {}
 
-    def note(self, li: int, pred: np.ndarray) -> None:
+    def note(self, li: int, pred: np.ndarray, depth: int = 1) -> None:
         rows = pred.reshape(-1, pred.shape[-1])
         if rows.shape[0] == 1:  # decode rows only; prefill passes ungated
-            self._last[li] = rows[0]
+            self._last[(li, depth)] = rows[0]
 
     def observe(self, li: int, actual: np.ndarray) -> None:
-        last = self._last.pop(li, None)
-        if last is None:
+        keys = [k for k in self._last if k[0] == li]
+        if not keys:
             return
         rows = actual.reshape(-1, actual.shape[-1])
-        if rows.shape[0] != 1:
-            return
-        hits = np.isin(last, rows[0]).astype(np.float64)
-        ema = self._ema.get(li)
-        if ema is None or len(ema) != len(hits):
-            ema = np.ones(len(hits), dtype=np.float64)
-        ema += self._ALPHA * (hits - ema)
-        self._ema[li] = ema
+        for key in keys:
+            last = self._last.pop(key)
+            if rows.shape[0] != 1:
+                continue
+            hits = np.isin(last, rows[0]).astype(np.float64)
+            ema = self._ema.get(key)
+            if ema is None or len(ema) != len(hits):
+                ema = np.ones(len(hits), dtype=np.float64)
+            ema += self._ALPHA * (hits - ema)
+            self._ema[key] = ema
 
-    def k(self, li: int, width: int) -> int:
-        ema = self._ema.get(li)
+    def k(self, li: int, width: int, depth: int = 1) -> int:
+        ema = self._ema.get((li, depth))
         if ema is None:
             return width
         k = 0
@@ -86,21 +103,26 @@ class RankGate:
         return k
 
     def report(self) -> None:
-        if not self._ema:
+        if not self._ema or not getattr(self, "_stats_verbose", True):
             return
-        widths = [len(e) for e in self._ema.values()]
-        w = max(set(widths), key=widths.count)
-        stack = np.stack([e for e in self._ema.values() if len(e) == w])
-        ks = sorted(self.k(li, len(e)) for li, e in self._ema.items())
-        print(
-            "[lookahead] rank gate (hit EMA per prediction rank, "
-            f"min_p={self.min_p:g}): "
-            + "  ".join(f"r{r} {v:.0%}" for r, v in enumerate(stack.mean(0)))
-        )
-        print(
-            f"[lookahead] rank gate per-layer K: median {ks[len(ks) // 2]}, "
-            f"min {ks[0]}, max {ks[-1]} of {w}"
-        )
+        for depth in sorted({d for _, d in self._ema}):
+            emas = {li: e for (li, d), e in self._ema.items() if d == depth}
+            widths = [len(e) for e in emas.values()]
+            w = max(set(widths), key=widths.count)
+            stack = np.stack([e for e in emas.values() if len(e) == w])
+            ks = sorted(self.k(li, len(e), depth) for li, e in emas.items())
+            tag = "" if depth == 1 else f" d{depth}"
+            print(
+                f"[lookahead] rank gate{tag} (hit EMA per prediction rank, "
+                f"min_p={self.min_p:g}): "
+                + "  ".join(
+                    f"r{r} {v:.0%}" for r, v in enumerate(stack.mean(0)))
+            )
+            print(
+                f"[lookahead] rank gate{tag} per-layer K: "
+                f"median {ks[len(ks) // 2]}, "
+                f"min {ks[0]}, max {ks[-1]} of {w}"
+            )
 
 
 def _norm_gains(norm) -> mx.array | None:
@@ -176,12 +198,10 @@ def _base_block_name(owner) -> str:
 def _router_fn_for(owner):
     """Selection closure for ``owner`` (a MoE block), or None when the
     arch's routing seam is not recognized."""
-    gate = getattr(owner, "gate", None)
-    if (
-        isinstance(gate, nn.Module)
-        and not isinstance(gate, nn.Linear)
-        and isinstance(getattr(gate, "top_k", None), int)
-    ):
+    from .moe_experts import _gate_submodule
+
+    gate = _gate_submodule(owner)
+    if gate is not None:
         return _gate_module_select(gate)
     name = _base_block_name(owner)
     if name in _SIGMOID_BIAS_BLOCKS:
@@ -196,11 +216,13 @@ class _LayerPredictor:
     input. ``ratio`` converts between the two layers' norm gains; None
     (missing/degenerate norms) restricts the predictor to the raw variant."""
 
-    def __init__(self, src_li: int, dst_li: int, router_fn, ratio):
+    def __init__(self, src_li: int, dst_li: int, router_fn, ratio,
+                 depth: int = 1):
         self.src_li = src_li
         self.dst_li = dst_li
         self._router_fn = router_fn
         self._ratio = ratio
+        self.depth = depth  # MoE-layer distance src -> dst
         self.dead = False  # set on first router_fn failure; predictor off
 
     def variants(self, probing: bool) -> tuple[str, ...]:
@@ -235,7 +257,9 @@ class LookaheadProbe:
         self._reported = False
 
     def note(self, dst_li: int, preds: dict) -> None:
-        self._pending[dst_li] = preds
+        # Merge: with depth > 1 the same destination is predicted by more
+        # than one source hook (labels are variant@dN, so keys never clash).
+        self._pending.setdefault(dst_li, {}).update(preds)
 
     def actual(self, li: int, ids_np: np.ndarray) -> None:
         rows = ids_np.reshape(-1, ids_np.shape[-1])
@@ -309,74 +333,124 @@ class LookaheadHook:
     ``mx.eval`` batching the router read with the prediction, probe
     bookkeeping, and (when prefetching) the materialized prediction."""
 
-    def __init__(self, li: int, predictor, probe, prefetch: bool,
+    def __init__(self, li: int, predictors, probe, prefetch: bool,
                  gate: RankGate | None = None):
         self.li = li
-        self.predictor = predictor
+        if predictors is None:
+            predictors = []
+        elif not isinstance(predictors, (list, tuple)):
+            predictors = [predictors]
+        self.predictors = [p for p in predictors if p is not None]
         self.probe = probe
         self.prefetch = prefetch
         self.gate = gate
 
-    def on_call(self, x, indices) -> np.ndarray | None:
+    @property
+    def predictor(self):
+        """The depth-1 (next-MoE-layer) predictor, or None."""
+        for p in self.predictors:
+            if p.depth == 1:
+                return p
+        return None
+
+    def on_call(self, x, indices) -> dict:
         """Evaluate ``indices`` (the fence the caller needed anyway) plus
-        any lookahead prediction in one sync. Returns the predicted ranked
-        ids for ``predictor.dst_li`` when prefetching - trimmed to the
-        rank gate's reliable prefix - else None."""
-        pred = self.predictor
-        lazy: dict = {}
-        if pred is not None and not pred.dead:
-            probing = self.probe is not None
+        every live lookahead prediction in one sync. Returns a dict of
+        predicted ranked ids per destination layer when prefetching, each
+        trimmed to its rank gate prefix; empty when there is nothing to
+        prestage."""
+        probing = self.probe is not None
+        ph = _LA_PHASE
+        t0 = time.perf_counter() if ph is not None else 0.0
+        lazy: list = []  # (predictor, variant, lazy array)
+        for pred in self.predictors:
+            if pred.dead:
+                continue
             try:
                 for variant in pred.variants(probing):
-                    lazy[variant] = pred.predict(x, variant)
-                mx.eval(indices, *lazy.values())
+                    lazy.append((pred, variant, pred.predict(x, variant)))
             except Exception as exc:  # unsupported gate signature, bad dims
                 pred.dead = True
-                lazy = {}
+                lazy = [t for t in lazy if t[0] is not pred]
                 print(
                     f"[lookahead] predictor for layer {pred.dst_li} "
                     f"disabled: {type(exc).__name__}: {exc}"
                 )
-                mx.eval(indices)
-        else:
+        if ph is not None:
+            t1 = time.perf_counter()
+            ph["build"] += t1 - t0
+        try:
+            mx.eval(indices, *[a for _, _, a in lazy])
+        except Exception as exc:
+            # Joint eval: the failing predictor is unattributable, so
+            # disable every one this hook owns rather than loop forever.
+            for pred, _, _ in lazy:
+                pred.dead = True
+            if lazy:
+                print(
+                    f"[lookahead] predictors at layer {self.li} disabled: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+            lazy = []
             mx.eval(indices)
-        preds_np = {v: np.array(a) for v, a in lazy.items()}
+        if ph is not None:
+            ph["sync"] += time.perf_counter() - t1
+        by_pred: dict = {}
+        for pred, variant, arr in lazy:
+            by_pred.setdefault(pred, {})[variant] = np.array(arr)
         actual_np = None
         if self.probe is not None or self.gate is not None:
             actual_np = np.array(indices)
         if self.gate is not None:
             self.gate.observe(self.li, actual_np)
         if self.probe is not None:
-            if preds_np:
-                self.probe.note(pred.dst_li, preds_np)
+            for pred, pv in by_pred.items():
+                if pred.depth == 1:
+                    labeled = pv
+                else:
+                    labeled = {
+                        f"{v}@d{pred.depth}": a for v, a in pv.items()
+                    }
+                self.probe.note(pred.dst_li, labeled)
             self.probe.actual(self.li, actual_np)
-        if self.prefetch and preds_np:
-            # With the probe co-installed both variants exist; prefetch
-            # uses the configured one.
-            chosen = pred.variants(False)[0]
-            out = preds_np.get(chosen)
-            if out is None:
-                out = next(iter(preds_np.values()))
-            if self.gate is not None:
-                # Full width is noted (gated-out ranks keep being scored
-                # and can re-qualify); only the submission is trimmed.
-                self.gate.note(pred.dst_li, out)
-                k = self.gate.k(pred.dst_li, out.shape[-1])
-                if k <= 0:
-                    return None
-                if k < out.shape[-1]:
-                    out = out[..., :k]
-            return out
-        return None
+        out: dict = {}
+        if self.prefetch:
+            for pred, pv in by_pred.items():
+                # With the probe co-installed both variants exist;
+                # prefetch uses the configured one.
+                chosen = pred.variants(False)[0]
+                ids = pv.get(chosen)
+                if ids is None:
+                    ids = next(iter(pv.values()))
+                if self.gate is not None:
+                    # Full width is noted (gated-out ranks keep being
+                    # scored and can re-qualify); only the submission is
+                    # trimmed.
+                    self.gate.note(pred.dst_li, ids, pred.depth)
+                    k = self.gate.k(pred.dst_li, ids.shape[-1], pred.depth)
+                    if k <= 0:
+                        continue
+                    if k < ids.shape[-1]:
+                        ids = ids[..., :k]
+                out[pred.dst_li] = ids
+        return out
 
 
 def install_lookahead(model, layers, *, probe: bool = False,
-                      prefetch: bool = False) -> int:
+                      prefetch: bool = False,
+                      stats_verbose: bool | None = None) -> int:
     """Wire lookahead hooks onto every offloaded MoE module whose next
     offloaded MoE layer has a recognizable router. The last MoE layer (and
     any layer followed by an unsupported arch) still gets a hook when
     probing, so its actual routing anchors the recall comparison. Returns
-    the number of layers with a live predictor."""
+    the number of layers with a live predictor.
+
+    ``GMLX_DECODE_LOOKAHEAD_DEPTH`` (default 1, max 3) adds predictors for
+    the MoE layers 2..D steps ahead as well: a read predicted two layers
+    early gets two layers of compute to complete instead of one, at the
+    cost of extra residual drift between the source input and the
+    destination router. Deeper predictions are probed, gated, and
+    prestaged independently of the next-layer ones."""
     from .moe_experts import _offloaded_moe_owners
 
     owners: dict[int, object] = {}
@@ -398,40 +472,45 @@ def install_lookahead(model, layers, *, probe: bool = False,
     gate = (
         RankGate(env_float("GMLX_DECODE_LOOKAHEAD_MIN_P", 0.5))
         if prefetch else None)
+    if gate is not None and stats_verbose is not None:
+        gate._stats_verbose = stats_verbose
+    depth = max(1, min(3, env_int("GMLX_DECODE_LOOKAHEAD_DEPTH", 1)))
     n_pred = 0
     unsupported: set = set()
     for pos, li in enumerate(lis):
-        predictor = None
-        if pos + 1 < len(lis):
-            dst_li = lis[pos + 1]
+        predictors = []
+        src_norm = getattr(layers[li], "post_attention_layernorm", None)
+        src_g = _norm_gains(src_norm) if src_norm is not None else None
+        for d in range(1, depth + 1):
+            if pos + d >= len(lis):
+                break
+            dst_li = lis[pos + d]
             router_fn = _router_fn_for(owners[dst_li])
             if router_fn is None:
                 unsupported.add(_base_block_name(owners[dst_li]))
-            else:
-                src_norm = getattr(
-                    layers[li], "post_attention_layernorm", None
+                continue
+            dst_norm = getattr(
+                layers[dst_li], "post_attention_layernorm", None
+            )
+            ratio = None
+            dst_g = _norm_gains(dst_norm) if dst_norm is not None else None
+            if src_g is not None and dst_g is not None:
+                src_f = src_g.astype(mx.float32)
+                ratio = mx.where(
+                    mx.abs(src_f) < 1e-6,
+                    mx.ones_like(src_f),
+                    dst_g.astype(mx.float32) / src_f,
                 )
-                dst_norm = getattr(
-                    layers[dst_li], "post_attention_layernorm", None
-                )
-                ratio = None
-                src_g = _norm_gains(src_norm) if src_norm is not None else None
-                dst_g = _norm_gains(dst_norm) if dst_norm is not None else None
-                if src_g is not None and dst_g is not None:
-                    src_f = src_g.astype(mx.float32)
-                    ratio = mx.where(
-                        mx.abs(src_f) < 1e-6,
-                        mx.ones_like(src_f),
-                        dst_g.astype(mx.float32) / src_f,
-                    )
-                predictor = _LayerPredictor(li, dst_li, router_fn, ratio)
-                n_pred += 1
-        if predictor is None and shared_probe is None and gate is None:
+            predictors.append(
+                _LayerPredictor(li, dst_li, router_fn, ratio, d))
+        if predictors:
+            n_pred += 1
+        elif shared_probe is None and gate is None:
             # Without a probe or gate a terminal layer has nothing to do;
             # with a gate it still observes its own routing so predictions
             # targeting it keep being scored.
             continue
-        hook = LookaheadHook(li, predictor, shared_probe, prefetch, gate)
+        hook = LookaheadHook(li, predictors, shared_probe, prefetch, gate)
         for m in wrapped[li]:
             object.__setattr__(m, "_kq_lookahead", hook)
     if shared_probe is not None and n_pred:

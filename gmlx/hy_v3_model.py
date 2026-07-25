@@ -35,6 +35,7 @@ block appended past the trunk (GGUF block 80), sharing embeddings and LM head.
 """
 
 import importlib
+import os
 import sys
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -205,6 +206,11 @@ class MoEGate(nn.Module):
         )
 
 
+# Pass routing scores into a fused SwitchGLU so the mix (and a stamped
+# shared expert) folds into the down gather; 0 mixes python-side.
+_MOE_MIX_SCORES = os.environ.get("GMLX_HY3_MOE_MIX", "1") != "0"
+
+
 class MoE(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
@@ -233,9 +239,19 @@ class MoE(nn.Module):
         inds, scores = self.router(x)
         if not self.fp32_combine:
             scores = scores.astype(x.dtype)
-        y = self.switch_mlp(x, inds)
-        y = (y * scores[..., None]).sum(axis=-2)
-        if self.shared_mlp is not None:
+        if _MOE_MIX_SCORES and getattr(
+                self.switch_mlp, "_kq_mix_scores", False):
+            y = self.switch_mlp(x, inds, scores)
+        else:
+            y = self.switch_mlp(x, inds)
+        if y.ndim == scores.ndim + 1:
+            # unmixed return: mix and add the shared expert here
+            y = (y * scores[..., None]).sum(axis=-2)
+            if self.shared_mlp is not None:
+                y = y + self.shared_mlp(x)
+        elif (self.shared_mlp is not None and getattr(
+                self.switch_mlp, "_kq_shexp_mod", None) is None):
+            # mixed in-kernel without the shared-expert fold
             y = y + self.shared_mlp(x)
 
         if self.sharding_group is not None:
