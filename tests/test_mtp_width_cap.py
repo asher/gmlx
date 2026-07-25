@@ -9,7 +9,6 @@ raises on every forward-work method, so "gated" is asserted structurally: if
 the gate ever drafts, the test errors rather than silently measuring nothing.
 """
 
-import os
 from types import SimpleNamespace
 
 import mlx.core as mx
