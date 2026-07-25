@@ -8,6 +8,16 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- llama-family batched decode fuses the attention and MLP projections
+  at load: q/k/v (and gate/up) K-quant wires row-concatenate into one
+  matmul per group on the single-position B>=2 path, filling the GPU
+  where the separate small-M launches underfill it (llama-8B k/v put up
+  16 threadgroups each). Certified bit-exact against stock on
+  Dolphin3-8B Q6_K (B=2 greedy logits and tokens identical, ragged
+  BatchGenerator tokens identical); whole-step -2.6% at B=8 and -4.8%
+  at B=16 at d64, B=1 takes the stock path exactly
+  (`GMLX_OCCUPANCY_FUSE=0` reverts, read per call).
+
 - gemma-4 concurrent decode and speculative verify keep the global layers
   on fused attention: head_dim-512 batched calls at decode width (one
   position) and MTP verify width (2-8 positions) route each stream through
@@ -24,6 +34,18 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- worked around an upstream Metal kernel bug in `mx.fast.rope` (stock
+  mlx 0.31.2): with a plain int offset and a single-position batched
+  input (B, \*, 1, D) with B > 1, every batch row past the first is
+  rotated from out-of-bounds memory (allocator-dependent garbage; the
+  CPU path is correct). Batched serving was never affected --
+  BatchKVCache passes per-row offset arrays, which are correct -- but
+  any plain-KVCache batched decode (raw chains, external harnesses)
+  silently corrupted rows past the first. The fix wraps `mx.fast.rope`
+  and expands the int offset to a per-row int32 array for exactly that
+  case, covering every arch including direct `mx.fast.rope` call sites
+  (`GMLX_ROPE_BATCH_FIX=0` reverts; a tripwire test flags when an mlx
+  upgrade fixes the kernel so the workaround can be dropped).
 - the qwen3.5/3.6 batched-verify SDPA seam no longer forwards to the
   stock per-pad-group gather loop whenever the cache carries a
   left-padding attribute: it now bails only on real padding, and when

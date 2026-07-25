@@ -32,11 +32,13 @@ from .attn_hd512 import install_hd512_sdpa
 from .prefill_decay import install_prefill_decay, note_untracked_weights
 from . import gpt_oss_prefill  # noqa: F401  (registers gpt_oss score profile)
 from .modules import install_fused_moe_glu, install_hyv3_shexp_fold
+from .occupancy_fuse import install_occupancy_fuse
 from .qkv_fuse import install_fused_qkv
 from .gemma4_batched_sdpa import install_gemma4_batched_sdpa
 from .gemma4_sync import install_gemma4_nosync
 from .quantized_sdpa_fix import install_quantized_sdpa_mask_fix
 from .qwen35_verify_fold import install_qwen35_verify_fold
+from .rope_batch_fix import install_rope_batch_fix
 from .rotating_cache_fix import install_rotating_cache_fix
 from .modules import KQuantEmbedding, install_kquant_modules
 from .populate import (
@@ -2478,6 +2480,8 @@ def _install_and_load(
         log("[install] head_dim-512 fused SDPA active")
     if install_quantized_sdpa_mask_fix():
         log("[install] quantized-KV SDPA batch-mask fix active")
+    if install_rope_batch_fix():
+        log("[install] rope int-offset batch fix active")
     if install_prefill_decay():
         log("[install] depth-decay prefill chunking active")
     if install_qwen35_verify_fold():
@@ -2495,6 +2499,10 @@ def _install_and_load(
     n_fused_qkv = install_fused_qkv(model)
     if n_fused_qkv:
         log(f"[install] fused QKV decode projection on {n_fused_qkv} layers")
+    n_occ = install_occupancy_fuse(model)
+    if n_occ:
+        log(f"[install] occupancy fusion (qkv + gate/up decode) on "
+            f"{n_occ} modules")
     install_rotating_cache_fix()
 
     # 7. partition by what the constructed model actually defines + load.
@@ -2906,6 +2914,8 @@ def load_model(
         _log("[install] head_dim-512 fused SDPA active")
     if install_quantized_sdpa_mask_fix():
         _log("[install] quantized-KV SDPA batch-mask fix active")
+    if install_rope_batch_fix():
+        _log("[install] rope int-offset batch fix active")
     if install_prefill_decay():
         _log("[install] depth-decay prefill chunking active")
     if install_qwen35_verify_fold():
@@ -2923,6 +2933,10 @@ def load_model(
     n_fused_qkv = install_fused_qkv(model)
     if n_fused_qkv:
         _log(f"[install] fused QKV decode projection on {n_fused_qkv} layers")
+    n_occ = install_occupancy_fuse(model)
+    if n_occ:
+        _log(f"[install] occupancy fusion (qkv + gate/up decode) on "
+             f"{n_occ} modules")
     install_rotating_cache_fix()
 
     # 7. partition by what the constructed model actually defines + load.
