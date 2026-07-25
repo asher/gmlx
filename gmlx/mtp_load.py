@@ -57,11 +57,11 @@ from .transforms import coalesce_split_experts
 #
 # These are the DENSE-target defaults. Routed-expert targets are capped to 1 by
 # `model_is_moe` regardless of family (see `_stamp_mtp_width_cap`): qwen MoE
-# loses at B=2 (0.78x aggregate, d14k max_tokens 1024) and the gemma MoE
-# assistant is marginal even at B=1, and the structural check generalizes that
-# to every MoE arch instead of needing a row here per checkpoint. The MoE rows
-# below are kept explicit so a target that never reaches the structural check
-# still lands on the measured value rather than the fallback.
+# loses at B=2 (0.78x aggregate, d14k max_tokens 1024), and the structural
+# check generalizes that to every MoE arch instead of needing a row here per
+# checkpoint. The MoE rows below are kept explicit so a target that never
+# reaches the structural check still lands on the measured value rather than
+# the fallback.
 _MTP_WIDTH_CAP_BY_MODEL_TYPE = {
     "qwen3_5": 0,
     "qwen3_5_text": 0,

@@ -1620,6 +1620,26 @@ def _owned_decode_rounds_batch(
     _needs_shared_kv = getattr(drafter, "uses_shared_kv", True)
     _draft_block = drafter.draft_block
 
+    # Double buffer for gated (plain-decode) rounds: the tokens the GPU is
+    # already computing. None means "re-prime", set whenever the batch shape
+    # changes under us (injection, row retirement, adoption).
+    _gated_pending = None
+
+    def _gated_step(inputs):
+        """One plain target decode step: [n_active] tokens in, [n_active] out.
+
+        Deliberately NOT _mtp_verify_target -- its plain branch hardcodes
+        return_hidden/return_shared_kv with no off switch, so shared-KV archs
+        would materialize every shared layer per emitted token.
+        """
+        with mx.stream(generation_stream):
+            out = lm(inputs[:, None], cache=prompt_cache)
+            logits = getattr(out, "logits", out)[:, -1, :]
+            if greedy:
+                return mx.argmax(logits, axis=-1).astype(token_dtype)
+            logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
+            return sampler(logprobs).reshape(-1).astype(token_dtype)
+
     def _trip_width_gate(width: int) -> None:
         """Latch the batch into plain decode for the rest of this generator."""
         nonlocal gated
@@ -1630,9 +1650,12 @@ def _owned_decode_rounds_batch(
 
     def _drain_injections():
         # continuous-batch injection
-        nonlocal hidden, B_orig
+        nonlocal hidden, B_orig, _gated_pending
         gen_inj = getattr(model, "_generator_injections", None)
         if gen_inj:
+            # The batch is about to widen; anything already dispatched was
+            # shaped for the old width, so re-prime rather than slice.
+            _gated_pending = None
             # Trip BEFORE processing: a tripping drain must not pay
             # inject_rows, which teacher-forces the whole injected prompt
             # through a drafter this batch will never use again. The queue can
@@ -1729,33 +1752,35 @@ def _owned_decode_rounds_batch(
         n_active = len(active_idx)
 
         if gated:
-            # Plain decode round: one target step per row, no draft, no
-            # verify captures. Deliberately NOT _mtp_verify_target -- its
-            # plain branch hardcodes return_hidden/return_shared_kv with no
-            # off switch, so shared-KV archs would materialize every shared
-            # layer per emitted token.
+            # Plain decode round, double-buffered the way stock
+            # GenerationBatch._step is: dispatch the NEXT round's forward from
+            # this round's still-lazy tokens, then block on this round's. The
+            # CPU graph build for round N+1 overlaps the GPU running round N
+            # instead of serializing behind it.
             _t0 = time.perf_counter()
             _gap = (_t0 - _prev_end) * 1e3 if _prev_end else 0.0
-            b_arr = mx.array(
-                [b[active_idx[j]] for j in range(n_active)], dtype=token_dtype)
             if _SHAPE_DEBUG:
                 _log_cache_shape_once("gated", prompt_cache, n_active)
-            with mx.stream(generation_stream):
-                out = lm(b_arr[:, None], cache=prompt_cache)
-                logits = getattr(out, "logits", out)[:, -1, :]
-                if greedy:
-                    toks = mx.argmax(logits, axis=-1)
-                else:
-                    logprobs = logits - mx.logsumexp(
-                        logits, axis=-1, keepdims=True)
-                    toks = sampler(logprobs).reshape(-1)
-            # Profile split for the gated round. Stock GenerationBatch._step
-            # is double-buffered (async_eval; it blocks on the PREVIOUS
-            # step's tokens while the next forward is already dispatched),
-            # so its CPU graph build overlaps GPU execution. This loop is
-            # synchronous, so the two serialize. Under GMLX_ROUND_PROFILE
-            # the columns read as dispatch (CPU build) / wait (GPU) /
-            # emit-prep instead of draft / verify / walk.
+            if _gated_pending is None:
+                # Prime: first gated round, or the batch shape just changed.
+                # Costs one un-overlapped forward, amortized over every round
+                # until the next structural change.
+                _gated_pending = _gated_step(
+                    mx.array([b[active_idx[j]] for j in range(n_active)],
+                             dtype=token_dtype))
+                mx.async_eval(_gated_pending)
+            toks = _gated_pending
+            # Rows are independent within a decode step, so a row that turns
+            # out to finish this round only wastes its own lookahead; the
+            # keep_mx filter below slices it back out. The extra KV position
+            # this leaves in the cache is past every retirement's store_len
+            # (retirement is driven by `positions`, not the cache offset) and
+            # nothing reads the cache offset while gated.
+            _gated_pending = _gated_step(toks)
+            mx.async_eval(_gated_pending)
+            # Under GMLX_ROUND_PROFILE the columns read as dispatch (CPU build
+            # of round N+1) / wait (GPU finishing round N) / emit-prep instead
+            # of draft / verify / walk.
             _td = time.perf_counter() if _ROUND_PROFILE else _t0
             mx.eval(toks)
             _tv = time.perf_counter() if _ROUND_PROFILE else _t0
@@ -1888,6 +1913,7 @@ def _owned_decode_rounds_batch(
             empty = mx.array([], dtype=mx.int32)
             for c in prompt_cache:
                 c.filter(empty)
+            _gated_pending = None  # adopted batch re-primes at its own width
             if not gated:
                 _filter_drafter = getattr(drafter, "filter_batch", None)
                 if callable(_filter_drafter):
@@ -1911,6 +1937,10 @@ def _owned_decode_rounds_batch(
                 keep_mx = mx.array(keep_slots, dtype=mx.int32)
                 for c in prompt_cache:
                     c.filter(keep_mx)
+                if _gated_pending is not None:
+                    # Same row order as the cache filter, so the dispatched
+                    # lookahead stays aligned with the surviving rows.
+                    _gated_pending = _gated_pending[keep_mx]
                 if not gated:
                     filter_drafter = getattr(drafter, "filter_batch", None)
                     if callable(filter_drafter):

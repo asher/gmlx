@@ -119,8 +119,27 @@ class _StrictDrafter:
         return self._forbidden("filter_batch")
 
 
+class _EchoLM:
+    """Target whose next token is a function of the INPUT token rather than the
+    row slot, so every row carries its own distinct stream. That makes a
+    mis-sliced double buffer visible: a surviving row would inherit a retired
+    row's stream instead of continuing its own."""
+
+    def __init__(self):
+        self.widths = []
+        self._rope_deltas = None
+
+    def __call__(self, x, cache=None, **kw):
+        B, _ = x.shape
+        self.widths.append(B)
+        nxt = (x[:, -1] + 1) % VOCAB
+        onehot = (mx.arange(VOCAB)[None, :] == nxt[:, None]).astype(mx.float32)
+        return SimpleNamespace(logits=(onehot * 10.0)[:, None, :])
+
+
 def _drive(drafter, *, B=3, max_tokens=3, sampler=None, model=None,
-           prompt_cache=None, lm=None, rounds=None):
+           prompt_cache=None, lm=None, rounds=None, stop_check=None,
+           eos_token_ids=None):
     model = model if model is not None else SimpleNamespace()
     lm = lm if lm is not None else _FakeLM()
     prompt_cache = prompt_cache if prompt_cache is not None else [
@@ -135,6 +154,8 @@ def _drive(drafter, *, B=3, max_tokens=3, sampler=None, model=None,
         max_tokens=max_tokens,
         sampler=sampler,
         draft_block_size=None,
+        stop_check=stop_check,
+        eos_token_ids=eos_token_ids,
     )
     out = []
     for i, (toks, meta) in enumerate(gen):
@@ -586,3 +607,49 @@ def test_gated_generator_exhausts_rather_than_stranding_rows():
     out, _, _ = _drive(d, B=2, max_tokens=4)
     # emitted starts at 1, so 3 more rounds reach the budget
     assert len(out) == 3
+
+
+# -- gated rounds are double-buffered -------------------------------------
+
+def test_gated_stream_survives_a_row_retiring_mid_flight():
+    """The gated round dispatches the NEXT forward before reading this round's
+    tokens, so when a row finishes the already-dispatched lookahead is one row
+    too wide. It gets sliced by the same keep_mx as the cache; if that slice
+    were missing or mis-ordered, a surviving row would continue another row's
+    stream (or the forward would hit a width mismatch)."""
+    lm = _EchoLM()
+    out, _, cache = _drive(
+        _StrictDrafter(cap=2), B=3, max_tokens=4, lm=lm,
+        stop_check=lambda orig, tok: orig == 1)
+
+    emitted = [toks for toks, _ in out]
+    # rows start at [1, 2, 3]; each row's stream is its own +1 chain, and row 1
+    # is stopped after its first token
+    assert emitted == [
+        [2, 3, 4],
+        [3, None, 5],
+        [4, None, 6],
+    ]
+    assert cache[0].width == 2, "cache should have been filtered to survivors"
+
+
+def test_gated_rounds_dispatch_one_forward_ahead():
+    """Round 1 primes and dispatches a lookahead (two forwards); every later
+    round costs exactly one, which is where the overlap comes from. The width
+    drop shows the lookahead following the filtered batch."""
+    lm = _EchoLM()
+    _drive(_StrictDrafter(cap=2), B=3, max_tokens=4, lm=lm,
+           stop_check=lambda orig, tok: orig == 1)
+    assert lm.widths == [3, 3, 2, 2]
+
+
+def test_gated_stream_matches_a_single_buffered_reference():
+    """Double buffering must not perturb the token stream: with no retirement
+    the emitted rows are the plain +1 chains from their seeds."""
+    lm = _EchoLM()
+    out, _, _ = _drive(_StrictDrafter(cap=2), B=3, max_tokens=4, lm=lm)
+    assert [toks for toks, _ in out] == [
+        [2, 3, 4],
+        [3, 4, 5],
+        [4, 5, 6],
+    ]
