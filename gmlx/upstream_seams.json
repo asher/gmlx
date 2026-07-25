@@ -42,6 +42,7 @@
   "mlx_vlm.models.cache:make_prompt_cache": "ae8ee8ce5ac69f2afa8e85c9cf32d75bdc10da6d07b3e3ad5b3bcc43bc4c64dd",
   "mlx_vlm.models.gemma4.language:Attention.__call__": "0eed7a3059e39eb7c2fabc4f63031d12895c7e12f8370bdd1ffa0fff06efe63b",
   "mlx_vlm.models.gemma4.language:Gemma4TextModel._make_masks": "b4ca427ed67af1953c6725e01a4b3c5b2e18f815061561b5629827a0265a47b3",
+  "mlx_vlm.models.gemma4.language:scaled_dot_product_attention": "67320fa4f0b489375caae5e9332dc572a3a30c0e33f919437a6114f4e5c80306",
   "mlx_vlm.models.qwen3_5.gated_delta:_gated_delta_state_ops": "fd4e7f0f407f9eb7bed84951c9dbbcf8deac801fd20ee0b1510c37d7bebbbe9c",
   "mlx_vlm.models.qwen3_5.gated_delta:_gated_delta_with_states_ops": "5c49d32aefd9a091f30aaff9e607e3cc14f0b671dda822f35fc434f10265bab2",
   "mlx_vlm.models.qwen3_5.gated_delta:gated_delta_kernel": "87dd535eba98a52b22f44ca642f8e8fbbf496446790a8a790ee626fef74a9483",

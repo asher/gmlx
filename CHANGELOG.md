@@ -6,6 +6,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- gemma-4 concurrent decode keeps the global layers on fused attention:
+  head_dim-512 batched decode routes each stream through the single-stream
+  kernels (left padding honored via per-row K/V tail slices) instead of the
+  stock materialized fallback. Measured in-process on gemma-4-31b at 14k
+  context: whole-step -3.4% at two streams, -6.5% at four
+  (`GMLX_G4_BATCHED_SDPA=0` reverts).
+
 ### Changed
 
 - gemma-4 text decode/verify no longer host-syncs per step: the sliding-mask
