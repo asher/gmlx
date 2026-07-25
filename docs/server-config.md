@@ -179,6 +179,8 @@ server:
                              #   (null => mlx-vlm's own default, 600; 0 => never)
   prefill_step_size: null    # prefill chunk size in tokens for every model on this server
                              #   (null => the default, 2048; lower caps peak memory on long prompts)
+  decode_prefill_ratio: null # decode GPU-time share per admission prefill chunk under load
+                             #   (null => the default, 1.0; 0 => strict alternation; see below)
   cache_limit_gb: null       # MLX buffer-cache cap in GiB (null => auto: bounded only when the
                              #   biggest model leaves little working-set slack; negative => never bound)
   family_defaults: true      # built-in per-family model-card sampling + @intents (false turns them off)
@@ -237,6 +239,22 @@ by design: the engine reads it per request, after the per-model load window has
 closed, so it cannot be a per-model `load:` key. Also available as
 `--prefill-step-size` on `serve` (the flag wins over the config) or an exported
 `PREFILL_STEP_SIZE`. Applies to speculative (MTP) serving too.
+
+`decode_prefill_ratio` paces admission prefills against live decode. Stock
+scheduling runs one decode step per prefill chunk, so while any request
+prefills, every decoding stream advances ~1 token per chunk -- at deep context
+that is a multi-second stall per admission. With pacing (default `1.0`), a
+prefill chunk is admitted only after the decode batch has received that
+multiple of the chunk's GPU time: live streams keep ~half throughput during
+admissions, and the incoming request's time-to-first-token stretches up to
+~(1+ratio)x while decode is busy. Raise the ratio to favor decode further,
+lower it toward `0` for TTFT-critical serving, `0` restores stock scheduling.
+Prefill runs at full speed whenever nothing is decoding, so a single-stream
+server is unaffected. Also available as `--decode-prefill-ratio` on `serve`
+(the flag wins over the config) or an exported `GMLX_DECODE_PREFILL_RATIO`
+(read per scheduler tick, so it can be flipped on a live server). Applies to
+speculative (MTP) serving too. Background and measured effects:
+[performance.md](performance.md#serving-concurrent-requests).
 
 `cache_limit_gb` caps MLX's buffer cache (the wired pool of freed GPU buffers
 kept for reuse). Left `null`, the server bounds it automatically only when
@@ -462,6 +480,9 @@ models:
   gemma-31b-mtp:                     # assistant-shape MTP (separate drafter GGUF)
     path: google_gemma-4-31B-it-Q6_K_L.gguf
     draft_gguf: gemma-4-31B-it-assistant.Q8_0.gguf       # implies speculative
+    speculative_width_cap: null      # speculate only up to this many live streams
+                                     #   (null => the drafter family default;
+                                     #    0 => uncapped; see below)
   gemma-e4b-vlm:                     # VLM (LLM GGUF + float mmproj GGUF)
     path: gemma-4-E4B-it-Q6_K.gguf
     mmproj: mmproj-gemma-4-E4B-it-bf16.gguf
@@ -474,9 +495,36 @@ models:
 
 Per-model keys: `path` (required), `profile`, `family`, `profiles`, `mmproj`,
 `draft_gguf`, `adapter`, `stream`, `moe_experts`, `moe_expert_mass`,
-`moe_miss_shed`, `moe_layer_shed`, `prefill_feeder`,
-`decode_feeder`, `speculative`, `overrides` (`{sampling, load, cache, system,
-chat_template, chat_template_kwargs}`), `pin`, `ttl_s`.
+`moe_miss_shed`, `moe_layer_shed`, `prefill_feeder`, `decode_feeder`,
+`speculative`, `speculative_width_cap`, `overrides`
+(`{sampling, load, cache, system, chat_template, chat_template_kwargs}`),
+`pin`, `ttl_s`.
+
+#### `speculative_width_cap`
+
+Speculation and batching compete for the same bandwidth: verifying a draft
+widens each request's weight reads, which is nearly free when one stream is
+decoding and costly once several are. Where that trade turns depends on the
+drafter and on whether the target routes experts, so each model carries a
+measured default and this key overrides it.
+
+`null` (the default) takes that value: uncapped for a native-head drafter on a
+dense qwen target, `2` for the separate-model gemma assistant drafter on a
+dense target, `1` for any routed-expert target, and `1` for the hy3 and
+deepseek4 drafters (single sequence only). MoE targets are recognized by
+inspecting the loaded model for stacked expert layers, so the cap reaches a
+new MoE architecture without a per-model entry. `0` turns the cap off; `N`
+speculates only while at most N requests decode together. A drafter that can
+only handle one sequence clamps any larger value, since exceeding it raises
+rather than running slowly.
+
+A batch that grows past the cap finishes in plain decode. The drafter stays
+loaded and untouched, and the next batch to form re-evaluates; there is no
+mid-flight switch back, so a continuously busy batch keeps decoding plain
+until it drains. `GMLX_MTP_WIDTH_CAP` overrides every model at once (set it to
+`0` to measure a model uncapped) and `--speculative-width-cap` does the same
+from the CLI. The measured numbers behind the defaults are in
+[performance.md](performance.md#mtp-speculative-decoding).
 
 An entry whose file is gone from disk does not stop the server: it is skipped
 with a log warning at startup (and on config reload), disappears from

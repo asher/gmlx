@@ -151,10 +151,30 @@ and workload:
 gmlx run model.gguf --bench-depths "0,4096" --speculative     # accept rate + speedup
 ```
 
-One interaction to know about: on MoE models under concurrent load, speculation and
-batching compete (verification widens each request's expert reads). If you serve
-many parallel clients on an MoE model, benchmark with speculation off before
-enabling it.
+One interaction to know about: speculation and batching compete for the same
+bandwidth. Verifying a draft widens each request's weight reads, which is
+nearly free while one stream decodes and costly once several do, so the lift
+falls as concurrency rises. The server handles this for you with a per-model
+batch-width cap: speculation runs while the live batch is narrow and the
+batch finishes in plain decode once it grows past the cap, with the drafter
+left loaded for the next one.
+
+Where the trade turns depends on the drafter and on whether the target routes
+experts. A native head verified by a dense hybrid-attention target keeps
+winning to the widest batch we measured, so it defaults to uncapped. A
+separate-model drafter pays a full small-model forward per drafted token and
+that cost grows with the batch, so the gemma assistant shape defaults to a cap
+of 2 on a dense target. Routed-expert targets default to 1 and speculate only
+while a single stream decodes: verification multiplies the union of experts
+each drafted position touches, and both MoE families measured lose the trade
+at width 2. That one is decided by inspecting the loaded model for stacked
+expert layers rather than by a table of architectures, so a new MoE model
+inherits it on arrival. Two drafters (hy3, deepseek4) can draft only a single
+sequence, and are capped at 1 for that reason instead.
+
+Per-model `speculative_width_cap` overrides the default; `GMLX_MTP_WIDTH_CAP=0`
+turns the cap off for a measurement run. See
+[server-config.md](server-config.md#speculative_width_cap).
 
 A second: quantizing the KV cache (`--kv-bits`) shifts the target model's verify
 logits away from the draft head and costs accepted drafts -- about a third fewer
@@ -207,6 +227,49 @@ tokens too: turn N+1 of a conversation warm-starts past the whole of turn N
 instead of re-prefilling the previous reply, and a warm hit restores the
 draft head's state along with the base model's. Details and switches:
 [server-config.md](server-config.md#speculative-decoding--the-prompt-cache).
+
+## Serving concurrent requests
+
+The server decodes all active streams as one batch. Decode is
+bandwidth-bound and the batched step reads the weights once for every
+stream, so aggregate throughput rises with client count while each stream
+gives up less than its proportional share. Steady-state batched decode
+measured on an M5 Max (Qwen3.6-35B-A3B Q6_K): three streams deliver 1.3-1.7x
+the aggregate of one, the ratio narrowing as context deepens because
+attention work is per-stream and does not amortize.
+
+What needs managing is admission: a new request's prompt must prefill while
+existing streams are mid-decode. Prefill runs in 2048-token chunks, and a
+scheduler that simply alternates one decode step with one chunk lets a long
+admission starve live streams, because at depth a chunk costs hundreds of
+decode steps' worth of GPU time. The server paces admissions instead:
+`decode_prefill_ratio` (default `1.0`) admits the next chunk only after the
+decode batch has received that multiple of the previous chunk's GPU time. At
+the default, live streams keep roughly half their throughput while a prompt
+is admitted, and the incoming request's time-to-first-token stretches by up
+to (1 + ratio)x under load. Raise the ratio when live-stream decode matters
+most, lower it toward `0` when time-to-first-token does; `0` restores strict
+alternation. Prefill runs at full speed whenever nothing is decoding, so
+single-client serving is unaffected.
+
+The deeper the context, the more this matters. In our serve benchmarks on
+the same 35B-A3B, adding a second client at 14k tokens used to drop
+aggregate decode to 0.57x of single-stream; paced, it lands above
+single-stream. At 50k tokens each of two streams held ~10 tok/s under
+alternation and ~50 tok/s paced, because a 50k admission previously froze
+live streams for tens of seconds. The key is `server.decode_prefill_ratio`
+([server-config.md](server-config.md)), the `serve` flag is
+`--decode-prefill-ratio`, and the `GMLX_DECODE_PREFILL_RATIO` env is read
+per scheduler tick, so it can be changed on a live server.
+
+Two interactions to know. Pacing applies to speculative (MTP) serving too,
+and the two features divide the work: pacing decides how admissions share
+GPU time, while the width cap decides which decode mode each batch runs in
+(speculative while narrow, plain once it grows past the model's cap). And
+the prompt cache is the strongest admission lever of all: a warm prefix
+skips its prefill outright, leaving pacing to govern only the cold suffix.
+Agent sessions that resend a cached history and add a few thousand tokens
+admit almost for free.
 
 ## Memory and the KV cache
 

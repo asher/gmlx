@@ -430,6 +430,31 @@ def _mtp_prefill_init(batch) -> None:
         batch._mtp_apc_prefix_len = restored
 
 
+def _zero_pad_rows(arr, rows: int):
+    pad = mx.zeros((rows - arr.shape[0],) + tuple(arr.shape[1:]),
+                   dtype=arr.dtype)
+    return mx.concatenate([arr, pad], axis=0)
+
+
+def _widen_prompt_rope_state(batch, prompt_kwargs: dict) -> dict:
+    """Continuous-batch admission can grow the spec prompt batch (and decode
+    forwards run at other widths) between chunks; the target caches text
+    mrope deltas at the old width and only slices down, never widens, so the
+    next chunk forward dies on offsets(B) + rope_deltas(B_old) broadcast.
+    Text rows have delta 0, so zero-pad both delta sources to the live width
+    (decode-loop twin of this guard: speculative.py injection path)."""
+    b = batch._input_ids.shape[0]
+    rd = prompt_kwargs.get("rope_deltas")
+    if rd is not None and rd.shape[0] < b:
+        prompt_kwargs = dict(prompt_kwargs)
+        prompt_kwargs["rope_deltas"] = _zero_pad_rows(rd, b)
+    lm = getattr(batch.model, "language_model", batch.model)
+    rd = getattr(lm, "_rope_deltas", None)
+    if rd is not None and rd.shape[0] < b:
+        lm._rope_deltas = _zero_pad_rows(rd, b)
+    return prompt_kwargs
+
+
 def install_full_prompt_mtp_prefill() -> None:
     """Retain full-prompt hidden through the BatchGenerator MTP prefill so the
     native head teacher-forces the whole prompt into its KV (llama parity).
@@ -525,6 +550,7 @@ def install_full_prompt_mtp_prefill() -> None:
         if n <= 0:
             return 0
         prompt_kwargs = self._prompt_kwargs_for_step(n)
+        prompt_kwargs = _widen_prompt_rope_state(self, prompt_kwargs)
         out = self.model(
             self._input_ids[:, :n],
             cache=self.prompt_cache,

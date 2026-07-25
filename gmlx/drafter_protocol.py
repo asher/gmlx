@@ -71,6 +71,12 @@ class BatchDrafterProtocol(Protocol):
         config.runtime_block_size       -- default None
         cap_at_configured_depth         -- default False
         _native_block_size              -- default configured_block_total
+        mtp_width_cap                   -- default 0 (uncapped): speculate
+                                           only while the live batch is this
+                                           wide; stamped at load
+        mtp_width_limit                 -- default 0 (none): hard ceiling a
+                                           config/env cap can never cross,
+                                           for B=1-only drafters
 
     Load-path only (not runtime):
         sanitize        -- weight remapping at load

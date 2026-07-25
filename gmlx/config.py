@@ -8,10 +8,10 @@ no mlx), so it loads and tests on any machine.
 
 Shape (see ``docs/server-config.md`` for the full reference)::
 
-    server:    {host, port, api_key, no_auth, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, rerank, menubar, token_queue_timeout_s, prefill_step_size, cache_limit_gb, family_defaults, stochastic_mtp, gpu_keepwarm, assistants, assistant_allow_remote}
+    server:    {host, port, api_key, no_auth, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, rerank, menubar, token_queue_timeout_s, prefill_step_size, decode_prefill_ratio, cache_limit_gb, family_defaults, stochastic_mtp, gpu_keepwarm, assistants, assistant_allow_remote}
     profiles:  {<name>: {extends, sampling, load, cache, system}}
     rules:     [{match: <glob>, profile: <name>}]
-    models:    {<id>: {path, profile, family, profiles, mmproj, draft_gguf, adapter, stream, moe_experts, moe_expert_mass, moe_miss_shed, moe_layer_shed, speculative, overrides, pin, ttl_s}}
+    models:    {<id>: {path, profile, family, profiles, mmproj, draft_gguf, adapter, stream, moe_experts, moe_expert_mass, moe_miss_shed, moe_layer_shed, speculative, speculative_width_cap, overrides, pin, ttl_s}}
     aliases:   {<name>: <id> | <id>@<profile>}    # friendly name / profile preset
     discover:  [{dir, recursive, pair_mmproj, speculative}]
     talk:      {model, voice, speed, system, language, max_tokens, mode, wake_word, wake_threshold, vad, input_device, output_device, chime, brain, push_to_talk_modifier}
@@ -103,6 +103,7 @@ _SERVER_KEYS = frozenset({"host", "port", "api_key", "no_auth", "model_dirs",
                           "budget_gb", "max_models", "hf_cache", "cache",
                           "defaults", "stt", "tts", "embeddings", "rerank",
                           "menubar", "token_queue_timeout_s", "prefill_step_size",
+                          "decode_prefill_ratio",
                           "cache_limit_gb", "family_defaults", "stochastic_mtp",
                           "gpu_keepwarm", "assistants", "assistant_allow_remote"})
 _DEFAULTS_KEYS = frozenset({"profile", "ttl_s", "model", "preload"})
@@ -116,6 +117,7 @@ _MODEL_KEYS = frozenset({"path", "profile", "family", "profiles", "mmproj",
                          "moe_experts", "moe_expert_mass",
                          "moe_miss_shed", "moe_layer_shed",
                          "prefill_feeder", "decode_feeder", "speculative",
+                         "speculative_width_cap",
                          "overrides", "pin", "ttl_s"})
 _RULE_KEYS = frozenset({"match", "profile"})
 _DISCOVER_KEYS = frozenset({"dir", "recursive", "pair_mmproj", "speculative"})
@@ -226,6 +228,11 @@ class ModelCfg:
     prefill_feeder: bool | None = None
     decode_feeder: bool | None = None
     speculative: bool = False
+    # Batch-width cap for speculative decode: MTP runs only while the live
+    # decode batch is this wide, wider batches decode plain (drafter stays
+    # loaded). None = the drafter family's measured default; 0 = uncapped;
+    # N = cap. Clamped by a per-drafter hard limit (B=1-only drafters).
+    speculative_width_cap: int | None = None
     overrides: dict = field(default_factory=dict)   # {sampling, load, cache, system}
     pin: bool = False
     ttl_s: float | None = None
@@ -394,6 +401,11 @@ class ServerCfg:
     # env, after the per-model load window has closed. None => leave the env /
     # upstream default in place.
     prefill_step_size: int | None = None
+    # Decode-priority prefill pacing ratio: a live decode batch gets this
+    # multiple of each prefill chunk's GPU time before the next chunk is
+    # admitted (1.0 ~= 50/50 split; 0 = stock 1 decode step : 1 chunk).
+    # None => leave the env / branch default (1.0) in place.
+    decode_prefill_ratio: float | None = None
     # MLX buffer-cache cap in GiB (mx.set_cache_limit). None => auto policy:
     # bounded automatically when the biggest configured model leaves little
     # working-set slack (deep-context safety), unlimited otherwise. Negative
@@ -478,6 +490,10 @@ class ResolvedModel:
     # Sampling family (profiles.py key) the spec resolved under; informational
     # (surfaced by /v1/models and `gmlx profiles`), not load-affecting.
     family: str | None = None
+    # Speculative batch-width cap: None = drafter-family default, 0 = uncapped,
+    # N = speculate only while the live decode batch is <= N wide.
+    # Load-affecting - it is stamped onto the drafter at load.
+    speculative_width_cap: int | None = None
 
     def load_signature(self) -> tuple:
         """Identity for the residency cache_key: two ids backed by the same GGUF but
@@ -492,6 +508,7 @@ class ResolvedModel:
             self.mmproj,
             self.draft_gguf,
             bool(self.speculative),
+            str(self.speculative_width_cap),
             self.chat_template,
             self.adapter,
             str(self.stream),
@@ -811,6 +828,7 @@ def resolve_model(
         chat_template=chat_template,
         chat_template_kwargs=chat_template_kwargs,
         speculative=bool(model.speculative or model.draft_gguf),
+        speculative_width_cap=model.speculative_width_cap,
         mmproj=resolve_path(model.mmproj, cfg.model_dirs),
         draft_gguf=resolve_path(model.draft_gguf, cfg.model_dirs),
         adapter=resolve_path(model.adapter, cfg.model_dirs),
@@ -879,7 +897,9 @@ def resolve_cli_model(name: str, cfg: ServerCfg,
 def env_for(resolved: ResolvedModel) -> dict[str, str]:
     """The env vars to set in the residency window for this model's load params + APC
     prompt-cache config. Keys absent/``None`` are omitted; booleans render ``1``/``0``;
-    a ``~`` disk path is expanded."""
+    a ``~`` disk path is expanded. The two speculative keys are the exceptions:
+    both are always emitted (an empty/``0`` value is meaningful) so a sibling
+    id's setting can never linger in the process env and be inherited."""
     env: dict[str, str] = {}
     for k, v in resolved.load.items():
         if v is not None and k in LOAD_ENV:
@@ -908,6 +928,11 @@ def env_for(resolved: ResolvedModel) -> dict[str, str]:
     # explicit "0" forces a non-speculative load even when a sibling id registered
     # the same GGUF for MTP (the lossless-oracle case: one GGUF, spec-on + spec-off).
     env["MLX_VLM_GGUF_SPECULATIVE"] = "1" if resolved.speculative else "0"
+    # Same reasoning, same always-emit rule: "" means "this id declares no cap,
+    # use the drafter family default". Emitting only when set would let a
+    # sibling id's cap linger in the process env and be inherited here.
+    cap = resolved.speculative_width_cap
+    env["MLX_VLM_GGUF_SPEC_WIDTH_CAP"] = "" if cap is None else str(cap)
     return env
 
 
@@ -998,6 +1023,24 @@ def _normalize_optional_bool(value, key: str, where: str = "model"):
         stacklevel=3,
     )
     return None
+
+
+def _normalize_speculative_width_cap(value, where: str = "model"):
+    """Validate a ``speculative_width_cap``: None (family default), 0
+    (uncapped), or a positive batch width. Bad values raise rather than
+    default - a silently-ignored cap would serve the losing regime."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ConfigError(
+            f"{where}.speculative_width_cap: expected an int batch width, "
+            f"got {value!r}")
+    n = _coerce_num("speculative_width_cap", value, int, where=where)
+    if n is not None and n < 0:
+        raise ConfigError(
+            f"{where}.speculative_width_cap: expected null, 0 (uncapped), or "
+            f"a positive batch width, got {value!r}")
+    return n
 
 
 def _normalize_moe_expert_mass(value, where: str = "model",
@@ -1258,6 +1301,8 @@ def _parse_model(model_id: str, raw: dict) -> ModelCfg:
         decode_feeder=_normalize_optional_bool(
             raw.get("decode_feeder"), "decode_feeder", f"model {model_id!r}"),
         speculative=bool(raw.get("speculative", False)),
+        speculative_width_cap=_normalize_speculative_width_cap(
+            raw.get("speculative_width_cap"), f"model {model_id!r}"),
         overrides=dict(ov),
         pin=bool(raw.get("pin", False)),
         ttl_s=_coerce_num("ttl_s", raw.get("ttl_s"), float,
@@ -1519,6 +1564,8 @@ def build_config(doc: dict) -> ServerCfg:
             "token_queue_timeout_s", srv.get("token_queue_timeout_s"), float),
         prefill_step_size=_coerce_num(
             "prefill_step_size", srv.get("prefill_step_size"), int),
+        decode_prefill_ratio=_coerce_num(
+            "decode_prefill_ratio", srv.get("decode_prefill_ratio"), float),
         cache_limit_gb=_coerce_num(
             "cache_limit_gb", srv.get("cache_limit_gb"), float),
         family_defaults=bool(srv.get("family_defaults", True)),

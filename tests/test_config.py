@@ -577,7 +577,10 @@ def test_env_for_load_params():
         pin=False, ttl_s=None)
     env = cfgmod.env_for(r)
     assert env == {"KV_BITS": "8", "KV_GROUP_SIZE": "64", "MAX_KV_SIZE": "4096",
-                   "MLX_VLM_GGUF_SPECULATIVE": "0"}
+                   "MLX_VLM_GGUF_SPECULATIVE": "0",
+                   # always emitted; "" = no per-model cap, use the family
+                   # default (see test_env_for_always_emits_width_cap)
+                   "MLX_VLM_GGUF_SPEC_WIDTH_CAP": ""}
 
 
 def test_env_for_emits_speculative_flag():
@@ -593,6 +596,51 @@ def test_env_for_emits_speculative_flag():
 
     assert env_spec(True) == "1"
     assert env_spec(False) == "0"
+
+
+def test_env_for_always_emits_width_cap():
+    """Same reasoning as the speculative flag: always emitted, so one id's cap
+    can never linger in the process env and be inherited by a sibling that
+    declares none ("" = defer to the drafter family default)."""
+    def env_cap(cap):
+        r = cfgmod.ResolvedModel(
+            id="x", path="/p", sampling={}, load={}, cache={}, system=None,
+            speculative=True, mmproj=None, draft_gguf=None, pin=False,
+            ttl_s=None, speculative_width_cap=cap)
+        return cfgmod.env_for(r)["MLX_VLM_GGUF_SPEC_WIDTH_CAP"]
+
+    assert env_cap(None) == ""
+    assert env_cap(0) == "0"
+    assert env_cap(3) == "3"
+
+
+def test_width_cap_parse_and_validate():
+    def cap(value):
+        cfg = cfgmod.build_config({
+            "models": {"m": {"path": "/p.gguf", "speculative_width_cap": value}}})
+        return cfg.models["m"].speculative_width_cap
+
+    assert cap(None) is None
+    assert cap(0) == 0
+    assert cap(4) == 4
+    for bad in (-1, True, "wide"):
+        with pytest.raises(cfgmod.ConfigError):
+            cap(bad)
+
+
+def test_width_cap_is_load_affecting():
+    """Stamped onto the drafter at load, so two ids differing only in the cap
+    must not share a resident entry."""
+    common = dict(path="/p", load={}, cache={}, system=None, speculative=True,
+                  mmproj=None, draft_gguf=None, pin=False, ttl_s=None)
+    a = cfgmod.ResolvedModel(id="a", sampling={}, speculative_width_cap=2,
+                             **common)
+    b = cfgmod.ResolvedModel(id="b", sampling={}, speculative_width_cap=4,
+                             **common)
+    c = cfgmod.ResolvedModel(id="c", sampling={}, speculative_width_cap=2,
+                             **common)
+    assert a.load_signature() != b.load_signature()
+    assert a.load_signature() == c.load_signature()
 
 
 def test_env_for_apc_cache_and_disk(tmp_path):
@@ -864,6 +912,16 @@ def test_prefill_step_size_parsed_and_defaults_none():
                         ).prefill_step_size == 512               # coerced to int
     with pytest.raises(ConfigError):
         build_config({"server": {"prefill_step_size": "lots"}})
+
+
+def test_decode_prefill_ratio_parsed_and_defaults_none():
+    assert build_config({}).decode_prefill_ratio is None         # absent => None
+    assert build_config({"server": {"decode_prefill_ratio": "1.5"}}
+                        ).decode_prefill_ratio == 1.5            # coerced to float
+    assert build_config({"server": {"decode_prefill_ratio": 0}}
+                        ).decode_prefill_ratio == 0.0            # 0 => stock sched
+    with pytest.raises(ConfigError):
+        build_config({"server": {"decode_prefill_ratio": "fast"}})
 
 
 def test_load_config_missing_file_raises():

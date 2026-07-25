@@ -35,6 +35,7 @@ from .loader import (
     build_model,
     load_gguf_wire_bytes,
     materialize_module_arrays,
+    model_is_moe,
     print_inventory,
     remap_arrays,
     remap_gemma4_assistant_arrays,
@@ -45,6 +46,85 @@ from .populate import maybe_populate_for_load
 from .populate import wait_for as wait_for_populate
 from .preflight import preflight
 from .transforms import coalesce_split_experts
+
+
+# Per-family MTP batch-width caps, keyed on model_type (NEVER isinstance:
+# HyV3MTPDrafter subclasses QwenMTPDrafter, so a class check would hand hy_v3
+# the uncapped dense-qwen default). Cap = speculate only while the live decode
+# batch is this wide; 0 = uncapped. Measured knees, 2026-07 batch campaign:
+# qwen dense nextn wins through c4 (worst corner 0.97); the gemma assistant
+# wins c1/c2 on the dense 31B (1.83/1.80) and knees at B>=3. Limit = hard
+# ceiling a config/env value can never cross, for drafters that raise above it.
+#
+# These are the DENSE-target defaults. Routed-expert targets are capped to 1 by
+# `model_is_moe` regardless of family (see `_stamp_mtp_width_cap`): qwen MoE
+# loses at B=2 (0.78x aggregate, d14k max_tokens 1024), and the structural
+# check generalizes that to every MoE arch instead of needing a row here per
+# checkpoint. The MoE rows below are kept explicit so a target that never
+# reaches the structural check still lands on the measured value rather than
+# the fallback.
+_MTP_WIDTH_CAP_BY_MODEL_TYPE = {
+    "qwen3_5": 0,
+    "qwen3_5_text": 0,
+    "qwen3_5_moe": 1,
+    "qwen3_5_moe_text": 1,
+    "gemma4_assistant": 2,
+}
+# B=1-only drafters: DeepseekV4MTPDrafter.reset and HyV3MTPDrafter.make_cache
+# both raise on batched left_padding (hy_v3's inject_rows raises outright).
+_MTP_WIDTH_LIMIT_BY_MODEL_TYPE = {
+    "hy_v3": 1,
+    "deepseek_v4": 1,
+    "deepseek4": 1,
+}
+# Unknown arch: cap conservatively rather than opting a new family into the
+# losing regime. Uncapped is earned by measurement, not inherited by default.
+_MTP_WIDTH_CAP_FALLBACK = 2
+
+
+def _stamp_mtp_width_cap(drafter, model_type: str, *, target=None,
+                         log=loadlog.verbose_print):
+    """Stamp mtp_width_cap / mtp_width_limit for the runtime gate.
+
+    Call on the raw drafter BEFORE any DrafterAdapter wrap: the adapter
+    forwards attribute reads but a setattr would land on the wrapper.
+    A routed-expert ``target`` caps at 1 whatever its family default says.
+    MLX_VLM_GGUF_SPEC_WIDTH_CAP (per-model config, load-window env) overrides
+    both and is itself clamped by the family's hard limit.
+    """
+    limit = _MTP_WIDTH_LIMIT_BY_MODEL_TYPE.get(model_type, 0)
+    cap = _MTP_WIDTH_CAP_BY_MODEL_TYPE.get(model_type)
+    if cap is None:
+        cap = limit if limit >= 1 else _MTP_WIDTH_CAP_FALLBACK
+        if model_type not in _MTP_WIDTH_LIMIT_BY_MODEL_TYPE:
+            log(f"[mtp] width cap: model_type {model_type!r} unmapped, "
+                f"defaulting to {cap} (uncapped is measurement-earned)")
+    # MoE verify multiplies the expert union each drafted position touches, and
+    # both measured MoE families lose the trade above B=1. Structural, so a new
+    # MoE arch inherits it without a table row; dense stays family-defaulted.
+    if cap != 1 and target is not None and model_is_moe(target):
+        log(f"[mtp] width cap: routed-expert target -> 1 "
+            f"(family default was {cap or 'uncapped'})")
+        cap = 1
+    raw = os.environ.get("MLX_VLM_GGUF_SPEC_WIDTH_CAP", "")
+    if raw:
+        try:
+            cap = max(0, int(raw))
+        except ValueError:
+            log(f"[mtp] width cap: MLX_VLM_GGUF_SPEC_WIDTH_CAP={raw!r} is not "
+                f"an int; keeping {cap}")
+    if limit >= 1 and (cap == 0 or cap > limit):
+        log(f"[mtp] width cap: clamped {cap} -> {limit} ({model_type} drafter "
+            f"is batch-width {limit} only)")
+        cap = limit
+    try:
+        drafter.mtp_width_cap = cap
+        drafter.mtp_width_limit = limit
+    except AttributeError:
+        pass  # slotted/frozen drafter forbids ad-hoc attrs
+    log(f"[mtp] width cap: {cap or 'uncapped'}"
+        + (f" (hard limit {limit})" if limit else ""))
+    return drafter
 
 
 def _load_mtp_drafter(
@@ -140,6 +220,7 @@ def _load_mtp_drafter(
     validate_drafter(drafter)
     log("[mtp] drafter bound to target embeddings + LM head")
     _patch_draft_head_quantized(drafter)
+    _stamp_mtp_width_cap(drafter, model_type, target=target, log=log)
     return drafter
 
 
@@ -272,6 +353,9 @@ def _load_gemma4_assistant_drafter(
     drafter.bind(target)
 
     from .drafter_protocol import DrafterAdapter, validate_drafter
+    # Stamp before the wrap: DrafterAdapter forwards attribute reads, but a
+    # setattr on the adapter would never reach the inner drafter.
+    _stamp_mtp_width_cap(drafter, "gemma4_assistant", target=target, log=log)
     drafter = DrafterAdapter(drafter)
     validate_drafter(drafter)
 
@@ -440,6 +524,7 @@ def _load_deepseek4_mtp_drafter(
     validate_drafter(drafter)
     log("[mtp] drafter bound to target embeddings + LM head")
     _patch_draft_head_quantized(drafter)
+    _stamp_mtp_width_cap(drafter, "deepseek_v4", target=target, log=log)
     return drafter
 
 

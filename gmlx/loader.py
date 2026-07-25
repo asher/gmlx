@@ -2013,6 +2013,47 @@ def _switch_num_experts(glu) -> int:
     return 0
 
 
+def _decoder_layers(model):
+    """Transformer layers of a text model or a VLM wrapper, or ()."""
+    for owner in (model, getattr(model, "language_model", None)):
+        if owner is None:
+            continue
+        layers = getattr(owner, "layers", None)
+        if layers is None:
+            layers = getattr(getattr(owner, "model", None), "layers", None)
+        if layers:
+            return layers
+    return ()
+
+
+def model_is_moe(model) -> bool:
+    """True when the model routes tokens through stacked expert MLPs.
+
+    Structural on purpose. The synthesized config spells the expert count four
+    ways across arches (``num_experts``, ``num_local_experts``,
+    ``moe_num_experts``, ``n_routed_experts``), all from one GGUF field, so a
+    key lookup fails OPEN on the next arch that picks a fifth: it would report
+    an MoE target as dense. Every routed block instead reaches its forward
+    through a switch GLU whose projections carry a stacked ``[experts, out, in]``
+    weight, or a ``num_experts`` attribute on the quantized/K-quant variants.
+
+    ``_switch_num_experts`` is NOT a usable test here: on a dense MLP it returns
+    ``weight.shape[0]``, the output width, not 0.
+    """
+    for layer in _decoder_layers(model):
+        for m in layer.modules():
+            for name in ("gate_proj", "up_proj", "down_proj"):
+                proj = getattr(m, name, None)
+                if proj is None:
+                    continue
+                if getattr(proj, "num_experts", None) is not None:
+                    return True
+                w = getattr(proj, "weight", None)
+                if w is not None and getattr(w, "ndim", 0) == 3:
+                    return True
+    return False
+
+
 def install_moe_experts_override(model, k: int) -> int:
     """Experiment, lossy: route every token to ``k`` experts instead of the
     trained top-k, on MoE blocks whose experts ``install_expert_streaming``

@@ -11,9 +11,110 @@ import mlx.core as mx
 import mlx.nn as nn
 
 
+import atexit
+import sys
+
 from . import loadlog
 from .envflags import env_bool
 from .patching import ClassPatch
+
+
+# One-shot routing dump for the GDN call: which branch each distinct
+# (S, B, sink, mask) shape takes. GMLX_GDN_ROUTE_DEBUG=1.
+_ROUTE_DEBUG = env_bool("GMLX_GDN_ROUTE_DEBUG", False)
+_route_logged: set = set()
+# Call counts per (which, S, B, mask, branch). The decode-width histogram this
+# yields is the only record of live batch width on the NON-MTP arm, which has
+# no round log -- without it a gated-vs-baseline comparison cannot tell a real
+# regression from an arm that simply never reached the same width.
+_route_counts: dict = {}
+
+
+_route_calls = [0]
+# Dump cadence in GDN calls. The harness SIGTERMs servers, which does not run
+# atexit, so the histogram has to land in the log while the process is alive.
+_ROUTE_DUMP_EVERY = 2000
+
+
+def _log_gdn_route_once(which, S, B, sink, mask, taken):
+    key = (which, S, B, sink is not None, type(mask).__name__, taken)
+    _route_counts[key] = _route_counts.get(key, 0) + 1
+    _route_calls[0] += 1
+    if _route_calls[0] % _ROUTE_DUMP_EVERY == 0:
+        _dump_gdn_route_counts()
+    if key in _route_logged:
+        return
+    _route_logged.add(key)
+    print(f"[gdn] route {which}: S={S} B={B} sink={sink is not None} "
+          f"mask={type(mask).__name__} -> {taken}", file=sys.stderr, flush=True)
+
+
+# Single-slot memo for "does this mask exclude anything". Every GDN layer in a
+# step is handed the SAME mask object, so one host sync per step covers all of
+# them; holding the reference keeps the identity check honest against id reuse.
+_noop_mask_memo: tuple = (None, False)
+
+
+def _mask_excludes_nothing(mask) -> bool:
+    """True when `mask` admits every entry, so a kernel that ignores masks is
+    still correct. At S=1 the recurrent ssm mask is all-true by construction
+    (each live row contributes one real token; left padding is history, not
+    input), but this is verified rather than assumed -- a row that is fully
+    padded would make it false and must keep the stock path."""
+    global _noop_mask_memo
+    if _noop_mask_memo[0] is mask:
+        return _noop_mask_memo[1]
+    if mask.dtype == mx.bool_:
+        verdict = bool(mx.all(mask).item())
+    else:
+        verdict = bool(mx.all(mask >= 0).item())
+    _noop_mask_memo = (mask, verdict)
+    return verdict
+
+
+_mask_described: set = set()
+
+
+def _describe_blocking_mask_once(which, S, B, mask):
+    """When a mask is what costs this layer the fused kernel, report whether it
+    actually masks anything. An all-true mask at S=1 blocks the fast path while
+    excluding nothing."""
+    if not isinstance(mask, mx.array):
+        return
+    key = (which, S, B, tuple(mask.shape), str(mask.dtype))
+    if key in _mask_described:
+        return
+    _mask_described.add(key)
+    if mask.dtype == mx.bool_:
+        blocked = int((~mask).sum().item())
+    else:
+        blocked = int((mask < 0).sum().item())
+    print(f"[gdn] blocking mask {which}: S={S} B={B} shape={tuple(mask.shape)} "
+          f"dtype={mask.dtype} excluded_entries={blocked} of {mask.size} "
+          f"({'NO-OP -> fused path lost for nothing' if blocked == 0 else 'real'})",
+          file=sys.stderr, flush=True)
+
+
+@atexit.register
+def _dump_gdn_route_counts():
+    if not _ROUTE_DEBUG or not _route_counts:
+        return
+    # Decode steps only (S == 1); per-layer calls, so divide by layer count for
+    # rounds. Prefill chunks (S > 1) are reported separately.
+    print("[gdn] route histogram (calls, S=1 decode):", file=sys.stderr)
+    for key in sorted(_route_counts, key=lambda k: (-_route_counts[k], str(k))):
+        which, S, B, sink, mask, taken = key
+        if S != 1:
+            continue
+        print(f"[gdn]   {which} B={B} sink={sink} mask={mask} -> {taken}: "
+              f"{_route_counts[key]} calls", file=sys.stderr)
+    print("[gdn] route histogram (calls, S>1 prefill):", file=sys.stderr)
+    for key in sorted(_route_counts, key=lambda k: (-_route_counts[k], str(k))):
+        which, S, B, sink, mask, taken = key
+        if S == 1:
+            continue
+        print(f"[gdn]   {which} S={S} B={B} -> {taken}: "
+              f"{_route_counts[key]} calls", file=sys.stderr, flush=True)
 
 
 # GGUF V-head tiling fixup (runtime patch)
@@ -384,16 +485,26 @@ def _gdn_fused_decode_call(self, inputs, mask=None, cache=None):
     state = cache[1] if cache else None
     Dv = self.head_v_dim
     SG = 16 if B == 1 else 32
+    # A mask that excludes nothing must not cost the fused kernel: BatchGenerator
+    # hands every batched decode step an ssm mask built from the cache's left
+    # padding, and at S=1 that mask is all-true, so bailing on `mask is not None`
+    # dropped all 30 gated-delta layers onto the unfused chain for nothing.
     if (
         not getattr(self, "_gdn_fused", False)
         or S != 1
-        or mask is not None
+        or (mask is not None
+            and not (isinstance(mask, mx.array) and _mask_excludes_nothing(mask)))
         or state is None
         or _gdn_fused_decode_kernel is None
         or Dv % SG != 0
         or self.head_k_dim % 32 != 0
     ):
+        if _ROUTE_DEBUG:
+            _log_gdn_route_once("lm", S, B, None, mask, "STOCK-unfused")
+            _describe_blocking_mask_once("lm", S, B, mask)
         return _FUSED_DECODE_PATCH.stock(self, inputs, mask, cache)
+    if _ROUTE_DEBUG:
+        _log_gdn_route_once("lm", S, B, None, mask, "fused-decode")
     return _gdn_fused_decode_body(self, inputs, cache)
 
 
@@ -711,6 +822,8 @@ def _gdn_fused_verify_call(
         and Dv % (16 if B == 1 else 32) == 0
         and self.head_k_dim % 32 == 0
     ):
+        if _ROUTE_DEBUG:
+            _log_gdn_route_once("vlm", S, B, gdn_sink, mask, "fused-decode")
         return _gdn_fused_decode_body(self, inputs, cache, vlm_cache_advance=True)
     if (
         not getattr(self, "_gdn_fused_verify", False)
@@ -720,9 +833,13 @@ def _gdn_fused_verify_call(
         or Dv % 16 != 0
         or self.head_k_dim % 32 != 0
     ):
+        if _ROUTE_DEBUG:
+            _log_gdn_route_once("vlm", S, B, gdn_sink, mask, "STOCK-unfused")
         return _FUSED_VERIFY_PATCH.stock(
             self, inputs, mask, cache, gdn_sink, target_verify
         )
+    if _ROUTE_DEBUG:
+        _log_gdn_route_once("vlm", S, B, gdn_sink, mask, "fused-verify")
 
     import mlx_vlm.models.qwen3_5.language as _L
 

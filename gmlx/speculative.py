@@ -135,6 +135,45 @@ def _argmax_sampler(logits: mx.array) -> mx.array:
 #     when the modes match). Measured 61% vs 67% greedy on Qwen3.6-27B ultrachat.
 _FORCE_GREEDY_DRAFT = not env_bool("GMLX_MTP_COUPLED_DRAFT", False)
 _ROUND_PROFILE = env_bool("GMLX_ROUND_PROFILE", False)
+# One-shot cache-shape dump for the batched decode rounds: which cache class
+# the target forward sees, its offset, and the left-padding spread that picks
+# the padded-decode attention path over the plain batched one.
+_SHAPE_DEBUG = env_bool("GMLX_SPEC_SHAPE_DEBUG", False)
+_shape_logged: set[str] = set()
+
+
+def _log_cache_shape_once(tag, prompt_cache, n_active):
+    if tag in _shape_logged:
+        return
+    _shape_logged.add(tag)
+    kinds: dict[str, int] = {}
+    for e in prompt_cache:
+        k = type(e).__name__
+        kinds[k] = kinds.get(k, 0) + 1
+    # First attention-ish entry: the left-padding spread on it is what picks
+    # the padded-decode attention path over the plain batched one.
+    attn = next((e for e in prompt_cache
+                 if getattr(e, "keys", None) is not None), None)
+    lp = getattr(attn, "left_padding", None)
+    lp_list = lp.tolist() if isinstance(lp, mx.array) else lp
+    keys = getattr(attn, "keys", None)
+    # First recurrent (gated-delta) entry: its left_padding / lengths are what
+    # _create_qwen3_5_ssm_mask reads, and an array mask there disqualifies the
+    # fused GDN decode kernel for every linear layer.
+    rec = next((e for e in prompt_cache
+                if getattr(e, "keys", None) is None), None)
+    rlp = getattr(rec, "left_padding", None)
+    rlp_list = rlp.tolist() if isinstance(rlp, mx.array) else rlp
+    rlen = getattr(rec, "lengths", None)
+    rlen_list = rlen.tolist() if isinstance(rlen, mx.array) else rlen
+    print(f"[spec] shape-debug {tag}: rows={n_active} entries={len(prompt_cache)} "
+          f"kinds={kinds} attn={type(attn).__name__ if attn is not None else None} "
+          f"offset={getattr(attn, 'offset', None)} left_padding={lp_list} "
+          f"keys={None if keys is None else tuple(keys.shape)} | "
+          f"recurrent={type(rec).__name__ if rec is not None else None} "
+          f"rec_left_padding={rlp_list} rec_lengths={rlen_list} "
+          f"rec_make_mask={hasattr(rec, 'make_mask')}",
+          file=sys.stderr, flush=True)
 # Walk diagnostics (B=1 loop only). GMLX_WALK_PROFILE=1 splits the walk
 # into graph-build / eval / host tail and prints medians at session end.
 # =2 additionally stages the eval to split lm_head projection from the
@@ -1316,6 +1355,142 @@ def _retire_batch_row(model, prompt_cache: list, slot: int,
 
 # Batched B>1 owned MTP round
 
+def _lift_injected_cache(cache, other):
+    """Admission prefill builds single-sequence caches; the live batch holds
+    batch-class caches, and extend() requires the batch shape. The old
+    detector keyed on a missing `_idx`, but single-sequence RotatingKVCache
+    (and its Buffered spec subclass) HAS `_idx` and lacks `rotated`, so SWA
+    layers slipped through unconverted and extend died on other.rotated
+    (gemma drafter-MTP c>1, 2026-07-23 bench). Lift via the class's own
+    merge when either batch-only attr is absent; merge temporal-orders
+    rotated content, so mid-rotation injected streams stay correct."""
+    if ((hasattr(cache, "_idx") and not hasattr(other, "_idx"))
+            or (hasattr(cache, "rotated") and not hasattr(other, "rotated"))):
+        return type(other).merge([other])
+    return other
+
+
+_width_cap_memo: tuple[str, int | None] = ("", None)
+
+
+def _mtp_width_cap(drafter) -> int:
+    """Effective MTP batch-width cap: speculate only while the live decode
+    batch is this wide, 0 = uncapped.
+
+    env GMLX_MTP_WIDTH_CAP wins over the drafter's load-time stamp, then a
+    drafter hard limit clamps both (B=1-only drafters raise above theirs, so
+    crossing it is a guaranteed exception rather than a perf trade). The memo
+    covers the raw-string parse ONLY -- unlike batch_sched._ratio this
+    resolver is per-drafter, so memoizing the clamped result would leak one
+    model's limit onto the next model in a multi-model server.
+    """
+    global _width_cap_memo
+    cap = None
+    raw = os.environ.get("GMLX_MTP_WIDTH_CAP")
+    if raw is not None:
+        if raw != _width_cap_memo[0]:
+            try:
+                parsed = int(raw)
+            except ValueError:
+                _log.warning(
+                    "GMLX_MTP_WIDTH_CAP=%r is not an int; using the drafter "
+                    "cap", raw)
+                parsed = None
+            _width_cap_memo = (raw, parsed)
+        cap = _width_cap_memo[1]
+    if cap is None:
+        try:
+            cap = int(getattr(drafter, "mtp_width_cap", 0) or 0)
+        except (TypeError, ValueError):
+            cap = 0
+    cap = max(0, cap)
+    try:
+        limit = int(getattr(drafter, "mtp_width_limit", 0) or 0)
+    except (TypeError, ValueError):
+        limit = 0
+    # limit >= 1 guard: without it a 0 limit (no hard limit) would read as
+    # "cap exceeds 0, clamp to 0" and silently uncap a capped model.
+    if limit >= 1 and (cap == 0 or cap > limit):
+        _log_width_cap_once(
+            f"clamp: requested {cap or 'uncapped'} -> {limit} (drafter limit)")
+        cap = limit
+    return cap
+
+
+_width_cap_logged: set[str] = set()
+
+
+def _log_width_cap_once(msg: str) -> None:
+    """One line per distinct width-cap event per process; a clamp or trip that
+    repeats every round would drown the serve log."""
+    if msg in _width_cap_logged:
+        return
+    _width_cap_logged.add(msg)
+    print(f"[spec] width-cap {msg}", file=sys.stderr, flush=True)
+
+
+def _pad_shared_kv_seq(arr, seq_len: int):
+    """Tail-pad a (B, H, S, D) shared-KV tensor to seq_len with zeros."""
+    if arr.shape[2] == seq_len:
+        return arr
+    pad = mx.zeros(
+        tuple(arr.shape[:2]) + (seq_len - arr.shape[2],) + tuple(arr.shape[3:]),
+        dtype=arr.dtype)
+    return mx.concatenate([arr, pad], axis=2)
+
+
+def _merge_injected_shared_kv(drafter, shared_kv, inj_states, n_old, n_new):
+    """Widen the shared-KV dict by n_new injected rows, in place.
+
+    Shared-KV drafters (gemma4 assistant) replace their stored view on
+    every set_shared_kv, so injected rows must be merged and re-set before
+    the next draft_block or the drafter runs old-width KV against new-width
+    queries. Base rows prefer the drafter's live view when its width
+    matches n_old: it is current (verify-refreshed) and already in the
+    normalized layout (rows front-aligned, tail zeroed, kv_valid_len
+    masks the rest). The engine dict is the fallback: a stale prefill
+    snapshot, or the 0-row dict of the all-finished adoption path.
+    Injected rows come from a solo prefill (left padding 0), already
+    front-aligned. Seq lengths are ragged across sources (windowed shared
+    layers cap S per prefill), so rows are tail-padded to the max; a
+    missing capture is zero-filled to keep widths consistent, costing
+    draft quality on those rows for one round, never correctness."""
+    live = getattr(drafter, "_shared_kv", None)
+    base = None
+    for cand in (live, shared_kv):
+        if (isinstance(cand, dict) and cand
+                and next(iter(cand.values()))[0].shape[0] == n_old):
+            base = cand
+            break
+    keys = list(base.keys()) if base is not None else list(
+        (inj_states or {}).keys())
+    for k in keys:
+        pair_new = (inj_states or {}).get(k)
+        if base is not None:
+            K_old, V_old = base[k]
+            if pair_new is None:
+                K_new = mx.zeros(
+                    (n_new,) + tuple(K_old.shape[1:]), dtype=K_old.dtype)
+                V_new = mx.zeros(
+                    (n_new,) + tuple(V_old.shape[1:]), dtype=V_old.dtype)
+            else:
+                K_new, V_new = pair_new
+        else:
+            K_new, V_new = pair_new
+            K_old = mx.zeros(
+                (n_old,) + tuple(K_new.shape[1:]), dtype=K_new.dtype)
+            V_old = mx.zeros(
+                (n_old,) + tuple(V_new.shape[1:]), dtype=V_new.dtype)
+        seq_len = max(K_old.shape[2], K_new.shape[2])
+        shared_kv[k] = (
+            mx.concatenate(
+                [_pad_shared_kv_seq(K_old, seq_len),
+                 _pad_shared_kv_seq(K_new, seq_len)], axis=0),
+            mx.concatenate(
+                [_pad_shared_kv_seq(V_old, seq_len),
+                 _pad_shared_kv_seq(V_new, seq_len)], axis=0))
+
+
 def _owned_decode_rounds_batch(
     model,
     drafter,
@@ -1365,6 +1540,20 @@ def _owned_decode_rounds_batch(
     block_total = _dflash_block_total(drafter, draft_block_size)
     configured_block_total = int(
         getattr(drafter.config, "block_size", block_total))
+
+    # Width gate: speculation only pays off up to a per-family batch width
+    # (measured knees; some drafters are B=1-only outright). Past the cap the
+    # batch decodes plain for the rest of this generator -- a LATCH, never
+    # re-entering, because re-arming a drafter mid-flight means re-seeding
+    # every row's hidden/shared-KV, the seam that produced this campaign's
+    # crashes. The next generator re-evaluates from scratch.
+    cap = _mtp_width_cap(drafter)
+    gated = bool(cap) and len(b) > cap
+    if gated:
+        _log_width_cap_once(
+            f"gate: batch B={len(b)} > cap={cap} at formation; plain decode "
+            f"until the batch drains")
+
     # Batched rounds reseed the shared drafter without the B=1 sidecar seam;
     # clear the request nonce so no earlier request's lazy retirement can
     # export this batch's head KV under its key.
@@ -1373,7 +1562,14 @@ def _owned_decode_rounds_batch(
         drafter._kq_head_request = None
     except Exception:
         pass  # slotted/frozen drafter forbids ad-hoc attrs
-    drafter.reset(model, left_padding=[0] * len(b))
+    # reset() is bind + empty caches, no compute, so it runs gated too (that
+    # keeps "the previous batch already released the drafter" off the critical
+    # path). Without left_padding when gated: B=1-only drafters raise on a
+    # batched one, and gated mode never touches the drafter's KV anyway.
+    if gated:
+        drafter.reset(model)
+    else:
+        drafter.reset(model, left_padding=[0] * len(b))
     sampler_rng = _SpeculativeSamplerRNG(drafter, enabled=False)
 
     draft_kwargs = {}
@@ -1381,23 +1577,35 @@ def _owned_decode_rounds_batch(
         draft_kwargs["greedy"] = True
     draft_sampler = _argmax_sampler
 
-    prefill_draft = getattr(drafter, "prefill_from_target_hidden", None)
-    if callable(prefill_draft) and seed_tokens is not None:
-        sampler_rng.draft_call(
-            prefill_draft, seed_tokens, hidden, mx.array(b, dtype=token_dtype),
-            draft_sampler, token_dtype, **draft_kwargs)
+    if not gated:
+        prefill_draft = getattr(drafter, "prefill_from_target_hidden", None)
+        if callable(prefill_draft) and seed_tokens is not None:
+            sampler_rng.draft_call(
+                prefill_draft, seed_tokens, hidden,
+                mx.array(b, dtype=token_dtype),
+                draft_sampler, token_dtype, **draft_kwargs)
 
-    if hidden.shape[1] > 1:
-        hidden = hidden[:, -1:, :]
-    hidden = _mtp_draft_hidden(lm, hidden)
+    if gated:
+        # Only draft_block reads hidden and only the drafter reads shared_kv;
+        # dropping both frees the full prefill [B, L, D] and (on shared-KV
+        # drafters at depth) the prefill K/V capture instead of pinning them
+        # for the generator's life, and turns any missed consumer into a loud
+        # TypeError. Every remaining use of either is behind `not gated`.
+        hidden = None
+        shared_kv = None
+    else:
+        if hidden.shape[1] > 1:
+            hidden = hidden[:, -1:, :]
+        hidden = _mtp_draft_hidden(lm, hidden)
 
     L_prefill = _mtp_cache_offset_max(prompt_cache)
     positions = [L_prefill] * len(b)
-    drafter.set_shared_kv(
-        shared_kv, kv_offset=L_prefill,
-        position=_mtp_draft_position(mx.array(positions)),
-        kv_valid_len=mx.array(positions),
-        left_padding=_batch_left_padding(prompt_cache))
+    if not gated:
+        drafter.set_shared_kv(
+            shared_kv, kv_offset=L_prefill,
+            position=_mtp_draft_position(mx.array(positions)),
+            kv_valid_len=mx.array(positions),
+            left_padding=_batch_left_padding(prompt_cache))
 
     finished = [False] * B_orig
     active_idx = list(range(B_orig))
@@ -1412,33 +1620,73 @@ def _owned_decode_rounds_batch(
     _needs_shared_kv = getattr(drafter, "uses_shared_kv", True)
     _draft_block = drafter.draft_block
 
+    # Double buffer for gated (plain-decode) rounds: the tokens the GPU is
+    # already computing. None means "re-prime", set whenever the batch shape
+    # changes under us (injection, row retirement, adoption).
+    _gated_pending = None
+
+    def _gated_step(inputs):
+        """One plain target decode step: [n_active] tokens in, [n_active] out.
+
+        Deliberately NOT _mtp_verify_target -- its plain branch hardcodes
+        return_hidden/return_shared_kv with no off switch, so shared-KV archs
+        would materialize every shared layer per emitted token.
+        """
+        with mx.stream(generation_stream):
+            out = lm(inputs[:, None], cache=prompt_cache)
+            logits = getattr(out, "logits", out)[:, -1, :]
+            if greedy:
+                return mx.argmax(logits, axis=-1).astype(token_dtype)
+            logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
+            return sampler(logprobs).reshape(-1).astype(token_dtype)
+
+    def _trip_width_gate(width: int) -> None:
+        """Latch the batch into plain decode for the rest of this generator."""
+        nonlocal gated
+        gated = True
+        _log_width_cap_once(
+            f"trip: B={width} > cap={cap}; batch converts to plain decode "
+            f"until drained")
+
     def _drain_injections():
         # continuous-batch injection
-        nonlocal hidden, B_orig
+        nonlocal hidden, B_orig, _gated_pending
         gen_inj = getattr(model, "_generator_injections", None)
         if gen_inj:
+            # The batch is about to widen; anything already dispatched was
+            # shaped for the old width, so re-prime rather than slice.
+            _gated_pending = None
+            # Trip BEFORE processing: a tripping drain must not pay
+            # inject_rows, which teacher-forces the whole injected prompt
+            # through a drafter this batch will never use again. The queue can
+            # hold several entries, so admissions sum.
+            if not gated and cap:
+                incoming = sum(len(inj["uids"]) for inj in gen_inj)
+                if len(active_idx) + incoming > cap:
+                    _trip_width_gate(len(active_idx) + incoming)
             for inj in gen_inj:
                 B_new = len(inj["uids"])
                 for i, cache in enumerate(prompt_cache):
                     extend_fn = getattr(cache, "extend", None)
                     if callable(extend_fn):
-                        other = inj["prompt_cache"][i]
-                        if hasattr(cache, "_idx") and not hasattr(other, "_idx"):
-                            other = type(other).merge([other])
+                        other = _lift_injected_cache(
+                            cache, inj["prompt_cache"][i])
                         extend_fn(other)
 
-                inject_fn = getattr(drafter, "inject_rows", None)
-                if callable(inject_fn):
-                    inject_fn(
-                        inj["prompt_tokens"], inj["hidden"],
-                        inj["first_tokens"], draft_sampler,
-                        token_dtype, greedy=True)
+                if not gated:
+                    inject_fn = getattr(drafter, "inject_rows", None)
+                    if callable(inject_fn):
+                        inject_fn(
+                            inj["prompt_tokens"], inj["hidden"],
+                            inj["first_tokens"], draft_sampler,
+                            token_dtype, greedy=True)
 
-                inj_hidden = inj["hidden"]
-                if inj_hidden.shape[1] > 1:
-                    inj_hidden = inj_hidden[:, -1:, :]
-                inj_hidden = _mtp_draft_hidden(lm, inj_hidden)
-                hidden = mx.concatenate([hidden, inj_hidden], axis=0)
+                if not gated:
+                    inj_hidden = inj["hidden"]
+                    if inj_hidden.shape[1] > 1:
+                        inj_hidden = inj_hidden[:, -1:, :]
+                    inj_hidden = _mtp_draft_hidden(lm, inj_hidden)
+                    hidden = mx.concatenate([hidden, inj_hidden], axis=0)
 
                 # A single-request injection carries its APC retirement
                 # context on its (un-merged) cache's first entry; pop it
@@ -1463,14 +1711,22 @@ def _owned_decode_rounds_batch(
                     retired.append(False)
                     B_orig += 1
 
-                if _needs_shared_kv and inj.get("shared_kv_states"):
-                    for k in shared_kv:
-                        K_old, V_old = shared_kv[k]
-                        if k in inj["shared_kv_states"]:
-                            K_new, V_new = inj["shared_kv_states"][k]
-                            shared_kv[k] = (
-                                mx.concatenate([K_old, K_new], axis=0),
-                                mx.concatenate([V_old, V_new], axis=0))
+                if _needs_shared_kv and not gated:
+                    # The old raw batch-axis concat crashed on ragged seq
+                    # and, when set_shared_kv had normalized into a copy,
+                    # never reached the drafter anyway -- whose stored
+                    # view, position, and kv_valid_len all stay at the
+                    # old width until re-set.
+                    _merge_injected_shared_kv(
+                        drafter, shared_kv, inj.get("shared_kv_states"),
+                        len(active_idx) - B_new, B_new)
+                    positions_active = [positions[i] for i in active_idx]
+                    drafter.set_shared_kv(
+                        shared_kv, kv_offset=max(positions_active),
+                        position=_mtp_draft_position(
+                            mx.array(positions_active)),
+                        kv_valid_len=mx.array(positions_active),
+                        left_padding=None)
             # Injection grew B; the target caches text mrope deltas at the old
             # width and only handles too-WIDE (slices down), not too-narrow --
             # verify then dies on offsets(B) + rope_deltas(B_old) broadcast.
@@ -1489,65 +1745,111 @@ def _owned_decode_rounds_batch(
     _last_clear = sum(emitted)
     while len(active_idx) > 0:
         _drain_injections()
+        # Env can be lowered on a live server (per-round read, like the pacing
+        # ratio), so re-check even without an admission.
+        if not gated and cap and len(active_idx) > cap:
+            _trip_width_gate(len(active_idx))
         n_active = len(active_idx)
-        remaining = [
-            max(1, max_tokens - emitted[active_idx[j]] + 1)
-            for j in range(n_active)]
-        bs = _mtp_next_block_size(
-            drafter, block_total, configured_block_total, min(remaining))
-        if bs <= 1:
-            break
 
-        _t0 = time.perf_counter()
-        _gap = (_t0 - _prev_end) * 1e3 if _prev_end else 0.0
-        b_active = [b[active_idx[j]] for j in range(n_active)]
-        b_arr = mx.array(b_active, dtype=token_dtype)
-
-        draft_tokens = sampler_rng.draft_tokens(
-            _draft_block, b_arr, hidden, None, bs, draft_sampler, token_dtype,
-            **draft_kwargs)
-        # Actual draft width (drafters may return fewer than requested);
-        # see the scalar round.
-        bs = int(draft_tokens.shape[1]) + 1
-        if _ROUND_PROFILE:
-            mx.eval(draft_tokens)
-        _td = time.perf_counter()
-
-        with mx.stream(generation_stream):
-            verify_input = mx.concatenate(
-                [b_arr[:, None], draft_tokens], axis=1)
-            verify = _mtp_verify_target(
-                lm, verify_input, prompt_cache, sampler,
-                sample_target_tokens=greedy)
-        if _ROUND_PROFILE:
-            mx.eval(verify.hidden)
-        _tv = time.perf_counter()
-
-        budgets = [max_tokens - emitted[active_idx[j]] for j in range(n_active)]
-        accepted_list, new_tokens_list = _coupled_walk_batch(
-            lm, verify, draft_tokens, _walk_sampler, budgets)
-        _t1 = time.perf_counter()
-        sampler_rng.target_sampled(sync_draft=True)
-        _record_speculative_round(
-            drafter,
-            sum(accepted_list) / len(accepted_list),
-            bs - 1)
-
-        max_a = max(accepted_list)
-
-        if _has_accept_batch:
-            sampler_rng.draft_call(
-                _accept_batch_fn, verify.hidden, draft_tokens,
-                accepted_list, new_tokens_list, draft_sampler, token_dtype,
-                **draft_kwargs)
-
-        if max_a < bs - 1 or any(a < max_a for a in accepted_list):
-            row_idx = mx.arange(n_active)
-            col_idx = mx.array(accepted_list)
-            hidden = verify.hidden[row_idx, col_idx, :][:, None, :]
+        if gated:
+            # Plain decode round, double-buffered the way stock
+            # GenerationBatch._step is: dispatch the NEXT round's forward from
+            # this round's still-lazy tokens, then block on this round's. The
+            # CPU graph build for round N+1 overlaps the GPU running round N
+            # instead of serializing behind it.
+            _t0 = time.perf_counter()
+            _gap = (_t0 - _prev_end) * 1e3 if _prev_end else 0.0
+            if _SHAPE_DEBUG:
+                _log_cache_shape_once("gated", prompt_cache, n_active)
+            if _gated_pending is None:
+                # Prime: first gated round, or the batch shape just changed.
+                # Costs one un-overlapped forward, amortized over every round
+                # until the next structural change.
+                _gated_pending = _gated_step(
+                    mx.array([b[active_idx[j]] for j in range(n_active)],
+                             dtype=token_dtype))
+                mx.async_eval(_gated_pending)
+            toks = _gated_pending
+            # Rows are independent within a decode step, so a row that turns
+            # out to finish this round only wastes its own lookahead; the
+            # keep_mx filter below slices it back out. The extra KV position
+            # this leaves in the cache is past every retirement's store_len
+            # (retirement is driven by `positions`, not the cache offset) and
+            # nothing reads the cache offset while gated.
+            _gated_pending = _gated_step(toks)
+            mx.async_eval(_gated_pending)
+            # Under GMLX_ROUND_PROFILE the columns read as dispatch (CPU build
+            # of round N+1) / wait (GPU finishing round N) / emit-prep instead
+            # of draft / verify / walk.
+            _td = time.perf_counter() if _ROUND_PROFILE else _t0
+            mx.eval(toks)
+            _tv = time.perf_counter() if _ROUND_PROFILE else _t0
+            bs = 1
+            accepted_list = [0] * n_active
+            new_tokens_list = [[int(t)] for t in toks.tolist()]
+            _t1 = time.perf_counter()
         else:
-            hidden = verify.hidden[:, -1:, :]
-        hidden = _mtp_draft_hidden(lm, hidden)
+            remaining = [
+                max(1, max_tokens - emitted[active_idx[j]] + 1)
+                for j in range(n_active)]
+            bs = _mtp_next_block_size(
+                drafter, block_total, configured_block_total, min(remaining))
+            if bs <= 1:
+                break
+
+            _t0 = time.perf_counter()
+            _gap = (_t0 - _prev_end) * 1e3 if _prev_end else 0.0
+            b_active = [b[active_idx[j]] for j in range(n_active)]
+            b_arr = mx.array(b_active, dtype=token_dtype)
+
+            draft_tokens = sampler_rng.draft_tokens(
+                _draft_block, b_arr, hidden, None, bs, draft_sampler,
+                token_dtype, **draft_kwargs)
+            # Actual draft width (drafters may return fewer than requested);
+            # see the scalar round.
+            bs = int(draft_tokens.shape[1]) + 1
+            if _ROUND_PROFILE:
+                mx.eval(draft_tokens)
+            _td = time.perf_counter()
+
+            with mx.stream(generation_stream):
+                verify_input = mx.concatenate(
+                    [b_arr[:, None], draft_tokens], axis=1)
+                verify = _mtp_verify_target(
+                    lm, verify_input, prompt_cache, sampler,
+                    sample_target_tokens=greedy)
+            if _ROUND_PROFILE:
+                mx.eval(verify.hidden)
+            _tv = time.perf_counter()
+
+            budgets = [
+                max_tokens - emitted[active_idx[j]] for j in range(n_active)]
+            accepted_list, new_tokens_list = _coupled_walk_batch(
+                lm, verify, draft_tokens, _walk_sampler, budgets)
+            _t1 = time.perf_counter()
+            sampler_rng.target_sampled(sync_draft=True)
+            # Gated rounds stay out of the accept stats: 0-accept plain rounds
+            # would dilute the acceptance rate the server reports.
+            _record_speculative_round(
+                drafter,
+                sum(accepted_list) / len(accepted_list),
+                bs - 1)
+
+            max_a = max(accepted_list)
+
+            if _has_accept_batch:
+                sampler_rng.draft_call(
+                    _accept_batch_fn, verify.hidden, draft_tokens,
+                    accepted_list, new_tokens_list, draft_sampler, token_dtype,
+                    **draft_kwargs)
+
+            if max_a < bs - 1 or any(a < max_a for a in accepted_list):
+                row_idx = mx.arange(n_active)
+                col_idx = mx.array(accepted_list)
+                hidden = verify.hidden[row_idx, col_idx, :][:, None, :]
+            else:
+                hidden = verify.hidden[:, -1:, :]
+            hidden = _mtp_draft_hidden(lm, hidden)
 
         max_new = max(len(nt) for nt in new_tokens_list) if new_tokens_list else 0
         for pos in range(max_new):
@@ -1579,7 +1881,7 @@ def _owned_decode_rounds_batch(
                 _rollback_fn(prompt_cache, verify.gdn_states,
                              accepted_list, bs)
 
-        if _needs_shared_kv:
+        if _needs_shared_kv and not gated:
             rejected_global = bs - (max_a + 1)
             next_shared_kv = _slice_shared_kv_batch(
                 verify.shared_kv_states, rejected_global, accepted_list, max_a)
@@ -1611,15 +1913,17 @@ def _owned_decode_rounds_batch(
             empty = mx.array([], dtype=mx.int32)
             for c in prompt_cache:
                 c.filter(empty)
-            _filter_drafter = getattr(drafter, "filter_batch", None)
-            if callable(_filter_drafter):
-                _filter_drafter(empty)
-            hidden = hidden[empty]
-            if _needs_shared_kv:
-                for k in next_shared_kv:
-                    K_next, V_next = next_shared_kv[k]
-                    next_shared_kv[k] = (K_next[empty], V_next[empty])
-                shared_kv = next_shared_kv
+            _gated_pending = None  # adopted batch re-primes at its own width
+            if not gated:
+                _filter_drafter = getattr(drafter, "filter_batch", None)
+                if callable(_filter_drafter):
+                    _filter_drafter(empty)
+                hidden = hidden[empty]
+                if _needs_shared_kv:
+                    for k in next_shared_kv:
+                        K_next, V_next = next_shared_kv[k]
+                        next_shared_kv[k] = (K_next[empty], V_next[empty])
+                    shared_kv = next_shared_kv
             active_idx = []
             _drain_injections()
             if not active_idx:
@@ -1633,22 +1937,28 @@ def _owned_decode_rounds_batch(
                 keep_mx = mx.array(keep_slots, dtype=mx.int32)
                 for c in prompt_cache:
                     c.filter(keep_mx)
-                filter_drafter = getattr(drafter, "filter_batch", None)
-                if callable(filter_drafter):
-                    filter_drafter(keep_mx)
-                hidden = hidden[keep_mx]
-                for k in next_shared_kv:
-                    K_next, V_next = next_shared_kv[k]
-                    next_shared_kv[k] = (K_next[keep_mx], V_next[keep_mx])
+                if _gated_pending is not None:
+                    # Same row order as the cache filter, so the dispatched
+                    # lookahead stays aligned with the surviving rows.
+                    _gated_pending = _gated_pending[keep_mx]
+                if not gated:
+                    filter_drafter = getattr(drafter, "filter_batch", None)
+                    if callable(filter_drafter):
+                        filter_drafter(keep_mx)
+                    hidden = hidden[keep_mx]
+                    for k in next_shared_kv:
+                        K_next, V_next = next_shared_kv[k]
+                        next_shared_kv[k] = (K_next[keep_mx], V_next[keep_mx])
                 active_idx = [active_idx[j] for j in keep_slots]
 
-        positions_active = [positions[i] for i in active_idx]
-        new_kv_offset = max(positions_active) if positions_active else 0
-        drafter.set_shared_kv(
-            next_shared_kv, kv_offset=new_kv_offset,
-            position=_mtp_draft_position(mx.array(positions_active)),
-            kv_valid_len=mx.array(positions_active),
-            left_padding=_batch_left_padding(prompt_cache))
+        if not gated:
+            positions_active = [positions[i] for i in active_idx]
+            new_kv_offset = max(positions_active) if positions_active else 0
+            drafter.set_shared_kv(
+                next_shared_kv, kv_offset=new_kv_offset,
+                position=_mtp_draft_position(mx.array(positions_active)),
+                kv_valid_len=mx.array(positions_active),
+                left_padding=_batch_left_padding(prompt_cache))
 
         if sum(emitted) - _last_clear >= 256:
             mx.clear_cache()
