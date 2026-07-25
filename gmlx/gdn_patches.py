@@ -49,6 +49,29 @@ def _log_gdn_route_once(which, S, B, sink, mask, taken):
           f"mask={type(mask).__name__} -> {taken}", file=sys.stderr, flush=True)
 
 
+# Single-slot memo for "does this mask exclude anything". Every GDN layer in a
+# step is handed the SAME mask object, so one host sync per step covers all of
+# them; holding the reference keeps the identity check honest against id reuse.
+_noop_mask_memo: tuple = (None, False)
+
+
+def _mask_excludes_nothing(mask) -> bool:
+    """True when `mask` admits every entry, so a kernel that ignores masks is
+    still correct. At S=1 the recurrent ssm mask is all-true by construction
+    (each live row contributes one real token; left padding is history, not
+    input), but this is verified rather than assumed -- a row that is fully
+    padded would make it false and must keep the stock path."""
+    global _noop_mask_memo
+    if _noop_mask_memo[0] is mask:
+        return _noop_mask_memo[1]
+    if mask.dtype == mx.bool_:
+        verdict = bool(mx.all(mask).item())
+    else:
+        verdict = bool(mx.all(mask >= 0).item())
+    _noop_mask_memo = (mask, verdict)
+    return verdict
+
+
 _mask_described: set = set()
 
 
@@ -462,10 +485,15 @@ def _gdn_fused_decode_call(self, inputs, mask=None, cache=None):
     state = cache[1] if cache else None
     Dv = self.head_v_dim
     SG = 16 if B == 1 else 32
+    # A mask that excludes nothing must not cost the fused kernel: BatchGenerator
+    # hands every batched decode step an ssm mask built from the cache's left
+    # padding, and at S=1 that mask is all-true, so bailing on `mask is not None`
+    # dropped all 30 gated-delta layers onto the unfused chain for nothing.
     if (
         not getattr(self, "_gdn_fused", False)
         or S != 1
-        or mask is not None
+        or (mask is not None
+            and not (isinstance(mask, mx.array) and _mask_excludes_nothing(mask)))
         or state is None
         or _gdn_fused_decode_kernel is None
         or Dv % SG != 0
