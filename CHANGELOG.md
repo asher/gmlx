@@ -18,7 +18,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Certified in-process on gemma-4-31b Q6_K: whole-step -8.6% at four
   streams on mixed 8k-14k contexts (tail slices also skip the padded
   prefix short rows would otherwise re-read); -3.4% at two streams at
-  uniform 14k (`GMLX_G4_BATCHED_SDPA=0` reverts).
+  uniform 14k; speculative verify -17.5% per verify call at two streams
+  with a 3-token block at 10-14k depth (`GMLX_G4_BATCHED_SDPA=0`
+  reverts).
 
 ### Fixed
 
