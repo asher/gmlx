@@ -11,6 +11,7 @@ import mlx.core as mx
 import mlx.nn as nn
 
 
+import atexit
 import sys
 
 from . import loadlog
@@ -22,15 +23,43 @@ from .patching import ClassPatch
 # (S, B, sink, mask) shape takes. GMLX_GDN_ROUTE_DEBUG=1.
 _ROUTE_DEBUG = env_bool("GMLX_GDN_ROUTE_DEBUG", False)
 _route_logged: set = set()
+# Call counts per (which, S, B, mask, branch). The decode-width histogram this
+# yields is the only record of live batch width on the NON-MTP arm, which has
+# no round log -- without it a gated-vs-baseline comparison cannot tell a real
+# regression from an arm that simply never reached the same width.
+_route_counts: dict = {}
 
 
 def _log_gdn_route_once(which, S, B, sink, mask, taken):
     key = (which, S, B, sink is not None, type(mask).__name__, taken)
+    _route_counts[key] = _route_counts.get(key, 0) + 1
     if key in _route_logged:
         return
     _route_logged.add(key)
     print(f"[gdn] route {which}: S={S} B={B} sink={sink is not None} "
           f"mask={type(mask).__name__} -> {taken}", file=sys.stderr, flush=True)
+
+
+@atexit.register
+def _dump_gdn_route_counts():
+    if not _ROUTE_DEBUG or not _route_counts:
+        return
+    # Decode steps only (S == 1); per-layer calls, so divide by layer count for
+    # rounds. Prefill chunks (S > 1) are reported separately.
+    print("[gdn] route histogram (calls, S=1 decode):", file=sys.stderr)
+    for key in sorted(_route_counts, key=lambda k: (-_route_counts[k], str(k))):
+        which, S, B, sink, mask, taken = key
+        if S != 1:
+            continue
+        print(f"[gdn]   {which} B={B} sink={sink} mask={mask} -> {taken}: "
+              f"{_route_counts[key]} calls", file=sys.stderr)
+    print("[gdn] route histogram (calls, S>1 prefill):", file=sys.stderr)
+    for key in sorted(_route_counts, key=lambda k: (-_route_counts[k], str(k))):
+        which, S, B, sink, mask, taken = key
+        if S == 1:
+            continue
+        print(f"[gdn]   {which} S={S} B={B} -> {taken}: "
+              f"{_route_counts[key]} calls", file=sys.stderr, flush=True)
 
 
 # GGUF V-head tiling fixup (runtime patch)
