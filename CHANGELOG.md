@@ -18,6 +18,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   at the contended cell, aggregate throughput and single-stream rates
   unchanged.
 
+### Changed
+
+- Batched decode on gated-delta hybrids (qwen3.6 dense) speeds up ~8%: the two
+  tiny per-layer decay/gate projections (b/a) are concatenated at load and
+  routed through the M-stationary head kernel at batch width 2-8, instead of
+  falling onto a full GEMM tile per matvec (~70 us wall each for ~1 MB of
+  weights). Token-identical; single-stream decode and prefill unaffected.
+  `GMLX_GDN_BA_CAT=0` restores the separate matvecs.
+
 ## [0.1.1] - 2026-07-24
 
 ### Added
