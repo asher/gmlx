@@ -22,9 +22,8 @@ jobs:
     runs-on: macos-26
     strategy:
       matrix:
-        # 3.11 is the requires-python floor; 3.13 the newest qualified release
-        # (3.12, the development version, sits between).
-        python-version: ["3.11", "3.13"]
+        # 3.11 is the requires-python floor; 3.13 the newest qualified release.
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6

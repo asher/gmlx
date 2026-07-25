@@ -34,6 +34,7 @@ from .loader import (
     _resolve_chat_template,
     build_model,
     load_gguf_wire_bytes,
+    materialize_module_arrays,
     model_is_moe,
     print_inventory,
     remap_arrays,
@@ -724,6 +725,7 @@ def load_mtp_model(
     eos_ids = getattr(raw_tokenizer, "_gguf_eos_token_ids", None)
     tokenizer = TokenizerWrapper(raw_tokenizer, eos_token_ids=eos_ids)
 
+    materialize_module_arrays(model, drafter)
     if wire:
         _wire_big_model(model)
     wait_for_populate(pf.shards, log=_log)
@@ -860,6 +862,7 @@ def load_vlm_mtp_model(
     eos_ids = getattr(raw_tokenizer, "_gguf_eos_token_ids", None)
     tokenizer = TokenizerWrapper(raw_tokenizer, eos_token_ids=eos_ids)
 
+    materialize_module_arrays(model, drafter)
     _wire_big_model(model)
 
     return model, drafter, config, tokenizer, processor

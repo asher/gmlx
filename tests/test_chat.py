@@ -665,7 +665,8 @@ def test_theme_and_render_completions():
 def test_chat_parser_render_theme_flags():
     ap = chat._build_parser()
     ns = ap.parse_args(["m.gguf"])
-    assert ns.render == "auto" and ns.theme == "dark" and ns.colorblind is False
+    # theme defaults to None so the config's `theme:` can fill it (dark last).
+    assert ns.render == "auto" and ns.theme is None and ns.colorblind is False
     ns = ap.parse_args(["m.gguf", "--render", "lite", "--theme", "nord", "--colorblind"])
     assert ns.render == "lite" and ns.theme == "nord" and ns.colorblind
 

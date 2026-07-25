@@ -788,6 +788,14 @@ def test_merged_settings_precedence():
     assert s["chime"] is True
     args = _build_parser("t").parse_args(["--no-chime"])
     assert _merged_settings(args, cfg)["chime"] is False
+    # The model is a positional, like `gmlx chat` - flag wins over talk.model.
+    cfg = TalkCfg(model="from-config")
+    args = _build_parser("t").parse_args(["qwen3@coding"])
+    assert _merged_settings(args, cfg)["model"] == "qwen3@coding"
+    args = _build_parser("t").parse_args([])
+    s = _merged_settings(args, cfg)
+    assert s["model"] == "from-config"
+    assert s["max_tokens"] is None                # unset = until the model stops
 
 
 def test_pick_model_order():
@@ -815,6 +823,33 @@ def test_capability_guidance(capsys):
 
 
 import sys  # noqa: E402  (used by the capability tests above)
+
+
+def test_list_voices_explains_missing_tts(tmp_path, monkeypatch, capsys):
+    """`--list-voices` against a server with no TTS configured points at the
+    config fix, not at a missing route (which reads as a version mismatch)."""
+    from gmlx import launch as launch_mod
+    from gmlx import talk_client as tc
+    from gmlx.talk import cmd_talk
+
+    cfg = tmp_path / "gmlx.yaml"
+    cfg.write_text("models: {}\n")
+    monkeypatch.setattr(launch_mod, "_ensure_server", lambda ns: None)
+    caps = {"stt": False, "tts": False, "chat_ids": ["m"], "default": "m"}
+    monkeypatch.setattr(tc, "probe_capabilities", lambda *a, **k: caps)
+    monkeypatch.setattr(
+        tc, "list_voices",
+        lambda *a, **k: pytest.fail("must not probe the route without tts"))
+
+    assert cmd_talk(["--list-voices", "--config", str(cfg)]) == 1
+    err = capsys.readouterr().err
+    assert "no tts service enabled" in err
+    assert "tts: true" in err                     # the fix-it guidance
+
+    caps["tts"] = True
+    monkeypatch.setattr(tc, "list_voices", lambda *a, **k: ["af_heart"])
+    assert cmd_talk(["--list-voices", "--config", str(cfg)]) == 0
+    assert capsys.readouterr().out.strip() == "af_heart"
 
 
 def test_slash_wake_swaps_detector(capsys):
@@ -874,6 +909,61 @@ def test_merged_settings_brain_and_assistant():
     assert s["assistant"].max_tool_rounds == 3
     args = _build_parser("t").parse_args(["--brain", "chat"])
     assert _merged_settings(args, cfg)["brain"] == "chat"   # flag wins
+
+
+def test_tts_worker_merges_ready_sentences():
+    """Sentences already decoded when the worker gets to them are folded into
+    one synthesis call - the reply is spoken with the text's own cadence, not
+    one isolated utterance (and one round trip) per sentence."""
+    import threading
+    from gmlx.talk import _TURN_END
+
+    loop = _make_loop("vad")
+    cancel = threading.Event()
+    for s in ("One two three four five six seven.", "Eight nine ten.",
+              "Eleven twelve."):
+        loop.tts_q.put((cancel, s))
+    loop.tts_q.put(_TURN_END)
+    loop.tts_q.put(None)
+    loop._tts_worker()
+    merged = "One two three four five six seven. Eight nine ten. " \
+             "Eleven twelve."
+    assert loop._said == [merged]
+    assert loop.play_q.get_nowait()[1] == merged
+    assert loop.play_q.get_nowait() is _TURN_END
+
+
+def test_tts_worker_merge_respects_cap_and_turns():
+    """The merge stops at _MERGE_CHARS and never crosses into another turn's
+    chunks; the boundary item is processed on its own, not dropped."""
+    import threading
+    from gmlx.talk import _MERGE_CHARS
+
+    loop = _make_loop("vad")
+    c1, c2 = threading.Event(), threading.Event()
+    big = "a" * (_MERGE_CHARS + 1)
+    loop.tts_q.put((c1, big))
+    loop.tts_q.put((c1, "Same turn tail."))
+    loop.tts_q.put((c2, "Next turn."))
+    loop.tts_q.put(None)
+    loop._tts_worker()
+    assert loop._said == [big, "Same turn tail.", "Next turn."]
+
+
+def test_tts_worker_merged_chunk_skipped_when_canceled():
+    """A cancel that lands after the merge drain must still silence the
+    whole merged utterance."""
+    import threading
+
+    loop = _make_loop("vad")
+    cancel = threading.Event()
+    loop.tts_q.put((cancel, "Never say this."))
+    loop.tts_q.put((cancel, "Nor this."))
+    cancel.set()
+    loop.tts_q.put(None)
+    loop._tts_worker()
+    assert loop._said == []
+    assert loop.play_q.empty()
 
 
 def test_playback_survives_backend_play_error(capsys):

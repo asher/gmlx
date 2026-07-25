@@ -36,6 +36,7 @@ from .gguf_meta import first_nonzero_int, read_int
 from .loader import (
     _install_and_load,
     load_gguf_wire_bytes,
+    materialize_module_arrays,
     remap_arrays,
 )
 from .preflight import preflight
@@ -1734,6 +1735,7 @@ def load_vlm_model(
     #    (text under [thinker.]language_model.model.*, vision/audio under their
     #    towers), so model.sanitize must not run - it would re-prefix text keys.
     _install_and_load(model, hf_weights, hf_kquant_meta, log=_log, sanitize=False)
+    materialize_module_arrays(model)
 
     # 5. processor (image preprocessing + tokenizer + chat template). Synthesized
     #    from the two GGUFs by default (the LLM GGUF carries the tokenizer + chat

@@ -515,6 +515,20 @@ def test_menubar_alive_checks_cmdline(monkeypatch):
     assert lc.menubar_alive() is False                    # a recycled PID isn't ours
 
 
+def test_menubar_alive_ignore_pid_discounts_own_record(monkeypatch):
+    """The detached-start parent records the child's pid before the child's
+    already-running check runs; without ignore_pid the child saw itself as a
+    running bar and quit at once (no bar from `serve` or `launch menubar`)."""
+    lc.write_menubar_run(4242)
+    monkeypatch.setattr(lc, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(
+        lc, "_proc_cmdline",
+        lambda pid: f"{sys.executable} -m gmlx launch menubar --foreground")
+    assert lc.menubar_alive() is True
+    assert lc.menubar_alive(ignore_pid=4242) is False     # own record
+    assert lc.menubar_alive(ignore_pid=9999) is True      # someone else's
+
+
 # stop (B2): kills the process GROUP with SIGTERM - never SIGHUP (the reload signal)
 def test_stop_uses_killpg_sigterm(monkeypatch):
     lc.write_run("127.0.0.1", 8080, {"pid": 555, "pgid": 555, "host": "127.0.0.1",

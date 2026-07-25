@@ -9,6 +9,11 @@ gruvbox) carry explicit RGB values with a 256-color fallback.
 ``colorblind=True`` remaps every accent slot onto the Okabe-Ito palette
 (blue / orange / sky / vermillion - no red-green opposition), giving a
 colorblind-friendly variant of any theme.
+
+User-defined themes (a ``themes:`` mapping in gmlx.yaml, registered by chat
+startup via :func:`register_user_themes`) resolve exactly like built-ins and
+may shadow them; unspecified slots inherit from the theme they ``extends``
+(default ``dark``).
 """
 from __future__ import annotations
 
@@ -129,7 +134,7 @@ THEMES: dict[str, ThemeSpec] = {
     "dark": ThemeSpec(
         name="dark",
         slots={
-            "thinking": _s(dim=True),
+            "thinking": _s(italic=True, fg16=94),     # bright blue; dim is illegible on many dark palettes
             "heading": _s(bold=True, fg16=36),        # cyan
             "bold": _s(bold=True),
             "italic": _s(italic=True),
@@ -276,7 +281,106 @@ THEMES: dict[str, ThemeSpec] = {
 
 
 def list_themes() -> list[str]:
-    return sorted(THEMES)
+    return sorted(set(THEMES) | set(_USER_THEMES))
+
+
+# User-defined themes (``themes:`` in gmlx.yaml), registered at chat startup.
+# A user name shadows a built-in; unspecified slots inherit from ``extends``.
+_USER_THEMES: dict[str, ThemeSpec] = {}
+
+_STYLE_KEYS = frozenset({"bold", "dim", "italic", "underline", "fg16", "rgb"})
+_THEME_META_KEYS = frozenset(
+    {"extends", "code_theme", "code_theme_cb", "ptk_toolbar"})
+_FG16_CODES = frozenset(range(30, 38)) | frozenset(range(90, 98))
+
+
+def _parse_rgb(theme: str, slot: str, value) -> tuple[int, int, int]:
+    if isinstance(value, str):
+        v = value.lstrip("#")
+        if len(v) == 6:
+            try:
+                return tuple(int(v[i:i + 2], 16) for i in (0, 2, 4))
+            except ValueError:
+                pass
+    elif (isinstance(value, (list, tuple)) and len(value) == 3
+            and all(isinstance(c, int) and 0 <= c <= 255 for c in value)):
+        return tuple(value)
+    raise ValueError(
+        f"theme {theme!r} slot {slot!r}: rgb must be '#rrggbb' or "
+        f"[r, g, b] 0-255, got {value!r}")
+
+
+def _parse_user_style(theme: str, slot: str, raw) -> Style:
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"theme {theme!r} slot {slot!r}: expected a mapping of style keys "
+            f"({', '.join(sorted(_STYLE_KEYS))}), got {type(raw).__name__}")
+    unknown = set(raw) - _STYLE_KEYS
+    if unknown:
+        raise ValueError(
+            f"theme {theme!r} slot {slot!r}: unknown style keys "
+            f"{sorted(unknown)} (valid: {', '.join(sorted(_STYLE_KEYS))})")
+    kw: dict = {k: bool(raw[k])
+                for k in ("bold", "dim", "italic", "underline") if k in raw}
+    fg16 = raw.get("fg16")
+    if fg16 is not None:
+        if not isinstance(fg16, int) or fg16 not in _FG16_CODES:
+            raise ValueError(
+                f"theme {theme!r} slot {slot!r}: fg16 must be an ANSI "
+                f"foreground code 30-37 or 90-97, got {fg16!r}")
+        kw["fg16"] = fg16
+    if raw.get("rgb") is not None:
+        kw["rgb"] = _parse_rgb(theme, slot, raw["rgb"])
+    return Style(**kw)
+
+
+def define_user_theme(name: str, spec) -> ThemeSpec:
+    """Build a :class:`ThemeSpec` from a config mapping.
+
+    Keys are slot names (see ``_SLOTS``) mapping to style keys, plus optional
+    ``extends`` (the theme filling unspecified slots, default ``dark``),
+    ``code_theme`` / ``code_theme_cb`` (pygments styles for rich fences) and
+    ``ptk_toolbar`` (prompt_toolkit toolbar style). Raises ValueError with the
+    offending key on any malformed piece."""
+    if not isinstance(spec, dict):
+        raise ValueError(
+            f"theme {name!r}: expected a mapping of slots, "
+            f"got {type(spec).__name__}")
+    unknown = set(spec) - set(_SLOTS) - _THEME_META_KEYS
+    if unknown:
+        raise ValueError(
+            f"theme {name!r}: unknown keys {sorted(unknown)} (slots: "
+            f"{', '.join(_SLOTS)}; meta: {', '.join(sorted(_THEME_META_KEYS))})")
+    base_name = str(spec.get("extends", "dark"))
+    base = _USER_THEMES.get(base_name) or THEMES.get(base_name)
+    if base is None:
+        raise ValueError(
+            f"theme {name!r}: extends unknown theme {base_name!r} "
+            f"(choose from: {', '.join(list_themes())})")
+    slots = dict(base.slots)
+    for slot in _SLOTS:
+        if slot in spec:
+            slots[slot] = _parse_user_style(name, slot, spec[slot])
+    return ThemeSpec(
+        name=name,
+        slots=slots,
+        code_theme=str(spec.get("code_theme", base.code_theme)),
+        code_theme_cb=spec.get("code_theme_cb", base.code_theme_cb),
+        ptk_toolbar=spec.get("ptk_toolbar", base.ptk_toolbar),
+    )
+
+
+def register_user_themes(themes: dict | None) -> list[str]:
+    """Register the config's ``themes:`` mapping. Returns a warning string per
+    definition that failed validation; the valid ones still register (later
+    definitions may extend earlier ones)."""
+    warnings: list[str] = []
+    for name, spec in (themes or {}).items():
+        try:
+            _USER_THEMES[str(name)] = define_user_theme(str(name), spec)
+        except ValueError as e:
+            warnings.append(str(e))
+    return warnings
 
 
 # Colorblind remap: accent slots -> Okabe-Ito, keyed by slot semantics so it
@@ -406,12 +510,11 @@ def resolve_theme(
     ``color=False`` (non-TTY / NO_COLOR) empties every slot so callers can
     style unconditionally. Unknown names raise ValueError naming the options.
     """
-    try:
-        spec = THEMES[name]
-    except KeyError:
+    spec = _USER_THEMES.get(name) or THEMES.get(name)
+    if spec is None:
         raise ValueError(
             f"unknown theme {name!r} (choose from: {', '.join(list_themes())})"
-        ) from None
+        )
     slots = _cb_slots(spec) if colorblind else spec.slots
     if not color:
         sgr = {slot: "" for slot in _SLOTS}

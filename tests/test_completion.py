@@ -112,6 +112,16 @@ def test_model_positional_drops_off_once_model_given(tmp_path):
     assert completion._complete(["run", "--config", cfg, "qwen-fast", ""]) == []
 
 
+def test_talk_positional_lists_model_ids_without_files(tmp_path):
+    cfg = _write_cfg(tmp_path)
+    lines = completion._complete(["talk", "--config", cfg, ""])
+    assert "::files" not in lines           # a served id, never a path on disk
+    vals = _vals(lines)
+    assert "qwen-fast" in vals and "q" in vals
+    # Once a model is chosen, no more positional candidates.
+    assert completion._complete(["talk", "--config", cfg, "qwen-fast", ""]) == []
+
+
 def test_ls_alias_canonicalizes_for_flags():
     vals = _vals(completion._complete(["ls", "--"]))
     assert "--config" in vals and "--json" in vals

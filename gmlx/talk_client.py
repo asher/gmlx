@@ -420,7 +420,7 @@ class ServerChatBrain:
 
     def __init__(self, *, base_url: str, model: str,
                  api_key: str | None = None,
-                 system: str | None = None, max_tokens: int | None = 512):
+                 system: str | None = None, max_tokens: int | None = None):
         self.base_url = base_url
         self.model = model
         self.api_key = api_key

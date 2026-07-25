@@ -24,27 +24,33 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Unified ragged-plan batched decode for the qwen3_5 family: concurrent streams
   at different depths stay on the fused ragged-attention kernel instead of a
   per-row fallback loop.
+- `detect_arch` and `load_tokenizer_from_gguf` promoted to the stable public
+  API (`gmlx.__all__`): synthesize the HF tokenizer from GGUF metadata without
+  loading the model.
 - Lossy MoE decode levers for streamed models: `--moe-miss-shed` drops
-  non-resident experts while keeping a share of routing mass, `--moe-layer-shed`
-  skips routed MoE paths per token. Never on by default.
-- GPU keep-warm for streamed decode (`--gpu-keepwarm`) holds the GPU clock up
-  between tokens; decode-gated, so an idle server pays no power cost. Measured
-  +45% on GLM and +32% on Hunyuan 3.
-- Decode lookahead depth (`GMLX_DECODE_LOOKAHEAD_DEPTH`): expert prestage
-  prediction up to three MoE layers ahead.
-- Hunyuan 3 MoE fusion (routing-scores fold, shared-expert ride-along) and
-  MiniMax-M3 streaming via normalized routing weights through the mix seam.
-- `detect_arch` and `load_tokenizer_from_gguf` promoted to the stable public API:
-  synthesize the HF tokenizer from GGUF metadata without loading the model.
-- Streaming guide (`docs/streaming.md`) and a `bench/plot-bench.py batch-scaling`
-  chart grammar for scheduler A/Bs.
+  non-resident experts while keeping a configured share of routing mass, and
+  `--moe-layer-shed` probabilistically skips routed MoE paths per token.
+- GPU keep-warm for streamed decode: `--gpu-keepwarm` (config
+  `server.gpu_keepwarm`) holds the GPU clock up between tokens.
+- Decode lookahead depth: `GMLX_DECODE_LOOKAHEAD_DEPTH` extends expert
+  prestage prediction up to three MoE layers ahead, gated independently per
+  layer and depth.
+- Hunyuan 3 MoE fusion: routing-scores fold and shared-expert ride-along on
+  the fused streaming path.
+- MiniMax-M3 streaming enables miss-shed.
+- Streaming MoE guide (`docs/streaming.md`) and a `bench/plot-bench.py
+  batch-scaling` chart grammar for scheduler A/Bs.
+- Chat CLI adds user customizable themes
 
 ### Changed
 
 - `--stream-experts` now composes with MTP speculative decoding. Auto-MTP defers
   under `--stream-experts`; explicit `--speculative` opts in.
 - Lookahead prestage defaults off for the `glm_moe_dsa` and `deepseek_v32`
-  families; feeder and lookahead end-of-run stats print only at `-v`.
+  families.
+- Feeder and lookahead end-of-run stats print only at `-v` on run and chat.
+- `gmlx talk` takes the model as a positional (like `chat`/`run`, replacing
+  `--model`) with tab completion, `max_tokens` now unset by default.
 
 ### Fixed
 
@@ -55,11 +61,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   assistant drafter. Deltas are zero-padded to the live width, rotating caches
   are lifted to the batch class before the join, and injected rows are aligned
   into the drafter's view at the new width.
-- Streamed GLM decode could return corrupted output: prestage evictions could
-  overwrite arena slots a still-executing gather was reading. Layer outputs are
-  now evaluated before any arena mutation.
-- MoE expert controls silently no-opped on Hunyuan 3, whose gate submodule is
-  named `router`.
+- Chat died at the first token with `There is no Stream(gpu, N) in current
+  thread` on models carrying precomputed RoPE frequencies (Gemma 4 and other
+  scaled-RoPE families).
+- Menu bar pid tracking
+- MoE expert controls (`--moe-experts` mass, probe, fixed-k, lookahead)
+  silently no-opped on Hunyuan 3, whose gate submodule is named `router`.
+- Streamed GLM decode could return corrupted output: under async pipelining,
+  prestage evictions could overwrite arena slots a still-executing gather was
+  reading. Layer outputs are now evaluated before any arena mutation.
 - Loading an MTP model for streaming no longer wires the resident buffer set,
   which marched wired memory through the free-page floor on over-RAM targets.
 - Miss-shed no longer costs a second per-layer host sync, and streamed decode
