@@ -141,6 +141,62 @@ def test_mask_relay_cold_miss_falls_through(monkeypatch):
     assert seen == [1]
 
 
+def _verify_mask(pads, L, qL):
+    """Left-pad visibility AND end-aligned in-block causal: query j (abs
+    position L-qL+j) sees keys k with k >= pad and k <= L-qL+j."""
+    pos = mx.arange(L)[None, None, None, :]
+    vis = pos >= mx.array(pads)[:, None, None, None]
+    limit = (L - qL) + mx.arange(qL)[None, None, :, None]
+    return vis & (pos <= limit)
+
+
+def test_verify_width_matches_masked_reference(monkeypatch):
+    """qL 2..8 (MTP verify blocks) claim with per-row tail slice + causal;
+    numerics vs the orig with the pad+causal mask."""
+    _install()
+    monkeypatch.setattr(attn_hd512, "_MIN_KV", 32)
+    mx.random.seed(9)
+    pads = [6, 0, 3]
+    qL = 4
+    q = mx.random.normal((3, 8, qL, 512))
+    k = mx.random.normal((3, 2, 64, 512))
+    v = mx.random.normal((3, 2, 64, 512))
+    mx.eval(q, k, v)
+    mask = _verify_mask(pads, 64, qL)
+    n0 = gb.claims()
+    got = g4t.scaled_dot_product_attention(
+        q, k, v, cache=_FakeBatchCache(pads), scale=0.125, mask=mask)
+    assert gb.claims() == n0 + 1
+    ref = _orig_lm(q, k, v, cache=_FakeBatchCache(pads), scale=0.125,
+                   mask=mask)
+    err = mx.abs(got - ref).max().item()
+    assert err < 1e-4, f"verify tail-slice vs mask err={err}"
+
+
+def test_verify_width_non_claims(monkeypatch):
+    monkeypatch.setattr(attn_hd512, "_MIN_KV", 32)
+    seen = []
+    route = gb._make_route(lambda *a, **kw: seen.append(1) or mx.zeros(1))
+    cache = _FakeBatchCache([0, 5])
+
+    def qkv(qL, L=48):
+        q = mx.random.normal((2, 4, qL, 512))
+        k = mx.random.normal((2, 2, L, 512))
+        v = mx.random.normal((2, 2, L, 512))
+        return q, k, v
+
+    q, k, v = qkv(9)  # above the verify-block range
+    route(q, k, v, cache=cache, scale=0.5, mask=_verify_mask([0, 5], 48, 9))
+    q, k, v = qkv(3)  # qL>1 with mask None: unmasked block, never claim
+    route(q, k, v, cache=cache, scale=0.5, mask=None)
+    q, k, v = qkv(3)  # mask width mismatched to qL
+    route(q, k, v, cache=cache, scale=0.5, mask=_verify_mask([0, 5], 48, 1))
+    q, k, v = qkv(4)  # pad overlaps the block: 46 > 48 - 4
+    route(q, k, v, cache=_FakeBatchCache([0, 46]), scale=0.5,
+          mask=_verify_mask([0, 46], 48, 4))
+    assert len(seen) == 4
+
+
 def test_non_claims_fall_through(monkeypatch):
     monkeypatch.setattr(attn_hd512, "_MIN_KV", 32)
     seen = []
@@ -151,9 +207,8 @@ def test_non_claims_fall_through(monkeypatch):
     route(q, k, v, cache=cache, scale=0.5, mask=None)
     q, k, v = _rand(2, 4, 2, 48, d=256)  # hd256
     route(q, k, v, cache=cache, scale=0.5, mask=None)
-    q, k, v = _rand(2, 4, 2, 48)
-    q = mx.concatenate([q, q], axis=2)  # qL=2
-    route(q, k, v, cache=cache, scale=0.5, mask="causal")
+    q, k, v = _rand(2, 4, 2, 48)  # attention sinks present
+    route(q, k, v, cache=cache, scale=0.5, mask=None, sinks=mx.zeros((4,)))
     q, k, v = _rand(2, 4, 2, 16)  # below MIN_KV
     route(q, k, v, cache=cache, scale=0.5, mask=None)
 

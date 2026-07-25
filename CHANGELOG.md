@@ -8,15 +8,17 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- gemma-4 concurrent decode keeps the global layers on fused attention:
-  head_dim-512 batched decode routes each stream through the single-stream
-  kernels (left padding honored via per-row K/V tail slices) instead of the
-  stock materialized fallback, on both load paths (text-only GGUFs via the
-  mlx-lm text module, multimodal via the mlx-vlm language module). Certified
-  in-process on gemma-4-31b Q6_K: whole-step -8.6% at four streams on mixed
-  8k-14k contexts (tail slices also skip the padded prefix short rows would
-  otherwise re-read); -3.4% at two streams at uniform 14k
-  (`GMLX_G4_BATCHED_SDPA=0` reverts).
+- gemma-4 concurrent decode and speculative verify keep the global layers
+  on fused attention: head_dim-512 batched calls at decode width (one
+  position) and MTP verify width (2-8 positions) route each stream through
+  the single-stream kernels (left padding via per-row K/V tail slices;
+  verify blocks via end-aligned causal on the slice) instead of the stock
+  materialized fallback, on both load paths (text-only GGUFs via the
+  mlx-lm text module, multimodal via the mlx-vlm language module).
+  Certified in-process on gemma-4-31b Q6_K: whole-step -8.6% at four
+  streams on mixed 8k-14k contexts (tail slices also skip the padded
+  prefix short rows would otherwise re-read); -3.4% at two streams at
+  uniform 14k (`GMLX_G4_BATCHED_SDPA=0` reverts).
 
 ### Fixed
 

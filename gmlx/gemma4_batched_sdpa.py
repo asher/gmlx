@@ -14,9 +14,12 @@ mlx_vlm.models.text_only), multimodal loads from mlx_vlm.models.gemma4's
 language module. Both import a module-level scaled_dot_product_attention and
 call it with the cache in hand -- the only seam where left padding is
 visible -- so the route installs on both, each chained to that module's own
-original. This claims hd512 qL==1 B>1 calls and loops rows through
-mx.fast.scaled_dot_product_attention, i.e. through attn_hd512's wrapper, so
-each row picks sdpa_vector or sdpa_decode_gqa by its own depth. Left
+original. This claims hd512 B>1 calls at decode width (qL==1) and verify
+width (qL 2..8, the MTP block range; the block occupies the last qL key
+positions, so a per-row end-aligned "causal" mask after the tail slice is
+exact) and loops rows through mx.fast.scaled_dot_product_attention, i.e.
+through attn_hd512's wrapper, so each row picks the B=1 kernel route
+(sdpa_vector, sdpa_decode_gqa, fa_verify, verify_gemm) by its own shape. Left
 padding is honored by slicing each padded row's K/V to its visible tail
 ([pad, L) -- BatchKVCache.make_mask encodes exactly this at decode width;
 right padding is transient inside update_and_fetch and never live here).
@@ -90,12 +93,19 @@ def _pads_for_mask(mask):
     return None
 
 
-def _mask_claimable(mask):
-    if mask is None or (isinstance(mask, str) and mask == "causal"):
+def _mask_claimable(mask, qL):
+    if isinstance(mask, str) and mask == "causal":
         return True
-    # decode-width array mask: pure left-pad visibility (the qL>1 vision
-    # overlay never reaches decode width), which the tail slice reproduces
-    return isinstance(mask, mx.array) and mask.ndim >= 2 and mask.shape[-2] == 1
+    if mask is None:
+        # None at qL>1 would mean unmasked block attention; never claim it
+        return qL == 1
+    # decode-width (shape[-2]==1) or verify-width (shape[-2]==qL) array
+    # mask: pure left-pad visibility plus in-block causal, which the tail
+    # slice plus per-row causal reproduces. The gemma vision overlay only
+    # appears on image prefills (>=256 tokens/image), never at qL<=8 -- and
+    # the text-only load path has no overlay at all.
+    return (isinstance(mask, mx.array) and mask.ndim >= 2
+            and mask.shape[-2] == qL)
 
 
 def _claim(queries, keys, values, cache, scale, mask, sinks):
@@ -105,7 +115,7 @@ def _claim(queries, keys, values, cache, scale, mask, sinks):
         and isinstance(keys, mx.array)
         and queries.ndim == 4
         and queries.shape[0] > 1
-        and queries.shape[2] == 1
+        and 1 <= queries.shape[2] <= 8
         and queries.shape[-1] == 512
         and values.shape[-1] == 512
         and keys.shape[-1] == 512
@@ -114,7 +124,7 @@ def _claim(queries, keys, values, cache, scale, mask, sinks):
         and not hasattr(cache, "bits")
         and getattr(cache, "_right_padding", None) is None
         and keys.shape[2] >= attn_hd512._MIN_KV
-        and _mask_claimable(mask)
+        and _mask_claimable(mask, queries.shape[2])
     ):
         return None
     pads = _pads(cache)
@@ -132,9 +142,14 @@ def _claim(queries, keys, values, cache, scale, mask, sinks):
             pads = [0] * B
     elif isinstance(mask, mx.array):
         _remember_mask_pads(mask, pads)
-    if len(pads) < B or max(pads[:B]) >= keys.shape[2]:
+    qL = queries.shape[2]
+    if len(pads) < B or max(pads[:B]) > keys.shape[2] - qL:
         return None
     _CLAIMS[0] += 1
+    # qL==1 needs no mask after the tail slice; verify blocks (qL 2..8)
+    # occupy the LAST qL key positions, which is exactly mx.fast's
+    # end-aligned "causal" semantics on the sliced row.
+    row_mask = None if qL == 1 else "causal"
     outs = []
     for i in range(B):
         p = pads[i]
@@ -144,7 +159,7 @@ def _claim(queries, keys, values, cache, scale, mask, sinks):
             ki = keys[i:i + 1, :, p:, :]
             vi = values[i:i + 1, :, p:, :]
         outs.append(mx.fast.scaled_dot_product_attention(
-            queries[i:i + 1], ki, vi, scale=scale, mask=None))
+            queries[i:i + 1], ki, vi, scale=scale, mask=row_mask))
     return mx.concatenate(outs, axis=0)
 
 
