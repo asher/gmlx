@@ -6,6 +6,16 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- gemma-4 text decode/verify no longer host-syncs per step: the sliding-mask
+  cache probe compares int offsets host-side (array offsets skip the probe),
+  and per-layer rope offsets pass through without a device wrap. Token
+  outputs are bit-identical; `GMLX_G4_NOSYNC=0` restores upstream behavior.
+- gemma-4 MTP targets no longer install the three qwen3_5 verify levers
+  (module-scoped no-ops on gemma4); the tied quantized head already serves
+  verify logits directly.
+
 ## [0.1.1] - 2026-07-24
 
 ### Added

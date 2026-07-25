@@ -94,6 +94,11 @@ SEAMS: tuple[Seam, ...] = (
          "gdn_patches._patch_mlxvlm_gated_delta_tiled_v", critical=True),
     Seam("mlx_vlm.models.qwen3_5.gated_delta", "_gated_delta_state_ops",
          "gdn_patches._patch_mlxvlm_gated_delta_tiled_v", critical=True),
+    # --- gemma4 host-sync-free masks/offsets (gemma4_sync carries bodies) ---
+    Seam("mlx_vlm.models.gemma4.language", "Gemma4TextModel._make_masks",
+         "gemma4_sync.install_gemma4_nosync (body carried, offset probe)"),
+    Seam("mlx_vlm.models.gemma4.language", "Attention.__call__",
+         "gemma4_sync.install_gemma4_nosync (body carried, offset wrap)"),
     # --- speculative / AR batch engine (spec_engine owns these methods) ---
     Seam("mlx_vlm.generate.ar", "BatchGenerator.__init__",
          "spec_engine._install_apc_manager_stash", critical=True),

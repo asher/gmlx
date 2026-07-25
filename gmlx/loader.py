@@ -33,6 +33,7 @@ from .prefill_decay import install_prefill_decay, note_untracked_weights
 from . import gpt_oss_prefill  # noqa: F401  (registers gpt_oss score profile)
 from .modules import install_fused_moe_glu, install_hyv3_shexp_fold
 from .qkv_fuse import install_fused_qkv
+from .gemma4_sync import install_gemma4_nosync
 from .qwen35_verify_fold import install_qwen35_verify_fold
 from .rotating_cache_fix import install_rotating_cache_fix
 from .modules import KQuantEmbedding, install_kquant_modules
@@ -2477,6 +2478,8 @@ def _install_and_load(
         log("[install] depth-decay prefill chunking active")
     if install_qwen35_verify_fold():
         log("[install] qwen3.5 folded verify attention active")
+    if install_gemma4_nosync():
+        log("[install] gemma-4 host-sync-free masks/rope offsets active")
     n_fused_moe = install_fused_moe_glu(model)
     if n_fused_moe:
         log(f"[install] fused mxfp4 MoE GLU decode on {n_fused_moe} layers")
@@ -2899,6 +2902,8 @@ def load_model(
         _log("[install] depth-decay prefill chunking active")
     if install_qwen35_verify_fold():
         _log("[install] qwen3.5 folded verify attention active")
+    if install_gemma4_nosync():
+        _log("[install] gemma-4 host-sync-free masks/rope offsets active")
     n_fused_moe = install_fused_moe_glu(model)
     if n_fused_moe:
         _log(f"[install] fused mxfp4 MoE GLU decode on {n_fused_moe} layers")
