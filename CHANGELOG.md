@@ -27,7 +27,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   per-model width cap, and wider batches finish in plain decode with the
   drafter left loaded (`models[].speculative_width_cap` /
   `--speculative-width-cap` / `GMLX_MTP_WIDTH_CAP`; default per drafter
-  family, 0 = uncapped).
+  family, 0 = uncapped). Mixture-of-experts targets default to speculating
+  only at a single stream, since verification multiplies the expert union each
+  drafted position touches; they are detected from the loaded model's stacked
+  expert layers, so the default reaches new MoE architectures unaided.
 
 ### Fixed
 

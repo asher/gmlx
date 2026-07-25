@@ -497,15 +497,18 @@ Per-model keys: `path` (required), `profile`, `family`, `profiles`, `mmproj`,
 Speculation and batching compete for the same bandwidth: verifying a draft
 widens each request's weight reads, which is nearly free when one stream is
 decoding and costly once several are. Where that trade turns depends on the
-drafter, so each family carries a measured default and this key overrides it
-per model.
+drafter and on whether the target routes experts, so each model carries a
+measured default and this key overrides it.
 
-`null` (the default) takes the family value: uncapped for a native-head
-drafter on a dense qwen target, `2` for MoE targets and for the separate-model
-gemma assistant drafter, `1` for the hy3 and deepseek4 drafters (single
-sequence only). `0` turns the cap off; `N` speculates only while at most N
-requests decode together. A drafter that can only handle one sequence clamps
-any larger value, since exceeding it raises rather than running slowly.
+`null` (the default) takes that value: uncapped for a native-head drafter on a
+dense qwen target, `2` for the separate-model gemma assistant drafter on a
+dense target, `1` for any routed-expert target, and `1` for the hy3 and
+deepseek4 drafters (single sequence only). MoE targets are recognized by
+inspecting the loaded model for stacked expert layers, so the cap reaches a
+new MoE architecture without a per-model entry. `0` turns the cap off; `N`
+speculates only while at most N requests decode together. A drafter that can
+only handle one sequence clamps any larger value, since exceeding it raises
+rather than running slowly.
 
 A batch that grows past the cap finishes in plain decode. The drafter stays
 loaded and untouched, and the next batch to form re-evaluates; there is no

@@ -147,22 +147,138 @@ def _drive(drafter, *, B=3, max_tokens=3, sampler=None, model=None,
 
 # -- load-time stamping --------------------------------------------------
 
-def _stamped(model_type, env=None, monkeypatch=None):
+def _stamped(model_type, env=None, monkeypatch=None, target=None):
     from gmlx.mtp_load import _stamp_mtp_width_cap
 
     if env is not None:
         monkeypatch.setenv("MLX_VLM_GGUF_SPEC_WIDTH_CAP", env)
     d = SimpleNamespace()
-    _stamp_mtp_width_cap(d, model_type, log=lambda *a, **k: None)
+    _stamp_mtp_width_cap(d, model_type, target=target, log=lambda *a, **k: None)
     return d.mtp_width_cap, d.mtp_width_limit
+
+
+class _FakeProj:
+    """Stands in for a switch/dense projection: MoE variants carry either a
+    num_experts attribute (quantized/K-quant) or a stacked 3D weight."""
+
+    def __init__(self, weight=None, num_experts=None):
+        self.weight = weight
+        if num_experts is not None:
+            self.num_experts = num_experts
+
+
+class _FakeMLP:
+    def __init__(self, proj):
+        self.gate_proj = proj
+
+    def modules(self):
+        return [self]
+
+
+class _FakeLayer:
+    def __init__(self, proj):
+        self._mlp = _FakeMLP(proj)
+
+    def modules(self):
+        return [self, self._mlp]
+
+
+def _fake_model(proj, *, vlm=False):
+    """A model whose decoder layers hold one projection each. vlm=True nests it
+    the way a VLM wrapper does (model.language_model.model.layers)."""
+    inner = SimpleNamespace(layers=[_FakeLayer(proj)])
+    if vlm:
+        return SimpleNamespace(language_model=SimpleNamespace(model=inner))
+    return SimpleNamespace(model=inner)
+
+
+DENSE_PROJ = _FakeProj(weight=mx.zeros((8, 4)))
+MOE_PROJ_3D = _FakeProj(weight=mx.zeros((6, 8, 4)))
+MOE_PROJ_ATTR = _FakeProj(weight=None, num_experts=6)
+
+
+# -- structural MoE detection --------------------------------------------
+
+def test_model_is_moe_detects_stacked_expert_weight():
+    from gmlx.loader import model_is_moe
+
+    assert model_is_moe(_fake_model(MOE_PROJ_3D))
+    assert model_is_moe(_fake_model(MOE_PROJ_ATTR))
+
+
+def test_model_is_moe_false_on_dense():
+    """A dense 2D weight must NOT read as MoE. _switch_num_experts would return
+    weight.shape[0] here (the output width), which is why it can't be the
+    test."""
+    from gmlx.loader import model_is_moe
+
+    assert not model_is_moe(_fake_model(DENSE_PROJ))
+
+
+def test_model_is_moe_walks_the_vlm_wrapper():
+    from gmlx.loader import model_is_moe
+
+    assert model_is_moe(_fake_model(MOE_PROJ_3D, vlm=True))
+    assert not model_is_moe(_fake_model(DENSE_PROJ, vlm=True))
+
+
+def test_model_is_moe_no_layers_is_false():
+    from gmlx.loader import model_is_moe
+
+    assert not model_is_moe(SimpleNamespace())
+
+
+# -- the MoE rule overrides the family default ---------------------------
+
+def test_moe_target_caps_at_one_over_any_family_default():
+    """Routed experts cap at 1 whatever the family says: the gemma assistant
+    (2, earned on the dense 31B) and dense qwen (uncapped) both drop."""
+    moe = _fake_model(MOE_PROJ_3D)
+    assert _stamped("gemma4_assistant", target=moe) == (1, 0)
+    assert _stamped("qwen3_5", target=moe) == (1, 0)
+    # an arch with no table row inherits it too, instead of the fallback 2
+    assert _stamped("brand_new_moe_arch", target=moe) == (1, 0)
+
+
+def test_dense_target_keeps_the_family_default():
+    dense = _fake_model(DENSE_PROJ)
+    assert _stamped("gemma4_assistant", target=dense) == (2, 0)
+    assert _stamped("qwen3_5", target=dense) == (0, 0)
+    assert _stamped("brand_new_arch", target=dense) == (2, 0)
+
+
+def test_env_override_still_beats_the_moe_rule(monkeypatch):
+    """The MoE cap is a default, not a limit -- a measurement run can ungate
+    it. (Hard limits are the only thing env may not cross.)"""
+    moe = _fake_model(MOE_PROJ_3D)
+    assert _stamped("gemma4_assistant", env="0", monkeypatch=monkeypatch,
+                    target=moe) == (0, 0)
+    assert _stamped("gemma4_assistant", env="3", monkeypatch=monkeypatch,
+                    target=moe) == (3, 0)
+
+
+def test_moe_rule_does_not_unclamp_a_hard_limit():
+    """deepseek4/hy3 are MoE and already B=1-only; the rule must not disturb
+    the limit that keeps their drafters from raising."""
+    moe = _fake_model(MOE_PROJ_3D)
+    assert _stamped("deepseek_v4", target=moe) == (1, 1)
+    assert _stamped("hy_v3", target=moe) == (1, 1)
+
+
+def test_absent_target_falls_back_to_the_family_default():
+    """Every in-tree stamp site passes target=, but the parameter is optional
+    so a caller that cannot supply one still gets defined behavior."""
+    assert _stamped("gemma4_assistant") == (2, 0)
 
 
 def test_stamp_family_defaults():
     # dense qwen nextn: measured a win through c4, so uncapped
     assert _stamped("qwen3_5") == (0, 0)
     assert _stamped("qwen3_5_text") == (0, 0)
-    # MoE nextn and the gemma assistant knee at B>=3
-    assert _stamped("qwen3_5_moe") == (2, 0)
+    # MoE nextn loses at B=2 (0.78x aggregate, d14k) -> speculate at B=1 only
+    assert _stamped("qwen3_5_moe") == (1, 0)
+    assert _stamped("qwen3_5_moe_text") == (1, 0)
+    # the gemma assistant wins c1/c2 on the dense 31B, knees at B>=3
     assert _stamped("gemma4_assistant") == (2, 0)
     # B=1-only drafters: cap AND hard limit
     assert _stamped("hy_v3") == (1, 1)
@@ -179,7 +295,7 @@ def test_stamp_env_override(monkeypatch):
     assert _stamped("qwen3_5_moe", env="4", monkeypatch=monkeypatch) == (4, 0)
     assert _stamped("qwen3_5_moe", env="0", monkeypatch=monkeypatch) == (0, 0)
     # empty = the config declared nothing, keep the family default
-    assert _stamped("qwen3_5_moe", env="", monkeypatch=monkeypatch) == (2, 0)
+    assert _stamped("qwen3_5_moe", env="", monkeypatch=monkeypatch) == (1, 0)
 
 
 def test_stamp_env_cannot_cross_hard_limit(monkeypatch):

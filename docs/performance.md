@@ -150,14 +150,18 @@ batch-width cap: speculation runs while the live batch is narrow and the
 batch finishes in plain decode once it grows past the cap, with the drafter
 left loaded for the next one.
 
-Where the trade turns depends on the drafter, not on whether the target is
-dense or MoE. A native head verified by a hybrid-attention target keeps
+Where the trade turns depends on the drafter and on whether the target routes
+experts. A native head verified by a dense hybrid-attention target keeps
 winning to the widest batch we measured, so it defaults to uncapped. A
 separate-model drafter pays a full small-model forward per drafted token and
 that cost grows with the batch, so the gemma assistant shape defaults to a cap
-of 2 even though its target is dense. MoE targets default to 2 as well:
-verification multiplies the union of experts each row touches. Two drafters
-(hy3, deepseek4) can only draft a single sequence and are capped at 1.
+of 2 on a dense target. Routed-expert targets default to 1 and speculate only
+while a single stream decodes: verification multiplies the union of experts
+each drafted position touches, and both MoE families measured lose the trade
+at width 2. That one is decided by inspecting the loaded model for stacked
+expert layers rather than by a table of architectures, so a new MoE model
+inherits it on arrival. Two drafters (hy3, deepseek4) can draft only a single
+sequence, and are capped at 1 for that reason instead.
 
 Per-model `speculative_width_cap` overrides the default; `GMLX_MTP_WIDTH_CAP=0`
 turns the cap off for a measurement run. See
