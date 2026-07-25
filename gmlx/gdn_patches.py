@@ -49,6 +49,29 @@ def _log_gdn_route_once(which, S, B, sink, mask, taken):
           f"mask={type(mask).__name__} -> {taken}", file=sys.stderr, flush=True)
 
 
+_mask_described: set = set()
+
+
+def _describe_blocking_mask_once(which, S, B, mask):
+    """When a mask is what costs this layer the fused kernel, report whether it
+    actually masks anything. An all-true mask at S=1 blocks the fast path while
+    excluding nothing."""
+    if not isinstance(mask, mx.array):
+        return
+    key = (which, S, B, tuple(mask.shape), str(mask.dtype))
+    if key in _mask_described:
+        return
+    _mask_described.add(key)
+    if mask.dtype == mx.bool_:
+        blocked = int((~mask).sum().item())
+    else:
+        blocked = int((mask < 0).sum().item())
+    print(f"[gdn] blocking mask {which}: S={S} B={B} shape={tuple(mask.shape)} "
+          f"dtype={mask.dtype} excluded_entries={blocked} of {mask.size} "
+          f"({'NO-OP -> fused path lost for nothing' if blocked == 0 else 'real'})",
+          file=sys.stderr, flush=True)
+
+
 @atexit.register
 def _dump_gdn_route_counts():
     if not _ROUTE_DEBUG or not _route_counts:
@@ -450,6 +473,7 @@ def _gdn_fused_decode_call(self, inputs, mask=None, cache=None):
     ):
         if _ROUTE_DEBUG:
             _log_gdn_route_once("lm", S, B, None, mask, "STOCK-unfused")
+            _describe_blocking_mask_once("lm", S, B, mask)
         return _FUSED_DECODE_PATCH.stock(self, inputs, mask, cache)
     if _ROUTE_DEBUG:
         _log_gdn_route_once("lm", S, B, None, mask, "fused-decode")
