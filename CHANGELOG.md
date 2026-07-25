@@ -18,6 +18,14 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   otherwise re-read); -3.4% at two streams at uniform 14k
   (`GMLX_G4_BATCHED_SDPA=0` reverts).
 
+### Fixed
+
+- quantized KV cache (`kv_bits`) no longer crashes concurrent serving on
+  grouped-query models: upstream's quantized SDPA applies the batched
+  left-pad mask to 5D grouped scores and every B>1 masked call raised a
+  broadcast error (single-stream was unaffected). gmlx inserts the missing
+  mask axis at both upstream seams (`GMLX_QSDPA_MASK_FIX=0` reverts).
+
 ### Changed
 
 - multimodal gemma-4 decode/verify no longer host-syncs per step: the

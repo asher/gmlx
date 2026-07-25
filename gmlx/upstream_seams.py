@@ -101,6 +101,11 @@ SEAMS: tuple[Seam, ...] = (
          "gemma4_sync.install_gemma4_nosync (body carried, offset wrap)"),
     Seam("mlx_vlm.models.gemma4.language", "scaled_dot_product_attention",
          "gemma4_batched_sdpa (hd512 B>1 row route; left-pad tail slices)"),
+    # --- quantized-KV SDPA batch-mask fix (both base modules) ---
+    Seam("mlx_lm.models.base", "quantized_scaled_dot_product_attention",
+         "quantized_sdpa_fix (5D grouped scores vs 4D batch mask)"),
+    Seam("mlx_vlm.models.base", "quantized_scaled_dot_product_attention",
+         "quantized_sdpa_fix (same body as the mlx_lm copy)"),
     # --- gemma4 text-only load path (mlx_lm module wrapped in text_only) ---
     Seam("mlx_lm.models.gemma4_text", "scaled_dot_product_attention",
          "gemma4_batched_sdpa (same row route at the text-only seam)"),

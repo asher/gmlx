@@ -35,6 +35,7 @@ from .modules import install_fused_moe_glu, install_hyv3_shexp_fold
 from .qkv_fuse import install_fused_qkv
 from .gemma4_batched_sdpa import install_gemma4_batched_sdpa
 from .gemma4_sync import install_gemma4_nosync
+from .quantized_sdpa_fix import install_quantized_sdpa_mask_fix
 from .qwen35_verify_fold import install_qwen35_verify_fold
 from .rotating_cache_fix import install_rotating_cache_fix
 from .modules import KQuantEmbedding, install_kquant_modules
@@ -2475,6 +2476,8 @@ def _install_and_load(
 
     if install_hd512_sdpa():
         log("[install] head_dim-512 fused SDPA active")
+    if install_quantized_sdpa_mask_fix():
+        log("[install] quantized-KV SDPA batch-mask fix active")
     if install_prefill_decay():
         log("[install] depth-decay prefill chunking active")
     if install_qwen35_verify_fold():
@@ -2901,6 +2904,8 @@ def load_model(
 
     if install_hd512_sdpa():
         _log("[install] head_dim-512 fused SDPA active")
+    if install_quantized_sdpa_mask_fix():
+        _log("[install] quantized-KV SDPA batch-mask fix active")
     if install_prefill_decay():
         _log("[install] depth-decay prefill chunking active")
     if install_qwen35_verify_fold():
