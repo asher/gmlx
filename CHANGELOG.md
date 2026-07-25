@@ -24,6 +24,18 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- the qwen3.5/3.6 batched-verify SDPA seam no longer forwards to the
+  stock per-pad-group gather loop whenever the cache carries a
+  left-padding attribute: it now bails only on real padding, and when
+  padding is real it answers with one SDPA call under a combined
+  left-pad + causal boolean mask (bit-exact against the stock loop on
+  the bf16 serve path; `GMLX_VERIFY_RAGGED_MASK=0` restores the
+  forward). Live verify traffic reaches this seam with the pad
+  attribute already cleared and an upstream-built array mask, so this
+  hardens the seam against flows that pass pads at verify width rather
+  than changing current serve numbers; a one-shot
+  `[verify] ragged-pads route:` stderr note reports whenever either
+  branch actually fires.
 - quantized KV cache (`kv_bits`) no longer crashes concurrent serving on
   grouped-query models: upstream's quantized SDPA applies the batched
   left-pad mask to 5D grouped scores and every B>1 masked call raised a
