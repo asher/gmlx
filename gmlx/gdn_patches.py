@@ -30,9 +30,18 @@ _route_logged: set = set()
 _route_counts: dict = {}
 
 
+_route_calls = [0]
+# Dump cadence in GDN calls. The harness SIGTERMs servers, which does not run
+# atexit, so the histogram has to land in the log while the process is alive.
+_ROUTE_DUMP_EVERY = 2000
+
+
 def _log_gdn_route_once(which, S, B, sink, mask, taken):
     key = (which, S, B, sink is not None, type(mask).__name__, taken)
     _route_counts[key] = _route_counts.get(key, 0) + 1
+    _route_calls[0] += 1
+    if _route_calls[0] % _ROUTE_DUMP_EVERY == 0:
+        _dump_gdn_route_counts()
     if key in _route_logged:
         return
     _route_logged.add(key)
