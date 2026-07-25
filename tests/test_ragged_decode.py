@@ -23,6 +23,16 @@ import pytest
 
 import mlx.core as mx
 
+# The numerics tests dispatch mx.fast.metal_kernel, which raises on the CPU
+# device. conftest pins the device to CPU under KQUANT_FORCE_CPU (CI). Gate on
+# the resolved device rather than the env var so a machine with no Metal at all
+# is covered too. Applied per-test, not module-wide: the decline test asserts a
+# guard rail that returns before any dispatch, so it must keep running on CPU.
+_NEEDS_GPU = pytest.mark.skipif(
+    mx.default_device() != mx.gpu,
+    reason="ragged decode numerics dispatch metal kernels; needs the GPU device",
+)
+
 D_SIZE = 256
 KV_HEADS = 2
 Q_HEADS = 16
@@ -89,6 +99,7 @@ def unified():
         (4096, [0, 1000, 2000]),      # wide pad spread, still one bucket
     ],
 )
+@_NEEDS_GPU
 def test_same_bucket_is_bit_exact(unified, k_size, pads):
     """Buckets agree -> seam keeps the stock plan -> no drift at all."""
     got, ref = _run(k_size, pads)
@@ -103,6 +114,7 @@ def test_same_bucket_is_bit_exact(unified, k_size, pads):
         (32900, [0, 400, 900]),       # straddles the 32k plan boundary
     ],
 )
+@_NEEDS_GPU
 def test_straddling_buckets_claimed_and_accurate(unified, k_size, pads):
     """Newly claimed (stock declines these); must match within bf16 rounding."""
     got, ref = _run(k_size, pads)
@@ -110,6 +122,7 @@ def test_straddling_buckets_claimed_and_accurate(unified, k_size, pads):
     assert _rel_err(got, ref) < BF16_ULP
 
 
+@_NEEDS_GPU
 def test_pads_are_honored(unified):
     """A padded row must ignore its pad columns entirely: poisoning the pad
     region cannot change the output. This is the masking property a position

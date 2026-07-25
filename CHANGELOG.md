@@ -55,12 +55,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - Speculative serving: admitting a request into a live batch could kill every
-  request in flight, in three ways - a rope-deltas broadcast error on the
+  request in flight in three ways. A rope-deltas broadcast error on the
   qwen3.5/3.6 prompt path, `'RotatingKVCache' object has no attribute 'rotated'`
   on sliding-window models, and a shared-KV shape mismatch with the gemma
-  assistant drafter. Deltas are zero-padded to the live width, rotating caches
-  are lifted to the batch class before the join, and injected rows are aligned
-  into the drafter's view at the new width.
+  assistant drafter. Deltas are now zero-padded to the live width, rotating
+  caches are lifted to the batch class before the join, and injected rows are
+  aligned into the drafter's view at the new width.
 - Chat died at the first token with `There is no Stream(gpu, N) in current
   thread` on models carrying precomputed RoPE frequencies (Gemma 4 and other
   scaled-RoPE families).

@@ -1,12 +1,36 @@
 """Decode-priority prefill pacing: wrapper logic over a fake generator."""
 
-import time
+from types import SimpleNamespace
 
 import pytest
 
 from mlx_vlm.generate import ar
 
 import gmlx.batch_sched as batch_sched
+
+
+class _Clock:
+    """Deterministic stand-in for ``time.perf_counter``.
+
+    The pacer charges a decode tick by wall clock, so sleeping real
+    milliseconds makes the decode/chunk ratio a function of the runner's sleep
+    granularity: on a loaded CI box a 1 ms sleep lands nearer 2 ms and the
+    measured ratio halves. Advancing by exact amounts tests the pacing
+    arithmetic instead of the scheduler underneath it."""
+
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+    def advance(self, dt):
+        self.t += dt
+
+
+_CLOCK = _Clock()
+DECODE_S = 0.001
+CHUNK_S = 0.004
 
 
 class FakeGen:
@@ -25,15 +49,15 @@ class FakeGen:
 def _fake_next(self, **kw):
     if len(self._generation_batch) > 0:
         self.decodes += 1
-        time.sleep(0.001)
+        _CLOCK.advance(DECODE_S)
     # a handler thread may enqueue mid-call; appends bind to whatever list
     # the wrapper left on the instance
     self.arrivals += 1
     self._unprocessed_sequences.append(("uid", self.arrivals))
     if self._prompt_batch is not None:
         self.chunks += 1
-        time.sleep(0.004)
-        self._prompt_time_counter += 0.004
+        _CLOCK.advance(CHUNK_S)
+        self._prompt_time_counter += CHUNK_S
     return [], []
 
 
@@ -41,6 +65,11 @@ def _fake_next(self, **kw):
 def paced(monkeypatch):
     monkeypatch.setenv("GMLX_DECODE_PREFILL_RATIO", "1.0")
     monkeypatch.setattr(ar.BatchGenerator, "_next", _fake_next)
+    # batch_sched reads only time.perf_counter; swap the whole name so the
+    # patch is scoped to that module rather than the global time module.
+    _CLOCK.t = 0.0
+    monkeypatch.setattr(batch_sched, "time",
+                        SimpleNamespace(perf_counter=_CLOCK))
     batch_sched.install_decode_priority_sched()
     yield ar.BatchGenerator._next
 
@@ -51,9 +80,12 @@ def test_pacing_ratio_and_arrival_merge(paced):
     n = 120
     for _ in range(n):
         paced(g)
-    # 4ms chunk / 1ms step at ratio 1.0 -> roughly 4 decode ticks per chunk
+    # Ratio 1.0 owes 4 ms of decode per 4 ms chunk, so a cycle is 4 paced
+    # decode ticks plus the chunk tick, whose stock body also runs a decode
+    # step: 5 decodes per chunk. n=120 is 24 whole cycles, and the clock is
+    # exact, so this is an equality rather than a tolerance band.
     per_chunk = g.decodes / g.chunks
-    assert 2.5 <= per_chunk <= 7.0
+    assert per_chunk == 5.0
     # every mid-call arrival survives the stash/restore merge
     assert g._unprocessed_sequences is pending
     assert len(pending) == g.arrivals == n
