@@ -146,15 +146,34 @@ def _log_cache_shape_once(tag, prompt_cache, n_active):
     if tag in _shape_logged:
         return
     _shape_logged.add(tag)
-    entry = prompt_cache[0] if prompt_cache else None
-    lp = getattr(entry, "left_padding", None)
+    kinds: dict[str, int] = {}
+    for e in prompt_cache:
+        k = type(e).__name__
+        kinds[k] = kinds.get(k, 0) + 1
+    # First attention-ish entry: the left-padding spread on it is what picks
+    # the padded-decode attention path over the plain batched one.
+    attn = next((e for e in prompt_cache
+                 if getattr(e, "keys", None) is not None), None)
+    lp = getattr(attn, "left_padding", None)
     lp_list = lp.tolist() if isinstance(lp, mx.array) else lp
-    keys = getattr(entry, "keys", None)
-    print(f"[spec] shape-debug {tag}: rows={n_active} "
-          f"cache={type(entry).__name__} offset={getattr(entry, 'offset', None)} "
-          f"left_padding={lp_list} "
-          f"keys={None if keys is None else tuple(keys.shape)} "
-          f"entries={len(prompt_cache)}", file=sys.stderr, flush=True)
+    keys = getattr(attn, "keys", None)
+    # First recurrent (gated-delta) entry: its left_padding / lengths are what
+    # _create_qwen3_5_ssm_mask reads, and an array mask there disqualifies the
+    # fused GDN decode kernel for every linear layer.
+    rec = next((e for e in prompt_cache
+                if getattr(e, "keys", None) is None), None)
+    rlp = getattr(rec, "left_padding", None)
+    rlp_list = rlp.tolist() if isinstance(rlp, mx.array) else rlp
+    rlen = getattr(rec, "lengths", None)
+    rlen_list = rlen.tolist() if isinstance(rlen, mx.array) else rlen
+    print(f"[spec] shape-debug {tag}: rows={n_active} entries={len(prompt_cache)} "
+          f"kinds={kinds} attn={type(attn).__name__ if attn is not None else None} "
+          f"offset={getattr(attn, 'offset', None)} left_padding={lp_list} "
+          f"keys={None if keys is None else tuple(keys.shape)} | "
+          f"recurrent={type(rec).__name__ if rec is not None else None} "
+          f"rec_left_padding={rlp_list} rec_lengths={rlen_list} "
+          f"rec_make_mask={hasattr(rec, 'make_mask')}",
+          file=sys.stderr, flush=True)
 # Walk diagnostics (B=1 loop only). GMLX_WALK_PROFILE=1 splits the walk
 # into graph-build / eval / host tail and prints medians at session end.
 # =2 additionally stages the eval to split lm_head projection from the
