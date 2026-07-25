@@ -8,15 +8,24 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- llama-family batched decode fuses the attention and MLP projections
-  at load: q/k/v (and gate/up) K-quant wires row-concatenate into one
-  matmul per group on the single-position B>=2 path, filling the GPU
-  where the separate small-M launches underfill it (llama-8B k/v put up
-  16 threadgroups each). Certified bit-exact against stock on
-  Dolphin3-8B Q6_K (B=2 greedy logits and tokens identical, ragged
-  BatchGenerator tokens identical); whole-step -2.6% at B=8 and -4.8%
-  at B=16 at d64, B=1 takes the stock path exactly
-  (`GMLX_OCCUPANCY_FUSE=0` reverts, read per call).
+- batched decode fuses the attention and MLP projections at load on
+  llama and qwen3.5/3.6 text (full-attention layers; GDN layers
+  untouched): q/k/v (and gate/up) K-quant wires row-concatenate into
+  one matmul per group on the single-position B>=2 path, filling the
+  GPU where the separate small-M launches underfill it (llama-8B k/v
+  put up 16 threadgroups each). Certified bit-exact against stock on
+  Dolphin3-8B and Qwen3.5-9B Q6_K (B=2 greedy logits and tokens
+  identical, ragged BatchGenerator tokens identical); B=1 takes the
+  stock path exactly (`GMLX_OCCUPANCY_FUSE=0` reverts, read per call).
+- at batch width 12 and above the fused MLP also splits down_proj into
+  two half-K matmuls plus an add: the single long-K launch craters at
+  the M=12 kernel-route cliff (q6_k [4096x14336] serial 224 -> 124
+  GB/s) while two overlapping halves hold 165. The add costs one bf16
+  rounding, so this path is allclose-not-bit-identical to stock
+  (certified: B=12 greedy tokens identical, logits within 1 ulp);
+  single-stream traffic never reaches it. Combined step-time win at
+  B=16 d64: -11.0% on Dolphin3-8B, -7.1% on Qwen3.5-9B
+  (`GMLX_SPLITK_MIN_B` tunes the width, `0` kills the split).
 
 - gemma-4 concurrent decode and speculative verify keep the global layers
   on fused attention: head_dim-512 batched calls at decode width (one
