@@ -1004,23 +1004,49 @@ def _gdn_fused_verify_call(
 
 
 _BATCHED_VERIFY_SDPA_PATCHED = False
+# Stock upstream _target_verify_left_padded_attention, captured at patch
+# install; tests use it as the bit-exact reference.
+_STOCK_VERIFY_LEFT_PADDED = None
 
 
 def _patch_batched_verify_sdpa() -> None:
     """Replace the per-position SDPA loop in _target_verify_left_padded_attention
-    with a single batched call using a causal mask.
+    with a single batched call.
 
     For MTP verify (S=K+1 query positions), the stock code does S separate
     mx.fast.scaled_dot_product_attention calls per attention layer.  A single
     call with mask='causal' is numerically identical (verified bit-exact for
-    GQA, B=1..4, d up to 4096) and saves S-1 kernel launches per layer."""
-    global _BATCHED_VERIFY_SDPA_PATCHED
+    GQA, B=1..4, d up to 4096) and saves S-1 kernel launches per layer.
+
+    Left-padded batches (ragged prompt lengths) get the same treatment with
+    an explicit [B, 1, S, T] boolean mask that encodes the per-row pad and
+    causality together.  The stock path for that case groups rows by pad
+    value and does an mx.take of full-depth K/V per group plus a
+    per-query-position SDPA, so at depth every verify step re-reads the
+    whole KV once more; the masked call touches each key exactly once.
+    Masked columns contribute exp(-inf) = 0 to reductions, so the result is
+    bit-exact against the group loop.  GMLX_VERIFY_RAGGED_MASK=0 restores
+    the stock group-loop path (read per call)."""
+    global _BATCHED_VERIFY_SDPA_PATCHED, _STOCK_VERIFY_LEFT_PADDED
     if _BATCHED_VERIFY_SDPA_PATCHED:
         return
+
+    import os
 
     import mlx_vlm.models.qwen3_5.language as _L
 
     _orig_left_padded = _L._target_verify_left_padded_attention
+    _STOCK_VERIFY_LEFT_PADDED = _orig_left_padded
+    _ragged_noted = set()
+
+    def _note_ragged(route, B, L, T, pads):
+        key = (route, B, L)
+        if key in _ragged_noted:
+            return
+        _ragged_noted.add(key)
+        import sys
+        print(f"[verify] ragged-pads route: {route} B={B} S={L} T={T} "
+              f"max_pad={max(pads)}", file=sys.stderr, flush=True)
 
     def _batched_verify_attention(queries, keys, values, *, cache, scale, mask):
         if hasattr(cache, "bits") or queries.ndim != 4 or keys.ndim != 4:
@@ -1028,14 +1054,32 @@ def _patch_batched_verify_sdpa() -> None:
                 queries, keys, values, cache=cache, scale=scale, mask=mask
             )
         pads = getattr(cache, "_qwen3_5_decode_left_padding", None)
-        if pads is not None:
+        padded = pads is not None and len(pads) > 0 and max(pads) > 0
+        L = queries.shape[-2]
+        if padded and (
+            L <= 1
+            or len(pads) != queries.shape[0]
+            or isinstance(mask, mx.array)
+            or os.environ.get("GMLX_VERIFY_RAGGED_MASK", "1") == "0"
+        ):
+            if L > 1:
+                _note_ragged("stock-loop", queries.shape[0], L,
+                             keys.shape[-2], pads)
             return _orig_left_padded(
                 queries, keys, values, cache=cache, scale=scale, mask=mask
             )
-        L = queries.shape[-2]
         if L <= 1:
             return None
-        sdpa_mask = mask if isinstance(mask, mx.array) else "causal"
+        if padded:
+            _note_ragged("masked-sdpa", queries.shape[0], L,
+                         keys.shape[-2], pads)
+            T = keys.shape[-2]
+            t = mx.arange(T)[None, None, :]
+            end = (T - L) + mx.arange(L)[None, :, None]
+            pad_arr = mx.array(pads, dtype=mx.int32)[:, None, None]
+            sdpa_mask = ((t >= pad_arr) & (t <= end))[:, None, :, :]
+        else:
+            sdpa_mask = mask if isinstance(mask, mx.array) else "causal"
         return mx.fast.scaled_dot_product_attention(
             queries, keys, values, scale=scale, mask=sdpa_mask
         )

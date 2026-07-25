@@ -94,6 +94,26 @@ SEAMS: tuple[Seam, ...] = (
          "gdn_patches._patch_mlxvlm_gated_delta_tiled_v", critical=True),
     Seam("mlx_vlm.models.qwen3_5.gated_delta", "_gated_delta_state_ops",
          "gdn_patches._patch_mlxvlm_gated_delta_tiled_v", critical=True),
+    # --- gemma4 host-sync-free masks/offsets (gemma4_sync carries bodies) ---
+    Seam("mlx_vlm.models.gemma4.language", "Gemma4TextModel._make_masks",
+         "gemma4_sync.install_gemma4_nosync (body carried, offset probe)"),
+    Seam("mlx_vlm.models.gemma4.language", "Attention.__call__",
+         "gemma4_sync.install_gemma4_nosync (body carried, offset wrap)"),
+    Seam("mlx_vlm.models.gemma4.language", "scaled_dot_product_attention",
+         "gemma4_batched_sdpa (hd512 B>1 row route; left-pad tail slices)"),
+    # --- quantized-KV SDPA batch-mask fix (both base modules) ---
+    Seam("mlx_lm.models.base", "quantized_scaled_dot_product_attention",
+         "quantized_sdpa_fix (5D grouped scores vs 4D batch mask)"),
+    Seam("mlx_vlm.models.base", "quantized_scaled_dot_product_attention",
+         "quantized_sdpa_fix (same body as the mlx_lm copy)"),
+    # --- gemma4 text-only load path (mlx_lm module wrapped in text_only) ---
+    Seam("mlx_lm.models.gemma4_text", "scaled_dot_product_attention",
+         "gemma4_batched_sdpa (same row route at the text-only seam)"),
+    Seam("mlx_lm.models.gemma4_text", "Attention.__call__",
+         "gemma4_batched_sdpa (module-global sdpa call, cache kwarg)"),
+    Seam("mlx_lm.models.gemma4_text", "Gemma4TextModel._make_masks",
+         "gemma4_batched_sdpa (one mask object per layer type; the "
+         "producer->consumer pad relay keys on that identity)"),
     # --- speculative / AR batch engine (spec_engine owns these methods) ---
     Seam("mlx_vlm.generate.ar", "BatchGenerator.__init__",
          "spec_engine._install_apc_manager_stash", critical=True),

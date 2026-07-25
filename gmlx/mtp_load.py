@@ -675,17 +675,19 @@ def load_mtp_model(
         _patch_batched_verify_sdpa()
         _patch_bf16_verify_linear()
     elif config_dict.get("model_type") in ("gemma4", "gemma4_text"):
-        # gemma4 MTP target (assistant drafter): no GDN, but the generic
-        # verify-width levers should apply -- the M-stationary GEMV-ext
-        # dense head alone is ~2 ms/round at M=4 on the 31B (2.8 GB bf16
-        # head read at 68% of peak on stock mx.matmul vs ~95% on the ext
-        # kernel). All three currently no-op here: their applicability
-        # checks match the qwen3_5 target classes only. Adapting them to
-        # the gemma4 LanguageModel class is the open MTP front (verify is
-        # 89.7% of the round and +37% over the M=1 step on the 31B).
-        _patch_dense_head_verify(model)
-        _patch_batched_verify_sdpa()
-        _patch_bf16_verify_linear()
+        # gemma4 MTP target (assistant drafter): none of the qwen verify
+        # levers apply here, so none are installed.
+        # - dense-head verify is categorically inapplicable: gemma4 ties
+        #   the head to the quantized embedding (embed_tokens.as_linear;
+        #   no lm_head attr), and the q6_k head already runs kq's fast
+        #   verify path (measured 445-490 GB/s at verify M, ~0.4 ms/round
+        #   of headroom at most).
+        # - _patch_batched_verify_sdpa / _patch_bf16_verify_linear rebind
+        #   qwen3_5-module seams (_target_verify_*) that gemma4's language
+        #   module does not route through; installing them here implied
+        #   coverage that never existed. gemma4's verify-attention seam is
+        #   the open front (verify is 89.7% of the round on the 31B).
+        pass
 
     # 3. drafter - native-head (extracted from this GGUF's MTP block) or
     #    assistant (a separate companion GGUF). Seam 4.
