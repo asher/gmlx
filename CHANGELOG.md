@@ -6,6 +6,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Prefill ticks: while streams are decoding, each admission prefill chunk is
+  halved until its predicted wall time fits a stall budget
+  (`server.prefill_tick_ms` / `--prefill-tick-ms` / `GMLX_PREFILL_TICK_MS`,
+  default 500 ms; 0 = full chunks), bounding the per-chunk decode hitch that
+  pacing's average-share arithmetic cannot. Inert with no live decode, so
+  single-stream TTFT is unchanged.
+
 ## [0.1.1] - 2026-07-24
 
 ### Added

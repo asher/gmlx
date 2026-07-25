@@ -13,6 +13,14 @@ since the previous chunk. ratio=1.0 => ~50/50 GPU split while both are
 live; higher favors decode. Prefill runs at full speed whenever no decode
 batch is active, so single-stream TTFT is untouched.
 
+The wrapper also feeds prefill_decay's concurrency term (prefill ticks):
+live decode width is noted every tick, and each admitted chunk's observed
+wall cost is handed over so the next chunk can be sized to the
+GMLX_PREFILL_TICK_MS stall budget. Pacing bounds the average GPU share;
+the tick term bounds the per-chunk stall quantum. The two compose: pacing
+self-tunes off the same observed chunk cost whatever chunk policy is in
+force.
+
 Installation is the same late-bound monkeypatch pattern as `spec_engine`:
 wrap ``BatchGenerator._next``; on a paced tick, stash ``_prompt_batch`` +
 ``_unprocessed_sequences`` so the stock body sees no prefill work (decode
@@ -67,20 +75,39 @@ def install_decode_priority_sched() -> None:
     passes straight through at ratio <= 0 (stock scheduling)."""
     from mlx_vlm.generate import ar as _ar
 
+    from . import prefill_decay as _pd
+
     if getattr(_ar.BatchGenerator._next, _INSTALLED_FLAG, False):
         return
     _orig_next = _ar.BatchGenerator._next
+
+    def _observed_next(self, **kwargs):
+        # Run the stock body and observe any prefill chunk it admitted via
+        # the prompt-time counter delta. Feeds both consumers of the
+        # observation: the pacer's owed-decode arithmetic and
+        # prefill_decay's tick term (which sizes the NEXT chunk to the
+        # stall budget).
+        before = self._prompt_time_counter
+        out = _orig_next(self, **kwargs)
+        spent = self._prompt_time_counter - before
+        if spent > 0.0:
+            self._kq_last_chunk_time = spent
+            self._kq_decode_since_chunk = 0.0
+            _pd.note_chunk_cost(spent)
+        return out
 
     def _paced_next(self, **kwargs):
         # Pace only when decode AND prefill work are both live; otherwise
         # stock behavior (prefill at full speed, untouched TTFT).
         ratio = _ratio()
+        decode_rows = len(self._generation_batch)
+        _pd.note_decode_pressure(decode_rows)
         prefill_live = self._prompt_batch is not None or bool(
             self._unprocessed_sequences
         )
-        decode_live = len(self._generation_batch) > 0
+        decode_live = decode_rows > 0
         if ratio <= 0 or not (prefill_live and decode_live):
-            return _orig_next(self, **kwargs)
+            return _observed_next(self, **kwargs)
 
         last_chunk = getattr(self, "_kq_last_chunk_time", 0.0)
         decode_owed = ratio * last_chunk
@@ -110,14 +137,8 @@ def install_decode_priority_sched() -> None:
             return out
 
         # Chunk-eligible tick: let the stock body run its prefill arm and
-        # observe the chunk cost via the prompt-time counter delta.
-        before = self._prompt_time_counter
-        out = _orig_next(self, **kwargs)
-        spent = self._prompt_time_counter - before
-        if spent > 0.0:
-            self._kq_last_chunk_time = spent
-            self._kq_decode_since_chunk = 0.0
-        return out
+        # observe the chunk cost.
+        return _observed_next(self, **kwargs)
 
     setattr(_paced_next, _INSTALLED_FLAG, True)
     _ar.BatchGenerator._next = _paced_next
