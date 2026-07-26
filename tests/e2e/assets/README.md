@@ -8,4 +8,5 @@
   macOS `say` (no external source). Real speech exercises the audio encoder
   where a tone sweep would not.
 
-Override with `--image PATH` or `$GMLX_E2E_IMAGE`.
+The e2e chat script accepts overrides (`--image PATH` / `$GMLX_E2E_IMAGE`);
+`tests/test_vlm_integration.py` uses the bundled files directly.

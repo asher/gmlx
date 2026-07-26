@@ -124,6 +124,11 @@ def test_vlm_image_turn(vlm_pair):
         chunks.append(chunk.text)
     reply = "".join(chunks).strip()
     assert reply, "image turn produced no text"
+    # Content-bearing check: a non-empty reply alone passes even when the
+    # image never reaches the encoder. Greedy on cats.jpg must mention the
+    # cats; couples the test to checkpoint competence, which a curated
+    # test dir provides.
+    assert "cat" in reply.lower(), f"image not grounded in reply: {reply!r}"
     mx.clear_cache()
 
 
@@ -162,4 +167,10 @@ def test_vlm_audio_turn(audio_pair):
         chunks.append(chunk.text)
     reply = "".join(chunks).strip()
     assert reply, "audio turn produced no text"
+    # The clip says "peanut butter and jelly sandwich"; a grounded reply
+    # mentions at least one phrase word even when it paraphrases.
+    words = ("peanut", "butter", "jelly", "sandwich")
+    assert any(w in reply.lower() for w in words), (
+        f"audio not grounded in reply: {reply!r}"
+    )
     mx.clear_cache()
