@@ -23,7 +23,6 @@ from mlx_vlm.models.cache import ArraysCache, BatchKVCache
 from mlx_vlm.models.qwen3_5.config import TextConfig as Q35TextConfig
 from mlx_vlm.models.qwen3_5.language import LanguageModel as Q35LanguageModel
 from mlx_vlm.models.qwen3_5.language import Qwen3_5GatedDeltaNet
-from mlx_vlm.models import base as _B
 from mlx_vlm.models.qwen3_5 import language as _L
 
 from gmlx import gdn_patches, qwen35_attn, qwen35_gdn, qwen35_verify_fold
@@ -323,12 +322,13 @@ def test_deep_batched_fold_identity(_restore_patches, monkeypatch):
     mx.eval(ids)
 
     # Owned-arm engagement: the fold splits the continuation block into
-    # per-row "causal" base-sdpa calls (the patched chain early-bound
-    # its own original, so wrapping the base module counts owned only).
+    # per-row "causal" calls on the owned dispatch tail (the patched
+    # chain routes through verify_fold's early-bound original, so
+    # wrapping the owned tail counts owned only).
     causal_rows = {"n": 0}
-    base_inner = _B.scaled_dot_product_attention
+    base_inner = qwen35_attn._sdpa_dispatch
 
-    def counting(queries, keys, values, cache, scale, mask, sinks=None):
+    def counting(queries, keys, values, *, cache, scale, mask, sinks=None):
         if (
             isinstance(mask, str)
             and mask == "causal"
@@ -341,7 +341,7 @@ def test_deep_batched_fold_identity(_restore_patches, monkeypatch):
             sinks=sinks,
         )
 
-    monkeypatch.setattr(_B, "scaled_dot_product_attention", counting)
+    monkeypatch.setattr(qwen35_attn, "_sdpa_dispatch", counting)
 
     outs = []
     for lm in (patched, owned):

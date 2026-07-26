@@ -10,9 +10,13 @@ python loop in ``_target_verify_left_padded_attention``: full-depth
 The bail is unnecessary: both metal kernels partition the PADDED ``k_size``
 and mask per-row via ``pads``, so one plan computed from ``k_size`` is
 correct for every row (shorter rows just early-exit more blocks). This seam
-rebinds the module global with the unified-plan dispatch, which now lives in
-``gmlx.qwen35_attn`` (the owned attention calls it directly; only the stock
-``GMLX_QWEN_OWNED=0`` forward reads the module global this installs).
+rebinds the module global with the unified-plan dispatch, which lives in
+``gmlx.qwen35_attn`` (the owned attention calls it directly).
+
+No production path installs this rebind anymore: the ``GMLX_QWEN_OWNED=0``
+fallback runs genuinely stock (strict-bucket bail included). The installer
+stays in-tree for the serve-parity oracle arm that owned-forward probes
+and tests compose.
 
 Env: GMLX_RAGGED_UNIFIED_PLAN=0 disables (also read per call by the
 dispatch, which then keeps the stock strict-bucket bail).

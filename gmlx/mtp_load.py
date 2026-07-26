@@ -20,10 +20,7 @@ from . import loadlog
 from .envflags import env_int
 from .gdn_patches import (
     _needs_tiled_v_patch,
-    _patch_batched_verify_sdpa,
-    _patch_bf16_verify_linear,
     _patch_dense_head_verify,
-    _patch_gated_delta_fused_verify,
     _patch_gated_delta_tiled_v,
     _patch_mlxvlm_gated_delta_tiled_v,
 )
@@ -45,8 +42,7 @@ from .native_fp import _strip_weight
 from .populate import maybe_populate_for_load
 from .populate import wait_for as wait_for_populate
 from .preflight import preflight
-from .qwen35_attn import rebind_attn
-from .qwen35_gdn import owned_gdn_active, rebind_gdn
+from .qwen35_gdn import owned_gdn_active, prepare_gdn
 from .transforms import coalesce_split_experts
 
 
@@ -677,14 +673,15 @@ def load_mtp_model(
         "qwen3_5",
         "qwen3_5_text",
     ):
+        # Owned trees carry the fused routes natively and are built at
+        # construction; prepare_gdn arms them and concatenates b/a (both
+        # read loaded weights). The GMLX_QWEN_OWNED=0 fallback is
+        # genuinely stock plus the tiled-V correctness rebind installed
+        # above -- no fused verify, no batched-verify SDPA, no verify
+        # fold, no empty-sequence guard, no bf16 verify-linear lever.
         if owned_gdn_active(config_dict.get("model_type")):
-            rebind_gdn(model)
-            rebind_attn(model)
-        else:
-            _patch_gated_delta_fused_verify(model)
-            _patch_batched_verify_sdpa()
+            prepare_gdn(model)
         _patch_dense_head_verify(model)
-        _patch_bf16_verify_linear()
     elif config_dict.get("model_type") in ("gemma4", "gemma4_text"):
         # gemma4 MTP target (assistant drafter): none of the qwen verify
         # levers apply here, so none are installed.
@@ -693,11 +690,11 @@ def load_mtp_model(
         #   no lm_head attr), and the q6_k head already runs kq's fast
         #   verify path (measured 445-490 GB/s at verify M, ~0.4 ms/round
         #   of headroom at most).
-        # - _patch_batched_verify_sdpa / _patch_bf16_verify_linear rebind
-        #   qwen3_5-module seams (_target_verify_*) that gemma4's language
-        #   module does not route through; installing them here implied
-        #   coverage that never existed. gemma4's verify-attention seam is
-        #   the open front (verify is 89.7% of the round on the 31B).
+        # - the qwen verify levers live in the owned qwen3_5 modules,
+        #   which gemma4's language module does not route through;
+        #   installing the old patch set here implied coverage that
+        #   never existed. gemma4's verify-attention seam is the open
+        #   front (verify is 89.7% of the round on the 31B).
         pass
 
     # 3. drafter - native-head (extracted from this GGUF's MTP block) or
@@ -856,14 +853,11 @@ def load_vlm_mtp_model(
             "qwen3_5",
             "qwen3_5_text",
         ):
+            # Same shape as the text-path install above: arm the owned
+            # tree, or leave the fallback stock plus the tiled rebind.
             if owned_gdn_active(config_dict.get("model_type")):
-                rebind_gdn(model)
-                rebind_attn(model)
-            else:
-                _patch_gated_delta_fused_verify(model)
-                _patch_batched_verify_sdpa()
+                prepare_gdn(model)
             _patch_dense_head_verify(model)
-            _patch_bf16_verify_linear()
         drafter = _load_mtp_drafter(
             arrays,
             kquant_meta,

@@ -60,65 +60,20 @@ SEAMS: tuple[Seam, ...] = (
          critical=True),
     Seam("mlx_vlm.generate.ar", "BatchGenerator.insert",
          "batch_sched arrival-merge (_unprocessed_sequences append/rebind)"),
-    # The ragged plan/kernel builders and cached-array helpers are owned
-    # copies in qwen35_attn (source-equality-tested every run), and the
-    # unified-plan dispatch that consumed them lives there too, so the
-    # per-symbol builder pins are gone. The dispatch global stays pinned:
-    # ragged_decode rebinds it for the stock fallback forward.
-    Seam("mlx_vlm.models.qwen3_5.language",
-         "_qwen3_5_ragged_decode_attention",
-         "ragged_decode.install_unified_ragged_plan (stock fallback "
-         "GMLX_QWEN_OWNED=0 only; the owned attention calls the in-tree "
-         "dispatch directly)"),
-    # --- qwen3_5 MTP-target verify seams (loader + qwen35_verify_fold) ---
-    Seam("mlx_vlm.models.qwen3_5.language",
-         "_target_verify_left_padded_attention",
-         "gdn_patches._patch_batched_verify_sdpa / qwen35_verify_fold "
-         "(stock fallback GMLX_QWEN_OWNED=0 only; the owned attention "
-         "carries the composed verify routes natively)"),
-    Seam("mlx_vlm.models.qwen3_5.language", "_target_verify_linear",
-         "gdn_patches._patch_bf16_verify_linear"),
-    Seam("mlx_vlm.models.qwen3_5.language", "scaled_dot_product_attention",
-         "qwen35_verify_fold (B>=2 left-padded fold; stock fallback only "
-         "- the owned attention folds at its own dispatch and calls the "
-         "base module symbol)"),
-    Seam("mlx_vlm.models.base", "scaled_dot_product_attention",
-         "qwen35_attn._sdpa (owned dispatch tail: quantized-KV routing "
-         "via the batch-mask-fixed module global)", critical=True),
-    Seam("mlx_vlm.models.rope_utils", "MRoPERotaryEmbedding.apply_rotary",
-         "qwen35_attn.OwnedQwen3_5Attention (called on the stock rotary "
-         "submodule; retires with the assembly stage)", critical=True),
-    Seam("mlx_vlm.models.rope_utils", "apply_multimodal_rotary_pos_emb",
-         "qwen35_attn (in-tree copy of the language wrapper delegates "
-         "here for the position_embeddings branch)", critical=True),
-    Seam("mlx_vlm.models.qwen3_5.language", "Qwen3_5Model.__call__",
-         "gdn_patches._patch_qwen35_empty_sequence_guard (stock fallback "
-         "GMLX_QWEN_OWNED=0 only; the default owned subclass overrides "
-         "__call__ and absorbs the S=0 guard structurally)", critical=True),
-    # --- qwen3_5 owned model-level forward (qwen35_owned) ---
-    # The model-level helpers (mask builders, decode pad walk, row
-    # extract, pad-time, padding/lengths memos) are owned copies in
-    # qwen35_owned, so they are no longer pinned here; parity
-    # against the upstream originals is asserted by tests every run,
-    # which also pins the shared memo-attr protocol the stock layers
-    # consume until the layer classes are owned.
-    Seam("mlx_vlm.models.qwen3_5.language", "LanguageModel.__init__",
-         "qwen35_owned.OwnedQwen3_5LanguageModel (constructor body mirrored; "
-         "an upstream field addition must be re-mirrored)", critical=True),
-    Seam("mlx_vlm.models.qwen3_5_moe.language", "LanguageModel.__init__",
-         "qwen35_owned._moe_classes (constructor body mirrored)",
-         critical=True),
-    # The memo-advance helpers are owned copies in qwen35_owned; every
-    # gmlx call site (fused decode/verify bodies, owned unfused chain)
-    # uses the owned pair, so the upstream pair is no longer pinned.
-    # Parity is asserted by tests alongside the memo builders.
-    Seam("mlx_vlm.models.qwen3_5.language", "Qwen3_5GatedDeltaNet.__call__",
-         "gdn_patches._patch_gated_delta_fused_verify (stock fallback "
-         "GMLX_QWEN_OWNED=0 only; the default owned subclass carries the "
-         "fused dispatch natively)"),
-    Seam("mlx_vlm.models.qwen3_5.language", "_target_verify_linears",
-         "qwen35_gdn._owned_gdn_unfused (projection indirection; retires "
-         "with the attention/MLP verify family)", critical=True),
+    # --- qwen3_5 owned forwards (qwen35_owned/gdn/attn/layers/rope/
+    #     verify_linear) ---
+    # The qwen3.5 MTP-target forward surface is owned in-tree: the
+    # model-level control flow, both decoder layers, attention (ragged
+    # kernels, verify routes, SDPA dispatch tail), GatedDeltaNet, the
+    # MLP/MoE blocks, the verify-linear projection family, and the
+    # MRoPE apply chain. Verbatim copies are source-equality-tested
+    # against the pinned release every run; mirrored constructors and
+    # mirror forwards are certified by construction-pair and identity
+    # tests, so none of those symbols carry pins. The old patch modules
+    # (qwen35_verify_fold, ragged_decode, the gdn_patches class/global
+    # patches) stay in-tree as test oracles only and no production path
+    # installs them; the GMLX_QWEN_OWNED=0 fallback is genuinely stock
+    # plus the tiled-V correctness rebind pinned below.
     Seam("mlx_vlm.models.qwen3_5.gated_delta", "gated_delta_ops",
          "gdn_patches._patch_mlxvlm_gated_delta_tiled_v (stock fallback "
          "GMLX_QWEN_OWNED=0 only; owned GDN routes through mlx-lm "

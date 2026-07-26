@@ -1,12 +1,12 @@
 """Owned full-attention forward for qwen3.5/3.6 MTP targets.
 
 Replaces the attention patch stack on mlx-vlm's ``Qwen3_5Attention``
-with an owned subclass installed by instance ``__class__`` rebind after
-weights load (the same mechanism the owned GatedDeltaNet uses). Today
-the default load composes three module-global patches at three install
-times: the unified ragged-plan decode (serve start), the folded verify
-attention (every load), and the batched-verify masked SDPA (MTP load).
-The owned ``__call__`` carries the composed routes natively:
+with an owned subclass the owned constructors build directly
+(``rebind_attn`` remains as the instance-``__class__``-rebind install
+for stock-built trees in tests). It composes what used to be three
+module-global patches at three install times -- the unified ragged-plan
+decode, the folded verify attention, and the batched-verify masked
+SDPA -- natively in the owned ``__call__``:
 
 - ragged left-padded S=1 decode through the ragged SDPA kernels with
   the unified plan fallback (rows straddling plan buckets use the
@@ -19,16 +19,18 @@ The owned ``__call__`` carries the composed routes natively:
 The ragged kernel sources, plan/block tables, and cached-array helpers
 are verbatim in-tree copies of the upstream bodies, equality-tested
 against the pinned mlx-vlm release on every run. Projection
-indirections still go through the pinned ``_target_verify_*`` seams,
-which retire with the assembly stage; the SDPA dispatch tail (quantized
-KV routing) stays on ``mlx_vlm.models.base.scaled_dot_product_attention``
-as a called pin.
+indirections go through the owned verify-linear family
+(``qwen35_verify_linear``), the rotary apply through the owned MRoPE
+chain (``qwen35_rope``), and the SDPA dispatch tail is owned here
+(quantized-KV routing calls the base module symbol at call time so the
+batch-mask fix stays engaged under its own ledger pin).
 
-Owned loads never read the patched qwen3_5 module globals, so the three
-patches install only for the ``GMLX_QWEN_OWNED=0`` stock fallback.
-``GMLX_QWEN35_VERIFY_FOLD=0``, ``GMLX_VERIFY_RAGGED_MASK=0`` and
-``GMLX_RAGGED_UNIFIED_PLAN=0`` disable the same routes here (read per
-call; the patched path reads the first and last at install time).
+Owned loads never read the qwen3_5 module globals; no production path
+installs the old patches anymore (the ``GMLX_QWEN_OWNED=0`` fallback
+runs genuinely stock, and the patch modules stay in-tree as test
+oracles). ``GMLX_QWEN35_VERIFY_FOLD=0``, ``GMLX_VERIFY_RAGGED_MASK=0``
+and ``GMLX_RAGGED_UNIFIED_PLAN=0`` disable the corresponding routes
+here, read per call.
 """
 
 from functools import lru_cache
@@ -38,15 +40,15 @@ import mlx.core as mx
 
 from mlx_vlm.models import base as _B
 from mlx_vlm.models.qwen3_5 import language as _L
-from mlx_vlm.models.rope_utils import (
-    apply_multimodal_rotary_pos_emb as _apply_mrope,
-)
 
 from . import loadlog
 from .envflags import env_bool
 from .qwen35_gdn import owned_gdn_active as owned_attn_active  # one switch
 from .qwen35_owned import _qwen3_5_left_padding_info
+from .qwen35_rope import apply_multimodal_rotary_pos_emb as _apply_mrope
+from .qwen35_rope import rope_apply_rotary
 from .qwen35_verify_fold import _pads_list
+from .qwen35_verify_linear import verify_linear, verify_linears
 
 __all__ = ["owned_attn_active", "rebind_attn", "OwnedQwen3_5Attention"]
 
@@ -498,13 +500,43 @@ def ragged_decode_attention(queries, keys, values, pads, scale):
     )[0]
 
 
+def _sdpa_dispatch(queries, keys, values, *, cache, scale, mask, sinks=None):
+    """Owned SDPA dispatch tail: quantized-KV routing, then mx.fast.
+
+    Mirrors mlx-vlm's base dispatch minus the TurboQuant branches (gmlx
+    never builds those caches). The quantized branch resolves the base
+    module symbol at call time so the batch-mask fix patch stays
+    engaged (pinned under the quantized-SDPA ledger).
+    """
+    if hasattr(cache, "bits"):
+        if sinks is not None:
+            raise ValueError("Quantized SDPA does not support attention sinks.")
+        return _B.quantized_scaled_dot_product_attention(
+            queries,
+            keys,
+            values,
+            scale=scale,
+            mask=mask,
+            group_size=cache.group_size,
+            bits=cache.bits,
+        )
+    return mx.fast.scaled_dot_product_attention(
+        queries,
+        keys,
+        values,
+        scale=scale,
+        mask=mask,
+        sinks=sinks,
+    )
+
+
 def _sdpa(queries, keys, values, *, cache, scale, mask, sinks=None):
-    """SDPA with the deep batched-verify per-row fold, then the base tail.
+    """SDPA with the deep batched-verify per-row fold, then the owned tail.
 
     The fold claims verify-width (2 <= qL <= 8) batched calls on plain
     deep caches and splits per row past each row's pad, so every row is
     a plain bottom-right-causal verify on fused kernels. Everything
-    else lands on mlx-vlm's base dispatch (quantized-KV routing
+    else lands on the owned dispatch tail (quantized-KV routing
     included, through the batch-mask fix patch).
     """
     if not isinstance(keys, (tuple, list)) and (
@@ -531,7 +563,7 @@ def _sdpa(queries, keys, values, *, cache, scale, mask, sinks=None):
             # construction (BatchKVCache.make_mask); per-row slices past
             # the pad make each row a plain bottom-right-causal verify.
             rows = [
-                _B.scaled_dot_product_attention(
+                _sdpa_dispatch(
                     queries[r : r + 1],
                     keys[r : r + 1, :, p:, :],
                     values[r : r + 1, :, p:, :],
@@ -542,7 +574,7 @@ def _sdpa(queries, keys, values, *, cache, scale, mask, sinks=None):
                 for r, p in enumerate(pads)
             ]
             return mx.concatenate(rows, axis=0)
-    return _B.scaled_dot_product_attention(
+    return _sdpa_dispatch(
         queries, keys, values, cache=cache, scale=scale, mask=mask, sinks=sinks
     )
 
@@ -697,7 +729,8 @@ def _verify_attention(queries, keys, values, *, cache, scale, mask):
 
 
 class OwnedQwen3_5Attention(_L.Qwen3_5Attention):
-    """Installed by ``rebind_attn`` via instance ``__class__`` rebind.
+    """Built by the owned constructors (``rebind_attn`` remains for
+    arming a stock-built module tree in tests).
 
     ``__call__`` mirrors upstream's body; the attention dispatch goes
     through the owned resolvers instead of the patched module globals.
@@ -713,7 +746,7 @@ class OwnedQwen3_5Attention(_L.Qwen3_5Attention):
         target_verify: bool = False,
     ) -> mx.array:
         B, L, D = x.shape
-        q_proj_output, keys, values = _L._target_verify_linears(
+        q_proj_output, keys, values = verify_linears(
             (self.q_proj, self.k_proj, self.v_proj), x, target_verify
         )
         queries, gate = mx.split(
@@ -750,7 +783,8 @@ class OwnedQwen3_5Attention(_L.Qwen3_5Attention):
             kv_seq_len += cache.offset + 1 if cache is not None else 0
 
         if position_embeddings is None:
-            queries, keys = self.rotary_emb.apply_rotary(
+            queries, keys = rope_apply_rotary(
+                self.rotary_emb,
                 queries,
                 keys,
                 position_ids,
@@ -813,14 +847,16 @@ class OwnedQwen3_5Attention(_L.Qwen3_5Attention):
             )
         output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
 
-        return _L._target_verify_linear(
+        return verify_linear(
             self.o_proj, output * mx.sigmoid(gate), target_verify
         )
 
 
 def rebind_attn(model) -> int:
     """Rebind every stock Qwen3_5Attention in ``model`` to the owned
-    class. Returns the rebind count for engagement proof."""
+    class. Production trees build owned classes at construction; this
+    remains the install path for stock-built toy trees in tests.
+    Returns the rebind count for engagement proof."""
     lm = getattr(model, "language_model", model)
     n = 0
     for m in lm.modules():

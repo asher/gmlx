@@ -25,6 +25,13 @@ Patched seams:
   to slice each row. Unknown array masks without pad info defer upstream.
 
 Disable both with GMLX_QWEN35_VERIFY_FOLD=0.
+
+No production path installs this patch anymore: the owned attention
+(``qwen35_attn``) carries the folded routes natively and the
+``GMLX_QWEN_OWNED=0`` fallback runs genuinely stock. The module stays
+in-tree as the patched-oracle arm the owned-forward identity tests
+compose (``_pads_list`` also remains a live import of the owned
+dispatch).
 """
 
 from __future__ import annotations

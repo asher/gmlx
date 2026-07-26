@@ -24,10 +24,25 @@ from mlx_vlm.models.qwen3_5.config import TextConfig as Q35TextConfig
 from mlx_vlm.models.qwen3_5.language import LanguageModel as Q35LanguageModel
 
 from gmlx import qwen35_owned
+from gmlx.gdn_patches import (
+    _patch_gated_delta_tiled_v,
+    _patch_mlxvlm_gated_delta_tiled_v,
+)
 from gmlx.loader import _mtp_target_classes
 
 ATOL = 2e-3  # differing-route bound (shortcut removed / kernel path)
 TIGHT_ATOL = 1e-5  # same-ops bound
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _tiled_oracle():
+    # Production installs the mlx-lm tiled rebind for every qwen3.5
+    # GGUF load and the vlm rebind for the stock fallback; the stock
+    # oracle arm must match that posture. With both arms tiled and in
+    # eval mode (see _pair) the GDN scan runs the same mlx-lm kernel on
+    # both sides, so the same-ops routes stay bit-tight.
+    _patch_gated_delta_tiled_v()
+    _patch_mlxvlm_gated_delta_tiled_v()
 
 # The qwen3_5 GDN forward dispatches Metal-only kernels.
 _NEEDS_GPU = pytest.mark.skipif(
@@ -44,8 +59,10 @@ def _cfg():
         intermediate_size=128,
         linear_num_value_heads=4,
         linear_num_key_heads=2,
-        linear_key_head_dim=16,
-        linear_value_head_dim=16,
+        # GDN head dims 32: the eval-mode mlx-lm gated-delta kernels
+        # template on Dk/Dv and reject 16 at build (zero-length array).
+        linear_key_head_dim=32,
+        linear_value_head_dim=32,
         linear_conv_kernel_dim=4,
         num_hidden_layers=4,
         num_attention_heads=4,
@@ -81,9 +98,15 @@ def _pair():
 
     Beyond the weight check, the attribute-set and module-key comparisons
     guard the mirrored constructors: an upstream field or submodule added
-    to LanguageModel or Qwen3_5Model __init__ shows up as a key-set
-    mismatch here (and as a seam-pin failure), not as a silent behavioral
-    drift.
+    to LanguageModel, Qwen3_5Model or Qwen3_5DecoderLayer __init__ shows
+    up as a key-set mismatch here (and as a seam-pin failure), not as a
+    silent behavioral drift. The mirrored constructors also draw
+    parameters in the stock order, which the weight check certifies.
+
+    Both arms run in eval mode: the production loaders call
+    ``model.eval()``, and in training mode the two arms take different
+    gated-delta scan implementations (mlx-lm ops vs the vlm chunked
+    scan) whose float error breaks the same-ops tolerance.
     """
     from mlx.utils import tree_flatten
 
@@ -102,6 +125,12 @@ def _pair():
     for s_mod, o_mod, name in (
         (stock, owned, "LanguageModel"),
         (stock.model, owned.model, "Qwen3_5Model"),
+        *(
+            (s_layer, o_layer, f"Qwen3_5DecoderLayer[{i}]")
+            for i, (s_layer, o_layer) in enumerate(
+                zip(stock.model.layers, owned.model.layers)
+            )
+        ),
     ):
         assert set(vars(s_mod)) == set(vars(o_mod)), (
             f"{name} instance attribute set diverged (mirrored constructor "
@@ -113,6 +142,8 @@ def _pair():
             f"{name} module key set diverged (mirrored constructor drifted "
             f"from upstream)"
         )
+    stock.eval()
+    owned.eval()
     return stock, owned
 
 

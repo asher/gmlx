@@ -75,10 +75,21 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unified-plan decode, the batched-verify masked SDPA, and the folded
   verify routes natively (previously three module-global patches at
   three install times), with the ragged kernel sources and plan tables
-  as equality-tested in-tree copies. Fused kernels themselves are
-  unchanged; greedy tokens are identical against the patched stock
-  path on every route (`GMLX_QWEN_OWNED=0` reverts to the stock
-  classes plus the patch set at load).
+  as equality-tested in-tree copies. The assembly is owned too: the
+  mirrored constructors build the owned decoder layers, MLP and MoE
+  sparse block directly (no post-load rebind), the verify-width
+  projection family (dense GEMV, quantized qmv/argmax, fused decode
+  concat) is an equality-tested in-tree copy with the bf16 GEMV-ext
+  lever folded into the default dispatch, and the MRoPE apply chain
+  (fused Metal kernel, cos/sin frequency chain, interleaved apply) is
+  an equality-tested in-tree copy called on the stock rotary
+  submodule. Fused kernels themselves are unchanged; greedy tokens
+  are identical against the patched stock path on every route.
+  `GMLX_QWEN_OWNED=0` now builds genuinely stock classes: the fallback
+  keeps only the tiled-V weight-order rebind, loses every performance
+  patch, and reinstates the two stock defects the owned path fixes
+  (left-padded single-row batches attend their pads; empty-sequence
+  rows in batched serve crash).
 - Install docs lead with `uv tool install "gmlx[all]"` / pipx: one command,
   on PATH in every terminal, every optional feature on, no follow-up
   installs. Smaller extra sets and the plain-venv route stay documented.
