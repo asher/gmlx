@@ -162,6 +162,7 @@ class HeaderReport:
     unsupported: dict = field(default_factory=dict)   # codec name -> count
     n_tensors: int = 0
     gguf_type: str | None = None                      # general.type ("adapter", ...)
+    total_bytes: int | None = None                    # full file size, when known
 
     @property
     def loadable_codecs(self) -> bool:
@@ -187,12 +188,14 @@ def aggregate_reports(reports: list[HeaderReport]) -> HeaderReport:
     in the metadata shard (often tensor-free) and distributes its tensors - so a
     codec used by a single tensor can live in any shard. The arch is the first
     non-empty one; the codec histograms sum. Checking every shard is the only
-    sound way to catch such an isolated codec."""
+    sound way to catch such an isolated codec. ``total_bytes`` sums too, and
+    goes unknown if any shard's is - a partial sum would understate the set."""
     arch: str | None = None
     gguf_type: str | None = None
     hist: dict[str, int] = {}
     unsup: dict[str, int] = {}
     n = 0
+    total: int | None = 0        # summed across shards; None if any is unknown
     for r in reports:
         if arch is None and r.arch:
             arch = r.arch
@@ -203,7 +206,9 @@ def aggregate_reports(reports: list[HeaderReport]) -> HeaderReport:
         for k, v in r.unsupported.items():
             unsup[k] = unsup.get(k, 0) + v
         n += r.n_tensors
-    return HeaderReport(arch, hist, unsup, n, gguf_type)
+        if total is not None:
+            total = None if r.total_bytes is None else total + r.total_bytes
+    return HeaderReport(arch, hist, unsup, n, gguf_type, total)
 
 
 # Ref parsing + HTTP range read
@@ -340,15 +345,36 @@ def parse_ref(ref: str) -> Ref:
     return Ref("local", ref, filename=os.path.basename(ref))
 
 
-def http_get_prefix(url: str, end: int, *, timeout: float = 30.0) -> bytes:
-    """GET bytes ``[0, end)`` of ``url`` via a Range request. Caps the socket read
-    at ``end`` so a server that ignores Range can't stream a multi-GB body, and
-    wraps transport errors as :class:`RemoteError`. Seam: monkeypatched in tests."""
+def _response_total_bytes(resp) -> int | None:
+    """The full length of the resource behind a range response: the total after
+    the slash in ``Content-Range: bytes 0-99/12345``, or ``Content-Length``
+    when the server ignored the Range and sent the whole body (status 200).
+    ``None`` when neither is usable - the size is advisory everywhere."""
+    rng = resp.headers.get("Content-Range")
+    if rng and "/" in rng:
+        total = rng.rsplit("/", 1)[1].strip()
+        if total.isdigit():
+            return int(total)
+    if getattr(resp, "status", None) == 200:
+        length = resp.headers.get("Content-Length")
+        if length and length.strip().isdigit():
+            return int(length)
+    return None
+
+
+def http_get_prefix(url: str, end: int, *,
+                    timeout: float = 30.0) -> tuple[bytes, int | None]:
+    """GET bytes ``[0, end)`` of ``url`` via a Range request, returning
+    ``(data, total_size_or_None)``. Caps the socket read at ``end`` so a server
+    that ignores Range can't stream a multi-GB body, and wraps transport errors
+    as :class:`RemoteError`. The total comes off the range response itself, so
+    callers learn a remote file's size without a second request. Seam:
+    monkeypatched in tests."""
     req = urllib.request.Request(
         url, headers={"Range": f"bytes=0-{end - 1}", **_auth_headers(url)})
     try:
         with http_open(req, timeout=timeout) as resp:
-            return resp.read(end)
+            return resp.read(end), _response_total_bytes(resp)
     except urllib.error.HTTPError as e:
         hint = (" - file or repo not found; try `gmlx validate "
                 "hf:<org>/<repo>/` to list a repo's GGUFs"
@@ -393,9 +419,11 @@ def fetch_header(url: str, *, get=None,
         get = http_get_prefix
     size = initial
     while True:
-        buf = get(url, size)
+        buf, total = get(url, size)
         try:
-            return classify_header(buf)
+            report = classify_header(buf)
+            report.total_bytes = total
+            return report
         except _NeedMore:
             if len(buf) < size:                  # server returned EOF: file < size
                 raise RemoteError(

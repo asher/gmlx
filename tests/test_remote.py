@@ -243,7 +243,7 @@ def test_fetch_header_grows(tmp_path):
 
     def fake_get(url, end, *, timeout=30.0):
         calls.append(end)
-        return full[:end]
+        return full[:end], len(full)
 
     rep = remote.fetch_header("http://x/m.gguf", get=fake_get, initial=8)
     assert rep.arch == "llama"
@@ -256,7 +256,7 @@ def test_fetch_header_eof_truncated(tmp_path):
     truncated = full[:40]                   # past the magic, mid metadata block
 
     def fake_get(url, end, *, timeout=30.0):
-        return truncated[:end]             # server has only this much
+        return truncated[:end], len(truncated)   # server has only this much
 
     with pytest.raises(remote.RemoteError) as ei:
         remote.fetch_header("http://x/m.gguf", get=fake_get, initial=8)
@@ -267,9 +267,10 @@ def test_fetch_header_default_get_is_call_time(tmp_path, monkeypatch):
     """Monkeypatching the module attr must take effect (default resolved late)."""
     full = _mint_bytes(tmp_path / "m.gguf")
     monkeypatch.setattr(remote, "http_get_prefix",
-                        lambda url, end, *, timeout=30.0: full[:end])
+                        lambda url, end, *, timeout=30.0: (full[:end], len(full)))
     rep = remote.fetch_header("http://x/m.gguf", initial=8)
     assert rep.arch == "llama"
+    assert rep.total_bytes == len(full)   # size rides the range response
 
 
 # shard aggregation

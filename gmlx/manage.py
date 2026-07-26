@@ -142,25 +142,16 @@ def _repo_file_sizes(ref: remote.Ref, listing_cache: dict) -> dict | None:
     return listing_cache[key]
 
 
-def _ref_size_bytes(ref: remote.Ref, listing_cache: dict) -> int | None:
+def _ref_size_bytes(ref: remote.Ref, report: remote.HeaderReport) -> int | None:
     """Total on-disk bytes a model ref stands for (every shard of a split
-    file), or ``None`` when unknown. Local refs stat the files; hf refs read
-    the (cached) repo listing; other URLs stay unknown - the size line is
-    advisory, so unknown never fails anything."""
+    file), or ``None`` when unknown. Local refs stat the files; remote refs
+    take the total the header range-read already reported, so the size line
+    costs no request of its own. Advisory, so unknown never fails anything."""
+    if ref.kind != "local":
+        return report.total_bytes
     try:
-        if ref.kind == "local":
-            return sum(os.path.getsize(p) for p in find_split_shards(ref.raw))
-        sizes = _repo_file_sizes(ref, listing_cache)
-        if sizes is None:
-            return None
-        total = 0
-        for name in _shard_names(ref.path_in_repo):
-            size = sizes.get(name)
-            if not isinstance(size, int) or size <= 0:
-                return None
-            total += size
-        return total
-    except Exception:                        # noqa: BLE001 - advisory only
+        return sum(os.path.getsize(p) for p in find_split_shards(ref.raw))
+    except OSError:
         return None
 
 
@@ -323,7 +314,7 @@ def cmd_validate(argv: list | None = None, prog: str = "gmlx validate") -> int:
         print(f"error: {e}", file=sys.stderr)
         return 2
 
-    size_bytes = _ref_size_bytes(ref, {})
+    size_bytes = _ref_size_bytes(ref, report)
     v = _verdict(ref, report, hf_source=a.hf_source, n_shards=n_shards,
                  size_bytes=size_bytes)
     if a.json:
@@ -797,7 +788,7 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
             continue
 
         v = _verdict(ref, report, hf_source=a.hf_source, n_shards=n_shards,
-                     size_bytes=_ref_size_bytes(ref, listing_cache))
+                     size_bytes=_ref_size_bytes(ref, report))
         if a.json:
             print(json.dumps(v, indent=2))
         else:
