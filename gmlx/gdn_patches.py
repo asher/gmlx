@@ -408,8 +408,26 @@ def _gdn_fused_decode_body(self, inputs, cache, *, vlm_cache_advance=False):
     else:
         z = self.in_proj_z(inputs).reshape(
             B, S, self.num_v_heads, self.head_v_dim)
-        b = self.in_proj_b(inputs)
-        a = self.in_proj_a(inputs)
+        ba_w = getattr(self, "_gdn_ba_weight", None)
+        if ba_w is not None:
+            # One [2*Hv, K] matvec for the two tiny decay/gate rows. At
+            # M=B*S in [2, 8] the M-stationary head kernel matters: stock
+            # mlx routes each [M, K] @ [K, Hv] through a steel GEMM tile
+            # that costs ~70 us wall for ~1 MB of weights (measured B=2:
+            # b/a alone add 6.9 ms/step across 48 layers; this path
+            # recovers all of it, cat-without-kernel only ~1.7 ms).
+            if 2 <= B * S <= 8 and _F16_HEAD_GEMV is not None:
+                ba = _f16_head_gemv(
+                    inputs.reshape(1, B * S, -1), ba_w
+                ).reshape(B, S, -1)
+            else:
+                ba = inputs @ ba_w.T
+            hv = self.num_v_heads
+            b = ba[..., :hv]
+            a = ba[..., hv:]
+        else:
+            b = self.in_proj_b(inputs)
+            a = self.in_proj_a(inputs)
 
     conv_state = (
         cache[0]
@@ -527,16 +545,22 @@ def _patch_gated_delta_fused_decode(model) -> None:
     # step, so fewer dispatches buy nothing there. Off by default; opt-in
     # for re-measure at other geometries.
     merge_zba = env_bool("GMLX_GDN_ZBA", False)
+    cat_ba = env_bool("GMLX_GDN_BA_CAT", True)
     n_zba = 0
+    n_ba = 0
     for m in model.modules():
         if isinstance(m, GatedDeltaNet):
             m._gdn_fused = True
             n += 1
             if merge_zba and _gdn_try_merge_zba(m):
                 n_zba += 1
+            elif cat_ba and _gdn_try_cat_ba(m):
+                n_ba += 1
     zba = f", z/b/a matvecs merged on {n_zba}" if n_zba else ""
+    ba = f", b/a matvecs concatenated on {n_ba}" if n_ba else ""
     loadlog.verbose_print(
-        f"[patch] gated_delta: fused decode kernel enabled on {n} layers{zba}")
+        f"[patch] gated_delta: fused decode kernel enabled on {n} "
+        f"layers{zba}{ba}")
 
 
 def _gdn_try_merge_zba(gdn) -> bool:
@@ -562,7 +586,44 @@ def _gdn_try_merge_zba(gdn) -> bool:
     gdn.in_proj_z.weight = merged[:v]
     gdn.in_proj_b.weight = merged[v:v + h]
     gdn.in_proj_a.weight = merged[v + h:]
-    gdn._gdn_zba_weight = merged
+    # Plain instance attr: nn.Module.__setattr__ would file the merged
+    # array into the parameter tree, aliasing the three views above and
+    # double-counting any parameter-size audit.
+    object.__setattr__(gdn, "_gdn_zba_weight", merged)
+    return True
+
+
+def _gdn_try_cat_ba(gdn) -> bool:
+    """Concatenate the two tiny float decay/gate in-projections (b, a) into
+    one [2*Hv, K] weight for the fused decode step. This is the k-quant
+    complement of the zba merge above: on k-quant files z is quantized (the
+    merge can never fire), while b/a load as plain bf16 Linears whose
+    per-step matvecs collapse onto MLX's steel GEMM tile at batched decode
+    (M>=2) at ~70 us wall each for ~1 MB of weights. The decode body routes
+    the concatenated weight through the M-stationary head kernel instead.
+    Same storage discipline as the merge: the cat owns the rows, the
+    original modules' weights become row-slice views, so prefill and every
+    stock path are untouched and no memory is duplicated."""
+    import mlx.nn as nn
+
+    if getattr(gdn, "_gdn_zba_weight", None) is not None:
+        return False  # zba merge already owns these rows
+    mods = [getattr(gdn, "in_proj_b", None), getattr(gdn, "in_proj_a", None)]
+    for m in mods:
+        if m is None or type(m) is not nn.Linear or "bias" in m:
+            return False
+    if len({m.weight.dtype for m in mods}) != 1:
+        return False
+    h = getattr(gdn, "num_v_heads", None)
+    if not h or any(m.weight.shape[0] != h for m in mods):
+        return False
+    cat = mx.concatenate([m.weight for m in mods], axis=0)
+    mx.eval(cat)
+    gdn.in_proj_b.weight = cat[:h]
+    gdn.in_proj_a.weight = cat[h:]
+    # Same reason as the zba merge: keep the cat out of the parameter
+    # tree, it only aliases the two view weights above.
+    object.__setattr__(gdn, "_gdn_ba_weight", cat)
     return True
 
 
@@ -948,23 +1009,50 @@ def _gdn_fused_verify_call(
 
 
 _BATCHED_VERIFY_SDPA_PATCHED = False
+# Stock upstream _target_verify_left_padded_attention, captured at patch
+# install; tests use it as the bit-exact reference.
+_STOCK_VERIFY_LEFT_PADDED = None
 
 
 def _patch_batched_verify_sdpa() -> None:
     """Replace the per-position SDPA loop in _target_verify_left_padded_attention
-    with a single batched call using a causal mask.
+    with a single batched call.
 
     For MTP verify (S=K+1 query positions), the stock code does S separate
     mx.fast.scaled_dot_product_attention calls per attention layer.  A single
     call with mask='causal' is numerically identical (verified bit-exact for
-    GQA, B=1..4, d up to 4096) and saves S-1 kernel launches per layer."""
-    global _BATCHED_VERIFY_SDPA_PATCHED
+    GQA, B=1..4, d up to 4096) and saves S-1 kernel launches per layer.
+
+    Left-padded batches (ragged prompt lengths) get the same treatment with
+    an explicit [B, 1, S, T] boolean mask that encodes the per-row pad and
+    causality together.  The stock path for that case groups rows by pad
+    value and does an mx.take of full-depth K/V per group plus a
+    per-query-position SDPA, so at depth every verify step re-reads the
+    whole KV once more; the masked call touches each key exactly once.
+    Masked columns contribute exp(-inf) = 0 to reductions, so the result is
+    bit-exact against the group loop.  GMLX_VERIFY_RAGGED_MASK=0 restores
+    the stock group-loop path (read per call)."""
+    global _BATCHED_VERIFY_SDPA_PATCHED, _STOCK_VERIFY_LEFT_PADDED
     if _BATCHED_VERIFY_SDPA_PATCHED:
         return
+
+    import os
 
     import mlx_vlm.models.qwen3_5.language as _L
 
     _orig_left_padded = _L._target_verify_left_padded_attention
+    _STOCK_VERIFY_LEFT_PADDED = _orig_left_padded
+    _ragged_noted = set()
+
+    def _note_ragged(route, B, L, T, pads):
+        key = (route, B, L)
+        if key in _ragged_noted:
+            return
+        _ragged_noted.add(key)
+        # warn, not verbose_print: live verify traffic should never reach
+        # this seam, so the one-shot must survive quiet serve logs.
+        loadlog.warn(f"[verify] ragged-pads route: {route} B={B} S={L} T={T} "
+                     f"max_pad={max(pads)}")
 
     def _batched_verify_attention(queries, keys, values, *, cache, scale, mask):
         if hasattr(cache, "bits") or queries.ndim != 4 or keys.ndim != 4:
@@ -972,14 +1060,32 @@ def _patch_batched_verify_sdpa() -> None:
                 queries, keys, values, cache=cache, scale=scale, mask=mask
             )
         pads = getattr(cache, "_qwen3_5_decode_left_padding", None)
-        if pads is not None:
+        padded = pads is not None and len(pads) > 0 and max(pads) > 0
+        L = queries.shape[-2]
+        if padded and (
+            L <= 1
+            or len(pads) != queries.shape[0]
+            or isinstance(mask, mx.array)
+            or os.environ.get("GMLX_VERIFY_RAGGED_MASK", "1") == "0"
+        ):
+            if L > 1:
+                _note_ragged("stock-loop", queries.shape[0], L,
+                             keys.shape[-2], pads)
             return _orig_left_padded(
                 queries, keys, values, cache=cache, scale=scale, mask=mask
             )
-        L = queries.shape[-2]
         if L <= 1:
             return None
-        sdpa_mask = mask if isinstance(mask, mx.array) else "causal"
+        if padded:
+            _note_ragged("masked-sdpa", queries.shape[0], L,
+                         keys.shape[-2], pads)
+            T = keys.shape[-2]
+            t = mx.arange(T)[None, None, :]
+            end = (T - L) + mx.arange(L)[None, :, None]
+            pad_arr = mx.array(pads, dtype=mx.int32)[:, None, None]
+            sdpa_mask = ((t >= pad_arr) & (t <= end))[:, None, :, :]
+        else:
+            sdpa_mask = mask if isinstance(mask, mx.array) else "causal"
         return mx.fast.scaled_dot_product_attention(
             queries, keys, values, scale=scale, mask=sdpa_mask
         )
@@ -1063,12 +1169,22 @@ def _patch_gated_delta_fused_verify(model) -> None:
     _FUSED_VERIFY_PATCH.install(
         Qwen3_5GatedDeltaNet, "__call__", _gdn_fused_verify_call)
     n = 0
+    n_ba = 0
+    cat_ba = env_bool("GMLX_GDN_BA_CAT", True)
     lm = getattr(model, "language_model", model)
     for m in lm.modules():
         if isinstance(m, Qwen3_5GatedDeltaNet):
             m._gdn_fused_verify = True
             n += 1
-    loadlog.verbose_print(f"[patch] gated_delta: fused verify kernel enabled on {n} layers")
+            # The S=1 decode branch above routes these instances through
+            # _gdn_fused_decode_body too, so they need the b/a cat as much
+            # as the mlx-lm text path does.
+            if cat_ba and getattr(m, "_gdn_ba_weight", None) is None \
+                    and _gdn_try_cat_ba(m):
+                n_ba += 1
+    ba = f", b/a matvecs concatenated on {n_ba}" if n_ba else ""
+    loadlog.verbose_print(
+        f"[patch] gated_delta: fused verify kernel enabled on {n} layers{ba}")
 
 
 def _patch_dense_head_verify(model) -> None:

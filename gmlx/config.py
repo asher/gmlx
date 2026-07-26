@@ -8,7 +8,7 @@ no mlx), so it loads and tests on any machine.
 
 Shape (see ``docs/server-config.md`` for the full reference)::
 
-    server:    {host, port, api_key, no_auth, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, rerank, menubar, token_queue_timeout_s, prefill_step_size, decode_prefill_ratio, cache_limit_gb, family_defaults, stochastic_mtp, gpu_keepwarm, assistants, assistant_allow_remote}
+    server:    {host, port, api_key, no_auth, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, rerank, menubar, token_queue_timeout_s, prefill_step_size, decode_prefill_ratio, prefill_tick_ms, cache_limit_gb, family_defaults, stochastic_mtp, gpu_keepwarm, assistants, assistant_allow_remote}
     profiles:  {<name>: {extends, sampling, load, cache, system}}
     rules:     [{match: <glob>, profile: <name>}]
     models:    {<id>: {path, profile, family, profiles, mmproj, draft_gguf, adapter, stream, moe_experts, moe_expert_mass, moe_miss_shed, moe_layer_shed, speculative, speculative_width_cap, overrides, pin, ttl_s}}
@@ -103,7 +103,7 @@ _SERVER_KEYS = frozenset({"host", "port", "api_key", "no_auth", "model_dirs",
                           "budget_gb", "max_models", "hf_cache", "cache",
                           "defaults", "stt", "tts", "embeddings", "rerank",
                           "menubar", "token_queue_timeout_s", "prefill_step_size",
-                          "decode_prefill_ratio",
+                          "decode_prefill_ratio", "prefill_tick_ms",
                           "cache_limit_gb", "family_defaults", "stochastic_mtp",
                           "gpu_keepwarm", "assistants", "assistant_allow_remote"})
 _DEFAULTS_KEYS = frozenset({"profile", "ttl_s", "model", "preload"})
@@ -406,6 +406,12 @@ class ServerCfg:
     # admitted (1.0 ~= 50/50 split; 0 = stock 1 decode step : 1 chunk).
     # None => leave the env / branch default (1.0) in place.
     decode_prefill_ratio: float | None = None
+    # Prefill tick budget in wall-clock ms: while decode rows are live, each
+    # prefill chunk is halved until its predicted wall time (from the last
+    # observed chunk cost) fits this budget, bounding the per-chunk decode
+    # stall. 0 disables the term. None => leave the env / default (500) in
+    # place. Inert with no live decode, so single-stream TTFT is untouched.
+    prefill_tick_ms: float | None = None
     # MLX buffer-cache cap in GiB (mx.set_cache_limit). None => auto policy:
     # bounded automatically when the biggest configured model leaves little
     # working-set slack (deep-context safety), unlimited otherwise. Negative
@@ -1566,6 +1572,8 @@ def build_config(doc: dict) -> ServerCfg:
             "prefill_step_size", srv.get("prefill_step_size"), int),
         decode_prefill_ratio=_coerce_num(
             "decode_prefill_ratio", srv.get("decode_prefill_ratio"), float),
+        prefill_tick_ms=_coerce_num(
+            "prefill_tick_ms", srv.get("prefill_tick_ms"), float),
         cache_limit_gb=_coerce_num(
             "cache_limit_gb", srv.get("cache_limit_gb"), float),
         family_defaults=bool(srv.get("family_defaults", True)),

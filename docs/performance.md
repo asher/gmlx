@@ -262,6 +262,18 @@ live streams for tens of seconds. The key is `server.decode_prefill_ratio`
 `--decode-prefill-ratio`, and the `GMLX_DECODE_PREFILL_RATIO` env is read
 per scheduler tick, so it can be changed on a live server.
 
+Pacing bounds the average split, not the stall a single chunk inflicts:
+every live stream still hitches by one full chunk whenever one is admitted,
+which is 1-2 seconds at deep context and can reach tens of seconds when an
+over-RAM model streams weights from disk. `server.prefill_tick_ms` (default
+500, flag `--prefill-tick-ms`, env `GMLX_PREFILL_TICK_MS` read per chunk)
+bounds that quantum: while streams decode, each chunk is halved until its
+predicted wall time, taken from the last observed chunk cost, fits the
+budget. The two knobs answer different symptoms -- a starved decode batch
+needs the ratio, a hitchy stream needs the tick -- and smaller chunks cost
+a few percent of prefill throughput per halving tier (worst on MoE), so
+batch jobs that only care about aggregate throughput can set `0`.
+
 Two interactions to know. Pacing applies to speculative (MTP) serving too,
 and the two features divide the work: pacing decides how admissions share
 GPU time, while the width cap decides which decode mode each batch runs in

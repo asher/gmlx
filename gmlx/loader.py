@@ -32,8 +32,13 @@ from .attn_hd512 import install_hd512_sdpa
 from .prefill_decay import install_prefill_decay, note_untracked_weights
 from . import gpt_oss_prefill  # noqa: F401  (registers gpt_oss score profile)
 from .modules import install_fused_moe_glu, install_hyv3_shexp_fold
+from .occupancy_fuse import install_occupancy_fuse
 from .qkv_fuse import install_fused_qkv
+from .gemma4_batched_sdpa import install_gemma4_batched_sdpa
+from .gemma4_sync import install_gemma4_nosync
+from .quantized_sdpa_fix import install_quantized_sdpa_mask_fix
 from .qwen35_verify_fold import install_qwen35_verify_fold
+from .rope_batch_fix import install_rope_batch_fix
 from .rotating_cache_fix import install_rotating_cache_fix
 from .modules import KQuantEmbedding, install_kquant_modules
 from .populate import (
@@ -2402,6 +2407,16 @@ def _resolve_native_fp_wire(hf_weights, hf_kquant_meta, log) -> bool:
     return False
 
 
+def _gemma4_target(model) -> bool:
+    """True when the loaded model runs the gemma4 classes the gemma-4
+    patches target. The installs themselves stay unconditional (they are
+    module-level and inert elsewhere); this only keeps the [install] log
+    lines from claiming gemma-4 levers on unrelated archs."""
+    lm = getattr(model, "language_model", model)
+    return ("gemma4" in type(model).__module__
+            or "gemma4" in type(lm).__module__)
+
+
 def _install_and_load(
     model,
     hf_weights,
@@ -2473,10 +2488,18 @@ def _install_and_load(
 
     if install_hd512_sdpa():
         log("[install] head_dim-512 fused SDPA active")
+    if install_quantized_sdpa_mask_fix():
+        log("[install] quantized-KV SDPA batch-mask fix active")
+    if install_rope_batch_fix():
+        log("[install] rope int-offset batch fix active")
     if install_prefill_decay():
         log("[install] depth-decay prefill chunking active")
     if install_qwen35_verify_fold():
         log("[install] qwen3.5 folded verify attention active")
+    if install_gemma4_nosync() and _gemma4_target(model):
+        log("[install] gemma-4 host-sync-free masks/rope offsets active")
+    if install_gemma4_batched_sdpa() and _gemma4_target(model):
+        log("[install] gemma-4 hd512 batched-decode row route active")
     n_fused_moe = install_fused_moe_glu(model)
     if n_fused_moe:
         log(f"[install] fused mxfp4 MoE GLU decode on {n_fused_moe} layers")
@@ -2486,6 +2509,10 @@ def _install_and_load(
     n_fused_qkv = install_fused_qkv(model)
     if n_fused_qkv:
         log(f"[install] fused QKV decode projection on {n_fused_qkv} layers")
+    n_occ = install_occupancy_fuse(model)
+    if n_occ:
+        log(f"[install] occupancy fusion (qkv + gate/up decode) on "
+            f"{n_occ} modules")
     install_rotating_cache_fix()
 
     # 7. partition by what the constructed model actually defines + load.
@@ -2895,10 +2922,18 @@ def load_model(
 
     if install_hd512_sdpa():
         _log("[install] head_dim-512 fused SDPA active")
+    if install_quantized_sdpa_mask_fix():
+        _log("[install] quantized-KV SDPA batch-mask fix active")
+    if install_rope_batch_fix():
+        _log("[install] rope int-offset batch fix active")
     if install_prefill_decay():
         _log("[install] depth-decay prefill chunking active")
     if install_qwen35_verify_fold():
         _log("[install] qwen3.5 folded verify attention active")
+    if install_gemma4_nosync() and _gemma4_target(model):
+        _log("[install] gemma-4 host-sync-free masks/rope offsets active")
+    if install_gemma4_batched_sdpa() and _gemma4_target(model):
+        _log("[install] gemma-4 hd512 batched-decode row route active")
     n_fused_moe = install_fused_moe_glu(model)
     if n_fused_moe:
         _log(f"[install] fused mxfp4 MoE GLU decode on {n_fused_moe} layers")
@@ -2908,6 +2943,10 @@ def load_model(
     n_fused_qkv = install_fused_qkv(model)
     if n_fused_qkv:
         _log(f"[install] fused QKV decode projection on {n_fused_qkv} layers")
+    n_occ = install_occupancy_fuse(model)
+    if n_occ:
+        _log(f"[install] occupancy fusion (qkv + gate/up decode) on "
+             f"{n_occ} modules")
     install_rotating_cache_fix()
 
     # 7. partition by what the constructed model actually defines + load.

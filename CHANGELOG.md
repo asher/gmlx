@@ -6,6 +6,118 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-07-26
+
+### Added
+
+- Prefill ticks: while streams are decoding, each admission prefill chunk is
+  halved until its predicted wall time fits a stall budget
+  (`server.prefill_tick_ms` / `--prefill-tick-ms` / `GMLX_PREFILL_TICK_MS`,
+  default 500 ms; 0 = full chunks), bounding the per-chunk decode hitch that
+  pacing's average-share arithmetic cannot. Inert with no live decode, so
+  single-stream TTFT is unchanged. Measured (27B dense, 14k context, four
+  streams): worst inter-token gap 3.6 s -> 109 ms, per-stream decode +80%
+  at the contended cell, aggregate throughput and single-stream rates
+  unchanged.
+- batched decode fuses the attention and MLP projections at load on
+  llama and qwen3.5/3.6 text (full-attention layers; GDN layers
+  untouched): q/k/v (and gate/up) K-quant wires row-concatenate into
+  one matmul per group on the single-position B>=2 path, filling the
+  GPU where the separate small-M launches underfill it (llama-8B k/v
+  put up 16 threadgroups each). Certified bit-exact against stock on
+  Dolphin3-8B and Qwen3.5-9B Q6_K (B=2 greedy logits and tokens
+  identical, ragged BatchGenerator tokens identical); B=1 takes the
+  stock path exactly (`GMLX_OCCUPANCY_FUSE=0` reverts, read per call).
+- at batch width 12 and above the fused MLP also splits down_proj into
+  two half-K matmuls plus an add: the single long-K launch craters at
+  the M=12 kernel-route cliff (q6_k [4096x14336] serial 224 -> 124
+  GB/s) while two overlapping halves hold 165. The add costs one bf16
+  rounding, so this path is allclose-not-bit-identical to stock
+  (certified: B=12 greedy tokens identical, logits within 1 ulp);
+  single-stream traffic never reaches it. Combined step-time win at
+  B=16 d64: -11.0% on Dolphin3-8B, -7.1% on Qwen3.5-9B
+  (`GMLX_SPLITK_MIN_B` tunes the width, `0` kills the split).
+- gemma-4 concurrent decode and speculative verify keep the global layers
+  on fused attention: head_dim-512 batched calls at decode width (one
+  position) and MTP verify width (2-8 positions) route each stream through
+  the single-stream kernels (left padding via per-row K/V tail slices;
+  verify blocks via end-aligned causal on the slice) instead of the stock
+  materialized fallback, on both load paths (text-only GGUFs via the
+  mlx-lm text module, multimodal via the mlx-vlm language module).
+  Certified in-process on gemma-4-31b Q6_K: whole-step -8.6% at four
+  streams on mixed 8k-14k contexts (tail slices also skip the padded
+  prefix short rows would otherwise re-read); -3.4% at two streams at
+  uniform 14k; speculative verify -17.5% per verify call at two streams
+  with a 3-token block at 10-14k depth (`GMLX_G4_BATCHED_SDPA=0`
+  reverts).
+
+### Fixed
+
+- worked around an upstream Metal kernel bug in `mx.fast.rope` (stock
+  mlx 0.31.2): with a scalar offset and a single-position batched
+  input (B, \*, 1, D) with B > 1, every batch row past the first is
+  rotated from out-of-bounds memory (allocator-dependent garbage; the
+  CPU path is correct). Scalar means fewer offset entries than batch
+  rows: a plain int, a 0-d array (the `mx.array(cache.offset)` wrap in
+  mlx-lm's gemma4_text produces one), or a size-1 array. Batched
+  serving was never affected -- BatchKVCache passes size-B per-row
+  offset arrays, which are correct -- but any plain-KVCache batched
+  decode (raw chains, external harnesses) silently corrupted rows past
+  the first. The fix wraps `mx.fast.rope` and expands any offset
+  carrying fewer entries than the batch dimension to a per-row int32
+  array, covering every arch including direct `mx.fast.rope` call
+  sites (`GMLX_ROPE_BATCH_FIX=0` reverts; per-variant subprocess
+  tripwire tests flag when an mlx upgrade fixes the kernel so the
+  workaround can be dropped -- subprocesses because an in-process A/B
+  is primed by the fix's own expanded-offset buffer and reads clean).
+- the qwen3.5/3.6 batched-verify SDPA seam no longer forwards to the
+  stock per-pad-group gather loop whenever the cache carries a
+  left-padding attribute: it now bails only on real padding, and when
+  padding is real it answers with one SDPA call under a combined
+  left-pad + causal boolean mask (bit-exact against the stock loop on
+  the bf16 serve path; `GMLX_VERIFY_RAGGED_MASK=0` restores the
+  forward). Live verify traffic reaches this seam with the pad
+  attribute already cleared and an upstream-built array mask, so this
+  hardens the seam against flows that pass pads at verify width rather
+  than changing current serve numbers; a one-shot
+  `[verify] ragged-pads route:` stderr note reports whenever either
+  branch actually fires.
+- quantized KV cache (`kv_bits`) no longer crashes concurrent serving on
+  grouped-query models: upstream's quantized SDPA applies the batched
+  left-pad mask to 5D grouped scores and every B>1 masked call raised a
+  broadcast error (single-stream was unaffected). gmlx inserts the missing
+  mask axis at both upstream seams (`GMLX_QSDPA_MASK_FIX=0` reverts).
+
+### Changed
+
+- mlx-kquant floor raised to 0.3.6, which ships the M-banded NAX qmm
+  routing (BM=32/64-db/128 tiles behind a measured per-codec policy).
+  Older wheels still run correctly, but the batched-decode rates
+  certified on this release, and the batch-width floor of the down_proj
+  split, are calibrated against 0.3.6's routes.
+- Batched decode on gated-delta hybrids (qwen3.6 dense) speeds up ~8%: the two
+  tiny per-layer decay/gate projections (b/a) are concatenated at load and
+  routed through the M-stationary head kernel at batch width 2-8, instead of
+  falling onto a full GEMM tile per matvec (~70 us wall each for ~1 MB of
+  weights). Token-identical; single-stream decode and prefill unaffected.
+  `GMLX_GDN_BA_CAT=0` restores the separate matvecs.
+- multimodal gemma-4 decode/verify no longer host-syncs per step: the
+  sliding-mask cache probe compares int offsets host-side (array offsets skip
+  the probe), and per-layer int rope offsets pass through without a device
+  wrap. Array rope offsets keep upstream's snapshot copy: the cache update
+  between the key rope and the query rope advances its offset array with an
+  in-place `+=` (mx arrays mutate through every handle under augmented
+  assignment), so an aliased offset rotates queries one position ahead of
+  keys on every batched decode step. A serve-level gate certification caught
+  width-cap-gated B>=3 gemma decode degenerating into repetition loops from
+  exactly that skew (server-side throughput looked healthy; only the content
+  was wrong). Token outputs are bit-identical on the int paths;
+  `GMLX_G4_NOSYNC=0` restores upstream behavior. Text-only gemma-4 loads build from the mlx-lm text module, which
+  has no per-step host syncs to begin with.
+- gemma-4 MTP targets no longer install the three qwen3_5 verify levers
+  (module-scoped no-ops on gemma4); the tied quantized head already serves
+  verify logits directly.
+
 ## [0.1.1] - 2026-07-24
 
 ### Added

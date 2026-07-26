@@ -181,6 +181,8 @@ server:
                              #   (null => the default, 2048; lower caps peak memory on long prompts)
   decode_prefill_ratio: null # decode GPU-time share per admission prefill chunk under load
                              #   (null => the default, 1.0; 0 => strict alternation; see below)
+  prefill_tick_ms: null      # wall-clock budget per prefill chunk while streams decode;
+                             #   chunks are halved to fit (null => the default, 500; 0 => full chunks)
   cache_limit_gb: null       # MLX buffer-cache cap in GiB (null => auto: bounded only when the
                              #   biggest model leaves little working-set slack; negative => never bound)
   family_defaults: true      # built-in per-family model-card sampling + @intents (false turns them off)
@@ -255,6 +257,23 @@ server is unaffected. Also available as `--decode-prefill-ratio` on `serve`
 (read per scheduler tick, so it can be flipped on a live server). Applies to
 speculative (MTP) serving too. Background and measured effects:
 [performance.md](performance.md#serving-concurrent-requests).
+
+`prefill_tick_ms` bounds how long any one prefill chunk can stall live decode
+streams. Pacing (above) controls the average GPU share between decode and
+prefill but never the length of a single chunk, so every live stream still
+hitches by a full chunk (1-2 seconds at deep context, more when weights
+stream from disk) whenever one lands. While decode rows are live, the chunk
+is halved until its predicted wall time -- the last observed chunk cost
+scaled to the tier -- fits this budget (default 500 ms, floored at
+`GMLX_PREFILL_MIN_STEP` tokens). Smaller chunks lose some weight
+amortization, so total prefill throughput under load drops a few percent per
+halving tier (worst on MoE); set `0` for batch-job serving where per-stream
+latency does not matter. Inert whenever nothing is decoding, so
+single-stream time-to-first-token is untouched. Also available as
+`--prefill-tick-ms` on `serve` (the flag wins over the config) or an
+exported `GMLX_PREFILL_TICK_MS` (read per chunk, so it can be changed on a
+live server). Composes with `decode_prefill_ratio`: the ratio sets the duty
+cycle, the tick sets the stall quantum.
 
 `cache_limit_gb` caps MLX's buffer cache (the wired pool of freed GPU buffers
 kept for reuse). Left `null`, the server bounds it automatically only when

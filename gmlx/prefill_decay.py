@@ -28,11 +28,24 @@ transient and the chunk stays full until that genuinely nears the cap. A
 profile may also carry an arch-default base step, honored only when no
 explicit PREFILL_STEP_SIZE is in force.
 
+A second, concurrency-keyed term (prefill ticks) bounds the wall-clock
+stall a chunk inflicts on live decode streams. Decode-priority pacing
+(batch_sched) bounds the average GPU share between decode and prefill but
+never how long one chunk runs, so every live stream hitches by a full
+chunk (1-2 s at depth, more over-RAM) whenever one lands. While the
+scheduler reports live decode rows, the chunk is halved until its
+predicted wall time - last observed chunk cost scaled by the tier - fits
+GMLX_PREFILL_TICK_MS. Inert at zero decode rows and outside the batched
+serve path, so single-stream TTFT is untouched. The resolver takes the
+min of the depth term and the tick term.
+
 Knobs:
-    GMLX_PREFILL_DECAY=0        kill switch (default on)
+    GMLX_PREFILL_DECAY=0        kill switch, both terms (default on)
     GMLX_PREFILL_SCORE_CAP_GB   transient cap (default 5% of the GPU
                                     working set, floor 2 GB)
-    GMLX_PREFILL_MIN_STEP       decay floor (default 256)
+    GMLX_PREFILL_MIN_STEP       decay floor, both terms (default 256)
+    GMLX_PREFILL_TICK_MS        chunk wall-clock budget under live decode
+                                    (default 500; 0 disables the tick term)
     GMLX_PREFILL_SCORE_PROFILE=0  ignore arch score profiles (dense model
                                     everywhere, pre-profile behavior)
     GMLX_PREFILL_HEADROOM_CAP=1 raise the body cap to min(half the live
@@ -53,10 +66,22 @@ from typing import Callable, NamedTuple, Optional
 
 import mlx.core as mx
 
-from .envflags import env_bool, env_int
+from .envflags import env_bool, env_float, env_int
 
 _WS_CAP_BYTES: float | None = None
 _FLAG = "_gmlx_prefill_decay"
+
+# Prefill-tick state, fed by the batched-serve scheduler (batch_sched).
+# Single-threaded tick loop; plain module globals. Outside serve nothing
+# calls the hooks, so the tick term stays inert there by construction.
+# Known coarseness under max_models > 1: the globals mix signals across
+# models (one model's observed per-token cost sizes another's next
+# chunk, and the last generator to tick owns the pressure reading).
+# Latency-only and self-correcting within a chunk or two of any switch;
+# key by generator if a multi-model serve ever shows chunk thrash.
+_LIVE_DECODE_ROWS = 0
+_CHUNK_COST: tuple[int, float] | None = None  # (step tokens, wall seconds)
+_LAST_STEP = 0
 
 
 class ScoreTransientProfile(NamedTuple):
@@ -275,6 +300,44 @@ def decayed_step(base: int, depth: int, heads: int,
     return step
 
 
+def note_decode_pressure(rows: int) -> None:
+    """Scheduler hook: live decode-batch width seen this tick (0 clears).
+    Arms the tick term for the next prefill chunk."""
+    global _LIVE_DECODE_ROWS
+    _LIVE_DECODE_ROWS = max(0, int(rows))
+
+
+def note_chunk_cost(seconds: float) -> None:
+    """Scheduler hook: observed wall cost of the chunk that just ran, paired
+    with the step decayed_for_batch last returned. A short final tail chunk
+    under-reports per-token cost by up to one tier; the next full chunk
+    corrects it."""
+    global _CHUNK_COST
+    if _LAST_STEP > 0 and seconds > 0.0:
+        _CHUNK_COST = (_LAST_STEP, float(seconds))
+
+
+def _tick_step(base: int) -> int | None:
+    """Concurrency term: largest halving tier of base whose predicted wall
+    time - last observed per-token chunk cost times the tier - fits the
+    GMLX_PREFILL_TICK_MS budget. None = inert (no live decode rows, no
+    observation yet, or the term is disabled). The first chunk after decode
+    goes live runs full-size when nothing has been observed; its cost arms
+    the term for the rest of the prefill."""
+    if _LIVE_DECODE_ROWS <= 0 or _CHUNK_COST is None:
+        return None
+    budget_ms = env_float("GMLX_PREFILL_TICK_MS", 500.0)
+    if budget_ms <= 0:
+        return None
+    obs_step, obs_secs = _CHUNK_COST
+    per_tok_ms = 1e3 * obs_secs / obs_step
+    min_step = max(1, env_int("GMLX_PREFILL_MIN_STEP", 256))
+    step = int(base)
+    while step > min_step and step * per_tok_ms > budget_ms:
+        step //= 2
+    return step
+
+
 _UNTRACKED_WEIGHTS = 0.0
 _HEADROOM_FRACTION = 0.5
 
@@ -357,12 +420,21 @@ def decayed_for_batch(batch) -> int | None:
     depth = kv_depth(batch.prompt_cache)
     step = decayed_step(base, depth, score_heads(batch.model),
                         profile=profile)
+    tick = _tick_step(base)
+    ticked = tick is not None and tick < step
+    if ticked:
+        step = tick
+    global _LAST_STEP
+    _LAST_STEP = step
     if env_bool("GMLX_PREFILL_DECAY_LOG", False):
         if profile is not None and "profile" not in _PROFILE_LOGGED:
             _PROFILE_LOGGED.add("profile")
             print(f"[prefill-decay] score profile active: {profile}",
                   flush=True)
-        if step != base:
+        if ticked:
+            print(f"[prefill-decay] tick: step {base} -> {step} "
+                  f"(rows {_LIVE_DECODE_ROWS})", flush=True)
+        elif step != base:
             print(f"[prefill-decay] depth {depth}: step {base} -> {step}",
                   flush=True)
     return step

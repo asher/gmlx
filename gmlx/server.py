@@ -777,6 +777,13 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "(default 1.0 ~= 50/50; 0 = stock scheduling). Also "
                          "via GMLX_DECODE_PREFILL_RATIO; config mode: "
                          "server.decode_prefill_ratio.")
+    ap.add_argument("--prefill-tick-ms", type=float, default=None,
+                    metavar="MS",
+                    help="Wall-clock budget per prefill chunk while decode "
+                         "rows are live; chunks are halved to fit (default "
+                         "500; 0 = full chunks). Also via "
+                         "GMLX_PREFILL_TICK_MS; config mode: "
+                         "server.prefill_tick_ms.")
     ap.add_argument("--speculative-width-cap", type=int, default=None,
                     metavar="N",
                     help="Run MTP only while the live decode batch is <= N "
@@ -910,6 +917,8 @@ def _bg_serve_args(a, cfg_path) -> list:
         out += ["--prefill-step-size", str(a.prefill_step_size)]
     if getattr(a, "decode_prefill_ratio", None) is not None:
         out += ["--decode-prefill-ratio", str(a.decode_prefill_ratio)]
+    if getattr(a, "prefill_tick_ms", None) is not None:
+        out += ["--prefill-tick-ms", str(a.prefill_tick_ms)]
     if getattr(a, "speculative_width_cap", None) is not None:
         out += ["--speculative-width-cap", str(a.speculative_width_cap)]
     if getattr(a, "ignore_eos", False):
@@ -1293,7 +1302,7 @@ def _dump_cfg_yaml(cfg: ServerCfg) -> str:
     server = {k: d.pop(k) for k in
               ("host", "port", "api_key", "no_auth", "model_dirs", "budget_gb",
                "max_models", "hf_cache", "menubar", "token_queue_timeout_s",
-               "prefill_step_size", "decode_prefill_ratio",
+               "prefill_step_size", "decode_prefill_ratio", "prefill_tick_ms",
                "cache_limit_gb", "family_defaults",
                "stochastic_mtp", "gpu_keepwarm", "stt", "tts", "embeddings",
                "rerank",
@@ -1488,6 +1497,20 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
         else:
             os.environ["GMLX_DECODE_PREFILL_RATIO"] = str(ratio)
             print(f"[server] decode-prefill pacing ratio: {ratio}")
+
+    # Prefill tick budget: flag > config > exported env > default (500 in
+    # prefill_decay). Read per chunk from the env, so setting it here is
+    # enough regardless of patch-install order.
+    tick = getattr(a, "prefill_tick_ms", None)
+    if tick is None:
+        tick = cfg.prefill_tick_ms
+    if tick is not None:
+        if tick < 0:
+            print(f"[server] ignoring negative prefill tick budget {tick}")
+        else:
+            os.environ["GMLX_PREFILL_TICK_MS"] = str(tick)
+            print(f"[server] prefill tick budget: "
+                  f"{f'{tick:g} ms' if tick else 'off (full chunks)'}")
 
     # MTP width cap: the flag is process-wide and outranks per-model config,
     # so say so when both are in play rather than letting the key look active.
