@@ -14,6 +14,7 @@ projector skips it. Skips carry the exact missing piece in their reason.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -127,8 +128,11 @@ def test_vlm_image_turn(vlm_pair):
     # Content-bearing check: a non-empty reply alone passes even when the
     # image never reaches the encoder. Greedy on cats.jpg must mention the
     # cats; couples the test to checkpoint competence, which a curated
-    # test dir provides.
-    assert "cat" in reply.lower(), f"image not grounded in reply: {reply!r}"
+    # test dir provides. Word-boundary match: "locate"/"indicates" carry
+    # the bare substring.
+    assert re.search(r"\bcats?\b", reply.lower()), (
+        f"image not grounded in reply: {reply!r}"
+    )
     mx.clear_cache()
 
 
