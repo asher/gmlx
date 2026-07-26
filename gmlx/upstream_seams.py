@@ -101,6 +101,14 @@ SEAMS: tuple[Seam, ...] = (
          critical=True),
     Seam("mlx_vlm.models.qwen3_5.language", "Qwen3_5GatedDeltaNet.__call__",
          "gdn_patches._patch_gated_delta_fused_verify"),
+    Seam("mlx_vlm.models.qwen3_5.language",
+         "_qwen3_5_advance_left_padding_info",
+         "gdn_patches fused GDN decode/verify (memo advance after "
+         "cache.advance; also the interop partner of the owned memo "
+         "builders in qwen35_owned)", critical=True),
+    Seam("mlx_vlm.models.qwen3_5.language", "_qwen3_5_advance_lengths_info",
+         "gdn_patches fused GDN decode/verify (memo advance after "
+         "cache.advance)", critical=True),
     Seam("mlx_vlm.models.qwen3_5.gated_delta", "gated_delta_ops",
          "gdn_patches._patch_mlxvlm_gated_delta_tiled_v", critical=True),
     Seam("mlx_vlm.models.qwen3_5.gated_delta", "gated_delta_kernel",

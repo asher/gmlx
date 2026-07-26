@@ -55,6 +55,8 @@
   "mlx_vlm.models.qwen3_5.language:LanguageModel.__init__": "5df9643ed44b9a8a7ed12cafc8ab54afd28f24baad1d9c1c5c28d564e2df6f94",
   "mlx_vlm.models.qwen3_5.language:Qwen3_5GatedDeltaNet.__call__": "8fed4a648827688517e7379441e62e3265f4e43413292ab5a3739f1075b71d9a",
   "mlx_vlm.models.qwen3_5.language:Qwen3_5Model.__call__": "b7915514f292ab9fe5437ab995bd49e08d81959e68ce9318e62570e56de935af",
+  "mlx_vlm.models.qwen3_5.language:_qwen3_5_advance_left_padding_info": "11a1339a17cd4d40c77cebfa4561b9dc8316f4398e7f313128401acc311e3e9a",
+  "mlx_vlm.models.qwen3_5.language:_qwen3_5_advance_lengths_info": "9944163aeb7fe2a03f72381a77cf339afa10d0a5fa21fdcb326e32f1c91e3ef9",
   "mlx_vlm.models.qwen3_5.language:_qwen3_5_ragged_decode_attention": "14d23add793a42f2b78dd5a68ff785dd5770c870805cfc29e6b8048153747eb9",
   "mlx_vlm.models.qwen3_5.language:_qwen3_5_ragged_sdpa_one_pass_kernel": "459220a949c53ed39123812d0e2f9268c10d5c47b63a9e185f253c74a520918c",
   "mlx_vlm.models.qwen3_5.language:_qwen3_5_ragged_sdpa_two_pass_1_kernel": "735e11c9ad43954b99e919534fad9b3c5375d564af87c329a914c18838422131",
