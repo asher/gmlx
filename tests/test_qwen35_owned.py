@@ -78,10 +78,11 @@ def _top():
 def _pair():
     """Stock and owned LanguageModel with identical weights.
 
-    Beyond the weight check, the attribute-set comparison guards the
-    mirrored constructors: an upstream field added to LanguageModel or
-    Qwen3_5Model __init__ shows up as a key-set mismatch here (and as a
-    seam-pin failure), not as a silent behavioral drift.
+    Beyond the weight check, the attribute-set and module-key comparisons
+    guard the mirrored constructors: an upstream field or submodule added
+    to LanguageModel or Qwen3_5Model __init__ shows up as a key-set
+    mismatch here (and as a seam-pin failure), not as a silent behavioral
+    drift.
     """
     from mlx.utils import tree_flatten
 
@@ -104,6 +105,12 @@ def _pair():
         assert set(vars(s_mod)) == set(vars(o_mod)), (
             f"{name} instance attribute set diverged (mirrored constructor "
             f"drifted from upstream)"
+        )
+        # Module is a dict: parameter-less submodules live in keys() but in
+        # neither vars() nor the parameter tree.
+        assert set(s_mod.keys()) == set(o_mod.keys()), (
+            f"{name} module key set diverged (mirrored constructor drifted "
+            f"from upstream)"
         )
     return stock, owned
 
