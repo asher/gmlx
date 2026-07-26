@@ -13,6 +13,7 @@ row-slice views, so prefill and every stock path are untouched.
 from __future__ import annotations
 
 import importlib
+import os
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -172,6 +173,8 @@ def test_verify_patcher_cats_vlm_instances(monkeypatch):
         patches._FUSED_VERIFY_PATCH.stock = saved_stock
 
 
+@pytest.mark.skipif(bool(os.environ.get("KQUANT_FORCE_CPU")),
+                    reason="_f16_head_gemv is a Metal kernel")
 @pytest.mark.parametrize("m", [2, 4, 8])
 def test_head_gemv_route_parity(m):
     """The decode-body route: cat weight through _f16_head_gemv must match

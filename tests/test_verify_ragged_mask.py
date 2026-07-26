@@ -7,6 +7,7 @@ ragged decode kernel's case, not verify's), and GMLX_VERIFY_RAGGED_MASK=0
 restores the stock group loop per call.
 """
 
+import os
 from types import SimpleNamespace
 
 import mlx.core as mx
@@ -48,8 +49,13 @@ def test_ragged_mask_matches_stock_loop(dtype):
     mx.eval(got, ref)
     assert got.dtype == ref.dtype
     if dtype == mx.bfloat16:
-        # Production dtype: bit-exact against the group loop.
-        assert mx.array_equal(got, ref).item()
+        if os.environ.get("KQUANT_FORCE_CPU"):
+            # The CPU sdpa fallback rounds bf16 differently; bit-exactness
+            # is a Metal serve-path claim.
+            assert mx.allclose(got, ref, atol=2e-2, rtol=2e-2).item()
+        else:
+            # Production dtype: bit-exact against the group loop.
+            assert mx.array_equal(got, ref).item()
     else:
         # fp32 differs by 1-2 ulps (reduction order of the masked full-T
         # kernel vs the sliced per-position calls), max 1.8e-7 measured.
@@ -69,6 +75,8 @@ def test_zero_pads_takes_fast_path():
     assert mx.array_equal(got, ref).item()
 
 
+@pytest.mark.skipif(bool(os.environ.get("KQUANT_FORCE_CPU")),
+                    reason="stock L==1 answers with the ragged decode Metal kernel")
 def test_l1_with_pads_still_bails_to_stock():
     patched, stock = _install()
     q, k, v, cache = _case([0, 7, 33, 12], L=1)

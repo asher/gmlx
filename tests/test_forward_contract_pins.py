@@ -24,6 +24,7 @@ pinned end-to-end by test_deepseek_v4_mtp.py / test_hy_v3_mtp.py greedy
 identity, and are out of scope here.
 """
 
+import os
 from types import SimpleNamespace
 
 import mlx.core as mx
@@ -38,6 +39,12 @@ from mlx_vlm.models.qwen3_5.config import TextConfig as Q35TextConfig
 from mlx_vlm.models.qwen3_5.language import LanguageModel as Q35LanguageModel
 
 ATOL = 2e-3  # f32 path-divergence floor (block SDPA / chunked GDN vs step)
+
+# The qwen3_5 GDN forward dispatches Metal-only kernels; the gemma4 tests
+# and the policy-table checks run on any device.
+_NEEDS_GPU = pytest.mark.skipif(
+    bool(os.environ.get("KQUANT_FORCE_CPU")),
+    reason="qwen3_5 GDN forward is Metal-only")
 # Replay pins compare states built through a qL=3 forward against states
 # built through qL=1 steps: the KV entries themselves differ by kernel-path
 # rounding, so the bound is looser. Real rollback bugs (wrong trim, stale
@@ -137,6 +144,7 @@ def _close(a, b, atol=ATOL):
 # ---------------------------------------------------------------------------
 
 
+@_NEEDS_GPU
 def test_q35_output_holder_and_hidden_head_consistency():
     lm = _q35_lm()
     ids = _ids(*PROMPT)
@@ -154,6 +162,7 @@ def test_q35_output_holder_and_hidden_head_consistency():
     assert _close(lm.speculative_logits_from_hidden(h), out2.logits)
 
 
+@_NEEDS_GPU
 def test_q35_skip_logits_still_captures_hidden():
     lm = _q35_lm()
     out = lm(_ids(*PROMPT), return_hidden=True, skip_logits=True)
@@ -161,6 +170,7 @@ def test_q35_skip_logits_still_captures_hidden():
     assert out.hidden_states is not None and len(out.hidden_states) == 1
 
 
+@_NEEDS_GPU
 def test_q35_capture_layer_ids_and_gdn_sink():
     lm = _q35_lm()
     n_gdn = sum(1 for lyr in lm.layers if lyr.is_linear)
@@ -173,6 +183,7 @@ def test_q35_capture_layer_ids_and_gdn_sink():
     assert out.gdn_states is not None and len(out.gdn_states) == n_gdn
 
 
+@_NEEDS_GPU
 def test_q35_verify_hooks_agree_with_forward():
     lm = _q35_lm()
     prompt = _ids(*PROMPT)
@@ -202,6 +213,7 @@ def test_q35_verify_hooks_agree_with_forward():
     assert (am == _greedy(lm.speculative_logits_from_hidden(hidden))).all().item()
 
 
+@_NEEDS_GPU
 def test_q35_rollback_replays_to_sequential_state():
     lm = _q35_lm()
     prompt = _ids(*PROMPT)
@@ -243,6 +255,7 @@ def test_q35_chunked_prefill_policy_table():
         draft_model=draft, draft_kind=None, prefill_kwargs={}) is True
 
 
+@_NEEDS_GPU
 def test_q35_text_rope_deltas_zeroed():
     lm = _q35_lm()
     ids = mx.array([[3, 17, 42], [9, 8, 7]])
