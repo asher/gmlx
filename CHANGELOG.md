@@ -53,17 +53,22 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - worked around an upstream Metal kernel bug in `mx.fast.rope` (stock
-  mlx 0.31.2): with a plain int offset and a single-position batched
+  mlx 0.31.2): with a scalar offset and a single-position batched
   input (B, \*, 1, D) with B > 1, every batch row past the first is
   rotated from out-of-bounds memory (allocator-dependent garbage; the
-  CPU path is correct). Batched serving was never affected --
-  BatchKVCache passes per-row offset arrays, which are correct -- but
-  any plain-KVCache batched decode (raw chains, external harnesses)
-  silently corrupted rows past the first. The fix wraps `mx.fast.rope`
-  and expands the int offset to a per-row int32 array for exactly that
-  case, covering every arch including direct `mx.fast.rope` call sites
-  (`GMLX_ROPE_BATCH_FIX=0` reverts; a tripwire test flags when an mlx
-  upgrade fixes the kernel so the workaround can be dropped).
+  CPU path is correct). Scalar means fewer offset entries than batch
+  rows: a plain int, a 0-d array (the `mx.array(cache.offset)` wrap in
+  mlx-lm's gemma4_text produces one), or a size-1 array. Batched
+  serving was never affected -- BatchKVCache passes size-B per-row
+  offset arrays, which are correct -- but any plain-KVCache batched
+  decode (raw chains, external harnesses) silently corrupted rows past
+  the first. The fix wraps `mx.fast.rope` and expands any offset
+  carrying fewer entries than the batch dimension to a per-row int32
+  array, covering every arch including direct `mx.fast.rope` call
+  sites (`GMLX_ROPE_BATCH_FIX=0` reverts; per-variant subprocess
+  tripwire tests flag when an mlx upgrade fixes the kernel so the
+  workaround can be dropped -- subprocesses because an in-process A/B
+  is primed by the fix's own expanded-offset buffer and reads clean).
 - the qwen3.5/3.6 batched-verify SDPA seam no longer forwards to the
   stock per-pad-group gather loop whenever the cache carries a
   left-padding attribute: it now bails only on real padding, and when
