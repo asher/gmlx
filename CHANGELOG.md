@@ -6,6 +6,17 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- qwen3.5/3.6 MTP targets run an owned model-level forward: the
+  model-level control flow (mask resolution, decode left-padding walk,
+  batched left-padded prefill, hidden capture) now runs from a gmlx
+  subclass instead of the stock mlx-vlm class, dropping the B=1
+  extract/recurse/merge cache shortcut and making the empty-sequence
+  guard structural. Layer classes and fused kernels are unchanged, and
+  greedy tokens are identical against stock on every route
+  (`GMLX_QWEN_OWNED=0` reverts to the stock class at load).
+
 ## [0.1.2] - 2026-07-26
 
 ### Added

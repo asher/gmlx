@@ -668,6 +668,17 @@ def _mtp_target_classes(model_type: str):
         lang = importlib.import_module(f"mlx_vlm.models.{sub}.language")
         cfg = importlib.import_module(f"mlx_vlm.models.{sub}.config")
 
+        # Owned model-level forward by default: the model-level control
+        # flow (masks, left-padding walk, batched-padded prefill, capture)
+        # runs from gmlx code on a subclass; layers stay stock so the
+        # fused-kernel seams keep engaging. GMLX_QWEN_OWNED=0 reverts to
+        # the stock class wholesale.
+        language_model_cls = lang.LanguageModel
+        if env_bool("GMLX_QWEN_OWNED", True):
+            from . import qwen35_owned
+
+            language_model_cls = qwen35_owned.language_model_class(sub)
+
         def build(config):
             text_config = cfg.TextConfig.from_dict(config)
             model_config = cfg.ModelConfig.from_dict(
@@ -678,9 +689,9 @@ def _mtp_target_classes(model_type: str):
                     "vocab_size": config.get("vocab_size"),
                 }
             )
-            return lang.LanguageModel(text_config, model_config)
+            return language_model_cls(text_config, model_config)
 
-        return lang.LanguageModel, build
+        return language_model_cls, build
     if model_type == "gemma4_text":
         lang = importlib.import_module("mlx_vlm.models.gemma4.language")
         cfg = importlib.import_module("mlx_vlm.models.gemma4.config")
@@ -749,7 +760,9 @@ def _build_mtp_target(config_dict: dict):
             _lm.speculative_logits_from_hidden(hidden), axis=-1
         )
     wrapper = MTPTextTarget(language_model, config)
-    loadlog.verbose_print(f"[build] {model_type} -> mlx-vlm LanguageModel (MTP target wrapper)")
+    loadlog.verbose_print(
+        f"[build] {model_type} -> {type(language_model).__name__} (MTP target wrapper)"
+    )
     return wrapper, config
 
 
