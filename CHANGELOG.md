@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-07-26
+
 ### Added
 
 - Prefill ticks: while streams are decoding, each admission prefill chunk is
@@ -35,7 +37,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   single-stream traffic never reaches it. Combined step-time win at
   B=16 d64: -11.0% on Dolphin3-8B, -7.1% on Qwen3.5-9B
   (`GMLX_SPLITK_MIN_B` tunes the width, `0` kills the split).
-
 - gemma-4 concurrent decode and speculative verify keep the global layers
   on fused attention: head_dim-512 batched calls at decode width (one
   position) and MTP verify width (2-8 positions) route each stream through
