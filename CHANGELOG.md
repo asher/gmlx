@@ -89,6 +89,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- mlx-kquant floor raised to 0.3.6, which ships the M-banded NAX qmm
+  routing (BM=32/64-db/128 tiles behind a measured per-codec policy).
+  Older wheels still run correctly, but the batched-decode rates
+  certified on this release, and the batch-width floor of the down_proj
+  split, are calibrated against 0.3.6's routes.
 - Batched decode on gated-delta hybrids (qwen3.6 dense) speeds up ~8%: the two
   tiny per-layer decay/gate projections (b/a) are concatenated at load and
   routed through the M-stationary head kernel at batch width 2-8, instead of
