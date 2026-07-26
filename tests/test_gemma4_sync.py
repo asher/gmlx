@@ -95,6 +95,52 @@ def test_mask_decisions_match_stock_int_offsets():
     compare(mx.zeros((1, 1, 4)), warm_p)  # decode width
 
 
+def test_array_offsets_snapshotted_ints_pass_through():
+    """rope must never receive the cache's live offset array object: the
+    shared buffer can be written through by downstream kernels, which
+    degenerated gated B>1 decode (gate-cert 2026-07-25). Int offsets keep
+    passing through unwrapped -- that skip is the patch's sync win."""
+    _install()
+    lm = _g4_lm()
+    attn = lm.model.layers[0].self_attn
+
+    seen = []
+    real_rope = attn.rope
+
+    class SpyRope:
+        def __call__(self, x, offset=0):
+            seen.append(offset)
+            return real_rope(x, offset=0)  # rotation content irrelevant
+
+    attn.rope = SpyRope()
+
+    class FakeCache:
+        left_padding = None
+
+        def __init__(self, off):
+            self.offset = off
+
+        def update_and_fetch(self, k, v):
+            return k, v
+
+    hidden = lm.model.layers[0].self_attn.q_proj.weight.shape[1]
+
+    cache = FakeCache(mx.array([5, 6, 7]))
+    attn(mx.zeros((3, 1, hidden)), mask=None, cache=cache)
+    assert len(seen) == 2  # keys, then queries
+    for off in seen:
+        assert isinstance(off, mx.array)
+        assert off is not cache.offset  # snapshot, not the live object
+        assert mx.array_equal(off, cache.offset).item()
+
+    seen.clear()
+    cache_int = FakeCache(9)
+    attn(mx.zeros((1, 1, hidden)), mask=None, cache=cache_int)
+    assert seen == [9, 9]  # ints stay unwrapped
+
+    attn.rope = real_rope
+
+
 def test_logits_bit_identical_before_and_after():
     lm = _g4_lm()
     prompt = _ids(*PROMPT)

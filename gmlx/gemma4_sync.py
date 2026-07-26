@@ -21,7 +21,10 @@ The replacements keep upstream's decisions everywhere except:
   of a batched prefill), where upstream picks the "causal" string and this
   patch builds the windowed array mask -- same attention result, built the
   way every later chunk builds it anyway;
-- rope offsets pass through untouched (int stays int, array stays array).
+- int rope offsets pass through untouched (no per-layer device upload).
+  Array offsets keep upstream's snapshot copy: the cache's live offset
+  array must not share its buffer with downstream kernels (a write-through
+  degenerates gated B>1 decode; the copy is async device work, not a sync).
 
 Install is idempotent; GMLX_G4_NOSYNC=0 disables. Both replaced bodies are
 copies of the pinned upstream implementations (seam-fingerprinted in
@@ -141,8 +144,12 @@ def install_gemma4_nosync() -> bool:
 
     def _attn_call(self, x, mask=None, cache=None, shared_kv=None,
                    offset=None):
-        # Upstream body with the offset wrap removed (int stays int, array
-        # stays array; rope takes both). Everything else verbatim.
+        # Upstream body with the int-offset wrap removed (no per-layer
+        # device upload; rope takes ints directly). Array offsets are still
+        # snapshotted: passing the cache's live offset array shares its
+        # buffer with downstream kernels, and gated B>1 decode degenerates
+        # when that buffer is written through (single-line bisect,
+        # gate-cert 2026-07-25). Everything else verbatim.
         B, L, _ = x.shape
 
         queries = self.q_proj(x).reshape(B, L, self.n_heads, self.head_dim)
@@ -160,6 +167,8 @@ def install_gemma4_nosync() -> bool:
                     B, L, self.n_kv_heads, self.head_dim)
 
             offset = cache.offset if cache is not None else 0
+            if isinstance(offset, mx.array):
+                offset = mx.array(offset)
 
             keys = self.k_norm(keys)
             keys = keys.transpose(0, 2, 1, 3)
