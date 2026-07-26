@@ -20,6 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 # mlx-kquant supplies the K-quant ops/kernels + the C++ GGUF wire-byte reader.
@@ -30,7 +31,10 @@ classifiers = [
 # mlx / mlx-lm / mlx-vlm move in lockstep with the exact mlx-vlm pin; bump them
 # together per docs/upstream-upgrades.md.
 dependencies = [
-    "mlx-kquant>=0.3.6",
+    # >=0.3.7: first release with a cp314 wheel. Below it, a Python 3.14
+    # install (uv and pipx pick the newest interpreter by default) silently
+    # falls back to compiling the Metal kernels from source.
+    "mlx-kquant>=0.3.7",
     "mlx-lm>=0.31",
     # Direct imports of both throughout (mx.*, np.*); declared explicitly
     # rather than inherited through mlx-lm.
@@ -89,14 +93,18 @@ stt = ["mlx-whisper", "python-multipart"]
 # (gmlx/_vendor - PyPI misaki caps at Python <3.13, and its [en] extra
 # drags torch for a transformer mode Kokoro never enables); listed here are
 # misaki's runtime deps for the English path. spacy<4: unmarked, pip
-# backtracks onto the unbuildable spacy 4.0.0.devN sdist; <3.14: no cp314
-# wheels yet, so Kokoro needs Python <= 3.13 (qwen3-tts needs none of this).
+# backtracks onto the unbuildable spacy 4.0.0.devN sdist. spacy also carried a
+# `python_version < '3.14'` marker while it had no cp314 wheels; 3.8.13 ships
+# them, and the marker had become a silent breakage (it dropped spacy on 3.14
+# while the vendored G2P still imported it), so it is gone. The spacy English
+# pipeline is not a package here: it is not on PyPI, and the snapshot fetches
+# it from the Hub (qwen3-tts needs none of this).
 # phonemizer-fork (not phonemizer): espeak data-path support, without which
 # OOD words hard-exit the server. `espeakng-loader` bundles libespeak-ng +
 # data (GPLv3 - fine in this optional extra, keep it out of core deps).
 tts = [
     "mlx-audio",
-    "spacy<4; python_version < '3.14'",
+    "spacy<4",
     "num2words",
     "addict",
     "phonemizer-fork",

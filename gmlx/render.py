@@ -54,7 +54,8 @@ def resolve_render_mode(
     if not (tty and color):
         return "plain", f"render={req} needs a color terminal; using plain"
     if req == "rich" and not rich_available():
-        return "lite", "rich not installed (pip install 'gmlx[chat]'); using lite"
+        from .extras import install_hint
+        return "lite", f"rich not installed ({install_hint('chat')}); using lite"
     return req, None
 
 

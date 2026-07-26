@@ -31,6 +31,68 @@ def _parse_int_list(s: str, *, flag: str) -> list[int]:
     return out
 
 
+# Condensed --help. run/chat expose 70+ flags, most of which a first run never
+# touches: -h/--help shows the everyday subset, --help-all keeps the full
+# reference. Both verbs build their parsers with add_help=False and route
+# through add_condensed_help.
+class _HelpAllAction(argparse.Action):
+    def __init__(self, option_strings, dest=argparse.SUPPRESS,
+                 default=argparse.SUPPRESS, help=None):  # noqa: A002
+        super().__init__(option_strings, dest=dest, default=default, nargs=0,
+                         help=help)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        parser.print_help()
+        parser.exit()
+
+
+class _CondensedHelpAction(argparse.Action):
+    def __init__(self, option_strings, dest=argparse.SUPPRESS,
+                 default=argparse.SUPPRESS, help=None, core=()):  # noqa: A002
+        super().__init__(option_strings, dest=dest, default=default, nargs=0,
+                         help=help)
+        self.core = tuple(core)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        print(format_condensed_help(parser, self.core), end="")
+        parser.exit()
+
+
+def format_condensed_help(ap: argparse.ArgumentParser, core) -> str:
+    """The short help page: usage over just the core actions, the description,
+    the core options, and a pointer at --help-all for the rest."""
+    keys = set(core)
+    shown = [a for a in ap._actions
+             if (isinstance(a, (_CondensedHelpAction, _HelpAllAction))
+                 or (keys & set(a.option_strings) if a.option_strings
+                     else a.dest in keys))]
+    n_more = sum(1 for a in ap._actions
+                 if a not in shown and a.help != argparse.SUPPRESS)
+    fmt = ap._get_formatter()
+    # Pass the mutually exclusive groups so the usage line keeps its
+    # `[--prompt STR | --prompt-file PATH]` bracketing. argparse skips any
+    # group whose actions are not all present and adjacent in `shown`, so a
+    # group split by the core filter degrades to plain optionals.
+    fmt.add_usage(None, shown, ap._mutually_exclusive_groups)
+    fmt.add_text(ap.description)
+    fmt.start_section("common options")
+    fmt.add_arguments(shown)
+    fmt.end_section()
+    fmt.add_text(
+        f"{n_more} further flags cover sampling, the KV cache, speculative "
+        f"decoding, and bigger-than-RAM streaming: `{ap.prog} --help-all` "
+        f"lists them, docs/cli.md explains them.")
+    return fmt.format_help()
+
+
+def add_condensed_help(ap: argparse.ArgumentParser, core) -> None:
+    """Install -h/--help (the everyday flags) and --help-all (everything)."""
+    ap.add_argument("-h", "--help", action=_CondensedHelpAction, core=core,
+                    help="Show the common options (this page) and exit.")
+    ap.add_argument("--help-all", action=_HelpAllAction,
+                    help="Show every option and exit.")
+
+
 def add_verbosity_arg(ap: argparse.ArgumentParser) -> None:
     """Add ``-v/--verbose``. Shared by ``run`` and ``chat``."""
     ap.add_argument(
@@ -612,7 +674,13 @@ def _build_parser(prog: str = "gmlx run") -> argparse.ArgumentParser:
         prog=prog,
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        add_help=False,
     )
+    add_condensed_help(ap, (
+        "gguf", "--prompt", "--prompt-file", "--max-tokens", "--temp",
+        "--system-prompt", "--reasoning", "--mmproj", "--image",
+        "--stream-experts", "--verbose",
+    ))
     ap.add_argument("gguf", help="Path to the GGUF file (sharded ok).")
     prompt_group = ap.add_mutually_exclusive_group()
     prompt_group.add_argument(
@@ -650,6 +718,15 @@ def _build_parser(prog: str = "gmlx run") -> argparse.ArgumentParser:
         default=None,
         metavar="STR",
         help="System message for the chat template.",
+    )
+    ap.add_argument(
+        "--reasoning",
+        choices=("show", "hide", "raw"),
+        default="show",
+        help="How to display a reasoning model's thinking: 'show' styles it "
+        "under a label and strips the control markers (default), 'hide' drops "
+        "it and prints only the answer, 'raw' passes everything through "
+        "verbatim. Display-only - image (--image/--audio) requests print raw.",
     )
     add_kv_cache_args(ap)
     add_vlm_shared_args(ap)
@@ -1271,6 +1348,7 @@ def _run_generate(args) -> int:
             system_prompt=args.system_prompt,
             template_kwargs=template_kwargs,
             verbose=True,
+            reasoning=args.reasoning,
             kv_bits=args.kv_bits,
             kv_group_size=args.kv_group_size,
         )
@@ -1355,6 +1433,7 @@ def _run_generate(args) -> int:
         over_generation_log=args.over_generation_log,
         over_label=args.over_label,
         verbose=True,
+        reasoning=args.reasoning,
     )
     return 0
 
@@ -1518,6 +1597,7 @@ def _run_vlm_mtp(args) -> int:
         system_prompt=args.system_prompt,
         template_kwargs=parse_template_config(args.chat_template_config),
         verbose=True,
+        reasoning=args.reasoning,
         kv_bits=args.kv_bits,
         kv_group_size=args.kv_group_size,
     )

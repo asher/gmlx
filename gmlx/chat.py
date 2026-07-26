@@ -94,7 +94,13 @@ def _build_parser(prog: str = "gmlx chat") -> argparse.ArgumentParser:
         "staging files/shell output, and (with --mmproj) images and "
         "audio. Type '/help' inside the REPL for the command list; "
         "Esc or Ctrl-C cancels a reply.",
+        add_help=False,
     )
+    from .cli import add_condensed_help
+    add_condensed_help(ap, (
+        "gguf", "--assistant", "--system-prompt", "--reasoning", "--mmproj",
+        "--max-tokens", "--temp", "--resume", "--theme", "--verbose",
+    ))
     ap.add_argument(
         "gguf", nargs="?", default=None,
         help="Path to the GGUF file (sharded ok), or a config model id. "
@@ -1220,7 +1226,8 @@ def _slash_render(cmd, arg, state):
         print("[chat] /render needs one of: plain, lite, rich")
         return None
     if arg == "rich" and not rich_available():
-        print("[chat] rich not installed (pip install 'gmlx[chat]')")
+        from .extras import install_hint
+        print(f"[chat] rich not installed ({install_hint('chat')})")
         return None
     state.render = arg
     print(f"[chat] render = {arg} (next reply)")
@@ -2603,7 +2610,18 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 parser.error(f"{flag} targets a server and needs --assistant "
                              f"(without it, chat loads the model in-process)")
         if not args.gguf:
-            parser.error("the gguf argument is required without --assistant")
+            # Not parser.error: that leads with the full usage dump, which is
+            # exactly the wall of text a first-run user shouldn't wade through.
+            print(
+                "error: chat needs a model - a GGUF file or a configured "
+                "model id:\n"
+                "  gmlx chat ~/models/model.gguf          a local GGUF\n"
+                "  gmlx chat <id>                         from your config "
+                "(gmlx list shows ids)\n"
+                "  gmlx pull hf:org/repo/file.gguf        download one first\n"
+                "  gmlx chat --assistant NAME             talk to a running "
+                "server instead", file=sys.stderr)
+            raise SystemExit(2)
         # By-name config fallback (same rules as `gmlx run`): a positional that isn't
         # an on-disk file is resolved against the server config by id/alias, applying that
         # model's path + sampling/template/load settings.
@@ -2893,10 +2911,12 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         cache = backend.new_text_cache()
         _bind_model_state()
 
+    from .extras import install_hint
     editor = (
         "prompt_toolkit"
         if state.ptk_session is not None
-        else "readline (pip install 'gmlx[chat]' for menu completion + suggestions)"
+        else f"readline ({install_hint('chat')} for menu completion "
+             "+ suggestions)"
     )
     print(
         f"[chat] '/help' lists commands - '/exit' or Ctrl-D quits - "

@@ -419,6 +419,18 @@ def report_port_in_use(tail: str, host: str, port: int, tag: str = "error:") -> 
     return True
 
 
+def _served_model_count(host, port, api_key=None) -> int | None:
+    """How many ids ``/v1/models`` lists, or ``None`` when unreachable /
+    auth-gated. Best-effort - callers treat ``None`` as unknown, never as 0."""
+    try:
+        payload = get_json(f"http://{host}:{port}/v1/models",
+                           api_key=api_key, timeout=3)
+        data = payload.get("data") if isinstance(payload, dict) else None
+        return len(data) if isinstance(data, list) else None
+    except Exception:                        # noqa: BLE001 - advisory probe
+        return None
+
+
 def _warn_missing_models(host, port, api_key, config_abspath) -> None:
     """After a ready background start, compare the config's ``models:`` ids with
     what ``/v1/models`` actually serves and warn when entries were skipped
@@ -479,8 +491,16 @@ def launch_detached(child: list, *, host: str, port: int,
             run["status"] = "running"
             write_run(host, port, run)
             print(f"server up at http://{host}:{port}  (pid {proc.pid})")
-            print(f"  try:  gmlx launch <harness>   or   "
-                  f"curl http://{host}:{port}/v1/models")
+            # An empty /v1/models means every request will 404: say so here
+            # instead of suggesting `gmlx launch` at a server with nothing
+            # to serve. None (probe failed / auth-gated) keeps the default.
+            if _served_model_count(host, port, api_key) == 0:
+                print("  serving 0 models - requests will 404")
+                print("  set up:  gmlx init  ->  gmlx pull <hf:ref>  ->  "
+                      "gmlx restart")
+            else:
+                print(f"  try:  gmlx launch <harness>   or   "
+                      f"curl http://{host}:{port}/v1/models")
             print(f"  logs: {lp}")
             tgt = "" if (host, port) == ("127.0.0.1", 8080) else f" --port {port}"
             print(f"  stop: gmlx stop{tgt}   status: gmlx status{tgt}")
@@ -826,7 +846,16 @@ def status(host: str, port, *, as_json: bool = False) -> int:
     health = "healthy" if healthy else "starting/unhealthy"
     pid = f"pid {info['pid']}" if info["pid"] else "launchd-managed"
     url = info["url"] or f"http://{info['host']}:{info['port']}"
-    print(f"{url}: up ({health}) - {pid}, {where}")
+    # "up (healthy)" over an empty model list reads as all-good while every
+    # request 404s; count the served ids (skipped on a key-protected server -
+    # the unauthenticated probe would just fail).
+    n_models = (None if info["api_key_set"] or not healthy
+                else _served_model_count(info["host"], info["port"]))
+    tail = f", {n_models} model{plural_s(n_models)}" if n_models is not None else ""
+    print(f"{url}: up ({health}{tail}) - {pid}, {where}")
+    if n_models == 0:
+        print("  0 models served: requests will 404 - "
+              "gmlx init -> gmlx pull <hf:ref> -> gmlx restart")
     if info["log"]:
         print(f"  logs: {info['log']}  (gmlx logs)")
     if info["api_key_set"]:

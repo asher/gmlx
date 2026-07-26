@@ -2710,6 +2710,7 @@ def load_model(
     pf = preflight(gguf_path, arch=arch, hf_source=hf_source)
     arch = pf.arch
     loadlog.fact("arch", arch)
+    loadlog.fact_file_size(pf.shards)
     _log(f"[arch] {arch}")
 
     # Kick off the page-cache populate as early as the shard list exists so

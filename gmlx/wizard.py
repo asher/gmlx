@@ -340,11 +340,11 @@ def _configure_service(io: WizardIO, key, label, alias_table, default_alias,
                 default=False):
             ok = extras.install_extra(key)
             io.note("  installed." if ok else
-                    f"  install failed - configure anyway; retry later with: "
-                    f"pip install 'gmlx[{key}]'")
+                    f"  install failed - configure anyway; retry later "
+                    f"with: {extras.install_hint(key)}")
         else:
-            io.note(f"  not installed - the endpoint errors until you run: "
-                    f"pip install 'gmlx[{key}]'")
+            io.note("  not installed - the endpoint errors until you run: "
+                    f"{extras.install_hint(key)}")
     if needs_ffmpeg and not extras.ffmpeg_present():
         io.note("  note: audio needs ffmpeg on PATH - `brew install ffmpeg`")
     return model
@@ -447,10 +447,10 @@ def _maybe_install_embeddings_extra(io: WizardIO, value: str, *, allow_install):
         ok = extras.install_extra("embeddings")
         io.note("  installed." if ok else
                 "  install failed - configure anyway; retry later with: "
-                "pip install 'gmlx[embeddings]'")
+                f"{extras.install_hint('embeddings')}")
     else:
         io.note("  not installed - the endpoint errors until you run: "
-                "pip install 'gmlx[embeddings]'")
+                f"{extras.install_hint('embeddings')}")
 
 
 def _configure_embeddings(io: WizardIO, *, allow_install: bool, found):
@@ -552,10 +552,10 @@ def _configure_talk(io: WizardIO, *, stt_model, tts_model,
             ok = extras.install_extra("talk")
             io.note("  installed." if ok else
                     "  install failed - configure anyway; retry later with: "
-                    "pip install 'gmlx[talk]'")
+                    f"{extras.install_hint('talk')}")
         else:
             io.note("  not installed - `gmlx talk` errors until you run: "
-                    "pip install 'gmlx[talk]'")
+                    f"{extras.install_hint('talk')}")
     return {"voice": voice, "wake_word": wake, "mode": mode,
             "push_to_talk_modifier": modifier}
 

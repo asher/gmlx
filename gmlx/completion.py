@@ -107,14 +107,17 @@ def _verb_options(verb: str) -> tuple[tuple[str, str, str], ...]:
 
 def _capture_help(verb: str) -> str:
     """Run ``gmlx <verb> --help`` in-process, capturing stdout (argparse exits
-    via SystemExit, which we swallow). Returns ``""`` on any trouble - completion
-    must never raise."""
+    via SystemExit, which we swallow). Verbs with a condensed default help
+    (run/chat) are scraped via ``--help-all`` so completion still offers the
+    full flag surface. Returns ``""`` on any trouble - completion must never
+    raise."""
     from .cli import umbrella_main
 
+    flag = "--help-all" if verb in ("run", "chat") else "--help"
     buf = io.StringIO()
     try:
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
-            umbrella_main([verb, "--help"])
+            umbrella_main([verb, flag])
     except SystemExit:
         pass
     except Exception:  # noqa: BLE001 - a broken verb help must not break completion

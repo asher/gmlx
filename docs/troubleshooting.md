@@ -27,12 +27,13 @@ arrive as a prebuilt wheel.
 Symptom: `gmlx` worked yesterday; a fresh terminal says
 `command not found: gmlx` (so `gmlx doctor` is unavailable too).
 
-Nothing is broken - gmlx lives in the Python venv you installed it into, and
-each new terminal starts with that venv inactive. Run
-`source <install dir>/.venv/bin/activate` (the directory from the
-[install step](getting-started.md#install)) and the command is back. A
-background server or menu-bar app keeps running either way; only the terminal
-command needs the venv.
+Nothing is broken - this happens with the plain-venv install route: gmlx
+lives in the Python venv you installed it into, and each new terminal starts
+with that venv inactive. Run `source <install dir>/.venv/bin/activate` (the
+directory from the [install step](getting-started.md#install)) and the
+command is back. A background server or menu-bar app keeps running either
+way; only the terminal command needs the venv. An install via `uv tool
+install` or pipx stays on PATH in every terminal and never hits this.
 
 ## A download was interrupted or the disk filled
 

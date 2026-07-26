@@ -125,8 +125,39 @@ def _build_report(ref: remote.Ref, *, arch: str | None = None,
     return report, len(urls)
 
 
+def _repo_file_sizes(ref: remote.Ref, listing_cache: dict) -> dict | None:
+    """``{path_in_repo: bytes}`` for an hf ref's repo (cached per repo+revision),
+    or ``None`` when the listing failed / the ref is not hf."""
+    if ref.kind != "hf":
+        return None
+    key = (ref.repo, ref.revision)
+    if key not in listing_cache:
+        try:
+            listing_cache[key] = {
+                p: size for p, typ, size in
+                remote.hf_list_dir(ref.repo, "", ref.revision)
+                if typ == "file"}
+        except remote.RemoteError:
+            listing_cache[key] = None
+    return listing_cache[key]
+
+
+def _ref_size_bytes(ref: remote.Ref, report: remote.HeaderReport) -> int | None:
+    """Total on-disk bytes a model ref stands for (every shard of a split
+    file), or ``None`` when unknown. Local refs stat the files; remote refs
+    take the total the header range-read already reported, so the size line
+    costs no request of its own. Advisory, so unknown never fails anything."""
+    if ref.kind != "local":
+        return report.total_bytes
+    try:
+        return sum(os.path.getsize(p) for p in find_split_shards(ref.raw))
+    except OSError:
+        return None
+
+
 def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
-             hf_source: str | None = None, n_shards: int = 1) -> dict:
+             hf_source: str | None = None, n_shards: int = 1,
+             size_bytes: int | None = None) -> dict:
     # An mmproj (vision/audio projector) carries general.architecture="clip".
     # It is not a standalone model, so the arch gate doesn't apply - but it's a
     # perfectly valid file for its purpose (pair it with the LLM GGUF).
@@ -138,9 +169,18 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
         arch_ok, arch_err = False, None
     else:
         arch_ok, arch_err = _arch_status(report.arch, hf_source=hf_source)
+    from .memfit import classify_fit, total_ram_bytes
+    ram = total_ram_bytes()
     return {
         "ref": ref.raw,
         "kind": ref.kind,
+        "size_bytes": size_bytes,
+        "ram_bytes": ram,
+        # fits / tight / over vs this machine's RAM (None = size or RAM
+        # unknown); companions (mmproj/adapter) ride a base model, so their
+        # standalone fit is not judged.
+        "fit": (classify_fit(size_bytes, ram)
+                if size_bytes and not (mmproj or adapter) else None),
         "arch": report.arch,
         "arch_supported": arch_ok,
         "arch_error": arch_err,
@@ -173,6 +213,17 @@ def _print_report(v: dict) -> None:
         print(f"  architecture: {arch}  [unsupported]")
         if v["arch_error"]:
             print(f"    {v['arch_error']}")
+    size = v.get("size_bytes")
+    if size:
+        sline = f"  size: {_human_gb(size)}"
+        if v.get("n_shards", 1) > 1:
+            sline += f"  ({v['n_shards']} shards)"
+        from .memfit import fit_sentence
+        note = (fit_sentence(size, v.get("ram_bytes"))
+                if v.get("fit") is not None else None)
+        if note:
+            sline += f"  - {note}"
+        print(sline)
     tline = f"  tensors: {v['n_tensors']}"
     if v.get("n_shards", 1) > 1:
         tline += f"   (across {v['n_shards']} shards)"
@@ -202,6 +253,32 @@ def _print_report(v: dict) -> None:
         print(f"  => not loadable: {'; '.join(reasons)}")
 
 
+def _print_repo_listing(e: remote.AmbiguousRepo) -> None:
+    """The pick-one repo listing, with per-variant size and a fits-this-Mac
+    column when both the sizes and the machine RAM are known."""
+    from .lifecycle import human_gb
+    from .memfit import classify_fit, fit_label, total_ram_bytes
+
+    ram = total_ram_bytes()
+    shown = e.refs[:40]
+    sizes = (e.sizes or [None] * len(e.refs))[:40]
+    have_sizes = any(isinstance(s, int) and s > 0 for s in sizes)
+    head = f"{e.where} has {len(e.refs)} GGUF models:"
+    if have_sizes and ram:
+        head += f"   (fit vs this Mac's {human_gb(ram, 0)} RAM)"
+    print(head)
+    wid = max(len(r) for r in shown)
+    for r, s in zip(shown, sizes):
+        if not have_sizes:
+            print(f"  {r}")
+            continue
+        size = human_gb(s) if isinstance(s, int) and s > 0 else "?"
+        fit = fit_label(classify_fit(s, ram)) if isinstance(s, int) else ""
+        print(f"  {r:<{wid}}  {size:>8}  {fit}".rstrip())
+    if len(e.refs) > 40:
+        print(f"  ...and {len(e.refs) - 40} more")
+
+
 # validate
 def cmd_validate(argv: list | None = None, prog: str = "gmlx validate") -> int:
     ap = argparse.ArgumentParser(
@@ -228,17 +305,18 @@ def cmd_validate(argv: list | None = None, prog: str = "gmlx validate") -> int:
         # A repo with several models is a listing, not a failure: print the
         # ready-to-paste refs and succeed (the README promises exactly this).
         if a.json:
-            print(json.dumps({"repo": e.where, "models": e.refs}, indent=2))
+            print(json.dumps({"repo": e.where, "models": e.refs,
+                              "sizes": e.sizes}, indent=2))
         else:
-            print(f"{e.where} has {len(e.refs)} GGUF models:")
-            for r in e.refs:
-                print(f"  {r}")
+            _print_repo_listing(e)
         return 0
     except remote.RemoteError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
 
-    v = _verdict(ref, report, hf_source=a.hf_source, n_shards=n_shards)
+    size_bytes = _ref_size_bytes(ref, report)
+    v = _verdict(ref, report, hf_source=a.hf_source, n_shards=n_shards,
+                 size_bytes=size_bytes)
     if a.json:
         print(json.dumps(v, indent=2))
     else:
@@ -291,17 +369,34 @@ def _resolve_to_file(ref: remote.Ref) -> remote.Ref:
         hint = ("\nsubfolders to try:\n"
                 + "\n".join(f"  hf:{ref.repo}/{d}" for d in dirs[:40])) if dirs else ""
         raise remote.RemoteError(f"no .gguf files under {where}{hint}")
-    reps = sorted(_group_shard_sets(ggufs).values())
+    groups = _group_shard_sets(ggufs)
+    reps = sorted(groups.values())
     if len(reps) == 1:
         rep = reps[0]
         print(f"[resolved] {where} -> hf:{ref.repo}/{rep}", file=sys.stderr)
         return remote._make_hf_ref(ref.repo, rep, ref.revision,
                                    f"hf:{ref.repo}/{rep}")
+    # Per-model total bytes (all shards of a set), from the listing already in
+    # hand - so the pick-one listing can carry sizes and a fits-this-Mac
+    # marker without another request. Unknown sizes stay None.
+    file_sizes = {p: s for p, typ, s in entries if typ == "file"}
+    totals: dict[str, int] = {}
+    for p in ggufs:
+        m = SPLIT_SHARD_RE.search(p)
+        key = p[:m.start()] if m else p
+        s = file_sizes.get(p)
+        if isinstance(s, int) and s > 0 and totals.get(key, 0) is not None:
+            totals[key] = totals.get(key, 0) + s
+        else:
+            totals[key] = None                  # any unknown shard -> unknown
+    rep_sizes = {rep: totals.get(key)
+                 for key, rep in groups.items()}
     listing = "\n".join(f"  hf:{ref.repo}/{r}" for r in reps[:40])
     more = "" if len(reps) <= 40 else f"\n  ...and {len(reps) - 40} more"
     raise remote.AmbiguousRepo(
         f"{where} has {len(reps)} GGUF models - pass one:\n{listing}{more}",
-        where, [f"hf:{ref.repo}/{r}" for r in reps])
+        where, [f"hf:{ref.repo}/{r}" for r in reps],
+        sizes=[rep_sizes.get(r) for r in reps])
 
 
 def _remote_shard_urls(ref: remote.Ref) -> list[str]:
@@ -600,18 +695,7 @@ def _planned_download_bytes(ref: remote.Ref, dest_dir: str,
     ``None`` when unknown (non-hf ref, listing failed, or a shard is missing
     from the listing). Existing final files and ``.part`` resume files are
     subtracted, so a re-pull or resume needs only the remainder."""
-    if ref.kind != "hf":
-        return None
-    key = (ref.repo, ref.revision)
-    if key not in listing_cache:
-        try:
-            listing_cache[key] = {
-                p: size for p, typ, size in
-                remote.hf_list_dir(ref.repo, "", ref.revision)
-                if typ == "file"}
-        except remote.RemoteError:
-            listing_cache[key] = None
-    sizes = listing_cache[key]
+    sizes = _repo_file_sizes(ref, listing_cache)
     if sizes is None:
         return None
     total = 0
@@ -703,11 +787,19 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
             all_ok = False
             continue
 
-        v = _verdict(ref, report, hf_source=a.hf_source, n_shards=n_shards)
+        v = _verdict(ref, report, hf_source=a.hf_source, n_shards=n_shards,
+                     size_bytes=_ref_size_bytes(ref, report))
         if a.json:
             print(json.dumps(v, indent=2))
         else:
             _print_report(v)
+            if v.get("fit") in ("tight", "over"):
+                # Advisory only - the file may be destined for another machine
+                # or a streaming setup, so the pull itself proceeds.
+                from .memfit import fit_sentence
+                note = fit_sentence(v["size_bytes"], v.get("ram_bytes"))
+                if note:
+                    print(f"note: {note}", file=sys.stderr)
         if not v["usable"] and not a.force:
             reasons = []
             if not v["codecs_loadable"] and v["unsupported_codecs"]:

@@ -46,6 +46,10 @@ load inventory.
 gmlx run GGUF [options]
 ```
 
+`run` and `chat` carry 70+ flags, so `--help` shows just the everyday subset;
+`--help-all` prints the full reference (everything documented in the tables
+below).
+
 ```sh
 # generate
 gmlx run model.gguf --prompt "Explain entropy." --max-tokens 128
@@ -86,6 +90,7 @@ family sets no value.
 | `--seed N` | - | PRNG seed for reproducible sampling. |
 | `-v` / `--verbose` | off | Full load diagnostics instead of the progress spinner. |
 | `--system-prompt STR` | - | System message for the chat template. |
+| `--reasoning {show,hide,raw}` | `show` | How a thinking model's reasoning is displayed, same as chat: `show` styles it under a `thinking` label and strips the control markers, `hide` collapses it to the elapsed/token payoff line, `raw` streams everything verbatim. Display-only: image/audio requests print raw. |
 | `--chat-template-config JSON` | - | Extra chat-template kwargs, e.g. `'{"enable_thinking": false}'`. |
 | `--xtc-probability F` / `--xtc-threshold F` | `0.0` | XTC sampling (text path). |
 | `--repetition-context-size N` | `20` | How many recent tokens the repetition penalty considers. |
@@ -856,7 +861,9 @@ per check and the fix named for anything that fails. It checks: the runtime
 (mlx, mlx-kquant, mlx-lm importable, Metal available, versions), the compiled
 kernels, the config (parse errors and warnings), every configured model's
 paths (all shards, mmproj/draft/adapter companions), any background server
-(including stale run files), free disk space, and the HF token. Rows for
+(including stale run files), machine RAM vs each configured model's file size
+(a larger-than-RAM model that isn't set to `stream: experts` gets a WARN
+naming it), free disk space, and the HF token. Rows for
 optional features (installed launchd agents and their load state, extras
 installed, ffmpeg, MCP tool binaries, served assistants exposed beyond
 loopback) appear only when your setup uses them.
@@ -886,6 +893,14 @@ the architecture (and whether the installed `mlx-lm` implements it) plus the
 per-tensor codec histogram, and agree because they reuse the same codec gate
 as the loader. Exit code `0` = loadable, `1` = not, `2` = couldn't resolve or
 read the ref (no such file, an ambiguous folder ref, an unreadable header).
+
+The report also states the model's total size (every shard of a split file)
+and whether it fits this Mac's RAM: comfortable, tight (little room left for
+the KV cache; consider `--kv-bits 8` or a smaller quant), or over (a MoE
+model can still run with `--stream-experts`, see
+[docs/streaming.md](streaming.md)). A repo/folder listing gets the same
+treatment: each variant is shown with its size and a fits/tight/over-RAM
+column, so you can pick a quant that fits before downloading anything.
 
 An mmproj file (`general.architecture = "clip"`, a VLM's vision/audio
 projector) is recognized as a companion, not judged as a standalone model: the
@@ -1004,6 +1019,11 @@ Before downloading, `pull` also checks that the destination volume has room
 for every shard (bytes already landed in `.part` resume files count toward
 the total). If it does not, the pull is refused with both numbers; use
 `--to DIR` to target another volume, or `--force` to try anyway.
+
+The pre-download report also states the model's size and whether it fits this
+Mac's RAM (same verdict as `validate`). A tight or over-RAM model gets a
+stderr note but still downloads - the file may be destined for another
+machine or a [streaming](streaming.md) setup.
 
 | Flag | Default | Meaning |
 |------|---------|---------|

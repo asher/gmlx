@@ -7,7 +7,12 @@
 
 gmlx is a local inference platform for Apple Silicon: chat with an open
 model, serve it over OpenAI- and Anthropic-compatible APIs, talk to it by
-voice, and fine-tune it. One command, entirely on your Mac.
+voice, and fine-tune it. One command, entirely on your Mac. If GGUF files,
+quants, and the KV cache are unfamiliar terms, the
+[getting-started guide](https://github.com/asher/gmlx/blob/main/docs/getting-started.md)
+introduces them alongside the first install, and its
+[glossary](https://github.com/asher/gmlx/blob/main/docs/getting-started.md#glossary)
+defines the vocabulary used throughout these docs.
 
 gmlx takes the highest-quality quants available and serves them with the best
 performance on Apple Silicon. Today that means the community's K-quant and
@@ -86,17 +91,17 @@ The command is `gmlx`.
 
 ## Quickstart
 
-Requires an Apple Silicon Mac and Python 3.11+, and installs like a Python
-developer tool. On macOS 26 and newer the Metal
-kernels install as a prebuilt wheel; older macOS builds them from source (Xcode
-Command Line Tools, a few minutes).
+Requires an Apple Silicon Mac. [uv](https://docs.astral.sh/uv/) and pipx
+install a suitable Python themselves; a manual install needs Python 3.11+. On
+macOS 26 and newer the Metal kernels install as a prebuilt wheel; older macOS
+builds them from source (Xcode Command Line Tools, a few minutes).
 
 ```sh
-mkdir ~/gmlx && cd ~/gmlx
-python3 -m venv .venv && source .venv/bin/activate
-pip install "gmlx[chat]"        # [chat] = upgraded chat TUI, optional
+uv tool install "gmlx[all]"     # or: pipx install "gmlx[all]"
+brew install ffmpeg             # only for voice and non-wav audio
 
 # start small: a ~0.4 GB model, downloaded into the current directory
+mkdir ~/gmlx && cd ~/gmlx
 gmlx pull hf:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q4_K_M.gguf --to .
 gmlx run  Qwen3-0.6B-Q4_K_M.gguf --prompt "Explain entropy in one paragraph."
 gmlx chat Qwen3-0.6B-Q4_K_M.gguf                # interactive, multi-turn
@@ -107,13 +112,17 @@ curl localhost:8080/v1/chat/completions -d \
 gmlx stop                                       # the server ran detached
 ```
 
-The core install carries the whole platform - serving, vision, embeddings,
-the menu bar. Voice chat and the MCP assistant are extras (`gmlx[talk]`,
-`gmlx[assistant]`), and `gmlx[all]` turns on everything; the full list is in
-the
+`gmlx[all]` adds every optional feature to the core platform: the upgraded
+chat TUI, voice chat, and the MCP assistant. The core alone already carries
+serving, vision, embeddings, and the menu bar, so `gmlx[chat]` is a smaller
+install that gives up only voice and the assistant; `gmlx init` adds either
+one later. The extras table is in the
 [getting-started guide](https://github.com/asher/gmlx/blob/main/docs/getting-started.md).
-In new terminals, `source ~/gmlx/.venv/bin/activate` brings the `gmlx` command
-back. A model typically needs roughly its file size in memory, plus the KV cache;
+`uv tool` and pipx put `gmlx` on your PATH in every terminal; `pip install
+"gmlx[all]"` into a venv you manage works too, with the command available
+only while that venv is active.
+
+A model typically needs roughly its file size in memory, plus the KV cache;
 the exception is MoE models, which can run
 [bigger than memory](#bigger-than-memory). If anything
 misbehaves, `gmlx doctor` checks the runtime, config, model paths, and services

@@ -240,3 +240,10 @@ def test_warn_cap_hit_only_when_capped(capsys):
     a._max_tokens_capped = False
     cli.warn_cap_hit(a, 10)
     assert capsys.readouterr().err == ""
+
+
+def test_run_reasoning_default_and_explicit(gguf, gen):
+    assert cli.main([gguf]) == 0
+    assert gen["reasoning"] == "show"          # default matches chat
+    assert cli.main([gguf, "--reasoning", "raw"]) == 0
+    assert gen["reasoning"] == "raw"

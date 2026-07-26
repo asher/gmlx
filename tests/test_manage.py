@@ -39,18 +39,23 @@ def _mint(path, *, arch="llama", codec=GT.Q4_0) -> bytes:
         return f.read()
 
 
-def _serve(monkeypatch, payload: bytes):
-    """Point remote header reads at fixed bytes (no network)."""
+def _serve(monkeypatch, payload: bytes, total: int | None = None):
+    """Point remote header reads at fixed bytes (no network). The seam returns
+    ``(data, total)`` like a real range response; ``total`` overrides the size
+    it advertises, which is where remote size/fit verdicts come from."""
+    size = len(payload) if total is None else total
     monkeypatch.setattr(remote, "http_get_prefix",
-                        lambda url, end, *, timeout=30.0: payload[:end])
+                        lambda url, end, *, timeout=30.0: (payload[:end], size))
 
 
-def _serve_shards(monkeypatch, mapping: dict):
-    """Serve different header bytes per shard, keyed by a substring of the URL."""
+def _serve_shards(monkeypatch, mapping: dict, totals: dict | None = None):
+    """Serve different header bytes per shard, keyed by a substring of the URL.
+    ``totals`` gives each shard the size its range response advertises."""
     def fake_get(url, end, *, timeout=30.0):
         for key, payload in mapping.items():
             if key in url:
-                return payload[:end]
+                size = (totals or {}).get(key, len(payload))
+                return payload[:end], size
         raise AssertionError(f"unexpected url: {url}")
     monkeypatch.setattr(remote, "http_get_prefix", fake_get)
 
@@ -1262,3 +1267,130 @@ def test_rm_drops_dangling_assistant_aliases(tmp_path, capsys):
     asst = doc["server"]["assistants"]
     assert set(asst) == {"survivor"}
     build_config(doc)  # config still validates after the removal
+
+
+# size + RAM-fit reporting (validate / pull)
+def _ram(monkeypatch, n_bytes):
+    from gmlx import memfit
+    monkeypatch.setattr(memfit, "total_ram_bytes", lambda: n_bytes)
+
+
+def test_validate_local_reports_size_and_fit(tmp_path, monkeypatch, capsys):
+    p = tmp_path / "ok.gguf"
+    _mint(p)
+    _ram(monkeypatch, 64 * 1024**3)
+    rc = manage.cmd_validate([str(p)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "size:" in out
+    assert "fits this Mac's 64 GB RAM" in out
+
+
+def test_validate_local_over_ram_notes_streaming(tmp_path, monkeypatch, capsys):
+    p = tmp_path / "big.gguf"
+    _mint(p)
+    _ram(monkeypatch, 256)                  # tiny "machine": any file is over
+    rc = manage.cmd_validate([str(p)])
+    out = capsys.readouterr().out
+    assert rc == 0                          # advisory only, still loadable
+    assert "exceeds this Mac's" in out and "--stream-experts" in out
+
+
+def test_validate_json_carries_size_and_fit(tmp_path, monkeypatch, capsys):
+    p = tmp_path / "ok.gguf"
+    _mint(p)
+    _ram(monkeypatch, 64 * 1024**3)
+    rc = manage.cmd_validate([str(p), "--json"])
+    v = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert v["size_bytes"] == (tmp_path / "ok.gguf").stat().st_size
+    assert v["fit"] == "fits"
+    assert v["ram_bytes"] == 64 * 1024**3
+
+
+def test_validate_remote_size_rides_the_header_read(tmp_path, monkeypatch,
+                                                    capsys):
+    """The size comes off the range response the header read already makes -
+    validate must not spend a repo listing on it."""
+    _serve(monkeypatch, _mint(tmp_path / "m.gguf", codec=GT.Q4_0),
+           total=8 * 1024**3)
+    listed = []
+    monkeypatch.setattr(remote, "hf_list_dir",
+                        lambda *a, **k: listed.append(a) or [])
+    _ram(monkeypatch, 64 * 1024**3)
+    rc = manage.cmd_validate(["hf:org/repo/model.gguf"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "size: 8.0 GB" in out
+    assert "fits this Mac's 64 GB RAM" in out
+    assert listed == []                     # no extra listing request
+
+
+def test_validate_remote_split_sums_all_shards(tmp_path, monkeypatch, capsys):
+    payload = _mint(tmp_path / "m.gguf", codec=GT.Q4_0)
+    _serve_shards(monkeypatch,
+                  {"00001-of-00002": payload, "00002-of-00002": payload},
+                  totals={"00001-of-00002": 3 * 1024**3,
+                          "00002-of-00002": 5 * 1024**3})
+    _ram(monkeypatch, 64 * 1024**3)
+    rc = manage.cmd_validate(["hf:org/repo/model-00001-of-00002.gguf"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "size: 8.0 GB" in out and "2 shards" in out
+
+
+def test_validate_repo_listing_has_size_and_fit_columns(monkeypatch, capsys):
+    _list(monkeypatch, [
+        ("small.gguf", "file", 8 * 1024**3),
+        ("huge.gguf", "file", 200 * 1024**3),
+    ])
+    _ram(monkeypatch, 64 * 1024**3)
+    rc = manage.cmd_validate(["hf:org/repo"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "fit vs this Mac's 64 GB RAM" in out
+    small = next(ln for ln in out.splitlines() if "small.gguf" in ln)
+    huge = next(ln for ln in out.splitlines() if "huge.gguf" in ln)
+    assert "8.0 GB" in small and small.rstrip().endswith("fits")
+    assert "200.0 GB" in huge and huge.rstrip().endswith("over RAM")
+
+
+def test_pull_over_ram_notes_but_proceeds(tmp_path, monkeypatch, capsys):
+    _serve(monkeypatch, _mint(tmp_path / "m.gguf", codec=GT.Q4_0),
+           total=200 * 1024**3)
+    _listing(monkeypatch, {"model.gguf": 200 * 1024**3})
+    _ram(monkeypatch, 64 * 1024**3)
+    monkeypatch.setattr(manage, "_disk_free", lambda p: 500 * 1024**3)
+    got = []
+    monkeypatch.setattr(
+        manage, "_hf_download",
+        lambda repo, filename, revision, dest: got.append(filename) or filename)
+    rc = manage.cmd_pull(["hf:org/repo/model.gguf", "--to", str(tmp_path)])
+    _out, err = capsys.readouterr()
+    assert rc == 0 and got == ["model.gguf"]        # advisory: pull proceeds
+    assert "note:" in err and "exceeds this Mac's 64 GB RAM" in err
+
+
+def test_pull_fitting_model_has_no_note(tmp_path, monkeypatch, capsys):
+    _serve(monkeypatch, _mint(tmp_path / "m.gguf", codec=GT.Q4_0))
+    _listing(monkeypatch, {"model.gguf": 8 * 1024**3})
+    _ram(monkeypatch, 64 * 1024**3)
+    monkeypatch.setattr(manage, "_disk_free", lambda p: 500 * 1024**3)
+    monkeypatch.setattr(
+        manage, "_hf_download",
+        lambda repo, filename, revision, dest: filename)
+    rc = manage.cmd_pull(["hf:org/repo/model.gguf", "--to", str(tmp_path)])
+    _out, err = capsys.readouterr()
+    assert rc == 0
+    assert "note:" not in err
+
+
+def test_validate_no_ram_probe_omits_fit(tmp_path, monkeypatch, capsys):
+    p = tmp_path / "ok.gguf"
+    _mint(p)
+    _ram(monkeypatch, None)
+    rc = manage.cmd_validate([str(p)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "size:" in out                   # size still shown
+    assert "RAM" not in out                 # fit note omitted

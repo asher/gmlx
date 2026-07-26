@@ -145,25 +145,32 @@ def test_thread_isolation():
 # -- summary line -------------------------------------------------------------
 
 
-def test_summary_top3_codecs_and_truncation():
+def test_summary_leads_with_family_size_and_dominant_quant():
     line = loadlog._summary_line(
         "m.gguf",
         6.84,
         {
             "arch": "qwen35moe",
+            "size_bytes": 17 * 1024**3,
             "codecs": Counter({"q8_0": 302, "q6_k": 80, "q4_k": 9, "q5_k": 2, "f32": 1}),
             "drafter": "native-head",
         },
     )
-    assert line.startswith("[load] m.gguf | arch qwen35moe | ")
-    assert "q8_0 x302 q6_k x80 q4_k x9 +2 more" in line
+    assert line.startswith("[load] m.gguf | qwen35moe | 17.0 GB | mostly q8_0")
     assert "| 6.8s" in line
     assert line.endswith("| drafter native-head")
+    assert "x302" not in line            # histogram demoted to --verbose
+
+
+def test_summary_single_codec_drops_mostly():
+    line = loadlog._summary_line(
+        "m.gguf", 1.0, {"arch": "llama", "codecs": Counter({"q4_k": 10})})
+    assert "| q4_k |" in line and "mostly" not in line
 
 
 def test_summary_no_kquant_and_mmproj():
     line = loadlog._summary_line("m.gguf", 1.0, {"arch": "llama", "mmproj": True})
-    assert "no kquant tensors" in line
+    assert "float weights" in line
     assert "+mmproj" in line
 
 
@@ -198,7 +205,7 @@ def test_load_ui_quiet_prints_summary_only(capsys):
         loadlog.fact("arch", "llama")
     out = capsys.readouterr().out
     assert "[gguf] diag" not in out
-    assert out.startswith("[load] m.gguf | arch llama | ")
+    assert out.startswith("[load] m.gguf | llama | ")
 
 
 def test_load_ui_failure_names_stage_and_reraises(capsys):
@@ -255,7 +262,7 @@ def test_capture_defers_stray_writes(capsys):
     assert captured.err == "" and captured.out == ""    # nothing smeared live
     assert "W: added a special token\n" in cap.stray    # handed to the joiner
     assert "progress dots\n" in cap.stray
-    assert cap.summary.startswith("[load] m.gguf | arch llama")
+    assert cap.summary.startswith("[load] m.gguf | llama")
 
 
 def test_capture_stray_kept_on_failure(capsys):

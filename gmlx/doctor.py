@@ -319,7 +319,7 @@ def check_extras(cfg, running=()):
             if x in origin:
                 out += f" [server config {origin[x]}]"
             return out
-        pips = "; ".join(f'pip install "gmlx[{x}]"' for x in missing)
+        pips = "; ".join(extras.install_hint(x) for x in missing)
         return _check("extras", "FAIL",
                       "configured but not installed: "
                       f"{', '.join(label(x) for x in missing)} ({pips})")
@@ -403,6 +403,38 @@ def check_hf_token() -> dict:
     return _check("hf token", "SKIP", "no token (needed only for gated repos)")
 
 
+def check_memory(cfg) -> dict:
+    """RAM vs the configured models' file sizes. A model file bigger than the
+    fit threshold that isn't set to stream gets a WARN naming it - the server
+    would load it into memory pressure (or fail) on first request. Advisory:
+    smaller models on the same config keep serving either way."""
+    from .lifecycle import human_gb
+    from .memfit import classify_fit, total_ram_bytes
+
+    ram = total_ram_bytes()
+    if ram is None:
+        return _check("memory", "SKIP", "could not read machine RAM")
+    detail = f"{human_gb(ram, 0)} RAM"
+    if cfg is None or not cfg.models:
+        return _check("memory", "PASS", detail)
+    from .manage import _model_size_bytes
+    flagged: list[str] = []
+    for mid, m in cfg.models.items():
+        if getattr(m, "stream", None):
+            continue                     # streamed on purpose: over-RAM is fine
+        size = _model_size_bytes(m.path, cfg.model_dirs)
+        if size and classify_fit(size, ram) == "over":
+            flagged.append(f"{mid} ({human_gb(size)})")
+    if flagged:
+        more = f" (+{len(flagged) - 3} more)" if len(flagged) > 3 else ""
+        return _check(
+            "memory", "WARN",
+            f"{detail}; larger than RAM: " + ", ".join(flagged[:3]) + more
+            + " - a MoE model can set `stream: experts` "
+              "(docs/streaming.md); a dense model needs a smaller quant")
+    return _check("memory", "PASS", f"{detail}; configured models fit")
+
+
 def check_disk(cfg) -> dict:
     root = os.path.expanduser("~")
     if cfg is not None:
@@ -428,7 +460,7 @@ def _run_checks(config_path, *, deep: bool) -> list[dict]:
               check_mcp(cfg), check_assistant_exposure(cfg)):
         if c is not None:
             checks.append(c)
-    checks += [check_hf_token(), check_disk(cfg)]
+    checks += [check_hf_token(), check_memory(cfg), check_disk(cfg)]
     return checks
 
 

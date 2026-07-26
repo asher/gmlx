@@ -5,7 +5,7 @@ context, the docs under [`docs/`](docs/) are the source of truth.
 
 ## Dev setup
 
-`mlx-kquant` is on PyPI with prebuilt arm64 wheels for Python 3.10-3.13 on
+`mlx-kquant` is on PyPI with prebuilt arm64 wheels for Python 3.10-3.14 on
 macOS 26+. Older macOS builds it from source, which needs the Xcode Command
 Line Tools. It pins `mlx==0.31.2` itself, so nothing else needs pinning. Dev
 setup is a venv, a clone, and an editable install:

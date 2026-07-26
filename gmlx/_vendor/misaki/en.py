@@ -9,8 +9,9 @@ import numpy as np
 import re
 import spacy
 import unicodedata
-from transformers import BartForConditionalGeneration
-import torch
+# gmlx: torch + transformers are imported inside FallbackNetwork, the only
+# consumer. Kokoro always passes its own espeak fallback, so the module-level
+# imports pulled ~2 GB of torch into `gmlx[tts]` for a path that never runs.
 
 def merge_tokens(tokens: List[MToken], unk: Optional[str] = None) -> MToken:
     stress = {tk._.stress for tk in tokens if tk._.stress is not None}
@@ -494,8 +495,20 @@ class Lexicon:
         #         return apply_stress(self.append_currency(ps, tk._.currency), tk._.stress), rating
         return None, None
 
+def _load_torch():
+    """gmlx: bind torch + transformers as module globals on first use.
+
+    FallbackNetwork is their only consumer and Kokoro always supplies its own
+    espeak fallback, so importing them at module scope charged every
+    ``gmlx[tts]`` install ~2 GB of torch for a path that never runs."""
+    global torch, BartForConditionalGeneration
+    import torch
+    from transformers import BartForConditionalGeneration
+
+
 class FallbackNetwork:
     def __init__(self, british):
+        _load_torch()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = BartForConditionalGeneration.from_pretrained(
             "PeterReid/graphemes_to_phonemes_en_" + ("gb" if british else "us"))
@@ -518,15 +531,58 @@ class FallbackNetwork:
         output_text = self.tokens_to_phonemes(generated_ids[0].tolist())
         return (output_text, 1)
 
+# gmlx: pinned revisions of the Hugging Face spacy pipeline mirrors. The
+# mirrors carry no tags and their `main` sits a release behind the GitHub
+# wheels (sm: 3.7.1 vs 3.8.0), so pin the commit rather than track a moving
+# branch: the POS tags feed Kokoro's phonemization, and a mirror update would
+# otherwise reach synthesis with no local change to point at.
+_SPACY_HF_REVISIONS = {
+    "en_core_web_sm": "8fb6f8155286360bf5486fe399e2738d1df7ded2",
+    "en_core_web_trf": "58223163ebdcfdff182d526cc8deb1c73cd8d5a3",
+}
+
+
+def _spacy_model_source(name):
+    """gmlx: what to hand ``spacy.load`` - an installed model distribution when
+    there is one, else a Hugging Face snapshot directory.
+
+    Upstream calls ``spacy.cli.download``, which shells out to pip. Tool
+    installs (``uv tool``, pipx) have no pip in the environment, and spacy's
+    downloader answers that failure with ``sys.exit`` - the voice loop died on
+    its first synthesis with no traceback. The models are not on PyPI, so the
+    wheel cannot be a declared dependency either, but the ``spacy/*`` Hub
+    mirrors carry the same pipeline as a plain model directory, and
+    ``spacy.load`` takes that by path. An installed distribution still wins, so
+    environments that already resolved the model keep their exact pipeline."""
+    if spacy.util.is_package(name):
+        return name
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError:
+        raise OSError(f"spacy model {name} is not installed, and "
+                      "huggingface_hub is unavailable to fetch it") from None
+    return snapshot_download(f"spacy/{name}", ignore_patterns=["*.whl"],
+                             revision=_SPACY_HF_REVISIONS.get(name))
+
+
 class G2P:
     def __init__(self, version=None, trf=False, british=False, fallback=None, unk='❓'):
         self.version = version
         self.british = british
         name = f"en_core_web_{'trf' if trf else 'sm'}"
-        if not spacy.util.is_package(name):
-            spacy.cli.download(name)
         components = ['transformer' if trf else 'tok2vec', 'tagger']
-        self.nlp = spacy.load(name, enable=components)
+        source = _spacy_model_source(name)
+        if source == name:
+            self.nlp = spacy.load(source, enable=components)
+        else:
+            # gmlx: the pinned mirror is a spacy release behind, which spacy
+            # reports as W095 on every load. The pairing is pinned and tested,
+            # and the message names no action, so keep it out of the server log
+            # - a real load failure still raises.
+            import warnings
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message=r".*\[W095\].*")
+                self.nlp = spacy.load(source, enable=components)
         self.lexicon = Lexicon(british)
         self.fallback = fallback if fallback else FallbackNetwork(british)
         self.unk = unk

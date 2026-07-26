@@ -6,6 +6,56 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `gmlx run --reasoning {show,hide,raw}`: `run` now streams a thinking
+  model through the same styled reasoning display as chat (default `show`),
+  on the plain, MTP-speculative, and VLM text paths alike.
+- Size and RAM-fit verdicts: `validate` and `pull` report a model's total
+  size (all shards) and whether it fits this Mac's RAM - comfortable, tight
+  (KV-cache headroom), or over (with the `--stream-experts` pointer). Repo
+  listings gain per-variant size and fit columns; a tight/over pull prints
+  an advisory note but still downloads. `gmlx doctor` gains a `memory` row
+  that warns on configured larger-than-RAM models not set to stream.
+- `--help-all` on `run` and `chat`: the default `--help` now shows the
+  everyday flags with a pointer at the rest; `--help-all` prints the full
+  reference. Shell completion still offers every flag.
+- A glossary in getting-started.md (GGUF, quant, KV cache, prefill/decode,
+  MoE, MTP, ...), a pointer to it from the README opening, and a row for it
+  in the docs index.
+
+### Fixed
+
+- left-padded single-row batches attended their pad tokens as content:
+  the stock B=1 batch-cache shortcut extracts a row cache that drops
+  `left_padding` while recursing with the unsliced input. The owned
+  forward takes the direct masked path instead and matches an unpadded
+  reference exactly; the stock defect is pinned by an anti-identity
+  test so an upstream fix surfaces.
+- Extras now install correctly when gmlx itself was installed with `uv tool`
+  or pipx. Those environments are owned by their installer - uv's has no pip
+  at all - so `gmlx init`'s "install it now?" failed, and every "not
+  installed" message named a `pip install` command that could not work.
+  `gmlx.extras` detects the route and issues `uv tool install --force`
+  (merging the extras and interpreter already recorded, so nothing is
+  dropped), `pipx inject`, or `pip install` as appropriate.
+- `gmlx[tts]` on its own could not synthesize: the vendored misaki G2P
+  imported torch at module scope, and torch is not a dependency of any gmlx
+  extra - it only ever arrived through `gmlx[stt]`'s mlx-whisper. The import
+  now happens inside the one class that uses it, which Kokoro never
+  constructs, so the voice stack no longer pulls torch at all.
+- First speech synthesis no longer shells out to pip. The vendored G2P called
+  `spacy.cli.download` for its English pipeline; with no pip in the
+  environment spacy answered by exiting the process with no diagnostic. The
+  pipeline is fetched from its Hugging Face mirror at a pinned revision
+  instead, and an already-installed pipeline still takes precedence.
+- The `tts`, `talk`, and `all` extras work on Python 3.14. spacy carried a
+  `python_version < '3.14'` marker from when it had no cp314 wheels; it has
+  shipped them since, and the stale marker had turned into a silent failure -
+  spacy was dropped from the install while the G2P still imported it.
+- `gmlx doctor`'s extras check now detects a voice stack that is missing
+  spacy, which previously reported as fully installed.
+
 ### Changed
 
 - qwen3.5/3.6 MTP targets run an owned model-level forward: the
@@ -21,15 +71,23 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   greedy tokens are identical against stock on every route stock
   computes correctly (`GMLX_QWEN_OWNED=0` reverts to the stock class at
   load).
-
-### Fixed
-
-- left-padded single-row batches attended their pad tokens as content:
-  the stock B=1 batch-cache shortcut extracts a row cache that drops
-  `left_padding` while recursing with the unsliced input. The owned
-  forward takes the direct masked path instead and matches an unpadded
-  reference exactly; the stock defect is pinned by an anti-identity
-  test so an upstream fix surfaces.
+- Install docs lead with `uv tool install "gmlx[all]"` / pipx: one command,
+  on PATH in every terminal, every optional feature on, no follow-up
+  installs. Smaller extra sets and the plain-venv route stay documented.
+- `mlx-kquant>=0.3.7`, the first release with a cp314 wheel. Below it a
+  Python 3.14 install - what uv and pipx select by default - silently
+  compiled the Metal kernels from source.
+- Python 3.14 is a supported release: the CI matrix runs it alongside
+  3.11-3.13, and it carries the trove classifier. It is what the documented
+  `uv tool` and pipx installs select, so it was already the default target.
+- The quiet-load `[load]` summary now reads family | size | dominant quant
+  | elapsed; the full codec histogram moved to `--verbose`.
+- Bare `gmlx serve` with no config says so in the foreground before
+  detaching; the ready banner and `gmlx status` count the served models and
+  call out a server serving 0 models (with the init/pull/restart recipe)
+  instead of reporting a bare "healthy".
+- `gmlx chat` with no model now explains the four ways to get one instead
+  of dumping the usage block.
 
 ## [0.1.2] - 2026-07-26
 
