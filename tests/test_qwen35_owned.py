@@ -18,7 +18,8 @@ import pytest
 
 pytest.importorskip("mlx_vlm.models.qwen3_5.language")
 
-from mlx_vlm.models.cache import ArraysCache, BatchKVCache
+from mlx_vlm.models.cache import ArraysCache, BatchKVCache, KVCache
+from mlx_vlm.models.qwen3_5 import language as _L
 from mlx_vlm.models.qwen3_5.config import TextConfig as Q35TextConfig
 from mlx_vlm.models.qwen3_5.language import LanguageModel as Q35LanguageModel
 
@@ -354,9 +355,6 @@ def test_hidden_capture_layers_match():
 # both streams (no GDN kernels involved).
 # ---------------------------------------------------------------------------
 
-from mlx_vlm.models.cache import KVCache  # noqa: E402
-from mlx_vlm.models.qwen3_5 import language as _L  # noqa: E402
-
 
 def _same(a, b):
     if isinstance(a, mx.array) or isinstance(b, mx.array):
@@ -563,3 +561,34 @@ def test_memo_protocol_interop():
     assert qwen35_owned._qwen3_5_lengths_info(lc) == 5
     _L._qwen3_5_advance_lengths_info(lc, 2)
     assert qwen35_owned._qwen3_5_lengths_info(lc) == 3
+
+
+def test_copies_match_upstream_source():
+    """Every owned helper body is a literal copy of the upstream original.
+
+    The behavioral parity tests certify the routes they drive; this
+    covers every branch at once (including the ones no behavioral case
+    reaches) by asserting normalized source equality. Retires with the
+    helpers when the layer classes are owned.
+    """
+    import inspect
+
+    def norm(fn):
+        return [
+            line.rstrip()
+            for line in inspect.getsource(fn).splitlines()
+            if line.strip()
+        ]
+
+    for name in (
+        "_qwen3_5_left_padding_info",
+        "_qwen3_5_lengths_info",
+        "_create_qwen3_5_ssm_mask",
+        "_create_qwen3_5_attention_mask",
+        "_set_qwen3_5_decode_left_padding",
+        "_extract_row_cache",
+        "_pad_row_time",
+    ):
+        assert norm(getattr(qwen35_owned, name)) == norm(getattr(_L, name)), (
+            f"owned copy of {name} drifted from the upstream original"
+        )
