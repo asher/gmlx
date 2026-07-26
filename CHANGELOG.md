@@ -77,8 +77,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - multimodal gemma-4 decode/verify no longer host-syncs per step: the
   sliding-mask cache probe compares int offsets host-side (array offsets skip
-  the probe), and per-layer rope offsets pass through without a device wrap.
-  Token outputs are bit-identical; `GMLX_G4_NOSYNC=0` restores upstream
+  the probe), and per-layer int rope offsets pass through without a device
+  wrap. Array rope offsets keep upstream's snapshot copy: handing rope the
+  cache's live offset array shares its buffer with downstream kernels, and a
+  serve-level gate certification caught width-cap-gated B>=3 gemma decode
+  degenerating into repetition loops from exactly that aliasing (server-side
+  throughput looked healthy; only the content was wrong). Token outputs are
+  bit-identical on the int paths; `GMLX_G4_NOSYNC=0` restores upstream
   behavior. Text-only gemma-4 loads build from the mlx-lm text module, which
   has no per-step host syncs to begin with.
 - gemma-4 MTP targets no longer install the three qwen3_5 verify levers
