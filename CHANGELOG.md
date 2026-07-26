@@ -6,6 +6,31 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- qwen3.5/3.6 MTP targets run an owned model-level forward: the
+  model-level control flow (mask resolution, decode left-padding walk,
+  batched left-padded prefill, hidden capture) now runs from a gmlx
+  subclass instead of the stock mlx-vlm class, making the empty-sequence
+  guard structural. The model-level helper bodies (both mask builders,
+  the decode pad walk, row-cache extract, pad-time, and the
+  padding/lengths memos they use) are owned copies in gmlx,
+  parity-tested against the pinned mlx-vlm release on every run, which
+  replaces five upstream seam pins. Layer classes and fused kernels are
+  unchanged;
+  greedy tokens are identical against stock on every route stock
+  computes correctly (`GMLX_QWEN_OWNED=0` reverts to the stock class at
+  load).
+
+### Fixed
+
+- left-padded single-row batches attended their pad tokens as content:
+  the stock B=1 batch-cache shortcut extracts a row cache that drops
+  `left_padding` while recursing with the unsliced input. The owned
+  forward takes the direct masked path instead and matches an unpadded
+  reference exactly; the stock defect is pinned by an anti-identity
+  test so an upstream fix surfaces.
+
 ## [0.1.2] - 2026-07-26
 
 ### Added
