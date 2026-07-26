@@ -425,6 +425,16 @@ def _moe_classes():
 _MOE_CACHE = None
 
 
+def is_owned_language_model(model) -> bool:
+    """Whether ``model`` (or its language_model) is an owned qwen3.5
+    class. Gates the stock-fallback patch installs: owned forwards never
+    read the patched module globals."""
+    lm = getattr(model, "language_model", model)
+    if isinstance(lm, OwnedQwen3_5LanguageModel):
+        return True
+    return _MOE_CACHE is not None and isinstance(lm, _MOE_CACHE[1])
+
+
 def language_model_class(model_type: str):
     """Owned LanguageModel class for a qwen3.5 family model_type."""
     global _MOE_CACHE

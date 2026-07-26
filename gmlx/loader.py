@@ -2507,7 +2507,10 @@ def _install_and_load(
         log("[install] rope int-offset batch fix active")
     if install_prefill_decay():
         log("[install] depth-decay prefill chunking active")
-    if install_qwen35_verify_fold():
+    # Owned qwen forwards carry the folded verify routes natively; the
+    # module-global patch is the stock-fallback delivery only.
+    from .qwen35_owned import is_owned_language_model
+    if not is_owned_language_model(model) and install_qwen35_verify_fold():
         log("[install] qwen3.5 folded verify attention active")
     if install_gemma4_nosync() and _gemma4_target(model):
         log("[install] gemma-4 host-sync-free masks/rope offsets active")
@@ -2942,7 +2945,10 @@ def load_model(
         _log("[install] rope int-offset batch fix active")
     if install_prefill_decay():
         _log("[install] depth-decay prefill chunking active")
-    if install_qwen35_verify_fold():
+    # Owned qwen forwards carry the folded verify routes natively; the
+    # module-global patch is the stock-fallback delivery only.
+    from .qwen35_owned import is_owned_language_model
+    if not is_owned_language_model(model) and install_qwen35_verify_fold():
         _log("[install] qwen3.5 folded verify attention active")
     if install_gemma4_nosync() and _gemma4_target(model):
         _log("[install] gemma-4 host-sync-free masks/rope offsets active")

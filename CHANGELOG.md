@@ -70,7 +70,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the same way: an owned subclass carries the fused decode and fused
   verify dispatch natively (previously a class-level patch) plus an
   owned unfused chain for the routes the kernels do not cover, and the
-  layer advance memos are owned copies. Fused kernels themselves are
+  layer advance memos are owned copies. The full-attention layers are
+  owned the same way: the owned subclass composes the ragged
+  unified-plan decode, the batched-verify masked SDPA, and the folded
+  verify routes natively (previously three module-global patches at
+  three install times), with the ragged kernel sources and plan tables
+  as equality-tested in-tree copies. Fused kernels themselves are
   unchanged; greedy tokens are identical against the patched stock
   path on every route (`GMLX_QWEN_OWNED=0` reverts to the stock
   classes plus the patch set at load).

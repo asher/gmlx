@@ -45,6 +45,7 @@ from .native_fp import _strip_weight
 from .populate import maybe_populate_for_load
 from .populate import wait_for as wait_for_populate
 from .preflight import preflight
+from .qwen35_attn import rebind_attn
 from .qwen35_gdn import owned_gdn_active, rebind_gdn
 from .transforms import coalesce_split_experts
 
@@ -678,10 +679,11 @@ def load_mtp_model(
     ):
         if owned_gdn_active(config_dict.get("model_type")):
             rebind_gdn(model)
+            rebind_attn(model)
         else:
             _patch_gated_delta_fused_verify(model)
+            _patch_batched_verify_sdpa()
         _patch_dense_head_verify(model)
-        _patch_batched_verify_sdpa()
         _patch_bf16_verify_linear()
     elif config_dict.get("model_type") in ("gemma4", "gemma4_text"):
         # gemma4 MTP target (assistant drafter): none of the qwen verify
@@ -856,10 +858,11 @@ def load_vlm_mtp_model(
         ):
             if owned_gdn_active(config_dict.get("model_type")):
                 rebind_gdn(model)
+                rebind_attn(model)
             else:
                 _patch_gated_delta_fused_verify(model)
+                _patch_batched_verify_sdpa()
             _patch_dense_head_verify(model)
-            _patch_batched_verify_sdpa()
             _patch_bf16_verify_linear()
         drafter = _load_mtp_drafter(
             arrays,

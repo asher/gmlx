@@ -60,28 +60,37 @@ SEAMS: tuple[Seam, ...] = (
          critical=True),
     Seam("mlx_vlm.generate.ar", "BatchGenerator.insert",
          "batch_sched arrival-merge (_unprocessed_sequences append/rebind)"),
+    # The ragged plan/kernel builders and cached-array helpers are owned
+    # copies in qwen35_attn (source-equality-tested every run), and the
+    # unified-plan dispatch that consumed them lives there too, so the
+    # per-symbol builder pins are gone. The dispatch global stays pinned:
+    # ragged_decode rebinds it for the stock fallback forward.
     Seam("mlx_vlm.models.qwen3_5.language",
          "_qwen3_5_ragged_decode_attention",
-         "ragged_decode.install_unified_ragged_plan (dispatch body carried)"),
-    Seam("mlx_vlm.models.qwen3_5.language", "_qwen3_5_sdpa_vector_plan",
-         "ragged_decode (plan-bucket semantics)"),
-    Seam("mlx_vlm.models.qwen3_5.language",
-         "_qwen3_5_ragged_sdpa_one_pass_kernel",
-         "ragged_decode (kernel builder reuse)"),
-    Seam("mlx_vlm.models.qwen3_5.language",
-         "_qwen3_5_ragged_sdpa_two_pass_1_kernel",
-         "ragged_decode (kernel builder reuse; grid contract)"),
-    Seam("mlx_vlm.models.qwen3_5.language",
-         "_qwen3_5_ragged_sdpa_two_pass_2_kernel",
-         "ragged_decode (kernel builder reuse)"),
+         "ragged_decode.install_unified_ragged_plan (stock fallback "
+         "GMLX_QWEN_OWNED=0 only; the owned attention calls the in-tree "
+         "dispatch directly)"),
     # --- qwen3_5 MTP-target verify seams (loader + qwen35_verify_fold) ---
     Seam("mlx_vlm.models.qwen3_5.language",
          "_target_verify_left_padded_attention",
-         "gdn_patches._patch_batched_verify_sdpa / qwen35_verify_fold"),
+         "gdn_patches._patch_batched_verify_sdpa / qwen35_verify_fold "
+         "(stock fallback GMLX_QWEN_OWNED=0 only; the owned attention "
+         "carries the composed verify routes natively)"),
     Seam("mlx_vlm.models.qwen3_5.language", "_target_verify_linear",
          "gdn_patches._patch_bf16_verify_linear"),
     Seam("mlx_vlm.models.qwen3_5.language", "scaled_dot_product_attention",
-         "qwen35_verify_fold (B>=2 left-padded fold)"),
+         "qwen35_verify_fold (B>=2 left-padded fold; stock fallback only "
+         "- the owned attention folds at its own dispatch and calls the "
+         "base module symbol)"),
+    Seam("mlx_vlm.models.base", "scaled_dot_product_attention",
+         "qwen35_attn._sdpa (owned dispatch tail: quantized-KV routing "
+         "via the batch-mask-fixed module global)", critical=True),
+    Seam("mlx_vlm.models.rope_utils", "MRoPERotaryEmbedding.apply_rotary",
+         "qwen35_attn.OwnedQwen3_5Attention (called on the stock rotary "
+         "submodule; retires with the assembly stage)", critical=True),
+    Seam("mlx_vlm.models.rope_utils", "apply_multimodal_rotary_pos_emb",
+         "qwen35_attn (in-tree copy of the language wrapper delegates "
+         "here for the position_embeddings branch)", critical=True),
     Seam("mlx_vlm.models.qwen3_5.language", "Qwen3_5Model.__call__",
          "gdn_patches._patch_qwen35_empty_sequence_guard (stock fallback "
          "GMLX_QWEN_OWNED=0 only; the default owned subclass overrides "
