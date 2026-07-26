@@ -1,20 +1,29 @@
-"""Upstream-bug fix: mx.fast.rope int-offset batch corruption at T == 1.
+"""Upstream-bug fix: mx.fast.rope scalar-offset batch corruption at T == 1.
 
 The Metal rope kernel in stock mlx 0.31.2 mis-addresses batch rows when
-called with a plain int offset on a single-position input (B, *, 1, D)
+called with a scalar offset on a single-position input (B, *, 1, D)
 with B > 1: row 0 is correct, every later batch row is rotated from
 out-of-bounds memory (allocator-dependent garbage, occasionally NaN).
-The CPU path is correct, T > 1 is correct, B == 1 is correct, and the
-per-row array-offset path is correct -- which is why batched serving
-(BatchKVCache passes offset arrays) and single-stream chat never see it,
-while any plain-KVCache batched decode chain silently corrupts every
-row past the first.
+Scalar means fewer offset entries than batch rows: a plain int, a 0-d
+mx.array (the ``mx.array(cache.offset)`` wrap in mlx-lm's gemma4_text
+produces exactly this), or a size-1 array. The CPU path is correct,
+T > 1 is correct, B == 1 is correct, and the full per-row array path is
+correct -- which is why batched serving (BatchKVCache passes size-B
+offset arrays) and single-stream chat never see it, while any
+plain-KVCache batched decode chain silently corrupts every row past
+the first.
 
-The fix routes the broken case onto the healthy kernel: when offset is
-an int, the input is 3-D or 4-D with shape[-2] == 1 and shape[0] > 1,
-the offset is expanded to a per-row int32 array of length shape[0].
-All other calls pass through untouched, so B == 1 single-stream decode
-keeps bit-identical behavior.
+The fix routes the broken case onto the healthy kernel: when the input
+is 3-D or 4-D with shape[-2] == 1 and shape[0] > 1 and the offset
+carries fewer entries than shape[0], the offset is expanded to a
+per-row int32 array of length shape[0]. All other calls pass through
+untouched, so B == 1 single-stream decode keeps bit-identical behavior.
+
+Verification note: the array-offset variants only demonstrate the bug in
+a FRESH process. The OOB read lands on the buffer a previous expanded
+offset left behind, so an in-process A/B that ran any fixed call first
+reads primed memory and looks clean. The regression tripwires therefore
+run per-variant subprocesses.
 
 Install is idempotent; GMLX_ROPE_BATCH_FIX=0 disables (read per call;
 A/B safe). Patched at mx.fast.rope so every arch's rope -- module
@@ -35,10 +44,11 @@ def _fixed_rope(a, dims, *, traditional, base, scale, offset, freqs=None,
                 stream=None):
     if (
         env_bool("GMLX_ROPE_BATCH_FIX", True)
-        and type(offset) is int
         and a.ndim in (3, 4)
         and a.shape[-2] == 1
         and a.shape[0] > 1
+        and (type(offset) is int
+             or (isinstance(offset, mx.array) and offset.size < a.shape[0]))
     ):
         offset = mx.full((a.shape[0],), offset, dtype=mx.int32)
     return _orig_rope(a, dims, traditional=traditional, base=base,
