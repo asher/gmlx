@@ -8,18 +8,22 @@ layer-level fused kernels and verify seams keep engaging unchanged.
 Differences from the stock forward, all deliberate:
 
 - The B=1 single-row batch-cache shortcut (extract row cache, recurse,
-  merge back) is removed. Measured at zero decode-step cost either way;
-  the mask path handles the single-row batch cache directly, and the
-  quantized-cache rebuild hazard the shortcut had to special-case cannot
-  arise at all.
+  merge back) is removed. This is a correctness fix, not a neutral
+  cleanup: the stock shortcut extracts a row cache that drops
+  ``left_padding`` while recursing with the full unsliced input, so a
+  padded single-row batch attends its pad tokens as content. The direct
+  mask path honors the pads and matches an unpadded reference exactly.
+  Decode-step cost is zero either way, and the quantized-cache rebuild
+  hazard the shortcut had to special-case cannot arise at all.
 - The S=0 guard is structural. A fully left-padded prefill row embeds to
   an empty sequence; padding rows produce zero hidden states and the
   caller zero-pads the output, so the forward returns ``norm(empty)``
   without an external wrapper patch.
 - The batched left-padded prefill path stays per-row (it is live for
-  batched prefill through the stock AR engine) but is owned here, and
-  its any-pads probe costs one host sync in the common no-pad case
-  instead of two.
+  batched prefill through the stock AR engine) but is owned here. Its
+  pad probe folds the any-pads check and the per-row pad list into one
+  host read: the no-pad case costs the same two syncs as stock, but a
+  chunk with query-side pads costs one instead of stock's up to three.
 - The decode-path mask resolution and the decode left-padding walk keep
   upstream's cache-attr protocol exactly (``_qwen3_5_decode_left_padding``
   and the memo attrs), because the stock layers consume it. The helpers
@@ -43,7 +47,12 @@ _OWNED_CALLS = 0
 
 
 def owned_call_count() -> int:
-    """Engagement counter: total owned model-level forwards this process."""
+    """Engagement counter: total owned model-level forwards this process.
+
+    Counts recursive per-row prefill calls individually, so a padded
+    B-row prefill chunk adds B+1, not 1. Treat deltas as engagement
+    proof, not as a step count.
+    """
     return _OWNED_CALLS
 
 
@@ -53,7 +62,9 @@ def _batched_padded_prefill(self, inputs, h, cache, position_ids):
     Returns None when no row carries padding, letting the caller take the
     plain masked path. Row slices drop each row's query-side padding; a
     row whose padding consumes the whole chunk recurses with S=0 and the
-    owned forward returns its empty hidden directly.
+    owned forward returns its empty hidden directly. The pads list is
+    read from the device once and reused for both the any-pads check and
+    the row loop (stock reads it up to three times).
     """
     fa_cache = cache[self.fa_idx]
     query_left_padding = mx.minimum(mx.maximum(-fa_cache.offset, 0), h.shape[1])

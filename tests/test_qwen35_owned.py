@@ -76,17 +76,35 @@ def _top():
 
 
 def _pair():
-    """Stock and owned LanguageModel with identical weights."""
+    """Stock and owned LanguageModel with identical weights.
+
+    Beyond the weight check, the attribute-set comparison guards the
+    mirrored constructors: an upstream field added to LanguageModel or
+    Qwen3_5Model __init__ shows up as a key-set mismatch here (and as a
+    seam-pin failure), not as a silent behavioral drift.
+    """
+    from mlx.utils import tree_flatten
+
     mx.random.seed(11)
     stock = Q35LanguageModel(_cfg(), _top())
     mx.eval(stock.parameters())
     mx.random.seed(11)
     owned = qwen35_owned.OwnedQwen3_5LanguageModel(_cfg(), _top())
     mx.eval(owned.parameters())
-    same = mx.array_equal(
-        stock.model.embed_tokens.weight, owned.model.embed_tokens.weight
-    ).item()
-    assert same, "seeded construction diverged; weight sync broken"
+
+    s_params = dict(tree_flatten(stock.parameters()))
+    o_params = dict(tree_flatten(owned.parameters()))
+    assert set(s_params) == set(o_params), "parameter tree keys diverged"
+    for k, v in s_params.items():
+        assert mx.array_equal(v, o_params[k]).item(), f"weight diverged: {k}"
+    for s_mod, o_mod, name in (
+        (stock, owned, "LanguageModel"),
+        (stock.model, owned.model, "Qwen3_5Model"),
+    ):
+        assert set(vars(s_mod)) == set(vars(o_mod)), (
+            f"{name} instance attribute set diverged (mirrored constructor "
+            f"drifted from upstream)"
+        )
     return stock, owned
 
 
@@ -179,13 +197,53 @@ def test_b1_plain_cache_identity():
 @_NEEDS_GPU
 def test_b1_single_row_batch_cache_identity():
     # Stock takes the extract/recurse/merge shortcut here; owned takes the
-    # direct batched path. Same tokens, logits within the route bound.
+    # direct batched path. pads=[0] is the one value where the two routes
+    # agree (see the padded test below for the value where they must not).
     stock, owned = _pair()
     ids = mx.array([list(PROMPT)])
     toks_s, logits_s = _greedy_chain(stock, ids, _batch_caches(stock, [0]), 5)
     toks_o, logits_o = _greedy_chain(owned, ids, _batch_caches(owned, [0]), 5)
     assert mx.array_equal(toks_s, toks_o).item()
     assert _close(logits_s, logits_o, ATOL)
+
+
+@_NEEDS_GPU
+def test_b1_padded_batch_cache_fixes_stock():
+    # The stock B=1 shortcut extracts a row cache that DROPS left_padding
+    # while recursing with the full unsliced input, so pad tokens are
+    # attended as content. The owned direct path honors the pads. Owned
+    # must match an unpadded reference; stock must NOT - the anti-identity
+    # assertion pins the upstream defect, so if a future mlx-vlm fixes the
+    # shortcut this test flags that the fix claim can be retired.
+    stock, owned = _pair()
+    real = list(PROMPT[:5])
+    pad = 3
+    ref_ids = mx.array([real])
+    padded_ids = mx.array([[0] * pad + real])
+
+    # Eval each arm before the next forward runs: an unevaluated logits
+    # graph reads through later in-place cache mutations (the same
+    # aliasing class as the campaign's offset bug) and turns to NaN.
+    ref = stock(ref_ids, cache=stock.make_cache()).logits[:, -1, :]
+    mx.eval(ref)
+    got_stock = stock(
+        padded_ids, cache=_batch_caches(stock, [pad])
+    ).logits[:, -1, :]
+    mx.eval(got_stock)
+    got_owned = owned(
+        padded_ids, cache=_batch_caches(owned, [pad])
+    ).logits[:, -1, :]
+    mx.eval(got_owned)
+
+    assert _close(got_owned, ref, TIGHT_ATOL), (
+        "owned padded B=1 diverges from the unpadded reference"
+    )
+    delta = mx.abs(got_stock.astype(mx.float32) - ref.astype(mx.float32))
+    delta = delta.max().item()
+    assert delta > 1e-2, (
+        f"stock shortcut now honors left padding (delta {delta:.4f}); "
+        f"the fix framing in the changelog can be retired"
+    )
 
 
 @_NEEDS_GPU
@@ -259,7 +317,16 @@ def test_verify_shaped_sink_path_identity():
     )
     assert _close(out_s.hidden_states[-1], out_o.hidden_states[-1], ATOL)
     assert _close(out_s.logits, out_o.logits, ATOL)
-    assert (out_o.gdn_states is None) == (out_s.gdn_states is None)
+    # gdn_states entries are per-GDN-layer tuples mixing arrays and None.
+    assert len(out_s.gdn_states) == len(out_o.gdn_states)
+    assert out_s.gdn_states, "verify-shaped call captured no GDN states"
+    for entry_s, entry_o in zip(out_s.gdn_states, out_o.gdn_states):
+        assert len(entry_s) == len(entry_o)
+        for a, b in zip(entry_s, entry_o):
+            if isinstance(a, mx.array) or isinstance(b, mx.array):
+                assert _close(a, b, ATOL)
+            else:
+                assert a == b
 
 
 @_NEEDS_GPU
