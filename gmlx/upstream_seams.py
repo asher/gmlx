@@ -83,7 +83,28 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.models.qwen3_5.language", "scaled_dot_product_attention",
          "qwen35_verify_fold (B>=2 left-padded fold)"),
     Seam("mlx_vlm.models.qwen3_5.language", "Qwen3_5Model.__call__",
-         "gdn_patches._patch_qwen35_empty_sequence_guard", critical=True),
+         "gdn_patches._patch_qwen35_empty_sequence_guard (stock fallback "
+         "GMLX_QWEN_OWNED=0 only; the default owned subclass overrides "
+         "__call__ and absorbs the S=0 guard structurally)", critical=True),
+    # --- qwen3_5 owned model-level forward (qwen35_owned, called not patched) ---
+    Seam("mlx_vlm.models.qwen3_5.language", "_create_qwen3_5_attention_mask",
+         "qwen35_owned._owned_model_call (mask resolution + decode-pad "
+         "cache-attr protocol)", critical=True),
+    Seam("mlx_vlm.models.qwen3_5.language", "_create_qwen3_5_ssm_mask",
+         "qwen35_owned._owned_model_call", critical=True),
+    Seam("mlx_vlm.models.qwen3_5.language", "_set_qwen3_5_decode_left_padding",
+         "qwen35_owned._owned_model_call (decode left-padding walk the stock "
+         "layers consume)", critical=True),
+    Seam("mlx_vlm.models.qwen3_5.language", "_extract_row_cache",
+         "qwen35_owned._batched_padded_prefill", critical=True),
+    Seam("mlx_vlm.models.qwen3_5.language", "_pad_row_time",
+         "qwen35_owned._batched_padded_prefill", critical=True),
+    Seam("mlx_vlm.models.qwen3_5.language", "LanguageModel.__init__",
+         "qwen35_owned.OwnedQwen3_5LanguageModel (constructor body mirrored; "
+         "an upstream field addition must be re-mirrored)", critical=True),
+    Seam("mlx_vlm.models.qwen3_5_moe.language", "LanguageModel.__init__",
+         "qwen35_owned._moe_classes (constructor body mirrored)",
+         critical=True),
     Seam("mlx_vlm.models.qwen3_5.language", "Qwen3_5GatedDeltaNet.__call__",
          "gdn_patches._patch_gated_delta_fused_verify"),
     Seam("mlx_vlm.models.qwen3_5.gated_delta", "gated_delta_ops",
