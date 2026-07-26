@@ -100,13 +100,20 @@ def install_decode_priority_sched() -> None:
         # Pace only when decode AND prefill work are both live; otherwise
         # stock behavior (prefill at full speed, untouched TTFT).
         ratio = _ratio()
+        if ratio <= 0:
+            # Ratio 0 is documented as stock: clear the tick term's
+            # decode-pressure reading (0 clears, per the hook contract)
+            # so chunk sizing goes stock too instead of riding a stale
+            # pressure value.
+            _pd.note_decode_pressure(0)
+            return _observed_next(self, **kwargs)
         decode_rows = len(self._generation_batch)
         _pd.note_decode_pressure(decode_rows)
         prefill_live = self._prompt_batch is not None or bool(
             self._unprocessed_sequences
         )
         decode_live = decode_rows > 0
-        if ratio <= 0 or not (prefill_live and decode_live):
+        if not (prefill_live and decode_live):
             return _observed_next(self, **kwargs)
 
         last_chunk = getattr(self, "_kq_last_chunk_time", 0.0)

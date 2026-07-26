@@ -74,6 +74,11 @@ _FLAG = "_gmlx_prefill_decay"
 # Prefill-tick state, fed by the batched-serve scheduler (batch_sched).
 # Single-threaded tick loop; plain module globals. Outside serve nothing
 # calls the hooks, so the tick term stays inert there by construction.
+# Known coarseness under max_models > 1: the globals mix signals across
+# models (one model's observed per-token cost sizes another's next
+# chunk, and the last generator to tick owns the pressure reading).
+# Latency-only and self-correcting within a chunk or two of any switch;
+# key by generator if a multi-model serve ever shows chunk thrash.
 _LIVE_DECODE_ROWS = 0
 _CHUNK_COST: tuple[int, float] | None = None  # (step tokens, wall seconds)
 _LAST_STEP = 0

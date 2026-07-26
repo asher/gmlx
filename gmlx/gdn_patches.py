@@ -586,7 +586,10 @@ def _gdn_try_merge_zba(gdn) -> bool:
     gdn.in_proj_z.weight = merged[:v]
     gdn.in_proj_b.weight = merged[v:v + h]
     gdn.in_proj_a.weight = merged[v + h:]
-    gdn._gdn_zba_weight = merged
+    # Plain instance attr: nn.Module.__setattr__ would file the merged
+    # array into the parameter tree, aliasing the three views above and
+    # double-counting any parameter-size audit.
+    object.__setattr__(gdn, "_gdn_zba_weight", merged)
     return True
 
 
@@ -618,7 +621,9 @@ def _gdn_try_cat_ba(gdn) -> bool:
     mx.eval(cat)
     gdn.in_proj_b.weight = cat[:h]
     gdn.in_proj_a.weight = cat[h:]
-    gdn._gdn_ba_weight = cat
+    # Same reason as the zba merge: keep the cat out of the parameter
+    # tree, it only aliases the two view weights above.
+    object.__setattr__(gdn, "_gdn_ba_weight", cat)
     return True
 
 
@@ -1044,9 +1049,10 @@ def _patch_batched_verify_sdpa() -> None:
         if key in _ragged_noted:
             return
         _ragged_noted.add(key)
-        import sys
-        print(f"[verify] ragged-pads route: {route} B={B} S={L} T={T} "
-              f"max_pad={max(pads)}", file=sys.stderr, flush=True)
+        # warn, not verbose_print: live verify traffic should never reach
+        # this seam, so the one-shot must survive quiet serve logs.
+        loadlog.warn(f"[verify] ragged-pads route: {route} B={B} S={L} T={T} "
+                     f"max_pad={max(pads)}")
 
     def _batched_verify_attention(queries, keys, values, *, cache, scale, mask):
         if hasattr(cache, "bits") or queries.ndim != 4 or keys.ndim != 4:

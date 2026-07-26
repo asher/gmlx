@@ -29,6 +29,14 @@ The replacements keep upstream's decisions everywhere except:
   position ahead of keys on every batched decode step and gated B>1
   decode degenerates. The copy is async device work, not a sync.
 
+Scope is the mlx-vlm module only, deliberately (the row route patches
+both seams, this module does not): mlx-lm's gemma4_text has no offset
+probe, so there is no host sync to remove there. Its only per-layer cost
+is the 0-d ``mx.array(cache.offset)`` wrap, an async upload that is also
+what keeps rope off the cache's in-place-mutating offset (and off the
+upstream scalar-offset rope kernel bug rope_batch_fix covers). Removing
+it would buy microseconds against two known hazard classes.
+
 Install is idempotent; GMLX_G4_NOSYNC=0 disables. Both replaced bodies are
 copies of the pinned upstream implementations (seam-fingerprinted in
 upstream_seams.json); module-level collaborators (create_attention_mask,

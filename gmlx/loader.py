@@ -2407,6 +2407,16 @@ def _resolve_native_fp_wire(hf_weights, hf_kquant_meta, log) -> bool:
     return False
 
 
+def _gemma4_target(model) -> bool:
+    """True when the loaded model runs the gemma4 classes the gemma-4
+    patches target. The installs themselves stay unconditional (they are
+    module-level and inert elsewhere); this only keeps the [install] log
+    lines from claiming gemma-4 levers on unrelated archs."""
+    lm = getattr(model, "language_model", model)
+    return ("gemma4" in type(model).__module__
+            or "gemma4" in type(lm).__module__)
+
+
 def _install_and_load(
     model,
     hf_weights,
@@ -2486,9 +2496,9 @@ def _install_and_load(
         log("[install] depth-decay prefill chunking active")
     if install_qwen35_verify_fold():
         log("[install] qwen3.5 folded verify attention active")
-    if install_gemma4_nosync():
+    if install_gemma4_nosync() and _gemma4_target(model):
         log("[install] gemma-4 host-sync-free masks/rope offsets active")
-    if install_gemma4_batched_sdpa():
+    if install_gemma4_batched_sdpa() and _gemma4_target(model):
         log("[install] gemma-4 hd512 batched-decode row route active")
     n_fused_moe = install_fused_moe_glu(model)
     if n_fused_moe:
@@ -2920,9 +2930,9 @@ def load_model(
         _log("[install] depth-decay prefill chunking active")
     if install_qwen35_verify_fold():
         _log("[install] qwen3.5 folded verify attention active")
-    if install_gemma4_nosync():
+    if install_gemma4_nosync() and _gemma4_target(model):
         _log("[install] gemma-4 host-sync-free masks/rope offsets active")
-    if install_gemma4_batched_sdpa():
+    if install_gemma4_batched_sdpa() and _gemma4_target(model):
         _log("[install] gemma-4 hd512 batched-decode row route active")
     n_fused_moe = install_fused_moe_glu(model)
     if n_fused_moe:
