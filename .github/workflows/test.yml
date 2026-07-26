@@ -22,8 +22,9 @@ jobs:
     runs-on: macos-26
     strategy:
       matrix:
-        # 3.11 is the requires-python floor; 3.13 the newest qualified release.
-        python-version: ["3.11", "3.12", "3.13"]
+        # 3.11 is the requires-python floor; 3.14 is what uv and pipx select by
+        # default, so the documented install lands there unless asked otherwise.
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -32,7 +33,9 @@ jobs:
       - name: Install
         run: |
           pip install "mlx==0.31.2"
-          pip install "mlx-kquant>=0.3.6"
+          # 0.3.7 is the first release with a cp314 wheel; below it the 3.14 job
+          # compiles the Metal extension from sdist.
+          pip install "mlx-kquant>=0.3.7"
           # `assistant` pulls the MCP SDK: without it the stdio tool-server
           # tests (env isolation especially) importorskip themselves away.
           pip install -e ".[vlm,chat,assistant]" pytest httpx build

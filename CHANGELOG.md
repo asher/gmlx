@@ -77,6 +77,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `mlx-kquant>=0.3.7`, the first release with a cp314 wheel. Below it a
   Python 3.14 install - what uv and pipx select by default - silently
   compiled the Metal kernels from source.
+- Python 3.14 is a supported release: the CI matrix runs it alongside
+  3.11-3.13, and it carries the trove classifier. It is what the documented
+  `uv tool` and pipx installs select, so it was already the default target.
 - The quiet-load `[load]` summary now reads family | size | dominant quant
   | elapsed; the full codec histogram moved to `--verbose`.
 - Bare `gmlx serve` with no config says so in the foreground before
