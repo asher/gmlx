@@ -100,6 +100,35 @@ def _qwen3_5_lengths_info(cache):
     return cached[1]
 
 
+def _qwen3_5_set_left_padding_info(cache, pads):
+    left_padding = getattr(cache, "left_padding", None)
+    if not isinstance(left_padding, mx.array):
+        return
+    pads = tuple(int(p) for p in pads)
+    cache._qwen3_5_left_padding_info = (
+        left_padding,
+        pads,
+        max(pads) if pads else 0,
+    )
+
+
+def _qwen3_5_advance_left_padding_info(cache, steps: int):
+    cached = getattr(cache, "_qwen3_5_left_padding_info", None)
+    if cached is None:
+        return
+    _left_padding, pads, _max_pad = cached
+    _qwen3_5_set_left_padding_info(cache, (p - steps for p in pads))
+
+
+def _qwen3_5_advance_lengths_info(cache, steps: int):
+    lengths = getattr(cache, "lengths", None)
+    cached = getattr(cache, "_qwen3_5_lengths_info", None)
+    if cached is None or not isinstance(lengths, mx.array):
+        return
+    _lengths, min_value = cached
+    cache._qwen3_5_lengths_info = (lengths, min_value - steps)
+
+
 def _create_qwen3_5_ssm_mask(h: mx.array, cache):
     if not (cache and hasattr(cache, "make_mask")):
         return None

@@ -487,10 +487,13 @@ def _gdn_fused_decode_body(self, inputs, cache, *, vlm_cache_advance=False):
         cache[1] = state
         cache.advance(S)
         if vlm_cache_advance:
-            import mlx_vlm.models.qwen3_5.language as _L
+            from .qwen35_owned import (
+                _qwen3_5_advance_left_padding_info,
+                _qwen3_5_advance_lengths_info,
+            )
 
-            _L._qwen3_5_advance_left_padding_info(cache, S)
-            _L._qwen3_5_advance_lengths_info(cache, S)
+            _qwen3_5_advance_left_padding_info(cache, S)
+            _qwen3_5_advance_lengths_info(cache, S)
     return self.out_proj(y.reshape(B, S, -1))
 
 
@@ -902,7 +905,16 @@ def _gdn_fused_verify_call(
     if _ROUTE_DEBUG:
         _log_gdn_route_once("vlm", S, B, gdn_sink, mask, "fused-verify")
 
-    import mlx_vlm.models.qwen3_5.language as _L
+    return _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink)
+
+
+def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink):
+    """Fused multi-position verify forward, shared by the class patch
+    (stock fallback loads) and the owned GatedDeltaNet class. Callers
+    guarantee the route conditions: sink set, S>1, kernel available,
+    Dv%16==0, Dk%32==0."""
+    B, S, _ = inputs.shape
+    Dv = self.head_v_dim
 
     mixed_qkv = self.in_proj_qkv(inputs)
     z = _bf16_verify_linear(self.in_proj_z, inputs)
@@ -981,8 +993,13 @@ def _gdn_fused_verify_call(
         cache[1] = new_state
         if hasattr(cache, "advance"):
             cache.advance(S)
-            _L._qwen3_5_advance_left_padding_info(cache, S)
-            _L._qwen3_5_advance_lengths_info(cache, S)
+            from .qwen35_owned import (
+                _qwen3_5_advance_left_padding_info,
+                _qwen3_5_advance_lengths_info,
+            )
+
+            _qwen3_5_advance_left_padding_info(cache, S)
+            _qwen3_5_advance_lengths_info(cache, S)
 
     if gdn_sink is not None:
         # The rejection rollback indexes the per-position intermediate states and

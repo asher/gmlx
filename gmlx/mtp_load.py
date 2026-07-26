@@ -45,6 +45,7 @@ from .native_fp import _strip_weight
 from .populate import maybe_populate_for_load
 from .populate import wait_for as wait_for_populate
 from .preflight import preflight
+from .qwen35_gdn import owned_gdn_active, rebind_gdn
 from .transforms import coalesce_split_experts
 
 
@@ -633,9 +634,13 @@ def load_mtp_model(
 
     # 2. tiled-V fixup for asymmetric K/V heads - both mlx-lm (transitive) and
     #    mlx-vlm's own gated_delta (the MTP target / state-capture paths).
+    #    Owned qwen GDN loads route the scan through mlx-lm's tiled
+    #    gated_delta directly and never touch the vlm module, so the vlm
+    #    rebind installs only for the stock fallback.
     if _needs_tiled_v_patch(config):
         _patch_gated_delta_tiled_v()
-        _patch_mlxvlm_gated_delta_tiled_v()
+        if not owned_gdn_active(config_dict.get("model_type")):
+            _patch_mlxvlm_gated_delta_tiled_v()
 
     # deepseek_v4 needs sanitize=True (the vendored Model.sanitize does the
     # wo_a 2D->3D MultiLinear reshape, same as the plain-text load path) and
@@ -671,7 +676,10 @@ def load_mtp_model(
         "qwen3_5",
         "qwen3_5_text",
     ):
-        _patch_gated_delta_fused_verify(model)
+        if owned_gdn_active(config_dict.get("model_type")):
+            rebind_gdn(model)
+        else:
+            _patch_gated_delta_fused_verify(model)
         _patch_dense_head_verify(model)
         _patch_batched_verify_sdpa()
         _patch_bf16_verify_linear()
@@ -838,14 +846,18 @@ def load_vlm_mtp_model(
         n_head_kv = first_nonzero_int(meta, f"{arch_r}.attention.head_count_kv")
         if _needs_tiled_v_patch(config_dict):
             _patch_gated_delta_tiled_v()  # idempotent; load_vlm_model already ran it
-            _patch_mlxvlm_gated_delta_tiled_v()
+            if not owned_gdn_active(config_dict.get("model_type")):
+                _patch_mlxvlm_gated_delta_tiled_v()
         if config_dict.get("model_type") in (
             "qwen3_5_moe",
             "qwen3_5_moe_text",
             "qwen3_5",
             "qwen3_5_text",
         ):
-            _patch_gated_delta_fused_verify(model)
+            if owned_gdn_active(config_dict.get("model_type")):
+                rebind_gdn(model)
+            else:
+                _patch_gated_delta_fused_verify(model)
             _patch_dense_head_verify(model)
             _patch_batched_verify_sdpa()
             _patch_bf16_verify_linear()

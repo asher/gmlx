@@ -66,11 +66,14 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the decode pad walk, row-cache extract, pad-time, and the
   padding/lengths memos they use) are owned copies in gmlx,
   parity-tested against the pinned mlx-vlm release on every run, which
-  replaces five upstream seam pins. Layer classes and fused kernels are
-  unchanged;
-  greedy tokens are identical against stock on every route stock
-  computes correctly (`GMLX_QWEN_OWNED=0` reverts to the stock class at
-  load).
+  replaces five upstream seam pins. The GatedDeltaNet layers are owned
+  the same way: an owned subclass carries the fused decode and fused
+  verify dispatch natively (previously a class-level patch) plus an
+  owned unfused chain for the routes the kernels do not cover, and the
+  layer advance memos are owned copies. Fused kernels themselves are
+  unchanged; greedy tokens are identical against the patched stock
+  path on every route (`GMLX_QWEN_OWNED=0` reverts to the stock
+  classes plus the patch set at load).
 - Install docs lead with `uv tool install "gmlx[all]"` / pipx: one command,
   on PATH in every terminal, every optional feature on, no follow-up
   installs. Smaller extra sets and the plain-venv route stay documented.

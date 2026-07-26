@@ -583,6 +583,9 @@ def test_copies_match_upstream_source():
     for name in (
         "_qwen3_5_left_padding_info",
         "_qwen3_5_lengths_info",
+        "_qwen3_5_set_left_padding_info",
+        "_qwen3_5_advance_left_padding_info",
+        "_qwen3_5_advance_lengths_info",
         "_create_qwen3_5_ssm_mask",
         "_create_qwen3_5_attention_mask",
         "_set_qwen3_5_decode_left_padding",

@@ -99,24 +99,30 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.models.qwen3_5_moe.language", "LanguageModel.__init__",
          "qwen35_owned._moe_classes (constructor body mirrored)",
          critical=True),
+    # The memo-advance helpers are owned copies in qwen35_owned; every
+    # gmlx call site (fused decode/verify bodies, owned unfused chain)
+    # uses the owned pair, so the upstream pair is no longer pinned.
+    # Parity is asserted by tests alongside the memo builders.
     Seam("mlx_vlm.models.qwen3_5.language", "Qwen3_5GatedDeltaNet.__call__",
-         "gdn_patches._patch_gated_delta_fused_verify"),
-    Seam("mlx_vlm.models.qwen3_5.language",
-         "_qwen3_5_advance_left_padding_info",
-         "gdn_patches fused GDN decode/verify (memo advance after "
-         "cache.advance; also the interop partner of the owned memo "
-         "builders in qwen35_owned)", critical=True),
-    Seam("mlx_vlm.models.qwen3_5.language", "_qwen3_5_advance_lengths_info",
-         "gdn_patches fused GDN decode/verify (memo advance after "
-         "cache.advance)", critical=True),
+         "gdn_patches._patch_gated_delta_fused_verify (stock fallback "
+         "GMLX_QWEN_OWNED=0 only; the default owned subclass carries the "
+         "fused dispatch natively)"),
+    Seam("mlx_vlm.models.qwen3_5.language", "_target_verify_linears",
+         "qwen35_gdn._owned_gdn_unfused (projection indirection; retires "
+         "with the attention/MLP verify family)", critical=True),
     Seam("mlx_vlm.models.qwen3_5.gated_delta", "gated_delta_ops",
-         "gdn_patches._patch_mlxvlm_gated_delta_tiled_v", critical=True),
+         "gdn_patches._patch_mlxvlm_gated_delta_tiled_v (stock fallback "
+         "GMLX_QWEN_OWNED=0 only; owned GDN routes through mlx-lm "
+         "gated_delta)", critical=True),
     Seam("mlx_vlm.models.qwen3_5.gated_delta", "gated_delta_kernel",
-         "gdn_patches._patch_mlxvlm_gated_delta_tiled_v", critical=True),
+         "gdn_patches._patch_mlxvlm_gated_delta_tiled_v (stock fallback "
+         "only)", critical=True),
     Seam("mlx_vlm.models.qwen3_5.gated_delta", "_gated_delta_with_states_ops",
-         "gdn_patches._patch_mlxvlm_gated_delta_tiled_v", critical=True),
+         "gdn_patches._patch_mlxvlm_gated_delta_tiled_v (stock fallback "
+         "only)", critical=True),
     Seam("mlx_vlm.models.qwen3_5.gated_delta", "_gated_delta_state_ops",
-         "gdn_patches._patch_mlxvlm_gated_delta_tiled_v", critical=True),
+         "gdn_patches._patch_mlxvlm_gated_delta_tiled_v (stock fallback "
+         "only)", critical=True),
     # --- gemma4 host-sync-free masks/offsets (gemma4_sync carries bodies) ---
     Seam("mlx_vlm.models.gemma4.language", "Gemma4TextModel._make_masks",
          "gemma4_sync.install_gemma4_nosync (body carried, offset probe)"),
