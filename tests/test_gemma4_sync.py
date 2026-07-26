@@ -96,10 +96,12 @@ def test_mask_decisions_match_stock_int_offsets():
 
 
 def test_array_offsets_snapshotted_ints_pass_through():
-    """rope must never receive the cache's live offset array object: the
-    shared buffer can be written through by downstream kernels, which
-    degenerated gated B>1 decode (gate-cert 2026-07-25). Int offsets keep
-    passing through unwrapped -- that skip is the patch's sync win."""
+    """rope must never receive the cache's live offset array object:
+    update_and_fetch advances it with an in-place += between the key rope
+    and the query rope, so an aliased offset rotates queries one position
+    ahead of keys and gated B>1 decode degenerates (gate-cert 2026-07-25).
+    Int offsets keep passing through unwrapped -- that skip is the patch's
+    sync win."""
     _install()
     lm = _g4_lm()
     attn = lm.model.layers[0].self_attn
