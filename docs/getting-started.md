@@ -8,16 +8,16 @@ can use, so stop wherever your needs are met.
 ## What you need
 
 - An Apple Silicon Mac (any M-series chip).
-- Python 3.11 or newer.
+- Python 3.11 or newer. Installing with `uv` or `pipx` fetches one for you.
 - Disk space for models.
 - On macOS versions before 26: the Xcode Command Line Tools
   (`xcode-select --install`), because the install compiles the Metal kernels
   from source there.
-- Optional, for voice and the browser chat app: [Homebrew](https://brew.sh),
-  used below to install `ffmpeg` and `pipx`.
+- For voice and the browser chat app: [Homebrew](https://brew.sh), used below
+  to install `ffmpeg`.
 
-gmlx installs like a Python developer tool - a terminal, `git`, and `pip` are
-assumed throughout.
+gmlx installs like a Python developer tool - a terminal is assumed
+throughout.
 
 A running model costs memory in two parts: the weights, roughly the GGUF file size,
 and the KV cache, which grows with context length.
@@ -27,40 +27,71 @@ and the arithmetic for estimating the cache.
 ## Install
 
 ```sh
-mkdir ~/gmlx && cd ~/gmlx
-python3 -m venv .venv && source .venv/bin/activate
-pip install "gmlx[chat]"
+uv tool install "gmlx[all]"
+brew install ffmpeg              # voice and non-wav audio only
 ```
 
-That is the whole install. One venv habit to know: the `gmlx` command exists
-only while the venv is active. In every new terminal, run
-`source ~/gmlx/.venv/bin/activate` first - if you ever see
-`command not found: gmlx`, that is all that happened.
+That is the whole install. `gmlx` lands on your PATH in every terminal, in an
+isolated environment, with a suitable Python fetched for it, and `[all]` turns
+on every optional feature so nothing else is needed later.
+[uv](https://docs.astral.sh/uv/) itself is one command
+(`brew install uv`, or `curl -LsSf https://astral.sh/uv/install.sh | sh`);
+`pipx install "gmlx[all]"` behaves the same way. Upgrade later with
+`uv tool upgrade gmlx` (or `pipx upgrade gmlx`).
+
+`ffmpeg` is the one dependency no Python installer can supply. It is needed
+only to decode audio uploads and to encode mp3/flac/opus; skip it if you are
+not using voice.
+
+To install less, name the extras you want instead of `all` - `gmlx[chat]` is
+the common choice, giving up only voice and the assistant. `gmlx init` offers
+to add the rest later, and issues the correct command for however gmlx was
+installed.
+
+A plain venv you manage yourself works as well:
+
+```sh
+mkdir ~/gmlx && cd ~/gmlx
+python3 -m venv .venv && source .venv/bin/activate
+pip install "gmlx[all]"
+```
+
+Installed this way, the `gmlx` command exists only while the venv is active:
+run `source ~/gmlx/.venv/bin/activate` in each new terminal. A
+`command not found: gmlx` means only that. The `uv tool` and pipx routes have
+no such step.
 
 The `mlx-kquant` dependency (the Metal kernels) arrives
-as a prebuilt wheel from PyPI on macOS 26 and newer; on older macOS versions pip
-builds it from source, which needs the Xcode Command Line Tools
+as a prebuilt wheel from PyPI on macOS 26 and newer; on older macOS versions
+the install builds it from source, which needs the Xcode Command Line Tools
 (`xcode-select --install`) and takes a few minutes.
 
-The `[chat]` extra upgrades the chat REPL's line editor. Other extras, all optional:
+The extras, all optional:
 
 | Extra | Adds | Needed for |
 |-------|------|------------|
 | `chat` | prompt_toolkit line editor, rich | nicer `gmlx chat` |
 | `stt` | mlx-whisper (plus ffmpeg on PATH) | server speech-to-text |
-| `tts` | misaki[en] phoneme front-end (plus ffmpeg for non-wav) | server text-to-speech |
+| `tts` | spaCy-backed phoneme front-end (plus ffmpeg for non-wav) | server text-to-speech |
 | `talk` | client audio + wake word, includes stt and tts | `gmlx talk` voice chat |
 | `assistant` | the MCP SDK | tools for the built-in [assistant](assistant.md) (talk, `chat --assistant`, served assistants) |
 | `all` | chat + talk + assistant in one | every optional feature |
 
-The `tts`, `talk`, and `all` extras need Python 3.11-3.13 (on 3.14 the Kokoro
-voice is unavailable until spacy ships wheels - the `qwen3-tts` model
-still works). Everything else runs on any supported Python.
+Every extra runs on any supported Python, 3.11 through 3.14.
+
+Adding one later depends on how gmlx was installed: `pip install 'gmlx[X]'`
+in a venv, but a `uv tool` or pipx environment is owned by its installer and
+takes a different command. These docs write the pip form for brevity; to get
+the right one for your machine, run `gmlx init`, which offers to install what
+it needs, or read it off any "not installed" message - both name the command
+that works where you are.
 
 `vlm` and `embeddings` exist as empty back-compat extras; multimodal loading and the
 embeddings endpoint are part of the core install. mlx-audio itself already arrives
 with the core install; the `tts` extra pins it and adds the
-misaki[en] grapheme-to-phoneme front-end the default Kokoro voice needs.
+grapheme-to-phoneme front-end the default Kokoro voice needs. That front-end
+also wants a spaCy English pipeline, which gmlx fetches from Hugging Face on
+first use - no separate install step.
 
 Tab completion is worth the one line: add `eval "$(gmlx completion zsh)"` to
 `~/.zshrc` (there are `bash` and `fish` variants). It completes verbs, flags, your
@@ -77,7 +108,8 @@ gmlx pull hf:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q4_K_M.gguf --to .
 gmlx run Qwen3-0.6B-Q4_K_M.gguf --prompt "Explain entropy in one paragraph."
 ```
 
-You should see a short load report (architecture, codecs, load time), the model's
+You should see a one-line load summary (model family, file size, quant, load
+time), the model's
 reply, and a closing line with prompt and generation speeds in tokens per second.
 This model is only 0.4 GB; it exists to prove the pipeline, not to impress.
 
@@ -337,3 +369,59 @@ permission prompt never appeared, port 8080 is already in use, or the first
 request after a cold start is slow because the model was loading. For anything
 else, `gmlx doctor` checks the runtime, config, model paths, and services in one
 pass, and `gmlx logs` shows what the server was doing.
+
+## Glossary
+
+Terms used throughout these docs and on Hugging Face model pages, ordered
+roughly as you will meet them.
+
+- **Open-weight model**: a language model whose weights are published for
+  anyone to download and run - Llama, Qwen, Gemma, DeepSeek, GLM, gpt-oss,
+  and many more. Running one locally keeps the conversation on your Mac.
+- **GGUF**: the single-file format the open-model ecosystem publishes models
+  in. One `.gguf` file is one ready-to-run model (very large ones are split
+  into numbered shards; gmlx treats the set as one file). gmlx runs GGUFs
+  exactly as published, with no conversion step.
+- **Quant (quantization)**: a compressed build of a model. The suffix on a
+  GGUF name - `Q4_K_M`, `Q6_K`, `Q8_0`, `IQ2_M` - says how many bits each
+  weight keeps: the number is roughly bits per weight, so Q4 files are
+  smaller and slightly lossier, Q6/Q8 bigger and closer to the original.
+  Most repos publish one file per quant; you pick the size that fits your
+  RAM ([pick a model](#pick-a-model-for-your-mac)).
+- **Token**: the unit models read and write - a word fragment, on average
+  about three-quarters of an English word. Speeds are quoted in tokens per
+  second (tok/s).
+- **Context**: everything the model is currently considering - your
+  conversation so far, pasted files, its own reply in progress - measured in
+  tokens.
+- **KV cache**: the model's working memory for the context, kept alongside
+  the weights in RAM. It grows with context length, which is why a model
+  whose file barely fits leaves no room for long conversations
+  ([will it fit?](#will-it-fit)); `--kv-bits 8` compresses it.
+- **Prefill and decode**: the two phases of answering. Prefill is reading
+  your prompt (fast, reported separately); decode is generating the reply
+  token by token. `gmlx run`'s closing stats line reports both speeds.
+- **Thinking (reasoning) model**: a model trained to reason step by step
+  before answering, streaming that scratch work inside `<think>` markers.
+  `run` and `chat` style it under a `thinking` label by default
+  (`--reasoning` controls this).
+- **MoE (mixture of experts)**: a model built from many small "expert"
+  sub-networks, of which each token activates only a few, so decode costs
+  what the active fraction costs rather than the full parameter count (the
+  `-A3B` in a name like `35B-A3B` = 3B active parameters). Because most
+  experts are idle on any given token, a MoE bigger than RAM can still run by
+  [streaming experts from disk](streaming.md).
+- **Speculative decoding / MTP**: a small draft predictor proposes several
+  tokens and the full model verifies them in one step - identical output,
+  fewer full-model passes. Some models (qwen3.5/3.6)
+  ship the draft head inside the GGUF ("MTP", multi-token prediction), and
+  gmlx turns it on automatically.
+- **mmproj**: a companion GGUF holding a vision (or audio) tower. Pair it
+  with its LLM GGUF via `--mmproj` and the model can see images
+  ([vlm.md](vlm.md)).
+- **Hugging Face**: the site the open-model ecosystem publishes on.
+  `hf:org/repo/file.gguf` refs throughout these docs point there; `gmlx
+  pull` downloads them.
+- **OpenAI-compatible API**: the de-facto standard HTTP interface for
+  chatting with a model. `gmlx serve` speaks it, and Anthropic's, so clients
+  written for those APIs address a local server unchanged.

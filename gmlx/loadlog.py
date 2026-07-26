@@ -129,20 +129,34 @@ def seeds(fn):
     return wrapper
 
 
+def fact_file_size(shards) -> None:
+    """Record the model's total on-disk bytes (every shard) for the summary."""
+    try:
+        fact("size_bytes", sum(os.path.getsize(p) for p in shards))
+    except OSError:
+        pass
+
+
 def _summary_line(name: str, elapsed: float, collected: dict) -> str:
+    """One human-readable line for a finished load: family, on-disk size,
+    dominant quant, elapsed - the facts a first run cares about - plus the
+    companions that change behavior (mmproj/drafter/attn/sidecar). The full
+    per-codec histogram lives in the --verbose diagnostics."""
     parts = [f"[load] {name}"]
     arch = collected.get("arch")
     if arch:
-        parts.append(f"arch {arch}")
+        parts.append(arch)
+    size = collected.get("size_bytes")
+    if size:
+        from .lifecycle import human_gb
+
+        parts.append(human_gb(size))
     codecs = collected.get("codecs")
     if codecs:
         top = sorted(codecs.items(), key=lambda kv: (-kv[1], kv[0]))
-        shown = " ".join(f"{c} x{n}" for c, n in top[:3])
-        if len(top) > 3:
-            shown += f" +{len(top) - 3} more"
-        parts.append(shown)
+        parts.append(f"mostly {top[0][0]}" if len(top) > 1 else top[0][0])
     else:
-        parts.append("no kquant tensors")
+        parts.append("float weights")
     parts.append(f"{elapsed:.1f}s")
     if collected.get("mmproj"):
         parts.append("+mmproj")

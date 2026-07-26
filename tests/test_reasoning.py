@@ -281,3 +281,31 @@ def test_themed_printer_uses_theme_slot():
     p.close()
     joined = "".join(out)
     assert t.thinking in joined           # theme slot, not the bare \x1b[2m dim
+
+
+# StreamRenderer: the run CLI's (write, close) glue over filter + printer.
+def test_stream_renderer_show_styles_and_strips(capsys):
+    from gmlx.reasoning import StreamRenderer
+
+    r = StreamRenderer("show", color=False)
+    text = "<think>" + _QWEN
+    for i in range(0, len(text), 7):
+        r.write(text[i : i + 7])
+    r.close()
+    out = capsys.readouterr().out
+    assert "┌ thinking" in out and "└ thought for" in out
+    assert "</think>" not in out
+    assert out.rstrip().endswith("Hi! How can I help you today?")
+
+
+def test_stream_renderer_prefill_close_only(capsys):
+    from gmlx.reasoning import StreamRenderer
+
+    # Pre-fill template: the prompt opened the block, the stream only closes it.
+    r = StreamRenderer("hide", start_in_thinking=True, color=False)
+    for chunk in ("mulling", "</think>", "Answer."):
+        r.write(chunk)
+    r.close()
+    out = capsys.readouterr().out
+    assert "mulling" not in out and "</think>" not in out
+    assert "thought for" in out and "Answer." in out

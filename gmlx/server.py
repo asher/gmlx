@@ -804,7 +804,7 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--stt", nargs="?", const="default", default=None,
                     metavar="MODEL",
                     help="Speech-to-text: serve POST /v1/audio/transcriptions via "
-                         "mlx-whisper (pip install 'gmlx[stt]'; ffmpeg on "
+                         "mlx-whisper (needs the stt extra; ffmpeg on "
                          "PATH). MODEL is an alias (whisper-turbo, "
                          "whisper-turbo-q4, whisper-large/medium/small/base/tiny), "
                          "any HF repo in MLX-whisper format, or a local model dir; "
@@ -815,7 +815,7 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--tts", nargs="?", const="default", default=None,
                     metavar="MODEL",
                     help="Text-to-speech: serve POST /v1/audio/speech via "
-                         "mlx-audio (pip install 'gmlx[tts]'; non-wav "
+                         "mlx-audio (needs the tts extra; non-wav "
                          "formats need ffmpeg on PATH). MODEL is an alias "
                          "(kokoro, kokoro-8bit/4bit, qwen3-tts), any HF repo in "
                          "MLX-audio format, or a local model dir; bare --tts "
@@ -1209,6 +1209,12 @@ def _cmd_serve(argv: list, prog: str = "gmlx serve") -> int:
         except ConfigError as e:
             print(f"error: {e}", file=sys.stderr)
             return 2
+        if cfg_path is None and not a.models_dir and not a.model:
+            # The child logs this too, but the log is exactly where a first-run
+            # user never looks - say it in the foreground before detaching.
+            print("note: no config found - serving a discovery scan of the "
+                  "current directory (run `gmlx init` to save a config, or "
+                  "pass --models-dir DIR)", file=sys.stderr)
         rc = lifecycle.start_background(
             serve_args, host=host, port=port, config_abspath=cfg_path,
             log=a.log, start_timeout=a.start_timeout, api_key=api_key)

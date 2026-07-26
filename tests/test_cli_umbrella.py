@@ -154,3 +154,40 @@ def test_deleted_cwd_gives_actionable_error(tmp_path, monkeypatch, capsys):
     assert cli.umbrella_main(["chat", "whatever"]) == 1
     err = capsys.readouterr().err
     assert "working directory no longer exists" in err
+
+
+# condensed --help vs --help-all (run + chat)
+def test_run_help_is_condensed(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["--help"])
+    out = capsys.readouterr().out
+    assert "common options" in out
+    assert "--prompt" in out and "--reasoning" in out
+    assert "--help-all" in out and "further flags" in out
+    assert "--bench-chat-seed" not in out       # the long tail is demoted
+
+
+def test_run_help_all_is_complete(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["--help-all"])
+    out = capsys.readouterr().out
+    assert "--bench-chat-seed" in out and "--kv-bits" in out
+    assert "--stream-experts" in out
+
+
+def test_chat_help_is_condensed(capsys):
+    from gmlx import chat
+    with pytest.raises(SystemExit):
+        chat.cmd_chat(["--help"])
+    out = capsys.readouterr().out
+    assert "common options" in out
+    assert "--assistant" in out and "--reasoning" in out
+    assert "--logit-bias" not in out            # the long tail is demoted
+
+
+def test_chat_help_all_is_complete(capsys):
+    from gmlx import chat
+    with pytest.raises(SystemExit):
+        chat.cmd_chat(["--help-all"])
+    out = capsys.readouterr().out
+    assert "--logit-bias" in out and "--kv-bits" in out

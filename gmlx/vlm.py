@@ -1651,6 +1651,7 @@ def load_vlm_model(
     pf = preflight(gguf_path, arch=arch)
     llm_arch = pf.arch
     loadlog.fact("arch", llm_arch)
+    loadlog.fact_file_size(pf.shards)
     _log(f"[vlm] llm arch={llm_arch}")
     loadlog.stage("reading tensors")
     arrays, kquant_meta, _arch, llm_meta, llm_shapes = load_gguf_wire_bytes(

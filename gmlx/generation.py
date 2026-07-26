@@ -178,6 +178,26 @@ def _echo_think_tag(prompt, tokenizer):
     return prompt_open_think_tag(prompt, tokenizer=tokenizer)
 
 
+def _verbose_emitter(prompt, tokenizer, reasoning):
+    """``(write, close)`` for a verbose stream. ``reasoning`` show/hide styles
+    a thinking model's chain-of-thought through :class:`~gmlx.reasoning.
+    StreamRenderer` (the chat REPL's rendering); anything else prints raw,
+    echoing the prompt-opened think tag so the bare close marker still reads."""
+    open_tag = _echo_think_tag(prompt, tokenizer)
+    if reasoning in ("show", "hide"):
+        from .reasoning import StreamRenderer
+
+        r = StreamRenderer(reasoning, start_in_thinking=open_tag is not None)
+        return r.write, r.close
+    if open_tag is not None:
+        print(open_tag, flush=True)
+
+    def write(s):
+        print(s, end="", flush=True)
+
+    return write, (lambda: None)
+
+
 def generate(
     model,
     tokenizer,
@@ -216,6 +236,7 @@ def generate(
     over_generation_log: str | None = None,
     over_label: str | None = None,
     verbose: bool = False,
+    reasoning: str | None = None,
 ) -> str:
     """Generate text from a kquant model. Applies the tokenizer's chat template
     to a string prompt when present (set ``apply_chat_template=False`` for
@@ -232,6 +253,11 @@ def generate(
     generated or the tokenizer lacks a ``</think>`` token. Returns the generated
     text. ``prefill_progress`` shows a stderr spinner during a long prefill
     (TTY only; cleared before the first token).
+    ``reasoning`` shapes how a *verbose* stream displays a thinking model's
+    chain-of-thought: ``"show"`` styles it under a label (the chat REPL's
+    rendering), ``"hide"`` collapses it to the elapsed/token payoff, and
+    ``None``/``"raw"`` (the default) streams verbatim. The returned text is
+    always raw.
     ``over_generation``/``inject_critique`` route to an experimental
     two-phase over-generation probe (see overgen.py)."""
     import mlx_lm
@@ -409,54 +435,60 @@ def generate(
 
     try:
         stop = [s for s in (stop or []) if s]
-        open_tag = _echo_think_tag(prompt, tokenizer) if verbose else None
+        styled = verbose and reasoning in ("show", "hide")
         if not stop:
-            if open_tag is None:
-                return mlx_lm.generate(
-                    model, tokenizer, prompt, verbose=verbose, **gen_kwargs)
-            # Pre-fill templates end the prompt inside an open thinking block,
-            # so the raw stream alone shows a bare close tag. mlx_lm.generate
-            # has no seam between its separator and the first token; own the
-            # loop (same verbose format) to echo the open tag first.
-            from mlx_lm.generate import stream_generate
+            if verbose and (styled
+                            or _echo_think_tag(prompt, tokenizer) is not None):
+                # Own the loop (same verbose format as mlx_lm.generate) when
+                # the stream needs shaping: reasoning show/hide styling, or a
+                # pre-fill template that ended the prompt inside an open
+                # thinking block (the raw stream alone shows a bare close tag,
+                # and mlx_lm.generate has no seam between its separator and
+                # the first token).
+                from mlx_lm.generate import stream_generate
 
-            print("=" * 10)
-            print(open_tag, flush=True)
-            text, last = "", None
-            for last in stream_generate(model, tokenizer, prompt, **gen_kwargs):
-                print(last.text, end="", flush=True)
-                text += last.text
-            print()
-            print("=" * 10)
-            if not text:
-                print("No text generated for this prompt")
-            else:
-                print(
-                    f"Prompt: {last.prompt_tokens} tokens, "
-                    f"{last.prompt_tps:.3f} tokens-per-sec"
-                )
-                print(
-                    f"Generation: {last.generation_tokens} tokens, "
-                    f"{last.generation_tps:.3f} tokens-per-sec"
-                )
-                print(f"Peak memory: {last.peak_memory:.3f} GB")
-            return text
+                print("=" * 10)
+                emit, close_emit = _verbose_emitter(prompt, tokenizer, reasoning)
+                text, last = "", None
+                for last in stream_generate(model, tokenizer, prompt,
+                                            **gen_kwargs):
+                    emit(last.text)
+                    text += last.text
+                close_emit()
+                print()
+                print("=" * 10)
+                if not text:
+                    print("No text generated for this prompt")
+                else:
+                    print(
+                        f"Prompt: {last.prompt_tokens} tokens, "
+                        f"{last.prompt_tps:.3f} tokens-per-sec"
+                    )
+                    print(
+                        f"Generation: {last.generation_tokens} tokens, "
+                        f"{last.generation_tps:.3f} tokens-per-sec"
+                    )
+                    print(f"Peak memory: {last.peak_memory:.3f} GB")
+                return text
+            return mlx_lm.generate(
+                model, tokenizer, prompt, verbose=verbose, **gen_kwargs)
 
         # Stop sequences need the streamed text: scan with a held-back tail so
         # a stop string split across segments still matches, then end the
-        # stream.
+        # stream. The scanner sees the raw text; the emitter only displays.
         from mlx_lm.generate import stream_generate
 
-        if open_tag is not None:
-            print(open_tag, flush=True)
+        emit = close_emit = None
+        if verbose:
+            emit, close_emit = _verbose_emitter(prompt, tokenizer, reasoning)
         scanner = StopScanner(stop)
         pieces, last = [], None
         for r in stream_generate(model, tokenizer, prompt, **gen_kwargs):
             out, hit = scanner.feed(r.text)
             if out:
                 pieces.append(out)
-                if verbose:
-                    print(out, end="", flush=True)
+                if emit is not None:
+                    emit(out)
             last = r
             if hit:
                 break
@@ -464,9 +496,10 @@ def generate(
             tail = scanner.flush()
             if tail:
                 pieces.append(tail)
-                if verbose:
-                    print(tail, end="", flush=True)
+                if emit is not None:
+                    emit(tail)
         if verbose:
+            close_emit()
             print()
             if last is not None:
                 print(
@@ -692,6 +725,7 @@ def generate_speculative(
     system_prompt: str | None = None,
     template_kwargs: dict | None = None,
     verbose: bool = False,
+    reasoning: str | None = None,
     kv_bits: int | None = None,
     kv_group_size: int = 64,
 ) -> dict:
@@ -702,6 +736,8 @@ def generate_speculative(
     ``{text, tokens, elapsed_s, decode_tps, accept_rate, mean_accept_len,
     rounds}`` - ``accept_rate`` is fraction of drafted tokens accepted; greedy
     output must match the non-speculative path token-for-token (lossless gate).
+    ``reasoning`` shapes the *verbose* stream like :func:`generate`'s; the
+    returned ``text`` is always raw.
     """
     # Drafters whose hooks only the owned engine understands (deepseek_v4:
     # 4D hidden + rotating-undo rollback) must not run mlx-vlm's stock round;
@@ -714,7 +750,7 @@ def generate_speculative(
             min_p=min_p, draft_block_size=draft_block_size,
             apply_chat_template=apply_chat_template,
             system_prompt=system_prompt, template_kwargs=template_kwargs,
-            verbose=verbose,
+            verbose=verbose, reasoning=reasoning,
             kv_bits=kv_bits, kv_group_size=kv_group_size,
         )
 
@@ -775,10 +811,9 @@ def generate_speculative(
     detok = tokenizer.detokenizer
     detok.reset()
     n = 0
+    emit = close_emit = None
     if verbose:
-        tag = _echo_think_tag(prompt, tokenizer)
-        if tag:
-            print(tag, flush=True)
+        emit, close_emit = _verbose_emitter(prompt, tokenizer, reasoning)
     # Split prefill from decode at the first-token boundary, mirroring
     # mlx-lm's stream_generate: the first yielded token's wall time is the
     # (chunked) prefill cost; decode_tps is measured over the steady decode
@@ -819,18 +854,21 @@ def generate_speculative(
             break
         detok.add_token(tok)
         n += 1
-        if verbose:
+        if emit is not None:
             seg = detok.last_segment
             if seg:
-                print(seg, end="", flush=True)
+                emit(seg)
         if n >= max_tokens:
             break
     detok.finalize()
     decode_s = time.perf_counter() - tic
     if prefill_s is None:
         prefill_s = 0.0
-    if verbose:
-        print(detok.last_segment)
+    if emit is not None:
+        if detok.last_segment:
+            emit(detok.last_segment)
+        close_emit()
+        print()
 
     accept = list(getattr(drafter, "accept_lens", []) or [])
     draft = list(getattr(drafter, "draft_lens", []) or [])
@@ -865,6 +903,7 @@ def generate_speculative_owned(
     system_prompt: str | None = None,
     template_kwargs: dict | None = None,
     verbose: bool = False,
+    reasoning: str | None = None,
     kv_bits: int | None = None,
     kv_group_size: int = 64,
 ) -> dict:
@@ -933,10 +972,9 @@ def generate_speculative_owned(
     detok = tokenizer.detokenizer
     detok.reset()
     n = 0
+    emit = close_emit = None
     if verbose:
-        tag = _echo_think_tag(prompt, tokenizer)
-        if tag:
-            print(tag, flush=True)
+        emit, close_emit = _verbose_emitter(prompt, tokenizer, reasoning)
     tic = time.perf_counter()
     prefill_s = None
     for tok in stream_speculative(
@@ -956,18 +994,21 @@ def generate_speculative_owned(
             break
         detok.add_token(tok)
         n += 1
-        if verbose:
+        if emit is not None:
             seg = detok.last_segment
             if seg:
-                print(seg, end="", flush=True)
+                emit(seg)
         if n >= max_tokens:
             break
     detok.finalize()
     decode_s = time.perf_counter() - tic
     if prefill_s is None:
         prefill_s = 0.0
-    if verbose:
-        print(detok.last_segment)
+    if emit is not None:
+        if detok.last_segment:
+            emit(detok.last_segment)
+        close_emit()
+        print()
 
     accept = list(getattr(drafter, "accept_lens", []) or [])
     draft = list(getattr(drafter, "draft_lens", []) or [])

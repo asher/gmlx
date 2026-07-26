@@ -567,6 +567,7 @@ def load_mtp_model(
     pf = preflight(gguf_path, arch=arch)
     arch = pf.arch
     loadlog.fact("arch", arch)
+    loadlog.fact_file_size(pf.shards)
     _log(f"[arch] {arch}")
 
     maybe_populate_for_load(pf.shards, log=_log)

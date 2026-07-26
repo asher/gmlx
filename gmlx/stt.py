@@ -58,9 +58,10 @@ def import_mlx_whisper():
     try:
         import mlx_whisper
     except ImportError as exc:
+        from .extras import install_hint
         raise ImportError(
             "speech-to-text requires the optional stt extra:\n"
-            "    pip install 'gmlx[stt]'\n"
+            f"    {install_hint('stt')}\n"
             "(installs mlx-whisper + python-multipart; audio decoding also "
             "needs ffmpeg on PATH - `brew install ffmpeg`)") from exc
     return mlx_whisper

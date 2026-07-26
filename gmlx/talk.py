@@ -1086,6 +1086,7 @@ def _capability_guidance(caps: dict, *, needs_stt: bool, explicit_url: bool,
                if need and not caps.get(name)]
     if not missing:
         return True
+    from .extras import install_hint
     what = " + ".join(missing)
     print(f"[talk] the server is up but has no {what} service enabled",
           file=out)
@@ -1098,7 +1099,7 @@ def _capability_guidance(caps: dict, *, needs_stt: bool, explicit_url: bool,
             "      stt: true      # whisper-turbo\n"
             "      tts: true      # kokoro\n"
             "  install the models' engines if needed:\n"
-            "      pip install 'gmlx[talk]'\n"
+            f"      {install_hint('talk')}\n"
             "  then restart:  gmlx restart   (and re-run gmlx talk)",
             file=out)
     return False

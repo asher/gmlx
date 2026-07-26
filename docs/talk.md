@@ -18,8 +18,7 @@ pip install 'gmlx[talk]'    # client audio + wake word, includes server STT/TTS 
 brew install ffmpeg             # Whisper's audio decoding
 ```
 
-The `talk` extra needs Python 3.11-3.13 (on 3.14, the Kokoro voice's
-phoneme stack has no wheels yet - configure the `qwen3-tts` model instead).
+The `talk` extra runs on any supported Python, 3.11 through 3.14.
 
 The server needs both audio services in its config:
 

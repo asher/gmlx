@@ -35,8 +35,11 @@ class TalkMcpError(RuntimeError):
     """An MCP server could not be reached / initialized."""
 
 
-ASSISTANT_EXTRA_HINT = ("MCP tools need the assistant extra: "
-                        "pip install 'gmlx[assistant]'")
+def assistant_extra_hint() -> str:
+    """The missing-assistant-extra warning. A function, not a constant: the
+    install command depends on how gmlx itself was installed."""
+    from .extras import install_hint
+    return f"MCP tools need the assistant extra: {install_hint('assistant')}"
 
 
 def _result_text(result) -> str:
@@ -223,7 +226,7 @@ def connect_servers(servers, *, call_timeout_s: float = 60.0,
     if not servers:
         return None, registry, []
     if open_session is None and importlib.util.find_spec("mcp") is None:
-        return None, registry, [ASSISTANT_EXTRA_HINT]
+        return None, registry, [assistant_extra_hint()]
     host = McpToolHost(call_timeout_s=call_timeout_s,
                        open_session=open_session)
     warnings: list = []

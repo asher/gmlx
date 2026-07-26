@@ -8,6 +8,7 @@ right document for the task at hand.
 
 | Task | Read |
 |------|------|
+| Learn what GGUF files, quants, and the KV cache are | [getting-started.md](getting-started.md), and its [glossary](getting-started.md#glossary) |
 | Install and chat with a first model | [getting-started.md](getting-started.md) |
 | Switch over from llama.cpp, Ollama, or LM Studio | [migrating.md](migrating.md) |
 | Chat in your browser instead of a terminal | [getting-started.md](getting-started.md#chat-in-your-browser) |

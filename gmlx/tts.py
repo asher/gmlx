@@ -83,9 +83,10 @@ def import_mlx_audio():
     try:
         import mlx_audio
     except ImportError as exc:
+        from .extras import install_hint
         raise ImportError(
             "text-to-speech requires the optional tts extra:\n"
-            "    pip install 'gmlx[tts]'\n"
+            f"    {install_hint('tts')}\n"
             "(installs mlx-audio; non-wav formats also need ffmpeg on "
             "PATH - `brew install ffmpeg`)") from exc
     return mlx_audio

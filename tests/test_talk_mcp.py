@@ -13,7 +13,7 @@ import pytest
 
 from gmlx import talk_mcp
 from gmlx.config import McpServerCfg
-from gmlx.talk_mcp import (ASSISTANT_EXTRA_HINT, McpToolHost,
+from gmlx.talk_mcp import (McpToolHost, assistant_extra_hint,
                                TalkMcpError, _result_text, connect_servers)
 
 
@@ -113,7 +113,7 @@ def test_no_servers_and_missing_sdk_paths(monkeypatch):
     monkeypatch.setattr(importlib.util, "find_spec",
                         lambda n, *a: None if n == "mcp" else real(n, *a))
     host, reg, warnings = connect_servers([_srv("clock")])
-    assert host is None and not reg and warnings == [ASSISTANT_EXTRA_HINT]
+    assert host is None and not reg and warnings == [assistant_extra_hint()]
 
 
 def test_connect_timeout_raises():

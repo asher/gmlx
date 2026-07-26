@@ -296,8 +296,9 @@ def make_wake_detector(phrase: str, *, threshold: float = 0.5):
     try:
         import sherpa_onnx  # noqa: F401
     except ImportError:
-        return None, ("wake word needs the talk extra: pip install "
-                      "'gmlx[talk]' - falling back to voice-activity mode")
+        from .extras import install_hint
+        return None, (f"wake word needs the talk extra: {install_hint('talk')}"
+                      " - falling back to voice-activity mode")
     try:
         return SherpaKwsDetector(phrase, threshold=threshold), None
     except TalkAudioError as e:
@@ -335,9 +336,10 @@ def import_sounddevice():
     try:
         import sounddevice
     except ImportError as exc:
+        from .extras import install_hint
         raise ImportError(
             "voice chat requires the optional talk extra:\n"
-            "    pip install 'gmlx[talk]'\n"
+            f"    {install_hint('talk')}\n"
             "(installs sounddevice + sherpa-onnx and the stt/tts extras)"
         ) from exc
     return sounddevice

@@ -30,6 +30,7 @@ import sys
 from dataclasses import dataclass
 
 from .textfmt import plural_s
+from .extras import install_hint
 from . import profiles as _family_profiles
 from .config import DiscoverSpec, ModelCfg
 from .config_synth import supported_arches
@@ -818,19 +819,19 @@ def _scaffold_services_block(stt, tts, embeddings, rerank) -> list[str]:
                          "speech-to-text (POST /v1/audio/transcriptions)"))
     else:
         svc_rows.append(("# stt: whisper-turbo",
-                         "speech-to-text: pip install 'gmlx[stt]' + ffmpeg"))
+                         f"speech-to-text: {install_hint('stt')} + ffmpeg"))
     if tts:
         svc_rows.append((f"tts: {tts}", "text-to-speech (POST /v1/audio/speech)"))
     else:
         svc_rows.append(("# tts: kokoro",
-                         "text-to-speech: pip install 'gmlx[tts]' + ffmpeg"))
+                         f"text-to-speech: {install_hint('tts')} + ffmpeg"))
     if embeddings:
         svc_rows.append((f"embeddings: {embeddings}",
                          "text embeddings (POST /v1/embeddings)"))
     else:
         svc_rows.append(("# embeddings: qwen3-embed-0.6b",
                          "text embeddings: GGUF embedders work out of the box, "
-                         "pip install 'gmlx[embeddings]' for safetensors"))
+                         f"{install_hint('embeddings')} for safetensors"))
     if rerank:
         svc_rows.append((f"rerank: {rerank}", "reranking (POST /v1/rerank)"))
     else:
@@ -1052,7 +1053,7 @@ def _scaffold_talk_block(talk) -> list[str]:
                      f"hotkey is <key>+Space: {modifiers}")
     else:
         lines.append("# Voice chat client (`gmlx talk`): needs stt + tts above "
-                     "+ `pip install 'gmlx[talk]'`")
+                     f"+ `{install_hint('talk')}`")
         lines.append("# talk:")
         talk_field_rows = [
             ("model: <id>@profile",

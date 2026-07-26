@@ -385,7 +385,10 @@ def test_extras_row_follows_running_server_config(tmp_path, monkeypatch, capsys)
     assert "FAIL  extras" in out
     assert "talk (sherpa_onnx)" in out
     assert f"[server config {served}]" in out
-    assert 'pip install "gmlx[talk]"' in out
+    # The command depends on how gmlx was installed (uv tool / pipx / pip),
+    # so assert the row carries whatever this environment's is.
+    from gmlx import extras
+    assert extras.install_hint("talk") in out
     assert "PASS  ffmpeg" in out                   # audio need carried over too
 
 
@@ -434,3 +437,52 @@ def test_agents_row_states(monkeypatch, tmp_path):
 def test_agents_row_absent_without_plists(monkeypatch):
     monkeypatch.setattr(doctor, "_agent_plists", lambda: [])
     assert _real_check_agents() is None
+
+
+# memory row: RAM vs configured model sizes
+def _ram(monkeypatch, n_bytes):
+    from gmlx import memfit
+    monkeypatch.setattr(memfit, "total_ram_bytes", lambda: n_bytes)
+
+
+def test_memory_row_passes_when_models_fit(tmp_path, monkeypatch, capsys):
+    cfg, lib = _cfg(tmp_path, _BASE)
+    _mint(lib / "m.gguf")
+    _ram(monkeypatch, 64 * 1024**3)
+    rc = doctor.cmd_doctor(["--config", str(cfg)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "PASS  memory" in out and "64 GB RAM; configured models fit" in out
+
+
+def test_memory_row_warns_on_over_ram_model(tmp_path, monkeypatch, capsys):
+    cfg, lib = _cfg(tmp_path, _BASE)
+    _mint(lib / "m.gguf")
+    _ram(monkeypatch, 256)                  # tiny "machine": m.gguf is over
+    rc = doctor.cmd_doctor(["--config", str(cfg)])
+    out = capsys.readouterr().out
+    assert rc == 0                          # advisory WARN, not a failure
+    assert "WARN  memory" in out
+    assert "larger than RAM: m (" in out
+    assert "stream: experts" in out
+
+
+def test_memory_row_skips_streamed_models(tmp_path, monkeypatch, capsys):
+    body = _BASE + "    stream: experts\n"
+    cfg, lib = _cfg(tmp_path, body)
+    _mint(lib / "m.gguf")
+    _ram(monkeypatch, 256)
+    rc = doctor.cmd_doctor(["--config", str(cfg)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "PASS  memory" in out            # streamed on purpose: no warning
+
+
+def test_memory_row_skips_without_ram_probe(tmp_path, monkeypatch, capsys):
+    cfg, lib = _cfg(tmp_path, _BASE)
+    _mint(lib / "m.gguf")
+    _ram(monkeypatch, None)
+    rc = doctor.cmd_doctor(["--config", str(cfg)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "SKIP  memory" in out and "could not read machine RAM" in out

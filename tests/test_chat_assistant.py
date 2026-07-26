@@ -269,7 +269,10 @@ def test_noop_flags_print_one_note(monkeypatch, tmp_path, capsys):
 def test_gguf_required_without_assistant(capsys):
     with pytest.raises(SystemExit):
         chat.cmd_chat([])
-    assert "required without --assistant" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "chat needs a model" in err
+    # The error routes the user somewhere useful, not just to the usage line.
+    assert "gmlx list" in err and "gmlx pull" in err and "--assistant" in err
 
 
 # --------------------------- setup ergonomics ----------------------------

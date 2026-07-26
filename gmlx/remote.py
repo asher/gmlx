@@ -37,12 +37,16 @@ class RemoteError(RuntimeError):
 
 
 class AmbiguousRepo(RemoteError):
-    """A directory ref matched several GGUF models; ``refs`` lists them."""
+    """A directory ref matched several GGUF models; ``refs`` lists them.
+    ``sizes`` (parallel to ``refs``, when known) carries each model's total
+    bytes so the listing can say which variants fit the machine."""
 
-    def __init__(self, message: str, where: str, refs: list):
+    def __init__(self, message: str, where: str, refs: list,
+                 sizes: list | None = None):
         super().__init__(message)
         self.where = where
         self.refs = refs
+        self.sizes = sizes if sizes is not None else [None] * len(refs)
 
 
 class _NeedMore(Exception):

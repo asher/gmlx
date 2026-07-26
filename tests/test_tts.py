@@ -336,3 +336,79 @@ def test_configure_espeak_sets_bundled_library(monkeypatch):
     calls.clear()
     tts._configure_espeak()
     assert calls == {}
+
+
+# -- vendored misaki (gmlx/_vendor/misaki/en.py) -------------------------------
+# Two local fixes to the snapshot, both easy to lose to a resnapshot from
+# upstream and both silent when lost, so they are pinned here.
+
+
+def _vendored_en_source() -> str:
+    import pathlib
+
+    from gmlx import _vendor
+    return (pathlib.Path(_vendor.__file__).parent / "misaki"
+            / "en.py").read_text()
+
+
+def test_vendored_misaki_defers_torch_import():
+    """torch and transformers back ``FallbackNetwork`` alone, which Kokoro
+    never constructs (it always passes its own espeak fallback). Imported at
+    module scope they made the whole G2P unimportable without torch - which no
+    gmlx extra declares, so ``gmlx[tts]`` alone died on first synthesis."""
+    import ast
+
+    tree = ast.parse(_vendored_en_source())
+    top: list[str] = []
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            top += [a.name.split(".")[0] for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            top.append((node.module or "").split(".")[0])
+    assert "torch" not in top
+    assert "transformers" not in top
+
+
+def test_vendored_misaki_never_calls_spacy_download():
+    """``spacy.cli.download`` shells out to pip. uv-tool and pipx environments
+    have no pip, and spacy answers that failure with ``sys.exit`` - a voice
+    loop that dies on first synthesis with no traceback."""
+    import ast
+
+    def dotted(node) -> str:
+        parts = []
+        while isinstance(node, ast.Attribute):
+            parts.append(node.attr)
+            node = node.value
+        if isinstance(node, ast.Name):
+            parts.append(node.id)
+        return ".".join(reversed(parts))
+
+    called = {dotted(n.func) for n in ast.walk(ast.parse(_vendored_en_source()))
+              if isinstance(n, ast.Call)}
+    assert "spacy.cli.download" not in called
+
+
+def test_vendored_misaki_spacy_source_prefers_installed_model(monkeypatch):
+    en = pytest.importorskip("gmlx._vendor.misaki.en")
+    monkeypatch.setattr(en.spacy.util, "is_package", lambda name: True)
+    assert en._spacy_model_source("en_core_web_sm") == "en_core_web_sm"
+
+
+def test_vendored_misaki_spacy_source_falls_back_to_pinned_hub(monkeypatch):
+    """No installed model: fetch the Hub mirror at a pinned revision. The
+    mirrors carry no tags, so an unpinned fetch would move under the user."""
+    en = pytest.importorskip("gmlx._vendor.misaki.en")
+    hub = pytest.importorskip("huggingface_hub")
+    monkeypatch.setattr(en.spacy.util, "is_package", lambda name: False)
+    seen = {}
+
+    def _snapshot(repo_id, **kw):
+        seen.update(repo=repo_id, **kw)
+        return "/cache/snap"
+
+    monkeypatch.setattr(hub, "snapshot_download", _snapshot)
+    assert en._spacy_model_source("en_core_web_sm") == "/cache/snap"
+    assert seen["repo"] == "spacy/en_core_web_sm"
+    assert seen["revision"] == en._SPACY_HF_REVISIONS["en_core_web_sm"]
+    assert "*.whl" in seen["ignore_patterns"]      # the wheel is dead weight

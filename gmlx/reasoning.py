@@ -356,6 +356,29 @@ class ReasoningPrinter:
         return f"{_DIM}{text}{_RESET}"
 
 
+class StreamRenderer:
+    """One-shot glue for the ``run`` CLI: :class:`ReasoningFilter` +
+    :class:`ReasoningPrinter` behind a ``(write, close)`` pair, so the verbose
+    generate paths stream a thinking model through the same show/hide styling
+    the chat REPL uses. ``start_in_thinking`` seeds the pre-fill-template case
+    (the prompt opened the think block, so the stream carries only the close
+    marker)."""
+
+    def __init__(self, display: str = "show", *,
+                 start_in_thinking: bool = False, color: bool | None = None):
+        self._filter = ReasoningFilter(start_in_thinking=start_in_thinking)
+        self._printer = ReasoningPrinter(
+            display=display, color=want_color() if color is None else color)
+
+    def write(self, text: str) -> None:
+        self._printer.feed_spans(self._filter.feed(text))
+        self._printer.tick()
+
+    def close(self) -> None:
+        self._printer.feed_spans(self._filter.flush())
+        self._printer.close()
+
+
 def want_color(stream=None) -> bool:
     """ANSI is wanted when the stream is a TTY and ``NO_COLOR`` is unset."""
     stream = stream or sys.stdout
