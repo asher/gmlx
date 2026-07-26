@@ -22,9 +22,12 @@ The replacements keep upstream's decisions everywhere except:
   patch builds the windowed array mask -- same attention result, built the
   way every later chunk builds it anyway;
 - int rope offsets pass through untouched (no per-layer device upload).
-  Array offsets keep upstream's snapshot copy: the cache's live offset
-  array must not share its buffer with downstream kernels (a write-through
-  degenerates gated B>1 decode; the copy is async device work, not a sync).
+  Array offsets keep upstream's snapshot copy: ``update_and_fetch`` runs
+  between the key rope and the query rope and advances ``cache.offset``
+  with an in-place ``+=`` (mx arrays mutate through every handle under
+  augmented assignment), so an aliased offset rotates queries one
+  position ahead of keys on every batched decode step and gated B>1
+  decode degenerates. The copy is async device work, not a sync.
 
 Install is idempotent; GMLX_G4_NOSYNC=0 disables. Both replaced bodies are
 copies of the pinned upstream implementations (seam-fingerprinted in
@@ -146,10 +149,11 @@ def install_gemma4_nosync() -> bool:
                    offset=None):
         # Upstream body with the int-offset wrap removed (no per-layer
         # device upload; rope takes ints directly). Array offsets are still
-        # snapshotted: passing the cache's live offset array shares its
-        # buffer with downstream kernels, and gated B>1 decode degenerates
-        # when that buffer is written through (single-line bisect,
-        # gate-cert 2026-07-25). Everything else verbatim.
+        # snapshotted: update_and_fetch below advances cache.offset with an
+        # in-place += that mutates the aliased array, so the query rope
+        # would read positions one step ahead of the key rope and gated
+        # B>1 decode degenerates (found by gate-cert 2026-07-25, writer
+        # pinned by the offset-hunt probes). Everything else verbatim.
         B, L, _ = x.shape
 
         queries = self.q_proj(x).reshape(B, L, self.n_heads, self.head_dim)
