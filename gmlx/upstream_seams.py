@@ -86,19 +86,13 @@ SEAMS: tuple[Seam, ...] = (
          "gdn_patches._patch_qwen35_empty_sequence_guard (stock fallback "
          "GMLX_QWEN_OWNED=0 only; the default owned subclass overrides "
          "__call__ and absorbs the S=0 guard structurally)", critical=True),
-    # --- qwen3_5 owned model-level forward (qwen35_owned, called not patched) ---
-    Seam("mlx_vlm.models.qwen3_5.language", "_create_qwen3_5_attention_mask",
-         "qwen35_owned._owned_model_call (mask resolution + decode-pad "
-         "cache-attr protocol)", critical=True),
-    Seam("mlx_vlm.models.qwen3_5.language", "_create_qwen3_5_ssm_mask",
-         "qwen35_owned._owned_model_call", critical=True),
-    Seam("mlx_vlm.models.qwen3_5.language", "_set_qwen3_5_decode_left_padding",
-         "qwen35_owned._owned_model_call (decode left-padding walk the stock "
-         "layers consume)", critical=True),
-    Seam("mlx_vlm.models.qwen3_5.language", "_extract_row_cache",
-         "qwen35_owned._batched_padded_prefill", critical=True),
-    Seam("mlx_vlm.models.qwen3_5.language", "_pad_row_time",
-         "qwen35_owned._batched_padded_prefill", critical=True),
+    # --- qwen3_5 owned model-level forward (qwen35_owned) ---
+    # The model-level helpers (mask builders, decode pad walk, row
+    # extract, pad-time, padding/lengths memos) are owned copies in
+    # qwen35_owned, so they are no longer pinned here; parity
+    # against the upstream originals is asserted by tests every run,
+    # which also pins the shared memo-attr protocol the stock layers
+    # consume until the layer classes are owned.
     Seam("mlx_vlm.models.qwen3_5.language", "LanguageModel.__init__",
          "qwen35_owned.OwnedQwen3_5LanguageModel (constructor body mirrored; "
          "an upstream field addition must be re-mirrored)", critical=True),

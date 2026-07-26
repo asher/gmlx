@@ -26,9 +26,11 @@ Differences from the stock forward, all deliberate:
   chunk with query-side pads costs one instead of stock's up to three.
 - The decode-path mask resolution and the decode left-padding walk keep
   upstream's cache-attr protocol exactly (``_qwen3_5_decode_left_padding``
-  and the memo attrs), because the stock layers consume it. The helpers
-  are called through the upstream module object so their single source
-  of truth is preserved until the layer classes are owned too.
+  and the memo attrs), because the stock layers consume it. The helper
+  bodies live in this module as owned copies; parity with the upstream
+  originals is test-certified every run, and the memo attrs they write
+  stay a shared protocol with the stock layer classes (the GDN layer
+  advances them, attention reads them) until the layers are owned too.
 
 ``GMLX_QWEN_OWNED=0`` falls back to the stock classes at build time
 (loader-level switch; see ``loader._mtp_target_classes``).
@@ -39,6 +41,8 @@ from typing import List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
+from mlx_vlm.models.base import create_attention_mask
+from mlx_vlm.models.cache import ArraysCache, KVCache
 from mlx_vlm.models.qwen3_5 import language as _L
 from mlx_vlm.models.qwen3_5.config import ModelConfig as _Q35ModelConfig
 from mlx_vlm.models.qwen3_5.config import TextConfig as _Q35TextConfig
@@ -54,6 +58,147 @@ def owned_call_count() -> int:
     proof, not as a step count.
     """
     return _OWNED_CALLS
+
+
+# --------------------------------------------------------------------------
+# Owned copies of the model-level helpers. Bodies match the
+# pinned mlx-vlm release; tests certify parity against the upstream
+# originals every run, so a release upgrade that changes a body fails
+# loudly. The memo attrs written here (_qwen3_5_left_padding_info,
+# _qwen3_5_lengths_info, _qwen3_5_left_padding_cache,
+# _qwen3_5_ssm_no_mask_batch_size, _qwen3_5_decode_left_padding) are a
+# shared protocol with the stock layer classes until those are owned.
+# --------------------------------------------------------------------------
+
+
+def _qwen3_5_left_padding_info(cache):
+    left_padding = getattr(cache, "left_padding", None)
+    if not (
+        isinstance(left_padding, mx.array)
+        and left_padding.ndim > 0
+        and left_padding.size > 0
+    ):
+        return None
+
+    cached = getattr(cache, "_qwen3_5_left_padding_info", None)
+    if cached is None or cached[0] is not left_padding:
+        pads = tuple(int(p) for p in left_padding.tolist())
+        cached = (left_padding, pads, max(pads) if pads else 0)
+        cache._qwen3_5_left_padding_info = cached
+    return cached[1], cached[2]
+
+
+def _qwen3_5_lengths_info(cache):
+    lengths = getattr(cache, "lengths", None)
+    if not (isinstance(lengths, mx.array) and lengths.ndim > 0 and lengths.size > 0):
+        return None
+    cached = getattr(cache, "_qwen3_5_lengths_info", None)
+    if cached is None or cached[0] is not lengths:
+        values = tuple(int(v) for v in lengths.tolist())
+        cached = (lengths, min(values) if values else 0)
+        cache._qwen3_5_lengths_info = cached
+    return cached[1]
+
+
+def _create_qwen3_5_ssm_mask(h: mx.array, cache):
+    if not (cache and hasattr(cache, "make_mask")):
+        return None
+
+    lengths = getattr(cache, "lengths", None)
+    left_padding = getattr(cache, "left_padding", None)
+    if isinstance(left_padding, mx.array):
+        batch_size = int(left_padding.shape[0]) if left_padding.ndim > 0 else 1
+        if (
+            lengths is None
+            and getattr(cache, "_qwen3_5_ssm_no_mask_batch_size", None) == batch_size
+        ):
+            return None
+        left_padding_info = _qwen3_5_left_padding_info(cache)
+        max_left_padding = left_padding_info[1] if left_padding_info else 0
+        if max_left_padding <= 0:
+            if lengths is None:
+                cache._qwen3_5_ssm_no_mask_batch_size = batch_size
+            return None
+        if hasattr(cache, "_qwen3_5_ssm_no_mask_batch_size"):
+            delattr(cache, "_qwen3_5_ssm_no_mask_batch_size")
+
+    lengths_min = _qwen3_5_lengths_info(cache)
+    if lengths_min is not None and lengths_min >= h.shape[1]:
+        return None
+
+    return cache.make_mask(h.shape[1])
+
+
+def _create_qwen3_5_attention_mask(h: mx.array, cache):
+    if cache is None:
+        return create_attention_mask(h, cache)
+
+    if hasattr(cache, "_qwen3_5_decode_left_padding"):
+        delattr(cache, "_qwen3_5_decode_left_padding")
+
+    left_padding = getattr(cache, "left_padding", None)
+    if h.shape[1] == 1 and isinstance(left_padding, mx.array) and left_padding.ndim > 0:
+        padding_cache = getattr(cache, "_qwen3_5_left_padding_cache", None)
+        if padding_cache is None or padding_cache[0] is not left_padding:
+            left_padding_info = _qwen3_5_left_padding_info(cache)
+            pads = list(left_padding_info[0]) if left_padding_info else []
+            padding_cache = (left_padding, pads, max(pads) if pads else 0)
+            cache._qwen3_5_left_padding_cache = padding_cache
+        pads = padding_cache[1]
+        if padding_cache[2] <= 0:
+            return None
+        cache._qwen3_5_decode_left_padding = pads
+        return "left_padded_decode"
+    return create_attention_mask(h, cache)
+
+
+def _set_qwen3_5_decode_left_padding(caches, layers, pads):
+    if caches is None:
+        return
+    for layer, cache_entry in zip(layers, caches):
+        if layer.is_linear or cache_entry is None:
+            continue
+        if pads is None:
+            if hasattr(cache_entry, "_qwen3_5_decode_left_padding"):
+                delattr(cache_entry, "_qwen3_5_decode_left_padding")
+        else:
+            cache_entry._qwen3_5_decode_left_padding = pads
+
+
+def _extract_row_cache(cache_entry, row: int):
+    if isinstance(cache_entry, ArraysCache):
+        row_cache = ArraysCache(size=len(cache_entry.cache))
+        row_cache.cache = [
+            None if cached is None else cached[row : row + 1]
+            for cached in cache_entry.cache
+        ]
+        lengths = getattr(cache_entry, "lengths", None)
+        if lengths is not None:
+            row_cache.lengths = lengths[row : row + 1]
+        return row_cache
+
+    if hasattr(cache_entry, "extract") and not cache_entry.empty():
+        return cache_entry.extract(row)
+
+    if hasattr(cache_entry, "left_padding"):
+        row_cache = KVCache()
+        return row_cache
+
+    return cache_entry
+
+
+def _pad_row_time(x: mx.array, pad: int, target_length: int) -> mx.array:
+    if pad <= 0:
+        return x
+    if x.shape[1] >= target_length:
+        return x
+    return mx.concatenate(
+        [
+            mx.zeros((x.shape[0], pad, *x.shape[2:]), dtype=x.dtype),
+            x,
+        ],
+        axis=1,
+    )
 
 
 def _batched_padded_prefill(self, inputs, h, cache, position_ids):
@@ -95,7 +240,7 @@ def _batched_padded_prefill(self, inputs, h, cache, position_ids):
             if cache_entry is None:
                 current_cache.append(None)
             else:
-                current_cache.append(_L._extract_row_cache(cache_entry, row))
+                current_cache.append(_extract_row_cache(cache_entry, row))
 
         row_out = self(
             row_inputs,
@@ -104,7 +249,7 @@ def _batched_padded_prefill(self, inputs, h, cache, position_ids):
             position_ids=row_position_ids,
         )
         if pad > 0:
-            row_out = _L._pad_row_time(row_out, pad, h.shape[1])
+            row_out = _pad_row_time(row_out, pad, h.shape[1])
         row_outputs.append(row_out)
         for i, cache_entry in enumerate(current_cache):
             row_caches[i].append(cache_entry)
@@ -161,14 +306,14 @@ def _owned_model_call(
         if out is not None:
             return out
 
-    fa_mask = _L._create_qwen3_5_attention_mask(h, cache[self.fa_idx])
-    ssm_mask = _L._create_qwen3_5_ssm_mask(h, cache[self.ssm_idx])
+    fa_mask = _create_qwen3_5_attention_mask(h, cache[self.fa_idx])
+    ssm_mask = _create_qwen3_5_ssm_mask(h, cache[self.ssm_idx])
     decode_left_padding = (
         getattr(cache[self.fa_idx], "_qwen3_5_decode_left_padding", None)
         if isinstance(fa_mask, str) and fa_mask == "left_padded_decode"
         else None
     )
-    _L._set_qwen3_5_decode_left_padding(cache, self.layers, decode_left_padding)
+    _set_qwen3_5_decode_left_padding(cache, self.layers, decode_left_padding)
 
     position_embeddings = None
     if position_ids is not None:

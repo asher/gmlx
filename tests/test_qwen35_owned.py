@@ -345,3 +345,221 @@ def test_hidden_capture_layers_match():
     assert len(out_s.hidden_states) == len(out_o.hidden_states)
     for a, b in zip(out_s.hidden_states, out_o.hidden_states):
         assert _close(a, b, ATOL)
+
+
+# ---------------------------------------------------------------------------
+# Helper parity: the owned copies against the upstream originals.
+# These certify the in-tree bodies stay equal to the pinned release and
+# pin the shared memo-attr protocol the stock layers consume; they run on
+# both streams (no GDN kernels involved).
+# ---------------------------------------------------------------------------
+
+from mlx_vlm.models.cache import KVCache  # noqa: E402
+from mlx_vlm.models.qwen3_5 import language as _L  # noqa: E402
+
+
+def _same(a, b):
+    if isinstance(a, mx.array) or isinstance(b, mx.array):
+        return (
+            isinstance(a, mx.array)
+            and isinstance(b, mx.array)
+            and a.shape == b.shape
+            and mx.array_equal(a, b).item()
+        )
+    return a == b
+
+
+def test_parity_pad_row_time():
+    x = mx.arange(24, dtype=mx.float32).reshape(1, 3, 8)
+    for pad, target in ((0, 5), (-1, 5), (2, 5), (2, 3), (4, 7)):
+        got = qwen35_owned._pad_row_time(x, pad, target)
+        ref = _L._pad_row_time(x, pad, target)
+        assert _same(got, ref), f"pad={pad} target={target}"
+
+
+def test_parity_extract_row_cache():
+    def arrays_pair():
+        pair = []
+        for _ in range(2):
+            c = ArraysCache(size=2)
+            c.cache = [mx.arange(12, dtype=mx.float32).reshape(3, 4), None]
+            c.lengths = mx.array([5, 7, 9])
+            pair.append(c)
+        return pair
+
+    c_o, c_s = arrays_pair()
+    row_o = qwen35_owned._extract_row_cache(c_o, 1)
+    row_s = _L._extract_row_cache(c_s, 1)
+    assert type(row_o) is type(row_s)
+    assert _same(row_o.cache[0], row_s.cache[0])
+    assert row_o.cache[1] is None and row_s.cache[1] is None
+    assert _same(row_o.lengths, row_s.lengths)
+
+    def batch_pair(fill):
+        pair = []
+        for _ in range(2):
+            c = BatchKVCache([1, 0])
+            if fill:
+                k = mx.arange(64, dtype=mx.float32).reshape(2, 2, 4, 4)
+                c.update_and_fetch(k, k + 1)
+            pair.append(c)
+        return pair
+
+    c_o, c_s = batch_pair(fill=True)
+    row_o = qwen35_owned._extract_row_cache(c_o, 0)
+    row_s = _L._extract_row_cache(c_s, 0)
+    assert type(row_o) is type(row_s)
+    assert row_o.offset == row_s.offset
+    for a, b in zip(row_o.state, row_s.state):
+        assert _same(a, b)
+
+    # Empty batch cache with left_padding: both arms hand back a bare
+    # KVCache (the dropped-pads mechanism behind the stock B=1 defect;
+    # the owned forward never routes here for B=1, this pins the body).
+    c_o, c_s = batch_pair(fill=False)
+    row_o = qwen35_owned._extract_row_cache(c_o, 0)
+    row_s = _L._extract_row_cache(c_s, 0)
+    assert type(row_o) is KVCache and type(row_s) is KVCache
+
+    plain = KVCache()
+    assert qwen35_owned._extract_row_cache(plain, 0) is plain
+    assert _L._extract_row_cache(plain, 0) is plain
+
+
+def test_parity_attention_mask():
+    h1 = mx.zeros((2, 1, 8))
+    h4 = mx.zeros((2, 4, 8))
+
+    assert _same(
+        qwen35_owned._create_qwen3_5_attention_mask(h4, None),
+        _L._create_qwen3_5_attention_mask(h4, None),
+    )
+
+    def twin():
+        return BatchKVCache([2, 0]), BatchKVCache([2, 0])
+
+    # S>1 delegates on both arms.
+    c_o, c_s = twin()
+    assert _same(
+        qwen35_owned._create_qwen3_5_attention_mask(h4, c_o),
+        _L._create_qwen3_5_attention_mask(h4, c_s),
+    )
+
+    # S=1 with live pads: sentinel + decode-pad attr, stale attr cleared.
+    c_o, c_s = twin()
+    c_o._qwen3_5_decode_left_padding = [9, 9]
+    c_s._qwen3_5_decode_left_padding = [9, 9]
+    got = qwen35_owned._create_qwen3_5_attention_mask(h1, c_o)
+    ref = _L._create_qwen3_5_attention_mask(h1, c_s)
+    assert got == ref == "left_padded_decode"
+    assert (
+        c_o._qwen3_5_decode_left_padding
+        == c_s._qwen3_5_decode_left_padding
+        == [2, 0]
+    )
+    # Memo keyed on left_padding identity survives a second call.
+    memo = c_o._qwen3_5_left_padding_cache
+    qwen35_owned._create_qwen3_5_attention_mask(h1, c_o)
+    assert c_o._qwen3_5_left_padding_cache is memo
+
+    # S=1 all-zero pads: None on both arms, no decode-pad attr.
+    z_o, z_s = BatchKVCache([0, 0]), BatchKVCache([0, 0])
+    assert qwen35_owned._create_qwen3_5_attention_mask(h1, z_o) is None
+    assert _L._create_qwen3_5_attention_mask(h1, z_s) is None
+    assert not hasattr(z_o, "_qwen3_5_decode_left_padding")
+    assert not hasattr(z_s, "_qwen3_5_decode_left_padding")
+
+
+def test_parity_ssm_mask():
+    h4 = mx.zeros((2, 4, 8))
+
+    assert qwen35_owned._create_qwen3_5_ssm_mask(h4, None) is None
+    assert _L._create_qwen3_5_ssm_mask(h4, None) is None
+
+    def twin(pads):
+        return (
+            ArraysCache(size=2, left_padding=list(pads)),
+            ArraysCache(size=2, left_padding=list(pads)),
+        )
+
+    # Zero pads: None plus the no-mask memo on both arms.
+    c_o, c_s = twin([0, 0])
+    assert qwen35_owned._create_qwen3_5_ssm_mask(h4, c_o) is None
+    assert _L._create_qwen3_5_ssm_mask(h4, c_s) is None
+    assert (
+        c_o._qwen3_5_ssm_no_mask_batch_size
+        == c_s._qwen3_5_ssm_no_mask_batch_size
+        == 2
+    )
+
+    # Live pads: equal masks, no-mask memo absent.
+    c_o, c_s = twin([2, 0])
+    got = qwen35_owned._create_qwen3_5_ssm_mask(h4, c_o)
+    ref = _L._create_qwen3_5_ssm_mask(h4, c_s)
+    assert _same(got, ref)
+    assert got is not None
+    assert not hasattr(c_o, "_qwen3_5_ssm_no_mask_batch_size")
+    # Memoized pads give the same answer on a second call.
+    assert _same(qwen35_owned._create_qwen3_5_ssm_mask(h4, c_o), ref)
+
+
+def test_parity_set_decode_left_padding():
+    layers = [
+        SimpleNamespace(is_linear=flag) for flag in (True, False, False, True)
+    ]
+
+    def twin():
+        return (
+            [BatchKVCache([1, 2]) for _ in layers],
+            [BatchKVCache([1, 2]) for _ in layers],
+        )
+
+    caches_o, caches_s = twin()
+    qwen35_owned._set_qwen3_5_decode_left_padding(caches_o, layers, [1, 2])
+    _L._set_qwen3_5_decode_left_padding(caches_s, layers, [1, 2])
+    for got, ref, layer in zip(caches_o, caches_s, layers):
+        assert hasattr(got, "_qwen3_5_decode_left_padding") == (
+            not layer.is_linear
+        )
+        assert hasattr(got, "_qwen3_5_decode_left_padding") == hasattr(
+            ref, "_qwen3_5_decode_left_padding"
+        )
+
+    qwen35_owned._set_qwen3_5_decode_left_padding(caches_o, layers, None)
+    _L._set_qwen3_5_decode_left_padding(caches_s, layers, None)
+    for got, ref in zip(caches_o, caches_s):
+        assert not hasattr(got, "_qwen3_5_decode_left_padding")
+        assert not hasattr(ref, "_qwen3_5_decode_left_padding")
+
+    # None caches: no-op on both arms.
+    qwen35_owned._set_qwen3_5_decode_left_padding(None, layers, [1, 2])
+    _L._set_qwen3_5_decode_left_padding(None, layers, [1, 2])
+
+
+def test_memo_protocol_interop():
+    """The memo attrs are a shared format with stock layer code.
+
+    The stock GDN layer advances _qwen3_5_left_padding_info and
+    _qwen3_5_lengths_info after every step; an owned writer must produce
+    memos the stock advancers mutate correctly and vice versa.
+    """
+    cache = BatchKVCache([3, 1])
+    pads, max_pad = qwen35_owned._qwen3_5_left_padding_info(cache)
+    assert (pads, max_pad) == ((3, 1), 3)
+    _L._qwen3_5_advance_left_padding_info(cache, 2)
+    pads, max_pad = qwen35_owned._qwen3_5_left_padding_info(cache)
+    assert (pads, max_pad) == ((1, -1), 1)
+
+    # Reverse direction: stock writes, owned reads the same memo.
+    other = BatchKVCache([4, 0])
+    ref = _L._qwen3_5_left_padding_info(other)
+    memo = other._qwen3_5_left_padding_info
+    got = qwen35_owned._qwen3_5_left_padding_info(other)
+    assert got == ref
+    assert other._qwen3_5_left_padding_info is memo
+
+    lc = ArraysCache(size=2)
+    lc.lengths = mx.array([5, 7])
+    assert qwen35_owned._qwen3_5_lengths_info(lc) == 5
+    _L._qwen3_5_advance_lengths_info(lc, 2)
+    assert qwen35_owned._qwen3_5_lengths_info(lc) == 3
