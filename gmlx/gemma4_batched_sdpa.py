@@ -17,14 +17,23 @@ visible -- so the route installs on both, each chained to that module's own
 original. This claims hd512 B>1 calls at decode width (qL==1) and verify
 width (qL 2..8, the MTP block range; the block occupies the last qL key
 positions, so a per-row end-aligned "causal" mask after the tail slice is
-exact) and loops rows through mx.fast.scaled_dot_product_attention, i.e.
-through attn_hd512's wrapper, so each row picks the B=1 kernel route
-(sdpa_vector, sdpa_decode_gqa, fa_verify, verify_gemm) by its own shape. Left
-padding is honored by slicing each padded row's K/V to its visible tail
-([pad, L) -- BatchKVCache.make_mask encodes exactly this at decode width;
-right padding is transient inside update_and_fetch and never live here).
-The pad list is host-read once per left_padding rebinding (identity-keyed
-memo, the qwen35_verify_fold._pads pattern), never per step.
+exact). Left padding is honored by restricting each row to its visible key
+tail [pad, L) -- BatchKVCache.make_mask encodes exactly this at decode
+width; right padding is transient inside update_and_fetch and never live
+here. The pad list is host-read once per left_padding rebinding
+(identity-keyed memo, the qwen35_verify_fold._pads pattern), never per step.
+
+Decode width goes out as ONE batched kq.sdpa_decode_gqa call with per-row
+key start offsets (the kernel's `starts` buffer; pad bytes are skipped, not
+staged) when the resident mlx-kquant ships it -- measured 1.14-1.38x over
+the per-row loop at the 31b global shape from d4k to d49k, B 2-16: the
+per-row grid (Hkv, 1, splits) starves the GPU, the batched grid fills it.
+GMLX_G4_SDPA_STARTS=0 falls back to the loop; an older mlx-kquant falls
+back silently. Verify width (qL 2..8) stays on the per-row loop through
+mx.fast.scaled_dot_product_attention, i.e. through attn_hd512's wrapper, so
+each row picks the B=1 kernel route (fa_verify, verify_gemm, sdpa_vector)
+by its own shape -- the batched kernel measured 0.5-0.6x against fa_verify
+at block width, so one call is not the right shape there.
 
 KV-shared consumer layers arrive with cache=None but share the producers'
 per-layer-type mask object (both upstream modules build one mask per layer
@@ -47,8 +56,14 @@ import mlx.core as mx
 from . import attn_hd512
 from .envflags import env_bool
 
+try:
+    import mlx_kquant as _kq
+except Exception:  # pragma: no cover - mlx_kquant always present in practice
+    _kq = None
+
 _installed = False
 _CLAIMS = [0]
+_ONECALL = [0]
 
 _MODULES = (
     ("mlx_lm.models", "gemma4_text"),
@@ -56,9 +71,34 @@ _MODULES = (
 )
 
 
+def _probe_starts() -> bool:
+    # Kernel capability: sdpa_decode_gqa grew the per-row `starts` buffer
+    # after 0.3.6. The op validator runs at build time, so probing costs no
+    # GPU work (nothing is evaled); an older wheel raises TypeError.
+    if _kq is None or not hasattr(_kq, "sdpa_decode_gqa"):
+        return False
+    try:
+        q = mx.zeros((2, 1, 1, 512), dtype=mx.float16)
+        kv = mx.zeros((2, 1, 8, 512), dtype=mx.float16)
+        _kq.sdpa_decode_gqa(q, kv, kv, 1.0,
+                            starts=mx.zeros((2,), dtype=mx.int32))
+        return True
+    except Exception:
+        return False
+
+
+_HAS_STARTS = _probe_starts()
+
+
 def claims() -> int:
-    """Calls claimed by the row route since import (test/cert hook)."""
+    """Calls claimed by the route since import (test/cert hook)."""
     return _CLAIMS[0]
+
+
+def onecall_claims() -> int:
+    """Decode-width claims served by the single batched starts-kernel call
+    (subset of claims(); test/cert engagement hook)."""
+    return _ONECALL[0]
 
 
 def _pads(cache):
@@ -75,6 +115,23 @@ def _pads(cache):
     ]
     cache._gmlx_g4_pads = (lp, pads)
     return pads
+
+
+_STARTS_RING: list = []  # (tuple(pads), int32 device array), bounded
+
+
+def _starts_for(pads, B):
+    """Device starts buffer for the batched kernel call, memoized by value
+    (pads lists are tiny; the ring avoids a per-layer-per-step upload)."""
+    key = tuple(pads[:B])
+    for k2, arr in _STARTS_RING:
+        if k2 == key:
+            return arr
+    arr = mx.array(list(key), dtype=mx.int32)
+    _STARTS_RING.append((key, arr))
+    if len(_STARTS_RING) > 8:
+        _STARTS_RING.pop(0)
+    return arr
 
 
 _MASK_PADS: list = []  # ring of (mask_obj, pads): producer -> consumer relay
@@ -146,6 +203,27 @@ def _claim(queries, keys, values, cache, scale, mask, sinks):
     if len(pads) < B or max(pads[:B]) > keys.shape[2] - qL:
         return None
     _CLAIMS[0] += 1
+    # Decode width: one batched kernel call, per-row starts. The explicit
+    # dtype/gqa gates mirror the op validator so an ineligible call walks
+    # the row loop without paying an exception; anything else the op
+    # rejects at build time lands there through the except.
+    if (
+        qL == 1
+        and _HAS_STARTS
+        and queries.dtype in (mx.float16, mx.bfloat16)
+        and keys.dtype == queries.dtype
+        and values.dtype == queries.dtype
+        and queries.shape[1] // keys.shape[1] <= 16
+        and env_bool("GMLX_G4_SDPA_STARTS", True)
+    ):
+        try:
+            starts = (_starts_for(pads, B) if max(pads[:B]) > 0 else None)
+            out = _kq.sdpa_decode_gqa(queries, keys, values, float(scale),
+                                      starts=starts)
+            _ONECALL[0] += 1
+            return out
+        except Exception:
+            pass  # op-build rejection -> per-row loop
     # qL==1 needs no mask after the tail slice; verify blocks (qL 2..8)
     # occupy the LAST qL key positions, which is exactly mx.fast's
     # end-aligned "causal" semantics on the sliced row.

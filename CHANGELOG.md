@@ -49,6 +49,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- gemma-4 batched decode runs the global (hd512) layers as one ragged
+  kernel call per layer instead of a per-row loop (needs mlx-kquant with
+  `sdpa_decode_gqa` starts; older wheels keep the loop).
+
 - gemma4 text MTP targets now build gmlx-owned mask/attention classes at
   construction (`GMLX_GEMMA_OWNED=0` reverts to the stock classes plus the
   patch regime; numerics identical either way).

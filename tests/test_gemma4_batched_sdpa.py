@@ -1,11 +1,17 @@
-"""gemma4 hd512 batched-decode row route: claim gates, left-pad tail-slice
+"""gemma4 hd512 batched-decode route: claim gates, left-pad tail-slice
 numerics vs the masked reference, pad memoization, the producer->consumer
 mask relay for kv-shared layers, dual-seam install (mlx_lm gemma4_text +
-mlx_vlm gemma4 language), and install hygiene.
+mlx_vlm gemma4 language), install hygiene, and the decode-width one-call
+starts path (single batched kq.sdpa_decode_gqa with per-row key starts).
 
-Numerics run in f32 through whatever mx.fast route the platform provides
-(stock on CI): the pin is that per-row tail slicing reproduces the bool
-left-pad mask semantics, independent of which kernel executes the row."""
+Row-loop numerics run in f32 through whatever mx.fast route the platform
+provides (stock on CI): the pin is that per-row tail slicing reproduces the
+bool left-pad mask semantics, independent of which kernel executes the row.
+f32 also keeps the one-call path out (its dtype gate mirrors the kernel),
+so those tests stay valid on the forced-CPU stream; the one-call tests are
+bf16 and GPU-only."""
+
+import os
 
 import mlx.core as mx
 import pytest
@@ -219,6 +225,134 @@ def test_non_claims_fall_through(monkeypatch):
     q, k, v = _rand(2, 4, 2, 48)  # quantized-style cache
     route(q, k, v, cache=_QCache([0, 0]), scale=0.5, mask=None)
     assert len(seen) == 5
+
+
+_gpu_only = pytest.mark.skipif(
+    bool(os.environ.get("KQUANT_FORCE_CPU")),
+    reason="kq.sdpa_decode_gqa is Metal-only; the one-call path needs it")
+
+
+def _rand16(B, hq, hkv, L, qL=1, d=512):
+    q = mx.random.normal((B, hq, qL, d)).astype(mx.bfloat16)
+    k = mx.random.normal((B, hkv, L, d)).astype(mx.bfloat16)
+    v = mx.random.normal((B, hkv, L, d)).astype(mx.bfloat16)
+    mx.eval(q, k, v)
+    return q, k, v
+
+
+@_gpu_only
+def test_onecall_starts_engagement_and_numerics(monkeypatch):
+    """Decode width bf16 with ragged pads: served by ONE batched kernel
+    call (onecall counter), numerics vs the masked-reference orig."""
+    if not gb._HAS_STARTS:
+        pytest.skip("resident mlx-kquant lacks sdpa_decode_gqa starts")
+    _install()
+    monkeypatch.setattr(attn_hd512, "_MIN_KV", 32)
+    mx.random.seed(13)
+    pads = [0, 17, 40]
+    q, k, v = _rand16(3, 8, 2, 64)
+    n0, o0 = gb.claims(), gb.onecall_claims()
+    got = g4v.scaled_dot_product_attention(
+        q, k, v, cache=_FakeBatchCache(pads), scale=0.125,
+        mask=_pad_mask(pads, 64))
+    assert gb.claims() == n0 + 1
+    assert gb.onecall_claims() == o0 + 1
+    # independent f32 oracle (kernel-vs-kernel bf16 would double the error
+    # budget); rel-norm bound is the kq-suite bf16 bar
+    g = q.shape[1] // k.shape[1]
+    kf = mx.repeat(k.astype(mx.float32), g, axis=1)
+    vf = mx.repeat(v.astype(mx.float32), g, axis=1)
+    s = (q.astype(mx.float32) * 0.125) @ kf.swapaxes(-1, -2)
+    s = mx.where(_pad_mask(pads, 64), s, -float("inf"))
+    rf = mx.softmax(s, axis=-1, precise=True) @ vf
+    gf = got.astype(mx.float32)
+    rel = float(mx.linalg.norm(gf - rf) / (mx.linalg.norm(rf) + 1e-9))
+    assert rel < 5e-3, f"one-call vs f32 oracle rel={rel}"
+
+
+@_gpu_only
+def test_onecall_pad_zero_and_kill_switch(monkeypatch):
+    if not gb._HAS_STARTS:
+        pytest.skip("resident mlx-kquant lacks sdpa_decode_gqa starts")
+    _install()
+    monkeypatch.setattr(attn_hd512, "_MIN_KV", 32)
+    mx.random.seed(17)
+    q, k, v = _rand16(2, 8, 2, 64)
+    cache = _FakeBatchCache([0, 0])
+    o0 = gb.onecall_claims()
+    a = g4v.scaled_dot_product_attention(q, k, v, cache=cache, scale=0.125,
+                                         mask=None)
+    assert gb.onecall_claims() == o0 + 1  # pad-0: starts omitted, still one
+    monkeypatch.setenv("GMLX_G4_SDPA_STARTS", "0")
+    b = g4v.scaled_dot_product_attention(q, k, v, cache=cache, scale=0.125,
+                                         mask=None)
+    assert gb.onecall_claims() == o0 + 1  # kill switch -> row loop
+    err = mx.abs(a.astype(mx.float32) - b.astype(mx.float32)).max().item()
+    assert err < 2e-2, f"one-call vs row loop err={err}"
+
+
+@_gpu_only
+def test_onecall_verify_width_stays_rowloop(monkeypatch):
+    """qL>1 blocks stay on the per-row loop (fa_verify territory)."""
+    if not gb._HAS_STARTS:
+        pytest.skip("resident mlx-kquant lacks sdpa_decode_gqa starts")
+    _install()
+    monkeypatch.setattr(attn_hd512, "_MIN_KV", 32)
+    mx.random.seed(19)
+    pads = [5, 0]
+    q, k, v = _rand16(2, 8, 2, 64, qL=4)
+    o0 = gb.onecall_claims()
+    n0 = gb.claims()
+    g4v.scaled_dot_product_attention(
+        q, k, v, cache=_FakeBatchCache(pads), scale=0.125,
+        mask=_verify_mask(pads, 64, 4))
+    assert gb.claims() == n0 + 1
+    assert gb.onecall_claims() == o0
+
+
+def test_onecall_dtype_gate_keeps_f32_on_rowloop(monkeypatch):
+    """f32 calls never enter the one-call path (this is also what keeps the
+    forced-CPU stream off the Metal-only kernel)."""
+    _install()
+    monkeypatch.setattr(attn_hd512, "_MIN_KV", 32)
+    mx.random.seed(23)
+    pads = [2, 0]
+    q, k, v = _rand(2, 8, 2, 64)
+    o0 = gb.onecall_claims()
+    n0 = gb.claims()
+    g4v.scaled_dot_product_attention(
+        q, k, v, cache=_FakeBatchCache(pads), scale=0.125,
+        mask=_pad_mask(pads, 64))
+    assert gb.claims() == n0 + 1
+    assert gb.onecall_claims() == o0
+
+
+def test_onecall_absent_kernel_falls_back(monkeypatch):
+    _install()
+    monkeypatch.setattr(attn_hd512, "_MIN_KV", 32)
+    monkeypatch.setattr(gb, "_HAS_STARTS", False)
+    mx.random.seed(29)
+    pads = [1, 0]
+    q, k, v = _rand(2, 8, 2, 64)
+    o0 = gb.onecall_claims()
+    n0 = gb.claims()
+    g4v.scaled_dot_product_attention(
+        q, k, v, cache=_FakeBatchCache(pads), scale=0.125,
+        mask=_pad_mask(pads, 64))
+    assert gb.claims() == n0 + 1
+    assert gb.onecall_claims() == o0
+
+
+def test_starts_ring_memoizes_by_value():
+    gb._STARTS_RING.clear()
+    a = gb._starts_for([3, 0, 7], 3)
+    b = gb._starts_for([3, 0, 7], 3)
+    assert a is b
+    c = gb._starts_for([3, 0, 8], 3)
+    assert c is not a
+    for i in range(12):  # bounded ring
+        gb._starts_for([i, i], 2)
+    assert len(gb._STARTS_RING) <= 8
 
 
 def test_install_idempotent_and_killable(monkeypatch):
