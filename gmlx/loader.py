@@ -695,10 +695,21 @@ def _mtp_target_classes(model_type: str):
         lang = importlib.import_module("mlx_vlm.models.gemma4.language")
         cfg = importlib.import_module("mlx_vlm.models.gemma4.config")
 
-        def build(config):
-            return lang.LanguageModel(cfg.TextConfig.from_dict(config))
+        # Owned mask builder + attention by default: the nosync offset
+        # semantics and the hd512 row-route dispatch run from gmlx
+        # subclasses; layers stay stock so the fused-MoE swap keeps
+        # engaging. GMLX_GEMMA_OWNED=0 reverts to the stock class (the
+        # patch regime still installs and covers it).
+        language_model_cls = lang.LanguageModel
+        if env_bool("GMLX_GEMMA_OWNED", True):
+            from . import gemma4_owned
 
-        return lang.LanguageModel, build
+            language_model_cls = gemma4_owned.OwnedGemma4LanguageModel
+
+        def build(config):
+            return language_model_cls(cfg.TextConfig.from_dict(config))
+
+        return language_model_cls, build
     if model_type == "deepseek_v4":
         # Vendored mlx-lm-class target (no mlx-vlm counterpart): the SpecLM
         # subclass carries the speculative_* hooks + rotating-undo arming.

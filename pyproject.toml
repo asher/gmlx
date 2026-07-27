@@ -165,3 +165,4 @@ extend-exclude = ["gmlx/_vendor"]
 # Verbatim upstream copies (source-equality-tested); a noqa comment would
 # break the byte fidelity the equality tests certify.
 "gmlx/qwen35_verify_linear.py" = ["E741"]
+"gmlx/gemma4_owned.py" = ["E741"]

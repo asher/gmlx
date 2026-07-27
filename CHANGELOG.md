@@ -47,6 +47,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A finished request's retirement-key memo no longer pins the response
   generator (and its model weights) past a pool unload.
 
+### Changed
+
+- gemma4 text MTP targets now build gmlx-owned mask/attention classes at
+  construction (`GMLX_GEMMA_OWNED=0` reverts to the stock classes plus the
+  patch regime; numerics identical either way).
+
 ## [0.1.4] - 2026-07-27
 
 ### Added
