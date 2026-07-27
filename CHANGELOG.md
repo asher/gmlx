@@ -60,44 +60,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- qwen3.5/3.6 MTP targets run an owned model-level forward: the
-  model-level control flow (mask resolution, decode left-padding walk,
-  batched left-padded prefill, hidden capture) now runs from a gmlx
-  subclass instead of the stock mlx-vlm class, making the empty-sequence
-  guard structural. The model-level helper bodies (both mask builders,
-  the decode pad walk, row-cache extract, pad-time, and the
-  padding/lengths memos they use) are owned copies in gmlx,
-  parity-tested against the pinned mlx-vlm release on every run, which
-  replaces five upstream seam pins. The GatedDeltaNet layers are owned
-  the same way: an owned subclass carries the fused decode and fused
-  verify dispatch natively (previously a class-level patch) plus an
-  owned unfused chain for the routes the kernels do not cover, and the
-  layer advance memos are owned copies. The full-attention layers are
-  owned the same way: the owned subclass composes the ragged
-  unified-plan decode, the batched-verify masked SDPA, and the folded
-  verify routes natively (previously three module-global patches at
-  three install times), with the ragged kernel sources and plan tables
-  as equality-tested in-tree copies. The assembly is owned too: the
-  mirrored constructors build the owned decoder layers, MLP and MoE
-  sparse block directly (no post-load rebind), the verify-width
-  projection family (dense GEMV, quantized qmv/argmax, fused decode
-  concat) is an equality-tested in-tree copy with the bf16 GEMV-ext
-  lever folded into the default dispatch, and the MRoPE apply chain
-  (fused Metal kernel, cos/sin frequency chain, interleaved apply) is
-  an equality-tested in-tree copy called on the stock rotary
-  submodule. Fused kernels themselves are unchanged; greedy tokens
-  are identical against the patched stock path on every route.
-  `GMLX_QWEN_OWNED=0` now builds genuinely stock classes: the fallback
-  keeps only the tiled-V weight-order rebind, loses every performance
-  patch, and reinstates the two stock defects the owned path fixes
-  (left-padded single-row batches attend their pads; empty-sequence
-  rows in batched serve crash). Ownership applies to text MTP loads,
-  where the owned classes are selected at construction; a multimodal
-  MTP target (LLM GGUF + mmproj) is built stock by mlx-vlm
-  construction, and its install site gates on the built tree and keeps
-  the full patched regime - tiled-V rebind, fused gated-delta verify,
-  batched-verify SDPA, folded verify attention, unified ragged-plan
-  decode, and the bf16 verify-linear lever.
+- qwen3.5/3.6 text MTP targets run owned gmlx forwards instead of
+  runtime patches on the stock mlx-vlm classes, parity-tested against
+  the pinned release (greedy tokens identical on every route).
+  Multimodal MTP targets are still built stock and keep the patched
+  regime; `GMLX_QWEN_OWNED=0` reverts text loads to genuinely stock
+  classes for debugging.
 - Install docs lead with `uv tool install "gmlx[all]"` / pipx: one command,
   on PATH in every terminal, every optional feature on, no follow-up
   installs. Smaller extra sets and the plain-venv route stay documented.
