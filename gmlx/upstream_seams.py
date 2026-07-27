@@ -60,63 +60,57 @@ SEAMS: tuple[Seam, ...] = (
          critical=True),
     Seam("mlx_vlm.generate.ar", "BatchGenerator.insert",
          "batch_sched arrival-merge (_unprocessed_sequences append/rebind)"),
+    # --- qwen3_5 owned forwards (qwen35_owned/gdn/attn/layers/rope/
+    #     verify_linear) ---
+    # The owned qwen3.5 forward surface carries no pins: its copies and
+    # mirrors are certified by source-equality, construction-pair, and
+    # identity tests. But ownership lands at construction only on the
+    # text MTP load (loader._mtp_target_classes); load_vlm_mtp_model's
+    # target is built stock by mlx_vlm.utils, so the multimodal path
+    # still installs the patched regime and its symbols stay pinned
+    # below.
+    Seam("mlx_vlm.models.qwen3_5.gated_delta", "gated_delta_ops",
+         "gdn_patches._patch_mlxvlm_gated_delta_tiled_v (stock-built "
+         "trees only: vlm MTP targets + the GMLX_QWEN_OWNED=0 text "
+         "fallback; owned GDN routes through mlx-lm gated_delta)",
+         critical=True),
+    Seam("mlx_vlm.models.qwen3_5.gated_delta", "gated_delta_kernel",
+         "gdn_patches._patch_mlxvlm_gated_delta_tiled_v (stock-built "
+         "trees only)", critical=True),
+    Seam("mlx_vlm.models.qwen3_5.gated_delta", "_gated_delta_with_states_ops",
+         "gdn_patches._patch_mlxvlm_gated_delta_tiled_v (stock-built "
+         "trees only)", critical=True),
+    Seam("mlx_vlm.models.qwen3_5.gated_delta", "_gated_delta_state_ops",
+         "gdn_patches._patch_mlxvlm_gated_delta_tiled_v (stock-built "
+         "trees only)", critical=True),
+    # --- qwen3_5 stock-path verify patches (vlm MTP targets) ---
     Seam("mlx_vlm.models.qwen3_5.language",
          "_qwen3_5_ragged_decode_attention",
-         "ragged_decode.install_unified_ragged_plan (dispatch body carried)"),
-    Seam("mlx_vlm.models.qwen3_5.language", "_qwen3_5_sdpa_vector_plan",
-         "ragged_decode (plan-bucket semantics)"),
-    Seam("mlx_vlm.models.qwen3_5.language",
-         "_qwen3_5_ragged_sdpa_one_pass_kernel",
-         "ragged_decode (kernel builder reuse)"),
-    Seam("mlx_vlm.models.qwen3_5.language",
-         "_qwen3_5_ragged_sdpa_two_pass_1_kernel",
-         "ragged_decode (kernel builder reuse; grid contract)"),
-    Seam("mlx_vlm.models.qwen3_5.language",
-         "_qwen3_5_ragged_sdpa_two_pass_2_kernel",
-         "ragged_decode (kernel builder reuse)"),
-    # --- qwen3_5 MTP-target verify seams (loader + qwen35_verify_fold) ---
+         "ragged_decode.install_unified_ragged_plan (vlm MTP stock path; "
+         "the owned attention calls the in-tree dispatch directly)"),
     Seam("mlx_vlm.models.qwen3_5.language",
          "_target_verify_left_padded_attention",
-         "gdn_patches._patch_batched_verify_sdpa / qwen35_verify_fold"),
+         "gdn_patches._patch_batched_verify_sdpa / qwen35_verify_fold "
+         "(vlm MTP stock path; the owned attention carries the composed "
+         "verify routes natively)"),
     Seam("mlx_vlm.models.qwen3_5.language", "_target_verify_linear",
-         "gdn_patches._patch_bf16_verify_linear"),
+         "gdn_patches._patch_bf16_verify_linear (vlm MTP stock path; the "
+         "owned verify-linear family folds the lever into its dispatch)"),
     Seam("mlx_vlm.models.qwen3_5.language", "scaled_dot_product_attention",
-         "qwen35_verify_fold (B>=2 left-padded fold)"),
-    Seam("mlx_vlm.models.qwen3_5.language", "Qwen3_5Model.__call__",
-         "gdn_patches._patch_qwen35_empty_sequence_guard (stock fallback "
-         "GMLX_QWEN_OWNED=0 only; the default owned subclass overrides "
-         "__call__ and absorbs the S=0 guard structurally)", critical=True),
-    # --- qwen3_5 owned model-level forward (qwen35_owned) ---
-    # The model-level helpers (mask builders, decode pad walk, row
-    # extract, pad-time, padding/lengths memos) are owned copies in
-    # qwen35_owned, so they are no longer pinned here; parity
-    # against the upstream originals is asserted by tests every run,
-    # which also pins the shared memo-attr protocol the stock layers
-    # consume until the layer classes are owned.
-    Seam("mlx_vlm.models.qwen3_5.language", "LanguageModel.__init__",
-         "qwen35_owned.OwnedQwen3_5LanguageModel (constructor body mirrored; "
-         "an upstream field addition must be re-mirrored)", critical=True),
-    Seam("mlx_vlm.models.qwen3_5_moe.language", "LanguageModel.__init__",
-         "qwen35_owned._moe_classes (constructor body mirrored)",
-         critical=True),
+         "qwen35_verify_fold (B>=2 left-padded fold; vlm MTP stock path "
+         "- the owned attention folds at its own dispatch and calls the "
+         "base module symbol)"),
     Seam("mlx_vlm.models.qwen3_5.language", "Qwen3_5GatedDeltaNet.__call__",
-         "gdn_patches._patch_gated_delta_fused_verify"),
-    Seam("mlx_vlm.models.qwen3_5.language",
-         "_qwen3_5_advance_left_padding_info",
-         "gdn_patches fused GDN decode/verify (memo advance after "
-         "cache.advance; also the interop partner of the owned memo "
-         "builders in qwen35_owned)", critical=True),
-    Seam("mlx_vlm.models.qwen3_5.language", "_qwen3_5_advance_lengths_info",
-         "gdn_patches fused GDN decode/verify (memo advance after "
-         "cache.advance)", critical=True),
-    Seam("mlx_vlm.models.qwen3_5.gated_delta", "gated_delta_ops",
-         "gdn_patches._patch_mlxvlm_gated_delta_tiled_v", critical=True),
-    Seam("mlx_vlm.models.qwen3_5.gated_delta", "gated_delta_kernel",
-         "gdn_patches._patch_mlxvlm_gated_delta_tiled_v", critical=True),
-    Seam("mlx_vlm.models.qwen3_5.gated_delta", "_gated_delta_with_states_ops",
-         "gdn_patches._patch_mlxvlm_gated_delta_tiled_v", critical=True),
-    Seam("mlx_vlm.models.qwen3_5.gated_delta", "_gated_delta_state_ops",
-         "gdn_patches._patch_mlxvlm_gated_delta_tiled_v", critical=True),
+         "gdn_patches._patch_gated_delta_fused_verify (vlm MTP stock "
+         "path; the owned subclass carries the fused dispatch natively)"),
+    # Mirror pin: _owned_model_call deliberately diverges from this
+    # body (B=1 shortcut removed, padded prefill hoisted, S=0 guard),
+    # so it cannot be substitution-normalized; the fingerprint forces a
+    # re-mirror review on upstream change.
+    Seam("mlx_vlm.models.qwen3_5.language", "Qwen3_5Model.__call__",
+         "qwen35_owned._owned_model_call (forward body mirrored with "
+         "deliberate divergences; re-mirror on upstream change)",
+         critical=True),
     # --- gemma4 host-sync-free masks/offsets (gemma4_sync carries bodies) ---
     Seam("mlx_vlm.models.gemma4.language", "Gemma4TextModel._make_masks",
          "gemma4_sync.install_gemma4_nosync (body carried, offset probe)"),

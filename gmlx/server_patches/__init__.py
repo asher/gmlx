@@ -181,11 +181,6 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     spec_engine.install_spec_kv_quant()
     from ..batch_sched import install_decode_priority_sched
     install_decode_priority_sched()
-    from ..ragged_decode import install_unified_ragged_plan
-    try:
-        install_unified_ragged_plan()
-    except ImportError:
-        pass  # non-qwen3_5 install without the module present stays fine
     from ..apc_pooling import (
         install_pooled_prompt_kv_quant,
         install_pooling_apc_support,

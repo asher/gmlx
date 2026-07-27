@@ -854,6 +854,9 @@ def install_continuous_batch_admission() -> None:
                     "prompt_tokens": other.prompt_tokens,
                     "first_tokens": other.first_tokens,
                     "first_tokens_list": first_list,
+                    # The running generator froze max(max_tokens) at
+                    # start; injected rows carry their own budgets.
+                    "max_tokens": list(other.max_tokens),
                 })
 
             pending.clear()

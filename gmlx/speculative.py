@@ -96,6 +96,15 @@ def _round_log_session(kv_offset, max_tokens):
     st["idx"] = 0
 
 
+def _round_log_note(text):
+    # Mid-session comment row; parsers skip '#' lines.
+    st = _round_log_open()
+    if st is None:
+        return
+    st["fh"].write(f"# {text}\n")
+    st["fh"].flush()
+
+
 def _round_log(compute_ms, emit_ms, book_ms, accepted, bs,
                draft_ms=None, verify_ms=None, walk_ms=None,
                gap_ms=None):
@@ -1530,6 +1539,11 @@ def _owned_decode_rounds_batch(
     B_orig = len(b)
     row_ids = list(range(B_orig)) if row_ids is None else list(row_ids)
 
+    # Per-row budgets: ar.py freezes max_tokens = max() over the rows at
+    # generator start; rows injected mid-flight carry their own in the
+    # injection entry.
+    max_tok = [max_tokens] * B_orig
+
     # Per-row APC retirement state. Rows born in a batched prefill carry no
     # retire context (APC is gated to single-request prefill); rows injected
     # from a B=1 prefill carry theirs on the injected cache's first entry.
@@ -1653,6 +1667,7 @@ def _owned_decode_rounds_batch(
         nonlocal hidden, B_orig, _gated_pending
         gen_inj = getattr(model, "_generator_injections", None)
         if gen_inj:
+            n_before = B_orig
             # The batch is about to widen; anything already dispatched was
             # shaped for the old width, so re-prime rather than slice.
             _gated_pending = None
@@ -1700,6 +1715,9 @@ def _owned_decode_rounds_batch(
                 _pop_drafter_warm(inj["prompt_cache"])
 
                 inj_offset = _mtp_cache_offset_max(inj["prompt_cache"])
+                # Entries without per-row budgets (older producers, test
+                # fakes) inherit the host scalar, the pre-existing behavior.
+                inj_max = inj.get("max_tokens") or [max_tokens] * B_new
                 for row in range(B_new):
                     b.append(int(inj["first_tokens_list"][row]))
                     positions.append(inj_offset)
@@ -1709,6 +1727,7 @@ def _owned_decode_rounds_batch(
                     retire_ctxs.append(inj_ctx if row == 0 else None)
                     gen_rows.append([int(inj["first_tokens_list"][row])])
                     retired.append(False)
+                    max_tok.append(int(inj_max[row]))
                     B_orig += 1
 
                 if _needs_shared_kv and not gated:
@@ -1737,6 +1756,10 @@ def _owned_decode_rounds_batch(
                     (B_orig - _rd.shape[0],) + tuple(_rd.shape[1:]),
                     dtype=_rd.dtype)
                 lm._rope_deltas = mx.concatenate([_rd, _pad], axis=0)
+            # The session header logged the budget at generator start;
+            # adopted rows carry their own, so note the new effective max.
+            _round_log_note(
+                f"inject rows={B_orig - n_before} maxtok={max(max_tok)}")
             gen_inj.clear()
         # end injection
 
@@ -1790,7 +1813,7 @@ def _owned_decode_rounds_batch(
             _t1 = time.perf_counter()
         else:
             remaining = [
-                max(1, max_tokens - emitted[active_idx[j]] + 1)
+                max(1, max_tok[active_idx[j]] - emitted[active_idx[j]] + 1)
                 for j in range(n_active)]
             bs = _mtp_next_block_size(
                 drafter, block_total, configured_block_total, min(remaining))
@@ -1823,7 +1846,8 @@ def _owned_decode_rounds_batch(
             _tv = time.perf_counter()
 
             budgets = [
-                max_tokens - emitted[active_idx[j]] for j in range(n_active)]
+                max_tok[active_idx[j]] - emitted[active_idx[j]]
+                for j in range(n_active)]
             accepted_list, new_tokens_list = _coupled_walk_batch(
                 lm, verify, draft_tokens, _walk_sampler, budgets)
             _t1 = time.perf_counter()
@@ -1861,7 +1885,7 @@ def _owned_decode_rounds_batch(
                     tokens_out[orig] = tok
                     gen_rows[orig].append(tok)
                     emitted[orig] += 1
-                    if emitted[orig] >= max_tokens:
+                    if emitted[orig] >= max_tok[orig]:
                         finished[orig] = True
                     if eos_token_ids is not None and tok in eos_token_ids:
                         finished[orig] = True

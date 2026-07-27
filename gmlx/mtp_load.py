@@ -20,10 +20,7 @@ from . import loadlog
 from .envflags import env_int
 from .gdn_patches import (
     _needs_tiled_v_patch,
-    _patch_batched_verify_sdpa,
-    _patch_bf16_verify_linear,
     _patch_dense_head_verify,
-    _patch_gated_delta_fused_verify,
     _patch_gated_delta_tiled_v,
     _patch_mlxvlm_gated_delta_tiled_v,
 )
@@ -45,6 +42,8 @@ from .native_fp import _strip_weight
 from .populate import maybe_populate_for_load
 from .populate import wait_for as wait_for_populate
 from .preflight import preflight
+from .qwen35_gdn import prepare_gdn
+from .qwen35_owned import is_owned_language_model
 from .transforms import coalesce_split_experts
 
 
@@ -633,9 +632,12 @@ def load_mtp_model(
 
     # 2. tiled-V fixup for asymmetric K/V heads - both mlx-lm (transitive) and
     #    mlx-vlm's own gated_delta (the MTP target / state-capture paths).
+    #    Owned trees never route through the vlm module, so the vlm rebind
+    #    is stock-only. Gate on the built tree, not the config.
     if _needs_tiled_v_patch(config):
         _patch_gated_delta_tiled_v()
-        _patch_mlxvlm_gated_delta_tiled_v()
+        if not is_owned_language_model(model):
+            _patch_mlxvlm_gated_delta_tiled_v()
 
     # deepseek_v4 needs sanitize=True (the vendored Model.sanitize does the
     # wo_a 2D->3D MultiLinear reshape, same as the plain-text load path) and
@@ -671,10 +673,12 @@ def load_mtp_model(
         "qwen3_5",
         "qwen3_5_text",
     ):
-        _patch_gated_delta_fused_verify(model)
+        # Owned trees carry the fused routes natively; prepare_gdn arms
+        # them post-load. The GMLX_QWEN_OWNED=0 fallback stays bare stock
+        # plus the tiled-V rebind above.
+        if is_owned_language_model(model):
+            prepare_gdn(model)
         _patch_dense_head_verify(model)
-        _patch_batched_verify_sdpa()
-        _patch_bf16_verify_linear()
     elif config_dict.get("model_type") in ("gemma4", "gemma4_text"):
         # gemma4 MTP target (assistant drafter): none of the qwen verify
         # levers apply here, so none are installed.
@@ -683,11 +687,9 @@ def load_mtp_model(
         #   no lm_head attr), and the q6_k head already runs kq's fast
         #   verify path (measured 445-490 GB/s at verify M, ~0.4 ms/round
         #   of headroom at most).
-        # - _patch_batched_verify_sdpa / _patch_bf16_verify_linear rebind
-        #   qwen3_5-module seams (_target_verify_*) that gemma4's language
-        #   module does not route through; installing them here implied
-        #   coverage that never existed. gemma4's verify-attention seam is
-        #   the open front (verify is 89.7% of the round on the 31B).
+        # - the qwen verify levers live in qwen3_5 modules gemma4 never
+        #   routes through; its verify-attention seam is the open front
+        #   (verify is 89.7% of the round on the 31B).
         pass
 
     # 3. drafter - native-head (extracted from this GGUF's MTP block) or
@@ -734,6 +736,33 @@ def load_mtp_model(
     wait_for_populate(pf.shards, log=_log)
 
     return model, drafter, config, tokenizer
+
+
+def _install_stock_qwen35_verify_patches(model) -> None:
+    """Full verify patch set for a stock-built qwen3.5/3.6 MTP target.
+
+    ``load_vlm_mtp_model``'s target comes out of mlx_vlm.utils
+    construction, which never consults the owned-class selector, so it
+    gets the patched regime the text path ran before the owned forwards
+    landed. The ``GMLX_QWEN_OWNED=0`` text fallback does not take this
+    path: bare stock plus tiled-V is its debugging contract.
+    """
+    from .gdn_patches import (
+        _patch_batched_verify_sdpa,
+        _patch_bf16_verify_linear,
+        _patch_gated_delta_fused_verify,
+    )
+    from .qwen35_verify_fold import install_qwen35_verify_fold
+    from .ragged_decode import install_unified_ragged_plan
+
+    _patch_gated_delta_fused_verify(model)
+    _patch_batched_verify_sdpa()
+    install_qwen35_verify_fold()
+    install_unified_ragged_plan()
+    _patch_bf16_verify_linear()
+    loadlog.verbose_print(
+        "[build] qwen3.5 stock verify patch set installed (vlm mtp target)"
+    )
 
 
 @loadlog.seeds
@@ -838,17 +867,22 @@ def load_vlm_mtp_model(
         n_head_kv = first_nonzero_int(meta, f"{arch_r}.attention.head_count_kv")
         if _needs_tiled_v_patch(config_dict):
             _patch_gated_delta_tiled_v()  # idempotent; load_vlm_model already ran it
-            _patch_mlxvlm_gated_delta_tiled_v()
+            if not is_owned_language_model(model):
+                _patch_mlxvlm_gated_delta_tiled_v()
         if config_dict.get("model_type") in (
             "qwen3_5_moe",
             "qwen3_5_moe_text",
             "qwen3_5",
             "qwen3_5_text",
         ):
-            _patch_gated_delta_fused_verify(model)
+            # Gate on the built tree: mlx_vlm.utils construction never
+            # consults the owned-class selector, so this is stock today.
+            # The owned branch covers ownership reaching vlm builds.
+            if is_owned_language_model(model):
+                prepare_gdn(model)
+            else:
+                _install_stock_qwen35_verify_patches(model)
             _patch_dense_head_verify(model)
-            _patch_batched_verify_sdpa()
-            _patch_bf16_verify_linear()
         drafter = _load_mtp_drafter(
             arrays,
             kquant_meta,

@@ -2,8 +2,9 @@
 
 Replaces mlx-vlm's ``Qwen3_5Model.__call__`` control flow with an owned
 subclass (no monkeypatch): the code that runs at the model level is the
-code in this file. Layers stay the stock mlx-vlm classes, so the
-layer-level fused kernels and verify seams keep engaging unchanged.
+code in this file. The mirrored constructors build the owned layer
+classes directly (``qwen35_layers``), so ownership lands at
+construction and no post-load rebind walk is needed.
 
 Differences from the stock forward, all deliberate:
 
@@ -46,6 +47,8 @@ from mlx_vlm.models.cache import ArraysCache, KVCache
 from mlx_vlm.models.qwen3_5 import language as _L
 from mlx_vlm.models.qwen3_5.config import ModelConfig as _Q35ModelConfig
 from mlx_vlm.models.qwen3_5.config import TextConfig as _Q35TextConfig
+
+from .qwen35_rope import rope_cos_sin
 
 _OWNED_CALLS = 0
 
@@ -98,6 +101,35 @@ def _qwen3_5_lengths_info(cache):
         cached = (lengths, min(values) if values else 0)
         cache._qwen3_5_lengths_info = cached
     return cached[1]
+
+
+def _qwen3_5_set_left_padding_info(cache, pads):
+    left_padding = getattr(cache, "left_padding", None)
+    if not isinstance(left_padding, mx.array):
+        return
+    pads = tuple(int(p) for p in pads)
+    cache._qwen3_5_left_padding_info = (
+        left_padding,
+        pads,
+        max(pads) if pads else 0,
+    )
+
+
+def _qwen3_5_advance_left_padding_info(cache, steps: int):
+    cached = getattr(cache, "_qwen3_5_left_padding_info", None)
+    if cached is None:
+        return
+    _left_padding, pads, _max_pad = cached
+    _qwen3_5_set_left_padding_info(cache, (p - steps for p in pads))
+
+
+def _qwen3_5_advance_lengths_info(cache, steps: int):
+    lengths = getattr(cache, "lengths", None)
+    cached = getattr(cache, "_qwen3_5_lengths_info", None)
+    if cached is None or not isinstance(lengths, mx.array):
+        return
+    _lengths, min_value = cached
+    cache._qwen3_5_lengths_info = (lengths, min_value - steps)
 
 
 def _create_qwen3_5_ssm_mask(h: mx.array, cache):
@@ -320,8 +352,8 @@ def _owned_model_call(
         for layer in self.layers:
             if not layer.is_linear:
                 if not layer.self_attn.rotary_emb.fused_apply:
-                    position_embeddings = layer.self_attn.rotary_emb(
-                        h, position_ids
+                    position_embeddings = rope_cos_sin(
+                        layer.self_attn.rotary_emb, h, position_ids
                     )
                 break
 
@@ -344,7 +376,25 @@ def _owned_model_call(
 
 
 class OwnedQwen3_5Model(_L.Qwen3_5Model):
+    """__init__ mirrors the stock body building the owned decoder
+    layers (lazy import: the layer module imports the owned attention,
+    which imports this module)."""
+
     __call__ = _owned_model_call
+
+    def __init__(self, args: _Q35TextConfig):
+        from .qwen35_layers import OwnedQwen3_5DecoderLayer
+
+        nn.Module.__init__(self)
+        self.args = args
+        self.embed_tokens = nn.Embedding(args.vocab_size, args.hidden_size)
+        self.layers = [
+            OwnedQwen3_5DecoderLayer(args=args, layer_idx=i)
+            for i in range(args.num_hidden_layers)
+        ]
+        self.norm = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
+        self.ssm_idx = 0
+        self.fa_idx = args.full_attention_interval - 1
 
 
 class OwnedQwen3_5LanguageModel(_L.LanguageModel):
@@ -372,8 +422,24 @@ class OwnedQwen3_5LanguageModel(_L.LanguageModel):
 def _moe_classes():
     from mlx_vlm.models.qwen3_5_moe import language as _ML
 
+    from .qwen35_layers import moe_layer_classes
+
+    _, OwnedQwen3_5MoeDecoderLayer = moe_layer_classes()
+
     class OwnedQwen3_5MoeModel(_ML.Qwen3_5MoeModel):
         __call__ = _owned_model_call
+
+        def __init__(self, args):
+            nn.Module.__init__(self)
+            self.args = args
+            self.embed_tokens = nn.Embedding(args.vocab_size, args.hidden_size)
+            self.layers = [
+                OwnedQwen3_5MoeDecoderLayer(args=args, layer_idx=i)
+                for i in range(args.num_hidden_layers)
+            ]
+            self.norm = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
+            self.ssm_idx = 0
+            self.fa_idx = args.full_attention_interval - 1
 
     class OwnedQwen3_5MoeLanguageModel(_ML.LanguageModel):
         def __init__(self, args, config=None):
@@ -394,6 +460,16 @@ def _moe_classes():
 
 
 _MOE_CACHE = None
+
+
+def is_owned_language_model(model) -> bool:
+    """Whether ``model`` (or its language_model) is an owned qwen3.5
+    class. Gates the stock-fallback patch installs: owned forwards never
+    read the patched module globals."""
+    lm = getattr(model, "language_model", model)
+    if isinstance(lm, OwnedQwen3_5LanguageModel):
+        return True
+    return _MOE_CACHE is not None and isinstance(lm, _MOE_CACHE[1])
 
 
 def language_model_class(model_type: str):

@@ -522,6 +522,56 @@ def test_no_flip_back_when_width_drops():
     assert len(d.reset_calls) == 1
 
 
+def test_injected_row_budget_outlives_host_scalar():
+    """The caller's max_tokens is max() over the rows present at generator
+    start; an injected row carries its own budget in the entry and must
+    stream to it, not truncate at the host batch's frozen scalar."""
+    d = _StrictDrafter(cap=2)
+    model = SimpleNamespace()
+    lm = _EchoLM()
+    _queue_injection(model, lm)
+    model._generator_injections[0]["max_tokens"] = [6]
+    out, _, _ = _drive(d, B=3, max_tokens=2, model=model, lm=lm,
+                       prompt_cache=[_FakeCache(width=3)])
+    assert d.forward_calls == []
+    # round 1: hosts (b=[1,2,3] -> 2,3,4) finish at the scalar; the injected
+    # row (first token 7 -> 8) keeps its own stream for four more rounds
+    assert out[0][0] == [2, 3, 4, 8]
+    assert [toks[3] for toks, _ in out[1:]] == [9, 10, 11, 12]
+    # hosts stay finished (None slots) while the injected row streams
+    assert all(toks[:3] == [None] * 3 for toks, _ in out[1:])
+
+
+def test_round_log_notes_injected_budget(monkeypatch, tmp_path):
+    """The session header logs the budget at generator start; a drain that
+    adopts rows with their own budgets must leave a corrected trace."""
+    log = tmp_path / "rounds.tsv"
+    monkeypatch.setenv("GMLX_ROUND_LOG", str(log))
+    d = _StrictDrafter(cap=2)
+    model = SimpleNamespace()
+    lm = _FakeLM()
+    _queue_injection(model, lm)
+    model._generator_injections[0]["max_tokens"] = [6]
+    _drive(d, B=3, max_tokens=2, model=model, lm=lm,
+           prompt_cache=[_FakeCache(width=3)])
+    text = log.read_text()
+    assert "# session kv=8 maxtok=2" in text
+    assert "# inject rows=1 maxtok=6" in text
+
+
+def test_injection_without_budgets_inherits_host_scalar():
+    """An entry without per-row budgets (older producer, test fake) keeps the
+    pre-existing behavior: the injected row stops at the host scalar."""
+    d = _StrictDrafter(cap=2)
+    model = SimpleNamespace()
+    lm = _FakeLM()
+    _queue_injection(model, lm)
+    out, _, _ = _drive(d, B=3, max_tokens=3, model=model, lm=lm,
+                       prompt_cache=[_FakeCache(width=3)])
+    assert len(out) == 2
+    assert all(len(toks) == 4 for toks, _ in out)
+
+
 def test_env_lowered_mid_flight_trips(monkeypatch):
     """Per-round env read: a live server can be re-gated for an A/B."""
     d = _StrictDrafter(cap=0)

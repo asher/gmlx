@@ -162,3 +162,6 @@ extend-exclude = ["gmlx/_vendor"]
 [tool.ruff.lint.per-file-ignores]
 # Lambda assignment is idiomatic for the tests' one-line monkeypatch stubs.
 "tests/*" = ["E731"]
+# Verbatim upstream copies (source-equality-tested); a noqa comment would
+# break the byte fidelity the equality tests certify.
+"gmlx/qwen35_verify_linear.py" = ["E741"]

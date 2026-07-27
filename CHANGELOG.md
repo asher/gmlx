@@ -26,6 +26,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A request admitted into a running speculative decode batch was truncated
+  at its batchmates' `max_tokens` instead of its own.
 - left-padded single-row batches attended their pad tokens as content:
   the stock B=1 batch-cache shortcut extracts a row cache that drops
   `left_padding` while recursing with the unsliced input. The owned
@@ -58,19 +60,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- qwen3.5/3.6 MTP targets run an owned model-level forward: the
-  model-level control flow (mask resolution, decode left-padding walk,
-  batched left-padded prefill, hidden capture) now runs from a gmlx
-  subclass instead of the stock mlx-vlm class, making the empty-sequence
-  guard structural. The model-level helper bodies (both mask builders,
-  the decode pad walk, row-cache extract, pad-time, and the
-  padding/lengths memos they use) are owned copies in gmlx,
-  parity-tested against the pinned mlx-vlm release on every run, which
-  replaces five upstream seam pins. Layer classes and fused kernels are
-  unchanged;
-  greedy tokens are identical against stock on every route stock
-  computes correctly (`GMLX_QWEN_OWNED=0` reverts to the stock class at
-  load).
+- qwen3.5/3.6 text MTP targets run owned gmlx forwards instead of
+  runtime patches on the stock mlx-vlm classes, parity-tested against
+  the pinned release (greedy tokens identical on every route).
+  Multimodal MTP targets are still built stock and keep the patched
+  regime; `GMLX_QWEN_OWNED=0` reverts text loads to genuinely stock
+  classes for debugging.
 - Install docs lead with `uv tool install "gmlx[all]"` / pipx: one command,
   on PATH in every terminal, every optional feature on, no follow-up
   installs. Smaller extra sets and the plain-venv route stay documented.
