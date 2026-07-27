@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-07-27
+
 ### Added
 
 - `gmlx run --reasoning {show,hide,raw}`: `run` now streams a thinking
