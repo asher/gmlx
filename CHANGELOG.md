@@ -26,6 +26,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A request admitted into a running speculative decode batch was truncated
+  at its batchmates' `max_tokens` instead of its own.
 - left-padded single-row batches attended their pad tokens as content:
   the stock B=1 batch-cache shortcut extracts a row cache that drops
   `left_padding` while recursing with the unsliced input. The owned

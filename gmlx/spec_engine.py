@@ -854,6 +854,11 @@ def install_continuous_batch_admission() -> None:
                     "prompt_tokens": other.prompt_tokens,
                     "first_tokens": other.first_tokens,
                     "first_tokens_list": first_list,
+                    # Per-row budgets ride along: the running rounds
+                    # generator froze max(self.max_tokens) at start, and
+                    # an injected row with a larger budget must not be
+                    # truncated to the host batch's stale scalar.
+                    "max_tokens": list(other.max_tokens),
                 })
 
             pending.clear()
