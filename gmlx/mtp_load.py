@@ -632,12 +632,8 @@ def load_mtp_model(
 
     # 2. tiled-V fixup for asymmetric K/V heads - both mlx-lm (transitive) and
     #    mlx-vlm's own gated_delta (the MTP target / state-capture paths).
-    #    Owned qwen GDN loads route the scan through mlx-lm's tiled
-    #    gated_delta directly and never touch the vlm module, so the vlm
-    #    rebind installs only for stock-built trees. Gate on what was
-    #    BUILT, never on the config: the two can disagree (the config
-    #    answers what the selector would pick, not what construction
-    #    actually produced).
+    #    Owned trees never route through the vlm module, so the vlm rebind
+    #    is stock-only. Gate on the built tree, not the config.
     if _needs_tiled_v_patch(config):
         _patch_gated_delta_tiled_v()
         if not is_owned_language_model(model):
@@ -677,12 +673,9 @@ def load_mtp_model(
         "qwen3_5",
         "qwen3_5_text",
     ):
-        # Owned trees carry the fused routes natively and are built at
-        # construction; prepare_gdn arms them and concatenates b/a (both
-        # read loaded weights). The GMLX_QWEN_OWNED=0 fallback is
-        # genuinely stock plus the tiled-V correctness rebind installed
-        # above -- no fused verify, no batched-verify SDPA, no verify
-        # fold, no empty-sequence guard, no bf16 verify-linear lever.
+        # Owned trees carry the fused routes natively; prepare_gdn arms
+        # them post-load. The GMLX_QWEN_OWNED=0 fallback stays bare stock
+        # plus the tiled-V rebind above.
         if is_owned_language_model(model):
             prepare_gdn(model)
         _patch_dense_head_verify(model)
@@ -694,11 +687,9 @@ def load_mtp_model(
         #   no lm_head attr), and the q6_k head already runs kq's fast
         #   verify path (measured 445-490 GB/s at verify M, ~0.4 ms/round
         #   of headroom at most).
-        # - the qwen verify levers live in the owned qwen3_5 modules,
-        #   which gemma4's language module does not route through;
-        #   installing the old patch set here implied coverage that
-        #   never existed. gemma4's verify-attention seam is the open
-        #   front (verify is 89.7% of the round on the 31B).
+        # - the qwen verify levers live in qwen3_5 modules gemma4 never
+        #   routes through; its verify-attention seam is the open front
+        #   (verify is 89.7% of the round on the 31B).
         pass
 
     # 3. drafter - native-head (extracted from this GGUF's MTP block) or
@@ -750,15 +741,11 @@ def load_mtp_model(
 def _install_stock_qwen35_verify_patches(model) -> None:
     """Full verify patch set for a stock-built qwen3.5/3.6 MTP target.
 
-    ``load_vlm_mtp_model``'s target comes out of mlx_vlm.utils model
-    construction, which never consults the owned-class selector, so a
-    multimodal qwen MTP target is the stock classes. Stock trees read
-    the patched module globals, so they get the same patched regime the
-    text path ran before the owned forwards landed: fused gated-delta
-    verify, batched-verify masked SDPA, folded verify attention,
-    unified ragged-plan decode, and the bf16 verify-linear lever. The
-    ``GMLX_QWEN_OWNED=0`` text fallback deliberately does NOT take this
-    path; bare stock plus tiled-V is its documented debugging contract.
+    ``load_vlm_mtp_model``'s target comes out of mlx_vlm.utils
+    construction, which never consults the owned-class selector, so it
+    gets the patched regime the text path ran before the owned forwards
+    landed. The ``GMLX_QWEN_OWNED=0`` text fallback does not take this
+    path: bare stock plus tiled-V is its debugging contract.
     """
     from .gdn_patches import (
         _patch_batched_verify_sdpa,
@@ -888,12 +875,9 @@ def load_vlm_mtp_model(
             "qwen3_5",
             "qwen3_5_text",
         ):
-            # Gate on what was BUILT: this target came out of
-            # load_vlm_model's mlx_vlm.utils construction, which never
-            # consults the owned-class selector, so it is the stock
-            # classes today and takes the patched regime. The owned
-            # branch stays so this site is already correct if ownership
-            # ever extends to VLM construction.
+            # Gate on the built tree: mlx_vlm.utils construction never
+            # consults the owned-class selector, so this is stock today.
+            # The owned branch covers ownership reaching vlm builds.
             if is_owned_language_model(model):
                 prepare_gdn(model)
             else:
