@@ -89,7 +89,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   keeps only the tiled-V weight-order rebind, loses every performance
   patch, and reinstates the two stock defects the owned path fixes
   (left-padded single-row batches attend their pads; empty-sequence
-  rows in batched serve crash).
+  rows in batched serve crash). Ownership applies to text MTP loads,
+  where the owned classes are selected at construction; a multimodal
+  MTP target (LLM GGUF + mmproj) is built stock by mlx-vlm
+  construction, and its install site gates on the built tree and keeps
+  the full patched regime - tiled-V rebind, fused gated-delta verify,
+  batched-verify SDPA, folded verify attention, unified ragged-plan
+  decode, and the bf16 verify-linear lever.
 - Install docs lead with `uv tool install "gmlx[all]"` / pipx: one command,
   on PATH in every terminal, every optional feature on, no follow-up
   installs. Smaller extra sets and the plain-venv route stay documented.

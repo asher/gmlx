@@ -13,10 +13,12 @@ correct for every row (shorter rows just early-exit more blocks). This seam
 rebinds the module global with the unified-plan dispatch, which lives in
 ``gmlx.qwen35_attn`` (the owned attention calls it directly).
 
-No production path installs this rebind anymore: the ``GMLX_QWEN_OWNED=0``
-fallback runs genuinely stock (strict-bucket bail included). The installer
-stays in-tree for the serve-parity oracle arm that owned-forward probes
-and tests compose.
+The installer runs in production for stock-built qwen MTP targets:
+multimodal loads, whose trees never pass the owned-class selector
+(``mtp_load._install_stock_qwen35_verify_patches``). It also serves as
+the serve-parity oracle arm that owned-forward probes and tests
+compose. The ``GMLX_QWEN_OWNED=0`` text fallback runs genuinely stock
+(strict-bucket bail included).
 
 Env: GMLX_RAGGED_UNIFIED_PLAN=0 disables (also read per call by the
 dispatch, which then keeps the stock strict-bucket bail).
@@ -29,8 +31,6 @@ import os
 
 _log = logging.getLogger(__name__)
 
-_INSTALLED_FLAG = "_kq_gguf_unified_ragged_plan"
-
 
 def install_unified_ragged_plan() -> None:
     """Rebind qwen3_5 ragged decode with plan-unify fallback. Idempotent."""
@@ -38,13 +38,13 @@ def install_unified_ragged_plan() -> None:
         return
     from mlx_vlm.models.qwen3_5 import language as _lang
 
-    if getattr(
-        _lang._qwen3_5_ragged_decode_attention, _INSTALLED_FLAG, False
-    ):
-        return
-
     from .qwen35_attn import ragged_decode_attention
 
-    setattr(ragged_decode_attention, _INSTALLED_FLAG, True)
+    # Identity check instead of a latch: no attribute stamped onto the
+    # owned function, and a test that restores the upstream global gets
+    # a clean reinstall on the next call.
+    if _lang._qwen3_5_ragged_decode_attention is ragged_decode_attention:
+        return
+
     _lang._qwen3_5_ragged_decode_attention = ragged_decode_attention
     _log.info("unified ragged-plan decode installed (qwen3_5 family)")

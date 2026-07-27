@@ -42,7 +42,8 @@ from .native_fp import _strip_weight
 from .populate import maybe_populate_for_load
 from .populate import wait_for as wait_for_populate
 from .preflight import preflight
-from .qwen35_gdn import owned_gdn_active, prepare_gdn
+from .qwen35_gdn import prepare_gdn
+from .qwen35_owned import is_owned_language_model
 from .transforms import coalesce_split_experts
 
 
@@ -633,10 +634,13 @@ def load_mtp_model(
     #    mlx-vlm's own gated_delta (the MTP target / state-capture paths).
     #    Owned qwen GDN loads route the scan through mlx-lm's tiled
     #    gated_delta directly and never touch the vlm module, so the vlm
-    #    rebind installs only for the stock fallback.
+    #    rebind installs only for stock-built trees. Gate on what was
+    #    BUILT, never on the config: the two can disagree (the config
+    #    answers what the selector would pick, not what construction
+    #    actually produced).
     if _needs_tiled_v_patch(config):
         _patch_gated_delta_tiled_v()
-        if not owned_gdn_active(config_dict.get("model_type")):
+        if not is_owned_language_model(model):
             _patch_mlxvlm_gated_delta_tiled_v()
 
     # deepseek_v4 needs sanitize=True (the vendored Model.sanitize does the
@@ -679,7 +683,7 @@ def load_mtp_model(
         # genuinely stock plus the tiled-V correctness rebind installed
         # above -- no fused verify, no batched-verify SDPA, no verify
         # fold, no empty-sequence guard, no bf16 verify-linear lever.
-        if owned_gdn_active(config_dict.get("model_type")):
+        if is_owned_language_model(model):
             prepare_gdn(model)
         _patch_dense_head_verify(model)
     elif config_dict.get("model_type") in ("gemma4", "gemma4_text"):
@@ -741,6 +745,37 @@ def load_mtp_model(
     wait_for_populate(pf.shards, log=_log)
 
     return model, drafter, config, tokenizer
+
+
+def _install_stock_qwen35_verify_patches(model) -> None:
+    """Full verify patch set for a stock-built qwen3.5/3.6 MTP target.
+
+    ``load_vlm_mtp_model``'s target comes out of mlx_vlm.utils model
+    construction, which never consults the owned-class selector, so a
+    multimodal qwen MTP target is the stock classes. Stock trees read
+    the patched module globals, so they get the same patched regime the
+    text path ran before the owned forwards landed: fused gated-delta
+    verify, batched-verify masked SDPA, folded verify attention,
+    unified ragged-plan decode, and the bf16 verify-linear lever. The
+    ``GMLX_QWEN_OWNED=0`` text fallback deliberately does NOT take this
+    path; bare stock plus tiled-V is its documented debugging contract.
+    """
+    from .gdn_patches import (
+        _patch_batched_verify_sdpa,
+        _patch_bf16_verify_linear,
+        _patch_gated_delta_fused_verify,
+    )
+    from .qwen35_verify_fold import install_qwen35_verify_fold
+    from .ragged_decode import install_unified_ragged_plan
+
+    _patch_gated_delta_fused_verify(model)
+    _patch_batched_verify_sdpa()
+    install_qwen35_verify_fold()
+    install_unified_ragged_plan()
+    _patch_bf16_verify_linear()
+    loadlog.verbose_print(
+        "[build] qwen3.5 stock verify patch set installed (vlm mtp target)"
+    )
 
 
 @loadlog.seeds
@@ -845,7 +880,7 @@ def load_vlm_mtp_model(
         n_head_kv = first_nonzero_int(meta, f"{arch_r}.attention.head_count_kv")
         if _needs_tiled_v_patch(config_dict):
             _patch_gated_delta_tiled_v()  # idempotent; load_vlm_model already ran it
-            if not owned_gdn_active(config_dict.get("model_type")):
+            if not is_owned_language_model(model):
                 _patch_mlxvlm_gated_delta_tiled_v()
         if config_dict.get("model_type") in (
             "qwen3_5_moe",
@@ -853,10 +888,16 @@ def load_vlm_mtp_model(
             "qwen3_5",
             "qwen3_5_text",
         ):
-            # Same shape as the text-path install above: arm the owned
-            # tree, or leave the fallback stock plus the tiled rebind.
-            if owned_gdn_active(config_dict.get("model_type")):
+            # Gate on what was BUILT: this target came out of
+            # load_vlm_model's mlx_vlm.utils construction, which never
+            # consults the owned-class selector, so it is the stock
+            # classes today and takes the patched regime. The owned
+            # branch stays so this site is already correct if ownership
+            # ever extends to VLM construction.
+            if is_owned_language_model(model):
                 prepare_gdn(model)
+            else:
+                _install_stock_qwen35_verify_patches(model)
             _patch_dense_head_verify(model)
         drafter = _load_mtp_drafter(
             arrays,

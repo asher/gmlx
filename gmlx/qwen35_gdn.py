@@ -250,7 +250,10 @@ def prepare_gdn(model) -> int:
     Runs after weights load (the b/a concatenation reads loaded
     weights). Constructor-built instances start with the fused flag
     off, so a tree that never passes here decodes on the unfused chain.
-    Returns the armed count for engagement proof.
+    Returns the armed count for engagement proof, and raises on zero:
+    every qwen3.5-family target has gated-delta layers, so arming none
+    means the caller gated the install on the wrong predicate (a
+    stock-built tree must take the patched branch, not this one).
     """
     fused = env_bool("GMLX_FUSED_GDN", True)
     cat_ba = env_bool("GMLX_GDN_BA_CAT", True)
@@ -264,6 +267,12 @@ def prepare_gdn(model) -> int:
             if fused and cat_ba and getattr(m, "_gdn_ba_weight", None) is None:
                 if _gp._gdn_try_cat_ba(m):
                     n_ba += 1
+    if n == 0:
+        raise RuntimeError(
+            "prepare_gdn armed 0 layers: no owned GatedDeltaNet in this "
+            "tree, so the install site gated on the wrong predicate for "
+            "a stock-built target"
+        )
     ba = f", b/a matvecs concatenated on {n_ba}" if n_ba else ""
     verbose_print(f"[build] gated_delta: owned forward on {n} layers{ba}")
     return n

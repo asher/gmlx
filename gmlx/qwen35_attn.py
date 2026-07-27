@@ -503,11 +503,22 @@ def ragged_decode_attention(queries, keys, values, pads, scale):
 def _sdpa_dispatch(queries, keys, values, *, cache, scale, mask, sinks=None):
     """Owned SDPA dispatch tail: quantized-KV routing, then mx.fast.
 
-    Mirrors mlx-vlm's base dispatch minus the TurboQuant branches (gmlx
-    never builds those caches). The quantized branch resolves the base
-    module symbol at call time so the batch-mask fix patch stays
-    engaged (pinned under the quantized-SDPA ledger).
+    Mirrors mlx-vlm's base dispatch minus the TurboQuant branches. gmlx
+    never builds those caches (the scheme passthrough was reverted and
+    the MTP engine keeps fp16 caches), but ``kv_quant_scheme`` is still
+    a live config key, so the premise is policy, not structure: a
+    TurboQuant cache raises loudly here instead of falling into the
+    affine quantized branch, which would silently misread its packing
+    (both TurboQuant cache classes set ``bits``). The quantized branch
+    resolves the base module symbol at call time so the batch-mask fix
+    patch stays engaged (pinned under the quantized-SDPA ledger).
     """
+    if isinstance(cache, (_B.TurboQuantKVCache, _B.BatchTurboQuantKVCache)):
+        raise RuntimeError(
+            "TurboQuant KV cache reached the owned qwen3.5 SDPA dispatch; "
+            "gmlx does not build these caches and the affine quantized "
+            "branch cannot read their packing"
+        )
     if hasattr(cache, "bits"):
         if sinks is not None:
             raise ValueError("Quantized SDPA does not support attention sinks.")
