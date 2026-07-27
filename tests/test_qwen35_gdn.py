@@ -1,12 +1,11 @@
 """Owned GatedDeltaNet: rebind wiring + route identity vs the patched path.
 
-The oracle for every numerics test is the CURRENT PATCHED path (class
-patch + vlm gated_delta rebind), not raw stock: the patched path carries
-the certified production numerics. Both arms use the stock LanguageModel
-class so the comparison isolates the GDN treatment from the model-level
-ownership. Toy GDN dims are 32 so the fused decode and fused verify
-routes engage at toy scale (the real-weights probes cover them at
-production shapes).
+The oracle for every numerics test is the patched path (class patch +
+vlm gated_delta rebind), which carries the certified numerics. Both
+arms use the stock LanguageModel class so the comparison isolates the
+GDN treatment from the model-level ownership. Toy GDN dims are 32 so
+the fused decode and fused verify routes engage at toy scale (the
+real-weights probes cover them at real shapes).
 """
 
 import os

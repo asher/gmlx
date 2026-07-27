@@ -10,9 +10,8 @@ serving upstream-internal call sites (the stock wrapper head path)
 untouched.
 
 The upstream bodies are verbatim copies, source-equality-tested
-against the pinned mlx-vlm release every run (see
-tests/test_qwen35_verify_linear.py), so a release upgrade that
-changes a body fails loudly instead of drifting silently.
+against the pinned mlx-vlm release, so a release upgrade that changes
+a body fails the suite.
 """
 
 from functools import lru_cache

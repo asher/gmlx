@@ -1,36 +1,29 @@
 """Owned full-attention forward for qwen3.5/3.6 MTP targets.
 
-Replaces the attention patch stack on mlx-vlm's ``Qwen3_5Attention``
-with an owned subclass the owned constructors build directly
-(``rebind_attn`` remains as the instance-``__class__``-rebind install
-for stock-built trees in tests). It composes what used to be three
-module-global patches at three install times -- the unified ragged-plan
-decode, the folded verify attention, and the batched-verify masked
-SDPA -- natively in the owned ``__call__``:
+Subclasses mlx-vlm's ``Qwen3_5Attention``; the owned constructors
+build it directly (``rebind_attn`` arms stock-built trees in tests).
+The owned ``__call__`` composes three formerly patch-installed routes:
 
-- ragged left-padded S=1 decode through the ragged SDPA kernels with
-  the unified plan fallback (rows straddling plan buckets use the
-  padded-k_size plan instead of bailing to the per-row group loop);
+- ragged left-padded S=1 decode through the in-tree ragged SDPA
+  kernels, with the unified-plan fallback for rows straddling plan
+  buckets;
 - MTP verify: single masked-SDPA call for left-padded batches, one
   "causal" call for B=1 and unpadded batches (quantized KV included),
   per-row "causal" fold for deep batched verify widths;
-- the stock per-pad-group loop as the declining routes' fallback.
+- the stock per-pad-group loop as the fallback.
 
 The ragged kernel sources, plan/block tables, and cached-array helpers
-are verbatim in-tree copies of the upstream bodies, equality-tested
-against the pinned mlx-vlm release on every run. Projection
-indirections go through the owned verify-linear family
-(``qwen35_verify_linear``), the rotary apply through the owned MRoPE
-chain (``qwen35_rope``), and the SDPA dispatch tail is owned here
-(quantized-KV routing calls the base module symbol at call time so the
-batch-mask fix stays engaged under its own ledger pin).
+are verbatim in-tree copies, equality-tested against the pinned
+mlx-vlm release. Projections go through ``qwen35_verify_linear``, the
+rotary apply through ``qwen35_rope``; the quantized-KV routing calls
+the base module symbol at call time so the batch-mask fix stays
+engaged under its own ledger pin.
 
-Owned loads never read the qwen3_5 module globals; no production path
-installs the old patches anymore (the ``GMLX_QWEN_OWNED=0`` fallback
-runs genuinely stock, and the patch modules stay in-tree as test
-oracles). ``GMLX_QWEN35_VERIFY_FOLD=0``, ``GMLX_VERIFY_RAGGED_MASK=0``
-and ``GMLX_RAGGED_UNIFIED_PLAN=0`` disable the corresponding routes
-here, read per call.
+Owned loads never read the qwen3_5 module globals; the
+``GMLX_QWEN_OWNED=0`` fallback runs stock, and the patch modules stay
+in-tree as test oracles. ``GMLX_QWEN35_VERIFY_FOLD=0``,
+``GMLX_VERIFY_RAGGED_MASK=0`` and ``GMLX_RAGGED_UNIFIED_PLAN=0``
+disable the corresponding routes, read per call.
 """
 
 from functools import lru_cache
@@ -504,14 +497,11 @@ def _sdpa_dispatch(queries, keys, values, *, cache, scale, mask, sinks=None):
     """Owned SDPA dispatch tail: quantized-KV routing, then mx.fast.
 
     Mirrors mlx-vlm's base dispatch minus the TurboQuant branches. gmlx
-    never builds those caches (the scheme passthrough was reverted and
-    the MTP engine keeps fp16 caches), but ``kv_quant_scheme`` is still
-    a live config key, so the premise is policy, not structure: a
-    TurboQuant cache raises loudly here instead of falling into the
-    affine quantized branch, which would silently misread its packing
-    (both TurboQuant cache classes set ``bits``). The quantized branch
-    resolves the base module symbol at call time so the batch-mask fix
-    patch stays engaged (pinned under the quantized-SDPA ledger).
+    never builds those caches, but both TurboQuant cache classes set
+    ``bits``, so raise before the affine quantized branch misreads
+    their packing. The quantized branch resolves the base module symbol
+    at call time so the batch-mask fix patch stays engaged (pinned
+    under the quantized-SDPA ledger).
     """
     if isinstance(cache, (_B.TurboQuantKVCache, _B.BatchTurboQuantKVCache)):
         raise RuntimeError(
@@ -865,9 +855,9 @@ class OwnedQwen3_5Attention(_L.Qwen3_5Attention):
 
 def rebind_attn(model) -> int:
     """Rebind every stock Qwen3_5Attention in ``model`` to the owned
-    class. Production trees build owned classes at construction; this
-    remains the install path for stock-built toy trees in tests.
-    Returns the rebind count for engagement proof."""
+    class. Real loads build owned classes at construction; this is the
+    install path for stock-built toy trees in tests. Returns the
+    rebind count."""
     lm = getattr(model, "language_model", model)
     n = 0
     for m in lm.modules():

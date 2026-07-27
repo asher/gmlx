@@ -2,11 +2,9 @@
 
 This is the third way gmlx reaches mlx-vlm forward code, next to
 ``load_mtp_model`` (owned classes at construction) and plain
-``load_vlm_model``: the multimodal MTP target is built by mlx_vlm.utils
-construction, never sees the owned-class selector, and must come out
-STOCK with the full verify patch regime engaged (tiled-V included -
-grouped K->V indexing on tiled GGUF weight order is a correctness
-requirement, not a perf choice).
+``load_vlm_model``: the multimodal MTP target is built stock by
+mlx_vlm.utils, never sees the owned-class selector, and must come out
+with the full verify patch regime engaged, tiled-V included.
 
 ``integration`` + ``slow``; needs ``KQUANT_TEST_GGUF_DIR`` to contain a
 qwen3.5/3.6 native-MTP model with a sibling mmproj GGUF that discovery

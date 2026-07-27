@@ -1539,11 +1539,9 @@ def _owned_decode_rounds_batch(
     B_orig = len(b)
     row_ids = list(range(B_orig)) if row_ids is None else list(row_ids)
 
-    # Per-row budgets. The caller's max_tokens is max() over the rows
-    # present at generator start (ar.py freezes it in _start_rounds); a row
-    # injected mid-flight carries its own budget in the injection entry and
-    # must decode against that, not against the host batch's stale scalar --
-    # otherwise its stream is silently truncated when the host rows drain.
+    # Per-row budgets: ar.py freezes max_tokens = max() over the rows at
+    # generator start; rows injected mid-flight carry their own in the
+    # injection entry.
     max_tok = [max_tokens] * B_orig
 
     # Per-row APC retirement state. Rows born in a batched prefill carry no

@@ -1,13 +1,11 @@
 """Install gating for stock-built qwen MTP targets (the vlm MTP path).
 
-``load_vlm_mtp_model``'s target comes out of mlx_vlm.utils construction
-and is the stock classes - the owned-class selector never runs there -
-so the install sites gate on what was BUILT
-(``qwen35_owned.is_owned_language_model``), never on the config's
-model_type. A stock tree takes the full patched regime
-(``mtp_load._install_stock_qwen35_verify_patches``); an owned tree arms
-``prepare_gdn``; ``prepare_gdn`` on a tree with no owned GatedDeltaNet
-raises instead of logging an armed-0 line.
+``load_vlm_mtp_model``'s target is built stock by mlx_vlm.utils (the
+owned-class selector never runs there), so the install sites gate on
+the built tree (``qwen35_owned.is_owned_language_model``), never on
+the config's model_type. A stock tree takes the full patched regime;
+an owned tree arms ``prepare_gdn``, which raises on a tree with no
+owned GatedDeltaNet.
 """
 
 from types import SimpleNamespace

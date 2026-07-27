@@ -36,11 +36,11 @@ TIGHT_ATOL = 1e-5  # same-ops bound
 
 @pytest.fixture(scope="module", autouse=True)
 def _tiled_oracle():
-    # Production installs the mlx-lm tiled rebind for every qwen3.5
-    # GGUF load and the vlm rebind for the stock fallback; the stock
-    # oracle arm must match that posture. With both arms tiled and in
-    # eval mode (see _pair) the GDN scan runs the same mlx-lm kernel on
-    # both sides, so the same-ops routes stay bit-tight.
+    # Every qwen3.5 GGUF load installs the mlx-lm tiled rebind (plus
+    # the vlm rebind on the stock fallback); the stock oracle arm must
+    # match. With both arms tiled and in eval mode (see _pair) the GDN
+    # scan runs the same mlx-lm kernel on both sides, so the same-ops
+    # routes stay bit-tight.
     _patch_gated_delta_tiled_v()
     _patch_mlxvlm_gated_delta_tiled_v()
 

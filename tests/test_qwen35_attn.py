@@ -1,14 +1,14 @@
 """Owned Qwen3_5Attention: rebind wiring + route identity vs the patched path.
 
-The oracle for every numerics test is the CURRENT PATCHED path (verify
-fold + batched-verify masked SDPA + unified ragged plan, installed in
-production order), not raw stock: the patched path carries the certified
-production numerics. Both arms use the stock LanguageModel class so the
-comparison isolates the attention treatment. Attention head_dim is 64 so
-the ragged decode kernels engage at toy scale (their allowlist starts at
-64); the f32 parametrization keeps them declined so the per-pad-group
-loop is exercised too. Arms are built in eval mode (training-mode toys
-route upstream dispatchers differently from production).
+The oracle for every numerics test is the patched path (verify fold +
+batched-verify masked SDPA + unified ragged plan, installed in load
+order), which carries the certified numerics. Both arms use the stock
+LanguageModel class so the comparison isolates the attention
+treatment. Attention head_dim is 64 so the ragged decode kernels
+engage at toy scale (their allowlist starts at 64); the f32
+parametrization keeps them declined so the per-pad-group loop is
+exercised too. Arms are built in eval mode (training-mode toys route
+upstream dispatchers differently).
 """
 
 import os
@@ -123,10 +123,9 @@ def _greedy_chain(lm, ids, cache, steps):
 def _arms(dtype=None):
     """(patched-stock lm, owned-rebound lm) with identical weights.
 
-    The patched arm installs the full production patch set in production
-    install order (verify fold at load, batched-verify masked SDPA after,
-    unified ragged plan process-global); the owned arm goes through the
-    rebinds. Caller must use the _restore_patches fixture.
+    The patched arm installs the full patch set in load order; the
+    owned arm goes through the rebinds. Caller must use the
+    _restore_patches fixture.
     """
     patched = _lm(dtype)
     gdn_patches._patch_gated_delta_tiled_v()
@@ -143,8 +142,8 @@ def _arms(dtype=None):
 
 @pytest.fixture
 def _restore_patches(monkeypatch):
-    # Restore every module global the arm installers touch AND the
-    # install-once latches (restoring the symbol without the latch turns
+    # Restore every module global the arm installers touch, plus the
+    # install-once latches (a restored symbol with a stale latch turns
     # the next install into a silent no-op).
     saved_gdn_call = Qwen3_5GatedDeltaNet.__call__
     saved_fv_installed = gdn_patches._FUSED_VERIFY_PATCH.installed

@@ -1,18 +1,14 @@
 """Owned layer assembly for qwen3.5/3.6 MTP targets.
 
-The dense MLP, the MoE sparse block, and both decoder layers, built as
-subclasses whose ``__init__`` mirrors the stock body but constructs the
-owned attention/GDN/MLP classes, so ownership lands at construction
-instead of a post-load rebind walk. The ``__call__`` bodies that are
-pure self-dispatch (both decoder layers) are verbatim upstream copies,
-source-equality-tested against the pinned mlx-vlm release every run;
-the MLP and sparse-block forwards are mirrors whose projection
-indirections route through the owned verify-linear family. ``swiglu``
-and ``_target_verify_switch_glu`` are verbatim copies.
-
-The mirrored constructors draw parameters in the stock order, so a
-seeded owned build is weight-identical to a seeded stock build (the
-construction-pair tests certify this every run).
+The dense MLP, the MoE sparse block, and both decoder layers, as
+subclasses whose ``__init__`` mirrors the stock body but constructs
+the owned attention/GDN/MLP classes. Dispatch-only ``__call__`` bodies
+are verbatim upstream copies, source-equality-tested against the
+pinned mlx-vlm release; the MLP and sparse-block forwards route
+projections through the owned verify-linear family. The mirrored
+constructors draw parameters in the stock order, so a seeded owned
+build is weight-identical to a seeded stock build (certified by the
+construction-pair tests).
 """
 
 from functools import partial

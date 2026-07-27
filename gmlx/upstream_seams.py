@@ -62,24 +62,13 @@ SEAMS: tuple[Seam, ...] = (
          "batch_sched arrival-merge (_unprocessed_sequences append/rebind)"),
     # --- qwen3_5 owned forwards (qwen35_owned/gdn/attn/layers/rope/
     #     verify_linear) ---
-    # The qwen3.5 MTP-target forward surface is owned in-tree: the
-    # model-level control flow, both decoder layers, attention (ragged
-    # kernels, verify routes, SDPA dispatch tail), GatedDeltaNet, the
-    # MLP/MoE blocks, the verify-linear projection family, and the
-    # MRoPE apply chain. Verbatim copies are source-equality-tested
-    # against the pinned release every run; mirrored constructors and
-    # mirror forwards are certified by construction-pair, normalized
-    # source-equality, and identity tests, so none of those symbols
-    # carry pins ON THE OWNED PATH. But ownership lands at construction
-    # through loader._mtp_target_classes, which only the TEXT MTP load
-    # consults: load_vlm_mtp_model's target comes out of mlx_vlm.utils
-    # construction and is the stock classes, so the multimodal qwen MTP
-    # path still installs the patched regime
-    # (mtp_load._install_stock_qwen35_verify_patches) and its patched
-    # symbols stay pinned below. qwen35_verify_fold is also load-bearing
-    # for the owned path (qwen35_attn imports _pads_list from it). The
-    # GMLX_QWEN_OWNED=0 text fallback is genuinely stock plus the
-    # tiled-V correctness rebind.
+    # The owned qwen3.5 forward surface carries no pins: its copies and
+    # mirrors are certified by source-equality, construction-pair, and
+    # identity tests. But ownership lands at construction only on the
+    # text MTP load (loader._mtp_target_classes); load_vlm_mtp_model's
+    # target is built stock by mlx_vlm.utils, so the multimodal path
+    # still installs the patched regime and its symbols stay pinned
+    # below.
     Seam("mlx_vlm.models.qwen3_5.gated_delta", "gated_delta_ops",
          "gdn_patches._patch_mlxvlm_gated_delta_tiled_v (stock-built "
          "trees only: vlm MTP targets + the GMLX_QWEN_OWNED=0 text "
@@ -114,11 +103,10 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.models.qwen3_5.language", "Qwen3_5GatedDeltaNet.__call__",
          "gdn_patches._patch_gated_delta_fused_verify (vlm MTP stock "
          "path; the owned subclass carries the fused dispatch natively)"),
-    # Mirror pin: _owned_model_call diverges from this body ON PURPOSE
-    # (B=1 shortcut removed as a correctness fix, padded prefill hoisted,
-    # S=0 guard added), so it cannot be substitution-normalized like the
-    # other mirrors. The fingerprint fires on any upstream change and
-    # forces a re-mirror review.
+    # Mirror pin: _owned_model_call deliberately diverges from this
+    # body (B=1 shortcut removed, padded prefill hoisted, S=0 guard),
+    # so it cannot be substitution-normalized; the fingerprint forces a
+    # re-mirror review on upstream change.
     Seam("mlx_vlm.models.qwen3_5.language", "Qwen3_5Model.__call__",
          "qwen35_owned._owned_model_call (forward body mirrored with "
          "deliberate divergences; re-mirror on upstream change)",

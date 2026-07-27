@@ -1,27 +1,16 @@
 """Owned GatedDeltaNet forward for qwen3.5/3.6 MTP targets.
 
-Replaces the class-level patch dispatch on mlx-vlm's
-``Qwen3_5GatedDeltaNet`` with an owned subclass the owned constructors
-build directly (``prepare_gdn`` arms the fused routes after weights
-load; ``rebind_gdn`` remains as the instance-``__class__``-rebind
-install for stock-built trees in tests). The owned ``__call__``
-carries three routes natively:
+Subclasses mlx-vlm's ``Qwen3_5GatedDeltaNet``; the owned constructors
+build it directly and ``prepare_gdn`` arms the fused routes after
+weights load (``rebind_gdn`` arms stock-built trees in tests). Three
+routes: fused decode (S=1, no sink), fused verify (sink set, S>1), and
+an owned unfused chain for the rest, which sends the scan through
+mlx-lm's gated_delta (tiled under the GGUF K->V fixup) and projections
+through ``qwen35_verify_linear``.
 
-- fused decode (S=1, no sink): the same kernel body the patched class
-  dispatched to, launch-collapsing the conv/norm/scan/gate chain;
-- fused verify (sink set, S>1): the fused multi-position verify body;
-- an owned unfused chain for everything else (S>1 prefill, forced-CPU,
-  odd head dims, array masks at S=1). The chain mirrors the stock body
-  but routes the scan through mlx-lm's gated_delta (tiled under the
-  GGUF K->V fixup, which is a correctness requirement for GGUF weight
-  order, not a perf choice) and the sink-shaped scan through the tiled
-  state-capturing ops directly. Projection indirections go through
-  the owned verify-linear family (``qwen35_verify_linear``).
-
-Owned loads never touch ``mlx_vlm.models.qwen3_5.gated_delta``, so the
-module-global rebind patch and the class patch install only for the
-``GMLX_QWEN_OWNED=0`` stock fallback. ``GMLX_FUSED_GDN=0`` disables the
-fused routes here exactly as it disabled the patch installs.
+Owned loads never touch ``mlx_vlm.models.qwen3_5.gated_delta``; the
+rebind and class patches install only for the ``GMLX_QWEN_OWNED=0``
+fallback. ``GMLX_FUSED_GDN=0`` disables the fused routes.
 """
 
 from typing import Any, Optional
@@ -45,20 +34,15 @@ _QWEN_GDN_FAMILY = ("qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"
 
 
 def owned_gdn_active(model_type) -> bool:
-    """Whether this load takes the owned GatedDeltaNet instead of the
-    class patch + vlm gated_delta rebind (same switch as the owned
-    model-level forward)."""
+    """Whether this load takes the owned GatedDeltaNet (same switch as
+    the owned model-level forward)."""
     return model_type in _QWEN_GDN_FAMILY and env_bool("GMLX_QWEN_OWNED", True)
 
 
 def _gdn_update_with_states_tiled(q, k, v, a, b, A_log, dt_bias, state, mask):
-    """Sink-shaped scan on the tiled state-capturing ops.
-
-    Mirrors the post-rebind behavior of upstream's
-    ``gated_delta_update_with_states``: the rebind patch pins its kernel
-    globals to None so every call lands on the tiled ops; this calls
-    them directly.
-    """
+    """Sink-shaped scan, calling the tiled state-capturing ops directly
+    (what upstream's ``gated_delta_update_with_states`` resolves to
+    after the rebind patch)."""
     from mlx_lm.models.gated_delta import compute_g
 
     g = compute_g(A_log, a, dt_bias)
@@ -248,12 +232,9 @@ def prepare_gdn(model) -> int:
     """Arm the fused routes on every owned GatedDeltaNet in ``model``.
 
     Runs after weights load (the b/a concatenation reads loaded
-    weights). Constructor-built instances start with the fused flag
-    off, so a tree that never passes here decodes on the unfused chain.
-    Returns the armed count for engagement proof, and raises on zero:
-    every qwen3.5-family target has gated-delta layers, so arming none
-    means the caller gated the install on the wrong predicate (a
-    stock-built tree must take the patched branch, not this one).
+    weights); an unarmed tree decodes on the unfused chain. Returns the
+    armed count; raises on zero, which means the install site gated on
+    the wrong predicate for a stock-built target.
     """
     fused = env_bool("GMLX_FUSED_GDN", True)
     cat_ba = env_bool("GMLX_GDN_BA_CAT", True)
@@ -280,9 +261,9 @@ def prepare_gdn(model) -> int:
 
 def rebind_gdn(model) -> int:
     """Rebind every stock GatedDeltaNet in ``model`` to the owned class
-    and arm it. Production trees build owned classes at construction;
-    this remains the install path for stock-built toy trees in tests.
-    Returns the rebind count for engagement proof.
+    and arm it. Real loads build owned classes at construction; this is
+    the install path for stock-built toy trees in tests. Returns the
+    rebind count.
     """
     lm = getattr(model, "language_model", model)
     n = 0

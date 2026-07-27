@@ -1,7 +1,7 @@
 """Owned verify-linear family: upstream drift tripwires + wrapper parity.
 
 The verbatim copies must stay byte-identical to the pinned mlx-vlm
-release (a release upgrade that changes a body fails here, loudly).
+release (a release upgrade that changes a body fails here).
 The gmlx wrappers must reproduce the patched-global chain the stock
 fallback used to compose: the bf16 GEMV-ext lever first, the verbatim
 upstream dispatcher for everything else.

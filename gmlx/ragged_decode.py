@@ -13,12 +13,10 @@ correct for every row (shorter rows just early-exit more blocks). This seam
 rebinds the module global with the unified-plan dispatch, which lives in
 ``gmlx.qwen35_attn`` (the owned attention calls it directly).
 
-The installer runs in production for stock-built qwen MTP targets:
-multimodal loads, whose trees never pass the owned-class selector
-(``mtp_load._install_stock_qwen35_verify_patches``). It also serves as
-the serve-parity oracle arm that owned-forward probes and tests
-compose. The ``GMLX_QWEN_OWNED=0`` text fallback runs genuinely stock
-(strict-bucket bail included).
+The installer runs for stock-built qwen MTP targets (multimodal
+loads, via ``mtp_load._install_stock_qwen35_verify_patches``) and is the
+serve-parity oracle arm of the owned-forward tests; the
+``GMLX_QWEN_OWNED=0`` text fallback keeps the stock strict-bucket bail.
 
 Env: GMLX_RAGGED_UNIFIED_PLAN=0 disables (also read per call by the
 dispatch, which then keeps the stock strict-bucket bail).

@@ -26,16 +26,12 @@ Patched seams:
 
 Disable both with GMLX_QWEN35_VERIFY_FOLD=0.
 
-The module is load-bearing two ways. The installer still runs in
-production for stock-built qwen MTP targets: multimodal loads, whose
-trees never pass the owned-class selector
-(``mtp_load._install_stock_qwen35_verify_patches``); it doubles as the
-patched-oracle arm the owned-forward identity tests compose. And
-``_pads_list`` is a live import of the owned dispatch
-(``qwen35_attn``), so the module loads on every path. The text default
-composes these routes natively in the owned attention and never
-installs the patch; the ``GMLX_QWEN_OWNED=0`` text fallback runs
-genuinely stock.
+Still live: the installer runs for stock-built qwen MTP targets
+(multimodal loads, via
+``mtp_load._install_stock_qwen35_verify_patches``) and is the
+patched-oracle arm of the owned-forward identity tests; ``_pads_list``
+is imported by the owned dispatch (``qwen35_attn``). The owned text
+path composes these routes natively and never installs the patch.
 """
 
 from __future__ import annotations

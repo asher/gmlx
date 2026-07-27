@@ -1,20 +1,16 @@
 """Substitution-normalized drift alarms for the owned mirror forwards.
 
 The verbatim in-tree copies have plain source-equality tests in their
-own modules. The MIRRORS - owned bodies that differ from upstream by a
-fixed, small substitution table (renamed call indirections, an owned
-memo, a hoisted import) - had no source-level alarm: only the toy
-identity tests covered them, and those fire only when an upstream
-change alters numerics on a route and shape the toys reach. Here each
-mirror asserts exact equality after applying its substitution table to
-the ast-normalized upstream source, so ANY upstream edit outside the
-table fails loudly and forces a re-mirror review.
+own modules. Mirrors differ from upstream by a fixed substitution
+table (renamed call indirections, an owned memo, a hoisted import);
+each test asserts exact equality after applying its table to the
+ast-normalized upstream source, so an upstream edit outside the table
+fails and forces a re-mirror review.
 
-``Qwen3_5Model.__call__`` is deliberately not here: `_owned_model_call`
-diverges structurally on purpose (B=1 shortcut removed as a correctness
-fix, padded prefill hoisted, S=0 guard added), so its alarm is a
-fingerprint pin in ``upstream_seams`` instead of an edit script that
-would ossify the removed code as test literals.
+``Qwen3_5Model.__call__`` is deliberately absent: ``_owned_model_call``
+diverges structurally (B=1 shortcut removed, padded prefill hoisted,
+S=0 guard added), so its alarm is a fingerprint pin in
+``upstream_seams``.
 
 The MoE alias premise the owned constructors rely on is asserted at the
 bottom: the MoE module re-exports the dense layer classes, so building
