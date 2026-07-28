@@ -483,6 +483,16 @@ def test_rows_from_prompt_batch_cold():
     assert rows == [_rb(pre + [7]), _rb(pre)]
 
 
+def test_rows_from_prompt_batch_empty_meta_is_cold():
+    """PPB normalizes absent meta to [] (kv-quantized serving disables
+    APC): an empty list must fall through to the _input_ids currency,
+    not read as meta-without-ids."""
+    pre = list(range(48))
+    pb = _FakePromptBatch([pre + [7], pre], apc_meta=[])
+    rows = cs._rows_from_prompt_batch(pb)
+    assert rows == [_rb(pre + [7]), _rb(pre)]
+
+
 def test_rows_from_prompt_batch_apc_meta_wins():
     full = list(range(64))
     pb = _FakePromptBatch([[1, 2], [3, 4]],

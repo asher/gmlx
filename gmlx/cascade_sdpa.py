@@ -127,7 +127,8 @@ def _debug_decline(reason, **kw):
     import os
     import sys
 
-    if os.environ.get("GMLX_CASCADE_DEBUG") == "1" and _DEBUGGED[0] < 8:
+    if os.environ.get("GMLX_CASCADE_DEBUG") == "1" and _DEBUGGED[0] < env_int(
+            "GMLX_CASCADE_DEBUG_N", 8):
         _DEBUGGED[0] += 1
         print(f"[cascade] decline: {reason} {kw}", file=sys.stderr, flush=True)
 
@@ -437,8 +438,11 @@ def _rows_from_prompt_batch(pb):
     row is cold, so the untouched _input_ids ARE the full prompts; strip
     each row's pads. Must run before prompt_step consumes _input_ids.
     """
+    # PPB normalizes absent meta to [] (kv-quantized serving disables APC
+    # entirely) -- an empty list means every row is cold, NOT "meta without
+    # ids"; fall through to the _input_ids currency.
     meta = getattr(pb, "_apc_meta", None)
-    if meta is not None:
+    if meta:
         rows = []
         for m in meta:
             ids = (m or {}).get("full_input_ids")
@@ -468,8 +472,18 @@ def _make_stamped_ppb_init(orig):
                 rows = _rows_from_prompt_batch(self)
                 if rows:
                     _stamp_caches(caches, rows)
+                else:
+                    _debug_decline(
+                        "stamp-no-rows",
+                        meta=getattr(self, "_apc_meta", None) is not None,
+                        cache=type(caches[0]).__name__)
+            else:
+                _debug_decline("stamp-no-caches")
         except Exception:
-            pass
+            if env_bool("GMLX_CASCADE_DEBUG", False):
+                import traceback
+
+                traceback.print_exc()
 
     _init._gmlx_orig = orig
     _init._gmlx_cascade_stamp = True
