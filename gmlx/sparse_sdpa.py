@@ -38,6 +38,7 @@ from .envflags import env_bool, env_int
 
 _installed = False
 _CLAIMS = [0]
+_SEEN_B = set()
 
 _MODULES = (
     ("mlx_lm.models", "llama"),
@@ -184,7 +185,8 @@ def _claim(queries, keys, values, cache, scale, mask, sinks):
                                     starts=starts)
     except Exception:
         return None
-    if _CLAIMS[0] == 0:
+    if B not in _SEEN_B:  # one line per batch width, not per call
+        _SEEN_B.add(B)
         import sys
 
         print(
