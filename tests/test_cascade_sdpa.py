@@ -143,6 +143,62 @@ def test_non_claims_fall_through(monkeypatch):
 
 
 @pytest.mark.skipif(not _has_cascade_op(), reason="fused cascade op needs GPU")
+@pytest.mark.parametrize("qL,pads", [(4, [0, 0, 0]), (8, [0, 64, 32])])
+def test_route_verify_width_matches_masked_reference(monkeypatch, qL, pads):
+    """qL 2..8 claims: end-aligned causal on each row's private tail plus
+    full shared visibility, ragged left pads included."""
+    _install()
+    monkeypatch.setenv("GMLX_CASCADE_MIN_P", "256")
+    P, sp = 2048, 96
+    B, hq, hkv = 3, 8, 4
+    mx.random.seed(17)
+    L = max(pads) + P + sp
+    kb = mx.random.normal((B, hkv, L, 128)).astype(mx.float16)
+    vb = mx.random.normal((B, hkv, L, 128)).astype(mx.float16)
+    pk = kb[0:1, :, pads[0]:pads[0] + P]
+    pv = vb[0:1, :, pads[0]:pads[0] + P]
+    rk, rv = [], []
+    for b in range(B):
+        rk.append(mx.concatenate(
+            [kb[b:b + 1, :, :pads[b]], pk, kb[b:b + 1, :, pads[b] + P:]],
+            axis=2))
+        rv.append(mx.concatenate(
+            [vb[b:b + 1, :, :pads[b]], pv, vb[b:b + 1, :, pads[b] + P:]],
+            axis=2))
+    k = mx.concatenate(rk, axis=0)
+    v = mx.concatenate(rv, axis=0)
+    q = mx.random.normal((B, hq, qL, 128)).astype(mx.float16)
+    cache = _FakeBatchCache(pads, P=P)
+    n0 = cs.claims()
+    got = llama_mod.scaled_dot_product_attention(
+        q, k, v, cache=cache, scale=0.088, mask="causal")
+    assert cs.claims() == n0 + 1
+
+    kr = mx.repeat(k, hq // hkv, axis=1).astype(mx.float32)
+    vr = mx.repeat(v, hq // hkv, axis=1).astype(mx.float32)
+    sc = (q.astype(mx.float32) * 0.088) @ kr.swapaxes(-1, -2)
+    pos = mx.arange(L)[None, None, None, :]
+    end = (L - qL) + mx.arange(qL)[None, None, :, None]
+    pad = mx.array(pads)[:, None, None, None]
+    keep = (pos >= pad) & (pos <= end)
+    ref = mx.softmax(
+        mx.where(keep, sc, mx.array(-mx.inf)), axis=-1) @ vr
+    err = mx.abs(got.astype(mx.float32) - ref).max().item()
+    assert err < 2e-2, f"verify-width cascade err={err}"
+
+    # None mask at verify width = unmasked block: never claimed
+    llama_mod.scaled_dot_product_attention(
+        q, k, v, cache=_FakeBatchCache(pads, P=P), scale=0.088, mask=None)
+    assert cs.claims() == n0 + 1
+    # over the folded-row cap (3 * 2 * 8 = 48 ok; force with wider gqa)
+    qw = mx.random.normal((B, 32, 8, 128)).astype(mx.float16)
+    llama_mod.scaled_dot_product_attention(
+        qw, k, v, cache=_FakeBatchCache(pads, P=P), scale=0.088,
+        mask="causal")
+    assert cs.claims() == n0 + 1
+
+
+@pytest.mark.skipif(not _has_cascade_op(), reason="fused cascade op needs GPU")
 def test_qwen_owned_path_claims(monkeypatch):
     """The owned qwen left-padded decode resolver routes stamped B>1
     qL==1 calls through the cascade claim before the ragged kernels."""

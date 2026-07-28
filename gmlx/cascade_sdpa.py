@@ -28,13 +28,14 @@ Two pieces, both in this module:
   cascade too. B=1 batches are stamped -- inert until rows join.
 
 * A decode route. Module-global scaled_dot_product_attention seams (the
-  gemma4_batched_sdpa pattern) claim stamped B>1 qL==1 calls and issue the
-  fused op on zero-copy views of the live cache buffer: k_shared is row 0's
-  prefix copy, the private slab starts at C0 = min_b(L_b + P), and
-  starts[b] = L_b + P - C0 masks each row's own prefix bytes inside the
-  slab. Anything else falls through to the wrapped original, and any kernel
-  rejection lands on stock via try/except -- the route can only decline,
-  never break a step.
+  gemma4_batched_sdpa pattern) claim stamped B>1 calls at decode width
+  (qL 1) and speculative-verify width (qL 2..8, end-aligned causal on the
+  private slab) and issue the fused op on zero-copy views of the live
+  cache buffer: k_shared is row 0's prefix copy, the private slab starts
+  at C0 = min_b(L_b + P), and starts[b] = L_b + P - C0 masks each row's
+  own prefix bytes inside the slab. Anything else falls through to the
+  wrapped original, and any kernel rejection lands on stock via
+  try/except -- the route can only decline, never break a step.
 
 Install is idempotent; GMLX_CASCADE_SDPA=0 disables both pieces;
 GMLX_CASCADE_MIN_P (default 1024) sets the smallest shared prefix worth
@@ -104,14 +105,19 @@ def _starts_for(cache, pads, P):
     return starts, c0
 
 
-def _mask_claimable(mask):
-    # Decode-width claims only: None, mx.fast's "causal" string, or a
-    # boolean visibility mask of decode width. The route reproduces
-    # left-pad visibility exactly (full shared region + per-row starts on
-    # the private slab), so the array mask's content is redundant.
-    if mask is None or (isinstance(mask, str) and mask == "causal"):
+def _mask_claimable(mask, qL):
+    # Decode width (qL 1): None, mx.fast's "causal" string, or a boolean
+    # visibility mask of decode width. Verify width (qL 2..8): "causal"
+    # or an array mask of matching width -- its content is left-pad
+    # visibility plus the end-aligned in-block causal, which the fused
+    # op reproduces (full shared region + per-row starts + causal clamp
+    # on the private slab). None at qL > 1 would mean an unmasked block:
+    # never claim it.
+    if isinstance(mask, str) and mask == "causal":
         return True
-    return isinstance(mask, mx.array) and mask.ndim >= 2 and mask.shape[-2] == 1
+    if mask is None:
+        return qL == 1
+    return isinstance(mask, mx.array) and mask.ndim >= 2 and mask.shape[-2] == qL
 
 
 _DEBUGGED = [0]
@@ -135,12 +141,13 @@ def _claim(queries, keys, values, cache, scale, mask, sinks):
         return None
     B, Hq = queries.shape[0], queries.shape[1]
     hd = queries.shape[-1]
+    qL = queries.shape[2] if queries.ndim == 4 else 0
     if not (
         sinks is None
         and isinstance(keys, mx.array)
         and queries.ndim == 4
         and B > 1
-        and queries.shape[2] == 1
+        and 1 <= qL <= 8
         and hd in _HD_OK
         and keys.shape[-1] == hd
         and values.shape[-1] == hd
@@ -151,7 +158,7 @@ def _claim(queries, keys, values, cache, scale, mask, sinks):
         and keys.dtype == queries.dtype
         and not hasattr(cache, "bits")
         and getattr(cache, "_right_padding", None) is None
-        and _mask_claimable(mask)
+        and _mask_claimable(mask, qL)
     ):
         _debug_decline(
             "shape/dtype/mask", B=B, qL=queries.shape[2], hd=hd,
@@ -163,7 +170,9 @@ def _claim(queries, keys, values, cache, scale, mask, sinks):
             sinks=sinks is not None)
         return None
     gqa = Hq // keys.shape[1]
-    if gqa > 16 or B * gqa > (32 if hd == 512 else 64):
+    if gqa > 16 or B * gqa * qL > (32 if hd == 512 else 64):
+        return None
+    if qL > 1 and gqa * ((qL + 1) // 2) > 32:
         return None
     P = info["P"]
     if P < env_int("GMLX_CASCADE_MIN_P", 1024):
@@ -173,7 +182,7 @@ def _claim(queries, keys, values, cache, scale, mask, sinks):
         return None
     kL = keys.shape[2]
     starts, c0 = _starts_for(cache, pads[:B], P)
-    if kL - c0 < 1 or max(pads[:B]) + P > kL:
+    if kL - c0 < qL or max(pads[:B]) + P > kL - qL + 1:
         _debug_decline("geometry", kL=kL, c0=c0, P=P, pads=pads[:B])
         return None
     l0 = pads[0]
@@ -192,11 +201,11 @@ def _claim(queries, keys, values, cache, scale, mask, sinks):
     except Exception as e:
         _debug_decline("kernel", err=str(e)[:120])
         return None
-    if B not in _SEEN_B:  # one line per batch width, not per call
-        _SEEN_B.add(B)
+    if (B, qL) not in _SEEN_B:  # one line per (batch, query) width
+        _SEEN_B.add((B, qL))
         import sys
 
-        print(f"[cascade] claimed: B={B} P={P} hd={hd} gqa={gqa}",
+        print(f"[cascade] claimed: B={B} qL={qL} P={P} hd={hd} gqa={gqa}",
               file=sys.stderr, flush=True)
     _CLAIMS[0] += 1
     return out
