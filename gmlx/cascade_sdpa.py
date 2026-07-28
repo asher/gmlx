@@ -161,6 +161,11 @@ def _claim(queries, keys, values, cache, scale, mask, sinks):
         )
     except Exception:
         return None
+    if _CLAIMS[0] == 0:
+        import sys
+
+        print(f"[cascade] claimed: B={B} P={P} hd={hd} gqa={gqa}",
+              file=sys.stderr, flush=True)
     _CLAIMS[0] += 1
     return out
 
@@ -261,6 +266,11 @@ def _stamp_caches(caches, shared_tokens):
     for c in caches:
         c._gmlx_cascade = {"P": shared_tokens}
         _drop_stamp_on_extend(c)
+    if _STAMPS[0] == 0:
+        import sys
+
+        print(f"[cascade] stamped warm batch: shared P={shared_tokens}",
+              file=sys.stderr, flush=True)
     _STAMPS[0] += 1
 
 
