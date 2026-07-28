@@ -234,6 +234,67 @@ def test_qwen_owned_path_claims(monkeypatch):
 
 
 @pytest.mark.skipif(not _has_cascade_op(), reason="fused cascade op needs GPU")
+def test_qwen_owned_verify_width_claims(monkeypatch):
+    """The owned qwen verify resolver routes stamped B>1 qL>1 calls
+    through the cascade claim ahead of the padded masked-sdpa branch."""
+    from gmlx import qwen35_attn as qa
+
+    monkeypatch.setenv("GMLX_CASCADE_MIN_P", "256")
+    P, sp, qL = 1024, 96, 4
+    B, hq, hkv = 2, 16, 8
+    pads = [0, 48]
+    _, k, v = _shared_batch(B, hq, hkv, P, sp, pads)
+    mx.random.seed(23)
+    q = mx.random.normal((B, hq, qL, 128)).astype(mx.float16)
+    mx.eval(q)
+    L = k.shape[-2]
+
+    def _cache(stamped=True):
+        c = _FakeBatchCache(pads, P=P if stamped else None)
+        c._qwen3_5_decode_left_padding = list(pads)
+        return c
+
+    n0 = cs.claims()
+    got = qa._verify_attention(q, k, v, cache=_cache(), scale=0.088,
+                               mask=None)
+    assert cs.claims() == n0 + 1
+
+    # padded verify reference: left-pad visibility + end-aligned causal
+    kr = mx.repeat(k, hq // hkv, axis=1).astype(mx.float32)
+    vr = mx.repeat(v, hq // hkv, axis=1).astype(mx.float32)
+    sc = (q.astype(mx.float32) * 0.088) @ kr.swapaxes(-1, -2)
+    pos = mx.arange(L)[None, None, None, :]
+    end = (L - qL) + mx.arange(qL)[None, None, :, None]
+    pad = mx.array(pads)[:, None, None, None]
+    keep = (pos >= pad) & (pos <= end)
+    ref = mx.softmax(
+        mx.where(keep, sc, mx.array(-mx.inf)), axis=-1) @ vr
+    err = mx.abs(got.astype(mx.float32) - ref).max().item()
+    assert err < 2e-2, f"qwen verify-width cascade err={err}"
+
+    # kill switch: masked-sdpa branch answers instead, no claim
+    monkeypatch.setenv("GMLX_CASCADE_SDPA", "0")
+    got2 = qa._verify_attention(q, k, v, cache=_cache(), scale=0.088,
+                                mask=None)
+    assert cs.claims() == n0 + 1
+    err2 = mx.abs(got2.astype(mx.float32) - ref).max().item()
+    assert err2 < 2e-2
+    monkeypatch.delenv("GMLX_CASCADE_SDPA", raising=False)
+
+    # unstamped cache: no claim, masked branch still answers
+    got3 = qa._verify_attention(q, k, v, cache=_cache(stamped=False),
+                                scale=0.088, mask=None)
+    assert cs.claims() == n0 + 1
+    err3 = mx.abs(got3.astype(mx.float32) - ref).max().item()
+    assert err3 < 2e-2
+
+    # array masks stay conservative: never claimed
+    am = mx.zeros((B, 1, qL, L), dtype=q.dtype)
+    qa._verify_attention(q, k, v, cache=_cache(), scale=0.088, mask=am)
+    assert cs.claims() == n0 + 1
+
+
+@pytest.mark.skipif(not _has_cascade_op(), reason="fused cascade op needs GPU")
 def test_starts_memoized_on_pad_identity(monkeypatch):
     _install()
     monkeypatch.setenv("GMLX_CASCADE_MIN_P", "256")

@@ -712,6 +712,21 @@ def _verify_attention(queries, keys, values, *, cache, scale, mask):
     pads = getattr(cache, "_qwen3_5_decode_left_padding", None)
     padded = pads is not None and len(pads) > 0 and max(pads) > 0
     L = queries.shape[-2]
+    if (
+        L > 1
+        and queries.shape[0] > 1
+        and not isinstance(mask, mx.array)
+        and env_bool("GMLX_CASCADE_SDPA", True)
+    ):
+        # verify semantics here are pad visibility + end-aligned causal,
+        # exactly what the fused cascade op reproduces from the cache's
+        # left_padding; array masks (possible overlays) stay conservative
+        from .cascade_sdpa import _claim as _cascade_claim
+
+        output = _cascade_claim(queries, keys, values, cache, scale,
+                                "causal", None)
+        if output is not None:
+            return output
     if padded and (
         L <= 1
         or len(pads) != queries.shape[0]
