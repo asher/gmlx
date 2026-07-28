@@ -300,6 +300,32 @@ re-reads are wider, so the saving is larger). On by default and exact
 `GMLX_CASCADE_MIN_P` (default `1024`) sets the smallest shared prefix
 worth routing.
 
+## Sparse attention at depth (opt-in)
+
+At deep context, decode attention reads the whole KV cache every token, and
+past roughly 16k tokens it comes to dominate the step. `GMLX_SPARSE_ATTN=1`
+switches deep decode to top-k sparse attention: the runtime keeps a small
+index over the cache (one mean key per 32-token page, maintained as the
+cache grows) and each step attends only the best-scoring pages within a
+fixed token budget, plus the attention sink and the most recent pages, which
+are always kept. Attention cost stops growing with depth.
+
+This is lossy, which is why it is opt-in. Measured on a Llama-3.1-8B Q6_K
+at 32k depth with the default 2048-token budget: mean KL divergence against
+full attention of 0.008 - the same order as the quantization noise of a Q6
+checkpoint - at 1.40x end-to-end decode single-stream, and 1.8x aggregate
+over the exact cascade route at three streams on a 26k shared prompt. The
+index is good at finding the pages a query actually needs (needle lookups
+deep in the context keep working); the always-resident sink and recency
+pages keep the failure mode graceful when it is not.
+
+`GMLX_SPARSE_K` sets the budget (default `2048` tokens: larger tracks full
+attention closer, smaller is faster), and `GMLX_SPARSE_MIN_S` (default
+`8192`) sets the depth where the route engages - below it full attention is
+already cheap and the route stays off. Applies to fp16/bf16 KV caches at
+decode width; quantized-KV caches and speculative verify steps run full
+attention.
+
 ## Memory and the KV cache
 
 Weights cost about the GGUF file size. The KV cache, for a standard dense model:

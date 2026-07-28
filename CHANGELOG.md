@@ -17,6 +17,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   drafter decode 1.37x faster aggregate, and native-MTP models (qwen)
   get the same verify-round win. Composes with quantized KV
   (`kv_bits: 8`).
+- Opt-in sparse attention for deep contexts: `GMLX_SPARSE_ATTN=1` decodes
+  past `GMLX_SPARSE_MIN_S` (default 8192) tokens attending only the
+  top-scoring KV pages within a `GMLX_SPARSE_K` (default 2048) token budget.
+  Attention cost stops growing with depth - 1.40x end-to-end decode at 32k,
+  quality loss on the order of Q6 quantization noise.
 - Sliding-window models (gemma-4) join the hybrid prompt-cache checkpoint
   tier, and prefill now checkpoints at intervals (`GMLX_APC_CKPT_INTERVAL`,
   default 4096 tokens): a burst of long shared-prefix requests converts to
