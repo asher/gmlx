@@ -715,16 +715,20 @@ def _verify_attention(queries, keys, values, *, cache, scale, mask):
     if (
         L > 1
         and queries.shape[0] > 1
-        and not isinstance(mask, mx.array)
         and env_bool("GMLX_CASCADE_SDPA", True)
     ):
-        # verify semantics here are pad visibility + end-aligned causal,
-        # exactly what the fused cascade op reproduces from the cache's
-        # left_padding; array masks (possible overlays) stay conservative
+        # Layer masks on this tree are always cache-derived (the owned
+        # model call drops any caller mask), so at verify width they
+        # encode pad visibility + end-aligned causal -- exactly what
+        # the fused cascade op reproduces from cache.left_padding. The
+        # claim re-derives pads itself and declines right padding and
+        # width-mismatched arrays; None means "causal" on this
+        # resolver, so map it before the claim.
         from .cascade_sdpa import _claim as _cascade_claim
 
-        output = _cascade_claim(queries, keys, values, cache, scale,
-                                "causal", None)
+        output = _cascade_claim(
+            queries, keys, values, cache, scale,
+            mask if isinstance(mask, mx.array) else "causal", None)
         if output is not None:
             return output
     if padded and (

@@ -288,10 +288,20 @@ def test_qwen_owned_verify_width_claims(monkeypatch):
     err3 = mx.abs(got3.astype(mx.float32) - ref).max().item()
     assert err3 < 2e-2
 
-    # array masks stay conservative: never claimed
+    # width-matched array masks claim too: this tree's masks are always
+    # cache-derived pad+causal, and the claim re-derives from pads
     am = mx.zeros((B, 1, qL, L), dtype=q.dtype)
-    qa._verify_attention(q, k, v, cache=_cache(), scale=0.088, mask=am)
-    assert cs.claims() == n0 + 1
+    got4 = qa._verify_attention(q, k, v, cache=_cache(), scale=0.088,
+                                mask=am)
+    assert cs.claims() == n0 + 2
+    err4 = mx.abs(got4.astype(mx.float32) - ref).max().item()
+    assert err4 < 2e-2
+
+    # right padding: claim declines, masked branch answers
+    c5 = _cache()
+    c5._right_padding = [0, 1]
+    qa._verify_attention(q, k, v, cache=c5, scale=0.088, mask=None)
+    assert cs.claims() == n0 + 2
 
 
 @pytest.mark.skipif(not _has_cascade_op(), reason="fused cascade op needs GPU")
@@ -331,6 +341,20 @@ def test_install_idempotent_and_killable(monkeypatch):
 
 def _rb(ids):
     return cs._row_bytes(ids)
+
+
+def test_carry_stamp():
+    """Owned prefill merge rebuilds cache objects; carry_stamp moves the
+    formation stamp onto the merged cache and re-arms the extend hook."""
+    src = _FakeBatchCache([0, 0], P=512)
+    dst = _FakeBatchCache([0, 0])
+    cs.carry_stamp(src, dst)
+    assert dst._gmlx_cascade == src._gmlx_cascade
+    assert getattr(dst.extend, "_gmlx_cascade_merge", False)
+    # unstamped src is a no-op
+    dst2 = _FakeBatchCache([0, 0])
+    cs.carry_stamp(_FakeBatchCache([0, 0]), dst2)
+    assert "_gmlx_cascade" not in dst2.__dict__
 
 
 def test_lcp_rows():

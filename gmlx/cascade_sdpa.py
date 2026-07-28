@@ -345,6 +345,20 @@ def _mask_stamp_on_filter(cache):
     cache.filter = _filter
 
 
+def carry_stamp(src, dst):
+    """Copy a live cascade stamp from one cache object to another.
+
+    Owned prefill paths that rebuild per-layer caches through class
+    merge (fresh objects) call this so the formation stamp survives;
+    row order is unchanged there, so the stamp stays valid as-is."""
+    st = src.__dict__.get("_gmlx_cascade") if src is not None else None
+    if st is None or dst is None:
+        return
+    dst._gmlx_cascade = st
+    _merge_stamp_on_extend(dst)
+    _mask_stamp_on_filter(dst)
+
+
 def _stamp_caches(caches, rows):
     """Stamp every layer cache with the batch's shared token prefix.
     rows: per-row packed token bytes, cache row order. No-op when the
