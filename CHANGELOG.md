@@ -57,6 +57,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   construction (`GMLX_GEMMA_OWNED=0` reverts to the stock classes plus the
   patch regime; numerics identical either way).
 
+### Fixed
+
+- Quantized-KV (`kv_bits`) prefill no longer runs 1.6-1.9x slower than
+  fp16: prefill-width attention now takes the fused flash path
+  (`GMLX_KV8_PREFILL_FLASH=0` restores the old behavior).
+
 ## [0.1.4] - 2026-07-27
 
 ### Added

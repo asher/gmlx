@@ -1,30 +1,43 @@
-"""Upstream-bug fix: quantized-KV SDPA mask broadcast at B>1 with GQA.
+"""Quantized-KV SDPA fixes at both base-module seams.
 
 Both mlx_lm.models.base and mlx_vlm.models.base carry the same
-quantized_scaled_dot_product_attention: when n_repeats > 1 it reshapes
-queries to the grouped 5D layout (B, n_kv_heads, n_repeats, L, D), so the
-score tensor is 5D -- but an array mask is applied as-is. A batched
+quantized_scaled_dot_product_attention. Two independent problems live
+there, patched by one wrapper:
+
+Mask broadcast at B>1 with GQA (upstream bug): when n_repeats > 1 it
+reshapes queries to the grouped 5D layout (B, n_kv_heads, n_repeats, L, D),
+so the score tensor is 5D -- but an array mask is applied as-is. A batched
 left-pad mask (B, 1, 1, kv) left-pads to (1, B, 1, 1, kv) under broadcast,
 its batch dim lands in the n_kv_heads slot, and the mx.where raises a
 broadcast error. Every batched (B>1) masked GQA call with a quantized KV
 cache crashes; B=1 works because a leading 1 broadcasts anywhere, which is
-why single-stream kv4/kv8 measurements never saw it.
+why single-stream kv4/kv8 measurements never saw it. The fix inserts one
+axis: a 4D array mask becomes (B, 1, 1, L, kv) before the wrapped call
+whenever the call is grouped. Masks without a real batch dim
+((1, 1, L, kv), 2D, "causal", None) are unchanged in effect -- the expand
+is a no-op under broadcasting -- so the wrapper applies it to every 4D
+array mask rather than sniffing shapes.
 
-The fix inserts one axis: a 4D array mask becomes (B, 1, 1, L, kv) before
-the wrapped call whenever the call is grouped. Masks without a real batch
-dim ((1, 1, L, kv), 2D, "causal", None) are unchanged in effect -- the
-expand is a no-op under broadcasting -- so the wrapper applies it to every
-4D array mask rather than sniffing shapes.
+Prefill-width flash path (perf): the stock body runs two unfused
+mx.quantized_matmul passes plus a separate masked softmax. At decode
+width (qL == 1) that is at parity with the fused fp16 path, but at
+prefill chunk widths it is 3.4-4.2x slower per call, which put
+``kv_bits: 8`` serving 1.6-1.9x behind fp16 on prefill wall time. When
+the query width reaches GMLX_KV8_PREFILL_FLASH_MIN_L (default 8) the
+wrapper dequantizes the K/V wire once (a bandwidth-bound copy, amortized
+over the chunk) and runs fused mx.fast.scaled_dot_product_attention
+instead; grouping never happens on that path, so the mask needs no
+reshaping. Kill with GMLX_KV8_PREFILL_FLASH=0.
 
-Install is idempotent; GMLX_QSDPA_MASK_FIX=0 disables. Patched at each
-base module's symbol (their scaled_dot_product_attention dispatchers read
-the module global at call time).
+Install is idempotent; GMLX_QSDPA_MASK_FIX=0 disables the whole wrapper.
+Patched at each base module's symbol (their scaled_dot_product_attention
+dispatchers read the module global at call time).
 """
 from __future__ import annotations
 
 import mlx.core as mx
 
-from .envflags import env_bool
+from .envflags import env_bool, env_int
 
 _installed = False
 
@@ -34,6 +47,15 @@ _MODULES = ("mlx_lm.models.base", "mlx_vlm.models.base")
 def _make_fixed(orig):
     def _masked_grouped_qsdpa(queries, q_keys, q_values, scale, mask,
                               group_size: int = 64, bits: int = 8):
+        if (
+            queries.shape[-2] >= env_int("GMLX_KV8_PREFILL_FLASH_MIN_L", 8)
+            and env_bool("GMLX_KV8_PREFILL_FLASH", True)
+        ):
+            keys = mx.dequantize(*q_keys, group_size=group_size, bits=bits)
+            values = mx.dequantize(*q_values, group_size=group_size,
+                                   bits=bits)
+            return mx.fast.scaled_dot_product_attention(
+                queries, keys, values, scale=scale, mask=mask)
         if (
             isinstance(mask, mx.array)
             and mask.ndim == 4

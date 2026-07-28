@@ -3,7 +3,11 @@ scores vs a 4D batch mask raises a broadcast error when B != n_kv_heads
 and silently misapplies the mask (batch dim lands in the head slot) when
 B == n_kv_heads. The fix inserts one mask axis; these tests pin the raise
 repro, both numerics cases against a dequantized reference, the
-ungrouped/B=1 pass-through, and install hygiene.
+ungrouped/B=1 pass-through, and install hygiene. The same wrapper routes
+prefill-width calls (qL >= GMLX_KV8_PREFILL_FLASH_MIN_L) through
+dequant + fused flash SDPA; those tests pin numerics vs both the
+dequantized reference and the stock quantized body, the threshold, and
+the kill switch.
 
 Upstream mutates `queries` in place (`queries *= scale`), so every call
 here gets a fresh copy -- reusing one q across calls poisons comparisons.
@@ -95,6 +99,61 @@ def test_ungrouped_and_b1_pass_through():
     assert mx.abs(got - ref).max().item() == 0.0
     # B=1 grouped worked upstream already; fix must agree with it
     q, qk, qv, mask = _case(B=1, nq=8, nkv=4, pads=(3,))
+    got = lm_base.quantized_scaled_dot_product_attention(
+        mx.array(q), qk, qv, 0.125, mask)
+    ref = _orig_lm(mx.array(q), qk, qv, 0.125, mask)
+    assert mx.abs(got - ref).max().item() == 0.0
+
+
+def test_prefill_flash_matches_dequant_reference():
+    # qL >= MIN_L routes dequant+fused-flash; identical ops to _ref -> exact.
+    assert qf.install_quantized_sdpa_mask_fix()
+    q, qk, qv, mask = _case(B=2, nq=8, nkv=4, L=64, kv=256, pads=(5, 0))
+    got = lm_base.quantized_scaled_dot_product_attention(
+        mx.array(q), qk, qv, 0.125, mask)
+    assert mx.abs(got - _ref(q, qk, qv, mask)).max().item() == 0.0
+
+
+def test_prefill_flash_matches_stock_numerics():
+    # Cross-check the flash path against the stock quantized body (mask
+    # pre-expanded for the upstream 5D bug) at prefill width.
+    assert qf.install_quantized_sdpa_mask_fix()
+    q, qk, qv, mask = _case(B=2, nq=8, nkv=4, L=32, kv=256, pads=(5, 0))
+    got = lm_base.quantized_scaled_dot_product_attention(
+        mx.array(q), qk, qv, 0.125, mask)
+    stock = _orig_lm(mx.array(q), qk, qv, 0.125, mask[:, None])
+    err = mx.abs(got - stock).max().item()
+    assert err < 2e-2, f"flash vs stock err={err}"
+
+
+def test_prefill_flash_causal_str_mask():
+    assert qf.install_quantized_sdpa_mask_fix()
+    q, qk, qv, _ = _case(B=1, nq=8, nkv=4, L=16, kv=64)
+    got = lm_base.quantized_scaled_dot_product_attention(
+        mx.array(q), qk, qv, 0.125, "causal")
+    stock = _orig_lm(mx.array(q), qk, qv, 0.125, "causal")
+    err = mx.abs(got - stock).max().item()
+    assert err < 2e-2, f"causal flash vs stock err={err}"
+
+
+def test_prefill_flash_threshold_and_kill(monkeypatch):
+    assert qf.install_quantized_sdpa_mask_fix()
+    # below MIN_L: stock quantized path (compare exact vs orig)
+    q, qk, qv, mask = _case(B=1, nq=8, nkv=4, L=4, kv=64, pads=(3,))
+    got = lm_base.quantized_scaled_dot_product_attention(
+        mx.array(q), qk, qv, 0.125, mask)
+    ref = _orig_lm(mx.array(q), qk, qv, 0.125, mask)
+    assert mx.abs(got - ref).max().item() == 0.0
+    # raised threshold: prefill width falls back to stock
+    monkeypatch.setenv("GMLX_KV8_PREFILL_FLASH_MIN_L", "128")
+    q, qk, qv, mask = _case(B=1, nq=8, nkv=4, L=64, kv=256, pads=(3,))
+    got = lm_base.quantized_scaled_dot_product_attention(
+        mx.array(q), qk, qv, 0.125, mask)
+    ref = _orig_lm(mx.array(q), qk, qv, 0.125, mask)
+    assert mx.abs(got - ref).max().item() == 0.0
+    monkeypatch.delenv("GMLX_KV8_PREFILL_FLASH_MIN_L", raising=False)
+    # kill switch: flash off, stock path even at prefill width
+    monkeypatch.setenv("GMLX_KV8_PREFILL_FLASH", "0")
     got = lm_base.quantized_scaled_dot_product_attention(
         mx.array(q), qk, qv, 0.125, mask)
     ref = _orig_lm(mx.array(q), qk, qv, 0.125, mask)
