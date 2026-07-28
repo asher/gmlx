@@ -10,11 +10,21 @@ host logic and always run."""
 import mlx.core as mx
 import pytest
 
+import importlib
+
 from mlx_lm.models import llama as llama_mod
 
 from gmlx import cascade_sdpa as cs
 
 _orig_llama = llama_mod.scaled_dot_product_attention
+_ORIG_SEAMS = []
+for _pkg, _name in cs._MODULES:
+    try:
+        _mod = importlib.import_module(f"{_pkg}.{_name}")
+    except ImportError:
+        continue
+    _ORIG_SEAMS.append((_mod, getattr(_mod, "scaled_dot_product_attention",
+                                      None)))
 
 
 def _has_cascade_op():
@@ -26,7 +36,9 @@ def _has_cascade_op():
 
 
 def teardown_module(module):
-    llama_mod.scaled_dot_product_attention = _orig_llama
+    for _mod, _fn in _ORIG_SEAMS:
+        if _fn is not None:
+            _mod.scaled_dot_product_attention = _fn
     cs._installed_route = False
     cs._installed_stamp = False
 
@@ -171,47 +183,72 @@ class _FakeBlock:
         self.values = [mx.zeros((1, 2, ntok, 8))]
 
 
-def test_common_prefix_block_identity():
+def test_common_chain_block_identity():
     a, b, c, d = _FakeBlock(16), _FakeBlock(16), _FakeBlock(16), _FakeBlock(16)
     picks = [
         {"matched_blocks": [a, b, c], "prefix_len": 48},
         {"matched_blocks": [a, b, d], "prefix_len": 48},
     ]
-    assert cs._common_prefix_tokens(picks) == 32  # a + b shared, c != d
+    chain, widths = cs._common_chain(picks)
+    assert chain == (a, b) and sum(widths) == 32  # a + b shared, c != d
     picks[1]["matched_blocks"] = [a, b, c]
-    assert cs._common_prefix_tokens(picks) == 48
+    assert sum(cs._common_chain(picks)[1]) == 48
     # equal-content but distinct objects share nothing (identity only)
     picks[1]["matched_blocks"] = [_FakeBlock(16), b, c]
-    assert cs._common_prefix_tokens(picks) == 0
+    assert cs._common_chain(picks) == ((), ())
 
 
-def test_common_prefix_cold_and_scalar():
+def test_common_chain_scalar_and_cold():
     a = _FakeBlock(16)
-    assert cs._common_prefix_tokens([{"matched_blocks": [a],
-                                      "prefix_len": 16}]) == 0
-    assert cs._common_prefix_tokens([
-        {"matched_blocks": [a], "prefix_len": 16}, None]) == 0
+    # a single warm pick shares its WHOLE chain (feeds extend merges)
+    chain, widths = cs._common_chain([{"matched_blocks": [a],
+                                       "prefix_len": 16}])
+    assert chain == (a,) and widths == (16,)
+    assert cs._common_chain([
+        {"matched_blocks": [a], "prefix_len": 16}, None]) == ((), ())
 
 
-def test_common_prefix_exact_mode():
+def test_common_chain_exact_mode():
     warm = object()
     picks = [
         {"warm_cache": warm, "prefix_len": 512, "matched_blocks": None},
         {"warm_cache": warm, "prefix_len": 512, "matched_blocks": None},
     ]
-    assert cs._common_prefix_tokens(picks) == 512
+    assert cs._common_chain(picks) == ((warm,), (512,))
     picks[1]["warm_cache"] = object()
-    assert cs._common_prefix_tokens(picks) == 0
+    assert cs._common_chain(picks) == ((), ())
 
 
-def test_stamp_dropped_on_extend_kept_on_filter():
+def test_stamp_merge_on_extend():
+    a, b, c, d = _FakeBlock(16), _FakeBlock(16), _FakeBlock(16), _FakeBlock(16)
     cache = _FakeBatchCache([0, 0])
-    cs._stamp_caches([cache], 1024)
-    assert cache._gmlx_cascade == {"P": 1024}
-    assert cache.extend(object()) == "extended"
+    cs._stamp_caches([cache], (a, b, c), (16, 16, 16))
+    assert cache._gmlx_cascade["P"] == 48
+
+    # same-prefix admission: common chain survives with the shared P
+    other = _FakeBatchCache([0])
+    cs._stamp_caches([other], (a, b, d), (16, 16, 16))
+    assert cache.extend(other) == "extended"
+    assert cache._gmlx_cascade["P"] == 32
+    assert cache._gmlx_cascade["chain"] == (a, b)
+
+    # unstamped admission clears it
+    assert cache.extend(_FakeBatchCache([0])) == "extended"
     assert not hasattr(cache, "_gmlx_cascade")
-    # a second extend still works (wrapper is single-shot on the attr)
-    assert cache.extend(object()) == "extended"
+
+    # a later extend still works and stays clear
+    assert cache.extend(other) == "extended"
+    assert not hasattr(cache, "_gmlx_cascade")
+
+
+def test_stamp_merge_divergent_chain_clears():
+    a, b = _FakeBlock(16), _FakeBlock(16)
+    cache = _FakeBatchCache([0])
+    cs._stamp_caches([cache], (a,), (16,))
+    other = _FakeBatchCache([0])
+    cs._stamp_caches([other], (b,), (16,))
+    cache.extend(other)
+    assert not hasattr(cache, "_gmlx_cascade")
 
 
 def test_warm_multi_wrapper_stamps():
@@ -228,13 +265,23 @@ def test_warm_multi_wrapper_stamps():
     wrapped = cs._make_stamped_warm_multi(fake_orig)
     out_caches, max_prefix = wrapped(picks, 2)
     assert out_caches is caches and max_prefix == 32
-    assert all(c._gmlx_cascade == {"P": 32} for c in caches)
+    assert all(c._gmlx_cascade["P"] == 32 for c in caches)
 
     # cold row -> no stamp
     caches2 = [_FakeBatchCache([0, 0])]
     wrapped2 = cs._make_stamped_warm_multi(lambda p, n: (caches2, 32))
     wrapped2([picks[0], None], 1)
     assert not hasattr(caches2[0], "_gmlx_cascade")
+
+
+def test_warm_single_wrapper_stamps():
+    a, b = _FakeBlock(16), _FakeBlock(16)
+    caches = [_FakeBatchCache([0])]
+    wrapped = cs._make_stamped_warm_single(lambda blocks: caches)
+    out = wrapped([a, b])
+    assert out is caches
+    assert caches[0]._gmlx_cascade["P"] == 32
+    assert caches[0]._gmlx_cascade["chain"] == (a, b)
 
 
 def test_stamp_install_killable(monkeypatch):

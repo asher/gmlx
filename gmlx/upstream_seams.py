@@ -146,6 +146,9 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.apc", "make_warm_batch_kv_cache_multi",
          "cascade_sdpa.install_cascade_stamp (shared-prefix detection at "
          "the warm-batch duplication point)"),
+    Seam("mlx_vlm.apc", "make_warm_batch_kv_cache",
+         "cascade_sdpa.install_cascade_stamp (single-row chain stamp for "
+         "extend()-path admission merges)"),
     # --- speculative / AR batch engine (spec_engine owns these methods) ---
     Seam("mlx_vlm.generate.ar", "BatchGenerator.__init__",
          "spec_engine._install_apc_manager_stash", critical=True),

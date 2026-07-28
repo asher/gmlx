@@ -16,13 +16,18 @@ Two pieces, both in this module:
   every row's pick resolves to the same block chain (object identity on
   APCBlock entries -- concurrent hits on one cached prefix return the same
   blocks) or the same exact-cache snapshot, the shared token length P is
-  stamped on each layer cache as ``_gmlx_cascade``. Rows may extend past a
-  common chain: the stamp records the COMMON prefix only. The stamp's
-  invariant is "keys[b, :, L_b : L_b + P] is byte-identical across rows",
-  with L_b read live from cache.left_padding -- filter()'s uniform
-  left-shift preserves it, so retirement keeps the stamp; extend() admits a
-  row with an arbitrary prefix, so an instance-level extend wrapper drops
-  the stamp on injection.
+  stamped on each layer cache as ``_gmlx_cascade`` together with the block
+  chain itself (strong refs). Rows may extend past a common chain: the
+  stamp records the COMMON prefix only. The stamp's invariant is
+  "keys[b, :, L_b : L_b + P] is byte-identical across rows", with L_b read
+  live from cache.left_padding -- filter()'s uniform left-shift preserves
+  it, so retirement keeps the stamp. extend() (admission of new rows into
+  a live batch) re-derives the stamp as the longest common object-identity
+  chain of both sides: same-prefix admission keeps cascading, a diverging
+  or cold row clears it. B=1 warm batches are stamped too -- they never
+  route (the claim gate needs B>1) but they carry the chain into the
+  merges, which is exactly the steady serve flow (one live request, more
+  arriving on the same prefix).
 
 * A decode route. Module-global scaled_dot_product_attention seams (the
   gemma4_batched_sdpa pattern) claim stamped B>1 qL==1 calls and issue the
@@ -107,6 +112,18 @@ def _mask_claimable(mask):
     return isinstance(mask, mx.array) and mask.ndim >= 2 and mask.shape[-2] == 1
 
 
+_DEBUGGED = [0]
+
+
+def _debug_decline(reason, **kw):
+    import os
+    import sys
+
+    if os.environ.get("GMLX_CASCADE_DEBUG") == "1" and _DEBUGGED[0] < 8:
+        _DEBUGGED[0] += 1
+        print(f"[cascade] decline: {reason} {kw}", file=sys.stderr, flush=True)
+
+
 def _claim(queries, keys, values, cache, scale, mask, sinks):
     """Cascade output for a claimable stamped decode call, else None."""
     info = getattr(cache, "_gmlx_cascade", None)
@@ -132,6 +149,14 @@ def _claim(queries, keys, values, cache, scale, mask, sinks):
         and getattr(cache, "_right_padding", None) is None
         and _mask_claimable(mask)
     ):
+        _debug_decline(
+            "shape/dtype/mask", B=B, qL=queries.shape[2], hd=hd,
+            kshape=tuple(keys.shape), qdt=str(queries.dtype),
+            kdt=str(keys.dtype), bits=hasattr(cache, "bits"),
+            rp=getattr(cache, "_right_padding", None) is not None,
+            mask=type(mask).__name__ if not isinstance(mask, str) else mask,
+            mshape=tuple(mask.shape) if isinstance(mask, mx.array) else None,
+            sinks=sinks is not None)
         return None
     gqa = Hq // keys.shape[1]
     if gqa > 16 or B * gqa > (32 if hd == 512 else 64):
@@ -145,6 +170,7 @@ def _claim(queries, keys, values, cache, scale, mask, sinks):
     kL = keys.shape[2]
     starts, c0 = _starts_for(cache, pads[:B], P)
     if kL - c0 < 1 or max(pads[:B]) + P > kL:
+        _debug_decline("geometry", kL=kL, c0=c0, P=P, pads=pads[:B])
         return None
     l0 = pads[0]
     try:
@@ -159,7 +185,8 @@ def _claim(queries, keys, values, cache, scale, mask, sinks):
             scale,
             starts=starts,
         )
-    except Exception:
+    except Exception as e:
+        _debug_decline("kernel", err=str(e)[:120])
         return None
     if _CLAIMS[0] == 0:
         import sys
@@ -220,56 +247,87 @@ def install_cascade_sdpa() -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _common_prefix_tokens(picks) -> int:
-    """Shared token length across all picks, 0 when nothing is shared.
+def _common_chain(picks):
+    """(chain, widths) shared across all picks, ((), ()) when nothing is.
 
-    Block mode: the longest common APCBlock chain by object identity (two
-    rows that hit the same cached prefix get the same block objects from the
-    manager). Exact mode: the full prefix when every row carries the same
-    warm_cache snapshot object. Mixed or cold rows share nothing.
+    Block mode: the longest common APCBlock chain by object identity (rows
+    that hit the same cached prefix get the same block objects from the
+    manager); a single warm pick shares its whole chain -- a B=1 stamp
+    never routes, but it carries the chain into extend() merges when new
+    same-prefix rows are admitted. Exact mode: the snapshot object stands
+    in as a one-element chain. Cold rows share nothing.
     """
-    if len(picks) < 2 or any(p is None for p in picks):
-        return 0
+    if not picks or any(p is None for p in picks):
+        return (), ()
     if all(p.get("warm_cache") is not None for p in picks):
         first = picks[0]["warm_cache"]
         if all(p["warm_cache"] is first for p in picks[1:]) and len(
             {p["prefix_len"] for p in picks}
         ) == 1:
-            return picks[0]["prefix_len"]
-        return 0
+            return (first,), (picks[0]["prefix_len"],)
+        return (), ()
     if any(p.get("matched_blocks") is None for p in picks):
-        return 0
-    chains = [p["matched_blocks"] for p in picks]
-    shared = 0
-    for blocks in zip(*chains):
+        return (), ()
+    chain, widths = [], []
+    for blocks in zip(*[p["matched_blocks"] for p in picks]):
         first = blocks[0]
         if any(b is not first for b in blocks[1:]):
             break
-        shared += first.keys[0].shape[-2]
-    return shared
+        chain.append(first)
+        widths.append(first.keys[0].shape[-2])
+    return tuple(chain), tuple(widths)
 
 
-def _drop_stamp_on_extend(cache):
-    """Instance-level extend wrapper: an injected row need not share the
-    prefix, so admission invalidates the stamp. filter() is left alone --
-    its uniform left-shift preserves the stamp's invariant."""
+def _merge_stamps(a, b):
+    """Stamp for a batch formed by extend(): the longest common
+    object-identity prefix of the two chains, None when nothing survives."""
+    if a is None or b is None:
+        return None
+    chain, widths = [], []
+    for x, w, y in zip(a["chain"], a["widths"], b["chain"]):
+        if x is not y:
+            break
+        chain.append(x)
+        widths.append(w)
+    P = sum(widths)
+    if P <= 0:
+        return None
+    return {"P": P, "chain": tuple(chain), "widths": tuple(widths)}
+
+
+def _merge_stamp_on_extend(cache):
+    """Instance-level extend wrapper: admission re-derives the stamp as
+    the common chain of both sides (an unstamped or cold side clears it).
+    filter() is left alone -- its uniform left-shift preserves the stamp's
+    invariant for surviving rows."""
+    if getattr(cache.extend, "_gmlx_cascade_merge", False):
+        return
     orig = cache.extend
 
     def _extend(other, _c=cache, _orig=orig):
-        _c.__dict__.pop("_gmlx_cascade", None)
-        return _orig(other)
+        merged = _merge_stamps(
+            _c.__dict__.get("_gmlx_cascade"),
+            getattr(other, "_gmlx_cascade", None))
+        out = _orig(other)
+        if merged is None:
+            _c.__dict__.pop("_gmlx_cascade", None)
+        else:
+            _c._gmlx_cascade = merged
+        return out
 
+    _extend._gmlx_cascade_merge = True
     cache.extend = _extend
 
 
-def _stamp_caches(caches, shared_tokens):
+def _stamp_caches(caches, chain, widths):
+    P = sum(widths)
     for c in caches:
-        c._gmlx_cascade = {"P": shared_tokens}
-        _drop_stamp_on_extend(c)
+        c._gmlx_cascade = {"P": P, "chain": chain, "widths": widths}
+        _merge_stamp_on_extend(c)
     if _STAMPS[0] == 0:
         import sys
 
-        print(f"[cascade] stamped warm batch: shared P={shared_tokens}",
+        print(f"[cascade] stamped warm batch: shared P={P}",
               file=sys.stderr, flush=True)
     _STAMPS[0] += 1
 
@@ -280,9 +338,9 @@ def _make_stamped_warm_multi(orig):
         try:
             caches, max_prefix = out
             if caches and max_prefix:
-                shared = _common_prefix_tokens(picks)
-                if shared > 0:
-                    _stamp_caches(caches, shared)
+                chain, widths = _common_chain(picks)
+                if sum(widths) > 0:
+                    _stamp_caches(caches, chain, widths)
         except Exception:
             pass
         return out
@@ -290,6 +348,24 @@ def _make_stamped_warm_multi(orig):
     _warm_multi._gmlx_orig = orig
     _warm_multi._gmlx_cascade_stamp = True
     return _warm_multi
+
+
+def _make_stamped_warm_single(orig):
+    def _warm_single(matched_blocks):
+        out = orig(matched_blocks)
+        try:
+            if out and matched_blocks:
+                chain = tuple(matched_blocks)
+                widths = tuple(b.keys[0].shape[-2] for b in chain)
+                if sum(widths) > 0:
+                    _stamp_caches(out, chain, widths)
+        except Exception:
+            pass
+        return out
+
+    _warm_single._gmlx_orig = orig
+    _warm_single._gmlx_cascade_stamp = True
+    return _warm_single
 
 
 def install_cascade_stamp() -> bool:
@@ -310,5 +386,10 @@ def install_cascade_stamp() -> bool:
         return False
     if not getattr(cur, "_gmlx_cascade_stamp", False):
         apc.make_warm_batch_kv_cache_multi = _make_stamped_warm_multi(cur)
+    single = getattr(apc, "make_warm_batch_kv_cache", None)
+    if single is not None and not getattr(
+        single, "_gmlx_cascade_stamp", False
+    ):
+        apc.make_warm_batch_kv_cache = _make_stamped_warm_single(single)
     _installed_stamp = True
     return True
