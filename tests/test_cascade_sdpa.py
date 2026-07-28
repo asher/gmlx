@@ -343,6 +343,50 @@ def _rb(ids):
     return cs._row_bytes(ids)
 
 
+@pytest.mark.skipif(not _has_cascade_op(), reason="fused cascade op needs GPU")
+def test_kv_q8_claim(monkeypatch):
+    """Quantized batch caches (bits 8, group 64) claim through the fused
+    op's q8 operands; other quant configs decline."""
+
+    class _FakeQuantCache(_FakeBatchCache):
+        bits = 8
+        group_size = 64
+
+    monkeypatch.setenv("GMLX_CASCADE_MIN_P", "256")
+    P, pads = 1024, [0, 64, 32]
+    q, k, v = _shared_batch(3, 16, 8, P, 96, pads)
+    kq_t = mx.quantize(k, group_size=64, bits=8)
+    vq_t = mx.quantize(v, group_size=64, bits=8)
+    cache = _FakeQuantCache(pads, P=P)
+    n0 = cs.claims()
+    got = cs._claim(q, kq_t, vq_t, cache, 0.125, None, None)
+    assert got is not None
+    assert cs.claims() == n0 + 1
+
+    kd = mx.dequantize(*kq_t, group_size=64, bits=8).astype(mx.float16)
+    vd = mx.dequantize(*vq_t, group_size=64, bits=8).astype(mx.float16)
+    ref = _masked_ref(q, kd, vd, pads, 0.125)
+    err = mx.abs(got.astype(mx.float32) - ref).max().item()
+    assert err < 2e-2, f"kv_q8 cascade vs dequant masked ref err={err}"
+
+    # verify width composes with q8 operands
+    q5 = mx.random.normal((3, 16, 5, 128)).astype(mx.float16)
+    got5 = cs._claim(q5, kq_t, vq_t, _FakeQuantCache(pads, P=P), 0.125,
+                     "causal", None)
+    assert got5 is not None
+    assert got5.shape == q5.shape
+
+    # wrong quant config declines: bits 4
+    class _FakeQ4(_FakeBatchCache):
+        bits = 4
+        group_size = 64
+
+    n1 = cs.claims()
+    assert cs._claim(q, kq_t, vq_t, _FakeQ4(pads, P=P), 0.125,
+                     None, None) is None
+    assert cs.claims() == n1
+
+
 def test_carry_stamp():
     """Owned prefill merge rebuilds cache objects; carry_stamp moves the
     formation stamp onto the merged cache and re-arms the extend hook."""

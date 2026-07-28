@@ -142,34 +142,60 @@ def _claim(queries, keys, values, cache, scale, mask, sinks):
     B, Hq = queries.shape[0], queries.shape[1]
     hd = queries.shape[-1]
     qL = queries.shape[2] if queries.ndim == 4 else 0
+    # Quantized batch caches (BatchQuantizedKVCache, mlx affine bits 8 /
+    # group 64) present k/v as (wire, scales, biases) tuples; the fused op
+    # takes the wire directly and dequants at tile stage. Other quant
+    # configs decline.
+    quant = (
+        isinstance(keys, (tuple, list))
+        and len(keys) == 3
+        and isinstance(values, (tuple, list))
+        and len(values) == 3
+        and getattr(cache, "bits", None) == 8
+        and getattr(cache, "group_size", None) == 64
+        and hd != 512
+    )
+    if not quant and isinstance(keys, (tuple, list)):
+        _debug_decline("quant-config", bits=getattr(cache, "bits", None),
+                       gs=getattr(cache, "group_size", None), hd=hd)
+        return None
+    ka = keys[0] if quant else keys
+    va = values[0] if quant else values
+    kv_last = hd // 4 if quant else hd
+    dt_ok = (
+        (ka.dtype == mx.uint32 and keys[1].dtype == queries.dtype)
+        if quant
+        else (ka.dtype == queries.dtype and not hasattr(cache, "bits"))
+    )
     if not (
         sinks is None
-        and isinstance(keys, mx.array)
+        and isinstance(ka, mx.array)
         and queries.ndim == 4
         and B > 1
         and 1 <= qL <= 8
         and hd in _HD_OK
-        and keys.shape[-1] == hd
-        and values.shape[-1] == hd
-        and keys.shape[0] == B
-        and keys.shape[1] >= 1
-        and Hq % keys.shape[1] == 0
+        and ka.shape[-1] == kv_last
+        and va.shape[-1] == kv_last
+        and ka.shape[0] == B
+        and ka.shape[1] >= 1
+        and Hq % ka.shape[1] == 0
         and queries.dtype in (mx.float16, mx.bfloat16)
-        and keys.dtype == queries.dtype
-        and not hasattr(cache, "bits")
+        and dt_ok
         and getattr(cache, "_right_padding", None) is None
         and _mask_claimable(mask, qL)
     ):
         _debug_decline(
             "shape/dtype/mask", B=B, qL=queries.shape[2], hd=hd,
-            kshape=tuple(keys.shape), qdt=str(queries.dtype),
-            kdt=str(keys.dtype), bits=hasattr(cache, "bits"),
+            kshape=tuple(ka.shape) if isinstance(ka, mx.array) else None,
+            qdt=str(queries.dtype),
+            kdt=str(ka.dtype) if isinstance(ka, mx.array) else None,
+            bits=getattr(cache, "bits", None), quant=quant,
             rp=getattr(cache, "_right_padding", None) is not None,
             mask=type(mask).__name__ if not isinstance(mask, str) else mask,
             mshape=tuple(mask.shape) if isinstance(mask, mx.array) else None,
             sinks=sinks is not None)
         return None
-    gqa = Hq // keys.shape[1]
+    gqa = Hq // ka.shape[1]
     if gqa > 16 or B * gqa * qL > (32 if hd == 512 else 64):
         return None
     if qL > 1 and gqa * ((qL + 1) // 2) > 32:
@@ -180,7 +206,7 @@ def _claim(queries, keys, values, cache, scale, mask, sinks):
     pads = _pads(cache)
     if pads is None or len(pads) < B:
         return None
-    kL = keys.shape[2]
+    kL = ka.shape[2]
     starts, c0 = _starts_for(cache, pads[:B], P)
     if kL - c0 < qL or max(pads[:B]) + P > kL - qL + 1:
         _debug_decline("geometry", kL=kL, c0=c0, P=P, pads=pads[:B])
@@ -189,23 +215,45 @@ def _claim(queries, keys, values, cache, scale, mask, sinks):
     try:
         from mlx_kquant import sdpa_decode_gqa_cascade
 
-        out = sdpa_decode_gqa_cascade(
-            queries,
-            keys[0:1, :, l0:l0 + P],
-            values[0:1, :, l0:l0 + P],
-            keys[:, :, c0:],
-            values[:, :, c0:],
-            scale,
-            starts=starts,
-        )
+        if quant:
+            kw, ks, kb = keys
+            vw, vs, vb = values
+            out = sdpa_decode_gqa_cascade(
+                queries,
+                kw[0:1, :, l0:l0 + P],
+                vw[0:1, :, l0:l0 + P],
+                kw[:, :, c0:],
+                vw[:, :, c0:],
+                scale,
+                starts=starts,
+                k_shared_scales=ks[0:1, :, l0:l0 + P],
+                k_shared_biases=kb[0:1, :, l0:l0 + P],
+                v_shared_scales=vs[0:1, :, l0:l0 + P],
+                v_shared_biases=vb[0:1, :, l0:l0 + P],
+                k_priv_scales=ks[:, :, c0:],
+                k_priv_biases=kb[:, :, c0:],
+                v_priv_scales=vs[:, :, c0:],
+                v_priv_biases=vb[:, :, c0:],
+            )
+        else:
+            out = sdpa_decode_gqa_cascade(
+                queries,
+                keys[0:1, :, l0:l0 + P],
+                values[0:1, :, l0:l0 + P],
+                keys[:, :, c0:],
+                values[:, :, c0:],
+                scale,
+                starts=starts,
+            )
     except Exception as e:
         _debug_decline("kernel", err=str(e)[:120])
         return None
-    if (B, qL) not in _SEEN_B:  # one line per (batch, query) width
-        _SEEN_B.add((B, qL))
+    if (B, qL, quant) not in _SEEN_B:  # one line per (batch, query) width
+        _SEEN_B.add((B, qL, quant))
         import sys
 
-        print(f"[cascade] claimed: B={B} qL={qL} P={P} hd={hd} gqa={gqa}",
+        print(f"[cascade] claimed: B={B} qL={qL} P={P} hd={hd} gqa={gqa}"
+              + (" kv=q8" if quant else ""),
               file=sys.stderr, flush=True)
     _CLAIMS[0] += 1
     return out
