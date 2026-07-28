@@ -12,6 +12,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (O(index_topk) per step); the mask-path workaround is now opt-in via
   `GMLX_DSV32_MASK_DECODE=1`.
 
+### Fixed
+
+- Multi-turn prefix-cache entries from finished server requests now match
+  the follow-up turn on thinking and tool-calling models (entries are keyed
+  on what the chat template will actually replay; `GMLX_APC_RETIRE_LCP=0`
+  restores the old keys).
+
 ## [0.1.4] - 2026-07-27
 
 ### Added

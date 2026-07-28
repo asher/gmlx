@@ -60,7 +60,11 @@ import importlib
 import os
 
 from ._common import _PATCH_FLAG
-from .apc import install_apc_batched_store_eval, install_apc_lone_harvest
+from .apc import (
+    install_apc_batched_store_eval,
+    install_apc_lone_harvest,
+    install_retire_render_capture,
+)
 from .api_contract import install_api_contract
 from .chat_behavior import (
     install_chat_template_kwargs,
@@ -114,6 +118,7 @@ __all__ = [
     "disable_credentialed_cors",
     "install_apc_batched_store_eval",
     "install_apc_lone_harvest",
+    "install_retire_render_capture",
     "install_api_contract",
     "install_api_key_auth",
     "install_audio_speech_route",
@@ -212,6 +217,7 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_pool_aware_unload()
     install_apc_lone_harvest()
     install_apc_batched_store_eval()
+    install_retire_render_capture()
     install_keep_route()
     install_reload_route(reload_fn)
     install_audio_transcription_route(getattr(cfg, "stt", None))

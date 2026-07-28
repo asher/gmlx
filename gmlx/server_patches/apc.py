@@ -275,3 +275,78 @@ def install_apc_batched_store_eval() -> None:
 
     apc.APCManager.store_kv_blocks = store_kv_blocks
     apc._kq_batched_store_eval = True
+
+
+def install_retire_render_capture() -> None:
+    """Record each chat request's render context for next-turn retirement keys.
+
+    Two hops, both provenance: the openai module's ``apply_chat_template``
+    records (processed messages, template kwargs, processor, config) keyed
+    by the rendered prompt text, and ``ResponseGenerator._preprocess_request``
+    re-keys the entry by the exact token ids it produces -- the same ids the
+    spec engine later stashes as ``full_ids`` -- while capturing the
+    generator's own text-to-ids path so the retirement render tokenizes
+    identically. Media requests are not re-keyed (re-encoding text cannot
+    reproduce expanded media token ids). Consumed by speculative retirement
+    via ``retire_key.next_turn_lcp``. Kill: ``GMLX_APC_RETIRE_LCP=0``.
+    """
+    import os
+
+    if os.environ.get("GMLX_APC_RETIRE_LCP") == "0":
+        return
+    from .. import retire_key
+
+    openai_mod = importlib.import_module("mlx_vlm.server.openai")
+    gen_mod = importlib.import_module("mlx_vlm.server.generation")
+
+    orig_render = openai_mod.apply_chat_template
+    if not getattr(orig_render, "_kq_retire_capture", False):
+        def apply_chat_template(processor, config, prompt, *a, **kw):
+            out = orig_render(processor, config, prompt, *a, **kw)
+            try:
+                if isinstance(out, str) and isinstance(prompt, list):
+                    retire_key.register_render(out, {
+                        "messages": [dict(m) for m in prompt
+                                     if isinstance(m, dict)],
+                        "kw": dict(kw),
+                        "processor": processor,
+                        "config": config,
+                        "render": orig_render,
+                        "media": bool(kw.get("num_images")
+                                      or kw.get("num_audios")
+                                      or kw.get("video")),
+                    })
+            except Exception:
+                pass
+            return out
+
+        apply_chat_template._kq_retire_capture = True
+        openai_mod.apply_chat_template = apply_chat_template
+
+    cls = gen_mod.ResponseGenerator
+    orig_pre = cls._preprocess_request
+    if getattr(orig_pre, "_kq_retire_capture", False):
+        return
+
+    def _preprocess_request(self, prompt, images=None, audio=None,
+                            videos=None):
+        raw = orig_pre(self, prompt, images, audio, videos)
+        try:
+            if isinstance(prompt, str) and not images and not audio \
+                    and not videos and isinstance(raw, dict):
+                ids = raw.get("input_ids")
+                if ids is not None:
+                    row = ids.tolist() if hasattr(ids, "tolist") else list(ids)
+                    if row and isinstance(row[0], list):
+                        row = row[0]
+
+                    def preprocess(text, _self=self):
+                        return orig_pre(_self, text, None, None, None)
+
+                    retire_key.register_ids(prompt, row, preprocess)
+        except Exception:
+            pass
+        return raw
+
+    _preprocess_request._kq_retire_capture = True
+    cls._preprocess_request = _preprocess_request

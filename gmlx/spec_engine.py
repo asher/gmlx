@@ -414,11 +414,16 @@ def _mtp_prefill_init(batch) -> None:
     if (manager is not None and not _SPEC_APC_RETIRE_DISABLED
             and batch.prompt_cache):
         meta = (batch._apc_meta or [{}])[0] or {}
+        full_ids = [int(t) for t in batch._mtp_full_input_ids[0].tolist()]
+        from .retire_key import lookup_render_ctx
         batch.prompt_cache[0]._kq_apc_retire = {
-            "full_ids": [int(t) for t in batch._mtp_full_input_ids[0].tolist()],
+            "full_ids": full_ids,
             "extra_hash": int(meta.get("extra_hash", 0)),
             "mode": ("ckpt" if _ckpt_active(batch.model, mode) else mode),
             "checkpoint_len": int(meta.get("checkpoint_len", 0) or 0),
+            # Render context for the next-turn LCP key (None off the server
+            # path or on a media prompt; retirement then keys as before).
+            "render_ctx": lookup_render_ctx(full_ids),
         }
 
     if restored > 0:

@@ -481,6 +481,22 @@ def ckpt_lookup(
         return None, 0
 
 
+def _truncate_kv_snapshot(snap: list[Any], n: int) -> list[Any] | None:
+    """Trim a row snapshot to its first ``n`` tokens, or None if any layer
+    cannot be truncated faithfully (rotation, recurrent state, pooling)."""
+    from .cache_compat import cache_types
+
+    kv_types = cache_types("KVCache")
+    for c in snap:
+        if not isinstance(c, kv_types) or int(getattr(c, "offset", 0)) < n:
+            return None
+    for c in snap:
+        c.keys = c.keys[..., :n, :]
+        c.values = c.values[..., :n, :]
+        c.offset = n
+    return snap
+
+
 def retirement_store(
     manager: Any,
     mode: str | None,
@@ -489,6 +505,7 @@ def retirement_store(
     *,
     row: int = 0,
     extra_hash: int = 0,
+    max_len: int | None = None,
 ) -> bool:
     """Persist a finished row's full KV into the shared APC.
 
@@ -498,11 +515,24 @@ def retirement_store(
     Exact mode snapshots the row and stores it whole (the rotating chat
     fleet); ckpt mode stores blocks + sidecar (gated-delta hybrids, B=1
     rows only in v1); block mode harvests the row's blocks into the shared
-    pool. Best-effort: a failure never breaks generation.
+    pool. ``max_len`` caps the stored key at a shorter prefix (the next-turn
+    LCP): blocks are prefix-causal and truncate freely; an exact snapshot
+    truncates only when every layer is a plain KVCache; a ckpt store is
+    skipped outright -- recurrent state cannot rewind, and an entry keyed
+    past the replayable prefix can never match. Best-effort: a failure
+    never breaks generation.
     """
     if manager is None or token_ids is None:
         return False
     ids = [int(t) for t in token_ids]
+    if max_len is not None and max_len < len(ids):
+        if mode == "ckpt":
+            _log.info(
+                "APC retirement skipped: ckpt state at %d cannot rewind to "
+                "the replayable prefix %d", len(ids), max_len)
+            return False
+        if mode != "exact":
+            ids = ids[:max_len]
     if len(ids) < 2:
         return False
     try:
@@ -516,6 +546,16 @@ def retirement_store(
             snap = row_snapshot(prompt_cache, row)
             if snap is None:
                 return False
+            if max_len is not None and max_len < len(ids):
+                if max_len < 2:
+                    return False
+                snap = _truncate_kv_snapshot(snap, max_len)
+                if snap is None:
+                    _log.info(
+                        "APC retirement skipped: snapshot not truncatable "
+                        "to the replayable prefix %d", max_len)
+                    return False
+                ids = ids[:max_len]
             return bool(manager.store_exact_cache(
                 ids, snap, extra_hash=extra_hash))
         from mlx_vlm import apc as _apc
