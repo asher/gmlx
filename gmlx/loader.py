@@ -35,6 +35,7 @@ from .modules import install_fused_moe_glu, install_hyv3_shexp_fold
 from .occupancy_fuse import install_occupancy_fuse
 from .qkv_fuse import install_fused_qkv
 from .gemma4_batched_sdpa import install_gemma4_batched_sdpa
+from .cascade_sdpa import install_cascade_sdpa, install_cascade_stamp
 from .gemma4_sync import install_gemma4_nosync
 from .quantized_sdpa_fix import install_quantized_sdpa_mask_fix
 from .rope_batch_fix import install_rope_batch_fix
@@ -2521,6 +2522,8 @@ def _install_and_load(
         log("[install] gemma-4 host-sync-free masks/rope offsets active")
     if install_gemma4_batched_sdpa() and _gemma4_target(model):
         log("[install] gemma-4 hd512 batched-decode row route active")
+    if install_cascade_sdpa() and install_cascade_stamp():
+        log("[install] shared-prefix cascade decode route active")
     n_fused_moe = install_fused_moe_glu(model)
     if n_fused_moe:
         log(f"[install] fused mxfp4 MoE GLU decode on {n_fused_moe} layers")
@@ -2955,6 +2958,8 @@ def load_model(
         _log("[install] gemma-4 host-sync-free masks/rope offsets active")
     if install_gemma4_batched_sdpa() and _gemma4_target(model):
         _log("[install] gemma-4 hd512 batched-decode row route active")
+    if install_cascade_sdpa() and install_cascade_stamp():
+        _log("[install] shared-prefix cascade decode route active")
     n_fused_moe = install_fused_moe_glu(model)
     if n_fused_moe:
         _log(f"[install] fused mxfp4 MoE GLU decode on {n_fused_moe} layers")

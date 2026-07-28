@@ -140,6 +140,12 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_lm.models.gemma4_text", "Gemma4TextModel._make_masks",
          "gemma4_batched_sdpa (one mask object per layer type; the "
          "producer->consumer pad relay keys on that identity)"),
+    # --- shared-prefix cascade decode route + APC warm-batch stamp ---
+    Seam("mlx_lm.models.llama", "scaled_dot_product_attention",
+         "cascade_sdpa (stamped shared-prefix batched decode)"),
+    Seam("mlx_vlm.apc", "make_warm_batch_kv_cache_multi",
+         "cascade_sdpa.install_cascade_stamp (shared-prefix detection at "
+         "the warm-batch duplication point)"),
     # --- speculative / AR batch engine (spec_engine owns these methods) ---
     Seam("mlx_vlm.generate.ar", "BatchGenerator.__init__",
          "spec_engine._install_apc_manager_stash", critical=True),
