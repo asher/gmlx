@@ -143,12 +143,13 @@ SEAMS: tuple[Seam, ...] = (
     # --- shared-prefix cascade decode route + APC warm-batch stamp ---
     Seam("mlx_lm.models.llama", "scaled_dot_product_attention",
          "cascade_sdpa (stamped shared-prefix batched decode)"),
-    Seam("mlx_vlm.apc", "make_warm_batch_kv_cache_multi",
-         "cascade_sdpa.install_cascade_stamp (shared-prefix detection at "
-         "the warm-batch duplication point)"),
-    Seam("mlx_vlm.apc", "make_warm_batch_kv_cache",
-         "cascade_sdpa.install_cascade_stamp (single-row chain stamp for "
-         "extend()-path admission merges)"),
+    Seam("mlx_vlm.generate.ar", "PromptProcessingBatch.__init__",
+         "cascade_sdpa.install_cascade_stamp (token-prefix stamp at batch "
+         "formation; rows + caches coexist in matching order here)",
+         critical=True),
+    Seam("mlx_vlm.generate.ar", "_extend_cache",
+         "cascade_sdpa.install_cascade_stamp (stamp carry across the "
+         "B=1-to-batch merge lift on admission)", critical=True),
     # --- speculative / AR batch engine (spec_engine owns these methods) ---
     Seam("mlx_vlm.generate.ar", "BatchGenerator.__init__",
          "spec_engine._install_apc_manager_stash", critical=True),

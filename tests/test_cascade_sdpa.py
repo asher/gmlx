@@ -173,118 +173,166 @@ def test_install_idempotent_and_killable(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Stamp detection (host-only)
+# Stamp v3: token-prefix currency (host-only)
 # ---------------------------------------------------------------------------
 
 
-class _FakeBlock:
-    def __init__(self, ntok):
-        self.keys = [mx.zeros((1, 2, ntok, 8))]
-        self.values = [mx.zeros((1, 2, ntok, 8))]
+def _rb(ids):
+    return cs._row_bytes(ids)
 
 
-def test_common_chain_block_identity():
-    a, b, c, d = _FakeBlock(16), _FakeBlock(16), _FakeBlock(16), _FakeBlock(16)
-    picks = [
-        {"matched_blocks": [a, b, c], "prefix_len": 48},
-        {"matched_blocks": [a, b, d], "prefix_len": 48},
-    ]
-    chain, widths = cs._common_chain(picks)
-    assert chain == (a, b) and sum(widths) == 32  # a + b shared, c != d
-    picks[1]["matched_blocks"] = [a, b, c]
-    assert sum(cs._common_chain(picks)[1]) == 48
-    # equal-content but distinct objects share nothing (identity only)
-    picks[1]["matched_blocks"] = [_FakeBlock(16), b, c]
-    assert cs._common_chain(picks) == ((), ())
+def test_lcp_rows():
+    a = list(range(100))
+    assert cs._lcp_rows([_rb(a), _rb(a)]) == 100
+    assert cs._lcp_rows([_rb(a), _rb(a[:50] + [999] + a[51:])]) == 50
+    assert cs._lcp_rows([_rb(a), _rb(a[:30])]) == 30
+    assert cs._lcp_rows([_rb(a)]) == 100
+    assert cs._lcp_rows([]) == 0
+    assert cs._lcp_rows([_rb(a), b""]) == 0
 
 
-def test_common_chain_scalar_and_cold():
-    a = _FakeBlock(16)
-    # a single warm pick shares its WHOLE chain (feeds extend merges)
-    chain, widths = cs._common_chain([{"matched_blocks": [a],
-                                       "prefix_len": 16}])
-    assert chain == (a,) and widths == (16,)
-    assert cs._common_chain([
-        {"matched_blocks": [a], "prefix_len": 16}, None]) == ((), ())
-
-
-def test_common_chain_exact_mode():
-    warm = object()
-    picks = [
-        {"warm_cache": warm, "prefix_len": 512, "matched_blocks": None},
-        {"warm_cache": warm, "prefix_len": 512, "matched_blocks": None},
-    ]
-    assert cs._common_chain(picks) == ((warm,), (512,))
-    picks[1]["warm_cache"] = object()
-    assert cs._common_chain(picks) == ((), ())
-
-
-def test_stamp_merge_on_extend():
-    a, b, c, d = _FakeBlock(16), _FakeBlock(16), _FakeBlock(16), _FakeBlock(16)
+def test_stamp_caches_and_merge():
+    pre = list(range(64))
+    r1 = _rb(pre + [7, 8])
+    r2 = _rb(pre + [9])
     cache = _FakeBatchCache([0, 0])
-    cs._stamp_caches([cache], (a, b, c), (16, 16, 16))
-    assert cache._gmlx_cascade["P"] == 48
+    assert cs._stamp_caches([cache], [r1, r2])
+    assert cache._gmlx_cascade["P"] == 64
 
-    # same-prefix admission: common chain survives with the shared P
+    # same-prefix admission keeps cascading at the common P
     other = _FakeBatchCache([0])
-    cs._stamp_caches([other], (a, b, d), (16, 16, 16))
+    cs._stamp_caches([other], [_rb(pre[:40] + [999])])
     assert cache.extend(other) == "extended"
-    assert cache._gmlx_cascade["P"] == 32
-    assert cache._gmlx_cascade["chain"] == (a, b)
+    assert cache._gmlx_cascade["P"] == 40
+    assert len(cache._gmlx_cascade["tok"]) == 3
 
-    # unstamped admission clears it
+    # unstamped admission clears
     assert cache.extend(_FakeBatchCache([0])) == "extended"
     assert not hasattr(cache, "_gmlx_cascade")
 
-    # a later extend still works and stays clear
-    assert cache.extend(other) == "extended"
-    assert not hasattr(cache, "_gmlx_cascade")
 
-
-def test_stamp_merge_divergent_chain_clears():
-    a, b = _FakeBlock(16), _FakeBlock(16)
+def test_stamp_divergent_clears():
     cache = _FakeBatchCache([0])
-    cs._stamp_caches([cache], (a,), (16,))
+    cs._stamp_caches([cache], [_rb([1, 2, 3])])
     other = _FakeBatchCache([0])
-    cs._stamp_caches([other], (b,), (16,))
+    cs._stamp_caches([other], [_rb([9, 9, 9])])
     cache.extend(other)
     assert not hasattr(cache, "_gmlx_cascade")
 
 
-def test_warm_multi_wrapper_stamps():
-    a, b = _FakeBlock(16), _FakeBlock(16)
-    picks = [
-        {"matched_blocks": [a, b], "prefix_len": 32},
-        {"matched_blocks": [a, b], "prefix_len": 32},
-    ]
-    caches = [_FakeBatchCache([0, 0]), _FakeBatchCache([0, 0])]
-
-    def fake_orig(picks, num_layers):
-        return caches, 32
-
-    wrapped = cs._make_stamped_warm_multi(fake_orig)
-    out_caches, max_prefix = wrapped(picks, 2)
-    assert out_caches is caches and max_prefix == 32
-    assert all(c._gmlx_cascade["P"] == 32 for c in caches)
-
-    # cold row -> no stamp
-    caches2 = [_FakeBatchCache([0, 0])]
-    wrapped2 = cs._make_stamped_warm_multi(lambda p, n: (caches2, 32))
-    wrapped2([picks[0], None], 1)
-    assert not hasattr(caches2[0], "_gmlx_cascade")
+def test_stamp_no_common_prefix_no_stamp():
+    cache = _FakeBatchCache([0, 0])
+    assert not cs._stamp_caches([cache], [_rb([1, 2]), _rb([3, 4])])
+    assert not hasattr(cache, "_gmlx_cascade")
 
 
-def test_warm_single_wrapper_stamps():
-    a, b = _FakeBlock(16), _FakeBlock(16)
-    caches = [_FakeBatchCache([0])]
-    wrapped = cs._make_stamped_warm_single(lambda blocks: caches)
-    out = wrapped([a, b])
-    assert out is caches
-    assert caches[0]._gmlx_cascade["P"] == 32
-    assert caches[0]._gmlx_cascade["chain"] == (a, b)
+class _FilterCache(_FakeBatchCache):
+    def filter(self, keep):
+        return "filtered"
+
+
+def test_stamp_filter_masks_rows():
+    pre = list(range(32))
+    rows = [_rb(pre + [i]) for i in range(3)]
+    cache = _FilterCache([0, 0, 0])
+    cs._stamp_caches([cache], rows)
+    assert cache.filter([True, False, True]) == "filtered"
+    info = cache._gmlx_cascade
+    assert info["P"] == 32 and len(info["tok"]) == 2
+    assert cache.filter([False, False]) == "filtered"
+    assert not hasattr(cache, "_gmlx_cascade")
+
+
+class _FakePromptBatch:
+    def __init__(self, rows, apc_meta=None, rp=None):
+        import mlx.core as mx
+
+        self.prompt_cache = [_FakeBatchCache([0] * len(rows))]
+        self._apc_meta = apc_meta
+        L = max(len(r) for r in rows)
+        self._left_padding_per_row = [L - len(r) for r in rows]
+        self._right_pad_per_row = rp or [0] * len(rows)
+        self._input_ids = mx.array(
+            [[0] * (L - len(r)) + list(r) for r in rows])
+
+
+def test_rows_from_prompt_batch_cold():
+    pre = list(range(48))
+    pb = _FakePromptBatch([pre + [7], pre])
+    rows = cs._rows_from_prompt_batch(pb)
+    assert rows == [_rb(pre + [7]), _rb(pre)]
+
+
+def test_rows_from_prompt_batch_apc_meta_wins():
+    full = list(range(64))
+    pb = _FakePromptBatch([[1, 2], [3, 4]],
+                          apc_meta=[{"full_input_ids": full},
+                                    {"full_input_ids": full + [5]}])
+    rows = cs._rows_from_prompt_batch(pb)
+    assert rows == [_rb(full), _rb(full + [5])]
+    # meta present but incomplete: bail rather than mix currencies
+    pb2 = _FakePromptBatch([[1, 2], [3, 4]],
+                           apc_meta=[{"full_input_ids": full}, {}])
+    assert cs._rows_from_prompt_batch(pb2) is None
+
+
+def test_stamped_ppb_init_wrapper():
+    pre = list(range(40))
+
+    def fake_init(self, rows=None):
+        _FakePromptBatch.__init__(self, rows)
+
+    wrapped = cs._make_stamped_ppb_init(fake_init)
+    pb = _FakePromptBatch.__new__(_FakePromptBatch)
+    wrapped(pb, rows=[pre + [1], pre + [2]])
+    assert pb.prompt_cache[0]._gmlx_cascade["P"] == 40
+
+
+def test_extend_cache_lift_carries_stamp():
+    pre = list(range(50))
+
+    class _Plain:
+        pass
+
+    def fake_extend_cache(a, b):
+        out = []
+        for ca, cb in zip(a, b):
+            oc = _Plain()  # simulates the merge([ca]) lift: attrs dropped
+            out.append(oc)
+        return out
+
+    wrapped = cs._make_stamped_extend_cache(fake_extend_cache)
+    ca, cb = _FakeBatchCache([0]), _FakeBatchCache([0])
+    cs._stamp_caches([ca], [_rb(pre + [1])])
+    cs._stamp_caches([cb], [_rb(pre + [2])])
+    out = wrapped([ca], [cb])
+    assert out[0]._gmlx_cascade["P"] == 50
+    assert len(out[0]._gmlx_cascade["tok"]) == 2
+    # unstamped side clears
+    out2 = wrapped([ca], [_FakeBatchCache([0])])
+    assert not hasattr(out2[0], "_gmlx_cascade")
 
 
 def test_stamp_install_killable(monkeypatch):
     monkeypatch.setenv("GMLX_CASCADE_SDPA", "0")
     cs._installed_stamp = False
     assert not cs.install_cascade_stamp()
+
+
+def test_stamp_install_real_seams(monkeypatch):
+    monkeypatch.delenv("GMLX_CASCADE_SDPA", raising=False)
+    cs._installed_stamp = False
+    from mlx_vlm.generate import ar
+
+    orig_init = ar.PromptProcessingBatch.__init__
+    orig_ext = ar._extend_cache
+    try:
+        assert cs.install_cascade_stamp()
+        assert getattr(ar.PromptProcessingBatch.__init__,
+                       "_gmlx_cascade_stamp", False)
+        assert getattr(ar._extend_cache, "_gmlx_cascade_stamp", False)
+        assert cs.install_cascade_stamp()  # idempotent
+    finally:
+        ar.PromptProcessingBatch.__init__ = orig_init
+        ar._extend_cache = orig_ext
+        cs._installed_stamp = False

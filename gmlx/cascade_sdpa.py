@@ -11,23 +11,21 @@ per step from B*(P+S) to P + B*S. Measured per call vs the per-row path:
 
 Two pieces, both in this module:
 
-* A stamp at the duplication point. make_warm_batch_kv_cache_multi is where
-  the APC materializes per-row prefix copies into one BatchKVCache; when
-  every row's pick resolves to the same block chain (object identity on
-  APCBlock entries -- concurrent hits on one cached prefix return the same
-  blocks) or the same exact-cache snapshot, the shared token length P is
-  stamped on each layer cache as ``_gmlx_cascade`` together with the block
-  chain itself (strong refs). Rows may extend past a common chain: the
-  stamp records the COMMON prefix only. The stamp's invariant is
-  "keys[b, :, L_b : L_b + P] is byte-identical across rows", with L_b read
-  live from cache.left_padding -- filter()'s uniform left-shift preserves
-  it, so retirement keeps the stamp. extend() (admission of new rows into
-  a live batch) re-derives the stamp as the longest common object-identity
-  chain of both sides: same-prefix admission keeps cascading, a diverging
-  or cold row clears it. B=1 warm batches are stamped too -- they never
-  route (the claim gate needs B>1) but they carry the chain into the
-  merges, which is exactly the steady serve flow (one live request, more
-  arriving on the same prefix).
+* A stamp at batch formation. PromptProcessingBatch is where every row's
+  prompt tokens and the freshly built per-layer caches coexist in matching
+  order -- for cold, warm, and mixed batches alike -- so the stamp derives
+  the shared prefix from TOKEN IDS (packed bytes, memcmp compare): rows
+  whose token prefixes match hold interchangeable KV for that span. The
+  common token length P is stamped on each layer cache as
+  ``_gmlx_cascade`` with the per-row token bytes. The invariant is
+  "keys[b, :, L_b : L_b + P] is interchangeable across rows", with L_b
+  read live from cache.left_padding -- filter()'s uniform left-shift
+  preserves it, so retirement keeps the stamp. extend() (admission into a
+  live batch) re-derives the stamp from both sides' tokens: same-prefix
+  admission keeps cascading, a diverging row clears it; the _extend_cache
+  merge lift carries stamps across B=1-to-batch conversion. No APC mode
+  is required, so hybrid models (exact-snapshot APC) and APC-off serving
+  cascade too. B=1 batches are stamped -- inert until rows join.
 
 * A decode route. Module-global scaled_dot_product_attention seams (the
   gemma4_batched_sdpa pattern) claim stamped B>1 qL==1 calls and issue the
@@ -243,66 +241,54 @@ def install_cascade_sdpa() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Stamp: shared-prefix detection at the APC warm-batch duplication point
+# Stamp v3: token-prefix currency (cold + warm rows alike)
 # ---------------------------------------------------------------------------
 
 
-def _common_chain(picks):
-    """(chain, widths) shared across all picks, ((), ()) when nothing is.
+# The stamp's currency is the row's PROMPT TOKEN IDS, packed to bytes.
+# Rows whose token prefixes match hold interchangeable KV for that span
+# (same tokens, same positions under left padding => same prefill math;
+# byte-identical when chunking matches, and within GEMM reduction-order
+# noise when the prefill tick resized chunks -- far below kv8 noise).
+# One stamp point covers every formation path: PromptProcessingBatch
+# builds caches and rows in matching order for cold, warm, and mixed
+# batches. Merges compare token bytes, so cold rows cascade with warm
+# ones and no APC mode is required at all.
 
-    Block mode: the longest common APCBlock chain by object identity (rows
-    that hit the same cached prefix get the same block objects from the
-    manager); a single warm pick shares its whole chain -- a B=1 stamp
-    never routes, but it carries the chain into extend() merges when new
-    same-prefix rows are admitted. Exact mode: the snapshot object stands
-    in as a one-element chain. Cold rows share nothing.
-    """
-    if not picks or any(p is None for p in picks):
-        return (), ()
-    if all(p.get("warm_cache") is not None for p in picks):
-        first = picks[0]["warm_cache"]
-        if all(p["warm_cache"] is first for p in picks[1:]) and len(
-            {p["prefix_len"] for p in picks}
-        ) == 1:
-            return (first,), (picks[0]["prefix_len"],)
-        return (), ()
-    if any(p.get("matched_blocks") is None for p in picks):
-        return (), ()
-    chain, widths = [], []
-    for blocks in zip(*[p["matched_blocks"] for p in picks]):
-        first = blocks[0]
-        if any(b is not first for b in blocks[1:]):
-            break
-        chain.append(first)
-        widths.append(first.keys[0].shape[-2])
-    return tuple(chain), tuple(widths)
+
+def _row_bytes(ids):
+    import array
+
+    return array.array("i", [int(t) for t in ids]).tobytes()
+
+
+def _lcp_rows(rows):
+    """Common-prefix token count across packed rows (memcmp-speed)."""
+    import os
+
+    if not rows or any(not r for r in rows):
+        return 0
+    return len(os.path.commonprefix(list(rows))) // 4
 
 
 def _merge_stamps(a, b):
-    """Stamp for a batch formed by extend(): the longest common
-    object-identity prefix of the two chains, None when nothing survives."""
+    """Stamp for a batch formed by extend(): self rows then other rows
+    (BatchKVCache.extend row order). None when nothing survives."""
     if a is None or b is None:
         return None
-    chain, widths = [], []
-    for x, w, y in zip(a["chain"], a["widths"], b["chain"]):
-        if x is not y:
-            break
-        chain.append(x)
-        widths.append(w)
-    P = sum(widths)
+    P = _lcp_rows([a["tok"][0][: 4 * a["P"]], b["tok"][0][: 4 * b["P"]]])
     if P <= 0:
         return None
-    return {"P": P, "chain": tuple(chain), "widths": tuple(widths)}
+    return {"P": P, "tok": a["tok"] + b["tok"]}
 
 
 def _merge_stamp_on_extend(cache):
-    """Instance-level extend wrapper: admission re-derives the stamp as
-    the common chain of both sides (an unstamped or cold side clears it).
-    filter() is left alone -- its uniform left-shift preserves the stamp's
-    invariant for surviving rows."""
-    if getattr(cache.extend, "_gmlx_cascade_merge", False):
+    """Instance-level extend wrapper: admission re-derives the stamp from
+    both sides' token bytes (an unstamped side clears it)."""
+    fn = getattr(cache, "extend", None)
+    if fn is None or getattr(fn, "_gmlx_cascade_merge", False):
         return
-    orig = cache.extend
+    orig = fn
 
     def _extend(other, _c=cache, _orig=orig):
         merged = _merge_stamps(
@@ -319,77 +305,147 @@ def _merge_stamp_on_extend(cache):
     cache.extend = _extend
 
 
-def _stamp_caches(caches, chain, widths):
-    P = sum(widths)
+def _mask_stamp_on_filter(cache):
+    """Instance-level filter wrapper: retired rows leave the stamp; the
+    shared prefix stays valid for every surviving row."""
+    fn = getattr(cache, "filter", None)
+    if fn is None or getattr(fn, "_gmlx_cascade_filter", False):
+        return
+    orig = fn
+
+    def _filter(keep, *a, _c=cache, _orig=orig, **kw):
+        info = _c.__dict__.get("_gmlx_cascade")
+        out = _orig(keep, *a, **kw)
+        if info is not None:
+            ks = keep.tolist() if hasattr(keep, "tolist") else list(keep)
+            tok = tuple(t for t, k in zip(info["tok"], ks) if k)
+            if tok:
+                _c._gmlx_cascade = {"P": info["P"], "tok": tok}
+            else:
+                _c.__dict__.pop("_gmlx_cascade", None)
+        return out
+
+    _filter._gmlx_cascade_filter = True
+    cache.filter = _filter
+
+
+def _stamp_caches(caches, rows):
+    """Stamp every layer cache with the batch's shared token prefix.
+    rows: per-row packed token bytes, cache row order. No-op when the
+    common prefix is empty."""
+    P = _lcp_rows(rows)
+    if P <= 0:
+        return False
+    tok = tuple(rows)
     for c in caches:
-        c._gmlx_cascade = {"P": P, "chain": chain, "widths": widths}
+        c._gmlx_cascade = {"P": P, "tok": tok}
         _merge_stamp_on_extend(c)
+        _mask_stamp_on_filter(c)
     if _STAMPS[0] == 0:
         import sys
 
-        print(f"[cascade] stamped warm batch: shared P={P}",
+        print(f"[cascade] stamped batch: shared P={P} rows={len(rows)}",
               file=sys.stderr, flush=True)
     _STAMPS[0] += 1
+    return True
 
 
-def _make_stamped_warm_multi(orig):
-    def _warm_multi(picks, num_layers):
-        out = orig(picks, num_layers)
+def _rows_from_prompt_batch(pb):
+    """Per-row full prompt tokens (packed) for a just-built prompt batch.
+
+    APC on: _apc_meta carries full_input_ids for every row (warm rows'
+    _input_ids hold only the suffix, so meta is the ONLY safe source --
+    bail if any row lacks it rather than mix currencies). APC off: every
+    row is cold, so the untouched _input_ids ARE the full prompts; strip
+    each row's pads. Must run before prompt_step consumes _input_ids.
+    """
+    meta = getattr(pb, "_apc_meta", None)
+    if meta is not None:
+        rows = []
+        for m in meta:
+            ids = (m or {}).get("full_input_ids")
+            if not ids:
+                return None
+            rows.append(_row_bytes(ids))
+        return rows
+    ii = getattr(pb, "_input_ids", None)
+    lps = getattr(pb, "_left_padding_per_row", None)
+    if ii is None or lps is None or getattr(ii, "ndim", 0) != 2:
+        return None
+    rps = getattr(pb, "_right_pad_per_row", None) or [0] * len(lps)
+    L = ii.shape[1]
+    rows = []
+    for i, lp in enumerate(lps):
+        rp = rps[i] if i < len(rps) else 0
+        rows.append(_row_bytes(ii[i, lp:L - rp].tolist()))
+    return rows
+
+
+def _make_stamped_ppb_init(orig):
+    def _init(self, *a, **kw):
+        orig(self, *a, **kw)
         try:
-            caches, max_prefix = out
-            if caches and max_prefix:
-                chain, widths = _common_chain(picks)
-                if sum(widths) > 0:
-                    _stamp_caches(caches, chain, widths)
+            caches = getattr(self, "prompt_cache", None)
+            if caches:
+                rows = _rows_from_prompt_batch(self)
+                if rows:
+                    _stamp_caches(caches, rows)
         except Exception:
             pass
+
+    _init._gmlx_orig = orig
+    _init._gmlx_cascade_stamp = True
+    return _init
+
+
+def _make_stamped_extend_cache(orig):
+    """_extend_cache lifts B=1 caches via merge([ca]), which drops
+    instance attrs; carry the stamps across the whole merge."""
+
+    def _extend_cache(a, b):
+        stamps = [
+            (getattr(ca, "_gmlx_cascade", None),
+             getattr(cb, "_gmlx_cascade", None))
+            for ca, cb in zip(a, b)
+        ]
+        out = orig(a, b)
+        for oc, (sa, sb) in zip(out, stamps):
+            merged = _merge_stamps(sa, sb)
+            if merged is None:
+                oc.__dict__.pop("_gmlx_cascade", None)
+            else:
+                oc._gmlx_cascade = merged
+                _merge_stamp_on_extend(oc)
+                _mask_stamp_on_filter(oc)
         return out
 
-    _warm_multi._gmlx_orig = orig
-    _warm_multi._gmlx_cascade_stamp = True
-    return _warm_multi
-
-
-def _make_stamped_warm_single(orig):
-    def _warm_single(matched_blocks):
-        out = orig(matched_blocks)
-        try:
-            if out and matched_blocks:
-                chain = tuple(matched_blocks)
-                widths = tuple(b.keys[0].shape[-2] for b in chain)
-                if sum(widths) > 0:
-                    _stamp_caches(out, chain, widths)
-        except Exception:
-            pass
-        return out
-
-    _warm_single._gmlx_orig = orig
-    _warm_single._gmlx_cascade_stamp = True
-    return _warm_single
+    _extend_cache._gmlx_orig = orig
+    _extend_cache._gmlx_cascade_stamp = True
+    return _extend_cache
 
 
 def install_cascade_stamp() -> bool:
-    """Stamp shared-prefix warm batches as they are built by
-    mlx_vlm.apc.make_warm_batch_kv_cache_multi. Idempotent; no-op when
-    GMLX_CASCADE_SDPA=0 or the apc module is unavailable."""
+    """Stamp shared-prefix batches at formation (PromptProcessingBatch)
+    and keep stamps alive across admission merges (_extend_cache lift).
+    Token-currency: works for cold, warm, and mixed batches on every
+    cache mode, including hybrid models whose APC is exact-snapshot
+    only. Idempotent; no-op when GMLX_CASCADE_SDPA=0."""
     global _installed_stamp
     if not env_bool("GMLX_CASCADE_SDPA", True):
         return False
     if _installed_stamp:
         return True
     try:
-        from mlx_vlm import apc
+        from mlx_vlm.generate import ar
     except ImportError:
         return False
-    cur = getattr(apc, "make_warm_batch_kv_cache_multi", None)
-    if cur is None:
+    ppb = getattr(ar, "PromptProcessingBatch", None)
+    ext = getattr(ar, "_extend_cache", None)
+    if ppb is None or ext is None:
         return False
-    if not getattr(cur, "_gmlx_cascade_stamp", False):
-        apc.make_warm_batch_kv_cache_multi = _make_stamped_warm_multi(cur)
-    single = getattr(apc, "make_warm_batch_kv_cache", None)
-    if single is not None and not getattr(
-        single, "_gmlx_cascade_stamp", False
-    ):
-        apc.make_warm_batch_kv_cache = _make_stamped_warm_single(single)
+    if not getattr(ppb.__init__, "_gmlx_cascade_stamp", False):
+        ppb.__init__ = _make_stamped_ppb_init(ppb.__init__)
+    if not getattr(ext, "_gmlx_cascade_stamp", False):
+        ar._extend_cache = _make_stamped_extend_cache(ext)
     _installed_stamp = True
     return True

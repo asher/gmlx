@@ -1420,7 +1420,11 @@ def _lift_injected_cache(cache, other):
     rotated content, so mid-rotation injected streams stay correct."""
     if ((hasattr(cache, "_idx") and not hasattr(other, "_idx"))
             or (hasattr(cache, "rotated") and not hasattr(other, "rotated"))):
-        return type(other).merge([other])
+        lifted = type(other).merge([other])
+        stamp = getattr(other, "_gmlx_cascade", None)
+        if stamp is not None:
+            lifted._gmlx_cascade = stamp
+        return lifted
     return other
 
 
