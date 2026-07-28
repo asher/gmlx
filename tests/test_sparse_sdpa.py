@@ -1,0 +1,177 @@
+"""Sparse top-k page decode route: claim gates, selection determinism
+(route output == a manual paged-kernel call on the same selected pages),
+forced sink/local residency, block-mean memo lifecycle, and install
+hygiene (opt-in, idempotent, killable).
+
+Numerics need the mlx_kquant paged op (GPU); those tests skip where it
+is unavailable. Selection and memo tests are host logic and always run.
+"""
+
+import importlib
+
+import mlx.core as mx
+import pytest
+
+from mlx_lm.models import llama as llama_mod
+
+from gmlx import sparse_sdpa as sp
+
+_ORIG_SEAMS = []
+for _pkg, _name in sp._MODULES:
+    try:
+        _mod = importlib.import_module(f"{_pkg}.{_name}")
+    except ImportError:
+        continue
+    _ORIG_SEAMS.append((_mod, getattr(_mod, "scaled_dot_product_attention",
+                                      None)))
+
+
+def _has_paged_op():
+    try:
+        from mlx_kquant import sdpa_decode_gqa_paged  # noqa: F401
+    except ImportError:
+        return False
+    return mx.default_device() == mx.Device(mx.gpu)
+
+
+def teardown_module(module):
+    for _mod, _fn in _ORIG_SEAMS:
+        if _fn is not None:
+            _mod.scaled_dot_product_attention = _fn
+    sp._installed = False
+
+
+class _FakeCache:
+    left_padding = None
+    _right_padding = None
+
+
+def _install(monkeypatch):
+    monkeypatch.setenv("GMLX_SPARSE_ATTN", "1")
+    assert sp.install_sparse_sdpa()
+
+
+def _mk(B, hq, hkv, S, d=128, dtype=mx.float16, seed=5):
+    mx.random.seed(seed)
+    q = mx.random.normal((B, hq, 1, d)).astype(dtype)
+    k = mx.random.normal((B, hkv, S, d)).astype(dtype)
+    v = mx.random.normal((B, hkv, S, d)).astype(dtype)
+    mx.eval(q, k, v)
+    return q, k, v
+
+
+@pytest.mark.skipif(not _has_paged_op(), reason="paged op needs GPU")
+def test_route_matches_manual_paged_call(monkeypatch):
+    _install(monkeypatch)
+    monkeypatch.setenv("GMLX_SPARSE_MIN_S", "1024")
+    monkeypatch.setenv("GMLX_SPARSE_K", "512")
+    from mlx_kquant import sdpa_decode_gqa_paged
+
+    q, k, v = _mk(2, 16, 8, 4096)
+    cache = _FakeCache()
+    n0 = sp.claims()
+    got = llama_mod.scaled_dot_product_attention(
+        q, k, v, cache=cache, scale=0.125, mask=None)
+    assert sp.claims() == n0 + 1
+    # same cache => memoized means => identical selection => identical op
+    pages = sp._select_pages(q, k, cache, 32, 512 // 32 + 3)
+    want = sdpa_decode_gqa_paged(q, k, v, 0.125, pages)
+    mx.eval(got, want)
+    assert mx.array_equal(got, want)
+
+
+@pytest.mark.skipif(not _has_paged_op(), reason="paged op needs GPU")
+def test_non_claims_fall_through(monkeypatch):
+    _install(monkeypatch)
+    monkeypatch.setenv("GMLX_SPARSE_MIN_S", "1024")
+    monkeypatch.setenv("GMLX_SPARSE_K", "512")
+    q, k, v = _mk(1, 16, 8, 4096)
+    n0 = sp.claims()
+
+    # no cache
+    llama_mod.scaled_dot_product_attention(
+        q, k, v, cache=None, scale=0.125, mask=None)
+    # below MIN_S
+    monkeypatch.setenv("GMLX_SPARSE_MIN_S", "65536")
+    llama_mod.scaled_dot_product_attention(
+        q, k, v, cache=_FakeCache(), scale=0.125, mask=None)
+    monkeypatch.setenv("GMLX_SPARSE_MIN_S", "1024")
+    # budget covers the whole cache -> pointless, decline
+    monkeypatch.setenv("GMLX_SPARSE_K", "4096")
+    llama_mod.scaled_dot_product_attention(
+        q, k, v, cache=_FakeCache(), scale=0.125, mask=None)
+    monkeypatch.setenv("GMLX_SPARSE_K", "512")
+    # verify width
+    q2 = mx.concatenate([q, q], axis=2)
+    llama_mod.scaled_dot_product_attention(
+        q2, k, v, cache=_FakeCache(), scale=0.125, mask=None)
+    # quantized cache
+    qc = _FakeCache()
+    qc.bits = 8
+    assert sp._claim(q, k, v, qc, 0.125, None, None) is None
+    # left-padded batch
+    pc = _FakeCache()
+    pc.left_padding = mx.array([0, 32])
+    qb, kb, vb = _mk(2, 16, 8, 4096)
+    assert sp._claim(qb, kb, vb, pc, 0.125, None, None) is None
+    assert sp.claims() == n0
+
+
+def test_select_pages_forced_residency():
+    q, k, _ = _mk(1, 16, 8, 4096)
+    cache = _FakeCache()
+    nkeep = 19
+    pages = sp._select_pages(q, k, cache, 32, nkeep)
+    assert pages.shape == (1, 8, nkeep)
+    assert pages.dtype == mx.int32
+    pl = pages.tolist()[0]
+    nb = 4096 // 32
+    for row in pl:
+        assert row == sorted(row)
+        assert 0 in row and nb - 1 in row and nb - 2 in row
+        assert len(set(row)) == nkeep
+
+
+def test_select_pages_partial_tail_forced():
+    q, k, _ = _mk(1, 16, 8, 4001)  # 126 pages, last one partial
+    pages = sp._select_pages(q, k, _FakeCache(), 32, 11)
+    nb_total = (4001 + 31) // 32
+    for row in pages.tolist()[0]:
+        assert nb_total - 1 in row and nb_total - 2 in row
+
+
+def test_means_memo_lifecycle():
+    cache = _FakeCache()
+    _, k, _ = _mk(1, 16, 8, 4096)
+    m1 = sp._block_means(cache, k, 32)
+    assert m1.shape == (1, 8, 128, 128)
+    memo1 = cache._gmlx_sp_means
+
+    # append: only new full blocks are computed, prefix object is reused
+    k2 = mx.concatenate([k, mx.ones((1, 8, 64, 128), dtype=k.dtype)], axis=2)
+    m2 = sp._block_means(cache, k2, 32)
+    assert m2.shape[2] == 130
+    assert mx.array_equal(m2[:, :, :128], m1)
+
+    # shrink (trim/filter) invalidates the memo wholesale
+    m3 = sp._block_means(cache, k, 32)
+    assert cache._gmlx_sp_means is not memo1
+    assert m3.shape[2] == 128
+
+    # batch-width change invalidates too
+    kb = mx.concatenate([k2, k2], axis=0)
+    m4 = sp._block_means(cache, kb, 32)
+    assert m4.shape[0] == 2
+
+
+def test_install_opt_in_and_killable(monkeypatch):
+    sp._installed = False
+    monkeypatch.delenv("GMLX_SPARSE_ATTN", raising=False)
+    assert not sp.install_sparse_sdpa()  # default OFF: the route is lossy
+    monkeypatch.setenv("GMLX_SPARSE_ATTN", "0")
+    assert not sp.install_sparse_sdpa()
+    monkeypatch.setenv("GMLX_SPARSE_ATTN", "1")
+    assert sp.install_sparse_sdpa()
+    route = llama_mod.scaled_dot_product_attention
+    assert sp.install_sparse_sdpa()  # idempotent
+    assert llama_mod.scaled_dot_product_attention is route
