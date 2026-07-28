@@ -294,9 +294,11 @@ batch, so attention
 traffic per step drops from every stream's full context to one prefix plus
 each stream's own suffix. Four streams on a 12k-token system prompt decode
 about 1.4x faster aggregate; the win grows with prefix length and stream
-count. On by default and exact (same numbers as the plain step);
-`GMLX_CASCADE_SDPA=0` disables it, `GMLX_CASCADE_MIN_P` (default `1024`)
-sets the smallest shared prefix worth routing.
+count, and speculative-verify rounds cascade the same way (their
+re-reads are wider, so the saving is larger). On by default and exact
+(same numbers as the plain step); `GMLX_CASCADE_SDPA=0` disables it,
+`GMLX_CASCADE_MIN_P` (default `1024`) sets the smallest shared prefix
+worth routing.
 
 ## Memory and the KV cache
 
