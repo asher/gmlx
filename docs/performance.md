@@ -283,6 +283,19 @@ skips its prefill outright, leaving pacing to govern only the cold suffix.
 Agent sessions that resend a cached history and add a few thousand tokens
 admit almost for free.
 
+Concurrent streams often share a prefix - the same system prompt, or
+histories restored from the prompt cache. The batch cache holds one copy of
+that prefix per stream, and a plain batched step re-reads every copy every
+token. The server detects the sharing at admission (warm rows that resolve
+to the same cached blocks) and decodes such batches through a shared-prefix
+cascade kernel that reads the prefix once for the whole batch, so attention
+traffic per step drops from every stream's full context to one prefix plus
+each stream's own suffix. Four streams on a 12k-token system prompt decode
+about 1.4x faster aggregate; the win grows with prefix length and stream
+count. On by default and exact (same numbers as the plain step);
+`GMLX_CASCADE_SDPA=0` disables it, `GMLX_CASCADE_MIN_P` (default `1024`)
+sets the smallest shared prefix worth routing.
+
 ## Memory and the KV cache
 
 Weights cost about the GGUF file size. The KV cache, for a standard dense model:
