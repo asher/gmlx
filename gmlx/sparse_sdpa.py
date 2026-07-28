@@ -21,12 +21,14 @@ full attention is already cheap. Forced sink + recency residency is
 load-bearing: without it approximate indexers fail catastrophically
 (stage-2 finding), so it is not configurable.
 
-v1 claims decode width (qL==1) on unpadded caches only -- B=1 or
-equal-length batches. Left-padded batches fall through (the paged
-kernel's starts plumbing is not exposed yet), as do quantized-KV
-caches, sinks, and speculative verify widths. Any kernel rejection
-lands on stock via try/except: the route can only decline, never break
-a step.
+Claims decode width (qL==1) on fp16/bf16 caches, B=1 or batched.
+Left-padded rows are handled end to end: pages fully inside a row's
+pad region are biased out of selection, the row's sink page is the
+first page holding its real tokens, and the kernel masks pad positions
+inside selected boundary pages via per-row starts. Quantized-KV
+caches, sinks, and speculative verify widths decline. Any kernel
+rejection lands on stock via try/except: the route can only decline,
+never break a step.
 """
 from __future__ import annotations
 
@@ -80,13 +82,15 @@ def _block_means(cache, keys, bl):
     return memo[0]
 
 
-def _select_pages(queries, keys, cache, bl, nkeep):
+def _select_pages(queries, keys, cache, bl, nkeep, pads=None):
     """Top-nkeep page indices per kv head, int32 [B,Hkv,nkeep], sorted.
 
     Group-shared scoring (mean query over the GQA group against the page
-    means, f32); the sink page and the last two pages -- including an
-    unscored partial tail -- are forced resident via a score bias, so the
-    kept-page count stays fixed and argpartition-friendly.
+    means, f32). Per row, the sink page (the first page holding the
+    row's real tokens) and the last two pages -- including an unscored
+    partial tail -- are forced resident via a score bias, and pages
+    fully inside the row's left pad are biased out; the kept-page count
+    stays fixed and argpartition-friendly.
     """
     B, Hq, _, D = queries.shape
     Hkv, S = keys.shape[1], keys.shape[2]
@@ -100,10 +104,15 @@ def _select_pages(queries, keys, cache, bl, nkeep):
         bs = mx.concatenate(
             [bs, mx.zeros((B, Hkv, nb_total - nb_full))], axis=-1
         )
-    pos = mx.arange(nb_total)
-    forced = (pos < 1) | (pos >= nb_total - 2)
-    bs = bs + mx.where(forced, mx.array(1e9), mx.array(0.0))[None, None, :]
-    idx = mx.argpartition(-bs, nkeep - 1, axis=-1)[..., :nkeep]
+    pos = mx.arange(nb_total)[None, None, :]
+    pad = mx.array(pads if pads is not None else [0] * B).reshape(B, 1, 1)
+    local = (pos >= nb_total - 2)
+    sink = (pos == pad // bl)
+    dead = ((pos + 1) * bl <= pad)  # page holds only this row's pad bytes
+    bias = mx.where(sink | local, mx.array(1e9), mx.array(0.0)) + mx.where(
+        dead, mx.array(-1e9), mx.array(0.0)
+    )
+    idx = mx.argpartition(-(bs + bias), nkeep - 1, axis=-1)[..., :nkeep]
     return mx.sort(idx, axis=-1).astype(mx.int32)
 
 
@@ -113,18 +122,22 @@ def _mask_claimable(mask):
     return isinstance(mask, mx.array) and mask.ndim >= 2 and mask.shape[-2] == 1
 
 
-def _unpadded(cache):
+def _pads(cache, B):
+    """Host-side left padding as a python list (zeros when absent), plus
+    the int32 starts array for the kernel (None when unpadded). Memoized
+    on the left_padding array identity."""
     lp = getattr(cache, "left_padding", None)
     if lp is None:
-        return True
-    if isinstance(lp, mx.array):
-        cached = getattr(cache, "_gmlx_sp_pads0", None)
-        if cached is not None and cached[0] is lp:
-            return cached[1]
-        flat = bool((lp == 0).all())
-        cache._gmlx_sp_pads0 = (lp, flat)
-        return flat
-    return all(int(x) == 0 for x in lp)
+        return [0] * B, None
+    cached = getattr(cache, "_gmlx_sp_pads", None)
+    if cached is not None and cached[0] is lp:
+        return cached[1], cached[2]
+    vals = [int(x) for x in (lp.tolist() if isinstance(lp, mx.array) else lp)]
+    starts = None
+    if any(v != 0 for v in vals):
+        starts = mx.array(vals, dtype=mx.int32)
+    cache._gmlx_sp_pads = (lp, vals, starts)
+    return vals, starts
 
 
 def _claim(queries, keys, values, cache, scale, mask, sinks):
@@ -150,11 +163,13 @@ def _claim(queries, keys, values, cache, scale, mask, sinks):
         and not hasattr(cache, "bits")
         and getattr(cache, "_right_padding", None) is None
         and _mask_claimable(mask)
-        and _unpadded(cache)
     ):
         return None
     S = keys.shape[2]
-    if S < env_int("GMLX_SPARSE_MIN_S", 8192):
+    pads, starts = _pads(cache, B)
+    if len(pads) < B:
+        return None
+    if S - max(pads[:B]) < env_int("GMLX_SPARSE_MIN_S", 8192):
         return None
     k = env_int("GMLX_SPARSE_K", 2048)
     nkeep = max(1, k // bl) + 3
@@ -164,8 +179,9 @@ def _claim(queries, keys, values, cache, scale, mask, sinks):
     try:
         from mlx_kquant import sdpa_decode_gqa_paged
 
-        pages = _select_pages(queries, keys, cache, bl, nkeep)
-        out = sdpa_decode_gqa_paged(queries, keys, values, scale, pages)
+        pages = _select_pages(queries, keys, cache, bl, nkeep, pads[:B])
+        out = sdpa_decode_gqa_paged(queries, keys, values, scale, pages,
+                                    starts=starts)
     except Exception:
         return None
     if _CLAIMS[0] == 0:

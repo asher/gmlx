@@ -109,12 +109,47 @@ def test_non_claims_fall_through(monkeypatch):
     qc = _FakeCache()
     qc.bits = 8
     assert sp._claim(q, k, v, qc, 0.125, None, None) is None
-    # left-padded batch
+    # a heavily padded row leaves too little effective context
     pc = _FakeCache()
-    pc.left_padding = mx.array([0, 32])
+    pc.left_padding = mx.array([0, 3500])
     qb, kb, vb = _mk(2, 16, 8, 4096)
     assert sp._claim(qb, kb, vb, pc, 0.125, None, None) is None
     assert sp.claims() == n0
+
+
+@pytest.mark.skipif(not _has_paged_op(), reason="paged op needs GPU")
+def test_route_left_padded_matches_manual_call(monkeypatch):
+    _install(monkeypatch)
+    monkeypatch.setenv("GMLX_SPARSE_MIN_S", "1024")
+    monkeypatch.setenv("GMLX_SPARSE_K", "512")
+    from mlx_kquant import sdpa_decode_gqa_paged
+
+    pads = [0, 100, 513]
+    q, k, v = _mk(3, 16, 8, 4096)
+    cache = _FakeCache()
+    cache.left_padding = mx.array(pads)
+    n0 = sp.claims()
+    got = llama_mod.scaled_dot_product_attention(
+        q, k, v, cache=cache, scale=0.125, mask=None)
+    assert sp.claims() == n0 + 1
+    pages = sp._select_pages(q, k, cache, 32, 512 // 32 + 3, pads)
+    want = sdpa_decode_gqa_paged(q, k, v, 0.125, pages,
+                                 starts=mx.array(pads, dtype=mx.int32))
+    mx.eval(got, want)
+    assert mx.array_equal(got, want)
+
+
+def test_select_pages_per_row_pads():
+    pads = [0, 640, 1000]
+    q, k, _ = _mk(3, 16, 8, 4096)
+    nkeep = 15
+    pages = sp._select_pages(q, k, _FakeCache(), 32, nkeep, pads)
+    for b, row_pages in enumerate(pages.tolist()):
+        sink = pads[b] // 32
+        dead_below = pads[b] // 32  # pages < this hold only pad bytes
+        for row in row_pages:
+            assert sink in row
+            assert all(pg >= dead_below for pg in row)
 
 
 def test_select_pages_forced_residency():
