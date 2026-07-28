@@ -199,6 +199,30 @@ def test_means_memo_lifecycle():
     assert m4.shape[0] == 2
 
 
+def test_install_patches_validated_archs_only(monkeypatch):
+    import importlib
+
+    sp._installed = False
+    monkeypatch.setenv("GMLX_SPARSE_ATTN", "1")
+    monkeypatch.delenv("GMLX_SPARSE_ARCHS", raising=False)
+    for _mod, _fn in _ORIG_SEAMS:
+        if _fn is not None:
+            _mod.scaled_dot_product_attention = _fn
+    assert sp.install_sparse_sdpa()
+    assert getattr(llama_mod.scaled_dot_product_attention,
+                   "_gmlx_sparse_route", False)
+    gt = importlib.import_module("mlx_lm.models.gemma4_text")
+    # gemma-4 failed its KLD gate (globals not top-k sparse): never patched
+    assert not getattr(gt.scaled_dot_product_attention,
+                       "_gmlx_sparse_route", False)
+    # explicit env extension patches it (for running a new arch's gate)
+    sp._installed = False
+    monkeypatch.setenv("GMLX_SPARSE_ARCHS", "gemma4_text")
+    assert sp.install_sparse_sdpa()
+    assert getattr(gt.scaled_dot_product_attention,
+                   "_gmlx_sparse_route", False)
+
+
 def test_install_opt_in_and_killable(monkeypatch):
     sp._installed = False
     monkeypatch.delenv("GMLX_SPARSE_ATTN", raising=False)

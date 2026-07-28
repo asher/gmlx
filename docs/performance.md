@@ -326,6 +326,14 @@ already cheap and the route stays off. Applies to fp16/bf16 KV caches at
 decode width; quantized-KV caches and speculative verify steps run full
 attention.
 
+The route only engages on architectures whose quality has been measured,
+because the property it trades on is architectural: pure full-attention
+stacks (llama-family) concentrate decode attention into a small key set,
+while measured SWA hybrids do not - on gemma-4's global layers even an
+exact top-k oracle at the default budget lands an order of magnitude
+outside the acceptable divergence band, so gemma-4 is deliberately
+excluded and runs full attention regardless of the switch.
+
 ## Memory and the KV cache
 
 Weights cost about the GGUF file size. The KV cache, for a standard dense model:

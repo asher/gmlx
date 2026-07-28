@@ -21,7 +21,12 @@ full attention is already cheap. Forced sink + recency residency is
 load-bearing: without it approximate indexers fail catastrophically
 (stage-2 finding), so it is not configurable.
 
-Claims decode width (qL==1) on fp16/bf16 caches, B=1 or batched.
+Claims are limited to quality-gated architectures (llama-family full
+attention today): the property being traded on -- top-k concentration
+of decode attention -- is architectural, and it measurably does NOT
+hold on SWA hybrids (gemma-4's global layers fail even the exact
+oracle at k=2048). Within a validated arch, claims cover decode width
+(qL==1) on fp16/bf16 caches, B=1 or batched.
 Left-padded rows are handled end to end: pages fully inside a row's
 pad region are biased out of selection, the row's sink page is the
 first page holding its real tokens, and the kernel masks pad positions
@@ -45,6 +50,13 @@ _MODULES = (
     ("mlx_lm.models", "gemma4_text"),
     ("mlx_vlm.models.gemma4", "language"),
 )
+
+# Only architectures with a PASSED KLD gate are patched. gemma-4 is
+# measured NOT top-k sparse: even the exact oracle at k=2048 sits ~15x
+# above the acceptance band on its global layers (SWA hybrids aggregate
+# diffusely there; lab results/sparse-attn/gemma-gate.md). Extend via
+# GMLX_SPARSE_ARCHS=name[,name] only to run a new arch's quality gate.
+_VALIDATED = ("llama",)
 
 # page size must match the paged kernel's staging tile per head dim
 _TILE_C = {64: 32, 128: 32, 256: 16, 512: 8}
@@ -223,9 +235,17 @@ def install_sparse_sdpa() -> bool:
     if _installed:
         return True
     import importlib
+    import os
 
+    extra = tuple(
+        x.strip() for x in os.environ.get("GMLX_SPARSE_ARCHS", "").split(",")
+        if x.strip()
+    )
+    allowed = _VALIDATED + extra
     patched = 0
     for pkg, name in _MODULES:
+        if name not in allowed:
+            continue
         try:
             mod = importlib.import_module(f"{pkg}.{name}")
         except ImportError:
