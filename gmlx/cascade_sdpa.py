@@ -57,6 +57,9 @@ _MODULES = (
     ("mlx_lm.models", "llama"),
     ("mlx_lm.models", "gemma4_text"),
     ("mlx_vlm.models.gemma4", "language"),
+    # text qwen3.5/3.6 (dense + MoE): the attention call site lives in
+    # qwen3_next; qwen3_5/qwen3_5_moe import its Attention class
+    ("mlx_lm.models", "qwen3_next"),
 )
 
 _HD_OK = (64, 128, 256, 512)
@@ -127,6 +130,8 @@ def _claim(queries, keys, values, cache, scale, mask, sinks):
     """Cascade output for a claimable stamped decode call, else None."""
     info = getattr(cache, "_gmlx_cascade", None)
     if info is None:
+        _debug_decline("no-stamp", B=queries.shape[0],
+                       cache=type(cache).__name__)
         return None
     B, Hq = queries.shape[0], queries.shape[1]
     hd = queries.shape[-1]
