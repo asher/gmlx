@@ -20,14 +20,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   retain the reply up to the divergence point (`GMLX_APC_DECODE_CKPT`,
   default 512 generated tokens; `0` off).
 
-### Changed
-
-- glm-dsa/DeepSeek-V3.2 sparse decode uses the stock top-k gather again
-  (O(index_topk) per step); the mask-path workaround is now opt-in via
-  `GMLX_DSV32_MASK_DECODE=1`.
-- The server's APC prompt-cache manager is now gmlx-owned, built at model
-  load; config `cache.enabled` and a plain `APC_ENABLED=1` both keep working.
-
 ### Fixed
 
 - Non-stream replies that hit `max_tokens` inside a think block now return
@@ -46,8 +38,17 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   checkpoints on GDN models no longer write recurrent state to disk.
 - A finished request's retirement-key memo no longer pins the response
   generator (and its model weights) past a pool unload.
+- Quantized-KV (`kv_bits`) prefill no longer runs 1.6-1.9x slower than
+  fp16: prefill-width attention now takes the fused flash path
+  (`GMLX_KV8_PREFILL_FLASH=0` restores the old behavior).
 
 ### Changed
+
+- glm-dsa/DeepSeek-V3.2 sparse decode uses the stock top-k gather again
+  (O(index_topk) per step); the mask-path workaround is now opt-in via
+  `GMLX_DSV32_MASK_DECODE=1`.
+- The server's APC prompt-cache manager is now gmlx-owned, built at model
+  load; config `cache.enabled` and a plain `APC_ENABLED=1` both keep working.
 
 - gemma-4 batched decode runs the global (hd512) layers as one ragged
   kernel call per layer instead of a per-row loop (needs mlx-kquant with
@@ -57,11 +58,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   construction (`GMLX_GEMMA_OWNED=0` reverts to the stock classes plus the
   patch regime; numerics identical either way).
 
-### Fixed
-
-- Quantized-KV (`kv_bits`) prefill no longer runs 1.6-1.9x slower than
-  fp16: prefill-width attention now takes the fused flash path
-  (`GMLX_KV8_PREFILL_FLASH=0` restores the old behavior).
+- Quantized-KV (`kv_bits: 8`) decode routes through the fused mlx_kquant
+  kernel when available, ~1.4x per attention call at depth
+  (`GMLX_QSDPA_KQ=0` restores the stock path).
 
 ## [0.1.4] - 2026-07-27
 
