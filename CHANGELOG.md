@@ -15,7 +15,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   on by default; `GMLX_CASCADE_SDPA=0` disables. Speculative-verify rounds
   cascade too: two streams on a 13k prompt with the gemma assistant
   drafter decode 1.37x faster aggregate, and native-MTP models (qwen)
-  get the same verify-round win.
+  get the same verify-round win. Composes with quantized KV
+  (`kv_bits: 8`).
 - Sliding-window models (gemma-4) join the hybrid prompt-cache checkpoint
   tier, and prefill now checkpoints at intervals (`GMLX_APC_CKPT_INTERVAL`,
   default 4096 tokens): a burst of long shared-prefix requests converts to
