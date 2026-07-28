@@ -143,6 +143,41 @@ def test_non_claims_fall_through(monkeypatch):
 
 
 @pytest.mark.skipif(not _has_cascade_op(), reason="fused cascade op needs GPU")
+def test_qwen_owned_path_claims(monkeypatch):
+    """The owned qwen left-padded decode resolver routes stamped B>1
+    qL==1 calls through the cascade claim before the ragged kernels."""
+    from gmlx import qwen35_attn as qa
+
+    monkeypatch.setenv("GMLX_CASCADE_MIN_P", "256")
+    P, pads = 1024, [0, 64, 32]
+    q, k, v = _shared_batch(3, 16, 8, P, 96, pads)
+    cache = _FakeBatchCache(pads, P=P)
+    n0 = cs.claims()
+    got = qa._left_padded_attention(q, k, v, cache=cache, scale=0.125,
+                                    mask=None)
+    assert cs.claims() == n0 + 1
+    ref = _masked_ref(q, k, v, pads, 0.125)
+    err = mx.abs(got.astype(mx.float32) - ref).max().item()
+    assert err < 2e-2, f"qwen cascade vs masked ref err={err}"
+
+    # kill switch: claim skipped, ragged path answers instead
+    monkeypatch.setenv("GMLX_CASCADE_SDPA", "0")
+    cache2 = _FakeBatchCache(pads, P=P)
+    got2 = qa._left_padded_attention(q, k, v, cache=cache2, scale=0.125,
+                                     mask=None)
+    assert cs.claims() == n0 + 1
+    assert got2 is not None
+    err2 = mx.abs(got2.astype(mx.float32) - ref).max().item()
+    assert err2 < 2e-2
+
+    # unstamped cache: falls through to ragged, no claim
+    cache3 = _FakeBatchCache(pads)
+    monkeypatch.delenv("GMLX_CASCADE_SDPA", raising=False)
+    qa._left_padded_attention(q, k, v, cache=cache3, scale=0.125, mask=None)
+    assert cs.claims() == n0 + 1
+
+
+@pytest.mark.skipif(not _has_cascade_op(), reason="fused cascade op needs GPU")
 def test_starts_memoized_on_pad_identity(monkeypatch):
     _install()
     monkeypatch.setenv("GMLX_CASCADE_MIN_P", "256")

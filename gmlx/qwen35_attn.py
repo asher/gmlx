@@ -599,6 +599,18 @@ def _left_padded_attention(queries, keys, values, *, cache, scale, mask):
     if max(pads) <= 0:
         return None
 
+    if (
+        queries.shape[0] > 1
+        and queries.shape[2] == 1
+        and env_bool("GMLX_CASCADE_SDPA", True)
+    ):
+        from .cascade_sdpa import _claim as _cascade_claim
+
+        output = _cascade_claim(queries, keys, values, cache, scale,
+                                None, None)
+        if output is not None:
+            return output
+
     output = ragged_decode_attention(queries, keys, values, pads, scale)
     if output is not None:
         return output
