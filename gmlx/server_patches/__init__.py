@@ -36,6 +36,11 @@ pattern as :mod:`server_bridge_vlm` / :mod:`residency`):
 * **``/v1/completions``** - a minimal classic text-completions route (single
   string prompt, ``n=1``, SSE streaming, stop sequences); mlx-vlm serves only
   the chat-shaped routes.
+* **Faithful history render** - the chat routes' ``apply_chat_template``
+  keeps message keys the per-model rebuild does not produce (notably
+  ``reasoning_content``), so ``preserve_thinking`` reaches the chat template
+  on non-tool turns instead of being silently dropped for model types in
+  mlx-vlm's ``MODEL_CONFIG`` table.
 * **SSE keepalive** - the streaming routes emit SSE comment lines while the
   engine is silent (a deep-context dense prefill can run >10 minutes before the
   first token), so clients with a between-bytes read timeout don't tear the
@@ -82,6 +87,7 @@ from .hardening import (
     install_loopback_host_guard,
 )
 from .observability import install_request_timing_log, uvicorn_log_config
+from .render import install_faithful_history
 from .request_flow import (
     install_chat_load_offload,
     install_optional_request_model,
@@ -128,6 +134,7 @@ __all__ = [
     "install_chat_template_kwargs",
     "install_completions_route",
     "install_embeddings_route",
+    "install_faithful_history",
     "install_fast_sampler",
     "install_gen_args_profile_injection",
     "install_health_liveness_override",
@@ -213,6 +220,9 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_hf_download_gate(bool(getattr(cfg, "hf_cache", False)))
     install_runtime_snapshot_enrichment()
     install_pool_aware_unload()
+    # Faithful history first: the retire capture memoizes the render
+    # callable, and predictions must see the same render the server does.
+    install_faithful_history()
     install_apc_lone_harvest()
     install_retire_render_capture()
     install_keep_route()

@@ -468,6 +468,13 @@ profiles:
     chat_template_kwargs: {preserve_thinking: true}   # keep prior-turn <think>
 ```
 
+For `preserve_thinking` to matter, the reasoning has to reach the template:
+the server keeps message keys that mlx-vlm's per-model message rebuild does
+not itself produce, so an assistant message's `reasoning_content` echoed
+back by the client renders on plain turns as well as tool-call turns. Set
+`GMLX_FAITHFUL_HISTORY=0` to restore the stock rebuild, which keeps
+reasoning only on tool-call messages for vision-capable model families.
+
 The KV / disk cache stays correct regardless: reuse is keyed on the exact
 token prefix, so changing this flag only changes the rendered tokens (and
 thus the cache hit rate), never the validity of a hit.
@@ -1031,6 +1038,7 @@ and store counts surface on the authed `GET /v1/metrics`.
 | `GMLX_APC_CKPT_BUDGET_MB` | Byte budget for checkpoint-record payload (recurrent states + KV tails), in MB (default `4096`). A GDN record can carry >100 MB of state, so the count bound alone is not the real limit. |
 | `GMLX_APC_DECODE_CKPT` | Decode-time snapshot interval in generated tokens on hybrid models, anchored to the prompt end (default `512`; `0` off; widens automatically with context). |
 | `GMLX_APC_RETIRE_LCP` | `0` keys retirement on the forwarded ids instead of the predicted next-turn render (also disables decode-time snapshots, which key on the prediction). |
+| `GMLX_FAITHFUL_HISTORY` | `0` restores mlx-vlm's stock chat-history rebuild, which drops `reasoning_content` from non-tool assistant messages before the template sees it (see `chat_template_kwargs`). |
 
 ---
 

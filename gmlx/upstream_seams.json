@@ -67,6 +67,8 @@
   "mlx_vlm.models.qwen3_5.language:scaled_dot_product_attention": "67320fa4f0b489375caae5e9332dc572a3a30c0e33f919437a6114f4e5c80306",
   "mlx_vlm.models.switch_layers:SwitchGLU.__call__": "5fd90fb259959a94b11c403596b8b93ba0805e5012126fc0aae162619c5f5046",
   "mlx_vlm.models.switch_layers:SwitchLinear.__call__": "1c91ef16afb139a811b09d76d88ce9dba7d9fddb5f7cee5964d6a3849066b685",
+  "mlx_vlm.prompt_utils:apply_chat_template": "4aaaa3f96d1e856ada575385acccf44aa250ed71ea0dd0d0894eda1bb198ce60",
+  "mlx_vlm.prompt_utils:get_chat_template": "3ee9c569ce6d98e4dd108984afc161025888852fabca58074fd3a4073c8c3c4d",
   "mlx_vlm.server.app:app": null,
   "mlx_vlm.server.generation:GenerationArguments.to_template_kwargs": "4da06fa052db0f207a0854aeace13e2bb529300b8ae7b87093bd560ceb92437e",
   "mlx_vlm.server.generation:ResponseGenerator._make_sampler": "24f0c94e3ad85564ff09e4859bdd764032444952c36487f4659c0e29f7d797ce",

@@ -30,6 +30,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `preserve_thinking` now works on plain chat turns: the server keeps
+  `reasoning_content` on assistant history messages instead of dropping it
+  before the template renders (`GMLX_FAITHFUL_HISTORY=0` restores stock).
 - Multi-turn prefix-cache entries from finished server requests now match
   the follow-up turn on thinking and tool-calling models (entries are keyed
   on what the chat template will actually replay; `GMLX_APC_RETIRE_LCP=0`

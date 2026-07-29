@@ -177,7 +177,15 @@ SEAMS: tuple[Seam, ...] = (
          "tokenize path for the next-turn retirement key)"),
     Seam("mlx_vlm.server.openai", "apply_chat_template",
          "server_patches.install_retire_render_capture (render-context "
-         "memo, module attr)"),
+         "memo, module attr) + render.install_faithful_history (inner "
+         "key-merge wrap)"),
+    Seam("mlx_vlm.prompt_utils", "apply_chat_template",
+         "server_patches.render.install_faithful_history "
+         "(return_messages contract: one rebuilt message per readable "
+         "input item; tool passthrough branch)"),
+    Seam("mlx_vlm.prompt_utils", "get_chat_template",
+         "server_patches.render.install_faithful_history (owned render "
+         "tail mirrors the stock function's)"),
     Seam("mlx_vlm.server.openai", "_split_thinking",
          "retire_key.build_assistant_message (response-shape mirror)"),
     Seam("mlx_vlm.server.openai", "process_tool_calls",
