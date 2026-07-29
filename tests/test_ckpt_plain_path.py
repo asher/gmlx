@@ -162,7 +162,7 @@ def test_gen_batch_retire_uses_decode_snap_on_divergence(monkeypatch):
              "gen": gen, "snaps": [(40, snap_states)]}
     cache[0]._kq_apc_retire = stash
     monkeypatch.setattr(retire_key, "next_turn_lcp",
-                        lambda ctx, seq, g: 44)
+                        lambda ctx, seq, g, **kw: 44)
     gb = GenerationBatch.empty(model=None, sampler=None, stop_criteria=None)
     gb.uids = [8]
     gb.prompt_cache = cache

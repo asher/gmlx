@@ -253,3 +253,40 @@ def test_retire_b1_no_ctx_keeps_today(monkeypatch):
     retire["render_ctx"] = None
     sp._retire_b1(model, cache, gen, retire)
     assert calls["store"][1] is None
+
+
+# -- mid-decode partial prediction: virtual thinking closer --
+
+
+def test_virtually_finish_closes_open_thinking():
+    kw = {"thinking_start_token": "<think>",
+          "thinking_end_token": "</think>"}
+    ctx = {"kw": kw, "_think_open": True}
+    assert rk._virtually_finish(ctx, "partial reasoning") == \
+        "partial reasoning</think>"
+    closed = "r\n</think>\n\nanswer"
+    assert rk._virtually_finish(ctx, closed) == closed
+    # A start token inside the text triggers the closer even when the
+    # prompt did not open the block.
+    ctx2 = {"kw": kw, "_think_open": False}
+    assert rk._virtually_finish(ctx2, "<think>partial") == \
+        "<think>partial</think>"
+    assert rk._virtually_finish(ctx2, "plain content") == "plain content"
+    # No thinking template: untouched.
+    assert rk._virtually_finish({"kw": {}}, "text") == "text"
+
+
+def test_prompt_opens_thinking_memoized():
+    calls = []
+
+    def render(proc, cfg, messages, **kw):
+        calls.append(1)
+        return "<|im_start|>assistant\n<think>\n"
+
+    ctx = {"render": render, "preprocess": lambda t: [1],
+           "processor": None, "config": None, "messages": [],
+           "kw": {"thinking_start_token": "<think>",
+                  "thinking_end_token": "</think>"}}
+    assert rk._prompt_opens_thinking(ctx) is True
+    assert rk._prompt_opens_thinking(ctx) is True
+    assert len(calls) == 1

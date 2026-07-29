@@ -37,7 +37,7 @@ def _stash(full_ids, **kw):
 
 def _tick_at(stash, p, gen_len, pred, monkeypatch):
     monkeypatch.setattr(retire_key, "next_turn_lcp",
-                        lambda ctx, seq, gen: pred)
+                        lambda ctx, seq, gen, **kw: pred)
     cache = make_hybrid_cache(p, seed=p)
     gen = list(range(9000, 9000 + gen_len))
     decode_ckpt_tick(stash, cache, gen)
@@ -86,7 +86,7 @@ def test_tick_grid_alignment_for_rotating(monkeypatch):
     monkeypatch.setenv("GMLX_APC_DECODE_CKPT", "32")
     stash = _stash(list(range(40)), snap_grid=16, snap_align=16)
     monkeypatch.setattr(retire_key, "next_turn_lcp",
-                        lambda ctx, seq, gen: 10_000)
+                        lambda ctx, seq, gen, **kw: 10_000)
     # First boundary: 40 + 32 snapped up the 16-token grid = 80.
     decode_ckpt_tick(stash, make_swa_cache(48), list(range(9000, 9008)))
     assert "snaps" not in stash and stash["snap_next"] == 80
@@ -110,7 +110,7 @@ def test_tick_failure_disables_ring(monkeypatch):
     stash = _stash(list(range(40)))
     calls = []
 
-    def boom(ctx, seq, gen):
+    def boom(ctx, seq, gen, **kw):
         calls.append(1)
         raise RuntimeError("drifted private")
 

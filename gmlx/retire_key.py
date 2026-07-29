@@ -90,6 +90,49 @@ def _decode_generated(ctx: dict, generated: list[int]) -> str:
     return text
 
 
+def _prompt_opens_thinking(ctx: dict) -> bool:
+    """True when the generation prompt itself opens a thinking block
+    (qwen-style templates emit ``<think>\\n`` as part of the prompt, so
+    the generated text carries no start token). Memoized on the ctx."""
+    flag = ctx.get("_think_open")
+    if flag is None:
+        flag = False
+        try:
+            render = ctx.get("render")
+            kw = dict(ctx.get("kw") or {})
+            ts = kw.get("thinking_start_token")
+            te = kw.get("thinking_end_token")
+            if render is not None and ts:
+                kw["add_generation_prompt"] = True
+                text = render(ctx["processor"], ctx["config"],
+                              list(ctx["messages"]), **kw)
+                if isinstance(text, str):
+                    flag = text.rfind(ts) > text.rfind(te or "")
+        except Exception:
+            flag = False
+        ctx["_think_open"] = flag
+    return flag
+
+
+def _virtually_finish(ctx: dict, text: str) -> str:
+    """Close an open thinking block in a mid-decode partial.
+
+    A partial prediction asks what the next turn would replay if the
+    reply finished here. With no end token in the text the splitter
+    reads the whole partial as content, so every mid-thinking render
+    diverged at the (empty) think block and the snapshot ring froze on
+    its first tick -- the virtual closer restores the honest question.
+    """
+    kw = ctx.get("kw") or {}
+    ts = kw.get("thinking_start_token")
+    te = kw.get("thinking_end_token")
+    if not te or te in text:
+        return text
+    if (ts and ts in text) or _prompt_opens_thinking(ctx):
+        return text + te
+    return text
+
+
 def build_assistant_message(ctx: dict, full_text: str) -> dict:
     """Parse a completion into the assistant message a client echoes back.
 
@@ -163,18 +206,25 @@ def predict_next_ids(ctx: dict, assistant_msg: dict) -> list[int] | None:
     return [int(t) for t in ids]
 
 
-def next_turn_lcp(ctx: dict, seq: list[int],
-                  generated: list[int]) -> int | None:
+def next_turn_lcp(ctx: dict, seq: list[int], generated: list[int],
+                  *, partial: bool = False) -> int | None:
     """Longest common prefix of ``seq`` with the predicted next-turn render.
 
-    Returns None (caller keeps today's behavior) when the context is
-    missing, carries media (re-encoding text cannot reproduce expanded
-    media token ids), or any step of the prediction fails.
+    ``partial=True`` marks a mid-decode call (the decode-time snapshot
+    tick): an open thinking block is virtually closed before the split,
+    since the finished reply this predicts for would close it. At
+    retirement the text is what the client will actually echo, so no
+    closer is applied. Returns None (caller keeps today's behavior)
+    when the context is missing, carries media (re-encoding text cannot
+    reproduce expanded media token ids), or any step of the prediction
+    fails.
     """
     if not ctx or ctx.get("media"):
         return None
     try:
         full_text = _decode_generated(ctx, generated)
+        if partial:
+            full_text = _virtually_finish(ctx, full_text)
         msg = build_assistant_message(ctx, full_text)
         nxt = predict_next_ids(ctx, msg)
         if not nxt:

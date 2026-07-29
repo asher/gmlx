@@ -1194,7 +1194,7 @@ def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
         if p > len(seq):
             return
         from .retire_key import next_turn_lcp
-        pred = next_turn_lcp(ctx, seq, gen)
+        pred = next_turn_lcp(ctx, seq, gen, partial=True)
         if pred is None:
             stash["snap_next"] = _grid_ceil(p + eff, grid)
             return
