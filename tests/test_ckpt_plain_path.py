@@ -56,6 +56,8 @@ def test_plain_init_arms_cold_batch():
     stash = b.prompt_cache[0]._kq_apc_retire
     assert stash["mode"] == "ckpt" and stash["manager"] is man
     assert stash["snap_ok"] and stash["gen"] == []
+    # Ring parameters: chunk-grid anchor, no rotating layers -> align 1.
+    assert stash["snap_grid"] == 16 and stash["snap_align"] == 1
     # Cold: no trim happened.
     assert b._processed_prompt_columns == 0
     assert b._input_ids.shape[1] == len(ids)
@@ -171,6 +173,18 @@ def test_gen_batch_retire_uses_decode_snap_on_divergence(monkeypatch):
                     snap_states):
         for a, b in zip(w.cache, s.cache):
             assert mx.array_equal(a, b).item()
+
+
+def test_plain_step_tick_disables_on_failure():
+    # Runs per token: a deterministic failure must strike once, not
+    # emit a traceback per step.
+    stash = {"mode": "ckpt", "gen": 7}        # broken accounting slot
+    gb = SimpleNamespace(
+        uids=[3], prompt_cache=[SimpleNamespace(_kq_apc_retire=stash)])
+    spec_engine._plain_step_tick(gb, [[5]])
+    assert stash["snap_ok"] is False and "gen" not in stash
+    spec_engine._plain_step_tick(gb, [[6]])   # gated off: silent no-op
+    assert "gen" not in stash
 
 
 def test_render_memo_preprocess_failure_is_safe():

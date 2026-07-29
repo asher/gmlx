@@ -984,15 +984,22 @@ What a warm hit restores:
   plain path; on ckpt-tier models, prompt formation is serialized to one
   request at a time (batched prompt prefill measured no win on these
   shapes anyway).
-- Decode-time checkpoints: on recurrent (GDN) models the tier also
-  snapshots recurrent state at intervals during decode, while the
-  predicted next-turn render still replays the sequence so far. When the
-  next turn's re-rendered history diverges from what was generated
-  (thinking strip, tool-call re-serialization, retokenization), the
-  retirement store falls back to the newest snapshot at or below the
-  divergence point instead of dropping the generated tokens entirely.
-  `GMLX_APC_DECODE_CKPT` sets the interval (default 4096; `0` off); each
-  live request holds at most two state snapshots.
+- Decode-time checkpoints: on hybrid (GDN and sliding-window) models the
+  tier also snapshots recurrent states and rotating windows at intervals
+  during decode, while the predicted next-turn render still replays the
+  sequence so far. When the next turn's re-rendered history diverges
+  from what was generated (thinking strip, tool-call re-serialization,
+  retokenization), the retirement store falls back to the newest
+  snapshot at or below the divergence point instead of dropping the
+  generated tokens entirely. `GMLX_APC_DECODE_CKPT` sets the interval
+  (default 512; `0` off); each live request holds at most two snapshots.
+  Boundaries anchor to the prompt end, so the first snapshot lands about
+  one interval into the reply: turns shorter than that retire through
+  the prompt-end store alone, which is all a short turn could retain
+  anyway (the payoff is bounded by generated length, and the mechanism
+  earns its keep on long preserve-thinking and tool-call turns). The
+  interval widens with context so the per-boundary prediction render
+  stays a bounded fraction of decode time.
 
 Eviction rides the pools the entries live in: the block LRU (`num_blocks`),
 the exact-prefix LRU (`exact_entries`), the disk cap (`disk.max_gb`). Hit
@@ -1001,9 +1008,9 @@ and store counts surface on the authed `GET /v1/metrics`.
 > Thinking templates that strip prior-turn `<think>` blocks from the
 > re-rendered history (the Qwen3 family) diverge right after the
 > assistant header, so a full-length retirement entry can never match.
-> Retirement keys on the predicted next-turn render instead, and on GDN
-> models the decode-time snapshots retain whatever prefix of the reply
-> the next turn can actually replay. What is structurally
+> Retirement keys on the predicted next-turn render instead, and on
+> hybrid models the decode-time snapshots retain whatever prefix of the
+> reply the next turn can actually replay. What is structurally
 > unretainable -- content past the divergence point -- costs
 > re-prefilling, which is what every server pays there. A template
 > property, not a gmlx one.
@@ -1022,7 +1029,7 @@ and store counts surface on the authed `GET /v1/metrics`.
 | `GMLX_APC_CKPT_INTERVAL` | Prefill checkpoint interval in tokens (default `4096`, snapped to the chunk grid; `0` = final checkpoint only). |
 | `GMLX_APC_CKPT_RECORDS` | Checkpoint-record LRU entries (default `32`). |
 | `GMLX_APC_CKPT_BUDGET_MB` | Byte budget for checkpoint-record payload (recurrent states + KV tails), in MB (default `4096`). A GDN record can carry >100 MB of state, so the count bound alone is not the real limit. |
-| `GMLX_APC_DECODE_CKPT` | Decode-time snapshot interval in tokens on GDN models (default `4096`; `0` off). |
+| `GMLX_APC_DECODE_CKPT` | Decode-time snapshot interval in generated tokens on hybrid models, anchored to the prompt end (default `512`; `0` off; widens automatically with context). |
 | `GMLX_APC_RETIRE_LCP` | `0` keys retirement on the forwarded ids instead of the predicted next-turn render (also disables decode-time snapshots, which key on the prediction). |
 
 ---

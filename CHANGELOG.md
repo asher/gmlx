@@ -14,10 +14,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   one cold prefill plus warm tails instead of N cold prefills.
 - The checkpoint tier serves the plain (non-speculative) path too: lookup,
   interval checkpoints, and retirement no longer require an MTP drafter.
-- On recurrent (GDN) models, generated tokens survive retirement even when
-  the next turn's re-rendered history diverges (thinking strip, tool-call
-  re-serialization): decode-time state snapshots retain the reply up to
-  the divergence point (`GMLX_APC_DECODE_CKPT`, default 4096; `0` off).
+- On hybrid (GDN and sliding-window) models, generated tokens survive
+  retirement even when the next turn's re-rendered history diverges
+  (thinking strip, tool-call re-serialization): decode-time snapshots
+  retain the reply up to the divergence point (`GMLX_APC_DECODE_CKPT`,
+  default 512 generated tokens; `0` off).
 
 ### Changed
 

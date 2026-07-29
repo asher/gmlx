@@ -461,11 +461,23 @@ def _install_ckpt_checkpoint_store() -> None:
         _store_with_ckpt_cursor
 
 
-def _snap_ok_for(model, block_size: int) -> bool:
-    """Decode-time snapshots serve GDN-shaped layouts only: a rotating
-    window at a past position would need its evicted front back."""
-    tags = _ckpt_layout_for(model, block_size) or ()
-    return "arr" in tags and not any(t.startswith("rot") for t in tags)
+def _snap_fields(batch, manager) -> dict:
+    """Decode-time snapshot ring parameters for a retirement stash.
+
+    ``snap_grid`` anchors snapshot positions to the prefill chunk grid
+    (lcm of step and block size), so a restore replays chunk-exact;
+    ``snap_align`` is the block alignment a rotating window store
+    requires (a window cannot rewind, so off-grid clones are unusable).
+    """
+    import math
+    bs = int(manager.block_size)
+    tags = _ckpt_layout_for(batch.model, bs) or ()
+    step = int(getattr(batch, "prefill_step_size", 0) or 0)
+    return {
+        "snap_ok": bool(tags),
+        "snap_grid": math.lcm(step, bs) if step > 0 else bs,
+        "snap_align": bs if any(t.startswith("rot") for t in tags) else 1,
+    }
 
 
 def _plain_ckpt_init(batch) -> None:
@@ -533,12 +545,35 @@ def _plain_ckpt_init(batch) -> None:
             "apc_meta": meta,
             "render_ctx": lookup_render_ctx(ids_list),
             "manager": manager,
-            "snap_ok": _snap_ok_for(batch.model, bs),
             "gen": [],
+            **_snap_fields(batch, manager),
         }
 
 
 _PLAIN_DECODE_FLAG = "_kq_ckpt_plain_decode"
+
+
+def _plain_step_tick(gb, out) -> None:
+    """Per-token accounting + snapshot tick for a lone stock-path ckpt
+    row. Runs per step, so a deterministic failure disables the hook for
+    the request on first strike instead of emitting a traceback per
+    token; dropping ``gen`` also quiets retirement (its offset check
+    would skip anyway on a broken count)."""
+    stash = None
+    try:
+        if len(gb.uids) == 1 and gb.prompt_cache:
+            stash = getattr(gb.prompt_cache[0], "_kq_apc_retire", None)
+            if (stash is not None and stash.get("mode") == "ckpt"
+                    and "gen" in stash):
+                stash["gen"].append(int(out[0][0]))
+                from .cache_snapshot import decode_ckpt_tick
+                decode_ckpt_tick(stash, gb.prompt_cache, stash["gen"])
+    except Exception:
+        if stash is not None:
+            stash.pop("gen", None)
+            stash["snap_ok"] = False
+        _log.warning("APC plain decode hook failed; disabled for "
+                     "this request", exc_info=True)
 
 
 def _plain_retire(stash: dict, prompt_cache: list) -> None:
@@ -596,19 +631,7 @@ def _install_plain_ckpt_decode() -> None:
 
     def _step_with_ckpt(self):
         out = _orig_step(self)
-        try:
-            if len(self.uids) == 1 and self.prompt_cache:
-                stash = getattr(self.prompt_cache[0], "_kq_apc_retire",
-                                None)
-                if (stash is not None and stash.get("mode") == "ckpt"
-                        and "gen" in stash):
-                    stash["gen"].append(int(out[0][0]))
-                    from .cache_snapshot import decode_ckpt_tick
-                    decode_ckpt_tick(stash, self.prompt_cache,
-                                     stash["gen"])
-        except Exception:
-            _log.warning("APC plain decode hook failed; continuing",
-                         exc_info=True)
+        _plain_step_tick(self, out)
         return out
 
     def _filter_with_ckpt(self, keep):
@@ -715,7 +738,7 @@ def _mtp_prefill_init(batch) -> None:
             # Render context for the next-turn LCP key (None off the server
             # path or on a media prompt; retirement then keys as before).
             "render_ctx": lookup_render_ctx(full_ids),
-            "snap_ok": _snap_ok_for(batch.model, int(manager.block_size)),
+            **_snap_fields(batch, manager),
         }
 
     if restored > 0:

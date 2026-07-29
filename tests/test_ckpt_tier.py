@@ -222,18 +222,19 @@ def test_swa_store_declines_off_grid():
     assert all(b.ref_cnt == 0 for b in man.pool)
 
 
-def test_retirement_rotating_falls_back_to_exact():
+def test_retirement_rotating_without_snap_declines():
+    """No exact-tier fallback: an off-grid rotating retirement with no
+    decode snapshot stores nothing, and the exact tier stays empty so
+    the stock warm path never bypasses ckpt arming."""
     man = APCManager(num_blocks=64, block_size=16)
     p = 40                                    # unaligned: ckpt declines
     cache = make_swa_cache(p, seed=3)
     ids = list(range(300, 300 + p))
-    assert retirement_store(man, "ckpt", ids, cache, row=0, extra_hash=1)
-    # landed on the exact tier (verbatim row with rotation meta)
+    assert not retirement_store(man, "ckpt", ids, cache, row=0,
+                                extra_hash=1)
     entry, plen = man.lookup_exact_cache(ids + [1], extra_hash=1)
-    assert plen == p and entry is not None
-    from gmlx.cache_snapshot import ckpt_extra_hash as _ceh
-    e2, p2 = man.lookup_exact_cache(ids + [1], extra_hash=_ceh(1))
-    assert e2 is None and p2 == 0             # nothing under the ckpt salt
+    assert entry is None and plen == 0
+    assert man.stats_snapshot()["exact_stores"] == 0
 
 
 def test_pinning_survives_pool_pressure():

@@ -1123,18 +1123,26 @@ def _truncate_kv_snapshot(snap: list[Any], n: int) -> list[Any] | None:
 # keyed past the next turn's replayable prefix can never match, and
 # recurrent state cannot rewind at retirement, so whatever the tier
 # retains of the generated tokens must be captured while decode passes
-# it. At interval boundaries the predicted next-turn render is compared
-# against the sequence so far: while it still replays (LCP within a
-# retokenization margin of the live length), the recurrent states are
-# cloned into a two-slot ring; the first structural divergence (thinking
-# strip, tool-call re-serialization) freezes the ring and drops the
-# unreachable slots. Retirement assembles a checkpoint from the newest
-# snapshot at or below the actual LCP: plain KV truncates freely, states
-# come from the snapshot. GDN-shaped models only -- a rotating window at
-# a past position would need its evicted front back.
+# it. At interval boundaries (anchored to the prompt end and snapped to
+# the prefill chunk grid, so the interval is a floor on generated tokens
+# retained and a restore replays chunk-exact) the predicted next-turn
+# render is compared against the sequence so far: while it still replays
+# (LCP within a retokenization margin of the live length), recurrent
+# states and rotating windows are cloned into a two-slot ring; the first
+# structural divergence (thinking strip, tool-call re-serialization)
+# freezes the ring and drops the unreachable slots. Retirement assembles
+# a checkpoint from the newest snapshot at or below the actual LCP:
+# plain KV truncates freely, everything else comes from the snapshot.
+# Rotating windows cannot rewind, so their snapshots are usable only at
+# block-aligned positions -- the tick waits for one.
 
-_DECODE_CKPT_DEFAULT = 4096
+_DECODE_CKPT_DEFAULT = 512
 _DECODE_CKPT_MARGIN = 64
+
+
+def _grid_ceil(n: int, g: int) -> int:
+    g = max(1, int(g))
+    return -(-int(n) // g) * g
 
 
 def _cache_offset_max(prompt_cache) -> int:
@@ -1155,23 +1163,32 @@ def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
 
     ``stash`` is the request's retirement context (``snaps`` /
     ``snap_next`` / ``snap_frozen`` live here and die with it). Cheap
-    off-boundary; never raises into the decode loop.
+    off-boundary; never raises into the decode loop, and a failure
+    disables the ring for the request rather than retrying per token.
     """
     try:
-        interval = env_int("GMLX_APC_DECODE_CKPT", _DECODE_CKPT_DEFAULT)
-        if interval <= 0 or stash.get("snap_frozen"):
+        if stash.get("snap_frozen") or not stash.get("snap_ok"):
             return
+        interval = env_int("GMLX_APC_DECODE_CKPT", _DECODE_CKPT_DEFAULT)
         ctx = stash.get("render_ctx")
-        if ctx is None or not stash.get("snap_ok"):
+        if interval <= 0 or ctx is None:
             return
         full_ids = stash["full_ids"]
         p = _cache_offset_max(prompt_cache)
+        # The render retokenizes the whole sequence, so its cost grows
+        # with p; widening the interval with p keeps prediction a bounded
+        # fraction of decode time.
+        eff = max(interval, p >> 6)
+        grid = int(stash.get("snap_grid") or 1)
         nxt = stash.get("snap_next")
         if nxt is None:
-            nxt = ((len(full_ids) // interval) + 1) * interval
+            nxt = _grid_ceil(len(full_ids) + eff, grid)
             stash["snap_next"] = nxt
         if p < nxt:
             return
+        align = int(stash.get("snap_align") or 1)
+        if align > 1 and p % align:
+            return          # rotating stores need a block-aligned p
         gen = [int(t) for t in generated]
         seq = list(full_ids) + gen
         if p > len(seq):
@@ -1179,7 +1196,7 @@ def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
         from .retire_key import next_turn_lcp
         pred = next_turn_lcp(ctx, seq, gen)
         if pred is None:
-            stash["snap_next"] = p + interval
+            stash["snap_next"] = _grid_ceil(p + eff, grid)
             return
         if pred + _DECODE_CKPT_MARGIN < p:
             # Structural divergence behind us: no future snapshot can sit
@@ -1192,28 +1209,34 @@ def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
             return
         from .cache_compat import cache_types
         kv_types = cache_types("KVCache")
+        rot_types = cache_types("RotatingKVCache")
         states = []
         for c in prompt_cache:
-            if isinstance(c, kv_types):
+            if isinstance(c, kv_types) and not isinstance(c, rot_types):
                 continue
             clone = _clone_single_row(c)
             if clone is None:
+                stash["snap_ok"] = False
+                _log.info("APC decode ckpt disabled: uncloneable cache %s",
+                          type(c).__name__)
                 return
             states.append(clone)
         snaps = stash.setdefault("snaps", [])
         snaps.append((p, states))
         del snaps[:-2]
-        stash["snap_next"] = p + interval
+        stash["snap_next"] = _grid_ceil(p + eff, grid)
         _log.info("APC decode ckpt snapshot: p=%d pred=%d", p, pred)
     except Exception:
-        _log.warning("APC decode ckpt tick failed; continuing",
-                     exc_info=True)
+        stash["snap_ok"] = False
+        _log.warning("APC decode ckpt tick failed; ring disabled for "
+                     "this request", exc_info=True)
 
 
 def _snap_assemble(prompt_cache: list[Any], states: list[Any],
                    p: int) -> list[Any] | None:
     """Rebuild a single-row cache list at snapshot position ``p``: plain
-    KV sliced from the live row, recurrent states from the snapshot."""
+    KV sliced from the live row, rotating windows and recurrent states
+    from the snapshot clones."""
     from .cache_compat import cache_types, construction_cache_module
 
     kv_types = cache_types("KVCache")
@@ -1221,9 +1244,7 @@ def _snap_assemble(prompt_cache: list[Any], states: list[Any],
     out = []
     si = 0
     for c in prompt_cache:
-        if isinstance(c, rot_types):
-            return None
-        if isinstance(c, kv_types):
+        if isinstance(c, kv_types) and not isinstance(c, rot_types):
             if c.keys is None or int(getattr(c, "offset", 0) or 0) < p:
                 return None
             k = construction_cache_module().KVCache()
@@ -1239,6 +1260,49 @@ def _snap_assemble(prompt_cache: list[Any], states: list[Any],
     if si != len(states):
         return None
     return out
+
+
+def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
+                     max_len, decode_snaps) -> bool:
+    """Ckpt-mode retirement: the full sequence when it can store whole,
+    else the newest decode-time snapshot at or below the replayable
+    prefix. Never spills to the exact tier -- on ckpt models the exact
+    tier stays empty, so the stock warm path never bypasses arming."""
+    try:
+        cap = len(ids)
+        if max_len is not None and max_len < len(ids):
+            cap = max_len
+        elif len(ids) >= 2:
+            # The row is already single-row on the B=1 path; ckpt_store
+            # slices it directly (its own stores copy internally), so no
+            # full-cache clone happens -- the exact tier's whole sin. A
+            # rotating layer declines here (retirement p is arbitrary and
+            # a window store needs the block grid); the ring below holds
+            # grid-aligned clones for exactly that case.
+            if ckpt_store(manager, ids, prompt_cache,
+                          extra_hash=extra_hash):
+                return True
+        for p, states in sorted(decode_snaps or (),
+                                key=lambda s: s[0], reverse=True):
+            if not 2 <= p <= cap:
+                continue
+            assembled = _snap_assemble(prompt_cache, states, p)
+            # skeleton_disk stays on: this is the entry a post-restart
+            # turn restores from, unlike interval boundaries.
+            if assembled is not None and ckpt_store(
+                    manager, ids[:p], assembled, extra_hash=extra_hash,
+                    skeleton_disk=True):
+                _log.info("APC retirement: decode ckpt stored at %d "
+                          "(cap %d, full %d)", p, cap, len(ids))
+                return True
+        _log.info("APC retirement skipped: no decode snapshot at or "
+                  "below the replayable prefix %d (full %d)",
+                  cap, len(ids))
+        return False
+    except Exception:
+        _log.warning("APC ckpt retirement failed; continuing",
+                     exc_info=True)
+        return False
 
 
 def retirement_store(
@@ -1257,60 +1321,30 @@ def retirement_store(
     ``token_ids`` is the full sequence (prompt + generated); it must be the
     request's original full_input_ids plus the emitted tokens, never a
     suffix-only serve-layer ``prompt_tokens`` (which is trimmed on a warm turn).
-    Exact mode snapshots the row and stores it whole (the rotating chat
-    fleet); ckpt mode stores blocks + sidecar (gated-delta hybrids, B=1
-    rows only in v1); block mode harvests the row's blocks into the shared
-    pool. ``max_len`` caps the stored key at a shorter prefix (the next-turn
-    LCP): blocks are prefix-causal and truncate freely; an exact snapshot
-    truncates only when every layer is a plain KVCache; a ckpt store falls
-    back to the newest decode-time snapshot at or below the LCP
-    (``decode_snaps``, from ``decode_ckpt_tick``) -- recurrent state
-    cannot rewind, so without one it is skipped outright. Best-effort: a
-    failure never breaks generation.
+    Exact mode snapshots the row and stores it whole (plain-KV fleets);
+    ckpt mode stores blocks + sidecar (gated-delta and sliding-window
+    hybrids, B=1 rows only in v1); block mode harvests the row's blocks
+    into the shared pool. ``max_len`` caps the stored key at a shorter
+    prefix (the next-turn LCP): blocks are prefix-causal and truncate
+    freely; an exact snapshot truncates only when every layer is a plain
+    KVCache; a ckpt store uses the newest decode-time snapshot at or
+    below the LCP (``decode_snaps``, from ``decode_ckpt_tick``) --
+    neither recurrent state nor a rotating window can rewind, so without
+    one it is skipped outright, never spilled to the exact tier. Best
+    effort: a failure never breaks generation.
     """
     if manager is None or token_ids is None:
         return False
     ids = [int(t) for t in token_ids]
-    if max_len is not None and max_len < len(ids):
-        if mode == "ckpt":
-            for p, states in sorted(decode_snaps or (),
-                                    key=lambda s: s[0], reverse=True):
-                if not 2 <= p <= max_len:
-                    continue
-                assembled = _snap_assemble(prompt_cache, states, p)
-                if assembled is not None and ckpt_store(
-                        manager, ids[:p], assembled, extra_hash=extra_hash):
-                    _log.info(
-                        "APC retirement: decode ckpt stored at %d "
-                        "(LCP %d, full %d)", p, max_len, len(ids))
-                    return True
-            _log.info(
-                "APC retirement skipped: ckpt state at %d cannot rewind to "
-                "the replayable prefix %d", len(ids), max_len)
-            return False
-        if mode != "exact":
-            ids = ids[:max_len]
+    if mode == "ckpt":
+        return _ckpt_retirement(manager, ids, prompt_cache,
+                                extra_hash=extra_hash, max_len=max_len,
+                                decode_snaps=decode_snaps)
+    if max_len is not None and max_len < len(ids) and mode != "exact":
+        ids = ids[:max_len]
     if len(ids) < 2:
         return False
     try:
-        if mode == "ckpt":
-            # The row is already single-row on the B=1 path; ckpt_store
-            # slices it directly (its own stores copy internally), so no
-            # full-cache clone happens -- the exact tier's whole sin.
-            if ckpt_store(manager, ids, prompt_cache,
-                          extra_hash=extra_hash):
-                return True
-            # A rotating store declines off the block grid (retirement p
-            # is arbitrary; the evicted window front cannot be rewound to
-            # a lower grid point). Fall back to the exact tier's verbatim
-            # row store, which carries rotation via meta -- today's
-            # shipped behavior for the sliding-window fleet. GDN rows
-            # never take this branch (unaligned p stores with a KV tail).
-            from .cache_compat import cache_types
-            if not any(isinstance(c, cache_types("RotatingKVCache"))
-                       for c in prompt_cache):
-                return False
-            mode = "exact"
         if mode == "exact":
             snap = row_snapshot(prompt_cache, row)
             if snap is None:
