@@ -316,33 +316,90 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
     batch._mtp_l1_prefix_len = l1_prefix
     batch._apc_manager = manager
     batch._apc_mode = mode
-    batch._apc_meta = [{
+    guard = int(view._apc_exact_checkpoint_len(ids_list) or 0)
+    meta = {
         "full_input_ids": ids_list,
         "prefix_len": 0,
         "extra_hash": extra_hash,
         "apc_blocks": held_blocks,
-        "checkpoint_len": view._apc_exact_checkpoint_len(ids_list),
-    }]
+        "checkpoint_len": guard,
+    }
+    batch._apc_meta = [meta]
     if ckpt:
         # The checkpoint tier replaces the stock exact-tier stores: the
         # post-prefill full-cache clone is suppressed here, and the
         # mid-prefill checkpoint store is superseded in _mtp_prompt_step
-        # (same aligned column, marks checkpoint_done so the stock store
-        # is a no-op). Column alignment itself still runs on the stock
-        # machinery, which requires _apc_mode == "exact".
+        # (an interval cursor over aligned columns; the stock store is
+        # suppressed by the cursor's advance -- see _ckpt_mid_prefill_store).
+        # Column alignment itself still runs on the stock machinery, which
+        # requires _apc_mode == "exact".
+        first, terminal, interval = _ckpt_cursor_init(
+            batch, guard, max(l0_prefix, l1_prefix),
+            int(manager.block_size))
+        meta["checkpoint_len"] = first
+        meta["ckpt_terminal"] = terminal
+        meta["ckpt_interval"] = interval
+        meta["ckpt_last_stored"] = 0
         batch._apc_harvest_enabled = False
         batch._kq_ckpt_armed = True
     return l1_prefix
 
 
+def _gcd(a: int, b: int) -> int:
+    while b:
+        a, b = b, a % b
+    return a
+
+
+def _ckpt_cursor_init(batch, guard: int, restored: int,
+                      block_size: int) -> tuple[int, int, int]:
+    """(first_boundary, terminal, interval) for the checkpoint cursor.
+
+    Every boundary sits on the natural chunk grid -- multiples of
+    lcm(prefill_step_size, block_size) -- so the cached path replays the
+    uncached run's exact chunk sequence and determinism carries
+    bit-exactness (the step-2 cert: any truncated chunk drifts KV, GDN
+    state and logits). The terminal is the largest grid point at or below
+    the stock guard column and the cursor latches there; boundaries at or
+    below the restored prefix are skipped (their store already exists on
+    the chain that produced the restore). GMLX_APC_CKPT_INTERVAL tokens
+    (default 4096, snapped up to the grid; 0 = terminal-only, the
+    pre-cursor behavior). B>1 note: the owned prefill is single-request,
+    so the shared-column-axis question does not arise here; if multi-row
+    owned prefill ever lands, all rows snap to these same boundaries.
+    """
+    step = int(getattr(batch, "prefill_step_size", 0) or 0)
+    unit = block_size if step <= 0 else \
+        step * block_size // _gcd(step, block_size)
+    terminal = (guard // unit) * unit
+    if terminal <= max(0, restored):
+        return 0, 0, 0
+    raw = env_int("GMLX_APC_CKPT_INTERVAL", 4096)
+    interval = 0 if raw <= 0 else max(unit, (raw // unit) * unit)
+    if interval:
+        first = ((max(0, restored) // interval) + 1) * interval
+        first = min(first, terminal)
+    else:
+        first = terminal
+    return first, terminal, interval
+
+
 def _ckpt_mid_prefill_store(batch) -> None:
     """Checkpoint-tier replacement for the stock mid-prefill exact store.
 
-    Fires at the same aligned column (the stock ``_next_apc_checkpoint_
-    column`` machinery forces the chunk boundary there), then marks
-    ``checkpoint_done`` so the stock store -- a full multi-GB hybrid clone
-    -- becomes a no-op. Marked done even when the store fails: falling back
-    to the stock clone would defeat the tier's purpose.
+    Fires at each cursor boundary (the stock ``_next_apc_checkpoint_
+    column`` machinery re-reads ``checkpoint_len`` every chunk and forces
+    the boundary there), then advances the cursor to the next interval
+    boundary, latching ``checkpoint_done`` only after the terminal (the
+    grid point at or below the stock guard column). The stock store is
+    suppressed by the advance, not the latch: this hook runs immediately
+    before ``_store_apc_exact_checkpoints`` in ``_mtp_prompt_step``, and
+    the moved cursor no longer equals ``_row_real_tokens_processed`` --
+    the ordering is load-bearing and carries an explicit test. The cursor
+    advances even when a store fails (falling back to the stock multi-GB
+    clone would defeat the tier); ``ckpt_last_stored`` records the last
+    boundary that actually stored, which is what the retirement context
+    and the drafter sidecar key on -- never the cursor.
     """
     if not getattr(batch, "_kq_ckpt_armed", False):
         return
@@ -359,10 +416,16 @@ def _ckpt_mid_prefill_store(batch) -> None:
     if batch._row_real_tokens_processed(0) != checkpoint_len:
         return
     from .cache_snapshot import ckpt_store
-    ckpt_store(
-        manager, meta["full_input_ids"][:checkpoint_len],
-        batch.prompt_cache, extra_hash=int(meta.get("extra_hash", 0)))
-    meta["checkpoint_done"] = True
+    if ckpt_store(
+            manager, meta["full_input_ids"][:checkpoint_len],
+            batch.prompt_cache, extra_hash=int(meta.get("extra_hash", 0))):
+        meta["ckpt_last_stored"] = checkpoint_len
+    terminal = int(meta.get("ckpt_terminal") or 0)
+    interval = int(meta.get("ckpt_interval") or 0)
+    if interval and checkpoint_len < terminal:
+        meta["checkpoint_len"] = min(checkpoint_len + interval, terminal)
+    else:
+        meta["checkpoint_done"] = True
 
 
 def _mtp_prefill_init(batch) -> None:
@@ -444,6 +507,11 @@ def _mtp_prefill_init(batch) -> None:
             "mode": ("ckpt" if _ckpt_active(
                 batch.model, mode, int(manager.block_size)) else mode),
             "checkpoint_len": int(meta.get("checkpoint_len", 0) or 0),
+            # Live meta reference: under the ckpt cursor the sidecar must
+            # key on the last boundary actually stored (ckpt_last_stored,
+            # final by the time the rounds generator reads it), never the
+            # advancing cursor value frozen above.
+            "apc_meta": meta,
             # Render context for the next-turn LCP key (None off the server
             # path or on a media prompt; retirement then keys as before).
             "render_ctx": lookup_render_ctx(full_ids),

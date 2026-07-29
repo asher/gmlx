@@ -1064,7 +1064,7 @@ def owned_server_rounds(
         sidecar_ctx = {
             "full_ids": retire_ctx["full_ids"],
             "extra_hash": int(retire_ctx.get("extra_hash", 0)),
-            "checkpoint_len": int(retire_ctx.get("checkpoint_len", 0) or 0),
+            "checkpoint_len": _sidecar_boundary(retire_ctx),
             "manager": getattr(model, "_kq_apc_manager", None),
         }
         if retire_ctx.get("mode") == "ckpt":
@@ -1126,6 +1126,21 @@ def owned_server_rounds(
             rate = f" rate={sum(al) / drafted:.3f}" if drafted else ""
             print(f"[spec] rounds={len(al)} drafted={drafted} "
                   f"accepted={sum(al):g}{rate}", file=sys.stderr, flush=True)
+
+
+def _sidecar_boundary(retire_ctx: dict) -> int:
+    """Checkpoint boundary the drafter sidecar keys on.
+
+    Under the ckpt cursor: the last boundary that actually stored
+    (``ckpt_last_stored`` in the live meta, final by rounds entry), never
+    the advancing cursor -- a sidecar under a boundary with no target-side
+    entry would poison future turns. Exact mode keeps the frozen
+    guard-trimmed value.
+    """
+    if retire_ctx.get("mode") == "ckpt":
+        return int((retire_ctx.get("apc_meta") or {})
+                   .get("ckpt_last_stored", 0) or 0)
+    return int(retire_ctx.get("checkpoint_len", 0) or 0)
 
 
 def _ckpt_post_prefill(model, prompt_cache: list, retire_ctx: dict) -> None:
