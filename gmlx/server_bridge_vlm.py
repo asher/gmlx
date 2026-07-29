@@ -726,6 +726,15 @@ def install_gguf_server_bridge() -> None:
         # for its own build (builds are serialized by the residency build lock).
         os.environ.pop("MLX_VLM_DRAFT_MODEL", None)
         os.environ.pop("MLX_VLM_DRAFT_KIND", None)
+        # The server's APC manager is gmlx-owned: built here from the same env
+        # from_env reads (GMLX_APC_ENABLED gate + stock APC_* knobs, all set by
+        # the residency build window), published on the module channel, and
+        # wired in by residency after the load returns. Applies to GGUF and
+        # fall-through loads alike - any pooled model can enable the cache.
+        from .apc_manager import build_apc_manager
+        manager = build_apc_manager(model_namespace=model_path)
+        if manager is not None:
+            publish_built_apc_manager(manager)
         if _is_gguf(model_path):
             if adapter_path is not None:
                 # The LoRA/DoRA adapter-apply path on a GGUF base is not built yet.
@@ -1205,3 +1214,25 @@ def get_build_spec():
     """The ResolvedModel for the in-flight build, or ``None`` (single-model mode, or
     no build in progress). Safe to read from any thread - set under the build lock."""
     return _current_build_spec
+
+
+# The APC manager the load bridge built for the model now loading. Same
+# thread-crossing contract as the build spec: the bridge runs in the engine's
+# generation worker thread and publishes here; residency pops in the request
+# thread after the blocking stock load returns and wires it into the entry,
+# the registry cache dict, and the ResponseGenerator (whose own binding is
+# None - stock from_env sees the pinned APC_ENABLED=0 and builds nothing).
+_built_apc_manager = None
+
+
+def publish_built_apc_manager(manager) -> None:
+    global _built_apc_manager
+    _built_apc_manager = manager
+
+
+def pop_built_apc_manager():
+    """Return and clear the manager built for the in-flight load, or ``None``."""
+    global _built_apc_manager
+    manager = _built_apc_manager
+    _built_apc_manager = None
+    return manager

@@ -61,7 +61,6 @@ import os
 
 from ._common import _PATCH_FLAG
 from .apc import (
-    install_apc_batched_store_eval,
     install_apc_lone_harvest,
     install_retire_render_capture,
 )
@@ -116,7 +115,6 @@ from .sampling import (
 __all__ = [
     "HFAccessDisabled",
     "disable_credentialed_cors",
-    "install_apc_batched_store_eval",
     "install_apc_lone_harvest",
     "install_retire_render_capture",
     "install_api_contract",
@@ -216,7 +214,6 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_runtime_snapshot_enrichment()
     install_pool_aware_unload()
     install_apc_lone_harvest()
-    install_apc_batched_store_eval()
     install_retire_render_capture()
     install_keep_route()
     install_reload_route(reload_fn)

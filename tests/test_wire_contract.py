@@ -179,8 +179,6 @@ def wire_app():
         "stream_chunk_dump": _SCHEMAS.ChatStreamChunk.model_dump_json,
         "apc_harvest": apc.harvest_blocks_from_batch_cache,
         "apc_lone_flag": getattr(apc, "_kq_lone_harvest", False),
-        "apc_store": apc.APCManager.store_kv_blocks,
-        "apc_store_flag": getattr(apc, "_kq_batched_store_eval", False),
         "pkg_gcm": _PKG.get_cached_model,
         "app_gcm": _APP.get_cached_model,
         "pkg_act": _PKG.apply_chat_template,
@@ -249,8 +247,6 @@ def wire_app():
     _SCHEMAS.ChatStreamChunk.model_dump_json = saved["stream_chunk_dump"]
     apc.harvest_blocks_from_batch_cache = saved["apc_harvest"]
     apc._kq_lone_harvest = saved["apc_lone_flag"]
-    apc.APCManager.store_kv_blocks = saved["apc_store"]
-    apc._kq_batched_store_eval = saved["apc_store_flag"]
     if deps is not None:
         if saved["deps_bga"] is not None:
             deps.build_gen_args = saved["deps_bga"]
