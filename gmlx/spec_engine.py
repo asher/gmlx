@@ -465,17 +465,25 @@ def _snap_fields(batch, manager) -> dict:
     """Decode-time snapshot ring parameters for a retirement stash.
 
     ``snap_grid`` anchors snapshot positions to the prefill chunk grid
-    (lcm of step and block size), so a restore replays chunk-exact;
-    ``snap_align`` is the block alignment a rotating window store
-    requires (a window cannot rewind, so off-grid clones are unusable).
+    (lcm of step and block size), so a restore replays chunk-exact --
+    but only while one grid unit fits inside the snapshot interval; a
+    serve-sized step (2048) would otherwise push the first snapshot far
+    past prompt end + interval, so it falls back to the block size (the
+    off-grid restore is the scoped-benign case). ``snap_align`` is the
+    block alignment a rotating window store requires (a window cannot
+    rewind, so off-grid clones are unusable).
     """
     import math
+    from .cache_snapshot import _DECODE_CKPT_DEFAULT
     bs = int(manager.block_size)
     tags = _ckpt_layout_for(batch.model, bs) or ()
     step = int(getattr(batch, "prefill_step_size", 0) or 0)
+    grid = math.lcm(step, bs) if step > 0 else bs
+    if grid > env_int("GMLX_APC_DECODE_CKPT", _DECODE_CKPT_DEFAULT):
+        grid = bs
     return {
         "snap_ok": bool(tags),
-        "snap_grid": math.lcm(step, bs) if step > 0 else bs,
+        "snap_grid": grid,
         "snap_align": bs if any(t.startswith("rot") for t in tags) else 1,
     }
 
