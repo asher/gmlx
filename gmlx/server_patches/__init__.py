@@ -201,7 +201,6 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_pooled_prompt_kv_quant()
     install_chat_template_kwargs()
     install_thinking_budget_fix()
-    install_stream_thinking_seed()
     install_openai_stop_sequences()
     install_api_contract()
     # Before the load-offload / profile-capture / keepalive wrappers so they
@@ -222,7 +221,12 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_pool_aware_unload()
     # Faithful history first: the retire capture memoizes the render
     # callable, and predictions must see the same render the server does.
+    # The thinking-seed stash goes between them, outside the faithful wrap:
+    # the faithful wrap calls its inner render with return_messages=True, so
+    # an inner stash would record the message list as "no prompt" and the
+    # thinking splitters would lose their prompt ground truth.
     install_faithful_history()
+    install_stream_thinking_seed()
     install_apc_lone_harvest()
     install_retire_render_capture()
     install_keep_route()

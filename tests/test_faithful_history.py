@@ -113,6 +113,23 @@ def test_idempotent_install():
     assert openai_mod.apply_chat_template is once
 
 
+def test_stash_sees_final_render_not_message_list():
+    # Installer-order contract: the thinking-seed stash wraps outside the
+    # faithful wrap. Inside, the faithful wrap's return_messages=True call
+    # would stash None and the thinking splitters lose the prompt.
+    from gmlx.server_patches import chat_behavior as cb
+    from gmlx.server_patches.chat_behavior import install_stream_thinking_seed
+    install_faithful_history()
+    install_stream_thinking_seed()
+    tok = cb._LAST_RENDERED_PROMPT.set("sentinel")
+    try:
+        out = openai_mod.apply_chat_template(_Proc(), QWEN_CFG, _history())
+        assert out == "RENDERED"
+        assert cb._LAST_RENDERED_PROMPT.get() == "RENDERED"
+    finally:
+        cb._LAST_RENDERED_PROMPT.reset(tok)
+
+
 def test_retire_capture_wraps_faithful_render():
     from gmlx.server_patches.apc import install_retire_render_capture
     install_faithful_history()
