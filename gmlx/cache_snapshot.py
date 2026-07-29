@@ -251,6 +251,136 @@ def drafter_sidecar_lookup(
         return None
 
 
+# Rotating (sliding-window) snapshot/restore inverse. A live RotatingKVCache
+# buffer has three regimes (contiguous concat-mode, padded in-place growth,
+# rotated ring); the snapshot canonicalizes all three into temporal order at
+# exactly L = min(offset, max_size) tokens: [0, keep) plus the trailing
+# window. Restore rebuilds a cache whose continuation is bit-identical to an
+# uninterrupted run at p: _update_concat trims any longer live buffer to the
+# same trailing set on the next chunk, and a decode step rotates both to the
+# same write position, so the canonical form is the unique length that is
+# correct for both (the L == min(p, max_size), _idx == L invariant).
+# Geometry is never inferred: restore requires stored meta and rejects on
+# either invariant half, naming which broke.
+
+
+def rotating_geometry(prompt_cache, block_size: int):
+    """(window, keep) when every rotating layer shares one block-aligned
+    geometry, else None (exact tier). One distinct (max_size, keep) pair
+    across layers; window and keep whole numbers of blocks, so checkpoint
+    boundaries are rotation boundaries and the keep region restores as a
+    prefix slice of whole blocks."""
+    from .cache_compat import cache_types
+
+    rot_types = cache_types("RotatingKVCache")
+    geoms = {(int(c.max_size), int(c.keep))
+             for c in prompt_cache if isinstance(c, rot_types)}
+    if len(geoms) != 1:
+        if len(geoms) > 1:
+            _log.info("APC rotating: mixed window geometries %s", geoms)
+        return None
+    (window, keep), = geoms
+    if window <= 0 or window % block_size or keep % block_size:
+        _log.info(
+            "APC rotating: geometry (W=%d keep=%d) not on the %d-token "
+            "block grid", window, keep, block_size)
+        return None
+    return window, keep
+
+
+def rotating_canonical_window(cache):
+    """Canonical temporal snapshot of a live rotating layer.
+
+    Returns ``(keys, values, meta)`` where the arrays cover ``[0, keep)``
+    plus the trailing window in temporal order with length
+    ``L == min(offset, max_size)``, and ``meta = (keep, max_size, offset,
+    L)``. Arrays are lazy views into the live buffer; callers that persist
+    them must deep-copy (the store paths already do). Returns None when the
+    buffer cannot faithfully produce the canonical form.
+    """
+    keys, values = cache.keys, cache.values
+    if keys is None:
+        return None
+    keep = int(cache.keep)
+    max_size = int(cache.max_size)
+    offset = int(cache.offset)
+    idx = int(cache._idx)
+    buflen = keys.shape[2]
+    # Temporal order, mirroring RotatingKVCache._temporal_order's three
+    # regimes: contiguous (concat mode), rotated ring, partial in-place fill.
+    if idx == buflen:
+        tk, tv = keys, values
+    elif idx < offset:
+        import mlx.core as mx
+        tk = mx.concatenate(
+            [keys[..., :keep, :], keys[..., idx:, :],
+             keys[..., keep:idx, :]], axis=2)
+        tv = mx.concatenate(
+            [values[..., :keep, :], values[..., idx:, :],
+             values[..., keep:idx, :]], axis=2)
+    else:
+        tk, tv = keys[..., :idx, :], values[..., :idx, :]
+    t_len = tk.shape[2]
+    t_len = min(t_len, offset)          # concat/partial buffers never exceed
+    tk, tv = tk[..., :t_len, :], tv[..., :t_len, :]
+    L = min(offset, max_size)
+    if t_len < L or L <= keep and offset > keep:
+        return None
+    if t_len > L:
+        import mlx.core as mx
+        tk = mx.concatenate(
+            [tk[..., :keep, :], tk[..., t_len - (L - keep):, :]], axis=2)
+        tv = mx.concatenate(
+            [tv[..., :keep, :], tv[..., t_len - (L - keep):, :]], axis=2)
+    return tk, tv, (keep, max_size, offset, L)
+
+
+def rotating_restore(keys, values, meta):
+    """Rebuild a RotatingKVCache from a canonical window plus stored meta.
+
+    ``meta`` is ``(keep, max_size, offset, idx)`` and is required: geometry
+    is never inferred from buffer shape (a guessed offset or max_size
+    silently shifts RoPE positions and shrinks the window). The two
+    invariant halves are checked separately so a failure names which broke:
+    the assembled length must equal ``min(offset, max_size)`` (coverage),
+    and the stored ``idx`` must equal the assembled length (the ring
+    pointer is checked against what the chain actually returned, never
+    trusted). Returns the cache or None.
+    """
+    from .cache_compat import construction_cache_module
+
+    if meta is None:
+        _log.warning("APC rotating restore rejected: no stored meta")
+        return None
+    keep, max_size, offset, idx = (int(v) for v in meta)
+    L = int(keys.shape[2])
+    if L != min(offset, max_size):
+        _log.warning(
+            "APC rotating restore rejected: assembled length %d != "
+            "min(offset=%d, max_size=%d)", L, offset, max_size)
+        return None
+    if idx != L:
+        _log.warning(
+            "APC rotating restore rejected: stored _idx %d != assembled "
+            "length %d", idx, L)
+        return None
+    cache = construction_cache_module().RotatingKVCache(
+        max_size=max_size, keep=keep)
+    cache.keys = keys
+    cache.values = values
+    cache.offset = offset
+    cache._idx = L
+    return cache
+
+
+def rotating_invariant(cache):
+    """The two invariant halves for a restored rotating cache, separately:
+    ``(L == min(offset, max_size), _idx == L)``."""
+    L = 0 if cache.keys is None else int(cache.keys.shape[2])
+    return (L == min(int(cache.offset), int(cache.max_size)),
+            int(cache._idx) == L)
+
+
 # Hybrid checkpoint tier: for gated-delta hybrids (plain KVCache attention
 # layers + ArraysCache recurrent layers), a checkpoint at position p stores
 # the attention layers' KV through the shared block pool (incremental,
