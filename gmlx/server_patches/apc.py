@@ -5,6 +5,7 @@ subclass (``gmlx.apc_manager.GmlxAPCManager``), not as a method patch here."""
 from __future__ import annotations
 
 import importlib
+import weakref
 
 
 def install_apc_lone_harvest() -> None:
@@ -136,9 +137,16 @@ def install_retire_render_capture() -> None:
                     row = ids.tolist() if hasattr(ids, "tolist") else list(ids)
                     if row and isinstance(row[0], list):
                         row = row[0]
+                    # Weak: a memo entry must never pin the generator (and
+                    # through it the model weights) past a pool unload.
+                    ref = weakref.ref(self)
 
-                    def preprocess(text, _self=self):
-                        return orig_pre(_self, text, None, None, None)
+                    def preprocess(text, _ref=ref):
+                        gen = _ref()
+                        if gen is None:
+                            raise RuntimeError(
+                                "retire render: generator unloaded")
+                        return orig_pre(gen, text, None, None, None)
 
                     retire_key.register_ids(prompt, row, preprocess)
         except Exception:

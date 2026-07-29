@@ -16,8 +16,8 @@ part of it; when a change would need a copied body, vendor instead.
 mid-loop, unwrappable) - carried from the retired
 ``install_apc_batched_store_eval`` method patch, not repeated. It now also
 carries the ckpt-store policy (``_ckpt_disk``: suppress layer-major,
-optionally memory-only), a second in-body divergence - the section 11
-vendoring trigger is closer than when the rule was written.
+optionally memory-only), a second in-body divergence - one more divergence
+in this body is the agreed trigger to vendor the upstream file instead.
 """
 
 from __future__ import annotations

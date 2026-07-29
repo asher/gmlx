@@ -163,6 +163,10 @@ _SIDECAR_SALT = 0x5D_CA_9E_11_3F_2B_71
 # they exist to accompany.
 _SIDECAR_ENTRIES = max(
     1, env_int("GMLX_SPEC_APC_SIDECAR_ENTRIES", 8))
+# Deep-context drafter KV is not tiny (a 32k single-layer sidecar runs to
+# ~100 MB), so the side index is byte-bounded too; newest always survives.
+_SIDECAR_BUDGET_BYTES = max(
+    1, env_int("GMLX_SPEC_APC_SIDECAR_BUDGET_MB", 512)) << 20
 
 
 def sidecar_extra_hash(extra_hash: int) -> int:
@@ -223,6 +227,10 @@ def drafter_sidecar_store(
             idx.move_to_end((ids, int(extra_hash)))
             while len(idx) > _SIDECAR_ENTRIES:
                 idx.popitem(last=False)
+            total = sum(_caches_nbytes(v) for v in idx.values())
+            while total > _SIDECAR_BUDGET_BYTES and len(idx) > 1:
+                _, victim = idx.popitem(last=False)
+                total -= _caches_nbytes(victim)
         disk = getattr(manager, "disk", None)
         if disk is not None:
             try:
@@ -430,11 +438,11 @@ def rotating_invariant(cache):
             int(cache._idx) == L)
 
 
-# Hybrid checkpoint tier, three-way (plan section 3): plain KVCache
-# attention layers ride the shared block pool under a salted keyspace
-# ([0, b_full) whole blocks); RotatingKVCache layers ride per-checkpoint
-# position-salted window chains (the canonical window of section 4 is
-# exactly W/B whole blocks at an aligned p, so there is no ring arithmetic
+# Hybrid checkpoint tier, three-way: plain KVCache attention layers ride
+# the shared block pool under a salted keyspace ([0, b_full) whole
+# blocks); RotatingKVCache layers ride per-checkpoint position-salted
+# window chains (the canonical temporal window is exactly W/B whole
+# blocks at an aligned p, so there is no ring arithmetic
 # and no tail); ArraysCache recurrent state (GDN) is the only per-checkpoint
 # flat payload. The checkpoint record itself is a gmlx-owned LRU entry that
 # holds refcounts on its block chains (pin rather than repair: eviction
@@ -449,8 +457,34 @@ _CKPT_SALT = 0x7C_4B_D2_0A_86_E5_93
 _BOUNDED_SALT = 0x3A_91_C7_55_0E_D4_26
 
 _CKPT_RECORD_ENTRIES = max(2, env_int("GMLX_APC_CKPT_RECORDS", 32))
-# Strip-on-extend: newest N restorable checkpoints per chain (section 7).
+# Strip-on-extend: newest N restorable checkpoints per chain.
 _CKPT_HEAVY_PER_CHAIN = max(1, env_int("GMLX_APC_CKPT_HEAVY", 2))
+# Byte budget for record-owned payload (recurrent states + KV tails; chain
+# blocks are bounded by the manager pool). A GDN record can carry >100 MB
+# of state, so a count bound alone silently pins gigabytes.
+_CKPT_BUDGET_BYTES = max(1, env_int("GMLX_APC_CKPT_BUDGET_MB", 4096)) << 20
+
+
+def _iter_arrays(obj):
+    if obj is None:
+        return
+    if isinstance(obj, (list, tuple)):
+        for x in obj:
+            yield from _iter_arrays(x)
+    elif hasattr(obj, "nbytes"):
+        yield obj
+
+
+def _caches_nbytes(caches) -> int:
+    total = 0
+    for c in caches or ():
+        for a in _iter_arrays(getattr(c, "state", None)):
+            total += int(a.nbytes)
+    return total
+
+
+def _rec_nbytes(rec) -> int:
+    return _caches_nbytes(rec.states) + _caches_nbytes(rec.tails)
 
 
 def ckpt_extra_hash(extra_hash: int) -> int:
@@ -524,7 +558,7 @@ def _ckpt_block_prefix(p: int, block_size: int) -> int:
 class _CkptRecord:
     __slots__ = ("ids", "extra_hash", "p", "b_full", "layout",
                  "main_blocks", "bounded_blocks", "rot_meta", "states",
-                 "tails")
+                 "tails", "nbytes")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -555,9 +589,11 @@ def _record_insert(manager, rec) -> None:
     """Insert a checkpoint record: strip-on-extend superseded records on the
     same chain immediately (LRU would keep exactly the wrong ones - the
     second-newest on a just-grown chain is among the most recently touched),
-    then bound the index, releasing refs on everything dropped."""
+    then bound the index by count and payload bytes, releasing refs on
+    everything dropped. The newest record always survives."""
     idx = _ckpt_records(manager)
     key = (rec.ids, rec.extra_hash)
+    rec.nbytes = _rec_nbytes(rec)
     with manager.lock:
         old = idx.pop(key, None)
         if old is not None:
@@ -574,6 +610,11 @@ def _record_insert(manager, rec) -> None:
         while len(idx) > _CKPT_RECORD_ENTRIES:
             _, victim = idx.popitem(last=False)
             _release_record(manager, victim)
+        total = sum(int(getattr(r, "nbytes", 0) or 0) for r in idx.values())
+        while total > _CKPT_BUDGET_BYTES and len(idx) > 1:
+            _, victim = idx.popitem(last=False)
+            total -= int(getattr(victim, "nbytes", 0) or 0)
+            _release_record(manager, victim)
 
 
 def ckpt_store(
@@ -582,13 +623,17 @@ def ckpt_store(
     prompt_cache: list[Any],
     *,
     extra_hash: int = 0,
+    skeleton_disk: bool = True,
 ) -> bool:
     """Store a hybrid checkpoint at ``p = len(token_ids)``.
 
     Single-row cache list, KV/rotating offsets == p. Plain KV rides the
     salted main chain, rotating layers a per-checkpoint window chain
     (grid-aligned p required), states and unaligned-GDN tails land in the
-    pinned record; disk skeleton written best-effort. Never raises.
+    pinned record; disk skeleton written best-effort.
+    ``skeleton_disk=False`` skips the skeleton write (the skeleton inlines
+    recurrent state, >100 MB per GDN checkpoint -- interval boundaries
+    superseded minutes later do not earn that). Never raises.
     """
     if manager is None or token_ids is None:
         return False
@@ -708,8 +753,9 @@ def ckpt_store(
             states=states, tails=tails)
         _record_insert(manager, rec)
 
-        _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
-                         tail_len, states, tails, salted)
+        if skeleton_disk:
+            _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
+                             tail_len, states, tails, salted)
         _log.info(
             "APC ckpt store: tokens=%d main=%d window=%d tail=%d states=%d",
             p, len(main_blocks), len(bounded_blocks), tail_len, len(states))
@@ -1073,6 +1119,128 @@ def _truncate_kv_snapshot(snap: list[Any], n: int) -> list[Any] | None:
     return snap
 
 
+# Decode-time checkpoints (the predicted-LCP path). A ckpt-tier entry
+# keyed past the next turn's replayable prefix can never match, and
+# recurrent state cannot rewind at retirement, so whatever the tier
+# retains of the generated tokens must be captured while decode passes
+# it. At interval boundaries the predicted next-turn render is compared
+# against the sequence so far: while it still replays (LCP within a
+# retokenization margin of the live length), the recurrent states are
+# cloned into a two-slot ring; the first structural divergence (thinking
+# strip, tool-call re-serialization) freezes the ring and drops the
+# unreachable slots. Retirement assembles a checkpoint from the newest
+# snapshot at or below the actual LCP: plain KV truncates freely, states
+# come from the snapshot. GDN-shaped models only -- a rotating window at
+# a past position would need its evicted front back.
+
+_DECODE_CKPT_DEFAULT = 4096
+_DECODE_CKPT_MARGIN = 64
+
+
+def _cache_offset_max(prompt_cache) -> int:
+    p = 0
+    for c in prompt_cache or ():
+        off = getattr(c, "offset", None)
+        if off is not None:
+            try:
+                p = max(p, int(off))
+            except (TypeError, ValueError):
+                return 0
+    return p
+
+
+def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
+                     generated: list[int]) -> None:
+    """Advance the decode-time snapshot ring for a live B=1 ckpt row.
+
+    ``stash`` is the request's retirement context (``snaps`` /
+    ``snap_next`` / ``snap_frozen`` live here and die with it). Cheap
+    off-boundary; never raises into the decode loop.
+    """
+    try:
+        interval = env_int("GMLX_APC_DECODE_CKPT", _DECODE_CKPT_DEFAULT)
+        if interval <= 0 or stash.get("snap_frozen"):
+            return
+        ctx = stash.get("render_ctx")
+        if ctx is None or not stash.get("snap_ok"):
+            return
+        full_ids = stash["full_ids"]
+        p = _cache_offset_max(prompt_cache)
+        nxt = stash.get("snap_next")
+        if nxt is None:
+            nxt = ((len(full_ids) // interval) + 1) * interval
+            stash["snap_next"] = nxt
+        if p < nxt:
+            return
+        gen = [int(t) for t in generated]
+        seq = list(full_ids) + gen
+        if p > len(seq):
+            return
+        from .retire_key import next_turn_lcp
+        pred = next_turn_lcp(ctx, seq, gen)
+        if pred is None:
+            stash["snap_next"] = p + interval
+            return
+        if pred + _DECODE_CKPT_MARGIN < p:
+            # Structural divergence behind us: no future snapshot can sit
+            # at or below the final LCP. Keep only slots that still can.
+            stash["snaps"] = [s for s in stash.get("snaps") or ()
+                              if s[0] <= pred]
+            stash["snap_frozen"] = True
+            _log.info("APC decode ckpt frozen: render diverges at %d "
+                      "(live %d)", pred, p)
+            return
+        from .cache_compat import cache_types
+        kv_types = cache_types("KVCache")
+        states = []
+        for c in prompt_cache:
+            if isinstance(c, kv_types):
+                continue
+            clone = _clone_single_row(c)
+            if clone is None:
+                return
+            states.append(clone)
+        snaps = stash.setdefault("snaps", [])
+        snaps.append((p, states))
+        del snaps[:-2]
+        stash["snap_next"] = p + interval
+        _log.info("APC decode ckpt snapshot: p=%d pred=%d", p, pred)
+    except Exception:
+        _log.warning("APC decode ckpt tick failed; continuing",
+                     exc_info=True)
+
+
+def _snap_assemble(prompt_cache: list[Any], states: list[Any],
+                   p: int) -> list[Any] | None:
+    """Rebuild a single-row cache list at snapshot position ``p``: plain
+    KV sliced from the live row, recurrent states from the snapshot."""
+    from .cache_compat import cache_types, construction_cache_module
+
+    kv_types = cache_types("KVCache")
+    rot_types = cache_types("RotatingKVCache")
+    out = []
+    si = 0
+    for c in prompt_cache:
+        if isinstance(c, rot_types):
+            return None
+        if isinstance(c, kv_types):
+            if c.keys is None or int(getattr(c, "offset", 0) or 0) < p:
+                return None
+            k = construction_cache_module().KVCache()
+            k.keys = c.keys[..., :p, :]
+            k.values = c.values[..., :p, :]
+            k.offset = p
+            out.append(k)
+        else:
+            if si >= len(states):
+                return None
+            out.append(states[si])
+            si += 1
+    if si != len(states):
+        return None
+    return out
+
+
 def retirement_store(
     manager: Any,
     mode: str | None,
@@ -1082,6 +1250,7 @@ def retirement_store(
     row: int = 0,
     extra_hash: int = 0,
     max_len: int | None = None,
+    decode_snaps: list | None = None,
 ) -> bool:
     """Persist a finished row's full KV into the shared APC.
 
@@ -1093,16 +1262,28 @@ def retirement_store(
     rows only in v1); block mode harvests the row's blocks into the shared
     pool. ``max_len`` caps the stored key at a shorter prefix (the next-turn
     LCP): blocks are prefix-causal and truncate freely; an exact snapshot
-    truncates only when every layer is a plain KVCache; a ckpt store is
-    skipped outright -- recurrent state cannot rewind, and an entry keyed
-    past the replayable prefix can never match. Best-effort: a failure
-    never breaks generation.
+    truncates only when every layer is a plain KVCache; a ckpt store falls
+    back to the newest decode-time snapshot at or below the LCP
+    (``decode_snaps``, from ``decode_ckpt_tick``) -- recurrent state
+    cannot rewind, so without one it is skipped outright. Best-effort: a
+    failure never breaks generation.
     """
     if manager is None or token_ids is None:
         return False
     ids = [int(t) for t in token_ids]
     if max_len is not None and max_len < len(ids):
         if mode == "ckpt":
+            for p, states in sorted(decode_snaps or (),
+                                    key=lambda s: s[0], reverse=True):
+                if not 2 <= p <= max_len:
+                    continue
+                assembled = _snap_assemble(prompt_cache, states, p)
+                if assembled is not None and ckpt_store(
+                        manager, ids[:p], assembled, extra_hash=extra_hash):
+                    _log.info(
+                        "APC retirement: decode ckpt stored at %d "
+                        "(LCP %d, full %d)", p, max_len, len(ids))
+                    return True
             _log.info(
                 "APC retirement skipped: ckpt state at %d cannot rewind to "
                 "the replayable prefix %d", len(ids), max_len)

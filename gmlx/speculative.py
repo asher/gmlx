@@ -1081,6 +1081,9 @@ def owned_server_rounds(
     try:
         for tok in rounds:
             generated.append(tok)
+            if retire_ctx is not None and retire_ctx.get("mode") == "ckpt":
+                from .cache_snapshot import decode_ckpt_tick
+                decode_ckpt_tick(retire_ctx, prompt_cache, generated)
             # Finish eagerly on the token that ends the request: the server
             # abandons finished generators (close fires only at GC, often
             # after the next request has prefilled), so (a) a deferred
@@ -1327,7 +1330,7 @@ def _retire_b1(model, prompt_cache: list, generated: list[int],
         ok = retirement_store(
             manager, retire.get("mode"), seq, prompt_cache,
             row=0, extra_hash=int(retire.get("extra_hash", 0)),
-            max_len=max_len)
+            max_len=max_len, decode_snaps=retire.get("snaps"))
         if ok:
             _log.info("APC retire store: tokens=%d",
                       len(seq) if max_len is None else max_len)

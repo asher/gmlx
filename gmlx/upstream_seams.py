@@ -134,6 +134,19 @@ SEAMS: tuple[Seam, ...] = (
     # --- speculative / AR batch engine (spec_engine owns these methods) ---
     Seam("mlx_vlm.generate.ar", "BatchGenerator.__init__",
          "spec_engine._install_apc_manager_stash", critical=True),
+    Seam("mlx_vlm.generate.ar",
+         "PromptProcessingBatch._store_apc_exact_checkpoints",
+         "spec_engine._install_ckpt_checkpoint_store (ckpt cursor rides "
+         "the stock store)", critical=True),
+    Seam("mlx_vlm.generate.ar", "PromptProcessingBatch.__init__",
+         "spec_engine.install_full_prompt_mtp_prefill (prefill-step "
+         "restore + stock-path ckpt arming)", critical=True),
+    Seam("mlx_vlm.generate.ar", "GenerationBatch._step",
+         "spec_engine._install_plain_ckpt_decode (token accounting + "
+         "decode-time snapshots)", critical=True),
+    Seam("mlx_vlm.generate.ar", "GenerationBatch.filter",
+         "spec_engine._install_plain_ckpt_decode (B=1 retirement at row "
+         "exit)", critical=True),
     Seam("mlx_vlm.generate.ar", "PromptProcessingBatch.prompt_step",
          "spec_engine.install_full_prompt_mtp_prefill", critical=True),
     Seam("mlx_vlm.generate.ar", "PromptProcessingBatch.generate",

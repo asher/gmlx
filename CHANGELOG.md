@@ -6,6 +6,19 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Sliding-window models (gemma-4) join the hybrid prompt-cache checkpoint
+  tier, and prefill now checkpoints at intervals (`GMLX_APC_CKPT_INTERVAL`,
+  default 4096 tokens): a burst of long shared-prefix requests converts to
+  one cold prefill plus warm tails instead of N cold prefills.
+- The checkpoint tier serves the plain (non-speculative) path too: lookup,
+  interval checkpoints, and retirement no longer require an MTP drafter.
+- On recurrent (GDN) models, generated tokens survive retirement even when
+  the next turn's re-rendered history diverges (thinking strip, tool-call
+  re-serialization): decode-time state snapshots retain the reply up to
+  the divergence point (`GMLX_APC_DECODE_CKPT`, default 4096; `0` off).
+
 ### Changed
 
 - glm-dsa/DeepSeek-V3.2 sparse decode uses the stock top-k gather again
@@ -20,6 +33,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the follow-up turn on thinking and tool-calling models (entries are keyed
   on what the chat template will actually replay; `GMLX_APC_RETIRE_LCP=0`
   restores the old keys).
+- Checkpoint-tier memory and disk are bounded: record payload rides a byte
+  budget (`GMLX_APC_CKPT_BUDGET_MB`, default 4096), drafter sidecars too
+  (`GMLX_SPEC_APC_SIDECAR_BUDGET_MB`, default 512), and interval
+  checkpoints on GDN models no longer write recurrent state to disk.
+- A finished request's retirement-key memo no longer pins the response
+  generator (and its model weights) past a pool unload.
 
 ## [0.1.4] - 2026-07-27
 

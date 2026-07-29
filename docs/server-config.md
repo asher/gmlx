@@ -911,6 +911,16 @@ requests too; see
 > evicts the first. Each entry is a full prompt-cache clone, so raising it
 > trades memory for reuse.
 
+> Sizing `num_blocks`: the shared pool holds `num_blocks x block_size`
+> tokens for all live chains together -- the default 2048 x 16 = 32k
+> tokens, which one long-context request can fill by itself. When the
+> pool runs out, stores decline quietly and the cache stops helping at
+> exactly the depths where it helps most. Rule of thumb: size it to
+> `(expected prompt tokens x concurrent conversations) / block_size`,
+> plus one sliding-window width per rotating layer per checkpoint on
+> SWA models. 8192 blocks (128k tokens) costs pool metadata only until
+> stores actually land.
+
 `gmlx init` always writes this block on (`cache: {enabled: true, disk:
 false}`); `--disk-cache` swaps the `disk` value for the SSD tier
 (`disk: {path: ~/.cache/gmlx/apc, max_gb: 50}`). A config without a
@@ -960,23 +970,42 @@ What a warm hit restores:
   under the target's key (salted), so a warm hit restores both. Sidecars
   ride their own small LRU, never the exact-entry slots they would
   otherwise evict.
-- Checkpoint tier: hybrid archs (attention + recurrent layers) cannot use
-  the block cache alone because recurrent state is not block-decomposable,
-  and the stock fallback is a full prompt-cache clone per entry, whose disk
-  grows quadratically over a conversation. The checkpoint tier stores the
-  attention layers' KV through the block pool plus one small exact entry
-  carrying the recurrent states and a short KV tail: near-linear disk, same
-  warm TTFT.
+- Checkpoint tier: hybrid archs (attention + recurrent or sliding-window
+  layers) cannot use the block cache alone because their non-plain-KV
+  state is not block-decomposable, and the stock fallback is a full
+  prompt-cache clone per entry, whose disk grows quadratically over a
+  conversation. The checkpoint tier stores the plain-KV layers through
+  the block pool, sliding windows through per-checkpoint chains, and
+  recurrent states in a pinned record: near-linear memory, same warm
+  TTFT. During prefill it also checkpoints at intervals
+  (`GMLX_APC_CKPT_INTERVAL` tokens, default 4096), so a request queued
+  behind a long shared-prefix prefill restores from the last boundary
+  instead of going cold. The tier serves both the speculative and the
+  plain path; on ckpt-tier models, prompt formation is serialized to one
+  request at a time (batched prompt prefill measured no win on these
+  shapes anyway).
+- Decode-time checkpoints: on recurrent (GDN) models the tier also
+  snapshots recurrent state at intervals during decode, while the
+  predicted next-turn render still replays the sequence so far. When the
+  next turn's re-rendered history diverges from what was generated
+  (thinking strip, tool-call re-serialization, retokenization), the
+  retirement store falls back to the newest snapshot at or below the
+  divergence point instead of dropping the generated tokens entirely.
+  `GMLX_APC_DECODE_CKPT` sets the interval (default 4096; `0` off); each
+  live request holds at most two state snapshots.
 
 Eviction rides the pools the entries live in: the block LRU (`num_blocks`),
 the exact-prefix LRU (`exact_entries`), the disk cap (`disk.max_gb`). Hit
 and store counts surface on the authed `GET /v1/metrics`.
 
 > Thinking templates that strip prior-turn `<think>` blocks from the
-> re-rendered history (the Qwen3 family) structurally miss retirement
-> entries: the stored key diverges right after the assistant header. The
-> prompt prefix still hits; the miss costs re-prefilling the previous
-> reply, which is what every server pays on every turn. A template
+> re-rendered history (the Qwen3 family) diverge right after the
+> assistant header, so a full-length retirement entry can never match.
+> Retirement keys on the predicted next-turn render instead, and on GDN
+> models the decode-time snapshots retain whatever prefix of the reply
+> the next turn can actually replay. What is structurally
+> unretainable -- content past the divergence point -- costs
+> re-prefilling, which is what every server pays there. A template
 > property, not a gmlx one.
 
 | Variable | Meaning |
@@ -987,8 +1016,14 @@ and store counts surface on the authed `GET /v1/metrics`.
 | `GMLX_SPEC_APC_CKPT` | `0` turns off just the hybrid checkpoint tier (exact full clones return). |
 | `GMLX_SPEC_APC_ENTRIES` | Prefix-layer LRU entries (default `4`). |
 | `GMLX_SPEC_APC_SIDECAR_ENTRIES` | Drafter-sidecar LRU entries (default `8`). |
-| `GMLX_SPEC_APC_BUDGET_MB` | Byte budget for the whole speculative prefix cache, in MB (default `8192`). |
+| `GMLX_SPEC_APC_BUDGET_MB` | Byte budget for the in-memory prefix layer, in MB (default `8192`). |
+| `GMLX_SPEC_APC_SIDECAR_BUDGET_MB` | Byte budget for the drafter-sidecar LRU, in MB (default `512`). |
 | `GMLX_APC_STORE_EVAL_CHUNK` | Blocks evaluated per step in the post-prefill store (default `32`); bounds the prefill-thread stall on long prompts. |
+| `GMLX_APC_CKPT_INTERVAL` | Prefill checkpoint interval in tokens (default `4096`, snapped to the chunk grid; `0` = final checkpoint only). |
+| `GMLX_APC_CKPT_RECORDS` | Checkpoint-record LRU entries (default `32`). |
+| `GMLX_APC_CKPT_BUDGET_MB` | Byte budget for checkpoint-record payload (recurrent states + KV tails), in MB (default `4096`). A GDN record can carry >100 MB of state, so the count bound alone is not the real limit. |
+| `GMLX_APC_DECODE_CKPT` | Decode-time snapshot interval in tokens on GDN models (default `4096`; `0` off). |
+| `GMLX_APC_RETIRE_LCP` | `0` keys retirement on the forwarded ids instead of the predicted next-turn render (also disables decode-time snapshots, which key on the prediction). |
 
 ---
 
