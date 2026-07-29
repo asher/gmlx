@@ -69,6 +69,7 @@
   "mlx_vlm.models.switch_layers:SwitchLinear.__call__": "1c91ef16afb139a811b09d76d88ce9dba7d9fddb5f7cee5964d6a3849066b685",
   "mlx_vlm.prompt_utils:apply_chat_template": "4aaaa3f96d1e856ada575385acccf44aa250ed71ea0dd0d0894eda1bb198ce60",
   "mlx_vlm.prompt_utils:get_chat_template": "3ee9c569ce6d98e4dd108984afc161025888852fabca58074fd3a4073c8c3c4d",
+  "mlx_vlm.server.app:_split_thinking_text": "a0d85f3af4e5faa88a94398ac5e52e9a6286d10856dbfd2b066d9b4f7d73b568",
   "mlx_vlm.server.app:app": null,
   "mlx_vlm.server.generation:GenerationArguments.to_template_kwargs": "4da06fa052db0f207a0854aeace13e2bb529300b8ae7b87093bd560ceb92437e",
   "mlx_vlm.server.generation:ResponseGenerator._make_sampler": "24f0c94e3ad85564ff09e4859bdd764032444952c36487f4659c0e29f7d797ce",

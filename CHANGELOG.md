@@ -30,6 +30,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Non-stream replies that hit `max_tokens` inside a think block now return
+  the partial reasoning as `reasoning_content` with empty content, matching
+  the streaming path (the raw reasoning previously leaked into `content`).
 - `preserve_thinking` now works on plain chat turns: the server keeps
   `reasoning_content` on assistant history messages instead of dropping it
   before the template renders (`GMLX_FAITHFUL_HISTORY=0` restores stock).

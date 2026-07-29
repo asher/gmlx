@@ -286,6 +286,28 @@ def test_stream_thinking_seed_wraps_render_binding():
         rs.ThinkingStreamState.__init__ = original_init
 
 
+def test_nonstream_split_truncated_thinking_seeded_from_prompt():
+    app_mod = importlib.import_module("mlx_vlm.server.app")
+    sp.install_stream_thinking_seed()
+    split = app_mod._split_thinking_text
+    assert getattr(split, sp_chat._STREAM_SEED_FLAG, False)
+    tok = sp_chat._LAST_RENDERED_PROMPT.set(None)
+    try:
+        # No stashed render (off-request callers): stock classification.
+        assert split("half a plan, cut off") == (None, "half a plan, cut off")
+        sp_chat._LAST_RENDERED_PROMPT.set("<|im_start|>assistant\n<think>\n")
+        # Prompt-opened block, no marker in the truncated text: reasoning.
+        assert split("half a plan, cut off") == ("half a plan, cut off", "")
+        # A close marker in the text keeps the stock split untouched.
+        r, c = split("plan\n</think>\n\nanswer")
+        assert r == "plan" and c == "answer"
+        # Prompt did not open a block: stock classification.
+        sp_chat._LAST_RENDERED_PROMPT.set("<|im_start|>assistant\n")
+        assert split("just an answer") == (None, "just an answer")
+    finally:
+        sp_chat._LAST_RENDERED_PROMPT.reset(tok)
+
+
 def test_install_thinking_budget_fix_applies_and_idempotent():
     # Fail-loud guard: asserts the seam bound to the REAL mlx-vlm symbol, so a
     # rename of ResponseGenerator._make_thinking_budget_criteria turns into a CI

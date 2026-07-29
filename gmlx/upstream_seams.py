@@ -198,6 +198,10 @@ SEAMS: tuple[Seam, ...] = (
          "ThinkingStreamState._build_open_close_markers",
          "retire_key._thinking_markers (splitter default marker pairs "
          "for the mid-decode virtual closer)"),
+    Seam("mlx_vlm.server.app", "_split_thinking_text",
+         "server_patches.chat_behavior.install_stream_thinking_seed "
+         "(non-stream truncated-thinking classification, module attr "
+         "looked up per call by app._split_thinking)"),
     Seam("mlx_vlm.server.runtime", "runtime",
          "residency._RuntimeProxy wrap", critical=True),
     Seam("mlx_vlm.server.app", "app",

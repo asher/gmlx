@@ -222,7 +222,9 @@ def _prompt_tail_opens_thinking(text, open_close_markers) -> bool:
 
 def install_stream_thinking_seed() -> None:
     """Reseed ThinkingStreamState.in_thinking from the rendered prompt (see
-    the 7e comment). Idempotent; no-op if mlx-vlm's shape changed."""
+    the 7e comment), and give the non-stream splitter the same prompt
+    ground truth for replies truncated inside a think block. Idempotent;
+    no-op if mlx-vlm's shape changed."""
     rs = importlib.import_module("mlx_vlm.server.responses_state")
     cls = getattr(rs, "ThinkingStreamState", None)
     if cls is None:
@@ -258,6 +260,31 @@ def install_stream_thinking_seed() -> None:
         fn = getattr(target, "apply_chat_template", None)
         if fn is not None and not getattr(fn, _STREAM_SEED_FLAG, False):
             target.apply_chat_template = _wrap(fn)
+
+    # Non-stream twin: when the prompt opened the think block and the reply
+    # hit max_tokens before the close marker, no marker appears in the
+    # generated text and the stock splitter classifies the whole partial
+    # reasoning as content. Same ground truth as the stream seed: the
+    # rendered prompt tail. retire_key.build_assistant_message applies the
+    # identical rule from its own prompt memo (it runs off-task, where the
+    # contextvar is unset).
+    split = getattr(app, "_split_thinking_text", None)
+    if split is not None and not getattr(split, _STREAM_SEED_FLAG, False):
+        def _split_thinking_text(text, thinking_start_token=None,
+                                 thinking_end_token=None):
+            reasoning, content = split(
+                text, thinking_start_token, thinking_end_token)
+            if reasoning is None and content:
+                markers = cls._build_open_close_markers(
+                    thinking_start_token, thinking_end_token)
+                if (not any(m in text for pair in markers for m in pair)
+                        and _prompt_tail_opens_thinking(
+                            _LAST_RENDERED_PROMPT.get(), markers)):
+                    return content, ""
+            return reasoning, content
+
+        _split_thinking_text.__dict__[_STREAM_SEED_FLAG] = True
+        app._split_thinking_text = _split_thinking_text
 
 
 # ignore-eos: forced-length decode (server-level)

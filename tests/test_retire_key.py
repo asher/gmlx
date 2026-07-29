@@ -116,6 +116,24 @@ def test_build_assistant_message_thinking_split():
     assert "plan" in (msg.get("reasoning_content") or "")
 
 
+def test_build_assistant_message_truncated_thinking():
+    # Prompt-opened think block, budget exhausted before the close marker:
+    # the partial reasoning is reasoning, not content (server-shape mirror).
+    ctx = _fake_ctx([1])
+    ctx["_gen_prompt"] = "<|im_start|>assistant\n<think>\n"
+    msg = rk.build_assistant_message(ctx, "half a plan, cut off")
+    assert msg["content"] == ""
+    assert msg["reasoning_content"] == "half a plan, cut off"
+
+
+def test_build_assistant_message_no_open_block_stays_content():
+    ctx = _fake_ctx([1])
+    ctx["_gen_prompt"] = "<|im_start|>assistant\n"
+    msg = rk.build_assistant_message(ctx, "just an answer")
+    assert msg["content"] == "just an answer"
+    assert "reasoning_content" not in msg
+
+
 def test_predict_render_gets_generation_prompt_off():
     seen = {}
 

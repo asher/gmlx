@@ -161,6 +161,18 @@ def build_assistant_message(ctx: dict, full_text: str) -> dict:
     ts = kw.get("thinking_start_token")
     te = kw.get("thinking_end_token")
     reasoning, content = srv._split_thinking(full_text, ts, te)
+    if reasoning is None and content:
+        # Truncated thinking: the prompt opened the block and the budget
+        # ran out before the close marker, so no marker appears in the
+        # text. Mirrors the server's non-stream classification (the
+        # partial reasoning is reasoning, not content); the server-side
+        # twin keys on a request contextvar this thread does not see.
+        pairs = _thinking_markers(kw)
+        prompt = _gen_prompt_text(ctx)
+        if (not any(m in full_text for pair in pairs for m in pair)
+                and any(prompt.rfind(sm) > prompt.rfind(em)
+                        for sm, em in pairs)):
+            reasoning, content = content, ""
 
     tool_calls = None
     tools = kw.get("tools")
