@@ -16,14 +16,16 @@ from mlx_lm.models import llama as llama_mod
 
 from gmlx import sparse_sdpa as sp
 
-_ORIG_SEAMS = []
+_SEAM_MODS = []
 for _pkg, _name in sp._MODULES:
     try:
         _mod = importlib.import_module(f"{_pkg}.{_name}")
     except ImportError:
         continue
-    _ORIG_SEAMS.append((_mod, getattr(_mod, "scaled_dot_product_attention",
-                                      None)))
+    if getattr(_mod, "scaled_dot_product_attention", None) is not None:
+        _SEAM_MODS.append(_mod)
+
+_ENTRY_SEAMS = {}
 
 
 def _has_paged_op():
@@ -34,11 +36,23 @@ def _has_paged_op():
     return mx.default_device() == mx.Device(mx.gpu)
 
 
-def teardown_module(module):
-    for _mod, _fn in _ORIG_SEAMS:
-        if _fn is not None:
-            _mod.scaled_dot_product_attention = _fn
+@pytest.fixture(scope="module", autouse=True)
+def _fresh_route_state():
+    """Other suites can leave sp._installed latched while the seam symbols
+    hold a chain without the sparse route (a teardown elsewhere rebound
+    them). Clear the latch so installs wrap fresh on whatever chain exists,
+    and restore the entry state on exit instead of severing chains to
+    import-time symbols. Tests that need route-free seams mid-module reset
+    to the entry snapshot, not to stock."""
+    _ENTRY_SEAMS.clear()
+    _ENTRY_SEAMS.update(
+        {m: m.scaled_dot_product_attention for m in _SEAM_MODS})
+    snap_latch = sp._installed
     sp._installed = False
+    yield
+    for m, fn in _ENTRY_SEAMS.items():
+        m.scaled_dot_product_attention = fn
+    sp._installed = snap_latch
 
 
 class _FakeCache:
@@ -205,9 +219,8 @@ def test_install_patches_validated_archs_only(monkeypatch):
     sp._installed = False
     monkeypatch.setenv("GMLX_SPARSE_ATTN", "1")
     monkeypatch.delenv("GMLX_SPARSE_ARCHS", raising=False)
-    for _mod, _fn in _ORIG_SEAMS:
-        if _fn is not None:
-            _mod.scaled_dot_product_attention = _fn
+    for _mod, _fn in _ENTRY_SEAMS.items():
+        _mod.scaled_dot_product_attention = _fn
     assert sp.install_sparse_sdpa()
     assert getattr(llama_mod.scaled_dot_product_attention,
                    "_gmlx_sparse_route", False)
