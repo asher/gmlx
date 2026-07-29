@@ -14,7 +14,10 @@ inherited method outright, but does not duplicate an inherited body to edit
 part of it; when a change would need a copied body, vendor instead.
 ``store_kv_blocks`` is the one standing copied body (the chunked eval is
 mid-loop, unwrappable) - carried from the retired
-``install_apc_batched_store_eval`` method patch, not repeated.
+``install_apc_batched_store_eval`` method patch, not repeated. It now also
+carries the ckpt-store policy (``_ckpt_disk``: suppress layer-major,
+optionally memory-only), a second in-body divergence - the section 11
+vendoring trigger is closer than when the rule was written.
 """
 
 from __future__ import annotations
@@ -78,8 +81,20 @@ class GmlxAPCManager(_apc.APCManager):
     override defers to the stock store instead.
     """
 
+    def store_ckpt_blocks(self, token_ids, layer_keys, layer_values,
+                          *, extra_hash=0, disk=True):
+        """Block store for checkpoint chains: always per-block -- the
+        layer-major branch would return no blocks (an unpinnable record)
+        and clone the whole prefix into the 2-slot exact LRU. disk=False
+        keeps a chain memory-only (the window chain's position salt makes
+        its disk shards undedupable)."""
+        return self.store_kv_blocks(
+            token_ids, layer_keys, layer_values, extra_hash=extra_hash,
+            _ckpt_disk=bool(disk))
+
     def store_kv_blocks(self, token_ids, layer_keys, layer_values,
-                        *, extra_hash=0, skip_first_n_tokens=0):
+                        *, extra_hash=0, skip_first_n_tokens=0,
+                        _ckpt_disk=None):
         import mlx.core as mx
 
         h = _store_helpers()
@@ -88,6 +103,9 @@ class GmlxAPCManager(_apc.APCManager):
                 token_ids, layer_keys, layer_values,
                 extra_hash=extra_hash,
                 skip_first_n_tokens=skip_first_n_tokens)
+        is_ckpt = _ckpt_disk is not None
+        allow_disk = self.disk is not None and (_ckpt_disk is None
+                                                or _ckpt_disk)
         _clone_lm = h["clone_lm"]
         _seq_hash = h["seq_hash"]
         _entry_cls = h["entry_cls"]
@@ -116,7 +134,8 @@ class GmlxAPCManager(_apc.APCManager):
                 int(t) for t in token_ids[:layer_major_prefix_tokens])
             layer_major_stored = False
             if (
-                self._layer_major_memory_min_tokens > 0
+                not is_ckpt
+                and self._layer_major_memory_min_tokens > 0
                 and self._exact_cache_max > 0
                 and layer_major_prefix_tokens
                 >= self._layer_major_memory_min_tokens
@@ -154,10 +173,8 @@ class GmlxAPCManager(_apc.APCManager):
             def _flush_pending(force=False):
                 if not pending:
                     return
-                if force or eval_chunk_blocks <= 0:
-                    mx.eval(pending)
-                    pending.clear()
-                elif len(pending) >= eval_chunk_blocks * per_block_tensors:
+                if force or (eval_chunk_blocks > 0 and len(pending)
+                             >= eval_chunk_blocks * per_block_tensors):
                     mx.eval(pending)
                     pending.clear()
 
@@ -168,7 +185,7 @@ class GmlxAPCManager(_apc.APCManager):
                         i * self.block_size:(i + 1) * self.block_size]
                 )
                 h2 = _hash_tokens(parent, chunk, extra_hash)
-                if self.disk is not None and not self.disk.has(h2):
+                if allow_disk and not self.disk.has(h2):
                     disk_blocks.append(
                         _disk_block_cls(
                             block_hash=int(h2),
@@ -199,7 +216,7 @@ class GmlxAPCManager(_apc.APCManager):
                         i,
                         n_full,
                     )
-                    if self.disk is None:
+                    if not allow_disk:
                         break
                     parent = h2
                     continue
@@ -211,7 +228,7 @@ class GmlxAPCManager(_apc.APCManager):
                         i,
                         n_full,
                     )
-                    if self.disk is None:
+                    if not allow_disk:
                         break
                     parent = h2
                     continue
@@ -240,7 +257,7 @@ class GmlxAPCManager(_apc.APCManager):
                 self.stats.served_tokens += self.block_size
                 parent = h2
             _flush_pending(force=True)
-            if self.disk is not None and disk_blocks:
+            if allow_disk and disk_blocks:
                 try:
                     self.disk.save_layer_major_blocks(
                         disk_blocks, layer_keys, layer_values, self.block_size

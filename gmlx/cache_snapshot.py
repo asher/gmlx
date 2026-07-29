@@ -30,16 +30,7 @@ def _layer_has_content(snap: Any) -> bool:
     (ArraysCache) layer needs non-empty state; a CacheList needs all of its
     sub-caches populated. An incomplete layer means the row cannot be stored
     under a full-sequence key without lying about what it covers.
-
-    Renegotiated for skeletons (plan section 4): a placeholder explicitly
-    marked by the checkpoint tier (``mark_skeleton``) passes when it claims
-    coverage -- its content lives on the block chain, so "has content"
-    becomes "covers p". Unmarked empty layers still drop the row: the
-    half-prefilled-row hole this gate was written for stays closed.
     """
-    covers = getattr(snap, "_kq_skeleton_covers", None)
-    if covers is not None:
-        return int(covers) > 0
     subs = getattr(snap, "caches", None)
     if subs is not None:  # CacheList
         return all(_layer_has_content(s) for s in subs)
@@ -474,11 +465,22 @@ def bounded_extra_hash(extra_hash: int, p: int) -> int:
     return (int(extra_hash) ^ _BOUNDED_SALT) ^ (int(p) * 0x9E3779B1)
 
 
+def _rot_tag(cache) -> str:
+    """Rotating layout tag carries geometry: a stored entry restored into a
+    model with a different window must miss, never be inferred around."""
+    return (f"rot:{int(cache.max_size)}:"
+            f"{int(getattr(cache, 'keep', 0) or 0)}")
+
+
+def _is_rot(tag: str) -> bool:
+    return tag.startswith("rot")
+
+
 def ckpt_layout(prompt_cache, block_size: int = 16):
-    """Per-layer tags ("kv" | "rot" | "arr") for a supported hybrid cache
-    list, else None. Supported: every layer one of the three classes, at
-    least one non-plain-KV layer (pure-KV models belong to the stock block
-    tier), and rotating layers passing the block-grid geometry gate."""
+    """Per-layer tags ("kv" | "rot:W:keep" | "arr") for a supported hybrid
+    cache list, else None. Supported: every layer one of the three classes,
+    at least one non-plain-KV layer (pure-KV models belong to the stock
+    block tier), and rotating layers passing the block-grid geometry gate."""
     from .cache_compat import cache_types
 
     if not prompt_cache:
@@ -489,18 +491,19 @@ def ckpt_layout(prompt_cache, block_size: int = 16):
     tags = []
     for c in prompt_cache:
         if isinstance(c, rot_types):
-            tags.append("rot")
+            tags.append(_rot_tag(c))
         elif isinstance(c, kv_types):
             tags.append("kv")
         elif isinstance(c, arr_types):
             tags.append("arr")
         else:
             return None
-    if "rot" not in tags and "arr" not in tags:
+    has_rot = any(_is_rot(t) for t in tags)
+    if not has_rot and "arr" not in tags:
         return None                       # pure-KV: stock block tier
-    if "kv" not in tags and "rot" not in tags:
+    if "kv" not in tags and not has_rot:
         return None                       # no chain-backed layer: exact tier
-    if "rot" in tags and rotating_geometry(prompt_cache, block_size) is None:
+    if has_rot and rotating_geometry(prompt_cache, block_size) is None:
         return None
     return tags
 
@@ -516,13 +519,6 @@ def _ckpt_block_prefix(p: int, block_size: int) -> int:
     placeholders carry only the offset stamp (the serializer writes offset
     before the empty check, so this costs nothing on disk)."""
     return (p // block_size) * block_size
-
-
-def mark_skeleton(entry, p: int):
-    """Flag a placeholder cache entry as a skeleton covering ``p`` tokens
-    whose content lives on the block chain (the covers-p contract)."""
-    entry._kq_skeleton_covers = int(p)
-    return entry
 
 
 class _CkptRecord:
@@ -620,7 +616,7 @@ def ckpt_store(
                 _log.info("APC ckpt store skipped: rot offset %d != %d",
                           int(c.offset), p)
                 return False
-        has_rot = "rot" in layout
+        has_rot = any(_is_rot(t) for t in layout)
         b_full = _ckpt_block_prefix(p, bs)
         if has_rot and b_full != p:
             _log.info(
@@ -635,17 +631,24 @@ def ckpt_store(
         arr_caches = [c for c in prompt_cache
                       if not isinstance(c, (kv_types, rot_types))]
 
+        store_blocks = getattr(manager, "store_ckpt_blocks", None)
         if b_full > 0 and kv_caches:
             lk = [c.keys[..., :b_full, :] for c in kv_caches]
             lv = [c.values[..., :b_full, :] for c in kv_caches]
-            main_blocks = manager.store_kv_blocks(
-                ids[:b_full], lk, lv, extra_hash=salted)
+            if store_blocks is not None:
+                main_blocks = store_blocks(
+                    ids[:b_full], lk, lv, extra_hash=salted)
+            else:
+                main_blocks = manager.store_kv_blocks(
+                    ids[:b_full], lk, lv, extra_hash=salted)
             if len(main_blocks) * bs < b_full:
+                # An unpinnable record is a tombstone that displaces
+                # restorable ones through strip-on-extend: decline.
                 _log.info(
-                    "APC ckpt store: main chain short (%d/%d blocks); "
-                    "memory pin skipped", len(main_blocks), b_full // bs)
+                    "APC ckpt store declined: main chain short (%d/%d "
+                    "blocks)", len(main_blocks), b_full // bs)
                 manager.release(main_blocks)
-                main_blocks = []
+                return False
 
         rot_meta = None
         if rot_caches:
@@ -661,9 +664,16 @@ def ckpt_store(
             keep, _w, _off, L = rot_meta
             canon_ids = ids[:keep] + ids[p - (L - keep):p]
             bsalt = bounded_extra_hash(extra_hash, p)
-            bounded_blocks = manager.store_kv_blocks(
-                canon_ids, [cw[0] for cw in canon],
-                [cw[1] for cw in canon], extra_hash=bsalt)
+            if store_blocks is not None:
+                # Memory-only: the position salt makes window shards
+                # undedupable on disk.
+                bounded_blocks = store_blocks(
+                    canon_ids, [cw[0] for cw in canon],
+                    [cw[1] for cw in canon], extra_hash=bsalt, disk=False)
+            else:
+                bounded_blocks = manager.store_kv_blocks(
+                    canon_ids, [cw[0] for cw in canon],
+                    [cw[1] for cw in canon], extra_hash=bsalt)
             if len(bounded_blocks) * bs < L:
                 _log.info(
                     "APC ckpt store: window chain short (%d/%d blocks); "
@@ -733,14 +743,14 @@ def _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
                 else:
                     ph = rcm.KVCache()
                     ph.offset = p
-                    entries.append(mark_skeleton(ph, p))
+                    entries.append(ph)
                 kv_i += 1
-            elif tag == "rot":
+            elif _is_rot(tag):
                 ph = rcm.RotatingKVCache(
                     max_size=int(c.max_size), keep=int(c.keep))
                 ph.offset = p
                 ph._idx = min(p, int(c.max_size))
-                entries.append(mark_skeleton(ph, p))
+                entries.append(ph)
             else:
                 entries.append(states[arr_i])
                 arr_i += 1
@@ -765,7 +775,7 @@ def _assemble_from_record(manager, rec, geometry_check=None):
 
     rcm = runtime_cache_module()
     n_kv = sum(1 for t in rec.layout if t == "kv")
-    n_rot = sum(1 for t in rec.layout if t == "rot")
+    n_rot = sum(1 for t in rec.layout if _is_rot(t))
     if rec.b_full > 0 and n_kv and not rec.main_blocks:
         return None
     if n_rot and not rec.bounded_blocks:
@@ -816,7 +826,7 @@ def _assemble_from_record(manager, rec, geometry_check=None):
             kc.state = layer_kv[kv_i]
             warm.append(kc)
             kv_i += 1
-        elif tag == "rot":
+        elif _is_rot(tag):
             warm.append(layer_rot[rot_i])
             rot_i += 1
         else:
@@ -897,16 +907,22 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
         ids, extra_hash=salted, min_prefix_tokens=min_prefix_tokens)
     if entries is None or p <= 0:
         return None, 0
-    last = entries[-1] if entries else None
-    if (last is not None and not isinstance(last, kv_types + rot_types)
-            and hasattr(last, "cache") and len(last.cache) == 1
-            and last.cache[0] is not None
-            and getattr(last.cache[0], "size", 0) == 1):
-        entries = entries[:-1]        # the skeleton writer's sentinel
+    # Strip the skeleton writer's sentinel: exact by length when the live
+    # layout is known, by shape otherwise.
+    if layout is not None:
+        if len(entries) == len(layout) + 1:
+            entries = entries[:-1]
+    else:
+        last = entries[-1] if entries else None
+        if (last is not None and not isinstance(last, kv_types + rot_types)
+                and hasattr(last, "cache") and len(last.cache) == 1
+                and last.cache[0] is not None
+                and getattr(last.cache[0], "size", 0) == 1):
+            entries = entries[:-1]
     tags = []
     for e in entries:
         if isinstance(e, rot_types):
-            tags.append("rot")
+            tags.append(_rot_tag(e))
         elif isinstance(e, kv_types):
             tags.append("kv")
         else:
@@ -1014,7 +1030,7 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
                     return None, 0
                 warm.append(kc)
                 kv_i += 1
-            elif tag == "rot":
+            elif _is_rot(tag):
                 warm.append(layer_rot[rot_i])
                 rot_i += 1
             else:

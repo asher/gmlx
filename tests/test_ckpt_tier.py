@@ -270,15 +270,6 @@ def test_strip_on_extend_keeps_newest_two():
     assert got == 64
 
 
-def test_covers_p_gate_renegotiation():
-    from gmlx.cache_snapshot import _layer_has_content, mark_skeleton
-    empty = KVCache()
-    assert not _layer_has_content(empty)      # hole stays closed
-    ph = mark_skeleton(KVCache(), 128)
-    assert _layer_has_content(ph)             # skeleton covers p
-    assert not _layer_has_content(mark_skeleton(KVCache(), 0))
-
-
 def test_layout_signature_rejects_mismatch():
     man = APCManager(num_blocks=64, block_size=16)
     p = 32
@@ -289,7 +280,8 @@ def test_layout_signature_rejects_mismatch():
                             layout=("kv", "arr", "arr", "kv", "arr"))
     assert got == p
     warm, got = ckpt_lookup(man, ids + [1], extra_hash=0,
-                            layout=("kv", "rot", "rot", "kv", "rot"))
+                            layout=("kv", "rot:32:0", "rot:32:0", "kv",
+                                    "rot:32:0"))
     assert warm is None and got == 0
 
 
@@ -342,6 +334,83 @@ def test_mlx_lm_class_caches_roundtrip():
         else:
             for ws, os_ in zip(w.cache, o.cache):
                 assert mx.array_equal(ws, os_).item()
+
+
+def test_layout_geometry_rejects_window_mismatch():
+    """Same tag kinds, different window: the disk path must miss rather
+    than restore the writer's geometry into the model."""
+    man = APCManager(num_blocks=64, block_size=16)
+    p = 48
+    cache = make_swa_cache(p, seed=7)
+    ids = list(range(300, 300 + p))
+    assert ckpt_store(man, ids, cache, extra_hash=0)
+    from gmlx.cache_snapshot import ckpt_layout
+    live = tuple(ckpt_layout(cache, 16))
+    other = tuple(t if not t.startswith("rot") else "rot:64:0"
+                  for t in live)
+    warm, got = ckpt_lookup(man, ids + [1], extra_hash=0, layout=live)
+    assert got == p
+    warm, got = ckpt_lookup(man, ids + [1], extra_hash=0, layout=other)
+    assert warm is None and got == 0
+
+
+def test_short_main_chain_declines_and_spares_chain():
+    """A store that cannot pin its main chain is declined outright: an
+    unpinnable record would displace restorable ones via strip-on-extend."""
+    from gmlx.cache_snapshot import _ckpt_records
+    man = APCManager(num_blocks=2, block_size=16)
+    ids = list(range(400, 400 + 96))
+    good = make_hybrid_cache(32, seed=1)
+    assert ckpt_store(man, ids[:32], good, extra_hash=0)   # pins both blocks
+    assert not ckpt_store(man, ids[:64], make_hybrid_cache(64, seed=2),
+                          extra_hash=0)
+    assert not ckpt_store(man, ids[:96], make_hybrid_cache(96, seed=3),
+                          extra_hash=0)
+    idx = _ckpt_records(man)
+    assert [r.p for r in idx.values()] == [32]
+    warm, got = ckpt_lookup(man, ids[:40], extra_hash=0)
+    assert got == 32
+    assert_warm_matches(warm, good, 32)
+
+
+def test_ckpt_store_suppresses_layer_major():
+    """Above the layer-major threshold the stock store returns no blocks
+    and clones the prefix into the 2-slot exact LRU; the gmlx manager's
+    ckpt path must stay per-block and leave the exact LRU alone."""
+    from gmlx.apc_manager import GmlxAPCManager
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    man._layer_major_memory_min_tokens = 32
+    p = 64
+    cache = make_hybrid_cache(p, seed=4)
+    ids = list(range(500, 500 + p))
+    assert ckpt_store(man, ids, cache, extra_hash=0)
+    assert man.stats_snapshot()["exact_stores"] == 0
+    warm, got = ckpt_lookup(man, ids + [1], extra_hash=0)
+    assert got == p
+    assert_warm_matches(warm, cache, p)
+    # The stock path keeps its layer-major behavior.
+    lk = [c.keys for c in cache if isinstance(c, KVCache)]
+    lv = [c.values for c in cache if isinstance(c, KVCache)]
+    got_blocks = man.store_kv_blocks(ids, lk, lv, extra_hash=9)
+    assert got_blocks == []
+    assert man.stats_snapshot()["exact_stores"] == 1
+
+
+def test_window_chain_is_memory_only(tmp_path):
+    """Position-salted window shards cannot dedup on disk; the gmlx
+    manager schedules disk writes for the main chain only."""
+    from gmlx.apc_manager import GmlxAPCManager
+    disk = DiskBlockStore(root=tmp_path, namespace="m")
+    man = GmlxAPCManager(num_blocks=64, block_size=16, disk=disk)
+    try:
+        p = 48
+        cache = make_swa_cache(p, seed=5)
+        ids = list(range(600, 600 + p))
+        assert ckpt_store(man, ids, cache, extra_hash=0)
+        # 3 main blocks; the 2 window blocks stay memory-only.
+        assert man.stats_snapshot()["disk_writes"] == 3
+    finally:
+        disk.close()
 
 
 def test_incomplete_block_chain_is_miss():
