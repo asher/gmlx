@@ -219,16 +219,17 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_hf_download_gate(bool(getattr(cfg, "hf_cache", False)))
     install_runtime_snapshot_enrichment()
     install_pool_aware_unload()
-    # Faithful history first: the retire capture memoizes the render
-    # callable, and predictions must see the same render the server does.
-    # The thinking-seed stash goes between them, outside the faithful wrap:
-    # the faithful wrap calls its inner render with return_messages=True, so
-    # an inner stash would record the message list as "no prompt" and the
-    # thinking splitters would lose their prompt ground truth.
+    # Render-wrap nesting per target: seed(retire(faithful(orig))).
+    # Faithful innermost so the retire capture memoizes it and predictions
+    # see the render the server produces. Seed outermost for two reasons:
+    # the faithful wrap's inner return_messages=True call would feed an
+    # inner stash the message list ("no prompt"), and the captured render
+    # must exclude the stash so off-request predictions never write the
+    # request contextvar the thinking splitters read.
     install_faithful_history()
-    install_stream_thinking_seed()
     install_apc_lone_harvest()
     install_retire_render_capture()
+    install_stream_thinking_seed()
     install_keep_route()
     install_reload_route(reload_fn)
     install_audio_transcription_route(getattr(cfg, "stt", None))

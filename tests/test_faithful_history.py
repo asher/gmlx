@@ -157,6 +157,27 @@ def test_stash_sees_final_render_not_message_list():
         cb._LAST_RENDERED_PROMPT.reset(tok)
 
 
+def test_prediction_render_excludes_the_stash():
+    # Installer nesting: seed(retire(faithful)). The captured render must
+    # be the faithful wrapper, not the seed wrapper, so predictions never
+    # write the request contextvar the thinking splitters read.
+    from gmlx.server_patches import chat_behavior as cb
+    from gmlx.server_patches.apc import install_retire_render_capture
+    from gmlx.server_patches.chat_behavior import install_stream_thinking_seed
+    install_faithful_history()
+    install_retire_render_capture()
+    install_stream_thinking_seed()
+    outer = openai_mod.apply_chat_template
+    assert getattr(outer, cb._STREAM_SEED_FLAG, False)
+    retire = next(c.cell_contents for c in outer.__closure__
+                  if getattr(getattr(c, "cell_contents", None),
+                             "_kq_retire_capture", False))
+    captured = [c.cell_contents for c in retire.__closure__
+                if callable(getattr(c, "cell_contents", None))]
+    assert any(getattr(f, "_kq_faithful_history", False) for f in captured)
+    assert not any(getattr(f, cb._STREAM_SEED_FLAG, False) for f in captured)
+
+
 def test_retire_capture_wraps_faithful_render():
     from gmlx.server_patches.apc import install_retire_render_capture
     install_faithful_history()
