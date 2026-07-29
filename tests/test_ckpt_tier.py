@@ -80,7 +80,10 @@ def test_ckpt_supported_shapes():
     assert ckpt_supported(make_hybrid_cache(4))
     assert not ckpt_supported([KVCache(), KVCache()])
     assert not ckpt_supported([ArraysCache(size=2), ArraysCache(size=2)])
+    # off the block grid (8 % 16): geometry gate rejects
     assert not ckpt_supported([KVCache(), RotatingKVCache(max_size=8)])
+    # grid-aligned sliding window: the three-way tier serves it now
+    assert ckpt_supported([KVCache(), RotatingKVCache(max_size=32)])
     assert not ckpt_supported([])
 
 
@@ -100,7 +103,16 @@ def test_store_lookup_roundtrip(p):
     warm, got = ckpt_lookup(man, ids + [999, 998], extra_hash=7)
     assert got == p
     assert_warm_matches(warm, cache, p)
-    # All acquired blocks were released after materialization.
+    # The checkpoint record pins its chain: main blocks stay ref-held
+    # until the record is released (pin rather than repair).
+    from gmlx.cache_snapshot import _ckpt_records, _release_record
+    held = [b for b in man.pool if b.block_hash is not None]
+    if p >= 16:
+        assert held and all(b.ref_cnt == 1 for b in held)
+    idx = _ckpt_records(man)
+    for rec in list(idx.values()):
+        _release_record(man, rec)
+    idx.clear()
     assert all(b.ref_cnt == 0 for b in man.pool)
 
 
@@ -149,6 +161,154 @@ def test_salt_isolation_from_real_tiers():
                                  extra_hash=7)
     warm, got = ckpt_lookup(man, ids2 + [1], extra_hash=7)
     assert warm is None and got == 0
+
+
+ROT_LAYOUT = ("kv", "rot", "rot", "kv", "rot")
+ROT_W = 32
+
+
+def make_swa_cache(p, seed=0):
+    """gemma-like sliding-window hybrid, fed as one concat chunk to p."""
+    caches = []
+    for i, kind in enumerate(ROT_LAYOUT):
+        mx.random.seed(seed * 1000 + i)
+        k = mx.random.normal((1, H, p, D))
+        v = mx.random.normal((1, H, p, D))
+        if kind == "kv":
+            c = KVCache()
+            c.state = (k, v)
+        else:
+            c = RotatingKVCache(max_size=ROT_W)
+            c.update_and_fetch(k, v)
+        caches.append(c)
+    return caches
+
+
+def assert_swa_warm_matches(warm, orig, p):
+    from gmlx.cache_snapshot import (rotating_canonical_window,
+                                     rotating_invariant)
+    assert len(warm) == len(orig)
+    for w, o in zip(warm, orig):
+        if isinstance(o, RotatingKVCache):
+            assert isinstance(w, RotatingKVCache)
+            assert rotating_invariant(w) == (True, True)
+            ko, vo, mo = rotating_canonical_window(o)
+            kw, vw, mw = rotating_canonical_window(w)
+            assert mo == mw
+            assert mx.array_equal(ko, kw).item()
+            assert mx.array_equal(vo, vw).item()
+        else:
+            assert int(w.offset) == p
+            assert mx.array_equal(
+                w.keys[..., :p, :], o.keys[..., :p, :]).item()
+
+
+@pytest.mark.parametrize("p", [16, 48, 64])   # below and beyond the W=32 wrap
+def test_swa_store_lookup_roundtrip(p):
+    man = APCManager(num_blocks=64, block_size=16)
+    cache = make_swa_cache(p, seed=p)
+    ids = list(range(300, 300 + p))
+    assert ckpt_store(man, ids, cache, extra_hash=9)
+    warm, got = ckpt_lookup(man, ids + [1, 2], extra_hash=9)
+    assert got == p
+    assert_swa_warm_matches(warm, cache, p)
+
+
+def test_swa_store_declines_off_grid():
+    man = APCManager(num_blocks=64, block_size=16)
+    p = 40                                    # not a block multiple
+    cache = make_swa_cache(p)
+    assert not ckpt_store(man, list(range(300, 300 + p)), cache)
+    assert all(b.ref_cnt == 0 for b in man.pool)
+
+
+def test_retirement_rotating_falls_back_to_exact():
+    man = APCManager(num_blocks=64, block_size=16)
+    p = 40                                    # unaligned: ckpt declines
+    cache = make_swa_cache(p, seed=3)
+    ids = list(range(300, 300 + p))
+    assert retirement_store(man, "ckpt", ids, cache, row=0, extra_hash=1)
+    # landed on the exact tier (verbatim row with rotation meta)
+    entry, plen = man.lookup_exact_cache(ids + [1], extra_hash=1)
+    assert plen == p and entry is not None
+    from gmlx.cache_snapshot import ckpt_extra_hash as _ceh
+    e2, p2 = man.lookup_exact_cache(ids + [1], extra_hash=_ceh(1))
+    assert e2 is None and p2 == 0             # nothing under the ckpt salt
+
+
+def test_pinning_survives_pool_pressure():
+    man = APCManager(num_blocks=6, block_size=16)
+    p = 32
+    cache = make_hybrid_cache(p, seed=5)
+    ids = list(range(300, 300 + p))
+    assert ckpt_store(man, ids, cache, extra_hash=0)   # pins 2 blocks
+    # Hammer the pool with unrelated stores until exhaustion.
+    for s in range(4):
+        other = make_hybrid_cache(64, seed=50 + s)
+        lk = [c.keys for c in other if isinstance(c, KVCache)]
+        lv = [c.values for c in other if isinstance(c, KVCache)]
+        got = man.store_kv_blocks(list(range(1000 * s, 1000 * s + 64)),
+                                  lk, lv)
+        man.release(got)
+    warm, got = ckpt_lookup(man, ids + [1], extra_hash=0)
+    assert got == p                           # pinned chain survived
+    assert_warm_matches(warm, cache, p)
+
+
+def test_strip_on_extend_keeps_newest_two():
+    from gmlx.cache_snapshot import _ckpt_records
+    man = APCManager(num_blocks=64, block_size=16)
+    ids = list(range(400, 400 + 96))
+    for p in (32, 48, 64):
+        cache = make_hybrid_cache(p, seed=p)
+        assert ckpt_store(man, ids[:p], cache, extra_hash=0)
+    idx = _ckpt_records(man)
+    assert sorted(r.p for r in idx.values()) == [48, 64]
+    warm, got = ckpt_lookup(man, ids[:40], extra_hash=0)
+    assert warm is None and got == 0          # p=32 stripped
+    warm, got = ckpt_lookup(man, ids[:66], extra_hash=0)
+    assert got == 64
+
+
+def test_covers_p_gate_renegotiation():
+    from gmlx.cache_snapshot import _layer_has_content, mark_skeleton
+    empty = KVCache()
+    assert not _layer_has_content(empty)      # hole stays closed
+    ph = mark_skeleton(KVCache(), 128)
+    assert _layer_has_content(ph)             # skeleton covers p
+    assert not _layer_has_content(mark_skeleton(KVCache(), 0))
+
+
+def test_layout_signature_rejects_mismatch():
+    man = APCManager(num_blocks=64, block_size=16)
+    p = 32
+    cache = make_hybrid_cache(p, seed=2)
+    ids = list(range(300, 300 + p))
+    assert ckpt_store(man, ids, cache, extra_hash=0)
+    warm, got = ckpt_lookup(man, ids + [1], extra_hash=0,
+                            layout=("kv", "arr", "arr", "kv", "arr"))
+    assert got == p
+    warm, got = ckpt_lookup(man, ids + [1], extra_hash=0,
+                            layout=("kv", "rot", "rot", "kv", "rot"))
+    assert warm is None and got == 0
+
+
+def test_swa_disk_restart_roundtrip(tmp_path):
+    p = 48
+    cache = make_swa_cache(p, seed=11)
+    ids = list(range(700, 700 + p))
+    disk = DiskBlockStore(root=tmp_path, namespace="m")
+    man = APCManager(num_blocks=64, block_size=16, disk=disk)
+    assert ckpt_store(man, ids, cache, extra_hash=4)
+    disk.close()
+    disk2 = DiskBlockStore(root=tmp_path, namespace="m")
+    man2 = APCManager(num_blocks=64, block_size=16, disk=disk2)
+    try:
+        warm, got = ckpt_lookup(man2, ids + [77], extra_hash=4)
+        assert got == p
+        assert_swa_warm_matches(warm, cache, p)
+    finally:
+        disk2.close()
 
 
 def test_incomplete_block_chain_is_miss():

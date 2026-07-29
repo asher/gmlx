@@ -183,10 +183,11 @@ def _resolve_l1(model):
     return manager, mode
 
 
-def _ckpt_active(model, mode) -> bool:
-    """True when the checkpoint tier (attn-KV blocks + recurrent-state
-    sidecar) replaces the exact tier for this model: a gated-delta hybrid
-    cache shape, exact mode, kill switch open. Shape probed once per model;
+def _ckpt_active(model, mode, block_size: int = 16) -> bool:
+    """True when the checkpoint tier (chain-backed attn/rotating KV +
+    recurrent-state sidecar) replaces the exact tier for this model: a
+    supported hybrid cache shape (gated-delta or sliding-window, plan
+    section 3), exact mode, kill switch open. Shape probed once per model;
     the module flag is re-read every call so benches can toggle in-process.
     """
     if _SPEC_APC_CKPT_DISABLED or mode != "exact":
@@ -196,7 +197,7 @@ def _ckpt_active(model, mode) -> bool:
         from .cache_snapshot import ckpt_supported
         lm = getattr(model, "language_model", None) or model
         try:
-            flag = bool(ckpt_supported(lm.make_cache()))
+            flag = bool(ckpt_supported(lm.make_cache(), block_size))
         except Exception:
             flag = False
         try:
@@ -204,6 +205,25 @@ def _ckpt_active(model, mode) -> bool:
         except Exception:
             pass
     return bool(flag)
+
+
+def _ckpt_layout_for(model, block_size: int = 16):
+    """The live model's per-layer tags for the lookup-side signature check
+    (section 7: compared against the freshly constructed model, never a
+    stored entry). Cached on the model object."""
+    tags = getattr(model, "_kq_apc_ckpt_layout", None)
+    if tags is None:
+        from .cache_snapshot import ckpt_layout
+        lm = getattr(model, "language_model", None) or model
+        try:
+            tags = tuple(ckpt_layout(lm.make_cache(), block_size) or ())
+        except Exception:
+            tags = ()
+        try:
+            model._kq_apc_ckpt_layout = tags
+        except Exception:
+            pass
+    return tags or None
 
 
 def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
@@ -228,7 +248,7 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
     ids_list = [int(t) for t in batch._mtp_full_input_ids[0].tolist()]
     prompt_kwargs = batch._prompt_kwargs or {}
     extra_hash = view._apc_extra_hash(prompt_kwargs)
-    ckpt = _ckpt_active(batch.model, mode)
+    ckpt = _ckpt_active(batch.model, mode, int(manager.block_size))
     held_blocks = []
     l1_prefix = 0
     if l0_prefix == 0 and len(ids_list) >= 2:
@@ -256,7 +276,9 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
                         view._apc_safe_prefix_lookup_min(ids_list))
             cw, cp = ckpt_lookup(
                 manager, ids_list, extra_hash=extra_hash,
-                min_prefix_tokens=min_p)
+                min_prefix_tokens=min_p,
+                layout=_ckpt_layout_for(batch.model,
+                                        int(manager.block_size)))
             if (cw is not None and cp > prefix_len
                     and view._apc_suffix_is_text_only(ids_list, cp)):
                 if blocks:
@@ -419,7 +441,8 @@ def _mtp_prefill_init(batch) -> None:
         batch.prompt_cache[0]._kq_apc_retire = {
             "full_ids": full_ids,
             "extra_hash": int(meta.get("extra_hash", 0)),
-            "mode": ("ckpt" if _ckpt_active(batch.model, mode) else mode),
+            "mode": ("ckpt" if _ckpt_active(
+                batch.model, mode, int(manager.block_size)) else mode),
             "checkpoint_len": int(meta.get("checkpoint_len", 0) or 0),
             # Render context for the next-turn LCP key (None off the server
             # path or on a media prompt; retirement then keys as before).

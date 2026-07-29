@@ -30,7 +30,16 @@ def _layer_has_content(snap: Any) -> bool:
     (ArraysCache) layer needs non-empty state; a CacheList needs all of its
     sub-caches populated. An incomplete layer means the row cannot be stored
     under a full-sequence key without lying about what it covers.
+
+    Renegotiated for skeletons (plan section 4): a placeholder explicitly
+    marked by the checkpoint tier (``mark_skeleton``) passes when it claims
+    coverage -- its content lives on the block chain, so "has content"
+    becomes "covers p". Unmarked empty layers still drop the row: the
+    half-prefilled-row hole this gate was written for stays closed.
     """
+    covers = getattr(snap, "_kq_skeleton_covers", None)
+    if covers is not None:
+        return int(covers) > 0
     subs = getattr(snap, "caches", None)
     if subs is not None:  # CacheList
         return all(_layer_has_content(s) for s in subs)
@@ -381,52 +390,145 @@ def rotating_invariant(cache):
             int(cache._idx) == L)
 
 
-# Hybrid checkpoint tier: for gated-delta hybrids (plain KVCache attention
-# layers + ArraysCache recurrent layers), a checkpoint at position p stores
-# the attention layers' KV through the shared block pool (incremental,
-# deduped, disk-persistent) and the recurrent states + a 1..block_size-token
-# attention-KV tail as a small exact-tier "sidecar" entry keyed on
-# tokens[:p]. This replaces the exact tier's full-cache clones (GBs per
-# entry at depth, duplicated per turn) with shared blocks plus ~10s-of-MB
-# sidecars. Both keyspaces are salted: block hashes ignore layer count, so
-# the salt is what guarantees these attn-subset blocks can never satisfy (or
-# be satisfied by) any full-layer store.
+# Hybrid checkpoint tier, three-way (plan section 3): plain KVCache
+# attention layers ride the shared block pool under a salted keyspace
+# ([0, b_full) whole blocks); RotatingKVCache layers ride per-checkpoint
+# position-salted window chains (the canonical window of section 4 is
+# exactly W/B whole blocks at an aligned p, so there is no ring arithmetic
+# and no tail); ArraysCache recurrent state (GDN) is the only per-checkpoint
+# flat payload. The checkpoint record itself is a gmlx-owned LRU entry that
+# holds refcounts on its block chains (pin rather than repair: eviction
+# releases them), with a best-effort disk skeleton written through for
+# restart repair. At an aligned p the on-disk skeleton's KV entries are
+# zero-width placeholders stamped offset=p; only an unaligned GDN store
+# (retirement at an arbitrary length) still carries a 1..block_size-1 token
+# KV tail. Both keyspaces are salted so these subset chains can never
+# satisfy (or be satisfied by) a full-layer store.
 
 _CKPT_SALT = 0x7C_4B_D2_0A_86_E5_93
+_BOUNDED_SALT = 0x3A_91_C7_55_0E_D4_26
+
+_CKPT_RECORD_ENTRIES = max(2, env_int("GMLX_APC_CKPT_RECORDS", 32))
+# Strip-on-extend: newest N restorable checkpoints per chain (section 7).
+_CKPT_HEAVY_PER_CHAIN = max(1, env_int("GMLX_APC_CKPT_HEAVY", 2))
 
 
 def ckpt_extra_hash(extra_hash: int) -> int:
     return int(extra_hash) ^ _CKPT_SALT
 
 
-def ckpt_supported(prompt_cache) -> bool:
-    """True for the gated-delta hybrid cache shape: every layer a plain
-    KVCache or an ArraysCache, at least one of each. Rotating/chunked/
-    quantized layers (gemma-4 et al) stay on the exact tier."""
+def bounded_extra_hash(extra_hash: int, p: int) -> int:
+    """Per-checkpoint salt for a rotating window chain: mixing ``p`` makes
+    each checkpoint's window an independent chain, so identical window text
+    at different absolute positions can never cross-match, and releasing a
+    record releases exactly its own window blocks."""
+    return (int(extra_hash) ^ _BOUNDED_SALT) ^ (int(p) * 0x9E3779B1)
+
+
+def ckpt_layout(prompt_cache, block_size: int = 16):
+    """Per-layer tags ("kv" | "rot" | "arr") for a supported hybrid cache
+    list, else None. Supported: every layer one of the three classes, at
+    least one non-plain-KV layer (pure-KV models belong to the stock block
+    tier), and rotating layers passing the block-grid geometry gate."""
     from .cache_compat import cache_types
 
     if not prompt_cache:
-        return False
+        return None
     kv_types = cache_types("KVCache")
+    rot_types = cache_types("RotatingKVCache")
     arr_types = cache_types("ArraysCache")
-    has_kv = has_arr = False
+    tags = []
     for c in prompt_cache:
-        if isinstance(c, kv_types):
-            has_kv = True
+        if isinstance(c, rot_types):
+            tags.append("rot")
+        elif isinstance(c, kv_types):
+            tags.append("kv")
         elif isinstance(c, arr_types):
-            has_arr = True
+            tags.append("arr")
         else:
-            return False
-    return has_kv and has_arr
+            return None
+    if "rot" not in tags and "arr" not in tags:
+        return None                       # pure-KV: stock block tier
+    if "kv" not in tags and "rot" not in tags:
+        return None                       # no chain-backed layer: exact tier
+    if "rot" in tags and rotating_geometry(prompt_cache, block_size) is None:
+        return None
+    return tags
+
+
+def ckpt_supported(prompt_cache, block_size: int = 16) -> bool:
+    """True for cache shapes the checkpoint tier serves (see ckpt_layout)."""
+    return ckpt_layout(prompt_cache, block_size) is not None
 
 
 def _ckpt_block_prefix(p: int, block_size: int) -> int:
-    """Tokens covered by whole blocks below a checkpoint at ``p``. Always
-    leaves a 1..block_size-token tail for the sidecar: recurrent state is
-    captured at exactly ``p`` and cannot rewind, so the tail bridges the
-    block grain -- and a never-empty tail KVCache keeps the sidecar entry
-    round-trippable through the exact serializer."""
-    return ((p - 1) // block_size) * block_size
+    """Tokens covered by whole blocks below a checkpoint at ``p``. At an
+    aligned p this equals p: the tail is zero-width and the skeleton's KV
+    placeholders carry only the offset stamp (the serializer writes offset
+    before the empty check, so this costs nothing on disk)."""
+    return (p // block_size) * block_size
+
+
+def mark_skeleton(entry, p: int):
+    """Flag a placeholder cache entry as a skeleton covering ``p`` tokens
+    whose content lives on the block chain (the covers-p contract)."""
+    entry._kq_skeleton_covers = int(p)
+    return entry
+
+
+class _CkptRecord:
+    __slots__ = ("ids", "extra_hash", "p", "b_full", "layout",
+                 "main_blocks", "bounded_blocks", "rot_meta", "states",
+                 "tails")
+
+    def __init__(self, **kw):
+        for k in self.__slots__:
+            setattr(self, k, kw.get(k))
+
+
+def _ckpt_records(manager) -> "OrderedDict":
+    with manager.lock:
+        idx = getattr(manager, "_kq_ckpt_records", None)
+        if idx is None:
+            idx = OrderedDict()
+            manager._kq_ckpt_records = idx
+        return idx
+
+
+def _release_record(manager, rec) -> None:
+    for blocks in (rec.main_blocks, rec.bounded_blocks):
+        if blocks:
+            try:
+                manager.release(blocks)
+            except Exception:
+                _log.debug("APC ckpt record release failed", exc_info=True)
+    rec.main_blocks = rec.bounded_blocks = []
+    rec.states = rec.tails = None
+
+
+def _record_insert(manager, rec) -> None:
+    """Insert a checkpoint record: strip-on-extend superseded records on the
+    same chain immediately (LRU would keep exactly the wrong ones - the
+    second-newest on a just-grown chain is among the most recently touched),
+    then bound the index, releasing refs on everything dropped."""
+    idx = _ckpt_records(manager)
+    key = (rec.ids, rec.extra_hash)
+    with manager.lock:
+        old = idx.pop(key, None)
+        if old is not None:
+            _release_record(manager, old)
+        # chain = records whose ids are a strict prefix of this one
+        chain = [k for k, r in idx.items()
+                 if r.extra_hash == rec.extra_hash and r.p < rec.p
+                 and rec.ids[:r.p] == r.ids]
+        chain.sort(key=lambda k: idx[k].p, reverse=True)
+        for k in chain[_CKPT_HEAVY_PER_CHAIN - 1:]:
+            _release_record(manager, idx.pop(k))
+        idx[key] = rec
+        idx.move_to_end(key)
+        while len(idx) > _CKPT_RECORD_ENTRIES:
+            _, victim = idx.popitem(last=False)
+            _release_record(manager, victim)
 
 
 def ckpt_store(
@@ -438,64 +540,255 @@ def ckpt_store(
 ) -> bool:
     """Store a hybrid checkpoint at ``p = len(token_ids)``.
 
-    ``prompt_cache`` must be a single-row cache list whose KV offsets equal
-    ``p`` exactly (mid-prefill at the aligned checkpoint column,
-    post-prefill, or a guarded retirement row); a mismatch means the cache
-    does not faithfully cover the key and the store is skipped. The block
-    store dedups against the existing chain, so re-walking an already-stored
-    prefix copies nothing. Best-effort; never raises.
+    ``prompt_cache`` must be a single-row cache list whose KV/rotating
+    offsets equal ``p`` exactly. Plain KV rides the salted main chain,
+    rotating layers ride a per-checkpoint window chain (grid-aligned ``p``
+    required - an unaligned rotating store cannot cover the window and is
+    declined), recurrent states and (for unaligned GDN stores) the KV tail
+    land in the record. The record pins its blocks via refcounts and a disk
+    skeleton is written through best-effort. Never raises.
     """
     if manager is None or token_ids is None:
         return False
     from .cache_compat import cache_types, runtime_cache_module
 
     kv_types = cache_types("KVCache")
+    rot_types = cache_types("RotatingKVCache")
+    main_blocks: list[Any] = []
+    bounded_blocks: list[Any] = []
     try:
         ids = [int(t) for t in token_ids]
         p = len(ids)
-        if p < 2 or not ckpt_supported(prompt_cache):
+        bs = int(manager.block_size)
+        layout = ckpt_layout(prompt_cache, bs)
+        if p < 2 or layout is None:
             return False
         for c in prompt_cache:
-            if isinstance(c, kv_types) and int(c.offset) != p:
-                _log.info(
-                    "APC ckpt store skipped: KV offset %d != %d",
-                    int(c.offset), p)
+            off = getattr(c, "offset", None)
+            if off is not None and not isinstance(c, rot_types) \
+                    and isinstance(c, kv_types) and int(off) != p:
+                _log.info("APC ckpt store skipped: KV offset %d != %d",
+                          int(off), p)
                 return False
-        bs = int(manager.block_size)
+            if isinstance(c, rot_types) and int(c.offset) != p:
+                _log.info("APC ckpt store skipped: rot offset %d != %d",
+                          int(c.offset), p)
+                return False
+        has_rot = "rot" in layout
         b_full = _ckpt_block_prefix(p, bs)
-        salted = ckpt_extra_hash(extra_hash)
-        n_blocks = 0
-        if b_full > 0:
-            lk = [c.keys[..., :b_full, :]
-                  for c in prompt_cache if isinstance(c, kv_types)]
-            lv = [c.values[..., :b_full, :]
-                  for c in prompt_cache if isinstance(c, kv_types)]
-            blocks = manager.store_kv_blocks(
-                ids[:b_full], lk, lv, extra_hash=salted)
-            n_blocks = len(blocks)
-            manager.release(blocks)
-        sidecar: list[Any] = []
-        for c in prompt_cache:
-            if isinstance(c, kv_types):
-                # Runtime-origin tail: store_exact_cache's clone/serialize
-                # gates isinstance on the mlx-vlm runtime's classes.
-                tail = runtime_cache_module().KVCache()
-                # Lazy views into the live cache; store_exact_cache deep-
-                # clones (and evals) before anything can mutate them.
-                tail.state = (c.keys[..., b_full:p, :],
-                              c.values[..., b_full:p, :])
-                sidecar.append(tail)
-            else:
-                sidecar.append(c)
-        ok = bool(manager.store_exact_cache(ids, sidecar, extra_hash=salted))
-        if ok:
+        if has_rot and b_full != p:
             _log.info(
-                "APC ckpt store: tokens=%d blocks=%d tail=%d",
-                p, n_blocks, p - b_full)
-        return ok
+                "APC ckpt store declined: rotating store needs grid-aligned "
+                "p (%d %% %d != 0)", p, bs)
+            return False
+        tail_len = p - b_full
+        salted = ckpt_extra_hash(extra_hash)
+        kv_caches = [c for c in prompt_cache if isinstance(c, kv_types)
+                     and not isinstance(c, rot_types)]
+        rot_caches = [c for c in prompt_cache if isinstance(c, rot_types)]
+        arr_caches = [c for c in prompt_cache
+                      if not isinstance(c, (kv_types, rot_types))]
+
+        if b_full > 0 and kv_caches:
+            lk = [c.keys[..., :b_full, :] for c in kv_caches]
+            lv = [c.values[..., :b_full, :] for c in kv_caches]
+            main_blocks = manager.store_kv_blocks(
+                ids[:b_full], lk, lv, extra_hash=salted)
+            if len(main_blocks) * bs < b_full:
+                _log.info(
+                    "APC ckpt store: main chain short (%d/%d blocks); "
+                    "memory pin skipped", len(main_blocks), b_full // bs)
+                manager.release(main_blocks)
+                main_blocks = []
+
+        rot_meta = None
+        if rot_caches:
+            canon = [rotating_canonical_window(c) for c in rot_caches]
+            if any(cw is None for cw in canon):
+                manager.release(main_blocks)
+                return False
+            metas = {cw[2] for cw in canon}
+            if len(metas) != 1:
+                manager.release(main_blocks)
+                return False
+            rot_meta = canon[0][2]
+            keep, _w, _off, L = rot_meta
+            canon_ids = ids[:keep] + ids[p - (L - keep):p]
+            bsalt = bounded_extra_hash(extra_hash, p)
+            bounded_blocks = manager.store_kv_blocks(
+                canon_ids, [cw[0] for cw in canon],
+                [cw[1] for cw in canon], extra_hash=bsalt)
+            if len(bounded_blocks) * bs < L:
+                _log.info(
+                    "APC ckpt store: window chain short (%d/%d blocks); "
+                    "store declined", len(bounded_blocks), L // bs)
+                manager.release(main_blocks)
+                manager.release(bounded_blocks)
+                return False
+
+        states = [_clone_single_row(c) for c in arr_caches]
+        if any(s is None for s in states):
+            manager.release(main_blocks)
+            manager.release(bounded_blocks)
+            return False
+        tails = None
+        if tail_len and kv_caches:
+            tails = []
+            for c in kv_caches:
+                t = runtime_cache_module().KVCache()
+                t.state = (c.keys[..., b_full:p, :],
+                           c.values[..., b_full:p, :])
+                t = _clone_single_row(t)
+                if t is None:
+                    manager.release(main_blocks)
+                    manager.release(bounded_blocks)
+                    return False
+                tails.append(t)
+
+        rec = _CkptRecord(
+            ids=tuple(ids), extra_hash=int(extra_hash), p=p, b_full=b_full,
+            layout=tuple(layout), main_blocks=main_blocks,
+            bounded_blocks=bounded_blocks, rot_meta=rot_meta,
+            states=states, tails=tails)
+        _record_insert(manager, rec)
+
+        _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
+                         tail_len, states, tails, salted)
+        _log.info(
+            "APC ckpt store: tokens=%d main=%d window=%d tail=%d states=%d",
+            p, len(main_blocks), len(bounded_blocks), tail_len, len(states))
+        return True
     except Exception:
+        try:
+            manager.release(main_blocks)
+            manager.release(bounded_blocks)
+        except Exception:
+            pass  # best-effort release on the failure path
         _log.warning("APC ckpt store failed; continuing", exc_info=True)
         return False
+
+
+def _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
+                     tail_len, states, tails, salted) -> None:
+    """Best-effort disk skeleton: placeholders for chain-backed layers
+    (offset stamped, rotating meta native), real tails/states inline."""
+    disk = getattr(manager, "disk", None)
+    if disk is None:
+        return
+    from .cache_compat import runtime_cache_module
+    try:
+        rcm = runtime_cache_module()
+        entries: list[Any] = []
+        kv_i = arr_i = 0
+        for tag, c in zip(layout, prompt_cache):
+            if tag == "kv":
+                if tail_len:
+                    entries.append(tails[kv_i])
+                else:
+                    ph = rcm.KVCache()
+                    ph.offset = p
+                    entries.append(mark_skeleton(ph, p))
+                kv_i += 1
+            elif tag == "rot":
+                ph = rcm.RotatingKVCache(
+                    max_size=int(c.max_size), keep=int(c.keep))
+                ph.offset = p
+                ph._idx = min(p, int(c.max_size))
+                entries.append(mark_skeleton(ph, p))
+            else:
+                entries.append(states[arr_i])
+                arr_i += 1
+        # The upstream writer drops shards that serialize zero arrays,
+        # which an all-placeholder skeleton (aligned p, no tails, no
+        # states) would hit. A one-element sentinel entry keeps the shard
+        # persistable; _ckpt_disk_lookup strips it.
+        import mlx.core as mx
+        sent = rcm.ArraysCache(size=1)
+        sent.cache[0] = mx.array([float(p)], dtype=mx.float32)
+        entries.append(sent)
+        from mlx_vlm import apc as _apc
+        tid = tuple(ids)
+        khash = _apc._sequence_hash(tid, salted, manager.block_size)
+        disk.save_exact_cache(khash, tid, salted, entries)
+    except Exception:
+        _log.debug("APC ckpt disk skeleton save failed", exc_info=True)
+
+
+def _assemble_from_record(manager, rec, geometry_check=None):
+    """Warm cache list from a pinned record, or None (conjunction fail)."""
+    import mlx.core as mx
+    from .cache_compat import runtime_cache_module
+
+    rcm = runtime_cache_module()
+    n_kv = sum(1 for t in rec.layout if t == "kv")
+    n_rot = sum(1 for t in rec.layout if t == "rot")
+    if rec.b_full > 0 and n_kv and not rec.main_blocks:
+        return None
+    if n_rot and not rec.bounded_blocks:
+        return None
+    layer_kv = None
+    if n_kv:
+        if rec.b_full > 0:
+            if len(rec.main_blocks[0].keys) != n_kv:
+                return None
+            layer_kv = [
+                (mx.concatenate([b.keys[j] for b in rec.main_blocks],
+                                axis=2),
+                 mx.concatenate([b.values[j] for b in rec.main_blocks],
+                                axis=2))
+                for j in range(n_kv)
+            ]
+        if rec.tails:
+            tails = [(t.keys[..., :t.offset, :], t.values[..., :t.offset, :])
+                     for t in rec.tails]
+            if layer_kv is None:
+                layer_kv = tails
+            else:
+                layer_kv = [
+                    (mx.concatenate([layer_kv[j][0], tails[j][0]], axis=2),
+                     mx.concatenate([layer_kv[j][1], tails[j][1]], axis=2))
+                    for j in range(n_kv)
+                ]
+    layer_rot = None
+    if n_rot:
+        if len(rec.bounded_blocks[0].keys) != n_rot:
+            return None
+        keep, w, off, L = rec.rot_meta
+        layer_rot = []
+        for j in range(n_rot):
+            k = mx.concatenate([b.keys[j] for b in rec.bounded_blocks],
+                               axis=2)
+            v = mx.concatenate([b.values[j] for b in rec.bounded_blocks],
+                               axis=2)
+            rc = rotating_restore(k, v, (keep, w, rec.p, k.shape[2]))
+            if rc is None or k.shape[2] != L:
+                return None
+            layer_rot.append(rc)
+    warm: list[Any] = []
+    kv_i = rot_i = arr_i = 0
+    for tag in rec.layout:
+        if tag == "kv":
+            kc = rcm.KVCache()
+            kc.state = layer_kv[kv_i]
+            warm.append(kc)
+            kv_i += 1
+        elif tag == "rot":
+            warm.append(layer_rot[rot_i])
+            rot_i += 1
+        else:
+            clone = _clone_single_row(rec.states[arr_i])
+            if clone is None:
+                return None
+            warm.append(clone)
+            arr_i += 1
+    targets: list[Any] = []
+    for c in warm:
+        if getattr(c, "keys", None) is not None:
+            targets.extend([c.keys, c.values])
+        elif hasattr(c, "cache"):
+            targets.extend(s for s in c.cache if s is not None)
+    mx.eval(*targets)
+    return warm
 
 
 def ckpt_lookup(
@@ -504,45 +797,101 @@ def ckpt_lookup(
     *,
     extra_hash: int = 0,
     min_prefix_tokens: int = 0,
+    layout: tuple | None = None,
 ) -> tuple:
     """Longest checkpoint-tier warm start for ``token_ids``.
 
-    Finds the longest salted sidecar at some ``p`` (memory LRU then disk,
-    all upstream exact machinery -- never serves ``p == len(token_ids)``),
-    then assembles the attention KV from the salted block chain below ``p``
-    plus the sidecar tail, and the recurrent layers from the sidecar states.
-    Returns ``(warm_prompt_cache, p)`` with KV offsets exactly ``p``, or
-    ``(None, 0)``. A sidecar whose block chain is incomplete (evicted from
-    both memory and disk) is a miss: recurrent state cannot bridge a KV
-    hole. Best-effort; never raises.
+    Walks pinned records (candidate ``p`` descending, testing the whole
+    conjunction - main chain, window chain, states - together; refcount
+    pinning makes the chain halves non-failing in steady state), then falls
+    back to the disk skeleton path (restart repair). ``layout`` (the live
+    model's per-layer tags) rejects a record written by a different layout
+    (section 7 signature check against the freshly constructed model).
+    Returns ``(warm_prompt_cache, p)`` or ``(None, 0)``. Never raises.
     """
     if manager is None or token_ids is None:
         return None, 0
-    import mlx.core as mx
+    try:
+        ids = [int(t) for t in token_ids]
+        tid = tuple(ids)
+        idx = _ckpt_records(manager)
+        with manager.lock:
+            cands = [
+                rec for rec in idx.values()
+                if rec.extra_hash == int(extra_hash)
+                and min_prefix_tokens < rec.p < len(ids)
+                and tid[:rec.p] == rec.ids
+                and (layout is None or tuple(layout) == rec.layout)
+            ]
+        cands.sort(key=lambda r: r.p, reverse=True)
+        for rec in cands:
+            warm = _assemble_from_record(manager, rec)
+            if warm is not None:
+                with manager.lock:
+                    if (rec.ids, rec.extra_hash) in idx:
+                        idx.move_to_end((rec.ids, rec.extra_hash))
+                _log.info("APC ckpt hit: prefix=%d (pinned record)", rec.p)
+                return warm, rec.p
+            _log.info("APC ckpt walk-back past %d (assembly failed)", rec.p)
+        return _ckpt_disk_lookup(
+            manager, ids, extra_hash=extra_hash,
+            min_prefix_tokens=min_prefix_tokens, layout=layout)
+    except Exception:
+        _log.warning("APC ckpt lookup failed; continuing", exc_info=True)
+        return None, 0
 
+
+def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
+                      layout):
+    """Restart-repair path: the skeleton entry via the upstream exact
+    machinery (memory LRU + disk shard promote), chains from the salted
+    block keyspaces. The loaded plain-KV placeholder's offset is zeroed by
+    the in-memory clone (upstream behavior); p comes from the lookup's
+    matched length, never from a placeholder."""
+    import mlx.core as mx
     from .cache_compat import cache_types, runtime_cache_module
 
     kv_types = cache_types("KVCache")
-    blocks: list[Any] = []
+    rot_types = cache_types("RotatingKVCache")
+    salted = ckpt_extra_hash(extra_hash)
+    entries, p = manager.lookup_exact_cache(
+        ids, extra_hash=salted, min_prefix_tokens=min_prefix_tokens)
+    if entries is None or p <= 0:
+        return None, 0
+    last = entries[-1] if entries else None
+    if (last is not None and not isinstance(last, kv_types + rot_types)
+            and hasattr(last, "cache") and len(last.cache) == 1
+            and last.cache[0] is not None
+            and getattr(last.cache[0], "size", 0) == 1):
+        entries = entries[:-1]        # the skeleton writer's sentinel
+    tags = []
+    for e in entries:
+        if isinstance(e, rot_types):
+            tags.append("rot")
+        elif isinstance(e, kv_types):
+            tags.append("kv")
+        else:
+            tags.append("arr")
+    if layout is not None and tuple(layout) != tuple(tags):
+        _log.info("APC ckpt disk miss: layout %s != model %s",
+                  tags, list(layout))
+        return None, 0
+    bs = int(manager.block_size)
+    b_full = _ckpt_block_prefix(p, bs)
+    n_kv = tags.count("kv")
+    blocks = []
+    wblocks = []
     try:
-        ids = [int(t) for t in token_ids]
-        salted = ckpt_extra_hash(extra_hash)
-        sidecar, p = manager.lookup_exact_cache(
-            ids, extra_hash=salted, min_prefix_tokens=min_prefix_tokens)
-        if sidecar is None or p <= 0:
-            return None, 0
-        bs = int(manager.block_size)
-        b_full = _ckpt_block_prefix(p, bs)
-        n_attn = sum(1 for e in sidecar if isinstance(e, kv_types))
         layer_kv = None
-        if b_full > 0:
+        if n_kv and b_full > 0:
             blocks, matched = manager.lookup_prefix(
                 ids[:b_full], extra_hash=salted)
-            if matched >= b_full and blocks and len(blocks[0].keys) == n_attn:
+            if matched >= b_full and blocks \
+                    and len(blocks[0].keys) == n_kv:
                 layer_kv = [
                     (mx.concatenate([b.keys[j] for b in blocks], axis=2),
                      mx.concatenate([b.values[j] for b in blocks], axis=2))
-                    for j in range(n_attn)
+                    for j in range(n_kv)
                 ]
             else:
                 manager.release(blocks)
@@ -553,61 +902,103 @@ def ckpt_lookup(
                     min_prefix_tokens=b_full - 1,
                     allow_memory_overlap=True)
                 if (disk_caches is None or dmatched < b_full
-                        or len(disk_caches) != n_attn):
-                    _log.info(
-                        "APC ckpt miss: sidecar at %d, block chain %d/%d",
-                        p, max(matched, dmatched), b_full)
+                        or len(disk_caches) != n_kv):
+                    _log.info("APC ckpt disk miss: main chain %d/%d",
+                              dmatched if disk_caches else 0, b_full)
                     return None, 0
                 layer_kv = [
                     (c.keys[..., :b_full, :], c.values[..., :b_full, :])
                     for c in disk_caches
                 ]
-        warm: list[Any] = []
-        j = 0
-        for entry in sidecar:
-            if isinstance(entry, kv_types):
-                t_len = int(entry.offset)
-                if t_len != p - b_full:
-                    manager.release(blocks)
-                    _log.warning(
-                        "APC ckpt miss: sidecar tail %d != %d", t_len,
-                        p - b_full)
+        rot_entries = [e for e in entries if isinstance(e, rot_types)]
+        layer_rot = None
+        if rot_entries:
+            keep = int(rot_entries[0].keep)
+            w = int(rot_entries[0].max_size)
+            L = min(p, w)
+            canon_ids = ids[:keep] + ids[p - (L - keep):p]
+            bsalt = bounded_extra_hash(extra_hash, p)
+            wblocks, wmatched = manager.lookup_prefix(
+                canon_ids, extra_hash=bsalt)
+            src = None
+            if wmatched >= L and wblocks \
+                    and len(wblocks[0].keys) == len(rot_entries):
+                src = [
+                    (mx.concatenate([b.keys[j] for b in wblocks], axis=2),
+                     mx.concatenate([b.values[j] for b in wblocks], axis=2))
+                    for j in range(len(rot_entries))
+                ]
+            else:
+                manager.release(wblocks)
+                wblocks = []
+                wcaches, wdm = manager.lookup_prefix_disk_cache(
+                    canon_ids, extra_hash=bsalt,
+                    max_prefix_tokens=L, min_prefix_tokens=L - 1,
+                    allow_memory_overlap=True)
+                if wcaches is None or wdm < L \
+                        or len(wcaches) != len(rot_entries):
+                    _log.info("APC ckpt disk miss: window chain")
                     return None, 0
-                tk = entry.keys[..., :t_len, :]
-                tv = entry.values[..., :t_len, :]
+                src = [(c.keys[..., :L, :], c.values[..., :L, :])
+                       for c in wcaches]
+            layer_rot = []
+            for j in range(len(rot_entries)):
+                rc = rotating_restore(
+                    src[j][0], src[j][1],
+                    (keep, w, p, src[j][0].shape[2]))
+                if rc is None:
+                    return None, 0
+                layer_rot.append(rc)
+        warm: list[Any] = []
+        kv_i = rot_i = 0
+        for tag, e in zip(tags, entries):
+            if tag == "kv":
+                has_tail = getattr(e, "keys", None) is not None
+                t_len = int(e.offset) if has_tail else 0
                 kc = runtime_cache_module().KVCache()
-                if layer_kv is not None:
-                    kc.state = (
-                        mx.concatenate([layer_kv[j][0], tk], axis=2),
-                        mx.concatenate([layer_kv[j][1], tv], axis=2))
+                base = layer_kv[kv_i] if layer_kv is not None else None
+                if t_len:
+                    tk = e.keys[..., :t_len, :]
+                    tv = e.values[..., :t_len, :]
+                    if base is not None:
+                        kc.state = (mx.concatenate([base[0], tk], axis=2),
+                                    mx.concatenate([base[1], tv], axis=2))
+                    else:
+                        kc.state = (tk, tv)
+                elif base is not None:
+                    kc.state = base
                 else:
-                    kc.state = (tk, tv)
-                j += 1
+                    return None, 0
+                if kc.offset != p:
+                    _log.info("APC ckpt disk miss: kv assembled %d != %d",
+                              kc.offset, p)
+                    return None, 0
                 warm.append(kc)
+                kv_i += 1
+            elif tag == "rot":
+                warm.append(layer_rot[rot_i])
+                rot_i += 1
             else:
-                # ArraysCache: lookup_exact_cache returned a decoupled clone;
-                # it is ours to hand to the live batch.
-                warm.append(entry)
-        targets: list[Any] = []
+                warm.append(e)
+        targets = []
         for c in warm:
-            if isinstance(c, kv_types):
+            if getattr(c, "keys", None) is not None:
                 targets.extend([c.keys, c.values])
-            else:
+            elif hasattr(c, "cache"):
                 targets.extend(s for s in c.cache if s is not None)
         mx.eval(*targets)
-        # Concats are materialized copies now; the pool may recycle.
         manager.release(blocks)
-        blocks = []
-        _log.info(
-            "APC ckpt hit: prefix=%d blocks=%d tail=%d",
-            p, b_full // bs, p - b_full)
+        manager.release(wblocks)
+        _log.info("APC ckpt hit: prefix=%d (disk skeleton)", p)
         return warm, p
     except Exception:
         try:
             manager.release(blocks)
+            manager.release(wblocks)
         except Exception:
             pass  # best-effort release on the failure path
-        _log.warning("APC ckpt lookup failed; continuing", exc_info=True)
+        _log.warning("APC ckpt disk lookup failed; continuing",
+                     exc_info=True)
         return None, 0
 
 
@@ -670,8 +1061,20 @@ def retirement_store(
             # The row is already single-row on the B=1 path; ckpt_store
             # slices it directly (its own stores copy internally), so no
             # full-cache clone happens -- the exact tier's whole sin.
-            return ckpt_store(manager, ids, prompt_cache,
-                              extra_hash=extra_hash)
+            if ckpt_store(manager, ids, prompt_cache,
+                          extra_hash=extra_hash):
+                return True
+            # A rotating store declines off the block grid (retirement p
+            # is arbitrary; the evicted window front cannot be rewound to
+            # a lower grid point). Fall back to the exact tier's verbatim
+            # row store, which carries rotation via meta -- today's
+            # shipped behavior for the sliding-window fleet. GDN rows
+            # never take this branch (unaligned p stores with a KV tail).
+            from .cache_compat import cache_types
+            if not any(isinstance(c, cache_types("RotatingKVCache"))
+                       for c in prompt_cache):
+                return False
+            mode = "exact"
         if mode == "exact":
             snap = row_snapshot(prompt_cache, row)
             if snap is None:
