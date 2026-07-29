@@ -22,14 +22,40 @@ from mlx_vlm.models.gemma4 import language as g4v
 
 from gmlx import attn_hd512, gemma4_batched_sdpa as gb
 
-_orig_vlm = g4v.scaled_dot_product_attention
-_orig_lm = g4t.scaled_dot_product_attention
+
+def _chain(fn):
+    while fn is not None:
+        yield fn
+        fn = getattr(fn, "_gmlx_orig", None)
 
 
-def teardown_module(module):
-    g4v.scaled_dot_product_attention = _orig_vlm
-    g4t.scaled_dot_product_attention = _orig_lm
+def _stock(fn):
+    for fn in _chain(fn):
+        pass
+    return fn
+
+
+# Walk to the true originals: with a real-model suite the loader may have
+# installed route chains on these symbols before this module imports.
+_orig_vlm = _stock(g4v.scaled_dot_product_attention)
+_orig_lm = _stock(g4t.scaled_dot_product_attention)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _fresh_route_state():
+    """Other suites can leave gb._installed latched while the module symbols
+    hold a chain without the g4 route (a teardown elsewhere rebound them).
+    Clear the latch so _install() wraps fresh on whatever chain exists, and
+    restore the entry state on exit instead of severing chains to stock."""
+    snap_vlm = g4v.scaled_dot_product_attention
+    snap_lm = g4t.scaled_dot_product_attention
+    snap_latch = gb._installed
     gb._installed = False
+    gb._MASK_PADS.clear()
+    yield
+    g4v.scaled_dot_product_attention = snap_vlm
+    g4t.scaled_dot_product_attention = snap_lm
+    gb._installed = snap_latch
     gb._MASK_PADS.clear()
 
 
@@ -69,8 +95,8 @@ def test_route_matches_masked_reference(monkeypatch):
     got = g4v.scaled_dot_product_attention(
         q, k, v, cache=cache, scale=0.125, mask=_pad_mask(pads, 64))
     assert gb.claims() == n0 + 1
-    orig = g4v.scaled_dot_product_attention._gmlx_orig
-    ref = orig(q, k, v, cache=cache, scale=0.125, mask=_pad_mask(pads, 64))
+    ref = _orig_vlm(q, k, v, cache=cache, scale=0.125,
+                    mask=_pad_mask(pads, 64))
     err = mx.abs(got - ref).max().item()
     assert err < 1e-4, f"tail-slice vs mask err={err}"
 
@@ -82,7 +108,7 @@ def test_gemma4_text_seam_claims(monkeypatch):
     monkeypatch.setattr(attn_hd512, "_MIN_KV", 32)
     route = g4t.scaled_dot_product_attention
     assert getattr(route, "_gmlx_g4_route", False)
-    assert route._gmlx_orig is _orig_lm
+    assert any(fn is _orig_lm for fn in _chain(route))
     mx.random.seed(5)
     pads = [3, 0]
     q, k, v = _rand(2, 4, 2, 48)
