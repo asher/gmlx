@@ -299,6 +299,15 @@ def test_swa_disk_restart_roundtrip(tmp_path):
         warm, got = ckpt_lookup(man2, ids + [77], extra_hash=4)
         assert got == p
         assert_swa_warm_matches(warm, cache, p)
+        # Disk half of the geometry check: the stored entries carry the
+        # writer's window, so a reader with a different one must miss.
+        from gmlx.cache_snapshot import ckpt_layout
+        live = tuple(ckpt_layout(cache, 16))
+        other = tuple(t if not t.startswith("rot") else "rot:64:0"
+                      for t in live)
+        warm, got = ckpt_lookup(man2, ids + [77], extra_hash=4,
+                                layout=other)
+        assert warm is None and got == 0
     finally:
         disk2.close()
 
