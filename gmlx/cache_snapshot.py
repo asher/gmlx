@@ -589,13 +589,10 @@ def ckpt_store(
 ) -> bool:
     """Store a hybrid checkpoint at ``p = len(token_ids)``.
 
-    ``prompt_cache`` must be a single-row cache list whose KV/rotating
-    offsets equal ``p`` exactly. Plain KV rides the salted main chain,
-    rotating layers ride a per-checkpoint window chain (grid-aligned ``p``
-    required - an unaligned rotating store cannot cover the window and is
-    declined), recurrent states and (for unaligned GDN stores) the KV tail
-    land in the record. The record pins its blocks via refcounts and a disk
-    skeleton is written through best-effort. Never raises.
+    Single-row cache list, KV/rotating offsets == p. Plain KV rides the
+    salted main chain, rotating layers a per-checkpoint window chain
+    (grid-aligned p required), states and unaligned-GDN tails land in the
+    pinned record; disk skeleton written best-effort. Never raises.
     """
     if manager is None or token_ids is None:
         return False
@@ -747,10 +744,8 @@ def _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
             else:
                 entries.append(states[arr_i])
                 arr_i += 1
-        # The upstream writer drops shards that serialize zero arrays,
-        # which an all-placeholder skeleton (aligned p, no tails, no
-        # states) would hit. A one-element sentinel entry keeps the shard
-        # persistable; _ckpt_disk_lookup strips it.
+        # The upstream writer drops zero-array shards; the sentinel keeps
+        # an all-placeholder skeleton persistable. Stripped on lookup.
         import mlx.core as mx
         sent = rcm.ArraysCache(size=1)
         sent.cache[0] = mx.array([float(p)], dtype=mx.float32)
@@ -850,13 +845,10 @@ def ckpt_lookup(
 ) -> tuple:
     """Longest checkpoint-tier warm start for ``token_ids``.
 
-    Walks pinned records (candidate ``p`` descending, testing the whole
-    conjunction - main chain, window chain, states - together; refcount
-    pinning makes the chain halves non-failing in steady state), then falls
-    back to the disk skeleton path (restart repair). ``layout`` (the live
-    model's per-layer tags) rejects a record written by a different layout
-    (section 7 signature check against the freshly constructed model).
-    Returns ``(warm_prompt_cache, p)`` or ``(None, 0)``. Never raises.
+    Walks pinned records p-descending testing the whole conjunction, then
+    falls back to the disk skeleton (restart repair). ``layout`` rejects
+    records from a different per-layer layout. Returns
+    ``(warm_prompt_cache, p)`` or ``(None, 0)``. Never raises.
     """
     if manager is None or token_ids is None:
         return None, 0
@@ -892,11 +884,9 @@ def ckpt_lookup(
 
 def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
                       layout):
-    """Restart-repair path: the skeleton entry via the upstream exact
-    machinery (memory LRU + disk shard promote), chains from the salted
-    block keyspaces. The loaded plain-KV placeholder's offset is zeroed by
-    the in-memory clone (upstream behavior); p comes from the lookup's
-    matched length, never from a placeholder."""
+    """Restart-repair path: skeleton entry via the upstream exact
+    machinery, chains from the salted block keyspaces. p comes from the
+    lookup's matched length, never from a placeholder."""
     import mlx.core as mx
     from .cache_compat import cache_types, runtime_cache_module
 

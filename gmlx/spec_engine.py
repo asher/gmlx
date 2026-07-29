@@ -150,6 +150,19 @@ def _install_apc_manager_stash() -> None:
             except Exception:
                 pass
         _orig_init(self, model, processor, **kwargs)
+        # Ckpt-tier models form prompt batches one request at a time: the
+        # owned APC declines B>1 prefill, so a coalesced burst would go
+        # all-cold, and B>1 prompt batching is not a throughput win anyway
+        # (gemma-31b 2x27k: 130s batched vs 120s serialized).
+        if kwargs.get("draft_model") is not None and not _SPEC_APC_DISABLED:
+            try:
+                manager, mode = _resolve_l1(model)
+                if manager is not None and _ckpt_active(
+                        model, mode, int(manager.block_size)):
+                    self.prefill_batch_size = 1
+            except Exception:
+                _log.warning("APC ckpt formation gate failed; continuing",
+                             exc_info=True)
 
     _init_with_stash.__dict__[_APC_STASH_FLAG] = True
     BatchGenerator.__init__ = _init_with_stash
@@ -355,18 +368,11 @@ def _ckpt_cursor_init(batch, guard: int, restored: int,
                       block_size: int) -> tuple[int, int, int]:
     """(first_boundary, terminal, interval) for the checkpoint cursor.
 
-    Every boundary sits on the natural chunk grid -- multiples of
-    lcm(prefill_step_size, block_size) -- so the cached path replays the
-    uncached run's exact chunk sequence and determinism carries
-    bit-exactness (the step-2 cert: any truncated chunk drifts KV, GDN
-    state and logits). The terminal is the largest grid point at or below
-    the stock guard column and the cursor latches there; boundaries at or
-    below the restored prefix are skipped (their store already exists on
-    the chain that produced the restore). GMLX_APC_CKPT_INTERVAL tokens
-    (default 4096, snapped up to the grid; 0 = terminal-only, the
-    pre-cursor behavior). B>1 note: the owned prefill is single-request,
-    so the shared-column-axis question does not arise here; if multi-row
-    owned prefill ever lands, all rows snap to these same boundaries.
+    Boundaries sit on the natural chunk grid, lcm(prefill_step_size,
+    block_size) -- off-grid boundaries truncate a chunk and drift (step-2
+    cert). First boundary above the restored prefix; terminal clamped to
+    the grid at or below the stock guard column. GMLX_APC_CKPT_INTERVAL
+    tokens, default 4096, snapped up to the grid; 0 = terminal-only.
     """
     step = int(getattr(batch, "prefill_step_size", 0) or 0)
     unit = block_size if step <= 0 else \
@@ -387,19 +393,12 @@ def _ckpt_cursor_init(batch, guard: int, restored: int,
 def _ckpt_mid_prefill_store(batch) -> None:
     """Checkpoint-tier replacement for the stock mid-prefill exact store.
 
-    Fires at each cursor boundary (the stock ``_next_apc_checkpoint_
-    column`` machinery re-reads ``checkpoint_len`` every chunk and forces
-    the boundary there), then advances the cursor to the next interval
-    boundary, latching ``checkpoint_done`` only after the terminal (the
-    grid point at or below the stock guard column). The stock store is
-    suppressed by the advance, not the latch: this hook runs immediately
-    before ``_store_apc_exact_checkpoints`` in ``_mtp_prompt_step``, and
-    the moved cursor no longer equals ``_row_real_tokens_processed`` --
-    the ordering is load-bearing and carries an explicit test. The cursor
-    advances even when a store fails (falling back to the stock multi-GB
-    clone would defeat the tier); ``ckpt_last_stored`` records the last
-    boundary that actually stored, which is what the retirement context
-    and the drafter sidecar key on -- never the cursor.
+    Fires at each cursor boundary, then advances ``checkpoint_len`` and
+    latches ``checkpoint_done`` only after the terminal. The advance is
+    what suppresses the stock store (this hook must run immediately
+    before ``_store_apc_exact_checkpoints``; the ordering carries a
+    test). Advances past failed stores; ``ckpt_last_stored`` records only
+    boundaries that landed.
     """
     if not getattr(batch, "_kq_ckpt_armed", False):
         return
@@ -507,10 +506,8 @@ def _mtp_prefill_init(batch) -> None:
             "mode": ("ckpt" if _ckpt_active(
                 batch.model, mode, int(manager.block_size)) else mode),
             "checkpoint_len": int(meta.get("checkpoint_len", 0) or 0),
-            # Live meta reference: under the ckpt cursor the sidecar must
-            # key on the last boundary actually stored (ckpt_last_stored,
-            # final by the time the rounds generator reads it), never the
-            # advancing cursor value frozen above.
+            # Live reference: the sidecar keys on ckpt_last_stored, not
+            # the cursor value frozen above.
             "apc_meta": meta,
             # Render context for the next-turn LCP key (None off the server
             # path or on a media prompt; retirement then keys as before).

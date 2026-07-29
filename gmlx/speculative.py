@@ -1129,14 +1129,8 @@ def owned_server_rounds(
 
 
 def _sidecar_boundary(retire_ctx: dict) -> int:
-    """Checkpoint boundary the drafter sidecar keys on.
-
-    Under the ckpt cursor: the last boundary that actually stored
-    (``ckpt_last_stored`` in the live meta, final by rounds entry), never
-    the advancing cursor -- a sidecar under a boundary with no target-side
-    entry would poison future turns. Exact mode keeps the frozen
-    guard-trimmed value.
-    """
+    """Sidecar boundary key: the last ckpt boundary that actually stored
+    (never the advancing cursor); exact mode keeps the frozen value."""
     if retire_ctx.get("mode") == "ckpt":
         return int((retire_ctx.get("apc_meta") or {})
                    .get("ckpt_last_stored", 0) or 0)

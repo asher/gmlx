@@ -207,3 +207,44 @@ def test_second_request_hits_first_requests_checkpoint():
         prefill_step_size=32, _prompt_length_aware_keys=())
     se._mtp_prefill_init(batch_b)
     assert batch_b._mtp_l1_prefix_len == boundary
+
+
+# -- formation: ckpt-tier models serialize prompt admission --
+
+def test_ckpt_formation_serializes_prefill(monkeypatch):
+    """Simultaneous arrivals must not coalesce into a multi-row prompt
+    batch on a ckpt-tier model (the owned APC declines B>1 prefill); B=1
+    formation converts a burst into 1 cold + N-1 restores. Pure-KV models
+    keep batched formation."""
+    import importlib
+
+    from test_ckpt_tier import KVCache
+
+    ar = importlib.import_module("mlx_vlm.generate.ar")
+
+    class _ProbeBG:
+        def __init__(self, model, processor, **kwargs):
+            self.prefill_batch_size = kwargs.get("prefill_batch_size", 8)
+
+    monkeypatch.setattr(ar, "BatchGenerator", _ProbeBG)
+    se._install_apc_manager_stash()
+    se._bind_l1_view()
+    man = APCManager(num_blocks=64, block_size=16)
+
+    hybrid = SimpleNamespace(make_cache=lambda: make_hybrid_cache(0))
+    bg = ar.BatchGenerator(hybrid, None, draft_model=object(),
+                           apc_manager=man, prefill_batch_size=8)
+    assert bg.prefill_batch_size == 1
+
+    def kv_cache():
+        c = KVCache()
+        return [c, KVCache()]
+
+    kv_model = SimpleNamespace(make_cache=kv_cache)
+    bg2 = ar.BatchGenerator(kv_model, None, draft_model=object(),
+                            apc_manager=man, prefill_batch_size=8)
+    assert bg2.prefill_batch_size == 8
+
+    bg3 = ar.BatchGenerator(SimpleNamespace(), None, draft_model=object(),
+                            apc_manager=None, prefill_batch_size=8)
+    assert bg3.prefill_batch_size == 8
