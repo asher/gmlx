@@ -69,10 +69,59 @@ def _clone_single_row(cache: Any) -> Any | None:
     eval_targets: list[Any] = []
     out = _apc._clone_cache_entry_for_apc(
         cache, min_capacity_tokens=None, eval_targets=eval_targets)
+    if out is None:
+        # Upstream isinstance-gates on the mlx_vlm cache classes; gmlx text
+        # models carry the mlx_lm twins. Mirror the same per-kind copy for
+        # any class cache_types recognizes.
+        out = _clone_lm_twin(cache, eval_targets)
     if eval_targets:
         import mlx.core as mx
         mx.eval(*eval_targets)
     return out
+
+
+def _clone_lm_twin(cache: Any, eval_targets: list[Any]) -> Any | None:
+    from mlx_vlm import apc as _apc
+    from .cache_compat import cache_types
+
+    copy = _apc._copy_mlx_array
+    if isinstance(cache, cache_types("RotatingKVCache")):
+        out = type(cache)(max_size=int(cache.max_size),
+                          keep=int(getattr(cache, "keep", 0)))
+        out.offset = int(getattr(cache, "offset", 0) or 0)
+        out._idx = int(getattr(cache, "_idx", 0) or 0)
+        if cache.keys is not None and cache.values is not None:
+            out.keys = copy(cache.keys)
+            out.values = copy(cache.values)
+            eval_targets.extend([out.keys, out.values])
+        return out
+    if isinstance(cache, cache_types("KVCache")):
+        out = type(cache)()
+        off = int(getattr(cache, "offset", 0) or 0)
+        if cache.keys is not None and cache.values is not None and off > 0:
+            out.keys = copy(cache.keys[..., :off, :])
+            out.values = copy(cache.values[..., :off, :])
+            out.offset = off
+            eval_targets.extend([out.keys, out.values])
+        return out
+    if isinstance(cache, cache_types("ArraysCache")):
+        out = type(cache)(len(cache.cache))
+        out.cache = []
+        for state in cache.cache:
+            if state is None:
+                out.cache.append(None)
+                continue
+            copied = copy(state)
+            out.cache.append(copied)
+            eval_targets.append(copied)
+        for attr in ("left_padding", "lengths"):
+            v = getattr(cache, attr, None)
+            if v is not None:
+                copied = copy(v)
+                setattr(out, attr, copied)
+                eval_targets.append(copied)
+        return out
+    return None
 
 
 def row_snapshot(prompt_cache: list[Any], row: int = 0) -> list[Any] | None:

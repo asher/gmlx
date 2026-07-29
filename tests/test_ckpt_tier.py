@@ -311,6 +311,39 @@ def test_swa_disk_restart_roundtrip(tmp_path):
         disk2.close()
 
 
+def test_mlx_lm_class_caches_roundtrip():
+    """gmlx text models carry mlx_lm cache classes; the tier must clone
+    them (upstream's clone isinstance-gates on the mlx_vlm twins)."""
+    from mlx_lm.models.cache import ArraysCache as LmArrays
+    from mlx_lm.models.cache import KVCache as LmKV
+    man = APCManager(num_blocks=64, block_size=16)
+    p = 33                                    # unaligned: tail clone too
+    caches = []
+    for i, kind in enumerate(LAYOUT):
+        mx.random.seed(900 + i)
+        if kind == "kv":
+            c = LmKV()
+            c.state = (mx.random.normal((1, H, p, D)),
+                       mx.random.normal((1, H, p, D)))
+        else:
+            c = LmArrays(2)
+            c.cache[0] = mx.random.normal((1, 3, 8))
+            c.cache[1] = mx.random.normal((1, 4, D, D))
+        caches.append(c)
+    ids = list(range(300, 300 + p))
+    assert ckpt_store(man, ids, caches, extra_hash=0)
+    warm, got = ckpt_lookup(man, ids + [1], extra_hash=0)
+    assert got == p
+    for kind, w, o in zip(LAYOUT, warm, caches):
+        if kind == "kv":
+            assert int(w.offset) == p
+            assert mx.array_equal(w.keys[..., :p, :], o.keys).item()
+            assert mx.array_equal(w.values[..., :p, :], o.values).item()
+        else:
+            for ws, os_ in zip(w.cache, o.cache):
+                assert mx.array_equal(ws, os_).item()
+
+
 def test_incomplete_block_chain_is_miss():
     man = APCManager(num_blocks=64, block_size=16)
     p = 48
