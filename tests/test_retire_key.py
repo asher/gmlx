@@ -116,6 +116,18 @@ def test_build_assistant_message_thinking_split():
     assert "plan" in (msg.get("reasoning_content") or "")
 
 
+def test_truncated_thinking_predicate():
+    pairs = (("<think>", "</think>"),)
+    f = rk.truncated_thinking
+    assert f("cut off mid plan", pairs, "assistant\n<think>\n") is True
+    assert f("plan</think>done", pairs, "assistant\n<think>\n") is False
+    assert f("<think>plan", pairs, "assistant\n<think>\n") is False
+    assert f("cut off", pairs, "assistant\n") is False
+    assert f("cut off", pairs, "x<think>a</think>b") is False
+    assert f("", pairs, "assistant\n<think>\n") is False
+    assert f("cut off", pairs, None) is False
+
+
 def test_build_assistant_message_truncated_thinking():
     # Prompt-opened think block, budget exhausted before the close marker:
     # the partial reasoning is reasoning, not content (server-shape mirror).

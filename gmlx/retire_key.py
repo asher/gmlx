@@ -146,6 +146,20 @@ def _virtually_finish(ctx: dict, text: str) -> str:
     return text
 
 
+def truncated_thinking(text, pairs, prompt) -> bool:
+    """Whether ``text`` is reasoning cut off inside a prompt-opened think
+    block: no marker from any pair appears in the text, and ``prompt``
+    ends inside an open block. Shared rule for the server's non-stream
+    splitter and the retirement mirror -- each supplies the prompt from
+    its own source (request contextvar vs. generation-prompt memo)."""
+    if not text or not isinstance(prompt, str) or not prompt:
+        return False
+    for sm, em in pairs:
+        if sm in text or em in text:
+            return False
+    return any(prompt.rfind(sm) > prompt.rfind(em) for sm, em in pairs)
+
+
 def build_assistant_message(ctx: dict, full_text: str) -> dict:
     """Parse a completion into the assistant message a client echoes back.
 
@@ -161,18 +175,9 @@ def build_assistant_message(ctx: dict, full_text: str) -> dict:
     ts = kw.get("thinking_start_token")
     te = kw.get("thinking_end_token")
     reasoning, content = srv._split_thinking(full_text, ts, te)
-    if reasoning is None and content:
-        # Truncated thinking: the prompt opened the block and the budget
-        # ran out before the close marker, so no marker appears in the
-        # text. Mirrors the server's non-stream classification (the
-        # partial reasoning is reasoning, not content); the server-side
-        # twin keys on a request contextvar this thread does not see.
-        pairs = _thinking_markers(kw)
-        prompt = _gen_prompt_text(ctx)
-        if (not any(m in full_text for pair in pairs for m in pair)
-                and any(prompt.rfind(sm) > prompt.rfind(em)
-                        for sm, em in pairs)):
-            reasoning, content = content, ""
+    if reasoning is None and content and truncated_thinking(
+            full_text, _thinking_markers(kw), _gen_prompt_text(ctx)):
+        reasoning, content = content, ""
 
     tool_calls = None
     tools = kw.get("tools")

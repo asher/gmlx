@@ -179,6 +179,13 @@ SEAMS: tuple[Seam, ...] = (
          "server_patches.install_retire_render_capture (render-context "
          "memo, module attr) + render.install_faithful_history (inner "
          "key-merge wrap)"),
+    Seam("mlx_vlm.server.anthropic", "apply_chat_template",
+         "server_patches._common._render_target_modules (faithful "
+         "history, retire capture, and thinking seed wrap every "
+         "captured render binding)"),
+    Seam("mlx_vlm.server.app", "_protocol_deps",
+         "server_patches._common._render_target_modules (deps captures "
+         "the openai function object at namespace construction)"),
     Seam("mlx_vlm.prompt_utils", "apply_chat_template",
          "server_patches.render.install_faithful_history "
          "(return_messages contract: one rebuilt message per readable "

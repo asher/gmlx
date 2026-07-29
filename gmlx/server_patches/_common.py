@@ -39,6 +39,20 @@ def _install_gen_args_transform(flag: str, transform) -> None:
             mod._build_gen_args = build_gen_args
 
 
+def _render_target_modules():
+    """Namespaces holding a captured ``apply_chat_template`` binding: the
+    protocol modules plus ``app._protocol_deps``. deps captures the openai
+    module's function object at namespace construction and anthropic holds
+    its own binding, so rebinding one module attr misses the other two."""
+    targets = [sys.modules.get(m) or importlib.import_module(m)
+               for m in ("mlx_vlm.server.openai", "mlx_vlm.server.anthropic")]
+    app = importlib.import_module("mlx_vlm.server.app")
+    deps = getattr(app, "_protocol_deps", None)
+    if deps is not None:
+        targets.append(deps)
+    return targets
+
+
 def _get_pool():
     pkg = sys.modules.get("mlx_vlm.server")
     return getattr(pkg, "_kq_residency_pool", None) if pkg else None

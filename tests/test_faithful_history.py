@@ -13,12 +13,20 @@ QWEN_CFG = {"model_type": "qwen3_5"}
 PLAIN_CFG = {"model_type": "some_text_model"}
 
 
+anthropic_mod = importlib.import_module("mlx_vlm.server.anthropic")
+app_mod = importlib.import_module("mlx_vlm.server.app")
+_deps = getattr(app_mod, "_protocol_deps", None)
+
+
 @pytest.fixture(autouse=True)
 def _stock_render():
-    orig = openai_mod.apply_chat_template
-    openai_mod.apply_chat_template = prompt_utils.apply_chat_template
+    saved = [(t, t.apply_chat_template) for t in
+             (openai_mod, anthropic_mod) + ((_deps,) if _deps else ())]
+    for t, _ in saved:
+        t.apply_chat_template = prompt_utils.apply_chat_template
     yield
-    openai_mod.apply_chat_template = orig
+    for t, fn in saved:
+        t.apply_chat_template = fn
 
 
 class _Proc:
@@ -104,6 +112,25 @@ def test_kill_switch(monkeypatch):
     monkeypatch.setenv("GMLX_FAITHFUL_HISTORY", "0")
     install_faithful_history()
     assert openai_mod.apply_chat_template is prompt_utils.apply_chat_template
+
+
+def test_all_render_bindings_wrapped():
+    # deps and anthropic hold their own captured references; a rebind of
+    # the openai module attr alone leaves them on the stock rebuild.
+    install_faithful_history()
+    for t in (openai_mod, anthropic_mod) + ((_deps,) if _deps else ()):
+        assert getattr(t.apply_chat_template, "_kq_faithful_history", False)
+    msgs = anthropic_mod.apply_chat_template(
+        _Proc(), QWEN_CFG, _history(), return_messages=True)
+    assert msgs[1]["reasoning_content"] == "let me think"
+
+
+def test_retire_capture_covers_all_bindings():
+    from gmlx.server_patches.apc import install_retire_render_capture
+    install_faithful_history()
+    install_retire_render_capture()
+    for t in (openai_mod, anthropic_mod) + ((_deps,) if _deps else ()):
+        assert getattr(t.apply_chat_template, "_kq_retire_capture", False)
 
 
 def test_idempotent_install():

@@ -94,11 +94,10 @@ def install_retire_render_capture() -> None:
         return
     from .. import retire_key
 
-    openai_mod = importlib.import_module("mlx_vlm.server.openai")
+    from ._common import _render_target_modules
     gen_mod = importlib.import_module("mlx_vlm.server.generation")
 
-    orig_render = openai_mod.apply_chat_template
-    if not getattr(orig_render, "_kq_retire_capture", False):
+    def _make_capture(orig_render):
         def apply_chat_template(processor, config, prompt, *a, **kw):
             out = orig_render(processor, config, prompt, *a, **kw)
             try:
@@ -119,7 +118,14 @@ def install_retire_render_capture() -> None:
             return out
 
         apply_chat_template._kq_retire_capture = True
-        openai_mod.apply_chat_template = apply_chat_template
+        return apply_chat_template
+
+    # Every captured binding (openai, anthropic, _protocol_deps), so
+    # retirement keys cover all protocol routes, not just OpenAI.
+    for target in _render_target_modules():
+        fn = getattr(target, "apply_chat_template", None)
+        if fn is not None and not getattr(fn, "_kq_retire_capture", False):
+            target.apply_chat_template = _make_capture(fn)
 
     cls = gen_mod.ResponseGenerator
     orig_pre = cls._preprocess_request
