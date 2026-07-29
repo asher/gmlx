@@ -186,6 +186,10 @@ SEAMS: tuple[Seam, ...] = (
          "retire_key.build_assistant_message (response-shape mirror)"),
     Seam("mlx_vlm.server.openai", "load_tool_module",
          "retire_key.build_assistant_message (response-shape mirror)"),
+    Seam("mlx_vlm.server.responses_state",
+         "ThinkingStreamState._build_open_close_markers",
+         "retire_key._thinking_markers (splitter default marker pairs "
+         "for the mid-decode virtual closer)"),
     Seam("mlx_vlm.server.runtime", "runtime",
          "residency._RuntimeProxy wrap", critical=True),
     Seam("mlx_vlm.server.app", "app",

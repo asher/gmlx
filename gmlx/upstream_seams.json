@@ -78,6 +78,7 @@
   "mlx_vlm.server.openai:apply_chat_template": "5c23f52772eb701163ed40e9eaf85715fb9abb348cc88905deb43b368d81d27a",
   "mlx_vlm.server.openai:load_tool_module": "5b2cd4d4a774fa1591a9628e461a29ea33143376dd5a601eb4b3977e6e582dfb",
   "mlx_vlm.server.openai:process_tool_calls": "07525468fb8712afa375f4dd840d6946c8f4901bb7e23c4dd31edd69e88161a6",
+  "mlx_vlm.server.responses_state:ThinkingStreamState._build_open_close_markers": "30fce43f3938d8bb0c5ed063382544486d7c9d39089dc449e5904790e68686cb",
   "mlx_vlm.server.runtime:ModelCacheRegistry": "9739b62b8615762ca9ac0983d3b139316db8e7513a68b069d54bd1993125852b",
   "mlx_vlm.server.runtime:runtime": null,
   "mlx_vlm.speculative.drafters:load_drafter": "0c0a5200fa7bbf342e2126150e17b960a0fb086bf1802322e158ef0e654a3d3b",

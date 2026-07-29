@@ -259,34 +259,39 @@ def test_retire_b1_no_ctx_keeps_today(monkeypatch):
 
 
 def test_virtually_finish_closes_open_thinking():
-    kw = {"thinking_start_token": "<think>",
-          "thinking_end_token": "</think>"}
-    ctx = {"kw": kw, "_think_open": True}
+    # Prompt-opened block (qwen style: the start marker never appears in
+    # the generated text). Default markers -- the request kwargs rarely
+    # carry explicit thinking tokens.
+    ctx = {"kw": {}, "_gen_prompt": "<|im_start|>assistant\n<think>\n"}
     assert rk._virtually_finish(ctx, "partial reasoning") == \
         "partial reasoning</think>"
     closed = "r\n</think>\n\nanswer"
     assert rk._virtually_finish(ctx, closed) == closed
-    # A start token inside the text triggers the closer even when the
+    # A start marker inside the text triggers the closer even when the
     # prompt did not open the block.
-    ctx2 = {"kw": kw, "_think_open": False}
+    ctx2 = {"kw": {}, "_gen_prompt": "<|im_start|>assistant\n"}
     assert rk._virtually_finish(ctx2, "<think>partial") == \
         "<think>partial</think>"
+    # Neither the text nor the prompt opens a block: untouched.
     assert rk._virtually_finish(ctx2, "plain content") == "plain content"
-    # No thinking template: untouched.
-    assert rk._virtually_finish({"kw": {}}, "text") == "text"
+    # No-think prompts carry a closed empty block: untouched.
+    ctx3 = {"kw": {},
+            "_gen_prompt": "assistant\n<think>\n\n</think>\n\n"}
+    assert rk._virtually_finish(ctx3, "plain content") == "plain content"
 
 
-def test_prompt_opens_thinking_memoized():
+def test_gen_prompt_text_memoized():
     calls = []
 
     def render(proc, cfg, messages, **kw):
-        calls.append(1)
+        calls.append(kw.get("add_generation_prompt"))
         return "<|im_start|>assistant\n<think>\n"
 
     ctx = {"render": render, "preprocess": lambda t: [1],
-           "processor": None, "config": None, "messages": [],
-           "kw": {"thinking_start_token": "<think>",
-                  "thinking_end_token": "</think>"}}
-    assert rk._prompt_opens_thinking(ctx) is True
-    assert rk._prompt_opens_thinking(ctx) is True
-    assert len(calls) == 1
+           "processor": None, "config": None, "messages": [], "kw": {}}
+    assert rk._gen_prompt_text(ctx).endswith("<think>\n")
+    assert rk._gen_prompt_text(ctx).endswith("<think>\n")
+    assert calls == [True]
+    # The memoized prompt feeds the closer.
+    assert rk._virtually_finish(ctx, "deep partial") == \
+        "deep partial</think>"

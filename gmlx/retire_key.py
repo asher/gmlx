@@ -90,46 +90,59 @@ def _decode_generated(ctx: dict, generated: list[int]) -> str:
     return text
 
 
-def _prompt_opens_thinking(ctx: dict) -> bool:
-    """True when the generation prompt itself opens a thinking block
-    (qwen-style templates emit ``<think>\\n`` as part of the prompt, so
-    the generated text carries no start token). Memoized on the ctx."""
-    flag = ctx.get("_think_open")
-    if flag is None:
-        flag = False
+def _thinking_markers(kw: dict):
+    """The same (open, close) marker pairs the response splitter tries,
+    including its built-in defaults -- the request kwargs rarely carry
+    explicit thinking tokens."""
+    from mlx_vlm.server.responses_state import ThinkingStreamState
+    return ThinkingStreamState._build_open_close_markers(
+        kw.get("thinking_start_token"), kw.get("thinking_end_token"))
+
+
+def _gen_prompt_text(ctx: dict) -> str:
+    """The request's generation-prompt render (memoized on the ctx):
+    qwen-style templates open the thinking block inside the prompt, so
+    the generated text alone never shows the start marker."""
+    text = ctx.get("_gen_prompt")
+    if text is None:
+        text = ""
         try:
             render = ctx.get("render")
-            kw = dict(ctx.get("kw") or {})
-            ts = kw.get("thinking_start_token")
-            te = kw.get("thinking_end_token")
-            if render is not None and ts:
+            if render is not None:
+                kw = dict(ctx.get("kw") or {})
                 kw["add_generation_prompt"] = True
-                text = render(ctx["processor"], ctx["config"],
-                              list(ctx["messages"]), **kw)
-                if isinstance(text, str):
-                    flag = text.rfind(ts) > text.rfind(te or "")
+                out = render(ctx["processor"], ctx["config"],
+                             list(ctx["messages"]), **kw)
+                if isinstance(out, str):
+                    text = out
         except Exception:
-            flag = False
-        ctx["_think_open"] = flag
-    return flag
+            text = ""
+        ctx["_gen_prompt"] = text
+    return text
 
 
 def _virtually_finish(ctx: dict, text: str) -> str:
     """Close an open thinking block in a mid-decode partial.
 
     A partial prediction asks what the next turn would replay if the
-    reply finished here. With no end token in the text the splitter
+    reply finished here. With no end marker in the text the splitter
     reads the whole partial as content, so every mid-thinking render
     diverged at the (empty) think block and the snapshot ring froze on
     its first tick -- the virtual closer restores the honest question.
     """
-    kw = ctx.get("kw") or {}
-    ts = kw.get("thinking_start_token")
-    te = kw.get("thinking_end_token")
-    if not te or te in text:
+    try:
+        markers = _thinking_markers(ctx.get("kw") or {})
+    except Exception:
         return text
-    if (ts and ts in text) or _prompt_opens_thinking(ctx):
-        return text + te
+    for sm, em in markers:
+        if em in text:
+            return text
+        if sm in text:
+            return text + em
+    prompt = _gen_prompt_text(ctx)
+    for sm, em in markers:
+        if prompt.rfind(sm) > prompt.rfind(em):
+            return text + em
     return text
 
 
