@@ -16,15 +16,14 @@ from mlx_lm.models import llama as llama_mod
 
 from gmlx import cascade_sdpa as cs
 
-_orig_llama = llama_mod.scaled_dot_product_attention
-_ORIG_SEAMS = []
+_SEAM_MODS = []
 for _pkg, _name in cs._MODULES:
     try:
         _mod = importlib.import_module(f"{_pkg}.{_name}")
     except ImportError:
         continue
-    _ORIG_SEAMS.append((_mod, getattr(_mod, "scaled_dot_product_attention",
-                                      None)))
+    if getattr(_mod, "scaled_dot_product_attention", None) is not None:
+        _SEAM_MODS.append(_mod)
 
 
 def _has_cascade_op():
@@ -35,12 +34,22 @@ def _has_cascade_op():
     return mx.default_device() == mx.Device(mx.gpu)
 
 
-def teardown_module(module):
-    for _mod, _fn in _ORIG_SEAMS:
-        if _fn is not None:
-            _mod.scaled_dot_product_attention = _fn
+@pytest.fixture(scope="module", autouse=True)
+def _fresh_route_state():
+    """Other suites can leave cs._installed_route latched while the seam
+    symbols hold a chain without the cascade route (a teardown elsewhere
+    rebound them). Clear the latch so _install() wraps fresh on whatever
+    chain exists, and restore the entry state on exit instead of severing
+    chains to import-time symbols."""
+    snap = [(m, m.scaled_dot_product_attention) for m in _SEAM_MODS]
+    snap_route = cs._installed_route
+    snap_stamp = cs._installed_stamp
     cs._installed_route = False
-    cs._installed_stamp = False
+    yield
+    for m, fn in snap:
+        m.scaled_dot_product_attention = fn
+    cs._installed_route = snap_route
+    cs._installed_stamp = snap_stamp
 
 
 class _FakeBatchCache:
