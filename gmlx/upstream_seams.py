@@ -111,13 +111,19 @@ SEAMS: tuple[Seam, ...] = (
          "qwen35_owned._owned_model_call (forward body mirrored with "
          "deliberate divergences; re-mirror on upstream change)",
          critical=True),
-    # --- gemma4 host-sync-free masks/offsets (gemma4_sync carries bodies) ---
+    # --- gemma4 host-sync-free masks/offsets (gemma4_sync carries bodies).
+    # Owned gemma4_text MTP trees (gemma4_owned) shadow all three rows by
+    # subclass override and mirror the same bodies; the pins stay live for
+    # stock-built trees (multimodal construction, GMLX_GEMMA_OWNED=0). ---
     Seam("mlx_vlm.models.gemma4.language", "Gemma4TextModel._make_masks",
-         "gemma4_sync.install_gemma4_nosync (body carried, offset probe)"),
+         "gemma4_sync.install_gemma4_nosync (body carried, offset probe); "
+         "gemma4_owned._owned_make_masks (mirror)"),
     Seam("mlx_vlm.models.gemma4.language", "Attention.__call__",
-         "gemma4_sync.install_gemma4_nosync (body carried, offset wrap)"),
+         "gemma4_sync.install_gemma4_nosync (body carried, offset wrap); "
+         "gemma4_owned._owned_attention_call (mirror)"),
     Seam("mlx_vlm.models.gemma4.language", "scaled_dot_product_attention",
-         "gemma4_batched_sdpa (hd512 B>1 row route; left-pad tail slices)"),
+         "gemma4_batched_sdpa (hd512 B>1 row route; left-pad tail slices); "
+         "gemma4_owned._sdpa_dispatch calls the claim directly"),
     # --- quantized-KV SDPA batch-mask fix (both base modules) ---
     Seam("mlx_lm.models.base", "quantized_scaled_dot_product_attention",
          "quantized_sdpa_fix (5D grouped scores vs 4D batch mask)"),
