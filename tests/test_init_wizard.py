@@ -318,7 +318,7 @@ def test_wizard_profiles_step_pins_intent(monkeypatch, tmp_path):
     cfg = config.build_config(yaml.safe_load(outcome.text))
     assert cfg.models["qw"].profile == "coding"      # pinned
     assert cfg.models["gm"].profile is None          # no intents -> no prompt
-    assert "# qwen3.6: t=1.0" in outcome.text        # family comment rendered
+    assert "# sampling (qwen3.6): t=1" in outcome.text  # family comment rendered
 
 
 def test_wizard_profiles_step_enter_through(monkeypatch, tmp_path):

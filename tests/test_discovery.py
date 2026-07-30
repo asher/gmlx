@@ -380,17 +380,17 @@ def test_scaffold_empty_is_valid():
     assert cfg.cache["enabled"] is True
 
 
-def test_scaffold_family_trailing_comments():
-    """Detected families render as a trailing comment with the model-card base
-    sampling; an unknown family renders no comment."""
+def test_scaffold_family_comments_above_entry():
+    """Detected families render as a comment line above the entry with the
+    model-card base sampling; an unknown family renders no comment."""
     models = [
         ModelCfg(id="qw", path="/m/qw.gguf", family="qwen3.6"),
         ModelCfg(id="gm", path="/m/gm.gguf", family="gemma"),
         ModelCfg(id="mystery", path="/m/x.gguf"),
     ]
     text = disc.scaffold_yaml(models, model_dirs=["/m"])
-    assert "  qw:        # qwen3.6: t=1.0 top_p=0.95 top_k=20\n" in text
-    assert "  gm:        # gemma: t=1.0 top_p=0.95 top_k=64\n" in text
+    assert "  # sampling (qwen3.6): t=1 top_p=0.95 top_k=20\n  qw:\n" in text
+    assert "  # sampling (gemma): t=1 top_p=0.95 top_k=64\n  gm:\n" in text
     assert "  mystery:\n" in text                # no family -> bare key
 
 
@@ -622,7 +622,7 @@ def _hm(monkeypatch, tmp_path):
         c = disc._classify_meta(
             {"general.architecture": "gemma4"},
             basename=os.path.basename(path), path=path)
-        return c, "Gemma 4 12B It"
+        return c, "Gemma 4 12B It", {}
 
     monkeypatch.setattr(disc, "_read_header", _fake_read)
     return calls
@@ -638,7 +638,7 @@ def test_header_meta_reads_and_memoizes(_hm, tmp_path):
     f.write_bytes(b"x")
     meta = disc.header_meta(str(f))
     assert meta == {"arch": "gemma4", "name": "Gemma 4 12B It",
-                    "kind": "model", "mtp": False}
+                    "kind": "model", "mtp": False, "sampling": {}}
     disc.header_meta(str(f))
     assert _hm["n"] == 1                         # second hit is the memo
 
@@ -785,3 +785,36 @@ def test_scaffold_stream_round_trips_through_build_config():
     text = disc.scaffold_yaml(models, model_dirs=["/models"])
     cfg = build_config(yaml.safe_load(text))
     assert cfg.models["hy3-iq4"].stream == "experts"
+
+
+# GGUF-embedded model-card sampling (general.sampling.*)
+def test_read_sampling_maps_header_keys():
+    kv = {"general.sampling.temp": 0.7, "general.sampling.top_p": 0.8,
+          "general.sampling.top_k": 20}
+    assert disc._read_sampling(kv) == {"temperature": 0.7, "top_p": 0.8,
+                                       "top_k": 20}
+
+
+def test_read_sampling_absent_is_empty():
+    assert disc._read_sampling({"general.architecture": "qwen3"}) == {}
+
+
+def test_family_comment_merges_gguf_sampling(monkeypatch):
+    monkeypatch.setattr(disc, "header_sampling",
+                        lambda p: {"temperature": 0.7, "top_p": 0.8})
+    mc = ModelCfg(id="x", path="/m/x.gguf", family="qwen3")
+    assert disc.family_comment(mc) == \
+        "sampling (qwen3 + gguf): t=0.7 top_p=0.8 top_k=20"
+
+
+def test_family_comment_gguf_only_without_family(monkeypatch):
+    monkeypatch.setattr(disc, "header_sampling", lambda p: {"temperature": 0.9})
+    mc = ModelCfg(id="x", path="/m/x.gguf")
+    assert disc.family_comment(mc) == "sampling (gguf): t=0.9"
+
+
+def test_read_sampling_normalizes_disabled_sentinels():
+    kv = {"general.sampling.temp": 0.9, "general.sampling.top_p": 1.0,
+          "general.sampling.top_k": -1, "general.sampling.repeat_penalty": 1.0}
+    assert disc._read_sampling(kv) == {"temperature": 0.9, "top_p": 0.0,
+                                       "top_k": 0}

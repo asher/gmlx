@@ -1803,6 +1803,11 @@ def apply_family_defaults(args, parser, argv) -> int | None:
     family = (fam.detect_family(meta.get("arch"), meta.get("name"))
               if meta else "default")
     groups = fam.groups_for(family, intent)
+    # The GGUF's own embedded model-card sampling (general.sampling.*) refines
+    # the arch-family guess; explicit flags still win via `explicit`.
+    hs = (meta or {}).get("sampling") or {}
+    if hs:
+        groups = {**groups, "sampling": {**groups.get("sampling", {}), **hs}}
     label = fam.FAMILIES.get(family, {}).get("label", family)
     # An intent the family defines no delta for resolves to the base defaults;
     # say so instead of a banner claiming the intent was applied.
@@ -1815,10 +1820,11 @@ def apply_family_defaults(args, parser, argv) -> int | None:
                                       groups.get("chat_template_kwargs"))
     if applied:
         suffix = f" @{intent}" if has_delta else ""
+        src = f"{label}{suffix} + gguf header" if hs else f"{label}{suffix}"
         # Deferred to print_family_note() after a successful load: the banner
         # must never trail a load failure claiming defaults were applied.
         args._family_note = (
-            f"[family] {label}{suffix} defaults: "
+            f"[family] {src} defaults: "
             f"{', '.join(sorted(applied))}  (--no-family-defaults to disable)")
     return None
 

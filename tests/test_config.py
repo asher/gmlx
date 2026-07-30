@@ -1830,3 +1830,30 @@ def test_scalar_cache_disk_raises_config_error():
     doc["server"]["cache"] = {"disk": "/tmp/apc"}
     with pytest.raises(ConfigError, match="cache.disk"):
         build_config(doc)
+
+
+def test_resolve_overlays_gguf_header_sampling(monkeypatch):
+    """The GGUF's embedded general.sampling.* beats the family guess but loses
+    to profiles/overrides."""
+    import gmlx.discovery as _disc
+    monkeypatch.setattr(_disc, "header_sampling",
+                        lambda p: {"temperature": 0.7, "top_p": 0.8})
+    cfg = build_config({
+        "models": {"m": {"path": "/m/x.gguf", "family": "qwen3",
+                         "overrides": {"sampling": {"top_p": 0.5}}}},
+    })
+    r = resolve_model("m", cfg)
+    assert r.sampling["temperature"] == 0.7      # header beats family base 0.6
+    assert r.sampling["top_p"] == 0.5            # overrides beat the header
+    assert r.sampling["top_k"] == 20             # family base fills the rest
+
+
+def test_resolve_header_sampling_off_with_family_defaults(monkeypatch):
+    import gmlx.discovery as _disc
+    monkeypatch.setattr(_disc, "header_sampling",
+                        lambda p: {"temperature": 0.7})
+    doc = {"server": {"family_defaults": False},
+           "models": {"m": {"path": "/m/x.gguf", "family": "qwen3"}}}
+    cfg = build_config(doc)
+    r = resolve_model("m", cfg)
+    assert "temperature" not in r.sampling

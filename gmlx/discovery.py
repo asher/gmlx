@@ -206,19 +206,58 @@ def _save_header_cache(cache: dict) -> None:
         pass  # best-effort cache write; discovery just re-scans next time
 
 
+# Model-card sampling embedded in the GGUF header (llama.cpp writes
+# `general.sampling.*` from convert-time metadata). Maps header key -> gmlx
+# sampling key. These are THIS model's recommended values, so they beat the
+# arch-family guess wherever family defaults apply.
+_HEADER_SAMPLING_KEYS = (
+    ("temp", "temperature"),
+    ("temperature", "temperature"),
+    ("top_p", "top_p"),
+    ("top_k", "top_k"),
+    ("min_p", "min_p"),
+    ("repeat_penalty", "repetition_penalty"),
+)
+
+
+def _read_sampling(kv) -> dict:
+    """Normalizes llama.cpp "disabled" sentinels to mlx-lm's (`top_k: -1` ->
+    `0`, `top_p/min_p >= 1` -> `0.0`); a no-op `repeat_penalty: 1` is dropped."""
+    from .gguf_meta import read_float
+    out: dict = {}
+    for hk, sk in _HEADER_SAMPLING_KEYS:
+        if sk in out:
+            continue
+        v = (read_int(kv, f"general.sampling.{hk}") if sk == "top_k"
+             else read_float(kv, f"general.sampling.{hk}"))
+        if v is None:
+            continue
+        if sk == "top_k":
+            out[sk] = max(v, 0)
+        elif sk in ("top_p", "min_p"):
+            if v > 0:
+                out[sk] = 0.0 if v >= 1 else round(v, 4)
+        elif sk == "repetition_penalty":
+            if v > 0 and v != 1:
+                out[sk] = round(v, 4)
+        elif v >= 0:                             # temperature
+            out[sk] = round(v, 4)
+    return out
+
+
 def _read_header(path: str) -> tuple:
     """The slow path behind :func:`header_meta`: open the GGUF and return
-    ``(ClassifiedGguf, general.name)``. Raises when unreadable."""
+    ``(ClassifiedGguf, general.name, sampling)``. Raises when unreadable."""
     from .headerscan import scan_gguf
     kv = scan_gguf(path, include_tensors=False).kv
     c = _classify_meta(kv, basename=os.path.basename(path), path=path)
-    return c, read_string(kv, "general.name")
+    return c, read_string(kv, "general.name"), _read_sampling(kv)
 
 
 def header_meta(path: str) -> dict | None:
-    """``{"arch", "name", "kind", "mtp"}`` from a GGUF's header, or ``None``
-    when the file is missing/unreadable. Unlike :func:`classify_gguf` this is
-    **silent** on failure - registration over a config that references a
+    """``{"arch", "name", "kind", "mtp", "sampling"}`` from a GGUF's header, or
+    ``None`` when the file is missing/unreadable. Unlike :func:`classify_gguf`
+    this is **silent** on failure - registration over a config that references a
     not-yet-pulled file must not spam stderr. A sharded model's configured path
     is its first shard, which carries the full KV block, so a plain read of the
     given path suffices."""
@@ -232,20 +271,35 @@ def header_meta(path: str) -> dict | None:
     disk = _load_header_cache()
     ent = disk.get(ap)
     if (isinstance(ent, dict) and ent.get("mtime") == int(st.st_mtime)
-            and ent.get("size") == st.st_size):
-        meta = {k: ent.get(k) for k in ("arch", "name", "kind", "mtp")}
+            and ent.get("size") == st.st_size and "sampling" in ent):
+        meta = {k: ent.get(k) for k in ("arch", "name", "kind", "mtp",
+                                        "sampling")}
         _HEADER_MEMO[ap] = meta
         return meta
     try:
-        c, name = _read_header(ap)
+        c, name, sampling = _read_header(ap)
     except Exception:
         _HEADER_MEMO[ap] = None                  # unreadable-as-GGUF is stable
         return None
-    meta = {"arch": c.arch, "name": name, "kind": c.kind, "mtp": c.mtp}
+    meta = {"arch": c.arch, "name": name, "kind": c.kind, "mtp": c.mtp,
+            "sampling": sampling}
     _HEADER_MEMO[ap] = meta
     disk[ap] = {"mtime": int(st.st_mtime), "size": st.st_size, **meta}
     _save_header_cache(disk)
     return meta
+
+
+def header_sampling(path) -> dict:
+    """The GGUF's embedded model-card sampling (``general.sampling.*``), mapped
+    to gmlx sampling keys. ``{}`` when absent/unreadable/not-a-local-file."""
+    if not path or str(path).startswith("hf:"):
+        try:
+            from .config import resolve_path
+            path = resolve_path(str(path), [])
+        except Exception:
+            return {}
+    meta = header_meta(str(path))
+    return dict(meta.get("sampling") or {}) if meta else {}
 
 
 def find_mtp_companion(path: str, drafter_arch: str = "deepseek4_mtp_support") -> str | None:
@@ -784,18 +838,48 @@ def _fmt_num(v) -> str:
 
 
 def family_comment(mc: ModelCfg) -> str:
-    """A one-line family summary for a model entry's trailing comment
-    (``qwen3.6: t=1.0 top_p=0.95 top_k=20``); "" when the family is unknown.
-    Documentation only -- detection re-runs from the GGUF header at serve time."""
+    """A one-line sampling summary for a model entry's comment
+    (``qwen3.6: t=1.0 top_p=0.95 top_k=20``): the family base refined by the
+    GGUF's own embedded ``general.sampling.*`` -- the values serve time
+    actually applies. "" when neither source knows anything. Documentation
+    only -- detection re-runs from the GGUF header at serve time."""
     fam = mc.family
-    if not fam or fam == "default":
-        return ""
-    base = _family_profiles.family_base(fam).get("sampling", {})
+    base = (_family_profiles.family_base(fam).get("sampling", {})
+            if fam and fam != "default" else {})
+    hs = header_sampling(mc.path)
+    eff = {**base, **hs}
     short = (("temperature", "t"), ("top_p", "top_p"), ("top_k", "top_k"),
              ("min_p", "min_p"), ("repetition_penalty", "rep"),
              ("presence_penalty", "presence"))
-    parts = [f"{s}={base[k]}" for k, s in short if base.get(k)]
-    return f"{fam}: {' '.join(parts)}" if parts else fam
+    parts = [f"{s}={_fmt_num(eff[k])}" for k, s in short if eff.get(k)]
+    src = (fam if fam and fam != "default" else "") if not hs else (
+        f"{fam} + gguf" if fam and fam != "default" else "gguf")
+    if not src:
+        return ""
+    # `sampling (<src>):` and not `<src>: ...` -- a comment starting with a
+    # bare `word:` reads as a commented-out option key (see
+    # tests/test_discovery.py `_uncomment_hints`).
+    return f"sampling ({src}): {' '.join(parts)}" if parts else f"sampling ({src})"
+
+
+def _rows(rows: list, indent: str = "  ") -> list[str]:
+    """``rows``: ``(keyval_text, comment_text_or_None)``, mixed live and
+    commented-example lines. A LIVE row's comment renders on its own line above
+    the key (no wrapping on narrow terminals, no busy right-hand column);
+    commented example rows keep a trailing aligned comment via :func:`_aligned`
+    (they are reference prose either way)."""
+    out = []
+    commented = [r for r in rows if r[0].startswith("#")]
+    aligned = iter(_aligned(commented, indent=indent))
+    for kv, c in rows:
+        if kv.startswith("#"):
+            out.append(next(aligned))
+        elif c is None:
+            out.append(f"{indent}{kv}")
+        else:
+            out.append(f"{indent}# {c}")
+            out.append(f"{indent}{kv}")
+    return out
 
 
 def _aligned(rows: list, indent: str = "  ", gap: int = 3, cap: int = 40) -> list[str]:
@@ -851,7 +935,7 @@ def _scaffold_server_block(dirs, *, hf_cache, port, token_queue_timeout_s) -> li
         lines.append("    []      # no local dirs; models below resolve from the "
                      "hf cache")
     hf_val = "true" if hf_cache else "false"
-    discovery_rows = [
+    discovery_rows: list = [
         (f"hf_cache: {hf_val}",
          "hf model paths resolve from the local cache, no downloads"),
         ("# budget_gb: 96",
@@ -871,7 +955,7 @@ def _scaffold_server_block(dirs, *, hf_cache, port, token_queue_timeout_s) -> li
             ("# token_queue_timeout_s: 600",
              "abort if no new token received in this time (0 = never, "
              "includes prefill time for first token)"))
-    lines.extend(_aligned(discovery_rows))
+    lines.extend(_rows(discovery_rows))
     lines.append("")
     return lines
 
@@ -906,7 +990,7 @@ def _scaffold_services_block(stt, tts, embeddings, rerank) -> list[str]:
     else:
         svc_rows.append(("# rerank: qwen3-rerank-0.6b",
                          "reranking: Qwen3-Reranker GGUF works out of the box"))
-    lines.extend(_aligned(svc_rows))
+    lines.extend(_rows(svc_rows))
     lines.append("")
     return lines
 
@@ -926,7 +1010,7 @@ def _scaffold_defaults_block(ttl_s, default_model) -> list[str]:
     else:
         defaults_rows.append(("# model: <id>",
                               "fallback model when a request omits `model`"))
-    lines.extend(_aligned(defaults_rows, indent="    "))
+    lines.extend(_rows(defaults_rows, indent="    "))
     lines.append("    # profile: <name>    # global fallback profile (rules + "
                  "per-model settings win over this); rarely")
     lines.append("    #                    # needed -- each model already "
@@ -957,8 +1041,8 @@ def _scaffold_cache_block(disk_cache, disk_cache_gb) -> list[str]:
         gb = 50 if disk_cache_gb is None else disk_cache_gb
         cache_rows.append(
             ("disk:", "SSD tier: persists cache across an idle-unload or restart"))
-        lines.extend(_aligned(cache_rows, indent="    "))
-        lines.extend(_aligned([
+        lines.extend(_rows(cache_rows, indent="    "))
+        lines.extend(_rows([
             ("path: ~/.cache/gmlx/apc", None),
             (f"max_gb: {_fmt_num(gb)}",
              "disk cap per model (worst case: max_gb * resident models)"),
@@ -969,7 +1053,7 @@ def _scaffold_cache_block(disk_cache, disk_cache_gb) -> list[str]:
              "true persists the cache to ~/.cache/gmlx/apc so reuse "
              "survives an idle-unload or restart; a mapping sets "
              "{path, max_gb, ...}"))
-        lines.extend(_aligned(cache_rows, indent="    "))
+        lines.extend(_rows(cache_rows, indent="    "))
     lines.append("")
     return lines
 
@@ -979,10 +1063,11 @@ def _scaffold_profiles_block() -> list[str]:
     lines: list[str] = []
     lines.append("# Sampling. Every model automatically starts from its family's "
                  "model-card")
-    lines.append("# recommended sampling (the trailing comment on each model "
-                 "below; `gmlx profiles`")
-    lines.append("# prints the full table). Built-in intents work on any model "
-                 "with zero config,")
+    lines.append("# recommended sampling, refined by any sampling the GGUF "
+                 "itself embeds (the")
+    lines.append("# comment above each model below; `gmlx profiles` prints the "
+                 "full table).")
+    lines.append("# Built-in intents work on any model with zero config,")
     lines.append("# as the request `model` (`<id>@coding`), a request `profile` "
                  "field, or")
     lines.append("# `run/chat --profile`: @coding @instruct @creative "
@@ -1016,7 +1101,8 @@ def _scaffold_aliases_block(aliases) -> list[str]:
     """aliases: block (real entries, or a commented hint)."""
     lines: list[str] = []
     if aliases:
-        lines.append("aliases:    # friendly request names, listed in /v1/models")
+        lines.append("# Friendly request names, listed in /v1/models")
+        lines.append("aliases:")
         for name, target in aliases.items():
             lines.append(f"  {name}: {target}")
     else:
@@ -1088,19 +1174,24 @@ def _scaffold_models_block(models, dirs) -> list[str]:
                      ".gguf files")
     for mc in sorted(models, key=lambda m: m.id):
         note = family_comment(mc)
-        lines.append(f"  {mc.id}:" + (f"        # {note}" if note else ""))
+        if note:
+            lines.append(f"  # {note}")
+        lines.append(f"  {mc.id}:")
         lines.append(f"    path: {_rel(mc.path, dirs)}")
         if mc.profile:
-            lines.append(f"    profile: {mc.profile}    # pinned default "
-                         "(requests can still switch @intent)")
+            lines.append("    # pinned default (requests can still "
+                         "switch @intent)")
+            lines.append(f"    profile: {mc.profile}")
         if mc.mmproj:
-            lines.append(f"    mmproj: {_rel(mc.mmproj, dirs)}    # VLM companion")
+            lines.append(f"    mmproj: {_rel(mc.mmproj, dirs)}")
         if mc.speculative:
-            lines.append("    speculative: true       # native-head MTP "
-                         "(drafter inside the target GGUF)")
+            lines.append("    # native-head MTP (drafter inside the "
+                         "target GGUF)")
+            lines.append("    speculative: true")
         if mc.stream:
-            lines.append(f"    stream: {mc.stream}    # over-RAM MoE: experts "
-                         "stream from disk, rest stays on GPU")
+            lines.append("    # experts stream from disk (over-RAM MoE); "
+                         "rest of the model + KV on GPU")
+            lines.append(f"    stream: {mc.stream}")
     lines.append("")
     return lines
 
@@ -1112,17 +1203,19 @@ def _scaffold_talk_block(talk) -> list[str]:
     alternates = " | ".join(m for m in PUSH_TO_TALK_MODIFIERS if m != "globe")
     lines: list[str] = []
     if talk:
-        lines.append("talk:                     # voice chat client: `gmlx talk` "
+        lines.append("# Voice chat client: `gmlx talk` "
                      "(wake word -> STT -> chat -> TTS)")
-        lines.append(f"  voice: {talk['voice']}              # kokoro preset or "
-                     "a qwen3-tts speaker name")
-        lines.append(f"  wake_word: \"{talk['wake_word']}\"")
-        lines.append(f"  mode: {talk['mode']}    # wake=say the phrase | "
-                     "vad=just start talking | ptt=space in the terminal | "
-                     "text=typed")
-        modifier = talk.get("push_to_talk_modifier", "globe")
-        lines.append(f"  push_to_talk_modifier: {modifier}    # menu bar "
-                     f"hotkey is <key>+Space: {modifiers}")
+        lines.append("talk:")
+        lines.extend(_rows([
+            (f"voice: {talk['voice']}",
+             "kokoro preset or a qwen3-tts speaker name"),
+            (f"wake_word: \"{talk['wake_word']}\"", None),
+            (f"mode: {talk['mode']}",
+             "wake=say the phrase | vad=just start talking | "
+             "ptt=space in the terminal | text=typed"),
+            (f"push_to_talk_modifier: {talk.get('push_to_talk_modifier', 'globe')}",
+             f"menu bar hotkey is <key>+Space: {modifiers}"),
+        ]))
     else:
         lines.append("# Voice chat client (`gmlx talk`): needs stt + tts above "
                      f"+ `{install_hint('talk')}`")

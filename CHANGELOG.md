@@ -36,8 +36,17 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   retain the reply up to the divergence point (`GMLX_APC_DECODE_CKPT`,
   default 512 generated tokens; `0` off).
 
+### Changed
+
+- Scaffolded config comments now sit on their own line above live keys
+  instead of trailing them (no more wrapped lines on narrow terminals); the
+  redundant mmproj `# VLM companion` comment is gone.
+
 ### Fixed
 
+- Sampling embedded in the GGUF header (`general.sampling.*`) is now
+  honored: it refines the arch-family defaults for both configured models
+  and bare-path runs (profiles, overrides, and explicit flags still win).
 - `gmlx init` / `sync-models` no longer scaffold `speculative: true` for
   models whose architecture has no MTP target class (they failed at load),
   and models too large for RAM get `stream: experts` (MoE) or a `stream:

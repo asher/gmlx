@@ -774,6 +774,15 @@ def resolve_model(
         load = _merge_dict(load, base.get("load", {}))
         chat_template_kwargs = _merge_dict(
             chat_template_kwargs, base.get("chat_template_kwargs", {}))
+        # The GGUF's own embedded model-card sampling (general.sampling.*)
+        # refines the arch-family guess; profiles/overrides still win.
+        from .discovery import header_sampling
+        try:
+            hs = header_sampling(resolve_path(model.path, cfg.model_dirs))
+        except ConfigError:
+            hs = {}
+        if hs:
+            sampling = _merge_dict(sampling, hs)
 
     layers: list[str] = []
     if cfg.defaults.profile:

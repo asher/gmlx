@@ -574,7 +574,8 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=()) -> None:
                 pos += 1
             note = discovery.family_comment(mc)
             if note:
-                models.yaml_add_eol_comment(note, key=mc.id)
+                models.yaml_set_comment_before_after_key(
+                    mc.id, before=note, indent=2)
         # Cache-resident entries need server.hf_cache to resolve from the cache.
         if any(str(mc.path).startswith("hf:") for mc in discovered):
             srv = doc.get("server")
