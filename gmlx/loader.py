@@ -896,6 +896,12 @@ def build_model(config_dict: dict, *, mtp: bool = False):
 
         hy_v3_model.ensure_registered()
         hy_v3_tools.ensure_registered()
+    if mt == "kimi_k3":
+        # mlx-lm ships no kimi_k3 module (llama.cpp PR #26185 arch); same
+        # vendored-registration pattern as minimax_m3.
+        from . import kimi_k3_model
+
+        kimi_k3_model.ensure_registered()
     Model, ModelArgs = _get_classes(config)
     model_args = ModelArgs.from_dict(config)
     model = Model(model_args)
@@ -2394,6 +2400,11 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # gate + selection bias decide top-8 of 192, where bf16 rounding flips
     # near-tie selections.
     "hy_v3": (".mlp.router.gate.weight", ".mlp.router.expert_bias"),
+    # kimi_k3: routing is fp32 (sigmoid top-16-of-896 + correction bias is
+    # near-tie-heavy); the KDA decay/state path and the res-mix scores are
+    # computed fp32 (the vendored cast_predicate pins the same set).
+    "kimi_k3": (".mlp.gate.weight", ".e_score_correction_bias",
+                ".a_folded", ".dt_bias", "_res_score"),
 }
 
 
@@ -2891,7 +2902,9 @@ def load_model(
         # and qwen3_next's gated_delta_update goes through that same module -
         # once a qwen3.5/3.6 hybrid has been loaded in this process, a
         # subsequent qwen3_next load would silently run the wrong (tiled) K->V
-        # mapping. Fail loudly instead.
+        # mapping. Fail loudly instead. (kimi_k3 also dispatches through
+        # gated_delta but needs no guard: its K/V heads are symmetric, and
+        # with Hk == Hv the tiled and grouped K->V mappings are identical.)
         raise RuntimeError(
             "cannot load a qwen3next GGUF after a qwen3.5/3.6 hybrid in the "
             "same process: the qwen3.5 tiled-V runtime patch (already applied) "
