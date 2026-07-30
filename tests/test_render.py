@@ -256,8 +256,8 @@ def test_stream_shrinking_render_clears_leftovers():
     assert "tiny" in _strip(t.text())
 
 
-def test_stream_oversize_block_freezes_to_raw():
-    t = _Term(columns=41, lines=8)   # threshold: >= 6 rendered lines freezes
+def test_stream_oversize_block_scroll_commits_rendered():
+    t = _Term(columns=41, lines=8)   # paint budget: 6 lines; taller commits the top
     r = t.renderer()
     r.feed("```\n")
     for i in range(10):
@@ -269,10 +269,16 @@ def test_stream_oversize_block_freezes_to_raw():
     stripped = _strip(out)
     assert "line 9" in stripped                  # everything still reached the screen
     assert "after" in stripped
-    # once frozen, appends inside the block are raw: no escapes between the
-    # late lines (the next repaint only comes with the "after" block)
-    frozen_part = out.split("line 7", 1)[1].split("line 9", 1)[0]
-    assert "\x1b[" not in frozen_part
+    # The block stays RENDERED past the viewport: no raw fence marker ever
+    # reaches the screen (the write stream repeats tail lines across
+    # repaints; a real terminal overwrites them in place).
+    assert "```" not in stripped
+    for i in range(10):
+        assert f"line {i}" in stripped, i
+    # Live repaints never reach above the committed region: cursor-up spans
+    # stay under the paint budget, so committed lines are final.
+    import re as _re
+    assert all(int(n) <= 6 for n in _re.findall(r"\x1b\[(\d+)A", out))
 
 
 def test_stream_resize_freezes_current_block():

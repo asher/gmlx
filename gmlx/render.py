@@ -424,7 +424,12 @@ class StreamRenderer:
         self._min_repaint = min_repaint_s
         self._buf = BlockBuffer()
         self._painted = 0          # terminal lines the live block occupies
-        self._frozen = False       # oversize/resize: current block appends raw
+        self._committed = 0        # rendered lines of the live block already
+        #                            scroll-committed: a block taller than the
+        #                            viewport emits its top permanently (it
+        #                            scrolls off rendered) and live-paints only
+        #                            the last screenful
+        self._frozen = False       # resized mid-block: appends raw to block end
         self._raw_emitted = 0      # chars of the current block already raw-written
         self._last_paint = 0.0
         self._width = None
@@ -456,8 +461,9 @@ class StreamRenderer:
             self._reset_block()
             return
         if tail.strip():
-            self._repaint(self._render(tail))
+            self._repaint(self._render(tail)[self._committed :])
         self._painted = 0
+        self._committed = 0
 
     # -- internals ----------------------------------------------------------------
 
@@ -474,10 +480,11 @@ class StreamRenderer:
             self._reset_block()
             return
         if src.strip():
-            self._repaint(self._render(src))
+            self._repaint(self._render(src)[self._committed :])
             self._w("\n")
         self._painted = 0
         self._raw_emitted = 0
+        self._committed = 0
 
     def _paint_live(self) -> None:
         cur = self._buf.current
@@ -497,9 +504,18 @@ class StreamRenderer:
             self._freeze(cur)
             return
         self._width = width
-        lines = self._render(cur)
-        if len(lines) >= max(4, size.lines - 2):
-            self._freeze(cur)
+        lines = self._render(cur)[self._committed :]
+        budget = max(4, size.lines - 2)
+        if len(lines) >= budget:
+            # Taller than the viewport: rows above the screen edge cannot be
+            # repainted in place. Commit everything but the last screenful
+            # permanently - it scrolls into scrollback fully rendered - and
+            # keep only the tail live. Rendered prefixes are append-stable
+            # for fences, paragraphs and lists (greedy wrap), so committed
+            # lines never need rewriting.
+            self._committed += len(lines) - (budget - 1)
+            self._repaint(lines)
+            self._painted = budget - 1
             return
         self._repaint(lines)
 
@@ -517,12 +533,18 @@ class StreamRenderer:
         self._painted = len(lines)
 
     def _freeze(self, cur: str) -> None:
-        """Oversize or resized mid-block: swap the painted render for the raw
-        source and append-only from here to the end of this block."""
-        head, _, partial = cur.rpartition("\n")
-        self._repaint(head.split("\n") if head else [])
-        if partial:
-            self._w(partial)  # stays open; later appends continue the line
+        """Resized mid-block: the painted region's geometry no longer matches
+        the screen, so swap it for the raw source and append-only to the end
+        of this block. With part of the block already scroll-committed the
+        painted tail just stays as-is (stale width) and the stream continues
+        raw below it."""
+        if self._committed:
+            self._w("\n")
+        else:
+            head, _, partial = cur.rpartition("\n")
+            self._repaint(head.split("\n") if head else [])
+            if partial:
+                self._w(partial)  # stays open; later appends continue the line
         self._frozen = True
         self._raw_emitted = len(cur)
         self._painted = 0
@@ -531,4 +553,5 @@ class StreamRenderer:
         self._frozen = False
         self._raw_emitted = 0
         self._painted = 0
+        self._committed = 0
         self._width = None

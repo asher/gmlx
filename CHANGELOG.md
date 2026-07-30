@@ -48,6 +48,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Chat markdown rendering no longer reverts a block to raw text when it
+  grows taller than the terminal: the rendered top scrolls into scrollback
+  and only the last screenful stays live-repainted, so long fenced code
+  blocks keep their formatting end to end.
 - The decode-arena reclaimable-RAM estimate now counts the whole
   file-backed page cache (droppable without swap), not just the inactive
   queue - a machine full of hot GGUF cache no longer clamps
