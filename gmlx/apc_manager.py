@@ -259,6 +259,10 @@ class GmlxAPCManager(_apc.APCManager):
             _flush_pending(force=True)
             if allow_disk and disk_blocks:
                 try:
+                    # The shard crosses to the disk writer thread; hand it
+                    # evaluated arrays only (loop paths that skip the slab
+                    # copies leave these lazy).
+                    mx.eval(list(layer_keys) + list(layer_values))
                     self.disk.save_layer_major_blocks(
                         disk_blocks, layer_keys, layer_values, self.block_size
                     )
