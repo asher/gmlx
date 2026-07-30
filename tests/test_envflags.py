@@ -295,8 +295,6 @@ def test_gdn_zba_default_off_and_opt_in(monkeypatch):
 
 _DSV32_KILL_SITES = [
     # (env name, patch fn, ClassPatch global, patched class)
-    ("GMLX_DSV32_MASK_DECODE", "_patch_dsv32_mask_decode",
-     "_MASK_DECODE_PATCH", "DeepseekV32Attention"),
     ("GMLX_DSV32_INDEXER_ROPE", "_patch_dsv32_indexer_rope", None, None),
     ("GMLX_DSV32_INDEXER_FP32", "_patch_dsv32_indexer_fp32",
      "_INDEXER_FP32_PATCH", "Indexer"),
@@ -331,6 +329,28 @@ def test_dsv32_kill_switches(monkeypatch, name, fn, flag, clsname):
             cls.__call__ = saved_call
         if cp:
             cp.installed = saved_installed
+
+
+def test_dsv32_mask_decode_opt_in(monkeypatch):
+    # Inverted default: stock gather decode by default, mask path opt-in.
+    patches = importlib.import_module("gmlx.dsv32_patches")
+    dsv32 = importlib.import_module("mlx_lm.models.deepseek_v32")
+    cp = patches._MASK_DECODE_PATCH
+    saved_call = dsv32.DeepseekV32Attention.__call__
+    saved_installed = cp.installed
+    cp.installed = False
+    try:
+        # default (unset): returns before touching the model
+        monkeypatch.delenv("GMLX_DSV32_MASK_DECODE", raising=False)
+        patches._patch_dsv32_mask_decode(_BoomModules())
+        assert cp.installed is False
+        # opt-in: reaches the model walk
+        monkeypatch.setenv("GMLX_DSV32_MASK_DECODE", "1")
+        with pytest.raises(_Boom):
+            patches._patch_dsv32_mask_decode(_BoomModules())
+    finally:
+        dsv32.DeepseekV32Attention.__call__ = saved_call
+        cp.installed = saved_installed
 
 
 def test_dsv32_sparse_opt_in(monkeypatch):

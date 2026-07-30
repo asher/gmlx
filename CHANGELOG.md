@@ -6,6 +6,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- glm-dsa/DeepSeek-V3.2 sparse decode uses the stock top-k gather again
+  (O(index_topk) per step); the mask-path workaround is now opt-in via
+  `GMLX_DSV32_MASK_DECODE=1`.
+
 ## [0.1.4] - 2026-07-27
 
 ### Added

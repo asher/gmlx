@@ -16,23 +16,23 @@ from .envflags import env_bool, env_int
 from .patching import ClassPatch
 
 
-# DeepSeek-V3.2 / glm-dsa: mask-path decode attention (correctness patch)
+# DeepSeek-V3.2 / glm-dsa: mask-path decode attention (opt-in mitigation)
 #
 # mlx-lm's DeepseekV32Attention applies the DSA "lightning indexer" top-k by
 # gathering the selected keys on the L==1 decode step, but by masking full keys
-# on the L>1 prefill step. The gather is mathematically equivalent to the mask
-# (verified ~bit-for-bit at small scale) yet corrupts the decode attention
-# *distribution* once context exceeds index_topk (~2048): the argmax stays right
-# (greedy looks fine) while the tail is wrong, so temperature/top-p sampling
-# degenerates to token-garbage at depth. llama.cpp and mlx-lm's own prefill both
-# take the mask path and stay coherent.
+# on the L>1 prefill step. An early stack corrupted the decode distribution on
+# the gather path past index_topk depth, and this patch (mask every L, never
+# gather) shipped as the fix. Re-tested 2026-07: the corruption does not
+# reproduce - gathers are bit-exact to S=32k on synthetic and real modules on
+# both devices, and a live GLM-5.2 A/B at depth against a bit-identical replay
+# control shows only bf16-rounding-scale divergence between the two paths. The
+# stock gather is therefore the default again: it keeps decode attention
+# O(index_topk) instead of O(context).
 #
-# This routes the L==1 decode step through that same mask path. The body is the
-# exact upstream forward with only the `if topk_indices is not None` block changed
-# to always mask (never gather). Trade-off: decode attention becomes O(context)
-# rather than O(index_topk) - negligible for over-RAM streaming (decode is
-# disk-bound) but it forfeits DSA's sparse-decode speedup for long-context in-RAM
-# use. Kill with GMLX_DSV32_MASK_DECODE=0.
+# The mask path is retained as an opt-in mitigation (GMLX_DSV32_MASK_DECODE=1)
+# in case a gather-side regression ever resurfaces. The body is the exact
+# upstream forward with only the `if topk_indices is not None` block changed
+# to always mask.
 _MASK_DECODE_PATCH = ClassPatch()
 
 
@@ -117,8 +117,9 @@ def _patch_dsv32_mask_decode(model) -> None:
     attention module in ``model``. Installs the class-level dispatch once (a no-op
     for any instance without the per-instance ``_dsv32_mask_decode`` flag, so
     unrelated loads in the same process are untouched) and flags this model's
-    instances. Kill with GMLX_DSV32_MASK_DECODE=0."""
-    if not env_bool("GMLX_DSV32_MASK_DECODE", True):
+    instances. Off by default (stock gather decode); opt in with
+    GMLX_DSV32_MASK_DECODE=1."""
+    if not env_bool("GMLX_DSV32_MASK_DECODE", False):
         return
     from mlx_lm.models.deepseek_v32 import DeepseekV32Attention
 
