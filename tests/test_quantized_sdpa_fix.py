@@ -186,7 +186,7 @@ def test_install_idempotent_and_killable(monkeypatch):
 
 needs_kq = pytest.mark.skipif(
     qf._kq_q8_route() is None,
-    reason="mlx_kquant build without q8+starts sdpa_decode_gqa")
+    reason="q8+starts sdpa_decode_gqa unavailable (build or cpu device)")
 
 
 def _spy_wrapper():

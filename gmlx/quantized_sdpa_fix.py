@@ -79,6 +79,10 @@ def _kq_q8_route():
         import mlx_kquant as kq
     except ImportError:
         return None
+    # Metal-only kernel: on a cpu default device (--cpu runs, no-Metal
+    # hosts) the stock path is correct, so the route declines.
+    if mx.default_device().type != mx.DeviceType.gpu:
+        return None
     fn = getattr(kq, "sdpa_decode_gqa", None)
     doc = (getattr(fn, "__doc__", "") or "") if fn is not None else ""
     if "k_scales" not in doc or "starts" not in doc:
