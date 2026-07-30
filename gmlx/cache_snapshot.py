@@ -680,6 +680,11 @@ def ckpt_store(
         if b_full > 0 and kv_caches:
             lk = [c.keys[..., :b_full, :] for c in kv_caches]
             lv = [c.values[..., :b_full, :] for c in kv_caches]
+            # Evaluate before storing: the shard payload crosses to the
+            # disk writer thread, and evaluating arrays that share
+            # unevaluated inputs from two threads is undefined in mlx.
+            import mlx.core as mx
+            mx.eval(lk + lv)
             if store_blocks is not None:
                 main_blocks = store_blocks(
                     ids[:b_full], lk, lv, extra_hash=salted)
@@ -709,16 +714,19 @@ def ckpt_store(
             keep, _w, _off, L = rot_meta
             canon_ids = ids[:keep] + ids[p - (L - keep):p]
             bsalt = bounded_extra_hash(extra_hash, p)
+            canon_k = [cw[0] for cw in canon]
+            canon_v = [cw[1] for cw in canon]
+            # Same writer-thread rule as the main chain above.
+            import mlx.core as mx
+            mx.eval(canon_k + canon_v)
             if store_blocks is not None:
                 # Memory-only: the position salt makes window shards
                 # undedupable on disk.
                 bounded_blocks = store_blocks(
-                    canon_ids, [cw[0] for cw in canon],
-                    [cw[1] for cw in canon], extra_hash=bsalt, disk=False)
+                    canon_ids, canon_k, canon_v, extra_hash=bsalt, disk=False)
             else:
                 bounded_blocks = manager.store_kv_blocks(
-                    canon_ids, [cw[0] for cw in canon],
-                    [cw[1] for cw in canon], extra_hash=bsalt)
+                    canon_ids, canon_k, canon_v, extra_hash=bsalt)
             if len(bounded_blocks) * bs < L:
                 _log.info(
                     "APC ckpt store: window chain short (%d/%d blocks); "
