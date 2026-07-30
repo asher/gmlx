@@ -128,6 +128,12 @@ GGUF_ARCH_TO_MODEL_TYPE = {
     # per-head qk-norm, plain rope. Native MTP/NextN block past the trunk.
     # Model class vendored from mlx-lm PR #1485.
     "hy_v3": "hy_v3",
+    # Moonshot Kimi-K3 (2.8T-A50B): hybrid KDA (linear, per-channel decay) +
+    # nope-only MLA layers from the per-layer head_count_kv schedule, latent
+    # 896-expert sigmoid MoE behind down/up projections, situ activation,
+    # cross-layer attention residuals, MLA output gate. No rope anywhere, no
+    # MTP. Model class vendored (llama.cpp PR 26185; no mlx-lm class).
+    "kimi-k3": "kimi_k3",
     # IBM Granite 4.x hybrid (H-Micro/H-Tiny/H-Small): alternating Mamba2 +
     # attention layers, softmax MoE + fused-input shared MLP, granite multipliers.
     "granitehybrid": "granitemoehybrid",
@@ -2429,6 +2435,131 @@ def _synth_glm_moe_dsa(meta, shapes, config: dict) -> None:
     config["rope_parameters"] = rope_params
 
 
+# kimi-k3 (Moonshot Kimi-K3 2.8T-A50B; hybrid KDA + nope-only MLA, latent MoE)
+
+def _synth_kimi_k3(meta, shapes, config: dict) -> None:
+    """Synthesize a kimi_k3 config from a 'kimi-k3'-arch GGUF (llama.cpp PR
+    26185 + unsloth PR 48 conversion).
+
+    Hybrid layer schedule from the per-layer head_count_kv array (0 marks a
+    KDA/recurrent layer). MLA is nope-only (no rope fields at all). Routed
+    experts run at routed_expert_hidden_size behind down/up latent projections;
+    the router reads the full-width input. The situ activation replaces SwiGLU
+    everywhere, and cross-layer attention residuals mix banked checkpoints
+    every attn_res_block_size layers.
+
+    The K3-specific keys are REQUIRED (unsloth PR 48 semantics): a silent
+    default on any of them loads cleanly and produces garbage.
+    """
+    arch = "kimi-k3"
+    config["model_type"] = "kimi_k3"
+
+    # kimi_k3 has no single head_dim; the universal default set it to
+    # key_length (= kv_lora + qk_rope), which is not a head dim. Drop it.
+    config.pop("head_dim", None)
+
+    # Layer schedule. A scalar head_count_kv means a mis-converted file - the
+    # KDA/MLA split would be unrecoverable - so fail loud rather than guess.
+    n_layers = config["num_hidden_layers"]
+    kv_arr = _read_int_array(meta, f"{arch}.attention.head_count_kv")
+    if kv_arr is None or len(kv_arr) < n_layers:
+        raise ValueError(
+            f"kimi-k3 synth: {arch}.attention.head_count_kv must be a "
+            f"per-layer array ({n_layers} entries; 0 marks a KDA layer); "
+            f"got {kv_arr!r}. Re-convert with the PR-26185 converter.")
+    config["layer_types"] = [
+        "linear_attention" if v == 0 else "full_attention"
+        for v in kv_arr[:n_layers]]
+    # The universal extractor took element 0 of the array, which is 0
+    # whenever layer 0 is KDA - fix to the first MLA layer's value (1, MQA).
+    nonzero = [v for v in kv_arr if v]
+    if not nonzero:
+        raise ValueError("kimi-k3 synth: no full-attention layers in "
+                         f"{arch}.attention.head_count_kv")
+    config["num_key_value_heads"] = nonzero[0]
+
+    # KDA
+    config["kda_head_dim"] = _require(
+        _read_int(meta, f"{arch}.kda.head_dim"),
+        arch=arch, gguf_field=f"{arch}.kda.head_dim")
+    config["ssm_conv_kernel"] = _require(
+        _read_int(meta, f"{arch}.ssm.conv_kernel"),
+        arch=arch, gguf_field=f"{arch}.ssm.conv_kernel")
+    # Optional: absent means the kimi-linear softplus decay form.
+    lb = _read_float(meta, f"{arch}.kda.gate_lower_bound")
+    if lb is not None:
+        config["kda_gate_lower_bound"] = lb
+
+    # MLA (nope-only; qk_rope_head_dim still sizes the un-roped k_pe slice).
+    q_lora = _read_int(meta, f"{arch}.attention.q_lora_rank")
+    if q_lora is not None:
+        config["q_lora_rank"] = q_lora
+    config["kv_lora_rank"] = _require(
+        _read_int(meta, f"{arch}.attention.kv_lora_rank"),
+        arch=arch, gguf_field=f"{arch}.attention.kv_lora_rank")
+    qk_rope = _require(
+        _read_int(meta, f"{arch}.rope.dimension_count"),
+        arch=arch, gguf_field=f"{arch}.rope.dimension_count")
+    config["qk_rope_head_dim"] = qk_rope
+
+    # qk_nope_head_dim / v_head_dim from the per-head MLA tensor shapes, like
+    # deepseek2 - but blk.0 is a KDA layer, so probe the first MLA layer.
+    num_heads = config["num_attention_heads"]
+    mla_layers = [i for i, t in enumerate(config["layer_types"])
+                  if t == "full_attention"]
+    q_b = v_b = None
+    for i in mla_layers:
+        q_b = shapes.get(f"blk.{i}.attn_q_b.weight")
+        v_b = shapes.get(f"blk.{i}.attn_v_b.weight")
+        if q_b is not None and v_b is not None:
+            break
+    if q_b is None or v_b is None:
+        raise ValueError(
+            "kimi-k3 synth: need attn_q_b.weight + attn_v_b.weight on an MLA "
+            f"layer (probed {mla_layers[:4]}...) to derive the MLA head dims.")
+    q_head_dim = q_b[1] // num_heads
+    config["qk_nope_head_dim"] = q_head_dim - qk_rope
+    config["v_head_dim"] = v_b[1]
+
+    # MoE (sigmoid-gated fine-grained; latent routed experts)
+    v3 = _read_v3_moe(meta, shapes, arch)
+    if not v3["sigmoid"]:
+        raise NotImplementedError(
+            "kimi-k3 synth: expert_gating_func != 2 (sigmoid); no such K3 "
+            "conversion exists - re-convert with the PR-26185 converter.")
+    config["num_experts"] = v3["n_experts"]
+    config["num_experts_per_tok"] = v3["n_used"]
+    config["moe_intermediate_size"] = v3["moe_ffn"]
+    config["num_shared_experts"] = v3["n_shared"]
+    config["first_k_dense_replace"] = (
+        _read_int(meta, f"{arch}.leading_dense_block_count") or 0)
+    scale = _read_float(meta, f"{arch}.expert_weights_scale")
+    config["routed_scaling_factor"] = scale if scale is not None else 1.0
+    norm = _read_bool(meta, f"{arch}.expert_weights_norm")
+    config["moe_renormalize"] = True if norm is None else norm
+    config["routed_expert_hidden_size"] = _require(
+        _read_int(meta, f"{arch}.expert_latent_length"),
+        arch=arch, gguf_field=f"{arch}.expert_latent_length")
+    first_moe = config["first_k_dense_replace"]
+    config["has_routed_norm"] = _has_tensor(
+        shapes, f"blk.{first_moe}.ffn_routed_norm.weight")
+
+    # situ activation + cross-layer attention residuals
+    config["situ_beta"] = _require(
+        _read_float(meta, f"{arch}.activation.situ_beta"),
+        arch=arch, gguf_field=f"{arch}.activation.situ_beta")
+    config["situ_linear_beta"] = _require(
+        _read_float(meta, f"{arch}.activation.situ_linear_beta"),
+        arch=arch, gguf_field=f"{arch}.activation.situ_linear_beta")
+    config["attn_res_block_size"] = _require(
+        _read_int(meta, f"{arch}.attn_res.block_size"),
+        arch=arch, gguf_field=f"{arch}.attn_res.block_size")
+
+    vocab = _read_int(meta, f"{arch}.vocab_size")
+    if vocab is not None:
+        config["vocab_size"] = vocab
+
+
 # deepseek4 (DeepSeek V4 Flash 256x8.4B)
 
 def _synth_deepseek4(meta, shapes, config: dict) -> None:
@@ -2748,6 +2879,7 @@ _SYNTH = {
     "nemotron_h_moe": _synth_nemotron_h_moe,
     "deepseek2": _synth_deepseek2,
     "glm-dsa": _synth_glm_moe_dsa,
+    "kimi-k3": _synth_kimi_k3,
     "deepseek4": _synth_deepseek4,
     "glm4moe": _synth_glm4moe,
     "gpt-oss": _synth_gpt_oss,

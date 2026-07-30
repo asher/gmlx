@@ -715,6 +715,131 @@ def test_hy_v3_no_shared_expert_when_absent():
     assert c["num_shared_experts"] == 0
 
 
+def _kimi_k3_meta() -> dict:
+    arch = "kimi-k3"
+    m = _base_meta(arch)
+    m[f"{arch}.block_count"] = 4
+    # Per-layer schedule: 0 marks a KDA layer (layers 0,2), else MLA (1,3).
+    m[f"{arch}.attention.head_count_kv"] = [0, 1, 0, 1]
+    m[f"{arch}.attention.key_length"] = 40          # kv_lora + qk_rope
+    # KDA
+    m[f"{arch}.kda.head_dim"] = 16
+    m[f"{arch}.kda.gate_lower_bound"] = -5.0
+    m[f"{arch}.ssm.conv_kernel"] = 4
+    # MLA (nope-only)
+    m[f"{arch}.attention.q_lora_rank"] = 32
+    m[f"{arch}.attention.kv_lora_rank"] = 32
+    m[f"{arch}.rope.dimension_count"] = 8
+    # MoE (latent, sigmoid)
+    m[f"{arch}.expert_count"] = 4
+    m[f"{arch}.expert_used_count"] = 2
+    m[f"{arch}.expert_feed_forward_length"] = 24
+    m[f"{arch}.expert_shared_count"] = 1
+    m[f"{arch}.expert_weights_scale"] = 1.0
+    m[f"{arch}.expert_weights_norm"] = True
+    m[f"{arch}.expert_gating_func"] = 2
+    m[f"{arch}.expert_latent_length"] = 32
+    m[f"{arch}.leading_dense_block_count"] = 1
+    # situ + cross-layer attention residuals
+    m[f"{arch}.activation.situ_beta"] = 4.0
+    m[f"{arch}.activation.situ_linear_beta"] = 25.0
+    m[f"{arch}.attn_res.block_size"] = 2
+    m[f"{arch}.vocab_size"] = VOCAB
+    return m
+
+
+# MLA head-dim shapes live on the first MLA layer (blk.1) - blk.0 is KDA and
+# has none (the probe must walk, not read blk.0 like deepseek2 does).
+# GGUF-native order: attn_q_b [q_lora, heads*q_head_dim], attn_v_b
+# [kv_lora, v_head_dim, heads]. q_head_dim = nope 16 + rope 8 = 24.
+_KIMI_K3_SHAPES = {
+    "output.weight": [64, VOCAB],
+    "blk.1.attn_q_b.weight": [32, 96],
+    "blk.1.attn_v_b.weight": [32, 16, 4],
+    "blk.1.ffn_routed_norm.weight": [32],
+}
+
+
+def test_kimi_k3_synth_fields():
+    c = synthesize_config(_kimi_k3_meta(), tensor_shapes=_KIMI_K3_SHAPES)
+    assert c["model_type"] == "kimi_k3"
+    assert c["layer_types"] == ["linear_attention", "full_attention",
+                                "linear_attention", "full_attention"]
+    assert c["num_key_value_heads"] == 1          # first MLA layer, not arr[0]
+    assert "head_dim" not in c                    # key_length is not a head dim
+    assert c["kda_head_dim"] == 16
+    assert c["ssm_conv_kernel"] == 4
+    assert c["kda_gate_lower_bound"] == -5.0
+    assert c["q_lora_rank"] == 32
+    assert c["kv_lora_rank"] == 32
+    assert c["qk_rope_head_dim"] == 8
+    assert c["qk_nope_head_dim"] == 16            # from blk.1 shapes
+    assert c["v_head_dim"] == 16
+    assert c["num_experts"] == 4 and c["num_experts_per_tok"] == 2
+    assert c["moe_intermediate_size"] == 24
+    assert c["num_shared_experts"] == 1
+    assert c["first_k_dense_replace"] == 1
+    assert c["routed_scaling_factor"] == 1.0
+    assert c["moe_renormalize"] is True
+    assert c["routed_expert_hidden_size"] == 32
+    assert c["has_routed_norm"] is True           # blk.1 ffn_routed_norm
+    assert c["situ_beta"] == 4.0
+    assert c["situ_linear_beta"] == 25.0
+    assert c["attn_res_block_size"] == 2
+    assert c["tie_word_embeddings"] is False
+    assert "rope_scaling" not in c                # nope-only: no rope block
+
+
+@pytest.mark.parametrize("key", [
+    "kimi-k3.expert_latent_length",
+    "kimi-k3.attn_res.block_size",
+    "kimi-k3.activation.situ_beta",
+    "kimi-k3.activation.situ_linear_beta",
+    "kimi-k3.kda.head_dim",
+    "kimi-k3.ssm.conv_kernel",
+])
+def test_kimi_k3_required_keys_fail_loud(key):
+    # unsloth PR 48 semantics: these keys silently defaulting produces a model
+    # that loads cleanly and generates garbage - they must be required.
+    m = _kimi_k3_meta()
+    del m[key]
+    with pytest.raises(ValueError, match=key.rsplit(".", 1)[-1]):
+        synthesize_config(m, tensor_shapes=_KIMI_K3_SHAPES)
+
+
+def test_kimi_k3_scalar_head_count_kv_rejected():
+    # A scalar head_count_kv loses the KDA/MLA schedule - mis-converted file.
+    m = _kimi_k3_meta()
+    m["kimi-k3.attention.head_count_kv"] = 1
+    with pytest.raises(ValueError, match="per-layer array"):
+        synthesize_config(m, tensor_shapes=_KIMI_K3_SHAPES)
+
+
+def test_kimi_k3_mla_shapes_probe_walks_past_kda_layers():
+    # Shapes only on blk.3 (the other MLA layer): the probe must find them.
+    shapes = {
+        "output.weight": [64, VOCAB],
+        "blk.3.attn_q_b.weight": [32, 96],
+        "blk.3.attn_v_b.weight": [32, 16, 4],
+    }
+    c = synthesize_config(_kimi_k3_meta(), tensor_shapes=shapes)
+    assert c["qk_nope_head_dim"] == 16 and c["v_head_dim"] == 16
+    assert c["has_routed_norm"] is False
+    # No MLA-layer shapes at all -> actionable error, not a KeyError.
+    with pytest.raises(ValueError, match="MLA"):
+        synthesize_config(_kimi_k3_meta(),
+                          tensor_shapes={"output.weight": [64, VOCAB]})
+
+
+def test_kimi_k3_optional_gate_lower_bound():
+    # Absent gate_lower_bound = kimi-linear softplus decay form; the key must
+    # simply not be emitted (the model treats None/absent as softplus).
+    m = _kimi_k3_meta()
+    del m["kimi-k3.kda.gate_lower_bound"]
+    c = synthesize_config(m, tensor_shapes=_KIMI_K3_SHAPES)
+    assert "kda_gate_lower_bound" not in c
+
+
 def _granitehybrid_meta() -> dict:
     arch = "granitehybrid"
     m = _base_meta(arch)
