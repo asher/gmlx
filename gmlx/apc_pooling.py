@@ -111,6 +111,8 @@ def install_pooling_apc_support() -> None:
         return out
 
     def snap_entry(self, c, prefix, arrays, metadata):
+        # Runs on the disk writer thread: enqueue paths must hand over
+        # cloned, evaluated entries only.
         if not isinstance(c, PoolingCache):
             before = set(arrays)
             ok = stock_snap(self, c, prefix, arrays, metadata)
