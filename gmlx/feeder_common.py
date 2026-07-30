@@ -54,6 +54,35 @@ def verify_zero_copy(li: int, entries, fds: dict[str, int]) -> None:
             )
 
 
+def slot_itemsize(nbytes_max: int, last_dims) -> int:
+    """Arena granule for a slot: 1 (plain uint8) whenever the slot fits
+    int32 shape dims; past that, the widest unsigned itemsize that divides
+    every layer's wire row length (so the byte view can land back on each
+    geometry) and brings the element count back under int32. Returns 0
+    when no granule works (caller refuses)."""
+    if nbytes_max <= 2**31 - 1:
+        return 1
+    for w in (8, 4, 2):
+        if any(d % w for d in last_dims):
+            continue
+        if -(-nbytes_max // w) <= 2**31 - 1:
+            return w
+    return 0
+
+
+def slot_view(arr, nbytes: int, shape):
+    """First ``nbytes`` of a flat arena array as a zero-copy uint8 view of
+    ``shape``. Wide arenas (uint16/32/64, from ``slot_itemsize``) slice at
+    their granule and view back - still buffer-sharing."""
+    import mlx.core as mx
+
+    w = arr.itemsize
+    if w == 1:
+        return arr[:nbytes].reshape(shape)
+    wide = arr[: nbytes // w].reshape(tuple(shape[:-1]) + (shape[-1] // w,))
+    return mx.view(wide, mx.uint8)
+
+
 @contextmanager
 def swapped_weights(entry: dict, views: dict):
     """Swap each module's expert weight to ``views[kind]`` for the call body,

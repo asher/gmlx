@@ -31,7 +31,15 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 
-from .feeder_common import ATTRS, KINDS, read_range, swapped_weights, verify_zero_copy
+from .feeder_common import (
+    ATTRS,
+    KINDS,
+    read_range,
+    slot_itemsize,
+    slot_view,
+    swapped_weights,
+    verify_zero_copy,
+)
 
 # Per-range read granularity: large enough for sequential SSD clustering,
 # small enough that one layer's three stacks spread across the pool.
@@ -77,13 +85,23 @@ class PrefillFeeder:
                     max_bytes[kind] = max(max_bytes.get(kind, 0), nbytes)
         if not self._layers:
             raise RuntimeError("no layers with matching gate/up/down stacks")
-        # Layer slots are flat 1-D uint8 arenas; a stack past int32 elements
-        # cannot be allocated or viewed that way (mx shape dims are int32).
-        big = max(max_bytes.values())
-        if big > 2**31 - 1:
-            raise RuntimeError(
-                f"largest expert stack ({big / 1e9:.1f} GB) exceeds the 2 GiB "
-                "layer-slot limit")
+        # Layer slots are flat arenas; a stack past int32 uint8 elements
+        # (mx shape dims are int32) is held at a wider granule and viewed
+        # back per layer (slot_itemsize / slot_view).
+        self._slot_isz: dict[str, int] = {}
+        for kind, n in max_bytes.items():
+            last_dims = [
+                getattr(mod, ATTRS[kind]).weight.shape[-1]
+                for entry in self._layers.values()
+                for k2, (mod, *_) in entry.items()
+                if k2 == kind
+            ]
+            w = slot_itemsize(n, last_dims)
+            if w == 0:
+                raise RuntimeError(
+                    f"{kind} stack ({n / 1e9:.1f} GB) fits no layer-slot "
+                    "granule (int32 shape limit)")
+            self._slot_isz[kind] = w
 
         self._fds: dict[str, int] = {}
         try:
@@ -101,7 +119,14 @@ class PrefillFeeder:
         # of its own geometry (mixed-codec quants - e.g. Q5_K_M's q6_k down
         # stacks on some layers - make per-kind shapes non-uniform).
         self._slots = [
-            {k: kq.arena_alloc([n]) for k, n in max_bytes.items()} for _ in (0, 1)
+            {
+                k: kq.arena_alloc(
+                    [-(-n // self._slot_isz[k])], itemsize=self._slot_isz[k])
+                if self._slot_isz[k] > 1
+                else kq.arena_alloc([n])
+                for k, n in max_bytes.items()
+            }
+            for _ in (0, 1)
         ]
         self.slot_bytes = sum(a.nbytes for a, _ in self._slots[0].values())
         self._views: dict[tuple[int, int], dict] = {}  # (li, parity) -> kind -> view
@@ -175,7 +200,7 @@ class PrefillFeeder:
             views = {}
             for kind, (mod, _, _, nbytes) in entry.items():
                 shape = getattr(mod, ATTRS[kind]).weight.shape
-                views[kind] = slot[kind][0][:nbytes].reshape(shape)
+                views[kind] = slot_view(slot[kind][0], nbytes, shape)
             self._views[(li, self._slot_of[li])] = views
         with swapped_weights(entry, views):
             yield
