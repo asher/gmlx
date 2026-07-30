@@ -35,7 +35,7 @@ jobs:
           pip install "mlx==0.31.2"
           # 0.3.7 is the first release with a cp314 wheel; below it the 3.14 job
           # compiles the Metal extension from sdist.
-          pip install "mlx-kquant>=0.3.7"
+          pip install "mlx-kquant>=0.3.8"
           # `assistant` pulls the MCP SDK: without it the stdio tool-server
           # tests (env isolation especially) importorskip themselves away.
           pip install -e ".[vlm,chat,assistant]" pytest httpx build
