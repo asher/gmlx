@@ -110,6 +110,25 @@ O200K_PATTERN = (
     r"\s+"
 )
 
+# Kimi K2/K3 word-split, verbatim from tokenization_kimi.py (llama.cpp ports
+# the same pattern as the hand-coded unicode_regex_split_custom_kimi_k2).
+# o200k-shaped, plus: Han runs are isolated as their own pieces and excluded
+# from the letter clauses via `&&[^\p{Han}]` class intersection - supported by
+# the tokenizers engine (Oniguruma) and verified piecewise against a
+# regex-module V1 reference on mixed Han/Latin/marks/digit corpora.
+KIMI_K2_PATTERN = (
+    r"[\p{Han}]+|"
+    r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]*"
+    r"[\p{Ll}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|"
+    r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]+"
+    r"[\p{Ll}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?|"
+    r"\p{N}{1,3}|"
+    r" ?[^\s\p{L}\p{N}]+[\r\n]*|"
+    r"\s*[\r\n]+|"
+    r"\s+(?!\S)|"
+    r"\s+"
+)
+
 # DeepSeek-V3 family word-split: llama.cpp applies these three regexes
 # sequentially (each further splits the previous pass's pieces), verbatim
 # from PRE_TYPE_DEEPSEEK3_LLM (llama-vocab.cpp:318-325; the same case also
@@ -141,6 +160,11 @@ _PATTERN_BY_PRE = {
     "deepseek-v3": _DEEPSEEK3_PATTERNS,
     "joyai-llm": _DEEPSEEK3_PATTERNS,
     "hunyuan-dense": _DEEPSEEK3_PATTERNS,
+    # Kimi K2 and K3 GGUFs both ship pre='kimi-k2' (tiktoken vocab; the
+    # converter synthesizes merges from the rank order). Before this entry the
+    # pre fell back to the single-digit clause - over-splitting numbers and
+    # gluing Han runs to Latin words.
+    "kimi-k2": KIMI_K2_PATTERN,
 }
 
 
@@ -584,6 +608,17 @@ def _infer_turn_end_eos(
     suffix = rendered[pos + len("GGUF_SENTINEL"):]
     if not suffix:
         return []
+
+    # If the template already terminates the turn with the primary EOS, the
+    # heuristic has nothing to add - and adopting whatever control token comes
+    # first would be wrong. Kimi K3 is the motivating case: the suffix is
+    # <|close|>response<|sep|><|close|>message<|sep|><|end_of_msg|>, eos is
+    # <|end_of_msg|>, and <|close|> also closes the think section mid-turn, so
+    # adopting it would stop generation at end-of-thinking.
+    if eos_id is not None and 0 <= eos_id < len(tokens):
+        eos_str = tokens[eos_id]
+        if eos_str and eos_str in suffix:
+            return []
 
     extra: list[int] = []
     if token_types is not None:

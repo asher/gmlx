@@ -173,6 +173,75 @@ def test_deepseek3_pre_is_multi_regex_sequence():
         assert tok.decode(ids, skip_special_tokens=False) == text
 
 
+def test_kimi_k2_pre_full_pattern_override():
+    # Kimi K2/K3 GGUFs ship pre='kimi-k2' (llama.cpp routes it to a hand-coded
+    # splitter mirroring tokenization_kimi.py). Full-pattern override, and the
+    # `&&[^\p{Han}]` class intersections must be accepted by the tokenizers
+    # engine and behave: Han runs isolate, digits group to 3, contractions
+    # attach.
+    from tokenizers import Regex
+    from gmlx.tokenizer import KIMI_K2_PATTERN, _bytelevel_split_patterns
+
+    assert _bytelevel_split_patterns("kimi-k2") == (KIMI_K2_PATTERN,)
+    split = pre_tokenizers.Split(
+        Regex(KIMI_K2_PATTERN), behavior="isolated", invert=False)
+    pieces = [p for p, _ in split.pre_tokenize_str("hello中文world 1234 don't")]
+    assert "".join(pieces) == "hello中文world 1234 don't"
+    assert "中文" in pieces          # Han run isolated from Latin
+    assert "hello" in pieces                 # Latin never swallows Han
+    assert "123" in pieces and "4" in pieces  # \p{N}{1,3} grouping
+    assert " don't" in pieces                # contraction attaches to the word
+
+
+def _kimi_k3_style_meta() -> dict:
+    # Minimal K3-shaped vocab: the four markers are CONTROL tokens, eos is
+    # <|end_of_msg|>, and the template closes the assistant turn with
+    # <|close|>response<|sep|><|close|>message<|sep|><|end_of_msg|>.
+    specials = ["<|open|>", "<|close|>", "<|sep|>", "<|end_of_msg|>"]
+    toks = specials + _ALPHABET + _MERGED
+    token_type = [3] * len(specials) + [1] * (len(toks) - len(specials))
+    tmpl = (
+        "{% for m in messages %}<|open|>message role=\"{{ m['role'] }}\"<|sep|>"
+        "{% if m['role'] == 'assistant' %}<|open|>response<|sep|>{{ m['content'] }}"
+        "<|close|>response<|sep|>{% else %}{{ m['content'] }}{% endif %}"
+        "<|close|>message<|sep|>"
+        "{% if m['role'] == 'assistant' %}<|end_of_msg|>{% endif %}{% endfor %}"
+    )
+    return {
+        "general.architecture": "kimi-k3",
+        "tokenizer.ggml.model": "gpt2",
+        "tokenizer.ggml.pre": "kimi-k2",
+        "tokenizer.ggml.tokens": toks,
+        "tokenizer.ggml.merges": _MERGES,
+        "tokenizer.ggml.token_type": token_type,
+        "tokenizer.ggml.eos_token_id": 3,
+        "tokenizer.chat_template": tmpl,
+    }
+
+
+def test_kimi_k3_template_does_not_adopt_close_as_eos():
+    # The turn-end heuristic takes the first CONTROL token after the assistant
+    # sentinel; for K3 that is <|close|>, which ALSO closes the think section
+    # mid-generation - adopting it would stop generation at end-of-thinking.
+    # Guard: the template already terminates the turn with the primary EOS
+    # (it appears in the suffix), so the heuristic must return nothing.
+    tok = load_tokenizer_from_gguf(_kimi_k3_style_meta(), "kimi-k3")
+    assert tok._gguf_eos_token_ids == [3]     # <|end_of_msg|> only
+
+
+def test_turn_end_heuristic_still_adopts_without_eos_in_suffix():
+    # Regression guard for the guard: when the template ends the assistant turn
+    # with a non-eos control token and the primary EOS is NOT in the suffix,
+    # the heuristic must keep adopting it (pre-K3 behavior).
+    meta = _kimi_k3_style_meta()
+    meta["tokenizer.chat_template"] = (
+        "{% for m in messages %}{{ m['content'] }}"
+        "{% if m['role'] == 'assistant' %}<|close|>{% endif %}{% endfor %}"
+    )
+    tok = load_tokenizer_from_gguf(meta, "kimi-k3")
+    assert 1 in tok._gguf_eos_token_ids       # <|close|> adopted
+
+
 def test_add_bos_token_prepends_on_raw_path_only():
     # add_bos_token=True -> encode() prepends BOS with the default
     # add_special_tokens=True (raw-completion parity with llama.cpp), but
