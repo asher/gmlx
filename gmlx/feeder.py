@@ -77,6 +77,13 @@ class PrefillFeeder:
                     max_bytes[kind] = max(max_bytes.get(kind, 0), nbytes)
         if not self._layers:
             raise RuntimeError("no layers with matching gate/up/down stacks")
+        # Layer slots are flat 1-D uint8 arenas; a stack past int32 elements
+        # cannot be allocated or viewed that way (mx shape dims are int32).
+        big = max(max_bytes.values())
+        if big > 2**31 - 1:
+            raise RuntimeError(
+                f"largest expert stack ({big / 1e9:.1f} GB) exceeds the 2 GiB "
+                "layer-slot limit")
 
         self._fds: dict[str, int] = {}
         try:

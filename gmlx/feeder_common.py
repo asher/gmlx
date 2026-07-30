@@ -38,9 +38,15 @@ def verify_zero_copy(li: int, entries, fds: dict[str, int]) -> None:
         w = getattr(mod, ATTRS[kind]).weight
         # CPU stream: a GPU slice of the file-backed stack would make the
         # driver page the referenced range in - the cost the feeders exist
-        # to avoid.
+        # to avoid. Flattening the whole stack would overflow the int32
+        # shape dims on a >2 GiB stack, so slice off just enough leading
+        # experts to cover the head sample before flattening.
+        per = 1
+        for d in w.shape[1:]:
+            per *= d
+        lead = min(w.shape[0], -(-4096 // max(per, 1)))
         with mx.stream(mx.cpu):
-            head = bytes(np.array(w.reshape(-1)[:4096]))
+            head = bytes(np.array(w[:lead].reshape(-1)[:4096]))
         if os.pread(fds[path], len(head), off) != head:
             raise RuntimeError(
                 f"layer {li} {kind} stack is not a zero-copy view of its "
