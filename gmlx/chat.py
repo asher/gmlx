@@ -280,7 +280,9 @@ def parse_template_config(raw: str | None) -> dict:
         raise ValueError(f"--chat-template-config is not valid JSON: {e}") from e
     if not isinstance(out, dict):
         raise ValueError("--chat-template-config must be a JSON object")
-    return out
+    from .reasoning import normalize_template_kwargs
+
+    return normalize_template_kwargs(out)
 
 
 def parse_logit_bias(raw: str | None) -> dict | None:

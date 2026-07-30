@@ -40,7 +40,9 @@ def _merged_template_kwargs(request, spec) -> dict:
     req_kw = getattr(request, "chat_template_kwargs", None)
     if isinstance(req_kw, dict):
         merged.update(req_kw)
-    return merged
+    from ..reasoning import normalize_template_kwargs
+
+    return normalize_template_kwargs(merged)
 
 
 def _stash_template_kwargs(args, request, _processor):
@@ -57,9 +59,18 @@ def _stash_template_kwargs(args, request, _processor):
         or "enable_thinking" in spec_sampling
         or os.environ.get("MLX_VLM_ENABLE_THINKING") is not None
     )
-    args._kq_thinking_explicit = thinking_explicit
     if not thinking_explicit:
-        args.enable_thinking = True
+        # The z.ai / GLM API spelling as a top-level request field:
+        # `thinking: {"type": "enabled"|"disabled"}`.
+        from ..reasoning import thinking_flag
+
+        flag = thinking_flag(getattr(request, "thinking", None))
+        if flag is not None:
+            args.enable_thinking = flag
+            thinking_explicit = True
+        else:
+            args.enable_thinking = True
+    args._kq_thinking_explicit = thinking_explicit
     return args
 
 

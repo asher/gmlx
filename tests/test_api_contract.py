@@ -104,6 +104,7 @@ def test_gmlx_extras_allowlist_matches_patch_reads():
         "chat_template_kwargs",  # chat_behavior template-kwargs passthrough
         "xtc_probability",      # sampling XTC
         "xtc_threshold",
+        "thinking",             # chat_behavior: z.ai {"type": en/disabled} spelling
     }
 
 

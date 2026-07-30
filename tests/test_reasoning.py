@@ -309,3 +309,33 @@ def test_stream_renderer_prefill_close_only(capsys):
     out = capsys.readouterr().out
     assert "mulling" not in out and "</think>" not in out
     assert "thought for" in out and "Answer." in out
+
+
+# -- provider-doc thinking switch spellings ------------------------------------
+
+def test_thinking_flag_zai_shapes():
+    from gmlx.reasoning import thinking_flag
+    assert thinking_flag({"type": "disabled"}) is False
+    assert thinking_flag({"type": "enabled"}) is True
+    assert thinking_flag({"type": "auto"}) is None       # unknown -> untouched
+    assert thinking_flag({"type": "disabled", "x": 1}) is None
+    assert thinking_flag("disabled") is None
+    assert thinking_flag(None) is None
+
+
+def test_normalize_template_kwargs_translates_thinking():
+    from gmlx.reasoning import normalize_template_kwargs
+    assert normalize_template_kwargs({"thinking": {"type": "disabled"}}) == \
+        {"enable_thinking": False}
+    # An explicit enable_thinking wins over the translated spelling.
+    assert normalize_template_kwargs(
+        {"thinking": {"type": "disabled"}, "enable_thinking": True}) == \
+        {"enable_thinking": True}
+    # Non-API values stay as plain template variables.
+    assert normalize_template_kwargs({"thinking": "deep"}) == {"thinking": "deep"}
+
+
+def test_parse_template_config_translates_thinking():
+    from gmlx.chat import parse_template_config
+    assert parse_template_config('{"thinking": {"type": "disabled"}}') == \
+        {"enable_thinking": False}

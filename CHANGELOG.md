@@ -46,6 +46,14 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   instead of trailing them (no more wrapped lines on narrow terminals); the
   redundant mmproj `# VLM companion` comment is gone.
 
+### Added
+
+- The z.ai / GLM API spelling of the thinking switch -
+  `thinking: {"type": "enabled"|"disabled"}` - now works everywhere the
+  template kwargs do: `--chat-template-config`, config/profile
+  `chat_template_kwargs`, and as a top-level request field on the server
+  (it translates to `enable_thinking`).
+
 ### Fixed
 
 - Chat markdown rendering no longer reverts a block to raw text when it

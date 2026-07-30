@@ -387,3 +387,29 @@ def want_color(stream=None) -> bool:
     except Exception:
         tty = False
     return bool(tty) and os.environ.get("NO_COLOR") is None
+
+
+# -- provider-doc thinking switch spellings ------------------------------------
+
+def thinking_flag(value) -> bool | None:
+    """The z.ai / GLM API spelling of the thinking switch -
+    ``{"type": "enabled"|"disabled"}`` - as a bool; ``None`` for anything
+    else (including template variables that happen to be named thinking)."""
+    if (isinstance(value, dict) and set(value) <= {"type"}
+            and value.get("type") in ("enabled", "disabled")):
+        return value["type"] == "enabled"
+    return None
+
+
+def normalize_template_kwargs(kwargs: dict) -> dict:
+    """Translate ``thinking: {"type": ...}`` (the z.ai / GLM API request
+    schema users copy from provider docs) into ``enable_thinking``, the
+    variable chat templates actually read. Any other ``thinking`` value
+    passes through untouched as a plain template variable."""
+    flag = thinking_flag(kwargs.get("thinking"))
+    if flag is None:
+        return kwargs
+    out = dict(kwargs)
+    del out["thinking"]
+    out.setdefault("enable_thinking", flag)
+    return out
