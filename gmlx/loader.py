@@ -1456,6 +1456,13 @@ def install_expert_streaming(
         prefetcher = maybe_make_prefetcher(gguf_path)
         if prefetcher is not None:
             object.__setattr__(model, "_kq_prefetcher", prefetcher)
+        # Wire the every-token weights before the decode feeder sizes its
+        # arena: pinned spine pages come out of the same wired budget.
+        from .pin_spine import maybe_pin_spine
+
+        spine_pin = maybe_pin_spine(gguf_path)
+        if spine_pin is not None:
+            object.__setattr__(model, "_kq_spine_pin", spine_pin)
 
     def _wrapped_class(cls):
         sub = _CPU_OFFLOAD_CLASS_CACHE.get(cls)

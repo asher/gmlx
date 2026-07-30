@@ -385,6 +385,9 @@ class DecodeFeeder:
         self._t_demand = 0.0
         self._t_settle = 0.0
         self._t_start = time.monotonic()
+        # Diagnostic ledger of every byte this feeder submits to a read
+        # worker (GIL-serialized increments; close enough for attribution).
+        self._bytes_read = 0
 
         # Lossy-lever accounting (shed_misses + the wrapper's layer shed).
         self._shed_n = 0
@@ -497,12 +500,14 @@ class DecodeFeeder:
         dest = mv[slot * stride:(slot + 1) * stride]
         off_e = off + e * stride
         if not self._aligned:
+            self._bytes_read += stride
             read_range(self._fds[path], dest, off_e)
             return
         a = off_e & ~(_PAGE - 1)
         b = min(
             (off_e + stride + _PAGE - 1) & ~(_PAGE - 1),
             self._sizes[path])
+        self._bytes_read += b - a
         pool = bounce if bounce is not None else self._bounce
         buf = pool.get()
         try:
@@ -1215,6 +1220,9 @@ class DecodeFeeder:
                 f"{self._t_demand:.1f}s, prestage settle "
                 f"{self._t_settle:.1f}s, over {wall:.0f}s wall"
             )
+            print(
+                f"[stream] decode feeder bytes read: "
+                f"{getattr(self, '_bytes_read', 0) / 1e9:.1f} GB")
         if getattr(self, "_shed_tokens", 0):
             print(
                 f"[stream] miss-shed: {self._shed_n} experts shed over "

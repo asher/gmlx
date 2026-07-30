@@ -113,6 +113,19 @@ Streaming models engage two *feeder* paths by default:
   model, a build) it shrinks, keeping its most popular experts, and regrows
   once pressure clears - a long-running model stays a good citizen on a
   machine that is doing other work (`GMLX_DECODE_PRESSURE=0` pins it instead).
+
+Streaming installs also pin the spine (`GMLX_PIN_SPINE=0` disables): every
+non-expert tensor - attention, routers, shared experts, norms, the lm head -
+is mlocked so the kernel cannot evict it. Without the pin those weights are
+plain file-backed mmap pages, and on a box running at the free-page floor the
+kernel evicts them between uses; each decode token then re-faults the whole
+every-token set from disk, which on a large model saturates the SSD before
+the experts read a byte. The fault traffic is invisible to the feeder's
+stall accounting (it appears as compute time), so the symptom is a decode
+rate stuck near `spine_bytes / ssd_bandwidth` per token no matter the arena
+hit rate. Measured on Kimi-K3 UD-IQ2_XXS (662 GB, 62 GB spine, M5 Max
+128 GB): decode 0.10 -> 0.38 tok/s, prefill 0.62 -> 0.97 tok/s. The pin is
+skipped with a printed reason when the spine would exceed 60% of RAM.
   Same model and
   box: decode went from 2.4 tok/s on the page-cache path to 4.0 tok/s averaged
   over a 512-token generation (~4.7 steady, ~90% arena hits), against 3.0
