@@ -1300,3 +1300,48 @@ def test_wrapper_layer_shed_returns_unmixed_zeros(monkeypatch):
     i2 = mx.array([[[1, 3], [0, 2]]], dtype=mx.uint32)
     mx.eval(glu(x2, i2))
     assert df.stage_calls and df._layer_shed_n == 1  # t=2 ran normally
+
+
+def test_available_ram_counts_active_file_cache(monkeypatch):
+    """Reclaimable RAM counts the whole file-backed page cache (droppable
+    without swap), not just the inactive queue - a machine full of hot GGUF
+    cache used to look nearly out of RAM."""
+    import subprocess
+    out = (
+        "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
+        "Pages free:                                    1000.\n"
+        "Pages active:                                600000.\n"
+        "Pages inactive:                              200000.\n"
+        "Pages speculative:                             5000.\n"
+        "Pages purgeable:                                500.\n"
+        "File-backed pages:                           700000.\n"
+        "Anonymous pages:                             100000.\n"
+    )
+
+    class _R:
+        stdout = out
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _R())
+    page = 16384
+    assert gmlx.loader._available_ram_bytes() == (1000 + 500 + 700000) * page
+    # Strict no-victims set: free + purgeable + speculative only.
+    assert gmlx.loader._available_ram_bytes(include_inactive=False) == \
+        (1000 + 500 + 5000) * page
+
+
+def test_available_ram_fallback_without_file_backed_line(monkeypatch):
+    import subprocess
+    out = (
+        "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
+        "Pages free:                                    1000.\n"
+        "Pages inactive:                              200000.\n"
+        "Pages speculative:                             5000.\n"
+        "Pages purgeable:                                500.\n"
+    )
+
+    class _R:
+        stdout = out
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _R())
+    assert gmlx.loader._available_ram_bytes() == \
+        (1000 + 500 + 5000 + 200000) * 16384

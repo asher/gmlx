@@ -1009,17 +1009,22 @@ _DECODE_ARENA_RAM_FRAC_DEFAULT = 0.6
 
 
 def _available_ram_bytes(include_inactive: bool = True) -> int | None:
-    """RAM this process can take: free + inactive + purgeable + speculative
-    pages (macOS ``vm_stat``). A load-time snapshot of the machine's offer -
-    a machine already half-occupied by other workloads offers the arena
-    half a machine, whatever the hardware total says.
+    """RAM this process can take without swapping anyone's anonymous memory:
+    free + purgeable + the file-backed page cache (macOS ``vm_stat``). A
+    load-time snapshot of the machine's offer - a machine already
+    half-occupied by other workloads offers the arena half a machine,
+    whatever the hardware total says. File-backed pages drop without IO
+    whatever queue they sit on; counting only the *inactive* queue (the old
+    formula) missed the tens of GB of recently-read GGUF cache still on the
+    active queue and made a mostly-cache machine look nearly full. A
+    ``vm_stat`` without the ``File-backed pages`` line falls back to
+    inactive + speculative.
 
-    ``include_inactive=False`` is the stricter no-victims set: inactive
-    pages include other processes' anonymous memory, reclaimable only by
-    swapping it. Counting them is the right optimistic call at load time
-    (inactive is usually stale page cache from earlier runs), and the wrong
-    call when the decode feeder regrows its wired arena into a *running*
-    system - measured, that pushed double-digit GB of anon to swap."""
+    ``include_inactive=False`` is the stricter no-victims set (free +
+    purgeable + speculative only): used when the decode feeder regrows its
+    wired arena into a *running* system, where even evicting the page cache
+    other reads depend on is a real cost - measured, the optimistic set
+    there pushed double-digit GB of anon to swap."""
     import subprocess
 
     try:
@@ -1031,11 +1036,18 @@ def _available_ram_bytes(include_inactive: bool = True) -> int | None:
     m = re.search(r"page size of (\d+)", out)
     if not m:
         return None
-    keys = ["free", "purgeable", "speculative"]
-    if include_inactive:
-        keys.append("inactive")
+    keys = ["free", "purgeable"]
     pages = 0
     found = False
+    if include_inactive:
+        mm = re.search(r"File-backed pages:\s+(\d+)\.", out)
+        if mm:
+            pages += int(mm.group(1))
+            found = True
+        else:
+            keys += ["speculative", "inactive"]
+    else:
+        keys.append("speculative")
     for key in keys:
         mm = re.search(rf"Pages {key}:\s+(\d+)\.", out)
         if mm:
@@ -1802,7 +1814,7 @@ def install_expert_streaming(
             if over_budget
             else f"model {total_bytes / 1e9:.0f} GB, streaming forced"
         )
-        print(
+        loadlog.info(
             f"[stream] streaming: {head} - {n_wrapped} MoE layers' experts "
             f"({offloaded / 1e9:.1f} GB) stay file-backed; rest of the model "
             f"+ KV on {base_dev}"
@@ -1832,7 +1844,7 @@ def install_expert_streaming(
                 "" if n_cov == len(moe_modules)
                 else f" on {n_cov}/{len(moe_modules)} layers"
             )
-            print(
+            loadlog.info(
                 "[stream] feeder prefill: expert stacks staged straight "
                 f"from GGUF through 2 x {feeder.slot_bytes / 1e9:.1f} GB "
                 f"GPU-visible ring slots{cov} (--no-prefill-feeder disables)"
@@ -1864,7 +1876,7 @@ def install_expert_streaming(
                 "" if n_cov == len(moe_modules)
                 else f" on {n_cov}/{len(moe_modules)} layers"
             )
-            print(
+            loadlog.info(
                 f"[stream] decode feeder: {dfeeder.arena_bytes / 1e9:.1f} GB "
                 f"popularity-managed expert arena ({wired}){cov} "
                 "(--no-decode-feeder disables, GMLX_DECODE_ARENA_GB sizes)"
@@ -1893,7 +1905,7 @@ def install_expert_streaming(
                     else "adaptive: layers above GMLX_AUTO_HOT_HIT go "
                     "syncless, the rest keep per-layer staging"
                 )
-                print(
+                loadlog.info(
                     "[stream] gpu-autonomous token: route_shed remaps + "
                     f"sheds on GPU; {mode_note}; misses prestage at "
                     "token boundaries (GMLX_GPU_AUTONOMOUS=1|all)"
@@ -1903,11 +1915,10 @@ def install_expert_streaming(
         from . import keepwarm
 
         keepwarm.start()
-        print(
+        loadlog.info(
             "[stream] gpu keep-warm: background heartbeat holds GPU "
             "clocks between per-layer decode bursts, parked while no "
-            "decode is running (lossless, costs power only during "
-            "decode; --gpu-keepwarm / GMLX_GPU_KEEPWARM=1 enables)"
+            "decode is running (lossless; costs power only during decode)"
         )
     la_probe = env_bool("GMLX_DECODE_LOOKAHEAD_PROBE", False)
     # Lookahead's replica router folds into the per-layer sync; whether its
@@ -1920,7 +1931,7 @@ def install_expert_streaming(
         env_bool("GMLX_DECODE_LOOKAHEAD", la_default) and dfeeder is not None)
     if (streaming and dfeeder is not None and not la_default
             and "GMLX_DECODE_LOOKAHEAD" not in os.environ):
-        print(
+        loadlog.info(
             "[stream] lookahead prestage: off by family default (replica-"
             "router sync tax measured above its stall savings; "
             "GMLX_DECODE_LOOKAHEAD=1 enables)"
@@ -1939,13 +1950,13 @@ def install_expert_streaming(
             else f"router predictions {la_depth} layers deep"
         )
         if n_la and la_prefetch:
-            print(
+            loadlog.info(
                 f"[stream] lookahead prestage: {la_what} pre-read arena "
                 f"misses on {n_la} MoE layer pairs (lossless; "
                 "GMLX_DECODE_LOOKAHEAD=0 disables)"
             )
         if n_la and la_probe:
-            print(
+            loadlog.info(
                 f"[stream] lookahead probe: recording {la_what} recall "
                 f"on {n_la} MoE layer pairs (lossless; table at exit)"
             )
@@ -1969,7 +1980,7 @@ def install_expert_streaming(
                 else "prefill demand-faults (no gguf_path)"
             )
         if fallback:
-            print(f"[stream] {'; '.join(fallback)}")
+            loadlog.info(f"[stream] {'; '.join(fallback)}")
         if not over_budget:
             b = f"~{budget / 1e9:.0f} GB" if budget else "unknown"
             print(
@@ -1989,7 +2000,7 @@ def install_expert_streaming(
             staging = f"prefill calls >={gpu_tokens} tokens routed to GPU"
         else:
             staging = "GPU prefill routing disabled"
-        print(
+        loadlog.info(
             f"[stream] routed experts -> CPU stream on {n_wrapped} layers "
             f"({offloaded / 1e9:.1f} GB stays file-backed; rest of the model "
             f"+ KV on {base_dev}; {staging})"

@@ -2434,7 +2434,9 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
             b.model, kv_kwargs.get("prefill_step_size")
         )
         if defaulted:
-            print(
+            from . import loadlog
+
+            loadlog.info(
                 f"[prefill] streaming model: chunk size defaults to {step} "
                 "(--prefill-step-size overrides)"
             )

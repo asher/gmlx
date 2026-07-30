@@ -478,6 +478,12 @@ def test_miss_shed_install_targets_decode_feeder_layers(monkeypatch, capsys):
     assert install_moe_miss_shed(model, 0.9) == 1
     assert block.switch_mlp._kq_miss_shed == 0.9
     assert not hasattr(block.gate, "_kq_miss_shed")
+    # Confirmation banners are verbose-only.
+    assert "miss-shed 0.9" not in capsys.readouterr().out
+    from gmlx import loadlog
+    monkeypatch.setattr(loadlog, "_LAST_VERBOSE", True)
+    object.__setattr__(block.switch_mlp, "_kq_miss_shed", None)
+    assert install_moe_miss_shed(model, 0.9) == 1
     assert "miss-shed 0.9" in capsys.readouterr().out
 
 
@@ -502,4 +508,9 @@ def test_layer_shed_install_targets_streamed_glus(monkeypatch, capsys):
     assert block.switch_mlp._kq_layer_shed == 0.1
     # routers/gates never shed: the hook lives on the wrapped container only
     assert not hasattr(block.gate, "_kq_layer_shed")
+    # Confirmation banners are verbose-only.
+    assert "layer-shed 0.1" not in capsys.readouterr().out
+    from gmlx import loadlog
+    monkeypatch.setattr(loadlog, "_LAST_VERBOSE", True)
+    assert install_moe_layer_shed(model, 0.1) == 1
     assert "layer-shed 0.1" in capsys.readouterr().out

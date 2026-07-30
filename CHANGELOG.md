@@ -38,12 +38,20 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Informational `[stream]` banners (streaming summary, feeder/arena sizes,
+  keep-warm, lookahead, MoE lever confirmations, runtime stats) and the
+  `[prefill]` chunk-size note only print under `--verbose`; warnings
+  (ignored flags, fallbacks, wedged reads, clamps) stay visible.
 - Scaffolded config comments now sit on their own line above live keys
   instead of trailing them (no more wrapped lines on narrow terminals); the
   redundant mmproj `# VLM companion` comment is gone.
 
 ### Fixed
 
+- The decode-arena reclaimable-RAM estimate now counts the whole
+  file-backed page cache (droppable without swap), not just the inactive
+  queue - a machine full of hot GGUF cache no longer clamps
+  `GMLX_DECODE_ARENA_GB` as if it were out of RAM.
 - Sampling embedded in the GGUF header (`general.sampling.*`) is now
   honored: it refines the arch-family defaults for both configured models
   and bare-path runs (profiles, overrides, and explicit flags still win).
