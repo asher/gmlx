@@ -2876,9 +2876,10 @@ def load_model(
     #         sink+local (GMLX_DSV32_SINK/_LOCAL). Why our score diverges from
     #         llama (which keeps them via score alone) is unresolved; sparse stays
     #         experimental and dense is the default.
-    #       (secondary) the L==1 decode applies the top-k by gathering keys rather
-    #         than masking, corrupting the sampling tail. Kill with
-    #         GMLX_DSV32_MASK_DECODE=0.
+    #       (secondary, retired default) the L==1 gather decode was suspected of
+    #         corrupting the sampling tail on an early stack; re-tested clean, so
+    #         stock gather is the default. GMLX_DSV32_MASK_DECODE=1 re-arms the
+    #         mask-path mitigation.
     if config.get("model_type") in ("glm_moe_dsa", "deepseek_v32"):
         _patch_dsv32_indexer_rope(model)
         _patch_dsv32_indexer_fp32(model)

@@ -1,21 +1,18 @@
-"""Regression test for the glm-dsa / DeepSeek-V3.2 decode correctness patch
+"""Regression test for the glm-dsa / DeepSeek-V3.2 mask-path decode mitigation
 (``dsv32_patches._patch_dsv32_mask_decode``).
 
 mlx-lm's ``DeepseekV32Attention`` applies the DSA indexer top-k by GATHERING keys on
-the L==1 decode step but MASKING full keys on the L>1 prefill step. The gather is
-gather-equivalent to the mask at small scale yet corrupts the decode attention tail
-once context exceeds ``index_topk`` (~2048), so temperature/top-p sampling degenerates
-at depth while greedy stays fine. The patch routes the L==1 decode step through the
-mask path too.
+the L==1 decode step but MASKING full keys on the L>1 prefill step. The mask path
+shipped as a corruption fix on an early stack; the corruption no longer reproduces,
+so stock gather is the default and the mask path is an opt-in mitigation
+(``GMLX_DSV32_MASK_DECODE=1``).
 
-No GGUF / no GPU: builds a tiny random-weight stock ``glm_moe_dsa`` model and checks the
-patch (1) installs + flags every attention module, (2) reproduces the stock decode
-logits at small scale (where gather == mask - guards the mask rewrite), exercising the
-indexer's sparse branch, (3) honours the ``GMLX_DSV32_MASK_DECODE=0`` kill-switch,
-and (4) leaves unflagged instances on the stock path.
+No GGUF / no GPU: builds a tiny random-weight stock ``glm_moe_dsa`` model and checks
+(1) the opt-in installs + flags every attention module, (2) the mask rewrite
+reproduces the stock decode logits at small scale, exercising the indexer's sparse
+branch, (3) the default and an explicit ``0`` both leave the model on stock gather,
+and (4) unflagged instances stay on the stock path even with the class patched.
 """
-
-import os
 
 import mlx.core as mx
 import pytest
@@ -95,7 +92,8 @@ def _n_attn(model: Model) -> int:
     return sum(isinstance(m, DeepseekV32Attention) for m in model.modules())
 
 
-def test_patch_installs_and_flags_every_attention():
+def test_patch_installs_and_flags_every_attention(monkeypatch):
+    monkeypatch.setenv("GMLX_DSV32_MASK_DECODE", "1")
     model = _build()
     n_attn = _n_attn(model)
     assert n_attn > 0
@@ -112,7 +110,8 @@ def test_patch_installs_and_flags_every_attention():
     assert flagged == n_attn
 
 
-def test_mask_decode_matches_stock_gather_at_small_scale():
+def test_mask_decode_matches_stock_gather_at_small_scale(monkeypatch):
+    monkeypatch.setenv("GMLX_DSV32_MASK_DECODE", "1")
     # index_topk small + prefill above it -> sparse indexer branch fires every step.
     prefill, n = 6, 5
     model = _build(index_topk=4)
@@ -132,18 +131,11 @@ def test_mask_decode_matches_stock_gather_at_small_scale():
     assert bool(mx.all(mx.argmax(fixed, -1) == mx.argmax(stock, -1)).item())
 
 
-def test_kill_switch_skips_patch():
+def test_default_off_skips_patch(monkeypatch):
+    # Stock gather decode is the default; the mask path is opt-in.
+    monkeypatch.delenv("GMLX_DSV32_MASK_DECODE", raising=False)
     model = _build()
-    prev = os.environ.get("GMLX_DSV32_MASK_DECODE")
-    os.environ["GMLX_DSV32_MASK_DECODE"] = "0"
-    try:
-        dsv32_patches._patch_dsv32_mask_decode(model)
-    finally:
-        if prev is None:
-            os.environ.pop("GMLX_DSV32_MASK_DECODE", None)
-        else:
-            os.environ["GMLX_DSV32_MASK_DECODE"] = prev
-    # No instance on this model should have been flagged.
+    dsv32_patches._patch_dsv32_mask_decode(model)
     assert not any(
         getattr(m, "_dsv32_mask_decode", False)
         for m in model.modules()
@@ -151,10 +143,22 @@ def test_kill_switch_skips_patch():
     )
 
 
-def test_unflagged_instance_uses_stock_path():
+def test_explicit_zero_skips_patch(monkeypatch):
+    monkeypatch.setenv("GMLX_DSV32_MASK_DECODE", "0")
+    model = _build()
+    dsv32_patches._patch_dsv32_mask_decode(model)
+    assert not any(
+        getattr(m, "_dsv32_mask_decode", False)
+        for m in model.modules()
+        if isinstance(m, DeepseekV32Attention)
+    )
+
+
+def test_unflagged_instance_uses_stock_path(monkeypatch):
     # Even with the class patch installed, an unflagged instance must hit the stock
     # fallback. Compare an all-unflagged model's decode to the saved stock call run
     # directly on the same modules.
+    monkeypatch.setenv("GMLX_DSV32_MASK_DECODE", "1")
     model = _build(index_topk=4)
     dsv32_patches._patch_dsv32_mask_decode(model)  # ensure class is patched
     for m in model.modules():
