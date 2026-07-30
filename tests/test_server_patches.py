@@ -308,6 +308,28 @@ def test_nonstream_split_truncated_thinking_seeded_from_prompt():
         sp_chat._LAST_RENDERED_PROMPT.reset(tok)
 
 
+def test_nonstream_split_strips_xtml_section_markers():
+    """Kimi-K3: the response/message closers and turn terminator must not
+    leak into chat content; other think spellings stay untouched."""
+    app_mod = importlib.import_module("mlx_vlm.server.app")
+    sp.install_stream_thinking_seed()
+    split = app_mod._split_thinking_text
+    tok = sp_chat._LAST_RENDERED_PROMPT.set(None)
+    try:
+        text = ("plan<|close|>think<|sep|><|open|>response<|sep|>"
+                "2+2 equals 4.<|close|>response<|sep|>"
+                "<|close|>message<|sep|><|end_of_msg|>")
+        r, c = split(text, "<|open|>think<|sep|>", "<|close|>think<|sep|>")
+        assert r == "plan"
+        assert c == "2+2 equals 4."
+        # Gate: a different think spelling passes content through unchanged.
+        r, c = split("x</think>keep <|close|>message<|sep|> text",
+                     "<think>", "</think>")
+        assert c == "keep <|close|>message<|sep|> text"
+    finally:
+        sp_chat._LAST_RENDERED_PROMPT.reset(tok)
+
+
 def test_install_thinking_budget_fix_applies_and_idempotent():
     # Fail-loud guard: asserts the seam bound to the REAL mlx-vlm symbol, so a
     # rename of ResponseGenerator._make_thinking_budget_criteria turns into a CI
