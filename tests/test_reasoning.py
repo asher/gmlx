@@ -339,3 +339,33 @@ def test_parse_template_config_translates_thinking():
     from gmlx.chat import parse_template_config
     assert parse_template_config('{"thinking": {"type": "disabled"}}') == \
         {"enable_thinking": False}
+
+
+def test_fold_thinking_flag(monkeypatch):
+    from types import SimpleNamespace
+    import gmlx.chat as chat
+    import gmlx.discovery as discovery
+
+    monkeypatch.setattr(discovery, "header_meta",
+                        lambda p: {"arch": "glm-dsa", "name": "GLM 5.2"})
+    args = SimpleNamespace(thinking=None, gguf="/m/x.gguf")
+    assert chat.fold_thinking_flag(args, {"a": 1}) == {"a": 1}
+    args.thinking = "off"
+    assert chat.fold_thinking_flag(args, {}) == {"enable_thinking": False}
+    # The dedicated flag wins over a --chat-template-config value.
+    assert chat.fold_thinking_flag(args, {"enable_thinking": True}) == \
+        {"enable_thinking": False}
+    args.thinking = "on"
+    assert chat.fold_thinking_flag(args, {}) == {"enable_thinking": True}
+
+
+def test_fold_thinking_flag_gpt_oss_warns(monkeypatch, capsys):
+    from types import SimpleNamespace
+    import gmlx.chat as chat
+    import gmlx.discovery as discovery
+
+    monkeypatch.setattr(discovery, "header_meta",
+                        lambda p: {"arch": "gpt-oss", "name": "gpt-oss-20b"})
+    args = SimpleNamespace(thinking="off", gguf="/m/x.gguf")
+    assert chat.fold_thinking_flag(args, {}) == {}   # no kwarg forced
+    assert "reasoning" in capsys.readouterr().err

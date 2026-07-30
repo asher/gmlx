@@ -98,8 +98,9 @@ def _build_parser(prog: str = "gmlx chat") -> argparse.ArgumentParser:
     )
     from .cli import add_condensed_help
     add_condensed_help(ap, (
-        "gguf", "--assistant", "--system-prompt", "--reasoning", "--mmproj",
-        "--max-tokens", "--temp", "--resume", "--theme", "--verbose",
+        "gguf", "--assistant", "--system-prompt", "--reasoning",
+        "--thinking", "--mmproj", "--max-tokens", "--temp", "--resume",
+        "--theme", "--verbose",
     ))
     ap.add_argument(
         "gguf", nargs="?", default=None,
@@ -283,6 +284,33 @@ def parse_template_config(raw: str | None) -> dict:
     from .reasoning import normalize_template_kwargs
 
     return normalize_template_kwargs(out)
+
+
+def fold_thinking_flag(args, tkw: dict) -> dict:
+    """``--thinking on|off`` -> the ``enable_thinking`` template kwarg (the
+    dedicated flag wins over a ``--chat-template-config`` value). gpt-oss has
+    no off switch - its harmony template always reasons - so the flag warns
+    and points at the reasoning-effort levers instead."""
+    t = getattr(args, "thinking", None)
+    if t is None:
+        return tkw
+    from . import profiles as fam
+    from .discovery import header_meta
+
+    meta = header_meta(args.gguf) if getattr(args, "gguf", None) else None
+    family = (fam.detect_family(meta.get("arch"), meta.get("name"))
+              if meta else "default")
+    if family == "gpt-oss":
+        print(
+            "[thinking] gpt-oss has no thinking switch (reasoning always "
+            "runs); use --profile reasoning-low/-high or "
+            "--chat-template-config '{\"reasoning_effort\": ...}'",
+            file=sys.stderr,
+        )
+        return tkw
+    out = dict(tkw)
+    out["enable_thinking"] = t == "on"
+    return out
 
 
 def parse_logit_bias(raw: str | None) -> dict | None:
@@ -2739,7 +2767,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                     f"(set --no-mtp to apply via plain decoding)",
                     file=sys.stderr,
                 )
-        template_kwargs = parse_template_config(args.chat_template_config)
+        template_kwargs = fold_thinking_flag(
+            args, parse_template_config(args.chat_template_config))
         logit_bias = parse_logit_bias(args.logit_bias)
         resize_shape = parse_resize_shape(args.resize_shape)
 

@@ -271,6 +271,13 @@ def add_load_args(ap: argparse.ArgumentParser) -> None:
         help="JSON of extra chat-template kwargs, e.g. '{\"enable_thinking\": false}'.",
     )
     ap.add_argument(
+        "--thinking",
+        choices=("on", "off"),
+        default=None,
+        help="Thinking-model reasoning switch (sets the model's "
+        "enable_thinking template variable; default: the model's default).",
+    )
+    ap.add_argument(
         "--no-remap",
         action="store_true",
         help="Skip GGUF->HF name remap (raw GGUF names).",
@@ -678,8 +685,8 @@ def _build_parser(prog: str = "gmlx run") -> argparse.ArgumentParser:
     )
     add_condensed_help(ap, (
         "gguf", "--prompt", "--prompt-file", "--max-tokens", "--temp",
-        "--system-prompt", "--reasoning", "--mmproj", "--image",
-        "--stream-experts", "--verbose",
+        "--system-prompt", "--reasoning", "--thinking", "--mmproj",
+        "--image", "--stream-experts", "--verbose",
     ))
     ap.add_argument("gguf", help="Path to the GGUF file (sharded ok).")
     prompt_group = ap.add_mutually_exclusive_group()
@@ -1140,7 +1147,9 @@ def _run_bench_depths(args) -> int:
     prompt_source = None
     if convs is not None:
         seed = int(getattr(args, "bench_chat_seed", 42))
-        tkw = parse_template_config(args.chat_template_config)
+        from .chat import fold_thinking_flag
+        tkw = fold_thinking_flag(
+            args, parse_template_config(args.chat_template_config))
         prompt_source = _ChatPromptSource(
             convs, tok, seed=seed, template_kwargs=tkw)
         print(f"[bench] prompt slice seed {seed}"
@@ -1280,12 +1289,13 @@ def _apply_placement(args, model) -> None:
 
 
 def _run_generate(args) -> int:
-    from .chat import parse_logit_bias, parse_template_config
+    from .chat import fold_thinking_flag, parse_logit_bias, parse_template_config
     from .generation import generate
     from .loader import load_model, preset_native_fp_wire_env
 
     # Parse before the model load so a JSON typo fails fast.
-    template_kwargs = parse_template_config(args.chat_template_config)
+    template_kwargs = fold_thinking_flag(
+        args, parse_template_config(args.chat_template_config))
     logit_bias = parse_logit_bias(args.logit_bias)
     preset_native_fp_wire_env(args)
 
@@ -1446,11 +1456,12 @@ def _run_vlm(args) -> int:
     The sampling surface mirrors the text path where mlx-vlm's generate supports
     it; --stop / --xtc-* stay text-only (mlx-vlm has no seam for them here).
     """
-    from .chat import parse_logit_bias, parse_template_config
+    from .chat import fold_thinking_flag, parse_logit_bias, parse_template_config
     from .vlm import load_vlm_model
 
     # Parse before the model load so a JSON typo fails fast.
-    template_kwargs = parse_template_config(args.chat_template_config)
+    template_kwargs = fold_thinking_flag(
+        args, parse_template_config(args.chat_template_config))
     logit_bias = parse_logit_bias(args.logit_bias)
     if args.seed is not None:
         import mlx.core as mx
@@ -1548,7 +1559,7 @@ def _run_vlm_mtp(args) -> int:
     the speculative speedup. Image/audio requests are routed to ``_run_vlm`` upstream;
     the drafter is simply unused for those.
     """
-    from .chat import parse_template_config
+    from .chat import fold_thinking_flag, parse_template_config
     from .generation import generate_speculative
     from .mtp_load import load_vlm_mtp_model
 
@@ -1595,7 +1606,8 @@ def _run_vlm_mtp(args) -> int:
         draft_block_size=args.draft_block_size,
         apply_chat_template=not args.no_chat_template,
         system_prompt=args.system_prompt,
-        template_kwargs=parse_template_config(args.chat_template_config),
+        template_kwargs=fold_thinking_flag(
+            args, parse_template_config(args.chat_template_config)),
         verbose=True,
         reasoning=args.reasoning,
         kv_bits=args.kv_bits,
