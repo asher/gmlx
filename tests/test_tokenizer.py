@@ -193,6 +193,22 @@ def test_kimi_k2_pre_full_pattern_override():
     assert " don't" in pieces                # contraction attaches to the word
 
 
+def test_kimi_k2_pre_skips_nfc_normalizer():
+    # llama.cpp's kimi-k2 hand splitter and tokenization_kimi.py apply no
+    # unicode normalization; NFC would merge decomposed combining marks
+    # (e + U+0301 -> e-acute) and shift split boundaries vs the oracle.
+    from gmlx.tokenizer import _build_bytelevel_bpe
+
+    kimi = _build_bytelevel_bpe(["a", "b"], [], pre_id="kimi-k2")
+    assert kimi.normalizer is None
+    default = _build_bytelevel_bpe(["a", "b"], [], pre_id="")
+    assert default.normalizer is not None
+    decomposed = "e\u0301clair"
+    norm = default.normalizer.normalize_str(decomposed)
+    assert norm == "\u00e9clair"          # NFC merges the mark elsewhere...
+    assert kimi.normalizer is None        # ...but kimi-k2 must keep it raw
+
+
 def _kimi_k3_style_meta() -> dict:
     # Minimal K3-shaped vocab: the four markers are CONTROL tokens, eos is
     # <|end_of_msg|>, and the template closes the assistant turn with

@@ -486,7 +486,12 @@ def _build_bytelevel_bpe(tokens: list[str], raw_merges: list[str],
     tok = Tokenizer(models.BPE(
         vocab=vocab, merges=merges,
         byte_fallback=False, fuse_unk=False))
-    tok.normalizer = normalizers.NFC()
+    # tiktoken-family pres (kimi-k2) split raw codepoints - llama.cpp's
+    # hand-coded splitter and the HF reference apply no unicode
+    # normalization, and NFC here would merge decomposed combining marks
+    # (e + U+0301 -> e-acute) and shift the split boundaries.
+    if pre_id != "kimi-k2":
+        tok.normalizer = normalizers.NFC()
     tok.pre_tokenizer = pre_tokenizers.Sequence([
         pre_tokenizers.Split(Regex(p), behavior="isolated", invert=False)
         for p in _bytelevel_split_patterns(pre_id)
