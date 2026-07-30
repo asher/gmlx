@@ -67,6 +67,17 @@ _MARKERS: tuple[tuple[str, str], ...] = (
     # exist in its vocab but the template only ever uses the mm spelling).
     ("<mm:think>", _REASON),
     ("</mm:think>", _ANSWER),
+    # Kimi-K3 XTML sections: the prompt pre-opens the think section (seed with
+    # start_in_thinking), generation streams the close, the response section,
+    # then the message close + turn terminator. Attribute-carrying openers
+    # (e.g. '<|open|>message role=...') only occur in the prompt, never in
+    # generation, so literal matching is sufficient here.
+    ("<|open|>think<|sep|>", _REASON),
+    ("<|close|>think<|sep|>", _ANSWER),
+    ("<|open|>response<|sep|>", _ANSWER),
+    ("<|close|>response<|sep|>", _DROP),
+    ("<|close|>message<|sep|>", _DROP),
+    ("<|end_of_msg|>", _DROP),
 )
 
 

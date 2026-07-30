@@ -72,6 +72,7 @@ def test_families_never_set_max_tokens():
     ("minimax-m3", "minimax"),
     ("nemotron_h_moe", "nemotron"),
     ("hunyuan-moe", "hunyuan"),
+    ("kimi-k3", "kimi"),
     ("llama", "llama"), ("smollm3", "llama"),
     ("mistral3", "mistral"),
     ("phi3", "default"),          # no card entry -> generic
@@ -118,6 +119,22 @@ def test_gpt_oss_reasoning_intents():
     hi = profiles.groups_for("gpt-oss", "reasoning-high")
     assert hi["chat_template_kwargs"] == {"reasoning_effort": "high"}
     assert hi["sampling"] == base["sampling"]
+
+
+def test_kimi_reasoning_intents_and_thinking_tokens():
+    base = profiles.groups_for("kimi")
+    assert base["sampling"]["temperature"] == 1.0
+    assert base["sampling"]["top_p"] == 0.95
+    # XTML section markers reach the server's think-tag plumbing.
+    assert base["sampling"]["thinking_start_token"] == "<|open|>think<|sep|>"
+    assert base["sampling"]["thinking_end_token"] == "<|close|>think<|sep|>"
+    # K3's template variable is thinking_effort (low/high/max; no medium).
+    hi = profiles.groups_for("kimi", "reasoning-high")
+    assert hi["chat_template_kwargs"] == {"thinking_effort": "high"}
+    mx_ = profiles.groups_for("kimi", "reasoning-max")
+    assert mx_["chat_template_kwargs"] == {"thinking_effort": "max"}
+    # reasoning-medium has no kimi card value -> resolves to base.
+    assert profiles.groups_for("kimi", "reasoning-medium") == base
 
 
 def test_unknown_family_and_intent_fall_back():
