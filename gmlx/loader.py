@@ -2466,6 +2466,27 @@ def _resolve_native_fp_wire(hf_weights, hf_kquant_meta, log) -> bool:
     return False
 
 
+def _native_fp_multilinear_keys(model, hf_kquant_meta) -> set[str]:
+    """Weight names of native-fp tensors destined for a MultiLinear leaf.
+
+    These stay ggml wire bytes even in packed mode (kq.gather_qmm dispatch;
+    no packed MultiLinear module exists) - the repack must skip them.
+    """
+    from .modules import MultiLinear
+    from .native_fp import NATIVE_FP_CODECS
+
+    if MultiLinear is None:
+        return set()
+    keys = set()
+    for path, mod in tree_flatten(model.leaf_modules(),
+                                  is_leaf=nn.Module.is_module):
+        wk = f"{path}.weight"
+        if (isinstance(mod, MultiLinear)
+                and hf_kquant_meta.get(wk) in NATIVE_FP_CODECS):
+            keys.add(wk)
+    return keys
+
+
 def _gemma4_target(model) -> bool:
     """True when the loaded model runs the gemma4 classes the gemma-4
     patches target. The installs themselves stay unconditional (they are
@@ -2534,7 +2555,9 @@ def _install_and_load(
     if not native_fp_wire:
         from .native_fp import repack_native_fp_weights
 
-        n_fp = repack_native_fp_weights(hf_weights, hf_kquant_meta)
+        n_fp = repack_native_fp_weights(
+            hf_weights, hf_kquant_meta,
+            skip=_native_fp_multilinear_keys(model, hf_kquant_meta))
         if n_fp:
             log(
                 f"[native-fp] de-interleaved {n_fp} mxfp4/nvfp4 tensors -> MLX packed layout"
@@ -2973,7 +2996,9 @@ def load_model(
     if not native_fp_wire:
         from .native_fp import repack_native_fp_weights
 
-        n_fp = repack_native_fp_weights(hf_weights, hf_kquant_meta)
+        n_fp = repack_native_fp_weights(
+            hf_weights, hf_kquant_meta,
+            skip=_native_fp_multilinear_keys(model, hf_kquant_meta))
         if n_fp:
             _log(
                 f"[native-fp] de-interleaved {n_fp} mxfp4/nvfp4 tensors -> MLX packed layout"
