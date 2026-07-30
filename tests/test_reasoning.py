@@ -344,11 +344,10 @@ def test_parse_template_config_translates_thinking():
 def test_fold_thinking_flag(monkeypatch):
     from types import SimpleNamespace
     import gmlx.chat as chat
-    import gmlx.discovery as discovery
 
-    monkeypatch.setattr(discovery, "header_meta",
-                        lambda p: {"arch": "glm-dsa", "name": "GLM 5.2"})
-    args = SimpleNamespace(thinking=None, gguf="/m/x.gguf")
+    monkeypatch.setattr(chat, "_template_text",
+                        lambda a: "{% if enable_thinking %}...{% endif %}")
+    args = SimpleNamespace(thinking=None, reasoning_effort=None, gguf="/m/x.gguf")
     assert chat.fold_thinking_flag(args, {"a": 1}) == {"a": 1}
     args.thinking = "off"
     assert chat.fold_thinking_flag(args, {}) == {"enable_thinking": False}
@@ -359,13 +358,44 @@ def test_fold_thinking_flag(monkeypatch):
     assert chat.fold_thinking_flag(args, {}) == {"enable_thinking": True}
 
 
-def test_fold_thinking_flag_gpt_oss_warns(monkeypatch, capsys):
+def test_fold_thinking_flag_hy3_dialect(monkeypatch):
+    """Hy3 has no enable_thinking; its template grades reasoning_effort with
+    a no_think level - --thinking maps onto that spelling."""
     from types import SimpleNamespace
     import gmlx.chat as chat
-    import gmlx.discovery as discovery
 
-    monkeypatch.setattr(discovery, "header_meta",
-                        lambda p: {"arch": "gpt-oss", "name": "gpt-oss-20b"})
-    args = SimpleNamespace(thinking="off", gguf="/m/x.gguf")
+    monkeypatch.setattr(chat, "_template_text",
+                        lambda a: "reasoning_effort in ['low','high','no_think']")
+    args = SimpleNamespace(thinking="off", reasoning_effort=None, gguf="/m/x.gguf")
+    assert chat.fold_thinking_flag(args, {}) == {"reasoning_effort": "no_think"}
+    args.thinking = "on"
+    assert chat.fold_thinking_flag(args, {}) == {"reasoning_effort": "high"}
+    # An explicit level wins over the mapped one.
+    args.reasoning_effort = "low"
+    assert chat.fold_thinking_flag(args, {}) == {"reasoning_effort": "low"}
+
+
+def test_fold_thinking_flag_gpt_oss_warns(monkeypatch, capsys):
+    """gpt-oss grades reasoning_effort but cannot disable reasoning."""
+    from types import SimpleNamespace
+    import gmlx.chat as chat
+
+    monkeypatch.setattr(chat, "_template_text",
+                        lambda a: 'set reasoning_effort = "medium"')
+    args = SimpleNamespace(thinking="off", reasoning_effort=None, gguf="/m/x.gguf")
     assert chat.fold_thinking_flag(args, {}) == {}   # no kwarg forced
-    assert "reasoning" in capsys.readouterr().err
+    assert "--reasoning-effort" in capsys.readouterr().err
+
+
+def test_fold_reasoning_effort_passthrough_and_noop_warning(monkeypatch, capsys):
+    from types import SimpleNamespace
+    import gmlx.chat as chat
+
+    monkeypatch.setattr(chat, "_template_text",
+                        lambda a: 'set reasoning_effort = "medium"')
+    args = SimpleNamespace(thinking=None, reasoning_effort="high", gguf="/m/x.gguf")
+    assert chat.fold_thinking_flag(args, {}) == {"reasoning_effort": "high"}
+    assert capsys.readouterr().err == ""
+    monkeypatch.setattr(chat, "_template_text", lambda a: "enable_thinking only")
+    assert chat.fold_thinking_flag(args, {}) == {"reasoning_effort": "high"}
+    assert "no-op" in capsys.readouterr().err

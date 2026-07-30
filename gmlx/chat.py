@@ -286,30 +286,80 @@ def parse_template_config(raw: str | None) -> dict:
     return normalize_template_kwargs(out)
 
 
-def fold_thinking_flag(args, tkw: dict) -> dict:
-    """``--thinking on|off`` -> the ``enable_thinking`` template kwarg (the
-    dedicated flag wins over a ``--chat-template-config`` value). gpt-oss has
-    no off switch - its harmony template always reasons - so the flag warns
-    and points at the reasoning-effort levers instead."""
-    t = getattr(args, "thinking", None)
-    if t is None:
-        return tkw
-    from . import profiles as fam
-    from .discovery import header_meta
+def _template_text(args) -> str:
+    """The chat template that will actually render: an explicit
+    ``--chat-template`` (inline or file), else the GGUF's embedded one.
+    Best-effort - "" when unavailable - used only to pick the right
+    thinking/effort variable spelling."""
+    ct = getattr(args, "chat_template", None)
+    if ct:
+        p = os.path.expanduser(ct)
+        if os.path.exists(p):
+            try:
+                with open(p) as f:
+                    return f.read()
+            except OSError:
+                return ""
+        return ct
+    path = getattr(args, "gguf", None)
+    if not path or not os.path.exists(os.path.expanduser(str(path))):
+        return ""
+    try:
+        from .headerscan import scan_gguf
 
-    meta = header_meta(args.gguf) if getattr(args, "gguf", None) else None
-    family = (fam.detect_family(meta.get("arch"), meta.get("name"))
-              if meta else "default")
-    if family == "gpt-oss":
-        print(
-            "[thinking] gpt-oss has no thinking switch (reasoning always "
-            "runs); use --profile reasoning-low/-high or "
-            "--chat-template-config '{\"reasoning_effort\": ...}'",
-            file=sys.stderr,
-        )
+        t = scan_gguf(os.path.expanduser(str(path)), include_tensors=False).kv.get(
+            "tokenizer.chat_template")
+    except Exception:
+        return ""
+    if t is None:
+        return ""
+    return t if isinstance(t, str) else bytes(t).decode(errors="replace")
+
+
+def fold_thinking_flag(args, tkw: dict) -> dict:
+    """``--thinking on|off`` / ``--reasoning-effort LEVEL`` -> the template
+    variables this model's template actually reads (the dedicated flags win
+    over ``--chat-template-config`` values).
+
+    There is no cross-model standard, so the template text picks the
+    spelling: ``enable_thinking`` (Qwen3.x, GLM) where present; else
+    ``reasoning_effort`` - the Hy3 dialect includes a ``no_think`` level, so
+    ``--thinking off`` maps onto it, while gpt-oss's low/medium/high cannot
+    disable reasoning and the flag warns instead. ``--reasoning-effort``
+    passes through as ``reasoning_effort`` verbatim (families disagree on
+    the level names; the template validates its own)."""
+    t = getattr(args, "thinking", None)
+    effort = getattr(args, "reasoning_effort", None)
+    if t is None and effort is None:
         return tkw
     out = dict(tkw)
-    out["enable_thinking"] = t == "on"
+    template = _template_text(args)
+    if effort is not None:
+        out["reasoning_effort"] = effort
+        if template and "reasoning_effort" not in template:
+            print(
+                "[thinking] this model's chat template has no "
+                "reasoning_effort variable; --reasoning-effort is likely a "
+                "no-op", file=sys.stderr,
+            )
+    if t is not None:
+        if "enable_thinking" in template or not template:
+            out["enable_thinking"] = t == "on"
+        elif "no_think" in template and "reasoning_effort" in template:
+            out.setdefault(
+                "reasoning_effort", "no_think" if t == "off" else "high")
+        elif "reasoning_effort" in template:
+            print(
+                "[thinking] this model has no thinking switch (reasoning "
+                "always runs); use --reasoning-effort low|medium|high to "
+                "size it", file=sys.stderr,
+            )
+        else:
+            print(
+                "[thinking] this model's chat template has no thinking "
+                "switch; --thinking is likely a no-op", file=sys.stderr,
+            )
+            out["enable_thinking"] = t == "on"
     return out
 
 

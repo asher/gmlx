@@ -274,8 +274,16 @@ def add_load_args(ap: argparse.ArgumentParser) -> None:
         "--thinking",
         choices=("on", "off"),
         default=None,
-        help="Thinking-model reasoning switch (sets the model's "
-        "enable_thinking template variable; default: the model's default).",
+        help="Thinking-model reasoning switch (sets the template variable "
+        "this model's template reads; default: the model's default).",
+    )
+    ap.add_argument(
+        "--reasoning-effort",
+        default=None,
+        metavar="LEVEL",
+        help="Reasoning-effort level for models that grade their thinking "
+        "(gpt-oss/GLM: low|medium|high, Hy3: no_think|low|high; the "
+        "template validates its own level names).",
     )
     ap.add_argument(
         "--no-remap",

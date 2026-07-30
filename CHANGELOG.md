@@ -48,9 +48,14 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- `run`/`chat --thinking on|off`: a first-class switch for thinking models
-  (sets the `enable_thinking` template variable; on gpt-oss it points at
-  the reasoning-effort levers instead). Shows in the everyday `-h` page.
+- `run`/`chat --thinking on|off` and `--reasoning-effort LEVEL`:
+  first-class switches for thinking models. The chat template picks the
+  spelling: `enable_thinking` where the template reads it (Qwen3.x, GLM),
+  the Hy3 `reasoning_effort: no_think` dialect where it doesn't, and a
+  pointer at the effort levels on gpt-oss (which cannot disable
+  reasoning). `--reasoning-effort` passes through verbatim - level names
+  are the model's own (gpt-oss/GLM low|medium|high, Hy3
+  no_think|low|high) - and warns when the template has no such variable.
 - The z.ai / GLM API spelling of the thinking switch -
   `thinking: {"type": "enabled"|"disabled"}` - now works everywhere the
   template kwargs do: `--chat-template-config`, config/profile
