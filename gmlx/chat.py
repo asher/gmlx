@@ -322,12 +322,15 @@ def fold_thinking_flag(args, tkw: dict) -> dict:
     over ``--chat-template-config`` values).
 
     There is no cross-model standard, so the template text picks the
-    spelling: ``enable_thinking`` (Qwen3.x, GLM) where present; else
-    ``reasoning_effort`` - the Hy3 dialect includes a ``no_think`` level, so
-    ``--thinking off`` maps onto it, while gpt-oss's low/medium/high cannot
-    disable reasoning and the flag warns instead. ``--reasoning-effort``
-    passes through as ``reasoning_effort`` verbatim (families disagree on
-    the level names; the template validates its own)."""
+    spelling: MiniMax's three-state ``thinking_mode``
+    (enabled/disabled/adaptive) where present; ``enable_thinking`` (Qwen3.x,
+    GLM, DeepSeek-V4 alias) next; else ``reasoning_effort`` - the Hy3
+    dialect includes a ``no_think`` level, so ``--thinking off`` maps onto
+    it, while gpt-oss's low/medium/high cannot disable reasoning and the
+    flag warns instead. ``--reasoning-effort`` passes through as
+    ``reasoning_effort`` verbatim (families disagree on the level names -
+    gpt-oss/GLM low/medium/high, Hy3 no_think/low/high, DeepSeek-V4 max;
+    the template validates its own)."""
     t = getattr(args, "thinking", None)
     effort = getattr(args, "reasoning_effort", None)
     if t is None and effort is None:
@@ -343,7 +346,16 @@ def fold_thinking_flag(args, tkw: dict) -> dict:
                 "no-op", file=sys.stderr,
             )
     if t is not None:
-        if "enable_thinking" in template or not template:
+        if "thinking_mode" in template:
+            out["thinking_mode"] = {
+                "on": "enabled", "off": "disabled", "adaptive": "adaptive"}[t]
+        elif t == "adaptive":
+            print(
+                "[thinking] adaptive is a MiniMax-style thinking_mode level; "
+                "this model's template has no such variable - ignored",
+                file=sys.stderr,
+            )
+        elif "enable_thinking" in template or not template:
             out["enable_thinking"] = t == "on"
         elif "no_think" in template and "reasoning_effort" in template:
             out.setdefault(

@@ -272,10 +272,11 @@ def add_load_args(ap: argparse.ArgumentParser) -> None:
     )
     ap.add_argument(
         "--thinking",
-        choices=("on", "off"),
+        choices=("on", "off", "adaptive"),
         default=None,
         help="Thinking-model reasoning switch (sets the template variable "
-        "this model's template reads; default: the model's default).",
+        "this model's template reads; 'adaptive' = MiniMax-style "
+        "model-decides mode; default: the model's default).",
     )
     ap.add_argument(
         "--reasoning-effort",

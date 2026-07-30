@@ -399,3 +399,30 @@ def test_fold_reasoning_effort_passthrough_and_noop_warning(monkeypatch, capsys)
     monkeypatch.setattr(chat, "_template_text", lambda a: "enable_thinking only")
     assert chat.fold_thinking_flag(args, {}) == {"reasoning_effort": "high"}
     assert "no-op" in capsys.readouterr().err
+
+
+def test_fold_thinking_flag_minimax_thinking_mode(monkeypatch):
+    """MiniMax-M3: three-state thinking_mode (enabled/disabled/adaptive)."""
+    from types import SimpleNamespace
+    import gmlx.chat as chat
+
+    monkeypatch.setattr(chat, "_template_text",
+                        lambda a: 'thinking_mode == "adaptive"')
+    args = SimpleNamespace(thinking="off", reasoning_effort=None, gguf="/m/x.gguf")
+    assert chat.fold_thinking_flag(args, {}) == {"thinking_mode": "disabled"}
+    args.thinking = "on"
+    assert chat.fold_thinking_flag(args, {}) == {"thinking_mode": "enabled"}
+    args.thinking = "adaptive"
+    assert chat.fold_thinking_flag(args, {}) == {"thinking_mode": "adaptive"}
+
+
+def test_fold_thinking_adaptive_elsewhere_warns(monkeypatch, capsys):
+    from types import SimpleNamespace
+    import gmlx.chat as chat
+
+    monkeypatch.setattr(chat, "_template_text",
+                        lambda a: "{% if enable_thinking %}...{% endif %}")
+    args = SimpleNamespace(thinking="adaptive", reasoning_effort=None,
+                           gguf="/m/x.gguf")
+    assert chat.fold_thinking_flag(args, {}) == {}
+    assert "adaptive" in capsys.readouterr().err
