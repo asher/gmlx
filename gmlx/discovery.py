@@ -36,7 +36,9 @@ from .config import DiscoverSpec, ModelCfg
 from .config_synth import supported_arches
 from .gguf_meta import read_int, read_string
 from .preflight import is_first_shard as _is_first_shard
+from .preflight import shard_names as _shard_names
 from .preflight import strip_shard_suffix as _strip_shard_suffix
+from . import arch_table as _arch_table
 
 # Assistant-shape drafter arches (a separate GGUF that drafts for a target whose
 # hidden size it carries as a "backbone" field). The set is the fast path; the
@@ -88,6 +90,7 @@ class ClassifiedGguf:
     mtp: bool               # native-head MTP (model kind only)
     quant: str | None    # quant tag from the filename, or None
     loadable: bool          # arch builds a model with no hf override (model kind)
+    moe: bool = False       # routed experts present (model kind only)
 
 
 # Classification
@@ -143,8 +146,10 @@ def _classify_meta(meta, *, basename: str, path: str) -> ClassifiedGguf:
 
     nextn = read_int(meta, f"{arch}.nextn_predict_layers") if arch else None
     mtp = bool(nextn and nextn > 0)
+    experts = read_int(meta, f"{arch}.expert_count") if arch else None
     loadable = bool(arch) and arch in supported_arches()
-    return ClassifiedGguf(ap, "model", arch, mtp, quant, loadable)
+    return ClassifiedGguf(ap, "model", arch, mtp, quant, loadable,
+                          moe=bool(experts and experts > 0))
 
 
 def classify_gguf(path: str) -> ClassifiedGguf | None:
@@ -548,6 +553,60 @@ def _classify_each(paths, *, progress):
         yield classify_gguf(p)
 
 
+# Memory fit - a model whose weights alone exceed this share of physical RAM
+# cannot run fully resident (KV cache, activations, and the OS need the rest,
+# and the GPU wired limit sits below physmem), so discovery wires the over-RAM
+# placement instead of scaffolding a config that fails at load.
+_OVERRAM_RAM_FRACTION = 0.8
+
+
+def _physmem_bytes() -> int | None:
+    try:
+        return os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    except (AttributeError, ValueError, OSError):
+        return None
+
+
+def _gguf_set_bytes(path: str) -> int | None:
+    """Total on-disk bytes of ``path``'s split set (all shards), or its own size
+    for a non-split GGUF. ``None`` when nothing could be stat'd (e.g. an hf ref
+    or a malformed split name) - callers treat unknown as "fits"."""
+    d, base = os.path.split(path)
+    try:
+        names = _shard_names(base)
+    except ValueError:
+        names = [base]
+    total = 0
+    for n in names:
+        try:
+            total += os.stat(os.path.join(d, n)).st_size
+        except OSError:
+            pass                                 # missing shard: size what exists
+    return total or None
+
+
+def _fit_in_memory(mc: ModelCfg, c: ClassifiedGguf) -> None:
+    """Wire the over-RAM placement for a model whose weights can't sit resident:
+    a MoE gets ``stream: experts`` (and loses ``speculative`` - MTP needs a plain
+    fully-resident base); a dense over-RAM model just gets a stderr hint (whole-
+    model CPU streaming is a big enough behavior change to leave opt-in)."""
+    total, phys = _gguf_set_bytes(c.path), _physmem_bytes()
+    if not total or not phys or total <= _OVERRAM_RAM_FRACTION * phys:
+        return
+    size = f"{total / 1e9:.0f} GB weights, {phys / 1e9:.0f} GB RAM"
+    if c.moe:
+        mc.stream = "experts"
+        note = ""
+        if mc.speculative:
+            mc.speculative = False
+            note = ", speculative off (MTP needs a fully-resident base)"
+        print(f"[discover] over-RAM MoE ({size}): stream: experts{note}: "
+              f"{c.path}", file=sys.stderr)
+    else:
+        print(f"[discover] over-RAM model ({size}): consider `stream: cpu` "
+              f"on its entry: {c.path}", file=sys.stderr)
+
+
 def _emit_dir(classified, spec, used_ids, out):
     """Build ModelCfgs for one scan, pairing mmproj/draft per directory."""
     by_dir: dict[str, list[ClassifiedGguf]] = {}
@@ -582,9 +641,17 @@ def _emit_dir(classified, spec, used_ids, out):
         made: list[tuple[ModelCfg, ClassifiedGguf]] = []
         for c in models:
             spec_flag = False if spec.speculative is False else bool(c.mtp)
+            if spec_flag and not _arch_table.mtp_wired(c.arch):
+                # The GGUF carries an MTP head, but no target class is wired
+                # for the arch - `speculative: true` would fail at load.
+                print(f"[discover] MTP head present but no MTP target wired "
+                      f"for arch {c.arch!r}; speculative stays off: {c.path}",
+                      file=sys.stderr)
+                spec_flag = False
             fam = _family_profiles.detect_family(c.arch)
             mc = ModelCfg(id=id_for[c.path], path=c.path, speculative=spec_flag,
                           family=fam if fam != "default" else None)
+            _fit_in_memory(mc, c)
             made.append((mc, c))
             out.append(mc)
 
@@ -704,6 +771,8 @@ def model_to_entry(mc: ModelCfg, model_dirs) -> dict:
         entry["mmproj"] = _rel(mc.mmproj, model_dirs)
     if mc.speculative:
         entry["speculative"] = True
+    if mc.stream:
+        entry["stream"] = mc.stream
     return entry
 
 
@@ -1029,6 +1098,9 @@ def _scaffold_models_block(models, dirs) -> list[str]:
         if mc.speculative:
             lines.append("    speculative: true       # native-head MTP "
                          "(drafter inside the target GGUF)")
+        if mc.stream:
+            lines.append(f"    stream: {mc.stream}    # over-RAM MoE: experts "
+                         "stream from disk, rest stays on GPU")
     lines.append("")
     return lines
 

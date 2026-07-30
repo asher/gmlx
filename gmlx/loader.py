@@ -735,10 +735,11 @@ def _mtp_target_classes(model_type: str):
             return hy_v3_mtp.HyV3SpecLM(ModelArgs.from_dict(config))
 
         return hy_v3_mtp.HyV3SpecLM, build
+    from .arch_table import MTP_WIRED_MODEL_TYPES
+
     raise NotImplementedError(
         f"MTP target class for model_type {model_type!r} not wired "
-        f"(supported: qwen3_5 / qwen3_5_moe / gemma4_text / deepseek_v4 / "
-        f"hy_v3)"
+        f"(supported: {' / '.join(sorted(MTP_WIRED_MODEL_TYPES))})"
     )
 
 

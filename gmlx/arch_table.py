@@ -119,6 +119,22 @@ class UnsupportedArchError(Exception):
     """A GGUF architecture the runtime loader can't build a model for."""
 
 
+# model_types with a wired native-head MTP target class - the rows
+# ``loader._mtp_target_classes`` dispatches on. A GGUF can carry an MTP head
+# (``<arch>.nextn_predict_layers > 0``) on an arch outside this set (e.g.
+# glm-dsa -> glm_moe_dsa); such a model loads plain but ``speculative: true``
+# fails at build. Extend together with the loader dispatch.
+MTP_WIRED_MODEL_TYPES = frozenset({
+    "qwen3_5", "qwen3_5_moe", "gemma4_text", "deepseek_v4", "hy_v3",
+})
+
+
+def mtp_wired(gguf_arch: str | None) -> bool:
+    """True iff a native-head MTP GGUF of this arch has a wired target class."""
+    model_type = config_synth.GGUF_ARCH_TO_MODEL_TYPE.get(gguf_arch or "")
+    return model_type in MTP_WIRED_MODEL_TYPES
+
+
 def has_synth(gguf_arch: str) -> bool:
     """True iff ``config_synth`` produces a complete config for this arch."""
     return gguf_arch in config_synth.supported_arches()

@@ -699,3 +699,89 @@ def test_scan_pairs_llamacpp_default_mmproj_name(tmp_path, fake_classify):
     models = _scan(root)
     assert len(models) == 1
     assert models[0].mmproj.endswith("mmproj-model-f16.gguf")
+
+
+# MTP wiring gate + memory-fit placement (over-RAM models)
+def test_expert_count_sets_moe():
+    c = _classify({"general.architecture": "qwen35moe",
+                   "qwen35moe.expert_count": 128}, "m-Q4_K_M.gguf")
+    assert c.moe is True
+
+
+def test_dense_model_not_moe():
+    c = _classify({"general.architecture": "qwen35"}, "m-Q4_K_M.gguf")
+    assert c.moe is False
+
+
+def _classify_as(arch, extra=None):
+    """A classify_gguf stand-in returning one fixed arch (plus extra KV)."""
+    def _f(path):
+        meta = {"general.architecture": arch, **(extra or {})}
+        return disc._classify_meta(meta, basename=os.path.basename(path),
+                                   path=path)
+    return _f
+
+
+def test_scan_mtp_head_on_unwired_arch_stays_plain(tmp_path, monkeypatch, capsys):
+    # GLM-5.2: an MTP/nextn head in the GGUF, but no MTP target class wired for
+    # glm-dsa -> `speculative: true` would fail at load, so it must stay off.
+    monkeypatch.setattr(disc, "classify_gguf", _classify_as(
+        "glm-dsa", {"glm-dsa.nextn_predict_layers": 1,
+                    "glm-dsa.expert_count": 160}))
+    root = _write(tmp_path, "GLM-5.2-UD-IQ3_XXS.gguf")
+    models = _scan(root)
+    assert models[0].speculative is False
+    assert "no MTP target wired" in capsys.readouterr().err
+
+
+def test_scan_wired_mtp_arch_keeps_speculative(tmp_path, monkeypatch):
+    monkeypatch.setattr(disc, "classify_gguf", _classify_as(
+        "hy_v3", {"hy_v3.nextn_predict_layers": 1, "hy_v3.expert_count": 64}))
+    root = _write(tmp_path, "Hy3-IQ4_XS.gguf")
+    models = _scan(root)
+    assert models[0].speculative is True
+    assert models[0].stream is None               # tiny file: fits in RAM
+
+
+def test_scan_overram_moe_streams_experts_and_drops_mtp(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(disc, "classify_gguf", _classify_as(
+        "hy_v3", {"hy_v3.nextn_predict_layers": 1, "hy_v3.expert_count": 64}))
+    monkeypatch.setattr(disc, "_physmem_bytes", lambda: 128 * 10**9)
+    monkeypatch.setattr(disc, "_gguf_set_bytes", lambda p: 200 * 10**9)
+    root = _write(tmp_path, "Hy3-IQ4_XS.gguf")
+    m = _scan(root)[0]
+    assert m.stream == "experts"
+    assert m.speculative is False                 # MTP needs a resident base
+    err = capsys.readouterr().err
+    assert "over-RAM MoE" in err and "speculative off" in err
+
+
+def test_scan_overram_dense_gets_hint_only(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(disc, "classify_gguf", _classify_as("llama"))
+    monkeypatch.setattr(disc, "_physmem_bytes", lambda: 64 * 10**9)
+    monkeypatch.setattr(disc, "_gguf_set_bytes", lambda p: 100 * 10**9)
+    root = _write(tmp_path, "Big-Dense-Q8_0.gguf")
+    m = _scan(root)[0]
+    assert m.stream is None                       # dense: streaming stays opt-in
+    assert "stream: cpu" in capsys.readouterr().err
+
+
+def test_gguf_set_bytes_sums_shards(tmp_path):
+    (tmp_path / "m-Q4-00001-of-00002.gguf").write_bytes(b"x" * 10)
+    (tmp_path / "m-Q4-00002-of-00002.gguf").write_bytes(b"y" * 7)
+    assert disc._gguf_set_bytes(str(tmp_path / "m-Q4-00001-of-00002.gguf")) == 17
+
+
+def test_model_to_entry_includes_stream():
+    mc = ModelCfg(id="x", path="/models/x.gguf", stream="experts")
+    assert disc.model_to_entry(mc, ["/models"])["stream"] == "experts"
+
+
+def test_scaffold_stream_round_trips_through_build_config():
+    import yaml
+    models = [ModelCfg(id="hy3-iq4", path="/models/Hy3-IQ4_XS.gguf",
+                       stream="experts")]
+    text = disc.scaffold_yaml(models, model_dirs=["/models"])
+    cfg = build_config(yaml.safe_load(text))
+    assert cfg.models["hy3-iq4"].stream == "experts"

@@ -38,6 +38,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `gmlx init` / `sync-models` no longer scaffold `speculative: true` for
+  models whose architecture has no MTP target class (they failed at load),
+  and models too large for RAM get `stream: experts` (MoE) or a `stream:
+  cpu` hint (dense) instead of an entry that cannot load.
 - Non-stream replies that hit `max_tokens` inside a think block now return
   the partial reasoning as `reasoning_content` with empty content, matching
   the streaming path (the raw reasoning previously leaked into `content`).
