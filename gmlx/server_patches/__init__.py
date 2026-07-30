@@ -36,6 +36,11 @@ pattern as :mod:`server_bridge_vlm` / :mod:`residency`):
 * **``/v1/completions``** - a minimal classic text-completions route (single
   string prompt, ``n=1``, SSE streaming, stop sequences); mlx-vlm serves only
   the chat-shaped routes.
+* **Faithful history render** - the chat routes' ``apply_chat_template``
+  keeps message keys the per-model rebuild does not produce (notably
+  ``reasoning_content``), so ``preserve_thinking`` reaches the chat template
+  on non-tool turns instead of being silently dropped for model types in
+  mlx-vlm's ``MODEL_CONFIG`` table.
 * **SSE keepalive** - the streaming routes emit SSE comment lines while the
   engine is silent (a deep-context dense prefill can run >10 minutes before the
   first token), so clients with a between-bytes read timeout don't tear the
@@ -60,7 +65,10 @@ import importlib
 import os
 
 from ._common import _PATCH_FLAG
-from .apc import install_apc_batched_store_eval, install_apc_lone_harvest
+from .apc import (
+    install_apc_lone_harvest,
+    install_retire_render_capture,
+)
 from .api_contract import install_api_contract
 from .chat_behavior import (
     install_chat_template_kwargs,
@@ -79,6 +87,7 @@ from .hardening import (
     install_loopback_host_guard,
 )
 from .observability import install_request_timing_log, uvicorn_log_config
+from .render import install_faithful_history
 from .request_flow import (
     install_chat_load_offload,
     install_optional_request_model,
@@ -112,8 +121,8 @@ from .sampling import (
 __all__ = [
     "HFAccessDisabled",
     "disable_credentialed_cors",
-    "install_apc_batched_store_eval",
     "install_apc_lone_harvest",
+    "install_retire_render_capture",
     "install_api_contract",
     "install_api_key_auth",
     "install_audio_speech_route",
@@ -125,6 +134,7 @@ __all__ = [
     "install_chat_template_kwargs",
     "install_completions_route",
     "install_embeddings_route",
+    "install_faithful_history",
     "install_fast_sampler",
     "install_gen_args_profile_injection",
     "install_health_liveness_override",
@@ -191,7 +201,6 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_pooled_prompt_kv_quant()
     install_chat_template_kwargs()
     install_thinking_budget_fix()
-    install_stream_thinking_seed()
     install_openai_stop_sequences()
     install_api_contract()
     # Before the load-offload / profile-capture / keepalive wrappers so they
@@ -210,8 +219,17 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_hf_download_gate(bool(getattr(cfg, "hf_cache", False)))
     install_runtime_snapshot_enrichment()
     install_pool_aware_unload()
+    # Render-wrap nesting per target: seed(retire(faithful(orig))).
+    # Faithful innermost so the retire capture memoizes it and predictions
+    # see the render the server produces. Seed outermost for two reasons:
+    # the faithful wrap's inner return_messages=True call would feed an
+    # inner stash the message list ("no prompt"), and the captured render
+    # must exclude the stash so off-request predictions never write the
+    # request contextvar the thinking splitters read.
+    install_faithful_history()
     install_apc_lone_harvest()
-    install_apc_batched_store_eval()
+    install_retire_render_capture()
+    install_stream_thinking_seed()
     install_keep_route()
     install_reload_route(reload_fn)
     install_audio_transcription_route(getattr(cfg, "stt", None))

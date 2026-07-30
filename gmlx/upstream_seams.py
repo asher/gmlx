@@ -134,6 +134,19 @@ SEAMS: tuple[Seam, ...] = (
     # --- speculative / AR batch engine (spec_engine owns these methods) ---
     Seam("mlx_vlm.generate.ar", "BatchGenerator.__init__",
          "spec_engine._install_apc_manager_stash", critical=True),
+    Seam("mlx_vlm.generate.ar",
+         "PromptProcessingBatch._store_apc_exact_checkpoints",
+         "spec_engine._install_ckpt_checkpoint_store (ckpt cursor rides "
+         "the stock store)", critical=True),
+    Seam("mlx_vlm.generate.ar", "PromptProcessingBatch.__init__",
+         "spec_engine.install_full_prompt_mtp_prefill (prefill-step "
+         "restore + stock-path ckpt arming)", critical=True),
+    Seam("mlx_vlm.generate.ar", "GenerationBatch._step",
+         "spec_engine._install_plain_ckpt_decode (token accounting + "
+         "decode-time snapshots)", critical=True),
+    Seam("mlx_vlm.generate.ar", "GenerationBatch.filter",
+         "spec_engine._install_plain_ckpt_decode (B=1 retirement at row "
+         "exit)", critical=True),
     Seam("mlx_vlm.generate.ar", "PromptProcessingBatch.prompt_step",
          "spec_engine.install_full_prompt_mtp_prefill", critical=True),
     Seam("mlx_vlm.generate.ar", "PromptProcessingBatch.generate",
@@ -159,6 +172,43 @@ SEAMS: tuple[Seam, ...] = (
          "server_patches.install_fast_sampler"),
     Seam("mlx_vlm.server.generation", "GenerationArguments.to_template_kwargs",
          "server_patches (chat_template_kwargs transform)"),
+    Seam("mlx_vlm.server.generation", "ResponseGenerator._preprocess_request",
+         "server_patches.install_retire_render_capture (ids hop + "
+         "tokenize path for the next-turn retirement key)"),
+    Seam("mlx_vlm.server.openai", "apply_chat_template",
+         "server_patches.install_retire_render_capture (render-context "
+         "memo, module attr) + render.install_faithful_history (inner "
+         "key-merge wrap)"),
+    Seam("mlx_vlm.server.anthropic", "apply_chat_template",
+         "server_patches._common._render_target_modules (faithful "
+         "history, retire capture, and thinking seed wrap every "
+         "captured render binding)"),
+    Seam("mlx_vlm.server.app", "_protocol_deps",
+         "server_patches._common._render_target_modules (deps captures "
+         "the openai function object at namespace construction)"),
+    Seam("mlx_vlm.prompt_utils", "apply_chat_template",
+         "server_patches.render.install_faithful_history "
+         "(return_messages contract: one rebuilt message per readable "
+         "input item; tool passthrough branch)"),
+    Seam("mlx_vlm.prompt_utils", "get_chat_template",
+         "server_patches.render.install_faithful_history (owned render "
+         "tail mirrors the stock function's)"),
+    Seam("mlx_vlm.server.openai", "_split_thinking",
+         "retire_key.build_assistant_message (response-shape mirror)"),
+    Seam("mlx_vlm.server.openai", "process_tool_calls",
+         "retire_key.build_assistant_message (response-shape mirror)"),
+    Seam("mlx_vlm.server.openai", "_infer_tool_parser_from_processor",
+         "retire_key.build_assistant_message (response-shape mirror)"),
+    Seam("mlx_vlm.server.openai", "load_tool_module",
+         "retire_key.build_assistant_message (response-shape mirror)"),
+    Seam("mlx_vlm.server.responses_state",
+         "ThinkingStreamState._build_open_close_markers",
+         "retire_key._thinking_markers (splitter default marker pairs "
+         "for the mid-decode virtual closer)"),
+    Seam("mlx_vlm.server.app", "_split_thinking_text",
+         "server_patches.chat_behavior.install_stream_thinking_seed "
+         "(non-stream truncated-thinking classification, module attr "
+         "looked up per call by app._split_thinking)"),
     Seam("mlx_vlm.server.runtime", "runtime",
          "residency._RuntimeProxy wrap", critical=True),
     Seam("mlx_vlm.server.app", "app",
@@ -175,23 +225,29 @@ SEAMS: tuple[Seam, ...] = (
          "hy_v3_tools.ensure_registered (Hy3 marker prepend)"),
     Seam("mlx_vlm.tool_parsers", "load_tool_module",
          "hy_v3_tools (sys.modules graft resolves through it)"),
-    # --- APC internals (server_patches lone-harvest + apc_pooling) ---
+    # --- APC internals (lone-harvest patch, gmlx manager subclass, apc_pooling) ---
     Seam("mlx_vlm.apc", "harvest_blocks_from_batch_cache",
          "server_patches.install_apc_lone_harvest", critical=True),
     Seam("mlx_vlm.apc", "_clone_layer_major_kv_cache_for_apc",
-         "server_patches.install_apc_lone_harvest", critical=True),
+         "apc_manager.GmlxAPCManager.store_kv_blocks", critical=True),
     Seam("mlx_vlm.apc", "_sequence_hash",
-         "server_patches.install_apc_lone_harvest", critical=True),
+         "apc_manager.GmlxAPCManager.store_kv_blocks", critical=True),
     Seam("mlx_vlm.apc", "APCExactCacheEntry",
-         "server_patches.install_apc_lone_harvest", critical=True),
+         "apc_manager.GmlxAPCManager.store_kv_blocks", critical=True),
     Seam("mlx_vlm.apc", "_hash_tokens",
-         "server_patches.install_apc_lone_harvest", critical=True),
+         "apc_manager.GmlxAPCManager.store_kv_blocks", critical=True),
     Seam("mlx_vlm.apc", "_DiskLayerMajorBlock",
-         "server_patches.install_apc_lone_harvest", critical=True),
+         "apc_manager.GmlxAPCManager.store_kv_blocks", critical=True),
     Seam("mlx_vlm.apc", "_copy_mlx_array",
-         "server_patches.install_apc_lone_harvest", critical=True),
+         "apc_manager.GmlxAPCManager.store_kv_blocks", critical=True),
     Seam("mlx_vlm.apc", "SEED_PARENT_HASH",
-         "server_patches.install_apc_lone_harvest", critical=True),
+         "apc_manager.GmlxAPCManager.store_kv_blocks", critical=True),
+    Seam("mlx_vlm.apc", "DEFAULT_BLOCK_SIZE",
+         "apc_manager.build_apc_manager (from_env mirror)", critical=True),
+    Seam("mlx_vlm.apc", "DEFAULT_NUM_BLOCKS",
+         "apc_manager.build_apc_manager (from_env mirror)", critical=True),
+    Seam("mlx_vlm.apc", "DiskBlockStore",
+         "apc_manager.build_apc_manager (from_env mirror)", critical=True),
     Seam("mlx_vlm.apc", "_cache_entry_supports_exact_apc",
          "apc_pooling (PoolingCache exact-APC predicate)", critical=True),
     Seam("mlx_vlm.apc", "_merge_exact_cache_entries",

@@ -1,12 +1,11 @@
-"""APC (prefix-cache) engine patches: lone-sequence harvest and batched
-store eval."""
+"""APC (prefix-cache) engine patches: lone-sequence harvest and retirement
+render capture. The batched store eval lives on the gmlx-owned manager
+subclass (``gmlx.apc_manager.GmlxAPCManager``), not as a method patch here."""
 
 from __future__ import annotations
 
 import importlib
-
-
-from ..envflags import env_int
+import weakref
 
 
 def install_apc_lone_harvest() -> None:
@@ -76,202 +75,89 @@ def install_apc_lone_harvest() -> None:
     apc._kq_lone_harvest = True
 
 
-def install_apc_batched_store_eval() -> None:
-    """Batch the per-block ``mx.eval`` inside ``APCManager.store_kv_blocks``.
+def install_retire_render_capture() -> None:
+    """Record each chat request's render context for next-turn retirement keys.
 
-    The stock store loop deep-copies each 16-token block's K/V slices and
-    evaluates them one block at a time -- ~0.4-0.5 ms of dispatch/sync per
-    block regardless of data size, which compounds to ~1 s of synchronous
-    prefill-thread stall for a 32k-token store on a 27B model. The copies
-    are pure materialization (nothing in the loop consumes their values), so
-    they can be evaluated in chunks: same data volume, ~30x fewer syncs.
+    Two hops, both provenance: the openai module's ``apply_chat_template``
+    records (processed messages, template kwargs, processor, config) keyed
+    by the rendered prompt text, and ``ResponseGenerator._preprocess_request``
+    re-keys the entry by the exact token ids it produces -- the same ids the
+    spec engine later stashes as ``full_ids`` -- while capturing the
+    generator's own text-to-ids path so the retirement render tokenizes
+    identically. Media requests are not re-keyed (re-encoding text cannot
+    reproduce expanded media token ids). Consumed by speculative retirement
+    via ``retire_key.next_turn_lcp``. Kill: ``GMLX_APC_RETIRE_LCP=0``.
+    """
+    import os
 
-    This is a verbatim copy of the stock method with the eval hoisted into
-    ``GMLX_APC_STORE_EVAL_CHUNK``-block batches (default 32; <=0 means a
-    single eval before return). All evals still complete before the method
-    returns, preserving the stock guarantee that block tensors are decoupled
-    from the caller's cache before ``mx.clear_cache`` can release it.
-
-    Installs only if every private helper it references still exists
-    upstream; otherwise logs and keeps the stock method. Idempotent."""
-    import mlx.core as mx
-
-    apc = importlib.import_module("mlx_vlm.apc")
-    if getattr(apc, "_kq_batched_store_eval", False):
+    if os.environ.get("GMLX_APC_RETIRE_LCP") == "0":
         return
-    try:
-        _clone_lm = apc._clone_layer_major_kv_cache_for_apc
-        _seq_hash = apc._sequence_hash
-        _entry_cls = apc.APCExactCacheEntry
-        _seed_parent = apc.SEED_PARENT_HASH
-        _hash_tokens = apc._hash_tokens
-        _disk_block_cls = apc._DiskLayerMajorBlock
-        _copy_arr = apc._copy_mlx_array
-        _time = apc.time
-        _logger = apc.logger
-    except AttributeError as e:
-        print(f"[apc] prompt-cache fast path not installed ({e}); the cache "
-              "still works, slower - reinstall the pinned mlx-vlm "
-              "(pip install mlx-vlm==0.6.4)")
+    from .. import retire_key
+
+    from ._common import _render_target_modules
+    gen_mod = importlib.import_module("mlx_vlm.server.generation")
+
+    def _make_capture(orig_render):
+        def apply_chat_template(processor, config, prompt, *a, **kw):
+            out = orig_render(processor, config, prompt, *a, **kw)
+            try:
+                if isinstance(out, str) and isinstance(prompt, list):
+                    retire_key.register_render(out, {
+                        "messages": [dict(m) for m in prompt
+                                     if isinstance(m, dict)],
+                        "kw": dict(kw),
+                        "processor": processor,
+                        "config": config,
+                        "render": orig_render,
+                        "media": bool(kw.get("num_images")
+                                      or kw.get("num_audios")
+                                      or kw.get("video")),
+                    })
+            except Exception:
+                pass
+            return out
+
+        apply_chat_template._kq_retire_capture = True
+        return apply_chat_template
+
+    # Every captured binding (openai, anthropic, _protocol_deps), so
+    # retirement keys cover all protocol routes, not just OpenAI.
+    for target in _render_target_modules():
+        fn = getattr(target, "apply_chat_template", None)
+        if fn is not None and not getattr(fn, "_kq_retire_capture", False):
+            target.apply_chat_template = _make_capture(fn)
+
+    cls = gen_mod.ResponseGenerator
+    orig_pre = cls._preprocess_request
+    if getattr(orig_pre, "_kq_retire_capture", False):
         return
 
-    eval_chunk_blocks = env_int("GMLX_APC_STORE_EVAL_CHUNK", 32)
+    def _preprocess_request(self, prompt, images=None, audio=None,
+                            videos=None):
+        raw = orig_pre(self, prompt, images, audio, videos)
+        try:
+            if isinstance(prompt, str) and not images and not audio \
+                    and not videos and isinstance(raw, dict):
+                ids = raw.get("input_ids")
+                if ids is not None:
+                    row = ids.tolist() if hasattr(ids, "tolist") else list(ids)
+                    if row and isinstance(row[0], list):
+                        row = row[0]
+                    # Weak: a memo entry must never pin the generator (and
+                    # through it the model weights) past a pool unload.
+                    ref = weakref.ref(self)
 
-    def store_kv_blocks(self, token_ids, layer_keys, layer_values,
-                        *, extra_hash=0, skip_first_n_tokens=0):
-        with self.lock:
-            n_full = len(token_ids) // self.block_size
-            skip_full = skip_first_n_tokens // self.block_size
-            full_prefix_tokens = n_full * self.block_size
-            guarded_prefix_tokens = max(
-                0, len(token_ids) - self.exact_cache_guard_tokens
-            )
-            layer_major_prefix_tokens = min(
-                full_prefix_tokens,
-                (guarded_prefix_tokens // self.block_size) * self.block_size,
-            )
-            new_blocks = []
-            disk_blocks = []
-            per_block_tensors = len(layer_keys) + len(layer_values)
-            token_tuple = tuple(
-                int(t) for t in token_ids[:layer_major_prefix_tokens])
-            layer_major_stored = False
-            if (
-                self._layer_major_memory_min_tokens > 0
-                and self._exact_cache_max > 0
-                and layer_major_prefix_tokens
-                >= self._layer_major_memory_min_tokens
-            ):
-                copied = _clone_lm(
-                    layer_keys,
-                    layer_values,
-                    layer_major_prefix_tokens,
-                )
-                if copied is not None:
-                    key = _seq_hash(token_tuple, extra_hash, self.block_size)
-                    self._exact_cache[key] = _entry_cls(
-                        token_ids=token_tuple,
-                        extra_hash=int(extra_hash),
-                        prompt_cache=copied,
-                        last_used=_time.time(),
-                    )
-                    self._exact_cache.move_to_end(key)
-                    while len(self._exact_cache) > self._exact_cache_max:
-                        self._exact_cache.popitem(last=False)
-                    self.stats.exact_stores += 1
-                    layer_major_stored = True
-            parent = _seed_parent
-            for i in range(skip_full):
-                chunk = tuple(
-                    int(t)
-                    for t in token_ids[
-                        i * self.block_size:(i + 1) * self.block_size]
-                )
-                parent = _hash_tokens(parent, chunk, extra_hash)
+                    def preprocess(text, _ref=ref):
+                        gen = _ref()
+                        if gen is None:
+                            raise RuntimeError(
+                                "retire render: generator unloaded")
+                        return orig_pre(gen, text, None, None, None)
 
-            # Deferred-eval accumulator (the only change vs stock).
-            pending = []
+                    retire_key.register_ids(prompt, row, preprocess)
+        except Exception:
+            pass
+        return raw
 
-            def _flush_pending(force=False):
-                if not pending:
-                    return
-                if force or eval_chunk_blocks <= 0:
-                    mx.eval(pending)
-                    pending.clear()
-                elif len(pending) >= eval_chunk_blocks * per_block_tensors:
-                    mx.eval(pending)
-                    pending.clear()
-
-            for i in range(skip_full, n_full):
-                chunk = tuple(
-                    int(t)
-                    for t in token_ids[
-                        i * self.block_size:(i + 1) * self.block_size]
-                )
-                h = _hash_tokens(parent, chunk, extra_hash)
-                if self.disk is not None and not self.disk.has(h):
-                    disk_blocks.append(
-                        _disk_block_cls(
-                            block_hash=int(h),
-                            parent_hash=int(parent),
-                            extra_hash=int(extra_hash),
-                            token_ids=chunk,
-                            source_block_idx=i,
-                        )
-                    )
-                if layer_major_stored:
-                    parent = h
-                    continue
-                existing = self.hash_table.get(h)
-                if existing is not None and existing.token_ids == chunk:
-                    acquired = self._acquire_existing(existing)
-                    new_blocks.append(acquired)
-                    parent = h
-                    continue
-                if (
-                    self._max_pool_tensors > 0
-                    and per_block_tensors > 0
-                    and (len(self.hash_table) + 1) * per_block_tensors
-                    > self._max_pool_tensors
-                ):
-                    _logger.debug(
-                        "APC pool tensor limit reached; skipping memory "
-                        "store at block %d/%d",
-                        i,
-                        n_full,
-                    )
-                    if self.disk is None:
-                        break
-                    parent = h
-                    continue
-                b = self._evict_lru()
-                if b is None:
-                    _logger.debug(
-                        "APC pool exhausted; skipping memory store at "
-                        "block %d/%d",
-                        i,
-                        n_full,
-                    )
-                    if self.disk is None:
-                        break
-                    parent = h
-                    continue
-                start = i * self.block_size
-                end = start + self.block_size
-                # Deep-copy each slice into its own buffer so the block
-                # tensor is decoupled from the caller's cache, which
-                # mlx.clear_cache may release after generation. The copies
-                # are lazy here; _flush_pending materializes them in chunks
-                # and always before return.
-                k_slabs = [_copy_arr(k[..., start:end, :]) for k in layer_keys]
-                v_slabs = [_copy_arr(v[..., start:end, :]) for v in layer_values]
-                pending.extend(k_slabs)
-                pending.extend(v_slabs)
-                _flush_pending()
-                b.block_hash = h
-                b.parent_hash = parent
-                b.token_ids = chunk
-                b.extra_hash = extra_hash
-                b.keys = k_slabs
-                b.values = v_slabs
-                b.ref_cnt = 1
-                self.hash_table[h] = b
-                new_blocks.append(b)
-                self.stats.stores += 1
-                self.stats.served_tokens += self.block_size
-                parent = h
-            _flush_pending(force=True)
-            if self.disk is not None and disk_blocks:
-                try:
-                    self.disk.save_layer_major_blocks(
-                        disk_blocks, layer_keys, layer_values, self.block_size
-                    )
-                    self.stats.disk_writes += len(disk_blocks)
-                except Exception as e:
-                    _logger.warning("APC disk save scheduling failed: %s", e)
-            self.stats.pool_used = sum(
-                1 for x in self.pool if x.block_hash is not None)
-            return new_blocks
-
-    apc.APCManager.store_kv_blocks = store_kv_blocks
-    apc._kq_batched_store_eval = True
+    _preprocess_request._kq_retire_capture = True
+    cls._preprocess_request = _preprocess_request

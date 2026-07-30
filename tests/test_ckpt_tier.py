@@ -80,7 +80,10 @@ def test_ckpt_supported_shapes():
     assert ckpt_supported(make_hybrid_cache(4))
     assert not ckpt_supported([KVCache(), KVCache()])
     assert not ckpt_supported([ArraysCache(size=2), ArraysCache(size=2)])
+    # off the block grid (8 % 16): geometry gate rejects
     assert not ckpt_supported([KVCache(), RotatingKVCache(max_size=8)])
+    # grid-aligned sliding window: the three-way tier serves it now
+    assert ckpt_supported([KVCache(), RotatingKVCache(max_size=32)])
     assert not ckpt_supported([])
 
 
@@ -100,7 +103,16 @@ def test_store_lookup_roundtrip(p):
     warm, got = ckpt_lookup(man, ids + [999, 998], extra_hash=7)
     assert got == p
     assert_warm_matches(warm, cache, p)
-    # All acquired blocks were released after materialization.
+    # The checkpoint record pins its chain: main blocks stay ref-held
+    # until the record is released (pin rather than repair).
+    from gmlx.cache_snapshot import _ckpt_records, _release_record
+    held = [b for b in man.pool if b.block_hash is not None]
+    if p >= 16:
+        assert held and all(b.ref_cnt == 1 for b in held)
+    idx = _ckpt_records(man)
+    for rec in list(idx.values()):
+        _release_record(man, rec)
+    idx.clear()
     assert all(b.ref_cnt == 0 for b in man.pool)
 
 
@@ -149,6 +161,266 @@ def test_salt_isolation_from_real_tiers():
                                  extra_hash=7)
     warm, got = ckpt_lookup(man, ids2 + [1], extra_hash=7)
     assert warm is None and got == 0
+
+
+ROT_LAYOUT = ("kv", "rot", "rot", "kv", "rot")
+ROT_W = 32
+
+
+def make_swa_cache(p, seed=0):
+    """gemma-like sliding-window hybrid, fed as one concat chunk to p."""
+    caches = []
+    for i, kind in enumerate(ROT_LAYOUT):
+        mx.random.seed(seed * 1000 + i)
+        k = mx.random.normal((1, H, p, D))
+        v = mx.random.normal((1, H, p, D))
+        if kind == "kv":
+            c = KVCache()
+            c.state = (k, v)
+        else:
+            c = RotatingKVCache(max_size=ROT_W)
+            c.update_and_fetch(k, v)
+        caches.append(c)
+    return caches
+
+
+def assert_swa_warm_matches(warm, orig, p):
+    from gmlx.cache_snapshot import (rotating_canonical_window,
+                                     rotating_invariant)
+    assert len(warm) == len(orig)
+    for w, o in zip(warm, orig):
+        if isinstance(o, RotatingKVCache):
+            assert isinstance(w, RotatingKVCache)
+            assert rotating_invariant(w) == (True, True)
+            ko, vo, mo = rotating_canonical_window(o)
+            kw, vw, mw = rotating_canonical_window(w)
+            assert mo == mw
+            assert mx.array_equal(ko, kw).item()
+            assert mx.array_equal(vo, vw).item()
+        else:
+            assert int(w.offset) == p
+            assert mx.array_equal(
+                w.keys[..., :p, :], o.keys[..., :p, :]).item()
+
+
+@pytest.mark.parametrize("p", [16, 48, 64])   # below and beyond the W=32 wrap
+def test_swa_store_lookup_roundtrip(p):
+    man = APCManager(num_blocks=64, block_size=16)
+    cache = make_swa_cache(p, seed=p)
+    ids = list(range(300, 300 + p))
+    assert ckpt_store(man, ids, cache, extra_hash=9)
+    warm, got = ckpt_lookup(man, ids + [1, 2], extra_hash=9)
+    assert got == p
+    assert_swa_warm_matches(warm, cache, p)
+
+
+def test_swa_store_declines_off_grid():
+    man = APCManager(num_blocks=64, block_size=16)
+    p = 40                                    # not a block multiple
+    cache = make_swa_cache(p)
+    assert not ckpt_store(man, list(range(300, 300 + p)), cache)
+    assert all(b.ref_cnt == 0 for b in man.pool)
+
+
+def test_retirement_rotating_without_snap_declines():
+    """No exact-tier fallback: an off-grid rotating retirement with no
+    decode snapshot stores nothing, and the exact tier stays empty so
+    the stock warm path never bypasses ckpt arming."""
+    man = APCManager(num_blocks=64, block_size=16)
+    p = 40                                    # unaligned: ckpt declines
+    cache = make_swa_cache(p, seed=3)
+    ids = list(range(300, 300 + p))
+    assert not retirement_store(man, "ckpt", ids, cache, row=0,
+                                extra_hash=1)
+    entry, plen = man.lookup_exact_cache(ids + [1], extra_hash=1)
+    assert entry is None and plen == 0
+    assert man.stats_snapshot()["exact_stores"] == 0
+
+
+def test_pinning_survives_pool_pressure():
+    man = APCManager(num_blocks=6, block_size=16)
+    p = 32
+    cache = make_hybrid_cache(p, seed=5)
+    ids = list(range(300, 300 + p))
+    assert ckpt_store(man, ids, cache, extra_hash=0)   # pins 2 blocks
+    # Hammer the pool with unrelated stores until exhaustion.
+    for s in range(4):
+        other = make_hybrid_cache(64, seed=50 + s)
+        lk = [c.keys for c in other if isinstance(c, KVCache)]
+        lv = [c.values for c in other if isinstance(c, KVCache)]
+        got = man.store_kv_blocks(list(range(1000 * s, 1000 * s + 64)),
+                                  lk, lv)
+        man.release(got)
+    warm, got = ckpt_lookup(man, ids + [1], extra_hash=0)
+    assert got == p                           # pinned chain survived
+    assert_warm_matches(warm, cache, p)
+
+
+def test_strip_on_extend_keeps_newest_two():
+    from gmlx.cache_snapshot import _ckpt_records
+    man = APCManager(num_blocks=64, block_size=16)
+    ids = list(range(400, 400 + 96))
+    for p in (32, 48, 64):
+        cache = make_hybrid_cache(p, seed=p)
+        assert ckpt_store(man, ids[:p], cache, extra_hash=0)
+    idx = _ckpt_records(man)
+    assert sorted(r.p for r in idx.values()) == [48, 64]
+    warm, got = ckpt_lookup(man, ids[:40], extra_hash=0)
+    assert warm is None and got == 0          # p=32 stripped
+    warm, got = ckpt_lookup(man, ids[:66], extra_hash=0)
+    assert got == 64
+
+
+def test_layout_signature_rejects_mismatch():
+    man = APCManager(num_blocks=64, block_size=16)
+    p = 32
+    cache = make_hybrid_cache(p, seed=2)
+    ids = list(range(300, 300 + p))
+    assert ckpt_store(man, ids, cache, extra_hash=0)
+    warm, got = ckpt_lookup(man, ids + [1], extra_hash=0,
+                            layout=("kv", "arr", "arr", "kv", "arr"))
+    assert got == p
+    warm, got = ckpt_lookup(man, ids + [1], extra_hash=0,
+                            layout=("kv", "rot:32:0", "rot:32:0", "kv",
+                                    "rot:32:0"))
+    assert warm is None and got == 0
+
+
+def test_swa_disk_restart_roundtrip(tmp_path):
+    p = 48
+    cache = make_swa_cache(p, seed=11)
+    ids = list(range(700, 700 + p))
+    disk = DiskBlockStore(root=tmp_path, namespace="m")
+    man = APCManager(num_blocks=64, block_size=16, disk=disk)
+    assert ckpt_store(man, ids, cache, extra_hash=4)
+    disk.close()
+    disk2 = DiskBlockStore(root=tmp_path, namespace="m")
+    man2 = APCManager(num_blocks=64, block_size=16, disk=disk2)
+    try:
+        warm, got = ckpt_lookup(man2, ids + [77], extra_hash=4)
+        assert got == p
+        assert_swa_warm_matches(warm, cache, p)
+        # Disk half of the geometry check: the stored entries carry the
+        # writer's window, so a reader with a different one must miss.
+        from gmlx.cache_snapshot import ckpt_layout
+        live = tuple(ckpt_layout(cache, 16))
+        other = tuple(t if not t.startswith("rot") else "rot:64:0"
+                      for t in live)
+        warm, got = ckpt_lookup(man2, ids + [77], extra_hash=4,
+                                layout=other)
+        assert warm is None and got == 0
+    finally:
+        disk2.close()
+
+
+def test_mlx_lm_class_caches_roundtrip():
+    """gmlx text models carry mlx_lm cache classes; the tier must clone
+    them (upstream's clone isinstance-gates on the mlx_vlm twins)."""
+    from mlx_lm.models.cache import ArraysCache as LmArrays
+    from mlx_lm.models.cache import KVCache as LmKV
+    man = APCManager(num_blocks=64, block_size=16)
+    p = 33                                    # unaligned: tail clone too
+    caches = []
+    for i, kind in enumerate(LAYOUT):
+        mx.random.seed(900 + i)
+        if kind == "kv":
+            c = LmKV()
+            c.state = (mx.random.normal((1, H, p, D)),
+                       mx.random.normal((1, H, p, D)))
+        else:
+            c = LmArrays(2)
+            c.cache[0] = mx.random.normal((1, 3, 8))
+            c.cache[1] = mx.random.normal((1, 4, D, D))
+        caches.append(c)
+    ids = list(range(300, 300 + p))
+    assert ckpt_store(man, ids, caches, extra_hash=0)
+    warm, got = ckpt_lookup(man, ids + [1], extra_hash=0)
+    assert got == p
+    for kind, w, o in zip(LAYOUT, warm, caches):
+        if kind == "kv":
+            assert int(w.offset) == p
+            assert mx.array_equal(w.keys[..., :p, :], o.keys).item()
+            assert mx.array_equal(w.values[..., :p, :], o.values).item()
+        else:
+            for ws, os_ in zip(w.cache, o.cache):
+                assert mx.array_equal(ws, os_).item()
+
+
+def test_layout_geometry_rejects_window_mismatch():
+    """Same tag kinds, different window: the disk path must miss rather
+    than restore the writer's geometry into the model."""
+    man = APCManager(num_blocks=64, block_size=16)
+    p = 48
+    cache = make_swa_cache(p, seed=7)
+    ids = list(range(300, 300 + p))
+    assert ckpt_store(man, ids, cache, extra_hash=0)
+    from gmlx.cache_snapshot import ckpt_layout
+    live = tuple(ckpt_layout(cache, 16))
+    other = tuple(t if not t.startswith("rot") else "rot:64:0"
+                  for t in live)
+    warm, got = ckpt_lookup(man, ids + [1], extra_hash=0, layout=live)
+    assert got == p
+    warm, got = ckpt_lookup(man, ids + [1], extra_hash=0, layout=other)
+    assert warm is None and got == 0
+
+
+def test_short_main_chain_declines_and_spares_chain():
+    """A store that cannot pin its main chain is declined outright: an
+    unpinnable record would displace restorable ones via strip-on-extend."""
+    from gmlx.cache_snapshot import _ckpt_records
+    man = APCManager(num_blocks=2, block_size=16)
+    ids = list(range(400, 400 + 96))
+    good = make_hybrid_cache(32, seed=1)
+    assert ckpt_store(man, ids[:32], good, extra_hash=0)   # pins both blocks
+    assert not ckpt_store(man, ids[:64], make_hybrid_cache(64, seed=2),
+                          extra_hash=0)
+    assert not ckpt_store(man, ids[:96], make_hybrid_cache(96, seed=3),
+                          extra_hash=0)
+    idx = _ckpt_records(man)
+    assert [r.p for r in idx.values()] == [32]
+    warm, got = ckpt_lookup(man, ids[:40], extra_hash=0)
+    assert got == 32
+    assert_warm_matches(warm, good, 32)
+
+
+def test_ckpt_store_suppresses_layer_major():
+    """Above the layer-major threshold the stock store returns no blocks
+    and clones the prefix into the 2-slot exact LRU; the gmlx manager's
+    ckpt path must stay per-block and leave the exact LRU alone."""
+    from gmlx.apc_manager import GmlxAPCManager
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    man._layer_major_memory_min_tokens = 32
+    p = 64
+    cache = make_hybrid_cache(p, seed=4)
+    ids = list(range(500, 500 + p))
+    assert ckpt_store(man, ids, cache, extra_hash=0)
+    assert man.stats_snapshot()["exact_stores"] == 0
+    warm, got = ckpt_lookup(man, ids + [1], extra_hash=0)
+    assert got == p
+    assert_warm_matches(warm, cache, p)
+    # The stock path keeps its layer-major behavior.
+    lk = [c.keys for c in cache if isinstance(c, KVCache)]
+    lv = [c.values for c in cache if isinstance(c, KVCache)]
+    got_blocks = man.store_kv_blocks(ids, lk, lv, extra_hash=9)
+    assert got_blocks == []
+    assert man.stats_snapshot()["exact_stores"] == 1
+
+
+def test_window_chain_is_memory_only(tmp_path):
+    """Position-salted window shards cannot dedup on disk; the gmlx
+    manager schedules disk writes for the main chain only."""
+    from gmlx.apc_manager import GmlxAPCManager
+    disk = DiskBlockStore(root=tmp_path, namespace="m")
+    man = GmlxAPCManager(num_blocks=64, block_size=16, disk=disk)
+    try:
+        p = 48
+        cache = make_swa_cache(p, seed=5)
+        ids = list(range(600, 600 + p))
+        assert ckpt_store(man, ids, cache, extra_hash=0)
+        # 3 main blocks; the 2 window blocks stay memory-only.
+        assert man.stats_snapshot()["disk_writes"] == 3
+    finally:
+        disk.close()
 
 
 def test_incomplete_block_chain_is_miss():

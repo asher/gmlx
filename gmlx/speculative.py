@@ -1064,7 +1064,7 @@ def owned_server_rounds(
         sidecar_ctx = {
             "full_ids": retire_ctx["full_ids"],
             "extra_hash": int(retire_ctx.get("extra_hash", 0)),
-            "checkpoint_len": int(retire_ctx.get("checkpoint_len", 0) or 0),
+            "checkpoint_len": _sidecar_boundary(retire_ctx),
             "manager": getattr(model, "_kq_apc_manager", None),
         }
         if retire_ctx.get("mode") == "ckpt":
@@ -1081,6 +1081,9 @@ def owned_server_rounds(
     try:
         for tok in rounds:
             generated.append(tok)
+            if retire_ctx is not None and retire_ctx.get("mode") == "ckpt":
+                from .cache_snapshot import decode_ckpt_tick
+                decode_ckpt_tick(retire_ctx, prompt_cache, generated)
             # Finish eagerly on the token that ends the request: the server
             # abandons finished generators (close fires only at GC, often
             # after the next request has prefilled), so (a) a deferred
@@ -1126,6 +1129,15 @@ def owned_server_rounds(
             rate = f" rate={sum(al) / drafted:.3f}" if drafted else ""
             print(f"[spec] rounds={len(al)} drafted={drafted} "
                   f"accepted={sum(al):g}{rate}", file=sys.stderr, flush=True)
+
+
+def _sidecar_boundary(retire_ctx: dict) -> int:
+    """Sidecar boundary key: the last ckpt boundary that actually stored
+    (never the advancing cursor); exact mode keeps the frozen value."""
+    if retire_ctx.get("mode") == "ckpt":
+        return int((retire_ctx.get("apc_meta") or {})
+                   .get("ckpt_last_stored", 0) or 0)
+    return int(retire_ctx.get("checkpoint_len", 0) or 0)
 
 
 def _ckpt_post_prefill(model, prompt_cache: list, retire_ctx: dict) -> None:
@@ -1298,12 +1310,34 @@ def _retire_b1(model, prompt_cache: list, generated: list[int],
                 "APC retire skipped: cache offset %d != tokens %d",
                 offset, len(seq))
             return
+        # Key on what the next turn will actually replay, not on what we
+        # forwarded: templates strip/re-emit thinking and re-serialize tool
+        # calls, so a diverged tail makes the whole entry unmatchable. lcp
+        # None (no server render ctx, media, kill switch, or prediction
+        # failure) keeps today's behavior.
+        lcp = None
+        if os.environ.get("GMLX_APC_RETIRE_LCP") != "0":
+            from .retire_key import next_turn_lcp
+            lcp = next_turn_lcp(retire.get("render_ctx"), seq,
+                                [int(t) for t in generated])
+        max_len = None
+        if lcp is not None and lcp < len(seq):
+            max_len = lcp
+            _log.info(
+                "APC retire key: next-turn render diverges at %d/%d",
+                lcp, len(seq))
         from .cache_snapshot import retirement_store
         ok = retirement_store(
             manager, retire.get("mode"), seq, prompt_cache,
-            row=0, extra_hash=int(retire.get("extra_hash", 0)))
+            row=0, extra_hash=int(retire.get("extra_hash", 0)),
+            max_len=max_len, decode_snaps=retire.get("snaps"))
         if ok:
-            _log.info("APC retire store: tokens=%d", len(seq))
+            _log.info("APC retire store: tokens=%d",
+                      len(seq) if max_len is None else max_len)
+        if max_len is not None:
+            # The drafter sidecar pairs with a same-key main entry; its KV
+            # covers the full sequence and cannot be rewound to the LCP.
+            return
         if (ok and drafter is not None and not _SIDECAR_DISABLED
                 and getattr(drafter, "_kq_head_covered", False)
                 and (sidecar_ctx is None
@@ -1352,6 +1386,17 @@ def _retire_batch_row(model, prompt_cache: list, slot: int,
                 "APC retire skipped: row position %d < tokens %d",
                 position, store_len)
             return
+        # Blocks are prefix-causal, so the next-turn LCP key is a plain
+        # harvest truncation here (see _retire_b1 for the rationale).
+        if os.environ.get("GMLX_APC_RETIRE_LCP") != "0":
+            from .retire_key import next_turn_lcp
+            lcp = next_turn_lcp(retire.get("render_ctx"), seq,
+                                [int(t) for t in gen_row])
+            if lcp is not None and lcp < store_len:
+                _log.info(
+                    "APC retire key (row): next-turn render diverges at "
+                    "%d/%d", lcp, store_len)
+                store_len = lcp
         from .cache_snapshot import retirement_store
         ok = retirement_store(
             manager, "block", seq[:store_len], prompt_cache,

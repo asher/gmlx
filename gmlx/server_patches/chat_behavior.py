@@ -7,7 +7,6 @@ from __future__ import annotations
 import contextvars
 import importlib
 import os
-import sys
 
 
 from .. import server_bridge_vlm as serving
@@ -222,7 +221,9 @@ def _prompt_tail_opens_thinking(text, open_close_markers) -> bool:
 
 def install_stream_thinking_seed() -> None:
     """Reseed ThinkingStreamState.in_thinking from the rendered prompt (see
-    the 7e comment). Idempotent; no-op if mlx-vlm's shape changed."""
+    the 7e comment), and give the non-stream splitter the same prompt
+    ground truth for replies truncated inside a think block. Idempotent;
+    no-op if mlx-vlm's shape changed."""
     rs = importlib.import_module("mlx_vlm.server.responses_state")
     cls = getattr(rs, "ThinkingStreamState", None)
     if cls is None:
@@ -248,16 +249,34 @@ def install_stream_thinking_seed() -> None:
         apply_chat_template.__dict__[_STREAM_SEED_FLAG] = True
         return apply_chat_template
 
-    targets = [sys.modules.get(m) or importlib.import_module(m)
-               for m in ("mlx_vlm.server.openai", "mlx_vlm.server.anthropic")]
+    from ._common import _render_target_modules
     app = importlib.import_module("mlx_vlm.server.app")
-    deps = getattr(app, "_protocol_deps", None)
-    if deps is not None:
-        targets.append(deps)
-    for target in targets:
+    for target in _render_target_modules():
         fn = getattr(target, "apply_chat_template", None)
         if fn is not None and not getattr(fn, _STREAM_SEED_FLAG, False):
             target.apply_chat_template = _wrap(fn)
+
+    # Non-stream twin: a reply that hits max_tokens inside a prompt-opened
+    # think block carries no marker, so the stock splitter classifies the
+    # partial reasoning as content. Shared rule with the retirement mirror
+    # (retire_key.truncated_thinking); this side supplies the prompt from
+    # the request contextvar.
+    from .. import retire_key
+    split = getattr(app, "_split_thinking_text", None)
+    if split is not None and not getattr(split, _STREAM_SEED_FLAG, False):
+        def _split_thinking_text(text, thinking_start_token=None,
+                                 thinking_end_token=None):
+            reasoning, content = split(
+                text, thinking_start_token, thinking_end_token)
+            if reasoning is None and content and retire_key.truncated_thinking(
+                    text, cls._build_open_close_markers(
+                        thinking_start_token, thinking_end_token),
+                    _LAST_RENDERED_PROMPT.get()):
+                return content, ""
+            return reasoning, content
+
+        _split_thinking_text.__dict__[_STREAM_SEED_FLAG] = True
+        app._split_thinking_text = _split_thinking_text
 
 
 # ignore-eos: forced-length decode (server-level)

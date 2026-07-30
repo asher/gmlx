@@ -48,7 +48,8 @@ def make_pool(*, budget_gb=200, footprint_gb=10, pinned=(), in_flight=0,
 
     def fake_stock_get(model_path, adapter_path, *, model_kind="auto"):
         row = {k: os.environ.get(k)
-               for k in ("KV_BITS", "APC_ENABLED", "APC_DISK_PATH")}
+               for k in ("KV_BITS", "APC_ENABLED", "GMLX_APC_ENABLED",
+                         "APC_DISK_PATH")}
         # The build spec the load bridge would read - set by _build around this call.
         row["build_spec"] = serving.get_build_spec()
         seen_env.append(row)
@@ -96,16 +97,22 @@ def test_same_signature_shares_one_entry():
     assert len(pool.stats()["resident"]) == 1
 
 
-# per-build env window: set around the load, restored after
+# per-build env window: set around the load, restored after. APC_ENABLED is
+# the exception: the window value is captured into GMLX_APC_ENABLED for the
+# bridge's gmlx-owned manager build, and the stock var is pinned to 0 so
+# apc.from_env stays unpatched and unused (builds nothing to discard).
 def test_env_window_set_during_build_then_restored(monkeypatch):
     monkeypatch.delenv("KV_BITS", raising=False)
     monkeypatch.delenv("APC_ENABLED", raising=False)
+    monkeypatch.delenv("GMLX_APC_ENABLED", raising=False)
     _proxy, pool, seen, _td = make_pool()
     _acq(pool, "/m/a.gguf", env={"KV_BITS": "8", "APC_ENABLED": "1"})
     assert seen[-1]["KV_BITS"] == "8"              # set during the stock load
-    assert seen[-1]["APC_ENABLED"] == "1"
+    assert seen[-1]["APC_ENABLED"] == "0"          # pinned: from_env builds nothing
+    assert seen[-1]["GMLX_APC_ENABLED"] == "1"     # effective value, gmlx gate
     assert os.environ.get("KV_BITS") is None       # restored (was unset)
     assert os.environ.get("APC_ENABLED") is None
+    assert os.environ.get("GMLX_APC_ENABLED") is None
 
 
 def test_env_window_does_not_leak_to_sibling_build(monkeypatch):

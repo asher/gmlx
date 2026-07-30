@@ -24,8 +24,11 @@ Seams (both late-bound by mlx-vlm, so a monkeypatch suffices - no fork):
 
 Loading and teardown delegate to stock ``get_cached_model`` /
 ``unload_model_sync`` through a context-isolated scratch object, so the pool
-inherits mlx-vlm's exact load path (vision cache, APC manager, KV-quant config,
+inherits mlx-vlm's exact load path (vision cache, KV-quant config,
 ``ResponseGenerator`` with its speculative drafter) rather than duplicating it.
+The APC manager is the exception: the load bridge builds the gmlx-owned one
+(``apc_manager.build_apc_manager``) and ``_build`` wires it in post-load,
+with stock ``from_env`` pinned dead for the load's duration.
 """
 
 from __future__ import annotations
@@ -655,10 +658,38 @@ class _ResidencyPool:
         # global crosses that boundary. Safe because the build lock serialises
         # builds (one spec live at a time); cleared in the finally.
         _serving.set_build_spec(build_spec)
+        # The stock loader's ``apc.from_env`` stays unpatched and unused:
+        # capture the effective APC enablement (this model's window value over
+        # any ambient shell var - the stock precedence) into GMLX_APC_ENABLED
+        # for the bridge's gmlx-owned manager build, then pin APC_ENABLED=0 so
+        # from_env returns None instead of building a stock manager (and its
+        # disk worker threads) that the bridge's manager would orphan.
+        apc_saved = {k: os.environ.get(k)
+                     for k in ("GMLX_APC_ENABLED", "APC_ENABLED")}
+        enabled = os.environ.get("APC_ENABLED", "0") in (
+            "1", "true", "True", "yes")
+        os.environ["GMLX_APC_ENABLED"] = "1" if enabled else "0"
+        os.environ["APC_ENABLED"] = "0"
         try:
             self._stock_get(model_path, adapter_path, model_kind=model_kind)
+            # Wire the bridge-built manager everywhere the stock load would
+            # have put a from_env one: the scratch (captured by the _Entry
+            # below and served by the runtime proxy), the registry cache dict
+            # (read back on model-switch reuse and cleared at unload), and the
+            # ResponseGenerator, whose binding is read lazily at the first
+            # BatchGenerator build - this runs before any request reaches it.
+            manager = _serving.pop_built_apc_manager()
+            if manager is not None:
+                scratch.apc_manager = manager
+                if isinstance(scratch.model_cache, dict):
+                    scratch.model_cache["apc_manager"] = manager
+                rg = scratch.response_generator
+                if rg is not None:
+                    rg.apc_manager = manager
         finally:
             _serving.set_build_spec(None)
+            _serving.pop_built_apc_manager()
+            self._restore_env(apc_saved)
             self._restore_env(saved_env)
             _build_scratch.reset(token)
         return _Entry(

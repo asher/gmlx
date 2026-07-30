@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""install_apc_batched_store_eval: the chunked-eval store must be
-behavior-identical to the stock per-block-eval store.
+"""GmlxAPCManager.store_kv_blocks: the chunked-eval store override must be
+behavior-identical to the stock per-block-eval store, and the stock class
+must stay unpatched (the old global method patch is retired).
 
-CPU-only, model-free: exercises mlx-vlm's APCManager directly with tiny
-synthetic K/V tensors.
+CPU-only, model-free: exercises the managers directly with tiny synthetic
+K/V tensors.
 """
 from __future__ import annotations
 
@@ -13,9 +14,9 @@ import mlx.core as mx
 
 apc = pytest.importorskip("mlx_vlm.apc")
 
-from gmlx.server_patches import install_apc_batched_store_eval  # noqa: E402
+from gmlx.apc_manager import GmlxAPCManager  # noqa: E402
 
-# The stock method, captured before any test installs the patch.
+# The stock method, captured at import: nothing in gmlx may mutate it.
 _STOCK_STORE = apc.APCManager.store_kv_blocks
 
 BLOCK = 16
@@ -51,13 +52,14 @@ def _pool_snapshot(mgr):
     return out
 
 
-@pytest.fixture()
-def patched():
-    install_apc_batched_store_eval()
-    return apc.APCManager.store_kv_blocks
+def test_stock_class_unpatched():
+    """Importing gmlx (incl. the subclass module) must not touch the stock
+    method - the batched eval lives on the subclass only."""
+    assert apc.APCManager.store_kv_blocks is _STOCK_STORE
+    assert "store_kv_blocks" in GmlxAPCManager.__dict__
 
 
-def test_patched_store_matches_stock(patched):
+def test_patched_store_matches_stock():
     """Same tokens + K/V through stock and patched stores must produce
     identical block hashes, chain parents, token ids, and tensor data."""
     keys, values = _make_kv(seed=1)
@@ -66,8 +68,8 @@ def test_patched_store_matches_stock(patched):
     mgr_stock = apc.APCManager(num_blocks=32, block_size=BLOCK)
     blocks_stock = _STOCK_STORE(mgr_stock, toks, keys, values)
 
-    mgr_patch = apc.APCManager(num_blocks=32, block_size=BLOCK)
-    blocks_patch = patched(mgr_patch, toks, keys, values)
+    mgr_patch = GmlxAPCManager(num_blocks=32, block_size=BLOCK)
+    blocks_patch = mgr_patch.store_kv_blocks(toks, keys, values)
 
     assert len(blocks_stock) == len(blocks_patch) == N_TOKENS // BLOCK
     assert _pool_snapshot(mgr_stock) == _pool_snapshot(mgr_patch)
@@ -83,14 +85,14 @@ def test_patched_store_matches_stock(patched):
     mgr_patch.release(blocks_patch)
 
 
-def test_patched_store_dedup_and_lookup(patched):
+def test_patched_store_dedup_and_lookup():
     """Re-storing the same tokens acquires existing blocks (no new stores),
     and lookup_prefix returns the full stored prefix with intact data."""
     keys, values = _make_kv(seed=2)
     toks = _tokens()
     n_full = N_TOKENS // BLOCK
 
-    mgr = apc.APCManager(num_blocks=32, block_size=BLOCK)
+    mgr = GmlxAPCManager(num_blocks=32, block_size=BLOCK)
     first = mgr.store_kv_blocks(toks, keys, values)
     stores_after_first = mgr.stats.stores
     assert stores_after_first == n_full
@@ -113,14 +115,14 @@ def test_patched_store_dedup_and_lookup(patched):
     mgr.release(matched)
 
 
-def test_patched_store_skip_first_n(patched):
+def test_patched_store_skip_first_n():
     """skip_first_n_tokens skips already-stored prefix blocks but keeps the
     hash chain intact for the stored suffix."""
     keys, values = _make_kv(seed=3)
     toks = _tokens()
     n_full = N_TOKENS // BLOCK
 
-    mgr = apc.APCManager(num_blocks=32, block_size=BLOCK)
+    mgr = GmlxAPCManager(num_blocks=32, block_size=BLOCK)
     first = mgr.store_kv_blocks(toks, keys, values)
     baseline = mgr.stats.stores
 
@@ -137,13 +139,13 @@ def test_patched_store_skip_first_n(patched):
     mgr.release(matched)
 
 
-def test_patched_store_pool_exhaustion(patched):
+def test_patched_store_pool_exhaustion():
     """A pool smaller than the block count stores what fits and stops
     cleanly (stock break semantics, no disk tier)."""
     keys, values = _make_kv(seed=4)
     toks = _tokens()
 
-    mgr = apc.APCManager(num_blocks=4, block_size=BLOCK)
+    mgr = GmlxAPCManager(num_blocks=4, block_size=BLOCK)
     blocks = mgr.store_kv_blocks(toks, keys, values)
     assert len(blocks) == 4
     assert mgr.stats.stores == 4
