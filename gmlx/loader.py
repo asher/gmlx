@@ -202,6 +202,7 @@ def remap_arrays(
         "qk_permute_applied": 0,
         "qk_permute_skipped": 0,
         "conv1d_unsqueeze": 0,
+        "kda_conv_weight": 0,
         "gemma_norm_minus_one": 0,
     }
 
@@ -305,6 +306,16 @@ def remap_arrays(
             # F32/BF16 (not kquant), so codec is None here.
             hf_weights[hf_name] = arr[..., None]
             stats["conv1d_unsqueeze"] += 1
+            stats["mapped"] += 1
+
+        elif transform == "kda_conv_weight":
+            # Kimi-K3 KDA depthwise short conv: GGUF ships (1, d_inner, 1,
+            # d_conv) numpy order, or (d_inner, 1, d_conv) when quantization
+            # drops the trailing 1. conv_step varies fastest in both, so a
+            # pure reshape to (d_inner, d_conv) is exact; mlx Conv1d wants
+            # (out_channels=d_inner, kernel=d_conv, in/groups=1).
+            hf_weights[hf_name] = arr.reshape(-1, arr.shape[-1])[..., None]
+            stats["kda_conv_weight"] += 1
             stats["mapped"] += 1
 
         elif transform == "ssm_a_to_a_log":

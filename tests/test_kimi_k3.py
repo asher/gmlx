@@ -326,3 +326,53 @@ def test_cast_predicate_pins_fp32_params():
                  "model.output_res_score"):
         assert pred(path) is False, path
     assert pred("model.layers.0.self_attn.q_proj.weight") is True
+
+
+def test_remap_covers_every_wire_tensor_onto_real_params():
+    # Enumerate every GGUF name llama.cpp's kimi-k3 create_tensor rows emit
+    # for the tiny config and assert each one remaps onto an actual parameter
+    # path of the built model. Catches typos in both directions (override
+    # targets vs module attribute names).
+    from mlx.utils import tree_flatten
+
+    from gmlx.remap import RemapDecision, parse_gguf_name
+
+    args = _tiny_args()
+    model = Model(args)
+    params = {name for name, _ in tree_flatten(model.parameters())}
+
+    names = ["token_embd.weight", "output_norm.weight", "output.weight",
+             "output_res_score.weight"]
+    for i, lt in enumerate(args.layer_types):
+        names += [f"blk.{i}.attn_norm.weight", f"blk.{i}.ffn_norm.weight",
+                  f"blk.{i}.attn_output.weight",
+                  f"blk.{i}.attn_res_score.weight",
+                  f"blk.{i}.ffn_res_score.weight"]
+        if lt == "linear_attention":
+            names += [f"blk.{i}.{t}" for t in (
+                "attn_q.weight", "attn_k.weight", "attn_v.weight",
+                "ssm_conv1d_q.weight", "ssm_conv1d_k.weight",
+                "ssm_conv1d_v.weight", "ssm_f_a.weight", "ssm_f_b.weight",
+                "ssm_beta.weight", "ssm_a", "ssm_dt.bias", "ssm_g.weight",
+                "ssm_norm.weight")]
+        else:
+            names += [f"blk.{i}.{t}" for t in (
+                "attn_q_a.weight", "attn_q_a_norm.weight", "attn_q_b.weight",
+                "attn_kv_a_mqa.weight", "attn_kv_a_norm.weight",
+                "attn_k_b.weight", "attn_v_b.weight", "attn_gate.weight")]
+        if i < args.first_k_dense_replace:
+            names += [f"blk.{i}.ffn_{t}.weight"
+                      for t in ("gate", "up", "down")]
+        else:
+            names += [f"blk.{i}.{t}" for t in (
+                "ffn_gate_inp.weight", "exp_probs_b.bias",
+                "ffn_routed_down.weight", "ffn_routed_up.weight",
+                "ffn_routed_norm.weight", "ffn_gate_exps.weight",
+                "ffn_up_exps.weight", "ffn_down_exps.weight",
+                "ffn_gate_shexp.weight", "ffn_up_shexp.weight",
+                "ffn_down_shexp.weight")]
+
+    for name in names:
+        dec = parse_gguf_name("kimi-k3", name)
+        assert dec.kind == RemapDecision.KIND_MAP, (name, dec.reason)
+        assert dec.hf_name in params, (name, dec.hf_name)

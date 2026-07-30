@@ -955,6 +955,129 @@ def test_deepseek2_leading_dense_block():
         "model.layers.0.mlp.down_proj.weight"
 
 
+# kimi-k3: hybrid KDA + nope-only MLA, latent MoE, residual-attention scores
+def test_kimi_k3_mla_rows_match_deepseek2_targets():
+    for t, hf in (("attn_q_a", "q_a_proj"), ("attn_q_a_norm", "q_a_layernorm"),
+                  ("attn_q_b", "q_b_proj"),
+                  ("attn_kv_a_mqa", "kv_a_proj_with_mqa"),
+                  ("attn_kv_a_norm", "kv_a_layernorm"),
+                  ("attn_k_b", "embed_q"), ("attn_v_b", "unembed_out"),
+                  ("attn_output", "o_proj")):
+        r = d("kimi-k3", f"blk.2.{t}.weight")
+        assert r.kind == MAP and r.transform == "passthrough"
+        assert r.hf_name == f"model.layers.2.self_attn.{hf}.weight"
+    # K3-only MLA sigmoid output gate.
+    assert d("kimi-k3", "blk.2.attn_gate.weight").hf_name == \
+        "model.layers.2.self_attn.attn_gate.weight"
+
+
+def test_kimi_k3_kda_rows():
+    # In-projections (also the MLA no-q_lora fallback for attn_q) + decay path.
+    for t, hf in (("attn_q", "q_proj"), ("attn_k", "k_proj"),
+                  ("attn_v", "v_proj"), ("ssm_f_a", "f_a_proj"),
+                  ("ssm_f_b", "f_b_proj"), ("ssm_beta", "b_proj"),
+                  ("ssm_g", "g_proj")):
+        r = d("kimi-k3", f"blk.0.{t}.weight")
+        assert r.kind == MAP and r.transform == "passthrough"
+        assert r.hf_name == f"model.layers.0.self_attn.{hf}.weight"
+    assert d("kimi-k3", "blk.0.ssm_norm.weight").hf_name == \
+        "model.layers.0.self_attn.o_norm.weight"
+    # dt bias is a raw array on the module (no .weight).
+    rdt = d("kimi-k3", "blk.0.ssm_dt.bias")
+    assert rdt.kind == MAP and rdt.transform == "passthrough"
+    assert rdt.hf_name == "model.layers.0.self_attn.dt_bias"
+
+
+def test_kimi_k3_conv_weights_get_kda_conv_transform():
+    for t, hf in (("ssm_conv1d_q", "q_conv"), ("ssm_conv1d_k", "k_conv"),
+                  ("ssm_conv1d_v", "v_conv")):
+        r = d("kimi-k3", f"blk.0.{t}.weight")
+        assert r.kind == MAP and r.transform == "kda_conv_weight"
+        assert r.hf_name == f"model.layers.0.self_attn.{hf}.conv.weight"
+
+
+def test_kimi_k3_ssm_a_stays_folded_never_a_log():
+    # ssm_a is the folded -exp(A_log); the canonical ssm_a_to_a_log transform
+    # would take log of a negative (NaN). The override must claim it first
+    # with a plain flatten onto a_folded.
+    r = d("kimi-k3", "blk.0.ssm_a")
+    assert r.kind == MAP and r.transform == "flatten"
+    assert r.hf_name == "model.layers.0.self_attn.a_folded"
+
+
+def test_kimi_k3_res_scores_are_raw_arrays():
+    ra = d("kimi-k3", "blk.4.attn_res_score.weight")
+    assert ra.kind == MAP and ra.hf_name == "model.layers.4.attn_res_score"
+    rf = d("kimi-k3", "blk.4.ffn_res_score.weight")
+    assert rf.kind == MAP and rf.hf_name == "model.layers.4.ffn_res_score"
+    ro = d("kimi-k3", "output_res_score.weight")
+    assert ro.kind == MAP and ro.hf_name == "model.output_res_score"
+
+
+def test_kimi_k3_latent_moe_and_bias_on_moe_module():
+    # Latent projections around the routed experts.
+    assert d("kimi-k3", "blk.3.ffn_routed_down.weight").hf_name == \
+        "model.layers.3.mlp.routed_down.weight"
+    assert d("kimi-k3", "blk.3.ffn_routed_up.weight").hf_name == \
+        "model.layers.3.mlp.routed_up.weight"
+    assert d("kimi-k3", "blk.3.ffn_routed_norm.weight").hf_name == \
+        "model.layers.3.mlp.routed_norm.weight"
+    # Router on mlp.gate; the correction bias lives on the MoE module itself
+    # (kimi_linear layout), NOT mlp.gate as in deepseek2.
+    assert d("kimi-k3", "blk.3.ffn_gate_inp.weight").hf_name == \
+        "model.layers.3.mlp.gate.weight"
+    assert d("kimi-k3", "blk.3.exp_probs_b.bias").hf_name == \
+        "model.layers.3.mlp.e_score_correction_bias"
+    # Routed experts + fused shared experts.
+    assert d("kimi-k3", "blk.3.ffn_up_exps.weight").hf_name == \
+        "model.layers.3.mlp.switch_mlp.up_proj.weight"
+    assert d("kimi-k3", "blk.3.ffn_gate_shexp.weight").hf_name == \
+        "model.layers.3.mlp.shared_experts.gate_proj.weight"
+
+
+def test_kimi_k3_norms_dense_mlp_and_globals():
+    assert d("kimi-k3", "blk.0.attn_norm.weight").hf_name == \
+        "model.layers.0.input_layernorm.weight"
+    assert d("kimi-k3", "blk.0.ffn_norm.weight").hf_name == \
+        "model.layers.0.post_attention_layernorm.weight"
+    assert d("kimi-k3", "blk.0.ffn_gate.weight").hf_name == \
+        "model.layers.0.mlp.gate_proj.weight"
+    # Globals resolve via the canonical map.
+    assert d("kimi-k3", "token_embd.weight").hf_name == \
+        "model.embed_tokens.weight"
+    assert d("kimi-k3", "output_norm.weight").hf_name == "model.norm.weight"
+    assert d("kimi-k3", "output.weight").hf_name == "lm_head.weight"
+
+
+def test_kimi_k3_kda_conv_weight_array_transform():
+    # Both wire layouts reshape to mlx Conv1d (d_inner, d_conv, 1) exactly.
+    import mlx.core as mx
+    import numpy as np
+    from gmlx.loader import remap_arrays
+    d_inner, d_conv = 6, 4
+    base = np.arange(d_inner * d_conv, dtype=np.float32)
+    arrays = {
+        # bf16-style 4D numpy layout (1, d_inner, 1, d_conv).
+        "blk.0.ssm_conv1d_q.weight":
+            mx.array(base.reshape(1, d_inner, 1, d_conv)),
+        # quantized 3D layout (d_inner, 1, d_conv).
+        "blk.0.ssm_conv1d_k.weight":
+            mx.array(base.reshape(d_inner, 1, d_conv)),
+        # folded -exp(A_log), padded [1, n_head]: flatten, no log (NaN trap).
+        "blk.0.ssm_a": mx.array([[-0.5, -1.5]]),
+    }
+    hf, _meta, stats = remap_arrays(arrays, {}, "kimi-k3")
+    q = hf["model.layers.0.self_attn.q_conv.conv.weight"]
+    k = hf["model.layers.0.self_attn.k_conv.conv.weight"]
+    assert q.shape == (d_inner, d_conv, 1) and k.shape == (d_inner, d_conv, 1)
+    assert np.array_equal(np.array(q), base.reshape(d_inner, d_conv, 1))
+    assert np.array_equal(np.array(q), np.array(k))
+    a = hf["model.layers.0.self_attn.a_folded"]
+    assert a.shape == (2,)
+    assert np.array_equal(np.array(a), [-0.5, -1.5])
+    assert stats["kda_conv_weight"] == 2
+
+
 # glm4moe: MHA + V3-style fine-grained MoE (router bias, experts, shexp)
 def test_glm4moe_norms_and_attention_via_canonical():
     # glm4_moe's two per-layer norms resolve via the canonical map (no glm4-dense
