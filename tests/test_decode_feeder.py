@@ -293,6 +293,15 @@ def test_arena_budget_math(monkeypatch):
     assert got == (80 << 30) - (20 << 30) - (8 << 30)
     assert _decode_arena_bytes(85 << 30, offsets, budget=200 << 30) == 80 << 30
     assert _decode_arena_bytes(60 << 30, offsets, budget=None) == 0
+    # The prefill ring's bytes are credited: its wired budget is
+    # time-shared with the arena (released at first decode, lent back on
+    # later prefill passes), so a pinned model whose ceiling barely covers
+    # the non-expert bytes still gets an arena instead of zero.
+    got = _decode_arena_bytes(
+        100 << 30, offsets, budget=30 << 30, ring_bytes=10 << 30)
+    assert got == (40 << 30) - (20 << 30) - (8 << 30)
+    assert _decode_arena_bytes(
+        100 << 30, offsets, budget=25 << 30, ring_bytes=2 << 30) == 0
     # RAM-fraction ceiling binds when physical RAM is the scarce resource.
     monkeypatch.setattr(
         mx, "device_info", lambda: {"memory_size": 100 << 30}
@@ -314,6 +323,12 @@ def test_arena_budget_math(monkeypatch):
     floor = int(7.5 * (1 << 30))
     got = _decode_arena_bytes(100 << 30, offsets, budget=90 << 30)
     assert got == (40 << 30) - floor - (20 << 30) - (8 << 30)
+    # A live pin is already out of the avail snapshot, so only the
+    # unpinned share of the non-expert bytes is charged on that leg
+    # (charging all of it double-counts the pin).
+    got = _decode_arena_bytes(
+        100 << 30, offsets, budget=90 << 30, pinned_bytes=20 << 30)
+    assert got == (40 << 30) - floor - (8 << 30)
     monkeypatch.setenv("GMLX_DECODE_PAGECACHE_GB", "0")
     got = _decode_arena_bytes(100 << 30, offsets, budget=90 << 30)
     assert got == (40 << 30) - (5 << 30) - (20 << 30) - (8 << 30)

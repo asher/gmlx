@@ -1099,7 +1099,10 @@ def _ram_floor_bytes(ram: int | None) -> int:
     return int(gb * (1 << 30))
 
 
-def _decode_arena_bytes(total_bytes: int, offsets, budget: int | None) -> int:
+def _decode_arena_bytes(
+    total_bytes: int, offsets, budget: int | None, ring_bytes: int = 0,
+    pinned_bytes: int = 0,
+) -> int:
     """Arena budget for the decode feeder, under two hardware-derived
     ceilings: the GPU working-set budget, and a fraction of physical RAM
     (``GMLX_DECODE_ARENA_RAM_FRAC``). The second exists because the arena is
@@ -1151,19 +1154,35 @@ def _decode_arena_bytes(total_bytes: int, offsets, budget: int | None) -> int:
         ceiling = min(ceiling, int(frac * ram))
     except Exception:
         pass
-    # Third ceiling: what is reclaimable right now. The fraction assumes an
-    # otherwise idle machine; co-resident workloads shrink the offer, and a
-    # wired arena sized past it would evict them to swap. The floor keeps a
-    # breathing margin for the system.
-    avail = _available_ram_bytes()
-    if avail is not None:
-        ceiling = min(ceiling, avail - _ram_floor_bytes(ram or avail))
     expert_bytes = sum(r[2] for ranges in offsets.values() for r in ranges)
     non_expert_bytes = max(0, total_bytes - expert_bytes)
     reserve = int(
         float(os.environ.get("GMLX_DECODE_KV_RESERVE_GB", "8") or 8) * (1 << 30)
     )
-    return min(max(0, ceiling - non_expert_bytes - reserve), expert_bytes)
+    # The prefill ring's wired budget is time-shared with the arena, not
+    # spent: the first decode releases the ring and wires the arena, and a
+    # later prefill borrows it back through the lend (DecodeFeeder
+    # .lend_for_ring). Crediting it against the static ceilings is what
+    # keeps a large pinned model from sizing its arena to zero and
+    # decoding on the page-cache path with most of RAM wired.
+    arena = ceiling + ring_bytes - non_expert_bytes - reserve
+    # Third ceiling: what is reclaimable right now. The fraction assumes an
+    # otherwise idle machine; co-resident workloads shrink the offer, and a
+    # wired arena sized past it would evict them to swap. The floor keeps a
+    # breathing margin for the system. This is a live post-pin snapshot:
+    # already-wired weights are out of it, so only the still-unwired share
+    # of the non-expert set is charged (charging all of it double-counted
+    # the pin and zeroed the arena on exactly the models that need it).
+    # No ring credit either - the untouched ring has no physical cost yet,
+    # and once it wires, the first decode's handoff keeps the sum constant.
+    avail = _available_ram_bytes()
+    if avail is not None:
+        unpinned = max(0, non_expert_bytes - pinned_bytes)
+        arena = min(
+            arena,
+            avail - _ram_floor_bytes(ram or avail) - reserve - unpinned,
+        )
+    return min(max(0, arena), expert_bytes)
 
 
 def _neutralize_wired_limit_sweep():
@@ -1978,7 +1997,11 @@ def install_expert_streaming(
     ):
         from .decode_feeder import maybe_make_decode_feeder
 
-        arena = _decode_arena_bytes(total_bytes, prefetcher.offsets, budget)
+        pin = getattr(model, "_kq_weights_pin", None)
+        arena = _decode_arena_bytes(
+            total_bytes, prefetcher.offsets, budget,
+            ring_bytes=2 * feeder.slot_bytes if feeder is not None else 0,
+            pinned_bytes=getattr(pin, "pinned_bytes", 0))
         dfeeder = maybe_make_decode_feeder(
             prefetcher.offsets, moe_modules, arena, stats_verbose)
         if dfeeder is not None:

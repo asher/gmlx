@@ -98,6 +98,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   thinking on an XTML channel (<|open|>think<|sep|>) were missed by
   mlx-lm's vocab-pair detection, which then forced enable_thinking=False
   and the model answered without reasoning.
+- Auto arena sizing credits the prefill ring's bytes now that the two
+  time-share the wired budget: a large pinned model no longer sizes its
+  decode arena to zero and decodes on the page-cache path with most of
+  RAM wired (measured driving the box to the free-page floor).
 - Long streamed-expert follow-up turns no longer breach the wired cap:
   rebuilding the prefill ring after decode now borrows the ring's footprint
   from the decode arena (hot experts kept), and the next decode returns it.
