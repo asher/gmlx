@@ -1589,7 +1589,9 @@ def install_expert_streaming(
                             return y
                         finally:
                             self._kq_cpu_only = True
-                    if la is not None and cpu_only and small:
+                    if la is not None and cpu_only and n_tokens == 1:
+                        # Decode only: prefill prestage would fault the
+                        # cold arena while the ring holds the wired budget.
                         # Lookahead: run the NEXT MoE layer's router on this
                         # layer's input and evaluate it together with the
                         # router read below (one sync either way). The
