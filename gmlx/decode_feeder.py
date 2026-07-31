@@ -580,6 +580,9 @@ class DecodeFeeder:
             self._mlock_deferred = False
             if self._release_ring is not None:
                 self._release_ring()
+                # Ring buffers land in MLX's freed-buffer cache; flush so
+                # the arena wires into pages the OS actually has back.
+                self._clear_mlx_cache()
             self._mlock_arena()
             if env_bool("GMLX_GPU_RESIDENT", True):
                 import mlx_kquant as kq
@@ -593,6 +596,7 @@ class DecodeFeeder:
         if self._lend_frac < 1.0:
             if self._release_ring is not None:
                 self._release_ring()
+                self._clear_mlx_cache()
             self._lend_frac = 1.0
 
     def lend_for_ring(self, nbytes: int) -> None:
@@ -1273,6 +1277,11 @@ class DecodeFeeder:
             kq.residency_commit()
         self._owner[li] = new_owner
         self._slots[li] = new_s
+        # The dropped buffers land in MLX's cache of freed GPU buffers,
+        # not back with the OS; on a box sized to the wired cap that idle
+        # anon memory is what the kernel starts compressing. Flush it
+        # while the freed bytes are the point of the resize.
+        self._clear_mlx_cache()
 
     @contextmanager
     def swapped(self, li: int):
