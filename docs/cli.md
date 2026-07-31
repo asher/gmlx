@@ -92,6 +92,8 @@ family sets no value.
 | `--system-prompt STR` | - | System message for the chat template. |
 | `--reasoning {show,hide,raw}` | `show` | How a thinking model's reasoning is displayed, same as chat: `show` styles it under a `thinking` label and strips the control markers, `hide` collapses it to the elapsed/token payoff line, `raw` streams everything verbatim. Display-only: image/audio requests print raw. |
 | `--chat-template-config JSON` | - | Extra chat-template kwargs, e.g. `'{"enable_thinking": false}'`. |
+| `--thinking {on,off,adaptive}` | - | Reasoning switch, mapped onto whatever variable this model's chat template reads (`enable_thinking`, MiniMax `thinking_mode`, Hy3 `reasoning_effort: no_think`). `adaptive` is MiniMax-only. |
+| `--reasoning-effort LEVEL` | - | Reasoning depth for models that grade it (gpt-oss/GLM `low`/`medium`/`high`, Hy3 `no_think`/`low`/`high`, DeepSeek-V4 `high`/`max`); the model's template validates the level. |
 | `--xtc-probability F` / `--xtc-threshold F` | `0.0` | XTC sampling (text path). |
 | `--repetition-context-size N` | `20` | How many recent tokens the repetition penalty considers. |
 | `--logit-bias JSON` | - | Token-id to bias map, e.g. `'{"128001": -100}'`. |
@@ -420,6 +422,7 @@ every command. The terminal is upgraded on top:
 | `-v` / `--verbose` | off | Full load diagnostics instead of the progress spinner. |
 | `--system-prompt STR` | - | System message, sent on the first turn (and after each reset; adjustable via `/system`). |
 | `--chat-template-config JSON` | - | Extra chat-template kwargs, e.g. `'{"enable_thinking": false}'`. |
+| `--thinking` / `--reasoning-effort` | - | Reasoning switch and depth, mapped onto this model's own template spelling, same as [`run`](#generation). |
 | `--max-kv-size N` | - | Cap the KV cache (rotating cache above it). |
 | `--no-history` | - | Don't read or write the prompt-history file. |
 | `--no-autosave` | - | Don't autosave the session after each turn. |

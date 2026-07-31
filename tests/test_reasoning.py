@@ -309,3 +309,148 @@ def test_stream_renderer_prefill_close_only(capsys):
     out = capsys.readouterr().out
     assert "mulling" not in out and "</think>" not in out
     assert "thought for" in out and "Answer." in out
+
+
+# -- provider-doc thinking switch spellings ------------------------------------
+
+def test_thinking_flag_zai_shapes():
+    from gmlx.reasoning import thinking_flag
+    assert thinking_flag({"type": "disabled"}) is False
+    assert thinking_flag({"type": "enabled"}) is True
+    assert thinking_flag({"type": "auto"}) is None       # unknown -> untouched
+    assert thinking_flag({"type": "disabled", "x": 1}) is None
+    assert thinking_flag("disabled") is None
+    assert thinking_flag(None) is None
+
+
+def test_normalize_template_kwargs_translates_thinking():
+    from gmlx.reasoning import normalize_template_kwargs
+    assert normalize_template_kwargs({"thinking": {"type": "disabled"}}) == \
+        {"enable_thinking": False}
+    # An explicit enable_thinking wins over the translated spelling.
+    assert normalize_template_kwargs(
+        {"thinking": {"type": "disabled"}, "enable_thinking": True}) == \
+        {"enable_thinking": True}
+    # Non-API values stay as plain template variables.
+    assert normalize_template_kwargs({"thinking": "deep"}) == {"thinking": "deep"}
+
+
+def test_parse_template_config_translates_thinking():
+    from gmlx.chat import parse_template_config
+    assert parse_template_config('{"thinking": {"type": "disabled"}}') == \
+        {"enable_thinking": False}
+
+
+def test_fold_thinking_flag(monkeypatch):
+    from types import SimpleNamespace
+    import gmlx.chat as chat
+
+    monkeypatch.setattr(chat, "_template_text",
+                        lambda a: "{% if enable_thinking %}...{% endif %}")
+    args = SimpleNamespace(thinking=None, reasoning_effort=None, gguf="/m/x.gguf")
+    assert chat.fold_thinking_flag(args, {"a": 1}) == {"a": 1}
+    args.thinking = "off"
+    assert chat.fold_thinking_flag(args, {}) == {"enable_thinking": False}
+    # The dedicated flag wins over a --chat-template-config value.
+    assert chat.fold_thinking_flag(args, {"enable_thinking": True}) == \
+        {"enable_thinking": False}
+    args.thinking = "on"
+    assert chat.fold_thinking_flag(args, {}) == {"enable_thinking": True}
+
+
+def test_fold_thinking_flag_hy3_dialect(monkeypatch):
+    """Hy3 has no enable_thinking; its template grades reasoning_effort with
+    a no_think level - --thinking maps onto that spelling."""
+    from types import SimpleNamespace
+    import gmlx.chat as chat
+
+    monkeypatch.setattr(chat, "_template_text",
+                        lambda a: "reasoning_effort in ['low','high','no_think']")
+    args = SimpleNamespace(thinking="off", reasoning_effort=None, gguf="/m/x.gguf")
+    assert chat.fold_thinking_flag(args, {}) == {"reasoning_effort": "no_think"}
+    args.thinking = "on"
+    assert chat.fold_thinking_flag(args, {}) == {"reasoning_effort": "high"}
+    # An explicit level wins over the mapped one.
+    args.reasoning_effort = "low"
+    assert chat.fold_thinking_flag(args, {}) == {"reasoning_effort": "low"}
+
+
+def test_fold_thinking_flag_gpt_oss_warns(monkeypatch, capsys):
+    """gpt-oss grades reasoning_effort but cannot disable reasoning."""
+    from types import SimpleNamespace
+    import gmlx.chat as chat
+
+    monkeypatch.setattr(chat, "_template_text",
+                        lambda a: 'set reasoning_effort = "medium"')
+    args = SimpleNamespace(thinking="off", reasoning_effort=None, gguf="/m/x.gguf")
+    assert chat.fold_thinking_flag(args, {}) == {}   # no kwarg forced
+    assert "reasoning_effort" in capsys.readouterr().err
+
+
+def test_fold_reasoning_effort_passthrough_and_noop_warning(monkeypatch, capsys):
+    from types import SimpleNamespace
+    import gmlx.chat as chat
+
+    monkeypatch.setattr(chat, "_template_text",
+                        lambda a: 'set reasoning_effort = "medium"')
+    args = SimpleNamespace(thinking=None, reasoning_effort="high", gguf="/m/x.gguf")
+    assert chat.fold_thinking_flag(args, {}) == {"reasoning_effort": "high"}
+    assert capsys.readouterr().err == ""
+    monkeypatch.setattr(chat, "_template_text", lambda a: "enable_thinking only")
+    assert chat.fold_thinking_flag(args, {}) == {"reasoning_effort": "high"}
+    assert "no-op" in capsys.readouterr().err
+
+
+def test_fold_thinking_flag_minimax_thinking_mode(monkeypatch):
+    """MiniMax-M3: three-state thinking_mode (enabled/disabled/adaptive)."""
+    from types import SimpleNamespace
+    import gmlx.chat as chat
+
+    monkeypatch.setattr(chat, "_template_text",
+                        lambda a: 'thinking_mode == "adaptive"')
+    args = SimpleNamespace(thinking="off", reasoning_effort=None, gguf="/m/x.gguf")
+    assert chat.fold_thinking_flag(args, {}) == {"thinking_mode": "disabled"}
+    args.thinking = "on"
+    assert chat.fold_thinking_flag(args, {}) == {"thinking_mode": "enabled"}
+    args.thinking = "adaptive"
+    assert chat.fold_thinking_flag(args, {}) == {"thinking_mode": "adaptive"}
+
+
+def test_fold_thinking_adaptive_elsewhere_warns(monkeypatch, capsys):
+    from types import SimpleNamespace
+    import gmlx.chat as chat
+
+    monkeypatch.setattr(chat, "_template_text",
+                        lambda a: "{% if enable_thinking %}...{% endif %}")
+    args = SimpleNamespace(thinking="adaptive", reasoning_effort=None,
+                           gguf="/m/x.gguf")
+    assert chat.fold_thinking_flag(args, {}) == {}
+    assert "adaptive" in capsys.readouterr().err
+
+
+def test_map_thinking_controls_base_is_verbatim():
+    """An explicitly passed chat_template_kwargs dict is never reinterpreted:
+    keys named like the controls pass through untouched; only the dedicated
+    control arguments are mapped."""
+    from gmlx.reasoning import map_thinking_controls
+
+    base = {"thinking": "deep", "reasoning_effort": "medium", "x": 1}
+    assert map_thinking_controls(base, template="enable_thinking") == base
+    out = map_thinking_controls(base, thinking="off",
+                                template="{% if enable_thinking %}{% endif %}")
+    assert out == {**base, "enable_thinking": False}
+
+
+def test_map_thinking_controls_value_spellings(capsys):
+    """Bools, enabled/disabled, and the z.ai dict shape all normalize; an
+    unrecognized value warns and is dropped."""
+    from gmlx.reasoning import map_thinking_controls
+
+    tmpl = "{% if enable_thinking %}{% endif %}"
+    warns = []
+    for v in (False, "disabled", {"type": "disabled"}):
+        assert map_thinking_controls({}, thinking=v, template=tmpl) == \
+            {"enable_thinking": False}
+    assert map_thinking_controls({}, thinking="sideways", template=tmpl,
+                                 warn=warns.append) == {}
+    assert warns and "unrecognized" in warns[0]

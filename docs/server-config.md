@@ -340,7 +340,8 @@ streaming and usage semantics, memory, and the security model -- is in
 
 Two things live here: built-in family defaults and intents (shipped in code,
 zero config) and user profiles (reusable, composable bundles of sampling +
-load + cache + system + chat_template + chat_template_kwargs params).
+load + cache + system + chat_template + chat_template_kwargs + thinking +
+reasoning_effort params).
 
 #### Built-in family defaults (model-card sampling)
 
@@ -479,6 +480,29 @@ The KV / disk cache stays correct regardless: reuse is keyed on the exact
 token prefix, so changing this flag only changes the rendered tokens (and
 thus the cache hit rate), never the validity of a hit.
 
+`thinking` and `reasoning_effort` are dedicated profile keys (also usable in
+a model's `overrides` / profile tweaks) for the two reasoning controls models
+spell differently. There is no cross-model standard for the template
+variable: MiniMax-M3 reads a three-state `thinking_mode`, Qwen3.x and GLM
+read `enable_thinking`, Hy3 grades a `reasoning_effort` scale that includes
+a `no_think` level, and gpt-oss grades `reasoning_effort` but cannot disable
+reasoning. Unlike a raw `chat_template_kwargs` entry, these keys are mapped
+onto the serving model's own spelling at request time (by inspecting its
+chat template), so one profile applies across models. `thinking` takes
+`on`/`off`/`adaptive` (`adaptive` is MiniMax-only); `reasoning_effort` takes
+a level name the model's template validates (`low`/`medium`/`high`,
+`no_think`, `max`, ...). A request's explicit `chat_template_kwargs` always
+pass through verbatim and win over the mapped controls. The same controls
+exist on `run`/`chat` as `--thinking` and `--reasoning-effort`.
+
+```yaml
+profiles:
+  quick:
+    thinking: off            # -> enable_thinking / thinking_mode / no_think, per model
+  deep:
+    reasoning_effort: high
+```
+
 ### `rules`
 
 Glob a model id to a profile. First match wins (`fnmatch`, not regex). Sits
@@ -523,8 +547,8 @@ Per-model keys: `path` (required), `profile`, `family`, `profiles`, `mmproj`,
 `draft_gguf`, `adapter`, `stream`, `moe_experts`, `moe_expert_mass`,
 `moe_miss_shed`, `moe_layer_shed`, `prefill_feeder`, `decode_feeder`,
 `speculative`, `speculative_width_cap`, `overrides`
-(`{sampling, load, cache, system, chat_template, chat_template_kwargs}`),
-`pin`, `ttl_s`.
+(`{sampling, load, cache, system, chat_template, chat_template_kwargs,
+thinking, reasoning_effort}`), `pin`, `ttl_s`.
 
 #### `speculative_width_cap`
 

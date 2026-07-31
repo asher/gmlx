@@ -108,9 +108,11 @@ _SERVER_KEYS = frozenset({"host", "port", "api_key", "no_auth", "model_dirs",
                           "gpu_keepwarm", "assistants", "assistant_allow_remote"})
 _DEFAULTS_KEYS = frozenset({"profile", "ttl_s", "model", "preload"})
 _PROFILE_KEYS = frozenset({"extends", "sampling", "load", "cache", "system",
-                           "chat_template", "chat_template_kwargs"})
+                           "chat_template", "chat_template_kwargs",
+                           "thinking", "reasoning_effort"})
 _OVERRIDE_KEYS = frozenset({"sampling", "load", "cache", "system",
-                            "chat_template", "chat_template_kwargs"})
+                            "chat_template", "chat_template_kwargs",
+                            "thinking", "reasoning_effort"})
 _MODEL_KEYS = frozenset({"path", "profile", "family", "profiles", "mmproj",
                          "draft_gguf", "adapter", "stream",
                          "cpu_moe",  # deprecated alias for `stream:`
@@ -191,6 +193,14 @@ class Profile:
     # {preserve_thinking: true} for Qwen3.6 / Gemma-4 agent turns). Applied at the
     # gen-args seam, so - unlike chat_template - not load-affecting.
     chat_template_kwargs: dict = field(default_factory=dict)
+    # Dedicated thinking controls, mapped per model at request time onto
+    # whatever switch its chat template reads (thinking_mode /
+    # enable_thinking / the Hy3 reasoning_effort dialect) - unlike
+    # chat_template_kwargs entries, which pass through verbatim. thinking:
+    # on|off|adaptive (bools accepted); reasoning_effort: a level name the
+    # model's own template validates (low/medium/high, no_think, max, ...).
+    thinking: Any = None
+    reasoning_effort: str | None = None
 
 
 @dataclass
@@ -476,6 +486,10 @@ class ResolvedModel:
     # Extra apply_chat_template variables merged into the per-request template kwargs
     # at the gen-args seam (request fields win). Per-request - not load-affecting.
     chat_template_kwargs: dict = field(default_factory=dict)
+    # Dedicated thinking controls (see Profile); mapped onto this model's
+    # template spelling at the gen-args seam. Per-request - not load-affecting.
+    thinking: Any = None
+    reasoning_effort: str | None = None
     # resolved GGUF LoRA adapter abspath, applied live over the base at load; two ids
     # on one GGUF with different adapters are distinct resident entries (load-affecting).
     adapter: str | None = None
@@ -698,7 +712,8 @@ def _resolve_profile_chain(name: str, profiles: dict[str, Profile]) -> dict:
         seen.add(cur)
         cur = prof.extends if prof.extends not in seen else None
     groups = {"sampling": {}, "load": {}, "cache": {}, "system": None,
-              "chat_template": None, "chat_template_kwargs": {}}
+              "chat_template": None, "chat_template_kwargs": {},
+              "thinking": None, "reasoning_effort": None}
     for prof in reversed(chain):          # root -> leaf
         groups["sampling"] = _merge_dict(groups["sampling"], prof.sampling)
         groups["load"] = _merge_dict(groups["load"], prof.load)
@@ -709,6 +724,10 @@ def _resolve_profile_chain(name: str, profiles: dict[str, Profile]) -> dict:
             groups["system"] = prof.system
         if prof.chat_template is not None:
             groups["chat_template"] = prof.chat_template
+        if prof.thinking is not None:
+            groups["thinking"] = prof.thinking
+        if prof.reasoning_effort is not None:
+            groups["reasoning_effort"] = prof.reasoning_effort
     return groups
 
 
@@ -764,6 +783,8 @@ def resolve_model(
     system: str | None = None
     chat_template: str | None = None
     chat_template_kwargs: dict = {}
+    thinking: Any = None
+    reasoning_effort: str | None = None
 
     # Lowest layer: the family's model-card base. Merged directly (not a named
     # pseudo-profile), so it can never be addressed or shadowed - anything a
@@ -774,6 +795,15 @@ def resolve_model(
         load = _merge_dict(load, base.get("load", {}))
         chat_template_kwargs = _merge_dict(
             chat_template_kwargs, base.get("chat_template_kwargs", {}))
+        # The GGUF's own embedded model-card sampling (general.sampling.*)
+        # refines the arch-family guess; profiles/overrides still win.
+        from .discovery import header_sampling
+        try:
+            hs = header_sampling(resolve_path(model.path, cfg.model_dirs))
+        except ConfigError:
+            hs = {}
+        if hs:
+            sampling = _merge_dict(sampling, hs)
 
     layers: list[str] = []
     if cfg.defaults.profile:
@@ -796,6 +826,10 @@ def resolve_model(
             system = groups["system"]
         if groups["chat_template"] is not None:
             chat_template = groups["chat_template"]
+        if groups["thinking"] is not None:
+            thinking = groups["thinking"]
+        if groups["reasoning_effort"] is not None:
+            reasoning_effort = groups["reasoning_effort"]
 
     # Per-model tweak of the *selected* named profile (the highest-precedence
     # name that applied): reshape what e.g. `@coding` means for this one model.
@@ -811,6 +845,10 @@ def resolve_model(
             system = tweak["system"]
         if tweak.get("chat_template") is not None:
             chat_template = tweak["chat_template"]
+        if tweak.get("thinking") is not None:
+            thinking = tweak["thinking"]
+        if tweak.get("reasoning_effort") is not None:
+            reasoning_effort = tweak["reasoning_effort"]
 
     ov = model.overrides or {}
     sampling = _merge_dict(sampling, ov.get("sampling", {}))
@@ -822,6 +860,10 @@ def resolve_model(
         system = ov["system"]
     if ov.get("chat_template") is not None:
         chat_template = ov["chat_template"]
+    if ov.get("thinking") is not None:
+        thinking = ov["thinking"]
+    if ov.get("reasoning_effort") is not None:
+        reasoning_effort = ov["reasoning_effort"]
 
     ttl_s = model.ttl_s if model.ttl_s is not None else cfg.defaults.ttl_s
     return ResolvedModel(
@@ -833,6 +875,8 @@ def resolve_model(
         system=system,
         chat_template=chat_template,
         chat_template_kwargs=chat_template_kwargs,
+        thinking=thinking,
+        reasoning_effort=reasoning_effort,
         speculative=bool(model.speculative or model.draft_gguf),
         speculative_width_cap=model.speculative_width_cap,
         mmproj=resolve_path(model.mmproj, cfg.model_dirs),
@@ -1218,6 +1262,8 @@ def _parse_profile(name: str, raw: dict) -> Profile:
         system=raw.get("system"),
         chat_template=raw.get("chat_template"),
         chat_template_kwargs=dict(ctk),
+        thinking=raw.get("thinking"),
+        reasoning_effort=raw.get("reasoning_effort"),
     )
 
 

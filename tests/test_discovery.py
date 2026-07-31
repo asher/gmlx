@@ -380,17 +380,17 @@ def test_scaffold_empty_is_valid():
     assert cfg.cache["enabled"] is True
 
 
-def test_scaffold_family_trailing_comments():
-    """Detected families render as a trailing comment with the model-card base
-    sampling; an unknown family renders no comment."""
+def test_scaffold_family_comments_above_entry():
+    """Detected families render as a comment line above the entry with the
+    model-card base sampling; an unknown family renders no comment."""
     models = [
         ModelCfg(id="qw", path="/m/qw.gguf", family="qwen3.6"),
         ModelCfg(id="gm", path="/m/gm.gguf", family="gemma"),
         ModelCfg(id="mystery", path="/m/x.gguf"),
     ]
     text = disc.scaffold_yaml(models, model_dirs=["/m"])
-    assert "  qw:        # qwen3.6: t=1.0 top_p=0.95 top_k=20\n" in text
-    assert "  gm:        # gemma: t=1.0 top_p=0.95 top_k=64\n" in text
+    assert "  # sampling (qwen3.6): t=1 top_p=0.95 top_k=20\n  qw:\n" in text
+    assert "  # sampling (gemma): t=1 top_p=0.95 top_k=64\n  gm:\n" in text
     assert "  mystery:\n" in text                # no family -> bare key
 
 
@@ -622,7 +622,7 @@ def _hm(monkeypatch, tmp_path):
         c = disc._classify_meta(
             {"general.architecture": "gemma4"},
             basename=os.path.basename(path), path=path)
-        return c, "Gemma 4 12B It"
+        return c, "Gemma 4 12B It", {}
 
     monkeypatch.setattr(disc, "_read_header", _fake_read)
     return calls
@@ -638,7 +638,7 @@ def test_header_meta_reads_and_memoizes(_hm, tmp_path):
     f.write_bytes(b"x")
     meta = disc.header_meta(str(f))
     assert meta == {"arch": "gemma4", "name": "Gemma 4 12B It",
-                    "kind": "model", "mtp": False}
+                    "kind": "model", "mtp": False, "sampling": {}}
     disc.header_meta(str(f))
     assert _hm["n"] == 1                         # second hit is the memo
 
@@ -699,3 +699,122 @@ def test_scan_pairs_llamacpp_default_mmproj_name(tmp_path, fake_classify):
     models = _scan(root)
     assert len(models) == 1
     assert models[0].mmproj.endswith("mmproj-model-f16.gguf")
+
+
+# MTP wiring gate + memory-fit placement (over-RAM models)
+def test_expert_count_sets_moe():
+    c = _classify({"general.architecture": "qwen35moe",
+                   "qwen35moe.expert_count": 128}, "m-Q4_K_M.gguf")
+    assert c.moe is True
+
+
+def test_dense_model_not_moe():
+    c = _classify({"general.architecture": "qwen35"}, "m-Q4_K_M.gguf")
+    assert c.moe is False
+
+
+def _classify_as(arch, extra=None):
+    """A classify_gguf stand-in returning one fixed arch (plus extra KV)."""
+    def _f(path):
+        meta = {"general.architecture": arch, **(extra or {})}
+        return disc._classify_meta(meta, basename=os.path.basename(path),
+                                   path=path)
+    return _f
+
+
+def test_scan_mtp_head_on_unwired_arch_stays_plain(tmp_path, monkeypatch, capsys):
+    # GLM-5.2: an MTP/nextn head in the GGUF, but no MTP target class wired for
+    # glm-dsa -> `speculative: true` would fail at load, so it must stay off.
+    monkeypatch.setattr(disc, "classify_gguf", _classify_as(
+        "glm-dsa", {"glm-dsa.nextn_predict_layers": 1,
+                    "glm-dsa.expert_count": 160}))
+    root = _write(tmp_path, "GLM-5.2-UD-IQ3_XXS.gguf")
+    models = _scan(root)
+    assert models[0].speculative is False
+    assert "no MTP target wired" in capsys.readouterr().err
+
+
+def test_scan_wired_mtp_arch_keeps_speculative(tmp_path, monkeypatch):
+    monkeypatch.setattr(disc, "classify_gguf", _classify_as(
+        "hy_v3", {"hy_v3.nextn_predict_layers": 1, "hy_v3.expert_count": 64}))
+    root = _write(tmp_path, "Hy3-IQ4_XS.gguf")
+    models = _scan(root)
+    assert models[0].speculative is True
+    assert models[0].stream is None               # tiny file: fits in RAM
+
+
+def test_scan_overram_moe_streams_experts_and_drops_mtp(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(disc, "classify_gguf", _classify_as(
+        "hy_v3", {"hy_v3.nextn_predict_layers": 1, "hy_v3.expert_count": 64}))
+    monkeypatch.setattr(disc, "_physmem_bytes", lambda: 128 * 10**9)
+    monkeypatch.setattr(disc, "_gguf_set_bytes", lambda p: 200 * 10**9)
+    root = _write(tmp_path, "Hy3-IQ4_XS.gguf")
+    m = _scan(root)[0]
+    assert m.stream == "experts"
+    assert m.speculative is False                 # MTP needs a resident base
+    err = capsys.readouterr().err
+    assert "over-RAM MoE" in err and "speculative off" in err
+
+
+def test_scan_overram_dense_gets_hint_only(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(disc, "classify_gguf", _classify_as("llama"))
+    monkeypatch.setattr(disc, "_physmem_bytes", lambda: 64 * 10**9)
+    monkeypatch.setattr(disc, "_gguf_set_bytes", lambda p: 100 * 10**9)
+    root = _write(tmp_path, "Big-Dense-Q8_0.gguf")
+    m = _scan(root)[0]
+    assert m.stream is None                       # dense: streaming stays opt-in
+    assert "stream: cpu" in capsys.readouterr().err
+
+
+def test_gguf_set_bytes_sums_shards(tmp_path):
+    (tmp_path / "m-Q4-00001-of-00002.gguf").write_bytes(b"x" * 10)
+    (tmp_path / "m-Q4-00002-of-00002.gguf").write_bytes(b"y" * 7)
+    assert disc._gguf_set_bytes(str(tmp_path / "m-Q4-00001-of-00002.gguf")) == 17
+
+
+def test_model_to_entry_includes_stream():
+    mc = ModelCfg(id="x", path="/models/x.gguf", stream="experts")
+    assert disc.model_to_entry(mc, ["/models"])["stream"] == "experts"
+
+
+def test_scaffold_stream_round_trips_through_build_config():
+    import yaml
+    models = [ModelCfg(id="hy3-iq4", path="/models/Hy3-IQ4_XS.gguf",
+                       stream="experts")]
+    text = disc.scaffold_yaml(models, model_dirs=["/models"])
+    cfg = build_config(yaml.safe_load(text))
+    assert cfg.models["hy3-iq4"].stream == "experts"
+
+
+# GGUF-embedded model-card sampling (general.sampling.*)
+def test_read_sampling_maps_header_keys():
+    kv = {"general.sampling.temp": 0.7, "general.sampling.top_p": 0.8,
+          "general.sampling.top_k": 20}
+    assert disc._read_sampling(kv) == {"temperature": 0.7, "top_p": 0.8,
+                                       "top_k": 20}
+
+
+def test_read_sampling_absent_is_empty():
+    assert disc._read_sampling({"general.architecture": "qwen3"}) == {}
+
+
+def test_family_comment_merges_gguf_sampling(monkeypatch):
+    monkeypatch.setattr(disc, "header_sampling",
+                        lambda p: {"temperature": 0.7, "top_p": 0.8})
+    mc = ModelCfg(id="x", path="/m/x.gguf", family="qwen3")
+    assert disc.family_comment(mc) == \
+        "sampling (qwen3 + gguf): t=0.7 top_p=0.8 top_k=20"
+
+
+def test_family_comment_gguf_only_without_family(monkeypatch):
+    monkeypatch.setattr(disc, "header_sampling", lambda p: {"temperature": 0.9})
+    mc = ModelCfg(id="x", path="/m/x.gguf")
+    assert disc.family_comment(mc) == "sampling (gguf): t=0.9"
+
+
+def test_read_sampling_normalizes_disabled_sentinels():
+    kv = {"general.sampling.temp": 0.9, "general.sampling.top_p": 1.0,
+          "general.sampling.top_k": -1, "general.sampling.repeat_penalty": 1.0}
+    assert disc._read_sampling(kv) == {"temperature": 0.9, "top_p": 0.0,
+                                       "top_k": 0}

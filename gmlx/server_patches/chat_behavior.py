@@ -30,26 +30,55 @@ from ._common import (
 _CTKW_FLAG = "_kq_gguf_chat_template_kwargs_patch"
 
 
-def _merged_template_kwargs(request, spec) -> dict:
-    """Profile ``chat_template_kwargs`` as the base, request ``chat_template_kwargs``
-    merged on top (request wins). Either side absent => the other; both absent => {}."""
+def _warn_thinking(msg: str) -> None:
+    import sys
+
+    print(f"[thinking] {msg}", file=sys.stderr)
+
+
+def _merged_template_kwargs(request, spec, template: str = "") -> dict:
+    """Profile ``chat_template_kwargs`` as the base, the profile's dedicated
+    ``thinking`` / ``reasoning_effort`` controls mapped over it (spelled as
+    the variables ``template`` reads), then request ``chat_template_kwargs``
+    merged on top - a request's explicit kwargs always win, verbatim. Either
+    side absent => the other; both absent => {}."""
+    from ..reasoning import map_thinking_controls, normalize_template_kwargs
+
     merged: dict = {}
     spec_kw = getattr(spec, "chat_template_kwargs", None) if spec is not None else None
     if isinstance(spec_kw, dict):
-        merged.update(spec_kw)
+        merged.update(normalize_template_kwargs(spec_kw))
+    thinking = getattr(spec, "thinking", None) if spec is not None else None
+    effort = getattr(spec, "reasoning_effort", None) if spec is not None else None
+    if thinking is not None or effort is not None:
+        merged = map_thinking_controls(merged, thinking, effort, template,
+                                       warn=_warn_thinking)
     req_kw = getattr(request, "chat_template_kwargs", None)
     if isinstance(req_kw, dict):
-        merged.update(req_kw)
+        merged.update(normalize_template_kwargs(req_kw))
     return merged
+
+
+def _model_template_text(processor) -> str:
+    """The serving model's chat template source, for control mapping; "" when
+    the processor carries none."""
+    for obj in (processor, getattr(processor, "tokenizer", None)):
+        t = getattr(obj, "chat_template", None)
+        if isinstance(t, str) and t:
+            return t
+    return ""
 
 
 def _stash_template_kwargs(args, request, _processor):
     """Stash the merged template kwargs on the GenerationArguments instance so the
-    patched ``to_template_kwargs`` can fold them in. Returns ``args`` (mutated)."""
+    patched ``to_template_kwargs`` can fold them in. Returns ``args`` (mutated).
+    The profile-level thinking controls are mapped onto the variables this
+    model's template reads, so one profile applies across models with
+    different spellings; explicit ``chat_template_kwargs`` (profile or
+    request) pass through verbatim."""
     spec = serving.get_active_spec()
-    merged = _merged_template_kwargs(request, spec)
-    if merged:
-        args._kq_template_kwargs = merged
+    template = _model_template_text(_processor)
+    merged = _merged_template_kwargs(request, spec, template)
     fields_set = getattr(request, "model_fields_set", None) or set()
     spec_sampling = getattr(spec, "sampling", None) or {} if spec else {}
     thinking_explicit = (
@@ -57,9 +86,23 @@ def _stash_template_kwargs(args, request, _processor):
         or "enable_thinking" in spec_sampling
         or os.environ.get("MLX_VLM_ENABLE_THINKING") is not None
     )
-    args._kq_thinking_explicit = thinking_explicit
     if not thinking_explicit:
-        args.enable_thinking = True
+        # The z.ai / GLM API spelling as a top-level request field:
+        # `thinking: {"type": "enabled"|"disabled"}`. A dedicated control,
+        # so it maps onto whatever switch this model's template reads.
+        from ..reasoning import map_thinking_controls, thinking_flag
+
+        flag = thinking_flag(getattr(request, "thinking", None))
+        if flag is not None:
+            args.enable_thinking = flag
+            merged = map_thinking_controls(merged, flag, None, template,
+                                           warn=_warn_thinking)
+            thinking_explicit = True
+        else:
+            args.enable_thinking = True
+    if merged:
+        args._kq_template_kwargs = merged
+    args._kq_thinking_explicit = thinking_explicit
     return args
 
 

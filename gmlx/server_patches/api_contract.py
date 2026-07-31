@@ -52,6 +52,8 @@ _GEN_ARGS_CONSUMED = frozenset({
 # XTC) read these off every generation request.
 _GMLX_CONSUMED = frozenset({
     "profile", "chat_template_kwargs", "xtc_probability", "xtc_threshold",
+    # z.ai / GLM API spelling of the thinking switch: {"type": "enabled"|"disabled"}
+    "thinking",
 })
 
 # /v1/chat/completions (openai.py chat_completions_endpoint + the gmlx stop

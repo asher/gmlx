@@ -1404,6 +1404,43 @@ def test_merged_template_kwargs_each_side_alone_and_empty():
     assert sp_chat._merged_template_kwargs(types.SimpleNamespace(), None) == {}
 
 
+def test_merged_template_kwargs_spec_thinking_controls_mapped():
+    """Profile-level thinking/reasoning_effort are dedicated controls: mapped
+    onto whatever switch the serving model's template reads."""
+    spec = _spec_ctkw()
+    spec.thinking = "off"
+    req = types.SimpleNamespace()
+    assert sp_chat._merged_template_kwargs(
+        req, spec, "{% if enable_thinking %}...{% endif %}") == \
+        {"enable_thinking": False}
+    assert sp_chat._merged_template_kwargs(
+        req, spec, "reasoning_effort in ['low','high','no_think']") == \
+        {"reasoning_effort": "no_think"}
+    spec.thinking = "adaptive"
+    assert sp_chat._merged_template_kwargs(
+        req, spec, 'thinking_mode == "adaptive"') == \
+        {"thinking_mode": "adaptive"}
+    spec.thinking = None
+    spec.reasoning_effort = "high"
+    assert sp_chat._merged_template_kwargs(
+        req, spec, 'set reasoning_effort = "medium"') == \
+        {"reasoning_effort": "high"}
+
+
+def test_merged_template_kwargs_request_kwargs_beat_spec_controls():
+    """A request's explicit chat_template_kwargs pass through verbatim and win
+    over the profile's mapped controls."""
+    spec = _spec_ctkw()
+    spec.thinking = "off"
+    spec.reasoning_effort = "low"
+    req = types.SimpleNamespace(
+        chat_template_kwargs={"enable_thinking": True})
+    merged = sp_chat._merged_template_kwargs(
+        req, spec, "{% if enable_thinking %}{% endif %} reasoning_effort")
+    assert merged["enable_thinking"] is True
+    assert merged["reasoning_effort"] == "low"
+
+
 def test_install_chat_template_kwargs_forwards_into_to_template_kwargs():
     """End-to-end seam: the gen-args wrapper stashes the merged dict and the
     patched to_template_kwargs folds it into what mlx-vlm hands the template."""

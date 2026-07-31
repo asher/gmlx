@@ -90,7 +90,9 @@ def register_exit_stats(gt: GpuTokenState) -> None:
             g.boundary()
         line = g.close_stats()
         if line:
-            print(line)
+            from . import loadlog
+
+            loadlog.info(line)
 
     atexit.register(_stats_at_exit)
 

@@ -571,7 +571,7 @@ def test_sync_long_path_stays_on_one_line(monkeypatch, tmp_path):
 
 
 def test_sync_splices_family_comment(monkeypatch, tmp_path):
-    """A spliced entry with a detected family carries the same trailing
+    """A spliced entry with a detected family carries the same above-the-entry
     model-card comment the scaffold writes."""
     cfg_path, lib = _sync_config(tmp_path, "models:\n  keep:\n    path: keep.gguf\n")
     (lib / "keep.gguf").write_bytes(b"x")
@@ -584,7 +584,9 @@ def test_sync_splices_family_comment(monkeypatch, tmp_path):
     assert rc == 0
     text = cfg_path.read_text()
     assert "qw:" in text
-    assert "# qwen3.6: t=1.0 top_p=0.95 top_k=20" in text
+    assert "# sampling (qwen3.6): t=1 top_p=0.95 top_k=20" in text
+    # Above the key, not trailing it.
+    assert text.index("# sampling (qwen3.6)") < text.index("qw:")
 
 
 def test_sync_inserts_new_entry_before_trailing_comment_block(monkeypatch, tmp_path):

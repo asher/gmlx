@@ -80,6 +80,25 @@ def verbose_print(msg: str) -> None:
         print(msg)
 
 
+# The most recent session's verbosity. Runtime (post-load) status notes have
+# no session to consult; a CLI that loaded quiet stays quiet at runtime.
+_LAST_VERBOSE = False
+
+
+def runtime_verbose() -> bool:
+    state = _STATE.get()
+    return state.verbose if state is not None else _LAST_VERBOSE
+
+
+def info(msg: str) -> None:
+    """An informational status line (feature confirmations, mode banners,
+    runtime stats): shown only under ``--verbose``, whether printed during the
+    load session or later at runtime. Warnings - a flag ignored, a fallback
+    taken, a setting clamped - use :func:`warn` or a plain print instead."""
+    if runtime_verbose():
+        print(msg)
+
+
 def warn(msg: str) -> None:
     """Always-visible warning; routed around the spinner when one is animating."""
     state = _STATE.get()
@@ -118,8 +137,10 @@ def seeds(fn):
 
     @functools.wraps(fn)
     def wrapper(*args, verbose: bool = False, **kwargs):
+        global _LAST_VERBOSE
         if _STATE.get() is not None:
             return fn(*args, verbose=verbose, **kwargs)
+        _LAST_VERBOSE = verbose
         tok = _STATE.set(_State(verbose=verbose))
         try:
             return fn(*args, verbose=verbose, **kwargs)
@@ -238,6 +259,8 @@ def load_ui(verbose: bool, path: str):
     """CLI wrapper for one model load: spinner + summary in quiet mode, a null
     context in verbose mode. Exceptions propagate; quiet mode names the stage
     that failed."""
+    global _LAST_VERBOSE
+    _LAST_VERBOSE = verbose
     if verbose:
         yield
         return

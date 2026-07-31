@@ -271,6 +271,22 @@ def add_load_args(ap: argparse.ArgumentParser) -> None:
         help="JSON of extra chat-template kwargs, e.g. '{\"enable_thinking\": false}'.",
     )
     ap.add_argument(
+        "--thinking",
+        choices=("on", "off", "adaptive"),
+        default=None,
+        help="Thinking-model reasoning switch (sets the template variable "
+        "this model's template reads; 'adaptive' = MiniMax-style "
+        "model-decides mode; default: the model's default).",
+    )
+    ap.add_argument(
+        "--reasoning-effort",
+        default=None,
+        metavar="LEVEL",
+        help="Reasoning-effort level for models that grade their thinking "
+        "(gpt-oss/GLM: low|medium|high, Hy3: no_think|low|high; the "
+        "template validates its own level names).",
+    )
+    ap.add_argument(
         "--no-remap",
         action="store_true",
         help="Skip GGUF->HF name remap (raw GGUF names).",
@@ -678,8 +694,8 @@ def _build_parser(prog: str = "gmlx run") -> argparse.ArgumentParser:
     )
     add_condensed_help(ap, (
         "gguf", "--prompt", "--prompt-file", "--max-tokens", "--temp",
-        "--system-prompt", "--reasoning", "--mmproj", "--image",
-        "--stream-experts", "--verbose",
+        "--system-prompt", "--reasoning", "--thinking", "--mmproj",
+        "--image", "--stream-experts", "--verbose",
     ))
     ap.add_argument("gguf", help="Path to the GGUF file (sharded ok).")
     prompt_group = ap.add_mutually_exclusive_group()
@@ -1140,7 +1156,9 @@ def _run_bench_depths(args) -> int:
     prompt_source = None
     if convs is not None:
         seed = int(getattr(args, "bench_chat_seed", 42))
-        tkw = parse_template_config(args.chat_template_config)
+        from .chat import fold_thinking_flag
+        tkw = fold_thinking_flag(
+            args, parse_template_config(args.chat_template_config))
         prompt_source = _ChatPromptSource(
             convs, tok, seed=seed, template_kwargs=tkw)
         print(f"[bench] prompt slice seed {seed}"
@@ -1280,12 +1298,13 @@ def _apply_placement(args, model) -> None:
 
 
 def _run_generate(args) -> int:
-    from .chat import parse_logit_bias, parse_template_config
+    from .chat import fold_thinking_flag, parse_logit_bias, parse_template_config
     from .generation import generate
     from .loader import load_model, preset_native_fp_wire_env
 
     # Parse before the model load so a JSON typo fails fast.
-    template_kwargs = parse_template_config(args.chat_template_config)
+    template_kwargs = fold_thinking_flag(
+        args, parse_template_config(args.chat_template_config))
     logit_bias = parse_logit_bias(args.logit_bias)
     preset_native_fp_wire_env(args)
 
@@ -1446,11 +1465,12 @@ def _run_vlm(args) -> int:
     The sampling surface mirrors the text path where mlx-vlm's generate supports
     it; --stop / --xtc-* stay text-only (mlx-vlm has no seam for them here).
     """
-    from .chat import parse_logit_bias, parse_template_config
+    from .chat import fold_thinking_flag, parse_logit_bias, parse_template_config
     from .vlm import load_vlm_model
 
     # Parse before the model load so a JSON typo fails fast.
-    template_kwargs = parse_template_config(args.chat_template_config)
+    template_kwargs = fold_thinking_flag(
+        args, parse_template_config(args.chat_template_config))
     logit_bias = parse_logit_bias(args.logit_bias)
     if args.seed is not None:
         import mlx.core as mx
@@ -1548,7 +1568,7 @@ def _run_vlm_mtp(args) -> int:
     the speculative speedup. Image/audio requests are routed to ``_run_vlm`` upstream;
     the drafter is simply unused for those.
     """
-    from .chat import parse_template_config
+    from .chat import fold_thinking_flag, parse_template_config
     from .generation import generate_speculative
     from .mtp_load import load_vlm_mtp_model
 
@@ -1595,7 +1615,8 @@ def _run_vlm_mtp(args) -> int:
         draft_block_size=args.draft_block_size,
         apply_chat_template=not args.no_chat_template,
         system_prompt=args.system_prompt,
-        template_kwargs=parse_template_config(args.chat_template_config),
+        template_kwargs=fold_thinking_flag(
+            args, parse_template_config(args.chat_template_config)),
         verbose=True,
         reasoning=args.reasoning,
         kv_bits=args.kv_bits,
@@ -1714,6 +1735,11 @@ def _apply_resolved_to_args(args, rm, explicit: set) -> list[str]:
             _set(attr, v, k)
     _set("system_prompt", rm.system, "system")
     _set("chat_template", rm.chat_template, "chat_template")
+    # Dedicated thinking controls ride the --thinking/--reasoning-effort args
+    # so fold_thinking_flag maps them onto this model's template spelling.
+    _set("thinking", getattr(rm, "thinking", None), "thinking")
+    _set("reasoning_effort", getattr(rm, "reasoning_effort", None),
+         "reasoning_effort")
     _set("mmproj", rm.mmproj, "mmproj")
     _set("adapter", rm.adapter, "adapter")
     _set("draft_gguf", rm.draft_gguf, "draft_gguf")
@@ -1803,6 +1829,11 @@ def apply_family_defaults(args, parser, argv) -> int | None:
     family = (fam.detect_family(meta.get("arch"), meta.get("name"))
               if meta else "default")
     groups = fam.groups_for(family, intent)
+    # The GGUF's own embedded model-card sampling (general.sampling.*) refines
+    # the arch-family guess; explicit flags still win via `explicit`.
+    hs = (meta or {}).get("sampling") or {}
+    if hs:
+        groups = {**groups, "sampling": {**groups.get("sampling", {}), **hs}}
     label = fam.FAMILIES.get(family, {}).get("label", family)
     # An intent the family defines no delta for resolves to the base defaults;
     # say so instead of a banner claiming the intent was applied.
@@ -1815,10 +1846,11 @@ def apply_family_defaults(args, parser, argv) -> int | None:
                                       groups.get("chat_template_kwargs"))
     if applied:
         suffix = f" @{intent}" if has_delta else ""
+        src = f"{label}{suffix} + gguf header" if hs else f"{label}{suffix}"
         # Deferred to print_family_note() after a successful load: the banner
         # must never trail a load failure claiming defaults were applied.
         args._family_note = (
-            f"[family] {label}{suffix} defaults: "
+            f"[family] {src} defaults: "
             f"{', '.join(sorted(applied))}  (--no-family-defaults to disable)")
     return None
 

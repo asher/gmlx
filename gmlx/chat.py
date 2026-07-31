@@ -98,8 +98,9 @@ def _build_parser(prog: str = "gmlx chat") -> argparse.ArgumentParser:
     )
     from .cli import add_condensed_help
     add_condensed_help(ap, (
-        "gguf", "--assistant", "--system-prompt", "--reasoning", "--mmproj",
-        "--max-tokens", "--temp", "--resume", "--theme", "--verbose",
+        "gguf", "--assistant", "--system-prompt", "--reasoning",
+        "--thinking", "--mmproj", "--max-tokens", "--temp", "--resume",
+        "--theme", "--verbose",
     ))
     ap.add_argument(
         "gguf", nargs="?", default=None,
@@ -280,7 +281,56 @@ def parse_template_config(raw: str | None) -> dict:
         raise ValueError(f"--chat-template-config is not valid JSON: {e}") from e
     if not isinstance(out, dict):
         raise ValueError("--chat-template-config must be a JSON object")
-    return out
+    from .reasoning import normalize_template_kwargs
+
+    return normalize_template_kwargs(out)
+
+
+def _template_text(args) -> str:
+    """The chat template that will actually render: an explicit
+    ``--chat-template`` (inline or file), else the GGUF's embedded one.
+    Best-effort - "" when unavailable - used only to pick the right
+    thinking/effort variable spelling."""
+    ct = getattr(args, "chat_template", None)
+    if ct:
+        p = os.path.expanduser(ct)
+        if os.path.exists(p):
+            try:
+                with open(p) as f:
+                    return f.read()
+            except OSError:
+                return ""
+        return ct
+    path = getattr(args, "gguf", None)
+    if not path or not os.path.exists(os.path.expanduser(str(path))):
+        return ""
+    try:
+        from .headerscan import scan_gguf
+
+        t = scan_gguf(os.path.expanduser(str(path)), include_tensors=False).kv.get(
+            "tokenizer.chat_template")
+    except Exception:
+        return ""
+    if t is None:
+        return ""
+    return t if isinstance(t, str) else bytes(t).decode(errors="replace")
+
+
+def fold_thinking_flag(args, tkw: dict) -> dict:
+    """Fold ``--thinking on|off|adaptive`` and ``--reasoning-effort LEVEL``
+    into the template kwargs, spelled as the variables this model's chat
+    template actually reads. ``tkw`` (the ``--chat-template-config`` blob)
+    passes through verbatim; the dedicated flags overlay it. See
+    :func:`gmlx.reasoning.map_thinking_controls` for the spelling table."""
+    t = getattr(args, "thinking", None)
+    effort = getattr(args, "reasoning_effort", None)
+    if t is None and effort is None:
+        return tkw
+    from .reasoning import map_thinking_controls
+
+    return map_thinking_controls(
+        tkw, t, effort, _template_text(args),
+        warn=lambda msg: print(f"[thinking] {msg}", file=sys.stderr))
 
 
 def parse_logit_bias(raw: str | None) -> dict | None:
@@ -2434,7 +2484,9 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
             b.model, kv_kwargs.get("prefill_step_size")
         )
         if defaulted:
-            print(
+            from . import loadlog
+
+            loadlog.info(
                 f"[prefill] streaming model: chunk size defaults to {step} "
                 "(--prefill-step-size overrides)"
             )
@@ -2735,7 +2787,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                     f"(set --no-mtp to apply via plain decoding)",
                     file=sys.stderr,
                 )
-        template_kwargs = parse_template_config(args.chat_template_config)
+        template_kwargs = fold_thinking_flag(
+            args, parse_template_config(args.chat_template_config))
         logit_bias = parse_logit_bias(args.logit_bias)
         resize_shape = parse_resize_shape(args.resize_shape)
 

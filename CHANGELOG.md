@@ -36,8 +36,54 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   retain the reply up to the divergence point (`GMLX_APC_DECODE_CKPT`,
   default 512 generated tokens; `0` off).
 
+### Changed
+
+- Informational `[stream]` banners (streaming summary, feeder/arena sizes,
+  keep-warm, lookahead, MoE lever confirmations, runtime stats) and the
+  `[prefill]` chunk-size note only print under `--verbose`; warnings
+  (ignored flags, fallbacks, wedged reads, clamps) stay visible.
+- Scaffolded config comments now sit on their own line above live keys
+  instead of trailing them (no more wrapped lines on narrow terminals); the
+  redundant mmproj `# VLM companion` comment is gone.
+
+### Added
+
+- `run`/`chat --thinking on|off|adaptive` and `--reasoning-effort LEVEL`:
+  first-class switches for thinking models. The chat template picks the
+  spelling: MiniMax's three-state `thinking_mode`
+  (enabled/disabled/adaptive) where present, `enable_thinking` next
+  (Qwen3.x, GLM, DeepSeek-V4 alias), the Hy3 `reasoning_effort: no_think`
+  dialect where neither exists, and a pointer at the effort levels on
+  gpt-oss (which cannot disable reasoning). `--reasoning-effort` passes
+  through verbatim - level names are the model's own (gpt-oss/GLM
+  low|medium|high, Hy3 no_think|low|high, DeepSeek-V4 max) - and warns
+  when the template has no such variable.
+- The z.ai / GLM API spelling of the thinking switch -
+  `thinking: {"type": "enabled"|"disabled"}` - now works everywhere the
+  template kwargs do: `--chat-template-config`, config/profile
+  `chat_template_kwargs`, and as a top-level request field on the server
+  (the request field maps onto the serving model's own thinking switch).
+- Config profiles and model overrides accept `thinking:` and
+  `reasoning_effort:` keys, applied per model in whatever spelling its
+  chat template reads; explicit `chat_template_kwargs` stay verbatim.
+
 ### Fixed
 
+- Chat markdown rendering no longer reverts a block to raw text when it
+  grows taller than the terminal: the rendered top scrolls into scrollback
+  and only the last screenful stays live-repainted, so long fenced code
+  blocks keep their formatting end to end.
+- The decode-arena reclaimable-RAM estimate now counts the whole
+  file-backed page cache (droppable without swap), not just the inactive
+  queue - a machine full of hot GGUF cache no longer clamps
+  `GMLX_DECODE_ARENA_GB` as if it were out of RAM.
+- Sampling embedded in the GGUF header (`general.sampling.*`) is now
+  honored: it refines the arch-family defaults for both configured models
+  and bare-path runs (profiles, overrides, and explicit flags still win).
+- `gmlx init` / `sync-models` no longer scaffold `speculative: true` for
+  models whose architecture has no MTP target class (they failed at load),
+  and models too large for RAM get `stream: experts` (MoE) or a `stream:
+  cpu` hint (dense) instead of an entry that cannot load.
 - Non-stream replies that hit `max_tokens` inside a think block now return
   the partial reasoning as `reasoning_content` with empty content, matching
   the streaming path (the raw reasoning previously leaked into `content`).

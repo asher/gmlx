@@ -43,6 +43,8 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
+from . import loadlog
+
 _PROBE_GRID_DEFAULT = (0.7, 0.8, 0.82, 0.85, 0.87, 0.9, 0.95, 0.99)
 
 
@@ -390,7 +392,7 @@ def install_moe_expert_mass(model, p: float) -> int:
         raise ValueError(f"MoE expert-mass share must be in (0, 1], got {p}")
     hooked = _install(model, mass=float(p))
     if hooked:
-        print(
+        loadlog.info(
             f"[stream] MoE expert-mass {p:g}: adaptive experts/token on "
             f"{hooked} offloaded MoE layers (lossy - outputs differ from "
             "the trained router)"
@@ -431,7 +433,7 @@ def install_moe_miss_shed(model, p: float) -> int:
             object.__setattr__(m, "_kq_miss_shed", float(p))
             n += 1
     if n:
-        print(
+        loadlog.info(
             f"[stream] MoE miss-shed {p:g}: demand-miss experts shed up to "
             f"{100 * (1 - p):g}% of each token's gate mass on {n} offloaded "
             "MoE layers (lossy - outputs differ from the trained router)"
@@ -457,7 +459,7 @@ def install_moe_layer_shed(model, p: float) -> int:
             object.__setattr__(m, "_kq_layer_shed", float(p))
             n += 1
     if n:
-        print(
+        loadlog.info(
             f"[stream] MoE layer-shed {p:g}: each of {n} streamed MoE "
             "layers skips its routed experts with that probability per "
             "token (lossy - shared expert only on shed layers)"
@@ -477,7 +479,7 @@ def install_moe_expert_probe(model, grid=None) -> int:
     hooked = _install(model, probe=probe)
     if hooked:
         atexit.register(probe.report)
-        print(
+        loadlog.info(
             f"[stream] MoE expert probe: recording router fan-out on "
             f"{hooked} offloaded MoE layers (lossless; table prints at exit)"
         )
