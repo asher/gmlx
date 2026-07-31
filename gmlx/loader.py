@@ -1022,6 +1022,16 @@ def _arena_stage_max_tokens() -> int:
     return env_int("GMLX_ARENA_STAGE_MAX_TOKENS", 64)
 
 
+def _arena_split_max_tokens() -> int:
+    """Largest expert call the arena serves by token-splitting when its
+    routed union exceeds the arena's slots (a turn-transition prefill or a
+    wide verify batch). Halves recurse until each piece's union fits, so
+    every read stays on the wired arena's read pool instead of the CPU
+    page-cache gather. 0 disables. Above the cap, the whole-layer prefill
+    paths win back their sequential pipelining."""
+    return env_int("GMLX_ARENA_SPLIT_MAX_TOKENS", 256)
+
+
 _DECODE_ARENA_RAM_FRAC_DEFAULT = 0.6
 
 
@@ -1746,6 +1756,47 @@ def install_expert_streaming(
                                 return y
                             finally:
                                 self._kq_cpu_only = True
+                    if (
+                        dfr is not None
+                        and cpu_only
+                        and 1 < n_tokens <= _arena_split_max_tokens()
+                        and not kwargs
+                        and dfr.covers(self._kq_li)
+                        and dfr.can_stage_smaller(self._kq_li)
+                    ):
+                        # The chunk routes more distinct experts than the
+                        # arena has slots (stage refused above, or the chunk
+                        # is over the stage-size gate and was never tried).
+                        # Halve along the token axis and recurse: pieces
+                        # whose routed union fits are served from the wired
+                        # arena's read pool, so a turn-transition prefill or
+                        # a wide verify batch never drops to the CPU
+                        # page-cache gather. Bottoms out at n_tokens == 1,
+                        # which always takes a non-split path.
+                        ax = x.ndim - 2
+                        orig = ((scores_arg,) + args
+                                if scores_arg is not None and not _fwd_scores
+                                else args)
+                        sliceable = (
+                            x.shape[ax] == n_tokens
+                            and indices.ndim == x.ndim
+                            and all(
+                                isinstance(a, mx.array)
+                                and a.ndim == x.ndim
+                                and a.shape[ax] == n_tokens
+                                for a in orig)
+                        )
+                        if sliceable:
+                            half = n_tokens // 2
+                            parts = []
+                            for sl in (slice(0, half),
+                                       slice(half, n_tokens)):
+                                t = tuple(
+                                    [slice(None)] * ax + [sl])
+                                parts.append(self.__call__(
+                                    x[t], indices[t],
+                                    *[a[t] for a in orig]))
+                            return mx.concatenate(parts, axis=ax)
                     wedged = dfr is not None and dfr.wedged_at(self._kq_li)
                     if wedged and dfr.has_dead(self._kq_li):
                         # A wedged read poisoned part of this layer's file

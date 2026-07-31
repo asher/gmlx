@@ -506,6 +506,16 @@ class DecodeFeeder:
     def covers(self, li: int) -> bool:
         return li in self._layers
 
+    def can_stage_smaller(self, li: int) -> bool:
+        """True when a stage() refusal was a slot-count overflow that a
+        smaller (token-split) call could clear, as opposed to a wedge or
+        staging being disabled outright."""
+        return (
+            not self._staging_disabled
+            and li in self._layers
+            and li not in self._wedged_layers
+        )
+
     # staging
 
     def _read_expert(self, li: int, kind: str, e: int, slot: int,

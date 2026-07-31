@@ -113,6 +113,16 @@ Streaming models engage two *feeder* paths by default:
   model, a build) it shrinks, keeping its most popular experts, and regrows
   once pressure clears - a long-running model stays a good citizen on a
   machine that is doing other work (`GMLX_DECODE_PRESSURE=0` pins it instead).
+- The arena also serves **multi-token expert calls whose routed union
+  exceeds its slots** - the next chat turn's prefill after a decode, or a
+  wide speculative verify batch - by halving the chunk along the token axis
+  and recursing until each piece fits (`GMLX_ARENA_SPLIT_MAX_TOKENS`, default
+  256, caps the size; `0` disables). Without this, those calls fall to a CPU
+  page-cache gather that runs at demand-fault speed while most of RAM is
+  wired: on Kimi-K3 UD-IQ2_XXS a 48-token second-turn prefill measured 0.25
+  tok/s on the fallthrough and 2.13 tok/s through the split (8.5x), with the
+  post-turn decode dip gone as well, because the reads stay on the arena's
+  read pool and its popularity accounting.
 
 Streaming installs also pin the every-token weights (`GMLX_PIN_WEIGHTS=0`
 disables): every

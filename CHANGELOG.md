@@ -94,6 +94,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   models whose architecture has no MTP target class (they failed at load),
   and models too large for RAM get `stream: experts` (MoE) or a `stream:
   cpu` hint (dense) instead of an entry that cannot load.
+- Streamed-expert chat turns no longer stall at the decode-to-prefill
+  transition: an expert call routing more distinct experts than the decode
+  arena holds is now token-split and served from the arena's read pool
+  instead of a CPU page-cache gather (measured 8.5x on a second-turn
+  prefill; GMLX_ARENA_SPLIT_MAX_TOKENS caps, 0 disables).
 - Non-stream replies that hit `max_tokens` inside a think block now return
   the partial reasoning as `reasoning_content` with empty content, matching
   the streaming path (the raw reasoning previously leaked into `content`).
