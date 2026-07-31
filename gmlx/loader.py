@@ -1402,13 +1402,14 @@ def _lookahead_default(model) -> bool:
 
 def _install_gpu_residency(model, moe_modules) -> None:
     """Wire every non-expert weight buffer into the Metal residency set,
-    so command buffers stop re-wiring the spine's pages on every use (the
+    so command buffers stop re-wiring the every-token weights' pages on
+    every use (the
     per-use wiring is what an unswept streaming install pays instead of
     the neutralized wire-everything sweep)."""
     import mlx_kquant as kq
 
     if not getattr(kq, "residency_insert", None):
-        print("[stream] gpu-resident spine unavailable "
+        print("[stream] gpu-resident weights unavailable "
               "(mlx-kquant lacks residency ops)")
         return
     skip = set()
@@ -1429,7 +1430,7 @@ def _install_gpu_residency(model, moe_modules) -> None:
             n += 1
             nbytes += a.nbytes
     kq.residency_commit()
-    print(f"[stream] gpu-resident spine: {n} buffers "
+    print(f"[stream] gpu-resident weights: {n} buffers "
           f"({nbytes / 1e9:.1f} GB) in the Metal residency set "
           "(GMLX_GPU_RESIDENT=0 disables)")
 
@@ -1491,12 +1492,12 @@ def install_expert_streaming(
         if prefetcher is not None:
             object.__setattr__(model, "_kq_prefetcher", prefetcher)
         # Wire the every-token weights before the decode feeder sizes its
-        # arena: pinned spine pages come out of the same wired budget.
-        from .pin_spine import maybe_pin_spine
+        # arena: pinned every-token pages come out of the same wired budget.
+        from .pin_weights import maybe_pin_weights
 
-        spine_pin = maybe_pin_spine(gguf_path)
-        if spine_pin is not None:
-            object.__setattr__(model, "_kq_spine_pin", spine_pin)
+        weights_pin = maybe_pin_weights(gguf_path)
+        if weights_pin is not None:
+            object.__setattr__(model, "_kq_weights_pin", weights_pin)
 
     def _wrapped_class(cls):
         sub = _CPU_OFFLOAD_CLASS_CACHE.get(cls)

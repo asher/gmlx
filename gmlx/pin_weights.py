@@ -1,13 +1,15 @@
 """Pin a streaming model's every-token (non-expert) weights in RAM.
 
 --stream-experts assumes only the routed-expert stacks stream from disk;
-attention, routers, shared experts, norms and the lm head (the spine) are
-meant to stay resident (see the prefetch module's design note). Nothing
-enforced that: the spine lives in evictable file-backed mmap pages, and on
-a box where model plus page cache exceed RAM the kernel evicts spine pages
-between uses. Each decode token then re-faults the whole spine from disk,
+attention, routers, shared experts, norms and the lm head (the every-token
+weights) are meant to stay resident (see the prefetch module's design
+note). Nothing enforced that: they live in evictable file-backed mmap
+pages, and on a box where model plus page cache exceed RAM the kernel
+evicts them between uses. Each decode token then re-faults them all from
+disk,
 which on a large MoE saturates the SSD before the experts read a byte
-(Kimi-K3: ~50 GB/token of spine page-ins vs ~7 GB of expert misses, a hard
+(Kimi-K3: ~50 GB/token of every-token-weight page-ins vs ~7 GB of
+expert misses, a hard
 ~9 s/token floor on a 6 GB/s NVMe).
 
 This module makes the residency assumption true. Each shard is mapped once
@@ -18,7 +20,7 @@ only per-token disk traffic left is expert misses. Pinning runs before the
 decode feeder sizes its arena, so arena auto-sizing sees the reduced
 budget.
 
-Opt-out with GMLX_PIN_SPINE=0. A partial pin (wire-limit refusal mid-way)
+Opt-out with GMLX_PIN_WEIGHTS=0. A partial pin (wire-limit refusal mid-way)
 is announced and left partial: unpinned ranges just stay cache-managed.
 """
 
@@ -30,8 +32,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from .envflags import env_bool
 
-# Spine = everything the expert prefetcher does not stream (keep the two
-# definitions in lockstep via the shared regex).
+# Every-token set = everything the expert prefetcher does not stream
+# (keep the two definitions in lockstep via the shared regex).
 from .prefetch import _EXPS_RE
 
 _PAGE = os.sysconf("SC_PAGESIZE") if hasattr(os, "sysconf") else 16384
@@ -43,8 +45,8 @@ _MAP_FAILED = ctypes.c_void_p(-1).value
 _CHUNK = 256 << 20
 _WORKERS = 8
 
-# Refuse to pin a spine that would leave the box no working room: wired
-# spine + decode arena + KV + anon must fit under RAM with margin.
+# Refuse a pin that would leave the box no working room: wired
+# every-token weights + decode arena + KV + anon must fit under RAM with margin.
 _MAX_FRACTION = 0.6
 
 
@@ -61,7 +63,7 @@ def _libc():
     return lc
 
 
-def spine_ranges(gguf_path: str) -> dict[str, list[tuple[int, int]]]:
+def every_token_ranges(gguf_path: str) -> dict[str, list[tuple[int, int]]]:
     """``shard_path -> [(offset, nbytes), ...]``: merged, page-aligned byte
     ranges of every non-expert tensor. Headers and metadata are read once
     at load and stay unpinned."""
@@ -90,8 +92,8 @@ def spine_ranges(gguf_path: str) -> dict[str, list[tuple[int, int]]]:
     return out
 
 
-class SpinePin:
-    """One model's pinned spine: per-shard mappings plus their mlocked
+class WeightsPin:
+    """One model's pinned every-token weights: per-shard mappings plus their mlocked
     ranges. ``close()`` (or GC) unlocks and unmaps."""
 
     def __init__(self, ranges: dict[str, list[tuple[int, int]]]):
@@ -153,17 +155,17 @@ class SpinePin:
             pass  # GC-time cleanup must never raise
 
 
-def maybe_pin_spine(gguf_path: str | None) -> SpinePin | None:
-    """A SpinePin over the model's non-expert ranges, or None with a printed
+def maybe_pin_weights(gguf_path: str | None) -> WeightsPin | None:
+    """A WeightsPin over the model's non-expert ranges, or None with a printed
     reason. Called only for streaming-mode installs."""
     if gguf_path is None:
         return None
-    if not env_bool("GMLX_PIN_SPINE", True):
-        print("[stream] spine pin off (GMLX_PIN_SPINE=0); every-token "
+    if not env_bool("GMLX_PIN_WEIGHTS", True):
+        print("[stream] weight pin off (GMLX_PIN_WEIGHTS=0); every-token "
               "weights stay cache-managed")
         return None
     try:
-        ranges = spine_ranges(gguf_path)
+        ranges = every_token_ranges(gguf_path)
         total = sum(n for rs in ranges.values() for _, n in rs)
         try:
             ram = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGESIZE")
@@ -171,22 +173,23 @@ def maybe_pin_spine(gguf_path: str | None) -> SpinePin | None:
             ram = 0
         if ram and total > _MAX_FRACTION * ram:
             print(
-                f"[stream] spine pin skipped: every-token weights "
+                f"[stream] weight pin skipped: every-token weights "
                 f"({total / 1e9:.1f} GB) exceed {int(_MAX_FRACTION * 100)}% "
                 f"of RAM ({ram / 1e9:.0f} GB); staying cache-managed")
             return None
-        pin = SpinePin(ranges)
+        pin = WeightsPin(ranges)
         if pin._refused:
             print(
-                f"[stream] spine pin partial: wired "
+                f"[stream] weight pin partial: wired "
                 f"{pin.pinned_bytes / 1e9:.1f} of {pin.total_bytes / 1e9:.1f} "
                 "GB (mlock refused); the rest stays cache-managed")
         else:
             print(
-                f"[stream] spine pinned: {pin.pinned_bytes / 1e9:.1f} GB of "
-                "every-token weights wired (GMLX_PIN_SPINE=0 disables)")
+                f"[stream] every-token weights pinned: "
+                f"{pin.pinned_bytes / 1e9:.1f} GB wired "
+                "(GMLX_PIN_WEIGHTS=0 disables)")
         return pin
     except Exception as e:
-        print(f"[stream] spine pin unavailable ({e}); every-token weights "
+        print(f"[stream] weight pin unavailable ({e}); every-token weights "
               "stay cache-managed")
         return None

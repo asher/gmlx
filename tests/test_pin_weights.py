@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from gmlx import pin_spine
+from gmlx import pin_weights
 
 
 def _write_model(path):
@@ -27,18 +27,18 @@ def _write_model(path):
     w.close()
 
 
-def test_spine_ranges_excludes_expert_stacks(tmp_path):
+def test_every_token_ranges_excludes_expert_stacks(tmp_path):
     from gguf import GGUFReader
 
     p = tmp_path / "m.gguf"
     _write_model(p)
-    ranges = pin_spine.spine_ranges(str(p))
+    ranges = pin_weights.every_token_ranges(str(p))
     assert set(ranges) == {str(p)}
     rs = ranges[str(p)]
     assert rs and all(n > 0 for _, n in rs)
     # every non-expert tensor byte is covered; expert bytes may only leak
     # in via page-alignment slack at range edges
-    page = pin_spine._PAGE
+    page = pin_weights._PAGE
     for t in GGUFReader(str(p)).tensors:
         off, end = int(t.data_offset), int(t.data_offset) + int(t.n_bytes)
         covered = any(a <= off and end <= a + n for a, n in rs)
@@ -50,19 +50,19 @@ def test_spine_ranges_excludes_expert_stacks(tmp_path):
             assert covered, t.name
 
 
-def test_spine_pin_lifecycle(tmp_path):
+def test_weight_pin_lifecycle(tmp_path):
     p = tmp_path / "m.gguf"
     _write_model(p)
-    pin = pin_spine.SpinePin(pin_spine.spine_ranges(str(p)))
+    pin = pin_weights.WeightsPin(pin_weights.every_token_ranges(str(p)))
     assert pin.pinned_bytes > 0
     assert pin.pinned_bytes == pin.total_bytes  # tiny file: no refusal
     pin.close()
     pin.close()  # idempotent (teardown + GC)
 
 
-def test_maybe_pin_spine_env_off(tmp_path, monkeypatch, capsys):
+def test_maybe_pin_weights_env_off(tmp_path, monkeypatch, capsys):
     p = tmp_path / "m.gguf"
     _write_model(p)
-    monkeypatch.setenv("GMLX_PIN_SPINE", "0")
-    assert pin_spine.maybe_pin_spine(str(p)) is None
-    assert "spine pin off" in capsys.readouterr().out
+    monkeypatch.setenv("GMLX_PIN_WEIGHTS", "0")
+    assert pin_weights.maybe_pin_weights(str(p)) is None
+    assert "weight pin off" in capsys.readouterr().out

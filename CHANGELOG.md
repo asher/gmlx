@@ -126,8 +126,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Scaffolded config comments now sit on their own line above live keys
   instead of trailing them (no more wrapped lines on narrow terminals); the
   redundant mmproj `# VLM companion` comment is gone.
-- Streamed installs default the GPU-resident spine and the keep-warm
-  heartbeat on; GMLX_GPU_RESIDENT=0 / GMLX_GPU_KEEPWARM=0 disable.
+- Streamed installs default the every-token-weight residency set and the
+  keep-warm heartbeat on; GMLX_GPU_RESIDENT=0 / GMLX_GPU_KEEPWARM=0 disable.
 - glm-dsa/DeepSeek-V3.2 sparse decode uses the stock top-k gather again
   (O(index_topk) per step); the mask-path workaround is now opt-in via
   `GMLX_DSV32_MASK_DECODE=1`.
