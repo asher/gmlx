@@ -474,6 +474,21 @@ def _url_download(url: str, dest_path: str) -> str:
         t0 = time.monotonic()
         session_bytes = 0
         last_print = 0.0
+        clear = "\x1b[K" if sys.stderr.isatty() else ""
+
+        def show(written: int, done: bool) -> None:
+            remaining = (total - written) if total else None
+            stats = _transfer_stats(t0, session_bytes,
+                                    None if done else remaining)
+            if total:
+                pct = written * 100 // total
+                line = (f"  {fname}: {_human_gb(written, 2)} / "
+                        f"{_human_gb(total, 2)} ({pct}%) {stats}")
+            else:
+                line = f"  {fname}: {_human_gb(written, 2)} {stats}"
+            print("\r" + line.rstrip() + clear, end="", file=sys.stderr,
+                  flush=True)
+
         with open(part, "ab" if resumed else "wb") as f:
             written = have if resumed else 0
             while True:
@@ -486,17 +501,9 @@ def _url_download(url: str, dest_path: str) -> str:
                 now = time.monotonic()
                 if now - last_print >= 2.0:
                     last_print = now
-                    stats = _transfer_stats(t0, session_bytes,
-                                            (total - written) if total else None)
-                    if total:
-                        pct = written * 100 // total
-                        print(f"\r  {fname}: {_human_gb(written, 2)} / "
-                              f"{_human_gb(total, 2)} ({pct}%) {stats}",
-                              end="", file=sys.stderr, flush=True)
-                    else:
-                        print(f"\r  {fname}: {_human_gb(written, 2)} {stats}",
-                              end="", file=sys.stderr, flush=True)
+                    show(written, False)
             if total or written:
+                show(written, True)
                 print(file=sys.stderr)
     if total and written != total:
         # A clean early close reads as EOF (read() returns b"" instead of
