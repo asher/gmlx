@@ -48,7 +48,7 @@ from functools import lru_cache
 import numpy as np
 
 from . import keepwarm, loadlog
-from .envflags import env_int
+from .envflags import env_bool, env_int
 from .feeder_common import ATTRS, KINDS, read_range, swapped_weights, verify_zero_copy
 
 # Miss-pull parallelism: per layer, up to top_k experts x 3 stacks of
@@ -556,6 +556,14 @@ class DecodeFeeder:
         if self._release_ring is not None:
             self._release_ring()
         self._mlock_arena()
+        if env_bool("GMLX_GPU_RESIDENT", False):
+            import mlx_kquant as kq
+
+            if getattr(kq, "residency_insert", None):
+                self._gpu_resident = True
+                for a in self._arena.values():
+                    kq.residency_insert(a[0])
+                kq.residency_commit()
 
     def stage(self, li: int, ids: np.ndarray) -> np.ndarray | None:
         """Map router expert ids to arena slots, pulling misses from the GGUF
@@ -1168,6 +1176,7 @@ class DecodeFeeder:
             e = owner[os_]
             new_owner[ns] = e
             slot_of[e] = ns
+        resident = getattr(self, "_gpu_resident", False)
         for kind, (_, _, _, stride, shape) in entry.items():
             key = (li, kind)
             a = kq.arena_alloc([new_s * stride])
@@ -1176,10 +1185,16 @@ class DecodeFeeder:
                 mv_new[ns * stride:(ns + 1) * stride] = \
                     mv_old[os_ * stride:(os_ + 1) * stride]
             self._munlock_buf(key)
+            if resident:
+                # a freed buffer must not stay in the residency set
+                kq.residency_erase(self._arena[key][0])
+                kq.residency_insert(a[0])
             self._arena[key] = a
             self._views[key] = a[0].reshape((new_s,) + shape[1:])
             self.arena_bytes += (new_s - old_s) * stride
             self._mlock_buf(key)
+        if resident:
+            kq.residency_commit()
         self._owner[li] = new_owner
         self._slots[li] = new_s
 

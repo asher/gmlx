@@ -1400,6 +1400,40 @@ def _lookahead_default(model) -> bool:
         model, "model_type", None) not in _LA_DEFAULT_OFF_FAMILIES
 
 
+def _install_gpu_residency(model, moe_modules) -> None:
+    """Wire every non-expert weight buffer into the Metal residency set,
+    so command buffers stop re-wiring the spine's pages on every use (the
+    per-use wiring is what an unswept streaming install pays instead of
+    the neutralized wire-everything sweep)."""
+    import mlx_kquant as kq
+
+    if not getattr(kq, "residency_insert", None):
+        print("[stream] gpu-resident spine unavailable "
+              "(mlx-kquant lacks residency ops)")
+        return
+    skip = set()
+    for mods in moe_modules.values():
+        for m in mods:
+            for attr in ("gate_proj", "up_proj", "down_proj"):
+                w = getattr(getattr(m, attr, None), "weight", None)
+                if w is not None:
+                    skip.add(id(w))
+    n = 0
+    nbytes = 0
+    for _, a in tree_flatten(model.parameters()):
+        if id(a) in skip:
+            continue
+        if a.ndim == 3 and a.nbytes > (1 << 30):
+            continue  # belt: any GB-scale stack is an expert container
+        if kq.residency_insert(a):
+            n += 1
+            nbytes += a.nbytes
+    kq.residency_commit()
+    print(f"[stream] gpu-resident spine: {n} buffers "
+          f"({nbytes / 1e9:.1f} GB) in the Metal residency set "
+          "(GMLX_GPU_RESIDENT=0 disables)")
+
+
 def install_expert_streaming(
     model,
     n_layers: int | None = None,
@@ -1920,6 +1954,8 @@ def install_expert_streaming(
                 f"popularity-managed expert arena ({wired}){cov} "
                 "(--no-decode-feeder disables, GMLX_DECODE_ARENA_GB sizes)"
             )
+    if streaming and env_bool("GMLX_GPU_RESIDENT", False):
+        _install_gpu_residency(model, moe_modules)
     if streaming and dfeeder is not None:
         from . import gpu_token
 
