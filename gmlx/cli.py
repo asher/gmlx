@@ -514,7 +514,8 @@ def add_placement_args(ap: argparse.ArgumentParser) -> None:
         "between per-layer bursts and each burst pays the clock ramp; "
         "the heartbeat removes that (lossless, costs a few watts while "
         "decoding; parks after GMLX_KEEPWARM_IDLE_S seconds idle, "
-        "default 1). Default off. Env: GMLX_GPU_KEEPWARM=1.",
+        "default 1). Default on for streamed installs; "
+        "GMLX_GPU_KEEPWARM=0 disables.",
     )
 
 

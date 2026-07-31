@@ -175,8 +175,8 @@ per-layer work (0.3 ms warm vs up to 4+ ms ramp-inflated). The more
 per-token host syncs a model's decode path has, the more of its token time
 is ramp rather than work.
 
-`--gpu-keepwarm` (env `GMLX_GPU_KEEPWARM=1`; serve: `--gpu-keepwarm` or
-config `server.gpu_keepwarm: true`) holds clocks up with a tiny heartbeat
+`--gpu-keepwarm` (default on for streamed installs; `GMLX_GPU_KEEPWARM=0`
+disables) holds clocks up with a tiny heartbeat
 kernel (a 256x256 matmul every 0.5 ms) on its own stream from a background
 thread. It moves no model bytes and changes no outputs - the win is purely
 clock residency. Measured on the production configs of two over-RAM

@@ -1954,7 +1954,7 @@ def install_expert_streaming(
                 f"popularity-managed expert arena ({wired}){cov} "
                 "(--no-decode-feeder disables, GMLX_DECODE_ARENA_GB sizes)"
             )
-    if streaming and env_bool("GMLX_GPU_RESIDENT", False):
+    if streaming and env_bool("GMLX_GPU_RESIDENT", True):
         _install_gpu_residency(model, moe_modules)
     if streaming and dfeeder is not None:
         from . import gpu_token
@@ -1986,14 +1986,15 @@ def install_expert_streaming(
                     "token boundaries (GMLX_GPU_AUTONOMOUS=1|all)"
                 )
     if streaming and dfeeder is not None and env_bool(
-            "GMLX_GPU_KEEPWARM", False):
+            "GMLX_GPU_KEEPWARM", True):
         from . import keepwarm
 
         keepwarm.start()
         loadlog.info(
             "[stream] gpu keep-warm: background heartbeat holds GPU "
             "clocks between per-layer decode bursts, parked while no "
-            "decode is running (lossless; costs power only during decode)"
+            "decode is running (lossless, costs power only during "
+            "decode; GMLX_GPU_KEEPWARM=0 disables)"
         )
     la_probe = env_bool("GMLX_DECODE_LOOKAHEAD_PROBE", False)
     # Lookahead's replica router folds into the per-layer sync; whether its
