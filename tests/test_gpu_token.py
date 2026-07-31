@@ -118,6 +118,9 @@ def _autonomous_glu(monkeypatch, fake_df):
 
 
 class _FakeDF:
+    def ensure_wired(self):
+        pass
+
     """Identity-arena stand-in exposing exactly what the autonomous path
     touches: residency state for snapshots, the boundary bookkeeping
     fields, and recording prestage/flush calls."""

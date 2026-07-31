@@ -1539,6 +1539,7 @@ def install_expert_streaming(
                         and dfr.covers(self._kq_li)
                     )
                     if gt_live:
+                        dfr.ensure_wired()
                         # Token tick for EVERY covered decode layer, stage
                         # path included: boundary detection and the
                         # adaptive hot-set refresh live here.
