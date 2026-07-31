@@ -599,6 +599,18 @@ def _left_padded_attention(queries, keys, values, *, cache, scale, mask):
     if max(pads) <= 0:
         return None
 
+    if (
+        queries.shape[0] > 1
+        and queries.shape[2] == 1
+        and env_bool("GMLX_CASCADE_SDPA", True)
+    ):
+        from .cascade_sdpa import _claim as _cascade_claim
+
+        output = _cascade_claim(queries, keys, values, cache, scale,
+                                None, None)
+        if output is not None:
+            return output
+
     output = ragged_decode_attention(queries, keys, values, pads, scale)
     if output is not None:
         return output
@@ -700,6 +712,25 @@ def _verify_attention(queries, keys, values, *, cache, scale, mask):
     pads = getattr(cache, "_qwen3_5_decode_left_padding", None)
     padded = pads is not None and len(pads) > 0 and max(pads) > 0
     L = queries.shape[-2]
+    if (
+        L > 1
+        and queries.shape[0] > 1
+        and env_bool("GMLX_CASCADE_SDPA", True)
+    ):
+        # Layer masks on this tree are always cache-derived (the owned
+        # model call drops any caller mask), so at verify width they
+        # encode pad visibility + end-aligned causal -- exactly what
+        # the fused cascade op reproduces from cache.left_padding. The
+        # claim re-derives pads itself and declines right padding and
+        # width-mismatched arrays; None means "causal" on this
+        # resolver, so map it before the claim.
+        from .cascade_sdpa import _claim as _cascade_claim
+
+        output = _cascade_claim(
+            queries, keys, values, cache, scale,
+            mask if isinstance(mask, mx.array) else "causal", None)
+        if output is not None:
+            return output
     if padded and (
         L <= 1
         or len(pads) != queries.shape[0]

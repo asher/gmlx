@@ -286,11 +286,15 @@ def _batched_padded_prefill(self, inputs, h, cache, position_ids):
         for i, cache_entry in enumerate(current_cache):
             row_caches[i].append(cache_entry)
 
+    from .cascade_sdpa import carry_stamp
+
     for i, entries in enumerate(row_caches):
         if cache[i] is None:
             continue
         if hasattr(cache[i].__class__, "merge"):
-            cache[i] = cache[i].__class__.merge(entries)
+            merged = cache[i].__class__.merge(entries)
+            carry_stamp(cache[i], merged)
+            cache[i] = merged
     return mx.concatenate(row_outputs, axis=0)
 
 
