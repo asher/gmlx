@@ -94,6 +94,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   models whose architecture has no MTP target class (they failed at load),
   and models too large for RAM get `stream: experts` (MoE) or a `stream:
   cpu` hint (dense) instead of an entry that cannot load.
+- Kimi-K3 supports the router-side MoE levers: --moe-expert-probe,
+  --moe-expert-mass and --moe-experts previously printed "no supported
+  offloaded MoE block" and silently did nothing (the block's inline
+  plain-Linear router was invisible to the installers).
 - Kimi-K3 now thinks by default in chat and serve: templates that gate
   thinking on an XTML channel (<|open|>think<|sep|>) were missed by
   mlx-lm's vocab-pair detection, which then forced enable_thinking=False

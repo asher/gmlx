@@ -194,6 +194,14 @@ class KimiK3MoE(nn.Module):
             weights = weights / (mx.sum(weights, axis=-1, keepdims=True) + 1e-20)
         weights = (weights * self.args.routed_scaling_factor).astype(x.dtype)
 
+        # Expert-controls seam (probe / expert-mass): moe_experts targets
+        # this block directly rather than swapping the forward.
+        if (getattr(self, "_kq_expert_probe", None) is not None
+                or getattr(self, "_kq_expert_mass", None) is not None):
+            from .moe_experts import _apply_expert_controls
+
+            inds, weights = _apply_expert_controls(self, inds, weights)
+
         if getattr(self.switch_mlp, "_kq_lookahead", None) is not None:
             # Latent MoE: the wrapped expert container sees routed_down's
             # latent-width output, but the router replica needs the
