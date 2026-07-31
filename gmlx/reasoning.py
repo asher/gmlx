@@ -413,3 +413,69 @@ def normalize_template_kwargs(kwargs: dict) -> dict:
     del out["thinking"]
     out.setdefault("enable_thinking", flag)
     return out
+
+
+# Values accepted for the model-agnostic `thinking` control (CLI flag,
+# config/profile key, z.ai-style request field).
+_THINKING_LEVELS = {"on": "on", "off": "off", "adaptive": "adaptive",
+                    "enabled": "on", "disabled": "off",
+                    True: "on", False: "off"}
+
+
+def map_thinking_controls(base: dict, thinking=None, reasoning_effort=None,
+                          template: str = "", warn=None) -> dict:
+    """Overlay the dedicated thinking controls onto ``base`` template kwargs,
+    spelled as the variables ``template`` actually reads. ``base`` (an
+    explicitly passed ``chat_template_kwargs`` dict) is never reinterpreted -
+    its keys pass through verbatim; only the controls given as arguments are
+    mapped, and a mapped switch overwrites a same-named base key (the
+    dedicated control is the more specific ask).
+
+    ``thinking`` (on/off/adaptive; enabled/disabled, plain bools, and the
+    z.ai dict shape accepted) becomes MiniMax's three-state ``thinking_mode``
+    where present, ``enable_thinking`` next (Qwen3.x, GLM, DeepSeek-V4
+    alias), or Hy3's ``reasoning_effort: no_think`` dialect.
+    ``reasoning_effort`` passes through under its own name (level names are
+    the model's own; its template validates them), and an explicit level -
+    argument or ``base`` key - wins over one a ``thinking`` switch would
+    imply. gpt-oss-style templates grade effort but cannot disable
+    reasoning; ``warn`` (an optional callable taking a message) hears about
+    that and other unmappable controls. With no template text available the
+    switch defaults to the ``enable_thinking`` spelling."""
+    _warn = warn or (lambda msg: None)
+    out = dict(base)
+    if reasoning_effort is not None:
+        out["reasoning_effort"] = reasoning_effort
+        if template and "reasoning_effort" not in template:
+            _warn("this model's chat template has no reasoning_effort "
+                  "variable; reasoning_effort is likely a no-op")
+    if thinking is None:
+        return out
+    if isinstance(thinking, dict):
+        flag = thinking_flag(thinking)
+        thinking = {True: "on", False: "off", None: thinking}[flag]
+    mode = _THINKING_LEVELS.get(thinking) if not isinstance(thinking, dict) \
+        else None
+    if mode is None:
+        _warn(f"unrecognized thinking value {thinking!r} "
+              "(expected on/off/adaptive) - ignored")
+        return out
+    if "thinking_mode" in template:
+        out["thinking_mode"] = {"on": "enabled", "off": "disabled",
+                                "adaptive": "adaptive"}[mode]
+    elif mode == "adaptive":
+        _warn("adaptive is a MiniMax-style thinking_mode level; this model's "
+              "chat template has no such variable - ignored")
+    elif "enable_thinking" in template or not template:
+        out["enable_thinking"] = mode == "on"
+    elif "no_think" in template and "reasoning_effort" in template:
+        out.setdefault("reasoning_effort",
+                       "no_think" if mode == "off" else "high")
+    elif "reasoning_effort" in template:
+        _warn("this model has no thinking switch (reasoning always runs); "
+              "use reasoning_effort low|medium|high to size it")
+    else:
+        _warn("this model's chat template has no thinking switch; the "
+              "thinking control is likely a no-op")
+        out["enable_thinking"] = mode == "on"
+    return out

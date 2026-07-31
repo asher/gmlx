@@ -62,7 +62,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `thinking: {"type": "enabled"|"disabled"}` - now works everywhere the
   template kwargs do: `--chat-template-config`, config/profile
   `chat_template_kwargs`, and as a top-level request field on the server
-  (it translates to `enable_thinking`).
+  (the request field maps onto the serving model's own thinking switch).
+- Config profiles and model overrides accept `thinking:` and
+  `reasoning_effort:` keys, applied per model in whatever spelling its
+  chat template reads; explicit `chat_template_kwargs` stay verbatim.
 
 ### Fixed
 

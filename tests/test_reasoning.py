@@ -384,7 +384,7 @@ def test_fold_thinking_flag_gpt_oss_warns(monkeypatch, capsys):
                         lambda a: 'set reasoning_effort = "medium"')
     args = SimpleNamespace(thinking="off", reasoning_effort=None, gguf="/m/x.gguf")
     assert chat.fold_thinking_flag(args, {}) == {}   # no kwarg forced
-    assert "--reasoning-effort" in capsys.readouterr().err
+    assert "reasoning_effort" in capsys.readouterr().err
 
 
 def test_fold_reasoning_effort_passthrough_and_noop_warning(monkeypatch, capsys):
@@ -426,3 +426,31 @@ def test_fold_thinking_adaptive_elsewhere_warns(monkeypatch, capsys):
                            gguf="/m/x.gguf")
     assert chat.fold_thinking_flag(args, {}) == {}
     assert "adaptive" in capsys.readouterr().err
+
+
+def test_map_thinking_controls_base_is_verbatim():
+    """An explicitly passed chat_template_kwargs dict is never reinterpreted:
+    keys named like the controls pass through untouched; only the dedicated
+    control arguments are mapped."""
+    from gmlx.reasoning import map_thinking_controls
+
+    base = {"thinking": "deep", "reasoning_effort": "medium", "x": 1}
+    assert map_thinking_controls(base, template="enable_thinking") == base
+    out = map_thinking_controls(base, thinking="off",
+                                template="{% if enable_thinking %}{% endif %}")
+    assert out == {**base, "enable_thinking": False}
+
+
+def test_map_thinking_controls_value_spellings(capsys):
+    """Bools, enabled/disabled, and the z.ai dict shape all normalize; an
+    unrecognized value warns and is dropped."""
+    from gmlx.reasoning import map_thinking_controls
+
+    tmpl = "{% if enable_thinking %}{% endif %}"
+    warns = []
+    for v in (False, "disabled", {"type": "disabled"}):
+        assert map_thinking_controls({}, thinking=v, template=tmpl) == \
+            {"enable_thinking": False}
+    assert map_thinking_controls({}, thinking="sideways", template=tmpl,
+                                 warn=warns.append) == {}
+    assert warns and "unrecognized" in warns[0]

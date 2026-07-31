@@ -317,62 +317,20 @@ def _template_text(args) -> str:
 
 
 def fold_thinking_flag(args, tkw: dict) -> dict:
-    """``--thinking on|off`` / ``--reasoning-effort LEVEL`` -> the template
-    variables this model's template actually reads (the dedicated flags win
-    over ``--chat-template-config`` values).
-
-    There is no cross-model standard, so the template text picks the
-    spelling: MiniMax's three-state ``thinking_mode``
-    (enabled/disabled/adaptive) where present; ``enable_thinking`` (Qwen3.x,
-    GLM, DeepSeek-V4 alias) next; else ``reasoning_effort`` - the Hy3
-    dialect includes a ``no_think`` level, so ``--thinking off`` maps onto
-    it, while gpt-oss's low/medium/high cannot disable reasoning and the
-    flag warns instead. ``--reasoning-effort`` passes through as
-    ``reasoning_effort`` verbatim (families disagree on the level names -
-    gpt-oss/GLM low/medium/high, Hy3 no_think/low/high, DeepSeek-V4 max;
-    the template validates its own)."""
+    """Fold ``--thinking on|off|adaptive`` and ``--reasoning-effort LEVEL``
+    into the template kwargs, spelled as the variables this model's chat
+    template actually reads. ``tkw`` (the ``--chat-template-config`` blob)
+    passes through verbatim; the dedicated flags overlay it. See
+    :func:`gmlx.reasoning.map_thinking_controls` for the spelling table."""
     t = getattr(args, "thinking", None)
     effort = getattr(args, "reasoning_effort", None)
     if t is None and effort is None:
         return tkw
-    out = dict(tkw)
-    template = _template_text(args)
-    if effort is not None:
-        out["reasoning_effort"] = effort
-        if template and "reasoning_effort" not in template:
-            print(
-                "[thinking] this model's chat template has no "
-                "reasoning_effort variable; --reasoning-effort is likely a "
-                "no-op", file=sys.stderr,
-            )
-    if t is not None:
-        if "thinking_mode" in template:
-            out["thinking_mode"] = {
-                "on": "enabled", "off": "disabled", "adaptive": "adaptive"}[t]
-        elif t == "adaptive":
-            print(
-                "[thinking] adaptive is a MiniMax-style thinking_mode level; "
-                "this model's template has no such variable - ignored",
-                file=sys.stderr,
-            )
-        elif "enable_thinking" in template or not template:
-            out["enable_thinking"] = t == "on"
-        elif "no_think" in template and "reasoning_effort" in template:
-            out.setdefault(
-                "reasoning_effort", "no_think" if t == "off" else "high")
-        elif "reasoning_effort" in template:
-            print(
-                "[thinking] this model has no thinking switch (reasoning "
-                "always runs); use --reasoning-effort low|medium|high to "
-                "size it", file=sys.stderr,
-            )
-        else:
-            print(
-                "[thinking] this model's chat template has no thinking "
-                "switch; --thinking is likely a no-op", file=sys.stderr,
-            )
-            out["enable_thinking"] = t == "on"
-    return out
+    from .reasoning import map_thinking_controls
+
+    return map_thinking_controls(
+        tkw, t, effort, _template_text(args),
+        warn=lambda msg: print(f"[thinking] {msg}", file=sys.stderr))
 
 
 def parse_logit_bias(raw: str | None) -> dict | None:

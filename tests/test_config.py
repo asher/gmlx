@@ -435,6 +435,28 @@ def test_chat_template_kwargs_override_merges_over_profile():
         "preserve_thinking": False, "extra": 1}
 
 
+def test_thinking_controls_resolve_like_system():
+    """Profile-level thinking/reasoning_effort are scalar layers: profile sets,
+    override wins; unset stays None."""
+    cfg = build_config({
+        "server": {"model_dirs": ["/models"]},
+        "profiles": {"nothink": {"thinking": "off", "reasoning_effort": "low"}},
+        "models": {
+            "plain": {"path": "/abs/a.gguf"},
+            "adopt": {"path": "/abs/b.gguf", "profile": "nothink"},
+            "override": {"path": "/abs/c.gguf", "profile": "nothink",
+                         "overrides": {"thinking": "on",
+                                       "reasoning_effort": "high"}},
+        },
+    })
+    rm = resolve_model("adopt", cfg)
+    assert (rm.thinking, rm.reasoning_effort) == ("off", "low")
+    rm = resolve_model("override", cfg)
+    assert (rm.thinking, rm.reasoning_effort) == ("on", "high")
+    rm = resolve_model("plain", cfg)
+    assert (rm.thinking, rm.reasoning_effort) == (None, None)
+
+
 def test_chat_template_kwargs_not_load_affecting():
     """Two ids on one GGUF differing only in chat_template_kwargs share a resident
     entry - the kwargs are applied per request, never baked into the tokenizer."""

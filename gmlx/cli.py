@@ -1735,6 +1735,11 @@ def _apply_resolved_to_args(args, rm, explicit: set) -> list[str]:
             _set(attr, v, k)
     _set("system_prompt", rm.system, "system")
     _set("chat_template", rm.chat_template, "chat_template")
+    # Dedicated thinking controls ride the --thinking/--reasoning-effort args
+    # so fold_thinking_flag maps them onto this model's template spelling.
+    _set("thinking", getattr(rm, "thinking", None), "thinking")
+    _set("reasoning_effort", getattr(rm, "reasoning_effort", None),
+         "reasoning_effort")
     _set("mmproj", rm.mmproj, "mmproj")
     _set("adapter", rm.adapter, "adapter")
     _set("draft_gguf", rm.draft_gguf, "draft_gguf")
