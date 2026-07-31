@@ -101,3 +101,73 @@ def test_thinking_effort_renders_and_validates():
     with pytest.raises(jinja2.exceptions.TemplateError,
                        match="thinking_effort"):
         _render(_CHAT, add_generation_prompt=True, thinking_effort="medium")
+
+
+# mlx-lm's TokenizerWrapper only detects thinking support from vocab token
+# pairs (<think>/</think> etc). K3's think channel is XTML: "think" is plain
+# text between structural tokens, so detection misses it and the wrapper
+# injects enable_thinking=False into a thinking-default template. The loader
+# helper renders the template's own default generation prompt and flips the
+# wrapper's think markers when it opens the XTML think channel.
+
+class _StubRaw:
+    chat_template = _TMPL
+
+    def apply_chat_template(self, messages, add_generation_prompt=False,
+                            tokenize=False, **kwargs):
+        return _render(messages,
+                       add_generation_prompt=add_generation_prompt)
+
+    def encode(self, text, add_special_tokens=False):
+        return [len(text), 7]
+
+
+class _StubWrapper:
+    _think_start = None
+    _think_end = None
+    _think_start_tokens = None
+    _think_end_tokens = None
+
+    @property
+    def has_thinking(self):
+        return self._think_start is not None
+
+
+def test_detect_xtml_thinking_flips_wrapper_default():
+    from gmlx.loader import _detect_xtml_thinking
+
+    w = _StubWrapper()
+    _detect_xtml_thinking(w, _StubRaw(), lambda *_: None)
+    assert w.has_thinking
+    assert w._think_start == "<|open|>think<|sep|>"
+    assert w._think_end == "<|close|>think<|sep|>"
+    assert w._think_start_tokens == (len(w._think_start), 7)
+    assert w._think_end_tokens == (len(w._think_end), 7)
+
+
+def test_detect_xtml_thinking_ignores_non_xtml_templates():
+    from gmlx.loader import _detect_xtml_thinking
+
+    class _PlainRaw(_StubRaw):
+        chat_template = "{{ messages }}"
+
+        def apply_chat_template(self, messages, **kwargs):
+            return "no think channel here"
+
+    w = _StubWrapper()
+    _detect_xtml_thinking(w, _PlainRaw(), lambda *_: None)
+    assert not w.has_thinking
+
+
+def test_detect_xtml_thinking_respects_existing_detection():
+    from gmlx.loader import _detect_xtml_thinking
+
+    class _Failing(_StubRaw):
+        def apply_chat_template(self, messages, **kwargs):
+            raise AssertionError("must not render when already detected")
+
+    w = _StubWrapper()
+    w._think_start = "<think>"
+    _detect_xtml_thinking(w, _Failing(), lambda *_: None)
+    assert w._think_start == "<think>"
+    assert w._think_start_tokens is None

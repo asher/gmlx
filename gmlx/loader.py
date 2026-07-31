@@ -3252,11 +3252,59 @@ def load_model(
     )
     eos_ids = getattr(raw_tokenizer, "_gguf_eos_token_ids", None)
     tokenizer = TokenizerWrapper(raw_tokenizer, eos_token_ids=eos_ids)
+    _detect_xtml_thinking(tokenizer, raw_tokenizer, _log)
 
     materialize_module_arrays(model)
     wait_for_populate(pf.shards, log=_log)
 
     return model, config, tokenizer
+
+
+def _detect_xtml_thinking(tokenizer, raw_tokenizer, log) -> None:
+    """Complete mlx-lm's thinking detection for XTML-channel templates.
+
+    TokenizerWrapper infers thinking support from vocab token pairs like
+    <think>/</think>. Kimi-K3 gates thinking on an XTML channel
+    (<|open|>think<|sep|> ... <|close|>think<|sep|>) where "think" is
+    plain text between structural tokens, so the inference misses it and
+    apply_chat_template injects enable_thinking=False into a template
+    whose own default is thinking on. The model then opens the response
+    channel immediately and never thinks. Detect the gate in the template
+    text and set the wrapper's think markers so has_thinking flips True
+    and the injected default becomes enable_thinking=True.
+
+    Detection renders the template's own default generation prompt (raw
+    tokenizer, no wrapper injection) and checks it ends with the XTML
+    think-open. Matching on rendered output rather than template source
+    covers both spellings in the wild (otag('think') in GGUF-embedded
+    templates, open_tag('think') in the llama.cpp jinja)."""
+    if tokenizer.has_thinking:
+        return
+    if not getattr(raw_tokenizer, "chat_template", None):
+        return
+    start, end = "<|open|>think<|sep|>", "<|close|>think<|sep|>"
+    try:
+        rendered = raw_tokenizer.apply_chat_template(
+            [{"role": "user", "content": "probe"}],
+            add_generation_prompt=True, tokenize=False,
+        )
+    except Exception:
+        return
+    if not (isinstance(rendered, str) and rendered.endswith(start)):
+        return
+    try:
+        start_ids = raw_tokenizer.encode(start, add_special_tokens=False)
+        end_ids = raw_tokenizer.encode(end, add_special_tokens=False)
+    except Exception:
+        return
+    tokenizer._think_start = start
+    tokenizer._think_end = end
+    tokenizer._think_start_tokens = tuple(start_ids)
+    tokenizer._think_end_tokens = tuple(end_ids)
+    log(
+        "[tokenizer] XTML think channel detected; "
+        "enable_thinking defaults on"
+    )
 
 
 def _resolve_chat_template(chat_template: str | None) -> str | None:

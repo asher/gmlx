@@ -94,6 +94,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   models whose architecture has no MTP target class (they failed at load),
   and models too large for RAM get `stream: experts` (MoE) or a `stream:
   cpu` hint (dense) instead of an entry that cannot load.
+- Kimi-K3 now thinks by default in chat and serve: templates that gate
+  thinking on an XTML channel (<|open|>think<|sep|>) were missed by
+  mlx-lm's vocab-pair detection, which then forced enable_thinking=False
+  and the model answered without reasoning.
 - Streamed-expert chat turns no longer stall at the decode-to-prefill
   transition: an expert call routing more distinct experts than the decode
   arena holds is now token-split and served from the arena's read pool
