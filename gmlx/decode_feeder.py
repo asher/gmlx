@@ -396,6 +396,14 @@ class DecodeFeeder:
         # worker (GIL-serialized increments; close enough for attribution).
         self._bytes_read = 0
 
+        # GMLX_LOG_ROUTED=path: append every decode stage() call's routed
+        # expert ids to an npz (li per call + concatenated ids + row
+        # offsets). Offline replay of arena policies against real routing
+        # traces (speculative-verify byte economics, arena sizing).
+        self._routed_log_path = os.environ.get("GMLX_LOG_ROUTED")
+        self._routed_log: list | None = (
+            [] if self._routed_log_path else None)
+
         # Lossy-lever accounting (shed_misses + the wrapper's layer shed).
         self._shed_n = 0
         self._shed_mass = 0.0
@@ -581,6 +589,10 @@ class DecodeFeeder:
         if self._pressure_on and self._calls % _PRESSURE_POLL_EVERY == 0:
             self._poll_pressure()
         uniq = np.unique(ids.reshape(-1))
+        if self._routed_log is not None and ids.size <= 64:
+            # Decode-shaped calls only (a prefill-tail batch would skew the
+            # per-token trace).
+            self._routed_log.append((li, uniq.astype(np.uint16)))
         if self._pending.get(li):
             # Serve-time barrier: every speculative read for this layer
             # lands (or is quarantined) before any residency decision or
@@ -1210,6 +1222,19 @@ class DecodeFeeder:
         if getattr(self, "_closed", False):
             return
         self._closed = True
+        if getattr(self, "_routed_log", None):
+            lis = np.array([li for li, _ in self._routed_log], np.uint16)
+            rows = [ids for _, ids in self._routed_log]
+            offs = np.zeros(len(rows) + 1, np.int64)
+            np.cumsum([len(r) for r in rows], out=offs[1:])
+            np.savez(
+                self._routed_log_path, li=lis, offsets=offs,
+                ids=np.concatenate(rows) if rows else
+                np.zeros(0, np.uint16))
+            print(
+                f"[stream] routed-id trace: {len(rows)} stage calls -> "
+                f"{self._routed_log_path}")
+            self._routed_log = None
         if not getattr(self, "_stats_verbose", True):
             self._print_wedges()
             return
