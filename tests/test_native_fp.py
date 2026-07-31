@@ -177,6 +177,25 @@ def test_preset_native_fp_wire_env():
         assert os.environ["GMLX_NATIVE_FP"] == "packed"
 
 
+def test_lift_stream_cb_caps():
+    from gmlx.cli import _lift_stream_cb_caps
+
+    with mock.patch.dict(os.environ):
+        for k in ("MLX_MAX_OPS_PER_BUFFER", "MLX_MAX_MB_PER_BUFFER"):
+            os.environ.pop(k, None)
+        # no streaming flag -> untouched
+        _lift_stream_cb_caps(["run", "model.gguf"])
+        assert "MLX_MAX_OPS_PER_BUFFER" not in os.environ
+        _lift_stream_cb_caps(["run", "model.gguf", "--stream-experts"])
+        assert os.environ["MLX_MAX_OPS_PER_BUFFER"] == "400"
+        assert os.environ["MLX_MAX_MB_PER_BUFFER"] == "100000"
+    with mock.patch.dict(os.environ, {"MLX_MAX_OPS_PER_BUFFER": "10"}):
+        # an explicit user override always wins over the entry preset
+        _lift_stream_cb_caps(["serve", "model.gguf", "--stream-cpu"])
+        assert os.environ["MLX_MAX_OPS_PER_BUFFER"] == "10"
+        assert os.environ["MLX_MAX_MB_PER_BUFFER"] == "100000"
+
+
 def test_resolve_native_fp_wire_modes(monkeypatch):
     from gmlx import loader
 

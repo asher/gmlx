@@ -1900,8 +1900,25 @@ def maybe_load_from_config(args, parser, argv) -> int | None:
     return None
 
 
+def _lift_stream_cb_caps(argv: list[str]) -> None:
+    """Lift MLX's command-buffer split caps for streaming placements.
+
+    MLX reads the caps once, at Metal device init, which the loader/kq
+    imports inside the verb handlers trigger - so this must run at entry,
+    before any verb dispatch (an env preset after those imports is a
+    no-op). The default caps (10 ops / 40 MB per buffer) shred a streamed
+    decode token into ~1450 command buffers whose turnaround gaps leave
+    the GPU 18% utilized; lifting them measured +40% streamed decode,
+    output bit-identical. setdefault keeps explicit overrides in charge.
+    """
+    if any(a in ("--stream-experts", "--stream-cpu") for a in argv):
+        os.environ.setdefault("MLX_MAX_OPS_PER_BUFFER", "400")
+        os.environ.setdefault("MLX_MAX_MB_PER_BUFFER", "100000")
+
+
 def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     argv = sys.argv[1:] if argv is None else list(argv)
+    _lift_stream_cb_caps(argv)
     parser = _build_parser(prog or f"{_prog()} run")
     args = parser.parse_args(argv)
     split_path_intent(args)
@@ -2146,6 +2163,7 @@ def umbrella_main(argv: list[str] | None = None) -> int:
               "cd to an existing directory and retry", file=sys.stderr)
         return 1
     argv = list(sys.argv[1:] if argv is None else argv)
+    _lift_stream_cb_caps(argv)
     prog = _prog()
     if argv and argv[0] == "__complete":
         # Hidden: the per-TAB callback the emitted shell-completion script forwards to.
