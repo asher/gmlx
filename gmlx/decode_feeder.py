@@ -324,7 +324,14 @@ class DecodeFeeder:
                 self.arena_bytes += s * stride
         self._locked: dict[tuple[int, str], tuple[int, int]] = {}
         self.locked_bytes = 0
-        self._mlock_arena()
+        # Wiring waits for ensure_wired (the wrapper's first decode call):
+        # at install time the prefill feeder's ring is live, and an
+        # over-RAM box cannot hold a wired ring and a wired arena at once.
+        # Untouched arena pages have no physical cost until then. The
+        # loader points _release_ring at the prefill feeder's slot release
+        # so the handoff happens in one place.
+        self._mlock_deferred = True
+        self._release_ring = None
 
         # Aligned-read plumbing (see _PAGE above): per-worker bounce
         # buffers big enough for the largest expert plus the alignment
@@ -537,6 +544,18 @@ class DecodeFeeder:
                         f"[verify] arena bytes wrong at {when}: layer {li} "
                         f"expert {e} slot {s} kind {kind} sample_off {o} "
                         f"owner={int(self._owner[li][s])} pending={pend}")
+
+    def ensure_wired(self) -> None:
+        """First decode call: release the prefill ring and wire the arena
+        (one-time fault pass; a few seconds on a tens-of-GB arena). Called
+        by the offload wrapper on decode-sized calls only - a small prefill
+        chunk served from the arena must not tear the ring down mid-pass."""
+        if not self._mlock_deferred:
+            return
+        self._mlock_deferred = False
+        if self._release_ring is not None:
+            self._release_ring()
+        self._mlock_arena()
 
     def stage(self, li: int, ids: np.ndarray) -> np.ndarray | None:
         """Map router expert ids to arena slots, pulling misses from the GGUF

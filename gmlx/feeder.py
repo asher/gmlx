@@ -59,8 +59,6 @@ class PrefillFeeder:
         offsets: dict[int, list[tuple[str, int, int, int, str]]],
         modules: dict[int, list],
     ):
-        import mlx_kquant as kq
-
         self._layers: dict[int, dict] = {}  # li -> {kind: (module, path, off, nbytes)}
         max_bytes: dict[str, int] = {}
         for li, ranges in offsets.items():
@@ -118,18 +116,9 @@ class PrefillFeeder:
         # its assigned slot through a zero-copy slice+reshape view
         # of its own geometry (mixed-codec quants - e.g. Q5_K_M's q6_k down
         # stacks on some layers - make per-kind shapes non-uniform).
-        self._slots = [
-            {
-                k: kq.arena_alloc(
-                    [-(-n // self._slot_isz[k])], itemsize=self._slot_isz[k])
-                if self._slot_isz[k] > 1
-                else kq.arena_alloc([n])
-                for k, n in max_bytes.items()
-            }
-            for _ in (0, 1)
-        ]
+        self._max_bytes = max_bytes
+        self._alloc_slots()
         self.slot_bytes = sum(a.nbytes for a, _ in self._slots[0].values())
-        self._views: dict[tuple[int, int], dict] = {}  # (li, parity) -> kind -> view
 
         # Ring slot by position in the ordered covered set, not absolute
         # layer parity: coverage gaps (e.g. interval-2 MoE layers) would
@@ -141,6 +130,35 @@ class PrefillFeeder:
         self._ready: dict[int, threading.Event] = {}
         self._last_li: int | None = None
         self._error: BaseException | None = None
+
+    def _alloc_slots(self) -> None:
+        import mlx_kquant as kq
+
+        self._slots = [
+            {
+                k: kq.arena_alloc(
+                    [-(-n // self._slot_isz[k])], itemsize=self._slot_isz[k])
+                if self._slot_isz[k] > 1
+                else kq.arena_alloc([n])
+                for k, n in self._max_bytes.items()
+            }
+            for _ in (0, 1)
+        ]
+        self._views: dict[tuple[int, int], dict] = {}  # (li, parity) -> kind -> view
+
+    def release_slots(self) -> None:
+        """Drop the ring (its physical pages with it) once decode starts;
+        the next prefill pass re-allocates lazily. Decode holds the wired
+        budget the ring was using - see DecodeFeeder.ensure_wired."""
+        if not self._slots:
+            return
+        for ev in self._ready.values():  # a worker may still write a slot
+            ev.wait(_STAGE_TIMEOUT_S)
+        self._ready.clear()
+        self._error = None
+        self._last_li = None
+        self._slots = []
+        self._views = {}
 
     def _verify_zero_copy(self) -> None:
         li = min(self._layers)
@@ -180,6 +198,8 @@ class PrefillFeeder:
     # the per-call protocol
 
     def _drain_on_new_pass(self, li: int) -> None:
+        if not self._slots:  # ring was released for decode; rebuild
+            self._alloc_slots()
         if self._last_li is None or li <= self._last_li:
             # New prefill pass (next chunk or new request). In-flight staging
             # from the old pass targets the same slots; drain before reusing.

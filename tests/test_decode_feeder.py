@@ -230,6 +230,7 @@ def test_pressure_regrow_after_sustained_normal(monkeypatch, tmp_path):
     monkeypatch.setattr(gmlx.loader, "_available_ram_bytes", _fake_avail)
     feeder, _ = _make_feeder(
         monkeypatch, tmp_path, slots_per_layer=4, pressure=True)
+    feeder.ensure_wired()
     feeder.stage(0, np.array([0, 1]))
     assert feeder._slots[0] == 3
 
@@ -396,6 +397,9 @@ def test_wrapper_decode_feeder_branch(monkeypatch):
         mx.eval(ref)
 
         class _FakeDF:
+            def ensure_wired(self):
+                pass
+
             stage_calls = []
             swap_calls = []
             overflow = False
@@ -471,6 +475,9 @@ def test_arena_call_lifts_cpu_pin(monkeypatch):
         pin_in_swap = []
 
         class _DF:
+            def ensure_wired(self):
+                pass
+
             overflow = False
 
             def covers(self, li):
@@ -703,6 +710,9 @@ def test_wrapper_redirects_dead_ids_on_fallback(monkeypatch):
         mx.eval(ref)
 
         class _WedgedDF:
+            def ensure_wired(self):
+                pass
+
             def covers(self, li):
                 return True
 
@@ -1143,6 +1153,9 @@ def _stream_scores_glu(monkeypatch, recorded, stock=False):
     install_expert_streaming(model)
 
     class _FakeDF:
+        def ensure_wired(self):
+            pass
+
         def __init__(self):
             self.stage_calls = []
             self.shed_calls = []
@@ -1345,3 +1358,16 @@ def test_available_ram_fallback_without_file_backed_line(monkeypatch):
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: _R())
     assert gmlx.loader._available_ram_bytes() == \
         (1000 + 500 + 5000 + 200000) * 16384
+
+
+def test_ensure_wired_releases_ring_once(monkeypatch, tmp_path):
+    """First decode call swaps the wired budget: ring release fires exactly
+    once, and wiring is deferred until then."""
+    feeder, _ = _make_feeder(monkeypatch, tmp_path)
+    calls = []
+    feeder._release_ring = lambda: calls.append(1)
+    assert feeder._mlock_deferred and feeder.locked_bytes == 0
+    feeder.ensure_wired()
+    assert calls == [1] and not feeder._mlock_deferred
+    feeder.ensure_wired()
+    assert calls == [1]

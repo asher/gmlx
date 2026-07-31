@@ -1618,6 +1618,8 @@ def install_expert_streaming(
                         # returns None when the call routes to more distinct
                         # experts than the arena has slots - fall through.
                         t0 = time.perf_counter() if ph is not None else 0.0
+                        if n_tokens == 1:
+                            dfr.ensure_wired()
                         ms = getattr(self, "_kq_miss_shed", None)
                         sc_f32 = None
                         if (ms is not None and scores_arg is not None
@@ -1891,9 +1893,13 @@ def install_expert_streaming(
                     for m in mods:
                         object.__setattr__(m, "_kq_decode_feeder", dfeeder)
             object.__setattr__(model, "_kq_decode_feeder", dfeeder)
+            if feeder is not None:
+                # First decode call swaps the wired budget: prefill ring
+                # freed, arena wired (DecodeFeeder.ensure_wired).
+                dfeeder._release_ring = feeder.release_slots
             wired = (
-                "fully wired"
-                if dfeeder.locked_bytes >= dfeeder.arena_bytes
+                "fully wired at first decode"
+                if dfeeder._mlock_deferred
                 else f"{dfeeder.locked_bytes / 1e9:.1f} GB wired"
             )
             cov = (

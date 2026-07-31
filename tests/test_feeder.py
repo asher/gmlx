@@ -219,3 +219,18 @@ def test_slot_itemsize_and_wide_slot_view():
     v8 = slot_view(arr8, 96, (2, 48))
     mx.eval(v8)
     assert bytes(np.array(v8).reshape(-1)) == pat[:96]
+
+
+def test_release_slots_and_lazy_realloc(monkeypatch, tmp_path):
+    """Decode releases the ring; the next prefill pass rebuilds it and
+    staging works as before."""
+    feeder, modules = _make_prefill_feeder(monkeypatch, tmp_path)
+    with feeder.prefill_call(modules[0][0], 0):
+        pass
+    feeder.release_slots()
+    assert feeder._slots == [] and feeder._views == {}
+    feeder.release_slots()  # idempotent
+    with feeder.prefill_call(modules[0][0], 0):
+        for kind in _KINDS:
+            assert _slot_expert(feeder, 0, kind, 1) == _expert_bytes(0, kind, 1)
+    assert feeder._error is None
