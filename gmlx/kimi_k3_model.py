@@ -194,6 +194,11 @@ class KimiK3MoE(nn.Module):
             weights = weights / (mx.sum(weights, axis=-1, keepdims=True) + 1e-20)
         weights = (weights * self.args.routed_scaling_factor).astype(x.dtype)
 
+        if getattr(self.switch_mlp, "_kq_lookahead", None) is not None:
+            # Latent MoE: the wrapped expert container sees routed_down's
+            # latent-width output, but the router replica needs the
+            # full-width block input - hand it over out of band.
+            object.__setattr__(self.switch_mlp, "_kq_la_input", x)
         y_in = self.routed_down(x) if self.routed_down is not None else x
         # Mix seam: hand the routing weights to the swapped kquant module when
         # it accepts them; an unmixed return keeps the python-side sum here.

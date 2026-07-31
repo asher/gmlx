@@ -1595,12 +1595,18 @@ def install_expert_streaming(
                         # router read below (one sync either way). The
                         # prediction feeds nothing downstream - it only
                         # records recall (probe) or drives prestage reads.
+                        # Latent-MoE blocks (kimi-k3) hand the full-width
+                        # router input over out of band; x here is the
+                        # expert container's latent-width input.
+                        x_la = getattr(self, "_kq_la_input", None)
+                        if x_la is None:
+                            x_la = x
                         if ph is not None:
                             t_la = time.perf_counter()
-                            la_pred = la.on_call(x, indices)
+                            la_pred = la.on_call(x_la, indices)
                             ph["la"] += time.perf_counter() - t_la
                         else:
-                            la_pred = la.on_call(x, indices)
+                            la_pred = la.on_call(x_la, indices)
                     if (
                         dfr is not None
                         and cpu_only
