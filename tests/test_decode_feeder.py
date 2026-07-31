@@ -80,6 +80,9 @@ def _make_feeder(monkeypatch, tmp_path, slots_per_layer=2, n_layers=2,
     from gmlx.decode_feeder import DecodeFeeder
 
     monkeypatch.setattr(kq, "arena_alloc", _fake_arena_alloc, raising=False)
+    # Residency defaults on for streamed runs; the fake numpy arena has no
+    # Metal buffer to insert, so keep it off here.
+    monkeypatch.setenv("GMLX_GPU_RESIDENT", "0")
     if not pressure:
         # Keep residency tests deterministic: never read the host's real
         # memory-pressure level.
@@ -1371,3 +1374,60 @@ def test_ensure_wired_releases_ring_once(monkeypatch, tmp_path):
     assert calls == [1] and not feeder._mlock_deferred
     feeder.ensure_wired()
     assert calls == [1]
+
+
+def test_lend_for_ring_shrinks_then_decode_restores(monkeypatch, tmp_path):
+    """A post-decode prefill pass borrows wired budget: lend_for_ring
+    eagerly shrinks every layer (keeping hot residents), and the next
+    decode-sized call releases the ring again and regrows lazily."""
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4)
+    feeder.stage(0, np.array([0, 1, 2, 3]))
+    feeder.stage(0, np.array([0, 1]))  # 0 and 1 hotter than 2 and 3
+    feeder.stage(1, np.array([2]))
+    released = []
+    feeder._release_ring = lambda: released.append(1)
+    feeder.ensure_wired()  # first decode: ring freed, arena wired
+    assert released == [1]
+    before = feeder.arena_bytes
+
+    feeder.lend_for_ring(before // 2)
+    assert feeder._lend_frac < 1.0
+    assert feeder.arena_bytes == before // 2
+    assert feeder._slots[0] == 2 and feeder._slots[1] == 2
+    # Hot residents survived the shrink; the cold tail was dropped.
+    assert feeder._slot_of[0][0] >= 0 and feeder._slot_of[0][1] >= 0
+    assert feeder._slot_of[0][2] == -1 and feeder._slot_of[0][3] == -1
+    for e in (0, 1):
+        s = int(feeder._slot_of[0][e])
+        for kind in _KINDS:
+            assert _arena_slot(feeder, 0, kind, s) == _expert_bytes(0, kind, e)
+
+    feeder.ensure_wired()  # next decode: repay the lend
+    assert released == [1, 1]
+    assert feeder._lend_frac == 1.0
+    assert feeder._slots[0] == 2  # regrow is lazy...
+    feeder.stage(0, np.array([0, 1]))
+    assert feeder._slots[0] == 4  # ...at the layer's own stage call
+    assert feeder.arena_bytes == before // 2 + 2 * feeder._per_expert[0]
+
+
+def test_lend_before_first_decode_is_noop(monkeypatch, tmp_path):
+    """Before the first decode the ring and the cold (unwired) arena
+    already coexist; there is nothing to lend."""
+    feeder, _ = _make_feeder(monkeypatch, tmp_path)
+    assert feeder._mlock_deferred
+    feeder.lend_for_ring(10**12)
+    assert feeder._lend_frac == 1.0 and feeder._slots[0] == 2
+
+
+def test_lend_skips_wedged_layers(monkeypatch, tmp_path):
+    """A wedged layer never resizes (the zombie read may still write into
+    its buffer); the lend shrinks the others and leaves it alone."""
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4)
+    feeder.stage(0, np.array([0, 1]))
+    feeder.stage(1, np.array([0, 1]))
+    feeder._release_ring = lambda: None
+    feeder.ensure_wired()
+    feeder._wedged_layers.add(0)
+    feeder.lend_for_ring(feeder.arena_bytes // 2)
+    assert feeder._slots[0] == 4 and feeder._slots[1] == 2

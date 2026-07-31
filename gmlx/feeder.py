@@ -130,6 +130,10 @@ class PrefillFeeder:
         self._ready: dict[int, threading.Event] = {}
         self._last_li: int | None = None
         self._error: BaseException | None = None
+        # Set by the loader to DecodeFeeder.lend_for_ring when a decode
+        # arena coexists with this ring: called before a post-decode slot
+        # rebuild so the wired arena shrinks by the ring's footprint first.
+        self._lend_hook = None
 
     def _alloc_slots(self) -> None:
         import mlx_kquant as kq
@@ -199,6 +203,8 @@ class PrefillFeeder:
 
     def _drain_on_new_pass(self, li: int) -> None:
         if not self._slots:  # ring was released for decode; rebuild
+            if self._lend_hook is not None:
+                self._lend_hook(2 * self.slot_bytes)
             self._alloc_slots()
         if self._last_li is None or li <= self._last_li:
             # New prefill pass (next chunk or new request). In-flight staging

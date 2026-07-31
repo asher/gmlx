@@ -160,6 +160,9 @@ def test_wrapper_partial_branch_and_ordering(monkeypatch):
             def wedged_at(self, li):
                 return False
 
+            def can_stage_smaller(self, li):
+                return False  # overflow here means fall through, not split
+
             def has_dead(self, li):
                 return False
 

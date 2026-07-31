@@ -98,6 +98,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   thinking on an XTML channel (<|open|>think<|sep|>) were missed by
   mlx-lm's vocab-pair detection, which then forced enable_thinking=False
   and the model answered without reasoning.
+- Long streamed-expert follow-up turns no longer breach the wired cap:
+  rebuilding the prefill ring after decode now borrows the ring's footprint
+  from the decode arena (hot experts kept), and the next decode returns it.
+  Previously the ring re-allocated on top of the fully wired arena.
 - Streamed-expert chat turns no longer stall at the decode-to-prefill
   transition: an expert call routing more distinct experts than the decode
   arena holds is now token-split and served from the arena's read pool

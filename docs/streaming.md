@@ -95,16 +95,16 @@ a single-model setup rather than mixing with GPU-resident models.
 
 ## The feeder paths
 
-Streaming models engage two *feeder* paths by default:
+Streaming models engage two feeder paths by default:
 
-- The **prefill feeder** (`--no-prefill-feeder` disables) stages each layer's
+- The prefill feeder (`--no-prefill-feeder` disables) stages each layer's
   expert stacks straight from the GGUF into GPU-visible ring slots while the
   previous layer computes, so every byte makes one trip - the page-cache path
   reads each expert byte twice on a machine that is at memory capacity by
   definition. Short prompts stage only the experts the router actually chose
   instead of whole layers (measured on an M3 Max, 162 GB MiniMax-M2 Q5_K_M: a
   53-token prompt's time-to-first-token dropped from 19.4 s to 11.4 s).
-- The **decode feeder** (`--stream-experts` only; `--no-decode-feeder`
+- The decode feeder (`--stream-experts` only; `--no-decode-feeder`
   disables) keeps the most-routed experts of every layer in a wired,
   popularity-managed GPU arena sized to the machine (`GMLX_DECODE_ARENA_GB`
   overrides) and reads only the misses from the GGUF, at SSD queue depth. The
@@ -113,8 +113,8 @@ Streaming models engage two *feeder* paths by default:
   model, a build) it shrinks, keeping its most popular experts, and regrows
   once pressure clears - a long-running model stays a good citizen on a
   machine that is doing other work (`GMLX_DECODE_PRESSURE=0` pins it instead).
-- The arena also serves **multi-token expert calls whose routed union
-  exceeds its slots** - the next chat turn's prefill after a decode, or a
+- The arena also serves multi-token expert calls whose routed union
+  exceeds its slots - the next chat turn's prefill after a decode, or a
   wide speculative verify batch - by halving the chunk along the token axis
   and recursing until each piece fits (`GMLX_ARENA_SPLIT_MAX_TOKENS`, default
   256, caps the size; `0` disables). Without this, those calls fall to a CPU
@@ -123,6 +123,14 @@ Streaming models engage two *feeder* paths by default:
   tok/s on the fallthrough and 2.13 tok/s through the split (8.5x), with the
   post-turn decode dip gone as well, because the reads stay on the arena's
   read pool and its popularity accounting.
+- Follow-up turns longer than the split cap go back through the prefill
+  feeder's ring, which was released at first decode so the arena could take
+  its wired budget. Rebuilding the ring on top of a full wired arena would
+  breach the wired cap, so the arena lends the ring its footprint first:
+  every layer shrinks eagerly, keeping its most popular experts, and the
+  next decode releases the ring and regrows the arena layer by layer. Both
+  feeders on is therefore the right default for chat and serve; the lend
+  makes long follow-ups safe without giving up warm decode resumes.
 
 Streaming installs also pin the every-token weights (`GMLX_PIN_WEIGHTS=0`
 disables): every
@@ -156,7 +164,7 @@ running server (`GMLX_RELEASE_PAGECACHE=0` disables).
 
 ## Lookahead prestage
 
-With the decode feeder on, arena misses are also *prestaged by lookahead*
+With the decode feeder on, arena misses are also prestaged by lookahead
 (`GMLX_DECODE_LOOKAHEAD=0` disables): each MoE layer runs the next MoE layer's router
 on its own input and pre-reads the predicted misses on a small dedicated pool
 while the current layer computes. The residual changes little between

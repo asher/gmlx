@@ -442,6 +442,10 @@ class DecodeFeeder:
         self._pressure_polls = 0
         self._last_step_poll = -_PRESSURE_COOLDOWN_POLLS
         self._normal_polls = 0
+        # Ring lend state: fraction of the arena kept while the prefill
+        # ring borrows wired budget for a post-decode prefill pass (see
+        # lend_for_ring). 1.0 = nothing lent.
+        self._lend_frac = 1.0
 
     def _mlock_arena(self) -> None:
         """Wire the arena. The residency policy only works if the slots
@@ -567,21 +571,70 @@ class DecodeFeeder:
         """First decode call: release the prefill ring and wire the arena
         (one-time fault pass; a few seconds on a tens-of-GB arena). Called
         by the offload wrapper on decode-sized calls only - a small prefill
-        chunk served from the arena must not tear the ring down mid-pass."""
-        if not self._mlock_deferred:
-            return
-        self._mlock_deferred = False
-        if self._release_ring is not None:
-            self._release_ring()
-        self._mlock_arena()
-        if env_bool("GMLX_GPU_RESIDENT", False):
-            import mlx_kquant as kq
+        chunk served from the arena must not tear the ring down mid-pass.
 
-            if getattr(kq, "residency_insert", None):
-                self._gpu_resident = True
-                for a in self._arena.values():
-                    kq.residency_insert(a[0])
-                kq.residency_commit()
+        Later decode calls repay a ring lend: the ring is dropped again and
+        the arena's slot targets return to full size (layers regrow lazily
+        at their own stage() calls, each re-wiring as it resizes)."""
+        if self._mlock_deferred:
+            self._mlock_deferred = False
+            if self._release_ring is not None:
+                self._release_ring()
+            self._mlock_arena()
+            if env_bool("GMLX_GPU_RESIDENT", True):
+                import mlx_kquant as kq
+
+                if getattr(kq, "residency_insert", None):
+                    self._gpu_resident = True
+                    for a in self._arena.values():
+                        kq.residency_insert(a[0])
+                    kq.residency_commit()
+            return
+        if self._lend_frac < 1.0:
+            if self._release_ring is not None:
+                self._release_ring()
+            self._lend_frac = 1.0
+
+    def lend_for_ring(self, nbytes: int) -> None:
+        """Shrink the wired arena by ~``nbytes`` so the prefill ring can
+        re-allocate without breaching the wired cap. The prefill feeder
+        calls this before rebuilding its slots on a post-decode prefill
+        pass (chat follow-up turns): decode handed the ring's wired budget
+        to the arena in ensure_wired, and a second wired ring on top of a
+        full wired arena is what the cap cannot hold.
+
+        Shrinking is eager (every layer now): the ring path never calls
+        stage(), so the lazy per-layer resize would not fire during the
+        prefill that needs the memory. Each layer keeps its most popular
+        residents, so the decode resume after this turn starts warm.
+        ensure_wired repays the lend on the next decode-sized call."""
+        if self._mlock_deferred:
+            return  # arena never wired; ring + cold arena already coexist
+        if not self.arena_bytes:
+            return
+        frac = max(0.0, 1.0 - nbytes / self.arena_bytes) * self._lend_frac
+        if frac >= self._lend_frac:
+            return
+        self._lend_frac = frac
+        try:
+            import mlx.core as mx
+
+            mx.synchronize()  # no in-flight gather may reference a layer
+        except Exception:
+            pass
+        freed = 0
+        for li in list(self._layers):
+            if li in self._wedged_layers or self._pending.get(li):
+                continue  # same no-resize contract as stage()
+            target = self._target_slots(li)
+            if target < self._slots[li]:
+                freed += (self._slots[li] - target) * self._per_expert[li]
+                self._resize_layer(li, target)
+        print(
+            f"[stream] decode arena lends {freed / 1e9:.1f} GB to the "
+            f"prefill ring (kept {self.arena_bytes / 1e9:.1f} GB); "
+            "restored at next decode"
+        )
 
     def stage(self, li: int, ids: np.ndarray) -> np.ndarray | None:
         """Map router expert ids to arena slots, pulling misses from the GGUF
@@ -1091,9 +1144,10 @@ class DecodeFeeder:
     # memory pressure
 
     def _target_slots(self, li: int) -> int:
-        if not self._pressure_steps:
+        frac = (1.0 - self._pressure_steps * _PRESSURE_STEP_FRAC) \
+            * self._lend_frac
+        if frac >= 1.0:
             return self._orig_slots[li]
-        frac = 1.0 - self._pressure_steps * _PRESSURE_STEP_FRAC
         return max(1, int(self._orig_slots[li] * frac))
 
     def _arena_bytes_at(self, steps: int) -> int:

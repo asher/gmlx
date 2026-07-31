@@ -1990,8 +1990,11 @@ def install_expert_streaming(
             object.__setattr__(model, "_kq_decode_feeder", dfeeder)
             if feeder is not None:
                 # First decode call swaps the wired budget: prefill ring
-                # freed, arena wired (DecodeFeeder.ensure_wired).
+                # freed, arena wired (DecodeFeeder.ensure_wired). A later
+                # prefill pass borrows it back: the ring rebuild asks the
+                # arena to lend its footprint before allocating.
                 dfeeder._release_ring = feeder.release_slots
+                feeder._lend_hook = dfeeder.lend_for_ring
             wired = (
                 "fully wired at first decode"
                 if dfeeder._mlock_deferred
