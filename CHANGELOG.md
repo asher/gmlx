@@ -98,6 +98,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   thinking on an XTML channel (<|open|>think<|sep|>) were missed by
   mlx-lm's vocab-pair detection, which then forced enable_thinking=False
   and the model answered without reasoning.
+- Freed decode-arena and prefill-ring buffers are returned to the OS
+  instead of idling in MLX's freed-buffer cache, where the kernel
+  compressed them and ran the box to the free-page floor mid-prefill.
 - Auto arena sizing credits the prefill ring's bytes now that the two
   time-share the wired budget: a large pinned model no longer sizes its
   decode arena to zero and decodes on the page-cache path with most of
