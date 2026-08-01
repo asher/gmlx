@@ -8,6 +8,26 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Speculative decoding for the GA DeepSeek-V4-Flash 0731 checkpoint via its
+  DSpark draft model (three chained draft blocks replacing the legacy
+  single-block MTP head). The drafter loads from a sidecar GGUF discovered
+  next to the target (preferred over legacy `deepseek4_mtp_support`
+  sidecars; `--draft-gguf` selects one explicitly) - measured +20% decode
+  over plain on UD-Q2_K_XL at ~0.99 acceptance. `GMLX_DSPARK_CONF` moves
+  the confidence gate (default 0.9, the model's own calibration) and
+  `GMLX_DSPARK_ROWS` the draft rows per block (default 3, the measured
+  optimum: fewer noise rows sharpen the non-causal block and keep verify
+  widths on the compiled attention paths).
+- `scripts/convert_dspark_sidecar.py` builds that sidecar from the three
+  draft shards of the upstream release (~10 GiB read instead of the full
+  167 GB checkpoint): expert tensors repack bit-exact into GGML MXFP4,
+  dense tensors encode Q8_0. `--experts-codec q3_k` (or `q4_k`/`q2_k`)
+  trades a little acceptance for a smaller file, with a round-trip RMS
+  report against the upstream weights.
+- Draft-model sidecars whose codecs are all fp4-wire capable load in wire
+  mode by default: the DSpark MXFP4 experts stay zero-copy and file-backed
+  instead of pinning ~9.6 GiB of anonymous memory (an explicit
+  `GMLX_NATIVE_FP` setting still wins).
 - Shared-prefix cascade decode for concurrent serving: streams that share a
   prefix (same system prompt, warm history, cold or cached alike) read it
   once per step for the whole batch instead of once per stream - measured
@@ -35,18 +55,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (thinking strip, tool-call re-serialization): decode-time snapshots
   retain the reply up to the divergence point (`GMLX_APC_DECODE_CKPT`,
   default 512 generated tokens; `0` off).
-
-### Changed
-
-- Informational `[stream]` banners (streaming summary, feeder/arena sizes,
-  keep-warm, lookahead, MoE lever confirmations, runtime stats) and the
-  `[prefill]` chunk-size note only print under `--verbose`; warnings
-  (ignored flags, fallbacks, wedged reads, clamps) stay visible.
-- Scaffolded config comments now sit on their own line above live keys
-  instead of trailing them (no more wrapped lines on narrow terminals); the
-  redundant mmproj `# VLM companion` comment is gone.
-
-### Added
 
 - `run`/`chat --thinking on|off|adaptive` and `--reasoning-effort LEVEL`:
   first-class switches for thinking models. The chat template picks the
@@ -106,20 +114,27 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The DSpark draft-model module (`deepseek_v4_dspark.py`) and the sidecar
+  converter are MIT licensed (LICENSE-MIT, SPDX headers); the rest of gmlx
+  stays BUSL-1.1.
+- Informational `[stream]` banners (streaming summary, feeder/arena sizes,
+  keep-warm, lookahead, MoE lever confirmations, runtime stats) and the
+  `[prefill]` chunk-size note only print under `--verbose`; warnings
+  (ignored flags, fallbacks, wedged reads, clamps) stay visible.
+- Scaffolded config comments now sit on their own line above live keys
+  instead of trailing them (no more wrapped lines on narrow terminals); the
+  redundant mmproj `# VLM companion` comment is gone.
 - glm-dsa/DeepSeek-V3.2 sparse decode uses the stock top-k gather again
   (O(index_topk) per step); the mask-path workaround is now opt-in via
   `GMLX_DSV32_MASK_DECODE=1`.
 - The server's APC prompt-cache manager is now gmlx-owned, built at model
   load; config `cache.enabled` and a plain `APC_ENABLED=1` both keep working.
-
 - gemma-4 batched decode runs the global (hd512) layers as one ragged
   kernel call per layer instead of a per-row loop (needs mlx-kquant with
   `sdpa_decode_gqa` starts; older wheels keep the loop).
-
 - gemma4 text MTP targets now build gmlx-owned mask/attention classes at
   construction (`GMLX_GEMMA_OWNED=0` reverts to the stock classes plus the
   patch regime; numerics identical either way).
-
 - Quantized-KV (`kv_bits: 8`) decode routes through the fused mlx_kquant
   kernel when available, ~1.4x per attention call at depth
   (`GMLX_QSDPA_KQ=0` restores the stock path).

@@ -157,15 +157,15 @@ class PoolingCache(_BaseCache):
         # One-update undo log for MTP draft rejection: trim() needs the
         # pre-update state plus this update's raw inputs to undo the last
         # token(s) when they completed a pool window. Only decode / MTP-verify
-        # sized updates (L <= 4; block-total-B rounds verify B-1+1 wide) are
-        # ever trimmed; skipping the stash for prompt chunks avoids pinning
-        # large prefill projections. Buffer slices are taken before any
-        # mutation, so they reference the pre-update array node.
-        # update_and_fetch extends the tuple with the post-append pooled
-        # tensor so a confirmed-prefix replay that re-completes a window can
-        # slice its pooled row back instead of recompressing (the compressor
-        # inputs are gone).
-        if L <= 4:
+        # sized updates (L <= 6; block-total-B rounds verify B-1+1 wide, and
+        # the dspark drafter verifies up to 6) are ever trimmed; skipping the
+        # stash for prompt chunks avoids pinning large prefill projections.
+        # Buffer slices are taken before any mutation, so they reference the
+        # pre-update array node. update_and_fetch extends the tuple with the
+        # post-append pooled tensor so a confirmed-prefix replay that
+        # re-completes a window can slice its pooled row back instead of
+        # recompressing (the compressor inputs are gone).
+        if L <= 6:
             self._undo = (
                 self.buf_kv[:, : self.remainder] if self.remainder > 0 else None,
                 self.buf_gate[:, : self.remainder] if self.remainder > 0 else None,
@@ -1069,14 +1069,15 @@ def _wrap_rotating(cls, fields) -> None:
     orig_trim = cls.trim
 
     def update_and_fetch(self, keys, values):
-        # Only armed verify-sized updates (qL 2-4) are undoable: S == 1
-        # uses the in-place ring write (setitem mutates the wrapper, which
-        # would invalidate reference snapshots) and prompt chunks have no
-        # rollback consumer. S >= 2 always routes through the concat path,
-        # which REBINDS keys/values to fresh wrappers, so plain references
-        # keep the pre-update value -- no detach copy (a full-ring copy per
-        # field per layer, ~200 MB/round across 43 caches).
-        if keys.shape[2] in (2, 3, 4) and _is_undo_armed():
+        # Only armed verify-sized updates (qL 2-6: legacy nextn verifies up
+        # to 4, dspark up to 6) are undoable: S == 1 uses the in-place ring
+        # write (setitem mutates the wrapper, which would invalidate
+        # reference snapshots) and prompt chunks have no rollback consumer.
+        # S >= 2 always routes through the concat path, which REBINDS
+        # keys/values to fresh wrappers, so plain references keep the
+        # pre-update value -- no detach copy (a full-ring copy per field
+        # per layer, ~200 MB/round across 43 caches).
+        if 2 <= keys.shape[2] <= 6 and _is_undo_armed():
             self._mtp_undo = ({f: getattr(self, f) for f in fields}, keys, values)
         else:
             self._mtp_undo = None
