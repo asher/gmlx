@@ -474,6 +474,21 @@ def _url_download(url: str, dest_path: str) -> str:
         t0 = time.monotonic()
         session_bytes = 0
         last_print = 0.0
+        clear = "\x1b[K" if sys.stderr.isatty() else ""
+
+        def show(written: int, done: bool) -> None:
+            remaining = (total - written) if total else None
+            stats = _transfer_stats(t0, session_bytes,
+                                    None if done else remaining)
+            if total:
+                pct = written * 100 // total
+                line = (f"  {fname}: {_human_gb(written, 2)} / "
+                        f"{_human_gb(total, 2)} ({pct}%) {stats}")
+            else:
+                line = f"  {fname}: {_human_gb(written, 2)} {stats}"
+            print("\r" + line.rstrip() + clear, end="", file=sys.stderr,
+                  flush=True)
+
         with open(part, "ab" if resumed else "wb") as f:
             written = have if resumed else 0
             while True:
@@ -486,17 +501,9 @@ def _url_download(url: str, dest_path: str) -> str:
                 now = time.monotonic()
                 if now - last_print >= 2.0:
                     last_print = now
-                    stats = _transfer_stats(t0, session_bytes,
-                                            (total - written) if total else None)
-                    if total:
-                        pct = written * 100 // total
-                        print(f"\r  {fname}: {_human_gb(written, 2)} / "
-                              f"{_human_gb(total, 2)} ({pct}%) {stats}",
-                              end="", file=sys.stderr, flush=True)
-                    else:
-                        print(f"\r  {fname}: {_human_gb(written, 2)} {stats}",
-                              end="", file=sys.stderr, flush=True)
+                    show(written, False)
             if total or written:
+                show(written, True)
                 print(file=sys.stderr)
     if total and written != total:
         # A clean early close reads as EOF (read() returns b"" instead of
@@ -712,21 +719,55 @@ def _planned_download_bytes(ref: remote.Ref, dest_dir: str,
     return total
 
 
+_PULL_DESCRIPTION = """\
+Validate a remote GGUF's header, then download it (all shards) to your model
+dir - not the HF cache. By default it lands in the server config's first
+model_dirs root, under <dir>/<org>__<repo>/. Pass several files to fetch them
+together (extra bare names resolve in the first ref's repo - e.g. an mmproj or
+a second quant). Files landing under a model_dirs root are registered in the
+config and served immediately. Refuses an unloadable GGUF unless --force.
+"""
+
+_PULL_EXAMPLES = """\
+examples (a ref names one file, a quant folder, or a whole repo):
+
+  one file - every shard of a split set comes with it
+    gmlx pull hf:unsloth/DeepSeek-V4-Flash-0731-GGUF/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00006.gguf
+
+  a quant folder - the sole model in it resolves, all shards download
+    gmlx pull hf:unsloth/DeepSeek-V4-Flash-0731-GGUF/UD-IQ3_XXS
+
+  the same folder as a pasted web link (/tree/ and /blob/ links work)
+    gmlx pull https://huggingface.co/unsloth/DeepSeek-V4-Flash-0731-GGUF/tree/main/UD-IQ3_XXS
+
+  a bare repo - one model downloads, several print a pick-one listing
+    gmlx pull hf:unsloth/gemma-4-27b-it-GGUF
+
+  a model plus siblings from the same repo (mmproj, a second quant)
+    gmlx pull hf:unsloth/gemma-4-27b-it-GGUF/gemma-4-27b-it-Q4_K_M.gguf mmproj-F16.gguf
+
+  pin a revision, or download somewhere other than the model dir
+    gmlx pull hf:unsloth/gemma-4-27b-it-GGUF/UD-Q4_K_XL@a1b2c3d
+    gmlx pull hf:unsloth/gemma-4-27b-it-GGUF/UD-Q4_K_XL --to /Volumes/ext/models
+
+  a direct URL (non-HF hosts too) - shard sets expand the same way
+    gmlx pull https://example.com/models/model-00001-of-00003.gguf
+"""
+
+
 def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
     ap = argparse.ArgumentParser(
         prog=prog,
-        description="Validate a remote GGUF's header, then download it (all shards) "
-                    "to your model dir - not the HF cache. By default it lands in "
-                    "the server config's first model_dirs root, under "
-                    "<dir>/<org>__<repo>/. Pass several files to fetch them together "
-                    "(extra bare names resolve in the first ref's repo - e.g. an "
-                    "mmproj or a second quant). Files landing under a model_dirs "
-                    "root are registered in the config and served immediately. "
-                    "Refuses an unloadable GGUF unless --force.")
+        description=_PULL_DESCRIPTION,
+        epilog=_PULL_EXAMPLES,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("refs", nargs="+", metavar="REF",
-                    help="hf:<org>/<repo>/<file.gguf>[@rev] or an http(s):// URL; "
-                         "additional bare filenames are fetched from the first "
-                         "ref's repo.")
+                    help="hf:<org>/<repo>[/<path>][@rev] naming a .gguf, a quant "
+                         "folder, or the bare repo (the last two resolve by "
+                         "listing), or an http(s):// URL - a huggingface.co "
+                         "/tree/ or /blob/ link resolves the same way. "
+                         "Additional bare filenames are fetched from the first "
+                         "ref's repo. See the examples below.")
     ap.add_argument("--to", "--out", default=None, metavar="DIR",
                     help="Download into DIR exactly (default: the server config's "
                          "first model_dirs root, nesting hf files under "
