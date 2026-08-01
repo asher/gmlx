@@ -737,15 +737,37 @@ def _load_deepseek4_dspark_drafter(
     )
     log(f"[mtp] drafter remap: {d_stats}")
 
-    _install_and_load(
-        drafter,
-        d_weights,
-        d_meta,
-        log=log,
-        sanitize=False,
-        fp32_keep=_FP32_KEEP_BY_MODEL_TYPE["deepseek_v4"]
-        + ("confidence_proj.",),
+    # Default the drafter's native-fp (mxfp4) experts to zero-copy wire: the
+    # packed de-interleave would pin ~9.6 GiB of anonymous memory for
+    # sparsely-touched MoE experts, and the auto gate never picks wire for a
+    # 10 GiB GGUF on its own. Wire's measured decode penalty (-5%) is noise
+    # on a drafter that is a small slice of each verify round. An explicit
+    # GMLX_NATIVE_FP (or a kq build without the codecs) wins.
+    import mlx_kquant as kq
+
+    from .native_fp import NATIVE_FP_CODECS
+
+    fp_codecs = {c for c in d_meta.values() if c in NATIVE_FP_CODECS}
+    force_wire = (
+        "GMLX_NATIVE_FP" not in os.environ
+        and fp_codecs
+        and fp_codecs <= set(kq.codecs())
     )
+    if force_wire:
+        os.environ["GMLX_NATIVE_FP"] = "wire"
+    try:
+        _install_and_load(
+            drafter,
+            d_weights,
+            d_meta,
+            log=log,
+            sanitize=False,
+            fp32_keep=_FP32_KEEP_BY_MODEL_TYPE["deepseek_v4"]
+            + ("confidence_proj.",),
+        )
+    finally:
+        if force_wire:
+            del os.environ["GMLX_NATIVE_FP"]
     drafter.bind(target)
 
     lm = getattr(target, "language_model", target)
