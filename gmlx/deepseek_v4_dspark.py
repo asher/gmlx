@@ -210,6 +210,16 @@ class DeepseekV4DSparkDrafter(nn.Module):
         # (fixed 5-token blocks, ds4's --dspark-confidence 0 diagnostic mode).
         self._confidence_tau = _env_float("GMLX_DSPARK_CONF", 0.9)
         self._ref_semantics = os.environ.get("GMLX_DSPARK_REF_SEMANTICS") == "1"
+        # Block rows per round (bonus + noise placeholders), <= draft_len.
+        # Fewer rows cut the draft forward's expert-union reads at the cost
+        # of draft depth (and, via the non-causal block, an acceptance
+        # shift). Default 3: at tau 0.9 accepted depth >=4 is rare (<4% of
+        # rounds on every target measured) while 3 rows vs 5 cut the draft
+        # forward ~40% and left depth-1/2 acceptance equal or better
+        # (Q2_K_XL A/B: +20% vs +14% net over plain decode).
+        self._rows = max(
+            2, min(int(_env_float("GMLX_DSPARK_ROWS", 3)), self._draft_len)
+        )
 
         self._input_embed = None
         self._lm_head_fn = None
@@ -327,10 +337,15 @@ class DeepseekV4DSparkDrafter(nn.Module):
         token_dtype: mx.Dtype = mx.int32,
         greedy: bool = False,
     ) -> mx.array:
-        """One DSpark round: 5 rows [bonus, noise*4] through the 3 stages,
-        markov-biased picks, confidence-pruned to at most ``block_size - 1``
-        drafts (min 1: the engine has no skip-round seam, and draft 0 is the
-        plain argmax prediction).
+        """One DSpark round: ``rows`` rows [bonus, noise*(rows-1)] through the
+        3 stages, markov-biased picks, confidence-pruned to at most
+        ``block_size - 1`` drafts (min 1: the engine has no skip-round seam,
+        and draft 0 is the plain argmax prediction).
+
+        ``rows`` defaults to draft_len (5); GMLX_DSPARK_ROWS caps it to trade
+        draft-forward expert reads against draft depth. Block attention is
+        non-causal, so fewer rows also perturbs the surviving rows' logits --
+        an acceptance effect, never a correctness one.
 
         The stage KV writes for the block rows are transient: snapshots are
         restored before returning so ``accept_verified_tokens`` remains the
@@ -343,7 +358,8 @@ class DeepseekV4DSparkDrafter(nn.Module):
                 f"block_size={block_size} -- cap_at_configured_depth should "
                 "have clamped this"
             )
-        want = min(int(block_size) - 1, self._draft_len)
+        rows = self._rows
+        want = min(int(block_size) - 1, rows)
         if want <= 0:
             raise RuntimeError(f"draft_block: block_size={block_size} < 2")
         if isinstance(last_bonus, mx.array):
@@ -353,7 +369,7 @@ class DeepseekV4DSparkDrafter(nn.Module):
         ids = mx.concatenate(
             [
                 bonus,
-                mx.full((1, self._draft_len - 1), self._noise_token_id, mx.int32),
+                mx.full((1, rows - 1), self._noise_token_id, mx.int32),
             ],
             axis=1,
         )
@@ -386,6 +402,11 @@ class DeepseekV4DSparkDrafter(nn.Module):
         tau = self._confidence_tau
         prev = ids[:, :1]
         drafts: List[mx.array] = []
+        confs: List[mx.array] = []
+        # Picks and confidences build one chained graph with a single host
+        # sync at the end; truncation to the confident prefix happens
+        # host-side, so a truncated round computes (but discards) the tail
+        # picks -- the surviving prefix is identical to gating in-loop.
         for i in range(want):
             m = self.markov_w1(prev)[:, 0]
             if tau > 0.0 and i > 0:
@@ -393,18 +414,24 @@ class DeepseekV4DSparkDrafter(nn.Module):
                     [conf_rows[:, i].astype(mx.float32), m.astype(mx.float32)],
                     axis=-1,
                 )
-                conf = mx.sigmoid(self.confidence_proj(feat))
-                # Host sync per gated row (the first retires the stage graph;
-                # the rest are tiny). Draft 0 is never gated -- see docstring.
-                if float(conf[0, 0].item()) < tau:
-                    break
+                confs.append(mx.sigmoid(self.confidence_proj(feat))[0, 0])
             li = logits[:, i].astype(mx.float32) + self.markov_w2(m).astype(
                 mx.float32
             )
             tok = self._pick(li, sampler, greedy).astype(token_dtype)
             drafts.append(tok[:, None] if tok.ndim == 1 else tok)
             prev = drafts[-1].astype(mx.int32)
-        return mx.concatenate(drafts, axis=1)
+        out = mx.concatenate(drafts, axis=1)
+        keep = len(drafts)
+        if confs:
+            cv = mx.stack(confs)
+            mx.eval(out, cv)
+            keep = 1
+            for c in cv.tolist():
+                if c < tau:
+                    break
+                keep += 1
+        return out[:, :keep]
 
     def accept_verified_tokens(
         self,
