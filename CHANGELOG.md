@@ -124,6 +124,29 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   kernel when available, ~1.4x per attention call at depth
   (`GMLX_QSDPA_KQ=0` restores the stock path).
 
+### Added
+
+- Speculative decoding for the GA DeepSeek-V4-Flash 0731 checkpoint via its
+  DSpark draft model (three chained draft blocks replacing the legacy
+  single-block MTP head). The drafter loads from a sidecar GGUF discovered
+  next to the target (preferred over legacy `deepseek4_mtp_support`
+  sidecars; `--draft-gguf` selects one explicitly) - measured +20% decode
+  over plain on UD-Q2_K_XL at ~0.99 acceptance. `GMLX_DSPARK_CONF` moves
+  the confidence gate (default 0.9, the model's own calibration) and
+  `GMLX_DSPARK_ROWS` the draft rows per block (default 3, the measured
+  optimum: fewer noise rows sharpen the non-causal block and keep verify
+  widths on the compiled attention paths).
+- `scripts/convert_dspark_sidecar.py` builds that sidecar from the three
+  draft shards of the upstream release (~10 GiB read instead of the full
+  167 GB checkpoint): expert tensors repack bit-exact into GGML MXFP4,
+  dense tensors encode Q8_0. `--experts-codec q3_k` (or `q4_k`/`q2_k`)
+  trades a little acceptance for a smaller file, with a round-trip RMS
+  report against the upstream weights.
+- Draft-model sidecars whose codecs are all fp4-wire capable load in wire
+  mode by default: the DSpark MXFP4 experts stay zero-copy and file-backed
+  instead of pinning ~9.6 GiB of anonymous memory (an explicit
+  `GMLX_NATIVE_FP` setting still wins).
+
 ## [0.1.4] - 2026-07-27
 
 ### Added
