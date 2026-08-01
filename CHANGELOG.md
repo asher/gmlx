@@ -169,6 +169,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Quantized-KV (`kv_bits: 8`) decode routes through the fused mlx_kquant
   kernel when available, ~1.4x per attention call at depth
   (`GMLX_QSDPA_KQ=0` restores the stock path).
+- bump mlx-kquant >= 0.3.9
 
 ## [0.1.4] - 2026-07-27
 
