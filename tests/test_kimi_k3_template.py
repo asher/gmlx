@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Asher Feldman
 """Kimi-K3 chat-template render checks (fixture = the llama.cpp PR #26185
 Kimi-K3.jinja, the template real GGUFs embed). Rendered through a jinja2
 sandbox configured the way transformers renders chat templates, so a pass

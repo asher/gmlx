@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Asher Feldman
 """Kimi-K3 vendored model: forward smoke, KDA recurrence parity, residual-mix
 semantics, situ, MoE selection, and the synth -> ModelArgs round-trip.
 

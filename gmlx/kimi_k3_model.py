@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Asher Feldman
+# Portions copyright (c) 2026 Apple Inc. (mlx-lm kimi_linear skeleton, MIT)
 """Vendored mlx-lm-style model for Moonshot Kimi-K3 (GGUF arch ``kimi-k3``).
 
 mlx-lm has no kimi_k3 class; this module is the runtime for llama.cpp PR

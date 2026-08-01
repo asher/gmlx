@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Apple Inc.
 #
 """MiniMax-M3 text backbone, vendored from mlx-lm PR #1401 (unmerged).
