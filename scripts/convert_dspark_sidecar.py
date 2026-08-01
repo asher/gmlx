@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Asher Feldman
+# Portions copyright (c) 2026 The ds4.c authors (deepseek4-dspark sidecar layout, MIT)
 """Convert DeepSeek-V4-Flash DSpark (MTP) shards to a deepseek4-dspark sidecar GGUF.
 
 The upstream HF repo isolates the DSpark drafter in its final shards (mtp.* tensors

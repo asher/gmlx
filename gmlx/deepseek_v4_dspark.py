@@ -1,4 +1,7 @@
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Asher Feldman
+# Portions copyright (c) 2026 DeepSeek (reference DSparkBlock, MIT)
+# Portions copyright (c) 2026 The ds4.c authors (dspark runtime semantics, MIT)
 """DeepSeek-V4-Flash DSpark: the GA (0731) auxiliary draft model.
 
 DSpark replaces the single-block nextn MTP head (deepseek_v4_mtp): a 3-block

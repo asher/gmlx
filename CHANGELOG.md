@@ -114,6 +114,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The DSpark draft-model module (`deepseek_v4_dspark.py`) and the sidecar
+  converter are MIT licensed (LICENSE-MIT, SPDX headers); the rest of gmlx
+  stays BUSL-1.1.
 - Informational `[stream]` banners (streaming summary, feeder/arena sizes,
   keep-warm, lookahead, MoE lever confirmations, runtime stats) and the
   `[prefill]` chunk-size note only print under `--verbose`; warnings

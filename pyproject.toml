@@ -8,8 +8,8 @@ version = "0.1.4"
 description = "A local inference platform for Apple Silicon: run, chat with, serve, and fine-tune the GGUF ecosystem's quantized models natively on MLX, straight off the file."
 readme = "README.md"
 requires-python = ">=3.11"  # 3.10 EOLs 2026-10; mlx-kquant's lower floor is a library floor
-license = "BUSL-1.1"
-license-files = ["LICENSE", "licenses/*"]
+license = "BUSL-1.1 AND MIT"  # MIT: files with an SPDX MIT header (dspark module + converter)
+license-files = ["LICENSE", "LICENSE-MIT", "licenses/*"]
 authors = [{ name = "Asher Feldman" }]
 classifiers = [
     "Development Status :: 4 - Beta",

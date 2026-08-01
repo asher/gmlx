@@ -477,6 +477,12 @@ version converts to the Apache License 2.0 four years after its release. No clai
 are made against inference outputs, and downloaded model weights carry their own
 licenses.
 
+Exception: the DSpark draft-model module (`deepseek_v4_dspark.py`) and the
+sidecar converter (`scripts/convert_dspark_sidecar.py`) are MIT licensed
+(see [LICENSE-MIT](https://github.com/asher/gmlx/blob/main/LICENSE-MIT)), so
+both can be reused freely alongside the MIT-licensed ds4 and gguf tooling
+they reimplement from. MIT-licensed files carry an SPDX header saying so.
+
 Third-party code vendored into gmlx is documented in
 [THIRD_PARTY_NOTICES.md](https://github.com/asher/gmlx/blob/main/THIRD_PARTY_NOTICES.md), with license texts under
 [`licenses/`](https://github.com/asher/gmlx/tree/main/licenses).
