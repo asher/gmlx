@@ -20,8 +20,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   expert stacks, and an MLX command-buffer cap lift at CLI entry.
   Kimi-K3 UD-IQ2_XXS (662 GB) decodes at ~1.4 tok/s on a 128 GB box with
   bit-identical output.
-- DFlash-family draft models (`dspark`): loader and block draft pass, with
-  auxiliary hidden-state taps on kimi-k3 (speculative-decode groundwork).
 - `GMLX_LOG_ROUTED`: routed-expert-id trace from the decode feeder, for
   offline arena replay and sizing experiments.
 - Speculative decoding for the GA DeepSeek-V4-Flash 0731 checkpoint via its
