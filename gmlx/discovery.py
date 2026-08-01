@@ -43,7 +43,8 @@ from . import arch_table as _arch_table
 # Assistant-shape drafter arches (a separate GGUF that drafts for a target whose
 # hidden size it carries as a "backbone" field). The set is the fast path; the
 # backbone-field probe in `_looks_like_drafter` catches future naming.
-_DRAFTER_ARCHES = frozenset({"gemma4_assistant", "gemma4-assistant", "gemma4_mtp"})
+_DRAFTER_ARCHES = frozenset({"gemma4_assistant", "gemma4-assistant", "gemma4_mtp",
+                             "deepseek4-dspark"})
 _BACKBONE_FIELDS = ("backbone_embedding_length", "embedding_length_out",
                     "n_embd_backbone")
 
@@ -302,17 +303,23 @@ def header_sampling(path) -> dict:
     return dict(meta.get("sampling") or {}) if meta else {}
 
 
-def find_mtp_companion(path: str, drafter_arch: str = "deepseek4_mtp_support") -> str | None:
-    """Path of an MTP drafter GGUF (arch ``drafter_arch``) sitting in the same
-    directory as ``path``, or ``None``. Header-only peeks through
+def find_mtp_companion(
+    path: str,
+    drafter_arch: str | tuple = ("deepseek4-dspark", "deepseek4_mtp_support"),
+) -> str | None:
+    """Path of an MTP drafter GGUF (arch in ``drafter_arch``) sitting in the
+    same directory as ``path``, or ``None``. Header-only peeks through
     :func:`header_meta`'s stat-validated cache, so a directory scan costs one
-    stat per already-seen sibling. Lexically first match wins on a tie."""
+    stat per already-seen sibling. Earlier arches in the tuple win over later
+    ones (dspark over legacy nextn); within an arch, lexically first wins."""
+    arches = (drafter_arch,) if isinstance(drafter_arch, str) else tuple(drafter_arch)
     ap = os.path.abspath(os.path.expanduser(path))
     parent = os.path.dirname(ap)
     try:
         names = sorted(os.listdir(parent))
     except OSError:
         return None
+    best: tuple[int, str] | None = None
     for name in names:
         if not name.endswith(".gguf"):
             continue
@@ -320,9 +327,14 @@ def find_mtp_companion(path: str, drafter_arch: str = "deepseek4_mtp_support") -
         if p == ap:
             continue
         meta = header_meta(p)
-        if meta and meta.get("arch") == drafter_arch:
-            return p
-    return None
+        arch = meta.get("arch") if meta else None
+        if arch in arches:
+            rank = arches.index(arch)
+            if best is None or rank < best[0]:
+                best = (rank, p)
+            if rank == 0:
+                break
+    return best[1] if best else None
 
 
 def fill_families(cfg) -> None:

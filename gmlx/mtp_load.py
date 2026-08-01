@@ -477,10 +477,21 @@ def _load_deepseek4_mtp_drafter(
     arrays, kquant_meta, d_arch, _meta, _shapes = load_gguf_wire_bytes(
         draft_gguf_path, zero_copy=zero_copy
     )
+    if d_arch == "deepseek4-dspark":
+        return _load_deepseek4_dspark_drafter(
+            draft_gguf_path,
+            target,
+            target_config_dict,
+            arrays=arrays,
+            kquant_meta=kquant_meta,
+            meta=_meta,
+            log=log,
+        )
     if d_arch != "deepseek4_mtp_support":
         raise ValueError(
-            f"{draft_gguf_path}: expected a deepseek4_mtp_support drafter "
-            f"GGUF for a deepseek_v4 target, got arch {d_arch!r}"
+            f"{draft_gguf_path}: expected a deepseek4_mtp_support or "
+            f"deepseek4-dspark drafter GGUF for a deepseek_v4 target, got "
+            f"arch {d_arch!r}"
         )
     log(
         f"[mtp] drafter gguf ({d_arch}): {len(arrays)} arrays, "
@@ -522,6 +533,233 @@ def _load_deepseek4_mtp_drafter(
 
     validate_drafter(drafter)
     log("[mtp] drafter bound to target embeddings + LM head")
+    _patch_draft_head_quantized(drafter)
+    _stamp_mtp_width_cap(drafter, "deepseek_v4", target=target, log=log)
+    return drafter
+
+
+# The closed per-stage tensor set of a deepseek4-dspark GGUF (81 tensors for
+# 3 stages, verified against both the antirez DSpark-support sidecar and the
+# scripts/convert_dspark_sidecar.py output). Stage entries land under
+# ``stages.{k}.``; the stage-0 fusion and final-stage head entries are
+# drafter-level.
+_DSPARK_STAGE_MAP = {
+    "attn_q_a": "block.attn.wq_a.weight",
+    "attn_q_a_norm": "block.attn.q_norm.weight",
+    "attn_q_b": "block.attn.wq_b.weight",
+    "attn_kv": "block.attn.wkv.weight",
+    "attn_kv_a_norm": "block.attn.kv_norm.weight",
+    "attn_output_a": "block.attn.wo_a.weight",  # 2D->3D MultiLinear reshape
+    "attn_output_b": "block.attn.wo_b.weight",
+    "attn_norm": "block.attn_norm.weight",
+    "ffn_norm": "block.ffn_norm.weight",
+    "ffn_gate_inp": "block.ffn.gate.weight",
+    "ffn_gate_exps": "block.ffn.switch_mlp.gate_proj.weight",
+    "ffn_up_exps": "block.ffn.switch_mlp.up_proj.weight",
+    "ffn_down_exps": "block.ffn.switch_mlp.down_proj.weight",
+    "ffn_gate_shexp": "block.ffn.shared_experts.gate_proj.weight",
+    "ffn_up_shexp": "block.ffn.shared_experts.up_proj.weight",
+    "ffn_down_shexp": "block.ffn.shared_experts.down_proj.weight",
+}
+_DSPARK_STAGE_RAW = {
+    "attn_sinks": "block.attn.attn_sink",
+    "exp_probs_b.bias": "block.ffn.gate.e_score_correction_bias",
+    "hc_attn_fn": "block.attn_hc.fn",
+    "hc_attn_base": "block.attn_hc.base",
+    "hc_attn_scale": "block.attn_hc.scale",
+    "hc_ffn_fn": "block.ffn_hc.fn",
+    "hc_ffn_base": "block.ffn_hc.base",
+    "hc_ffn_scale": "block.ffn_hc.scale",
+}
+_DSPARK_TOP_MAP = {
+    "main_proj": "main_proj.weight",
+    "main_norm": "main_norm.weight",
+    "norm": "norm.weight",
+    "markov_head.markov_w1": "markov_w1.weight",
+    "markov_head.markov_w2": "markov_w2.weight",
+    "confidence_head.proj": "confidence_proj.weight",
+}
+_DSPARK_TOP_RAW = {
+    "hc_head_fn": "hc_head.fn",
+    "hc_head_base": "hc_head.base",
+    "hc_head_scale": "hc_head.scale",
+}
+
+
+def remap_deepseek4_dspark_arrays(
+    arrays: dict,
+    kquant_meta: dict,
+    *,
+    n_stages: int,
+    o_groups: int,
+    o_lora_rank: int,
+):
+    """Remap a ``deepseek4-dspark`` GGUF onto the DeepseekV4DSparkDrafter
+    param tree. Closed tensor set: unknown ``mtp.*`` names are hard errors
+    (converter drift must surface at load, not as an unfilled param)."""
+    hf_weights: dict[str, mx.array] = {}
+    hf_kquant_meta: dict[str, str] = {}
+    stats = {"mapped": 0}
+    for name, arr in arrays.items():
+        if name.endswith(".scales") or name.endswith(".biases"):
+            continue
+        parts = name.split(".", 2)
+        if len(parts) != 3 or parts[0] != "mtp" or not parts[1].isdigit():
+            raise RuntimeError(
+                f"deepseek4 DSpark remap: unexpected tensor {name!r} "
+                f"(the drafter tensor set is closed)"
+            )
+        stage = int(parts[1])
+        if stage >= n_stages:
+            raise RuntimeError(
+                f"deepseek4 DSpark remap: {name!r} exceeds stage count "
+                f"{n_stages}"
+            )
+        rest = parts[2]
+        base = rest[: -len(".weight")] if rest.endswith(".weight") else rest
+        top_raw = _DSPARK_TOP_RAW.get(base)
+        if top_raw is not None:
+            hf_weights[top_raw] = arr
+            stats["mapped"] += 1
+            continue
+        stage_raw = _DSPARK_STAGE_RAW.get(base)
+        if stage_raw is not None:
+            hf_weights[f"stages.{stage}.{stage_raw}"] = arr
+            stats["mapped"] += 1
+            continue
+        top = _DSPARK_TOP_MAP.get(base)
+        if top is not None:
+            target = top
+        else:
+            mapped = _DSPARK_STAGE_MAP.get(base)
+            if mapped is None:
+                raise RuntimeError(
+                    f"deepseek4 DSpark remap: unknown tensor {name!r} "
+                    f"(converter drift?)"
+                )
+            target = f"stages.{stage}.{mapped}"
+        codec = kquant_meta.get(name)
+        scales = (
+            arrays.get(_strip_weight(name) + ".scales") if codec is not None else None
+        )
+        if base == "attn_output_a":
+            arr = arr.reshape(o_groups, o_lora_rank, -1)
+            if scales is not None and scales.ndim == 2:
+                scales = scales.reshape(o_groups, o_lora_rank, -1)
+        hf_weights[target] = arr
+        if codec is not None:
+            hf_weights[_strip_weight(target) + ".scales"] = scales
+            hf_kquant_meta[target] = codec
+        stats["mapped"] += 1
+    return hf_weights, hf_kquant_meta, stats
+
+
+def _dspark_meta(meta: dict, key: str, default=None):
+    """dspark kv with the ds4 alias order (deepseek4.dspark.X first)."""
+    for k in (
+        f"deepseek4.dspark.{key}",
+        f"deepseek4.dspark_{key}",
+        f"dspark.{key}",
+    ):
+        if k in meta:
+            return meta[k]
+    return default
+
+
+def _load_deepseek4_dspark_drafter(
+    draft_gguf_path: str,
+    target,
+    target_config_dict: dict,
+    *,
+    arrays: dict,
+    kquant_meta: dict,
+    meta: dict,
+    log=loadlog.verbose_print,
+):
+    """Build + load + bind the DSpark drafter from its companion GGUF (arch
+    ``deepseek4-dspark``: 3 chained V4 blocks under ``mtp.{k}.*`` reading
+    target hiddens from ``dspark.target_layer_ids``, plus markov/confidence
+    heads). Also wires the target's ``_dspark_capture`` so every
+    engine-facing hidden carries the capture pack."""
+    from .deepseek_v4_dspark import (
+        DeepseekV4DSparkConfig,
+        DeepseekV4DSparkDrafter,
+    )
+    from .deepseek_v4_model import ModelArgs, ensure_registered
+
+    ensure_registered()
+    n_stages = 1 + max(
+        int(n.split(".")[1]) for n in arrays if n.startswith("mtp.")
+    )
+    draft_len = int(_dspark_meta(meta, "block_size", 5))
+    layer_ids = tuple(
+        int(i) for i in (_dspark_meta(meta, "target_layer_ids") or ())
+    )
+    noise_token_id = _dspark_meta(meta, "noise_token_id")
+    if not layer_ids or noise_token_id is None:
+        raise ValueError(
+            f"{draft_gguf_path}: dspark.target_layer_ids / "
+            f"dspark.noise_token_id metadata missing - re-run the converter"
+        )
+    args = ModelArgs.from_dict(target_config_dict)
+    n = int(args.num_hidden_layers)
+    if list(layer_ids) != sorted(set(layer_ids)) or layer_ids[-1] >= n:
+        raise ValueError(
+            f"{draft_gguf_path}: dspark.target_layer_ids {layer_ids} must be "
+            f"strictly increasing and < {n}"
+        )
+    args.compress_ratios = list(args.compress_ratios) + [0] * n_stages
+    native_total = draft_len + 1
+    block_total = max(2, min(env_int("GMLX_DSPARK_BLOCK", native_total), native_total))
+    drafter = DeepseekV4DSparkDrafter(
+        DeepseekV4DSparkConfig(
+            text=args,
+            n_stages=n_stages,
+            draft_len=draft_len,
+            noise_token_id=int(noise_token_id),
+            target_layer_ids=layer_ids,
+            markov_rank=int(_dspark_meta(meta, "markov_rank", 256)),
+            block_size=block_total,
+        )
+    )
+    log(
+        f"[mtp] drafter: dspark stages={n_stages} draft_len={draft_len} "
+        f"targets={layer_ids} block_total={block_total} "
+        f"window={args.sliding_window}"
+    )
+
+    d_weights, d_meta, d_stats = remap_deepseek4_dspark_arrays(
+        arrays,
+        kquant_meta,
+        n_stages=n_stages,
+        o_groups=args.o_groups,
+        o_lora_rank=args.o_lora_rank,
+    )
+    log(f"[mtp] drafter remap: {d_stats}")
+
+    _install_and_load(
+        drafter,
+        d_weights,
+        d_meta,
+        log=log,
+        sanitize=False,
+        fp32_keep=_FP32_KEEP_BY_MODEL_TYPE["deepseek_v4"]
+        + ("confidence_proj.",),
+    )
+    drafter.bind(target)
+
+    lm = getattr(target, "language_model", target)
+    if not hasattr(lm, "_dspark_capture"):
+        raise RuntimeError(
+            "DSpark drafter needs a DeepseekV4SpecLM target (with the "
+            f"_dspark_capture seam); got {type(lm).__name__}"
+        )
+    lm._dspark_capture = layer_ids
+
+    from .drafter_protocol import validate_drafter
+
+    validate_drafter(drafter)
+    log("[mtp] dspark drafter bound; target capture layers wired")
     _patch_draft_head_quantized(drafter)
     _stamp_mtp_width_cap(drafter, "deepseek_v4", target=target, log=log)
     return drafter
@@ -593,8 +831,8 @@ def load_mtp_model(
         if draft_gguf_path is None:
             raise ValueError(
                 "deepseek_v4 MTP needs its companion drafter GGUF (arch "
-                "deepseek4_mtp_support); none found next to "
-                f"{gguf_path} - pass --draft-gguf <path>."
+                "deepseek4-dspark or deepseek4_mtp_support); none found next "
+                f"to {gguf_path} - pass --draft-gguf <path>."
             )
         assistant = True
         loadlog.fact("mtp_companion", os.path.basename(draft_gguf_path))

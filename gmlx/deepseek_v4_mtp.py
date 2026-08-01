@@ -110,6 +110,20 @@ class DeepseekV4SpecLM(v4.Model):
         ensure_rollback_attached()
         # Hard-disable the L1 shared-APC tier for V4 v1 (spec_engine reads it).
         self._kq_apc_mode = None
+        # Set by the DSpark loader: tuple of trunk layer ids whose hc-mean
+        # outputs the drafter consumes. When set, every engine-facing hidden
+        # is PACKED 3D: [raw_4d.flatten(hc) | cap_l0 | cap_l1 | ...].
+        self._dspark_capture: Optional[tuple] = None
+
+    def _dspark_pack(self, h_raw: mx.array, captures) -> mx.array:
+        return mx.concatenate([h_raw.flatten(2), *captures], axis=-1)
+
+    def _dspark_unpack_raw(self, hidden: mx.array) -> mx.array:
+        args = self.model.args
+        lead = args.hc_mult * args.hidden_size
+        return hidden[..., :lead].reshape(
+            hidden.shape[0], hidden.shape[1], args.hc_mult, args.hidden_size
+        )
 
     def __call__(
         self,
@@ -127,9 +141,21 @@ class DeepseekV4SpecLM(v4.Model):
         # MoE routing + embedding happen inside the backbone), so the embeds
         # are ignored. shared_kv is never used (the drafter owns its KV).
         del inputs_embeds, n_to_process, kwargs
+        want_hidden = return_hidden or return_shared_kv
+        if want_hidden and self._dspark_capture is not None:
+            out, h_raw, caps = self.model(
+                inputs,
+                cache,
+                return_raw_hidden=True,
+                capture_layers=self._dspark_capture,
+            )
+            return _SpecOutput(
+                logits=self.lm_head(out),
+                hidden_states=[self._dspark_pack(h_raw, caps)],
+            )
         out, h_raw = self.model(inputs, cache, return_raw_hidden=True)
         logits = self.lm_head(out)
-        if not (return_hidden or return_shared_kv):
+        if not want_hidden:
             # mlx-vlm's AR engine calls model.language_model(...) directly
             # and reads ``outputs.logits`` (the plain-path A/B baseline in
             # bench_tg_depth drives it), so raw logits are not an option.
@@ -141,7 +167,11 @@ class DeepseekV4SpecLM(v4.Model):
     # --- speculative hooks (owned engine contract) ---------------------------
 
     def speculative_logits_from_hidden(self, hidden: mx.array) -> mx.array:
-        """Collapse the raw 4D hidden and project: (B,S,4,H) -> (B,S,V)."""
+        """Collapse the raw 4D hidden and project: (B,S,4,H) -> (B,S,V).
+        On the DSpark path the hidden arrives packed 3D and the raw 4D lead
+        is unflattened first."""
+        if self._dspark_capture is not None and hidden.ndim == 3:
+            hidden = self._dspark_unpack_raw(hidden)
         return self.lm_head(self.model.norm(self.model.hc_head(hidden)))
 
     def speculative_argmax_from_hidden(self, hidden: mx.array) -> mx.array:
@@ -154,6 +184,14 @@ class DeepseekV4SpecLM(v4.Model):
         unconditionally for L<=3)."""
         set_undo_armed(True)
         try:
+            if self._dspark_capture is not None:
+                _, h_raw, caps = self.model(
+                    verify_input,
+                    prompt_cache,
+                    return_raw_hidden=True,
+                    capture_layers=self._dspark_capture,
+                )
+                return self._dspark_pack(h_raw, caps), {}
             _, h_raw = self.model(verify_input, prompt_cache, return_raw_hidden=True)
         finally:
             set_undo_armed(False)

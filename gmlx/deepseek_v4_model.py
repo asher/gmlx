@@ -2026,6 +2026,7 @@ class DeepseekV4Model(PipelineMixin, nn.Module):
         inputs: mx.array,
         cache: Optional[Any] = None,
         return_raw_hidden: bool = False,
+        capture_layers: Optional[tuple] = None,
     ) -> mx.array:
         h = self.embed_tokens(inputs)
         h = mx.broadcast_to(
@@ -2058,8 +2059,18 @@ class DeepseekV4Model(PipelineMixin, nn.Module):
         if pipeline_rank < pipeline_size - 1:
             h = mx.distributed.recv_like(h, (pipeline_rank + 1))
 
-        for layer, layer_cache in zip(self.pipeline_layers, cache):
+        captures = []
+        cap_set = capture_layers or ()
+        for idx, (layer, layer_cache) in enumerate(
+            zip(self.pipeline_layers, cache)
+        ):
             h = layer(h, mask, layer_cache, inputs)
+            if idx in cap_set:
+                # DSpark capture: uniform mean over the hc streams of the
+                # layer output (ds4's dspark_hc_mean_weights = 1/n_hc).
+                captures.append(
+                    h.astype(mx.float32).mean(axis=2).astype(h.dtype)
+                )
 
         _materialize_cache_arrays(cache)
 
@@ -2077,6 +2088,8 @@ class DeepseekV4Model(PipelineMixin, nn.Module):
         # MTP seam (omlx mlx_lm_mtp parity): the drafter head fuses on the raw
         # pre-hc_head 4D hidden (B, L, hc_mult, hidden), so the verify path
         # needs it alongside the collapsed+normed output.
+        if return_raw_hidden and capture_layers is not None:
+            return self.norm(self.hc_head(h)), h, captures
         if return_raw_hidden:
             return self.norm(self.hc_head(h)), h
         return self.norm(self.hc_head(h))
