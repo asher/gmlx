@@ -202,8 +202,18 @@ def build_plan(reader: ShardReader, cfg: dict, experts_codec: Q) -> list[Plan]:
                     codes[:, 0::2] = wu8 & 0x0F
                     codes[:, 1::2] = wu8 >> 4
                     f = fp4_table[codes] * np.repeat(_e8m0_to_f32(su8), 32, axis=1)
-                    out2 = ggml_quantize(f, experts_codec)
+                    # gguf-py has no k-quant encoders; mlx_kquant does.
+                    import mlx.core as mx
+                    import mlx_kquant as kq
+
+                    wq, _ = kq.quantize(mx.array(f), experts_codec.name.lower())
+                    out2 = np.asarray(wq).reshape(rows, -1)
                     if i == 0:
+                        rt = ggml_dequantize(out2, experts_codec)
+                        rms = float(np.sqrt(np.mean((rt - f) ** 2)))
+                        ref = float(np.sqrt(np.mean(f**2)))
+                        print(f"    {dst}: {experts_codec.name} round-trip rms "
+                              f"{rms:.4g} (weight rms {ref:.4g})")
                         nonlocal_shape[0] = (n_experts,) + out2.shape
                         out_l.append(np.empty((n_experts,) + out2.shape, dtype=np.uint8))
                     out_l[0][i] = out2
