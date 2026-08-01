@@ -8,6 +8,22 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Kimi-K3 support (GGUF arch `kimi-k3`, llama.cpp PR #26185 / unsloth
+  conversions): vendored KDA + nope-only MLA + latent-MoE model, kimi-k2
+  pre-tokenizer, config synthesis from the GGUF header, and XTML thinking
+  wired through chat, serve, thinking budgets, and the kimi profile family
+  (thinking effort low/high/max).
+- Larger-than-RAM MoE decode: expert streaming composes with an
+  every-token-weight RAM pin, a GPU-resident Metal residency set for
+  weights and arena (`GMLX_GPU_RESIDENT`), a wired-budget handoff between
+  the prefill ring and the decode arena, wide layer slots for >2 GiB
+  expert stacks, and an MLX command-buffer cap lift at CLI entry.
+  Kimi-K3 UD-IQ2_XXS (662 GB) decodes at ~1.4 tok/s on a 128 GB box with
+  bit-identical output.
+- DFlash-family draft models (`dspark`): loader and block draft pass, with
+  auxiliary hidden-state taps on kimi-k3 (speculative-decode groundwork).
+- `GMLX_LOG_ROUTED`: routed-expert-id trace from the decode feeder, for
+  offline arena replay and sizing experiments.
 - Speculative decoding for the GA DeepSeek-V4-Flash 0731 checkpoint via its
   DSpark draft model (three chained draft blocks replacing the legacy
   single-block MTP head). The drafter loads from a sidecar GGUF discovered
@@ -146,6 +162,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The mlx-lm-style model modules (kimi-k3, minimax-m3, hy-v3) and the
   kimi-k3 tests are MIT licensed (LICENSE-MIT, SPDX headers); the rest of
   gmlx stays BUSL-1.1.
+- The mlx-kquant floor is 0.3.9 (kimi-k3 zero-copy load and residency ops).
 - Informational `[stream]` banners (streaming summary, feeder/arena sizes,
   keep-warm, lookahead, MoE lever confirmations, runtime stats) and the
   `[prefill]` chunk-size note only print under `--verbose`; warnings
@@ -169,7 +186,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Quantized-KV (`kv_bits: 8`) decode routes through the fused mlx_kquant
   kernel when available, ~1.4x per attention call at depth
   (`GMLX_QSDPA_KQ=0` restores the stock path).
-- bump mlx-kquant >= 0.3.9
 
 ## [0.1.4] - 2026-07-27
 
