@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-02
+
 ### Added
 
 - Kimi-K3 support (GGUF arch `kimi-k3`, llama.cpp PR #26185 / unsloth
