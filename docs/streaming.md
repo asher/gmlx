@@ -82,7 +82,7 @@ watch the animation).
 
 | | |
 |---|---|
-| <a href="assets/perf/kimi-k3-ud-iq2xxs-car.html"><img src="assets/perf/kimi-k3-ud-iq2xxs-car.png" alt="Kimi-K3 UD-IQ2_XXS: deep-dusk scene, red coupe with a headlight beam under power lines, hills behind"></a><br>UD-IQ2_XXS, 662 GB file. One generation of 30.8k tokens (thinking included) at 1.34 tok/s, temperature 1.0. | <a href="assets/perf/kimi-k3-ud-q2kxl-car.html"><img src="assets/perf/kimi-k3-ud-q2kxl-car.png" alt="Kimi-K3 UD-Q2_K_XL: film-grain dusk scene, red sedan with a headlight cone, telegraph poles, layered hills and clouds"></a><br>UD-Q2_K_XL, 861 GB file (799 GB of experts stay file-backed). One generation of 23.7k tokens (thinking included) at 1.15 tok/s, temperature 1.0. |
+| <a href="assets/perf/kimi-k3-ud-iq2xxs-car.html"><img src="assets/perf/kimi-k3-ud-iq2xxs-car.png" alt="Kimi-K3 UD-IQ2_XXS: sunset scene, red coupe with a headlight beam under power lines, the sun low between hills"></a><br>UD-IQ2_XXS, 662 GB file. One generation of 30.8k tokens (thinking included) at 1.34 tok/s, temperature 1.0. | <a href="assets/perf/kimi-k3-ud-q2kxl-car.html"><img src="assets/perf/kimi-k3-ud-q2kxl-car.png" alt="Kimi-K3 UD-Q2_K_XL: film-grain dusk scene, red sedan with a headlight cone, telegraph poles, layered hills and clouds"></a><br>UD-Q2_K_XL, 861 GB file (799 GB of experts stay file-backed). One generation of 23.7k tokens (thinking included) at 1.15 tok/s, temperature 1.0. |
 
 Both pages ran as generated. The larger quant also added scroll and
 drag controls for the cruising pace that the prompt never asked for.
