@@ -2378,9 +2378,12 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
     from mlx_vlm.models.cache import make_prompt_cache as _mtp_make_cache
 
     from . import loadlog
+    from .cli import _apply_placement
+    from .loader import preset_native_fp_wire_env
     from .mtp_load import load_mtp_model
 
     b = _ChatBackend()
+    preset_native_fp_wire_env(args)
     with loadlog.load_ui(args.verbose, args.gguf):
         b.model, b.drafter, b.config, b.tok = load_mtp_model(
             args.gguf,
@@ -2389,7 +2392,11 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
             chat_template=args.chat_template,
             zero_copy=not args.no_zero_copy,
             verbose=args.verbose,
+            wire=not getattr(args, "stream_experts", False),
         )
+    # Streaming placement applies to the target trunk only (the drafter
+    # stays resident); same composition as the run/bench entry points.
+    _apply_placement(args, getattr(b.model, "language_model", b.model))
     _require_chat_template(b.tok)
 
     # --kv-bits on the MTP path: same pooled-cache packing as the plain
@@ -2748,8 +2755,10 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         # that already holds media) fall back to the plain VLM path. (resolve_speculative
         # treats --mmproj as a hard MTP blocker, so the VLM x MTP decision is its own.)
         vlm_mtp = bool(args.mmproj and _vlm_mtp_drafter_available(args))
+        # --stream-experts is absent: streaming composes with MTP here the
+        # same way as run/bench (placement after load_mtp_model).
         if speculative and not vlm_mtp and (
-            args.mmproj or args.adapter or args.stream_experts or args.stream_cpu
+            args.mmproj or args.adapter or args.stream_cpu
             or args.moe_experts is not None or args.moe_expert_mass is not None
             or args.moe_expert_probe or args.moe_miss_shed is not None
             or args.moe_layer_shed is not None
@@ -2759,7 +2768,6 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 for name, on in (
                     ("--mmproj", args.mmproj),
                     ("--adapter", args.adapter),
-                    ("--stream-experts", args.stream_experts),
                     ("--stream-cpu", args.stream_cpu),
                     ("--moe-experts", args.moe_experts is not None),
                     ("--moe-expert-mass", args.moe_expert_mass is not None),
