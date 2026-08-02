@@ -70,6 +70,27 @@ layers plus the KV cache - follows the normal fit arithmetic in
 [getting-started.md](getting-started.md#will-it-fit), and a quantized
 KV cache (`--kv-bits 8`) is the usual companion at long context.
 
+## What the over-budget case produces
+
+Two single samples from Kimi-K3, a 2.8T-parameter MoE, generated on the
+128 GB laptop above with `--stream-experts` at streaming defaults, on
+the lossless path. The prompt is the same one-shot canvas-animation
+prompt used for the four-settings comparison later in this guide.
+Each screenshot links to the generated page, committed beside it in
+`docs/assets/perf/` (GitHub shows the page source; download one to
+watch the animation).
+
+| | |
+|---|---|
+| <a href="assets/perf/kimi-k3-ud-iq2xxs-car.html"><img src="assets/perf/kimi-k3-ud-iq2xxs-car.png" alt="Kimi-K3 UD-IQ2_XXS: deep-dusk scene, red coupe with a headlight beam under power lines, hills behind"></a><br>UD-IQ2_XXS, 662 GB file. One generation of 30.8k tokens (thinking included) at 1.34 tok/s, temperature 1.0. | <a href="assets/perf/kimi-k3-ud-q2kxl-car.html"><img src="assets/perf/kimi-k3-ud-q2kxl-car.png" alt="Kimi-K3 UD-Q2_K_XL: film-grain dusk scene, red sedan with a headlight cone, telegraph poles, layered hills and clouds"></a><br>UD-Q2_K_XL, 861 GB file (799 GB of experts stay file-backed). One generation of 23.7k tokens (thinking included) at 1.15 tok/s, temperature 1.0. |
+
+Both pages ran as generated. The larger quant also added scroll and
+drag controls for the cruising pace that the prompt never asked for.
+The point of the samples is scale: a model five to seven times the
+machine's RAM sustaining a coherent 30k-token single-file program is
+what the levers in this guide buy, at the single-digit rates set out
+above.
+
 ## Choosing a placement
 
 Two placements run MoE models whose files exceed what the GPU can wire:
