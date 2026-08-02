@@ -77,6 +77,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `gmlx chat` no longer rejects `--stream-experts` on an MTP/speculative
+  base.
 - Chat markdown rendering no longer reverts a block to raw text when it
   grows taller than the terminal: the rendered top scrolls into scrollback
   and only the last screenful stays live-repainted, so long fenced code
