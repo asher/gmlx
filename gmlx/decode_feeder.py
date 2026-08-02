@@ -48,7 +48,7 @@ from functools import lru_cache
 import numpy as np
 
 from . import keepwarm, loadlog
-from .envflags import env_int
+from .envflags import env_bool, env_int
 from .feeder_common import ATTRS, KINDS, read_range, swapped_weights, verify_zero_copy
 
 # Miss-pull parallelism: per layer, up to top_k experts x 3 stacks of
@@ -324,7 +324,14 @@ class DecodeFeeder:
                 self.arena_bytes += s * stride
         self._locked: dict[tuple[int, str], tuple[int, int]] = {}
         self.locked_bytes = 0
-        self._mlock_arena()
+        # Wiring waits for ensure_wired (the wrapper's first decode call):
+        # at install time the prefill feeder's ring is live, and an
+        # over-RAM box cannot hold a wired ring and a wired arena at once.
+        # Untouched arena pages have no physical cost until then. The
+        # loader points _release_ring at the prefill feeder's slot release
+        # so the handoff happens in one place.
+        self._mlock_deferred = True
+        self._release_ring = None
 
         # Aligned-read plumbing (see _PAGE above): per-worker bounce
         # buffers big enough for the largest expert plus the alignment
@@ -385,6 +392,17 @@ class DecodeFeeder:
         self._t_demand = 0.0
         self._t_settle = 0.0
         self._t_start = time.monotonic()
+        # Diagnostic ledger of every byte this feeder submits to a read
+        # worker (GIL-serialized increments; close enough for attribution).
+        self._bytes_read = 0
+
+        # GMLX_LOG_ROUTED=path: append every decode stage() call's routed
+        # expert ids to an npz (li per call + concatenated ids + row
+        # offsets). Offline replay of arena policies against real routing
+        # traces (speculative-verify byte economics, arena sizing).
+        self._routed_log_path = os.environ.get("GMLX_LOG_ROUTED")
+        self._routed_log: list | None = (
+            [] if self._routed_log_path else None)
 
         # Lossy-lever accounting (shed_misses + the wrapper's layer shed).
         self._shed_n = 0
@@ -424,6 +442,10 @@ class DecodeFeeder:
         self._pressure_polls = 0
         self._last_step_poll = -_PRESSURE_COOLDOWN_POLLS
         self._normal_polls = 0
+        # Ring lend state: fraction of the arena kept while the prefill
+        # ring borrows wired budget for a post-decode prefill pass (see
+        # lend_for_ring). 1.0 = nothing lent.
+        self._lend_frac = 1.0
 
     def _mlock_arena(self) -> None:
         """Wire the arena. The residency policy only works if the slots
@@ -488,6 +510,16 @@ class DecodeFeeder:
     def covers(self, li: int) -> bool:
         return li in self._layers
 
+    def can_stage_smaller(self, li: int) -> bool:
+        """True when a stage() refusal was a slot-count overflow that a
+        smaller (token-split) call could clear, as opposed to a wedge or
+        staging being disabled outright."""
+        return (
+            not self._staging_disabled
+            and li in self._layers
+            and li not in self._wedged_layers
+        )
+
     # staging
 
     def _read_expert(self, li: int, kind: str, e: int, slot: int,
@@ -497,12 +529,14 @@ class DecodeFeeder:
         dest = mv[slot * stride:(slot + 1) * stride]
         off_e = off + e * stride
         if not self._aligned:
+            self._bytes_read += stride
             read_range(self._fds[path], dest, off_e)
             return
         a = off_e & ~(_PAGE - 1)
         b = min(
             (off_e + stride + _PAGE - 1) & ~(_PAGE - 1),
             self._sizes[path])
+        self._bytes_read += b - a
         pool = bounce if bounce is not None else self._bounce
         buf = pool.get()
         try:
@@ -533,6 +567,79 @@ class DecodeFeeder:
                         f"expert {e} slot {s} kind {kind} sample_off {o} "
                         f"owner={int(self._owner[li][s])} pending={pend}")
 
+    def ensure_wired(self) -> None:
+        """First decode call: release the prefill ring and wire the arena
+        (one-time fault pass; a few seconds on a tens-of-GB arena). Called
+        by the offload wrapper on decode-sized calls only - a small prefill
+        chunk served from the arena must not tear the ring down mid-pass.
+
+        Later decode calls repay a ring lend: the ring is dropped again and
+        the arena's slot targets return to full size (layers regrow lazily
+        at their own stage() calls, each re-wiring as it resizes)."""
+        if self._mlock_deferred:
+            self._mlock_deferred = False
+            if self._release_ring is not None:
+                self._release_ring()
+                # Ring buffers land in MLX's freed-buffer cache; flush so
+                # the arena wires into pages the OS actually has back.
+                self._clear_mlx_cache()
+            self._mlock_arena()
+            if env_bool("GMLX_GPU_RESIDENT", True):
+                import mlx_kquant as kq
+
+                if getattr(kq, "residency_insert", None):
+                    self._gpu_resident = True
+                    for a in self._arena.values():
+                        kq.residency_insert(a[0])
+                    kq.residency_commit()
+            return
+        if self._lend_frac < 1.0:
+            if self._release_ring is not None:
+                self._release_ring()
+                self._clear_mlx_cache()
+            self._lend_frac = 1.0
+
+    def lend_for_ring(self, nbytes: int) -> None:
+        """Shrink the wired arena by ~``nbytes`` so the prefill ring can
+        re-allocate without breaching the wired cap. The prefill feeder
+        calls this before rebuilding its slots on a post-decode prefill
+        pass (chat follow-up turns): decode handed the ring's wired budget
+        to the arena in ensure_wired, and a second wired ring on top of a
+        full wired arena is what the cap cannot hold.
+
+        Shrinking is eager (every layer now): the ring path never calls
+        stage(), so the lazy per-layer resize would not fire during the
+        prefill that needs the memory. Each layer keeps its most popular
+        residents, so the decode resume after this turn starts warm.
+        ensure_wired repays the lend on the next decode-sized call."""
+        if self._mlock_deferred:
+            return  # arena never wired; ring + cold arena already coexist
+        if not self.arena_bytes:
+            return
+        frac = max(0.0, 1.0 - nbytes / self.arena_bytes) * self._lend_frac
+        if frac >= self._lend_frac:
+            return
+        self._lend_frac = frac
+        try:
+            import mlx.core as mx
+
+            mx.synchronize()  # no in-flight gather may reference a layer
+        except Exception:
+            pass
+        freed = 0
+        for li in list(self._layers):
+            if li in self._wedged_layers or self._pending.get(li):
+                continue  # same no-resize contract as stage()
+            target = self._target_slots(li)
+            if target < self._slots[li]:
+                freed += (self._slots[li] - target) * self._per_expert[li]
+                self._resize_layer(li, target)
+        print(
+            f"[stream] decode arena lends {freed / 1e9:.1f} GB to the "
+            f"prefill ring (kept {self.arena_bytes / 1e9:.1f} GB); "
+            "restored at next decode"
+        )
+
     def stage(self, li: int, ids: np.ndarray) -> np.ndarray | None:
         """Map router expert ids to arena slots, pulling misses from the GGUF
         into evicted slots first. Returns the slot array (``ids``' shape,
@@ -549,6 +656,10 @@ class DecodeFeeder:
         if self._pressure_on and self._calls % _PRESSURE_POLL_EVERY == 0:
             self._poll_pressure()
         uniq = np.unique(ids.reshape(-1))
+        if self._routed_log is not None and ids.size <= 64:
+            # Decode-shaped calls only (a prefill-tail batch would skew the
+            # per-token trace).
+            self._routed_log.append((li, uniq.astype(np.uint16)))
         if self._pending.get(li):
             # Serve-time barrier: every speculative read for this layer
             # lands (or is quarantined) before any residency decision or
@@ -1037,9 +1148,10 @@ class DecodeFeeder:
     # memory pressure
 
     def _target_slots(self, li: int) -> int:
-        if not self._pressure_steps:
+        frac = (1.0 - self._pressure_steps * _PRESSURE_STEP_FRAC) \
+            * self._lend_frac
+        if frac >= 1.0:
             return self._orig_slots[li]
-        frac = 1.0 - self._pressure_steps * _PRESSURE_STEP_FRAC
         return max(1, int(self._orig_slots[li] * frac))
 
     def _arena_bytes_at(self, steps: int) -> int:
@@ -1144,6 +1256,7 @@ class DecodeFeeder:
             e = owner[os_]
             new_owner[ns] = e
             slot_of[e] = ns
+        resident = getattr(self, "_gpu_resident", False)
         for kind, (_, _, _, stride, shape) in entry.items():
             key = (li, kind)
             a = kq.arena_alloc([new_s * stride])
@@ -1152,12 +1265,23 @@ class DecodeFeeder:
                 mv_new[ns * stride:(ns + 1) * stride] = \
                     mv_old[os_ * stride:(os_ + 1) * stride]
             self._munlock_buf(key)
+            if resident:
+                # a freed buffer must not stay in the residency set
+                kq.residency_erase(self._arena[key][0])
+                kq.residency_insert(a[0])
             self._arena[key] = a
             self._views[key] = a[0].reshape((new_s,) + shape[1:])
             self.arena_bytes += (new_s - old_s) * stride
             self._mlock_buf(key)
+        if resident:
+            kq.residency_commit()
         self._owner[li] = new_owner
         self._slots[li] = new_s
+        # The dropped buffers land in MLX's cache of freed GPU buffers,
+        # not back with the OS; on a box sized to the wired cap that idle
+        # anon memory is what the kernel starts compressing. Flush it
+        # while the freed bytes are the point of the resize.
+        self._clear_mlx_cache()
 
     @contextmanager
     def swapped(self, li: int):
@@ -1171,6 +1295,19 @@ class DecodeFeeder:
         if getattr(self, "_closed", False):
             return
         self._closed = True
+        if getattr(self, "_routed_log", None):
+            lis = np.array([li for li, _ in self._routed_log], np.uint16)
+            rows = [ids for _, ids in self._routed_log]
+            offs = np.zeros(len(rows) + 1, np.int64)
+            np.cumsum([len(r) for r in rows], out=offs[1:])
+            np.savez(
+                self._routed_log_path, li=lis, offsets=offs,
+                ids=np.concatenate(rows) if rows else
+                np.zeros(0, np.uint16))
+            print(
+                f"[stream] routed-id trace: {len(rows)} stage calls -> "
+                f"{self._routed_log_path}")
+            self._routed_log = None
         if not getattr(self, "_stats_verbose", True):
             self._print_wedges()
             return
@@ -1215,6 +1352,9 @@ class DecodeFeeder:
                 f"{self._t_demand:.1f}s, prestage settle "
                 f"{self._t_settle:.1f}s, over {wall:.0f}s wall"
             )
+            print(
+                f"[stream] decode feeder bytes read: "
+                f"{getattr(self, '_bytes_read', 0) / 1e9:.1f} GB")
         if getattr(self, "_shed_tokens", 0):
             print(
                 f"[stream] miss-shed: {self._shed_n} experts shed over "

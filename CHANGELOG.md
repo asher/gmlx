@@ -8,6 +8,20 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Kimi-K3 support (GGUF arch `kimi-k3`, llama.cpp PR #26185 / unsloth
+  conversions): vendored KDA + nope-only MLA + latent-MoE model, kimi-k2
+  pre-tokenizer, config synthesis from the GGUF header, and XTML thinking
+  wired through chat, serve, thinking budgets, and the kimi profile family
+  (thinking effort low/high/max).
+- Larger-than-RAM MoE decode: expert streaming composes with an
+  every-token-weight RAM pin, a GPU-resident Metal residency set for
+  weights and arena (`GMLX_GPU_RESIDENT`), a wired-budget handoff between
+  the prefill ring and the decode arena, wide layer slots for >2 GiB
+  expert stacks, and an MLX command-buffer cap lift at CLI entry.
+  Kimi-K3 UD-IQ2_XXS (662 GB) decodes at ~1.4 tok/s on a 128 GB box with
+  bit-identical output.
+- `GMLX_LOG_ROUTED`: routed-expert-id trace from the decode feeder, for
+  offline arena replay and sizing experiments.
 - Speculative decoding for the GA DeepSeek-V4-Flash 0731 checkpoint via its
   DSpark draft model (three chained draft blocks replacing the legacy
   single-block MTP head). The drafter loads from a sidecar GGUF discovered
@@ -94,6 +108,30 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   models whose architecture has no MTP target class (they failed at load),
   and models too large for RAM get `stream: experts` (MoE) or a `stream:
   cpu` hint (dense) instead of an entry that cannot load.
+- Kimi-K3 supports the router-side MoE levers: --moe-expert-probe,
+  --moe-expert-mass and --moe-experts previously printed "no supported
+  offloaded MoE block" and silently did nothing (the block's inline
+  plain-Linear router was invisible to the installers).
+- Kimi-K3 now thinks by default in chat and serve: templates that gate
+  thinking on an XTML channel (<|open|>think<|sep|>) were missed by
+  mlx-lm's vocab-pair detection, which then forced enable_thinking=False
+  and the model answered without reasoning.
+- Freed decode-arena and prefill-ring buffers are returned to the OS
+  instead of idling in MLX's freed-buffer cache, where the kernel
+  compressed them and ran the box to the free-page floor mid-prefill.
+- Auto arena sizing credits the prefill ring's bytes now that the two
+  time-share the wired budget: a large pinned model no longer sizes its
+  decode arena to zero and decodes on the page-cache path with most of
+  RAM wired (measured driving the box to the free-page floor).
+- Long streamed-expert follow-up turns no longer breach the wired cap:
+  rebuilding the prefill ring after decode now borrows the ring's footprint
+  from the decode arena (hot experts kept), and the next decode returns it.
+  Previously the ring re-allocated on top of the fully wired arena.
+- Streamed-expert chat turns no longer stall at the decode-to-prefill
+  transition: an expert call routing more distinct experts than the decode
+  arena holds is now token-split and served from the arena's read pool
+  instead of a CPU page-cache gather (measured 8.5x on a second-turn
+  prefill; GMLX_ARENA_SPLIT_MAX_TOKENS caps, 0 disables).
 - Non-stream replies that hit `max_tokens` inside a think block now return
   the partial reasoning as `reasoning_content` with empty content, matching
   the streaming path (the raw reasoning previously leaked into `content`).
@@ -119,6 +157,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The DSpark draft-model module (`deepseek_v4_dspark.py`) and the sidecar
   converter are MIT licensed (LICENSE-MIT, SPDX headers); the rest of gmlx
   stays BUSL-1.1.
+- The mlx-lm-style model modules (kimi-k3, minimax-m3, hy-v3) and the
+  kimi-k3 tests are MIT licensed (LICENSE-MIT, SPDX headers); the rest of
+  gmlx stays BUSL-1.1.
+- The mlx-kquant floor is 0.3.9 (kimi-k3 zero-copy load and residency ops).
 - Informational `[stream]` banners (streaming summary, feeder/arena sizes,
   keep-warm, lookahead, MoE lever confirmations, runtime stats) and the
   `[prefill]` chunk-size note only print under `--verbose`; warnings
@@ -126,6 +168,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Scaffolded config comments now sit on their own line above live keys
   instead of trailing them (no more wrapped lines on narrow terminals); the
   redundant mmproj `# VLM companion` comment is gone.
+- Streamed installs default the every-token-weight residency set and the
+  keep-warm heartbeat on; GMLX_GPU_RESIDENT=0 / GMLX_GPU_KEEPWARM=0 disable.
 - glm-dsa/DeepSeek-V3.2 sparse decode uses the stock top-k gather again
   (O(index_topk) per step); the mask-path workaround is now opt-in via
   `GMLX_DSV32_MASK_DECODE=1`.

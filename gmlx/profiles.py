@@ -162,6 +162,29 @@ FAMILIES: dict[str, dict] = {
             "reasoning-high": {"chat_template_kwargs": {"reasoning_effort": "high"}},
         },
     },
+    # moonshotai/Kimi-K3 model card, 2026-07 (generation_config carries no
+    # sampling): t=1.0; top_p 0.95 single-step, 1.0 agentic - ship the
+    # conservative one. The
+    # chat template's thinking_effort takes low/high/max (defaults to max;
+    # other values raise in-template; there is no 'medium' despite the
+    # template's own prose listing it). The XTML thinking markers are set so
+    # the server's open-think detection, budget criteria, and stream splitter
+    # see the model's real section tags.
+    "kimi": {
+        "label": "Kimi",
+        "arches": ("kimi-k3",),
+        "base": {"sampling": {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "thinking_start_token": "<|open|>think<|sep|>",
+            "thinking_end_token": "<|close|>think<|sep|>",
+        }},
+        "intents": {
+            "reasoning-low": {"chat_template_kwargs": {"thinking_effort": "low"}},
+            "reasoning-high": {"chat_template_kwargs": {"thinking_effort": "high"}},
+            "reasoning-max": {"chat_template_kwargs": {"thinking_effort": "max"}},
+        },
+    },
     # Llama 3.x generation_config (t=0.6/top_p=0.9); SmolLM3 card matches
     # closely enough to share.
     "llama": {

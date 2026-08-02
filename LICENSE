@@ -26,9 +26,10 @@ For information about alternative licensing arrangements for the Licensed Work,
 please contact asher_feldman@icloud.com.
 
 File-level exception: files that carry an "SPDX-License-Identifier: MIT"
-header (the DSpark draft-model module and the DSpark sidecar converter)
-are licensed under the MIT license (see LICENSE-MIT), not under this
-License.
+header (the DSpark draft-model module and the DSpark sidecar converter, the
+mlx-lm-style model modules for kimi-k3, minimax-m3, and hy-v3, and the
+kimi-k3 tests) are licensed under the MIT license (see LICENSE-MIT), not
+under this License.
 
 Notice
 

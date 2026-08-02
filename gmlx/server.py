@@ -688,7 +688,8 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "(tiny heartbeat kernel; parks when no request is "
                          "decoding, so an idle server pays nothing). Only acts "
                          "on models streaming with a decode feeder. Same as "
-                         "config server.gpu_keepwarm; env GMLX_GPU_KEEPWARM=1.")
+                         "config server.gpu_keepwarm. Default on for "
+                         "streamed installs; GMLX_GPU_KEEPWARM=0 disables.")
     ap.add_argument("--draft-block-size", type=int, default=None, metavar="N",
                     help="MTP draft tokens per round (analogous to llama-server "
                          "--spec-draft-n-max). Default: the drafter's own block "

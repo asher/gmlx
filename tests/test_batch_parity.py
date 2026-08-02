@@ -56,6 +56,7 @@ CANDIDATE_ARCHES = [
     "ernie4_5-moe", "minimax-m2", "minimax-m3", "hunyuan-moe", "granitehybrid",
     "falcon-h1",
     "qwen3next",
+    "kimi-k3",
 ]
 
 # Deliberately varying lengths -> a ragged batch -> exercises the left-padding /

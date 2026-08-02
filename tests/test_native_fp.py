@@ -177,6 +177,25 @@ def test_preset_native_fp_wire_env():
         assert os.environ["GMLX_NATIVE_FP"] == "packed"
 
 
+def test_lift_stream_cb_caps():
+    from gmlx.cli import _lift_stream_cb_caps
+
+    with mock.patch.dict(os.environ):
+        for k in ("MLX_MAX_OPS_PER_BUFFER", "MLX_MAX_MB_PER_BUFFER"):
+            os.environ.pop(k, None)
+        # no streaming flag -> untouched
+        _lift_stream_cb_caps(["run", "model.gguf"])
+        assert "MLX_MAX_OPS_PER_BUFFER" not in os.environ
+        _lift_stream_cb_caps(["run", "model.gguf", "--stream-experts"])
+        assert os.environ["MLX_MAX_OPS_PER_BUFFER"] == "400"
+        assert os.environ["MLX_MAX_MB_PER_BUFFER"] == "100000"
+    with mock.patch.dict(os.environ, {"MLX_MAX_OPS_PER_BUFFER": "10"}):
+        # an explicit user override always wins over the entry preset
+        _lift_stream_cb_caps(["serve", "model.gguf", "--stream-cpu"])
+        assert os.environ["MLX_MAX_OPS_PER_BUFFER"] == "10"
+        assert os.environ["MLX_MAX_MB_PER_BUFFER"] == "100000"
+
+
 def test_resolve_native_fp_wire_modes(monkeypatch):
     from gmlx import loader
 
@@ -266,6 +285,69 @@ def test_install_native_fp_non_switch_fails_loud(native_fp_wire):
     with pytest.raises(NotImplementedError, match="mxfp4"):
         install_kquant_modules(Tiny(), {"proj.weight": "mxfp4"},
                                native_fp_wire=native_fp_wire)
+
+
+@pytest.mark.parametrize("native_fp_wire", [False, True])
+def test_install_native_fp_multilinear_dispatches_wire(native_fp_wire):
+    # Kimi-K3 regression: llama-quantize's MXFP4_MOE ftype also assigns MXFP4
+    # to the absorbed-MLA attn_k_b/attn_v_b (MultiLinear). Both modes must
+    # dispatch the wire bytes through KQuantMultiLinear, never raise and never
+    # expect the packed repack.
+    if not _kq_has_fp4():
+        pytest.skip("mlx-kquant build lacks the fp4 codecs")
+    import mlx.core as mx
+    import mlx.nn as nn
+
+    from gmlx.modules import (KQuantMultiLinear, MultiLinear,
+                              install_kquant_modules)
+
+    if MultiLinear is None:
+        pytest.skip("mlx-lm build lacks mla.MultiLinear")
+
+    class Tiny(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embed_q = MultiLinear(128, 64, 4)
+
+    model = Tiny()
+    n = install_kquant_modules(model, {"embed_q.weight": "mxfp4"},
+                               native_fp_wire=native_fp_wire)
+    assert n == 1
+    m = model.embed_q
+    assert isinstance(m, KQuantMultiLinear)
+    assert m.kquant_type == "mxfp4"
+    # zero-copy wire geometry: (heads, out, 17 B / 32 vals) + (1,) scales stub
+    assert m.weight.dtype == mx.uint8 and m.weight.shape == (4, 64, 68)
+    assert m.scales.dtype == mx.uint8 and m.scales.shape == (1,)
+
+
+def test_native_fp_multilinear_keys_exempt_from_repack():
+    # The packed repack must leave MultiLinear-destined wire bytes untouched
+    # (KQuantMultiLinear reads ggml wire, not MLX packed layout).
+    import mlx.nn as nn
+
+    from gmlx import loader
+    from gmlx.modules import MultiLinear
+    from gmlx.native_fp import repack_native_fp_weights
+
+    if MultiLinear is None:
+        pytest.skip("mlx-lm build lacks mla.MultiLinear")
+
+    class Tiny(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embed_q = MultiLinear(64, 32, 2)
+
+    model = Tiny()
+    meta = {"embed_q.weight": "mxfp4", "experts.weight": "mxfp4"}
+    keys = loader._native_fp_multilinear_keys(model, meta)
+    assert keys == {"embed_q.weight"}
+
+    wire = np.arange(2 * 32 * 34, dtype=np.uint8).reshape(2, 32, 34)
+    hf = {"embed_q.weight": wire}
+    n = repack_native_fp_weights(hf, {"embed_q.weight": "mxfp4"}, skip=keys)
+    assert n == 0
+    assert hf["embed_q.weight"] is wire and "embed_q.scales" not in hf
 
 
 def test_expert_gpu_ok_gates_cpu_only_codecs(monkeypatch):

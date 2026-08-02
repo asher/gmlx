@@ -18,7 +18,7 @@ unset.
 Sampling is model-aware from the first request: every model starts from its family's
 model-card recommended defaults (Qwen3.6, Gemma, and gpt-oss all publish
 different numbers), and the built-in intents (`@coding`, `@instruct`,
-`@creative`, `@reasoning-low|-medium|-high`) are addressable on any model with
+`@creative`, `@reasoning-low|-medium|-high|-max`) are addressable on any model with
 zero configuration. See
 [Sampling profiles and built-in intents](#profiles-sampling-profiles-and-built-in-intents).
 
@@ -68,7 +68,7 @@ curl localhost:8080/v1/chat/completions -d '{
 ```
 
 Sampling defaults come from the model's family card automatically; add
-`@coding` / `@instruct` / `@creative` / `@reasoning-low|-medium|-high` to any
+`@coding` / `@instruct` / `@creative` / `@reasoning-low|-medium|-high|-max` to any
 id to switch operating point (`"model": "qwen3.6-27b@coding"`).
 `gmlx profiles` prints the table.
 
@@ -368,6 +368,7 @@ model fully resolved); values are cited to the primary model cards in
 | `nemotron` | `nemotron_h_moe` | temperature=1.0 top_p=0.95 | - |
 | `hunyuan` | `hunyuan-moe` | temperature=0.7 top_p=0.8 top_k=20 repetition_penalty=1.05 | - |
 | `hy3` | `hy_v3` | temperature=0.9 thinking_start_token=<think:opensource> thinking_end_token=</think:opensource> | `@reasoning-high`: temperature=0.9 thinking_start_token=<think:opensource> thinking_end_token=</think:opensource> reasoning_effort=high; `@reasoning-low`: temperature=0.9 thinking_start_token=<think:opensource> thinking_end_token=</think:opensource> reasoning_effort=low |
+| `kimi` | `kimi-k3` | temperature=1.0 top_p=0.95 thinking_start_token=<|open|>think<|sep|> thinking_end_token=<|close|>think<|sep|> | `@reasoning-high`: temperature=1.0 top_p=0.95 thinking_start_token=<|open|>think<|sep|> thinking_end_token=<|close|>think<|sep|> thinking_effort=high; `@reasoning-low`: temperature=1.0 top_p=0.95 thinking_start_token=<|open|>think<|sep|> thinking_end_token=<|close|>think<|sep|> thinking_effort=low; `@reasoning-max`: temperature=1.0 top_p=0.95 thinking_start_token=<|open|>think<|sep|> thinking_end_token=<|close|>think<|sep|> thinking_effort=max |
 | `llama` | `llama`, `smollm3` | temperature=0.6 top_p=0.9 | - |
 | `mistral` | `mistral3` | temperature=0.15 | - |
 | `default` | *(anything else)* | temperature=0.7 top_p=0.95 | `@coding`: temperature=0.3 top_p=0.95; `@creative`: temperature=1.0 top_p=0.95 min_p=0.05; `@instruct`: temperature=0.7 top_p=0.95 |
@@ -389,6 +390,12 @@ Notes on individual families:
 - gpt-oss: the `@reasoning-*` intents set `reasoning_effort` as a
   `chat_template_kwargs` variable; the GGUF-embedded harmony template renders
   it (the base template default is `medium`).
+- kimi: the `@reasoning-*` intents set `thinking_effort` (the Kimi-K3
+  template's variable name; it takes `low`/`high`/`max` and defaults to
+  `max`, with no `medium` point). The XTML thinking markers
+  (`<|open|>think<|sep|>` / `<|close|>think<|sep|>`) are set as the family's
+  thinking tokens so open-think detection, thinking budgets, and the stream
+  splitter track the model's real section tags.
 - qwen3.6 / qwen3: `@instruct` also sets `enable_thinking: false` (the card's
   non-thinking operating point).
 - `default`: the fallback for unknown architectures, the historic scaffold
@@ -797,7 +804,7 @@ flowchart LR
 - An inline `@profile` in the request `model` string (or the `profile`
   request field) replaces the model's configured profile in the chain, not
   stacking on top. The name may be a user profile or a built-in intent
-  (`@coding`, `@instruct`, `@creative`, `@reasoning-low|-medium|-high`),
+  (`@coding`, `@instruct`, `@creative`, `@reasoning-low|-medium|-high|-max`),
   resolved per the model's family.
 - The `model.profiles[selected]` tweak applies when its name is the selected
   profile for the request (the request/inline profile, else the model's,

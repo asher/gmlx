@@ -85,6 +85,15 @@ ARCH_ALIAS = {
     # (vendored mlx-lm PR #1192). NEOX-style tail rope on q/kv after the
     # low-rank projections => everything passes through un-permuted.
     "deepseek4": "DEEPSEEK4",
+    # Moonshot Kimi-K3 (llama.cpp PR #26185 'kimi-k3'): hybrid KDA linear
+    # attention + nope-only MLA (per-layer head_count_kv array, 0 = KDA), with
+    # cross-layer residual-attention score vectors, a latent MoE (routed_down/
+    # routed_up around the experts), and an MLA sigmoid output gate. The MLA
+    # rows mirror DEEPSEEK2 (same absorbed k_b/v_b layout -> embed_q/
+    # unembed_out); everything else is K3-only, so it gets a complete override
+    # block. Targets follow gmlx.kimi_k3_model. ssm_a stays the folded
+    # -exp(A_log) (a_folded) and must NOT go through ssm_a_to_a_log.
+    "kimi-k3": "KIMI_K3",
     "glm4moe": "GLM4MOE",
     # OpenAI gpt-oss (llama.cpp arch 'gpt-oss' / LLM_ARCH_OPENAI_MOE): MoE with
     # attention sinks, sliding/full alternating attention, and MXFP4 experts.
@@ -1212,6 +1221,128 @@ ARCH_PRIORITY_OVERRIDES: dict[str, list[tuple[re.Pattern, str | None, str]]] = {
          "model.layers.{bid}.self_attn.indexer.k_norm.bias", "passthrough"),
         (re.compile(r"^blk\.(\d+)\.indexer\.proj\.weight$"),
          "model.layers.{bid}.self_attn.indexer.weights_proj.weight", "passthrough"),
+    ],
+    "KIMI_K3": [
+        # Moonshot Kimi-K3: every per-layer tensor is claimed explicitly (the
+        # KDA/ssm and K3-only names aren't canonical, and the MLA names need
+        # the DEEPSEEK2-style targets). token_embd/output_norm/output resolve
+        # via the canonical map. All passthrough unless noted - K3 is
+        # rope-free (nope-only MLA), so there's no Q/K permute anywhere.
+        #
+        # MLA attention (absorbed layout, as DEEPSEEK2; targets follow
+        # mlx_lm.models.deepseek_v3 naming in gmlx.kimi_k3_model).
+        (re.compile(r"^blk\.(\d+)\.attn_q_a\.weight$"),
+         "model.layers.{bid}.self_attn.q_a_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_q_a_norm\.weight$"),
+         "model.layers.{bid}.self_attn.q_a_layernorm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_q_b\.weight$"),
+         "model.layers.{bid}.self_attn.q_b_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_kv_a_mqa\.weight$"),
+         "model.layers.{bid}.self_attn.kv_a_proj_with_mqa.weight",
+         "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_kv_a_norm\.weight$"),
+         "model.layers.{bid}.self_attn.kv_a_layernorm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_k_b\.weight$"),
+         "model.layers.{bid}.self_attn.embed_q.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_v_b\.weight$"),
+         "model.layers.{bid}.self_attn.unembed_out.weight", "passthrough"),
+        # K3 MLA sigmoid output gate (pre-o_proj).
+        (re.compile(r"^blk\.(\d+)\.attn_gate\.weight$"),
+         "model.layers.{bid}.self_attn.attn_gate.weight", "passthrough"),
+        # attn_q/k/v: the KDA in-projections (all recurrent layers). attn_q is
+        # also the MLA no-q_lora fallback - same q_proj target either way.
+        (re.compile(r"^blk\.(\d+)\.attn_q\.weight$"),
+         "model.layers.{bid}.self_attn.q_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_k\.weight$"),
+         "model.layers.{bid}.self_attn.k_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_v\.weight$"),
+         "model.layers.{bid}.self_attn.v_proj.weight", "passthrough"),
+        # Shared output projection (KDA d_inner==n_head*v_head_dim, so both
+        # layer types land on the same o_proj target).
+        (re.compile(r"^blk\.(\d+)\.attn_output\.weight$"),
+         "model.layers.{bid}.self_attn.o_proj.weight", "passthrough"),
+        # KDA short conv1d weights: GGUF ships [d_conv, 1, d_inner(, 1)] ne
+        # (numpy (1, d_inner, 1, d_conv) or (d_inner, 1, d_conv) - quant
+        # drops the trailing 1); mlx Conv1d wants (d_inner, d_conv, 1).
+        (re.compile(r"^blk\.(\d+)\.ssm_conv1d_q\.weight$"),
+         "model.layers.{bid}.self_attn.q_conv.conv.weight", "kda_conv_weight"),
+        (re.compile(r"^blk\.(\d+)\.ssm_conv1d_k\.weight$"),
+         "model.layers.{bid}.self_attn.k_conv.conv.weight", "kda_conv_weight"),
+        (re.compile(r"^blk\.(\d+)\.ssm_conv1d_v\.weight$"),
+         "model.layers.{bid}.self_attn.v_conv.conv.weight", "kda_conv_weight"),
+        # KDA decay path: f_b(f_a(x)) + dt_bias, folded a, per-head beta.
+        (re.compile(r"^blk\.(\d+)\.ssm_f_a\.weight$"),
+         "model.layers.{bid}.self_attn.f_a_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ssm_f_b\.weight$"),
+         "model.layers.{bid}.self_attn.f_b_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ssm_beta\.weight$"),
+         "model.layers.{bid}.self_attn.b_proj.weight", "passthrough"),
+        # ssm_a is the FOLDED -exp(A_log); kimi_k3_model keeps it folded as
+        # a_folded, so this must NOT take the canonical ssm_a_to_a_log
+        # transform (log of a negative = NaN). Wire shapes vary ([n_head],
+        # [1, n_head], [1, n_head, 1, 1]) -> flatten.
+        (re.compile(r"^blk\.(\d+)\.ssm_a$"),
+         "model.layers.{bid}.self_attn.a_folded", "flatten"),
+        (re.compile(r"^blk\.(\d+)\.ssm_dt\.bias$"),
+         "model.layers.{bid}.self_attn.dt_bias", "passthrough"),
+        # K3 full-rank KDA gate (kimi-linear's low-rank g_a/g_b pair fused).
+        (re.compile(r"^blk\.(\d+)\.ssm_g\.weight$"),
+         "model.layers.{bid}.self_attn.g_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ssm_norm\.weight$"),
+         "model.layers.{bid}.self_attn.o_norm.weight", "passthrough"),
+        # Cross-layer residual-attention score vectors: raw [n_embd] arrays,
+        # no .weight on the target (ds4 attn_sink precedent).
+        (re.compile(r"^blk\.(\d+)\.attn_res_score\.weight$"),
+         "model.layers.{bid}.attn_res_score", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_res_score\.weight$"),
+         "model.layers.{bid}.ffn_res_score", "passthrough"),
+        (re.compile(r"^output_res_score\.weight$"),
+         "model.output_res_score", "passthrough"),
+        # Per-layer norms.
+        (re.compile(r"^blk\.(\d+)\.attn_norm\.weight$"),
+         "model.layers.{bid}.input_layernorm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_norm\.weight$"),
+         "model.layers.{bid}.post_attention_layernorm.weight", "passthrough"),
+        # Dense MLP (leading first_k_dense_replace layers; situ activation is
+        # model-side, tensors are plain gate/up/down).
+        (re.compile(r"^blk\.(\d+)\.ffn_gate\.weight$"),
+         "model.layers.{bid}.mlp.gate_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_up\.weight$"),
+         "model.layers.{bid}.mlp.up_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_down\.weight$"),
+         "model.layers.{bid}.mlp.down_proj.weight", "passthrough"),
+        # MoE router (full-width input) + sigmoid correction bias. K3's bias
+        # lives on the MoE module itself (kimi_linear precedent), not on
+        # mlp.gate as in DEEPSEEK2.
+        (re.compile(r"^blk\.(\d+)\.ffn_gate_inp\.weight$"),
+         "model.layers.{bid}.mlp.gate.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.exp_probs_b\.bias$"),
+         "model.layers.{bid}.mlp.e_score_correction_bias", "passthrough"),
+        # Latent MoE projections around the routed experts.
+        (re.compile(r"^blk\.(\d+)\.ffn_routed_down\.weight$"),
+         "model.layers.{bid}.mlp.routed_down.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_routed_up\.weight$"),
+         "model.layers.{bid}.mlp.routed_up.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_routed_norm\.weight$"),
+         "model.layers.{bid}.mlp.routed_norm.weight", "passthrough"),
+        # Routed experts (stacked, at latent width) -> switch_mlp. MXFP4 wire
+        # passes through onto KQuantSwitchLinear (gpt-oss codec).
+        (re.compile(r"^blk\.(\d+)\.ffn_gate_exps\.weight$"),
+         "model.layers.{bid}.mlp.switch_mlp.gate_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_up_exps\.weight$"),
+         "model.layers.{bid}.mlp.switch_mlp.up_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_down_exps\.weight$"),
+         "model.layers.{bid}.mlp.switch_mlp.down_proj.weight", "passthrough"),
+        # Shared experts (full width, fused into one KimiK3MLP).
+        (re.compile(r"^blk\.(\d+)\.ffn_gate_shexp\.weight$"),
+         "model.layers.{bid}.mlp.shared_experts.gate_proj.weight",
+         "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_up_shexp\.weight$"),
+         "model.layers.{bid}.mlp.shared_experts.up_proj.weight",
+         "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_down_shexp\.weight$"),
+         "model.layers.{bid}.mlp.shared_experts.down_proj.weight",
+         "passthrough"),
     ],
     "DEEPSEEK4": [
         # DeepSeek V4 Flash (dwarfstar 'deepseek4', not a llama.cpp arch).

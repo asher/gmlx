@@ -455,3 +455,66 @@ def test_streaming_prefill_default_resolution(monkeypatch):
         assert _resolve_prefill_step(model2, 4096) == (4096, False)
     finally:
         mx.set_wired_limit = real_set_wired
+
+
+def test_arena_overflow_token_split():
+    """A chunk that routes more distinct experts than the arena has slots
+    is halved along the token axis and served through the arena path
+    (recursing to single tokens if needed), and the reassembled output
+    matches the unsplit reference bit-for-bit shape and numerics."""
+    import contextlib
+
+    import numpy as np
+
+    mx.random.seed(3)
+    glu = SwitchGLU(16, 32, 8)
+    mx.eval(glu.parameters())
+    T = 6
+    x = mx.random.normal((1, T, 16))
+    inds = mx.array(
+        (np.arange(T * 2).reshape(1, T, 2) % 8).astype(np.uint32))
+    ref = glu(x, inds)
+    mx.eval(ref)
+
+    class _StubFeeder:
+        def __init__(self, cap):
+            self.cap = cap
+            self.stage_sizes = []
+
+        def covers(self, li):
+            return True
+
+        def can_stage_smaller(self, li):
+            return True
+
+        def wedged_at(self, li):
+            return False
+
+        def ensure_wired(self):
+            pass
+
+        def stage(self, li, ids):
+            self.stage_sizes.append(ids.size)
+            if len(np.unique(ids.reshape(-1))) > self.cap:
+                return None
+            return ids  # identity slots: arena views == real weights
+
+        @contextlib.contextmanager
+        def swapped(self, li):
+            yield
+
+    model = _holder_model(glu)
+    n, _ = install_expert_streaming(model)
+    assert n == 1
+    stub = _StubFeeder(cap=3)
+    object.__setattr__(glu, "_kq_decode_feeder", stub)
+    object.__setattr__(glu, "_kq_cpu_only", True)
+    object.__setattr__(glu, "_kq_li", 0)
+    out = glu(x, inds)
+    mx.eval(out)
+    assert out.shape == ref.shape
+    assert mx.allclose(ref, out, atol=1e-6, rtol=1e-6)
+    # The full chunk was tried first, refused, and the recursion bottomed
+    # out at single-token stage calls that fit under the slot cap.
+    assert stub.stage_sizes[0] == T * 2
+    assert min(stub.stage_sizes) == 2

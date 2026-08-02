@@ -359,9 +359,13 @@ def _install(model, *, mass=None, probe=None) -> int:
         elif gate is not None:
             target = gate
             gate.__class__ = _expert_ctl_gate_class(type(gate))
-        elif type(owner).__name__ in ("_NormTopKMoE", "_FusedKQuantMoeBlock"):
-            # hunyuan renorm patch / fused kquant MoE block: both forwards
-            # call back into the hook when the attrs are set
+        elif type(owner).__name__ in (
+            "_NormTopKMoE", "_FusedKQuantMoeBlock", "KimiK3MoE",
+        ):
+            # hunyuan renorm patch / fused kquant MoE block / gmlx-owned
+            # kimi-k3 latent MoE: these forwards call back into the hook
+            # when the attrs are set (kimi-k3's latent projections and
+            # mix seam make a call-back safer than a forward swap)
             target = owner
         elif type(owner).__name__.endswith("_ExpertCtl"):
             target = owner  # already swapped by an earlier install

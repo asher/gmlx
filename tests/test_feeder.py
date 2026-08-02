@@ -160,6 +160,9 @@ def test_wrapper_partial_branch_and_ordering(monkeypatch):
             def wedged_at(self, li):
                 return False
 
+            def can_stage_smaller(self, li):
+                return False  # overflow here means fall through, not split
+
             def has_dead(self, li):
                 return False
 
@@ -184,3 +187,53 @@ def test_wrapper_partial_branch_and_ordering(monkeypatch):
         assert fdr.partial_calls == [(3, [0, 2]), (3, [0, 2])]
     finally:
         mx.set_wired_limit = real_set_wired
+
+
+def test_slot_itemsize_and_wide_slot_view():
+    """>2 GiB stacks: the slot granule widens past uint8 and slot_view
+    lands back on the layer geometry byte-for-byte."""
+    from gmlx.feeder_common import slot_itemsize, slot_view
+    import mlx_kquant as kq
+
+    # In-int32 slots stay plain uint8; past int32 the granule is the widest
+    # divisor of every row length that fits the element count back in int32.
+    assert slot_itemsize(1 << 20, [672, 784]) == 1
+    assert slot_itemsize((1 << 31) - 64, [31]) == 1
+    assert slot_itemsize(3 << 30, [672, 784]) == 8
+    assert slot_itemsize(3 << 30, [924]) == 4          # 924 % 8 == 4
+    assert slot_itemsize((1 << 31) + 64, [30]) == 2    # 30 % 4 == 2
+    assert slot_itemsize(1 << 32, [31]) == 0           # nothing divides
+
+    # Wide slot round trip: bytes written through the memoryview surface
+    # in the uint8 view at the right geometry.
+    arr, mv = kq.arena_alloc([64], itemsize=8)         # 512 B arena
+    assert arr.dtype == mx.uint64 and len(mv) == 512
+    pat = bytes(range(256)) + bytes(reversed(range(256)))
+    mv[:512] = pat
+    nbytes, shape = 384, (2, 3, 64)                    # 64 % 8 == 0
+    v = slot_view(arr, nbytes, shape)
+    mx.eval(v)
+    assert v.dtype == mx.uint8 and v.shape == shape
+    assert bytes(np.array(v).reshape(-1)) == pat[:384]
+
+    # uint8 slots take the plain path unchanged.
+    arr8, mv8 = kq.arena_alloc([96])
+    mv8[:96] = pat[:96]
+    v8 = slot_view(arr8, 96, (2, 48))
+    mx.eval(v8)
+    assert bytes(np.array(v8).reshape(-1)) == pat[:96]
+
+
+def test_release_slots_and_lazy_realloc(monkeypatch, tmp_path):
+    """Decode releases the ring; the next prefill pass rebuilds it and
+    staging works as before."""
+    feeder, modules = _make_prefill_feeder(monkeypatch, tmp_path)
+    with feeder.prefill_call(modules[0][0], 0):
+        pass
+    feeder.release_slots()
+    assert feeder._slots == [] and feeder._views == {}
+    feeder.release_slots()  # idempotent
+    with feeder.prefill_call(modules[0][0], 0):
+        for kind in _KINDS:
+            assert _slot_expert(feeder, 0, kind, 1) == _expert_bytes(0, kind, 1)
+    assert feeder._error is None

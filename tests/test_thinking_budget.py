@@ -420,6 +420,42 @@ def test_prompt_opens_thinking_hy3_suffixed_tags():
         "...<think:opensource>x</think:opensource>...<think>") is True
 
 
+def test_prompt_opens_thinking_kimi_k3_xtml():
+    # K3's generation prompt ends '<|open|>message role="assistant"<|sep|>
+    # <|open|>think<|sep|>'; the default scan must catch the XTML pair.
+    assert prompt_opens_thinking(
+        '...<|open|>message role="assistant"<|sep|><|open|>think<|sep|>'
+    ) is True
+    # thinking=false pre-opens the response section instead.
+    assert prompt_opens_thinking(
+        '...<|open|>message role="assistant"<|sep|><|open|>response<|sep|>'
+    ) is False
+    # a closed think section in history does not count as open
+    assert prompt_opens_thinking(
+        "...<|open|>think<|sep|>x<|close|>think<|sep|>...") is False
+
+
+def test_template_think_pair_kimi_k3_macro_concat():
+    # The K3 jinja builds markers via open_tag('think') macro concatenation -
+    # the literal '<|open|>think<|sep|>' never appears in the template source.
+    from gmlx.thinking_budget import _template_think_pair
+
+    class _Tok:
+        chat_template = (
+            "{%- macro open_tag(tag, attrs=[]) -%}{{- '<|open|>' + tag -}}"
+            "{{- '<|sep|>' -}}{%- endmacro -%}"
+            "{{- open_tag('think' if thinking else 'response') -}}"
+        )
+
+    assert _template_think_pair(_Tok()) == (
+        "<|open|>think<|sep|>", "<|close|>think<|sep|>")
+
+    class _Plain:
+        chat_template = "{{ '<think>' }}"
+
+    assert _template_think_pair(_Plain()) == ("<think>", "</think>")
+
+
 def test_prompt_opens_thinking_uses_tokenizer_markers():
     class _Marker:
         think_start = "<|channel>thought"

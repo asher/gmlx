@@ -38,14 +38,49 @@ def verify_zero_copy(li: int, entries, fds: dict[str, int]) -> None:
         w = getattr(mod, ATTRS[kind]).weight
         # CPU stream: a GPU slice of the file-backed stack would make the
         # driver page the referenced range in - the cost the feeders exist
-        # to avoid.
+        # to avoid. Flattening the whole stack would overflow the int32
+        # shape dims on a >2 GiB stack, so slice off just enough leading
+        # experts to cover the head sample before flattening.
+        per = 1
+        for d in w.shape[1:]:
+            per *= d
+        lead = min(w.shape[0], -(-4096 // max(per, 1)))
         with mx.stream(mx.cpu):
-            head = bytes(np.array(w.reshape(-1)[:4096]))
+            head = bytes(np.array(w[:lead].reshape(-1)[:4096]))
         if os.pread(fds[path], len(head), off) != head:
             raise RuntimeError(
                 f"layer {li} {kind} stack is not a zero-copy view of its "
                 "GGUF range (loader transformed the bytes)"
             )
+
+
+def slot_itemsize(nbytes_max: int, last_dims) -> int:
+    """Arena granule for a slot: 1 (plain uint8) whenever the slot fits
+    int32 shape dims; past that, the widest unsigned itemsize that divides
+    every layer's wire row length (so the byte view can land back on each
+    geometry) and brings the element count back under int32. Returns 0
+    when no granule works (caller refuses)."""
+    if nbytes_max <= 2**31 - 1:
+        return 1
+    for w in (8, 4, 2):
+        if any(d % w for d in last_dims):
+            continue
+        if -(-nbytes_max // w) <= 2**31 - 1:
+            return w
+    return 0
+
+
+def slot_view(arr, nbytes: int, shape):
+    """First ``nbytes`` of a flat arena array as a zero-copy uint8 view of
+    ``shape``. Wide arenas (uint16/32/64, from ``slot_itemsize``) slice at
+    their granule and view back - still buffer-sharing."""
+    import mlx.core as mx
+
+    w = arr.itemsize
+    if w == 1:
+        return arr[:nbytes].reshape(shape)
+    wide = arr[: nbytes // w].reshape(tuple(shape[:-1]) + (shape[-1] // w,))
+    return mx.view(wide, mx.uint8)
 
 
 @contextmanager

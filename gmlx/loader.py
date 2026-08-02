@@ -202,6 +202,7 @@ def remap_arrays(
         "qk_permute_applied": 0,
         "qk_permute_skipped": 0,
         "conv1d_unsqueeze": 0,
+        "kda_conv_weight": 0,
         "gemma_norm_minus_one": 0,
     }
 
@@ -305,6 +306,16 @@ def remap_arrays(
             # F32/BF16 (not kquant), so codec is None here.
             hf_weights[hf_name] = arr[..., None]
             stats["conv1d_unsqueeze"] += 1
+            stats["mapped"] += 1
+
+        elif transform == "kda_conv_weight":
+            # Kimi-K3 KDA depthwise short conv: GGUF ships (1, d_inner, 1,
+            # d_conv) numpy order, or (d_inner, 1, d_conv) when quantization
+            # drops the trailing 1. conv_step varies fastest in both, so a
+            # pure reshape to (d_inner, d_conv) is exact; mlx Conv1d wants
+            # (out_channels=d_inner, kernel=d_conv, in/groups=1).
+            hf_weights[hf_name] = arr.reshape(-1, arr.shape[-1])[..., None]
+            stats["kda_conv_weight"] += 1
             stats["mapped"] += 1
 
         elif transform == "ssm_a_to_a_log":
@@ -885,6 +896,12 @@ def build_model(config_dict: dict, *, mtp: bool = False):
 
         hy_v3_model.ensure_registered()
         hy_v3_tools.ensure_registered()
+    if mt == "kimi_k3":
+        # mlx-lm ships no kimi_k3 module (llama.cpp PR #26185 arch); same
+        # vendored-registration pattern as minimax_m3.
+        from . import kimi_k3_model
+
+        kimi_k3_model.ensure_registered()
     Model, ModelArgs = _get_classes(config)
     model_args = ModelArgs.from_dict(config)
     model = Model(model_args)
@@ -1005,6 +1022,16 @@ def _arena_stage_max_tokens() -> int:
     return env_int("GMLX_ARENA_STAGE_MAX_TOKENS", 64)
 
 
+def _arena_split_max_tokens() -> int:
+    """Largest expert call the arena serves by token-splitting when its
+    routed union exceeds the arena's slots (a turn-transition prefill or a
+    wide verify batch). Halves recurse until each piece's union fits, so
+    every read stays on the wired arena's read pool instead of the CPU
+    page-cache gather. 0 disables. Above the cap, the whole-layer prefill
+    paths win back their sequential pipelining."""
+    return env_int("GMLX_ARENA_SPLIT_MAX_TOKENS", 256)
+
+
 _DECODE_ARENA_RAM_FRAC_DEFAULT = 0.6
 
 
@@ -1072,7 +1099,10 @@ def _ram_floor_bytes(ram: int | None) -> int:
     return int(gb * (1 << 30))
 
 
-def _decode_arena_bytes(total_bytes: int, offsets, budget: int | None) -> int:
+def _decode_arena_bytes(
+    total_bytes: int, offsets, budget: int | None, ring_bytes: int = 0,
+    pinned_bytes: int = 0,
+) -> int:
     """Arena budget for the decode feeder, under two hardware-derived
     ceilings: the GPU working-set budget, and a fraction of physical RAM
     (``GMLX_DECODE_ARENA_RAM_FRAC``). The second exists because the arena is
@@ -1124,19 +1154,35 @@ def _decode_arena_bytes(total_bytes: int, offsets, budget: int | None) -> int:
         ceiling = min(ceiling, int(frac * ram))
     except Exception:
         pass
-    # Third ceiling: what is reclaimable right now. The fraction assumes an
-    # otherwise idle machine; co-resident workloads shrink the offer, and a
-    # wired arena sized past it would evict them to swap. The floor keeps a
-    # breathing margin for the system.
-    avail = _available_ram_bytes()
-    if avail is not None:
-        ceiling = min(ceiling, avail - _ram_floor_bytes(ram or avail))
     expert_bytes = sum(r[2] for ranges in offsets.values() for r in ranges)
     non_expert_bytes = max(0, total_bytes - expert_bytes)
     reserve = int(
         float(os.environ.get("GMLX_DECODE_KV_RESERVE_GB", "8") or 8) * (1 << 30)
     )
-    return min(max(0, ceiling - non_expert_bytes - reserve), expert_bytes)
+    # The prefill ring's wired budget is time-shared with the arena, not
+    # spent: the first decode releases the ring and wires the arena, and a
+    # later prefill borrows it back through the lend (DecodeFeeder
+    # .lend_for_ring). Crediting it against the static ceilings is what
+    # keeps a large pinned model from sizing its arena to zero and
+    # decoding on the page-cache path with most of RAM wired.
+    arena = ceiling + ring_bytes - non_expert_bytes - reserve
+    # Third ceiling: what is reclaimable right now. The fraction assumes an
+    # otherwise idle machine; co-resident workloads shrink the offer, and a
+    # wired arena sized past it would evict them to swap. The floor keeps a
+    # breathing margin for the system. This is a live post-pin snapshot:
+    # already-wired weights are out of it, so only the still-unwired share
+    # of the non-expert set is charged (charging all of it double-counted
+    # the pin and zeroed the arena on exactly the models that need it).
+    # No ring credit either - the untouched ring has no physical cost yet,
+    # and once it wires, the first decode's handoff keeps the sum constant.
+    avail = _available_ram_bytes()
+    if avail is not None:
+        unpinned = max(0, non_expert_bytes - pinned_bytes)
+        arena = min(
+            arena,
+            avail - _ram_floor_bytes(ram or avail) - reserve - unpinned,
+        )
+    return min(max(0, arena), expert_bytes)
 
 
 def _neutralize_wired_limit_sweep():
@@ -1383,6 +1429,41 @@ def _lookahead_default(model) -> bool:
         model, "model_type", None) not in _LA_DEFAULT_OFF_FAMILIES
 
 
+def _install_gpu_residency(model, moe_modules) -> None:
+    """Wire every non-expert weight buffer into the Metal residency set,
+    so command buffers stop re-wiring the every-token weights' pages on
+    every use (the
+    per-use wiring is what an unswept streaming install pays instead of
+    the neutralized wire-everything sweep)."""
+    import mlx_kquant as kq
+
+    if not getattr(kq, "residency_insert", None):
+        print("[stream] gpu-resident weights unavailable "
+              "(mlx-kquant lacks residency ops)")
+        return
+    skip = set()
+    for mods in moe_modules.values():
+        for m in mods:
+            for attr in ("gate_proj", "up_proj", "down_proj"):
+                w = getattr(getattr(m, attr, None), "weight", None)
+                if w is not None:
+                    skip.add(id(w))
+    n = 0
+    nbytes = 0
+    for _, a in tree_flatten(model.parameters()):
+        if id(a) in skip:
+            continue
+        if a.ndim == 3 and a.nbytes > (1 << 30):
+            continue  # belt: any GB-scale stack is an expert container
+        if kq.residency_insert(a):
+            n += 1
+            nbytes += a.nbytes
+    kq.residency_commit()
+    print(f"[stream] gpu-resident weights: {n} buffers "
+          f"({nbytes / 1e9:.1f} GB) in the Metal residency set "
+          "(GMLX_GPU_RESIDENT=0 disables)")
+
+
 def install_expert_streaming(
     model,
     n_layers: int | None = None,
@@ -1439,6 +1520,13 @@ def install_expert_streaming(
         prefetcher = maybe_make_prefetcher(gguf_path)
         if prefetcher is not None:
             object.__setattr__(model, "_kq_prefetcher", prefetcher)
+        # Wire the every-token weights before the decode feeder sizes its
+        # arena: pinned every-token pages come out of the same wired budget.
+        from .pin_weights import maybe_pin_weights
+
+        weights_pin = maybe_pin_weights(gguf_path)
+        if weights_pin is not None:
+            object.__setattr__(model, "_kq_weights_pin", weights_pin)
 
     def _wrapped_class(cls):
         sub = _CPU_OFFLOAD_CLASS_CACHE.get(cls)
@@ -1515,6 +1603,7 @@ def install_expert_streaming(
                         and dfr.covers(self._kq_li)
                     )
                     if gt_live:
+                        dfr.ensure_wired()
                         # Token tick for EVERY covered decode layer, stage
                         # path included: boundary detection and the
                         # adaptive hot-set refresh live here.
@@ -1565,18 +1654,26 @@ def install_expert_streaming(
                             return y
                         finally:
                             self._kq_cpu_only = True
-                    if la is not None and cpu_only and small:
+                    if la is not None and cpu_only and n_tokens == 1:
+                        # Decode only: prefill prestage would fault the
+                        # cold arena while the ring holds the wired budget.
                         # Lookahead: run the NEXT MoE layer's router on this
                         # layer's input and evaluate it together with the
                         # router read below (one sync either way). The
                         # prediction feeds nothing downstream - it only
                         # records recall (probe) or drives prestage reads.
+                        # Latent-MoE blocks (kimi-k3) hand the full-width
+                        # router input over out of band; x here is the
+                        # expert container's latent-width input.
+                        x_la = getattr(self, "_kq_la_input", None)
+                        if x_la is None:
+                            x_la = x
                         if ph is not None:
                             t_la = time.perf_counter()
-                            la_pred = la.on_call(x, indices)
+                            la_pred = la.on_call(x_la, indices)
                             ph["la"] += time.perf_counter() - t_la
                         else:
-                            la_pred = la.on_call(x, indices)
+                            la_pred = la.on_call(x_la, indices)
                     if (
                         dfr is not None
                         and cpu_only
@@ -1594,6 +1691,8 @@ def install_expert_streaming(
                         # returns None when the call routes to more distinct
                         # experts than the arena has slots - fall through.
                         t0 = time.perf_counter() if ph is not None else 0.0
+                        if n_tokens == 1:
+                            dfr.ensure_wired()
                         ms = getattr(self, "_kq_miss_shed", None)
                         sc_f32 = None
                         if (ms is not None and scores_arg is not None
@@ -1676,6 +1775,47 @@ def install_expert_streaming(
                                 return y
                             finally:
                                 self._kq_cpu_only = True
+                    if (
+                        dfr is not None
+                        and cpu_only
+                        and 1 < n_tokens <= _arena_split_max_tokens()
+                        and not kwargs
+                        and dfr.covers(self._kq_li)
+                        and dfr.can_stage_smaller(self._kq_li)
+                    ):
+                        # The chunk routes more distinct experts than the
+                        # arena has slots (stage refused above, or the chunk
+                        # is over the stage-size gate and was never tried).
+                        # Halve along the token axis and recurse: pieces
+                        # whose routed union fits are served from the wired
+                        # arena's read pool, so a turn-transition prefill or
+                        # a wide verify batch never drops to the CPU
+                        # page-cache gather. Bottoms out at n_tokens == 1,
+                        # which always takes a non-split path.
+                        ax = x.ndim - 2
+                        orig = ((scores_arg,) + args
+                                if scores_arg is not None and not _fwd_scores
+                                else args)
+                        sliceable = (
+                            x.shape[ax] == n_tokens
+                            and indices.ndim == x.ndim
+                            and all(
+                                isinstance(a, mx.array)
+                                and a.ndim == x.ndim
+                                and a.shape[ax] == n_tokens
+                                for a in orig)
+                        )
+                        if sliceable:
+                            half = n_tokens // 2
+                            parts = []
+                            for sl in (slice(0, half),
+                                       slice(half, n_tokens)):
+                                t = tuple(
+                                    [slice(None)] * ax + [sl])
+                                parts.append(self.__call__(
+                                    x[t], indices[t],
+                                    *[a[t] for a in orig]))
+                            return mx.concatenate(parts, axis=ax)
                     wedged = dfr is not None and dfr.wedged_at(self._kq_li)
                     if wedged and dfr.has_dead(self._kq_li):
                         # A wedged read poisoned part of this layer's file
@@ -1857,7 +1997,11 @@ def install_expert_streaming(
     ):
         from .decode_feeder import maybe_make_decode_feeder
 
-        arena = _decode_arena_bytes(total_bytes, prefetcher.offsets, budget)
+        pin = getattr(model, "_kq_weights_pin", None)
+        arena = _decode_arena_bytes(
+            total_bytes, prefetcher.offsets, budget,
+            ring_bytes=2 * feeder.slot_bytes if feeder is not None else 0,
+            pinned_bytes=getattr(pin, "pinned_bytes", 0))
         dfeeder = maybe_make_decode_feeder(
             prefetcher.offsets, moe_modules, arena, stats_verbose)
         if dfeeder is not None:
@@ -1867,9 +2011,16 @@ def install_expert_streaming(
                     for m in mods:
                         object.__setattr__(m, "_kq_decode_feeder", dfeeder)
             object.__setattr__(model, "_kq_decode_feeder", dfeeder)
+            if feeder is not None:
+                # First decode call swaps the wired budget: prefill ring
+                # freed, arena wired (DecodeFeeder.ensure_wired). A later
+                # prefill pass borrows it back: the ring rebuild asks the
+                # arena to lend its footprint before allocating.
+                dfeeder._release_ring = feeder.release_slots
+                feeder._lend_hook = dfeeder.lend_for_ring
             wired = (
-                "fully wired"
-                if dfeeder.locked_bytes >= dfeeder.arena_bytes
+                "fully wired at first decode"
+                if dfeeder._mlock_deferred
                 else f"{dfeeder.locked_bytes / 1e9:.1f} GB wired"
             )
             cov = (
@@ -1881,6 +2032,8 @@ def install_expert_streaming(
                 f"popularity-managed expert arena ({wired}){cov} "
                 "(--no-decode-feeder disables, GMLX_DECODE_ARENA_GB sizes)"
             )
+    if streaming and env_bool("GMLX_GPU_RESIDENT", True):
+        _install_gpu_residency(model, moe_modules)
     if streaming and dfeeder is not None:
         from . import gpu_token
 
@@ -1911,14 +2064,15 @@ def install_expert_streaming(
                     "token boundaries (GMLX_GPU_AUTONOMOUS=1|all)"
                 )
     if streaming and dfeeder is not None and env_bool(
-            "GMLX_GPU_KEEPWARM", False):
+            "GMLX_GPU_KEEPWARM", True):
         from . import keepwarm
 
         keepwarm.start()
         loadlog.info(
             "[stream] gpu keep-warm: background heartbeat holds GPU "
             "clocks between per-layer decode bursts, parked while no "
-            "decode is running (lossless; costs power only during decode)"
+            "decode is running (lossless, costs power only during "
+            "decode; GMLX_GPU_KEEPWARM=0 disables)"
         )
     la_probe = env_bool("GMLX_DECODE_LOOKAHEAD_PROBE", False)
     # Lookahead's replica router folds into the per-layer sync; whether its
@@ -2383,6 +2537,11 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # gate + selection bias decide top-8 of 192, where bf16 rounding flips
     # near-tie selections.
     "hy_v3": (".mlp.router.gate.weight", ".mlp.router.expert_bias"),
+    # kimi_k3: routing is fp32 (sigmoid top-16-of-896 + correction bias is
+    # near-tie-heavy); the KDA decay/state path and the res-mix scores are
+    # computed fp32 (the vendored cast_predicate pins the same set).
+    "kimi_k3": (".mlp.gate.weight", ".e_score_correction_bias",
+                ".a_folded", ".dt_bias", "_res_score"),
 }
 
 
@@ -2442,6 +2601,27 @@ def _resolve_native_fp_wire(hf_weights, hf_kquant_meta, log) -> bool:
             f"tensors stay zero-copy wire bytes")
         return True
     return False
+
+
+def _native_fp_multilinear_keys(model, hf_kquant_meta) -> set[str]:
+    """Weight names of native-fp tensors destined for a MultiLinear leaf.
+
+    These stay ggml wire bytes even in packed mode (kq.gather_qmm dispatch;
+    no packed MultiLinear module exists) - the repack must skip them.
+    """
+    from .modules import MultiLinear
+    from .native_fp import NATIVE_FP_CODECS
+
+    if MultiLinear is None:
+        return set()
+    keys = set()
+    for path, mod in tree_flatten(model.leaf_modules(),
+                                  is_leaf=nn.Module.is_module):
+        wk = f"{path}.weight"
+        if (isinstance(mod, MultiLinear)
+                and hf_kquant_meta.get(wk) in NATIVE_FP_CODECS):
+            keys.add(wk)
+    return keys
 
 
 def _gemma4_target(model) -> bool:
@@ -2512,7 +2692,9 @@ def _install_and_load(
     if not native_fp_wire:
         from .native_fp import repack_native_fp_weights
 
-        n_fp = repack_native_fp_weights(hf_weights, hf_kquant_meta)
+        n_fp = repack_native_fp_weights(
+            hf_weights, hf_kquant_meta,
+            skip=_native_fp_multilinear_keys(model, hf_kquant_meta))
         if n_fp:
             log(
                 f"[native-fp] de-interleaved {n_fp} mxfp4/nvfp4 tensors -> MLX packed layout"
@@ -2880,7 +3062,9 @@ def load_model(
         # and qwen3_next's gated_delta_update goes through that same module -
         # once a qwen3.5/3.6 hybrid has been loaded in this process, a
         # subsequent qwen3_next load would silently run the wrong (tiled) K->V
-        # mapping. Fail loudly instead.
+        # mapping. Fail loudly instead. (kimi_k3 also dispatches through
+        # gated_delta but needs no guard: its K/V heads are symmetric, and
+        # with Hk == Hv the tiled and grouped K->V mappings are identical.)
         raise RuntimeError(
             "cannot load a qwen3next GGUF after a qwen3.5/3.6 hybrid in the "
             "same process: the qwen3.5 tiled-V runtime patch (already applied) "
@@ -2949,7 +3133,9 @@ def load_model(
     if not native_fp_wire:
         from .native_fp import repack_native_fp_weights
 
-        n_fp = repack_native_fp_weights(hf_weights, hf_kquant_meta)
+        n_fp = repack_native_fp_weights(
+            hf_weights, hf_kquant_meta,
+            skip=_native_fp_multilinear_keys(model, hf_kquant_meta))
         if n_fp:
             _log(
                 f"[native-fp] de-interleaved {n_fp} mxfp4/nvfp4 tensors -> MLX packed layout"
@@ -3092,11 +3278,59 @@ def load_model(
     )
     eos_ids = getattr(raw_tokenizer, "_gguf_eos_token_ids", None)
     tokenizer = TokenizerWrapper(raw_tokenizer, eos_token_ids=eos_ids)
+    _detect_xtml_thinking(tokenizer, raw_tokenizer, _log)
 
     materialize_module_arrays(model)
     wait_for_populate(pf.shards, log=_log)
 
     return model, config, tokenizer
+
+
+def _detect_xtml_thinking(tokenizer, raw_tokenizer, log) -> None:
+    """Complete mlx-lm's thinking detection for XTML-channel templates.
+
+    TokenizerWrapper infers thinking support from vocab token pairs like
+    <think>/</think>. Kimi-K3 gates thinking on an XTML channel
+    (<|open|>think<|sep|> ... <|close|>think<|sep|>) where "think" is
+    plain text between structural tokens, so the inference misses it and
+    apply_chat_template injects enable_thinking=False into a template
+    whose own default is thinking on. The model then opens the response
+    channel immediately and never thinks. Detect the gate in the template
+    text and set the wrapper's think markers so has_thinking flips True
+    and the injected default becomes enable_thinking=True.
+
+    Detection renders the template's own default generation prompt (raw
+    tokenizer, no wrapper injection) and checks it ends with the XTML
+    think-open. Matching on rendered output rather than template source
+    covers both spellings in the wild (otag('think') in GGUF-embedded
+    templates, open_tag('think') in the llama.cpp jinja)."""
+    if tokenizer.has_thinking:
+        return
+    if not getattr(raw_tokenizer, "chat_template", None):
+        return
+    start, end = "<|open|>think<|sep|>", "<|close|>think<|sep|>"
+    try:
+        rendered = raw_tokenizer.apply_chat_template(
+            [{"role": "user", "content": "probe"}],
+            add_generation_prompt=True, tokenize=False,
+        )
+    except Exception:
+        return
+    if not (isinstance(rendered, str) and rendered.endswith(start)):
+        return
+    try:
+        start_ids = raw_tokenizer.encode(start, add_special_tokens=False)
+        end_ids = raw_tokenizer.encode(end, add_special_tokens=False)
+    except Exception:
+        return
+    tokenizer._think_start = start
+    tokenizer._think_end = end
+    tokenizer._think_start_tokens = tuple(start_ids)
+    tokenizer._think_end_tokens = tuple(end_ids)
+    log(
+        "[tokenizer] XTML think channel detected; "
+        "enable_thinking defaults on"
+    )
 
 
 def _resolve_chat_template(chat_template: str | None) -> str | None:

@@ -514,3 +514,63 @@ def test_layer_shed_install_targets_streamed_glus(monkeypatch, capsys):
     monkeypatch.setattr(loadlog, "_LAST_VERBOSE", True)
     assert install_moe_layer_shed(model, 0.1) == 1
     assert "layer-shed 0.1" in capsys.readouterr().out
+
+
+def _k3_block():
+    from gmlx.kimi_k3_model import KimiK3MoE
+
+    args = SimpleNamespace(
+        hidden_size=32,
+        num_experts=4,
+        num_experts_per_tok=2,
+        moe_intermediate_size=64,
+        routed_expert_hidden_size=None,
+        has_routed_norm=False,
+        rms_norm_eps=1e-5,
+        num_shared_experts=0,
+        situ_beta=1.0,
+        situ_linear_beta=0.0,
+        moe_renormalize=True,
+        routed_scaling_factor=1.0,
+    )
+    block = KimiK3MoE(args)
+    block.switch_mlp = _kquant_glu()
+    return block
+
+
+def test_kimi_k3_block_hooked_via_callback(monkeypatch):
+    """KimiK3MoE routes with an inline plain-Linear top-k, so _install
+    targets the block itself and its forward calls back into
+    _apply_expert_controls at the selection seam."""
+    mx.random.seed(7)
+    block = _k3_block()
+    model = _shell(block)
+    monkeypatch.setattr(
+        mx, "device_info", lambda: {"max_recommended_working_set_size": 1024}
+    )
+    x = mx.random.normal((1, 5, 32))
+    mx.eval(block.parameters())
+    ref = np.array(block(x))
+
+    install_expert_streaming(model)
+    base = np.array(block(x))
+    # Streamed experts run on the CPU stream; vs the GPU dense reference the
+    # q8_0 kernels differ by one fp16 ulp, so the cross-device check is loose.
+    assert np.allclose(base, ref, atol=1e-2)
+    assert install_moe_expert_probe(model) == 1
+    probe = block._kq_expert_probe
+    out = np.array(block(x))
+    assert out.shape == ref.shape
+    assert np.allclose(out, base, atol=1e-5)  # probe is lossless
+    probe._flush()
+    assert probe._buckets["prefill"].tokens == 5
+
+    assert install_moe_expert_mass(model, 1e-6) == 1
+    rec = _SwitchRecorder(block.switch_mlp)
+    block.switch_mlp = rec
+    out = np.array(block(x))
+    assert out.shape == ref.shape
+    low = rec.seen[-1]
+    assert low.shape == (1, 5, 2)
+    for t in range(low.shape[1]):
+        assert len(set(low[0, t].tolist())) == 1  # collapsed to top-1

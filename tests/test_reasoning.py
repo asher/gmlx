@@ -89,6 +89,34 @@ def test_hy3_preopened_close_only(chunk):
     assert "opensource" not in reason + answer
 
 
+_KIMI_K3 = ("User greets; respond warmly.<|close|>think<|sep|>"
+            "<|open|>response<|sep|>Hi! How can I help?"
+            "<|close|>response<|sep|><|close|>message<|sep|>")
+
+
+@pytest.mark.parametrize("chunk", [0, 1, 3, 7, 13])
+def test_kimi_k3_xtml_sections(chunk):
+    # K3's prompt pre-opens the think section, so generation streams the
+    # close, the response section, and the message close (the <|end_of_msg|>
+    # turn terminator is the EOS token and never reaches the filter).
+    reason, answer, _ = _segment(_KIMI_K3, start=True, chunk=chunk)
+    assert reason == "User greets; respond warmly."
+    assert answer == "Hi! How can I help?"
+    for frag in ("<|", "|>", "think", "response", "message"):
+        assert frag not in reason + answer
+
+
+@pytest.mark.parametrize("chunk", [0, 3])
+def test_kimi_k3_self_opened_think(chunk):
+    # Defensive: if the model re-emits the opener itself (unseeded filter),
+    # the sections still segment correctly.
+    text = ("<|open|>think<|sep|>Plan.<|close|>think<|sep|>"
+            "<|open|>response<|sep|>Done.")
+    reason, answer, _ = _segment(text, chunk=chunk)
+    assert reason == "Plan."
+    assert answer == "Done."
+
+
 def test_qwen_unseeded_still_strips_close():
     # Without the seed the leading text is mistagged as answer, but the close
     # marker is still stripped (no </think> leaks) and the answer is recognised.

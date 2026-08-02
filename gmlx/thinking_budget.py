@@ -34,7 +34,10 @@ import mlx.core as mx
 # disjoint and scanning all of them is safe.
 _THINK_PAIRS = (("<think>", "</think>"),
                 ("<think:opensource>", "</think:opensource>"),
-                ("<mm:think>", "</mm:think>"))
+                ("<mm:think>", "</mm:think>"),
+                # Kimi-K3 XTML sections (multi-token markers; the prompt
+                # pre-opens the think section).
+                ("<|open|>think<|sep|>", "<|close|>think<|sep|>"))
 
 # Forced into the thinking block ahead of the first budget-triggered close.
 # The model must see itself DECIDE to answer: a bare close tag cuts the
@@ -59,6 +62,11 @@ def _template_think_pair(tokenizer):
     for pair in _THINK_PAIRS:
         if pair[0] in tmpl or pair[1] in tmpl:
             return pair
+    # Kimi-K3 builds its markers by macro concatenation ('<|open|>' + tag +
+    # '<|sep|>'), so the literal pair never appears in the template source;
+    # detect the macro call on the 'think' tag instead.
+    if "<|open|>" in tmpl and "open_tag('think" in tmpl:
+        return ("<|open|>think<|sep|>", "<|close|>think<|sep|>")
     return None
 
 

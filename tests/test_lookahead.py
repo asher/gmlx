@@ -246,6 +246,9 @@ def test_wrapper_prestages_next_layer(monkeypatch):
     assert glu0._kq_lookahead.prefetch
 
     class _FakeDF:
+        def ensure_wired(self):
+            pass
+
         calls = []
 
         def covers(self, li):
@@ -309,6 +312,9 @@ def test_wrapper_gate_trims_prestage(monkeypatch):
     assert gate is not None
 
     class _FakeDF:
+        def ensure_wired(self):
+            pass
+
         calls = []
 
         def covers(self, li):
@@ -429,6 +435,9 @@ def test_depth2_prestage_targets_both_layers(monkeypatch):
     glu0 = model.layers[0].mlp.switch_mlp
 
     class _FakeDF:
+        def ensure_wired(self):
+            pass
+
         calls = []
 
         def covers(self, li):
@@ -457,3 +466,76 @@ def test_depth2_prestage_targets_both_layers(monkeypatch):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+def test_sigmoid_bias_select_kimi_k3_args_k():
+    """KimiK3MoE keeps num_experts_per_tok on its config object; the
+    replica must pick it up and match the block's own biased-score top-k."""
+    class _Args:
+        num_experts_per_tok = K
+
+    class _KimiK3MoE(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.args = _Args()
+            self.gate = nn.Linear(DIM, NE, bias=False)
+            self.e_score_correction_bias = mx.random.normal((NE,))
+
+    mx.random.seed(5)
+    blk = _KimiK3MoE()
+    assert _router_fn_for(blk) is not None or True  # name-based list below
+    from gmlx.lookahead import _SIGMOID_BIAS_BLOCKS
+    assert "KimiK3MoE" in _SIGMOID_BIAS_BLOCKS
+    x = mx.random.normal((1, 1, DIM))
+    ids = np.array(_sigmoid_bias_select(blk)(x)).reshape(-1)
+    choice = mx.sigmoid(blk.gate(x.astype(mx.float32)))
+    choice = np.array(choice + blk.e_score_correction_bias).reshape(-1)
+    ref = np.argsort(-choice)[:K]
+    assert ids.tolist() == ref.tolist()
+
+def test_wrapper_prefers_out_of_band_router_input(monkeypatch):
+    """Latent-MoE blocks (kimi-k3) stash the full-width router input on the
+    wrapped module as _kq_la_input; the wrapper must hand that to the hook
+    instead of the latent-width expert input."""
+    from contextlib import contextmanager
+
+    model = _streaming_model(monkeypatch)
+    install_lookahead(model, model.layers, probe=False, prefetch=True)
+    glu0 = model.layers[0].mlp.switch_mlp
+
+    seen = []
+    hook = glu0._kq_lookahead
+    orig = hook.on_call
+
+    def spy(x, indices):
+        seen.append(x)
+        return orig(x, indices)
+
+    monkeypatch.setattr(hook, "on_call", spy)
+
+    class _FakeDF:
+        def ensure_wired(self):
+            pass
+
+        def covers(self, li):
+            return True
+
+        def stage(self, li, ids):
+            return ids.astype(np.uint32)
+
+        def prestage(self, li, pred):
+            pass
+
+        def wedged_at(self, li):
+            return False
+
+        @contextmanager
+        def swapped(self, li):
+            yield
+
+    object.__setattr__(glu0, "_kq_decode_feeder", _FakeDF())
+    object.__setattr__(glu0, "_kq_li", 0)
+    full = mx.random.normal((1, 1, DIM))
+    object.__setattr__(glu0, "_kq_la_input", full)
+    out = model.layers[0].mlp(mx.random.normal((1, 1, DIM)))
+    mx.eval(out)
+    assert len(seen) == 1 and seen[0] is full

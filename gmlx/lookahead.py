@@ -157,10 +157,13 @@ def _sigmoid_bias_select(mod):
     router plus selection bias, ranked by the selection score (score+bias),
     mirroring the stock forward's argpartition seam."""
 
+    k = getattr(mod, "num_experts_per_tok", None)
+    if k is None:  # kimi-k3 keeps it on the config
+        k = mod.args.num_experts_per_tok
+
     def select(x):
         choice = mx.sigmoid(mod.gate(x.astype(mx.float32)))
         choice = choice + mod.e_score_correction_bias
-        k = mod.num_experts_per_tok
         inds = mx.argpartition(-choice, kth=k - 1, axis=-1)[..., :k]
         ch = mx.take_along_axis(choice, inds, axis=-1)
         order = mx.argsort(-ch, axis=-1)
@@ -183,7 +186,8 @@ def _softmax_select(mod):
     return select
 
 
-_SIGMOID_BIAS_BLOCKS = ("MiniMaxSparseMoeBlock", "MiniMaxM3SparseMoeBlock")
+_SIGMOID_BIAS_BLOCKS = (
+    "MiniMaxSparseMoeBlock", "MiniMaxM3SparseMoeBlock", "KimiK3MoE")
 _SOFTMAX_BLOCKS = ("Qwen3MoeSparseMoeBlock", "Qwen3NextSparseMoeBlock")
 
 

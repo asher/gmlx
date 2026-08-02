@@ -334,6 +334,23 @@ SEAMS: tuple[Seam, ...] = (
          "loader._patch_hunyuan_norm_topk"),
     Seam("mlx_lm.models.deepseek_v32", "MoEGate",
          "dsv32_patches (fp32 router patch)"),
+    # --- kimi_k3 vendored-module imports (kimi_k3_model) ---
+    # The vendored Kimi-K3 class reuses mlx-lm's per-key-channel-decay
+    # gated-delta scan (KDA's exact recurrence), the kimi_linear ShortConv1d
+    # semantics (reimplemented in-module; the class itself is not imported),
+    # and the MLA MultiLinear (absorbed embed_q/unembed_out).
+    Seam("mlx_lm.models.gated_delta", "gated_delta_kernel",
+         "kimi_k3_model.KimiK3DeltaAttention (metal scan dispatch)",
+         critical=True),
+    Seam("mlx_lm.models.gated_delta", "gated_delta_ops",
+         "kimi_k3_model.KimiK3DeltaAttention (CPU/fallback scan)",
+         critical=True),
+    Seam("mlx_lm.models.mla", "MultiLinear",
+         "kimi_k3_model.KimiK3MLAAttention (embed_q/unembed_out -> "
+         "KQuantMultiLinear)", critical=True),
+    Seam("mlx_lm.models.kimi_linear", "ShortConv1d",
+         "kimi_k3_model.ShortConv1d (semantics mirror; re-mirror review "
+         "on upstream change)"),
 )
 
 

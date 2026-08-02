@@ -122,7 +122,9 @@ def _strip_weight(name: str) -> str:
     return name[: -len(".weight")] if name.endswith(".weight") else name
 
 
-def repack_native_fp_weights(hf_weights: dict, hf_codec_meta: dict) -> int:
+def repack_native_fp_weights(hf_weights: dict, hf_codec_meta: dict,
+                             skip: frozenset[str] | set[str] = frozenset(),
+                             ) -> int:
     """Repack every native-fp tensor in ``hf_weights`` from raw ggml wire bytes
     into MLX's native ``(packed uint32, scales uint8)`` form, in place.
 
@@ -132,12 +134,16 @@ def repack_native_fp_weights(hf_weights: dict, hf_codec_meta: dict) -> int:
     real per-group scale bytes. Returns the number of tensors repacked. Imports
     ``mlx`` lazily so the de-interleave helpers stay importable numpy-only (for
     unit tests) without pulling in mlx.
+
+    ``skip``: names to leave as wire bytes even in packed mode - the
+    MultiLinear targets, which dispatch wire through kq.gather_qmm (no packed
+    MultiLinear module exists).
     """
     import mlx.core as mx
 
     n = 0
     for name, codec in list(hf_codec_meta.items()):
-        if codec not in NATIVE_FP_CODECS:
+        if codec not in NATIVE_FP_CODECS or name in skip:
             continue
         raw = hf_weights.get(name)
         if raw is None:

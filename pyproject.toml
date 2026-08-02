@@ -8,7 +8,7 @@ version = "0.1.4"
 description = "A local inference platform for Apple Silicon: run, chat with, serve, and fine-tune the GGUF ecosystem's quantized models natively on MLX, straight off the file."
 readme = "README.md"
 requires-python = ">=3.11"  # 3.10 EOLs 2026-10; mlx-kquant's lower floor is a library floor
-license = "BUSL-1.1 AND MIT"  # MIT: files with an SPDX MIT header (dspark module + converter)
+license = "BUSL-1.1 AND MIT"  # MIT: files with an SPDX MIT header (model modules, dspark tooling, kimi-k3 tests)
 license-files = ["LICENSE", "LICENSE-MIT", "licenses/*"]
 authors = [{ name = "Asher Feldman" }]
 classifiers = [
@@ -34,7 +34,7 @@ dependencies = [
     # >=0.3.7: first release with a cp314 wheel. Below it, a Python 3.14
     # install (uv and pipx pick the newest interpreter by default) silently
     # falls back to compiling the Metal kernels from source.
-    "mlx-kquant>=0.3.8",
+    "mlx-kquant>=0.3.9",
     "mlx-lm>=0.31",
     # Direct imports of both throughout (mx.*, np.*); declared explicitly
     # rather than inherited through mlx-lm.

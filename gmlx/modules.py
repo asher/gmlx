@@ -1440,10 +1440,12 @@ def install_kquant_modules(model: nn.Module,
         if codec is None:
             return module
         if codec in NATIVE_FP_CODECS:
-            # Micro-scaling float codec. Only the SwitchGLU expert path is
-            # exercised today (gpt-oss, DS-V4). A native-fp Linear / Embedding
-            # would need its own module (packed) or its own wire Metal leaves;
-            # fail loud rather than mis-dispatch onto the kquant path.
+            # Micro-scaling float codec. The SwitchGLU expert path (gpt-oss,
+            # DS-V4) and the absorbed-MLA MultiLinear (Kimi-K3, whose
+            # MXFP4_MOE ftype also quantizes attn_k_b/attn_v_b) are wired.
+            # A native-fp Linear / Embedding would need its own module
+            # (packed) or its own wire Metal leaves; fail loud rather than
+            # mis-dispatch onto the kquant path.
             if isinstance(module, _switch_linear_types):
                 n_experts, out_dims, in_dims = module.weight.shape
                 bias = "bias" in module
@@ -1453,9 +1455,22 @@ def install_kquant_modules(model: nn.Module,
                                               bias, codec)
                 return NativeFPSwitchLinear(n_experts, out_dims, in_dims, bias,
                                             codec)
+            if MultiLinear is not None and isinstance(module, MultiLinear):
+                # No packed MultiLinear module exists; both modes dispatch the
+                # ggml wire bytes through kq.gather_qmm (the loader exempts
+                # these tensors from the packed repack).
+                import mlx_kquant as kq
+                if codec not in set(kq.codecs()):
+                    raise NotImplementedError(
+                        f"native-fp codec {codec!r} on MultiLinear at "
+                        f"{path!r} needs an mlx-kquant build with that codec")
+                num_heads, out_dims, in_dims = module.weight.shape
+                n_replaced += 1
+                return KQuantMultiLinear(in_dims, out_dims, num_heads, codec)
             raise NotImplementedError(
                 f"native-fp codec {codec!r} on {type(module).__name__} at "
-                f"{path!r} - only SwitchLinear (MoE experts) is wired so far")
+                f"{path!r} - only SwitchLinear (MoE experts) and MultiLinear "
+                f"(absorbed MLA) are wired so far")
         if isinstance(module, nn.Linear):
             out_dims, in_dims = module.weight.shape
             bias = "bias" in module

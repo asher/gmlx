@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Apple Inc.
 #
 """Tencent Hy3 (hy_v3) backbone, vendored from mlx-lm PR #1485 (unmerged).
