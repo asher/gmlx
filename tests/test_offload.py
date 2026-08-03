@@ -518,3 +518,78 @@ def test_arena_overflow_token_split():
     # out at single-token stage calls that fit under the slot cap.
     assert stub.stage_sizes[0] == T * 2
     assert min(stub.stage_sizes) == 2
+
+
+def test_arena_split_leaves_never_miss_shed():
+    """Miss-shed is decode-only: single-token leaves inside an arena token
+    split must not shed. A shedding leaf returns a mixed (rank-3) output
+    while a clean leaf returns per-expert rank-4, and the reassembly
+    concatenate crashed on the rank mismatch (kimi-k3 chat prefill with
+    --moe-miss-shed). The split output must match the unsplit reference."""
+    import contextlib
+
+    import numpy as np
+
+    mx.random.seed(5)
+    glu = SwitchGLU(16, 32, 8)
+    mx.eval(glu.parameters())
+    T = 2
+    x = mx.random.normal((1, T, 16))
+    inds = mx.array(
+        (np.arange(T * 2).reshape(1, T, 2) % 8).astype(np.uint32))
+    weights = mx.softmax(mx.random.normal((1, T, 2)), axis=-1)
+    ref = (glu(x, inds) * weights[..., None]).sum(axis=-2)
+    mx.eval(ref)
+
+    class _ShedStub:
+        def __init__(self, cap):
+            self.cap = cap
+            self.shed_calls = 0
+
+        def covers(self, li):
+            return True
+
+        def can_stage_smaller(self, li):
+            return True
+
+        def wedged_at(self, li):
+            return False
+
+        def ensure_wired(self):
+            pass
+
+        def shed_misses(self, li, ids, sc, p):
+            # First leaf: everything resident, nothing shed. Second leaf:
+            # shed all but the first routed expert. The asymmetry is what
+            # produced the mixed-rank concatenate.
+            self.shed_calls += 1
+            if self.shed_calls == 1:
+                return None
+            return np.array([0])
+
+        def stage(self, li, ids):
+            if len(np.unique(ids.reshape(-1))) > self.cap:
+                return None
+            return ids  # identity slots: arena views == real weights
+
+        @contextlib.contextmanager
+        def swapped(self, li):
+            yield
+
+    model = _holder_model(glu)
+    n, _ = install_expert_streaming(model)
+    assert n == 1
+    stub = _ShedStub(cap=2)
+    object.__setattr__(glu, "_kq_decode_feeder", stub)
+    object.__setattr__(glu, "_kq_cpu_only", True)
+    object.__setattr__(glu, "_kq_li", 0)
+    object.__setattr__(glu, "_kq_miss_shed", 0.8)
+    # Scores-sink call shape: the block hands routing weights as the third
+    # argument (kimi-k3 latent MoE does this whenever the sink is advertised).
+    out = glu(x, inds, weights)
+    mx.eval(out)
+    # Leaves stay on the per-expert contract; mix like the block would.
+    assert out.ndim == x.ndim + 1
+    mixed = (out * weights[..., None]).sum(axis=-2)
+    assert mx.allclose(ref, mixed, atol=1e-6, rtol=1e-6)
+    assert stub.shed_calls == 0  # decode-only: split leaves never shed

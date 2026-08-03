@@ -1609,7 +1609,8 @@ def install_expert_streaming(
                         # adaptive hot-set refresh live here.
                         gt.on_layer_entry(
                             self._kq_li,
-                            getattr(self, "_kq_miss_shed", None))
+                            None if getattr(self, "_kq_in_split", False)
+                            else getattr(self, "_kq_miss_shed", None))
                     if (
                         gt_live
                         and scores_arg is not None
@@ -1693,7 +1694,13 @@ def install_expert_streaming(
                         t0 = time.perf_counter() if ph is not None else 0.0
                         if n_tokens == 1:
                             dfr.ensure_wired()
-                        ms = getattr(self, "_kq_miss_shed", None)
+                        # Miss-shed is decode-only: a single-token leaf of an
+                        # arena token split is prefill work, and a shedding
+                        # leaf would return a mixed rank-3 output next to a
+                        # clean leaf's per-expert rank-4 - the reassembly
+                        # concatenate cannot take both.
+                        ms = (None if getattr(self, "_kq_in_split", False)
+                              else getattr(self, "_kq_miss_shed", None))
                         sc_f32 = None
                         if (ms is not None and scores_arg is not None
                                 and n_tokens == 1):
@@ -1808,13 +1815,21 @@ def install_expert_streaming(
                         if sliceable:
                             half = n_tokens // 2
                             parts = []
-                            for sl in (slice(0, half),
-                                       slice(half, n_tokens)):
-                                t = tuple(
-                                    [slice(None)] * ax + [sl])
-                                parts.append(self.__call__(
-                                    x[t], indices[t],
-                                    *[a[t] for a in orig]))
+                            prev_split = getattr(
+                                self, "_kq_in_split", False)
+                            object.__setattr__(
+                                self, "_kq_in_split", True)
+                            try:
+                                for sl in (slice(0, half),
+                                           slice(half, n_tokens)):
+                                    t = tuple(
+                                        [slice(None)] * ax + [sl])
+                                    parts.append(self.__call__(
+                                        x[t], indices[t],
+                                        *[a[t] for a in orig]))
+                            finally:
+                                object.__setattr__(
+                                    self, "_kq_in_split", prev_split)
                             return mx.concatenate(parts, axis=ax)
                     wedged = dfr is not None and dfr.wedged_at(self._kq_li)
                     if wedged and dfr.has_dead(self._kq_li):

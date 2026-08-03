@@ -108,6 +108,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `--moe-miss-shed` no longer crashes chat prefill on kimi-k3 (a
+  concatenate rank mismatch): shed is decode-only and now skips the
+  single-token leaves of an arena token split.
 - `gmlx chat` no longer rejects `--stream-experts` on an MTP/speculative
   base.
 - Chat markdown rendering no longer reverts a block to raw text when it
