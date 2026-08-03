@@ -73,6 +73,23 @@ def test_non_path_flag_value_offers_nothing():
     assert completion._complete(["run", "--temp", ""]) == []
 
 
+def test_choices_flag_value_completes_choices():
+    assert completion._complete(["chat", "--thinking", ""]) == \
+        ["on", "off", "adaptive"]
+    assert completion._complete(["run", "--reasoning", ""]) == \
+        ["show", "hide", "raw"]
+
+
+def test_theme_flag_value_completes_themes():
+    vals = _vals(completion._complete(["chat", "--theme", ""]))
+    assert "dark" in vals and "light" in vals
+
+
+def test_profile_flag_value_completes_intents():
+    vals = _vals(completion._complete(["chat", "--profile", ""]))
+    assert "coding" in vals and "reasoning-high" in vals
+
+
 def _write_cfg(tmp_path):
     cfg = tmp_path / "models.yaml"
     cfg.write_text(textwrap.dedent("""

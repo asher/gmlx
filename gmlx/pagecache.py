@@ -138,7 +138,12 @@ def _exit_sweep() -> None:
     for group in _groups:
         paths.extend(p for p in group if p not in paths)
     del _groups[:]
-    release_file_cache(paths, log=print if _log_release else None)
+    try:
+        release_file_cache(paths, log=print if _log_release else None)
+    except KeyboardInterrupt:
+        # ^C while already exiting: abandon the sweep quietly - the pages
+        # just stay cached, which only costs the next cold load.
+        pass
 
 
 def register_streaming_release(paths) -> None:

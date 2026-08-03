@@ -98,9 +98,10 @@ def _build_parser(prog: str = "gmlx chat") -> argparse.ArgumentParser:
     )
     from .cli import add_condensed_help
     add_condensed_help(ap, (
-        "gguf", "--assistant", "--system-prompt", "--reasoning",
-        "--thinking", "--mmproj", "--max-tokens", "--temp", "--resume",
-        "--theme", "--verbose",
+        "gguf", "--assistant", "--config", "--profile", "--system-prompt",
+        "--reasoning", "--thinking", "--mmproj", "--max-tokens", "--temp",
+        "--top-p", "--min-p", "--max-kv-size", "--stream-experts",
+        "--resume", "--theme", "--verbose",
     ))
     ap.add_argument(
         "gguf", nargs="?", default=None,

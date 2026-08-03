@@ -1397,7 +1397,7 @@ class DecodeFeeder:
     def __del__(self):
         try:
             self.close()
-        except Exception:
+        except BaseException:  # noqa: BLE001 - incl. ^C during interpreter exit
             pass
 
 
@@ -1412,8 +1412,14 @@ def _register_exit_close(feeder) -> None:
 
     def _close_at_exit():
         f = wref()
-        if f is not None:
+        if f is None:
+            return
+        try:
             f.close()
+        except KeyboardInterrupt:
+            # ^C while already exiting: skip the rest of the cleanup
+            # (munlock/stat printing) - the OS reclaims it all anyway.
+            pass
 
     atexit.register(_close_at_exit)
 
