@@ -6,6 +6,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- CLI polish: `--help`/`--help-all` now win even after a value-taking flag,
+  the short `-h` pages gained the typical sampling/config/streaming flags,
+  tab completion offers flag values (choices, themes, profiles).
+
 ## [0.2.0] - 2026-08-02
 
 ### Added
@@ -71,7 +77,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (thinking strip, tool-call re-serialization): decode-time snapshots
   retain the reply up to the divergence point (`GMLX_APC_DECODE_CKPT`,
   default 512 generated tokens; `0` off).
-
 - `run`/`chat --thinking on|off|adaptive` and `--reasoning-effort LEVEL`:
   first-class switches for thinking models. The chat template picks the
   spelling: MiniMax's three-state `thinking_mode`
