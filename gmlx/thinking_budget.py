@@ -23,6 +23,10 @@ extension point is ``logits_processors``.
 
 from __future__ import annotations
 
+import os
+import signal
+import sys
+
 import mlx.core as mx
 
 
@@ -45,6 +49,13 @@ _THINK_PAIRS = (("<think>", "</think>"),
 # inside the answer (endless self-review). First person, decisive, final.
 _BUDGET_WRAP_PHRASE = (
     "\n\nI've hit my thinking budget, so I'll stop reasoning here and "
+    "write the complete final answer now.\n"
+)
+
+# Forced when the user presses ^T (finish thinking now) - same rationale,
+# but the model should see the user's request, not a phantom budget.
+_SKIP_WRAP_PHRASE = (
+    "\n\nI've been asked to wrap up, so I'll stop reasoning here and "
     "write the complete final answer now.\n"
 )
 
@@ -186,6 +197,9 @@ class ThinkingBudgetProcessor:
     of generated thinking tokens exceeds ``budget``, the next steps' logits are
     forced (one-hot) through ``forced_ids``; generation then continues normally.
     A natural ``end_seq`` before the budget disarms the processor.
+    ``budget=None`` never trips on its own: the processor is armed only for an
+    external ``request_close()`` (the ^T finish-thinking key), which closes the
+    block through ``skip_ids`` and then behaves exactly like a spent budget.
 
     ``start_seq`` / ``end_seq`` are token-id tuples. They are multi-token for
     channel-style delimiters (``<|channel>thought`` / ``<channel|>``) and length
@@ -223,14 +237,17 @@ class ThinkingBudgetProcessor:
         start_in_thinking=True,
         eos_ids=None,
         reclose_ids=None,
+        skip_ids=None,
     ):
         self.end_seq = tuple(end_seq)
         self.start_seq = tuple(start_seq) if start_seq else None
         self.forced_ids = list(forced_ids)
         self.reclose_ids = list(reclose_ids) if reclose_ids else self.forced_ids
-        self.budget = max(0, int(budget))
+        self.skip_ids = list(skip_ids) if skip_ids else self.forced_ids
+        self.budget = None if budget is None else max(0, int(budget))
         self.in_thinking = bool(start_in_thinking)
         self.count = 0
+        self._close_requested = False
         self._baseline = None  # len(tokens) at first call -> skip the prompt
         self._forcing = False
         self._forced_idx = 0
@@ -271,6 +288,12 @@ class ThinkingBudgetProcessor:
         if self._strikes >= 3:
             self.done = True
 
+    def request_close(self):
+        """Finish thinking now (^T): the next step force-closes the open
+        thinking block exactly as if the budget had just been exceeded.
+        Consumed as a no-op when the model is not thinking."""
+        self._close_requested = True
+
     def __call__(self, tokens, logits):
         n = tokens.shape[0]
         if self._baseline is None:
@@ -292,9 +315,11 @@ class ThinkingBudgetProcessor:
                     tokens, self.start_seq
                 ):
                     self.in_thinking = True
-                    # A reopen after the budget was spent trips the forcing
+                    self.count = 0
+                    # A reopen after a forced close trips the forcing
                     # threshold immediately: closed on the spot.
-                    self.count = self.budget + 1 if self._spent else 0
+                    if self._spent:
+                        self._close_requested = True
                 elif self.in_thinking:
                     self.count += 1
                 elif self._answer_pending:
@@ -303,13 +328,21 @@ class ThinkingBudgetProcessor:
                     self._strikes = 0
         if self.done:
             return logits
-        if not self._forcing and self.in_thinking and self.count > self.budget:
+        over = self.budget is not None and self.count > self.budget
+        if not self._forcing and self.in_thinking and (
+                over or self._close_requested):
             self._forcing = True
             self._forced_idx = 0
-            # The first close carries the wrap-up phrase (the model must SEE
+            # The first close carries a wrap-up phrase (the model must SEE
             # itself decide to answer, or the cut thought continues untagged
             # in the answer); spent-mode recloses are terse.
-            self._force_seq = self.reclose_ids if self._spent else self.forced_ids
+            if self._spent:
+                self._force_seq = self.reclose_ids
+            elif self._close_requested:
+                self._force_seq = self.skip_ids
+            else:
+                self._force_seq = self.forced_ids
+        self._close_requested = False
         if self._forcing:
             fid = self._force_seq[self._forced_idx]
             self._forced_idx += 1
@@ -330,9 +363,14 @@ class ThinkingBudgetProcessor:
 
 def make_thinking_budget_processor(
     tokenizer, budget, *, start_in_thinking=True, verbose=False,
-    eos_floor=True,
+    eos_floor=True, interruptible=False,
 ):
     """Build a thinking-budget logits processor, or ``None`` if unsupported.
+
+    ``interruptible`` builds the processor even with no budget (``None``): it
+    then never trips on its own but stays armed for the ^T finish-thinking
+    key (``request_close``). Without it, ``budget=None`` returns ``None`` as
+    ever.
 
     Resolves the model's thinking delimiters via mlx-lm's tokenizer inference
     (``<think>``, ``<longcat_think>``, and the ``<|channel>thought`` /
@@ -354,11 +392,21 @@ def make_thinking_budget_processor(
     self-review on MiniMax-M3). Seeing itself decide to finalize keeps the
     trajectory coherent. Spent-mode recloses stay terse (``\\n`` + close).
     """
-    if budget is None or budget < 0:
+    if budget is None and not interruptible:
         return None
-    start_seq, end_seq = _thinking_token_seqs(tokenizer)
+    if budget is not None and budget < 0:
+        return None
+    if budget is None:
+        # An implicit (^T-only) processor is best-effort: a tokenizer the
+        # probe can't handle must not break plain generation.
+        try:
+            start_seq, end_seq = _thinking_token_seqs(tokenizer)
+        except Exception:  # noqa: BLE001
+            return None
+    else:
+        start_seq, end_seq = _thinking_token_seqs(tokenizer)
     if not end_seq:
-        if verbose:
+        if verbose and budget is not None:
             print(
                 "[thinking-budget] no thinking-end token detected; "
                 "ignoring thinking budget"
@@ -367,11 +415,15 @@ def make_thinking_budget_processor(
     nl_id = _last_token_id(tokenizer, "\n")
     reclose_ids = ([nl_id] if nl_id is not None else []) + list(end_seq)
     forced_ids = reclose_ids
-    if budget > 0:
+    skip_ids = reclose_ids
+    if budget is None or budget > 0:
         wrap = _encode_ids(tokenizer, _BUDGET_WRAP_PHRASE)
         if wrap:
             forced_ids = list(wrap) + list(end_seq)
-    if verbose:
+        wrap = _encode_ids(tokenizer, _SKIP_WRAP_PHRASE)
+        if wrap:
+            skip_ids = list(wrap) + list(end_seq)
+    if verbose and budget is not None:
         # Decode the actual forced ids first: the wrapper's think_end attr can
         # disagree with the resolved sequence (template-preferred spelling).
         try:
@@ -394,4 +446,72 @@ def make_thinking_budget_processor(
         if eos_floor
         else [],
         reclose_ids=reclose_ids,
+        skip_ids=skip_ids,
     )
+
+
+# --- ^T: finish thinking now -------------------------------------------------
+#
+# The chat REPL and `gmlx run` route Ctrl-T here. In a cooked (or cbreak) tty
+# ^T is the BSD status character: the terminal driver turns it into SIGINFO,
+# which install_finish_thinking_key catches; chat's mid-reply key listener
+# also forwards a raw \x14 byte in case the status character is unset. Either
+# way the in-flight generation's processor gets request_close() and the open
+# thinking block is closed as if the budget had just run out.
+
+_target = None  # the in-flight generation's processor, if any
+
+
+def set_finish_key_target(processor) -> None:
+    """Expose ``processor`` (may be None) to the ^T finish-thinking trigger
+    for the duration of one generation; pair with clear_finish_key_target."""
+    global _target
+    _target = processor
+
+
+def clear_finish_key_target() -> None:
+    global _target
+    _target = None
+
+
+def finish_thinking_now() -> bool:
+    """Ask the in-flight generation to close its thinking block. True when a
+    generation was listening (the request may still be a no-op if the model
+    is not currently thinking)."""
+    p = _target
+    if p is None or p.done:
+        return False
+    p.request_close()
+    return True
+
+
+def _quiet_kernel_status() -> None:
+    # Besides SIGINFO, ^T makes the kernel print a "load: ..." status line
+    # straight onto the tty, mid-stream; NOKERNINFO turns that off. Python's
+    # termios doesn't export the flag, so use the <sys/termios.h> value. The
+    # shell restores its own tty state at the next prompt.
+    try:
+        import termios
+        nokerninfo = getattr(termios, "NOKERNINFO", 0x02000000)
+        fd = sys.stdin.fileno()
+        if not os.isatty(fd):
+            return
+        attrs = termios.tcgetattr(fd)
+        attrs[3] |= nokerninfo
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+    except Exception:  # noqa: BLE001 - cosmetic; never block generation
+        pass
+
+
+def install_finish_thinking_key() -> bool:
+    """Route ^T (SIGINFO, Darwin/BSD) to ``finish_thinking_now``. Returns
+    whether the handler is installed; False off-platform or off the main
+    thread. Safe to call more than once."""
+    if not hasattr(signal, "SIGINFO"):
+        return False
+    try:
+        signal.signal(signal.SIGINFO, lambda signum, frame: finish_thinking_now())
+    except ValueError:
+        return False
+    _quiet_kernel_status()
+    return True

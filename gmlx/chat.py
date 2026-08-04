@@ -30,7 +30,9 @@ the terminal it runs in is upgraded:
   spinner that resolves to the same payoff. **Ctrl-O** toggles expand<->collapse
   live during a reply; ``/reasoning [show|hide|raw]`` (startup ``--reasoning``)
   sets the default and reaches ``raw`` (verbatim). The stored turn keeps the raw
-  text, so this is display-only;
+  text, so this is display-only. **Ctrl-T** while the model is thinking closes
+  the thinking block early (as if the thinking budget had just run out) so the
+  answer starts now;
 * ``/load <file>`` prefills the *next* prompt with a text file's contents
   (via the readline startup hook), so it can be edited before Enter sends it;
   Tab completes ``/command`` names, ``/history`` arguments, and file paths
@@ -715,6 +717,7 @@ def _print_shim_help(state: ChatState) -> None:
         "- '/reasoning [show|hide|raw]' control how thinking is displayed "
         "(Ctrl-O collapses/expands it live during a reply)"
     )
+    print("- Ctrl-T while the model is thinking: wrap up and answer now")
     print("- '/render [plain|lite|rich]' set reply markdown rendering")
     print("- '/theme [NAME] [cb]' set the color theme ('cb' = colorblind accents)")
     print("- '/model' show the loaded model card - '/stats' session totals")
@@ -1676,8 +1679,10 @@ class _EscCancel:
     immediately, not echoed into the streaming text; Ctrl-C still signals).
     ``pressed()`` polls stdin without blocking and drains whatever arrived,
     so arrow-key escape tails don't leak into the next prompt. Esc cancels;
-    Ctrl-O (``\\x0f``) fires ``on_toggle`` (collapse/expand thinking). Inert
-    when stdin is not a tty.
+    Ctrl-O (``\\x0f``) fires ``on_toggle`` (collapse/expand thinking); Ctrl-T
+    (``\\x14``) finishes thinking early - normally it arrives as SIGINFO (the
+    tty's status character survives cbreak), the raw byte is the fallback for
+    terminals with the status character unset. Inert when stdin is not a tty.
     """
 
     def __init__(self, on_toggle=None):
@@ -1709,6 +1714,10 @@ class _EscCancel:
                 hit = True
             elif ch == b"\x0f" and self._on_toggle is not None:
                 self._on_toggle()
+            elif ch == b"\x14":
+                from .thinking_budget import finish_thinking_now
+
+                finish_thinking_now()
         return hit
 
     def __exit__(self, *exc):
@@ -3159,6 +3168,9 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             _apply_session(doc, spath.stem)
 
     from .cli import _DIFFUSION_MAX_TOKENS, _UNCAPPED_MAX_TOKENS
+    from .thinking_budget import install_finish_thinking_key
+
+    install_finish_thinking_key()  # ^T closes an open thinking block
 
     while True:
         parts = []
@@ -3512,33 +3524,41 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         # Thinking-token cap (fresh per turn - the processor is stateful). Honored
         # regardless of enable_thinking; seed the in-thinking state from whether
         # the rendered prompt actually opens a <think> block (see generation.generate).
-        if state.thinking_budget is not None:
-            from .thinking_budget import (
-                make_thinking_budget_processor,
-                prompt_opens_thinking,
-            )
-
-            tbp = make_thinking_budget_processor(
-                tok,
-                state.thinking_budget,
-                start_in_thinking=prompt_opens_thinking(prompt_text),
-            )
-            if tbp is not None:
-                logits_processors = list(logits_processors) + [tbp]
-        first_turn = False  # the system prompt is in the cache either way
-        reply, canceled = _stream_reply(
-            stream_generate(
-                model,
-                tok,
-                prompt,
-                max_tokens=eff_max,
-                sampler=sampler,
-                logits_processors=logits_processors,
-                prompt_cache=cache,
-                **kv_kwargs,
-            ),
-            state,
-            stops=args.stop,
-            start_in_thinking=_opens_thinking(prompt_text),
+        # Built even with no budget set (interruptible): it never trips on its
+        # own, but ^T can close the thinking block through it mid-reply.
+        from .thinking_budget import (
+            clear_finish_key_target,
+            make_thinking_budget_processor,
+            prompt_opens_thinking,
+            set_finish_key_target,
         )
+
+        tbp = make_thinking_budget_processor(
+            tok,
+            state.thinking_budget,
+            start_in_thinking=prompt_opens_thinking(prompt_text),
+            interruptible=True,
+        )
+        if tbp is not None:
+            logits_processors = list(logits_processors) + [tbp]
+        first_turn = False  # the system prompt is in the cache either way
+        set_finish_key_target(tbp)
+        try:
+            reply, canceled = _stream_reply(
+                stream_generate(
+                    model,
+                    tok,
+                    prompt,
+                    max_tokens=eff_max,
+                    sampler=sampler,
+                    logits_processors=logits_processors,
+                    prompt_cache=cache,
+                    **kv_kwargs,
+                ),
+                state,
+                stops=args.stop,
+                start_in_thinking=_opens_thinking(prompt_text),
+            )
+        finally:
+            clear_finish_key_target()
         _end_turn(state, reply, canceled, cache=cache)

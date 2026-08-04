@@ -250,8 +250,10 @@ def generate(
     thinking tokens are generated it forces ``</think>`` so the model answers.
     An explicit budget is honored even when ``enable_thinking`` is false (a model
     may still emit ``<think>``); it is a no-op only when no ``<think>`` is ever
-    generated or the tokenizer lacks a ``</think>`` token. Returns the generated
-    text. ``prefill_progress`` shows a stderr spinner during a long prefill
+    generated or the tokenizer lacks a ``</think>`` token. With or without a
+    budget, ^T (see ``thinking_budget.install_finish_thinking_key``, armed by
+    the CLI entry points) force-closes an open thinking block the same way.
+    Returns the generated text. ``prefill_progress`` shows a stderr spinner during a long prefill
     (TTY only; cleared before the first token).
     ``reasoning`` shapes how a *verbose* stream displays a thinking model's
     chain-of-thought: ``"show"`` styles it under a label (the chat REPL's
@@ -307,17 +309,21 @@ def generate(
     # prompt* actually opens a <think> block (a pre-fill model opens it in the
     # prompt; a generate model emits it, which the processor detects). The flag
     # only shapes the prompt via the template - it never gates the cap.
-    if thinking_budget is not None and thinking_budget >= 0:
+    tbp = None
+    if thinking_budget is None or thinking_budget >= 0:
         from .thinking_budget import (
             make_thinking_budget_processor,
             prompt_opens_thinking,
         )
 
+        # interruptible: with no budget set the processor never trips on its
+        # own, but stays armed for the ^T finish-thinking key.
         tbp = make_thinking_budget_processor(
             tokenizer,
             thinking_budget,
             start_in_thinking=prompt_opens_thinking(prompt, tokenizer=tokenizer),
             verbose=verbose,
+            interruptible=True,
         )
         if tbp is not None:
             logits_processors = list(logits_processors) + [tbp]
@@ -434,6 +440,10 @@ def generate(
         gen_kwargs["prompt_progress_callback"] = progress_cb
 
     try:
+        if tbp is not None:
+            from .thinking_budget import set_finish_key_target
+
+            set_finish_key_target(tbp)
         stop = [s for s in (stop or []) if s]
         styled = verbose and reasoning in ("show", "hide")
         if not stop:
@@ -508,6 +518,10 @@ def generate(
                 )
         return "".join(pieces)
     finally:
+        if tbp is not None:
+            from .thinking_budget import clear_finish_key_target
+
+            clear_finish_key_target()
         if close_progress is not None:
             close_progress()
 

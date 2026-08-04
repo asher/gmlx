@@ -1416,6 +1416,9 @@ def _run_generate(args) -> int:
 
     # Cap-vs-EOS is not reported back on this path (generate returns text), so
     # no cap-hit note here; the MTP/VLM paths and chat print one.
+    from .thinking_budget import install_finish_thinking_key
+
+    install_finish_thinking_key()  # ^T closes an open thinking block
     print(f"[generate] max_tokens={max_tokens_label(args)} temp={args.temp}\n")
     generate(
         model,
