@@ -723,7 +723,34 @@ def _chunked_prefill_cache(lm, input_ids, chunk):
     return c
 
 
-def generate_speculative(
+_MTP_FINISH_WHY = "on the MTP path (run with --no-mtp to use it)"
+
+
+def _with_mtp_finish_key_notice(fn, *args, **kwargs):
+    """Run ``fn`` with the ^T finish-thinking target armed as "unsupported":
+    the MTP walks expose no forced-close seam, so the key explains itself
+    instead of silently doing nothing."""
+    from .thinking_budget import (
+        FinishKeyUnsupported,
+        clear_finish_key_target,
+        set_finish_key_target,
+    )
+
+    set_finish_key_target(FinishKeyUnsupported(_MTP_FINISH_WHY))
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        clear_finish_key_target()
+
+
+def generate_speculative(model, drafter, tokenizer, prompt, **kwargs) -> dict:
+    """See :func:`_generate_speculative` (^T-notice shim)."""
+    return _with_mtp_finish_key_notice(
+        _generate_speculative, model, drafter, tokenizer, prompt, **kwargs
+    )
+
+
+def _generate_speculative(
     model,
     drafter,
     tokenizer,
@@ -1173,7 +1200,24 @@ def _stream_generate_speculative_owned(
     )
 
 
-def stream_generate_speculative(
+def stream_generate_speculative(model, drafter, tokenizer, prompt, **kwargs):
+    """See :func:`_stream_generate_speculative` (^T-notice shim)."""
+    from .thinking_budget import (
+        FinishKeyUnsupported,
+        clear_finish_key_target,
+        set_finish_key_target,
+    )
+
+    set_finish_key_target(FinishKeyUnsupported(_MTP_FINISH_WHY))
+    try:
+        yield from _stream_generate_speculative(
+            model, drafter, tokenizer, prompt, **kwargs
+        )
+    finally:
+        clear_finish_key_target()
+
+
+def _stream_generate_speculative(
     model,
     drafter,
     tokenizer,

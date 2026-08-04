@@ -474,12 +474,33 @@ def clear_finish_key_target() -> None:
     _target = None
 
 
+class FinishKeyUnsupported:
+    """Armed as the ^T target on generation paths the key can't reach (the
+    MTP walks expose no logits-processor seam): pressing it then explains
+    itself once instead of silently doing nothing."""
+
+    def __init__(self, why: str):
+        self.why = why
+        self._told = False
+
+    def note(self) -> None:
+        if not self._told:
+            self._told = True
+            print(f"\n[^T] finish-thinking isn't available {self.why}",
+                  file=sys.stderr)
+
+
 def finish_thinking_now() -> bool:
     """Ask the in-flight generation to close its thinking block. True when a
     generation was listening (the request may still be a no-op if the model
     is not currently thinking)."""
     p = _target
-    if p is None or p.done:
+    if p is None:
+        return False
+    if isinstance(p, FinishKeyUnsupported):
+        p.note()
+        return False
+    if p.done:
         return False
     p.request_close()
     return True

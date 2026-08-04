@@ -310,6 +310,24 @@ def test_finish_key_target_round_trip():
     assert finish_thinking_now() is False
 
 
+def test_finish_key_unsupported_notes_once(capsys):
+    from gmlx.thinking_budget import (
+        FinishKeyUnsupported,
+        clear_finish_key_target,
+        finish_thinking_now,
+        set_finish_key_target,
+    )
+
+    set_finish_key_target(FinishKeyUnsupported("on the MTP path"))
+    try:
+        assert finish_thinking_now() is False
+        assert finish_thinking_now() is False
+    finally:
+        clear_finish_key_target()
+    err = capsys.readouterr().err
+    assert err.count("finish-thinking isn't available on the MTP path") == 1
+
+
 def test_factory_wires_eos_ids_and_floor():
     class _EosTok(_FakeTok):
         eos_token_ids = {77, 33}

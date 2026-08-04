@@ -3370,31 +3370,52 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             )
             # No cross-turn KV cache on the VLM path yet: each turn
             # re-prefills the whole conversation (and re-encodes media).
-            reply, _canceled = _stream_reply(
-                vlm_stream(
-                    model,
-                    processor,
-                    prompt,
-                    image=list(vlm_images) or None,
-                    audio=list(vlm_audios) or None,
-                    max_tokens=eff_max,
-                    temperature=s["temp"],
-                    top_p=s["top_p"],
-                    top_k=s["top_k"],
-                    min_p=s["min_p"],
-                    repetition_penalty=None if rep in (0.0, 1.0) else rep,
-                    repetition_context_size=s["repetition_context_size"],
-                    presence_penalty=s["presence_penalty"] or None,
-                    frequency_penalty=s["frequency_penalty"] or None,
-                    logit_bias=logit_bias,
-                    resize_shape=resize_shape,
-                    thinking_budget=state.thinking_budget,
-                    **kv_kwargs,
-                ),
-                state,
-                stops=args.stop,
-                start_in_thinking=_opens_thinking(prompt),
+            # mlx-vlm's own criteria enforces thinking_budget here; the
+            # budget-less interruptible processor rides along only so ^T can
+            # close a thinking block (mlx-vlm's generate_step applies extra
+            # logits_processors with the same (tokens, logits) contract).
+            from .thinking_budget import (
+                clear_finish_key_target,
+                make_thinking_budget_processor,
+                set_finish_key_target,
             )
+
+            tbp = make_thinking_budget_processor(
+                getattr(processor, "tokenizer", processor),
+                None,
+                start_in_thinking=_opens_thinking(prompt),
+                interruptible=True,
+            )
+            set_finish_key_target(tbp)
+            try:
+                reply, _canceled = _stream_reply(
+                    vlm_stream(
+                        model,
+                        processor,
+                        prompt,
+                        image=list(vlm_images) or None,
+                        audio=list(vlm_audios) or None,
+                        max_tokens=eff_max,
+                        temperature=s["temp"],
+                        top_p=s["top_p"],
+                        top_k=s["top_k"],
+                        min_p=s["min_p"],
+                        repetition_penalty=None if rep in (0.0, 1.0) else rep,
+                        repetition_context_size=s["repetition_context_size"],
+                        presence_penalty=s["presence_penalty"] or None,
+                        frequency_penalty=s["frequency_penalty"] or None,
+                        logit_bias=logit_bias,
+                        resize_shape=resize_shape,
+                        thinking_budget=state.thinking_budget,
+                        logits_processors=[tbp] if tbp is not None else None,
+                        **kv_kwargs,
+                    ),
+                    state,
+                    stops=args.stop,
+                    start_in_thinking=_opens_thinking(prompt),
+                )
+            finally:
+                clear_finish_key_target()
             if reply:
                 vlm_msgs.append(_vlm_message(model_type, reply, "assistant"))
             _end_turn(state, reply, _canceled)
