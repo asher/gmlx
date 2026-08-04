@@ -9,6 +9,7 @@ matcher shared with the chat REPL and serve streaming paths.
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 
@@ -1131,9 +1132,9 @@ def _stream_generate_speculative_owned(
     min_p: float = 0.05,
     draft_block_size: int | None = None,
 ):
-    """Owned-engine sibling of :func:`stream_generate_speculative` for
-    drafters with ``requires_owned_engine`` (deepseek_v4). Same
-    ``_MTPStreamResponse`` surface, but drives ``stream_speculative`` (which
+    """Owned-engine body of :func:`stream_generate_speculative` (the REPL
+    default; see the routing note there). Same ``_MTPStreamResponse``
+    surface as the stock round, but drives ``stream_speculative`` (which
     does its own chunked prefill through the persistent ``prompt_cache``)."""
     from mlx_lm.sample_utils import make_sampler
 
@@ -1246,10 +1247,15 @@ def _stream_generate_speculative(
     stop/penalty/bias hooks (same surface as :func:`generate_speculative`); the REPL's
     other ``/`` sampling controls don't reach this path.
     """
-    # Stochastic acceptance lives in the owned walk, so sampled runs route
-    # there when it's requested; greedy stays on the stock round.
+    # The owned walk is the default for the REPL (as it already is for serve
+    # and bench): unlike mlx-vlm's stock round it rolls the cache back to
+    # exactly the delivered tokens when the consumer closes mid-round (Esc /
+    # EOS / a stop string), so the persistent chat cache stays clean for the
+    # next turn. GMLX_OWNED_ROUND=0 opts back to the stock round, except for
+    # drafters whose contract demands the owned engine.
     from .speculative import use_owned_engine
-    if use_owned_engine(drafter, temp):
+    if (os.environ.get("GMLX_OWNED_ROUND") != "0"
+            or use_owned_engine(drafter, temp)):
         yield from _stream_generate_speculative_owned(
             model, drafter, tokenizer, prompt, prompt_cache=prompt_cache,
             max_tokens=max_tokens, temp=temp, top_p=top_p, top_k=top_k,
