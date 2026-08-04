@@ -1172,6 +1172,11 @@ def _slash_thinking_budget(cmd, arg, state):
             print(f"[chat] /thinking-budget needs an int or 'off', got {arg!r}")
             return None
         print(f"[chat] thinking-budget = {arg} (next reply)")
+        if (state.model_info or {}).get("drafter"):
+            print(
+                "[chat] note: not applied on MTP-decoded replies "
+                "(restart with --no-mtp to honor it)"
+            )
         return None
     if arg == "off":
         state.thinking_budget = None

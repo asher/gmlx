@@ -566,6 +566,7 @@ def mtp_dropped_chat_flags(args) -> list[str]:
         # mtp_dropped_run_flags).
         ("--quantized-kv-start", args.quantized_kv_start != 0),
         ("--max-kv-size", args.max_kv_size is not None),
+        ("--thinking-budget", getattr(args, "thinking_budget", None) is not None),
     )
     return [name for name, on in pairs if on]
 
