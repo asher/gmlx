@@ -310,6 +310,27 @@ def test_finish_key_target_round_trip():
     assert finish_thinking_now() is False
 
 
+def test_fallback_rejects_shared_trailing_piece():
+    # A vocab with no think tokens at all: both tag spellings BPE down to a
+    # shared trailing '>' piece. Arming on that would trip on every '>'.
+    class _NoThinkTok:
+        def encode(self, text, add_special_tokens=True):
+            return [7, 8, 42] if "think" in text else []
+
+    assert _thinking_token_seqs(_NoThinkTok()) == (None, None)
+    assert make_thinking_budget_processor(
+        _NoThinkTok(), None, interruptible=True) is None
+
+
+def test_factory_tolerates_int_eos_attr():
+    # Raw GGUF-built tokenizers carry eos_token_ids as a bare int.
+    class _IntEosTok(_FakeTok):
+        eos_token_ids = 77
+
+    p = make_thinking_budget_processor(_IntEosTok(), 4)
+    assert p.eos_ids == [77]
+
+
 def test_finish_key_unsupported_notes_once(capsys):
     from gmlx.thinking_budget import (
         FinishKeyUnsupported,

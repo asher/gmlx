@@ -184,6 +184,11 @@ def _thinking_token_seqs(tokenizer):
     if end_id is None:
         return (None, None)
     start_id = _last_token_id(tokenizer, "<think>")
+    if start_id == end_id:
+        # Both tags collapsed to a shared trailing piece (a bare '>'): the
+        # vocab has no think tokens at all, and arming on that piece would
+        # trip on every '>' the model emits.
+        return (None, None)
     return ((start_id,) if start_id is not None else None, (end_id,))
 
 
@@ -361,6 +366,46 @@ class ThinkingBudgetProcessor:
         return logits
 
 
+def _eos_id_list(tokenizer) -> list[int]:
+    """Sorted EOS ids; tolerates the attr being an int (raw GGUF-built
+    tokenizers), a set/list (mlx-lm wrapper), or absent."""
+    eos = getattr(tokenizer, "eos_token_ids", None)
+    if eos is None:
+        return []
+    if isinstance(eos, int):
+        return [eos]
+    return sorted(int(t) for t in eos)
+
+
+def think_tokenizer_for(processor):
+    """A think-capable tokenizer for an mlx-vlm processor.
+
+    The raw GGUF-built HF tokenizer carries no thinking markers (gemma4's
+    channel format lives neither in the template text nor as single-token
+    tag spellings), so resolve them by wrapping with mlx-lm's
+    ``TokenizerWrapper`` inference - once, cached on the processor (the
+    inference scans the vocab). Falls back to the raw tokenizer."""
+    cached = getattr(processor, "_gmlx_think_tokenizer", None)
+    if cached is not None:
+        return cached
+    tok = getattr(processor, "tokenizer", processor)
+    wrapped = tok
+    if not getattr(tok, "think_end_tokens", None):
+        try:
+            from mlx_lm.tokenizer_utils import TokenizerWrapper
+
+            wrapped = TokenizerWrapper(
+                tok, eos_token_ids=getattr(tok, "_gguf_eos_token_ids", None)
+            )
+        except Exception:  # noqa: BLE001 - best-effort; ^T just stays off
+            wrapped = tok
+    try:
+        processor._gmlx_think_tokenizer = wrapped
+    except Exception:  # noqa: BLE001 - unsettable processor: skip the cache
+        pass
+    return wrapped
+
+
 def make_thinking_budget_processor(
     tokenizer, budget, *, start_in_thinking=True, verbose=False,
     eos_floor=True, interruptible=False,
@@ -440,11 +485,7 @@ def make_thinking_budget_processor(
         budget=budget,
         start_seq=start_seq,
         start_in_thinking=start_in_thinking,
-        eos_ids=sorted(
-            int(t) for t in (getattr(tokenizer, "eos_token_ids", None) or [])
-        )
-        if eos_floor
-        else [],
+        eos_ids=_eos_id_list(tokenizer) if eos_floor else [],
         reclose_ids=reclose_ids,
         skip_ids=skip_ids,
     )

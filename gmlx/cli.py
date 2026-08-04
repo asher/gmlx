@@ -1556,11 +1556,12 @@ def _run_vlm(args) -> int:
         install_finish_thinking_key,
         make_thinking_budget_processor,
         set_finish_key_target,
+        think_tokenizer_for,
     )
 
     install_finish_thinking_key()
     tbp = make_thinking_budget_processor(
-        getattr(processor, "tokenizer", processor), None, interruptible=True
+        think_tokenizer_for(processor), None, interruptible=True
     )
     if tbp is not None:
         extra["logits_processors"] = [tbp]

@@ -3382,13 +3382,17 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             from .thinking_budget import (
                 clear_finish_key_target,
                 make_thinking_budget_processor,
+                prompt_opens_thinking,
                 set_finish_key_target,
+                think_tokenizer_for,
             )
 
+            vtok = think_tokenizer_for(processor)
             tbp = make_thinking_budget_processor(
-                getattr(processor, "tokenizer", processor),
+                vtok,
                 None,
-                start_in_thinking=_opens_thinking(prompt),
+                start_in_thinking=isinstance(prompt, str)
+                and prompt_opens_thinking(prompt, tokenizer=vtok),
                 interruptible=True,
             )
             set_finish_key_target(tbp)
