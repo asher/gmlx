@@ -235,6 +235,120 @@ def test_natural_close_skips_spent_mode():
     assert p.done and not p._spent
 
 
+# --- ^T finish-thinking (request_close / uncapped interruptible mode) --------
+
+SKIP = 7  # stand-in for the ^T wrap phrase's first token
+
+
+def test_request_close_forces_skip_sequence_then_spent_mode():
+    p = ThinkingBudgetProcessor(
+        end_seq=(END,), forced_ids=[SKIP, END], budget=None, start_seq=(START,),
+        skip_ids=[NL, END], reclose_ids=[NL, END],
+    )
+    tokens = [1, 2, START]
+    p(mx.array(tokens), _logits())
+    for tid in range(30, 80):  # no budget: thinking runs free until ^T
+        tokens.append(tid)
+        assert _argmax_if_forced(p(mx.array(tokens), _logits())) is None
+    p.request_close()
+    tokens.append(80)
+    assert _argmax_if_forced(p(mx.array(tokens), _logits())) == NL  # skip_ids,
+    tokens.append(NL)                                               # not forced_ids
+    assert _argmax_if_forced(p(mx.array(tokens), _logits())) == END
+    tokens.append(END)
+    p(mx.array(tokens), _logits())
+    assert p._spent and not p.in_thinking
+    tokens.append(60)  # a real answer token lands
+    p(mx.array(tokens), _logits())
+    # A reopen after ^T is closed on the spot, budget-0 style.
+    tokens.append(START)
+    assert _argmax_if_forced(p(mx.array(tokens), _logits())) == NL
+
+
+def test_request_close_consumed_when_not_thinking():
+    p = ThinkingBudgetProcessor(
+        end_seq=(END,), forced_ids=[NL, END], budget=None, start_seq=(START,),
+        start_in_thinking=False,
+    )
+    tokens = [1, 2, 3]
+    p(mx.array(tokens), _logits())
+    p.request_close()
+    tokens.append(50)
+    assert _argmax_if_forced(p(mx.array(tokens), _logits())) is None
+    # The stale request must not close a block opened later.
+    tokens.append(START)
+    assert _argmax_if_forced(p(mx.array(tokens), _logits())) is None
+    tokens.append(51)
+    assert _argmax_if_forced(p(mx.array(tokens), _logits())) is None
+    assert p.in_thinking
+
+
+def test_factory_interruptible_without_budget():
+    assert make_thinking_budget_processor(_FakeTok(), None) is None
+    p = make_thinking_budget_processor(_FakeTok(), None, interruptible=True)
+    assert p is not None and p.budget is None
+    assert p.skip_ids[-1] == END
+
+
+def test_finish_key_target_round_trip():
+    from gmlx.thinking_budget import (
+        clear_finish_key_target,
+        finish_thinking_now,
+        set_finish_key_target,
+    )
+
+    p = ThinkingBudgetProcessor(
+        end_seq=(END,), forced_ids=[NL, END], budget=None, start_seq=(START,)
+    )
+    assert finish_thinking_now() is False       # nothing armed
+    set_finish_key_target(p)
+    try:
+        assert finish_thinking_now() is True
+        assert p._close_requested
+    finally:
+        clear_finish_key_target()
+    assert finish_thinking_now() is False
+
+
+def test_fallback_rejects_shared_trailing_piece():
+    # A vocab with no think tokens at all: both tag spellings BPE down to a
+    # shared trailing '>' piece. Arming on that would trip on every '>'.
+    class _NoThinkTok:
+        def encode(self, text, add_special_tokens=True):
+            return [7, 8, 42] if "think" in text else []
+
+    assert _thinking_token_seqs(_NoThinkTok()) == (None, None)
+    assert make_thinking_budget_processor(
+        _NoThinkTok(), None, interruptible=True) is None
+
+
+def test_factory_tolerates_int_eos_attr():
+    # Raw GGUF-built tokenizers carry eos_token_ids as a bare int.
+    class _IntEosTok(_FakeTok):
+        eos_token_ids = 77
+
+    p = make_thinking_budget_processor(_IntEosTok(), 4)
+    assert p.eos_ids == [77]
+
+
+def test_finish_key_unsupported_notes_once(capsys):
+    from gmlx.thinking_budget import (
+        FinishKeyUnsupported,
+        clear_finish_key_target,
+        finish_thinking_now,
+        set_finish_key_target,
+    )
+
+    set_finish_key_target(FinishKeyUnsupported("on the MTP path"))
+    try:
+        assert finish_thinking_now() is False
+        assert finish_thinking_now() is False
+    finally:
+        clear_finish_key_target()
+    err = capsys.readouterr().err
+    assert err.count("finish-thinking isn't available on the MTP path") == 1
+
+
 def test_factory_wires_eos_ids_and_floor():
     class _EosTok(_FakeTok):
         eos_token_ids = {77, 33}

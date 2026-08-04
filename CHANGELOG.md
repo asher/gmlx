@@ -6,11 +6,21 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Ctrl-T during a `chat` or `run` reply closes the model's open thinking
+  block early (as if the thinking budget had just run out) so the answer
+  starts now.
+
+### Changed
+
 ### Fixed
 
 - CLI polish: `--help`/`--help-all` now win even after a value-taking flag,
   the short `-h` pages gained the typical sampling/config/streaming flags,
   tab completion offers flag values (choices, themes, profiles).
+- Chat: cancelling or stopping mid-round no longer leaves rejected draft KV 
+  in the persistent chat cache.
 
 ## [0.2.0] - 2026-08-02
 

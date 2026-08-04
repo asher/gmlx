@@ -9,6 +9,7 @@ matcher shared with the chat REPL and serve streaming paths.
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 
@@ -250,8 +251,10 @@ def generate(
     thinking tokens are generated it forces ``</think>`` so the model answers.
     An explicit budget is honored even when ``enable_thinking`` is false (a model
     may still emit ``<think>``); it is a no-op only when no ``<think>`` is ever
-    generated or the tokenizer lacks a ``</think>`` token. Returns the generated
-    text. ``prefill_progress`` shows a stderr spinner during a long prefill
+    generated or the tokenizer lacks a ``</think>`` token. With or without a
+    budget, ^T (see ``thinking_budget.install_finish_thinking_key``, armed by
+    the CLI entry points) force-closes an open thinking block the same way.
+    Returns the generated text. ``prefill_progress`` shows a stderr spinner during a long prefill
     (TTY only; cleared before the first token).
     ``reasoning`` shapes how a *verbose* stream displays a thinking model's
     chain-of-thought: ``"show"`` styles it under a label (the chat REPL's
@@ -307,17 +310,21 @@ def generate(
     # prompt* actually opens a <think> block (a pre-fill model opens it in the
     # prompt; a generate model emits it, which the processor detects). The flag
     # only shapes the prompt via the template - it never gates the cap.
-    if thinking_budget is not None and thinking_budget >= 0:
+    tbp = None
+    if thinking_budget is None or thinking_budget >= 0:
         from .thinking_budget import (
             make_thinking_budget_processor,
             prompt_opens_thinking,
         )
 
+        # interruptible: with no budget set the processor never trips on its
+        # own, but stays armed for the ^T finish-thinking key.
         tbp = make_thinking_budget_processor(
             tokenizer,
             thinking_budget,
             start_in_thinking=prompt_opens_thinking(prompt, tokenizer=tokenizer),
             verbose=verbose,
+            interruptible=True,
         )
         if tbp is not None:
             logits_processors = list(logits_processors) + [tbp]
@@ -434,6 +441,10 @@ def generate(
         gen_kwargs["prompt_progress_callback"] = progress_cb
 
     try:
+        if tbp is not None:
+            from .thinking_budget import set_finish_key_target
+
+            set_finish_key_target(tbp)
         stop = [s for s in (stop or []) if s]
         styled = verbose and reasoning in ("show", "hide")
         if not stop:
@@ -508,6 +519,10 @@ def generate(
                 )
         return "".join(pieces)
     finally:
+        if tbp is not None:
+            from .thinking_budget import clear_finish_key_target
+
+            clear_finish_key_target()
         if close_progress is not None:
             close_progress()
 
@@ -709,7 +724,34 @@ def _chunked_prefill_cache(lm, input_ids, chunk):
     return c
 
 
-def generate_speculative(
+_MTP_FINISH_WHY = "on the MTP path (run with --no-mtp to use it)"
+
+
+def _with_mtp_finish_key_notice(fn, *args, **kwargs):
+    """Run ``fn`` with the ^T finish-thinking target armed as "unsupported":
+    the MTP walks expose no forced-close seam, so the key explains itself
+    instead of silently doing nothing."""
+    from .thinking_budget import (
+        FinishKeyUnsupported,
+        clear_finish_key_target,
+        set_finish_key_target,
+    )
+
+    set_finish_key_target(FinishKeyUnsupported(_MTP_FINISH_WHY))
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        clear_finish_key_target()
+
+
+def generate_speculative(model, drafter, tokenizer, prompt, **kwargs) -> dict:
+    """See :func:`_generate_speculative` (^T-notice shim)."""
+    return _with_mtp_finish_key_notice(
+        _generate_speculative, model, drafter, tokenizer, prompt, **kwargs
+    )
+
+
+def _generate_speculative(
     model,
     drafter,
     tokenizer,
@@ -1090,9 +1132,9 @@ def _stream_generate_speculative_owned(
     min_p: float = 0.05,
     draft_block_size: int | None = None,
 ):
-    """Owned-engine sibling of :func:`stream_generate_speculative` for
-    drafters with ``requires_owned_engine`` (deepseek_v4). Same
-    ``_MTPStreamResponse`` surface, but drives ``stream_speculative`` (which
+    """Owned-engine body of :func:`stream_generate_speculative` (the REPL
+    default; see the routing note there). Same ``_MTPStreamResponse``
+    surface as the stock round, but drives ``stream_speculative`` (which
     does its own chunked prefill through the persistent ``prompt_cache``)."""
     from mlx_lm.sample_utils import make_sampler
 
@@ -1159,7 +1201,24 @@ def _stream_generate_speculative_owned(
     )
 
 
-def stream_generate_speculative(
+def stream_generate_speculative(model, drafter, tokenizer, prompt, **kwargs):
+    """See :func:`_stream_generate_speculative` (^T-notice shim)."""
+    from .thinking_budget import (
+        FinishKeyUnsupported,
+        clear_finish_key_target,
+        set_finish_key_target,
+    )
+
+    set_finish_key_target(FinishKeyUnsupported(_MTP_FINISH_WHY))
+    try:
+        yield from _stream_generate_speculative(
+            model, drafter, tokenizer, prompt, **kwargs
+        )
+    finally:
+        clear_finish_key_target()
+
+
+def _stream_generate_speculative(
     model,
     drafter,
     tokenizer,
@@ -1188,10 +1247,15 @@ def stream_generate_speculative(
     stop/penalty/bias hooks (same surface as :func:`generate_speculative`); the REPL's
     other ``/`` sampling controls don't reach this path.
     """
-    # Stochastic acceptance lives in the owned walk, so sampled runs route
-    # there when it's requested; greedy stays on the stock round.
+    # The owned walk is the default for the REPL (as it already is for serve
+    # and bench): unlike mlx-vlm's stock round it rolls the cache back to
+    # exactly the delivered tokens when the consumer closes mid-round (Esc /
+    # EOS / a stop string), so the persistent chat cache stays clean for the
+    # next turn. GMLX_OWNED_ROUND=0 opts back to the stock round, except for
+    # drafters whose contract demands the owned engine.
     from .speculative import use_owned_engine
-    if use_owned_engine(drafter, temp):
+    if (os.environ.get("GMLX_OWNED_ROUND") != "0"
+            or use_owned_engine(drafter, temp)):
         yield from _stream_generate_speculative_owned(
             model, drafter, tokenizer, prompt, prompt_cache=prompt_cache,
             max_tokens=max_tokens, temp=temp, top_p=top_p, top_k=top_k,

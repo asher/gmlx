@@ -566,6 +566,7 @@ def mtp_dropped_chat_flags(args) -> list[str]:
         # mtp_dropped_run_flags).
         ("--quantized-kv-start", args.quantized_kv_start != 0),
         ("--max-kv-size", args.max_kv_size is not None),
+        ("--thinking-budget", getattr(args, "thinking_budget", None) is not None),
     )
     return [name for name, on in pairs if on]
 
@@ -1310,6 +1311,10 @@ def _run_generate(args) -> int:
     logit_bias = parse_logit_bias(args.logit_bias)
     preset_native_fp_wire_env(args)
 
+    from .thinking_budget import install_finish_thinking_key
+
+    install_finish_thinking_key()  # ^T closes an open thinking block
+
     if args.seed is not None:
         import mlx.core as mx
 
@@ -1542,21 +1547,44 @@ def _run_vlm(args) -> int:
     if args.prefill_step_size is not None:
         extra["prefill_step_size"] = args.prefill_step_size
 
+    # ^T closes an open thinking block: mlx-vlm's generate_step applies extra
+    # logits_processors with the mlx-lm (tokens, logits) contract, so the
+    # budget-less interruptible processor rides along (mlx-vlm's own criteria
+    # still enforces --thinking-budget).
+    from .thinking_budget import (
+        clear_finish_key_target,
+        install_finish_thinking_key,
+        make_thinking_budget_processor,
+        set_finish_key_target,
+        think_tokenizer_for,
+    )
+
+    install_finish_thinking_key()
+    tbp = make_thinking_budget_processor(
+        think_tokenizer_for(processor), None, interruptible=True
+    )
+    if tbp is not None:
+        extra["logits_processors"] = [tbp]
+
     print(
         f"[generate] max_tokens={max_tokens_label(args)} temp={args.temp} "
         f"images={len(images)} audios={len(audios)}\n"
     )
-    result = generate(
-        model,
-        processor,
-        prompt,
-        image=images or None,
-        audio=audios or None,
-        max_tokens=args.max_tokens,
-        temperature=args.temp,
-        verbose=True,
-        **extra,
-    )
+    set_finish_key_target(tbp)
+    try:
+        result = generate(
+            model,
+            processor,
+            prompt,
+            image=images or None,
+            audio=audios or None,
+            max_tokens=args.max_tokens,
+            temperature=args.temp,
+            verbose=True,
+            **extra,
+        )
+    finally:
+        clear_finish_key_target()
     if getattr(result, "finish_reason", None) == "length":
         warn_cap_hit(args, getattr(result, "generation_tokens", None))
     return 0
@@ -1573,7 +1601,9 @@ def _run_vlm_mtp(args) -> int:
     from .chat import fold_thinking_flag, parse_template_config
     from .generation import generate_speculative
     from .mtp_load import load_vlm_mtp_model
+    from .thinking_budget import install_finish_thinking_key
 
+    install_finish_thinking_key()  # ^T prints the MTP-path notice here
     if args.seed is not None:
         import mlx.core as mx
 
