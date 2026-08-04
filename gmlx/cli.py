@@ -695,8 +695,9 @@ def _build_parser(prog: str = "gmlx run") -> argparse.ArgumentParser:
     )
     add_condensed_help(ap, (
         "gguf", "--prompt", "--prompt-file", "--max-tokens", "--temp",
+        "--top-p", "--min-p", "--stop", "--config", "--profile",
         "--system-prompt", "--reasoning", "--thinking", "--mmproj",
-        "--image", "--stream-experts", "--verbose",
+        "--image", "--max-kv-size", "--stream-experts", "--verbose",
     ))
     ap.add_argument("gguf", help="Path to the GGUF file (sharded ok).")
     prompt_group = ap.add_mutually_exclusive_group()
@@ -2204,6 +2205,18 @@ def umbrella_main(argv: list[str] | None = None) -> int:
         print(f"error: unknown command {verb!r}.\n", file=sys.stderr)
         _print_umbrella_help(prog)
         return 2
+    # Help always wins: argparse lets a value-taking flag swallow a following
+    # help token (`chat --thinking --help` dies with "expected one argument"
+    # instead of printing help), so hoist a bare help flag to the front. Safe:
+    # argparse rejects flag-like option values anyway, so a bare help token
+    # can never be a legitimate value. --help-all only where a verb defines it.
+    for tok in rest:
+        if tok == "--":
+            break
+        if tok in ("-h", "--help") or (
+                tok == "--help-all" and verb in ("run", "chat")):
+            rest = [tok]
+            break
     if verb != "doctor":  # doctor must run on a broken env to diagnose it
         from .upstream_seams import check_upstream_versions
         try:

@@ -191,3 +191,20 @@ def test_chat_help_all_is_complete(capsys):
         chat.cmd_chat(["--help-all"])
     out = capsys.readouterr().out
     assert "--logit-bias" in out and "--kv-bits" in out
+
+
+# Help always wins: a value-taking flag must not swallow a following help
+# token (`chat --thinking --help` used to die with "expected one argument").
+def test_help_after_value_flag_is_hoisted(routes):
+    assert cli.umbrella_main(["chat", "--thinking", "--help"]) == 0
+    assert routes["chat"] == ["--help"]
+    assert cli.umbrella_main(["run", "--profile", "--help-all"]) == 0
+    assert routes["run"] == ["--help-all"]
+    assert cli.umbrella_main(["serve", "model.gguf", "--config", "-h"]) == 0
+    assert routes["server"] == ["-h"]
+
+
+def test_help_hoist_stops_at_double_dash(routes):
+    # Past a `--` separator nothing is a flag; the argv passes through intact.
+    assert cli.umbrella_main(["rm", "old-model", "--", "--help"]) == 0
+    assert routes["rm"] == ["old-model", "--", "--help"]

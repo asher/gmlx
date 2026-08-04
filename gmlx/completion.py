@@ -125,6 +125,31 @@ def _capture_help(verb: str) -> str:
     return buf.getvalue()
 
 
+def _choice_values(metavar: str) -> list[str]:
+    """The values of a ``{a,b,c}`` choices metavar, else ``[]``."""
+    m = re.fullmatch(r"\{([^{}]+)\}", metavar or "")
+    if not m:
+        return []
+    return [v.strip() for v in m.group(1).split(",") if v.strip()]
+
+
+def _named_value_candidates(flag: str) -> list[str]:
+    """Value candidates for flags whose metavar hides an enumerable set
+    (themes, sampling profiles)."""
+    try:
+        if flag == "--theme":
+            from .theme import list_themes
+
+            return [f"{t}\tcolor theme" for t in list_themes()]
+        if flag == "--profile":
+            from .profiles import builtin_intents
+
+            return [f"{i}\tbuilt-in intent" for i in sorted(builtin_intents())]
+    except Exception:  # noqa: BLE001 - value candidates are best-effort
+        return []
+    return []
+
+
 def _is_pathish(metavar: str) -> bool:
     mv = (metavar or "").upper()
     return any(k in mv for k in ("PATH", "FILE", "DIR"))
@@ -293,8 +318,14 @@ def _complete(argv: list[str]) -> list[str]:
     if prev.startswith("-") and "=" not in prev:
         opt = _option_for(verb, prev)
         if opt is not None and opt[1]:       # the previous flag wants a value
+            choices = _choice_values(opt[1])
+            if choices:                      # a {on,off,...} choices flag
+                return choices
             if _is_pathish(opt[1]):
                 return ["::files"]
+            named = _named_value_candidates(opt[0])
+            if named:
+                return named
             # An endpoint flag (--host/--port/--url/--base-url) completes from the
             # servers currently running; any other value flag (a temperature, a
             # token count) has nothing to enumerate.
