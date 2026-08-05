@@ -1139,6 +1139,53 @@ def test_shed_misses_keeps_at_least_one_expert(monkeypatch, tmp_path):
     assert keep.tolist() == [True, False]
 
 
+def test_shed_misses_clear_mode_all_or_nothing(monkeypatch, tmp_path):
+    """Clear mode empties the layer's whole miss set when its mass fits
+    the budget (removing that layer's demand-read stall) and sheds
+    nothing when it does not - never a partial shed."""
+    feeder, _ = _make_feeder(monkeypatch, tmp_path)
+    feeder._shed_clear = True
+    feeder.stage(0, np.array([[0, 2]], dtype=np.uint32))  # 0,2 resident
+    ids = np.array([0, 1, 2, 3], dtype=np.uint32)
+    scores = np.array([0.4, 0.05, 0.4, 0.15], dtype=np.float32)
+    # budget 0.3 covers the miss set (experts 1+3 = 0.2): both shed
+    keep = feeder.shed_misses(0, ids, scores, 0.7)
+    assert keep.tolist() == [True, False, True, False]
+    assert feeder._shed_n == 2 and feeder._shed_tokens == 1
+    assert abs(feeder._shed_mass - 0.2) < 1e-6
+    # budget 0.1 does not cover it: nothing sheds (tail mode would have
+    # dropped expert 1 alone)
+    assert feeder.shed_misses(0, ids, scores, 0.9) is None
+    assert feeder._shed_n == 2  # no partial-shed bookkeeping
+
+
+def test_shed_misses_clear_mode_never_drops_whole_set(monkeypatch, tmp_path):
+    """An all-miss routed set never clears: its mass is the full total,
+    over any budget, so the token always computes something."""
+    feeder, _ = _make_feeder(monkeypatch, tmp_path)
+    feeder._shed_clear = True
+    feeder.stage(0, np.array([[0]], dtype=np.uint32))
+    assert feeder.shed_misses(
+        0, np.array([1, 3], dtype=np.uint32),
+        np.array([0.6, 0.4], dtype=np.float32), 0.01) is None
+
+
+# Mass popularity (--moe-popularity mass): score-weighted eviction rank
+def test_stage_mass_credit(monkeypatch, tmp_path):
+    """With scores, stage credits popularity by gate mass at count
+    credit's per-call total; score-less calls keep count credit; a
+    degenerate zero-mass call falls back to count credit."""
+    feeder, _ = _make_feeder(monkeypatch, tmp_path)
+    ids = np.array([[0, 1]], dtype=np.uint32)
+    feeder.stage(0, ids, scores=np.array([0.9, 0.1], dtype=np.float32))
+    c = feeder._counts[0]
+    assert abs(c[0] - 1.8) < 1e-6 and abs(c[1] - 0.2) < 1e-6
+    feeder.stage(0, ids)  # count credit: +1 each
+    assert abs(c[0] - 2.8) < 1e-6 and abs(c[1] - 1.2) < 1e-6
+    feeder.stage(0, ids, scores=np.zeros(2, dtype=np.float32))
+    assert abs(c[0] - 3.8) < 1e-6 and abs(c[1] - 2.2) < 1e-6
+
+
 def _stream_scores_glu(monkeypatch, recorded, stock=False):
     """A wrapped scores-carrying SwitchGLU with a recording fake feeder -
     the shared setup for the wrapper-hook tests. stock=True builds a base
@@ -1176,10 +1223,12 @@ def _stream_scores_glu(monkeypatch, recorded, stock=False):
 
         def __init__(self):
             self.stage_calls = []
+            self.stage_scores = []
             self.shed_calls = []
             self.keep = None
             self.overflow = False
             self._layer_shed_n = 0
+            self._credit_mass = False
 
         def covers(self, li):
             return True
@@ -1188,8 +1237,10 @@ def _stream_scores_glu(monkeypatch, recorded, stock=False):
             self.shed_calls.append((li, ids.copy(), scores.copy(), keep_mass))
             return None if self.keep is None else self.keep.copy()
 
-        def stage(self, li, ids):
+        def stage(self, li, ids, scores=None):
             self.stage_calls.append((li, ids.copy()))
+            self.stage_scores.append(
+                None if scores is None else np.array(scores, copy=True))
             return None if self.overflow else ids.astype(np.uint32)
 
         def wedged_at(self, li):
@@ -1257,6 +1308,32 @@ def test_wrapper_miss_shed_stages_survivors(monkeypatch):
     # score-less calls (stock unmixed path) never shed
     mx.eval(glu(x1, i1))
     assert len(df.shed_calls) == n_shed
+
+
+def test_wrapper_mass_credit_passes_scores_to_stage(monkeypatch):
+    """--moe-popularity mass: the arena path hands stage() the routed
+    scores with no shed configured, the post-shed renormalized scores
+    when one fires, and nothing when the switch is off."""
+    mx.random.seed(7)
+    recorded = []
+    glu, df = _stream_scores_glu(monkeypatch, recorded)
+    x1 = mx.random.normal((1, 1, 16))
+    i1 = mx.array([[[1, 3]]], dtype=mx.uint32)
+    sc = mx.array([[[0.75, 0.25]]], dtype=mx.float32)
+
+    mx.eval(glu(x1, i1, sc))  # switch off: count credit, no scores
+    assert df.stage_scores[-1] is None
+
+    df._credit_mass = True
+    mx.eval(glu(x1, i1, sc))  # no shed installed, credit still flows
+    assert np.allclose(df.stage_scores[-1], [0.75, 0.25])
+    assert not df.shed_calls
+
+    object.__setattr__(glu, "_kq_miss_shed", 0.9)
+    df.keep = np.array([False, True])
+    mx.eval(glu(x1, i1, sc))
+    # the surviving expert's credit carries the token's full mass
+    assert np.allclose(df.stage_scores[-1], [1.0], atol=1e-6)
 
 
 def test_wrapper_scores_sink_on_stock_base(monkeypatch):

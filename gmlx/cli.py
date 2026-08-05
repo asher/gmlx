@@ -163,6 +163,25 @@ def add_moe_expert_args(ap: argparse.ArgumentParser) -> None:
         "--moe-expert-mass.",
     )
     grp.add_argument(
+        "--moe-miss-shed-mode",
+        choices=("tail", "clear"),
+        default="tail",
+        help="Miss-shed policy. tail: shed lowest-scored misses up to the "
+        "budget. clear: shed a layer's whole miss set when its mass fits "
+        "the budget, nothing otherwise - each shed then removes a "
+        "per-layer demand-read stall instead of thinning one. No effect "
+        "without --moe-miss-shed.",
+    )
+    grp.add_argument(
+        "--moe-popularity",
+        choices=("count", "mass"),
+        default="count",
+        help="Expert-arena eviction popularity. count: every routed expert "
+        "credits equally per call. mass: credit by gate score, so each "
+        "layer's high-mass experts win residency (and, under "
+        "--moe-miss-shed, stop missing).",
+    )
+    grp.add_argument(
         "--moe-layer-shed",
         type=float,
         default=None,
@@ -1239,6 +1258,10 @@ def _apply_placement(args, model) -> None:
                     "--moe-layer-shed",
                     getattr(args, "moe_layer_shed", None) is not None,
                 ),
+                (
+                    "--moe-popularity mass",
+                    getattr(args, "moe_popularity", "count") == "mass",
+                ),
             )
             if on
         ]
@@ -1293,7 +1316,18 @@ def _apply_placement(args, model) -> None:
     if getattr(args, "moe_miss_shed", None) is not None:
         from .moe_experts import install_moe_miss_shed
 
-        install_moe_miss_shed(model, args.moe_miss_shed)
+        install_moe_miss_shed(
+            model, args.moe_miss_shed,
+            mode=getattr(args, "moe_miss_shed_mode", "tail"))
+    elif getattr(args, "moe_miss_shed_mode", "tail") != "tail":
+        print(
+            "[stream] --moe-miss-shed-mode ignored: it needs "
+            "--moe-miss-shed"
+        )
+    if getattr(args, "moe_popularity", "count") == "mass":
+        from .moe_experts import install_moe_mass_popularity
+
+        install_moe_mass_popularity(model)
     if getattr(args, "moe_layer_shed", None) is not None:
         from .moe_experts import install_moe_layer_shed
 

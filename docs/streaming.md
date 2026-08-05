@@ -301,6 +301,23 @@ shed expert earns no popularity credit, so the arena keeps its hot set.
 It needs the decode feeder and a block that hands router scores to the
 expert call; where it engages, it is the most targeted lever per point of
 quality spent, and its payoff scales directly with the miss rate.
+
+Miss-shed's payoff is not proportional to the bytes it saves: each
+streamed layer with any surviving demand miss still pays a synchronous
+read stall, so a shed that thins a layer's miss set buys little and one
+that empties it buys the whole stall. `--moe-miss-shed-mode clear`
+targets that directly: a layer sheds its entire miss set when its
+combined mass fits the budget and sheds nothing otherwise, so every
+point of dropped mass converts to a removed stall and untouched layers
+keep their full committee. On models where the tail mode plateaus (mass
+spent, stalls remaining), clear mode reaches further at the same P.
+`--moe-popularity mass` complements it from the residency side: arena
+eviction normally ranks experts by touch count, which keeps the most
+often routed experts resident; ranking by routed gate mass instead
+keeps the experts miss-shed refuses to drop, so fewer high-mass misses
+remain to block a clear. It changes no outputs on its own and composes
+with either shed mode.
+
 `--moe-layer-shed P` skips a streamed MoE layer's routed experts entirely
 with probability P per token (the layer's shared expert still runs). It
 is the blunt end of the scale, and the only lever that also cuts the
@@ -309,9 +326,10 @@ arena hit rate is high and misses are rare.
 
 In server configs the lossy levers are the per-model `moe_experts: K` /
 `moe_expert_mass: P` / `moe_miss_shed: P` / `moe_layer_shed: P` keys (or
-the matching `serve` flags for a single positional model); the probe
-stays CLI-only, so size P with a `gmlx run --moe-expert-probe` pass
-before pinning a value in a config.
+the matching `serve` flags for a single positional model); the probe,
+`--moe-miss-shed-mode`, and `--moe-popularity` stay CLI-only, so size P
+with a `gmlx run --moe-expert-probe` pass before pinning a value in a
+config.
 
 Which to reach for is a measurement, not a doctrine. Run the probe once,
 and read the decode feeder's exit stats (arena hit rate; printed by

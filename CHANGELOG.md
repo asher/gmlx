@@ -8,6 +8,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `--moe-miss-shed-mode clear`: miss-shed drops a layer's whole miss set
+  when its mass fits the budget and nothing otherwise, so each shed
+  removes a per-layer demand-read stall instead of thinning one.
+- `--moe-popularity mass`: expert-arena eviction ranks experts by routed
+  gate mass instead of touch count, keeping each layer's high-mass
+  experts resident.
 - Ctrl-T during a `chat` or `run` reply closes the model's open thinking
   block early (as if the thinking budget had just run out) so the answer
   starts now.
