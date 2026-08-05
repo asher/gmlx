@@ -450,34 +450,6 @@ def install_moe_miss_shed(model, p: float) -> int:
     return n
 
 
-def install_moe_mass_popularity(model) -> int:
-    """Credit arena popularity by routed gate mass instead of touch count
-    on decode calls that carry scores, so eviction keeps each layer's
-    high-mass experts resident. Not itself lossy (residency is a perf
-    policy), but composed with --moe-miss-shed it steers what sheds.
-    Returns the number of layers whose feeder switched."""
-    n = 0
-    seen: set[int] = set()
-    for m in _streamed_modules(model):
-        f = getattr(m, "_kq_decode_feeder", None)
-        if f is not None:
-            if id(f) not in seen:
-                seen.add(id(f))
-                f._credit_mass = True
-            n += 1
-    if n:
-        loadlog.info(
-            f"[stream] MoE mass popularity: arena eviction on {n} offloaded "
-            "MoE layers ranks experts by routed gate mass, not touch count"
-        )
-    else:
-        print(
-            "[stream] MoE mass popularity found no decode-feeder MoE layer "
-            "- no effect"
-        )
-    return n
-
-
 def install_moe_prestage_keepers(model) -> int:
     """Route lookahead prestage through the active miss-shed policy:
     predictions the shed would drop on arrival are never read, and

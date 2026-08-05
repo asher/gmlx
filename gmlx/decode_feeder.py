@@ -220,23 +220,6 @@ def _iopol_utility() -> None:
     libc.setiopolicy_np(0, 1, 4)
 
 
-def credit_popularity(counts, uniq, ids, scores) -> None:
-    """Popularity credit for one routed call: by touch count when
-    ``scores`` is None, else by gate mass scaled so the per-call total
-    stays ``len(uniq)`` (count credit's scale - the two can mix across
-    decode and prefill calls without skewing eviction). Shared by
-    ``stage`` and the gpu-autonomous boundary so the ledgers agree."""
-    if scores is None:
-        counts[uniq] += 1.0
-        return
-    w = np.asarray(scores, dtype=np.float64).reshape(-1)
-    tot = float(w.sum())
-    if tot <= 0.0:
-        counts[uniq] += 1.0
-        return
-    np.add.at(counts, np.asarray(ids).reshape(-1), w * (len(uniq) / tot))
-
-
 class DecodeFeeder:
     """Per-layer wired expert arenas with popularity-driven replacement."""
 
@@ -426,9 +409,6 @@ class DecodeFeeder:
         self._shed_mass = 0.0
         self._shed_tokens = 0
         self._layer_shed_n = 0
-        # Policy switch (installed by moe_experts after load):
-        # popularity credit by gate mass instead of touch count.
-        self._credit_mass = False
 
         # GMLX_DECODE_FEEDER_VERIFY=1: sample-compare arena slots against
         # their file bytes at every publish and every routed use, and
@@ -660,8 +640,7 @@ class DecodeFeeder:
             "restored at next decode"
         )
 
-    def stage(self, li: int, ids: np.ndarray,
-              scores: np.ndarray | None = None) -> np.ndarray | None:
+    def stage(self, li: int, ids: np.ndarray) -> np.ndarray | None:
         """Map router expert ids to arena slots, pulling misses from the GGUF
         into evicted slots first. Returns the slot array (``ids``' shape,
         uint32), or None when the call cannot be served from the arena:
@@ -669,10 +648,6 @@ class DecodeFeeder:
         wedges, or a wedge the layer had no spare slot to contain. On None
         the caller falls back to the CPU path - with ids rewritten through
         ``redirect_dead`` when ``has_dead`` says the layer lost experts.
-
-        ``scores`` (mass-popularity callers only, aligned with ``ids``
-        flattened) switches this call's popularity credit from touch count
-        to gate mass; calls without scores keep count credit.
 
         Caller contract: ``mx.eval`` of the call's ``indices`` has run, so no
         in-flight gather references this layer's arena (see module docstring).
@@ -710,7 +685,7 @@ class DecodeFeeder:
             for pe, ps in self._verify_prev.get(li, ()):
                 if ps < len(owner_v) and owner_v[ps] == pe:
                     self._verify_slot(li, pe, ps, "prev-routed")
-        credit_popularity(counts, uniq, ids, scores)
+        counts[uniq] += 1.0
         self._calls += 1
         if self._calls % _DECAY_EVERY == 0:
             for c in self._counts.values():

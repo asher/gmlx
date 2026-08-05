@@ -8,9 +8,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- `--moe-popularity mass`: expert-arena eviction ranks experts by routed
-  gate mass instead of touch count, keeping each layer's high-mass
-  experts resident.
 - `--moe-prestage keepers`: lookahead reads skip experts the miss-shed
   policy would drop and stage predicted keepers demand-grade, turning
   their synchronous demand stalls into reads that overlap compute.

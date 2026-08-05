@@ -1701,15 +1701,12 @@ def install_expert_streaming(
                         # concatenate cannot take both.
                         ms = (None if getattr(self, "_kq_in_split", False)
                               else getattr(self, "_kq_miss_shed", None))
-                        mass_credit = getattr(dfr, "_credit_mass", False)
                         sc_f32 = None
-                        if ((ms is not None or mass_credit)
-                                and scores_arg is not None
+                        if (ms is not None and scores_arg is not None
                                 and n_tokens == 1):
-                            # Shed and mass credit read the scores host-side;
-                            # fold them into the router eval so the hook adds
-                            # a small D2H copy, not a second per-layer graph
-                            # flush.
+                            # Shed reads the scores host-side; fold them into
+                            # the router eval so the hook adds a small D2H
+                            # copy, not a second per-layer graph flush.
                             sc_f32 = scores_arg.astype(mx.float32)
                             mx.eval(indices, sc_f32)
                         else:
@@ -1721,12 +1718,10 @@ def install_expert_streaming(
                         ids = np.array(indices)
                         shed_args = None
                         shed_mix = None
-                        credit_sc = None
                         if sc_f32 is not None:
                             sc = np.asarray(sc_f32).reshape(-1)
-                            credit_sc = sc
-                            keep = (None if ms is None else dfr.shed_misses(
-                                self._kq_li, ids.reshape(-1), sc, ms))
+                            keep = dfr.shed_misses(
+                                self._kq_li, ids.reshape(-1), sc, ms)
                             if keep is not None:
                                 # Arena-path only: the overflow fallback
                                 # below keeps the original routed set.
@@ -1736,7 +1731,6 @@ def install_expert_streaming(
                                 scn = sc[keep]
                                 # survivors keep the token's full mass
                                 scn = scn * (sc.sum() / max(scn.sum(), 1e-20))
-                                credit_sc = scn
                                 sc_mx = mx.array(scn.reshape(shp)).astype(
                                     scores_arg.dtype)
                                 if _fwd_scores:
@@ -1747,11 +1741,7 @@ def install_expert_streaming(
                                     # full routed set, so mix the shed
                                     # survivors here instead.
                                     shed_mix = sc_mx
-                        if mass_credit and credit_sc is not None:
-                            slots = dfr.stage(
-                                self._kq_li, ids, scores=credit_sc)
-                        else:
-                            slots = dfr.stage(self._kq_li, ids)
+                        slots = dfr.stage(self._kq_li, ids)
                         if ph is not None:
                             t2 = time.perf_counter()
                             w = getattr(dfr, "_t_demand", 0.0) - wait0

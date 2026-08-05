@@ -38,7 +38,7 @@ import numpy as np
 import mlx.core as mx
 
 from . import keepwarm
-from .decode_feeder import _DECAY_EVERY, credit_popularity
+from .decode_feeder import _DECAY_EVERY
 from .envflags import env_bool, env_float, env_int
 
 _ENV = "GMLX_GPU_AUTONOMOUS"
@@ -213,10 +213,7 @@ class GpuTokenState:
             # python miss-shed deliberately starves them; here prestage
             # below re-warms them anyway, so credit keeps the two ledgers
             # comparable.)
-            credit_popularity(
-                counts, routed, np.array(indices),
-                np.array(scores) if getattr(dfr, "_credit_mass", False)
-                else None)
+            counts[routed] += 1.0
             dfr._calls += 1
             if dfr._calls % _DECAY_EVERY == 0:
                 for c in dfr._counts.values():
