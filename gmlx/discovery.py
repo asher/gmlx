@@ -1179,6 +1179,8 @@ def _scaffold_models_block(models, dirs) -> list[str]:
                  "moe_experts: <K> (fixed cap) |")
     lines.append("  #   moe_miss_shed: <P> (drop arena-miss experts, keep "
                  "mass P) |")
+    lines.append("  #   moe_prestage: <ranked|keepers> (keepers = prestage "
+                 "only miss-shed keepers) |")
     lines.append("  #   moe_layer_shed: <P> (skip routed path with "
                  "probability P)")
     if not models:

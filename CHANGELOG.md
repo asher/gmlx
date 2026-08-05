@@ -10,7 +10,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `--moe-prestage keepers`: lookahead reads skip experts the miss-shed
   policy would drop and stage predicted keepers demand-grade, turning
-  their synchronous demand stalls into reads that overlap compute.
+  their synchronous demand stalls into reads that overlap compute. Also
+  a per-model server config key (`moe_prestage: keepers`) and serve flag.
 - Ctrl-T during a `chat` or `run` reply closes the model's open thinking
   block early (as if the thinking budget had just run out) so the answer
   starts now.

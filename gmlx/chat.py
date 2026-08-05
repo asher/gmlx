@@ -1941,6 +1941,7 @@ _ASSISTANT_NOOP = (
     ("moe_expert_probe", "--moe-expert-probe"),
     ("moe_miss_shed", "--moe-miss-shed"),
     ("moe_layer_shed", "--moe-layer-shed"),
+    ("moe_prestage", "--moe-prestage"),
     ("thinking_budget", "--thinking-budget"),
     ("resize_shape", "--resize-shape"),   # only meaningful with --mmproj (rejected)
 )

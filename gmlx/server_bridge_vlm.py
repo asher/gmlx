@@ -494,6 +494,7 @@ def load_serveable_model(
     moe_expert_mass: float | None = None,
     moe_miss_shed: float | None = None,
     moe_layer_shed: float | None = None,
+    moe_prestage: str | None = None,
     feeder_prefill: bool | None = None,
     feeder_decode: bool | None = None,
 ) -> tuple[object, object, object]:
@@ -533,7 +534,9 @@ def load_serveable_model(
     ``moe_miss_shed: P`` / ``moe_layer_shed: P``) install their filters/hooks
     over the streamed layers after the placement. They ride on ``stream`` -
     without a placement each is announced as ignored (there are no streamed
-    experts to filter).
+    experts to filter). ``moe_prestage: keepers`` retargets the lookahead
+    prestage through the miss-shed policy and additionally needs
+    ``moe_miss_shed`` (announced as ignored without it).
     """
     def _reject_unwired(base_kind: str) -> None:
         # Raising beats silently dropping the option on bases that don't
@@ -551,14 +554,15 @@ def load_serveable_model(
         for key, val in (("moe_experts", moe_experts),
                          ("moe_expert_mass", moe_expert_mass),
                          ("moe_miss_shed", moe_miss_shed),
-                         ("moe_layer_shed", moe_layer_shed)):
+                         ("moe_layer_shed", moe_layer_shed),
+                         ("moe_prestage", moe_prestage)):
             if val is not None:
                 print(
                     f"[stream] {key} ignored: needs stream: experts|cpu "
                     "(it only applies to streamed MoE layers)"
                 )
         moe_experts = moe_expert_mass = None
-        moe_miss_shed = moe_layer_shed = None
+        moe_miss_shed = moe_layer_shed = moe_prestage = None
     if mmproj_path is not None and speculative:
         # VLM x MTP: text-only requests speculate; image/audio requests prefill media
         # into the KV and decode normally (verify is token-only over that cache).
@@ -616,6 +620,13 @@ def load_serveable_model(
     if moe_miss_shed is not None:
         from .moe_experts import install_moe_miss_shed
         install_moe_miss_shed(raw_model, moe_miss_shed)
+    if moe_prestage == "keepers":
+        if moe_miss_shed is None:
+            print("[stream] moe_prestage: keepers ignored: it needs "
+                  "moe_miss_shed")
+        else:
+            from .moe_experts import install_moe_prestage_keepers
+            install_moe_prestage_keepers(raw_model)
     if moe_layer_shed is not None:
         from .moe_experts import install_moe_layer_shed
         install_moe_layer_shed(raw_model, moe_layer_shed)
@@ -767,14 +778,15 @@ def install_gguf_server_bridge() -> None:
             # The feeder overrides (config `prefill_feeder:`/`decode_feeder:` /
             # the paired serve flags) and the lossy MoE levers (config
             # `moe_experts:`/`moe_expert_mass:`/`moe_miss_shed:`/
-            # `moe_layer_shed:` / the paired serve flags) ride along; None
-            # keeps the loader default / trained fan-out.
+            # `moe_layer_shed:`/`moe_prestage:` / the paired serve flags) ride
+            # along; None keeps the loader default / trained fan-out.
             stream = getattr(spec, "stream", None)
             feeders = dict(
                 moe_experts=getattr(spec, "moe_experts", None),
                 moe_expert_mass=getattr(spec, "moe_expert_mass", None),
                 moe_miss_shed=getattr(spec, "moe_miss_shed", None),
                 moe_layer_shed=getattr(spec, "moe_layer_shed", None),
+                moe_prestage=getattr(spec, "moe_prestage", None),
                 feeder_prefill=getattr(spec, "prefill_feeder", None),
                 feeder_decode=getattr(spec, "decode_feeder", None),
             )

@@ -165,8 +165,9 @@ def add_moe_expert_args(ap: argparse.ArgumentParser) -> None:
     grp.add_argument(
         "--moe-prestage",
         choices=("ranked", "keepers"),
-        default="ranked",
-        help="Lookahead prestage targeting. ranked: rank-gated speculative "
+        default=None,
+        help="Lookahead prestage targeting; default ranked. ranked: "
+        "rank-gated speculative "
         "reads with guess-grade eviction. keepers: filter predictions "
         "through the active --moe-miss-shed policy - would-be-shed "
         "experts are never read, and would-be-kept misses stage "
@@ -1826,7 +1827,8 @@ def _apply_resolved_to_args(args, rm, explicit: set) -> list[str]:
         applied.append("moe-expert-mass")
     for dest, label in (("moe_experts", "moe-experts"),
                         ("moe_miss_shed", "moe-miss-shed"),
-                        ("moe_layer_shed", "moe-layer-shed")):
+                        ("moe_layer_shed", "moe-layer-shed"),
+                        ("moe_prestage", "moe-prestage")):
         if (getattr(rm, dest, None) is not None and dest not in explicit
                 and hasattr(args, dest)):
             setattr(args, dest, getattr(rm, dest))

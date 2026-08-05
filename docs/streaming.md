@@ -324,9 +324,9 @@ per-layer overhead - which makes it the one that still pays when the
 arena hit rate is high and misses are rare.
 
 In server configs the lossy levers are the per-model `moe_experts: K` /
-`moe_expert_mass: P` / `moe_miss_shed: P` / `moe_layer_shed: P` keys (or
-the matching `serve` flags for a single positional model); the probe
-and `--moe-prestage` stay CLI-only, so size P with a
+`moe_expert_mass: P` / `moe_miss_shed: P` / `moe_layer_shed: P` /
+`moe_prestage: keepers` keys (or the matching `serve` flags for a single
+positional model); the probe stays CLI-only, so size P with a
 `gmlx run --moe-expert-probe` pass before pinning a value in a config.
 
 Which to reach for is a measurement, not a doctrine. Run the probe once,
