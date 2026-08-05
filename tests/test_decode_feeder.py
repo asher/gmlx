@@ -1175,37 +1175,6 @@ def test_shed_misses_keeps_at_least_one_expert(monkeypatch, tmp_path):
     assert keep.tolist() == [True, False]
 
 
-def test_shed_misses_clear_mode_all_or_nothing(monkeypatch, tmp_path):
-    """Clear mode empties the layer's whole miss set when its mass fits
-    the budget (removing that layer's demand-read stall) and sheds
-    nothing when it does not - never a partial shed."""
-    feeder, _ = _make_feeder(monkeypatch, tmp_path)
-    feeder._shed_clear = True
-    feeder.stage(0, np.array([[0, 2]], dtype=np.uint32))  # 0,2 resident
-    ids = np.array([0, 1, 2, 3], dtype=np.uint32)
-    scores = np.array([0.4, 0.05, 0.4, 0.15], dtype=np.float32)
-    # budget 0.3 covers the miss set (experts 1+3 = 0.2): both shed
-    keep = feeder.shed_misses(0, ids, scores, 0.7)
-    assert keep.tolist() == [True, False, True, False]
-    assert feeder._shed_n == 2 and feeder._shed_tokens == 1
-    assert abs(feeder._shed_mass - 0.2) < 1e-6
-    # budget 0.1 does not cover it: nothing sheds (tail mode would have
-    # dropped expert 1 alone)
-    assert feeder.shed_misses(0, ids, scores, 0.9) is None
-    assert feeder._shed_n == 2  # no partial-shed bookkeeping
-
-
-def test_shed_misses_clear_mode_never_drops_whole_set(monkeypatch, tmp_path):
-    """An all-miss routed set never clears: its mass is the full total,
-    over any budget, so the token always computes something."""
-    feeder, _ = _make_feeder(monkeypatch, tmp_path)
-    feeder._shed_clear = True
-    feeder.stage(0, np.array([[0]], dtype=np.uint32))
-    assert feeder.shed_misses(
-        0, np.array([1, 3], dtype=np.uint32),
-        np.array([0.6, 0.4], dtype=np.float32), 0.01) is None
-
-
 # Mass popularity (--moe-popularity mass): score-weighted eviction rank
 def test_stage_mass_credit(monkeypatch, tmp_path):
     """With scores, stage credits popularity by gate mass at count

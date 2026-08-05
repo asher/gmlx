@@ -423,38 +423,22 @@ def _streamed_modules(model):
                 yield m
 
 
-def install_moe_miss_shed(model, p: float, mode: str = "tail") -> int:
+def install_moe_miss_shed(model, p: float) -> int:
     """Shed routed experts that would demand-miss the decode arena, up to
-    ``1 - p`` of each token's score mass (resident and prestage-inflight
-    experts never shed). ``mode`` "tail" sheds lowest scores first up to
-    the budget; "clear" sheds a layer's whole miss set when its mass fits
-    the budget and nothing otherwise (every shed then empties a per-layer
-    demand-read stall instead of thinning one). Lossy; acts only on
-    decode calls that carry routing scores (the fused scores path).
-    Returns the number of layers hooked; raises on p outside (0, 1] or an
-    unknown mode."""
+    ``1 - p`` of each token's score mass (lowest scores first; resident
+    and prestage-inflight experts never shed). Lossy; acts only on decode
+    calls that carry routing scores (the fused scores path). Returns the
+    number of layers hooked; raises on p outside (0, 1]."""
     if not 0.0 < p <= 1.0:
         raise ValueError(f"MoE miss-shed share must be in (0, 1], got {p}")
-    if mode not in ("tail", "clear"):
-        raise ValueError(f"MoE miss-shed mode must be tail or clear, got {mode}")
     n = 0
     for m in _streamed_modules(model):
-        f = getattr(m, "_kq_decode_feeder", None)
-        if f is not None:
+        if getattr(m, "_kq_decode_feeder", None) is not None:
             object.__setattr__(m, "_kq_miss_shed", float(p))
-            if mode == "clear":
-                f._shed_clear = True
-            elif getattr(f, "_shed_clear", False):
-                f._shed_clear = False
             n += 1
     if n:
-        how = (
-            "whole miss sets shed where they fit, none where they don't"
-            if mode == "clear"
-            else "demand-miss experts shed lowest score first"
-        )
         loadlog.info(
-            f"[stream] MoE miss-shed {p:g} ({mode}): {how}, up to "
+            f"[stream] MoE miss-shed {p:g}: demand-miss experts shed up to "
             f"{100 * (1 - p):g}% of each token's gate mass on {n} offloaded "
             "MoE layers (lossy - outputs differ from the trained router)"
         )

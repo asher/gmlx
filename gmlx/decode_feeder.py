@@ -426,10 +426,8 @@ class DecodeFeeder:
         self._shed_mass = 0.0
         self._shed_tokens = 0
         self._layer_shed_n = 0
-        # Policy switches (installed by moe_experts after load).
-        # _shed_clear: shed_misses drops a layer's whole miss set or
-        # nothing. _credit_mass: popularity credit by gate mass.
-        self._shed_clear = False
+        # Policy switch (installed by moe_experts after load):
+        # popularity credit by gate mass instead of touch count.
         self._credit_mass = False
 
         # GMLX_DECODE_FEEDER_VERIFY=1: sample-compare arena slots against
@@ -830,13 +828,7 @@ class DecodeFeeder:
         first, capped at ``1 - keep_mass`` of the token's score mass.
         Returns None when nothing sheds. A shed expert is never staged, so
         it also earns no popularity credit (self-reinforcing by design:
-        the arena's long tail stays cold).
-
-        ``_shed_clear`` (--moe-miss-shed-mode clear) swaps the greedy tail
-        for all-or-nothing: shed the layer's whole miss set when its mass
-        fits the budget, else shed nothing. A partial shed only thins the
-        bytes inside stage()'s per-layer read barrier; clearing the set
-        removes the barrier, which is where the wall time is."""
+        the arena's long tail stays cold)."""
         res = self._shed_mask(li, ids, scores, keep_mass)
         if res is None:
             return None
@@ -863,16 +855,6 @@ class DecodeFeeder:
             return None
         total = float(scores.sum())
         budget = total * max(0.0, 1.0 - keep_mass)
-        if self._shed_clear:
-            if miss.all():
-                # Never drop a token's entire routed set (belt-and-braces:
-                # an all-miss set's mass is the full total, over any
-                # budget with keep_mass > 0).
-                return None
-            shed_mass = float(scores[miss].sum())
-            if shed_mass > budget:
-                return None
-            return ~miss, shed_mass, total
         keep = np.ones(ids.size, dtype=bool)
         shed_mass = 0.0
         shed_n = 0

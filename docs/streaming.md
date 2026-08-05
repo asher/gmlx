@@ -302,22 +302,11 @@ It needs the decode feeder and a block that hands router scores to the
 expert call; where it engages, it is the most targeted lever per point of
 quality spent, and its payoff scales directly with the miss rate.
 
-The two shed modes spend the same budget with different aims. The
-default tail mode maximizes misses shed per point of mass, which is the
-right spend when stall time tracks the reads themselves.
-`--moe-miss-shed-mode clear` instead sheds a layer's entire miss set
-when its combined mass fits the budget and sheds nothing otherwise:
-only a layer whose miss set empties leaves the synchronous demand path
-entirely, and untouched layers keep their full committee. Which wins is
-a measurement, not a doctrine: compare the two at equal realized shed
-mass and read the `demand reads` stall line at exit; if tail mode has
-plateaued with stall seconds remaining, clear is the cheap A/B.
-`--moe-popularity mass` complements it from the residency side: arena
-eviction normally ranks experts by touch count, which keeps the most
-often routed experts resident; ranking by routed gate mass instead
+`--moe-popularity mass` complements miss-shed from the residency side:
+arena eviction normally ranks experts by touch count, which keeps the
+most often routed experts resident; ranking by routed gate mass instead
 keeps the experts miss-shed refuses to drop, so fewer high-mass misses
-remain to block a clear. It changes no outputs on its own and composes
-with either shed mode.
+remain to stall a layer. It changes no outputs on its own.
 
 `--moe-prestage keepers` attacks the same stalls from the speculative
 side, with no quality cost of its own. Lookahead normally prestages its
@@ -343,9 +332,9 @@ arena hit rate is high and misses are rare.
 In server configs the lossy levers are the per-model `moe_experts: K` /
 `moe_expert_mass: P` / `moe_miss_shed: P` / `moe_layer_shed: P` keys (or
 the matching `serve` flags for a single positional model); the probe,
-`--moe-miss-shed-mode`, `--moe-popularity`, and `--moe-prestage` stay
-CLI-only, so size P with a `gmlx run --moe-expert-probe` pass before
-pinning a value in a config.
+`--moe-popularity`, and `--moe-prestage` stay CLI-only, so size P with
+a `gmlx run --moe-expert-probe` pass before pinning a value in a
+config.
 
 Which to reach for is a measurement, not a doctrine. Run the probe once,
 and read the decode feeder's exit stats (arena hit rate; printed by
