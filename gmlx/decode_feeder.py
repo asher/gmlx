@@ -837,6 +837,21 @@ class DecodeFeeder:
         fits the budget, else shed nothing. A partial shed only thins the
         bytes inside stage()'s per-layer read barrier; clearing the set
         removes the barrier, which is where the wall time is."""
+        res = self._shed_mask(li, ids, scores, keep_mass)
+        if res is None:
+            return None
+        keep, shed_mass, total = res
+        self._shed_n += int((~keep).sum())
+        self._shed_mass += shed_mass / max(total, 1e-20)
+        self._shed_tokens += 1
+        return keep
+
+    def _shed_mask(self, li: int, ids: np.ndarray, scores: np.ndarray,
+                   keep_mass: float):
+        """Policy core shared by ``shed_misses`` (which books the stats)
+        and keeper-mode ``prestage`` (which asks what would shed on
+        arrival, stats-free). Returns ``(keep, shed_mass, total)`` or
+        None when nothing sheds."""
         slot_of = self._slot_of.get(li)
         if slot_of is None:
             return None
@@ -857,31 +872,28 @@ class DecodeFeeder:
             shed_mass = float(scores[miss].sum())
             if shed_mass > budget:
                 return None
-            keep = ~miss
-            shed_n = int(miss.sum())
-        else:
-            keep = np.ones(ids.size, dtype=bool)
-            shed_mass = 0.0
-            shed_n = 0
-            for j in np.argsort(scores, kind="stable"):
-                if not miss[j] or keep.sum() <= 1:
-                    continue
-                s = float(scores[j])
-                if shed_mass + s > budget:
-                    break
-                keep[j] = False
-                shed_mass += s
-                shed_n += 1
-            if not shed_n:
-                return None
-        self._shed_n += shed_n
-        self._shed_mass += shed_mass / max(total, 1e-20)
-        self._shed_tokens += 1
-        return keep
+            return ~miss, shed_mass, total
+        keep = np.ones(ids.size, dtype=bool)
+        shed_mass = 0.0
+        shed_n = 0
+        for j in np.argsort(scores, kind="stable"):
+            if not miss[j] or keep.sum() <= 1:
+                continue
+            s = float(scores[j])
+            if shed_mass + s > budget:
+                break
+            keep[j] = False
+            shed_mass += s
+            shed_n += 1
+        if not shed_n:
+            return None
+        return keep, shed_mass, total
 
     def prestage(self, li: int, pred_ids: np.ndarray, *,
                  demand: bool = False,
-                 protect: np.ndarray | None = None) -> None:
+                 protect: np.ndarray | None = None,
+                 keep_mass: float | None = None,
+                 pred_scores: np.ndarray | None = None) -> None:
         """Asynchronously pre-read predicted experts into layer ``li``'s
         arena. Safe under the same fence as ``stage`` (the caller's router
         eval for the *previous* MoE layer of the same token transitively
@@ -896,7 +908,14 @@ class DecodeFeeder:
         resident) is dropped and stage()'s policy applies: evict the
         least-popular resident outright. ``protect`` lists expert ids
         whose slots must survive this call (the token's routed set -
-        routing locality makes them next token's likely demand)."""
+        routing locality makes them next token's likely demand).
+
+        ``keep_mass`` + ``pred_scores`` (--moe-prestage keepers) filter a
+        decode-shaped prediction through the active miss-shed policy
+        first: predictions the shed would drop on arrival are not read at
+        all, and the keepers - the reads the demand path would otherwise
+        do synchronously next layer - stage demand-grade (full width, no
+        rank cap, least-popular eviction)."""
         if (
             li not in self._layers
             or self._staging_disabled
@@ -911,10 +930,25 @@ class DecodeFeeder:
         owner = self._owner[li]
         counts = self._counts[li]
         dead = self._dead.get(li)
+        keeper = False
+        if keep_mass is not None and pred_scores is not None:
+            flat = pred_ids.reshape(-1, pred_ids.shape[-1])
+            if flat.shape[0] == 1:  # decode-shaped predictions only
+                keeper = True
+                res = self._shed_mask(
+                    li, flat[0],
+                    np.asarray(pred_scores, dtype=np.float32).reshape(-1),
+                    keep_mass)
+                if res is not None:
+                    kept = flat[0][res[0]]
+                    if not kept.size:
+                        return
+                    pred_ids = kept.reshape(1, -1)
+        hard = demand or keeper
         # Only the top GMLX_DECODE_LOOKAHEAD_K ranks per row are considered (the
         # ranking head is reliable, the tail is not); residents among them
         # are simply already-good news, not license to dig deeper.
-        if demand:
+        if hard:
             rows = pred_ids.reshape(-1, pred_ids.shape[-1])
         else:
             rows = pred_ids.reshape(-1, pred_ids.shape[-1])[:, : self._la_k]
@@ -955,10 +989,10 @@ class DecodeFeeder:
                 if not len(cand):
                     break
                 v = int(np.argmin(counts[owner[cand]]))
-                if not demand and counts[owner[cand]][v] > counts[e]:
+                if not hard and counts[owner[cand]][v] > counts[e]:
                     # Guess-grade guard: a wrong prediction may only cost
-                    # a cold slot, never a hot one. Demand mode evicts
-                    # least-popular outright, like stage().
+                    # a cold slot, never a hot one. Demand and keeper
+                    # modes evict least-popular outright, like stage().
                     continue
                 s = int(cand[v])
                 old = int(owner[s])

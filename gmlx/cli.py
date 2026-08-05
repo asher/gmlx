@@ -182,6 +182,17 @@ def add_moe_expert_args(ap: argparse.ArgumentParser) -> None:
         "--moe-miss-shed, stop missing).",
     )
     grp.add_argument(
+        "--moe-prestage",
+        choices=("ranked", "keepers"),
+        default="ranked",
+        help="Lookahead prestage targeting. ranked: rank-gated speculative "
+        "reads with guess-grade eviction. keepers: filter predictions "
+        "through the active --moe-miss-shed policy - would-be-shed "
+        "experts are never read, and would-be-kept misses stage "
+        "demand-grade, converting their future demand stalls into "
+        "overlapped reads. Needs --moe-miss-shed.",
+    )
+    grp.add_argument(
         "--moe-layer-shed",
         type=float,
         default=None,
@@ -1262,6 +1273,10 @@ def _apply_placement(args, model) -> None:
                     "--moe-popularity mass",
                     getattr(args, "moe_popularity", "count") == "mass",
                 ),
+                (
+                    "--moe-prestage keepers",
+                    getattr(args, "moe_prestage", "ranked") == "keepers",
+                ),
             )
             if on
         ]
@@ -1328,6 +1343,16 @@ def _apply_placement(args, model) -> None:
         from .moe_experts import install_moe_mass_popularity
 
         install_moe_mass_popularity(model)
+    if getattr(args, "moe_prestage", "ranked") == "keepers":
+        if getattr(args, "moe_miss_shed", None) is None:
+            print(
+                "[stream] --moe-prestage keepers ignored: it needs "
+                "--moe-miss-shed"
+            )
+        else:
+            from .moe_experts import install_moe_prestage_keepers
+
+            install_moe_prestage_keepers(model)
     if getattr(args, "moe_layer_shed", None) is not None:
         from .moe_experts import install_moe_layer_shed
 

@@ -1091,6 +1091,42 @@ def test_close_stats_gated_on_stats_verbose(capsys):
     assert "wedged" in out
 
 
+# Keeper-mode prestage (--moe-prestage keepers): shed-aware targeting
+def test_prestage_keeper_mode_filters_and_evicts(monkeypatch, tmp_path):
+    """Keeper mode never reads a prediction the shed policy would drop on
+    arrival, stages the keepers demand-grade (a colder resident is
+    evicted although the prediction has no popularity), and books no
+    shed stats for the filtering."""
+    feeder, _ = _make_feeder(monkeypatch, tmp_path)
+    feeder.stage(0, np.array([[0, 1]]))  # arena full: e0, e1
+    feeder.stage(0, np.array([[0]]))     # counts: e0=2 > e1=1
+    # e0 resident; e2 (0.3) survives the 0.3 budget, e3 (0.1) sheds.
+    ids = np.array([[0, 2, 3]])
+    sc = np.array([0.6, 0.3, 0.1], dtype=np.float32)
+    feeder.prestage(0, ids, keep_mass=0.7, pred_scores=sc)
+    assert feeder._la_submitted == 1
+    assert 2 in feeder._pending[0] and 3 not in feeder._pending[0]
+    assert feeder._slot_of[0][1] == -1  # cold resident evicted outright
+    assert feeder._slot_of[0][0] >= 0   # predicted resident shielded
+    assert feeder._shed_n == 0 and feeder._shed_tokens == 0
+    _wait_published(feeder, 0)
+    assert feeder._slot_of[0][2] >= 0
+
+
+def test_prestage_keeper_mode_full_width_when_nothing_sheds(
+        monkeypatch, tmp_path):
+    """A budget that sheds nothing makes every predicted miss a keeper:
+    keeper mode skips the speculative rank cap, ranked mode keeps it."""
+    monkeypatch.setenv("GMLX_DECODE_LOOKAHEAD_K", "1")
+    feeder, _ = _make_feeder(monkeypatch, tmp_path)
+    ids = np.array([[1, 3]])
+    sc = np.array([0.5, 0.5], dtype=np.float32)
+    feeder.prestage(0, ids, keep_mass=1.0, pred_scores=sc)
+    assert feeder._la_submitted == 2  # both, despite the rank cap of 1
+    feeder.prestage(1, ids)
+    assert feeder._la_submitted == 3  # ranked mode: capped to rank 0
+
+
 # Lossy miss-shed (--moe-miss-shed): residency-aware expert drop
 def test_shed_misses_drops_cold_lowest_first(monkeypatch, tmp_path):
     """Only demand-miss experts shed, lowest score first, capped at

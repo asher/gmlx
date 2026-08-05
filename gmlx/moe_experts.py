@@ -494,6 +494,31 @@ def install_moe_mass_popularity(model) -> int:
     return n
 
 
+def install_moe_prestage_keepers(model) -> int:
+    """Route lookahead prestage through the active miss-shed policy:
+    predictions the shed would drop on arrival are never read, and
+    predicted keepers - the reads the demand path would otherwise do
+    synchronously - stage demand-grade (full width, least-popular
+    eviction). Needs --moe-miss-shed on the same layers to define the
+    policy. Returns the number of layers hooked."""
+    n = 0
+    for m in _streamed_modules(model):
+        if getattr(m, "_kq_decode_feeder", None) is not None:
+            object.__setattr__(m, "_kq_prestage_keepers", True)
+            n += 1
+    if n:
+        loadlog.info(
+            f"[stream] MoE keeper prestage: lookahead reads on {n} offloaded "
+            "MoE layers target only experts the miss-shed policy would keep"
+        )
+    else:
+        print(
+            "[stream] MoE keeper prestage found no decode-feeder MoE layer "
+            "- no effect"
+        )
+    return n
+
+
 def install_moe_layer_shed(model, p: float) -> int:
     """Skip each streamed MoE layer's routed path with probability ``p``
     per decode token; the layer's shared expert still runs. Lossy.

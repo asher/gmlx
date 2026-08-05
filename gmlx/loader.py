@@ -1764,8 +1764,17 @@ def install_expert_streaming(
                             # layer's gather and the next layers' every-token
                             # work compute - speculation never competes with
                             # demand traffic for the SSD.
-                            for _dst, _ids in la_pred.items():
-                                dfr.prestage(_dst, _ids)
+                            la_keep = (
+                                ms if getattr(
+                                    self, "_kq_prestage_keepers", False)
+                                else None)
+                            for _dst, (_ids, _sc) in la_pred.items():
+                                if la_keep is not None:
+                                    dfr.prestage(
+                                        _dst, _ids, keep_mass=la_keep,
+                                        pred_scores=_sc)
+                                else:
+                                    dfr.prestage(_dst, _ids)
                             if ph is not None:
                                 ph["prestage"] += time.perf_counter() - t2
                         if slots is not None:
