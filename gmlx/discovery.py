@@ -44,7 +44,8 @@ from . import arch_table as _arch_table
 # hidden size it carries as a "backbone" field). The set is the fast path; the
 # backbone-field probe in `_looks_like_drafter` catches future naming.
 _DRAFTER_ARCHES = frozenset({"gemma4_assistant", "gemma4-assistant", "gemma4_mtp",
-                             "deepseek4-dspark"})
+                             "deepseek4-dspark",
+                             "dflash"})  # llama.cpp's arch name for DSpark
 _BACKBONE_FIELDS = ("backbone_embedding_length", "embedding_length_out",
                     "n_embd_backbone")
 
@@ -95,10 +96,16 @@ class ClassifiedGguf:
 
 
 # Classification
-def _looks_like_drafter(meta, arch: str | None) -> bool:
+def is_drafter_arch(arch: str | None) -> bool:
+    """Whether ``arch`` names a draft/assistant model - a speculative-decoding
+    companion for a target model, never a standalone servable model."""
     if arch in _DRAFTER_ARCHES:
         return True
-    if arch and ("assistant" in arch or "_mtp" in arch):
+    return bool(arch) and ("assistant" in arch or "_mtp" in arch)
+
+
+def _looks_like_drafter(meta, arch: str | None) -> bool:
+    if is_drafter_arch(arch):
         return True
     if arch:
         for suf in _BACKBONE_FIELDS:
@@ -305,7 +312,8 @@ def header_sampling(path) -> dict:
 
 def find_mtp_companion(
     path: str,
-    drafter_arch: str | tuple = ("deepseek4-dspark", "deepseek4_mtp_support"),
+    drafter_arch: str | tuple = ("deepseek4-dspark", "dflash",
+                                 "deepseek4_mtp_support"),
 ) -> str | None:
     """Path of an MTP drafter GGUF (arch in ``drafter_arch``) sitting in the
     same directory as ``path``, or ``None``. Header-only peeks through

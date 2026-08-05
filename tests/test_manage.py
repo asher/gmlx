@@ -884,6 +884,31 @@ def test_validate_mmproj_json(tmp_path, capsys):
     assert v["usable"] is True
 
 
+# drafter companion files (MTP / DSpark sidecars, incl. llama.cpp's dflash)
+@pytest.mark.parametrize("arch", ["deepseek4-dspark", "dflash",
+                                  "deepseek4_mtp_support"])
+def test_validate_local_drafter_companion(tmp_path, capsys, arch):
+    p = tmp_path / "drafter.gguf"
+    _mint(p, arch=arch, codec=GT.Q8_0)
+    rc = manage.cmd_validate([str(p)])
+    out = capsys.readouterr().out
+    assert rc == 0                       # valid for its purpose
+    assert "draft-model companion" in out
+    assert "--draft-gguf" in out         # the message says how to use it
+    assert "not loadable" not in out and "[unsupported]" not in out
+
+
+def test_validate_drafter_json(tmp_path, capsys):
+    p = tmp_path / "drafter.gguf"
+    _mint(p, arch="dflash", codec=GT.Q8_0)
+    rc = manage.cmd_validate([str(p), "--json"])
+    v = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert v["drafter"] is True
+    assert v["loadable"] is False        # not a standalone model
+    assert v["usable"] is True
+
+
 def test_pull_mmproj_no_force_needed(tmp_path, monkeypatch):
     _serve(monkeypatch, _mint_mmproj(tmp_path / "mmproj.gguf"))
     called = []

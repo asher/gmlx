@@ -59,6 +59,36 @@ def test_mtp_support_arch_is_drafter():
     assert c.kind == "drafter"
 
 
+def test_dflash_arch_is_drafter():
+    """llama.cpp packages the DSpark drafter under arch `dflash` (the unsloth
+    release); it must classify as a companion, not an unsupported model."""
+    c = _classify({"general.architecture": "dflash"},
+                  "dspark-DeepSeek-V4-Flash-0731-Q8_0.gguf")
+    assert c.kind == "drafter"
+
+
+def test_companion_prefers_native_dspark_over_dflash(tmp_path, monkeypatch):
+    """With both containers next to the target, the gmlx-native sidecar wins."""
+    target = tmp_path / "model.gguf"
+    for name in ("a-dflash.gguf", "b-dspark.gguf", "model.gguf"):
+        (tmp_path / name).write_bytes(b"GGUF")
+    metas = {str(tmp_path / "a-dflash.gguf"): {"arch": "dflash"},
+             str(tmp_path / "b-dspark.gguf"): {"arch": "deepseek4-dspark"},
+             str(target): {"arch": "deepseek4"}}
+    monkeypatch.setattr(disc, "header_meta", lambda p: metas.get(str(p)))
+    assert disc.find_mtp_companion(str(target)) == str(tmp_path / "b-dspark.gguf")
+
+
+def test_companion_accepts_dflash_alone(tmp_path, monkeypatch):
+    target = tmp_path / "model.gguf"
+    for name in ("dspark-q8.gguf", "model.gguf"):
+        (tmp_path / name).write_bytes(b"GGUF")
+    metas = {str(tmp_path / "dspark-q8.gguf"): {"arch": "dflash"},
+             str(target): {"arch": "deepseek4"}}
+    monkeypatch.setattr(disc, "header_meta", lambda p: metas.get(str(p)))
+    assert disc.find_mtp_companion(str(target)) == str(tmp_path / "dspark-q8.gguf")
+
+
 def test_backbone_field_implies_drafter():
     """A future/unknown drafter arch is still caught by its target-backbone field."""
     c = _classify({"general.architecture": "gemma4-weird-draft",
