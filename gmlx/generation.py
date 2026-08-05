@@ -432,7 +432,7 @@ def generate(
             window=over_generation, inject_critique=inject_critique,
             template_kwargs=critique_tk, log_path=over_generation_log,
             orig_prompt=_over_prompt, label=over_label,
-            params=params, verbose=verbose,
+            params=params, verbose=verbose, reasoning=reasoning,
         )
 
     close_progress = None
@@ -553,13 +553,16 @@ def _generate_over(
     over_logits_processors=None,
     orig_prompt=None,
     label=None,
+    reasoning=None,
 ):
     """Over-generation probe (experimental). Phase 1 generates to the natural
     stop (the seam); phase 2 continues from phase 1's KV cache, either forcing
     ``window`` free tokens past the seam or injecting a follow-up critique turn
     and answering it. ``inject_critique`` selects the mode; when both it and
     ``window`` are set, ``window`` caps the injected reply. Returns the full
-    text and appends a JSONL record to ``log_path`` when set. See overgen.py."""
+    text and appends a JSONL record to ``log_path`` when set. See overgen.py.
+    ``reasoning`` styles phase 1's verbose stream like :func:`generate`'s;
+    phase 2 prints raw (the forced continuation is the thing being probed)."""
     from mlx_lm.generate import stream_generate
     from mlx_lm.models.cache import make_prompt_cache
 
@@ -580,6 +583,12 @@ def _generate_over(
     # the seam is detected here (and its token held out of the kept text)
     # instead of stream_generate ending the call.
     pre, seam, last = [], None, None
+    emit = close_emit = None
+    if verbose:
+        # Phase 1 is a normal reply: style it like the main verbose path
+        # (thinking rendering included). Phase 2 stays raw: the forced
+        # continuation is the thing being probed.
+        emit, close_emit = _verbose_emitter(prompt, tokenizer, reasoning)
     with suppressed_eos(tokenizer):
         for r in stream_generate(
             model, tokenizer, prompt, max_tokens=max_tokens,
@@ -595,8 +604,10 @@ def _generate_over(
                 }
                 break
             pre.append(r.text)
-            if verbose:
-                print(r.text, end="", flush=True)
+            if emit is not None:
+                emit(r.text)
+    if close_emit is not None:
+        close_emit()
     pre_text = "".join(pre)
     phase1_last = last  # the seam response; phase 2 reassigns `last` below
 

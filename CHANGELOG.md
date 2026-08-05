@@ -19,6 +19,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `--over-generation` runs now render thinking in the verbose stream like
+  normal runs (the probe path bypassed the styled emitter).
 - CLI polish: `--help`/`--help-all` now win even after a value-taking flag,
   the short `-h` pages gained the typical sampling/config/streaming flags,
   tab completion offers flag values (choices, themes, profiles).
