@@ -11,6 +11,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Ctrl-T during a `chat` or `run` reply closes the model's open thinking
   block early (as if the thinking budget had just run out) so the answer
   starts now.
+- DeepSeek-V4 speculative decoding now accepts llama.cpp dflash draft GGUFs 
+  in addition to DwarfStar's.
 
 ### Changed
 

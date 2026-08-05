@@ -165,7 +165,11 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
     # A LoRA adapter carries its base model's arch (general.type = "adapter"),
     # so like mmproj it's a valid companion file, never a standalone model.
     adapter = report.gguf_type == "adapter"
-    if mmproj or adapter:
+    # A draft model (MTP / DSpark / assistant) is likewise a companion: it
+    # rides a target model, so the standalone arch gate doesn't apply.
+    from .discovery import is_drafter_arch
+    drafter = not (mmproj or adapter) and is_drafter_arch(report.arch)
+    if mmproj or adapter or drafter:
         arch_ok, arch_err = False, None
     else:
         arch_ok, arch_err = _arch_status(report.arch, hf_source=hf_source)
@@ -180,12 +184,14 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
         # unknown); companions (mmproj/adapter) ride a base model, so their
         # standalone fit is not judged.
         "fit": (classify_fit(size_bytes, ram)
-                if size_bytes and not (mmproj or adapter) else None),
+                if size_bytes and not (mmproj or adapter or drafter)
+                else None),
         "arch": report.arch,
         "arch_supported": arch_ok,
         "arch_error": arch_err,
         "mmproj": mmproj,
         "adapter": adapter,
+        "drafter": drafter,
         "n_shards": n_shards,
         "n_tensors": report.n_tensors,
         "codecs": dict(sorted(report.histogram.items())),
@@ -195,7 +201,8 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
         # loadable = runs standalone; usable also admits a healthy companion
         # (mmproj / LoRA adapter).
         "usable": (report.loadable_codecs and arch_ok)
-                  or ((mmproj or adapter) and report.loadable_codecs),
+                  or ((mmproj or adapter or drafter)
+                      and report.loadable_codecs),
     }
 
 
@@ -207,6 +214,8 @@ def _print_report(v: dict) -> None:
         print(f"  architecture: {arch}  [mmproj companion]")
     elif v.get("adapter"):
         print(f"  architecture: {arch}  [LoRA adapter]")
+    elif v.get("drafter"):
+        print(f"  architecture: {arch}  [draft-model companion]")
     elif v["arch_supported"]:
         print(f"  architecture: {arch}  [supported]")
     else:
@@ -242,13 +251,18 @@ def _print_report(v: dict) -> None:
         print("  => adapter companion: a LoRA adapter, not a standalone model -")
         print("     attach it to its base GGUF: --adapter on run/chat/serve, or")
         print("     `adapter:` per model in the server config.")
+    elif v.get("drafter") and v["codecs_loadable"]:
+        print("  => draft-model companion: a speculative-decoding drafter, not a")
+        print("     standalone model - place it in the same directory as its")
+        print("     target GGUF (autodetected) or pass --draft-gguf.")
     else:
         reasons = []
         if not v["codecs_loadable"]:
             bad = ", ".join(f"{k}x{n}"
                             for k, n in v["unsupported_codecs"].items())
             reasons.append(f"unsupported codecs ({bad})")
-        if not v["arch_supported"] and not (v.get("mmproj") or v.get("adapter")):
+        if not v["arch_supported"] and not (v.get("mmproj") or v.get("adapter")
+                                            or v.get("drafter")):
             reasons.append("architecture not supported")
         print(f"  => not loadable: {'; '.join(reasons)}")
 
@@ -846,7 +860,8 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
             if not v["codecs_loadable"] and v["unsupported_codecs"]:
                 reasons.append(
                     "no kernel for codec(s): " + ", ".join(v["unsupported_codecs"]))
-            if not v["arch_supported"] and not (v.get("mmproj") or v.get("adapter")):
+            if not v["arch_supported"] and not (v.get("mmproj") or v.get("adapter")
+                                                or v.get("drafter")):
                 reasons.append(f"unsupported arch: {v['arch'] or '?'}")
             why = f" - {'; '.join(reasons)}" if reasons else ""
             print(f"\nrefusing to download an unloadable GGUF{why}. Pass --force to "

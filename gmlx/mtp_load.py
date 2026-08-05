@@ -477,6 +477,11 @@ def _load_deepseek4_mtp_drafter(
     arrays, kquant_meta, d_arch, _meta, _shapes = load_gguf_wire_bytes(
         draft_gguf_path, zero_copy=zero_copy
     )
+    if d_arch == "dflash":
+        arrays, kquant_meta, _meta = normalize_dflash_arrays(
+            arrays, kquant_meta, _meta
+        )
+        d_arch = "deepseek4-dspark"
     if d_arch == "deepseek4-dspark":
         return _load_deepseek4_dspark_drafter(
             draft_gguf_path,
@@ -489,9 +494,9 @@ def _load_deepseek4_mtp_drafter(
         )
     if d_arch != "deepseek4_mtp_support":
         raise ValueError(
-            f"{draft_gguf_path}: expected a deepseek4_mtp_support or "
-            f"deepseek4-dspark drafter GGUF for a deepseek_v4 target, got "
-            f"arch {d_arch!r}"
+            f"{draft_gguf_path}: expected a deepseek4-dspark, dflash, or "
+            f"deepseek4_mtp_support drafter GGUF for a deepseek_v4 target, "
+            f"got arch {d_arch!r}"
         )
     log(
         f"[mtp] drafter gguf ({d_arch}): {len(arrays)} arrays, "
@@ -584,6 +589,83 @@ _DSPARK_TOP_RAW = {
     "hc_head_base": "hc_head.base",
     "hc_head_scale": "hc_head.scale",
 }
+
+
+# llama.cpp packages the same DSpark drafter under arch "dflash" (its
+# convert_hf_to_gguf --dspark output, e.g. the unsloth release): per-stage
+# tensors under blk.{k}.* with the same leaf names, and drafter-level tensors
+# renamed through its root map. normalize_dflash_arrays translates that
+# container back to the deepseek4-dspark namespace so one remap serves both.
+# Drafter-level base name -> dspark base name; {L} is the last stage index
+# (stage placement only matters for the remap's per-stage bookkeeping:
+# main_proj/main_norm are stage-0 entries, the head tensors final-stage).
+_DFLASH_ROOT_MAP = {
+    "fc": "mtp.0.main_proj",
+    "enc.output_norm": "mtp.0.main_norm",
+    "output_norm": "mtp.{L}.norm",
+    "markov_w1": "mtp.{L}.markov_head.markov_w1",
+    "markov_w2": "mtp.{L}.markov_head.markov_w2",
+    "conf_proj": "mtp.{L}.confidence_head.proj",
+    "output_hc_fn": "mtp.{L}.hc_head_fn",
+    "output_hc_base": "mtp.{L}.hc_head_base",
+    "output_hc_scale": "mtp.{L}.hc_head_scale",
+}
+_DFLASH_SUFFIXES = (".weight", ".scales", ".biases", ".bias")
+
+
+def _dflash_rename(name: str, last_stage: int) -> str:
+    """The deepseek4-dspark name for one dflash tensor entry."""
+    if name.startswith("blk."):
+        return "mtp." + name[len("blk."):]
+    base, suffix = name, ""
+    for s in _DFLASH_SUFFIXES:
+        if name.endswith(s):
+            base, suffix = name[: -len(s)], s
+            break
+    mapped = _DFLASH_ROOT_MAP.get(base)
+    if mapped is None:
+        raise RuntimeError(
+            f"dflash normalize: unknown tensor {name!r} "
+            f"(the drafter tensor set is closed)"
+        )
+    return mapped.replace("{L}", str(last_stage)) + suffix
+
+
+def normalize_dflash_arrays(arrays: dict, kquant_meta: dict, meta: dict):
+    """Translate a llama.cpp ``dflash`` GGUF (tensor names and metadata) to
+    the ``deepseek4-dspark`` namespace. Returns ``(arrays, kquant_meta,
+    meta)`` ready for :func:`_load_deepseek4_dspark_drafter`."""
+    stages = {
+        int(n.split(".")[1]) for n in arrays if n.startswith("blk.")
+    }
+    if not stages:
+        raise RuntimeError("dflash normalize: no blk.* stage tensors found")
+    last_stage = max(stages)
+    n_arrays = {
+        _dflash_rename(name, last_stage): arr for name, arr in arrays.items()
+    }
+    n_kquant = {
+        _dflash_rename(name, last_stage): codec
+        for name, codec in kquant_meta.items()
+    }
+    n_meta = dict(meta)
+    block_size = meta.get("dflash.block_size")
+    if block_size is not None:
+        n_meta["dspark.block_size"] = block_size
+    # llama.cpp's converter writes the capture layers shifted +1 (its layer 0
+    # is the embedding) and carries the noise token as the tokenizer mask
+    # token; undo both. Verified against the source config ([40, 41, 42] for
+    # a 43-layer target) and conversion/deepseek.py's add_target_layers.
+    layers = meta.get("dflash.target_layers")
+    if layers is not None:
+        n_meta["dspark.target_layer_ids"] = [int(i) - 1 for i in layers]
+    mask = meta.get("tokenizer.ggml.mask_token_id")
+    if mask is not None:
+        n_meta["dspark.noise_token_id"] = int(mask)
+    w1 = n_arrays.get(f"mtp.{last_stage}.markov_head.markov_w1.weight")
+    if w1 is not None and "dspark.markov_rank" not in n_meta:
+        n_meta["dspark.markov_rank"] = int(min(w1.shape))
+    return n_arrays, n_kquant, n_meta
 
 
 def remap_deepseek4_dspark_arrays(

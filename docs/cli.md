@@ -144,7 +144,7 @@ with a warning); `--no-speculative`/`--no-mtp` forces it off.
 |------|---------|
 | `--speculative` / `--mtp` | Force MTP speculative decoding on. Native-head models (qwen3.5/3.6 `nextn`) need no companion; gemma4 needs `--draft-gguf`. Native heads are auto-enabled without this. Use it to force the path when a sampler flag would otherwise defer. |
 | `--no-speculative` / `--no-mtp` | Disable MTP. Overrides the native-head auto-enable and config `speculative: true`. |
-| `--draft-gguf PATH` | Separate assistant-drafter GGUF (gemma4 two-GGUF MTP shape); implies `--speculative` (same as `serve`). |
+| `--draft-gguf PATH` | Separate assistant-drafter GGUF (gemma4 two-GGUF MTP shape, or a deepseek4 DSpark/MTP sidecar - gmlx `deepseek4-dspark`, llama.cpp `dflash`, or legacy `deepseek4_mtp_support`); implies `--speculative` (same as `serve`). A sidecar in the target's directory is autodetected without the flag. |
 | `--draft-block-size N` | Override the MTP draft block size. |
 
 Speculative generation takes only `--temp`/`--top-p`/`--top-k`/`--min-p` plus a
