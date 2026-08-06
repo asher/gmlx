@@ -253,12 +253,19 @@ def test_moe_lossy_levers_parsed_and_resolved():
                   speculative=False, mmproj=None, draft_gguf=None, pin=False,
                   ttl_s=None, stream="experts")
     base_sig = cfgmod.ResolvedModel(id="x", **common).load_signature()
-    for key, val in (("moe_experts", 2), ("moe_expert_mass", 0.5),
-                     ("moe_miss_shed", 0.5), ("moe_layer_shed", 0.5),
-                     ("moe_prestage", "keepers")):
-        sig = cfgmod.ResolvedModel(
-            id="x", **{key: val}, **common).load_signature()
-        assert sig != base_sig, key
+    # (keepers needs a shed policy to take effect, so its arm carries one and
+    # is compared against the shed-only signature, not the bare base.)
+    for extra in ({"moe_experts": 2}, {"moe_expert_mass": 0.5},
+                  {"moe_miss_shed": 0.5}, {"moe_layer_shed": 0.5},
+                  {"moe_miss_shed": 0.5, "moe_prestage": "keepers"}):
+        sig = cfgmod.ResolvedModel(id="x", **extra, **common).load_signature()
+        assert sig != base_sig, extra
+    shed_only = cfgmod.ResolvedModel(
+        id="x", moe_miss_shed=0.5, **common).load_signature()
+    with_keepers = cfgmod.ResolvedModel(
+        id="x", moe_miss_shed=0.5, moe_prestage="keepers",
+        **common).load_signature()
+    assert with_keepers != shed_only
 
     for key, bad in (("moe_experts", 0), ("moe_experts", "many"),
                      ("moe_miss_shed", 1.5), ("moe_miss_shed", 0),
@@ -269,6 +276,47 @@ def test_moe_lossy_levers_parsed_and_resolved():
                                   "stream": "experts", key: bad}
         with pytest.raises(ConfigError, match=key):
             build_config(doc)
+
+
+def test_load_signature_canonicalizes_effective_defaults(monkeypatch):
+    """The signature hashes effective values, not config spellings: writing
+    a default explicitly must not fork a resident entry from an unset key."""
+    monkeypatch.delenv("GMLX_FEEDER_PREFILL", raising=False)
+    monkeypatch.delenv("GMLX_FEEDER_DECODE", raising=False)
+    common = dict(path="/p", sampling={}, load={}, cache={}, system=None,
+                  speculative=False, mmproj=None, draft_gguf=None, pin=False,
+                  ttl_s=None)
+
+    def sig(**kw):
+        return cfgmod.ResolvedModel(id="x", **common, **kw).load_signature()
+
+    base = sig(stream="experts")
+    # Explicit spellings of the streaming defaults collapse to the unset form.
+    assert sig(stream="experts", moe_prestage="ranked") == base
+    assert sig(stream="experts", prefill_feeder=True) == base
+    assert sig(stream="experts", decode_feeder=True) == base
+    # keepers without a shed policy is announced-ignored: also the unset form.
+    assert sig(stream="experts", moe_prestage="keepers") == base
+    # Real differences still fork.
+    assert sig(stream="experts", prefill_feeder=False) != base
+    assert sig(stream="experts", decode_feeder=False) != base
+    # Under stream: cpu the decode feeder defaults off, so True forks and
+    # False collapses (mirrors loader._resolve_feeder_defaults).
+    cpu = sig(stream="cpu")
+    assert sig(stream="cpu", decode_feeder=True) != cpu
+    assert sig(stream="cpu", decode_feeder=False) == cpu
+    # Without a placement every stream-riding key is inert (announced as
+    # ignored at load) and the signature treats them as unset.
+    plain = sig()
+    for kw in ({"moe_experts": 4}, {"moe_expert_mass": 0.9},
+               {"moe_miss_shed": 0.7}, {"moe_layer_shed": 0.1},
+               {"moe_miss_shed": 0.7, "moe_prestage": "keepers"},
+               {"prefill_feeder": False}, {"decode_feeder": False}):
+        assert sig(**kw) == plain, kw
+    # The env A/B levers move the effective default; the signature follows.
+    monkeypatch.setenv("GMLX_FEEDER_PREFILL", "0")
+    assert sig(stream="experts", prefill_feeder=False) == sig(stream="experts")
+    assert sig(stream="experts", prefill_feeder=True) != sig(stream="experts")
 
 
 def test_stream_legacy_cpu_moe_alias_warns_and_maps():
