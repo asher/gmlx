@@ -1243,6 +1243,75 @@ def _neutralize_wired_limit_sweep():
             mod.wired_limit = _quiet_wired_limit
 
 
+def _install_wired_limit_warn_once():
+    """Cap mlx-lm's large-model warning at one print per process.
+
+    ``stream_generate`` enters mlx-lm's ``wired_limit()`` context on every
+    call - at least once per chat turn - and on entry the context prints its
+    near-the-wired-budget warning unconditionally, so a resident model just
+    over the 0.9x threshold re-warns every turn. There is no seam around the
+    print, so swap in a re-implementation with identical wiring behavior
+    (raise the limit, synchronize on exit, restore) that warns only the
+    first time.
+
+    Installed at the end of every ``load_model`` (the resident path); the
+    streaming / CPU replacements above are stricter (they drop the sweep
+    entirely), so this never overwrites them - and they overwrite this when
+    they engage, which is always after load. Idempotent. NB: patched via
+    importlib - ``import mlx_lm.generate`` binds the function mlx_lm
+    re-exports in ``__init__``, not the submodule.
+    """
+    import contextlib
+    import importlib
+
+    from mlx.utils import tree_reduce
+
+    state = {"warned": False}
+
+    @contextlib.contextmanager
+    def _warn_once_wired_limit(model, streams=None):
+        if not mx.metal.is_available():
+            yield
+            return
+        model_bytes = tree_reduce(
+            lambda acc, x: acc + x.nbytes if isinstance(x, mx.array) else acc,
+            model, 0)
+        max_rec_size = mx.device_info()["max_recommended_working_set_size"]
+        if model_bytes > 0.9 * max_rec_size and not state["warned"]:
+            state["warned"] = True
+            model_mb = model_bytes // 2**20
+            max_rec_mb = max_rec_size // 2**20
+            print(
+                f"[WARNING] Generating with a model that requires {model_mb} "
+                f"MB which is close to the maximum recommended size of "
+                f"{max_rec_mb} MB. This can be slow. See the documentation "
+                "for possible work-arounds: "
+                "https://github.com/ml-explore/mlx-lm/tree/main#large-models"
+            )
+        old_limit = mx.set_wired_limit(max_rec_size)
+        try:
+            yield
+        finally:
+            if streams is not None:
+                for s in streams:
+                    mx.synchronize(s)
+            else:
+                mx.synchronize()
+            mx.set_wired_limit(old_limit)
+
+    _warn_once_wired_limit._kq_warn_once = True
+    for mod_name in ("mlx_lm.generate", "mlx_lm.utils"):
+        try:
+            mod = importlib.import_module(mod_name)
+        except ImportError:
+            continue
+        fn = getattr(mod, "wired_limit", None)
+        if fn is None or getattr(fn, "_kq_no_sweep", False) or \
+                getattr(fn, "_kq_warn_once", False):
+            continue
+        mod.wired_limit = _warn_once_wired_limit
+
+
 def configure_cpu_device():
     """Run everything on the CPU device (``--stream-cpu``): mmap-streamed weights.
 
@@ -1265,6 +1334,9 @@ def configure_cpu_device():
     def _wired_noop(model, streams=None):
         yield
 
+    # No sweep at all on CPU; the marker keeps a later load_model's
+    # warn-once variant (_install_wired_limit_warn_once) from clobbering it.
+    _wired_noop._kq_no_sweep = True
     for mod_name in ("mlx_lm.generate", "mlx_lm.utils"):
         try:
             mod = importlib.import_module(mod_name)
@@ -3308,6 +3380,10 @@ def load_model(
 
     materialize_module_arrays(model)
     wait_for_populate(pf.shards, log=_log)
+
+    # Resident generation re-enters mlx-lm's wired_limit() every turn, and
+    # its near-budget warning prints on every entry; cap it at one.
+    _install_wired_limit_warn_once()
 
     return model, config, tokenizer
 
