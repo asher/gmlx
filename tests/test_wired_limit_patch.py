@@ -22,11 +22,29 @@ _gen = importlib.import_module("mlx_lm.generate")
 
 @pytest.fixture
 def restore_wired_limit():
-    orig = _gen.wired_limit
+    """Reset wired_limit to an unmarked stand-in so the installer engages
+    even when an earlier test left the (marked) streaming / CPU replacement
+    installed process-wide, and restore the prior state after."""
+    mods = []
+    for name in ("mlx_lm.generate", "mlx_lm.utils"):
+        try:
+            mod = importlib.import_module(name)
+        except ImportError:
+            continue
+        if hasattr(mod, "wired_limit"):
+            mods.append((mod, mod.wired_limit))
+
+    @contextlib.contextmanager
+    def _stock_stand_in(model, streams=None):
+        yield
+
+    for mod, _ in mods:
+        mod.wired_limit = _stock_stand_in
     try:
         yield
     finally:
-        _gen.wired_limit = orig
+        for mod, orig in mods:
+            mod.wired_limit = orig
 
 
 @pytest.fixture
