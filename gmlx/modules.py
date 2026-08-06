@@ -1409,6 +1409,66 @@ def install_lora_adapter(model: nn.Module, plan,
     return len(wrapped)
 
 
+def dequantize_unattachable_leaves(model: nn.Module,
+                                   hf_weights: dict,
+                                   hf_kquant_meta: dict[str, str],
+                                   max_bytes: int = 64 * 1024 * 1024) -> list[str]:
+    """Dequantize codec'd weights on modules the installer cannot swap.
+
+    Some modules hold their weight as a raw array used inline in the
+    forward (deepseek-family MoEGate routers), so there is no leaf to
+    swap a kquant module into. Dequantize those wire bytes to f32 at
+    load and drop the codec entry. Tensors over ``max_bytes`` (f32
+    size) are left alone so ``install_kquant_modules`` fails loud on
+    them instead of silently materializing gigabytes of float.
+
+    llama.cpp's quantize never codecs router gates, so its GGUFs never
+    hit this path; so far only an antirez DeepSeek-V4-Flash dspark
+    drafter GGUF does. If quantized routers become a pattern in model
+    GGUFs, this approach should change to quantized execution.
+
+    Returns the handled ``path (codec)`` strings for load logging.
+    """
+    import mlx_kquant as kq
+
+    _switch_linear_types, _ = switch_layer_types()
+    attachable = [nn.Linear, nn.Embedding, KQuantLinear, KQuantEmbedding,
+                  KQuantSwitchLinear, KQuantMultiLinear, NativeFPSwitchLinear]
+    attachable.extend(_switch_linear_types)
+    if MultiLinear is not None:
+        attachable.append(MultiLinear)
+    attachable = tuple(attachable)
+    known_codecs = set(kq.codecs())
+    handled: list[str] = []
+
+    def _visit(path: str, module):
+        weight_key = f"{path}.weight"
+        codec = hf_kquant_meta.get(weight_key)
+        if codec is None or isinstance(module, attachable):
+            return module
+        target = getattr(module, "weight", None)
+        if not isinstance(target, mx.array) or codec not in known_codecs:
+            return module
+        if target.size * 4 > max_bytes:
+            return module
+        scales_key = f"{path}.scales"
+        scales = hf_weights.get(scales_key)
+        if scales is None:
+            scales = mx.zeros((1,), dtype=mx.uint8)
+        else:
+            del hf_weights[scales_key]
+        deq = kq.dequantize(hf_weights[weight_key], scales, codec, mx.float32)
+        del hf_weights[weight_key]
+        hf_weights[weight_key] = deq.reshape(target.shape)
+        del hf_kquant_meta[weight_key]
+        handled.append(f"{path} ({codec})")
+        return module
+
+    leaves = model.leaf_modules()
+    tree_map_with_path(_visit, leaves, is_leaf=nn.Module.is_module)
+    return handled
+
+
 def install_kquant_modules(model: nn.Module,
                            hf_kquant_meta: dict[str, str],
                            native_fp_wire: bool = False) -> int:

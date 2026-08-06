@@ -6,6 +6,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- GGUFs that quantize the MoE router gate (some community DeepSeek quants;
+  llama.cpp's own quantize leaves it F32) now load: small quantized tensors
+  on raw-array modules are dequantized to f32 at load instead of erroring.
+
 ## [0.2.2] - 2026-08-06
 
 ### Fixed
