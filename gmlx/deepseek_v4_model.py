@@ -91,6 +91,9 @@ _DSA_SYMS = {
     "kv_qat": ("dsa_kv_qat",),
 }
 
+# Only arm on NAX capable hardware, otherwise gets bf16 indexer
+_DSA_NAX_PATHS = frozenset({"indexer_q"})
+
 
 def _dsa_probe(path: str) -> bool:
     on = _dsa_state[path]
@@ -99,6 +102,8 @@ def _dsa_probe(path: str) -> bool:
             import mlx_kquant as kq
 
             has = all(hasattr(kq, sym) for sym in _DSA_SYMS[path])
+            if has and path in _DSA_NAX_PATHS:
+                has = bool(getattr(kq, "nax_available", lambda: False)())
         except Exception:
             has = False
         on = has and os.environ.get(_DSA_ENV[path], "1") != "0"
