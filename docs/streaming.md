@@ -75,7 +75,7 @@ KV cache (`--kv-bits 8`) is the usual companion at long context.
 Two single samples from Kimi-K3, a 2.8T-parameter MoE, generated on the
 128 GB laptop above with `--stream-experts` at streaming defaults, on
 the lossless path. The prompt is the same one-shot canvas-animation
-prompt used for the four-settings comparison later in this guide.
+prompt used for the lossy-lever comparisons later in this guide.
 Each screenshot links to the generated page, committed beside it in
 `docs/assets/perf/` (GitHub shows the page source; download one to
 watch the animation).
@@ -301,17 +301,37 @@ shed expert earns no popularity credit, so the arena keeps its hot set.
 It needs the decode feeder and a block that hands router scores to the
 expert call; where it engages, it is the most targeted lever per point of
 quality spent, and its payoff scales directly with the miss rate.
+
+`--moe-prestage keepers` attacks miss-shed's residual stalls from the
+speculative side. It adds no quality knob of its own; it applies the
+policy miss-shed already defines, one layer earlier. In the default
+`ranked` mode, lookahead prestages its rank-gated predictions with
+guess-grade caution (never evicting a more popular resident), which
+caps how many demand misses it can absorb; and because an inflight
+read exempts its expert from the shed, ranked lookahead incidentally
+rescues some experts the policy would have dropped, at the price of
+the read. Keeper mode filters each prediction through the policy
+instead: an expert that would be shed if it demand-missed is not read
+at all, and the predicted keepers are staged demand-grade, since if
+the prediction is right the demand path would do those same reads
+synchronously one layer later.
+Where prediction recall is good, this converts demand stalls into reads
+that overlap compute; the lookahead exit stats (submitted vs adopted)
+are the guardrail that the added aggression is landing. Requires
+`--moe-miss-shed` to define the policy.
+
 `--moe-layer-shed P` skips a streamed MoE layer's routed experts entirely
 with probability P per token (the layer's shared expert still runs). It
 is the blunt end of the scale, and the only lever that also cuts the
 per-layer overhead - which makes it the one that still pays when the
 arena hit rate is high and misses are rare.
 
-In server configs the lossy levers are the per-model `moe_experts: K` /
-`moe_expert_mass: P` / `moe_miss_shed: P` / `moe_layer_shed: P` keys (or
-the matching `serve` flags for a single positional model); the probe
-stays CLI-only, so size P with a `gmlx run --moe-expert-probe` pass
-before pinning a value in a config.
+In server configs the lossy levers and keeper prestage are the
+per-model `moe_experts: K` / `moe_expert_mass: P` / `moe_miss_shed: P`
+/ `moe_layer_shed: P` / `moe_prestage: keepers` keys (or the matching
+`serve` flags for a single positional model); the probe stays
+CLI-only, so size P with a `gmlx run --moe-expert-probe` pass before
+pinning a value in a config.
 
 Which to reach for is a measurement, not a doctrine. Run the probe once,
 and read the decode feeder's exit stats (arena hit rate; printed by
@@ -426,6 +446,45 @@ settings, against a lossless twin at the same seed. Miss-shed's safe
 range is per-architecture; re-gate it whenever routing width or
 gating changes.
 
+### Kimi-K3: far over budget
+
+The deepest measured point runs the scale sample from the top of this
+guide with the levers on: Kimi-K3 UD-Q2_K_XL (861 GB on the same
+128 GB machine, 384 experts routed 16 per token, 91 streamed expert
+layers). This far over budget the arena holds a sliver of the expert
+set, the lossless hit rate settles near 50%, and demand stalls are
+about two thirds of decode wall, so the miss-targeted lever leads by
+a wide margin, and each shed arm pairs it with keeper prestage
+(`--moe-prestage keepers`, described earlier). One long generation
+per setting on the same one-shot prompt as the samples above,
+temperature 1.0, 23-30k tokens each with thinking included. These are
+whole-run averages, not alternated A/Bs:
+
+| setting | dropped mass | hit rate | decode |
+|---|---|---|---|
+| lossless, ranked prestage | none | 49.9% | 1.15 tok/s |
+| `moe_miss_shed: 0.80` | 17.1% | 68.0% | 1.19 tok/s (+3%) |
+| `moe_miss_shed: 0.70` | 26.1% | 71.9% | 1.33 tok/s (+16%) |
+| `moe_miss_shed: 0.65` | 30.4% | 74.2% | 1.39 tok/s (+21%) |
+
+The runs span several days of sessions, and ambient memory pressure
+sized the wired arena differently across them (29 to 33 GB), so read
+the mechanism columns as a trend rather than a controlled sweep. Two
+things still stand out. Shedding raised the hit rate it left behind:
+the arena stops churning through experts that would be dropped
+anyway, the same self-reinforcement noted under miss-shed above. And
+the return curve bends the same way as on the other models: the step
+from lossless to 0.80 bought little in this sample, while 0.70 and
+0.65 returned +16% and +21%.
+
+All three shed levels produced complete working pages on this
+long-form prompt; what separates them is content drift, compared
+side by side in the Kimi-K3 screenshot table later in this guide.
+One step further down broke form, not just content: at 0.60 a code
+generation on this model produced a nonfunctional program in one try.
+The working band on this model at this quant is 0.65 to 0.80, sized
+inside it by how much content fidelity the workload can spend.
+
 ### Certifying a setting
 
 Back on Hy3, quality degraded in a consistent order as the levers
@@ -512,6 +571,37 @@ from the same full pair that needed softening to survive temperature
 practical recipe on this model: keep the full pair and its entire +13%,
 and cool the sampling slightly, rather than giving up most of the speed
 win by softening the levers at the card's temperature.
+
+### One prompt, four shed levels: Kimi-K3
+
+The same comparison at the deep end of the space. The four Kimi-K3
+settings measured earlier in this guide each ran the same prompt once
+to completion at temperature 1.0. Each screenshot links to its
+generated page, committed beside it in `docs/assets/perf/`:
+
+| | |
+|---|---|
+| <a href="assets/perf/kimi-k3-ud-q2kxl-car.html"><img src="assets/perf/kimi-k3-ud-q2kxl-car.png" alt="lossless: film-grain dusk scene, red sedan with a headlight cone, telegraph poles, layered hills and clouds"></a><br>lossless, ranked prestage. 23.7k tokens at 1.15 tok/s. | <a href="assets/perf/lossy-kimi-k3-shed-0.80.html"><img src="assets/perf/lossy-kimi-k3-shed-0.80.png" alt="miss-shed 0.80 with keeper prestage: bright daylight scene with green fields, mountains, and sun; red car with slightly misdrawn body panels"></a><br>`moe_miss_shed 0.80` + keeper prestage. 24.2k tokens at 1.19 tok/s. |
+| <a href="assets/perf/lossy-kimi-k3-shed-0.70.html"><img src="assets/perf/lossy-kimi-k3-shed-0.70.png" alt="miss-shed 0.70 with keeper prestage: complete but very dark dusk scene, red car with headlights on a dim road, foreground trees as blurred dark shapes"></a><br>`moe_miss_shed 0.70` + keeper prestage. 29.6k tokens at 1.33 tok/s. | <a href="assets/perf/lossy-kimi-k3-shed-0.65.html"><img src="assets/perf/lossy-kimi-k3-shed-0.65.png" alt="miss-shed 0.65 with keeper prestage: vivid layered sunset with poles, fence, and birds; red car with oversized featureless black wheels and a light streak across the body"></a><br>`moe_miss_shed 0.65` + keeper prestage. 28.3k tokens at 1.39 tok/s. |
+
+All four pages ran as generated: valid markup, a working animation
+loop, no stray tokens. What varies is the scene, and not
+monotonically. The lossless page drew the cohesive film-grain dusk.
+At 0.80 the scene is clean and bright but the car body picked up
+small geometry glitches and the lighting is the flattest of the set.
+At 0.70 the composition is complete but the tone mapping overshot:
+the page renders far darker than its palette intends, and the
+foreground trees reduce to blurred dark masses. At 0.65 the sky and
+landscape are the richest of the four while the car is the most
+damaged subject, with oversized featureless wheels and a stray light
+streak across the body. Between 0.65 and 0.80 the flaws differ in
+kind rather than degree, so one sample per setting cannot rank
+adjacent levels; what it can show is that all three sit above the
+cliff, which is one step further down at 0.60, where a code
+generation broke outright. As on GLM-5.2, dropped mass degraded what
+the pages drew long before it corrupted what they wrote: certifying a
+level means rendering the artifact, and ranking neighboring levels
+takes more samples than one.
 
 ## Native-fp experts (MXFP4/NVFP4)
 

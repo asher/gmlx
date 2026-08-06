@@ -741,6 +741,13 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "experts with probability P (0 < P < 1) per token; the "
                          "shared expert still runs on shed layers (config mode: "
                          "set `moe_layer_shed: P` per model).")
+    ap.add_argument("--moe-prestage", choices=("ranked", "keepers"),
+                    default=None,
+                    help="Lookahead prestage targeting for a streamed model; "
+                         "default ranked. keepers filters predictions through "
+                         "the active miss-shed policy and stages predicted "
+                         "keepers demand-grade; needs --moe-miss-shed (config "
+                         "mode: set `moe_prestage: keepers` per model).")
     ap.add_argument("--prefill-feeder", action=argparse.BooleanOptionalAction,
                     default=None,
                     help="Faster prompt processing for streaming models "
@@ -907,6 +914,8 @@ def _bg_serve_args(a, cfg_path) -> list:
         out += ["--moe-miss-shed", str(a.moe_miss_shed)]
     if getattr(a, "moe_layer_shed", None) is not None:
         out += ["--moe-layer-shed", str(a.moe_layer_shed)]
+    if getattr(a, "moe_prestage", None) is not None:
+        out += ["--moe-prestage", str(a.moe_prestage)]
     if a.budget_gb is not None:
         out += ["--budget-gb", str(a.budget_gb)]
     if a.max_models is not None:
@@ -1377,6 +1386,7 @@ def _single_model_cfg(a) -> ServerCfg:
         moe_expert_mass=getattr(a, "moe_expert_mass", None),
         moe_miss_shed=getattr(a, "moe_miss_shed", None),
         moe_layer_shed=getattr(a, "moe_layer_shed", None),
+        moe_prestage=getattr(a, "moe_prestage", None),
         prefill_feeder=getattr(a, "prefill_feeder", None),
         decode_feeder=getattr(a, "decode_feeder", None),
         pin=True,                            # the single model is always pinned

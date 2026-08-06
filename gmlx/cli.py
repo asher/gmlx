@@ -163,6 +163,18 @@ def add_moe_expert_args(ap: argparse.ArgumentParser) -> None:
         "--moe-expert-mass.",
     )
     grp.add_argument(
+        "--moe-prestage",
+        choices=("ranked", "keepers"),
+        default=None,
+        help="Lookahead prestage targeting; default ranked. ranked: "
+        "rank-gated speculative "
+        "reads with guess-grade eviction. keepers: filter predictions "
+        "through the active --moe-miss-shed policy - would-be-shed "
+        "experts are never read, and would-be-kept misses stage "
+        "demand-grade, converting their future demand stalls into "
+        "overlapped reads. Needs --moe-miss-shed.",
+    )
+    grp.add_argument(
         "--moe-layer-shed",
         type=float,
         default=None,
@@ -1239,6 +1251,10 @@ def _apply_placement(args, model) -> None:
                     "--moe-layer-shed",
                     getattr(args, "moe_layer_shed", None) is not None,
                 ),
+                (
+                    "--moe-prestage keepers",
+                    getattr(args, "moe_prestage", "ranked") == "keepers",
+                ),
             )
             if on
         ]
@@ -1294,6 +1310,16 @@ def _apply_placement(args, model) -> None:
         from .moe_experts import install_moe_miss_shed
 
         install_moe_miss_shed(model, args.moe_miss_shed)
+    if getattr(args, "moe_prestage", "ranked") == "keepers":
+        if getattr(args, "moe_miss_shed", None) is None:
+            print(
+                "[stream] --moe-prestage keepers ignored: it needs "
+                "--moe-miss-shed"
+            )
+        else:
+            from .moe_experts import install_moe_prestage_keepers
+
+            install_moe_prestage_keepers(model)
     if getattr(args, "moe_layer_shed", None) is not None:
         from .moe_experts import install_moe_layer_shed
 
@@ -1801,7 +1827,8 @@ def _apply_resolved_to_args(args, rm, explicit: set) -> list[str]:
         applied.append("moe-expert-mass")
     for dest, label in (("moe_experts", "moe-experts"),
                         ("moe_miss_shed", "moe-miss-shed"),
-                        ("moe_layer_shed", "moe-layer-shed")):
+                        ("moe_layer_shed", "moe-layer-shed"),
+                        ("moe_prestage", "moe-prestage")):
         if (getattr(rm, dest, None) is not None and dest not in explicit
                 and hasattr(args, dest)):
             setattr(args, dest, getattr(rm, dest))

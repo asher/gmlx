@@ -115,8 +115,9 @@ def test_gate_module_select_ranks_by_weight():
                 mx.array([[0.1, 0.7, 0.2]]),
             )
 
-    ids = np.array(_gate_module_select(_Stub())(mx.zeros((1, DIM))))
-    assert ids.tolist() == [[9, 2, 4]]
+    ids, sc = _gate_module_select(_Stub())(mx.zeros((1, DIM)))
+    assert np.array(ids).tolist() == [[9, 2, 4]]
+    assert np.allclose(np.array(sc), [[0.7, 0.2, 0.1]])
 
 
 def test_sigmoid_bias_select_matches_stock_selection():
@@ -130,12 +131,16 @@ def test_sigmoid_bias_select_matches_stock_selection():
     mx.random.seed(3)
     blk = _Block()
     x = mx.random.normal((1, 1, DIM))
-    ids = np.array(_sigmoid_bias_select(blk)(x)).reshape(-1)
+    ids_mx, sc_mx = _sigmoid_bias_select(blk)(x)
+    ids = np.array(ids_mx).reshape(-1)
     # Reference: the stock forward's selection seam.
     choice = mx.sigmoid(blk.gate(x.astype(mx.float32)))
-    choice = np.array(choice + blk.e_score_correction_bias).reshape(-1)
-    ref = np.argsort(-choice)[:K]
+    biased = np.array(choice + blk.e_score_correction_bias).reshape(-1)
+    ref = np.argsort(-biased)[:K]
     assert ids.tolist() == ref.tolist()
+    # Mass scores are the bias-free sigmoid the block's mix renormalizes.
+    raw = np.array(choice).reshape(-1)
+    assert np.allclose(np.array(sc_mx).reshape(-1), raw[ids], atol=1e-6)
 
 
 def test_router_fn_for_unknown_block_is_none():
@@ -464,6 +469,56 @@ def test_depth2_prestage_targets_both_layers(monkeypatch):
     assert sorted(li for li, _ in df.calls) == [1, 2]
 
 
+def test_wrapper_keeper_prestage_passes_policy(monkeypatch):
+    """--moe-prestage keepers: the wrapper hands prestage the active shed
+    share and the prediction's mass scores; with the switch off, or with
+    no miss-shed installed, the plain ranked call is unchanged."""
+    from contextlib import contextmanager
+
+    model = _streaming_model(monkeypatch)
+    install_lookahead(model, model.layers, probe=False, prefetch=True)
+    glu0 = model.layers[0].mlp.switch_mlp
+
+    class _FakeDF:
+        def ensure_wired(self):
+            pass
+
+        calls = []
+
+        def covers(self, li):
+            return True
+
+        def stage(self, li, ids):
+            return ids.astype(np.uint32)
+
+        def prestage(self, li, pred, **kw):
+            self.calls.append((li, pred.copy(), kw))
+
+        def wedged_at(self, li):
+            return False
+
+        @contextmanager
+        def swapped(self, li):
+            yield
+
+    df = _FakeDF()
+    object.__setattr__(glu0, "_kq_decode_feeder", df)
+    object.__setattr__(glu0, "_kq_li", 0)
+    x = mx.random.normal((1, 1, DIM))
+    mx.eval(model.layers[0].mlp(x))
+    assert df.calls and df.calls[-1][2] == {}  # ranked: no policy kwargs
+
+    object.__setattr__(glu0, "_kq_prestage_keepers", True)
+    mx.eval(model.layers[0].mlp(x))
+    assert df.calls[-1][2] == {}  # keepers without miss-shed: unchanged
+
+    object.__setattr__(glu0, "_kq_miss_shed", 0.8)
+    mx.eval(model.layers[0].mlp(x))
+    li, pred, kw = df.calls[-1]
+    assert li == 1 and kw["keep_mass"] == 0.8
+    assert kw["pred_scores"].shape == pred.shape
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
 
@@ -486,7 +541,8 @@ def test_sigmoid_bias_select_kimi_k3_args_k():
     from gmlx.lookahead import _SIGMOID_BIAS_BLOCKS
     assert "KimiK3MoE" in _SIGMOID_BIAS_BLOCKS
     x = mx.random.normal((1, 1, DIM))
-    ids = np.array(_sigmoid_bias_select(blk)(x)).reshape(-1)
+    ids_mx, _ = _sigmoid_bias_select(blk)(x)
+    ids = np.array(ids_mx).reshape(-1)
     choice = mx.sigmoid(blk.gate(x.astype(mx.float32)))
     choice = np.array(choice + blk.e_score_correction_bias).reshape(-1)
     ref = np.argsort(-choice)[:K]

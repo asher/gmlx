@@ -236,31 +236,34 @@ def test_moe_lossy_levers_parsed_and_resolved():
     doc = _doc()
     doc["models"]["m-moe"] = {"path": "/abs/big.gguf", "stream": "experts",
                               "moe_experts": 6, "moe_miss_shed": 0.95,
-                              "moe_layer_shed": "0.1"}
+                              "moe_layer_shed": "0.1",
+                              "moe_prestage": "Keepers"}
     cfg = build_config(doc)
     rm = resolve_model("m-moe", cfg)
     assert rm.moe_experts == 6
     assert rm.moe_miss_shed == 0.95
     assert rm.moe_layer_shed == 0.1
+    assert rm.moe_prestage == "keepers"   # case-normalized
     bare = resolve_model("m-named", cfg)
     assert (bare.moe_experts is None and bare.moe_miss_shed is None
-            and bare.moe_layer_shed is None)
+            and bare.moe_layer_shed is None and bare.moe_prestage is None)
     # Each lever is load-affecting: same GGUF, different value => distinct
     # resident entries.
     common = dict(path="/p", sampling={}, load={}, cache={}, system=None,
                   speculative=False, mmproj=None, draft_gguf=None, pin=False,
                   ttl_s=None, stream="experts")
     base_sig = cfgmod.ResolvedModel(id="x", **common).load_signature()
-    for key in ("moe_experts", "moe_expert_mass", "moe_miss_shed",
-                "moe_layer_shed"):
+    for key, val in (("moe_experts", 2), ("moe_expert_mass", 0.5),
+                     ("moe_miss_shed", 0.5), ("moe_layer_shed", 0.5),
+                     ("moe_prestage", "keepers")):
         sig = cfgmod.ResolvedModel(
-            id="x", **{key: 2 if key == "moe_experts" else 0.5},
-            **common).load_signature()
+            id="x", **{key: val}, **common).load_signature()
         assert sig != base_sig, key
 
     for key, bad in (("moe_experts", 0), ("moe_experts", "many"),
                      ("moe_miss_shed", 1.5), ("moe_miss_shed", 0),
-                     ("moe_layer_shed", 1.0), ("moe_layer_shed", 0)):
+                     ("moe_layer_shed", 1.0), ("moe_layer_shed", 0),
+                     ("moe_prestage", "eager")):
         doc = _doc()
         doc["models"]["m-moe"] = {"path": "/abs/big.gguf",
                                   "stream": "experts", key: bad}

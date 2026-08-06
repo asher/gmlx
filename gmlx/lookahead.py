@@ -147,7 +147,8 @@ def _gate_module_select(gate):
     def select(x):
         inds, weights = call(gate, x)
         order = mx.argsort(-weights, axis=-1)
-        return mx.take_along_axis(inds, order, axis=-1)
+        return (mx.take_along_axis(inds, order, axis=-1),
+                mx.take_along_axis(weights, order, axis=-1))
 
     return select
 
@@ -162,12 +163,15 @@ def _sigmoid_bias_select(mod):
         k = mod.args.num_experts_per_tok
 
     def select(x):
-        choice = mx.sigmoid(mod.gate(x.astype(mx.float32)))
-        choice = choice + mod.e_score_correction_bias
+        scores = mx.sigmoid(mod.gate(x.astype(mx.float32)))
+        choice = scores + mod.e_score_correction_bias
         inds = mx.argpartition(-choice, kth=k - 1, axis=-1)[..., :k]
         ch = mx.take_along_axis(choice, inds, axis=-1)
         order = mx.argsort(-ch, axis=-1)
-        return mx.take_along_axis(inds, order, axis=-1)
+        inds = mx.take_along_axis(inds, order, axis=-1)
+        # Rank order keeps the selection bias; the returned mass is the
+        # bias-free sigmoid score the block's mixing weights renormalize.
+        return inds, mx.take_along_axis(scores, inds, axis=-1)
 
     return select
 
@@ -181,7 +185,8 @@ def _softmax_select(mod):
         inds = mx.argpartition(gates, kth=-k, axis=-1)[..., -k:]
         sc = mx.take_along_axis(gates, inds, axis=-1)
         order = mx.argsort(-sc, axis=-1)
-        return mx.take_along_axis(inds, order, axis=-1)
+        return (mx.take_along_axis(inds, order, axis=-1),
+                mx.take_along_axis(sc, order, axis=-1))
 
     return select
 
@@ -238,7 +243,8 @@ class _LayerPredictor:
         return (v,)
 
     def predict(self, x, variant: str):
-        """Lazy ranked expert ids (shape ``indices``-like) for ``dst_li``."""
+        """Lazy ``(ranked ids, matching mass scores)`` (shapes
+        ``indices``-like) for ``dst_li``."""
         if variant == "ratio":
             x = x * self._ratio.astype(x.dtype)
         return self._router_fn(x)
@@ -360,9 +366,9 @@ class LookaheadHook:
     def on_call(self, x, indices) -> dict:
         """Evaluate ``indices`` (the fence the caller needed anyway) plus
         every live lookahead prediction in one sync. Returns a dict of
-        predicted ranked ids per destination layer when prefetching, each
-        trimmed to its rank gate prefix; empty when there is nothing to
-        prestage."""
+        predicted ``(ranked ids, mass scores)`` per destination layer when
+        prefetching, both trimmed to the rank gate prefix; empty when
+        there is nothing to prestage."""
         probing = self.probe is not None
         ph = _LA_PHASE
         t0 = time.perf_counter() if ph is not None else 0.0
@@ -384,7 +390,7 @@ class LookaheadHook:
             t1 = time.perf_counter()
             ph["build"] += t1 - t0
         try:
-            mx.eval(indices, *[a for _, _, a in lazy])
+            mx.eval(indices, *[t for _, _, pair in lazy for t in pair])
         except Exception as exc:
             # Joint eval: the failing predictor is unattributable, so
             # disable every one this hook owns rather than loop forever.
@@ -400,8 +406,9 @@ class LookaheadHook:
         if ph is not None:
             ph["sync"] += time.perf_counter() - t1
         by_pred: dict = {}
-        for pred, variant, arr in lazy:
-            by_pred.setdefault(pred, {})[variant] = np.array(arr)
+        for pred, variant, (ids_l, sc_l) in lazy:
+            by_pred.setdefault(pred, {})[variant] = (
+                np.array(ids_l), np.array(sc_l, dtype=np.float32))
         actual_np = None
         if self.probe is not None or self.gate is not None:
             actual_np = np.array(indices)
@@ -410,10 +417,10 @@ class LookaheadHook:
         if self.probe is not None:
             for pred, pv in by_pred.items():
                 if pred.depth == 1:
-                    labeled = pv
+                    labeled = {v: a for v, (a, _) in pv.items()}
                 else:
                     labeled = {
-                        f"{v}@d{pred.depth}": a for v, a in pv.items()
+                        f"{v}@d{pred.depth}": a for v, (a, _) in pv.items()
                     }
                 self.probe.note(pred.dst_li, labeled)
             self.probe.actual(self.li, actual_np)
@@ -423,9 +430,10 @@ class LookaheadHook:
                 # With the probe co-installed both variants exist;
                 # prefetch uses the configured one.
                 chosen = pred.variants(False)[0]
-                ids = pv.get(chosen)
-                if ids is None:
-                    ids = next(iter(pv.values()))
+                pair = pv.get(chosen)
+                if pair is None:
+                    pair = next(iter(pv.values()))
+                ids, sc = pair
                 if self.gate is not None:
                     # Full width is noted (gated-out ranks keep being
                     # scored and can re-qualify); only the submission is
@@ -436,7 +444,8 @@ class LookaheadHook:
                         continue
                     if k < ids.shape[-1]:
                         ids = ids[..., :k]
-                out[pred.dst_li] = ids
+                        sc = sc[..., :k]
+                out[pred.dst_li] = (ids, sc)
         return out
 
 

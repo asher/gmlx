@@ -64,6 +64,34 @@ def _call(**kw):
     return _generate_over(object(), _Tok(), "PROMPT", **base)
 
 
+def test_verbose_phase1_uses_styled_emitter(monkeypatch, capsys):
+    """Verbose phase 1 streams through the main path's emitter (thinking
+    rendering included) and closes it before the seam marker; phase 2
+    still prints raw."""
+    import gmlx.generation as g
+
+    got = {"chunks": [], "closed": 0, "reasoning": None}
+
+    def fake_emitter(prompt, tokenizer, reasoning):
+        got["reasoning"] = reasoning
+
+        def close():
+            got["closed"] += 1
+
+        return got["chunks"].append, close
+
+    monkeypatch.setattr(g, "_verbose_emitter", fake_emitter)
+    _patch_stream(
+        monkeypatch,
+        phase1=[(11, "think"), (12, "answer"), (2, "<|user|>")],
+        phase2=[(20, "over")],
+    )
+    _call(window=1, verbose=True, reasoning="hide")
+    assert got["chunks"] == ["think", "answer"]  # phase 2 never routed here
+    assert got["closed"] == 1 and got["reasoning"] == "hide"
+    assert "over" in capsys.readouterr().out  # phase 2 raw print intact
+
+
 def test_free_mode_splits_at_seam_and_forces_window(monkeypatch, tmp_path):
     _patch_stream(
         monkeypatch,

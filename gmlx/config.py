@@ -11,7 +11,7 @@ Shape (see ``docs/server-config.md`` for the full reference)::
     server:    {host, port, api_key, no_auth, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, rerank, menubar, token_queue_timeout_s, prefill_step_size, decode_prefill_ratio, prefill_tick_ms, cache_limit_gb, family_defaults, stochastic_mtp, gpu_keepwarm, assistants, assistant_allow_remote}
     profiles:  {<name>: {extends, sampling, load, cache, system}}
     rules:     [{match: <glob>, profile: <name>}]
-    models:    {<id>: {path, profile, family, profiles, mmproj, draft_gguf, adapter, stream, moe_experts, moe_expert_mass, moe_miss_shed, moe_layer_shed, speculative, speculative_width_cap, overrides, pin, ttl_s}}
+    models:    {<id>: {path, profile, family, profiles, mmproj, draft_gguf, adapter, stream, moe_experts, moe_expert_mass, moe_miss_shed, moe_layer_shed, moe_prestage, speculative, speculative_width_cap, overrides, pin, ttl_s}}
     aliases:   {<name>: <id> | <id>@<profile>}    # friendly name / profile preset
     discover:  [{dir, recursive, pair_mmproj, speculative}]
     talk:      {model, voice, speed, system, language, max_tokens, mode, wake_word, wake_threshold, vad, input_device, output_device, chime, brain, push_to_talk_modifier}
@@ -117,7 +117,7 @@ _MODEL_KEYS = frozenset({"path", "profile", "family", "profiles", "mmproj",
                          "draft_gguf", "adapter", "stream",
                          "cpu_moe",  # deprecated alias for `stream:`
                          "moe_experts", "moe_expert_mass",
-                         "moe_miss_shed", "moe_layer_shed",
+                         "moe_miss_shed", "moe_layer_shed", "moe_prestage",
                          "prefill_feeder", "decode_feeder", "speculative",
                          "speculative_width_cap",
                          "overrides", "pin", "ttl_s"})
@@ -228,11 +228,13 @@ class ModelCfg:
     # Lossy MoE fan-out levers on the streamed expert stacks (the
     # `--moe-experts K` / `--moe-expert-mass P` / `--moe-miss-shed P` /
     # `--moe-layer-shed P` CLI levers). Require stream; None = trained
-    # fan-out / no shedding.
+    # fan-out / no shedding. `moe_prestage: keepers` retargets the lookahead
+    # prestage through the miss-shed policy (needs `moe_miss_shed`).
     moe_experts: int | None = None
     moe_expert_mass: float | None = None
     moe_miss_shed: float | None = None
     moe_layer_shed: float | None = None
+    moe_prestage: str | None = None
     # Streaming-model feeder overrides (tri-state: None = loader default -
     # prefill feeder on, decode feeder on under `stream: experts`).
     prefill_feeder: bool | None = None
@@ -503,6 +505,7 @@ class ResolvedModel:
     moe_expert_mass: float | None = None
     moe_miss_shed: float | None = None
     moe_layer_shed: float | None = None
+    moe_prestage: str | None = None
     # Feeder overrides for streaming models (None = loader default); load-
     # affecting - they decide the ring slots / wired arena built at load.
     prefill_feeder: bool | None = None
@@ -536,6 +539,7 @@ class ResolvedModel:
             str(self.moe_expert_mass),
             str(self.moe_miss_shed),
             str(self.moe_layer_shed),
+            str(self.moe_prestage),
             str(self.prefill_feeder),
             str(self.decode_feeder),
             tuple(sorted((k, str(v)) for k, v in self.load.items())),
@@ -887,6 +891,7 @@ def resolve_model(
         moe_expert_mass=model.moe_expert_mass,
         moe_miss_shed=model.moe_miss_shed,
         moe_layer_shed=model.moe_layer_shed,
+        moe_prestage=model.moe_prestage,
         prefill_feeder=model.prefill_feeder,
         decode_feeder=model.decode_feeder,
         pin=bool(model.pin),
@@ -1126,6 +1131,18 @@ def _normalize_moe_layer_shed(value, where: str = "model"):
     return p
 
 
+def _normalize_moe_prestage(value, where: str = "model"):
+    """Validate a ``moe_prestage`` targeting mode: "ranked" or "keepers"."""
+    if value is None:
+        return None
+    mode = str(value).strip().lower()
+    if mode not in ("ranked", "keepers"):
+        raise ConfigError(
+            f"{where}.moe_prestage: expected 'ranked' or 'keepers', "
+            f"got {value!r}")
+    return mode
+
+
 def _normalize_stream(value, where: str = "model", legacy=None):
     """Normalize a ``stream:`` value to one of None / "experts" / "cpu".
 
@@ -1348,6 +1365,8 @@ def _parse_model(model_id: str, raw: dict) -> ModelCfg:
             key="moe_miss_shed"),
         moe_layer_shed=_normalize_moe_layer_shed(
             raw.get("moe_layer_shed"), f"model {model_id!r}"),
+        moe_prestage=_normalize_moe_prestage(
+            raw.get("moe_prestage"), f"model {model_id!r}"),
         prefill_feeder=_normalize_optional_bool(
             raw.get("prefill_feeder"), "prefill_feeder", f"model {model_id!r}"),
         decode_feeder=_normalize_optional_bool(

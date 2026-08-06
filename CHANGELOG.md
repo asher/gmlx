@@ -8,6 +8,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `--moe-prestage keepers`: lookahead reads skip experts the miss-shed
+  policy would drop and stage predicted keepers demand-grade, turning
+  their synchronous demand stalls into reads that overlap compute. Also
+  a per-model server config key (`moe_prestage: keepers`) and serve flag.
 - Ctrl-T during a `chat` or `run` reply closes the model's open thinking
   block early (as if the thinking budget had just run out) so the answer
   starts now.
@@ -18,6 +22,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `--over-generation` runs now render thinking in the verbose stream like
+  normal runs (the probe path bypassed the styled emitter).
 - CLI polish: `--help`/`--help-all` now win even after a value-taking flag,
   the short `-h` pages gained the typical sampling/config/streaming flags,
   tab completion offers flag values (choices, themes, profiles).
@@ -110,6 +116,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `--moe-miss-shed` no longer crashes chat prefill on kimi-k3 (a
+  concatenate rank mismatch): shed is decode-only and now skips the
+  single-token leaves of an arena token split.
 - `gmlx chat` no longer rejects `--stream-experts` on an MTP/speculative
   base.
 - Chat markdown rendering no longer reverts a block to raw text when it
