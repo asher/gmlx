@@ -1283,7 +1283,9 @@ def _resolve_feeder_defaults(
     defaults: prefill feeder on everywhere it can exist, decode feeder on
     only when the every-token layers are on the GPU (``--stream-experts``) -
     under ``--stream-cpu`` there is no GPU work for the arena gathers to
-    join, so it is not even attempted."""
+    join, so it is not even attempted. config.ResolvedModel.load_signature
+    mirrors this resolution to canonicalize the residency cache key; keep
+    the two in step."""
     gpu_resident = "gpu" in str(mx.default_device()).lower()
     if feeder_prefill is None:
         feeder_prefill = env_bool("GMLX_FEEDER_PREFILL", True)

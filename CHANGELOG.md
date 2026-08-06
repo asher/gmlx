@@ -22,6 +22,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Server: two model ids over the same GGUF now share one resident copy when
+  they differ only in spelling a default explicitly (`moe_prestage: ranked`,
+  `prefill_feeder: true`, or any streaming lever on a model with no `stream`).
 - `--over-generation` runs now render thinking in the verbose stream like
   normal runs (the probe path bypassed the styled emitter).
 - CLI polish: `--help`/`--help-all` now win even after a value-taking flag,

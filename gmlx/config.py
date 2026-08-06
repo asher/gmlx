@@ -42,6 +42,7 @@ from typing import Any
 import yaml
 
 from . import profiles as _family_profiles
+from .envflags import env_bool
 
 # Canonical key sets / env mappings
 # Sampling keys a profile may carry, as a plain dict so profiles compose by
@@ -525,7 +526,33 @@ class ResolvedModel:
         both load-affecting - the template is baked into the tokenizer and the adapter
         is wrapped over the model leaves at load, so profiles differing in either need
         their own resident entry. Sampling/system/ttl do not change the loaded model
-        and are excluded."""
+        and are excluded.
+
+        The stream-riding keys enter as their effective values, not their
+        config spellings, so an explicitly written default never forks a
+        resident entry from an unset key: without a ``stream`` placement the
+        MoE levers and feeder overrides are inert (announced as ignored at
+        load) and collapse to None; ``moe_prestage`` collapses to None
+        whenever it resolves to ranked behavior (``ranked``, or ``keepers``
+        without ``moe_miss_shed``); the feeder tri-states resolve through the
+        same explicit-then-env-then-default policy as
+        loader._resolve_feeder_defaults. The env reads happen in the serving
+        process, which is also where the load happens, so signature and load
+        always see the same values."""
+        stream = self.stream or None
+        prestage = self.moe_prestage if self.moe_prestage == "keepers" else None
+        if self.moe_miss_shed is None:
+            prestage = None
+        if stream:
+            pf = (self.prefill_feeder if self.prefill_feeder is not None
+                  else env_bool("GMLX_FEEDER_PREFILL", True))
+            df = (self.decode_feeder if self.decode_feeder is not None
+                  else env_bool("GMLX_FEEDER_DECODE", stream == "experts"))
+            levers = (str(self.moe_experts), str(self.moe_expert_mass),
+                      str(self.moe_miss_shed), str(self.moe_layer_shed),
+                      str(prestage), str(pf), str(df))
+        else:
+            levers = (str(None),) * 7
         return (
             self.path,
             self.mmproj,
@@ -534,14 +561,8 @@ class ResolvedModel:
             str(self.speculative_width_cap),
             self.chat_template,
             self.adapter,
-            str(self.stream),
-            str(self.moe_experts),
-            str(self.moe_expert_mass),
-            str(self.moe_miss_shed),
-            str(self.moe_layer_shed),
-            str(self.moe_prestage),
-            str(self.prefill_feeder),
-            str(self.decode_feeder),
+            str(stream),
+            *levers,
             tuple(sorted((k, str(v)) for k, v in self.load.items())),
             tuple(sorted((k, str(v)) for k, v in _flatten_cache(self.cache).items())),
         )
