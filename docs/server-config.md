@@ -122,8 +122,10 @@ VLM), `--draft-gguf FILE` (assistant-shape drafter, implies `--speculative`),
 `--speculative` (native-head MTP), `--adapter FILE` (live GGUF LoRA over the
 base; text only), `--chat-template STR|PATH` (replace the GGUF's template),
 `--stream-experts` / `--stream-cpu` (over-RAM MoE execution placement, see `stream:`
-below), `--moe-expert-mass P` (adaptive lossy MoE fan-out on the streamed
-experts, see `moe_expert_mass:` below),
+below), the streamed-MoE levers `--moe-expert-mass P` / `--moe-experts K` /
+`--moe-miss-shed P` / `--moe-layer-shed P` / `--moe-prestage MODE` (see the
+matching per-model keys below), `--prefill-feeder` / `--decode-feeder`
+(feeder opt-outs, see `prefill_feeder:` below),
 `--hf-source REPO` (processor/config override, rarely needed),
 `--host`, `--port`, `--budget-gb`, `--max-models`, `--pin ID_OR_PATH`
 (repeatable), `--max-tokens`, `--no-auth` (the API key is config-only: see
