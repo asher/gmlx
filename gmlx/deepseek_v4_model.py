@@ -303,6 +303,7 @@ def ensure_registered() -> None:
         sys.modules["mlx_lm.models.deepseek_v4"] = sys.modules[__name__]
 
 
+_DOT_STATE = {"n": 0}
 _CACHE_EVAL_EVERY = int(os.environ.get("GMLX_CACHE_EVAL_EVERY", "1"))
 _cache_eval_step = 0
 
@@ -2076,6 +2077,15 @@ class DeepseekV4Model(PipelineMixin, nn.Module):
                 captures.append(
                     h.astype(mx.float32).mean(axis=2).astype(h.dtype)
                 )
+
+        _dot_path = os.environ.get("GMLX_MODEL_DOT")
+        if _dot_path:
+            _DOT_STATE["n"] += 1
+            if _DOT_STATE["n"] == int(
+                os.environ.get("GMLX_MODEL_DOT_CALL", "140")
+            ):
+                with open(_dot_path, "w") as fh:
+                    mx.export_to_dot(fh, h)
 
         _materialize_cache_arrays(cache)
 
