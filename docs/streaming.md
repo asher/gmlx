@@ -302,16 +302,19 @@ It needs the decode feeder and a block that hands router scores to the
 expert call; where it engages, it is the most targeted lever per point of
 quality spent, and its payoff scales directly with the miss rate.
 
-`--moe-prestage keepers` attacks miss-shed's residual stalls from the speculative
-side, with no quality cost of its own. Lookahead normally prestages its
-rank-gated predictions with guess-grade caution (never evicting a more
-popular resident), which caps how many demand misses it can absorb.
-Keeper mode filters each prediction through the active miss-shed
-policy: an expert the shed would drop on arrival is not read at all
-(reclaiming the bandwidth a doomed speculative read would burn), and
-the predicted keepers are staged demand-grade, since if the prediction
-is right the demand path would do those same reads synchronously one
-layer later.
+`--moe-prestage keepers` attacks miss-shed's residual stalls from the
+speculative side. It adds no quality knob of its own; it applies the
+policy miss-shed already defines, one layer earlier. In the default
+`ranked` mode, lookahead prestages its rank-gated predictions with
+guess-grade caution (never evicting a more popular resident), which
+caps how many demand misses it can absorb; and because an inflight
+read exempts its expert from the shed, ranked lookahead incidentally
+rescues some experts the policy would have dropped, at the price of
+the read. Keeper mode filters each prediction through the policy
+instead: an expert that would be shed if it demand-missed is not read
+at all, and the predicted keepers are staged demand-grade, since if
+the prediction is right the demand path would do those same reads
+synchronously one layer later.
 Where prediction recall is good, this converts demand stalls into reads
 that overlap compute; the lookahead exit stats (submitted vs adopted)
 are the guardrail that the added aggression is landing. Requires
@@ -323,11 +326,12 @@ is the blunt end of the scale, and the only lever that also cuts the
 per-layer overhead - which makes it the one that still pays when the
 arena hit rate is high and misses are rare.
 
-In server configs the lossy levers are the per-model `moe_experts: K` /
-`moe_expert_mass: P` / `moe_miss_shed: P` / `moe_layer_shed: P` /
-`moe_prestage: keepers` keys (or the matching `serve` flags for a single
-positional model); the probe stays CLI-only, so size P with a
-`gmlx run --moe-expert-probe` pass before pinning a value in a config.
+In server configs the lossy levers and keeper prestage are the
+per-model `moe_experts: K` / `moe_expert_mass: P` / `moe_miss_shed: P`
+/ `moe_layer_shed: P` / `moe_prestage: keepers` keys (or the matching
+`serve` flags for a single positional model); the probe stays
+CLI-only, so size P with a `gmlx run --moe-expert-probe` pass before
+pinning a value in a config.
 
 Which to reach for is a measurement, not a doctrine. Run the probe once,
 and read the decode feeder's exit stats (arena hit rate; printed by
@@ -453,10 +457,10 @@ about two thirds of decode wall, so the miss-targeted lever leads by
 a wide margin, and each shed arm pairs it with keeper prestage
 (`--moe-prestage keepers`, described earlier). One long generation
 per setting on the same one-shot prompt as the samples above,
-temperature 1.0, 24-30k tokens each with thinking included. These are
+temperature 1.0, 23-30k tokens each with thinking included. These are
 whole-run averages, not alternated A/Bs:
 
-| setting (with keeper prestage) | dropped mass | hit rate | decode |
+| setting | dropped mass | hit rate | decode |
 |---|---|---|---|
 | lossless, ranked prestage | none | 49.9% | 1.15 tok/s |
 | `moe_miss_shed: 0.80` | 17.1% | 68.0% | 1.19 tok/s (+3%) |
@@ -475,7 +479,7 @@ from lossless to 0.80 bought little in this sample, while 0.70 and
 
 All three shed levels produced complete working pages on this
 long-form prompt; what separates them is content drift, compared
-frame by frame in the Kimi-K3 screenshot table later in this guide.
+side by side in the Kimi-K3 screenshot table later in this guide.
 One step further down broke form, not just content: at 0.60 a code
 generation on this model produced a nonfunctional program in one try.
 The working band on this model at this quant is 0.65 to 0.80, sized

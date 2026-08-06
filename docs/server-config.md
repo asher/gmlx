@@ -553,8 +553,7 @@ models:
 Per-model keys: `path` (required), `profile`, `family`, `profiles`, `mmproj`,
 `draft_gguf`, `adapter`, `stream`, `moe_experts`, `moe_expert_mass`,
 `moe_miss_shed`, `moe_layer_shed`, `moe_prestage`, `prefill_feeder`,
-`decode_feeder`,
-`speculative`, `speculative_width_cap`, `overrides`
+`decode_feeder`, `speculative`, `speculative_width_cap`, `overrides`
 (`{sampling, load, cache, system, chat_template, chat_template_kwargs,
 thinking, reasoning_effort}`), `pin`, `ttl_s`.
 
@@ -640,11 +639,14 @@ own tasks before serving with them.
 
 `moe_prestage: keepers` retargets the lookahead prestage on a
 `stream: experts` model: predictions are filtered through the miss-shed
-policy, so experts the shed would drop are never read and predicted keepers
-stage demand-grade, overlapping their would-be demand stalls with compute.
-It adds no quality cost of its own but needs `moe_miss_shed` to define the
-policy (announced as ignored without it). Load-affecting like the levers
-above; the default (`ranked`) keeps guess-grade speculative prestage.
+policy, so an expert that would be shed if it demand-missed is never
+read, and predicted keepers stage demand-grade, overlapping their
+would-be demand stalls with compute. It adds no quality knob of its
+own, applying the policy `moe_miss_shed` defines; it needs both
+`stream: experts` and `moe_miss_shed` (each announced as ignored when
+missing). Load-affecting like the levers above; the default (`ranked`)
+keeps guess-grade speculative prestage (see
+[streaming.md](streaming.md)).
 
 `prefill_feeder: false` / `decode_feeder: false` opt a streaming model out of
 the feeder paths that are otherwise on by default (`prefill_feeder`
