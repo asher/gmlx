@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-05
+
 ### Added
 
 - `--moe-prestage keepers`: lookahead reads skip experts the miss-shed
@@ -15,10 +17,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Ctrl-T during a `chat` or `run` reply closes the model's open thinking
   block early (as if the thinking budget had just run out) so the answer
   starts now.
-- DeepSeek-V4 speculative decoding now accepts llama.cpp dflash draft GGUFs 
+- DeepSeek-V4 speculative decoding now accepts llama.cpp dflash draft GGUFs
   in addition to DwarfStar's.
-
-### Changed
 
 ### Fixed
 
