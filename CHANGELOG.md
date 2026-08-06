@@ -6,6 +6,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a DeepSeek-V4 indexer crash on non-NAX (pre-M5) GPUs once the
+  context passed ~8k tokens.
+- The large-model memory warning now prints once per chat session, not
+  every turn.
+
 ## [0.2.1] - 2026-08-05
 
 ### Added
