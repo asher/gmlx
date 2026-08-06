@@ -43,6 +43,15 @@ pytestmark = [
     ),
 ]
 
+# dsa_indexer_scores_q throws from eval_gpu on non-NAX devices (m3/m4-class
+# GPUs), so the quant-arm integration tests can only run where the kernel
+# can. The probe-gate tests below run everywhere.
+_HAS_NAX = bool(getattr(kq, "nax_available", lambda: False)())
+_needs_nax = pytest.mark.skipif(
+    not _HAS_NAX,
+    reason="indexer_q kernel requires tensor-op (NAX) hardware",
+)
+
 H, D, HID, L, P = 64, 128, 256, 64, 4096
 
 
@@ -104,6 +113,7 @@ def _operands(seed=7, on_grid=True):
     return x, q, q_quant, pooled
 
 
+@_needs_nax
 def test_quant_arm_matches_fp16_arm(monkeypatch):
     idx = _indexer_stub()
     x, q, q_quant, pooled = _operands()
@@ -123,6 +133,7 @@ def test_quant_arm_matches_fp16_arm(monkeypatch):
     assert _selection_equivalent(s_f16, got_q, got_f)
 
 
+@_needs_nax
 def test_offgrid_pool_disarms_and_falls_back(monkeypatch, capsys):
     idx = _indexer_stub()
     x, q, q_quant, pooled = _operands(on_grid=False)
@@ -159,6 +170,30 @@ def test_kill_switch_disables_probe(monkeypatch):
     assert md._dsa_probe("indexer_q") is False
 
 
+def test_probe_refuses_indexer_q_without_nax(monkeypatch):
+    # The m3-class crash: dsa_indexer_scores_q throws from eval_gpu, after
+    # the graph-build try/except has returned, so arming on symbols alone
+    # crashes the first prefill whose pool crosses the kernel threshold.
+    monkeypatch.setattr(kq, "nax_available", lambda: False)
+    assert md._dsa_probe("indexer_q") is False
+
+
+def test_probe_arms_indexer_q_with_nax(monkeypatch):
+    monkeypatch.setattr(kq, "nax_available", lambda: True)
+    assert md._dsa_probe("indexer_q") is True
+
+
+def test_probe_treats_missing_nax_symbol_as_no(monkeypatch):
+    monkeypatch.delattr(kq, "nax_available", raising=False)
+    assert md._dsa_probe("indexer_q") is False
+
+
+def test_probe_nax_gate_leaves_fp16_paths_alone(monkeypatch):
+    monkeypatch.setattr(kq, "nax_available", lambda: False)
+    assert md._dsa_probe("indexer") is True
+
+
+@_needs_nax
 def test_unaligned_width_pads_quant_operands(monkeypatch):
     idx = _indexer_stub()
     mx.random.seed(11)
@@ -185,10 +220,11 @@ def test_unaligned_width_pads_quant_operands(monkeypatch):
 
 def test_warm_compiles_all_armed_groups():
     n = md.warm_kernel_pipelines()
-    # qat + scores/topk chain + decode + quant chain
+    # qat + scores/topk chain + decode (+ quant chain on NAX hardware)
     assert n >= 3
     assert md._dsa_state["indexer"] is True
-    assert md._dsa_state["indexer_q"] is not False
+    # The probe hardware-gates indexer_q: armed on NAX, refused otherwise.
+    assert md._dsa_state["indexer_q"] is _HAS_NAX
     assert md._pool_grid_certified is False  # warm never certifies
 
 
@@ -206,5 +242,5 @@ def test_warm_swallows_failures_without_disarming(monkeypatch):
     monkeypatch.setattr(kq, "dsa_indexer_scores_q", boom)
     n = md.warm_kernel_pipelines()  # must not raise
     assert md._dsa_state["indexer"] is True
-    assert md._dsa_state["indexer_q"] is True
+    assert md._dsa_state["indexer_q"] is _HAS_NAX
     assert n >= 1  # qat and decode still warmed
