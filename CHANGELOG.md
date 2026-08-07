@@ -11,6 +11,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - DeepSeek-V4 hyper-connections run as one fused kernel per call; DSpark
   speculative decode on an in-RAM V4-Flash goes from losing to plain
   decode to beating it (about +13% on M5 Max).
+- The hc_expand between attention and the ffn hyper-connection fuses into
+  the following collapse kernel, and dense small-N projections (router
+  gate, indexer weights, hyper head) route through mlx-kquant's
+  skinny_matmul at speculative verify widths when available
+  (GMLX_KQ_SKINNY=0 opts out).
 
 ### Fixed
 
