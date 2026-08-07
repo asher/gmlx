@@ -149,7 +149,8 @@ with a warning); `--no-speculative`/`--no-mtp` forces it off.
 | `--draft-block-size N` | Override the MTP draft block size. |
 
 Speculative generation takes only `--temp`/`--top-p`/`--top-k`/`--min-p` plus a
-baked `--system-prompt`; mlx-vlm's verify walk has no stop/bias/penalty
+baked `--system-prompt`; the MTP verify walk (gmlx's owned engine, or mlx-vlm's
+stock round for qwen3.5-native/gemma4 drafters) has no stop/bias/penalty
 hooks. A native head is sticky: MTP auto-enables and stays on. Flags the verify
 walk can't honour (`--stop`, `--logit-bias`, the
 repetition/presence/frequency penalties, `--xtc-probability`, `--max-kv-size`,

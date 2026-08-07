@@ -337,6 +337,11 @@ def install_safe_kv_quantization() -> None:
         scheme = kwargs.get(
             "kv_quant_scheme",
             getattr(vlm_common, "DEFAULT_KV_QUANT_SCHEME", None))
+        if scheme == "kvarn":
+            # kvarn converts at cache construction (kvarn_serve); the
+            # mid-stream affine pass must never touch a kvarn-scheme
+            # stack, converted or (declined) fp16.
+            return
         if turbo_on is not None and turbo_on(kv_bits, scheme):
             return stock(prompt_cache, quantized_kv_start, kv_group_size,
                          kv_bits, **kwargs)

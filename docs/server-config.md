@@ -925,6 +925,14 @@ models. Each maps 1:1 to the env var mlx-vlm reads at build:
 > per-model mapping cannot work. Set `server.prefill_step_size` (see the
 > server key table above).
 
+`kv_quant_scheme: kvarn` converts every eligible layer's batch KV cache to
+KVarN (`kv_bits` picks the width, default 6; `kv_tail_tokens` sizes the
+fp16 precision tail, default 1024). Ineligible models keep fp16 KV with a
+one-shot log reason, never a silent affine fallback. While a model serves
+under kvarn, the APC prompt cache and cascade shared-prefix decode are
+inactive for it (both announce themselves once); speculative targets keep
+their stock spec-engine KV handling.
+
 ### Cache keys (`cache:`)
 
 mlx-vlm's APC prompt cache and its optional SSD disk tier. Server-level,

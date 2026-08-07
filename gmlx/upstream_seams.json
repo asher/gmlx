@@ -49,6 +49,7 @@
   "mlx_vlm.generate.ar:PromptProcessingBatch.prompt_step": "3885eab6b6c3ec251d910d6c7d61bec330ddb96f90c981c8b7021577d4e62566",
   "mlx_vlm.generate.ar:SpeculativeGenerationBatch.next": "2fa64fe4fa750d86abbc750c120d498959b6507f4c0b7269174a1fe1e793d620",
   "mlx_vlm.generate.ar:_extend_cache": "6f1533883d2ddba4c4c2008a787148836a643284cb8da551d8c7ec3c22d1c32b",
+  "mlx_vlm.generate.ar:_make_cache": "2924a8a1f99c2c5bfbe0d406249442c0065a46d2f4ff20162df2c2469f8e7451",
   "mlx_vlm.generate.ar:run_speculative_server_rounds": "5953a756bf2aed0230fb31f50320d7ad12f32a6e0a28ea161a9f3f59fd71da9f",
   "mlx_vlm.generate:maybe_quantize_kv_cache": "eb4e2f6e11981f87cb3953723100d7a57f11cfe50cc74b1424fd743d1851f5cd",
   "mlx_vlm.models.base:quantized_scaled_dot_product_attention": "d7c6813bb1ee072de5d2c069c68d8a88488ba50d13d8576dbc8c6509ee8c77c1",

@@ -151,14 +151,20 @@ SEAMS: tuple[Seam, ...] = (
          "cascade_sdpa (stamped shared-prefix batched decode)"),
     Seam("mlx_vlm.generate.ar", "PromptProcessingBatch.__init__",
          "cascade_sdpa.install_cascade_stamp (token-prefix stamp at batch "
-         "formation; rows + caches coexist in matching order here)",
+         "formation; rows + caches coexist in matching order here) + "
+         "kvarn_serve._install_ppb_fastpath (B=1 fast path skips "
+         "_make_cache; kvarn rebuilds the empty cache)",
          critical=True),
     Seam("mlx_vlm.generate.ar", "_extend_cache",
          "cascade_sdpa.install_cascade_stamp (stamp carry across the "
          "B=1-to-batch merge lift on admission)", critical=True),
     # --- speculative / AR batch engine (spec_engine owns these methods) ---
     Seam("mlx_vlm.generate.ar", "BatchGenerator.__init__",
-         "spec_engine._install_apc_manager_stash", critical=True),
+         "spec_engine._install_apc_manager_stash + kvarn_serve APC gate",
+         critical=True),
+    Seam("mlx_vlm.generate.ar", "_make_cache",
+         "kvarn_serve._install_make_cache (batch kvarn KV construction)",
+         critical=True),
     Seam("mlx_vlm.generate.ar",
          "PromptProcessingBatch._store_apc_exact_checkpoints",
          "spec_engine._install_ckpt_checkpoint_store (ckpt cursor rides "

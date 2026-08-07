@@ -1667,13 +1667,19 @@ def install_spec_kv_quant() -> None:
 
     def _quantizing_spec_cache(lm, *, draft_kind, batch_size, left_padding,
                                make_cache):
-        caches = _orig(
-            lm,
-            draft_kind=draft_kind,
-            batch_size=batch_size,
-            left_padding=left_padding,
-            make_cache=make_cache,
-        )
+        from .kvarn_serve import spec_cache_build
+
+        # The stock make_cache closure passes the boot scheme through;
+        # suspend the serve wrap so spec targets never get a batch kvarn
+        # cache (the verify walk needs trim, which it does not support).
+        with spec_cache_build():
+            caches = _orig(
+                lm,
+                draft_kind=draft_kind,
+                batch_size=batch_size,
+                left_padding=left_padding,
+                make_cache=make_cache,
+            )
         if draft_kind != "mtp":
             return caches
         if batch_size != 1:
@@ -1692,6 +1698,13 @@ def install_spec_kv_quant() -> None:
                     "sliding-window cache stack cannot quantize")
             return caches
         if kind == "kvarn":
+            from .cache_compat import cache_types
+
+            if any(type(c) in cache_types("BatchKVCache") for c in caches):
+                _decline_kvarn(
+                    "serve spec prefill keeps the stock batch cache "
+                    "(kvarn spec serve lands later)")
+                return caches
             return _kvarn_spec_convert(lm, caches)
         bits, group = params[1], params[2]
         out = []

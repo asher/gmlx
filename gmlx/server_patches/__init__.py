@@ -199,6 +199,8 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_pooling_apc_support()
     install_safe_kv_quantization()
     install_pooled_prompt_kv_quant()
+    from ..kvarn_serve import install_kvarn_serve
+    install_kvarn_serve()
     install_chat_template_kwargs()
     install_thinking_budget_fix()
     install_openai_stop_sequences()

@@ -29,7 +29,7 @@ import sys
 import mlx.core as mx
 
 from .envflags import env_bool
-from .kvarn_cache import KVarNView
+from .kvarn_cache import BatchKVarNKVCache, KVarNView
 
 _MODEL_PREFIXES = ("mlx_lm.models.", "mlx_vlm.models.", "gmlx.")
 _BASE_MODULES = ("mlx_lm.models.base", "mlx_vlm.models.base")
@@ -122,6 +122,60 @@ def _decode(q, cache, scale):
     return merged.astype(q.dtype)
 
 
+def _decode_batch(q, cache, scale, starts):
+    """qL=1 batched decode: same body/tail split as _decode with per-row
+    key starts (left padding). A row admitted deep into an older batch can
+    start inside the tail window; its body leg then attends zero keys and
+    contributes nothing through the LSE weights."""
+    import mlx_kquant as kq
+
+    n = cache._idx
+    t = min(cache.tail_len, n)
+    n_body = n - t
+    if n_body == 0:
+        tk, tv = cache.tail_slices(t)
+        return kq.sdpa_decode_gqa(
+            q, tk.astype(q.dtype), tv.astype(q.dtype), scale, starts=starts
+        )
+    q_rot = kq.kvarn_rotate(q)
+    body_args = (
+        q_rot,
+        cache.codes_k,
+        cache.axes_k,
+        cache.codes_v,
+        cache.axes_v,
+        cache.stage_k,
+        cache.stage_v,
+        n,
+        scale,
+        cache.k_bits,
+        cache.v_bits,
+    )
+    if t == 0:
+        return kq.kvarn_rotate(
+            kq.sdpa_decode_gqa_kvarn(*body_args, starts=starts)
+        )
+    body, lse_b = kq.sdpa_decode_gqa_kvarn(
+        *body_args,
+        starts=mx.minimum(starts, n_body).astype(mx.int32),
+        n_attend=n_body,
+        full_visibility=True,
+        return_lse=True,
+    )
+    tk, tv = cache.tail_slices(t)
+    tail_starts = mx.maximum(starts - n_body, 0).astype(mx.int32)
+    tail, lse_t = kq.sdpa_decode_gqa(
+        q,
+        tk.astype(q.dtype),
+        tv.astype(q.dtype),
+        scale,
+        starts=tail_starts,
+        return_lse=True,
+    )
+    merged = _lse_merge(kq.kvarn_rotate(body), lse_b, tail, lse_t)
+    return merged.astype(q.dtype)
+
+
 def _prefill(q, cache, scale, mask):
     import mlx_kquant as kq
 
@@ -132,12 +186,37 @@ def _prefill(q, cache, scale, mask):
     return kq.kvarn_rotate(out)
 
 
+def _batch_starts(cache, mask):
+    """Per-row starts for a batched decode call, or None to decline. The
+    mask must be one this cache's make_mask registered (provenance, not
+    content -- inspecting mask contents is a GPU sync); windowed or foreign
+    masks fall back to the materialize path."""
+    if not isinstance(mask, mx.array):
+        return None
+    from .quantized_sdpa_fix import _registered_starts
+
+    return _registered_starts(mask)
+
+
 def kvarn_attention(q, cache, scale, mask, sinks=None):
     if sinks is not None:
         raise RuntimeError(
             "[kvarn] attention sinks reached the kvarn route; this arch "
             "should have been declined at cache build time."
         )
+    if isinstance(cache, BatchKVarNKVCache):
+        if (
+            q.shape[2] == 1
+            and q.shape[0] == cache.stage_k.shape[0]
+            and q.dtype in (mx.float16, mx.bfloat16)
+            and 1 <= q.shape[1] // cache.stage_k.shape[1] <= 16
+            and q.shape[1] % cache.stage_k.shape[1] == 0
+            and env_bool("GMLX_KVARN_SDPA", True)
+        ):
+            starts = _batch_starts(cache, mask)
+            if starts is not None:
+                return _decode_batch(q, cache, float(scale), starts)
+        return _prefill(q, cache, float(scale), mask)
     plain_mask = mask is None or (isinstance(mask, str) and mask == "causal")
     if (
         1 <= q.shape[2] <= 4
