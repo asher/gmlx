@@ -36,10 +36,14 @@ def _parse_int_list(s: str, *, flag: str) -> list[int]:
 # reference. Both verbs build their parsers with add_help=False and route
 # through add_condensed_help.
 class _HelpAllAction(argparse.Action):
-    def __init__(self, option_strings, dest=argparse.SUPPRESS,
-                 default=argparse.SUPPRESS, help=None):  # noqa: A002
-        super().__init__(option_strings, dest=dest, default=default, nargs=0,
-                         help=help)
+    def __init__(
+        self,
+        option_strings,
+        dest=argparse.SUPPRESS,
+        default=argparse.SUPPRESS,
+        help=None,
+    ):  # noqa: A002
+        super().__init__(option_strings, dest=dest, default=default, nargs=0, help=help)
 
     def __call__(self, parser, namespace, values, option_string=None):
         parser.print_help()
@@ -47,10 +51,15 @@ class _HelpAllAction(argparse.Action):
 
 
 class _CondensedHelpAction(argparse.Action):
-    def __init__(self, option_strings, dest=argparse.SUPPRESS,
-                 default=argparse.SUPPRESS, help=None, core=()):  # noqa: A002
-        super().__init__(option_strings, dest=dest, default=default, nargs=0,
-                         help=help)
+    def __init__(
+        self,
+        option_strings,
+        dest=argparse.SUPPRESS,
+        default=argparse.SUPPRESS,
+        help=None,
+        core=(),
+    ):  # noqa: A002
+        super().__init__(option_strings, dest=dest, default=default, nargs=0, help=help)
         self.core = tuple(core)
 
     def __call__(self, parser, namespace, values, option_string=None):
@@ -62,12 +71,17 @@ def format_condensed_help(ap: argparse.ArgumentParser, core) -> str:
     """The short help page: usage over just the core actions, the description,
     the core options, and a pointer at --help-all for the rest."""
     keys = set(core)
-    shown = [a for a in ap._actions
-             if (isinstance(a, (_CondensedHelpAction, _HelpAllAction))
-                 or (keys & set(a.option_strings) if a.option_strings
-                     else a.dest in keys))]
-    n_more = sum(1 for a in ap._actions
-                 if a not in shown and a.help != argparse.SUPPRESS)
+    shown = [
+        a
+        for a in ap._actions
+        if (
+            isinstance(a, (_CondensedHelpAction, _HelpAllAction))
+            or (keys & set(a.option_strings) if a.option_strings else a.dest in keys)
+        )
+    ]
+    n_more = sum(
+        1 for a in ap._actions if a not in shown and a.help != argparse.SUPPRESS
+    )
     fmt = ap._get_formatter()
     # Pass the mutually exclusive groups so the usage line keeps its
     # `[--prompt STR | --prompt-file PATH]` bracketing. argparse skips any
@@ -81,16 +95,23 @@ def format_condensed_help(ap: argparse.ArgumentParser, core) -> str:
     fmt.add_text(
         f"{n_more} further flags cover sampling, the KV cache, speculative "
         f"decoding, and bigger-than-RAM streaming: `{ap.prog} --help-all` "
-        f"lists them, docs/cli.md explains them.")
+        f"lists them, docs/cli.md explains them."
+    )
     return fmt.format_help()
 
 
 def add_condensed_help(ap: argparse.ArgumentParser, core) -> None:
     """Install -h/--help (the everyday flags) and --help-all (everything)."""
-    ap.add_argument("-h", "--help", action=_CondensedHelpAction, core=core,
-                    help="Show the common options (this page) and exit.")
-    ap.add_argument("--help-all", action=_HelpAllAction,
-                    help="Show every option and exit.")
+    ap.add_argument(
+        "-h",
+        "--help",
+        action=_CondensedHelpAction,
+        core=core,
+        help="Show the common options (this page) and exit.",
+    )
+    ap.add_argument(
+        "--help-all", action=_HelpAllAction, help="Show every option and exit."
+    )
 
 
 def add_verbosity_arg(ap: argparse.ArgumentParser) -> None:
@@ -112,8 +133,7 @@ def mass_share(value) -> float:
     except (TypeError, ValueError):
         raise argparse.ArgumentTypeError(f"not a number: {value!r}")
     if not 0.0 < p <= 1.0:
-        raise argparse.ArgumentTypeError(
-            f"must be a mass share in (0, 1], got {value}")
+        raise argparse.ArgumentTypeError(f"must be a mass share in (0, 1], got {value}")
     return p
 
 
@@ -725,12 +745,29 @@ def _build_parser(prog: str = "gmlx run") -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         add_help=False,
     )
-    add_condensed_help(ap, (
-        "gguf", "--prompt", "--prompt-file", "--max-tokens", "--temp",
-        "--top-p", "--min-p", "--stop", "--config", "--profile",
-        "--system-prompt", "--reasoning", "--thinking", "--mmproj",
-        "--image", "--max-kv-size", "--stream-experts", "--verbose",
-    ))
+    add_condensed_help(
+        ap,
+        (
+            "gguf",
+            "--prompt",
+            "--prompt-file",
+            "--max-tokens",
+            "--temp",
+            "--top-p",
+            "--min-p",
+            "--stop",
+            "--config",
+            "--profile",
+            "--system-prompt",
+            "--reasoning",
+            "--thinking",
+            "--mmproj",
+            "--image",
+            "--max-kv-size",
+            "--stream-experts",
+            "--verbose",
+        ),
+    )
     ap.add_argument("gguf", help="Path to the GGUF file (sharded ok).")
     prompt_group = ap.add_mutually_exclusive_group()
     prompt_group.add_argument(
@@ -987,14 +1024,20 @@ def resolve_max_tokens(args) -> None:
 
 def max_tokens_label(args) -> str:
     """``max_tokens=`` banner value: the cap, or ``until-eos`` when uncapped."""
-    return (str(args.max_tokens)
-            if getattr(args, "_max_tokens_capped", True) else "until-eos")
+    return (
+        str(args.max_tokens)
+        if getattr(args, "_max_tokens_capped", True)
+        else "until-eos"
+    )
 
 
 def warn_cap_hit(args, n_tokens) -> None:
     """One stderr line when a reply ended at the --max-tokens cap, not EOS."""
-    if (getattr(args, "_max_tokens_capped", False)
-            and n_tokens is not None and n_tokens >= args.max_tokens):
+    if (
+        getattr(args, "_max_tokens_capped", False)
+        and n_tokens is not None
+        and n_tokens >= args.max_tokens
+    ):
         print(
             f"note: reply stopped at the --max-tokens cap ({args.max_tokens}); "
             "raise it or omit the flag to generate until the model stops.",
@@ -1119,6 +1162,10 @@ def _run_bench(args) -> int:
         decode_tokens=decode_tokens,
         runs=args.bench_runs,
         prefill_step_size=args.prefill_step_size,
+        kv_bits=args.kv_bits,
+        kv_group_size=args.kv_group_size,
+        kv_quant_scheme=args.kv_quant_scheme,
+        kv_tail_tokens=args.kv_tail_tokens,
     )
     print(f"\n{'prompt_len':>10} {'prefill_tps':>12} {'decode_tps':>11}")
     for L in lengths:
@@ -1191,12 +1238,13 @@ def _run_bench_depths(args) -> int:
     if convs is not None:
         seed = int(getattr(args, "bench_chat_seed", 42))
         from .chat import fold_thinking_flag
-        tkw = fold_thinking_flag(
-            args, parse_template_config(args.chat_template_config))
-        prompt_source = _ChatPromptSource(
-            convs, tok, seed=seed, template_kwargs=tkw)
-        print(f"[bench] prompt slice seed {seed}"
-              + (f" template_config={tkw}" if tkw else ""))
+
+        tkw = fold_thinking_flag(args, parse_template_config(args.chat_template_config))
+        prompt_source = _ChatPromptSource(convs, tok, seed=seed, template_kwargs=tkw)
+        print(
+            f"[bench] prompt slice seed {seed}"
+            + (f" template_config={tkw}" if tkw else "")
+        )
 
     corpus_label = chat_ds if chat_ds else "synthetic"
     print(
@@ -1215,6 +1263,10 @@ def _run_bench_depths(args) -> int:
         prefill_step_size=args.prefill_step_size,
         temp=args.bench_temp,
         prompt_source=prompt_source,
+        kv_bits=args.kv_bits,
+        kv_group_size=args.kv_group_size,
+        kv_quant_scheme=args.kv_quant_scheme,
+        kv_tail_tokens=args.kv_tail_tokens,
     )
 
     if speculative:
@@ -1228,7 +1280,9 @@ def _run_bench_depths(args) -> int:
             dn = r.get("draft_n", 0)
             da = r.get("draft_n_accepted", 0)
             pct = 100.0 * da / dn if dn else 0.0
-            accept_str = f"{da}/{dn} {pct:.0f}%" if dn else f"{r['accept_rate'] * 100:.1f}%"
+            accept_str = (
+                f"{da}/{dn} {pct:.0f}%" if dn else f"{r['accept_rate'] * 100:.1f}%"
+            )
             print(
                 f"{D:>8} {r['prefill_tps']:>12.1f} {r['tg_tps']:>9.1f} "
                 f"{r['spec_tps']:>9.1f} {accept_str:>12} "
@@ -1304,8 +1358,11 @@ def _apply_placement(args, model) -> None:
         from .loader import install_expert_streaming
 
         n, _ = install_expert_streaming(
-            model, gguf_path=gguf_path,
-            stats_verbose=bool(getattr(args, "verbose", False)), **feeders)
+            model,
+            gguf_path=gguf_path,
+            stats_verbose=bool(getattr(args, "verbose", False)),
+            **feeders,
+        )
         if n == 0:
             print(
                 "[stream] warning: no MoE expert stacks found - "
@@ -1331,10 +1388,7 @@ def _apply_placement(args, model) -> None:
         install_moe_miss_shed(model, args.moe_miss_shed)
     if getattr(args, "moe_prestage", "ranked") == "keepers":
         if getattr(args, "moe_miss_shed", None) is None:
-            print(
-                "[stream] --moe-prestage keepers ignored: it needs "
-                "--moe-miss-shed"
-            )
+            print("[stream] --moe-prestage keepers ignored: it needs --moe-miss-shed")
         else:
             from .moe_experts import install_moe_prestage_keepers
 
@@ -1352,7 +1406,8 @@ def _run_generate(args) -> int:
 
     # Parse before the model load so a JSON typo fails fast.
     template_kwargs = fold_thinking_flag(
-        args, parse_template_config(args.chat_template_config))
+        args, parse_template_config(args.chat_template_config)
+    )
     logit_bias = parse_logit_bias(args.logit_bias)
     preset_native_fp_wire_env(args)
 
@@ -1450,6 +1505,7 @@ def _run_generate(args) -> int:
     _apply_placement(args, model)
 
     from .diffusion import is_diffusion_model
+
     if is_diffusion_model(model) and not args._max_tokens_capped:
         # Bounded canvas fallback, shown in the banner; see the constant.
         args.max_tokens = _DIFFUSION_MAX_TOKENS
@@ -1526,7 +1582,8 @@ def _run_vlm(args) -> int:
 
     # Parse before the model load so a JSON typo fails fast.
     template_kwargs = fold_thinking_flag(
-        args, parse_template_config(args.chat_template_config))
+        args, parse_template_config(args.chat_template_config)
+    )
     logit_bias = parse_logit_bias(args.logit_bias)
     if args.seed is not None:
         import mlx.core as mx
@@ -1703,7 +1760,8 @@ def _run_vlm_mtp(args) -> int:
         apply_chat_template=not args.no_chat_template,
         system_prompt=args.system_prompt,
         template_kwargs=fold_thinking_flag(
-            args, parse_template_config(args.chat_template_config)),
+            args, parse_template_config(args.chat_template_config)
+        ),
         verbose=True,
         reasoning=args.reasoning,
         kv_bits=args.kv_bits,
@@ -1760,15 +1818,18 @@ def _explicit_dests(parser, argv) -> set:
     provided = set()
     for action in parser._actions:
         for opt in action.option_strings:
-            if any(n == opt or (len(n) > 2 and n.startswith("--")
-                                and opt.startswith(n)) for n in names):
+            if any(
+                n == opt or (len(n) > 2 and n.startswith("--") and opt.startswith(n))
+                for n in names
+            ):
                 provided.add(action.dest)
                 break
     return provided
 
 
-def _apply_sampling_to_args(args, sampling, explicit: set,
-                            chat_template_kwargs=None) -> list[str]:
+def _apply_sampling_to_args(
+    args, sampling, explicit: set, chat_template_kwargs=None
+) -> list[str]:
     """Overlay a sampling group (plus optional chat-template kwargs like
     ``enable_thinking`` / gpt-oss ``reasoning_effort``) onto CLI ``args``,
     filling only what the user didn't pass explicitly. The sampling half of the
@@ -1786,7 +1847,7 @@ def _apply_sampling_to_args(args, sampling, explicit: set,
     sampling = sampling or {}
     for k, v in sampling.items():
         if k == "enable_thinking":
-            continue                       # folded into chat-template kwargs below
+            continue  # folded into chat-template kwargs below
         attr = _CFG_SAMPLING_TO_ARG.get(k)
         if attr:
             _set(attr, v, k)
@@ -1795,10 +1856,13 @@ def _apply_sampling_to_args(args, sampling, explicit: set,
     ctk = dict(chat_template_kwargs or {})
     et = sampling.get("enable_thinking")
     if et is not None:
-        ctk["enable_thinking"] = et        # the sampling key is authoritative
-    if (ctk and "chat_template_config" not in explicit
-            and hasattr(args, "chat_template_config")
-            and not args.chat_template_config):
+        ctk["enable_thinking"] = et  # the sampling key is authoritative
+    if (
+        ctk
+        and "chat_template_config" not in explicit
+        and hasattr(args, "chat_template_config")
+        and not args.chat_template_config
+    ):
         import json
 
         args.chat_template_config = json.dumps(ctk)
@@ -1811,8 +1875,9 @@ def _apply_resolved_to_args(args, rm, explicit: set) -> list[str]:
     filling only what the user didn't pass explicitly (explicit flags win). Returns the
     list of applied setting labels for a one-line note. Guarded by ``hasattr`` so it
     works for both the ``run`` and (narrower) ``chat`` arg surfaces."""
-    applied = _apply_sampling_to_args(args, rm.sampling, explicit,
-                                      rm.chat_template_kwargs)
+    applied = _apply_sampling_to_args(
+        args, rm.sampling, explicit, rm.chat_template_kwargs
+    )
 
     def _set(attr, value, label):
         if value is None or attr in explicit or not hasattr(args, attr):
@@ -1829,8 +1894,7 @@ def _apply_resolved_to_args(args, rm, explicit: set) -> list[str]:
     # Dedicated thinking controls ride the --thinking/--reasoning-effort args
     # so fold_thinking_flag maps them onto this model's template spelling.
     _set("thinking", getattr(rm, "thinking", None), "thinking")
-    _set("reasoning_effort", getattr(rm, "reasoning_effort", None),
-         "reasoning_effort")
+    _set("reasoning_effort", getattr(rm, "reasoning_effort", None), "reasoning_effort")
     _set("mmproj", rm.mmproj, "mmproj")
     _set("adapter", rm.adapter, "adapter")
     _set("draft_gguf", rm.draft_gguf, "draft_gguf")
@@ -1842,28 +1906,34 @@ def _apply_resolved_to_args(args, rm, explicit: set) -> list[str]:
         args.speculative = bool(rm.speculative)
         if rm.speculative:
             applied.append("speculative")
-    if (rm.stream and "stream_cpu" not in explicit
-            and "stream_experts" not in explicit):
+    if rm.stream and "stream_cpu" not in explicit and "stream_experts" not in explicit:
         if rm.stream == "cpu" and hasattr(args, "stream_cpu"):
             args.stream_cpu = True
             applied.append("stream-cpu")
         elif rm.stream == "experts" and hasattr(args, "stream_experts"):
             args.stream_experts = True
             applied.append("stream-experts")
-    if (getattr(rm, "moe_expert_mass", None) is not None
-            and "moe_expert_mass" not in explicit
-            and hasattr(args, "moe_expert_mass")
-            # an explicit --moe-expert-probe wins over the config's mass
-            # (they are mutually exclusive: the probe must stay lossless)
-            and not getattr(args, "moe_expert_probe", False)):
+    if (
+        getattr(rm, "moe_expert_mass", None) is not None
+        and "moe_expert_mass" not in explicit
+        and hasattr(args, "moe_expert_mass")
+        # an explicit --moe-expert-probe wins over the config's mass
+        # (they are mutually exclusive: the probe must stay lossless)
+        and not getattr(args, "moe_expert_probe", False)
+    ):
         args.moe_expert_mass = rm.moe_expert_mass
         applied.append("moe-expert-mass")
-    for dest, label in (("moe_experts", "moe-experts"),
-                        ("moe_miss_shed", "moe-miss-shed"),
-                        ("moe_layer_shed", "moe-layer-shed"),
-                        ("moe_prestage", "moe-prestage")):
-        if (getattr(rm, dest, None) is not None and dest not in explicit
-                and hasattr(args, dest)):
+    for dest, label in (
+        ("moe_experts", "moe-experts"),
+        ("moe_miss_shed", "moe-miss-shed"),
+        ("moe_layer_shed", "moe-layer-shed"),
+        ("moe_prestage", "moe-prestage"),
+    ):
+        if (
+            getattr(rm, dest, None) is not None
+            and dest not in explicit
+            and hasattr(args, dest)
+        ):
             setattr(args, dest, getattr(rm, dest))
             applied.append(label)
     return applied
@@ -1885,6 +1955,7 @@ def split_path_intent(args) -> None:
         return
     head, tail = raw.rsplit("@", 1)
     from . import profiles as fam
+
     if tail in fam.BUILTIN_INTENTS and os.path.exists(os.path.expanduser(head)):
         args.gguf = head
         args.profile = args.profile or tail
@@ -1901,25 +1972,31 @@ def apply_family_defaults(args, parser, argv) -> int | None:
     if getattr(args, "_config_resolved", False):
         return None
     intent = getattr(args, "profile", None)
-    if (getattr(args, "no_family_defaults", False)
-            or os.environ.get("GMLX_NO_FAMILY_DEFAULTS")):
+    if getattr(args, "no_family_defaults", False) or os.environ.get(
+        "GMLX_NO_FAMILY_DEFAULTS"
+    ):
         if intent:
-            print("error: --profile is a family-defaults feature; drop "
-                  "--no-family-defaults (or the env opt-out) to use it",
-                  file=sys.stderr)
+            print(
+                "error: --profile is a family-defaults feature; drop "
+                "--no-family-defaults (or the env opt-out) to use it",
+                file=sys.stderr,
+            )
             return 2
         return None
     from . import profiles as fam
     from .discovery import header_meta
 
     if intent is not None and intent not in fam.BUILTIN_INTENTS:
-        print(f"error: unknown profile {intent!r}; built-in intents: "
-              f"{', '.join(sorted(fam.BUILTIN_INTENTS))} (see `gmlx profiles`)",
-              file=sys.stderr)
+        print(
+            f"error: unknown profile {intent!r}; built-in intents: "
+            f"{', '.join(sorted(fam.BUILTIN_INTENTS))} (see `gmlx profiles`)",
+            file=sys.stderr,
+        )
         return 2
-    meta = header_meta(args.gguf)      # cached; the MTP auto probe shares it
-    family = (fam.detect_family(meta.get("arch"), meta.get("name"))
-              if meta else "default")
+    meta = header_meta(args.gguf)  # cached; the MTP auto probe shares it
+    family = (
+        fam.detect_family(meta.get("arch"), meta.get("name")) if meta else "default"
+    )
     groups = fam.groups_for(family, intent)
     # The GGUF's own embedded model-card sampling (general.sampling.*) refines
     # the arch-family guess; explicit flags still win via `explicit`.
@@ -1931,11 +2008,15 @@ def apply_family_defaults(args, parser, argv) -> int | None:
     # say so instead of a banner claiming the intent was applied.
     has_delta = bool(intent) and bool(fam.family_intents(family).get(intent))
     if intent and not has_delta:
-        print(f"[family] note: {label} has no @{intent} tuning - the family "
-              f"base defaults apply", file=sys.stderr)
+        print(
+            f"[family] note: {label} has no @{intent} tuning - the family "
+            f"base defaults apply",
+            file=sys.stderr,
+        )
     explicit = _explicit_dests(parser, argv)
-    applied = _apply_sampling_to_args(args, groups.get("sampling"), explicit,
-                                      groups.get("chat_template_kwargs"))
+    applied = _apply_sampling_to_args(
+        args, groups.get("sampling"), explicit, groups.get("chat_template_kwargs")
+    )
     if applied:
         suffix = f" @{intent}" if has_delta else ""
         src = f"{label}{suffix} + gguf header" if hs else f"{label}{suffix}"
@@ -1943,7 +2024,8 @@ def apply_family_defaults(args, parser, argv) -> int | None:
         # must never trail a load failure claiming defaults were applied.
         args._family_note = (
             f"[family] {src} defaults: "
-            f"{', '.join(sorted(applied))}  (--no-family-defaults to disable)")
+            f"{', '.join(sorted(applied))}  (--no-family-defaults to disable)"
+        )
     return None
 
 
@@ -1974,9 +2056,11 @@ def maybe_load_from_config(args, parser, argv) -> int | None:
         # Family detection before resolution, so the family base layer (and
         # family-resolved @intents) shape the overlay exactly like the server.
         from .discovery import fill_families
+
         fill_families(cfg)
         rm = cfgmod.resolve_cli_model(
-            raw, cfg, request_profile=getattr(args, "profile", None))
+            raw, cfg, request_profile=getattr(args, "profile", None)
+        )
     except cfgmod.ConfigError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -2036,8 +2120,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         # load_mtp_model; auto-MTP still defers under streaming, explicit
         # --speculative opts in). CPU-stream verify stays unsupported.
         print(
-            "error: --stream-cpu on a --speculative/MTP base is not "
-            "supported yet.",
+            "error: --stream-cpu on a --speculative/MTP base is not supported yet.",
             file=sys.stderr,
         )
         return 2
@@ -2138,7 +2221,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
             return _run_bench(args)
         return _run_generate(args)
     except (UnsupportedCodecError, UnsupportedArchError) as e:
-        return _report_error(e)          # skips loadlog's merged line
+        return _report_error(e)  # skips loadlog's merged line
     except KeyboardInterrupt:
         print("\ninterrupted", file=sys.stderr)
         return 130
@@ -2224,7 +2307,7 @@ def _print_umbrella_help(prog: str = "gmlx") -> None:
         "  completion   print a shell completion script (zsh, bash, fish)\n\n"
         f"first run:  {prog} init   (scaffold a config) ->  {prog} serve   "
         f"(start the server) ->  {prog} launch <harness>\n"
-        f"or one-shot:  {prog} run <model.gguf | id> --prompt \"...\"\n\n"
+        f'or one-shot:  {prog} run <model.gguf | id> --prompt "..."\n\n'
         f"run `{prog} <command> --help` for a command's options; "
         f"`{prog} --version` prints the installed version."
     )
@@ -2236,8 +2319,7 @@ def umbrella_main(argv: list[str] | None = None) -> int:
 
     # Validation warnings (unrecognized config keys, ...) are user-facing on
     # the CLI: print the message, not the library source path and line.
-    warnings.formatwarning = \
-        lambda msg, cat, fn, ln, line=None: f"warning: {msg}\n"
+    warnings.formatwarning = lambda msg, cat, fn, ln, line=None: f"warning: {msg}\n"
     # transformers advises that PyTorch is missing on import - it is missing by
     # design here (all numerics run on MLX), so the advisory is pure noise.
     os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
@@ -2251,8 +2333,11 @@ def umbrella_main(argv: list[str] | None = None) -> int:
     try:
         os.getcwd()
     except OSError:
-        print("error: current working directory no longer exists - "
-              "cd to an existing directory and retry", file=sys.stderr)
+        print(
+            "error: current working directory no longer exists - "
+            "cd to an existing directory and retry",
+            file=sys.stderr,
+        )
         return 1
     argv = list(sys.argv[1:] if argv is None else argv)
     _lift_stream_cb_caps(argv)
@@ -2265,7 +2350,7 @@ def umbrella_main(argv: list[str] | None = None) -> int:
     if not argv or argv[0] in ("-h", "--help", "help"):
         if argv and argv[0] == "help" and len(argv) > 1:
             sub = _VERB_ALIASES.get(argv[1], argv[1])
-            if sub in _VERBS:              # `help serve` == `serve --help`
+            if sub in _VERBS:  # `help serve` == `serve --help`
                 return umbrella_main([sub, "--help"])
         _print_umbrella_help(prog)
         return 0
@@ -2278,19 +2363,25 @@ def umbrella_main(argv: list[str] | None = None) -> int:
     verb = _VERB_ALIASES.get(verb, verb)
     if verb not in _VERBS:
         if verb.endswith(".gguf") or os.path.exists(verb):
-            print(f"error: unknown command {verb!r}.\n\n"
-                  f"did you mean: {prog} run {verb} ...?\n", file=sys.stderr)
+            print(
+                f"error: unknown command {verb!r}.\n\n"
+                f"did you mean: {prog} run {verb} ...?\n",
+                file=sys.stderr,
+            )
             _print_umbrella_help(prog)
             return 2
         import difflib
 
         close = difflib.get_close_matches(
-            verb, [*_VERBS, *_VERB_ALIASES], n=1, cutoff=0.6)
+            verb, [*_VERBS, *_VERB_ALIASES], n=1, cutoff=0.6
+        )
         if close:
             # With a likely typo in hand, two lines beat burying the
             # suggestion under the full command table.
-            print(f"error: unknown command {verb!r}. did you mean "
-                  f"{close[0]!r}?", file=sys.stderr)
+            print(
+                f"error: unknown command {verb!r}. did you mean {close[0]!r}?",
+                file=sys.stderr,
+            )
             return 2
         print(f"error: unknown command {verb!r}.\n", file=sys.stderr)
         _print_umbrella_help(prog)
@@ -2303,12 +2394,12 @@ def umbrella_main(argv: list[str] | None = None) -> int:
     for tok in rest:
         if tok == "--":
             break
-        if tok in ("-h", "--help") or (
-                tok == "--help-all" and verb in ("run", "chat")):
+        if tok in ("-h", "--help") or (tok == "--help-all" and verb in ("run", "chat")):
             rest = [tok]
             break
     if verb != "doctor":  # doctor must run on a broken env to diagnose it
         from .upstream_seams import check_upstream_versions
+
         try:
             check_upstream_versions()
         except RuntimeError as e:
@@ -2325,8 +2416,17 @@ def umbrella_main(argv: list[str] | None = None) -> int:
             from .talk import cmd_talk
 
             return cmd_talk(rest, prog=f"{prog} talk")
-        if verb in ("serve", "init", "sync-models", "launch", "stop", "restart",
-                    "status", "logs", "service"):
+        if verb in (
+            "serve",
+            "init",
+            "sync-models",
+            "launch",
+            "stop",
+            "restart",
+            "status",
+            "logs",
+            "service",
+        ):
             from .server import main as server_main
 
             return server_main(
@@ -2361,7 +2461,7 @@ def umbrella_main(argv: list[str] | None = None) -> int:
         print("\ninterrupted", file=sys.stderr)
         return 130
     except (ImportError, ValueError, OSError, RuntimeError) as e:
-        return _report_error(e)          # skips loadlog's merged line
+        return _report_error(e)  # skips loadlog's merged line
     except Exception as e:
         # The loaders raise their own refusal types (UnsupportedArchError,
         # UnsupportedCodecError, UnsupportedVLMError, ...) - `run` formats
@@ -2379,10 +2479,12 @@ def umbrella_main(argv: list[str] | None = None) -> int:
         # user. One line + next steps; --verbose / GMLX_DEBUG re-raises.
         if os.environ.get("GMLX_DEBUG") or "-v" in argv or "--verbose" in argv:
             raise
-        print(f"error: unexpected failure: {type(e).__name__}: {e}",
-              file=sys.stderr)
-        print("run `gmlx doctor` to check your setup; set GMLX_DEBUG=1 "
-              "for the full traceback", file=sys.stderr)
+        print(f"error: unexpected failure: {type(e).__name__}: {e}", file=sys.stderr)
+        print(
+            "run `gmlx doctor` to check your setup; set GMLX_DEBUG=1 "
+            "for the full traceback",
+            file=sys.stderr,
+        )
         return 1
 
 

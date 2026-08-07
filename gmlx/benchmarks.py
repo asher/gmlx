@@ -35,8 +35,9 @@ def _synth_prompt_ids(tokenizer, n: int) -> list[int]:
 
 
 # Chat-dataset prompt source for bench_tg_depth
-def _load_chat_dataset(dataset_id: str, split: str = "train_sft",
-                       max_convs: int = 4000) -> list[list[dict]]:
+def _load_chat_dataset(
+    dataset_id: str, split: str = "train_sft", max_convs: int = 4000
+) -> list[list[dict]]:
     """Load a multi-turn chat dataset into normalized conversations.
 
     Each conversation is a list of {role, content} dicts starting with a user
@@ -44,21 +45,30 @@ def _load_chat_dataset(dataset_id: str, split: str = "train_sft",
     and ShareGPT ``conversations`` schema ({from, value}).
     """
     from datasets import load_dataset
+
     ds = load_dataset(dataset_id, split=split)
     ds = ds.select(range(min(len(ds), max(max_convs * 3, 2000))))
     role_map = {
-        "human": "user", "user": "user",
-        "gpt": "assistant", "assistant": "assistant",
-        "chatgpt": "assistant", "bard": "assistant",
-        "system": None, "tool": None,
+        "human": "user",
+        "user": "user",
+        "gpt": "assistant",
+        "assistant": "assistant",
+        "chatgpt": "assistant",
+        "bard": "assistant",
+        "system": None,
+        "tool": None,
     }
     convs: list[list[dict]] = []
     for row in ds:
         turns = row.get("messages")
         if not turns and row.get("conversations"):
-            turns = [{"role": role_map.get((t.get("from") or "").lower()),
-                      "content": t.get("value") or ""}
-                     for t in row["conversations"]]
+            turns = [
+                {
+                    "role": role_map.get((t.get("from") or "").lower()),
+                    "content": t.get("value") or "",
+                }
+                for t in row["conversations"]
+            ]
         if not turns:
             continue
         norm: list[dict] = []
@@ -98,8 +108,13 @@ class _ChatPromptSource:
     across protocols and across days. Vary ``seed`` (``--bench-chat-seed``)
     to re-check a close decision against a different slice."""
 
-    def __init__(self, convs: list[list[dict]], tokenizer, seed: int = 42,
-                 template_kwargs: dict | None = None):
+    def __init__(
+        self,
+        convs: list[list[dict]],
+        tokenizer,
+        seed: int = 42,
+        template_kwargs: dict | None = None,
+    ):
         self._convs = convs
         self._tokenizer = tokenizer
         self._seed = seed
@@ -109,6 +124,7 @@ class _ChatPromptSource:
 
     def _order_for(self, target_len: int) -> list[int]:
         import random
+
         k = self._len_calls.get(target_len, 0)
         self._len_calls[target_len] = k + 1
         rng = random.Random(f"{self._seed}:{int(target_len)}:{k}")
@@ -163,6 +179,35 @@ class _ChatPromptSource:
         return ids
 
 
+def _bench_kv_arm(model, kv_bits, kv_group_size, kv_quant_scheme, kv_tail_tokens):
+    """KV-cache config for the bench decode calls: (stream_generate kwargs,
+    fresh-cache factory or None). The kvarn factory prints its banner or
+    decline once and rebuilds a fresh cache per timed call; the affine arm
+    rides mlx-lm's own kv kwargs with quantization from token 0."""
+    if kv_quant_scheme == "kvarn":
+        import io
+
+        from .generation import setup_kvarn_cache
+
+        first = [True]
+
+        def factory():
+            out = None if first[0] else io.StringIO()
+            first[0] = False
+            return setup_kvarn_cache(model, kv_bits, kv_tail_tokens, None, out=out)
+
+        if factory() is None:  # declined: warned once, bench runs fp16
+            return {}, None
+        return {}, factory
+    if kv_bits is not None:
+        return {
+            "kv_bits": int(kv_bits),
+            "kv_group_size": int(kv_group_size),
+            "quantized_kv_start": 0,
+        }, None
+    return {}, None
+
+
 def bench(
     model,
     tokenizer,
@@ -172,6 +217,10 @@ def bench(
     runs: int = 2,
     warmup: bool = True,
     prefill_step_size: int | None = None,
+    kv_bits=None,
+    kv_group_size: int = 64,
+    kv_quant_scheme=None,
+    kv_tail_tokens: int = 1024,
 ) -> dict[int, dict[str, float]]:
     """Measure prefill and decode throughput (tokens/sec) per prompt length.
 
@@ -192,11 +241,23 @@ def bench(
     if defaulted:
         print(f"[bench] streaming model: prefill chunk size defaults to {step}")
     pf_kwargs = {} if step is None else {"prefill_step_size": step}
+    kv_kwargs, kv_cache = _bench_kv_arm(
+        model, kv_bits, kv_group_size, kv_quant_scheme, kv_tail_tokens
+    )
+    pf_kwargs.update(kv_kwargs)
+
+    def _cache_kwargs():
+        return {} if kv_cache is None else {"prompt_cache": kv_cache()}
 
     if warmup:
         wn = min(max(lengths), 256)
         for _ in mlx_lm.stream_generate(
-            model, tokenizer, _synth_prompt_ids(tokenizer, wn), max_tokens=4
+            model,
+            tokenizer,
+            _synth_prompt_ids(tokenizer, wn),
+            max_tokens=4,
+            **kv_kwargs,
+            **_cache_kwargs(),
         ):
             pass
 
@@ -208,7 +269,12 @@ def bench(
             prompt = _synth_prompt_ids(tokenizer, L)
             final = None
             for resp in mlx_lm.stream_generate(
-                model, tokenizer, prompt, max_tokens=decode_tokens, **pf_kwargs
+                model,
+                tokenizer,
+                prompt,
+                max_tokens=decode_tokens,
+                **pf_kwargs,
+                **_cache_kwargs(),
             ):
                 final = resp
             prefill_tps.append(final.prompt_tps)
@@ -235,7 +301,11 @@ class _RawLogitsLM(nn.Module):
 
 
 def _bench_ar_tps(
-    model, tokenizer, seed_ids, *, decode_tokens: int,
+    model,
+    tokenizer,
+    seed_ids,
+    *,
+    decode_tokens: int,
     prefill_chunk: int | None = None,
 ):
     """Plain (no-MTP) AR prefill/decode tok/s via mlx-vlm's engine - the A/B
@@ -262,9 +332,7 @@ def _bench_ar_tps(
     chunk = prefill_chunk or _PREFILL_CHUNK
     feed, prompt_cache = input_ids, None
     if input_ids.shape[1] > chunk:
-        prompt_cache = _chunked_prefill_cache(
-            model.language_model, input_ids, chunk
-        )
+        prompt_cache = _chunked_prefill_cache(model.language_model, input_ids, chunk)
         feed = input_ids[:, -1:]
     for tok, _lp in generate_step(
         feed,
@@ -308,6 +376,10 @@ def bench_tg_depth(
     top_k: int = 0,
     min_p: float = 0.05,
     prompt_source: "_ChatPromptSource | None" = None,
+    kv_bits=None,
+    kv_group_size: int = 64,
+    kv_quant_scheme=None,
+    kv_tail_tokens: int = 1024,
 ) -> dict[int, dict[str, float]]:
     """Token-generation throughput measured at each context depth.
 
@@ -336,6 +408,15 @@ def bench_tg_depth(
     if defaulted:
         print(f"[bench] streaming model: prefill chunk size defaults to {step}")
     pf_kwargs = {} if step is None else {"prefill_step_size": step}
+    # KV config applies to the plain-decode arm (the tg/prefill columns);
+    # the speculative arm keeps the MTP path's own KV handling.
+    kv_kwargs, kv_cache = _bench_kv_arm(
+        model, kv_bits, kv_group_size, kv_quant_scheme, kv_tail_tokens
+    )
+    pf_kwargs.update(kv_kwargs)
+
+    def _cache_kwargs():
+        return {} if kv_cache is None else {"prompt_cache": kv_cache()}
 
     def _get_ids(n: int) -> list[int]:
         if prompt_source is not None:
@@ -346,9 +427,7 @@ def bench_tg_depth(
     # unboxed by _RawLogitsLM): their honest plain baseline is the deployed
     # mlx-lm path, not mlx-vlm's engine (which loses ~30% at depth and would
     # flatter the speculative speedup).
-    owned = drafter is not None and getattr(
-        drafter, "requires_owned_engine", False
-    )
+    owned = drafter is not None and getattr(drafter, "requires_owned_engine", False)
     plain_lm = model
     if owned and hasattr(model, "language_model"):
         plain_lm = _RawLogitsLM(model.language_model)
@@ -360,7 +439,12 @@ def bench_tg_depth(
             )
         else:
             for _ in mlx_lm.stream_generate(
-                plain_lm, tokenizer, _synth_prompt_ids(tokenizer, 64), max_tokens=4
+                plain_lm,
+                tokenizer,
+                _synth_prompt_ids(tokenizer, 64),
+                max_tokens=4,
+                **kv_kwargs,
+                **_cache_kwargs(),
             ):
                 pass
 
@@ -382,14 +466,21 @@ def bench_tg_depth(
             if drafter is not None and not owned:
                 # baseline = same mlx-vlm target, no drafter (apples-to-apples)
                 p_tps, d_tps = _bench_ar_tps(
-                    model, tokenizer, seed_ids, decode_tokens=decode_tokens,
+                    model,
+                    tokenizer,
+                    seed_ids,
+                    decode_tokens=decode_tokens,
                     prefill_chunk=step,
                 )
             else:
                 final = None
                 for resp in mlx_lm.stream_generate(
-                    plain_lm, tokenizer, seed_ids, max_tokens=decode_tokens,
-                    **pf_kwargs
+                    plain_lm,
+                    tokenizer,
+                    seed_ids,
+                    max_tokens=decode_tokens,
+                    **pf_kwargs,
+                    **_cache_kwargs(),
                 ):
                     final = resp
                 p_tps, d_tps = final.prompt_tps, final.generation_tps
