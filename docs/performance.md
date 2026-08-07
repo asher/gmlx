@@ -390,6 +390,16 @@ Levers, cheapest first:
   `--quantized-kv-start` keeps the first stretch of context in full precision.
   With speculative decoding on, quantized KV also costs draft acceptance --
   see the interaction note in the speculation section above.
+- `--kv-quant-scheme kvarn` (with `--kv-bits`, default 6) is the higher-fidelity
+  alternative: variance-normalized 6-bit KV measures at or above the affine 8-bit
+  cache on logit KLD while holding ~45% of the fp16 cache (vs ~53% for
+  `--kv-bits 8`); the sink and the last `--kv-tail-tokens` (default 1024) stay
+  fp16. Decode runs at fp16 parity on M3-class machines but behind `--kv-bits 8`
+  at depth (~0.9x at 16k, ~0.75x at 32k): pick kvarn for memory and fidelity,
+  plain `--kv-bits` for peak decode speed. Other widths (2-8, and mixed via
+  `GMLX_KVARN_BITS=k6v5`) trade fidelity for memory at roughly the same speed.
+  Covers head_dim-128 attention layers; anything else declines loudly and stays
+  fp16.
 - `--max-kv-size` caps the cache as a rolling window, trading away the oldest
   context.
 - Long prompts prefill in chunks automatically (2048 tokens), which bounds

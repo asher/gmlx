@@ -100,7 +100,7 @@ family sets no value.
 | `--stop STR` | - | Stop sequence; generation ends (trimmed) when it appears. Repeatable. |
 | `--max-kv-size N` | - | Cap the KV cache (rotating cache above it). |
 | `--kv-bits N` / `--kv-group-size N` / `--quantized-kv-start N` | off / `64` / `0` | Quantize the KV cache (mlx-lm `QuantizedKVCache`): cuts cache memory 2-4x for long contexts. |
-| `--kv-quant-scheme STR` / `--kv-tail-tokens N` | `uniform` / `1024` | KV quantization scheme. `kvarn` is variance-normalized quantization (kv8-class quality at 6 bits; `--kv-bits` defaults to 6, accepts 2/3/4/5/6/8); the sink and the last `--kv-tail-tokens` tokens stay fp16. Hybrid archs (qwen3.5/3.6) convert their full-attention layers; recurrent layers keep their own state. |
+| `--kv-quant-scheme STR` / `--kv-tail-tokens N` | `uniform` / `1024` | KV quantization scheme. `kvarn` is variance-normalized quantization (kv8-class quality at 6 bits; `--kv-bits` defaults to 6, accepts 2/3/4/5/6/8); the sink and the last `--kv-tail-tokens` tokens stay fp16. Covers head_dim-128 attention layers (hybrid archs convert those, recurrent layers keep their own state); anything else declines with a printed reason — current qwen3.5/3.6 checkpoints use 256-dim heads and stay fp16. |
 | `--prefill-step-size N` | `2048` / `8192` streaming | Prefill chunk size; lower it to cap peak memory on long prompts. Over-RAM streaming `--stream-cpu` / `--stream-experts` models default to `8192`: each chunk re-streams the expert lane from disk, so fewer, bigger chunks prefill faster. Applies to `run`, `--bench`, and `--bench-depths`. |
 
 ### Multimodal (VLM)
