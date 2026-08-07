@@ -46,6 +46,11 @@ GROUP = 128
 HEAD_DIMS = (128, 256, 512)
 KVARN_BITS = (2, 3, 4, 5, 6, 8)
 
+_META_ARITY_MSG = (
+    "[kvarn] cache metadata arity does not match this cache class; the "
+    "state was written by a different kvarn cache class or layout."
+)
+
 
 def _quantize_head(x, bits, side):
     """Quantize rotated [B, H, T, D] groups into the flat slice-minor wire:
@@ -118,6 +123,10 @@ class KVarNKVCache(_base_cache()):
     kvarn_layout_version = 1
     gcap_step = 32
     tail_slack = 256
+    # Tokens dropped from the record region by the rotating subclass. A
+    # class attribute so from_state-restored instances (cls.__new__, no
+    # __init__) resolve 0; all base arithmetic is identity at 0.
+    evicted = 0
 
     def __init__(self, k_bits=6, v_bits=6, tail_tokens=1024, sink_tokens=GROUP):
         for bits in (k_bits, v_bits):
@@ -158,8 +167,13 @@ class KVarNKVCache(_base_cache()):
         return min(self.offset, self.sink_cap)
 
     @property
+    def visible(self):
+        """Keys present (offset counts every token ever appended)."""
+        return self.offset - self.evicted
+
+    @property
     def live_len(self):
-        return self.offset - self.sink_used - GROUP * self.n_sealed
+        return self.offset - self.evicted - self.sink_used - GROUP * self.n_sealed
 
     @property
     def tail_len(self):
@@ -185,11 +199,14 @@ class KVarNKVCache(_base_cache()):
         t_rows = self.tail_cap + self.tail_slack if self.tail_cap else 1
         self.tail_k = mx.zeros((1, h, t_rows, d), mx.float16)
         self.tail_v = mx.zeros((1, h, t_rows, d), mx.float16)
-        g = self.gcap_step
+        g = self._initial_gcap()
         self.codes_k = mx.zeros((1, h, g, sl * 512 * self.k_bits), mx.uint32)
         self.codes_v = mx.zeros((1, h, g, sl * 512 * self.v_bits), mx.uint32)
         self.axes_k = mx.zeros((1, h, g, 3 * sl, GROUP), mx.float16)
         self.axes_v = mx.zeros((1, h, g, 3 * sl, GROUP), mx.float16)
+
+    def _initial_gcap(self):
+        return self.gcap_step
 
     def _ensure_gcap(self, groups):
         gcap = self.codes_k.shape[2]
@@ -256,7 +273,7 @@ class KVarNKVCache(_base_cache()):
         self.tail_start = max(self.tail_start, self.tail_end - self.tail_cap)
 
     def _append_rotated(self, rk, rv):
-        pos = self.offset
+        pos = self.visible
         n = rk.shape[2]
         a = 0
         if pos < self.sink_cap:
@@ -345,7 +362,7 @@ class KVarNKVCache(_base_cache()):
     def make_mask(self, *args, **kwargs):
         from mlx_lm.models.cache import create_attention_mask
 
-        return create_attention_mask(*args, offset=self.offset, **kwargs)
+        return create_attention_mask(*args, offset=self.visible, **kwargs)
 
     # -- trim ---------------------------------------------------------------
 
@@ -358,7 +375,10 @@ class KVarNKVCache(_base_cache()):
         new_off = self.offset - n
         if new_off <= self.sink_cap:
             return ("sink",)
-        body = new_off - self.sink_cap
+        body = new_off - self.sink_cap - self.evicted
+        if body < 0:
+            # Frontier inside evicted history: nothing to reopen from.
+            return None
         g = body // GROUP
         live = body % GROUP
         if g == self.n_sealed:
@@ -366,7 +386,7 @@ class KVarNKVCache(_base_cache()):
         if g == self.n_sealed - 1 and self.horizon_valid:
             return ("horizon", live)
         cover0 = self.offset - self.tail_len
-        if self.sink_cap + g * GROUP >= cover0:
+        if self.sink_cap + self.evicted + g * GROUP >= cover0:
             return ("tail", g, live, cover0)
         return None
 
@@ -386,6 +406,7 @@ class KVarNKVCache(_base_cache()):
         if kind == "sink":
             self.n_sealed = 0
             self.horizon_valid = False
+            self.evicted = 0
         elif kind == "horizon":
             live = plan[1]
             s0 = self.sink_cap
@@ -397,7 +418,7 @@ class KVarNKVCache(_base_cache()):
         elif kind == "tail":
             g, live, cover0 = plan[1:]
             if live:
-                a = self.sink_cap + g * GROUP - cover0
+                a = self.sink_cap + self.evicted + g * GROUP - cover0
                 tk = self.tail_k[:, :, self.tail_start + a : self.tail_start + a + live]
                 tv = self.tail_v[:, :, self.tail_start + a : self.tail_start + a + live]
                 s0 = self.sink_cap
@@ -463,6 +484,8 @@ class KVarNKVCache(_base_cache()):
 
     @meta_state.setter
     def meta_state(self, v):
+        if len(v) != 11:
+            raise ValueError(_META_ARITY_MSG)
         (
             version,
             allocated,
@@ -487,7 +510,7 @@ class KVarNKVCache(_base_cache()):
                 setattr(self, f, None)
 
     def size(self):
-        return self.offset
+        return self.visible
 
     def empty(self):
         return self.offset == 0
@@ -509,8 +532,8 @@ class KVarNKVCache(_base_cache()):
         t = self.tail_len
         if t:
             tk, tv = self.tail_slices(t)
-            rk[:, :, self.offset - t :] = tk
-            rv[:, :, self.offset - t :] = tv
+            rk[:, :, self.visible - t :] = tk
+            rv[:, :, self.visible - t :] = tv
         return rk, rv
 
     # -- conversion ---------------------------------------------------------

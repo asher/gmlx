@@ -83,7 +83,7 @@ def _lse_merge(out_a, lse_a, out_b, lse_b):
 def _decode(q, cache, scale):
     import mlx_kquant as kq
 
-    n = cache.offset
+    n = cache.visible
     qL = q.shape[2]
     t = min(cache.tail_len, n)
     n_body = n - t
