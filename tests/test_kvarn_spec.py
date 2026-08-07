@@ -178,11 +178,15 @@ def test_readback_target_declines(restorable, _ops_ok):
     assert all(type(c) is not KVarNKVCache for c in caches)
 
 
-def test_bypass_arch_declines(restorable, _ops_ok):
+@_NEEDS_GPU
+def test_qwen35_arch_converts(restorable, _ops_ok):
+    # The dispatch arm lifted the qwen3.5 bypass: the arch converts like
+    # any other 128-dim stack (recurrent layers stay untouched).
     restorable.setenv("KV_QUANT_SCHEME", "kvarn")
     spec_engine.install_spec_kv_quant()
     caches = _mk(lm=_FakeLM(model_type="qwen3_5"))
-    assert all(type(c) is not KVarNKVCache for c in caches)
+    assert sum(type(c) is KVarNKVCache for c in caches) == 2
+    assert type(caches[1]) is _SSMCache
 
 
 def test_batch_passthrough(restorable, _ops_ok):
@@ -310,6 +314,60 @@ def test_hy3_rollback_consults_probe_before_mutating():
     with pytest.raises(RuntimeError, match="untrimmable"):
         HyV3SpecLM.rollback_speculative_cache(None, [live, _ProbeStuck()], None, 1, 4)
     assert live.offset == 130  # two-phase: nothing mutated
+
+
+class _Refuser:
+    def __init__(self, limit):
+        self.limit = limit
+
+    def is_trimmable(self):
+        return True
+
+    def _can_trim(self, n):
+        return n <= self.limit
+
+    def trim(self, n):
+        pytest.fail("refused pre-check must block the stock body")
+
+
+def test_rollback_guard_pre_checks_trim():
+    from gmlx.generation import harden_mtp_rollback
+
+    calls = []
+
+    class _LM:
+        def rollback_speculative_cache(self, caches, gdn_states, accepted, block_size):
+            calls.append((accepted, block_size))
+            return accepted
+
+    lm = _LM()
+    harden_mtp_rollback(lm)
+    wrapped = lm.rollback_speculative_cache
+    harden_mtp_rollback(lm)
+    assert lm.rollback_speculative_cache is wrapped  # idempotent
+
+    assert wrapped([_Refuser(1), None], None, 2, 4) == 2  # trim 1: fits
+    assert calls == [(2, 4)]
+    with pytest.raises(RuntimeError, match="refuse trim"):
+        wrapped([_Refuser(1)], None, 0, 4)  # trim 3: refused, stock not run
+    assert calls == [(2, 4)]
+    # batched accepted: the guard checks the max-row trim, like stock
+    wrapped([_Refuser(1)], None, mx.array([0, 2]), 4)
+    assert len(calls) == 2
+
+
+@_NEEDS_GPU
+def test_rollback_guard_installed_by_mtp_setup(_ops_ok):
+    from gmlx.generation import setup_kvarn_mtp_cache
+
+    class _RollbackLM(_FakeLM):
+        def rollback_speculative_cache(self, caches, gdn_states, accepted, block_size):
+            return accepted
+
+    lm = _RollbackLM()
+    pc = setup_kvarn_mtp_cache(lm, _Drafter(), None, 1024, 2)
+    assert pc is not None
+    assert getattr(lm.rollback_speculative_cache, "_gmlx_kvarn_guard", False)
 
 
 # -- R1: reject cycles straddling seal boundaries ----------------------------

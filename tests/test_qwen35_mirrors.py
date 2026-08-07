@@ -85,6 +85,15 @@ def test_attention_call_mirror():
                 "_verify_attention(",
                 1,
             ),
+            (
+                # the kvarn claim inserted ahead of the verify branch
+                "if target_verify and L > 1 or left_padded_decode:",
+                "if isinstance(keys, KVarNView):\n"
+                "        output = _kvarn_attention(queries, cache=cache, "
+                "scale=self.scale, mask=mask)\n"
+                "    elif target_verify and L > 1 or left_padded_decode:",
+                1,
+            ),
             ("scaled_dot_product_attention(", "_sdpa(", 2),
             ("_target_verify_linear(", "verify_linear(", 1),
         ],
@@ -196,8 +205,7 @@ def test_rope_apply_rotary_mirror():
             # Owned per-ndim memo replaces the instance dict so a
             # stock-compiled entry can never masquerade as owned.
             (
-                "compiled_apply = "
-                "rotary_emb._compiled_apply.get(position_ids.ndim)",
+                "compiled_apply = rotary_emb._compiled_apply.get(position_ids.ndim)",
                 "memo = getattr(rotary_emb, '_gmlx_compiled_apply', None)\n"
                 "        if memo is None:\n"
                 "            memo = {}\n"
@@ -206,8 +214,7 @@ def test_rope_apply_rotary_mirror():
                 1,
             ),
             (
-                "rotary_emb._compiled_apply[position_ids.ndim] = "
-                "compiled_apply",
+                "rotary_emb._compiled_apply[position_ids.ndim] = compiled_apply",
                 "memo[position_ids.ndim] = compiled_apply",
                 1,
             ),

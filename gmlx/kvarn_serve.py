@@ -204,8 +204,8 @@ def _install_ppb_fastpath(_ar):
             return
         from .generation import kvarn_unsupported
 
-        # Ineligible models keep their model-built caches (hybrids carry
-        # non-KV layers a generic rebuild would drop).
+        # Ineligible models skip the rebuild: the wrapped _make_cache
+        # would decline anyway, and the stock single-stream caches stay.
         if kvarn_unsupported(self.model) is not None:
             return
         self.prompt_cache = _ar._make_cache(

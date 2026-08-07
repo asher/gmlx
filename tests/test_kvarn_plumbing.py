@@ -109,7 +109,8 @@ def test_unsupported_reasons(_ops_ok, monkeypatch):
     assert kvarn_unsupported(_FakeModel()) is None
     assert "head_dim 64" in kvarn_unsupported(_FakeModel(head_dim=64))
     assert "MLA" in kvarn_unsupported(_FakeModel(kv_lora_rank=512))
-    assert "no kvarn arm" in kvarn_unsupported(_FakeModel(model_type="qwen3_5"))
+    # qwen3.5 lost its bypass entry when the owned dispatch gained the arm
+    assert kvarn_unsupported(_FakeModel(model_type="qwen3_5")) is None
 
 
 def test_setup_rejects_bad_bits_and_tail(_ops_ok, monkeypatch, capsys):

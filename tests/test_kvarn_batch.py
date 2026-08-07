@@ -171,6 +171,44 @@ def test_make_mask_registers_starts():
     assert _registered_starts(windowed) is None
 
 
+@_NEEDS_GPU
+def test_explicit_starts_match_registered_mask():
+    # Owned dispatches (qwen3.5) pass cache.left_padding directly; the
+    # fused result must match the mask-provenance route bit for bit.
+    pads = [0, 150, 400]
+    c, mask = _decode_setup(600, pads)
+    q = _make_q()
+    via_mask = kvarn_attention(q, c, SCALE, mask)
+    via_starts = kvarn_attention(q, c, SCALE, None, starts=c.left_padding)
+    assert np.array_equal(np.array(via_starts), np.array(via_mask))
+
+
+@_NEEDS_GPU
+def test_explicit_starts_masked_fallback(monkeypatch):
+    # Declined fused decode with explicit starts must mask pad rows on
+    # the materialize path, not attend them.
+    monkeypatch.setenv("GMLX_KVARN_SDPA", "0")
+    pads = [0, 150, 296]
+    c, _ = _decode_setup(600, pads)
+    q = _make_q()
+    out = kvarn_attention(q, c, SCALE, None, starts=c.left_padding)
+    _assert_close(out, _ref_batch_decode(q, c, pads), atol=2e-2)
+
+
+@_NEEDS_GPU
+def test_qwen35_arm_uses_cache_pads():
+    # The qwen3.5 decode protocol strips the mask to None and carries the
+    # pads on the cache; the arm must recover per-row starts from it.
+    pytest.importorskip("mlx_vlm.models.qwen3_5")
+    from gmlx.qwen35_attn import _kvarn_attention
+
+    pads = [0, 150, 296]
+    c, _ = _decode_setup(600, pads)
+    q = _make_q()
+    out = _kvarn_attention(q, cache=c, scale=SCALE, mask=None)
+    _assert_close(out, _ref_batch_decode(q, c, pads))
+
+
 # -- batch ops ---------------------------------------------------------------
 
 

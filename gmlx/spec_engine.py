@@ -35,12 +35,10 @@ _SPEC_APC_RETIRE_DISABLED = (
     _SPEC_APC_DISABLED or os.environ.get("GMLX_SPEC_APC_RETIRE", "1") == "0"
 )
 _SPEC_APC_SIDECAR_DISABLED = (
-    _SPEC_APC_DISABLED
-    or os.environ.get("GMLX_SPEC_APC_SIDECAR", "1") == "0"
+    _SPEC_APC_DISABLED or os.environ.get("GMLX_SPEC_APC_SIDECAR", "1") == "0"
 )
 _SPEC_APC_CKPT_DISABLED = (
-    _SPEC_APC_DISABLED
-    or os.environ.get("GMLX_SPEC_APC_CKPT", "1") == "0"
+    _SPEC_APC_DISABLED or os.environ.get("GMLX_SPEC_APC_CKPT", "1") == "0"
 )
 _MTP_DEBUG = os.environ.get("GMLX_MTP_DEBUG", "0") not in ("", "0")
 
@@ -52,7 +50,6 @@ def _debug_note(msg: str) -> None:
         print(msg, file=sys.stderr, flush=True)
 
 
-
 def _get_spec_prefix_cache(model):
     """Lazy-create a SpecPrefixCache on the model, or return None if disabled."""
     if _SPEC_APC_DISABLED:
@@ -60,16 +57,17 @@ def _get_spec_prefix_cache(model):
     cache = getattr(model, "_spec_prefix_cache", None)
     if cache is None:
         from .prefix_cache import SpecPrefixCache
+
         max_entries = env_int("GMLX_SPEC_APC_ENTRIES", 4)
         budget_mb = env_int("GMLX_SPEC_APC_BUDGET_MB", 8192)
-        cache = SpecPrefixCache(max_entries=max_entries,
-                                max_bytes=budget_mb << 20)
+        cache = SpecPrefixCache(max_entries=max_entries, max_bytes=budget_mb << 20)
         model._spec_prefix_cache = cache
     return cache
 
 
 # L1: the shared APCManager (same block pool / exact LRU / disk namespace the
 # stock non-speculative path uses)
+
 
 class _L1View:
     """Minimal duck-typed receiver for BatchGenerator's APC lookup helpers.
@@ -105,6 +103,7 @@ def _bind_l1_view() -> None:
     if _L1_BOUND[0]:
         return
     from mlx_vlm.generate.ar import BatchGenerator
+
     try:
         for name in _L1_VIEW_METHODS:
             setattr(_L1View, name, getattr(BatchGenerator, name))
@@ -132,6 +131,7 @@ def _install_apc_manager_stash() -> None:
     inheriting one. Idempotent.
     """
     from mlx_vlm.generate.ar import BatchGenerator
+
     if getattr(BatchGenerator.__init__, _APC_STASH_FLAG, False):
         return
     _orig_init = BatchGenerator.__init__
@@ -158,11 +158,13 @@ def _install_apc_manager_stash() -> None:
             try:
                 manager, mode = _resolve_l1(model)
                 if manager is not None and _ckpt_active(
-                        model, mode, int(manager.block_size)):
+                    model, mode, int(manager.block_size)
+                ):
                     self.prefill_batch_size = 1
             except Exception:
-                _log.warning("APC ckpt formation gate failed; continuing",
-                             exc_info=True)
+                _log.warning(
+                    "APC ckpt formation gate failed; continuing", exc_info=True
+                )
 
     _init_with_stash.__dict__[_APC_STASH_FLAG] = True
     BatchGenerator.__init__ = _init_with_stash
@@ -178,6 +180,7 @@ def _resolve_l1(model):
     mode = getattr(model, "_kq_apc_mode", _L1_MODE_UNSET)
     if mode is _L1_MODE_UNSET:
         from mlx_vlm import apc as _apc
+
         # Probe the bare language model: model_apc_mode falls back to
         # "block" when make_cache is missing, which would misclassify a
         # hybrid reached through a wrapper without make_cache.
@@ -247,6 +250,7 @@ def _ckpt_layout_for(model, block_size: int = 16):
     tags = getattr(model, "_kq_apc_ckpt_layout", None)
     if tags is None:
         from .cache_snapshot import ckpt_layout
+
         lm = getattr(model, "language_model", None) or model
         try:
             tags = tuple(ckpt_layout(lm.make_cache(), block_size) or ())
@@ -297,23 +301,30 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
             extra_hash = int(pick.get("extra_hash", extra_hash))
             if warm is None and blocks:
                 from mlx_vlm import apc as _apc
+
                 warm = _apc.make_warm_kv_cache(
-                    blocks, min_capacity_tokens=len(ids_list) + 1)
+                    blocks, min_capacity_tokens=len(ids_list) + 1
+                )
                 tier = "block"
         if ckpt:
             # Checkpoint tier: the longest salted sidecar + block chain
             # wins only when strictly longer than the exact-tier pick.
             # Media guards mirror the stock exact probe.
             from .cache_snapshot import ckpt_lookup
-            min_p = max(prefix_len,
-                        view._apc_safe_prefix_lookup_min(ids_list))
+
+            min_p = max(prefix_len, view._apc_safe_prefix_lookup_min(ids_list))
             cw, cp = ckpt_lookup(
-                manager, ids_list, extra_hash=extra_hash,
+                manager,
+                ids_list,
+                extra_hash=extra_hash,
                 min_prefix_tokens=min_p,
-                layout=_ckpt_layout_for(batch.model,
-                                        int(manager.block_size)))
-            if (cw is not None and cp > prefix_len
-                    and view._apc_suffix_is_text_only(ids_list, cp)):
+                layout=_ckpt_layout_for(batch.model, int(manager.block_size)),
+            )
+            if (
+                cw is not None
+                and cp > prefix_len
+                and view._apc_suffix_is_text_only(ids_list, cp)
+            ):
                 if blocks:
                     manager.release(blocks)
                     blocks = []
@@ -328,7 +339,9 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
             l1_prefix = prefix_len
             _log.info(
                 "APC L1 hit: prefix=%d suffix=%d tier=%s",
-                prefix_len, len(ids_list) - prefix_len, tier,
+                prefix_len,
+                len(ids_list) - prefix_len,
+                tier,
             )
             # Drafter-KV sidecar: a plain L1 hit restores target KV but
             # not hidden, so the drafter would re-seed from suffix-only
@@ -338,12 +351,11 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
             # cache entry, same discipline as the retirement context.
             if not _SPEC_APC_SIDECAR_DISABLED:
                 from .cache_snapshot import drafter_sidecar_lookup
-                side = drafter_sidecar_lookup(
-                    manager, ids_list, prefix_len, extra_hash)
+
+                side = drafter_sidecar_lookup(manager, ids_list, prefix_len, extra_hash)
                 if side:
                     batch.prompt_cache[0]._kq_apc_drafter_warm = side
-                    _log.info(
-                        "APC sidecar hit: prefix=%d", prefix_len)
+                    _log.info("APC sidecar hit: prefix=%d", prefix_len)
         elif blocks:
             manager.release(blocks)
     batch._mtp_l1_prefix_len = l1_prefix
@@ -576,6 +588,7 @@ def _ckpt_mid_prefill_store(batch) -> None:
     skel = "arr" not in layout or (kind != "replay"
                                    and checkpoint_len >= terminal)
     from .cache_snapshot import ckpt_store
+
     if ckpt_store(
             manager, meta["full_input_ids"][:checkpoint_len],
             batch.prompt_cache, extra_hash=int(meta.get("extra_hash", 0)),
@@ -599,8 +612,10 @@ def _install_ckpt_checkpoint_store() -> None:
     suppresses the stock store -- wrapping makes that ordering
     structural. Idempotent."""
     from mlx_vlm.generate.ar import PromptProcessingBatch
-    if getattr(PromptProcessingBatch._store_apc_exact_checkpoints,
-               _CKPT_STORE_FLAG, False):
+
+    if getattr(
+        PromptProcessingBatch._store_apc_exact_checkpoints, _CKPT_STORE_FLAG, False
+    ):
         return
     _orig = PromptProcessingBatch._store_apc_exact_checkpoints
 
@@ -610,8 +625,7 @@ def _install_ckpt_checkpoint_store() -> None:
         _orig(self)
 
     _store_with_ckpt_cursor.__dict__[_CKPT_STORE_FLAG] = True
-    PromptProcessingBatch._store_apc_exact_checkpoints = \
-        _store_with_ckpt_cursor
+    PromptProcessingBatch._store_apc_exact_checkpoints = _store_with_ckpt_cursor
 
 
 def _snap_fields(batch, manager) -> dict:
@@ -629,6 +643,7 @@ def _snap_fields(batch, manager) -> dict:
     """
     import math
     from .cache_snapshot import _DECODE_CKPT_DEFAULT
+
     bs = int(manager.block_size)
     tags = _ckpt_layout_for(batch.model, bs) or ()
     step = int(getattr(batch, "prefill_step_size", 0) or 0)
@@ -662,17 +677,22 @@ def _plain_ckpt_init(batch) -> None:
     manager = getattr(batch, "_apc_manager", None)
     mode = getattr(batch, "_apc_mode", None)
     meta_list = getattr(batch, "_apc_meta", None) or []
-    if (manager is None or mode != "exact" or len(meta_list) != 1
-            or meta_list[0] is None or len(batch.uids) != 1
-            or batch._right_pad_per_row is not None
-            or batch._inputs_embeds is None):
+    if (
+        manager is None
+        or mode != "exact"
+        or len(meta_list) != 1
+        or meta_list[0] is None
+        or len(batch.uids) != 1
+        or batch._right_pad_per_row is not None
+        or batch._inputs_embeds is None
+    ):
         return
     bs = int(manager.block_size)
     if not _ckpt_active(batch.model, mode, bs):
         return
     meta = meta_list[0]
     if int(meta.get("prefix_len") or 0):
-        return                          # stock warm row: leave it stock
+        return  # stock warm row: leave it stock
     ids_list = [int(t) for t in meta["full_input_ids"]]
     if len(ids_list) < 2:
         return
@@ -680,12 +700,19 @@ def _plain_ckpt_init(batch) -> None:
     view = _L1View(batch.model, manager, mode)
     restored = 0
     from .cache_snapshot import ckpt_lookup
+
     warm, cp = ckpt_lookup(
-        manager, ids_list, extra_hash=extra_hash,
+        manager,
+        ids_list,
+        extra_hash=extra_hash,
         min_prefix_tokens=view._apc_safe_prefix_lookup_min(ids_list),
-        layout=_ckpt_layout_for(batch.model, bs))
-    if (warm is not None and 0 < cp < len(ids_list)
-            and view._apc_suffix_is_text_only(ids_list, cp)):
+        layout=_ckpt_layout_for(batch.model, bs),
+    )
+    if (
+        warm is not None
+        and 0 < cp < len(ids_list)
+        and view._apc_suffix_is_text_only(ids_list, cp)
+    ):
         batch.prompt_cache = warm
         batch._input_ids = batch._input_ids[:, cp:]
         batch._inputs_embeds = batch._inputs_embeds[:, cp:]
@@ -693,8 +720,7 @@ def _plain_ckpt_init(batch) -> None:
         for k in batch._prompt_length_aware_keys:
             batch._prompt_kwargs[k] = batch._prompt_kwargs[k][:, cp:, ...]
         restored = cp
-        _log.info("APC L1 hit: prefix=%d suffix=%d tier=ckpt",
-                  cp, len(ids_list) - cp)
+        _log.info("APC L1 hit: prefix=%d suffix=%d tier=ckpt", cp, len(ids_list) - cp)
     guard = int(meta.get("checkpoint_len") or 0)
     _ckpt_arm_schedule(batch, meta, guard, restored, bs)
     batch._apc_harvest_enabled = False
@@ -703,6 +729,7 @@ def _plain_ckpt_init(batch) -> None:
     ckpt_note_armed(manager)
     if not _SPEC_APC_RETIRE_DISABLED and batch.prompt_cache:
         from .retire_key import lookup_render_ctx
+
         batch.prompt_cache[0]._kq_apc_retire = {
             "full_ids": ids_list,
             "extra_hash": extra_hash,
@@ -729,17 +756,18 @@ def _plain_step_tick(gb, out) -> None:
     try:
         if len(gb.uids) == 1 and gb.prompt_cache:
             stash = getattr(gb.prompt_cache[0], "_kq_apc_retire", None)
-            if (stash is not None and stash.get("mode") == "ckpt"
-                    and "gen" in stash):
+            if stash is not None and stash.get("mode") == "ckpt" and "gen" in stash:
                 stash["gen"].append(int(out[0][0]))
                 from .cache_snapshot import decode_ckpt_tick
+
                 decode_ckpt_tick(stash, gb.prompt_cache, stash["gen"])
     except Exception:
         if stash is not None:
             stash.pop("gen", None)
             stash["snap_ok"] = False
-        _log.warning("APC plain decode hook failed; disabled for "
-                     "this request", exc_info=True)
+        _log.warning(
+            "APC plain decode hook failed; disabled for this request", exc_info=True
+        )
 
 
 def _plain_retire(stash: dict, prompt_cache: list) -> None:
@@ -758,22 +786,31 @@ def _plain_retire(stash: dict, prompt_cache: list) -> None:
             return
         seq = [int(t) for t in stash["full_ids"]] + gen
         from .cache_snapshot import _cache_offset_max, retirement_store
+
         offset = _cache_offset_max(prompt_cache)
         if offset == len(seq) - 1:
             seq = seq[:-1]
         elif offset != len(seq):
-            _log.info("APC retire skipped: cache offset %d != tokens %d",
-                      offset, len(seq))
+            _log.info(
+                "APC retire skipped: cache offset %d != tokens %d", offset, len(seq)
+            )
             return
         lcp = None
         if os.environ.get("GMLX_APC_RETIRE_LCP") != "0":
             from .retire_key import next_turn_lcp
+
             lcp = next_turn_lcp(stash.get("render_ctx"), seq, gen)
         max_len = lcp if lcp is not None and lcp < len(seq) else None
         ok = retirement_store(
-            manager, "ckpt", seq, prompt_cache, row=0,
-            extra_hash=int(stash.get("extra_hash", 0)), max_len=max_len,
-            decode_snaps=stash.get("snaps"))
+            manager,
+            "ckpt",
+            seq,
+            prompt_cache,
+            row=0,
+            extra_hash=int(stash.get("extra_hash", 0)),
+            max_len=max_len,
+            decode_snaps=stash.get("snaps"),
+        )
         if ok:
             _log.info("APC retire store: tokens=%d", ok)
     except Exception:
@@ -789,6 +826,7 @@ def _install_plain_ckpt_decode() -> None:
     batches are untouched: a mid-flight merge rebuilds the cache objects
     and the stash dies with them (intended v1 scope). Idempotent."""
     from mlx_vlm.generate.ar import GenerationBatch
+
     if getattr(GenerationBatch._step, _PLAIN_DECODE_FLAG, False):
         return
     _orig_step = GenerationBatch._step
@@ -802,14 +840,12 @@ def _install_plain_ckpt_decode() -> None:
     def _filter_with_ckpt(self, keep):
         try:
             if not keep and len(self.uids) == 1 and self.prompt_cache:
-                stash = getattr(self.prompt_cache[0], "_kq_apc_retire",
-                                None)
+                stash = getattr(self.prompt_cache[0], "_kq_apc_retire", None)
                 if stash is not None and stash.get("mode") == "ckpt":
                     self.prompt_cache[0]._kq_apc_retire = None
                     _plain_retire(stash, self.prompt_cache)
         except Exception:
-            _log.warning("APC plain retire hook failed; continuing",
-                         exc_info=True)
+            _log.warning("APC plain retire hook failed; continuing", exc_info=True)
         _orig_filter(self, keep)
 
     _step_with_ckpt.__dict__[_PLAIN_DECODE_FLAG] = True
@@ -851,7 +887,9 @@ def _mtp_prefill_init(batch) -> None:
         if not _SPEC_APC_DISABLED:
             _log.warning(
                 "APC skipped: prefill batch B=%d > 1 "
-                "(owned-path APC requires single-request prefill)", b)
+                "(owned-path APC requires single-request prefill)",
+                b,
+            )
         return
 
     restored = 0
@@ -864,7 +902,8 @@ def _mtp_prefill_init(batch) -> None:
             batch._mtp_chunk_hiddens = [entry.hidden]
             _log.info(
                 "APC hit: prefix=%d suffix=%d",
-                restored, int(batch._input_ids.shape[1]) - restored,
+                restored,
+                int(batch._input_ids.shape[1]) - restored,
             )
 
     manager, mode = _resolve_l1(batch.model)
@@ -886,16 +925,19 @@ def _mtp_prefill_init(batch) -> None:
     # hit replaces batch.prompt_cache wholesale. B=1 only (this init is gated
     # to B=1); B>1 retirement is handled per-row at the batch decode's
     # finish seam.
-    if (manager is not None and not _SPEC_APC_RETIRE_DISABLED
-            and batch.prompt_cache):
+    if manager is not None and not _SPEC_APC_RETIRE_DISABLED and batch.prompt_cache:
         meta = (batch._apc_meta or [{}])[0] or {}
         full_ids = [int(t) for t in batch._mtp_full_input_ids[0].tolist()]
         from .retire_key import lookup_render_ctx
+
         batch.prompt_cache[0]._kq_apc_retire = {
             "full_ids": full_ids,
             "extra_hash": int(meta.get("extra_hash", 0)),
-            "mode": ("ckpt" if _ckpt_active(
-                batch.model, mode, int(manager.block_size)) else mode),
+            "mode": (
+                "ckpt"
+                if _ckpt_active(batch.model, mode, int(manager.block_size))
+                else mode
+            ),
             "checkpoint_len": int(meta.get("checkpoint_len", 0) or 0),
             # Live reference: the sidecar keys on ckpt_last_stored, not
             # the cursor value frozen above.
@@ -916,8 +958,7 @@ def _mtp_prefill_init(batch) -> None:
 
 
 def _zero_pad_rows(arr, rows: int):
-    pad = mx.zeros((rows - arr.shape[0],) + tuple(arr.shape[1:]),
-                   dtype=arr.dtype)
+    pad = mx.zeros((rows - arr.shape[0],) + tuple(arr.shape[1:]), dtype=arr.dtype)
     return mx.concatenate([arr, pad], axis=0)
 
 
@@ -986,8 +1027,8 @@ def install_full_prompt_mtp_prefill() -> None:
         # (mlx_vlm.server.generation.get_prefill_step_size) so MTP prefill
         # can be chunked smaller to cap peak memory.
         from mlx_vlm.generate.ar import DEFAULT_PREFILL_STEP_SIZE
-        return int(os.environ.get(
-            "PREFILL_STEP_SIZE", DEFAULT_PREFILL_STEP_SIZE))
+
+        return int(os.environ.get("PREFILL_STEP_SIZE", DEFAULT_PREFILL_STEP_SIZE))
 
     def _mtp_init(self, *args, **kwargs) -> None:
         _orig_init(self, *args, **kwargs)
@@ -997,18 +1038,20 @@ def install_full_prompt_mtp_prefill() -> None:
         # Restoring at construction (not first prompt_step) matters: the
         # scheduler consults needs_processing() first, and with a None step
         # an APC-less deep prompt would one-shot the whole prefill.
-        if (getattr(self, "draft_kind", None) == "mtp"
-                and self.prefill_step_size is None):
+        if (
+            getattr(self, "draft_kind", None) == "mtp"
+            and self.prefill_step_size is None
+        ):
             self.prefill_step_size = _resolve_mtp_prefill_step()
         # Stock (non-speculative) batches get the checkpoint tier here:
         # lookup, prefix trim, cursor arming, retirement stash.
-        if getattr(self, "draft_kind", None) is None \
-                and not _SPEC_APC_DISABLED:
+        if getattr(self, "draft_kind", None) is None and not _SPEC_APC_DISABLED:
             try:
                 _plain_ckpt_init(self)
             except Exception:
-                _log.warning("APC plain ckpt init failed; continuing "
-                             "stock", exc_info=True)
+                _log.warning(
+                    "APC plain ckpt init failed; continuing stock", exc_info=True
+                )
 
     def _mtp_prompt_step(self) -> int:
         if self.draft_kind != "mtp":
@@ -1026,8 +1069,7 @@ def install_full_prompt_mtp_prefill() -> None:
         # Depth-decayed step: shrink only when this chunk's score transient
         # would exceed the cap (see prefill_decay; keeps MoE weight
         # amortization at shallow depth instead of a global small step).
-        step = (prefill_decay.decayed_for_batch(self)
-                or self._inputs_embeds.shape[1])
+        step = prefill_decay.decayed_for_batch(self) or self._inputs_embeds.shape[1]
         n = min(step, self._inputs_embeds.shape[1] - 1)
 
         if not hasattr(self, "_mtp_padding_widened"):
@@ -1071,9 +1113,11 @@ def install_full_prompt_mtp_prefill() -> None:
             if limit:
                 total = sum(int(h.shape[1]) for h in self._mtp_chunk_hiddens)
                 if total > limit:
-                    merged = (self._mtp_chunk_hiddens[0]
-                              if len(self._mtp_chunk_hiddens) == 1
-                              else mx.concatenate(self._mtp_chunk_hiddens, axis=1))
+                    merged = (
+                        self._mtp_chunk_hiddens[0]
+                        if len(self._mtp_chunk_hiddens) == 1
+                        else mx.concatenate(self._mtp_chunk_hiddens, axis=1)
+                    )
                     self._mtp_chunk_hiddens = [merged[:, -limit:]]
         else:
             self._mtp_chunk_hiddens = [chunk_hidden]
@@ -1089,31 +1133,35 @@ def install_full_prompt_mtp_prefill() -> None:
         mx.clear_cache()
         return n
 
-    def _mtp_generate(self, sampler, stop_criteria,
-                      compute_logprobs=True, top_logprobs_k=0):
+    def _mtp_generate(
+        self, sampler, stop_criteria, compute_logprobs=True, top_logprobs_k=0
+    ):
         if self.draft_kind == "mtp":
             # Short prompts never enter prompt_step (chunked prefill is not
             # needed), so the APC lookup/store arming runs here instead.
             _mtp_prefill_init(self)
         result = _orig_generate(
-            self, sampler, stop_criteria,
+            self,
+            sampler,
+            stop_criteria,
             compute_logprobs=compute_logprobs,
             top_logprobs_k=top_logprobs_k,
         )
         from mlx_vlm.generate.ar import SpeculativeGenerationBatch
-        if (
-            self.draft_kind != "mtp"
-            or not isinstance(result, SpeculativeGenerationBatch)
+
+        if self.draft_kind != "mtp" or not isinstance(
+            result, SpeculativeGenerationBatch
         ):
             # Stock-path ckpt batches store the full prompt here, the
             # moment the MTP path stores it at rounds entry: prefill just
             # finished, the first token is out, its KV not yet appended.
-            if getattr(self, "_kq_ckpt_armed", False) \
-                    and getattr(self, "draft_kind", None) is None:
+            if (
+                getattr(self, "_kq_ckpt_armed", False)
+                and getattr(self, "draft_kind", None) is None
+            ):
                 try:
                     cache = getattr(result, "prompt_cache", None) or []
-                    stash = getattr(cache[0], "_kq_apc_retire", None) \
-                        if cache else None
+                    stash = getattr(cache[0], "_kq_apc_retire", None) if cache else None
                     if stash is not None and stash.get("mode") == "ckpt":
                         from .cache_snapshot import (
                             ckpt_full_store_redundant, ckpt_store)
@@ -1130,8 +1178,9 @@ def install_full_prompt_mtp_prefill() -> None:
                                     "ckpt_stored_boundaries", []
                                 ).append(len(stash["full_ids"]))
                 except Exception:
-                    _log.warning("APC plain post-prefill store failed; "
-                                 "continuing", exc_info=True)
+                    _log.warning(
+                        "APC plain post-prefill store failed; continuing", exc_info=True
+                    )
             return result
         chunk_hiddens = getattr(self, "_mtp_chunk_hiddens", None)
         if not chunk_hiddens:
@@ -1169,14 +1218,14 @@ def install_full_prompt_mtp_prefill() -> None:
         # entries pair full-prompt keys with full-prompt hidden.
         b = int(full_hidden.shape[0]) if full_ids is not None else 0
         spec_cache = (
-            _get_spec_prefix_cache(self.model)
-            if b == 1 and l1_prefix == 0 else None
+            _get_spec_prefix_cache(self.model) if b == 1 and l1_prefix == 0 else None
         )
         if spec_cache is not None and full_ids is not None:
             spec_cache.store(full_ids, result.prompt_cache, full_hidden)
             _log.info(
                 "APC store: tokens=%d layers=%d",
-                int(full_ids.shape[1]), len(result.prompt_cache),
+                int(full_ids.shape[1]),
+                len(result.prompt_cache),
             )
 
         return result
@@ -1191,8 +1240,9 @@ def install_full_prompt_mtp_prefill() -> None:
         apc_status = "on: L0+L1"
     else:
         apc_status = "on: L0 only"
-    _debug_note(f"[mtp] serve prefill: full-prompt hidden capture installed "
-                f"(APC {apc_status})")
+    _debug_note(
+        f"[mtp] serve prefill: full-prompt hidden capture installed (APC {apc_status})"
+    )
 
 
 _CONTINUOUS_BATCH_FLAG = "_kq_gguf_continuous_batch"
@@ -1258,8 +1308,7 @@ def install_continuous_batch_admission() -> None:
                 setattr(self, _RELEASE_PENDING_FLAG, True)
                 return False
             except Exception:
-                _log.warning("spec batch release: rounds close failed",
-                             exc_info=True)
+                _log.warning("spec batch release: rounds close failed", exc_info=True)
         self._rounds_iter = None
         self.prompt_cache = []
         self.hidden = None
@@ -1273,8 +1322,9 @@ def install_continuous_batch_admission() -> None:
                 try:
                     drafter.reset(model)  # drops the head's request KV
                 except Exception:
-                    _log.warning("spec batch release: drafter reset failed",
-                                 exc_info=True)
+                    _log.warning(
+                        "spec batch release: drafter reset failed", exc_info=True
+                    )
         setattr(self, _RELEASED_FLAG, True)
         setattr(self, _RELEASE_PENDING_FLAG, False)
         mx.clear_cache()
@@ -1366,22 +1416,29 @@ def install_continuous_batch_admission() -> None:
                     finish = self._finish_reason(abs_row, tok)
                     if finish is not None:
                         self._finished[abs_row] = True
-                    responses.append(self.Response(
-                        uid=other._all_uids[row], token=tok,
-                        token_logprob=0.0, finish_reason=finish))
+                    responses.append(
+                        self.Response(
+                            uid=other._all_uids[row],
+                            token=tok,
+                            token_logprob=0.0,
+                            finish_reason=finish,
+                        )
+                    )
 
-                gen_inj.append({
-                    "uids": list(other._all_uids),
-                    "prompt_cache": other.prompt_cache,
-                    "hidden": other.hidden,
-                    "shared_kv_states": other.shared_kv_states,
-                    "prompt_tokens": other.prompt_tokens,
-                    "first_tokens": other.first_tokens,
-                    "first_tokens_list": first_list,
-                    # The running generator froze max(max_tokens) at
-                    # start; injected rows carry their own budgets.
-                    "max_tokens": list(other.max_tokens),
-                })
+                gen_inj.append(
+                    {
+                        "uids": list(other._all_uids),
+                        "prompt_cache": other.prompt_cache,
+                        "hidden": other.hidden,
+                        "shared_kv_states": other.shared_kv_states,
+                        "prompt_tokens": other.prompt_tokens,
+                        "first_tokens": other.first_tokens,
+                        "first_tokens_list": first_list,
+                        # The running generator froze max(max_tokens) at
+                        # start; injected rows carry their own budgets.
+                        "max_tokens": list(other.max_tokens),
+                    }
+                )
 
             pending.clear()
             self._refresh_uids()
@@ -1397,8 +1454,9 @@ def install_continuous_batch_admission() -> None:
 
     SpecBatch.next = _next_with_injection
     setattr(SpecBatch, _CONTINUOUS_BATCH_FLAG, True)
-    _debug_note("[mtp] continuous batch: admission gate removed, mid-flight "
-                "injection enabled")
+    _debug_note(
+        "[mtp] continuous batch: admission gate removed, mid-flight injection enabled"
+    )
 
 
 def install_owned_spec_engine() -> None:
@@ -1522,6 +1580,7 @@ def install_owned_spec_engine() -> None:
     _owned_server_rounds.__dict__[_OWNED_MTP_ROUND_FLAG] = True
     _ar.run_speculative_server_rounds = _owned_server_rounds
     from mlx_vlm.server import generation as _gen
+
     _gen.run_speculative_server_rounds = _owned_server_rounds
     _debug_note("[mtp] serve round: owned engine installed (B=1 + B>1)")
 
@@ -1546,7 +1605,8 @@ def _spec_kv_quant_params():
         except ValueError:
             _log.warning(
                 "KV_BITS/KV_TAIL_TOKENS malformed under scheme kvarn; "
-                "B=1 MTP target KV stays fp16")
+                "B=1 MTP target KV stays fp16"
+            )
             return None
         return "kvarn", bits, tail
     if not raw:
@@ -1557,11 +1617,17 @@ def _spec_kv_quant_params():
         return None
     if bits <= 0:
         return None
-    if (scheme != "uniform" or bits != int(bits)
-            or int(bits) not in _SPEC_KV_QUANT_WIDTHS):
+    if (
+        scheme != "uniform"
+        or bits != int(bits)
+        or int(bits) not in _SPEC_KV_QUANT_WIDTHS
+    ):
         _log.warning(
             "KV_BITS=%s scheme=%s: no trimmable single-stream cache; "
-            "B=1 MTP target KV stays fp16", raw, scheme)
+            "B=1 MTP target KV stays fp16",
+            raw,
+            scheme,
+        )
         return None
     return "affine", int(bits), int(os.environ.get("KV_GROUP_SIZE", "64"))
 
@@ -1612,8 +1678,7 @@ def install_spec_kv_quant() -> None:
     from .cache_compat import cache_types
 
     plain_kv = cache_types("KVCache")
-    rotating = (cache_types("RotatingKVCache")
-                + cache_types("BatchRotatingKVCache"))
+    rotating = cache_types("RotatingKVCache") + cache_types("BatchRotatingKVCache")
     _orig = _su.make_speculative_prompt_cache
     _noted = [False]
     _warned_batch = [False]
@@ -1624,8 +1689,8 @@ def install_spec_kv_quant() -> None:
         if not _warned_kvarn[0]:
             _warned_kvarn[0] = True
             _log.warning(
-                "KV_QUANT_SCHEME=kvarn dropped on the B=1 MTP path: %s",
-                reason)
+                "KV_QUANT_SCHEME=kvarn dropped on the B=1 MTP path: %s", reason
+            )
 
     def _kvarn_spec_convert(lm, caches):
         from .generation import _kvarn_widths, kvarn_unsupported
@@ -1635,38 +1700,39 @@ def install_spec_kv_quant() -> None:
         _, env_bits, tail = params
         reason = kvarn_unsupported(lm)
         k_bits, v_bits = _kvarn_widths(env_bits)
-        if reason is None and not (
-            k_bits in KVARN_BITS and v_bits in KVARN_BITS
-        ):
+        if reason is None and not (k_bits in KVARN_BITS and v_bits in KVARN_BITS):
             reason = f"kvarn bits must be one of {KVARN_BITS}"
         if reason is None and (tail < 0 or tail % 128):
             reason = "KV_TAIL_TOKENS must be a multiple of 128 (0 disables)"
         if reason is None and _mtp_reads_kv_back(lm):
-            reason = ("the target's verify path reads shared K/V back "
-                      "from the cache (kvarn records are not raw K/V)")
+            reason = (
+                "the target's verify path reads shared K/V back "
+                "from the cache (kvarn records are not raw K/V)"
+            )
         if reason is not None:
             _decline_kvarn(reason)
             return caches
-        n = convert_prompt_cache(
-            caches, k_bits=k_bits, v_bits=v_bits, tail_tokens=tail)
+        n = convert_prompt_cache(caches, k_bits=k_bits, v_bits=v_bits, tail_tokens=tail)
         if not n:
             _decline_kvarn("no plain KV-cache layers in this arch's stack")
             return caches
         install_kvarn_sdpa()
+        from .generation import harden_mtp_rollback
+
+        harden_mtp_rollback(lm)
         if not _noted[0]:
             _noted[0] = True
-            width = (f"kvarn{k_bits}" if k_bits == v_bits
-                     else f"kvarn k{k_bits} v{v_bits}")
+            width = (
+                f"kvarn{k_bits}" if k_bits == v_bits else f"kvarn k{k_bits} v{v_bits}"
+            )
             regions = "sink+tail fp16" if tail else "sink fp16, tail off"
             print(
-                f"[kv] MTP spec path: {n}-layer target KV {width} "
-                f"({regions})",
+                f"[kv] MTP spec path: {n}-layer target KV {width} ({regions})",
                 flush=True,
             )
         return caches
 
-    def _quantizing_spec_cache(lm, *, draft_kind, batch_size, left_padding,
-                               make_cache):
+    def _quantizing_spec_cache(lm, *, draft_kind, batch_size, left_padding, make_cache):
         from .kvarn_serve import spec_cache_build
 
         # The stock make_cache closure passes the boot scheme through;
@@ -1688,14 +1754,17 @@ def install_spec_kv_quant() -> None:
                 _log.warning(
                     "KV quantization with MTP at batch size %d: packed "
                     "batch rollback is unsupported; batched rows keep the "
-                    "stock cache", batch_size)
+                    "stock cache",
+                    batch_size,
+                )
             return caches
         if any(isinstance(c, rotating) for c in caches):
             if not _warned_rotating[0]:
                 _warned_rotating[0] = True
                 _log.warning(
                     "KV quantization dropped on the MTP path: "
-                    "sliding-window cache stack cannot quantize")
+                    "sliding-window cache stack cannot quantize"
+                )
             return caches
         if kind == "kvarn":
             from .cache_compat import cache_types
@@ -1703,7 +1772,8 @@ def install_spec_kv_quant() -> None:
             if any(type(c) in cache_types("BatchKVCache") for c in caches):
                 _decline_kvarn(
                     "serve spec prefill keeps the stock batch cache "
-                    "(kvarn spec serve lands later)")
+                    "(kvarn spec serve lands later)"
+                )
                 return caches
             return _kvarn_spec_convert(lm, caches)
         bits, group = params[1], params[2]

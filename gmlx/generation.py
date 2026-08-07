@@ -141,14 +141,6 @@ def kv_quantization_unsupported(model) -> str | None:
     return None
 
 
-_KVARN_BYPASS_ARCHS = frozenset(
-    # Archs whose attention dispatch does not go through the model-module
-    # scaled_dot_product_attention symbol; kvarn views would crash inside
-    # their owned routes. qwen3.5 gains a real dispatch arm later.
-    ("qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text")
-)
-
-
 def _kvarn_head_dim(model):
     """The model's attention head dim, -1 for MLA latents, 0 when unknown."""
     for holder in (model, getattr(model, "language_model", None)):
@@ -170,8 +162,7 @@ def _kvarn_head_dim(model):
 def kvarn_unsupported(model) -> str | None:
     """Reason string when --kv-quant-scheme kvarn cannot serve this model,
     else None. Coverage is partial by design (sliding windows and recurrent
-    layers stay fp16); the reason fires only when zero layers are eligible
-    or the arch's attention would bypass the kvarn route entirely."""
+    layers stay fp16); the reason fires only when zero layers are eligible."""
     from .envflags import env_bool
 
     if not env_bool("GMLX_KVARN", True):
@@ -181,10 +172,6 @@ def kvarn_unsupported(model) -> str | None:
     reason = kvarn_ops_missing()
     if reason:
         return reason
-    args = getattr(model, "args", None) or getattr(model, "config", None)
-    mt = getattr(args, "model_type", "") or getattr(model, "model_type", "")
-    if mt in _KVARN_BYPASS_ARCHS:
-        return f"{mt} attention dispatch has no kvarn arm yet"
     hd = _kvarn_head_dim(model)
     if hd == -1:
         return "MLA latent KV cache (K and V share storage)"
@@ -297,7 +284,46 @@ def setup_kvarn_mtp_cache(model, drafter, kv_bits, kv_tail_tokens, block, out=No
             "attention",
             file=out,
         )
+    if prompt_cache is not None:
+        harden_mtp_rollback(model)
+        if lm is not model:
+            harden_mtp_rollback(lm)
     return prompt_cache
+
+
+def harden_mtp_rollback(obj) -> None:
+    """Instance-wrap ``rollback_speculative_cache`` with a trim pre-check:
+    every ``_can_trim``-aware cache must accept the full trim before the
+    stock body mutates any. Upstream rollbacks (qwen3_5, gemma4) ignore
+    ``trim`` returns, so a cache that refused would silently desync layer
+    offsets; the guard turns that into a loud error. Idempotent."""
+    fn = getattr(obj, "rollback_speculative_cache", None)
+    if fn is None or getattr(fn, "_gmlx_kvarn_guard", False):
+        return
+
+    def _guarded(caches, gdn_states, accepted, block_size):
+        if isinstance(accepted, int):
+            max_a = accepted
+        elif hasattr(accepted, "tolist"):
+            max_a = max(int(a) for a in accepted.reshape(-1).tolist())
+        else:
+            max_a = max(int(a) for a in accepted)
+        trim = int(block_size) - max_a - 1
+        if trim > 0:
+            refused = [
+                type(c).__name__
+                for c in caches
+                if c is not None and hasattr(c, "_can_trim") and not c._can_trim(trim)
+            ]
+            if refused:
+                raise RuntimeError(
+                    f"MTP rollback: {', '.join(refused)} refuse trim({trim}); "
+                    "aborting before a partial rollback desyncs layer offsets"
+                )
+        return fn(caches, gdn_states, accepted, block_size)
+
+    _guarded._gmlx_kvarn_guard = True
+    obj.rollback_speculative_cache = _guarded
 
 
 _KV_QUANT_BITS = (2, 3, 4, 6, 8)  # mx.quantize affine widths

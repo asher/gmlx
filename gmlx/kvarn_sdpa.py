@@ -152,9 +152,7 @@ def _decode_batch(q, cache, scale, starts):
         cache.v_bits,
     )
     if t == 0:
-        return kq.kvarn_rotate(
-            kq.sdpa_decode_gqa_kvarn(*body_args, starts=starts)
-        )
+        return kq.kvarn_rotate(kq.sdpa_decode_gqa_kvarn(*body_args, starts=starts))
     body, lse_b = kq.sdpa_decode_gqa_kvarn(
         *body_args,
         starts=mx.minimum(starts, n_body).astype(mx.int32),
@@ -198,7 +196,18 @@ def _batch_starts(cache, mask):
     return _registered_starts(mask)
 
 
-def kvarn_attention(q, cache, scale, mask, sinks=None):
+def _pad_mask(starts, n, qL):
+    """Left-pad + causal bool mask [B,1,qL,n] for the materialize fallback
+    when only per-row starts are known (no mask to reuse)."""
+    t = mx.arange(n)[None, None, :]
+    end = (n - qL) + mx.arange(qL)[None, :, None]
+    return ((t >= starts[:, None, None]) & (t <= end))[:, None]
+
+
+def kvarn_attention(q, cache, scale, mask, sinks=None, starts=None):
+    """Attention over a kvarn cache. ``starts`` lets owned dispatches
+    (qwen3.5) pass per-row left padding directly when their mask protocol
+    carries none; unset, batched decode derives it from mask provenance."""
     if sinks is not None:
         raise RuntimeError(
             "[kvarn] attention sinks reached the kvarn route; this arch "
@@ -213,9 +222,13 @@ def kvarn_attention(q, cache, scale, mask, sinks=None):
             and q.shape[1] % cache.stage_k.shape[1] == 0
             and env_bool("GMLX_KVARN_SDPA", True)
         ):
-            starts = _batch_starts(cache, mask)
-            if starts is not None:
-                return _decode_batch(q, cache, float(scale), starts)
+            s = starts if starts is not None else _batch_starts(cache, mask)
+            if s is not None:
+                return _decode_batch(q, cache, float(scale), s)
+        if starts is not None and not isinstance(mask, mx.array):
+            # Declined decode with explicit pads: the materialize path
+            # still needs the pad rows masked out.
+            mask = _pad_mask(starts, cache._idx, q.shape[2])
         return _prefill(q, cache, float(scale), mask)
     plain_mask = mask is None or (isinstance(mask, str) and mask == "causal")
     if (
