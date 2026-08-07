@@ -7,9 +7,10 @@ prefill/materialize paths) and the decode leg (token-by-token from full
 prefill depth, exercising the fused decode kernels).
 
 Arms: fp16 (baseline), kv8 (affine QuantizedKVCache, group 64), kvarnN
-(KVarNKVCache at N bits; kvarn6 and kvarn4 by default). Primary metric is
-median KLD per leg; same_top is the argmax agreement rate. The routine
-gate is median_KLD(kvarn6) <= median_KLD(kv8) on both legs.
+(KVarNKVCache at N bits; kvarn6 and kvarn4 by default; kvarnk6v5-style
+names select mixed K/V widths). Primary metric is median KLD per leg;
+same_top is the argmax agreement rate. The routine gate is
+median_KLD(kvarn6) <= median_KLD(kv8) on both legs.
 
 Corpus: wikitext test split (local HF cache), tokenized to ctx +
 decode-tokens ids. Protocol: idle machine, one model, arms interleaved
@@ -57,14 +58,22 @@ def build_arm(name: str, model, tail_tokens: int):
     if name == "kv8":
         return [c.to_quantized(group_size=64, bits=8) for c in pc]
     if name.startswith("kvarn"):
+        import re
+
         from gmlx.kvarn_cache import convert_prompt_cache
         from gmlx.kvarn_sdpa import install_kvarn_sdpa, kvarn_ops_missing
 
         reason = kvarn_ops_missing()
         if reason:
             raise SystemExit(f"kvarn arm unavailable: {reason}")
-        bits = int(name[len("kvarn") :])
-        n = convert_prompt_cache(pc, k_bits=bits, v_bits=bits, tail_tokens=tail_tokens)
+        spec = name[len("kvarn") :]
+        m = re.fullmatch(r"k(\d)v(\d)", spec)
+        k_bits, v_bits = (
+            (int(m.group(1)), int(m.group(2))) if m else (int(spec), int(spec))
+        )
+        n = convert_prompt_cache(
+            pc, k_bits=k_bits, v_bits=v_bits, tail_tokens=tail_tokens
+        )
         if n != len(pc):
             raise SystemExit(f"kvarn arm converted {n}/{len(pc)} layers")
         install_kvarn_sdpa()
