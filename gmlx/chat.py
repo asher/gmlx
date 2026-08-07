@@ -2660,7 +2660,11 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
             kv_kwargs["prefill_step_size"] = step
 
         if (getattr(args, "kv_quant_scheme", None) or "uniform") == "kvarn":
-            from .generation import _kvarn_widths, setup_kvarn_cache
+            from .generation import (
+                _kvarn_rotating_window,
+                _kvarn_widths,
+                setup_kvarn_cache,
+            )
 
             tail = int(getattr(args, "kv_tail_tokens", 1024) or 0)
             probe = setup_kvarn_cache(
@@ -2672,7 +2676,14 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
             )
             if probe is not None:
                 kb, vb = _kvarn_widths(kv_kwargs.get("kv_bits"))
-                kvarn_cfg = {"k_bits": kb, "v_bits": vb, "tail_tokens": tail}
+                kvarn_cfg = {
+                    "k_bits": kb,
+                    "v_bits": vb,
+                    "tail_tokens": tail,
+                    "rotating_window": _kvarn_rotating_window(
+                        b.model, args.max_kv_size
+                    ),
+                }
             kv_kwargs["kv_bits"] = None
 
         # The MTP path already warns that --kv-bits is dropped. On plain
@@ -2683,7 +2694,7 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
         if kv_kwargs.get("kv_bits") is not None:
             from .generation import kv_quantization_unsupported
 
-            reason = kv_quantization_unsupported(b.model)
+            reason = kv_quantization_unsupported(b.model, max_kv_size=args.max_kv_size)
             if reason:
                 from .generation import quantize_pooled_caches
 

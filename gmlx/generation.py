@@ -103,14 +103,18 @@ def _prefill_progress_ui(stream=None):
     return cb, close
 
 
-def kv_quantization_unsupported(model) -> str | None:
+def kv_quantization_unsupported(model, max_kv_size=None) -> str | None:
     """Reason string when --kv-bits cannot apply to this model's cache stack,
     else None. mlx-lm's maybe_quantize_kv_cache converts every cache exposing
     ``to_quantized``, but RotatingKVCache's raises NotImplementedError mid
     generation - any arch with sliding-window layers (deepseek4, gemma) dies
-    on its first quantized step unless the flag is dropped up front."""
+    on its first quantized step unless the flag is dropped up front. The same
+    applies to the rotating stack --max-kv-size manufactures for models
+    without their own make_cache."""
     make = getattr(model, "make_cache", None)
     if not callable(make):
+        if max_kv_size is not None:
+            return "rotating KV cache (--max-kv-size) cannot quantize"
         return None
     try:
         caches = make()
@@ -216,6 +220,15 @@ def _kvarn_widths(kv_bits):
     return bits, bits
 
 
+def _kvarn_rotating_window(model, max_kv_size):
+    """The rotating window kvarn must honor, or None. --max-kv-size only
+    manufactures RotatingKVCache stacks for models without their own
+    make_cache; models with one ignore the flag."""
+    if max_kv_size is None or callable(getattr(model, "make_cache", None)):
+        return None
+    return int(max_kv_size)
+
+
 def setup_kvarn_cache(
     model, kv_bits, kv_tail_tokens, max_kv_size, out=None, make_cache=None
 ):
@@ -233,6 +246,17 @@ def setup_kvarn_cache(
     tail = int(kv_tail_tokens or 0)
     if reason is None and (tail < 0 or tail % 128):
         reason = "--kv-tail-tokens must be a multiple of 128 (0 disables)"
+    window = (
+        None if make_cache is not None else _kvarn_rotating_window(model, max_kv_size)
+    )
+    if reason is None and window is not None:
+        floor = 128 + max(tail, 128) + 128
+        if window < floor:
+            reason = (
+                f"--max-kv-size {window} is below the kvarn window floor "
+                f"({floor} = sink 128 + tail {max(tail, 128)} + 128); raise "
+                "it or lower --kv-tail-tokens"
+            )
     prompt_cache = None
     if reason is None:
         from mlx_lm.models.cache import make_prompt_cache as _mpc
@@ -245,7 +269,11 @@ def setup_kvarn_cache(
         else:
             prompt_cache = _mpc(model, max_kv_size=max_kv_size)
         n = convert_prompt_cache(
-            prompt_cache, k_bits=k_bits, v_bits=v_bits, tail_tokens=tail
+            prompt_cache,
+            k_bits=k_bits,
+            v_bits=v_bits,
+            tail_tokens=tail,
+            rotating_window=window,
         )
         if n:
             install_kvarn_sdpa()
@@ -253,6 +281,9 @@ def setup_kvarn_cache(
                 f"kvarn{k_bits}" if k_bits == v_bits else f"kvarn k{k_bits} v{v_bits}"
             )
             regions = "sink+tail fp16" if tail else "sink fp16, tail off"
+            if window is not None:
+                # Resident window: sink + g_max whole groups.
+                regions += f"; window ~{128 + (window - 128) // 128 * 128}"
             print(
                 f"[kv] {width} KV cache ({n}/{len(prompt_cache)} layers; {regions})",
                 file=out,
@@ -546,12 +577,23 @@ def generate(
 
     prompt_cache = None
     if (kv_quant_scheme or "uniform").lower() == "kvarn":
-        prompt_cache = setup_kvarn_cache(model, kv_bits, kv_tail_tokens, max_kv_size)
+        if inject_critique is not None or (over_generation and over_generation > 0):
+            # The over-generation runner builds its own per-pass caches and
+            # never sees a pre-armed prompt cache.
+            print(
+                "warning: --kv-quant-scheme kvarn dropped: over-generation/"
+                "critique passes rebuild their own fp16 KV cache",
+                file=sys.stderr,
+            )
+        else:
+            prompt_cache = setup_kvarn_cache(
+                model, kv_bits, kv_tail_tokens, max_kv_size
+            )
         # Handled here whatever the outcome: mlx-lm's per-step affine
         # converter must never touch a kvarn stack.
         kv_bits = None
     elif kv_bits is not None:
-        reason = kv_quantization_unsupported(model)
+        reason = kv_quantization_unsupported(model, max_kv_size=max_kv_size)
         if reason:
             # mlx-lm's converter would crash on the rotating caches, so the
             # flag is honored here instead: pack the growing pooled caches

@@ -25,10 +25,12 @@ frontier lands in the live stage, in the horizon group, or inside tail
 coverage (tail rows re-rotate to rebuild the live group bit-identically);
 anything deeper returns 0 and the caller falls back to its rebuild path.
 
-Head dim 128 or 256, single stream (B=1), group size 128. Heads wider
-than 128 quantize as D/128 independent 128-dim slices per group,
+Head dim 128, 256 or 512, single stream (B=1), group size 128. Heads
+wider than 128 quantize as D/128 independent 128-dim slices per group,
 slice-minor in the codes with one axes triplet per slice (the kq wire).
 All widths in {2, 3, 4, 5, 6, 8}, K and V independently.
+KVarNRotatingKVCache bounds the record region to a --max-kv-size window
+by compacting the oldest sealed groups away at update entry.
 """
 
 from __future__ import annotations
@@ -555,6 +557,153 @@ class KVarNKVCache(_base_cache()):
         return out
 
 
+class KVarNRotatingKVCache(KVarNKVCache):
+    """Bounded-window kvarn cache for --max-kv-size (CLI run/chat).
+
+    At most ``g_max = (max_size - sink_cap) // 128`` sealed groups stay
+    resident (max_size rounds down to whole groups); older groups are
+    dropped by compacting the record slabs at update entry, before the
+    append, so the first row of an incoming chunk still sees at least
+    max_size context and visibility never changes between mask creation
+    and attention within a call. Keys hold post-RoPE absolute positions,
+    so dropping leading groups is numerically exact; ``offset`` stays the
+    absolute token count (RoPE, chat checkpoints) while ``visible`` feeds
+    the kernel.
+
+    Divergence from mlx-lm's RotatingKVCache: the window is a memory
+    bound with a context floor, not a per-query attention span, so only
+    string masks are served (see make_mask) and no keep parameter exists
+    (sink_cap plays that role). Trims that would reopen evicted history
+    return 0 and the caller rebuilds.
+    """
+
+    evict_slack = 4  # groups of hysteresis between compactions
+
+    def __init__(
+        self, max_size, k_bits=6, v_bits=6, tail_tokens=1024, sink_tokens=GROUP
+    ):
+        super().__init__(
+            k_bits=k_bits,
+            v_bits=v_bits,
+            tail_tokens=tail_tokens,
+            sink_tokens=sink_tokens,
+        )
+        floor = self.sink_cap + max(self.tail_cap, GROUP) + GROUP
+        if int(max_size) < floor:
+            raise ValueError(
+                f"[kvarn] max_size {max_size} is below the kvarn window "
+                f"floor {floor} (sink {self.sink_cap} + tail "
+                f"{max(self.tail_cap, GROUP)} + {GROUP})."
+            )
+        self.max_size = int(max_size)
+        self.evicted = 0
+
+    @property
+    def g_max(self):
+        return (self.max_size - self.sink_cap) // GROUP
+
+    def _initial_gcap(self):
+        # +1: decode steady state peaks one seal past the compaction
+        # trigger (entry leaves g_max + slack, the append seals one more).
+        return min(self.gcap_step, self.g_max + self.evict_slack + 1)
+
+    def _ensure_gcap(self, groups):
+        # Grow to exactly what the call needs: the window re-compacts to
+        # g_max, so step-chunk growth would durably overshoot small
+        # windows. Wide prefill chunks can still push past the initial
+        # capacity transiently; the next entry compacts.
+        gcap = self.codes_k.shape[2]
+        if groups <= gcap:
+            return
+        add = groups - gcap
+
+        def grow(x):
+            pad = mx.zeros(x.shape[:2] + (add,) + x.shape[3:], x.dtype)
+            return mx.concatenate([x, pad], axis=2)
+
+        self.codes_k, self.codes_v = grow(self.codes_k), grow(self.codes_v)
+        self.axes_k, self.axes_v = grow(self.axes_k), grow(self.axes_v)
+
+    def _compact(self):
+        d = self.n_sealed - self.g_max
+        if d <= self.evict_slack:
+            return
+        for f in ("codes_k", "axes_k", "codes_v", "axes_v"):
+            x = getattr(self, f)
+            pad = mx.zeros(x.shape[:2] + (d,) + x.shape[3:], x.dtype)
+            slab = mx.concatenate([x[:, :, d:], pad], axis=2)
+            # eval per slab: one slab copy in flight at a time
+            mx.eval(slab)
+            setattr(self, f, slab)
+        self.n_sealed -= d
+        self.evicted += d * GROUP
+
+    def update_and_fetch(self, keys, values):
+        self._compact()
+        return super().update_and_fetch(keys, values)
+
+    def _seal(self, rk_block, rv_block):
+        # A single bulk block wider than the window: quantize only the
+        # last g_max groups, account the rest straight into evicted.
+        # Only the terminal bulk branch of _append_rotated can hit this.
+        skip = rk_block.shape[2] // GROUP - self.g_max
+        if skip > 0:
+            self.evicted += skip * GROUP
+            rk_block = rk_block[:, :, skip * GROUP :]
+            rv_block = rv_block[:, :, skip * GROUP :]
+        super()._seal(rk_block, rv_block)
+
+    def make_mask(self, N, return_array=False, window_size=None, **kwargs):
+        if return_array or window_size is not None:
+            # No correct array is producible: masks are built before layer
+            # 0's update, so an array would size to pre-compaction width.
+            raise ValueError(
+                "[kvarn] rotating kvarn serves string masks only; "
+                "array or windowed masks cannot span an eviction."
+            )
+        return "causal" if N > 1 else None
+
+    @property
+    def meta_state(self):
+        return KVarNKVCache.meta_state.fget(self) + (
+            str(self.max_size),
+            str(self.evicted),
+        )
+
+    @meta_state.setter
+    def meta_state(self, v):
+        if len(v) != 13:
+            raise ValueError(_META_ARITY_MSG)
+        KVarNKVCache.meta_state.fset(self, v[:11])
+        self.max_size = int(v[11])
+        self.evicted = int(v[12])
+
+    @classmethod
+    def from_cache(cls, cache, k_bits=6, v_bits=6, tail_tokens=1024, sink_tokens=GROUP):
+        """Convert a stock RotatingKVCache (window taken from the source).
+        Pre-wrap sources only: a wrapped ring buffer is no longer in
+        temporal order."""
+        max_size = int(getattr(cache, "max_size", 0) or 0)
+        off = int(getattr(cache, "offset", 0) or 0)
+        idx = int(getattr(cache, "_idx", off) or 0)
+        if max(off, idx) >= max_size:
+            raise ValueError(
+                "[kvarn] cannot convert a wrapped rotating cache (its "
+                "buffer is no longer in temporal order)."
+            )
+        out = cls(
+            max_size,
+            k_bits=k_bits,
+            v_bits=v_bits,
+            tail_tokens=tail_tokens,
+            sink_tokens=sink_tokens,
+        )
+        if off:
+            keys, values = cache.state
+            out.update_and_fetch(keys[:, :, :off], values[:, :, :off])
+        return out
+
+
 class BatchKVarNKVCache(_base_cache()):
     """Batched KVarN KV cache: the same region layout with a leading batch
     axis, a uniform buffer watermark ``_idx`` and per-row ``left_padding``
@@ -1060,24 +1209,45 @@ def ensure_registered():
             continue
         if not hasattr(mod, "KVarNKVCache"):
             mod.KVarNKVCache = KVarNKVCache
+        if not hasattr(mod, "KVarNRotatingKVCache"):
+            mod.KVarNRotatingKVCache = KVarNRotatingKVCache
         if not hasattr(mod, "BatchKVarNKVCache"):
             mod.BatchKVarNKVCache = BatchKVarNKVCache
 
 
 def convert_prompt_cache(
-    prompt_cache, k_bits=6, v_bits=6, tail_tokens=1024, sink_tokens=GROUP
+    prompt_cache,
+    k_bits=6,
+    v_bits=6,
+    tail_tokens=1024,
+    sink_tokens=GROUP,
+    rotating_window=None,
 ):
     """Replace every plain KVCache entry with a KVarNKVCache (converting
-    any existing history). Returns the number of layers converted; other
-    cache kinds are left untouched."""
+    any existing history). With rotating_window set, RotatingKVCache
+    entries built for that window become KVarNRotatingKVCache too.
+    Returns the number of layers converted; other cache kinds are left
+    untouched."""
     from .cache_compat import cache_types
 
     ensure_registered()
     kv_types = cache_types("KVCache")
+    rot_types = cache_types("RotatingKVCache") if rotating_window else ()
     n = 0
     for i, c in enumerate(prompt_cache):
         if type(c) in kv_types:
             prompt_cache[i] = KVarNKVCache.from_cache(
+                c,
+                k_bits=k_bits,
+                v_bits=v_bits,
+                tail_tokens=tail_tokens,
+                sink_tokens=sink_tokens,
+            )
+            n += 1
+        elif type(c) in rot_types and int(getattr(c, "max_size", 0) or 0) == int(
+            rotating_window
+        ):
+            prompt_cache[i] = KVarNRotatingKVCache.from_cache(
                 c,
                 k_bits=k_bits,
                 v_bits=v_bits,
