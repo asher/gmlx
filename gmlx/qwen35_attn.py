@@ -712,6 +712,21 @@ def _kvarn_attention(queries, *, cache, scale, mask):
     starts = None
     if queries.shape[2] == 1 and getattr(cache, "left_padding", None) is not None:
         starts = cache.left_padding
+    qL = queries.shape[2]
+    if (
+        isinstance(mask, mx.array)
+        and queries.shape[0] == 1
+        and 1 <= qL <= 4
+        and getattr(cache, "left_padding", None) is None
+        and mask.shape[-2] == qL
+        and mask.shape[-1] == cache.offset
+    ):
+        # Masks on the owned tree are cache-derived, so a B=1 array mask
+        # at decode/verify width is end-aligned causal by construction --
+        # the fused route's causal clamp, not the materialize fallback.
+        # Routing it fused keeps MTP verify on the same arithmetic as
+        # plain decode (greedy byte-identity) and skips a materialize.
+        mask = "causal"
     return kvarn_attention(queries, cache, scale, mask, starts=starts)
 
 

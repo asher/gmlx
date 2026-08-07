@@ -25,18 +25,18 @@ D = 128
 SCALE = D**-0.5
 
 
-def _filled(n, tail=384, seed=0):
+def _filled(n, tail=384, seed=0, d=D):
     rng = np.random.default_rng(seed)
-    k = mx.array(rng.standard_normal((1, H, n, D)).astype(np.float16))
-    v = mx.array(rng.standard_normal((1, H, n, D)).astype(np.float16))
+    k = mx.array(rng.standard_normal((1, H, n, d)).astype(np.float16))
+    v = mx.array(rng.standard_normal((1, H, n, d)).astype(np.float16))
     c = KVarNKVCache(tail_tokens=tail)
     c.update_and_fetch(k, v)
     return c
 
 
-def _make_q(qL, seed=1, dtype=mx.float16):
+def _make_q(qL, seed=1, dtype=mx.float16, d=D):
     rng = np.random.default_rng(seed)
-    return mx.array(rng.standard_normal((1, HQ, qL, D)).astype(np.float16)).astype(
+    return mx.array(rng.standard_normal((1, HQ, qL, d)).astype(np.float16)).astype(
         dtype
     )
 
@@ -46,6 +46,7 @@ def _ref_attention(q, cache, qL):
     materialized body plus rotated tail rows, causal-clamped per query."""
     import mlx_kquant as kq
 
+    d = q.shape[-1]
     n = cache.offset
     t = min(cache.tail_len, n)
     if 0 < n - t < qL:
@@ -59,12 +60,12 @@ def _ref_attention(q, cache, qL):
     k = mx.concatenate(parts_k, axis=2).astype(mx.float32)
     v = mx.concatenate(parts_v, axis=2).astype(mx.float32)
     qr = kq.kvarn_rotate(q.astype(mx.float16)).astype(mx.float32)
-    qg = qr.reshape(1, H, HQ // H, qL, D)
-    s = (qg @ k[:, :, None].transpose(0, 1, 2, 4, 3)) * SCALE
+    qg = qr.reshape(1, H, HQ // H, qL, d)
+    s = (qg @ k[:, :, None].transpose(0, 1, 2, 4, 3)) * (d**-0.5)
     kpos = mx.arange(n)[None, None, None, None, :]
     qpos = (n - qL + mx.arange(qL))[None, None, None, :, None]
     s = mx.where(kpos <= qpos, s, mx.array(-np.inf, mx.float32))
-    o = (mx.softmax(s, axis=-1) @ v[:, :, None]).reshape(1, HQ, qL, D)
+    o = (mx.softmax(s, axis=-1) @ v[:, :, None]).reshape(1, HQ, qL, d)
     return kq.kvarn_rotate(o.astype(mx.float16)).astype(mx.float32)
 
 
@@ -74,59 +75,65 @@ def _assert_close(out, ref, atol=5e-3):
 
 
 @_NEEDS_GPU
+@pytest.mark.parametrize("d", [128, 256])
 @pytest.mark.parametrize("ql", [1, 2, 4])
-def test_decode_with_tail_matches_reference(ql):
-    cache = _filled(700)
-    q = _make_q(ql)
-    out = kvarn_attention(q, cache, SCALE, "causal" if ql > 1 else None)
+def test_decode_with_tail_matches_reference(ql, d):
+    cache = _filled(700, d=d)
+    q = _make_q(ql, d=d)
+    out = kvarn_attention(q, cache, d**-0.5, "causal" if ql > 1 else None)
     _assert_close(out, _ref_attention(q, cache, ql))
 
 
 @_NEEDS_GPU
+@pytest.mark.parametrize("d", [128, 256])
 @pytest.mark.parametrize("n", [130, 300, 700])
-def test_decode_no_tail_matches_reference(n):
-    cache = _filled(n, tail=0)
-    q = _make_q(1)
-    out = kvarn_attention(q, cache, SCALE, None)
+def test_decode_no_tail_matches_reference(n, d):
+    cache = _filled(n, tail=0, d=d)
+    q = _make_q(1, d=d)
+    out = kvarn_attention(q, cache, d**-0.5, None)
     _assert_close(out, _ref_attention(q, cache, 1))
 
 
 @_NEEDS_GPU
-def test_decode_all_tail_matches_reference():
+@pytest.mark.parametrize("d", [128, 256])
+def test_decode_all_tail_matches_reference(d):
     # Shallow cache: the tail covers every token, no body call.
-    cache = _filled(200, tail=384)
-    q = _make_q(1)
-    out = kvarn_attention(q, cache, SCALE, None)
+    cache = _filled(200, tail=384, d=d)
+    q = _make_q(1, d=d)
+    out = kvarn_attention(q, cache, d**-0.5, None)
     _assert_close(out, _ref_attention(q, cache, 1))
 
 
 @_NEEDS_GPU
-def test_bfloat16_query():
-    cache = _filled(700)
-    q = _make_q(1, dtype=mx.bfloat16)
-    out = kvarn_attention(q, cache, SCALE, None)
+@pytest.mark.parametrize("d", [128, 256])
+def test_bfloat16_query(d):
+    cache = _filled(700, d=d)
+    q = _make_q(1, dtype=mx.bfloat16, d=d)
+    out = kvarn_attention(q, cache, d**-0.5, None)
     assert out.dtype == mx.bfloat16
     _assert_close(out, _ref_attention(q, cache, 1), atol=2e-2)
 
 
 @_NEEDS_GPU
-def test_prefill_matches_reference():
-    cache = _filled(700)
-    q = _make_q(16)
-    out = kvarn_attention(q, cache, SCALE, "causal")
+@pytest.mark.parametrize("d", [128, 256])
+def test_prefill_matches_reference(d):
+    cache = _filled(700, d=d)
+    q = _make_q(16, d=d)
+    scale = d**-0.5
+    out = kvarn_attention(q, cache, scale, "causal")
     # Prefill never consults the tail: reference over the materialized cache.
     import mlx_kquant as kq
 
     k, v = cache.materialize()
     k, v = k.astype(mx.float32), v.astype(mx.float32)
     qr = kq.kvarn_rotate(q).astype(mx.float32)
-    qg = qr.reshape(1, H, HQ // H, 16, D)
-    s = (qg @ k[:, :, None].transpose(0, 1, 2, 4, 3)) * SCALE
+    qg = qr.reshape(1, H, HQ // H, 16, d)
+    s = (qg @ k[:, :, None].transpose(0, 1, 2, 4, 3)) * scale
     n = cache.offset
     kpos = mx.arange(n)[None, None, None, None, :]
     qpos = (n - 16 + mx.arange(16))[None, None, None, :, None]
     s = mx.where(kpos <= qpos, s, mx.array(-np.inf, mx.float32))
-    o = (mx.softmax(s, axis=-1) @ v[:, :, None]).reshape(1, HQ, 16, D)
+    o = (mx.softmax(s, axis=-1) @ v[:, :, None]).reshape(1, HQ, 16, d)
     ref = kq.kvarn_rotate(o.astype(mx.float16)).astype(mx.float32)
     _assert_close(out, ref)
 

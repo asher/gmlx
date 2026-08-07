@@ -175,8 +175,8 @@ def kvarn_unsupported(model) -> str | None:
     hd = _kvarn_head_dim(model)
     if hd == -1:
         return "MLA latent KV cache (K and V share storage)"
-    if hd != 128:
-        return f"head_dim {hd or 'unknown'} (kvarn supports 128)"
+    if hd not in (128, 256):
+        return f"head_dim {hd or 'unknown'} (kvarn supports 128/256)"
     return None
 
 

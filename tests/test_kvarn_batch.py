@@ -24,10 +24,10 @@ D = 128
 SCALE = D**-0.5
 
 
-def _slab(n, b=B, seed=0):
+def _slab(n, b=B, seed=0, d=D):
     rng = np.random.default_rng(seed)
-    k = mx.array(rng.standard_normal((b, H, n, D)).astype(np.float16))
-    v = mx.array(rng.standard_normal((b, H, n, D)).astype(np.float16))
+    k = mx.array(rng.standard_normal((b, H, n, d)).astype(np.float16))
+    v = mx.array(rng.standard_normal((b, H, n, d)).astype(np.float16))
     return k, v
 
 
@@ -37,9 +37,9 @@ def _filled(n, pads, tail=256, seed=0):
     return c
 
 
-def _make_q(b=B, seed=1, dtype=mx.float16):
+def _make_q(b=B, seed=1, dtype=mx.float16, d=D):
     rng = np.random.default_rng(seed)
-    return mx.array(rng.standard_normal((b, HQ, 1, D)).astype(np.float16)).astype(dtype)
+    return mx.array(rng.standard_normal((b, HQ, 1, d)).astype(np.float16)).astype(dtype)
 
 
 def _ref_batch_decode(q, cache, pads):
@@ -55,16 +55,16 @@ def _ref_batch_decode(q, cache, pads):
         tk, tv = cache.tail_slices(t)
         parts_k.append(kq.kvarn_rotate(tk))
         parts_v.append(kq.kvarn_rotate(tv))
-    b = q.shape[0]
+    b, d = q.shape[0], q.shape[-1]
     k = mx.concatenate(parts_k, axis=2).astype(mx.float32)
     v = mx.concatenate(parts_v, axis=2).astype(mx.float32)
     qr = kq.kvarn_rotate(q.astype(mx.float16)).astype(mx.float32)
-    qg = qr.reshape(b, H, HQ // H, 1, D)
-    s = (qg @ k[:, :, None].transpose(0, 1, 2, 4, 3)) * SCALE
+    qg = qr.reshape(b, H, HQ // H, 1, d)
+    s = (qg @ k[:, :, None].transpose(0, 1, 2, 4, 3)) * (d**-0.5)
     kpos = mx.arange(n)[None, None, None, None, :]
     starts = mx.array(pads).reshape(b, 1, 1, 1, 1)
     s = mx.where(kpos >= starts, s, mx.array(-np.inf, mx.float32))
-    o = (mx.softmax(s, axis=-1) @ v[:, :, None]).reshape(b, HQ, 1, D)
+    o = (mx.softmax(s, axis=-1) @ v[:, :, None]).reshape(b, HQ, 1, d)
     return kq.kvarn_rotate(o.astype(mx.float16)).astype(mx.float32)
 
 
@@ -104,11 +104,11 @@ def test_views_and_offsets():
 # -- batched decode ----------------------------------------------------------
 
 
-def _decode_setup(n, pads, tail=256, seed=0):
+def _decode_setup(n, pads, tail=256, seed=0, d=D):
     """Fill to n the way serve does: the decode mask is created before the
     step's token lands in the cache, so mask width == post-update _idx."""
     c = BatchKVarNKVCache(pads, tail_tokens=tail)
-    k, v = _slab(n, b=len(pads), seed=seed)
+    k, v = _slab(n, b=len(pads), seed=seed, d=d)
     c.update_and_fetch(k[:, :, :-1], v[:, :, :-1])
     mask = c.make_mask(1, window_size=None)
     c.update_and_fetch(k[:, :, -1:], v[:, :, -1:])
@@ -116,14 +116,15 @@ def _decode_setup(n, pads, tail=256, seed=0):
 
 
 @_NEEDS_GPU
-def test_batch_decode_matches_reference():
+@pytest.mark.parametrize("d", [128, 256])
+def test_batch_decode_matches_reference(d):
     # Row starts hit every region: records (150), and past the body/tail
     # boundary (400 > 600-256): that row's body leg attends zero keys and
     # must contribute nothing through the LSE merge.
     pads = [0, 150, 400]
-    c, mask = _decode_setup(600, pads)
-    q = _make_q()
-    out = kvarn_attention(q, c, SCALE, mask)
+    c, mask = _decode_setup(600, pads, d=d)
+    q = _make_q(d=d)
+    out = kvarn_attention(q, c, d**-0.5, mask)
     _assert_close(out, _ref_batch_decode(q, c, pads))
 
 
@@ -172,14 +173,15 @@ def test_make_mask_registers_starts():
 
 
 @_NEEDS_GPU
-def test_explicit_starts_match_registered_mask():
+@pytest.mark.parametrize("d", [128, 256])
+def test_explicit_starts_match_registered_mask(d):
     # Owned dispatches (qwen3.5) pass cache.left_padding directly; the
     # fused result must match the mask-provenance route bit for bit.
     pads = [0, 150, 400]
-    c, mask = _decode_setup(600, pads)
-    q = _make_q()
-    via_mask = kvarn_attention(q, c, SCALE, mask)
-    via_starts = kvarn_attention(q, c, SCALE, None, starts=c.left_padding)
+    c, mask = _decode_setup(600, pads, d=d)
+    q = _make_q(d=d)
+    via_mask = kvarn_attention(q, c, d**-0.5, mask)
+    via_starts = kvarn_attention(q, c, d**-0.5, None, starts=c.left_padding)
     assert np.array_equal(np.array(via_starts), np.array(via_mask))
 
 
@@ -196,16 +198,18 @@ def test_explicit_starts_masked_fallback(monkeypatch):
 
 
 @_NEEDS_GPU
-def test_qwen35_arm_uses_cache_pads():
+@pytest.mark.parametrize("d", [128, 256])
+def test_qwen35_arm_uses_cache_pads(d):
     # The qwen3.5 decode protocol strips the mask to None and carries the
     # pads on the cache; the arm must recover per-row starts from it.
+    # d=256 is the shape every real qwen3.5/3.6 checkpoint dispatches.
     pytest.importorskip("mlx_vlm.models.qwen3_5")
     from gmlx.qwen35_attn import _kvarn_attention
 
     pads = [0, 150, 296]
-    c, _ = _decode_setup(600, pads)
-    q = _make_q()
-    out = _kvarn_attention(q, cache=c, scale=SCALE, mask=None)
+    c, _ = _decode_setup(600, pads, d=d)
+    q = _make_q(d=d)
+    out = _kvarn_attention(q, cache=c, scale=d**-0.5, mask=None)
     _assert_close(out, _ref_batch_decode(q, c, pads))
 
 

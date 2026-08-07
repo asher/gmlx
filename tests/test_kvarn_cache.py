@@ -19,16 +19,16 @@ H = 2
 D = 128
 
 
-def _tokens(n, seed=0):
+def _tokens(n, seed=0, d=D):
     rng = np.random.default_rng(seed)
-    k = mx.array(rng.standard_normal((1, H, n, D)).astype(np.float16))
-    v = mx.array(rng.standard_normal((1, H, n, D)).astype(np.float16))
+    k = mx.array(rng.standard_normal((1, H, n, d)).astype(np.float16))
+    v = mx.array(rng.standard_normal((1, H, n, d)).astype(np.float16))
     return k, v
 
 
-def _filled(n, tail=384, seed=0, **kw):
+def _filled(n, tail=384, seed=0, d=D, **kw):
     c = KVarNKVCache(tail_tokens=tail, **kw)
-    c.update_and_fetch(*_tokens(n, seed))
+    c.update_and_fetch(*_tokens(n, seed, d=d))
     return c
 
 
@@ -60,13 +60,17 @@ def test_eager_seal_watermarks():
 
 
 @_NEEDS_GPU
-def test_incremental_equals_bulk():
-    k, v = _tokens(700)
+@pytest.mark.parametrize("d", [128, 256])
+def test_incremental_equals_bulk(d):
+    # At d=256 this crosses both slice-transpose paths: single-group seals
+    # on the incremental side, the multi-group bulk transpose on the other.
+    k, v = _tokens(700, d=d)
     inc = KVarNKVCache(tail_tokens=256)
     for i in range(0, 700, 13):
         inc.update_and_fetch(k[:, :, i : i + 13], v[:, :, i : i + 13])
     bulk = KVarNKVCache(tail_tokens=256)
     bulk.update_and_fetch(k, v)
+    assert inc.head_dim == bulk.head_dim == d
     _assert_same_content(inc, bulk)
 
 
@@ -101,9 +105,10 @@ def test_trim_truth_table():
 
 
 @_NEEDS_GPU
+@pytest.mark.parametrize("d", [128, 256])
 @pytest.mark.parametrize("n_trim", [60, 160, 250, 600])
-def test_trim_replay_bit_equality(n_trim):
-    k, v = _tokens(700)
+def test_trim_replay_bit_equality(n_trim, d):
+    k, v = _tokens(700, d=d)
     ref = KVarNKVCache(tail_tokens=384)
     ref.update_and_fetch(k, v)
     c = KVarNKVCache(tail_tokens=384)
@@ -142,10 +147,12 @@ def test_tail_disabled():
 
 
 @_NEEDS_GPU
-def test_state_meta_round_trip():
-    ref = _filled(700)
+@pytest.mark.parametrize("d", [128, 256])
+def test_state_meta_round_trip(d):
+    ref = _filled(700, d=d)
     r = KVarNKVCache.from_state(ref.state, ref.meta_state)
     _assert_same_content(r, ref)
+    assert r.head_dim == d
     assert (r.k_bits, r.v_bits, r.sink_cap, r.tail_cap) == (6, 6, 128, 384)
     assert r.tail_len == ref.tail_len and r.horizon_valid == ref.horizon_valid
 
@@ -251,7 +258,7 @@ def test_constructor_rejects_malformed():
 def test_update_rejects_malformed():
     c = KVarNKVCache()
     rng = np.random.default_rng(0)
-    with pytest.raises(ValueError, match="head_dim 128"):
+    with pytest.raises(ValueError, match="head_dim in"):
         bad = mx.array(rng.standard_normal((1, H, 4, 64)).astype(np.float16))
         c.update_and_fetch(bad, bad)
     with pytest.raises(ValueError, match="single-stream"):

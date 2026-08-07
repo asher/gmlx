@@ -25,8 +25,10 @@ frontier lands in the live stage, in the horizon group, or inside tail
 coverage (tail rows re-rotate to rebuild the live group bit-identically);
 anything deeper returns 0 and the caller falls back to its rebuild path.
 
-Head dim 128, single stream (B=1), group size 128. All widths in
-{2, 3, 4, 5, 6, 8}, K and V independently.
+Head dim 128 or 256, single stream (B=1), group size 128. Heads wider
+than 128 quantize as D/128 independent 128-dim slices per group,
+slice-minor in the codes with one axes triplet per slice (the kq wire).
+All widths in {2, 3, 4, 5, 6, 8}, K and V independently.
 """
 
 from __future__ import annotations
@@ -41,8 +43,35 @@ except ImportError:  # pragma: no cover - mlx_kquant always present in practice
     kq = None
 
 GROUP = 128
-HEAD_DIM = 128
+HEAD_DIMS = (128, 256)
 KVARN_BITS = (2, 3, 4, 5, 6, 8)
+
+
+def _quantize_head(x, bits, side):
+    """Quantize rotated [B, H, T, D] groups into the flat slice-minor wire:
+    codes [B, H, G, (D/128) * 512 * bits], axes [B, H, G, 3 * (D/128), 128]."""
+    b, h, t, d = x.shape
+    sl = d // GROUP
+    if sl == 1:
+        return kq.kvarn_quantize(x, bits, side)
+    xs = x.reshape(b, h, t, sl, GROUP).transpose(0, 1, 3, 2, 4)
+    c, a = kq.kvarn_quantize(xs, bits, side)
+    g = c.shape[3]
+    c = c.transpose(0, 1, 3, 2, 4).reshape(b, h, g, sl * 512 * bits)
+    a = a.transpose(0, 1, 3, 2, 4, 5).reshape(b, h, g, 3 * sl, GROUP)
+    return c, a
+
+
+def _dequant_head(codes, axes, bits, side, d, dtype):
+    """Invert _quantize_head's layout back to rotated [B, H, G * 128, D]."""
+    b, h, g = codes.shape[:3]
+    sl = d // GROUP
+    if sl == 1:
+        return kq.kvarn_dequant(codes, axes, bits, side, dtype=dtype)
+    c = codes.reshape(b, h, g, sl, 512 * bits).transpose(0, 1, 3, 2, 4)
+    a = axes.reshape(b, h, g, sl, 3, GROUP).transpose(0, 1, 3, 2, 4, 5)
+    out = kq.kvarn_dequant(c, a, bits, side, dtype=dtype)
+    return out.transpose(0, 1, 3, 2, 4).reshape(b, h, g * GROUP, d)
 
 
 class KVarNView:
@@ -137,24 +166,30 @@ class KVarNKVCache(_base_cache()):
         return self.tail_end - self.tail_start
 
     def _allocated(self):
-        return self.stage_k is not None and self.stage_k.shape[-1] == HEAD_DIM
+        # Real stages are >= 128 wide; empty-state placeholders are 1.
+        return self.stage_k is not None and self.stage_k.shape[-1] >= GROUP
+
+    @property
+    def head_dim(self):
+        return self.stage_k.shape[-1] if self._allocated() else None
 
     # -- lifecycle ----------------------------------------------------------
 
-    def _alloc(self, h):
+    def _alloc(self, h, d):
+        sl = d // GROUP
         s_rows = self.sink_cap + GROUP
-        self.stage_k = mx.zeros((1, h, s_rows, HEAD_DIM), mx.float16)
-        self.stage_v = mx.zeros((1, h, s_rows, HEAD_DIM), mx.float16)
-        self.horizon_k = mx.zeros((1, h, GROUP, HEAD_DIM), mx.float16)
-        self.horizon_v = mx.zeros((1, h, GROUP, HEAD_DIM), mx.float16)
+        self.stage_k = mx.zeros((1, h, s_rows, d), mx.float16)
+        self.stage_v = mx.zeros((1, h, s_rows, d), mx.float16)
+        self.horizon_k = mx.zeros((1, h, GROUP, d), mx.float16)
+        self.horizon_v = mx.zeros((1, h, GROUP, d), mx.float16)
         t_rows = self.tail_cap + self.tail_slack if self.tail_cap else 1
-        self.tail_k = mx.zeros((1, h, t_rows, HEAD_DIM), mx.float16)
-        self.tail_v = mx.zeros((1, h, t_rows, HEAD_DIM), mx.float16)
+        self.tail_k = mx.zeros((1, h, t_rows, d), mx.float16)
+        self.tail_v = mx.zeros((1, h, t_rows, d), mx.float16)
         g = self.gcap_step
-        self.codes_k = mx.zeros((1, h, g, 512 * self.k_bits), mx.uint32)
-        self.codes_v = mx.zeros((1, h, g, 512 * self.v_bits), mx.uint32)
-        self.axes_k = mx.zeros((1, h, g, 3, HEAD_DIM), mx.float16)
-        self.axes_v = mx.zeros((1, h, g, 3, HEAD_DIM), mx.float16)
+        self.codes_k = mx.zeros((1, h, g, sl * 512 * self.k_bits), mx.uint32)
+        self.codes_v = mx.zeros((1, h, g, sl * 512 * self.v_bits), mx.uint32)
+        self.axes_k = mx.zeros((1, h, g, 3 * sl, GROUP), mx.float16)
+        self.axes_v = mx.zeros((1, h, g, 3 * sl, GROUP), mx.float16)
 
     def _ensure_gcap(self, groups):
         gcap = self.codes_k.shape[2]
@@ -171,10 +206,15 @@ class KVarNKVCache(_base_cache()):
         self.axes_k, self.axes_v = grow(self.axes_k), grow(self.axes_v)
 
     def update_and_fetch(self, keys, values):
-        if keys.ndim != 4 or keys.shape[-1] != HEAD_DIM or values.shape[-1] != HEAD_DIM:
+        if (
+            keys.ndim != 4
+            or keys.shape[-1] not in HEAD_DIMS
+            or values.shape[-1] != keys.shape[-1]
+        ):
             raise ValueError(
-                "[kvarn] KVarNKVCache requires head_dim 128 K and V, got "
-                f"K {tuple(keys.shape)} V {tuple(values.shape)}."
+                f"[kvarn] KVarNKVCache requires head_dim in {HEAD_DIMS} with "
+                f"matching K and V, got K {tuple(keys.shape)} "
+                f"V {tuple(values.shape)}."
             )
         if keys.shape[0] != 1:
             raise ValueError("[kvarn] KVarNKVCache is single-stream (B=1).")
@@ -185,7 +225,7 @@ class KVarNKVCache(_base_cache()):
         if not self._allocated() or self.stage_k.shape[1] != keys.shape[1]:
             if self.offset:
                 raise RuntimeError("[kvarn] cache head count changed mid-stream.")
-            self._alloc(keys.shape[1])
+            self._alloc(keys.shape[1], keys.shape[-1])
         self._write_tail(keys, values)
         rk = kq.kvarn_rotate(keys)
         rv = kq.kvarn_rotate(values)
@@ -256,8 +296,8 @@ class KVarNKVCache(_base_cache()):
         m = rk_block.shape[2] // GROUP
         g = self.n_sealed
         self._ensure_gcap(g + m)
-        ck, ak = kq.kvarn_quantize(rk_block, self.k_bits, "k")
-        cv, av = kq.kvarn_quantize(rv_block, self.v_bits, "v")
+        ck, ak = _quantize_head(rk_block, self.k_bits, "k")
+        cv, av = _quantize_head(rv_block, self.v_bits, "v")
         self.codes_k[:, :, g : g + m] = ck
         self.axes_k[:, :, g : g + m] = ak
         self.codes_v[:, :, g : g + m] = cv
@@ -280,12 +320,13 @@ class KVarNKVCache(_base_cache()):
             parts = [stage[:, :, : self.sink_used].astype(dtype)]
             if self.n_sealed:
                 parts.append(
-                    kq.kvarn_dequant(
+                    _dequant_head(
                         getattr(self, f"codes_{side}")[:, :, : self.n_sealed],
                         getattr(self, f"axes_{side}")[:, :, : self.n_sealed],
                         self.k_bits if side == "k" else self.v_bits,
                         side,
-                        dtype=dtype,
+                        self.head_dim,
+                        dtype,
                     )
                 )
             if self.live_len:
@@ -562,22 +603,28 @@ class BatchKVarNKVCache(_base_cache()):
         return self.tail_end - self.tail_start
 
     def _allocated(self):
-        return self.stage_k is not None and self.stage_k.shape[-1] == HEAD_DIM
+        # Real stages are >= 128 wide; empty-state placeholders are 1.
+        return self.stage_k is not None and self.stage_k.shape[-1] >= GROUP
+
+    @property
+    def head_dim(self):
+        return self.stage_k.shape[-1] if self._allocated() else None
 
     # -- lifecycle ----------------------------------------------------------
 
-    def _alloc(self, b, h):
+    def _alloc(self, b, h, d):
+        sl = d // GROUP
         s_rows = self.sink_cap + GROUP
-        self.stage_k = mx.zeros((b, h, s_rows, HEAD_DIM), mx.float16)
-        self.stage_v = mx.zeros((b, h, s_rows, HEAD_DIM), mx.float16)
+        self.stage_k = mx.zeros((b, h, s_rows, d), mx.float16)
+        self.stage_v = mx.zeros((b, h, s_rows, d), mx.float16)
         t_rows = self.tail_cap + self.tail_slack if self.tail_cap else 1
-        self.tail_k = mx.zeros((b, h, t_rows, HEAD_DIM), mx.float16)
-        self.tail_v = mx.zeros((b, h, t_rows, HEAD_DIM), mx.float16)
+        self.tail_k = mx.zeros((b, h, t_rows, d), mx.float16)
+        self.tail_v = mx.zeros((b, h, t_rows, d), mx.float16)
         g = self.gcap_step
-        self.codes_k = mx.zeros((b, h, g, 512 * self.k_bits), mx.uint32)
-        self.codes_v = mx.zeros((b, h, g, 512 * self.v_bits), mx.uint32)
-        self.axes_k = mx.zeros((b, h, g, 3, HEAD_DIM), mx.float16)
-        self.axes_v = mx.zeros((b, h, g, 3, HEAD_DIM), mx.float16)
+        self.codes_k = mx.zeros((b, h, g, sl * 512 * self.k_bits), mx.uint32)
+        self.codes_v = mx.zeros((b, h, g, sl * 512 * self.v_bits), mx.uint32)
+        self.axes_k = mx.zeros((b, h, g, 3 * sl, GROUP), mx.float16)
+        self.axes_v = mx.zeros((b, h, g, 3 * sl, GROUP), mx.float16)
 
     _ensure_gcap = KVarNKVCache._ensure_gcap
     _write_tail = KVarNKVCache._write_tail
@@ -585,10 +632,15 @@ class BatchKVarNKVCache(_base_cache()):
     materialize = KVarNKVCache.materialize
 
     def update_and_fetch(self, keys, values):
-        if keys.ndim != 4 or keys.shape[-1] != HEAD_DIM or values.shape[-1] != HEAD_DIM:
+        if (
+            keys.ndim != 4
+            or keys.shape[-1] not in HEAD_DIMS
+            or values.shape[-1] != keys.shape[-1]
+        ):
             raise ValueError(
-                "[kvarn] BatchKVarNKVCache requires head_dim 128 K and V, got "
-                f"K {tuple(keys.shape)} V {tuple(values.shape)}."
+                f"[kvarn] BatchKVarNKVCache requires head_dim in {HEAD_DIMS} "
+                f"with matching K and V, got K {tuple(keys.shape)} "
+                f"V {tuple(values.shape)}."
             )
         if keys.shape[0] != self.left_padding.shape[0]:
             raise ValueError(
@@ -602,7 +654,7 @@ class BatchKVarNKVCache(_base_cache()):
         if not self._allocated() or self.stage_k.shape[1] != keys.shape[1]:
             if self._idx:
                 raise RuntimeError("[kvarn] cache head count changed mid-stream.")
-            self._alloc(keys.shape[0], keys.shape[1])
+            self._alloc(keys.shape[0], keys.shape[1], keys.shape[-1])
         self._write_tail(keys, values)
         rk = kq.kvarn_rotate(keys)
         rv = kq.kvarn_rotate(values)
@@ -649,8 +701,8 @@ class BatchKVarNKVCache(_base_cache()):
         m = rk_block.shape[2] // GROUP
         g = self.n_sealed
         self._ensure_gcap(g + m)
-        ck, ak = kq.kvarn_quantize(rk_block, self.k_bits, "k")
-        cv, av = kq.kvarn_quantize(rv_block, self.v_bits, "v")
+        ck, ak = _quantize_head(rk_block, self.k_bits, "k")
+        cv, av = _quantize_head(rv_block, self.v_bits, "v")
         self.codes_k[:, :, g : g + m] = ck
         self.axes_k[:, :, g : g + m] = ak
         self.codes_v[:, :, g : g + m] = cv
@@ -716,9 +768,9 @@ class BatchKVarNKVCache(_base_cache()):
             sink_tokens=self.sink_cap,
         )
         rk, rv = self._raw_rows()
-        b, h = rk.shape[0], rk.shape[1]
-        pad_k = mx.zeros((b, h, delta, HEAD_DIM), mx.float16)
-        pad_v = mx.zeros((b, h, delta, HEAD_DIM), mx.float16)
+        b, h, d = rk.shape[0], rk.shape[1], rk.shape[3]
+        pad_k = mx.zeros((b, h, delta, d), mx.float16)
+        pad_v = mx.zeros((b, h, delta, d), mx.float16)
         out.update_and_fetch(
             mx.concatenate([pad_k, rk], axis=2),
             mx.concatenate([pad_v, rv], axis=2),
@@ -785,11 +837,11 @@ class BatchKVarNKVCache(_base_cache()):
         if self._idx - pad <= 0:
             return out
         if pad == 0:
-            h = self.stage_k.shape[1]
+            h, d = self.stage_k.shape[1], self.stage_k.shape[-1]
             for f in self._ARRAY_FIELDS:
                 setattr(out, f, mx.contiguous(getattr(self, f)[idx : idx + 1]))
-            out.horizon_k = mx.zeros((1, h, GROUP, HEAD_DIM), mx.float16)
-            out.horizon_v = mx.zeros((1, h, GROUP, HEAD_DIM), mx.float16)
+            out.horizon_k = mx.zeros((1, h, GROUP, d), mx.float16)
+            out.horizon_v = mx.zeros((1, h, GROUP, d), mx.float16)
             out.offset = self._idx
             out.n_sealed = self.n_sealed
             out.tail_start, out.tail_end = self.tail_start, self.tail_end
@@ -843,9 +895,11 @@ class BatchKVarNKVCache(_base_cache()):
             out.n_sealed = first.n_sealed
             out.tail_start, out.tail_end = first.tail_start, first.tail_end
             return out
-        h = next(c.stage_k.shape[1] for c in caches if c.offset)
-        slab_k = mx.zeros((len(caches), h, max_len, HEAD_DIM), mx.float16)
-        slab_v = mx.zeros((len(caches), h, max_len, HEAD_DIM), mx.float16)
+        h, d = next(
+            (c.stage_k.shape[1], c.stage_k.shape[-1]) for c in caches if c.offset
+        )
+        slab_k = mx.zeros((len(caches), h, max_len, d), mx.float16)
+        slab_v = mx.zeros((len(caches), h, max_len, d), mx.float16)
         for i, c in enumerate(caches):
             if not c.offset:
                 continue

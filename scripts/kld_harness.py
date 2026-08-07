@@ -50,13 +50,21 @@ def load_corpus_ids(tokenizer, n_tokens: int) -> list[int]:
 
 
 def build_arm(name: str, model, tail_tokens: int):
-    from mlx_lm.models.cache import make_prompt_cache
+    """Hybrid archs quantize/convert their plain-KV layers and leave
+    recurrent state untouched, matching the runtime's partial coverage."""
+    from mlx_lm.models.cache import KVCache, make_prompt_cache
 
     pc = make_prompt_cache(model)
+    eligible = sum(1 for c in pc if type(c) is KVCache)
     if name == "fp16":
         return pc
     if name == "kv8":
-        return [c.to_quantized(group_size=64, bits=8) for c in pc]
+        if not eligible:
+            raise SystemExit("kv8 arm: no plain KV layers to quantize")
+        return [
+            c.to_quantized(group_size=64, bits=8) if type(c) is KVCache else c
+            for c in pc
+        ]
     if name.startswith("kvarn"):
         import re
 
@@ -74,8 +82,8 @@ def build_arm(name: str, model, tail_tokens: int):
         n = convert_prompt_cache(
             pc, k_bits=k_bits, v_bits=v_bits, tail_tokens=tail_tokens
         )
-        if n != len(pc):
-            raise SystemExit(f"kvarn arm converted {n}/{len(pc)} layers")
+        if n == 0 or n != eligible:
+            raise SystemExit(f"kvarn arm converted {n}/{eligible} eligible layers")
         install_kvarn_sdpa()
         return pc
     raise SystemExit(f"unknown arm {name!r}")

@@ -107,7 +107,9 @@ def test_unsupported_kill_switch(monkeypatch):
 def test_unsupported_reasons(_ops_ok, monkeypatch):
     monkeypatch.delenv("GMLX_KVARN", raising=False)
     assert kvarn_unsupported(_FakeModel()) is None
+    assert kvarn_unsupported(_FakeModel(head_dim=256)) is None
     assert "head_dim 64" in kvarn_unsupported(_FakeModel(head_dim=64))
+    assert "128/256" in kvarn_unsupported(_FakeModel(head_dim=512))
     assert "MLA" in kvarn_unsupported(_FakeModel(kv_lora_rank=512))
     # qwen3.5 lost its bypass entry when the owned dispatch gained the arm
     assert kvarn_unsupported(_FakeModel(model_type="qwen3_5")) is None
