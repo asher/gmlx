@@ -6,15 +6,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Added
-
-- GMLX_SHEXP_FOLD=1 runs the DeepSeek-V4 shared expert inside the routed
-  expert gathers instead of as three separate projections. Off by
-  default: it drops three dispatches per MoE layer but measured 2%
-  slower decode on V4-Flash, whose shared projections already stream at
-  wire, so folding them onto a slower kernel costs more than the
-  launches it saves.
-
 ### Fixed
 
 - GGUFs that quantize the MoE router gate (some community DeepSeek quants;

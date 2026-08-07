@@ -210,14 +210,6 @@ class _FusedMoeCaps:
         self.has_silu_limit = self.has_kq_fused and "silu_limit" in glu_doc
         self.has_swiglu_clamp = (
             self.has_kq_fused and "swiglu_clamp" in glu_doc)
-        # silu_limit on the shared-expert ride-along shipped with a `limit`
-        # kwarg on moe_glu_gather_shexp_kq; sniff the nanobind signature
-        # line ("limit: float"), not prose, so doc mentions on older builds
-        # cannot false-positive.
-        shexp_doc = (getattr(
-            getattr(kq, "moe_glu_gather_shexp_kq", None), "__doc__", "")
-            or "")
-        self.shexp_limit_ok = "limit: float" in shexp_doc
         self.router_ok = (
             os.environ.get("GMLX_FUSED_MOE_ROUTER", "1") != "0"
             and hasattr(kq, "moe_router_topk")
@@ -882,96 +874,6 @@ def install_hyv3_shexp_fold(model) -> int:
         if not _eligible_hyv3_shexp(m, caps):
             continue
         object.__setattr__(m.switch_mlp, "_kq_shexp_mod", m.shared_mlp)
-        n += 1
-    return n
-
-
-def _eligible_dsv4_shexp(m, caps):
-    """deepseek-v4 MoE whose shared expert can ride the fused SwitchGLU
-    gathers as one extra slot with mix weight 1: the hy_v3 ride-along at
-    the V4 module shape (gate / switch_mlp / shared_experts) and the V4
-    LimitedSwiGLU epilogue (needs the limit-capable shexp kernels).
-    K-quant projections must be shape-matched to the expert stacks (same
-    codec, or a q6_k/q8_0 upcast)."""
-    kq = caps.kq
-    _KQ_SHEXP_UPCAST = caps.shexp_upcast
-    if not hasattr(kq, "moe_glu_gather_shexp_kq"):
-        return False
-    if not hasattr(kq, "gather_qmv_mix_kq"):
-        return False
-    if type(m).__name__ != "DeepseekV4MoE":
-        return False
-    for attr in ("gate", "switch_mlp", "shared_experts"):
-        if not hasattr(m, attr):
-            return False
-    se = m.shared_experts
-    if se is None:
-        return False
-    sw = m.switch_mlp
-    if not getattr(sw, "_kq_mix_scores", False):
-        return False
-    act = getattr(sw, "_kq_glu_act", None)
-    if act == "silu_limit":
-        if not caps.shexp_limit_ok:
-            return False
-        limit = float(getattr(sw, "_kq_glu_limit", 0.0) or 0.0)
-        # one epilogue serves routed and shared slots: the shared expert
-        # must clamp with the same bound
-        if limit <= 0.0 or float(
-                getattr(se, "swiglu_limit", -1.0) or 0.0) != limit:
-            return False
-    elif act == "silu":
-        # limit <= 0 degenerates to plain SwiGLU on both sides
-        if float(getattr(se, "swiglu_limit", 0.0) or 0.0) > 0.0:
-            return False
-    else:
-        return False
-    # kernel geometry: K of both matvecs % 256, N (= down K) % 256
-    d_in = _kq_wire_k(sw.gate_proj.weight, sw.gate_proj.kquant_type)
-    inter = sw.gate_proj.weight.shape[1]
-    if d_in <= 0 or d_in % 256 or inter % 256:
-        return False
-    for attr in ("gate_proj", "up_proj", "down_proj"):
-        if not hasattr(se, attr):
-            return False
-    # the GLU gather runs both shexp slots with one codec
-    if se.gate_proj.kquant_type != se.up_proj.kquant_type:
-        return False
-    for proj, stack in ((se.gate_proj, sw.gate_proj),
-                        (se.up_proj, sw.up_proj),
-                        (se.down_proj, sw.down_proj)):
-        if not _kq_dense(proj, (stack.kquant_type,) + _KQ_SHEXP_UPCAST):
-            return False
-        # shape-matched in each side's own codec wire bytes
-        if proj.weight.shape[0] != stack.weight.shape[1]:
-            return False
-        if (_kq_wire_k(proj.weight, proj.kquant_type)
-                != _kq_wire_k(stack.weight, stack.kquant_type)):
-            return False
-    return True
-
-
-def install_dsv4_shexp_fold(model) -> int:
-    """Stamp eligible deepseek-v4 MoE blocks' fused SwitchGLUs with their
-    shared expert (``_kq_shexp_mod``): the hy_v3 shared-expert ride-along
-    at the V4 module shape. Call after install_fused_moe_glu.
-
-    Opt-in (GMLX_SHEXP_FOLD=1). It removes three dispatches per MoE layer
-    but measured a decode wash on V4-Flash: the shared projections already
-    stream at wire, so their bytes cost the same read wherever they are
-    read, and only the launches go away. Kept for targets whose shared
-    expert is small enough for the launches to dominate its bytes.
-    Returns the number of blocks stamped."""
-    caps = _FusedMoeCaps()
-    if not caps.enabled or not caps.has_base or not caps.block_env_on:
-        return 0
-    if os.environ.get("GMLX_SHEXP_FOLD", "0") != "1":
-        return 0
-    n = 0
-    for _, m in model.named_modules():
-        if not _eligible_dsv4_shexp(m, caps):
-            continue
-        object.__setattr__(m.switch_mlp, "_kq_shexp_mod", m.shared_experts)
         n += 1
     return n
 

@@ -31,11 +31,7 @@ from .envflags import env_bool, env_choice, env_float, env_int
 from .attn_hd512 import install_hd512_sdpa
 from .prefill_decay import install_prefill_decay, note_untracked_weights
 from . import gpt_oss_prefill  # noqa: F401  (registers gpt_oss score profile)
-from .modules import (
-    install_dsv4_shexp_fold,
-    install_fused_moe_glu,
-    install_hyv3_shexp_fold,
-)
+from .modules import install_fused_moe_glu, install_hyv3_shexp_fold
 from .occupancy_fuse import install_occupancy_fuse
 from .qkv_fuse import install_fused_qkv
 from .gemma4_batched_sdpa import install_gemma4_batched_sdpa
@@ -2839,9 +2835,6 @@ def _install_and_load(
     n_shexp = install_hyv3_shexp_fold(model)
     if n_shexp:
         log(f"[install] hy3 shared-expert fold on {n_shexp} MoE layers")
-    n_shexp_v4 = install_dsv4_shexp_fold(model)
-    if n_shexp_v4:
-        log(f"[install] dsv4 shared-expert fold on {n_shexp_v4} MoE layers")
     n_fused_qkv = install_fused_qkv(model)
     if n_fused_qkv:
         log(f"[install] fused QKV decode projection on {n_fused_qkv} layers")
@@ -3290,9 +3283,6 @@ def load_model(
     n_shexp = install_hyv3_shexp_fold(model)
     if n_shexp:
         _log(f"[install] hy3 shared-expert fold on {n_shexp} MoE layers")
-    n_shexp_v4 = install_dsv4_shexp_fold(model)
-    if n_shexp_v4:
-        _log(f"[install] dsv4 shared-expert fold on {n_shexp_v4} MoE layers")
     n_fused_qkv = install_fused_qkv(model)
     if n_fused_qkv:
         _log(f"[install] fused QKV decode projection on {n_fused_qkv} layers")
