@@ -203,7 +203,7 @@ def invrope_regroup_m1(out, rope, offset, o_groups):
     freqs = rope._get_freqs(HD, True)
     if rope.freq_scale != 1:
         offset = offset // rope.freq_scale
-    pos = mx.array([float(offset)], dtype=mx.float32)
+    pos = _pos_array(offset)
     HG = H // o_groups
     total = B * L * H * (HD // 2)
     return _invrope_regroup_kernel(
@@ -228,7 +228,7 @@ def kv_norm_rope_m1(kv_out, norm_weight, rope, offset, eps):
     freqs = rope._get_freqs(D, False)
     if rope.freq_scale != 1:
         offset = offset // rope.freq_scale
-    pos = mx.array([float(offset)], dtype=mx.float32)
+    pos = _pos_array(offset)
     out = _kv_norm_rope_kernel(
         inputs=[kv_out, norm_weight, freqs, pos],
         template=[("T", kv_out.dtype), ("D", D),
@@ -252,7 +252,7 @@ def q_norm_rope_m1(q, rope, offset, eps):
     freqs = rope._get_freqs(D, False)
     if rope.freq_scale != 1:
         offset = offset // rope.freq_scale
-    pos = mx.array([float(offset)], dtype=mx.float32)
+    pos = _pos_array(offset)
     out = _q_norm_rope_kernel(
         inputs=[q, freqs, pos],
         template=[("T", q.dtype), ("D", D),
