@@ -98,7 +98,7 @@ family sets no value.
 | `--repetition-context-size N` | `20` | How many recent tokens the repetition penalty considers. |
 | `--logit-bias JSON` | - | Token-id to bias map, e.g. `'{"128001": -100}'`. |
 | `--stop STR` | - | Stop sequence; generation ends (trimmed) when it appears. Repeatable. |
-| `--max-kv-size N` | - | Cap the KV cache (rotating cache above it). |
+| `--max-kv-size N` | - | Cap the KV cache (rotating cache above it). Composes with `--kv-quant-scheme kvarn` (the window quantizes; N must clear the kvarn floor of sink 128 + `--kv-tail-tokens` + 128); plain `--kv-bits` cannot quantize a rotating window and is dropped loudly. |
 | `--kv-bits N` / `--kv-group-size N` / `--quantized-kv-start N` | off / `64` / `0` | Quantize the KV cache (mlx-lm `QuantizedKVCache`): cuts cache memory 2-4x for long contexts. |
 | `--kv-quant-scheme STR` / `--kv-tail-tokens N` | `uniform` / `1024` | KV quantization scheme. `kvarn` is variance-normalized quantization (kv8-class quality at 6 bits; `--kv-bits` defaults to 6, accepts 2/3/4/5/6/8); the sink and the last `--kv-tail-tokens` tokens stay fp16. Covers head_dim-128, -256 and -512 attention layers: the qwen3.5/3.6 family (hybrid archs convert those, recurrent layers keep their own state) and gemma-4 global layers (SWA layers stay fp16); anything else declines with a printed reason. |
 | `--prefill-step-size N` | `2048` / `8192` streaming | Prefill chunk size; lower it to cap peak memory on long prompts. Over-RAM streaming `--stream-cpu` / `--stream-experts` models default to `8192`: each chunk re-streams the expert lane from disk, so fewer, bigger chunks prefill faster. Applies to `run`, `--bench`, and `--bench-depths`. |
@@ -317,7 +317,8 @@ every command. The terminal is upgraded on top:
   entirely. Both rewind the persistent KV cache to the turn's checkpoint (no
   re-prefill), restore the pre-turn state (system prompt, media markers), and
   work after an Esc-canceled reply. A rotating cache (`--max-kv-size`) that
-  has wrapped its window can't rewind; `/reset` then.
+  has wrapped its window can't rewind past the evicted boundary; the next
+  message re-prefills (or `/reset`).
 - `/model` and `/stats` print the loaded model's card (arch, params, codecs,
   size, context, drafter, adapter) and the running session totals (turns,
   tokens, average tok/s, MTP acceptance).
@@ -430,7 +431,7 @@ every command. The terminal is upgraded on top:
 | `--system-prompt STR` | - | System message, sent on the first turn (and after each reset; adjustable via `/system`). |
 | `--chat-template-config JSON` | - | Extra chat-template kwargs, e.g. `'{"enable_thinking": false}'`. |
 | `--thinking` / `--reasoning-effort` | - | Reasoning switch and depth, mapped onto this model's own template spelling, same as [`run`](#generation). |
-| `--max-kv-size N` | - | Cap the KV cache (rotating cache above it). |
+| `--max-kv-size N` | - | Cap the KV cache (rotating cache above it). Composes with `--kv-quant-scheme kvarn` the same as [`run`](#generation); `/undo` across an evicted boundary rebuilds the cache on the next message. |
 | `--no-history` | - | Don't read or write the prompt-history file. |
 | `--no-autosave` | - | Don't autosave the session after each turn. |
 | `--resume [NAME]` | - | Resume a saved session (default: this model's latest). |

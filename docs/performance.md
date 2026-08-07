@@ -406,7 +406,13 @@ Levers, cheapest first:
   and gemma-4 global layers (SWA layers stay fp16, so the gemma-4 saving is
   modest); anything else declines loudly and stays fp16.
 - `--max-kv-size` caps the cache as a rolling window, trading away the oldest
-  context.
+  context. With `--kv-quant-scheme kvarn` on models the flag applies to (those
+  without an arch-specific cache), the window quantizes too: the cap rounds
+  down to whole 128-token groups and must clear the kvarn floor (128-token
+  sink + `--kv-tail-tokens` + 128, so 1280 at the default tail); below the
+  floor the scheme drops loudly and the window stays fp16. Plain `--kv-bits`
+  cannot quantize a rotating window and drops loudly with the same fp16
+  fallback.
 - Long prompts prefill in chunks automatically (2048 tokens), which bounds
   prefill's working memory on top of the cache itself. `--prefill-step-size`
   (on `serve`, `run`, and `chat`; server config `server.prefill_step_size`, or
