@@ -53,6 +53,7 @@ from gmlx.deepseek_v4_hyper_connection import (
     HyperConnection,
     HyperHead,
     hc_expand,
+    hc_expand_m1,
 )
 
 
@@ -2003,6 +2004,17 @@ class DeepseekV4Block(nn.Module):
         cache: Optional[Any],
         input_ids: mx.array,
     ) -> mx.array:
+        if self.attn_hc.m1_fused_ok(h):
+            residual = h
+            x, post, comb = self.attn_hc.fused_m1(h, self.attn_norm.weight)
+            x = self.attn(x, mask=mask, cache=cache)
+            h = hc_expand_m1(x, residual, post, comb)
+
+            residual = h
+            x, post, comb = self.ffn_hc.fused_m1(h, self.ffn_norm.weight)
+            x = self.ffn(x, input_ids)
+            return hc_expand_m1(x, residual, post, comb)
+
         residual = h
         x, post, comb = self.attn_hc(h)
         x = self.attn(self.attn_norm(x), mask=mask, cache=cache)
