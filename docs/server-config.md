@@ -927,9 +927,10 @@ models. Each maps 1:1 to the env var mlx-vlm reads at build:
 
 `kv_quant_scheme: kvarn` converts every eligible layer's batch KV cache to
 KVarN (`kv_bits` picks the width, default 6; `kv_tail_tokens` sizes the
-fp16 precision tail, default 1024). Coverage is head_dim-128 and -256
-attention layers, including the qwen3.5/3.6 family (hybrid archs convert
-those and leave recurrent layers untouched); ineligible models keep fp16 KV with a
+fp16 precision tail, default 1024). Coverage is head_dim-128, -256 and
+-512 attention layers: the qwen3.5/3.6 family (hybrid archs convert those
+and leave recurrent layers untouched) and gemma-4 global layers (SWA layers
+stay fp16); ineligible models keep fp16 KV with a
 one-shot log reason, never a silent affine fallback. A kvarn model runs the
 APC on the exact-entry tier (memory and disk; the 16-token block tier
 cannot split kvarn's 128-token records), with entries keyed to the kvarn

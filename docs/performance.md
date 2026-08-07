@@ -402,8 +402,9 @@ Levers, cheapest first:
   and shows no difference): pick kvarn for memory and fidelity, plain
   `--kv-bits` for peak decode speed. Other widths (2-8, and mixed via
   `GMLX_KVARN_BITS=k6v5`) trade fidelity for memory at roughly the same speed.
-  Covers head_dim-128 and -256 attention layers (the qwen3.5/3.6 family
-  included); anything else declines loudly and stays fp16.
+  Covers head_dim-128, -256 and -512 attention layers: the qwen3.5/3.6 family
+  and gemma-4 global layers (SWA layers stay fp16, so the gemma-4 saving is
+  modest); anything else declines loudly and stays fp16.
 - `--max-kv-size` caps the cache as a rolling window, trading away the oldest
   context.
 - Long prompts prefill in chunks automatically (2048 tokens), which bounds
