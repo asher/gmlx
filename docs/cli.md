@@ -149,13 +149,16 @@ with a warning); `--no-speculative`/`--no-mtp` forces it off.
 | `--draft-block-size N` | Override the MTP draft block size. |
 
 Speculative generation takes only `--temp`/`--top-p`/`--top-k`/`--min-p` plus a
-baked `--system-prompt`; mlx-vlm's verify walk has no stop/bias/penalty/KV
+baked `--system-prompt`; mlx-vlm's verify walk has no stop/bias/penalty
 hooks. A native head is sticky: MTP auto-enables and stays on. Flags the verify
 walk can't honour (`--stop`, `--logit-bias`, the
 repetition/presence/frequency penalties, `--xtc-probability`, `--max-kv-size`,
-the `--kv-*` flags) are dropped, each named in a warning, never silently. To
+`--quantized-kv-start`) are dropped, each named in a warning, never silently. To
 apply one of those flags, pass `--no-mtp` to decode on the plain path, which
-honours it exactly. Only hard-incompatible flags (`--mmproj`, `--adapter`, `--stream-cpu`,
+honours it exactly. `--kv-bits` (pooled packing where the arch has pools) and
+`--kv-quant-scheme kvarn` (where the arch is eligible and the drafter does not
+read the target KV back) apply on the MTP path itself, with an accurate note
+where they can't. Only hard-incompatible flags (`--mmproj`, `--adapter`, `--stream-cpu`,
 and the lossy `--moe-*` levers) make auto-enable step aside to plain
 decoding; an explicit `--speculative` with one of these errors out.
 `--stream-experts` is the exception: streaming composes with MTP, but

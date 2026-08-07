@@ -570,10 +570,9 @@ def mtp_dropped_run_flags(args) -> list[str]:
         ("--presence-penalty", args.presence_penalty != 0.0),
         ("--frequency-penalty", args.frequency_penalty != 0.0),
         ("--xtc-probability", args.xtc_probability != 0.0),
-        # --kv-bits/--kv-group-size are handled on the MTP path itself
-        # (pooled packing where the arch has pools, an accurate note where
-        # it doesn't), so they are no longer listed here.
-        ("--kv-quant-scheme", getattr(args, "kv_quant_scheme", None) == "kvarn"),
+        # --kv-bits/--kv-group-size/--kv-quant-scheme are handled on the MTP
+        # path itself (pooled packing or kvarn where the arch supports it,
+        # an accurate note where it doesn't), so they are not listed here.
         ("--quantized-kv-start", args.quantized_kv_start != 0),
         ("--max-kv-size", args.max_kv_size is not None),
         ("--over-generation", args.over_generation != 0),
@@ -1423,6 +1422,8 @@ def _run_generate(args) -> int:
             reasoning=args.reasoning,
             kv_bits=args.kv_bits,
             kv_group_size=args.kv_group_size,
+            kv_quant_scheme=args.kv_quant_scheme,
+            kv_tail_tokens=args.kv_tail_tokens,
         )
         print(
             f"\n[mtp] {stats['tokens']} tok @ {stats['decode_tps']:.1f} tok/s "
@@ -1707,6 +1708,8 @@ def _run_vlm_mtp(args) -> int:
         reasoning=args.reasoning,
         kv_bits=args.kv_bits,
         kv_group_size=args.kv_group_size,
+        kv_quant_scheme=args.kv_quant_scheme,
+        kv_tail_tokens=args.kv_tail_tokens,
     )
     print(
         f"\n[mtp] {stats['tokens']} tok @ {stats['decode_tps']:.1f} tok/s "

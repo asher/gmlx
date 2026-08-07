@@ -118,8 +118,7 @@ def kv_quantization_unsupported(model) -> str | None:
         return None
     from .cache_compat import cache_types
 
-    rotating = (cache_types("RotatingKVCache")
-                + cache_types("BatchRotatingKVCache"))
+    rotating = cache_types("RotatingKVCache") + cache_types("BatchRotatingKVCache")
     flat, stack = [], list(caches or [])
     while stack:
         c = stack.pop()
@@ -134,8 +133,7 @@ def kv_quantization_unsupported(model) -> str | None:
             for c in flat
             # kv_quant_unsupported: caches whose to_quantized raises by
             # design (MSAKVCache - quantizing drops the indexer stream).
-            if isinstance(c, rotating)
-            or getattr(c, "kv_quant_unsupported", False)
+            if isinstance(c, rotating) or getattr(c, "kv_quant_unsupported", False)
         }
     )
     if bad:
@@ -206,18 +204,20 @@ def _kvarn_widths(kv_bits):
         if m:
             return int(m.group(1)), int(m.group(2))
         print(
-            f"warning: GMLX_KVARN_BITS={env!r} is not of the form k6v5; "
-            "ignored",
+            f"warning: GMLX_KVARN_BITS={env!r} is not of the form k6v5; ignored",
             file=sys.stderr,
         )
     bits = int(kv_bits) if kv_bits is not None else 6
     return bits, bits
 
 
-def setup_kvarn_cache(model, kv_bits, kv_tail_tokens, max_kv_size, out=None):
+def setup_kvarn_cache(
+    model, kv_bits, kv_tail_tokens, max_kv_size, out=None, make_cache=None
+):
     """Build the model's prompt cache with kvarn KV on every eligible layer,
     printing the [kv] banner. Returns the cache list, or None (with a
-    warning) when the scheme cannot apply."""
+    warning) when the scheme cannot apply. ``make_cache`` overrides the
+    stock cache builder (the MTP paths build via mlx-vlm's)."""
     from .kvarn_cache import KVARN_BITS
 
     out = out if out is not None else sys.stderr
@@ -235,25 +235,67 @@ def setup_kvarn_cache(model, kv_bits, kv_tail_tokens, max_kv_size, out=None):
         from .kvarn_cache import convert_prompt_cache
         from .kvarn_sdpa import install_kvarn_sdpa
 
-        prompt_cache = _mpc(model, max_kv_size=max_kv_size)
+        if make_cache is not None:
+            prompt_cache = make_cache()
+        else:
+            prompt_cache = _mpc(model, max_kv_size=max_kv_size)
         n = convert_prompt_cache(
             prompt_cache, k_bits=k_bits, v_bits=v_bits, tail_tokens=tail
         )
         if n:
             install_kvarn_sdpa()
-            width = f"kvarn{k_bits}" if k_bits == v_bits else f"kvarn k{k_bits} v{v_bits}"
+            width = (
+                f"kvarn{k_bits}" if k_bits == v_bits else f"kvarn k{k_bits} v{v_bits}"
+            )
             regions = "sink+tail fp16" if tail else "sink fp16, tail off"
             print(
-                f"[kv] {width} KV cache ({n}/{len(prompt_cache)} layers; "
-                f"{regions})",
+                f"[kv] {width} KV cache ({n}/{len(prompt_cache)} layers; {regions})",
                 file=out,
             )
         else:
             prompt_cache = None
             reason = "no plain KV-cache layers in this arch's stack"
     if prompt_cache is None:
+        print(f"warning: --kv-quant-scheme kvarn dropped: {reason}", file=out)
+    return prompt_cache
+
+
+# The fused kvarn decode kernel walks verify blocks up to this query width;
+# wider blocks fall back to a full materialize per round.
+_KVARN_VERIFY_QL = 4
+
+
+def setup_kvarn_mtp_cache(model, drafter, kv_bits, kv_tail_tokens, block, out=None):
+    """setup_kvarn_cache for the MTP target. Declines drafters that read the
+    target KV back (kvarn records are not raw K/V; ``uses_shared_kv`` defaults
+    True so unknown drafters decline conservatively), warns when the verify
+    width exceeds the fused route, and builds via mlx-vlm's cache maker so
+    the arch's own make_cache hook applies. Returns the cache list or None."""
+    out = out if out is not None else sys.stderr
+    if getattr(drafter, "uses_shared_kv", True):
         print(
-            f"warning: --kv-quant-scheme kvarn dropped: {reason}", file=out
+            "warning: --kv-quant-scheme kvarn dropped: this drafter reads "
+            "the target KV back (kvarn records are not raw K/V)",
+            file=out,
+        )
+        return None
+    from mlx_vlm.models import cache as _cache
+
+    lm = model.language_model if hasattr(model, "language_model") else model
+    prompt_cache = setup_kvarn_cache(
+        model,
+        kv_bits,
+        kv_tail_tokens,
+        None,
+        out=out,
+        make_cache=lambda: _cache.make_prompt_cache(lm),
+    )
+    if prompt_cache is not None and block and block > _KVARN_VERIFY_QL:
+        print(
+            f"warning: verify width {block} exceeds the fused kvarn route "
+            f"({_KVARN_VERIFY_QL}); verify rounds fall back to materialized "
+            "attention",
+            file=out,
         )
     return prompt_cache
 
@@ -395,6 +437,7 @@ def generate(
         temp=temp, top_p=top_p, top_k=top_k, min_p=min_p, **xtc_kwargs
     )
     from .tokenizer import merge_suppressed_tokens
+
     logit_bias = merge_suppressed_tokens(logit_bias, tokenizer)
     logits_processors = make_logits_processors(
         logit_bias=logit_bias or None,
@@ -459,9 +502,7 @@ def generate(
 
     prompt_cache = None
     if (kv_quant_scheme or "uniform").lower() == "kvarn":
-        prompt_cache = setup_kvarn_cache(
-            model, kv_bits, kv_tail_tokens, max_kv_size
-        )
+        prompt_cache = setup_kvarn_cache(model, kv_bits, kv_tail_tokens, max_kv_size)
         # Handled here whatever the outcome: mlx-lm's per-step affine
         # converter must never touch a kvarn stack.
         kv_bits = None
@@ -518,14 +559,26 @@ def generate(
         base_kwargs = {
             k: v
             for k, v in gen_kwargs.items()
-            if k not in ("max_tokens", "sampler", "logits_processors",
-                         "max_kv_size", "prompt_cache")
+            if k
+            not in (
+                "max_tokens",
+                "sampler",
+                "logits_processors",
+                "max_kv_size",
+                "prompt_cache",
+            )
         }
         params = {
-            "max_tokens": max_tokens, "temp": temp, "top_p": top_p,
-            "top_k": top_k, "min_p": min_p, "over_generation": over_generation,
-            "over_temp": over_temp, "over_top_p": over_top_p,
-            "over_top_k": over_top_k, "over_min_p": over_min_p,
+            "max_tokens": max_tokens,
+            "temp": temp,
+            "top_p": top_p,
+            "top_k": top_k,
+            "min_p": min_p,
+            "over_generation": over_generation,
+            "over_temp": over_temp,
+            "over_top_p": over_top_p,
+            "over_top_k": over_top_k,
+            "over_min_p": over_min_p,
             "inject_no_thinking": inject_no_thinking,
         }
         # The injected critique can disable thinking independently of the main
@@ -540,23 +593,35 @@ def generate(
             from .thinking_budget import make_thinking_budget_processor
 
             tbp = make_thinking_budget_processor(
-                tokenizer, 0, start_in_thinking=False, verbose=verbose,
+                tokenizer,
+                0,
+                start_in_thinking=False,
+                verbose=verbose,
                 # Seam detection needs the model's untouched stop behavior.
                 eos_floor=False,
             )
             if tbp is not None:
                 over_logits_processors = list(logits_processors) + [tbp]
         return _generate_over(
-            model, tokenizer, prompt,
-            main_sampler=sampler, over_sampler=over_sampler,
+            model,
+            tokenizer,
+            prompt,
+            main_sampler=sampler,
+            over_sampler=over_sampler,
             logits_processors=logits_processors,
             over_logits_processors=over_logits_processors,
             base_kwargs=base_kwargs,
-            max_kv_size=max_kv_size, max_tokens=max_tokens,
-            window=over_generation, inject_critique=inject_critique,
-            template_kwargs=critique_tk, log_path=over_generation_log,
-            orig_prompt=_over_prompt, label=over_label,
-            params=params, verbose=verbose, reasoning=reasoning,
+            max_kv_size=max_kv_size,
+            max_tokens=max_tokens,
+            window=over_generation,
+            inject_critique=inject_critique,
+            template_kwargs=critique_tk,
+            log_path=over_generation_log,
+            orig_prompt=_over_prompt,
+            label=over_label,
+            params=params,
+            verbose=verbose,
+            reasoning=reasoning,
         )
 
     close_progress = None
@@ -572,8 +637,7 @@ def generate(
         stop = [s for s in (stop or []) if s]
         styled = verbose and reasoning in ("show", "hide")
         if not stop:
-            if verbose and (styled
-                            or _echo_think_tag(prompt, tokenizer) is not None):
+            if verbose and (styled or _echo_think_tag(prompt, tokenizer) is not None):
                 # Own the loop (same verbose format as mlx_lm.generate) when
                 # the stream needs shaping: reasoning show/hide styling, or a
                 # pre-fill template that ended the prompt inside an open
@@ -585,8 +649,7 @@ def generate(
                 print("=" * 10)
                 emit, close_emit = _verbose_emitter(prompt, tokenizer, reasoning)
                 text, last = "", None
-                for last in stream_generate(model, tokenizer, prompt,
-                                            **gen_kwargs):
+                for last in stream_generate(model, tokenizer, prompt, **gen_kwargs):
                     emit(last.text)
                     text += last.text
                 close_emit()
@@ -606,7 +669,8 @@ def generate(
                     print(f"Peak memory: {last.peak_memory:.3f} GB")
                 return text
             return mlx_lm.generate(
-                model, tokenizer, prompt, verbose=verbose, **gen_kwargs)
+                model, tokenizer, prompt, verbose=verbose, **gen_kwargs
+            )
 
         # Stop sequences need the streamed text: scan with a held-back tail so
         # a stop string split across segments still matches, then end the
@@ -715,9 +779,14 @@ def _generate_over(
         emit, close_emit = _verbose_emitter(prompt, tokenizer, reasoning)
     with suppressed_eos(tokenizer):
         for r in stream_generate(
-            model, tokenizer, prompt, max_tokens=max_tokens,
-            sampler=main_sampler, logits_processors=logits_processors,
-            prompt_cache=cache, **base_kwargs,
+            model,
+            tokenizer,
+            prompt,
+            max_tokens=max_tokens,
+            sampler=main_sampler,
+            logits_processors=logits_processors,
+            prompt_cache=cache,
+            **base_kwargs,
         ):
             last = r
             if int(r.token) in real_eos:
@@ -759,8 +828,13 @@ def _generate_over(
         )
         cap = window if window and window > 0 else max_tokens
         for r in stream_generate(
-            model, tokenizer, bridge, max_tokens=cap, sampler=over_sampler,
-            logits_processors=over_logits_processors, prompt_cache=cache,
+            model,
+            tokenizer,
+            bridge,
+            max_tokens=cap,
+            sampler=over_sampler,
+            logits_processors=over_logits_processors,
+            prompt_cache=cache,
             **base_kwargs,
         ):
             over_parts.append(r.text)
@@ -779,9 +853,14 @@ def _generate_over(
         run = 0
         with suppressed_eos(tokenizer):
             for r in stream_generate(
-                model, tokenizer, [seam["token_id"]], max_tokens=window,
-                sampler=over_sampler, logits_processors=over_logits_processors,
-                prompt_cache=cache, **base_kwargs,
+                model,
+                tokenizer,
+                [seam["token_id"]],
+                max_tokens=window,
+                sampler=over_sampler,
+                logits_processors=over_logits_processors,
+                prompt_cache=cache,
+                **base_kwargs,
             ):
                 over_parts.append(r.text)
                 over_tokens.append(int(r.token))
@@ -818,37 +897,41 @@ def _generate_over(
         )
 
     if log_path:
-        append_log(log_path, {
-            "mode": mode,
-            "label": label,
-            "prompt": orig_prompt,
-            "seam": seam,
-            "inject_critique": inject_critique,
-            "pre_text": pre_text,
-            "over_text": over_text,
-            "interim_stops": interim,
-            "phase1_tokens": p1_tok,
-            "over_tokens": p2_tok,
-            "total_tokens": total_tok,
-            "early_stop": early_stop,
-            "params": params,
-        })
+        append_log(
+            log_path,
+            {
+                "mode": mode,
+                "label": label,
+                "prompt": orig_prompt,
+                "seam": seam,
+                "inject_critique": inject_critique,
+                "pre_text": pre_text,
+                "over_text": over_text,
+                "interim_stops": interim,
+                "phase1_tokens": p1_tok,
+                "over_tokens": p2_tok,
+                "total_tokens": total_tok,
+                "early_stop": early_stop,
+                "params": params,
+            },
+        )
 
     return pre_text + over_text
 
 
-def _chunked_prefill_cache(lm, input_ids, chunk):
-    """Populate a fresh prompt cache by prefilling ``input_ids[:, :-1]`` in
-    ``chunk``-token steps, leaving the trailing token for the caller's capture
-    forward. Bounds each expert-gather forward to a width proven free of the
-    single-shot MoE gather memory bug. The drafter's shared K/V is read back from
-    this (fully populated) cache, so chunking is loss-free. Returns the cache."""
+def _chunked_prefill_cache(lm, input_ids, chunk, cache=None):
+    """Populate a fresh prompt cache (or the given empty one) by prefilling
+    ``input_ids[:, :-1]`` in ``chunk``-token steps, leaving the trailing token
+    for the caller's capture forward. Bounds each expert-gather forward to a
+    width proven free of the single-shot MoE gather memory bug. The drafter's
+    shared K/V is read back from this (fully populated) cache, so chunking is
+    loss-free. Returns the cache."""
     from mlx_vlm.models import cache as _cache
 
     for attr in ("_position_ids", "_rope_deltas"):
         if hasattr(lm, attr):
             setattr(lm, attr, None)
-    c = _cache.make_prompt_cache(lm)
+    c = cache if cache is not None else _cache.make_prompt_cache(lm)
     n_total = input_ids.shape[1]
     i = 0
     while i < n_total - 1:
@@ -905,6 +988,8 @@ def _generate_speculative(
     reasoning: str | None = None,
     kv_bits: int | None = None,
     kv_group_size: int = 64,
+    kv_quant_scheme: str | None = None,
+    kv_tail_tokens: int = 1024,
 ) -> dict:
     """Single-stream MTP speculative generation via mlx-vlm's engine.
 
@@ -920,23 +1005,44 @@ def _generate_speculative(
     # 4D hidden + rotating-undo rollback) must not run mlx-vlm's stock round;
     # stochastic acceptance also lives only in the owned walk.
     from .speculative import use_owned_engine
+
     if use_owned_engine(drafter, temp):
         return generate_speculative_owned(
-            model, drafter, tokenizer, prompt,
-            max_tokens=max_tokens, temp=temp, top_p=top_p, top_k=top_k,
-            min_p=min_p, draft_block_size=draft_block_size,
+            model,
+            drafter,
+            tokenizer,
+            prompt,
+            max_tokens=max_tokens,
+            temp=temp,
+            top_p=top_p,
+            top_k=top_k,
+            min_p=min_p,
+            draft_block_size=draft_block_size,
             apply_chat_template=apply_chat_template,
-            system_prompt=system_prompt, template_kwargs=template_kwargs,
-            verbose=verbose, reasoning=reasoning,
-            kv_bits=kv_bits, kv_group_size=kv_group_size,
+            system_prompt=system_prompt,
+            template_kwargs=template_kwargs,
+            verbose=verbose,
+            reasoning=reasoning,
+            kv_bits=kv_bits,
+            kv_group_size=kv_group_size,
+            kv_quant_scheme=kv_quant_scheme,
+            kv_tail_tokens=kv_tail_tokens,
         )
 
+    kvarn_cache = None
+    if kv_quant_scheme == "kvarn":
+        block_note = draft_block_size or int(getattr(drafter.config, "block_size", 3))
+        kvarn_cache = setup_kvarn_mtp_cache(
+            model, drafter, kv_bits, kv_tail_tokens, block_note
+        )
+        # kvarn owns the width request; a declined scheme means fp16, not
+        # a silent fall-through to another quantization.
+        kv_bits = None
     if kv_bits is not None:
         # The stock mlx-vlm round has no KV-quantization hook and the models
         # routed here (gemma4/qwen3.x drafters) have no pooled caches.
         print(
-            "warning: --kv-bits not applied on the MTP path "
-            "(no quantizable caches)",
+            "warning: --kv-bits not applied on the MTP path (no quantizable caches)",
             file=sys.stderr,
         )
 
@@ -1001,10 +1107,10 @@ def _generate_speculative(
     # only the trailing token so no single expert-gather forward exceeds the safe
     # width. Short prompts prefill in one already-safe forward. The pre-prefill
     # wall time is inside the first-token window, so prefill_tps stays correct.
-    feed, prompt_cache = input_ids, None
+    feed, prompt_cache = input_ids, kvarn_cache
     if input_ids.shape[1] > _PREFILL_CHUNK:
         prompt_cache = _chunked_prefill_cache(
-            model.language_model, input_ids, _PREFILL_CHUNK
+            model.language_model, input_ids, _PREFILL_CHUNK, cache=kvarn_cache
         )
         feed = input_ids[:, -1:]
     for tok, _logprobs in generate_step(
@@ -1083,6 +1189,8 @@ def generate_speculative_owned(
     reasoning: str | None = None,
     kv_bits: int | None = None,
     kv_group_size: int = 64,
+    kv_quant_scheme: str | None = None,
+    kv_tail_tokens: int = 1024,
 ) -> dict:
     """Same contract as generate_speculative but drives the owned
     stream_speculative engine (engine/speculative.py) instead of mlx-vlm's
@@ -1122,13 +1230,21 @@ def generate_speculative_owned(
         if temp == 0.0
         else make_sampler(temp=temp, top_p=top_p, top_k=top_k, min_p=min_p)
     )
-    annotate_sampling_params(
-        sampler, temp=temp, top_p=top_p, top_k=top_k, min_p=min_p)
+    annotate_sampling_params(sampler, temp=temp, top_p=top_p, top_k=top_k, min_p=min_p)
     block = draft_block_size or int(getattr(drafter.config, "block_size", 3))
     eos_ids = set(getattr(tokenizer, "eos_token_ids", None) or [tokenizer.eos_token_id])
 
     lm = model.language_model if hasattr(model, "language_model") else model
-    prompt_cache = _cache.make_prompt_cache(lm)
+    prompt_cache = None
+    if kv_quant_scheme == "kvarn":
+        prompt_cache = setup_kvarn_mtp_cache(
+            model, drafter, kv_bits, kv_tail_tokens, block
+        )
+        # kvarn owns the width request; a declined scheme means fp16, not
+        # a silent fall-through to the pooled packing.
+        kv_bits = None
+    if prompt_cache is None:
+        prompt_cache = _cache.make_prompt_cache(lm)
     if kv_bits is not None:
         # Rollback/replay are watermark moves, storage-agnostic, so the
         # pooled packing composes with the MTP undo machinery.
@@ -1289,8 +1405,7 @@ def _stream_generate_speculative_owned(
         if temp == 0.0
         else make_sampler(temp=temp, top_p=top_p, top_k=top_k, min_p=min_p)
     )
-    annotate_sampling_params(
-        sampler, temp=temp, top_p=top_p, top_k=top_k, min_p=min_p)
+    annotate_sampling_params(sampler, temp=temp, top_p=top_p, top_k=top_k, min_p=min_p)
     block = draft_block_size or int(getattr(drafter.config, "block_size", 2))
     eos_ids = set(getattr(tokenizer, "eos_token_ids", None) or [tokenizer.eos_token_id])
 
@@ -1389,12 +1504,20 @@ def _stream_generate_speculative(
     # next turn. GMLX_OWNED_ROUND=0 opts back to the stock round, except for
     # drafters whose contract demands the owned engine.
     from .speculative import use_owned_engine
-    if (os.environ.get("GMLX_OWNED_ROUND") != "0"
-            or use_owned_engine(drafter, temp)):
+
+    if os.environ.get("GMLX_OWNED_ROUND") != "0" or use_owned_engine(drafter, temp):
         yield from _stream_generate_speculative_owned(
-            model, drafter, tokenizer, prompt, prompt_cache=prompt_cache,
-            max_tokens=max_tokens, temp=temp, top_p=top_p, top_k=top_k,
-            min_p=min_p, draft_block_size=draft_block_size,
+            model,
+            drafter,
+            tokenizer,
+            prompt,
+            prompt_cache=prompt_cache,
+            max_tokens=max_tokens,
+            temp=temp,
+            top_p=top_p,
+            top_k=top_k,
+            min_p=min_p,
+            draft_block_size=draft_block_size,
         )
         return
 
@@ -1482,4 +1605,3 @@ def _stream_generate_speculative(
     yield _MTPStreamResponse(
         tail or "", n, n / elapsed if elapsed > 0 else 0.0, n_prompt, prompt_tps
     )
-

@@ -1531,12 +1531,24 @@ _SPEC_KV_QUANT_WIDTHS = (2, 3, 4, 6, 8)  # mx.quantize affine widths
 
 
 def _spec_kv_quant_params():
-    """(bits, group_size) when serve's KV_BITS asks for an affine width the
-    single-stream cache can honor, else None. Fractional widths and
-    non-uniform schemes (turboquant) have no trimmable B=1 cache."""
+    """("affine", bits, group) or ("kvarn", kv_bits, tail) when serve's KV
+    env asks for a scheme the trimmable B=1 single-stream cache can honor,
+    else None. Fractional widths and turboquant have no such cache; kvarn
+    engages on the scheme alone (widths default like the CLI's)."""
     if os.environ.get("GMLX_SPEC_KV_QUANT", "1") == "0":
         return None
+    scheme = os.environ.get("KV_QUANT_SCHEME", "uniform")
     raw = os.environ.get("KV_BITS", "")
+    if scheme == "kvarn":
+        try:
+            bits = int(raw) if raw else None
+            tail = int(os.environ.get("KV_TAIL_TOKENS", "") or 1024)
+        except ValueError:
+            _log.warning(
+                "KV_BITS/KV_TAIL_TOKENS malformed under scheme kvarn; "
+                "B=1 MTP target KV stays fp16")
+            return None
+        return "kvarn", bits, tail
     if not raw:
         return None
     try:
@@ -1545,14 +1557,26 @@ def _spec_kv_quant_params():
         return None
     if bits <= 0:
         return None
-    scheme = os.environ.get("KV_QUANT_SCHEME", "uniform")
     if (scheme != "uniform" or bits != int(bits)
             or int(bits) not in _SPEC_KV_QUANT_WIDTHS):
         _log.warning(
             "KV_BITS=%s scheme=%s: no trimmable single-stream cache; "
             "B=1 MTP target KV stays fp16", raw, scheme)
         return None
-    return int(bits), int(os.environ.get("KV_GROUP_SIZE", "64"))
+    return "affine", int(bits), int(os.environ.get("KV_GROUP_SIZE", "64"))
+
+
+def _mtp_reads_kv_back(lm) -> bool:
+    """True when the target's verify route re-reads K/V from the prompt
+    cache (spec_helpers._mtp_shared_kv_from_prompt_cache): it computes
+    logits from hidden but owns no verify hook, so the walk rebuilds the
+    drafter's shared K/V from cache state -- raw arrays kvarn records
+    cannot supply."""
+    return (
+        callable(getattr(lm, "speculative_logits_from_hidden", None))
+        and not callable(getattr(lm, "speculative_verify_hidden", None))
+        and not callable(getattr(lm, "speculative_verify_logits", None))
+    )
 
 
 def install_spec_kv_quant() -> None:
@@ -1564,13 +1588,16 @@ def install_spec_kv_quant() -> None:
     trim the target. The single-stream ``QuantizedKVCache`` can trim --
     packing is per-token along head_dim, so trim is an offset move -- and
     the model rollback already goes through ``is_trimmable()``/``trim()``.
-    Each plain KVCache converts at construction (empty, so conversion is
-    free); SSM / linear-attention / pooled caches pass through untouched.
-    Sliding-window stacks drop the flag (parity with the plain path, which
-    cannot quantize rotating caches). B>1 MTP keeps stock behavior with a
-    one-shot warning (ragged rollback on packed rows is unsupported).
-    No-op unless KV_BITS is set at server boot.
-    Kill switch: GMLX_SPEC_KV_QUANT=0."""
+    ``KV_QUANT_SCHEME=kvarn`` converts the same B=1 caches to
+    ``KVarNKVCache`` instead (rollback rides the stage/horizon regions),
+    declining targets whose verify path reads shared K/V back from cache
+    state. Each plain KVCache converts at construction (empty, so
+    conversion is free); SSM / linear-attention / pooled caches pass
+    through untouched. Sliding-window stacks drop the flag (parity with
+    the plain path, which cannot quantize rotating caches). B>1 MTP keeps
+    stock behavior with a one-shot warning (ragged rollback on packed rows
+    is unsupported). No-op unless KV_BITS or scheme kvarn is set at server
+    boot. Kill switch: GMLX_SPEC_KV_QUANT=0."""
     from mlx_vlm.generate import ar as _ar
     from mlx_vlm.server import generation as _gen
     from mlx_vlm.speculative import utils as _su
@@ -1580,7 +1607,7 @@ def install_spec_kv_quant() -> None:
     params = _spec_kv_quant_params()
     if params is None:
         return
-    bits, group = params
+    kind = params[0]
 
     from .cache_compat import cache_types
 
@@ -1591,6 +1618,52 @@ def install_spec_kv_quant() -> None:
     _noted = [False]
     _warned_batch = [False]
     _warned_rotating = [False]
+    _warned_kvarn = [False]
+
+    def _decline_kvarn(reason: str):
+        if not _warned_kvarn[0]:
+            _warned_kvarn[0] = True
+            _log.warning(
+                "KV_QUANT_SCHEME=kvarn dropped on the B=1 MTP path: %s",
+                reason)
+
+    def _kvarn_spec_convert(lm, caches):
+        from .generation import _kvarn_widths, kvarn_unsupported
+        from .kvarn_cache import KVARN_BITS, convert_prompt_cache
+        from .kvarn_sdpa import install_kvarn_sdpa
+
+        _, env_bits, tail = params
+        reason = kvarn_unsupported(lm)
+        k_bits, v_bits = _kvarn_widths(env_bits)
+        if reason is None and not (
+            k_bits in KVARN_BITS and v_bits in KVARN_BITS
+        ):
+            reason = f"kvarn bits must be one of {KVARN_BITS}"
+        if reason is None and (tail < 0 or tail % 128):
+            reason = "KV_TAIL_TOKENS must be a multiple of 128 (0 disables)"
+        if reason is None and _mtp_reads_kv_back(lm):
+            reason = ("the target's verify path reads shared K/V back "
+                      "from the cache (kvarn records are not raw K/V)")
+        if reason is not None:
+            _decline_kvarn(reason)
+            return caches
+        n = convert_prompt_cache(
+            caches, k_bits=k_bits, v_bits=v_bits, tail_tokens=tail)
+        if not n:
+            _decline_kvarn("no plain KV-cache layers in this arch's stack")
+            return caches
+        install_kvarn_sdpa()
+        if not _noted[0]:
+            _noted[0] = True
+            width = (f"kvarn{k_bits}" if k_bits == v_bits
+                     else f"kvarn k{k_bits} v{v_bits}")
+            regions = "sink+tail fp16" if tail else "sink fp16, tail off"
+            print(
+                f"[kv] MTP spec path: {n}-layer target KV {width} "
+                f"({regions})",
+                flush=True,
+            )
+        return caches
 
     def _quantizing_spec_cache(lm, *, draft_kind, batch_size, left_padding,
                                make_cache):
@@ -1607,17 +1680,20 @@ def install_spec_kv_quant() -> None:
             if not _warned_batch[0]:
                 _warned_batch[0] = True
                 _log.warning(
-                    "KV_BITS with MTP at batch size %d: packed batch "
-                    "rollback is unsupported; batched rows keep the stock "
-                    "cache", batch_size)
+                    "KV quantization with MTP at batch size %d: packed "
+                    "batch rollback is unsupported; batched rows keep the "
+                    "stock cache", batch_size)
             return caches
         if any(isinstance(c, rotating) for c in caches):
             if not _warned_rotating[0]:
                 _warned_rotating[0] = True
                 _log.warning(
-                    "KV_BITS dropped on the MTP path: sliding-window "
-                    "cache stack cannot quantize")
+                    "KV quantization dropped on the MTP path: "
+                    "sliding-window cache stack cannot quantize")
             return caches
+        if kind == "kvarn":
+            return _kvarn_spec_convert(lm, caches)
+        bits, group = params[1], params[2]
         out = []
         n = 0
         for c in caches:
@@ -1639,4 +1715,4 @@ def install_spec_kv_quant() -> None:
     _su.make_speculative_prompt_cache = _quantizing_spec_cache
     _ar.make_speculative_prompt_cache = _quantizing_spec_cache
     _gen.make_speculative_prompt_cache = _quantizing_spec_cache
-    _debug_note(f"[mtp] spec cache: KV_BITS={bits} group={group} armed (B=1)")
+    _debug_note(f"[mtp] spec cache: {params} armed (B=1)")
