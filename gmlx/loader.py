@@ -41,7 +41,11 @@ from .gemma4_sync import install_gemma4_nosync
 from .quantized_sdpa_fix import install_quantized_sdpa_mask_fix
 from .rope_batch_fix import install_rope_batch_fix
 from .rotating_cache_fix import install_rotating_cache_fix
-from .modules import KQuantEmbedding, install_kquant_modules
+from .modules import (
+    KQuantEmbedding,
+    dequantize_unattachable_leaves,
+    install_kquant_modules,
+)
 from .populate import (
     maybe_populate_for_load,
     start_populate,
@@ -2799,6 +2803,11 @@ def _install_and_load(
             )
 
     # 6. swap leaves with kquant equivalents.
+    dequant = dequantize_unattachable_leaves(model, hf_weights, hf_kquant_meta)
+    if dequant:
+        log(f"[install] dequantized {len(dequant)} raw-array leaves to f32: "
+            + ", ".join(dequant[:3])
+            + (f" (+{len(dequant) - 3} more)" if len(dequant) > 3 else ""))
     n_replaced = install_kquant_modules(
         model, hf_kquant_meta, native_fp_wire=native_fp_wire)
     log(f"[install] replaced {n_replaced} leaves with kquant modules")
@@ -3241,6 +3250,11 @@ def load_model(
 
     # 6. swap leaves with kquant equivalents.
     loadlog.stage("installing quantized weights")
+    dequant = dequantize_unattachable_leaves(model, hf_weights, hf_kquant_meta)
+    if dequant:
+        _log(f"[install] dequantized {len(dequant)} raw-array leaves to f32: "
+             + ", ".join(dequant[:3])
+             + (f" (+{len(dequant) - 3} more)" if len(dequant) > 3 else ""))
     n_replaced = install_kquant_modules(
         model, hf_kquant_meta, native_fp_wire=native_fp_wire)
     _log(f"[install] replaced {n_replaced} leaves with kquant modules")
