@@ -15,16 +15,26 @@ import mlx.nn as nn
 
 
 def _make_hc_sinkhorn_collapse_kernel():
-    """Fused sinkhorn + collapse: eliminates one dispatch per HC cycle.
+    """Fused rmsnorm + mixes matmul + sinkhorn + collapse.
 
-    1. BRANCHLESS SINKHORN: all 32 lanes in simd group 0 execute identical
+    One dispatch per HC cycle. The front (fp32 cast, rms_norm over the
+    flattened HC*D row, z @ fn_t) is computed in-kernel: rms_norm commutes
+    with the matmul (mixes = rrms * (y @ fn_t)), so one pass over the row
+    accumulates sum-of-squares and the MIX dot products together. This
+    replaces an M x 16384 x 24 fp32 GEMM that falls off the GEMV fast path
+    at M >= 2 (46us vs 7us on M5 Max) plus two more dispatches.
+
+    1. ONE-PASS FRONT: 256 threads stride the HC*D row; each accumulates
+       ssq + MIX fma partials from coalesced float4 fn_t loads; simd_sum
+       then a cross-simdgroup reduce in threadgroup memory.
+    2. BRANCHLESS SINKHORN: all 32 lanes in simd group 0 execute identical
        instructions. Lanes >= HC use multiplicative mask (active=0) instead
        of divergent branches - eliminates SIMD serialization.
-    2. PARALLEL SINKHORN: lanes 0-3 each own one comb row. Column norm
+    3. PARALLEL SINKHORN: lanes 0-3 each own one comb row. Column norm
        via simd_sum() - free SIMD shuffle.
-    3. NATIVE bfloat4 LOADS: single 64-bit load yields 4 bfloat16 values;
+    4. NATIVE bfloat4 LOADS: single 64-bit load yields 4 bfloat16 values;
        cast to float4 is a free hardware conversion.
-    4. FMA CHAINS: collapse uses fused multiply-add for 3 of 4 terms.
+    5. FMA CHAINS: collapse uses fused multiply-add for 3 of 4 terms.
     """
     if mx.default_device() != mx.gpu or not mx.metal.is_available():
         return None
@@ -37,13 +47,68 @@ def _make_hc_sinkhorn_collapse_kernel():
 
         constexpr int MIX      = (2 + HC) * HC;
         constexpr int BASE_OFF = 2 * HC;
-        constexpr float EPS = EPS_INT * 1e-9;
+        constexpr int KD       = HC * D;
+        constexpr float EPS  = EPS_INT * 1e-9;
+        constexpr float NEPS = NEPS_INT * 1e-9;
 
-        const device float* mix      = (const device float*)mixes + row * MIX;
-        device float*       post_out = (device float*)post + row * HC;
-        device float*       comb_out = (device float*)comb + row * HC * HC;
+        device float* post_out = (device float*)post + row * HC;
+        device float* comb_out = (device float*)comb + row * HC * HC;
 
         threadgroup float pre_shared[HC];
+        threadgroup float mix_sh[MIX];
+        threadgroup float red_sh[8][MIX];
+        threadgroup float ssq_sh[8];
+
+        // ================================================================
+        // PHASE 0: rmsnorm + mixes in one pass over the row.
+        //   mixes = rms_norm(y) @ fn_t = rrms * (y @ fn_t), so raw dots
+        //   and sum-of-squares accumulate together; rrms scales at the end.
+        // ================================================================
+        {
+            const device T*      xr  = (const device T*)x_in + row * KD;
+            const device float4* fr  = (const device float4*)fn_t;
+
+            float acc[MIX] = {0.0f};
+            float ssq = 0.0f;
+            for (uint i = tid; i < (uint)KD; i += 256) {
+                float xv = (float)xr[i];
+                ssq = metal::fma(xv, xv, ssq);
+                const device float4* f4 = fr + i * (MIX / 4);
+                #pragma clang loop unroll(full)
+                for (int j = 0; j < MIX / 4; ++j) {
+                    float4 f = f4[j];
+                    acc[4*j+0] = metal::fma(xv, f.x, acc[4*j+0]);
+                    acc[4*j+1] = metal::fma(xv, f.y, acc[4*j+1]);
+                    acc[4*j+2] = metal::fma(xv, f.z, acc[4*j+2]);
+                    acc[4*j+3] = metal::fma(xv, f.w, acc[4*j+3]);
+                }
+            }
+            ssq = simd_sum(ssq);
+            #pragma clang loop unroll(full)
+            for (int j = 0; j < MIX; ++j) {
+                acc[j] = simd_sum(acc[j]);
+            }
+            if (lane == 0) {
+                ssq_sh[sg] = ssq;
+                for (int j = 0; j < MIX; ++j) {
+                    red_sh[sg][j] = acc[j];
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (sg == 0) {
+                float s = (lane < 8) ? ssq_sh[lane] : 0.0f;
+                s = simd_sum(s);
+                float rrms = metal::precise::rsqrt(s / (float)KD + NEPS);
+                if (lane < (uint)MIX) {
+                    float tot = 0.0f;
+                    for (int g = 0; g < 8; ++g) {
+                        tot += red_sh[g][lane];
+                    }
+                    mix_sh[lane] = tot * rrms;
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
 
         // ================================================================
         // PHASE 1: Branchless sinkhorn on simd group 0
@@ -60,8 +125,8 @@ def _make_hc_sinkhorn_collapse_kernel():
             const uint  llane  = metal::min(lane, (uint)(HC - 1));
 
             // Pre/post sigmoids: all lanes compute, only active lanes write
-            float pre_z  = mix[llane]      * pre_scale  + base[llane];
-            float post_z = mix[HC + llane] * post_scale + base[HC + llane];
+            float pre_z  = mix_sh[llane]      * pre_scale  + base[llane];
+            float post_z = mix_sh[HC + llane] * post_scale + base[HC + llane];
             float pre_v  = 1.0f / (1.0f + metal::fast::exp(-pre_z)) + EPS;
             float post_v = 2.0f / (1.0f + metal::fast::exp(-post_z));
 
@@ -72,8 +137,11 @@ def _make_hc_sinkhorn_collapse_kernel():
 
             // Comb softmax: load + mask. Inactive lanes load row 0 (safe)
             // but multiply by active=0 so they hold zeros.
-            float4 v = (*(const device float4*)(mix  + BASE_OFF + llane * HC)
-                            * comb_scale
+            float4 m = float4(mix_sh[BASE_OFF + llane * HC + 0],
+                              mix_sh[BASE_OFF + llane * HC + 1],
+                              mix_sh[BASE_OFF + llane * HC + 2],
+                              mix_sh[BASE_OFF + llane * HC + 3]);
+            float4 v = (m * comb_scale
                       + *(const device float4*)(base + BASE_OFF + llane * HC))
                      * active;
 
@@ -157,8 +225,8 @@ def _make_hc_sinkhorn_collapse_kernel():
     """
 
     return mx.fast.metal_kernel(
-        name="hc_sinkhorn_collapse",
-        input_names=["x_in", "mixes", "scale", "base"],
+        name="hc_norm_mix_sinkhorn_collapse",
+        input_names=["x_in", "fn_t", "scale", "base"],
         output_names=["collapsed", "post", "comb"],
         source=source,
         ensure_row_contiguous=True,
@@ -168,13 +236,13 @@ def _make_hc_sinkhorn_collapse_kernel():
 _hc_sinkhorn_collapse_kernel = _make_hc_sinkhorn_collapse_kernel()
 
 
-def _hc_kernel(x, y, mixes, scale, base, hc_mult, sinkhorn_iters, eps):
+def _hc_kernel(x, fn_t, scale, base, hc_mult, sinkhorn_iters, eps, norm_eps):
     """Requires ``hc_mult == 4`` despite the HC template arg (the kernel body
     unrolls 4 streams); callers route other widths to :func:`_hc_ops`."""
     B, L, H, D = x.shape
 
     return _hc_sinkhorn_collapse_kernel(
-        inputs=[x, mixes, scale, base],
+        inputs=[x, fn_t, scale, base],
         template=[
             ("T", x.dtype),
             ("U", x.dtype),
@@ -182,6 +250,7 @@ def _hc_kernel(x, y, mixes, scale, base, hc_mult, sinkhorn_iters, eps):
             ("ITERS", sinkhorn_iters),
             ("D", D),
             ("EPS_INT", round(eps / 1e-9)),
+            ("NEPS_INT", round(norm_eps / 1e-9)),
         ],
         grid=(B * L * 256, 1, 1),
         threadgroup=(256, 1, 1),
@@ -240,17 +309,13 @@ class HyperConnection(nn.Module):
         self.scale = mx.ones((3,), dtype=mx.float32)
 
     def __call__(self, x: mx.array):
-        B, L, H, D = x.shape
-        y = x.astype(mx.float32)
-        z = mx.fast.rms_norm(y.flatten(-2), None, self.norm_eps)
         # fn is frozen; materialize its transpose once instead of adding a
         # Transpose node per layer per step (underscored: not a parameter).
         fn_t = getattr(self, "_fn_t", None)
         if fn_t is None:
-            fn_t = self.fn.T
+            fn_t = mx.contiguous(self.fn.T)
             mx.eval(fn_t)
             self._fn_t = fn_t
-        mixes = z @ fn_t
 
         use_ops = (
             self.training
@@ -260,9 +325,22 @@ class HyperConnection(nn.Module):
             or self.hc_mult != 4
             or not mx.metal.is_available()
         )
-        hc_func = _hc_ops if use_ops else _hc_kernel
+        if not use_ops:
+            return _hc_kernel(
+                x,
+                fn_t,
+                self.scale,
+                self.base,
+                self.hc_mult,
+                self.sinkhorn_iters,
+                self.hc_eps,
+                self.norm_eps,
+            )
 
-        return hc_func(
+        y = x.astype(mx.float32)
+        z = mx.fast.rms_norm(y.flatten(-2), None, self.norm_eps)
+        mixes = z @ fn_t
+        return _hc_ops(
             x,
             y,
             mixes,
@@ -302,7 +380,7 @@ class HyperHead(nn.Module):
         z = mx.fast.rms_norm(y.flatten(-2), None, self.norm_eps)
         fn_t = getattr(self, "_fn_t", None)
         if fn_t is None:
-            fn_t = self.fn.T
+            fn_t = mx.contiguous(self.fn.T)
             mx.eval(fn_t)
             self._fn_t = fn_t
         mixes = z @ fn_t

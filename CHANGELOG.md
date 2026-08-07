@@ -6,6 +6,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- DeepSeek-V4 hyper-connections run as one fused kernel per call; DSpark
+  speculative decode on an in-RAM V4-Flash goes from losing to plain
+  decode to beating it (about +13% on M5 Max).
+
 ### Fixed
 
 - GGUFs that quantize the MoE router gate (some community DeepSeek quants;
