@@ -391,12 +391,16 @@ Levers, cheapest first:
   With speculative decoding on, quantized KV also costs draft acceptance --
   see the interaction note in the speculation section above.
 - `--kv-quant-scheme kvarn` (with `--kv-bits`, default 6) is the higher-fidelity
-  alternative: variance-normalized 6-bit KV measures at or above the affine 8-bit
-  cache on logit KLD while holding ~45% of the fp16 cache (vs ~53% for
-  `--kv-bits 8`); the sink and the last `--kv-tail-tokens` (default 1024) stay
-  fp16. Decode runs at fp16 parity on M3-class machines but behind `--kv-bits 8`
-  at depth (~0.9x at 16k, ~0.75x at 32k): pick kvarn for memory and fidelity,
-  plain `--kv-bits` for peak decode speed. Other widths (2-8, and mixed via
+  alternative: variance-normalized KV beats the affine cache on logit KLD at
+  matched bits, and 6-bit kvarn measures at or above the affine 8-bit cache on
+  generation-position KLD (ahead from 32k context on Qwen3.6-27B; teacher-forced
+  full-context logits on that hybrid run ~1.4x the 8-bit cache's, both a few
+  1e-4) while holding ~45% of the fp16 cache (vs ~53% for `--kv-bits 8`); the
+  sink and the last `--kv-tail-tokens` (default 1024) stay fp16. Decode runs at
+  fp16 parity on M3-class machines but behind `--kv-bits 8` at depth on dense
+  models (~0.9x at 16k, ~0.75x at 32k; hybrid qwen3.5/3.6 decode is KV-light
+  and shows no difference): pick kvarn for memory and fidelity, plain
+  `--kv-bits` for peak decode speed. Other widths (2-8, and mixed via
   `GMLX_KVARN_BITS=k6v5`) trade fidelity for memory at roughly the same speed.
   Covers head_dim-128 and -256 attention layers (the qwen3.5/3.6 family
   included); anything else declines loudly and stays fp16.
