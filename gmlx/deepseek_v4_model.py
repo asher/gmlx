@@ -49,6 +49,11 @@ from mlx_lm.models.switch_layers import SwitchGLU
 
 from gmlx import prefill_decay as _prefill_decay
 from gmlx.deepseek_v4_cache import BatchPoolingCache, PoolingCache
+from gmlx.deepseek_v4_attn_fused import (
+    invrope_regroup_m1,
+    kv_norm_rope_m1,
+    q_norm_rope_m1,
+)
 from gmlx.deepseek_v4_hyper_connection import (
     HyperConnection,
     HyperHead,
@@ -1535,12 +1540,21 @@ class LocalAttention(nn.Module):
             qa_out, kv_out = self.wq_a(x), self.wkv(x)
         q = self.wq_b(self.q_norm(qa_out))
         q = q.reshape(B, L, self.n_heads, self.head_dim)
-        q = mx.fast.rms_norm(q, None, self.config.rms_norm_eps)
-        q = q.transpose(0, 2, 1, 3)
-        q = self.rope(q, offset)
+        qf = q_norm_rope_m1(q, self.rope, offset, self.config.rms_norm_eps)
+        if qf is None:
+            q = mx.fast.rms_norm(q, None, self.config.rms_norm_eps)
+            q = q.transpose(0, 2, 1, 3)
+            q = self.rope(q, offset)
+        else:
+            q = qf
 
-        kv = self.kv_norm(kv_out).reshape(B, 1, L, self.head_dim)
-        kv = self.rope(kv, offset)
+        kv = kv_norm_rope_m1(
+            kv_out, self.kv_norm.weight, self.rope, offset,
+            self.config.rms_norm_eps,
+        )
+        if kv is None:
+            kv = self.kv_norm(kv_out).reshape(B, 1, L, self.head_dim)
+            kv = self.rope(kv, offset)
         kv = _kv_qat_roundtrip(kv, self.config.qk_rope_head_dim)
         if cache is not None:
             kv, _ = cache.update_and_fetch(kv, mx.zeros((B, 1, L, 0)))
@@ -1570,10 +1584,13 @@ class LocalAttention(nn.Module):
                 mask=mask,
                 sinks=sinks,
             )
-        out = self.rope(out, offset, inverse=True)
-
-        out = out.reshape(B, self.o_groups, -1, L, self.head_dim)
-        out = out.transpose(0, 1, 3, 2, 4).flatten(-2)
+        of = invrope_regroup_m1(out, self.rope, offset, self.o_groups)
+        if of is None:
+            out = self.rope(out, offset, inverse=True)
+            out = out.reshape(B, self.o_groups, -1, L, self.head_dim)
+            out = out.transpose(0, 1, 3, 2, 4).flatten(-2)
+        else:
+            out = of
         out = self.wo_a(out)
         out = out.transpose(0, 2, 1, 3).flatten(-2)
         out = self.wo_b(out)
@@ -1649,12 +1666,21 @@ class CompressedAttention(nn.Module):
             qa_out, kv_out = self.wq_a(x), self.wkv(x)
         q = self.wq_b(self.q_norm(qa_out))
         q = q.reshape(B, L, self.n_heads, self.head_dim)
-        q = mx.fast.rms_norm(q, None, self.config.rms_norm_eps)
-        q = q.transpose(0, 2, 1, 3)
-        q = self.rope(q, offset)
+        qf = q_norm_rope_m1(q, self.rope, offset, self.config.rms_norm_eps)
+        if qf is None:
+            q = mx.fast.rms_norm(q, None, self.config.rms_norm_eps)
+            q = q.transpose(0, 2, 1, 3)
+            q = self.rope(q, offset)
+        else:
+            q = qf
 
-        kv = self.kv_norm(kv_out).reshape(B, 1, L, self.head_dim)
-        kv = self.rope(kv, offset)
+        kv = kv_norm_rope_m1(
+            kv_out, self.kv_norm.weight, self.rope, offset,
+            self.config.rms_norm_eps,
+        )
+        if kv is None:
+            kv = self.kv_norm(kv_out).reshape(B, 1, L, self.head_dim)
+            kv = self.rope(kv, offset)
         kv = _kv_qat_roundtrip(kv, self.config.qk_rope_head_dim)
         if local_cache is not None:
             kv, _ = local_cache.update_and_fetch(kv, mx.zeros((B, 1, L, 0)))
@@ -1729,10 +1755,13 @@ class CompressedAttention(nn.Module):
                 mask=mask,
                 sinks=sinks,
             )
-        out = self.rope(out, offset, inverse=True)
-
-        out = out.reshape(B, self.o_groups, -1, L, self.head_dim)
-        out = out.transpose(0, 1, 3, 2, 4).flatten(-2)
+        of = invrope_regroup_m1(out, self.rope, offset, self.o_groups)
+        if of is None:
+            out = self.rope(out, offset, inverse=True)
+            out = out.reshape(B, self.o_groups, -1, L, self.head_dim)
+            out = out.transpose(0, 1, 3, 2, 4).flatten(-2)
+        else:
+            out = of
         out = self.wo_a(out)
         out = out.transpose(0, 2, 1, 3).flatten(-2)
         out = self.wo_b(out)
@@ -1809,12 +1838,21 @@ class SparseCompressedAttention(nn.Module):
             qa_out, kv_out = self.wq_a(x), self.wkv(x)
         q_residual = self.q_norm(qa_out)
         q = self.wq_b(q_residual).reshape(B, L, self.n_heads, self.head_dim)
-        q = mx.fast.rms_norm(q, None, self.config.rms_norm_eps)
-        q = q.transpose(0, 2, 1, 3)
-        q = self.rope(q, offset)
+        qf = q_norm_rope_m1(q, self.rope, offset, self.config.rms_norm_eps)
+        if qf is None:
+            q = mx.fast.rms_norm(q, None, self.config.rms_norm_eps)
+            q = q.transpose(0, 2, 1, 3)
+            q = self.rope(q, offset)
+        else:
+            q = qf
 
-        kv = self.kv_norm(kv_out).reshape(B, 1, L, self.head_dim)
-        kv = self.rope(kv, offset)
+        kv = kv_norm_rope_m1(
+            kv_out, self.kv_norm.weight, self.rope, offset,
+            self.config.rms_norm_eps,
+        )
+        if kv is None:
+            kv = self.kv_norm(kv_out).reshape(B, 1, L, self.head_dim)
+            kv = self.rope(kv, offset)
         kv = _kv_qat_roundtrip(kv, self.config.qk_rope_head_dim)
         if local_cache is not None:
             kv, _ = local_cache.update_and_fetch(kv, mx.zeros((B, 1, L, 0)))
@@ -1921,10 +1959,13 @@ class SparseCompressedAttention(nn.Module):
                         sinks,
                     )
 
-        out = self.rope(out, offset, inverse=True)
-
-        out = out.reshape(B, self.o_groups, -1, L, self.head_dim)
-        out = out.transpose(0, 1, 3, 2, 4).flatten(-2)
+        of = invrope_regroup_m1(out, self.rope, offset, self.o_groups)
+        if of is None:
+            out = self.rope(out, offset, inverse=True)
+            out = out.reshape(B, self.o_groups, -1, L, self.head_dim)
+            out = out.transpose(0, 1, 3, 2, 4).flatten(-2)
+        else:
+            out = of
         out = self.wo_a(out)
         out = out.transpose(0, 2, 1, 3).flatten(-2)
         out = self.wo_b(out)
