@@ -262,8 +262,10 @@ class KVarNKVCache(_base_cache()):
         self.axes_k[:, :, g : g + m] = ak
         self.codes_v[:, :, g : g + m] = cv
         self.axes_v[:, :, g : g + m] = av
-        self.horizon_k = rk_block[:, :, -GROUP:]
-        self.horizon_v = rv_block[:, :, -GROUP:]
+        # copy, not view: on the bulk path rk_block slices a per-call
+        # slab, and a view would pin the whole slab in the horizon
+        self.horizon_k = mx.contiguous(rk_block[:, :, -GROUP:])
+        self.horizon_v = mx.contiguous(rv_block[:, :, -GROUP:])
         self.horizon_valid = True
         self.n_sealed = g + m
 

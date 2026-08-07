@@ -219,6 +219,25 @@ def test_nbytes_accounting():
     assert rec_bytes < 0.55 * fp16_equiv
 
 
+@_NEEDS_GPU
+def test_nbytes_tracks_active_memory():
+    # The formula must reflect what the allocator holds once the fill's
+    # transients settle: a state field pinning a retained fp16 graph
+    # would push the active delta far past nbytes.
+    mx.synchronize()
+    before = mx.get_active_memory()
+    c = _filled(8192, tail=256)
+    mx.eval(*(getattr(c, f) for f in c._STATE_FIELDS))
+    mx.synchronize()
+    delta = mx.get_active_memory() - before
+    assert delta <= c.nbytes * 1.1 + (1 << 20)
+    # at depth the whole cache (records + fp16 sink/stage/tail + slack)
+    # stays well under the fp16 twin, between kv8 (~0.53) and the 6-bit
+    # body floor (~0.40)
+    fp16_twin = 8192 * H * D * 2 * 2
+    assert c.nbytes < 0.55 * fp16_twin
+
+
 def test_constructor_rejects_malformed():
     with pytest.raises(ValueError):
         KVarNKVCache(k_bits=7)
