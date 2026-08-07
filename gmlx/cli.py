@@ -430,6 +430,25 @@ def add_kv_cache_args(ap: argparse.ArgumentParser) -> None:
         help="KV-cache quantization group size (default 64).",
     )
     ap.add_argument(
+        "--kv-quant-scheme",
+        choices=("uniform", "kvarn"),
+        default=None,
+        help="KV-cache quantization scheme: 'uniform' is the standard "
+        "affine wire (default), 'kvarn' is variance-normalized "
+        "quantization - kv8-class quality at 6 bits, with the first "
+        "tokens (sink) and the last --kv-tail-tokens kept fp16. Under "
+        "kvarn, --kv-bits defaults to 6 and accepts 2/3/4/5/6/8.",
+    )
+    ap.add_argument(
+        "--kv-tail-tokens",
+        type=int,
+        default=1024,
+        metavar="N",
+        help="kvarn precision tail: the most recent N tokens also stay "
+        "fp16 (a multiple of 128; 0 disables; default 1024). Only "
+        "applies under --kv-quant-scheme kvarn.",
+    )
+    ap.add_argument(
         "--quantized-kv-start",
         type=int,
         default=0,
@@ -554,6 +573,7 @@ def mtp_dropped_run_flags(args) -> list[str]:
         # --kv-bits/--kv-group-size are handled on the MTP path itself
         # (pooled packing where the arch has pools, an accurate note where
         # it doesn't), so they are no longer listed here.
+        ("--kv-quant-scheme", getattr(args, "kv_quant_scheme", None) == "kvarn"),
         ("--quantized-kv-start", args.quantized_kv_start != 0),
         ("--max-kv-size", args.max_kv_size is not None),
         ("--over-generation", args.over_generation != 0),
@@ -1471,6 +1491,8 @@ def _run_generate(args) -> int:
         kv_bits=args.kv_bits,
         kv_group_size=args.kv_group_size,
         quantized_kv_start=args.quantized_kv_start,
+        kv_quant_scheme=args.kv_quant_scheme,
+        kv_tail_tokens=args.kv_tail_tokens,
         prefill_step_size=args.prefill_step_size,
         thinking_budget=args.thinking_budget,
         apply_chat_template=not args.no_chat_template,
@@ -1562,6 +1584,12 @@ def _run_vlm(args) -> int:
         extra["resize_shape"] = parse_resize_shape(args.resize_shape)
     if args.thinking_budget is not None:
         extra["thinking_budget"] = args.thinking_budget
+    if getattr(args, "kv_quant_scheme", None) == "kvarn":
+        print(
+            "warning: --kv-quant-scheme kvarn is not applied on the VLM "
+            "path yet; KV stays fp16",
+            file=sys.stderr,
+        )
     if args.kv_bits is not None:
         extra.update(
             kv_bits=args.kv_bits,
@@ -1712,6 +1740,8 @@ _CFG_SAMPLING_TO_ARG = {
 _CFG_LOAD_TO_ARG = {
     "kv_bits": "kv_bits",
     "kv_group_size": "kv_group_size",
+    "kv_quant_scheme": "kv_quant_scheme",
+    "kv_tail_tokens": "kv_tail_tokens",
     "max_kv_size": "max_kv_size",
     "quantized_kv_start": "quantized_kv_start",
 }

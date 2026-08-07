@@ -775,12 +775,20 @@ def _fmt_k(n) -> str:
     return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
 
 
-def _can_trim(cache) -> bool:
-    """True when every layer cache supports trim() (a rotating cache that has
-    wrapped its window does not)."""
+def _can_trim(cache, n: int | None = None) -> bool:
+    """True when every layer cache can rewind (a rotating cache that has
+    wrapped its window cannot). Caches with a depth-aware ``_can_trim(n)``
+    probe (kvarn, pooling) are asked about this specific depth."""
     if not cache:
         return False
-    return all(bool(getattr(c, "is_trimmable", lambda: False)()) for c in cache)
+    for c in cache:
+        probe = getattr(c, "_can_trim", None)
+        if n is not None and callable(probe):
+            if not probe(n):
+                return False
+        elif not bool(getattr(c, "is_trimmable", lambda: False)()):
+            return False
+    return True
 
 
 def _trim_to(cache, checkpoint: int, lm=None) -> bool:
@@ -789,10 +797,14 @@ def _trim_to(cache, checkpoint: int, lm=None) -> bool:
     n = _cache_tokens(cache) - int(checkpoint)
     if n <= 0:
         return True
-    if not _can_trim(cache):
+    if not _can_trim(cache, n):
         return False
     for c in cache:
-        c.trim(n)
+        got = c.trim(n)
+        # A layer refusing after its probe passed: report failure so the
+        # caller rebuilds (the partially trimmed cache is discarded).
+        if got is not None and not isinstance(got, bool) and int(got) != n:
+            return False
     if lm is not None:
         for attr in ("_position_ids", "_rope_deltas"):
             if hasattr(lm, attr):
@@ -2415,6 +2427,13 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
     _apply_placement(args, getattr(b.model, "language_model", b.model))
     _require_chat_template(b.tok)
 
+    if (getattr(args, "kv_quant_scheme", None) or "uniform") == "kvarn":
+        print(
+            "warning: --kv-quant-scheme kvarn is not applied on the MTP "
+            "chat path yet; KV stays fp16",
+            file=sys.stderr,
+        )
+
     # --kv-bits on the MTP path: same pooled-cache packing as the plain
     # path (rollback/replay are watermark moves, storage-agnostic). For
     # drafter models with no pooled caches the flag stays dropped, with
@@ -2479,6 +2498,7 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
         )
 
     quantize_pools = None   # set at the load join (kv-bits pooled packing)
+    kvarn_cfg = None        # set at the load join (kvarn scheme accepted)
 
     def _new_text_cache():
         c = make_prompt_cache(b.model, args.max_kv_size)
@@ -2486,6 +2506,10 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
             from .generation import quantize_pooled_caches
 
             quantize_pooled_caches(c, *quantize_pools)
+        if kvarn_cfg is not None:
+            from .kvarn_cache import convert_prompt_cache
+
+            convert_prompt_cache(c, **kvarn_cfg)
         return c
 
     b.new_text_cache = _new_text_cache
@@ -2494,7 +2518,7 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
         # Model-dependent setup, deferred to the load join on the
         # background path. Prints bare, so it must run on the main
         # thread with the tty free.
-        nonlocal quantize_pools
+        nonlocal quantize_pools, kvarn_cfg
         if not args.no_chat_template:
             _require_chat_template(b.tok, verbatim_hint=True)
 
@@ -2515,6 +2539,19 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
             )
         if step is not None:
             kv_kwargs["prefill_step_size"] = step
+
+        if (getattr(args, "kv_quant_scheme", None) or "uniform") == "kvarn":
+            from .generation import _kvarn_widths, setup_kvarn_cache
+
+            tail = int(getattr(args, "kv_tail_tokens", 1024) or 0)
+            probe = setup_kvarn_cache(
+                b.model, kv_kwargs.get("kv_bits"), tail, args.max_kv_size,
+                out=sys.stdout,
+            )
+            if probe is not None:
+                kb, vb = _kvarn_widths(kv_kwargs.get("kv_bits"))
+                kvarn_cfg = {"k_bits": kb, "v_bits": vb, "tail_tokens": tail}
+            kv_kwargs["kv_bits"] = None
 
         # The MTP path already warns that --kv-bits is dropped. On plain
         # decoding, mlx-lm's per-step converter would crash on rotating

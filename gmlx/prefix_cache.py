@@ -23,6 +23,7 @@ _log = logging.getLogger(__name__)
 _CACHELIST_TAG = "_CacheList"
 _ARRAYS_TAG = "_ArraysCache"
 _POOLING_TAG = "_PoolingCache"
+_KVARN_TAG = "_KVarNKVCache"
 
 
 def _trim_rotating_state(c: Any, keys: mx.array, values: mx.array):
@@ -90,6 +91,12 @@ def _snapshot_entry(c: Any) -> Any:
         return (_POOLING_TAG, c.state, c.meta_state)
     if isinstance(c, cache_types("ArraysCache")):
         return (_ARRAYS_TAG, list(c.cache), c.left_padding, c.lengths)
+    from .kvarn_cache import KVarNKVCache
+    if isinstance(c, KVarNKVCache):
+        # No keys/values attrs (like pooling); owned copies because decode
+        # setitem-mutates the live region buffers.
+        state = tuple(mx.contiguous(a) for a in c.state)
+        return (_KVARN_TAG, state, c.meta_state)
     state = c.state
     offset = getattr(c, "offset", state[0].shape[2])
     _idx = getattr(c, "_idx", 0)
@@ -123,6 +130,13 @@ def _restore_entry(c: Any, snap: Any) -> None:
         c.left_padding = left_padding
         c.lengths = lengths
         return
+    if isinstance(snap, tuple) and snap[0] == _KVARN_TAG:
+        _, state, meta_state = snap
+        # Owned copies again: the restored cache mutates its buffers in
+        # place, and the stored entry may be restored more than once.
+        c.state = tuple(mx.contiguous(a) for a in state)
+        c.meta_state = meta_state
+        return
     keys, values, offset, _idx = snap
     c.keys, c.values = _owned_pair(keys, values)
     c.offset = offset
@@ -146,7 +160,11 @@ def _collect_snapshot_arrays(snaps: list[Any], out: list[mx.array]) -> None:
     for snap in snaps:
         if isinstance(snap, tuple) and len(snap) >= 2 and snap[0] == _CACHELIST_TAG:
             _collect_snapshot_arrays(snap[1], out)
-        elif isinstance(snap, tuple) and len(snap) == 3 and snap[0] == _POOLING_TAG:
+        elif (
+            isinstance(snap, tuple)
+            and len(snap) == 3
+            and snap[0] in (_POOLING_TAG, _KVARN_TAG)
+        ):
             out.extend(a for a in snap[1] if isinstance(a, mx.array))
         elif isinstance(snap, tuple) and len(snap) == 4 and snap[0] == _ARRAYS_TAG:
             _, cache_list, left_padding, lengths = snap

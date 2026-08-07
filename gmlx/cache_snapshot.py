@@ -22,6 +22,8 @@ from .envflags import env_int
 
 _log = logging.getLogger(__name__)
 
+_KVARN_CKPT_NOTED: list[bool] = []
+
 
 def _layer_has_content(snap: Any) -> bool:
     """True when a snapshotted layer carries reusable state.
@@ -155,6 +157,12 @@ def _clone_lm_twin(cache: Any, eval_targets: list[Any]) -> Any | None:
                 copied = copy(v)
                 setattr(out, attr, copied)
                 eval_targets.append(copied)
+        return out
+    from .kvarn_cache import KVarNKVCache
+    if isinstance(cache, KVarNKVCache):
+        state = tuple(copy(a) for a in cache.state)
+        out = type(cache).from_state(state, cache.meta_state)
+        eval_targets.extend(state)
         return out
     return None
 
@@ -578,6 +586,12 @@ def ckpt_layout(prompt_cache, block_size: int = 16):
         elif isinstance(c, arr_types):
             tags.append("arr")
         else:
+            if type(c).__name__ == "KVarNKVCache" and not _KVARN_CKPT_NOTED:
+                _KVARN_CKPT_NOTED.append(True)
+                _log.info(
+                    "APC decode-checkpoint tier inactive under kvarn KV "
+                    "(exact-entry APC still applies)"
+                )
             return None
     has_rot = any(_is_rot(t) for t in tags)
     if not has_rot and "arr" not in tags:

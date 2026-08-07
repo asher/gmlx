@@ -143,6 +143,121 @@ def kv_quantization_unsupported(model) -> str | None:
     return None
 
 
+_KVARN_BYPASS_ARCHS = frozenset(
+    # Archs whose attention dispatch does not go through the model-module
+    # scaled_dot_product_attention symbol; kvarn views would crash inside
+    # their owned routes. qwen3.5 gains a real dispatch arm later.
+    ("qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text")
+)
+
+
+def _kvarn_head_dim(model):
+    """The model's attention head dim, -1 for MLA latents, 0 when unknown."""
+    for holder in (model, getattr(model, "language_model", None)):
+        args = getattr(holder, "args", None) or getattr(holder, "config", None)
+        if args is None:
+            continue
+        if getattr(args, "kv_lora_rank", None):
+            return -1
+        hd = getattr(args, "head_dim", None)
+        if hd:
+            return int(hd)
+        hs = getattr(args, "hidden_size", None)
+        nh = getattr(args, "num_attention_heads", None)
+        if hs and nh:
+            return int(hs) // int(nh)
+    return 0
+
+
+def kvarn_unsupported(model) -> str | None:
+    """Reason string when --kv-quant-scheme kvarn cannot serve this model,
+    else None. Coverage is partial by design (sliding windows and recurrent
+    layers stay fp16); the reason fires only when zero layers are eligible
+    or the arch's attention would bypass the kvarn route entirely."""
+    from .envflags import env_bool
+
+    if not env_bool("GMLX_KVARN", True):
+        return "disabled (GMLX_KVARN=0)"
+    from .kvarn_sdpa import kvarn_ops_missing
+
+    reason = kvarn_ops_missing()
+    if reason:
+        return reason
+    args = getattr(model, "args", None) or getattr(model, "config", None)
+    mt = getattr(args, "model_type", "") or getattr(model, "model_type", "")
+    if mt in _KVARN_BYPASS_ARCHS:
+        return f"{mt} attention dispatch has no kvarn arm yet"
+    hd = _kvarn_head_dim(model)
+    if hd == -1:
+        return "MLA latent KV cache (K and V share storage)"
+    if hd != 128:
+        return f"head_dim {hd or 'unknown'} (kvarn supports 128)"
+    return None
+
+
+def _kvarn_widths(kv_bits):
+    """K/V bit widths for kvarn: --kv-bits (default 6) for both sides, or
+    a GMLX_KVARN_BITS=k6v5 style pair."""
+    import re
+
+    env = os.environ.get("GMLX_KVARN_BITS", "").strip().lower()
+    if env:
+        m = re.fullmatch(r"k(\d+)v(\d+)", env)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+        print(
+            f"warning: GMLX_KVARN_BITS={env!r} is not of the form k6v5; "
+            "ignored",
+            file=sys.stderr,
+        )
+    bits = int(kv_bits) if kv_bits is not None else 6
+    return bits, bits
+
+
+def setup_kvarn_cache(model, kv_bits, kv_tail_tokens, max_kv_size, out=None):
+    """Build the model's prompt cache with kvarn KV on every eligible layer,
+    printing the [kv] banner. Returns the cache list, or None (with a
+    warning) when the scheme cannot apply."""
+    from .kvarn_cache import KVARN_BITS
+
+    out = out if out is not None else sys.stderr
+    k_bits, v_bits = _kvarn_widths(kv_bits)
+    reason = kvarn_unsupported(model)
+    if reason is None and not (k_bits in KVARN_BITS and v_bits in KVARN_BITS):
+        reason = f"kvarn bits must be one of {KVARN_BITS}"
+    tail = int(kv_tail_tokens or 0)
+    if reason is None and (tail < 0 or tail % 128):
+        reason = "--kv-tail-tokens must be a multiple of 128 (0 disables)"
+    prompt_cache = None
+    if reason is None:
+        from mlx_lm.models.cache import make_prompt_cache as _mpc
+
+        from .kvarn_cache import convert_prompt_cache
+        from .kvarn_sdpa import install_kvarn_sdpa
+
+        prompt_cache = _mpc(model, max_kv_size=max_kv_size)
+        n = convert_prompt_cache(
+            prompt_cache, k_bits=k_bits, v_bits=v_bits, tail_tokens=tail
+        )
+        if n:
+            install_kvarn_sdpa()
+            width = f"kvarn{k_bits}" if k_bits == v_bits else f"kvarn k{k_bits} v{v_bits}"
+            regions = "sink+tail fp16" if tail else "sink fp16, tail off"
+            print(
+                f"[kv] {width} KV cache ({n}/{len(prompt_cache)} layers; "
+                f"{regions})",
+                file=out,
+            )
+        else:
+            prompt_cache = None
+            reason = "no plain KV-cache layers in this arch's stack"
+    if prompt_cache is None:
+        print(
+            f"warning: --kv-quant-scheme kvarn dropped: {reason}", file=out
+        )
+    return prompt_cache
+
+
 _KV_QUANT_BITS = (2, 3, 4, 6, 8)  # mx.quantize affine widths
 
 
@@ -223,6 +338,8 @@ def generate(
     kv_bits: int | None = None,
     kv_group_size: int = 64,
     quantized_kv_start: int = 0,
+    kv_quant_scheme: str | None = None,
+    kv_tail_tokens: int = 1024,
     prefill_step_size: int | None = None,
     thinking_budget: int | None = None,
     apply_chat_template: bool = True,
@@ -341,7 +458,14 @@ def generate(
         )
 
     prompt_cache = None
-    if kv_bits is not None:
+    if (kv_quant_scheme or "uniform").lower() == "kvarn":
+        prompt_cache = setup_kvarn_cache(
+            model, kv_bits, kv_tail_tokens, max_kv_size
+        )
+        # Handled here whatever the outcome: mlx-lm's per-step affine
+        # converter must never touch a kvarn stack.
+        kv_bits = None
+    elif kv_bits is not None:
         reason = kv_quantization_unsupported(model)
         if reason:
             # mlx-lm's converter would crash on the rotating caches, so the

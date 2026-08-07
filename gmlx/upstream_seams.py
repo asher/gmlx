@@ -129,6 +129,12 @@ SEAMS: tuple[Seam, ...] = (
          "quantized_sdpa_fix (5D grouped scores vs 4D batch mask)"),
     Seam("mlx_vlm.models.base", "quantized_scaled_dot_product_attention",
          "quantized_sdpa_fix (same body as the mlx_lm copy)"),
+    # --- KVarN KV-cache SDPA route (sweep-rebound over model modules) ---
+    Seam("mlx_lm.models.base", "scaled_dot_product_attention",
+         "kvarn_sdpa.install_kvarn_sdpa (KVarNView claim; signature order "
+         "queries/keys/values/cache/scale/mask/sinks)"),
+    Seam("mlx_vlm.models.base", "scaled_dot_product_attention",
+         "kvarn_sdpa.install_kvarn_sdpa (same claim at the vlm seam)"),
     Seam("mlx_vlm.models.cache", "BatchQuantizedKVCache.make_mask",
          "quantized_sdpa_fix._patch_make_mask (starts registration for "
          "the fused decode route; left_padding attr contract)"),

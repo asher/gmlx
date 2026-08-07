@@ -100,6 +100,7 @@ family sets no value.
 | `--stop STR` | - | Stop sequence; generation ends (trimmed) when it appears. Repeatable. |
 | `--max-kv-size N` | - | Cap the KV cache (rotating cache above it). |
 | `--kv-bits N` / `--kv-group-size N` / `--quantized-kv-start N` | off / `64` / `0` | Quantize the KV cache (mlx-lm `QuantizedKVCache`): cuts cache memory 2-4x for long contexts. |
+| `--kv-quant-scheme STR` / `--kv-tail-tokens N` | `uniform` / `1024` | KV quantization scheme. `kvarn` is variance-normalized quantization (kv8-class quality at 6 bits; `--kv-bits` defaults to 6, accepts 2/3/4/5/6/8); the sink and the last `--kv-tail-tokens` tokens stay fp16. |
 | `--prefill-step-size N` | `2048` / `8192` streaming | Prefill chunk size; lower it to cap peak memory on long prompts. Over-RAM streaming `--stream-cpu` / `--stream-experts` models default to `8192`: each chunk re-streams the expert lane from disk, so fewer, bigger chunks prefill faster. Applies to `run`, `--bench`, and `--bench-depths`. |
 
 ### Multimodal (VLM)
@@ -204,7 +205,8 @@ model id or alias in your server config, the same `models:`/`aliases:` blocks
 match, the model's resolved path and its merged profile/override settings are
 overlaid onto the run: sampling (`temp`, `top-p`, `top-k`, `min-p`, penalties,
 `max-tokens`, `stop`, `seed`, XTC), KV-cache
-(`kv-bits`/`kv-group-size`/`max-kv-size`/`quantized-kv-start`), `system`,
+(`kv-bits`/`kv-group-size`/`kv-quant-scheme`/`kv-tail-tokens`/`max-kv-size`/
+`quantized-kv-start`), `system`,
 `chat_template`, `enable_thinking`, `mmproj`, `adapter`, speculative/draft, and
 `stream` placement. Flags you pass explicitly always win; the config only
 fills what you left at its default. Models defined as `hf:` paths resolve to
@@ -411,6 +413,7 @@ every command. The terminal is upgraded on top:
 | `--logit-bias JSON` | - | Token-id to bias map. |
 | `--stop STR` | - | Stop sequence (trimmed; repeatable). |
 | `--kv-bits` / `--kv-group-size` / `--quantized-kv-start` | off / `64` / `0` | KV-cache quantization: cuts cache memory 2-4x for long chats. |
+| `--kv-quant-scheme` / `--kv-tail-tokens` | `uniform` / `1024` | KV quantization scheme (`kvarn` = variance-normalized, 6-bit default, fp16 sink + tail), same as [`run`](#generation--sampling). |
 | `--prefill-step-size N` | `2048` / `8192` streaming | Prefill chunk size (peak-memory cap for `/load`-ed long prompts). Streaming `--stream-cpu` / `--stream-experts` models default to `8192`, same as `run`. |
 | `--stream-cpu` / `--stream-experts` / `--moe-experts` / `--moe-expert-mass` / `--moe-expert-probe` / `--moe-miss-shed` / `--moe-layer-shed` / `--gpu-keepwarm` | - | Execution placement and lossy MoE fan-out, same as [`run`](#loading), including larger-than-RAM streaming `--stream-cpu` chat (text path only). |
 | `--resize-shape N\|WxH` / `--thinking-budget N` | - | Image resolution (soft-token count, VLM mode) / thinking-token cap (text + VLM; adjustable via `/thinking-budget`). |

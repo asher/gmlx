@@ -63,6 +63,7 @@ LOAD_ENV = {
     "kv_bits": "KV_BITS",
     "kv_group_size": "KV_GROUP_SIZE",
     "kv_quant_scheme": "KV_QUANT_SCHEME",
+    "kv_tail_tokens": "KV_TAIL_TOKENS",
     "max_kv_size": "MAX_KV_SIZE",
     "quantized_kv_start": "QUANTIZED_KV_START",
 }
