@@ -2003,18 +2003,32 @@ class DeepseekV4Block(nn.Module):
         mask: Optional[mx.array],
         cache: Optional[Any],
         input_ids: mx.array,
-    ) -> mx.array:
+        carry: Optional[tuple] = None,
+        carry_mode: bool = False,
+    ):
         if self.attn_hc.m1_fused_ok(h):
-            residual = h
-            x, post, comb = self.attn_hc.fused_m1(h, self.attn_norm.weight)
+            # attn front; a pending expand from the caller folds into it
+            if carry is not None:
+                h, front = self.attn_hc.fused_m1_expand(
+                    carry, self.attn_norm.weight
+                )
+            else:
+                front = self.attn_hc.fused_m1(h, self.attn_norm.weight)
+            x, post, comb = front
             x = self.attn(x, mask=mask, cache=cache)
-            h = hc_expand_m1(x, residual, post, comb)
 
-            residual = h
-            x, post, comb = self.ffn_hc.fused_m1(h, self.ffn_norm.weight)
+            # ffn front always consumes the attn expand inline
+            h, front = self.ffn_hc.fused_m1_expand(
+                (x, h, post, comb), self.ffn_norm.weight
+            )
+            x, post, comb = front
             x = self.ffn(x, input_ids)
-            return hc_expand_m1(x, residual, post, comb)
+            if carry_mode:
+                return h, (x, h, post, comb)
+            return hc_expand_m1(x, h, post, comb)
 
+        if carry is not None:
+            h = hc_expand_m1(*carry)
         residual = h
         x, post, comb = self.attn_hc(h)
         x = self.attn(self.attn_norm(x), mask=mask, cache=cache)
@@ -2023,7 +2037,10 @@ class DeepseekV4Block(nn.Module):
         residual = h
         x, post, comb = self.ffn_hc(h)
         x = self.ffn(self.ffn_norm(x), input_ids)
-        return hc_expand(x, residual, post, comb)
+        out = hc_expand(x, residual, post, comb)
+        if carry_mode:
+            return out, None
+        return out
 
 
 class DeepseekV4Model(PipelineMixin, nn.Module):
@@ -2078,16 +2095,24 @@ class DeepseekV4Model(PipelineMixin, nn.Module):
 
         captures = []
         cap_set = capture_layers or ()
+        carry = None
         for idx, (layer, layer_cache) in enumerate(
             zip(self.pipeline_layers, cache)
         ):
-            h = layer(h, mask, layer_cache, inputs)
+            h, carry = layer(
+                h, mask, layer_cache, inputs, carry=carry, carry_mode=True
+            )
             if idx in cap_set:
                 # DSpark capture: uniform mean over the hc streams of the
                 # layer output (ds4's dspark_hc_mean_weights = 1/n_hc).
+                if carry is not None:
+                    h = hc_expand_m1(*carry)
+                    carry = None
                 captures.append(
                     h.astype(mx.float32).mean(axis=2).astype(h.dtype)
                 )
+        if carry is not None:
+            h = hc_expand_m1(*carry)
 
         _materialize_cache_arrays(cache)
 
