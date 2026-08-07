@@ -10,11 +10,12 @@ KV_QUANT_SCHEME=kvarn:
   above kv8 fidelity on the KLD harness, so all eligible layers convert
   and the memory story stays uniform. Ineligible models keep fp16 batch
   caches with a one-shot reason (never a silent affine fallback).
-- ``BatchGenerator.__init__`` nulls apc_manager for kvarn-eligible models:
-  the APC tiers need the kvarn extract/merge arms (a later phase), and a
-  half-armed APC would fail on record-group geometry mid-request. Upstream
-  already nulls it whenever KV_BITS is set; this covers the scheme-only
-  boot where KV_BITS is unset.
+- ``BatchGenerator.__init__`` routes kvarn-eligible models onto the APC
+  exact tier: stamps the model so model_apc_mode resolves "exact" (the
+  block tier cannot split 128-token records) and drops the kv_bits kwarg
+  so upstream's kv-quant opt-out keeps the manager. When the kvarn APC
+  arms are not installed the manager is nulled instead -- a half-armed
+  APC would fail on record-group geometry mid-request.
 - ``PromptProcessingBatch.__init__`` re-routes the single-row fast path:
   stock init skips ``_make_cache`` entirely when B=1 and kv_bits is None
   (``cache.make_prompt_cache``), which under kvarn is every lone request.
@@ -226,20 +227,36 @@ def _install_apc_gate(_ar):
     _noted = [False]
 
     def _gated_init(self, model, *args, **kwargs):
+        # Scheme comes from the kwarg (the ResponseGenerator's env-window
+        # capture), not the ambient env: per-model load windows are closed
+        # by the time the first request constructs a BatchGenerator.
         if (
             kwargs.get("apc_manager") is not None
-            and os.environ.get("KV_QUANT_SCHEME", "") == "kvarn"
+            and kwargs.get("kv_quant_scheme") == "kvarn"
         ):
             from .generation import kvarn_unsupported
 
             if kvarn_unsupported(model) is None:
-                kwargs["apc_manager"] = None
-                if not _noted[0]:
-                    _noted[0] = True
-                    _log.info(
-                        "[serve] APC inactive under kvarn KV (the kvarn "
-                        "APC arms land in a later phase)"
-                    )
+                from .kvarn_apc import kvarn_apc_installed, stamp_model
+
+                if kvarn_apc_installed():
+                    # Exact tier only: stamp the model so model_apc_mode
+                    # resolves "exact", and drop kv_bits (the scheme owns
+                    # the width via env) so upstream's kv-quant opt-out
+                    # does not null the manager.
+                    stamp_model(model)
+                    kwargs["kv_bits"] = None
+                    if not _noted[0]:
+                        _noted[0] = True
+                        _log.info("[serve] APC exact tier active under kvarn KV")
+                else:
+                    kwargs["apc_manager"] = None
+                    if not _noted[0]:
+                        _noted[0] = True
+                        _log.info(
+                            "[serve] APC inactive under kvarn KV "
+                            "(kvarn APC arms not installed)"
+                        )
         return _orig_init(self, model, *args, **kwargs)
 
     _gated_init.__dict__[_APC_GATE_FLAG] = True

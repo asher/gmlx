@@ -455,6 +455,21 @@ class KVarNKVCache(_base_cache()):
             return 0
         return sum(getattr(self, f).nbytes for f in self._STATE_FIELDS)
 
+    def _raw_single(self):
+        """Recovered original-domain K/V [1, H, offset, D]: body un-rotated
+        from the materialized regions (WHT is self-inverse; one fp16
+        rounding), the last tail_len tokens taken verbatim from the raw
+        tail rows. The BatchKVarNKVCache._raw_rows twin."""
+        mk, mv = self.materialize()
+        rk = kq.kvarn_rotate(mk)
+        rv = kq.kvarn_rotate(mv)
+        t = self.tail_len
+        if t:
+            tk, tv = self.tail_slices(t)
+            rk[:, :, self.offset - t :] = tk
+            rv[:, :, self.offset - t :] = tv
+        return rk, rv
+
     # -- conversion ---------------------------------------------------------
 
     @classmethod
@@ -709,11 +724,12 @@ class BatchKVarNKVCache(_base_cache()):
         return out
 
     def _compatible(self, other):
-        return (
-            type(other) is BatchKVarNKVCache
-            and (self.k_bits, self.v_bits, self.sink_cap, self.tail_cap)
-            == (other.k_bits, other.v_bits, other.sink_cap, other.tail_cap)
-        )
+        return type(other) is BatchKVarNKVCache and (
+            self.k_bits,
+            self.v_bits,
+            self.sink_cap,
+            self.tail_cap,
+        ) == (other.k_bits, other.v_bits, other.sink_cap, other.tail_cap)
 
     def extend(self, other):
         if not self._compatible(other):
@@ -722,9 +738,7 @@ class BatchKVarNKVCache(_base_cache()):
                 "(mismatched class or kvarn parameters)."
             )
         if self._idx == 0 and other._idx == 0:
-            self.left_padding = mx.concatenate(
-                [self.left_padding, other.left_padding]
-            )
+            self.left_padding = mx.concatenate([self.left_padding, other.left_padding])
             return
         if self._idx == 0 or other._idx == 0:
             raise ValueError(
@@ -753,6 +767,92 @@ class BatchKVarNKVCache(_base_cache()):
         self.n_sealed = a.n_sealed
         self.tail_start, self.tail_end = a.tail_start, a.tail_end
 
+    def extract(self, idx):
+        """Row ``idx`` as a single-stream KVarNKVCache with the left padding
+        stripped (the BatchKVCache.extract model). A pad-free row adopts
+        copies of its region buffers bit-exactly (horizon stays unarmed);
+        a padded row rebuilds from recovered raw K/V, one re-quantization
+        pass, the extend-admission cost."""
+        pad = int(self.left_padding[idx].item())
+        out = KVarNKVCache(
+            k_bits=self.k_bits,
+            v_bits=self.v_bits,
+            tail_tokens=self.tail_cap,
+            sink_tokens=self.sink_cap,
+        )
+        if self._idx - pad <= 0:
+            return out
+        if pad == 0:
+            h = self.stage_k.shape[1]
+            for f in self._ARRAY_FIELDS:
+                setattr(out, f, mx.contiguous(getattr(self, f)[idx : idx + 1]))
+            out.horizon_k = mx.zeros((1, h, GROUP, HEAD_DIM), mx.float16)
+            out.horizon_v = mx.zeros((1, h, GROUP, HEAD_DIM), mx.float16)
+            out.offset = self._idx
+            out.n_sealed = self.n_sealed
+            out.tail_start, out.tail_end = self.tail_start, self.tail_end
+            return out
+        state = tuple(getattr(self, f)[idx : idx + 1] for f in self._ARRAY_FIELDS)
+        row = type(self).from_state(
+            state + (self.left_padding[idx : idx + 1],), self.meta_state
+        )
+        rk, rv = row._raw_rows()
+        out.update_and_fetch(rk[:, :, pad:], rv[:, :, pad:])
+        return out
+
+    @classmethod
+    def merge(cls, caches):
+        """Batch single-stream KVarNKVCache rows, right-justified (the
+        BatchKVCache.merge model). One filled row adopts copies of its
+        region buffers bit-exactly; multi-row merges rebuild from recovered
+        raw K/V (one re-quantization pass per row)."""
+        if not caches:
+            raise ValueError("[kvarn] merge requires at least one cache.")
+        first = caches[0]
+        params = (
+            (first.k_bits, first.v_bits, first.sink_cap, first.tail_cap)
+            if isinstance(first, KVarNKVCache)
+            else None
+        )
+        for c in caches:
+            if (
+                not isinstance(c, KVarNKVCache)
+                or (c.k_bits, c.v_bits, c.sink_cap, c.tail_cap) != params
+            ):
+                raise ValueError(
+                    "[kvarn] merge requires KVarNKVCache rows with matching "
+                    "kvarn parameters."
+                )
+        lengths = [c.offset for c in caches]
+        max_len = max(lengths)
+        out = cls(
+            [max_len - n for n in lengths],
+            k_bits=first.k_bits,
+            v_bits=first.v_bits,
+            tail_tokens=first.tail_cap,
+            sink_tokens=first.sink_cap,
+        )
+        if max_len == 0:
+            return out
+        if len(caches) == 1:
+            for f in cls._ARRAY_FIELDS:
+                setattr(out, f, mx.contiguous(getattr(first, f)))
+            out._idx = first.offset
+            out.n_sealed = first.n_sealed
+            out.tail_start, out.tail_end = first.tail_start, first.tail_end
+            return out
+        h = next(c.stage_k.shape[1] for c in caches if c.offset)
+        slab_k = mx.zeros((len(caches), h, max_len, HEAD_DIM), mx.float16)
+        slab_v = mx.zeros((len(caches), h, max_len, HEAD_DIM), mx.float16)
+        for i, c in enumerate(caches):
+            if not c.offset:
+                continue
+            rk, rv = c._raw_single()
+            slab_k[i : i + 1, :, max_len - c.offset :] = rk
+            slab_v[i : i + 1, :, max_len - c.offset :] = rv
+        out.update_and_fetch(slab_k, slab_v)
+        return out
+
     def prepare(self, *, left_padding=None, lengths=None, right_padding=None):
         del lengths
         if left_padding is not None:
@@ -767,11 +867,15 @@ class BatchKVarNKVCache(_base_cache()):
             self._right_padding = right_padding
 
     def finalize(self):
-        if self._right_padding is not None:
+        # All-zero right padding (a lone warm row) needs no roll; anything
+        # real would shift sealed records per row, which kvarn cannot do.
+        rp = getattr(self, "_right_padding", None)
+        if rp is not None and any(rp):
             raise RuntimeError(
                 "[kvarn] mixed warm/cold prefill (right padding) is not "
                 "supported under kvarn KV."
             )
+        self._right_padding = None
 
     def make_mask(self, N, return_array=False, **kwargs):
         del return_array

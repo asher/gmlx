@@ -106,6 +106,24 @@ class GmlxAPCManager(_apc.APCManager):
             super().clear()
             ckpt_reset(self)
 
+    # Exact-tier entry salt: nonzero only for kvarn boots, where it keys
+    # entries to the wire config (scheme/widths/tail/layout version) so a
+    # scheme change never warm-adopts a stale-format entry -- the disk
+    # namespace is the model path and carries no scheme.
+    _exact_extra_salt = 0
+
+    def lookup_exact_cache(self, token_ids, extra_hash=0,
+                           max_prefix_tokens=None, min_prefix_tokens=0):
+        return super().lookup_exact_cache(
+            token_ids, extra_hash ^ self._exact_extra_salt,
+            max_prefix_tokens=max_prefix_tokens,
+            min_prefix_tokens=min_prefix_tokens)
+
+    def store_exact_cache(self, token_ids, prompt_cache, *, extra_hash=0):
+        return super().store_exact_cache(
+            token_ids, prompt_cache,
+            extra_hash=extra_hash ^ self._exact_extra_salt)
+
     def store_ckpt_blocks(self, token_ids, layer_keys, layer_values,
                           *, extra_hash=0, disk=True):
         """Block store for checkpoint chains: always per-block -- the
@@ -342,5 +360,11 @@ def build_apc_manager(model_namespace=None):
         "APC enabled (block_size=%d, num_blocks=%d, disk=%s, gmlx manager)",
         block_size, num_blocks, bool(disk),
     )
-    return GmlxAPCManager(
+    mgr = GmlxAPCManager(
         num_blocks=num_blocks, block_size=block_size, disk=disk)
+    from .kvarn_apc import kvarn_entry_salt
+
+    salt = kvarn_entry_salt()
+    if salt:
+        mgr._exact_extra_salt = salt
+    return mgr

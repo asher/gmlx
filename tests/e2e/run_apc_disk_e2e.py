@@ -67,6 +67,13 @@ def tier_keys(tier: str) -> dict:
 # blocks, so a single request seals a dozen-plus blocks to disk and a replay has a
 # large matched-token prefix. Distinct sentences (not repeated padding) so the block
 # chain is non-degenerate.
+# kvarn serves the APC exact tier: stores and index counts move on the
+# exact-tier counters. Hit, matched-token, and disk-write counters are
+# shared between tiers.
+_EXACT_TIER = os.environ.get("KV_QUANT_SCHEME", "") == "kvarn"
+STORES_KEY = "exact_stores" if _EXACT_TIER else "stores"
+INDEXED_KEY = "disk_exact_indexed" if _EXACT_TIER else "disk_blocks_indexed"
+
 PREFIX = (
     "You are a meticulous systems engineer. Read the following background carefully "
     "and keep every detail in mind when you answer.\n\n"
@@ -197,7 +204,7 @@ def phase_sequential(python, model_path, disk_root, log_dir, block_size,
         s1, _ = chat(base, mid, turn1)
         out["turn1_status"] = s1
         drained = wait_disk_drained(base, min_files=1)
-        out["turn1_stores"] = int(drained.get("stores", 0))
+        out["turn1_stores"] = int(drained.get(STORES_KEY, 0))
         out["turn1_disk_writes"] = int(drained.get("disk_writes", 0))
         out["turn1_disk_files"] = int(drained.get("disk_files", 0))
         # turn 2 - a later lone request that shares turn 1's prefix -> reuse it
@@ -312,7 +319,7 @@ def phase_restart_and_reset(python, model_path, disk_root, log_dir, block_size,
         after = stats(base)
         out["after_restart"] = after
         out["disk_hits_after_restart"] = int(after.get("disk_hits", 0))
-        out["disk_blocks_indexed"] = int(after.get("disk_blocks_indexed", 0))
+        out["disk_blocks_indexed"] = int(after.get(INDEXED_KEY, 0))
         out["matched_tokens_after_restart"] = int(after.get("matched_tokens", 0))
 
         # in-memory reset, then replay again: disk tier must persist through it
@@ -379,11 +386,11 @@ def grade(seq, pop, restart, iso, out_dir: Path) -> int:
     checks["continuous batching enabled"] = bool(pop.get("continuous_batching_enabled"))
     checks["all concurrent clients 200"] = bool(pop.get("batch_all_ok"))
     pb = pop.get("post_batch", {})
-    checks["batch populates the cache (stores>0)"] = int(pb.get("stores", 0)) > 0
+    checks["batch populates the cache (stores>0)"] = int(pb.get(STORES_KEY, 0)) > 0
     checks["batch writes through to disk (disk_writes>0)"] = int(
         pb.get("disk_writes", 0)) > 0
     checks["disk files present (disk_files>0)"] = int(pb.get("disk_files", 0)) > 0
-    checks["disk blocks indexed (>0)"] = int(pb.get("disk_blocks_indexed", 0)) > 0
+    checks["disk blocks indexed (>0)"] = int(pb.get(INDEXED_KEY, 0)) > 0
     checks["shards on FS (live)"] = pop.get("shards_on_fs_live", 0) > 0
     # within-session prefix reuse, after the batch populated it
     checks["within-session prefix reuse (matched up)"] = (

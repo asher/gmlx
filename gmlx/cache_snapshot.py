@@ -39,6 +39,8 @@ def _layer_has_content(snap: Any) -> bool:
     if hasattr(snap, "accumulate_windows"):  # PoolingCache: no `keys`;
         # content lives in pooled rows and/or the staging remainder
         return snap.size() > 0 or getattr(snap, "remainder", 0) > 0
+    if getattr(snap, "kv_quant_scheme", None) == "kvarn":  # no `keys` either
+        return snap.size() > 0
     off = getattr(snap, "offset", None)
     if isinstance(off, int):
         return off > 0 and getattr(snap, "keys", None) is not None

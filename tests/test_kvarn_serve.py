@@ -157,21 +157,41 @@ def test_spec_build_suspends_kvarn(restorable, _ops_ok):
 
 
 def test_apc_gate(restorable, _ops_ok):
+    from mlx_vlm import apc
+
+    from gmlx import kvarn_apc
+
     class _FakeBG:
         def __init__(self, model, *args, **kwargs):
             self.apc_manager = kwargs.get("apc_manager")
+            self.kv_bits = kwargs.get("kv_bits")
 
     class _FakeAR:
         BatchGenerator = _FakeBG
 
     kvarn_serve._install_apc_gate(_FakeAR)
     sentinel = object()
-    restorable.setenv("KV_QUANT_SCHEME", "kvarn")
-    assert _FakeBG(_LayersLM(), apc_manager=sentinel).apc_manager is None
-    assert _FakeBG(_LayersLM(head_dim=64), apc_manager=sentinel).apc_manager is sentinel
-    assert _FakeBG(_LayersLM(), apc_manager=None).apc_manager is None
-    restorable.setenv("KV_QUANT_SCHEME", "uniform")
-    assert _FakeBG(_LayersLM(), apc_manager=sentinel).apc_manager is sentinel
+
+    # Arms installed: eligible models keep the manager, get stamped for
+    # exact mode, and lose the kv_bits kwarg (the scheme owns the width).
+    restorable.setattr(apc, kvarn_apc._FLAG, True, raising=False)
+    lm = _LayersLM()
+    bg = _FakeBG(lm, apc_manager=sentinel, kv_quant_scheme="kvarn", kv_bits=6)
+    assert bg.apc_manager is sentinel and bg.kv_bits is None
+    assert getattr(lm, kvarn_apc._MODE_STAMP, False)
+
+    # Ineligible models and other schemes pass through untouched.
+    cold = _LayersLM(head_dim=64)
+    bg = _FakeBG(cold, apc_manager=sentinel, kv_quant_scheme="kvarn", kv_bits=6)
+    assert bg.apc_manager is sentinel and bg.kv_bits == 6
+    assert not getattr(cold, kvarn_apc._MODE_STAMP, False)
+    bg = _FakeBG(_LayersLM(), apc_manager=sentinel, kv_quant_scheme="uniform")
+    assert bg.apc_manager is sentinel
+
+    # Arms missing: the manager is nulled rather than half-armed.
+    restorable.setattr(apc, kvarn_apc._FLAG, False, raising=False)
+    bg = _FakeBG(_LayersLM(), apc_manager=sentinel, kv_quant_scheme="kvarn")
+    assert bg.apc_manager is None
 
 
 def test_safe_quant_kvarn_arm(restorable, _ops_ok):

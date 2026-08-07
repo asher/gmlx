@@ -928,10 +928,13 @@ models. Each maps 1:1 to the env var mlx-vlm reads at build:
 `kv_quant_scheme: kvarn` converts every eligible layer's batch KV cache to
 KVarN (`kv_bits` picks the width, default 6; `kv_tail_tokens` sizes the
 fp16 precision tail, default 1024). Ineligible models keep fp16 KV with a
-one-shot log reason, never a silent affine fallback. While a model serves
-under kvarn, the APC prompt cache and cascade shared-prefix decode are
-inactive for it (both announce themselves once); speculative targets keep
-their stock spec-engine KV handling.
+one-shot log reason, never a silent affine fallback. A kvarn model runs the
+APC on the exact-entry tier (memory and disk; the 16-token block tier
+cannot split kvarn's 128-token records), with entries keyed to the kvarn
+width/tail config so a config change cold-misses instead of adopting a
+stale format. Cascade shared-prefix decode is inactive under kvarn (it
+announces itself once); speculative targets keep their stock spec-engine
+KV handling.
 
 ### Cache keys (`cache:`)
 
