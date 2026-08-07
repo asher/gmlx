@@ -54,6 +54,7 @@ from gmlx.deepseek_v4_hyper_connection import (
     HyperConnection,
     HyperHead,
     hc_expand,
+    hc_expand_collapse,
 )
 
 
@@ -2085,10 +2086,9 @@ class DeepseekV4Block(nn.Module):
         residual = h
         x, post, comb = self.attn_hc(h)
         x = self.attn(self.attn_norm(x), mask=mask, cache=cache)
-        h = hc_expand(x, residual, post, comb)
-
-        residual = h
-        x, post, comb = self.ffn_hc(h)
+        residual, x, post, comb = hc_expand_collapse(
+            self.ffn_hc, x, residual, post, comb
+        )
         x = self.ffn(self.ffn_norm(x), input_ids)
         return hc_expand(x, residual, post, comb)
 
