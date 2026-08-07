@@ -363,6 +363,22 @@ def hc_expand(x, residual, post, comb):
     return _hc_expand_op(x, residual, post, comb)
 
 
+_KQ_SKINNY = {"ok": None}
+
+
+def _kq_skinny_available() -> bool:
+    ok = _KQ_SKINNY["ok"]
+    if ok is None:
+        try:
+            import mlx_kquant as kq
+
+            ok = mx.metal.is_available() and hasattr(kq, "skinny_matmul")
+        except Exception:  # noqa: BLE001 - optional dependency
+            ok = False
+        _KQ_SKINNY["ok"] = ok
+    return ok
+
+
 class HyperHead(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -378,11 +394,20 @@ class HyperHead(nn.Module):
     def __call__(self, x: mx.array):
         y = x.astype(mx.float32)
         z = mx.fast.rms_norm(y.flatten(-2), None, self.norm_eps)
-        fn_t = getattr(self, "_fn_t", None)
-        if fn_t is None:
-            fn_t = mx.contiguous(self.fn.T)
-            mx.eval(fn_t)
-            self._fn_t = fn_t
-        mixes = z @ fn_t
+        if (
+            2 <= z.shape[-2] <= 16
+            and mx.default_device() == mx.gpu
+            and _kq_skinny_available()
+        ):
+            import mlx_kquant as kq
+
+            mixes = kq.skinny_matmul(z, self.fn)
+        else:
+            fn_t = getattr(self, "_fn_t", None)
+            if fn_t is None:
+                fn_t = mx.contiguous(self.fn.T)
+                mx.eval(fn_t)
+                self._fn_t = fn_t
+            mixes = z @ fn_t
         pre = mx.sigmoid(mixes * self.scale + self.base) + self.hc_eps
         return (pre[..., None] * y).sum(axis=2).astype(x.dtype)

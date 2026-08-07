@@ -1037,6 +1037,52 @@ def _kq_router_available() -> bool:
     return ok
 
 
+_KQ_SKINNY_STATE = {"ok": None}
+
+
+def _kq_skinny_available() -> bool:
+    """One-time probe for mlx-kquant's skinny_matmul (older builds fall
+    back to the stock matmul)."""
+    ok = _KQ_SKINNY_STATE["ok"]
+    if ok is None:
+        ok = os.environ.get("GMLX_KQ_SKINNY", "1") != "0"
+        if ok:
+            try:
+                import mlx_kquant as kq
+
+                ok = mx.metal.is_available() and hasattr(kq, "skinny_matmul")
+            except Exception:  # noqa: BLE001 - optional dependency
+                ok = False
+        _KQ_SKINNY_STATE["ok"] = ok
+    return ok
+
+
+def _skinny_or_matmul(x, w):
+    """x @ w.T; token widths 2..16 route around MLX's small-N GEMM cliff
+    (the stock path leaves the GEMV specialization at M >= 2 and runs
+    these shapes 4-8x below their bytes)."""
+    if (
+        2 <= x.shape[-2] <= 16
+        and x.shape[-1] % 4 == 0
+        and x.dtype in (mx.float16, mx.bfloat16, mx.float32)
+        and (w.dtype == x.dtype or w.dtype == mx.float32)
+        and mx.default_device() == mx.gpu
+        and _kq_skinny_available()
+    ):
+        import mlx_kquant as kq
+
+        return kq.skinny_matmul(x, w)
+    return x @ w.T
+
+
+def _skinny_linear(lin, x):
+    """lin(x); dense no-bias Linears at token widths 2..16 take the
+    skinny kernel, quantized or biased modules keep their own path."""
+    if type(lin) is nn.Linear and "bias" not in lin:
+        return _skinny_or_matmul(x, lin.weight)
+    return lin(x)
+
+
 class MoEGate(nn.Module):
     def __init__(self, config: ModelArgs, layer_idx: int):
         super().__init__()
@@ -1056,7 +1102,7 @@ class MoEGate(nn.Module):
             )
 
     def __call__(self, x: mx.array, input_ids: Optional[mx.array] = None):
-        logits = x @ self.weight.T
+        logits = _skinny_or_matmul(x, self.weight)
 
         if self.hash:
             if input_ids is None:
@@ -1331,7 +1377,9 @@ class Indexer(nn.Module):
             mx.float32
         )
         scores = mx.maximum(scores, 0) * self.scale
-        weights = self.weights_proj(x).astype(mx.float32) * (self.n_heads**-0.5)
+        weights = _skinny_linear(self.weights_proj, x).astype(mx.float32) * (
+            self.n_heads**-0.5
+        )
         scores = (scores * weights.swapaxes(-1, -2)[..., None]).sum(axis=1)
         if pmask is not None:
             scores = mx.where(
@@ -1384,7 +1432,9 @@ class Indexer(nn.Module):
                 import mlx_kquant as kq
 
                 if hasattr(kq, "dsa_indexer_score_decode"):
-                    weights = self.weights_proj(x) * (self.n_heads**-0.5)
+                    weights = _skinny_linear(self.weights_proj, x) * (
+                        self.n_heads**-0.5
+                    )
                     scores = kq.dsa_indexer_score_decode(
                         q,
                         pooled,
