@@ -14,6 +14,18 @@ from typing import Tuple
 import mlx.core as mx
 import mlx.nn as nn
 
+# Prefer the mlx-kquant C++ ports of the M=1 glue kernels when the
+# installed kq has them: same kernels, bit-exact, ~5x cheaper per call on
+# the host. GMLX_HC_KQ=0 forces the in-repo JIT kernels for A/Bs.
+try:
+    import mlx_kquant as _kq
+
+    _KQ_HC = hasattr(_kq, "hc_front_reduce") and os.environ.get(
+        "GMLX_HC_KQ", "1") != "0"
+except ImportError:
+    _kq = None
+    _KQ_HC = False
+
 
 def _make_hc_sinkhorn_collapse_kernel():
     """Fused sinkhorn + collapse: eliminates one dispatch per HC cycle.
@@ -249,7 +261,7 @@ class HyperConnection(nn.Module):
             ok = (
                 _HC_M1_ENABLED
                 and self.hc_mult == 4
-                and _hc_front_reduce_kernel is not None
+                and (_KQ_HC or _hc_front_reduce_kernel is not None)
                 and mx.default_device() == mx.gpu
                 and (self.fn.shape[1] // self.hc_mult) % 1024 == 0
             )
@@ -258,6 +270,11 @@ class HyperConnection(nn.Module):
 
     def _collapse_m1(self, x, mixes_raw, ssq, norm_weight):
         B, L, H, D = x.shape
+        if _KQ_HC:
+            return _kq.hc_sinkhorn_collapse(
+                x, mixes_raw, ssq, self.scale, self.base, norm_weight,
+                iters=self.sinkhorn_iters, hc_eps=self.hc_eps,
+                norm_eps=self.norm_eps)
         return _hc_sinkhorn_collapse_m1_kernel(
             inputs=[x, mixes_raw, ssq, self.scale, self.base, norm_weight],
             template=[
@@ -281,6 +298,9 @@ class HyperConnection(nn.Module):
         Returns (normed_collapsed, post, comb); matches __call__ + RMSNorm to
         rounding (fp reduction order differs)."""
         B, L, H, D = x.shape
+        if _KQ_HC:
+            mixes_raw, ssq = _kq.hc_front_reduce(x, self.fn)
+            return self._collapse_m1(x, mixes_raw, ssq, norm_weight)
         mix = (2 + H) * H
         mixes_raw, ssq = _hc_front_reduce_kernel(
             inputs=[x, self.fn],
@@ -302,6 +322,10 @@ class HyperConnection(nn.Module):
         x_sub, resid, post, comb = carry
         B, L, D = x_sub.shape
         H = resid.shape[2]
+        if _KQ_HC:
+            h, mixes_raw, ssq = _kq.hc_front_expand_reduce(
+                x_sub, resid, post, comb, self.fn)
+            return h, self._collapse_m1(h, mixes_raw, ssq, norm_weight)
         mix = (2 + H) * H
         h, mixes_raw, ssq = _hc_front_expand_reduce_kernel(
             inputs=[x_sub, resid, post, comb, self.fn],
@@ -758,6 +782,8 @@ _hc_expand_m1_kernel = _make_hc_expand_m1_kernel()
 
 
 def hc_expand_m1(x, residual, post, comb):
+    if _KQ_HC:
+        return _kq.hc_expand(x, residual, post, comb)
     B, L, D = x.shape
     H = residual.shape[2]
     return _hc_expand_m1_kernel(
