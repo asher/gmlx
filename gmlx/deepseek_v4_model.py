@@ -1155,14 +1155,22 @@ class DeepseekV4MoE(nn.Module):
         inds, scores = self.gate(x, input_ids)
         if _MOE_MIX_SCORES and getattr(self.switch_mlp, "_kq_mix_scores", False):
             # Fused arm folds the score-weighted sum into the down gather
-            # (one dispatch, no [..., k, H] intermediate); the wrapper
-            # applies the sum itself whenever the fused path is ineligible.
+            # (one dispatch, no [..., k, H] intermediate); with the
+            # shared-expert stamp (install_dsv4_shexp_fold) the shared
+            # expert rides the same gathers and a mixed return has already
+            # consumed it. The stamped fallback returns unmixed and this
+            # caller mixes + adds the shared expert itself.
             y = self.switch_mlp(x, inds, scores)
+            if y.ndim == scores.ndim + 1:
+                y = (y * scores[..., None].astype(y.dtype)).sum(-2)
+                y = y + self.shared_experts(x)
+            elif getattr(self.switch_mlp, "_kq_shexp_mod", None) is None:
+                y = y + self.shared_experts(x)
         else:
             y = self.switch_mlp(x, inds)
             if y.ndim == scores.ndim + 1:
                 y = (y * scores[..., None].astype(y.dtype)).sum(-2)
-        y = y + self.shared_experts(x)
+            y = y + self.shared_experts(x)
 
         if self.sharding_group is not None:
             y = mx.distributed.all_sum(y, group=self.sharding_group)
