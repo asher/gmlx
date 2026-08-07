@@ -86,15 +86,22 @@ def _sdpa_dispatch(queries, keys, values, cache=None, scale=1.0, mask=None):
     """
     global _OWNED_SDPA_CALLS
     _OWNED_SDPA_CALLS += 1
+    if type(keys).__name__ == "KVarNView":
+        # Backstop: kvarn_unsupported declines the owned tree at setup
+        # (this call site bypasses the module-attribute sweep). If an arm
+        # is ever wanted here, route kvarn_attention(queries, keys.cache,
+        # scale, mask) as kvarn_sdpa's wrapper does.
+        raise RuntimeError(
+            "[kvarn] gemma-4 owned attention reached a kvarn cache; "
+            "the scheme should have been declined at setup"
+        )
     if attn_hd512._installed and env_bool("GMLX_G4_BATCHED_SDPA", True):
         out = gemma4_batched_sdpa._claim(
             queries, keys, values, cache, scale, mask, None
         )
         if out is not None:
             return out
-    return _base_sdpa(
-        queries, keys, values, cache=cache, scale=scale, mask=mask
-    )
+    return _base_sdpa(queries, keys, values, cache=cache, scale=scale, mask=mask)
 
 
 def _owned_make_masks(self, h, cache, mm_token_type_ids: Optional[mx.array] = None):
@@ -104,13 +111,11 @@ def _owned_make_masks(self, h, cache, mm_token_type_ids: Optional[mx.array] = No
     mask = {}
     masks = []
     has_audio_tokens = (
-        mm_token_type_ids is not None
-        and int(mx.sum(mm_token_type_ids == 3).item()) > 0
+        mm_token_type_ids is not None and int(mx.sum(mm_token_type_ids == 3).item()) > 0
     )
     has_visual_tokens = (
         mm_token_type_ids is not None
-        and int(mx.sum((mm_token_type_ids == 1) | (mm_token_type_ids == 2)).item())
-        > 0
+        and int(mx.sum((mm_token_type_ids == 1) | (mm_token_type_ids == 2)).item()) > 0
     )
     use_bidirectional_vision = (
         getattr(self.config, "use_bidirectional_attention", None) == "vision"
@@ -131,9 +136,7 @@ def _owned_make_masks(self, h, cache, mm_token_type_ids: Optional[mx.array] = No
                 )
             elif l.layer_type == "sliding_attention":
                 return_array = (
-                    h.shape[1] > 1
-                    and c is not None
-                    and _cache_has_prefix(c)
+                    h.shape[1] > 1 and c is not None and _cache_has_prefix(c)
                 ) or use_bidirectional_vision
                 mask["sliding_attention"] = _G.create_attention_mask(
                     h, c, window_size=self.window_size, return_array=return_array
@@ -144,16 +147,12 @@ def _owned_make_masks(self, h, cache, mm_token_type_ids: Optional[mx.array] = No
                 and mask[l.layer_type] == "causal"
             ):
                 window = (
-                    self.window_size
-                    if l.layer_type == "sliding_attention"
-                    else None
+                    self.window_size if l.layer_type == "sliding_attention" else None
                 )
                 mask[l.layer_type] = _G.create_causal_mask(
                     h.shape[1], window_size=window
                 )
-            if use_bidirectional_vision and isinstance(
-                mask[l.layer_type], mx.array
-            ):
+            if use_bidirectional_vision and isinstance(mask[l.layer_type], mx.array):
                 mask[l.layer_type] = self._apply_blockwise_bidirectional_overlay(
                     mask[l.layer_type],
                     mm_token_type_ids,
@@ -258,9 +257,7 @@ class OwnedGemma4LanguageModel(_G.LanguageModel):
         self.config = config
         self.model_type = config.model_type
         self.model = OwnedGemma4TextModel(config)
-        self.final_logit_softcapping = getattr(
-            config, "final_logit_softcapping", None
-        )
+        self.final_logit_softcapping = getattr(config, "final_logit_softcapping", None)
 
 
 def is_owned_language_model(model) -> bool:

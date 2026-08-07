@@ -60,7 +60,7 @@ def test_eager_seal_watermarks():
 
 
 @_NEEDS_GPU
-@pytest.mark.parametrize("d", [128, 256])
+@pytest.mark.parametrize("d", [128, 256, 512])
 def test_incremental_equals_bulk(d):
     # At d=256 this crosses both slice-transpose paths: single-group seals
     # on the incremental side, the multi-group bulk transpose on the other.
@@ -105,7 +105,7 @@ def test_trim_truth_table():
 
 
 @_NEEDS_GPU
-@pytest.mark.parametrize("d", [128, 256])
+@pytest.mark.parametrize("d", [128, 256, 512])
 @pytest.mark.parametrize("n_trim", [60, 160, 250, 600])
 def test_trim_replay_bit_equality(n_trim, d):
     k, v = _tokens(700, d=d)
@@ -147,7 +147,7 @@ def test_tail_disabled():
 
 
 @_NEEDS_GPU
-@pytest.mark.parametrize("d", [128, 256])
+@pytest.mark.parametrize("d", [128, 256, 512])
 def test_state_meta_round_trip(d):
     ref = _filled(700, d=d)
     r = KVarNKVCache.from_state(ref.state, ref.meta_state)

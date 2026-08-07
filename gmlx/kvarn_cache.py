@@ -43,7 +43,7 @@ except ImportError:  # pragma: no cover - mlx_kquant always present in practice
     kq = None
 
 GROUP = 128
-HEAD_DIMS = (128, 256)
+HEAD_DIMS = (128, 256, 512)
 KVARN_BITS = (2, 3, 4, 5, 6, 8)
 
 

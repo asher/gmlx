@@ -75,7 +75,7 @@ def _assert_close(out, ref, atol=5e-3):
 
 
 @_NEEDS_GPU
-@pytest.mark.parametrize("d", [128, 256])
+@pytest.mark.parametrize("d", [128, 256, 512])
 @pytest.mark.parametrize("ql", [1, 2, 4])
 def test_decode_with_tail_matches_reference(ql, d):
     cache = _filled(700, d=d)
@@ -85,7 +85,7 @@ def test_decode_with_tail_matches_reference(ql, d):
 
 
 @_NEEDS_GPU
-@pytest.mark.parametrize("d", [128, 256])
+@pytest.mark.parametrize("d", [128, 256, 512])
 @pytest.mark.parametrize("n", [130, 300, 700])
 def test_decode_no_tail_matches_reference(n, d):
     cache = _filled(n, tail=0, d=d)
@@ -95,7 +95,7 @@ def test_decode_no_tail_matches_reference(n, d):
 
 
 @_NEEDS_GPU
-@pytest.mark.parametrize("d", [128, 256])
+@pytest.mark.parametrize("d", [128, 256, 512])
 def test_decode_all_tail_matches_reference(d):
     # Shallow cache: the tail covers every token, no body call.
     cache = _filled(200, tail=384, d=d)
@@ -105,7 +105,7 @@ def test_decode_all_tail_matches_reference(d):
 
 
 @_NEEDS_GPU
-@pytest.mark.parametrize("d", [128, 256])
+@pytest.mark.parametrize("d", [128, 256, 512])
 def test_bfloat16_query(d):
     cache = _filled(700, d=d)
     q = _make_q(1, dtype=mx.bfloat16, d=d)
@@ -115,7 +115,7 @@ def test_bfloat16_query(d):
 
 
 @_NEEDS_GPU
-@pytest.mark.parametrize("d", [128, 256])
+@pytest.mark.parametrize("d", [128, 256, 512])
 def test_prefill_matches_reference(d):
     cache = _filled(700, d=d)
     q = _make_q(16, d=d)

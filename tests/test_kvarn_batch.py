@@ -56,15 +56,16 @@ def _ref_batch_decode(q, cache, pads):
         parts_k.append(kq.kvarn_rotate(tk))
         parts_v.append(kq.kvarn_rotate(tv))
     b, d = q.shape[0], q.shape[-1]
+    h, hq = cache.stage_k.shape[1], q.shape[1]
     k = mx.concatenate(parts_k, axis=2).astype(mx.float32)
     v = mx.concatenate(parts_v, axis=2).astype(mx.float32)
     qr = kq.kvarn_rotate(q.astype(mx.float16)).astype(mx.float32)
-    qg = qr.reshape(b, H, HQ // H, 1, d)
+    qg = qr.reshape(b, h, hq // h, 1, d)
     s = (qg @ k[:, :, None].transpose(0, 1, 2, 4, 3)) * (d**-0.5)
     kpos = mx.arange(n)[None, None, None, None, :]
     starts = mx.array(pads).reshape(b, 1, 1, 1, 1)
     s = mx.where(kpos >= starts, s, mx.array(-np.inf, mx.float32))
-    o = (mx.softmax(s, axis=-1) @ v[:, :, None]).reshape(b, HQ, 1, d)
+    o = (mx.softmax(s, axis=-1) @ v[:, :, None]).reshape(b, hq, 1, d)
     return kq.kvarn_rotate(o.astype(mx.float16)).astype(mx.float32)
 
 
@@ -116,7 +117,7 @@ def _decode_setup(n, pads, tail=256, seed=0, d=D):
 
 
 @_NEEDS_GPU
-@pytest.mark.parametrize("d", [128, 256])
+@pytest.mark.parametrize("d", [128, 256, 512])
 def test_batch_decode_matches_reference(d):
     # Row starts hit every region: records (150), and past the body/tail
     # boundary (400 > 600-256): that row's body leg attends zero keys and
@@ -125,6 +126,23 @@ def test_batch_decode_matches_reference(d):
     c, mask = _decode_setup(600, pads, d=d)
     q = _make_q(d=d)
     out = kvarn_attention(q, c, d**-0.5, mask)
+    _assert_close(out, _ref_batch_decode(q, c, pads))
+
+
+@_NEEDS_GPU
+def test_batch_decode_d512_gqa16_shipped_shape():
+    # gemma-4 global layers on serve: 1 kv head, 16 q heads; gqa sits on
+    # _decode_batch's <= 16 limit.
+    pads = [0, 150, 400]
+    c = BatchKVarNKVCache(pads, tail_tokens=256)
+    rng = np.random.default_rng(7)
+    k = mx.array(rng.standard_normal((3, 1, 600, 512)).astype(np.float16))
+    v = mx.array(rng.standard_normal((3, 1, 600, 512)).astype(np.float16))
+    c.update_and_fetch(k[:, :, :-1], v[:, :, :-1])
+    mask = c.make_mask(1, window_size=None)
+    c.update_and_fetch(k[:, :, -1:], v[:, :, -1:])
+    q = mx.array(rng.standard_normal((3, 16, 1, 512)).astype(np.float16))
+    out = kvarn_attention(q, c, 512**-0.5, mask)
     _assert_close(out, _ref_batch_decode(q, c, pads))
 
 
@@ -173,7 +191,7 @@ def test_make_mask_registers_starts():
 
 
 @_NEEDS_GPU
-@pytest.mark.parametrize("d", [128, 256])
+@pytest.mark.parametrize("d", [128, 256, 512])
 def test_explicit_starts_match_registered_mask(d):
     # Owned dispatches (qwen3.5) pass cache.left_padding directly; the
     # fused result must match the mask-provenance route bit for bit.
@@ -198,7 +216,7 @@ def test_explicit_starts_masked_fallback(monkeypatch):
 
 
 @_NEEDS_GPU
-@pytest.mark.parametrize("d", [128, 256])
+@pytest.mark.parametrize("d", [128, 256, 512])
 def test_qwen35_arm_uses_cache_pads(d):
     # The qwen3.5 decode protocol strips the mask to None and carries the
     # pads on the cache; the arm must recover per-row starts from it.

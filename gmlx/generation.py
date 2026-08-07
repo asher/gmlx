@@ -141,22 +141,29 @@ def kv_quantization_unsupported(model) -> str | None:
     return None
 
 
-def _kvarn_head_dim(model):
-    """The model's attention head dim, -1 for MLA latents, 0 when unknown."""
+def _kvarn_head_dims(model):
+    """Candidate attention head dims, {-1} for MLA latents, empty when
+    unknown. Mixed-dim archs (gemma-4: sliding head_dim + global
+    global_head_dim) contribute every dim; any supported one suffices since
+    conversion is per-layer and update_and_fetch validates per instance."""
     for holder in (model, getattr(model, "language_model", None)):
         args = getattr(holder, "args", None) or getattr(holder, "config", None)
         if args is None:
             continue
         if getattr(args, "kv_lora_rank", None):
-            return -1
-        hd = getattr(args, "head_dim", None)
-        if hd:
-            return int(hd)
+            return {-1}
+        dims = set()
+        for key in ("head_dim", "global_head_dim"):
+            hd = getattr(args, key, None)
+            if hd:
+                dims.add(int(hd))
+        if dims:
+            return dims
         hs = getattr(args, "hidden_size", None)
         nh = getattr(args, "num_attention_heads", None)
         if hs and nh:
-            return int(hs) // int(nh)
-    return 0
+            return {int(hs) // int(nh)}
+    return set()
 
 
 def kvarn_unsupported(model) -> str | None:
@@ -172,11 +179,22 @@ def kvarn_unsupported(model) -> str | None:
     reason = kvarn_ops_missing()
     if reason:
         return reason
-    hd = _kvarn_head_dim(model)
-    if hd == -1:
+    dims = _kvarn_head_dims(model)
+    if dims == {-1}:
         return "MLA latent KV cache (K and V share storage)"
-    if hd not in (128, 256):
-        return f"head_dim {hd or 'unknown'} (kvarn supports 128/256)"
+    from .kvarn_cache import HEAD_DIMS
+
+    if not dims & set(HEAD_DIMS):
+        shown = "/".join(str(d) for d in sorted(dims)) or "unknown"
+        return f"head_dim {shown} (kvarn supports 128/256/512)"
+    from .gemma4_owned import is_owned_language_model
+
+    if is_owned_language_model(model):
+        # The owned tree's attention calls an import-time sdpa alias the
+        # kvarn sweep never rebinds; unreachable today (the shared-KV
+        # drafter gate declines first), declined here so a future drafter
+        # change fails informatively at setup, not mid-forward.
+        return "gemma-4 owned (MTP) tree"
     return None
 
 
