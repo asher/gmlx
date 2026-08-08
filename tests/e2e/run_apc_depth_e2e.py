@@ -1487,6 +1487,7 @@ def main() -> int:
                                 "ckpt_stores",
                                 "ckpt_hits",
                                 "ckpt_matched_tokens",
+                                "ckpt_pool_evictions",
                                 "matched_tokens",
                                 "disk_writes",
                             )

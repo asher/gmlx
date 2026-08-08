@@ -635,7 +635,7 @@ def _ckpt_records(manager) -> "OrderedDict":
 _CKPT_STAT_INTS = (
     "ckpt_stores", "ckpt_hits", "ckpt_matched_tokens",
     "ckpt_missed_adoptions", "ckpt_skeleton_writes", "sidecar_writes",
-    "retire_fallback_full",
+    "retire_fallback_full", "ckpt_pool_evictions",
 )
 
 
@@ -773,6 +773,36 @@ def _release_record(manager, rec) -> None:
                 _log.debug("APC ckpt record release failed", exc_info=True)
     rec.main_blocks = rec.bounded_blocks = []
     rec.states = rec.tails = None
+
+
+def _free_block_count(manager) -> int:
+    n = 0
+    b = manager._free_head
+    while b is not None:
+        n += 1
+        b = b.next
+    return n
+
+
+def _evict_for_pool(manager, deficit: int) -> int:
+    """Release least-recently-used records until ``deficit`` blocks sit on
+    the pool free list, always at least one when any record exists (the
+    caller loops on retry, so each call must make progress). Window
+    chains are position-salted (no dedup), so on large-window models
+    pinned records exhaust the pool long before the entry or byte bounds
+    trip; insert-time eviction then never runs again because no store
+    can complete. Returns the number of records released."""
+    if not hasattr(manager, "_free_head"):
+        return 0
+    idx = _ckpt_records(manager)
+    evicted = 0
+    with manager.lock:
+        while idx and (evicted == 0
+                       or _free_block_count(manager) < deficit):
+            _, victim = idx.popitem(last=False)
+            _release_record(manager, victim)
+            evicted += 1
+    return evicted
 
 
 def _record_insert(manager, rec) -> None:
@@ -915,6 +945,51 @@ def ckpt_store(
                       if not isinstance(c, (kv_types, rot_types))]
 
         store_blocks = getattr(manager, "store_ckpt_blocks", None)
+
+        def _chained(span_ids, ks, vs, *, extra, disk, need, what):
+            # A short chain means the pool ran out of evictable blocks
+            # (an unpinnable record is a tombstone that displaces
+            # restorable ones through strip-on-extend). Evict records
+            # and retry; each round releases at least one record, so
+            # the loop is bounded by the record count. A span the pool
+            # can never hold declines upfront without sacrificing live
+            # records.
+            pool = getattr(manager, "pool", None)
+            if pool is not None and need > len(pool):
+                _log.info(
+                    "APC ckpt store declined: %s chain needs %d blocks, "
+                    "pool holds %d", what, need, len(pool))
+                _ckpt_decline(manager, "short_chain")
+                return None
+
+            def _once():
+                if store_blocks is not None:
+                    return store_blocks(
+                        span_ids, ks, vs, extra_hash=extra, disk=disk)
+                return manager.store_kv_blocks(
+                    span_ids, ks, vs, extra_hash=extra)
+
+            blocks = _once()
+            evicted_total = 0
+            while len(blocks) < need:
+                got = len(blocks)
+                manager.release(blocks)
+                evicted = _evict_for_pool(manager, need - got)
+                if not evicted:
+                    _log.info(
+                        "APC ckpt store declined: %s chain short (%d/%d "
+                        "blocks)", what, got, need)
+                    _ckpt_decline(manager, "short_chain")
+                    return None
+                evicted_total += evicted
+                blocks = _once()
+            if evicted_total:
+                _ckpt_bump(manager, "ckpt_pool_evictions", evicted_total)
+                _log.info(
+                    "APC ckpt pool pressure: evicted %d record(s) for a "
+                    "%s chain store", evicted_total, what)
+            return blocks
+
         if b_full > 0 and kv_caches:
             lk = [c.keys[..., :b_full, :] for c in kv_caches]
             lv = [c.values[..., :b_full, :] for c in kv_caches]
@@ -923,21 +998,12 @@ def ckpt_store(
             # unevaluated inputs from two threads is undefined in mlx.
             import mlx.core as mx
             mx.eval(lk + lv)
-            if store_blocks is not None:
-                main_blocks = store_blocks(
-                    ids[:b_full], lk, lv, extra_hash=salted)
-            else:
-                main_blocks = manager.store_kv_blocks(
-                    ids[:b_full], lk, lv, extra_hash=salted)
-            if len(main_blocks) * bs < b_full:
-                # An unpinnable record is a tombstone that displaces
-                # restorable ones through strip-on-extend: decline.
-                _log.info(
-                    "APC ckpt store declined: main chain short (%d/%d "
-                    "blocks)", len(main_blocks), b_full // bs)
-                _ckpt_decline(manager, "short_chain")
-                manager.release(main_blocks)
+            got_main = _chained(
+                ids[:b_full], lk, lv, extra=salted, disk=True,
+                need=b_full // bs, what="main")
+            if got_main is None:
                 return False
+            main_blocks = got_main
 
         rot_meta = None
         if rot_caches:
@@ -960,21 +1026,13 @@ def ckpt_store(
             # Same writer-thread rule as the main chain above.
             import mlx.core as mx
             mx.eval(canon_k + canon_v)
-            if store_blocks is not None:
-                bounded_blocks = store_blocks(
-                    canon_ids, canon_k, canon_v, extra_hash=bsalt,
-                    disk=rot_disk)
-            else:
-                bounded_blocks = manager.store_kv_blocks(
-                    canon_ids, canon_k, canon_v, extra_hash=bsalt)
-            if len(bounded_blocks) * bs < L:
-                _log.info(
-                    "APC ckpt store: window chain short (%d/%d blocks); "
-                    "store declined", len(bounded_blocks), L // bs)
-                _ckpt_decline(manager, "short_chain")
+            got_win = _chained(
+                canon_ids, canon_k, canon_v, extra=bsalt, disk=rot_disk,
+                need=L // bs, what="window")
+            if got_win is None:
                 manager.release(main_blocks)
-                manager.release(bounded_blocks)
                 return False
+            bounded_blocks = got_win
 
         states = [_clone_single_row(c) for c in arr_caches]
         if any(s is None for s in states):
