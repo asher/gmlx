@@ -295,9 +295,38 @@ def install_stream_thinking_seed() -> None:
             if prompt is not None:
                 self.in_thinking = _prompt_tail_opens_thinking(
                     prompt, self.open_close_markers)
+                if prompt.rstrip().endswith("<|start|>assistant"):
+                    # harmony (gpt-oss): the state machine's open/close
+                    # pairs cannot express channel routing, so the stream
+                    # splits through the REPL's marker filter instead.
+                    from ..reasoning import ReasoningFilter
+                    self._kq_harmony = ReasoningFilter()
+                    self._kq_harmony_closed = False
 
         __init__.__dict__[_STREAM_SEED_FLAG] = True
         cls.__init__ = __init__
+
+    if not getattr(cls.feed, _STREAM_SEED_FLAG, False):
+        original_feed = cls.feed
+        delta_cls = rs.ThinkingStreamDelta
+
+        def feed(self, text):
+            filt = getattr(self, "_kq_harmony", None)
+            if filt is None:
+                return original_feed(self, text)
+            spans = filt.feed(text or "")
+            reasoning = "".join(t for t, m in spans if m == "reason")
+            content = "".join(t for t, m in spans if m == "answer")
+            closed = False
+            if content and not self._kq_harmony_closed:
+                self._kq_harmony_closed = True
+                closed = True
+            return delta_cls(reasoning=reasoning or None,
+                             content=content or None,
+                             thinking_closed=closed)
+
+        feed.__dict__[_STREAM_SEED_FLAG] = True
+        cls.feed = feed
 
     def _wrap(fn):
         def apply_chat_template(*a, **kw):
@@ -324,6 +353,15 @@ def install_stream_thinking_seed() -> None:
     if split is not None and not getattr(split, _STREAM_SEED_FLAG, False):
         def _split_thinking_text(text, thinking_start_token=None,
                                  thinking_end_token=None):
+            if text and "<|channel|>" in text:
+                # harmony (gpt-oss): the stock splitter knows none of these
+                # markers and returns the raw markup as content, which the
+                # model's own chat template rejects with a 500 once a client
+                # sends the reply back as history. (Gemma's lopsided
+                # "<|channel>thought" lacks the closing pipe, so this gate
+                # cannot misfire on it.)
+                from ..reasoning import split_harmony_reply
+                return split_harmony_reply(text)
             reasoning, content = split(
                 text, thinking_start_token, thinking_end_token)
             if reasoning is None and content and retire_key.truncated_thinking(

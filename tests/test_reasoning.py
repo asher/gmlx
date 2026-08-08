@@ -482,3 +482,58 @@ def test_map_thinking_controls_value_spellings(capsys):
     assert map_thinking_controls({}, thinking="sideways", template=tmpl,
                                  warn=warns.append) == {}
     assert warns and "unrecognized" in warns[0]
+
+
+@pytest.mark.parametrize("chunk", [0, 1, 3, 7])
+def test_harmony_annotated_commentary_tool_header(chunk):
+    # Tool preludes annotate the header; everything up to <|message|> is
+    # header, the payload routes to reasoning, nothing reaches the answer.
+    text = ('<|channel|>commentary to=functions.get_weather '
+            '<|constrain|>json<|message|>{"location": "SF"}<|call|>')
+    reason, answer, _ = _segment(text, chunk=chunk)
+    assert reason == '{"location": "SF"}'
+    assert answer == ""
+    assert "functions" not in reason + answer
+
+
+@pytest.mark.parametrize("chunk", [0, 1, 3, 7])
+def test_harmony_annotated_final_header(chunk):
+    # Structured output constrains the final channel; the annotation is
+    # header, the payload is the answer.
+    text = '<|channel|>final <|constrain|>json<|message|>{"answer": 4}'
+    reason, answer, _ = _segment(text, chunk=chunk)
+    assert answer == '{"answer": 4}'
+    assert reason == ""
+
+
+def test_harmony_unknown_channel_routes_to_reasoning():
+    reason, answer, _ = _segment(
+        "<|channel|>critique<|message|>too wordy<|end|>")
+    assert reason == "too wordy"
+    assert answer == ""
+
+
+def test_harmony_capped_mid_header_drops_header_remnant():
+    reason, answer, _ = _segment("<|channel|>commentary to=functi")
+    assert reason == ""
+    assert answer == ""
+
+
+def test_swallow_budget_bounds_literal_channel_mention():
+    # A non-harmony reply quoting the literal marker must not lose the rest
+    # of the message: the swallow gives up past its budget.
+    tail = "x" * 300
+    reason, answer, _ = _segment("see <|channel|>" + tail)
+    assert answer.startswith("see ")
+    assert tail[-40:] in reason + answer
+
+
+def test_split_harmony_reply_shapes():
+    from gmlx.reasoning import split_harmony_reply
+    full = ('<|channel|>analysis<|message|>Count the entries.'
+            "<|end|><|start|>assistant<|channel|>final<|message|>Six.")
+    assert split_harmony_reply(full) == ("Count the entries.", "Six.")
+    capped = "<|channel|>analysis<|message|>Count the"
+    assert split_harmony_reply(capped) == ("Count the", "")
+    plain = "Six."
+    assert split_harmony_reply(plain) == (None, "Six.")

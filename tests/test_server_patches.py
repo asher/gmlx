@@ -2440,3 +2440,107 @@ def test_sampling_float_rejects_non_numeric():
         with pytest.raises(HTTPException) as ei:
             sp_sampling._sampling_float("xtc_probability", bad)
         assert ei.value.status_code == 400
+
+
+# harmony (gpt-oss) serve-side split
+_HARMONY_PROMPT = ("<|start|>system<|message|>You are helpful.<|end|>"
+                   "<|start|>user<|message|>hi<|end|><|start|>assistant")
+_HARMONY_REPLY = ('<|channel|>analysis<|message|>User greets; keep it short.'
+                  "<|end|><|start|>assistant<|channel|>final<|message|>"
+                  "Hello! How can I help?")
+
+
+def test_nonstream_split_harmony_reply():
+    app_mod = importlib.import_module("mlx_vlm.server.app")
+    sp.install_stream_thinking_seed()
+    split = app_mod._split_thinking_text
+    tok = sp_chat._LAST_RENDERED_PROMPT.set(None)
+    try:
+        r, c = split(_HARMONY_REPLY)
+        assert r == "User greets; keep it short."
+        assert c == "Hello! How can I help?"
+        assert "<|" not in c and "<|" not in r
+        # Length-capped inside analysis: all reasoning, empty content
+        # (the truncated-thinking convention).
+        r, c = split("<|channel|>analysis<|message|>Entry 55 reads 4")
+        assert r == "Entry 55 reads 4"
+        assert c == ""
+        # Gemma's lopsided spelling must not take the harmony branch.
+        r, c = split("<|channel>thought\nplan\n<channel|>Hi there.")
+        assert c and "<|channel|>" not in c
+    finally:
+        sp_chat._LAST_RENDERED_PROMPT.reset(tok)
+
+
+def test_stream_harmony_filter_routes_channels():
+    rs = importlib.import_module("mlx_vlm.server.responses_state")
+    cls = rs.ThinkingStreamState
+    original_init = cls.__init__
+    original_feed = cls.feed
+    try:
+        sp.install_stream_thinking_seed()
+        tok = sp_chat._LAST_RENDERED_PROMPT.set(_HARMONY_PROMPT)
+        try:
+            st = cls(True)
+            assert getattr(st, "_kq_harmony", None) is not None
+            reasoning, content, closes = [], [], 0
+            for i in range(0, len(_HARMONY_REPLY), 7):
+                d = st.feed(_HARMONY_REPLY[i:i + 7])
+                if d.reasoning:
+                    reasoning.append(d.reasoning)
+                if d.content:
+                    content.append(d.content)
+                closes += bool(d.thinking_closed)
+            assert "".join(reasoning) == "User greets; keep it short."
+            assert "".join(content) == "Hello! How can I help?"
+            assert closes == 1
+            # Non-harmony prompt: the stock state machine still drives.
+            sp_chat._LAST_RENDERED_PROMPT.set("<|im_start|>assistant\n<think>\n")
+            st = cls(True)
+            assert getattr(st, "_kq_harmony", None) is None
+            d = st.feed("plan</think>answer")
+            assert d.reasoning == "plan" and d.content == "answer"
+        finally:
+            sp_chat._LAST_RENDERED_PROMPT.reset(tok)
+    finally:
+        cls.__init__ = original_init
+        cls.feed = original_feed
+
+
+def test_faithful_history_aliases_gpt_oss_thinking():
+    from gmlx.server_patches import _common as sp_common
+    from gmlx.server_patches import render as sp_render
+
+    def fake(processor, config, prompt, add_generation_prompt=True,
+             return_messages=False, num_images=0, num_audios=0, **kwargs):
+        return [dict(m) for m in prompt]
+
+    # Exercise through the installer against a stub target module.
+    target = types.SimpleNamespace(apply_chat_template=fake)
+    orig_targets = sp_common._render_target_modules
+    sp_common._render_target_modules = lambda: [target]
+    try:
+        sp_render.install_faithful_history()
+    finally:
+        sp_common._render_target_modules = orig_targets
+    wrapped = target.apply_chat_template
+    assert wrapped is not fake
+    msgs = wrapped(
+        "processor", {"model_type": "gpt_oss"},
+        [{"role": "assistant", "content": "Hi.",
+          "reasoning_content": "Short greeting."}],
+        return_messages=True)
+    assert msgs[0]["thinking"] == "Short greeting."
+    # Explicit thinking key wins; non-gpt-oss untouched.
+    msgs = wrapped(
+        "processor", {"model_type": "gpt_oss"},
+        [{"role": "assistant", "content": "Hi.", "thinking": "keep",
+          "reasoning_content": "drop"}],
+        return_messages=True)
+    assert msgs[0]["thinking"] == "keep"
+    msgs = wrapped(
+        "processor", {"model_type": "qwen3"},
+        [{"role": "assistant", "content": "Hi.",
+          "reasoning_content": "r"}],
+        return_messages=True)
+    assert "thinking" not in msgs[0]

@@ -71,9 +71,17 @@ def install_faithful_history() -> None:
                                  if k not in built}
                         if extra:
                             msgs[i] = {**extra, **built}
+            cfg = config if isinstance(config, dict) else config.__dict__
+            if cfg.get("model_type") == "gpt_oss":
+                # The harmony template reads prior-turn reasoning from a
+                # ``thinking`` key; alias the OpenAI-style spelling so
+                # preserve_thinking works for standard clients.
+                for i, m in enumerate(msgs):
+                    if (isinstance(m, dict) and "thinking" not in m
+                            and m.get("reasoning_content")):
+                        msgs[i] = {**m, "thinking": m["reasoning_content"]}
             if return_messages:
                 return msgs
-            cfg = config if isinstance(config, dict) else config.__dict__
             if cfg.get("model_type") in _LAST_MESSAGE_ONLY:
                 return msgs[-1]
             return prompt_utils.get_chat_template(
