@@ -405,8 +405,17 @@ def main() -> int:
         # A real conversation through the real chat template: this is the
         # production render_ctx path (think-stripping and all) that every
         # unit test fakes with synthetic ids.
+        def history_safe(reply: str) -> str:
+            # A length-capped reasoning reply can leak channel markup into
+            # the content field (server parser gap, noted in the report);
+            # templates reject it, so feed back plain text only.
+            if "<|" not in reply:
+                return reply
+            seg = reply.rsplit("<|message|>", 1)[-1]
+            return re.sub(r"<\|[^|>]*\|>", " ", seg).strip() or "(elided)"
+
         history = []
-        last_answer = text
+        last_answer = content
         prev_ptok = 0
         turn_qs = [
             "Follow-up: is the reading in entry 12 above or below 50 units?",
@@ -417,21 +426,23 @@ def main() -> int:
         turn_dms = []
         # ground truth for turn 1's question: entry 12 reads (12*7)%97 = 84
         for t_i in range(a.turns):
-            history.append((turn_qs[t_i % len(turn_qs)], last_answer))
+            history.append((turn_qs[t_i % len(turn_qs)],
+                            history_safe(last_answer)))
             msgs = [{"role": "user", "content": prefix + q}]
             for uq, at in history:
                 msgs.append({"role": "assistant", "content": at})
                 msgs.append({"role": "user", "content": uq})
             m0 = tick(K["matched"])
-            st, turn_text, last_answer, ptok, wall = chat(base, mid, msgs, max_tokens=96)
+            st, turn_text, last_answer, ptok, wall = chat(
+                base, mid, msgs, max_tokens=96)
             dm = tick(K["matched"]) - m0
             turn_dms.append(dm)
-            turns_ok &= st == 200 and len(last_answer) > 0
+            turns_ok &= st == 200 and len(turn_text) > 0
             monotone &= ptok > prev_ptok
             prev_ptok = ptok
             extra = ""
             if t_i == 0:
-                extra = f", says-above={'above' in last_answer.lower()}"
+                extra = f", says-above={'above' in turn_text.lower()}"
             rep.note(
                 f"turn{t_i + 1}",
                 f"status {st}, prompt {ptok} tok, matched +{dm}, {wall:.1f}s{extra}",
