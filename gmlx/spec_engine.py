@@ -427,7 +427,10 @@ def _ckpt_replay_boundary(batch, meta, restored: int,
     query, and the interval/terminal schedule never places one there
     for prompts under one interval (the depth e2e's bug 1); N-1 is the
     deepest position that is both adoptable and drift-free (the warm
-    turn forwards exactly one token). arr layouts gate on a minimum N:
+    turn forwards exactly one token), and the pause is free on the cold
+    side -- both prefill loops already stop at N-1 to feed the first
+    decode step, so the boundary lands on a natural chunk edge and
+    perturbs no chunk shape. arr layouts gate on a minimum N:
     recurrent state is prompt-length-independent (>100 MB per record on
     27B-class), and short-prompt records would churn the LRU out of the
     deep-conversation records it exists to protect. Rotating layouts
@@ -465,6 +468,16 @@ def _ckpt_turn_boundaries(batch, meta, restored: int,
     if env_int("GMLX_APC_CKPT_TURN", 1) == 0:
         return []
     ids = meta.get("full_input_ids") or ()
+    unit = _ckpt_unit(batch, block_size)
+    tags = _ckpt_layout_for(getattr(batch, "model", None), block_size) or ()
+    ws = [int(t.split(":")[1]) for t in tags if t.startswith("rot")]
+    # Cheapest boundary this layout could arm: the grid needs one unit
+    # of stable prefix; rot-only layouts can also pause exactly at
+    # p_stable once the window wraps. Below that no boundary can land,
+    # so skip the render+tokenize prediction entirely.
+    need = unit if ("arr" in tags or not ws) else min(unit, max(ws))
+    if len(ids) - 1 < need:
+        return []
     from .retire_key import lookup_render_ctx, prompt_stable_lcp
     ctx = lookup_render_ctx(ids)
     p_stable = prompt_stable_lcp(ctx, ids) if ctx else None
@@ -472,14 +485,11 @@ def _ckpt_turn_boundaries(batch, meta, restored: int,
         return []
     p_stable = min(int(p_stable), len(ids) - 1)
     meta["ckpt_p_stable"] = p_stable
-    unit = _ckpt_unit(batch, block_size)
     floor = max(0, restored)
     out = []
     grid = (p_stable // unit) * unit
     if grid > floor:
         out.append(grid)
-    tags = _ckpt_layout_for(getattr(batch, "model", None), block_size) or ()
-    ws = [int(t.split(":")[1]) for t in tags if t.startswith("rot")]
     if ws and "arr" not in tags and p_stable != grid \
             and p_stable > floor and p_stable >= max(ws):
         out.append(p_stable)
@@ -488,16 +498,16 @@ def _ckpt_turn_boundaries(batch, meta, restored: int,
 
 def _sched_insert(bounds: list, pos: int, kind: str) -> None:
     """Insert (pos, kind) keeping order. On collision the existing entry
-    keeps its kind unless the incoming kind is replay -- its retention
-    and adoption semantics must win for the identical-resend record."""
+    keeps its kind: a colliding position is always grid-aligned or an
+    exact turn boundary, where a plain boundary record adopts freely --
+    identical resend included -- while flipping it to replay would gate
+    turn-2 and branch adoption out on recurrent layouts (and satisfy the
+    p=N drop with a record turn 2 cannot use)."""
     import bisect
 
     pts = [b for b, _ in bounds]
     i = bisect.bisect_left(pts, pos)
-    if i < len(pts) and pts[i] == pos:
-        if kind == "replay":
-            bounds[i] = (pos, kind)
-    else:
+    if i >= len(pts) or pts[i] != pos:
         bounds.insert(i, (pos, kind))
 
 

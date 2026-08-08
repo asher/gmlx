@@ -114,11 +114,14 @@ def test_replay_boundary_appends_after_terminal():
     assert meta["ckpt_boundaries"] == [(4096, "boundary"), (4999, "replay")]
 
 
-def test_replay_boundary_retags_grid_collision():
-    # N-1 landing exactly on the terminal column: one boundary, replay
-    # retention/adoption semantics win.
+def test_replay_boundary_grid_collision_keeps_boundary_kind():
+    # N-1 landing exactly on the terminal column: one boundary, plain
+    # kind. A grid-aligned boundary record adopts freely -- identical
+    # resend included -- while a replay flip would gate turn-2 and
+    # branch adoption out on recurrent layouts yet still satisfy the
+    # p=N drop.
     meta = _arm_meta(4097, ("kv", "arr"))
-    assert meta["ckpt_boundaries"] == [(4096, "replay")]
+    assert meta["ckpt_boundaries"] == [(4096, "boundary")]
 
 
 def test_replay_boundary_kill_switch(monkeypatch):
@@ -194,6 +197,23 @@ def test_turn_boundary_no_render_ctx(monkeypatch):
     meta = _arm_meta(5000, ("kv", "arr"))
     assert meta["ckpt_p_stable_bounds"] == []
     assert meta["ckpt_boundaries"] == [(4096, "boundary"), (4999, "replay")]
+
+
+def test_turn_boundary_small_prompt_skips_prediction(monkeypatch):
+    # Below the cheapest armable boundary the render+tokenize prediction
+    # is pure cost; the schedule must not even look up the render ctx.
+    from gmlx import retire_key
+
+    def _boom(ids):
+        raise AssertionError("render ctx consulted below the arm floor")
+
+    monkeypatch.setattr(retire_key, "lookup_render_ctx", _boom)
+    assert _arm_meta(2048, ("kv", "arr"))["ckpt_p_stable_bounds"] == []
+    assert _arm_meta(400, ("rot:512:0", "kv"))["ckpt_p_stable_bounds"] == []
+    # At the floor the prediction runs again.
+    _stub_p_stable(monkeypatch, 550)
+    meta = _arm_meta(600, ("rot:512:0", "kv"))
+    assert meta["ckpt_p_stable_bounds"] == [550]
 
 
 # -- advance + latch across a schedule --

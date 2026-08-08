@@ -243,6 +243,12 @@ def predict_next_ids(ctx: dict, assistant_msg: dict | None) -> list[int] | None:
     return [int(t) for t in ids]
 
 
+# Configs whose prompt-stable prediction already failed once: the first
+# failure warns with the traceback, repeats log at debug -- one broken
+# template must not stack a warning onto every request.
+_P_STABLE_WARNED: set[int] = set()
+
+
 def prompt_stable_lcp(ctx: dict, prompt_ids) -> int | None:
     """Longest prefix of the live prompt render that survives a next-turn
     re-render.
@@ -269,8 +275,14 @@ def prompt_stable_lcp(ctx: dict, prompt_ids) -> int | None:
             while lcp < n and seq[lcp] == nxt[lcp]:
                 lcp += 1
     except Exception:
-        _log.warning("prompt-stable prediction failed; turn boundaries "
-                     "off for this request", exc_info=True)
+        key = id(ctx.get("config"))
+        if key in _P_STABLE_WARNED:
+            _log.debug("prompt-stable prediction failed", exc_info=True)
+        else:
+            _P_STABLE_WARNED.add(key)
+            _log.warning(
+                "prompt-stable prediction failed; turn-boundary reuse is "
+                "off for this model (repeats log at debug)", exc_info=True)
         lcp = None
     ctx["_p_stable"] = -1 if lcp is None else lcp
     return lcp
