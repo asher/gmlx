@@ -1161,10 +1161,14 @@ def _ckpt_post_prefill(model, prompt_cache: list, retire_ctx: dict) -> None:
         manager = getattr(model, "_kq_apc_manager", None)
         if manager is None:
             return
-        from .cache_snapshot import ckpt_store
+        from .cache_snapshot import ckpt_full_store_redundant, ckpt_store
+        meta = retire_ctx.get("apc_meta")
+        if ckpt_full_store_redundant(meta):
+            _log.info("APC ckpt post-prefill store skipped: render-stable "
+                      "boundary landed")
+            return
         if ckpt_store(manager, retire_ctx["full_ids"], prompt_cache,
                       extra_hash=int(retire_ctx.get("extra_hash", 0))):
-            meta = retire_ctx.get("apc_meta")
             if meta is not None:
                 meta.setdefault("ckpt_stored_boundaries", []).append(
                     len(retire_ctx["full_ids"]))

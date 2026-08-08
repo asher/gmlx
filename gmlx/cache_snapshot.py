@@ -723,6 +723,20 @@ def _ckpt_note_miss(manager, tid, extra_hash, had_candidates) -> None:
         "(GMLX_APC_CKPT_TRIPWIRE=0 silences)", n)
 
 
+def ckpt_full_store_redundant(meta) -> bool:
+    """Whether the p=N post-prefill store may be dropped: a render-stable
+    boundary LANDED (armed is not enough -- the store can decline for
+    every reason the counters track, and arm-then-decline must keep p=N).
+    With that record live, N-1 covers identical resend, p_stable covers
+    turn-2 and branch prefixes, and retirement covers continuation --
+    the near-identical adjacent records at N-1/N are exactly what
+    strip-on-extend was fighting over."""
+    if not meta:
+        return False
+    stored = meta.get("ckpt_stored_boundaries") or ()
+    return any(b in stored for b in meta.get("ckpt_p_stable_bounds") or ())
+
+
 def _release_record(manager, rec) -> None:
     for blocks in (rec.main_blocks, rec.bounded_blocks):
         if blocks:
@@ -1557,6 +1571,20 @@ def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
                 _log.info("APC retirement: decode ckpt stored at %d "
                           "(cap %d, full %d)", p, cap, len(ids))
                 return True
+        # No snapshot at or below the replayable prefix: fall back to the
+        # full sequence under its verbatim key rather than storing
+        # nothing. A re-rendered turn will not adopt it, but a raw
+        # continuation client replays prompt+gen exactly and does.
+        # Reason-counted so fallback traffic is distinguishable from
+        # turn reuse. Only when the whole-sequence branch above did not
+        # already try (cap == len means it ran and declined).
+        if cap < len(ids) and len(ids) >= 2 and ckpt_store(
+                manager, ids, prompt_cache, extra_hash=extra_hash,
+                kind="retire"):
+            _ckpt_bump(manager, "retire_fallback_full")
+            _log.info("APC retirement: full-sequence fallback stored at "
+                      "%d (replayable prefix %d)", len(ids), cap)
+            return True
         _log.info("APC retirement skipped: no decode snapshot at or "
                   "below the replayable prefix %d (full %d)",
                   cap, len(ids))

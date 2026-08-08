@@ -133,6 +133,69 @@ def test_replay_boundary_skipped_when_restored_past():
                      restored=1499)["ckpt_boundaries"] == []
 
 
+# -- Stage 6: render-stable turn boundaries --
+
+def _stub_p_stable(monkeypatch, p_stable):
+    from gmlx import retire_key
+    monkeypatch.setattr(retire_key, "lookup_render_ctx",
+                        lambda ids: {"stub": True})
+    monkeypatch.setattr(retire_key, "prompt_stable_lcp",
+                        lambda ctx, ids: p_stable)
+
+
+def test_turn_boundary_grid_all_layouts(monkeypatch):
+    _stub_p_stable(monkeypatch, 2100)
+    meta = _arm_meta(5000, ("kv", "arr"))
+    # The grid point below p_stable joins the schedule; p_stable itself
+    # is never armed on arr layouts (off-grid chunking drifts GDN state).
+    assert meta["ckpt_boundaries"] == [
+        (2048, "boundary"), (4096, "boundary"), (4999, "replay")]
+    assert meta["ckpt_p_stable_bounds"] == [2048]
+    assert meta["ckpt_p_stable"] == 2100
+
+
+def test_turn_boundary_rot_exact(monkeypatch):
+    # Rot-only layouts also pause exactly at p_stable: the attention
+    # split is exact and turn 2 adopts the full stable prefix.
+    _stub_p_stable(monkeypatch, 2100)
+    meta = _arm_meta(5000, ("rot:512:0", "kv"))
+    assert meta["ckpt_boundaries"] == [
+        (2048, "boundary"), (2100, "boundary"), (4096, "boundary"),
+        (4999, "replay")]
+    assert meta["ckpt_p_stable_bounds"] == [2048, 2100]
+
+
+def test_turn_boundary_rot_below_window_grid_only(monkeypatch):
+    _stub_p_stable(monkeypatch, 2100)
+    meta = _arm_meta(5000, ("rot:4096:0", "kv"))
+    assert meta["ckpt_boundaries"] == [
+        (2048, "boundary"), (4096, "boundary"), (4999, "replay")]
+    assert meta["ckpt_p_stable_bounds"] == [2048]
+
+
+def test_turn_boundary_grid_collides_with_terminal(monkeypatch):
+    _stub_p_stable(monkeypatch, 4990)
+    meta = _arm_meta(5000, ("kv", "arr"))
+    assert meta["ckpt_boundaries"] == [(4096, "boundary"), (4999, "replay")]
+    assert meta["ckpt_p_stable_bounds"] == [4096]
+
+
+def test_turn_boundary_kill_switch(monkeypatch):
+    _stub_p_stable(monkeypatch, 2100)
+    monkeypatch.setenv("GMLX_APC_CKPT_TURN", "0")
+    meta = _arm_meta(5000, ("kv", "arr"))
+    assert meta["ckpt_p_stable_bounds"] == []
+    assert meta["ckpt_boundaries"] == [(4096, "boundary"), (4999, "replay")]
+
+
+def test_turn_boundary_no_render_ctx(monkeypatch):
+    from gmlx import retire_key
+    monkeypatch.setattr(retire_key, "lookup_render_ctx", lambda ids: None)
+    meta = _arm_meta(5000, ("kv", "arr"))
+    assert meta["ckpt_p_stable_bounds"] == []
+    assert meta["ckpt_boundaries"] == [(4096, "boundary"), (4999, "replay")]
+
+
 # -- advance + latch across a schedule --
 
 def _armed_batch(man, ids, first, terminal, interval):

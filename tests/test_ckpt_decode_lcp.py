@@ -168,15 +168,31 @@ def test_retirement_rotating_uses_grid_snap():
     assert man.stats_snapshot()["exact_stores"] == 0
 
 
-def test_retirement_snap_past_lcp_is_skipped():
+def test_retirement_snap_past_lcp_falls_back_to_full():
+    """A snapshot past the replayable prefix stays unusable, but the
+    retirement now stores the full sequence under its verbatim key
+    (raw-continuation clients) instead of storing nothing."""
     man = APCManager(num_blocks=64, block_size=16)
     cache = make_hybrid_cache(96, seed=4)
     ids = list(range(96))
     snaps = [(90, _arr_states(make_hybrid_cache(90, seed=93)))]
-    assert not retirement_store(man, "ckpt", ids, cache, max_len=80,
-                                decode_snaps=snaps)
+    assert retirement_store(man, "ckpt", ids, cache, max_len=80,
+                            decode_snaps=snaps)
     _, got = ckpt_lookup(man, ids[:90] + [1], extra_hash=0)
-    assert got == 0
+    assert got == 0                       # the past-cap snap stayed unused
+    _, got = ckpt_lookup(man, ids + [1], extra_hash=0)
+    assert got == 96                      # verbatim fallback record
+    assert cs.ckpt_stats_snapshot(man)["retire_fallback_full"] == 1
+
+
+def test_retirement_snap_path_never_falls_back():
+    man = APCManager(num_blocks=64, block_size=16)
+    cache = make_hybrid_cache(96, seed=5)
+    ids = list(range(96))
+    snaps = [(64, _arr_states(make_hybrid_cache(64, seed=94)))]
+    assert retirement_store(man, "ckpt", ids, cache, max_len=80,
+                            decode_snaps=snaps)
+    assert cs.ckpt_stats_snapshot(man)["retire_fallback_full"] == 0
 
 
 def test_record_byte_budget_evicts_lru(monkeypatch):

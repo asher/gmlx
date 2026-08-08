@@ -382,6 +382,13 @@ def _gcd(a: int, b: int) -> int:
     return a
 
 
+def _ckpt_unit(batch, block_size: int) -> int:
+    """The natural chunk grid: lcm(prefill_step_size, block_size)."""
+    step = int(getattr(batch, "prefill_step_size", 0) or 0)
+    return block_size if step <= 0 else \
+        step * block_size // _gcd(step, block_size)
+
+
 def _ckpt_cursor_init(batch, guard: int, restored: int,
                       block_size: int) -> tuple[list, int, int]:
     """Boundary schedule for the checkpoint cursor: an ordered
@@ -396,9 +403,7 @@ def _ckpt_cursor_init(batch, guard: int, restored: int,
     Later stages add store positions by appending boundaries here, never
     by new store mechanisms.
     """
-    step = int(getattr(batch, "prefill_step_size", 0) or 0)
-    unit = block_size if step <= 0 else \
-        step * block_size // _gcd(step, block_size)
+    unit = _ckpt_unit(batch, block_size)
     terminal = (guard // unit) * unit
     if terminal <= max(0, restored):
         return [], 0, 0
@@ -444,6 +449,58 @@ def _ckpt_replay_boundary(batch, meta, restored: int,
     return replay
 
 
+def _ckpt_turn_boundaries(batch, meta, restored: int,
+                          block_size: int) -> list[int]:
+    """Render-stable turn boundary positions for the schedule.
+
+    p_stable is the deepest prompt position a next-turn re-render keeps;
+    the gen-prompt/think tail past it is re-rendered away, so records
+    stored only above it can never serve turn 2 (how multi-turn adoption
+    silently died). Every layout gets the grid point at or below
+    p_stable (drift-free for chunk-shape-sensitive state); rot-only
+    layouts also pause exactly at p_stable (attention splits exactly;
+    needs the window wrapped). GMLX_APC_CKPT_TURN=0 disables these and
+    with them the p=N drop gate.
+    """
+    if env_int("GMLX_APC_CKPT_TURN", 1) == 0:
+        return []
+    ids = meta.get("full_input_ids") or ()
+    from .retire_key import lookup_render_ctx, prompt_stable_lcp
+    ctx = lookup_render_ctx(ids)
+    p_stable = prompt_stable_lcp(ctx, ids) if ctx else None
+    if not p_stable or p_stable < 2:
+        return []
+    p_stable = min(int(p_stable), len(ids) - 1)
+    meta["ckpt_p_stable"] = p_stable
+    unit = _ckpt_unit(batch, block_size)
+    floor = max(0, restored)
+    out = []
+    grid = (p_stable // unit) * unit
+    if grid > floor:
+        out.append(grid)
+    tags = _ckpt_layout_for(getattr(batch, "model", None), block_size) or ()
+    ws = [int(t.split(":")[1]) for t in tags if t.startswith("rot")]
+    if ws and "arr" not in tags and p_stable != grid \
+            and p_stable > floor and p_stable >= max(ws):
+        out.append(p_stable)
+    return out
+
+
+def _sched_insert(bounds: list, pos: int, kind: str) -> None:
+    """Insert (pos, kind) keeping order. On collision the existing entry
+    keeps its kind unless the incoming kind is replay -- its retention
+    and adoption semantics must win for the identical-resend record."""
+    import bisect
+
+    pts = [b for b, _ in bounds]
+    i = bisect.bisect_left(pts, pos)
+    if i < len(pts) and pts[i] == pos:
+        if kind == "replay":
+            bounds[i] = (pos, kind)
+    else:
+        bounds.insert(i, (pos, kind))
+
+
 def _ckpt_arm_schedule(batch, meta, guard: int, restored: int,
                        block_size: int) -> None:
     """Publish the boundary schedule into the request meta. The head
@@ -451,25 +508,23 @@ def _ckpt_arm_schedule(batch, meta, guard: int, restored: int,
     checkpoint-column truncation and store reads exactly that key.
     ``ckpt_stored_boundaries`` collects every boundary whose store
     landed (record verified in the index) -- the settled variable the
-    post-prefill p=N decision and the sidecar key set both read."""
-    import bisect
-
+    post-prefill p=N decision and the sidecar key set both read;
+    ``ckpt_p_stable_bounds`` is the qualifying set for the p=N drop."""
     bounds, terminal, interval = _ckpt_cursor_init(
         batch, guard, restored, block_size)
+    turn = _ckpt_turn_boundaries(batch, meta, restored, block_size)
+    for pos in turn:
+        _sched_insert(bounds, pos, "boundary")
     replay = _ckpt_replay_boundary(batch, meta, restored, block_size)
     if replay is not None:
-        pos = [b for b, _ in bounds]
-        i = bisect.bisect_left(pos, replay)
-        if i < len(pos) and pos[i] == replay:
-            bounds[i] = (replay, "replay")
-        else:
-            bounds.insert(i, (replay, "replay"))
+        _sched_insert(bounds, replay, "replay")
     meta["ckpt_boundaries"] = bounds
     meta["checkpoint_len"] = int(bounds[0][0]) if bounds else 0
     meta["ckpt_terminal"] = terminal
     meta["ckpt_interval"] = interval
     meta["ckpt_last_stored"] = 0
     meta["ckpt_stored_boundaries"] = []
+    meta["ckpt_p_stable_bounds"] = turn
 
 
 def _ckpt_mid_prefill_store(batch) -> None:
@@ -1051,11 +1106,16 @@ def install_full_prompt_mtp_prefill() -> None:
                     stash = getattr(cache[0], "_kq_apc_retire", None) \
                         if cache else None
                     if stash is not None and stash.get("mode") == "ckpt":
-                        from .cache_snapshot import ckpt_store
-                        if ckpt_store(
+                        from .cache_snapshot import (
+                            ckpt_full_store_redundant, ckpt_store)
+                        m = stash.get("apc_meta")
+                        if ckpt_full_store_redundant(m):
+                            _log.info("APC ckpt post-prefill store "
+                                      "skipped: render-stable boundary "
+                                      "landed")
+                        elif ckpt_store(
                                 stash["manager"], stash["full_ids"], cache,
                                 extra_hash=int(stash.get("extra_hash", 0))):
-                            m = stash.get("apc_meta")
                             if m is not None:
                                 m.setdefault(
                                     "ckpt_stored_boundaries", []

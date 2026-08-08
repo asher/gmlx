@@ -215,16 +215,23 @@ def build_assistant_message(ctx: dict, full_text: str) -> dict:
     return msg
 
 
-def predict_next_ids(ctx: dict, assistant_msg: dict) -> list[int] | None:
-    """Render and tokenize the hypothetical next-turn prefix."""
+def predict_next_ids(ctx: dict, assistant_msg: dict | None) -> list[int] | None:
+    """Render and tokenize the hypothetical next-turn prefix.
+
+    ``assistant_msg=None`` renders the request's own messages with no
+    reply appended -- the render-stable core a next turn extends. One
+    predictor for both questions; a second renderer diverging silently
+    is how the turn-boundary bug stayed invisible."""
     render = ctx.get("render")
     preprocess = ctx.get("preprocess")
     if render is None or preprocess is None:
         return None
     kw = dict(ctx.get("kw") or {})
     kw["add_generation_prompt"] = False
-    text = render(ctx["processor"], ctx["config"],
-                  list(ctx["messages"]) + [assistant_msg], **kw)
+    msgs = list(ctx["messages"])
+    if assistant_msg is not None:
+        msgs.append(assistant_msg)
+    text = render(ctx["processor"], ctx["config"], msgs, **kw)
     if not isinstance(text, str):
         return None
     raw = preprocess(text)
@@ -234,6 +241,39 @@ def predict_next_ids(ctx: dict, assistant_msg: dict) -> list[int] | None:
     if ids and isinstance(ids[0], list):
         ids = ids[0]
     return [int(t) for t in ids]
+
+
+def prompt_stable_lcp(ctx: dict, prompt_ids) -> int | None:
+    """Longest prefix of the live prompt render that survives a next-turn
+    re-render.
+
+    The same messages rendered without the generation prompt: positions
+    past the LCP (the gen-prompt tail and any template-opened thinking
+    block) are replaced when the client echoes the conversation back, so
+    a checkpoint above it can never be adopted by turn 2. Memoized on the
+    ctx; returns None when the context is missing, carries media, or
+    prediction fails.
+    """
+    if not ctx or ctx.get("media"):
+        return None
+    memo = ctx.get("_p_stable")
+    if memo is not None:
+        return memo if memo >= 0 else None
+    lcp = None
+    try:
+        nxt = predict_next_ids(ctx, None)
+        if nxt:
+            seq = [int(t) for t in prompt_ids]
+            n = min(len(seq), len(nxt))
+            lcp = 0
+            while lcp < n and seq[lcp] == nxt[lcp]:
+                lcp += 1
+    except Exception:
+        _log.warning("prompt-stable prediction failed; turn boundaries "
+                     "off for this request", exc_info=True)
+        lcp = None
+    ctx["_p_stable"] = -1 if lcp is None else lcp
+    return lcp
 
 
 def next_turn_lcp(ctx: dict, seq: list[int], generated: list[int],

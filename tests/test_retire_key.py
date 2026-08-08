@@ -107,6 +107,45 @@ def test_lcp_prediction_failure_returns_none():
     assert rk.next_turn_lcp(ctx, [1, 2], [2]) is None
 
 
+# -- prompt-stable LCP (render-stable turn boundaries) --
+
+def test_prompt_stable_lcp_excludes_gen_tail():
+    # Positions past the assistant-free re-render (the gen-prompt/think
+    # tail) do not survive turn 2.
+    ctx = _fake_ctx(next_ids=[1, 2, 3, 4])
+    assert rk.prompt_stable_lcp(ctx, [1, 2, 3, 4, 90, 91]) == 4
+
+
+def test_prompt_stable_lcp_renders_without_assistant_once():
+    calls = []
+    ctx = _fake_ctx(next_ids=[1, 2, 3])
+
+    def render(p, c, msgs, **kw):
+        calls.append((len(msgs), kw.get("add_generation_prompt")))
+        return "RENDER"
+
+    ctx["render"] = render
+    assert rk.prompt_stable_lcp(ctx, [1, 2, 3, 9]) == 3
+    assert rk.prompt_stable_lcp(ctx, [1, 2, 3, 9]) == 3   # ctx memo
+    assert calls == [(1, False)]          # no assistant message appended
+
+
+def test_prompt_stable_lcp_failure_memoized():
+    calls = []
+
+    def boom(*a, **kw):
+        calls.append(1)
+        raise RuntimeError()
+
+    ctx = _fake_ctx([1, 2])
+    ctx["render"] = boom
+    assert rk.prompt_stable_lcp(ctx, [1, 2]) is None
+    assert rk.prompt_stable_lcp(ctx, [1, 2]) is None
+    assert len(calls) == 1
+    assert rk.prompt_stable_lcp(None, [1]) is None
+    assert rk.prompt_stable_lcp(_fake_ctx([1], media=True), [1]) is None
+
+
 def test_build_assistant_message_thinking_split():
     ctx = _fake_ctx([1])
     msg = rk.build_assistant_message(

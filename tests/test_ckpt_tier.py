@@ -552,6 +552,33 @@ def test_post_prefill_store_records_boundary():
     assert meta2 == {}
 
 
+def test_full_store_drop_gate():
+    """p=N drops only when an armed render-stable boundary LANDED --
+    armed-then-declined keeps it (nothing else would cover turn 2's
+    prefix class)."""
+    from gmlx.cache_snapshot import ckpt_full_store_redundant
+    assert not ckpt_full_store_redundant(None)
+    assert not ckpt_full_store_redundant({})
+    assert not ckpt_full_store_redundant(
+        {"ckpt_p_stable_bounds": [2048], "ckpt_stored_boundaries": [4096]})
+    assert ckpt_full_store_redundant(
+        {"ckpt_p_stable_bounds": [2048, 2100],
+         "ckpt_stored_boundaries": [2048, 4096]})
+
+
+def test_post_prefill_store_dropped_when_p_stable_landed():
+    from gmlx.cache_snapshot import _ckpt_records
+    from gmlx.speculative import _ckpt_post_prefill
+    man = APCManager(num_blocks=64, block_size=16)
+    ids = list(range(100, 132))
+    model = SimpleNamespace(_kq_apc_manager=man)
+    meta = {"ckpt_p_stable_bounds": [16], "ckpt_stored_boundaries": [16]}
+    _ckpt_post_prefill(model, make_hybrid_cache(32, seed=15),
+                       {"full_ids": ids, "extra_hash": 0, "apc_meta": meta})
+    assert meta["ckpt_stored_boundaries"] == [16]   # no p=N append
+    assert len(_ckpt_records(man)) == 0             # no p=N record
+
+
 def test_layout_signature_rejects_mismatch():
     man = APCManager(num_blocks=64, block_size=16)
     p = 32
