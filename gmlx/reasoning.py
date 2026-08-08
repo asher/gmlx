@@ -40,12 +40,17 @@ _DROP = "drop"       # strip the marker, keep the current mode
 # Order is irrelevant (we sort longest-first at construction so the most specific
 # marker wins at a shared position); keep it grouped by format for readability.
 _MARKERS: tuple[tuple[str, str], ...] = (
-    # harmony (gpt-oss): channel headers carry the routing in the marker itself.
-    ("<|channel|>analysis<|message|>", _REASON),
-    ("<|channel|>commentary<|message|>", _REASON),
-    ("<|channel|>final<|message|>", _ANSWER),
+    # harmony (gpt-oss): channel headers carry the routing in the marker
+    # itself. Name-only forms catch annotated headers too
+    # ("<|channel|>commentary to=functions.x <|constrain|>json<|message|>");
+    # any "<|channel|>"-prefixed match swallows the rest of the header up to
+    # "<|message|>" (see _swallow), and the bare "<|channel|>" catch-all
+    # routes unknown channels to reasoning - never to user-visible content.
+    ("<|channel|>analysis", _REASON),
+    ("<|channel|>commentary", _REASON),
+    ("<|channel|>final", _ANSWER),
     ("<|start|>assistant", _DROP),
-    ("<|channel|>", _DROP),
+    ("<|channel|>", _REASON),
     ("<|message|>", _DROP),
     ("<|constrain|>", _DROP),
     ("<|return|>", _DROP),
@@ -95,6 +100,8 @@ class ReasoningFilter:
         self._markers = sorted(_MARKERS, key=lambda m: len(m[0]), reverse=True)
         self.mode = _REASON if start_in_thinking else _ANSWER
         self.buf = ""
+        self._swallow = False  # inside a harmony channel header (drop text)
+        self._swallow_budget = 0
 
     def feed(self, text: str) -> list[tuple[str, str]]:
         self.buf += text
@@ -110,18 +117,18 @@ class ReasoningFilter:
         while self.buf:
             pos = self._next_marker_pos(final)
             if pos is None:
-                spans.append((self.buf, self.mode))
+                self._emit(self.buf, spans)
                 self.buf = ""
                 break
             if pos > 0:
-                spans.append((self.buf[:pos], self.mode))
+                self._emit(self.buf[:pos], spans)
                 self.buf = self.buf[pos:]
                 continue
             # buf now starts at a (possibly partial) marker.
             hit = self._full_marker_at0()
             if hit is None:
                 if final:  # an unfinished marker at EOS is just text
-                    spans.append((self.buf, self.mode))
+                    self._emit(self.buf, spans)
                     self.buf = ""
                 break  # otherwise wait for more input
             if not final and self._could_extend():
@@ -130,7 +137,27 @@ class ReasoningFilter:
             self.buf = self.buf[len(marker):]
             if action != _DROP:
                 self.mode = action
+            # Harmony headers run "<|channel|>NAME [annotations]<|message|>":
+            # the routing marker opens the header, "<|message|>" closes it,
+            # and annotation text in between is never a display span.
+            if marker.startswith("<|channel|>"):
+                self._swallow = True
+                self._swallow_budget = 256
+            elif marker == "<|message|>":
+                self._swallow = False
         return [s for s in spans if s[0]]
+
+    def _emit(self, text: str, spans: list[tuple[str, str]]) -> None:
+        """Append a display span, unless a channel header is being swallowed.
+        The budget bounds the swallow: a literal "<|channel|>" in a
+        non-harmony reply (no "<|message|>" ever follows) must not eat the
+        rest of the message."""
+        if self._swallow:
+            self._swallow_budget -= len(text)
+            if self._swallow_budget >= 0:
+                return
+            self._swallow = False
+        spans.append((text, self.mode))
 
     def _next_marker_pos(self, final: bool) -> int | None:
         """Earliest index of a full marker, or - unless ``final`` - of a trailing
@@ -173,6 +200,26 @@ class ReasoningFilter:
             if len(marker) > len(self.buf) and marker.startswith(self.buf):
                 return True
         return False
+
+
+def split_harmony_reply(text: str) -> tuple[str | None, str]:
+    """Split a complete harmony (gpt-oss) reply into ``(reasoning, content)``.
+
+    The serve path's stock splitter knows none of the harmony markers, so it
+    returns the raw channel markup as content - which the model's own chat
+    template rejects with a template error the moment a client sends the
+    reply back as history. This runs the same state machine the chat REPL
+    streams through, so both surfaces classify identically: analysis and
+    commentary channels (tool preludes included) become reasoning, the final
+    channel becomes content, and a reply truncated inside analysis returns
+    all-reasoning with empty content (the convention the truncated-thinking
+    handling already uses for think-tag models)."""
+    filt = ReasoningFilter()
+    spans = filt.feed(text)
+    spans += filt.flush()
+    reasoning = "".join(t for t, m in spans if m == _REASON).strip()
+    content = "".join(t for t, m in spans if m == _ANSWER).strip()
+    return (reasoning or None, content)
 
 
 _DIM = "\x1b[2m"
