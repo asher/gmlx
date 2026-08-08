@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Batched-decode correctness: continuous batching must be numerically faithful.
 
-The server path generates many sequences at once via mlx-lm's ``BatchGenerator``
-over a ``BatchKVCache``, driving the same K-quant leaf modules
-(``KQuantLinear`` / ``KQuantSwitchLinear`` ``gather_qmm`` / absorbed-MLA
-``KQuantMultiLinear``) that single-stream decode uses. This test gates that the
-batched path is correct for every loadable arch family.
+Batched decode here runs mlx-lm's ``BatchGenerator`` over a ``BatchKVCache``,
+driving the same K-quant leaf modules (``KQuantLinear`` /
+``KQuantSwitchLinear`` ``gather_qmm`` / absorbed-MLA ``KQuantMultiLinear``)
+that single-stream decode uses. (The gmlx server runs mlx-vlm's batch engine,
+not this one; this harness is the reference batched path for the kernels both
+share.) This test gates that batched decode is correct for every loadable
+arch family.
 
 The gate is NOT "token-for-token identical to single-stream". Batched and
 unbatched GEMM use different reduction orders, so at an exact logit tie greedy
