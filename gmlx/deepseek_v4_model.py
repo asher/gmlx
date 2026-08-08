@@ -25,7 +25,6 @@
 #    Without these the lightning indexer's top-k selection diverges from
 #    the model's training-time graph.
 
-import atexit
 import importlib
 import math
 import os
@@ -2081,30 +2080,6 @@ def v4_attention_factory(config: ModelArgs, layer_idx: int) -> nn.Module:
     return SparseCompressedAttention(config, layer_idx)
 
 
-_VSEG = tuple(
-    int(v) for v in os.environ.get("GMLX_VSEG", "").split(",") if v
-)
-_vseg_acc: dict = {}
-
-
-def _vseg_report():
-    if not _vseg_acc:
-        return
-    names = ("fence", "attn_hc", "attn", "hc_exp1", "ffn_hc", "ffn",
-             "hc_exp2")
-    for (idx, cls, ql), rows in sorted(_vseg_acc.items()):
-        rows = rows[3:] or rows
-        cols = list(zip(*rows))
-        med = [sorted(c)[len(c) // 2] * 1e3 for c in cols]
-        segs = " ".join(f"{n}={m:.3f}" for n, m in zip(names, med))
-        total = sum(med[1:])
-        print(f"[vseg] layer={idx} {cls} qL={ql} n={len(rows)} "
-              f"total={total:.3f} ms: {segs}", file=sys.stderr)
-
-
-atexit.register(_vseg_report)
-
-
 class DeepseekV4Block(nn.Module):
     def __init__(self, config: ModelArgs, layer_idx: int):
         super().__init__()
@@ -2125,11 +2100,6 @@ class DeepseekV4Block(nn.Module):
         carry: Optional[tuple] = None,
         carry_mode: bool = False,
     ):
-        # Scratch VSEG probe: only when no M=1 carry is in flight, since
-        # the fenced path cannot consume or produce a pending expand.
-        if _VSEG and self.layer_idx in _VSEG and carry is None \
-                and not carry_mode:
-            return self._call_fenced(h, mask, cache, input_ids)
         if self.attn_hc.m1_fused_ok(h):
             # attn front; a pending expand from the caller folds into it
             if carry is not None:
@@ -2163,40 +2133,6 @@ class DeepseekV4Block(nn.Module):
         out = hc_expand(x, residual, post, comb)
         if carry_mode:
             return out, None
-        return out
-
-    def _call_fenced(self, h, mask, cache, input_ids):
-        # Scratch probe (this branch only): eval-fence each segment of one
-        # layer to attribute per-segment GPU time. Column 0 is the fence
-        # calibration (eval on an already-evaluated array).
-        import time as _time
-
-        acc = _vseg_acc.setdefault(
-            (self.layer_idx, type(self.attn).__name__, int(h.shape[1])), [])
-        row = []
-
-        def fence(*arrs):
-            t0 = _time.perf_counter()
-            mx.eval(*arrs)
-            row.append(_time.perf_counter() - t0)
-
-        mx.eval(h)
-        fence(h * 1.0000001)  # one-kernel command buffer = true fence floor
-        residual = h
-        x, post, comb = self.attn_hc(h)
-        fence(x, post, comb)
-        x = self.attn(self.attn_norm(x), mask=mask, cache=cache)
-        fence(x)
-        h = hc_expand(x, residual, post, comb)
-        fence(h)
-        residual = h
-        x, post, comb = self.ffn_hc(h)
-        fence(x, post, comb)
-        x = self.ffn(self.ffn_norm(x), input_ids)
-        fence(x)
-        out = hc_expand(x, residual, post, comb)
-        fence(out)
-        acc.append(row)
         return out
 
 
