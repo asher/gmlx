@@ -183,7 +183,7 @@ def test_retirement_store_exact_round_trip():
         seq = list(range(1, 40))  # >= 2 tokens
         cache = [_kv_row(len(seq), 0), _kv_row(len(seq), 50)]
         ok = retirement_store(mgr, "exact", seq, cache)
-        assert ok is True
+        assert ok == len(seq)
         snap, prefix_len = mgr.lookup_exact_cache(seq + [999])
         assert prefix_len == len(seq)
         assert snap is not None and len(snap) == 2
@@ -203,7 +203,7 @@ def test_retirement_store_batched_row_exact():
         rows = [_kv_row(len(seq), 0), _kv_row(len(seq), 500)]
         merged = BatchKVCache.merge(rows)
         mx.eval(merged.keys, merged.values)
-        assert retirement_store(mgr, "exact", seq, [merged], row=1) is True
+        assert retirement_store(mgr, "exact", seq, [merged], row=1) == len(seq)
         snap, prefix_len = mgr.lookup_exact_cache(seq + [7])
         assert prefix_len == len(seq)
         assert snap[0].offset == rows[1].offset
@@ -218,9 +218,9 @@ def test_retirement_store_guards():
     mgr = _manager()
     try:
         cache = [_kv_row(4, 0)]
-        assert retirement_store(None, "exact", [1, 2, 3], cache) is False
-        assert retirement_store(mgr, "exact", [1], cache) is False
-        assert retirement_store(mgr, "exact", None, cache) is False
+        assert retirement_store(None, "exact", [1, 2, 3], cache) == 0
+        assert retirement_store(mgr, "exact", [1], cache) == 0
+        assert retirement_store(mgr, "exact", None, cache) == 0
     finally:
         mgr.close()
 
@@ -232,7 +232,7 @@ def test_retirement_store_incomplete_snapshot_skipped():
         merged = BatchKVCache.merge([KVCache(), _kv_row(len(seq), 0)])
         mx.eval(merged.keys, merged.values)
         # row 0 has no content -> store must decline, not raise
-        assert retirement_store(mgr, "exact", seq, [merged], row=0) is False
+        assert retirement_store(mgr, "exact", seq, [merged], row=0) == 0
         snap, prefix_len = mgr.lookup_exact_cache(seq + [1])
         assert prefix_len == 0 and snap is None
     finally:

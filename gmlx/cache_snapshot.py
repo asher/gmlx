@@ -861,6 +861,15 @@ def ckpt_store(
             # a restart serve this record past the replay adopt gate --
             # enforce at the tier boundary, not per call site.
             skeleton_disk = False
+        # Window chains are position-salted (no dedup across checkpoints),
+        # so they earn disk only where restart repair actually reads them:
+        # the replay and retirement records. Everywhere else the chain
+        # stays memory-only -- and a rot skeleton whose chain stayed local
+        # can never assemble after a restart, so it must not land either.
+        rot_disk = skeleton_disk and kind in ("replay", "retire")
+        if any(_is_rot(t) for t in layout) and kind not in ("replay",
+                                                            "retire"):
+            skeleton_disk = False
         if any(isinstance(c, _buffered_types()) for c in prompt_cache):
             _log.info(
                 "APC ckpt store declined: BufferedRotatingKVCache rows "
@@ -953,10 +962,9 @@ def ckpt_store(
             import mlx.core as mx
             mx.eval(canon_k + canon_v)
             if store_blocks is not None:
-                # Memory-only: the position salt makes window shards
-                # undedupable on disk.
                 bounded_blocks = store_blocks(
-                    canon_ids, canon_k, canon_v, extra_hash=bsalt, disk=False)
+                    canon_ids, canon_k, canon_v, extra_hash=bsalt,
+                    disk=rot_disk)
             else:
                 bounded_blocks = manager.store_kv_blocks(
                     canon_ids, canon_k, canon_v, extra_hash=bsalt)
@@ -1566,11 +1574,12 @@ def _snap_assemble(prompt_cache: list[Any], states: list[Any],
 
 
 def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
-                     max_len, decode_snaps) -> bool:
+                     max_len, decode_snaps) -> int:
     """Ckpt-mode retirement: the full sequence when it can store whole,
     else the newest decode-time snapshot at or below the replayable
     prefix. Never spills to the exact tier -- on ckpt models the exact
-    tier stays empty, so the stock warm path never bypasses arming."""
+    tier stays empty, so the stock warm path never bypasses arming.
+    Returns the stored length (0 = nothing)."""
     try:
         cap = len(ids)
         if max_len is not None and max_len < len(ids):
@@ -1584,7 +1593,7 @@ def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
             # clones for exactly that case.
             if ckpt_store(manager, ids, prompt_cache,
                           extra_hash=extra_hash, kind="retire"):
-                return True
+                return len(ids)
         for p, states in sorted(decode_snaps or (),
                                 key=lambda s: s[0], reverse=True):
             if not 2 <= p <= cap:
@@ -1597,7 +1606,7 @@ def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
                     skeleton_disk=True, kind="retire"):
                 _log.info("APC retirement: decode ckpt stored at %d "
                           "(cap %d, full %d)", p, cap, len(ids))
-                return True
+                return p
         # No snapshot at or below the replayable prefix: fall back to the
         # full sequence under its verbatim key rather than storing
         # nothing. A re-rendered turn will not adopt it, but a raw
@@ -1611,15 +1620,15 @@ def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
             _ckpt_bump(manager, "retire_fallback_full")
             _log.info("APC retirement: full-sequence fallback stored at "
                       "%d (replayable prefix %d)", len(ids), cap)
-            return True
+            return len(ids)
         _log.info("APC retirement skipped: no decode snapshot at or "
                   "below the replayable prefix %d (full %d)",
                   cap, len(ids))
-        return False
+        return 0
     except Exception:
         _log.warning("APC ckpt retirement failed; continuing",
                      exc_info=True)
-        return False
+        return 0
 
 
 def retirement_store(
@@ -1632,7 +1641,7 @@ def retirement_store(
     extra_hash: int = 0,
     max_len: int | None = None,
     decode_snaps: list | None = None,
-) -> bool:
+) -> int:
     """Persist a finished row's full KV into the shared APC.
 
     ``token_ids`` is the full sequence (prompt + generated); it must be the
@@ -1645,13 +1654,17 @@ def retirement_store(
     prefix (the next-turn LCP): blocks are prefix-causal and truncate
     freely; an exact snapshot truncates only when every layer is a plain
     KVCache; a ckpt store uses the newest decode-time snapshot at or
-    below the LCP (``decode_snaps``, from ``decode_ckpt_tick``) --
-    neither recurrent state nor a rotating window can rewind, so without
-    one it is skipped outright, never spilled to the exact tier. Best
-    effort: a failure never breaks generation.
+    below the LCP (``decode_snaps``, from ``decode_ckpt_tick``), falling
+    back to the full sequence under its verbatim key -- neither recurrent
+    state nor a rotating window can rewind, and nothing spills to the
+    exact tier. Best effort: a failure never breaks generation.
+
+    Returns the stored prefix length in tokens (0 = nothing stored) --
+    the fallback can store past ``max_len``, so callers must log the
+    return, not the cap.
     """
     if manager is None or token_ids is None:
-        return False
+        return 0
     ids = [int(t) for t in token_ids]
     if mode == "ckpt":
         return _ckpt_retirement(manager, ids, prompt_cache,
@@ -1660,29 +1673,32 @@ def retirement_store(
     if max_len is not None and max_len < len(ids) and mode != "exact":
         ids = ids[:max_len]
     if len(ids) < 2:
-        return False
+        return 0
     try:
         if mode == "exact":
             snap = row_snapshot(prompt_cache, row)
             if snap is None:
-                return False
+                return 0
             if max_len is not None and max_len < len(ids):
                 if max_len < 2:
-                    return False
+                    return 0
                 snap = _truncate_kv_snapshot(snap, max_len)
                 if snap is None:
                     _log.info(
                         "APC retirement skipped: snapshot not truncatable "
                         "to the replayable prefix %d", max_len)
-                    return False
+                    return 0
                 ids = ids[:max_len]
-            return bool(manager.store_exact_cache(
-                ids, snap, extra_hash=extra_hash))
+            if manager.store_exact_cache(ids, snap, extra_hash=extra_hash):
+                return len(ids)
+            return 0
         from mlx_vlm import apc as _apc
         blocks = _apc.harvest_blocks_from_batch_cache(
             manager, prompt_cache, row, ids, extra_hash=extra_hash)
         manager.release(blocks)
-        return bool(blocks)
+        if not blocks:
+            return 0
+        return len(blocks) * int(manager.block_size)
     except Exception:
         _log.warning("APC retirement store failed; continuing", exc_info=True)
-        return False
+        return 0

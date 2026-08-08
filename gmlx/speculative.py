@@ -1361,8 +1361,7 @@ def _retire_b1(model, prompt_cache: list, generated: list[int],
             row=0, extra_hash=int(retire.get("extra_hash", 0)),
             max_len=max_len, decode_snaps=retire.get("snaps"))
         if ok:
-            _log.info("APC retire store: tokens=%d",
-                      len(seq) if max_len is None else max_len)
+            _log.info("APC retire store: tokens=%d", ok)
         if max_len is not None:
             # The drafter sidecar pairs with a same-key main entry; its KV
             # covers the full sequence and cannot be rewound to the LCP.
@@ -1431,7 +1430,7 @@ def _retire_batch_row(model, prompt_cache: list, slot: int,
             manager, "block", seq[:store_len], prompt_cache,
             row=slot, extra_hash=int(retire.get("extra_hash", 0)))
         if ok:
-            _log.info("APC retire store (row): tokens=%d", store_len)
+            _log.info("APC retire store (row): tokens=%d", ok)
     except Exception:
         _log.warning("APC retire failed; continuing", exc_info=True)
 

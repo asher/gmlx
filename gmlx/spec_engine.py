@@ -765,8 +765,7 @@ def _plain_retire(stash: dict, prompt_cache: list) -> None:
             extra_hash=int(stash.get("extra_hash", 0)), max_len=max_len,
             decode_snaps=stash.get("snaps"))
         if ok:
-            _log.info("APC retire store: tokens=%d",
-                      len(seq) if max_len is None else max_len)
+            _log.info("APC retire store: tokens=%d", ok)
     except Exception:
         _log.warning("APC retire failed; continuing", exc_info=True)
 

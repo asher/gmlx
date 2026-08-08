@@ -623,14 +623,20 @@ def test_layout_signature_rejects_mismatch():
 
 @pytest.mark.parametrize("p", [33, 47, 48, 65])
 def test_swa_disk_restart_roundtrip(tmp_path, p):
+    """Production-manager restart repair. GmlxAPCManager routes chain
+    stores through store_ckpt_blocks, whose disk kwarg gates window-chain
+    persistence by kind; the stock manager's fallback disk-writes every
+    chain, and testing on it hid a live bug where rot window chains never
+    reached disk at all."""
+    from gmlx.apc_manager import GmlxAPCManager
     cache = make_swa_cache(p, seed=11)
     ids = list(range(700, 700 + p))
     disk = DiskBlockStore(root=tmp_path, namespace="m")
-    man = APCManager(num_blocks=64, block_size=16, disk=disk)
-    assert ckpt_store(man, ids, cache, extra_hash=4)
+    man = GmlxAPCManager(num_blocks=64, block_size=16, disk=disk)
+    assert ckpt_store(man, ids, cache, extra_hash=4, kind="replay")
     disk.close()
     disk2 = DiskBlockStore(root=tmp_path, namespace="m")
-    man2 = APCManager(num_blocks=64, block_size=16, disk=disk2)
+    man2 = GmlxAPCManager(num_blocks=64, block_size=16, disk=disk2)
     try:
         warm, got = ckpt_lookup(man2, ids + [77], extra_hash=4)
         assert got == p
@@ -741,9 +747,12 @@ def test_ckpt_store_suppresses_layer_major():
     assert man.stats_snapshot()["exact_stores"] == 1
 
 
-def test_window_chain_is_memory_only(tmp_path):
-    """Position-salted window shards cannot dedup on disk; the gmlx
-    manager schedules disk writes for the main chain only."""
+def test_window_chain_disk_follows_kind(tmp_path):
+    """Position-salted window shards cannot dedup on disk, so they earn
+    persistence only where restart repair reads them: replay and retire
+    records. A boundary store keeps both its window chain and its
+    skeleton off disk (a skeleton without its chain could never
+    assemble); the main chain writes through regardless (it dedups)."""
     from gmlx.apc_manager import GmlxAPCManager
     disk = DiskBlockStore(root=tmp_path, namespace="m")
     man = GmlxAPCManager(num_blocks=64, block_size=16, disk=disk)
@@ -752,9 +761,14 @@ def test_window_chain_is_memory_only(tmp_path):
         cache = make_swa_cache(p, seed=5)
         ids = list(range(600, 600 + p))
         assert ckpt_store(man, ids, cache, extra_hash=0)
-        # 3 main blocks + the skeleton entry; the 2 window blocks stay
-        # memory-only.
-        assert man.stats_snapshot()["disk_writes"] == 4
+        # boundary: 3 main blocks only -- no window shards, no skeleton
+        assert man.stats_snapshot()["disk_writes"] == 3
+        assert man.stats_snapshot()["ckpt_skeleton_writes"] == 0
+        cache2 = make_swa_cache(p, seed=6)
+        ids2 = list(range(800, 800 + p))
+        assert ckpt_store(man, ids2, cache2, extra_hash=0, kind="replay")
+        # replay: 3 main + 2 window blocks + the skeleton entry
+        assert man.stats_snapshot()["disk_writes"] == 9
         assert man.stats_snapshot()["ckpt_skeleton_writes"] == 1
     finally:
         disk.close()
