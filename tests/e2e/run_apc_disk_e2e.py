@@ -46,6 +46,23 @@ from client import Client                  # noqa: E402
 from models import ModelRegistry           # noqa: E402
 from server_proc import ServerProc         # noqa: E402
 
+
+def tier_keys(tier: str) -> dict:
+    """Counter-key names per APC storage tier as reported by /v1/cache/stats.
+    lookups_hit / matched_tokens / disk_writes / disk_hits are shared ledgers;
+    stores, tier-scoped hit/matched, and restart index counts are per-tier.
+    ckpt skeletons ride the exact disk machinery, hence disk_exact_indexed.
+    Shared with run_apc_depth_e2e's --tier flag."""
+    return {
+        "block": {"stores": "stores", "hits": "lookups_hit",
+                  "matched": "matched_tokens", "indexed": "disk_blocks_indexed"},
+        "exact": {"stores": "exact_stores", "hits": "exact_hits",
+                  "matched": "matched_tokens", "indexed": "disk_exact_indexed"},
+        "ckpt": {"stores": "ckpt_stores", "hits": "ckpt_hits",
+                 "matched": "ckpt_matched_tokens", "indexed": "disk_exact_indexed"},
+    }[tier]
+
+
 # A long, deterministic shared prefix. With APC_BLOCK_SIZE=16 this is many full
 # blocks, so a single request seals a dozen-plus blocks to disk and a replay has a
 # large matched-token prefix. Distinct sentences (not repeated padding) so the block
@@ -240,6 +257,13 @@ def phase_populate_warm_batch(python, model_path, disk_root, log_dir, block_size
         s, _ = chat(base, mid, PREFIX + FIXED_Q)
         out["cold_status"] = s
         out["cold"] = stats(base)
+        if not out["continuous_batching_enabled"]:
+            # The flag means "response_generator bound"; the background
+            # preload races the boot-time read, a completed request forces it.
+            _ms, m_body = Client(base).metrics()
+            srv = (m_body or {}).get("server") if isinstance(m_body, dict) else {}
+            out["continuous_batching_enabled"] = bool(
+                (srv or {}).get("continuous_batching_enabled"))
 
         # 2) batching / multi-client: concurrent clients sharing PREFIX. This is the
         #    store trigger - the engine commits the shared prefix to APC and writes it

@@ -168,6 +168,33 @@ def test_row_snapshot_empty_cache_list_input():
     assert row_snapshot([], 0) is None
 
 
+def test_row_snapshot_single_row_rotating_wrapped_canonical():
+    # B=1 rot caches route through _clone_single_row: exact-tier stores
+    # for rot archs outside the ckpt geometry hold the canonical window
+    # (temporal order, min(offset, W) tokens), not the untrimmed ring.
+    max_size = 8
+    c = _rot_row(max_size, 20, 0)
+    snap = row_snapshot([c], 0)
+    assert snap is not None
+    s = snap[0]
+    assert type(s) is RotatingKVCache
+    assert s.offset == 20
+    assert s.keys.shape[2] == max_size
+    got = [float(s.keys[0, 0, j, 0]) for j in range(max_size)]
+    assert got == [7.0 * t for t in range(12, 20)]
+
+
+def test_row_snapshot_buffered_rotating_declines():
+    # The spec path swaps rot layers to BufferedRotatingKVCache; its
+    # clones drop start_position, so the exact tier must store nothing
+    # for the stack rather than a corrupt row.
+    Buffered = getattr(_cache, "BufferedRotatingKVCache", None)
+    if Buffered is None:
+        pytest.skip("no BufferedRotatingKVCache in the runtime cache module")
+    buffered = Buffered.from_cache(_rot_row(8, 20, 0), buffer_size=4)
+    assert row_snapshot([_kv_row(4, 0), buffered], 0) is None
+
+
 # --------------------------------------------------------------------------
 # retirement_store: round-trip through a real APCManager exact tier
 # --------------------------------------------------------------------------
@@ -183,7 +210,7 @@ def test_retirement_store_exact_round_trip():
         seq = list(range(1, 40))  # >= 2 tokens
         cache = [_kv_row(len(seq), 0), _kv_row(len(seq), 50)]
         ok = retirement_store(mgr, "exact", seq, cache)
-        assert ok is True
+        assert ok == len(seq)
         snap, prefix_len = mgr.lookup_exact_cache(seq + [999])
         assert prefix_len == len(seq)
         assert snap is not None and len(snap) == 2
@@ -203,7 +230,7 @@ def test_retirement_store_batched_row_exact():
         rows = [_kv_row(len(seq), 0), _kv_row(len(seq), 500)]
         merged = BatchKVCache.merge(rows)
         mx.eval(merged.keys, merged.values)
-        assert retirement_store(mgr, "exact", seq, [merged], row=1) is True
+        assert retirement_store(mgr, "exact", seq, [merged], row=1) == len(seq)
         snap, prefix_len = mgr.lookup_exact_cache(seq + [7])
         assert prefix_len == len(seq)
         assert snap[0].offset == rows[1].offset
@@ -218,9 +245,9 @@ def test_retirement_store_guards():
     mgr = _manager()
     try:
         cache = [_kv_row(4, 0)]
-        assert retirement_store(None, "exact", [1, 2, 3], cache) is False
-        assert retirement_store(mgr, "exact", [1], cache) is False
-        assert retirement_store(mgr, "exact", None, cache) is False
+        assert retirement_store(None, "exact", [1, 2, 3], cache) == 0
+        assert retirement_store(mgr, "exact", [1], cache) == 0
+        assert retirement_store(mgr, "exact", None, cache) == 0
     finally:
         mgr.close()
 
@@ -232,7 +259,7 @@ def test_retirement_store_incomplete_snapshot_skipped():
         merged = BatchKVCache.merge([KVCache(), _kv_row(len(seq), 0)])
         mx.eval(merged.keys, merged.values)
         # row 0 has no content -> store must decline, not raise
-        assert retirement_store(mgr, "exact", seq, [merged], row=0) is False
+        assert retirement_store(mgr, "exact", seq, [merged], row=0) == 0
         snap, prefix_len = mgr.lookup_exact_cache(seq + [1])
         assert prefix_len == 0 and snap is None
     finally:
@@ -639,6 +666,74 @@ def test_sidecar_post_prefill_uncovered_head_skipped():
         _sidecar_post_prefill(plain, ctx)
         assert not hasattr(plain, "_kq_head_covered") or (
             plain._kq_head_covered is False)
+    finally:
+        mgr.close()
+
+
+def test_sidecar_post_prefill_ckpt_keys_mirror_landed_stores():
+    """Spec-path mirror invariant: the ckpt key set derives from the
+    live apc_meta at consumption time -- the p=N store lands AFTER
+    sidecar_ctx is built, so a frozen copy would orphan the full-prompt
+    key. Keys: deepest landed prefill boundary + N iff its store landed."""
+    from gmlx.speculative import _sidecar_post_prefill
+    mgr = _manager()
+    try:
+        full_ids = list(range(1, 13))          # n=12
+        meta = {"ckpt_last_stored": 11, "ckpt_stored_boundaries": [8, 11]}
+        ctx = {"full_ids": full_ids, "extra_hash": 0, "checkpoint_len": 11,
+               "manager": mgr, "mode": "ckpt", "apc_meta": meta}
+        # The ordering trap: p=N lands between ctx build and consumption.
+        meta["ckpt_stored_boundaries"].append(12)
+        drafter = _FakeDrafter([_kv_row(12, 0)])
+        _sidecar_post_prefill(drafter, ctx)
+        cont = full_ids + [200]
+        assert drafter_sidecar_lookup(mgr, cont, 11) is not None
+        assert drafter_sidecar_lookup(mgr, cont, 12) is not None
+        assert drafter_sidecar_lookup(mgr, cont, 8) is None
+    finally:
+        mgr.close()
+
+
+def test_sidecar_post_prefill_keys_landed_turn_boundary():
+    """Turn 2 adopts the target at p_stable and the sidecar lookup
+    demands an exact-length entry there: every landed turn boundary gets
+    a key, or the drafter head starts cold on exactly the turn the
+    boundary exists for. Armed-but-declined bounds stay unkeyed."""
+    from gmlx.speculative import _sidecar_post_prefill
+    mgr = _manager()
+    try:
+        full_ids = list(range(1, 13))
+        meta = {"ckpt_last_stored": 11,
+                "ckpt_stored_boundaries": [8, 11],
+                "ckpt_p_stable_bounds": [6, 8]}
+        ctx = {"full_ids": full_ids, "extra_hash": 0, "checkpoint_len": 11,
+               "manager": mgr, "mode": "ckpt", "apc_meta": meta}
+        drafter = _FakeDrafter([_kv_row(12, 0)])
+        _sidecar_post_prefill(drafter, ctx)
+        cont = full_ids + [200]
+        assert drafter_sidecar_lookup(mgr, cont, 8) is not None
+        assert drafter_sidecar_lookup(mgr, cont, 11) is not None
+        assert drafter_sidecar_lookup(mgr, cont, 6) is None
+        assert drafter_sidecar_lookup(mgr, cont, 12) is None
+    finally:
+        mgr.close()
+
+
+def test_sidecar_post_prefill_ckpt_no_orphan_full_key():
+    """Drop-branch mirror: when the p=N store did not land there is no
+    target record at N, and a sidecar key there would only burn slots."""
+    from gmlx.speculative import _sidecar_post_prefill
+    mgr = _manager()
+    try:
+        full_ids = list(range(1, 13))
+        meta = {"ckpt_last_stored": 11, "ckpt_stored_boundaries": [11]}
+        ctx = {"full_ids": full_ids, "extra_hash": 0, "checkpoint_len": 11,
+               "manager": mgr, "mode": "ckpt", "apc_meta": meta}
+        drafter = _FakeDrafter([_kv_row(12, 0)])
+        _sidecar_post_prefill(drafter, ctx)
+        cont = full_ids + [200]
+        assert drafter_sidecar_lookup(mgr, cont, 11) is not None
+        assert drafter_sidecar_lookup(mgr, cont, 12) is None
     finally:
         mgr.close()
 

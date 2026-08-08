@@ -963,19 +963,66 @@ requests too; see
 > trades memory for reuse.
 
 > Sizing `num_blocks`: the shared pool holds `num_blocks x block_size`
-> tokens for all live chains together -- the default 2048 x 16 = 32k
-> tokens, which one long-context request can fill by itself. When the
-> pool runs out, stores decline quietly and the cache stops helping at
-> exactly the depths where it helps most. Rule of thumb: size it to
-> `(expected prompt tokens x concurrent conversations) / block_size`,
-> plus one sliding-window width per rotating layer per checkpoint on
-> SWA models. 8192 blocks (128k tokens) costs pool metadata only until
-> stores actually land.
+> tokens for all cached prefixes together -- the default 2048 x 16 = 32k
+> tokens, which one long-context request can fill by itself. A full pool
+> is not fatal: the cache evicts its oldest saved prefixes to keep
+> caching new ones (`ckpt_pool_evictions` counts this), but reuse depth
+> shrinks to what fits. Rule of thumb: `(expected prompt tokens x
+> concurrent conversations) / block_size`; sliding-window models
+> (gemma-family) also consume about `window / block_size` blocks per
+> saved checkpoint, so budget extra there. 8192 blocks (128k tokens)
+> costs pool metadata only until stores actually land.
 
 `gmlx init` always writes this block on (`cache: {enabled: true, disk:
 false}`); `--disk-cache` swaps the `disk` value for the SSD tier
 (`disk: {path: ~/.cache/gmlx/apc, max_gb: 50}`). A config without a
 `cache:` block leaves APC off.
+
+### Which tier serves which architecture
+
+APC routes each model by its cache shape, once, at load; the server logs
+the routing (`APC tier: ...`) so a silent mis-route is visible. Reuse
+works on every family - the tiers differ in storage layout, not in
+whether hits happen:
+
+| Cache shape | Example archs | Tier |
+|-------------|---------------|------|
+| plain KV, dense or MoE | llama, qwen2/3, qwen3moe, glm4(-moe), deepseek2/v3, phi3, granite, hunyuan, minimax-m2, gemma2 | block |
+| hybrid GDN (recurrent + KV layers) | qwen3.5/3.6 (incl. MoE), qwen3-next, kimi-k3, nemotron-h, granitemoehybrid | ckpt |
+| sliding-window attention | gemma3, gemma-4 (incl. E4B/3n), gpt-oss, SWA llama | ckpt |
+| CacheList / pure recurrent | falcon-h1, mamba2, rwkv7, plamo2, deepseek-v3.2, deepseek4 | exact |
+| MSA indexer armed | minimax-m3 indexer GGUFs | none (loud log; the indexless GGUF serves via the block tier) |
+
+### Checkpoint-tier counters
+
+`GET /v1/cache/stats` carries the `ckpt_*` fields for every model, but
+they only move on checkpoint-tier architectures (the hybrid/SWA rows
+above) -- all-zero on a block- or exact-tier model is normal, not a
+fault. On ckpt-tier models they answer one question: is prefix reuse
+working? Read reuse health from `ckpt_*`, not from ratios built on the
+stock fields: checkpoint lookups bump the shared `lookups_hit` /
+`matched_tokens` on success but record nothing on a miss, and the
+token totals include window snapshots that can never be shared, so
+aggregate hit rates skew on these models. (`disk_writes` counts write
+operations: one per exact-format entry -- checkpoint skeletons and
+drafter sidecars included -- and one per block for block shards.)
+
+| Field | What it tells you |
+|-------|-------------------|
+| `ckpt_stores` | Prefixes saved for reuse. On a ckpt-tier model, stuck at zero after a few requests means nothing is being cached; the server logs a one-time warning when that happens. |
+| `ckpt_hits`, `ckpt_matched_tokens` | Requests that warm-started from a saved prefix, and the prompt tokens they skipped. This is the value the tier delivers: on a repeat-heavy workload, matched tokens should approach total prompt tokens. |
+| `ckpt_declines` | Saves the server skipped, grouped by reason (the same reason strings appear in the server log). Occasional entries are normal; every request piling into one reason means reuse is off for that traffic shape - include this map when filing an issue. |
+| `ckpt_missed_adoptions` | Requests that matched a saved prefix but could not use it. Stays 0 in healthy operation; growth is a bug signal and trips a one-time warning. |
+| `ckpt_pool_evictions` | Saved prefixes discarded to make room for new ones. Normal on long sessions, fastest on sliding-window models (gemma-family), whose snapshots are large and cannot be deduplicated. Raise `num_blocks` if you want deeper history to stay warm. |
+| `ckpt_skeleton_writes` | Saves mirrored to the disk tier for warm restarts. Zero with `disk` on means a restart will start cold. |
+| `sidecar_writes` | Draft-model cache entries saved next to their target entries (speculative decoding only). |
+| `retire_fallback_full` | Finished requests whose generated tokens were saved in the slower whole-sequence form because no cheaper snapshot was available. Occasional is fine. |
+
+The server also watches for a dead tier and warns once per model:
+`GMLX_APC_CKPT_TRIPWIRE` (default 5) completed requests with zero stores,
+or that many unusable matches with zero hits. Either warning means prefix
+reuse is not working for that model - file an issue with the
+`/v1/cache/stats` snapshot.
 
 An unknown key inside `sampling:` / `load:` / `cache:` (a typo like
 `temprature:`) is warned about loudly at load rather than silently dropped.
@@ -1015,42 +1062,33 @@ What a warm hit restores:
   conversation warm-starts past all of turn N instead of re-prefilling the
   previous reply. Single requests store every tier; batched rows store
   through the block pool only.
-- Drafter-KV sidecar: a native MTP head (Qwen3.5/3.6 `nextn`) keeps its own
-  KV, and a warm target with a cold drafter decodes at degraded acceptance
-  until the head catches up. A small sidecar entry stores the drafter's KV
-  under the target's key (salted), so a warm hit restores both. Sidecars
-  ride their own small LRU, never the exact-entry slots they would
-  otherwise evict.
-- Checkpoint tier: hybrid archs (attention + recurrent or sliding-window
-  layers) cannot use the block cache alone because their non-plain-KV
-  state is not block-decomposable, and the stock fallback is a full
-  prompt-cache clone per entry, whose disk grows quadratically over a
-  conversation. The checkpoint tier stores the plain-KV layers through
-  the block pool, sliding windows through per-checkpoint chains, and
-  recurrent states in a pinned record: near-linear memory, same warm
-  TTFT. During prefill it also checkpoints at intervals
-  (`GMLX_APC_CKPT_INTERVAL` tokens, default 4096), so a request queued
-  behind a long shared-prefix prefill restores from the last boundary
-  instead of going cold. The tier serves both the speculative and the
-  plain path; on ckpt-tier models, prompt formation is serialized to one
-  request at a time (batched prompt prefill measured no win on these
-  shapes anyway).
-- Decode-time checkpoints: on hybrid (GDN and sliding-window) models the
-  tier also snapshots recurrent states and rotating windows at intervals
-  during decode, while the predicted next-turn render still replays the
-  sequence so far. When the next turn's re-rendered history diverges
-  from what was generated (thinking strip, tool-call re-serialization,
-  retokenization), the retirement store falls back to the newest
-  snapshot at or below the divergence point instead of dropping the
-  generated tokens entirely. `GMLX_APC_DECODE_CKPT` sets the interval
-  (default 512; `0` off); each live request holds at most two snapshots.
-  Boundaries anchor to the prompt end, so the first snapshot lands about
-  one interval into the reply: turns shorter than that retire through
-  the prompt-end store alone, which is all a short turn could retain
-  anyway (the payoff is bounded by generated length, and the mechanism
-  earns its keep on long preserve-thinking and tool-call turns). The
-  interval widens with context so the per-boundary prediction render
-  stays a bounded fraction of decode time.
+- Drafter-KV sidecar: a native MTP head (Qwen3.5/3.6 `nextn`) keeps its
+  own KV, and a warm target with a cold drafter decodes at degraded
+  acceptance until the head catches up. A small sidecar entry saves the
+  drafter's KV next to the target's, so a warm hit restores both. It
+  rides its own small LRU and never competes for the exact-entry slots.
+- Checkpoint tier: hybrid archs (recurrent or sliding-window layers)
+  cannot use the block cache alone, and cloning the whole prompt cache
+  per entry grows quadratically over a conversation. The checkpoint tier
+  saves these models piecewise instead - near-linear memory, same warm
+  TTFT. Along a long prefill it drops a restore point every
+  `GMLX_APC_CKPT_INTERVAL` tokens (default 4096), plus two targeted
+  ones: a replay checkpoint one token before the prompt end (recurrent
+  state cannot rewind, so an identical resend needs a restore point
+  strictly below it) and a turn checkpoint at the longest prefix the
+  next turn's re-rendered history can actually replay (predicted from
+  the chat template, so thinking-strip divergence lands past it). What
+  reuse each family gets from these:
+  [performance.md](performance.md#the-prompt-cache). On ckpt-tier
+  models prompt prefill runs one request at a time (batched prefill
+  measured no win on these shapes).
+- Decode-time checkpoints: the same models also drop restore points
+  while generating, every `GMLX_APC_DECODE_CKPT` generated tokens
+  (default 512). When the next turn's re-rendered history diverges from
+  what was generated (thinking strip, tool-call re-serialization), the
+  finish-time save falls back to the newest point below the divergence
+  instead of dropping the reply entirely. Replies shorter than one
+  interval save through the prompt-end point alone.
 
 Eviction rides the pools the entries live in: the block LRU (`num_blocks`),
 the exact-prefix LRU (`exact_entries`), the disk cap (`disk.max_gb`). Hit
@@ -1078,8 +1116,12 @@ and store counts surface on the authed `GET /v1/metrics`.
 | `GMLX_SPEC_APC_SIDECAR_BUDGET_MB` | Byte budget for the drafter-sidecar LRU, in MB (default `512`). |
 | `GMLX_APC_STORE_EVAL_CHUNK` | Blocks evaluated per step in the post-prefill store (default `32`); bounds the prefill-thread stall on long prompts. |
 | `GMLX_APC_CKPT_INTERVAL` | Prefill checkpoint interval in tokens (default `4096`, snapped to the chunk grid; `0` = final checkpoint only). |
+| `GMLX_APC_CKPT_REPLAY` | `0` disables the replay checkpoint (identical resends prefill cold again). |
+| `GMLX_APC_CKPT_REPLAY_MIN` | Minimum prompt tokens before a replay checkpoint is saved on recurrent (GDN) models (default `1024`; short prompts re-prefill cheaply and are not worth the >100 MB state snapshot). |
+| `GMLX_APC_CKPT_TURN` | `0` disables the turn checkpoint (next-turn reuse falls back to the interval grid). |
+| `GMLX_APC_CKPT_TRIPWIRE` | Requests before the dead-tier tripwires warn (default `5`; `0` silences both). |
 | `GMLX_APC_CKPT_RECORDS` | Checkpoint-record LRU entries (default `32`). |
-| `GMLX_APC_CKPT_BUDGET_MB` | Byte budget for checkpoint-record payload (recurrent states + KV tails), in MB (default `4096`). A GDN record can carry >100 MB of state, so the count bound alone is not the real limit. |
+| `GMLX_APC_CKPT_BUDGET_MB` | Byte budget for checkpoint-record payload (recurrent states + KV tails), in MB (default `4096`). A GDN record can carry >100 MB of state and each request saves several checkpoints, so expect resident memory to grow toward this budget on hybrid models under sustained multi-turn traffic; lower it if 4 GB of cache is too much for your machine. |
 | `GMLX_APC_DECODE_CKPT` | Decode-time snapshot interval in generated tokens on hybrid models, anchored to the prompt end (default `512`; `0` off; widens automatically with context). |
 | `GMLX_APC_RETIRE_LCP` | `0` keys retirement on the forwarded ids instead of the predicted next-turn render (also disables decode-time snapshots, which key on the prediction). |
 | `GMLX_FAITHFUL_HISTORY` | `0` restores mlx-vlm's stock chat-history rebuild, which drops `reasoning_content` from non-tool assistant messages before the template sees it (see `chat_template_kwargs`). |
@@ -1145,7 +1187,7 @@ is enabled. These are the config-server overrides and additions:
 | `GET /v1/metrics` | The stock runtime snapshot (under its `server` key) enriched with `resident_models[]` (per-entry ids, pinned, `idle_s`, `ttl_s`, footprint), alongside the context limits / APC detail. Authed like every other endpoint; what `gmlx ps` reads. |
 | `POST /v1/completions` | Classic OpenAI text completions, no chat template applied. Scope: a single string `prompt`, `n=1`; supports `max_tokens`, `temperature`, `top_p`, `seed`, `stop`, `stream` (SSE with a final `[DONE]`), plus `profile` and the other shared sampling extras. List / token-array prompts, `n > 1`, `echo`, `suffix`, and `best_of > 1` are rejected with a 400. |
 | `POST /v1/messages/count_tokens` | (stock) Anthropic-style token counting: same body shape as `/v1/messages`, returns `{"input_tokens": N}` after applying the chat template. |
-| `GET /v1/cache/stats` | (stock) Automatic Prefix Cache statistics, or `{"enabled": false}` when APC is off. |
+| `GET /v1/cache/stats` | Automatic Prefix Cache statistics, or `{"enabled": false}` when APC is off. On checkpoint-tier models (hybrid/SWA archs) the snapshot carries the `ckpt_*` counter family beside the stock fields; see [Checkpoint-tier counters](#checkpoint-tier-counters). |
 | `POST /v1/cache/reset` | (stock) clears the Automatic Prefix Cache. |
 | `POST /v1/images/generations`, `POST /v1/images/edits` | (stock mlx-vlm routes) not usable with GGUF text models - they require an MLX image-generation checkpoint, which gmlx does not serve; a request against a configured GGUF fails with an error. |
 | `POST /unload` | `{"model": "<id>"}` evicts just that resident entry (also clearing any keep mark); an empty body clears the whole pool. |

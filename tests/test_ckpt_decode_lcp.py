@@ -144,36 +144,55 @@ def test_retirement_uses_newest_snap_at_or_below_lcp():
 
 
 def test_retirement_rotating_uses_grid_snap():
+    """Below the window an off-grid retirement still needs the aligned
+    decode snapshot (beyond it the full sequence stores directly -- see
+    test_retirement_rotating_off_grid_beyond_window_stores)."""
     from test_ckpt_tier import assert_swa_warm_matches, make_swa_cache
 
     man = APCManager(num_blocks=64, block_size=16)
-    n = 70                                    # retirement p: off-grid
+    n = 30                                    # < W=32 and off-grid
     ids = list(range(800, 800 + n))
     cache = make_swa_cache(n, seed=21)
-    snap_src = make_swa_cache(64, seed=22)
+    snap_src = make_swa_cache(16, seed=22)
     states = [c for c in snap_src if hasattr(c, "max_size")]
     assert retirement_store(man, "ckpt", ids, cache,
-                            decode_snaps=[(64, states)])
-    warm, got = ckpt_lookup(man, ids[:64] + [1], extra_hash=0)
-    assert got == 64 and warm is not None
+                            decode_snaps=[(16, states)])
+    warm, got = ckpt_lookup(man, ids[:16] + [1], extra_hash=0)
+    assert got == 16 and warm is not None
     # Expected: plain KV from the live row, rotating windows from the
     # snapshot clones.
     expected = [s if hasattr(s, "max_size") else c
                 for c, s in zip(cache, snap_src)]
-    assert_swa_warm_matches(warm, expected, 64)
+    assert_swa_warm_matches(warm, expected, 16)
     # No exact-tier spill: the verbatim-row fallback is gone.
     assert man.stats_snapshot()["exact_stores"] == 0
 
 
-def test_retirement_snap_past_lcp_is_skipped():
+def test_retirement_snap_past_lcp_falls_back_to_full():
+    """A snapshot past the replayable prefix stays unusable, but the
+    retirement now stores the full sequence under its verbatim key
+    (raw-continuation clients) instead of storing nothing."""
     man = APCManager(num_blocks=64, block_size=16)
     cache = make_hybrid_cache(96, seed=4)
     ids = list(range(96))
     snaps = [(90, _arr_states(make_hybrid_cache(90, seed=93)))]
-    assert not retirement_store(man, "ckpt", ids, cache, max_len=80,
-                                decode_snaps=snaps)
+    assert retirement_store(man, "ckpt", ids, cache, max_len=80,
+                            decode_snaps=snaps)
     _, got = ckpt_lookup(man, ids[:90] + [1], extra_hash=0)
-    assert got == 0
+    assert got == 0                       # the past-cap snap stayed unused
+    _, got = ckpt_lookup(man, ids + [1], extra_hash=0)
+    assert got == 96                      # verbatim fallback record
+    assert cs.ckpt_stats_snapshot(man)["retire_fallback_full"] == 1
+
+
+def test_retirement_snap_path_never_falls_back():
+    man = APCManager(num_blocks=64, block_size=16)
+    cache = make_hybrid_cache(96, seed=5)
+    ids = list(range(96))
+    snaps = [(64, _arr_states(make_hybrid_cache(64, seed=94)))]
+    assert retirement_store(man, "ckpt", ids, cache, max_len=80,
+                            decode_snaps=snaps)
+    assert cs.ckpt_stats_snapshot(man)["retire_fallback_full"] == 0
 
 
 def test_record_byte_budget_evicts_lru(monkeypatch):
@@ -235,7 +254,8 @@ def test_cursor_skeleton_policy(monkeypatch):
 
     seen = []
 
-    def rec_store(manager, ids, cache, *, extra_hash=0, skeleton_disk=True):
+    def rec_store(manager, ids, cache, *, extra_hash=0, skeleton_disk=True,
+                  kind="boundary"):
         seen.append((len(ids), skeleton_disk))
         return True
 
@@ -243,6 +263,7 @@ def test_cursor_skeleton_policy(monkeypatch):
     man = APCManager(num_blocks=8, block_size=16)
     tags = tuple("arr" if k == "arr" else "kv" for k in LAYOUT)
     meta = {"full_input_ids": list(range(96)), "extra_hash": 0,
+            "ckpt_boundaries": [(32, "boundary"), (64, "boundary")],
             "checkpoint_len": 32, "ckpt_terminal": 64, "ckpt_interval": 32,
             "ckpt_last_stored": 0}
     batch = SimpleNamespace(

@@ -37,6 +37,7 @@ from .qkv_fuse import install_fused_qkv
 from .gemma4_batched_sdpa import install_gemma4_batched_sdpa
 from .cascade_sdpa import install_cascade_sdpa, install_cascade_stamp
 from .sparse_sdpa import install_sparse_sdpa
+from .arrays_cache_fix import install_arrays_cache_fix
 from .gemma4_sync import install_gemma4_nosync
 from .quantized_sdpa_fix import install_quantized_sdpa_mask_fix
 from .rope_batch_fix import install_rope_batch_fix
@@ -2842,6 +2843,7 @@ def _install_and_load(
         log(f"[install] occupancy fusion (qkv + gate/up decode) on "
             f"{n_occ} modules")
     install_rotating_cache_fix()
+    install_arrays_cache_fix()
 
     # 7. partition by what the constructed model actually defines + load.
     model.eval()
@@ -3289,6 +3291,7 @@ def load_model(
         _log(f"[install] occupancy fusion (qkv + gate/up decode) on "
              f"{n_occ} modules")
     install_rotating_cache_fix()
+    install_arrays_cache_fix()
 
     # 7. partition by what the constructed model actually defines + load.
     loadlog.stage("loading weights")

@@ -116,6 +116,18 @@ def test_store_lookup_roundtrip(p):
     assert all(b.ref_cnt == 0 for b in man.pool)
 
 
+def _trim_kv(cache, p2):
+    out = []
+    for c in cache:
+        if isinstance(c, KVCache):
+            t = KVCache()
+            t.state = (c.keys[..., :p2, :], c.values[..., :p2, :])
+            out.append(t)
+        else:
+            out.append(c)
+    return out
+
+
 def test_identical_resend_needs_shorter_checkpoint():
     man = APCManager(num_blocks=64, block_size=16)
     p = 48
@@ -128,18 +140,86 @@ def test_identical_resend_needs_shorter_checkpoint():
     assert warm is None and got == 0
     # ...but hits a shorter one (the mid-prefill checkpoint_len store).
     p2 = 30
-    trimmed = []
-    for c in cache:
-        if isinstance(c, KVCache):
-            t = KVCache()
-            t.state = (c.keys[..., :p2, :], c.values[..., :p2, :])
-            trimmed.append(t)
-        else:
-            trimmed.append(c)
+    trimmed = _trim_kv(cache, p2)
     assert ckpt_store(man, ids[:p2], trimmed, extra_hash=0)
     warm, got = ckpt_lookup(man, ids, extra_hash=0)
     assert got == p2
     assert_warm_matches(warm, trimmed, p2)
+
+
+def test_replay_record_survives_retirement_insert():
+    """The N-1 replay record exists for the identical resend, which
+    arrives after retirement grows the chain -- exactly the moment
+    strip-on-extend used to release it."""
+    from gmlx.cache_snapshot import _ckpt_records
+
+    man = APCManager(num_blocks=64, block_size=16)
+    n = 48
+    ids = list(range(100, 100 + n + 4))
+    cache = make_hybrid_cache(n)
+    replay = _trim_kv(cache, n - 1)
+    assert ckpt_store(man, ids[:n - 1], replay, extra_hash=0,
+                      kind="replay")
+    # Post-prefill terminal store, then retirement at prompt+gen.
+    assert ckpt_store(man, ids[:n], cache, extra_hash=0)
+    assert retirement_store(man, "ckpt", ids, make_hybrid_cache(n + 4),
+                            row=0, extra_hash=0)
+    idx = _ckpt_records(man)
+    assert (n - 1) in [r.p for r in idx.values()]
+    assert {r.kind for r in idx.values()} == {"replay", "boundary",
+                                              "retire"}
+    # The identical resend adopts at N-1.
+    warm, got = ckpt_lookup(man, ids[:n], extra_hash=0)
+    assert got == n - 1
+    assert_warm_matches(warm, _trim_kv(cache, n - 1), n - 1)
+
+
+def test_newer_replay_supersedes_older_on_chain():
+    from gmlx.cache_snapshot import _ckpt_records
+
+    man = APCManager(num_blocks=64, block_size=16)
+    ids = list(range(100, 196))
+    assert ckpt_store(man, ids[:47], make_hybrid_cache(47, seed=1),
+                      extra_hash=0, kind="replay")
+    assert ckpt_store(man, ids[:79], make_hybrid_cache(79, seed=2),
+                      extra_hash=0, kind="replay")
+    idx = _ckpt_records(man)
+    assert [r.p for r in idx.values() if r.kind == "replay"] == [79]
+
+
+def test_replay_record_not_exempt_from_entry_cap(monkeypatch):
+    import gmlx.cache_snapshot as cs
+
+    monkeypatch.setattr(cs, "_CKPT_RECORD_ENTRIES", 2)
+    man = APCManager(num_blocks=64, block_size=16)
+    assert ckpt_store(man, list(range(100, 147)),
+                      make_hybrid_cache(47, seed=1), extra_hash=0,
+                      kind="replay")
+    # Unrelated chains (distinct extra_hash) push it out oldest-first.
+    assert ckpt_store(man, list(range(300, 332)),
+                      make_hybrid_cache(32, seed=2), extra_hash=1)
+    assert ckpt_store(man, list(range(500, 532)),
+                      make_hybrid_cache(32, seed=3), extra_hash=2)
+    idx = cs._ckpt_records(man)
+    assert len(idx) == 2
+    assert all(r.kind != "replay" for r in idx.values())
+    warm, got = ckpt_lookup(man, list(range(100, 148)), extra_hash=0)
+    assert warm is None and got == 0
+
+
+def test_replay_record_not_exempt_from_byte_budget(monkeypatch):
+    import gmlx.cache_snapshot as cs
+
+    man = APCManager(num_blocks=64, block_size=16)
+    assert ckpt_store(man, list(range(100, 147)),
+                      make_hybrid_cache(47, seed=1), extra_hash=0,
+                      kind="replay")
+    rec = next(iter(cs._ckpt_records(man).values()))
+    monkeypatch.setattr(cs, "_CKPT_BUDGET_BYTES", rec.nbytes + 1)
+    assert ckpt_store(man, list(range(300, 347)),
+                      make_hybrid_cache(47, seed=2), extra_hash=1)
+    idx = cs._ckpt_records(man)
+    assert [r.kind for r in idx.values()] == ["boundary"]
 
 
 def test_salt_isolation_from_real_tiers():
@@ -203,7 +283,10 @@ def assert_swa_warm_matches(warm, orig, p):
                 w.keys[..., :p, :], o.keys[..., :p, :]).item()
 
 
-@pytest.mark.parametrize("p", [16, 48, 64])   # below and beyond the W=32 wrap
+# Aligned below the wrap, then off-grid and aligned positions at and
+# beyond W=32: a wrapped window is whole blocks at any p, so the store
+# no longer waits for the grid.
+@pytest.mark.parametrize("p", [16, 33, 40, 47, 48, 64, 65])
 def test_swa_store_lookup_roundtrip(p):
     man = APCManager(num_blocks=64, block_size=16)
     cache = make_swa_cache(p, seed=p)
@@ -214,20 +297,26 @@ def test_swa_store_lookup_roundtrip(p):
     assert_swa_warm_matches(warm, cache, p)
 
 
-def test_swa_store_declines_off_grid():
+def test_swa_store_declines_off_grid_below_window():
+    """Below the wrap there is no rot tail mechanism: an off-grid store
+    would need a partial window block. Beyond it (see the roundtrip
+    params) off-grid p stores."""
+    from gmlx.cache_snapshot import _ckpt_stats
     man = APCManager(num_blocks=64, block_size=16)
-    p = 40                                    # not a block multiple
+    p = 20                                    # < W=32 and 20 % 16 != 0
     cache = make_swa_cache(p)
     assert not ckpt_store(man, list(range(300, 300 + p)), cache)
     assert all(b.ref_cnt == 0 for b in man.pool)
+    assert _ckpt_stats(man)["ckpt_declines"] == {"grid": 1}
 
 
 def test_retirement_rotating_without_snap_declines():
-    """No exact-tier fallback: an off-grid rotating retirement with no
-    decode snapshot stores nothing, and the exact tier stays empty so
-    the stock warm path never bypasses ckpt arming."""
+    """No exact-tier fallback: a below-window off-grid rotating
+    retirement with no decode snapshot stores nothing, and the exact
+    tier stays empty so the stock warm path never bypasses ckpt
+    arming."""
     man = APCManager(num_blocks=64, block_size=16)
-    p = 40                                    # unaligned: ckpt declines
+    p = 20                                    # < W and unaligned
     cache = make_swa_cache(p, seed=3)
     ids = list(range(300, 300 + p))
     assert not retirement_store(man, "ckpt", ids, cache, row=0,
@@ -235,6 +324,170 @@ def test_retirement_rotating_without_snap_declines():
     entry, plen = man.lookup_exact_cache(ids + [1], extra_hash=1)
     assert entry is None and plen == 0
     assert man.stats_snapshot()["exact_stores"] == 0
+
+
+def test_retirement_rotating_off_grid_beyond_window_stores():
+    man = APCManager(num_blocks=64, block_size=16)
+    p = 40                                    # unaligned but >= W=32
+    cache = make_swa_cache(p, seed=3)
+    ids = list(range(300, 300 + p))
+    assert retirement_store(man, "ckpt", ids, cache, row=0, extra_hash=1)
+    warm, got = ckpt_lookup(man, ids + [1], extra_hash=1)
+    assert got == p
+    assert_swa_warm_matches(warm, cache, p)
+
+
+def test_buffered_rotating_declines_loudly():
+    """The spec path swaps rot layers to BufferedRotatingKVCache after
+    prefill; its start_position/slack-buffer geometry has no canonical
+    window yet, so stores and clones must decline (counted), never
+    snapshot it silently wrong."""
+    from mlx_vlm.models.cache import BufferedRotatingKVCache
+    from gmlx.cache_snapshot import _ckpt_stats, _clone_single_row
+    man = APCManager(num_blocks=64, block_size=16)
+    p = 48
+    cache = make_swa_cache(p, seed=6)
+    buffered = [BufferedRotatingKVCache.from_cache(c, buffer_size=16)
+                if isinstance(c, RotatingKVCache) else c for c in cache]
+    ids = list(range(300, 300 + p))
+    assert not ckpt_store(man, ids, buffered, extra_hash=0)
+    assert _ckpt_stats(man)["ckpt_declines"] == {"buffered": 1}
+    assert all(b.ref_cnt == 0 for b in man.pool)
+    assert _clone_single_row(buffered[1]) is None
+
+
+def test_lookup_pins_blocks_against_concurrent_release(monkeypatch):
+    """A _record_insert on another thread can release a candidate's
+    chains between selection and assembly; the lookup must pin them (+1
+    ref under the lock) so assembly reads live tensors, and drop the pin
+    on every exit path."""
+    import gmlx.cache_snapshot as cs
+
+    man = APCManager(num_blocks=64, block_size=16)
+    p = 32
+    cache = make_hybrid_cache(p, seed=21)
+    ids = list(range(100, 100 + p))
+    assert ckpt_store(man, ids, cache, extra_hash=0)
+    idx = cs._ckpt_records(man)
+    (key,) = idx.keys()
+
+    real = cs._assemble_from_record
+
+    def _release_then_assemble(manager, rec):
+        # Simulate the concurrent insert's strip firing mid-lookup.
+        with manager.lock:
+            victim = idx.pop(key, None)
+            if victim is not None:
+                cs._release_record(manager, victim)
+        return real(manager, rec)
+
+    monkeypatch.setattr(cs, "_assemble_from_record", _release_then_assemble)
+    warm, got = ckpt_lookup(man, ids + [1], extra_hash=0)
+    assert got == p
+    assert_warm_matches(warm, cache, p)      # tensors were still live
+    # Record gone, pin dropped: every block back to refcount zero.
+    assert not idx
+    assert all(b.ref_cnt == 0 for b in man.pool)
+
+
+def test_lookup_skips_record_released_after_selection(monkeypatch):
+    """A candidate released after selection but before its turn in the
+    walk is refused via the index membership check, never assembled from
+    recycled blocks; surviving records keep their pins."""
+    import gmlx.cache_snapshot as cs
+
+    man = APCManager(num_blocks=64, block_size=16)
+    ids = list(range(100, 196))
+    short = make_hybrid_cache(32, seed=22)
+    assert ckpt_store(man, ids[:32], short, extra_hash=0)
+    assert ckpt_store(man, ids[:48], make_hybrid_cache(48, seed=23),
+                      extra_hash=0)
+    idx = cs._ckpt_records(man)
+    short_key = (tuple(ids[:32]), 0)
+    assert short_key in idx
+
+    real = cs._assemble_from_record
+
+    def _fail_deep_release_short(manager, rec):
+        if rec.p == 48:
+            with manager.lock:
+                victim = idx.pop(short_key, None)
+                if victim is not None:
+                    cs._release_record(manager, victim)
+            return None                      # deep candidate: assembly fails
+        return real(manager, rec)
+
+    monkeypatch.setattr(cs, "_assemble_from_record",
+                        _fail_deep_release_short)
+    warm, got = ckpt_lookup(man, ids[:60], extra_hash=0)
+    assert warm is None and got == 0
+    # The surviving p=48 record still pins exactly its own chain.
+    assert [r.p for r in idx.values()] == [48]
+    held = [b for b in man.pool if b.block_hash is not None]
+    assert held and all(b.ref_cnt == 1 for b in held)
+    monkeypatch.setattr(cs, "_assemble_from_record", real)
+    warm, got = ckpt_lookup(man, ids[:60], extra_hash=0)
+    assert got == 48
+
+
+def test_lookup_survives_concurrent_clear(monkeypatch):
+    """clear() while a lookup holds assembly pins: the pool free list is
+    rebuilt under the held refs, so releasing them afterwards would push
+    already-free blocks twice and corrupt the list. The generation check
+    drops the refs instead and discards the pre-clear warm result."""
+    import gmlx.cache_snapshot as cs
+    from gmlx.apc_manager import GmlxAPCManager
+
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    p = 32
+    ids = list(range(100, 100 + p))
+    assert ckpt_store(man, ids, make_hybrid_cache(p, seed=31), extra_hash=0)
+
+    real = cs._assemble_from_record
+
+    def _clear_then_assemble(manager, rec):
+        manager.clear()
+        return real(manager, rec)
+
+    monkeypatch.setattr(cs, "_assemble_from_record", _clear_then_assemble)
+    warm, got = ckpt_lookup(man, ids + [1], extra_hash=0)
+    assert warm is None and got == 0
+    # Free list intact: every pool block exactly once, all refs zero.
+    seen = set()
+    b = man._free_head
+    while b is not None and len(seen) <= len(man.pool):
+        assert id(b) not in seen
+        seen.add(id(b))
+        b = b.next
+    assert len(seen) == len(man.pool)
+    assert all(blk.ref_cnt == 0 for blk in man.pool)
+
+
+def test_store_exception_after_insert_keeps_record_pinned(monkeypatch):
+    """An exception after _record_insert transferred chain ownership must
+    not release the blocks on the except path: the record is live in the
+    index, so a second release would strip its pins while it serves."""
+    import gmlx.cache_snapshot as cs
+
+    man = APCManager(num_blocks=64, block_size=16)
+    p = 32
+    ids = list(range(100, 100 + p))
+
+    real = cs._ckpt_bump
+
+    def _boom(manager, key, n=1):
+        if key == "ckpt_stores":
+            raise RuntimeError("post-insert failure")
+        return real(manager, key, n)
+
+    monkeypatch.setattr(cs, "_ckpt_bump", _boom)
+    assert not ckpt_store(man, ids, make_hybrid_cache(p, seed=41),
+                          extra_hash=0)
+    monkeypatch.setattr(cs, "_ckpt_bump", real)
+    held = [b for b in man.pool if b.block_hash is not None]
+    assert held and all(b.ref_cnt >= 1 for b in held)
+    warm, got = ckpt_lookup(man, ids + [1], extra_hash=0)
+    assert got == p
 
 
 def test_pinning_survives_pool_pressure():
@@ -271,6 +524,148 @@ def test_strip_on_extend_keeps_newest_two():
     assert got == 64
 
 
+def test_strip_on_extend_exempts_replay():
+    """A growing chain strips boundary records past the cap but never a
+    replay record; the replay stays adoptable through terminal and
+    retirement inserts."""
+    from gmlx.cache_snapshot import _ckpt_records
+    man = APCManager(num_blocks=64, block_size=16)
+    ids = list(range(400, 400 + 96))
+    assert ckpt_store(man, ids[:32], make_hybrid_cache(32, seed=32),
+                      extra_hash=0)
+    assert ckpt_store(man, ids[:47], make_hybrid_cache(47, seed=47),
+                      extra_hash=0, kind="replay")
+    assert ckpt_store(man, ids[:64], make_hybrid_cache(64, seed=64),
+                      extra_hash=0)
+    assert ckpt_store(man, ids[:80], make_hybrid_cache(80, seed=80),
+                      extra_hash=0, kind="retire")
+    idx = _ckpt_records(man)
+    assert sorted(r.p for r in idx.values()) == [47, 64, 80]
+    warm, got = ckpt_lookup(man, ids[:48], extra_hash=0)
+    assert got == 47
+
+
+def test_replay_gate_arr_adopts_exact_resend_only():
+    """A recurrent-state replay record serves the identical resend
+    (query = record + 1 token) and refuses longer suffixes -- the
+    refusal is reason-counted and feeds missed-adoption accounting."""
+    import gmlx.cache_snapshot as cs
+    man = APCManager(num_blocks=64, block_size=16)
+    ids = list(range(400, 432))
+    assert ckpt_store(man, ids, make_hybrid_cache(32, seed=5),
+                      extra_hash=0, kind="replay")
+    warm, got = ckpt_lookup(man, ids + [1], extra_hash=0)
+    assert got == 32 and warm is not None
+    warm, got = ckpt_lookup(man, ids + [1, 2, 3], extra_hash=0)
+    assert warm is None and got == 0
+    st = cs.ckpt_stats_snapshot(man)
+    assert st["ckpt_declines"] == {"replay_gate": 1}
+    assert st["ckpt_missed_adoptions"] == 1
+
+
+def test_replay_gate_rot_only_adopts_freely():
+    """Attention-only replay records split exactly: any longer query
+    adopts, same as a boundary record."""
+    man = APCManager(num_blocks=64, block_size=16)
+    ids = list(range(800, 848))                # p=48 >= W=32
+    cache = make_swa_cache(48, seed=9)
+    assert ckpt_store(man, ids, cache, extra_hash=0, kind="replay")
+    warm, got = ckpt_lookup(man, ids + list(range(60, 70)), extra_hash=0)
+    assert got == 48
+    assert_swa_warm_matches(warm, cache, 48)
+
+
+def test_replay_arr_skeleton_forced_off(tmp_path):
+    """The disk path knows no kinds, so an arr replay skeleton would
+    serve a restart past the adopt gate; ckpt_store forces it off even
+    when the caller asks for one. Rot-only replay keeps its skeleton
+    (free adoption makes the disk hit equivalent)."""
+    import gmlx.cache_snapshot as cs
+    disk = DiskBlockStore(root=tmp_path, namespace="m")
+    man = APCManager(num_blocks=64, block_size=16, disk=disk)
+    ids = list(range(100, 132))
+    assert ckpt_store(man, ids, make_hybrid_cache(32, seed=6),
+                      extra_hash=0, kind="replay", skeleton_disk=True)
+    assert cs.ckpt_stats_snapshot(man)["ckpt_skeleton_writes"] == 0
+    rot_ids = list(range(200, 248))
+    assert ckpt_store(man, rot_ids, make_swa_cache(48, seed=7),
+                      extra_hash=0, kind="replay", skeleton_disk=True)
+    assert cs.ckpt_stats_snapshot(man)["ckpt_skeleton_writes"] == 1
+    disk.close()
+
+
+def test_post_prefill_store_records_boundary():
+    """The spec-path p=N store appends to the settled variable the
+    sidecar key set and the Stage 6 drop gate read; a declined store
+    appends nothing."""
+    from gmlx.speculative import _ckpt_post_prefill
+    man = APCManager(num_blocks=64, block_size=16)
+    ids = list(range(100, 132))
+    model = SimpleNamespace(_kq_apc_manager=man)
+    meta = {}
+    _ckpt_post_prefill(model, make_hybrid_cache(32, seed=13),
+                       {"full_ids": ids, "extra_hash": 0, "apc_meta": meta})
+    assert meta["ckpt_stored_boundaries"] == [32]
+    meta2 = {}
+    _ckpt_post_prefill(model, make_hybrid_cache(40, seed=14),
+                       {"full_ids": ids, "extra_hash": 0, "apc_meta": meta2})
+    assert meta2 == {}
+
+
+def test_full_store_drop_gate():
+    """p=N drops only when an armed render-stable boundary LANDED --
+    armed-then-declined keeps it (nothing else would cover turn 2's
+    prefix class)."""
+    from gmlx.cache_snapshot import ckpt_full_store_redundant
+    assert not ckpt_full_store_redundant(None)
+    assert not ckpt_full_store_redundant({})
+    assert not ckpt_full_store_redundant(
+        {"ckpt_p_stable_bounds": [2048], "ckpt_stored_boundaries": [4096]})
+    assert ckpt_full_store_redundant(
+        {"ckpt_p_stable_bounds": [2048, 2100],
+         "ckpt_stored_boundaries": [2048, 4096]})
+
+
+def test_post_prefill_store_dropped_when_p_stable_landed():
+    from gmlx.cache_snapshot import _ckpt_records
+    from gmlx.speculative import _ckpt_post_prefill
+    man = APCManager(num_blocks=64, block_size=16)
+    ids = list(range(100, 132))
+    model = SimpleNamespace(_kq_apc_manager=man)
+    meta = {"ckpt_p_stable_bounds": [16], "ckpt_stored_boundaries": [16]}
+    _ckpt_post_prefill(model, make_hybrid_cache(32, seed=15),
+                       {"full_ids": ids, "extra_hash": 0, "apc_meta": meta})
+    assert meta["ckpt_stored_boundaries"] == [16]   # no p=N append
+    assert len(_ckpt_records(man)) == 0             # no p=N record
+
+
+def test_rot_clone_canonicalizes():
+    """_clone_single_row trims a wrapped rotating buffer to the canonical
+    window (min(offset, W) columns, ring pointer at the end) while
+    preserving the concrete class; content matches the live canonical
+    window bit-exactly. Below the wrap the partial fill clones whole."""
+    from gmlx.cache_snapshot import (
+        _clone_single_row,
+        rotating_canonical_window,
+        rotating_invariant,
+    )
+    src = next(c for c in make_swa_cache(96, seed=8)
+               if isinstance(c, RotatingKVCache))
+    assert src.keys.shape[2] > ROT_W          # raw ring is untrimmed
+    out = _clone_single_row(src)
+    assert type(out) is type(src)
+    assert out.keys.shape[2] == ROT_W         # canonical: min(96, 32)
+    assert rotating_invariant(out) == (True, True)
+    ko, vo, mo = rotating_canonical_window(src)
+    kw, vw, mw = rotating_canonical_window(out)
+    assert mo == mw
+    assert mx.array_equal(ko, kw).item() and mx.array_equal(vo, vw).item()
+    src2 = next(c for c in make_swa_cache(20, seed=9)
+                if isinstance(c, RotatingKVCache))
+    out2 = _clone_single_row(src2)
+    assert out2.keys.shape[2] == 20 and int(out2.offset) == 20
+
+
 def test_layout_signature_rejects_mismatch():
     man = APCManager(num_blocks=64, block_size=16)
     p = 32
@@ -286,16 +681,22 @@ def test_layout_signature_rejects_mismatch():
     assert warm is None and got == 0
 
 
-def test_swa_disk_restart_roundtrip(tmp_path):
-    p = 48
+@pytest.mark.parametrize("p", [33, 47, 48, 65])
+def test_swa_disk_restart_roundtrip(tmp_path, p):
+    """Production-manager restart repair. GmlxAPCManager routes chain
+    stores through store_ckpt_blocks, whose disk kwarg gates window-chain
+    persistence by kind; the stock manager's fallback disk-writes every
+    chain, and testing on it hid a live bug where rot window chains never
+    reached disk at all."""
+    from gmlx.apc_manager import GmlxAPCManager
     cache = make_swa_cache(p, seed=11)
     ids = list(range(700, 700 + p))
     disk = DiskBlockStore(root=tmp_path, namespace="m")
-    man = APCManager(num_blocks=64, block_size=16, disk=disk)
-    assert ckpt_store(man, ids, cache, extra_hash=4)
+    man = GmlxAPCManager(num_blocks=64, block_size=16, disk=disk)
+    assert ckpt_store(man, ids, cache, extra_hash=4, kind="replay")
     disk.close()
     disk2 = DiskBlockStore(root=tmp_path, namespace="m")
-    man2 = APCManager(num_blocks=64, block_size=16, disk=disk2)
+    man2 = GmlxAPCManager(num_blocks=64, block_size=16, disk=disk2)
     try:
         warm, got = ckpt_lookup(man2, ids + [77], extra_hash=4)
         assert got == p
@@ -406,9 +807,39 @@ def test_ckpt_store_suppresses_layer_major():
     assert man.stats_snapshot()["exact_stores"] == 1
 
 
-def test_window_chain_is_memory_only(tmp_path):
-    """Position-salted window shards cannot dedup on disk; the gmlx
-    manager schedules disk writes for the main chain only."""
+def test_stripped_boundary_recovers_via_skeleton(tmp_path):
+    """Strip-on-extend releases a boundary record's pin, but its blocks
+    stay indexed in the pool until reused and its skeleton stays on
+    disk: a later shared-prefix lookup must re-assemble the record from
+    skeleton + memory blocks. This is the divergent-suffix recovery
+    path -- suppressing boundary skeletons broke it live (2d matrix,
+    gemma-4: divergent/turn adoption fell to +0)."""
+    from gmlx.apc_manager import GmlxAPCManager
+    from gmlx.cache_snapshot import _ckpt_records, _release_record
+    disk = DiskBlockStore(root=tmp_path, namespace="m")
+    man = GmlxAPCManager(num_blocks=64, block_size=16, disk=disk)
+    try:
+        p = 48
+        cache = make_swa_cache(p, seed=12)
+        ids = list(range(300, 300 + p))
+        assert ckpt_store(man, ids, cache, extra_hash=0)
+        idx = _ckpt_records(man)
+        (key, rec), = list(idx.items())
+        _release_record(man, idx.pop(key))
+        warm, got = ckpt_lookup(man, ids + [77], extra_hash=0)
+        assert got == p
+        assert_swa_warm_matches(warm, cache, p)
+    finally:
+        disk.close()
+
+
+def test_window_chain_disk_follows_kind(tmp_path):
+    """Position-salted window shards cannot dedup on disk, so they earn
+    persistence only where restart repair reads them: replay and retire
+    records. A boundary store keeps its window chain memory-only but
+    still writes its skeleton -- within the process the skeleton
+    re-indexes a record whose blocks survived strip-on-extend; the main
+    chain writes through regardless (it dedups)."""
     from gmlx.apc_manager import GmlxAPCManager
     disk = DiskBlockStore(root=tmp_path, namespace="m")
     man = GmlxAPCManager(num_blocks=64, block_size=16, disk=disk)
@@ -417,8 +848,15 @@ def test_window_chain_is_memory_only(tmp_path):
         cache = make_swa_cache(p, seed=5)
         ids = list(range(600, 600 + p))
         assert ckpt_store(man, ids, cache, extra_hash=0)
-        # 3 main blocks; the 2 window blocks stay memory-only.
-        assert man.stats_snapshot()["disk_writes"] == 3
+        # boundary: 3 main blocks + the skeleton -- no window shards
+        assert man.stats_snapshot()["disk_writes"] == 4
+        assert man.stats_snapshot()["ckpt_skeleton_writes"] == 1
+        cache2 = make_swa_cache(p, seed=6)
+        ids2 = list(range(800, 800 + p))
+        assert ckpt_store(man, ids2, cache2, extra_hash=0, kind="replay")
+        # replay: 3 main + 2 window blocks + the skeleton entry
+        assert man.stats_snapshot()["disk_writes"] == 10
+        assert man.stats_snapshot()["ckpt_skeleton_writes"] == 2
     finally:
         disk.close()
 

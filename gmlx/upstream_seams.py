@@ -295,7 +295,8 @@ SEAMS: tuple[Seam, ...] = (
          "cache_compat (ds4 make_cache, prefix_cache snapshots)",
          critical=True),
     Seam("mlx_vlm.models.cache", "ArraysCache",
-         "cache_compat (ckpt_supported, prefix_cache snapshots)"),
+         "cache_compat (ckpt_supported, prefix_cache snapshots) / "
+         "arrays_cache_fix (prepare wrap)"),
     Seam("mlx_vlm.models.cache", "BatchKVCache",
          "mtp_drafter / cache_snapshot row round-trip"),
     Seam("mlx_vlm.models.cache", "BatchRotatingKVCache",
@@ -329,6 +330,10 @@ SEAMS: tuple[Seam, ...] = (
          "apc_pooling", critical=True),
     Seam("mlx_lm.models.cache", "RotatingKVCache",
          "rotating_cache_fix / prefix_cache snapshots"),
+    Seam("mlx_lm.models.cache", "ArraysCache",
+         "arrays_cache_fix (prepare wrap: lengths must clear the stale "
+         "left_padding that merge() seeds, or right-padded ragged prefill "
+         "runs unmasked through conv/SSM state)"),
     Seam("mlx_lm.models.base", "create_causal_mask", "rotating_cache_fix"),
     Seam("mlx_lm.models.hunyuan", "MoeBlock",
          "loader._patch_hunyuan_norm_topk"),

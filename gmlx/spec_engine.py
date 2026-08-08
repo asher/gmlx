@@ -187,6 +187,19 @@ def _resolve_l1(model):
         except Exception:
             _log.warning("APC L1: model_apc_mode probe failed", exc_info=True)
             mode = None
+        if mode is None:
+            # A manager was built and wired, then silently dropped here --
+            # without this line a dead cache is indistinguishable from an
+            # idle one (minimax-m3 with the MSA indexer armed).
+            kinds = []
+            try:
+                kinds = sorted({type(c).__name__ for c in lm.make_cache()})
+            except Exception:
+                pass
+            _log.warning(
+                "APC OFF for this model: no tier serves its cache stack "
+                "(%s) -- every request prefills cold",
+                ", ".join(kinds) or "unprobeable")
         try:
             model._kq_apc_mode = mode
         except Exception:
@@ -207,12 +220,19 @@ def _ckpt_active(model, mode, block_size: int = 16) -> bool:
         return False
     flag = getattr(model, "_kq_apc_ckpt", None)
     if flag is None:
-        from .cache_snapshot import ckpt_supported
+        from .cache_snapshot import ckpt_layout
         lm = getattr(model, "language_model", None) or model
         try:
-            flag = bool(ckpt_supported(lm.make_cache(), block_size))
+            tags = ckpt_layout(lm.make_cache(), block_size)
         except Exception:
-            flag = False
+            tags = None
+        flag = tags is not None
+        if flag:
+            _log.info(
+                "APC tier: ckpt (layers: %d kv / %d rot / %d arr)",
+                tags.count("kv"),
+                sum(1 for t in tags if t.startswith("rot")),
+                tags.count("arr"))
         try:
             model._kq_apc_ckpt = flag
         except Exception:
@@ -346,15 +366,13 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
         # stock body is suppressed by the cursor's advance). Column
         # alignment itself still runs on the stock machinery, which
         # requires _apc_mode == "exact".
-        first, terminal, interval = _ckpt_cursor_init(
-            batch, guard, max(l0_prefix, l1_prefix),
-            int(manager.block_size))
-        meta["checkpoint_len"] = first
-        meta["ckpt_terminal"] = terminal
-        meta["ckpt_interval"] = interval
-        meta["ckpt_last_stored"] = 0
+        _ckpt_arm_schedule(batch, meta, guard,
+                           max(l0_prefix, l1_prefix),
+                           int(manager.block_size))
         batch._apc_harvest_enabled = False
         batch._kq_ckpt_armed = True
+        from .cache_snapshot import ckpt_note_armed
+        ckpt_note_armed(manager)
     return l1_prefix
 
 
@@ -364,43 +382,171 @@ def _gcd(a: int, b: int) -> int:
     return a
 
 
+def _ckpt_unit(batch, block_size: int) -> int:
+    """The natural chunk grid: lcm(prefill_step_size, block_size)."""
+    step = int(getattr(batch, "prefill_step_size", 0) or 0)
+    return block_size if step <= 0 else \
+        step * block_size // _gcd(step, block_size)
+
+
 def _ckpt_cursor_init(batch, guard: int, restored: int,
-                      block_size: int) -> tuple[int, int, int]:
-    """(first_boundary, terminal, interval) for the checkpoint cursor.
+                      block_size: int) -> tuple[list, int, int]:
+    """Boundary schedule for the checkpoint cursor: an ordered
+    ``[(position, kind), ...]`` list plus ``(terminal, interval)``.
 
     Boundaries sit on the natural chunk grid, lcm(prefill_step_size,
     block_size) -- an off-grid boundary truncates a chunk, and gated-delta
     state is chunk-shape sensitive (certified: any grid change drifts).
-    First boundary above the restored prefix; terminal clamped to
-    the grid at or below the stock guard column. GMLX_APC_CKPT_INTERVAL
+    Interval points above the restored prefix, then the terminal (the
+    grid point at or below the stock guard column). GMLX_APC_CKPT_INTERVAL
     tokens, default 4096, snapped up to the grid; 0 = terminal-only.
+    Later stages add store positions by appending boundaries here, never
+    by new store mechanisms.
     """
-    step = int(getattr(batch, "prefill_step_size", 0) or 0)
-    unit = block_size if step <= 0 else \
-        step * block_size // _gcd(step, block_size)
+    unit = _ckpt_unit(batch, block_size)
     terminal = (guard // unit) * unit
     if terminal <= max(0, restored):
-        return 0, 0, 0
+        return [], 0, 0
     raw = env_int("GMLX_APC_CKPT_INTERVAL", 4096)
     interval = 0 if raw <= 0 else max(unit, (raw // unit) * unit)
+    bounds = []
     if interval:
-        first = ((max(0, restored) // interval) + 1) * interval
-        first = min(first, terminal)
-    else:
-        first = terminal
-    return first, terminal, interval
+        b = ((max(0, restored) // interval) + 1) * interval
+        while b < terminal:
+            bounds.append((b, "boundary"))
+            b += interval
+    bounds.append((terminal, "boundary"))
+    return bounds, terminal, interval
+
+
+def _ckpt_replay_boundary(batch, meta, restored: int,
+                          block_size: int) -> int | None:
+    """N-1 replay boundary, or None when it cannot earn its pause.
+
+    An identical resend can only adopt a record strictly below the
+    query, and the interval/terminal schedule never places one there
+    for prompts under one interval (the depth e2e's bug 1); N-1 is the
+    deepest position that is both adoptable and drift-free (the warm
+    turn forwards exactly one token), and the pause is free on the cold
+    side -- both prefill loops already stop at N-1 to feed the first
+    decode step, so the boundary lands on a natural chunk edge and
+    perturbs no chunk shape. arr layouts gate on a minimum N:
+    recurrent state is prompt-length-independent (>100 MB per record on
+    27B-class), and short-prompt records would churn the LRU out of the
+    deep-conversation records it exists to protect. Rotating layouts
+    need N-1 at or past the window (below it the store's grid gate
+    declines). Kill switch: GMLX_APC_CKPT_REPLAY=0.
+    """
+    if env_int("GMLX_APC_CKPT_REPLAY", 1) == 0:
+        return None
+    n = len(meta.get("full_input_ids") or ())
+    replay = n - 1
+    if replay < 2 or replay <= max(0, restored):
+        return None
+    tags = _ckpt_layout_for(getattr(batch, "model", None), block_size) or ()
+    if "arr" in tags and n < env_int("GMLX_APC_CKPT_REPLAY_MIN", 1024):
+        return None
+    for t in tags:
+        if t.startswith("rot") and replay < int(t.split(":")[1]):
+            return None
+    return replay
+
+
+def _ckpt_turn_boundaries(batch, meta, restored: int,
+                          block_size: int) -> list[int]:
+    """Render-stable turn boundary positions for the schedule.
+
+    p_stable is the deepest prompt position a next-turn re-render keeps;
+    the gen-prompt/think tail past it is re-rendered away, so records
+    stored only above it can never serve turn 2 (how multi-turn adoption
+    silently died). Every layout gets the grid point at or below
+    p_stable (drift-free for chunk-shape-sensitive state); rot-only
+    layouts also pause exactly at p_stable (attention splits exactly;
+    needs the window wrapped). GMLX_APC_CKPT_TURN=0 disables these and
+    with them the p=N drop gate.
+    """
+    if env_int("GMLX_APC_CKPT_TURN", 1) == 0:
+        return []
+    ids = meta.get("full_input_ids") or ()
+    unit = _ckpt_unit(batch, block_size)
+    tags = _ckpt_layout_for(getattr(batch, "model", None), block_size) or ()
+    ws = [int(t.split(":")[1]) for t in tags if t.startswith("rot")]
+    # Cheapest boundary this layout could arm: the grid needs one unit
+    # of stable prefix; rot-only layouts can also pause exactly at
+    # p_stable once the window wraps. Below that no boundary can land,
+    # so skip the render+tokenize prediction entirely.
+    need = unit if ("arr" in tags or not ws) else min(unit, max(ws))
+    if len(ids) - 1 < need:
+        return []
+    from .retire_key import lookup_render_ctx, prompt_stable_lcp
+    ctx = lookup_render_ctx(ids)
+    p_stable = prompt_stable_lcp(ctx, ids) if ctx else None
+    if not p_stable or p_stable < 2:
+        return []
+    p_stable = min(int(p_stable), len(ids) - 1)
+    meta["ckpt_p_stable"] = p_stable
+    floor = max(0, restored)
+    out = []
+    grid = (p_stable // unit) * unit
+    if grid > floor:
+        out.append(grid)
+    if ws and "arr" not in tags and p_stable != grid \
+            and p_stable > floor and p_stable >= max(ws):
+        out.append(p_stable)
+    return out
+
+
+def _sched_insert(bounds: list, pos: int, kind: str) -> None:
+    """Insert (pos, kind) keeping order. On collision the existing entry
+    keeps its kind: a colliding position is always grid-aligned or an
+    exact turn boundary, where a plain boundary record adopts freely --
+    identical resend included -- while flipping it to replay would gate
+    turn-2 and branch adoption out on recurrent layouts (and satisfy the
+    p=N drop with a record turn 2 cannot use)."""
+    import bisect
+
+    pts = [b for b, _ in bounds]
+    i = bisect.bisect_left(pts, pos)
+    if i >= len(pts) or pts[i] != pos:
+        bounds.insert(i, (pos, kind))
+
+
+def _ckpt_arm_schedule(batch, meta, guard: int, restored: int,
+                       block_size: int) -> None:
+    """Publish the boundary schedule into the request meta. The head
+    mirrors into ``checkpoint_len`` (an int) because the stock
+    checkpoint-column truncation and store reads exactly that key.
+    ``ckpt_stored_boundaries`` collects every boundary whose store
+    landed (record verified in the index) -- the settled variable the
+    post-prefill p=N decision and the sidecar key set both read;
+    ``ckpt_p_stable_bounds`` is the qualifying set for the p=N drop."""
+    bounds, terminal, interval = _ckpt_cursor_init(
+        batch, guard, restored, block_size)
+    turn = _ckpt_turn_boundaries(batch, meta, restored, block_size)
+    for pos in turn:
+        _sched_insert(bounds, pos, "boundary")
+    replay = _ckpt_replay_boundary(batch, meta, restored, block_size)
+    if replay is not None:
+        _sched_insert(bounds, replay, "replay")
+    meta["ckpt_boundaries"] = bounds
+    meta["checkpoint_len"] = int(bounds[0][0]) if bounds else 0
+    meta["ckpt_terminal"] = terminal
+    meta["ckpt_interval"] = interval
+    meta["ckpt_last_stored"] = 0
+    meta["ckpt_stored_boundaries"] = []
+    meta["ckpt_p_stable_bounds"] = turn
 
 
 def _ckpt_mid_prefill_store(batch) -> None:
     """Checkpoint-tier replacement for the stock mid-prefill exact store.
 
-    Fires at each cursor boundary, then advances ``checkpoint_len`` and
-    latches ``checkpoint_done`` only after the terminal. The advance is
-    what suppresses the stock store; ``_install_ckpt_checkpoint_store``
-    wraps the stock method so the cursor always runs immediately before
-    it -- the ordering is structural, not positional. Advances past
-    failed stores; ``ckpt_last_stored`` records only boundaries that
-    landed.
+    Fires at the schedule head, pops it, and mirrors the next head into
+    ``checkpoint_len``, latching ``checkpoint_done`` when the schedule
+    empties. The advance is what suppresses the stock store;
+    ``_install_ckpt_checkpoint_store`` wraps the stock method so the
+    cursor always runs immediately before it -- the ordering is
+    structural, not positional. Advances past failed stores;
+    ``ckpt_last_stored`` records only boundaries that landed.
     """
     if not getattr(batch, "_kq_ckpt_armed", False):
         return
@@ -417,20 +563,27 @@ def _ckpt_mid_prefill_store(batch) -> None:
     if batch._row_real_tokens_processed(0) != checkpoint_len:
         return
     terminal = int(meta.get("ckpt_terminal") or 0)
-    interval = int(meta.get("ckpt_interval") or 0)
-    # GDN skeletons inline >100 MB of state; interval boundaries are
-    # superseded within the same prefill, so only the terminal earns disk.
+    bounds = meta.get("ckpt_boundaries") or []
+    kind = "boundary"
+    if bounds and int(bounds[0][0]) == checkpoint_len:
+        kind = str(bounds.pop(0)[1])
+    # GDN skeletons inline >100 MB of state; boundaries superseded within
+    # the same prefill do not earn disk, only the terminal does -- and a
+    # replay skeleton would buy restart-repair of an identical resend
+    # only, which does not earn it either.
     layout = _ckpt_layout_for(getattr(batch, "model", None),
                               int(manager.block_size)) or ()
-    skel = checkpoint_len >= terminal or "arr" not in layout
+    skel = "arr" not in layout or (kind != "replay"
+                                   and checkpoint_len >= terminal)
     from .cache_snapshot import ckpt_store
     if ckpt_store(
             manager, meta["full_input_ids"][:checkpoint_len],
             batch.prompt_cache, extra_hash=int(meta.get("extra_hash", 0)),
-            skeleton_disk=skel):
+            skeleton_disk=skel, kind=kind):
         meta["ckpt_last_stored"] = checkpoint_len
-    if interval and checkpoint_len < terminal:
-        meta["checkpoint_len"] = min(checkpoint_len + interval, terminal)
+        meta.setdefault("ckpt_stored_boundaries", []).append(checkpoint_len)
+    if bounds:
+        meta["checkpoint_len"] = int(bounds[0][0])
     else:
         meta["checkpoint_done"] = True
 
@@ -470,8 +623,9 @@ def _snap_fields(batch, manager) -> dict:
     serve-sized step (2048) would otherwise push the first snapshot far
     past prompt end + interval, so it falls back to the block size (the
     off-grid restore is the scoped-benign case). ``snap_align`` is the
-    block alignment a rotating window store requires (a window cannot
-    rewind, so off-grid clones are unusable).
+    block alignment a rotating window store requires below the window;
+    ``snap_offgrid_min`` (= W) is where the store gate stops caring --
+    a wrapped window is whole blocks at any p.
     """
     import math
     from .cache_snapshot import _DECODE_CKPT_DEFAULT
@@ -481,10 +635,16 @@ def _snap_fields(batch, manager) -> dict:
     grid = math.lcm(step, bs) if step > 0 else bs
     if grid > env_int("GMLX_APC_DECODE_CKPT", _DECODE_CKPT_DEFAULT):
         grid = bs
+    rot_w = 0
+    for t in tags:
+        if t.startswith("rot"):
+            rot_w = int(t.split(":")[1])
+            break
     return {
         "snap_ok": bool(tags),
         "snap_grid": grid,
-        "snap_align": bs if any(t.startswith("rot") for t in tags) else 1,
+        "snap_align": bs if rot_w else 1,
+        "snap_offgrid_min": rot_w,
     }
 
 
@@ -536,20 +696,18 @@ def _plain_ckpt_init(batch) -> None:
         _log.info("APC L1 hit: prefix=%d suffix=%d tier=ckpt",
                   cp, len(ids_list) - cp)
     guard = int(meta.get("checkpoint_len") or 0)
-    first, terminal, interval = _ckpt_cursor_init(batch, guard, restored, bs)
-    meta["checkpoint_len"] = first
-    meta["ckpt_terminal"] = terminal
-    meta["ckpt_interval"] = interval
-    meta["ckpt_last_stored"] = 0
+    _ckpt_arm_schedule(batch, meta, guard, restored, bs)
     batch._apc_harvest_enabled = False
     batch._kq_ckpt_armed = True
+    from .cache_snapshot import ckpt_note_armed
+    ckpt_note_armed(manager)
     if not _SPEC_APC_RETIRE_DISABLED and batch.prompt_cache:
         from .retire_key import lookup_render_ctx
         batch.prompt_cache[0]._kq_apc_retire = {
             "full_ids": ids_list,
             "extra_hash": extra_hash,
             "mode": "ckpt",
-            "checkpoint_len": first,
+            "checkpoint_len": int(meta.get("checkpoint_len") or 0),
             "apc_meta": meta,
             "render_ctx": lookup_render_ctx(ids_list),
             "manager": manager,
@@ -617,8 +775,7 @@ def _plain_retire(stash: dict, prompt_cache: list) -> None:
             extra_hash=int(stash.get("extra_hash", 0)), max_len=max_len,
             decode_snaps=stash.get("snaps"))
         if ok:
-            _log.info("APC retire store: tokens=%d",
-                      len(seq) if max_len is None else max_len)
+            _log.info("APC retire store: tokens=%d", ok)
     except Exception:
         _log.warning("APC retire failed; continuing", exc_info=True)
 
@@ -958,10 +1115,20 @@ def install_full_prompt_mtp_prefill() -> None:
                     stash = getattr(cache[0], "_kq_apc_retire", None) \
                         if cache else None
                     if stash is not None and stash.get("mode") == "ckpt":
-                        from .cache_snapshot import ckpt_store
-                        ckpt_store(
-                            stash["manager"], stash["full_ids"], cache,
-                            extra_hash=int(stash.get("extra_hash", 0)))
+                        from .cache_snapshot import (
+                            ckpt_full_store_redundant, ckpt_store)
+                        m = stash.get("apc_meta")
+                        if ckpt_full_store_redundant(m):
+                            _log.info("APC ckpt post-prefill store "
+                                      "skipped: render-stable boundary "
+                                      "landed")
+                        elif ckpt_store(
+                                stash["manager"], stash["full_ids"], cache,
+                                extra_hash=int(stash.get("extra_hash", 0))):
+                            if m is not None:
+                                m.setdefault(
+                                    "ckpt_stored_boundaries", []
+                                ).append(len(stash["full_ids"]))
                 except Exception:
                     _log.warning("APC plain post-prefill store failed; "
                                  "continuing", exc_info=True)

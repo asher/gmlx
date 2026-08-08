@@ -1,25 +1,27 @@
 #!/usr/bin/env python3
-"""Serve-path APC engagement: the manager must actually be consulted.
+"""Serve-path APC engagement, per cache-shape family: the tier that claims
+a family must actually move ITS OWN counters.
 
-mlx-vlm 0.6.4 silently disengaged APC for served mlx-lm-arch models (found
-live on gemma-4: ``apc_enabled: true``, every counter zero). ``ar.py``'s
-``BatchGenerator`` drops the ``apc_manager`` whenever ``model_apc_mode(model)``
-resolves ``None``, and that probe isinstance-gates the model's own
-``make_cache()`` entries against mlx-vlm's (since 0.6.4, vendored) cache
-classes -- mlx_lm-origin caches fail the gate. ``model_apc_mode``'s source was
-byte-identical across the break, so seam fingerprints can't catch this class
-of behavioral-composition regression; the unit half lives in
-``test_apc_pooling::test_apc_engages_for_mlx_lm_origin_model``, and this file
-attests the full composition: a real GGUF through ``load_serveable_model``
-(which applies the runtime-origin ``make_cache`` rebind), driven through the
-stock ``BatchGenerator`` with a live ``APCManager``, must move the counters --
-stores after the first request, prefix hits + matched tokens on a second
-request sharing the prefix.
+History: mlx-vlm 0.6.4 silently disengaged APC for served mlx-lm-arch
+models (found live on gemma-4), and the 2026-08 audit found the ckpt tier
+had never engaged on any hybrid/SWA arch -- both invisible because the
+only engagement test ran one dense model and asserted counter
+disjunctions. This gate runs one model per family through the real serve
+composition (``load_serveable_model`` + the gmlx engine installs + stock
+``BatchGenerator``) and asserts tier-specific counters: block families
+move ``stores``/``hits``, exact families ``exact_stores``/``exact_hits``,
+ckpt families the gmlx ``ckpt_stores``/``ckpt_hits``. No disjunctions --
+a family asserting the wrong tier's counters is exactly how this bug
+class hides.
 
-``integration`` + ``slow``; needs a small dense GGUF (qwen3-0.6b) under
-``KQUANT_TEST_GGUF_DIR``.
+``integration`` + ``slow``; needs GGUFs under ``KQUANT_TEST_GGUF_DIR``
+(families with no GGUF skip loudly). Multi-GB rows (gpt-oss 12 GB,
+qwen3.6-27B 15 GB) are opt-in: set ``GMLX_TEST_BIG_GGUFS=1`` (part of the
+pre-release checklist; CI cannot run any of this file).
 """
 from __future__ import annotations
+
+import os
 
 import pytest
 
@@ -31,29 +33,45 @@ pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
 GREEDY = lambda x: mx.argmax(x, axis=-1)  # noqa: E731
 N_DECODE = 8
-PREFIX_TOKENS = 200  # >> one APC block (16), so the shared prefix stores/hits
+
+# (family id, general.architecture key, tier, prompt tokens, big?)
+# Arch keys verified against the GGUF headers on disk (conftest's index
+# derives them from general.architecture, not directory names). ckpt rows
+# use identical-resend reuse (the N-1 replay record; prompts must clear
+# GMLX_APC_CKPT_REPLAY_MIN=1024), block/exact rows use shared-prefix
+# reuse (their tiers serve partial prefixes).
+FAMILIES = [
+    ("dense-block", "qwen3", "block", 200, False),
+    ("swa-moe-ckpt", "gpt-oss", "ckpt", 1200, True),
+    ("gdn-ckpt", "qwen35", "ckpt", 1200, True),
+    ("cachelist-exact", "falcon-h1", "exact", 200, False),
+]
 
 
-@pytest.fixture(scope="module")
-def serveable(gguf_index):
-    """(model, tokenizer) for a small dense arch via the real serve loader."""
-    from gmlx import server_bridge_vlm as serving
-
-    paths = gguf_index.get("qwen3")
+@pytest.fixture(scope="module", params=FAMILIES, ids=[f[0] for f in FAMILIES])
+def family(request, gguf_index):
+    fam, arch, tier, prompt_tokens, big = request.param
+    if big and os.environ.get("GMLX_TEST_BIG_GGUFS") != "1":
+        pytest.skip(f"{fam}: multi-GB GGUF row; set GMLX_TEST_BIG_GGUFS=1 "
+                    "(pre-release checklist)")
+    paths = gguf_index.get(arch)
     if not paths:
-        pytest.skip(f"no 'qwen3' GGUF under KQUANT_TEST_GGUF_DIR "
+        pytest.skip(f"no {arch!r} GGUF under KQUANT_TEST_GGUF_DIR "
                     f"(have: {sorted(gguf_index)})")
-    path = paths[0]
-    model, processor, _config = serving.load_serveable_model(path)
-    return model, processor
+    from gmlx import server_bridge_vlm as serving
+    from gmlx import spec_engine
+
+    spec_engine.install_full_prompt_mtp_prefill()   # the serve installs
+    model, processor, _config = serving.load_serveable_model(paths[0])
+    return fam, tier, prompt_tokens, model, processor
 
 
-def _build_ids(tokenizer, suffix):
+def _build_ids(tokenizer, n_tokens, suffix):
     parts, i = [], 0
-    while len(tokenizer.encode("".join(parts))) < PREFIX_TOKENS:
+    while len(tokenizer.encode("".join(parts))) < n_tokens:
         parts.append(f"Section {i}. The clockmaker adjusted the escapement. ")
         i += 1
-    prefix_ids = tokenizer.encode("".join(parts))[:PREFIX_TOKENS]
+    prefix_ids = tokenizer.encode("".join(parts))[:n_tokens]
     return list(prefix_ids) + list(tokenizer.encode(suffix))
 
 
@@ -84,25 +102,51 @@ def _drive(model, processor, ids, manager):
     return toks
 
 
-def test_serve_apc_stores_then_hits(serveable):
-    from mlx_vlm.apc import APCManager
+def test_family_tier_engages(family):
+    from mlx_vlm.apc import model_apc_mode
 
-    model, processor = serveable
+    from gmlx.apc_manager import GmlxAPCManager
+    from gmlx.cache_snapshot import ckpt_supported
+
+    fam, tier, prompt_tokens, model, processor = family
     tokenizer = processor.tokenizer
-    manager = APCManager(num_blocks=512, block_size=16)
+    lm = model.language_model if hasattr(model, "language_model") else model
 
-    toks = _drive(model, processor,
-                  _build_ids(tokenizer, " It began to rain."), manager)
-    assert toks, "no tokens generated on the first request"
-    s = manager.stats
-    assert s.stores + s.exact_stores > 0, (
-        "first request retired without storing anything into the APC "
-        f"(stats: {s}) -- harvest never ran")
+    # Routing: the family must land on the tier this row claims.
+    mode = model_apc_mode(lm)
+    assert mode == {"block": "block"}.get(tier, "exact"), (
+        f"{fam}: model_apc_mode resolved {mode!r}")
+    assert ckpt_supported(lm.make_cache()) == (tier == "ckpt"), (
+        f"{fam}: ckpt eligibility flipped")
 
-    toks = _drive(model, processor,
-                  _build_ids(tokenizer, " The sun came out."), manager)
-    assert toks, "no tokens generated on the second request"
-    s = manager.stats
-    assert s.hits + s.exact_hits > 0 and s.matched_tokens > 0, (
-        "second request shared a stored prefix but the APC served nothing "
-        f"(stats: {s}) -- lookup path disengaged")
+    manager = GmlxAPCManager(num_blocks=512, block_size=16)
+    ids = _build_ids(tokenizer, prompt_tokens, " It began to rain.")
+    toks = _drive(model, processor, ids, manager)
+    assert toks, f"{fam}: no tokens generated on the first request"
+    s1 = manager.stats_snapshot()
+
+    if tier == "ckpt":
+        assert s1["ckpt_stores"] > 0, (
+            f"{fam}: ckpt tier armed but stored nothing (stats: {s1})")
+        ids2 = ids                          # identical resend: N-1 replay
+    else:
+        key = "stores" if tier == "block" else "exact_stores"
+        assert s1[key] > 0, (
+            f"{fam}: first request stored nothing via {key} (stats: {s1})")
+        ids2 = _build_ids(tokenizer, prompt_tokens, " The sun came out.")
+
+    toks = _drive(model, processor, ids2, manager)
+    assert toks, f"{fam}: no tokens generated on the second request"
+    s2 = manager.stats_snapshot()
+    hit_key = {"block": "lookups_hit", "exact": "exact_hits",
+               "ckpt": "ckpt_hits"}[tier]
+    assert s2[hit_key] > 0, (
+        f"{fam}: second request shared a stored prefix but {hit_key} "
+        f"never moved (stats: {s2})")
+    assert s2["matched_tokens"] > 0, (
+        f"{fam}: {hit_key} moved but no tokens were served from cache "
+        f"(stats: {s2})")
+    if tier == "ckpt":
+        assert s2["ckpt_matched_tokens"] >= len(ids) - 1, (
+            f"{fam}: identical resend adopted "
+            f"{s2['ckpt_matched_tokens']} < N-1={len(ids) - 1}")

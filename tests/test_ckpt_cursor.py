@@ -26,49 +26,212 @@ def _batch(step=2048):
 
 # -- cursor init: grid snapping, restored skip, terminal clamp --
 
+def _positions(bounds):
+    assert all(kind == "boundary" for _, kind in bounds)
+    return [p for p, _ in bounds]
+
+
 def test_cursor_grid_and_terminal():
-    first, terminal, interval = se._ckpt_cursor_init(
+    bounds, terminal, interval = se._ckpt_cursor_init(
         _batch(), guard=27000, restored=0, block_size=16)
-    assert (first, terminal, interval) == (4096, 26624, 4096)
+    assert (terminal, interval) == (26624, 4096)
+    assert _positions(bounds) == [4096, 8192, 12288, 16384, 20480,
+                                  24576, 26624]
 
 
 def test_cursor_skips_restored_prefix():
-    first, terminal, interval = se._ckpt_cursor_init(
+    bounds, terminal, interval = se._ckpt_cursor_init(
         _batch(), guard=27000, restored=8192, block_size=16)
-    assert first == 12288
+    assert _positions(bounds)[0] == 12288
     # Restored past the terminal: nothing left to checkpoint.
     assert se._ckpt_cursor_init(
-        _batch(), guard=27000, restored=26624, block_size=16) == (0, 0, 0)
+        _batch(), guard=27000, restored=26624, block_size=16) == ([], 0, 0)
 
 
 def test_cursor_interval_snaps_up_to_chunk_grid(monkeypatch):
     monkeypatch.setenv("GMLX_APC_CKPT_INTERVAL", "1000")
-    first, terminal, interval = se._ckpt_cursor_init(
+    bounds, terminal, interval = se._ckpt_cursor_init(
         _batch(), guard=27000, restored=0, block_size=16)
-    assert interval == 2048 and first == 2048     # never below one chunk
+    assert interval == 2048                       # never below one chunk
+    assert _positions(bounds)[0] == 2048
 
 
 def test_cursor_zero_interval_is_terminal_only(monkeypatch):
     monkeypatch.setenv("GMLX_APC_CKPT_INTERVAL", "0")
-    first, terminal, interval = se._ckpt_cursor_init(
+    bounds, terminal, interval = se._ckpt_cursor_init(
         _batch(), guard=27000, restored=0, block_size=16)
-    assert (first, terminal, interval) == (26624, 26624, 0)
+    assert (terminal, interval) == (26624, 0)
+    assert _positions(bounds) == [26624]
 
 
 def test_cursor_no_step_uses_block_grid():
-    first, terminal, interval = se._ckpt_cursor_init(
+    bounds, terminal, interval = se._ckpt_cursor_init(
         _batch(step=None), guard=100, restored=0, block_size=16)
-    assert (first, terminal, interval) == (96, 96, 4096)
+    assert (terminal, interval) == (96, 4096)
+    assert _positions(bounds) == [96]
+
+
+# -- Stage 5: replay boundary at N-1 --
+
+def _arm_meta(n, tags, restored=0, guard=None, step=2048):
+    batch = SimpleNamespace(
+        prefill_step_size=step,
+        model=SimpleNamespace(_kq_apc_ckpt_layout=tuple(tags)))
+    meta = {"full_input_ids": list(range(n))}
+    se._ckpt_arm_schedule(batch, meta, guard if guard is not None else n,
+                          restored, block_size=16)
+    return meta
+
+
+def test_replay_boundary_short_prompt_arr():
+    # Sub-interval prompt: the interval/terminal schedule is empty (bug
+    # 1's shape) and the replay boundary is the only store point.
+    meta = _arm_meta(1500, ("kv", "arr"))
+    assert meta["ckpt_boundaries"] == [(1499, "replay")]
+    assert meta["checkpoint_len"] == 1499
+    assert meta["ckpt_stored_boundaries"] == []
+
+
+def test_replay_boundary_arr_floor(monkeypatch):
+    # Below GMLX_APC_CKPT_REPLAY_MIN a GDN clone costs the same >100 MB
+    # as a deep one; the boundary is not armed.
+    assert _arm_meta(500, ("kv", "arr"))["ckpt_boundaries"] == []
+    monkeypatch.setenv("GMLX_APC_CKPT_REPLAY_MIN", "100")
+    assert _arm_meta(500, ("kv", "arr"))["ckpt_boundaries"] == [
+        (499, "replay")]
+
+
+def test_replay_boundary_rot_window_floor():
+    # No byte floor for window clones, but N-1 must be at or past the
+    # window (the store's grid gate declines below it).
+    assert _arm_meta(300, ("rot:512:0", "kv"))["ckpt_boundaries"] == []
+    assert _arm_meta(600, ("rot:512:0", "kv"))["ckpt_boundaries"] == [
+        (599, "replay")]
+
+
+def test_replay_boundary_appends_after_terminal():
+    meta = _arm_meta(5000, ("kv", "arr"))
+    assert meta["ckpt_boundaries"] == [(4096, "boundary"), (4999, "replay")]
+
+
+def test_replay_boundary_grid_collision_keeps_boundary_kind():
+    # N-1 landing exactly on the terminal column: one boundary, plain
+    # kind. A grid-aligned boundary record adopts freely -- identical
+    # resend included -- while a replay flip would gate turn-2 and
+    # branch adoption out on recurrent layouts yet still satisfy the
+    # p=N drop.
+    meta = _arm_meta(4097, ("kv", "arr"))
+    assert meta["ckpt_boundaries"] == [(4096, "boundary")]
+
+
+def test_replay_boundary_kill_switch(monkeypatch):
+    monkeypatch.setenv("GMLX_APC_CKPT_REPLAY", "0")
+    assert _arm_meta(1500, ("kv", "arr"))["ckpt_boundaries"] == []
+
+
+def test_replay_boundary_skipped_when_restored_past():
+    # Identical-resend warm turn: the adopted prefix already sits at
+    # N-1; re-storing it would churn the LRU for nothing.
+    assert _arm_meta(1500, ("kv", "arr"),
+                     restored=1499)["ckpt_boundaries"] == []
+
+
+# -- Stage 6: render-stable turn boundaries --
+
+def _stub_p_stable(monkeypatch, p_stable):
+    from gmlx import retire_key
+    monkeypatch.setattr(retire_key, "lookup_render_ctx",
+                        lambda ids: {"stub": True})
+    monkeypatch.setattr(retire_key, "prompt_stable_lcp",
+                        lambda ctx, ids: p_stable)
+
+
+def test_turn_boundary_grid_all_layouts(monkeypatch):
+    _stub_p_stable(monkeypatch, 2100)
+    meta = _arm_meta(5000, ("kv", "arr"))
+    # The grid point below p_stable joins the schedule; p_stable itself
+    # is never armed on arr layouts (off-grid chunking drifts GDN state).
+    assert meta["ckpt_boundaries"] == [
+        (2048, "boundary"), (4096, "boundary"), (4999, "replay")]
+    assert meta["ckpt_p_stable_bounds"] == [2048]
+    assert meta["ckpt_p_stable"] == 2100
+
+
+def test_turn_boundary_rot_exact(monkeypatch):
+    # Rot-only layouts also pause exactly at p_stable: the attention
+    # split is exact and turn 2 adopts the full stable prefix.
+    _stub_p_stable(monkeypatch, 2100)
+    meta = _arm_meta(5000, ("rot:512:0", "kv"))
+    assert meta["ckpt_boundaries"] == [
+        (2048, "boundary"), (2100, "boundary"), (4096, "boundary"),
+        (4999, "replay")]
+    assert meta["ckpt_p_stable_bounds"] == [2048, 2100]
+
+
+def test_turn_boundary_rot_below_window_grid_only(monkeypatch):
+    _stub_p_stable(monkeypatch, 2100)
+    meta = _arm_meta(5000, ("rot:4096:0", "kv"))
+    assert meta["ckpt_boundaries"] == [
+        (2048, "boundary"), (4096, "boundary"), (4999, "replay")]
+    assert meta["ckpt_p_stable_bounds"] == [2048]
+
+
+def test_turn_boundary_grid_collides_with_terminal(monkeypatch):
+    _stub_p_stable(monkeypatch, 4990)
+    meta = _arm_meta(5000, ("kv", "arr"))
+    assert meta["ckpt_boundaries"] == [(4096, "boundary"), (4999, "replay")]
+    assert meta["ckpt_p_stable_bounds"] == [4096]
+
+
+def test_turn_boundary_kill_switch(monkeypatch):
+    _stub_p_stable(monkeypatch, 2100)
+    monkeypatch.setenv("GMLX_APC_CKPT_TURN", "0")
+    meta = _arm_meta(5000, ("kv", "arr"))
+    assert meta["ckpt_p_stable_bounds"] == []
+    assert meta["ckpt_boundaries"] == [(4096, "boundary"), (4999, "replay")]
+
+
+def test_turn_boundary_no_render_ctx(monkeypatch):
+    from gmlx import retire_key
+    monkeypatch.setattr(retire_key, "lookup_render_ctx", lambda ids: None)
+    meta = _arm_meta(5000, ("kv", "arr"))
+    assert meta["ckpt_p_stable_bounds"] == []
+    assert meta["ckpt_boundaries"] == [(4096, "boundary"), (4999, "replay")]
+
+
+def test_turn_boundary_small_prompt_skips_prediction(monkeypatch):
+    # Below the cheapest armable boundary the render+tokenize prediction
+    # is pure cost; the schedule must not even look up the render ctx.
+    from gmlx import retire_key
+
+    def _boom(ids):
+        raise AssertionError("render ctx consulted below the arm floor")
+
+    monkeypatch.setattr(retire_key, "lookup_render_ctx", _boom)
+    assert _arm_meta(2048, ("kv", "arr"))["ckpt_p_stable_bounds"] == []
+    assert _arm_meta(400, ("rot:512:0", "kv"))["ckpt_p_stable_bounds"] == []
+    # At the floor the prediction runs again.
+    _stub_p_stable(monkeypatch, 550)
+    meta = _arm_meta(600, ("rot:512:0", "kv"))
+    assert meta["ckpt_p_stable_bounds"] == [550]
 
 
 # -- advance + latch across a schedule --
 
 def _armed_batch(man, ids, first, terminal, interval):
+    bounds = []
+    if interval:
+        b = first
+        while b < terminal:
+            bounds.append((b, "boundary"))
+            b += interval
+    bounds.append((terminal, "boundary"))
     meta = {
         "full_input_ids": ids,
         "prefix_len": 0,
         "extra_hash": 7,
-        "checkpoint_len": first,
+        "ckpt_boundaries": bounds,
+        "checkpoint_len": bounds[0][0],
         "ckpt_terminal": terminal,
         "ckpt_interval": interval,
         "ckpt_last_stored": 0,

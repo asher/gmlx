@@ -212,8 +212,44 @@ acceptance is enabled.
 The server keeps a cross-request prompt cache: a request whose prefix was seen
 before skips prefill for the cached span. A repeated 32k-token prefix turns tens of
 seconds of prompt processing into a sub-second time-to-first-token. Dense-attention
-models reuse at block granularity; hybrid and sliding-window models reuse exact
+models reuse at block granularity; hybrid and sliding-window models reuse
+checkpoint records; pure-recurrent and CacheList archs reuse verbatim
 snapshots.
+
+What reuse to expect, per family (tier routing:
+[server-config.md](server-config.md#which-tier-serves-which-architecture)):
+
+- **Dense / plain-KV MoE** (block tier): any shared prefix reuses at
+  16-token block granularity - identical resends, shared system prompts,
+  mid-conversation branches all hit.
+- **GDN hybrids** (qwen3.5/3.6 and friends; ckpt tier): an identical
+  resend restores all but the final token. The next turn of a
+  conversation restores to the render-stable turn boundary snapped down
+  to the 2048-token checkpoint grid - at a 9k-token history that is
+  ~90% of the prefill. A branch or regenerate restores to the deepest
+  interval boundary below the divergence. Recurrent state cannot rewind,
+  so the un-restored tail re-prefills; that tail is bounded by the grid,
+  never the whole history.
+- **Sliding-window models** (gemma-4, gpt-oss; ckpt tier): same shapes
+  as GDN, but turn boundaries are exact rather than grid-snapped once
+  the prefix clears the attention window - next-turn restore lands
+  within a few tokens of the point where the re-rendered history
+  actually diverges.
+- **CacheList / pure-recurrent** (falcon-h1, deepseek4 - including
+  DeepSeek-V4-Flash; exact tier): verbatim-prefix snapshots. Identical
+  resends reuse, and so does multi-turn chat: a finished request
+  stores prompt plus reply, and the next turn's render extends that
+  sequence verbatim, so each turn re-prefills only its new tokens.
+  Measured on DeepSeek-V4-Flash (87 GB IQ2_XXS, ~8k-token history):
+  cold prefill 44.5 s, identical resend 2.0 s, later turns 1.5-9 s,
+  restart from the SSD tier 1.9 s. The boundary to respect: any edit
+  to the history is a different sequence and prefills cold - there is
+  no partial credit for a merely shared prefix on this tier (the same
+  history with one changed line went back to 43 s).
+- One stated gap: sliding-window models under `--speculative` retain no
+  record of generated tokens (their post-prefill rotating layers decline
+  stores by design), so next-turn reuse there comes from the prefill
+  boundaries alone; the reply itself re-prefills.
 
 This is the single biggest lever for agent workloads: coding harnesses resend a
 large, mostly stable system prompt every turn, and multi-turn chat resends the whole
