@@ -6,11 +6,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Added
-
-- `GMLX_ATTN_M1_FUSED=1`: opt-in fused DeepSeek-V4 attention front kernels
-  for single-token decode. Off by default pending fleet coverage.
-
 ### Changed
 
 - DeepSeek-V4 single-token decode runs its hyper-connection glue as four
@@ -18,8 +13,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   step. `GMLX_HC_M1_FUSED=0` and `GMLX_HC_KQ=0` restore the previous
   routes for A/Bs.
 - DeepSeek-V4 hyper-connections at speculative verify widths run as one
-  fused kernel per call; DSpark speculative decode on an in-RAM V4-Flash
-  goes from losing to plain decode to beating it (about +13% on M5 Max).
+  fused kernel per call.
 - The hc_expand between attention and the ffn hyper-connection fuses into
   the following collapse kernel, and dense small-N projections (router
   gate, indexer weights, hyper head) route through mlx-kquant's
