@@ -1,9 +1,12 @@
 """On-disk model registry for the e2e harness.
 
-Logical handles -> candidate paths under a models root (default ``~/llm/gguf``).
-First existing candidate wins; a missing handle resolves to ``None`` so a tier
-whose models aren't present is *skipped*, not failed. Nothing here loads a model -
-it's pure path resolution, so it runs on any machine for ``--dry-run``.
+Logical handles -> candidate paths under the model roots (default
+``~/llm/gguf`` with ``~/llm/gguf-test`` as a fallback: the pytest GGUF
+staging dir holds the small models, and missing it silently skipped every
+cache-tier scenario on this machine for months). First existing candidate
+wins; a missing handle resolves to ``None`` so a tier whose models aren't
+present is *skipped*, not failed. Nothing here loads a model - it's pure
+path resolution, so it runs on any machine for ``--dry-run``.
 """
 from __future__ import annotations
 
@@ -12,6 +15,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 DEFAULT_ROOT = "~/llm/gguf"
+FALLBACK_ROOTS = ["~/llm/gguf-test"]
 
 # handle -> ordered candidate relative paths (first existing wins)
 _CANDIDATES = {
@@ -28,7 +32,14 @@ _CANDIDATES = {
     "gemma4_e2b_mmproj": ["mmproj-gemma-4-E2B-it-bf16.gguf"],
     "gemma4_e2b_assistant": ["gemma-4-E2B-it-assistant.Q8_0.gguf"],
     # a stronger local judge if available (preferred), else fall back to small
-    "gemma4_12b": ["gemma-4-12b-it-GGUF/gemma-4-12b-it-Q6_K.gguf"],
+    "gemma4_12b": [
+        "gemma-4-12b-it-GGUF/gemma-4-12b-it-Q6_K.gguf",
+        "bartowski__gemma-4-12B-it-GGUF/gemma-4-12B-it-Q6_K.gguf",
+    ],
+    # ckpt-tier (hybrid/SWA) cache scenario
+    "gpt_oss_20b": [
+        "lmstudio-community__gpt-oss-20b-GGUF/gpt-oss-20b-MXFP4.gguf",
+    ],
 }
 
 # Canonical download source per handle: an ``hf:<org>/<repo>/<file>`` ref whose
@@ -45,6 +56,7 @@ _SOURCES = {
     "gemma4_e2b_mmproj": None,
     "gemma4_e2b_assistant": None,
     "gemma4_12b": None,
+    "gpt_oss_20b": "hf:lmstudio-community/gpt-oss-20b-GGUF/gpt-oss-20b-MXFP4.gguf",
 }
 
 # Preference order for the default LLM judge (a bigger, coherent model judges
@@ -59,19 +71,27 @@ class ModelRegistry:
     def _root(self) -> str:
         return os.path.abspath(os.path.expanduser(os.path.expandvars(self.root)))
 
+    def _roots(self) -> list:
+        roots = [self._root()]
+        for r in FALLBACK_ROOTS:
+            r = os.path.abspath(os.path.expanduser(os.path.expandvars(r)))
+            if r not in roots:
+                roots.append(r)
+        return roots
+
     def find(self, handle: str) -> Optional[str]:
-        root = self._root()
-        for rel in _CANDIDATES.get(handle, []):
-            cand = os.path.join(root, rel)
-            if os.path.exists(cand):
-                return cand
+        for root in self._roots():
+            for rel in _CANDIDATES.get(handle, []):
+                cand = os.path.join(root, rel)
+                if os.path.exists(cand):
+                    return cand
         return None
 
     def require(self, handle: str) -> str:
         p = self.find(handle)
         if p is None:
             raise FileNotFoundError(
-                f"model handle {handle!r} not found under {self._root()} "
+                f"model handle {handle!r} not found under {self._roots()} "
                 f"(candidates: {_CANDIDATES.get(handle)})")
         return p
 

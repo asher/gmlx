@@ -397,7 +397,7 @@ def main(argv=None) -> int:
 
     if not scenarios:
         print("no runnable scenarios (no models found under "
-              f"{reg._root()}). Nothing to do.")
+              f"{reg._roots()}). Nothing to do.")
         return 0
 
     judge_path = None if a.no_judge else (a.judge_model or reg.default_judge())
@@ -440,6 +440,15 @@ def main(argv=None) -> int:
     n_pass = sum(1 for r in results if r.ok)
     print(f"\n[report] {md_path}")
     print(f"[report] {json_path}")
+    # A tier whose models are missing produces zero scenarios; naming it in
+    # the FINAL summary (not just the plan header) keeps a fully-skipped
+    # tier from reading as covered -- the registry-root drift that silently
+    # skipped every cache scenario did exactly that.
+    ran_tiers = {s.tier for s in scenarios}
+    empty = [t for t in tiers if t not in ran_tiers]
+    if empty:
+        print("RESULT NOTE: tiers with ZERO scenarios run (models missing): "
+              + ", ".join(empty))
     print(f"RESULT: {n_pass}/{len(results)} scenarios passed")
     return 0 if n_pass == len(results) else 1
 

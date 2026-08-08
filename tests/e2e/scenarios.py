@@ -20,10 +20,10 @@ is too weak to follow strict-format prompts, so the judge correctly fails it on 
 weakness and that noise masks real config regressions. E2B gives a clean baseline where a
 config-induced degradation actually stands out. The structural tiers (residency/discovery
 /negative) keep the tiny models - they need distinct small sizes for LRU eviction and only
-fire the easy `capital` prompt. The cache tier ALSO stays on Qwen3-0.6B: APC block/prefix
-reuse needs a plain `KVCache`, and gemma-4's sliding-window `RotatingKVCache` bypasses APC
-entirely - so only an APC-capable model can verify the cache feature (its one judged
-prompt, anchored `capital`, doesn't need E2B anyway).
+fire the easy `capital` prompt. The cache tier runs Qwen3-0.6B for the block tier AND
+gpt-oss-20b for the gmlx checkpoint tier: hybrid/SWA archs (RotatingKVCache and friends)
+are served by the ckpt tier with its own counters, and asserting only the dense model was
+how zero engagement on every hybrid stayed invisible.
 
 A scenario whose required model handles are missing is skipped (not failed).
 Pure construction - no model loads here, so the whole matrix builds under --dry-run.
@@ -154,6 +154,37 @@ def pc_cache_reuse(model: str, prompt: P.PromptInstance,
                     "(mlx-vlm has no QuantizedKVCache APC support); graceful no-op")
             res.append(CheckResult("cache_exercised_info", True, f"{note}; {delta}"))
         return res
+    return _check
+
+
+def pc_ckpt_reuse(model: str, prompt: P.PromptInstance) -> Callable:
+    """Identical greedy resend on a ckpt-tier (hybrid/SWA) model: the first
+    request must land checkpoint records (``ckpt_stores``), the second must
+    adopt one (``ckpt_hits``/``ckpt_matched_tokens``) and stay byte-identical.
+    The counters are the ckpt tier's own -- the block/exact counters staying
+    zero here is correct, and asserting a disjunction is how the tier's total
+    disengagement stayed invisible."""
+    def _check(client):
+        st1, b1 = client.chat(model, prompt.messages,
+                              max_tokens=prompt.max_tokens, temperature=0.0)
+        mid = client.cache_stats()[1]
+        st2, b2 = client.chat(model, prompt.messages,
+                              max_tokens=prompt.max_tokens, temperature=0.0)
+        after = client.cache_stats()[1]
+        t1 = checks.extract_chat_text(b1) if isinstance(b1, dict) else None
+        t2 = checks.extract_chat_text(b2) if isinstance(b2, dict) else None
+        stores = (mid or {}).get("ckpt_stores") or 0
+        hits = (after or {}).get("ckpt_hits") or 0
+        matched = (after or {}).get("ckpt_matched_tokens") or 0
+        return [
+            CheckResult("ckpt_no_corruption",
+                        bool(t1) and bool(t2) and t1 == t2,
+                        "identical" if t1 == t2 else
+                        "second response diverged"),
+            CheckResult("ckpt_stores", stores > 0, f"ckpt_stores={stores}"),
+            CheckResult("ckpt_adopted", hits >= 1 and matched > 0,
+                        f"ckpt_hits={hits} ckpt_matched_tokens={matched}"),
+        ]
     return _check
 
 
@@ -362,13 +393,12 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
                                         P.p_long_gen()])],
             notes="KV-quant must still recall a planted fact at depth without looping"))
 
-    # cache: disabled / memory / disk / diskxkv8
-    # The cache tier runs on Qwen3-0.6B, NOT the judged-tier gemma-4-E2B: APC block /
-    # prefix reuse is only supported on a plain ``KVCache`` (mlx-vlm's
-    # ``_cache_entry_supports_block_apc``). gemma-4's sliding-window attention uses a
-    # ``RotatingKVCache``, so APC is bypassed entirely (zero lookups) and reuse can't
-    # be verified at all. To actually exercise the APC feature we need an APC-capable
-    # model; the only judged prompt here is the anchored `capital`, so E2B buys nothing.
+    # cache: disabled / memory / disk / diskxkv8 / ckpt
+    # Qwen3-0.6B exercises the block tier (plain KVCache prefix reuse); the
+    # ckpt scenario below runs gpt-oss (SWA MoE) through the gmlx checkpoint
+    # tier, which serves every hybrid/rotating cache stack with its own
+    # counters. Each scenario asserts its own tier's counters, never a
+    # disjunction.
     add(Scenario(
         key="cache_disabled", tier="cache", needs=["qwen3_0_6b_q4"],
         title="APC prompt cache disabled",
@@ -400,6 +430,17 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
               pc_cache_reuse("m", P.p_long_gen()),
               pc_disk_cache_created(disk_dir)],
         notes="disk tier created + reused without corrupting output"))
+
+    add(Scenario(
+        key="cache_ckpt", tier="cache", needs=["gpt_oss_20b"],
+        title="APC checkpoint tier on an SWA MoE (gpt-oss): resend adopts",
+        config={"server": {"cache": {"enabled": True}},
+                "models": {"m": _model_entry(reg.find("gpt_oss_20b") or "")}},
+        targets=[ReqTarget("warm", "m", prompts=[P.p_capital()])],
+        post=[pc_apc_enabled(True),
+              pc_ckpt_reuse("m", P.p_long_ctx_needle("CKPTNEEDLE7"))],
+        notes="hybrid/SWA archs route to the gmlx ckpt tier; its own counters "
+              "must move (the 2026-08 audit found the tier never engaged)"))
 
     disk_dir_kv = os.path.join(tmpdir, "apc_disk_kv8")
     add(Scenario(
