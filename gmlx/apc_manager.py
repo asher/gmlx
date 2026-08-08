@@ -98,10 +98,13 @@ class GmlxAPCManager(_apc.APCManager):
     def clear(self) -> None:
         """Stock clear plus the ckpt tier: the pool wipe zeroes the block
         tensors pinned records reference, so records/sidecars/counters
-        must not survive it."""
+        must not survive it. One lock span (RLock) so a concurrent
+        lookup can never pin a record between the pool wipe and the
+        record drop."""
         from .cache_snapshot import ckpt_reset
-        super().clear()
-        ckpt_reset(self)
+        with self.lock:
+            super().clear()
+            ckpt_reset(self)
 
     def store_ckpt_blocks(self, token_ids, layer_keys, layer_values,
                           *, extra_hash=0, disk=True):

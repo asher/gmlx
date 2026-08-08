@@ -1071,7 +1071,27 @@ def ckpt_lookup(
             ]
         cands.sort(key=lambda r: r.p, reverse=True)
         for rec in cands:
-            warm = _assemble_from_record(manager, rec)
+            # Assembly runs unlocked (it concatenates and evals block
+            # tensors), so the record's chains must be pinned against a
+            # concurrent _record_insert releasing them mid-assembly: +1
+            # ref per block under the lock, dropped after the final eval
+            # decouples the warm arrays. Fields are snapshotted under
+            # the same lock -- a release rebinds rec.states to None, but
+            # cache objects are never pool-recycled, so captured
+            # references stay valid.
+            with manager.lock:
+                if (rec.ids, rec.extra_hash) not in idx:
+                    continue          # released since candidate selection
+                snap = _CkptRecord(
+                    **{k: getattr(rec, k) for k in _CkptRecord.__slots__})
+                held = (list(snap.main_blocks or ())
+                        + list(snap.bounded_blocks or ()))
+                for b in held:
+                    manager._acquire_existing(b)
+            try:
+                warm = _assemble_from_record(manager, snap)
+            finally:
+                manager.release(held)
             if warm is not None:
                 with manager.lock:
                     if (rec.ids, rec.extra_hash) in idx:

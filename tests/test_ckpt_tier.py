@@ -237,6 +237,80 @@ def test_retirement_rotating_without_snap_declines():
     assert man.stats_snapshot()["exact_stores"] == 0
 
 
+def test_lookup_pins_blocks_against_concurrent_release(monkeypatch):
+    """A _record_insert on another thread can release a candidate's
+    chains between selection and assembly; the lookup must pin them (+1
+    ref under the lock) so assembly reads live tensors, and drop the pin
+    on every exit path."""
+    import gmlx.cache_snapshot as cs
+
+    man = APCManager(num_blocks=64, block_size=16)
+    p = 32
+    cache = make_hybrid_cache(p, seed=21)
+    ids = list(range(100, 100 + p))
+    assert ckpt_store(man, ids, cache, extra_hash=0)
+    idx = cs._ckpt_records(man)
+    (key,) = idx.keys()
+
+    real = cs._assemble_from_record
+
+    def _release_then_assemble(manager, rec):
+        # Simulate the concurrent insert's strip firing mid-lookup.
+        with manager.lock:
+            victim = idx.pop(key, None)
+            if victim is not None:
+                cs._release_record(manager, victim)
+        return real(manager, rec)
+
+    monkeypatch.setattr(cs, "_assemble_from_record", _release_then_assemble)
+    warm, got = ckpt_lookup(man, ids + [1], extra_hash=0)
+    assert got == p
+    assert_warm_matches(warm, cache, p)      # tensors were still live
+    # Record gone, pin dropped: every block back to refcount zero.
+    assert not idx
+    assert all(b.ref_cnt == 0 for b in man.pool)
+
+
+def test_lookup_skips_record_released_after_selection(monkeypatch):
+    """A candidate released after selection but before its turn in the
+    walk is refused via the index membership check, never assembled from
+    recycled blocks; surviving records keep their pins."""
+    import gmlx.cache_snapshot as cs
+
+    man = APCManager(num_blocks=64, block_size=16)
+    ids = list(range(100, 196))
+    short = make_hybrid_cache(32, seed=22)
+    assert ckpt_store(man, ids[:32], short, extra_hash=0)
+    assert ckpt_store(man, ids[:48], make_hybrid_cache(48, seed=23),
+                      extra_hash=0)
+    idx = cs._ckpt_records(man)
+    short_key = (tuple(ids[:32]), 0)
+    assert short_key in idx
+
+    real = cs._assemble_from_record
+
+    def _fail_deep_release_short(manager, rec):
+        if rec.p == 48:
+            with manager.lock:
+                victim = idx.pop(short_key, None)
+                if victim is not None:
+                    cs._release_record(manager, victim)
+            return None                      # deep candidate: assembly fails
+        return real(manager, rec)
+
+    monkeypatch.setattr(cs, "_assemble_from_record",
+                        _fail_deep_release_short)
+    warm, got = ckpt_lookup(man, ids[:60], extra_hash=0)
+    assert warm is None and got == 0
+    # The surviving p=48 record still pins exactly its own chain.
+    assert [r.p for r in idx.values()] == [48]
+    held = [b for b in man.pool if b.block_hash is not None]
+    assert held and all(b.ref_cnt == 1 for b in held)
+    monkeypatch.setattr(cs, "_assemble_from_record", real)
+    warm, got = ckpt_lookup(man, ids[:60], extra_hash=0)
+    assert got == 48
+
+
 def test_pinning_survives_pool_pressure():
     man = APCManager(num_blocks=6, block_size=16)
     p = 32
