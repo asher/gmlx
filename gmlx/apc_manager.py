@@ -81,6 +81,28 @@ class GmlxAPCManager(_apc.APCManager):
     override defers to the stock store instead.
     """
 
+    def stats_snapshot(self) -> dict:
+        """Stock snapshot plus the gmlx ckpt-tier side counters (pure
+        wrap: super() + merge). Visible at /v1/cache/stats -- a ckpt
+        model with zeroed ckpt_* keys is broken, not idle."""
+        from .cache_snapshot import ckpt_stats_snapshot
+        snap = super().stats_snapshot()
+        snap.update(ckpt_stats_snapshot(self))
+        return snap
+
+    def reset_stats(self) -> None:
+        from .cache_snapshot import ckpt_stats_clear
+        super().reset_stats()
+        ckpt_stats_clear(self)
+
+    def clear(self) -> None:
+        """Stock clear plus the ckpt tier: the pool wipe zeroes the block
+        tensors pinned records reference, so records/sidecars/counters
+        must not survive it."""
+        from .cache_snapshot import ckpt_reset
+        super().clear()
+        ckpt_reset(self)
+
     def store_ckpt_blocks(self, token_ids, layer_keys, layer_values,
                           *, extra_hash=0, disk=True):
         """Block store for checkpoint chains: always per-block -- the

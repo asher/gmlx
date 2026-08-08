@@ -187,6 +187,19 @@ def _resolve_l1(model):
         except Exception:
             _log.warning("APC L1: model_apc_mode probe failed", exc_info=True)
             mode = None
+        if mode is None:
+            # A manager was built and wired, then silently dropped here --
+            # without this line a dead cache is indistinguishable from an
+            # idle one (minimax-m3 with the MSA indexer armed).
+            kinds = []
+            try:
+                kinds = sorted({type(c).__name__ for c in lm.make_cache()})
+            except Exception:
+                pass
+            _log.warning(
+                "APC OFF for this model: no tier serves its cache stack "
+                "(%s) -- every request prefills cold",
+                ", ".join(kinds) or "unprobeable")
         try:
             model._kq_apc_mode = mode
         except Exception:
@@ -207,12 +220,19 @@ def _ckpt_active(model, mode, block_size: int = 16) -> bool:
         return False
     flag = getattr(model, "_kq_apc_ckpt", None)
     if flag is None:
-        from .cache_snapshot import ckpt_supported
+        from .cache_snapshot import ckpt_layout
         lm = getattr(model, "language_model", None) or model
         try:
-            flag = bool(ckpt_supported(lm.make_cache(), block_size))
+            tags = ckpt_layout(lm.make_cache(), block_size)
         except Exception:
-            flag = False
+            tags = None
+        flag = tags is not None
+        if flag:
+            _log.info(
+                "APC tier: ckpt (layers: %d kv / %d rot / %d arr)",
+                tags.count("kv"),
+                sum(1 for t in tags if t.startswith("rot")),
+                tags.count("arr"))
         try:
             model._kq_apc_ckpt = flag
         except Exception:
@@ -355,6 +375,8 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
         meta["ckpt_last_stored"] = 0
         batch._apc_harvest_enabled = False
         batch._kq_ckpt_armed = True
+        from .cache_snapshot import ckpt_note_armed
+        ckpt_note_armed(manager)
     return l1_prefix
 
 
@@ -543,6 +565,8 @@ def _plain_ckpt_init(batch) -> None:
     meta["ckpt_last_stored"] = 0
     batch._apc_harvest_enabled = False
     batch._kq_ckpt_armed = True
+    from .cache_snapshot import ckpt_note_armed
+    ckpt_note_armed(manager)
     if not _SPEC_APC_RETIRE_DISABLED and batch.prompt_cache:
         from .retire_key import lookup_render_ctx
         batch.prompt_cache[0]._kq_apc_retire = {

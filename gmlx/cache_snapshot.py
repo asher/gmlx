@@ -238,8 +238,11 @@ def drafter_sidecar_store(
                 salted = sidecar_extra_hash(extra_hash)
                 khash = _apc._sequence_hash(ids, salted, manager.block_size)
                 disk.save_exact_cache(khash, ids, salted, clones)
+                with manager.lock:
+                    manager.stats.disk_writes += 1
             except Exception:
                 _log.debug("APC sidecar disk save failed", exc_info=True)
+        _ckpt_bump(manager, "sidecar_writes")
         return True
     except Exception:
         _log.warning("APC sidecar store failed; continuing", exc_info=True)
@@ -574,6 +577,129 @@ def _ckpt_records(manager) -> "OrderedDict":
         return idx
 
 
+# Ckpt-tier counters live in a gmlx-owned side dict on the manager (same
+# pattern as _kq_ckpt_records): the upstream APCStats dataclass stays
+# untouched, and GmlxAPCManager's stats_snapshot wrap merges these keys
+# into /v1/cache/stats. Keys prefixed "_" are internal (tripwire state),
+# never exported.
+_CKPT_STAT_INTS = (
+    "ckpt_stores", "ckpt_hits", "ckpt_matched_tokens",
+    "ckpt_missed_adoptions", "ckpt_skeleton_writes", "sidecar_writes",
+    "retire_fallback_full",
+)
+
+
+def _ckpt_stats(manager) -> dict:
+    with manager.lock:
+        st = getattr(manager, "_kq_ckpt_stats", None)
+        if st is None:
+            st = {k: 0 for k in _CKPT_STAT_INTS}
+            st["ckpt_declines"] = {}
+            manager._kq_ckpt_stats = st
+        return st
+
+
+def _ckpt_bump(manager, key: str, n: int = 1) -> None:
+    st = _ckpt_stats(manager)
+    with manager.lock:
+        st[key] = st.get(key, 0) + n
+
+
+def _ckpt_decline(manager, reason: str) -> None:
+    st = _ckpt_stats(manager)
+    with manager.lock:
+        d = st["ckpt_declines"]
+        d[reason] = d.get(reason, 0) + 1
+
+
+def ckpt_stats_snapshot(manager) -> dict:
+    st = _ckpt_stats(manager)
+    with manager.lock:
+        out = {k: int(st.get(k, 0)) for k in _CKPT_STAT_INTS}
+        out["ckpt_declines"] = dict(st["ckpt_declines"])
+        return out
+
+
+def ckpt_stats_clear(manager) -> None:
+    with manager.lock:
+        manager._kq_ckpt_stats = None
+
+
+def ckpt_reset(manager) -> None:
+    """Drop ckpt records, sidecars, and counters after a manager.clear().
+
+    The pool clear already zeroed every block's tensors and refcount, so
+    the pinned records' chains are gone either way; references are
+    dropped, never released (a release into the reset pool would push
+    blocks onto the free list twice)."""
+    with manager.lock:
+        idx = getattr(manager, "_kq_ckpt_records", None)
+        if idx:
+            for rec in idx.values():
+                rec.main_blocks = rec.bounded_blocks = []
+                rec.states = rec.tails = None
+            idx.clear()
+        side = getattr(manager, "_kq_sidecar_cache", None)
+        if side:
+            side.clear()
+        manager._kq_ckpt_stats = None
+
+
+def ckpt_note_armed(manager) -> None:
+    """Per-request arming tick feeding tripwire 1: a ckpt-armed model
+    that keeps completing requests with zero checkpoint stores is
+    broken, not idle -- correctness is unaffected by design, so this
+    warning is the only runtime signal. Fires once."""
+    thresh = env_int("GMLX_APC_CKPT_TRIPWIRE", 5)
+    if manager is None or thresh <= 0:
+        return
+    st = _ckpt_stats(manager)
+    with manager.lock:
+        st["_armed_requests"] = st.get("_armed_requests", 0) + 1
+        armed = st["_armed_requests"]
+        if (st.get("_tripwire_stores_fired") or st["ckpt_stores"] > 0
+                or armed <= thresh):
+            return
+        st["_tripwire_stores_fired"] = True
+    _log.warning(
+        "APC ckpt tripwire: %d requests armed with zero checkpoint "
+        "stores -- the cache tier is not working for this model/config "
+        "and every request prefills cold (GMLX_APC_CKPT_TRIPWIRE=0 "
+        "silences)", armed)
+
+
+def _ckpt_note_miss(manager, tid, extra_hash, had_candidates) -> None:
+    """Missed-adoption accounting, empty-return path only: a record whose
+    full stored ids prefix the query was refused (p-bound, layout, or
+    assembly failure). This is tripwire 2's signal -- unlike bare
+    stores-without-hits it never fires on unrelated one-shot traffic."""
+    missed = bool(had_candidates)
+    if not missed:
+        idx = _ckpt_records(manager)
+        with manager.lock:
+            for rec in idx.values():
+                if (rec.extra_hash == int(extra_hash)
+                        and len(tid) >= rec.p and tid[:rec.p] == rec.ids):
+                    missed = True
+                    break
+    if not missed:
+        return
+    thresh = env_int("GMLX_APC_CKPT_TRIPWIRE", 5)
+    st = _ckpt_stats(manager)
+    with manager.lock:
+        st["ckpt_missed_adoptions"] += 1
+        n = st["ckpt_missed_adoptions"]
+        if (thresh <= 0 or st.get("_tripwire_adopt_fired")
+                or st["ckpt_hits"] > 0 or n < thresh):
+            return
+        st["_tripwire_adopt_fired"] = True
+    _log.warning(
+        "APC ckpt tripwire: %d lookups found a prefix-matching record "
+        "and adopted nothing (zero hits) -- stores and lookups are not "
+        "intersecting for this model/config "
+        "(GMLX_APC_CKPT_TRIPWIRE=0 silences)", n)
+
+
 def _release_record(manager, rec) -> None:
     for blocks in (rec.main_blocks, rec.bounded_blocks):
         if blocks:
@@ -649,6 +775,7 @@ def ckpt_store(
         bs = int(manager.block_size)
         layout = ckpt_layout(prompt_cache, bs)
         if p < 2 or layout is None:
+            _ckpt_decline(manager, "layout")
             return False
         for c in prompt_cache:
             off = getattr(c, "offset", None)
@@ -656,10 +783,12 @@ def ckpt_store(
                     and isinstance(c, kv_types) and int(off) != p:
                 _log.info("APC ckpt store skipped: KV offset %d != %d",
                           int(off), p)
+                _ckpt_decline(manager, "offset")
                 return False
             if isinstance(c, rot_types) and int(c.offset) != p:
                 _log.info("APC ckpt store skipped: rot offset %d != %d",
                           int(c.offset), p)
+                _ckpt_decline(manager, "offset")
                 return False
         has_rot = any(_is_rot(t) for t in layout)
         b_full = _ckpt_block_prefix(p, bs)
@@ -667,6 +796,7 @@ def ckpt_store(
             _log.info(
                 "APC ckpt store declined: rotating store needs grid-aligned "
                 "p (%d %% %d != 0)", p, bs)
+            _ckpt_decline(manager, "grid")
             return False
         tail_len = p - b_full
         salted = ckpt_extra_hash(extra_hash)
@@ -697,6 +827,7 @@ def ckpt_store(
                 _log.info(
                     "APC ckpt store declined: main chain short (%d/%d "
                     "blocks)", len(main_blocks), b_full // bs)
+                _ckpt_decline(manager, "short_chain")
                 manager.release(main_blocks)
                 return False
 
@@ -704,10 +835,12 @@ def ckpt_store(
         if rot_caches:
             canon = [rotating_canonical_window(c) for c in rot_caches]
             if any(cw is None for cw in canon):
+                _ckpt_decline(manager, "canon")
                 manager.release(main_blocks)
                 return False
             metas = {cw[2] for cw in canon}
             if len(metas) != 1:
+                _ckpt_decline(manager, "canon")
                 manager.release(main_blocks)
                 return False
             rot_meta = canon[0][2]
@@ -731,12 +864,14 @@ def ckpt_store(
                 _log.info(
                     "APC ckpt store: window chain short (%d/%d blocks); "
                     "store declined", len(bounded_blocks), L // bs)
+                _ckpt_decline(manager, "short_chain")
                 manager.release(main_blocks)
                 manager.release(bounded_blocks)
                 return False
 
         states = [_clone_single_row(c) for c in arr_caches]
         if any(s is None for s in states):
+            _ckpt_decline(manager, "clone")
             manager.release(main_blocks)
             manager.release(bounded_blocks)
             return False
@@ -749,6 +884,7 @@ def ckpt_store(
                            c.values[..., b_full:p, :])
                 t = _clone_single_row(t)
                 if t is None:
+                    _ckpt_decline(manager, "clone")
                     manager.release(main_blocks)
                     manager.release(bounded_blocks)
                     return False
@@ -764,12 +900,14 @@ def ckpt_store(
         if skeleton_disk:
             _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
                              tail_len, states, tails, salted)
+        _ckpt_bump(manager, "ckpt_stores")
         _log.info(
             "APC ckpt store: tokens=%d main=%d window=%d tail=%d states=%d",
             p, len(main_blocks), len(bounded_blocks), tail_len, len(states))
         return True
     except Exception:
         try:
+            _ckpt_decline(manager, "exception")
             manager.release(main_blocks)
             manager.release(bounded_blocks)
         except Exception:
@@ -818,6 +956,9 @@ def _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
         tid = tuple(ids)
         khash = _apc._sequence_hash(tid, salted, manager.block_size)
         disk.save_exact_cache(khash, tid, salted, entries)
+        _ckpt_bump(manager, "ckpt_skeleton_writes")
+        with manager.lock:
+            manager.stats.disk_writes += 1
     except Exception:
         _log.debug("APC ckpt disk skeleton save failed", exc_info=True)
 
@@ -935,12 +1076,24 @@ def ckpt_lookup(
                 with manager.lock:
                     if (rec.ids, rec.extra_hash) in idx:
                         idx.move_to_end((rec.ids, rec.extra_hash))
+                    # Memory-record hits are cache-served tokens the
+                    # upstream ledger never sees (the ckpt tier bypasses
+                    # lookup_exact_cache); bumping both keeps
+                    # token_hit_rate honest.
+                    manager.stats.hits += 1
+                    manager.stats.matched_tokens += rec.p
+                _ckpt_bump(manager, "ckpt_hits")
+                _ckpt_bump(manager, "ckpt_matched_tokens", rec.p)
                 _log.info("APC ckpt hit: prefix=%d (pinned record)", rec.p)
                 return warm, rec.p
             _log.info("APC ckpt walk-back past %d (assembly failed)", rec.p)
-        return _ckpt_disk_lookup(
+        warm, p = _ckpt_disk_lookup(
             manager, ids, extra_hash=extra_hash,
             min_prefix_tokens=min_prefix_tokens, layout=layout)
+        if warm is not None:
+            return warm, p
+        _ckpt_note_miss(manager, tid, extra_hash, bool(cands))
+        return None, 0
     except Exception:
         _log.warning("APC ckpt lookup failed; continuing", exc_info=True)
         return None, 0
@@ -1098,6 +1251,10 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
         mx.eval(*targets)
         manager.release(blocks)
         manager.release(wblocks)
+        # ckpt_* only: lookup_exact_cache above already fed the upstream
+        # hit/matched ledger for this entry.
+        _ckpt_bump(manager, "ckpt_hits")
+        _ckpt_bump(manager, "ckpt_matched_tokens", p)
         _log.info("APC ckpt hit: prefix=%d (disk skeleton)", p)
         return warm, p
     except Exception:

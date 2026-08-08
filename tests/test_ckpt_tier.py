@@ -417,8 +417,10 @@ def test_window_chain_is_memory_only(tmp_path):
         cache = make_swa_cache(p, seed=5)
         ids = list(range(600, 600 + p))
         assert ckpt_store(man, ids, cache, extra_hash=0)
-        # 3 main blocks; the 2 window blocks stay memory-only.
-        assert man.stats_snapshot()["disk_writes"] == 3
+        # 3 main blocks + the skeleton entry; the 2 window blocks stay
+        # memory-only.
+        assert man.stats_snapshot()["disk_writes"] == 4
+        assert man.stats_snapshot()["ckpt_skeleton_writes"] == 1
     finally:
         disk.close()
 
