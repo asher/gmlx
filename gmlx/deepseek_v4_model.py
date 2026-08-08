@@ -25,6 +25,7 @@
 #    Without these the lightning indexer's top-k selection diverges from
 #    the model's training-time graph.
 
+import atexit
 import importlib
 import math
 import os
@@ -58,6 +59,7 @@ from gmlx.deepseek_v4_hyper_connection import (
     HyperConnection,
     HyperHead,
     hc_expand,
+    hc_expand_collapse,
     hc_expand_m1,
 )
 
@@ -309,6 +311,7 @@ def ensure_registered() -> None:
         sys.modules["mlx_lm.models.deepseek_v4"] = sys.modules[__name__]
 
 
+_DOT_STATE = {"n": 0}
 _CACHE_EVAL_EVERY = int(os.environ.get("GMLX_CACHE_EVAL_EVERY", "1"))
 _cache_eval_step = 0
 
@@ -1041,6 +1044,52 @@ def _kq_router_available() -> bool:
     return ok
 
 
+_KQ_SKINNY_STATE = {"ok": None}
+
+
+def _kq_skinny_available() -> bool:
+    """One-time probe for mlx-kquant's skinny_matmul (older builds fall
+    back to the stock matmul)."""
+    ok = _KQ_SKINNY_STATE["ok"]
+    if ok is None:
+        ok = os.environ.get("GMLX_KQ_SKINNY", "1") != "0"
+        if ok:
+            try:
+                import mlx_kquant as kq
+
+                ok = mx.metal.is_available() and hasattr(kq, "skinny_matmul")
+            except Exception:  # noqa: BLE001 - optional dependency
+                ok = False
+        _KQ_SKINNY_STATE["ok"] = ok
+    return ok
+
+
+def _skinny_or_matmul(x, w):
+    """x @ w.T; token widths 2..16 route around MLX's small-N GEMM cliff
+    (the stock path leaves the GEMV specialization at M >= 2 and runs
+    these shapes 4-8x below their bytes)."""
+    if (
+        2 <= x.shape[-2] <= 16
+        and x.shape[-1] % 4 == 0
+        and x.dtype in (mx.float16, mx.bfloat16, mx.float32)
+        and (w.dtype == x.dtype or w.dtype == mx.float32)
+        and mx.default_device() == mx.gpu
+        and _kq_skinny_available()
+    ):
+        import mlx_kquant as kq
+
+        return kq.skinny_matmul(x, w)
+    return x @ w.T
+
+
+def _skinny_linear(lin, x):
+    """lin(x); dense no-bias Linears at token widths 2..16 take the
+    skinny kernel, quantized or biased modules keep their own path."""
+    if type(lin) is nn.Linear and "bias" not in lin:
+        return _skinny_or_matmul(x, lin.weight)
+    return lin(x)
+
+
 class MoEGate(nn.Module):
     def __init__(self, config: ModelArgs, layer_idx: int):
         super().__init__()
@@ -1060,7 +1109,7 @@ class MoEGate(nn.Module):
             )
 
     def __call__(self, x: mx.array, input_ids: Optional[mx.array] = None):
-        logits = x @ self.weight.T
+        logits = _skinny_or_matmul(x, self.weight)
 
         if self.hash:
             if input_ids is None:
@@ -1335,7 +1384,9 @@ class Indexer(nn.Module):
             mx.float32
         )
         scores = mx.maximum(scores, 0) * self.scale
-        weights = self.weights_proj(x).astype(mx.float32) * (self.n_heads**-0.5)
+        weights = _skinny_linear(self.weights_proj, x).astype(mx.float32) * (
+            self.n_heads**-0.5
+        )
         scores = (scores * weights.swapaxes(-1, -2)[..., None]).sum(axis=1)
         if pmask is not None:
             scores = mx.where(
@@ -1388,7 +1439,9 @@ class Indexer(nn.Module):
                 import mlx_kquant as kq
 
                 if hasattr(kq, "dsa_indexer_score_decode"):
-                    weights = self.weights_proj(x) * (self.n_heads**-0.5)
+                    weights = _skinny_linear(self.weights_proj, x) * (
+                        self.n_heads**-0.5
+                    )
                     scores = kq.dsa_indexer_score_decode(
                         q,
                         pooled,
@@ -2028,9 +2081,34 @@ def v4_attention_factory(config: ModelArgs, layer_idx: int) -> nn.Module:
     return SparseCompressedAttention(config, layer_idx)
 
 
+_VSEG = tuple(
+    int(v) for v in os.environ.get("GMLX_VSEG", "").split(",") if v
+)
+_vseg_acc: dict = {}
+
+
+def _vseg_report():
+    if not _vseg_acc:
+        return
+    names = ("fence", "attn_hc", "attn", "hc_exp1", "ffn_hc", "ffn",
+             "hc_exp2")
+    for (idx, cls, ql), rows in sorted(_vseg_acc.items()):
+        rows = rows[3:] or rows
+        cols = list(zip(*rows))
+        med = [sorted(c)[len(c) // 2] * 1e3 for c in cols]
+        segs = " ".join(f"{n}={m:.3f}" for n, m in zip(names, med))
+        total = sum(med[1:])
+        print(f"[vseg] layer={idx} {cls} qL={ql} n={len(rows)} "
+              f"total={total:.3f} ms: {segs}", file=sys.stderr)
+
+
+atexit.register(_vseg_report)
+
+
 class DeepseekV4Block(nn.Module):
     def __init__(self, config: ModelArgs, layer_idx: int):
         super().__init__()
+        self.layer_idx = layer_idx
         self.attn = v4_attention_factory(config, layer_idx)
         self.ffn = DeepseekV4MoE(config, layer_idx)
         self.attn_norm = nn.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -2047,6 +2125,11 @@ class DeepseekV4Block(nn.Module):
         carry: Optional[tuple] = None,
         carry_mode: bool = False,
     ):
+        # Scratch VSEG probe: only when no M=1 carry is in flight, since
+        # the fenced path cannot consume or produce a pending expand.
+        if _VSEG and self.layer_idx in _VSEG and carry is None \
+                and not carry_mode:
+            return self._call_fenced(h, mask, cache, input_ids)
         if self.attn_hc.m1_fused_ok(h):
             # attn front; a pending expand from the caller folds into it
             if carry is not None:
@@ -2073,14 +2156,47 @@ class DeepseekV4Block(nn.Module):
         residual = h
         x, post, comb = self.attn_hc(h)
         x = self.attn(self.attn_norm(x), mask=mask, cache=cache)
-        h = hc_expand(x, residual, post, comb)
-
-        residual = h
-        x, post, comb = self.ffn_hc(h)
+        residual, x, post, comb = hc_expand_collapse(
+            self.ffn_hc, x, residual, post, comb
+        )
         x = self.ffn(self.ffn_norm(x), input_ids)
         out = hc_expand(x, residual, post, comb)
         if carry_mode:
             return out, None
+        return out
+
+    def _call_fenced(self, h, mask, cache, input_ids):
+        # Scratch probe (this branch only): eval-fence each segment of one
+        # layer to attribute per-segment GPU time. Column 0 is the fence
+        # calibration (eval on an already-evaluated array).
+        import time as _time
+
+        acc = _vseg_acc.setdefault(
+            (self.layer_idx, type(self.attn).__name__, int(h.shape[1])), [])
+        row = []
+
+        def fence(*arrs):
+            t0 = _time.perf_counter()
+            mx.eval(*arrs)
+            row.append(_time.perf_counter() - t0)
+
+        mx.eval(h)
+        fence(h * 1.0000001)  # one-kernel command buffer = true fence floor
+        residual = h
+        x, post, comb = self.attn_hc(h)
+        fence(x, post, comb)
+        x = self.attn(self.attn_norm(x), mask=mask, cache=cache)
+        fence(x)
+        h = hc_expand(x, residual, post, comb)
+        fence(h)
+        residual = h
+        x, post, comb = self.ffn_hc(h)
+        fence(x, post, comb)
+        x = self.ffn(self.ffn_norm(x), input_ids)
+        fence(x)
+        out = hc_expand(x, residual, post, comb)
+        fence(out)
+        acc.append(row)
         return out
 
 
@@ -2154,6 +2270,15 @@ class DeepseekV4Model(PipelineMixin, nn.Module):
                 )
         if carry is not None:
             h = hc_expand_m1(*carry)
+
+        _dot_path = os.environ.get("GMLX_MODEL_DOT")
+        if _dot_path:
+            _DOT_STATE["n"] += 1
+            if _DOT_STATE["n"] == int(
+                os.environ.get("GMLX_MODEL_DOT_CALL", "140")
+            ):
+                with open(_dot_path, "w") as fh:
+                    mx.export_to_dot(fh, h)
 
         _materialize_cache_arrays(cache)
 

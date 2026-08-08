@@ -144,6 +144,25 @@ def _argmax_sampler(logits: mx.array) -> mx.array:
 #     when the modes match). Measured 61% vs 67% greedy on Qwen3.6-27B ultrachat.
 _FORCE_GREEDY_DRAFT = not env_bool("GMLX_MTP_COUPLED_DRAFT", False)
 _ROUND_PROFILE = env_bool("GMLX_ROUND_PROFILE", False)
+
+# Scratch instrumentation (this branch only): build-vs-exec split of the
+# draft and verify phases under _ROUND_PROFILE.
+_vsplit_rows: list = []
+
+
+def _vsplit_report():
+    if not _vsplit_rows:
+        return
+    import atexit as _  # noqa: F401
+    n = len(_vsplit_rows)
+    cols = list(zip(*_vsplit_rows))
+    med = [sorted(c)[len(c) // 2] * 1e3 for c in cols]
+    print(f"[vsplit] rounds={n} median ms: draft_build={med[0]:.2f} "
+          f"draft_eval={med[1]:.2f} verify_build={med[2]:.2f} "
+          f"verify_eval={med[3]:.2f}", file=sys.stderr)
+
+
+atexit.register(_vsplit_report)
 # One-shot cache-shape dump for the batched decode rounds: which cache class
 # the target forward sees, its offset, and the left-padding spread that picks
 # the padded-decode attention path over the plain batched one.
@@ -813,6 +832,7 @@ def _owned_decode_rounds(
             # tokens from the cache.
             bs = int(draft_tokens.shape[1]) + 1
 
+            _tdb = time.perf_counter()
             if _ROUND_PROFILE:
                 mx.eval(draft_tokens)
             _td = time.perf_counter()
@@ -823,9 +843,19 @@ def _owned_decode_rounds(
                 verify = _mtp_verify_target(lm, verify_input, prompt_cache, sampler,
                                             sample_target_tokens=greedy)
 
+            _tvb = time.perf_counter()
+            _dot = os.environ.get("GMLX_VSPLIT_DOT")
+            if _dot and len(_vsplit_rows) == int(
+                os.environ.get("GMLX_VSPLIT_DOT_ROUND", "5")
+            ):
+                with open(_dot, "w") as fh:
+                    mx.export_to_dot(fh, verify.hidden)
             if _ROUND_PROFILE:
                 mx.eval(verify.hidden)
             _tv = time.perf_counter()
+            if _ROUND_PROFILE:
+                _vsplit_rows.append((_tdb - _t0, _td - _tdb,
+                                     _tvb - _td, _tv - _tvb))
 
             if stoch and len(stoch_stash) == draft_tokens.shape[1]:
                 accepted, new_tokens = _stochastic_walk(

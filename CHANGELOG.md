@@ -17,6 +17,14 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   native mlx-kquant ops instead of about 176 python kernel launches per
   step. `GMLX_HC_M1_FUSED=0` and `GMLX_HC_KQ=0` restore the previous
   routes for A/Bs.
+- DeepSeek-V4 hyper-connections at speculative verify widths run as one
+  fused kernel per call; DSpark speculative decode on an in-RAM V4-Flash
+  goes from losing to plain decode to beating it (about +13% on M5 Max).
+- The hc_expand between attention and the ffn hyper-connection fuses into
+  the following collapse kernel, and dense small-N projections (router
+  gate, indexer weights, hyper head) route through mlx-kquant's
+  skinny_matmul at speculative verify widths when available
+  (GMLX_KQ_SKINNY=0 opts out).
 - The server now sizes command buffers per phase, coarse while decoding
   and fine during deep prefill, rather than one cap for both.
   `GMLX_CB_PHASE=0` restores the single cap.
