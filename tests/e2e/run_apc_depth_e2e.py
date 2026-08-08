@@ -47,6 +47,13 @@ Phases against one model:
   churn         distinct mid-size prefixes cycle records through the ckpt
                 LRU, then the original replay must still serve correctly
                 with no exception-declines
+  session       (only with --session N) an agent-shaped conversation on a
+                dedicated server: N turns of growing history with streamed
+                replies, tool-call/tool-role messages, a mid-stream client
+                abort, sampled turns, and a compaction rewrite of the
+                middle of the history; every turn must keep adopting near
+                the previous prompt's grid floor while retirement clones
+                churn the record LRU
   tripwire      (ckpt) third server with replay/turn boundaries disabled:
                 identical resends are refused by the p-bound, and the
                 missed-adoption tripwire must count them and log its
@@ -79,6 +86,8 @@ import re
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -127,6 +136,14 @@ SYSTEM_MSG = (
     "the maintenance log you are given."
 )
 
+# Session-phase system message: tool output is part of the conversation,
+# so the strict answer-from-the-log framing would invite refusals.
+SESSION_SYSTEM = (
+    "You are the flight operations duty assistant. Use the maintenance "
+    "log and any diagnostic tool output in this conversation."
+)
+SESSION_REPLY_TOKENS = 512
+
 
 def entry_facts(i: int) -> dict:
     """Ground truth for log entry i (mirrors deep_prefix's formulas)."""
@@ -164,6 +181,19 @@ def deep_prefix(target_words: int, header: str = "") -> tuple:
         i += 1
     out.append("\nInstruction: answer using only the log above, concisely.\n")
     return "".join(out), i
+
+
+def dump_value(j: int, k: int) -> int:
+    """Ground truth for channel k of diagnostic dump j. Two digits, so the
+    witness regex cannot match a stray pass or drift digit."""
+    return (j * 13 + k * 7) % 89 + 10
+
+
+def tool_dump(j: int) -> str:
+    lines = [f"Diagnostic dump {j}:"]
+    for k in range(40):
+        lines.append(f"Channel C{j}.{k}: {dump_value(j, k)} units")
+    return "\n".join(lines) + "\n"
 
 
 def expected_populate_stores(ptok: int) -> int:
@@ -224,6 +254,66 @@ def http_chat(
             pass
         ptok = int((body.get("usage") or {}).get("prompt_tokens", 0) or 0)
     return st, text, content, ptok, wall
+
+
+def sse_chat(
+    base: str,
+    mid: str,
+    messages: list,
+    *,
+    max_tokens: int = SESSION_REPLY_TOKENS,
+    timeout: float = 900.0,
+    abort_after: int = None,
+    **extra,
+):
+    """Streamed chat completion over SSE. Returns (status, text, content,
+    events, wall); text includes reasoning deltas. ``abort_after`` closes
+    the connection after that many events: a client cancel mid-decode."""
+    body = {
+        "model": mid,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": 0.0,
+        "stream": True,
+    }
+    body.update(extra)
+    req = urllib.request.Request(
+        f"{base}/v1/chat/completions",
+        data=json.dumps(body).encode(),
+        method="POST",
+    )
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Accept", "text/event-stream")
+    t0 = time.monotonic()
+    content, reasoning, events = [], [], 0
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status = resp.status
+            for raw in resp:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                payload = line[len("data:") :].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    delta = json.loads(payload)["choices"][0].get("delta") or {}
+                except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+                    continue
+                events += 1
+                r = delta.get("reasoning_content") or delta.get("reasoning")
+                if r:
+                    reasoning.append(str(r))
+                if delta.get("content"):
+                    content.append(str(delta["content"]))
+                if abort_after is not None and events >= abort_after:
+                    break
+    except urllib.error.HTTPError as e:
+        return e.code, "", "", 0, time.monotonic() - t0
+    except Exception as e:  # noqa: BLE001 - report, don't raise
+        return -1, f"{type(e).__name__}: {e}", "", 0, time.monotonic() - t0
+    c = "".join(content)
+    return status, "".join(reasoning) + c, c, events, time.monotonic() - t0
 
 
 class Report:
@@ -298,6 +388,16 @@ def main() -> int:
         help="second width: enables the bitrate-b isolation phase (kNvM form ok)",
     )
     ap.add_argument("--turns", type=int, default=3)
+    ap.add_argument(
+        "--session",
+        type=int,
+        default=0,
+        metavar="N",
+        help="agent-session phase on a dedicated server: N growing turns "
+        "with streamed replies, tool messages, a mid-stream abort, sampled "
+        "turns, and a compaction rewrite (0 disables; the abort/sampled/"
+        "compaction turns need N >= 10; 14 is the validated shape)",
+    )
     ap.add_argument("--concurrency", type=int, default=3)
     ap.add_argument(
         "--churn",
@@ -385,6 +485,20 @@ def main() -> int:
             with open(tpath, "a") as f:
                 f.write(json.dumps(rec) + "\n")
         return st, text, content, ptok, wall
+
+    def schat(base, mid, messages, **kw):
+        st, text, content, events, wall = sse_chat(base, mid, messages, **kw)
+        rec = {
+            "status": st,
+            "stream_events": events,
+            "wall": round(wall, 1),
+            "q": str(messages[-1].get("content"))[-160:],
+            "text": text[:600],
+        }
+        with tlock:
+            with open(tpath, "a") as f:
+                f.write(json.dumps(rec) + "\n")
+        return st, text, content, events, wall
 
     K = tier_keys(a.tier)
     ck = a.tier == "ckpt"
@@ -1032,6 +1146,354 @@ def main() -> int:
                 "bitrate_b.warm_served_ok", served_ok(text, b_cold_text), facts_hint
             )
 
+    # -- session -------------------------------------------------------------
+    # An agent-shaped conversation on a dedicated server: growing history
+    # with streamed replies, tool messages, a mid-stream abort, sampled
+    # turns, and a compaction rewrite. Retirement clones churn the record
+    # LRU as depth grows; each turn adopts from the newest records, so the
+    # grid floor must survive the eviction pressure.
+    sess_final_ptok = None
+    if a.session > 0:
+        n_turns = a.session
+        events_on = n_turns >= 10
+        abort_t = (n_turns // 2) | 1
+        sampled_t = abort_t + 2
+        comp_t = n_turns - 2
+        if not events_on:
+            rep.note(
+                "session.events",
+                f"{n_turns} turns < 10: abort/sampled/compaction disabled",
+            )
+        sess_disk = os.path.join(out_dir, "apc-disk-session")
+        os.makedirs(sess_disk, exist_ok=True)
+        env_s = depth_env(
+            sess_disk,
+            a.block_size,
+            a.num_blocks,
+            a.disk_gb,
+            scheme=a.scheme,
+            bits=a.bits_a,
+        )
+        with ServerProc(
+            serve_args(a.model, a.speculative, a.draft_gguf),
+            env_extra=env_s,
+            log_path=os.path.join(out_dir, "server-s.log"),
+            python=a.python,
+        ) as srv:
+            srv.wait_ready(timeout=900)
+            base = srv.base_url
+            mid = model_id_of(base, srv)
+            chat(base, mid, mk_msgs("Say ok."), max_tokens=4)
+
+            root = (
+                [] if a.no_system else [{"role": "system", "content": SESSION_SYSTEM}]
+            )
+            root = root + [{"role": "user", "content": prefix + q}]
+            st, text, content, ptok, wall = chat(
+                base, mid, root, max_tokens=SESSION_REPLY_TOKENS
+            )
+            settle(K["stores"])
+            # the session runs under its own system message, so the log
+            # witness recalibrates on this server's cold answer
+            sess_witness = [(n, rx) for n, rx in probes if rx.search(text)]
+            rep.check(
+                "session.populate",
+                st == 200 and len(text) > 0,
+                f"prompt {ptok} tok, {wall:.1f}s, cold answer retrieves "
+                f"{[n for n, _ in sess_witness]}",
+            )
+
+            def sess_facts(txt: str) -> bool:
+                if not sess_witness:
+                    return len(txt) > 0
+                return all(rx.search(txt) for _, rx in sess_witness)
+
+            history = [
+                {"role": "assistant", "content": history_safe(content) or "(ok)"}
+            ]
+            known_ptok = ptok
+            root_ptok = ptok
+            dump_id = 0
+            live_dumps = []
+            odd_flip = False
+            tool_state = "untried"
+            turns_ok = clean_ok = mono_ok = floors_ok = True
+            log_ok = near_ok = True
+            near_n = far_n = far_hits = 0
+            abort_ok = None
+            comp_row = None
+            floor_rows = []
+            for t in range(2, n_turns + 1):
+                is_abort = events_on and t == abort_t
+                is_sampled = events_on and t == sampled_t
+                is_comp = events_on and t == comp_t
+                if is_comp:
+                    # replace the middle of the history with a summary;
+                    # divergence drops below every per-turn record, and the
+                    # refused records must be re-stored, not crashed on
+                    summary = (
+                        "Summary of the session so far: diagnostics ran "
+                        f"clean on probes 1 through {dump_id}; all readings "
+                        "matched the maintenance log."
+                    )
+                    msgs = root + [
+                        {"role": "assistant", "content": summary},
+                        {"role": "user", "content": q},
+                    ]
+                    m0 = tick(K["matched"])
+                    st, text, content, ptok_t, wall = chat(
+                        base, mid, msgs, max_tokens=SESSION_REPLY_TOKENS
+                    )
+                    dm = tick(K["matched"]) - m0
+                    turns_ok &= st == 200 and len(text) > 0
+                    clean_ok &= content_clean(content)
+                    comp_row = (st, sess_facts(text), dm, wall)
+                    history = msgs[len(root) :] + [
+                        {
+                            "role": "assistant",
+                            "content": history_safe(content) or "(ok)",
+                        }
+                    ]
+                    if ptok_t:
+                        known_ptok = ptok_t
+                    live_dumps = []
+                    rep.note(
+                        f"session.t{t}",
+                        f"compaction status {st}, prompt {ptok_t} tok, "
+                        f"matched +{dm}, {wall:.1f}s",
+                    )
+                    continue
+                stream = t % 2 == 1
+                extra = {}
+                expect = None
+                hist = history
+                block = []
+                if is_abort:
+                    kind = "abort"
+                    q_t = (
+                        "Walk through the log's overall trends in as much "
+                        "detail as possible."
+                    )
+                elif is_sampled:
+                    kind = "sampled"
+                    q_t = (
+                        "Describe any notable anomalies across the log and "
+                        "the diagnostic dumps so far."
+                    )
+                    extra = {"temperature": 0.7, "top_p": 0.9}
+                elif t % 2 == 0:
+                    kind = "tool"
+                    dump_id += 1
+                    j = dump_id
+                    kq = (3 * t) % 40
+                    q_t = (
+                        f"In diagnostic dump {j}, what value does channel "
+                        f"C{j}.{kq} show? Answer with the number, then "
+                        "describe that channel in detail."
+                    )
+                    call = {
+                        "id": f"call_{j}",
+                        "type": "function",
+                        "function": {
+                            "name": "run_diagnostics",
+                            "arguments": json.dumps({"probe": j}),
+                        },
+                    }
+                    dump = tool_dump(j)
+                    if tool_state == "unsupported":
+                        block = [{"role": "user", "content": dump + "\n" + q_t}]
+                    else:
+                        hist = history[:-1] + [{**history[-1], "tool_calls": [call]}]
+                        block = [
+                            {
+                                "role": "tool",
+                                "tool_call_id": f"call_{j}",
+                                "name": "run_diagnostics",
+                                "content": dump,
+                            },
+                            {"role": "user", "content": q_t},
+                        ]
+                    expect = re.compile(rf"\b{dump_value(j, kq)}\b")
+                else:
+                    odd_flip = not odd_flip
+                    if odd_flip or not live_dumps:
+                        kind = "log"
+                        q_t = q
+                    else:
+                        kind = "far"
+                        j0 = live_dumps[0]
+                        kq = (3 * t) % 40
+                        q_t = (
+                            f"Back in diagnostic dump {j0}, what value did "
+                            f"channel C{j0}.{kq} show? Answer with the number."
+                        )
+                        expect = re.compile(rf"\b{dump_value(j0, kq)}\b")
+                if not block:
+                    block = [{"role": "user", "content": q_t}]
+                msgs = root + hist + block
+                # floor: the unit grid below the last known prompt length,
+                # one unit of slack for render-shape key divergence
+                floor = None
+                if ck:
+                    floor = max(0, turn_grid_floor(known_ptok) - CKPT_UNIT)
+                elif a.tier == "block":
+                    floor = max(
+                        0,
+                        ((root_ptok - QUESTION_SLACK) // a.block_size) * a.block_size,
+                    )
+                m0 = tick(K["matched"])
+                if stream:
+                    st, text, content, events, wall = schat(
+                        base,
+                        mid,
+                        msgs,
+                        max_tokens=1024 if is_abort else SESSION_REPLY_TOKENS,
+                        abort_after=24 if is_abort else None,
+                        **extra,
+                    )
+                    ptok_t = 0
+                else:
+                    st, text, content, ptok_t, wall = chat(
+                        base, mid, msgs, max_tokens=SESSION_REPLY_TOKENS, **extra
+                    )
+                    events = 0
+                if kind == "tool" and tool_state == "untried":
+                    if st == 200:
+                        tool_state = "ok"
+                    else:
+                        # template rejected the tool shape; resend the dump
+                        # as plain user text and stay in that mode
+                        tool_state = "unsupported"
+                        hist = history
+                        block = [{"role": "user", "content": dump + "\n" + q_t}]
+                        msgs = root + hist + block
+                        m0 = tick(K["matched"])
+                        st, text, content, ptok_t, wall = chat(
+                            base, mid, msgs, max_tokens=SESSION_REPLY_TOKENS
+                        )
+                dm = tick(K["matched"]) - m0
+                if is_abort:
+                    abort_ok = st == 200 and events >= 24
+                    settle(K["stores"])
+                else:
+                    turns_ok &= st == 200 and len(text) > 0
+                    clean_ok &= content_clean(content)
+                    if st == 200:
+                        history = (
+                            hist
+                            + block
+                            + [
+                                {
+                                    "role": "assistant",
+                                    "content": history_safe(content) or "(ok)",
+                                }
+                            ]
+                        )
+                        if kind == "tool":
+                            live_dumps.append(dump_id)
+                    if ptok_t:
+                        mono_ok &= ptok_t > known_ptok
+                        known_ptok = ptok_t
+                if floor is not None:
+                    ok_f = dm >= floor
+                    floors_ok &= ok_f
+                    floor_rows.append(f"t{t}{'' if ok_f else '(FAIL)'}:+{dm}/{floor}")
+                if kind == "log":
+                    log_ok &= sess_facts(text)
+                elif kind == "tool":
+                    near_n += 1
+                    near_ok &= bool(expect.search(text))
+                elif kind == "far":
+                    far_n += 1
+                    far_hits += bool(expect.search(text))
+                shape = f"stream {events}ev" if stream else f"prompt {ptok_t} tok"
+                rep.note(
+                    f"session.t{t}",
+                    f"{kind} status {st}, {shape}, matched +{dm}, {wall:.1f}s",
+                )
+            sess_final_ptok = known_ptok
+            settle(K["stores"])
+            s1 = stats(base)
+            rep.check(
+                "session.turns",
+                turns_ok,
+                f"{n_turns} turns, final prompt {known_ptok} tok",
+            )
+            rep.check(
+                "session.content_clean",
+                clean_ok,
+                "content fields markup-free across the session",
+            )
+            rep.check("session.growing", mono_ok, "prompt grows at full-history turns")
+            if a.tier == "exact":
+                rep.note("session.adopted", " ".join(floor_rows) or "n/a")
+            else:
+                rep.check("session.adopted", floors_ok, " ".join(floor_rows))
+            rep.check(
+                "session.log_facts",
+                log_ok,
+                f"log probes retrieve {[n for n, _ in sess_witness]}",
+            )
+            if near_n:
+                rep.check(
+                    "session.dump_facts",
+                    near_ok,
+                    f"{near_n} fresh-dump probes answered",
+                )
+            rep.note(
+                "session.tool_shape",
+                "tool_calls + tool role rendered"
+                if tool_state == "ok"
+                else f"tool messages sent as plain text ({tool_state})",
+            )
+            if far_n:
+                rep.note(
+                    "session.far_dumps",
+                    f"{far_hits}/{far_n} distant-dump retrievals",
+                )
+            if events_on:
+                rep.check(
+                    "session.abort",
+                    bool(abort_ok),
+                    f"stream at t{abort_t} aborted after ~24 events; "
+                    "recovery is covered by session.turns and .adopted",
+                )
+                st_c, facts_c, dm_c, wall_c = comp_row
+                rep.check(
+                    "session.compaction",
+                    st_c == 200 and facts_c,
+                    f"rewrite served with the calibrated facts, matched "
+                    f"+{dm_c} (depth noted: pre-rewrite records may be "
+                    f"evicted), {wall_c:.1f}s",
+                )
+            if ck:
+                declines = s1.get("ckpt_declines") or {}
+                rep.check(
+                    "session.no_exception_declines",
+                    int(declines.get("exception", 0) or 0) == 0,
+                    json.dumps(declines),
+                )
+                rep.check(
+                    "session.no_missed_adoptions",
+                    int(s1.get("ckpt_missed_adoptions", 0) or 0) == 0,
+                    f"ckpt_missed_adoptions={s1.get('ckpt_missed_adoptions')}",
+                )
+                rep.note(
+                    "session.counters",
+                    json.dumps(
+                        {
+                            k: s1.get(k)
+                            for k in (
+                                "ckpt_stores",
+                                "ckpt_hits",
+                                "ckpt_matched_tokens",
+                                "matched_tokens",
+                                "disk_writes",
+                            )
+                        }
+                    ),
+                )
+
     # -- tripwire ------------------------------------------------------------
     # With replay and turn boundaries off, an identical resend is refused
     # by the p < len(query) bound and the missed-adoption warning must
@@ -1098,6 +1560,8 @@ def main() -> int:
         "scheme": a.scheme,
         "bits": [a.bits_a, a.bits_b] if (a.bits_a or a.bits_b) else None,
         "prefix_tokens": prefix_tok,
+        "session_turns": a.session or None,
+        "session_final_ptok": sess_final_ptok,
         "speculative": a.speculative,
         "system_message": not a.no_system,
         "template_kwargs": template_kwargs,

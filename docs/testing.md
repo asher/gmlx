@@ -114,7 +114,12 @@ missed-adoption counters are bounded, the missed-adoption tripwire is
 fired live, and a churn phase cycles records through the LRU.
 `--template-kwargs` adds a render-variant turn; `--draft-gguf` covers
 assistant-shape MTP targets; wall-clock gates assume an idle machine
-(`--require-idle` enforces it). `tests/test_e2e_harness_smoke.py` pins
+(`--require-idle` enforces it). `--session N` appends an agent-shaped
+conversation on a dedicated server - N turns of growing history with
+streamed replies, tool-call/tool-role messages, a mid-stream client
+abort, sampled turns, and a compaction rewrite - where every turn must
+keep adopting near the previous prompt's grid floor while retirement
+clones churn the record LRU. `tests/test_e2e_harness_smoke.py` pins
 every harness's imports and argparse tree in CI.
 
 ### Pre-release: the APC engagement gate
