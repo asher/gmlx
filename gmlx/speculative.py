@@ -1186,10 +1186,11 @@ def _sidecar_post_prefill(drafter, sidecar_ctx: dict | None) -> None:
     hidden has its rows at the wrong positions and would poison future turns
     if stored under a full-prefix key. The coverage verdict is also recorded
     on the drafter for the retirement-time sidecar store. The key set mirrors
-    the target's landed post-prefill stores (ckpt: deepest landed prefill
-    boundary plus the full prompt iff its store landed; exact: the
-    guard-trimmed checkpoint length plus the full prompt) so every key pairs
-    with a target record a future lookup can adopt. Best-effort; never raises.
+    the target's landed stores (ckpt: landed turn boundaries, the deepest
+    landed prefill boundary, and the full prompt iff its store landed;
+    exact: the guard-trimmed checkpoint length plus the full prompt) so
+    every key pairs with a target record a future lookup can adopt.
+    Best-effort; never raises.
     """
     # Reset the coverage verdict and request nonce unconditionally: a stale
     # nonce from an earlier request would let that request's lazy retirement
@@ -1228,18 +1229,24 @@ def _sidecar_post_prefill(drafter, sidecar_ctx: dict | None) -> None:
         from .cache_snapshot import drafter_sidecar_store
         extra_hash = int(sidecar_ctx.get("extra_hash", 0))
         if sidecar_ctx.get("mode") == "ckpt":
-            # One sidecar key per adoptable terminal target record,
-            # derived from the live meta (never recomputing a store
-            # decision): the deepest landed prefill boundary, plus the
-            # full prompt iff the p=N store landed. A key without a
-            # target record only burns _SIDECAR_ENTRIES slots -- the
-            # lookup adopts the target first, then asks for a sidecar
-            # at exactly that length.
+            # One sidecar key per adoptable target record, derived from
+            # the live meta (never recomputing a store decision): every
+            # landed turn boundary, the deepest landed prefill boundary,
+            # plus the full prompt iff the p=N store landed. Turn 2
+            # adopts the target at p_stable and the sidecar lookup
+            # demands an exact-length entry there -- keying only the
+            # deepest boundary (N-1) would hand turn 2 a warm target
+            # and a cold drafter head.
             meta = sidecar_ctx.get("apc_meta") or {}
+            stored = meta.get("ckpt_stored_boundaries") or ()
+            keys = []
+            for b in meta.get("ckpt_p_stable_bounds") or ():
+                if b in stored and 0 < b <= n and b not in keys:
+                    keys.append(b)
             boundary = int(meta.get("ckpt_last_stored", 0) or 0)
-            keys = [boundary] if 0 < boundary <= n else []
-            if n not in keys and n in (
-                    meta.get("ckpt_stored_boundaries") or ()):
+            if 0 < boundary <= n and boundary not in keys:
+                keys.append(boundary)
+            if n not in keys and n in stored:
                 keys.append(n)
         else:
             checkpoint_len = int(sidecar_ctx.get("checkpoint_len", 0) or 0)

@@ -168,6 +168,33 @@ def test_row_snapshot_empty_cache_list_input():
     assert row_snapshot([], 0) is None
 
 
+def test_row_snapshot_single_row_rotating_wrapped_canonical():
+    # B=1 rot caches route through _clone_single_row: exact-tier stores
+    # for rot archs outside the ckpt geometry hold the canonical window
+    # (temporal order, min(offset, W) tokens), not the untrimmed ring.
+    max_size = 8
+    c = _rot_row(max_size, 20, 0)
+    snap = row_snapshot([c], 0)
+    assert snap is not None
+    s = snap[0]
+    assert type(s) is RotatingKVCache
+    assert s.offset == 20
+    assert s.keys.shape[2] == max_size
+    got = [float(s.keys[0, 0, j, 0]) for j in range(max_size)]
+    assert got == [7.0 * t for t in range(12, 20)]
+
+
+def test_row_snapshot_buffered_rotating_declines():
+    # The spec path swaps rot layers to BufferedRotatingKVCache; its
+    # clones drop start_position, so the exact tier must store nothing
+    # for the stack rather than a corrupt row.
+    Buffered = getattr(_cache, "BufferedRotatingKVCache", None)
+    if Buffered is None:
+        pytest.skip("no BufferedRotatingKVCache in the runtime cache module")
+    buffered = Buffered.from_cache(_rot_row(8, 20, 0), buffer_size=4)
+    assert row_snapshot([_kv_row(4, 0), buffered], 0) is None
+
+
 # --------------------------------------------------------------------------
 # retirement_store: round-trip through a real APCManager exact tier
 # --------------------------------------------------------------------------
@@ -663,6 +690,31 @@ def test_sidecar_post_prefill_ckpt_keys_mirror_landed_stores():
         assert drafter_sidecar_lookup(mgr, cont, 11) is not None
         assert drafter_sidecar_lookup(mgr, cont, 12) is not None
         assert drafter_sidecar_lookup(mgr, cont, 8) is None
+    finally:
+        mgr.close()
+
+
+def test_sidecar_post_prefill_keys_landed_turn_boundary():
+    """Turn 2 adopts the target at p_stable and the sidecar lookup
+    demands an exact-length entry there: every landed turn boundary gets
+    a key, or the drafter head starts cold on exactly the turn the
+    boundary exists for. Armed-but-declined bounds stay unkeyed."""
+    from gmlx.speculative import _sidecar_post_prefill
+    mgr = _manager()
+    try:
+        full_ids = list(range(1, 13))
+        meta = {"ckpt_last_stored": 11,
+                "ckpt_stored_boundaries": [8, 11],
+                "ckpt_p_stable_bounds": [6, 8]}
+        ctx = {"full_ids": full_ids, "extra_hash": 0, "checkpoint_len": 11,
+               "manager": mgr, "mode": "ckpt", "apc_meta": meta}
+        drafter = _FakeDrafter([_kv_row(12, 0)])
+        _sidecar_post_prefill(drafter, ctx)
+        cont = full_ids + [200]
+        assert drafter_sidecar_lookup(mgr, cont, 8) is not None
+        assert drafter_sidecar_lookup(mgr, cont, 11) is not None
+        assert drafter_sidecar_lookup(mgr, cont, 6) is None
+        assert drafter_sidecar_lookup(mgr, cont, 12) is None
     finally:
         mgr.close()
 
