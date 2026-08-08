@@ -116,6 +116,18 @@ def test_store_lookup_roundtrip(p):
     assert all(b.ref_cnt == 0 for b in man.pool)
 
 
+def _trim_kv(cache, p2):
+    out = []
+    for c in cache:
+        if isinstance(c, KVCache):
+            t = KVCache()
+            t.state = (c.keys[..., :p2, :], c.values[..., :p2, :])
+            out.append(t)
+        else:
+            out.append(c)
+    return out
+
+
 def test_identical_resend_needs_shorter_checkpoint():
     man = APCManager(num_blocks=64, block_size=16)
     p = 48
@@ -128,18 +140,86 @@ def test_identical_resend_needs_shorter_checkpoint():
     assert warm is None and got == 0
     # ...but hits a shorter one (the mid-prefill checkpoint_len store).
     p2 = 30
-    trimmed = []
-    for c in cache:
-        if isinstance(c, KVCache):
-            t = KVCache()
-            t.state = (c.keys[..., :p2, :], c.values[..., :p2, :])
-            trimmed.append(t)
-        else:
-            trimmed.append(c)
+    trimmed = _trim_kv(cache, p2)
     assert ckpt_store(man, ids[:p2], trimmed, extra_hash=0)
     warm, got = ckpt_lookup(man, ids, extra_hash=0)
     assert got == p2
     assert_warm_matches(warm, trimmed, p2)
+
+
+def test_replay_record_survives_retirement_insert():
+    """The N-1 replay record exists for the identical resend, which
+    arrives after retirement grows the chain -- exactly the moment
+    strip-on-extend used to release it."""
+    from gmlx.cache_snapshot import _ckpt_records
+
+    man = APCManager(num_blocks=64, block_size=16)
+    n = 48
+    ids = list(range(100, 100 + n + 4))
+    cache = make_hybrid_cache(n)
+    replay = _trim_kv(cache, n - 1)
+    assert ckpt_store(man, ids[:n - 1], replay, extra_hash=0,
+                      kind="replay")
+    # Post-prefill terminal store, then retirement at prompt+gen.
+    assert ckpt_store(man, ids[:n], cache, extra_hash=0)
+    assert retirement_store(man, "ckpt", ids, make_hybrid_cache(n + 4),
+                            row=0, extra_hash=0)
+    idx = _ckpt_records(man)
+    assert (n - 1) in [r.p for r in idx.values()]
+    assert {r.kind for r in idx.values()} == {"replay", "boundary",
+                                              "retire"}
+    # The identical resend adopts at N-1.
+    warm, got = ckpt_lookup(man, ids[:n], extra_hash=0)
+    assert got == n - 1
+    assert_warm_matches(warm, _trim_kv(cache, n - 1), n - 1)
+
+
+def test_newer_replay_supersedes_older_on_chain():
+    from gmlx.cache_snapshot import _ckpt_records
+
+    man = APCManager(num_blocks=64, block_size=16)
+    ids = list(range(100, 196))
+    assert ckpt_store(man, ids[:47], make_hybrid_cache(47, seed=1),
+                      extra_hash=0, kind="replay")
+    assert ckpt_store(man, ids[:79], make_hybrid_cache(79, seed=2),
+                      extra_hash=0, kind="replay")
+    idx = _ckpt_records(man)
+    assert [r.p for r in idx.values() if r.kind == "replay"] == [79]
+
+
+def test_replay_record_not_exempt_from_entry_cap(monkeypatch):
+    import gmlx.cache_snapshot as cs
+
+    monkeypatch.setattr(cs, "_CKPT_RECORD_ENTRIES", 2)
+    man = APCManager(num_blocks=64, block_size=16)
+    assert ckpt_store(man, list(range(100, 147)),
+                      make_hybrid_cache(47, seed=1), extra_hash=0,
+                      kind="replay")
+    # Unrelated chains (distinct extra_hash) push it out oldest-first.
+    assert ckpt_store(man, list(range(300, 332)),
+                      make_hybrid_cache(32, seed=2), extra_hash=1)
+    assert ckpt_store(man, list(range(500, 532)),
+                      make_hybrid_cache(32, seed=3), extra_hash=2)
+    idx = cs._ckpt_records(man)
+    assert len(idx) == 2
+    assert all(r.kind != "replay" for r in idx.values())
+    warm, got = ckpt_lookup(man, list(range(100, 148)), extra_hash=0)
+    assert warm is None and got == 0
+
+
+def test_replay_record_not_exempt_from_byte_budget(monkeypatch):
+    import gmlx.cache_snapshot as cs
+
+    man = APCManager(num_blocks=64, block_size=16)
+    assert ckpt_store(man, list(range(100, 147)),
+                      make_hybrid_cache(47, seed=1), extra_hash=0,
+                      kind="replay")
+    rec = next(iter(cs._ckpt_records(man).values()))
+    monkeypatch.setattr(cs, "_CKPT_BUDGET_BYTES", rec.nbytes + 1)
+    assert ckpt_store(man, list(range(300, 347)),
+                      make_hybrid_cache(47, seed=2), extra_hash=1)
+    idx = cs._ckpt_records(man)
+    assert [r.kind for r in idx.values()] == ["boundary"]
 
 
 def test_salt_isolation_from_real_tiers():
@@ -382,6 +462,27 @@ def test_strip_on_extend_keeps_newest_two():
     assert warm is None and got == 0          # p=32 stripped
     warm, got = ckpt_lookup(man, ids[:66], extra_hash=0)
     assert got == 64
+
+
+def test_strip_on_extend_exempts_replay():
+    """A growing chain strips boundary records past the cap but never a
+    replay record; the replay stays adoptable through terminal and
+    retirement inserts."""
+    from gmlx.cache_snapshot import _ckpt_records
+    man = APCManager(num_blocks=64, block_size=16)
+    ids = list(range(400, 400 + 96))
+    assert ckpt_store(man, ids[:32], make_hybrid_cache(32, seed=32),
+                      extra_hash=0)
+    assert ckpt_store(man, ids[:47], make_hybrid_cache(47, seed=47),
+                      extra_hash=0, kind="replay")
+    assert ckpt_store(man, ids[:64], make_hybrid_cache(64, seed=64),
+                      extra_hash=0)
+    assert ckpt_store(man, ids[:80], make_hybrid_cache(80, seed=80),
+                      extra_hash=0, kind="retire")
+    idx = _ckpt_records(man)
+    assert sorted(r.p for r in idx.values()) == [47, 64, 80]
+    warm, got = ckpt_lookup(man, ids[:48], extra_hash=0)
+    assert got == 47
 
 
 def test_layout_signature_rejects_mismatch():

@@ -576,13 +576,19 @@ def _ckpt_block_prefix(p: int, block_size: int) -> int:
 
 
 class _CkptRecord:
+    # kind in {"boundary", "replay", "retire"}: prefill-cursor boundaries,
+    # the N-1 identical-replay record, and retirement stores. Retention
+    # differs only in the strip-on-extend exemption (see _record_insert);
+    # the entries cap and byte budget treat all kinds alike.
     __slots__ = ("ids", "extra_hash", "p", "b_full", "layout",
                  "main_blocks", "bounded_blocks", "rot_meta", "states",
-                 "tails", "nbytes")
+                 "tails", "nbytes", "kind")
 
     def __init__(self, **kw):
         for k in self.__slots__:
             setattr(self, k, kw.get(k))
+        if self.kind is None:
+            self.kind = "boundary"
 
 
 def _ckpt_records(manager) -> "OrderedDict":
@@ -733,7 +739,14 @@ def _record_insert(manager, rec) -> None:
     same chain immediately (LRU would keep exactly the wrong ones - the
     second-newest on a just-grown chain is among the most recently touched),
     then bound the index by count and payload bytes, releasing refs on
-    everything dropped. The newest record always survives."""
+    everything dropped. The newest record always survives.
+
+    Replay records are exempt from the strip only: growth (a longer
+    boundary or retirement insert) is exactly the moment an identical
+    resend still needs the N-1 record, so a longer non-replay insert
+    never releases one; a newer replay on the same chain supersedes it.
+    The count and byte bounds below evict replay records normally -- the
+    exemption pins nothing against real memory pressure."""
     idx = _ckpt_records(manager)
     key = (rec.ids, rec.extra_hash)
     rec.nbytes = _rec_nbytes(rec)
@@ -745,6 +758,11 @@ def _record_insert(manager, rec) -> None:
         chain = [k for k, r in idx.items()
                  if r.extra_hash == rec.extra_hash and r.p < rec.p
                  and rec.ids[:r.p] == r.ids]
+        if rec.kind == "replay":
+            # One replay per chain: the newer one supersedes outright.
+            for k in [k for k in chain if idx[k].kind == "replay"]:
+                _release_record(manager, idx.pop(k))
+        chain = [k for k in chain if k in idx and idx[k].kind != "replay"]
         chain.sort(key=lambda k: idx[k].p, reverse=True)
         for k in chain[_CKPT_HEAVY_PER_CHAIN - 1:]:
             _release_record(manager, idx.pop(k))
@@ -767,16 +785,19 @@ def ckpt_store(
     *,
     extra_hash: int = 0,
     skeleton_disk: bool = True,
+    kind: str = "boundary",
 ) -> bool:
     """Store a hybrid checkpoint at ``p = len(token_ids)``.
 
     Single-row cache list, KV/rotating offsets == p. Plain KV rides the
     salted main chain, rotating layers a per-checkpoint window chain
-    (grid-aligned p required), states and unaligned-GDN tails land in the
-    pinned record; disk skeleton written best-effort.
-    ``skeleton_disk=False`` skips the skeleton write (the skeleton inlines
-    recurrent state, >100 MB per GDN checkpoint -- interval boundaries
-    superseded minutes later do not earn that). Never raises.
+    (block-grid p below the window, any p at or beyond it), states and
+    unaligned-GDN tails land in the pinned record; disk skeleton written
+    best-effort. ``skeleton_disk=False`` skips the skeleton write (the
+    skeleton inlines recurrent state, >100 MB per GDN checkpoint --
+    interval boundaries superseded minutes later do not earn that).
+    ``kind`` stamps the record's retention class (see _CkptRecord).
+    Never raises.
     """
     if manager is None or token_ids is None:
         return False
@@ -927,7 +948,7 @@ def ckpt_store(
             ids=tuple(ids), extra_hash=int(extra_hash), p=p, b_full=b_full,
             layout=tuple(layout), main_blocks=main_blocks,
             bounded_blocks=bounded_blocks, rot_meta=rot_meta,
-            states=states, tails=tails)
+            states=states, tails=tails, kind=str(kind))
         _record_insert(manager, rec)
 
         if skeleton_disk:
@@ -1499,11 +1520,11 @@ def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
             # The row is already single-row on the B=1 path; ckpt_store
             # slices it directly (its own stores copy internally), so no
             # full-cache clone happens -- the exact tier's whole sin. A
-            # rotating layer declines here (retirement p is arbitrary and
-            # a window store needs the block grid); the ring below holds
-            # grid-aligned clones for exactly that case.
+            # rotating layer declines here below the window (a sub-wrap
+            # store needs the block grid); the ring below holds aligned
+            # clones for exactly that case.
             if ckpt_store(manager, ids, prompt_cache,
-                          extra_hash=extra_hash):
+                          extra_hash=extra_hash, kind="retire"):
                 return True
         for p, states in sorted(decode_snaps or (),
                                 key=lambda s: s[0], reverse=True):
@@ -1514,7 +1535,7 @@ def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
             # turn restores from, unlike interval boundaries.
             if assembled is not None and ckpt_store(
                     manager, ids[:p], assembled, extra_hash=extra_hash,
-                    skeleton_disk=True):
+                    skeleton_disk=True, kind="retire"):
                 _log.info("APC retirement: decode ckpt stored at %d "
                           "(cap %d, full %d)", p, cap, len(ids))
                 return True
