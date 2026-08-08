@@ -240,6 +240,13 @@ def phase_populate_warm_batch(python, model_path, disk_root, log_dir, block_size
         s, _ = chat(base, mid, PREFIX + FIXED_Q)
         out["cold_status"] = s
         out["cold"] = stats(base)
+        if not out["continuous_batching_enabled"]:
+            # The flag means "response_generator bound"; the background
+            # preload races the boot-time read, a completed request forces it.
+            _ms, m_body = Client(base).metrics()
+            srv = (m_body or {}).get("server") if isinstance(m_body, dict) else {}
+            out["continuous_batching_enabled"] = bool(
+                (srv or {}).get("continuous_batching_enabled"))
 
         # 2) batching / multi-client: concurrent clients sharing PREFIX. This is the
         #    store trigger - the engine commits the shared prefix to APC and writes it
