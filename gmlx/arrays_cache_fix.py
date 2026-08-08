@@ -26,17 +26,14 @@ from __future__ import annotations
 
 _PATCH_FLAG = "_kq_lengths_clears_left_padding"
 
-_installed = False
-
 
 def install_arrays_cache_fix() -> bool:
     """Make ``ArraysCache.prepare(lengths=...)`` authoritative for the mask.
 
-    Idempotent; patches every loaded origin of the class.
+    Idempotent per class origin (the patch flag), re-scanned on every
+    call: an origin module imported after the first install still gets
+    patched by the next.
     """
-    global _installed
-    if _installed:
-        return True
     from .cache_compat import cache_types
 
     for cls in cache_types("ArraysCache"):
@@ -51,5 +48,4 @@ def install_arrays_cache_fix() -> bool:
 
         prepare.__dict__[_PATCH_FLAG] = True
         cls.prepare = prepare
-    _installed = True
     return True

@@ -46,6 +46,7 @@ from client import Client                  # noqa: E402
 from models import ModelRegistry           # noqa: E402
 from server_proc import ServerProc         # noqa: E402
 
+
 def tier_keys(tier: str) -> dict:
     """Counter-key names per APC storage tier as reported by /v1/cache/stats.
     lookups_hit / matched_tokens / disk_writes / disk_hits are shared ledgers;
