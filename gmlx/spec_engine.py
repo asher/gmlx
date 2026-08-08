@@ -492,8 +492,9 @@ def _snap_fields(batch, manager) -> dict:
     serve-sized step (2048) would otherwise push the first snapshot far
     past prompt end + interval, so it falls back to the block size (the
     off-grid restore is the scoped-benign case). ``snap_align`` is the
-    block alignment a rotating window store requires (a window cannot
-    rewind, so off-grid clones are unusable).
+    block alignment a rotating window store requires below the window;
+    ``snap_offgrid_min`` (= W) is where the store gate stops caring --
+    a wrapped window is whole blocks at any p.
     """
     import math
     from .cache_snapshot import _DECODE_CKPT_DEFAULT
@@ -503,10 +504,16 @@ def _snap_fields(batch, manager) -> dict:
     grid = math.lcm(step, bs) if step > 0 else bs
     if grid > env_int("GMLX_APC_DECODE_CKPT", _DECODE_CKPT_DEFAULT):
         grid = bs
+    rot_w = 0
+    for t in tags:
+        if t.startswith("rot"):
+            rot_w = int(t.split(":")[1])
+            break
     return {
         "snap_ok": bool(tags),
         "snap_grid": grid,
-        "snap_align": bs if any(t.startswith("rot") for t in tags) else 1,
+        "snap_align": bs if rot_w else 1,
+        "snap_offgrid_min": rot_w,
     }
 
 

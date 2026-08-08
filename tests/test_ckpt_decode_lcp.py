@@ -144,23 +144,26 @@ def test_retirement_uses_newest_snap_at_or_below_lcp():
 
 
 def test_retirement_rotating_uses_grid_snap():
+    """Below the window an off-grid retirement still needs the aligned
+    decode snapshot (beyond it the full sequence stores directly -- see
+    test_retirement_rotating_off_grid_beyond_window_stores)."""
     from test_ckpt_tier import assert_swa_warm_matches, make_swa_cache
 
     man = APCManager(num_blocks=64, block_size=16)
-    n = 70                                    # retirement p: off-grid
+    n = 30                                    # < W=32 and off-grid
     ids = list(range(800, 800 + n))
     cache = make_swa_cache(n, seed=21)
-    snap_src = make_swa_cache(64, seed=22)
+    snap_src = make_swa_cache(16, seed=22)
     states = [c for c in snap_src if hasattr(c, "max_size")]
     assert retirement_store(man, "ckpt", ids, cache,
-                            decode_snaps=[(64, states)])
-    warm, got = ckpt_lookup(man, ids[:64] + [1], extra_hash=0)
-    assert got == 64 and warm is not None
+                            decode_snaps=[(16, states)])
+    warm, got = ckpt_lookup(man, ids[:16] + [1], extra_hash=0)
+    assert got == 16 and warm is not None
     # Expected: plain KV from the live row, rotating windows from the
     # snapshot clones.
     expected = [s if hasattr(s, "max_size") else c
                 for c, s in zip(cache, snap_src)]
-    assert_swa_warm_matches(warm, expected, 64)
+    assert_swa_warm_matches(warm, expected, 16)
     # No exact-tier spill: the verbatim-row fallback is gone.
     assert man.stats_snapshot()["exact_stores"] == 0
 

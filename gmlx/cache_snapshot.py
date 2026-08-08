@@ -49,6 +49,19 @@ def _layer_has_content(snap: Any) -> bool:
     return True
 
 
+def _buffered_types() -> tuple:
+    """BufferedRotatingKVCache classes (spec-path swap-in). It subclasses
+    RotatingKVCache but carries ``start_position`` and a slack buffer no
+    rotating clone or canonical window preserves -- every snapshot path
+    declines it loudly until dedicated support lands."""
+    from .cache_compat import cache_types
+
+    try:
+        return cache_types("BufferedRotatingKVCache")
+    except AttributeError:
+        return ()
+
+
 def _clone_single_row(cache: Any) -> Any | None:
     """Deep-copy an already-single-row cache, preserving its concrete kind.
 
@@ -57,6 +70,10 @@ def _clone_single_row(cache: Any) -> Any | None:
     """
     from mlx_vlm import apc as _apc
 
+    if isinstance(cache, _buffered_types()):
+        _log.info("APC clone declined: BufferedRotatingKVCache carries "
+                  "start_position no rotating clone preserves")
+        return None
     eval_targets: list[Any] = []
     out = _apc._clone_cache_entry_for_apc(
         cache, min_capacity_tokens=None, eval_targets=eval_targets)
@@ -777,6 +794,12 @@ def ckpt_store(
         if p < 2 or layout is None:
             _ckpt_decline(manager, "layout")
             return False
+        if any(isinstance(c, _buffered_types()) for c in prompt_cache):
+            _log.info(
+                "APC ckpt store declined: BufferedRotatingKVCache rows "
+                "cannot snapshot (support deferred)")
+            _ckpt_decline(manager, "buffered")
+            return False
         for c in prompt_cache:
             off = getattr(c, "offset", None)
             if off is not None and not isinstance(c, rot_types) \
@@ -793,11 +816,21 @@ def ckpt_store(
         has_rot = any(_is_rot(t) for t in layout)
         b_full = _ckpt_block_prefix(p, bs)
         if has_rot and b_full != p:
-            _log.info(
-                "APC ckpt store declined: rotating store needs grid-aligned "
-                "p (%d %% %d != 0)", p, bs)
-            _ckpt_decline(manager, "grid")
-            return False
+            # Off-grid p is storable once the window has wrapped: the
+            # canonical window is then exactly W tokens -- whole blocks
+            # regardless of p (rotating_geometry enforces the single
+            # block-aligned (W, keep) that ckpt_layout already passed).
+            # Below the wrap the window chain would need a partial
+            # block, and there is no rot tail mechanism.
+            geom = rotating_geometry(prompt_cache, bs)
+            assert geom is not None, "rotating geometry failed at grid gate"
+            if p < geom[0]:
+                _log.info(
+                    "APC ckpt store declined: off-grid rotating store "
+                    "below the window (p=%d < W=%d, %d %% %d != 0)",
+                    p, geom[0], p, bs)
+                _ckpt_decline(manager, "grid")
+                return False
         tail_len = p - b_full
         salted = ckpt_extra_hash(extra_hash)
         kv_caches = [c for c in prompt_cache if isinstance(c, kv_types)
@@ -1373,7 +1406,12 @@ def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
             return
         align = int(stash.get("snap_align") or 1)
         if align > 1 and p % align:
-            return          # rotating stores need a block-aligned p
+            # Mirror of the store gate: off-grid rotating stores are
+            # valid once the window has wrapped (p >= W); below it the
+            # ring still waits for a block-aligned p.
+            off_min = int(stash.get("snap_offgrid_min") or 0)
+            if off_min <= 0 or p < off_min:
+                return
         gen = [int(t) for t in generated]
         seq = list(full_ids) + gen
         if p > len(seq):

@@ -80,7 +80,9 @@ def test_decline_reasons_land_in_distinct_buckets(case, reason):
             assert not ckpt_store(man, _ids(32), make_hybrid_cache(33),
                                   extra_hash=0)
         elif case == "grid":
-            assert not ckpt_store(man, _ids(40), make_swa_cache(40),
+            # Off-grid below the window (>= W stores since the off-grid
+            # relaxation).
+            assert not ckpt_store(man, _ids(20), make_swa_cache(20),
                                   extra_hash=0)
         elif case == "layout":
             assert not ckpt_store(man, _ids(32), [KVCache(), KVCache()],

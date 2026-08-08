@@ -203,7 +203,10 @@ def assert_swa_warm_matches(warm, orig, p):
                 w.keys[..., :p, :], o.keys[..., :p, :]).item()
 
 
-@pytest.mark.parametrize("p", [16, 48, 64])   # below and beyond the W=32 wrap
+# Aligned below the wrap, then off-grid and aligned positions at and
+# beyond W=32: a wrapped window is whole blocks at any p, so the store
+# no longer waits for the grid.
+@pytest.mark.parametrize("p", [16, 33, 40, 47, 48, 64, 65])
 def test_swa_store_lookup_roundtrip(p):
     man = APCManager(num_blocks=64, block_size=16)
     cache = make_swa_cache(p, seed=p)
@@ -214,20 +217,26 @@ def test_swa_store_lookup_roundtrip(p):
     assert_swa_warm_matches(warm, cache, p)
 
 
-def test_swa_store_declines_off_grid():
+def test_swa_store_declines_off_grid_below_window():
+    """Below the wrap there is no rot tail mechanism: an off-grid store
+    would need a partial window block. Beyond it (see the roundtrip
+    params) off-grid p stores."""
+    from gmlx.cache_snapshot import _ckpt_stats
     man = APCManager(num_blocks=64, block_size=16)
-    p = 40                                    # not a block multiple
+    p = 20                                    # < W=32 and 20 % 16 != 0
     cache = make_swa_cache(p)
     assert not ckpt_store(man, list(range(300, 300 + p)), cache)
     assert all(b.ref_cnt == 0 for b in man.pool)
+    assert _ckpt_stats(man)["ckpt_declines"] == {"grid": 1}
 
 
 def test_retirement_rotating_without_snap_declines():
-    """No exact-tier fallback: an off-grid rotating retirement with no
-    decode snapshot stores nothing, and the exact tier stays empty so
-    the stock warm path never bypasses ckpt arming."""
+    """No exact-tier fallback: a below-window off-grid rotating
+    retirement with no decode snapshot stores nothing, and the exact
+    tier stays empty so the stock warm path never bypasses ckpt
+    arming."""
     man = APCManager(num_blocks=64, block_size=16)
-    p = 40                                    # unaligned: ckpt declines
+    p = 20                                    # < W and unaligned
     cache = make_swa_cache(p, seed=3)
     ids = list(range(300, 300 + p))
     assert not retirement_store(man, "ckpt", ids, cache, row=0,
@@ -235,6 +244,36 @@ def test_retirement_rotating_without_snap_declines():
     entry, plen = man.lookup_exact_cache(ids + [1], extra_hash=1)
     assert entry is None and plen == 0
     assert man.stats_snapshot()["exact_stores"] == 0
+
+
+def test_retirement_rotating_off_grid_beyond_window_stores():
+    man = APCManager(num_blocks=64, block_size=16)
+    p = 40                                    # unaligned but >= W=32
+    cache = make_swa_cache(p, seed=3)
+    ids = list(range(300, 300 + p))
+    assert retirement_store(man, "ckpt", ids, cache, row=0, extra_hash=1)
+    warm, got = ckpt_lookup(man, ids + [1], extra_hash=1)
+    assert got == p
+    assert_swa_warm_matches(warm, cache, p)
+
+
+def test_buffered_rotating_declines_loudly():
+    """The spec path swaps rot layers to BufferedRotatingKVCache after
+    prefill; its start_position/slack-buffer geometry has no canonical
+    window yet, so stores and clones must decline (counted), never
+    snapshot it silently wrong."""
+    from mlx_vlm.models.cache import BufferedRotatingKVCache
+    from gmlx.cache_snapshot import _ckpt_stats, _clone_single_row
+    man = APCManager(num_blocks=64, block_size=16)
+    p = 48
+    cache = make_swa_cache(p, seed=6)
+    buffered = [BufferedRotatingKVCache.from_cache(c, buffer_size=16)
+                if isinstance(c, RotatingKVCache) else c for c in cache]
+    ids = list(range(300, 300 + p))
+    assert not ckpt_store(man, ids, buffered, extra_hash=0)
+    assert _ckpt_stats(man)["ckpt_declines"] == {"buffered": 1}
+    assert all(b.ref_cnt == 0 for b in man.pool)
+    assert _clone_single_row(buffered[1]) is None
 
 
 def test_lookup_pins_blocks_against_concurrent_release(monkeypatch):
@@ -360,8 +399,8 @@ def test_layout_signature_rejects_mismatch():
     assert warm is None and got == 0
 
 
-def test_swa_disk_restart_roundtrip(tmp_path):
-    p = 48
+@pytest.mark.parametrize("p", [33, 47, 48, 65])
+def test_swa_disk_restart_roundtrip(tmp_path, p):
     cache = make_swa_cache(p, seed=11)
     ids = list(range(700, 700 + p))
     disk = DiskBlockStore(root=tmp_path, namespace="m")
