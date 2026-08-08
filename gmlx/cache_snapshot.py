@@ -1697,7 +1697,8 @@ def retirement_store(
         manager.release(blocks)
         if not blocks:
             return 0
-        return len(blocks) * int(manager.block_size)
+        bs = int(getattr(manager, "block_size", 0) or 0)
+        return len(blocks) * bs if bs else len(ids)
     except Exception:
         _log.warning("APC retirement store failed; continuing", exc_info=True)
         return 0
