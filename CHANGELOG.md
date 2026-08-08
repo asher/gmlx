@@ -6,6 +6,21 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `GMLX_ATTN_M1_FUSED=1`: opt-in fused DeepSeek-V4 attention front kernels
+  for single-token decode. Off by default pending fleet coverage.
+
+### Changed
+
+- DeepSeek-V4 single-token decode runs its hyper-connection glue as four
+  native mlx-kquant ops instead of about 176 python kernel launches per
+  step. `GMLX_HC_M1_FUSED=0` and `GMLX_HC_KQ=0` restore the previous
+  routes for A/Bs.
+- The server now sizes command buffers per phase, coarse while decoding
+  and fine during deep prefill, rather than one cap for both.
+  `GMLX_CB_PHASE=0` restores the single cap.
+
 ### Fixed
 
 - GGUFs that quantize the MoE router gate (some community DeepSeek quants;
