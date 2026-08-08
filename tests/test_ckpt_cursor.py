@@ -71,6 +71,68 @@ def test_cursor_no_step_uses_block_grid():
     assert _positions(bounds) == [96]
 
 
+# -- Stage 5: replay boundary at N-1 --
+
+def _arm_meta(n, tags, restored=0, guard=None, step=2048):
+    batch = SimpleNamespace(
+        prefill_step_size=step,
+        model=SimpleNamespace(_kq_apc_ckpt_layout=tuple(tags)))
+    meta = {"full_input_ids": list(range(n))}
+    se._ckpt_arm_schedule(batch, meta, guard if guard is not None else n,
+                          restored, block_size=16)
+    return meta
+
+
+def test_replay_boundary_short_prompt_arr():
+    # Sub-interval prompt: the interval/terminal schedule is empty (bug
+    # 1's shape) and the replay boundary is the only store point.
+    meta = _arm_meta(1500, ("kv", "arr"))
+    assert meta["ckpt_boundaries"] == [(1499, "replay")]
+    assert meta["checkpoint_len"] == 1499
+    assert meta["ckpt_stored_boundaries"] == []
+
+
+def test_replay_boundary_arr_floor(monkeypatch):
+    # Below GMLX_APC_CKPT_REPLAY_MIN a GDN clone costs the same >100 MB
+    # as a deep one; the boundary is not armed.
+    assert _arm_meta(500, ("kv", "arr"))["ckpt_boundaries"] == []
+    monkeypatch.setenv("GMLX_APC_CKPT_REPLAY_MIN", "100")
+    assert _arm_meta(500, ("kv", "arr"))["ckpt_boundaries"] == [
+        (499, "replay")]
+
+
+def test_replay_boundary_rot_window_floor():
+    # No byte floor for window clones, but N-1 must be at or past the
+    # window (the store's grid gate declines below it).
+    assert _arm_meta(300, ("rot:512:0", "kv"))["ckpt_boundaries"] == []
+    assert _arm_meta(600, ("rot:512:0", "kv"))["ckpt_boundaries"] == [
+        (599, "replay")]
+
+
+def test_replay_boundary_appends_after_terminal():
+    meta = _arm_meta(5000, ("kv", "arr"))
+    assert meta["ckpt_boundaries"] == [(4096, "boundary"), (4999, "replay")]
+
+
+def test_replay_boundary_retags_grid_collision():
+    # N-1 landing exactly on the terminal column: one boundary, replay
+    # retention/adoption semantics win.
+    meta = _arm_meta(4097, ("kv", "arr"))
+    assert meta["ckpt_boundaries"] == [(4096, "replay")]
+
+
+def test_replay_boundary_kill_switch(monkeypatch):
+    monkeypatch.setenv("GMLX_APC_CKPT_REPLAY", "0")
+    assert _arm_meta(1500, ("kv", "arr"))["ckpt_boundaries"] == []
+
+
+def test_replay_boundary_skipped_when_restored_past():
+    # Identical-resend warm turn: the adopted prefix already sits at
+    # N-1; re-storing it would churn the LRU for nothing.
+    assert _arm_meta(1500, ("kv", "arr"),
+                     restored=1499)["ckpt_boundaries"] == []
+
+
 # -- advance + latch across a schedule --
 
 def _armed_batch(man, ids, first, terminal, interval):

@@ -1066,6 +1066,12 @@ def owned_server_rounds(
             "extra_hash": int(retire_ctx.get("extra_hash", 0)),
             "checkpoint_len": _sidecar_boundary(retire_ctx),
             "manager": getattr(model, "_kq_apc_manager", None),
+            # Live reference: the ckpt sidecar key set is derived at
+            # consumption time from the target's landed stores -- the
+            # p=N store below runs after this ctx is built, so a frozen
+            # copy would miss it and orphan the full-prompt key.
+            "mode": retire_ctx.get("mode"),
+            "apc_meta": retire_ctx.get("apc_meta"),
         }
         if retire_ctx.get("mode") == "ckpt":
             _ckpt_post_prefill(model, prompt_cache, retire_ctx)
@@ -1156,8 +1162,12 @@ def _ckpt_post_prefill(model, prompt_cache: list, retire_ctx: dict) -> None:
         if manager is None:
             return
         from .cache_snapshot import ckpt_store
-        ckpt_store(manager, retire_ctx["full_ids"], prompt_cache,
-                   extra_hash=int(retire_ctx.get("extra_hash", 0)))
+        if ckpt_store(manager, retire_ctx["full_ids"], prompt_cache,
+                      extra_hash=int(retire_ctx.get("extra_hash", 0))):
+            meta = retire_ctx.get("apc_meta")
+            if meta is not None:
+                meta.setdefault("ckpt_stored_boundaries", []).append(
+                    len(retire_ctx["full_ids"]))
     except Exception:
         _log.warning("APC ckpt post-prefill failed; continuing",
                      exc_info=True)
@@ -1171,10 +1181,11 @@ def _sidecar_post_prefill(drafter, sidecar_ctx: dict | None) -> None:
     sidecar warm start plus the suffix) -- a head seeded from suffix-only
     hidden has its rows at the wrong positions and would poison future turns
     if stored under a full-prefix key. The coverage verdict is also recorded
-    on the drafter for the retirement-time sidecar store. Two keys mirror the
-    stock exact-mode target stores: the guard-trimmed checkpoint length (what
-    an identical re-sent prompt hits) and the full prompt (what a continuation
-    hits when no retirement happened). Best-effort; never raises.
+    on the drafter for the retirement-time sidecar store. The key set mirrors
+    the target's landed post-prefill stores (ckpt: deepest landed prefill
+    boundary plus the full prompt iff its store landed; exact: the
+    guard-trimmed checkpoint length plus the full prompt) so every key pairs
+    with a target record a future lookup can adopt. Best-effort; never raises.
     """
     # Reset the coverage verdict and request nonce unconditionally: a stale
     # nonce from an earlier request would let that request's lazy retirement
@@ -1212,16 +1223,30 @@ def _sidecar_post_prefill(drafter, sidecar_ctx: dict | None) -> None:
             return
         from .cache_snapshot import drafter_sidecar_store
         extra_hash = int(sidecar_ctx.get("extra_hash", 0))
-        checkpoint_len = int(sidecar_ctx.get("checkpoint_len", 0) or 0)
+        if sidecar_ctx.get("mode") == "ckpt":
+            # One sidecar key per adoptable terminal target record,
+            # derived from the live meta (never recomputing a store
+            # decision): the deepest landed prefill boundary, plus the
+            # full prompt iff the p=N store landed. A key without a
+            # target record only burns _SIDECAR_ENTRIES slots -- the
+            # lookup adopts the target first, then asks for a sidecar
+            # at exactly that length.
+            meta = sidecar_ctx.get("apc_meta") or {}
+            boundary = int(meta.get("ckpt_last_stored", 0) or 0)
+            keys = [boundary] if 0 < boundary <= n else []
+            if n not in keys and n in (
+                    meta.get("ckpt_stored_boundaries") or ()):
+                keys.append(n)
+        else:
+            checkpoint_len = int(sidecar_ctx.get("checkpoint_len", 0) or 0)
+            keys = [checkpoint_len] if 0 < checkpoint_len <= n else []
+            if n not in keys:
+                keys.append(n)
         stored = []
-        if 0 < checkpoint_len <= n:
-            if drafter_sidecar_store(
-                    manager, drafter, full_ids, checkpoint_len, extra_hash):
-                stored.append(checkpoint_len)
-        if n != checkpoint_len:
-            if drafter_sidecar_store(
-                    manager, drafter, full_ids, n, extra_hash):
-                stored.append(n)
+        for k in keys:
+            if drafter_sidecar_store(manager, drafter, full_ids, k,
+                                     extra_hash):
+                stored.append(k)
         if stored:
             _log.info("APC sidecar store: tokens=%s", stored)
     except Exception:

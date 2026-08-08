@@ -643,6 +643,49 @@ def test_sidecar_post_prefill_uncovered_head_skipped():
         mgr.close()
 
 
+def test_sidecar_post_prefill_ckpt_keys_mirror_landed_stores():
+    """Spec-path mirror invariant: the ckpt key set derives from the
+    live apc_meta at consumption time -- the p=N store lands AFTER
+    sidecar_ctx is built, so a frozen copy would orphan the full-prompt
+    key. Keys: deepest landed prefill boundary + N iff its store landed."""
+    from gmlx.speculative import _sidecar_post_prefill
+    mgr = _manager()
+    try:
+        full_ids = list(range(1, 13))          # n=12
+        meta = {"ckpt_last_stored": 11, "ckpt_stored_boundaries": [8, 11]}
+        ctx = {"full_ids": full_ids, "extra_hash": 0, "checkpoint_len": 11,
+               "manager": mgr, "mode": "ckpt", "apc_meta": meta}
+        # The ordering trap: p=N lands between ctx build and consumption.
+        meta["ckpt_stored_boundaries"].append(12)
+        drafter = _FakeDrafter([_kv_row(12, 0)])
+        _sidecar_post_prefill(drafter, ctx)
+        cont = full_ids + [200]
+        assert drafter_sidecar_lookup(mgr, cont, 11) is not None
+        assert drafter_sidecar_lookup(mgr, cont, 12) is not None
+        assert drafter_sidecar_lookup(mgr, cont, 8) is None
+    finally:
+        mgr.close()
+
+
+def test_sidecar_post_prefill_ckpt_no_orphan_full_key():
+    """Drop-branch mirror: when the p=N store did not land there is no
+    target record at N, and a sidecar key there would only burn slots."""
+    from gmlx.speculative import _sidecar_post_prefill
+    mgr = _manager()
+    try:
+        full_ids = list(range(1, 13))
+        meta = {"ckpt_last_stored": 11, "ckpt_stored_boundaries": [11]}
+        ctx = {"full_ids": full_ids, "extra_hash": 0, "checkpoint_len": 11,
+               "manager": mgr, "mode": "ckpt", "apc_meta": meta}
+        drafter = _FakeDrafter([_kv_row(12, 0)])
+        _sidecar_post_prefill(drafter, ctx)
+        cont = full_ids + [200]
+        assert drafter_sidecar_lookup(mgr, cont, 11) is not None
+        assert drafter_sidecar_lookup(mgr, cont, 12) is None
+    finally:
+        mgr.close()
+
+
 def test_retire_b1_stores_sidecar_when_covered():
     from gmlx.speculative import _retire_b1
     mgr = _manager()

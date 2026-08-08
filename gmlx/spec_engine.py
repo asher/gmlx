@@ -414,18 +414,62 @@ def _ckpt_cursor_init(batch, guard: int, restored: int,
     return bounds, terminal, interval
 
 
+def _ckpt_replay_boundary(batch, meta, restored: int,
+                          block_size: int) -> int | None:
+    """N-1 replay boundary, or None when it cannot earn its pause.
+
+    An identical resend can only adopt a record strictly below the
+    query, and the interval/terminal schedule never places one there
+    for prompts under one interval (the depth e2e's bug 1); N-1 is the
+    deepest position that is both adoptable and drift-free (the warm
+    turn forwards exactly one token). arr layouts gate on a minimum N:
+    recurrent state is prompt-length-independent (>100 MB per record on
+    27B-class), and short-prompt records would churn the LRU out of the
+    deep-conversation records it exists to protect. Rotating layouts
+    need N-1 at or past the window (below it the store's grid gate
+    declines). Kill switch: GMLX_APC_CKPT_REPLAY=0.
+    """
+    if env_int("GMLX_APC_CKPT_REPLAY", 1) == 0:
+        return None
+    n = len(meta.get("full_input_ids") or ())
+    replay = n - 1
+    if replay < 2 or replay <= max(0, restored):
+        return None
+    tags = _ckpt_layout_for(getattr(batch, "model", None), block_size) or ()
+    if "arr" in tags and n < env_int("GMLX_APC_CKPT_REPLAY_MIN", 1024):
+        return None
+    for t in tags:
+        if t.startswith("rot") and replay < int(t.split(":")[1]):
+            return None
+    return replay
+
+
 def _ckpt_arm_schedule(batch, meta, guard: int, restored: int,
                        block_size: int) -> None:
     """Publish the boundary schedule into the request meta. The head
     mirrors into ``checkpoint_len`` (an int) because the stock
-    checkpoint-column truncation and store reads exactly that key."""
+    checkpoint-column truncation and store reads exactly that key.
+    ``ckpt_stored_boundaries`` collects every boundary whose store
+    landed (record verified in the index) -- the settled variable the
+    post-prefill p=N decision and the sidecar key set both read."""
+    import bisect
+
     bounds, terminal, interval = _ckpt_cursor_init(
         batch, guard, restored, block_size)
+    replay = _ckpt_replay_boundary(batch, meta, restored, block_size)
+    if replay is not None:
+        pos = [b for b, _ in bounds]
+        i = bisect.bisect_left(pos, replay)
+        if i < len(pos) and pos[i] == replay:
+            bounds[i] = (replay, "replay")
+        else:
+            bounds.insert(i, (replay, "replay"))
     meta["ckpt_boundaries"] = bounds
     meta["checkpoint_len"] = int(bounds[0][0]) if bounds else 0
     meta["ckpt_terminal"] = terminal
     meta["ckpt_interval"] = interval
     meta["ckpt_last_stored"] = 0
+    meta["ckpt_stored_boundaries"] = []
 
 
 def _ckpt_mid_prefill_store(batch) -> None:
@@ -459,16 +503,20 @@ def _ckpt_mid_prefill_store(batch) -> None:
     if bounds and int(bounds[0][0]) == checkpoint_len:
         kind = str(bounds.pop(0)[1])
     # GDN skeletons inline >100 MB of state; boundaries superseded within
-    # the same prefill do not earn disk, only the terminal does.
+    # the same prefill do not earn disk, only the terminal does -- and a
+    # replay skeleton would buy restart-repair of an identical resend
+    # only, which does not earn it either.
     layout = _ckpt_layout_for(getattr(batch, "model", None),
                               int(manager.block_size)) or ()
-    skel = checkpoint_len >= terminal or "arr" not in layout
+    skel = "arr" not in layout or (kind != "replay"
+                                   and checkpoint_len >= terminal)
     from .cache_snapshot import ckpt_store
     if ckpt_store(
             manager, meta["full_input_ids"][:checkpoint_len],
             batch.prompt_cache, extra_hash=int(meta.get("extra_hash", 0)),
             skeleton_disk=skel, kind=kind):
         meta["ckpt_last_stored"] = checkpoint_len
+        meta.setdefault("ckpt_stored_boundaries", []).append(checkpoint_len)
     if bounds:
         meta["checkpoint_len"] = int(bounds[0][0])
     else:
@@ -1004,9 +1052,14 @@ def install_full_prompt_mtp_prefill() -> None:
                         if cache else None
                     if stash is not None and stash.get("mode") == "ckpt":
                         from .cache_snapshot import ckpt_store
-                        ckpt_store(
-                            stash["manager"], stash["full_ids"], cache,
-                            extra_hash=int(stash.get("extra_hash", 0)))
+                        if ckpt_store(
+                                stash["manager"], stash["full_ids"], cache,
+                                extra_hash=int(stash.get("extra_hash", 0))):
+                            m = stash.get("apc_meta")
+                            if m is not None:
+                                m.setdefault(
+                                    "ckpt_stored_boundaries", []
+                                ).append(len(stash["full_ids"]))
                 except Exception:
                     _log.warning("APC plain post-prefill store failed; "
                                  "continuing", exc_info=True)

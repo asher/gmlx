@@ -179,7 +179,7 @@ _SIDECAR_SALT = 0x5D_CA_9E_11_3F_2B_71
 # 2-3 tiny sidecars a request stores would evict the multi-GB real entries
 # they exist to accompany.
 _SIDECAR_ENTRIES = max(
-    1, env_int("GMLX_SPEC_APC_SIDECAR_ENTRIES", 8))
+    1, env_int("GMLX_SPEC_APC_SIDECAR_ENTRIES", 12))
 # Deep-context drafter KV is not tiny (a 32k single-layer sidecar runs to
 # ~100 MB), so the side index is byte-bounded too; newest always survives.
 _SIDECAR_BUDGET_BYTES = max(
@@ -815,6 +815,11 @@ def ckpt_store(
         if p < 2 or layout is None:
             _ckpt_decline(manager, "layout")
             return False
+        if kind == "replay" and "arr" in layout:
+            # The disk path knows no kinds, so a skeleton here would let
+            # a restart serve this record past the replay adopt gate --
+            # enforce at the tier boundary, not per call site.
+            skeleton_disk = False
         if any(isinstance(c, _buffered_types()) for c in prompt_cache):
             _log.info(
                 "APC ckpt store declined: BufferedRotatingKVCache rows "
@@ -1116,13 +1121,26 @@ def ckpt_lookup(
         tid = tuple(ids)
         idx = _ckpt_records(manager)
         with manager.lock:
-            cands = [
-                rec for rec in idx.values()
-                if rec.extra_hash == int(extra_hash)
-                and min_prefix_tokens < rec.p < len(ids)
-                and tid[:rec.p] == rec.ids
-                and (layout is None or tuple(layout) == rec.layout)
-            ]
+            cands, gated = [], 0
+            for rec in idx.values():
+                if not (rec.extra_hash == int(extra_hash)
+                        and min_prefix_tokens < rec.p < len(ids)
+                        and tid[:rec.p] == rec.ids
+                        and (layout is None or tuple(layout) == rec.layout)):
+                    continue
+                # Recurrent-state replay records serve identical resends
+                # only: at exactly one token past the record, the warm
+                # turn forwards a single token and stays bit-identical to
+                # armed cold. A longer suffix would chunk off the grid
+                # the record was built on and drift. Attention-only
+                # replay records split exactly and adopt freely.
+                if (rec.kind == "replay" and "arr" in (rec.layout or ())
+                        and rec.p != len(ids) - 1):
+                    gated += 1
+                    continue
+                cands.append(rec)
+        if gated:
+            _ckpt_decline(manager, "replay_gate")
         cands.sort(key=lambda r: r.p, reverse=True)
         for rec in cands:
             # Assembly runs unlocked (it concatenates and evals block
@@ -1166,7 +1184,7 @@ def ckpt_lookup(
             min_prefix_tokens=min_prefix_tokens, layout=layout)
         if warm is not None:
             return warm, p
-        _ckpt_note_miss(manager, tid, extra_hash, bool(cands))
+        _ckpt_note_miss(manager, tid, extra_hash, bool(cands) or bool(gated))
         return None, 0
     except Exception:
         _log.warning("APC ckpt lookup failed; continuing", exc_info=True)

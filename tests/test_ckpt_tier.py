@@ -485,6 +485,73 @@ def test_strip_on_extend_exempts_replay():
     assert got == 47
 
 
+def test_replay_gate_arr_adopts_exact_resend_only():
+    """A recurrent-state replay record serves the identical resend
+    (query = record + 1 token) and refuses longer suffixes -- the
+    refusal is reason-counted and feeds missed-adoption accounting."""
+    import gmlx.cache_snapshot as cs
+    man = APCManager(num_blocks=64, block_size=16)
+    ids = list(range(400, 432))
+    assert ckpt_store(man, ids, make_hybrid_cache(32, seed=5),
+                      extra_hash=0, kind="replay")
+    warm, got = ckpt_lookup(man, ids + [1], extra_hash=0)
+    assert got == 32 and warm is not None
+    warm, got = ckpt_lookup(man, ids + [1, 2, 3], extra_hash=0)
+    assert warm is None and got == 0
+    st = cs.ckpt_stats_snapshot(man)
+    assert st["ckpt_declines"] == {"replay_gate": 1}
+    assert st["ckpt_missed_adoptions"] == 1
+
+
+def test_replay_gate_rot_only_adopts_freely():
+    """Attention-only replay records split exactly: any longer query
+    adopts, same as a boundary record."""
+    man = APCManager(num_blocks=64, block_size=16)
+    ids = list(range(800, 848))                # p=48 >= W=32
+    cache = make_swa_cache(48, seed=9)
+    assert ckpt_store(man, ids, cache, extra_hash=0, kind="replay")
+    warm, got = ckpt_lookup(man, ids + list(range(60, 70)), extra_hash=0)
+    assert got == 48
+    assert_swa_warm_matches(warm, cache, 48)
+
+
+def test_replay_arr_skeleton_forced_off(tmp_path):
+    """The disk path knows no kinds, so an arr replay skeleton would
+    serve a restart past the adopt gate; ckpt_store forces it off even
+    when the caller asks for one. Rot-only replay keeps its skeleton
+    (free adoption makes the disk hit equivalent)."""
+    import gmlx.cache_snapshot as cs
+    disk = DiskBlockStore(root=tmp_path, namespace="m")
+    man = APCManager(num_blocks=64, block_size=16, disk=disk)
+    ids = list(range(100, 132))
+    assert ckpt_store(man, ids, make_hybrid_cache(32, seed=6),
+                      extra_hash=0, kind="replay", skeleton_disk=True)
+    assert cs.ckpt_stats_snapshot(man)["ckpt_skeleton_writes"] == 0
+    rot_ids = list(range(200, 248))
+    assert ckpt_store(man, rot_ids, make_swa_cache(48, seed=7),
+                      extra_hash=0, kind="replay", skeleton_disk=True)
+    assert cs.ckpt_stats_snapshot(man)["ckpt_skeleton_writes"] == 1
+    disk.close()
+
+
+def test_post_prefill_store_records_boundary():
+    """The spec-path p=N store appends to the settled variable the
+    sidecar key set and the Stage 6 drop gate read; a declined store
+    appends nothing."""
+    from gmlx.speculative import _ckpt_post_prefill
+    man = APCManager(num_blocks=64, block_size=16)
+    ids = list(range(100, 132))
+    model = SimpleNamespace(_kq_apc_manager=man)
+    meta = {}
+    _ckpt_post_prefill(model, make_hybrid_cache(32, seed=13),
+                       {"full_ids": ids, "extra_hash": 0, "apc_meta": meta})
+    assert meta["ckpt_stored_boundaries"] == [32]
+    meta2 = {}
+    _ckpt_post_prefill(model, make_hybrid_cache(40, seed=14),
+                       {"full_ids": ids, "extra_hash": 0, "apc_meta": meta2})
+    assert meta2 == {}
+
+
 def test_layout_signature_rejects_mismatch():
     man = APCManager(num_blocks=64, block_size=16)
     p = 32
