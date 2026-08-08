@@ -516,3 +516,65 @@ def test_model_has_pools_memoizes(monkeypatch):
     assert model_has_pools(m) is True
     assert model_has_pools(m) is True
     assert len(calls) == 1  # walked once, memoized on the model
+
+
+def test_is_batched_cache_sees_through_cachelist():
+    from gmlx.apc_pooling import _is_batched_cache
+    from gmlx.deepseek_v4_cache import BatchPoolingCache
+
+    scalar = SimpleNamespace(caches=[_pool(rows=0, remainder=0)])
+    batched = SimpleNamespace(caches=[BatchPoolingCache(4, [0, 0])])
+    assert not _is_batched_cache(scalar)
+    assert _is_batched_cache(batched)
+
+
+def test_batched_pool_carries_left_padding():
+    from gmlx.deepseek_v4_cache import BatchPoolingCache
+
+    b = BatchPoolingCache(4, [0, 0, 0])
+    # The admission path lifts only caches missing this attribute.
+    assert b.left_padding == [0, 0, 0]
+    assert not hasattr(_pool(rows=0, remainder=0), "left_padding")
+
+
+def test_admission_does_not_remerge_batched_cachelist(monkeypatch):
+    from mlx_vlm.generate import ar
+
+    calls = []
+
+    class _Sub:
+        def __init__(self, batched):
+            if batched:
+                self.left_padding = [0]
+
+        @classmethod
+        def merge(cls, caches):
+            calls.append("merge")
+            return cls(batched=True)
+
+        def extend(self, other):
+            calls.append("extend")
+
+    class _List:
+        def __init__(self, batched):
+            self.caches = [_Sub(batched)]
+
+        @classmethod
+        def merge(cls, caches):
+            calls.append("list-merge")
+            return cls(batched=True)
+
+        def extend(self, other):
+            calls.append("list-extend")
+
+    monkeypatch.setattr(ar, "_extend_cache", lambda a, b: None, raising=False)
+    from gmlx.apc_pooling import install_batched_cachelist_admission
+
+    install_batched_cachelist_admission()
+    # Already-batched left side: extend only, no second merge.
+    ar._extend_cache([_List(batched=True)], [_List(batched=True)])
+    assert calls == ["list-extend"]
+    # Scalar side still gets lifted.
+    calls.clear()
+    ar._extend_cache([_List(batched=False)], [_List(batched=True)])
+    assert calls == ["list-merge", "list-extend"]

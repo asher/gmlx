@@ -192,6 +192,7 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     from ..batch_sched import install_decode_priority_sched
     install_decode_priority_sched()
     from ..apc_pooling import (
+        install_batched_cachelist_admission,
         install_pooled_prefill_batch_gate,
         install_pooled_prompt_kv_quant,
         install_pooling_apc_support,
@@ -201,6 +202,9 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_safe_kv_quantization()
     install_pooled_prompt_kv_quant()
     install_pooled_prefill_batch_gate()
+    # Before the model loads, so the cascade stamp wrapper (installed at load
+    # time) wraps this and both survive.
+    install_batched_cachelist_admission()
     install_chat_template_kwargs()
     install_thinking_budget_fix()
     install_openai_stop_sequences()

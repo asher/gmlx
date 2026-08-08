@@ -521,6 +521,15 @@ class BatchPoolingCache(_BaseCache):
         self._prev_gate = None
 
     @property
+    def left_padding(self):
+        # Always zero (the constructor rejects anything else), but present:
+        # batch caches are told apart from their scalar counterparts by
+        # carrying this attribute, and the admission path lifts a cache into
+        # a batch one only when it is missing. Derived rather than stored so
+        # it cannot go stale as extend/filter/extract change the row count.
+        return [0] * len(self._pool_lengths)
+
+    @property
     def offset(self):
         return mx.array(self._pool_lengths, dtype=mx.int32)
 

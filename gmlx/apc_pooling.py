@@ -421,6 +421,66 @@ def install_pooled_prefill_batch_gate() -> None:
     BatchGenerator.__init__ = _gated_init
 
 
+def _is_batched_cache(c) -> bool:
+    """True if ``c`` already holds batch rows.
+
+    Batch caches carry ``left_padding``; their scalar counterparts do not.
+    A CacheList carries nothing of its own, so ask its members.
+    """
+    subs = getattr(c, "caches", None)
+    if subs is not None:
+        return any(_is_batched_cache(s) for s in subs)
+    return hasattr(c, "left_padding")
+
+
+def install_batched_cachelist_admission() -> None:
+    """Stop re-merging an already-batched CacheList on admission.
+
+    ``_extend_cache`` lifts a scalar cache into a batch one when it has a
+    ``merge`` and no ``left_padding``. A CacheList defines neither, so a
+    decode batch whose entries are CacheLists (deepseek-v4: rotating window
+    plus two pools per layer) looks scalar on every admission and gets
+    merged a second time. The second merge reaches
+    ``BatchRotatingKVCache.merge``, which calls ``c._temporal_order(c.keys)``
+    -- the scalar signature -- against rows that are already batch caches,
+    and every request in flight dies with a TypeError.
+
+    Replace the promotion test with one that looks through CacheLists.
+    Faithful to the original otherwise: same merge, same in-place extend,
+    same short-circuits. Idempotent. Kill switch:
+    GMLX_BATCHED_CACHELIST_ADMISSION=0.
+    """
+    import os
+
+    from mlx_vlm.generate import ar as _ar
+
+    if getattr(_ar._extend_cache, "_kq_batched_cachelist", False):
+        return
+    if os.environ.get("GMLX_BATCHED_CACHELIST_ADMISSION", "1") == "0":
+        return
+
+    def _promote(c):
+        if _is_batched_cache(c):
+            return c
+        merge = getattr(type(c), "merge", None)
+        return merge([c]) if merge is not None else c
+
+    def _extend_cache(cache_a, cache_b):
+        if not cache_a:
+            return cache_b
+        if not cache_b:
+            return cache_a
+        extended = []
+        for ca, cb in zip(cache_a, cache_b):
+            ca = _promote(ca)
+            ca.extend(_promote(cb))
+            extended.append(ca)
+        return extended
+
+    _extend_cache._kq_batched_cachelist = True
+    _ar._extend_cache = _extend_cache
+
+
 def install_pooled_prompt_kv_quant() -> None:
     """Honor serve kv_bits on pooling-cache models at prompt-batch build.
 

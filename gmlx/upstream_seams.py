@@ -279,6 +279,10 @@ SEAMS: tuple[Seam, ...] = (
          "apc_pooling.install_pooled_prefill_batch_gate (prompt batches "
          "stay B=1 on pooling-cache models; to_batch_cache has no pooled "
          "arm)", critical=True),
+    Seam("mlx_vlm.generate.ar", "_extend_cache",
+         "apc_pooling.install_batched_cachelist_admission (promotion test "
+         "looks through CacheList so an already-batched one is not merged "
+         "twice)", critical=True),
     Seam("mlx_vlm.apc", "_safetensors_dtype_info",
          "apc_pooling", critical=True),
     # <= 0.6.3 the wrapper delegates to this mlx-lm alias; 0.6.4 inlined it.
