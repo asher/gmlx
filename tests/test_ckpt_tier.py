@@ -747,12 +747,39 @@ def test_ckpt_store_suppresses_layer_major():
     assert man.stats_snapshot()["exact_stores"] == 1
 
 
+def test_stripped_boundary_recovers_via_skeleton(tmp_path):
+    """Strip-on-extend releases a boundary record's pin, but its blocks
+    stay indexed in the pool until reused and its skeleton stays on
+    disk: a later shared-prefix lookup must re-assemble the record from
+    skeleton + memory blocks. This is the divergent-suffix recovery
+    path -- suppressing boundary skeletons broke it live (2d matrix,
+    gemma-4: divergent/turn adoption fell to +0)."""
+    from gmlx.apc_manager import GmlxAPCManager
+    from gmlx.cache_snapshot import _ckpt_records, _release_record
+    disk = DiskBlockStore(root=tmp_path, namespace="m")
+    man = GmlxAPCManager(num_blocks=64, block_size=16, disk=disk)
+    try:
+        p = 48
+        cache = make_swa_cache(p, seed=12)
+        ids = list(range(300, 300 + p))
+        assert ckpt_store(man, ids, cache, extra_hash=0)
+        idx = _ckpt_records(man)
+        (key, rec), = list(idx.items())
+        _release_record(man, idx.pop(key))
+        warm, got = ckpt_lookup(man, ids + [77], extra_hash=0)
+        assert got == p
+        assert_swa_warm_matches(warm, cache, p)
+    finally:
+        disk.close()
+
+
 def test_window_chain_disk_follows_kind(tmp_path):
     """Position-salted window shards cannot dedup on disk, so they earn
     persistence only where restart repair reads them: replay and retire
-    records. A boundary store keeps both its window chain and its
-    skeleton off disk (a skeleton without its chain could never
-    assemble); the main chain writes through regardless (it dedups)."""
+    records. A boundary store keeps its window chain memory-only but
+    still writes its skeleton -- within the process the skeleton
+    re-indexes a record whose blocks survived strip-on-extend; the main
+    chain writes through regardless (it dedups)."""
     from gmlx.apc_manager import GmlxAPCManager
     disk = DiskBlockStore(root=tmp_path, namespace="m")
     man = GmlxAPCManager(num_blocks=64, block_size=16, disk=disk)
@@ -761,15 +788,15 @@ def test_window_chain_disk_follows_kind(tmp_path):
         cache = make_swa_cache(p, seed=5)
         ids = list(range(600, 600 + p))
         assert ckpt_store(man, ids, cache, extra_hash=0)
-        # boundary: 3 main blocks only -- no window shards, no skeleton
-        assert man.stats_snapshot()["disk_writes"] == 3
-        assert man.stats_snapshot()["ckpt_skeleton_writes"] == 0
+        # boundary: 3 main blocks + the skeleton -- no window shards
+        assert man.stats_snapshot()["disk_writes"] == 4
+        assert man.stats_snapshot()["ckpt_skeleton_writes"] == 1
         cache2 = make_swa_cache(p, seed=6)
         ids2 = list(range(800, 800 + p))
         assert ckpt_store(man, ids2, cache2, extra_hash=0, kind="replay")
         # replay: 3 main + 2 window blocks + the skeleton entry
-        assert man.stats_snapshot()["disk_writes"] == 9
-        assert man.stats_snapshot()["ckpt_skeleton_writes"] == 1
+        assert man.stats_snapshot()["disk_writes"] == 10
+        assert man.stats_snapshot()["ckpt_skeleton_writes"] == 2
     finally:
         disk.close()
 

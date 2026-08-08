@@ -863,13 +863,12 @@ def ckpt_store(
             skeleton_disk = False
         # Window chains are position-salted (no dedup across checkpoints),
         # so they earn disk only where restart repair actually reads them:
-        # the replay and retirement records. Everywhere else the chain
-        # stays memory-only -- and a rot skeleton whose chain stayed local
-        # can never assemble after a restart, so it must not land either.
+        # the replay and retirement records. Boundary chains stay
+        # memory-only, but their skeletons still land -- within the
+        # process a skeleton re-indexes a record whose blocks survived
+        # strip-on-extend (the divergent-suffix recovery path); across a
+        # restart it misses on the window chain, loudly.
         rot_disk = skeleton_disk and kind in ("replay", "retire")
-        if any(_is_rot(t) for t in layout) and kind not in ("replay",
-                                                            "retire"):
-            skeleton_disk = False
         if any(isinstance(c, _buffered_types()) for c in prompt_cache):
             _log.info(
                 "APC ckpt store declined: BufferedRotatingKVCache rows "
