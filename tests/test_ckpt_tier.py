@@ -430,6 +430,66 @@ def test_lookup_skips_record_released_after_selection(monkeypatch):
     assert got == 48
 
 
+def test_lookup_survives_concurrent_clear(monkeypatch):
+    """clear() while a lookup holds assembly pins: the pool free list is
+    rebuilt under the held refs, so releasing them afterwards would push
+    already-free blocks twice and corrupt the list. The generation check
+    drops the refs instead and discards the pre-clear warm result."""
+    import gmlx.cache_snapshot as cs
+    from gmlx.apc_manager import GmlxAPCManager
+
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    p = 32
+    ids = list(range(100, 100 + p))
+    assert ckpt_store(man, ids, make_hybrid_cache(p, seed=31), extra_hash=0)
+
+    real = cs._assemble_from_record
+
+    def _clear_then_assemble(manager, rec):
+        manager.clear()
+        return real(manager, rec)
+
+    monkeypatch.setattr(cs, "_assemble_from_record", _clear_then_assemble)
+    warm, got = ckpt_lookup(man, ids + [1], extra_hash=0)
+    assert warm is None and got == 0
+    # Free list intact: every pool block exactly once, all refs zero.
+    seen = set()
+    b = man._free_head
+    while b is not None and len(seen) <= len(man.pool):
+        assert id(b) not in seen
+        seen.add(id(b))
+        b = b.next
+    assert len(seen) == len(man.pool)
+    assert all(blk.ref_cnt == 0 for blk in man.pool)
+
+
+def test_store_exception_after_insert_keeps_record_pinned(monkeypatch):
+    """An exception after _record_insert transferred chain ownership must
+    not release the blocks on the except path: the record is live in the
+    index, so a second release would strip its pins while it serves."""
+    import gmlx.cache_snapshot as cs
+
+    man = APCManager(num_blocks=64, block_size=16)
+    p = 32
+    ids = list(range(100, 100 + p))
+
+    real = cs._ckpt_bump
+
+    def _boom(manager, key, n=1):
+        if key == "ckpt_stores":
+            raise RuntimeError("post-insert failure")
+        return real(manager, key, n)
+
+    monkeypatch.setattr(cs, "_ckpt_bump", _boom)
+    assert not ckpt_store(man, ids, make_hybrid_cache(p, seed=41),
+                          extra_hash=0)
+    monkeypatch.setattr(cs, "_ckpt_bump", real)
+    held = [b for b in man.pool if b.block_hash is not None]
+    assert held and all(b.ref_cnt >= 1 for b in held)
+    warm, got = ckpt_lookup(man, ids + [1], extra_hash=0)
+    assert got == p
+
+
 def test_pinning_survives_pool_pressure():
     man = APCManager(num_blocks=6, block_size=16)
     p = 32

@@ -681,8 +681,11 @@ def ckpt_reset(manager) -> None:
     The pool clear already zeroed every block's tensors and refcount, so
     the pinned records' chains are gone either way; references are
     dropped, never released (a release into the reset pool would push
-    blocks onto the free list twice)."""
+    blocks onto the free list twice). The generation bump tells an
+    in-flight lookup that pinned a record before the clear to drop its
+    held refs the same way."""
     with manager.lock:
+        manager._kq_ckpt_gen = int(getattr(manager, "_kq_ckpt_gen", 0)) + 1
         idx = getattr(manager, "_kq_ckpt_records", None)
         if idx:
             for rec in idx.values():
@@ -718,21 +721,14 @@ def ckpt_note_armed(manager) -> None:
         "silences)", armed)
 
 
-def _ckpt_note_miss(manager, tid, extra_hash, had_candidates) -> None:
+def _ckpt_note_miss(manager, matched_refused) -> None:
     """Missed-adoption accounting, empty-return path only: a record whose
-    full stored ids prefix the query was refused (p-bound, layout, or
-    assembly failure). This is tripwire 2's signal -- unlike bare
-    stores-without-hits it never fires on unrelated one-shot traffic."""
-    missed = bool(had_candidates)
-    if not missed:
-        idx = _ckpt_records(manager)
-        with manager.lock:
-            for rec in idx.values():
-                if (rec.extra_hash == int(extra_hash)
-                        and len(tid) >= rec.p and tid[:rec.p] == rec.ids):
-                    missed = True
-                    break
-    if not missed:
+    full stored ids prefix the query was refused (p-bound, layout,
+    replay gate, or assembly failure). The candidate walk supplies the
+    verdict -- no index rescan on the miss path. This is tripwire 2's
+    signal; unlike bare stores-without-hits it never fires on unrelated
+    one-shot traffic."""
+    if not matched_refused:
         return
     thresh = env_int("GMLX_APC_CKPT_TRIPWIRE", 5)
     st = _ckpt_stats(manager)
@@ -786,19 +782,36 @@ def _free_block_count(manager) -> int:
 
 def _evict_for_pool(manager, deficit: int) -> int:
     """Release least-recently-used records until ``deficit`` blocks sit on
-    the pool free list, always at least one when any record exists (the
-    caller loops on retry, so each call must make progress). Window
-    chains are position-salted (no dedup), so on large-window models
-    pinned records exhaust the pool long before the entry or byte bounds
-    trip; insert-time eviction then never runs again because no store
-    can complete. Returns the number of records released."""
+    the pool free list, always at least one when the deficit is
+    reachable (the caller loops on retry, so each call must make
+    progress). Window chains are position-salted (no dedup), so on
+    large-window models pinned records exhaust the pool long before the
+    entry or byte bounds trip; insert-time eviction then never runs
+    again because no store can complete. Blocks a record shares with an
+    in-flight lookup pin or another request's chain do not free on
+    release, so an unreachable deficit is detected upfront and evicts
+    nothing rather than draining the whole index for a store that still
+    declines. Returns the number of records released."""
     if not hasattr(manager, "_free_head"):
         return 0
     idx = _ckpt_records(manager)
     evicted = 0
     with manager.lock:
+        held: dict[int, tuple[int, Any]] = {}
+        for rec in idx.values():
+            for blocks in (rec.main_blocks, rec.bounded_blocks):
+                for b in blocks or ():
+                    n, _ = held.get(id(b), (0, b))
+                    held[id(b)] = (n + 1, b)
+        reclaimable = sum(1 for n, b in held.values() if b.ref_cnt <= n)
+        if reclaimable < deficit:
+            return 0
+        # The caller's shortfall is measured with today's free list already
+        # consumed, so the target is growth by ``deficit``, not an
+        # absolute free count.
+        target = _free_block_count(manager) + deficit
         while idx and (evicted == 0
-                       or _free_block_count(manager) < deficit):
+                       or _free_block_count(manager) < target):
             _, victim = idx.popitem(last=False)
             _release_record(manager, victim)
             evicted += 1
@@ -928,7 +941,13 @@ def ckpt_store(
             # Below the wrap the window chain would need a partial
             # block, and there is no rot tail mechanism.
             geom = rotating_geometry(prompt_cache, bs)
-            assert geom is not None, "rotating geometry failed at grid gate"
+            if geom is None:
+                # ckpt_layout validated the geometry already; reaching
+                # here means the cache mutated since. Decline, don't die.
+                _log.warning("APC ckpt store declined: rotating geometry "
+                             "unavailable at grid gate")
+                _ckpt_decline(manager, "layout")
+                return False
             if p < geom[0]:
                 _log.info(
                     "APC ckpt store declined: off-grid rotating store "
@@ -1061,6 +1080,8 @@ def ckpt_store(
             bounded_blocks=bounded_blocks, rot_meta=rot_meta,
             states=states, tails=tails, kind=str(kind))
         _record_insert(manager, rec)
+        # Ownership moved to the record; the except path must not release.
+        main_blocks = bounded_blocks = []
 
         if skeleton_disk:
             _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
@@ -1068,7 +1089,8 @@ def ckpt_store(
         _ckpt_bump(manager, "ckpt_stores")
         _log.info(
             "APC ckpt store: tokens=%d main=%d window=%d tail=%d states=%d",
-            p, len(main_blocks), len(bounded_blocks), tail_len, len(states))
+            p, len(rec.main_blocks), len(rec.bounded_blocks), tail_len,
+            len(states))
         return True
     except Exception:
         try:
@@ -1226,13 +1248,23 @@ def ckpt_lookup(
         ids = [int(t) for t in token_ids]
         tid = tuple(ids)
         idx = _ckpt_records(manager)
+        n = len(ids)
         with manager.lock:
-            cands, gated = [], 0
+            gen = int(getattr(manager, "_kq_ckpt_gen", 0))
+            cands, gated, refused = [], 0, 0
             for rec in idx.values():
-                if not (rec.extra_hash == int(extra_hash)
-                        and min_prefix_tokens < rec.p < len(ids)
-                        and tid[:rec.p] == rec.ids
-                        and (layout is None or tuple(layout) == rec.layout)):
+                # Last-token sentinel before the full slice compare:
+                # unrelated queries reject in O(1), so tallying refused
+                # matches here costs the hot path nothing and the miss
+                # path never rescans the index.
+                if (rec.extra_hash != int(extra_hash) or not rec.ids
+                        or rec.p > n or tid[rec.p - 1] != rec.ids[-1]
+                        or tid[:rec.p] != rec.ids):
+                    continue
+                if (not min_prefix_tokens < rec.p < n
+                        or (layout is not None
+                            and tuple(layout) != rec.layout)):
+                    refused += 1
                     continue
                 # Recurrent-state replay records serve identical resends
                 # only: at exactly one token past the record, the warm
@@ -1241,7 +1273,7 @@ def ckpt_lookup(
                 # the record was built on and drift. Attention-only
                 # replay records split exactly and adopt freely.
                 if (rec.kind == "replay" and "arr" in (rec.layout or ())
-                        and rec.p != len(ids) - 1):
+                        and rec.p != n - 1):
                     gated += 1
                     continue
                 cands.append(rec)
@@ -1269,7 +1301,17 @@ def ckpt_lookup(
             try:
                 warm = _assemble_from_record(manager, snap)
             finally:
-                manager.release(held)
+                with manager.lock:
+                    stale = int(getattr(manager, "_kq_ckpt_gen", 0)) != gen
+                    if not stale:
+                        manager.release(held)
+            if stale:
+                # A clear() ran while the record was pinned: the pool
+                # free list was rebuilt under the held refs (releasing
+                # them would push already-free blocks twice) and the
+                # record index died with it. The warm result is
+                # pre-clear state -- discard it.
+                continue
             if warm is not None:
                 with manager.lock:
                     if (rec.ids, rec.extra_hash) in idx:
@@ -1290,7 +1332,8 @@ def ckpt_lookup(
             min_prefix_tokens=min_prefix_tokens, layout=layout)
         if warm is not None:
             return warm, p
-        _ckpt_note_miss(manager, tid, extra_hash, bool(cands) or bool(gated))
+        _ckpt_note_miss(manager,
+                        bool(cands) or bool(gated) or bool(refused))
         return None, 0
     except Exception:
         _log.warning("APC ckpt lookup failed; continuing", exc_info=True)

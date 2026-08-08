@@ -52,6 +52,36 @@ def test_fresh_tree_stores_after_exhaustion():
     assert got == 64
 
 
+def test_externally_pinned_pool_declines_without_drain():
+    # Blocks pinned outside the record index (an in-flight lookup's
+    # assembly refs, another request's live chain) do not free when a
+    # record is released: an unreachable deficit must decline upfront
+    # instead of draining the whole index for a store that still comes
+    # up short.
+    man = GmlxAPCManager(num_blocks=10, block_size=16)
+    assert ckpt_store(man, _ids(48), make_swa_cache(48, seed=1), extra_hash=0)
+    assert ckpt_store(man, _ids(64), make_swa_cache(64, seed=2), extra_hash=0)
+    idx = _ckpt_records(man)
+    pinned = []
+    for rec in idx.values():
+        for blocks in (rec.main_blocks, rec.bounded_blocks):
+            for b in blocks:
+                man._acquire_existing(b)
+                pinned.append(b)
+    assert not ckpt_store(man, _ids(80), make_swa_cache(80, seed=3),
+                          extra_hash=0)
+    snap = man.stats_snapshot()
+    assert snap["ckpt_pool_evictions"] == 0
+    assert snap["ckpt_declines"].get("short_chain", 0) >= 1
+    assert {rec.p for rec in idx.values()} == {48, 64}
+    # The external pins drop and the same store evicts normally.
+    man.release(pinned)
+    assert ckpt_store(man, _ids(80), make_swa_cache(80, seed=3), extra_hash=0)
+    assert man.stats_snapshot()["ckpt_pool_evictions"] >= 1
+    warm, got = ckpt_lookup(man, _ids(80) + [1, 2], extra_hash=0)
+    assert got == 80
+
+
 def test_oversized_store_declines_and_spares_records():
     # A span the pool can never hold declines upfront without draining
     # live records; a fitting store on a new tree then evicts normally.
