@@ -238,7 +238,8 @@ def test_cursor_skeleton_policy(monkeypatch):
 
     seen = []
 
-    def rec_store(manager, ids, cache, *, extra_hash=0, skeleton_disk=True):
+    def rec_store(manager, ids, cache, *, extra_hash=0, skeleton_disk=True,
+                  kind="boundary"):
         seen.append((len(ids), skeleton_disk))
         return True
 
@@ -246,6 +247,7 @@ def test_cursor_skeleton_policy(monkeypatch):
     man = APCManager(num_blocks=8, block_size=16)
     tags = tuple("arr" if k == "arr" else "kv" for k in LAYOUT)
     meta = {"full_input_ids": list(range(96)), "extra_hash": 0,
+            "ckpt_boundaries": [(32, "boundary"), (64, "boundary")],
             "checkpoint_len": 32, "ckpt_terminal": 64, "ckpt_interval": 32,
             "ckpt_last_stored": 0}
     batch = SimpleNamespace(

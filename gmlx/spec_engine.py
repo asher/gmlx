@@ -366,13 +366,9 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
         # stock body is suppressed by the cursor's advance). Column
         # alignment itself still runs on the stock machinery, which
         # requires _apc_mode == "exact".
-        first, terminal, interval = _ckpt_cursor_init(
-            batch, guard, max(l0_prefix, l1_prefix),
-            int(manager.block_size))
-        meta["checkpoint_len"] = first
-        meta["ckpt_terminal"] = terminal
-        meta["ckpt_interval"] = interval
-        meta["ckpt_last_stored"] = 0
+        _ckpt_arm_schedule(batch, meta, guard,
+                           max(l0_prefix, l1_prefix),
+                           int(manager.block_size))
         batch._apc_harvest_enabled = False
         batch._kq_ckpt_armed = True
         from .cache_snapshot import ckpt_note_armed
@@ -387,42 +383,61 @@ def _gcd(a: int, b: int) -> int:
 
 
 def _ckpt_cursor_init(batch, guard: int, restored: int,
-                      block_size: int) -> tuple[int, int, int]:
-    """(first_boundary, terminal, interval) for the checkpoint cursor.
+                      block_size: int) -> tuple[list, int, int]:
+    """Boundary schedule for the checkpoint cursor: an ordered
+    ``[(position, kind), ...]`` list plus ``(terminal, interval)``.
 
     Boundaries sit on the natural chunk grid, lcm(prefill_step_size,
     block_size) -- an off-grid boundary truncates a chunk, and gated-delta
     state is chunk-shape sensitive (certified: any grid change drifts).
-    First boundary above the restored prefix; terminal clamped to
-    the grid at or below the stock guard column. GMLX_APC_CKPT_INTERVAL
+    Interval points above the restored prefix, then the terminal (the
+    grid point at or below the stock guard column). GMLX_APC_CKPT_INTERVAL
     tokens, default 4096, snapped up to the grid; 0 = terminal-only.
+    Later stages add store positions by appending boundaries here, never
+    by new store mechanisms.
     """
     step = int(getattr(batch, "prefill_step_size", 0) or 0)
     unit = block_size if step <= 0 else \
         step * block_size // _gcd(step, block_size)
     terminal = (guard // unit) * unit
     if terminal <= max(0, restored):
-        return 0, 0, 0
+        return [], 0, 0
     raw = env_int("GMLX_APC_CKPT_INTERVAL", 4096)
     interval = 0 if raw <= 0 else max(unit, (raw // unit) * unit)
+    bounds = []
     if interval:
-        first = ((max(0, restored) // interval) + 1) * interval
-        first = min(first, terminal)
-    else:
-        first = terminal
-    return first, terminal, interval
+        b = ((max(0, restored) // interval) + 1) * interval
+        while b < terminal:
+            bounds.append((b, "boundary"))
+            b += interval
+    bounds.append((terminal, "boundary"))
+    return bounds, terminal, interval
+
+
+def _ckpt_arm_schedule(batch, meta, guard: int, restored: int,
+                       block_size: int) -> None:
+    """Publish the boundary schedule into the request meta. The head
+    mirrors into ``checkpoint_len`` (an int) because the stock
+    checkpoint-column truncation and store reads exactly that key."""
+    bounds, terminal, interval = _ckpt_cursor_init(
+        batch, guard, restored, block_size)
+    meta["ckpt_boundaries"] = bounds
+    meta["checkpoint_len"] = int(bounds[0][0]) if bounds else 0
+    meta["ckpt_terminal"] = terminal
+    meta["ckpt_interval"] = interval
+    meta["ckpt_last_stored"] = 0
 
 
 def _ckpt_mid_prefill_store(batch) -> None:
     """Checkpoint-tier replacement for the stock mid-prefill exact store.
 
-    Fires at each cursor boundary, then advances ``checkpoint_len`` and
-    latches ``checkpoint_done`` only after the terminal. The advance is
-    what suppresses the stock store; ``_install_ckpt_checkpoint_store``
-    wraps the stock method so the cursor always runs immediately before
-    it -- the ordering is structural, not positional. Advances past
-    failed stores; ``ckpt_last_stored`` records only boundaries that
-    landed.
+    Fires at the schedule head, pops it, and mirrors the next head into
+    ``checkpoint_len``, latching ``checkpoint_done`` when the schedule
+    empties. The advance is what suppresses the stock store;
+    ``_install_ckpt_checkpoint_store`` wraps the stock method so the
+    cursor always runs immediately before it -- the ordering is
+    structural, not positional. Advances past failed stores;
+    ``ckpt_last_stored`` records only boundaries that landed.
     """
     if not getattr(batch, "_kq_ckpt_armed", False):
         return
@@ -439,9 +454,12 @@ def _ckpt_mid_prefill_store(batch) -> None:
     if batch._row_real_tokens_processed(0) != checkpoint_len:
         return
     terminal = int(meta.get("ckpt_terminal") or 0)
-    interval = int(meta.get("ckpt_interval") or 0)
-    # GDN skeletons inline >100 MB of state; interval boundaries are
-    # superseded within the same prefill, so only the terminal earns disk.
+    bounds = meta.get("ckpt_boundaries") or []
+    kind = "boundary"
+    if bounds and int(bounds[0][0]) == checkpoint_len:
+        kind = str(bounds.pop(0)[1])
+    # GDN skeletons inline >100 MB of state; boundaries superseded within
+    # the same prefill do not earn disk, only the terminal does.
     layout = _ckpt_layout_for(getattr(batch, "model", None),
                               int(manager.block_size)) or ()
     skel = checkpoint_len >= terminal or "arr" not in layout
@@ -449,10 +467,10 @@ def _ckpt_mid_prefill_store(batch) -> None:
     if ckpt_store(
             manager, meta["full_input_ids"][:checkpoint_len],
             batch.prompt_cache, extra_hash=int(meta.get("extra_hash", 0)),
-            skeleton_disk=skel):
+            skeleton_disk=skel, kind=kind):
         meta["ckpt_last_stored"] = checkpoint_len
-    if interval and checkpoint_len < terminal:
-        meta["checkpoint_len"] = min(checkpoint_len + interval, terminal)
+    if bounds:
+        meta["checkpoint_len"] = int(bounds[0][0])
     else:
         meta["checkpoint_done"] = True
 
@@ -565,11 +583,7 @@ def _plain_ckpt_init(batch) -> None:
         _log.info("APC L1 hit: prefix=%d suffix=%d tier=ckpt",
                   cp, len(ids_list) - cp)
     guard = int(meta.get("checkpoint_len") or 0)
-    first, terminal, interval = _ckpt_cursor_init(batch, guard, restored, bs)
-    meta["checkpoint_len"] = first
-    meta["ckpt_terminal"] = terminal
-    meta["ckpt_interval"] = interval
-    meta["ckpt_last_stored"] = 0
+    _ckpt_arm_schedule(batch, meta, guard, restored, bs)
     batch._apc_harvest_enabled = False
     batch._kq_ckpt_armed = True
     from .cache_snapshot import ckpt_note_armed
@@ -580,7 +594,7 @@ def _plain_ckpt_init(batch) -> None:
             "full_ids": ids_list,
             "extra_hash": extra_hash,
             "mode": "ckpt",
-            "checkpoint_len": first,
+            "checkpoint_len": int(meta.get("checkpoint_len") or 0),
             "apc_meta": meta,
             "render_ctx": lookup_render_ctx(ids_list),
             "manager": manager,

@@ -26,49 +26,67 @@ def _batch(step=2048):
 
 # -- cursor init: grid snapping, restored skip, terminal clamp --
 
+def _positions(bounds):
+    assert all(kind == "boundary" for _, kind in bounds)
+    return [p for p, _ in bounds]
+
+
 def test_cursor_grid_and_terminal():
-    first, terminal, interval = se._ckpt_cursor_init(
+    bounds, terminal, interval = se._ckpt_cursor_init(
         _batch(), guard=27000, restored=0, block_size=16)
-    assert (first, terminal, interval) == (4096, 26624, 4096)
+    assert (terminal, interval) == (26624, 4096)
+    assert _positions(bounds) == [4096, 8192, 12288, 16384, 20480,
+                                  24576, 26624]
 
 
 def test_cursor_skips_restored_prefix():
-    first, terminal, interval = se._ckpt_cursor_init(
+    bounds, terminal, interval = se._ckpt_cursor_init(
         _batch(), guard=27000, restored=8192, block_size=16)
-    assert first == 12288
+    assert _positions(bounds)[0] == 12288
     # Restored past the terminal: nothing left to checkpoint.
     assert se._ckpt_cursor_init(
-        _batch(), guard=27000, restored=26624, block_size=16) == (0, 0, 0)
+        _batch(), guard=27000, restored=26624, block_size=16) == ([], 0, 0)
 
 
 def test_cursor_interval_snaps_up_to_chunk_grid(monkeypatch):
     monkeypatch.setenv("GMLX_APC_CKPT_INTERVAL", "1000")
-    first, terminal, interval = se._ckpt_cursor_init(
+    bounds, terminal, interval = se._ckpt_cursor_init(
         _batch(), guard=27000, restored=0, block_size=16)
-    assert interval == 2048 and first == 2048     # never below one chunk
+    assert interval == 2048                       # never below one chunk
+    assert _positions(bounds)[0] == 2048
 
 
 def test_cursor_zero_interval_is_terminal_only(monkeypatch):
     monkeypatch.setenv("GMLX_APC_CKPT_INTERVAL", "0")
-    first, terminal, interval = se._ckpt_cursor_init(
+    bounds, terminal, interval = se._ckpt_cursor_init(
         _batch(), guard=27000, restored=0, block_size=16)
-    assert (first, terminal, interval) == (26624, 26624, 0)
+    assert (terminal, interval) == (26624, 0)
+    assert _positions(bounds) == [26624]
 
 
 def test_cursor_no_step_uses_block_grid():
-    first, terminal, interval = se._ckpt_cursor_init(
+    bounds, terminal, interval = se._ckpt_cursor_init(
         _batch(step=None), guard=100, restored=0, block_size=16)
-    assert (first, terminal, interval) == (96, 96, 4096)
+    assert (terminal, interval) == (96, 4096)
+    assert _positions(bounds) == [96]
 
 
 # -- advance + latch across a schedule --
 
 def _armed_batch(man, ids, first, terminal, interval):
+    bounds = []
+    if interval:
+        b = first
+        while b < terminal:
+            bounds.append((b, "boundary"))
+            b += interval
+    bounds.append((terminal, "boundary"))
     meta = {
         "full_input_ids": ids,
         "prefix_len": 0,
         "extra_hash": 7,
-        "checkpoint_len": first,
+        "ckpt_boundaries": bounds,
+        "checkpoint_len": bounds[0][0],
         "ckpt_terminal": terminal,
         "ckpt_interval": interval,
         "ckpt_last_stored": 0,
