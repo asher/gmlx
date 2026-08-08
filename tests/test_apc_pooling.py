@@ -452,3 +452,67 @@ def test_pooled_prompt_kv_quant_idempotent(monkeypatch):
 
     install_pooled_prompt_kv_quant()
     assert ppb.__init__ is wrapped
+
+
+# install_pooled_prefill_batch_gate wraps BatchGenerator.__init__; the tests
+# swap in a stand-in class so the wrap is exercised without a real engine.
+DEFAULT_PREFILL_B = 8
+
+
+def _install_gate_on_fake(monkeypatch):
+    from mlx_vlm.generate import ar
+
+    class _FakeBG:
+        def __init__(self, model, processor, **kw):
+            self.model = model
+            self.prefill_batch_size = kw.get(
+                "prefill_batch_size", DEFAULT_PREFILL_B)
+
+    monkeypatch.setattr(ar, "BatchGenerator", _FakeBG)
+    from gmlx.apc_pooling import install_pooled_prefill_batch_gate
+
+    install_pooled_prefill_batch_gate()
+    return _FakeBG
+
+
+def test_prefill_gate_forces_b1_on_pooled(monkeypatch):
+    bg = _install_gate_on_fake(monkeypatch)
+    g = bg(_V4ish(), None)
+    # to_batch_cache has no pooled arm, so multi-row prompt batches would
+    # raise before prefill; one row per batch takes the scalar-cache path.
+    assert g.prefill_batch_size == 1
+
+
+def test_prefill_gate_leaves_non_pooled_alone(monkeypatch):
+    bg = _install_gate_on_fake(monkeypatch)
+    m = SimpleNamespace(make_cache=lambda: [SimpleNamespace(offset=0)])
+    g = bg(m, None)
+    assert g.prefill_batch_size == DEFAULT_PREFILL_B
+
+
+def test_prefill_gate_kill_switch(monkeypatch):
+    monkeypatch.setenv("GMLX_POOLED_PREFILL_B1", "0")
+    bg = _install_gate_on_fake(monkeypatch)
+    assert not getattr(bg.__init__, "_kq_pooled_prefill_b1", False)
+    assert bg(_V4ish(), None).prefill_batch_size == DEFAULT_PREFILL_B
+
+
+def test_prefill_gate_idempotent(monkeypatch):
+    bg = _install_gate_on_fake(monkeypatch)
+    wrapped = bg.__init__
+    from gmlx.apc_pooling import install_pooled_prefill_batch_gate
+
+    install_pooled_prefill_batch_gate()
+    assert bg.__init__ is wrapped
+
+
+def test_model_has_pools_memoizes(monkeypatch):
+    from gmlx.apc_pooling import model_has_pools
+
+    m = _V4ish()
+    calls = []
+    orig = m.make_cache
+    m.make_cache = lambda: (calls.append(1), orig())[1]
+    assert model_has_pools(m) is True
+    assert model_has_pools(m) is True
+    assert len(calls) == 1  # walked once, memoized on the model

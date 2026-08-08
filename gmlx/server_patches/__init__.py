@@ -192,6 +192,7 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     from ..batch_sched import install_decode_priority_sched
     install_decode_priority_sched()
     from ..apc_pooling import (
+        install_pooled_prefill_batch_gate,
         install_pooled_prompt_kv_quant,
         install_pooling_apc_support,
         install_safe_kv_quantization,
@@ -199,6 +200,7 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_pooling_apc_support()
     install_safe_kv_quantization()
     install_pooled_prompt_kv_quant()
+    install_pooled_prefill_batch_gate()
     install_chat_template_kwargs()
     install_thinking_budget_fix()
     install_openai_stop_sequences()

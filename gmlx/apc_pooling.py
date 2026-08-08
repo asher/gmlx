@@ -347,6 +347,80 @@ def install_safe_kv_quantization() -> None:
     vlm_common.maybe_quantize_kv_cache = safe_vlm_maybe_quantize
 
 
+def model_has_pools(model) -> bool:
+    """True if the model's cache stack contains a PoolingCache.
+
+    Walks ``make_cache()`` once and memoizes on the model, so the pooled
+    seams can gate without paying a cache build per call.
+    """
+    from .deepseek_v4_cache import PoolingCache
+
+    cached = getattr(model, "_kq_has_pools", None)
+    if cached is not None:
+        return cached
+    make = getattr(model, "make_cache", None)
+    found = False
+    if callable(make):
+        try:
+            stack = list(make() or [])
+        except Exception:
+            stack = []
+        while stack:
+            c = stack.pop()
+            subs = getattr(c, "caches", None)
+            if subs is not None:
+                stack.extend(subs)
+            elif isinstance(c, PoolingCache):
+                found = True
+                break
+    try:
+        model._kq_has_pools = found
+    except Exception:
+        pass
+    return found
+
+
+def install_pooled_prefill_batch_gate() -> None:
+    """Form prompt batches one row at a time on pooling-cache models.
+
+    ``to_batch_cache`` has no PoolingCache arm, so a multi-row prompt batch
+    raises before prefill and every request in it fails. Upstream's
+    single-row fast path sidesteps the conversion entirely (it builds the
+    model's own scalar caches), and the decode side already knows how to
+    join those: ``_extend_cache`` promotes a cache that has ``merge`` and no
+    ``left_padding``, which is exactly PoolingCache, and BatchPoolingCache
+    carries extend/filter/extract. So capping prompt batches at one row
+    yields serial prefill with batched decode, which is where batching pays
+    anyway -- B>1 prefill is not a throughput win at depth (gemma-31b 2x27k
+    measured 130s batched vs 120s serialized).
+
+    Same lever the ckpt tier already pulls in spec_engine, applied for a
+    different reason. Idempotent. Kill switch: GMLX_POOLED_PREFILL_B1=0.
+    """
+    import os
+
+    from mlx_vlm.generate.ar import BatchGenerator
+
+    if getattr(BatchGenerator.__init__, "_kq_pooled_prefill_b1", False):
+        return
+    if os.environ.get("GMLX_POOLED_PREFILL_B1", "1") == "0":
+        return
+
+    _orig_init = BatchGenerator.__init__
+
+    def _gated_init(self, model, processor, **kwargs):
+        _orig_init(self, model, processor, **kwargs)
+        try:
+            if model_has_pools(model) and self.prefill_batch_size != 1:
+                self.prefill_batch_size = 1
+        except Exception:
+            _log.warning("pooled prefill gate failed; continuing",
+                         exc_info=True)
+
+    _gated_init._kq_pooled_prefill_b1 = True
+    BatchGenerator.__init__ = _gated_init
+
+
 def install_pooled_prompt_kv_quant() -> None:
     """Honor serve kv_bits on pooling-cache models at prompt-batch build.
 
@@ -370,32 +444,7 @@ def install_pooled_prompt_kv_quant() -> None:
     if os.environ.get("GMLX_POOLED_KV_QUANT", "1") == "0":
         return
 
-    from .deepseek_v4_cache import PoolingCache
-
-    def _has_pools(model) -> bool:
-        cached = getattr(model, "_kq_has_pools", None)
-        if cached is not None:
-            return cached
-        make = getattr(model, "make_cache", None)
-        found = False
-        if callable(make):
-            try:
-                stack = list(make() or [])
-            except Exception:
-                stack = []
-            while stack:
-                c = stack.pop()
-                subs = getattr(c, "caches", None)
-                if subs is not None:
-                    stack.extend(subs)
-                elif isinstance(c, PoolingCache):
-                    found = True
-                    break
-        try:
-            model._kq_has_pools = found
-        except Exception:
-            pass
-        return found
+    _has_pools = model_has_pools
 
     _orig_init = ppb.__init__
     _noted = [False]
