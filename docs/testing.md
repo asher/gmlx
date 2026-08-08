@@ -39,6 +39,7 @@ you point the suite at a GGUF library:
 | `tests/test_long_context.py` | `KQUANT_TEST_GGUF_DIR` | long-decode integrity at >=16k (in-range, finite logprobs, no single-token collapse); attention bugs only surface at depth |
 | `tests/test_mtp.py` (one case) | `KQUANT_TEST_GGUF_DIR` | a native-head MTP GGUF's drafter has full remap coverage (the rest of the module is CPU-only) |
 | `tests/test_long_context.py::test_long_prefill_parity` | also `KQUANT_LLAMACPP_BIN` | long-prefill greedy output agrees with llama.cpp |
+| `tests/test_serve_apc_engagement.py` | `KQUANT_TEST_GGUF_DIR` (+ `GMLX_TEST_BIG_GGUFS=1` for the multi-GB rows) | the APC engagement gate: one model per cache-shape family (dense/block, SWA-MoE/ckpt, GDN/ckpt, CacheList/exact) served end-to-end, asserting that family's own tier counters move - a tier silently dead for an arch class fails by name |
 
 `KQUANT_TEST_GGUF_DIR` is searched recursively for `*.gguf`. Each test selects a model
 by architecture (read from the GGUF header), so it auto-skips any arch you don't have.
@@ -103,6 +104,26 @@ python tests/e2e/run_server_e2e.py
 
 `tests/e2e/run_apc_disk_e2e.py` exercises disk-backed APC prefix reuse across
 server restarts the same way: real server, real GGUF, standalone.
+`tests/e2e/run_apc_depth_e2e.py` is its deep twin: multi-thousand-token
+prefixes on a large model, `--tier {block,exact,ckpt}` selecting which
+counters must move, with fact-checked answers proving every cache-served
+reply (warm, restart, reset) is uncorrupted.
+
+### Pre-release: the APC engagement gate
+
+CI has no GGUFs, so it can prove routing and store/lookup schedules but
+never that a real served model engages its cache tier. Before a release,
+run the engagement gate with the big rows enabled - this is a named
+checklist step precisely because no automated environment runs it:
+
+```sh
+KQUANT_TEST_GGUF_DIR=~/llm/gguf-test GMLX_TEST_BIG_GGUFS=1 \
+  pytest tests/test_serve_apc_engagement.py -v
+```
+
+Every family with a staged GGUF must pass; a family skipping for a
+missing model prints its inventory so the skip is a visible choice, not
+a silent hole.
 
 ### LoRA-on-GGUF end-to-end
 

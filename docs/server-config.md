@@ -977,6 +977,42 @@ false}`); `--disk-cache` swaps the `disk` value for the SSD tier
 (`disk: {path: ~/.cache/gmlx/apc, max_gb: 50}`). A config without a
 `cache:` block leaves APC off.
 
+### Which tier serves which architecture
+
+APC routes each model by its cache shape, once, at load; the server logs
+the routing (`APC tier: ...`) so a silent mis-route is visible. Reuse
+works on every family - the tiers differ in storage layout, not in
+whether hits happen:
+
+| Cache shape | Example archs | Tier |
+|-------------|---------------|------|
+| plain KV, dense or MoE | llama, qwen2/3, qwen3moe, glm4(-moe), deepseek2/v3, phi3, granite, hunyuan, minimax-m2, gemma2 | block |
+| hybrid GDN (recurrent + KV layers) | qwen3.5/3.6 (incl. MoE), qwen3-next, kimi-k3, nemotron-h, granitemoehybrid | ckpt |
+| sliding-window attention | gemma3, gemma-4 (incl. E4B/3n), gpt-oss, SWA llama | ckpt |
+| CacheList / pure recurrent | falcon-h1, mamba2, rwkv7, plamo2, deepseek-v3.2, deepseek4 | exact |
+| MSA indexer armed | minimax-m3 indexer GGUFs | none (loud log; the indexless GGUF serves via the block tier) |
+
+### Checkpoint-tier counters
+
+On ckpt-tier models `GET /v1/cache/stats` carries these fields beside the
+stock ones (shared `lookups_hit` / `matched_tokens` also move on in-memory
+checkpoint hits, so the aggregate hit rate stays honest):
+
+| Field | Meaning |
+|-------|---------|
+| `ckpt_stores` | Checkpoint records stored (prefill boundaries, the N-1 replay record, retirement). |
+| `ckpt_hits`, `ckpt_matched_tokens` | Adoptions served from checkpoint records, in-memory or repaired from a disk skeleton, and the prefix tokens they saved. |
+| `ckpt_declines` | Per-reason map of refused stores (`grid`, `short_chain`, `canon`, `layout`, `buffered`, `replay_gate`, ...). A healthy server declines occasionally; a tier declining everything is what the reasons are for. |
+| `ckpt_missed_adoptions` | Lookups that found a usable-looking record and still adopted nothing - the "a record was there and we refused it" signal. |
+| `ckpt_skeleton_writes` | Disk skeletons written (what restart repair reads). |
+| `sidecar_writes` | Drafter-KV sidecar stores (speculative path). |
+| `retire_fallback_full` | Retirements that fell back to the full-sequence verbatim store. |
+
+Two one-time tripwire warnings watch these in production: a ckpt-armed
+model that completes `GMLX_APC_CKPT_TRIPWIRE` (default 5) requests with
+zero stores, and one whose missed adoptions reach the threshold with zero
+hits. Either firing means the tier is dead for that model - file it.
+
 An unknown key inside `sampling:` / `load:` / `cache:` (a typo like
 `temprature:`) is warned about loudly at load rather than silently dropped.
 Structural breakage (`pinned:` instead of `pin:`, a missing `path`, an
@@ -1031,7 +1067,14 @@ What a warm hit restores:
   TTFT. During prefill it also checkpoints at intervals
   (`GMLX_APC_CKPT_INTERVAL` tokens, default 4096), so a request queued
   behind a long shared-prefix prefill restores from the last boundary
-  instead of going cold. The tier serves both the speculative and the
+  instead of going cold. Two targeted boundaries join the interval grid:
+  a replay checkpoint one token before the prompt end (recurrent state
+  cannot rewind, so an identical resend needs a record strictly below
+  the query; `GMLX_APC_CKPT_REPLAY=0` disables), and a render-stable
+  turn boundary at the longest prefix the next turn's re-rendered
+  history can actually replay (predicted from the chat template, so
+  thinking-strip divergence lands past it; `GMLX_APC_CKPT_TURN=0`
+  disables). The tier serves both the speculative and the
   plain path; on ckpt-tier models, prompt formation is serialized to one
   request at a time (batched prompt prefill measured no win on these
   shapes anyway).
@@ -1078,6 +1121,10 @@ and store counts surface on the authed `GET /v1/metrics`.
 | `GMLX_SPEC_APC_SIDECAR_BUDGET_MB` | Byte budget for the drafter-sidecar LRU, in MB (default `512`). |
 | `GMLX_APC_STORE_EVAL_CHUNK` | Blocks evaluated per step in the post-prefill store (default `32`); bounds the prefill-thread stall on long prompts. |
 | `GMLX_APC_CKPT_INTERVAL` | Prefill checkpoint interval in tokens (default `4096`, snapped to the chunk grid; `0` = final checkpoint only). |
+| `GMLX_APC_CKPT_REPLAY` | `0` disables the N-1 replay checkpoint (identical resends prefill cold again). |
+| `GMLX_APC_CKPT_REPLAY_MIN` | Minimum prompt tokens before a replay record is worth its state clone on recurrent (GDN) layouts (default `1024`; short prompts re-prefill cheaply and would churn the record LRU). |
+| `GMLX_APC_CKPT_TURN` | `0` disables render-stable turn boundaries and the redundant prompt-end store drop they gate. |
+| `GMLX_APC_CKPT_TRIPWIRE` | Requests before the dead-tier tripwires warn (default `5`; `0` silences both). |
 | `GMLX_APC_CKPT_RECORDS` | Checkpoint-record LRU entries (default `32`). |
 | `GMLX_APC_CKPT_BUDGET_MB` | Byte budget for checkpoint-record payload (recurrent states + KV tails), in MB (default `4096`). A GDN record can carry >100 MB of state, so the count bound alone is not the real limit. |
 | `GMLX_APC_DECODE_CKPT` | Decode-time snapshot interval in generated tokens on hybrid models, anchored to the prompt end (default `512`; `0` off; widens automatically with context). |
@@ -1145,7 +1192,7 @@ is enabled. These are the config-server overrides and additions:
 | `GET /v1/metrics` | The stock runtime snapshot (under its `server` key) enriched with `resident_models[]` (per-entry ids, pinned, `idle_s`, `ttl_s`, footprint), alongside the context limits / APC detail. Authed like every other endpoint; what `gmlx ps` reads. |
 | `POST /v1/completions` | Classic OpenAI text completions, no chat template applied. Scope: a single string `prompt`, `n=1`; supports `max_tokens`, `temperature`, `top_p`, `seed`, `stop`, `stream` (SSE with a final `[DONE]`), plus `profile` and the other shared sampling extras. List / token-array prompts, `n > 1`, `echo`, `suffix`, and `best_of > 1` are rejected with a 400. |
 | `POST /v1/messages/count_tokens` | (stock) Anthropic-style token counting: same body shape as `/v1/messages`, returns `{"input_tokens": N}` after applying the chat template. |
-| `GET /v1/cache/stats` | (stock) Automatic Prefix Cache statistics, or `{"enabled": false}` when APC is off. |
+| `GET /v1/cache/stats` | Automatic Prefix Cache statistics, or `{"enabled": false}` when APC is off. On checkpoint-tier models (hybrid/SWA archs) the snapshot carries the `ckpt_*` counter family beside the stock fields; see [Checkpoint-tier counters](#checkpoint-tier-counters). |
 | `POST /v1/cache/reset` | (stock) clears the Automatic Prefix Cache. |
 | `POST /v1/images/generations`, `POST /v1/images/edits` | (stock mlx-vlm routes) not usable with GGUF text models - they require an MLX image-generation checkpoint, which gmlx does not serve; a request against a configured GGUF fails with an error. |
 | `POST /unload` | `{"model": "<id>"}` evicts just that resident entry (also clearing any keep mark); an empty body clears the whole pool. |
