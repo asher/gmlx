@@ -235,9 +235,17 @@ What reuse to expect, per family (tier routing:
   the prefix clears the attention window - next-turn restore lands
   within a few tokens of the point where the re-rendered history
   actually diverges.
-- **CacheList / pure-recurrent** (falcon-h1, deepseek4; exact tier):
-  verbatim-prefix snapshots - identical resends and strict
-  continuations reuse; a merely shared prefix does not.
+- **CacheList / pure-recurrent** (falcon-h1, deepseek4 - including
+  DeepSeek-V4-Flash; exact tier): verbatim-prefix snapshots. Identical
+  resends reuse, and so does multi-turn chat: a finished request
+  stores prompt plus reply, and the next turn's render extends that
+  sequence verbatim, so each turn re-prefills only its new tokens.
+  Measured on DeepSeek-V4-Flash (87 GB IQ2_XXS, ~8k-token history):
+  cold prefill 44.5 s, identical resend 2.0 s, later turns 1.5-9 s,
+  restart from the SSD tier 1.9 s. The boundary to respect: any edit
+  to the history is a different sequence and prefills cold - there is
+  no partial credit for a merely shared prefix on this tier (the same
+  history with one changed line went back to 43 s).
 - One stated gap: sliding-window models under `--speculative` retain no
   record of generated tokens (their post-prefill rotating layers decline
   stores by design), so next-turn reuse there comes from the prefill
