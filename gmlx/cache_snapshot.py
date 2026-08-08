@@ -797,6 +797,9 @@ def _evict_for_pool(manager, deficit: int) -> int:
     idx = _ckpt_records(manager)
     evicted = 0
     with manager.lock:
+        # Census stays inside the call: each retry round's evictions
+        # change both the ref counts and the deficit, so a hoisted copy
+        # would judge reachability from stale state.
         held: dict[int, tuple[int, Any]] = {}
         for rec in idx.values():
             for blocks in (rec.main_blocks, rec.bounded_blocks):

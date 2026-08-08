@@ -243,10 +243,12 @@ def predict_next_ids(ctx: dict, assistant_msg: dict | None) -> list[int] | None:
     return [int(t) for t in ids]
 
 
-# Configs whose prompt-stable prediction already failed once: the first
-# failure warns with the traceback, repeats log at debug -- one broken
-# template must not stack a warning onto every request.
-_P_STABLE_WARNED: set[int] = set()
+# Model types whose prompt-stable prediction already failed once: the
+# first failure warns with the traceback, repeats log at debug -- one
+# broken template must not stack a warning onto every request. Keyed by
+# model_type, not object identity: a recycled id would inherit
+# "already warned" across a model swap.
+_P_STABLE_WARNED: set[str] = set()
 
 
 def prompt_stable_lcp(ctx: dict, prompt_ids) -> int | None:
@@ -275,7 +277,10 @@ def prompt_stable_lcp(ctx: dict, prompt_ids) -> int | None:
             while lcp < n and seq[lcp] == nxt[lcp]:
                 lcp += 1
     except Exception:
-        key = id(ctx.get("config"))
+        cfg = ctx.get("config")
+        key = str(getattr(cfg, "model_type", None)
+                  or (cfg.get("model_type") if isinstance(cfg, dict) else None)
+                  or type(cfg).__name__)
         if key in _P_STABLE_WARNED:
             _log.debug("prompt-stable prediction failed", exc_info=True)
         else:
