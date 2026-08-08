@@ -995,14 +995,21 @@ whether hits happen:
 
 ### Checkpoint-tier counters
 
-On ckpt-tier models `GET /v1/cache/stats` adds `ckpt_*` fields beside the
-stock ones. Together they answer one question: is prefix reuse working
-for this model? (In-memory checkpoint hits also bump the shared
-`lookups_hit` / `matched_tokens`, so the aggregate hit rate stays honest.)
+`GET /v1/cache/stats` carries the `ckpt_*` fields for every model, but
+they only move on checkpoint-tier architectures (the hybrid/SWA rows
+above) -- all-zero on a block- or exact-tier model is normal, not a
+fault. On ckpt-tier models they answer one question: is prefix reuse
+working? Read reuse health from `ckpt_*`, not from ratios built on the
+stock fields: checkpoint lookups bump the shared `lookups_hit` /
+`matched_tokens` on success but record nothing on a miss, and the
+token totals include window snapshots that can never be shared, so
+aggregate hit rates skew on these models. (`disk_writes` counts write
+operations: one per exact-format entry -- checkpoint skeletons and
+drafter sidecars included -- and one per block for block shards.)
 
 | Field | What it tells you |
 |-------|-------------------|
-| `ckpt_stores` | Prefixes saved for reuse. Stuck at zero after a few requests means nothing is being cached; the server logs a one-time warning when that happens. |
+| `ckpt_stores` | Prefixes saved for reuse. On a ckpt-tier model, stuck at zero after a few requests means nothing is being cached; the server logs a one-time warning when that happens. |
 | `ckpt_hits`, `ckpt_matched_tokens` | Requests that warm-started from a saved prefix, and the prompt tokens they skipped. This is the value the tier delivers: on a repeat-heavy workload, matched tokens should approach total prompt tokens. |
 | `ckpt_declines` | Saves the server skipped, grouped by reason (the same reason strings appear in the server log). Occasional entries are normal; every request piling into one reason means reuse is off for that traffic shape - include this map when filing an issue. |
 | `ckpt_missed_adoptions` | Requests that matched a saved prefix but could not use it. Stays 0 in healthy operation; growth is a bug signal and trips a one-time warning. |
@@ -1114,7 +1121,7 @@ and store counts surface on the authed `GET /v1/metrics`.
 | `GMLX_APC_CKPT_TURN` | `0` disables the turn checkpoint (next-turn reuse falls back to the interval grid). |
 | `GMLX_APC_CKPT_TRIPWIRE` | Requests before the dead-tier tripwires warn (default `5`; `0` silences both). |
 | `GMLX_APC_CKPT_RECORDS` | Checkpoint-record LRU entries (default `32`). |
-| `GMLX_APC_CKPT_BUDGET_MB` | Byte budget for checkpoint-record payload (recurrent states + KV tails), in MB (default `4096`). A GDN record can carry >100 MB of state, so the count bound alone is not the real limit. |
+| `GMLX_APC_CKPT_BUDGET_MB` | Byte budget for checkpoint-record payload (recurrent states + KV tails), in MB (default `4096`). A GDN record can carry >100 MB of state and each request saves several checkpoints, so expect resident memory to grow toward this budget on hybrid models under sustained multi-turn traffic; lower it if 4 GB of cache is too much for your machine. |
 | `GMLX_APC_DECODE_CKPT` | Decode-time snapshot interval in generated tokens on hybrid models, anchored to the prompt end (default `512`; `0` off; widens automatically with context). |
 | `GMLX_APC_RETIRE_LCP` | `0` keys retirement on the forwarded ids instead of the predicted next-turn render (also disables decode-time snapshots, which key on the prediction). |
 | `GMLX_FAITHFUL_HISTORY` | `0` restores mlx-vlm's stock chat-history rebuild, which drops `reasoning_content` from non-tool assistant messages before the template sees it (see `chat_template_kwargs`). |
