@@ -10,37 +10,60 @@ resolves which counters must move (tier_keys in run_apc_disk_e2e); the
 harness is scheme-agnostic - fp16 KV by default, KV-quant vars only when
 `--scheme`/`--bits-*` are passed.
 
-Correctness is asserted, not assumed: the prefix is a synthetic log whose
-every entry is computable (entry_facts), the probe question targets entries
-at 1/4 and 1/2 depth, and every cache-served answer (warm, restart, reset)
-must retrieve those facts or reproduce the cold answer byte-for-byte.
+Correctness is asserted, not assumed: the prefix is a synthetic log with
+computable per-entry facts (entry_facts), and every cache-served answer
+must retrieve the cold-proven probe facts or match the cold answer
+byte-for-byte. Reuse floors come from the ckpt cursor's own schedule
+arithmetic (the expected_* helpers mirror _ckpt_cursor_init and
+_ckpt_turn_boundaries in gmlx/spec_engine.py): an identical resend must
+adopt the N-1 replay boundary, turns the render-stable grid floor, a
+divergent suffix the interval grid floor. The content field must stay
+markup-free everywhere.
 
 Phases against one model:
 
   populate      cold server, deep-prefix request -> tier stores and disk
                 write-through; ckpt additionally proves mid-prefill interval
                 boundaries advanced across the > interval prompt
-  warm          identical replay -> tier matched counter climbs by roughly
-                the prefix, wall time collapses vs cold, facts still right
-  divergent     same prefix, different question -> ckpt adopts a grid/render-
-                stable boundary (the class the p=N-only store orphaned)
+  warm          identical replay -> matched climbs to the N-1 replay
+                boundary, wall time collapses vs cold, facts still right
+  divergent     same prefix, different question -> ckpt adopts at least the
+                interval grid floor (the class the p=N-only store orphaned)
   turns         a real conversation through the real chat template: each
-                turn adopts a render-stable boundary (matched grows), prompts
-                grow monotonically -> the render_ctx production path all
-                unit tests fake
-  concurrent    N clients sharing the deep prefix; ckpt formation is B=1 by
-                design, so the burst asserts formation correctness
+                turn adopts a render-stable boundary at or past the unit
+                grid below the prefix, prompts grow monotonically -> the
+                render_ctx production path all unit tests fake; with
+                --template-kwargs, one extra turn re-renders under those
+                kwargs and must still adopt the interval grid
+  concurrent    N deep clients sharing the prefix plus one short unrelated
+                client -> a ragged mixed warm/cold batch; every deep reply
+                must retrieve the proven probe readings, the short row
+                must answer correctly (the batch pad-corruption witness)
   restart       fresh process, same APC_DISK_PATH -> skeletons re-index,
-                replay repairs from disk (disk_hits, ckpt_hits move) fast
+                replay repairs from disk; then a divergent suffix and a
+                follow-up turn against the restarted process (crash-freedom
+                and correctness; adoption depth is layout-dependent, noted)
   reset         /v1/cache/reset clears memory, not disk -> replay hits disk
-  bitrate-b     (only with --bits-b) fresh server at a second KV width on the
-                SAME disk root -> no cross-adoption, own namespace warms
+  churn         distinct mid-size prefixes cycle records through the ckpt
+                LRU, then the original replay must still serve correctly
+                with no exception-declines
+  tripwire      (ckpt) third server with replay/turn boundaries disabled:
+                identical resends are refused by the p-bound, and the
+                missed-adoption tripwire must count them and log its
+                one-time warning
+  bitrate-b     (only with --bits-b) fresh server at a second KV width on
+                the SAME disk root -> no cross-adoption, own namespace warms
 
+All requests carry a system message unless --no-system (the system-render
+path is part of the shared prefix, so every reuse floor exercises it).
 --speculative adds MTP to every server (spec-path ckpt arming + sidecar).
 `--warm-factor`/`--restart-factor` loosen the wall-clock collapse thresholds
-(ckpt restores clone >100 MB of GDN state; default 0.6x cold).
+(ckpt restores clone >100 MB of GDN state; default 0.6x cold). Wall-clock
+checks assume an otherwise idle machine: the harness notes the load average
+at start and warns; --require-idle makes a loaded machine a hard failure.
 
-Not ``test_``-prefixed: needs the GPU and a large local GGUF. Run directly::
+Not ``test_``-prefixed: needs the GPU and a large local GGUF
+(tests/test_e2e_harness_smoke.py pins imports and --help). Run directly::
 
     python tests/e2e/run_apc_depth_e2e.py --model ~/llm/gguf/.../model.gguf \
         --tier ckpt --out ./depth-out
@@ -54,6 +77,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -69,8 +93,19 @@ from run_apc_disk_e2e import (  # noqa: E402
     wait_disk_drained,
 )
 
-# GMLX_APC_CKPT_INTERVAL default: mid-prefill ckpt boundaries land on this grid.
+# Mirrors of the ckpt cursor's schedule arithmetic (gmlx/spec_engine.py):
+# boundaries sit on unit = lcm(prefill_step 2048, block 16); interval
+# points land every GMLX_APC_CKPT_INTERVAL (default 4096) snapped to that
+# grid; the replay boundary is N-1; turn boundaries are the unit-grid
+# point at or below p_stable (plus p_stable exactly on rotating layouts).
+CKPT_UNIT = 2048
 CKPT_INTERVAL = 4096
+# Rendered-template slack: p_stable / the terminal guard sit within this
+# many tokens of the measured prompt length (gen-prompt/think tail).
+RENDER_SLACK = 64
+# A divergent question replaces roughly this much prompt tail (question
+# tokens + template close); boundaries below survive the divergence.
+QUESTION_SLACK = 256
 
 _TOPICS = (
     "coolant loop",
@@ -87,6 +122,11 @@ _TOPICS = (
     "star tracker",
 )
 
+SYSTEM_MSG = (
+    "You are the flight operations duty assistant. Answer strictly from "
+    "the maintenance log you are given."
+)
+
 
 def entry_facts(i: int) -> dict:
     """Ground truth for log entry i (mirrors deep_prefix's formulas)."""
@@ -97,14 +137,16 @@ def entry_facts(i: int) -> dict:
     }
 
 
-def deep_prefix(target_words: int) -> tuple:
+def deep_prefix(target_words: int, header: str = "") -> tuple:
     """Deterministic, non-repetitive briefing text (~1.3 tok/word). Content
     varies per sentence so the APC block chain is non-degenerate, and every
     entry's facts are computable (entry_facts) so answers can be verified.
+    ``header`` prepends distinguishing text (churn phase: distinct chains).
     Returns (text, n_entries)."""
     out = [
+        header,
         "You are the flight systems engineer on duty. Read the maintenance "
-        "log below carefully; every entry matters.\n\nMaintenance log:\n"
+        "log below carefully; every entry matters.\n\nMaintenance log:\n",
     ]
     words = 20
     i = 0
@@ -124,12 +166,47 @@ def deep_prefix(target_words: int) -> tuple:
     return "".join(out), i
 
 
-def chat(
-    base: str, mid: str, messages: list, *, max_tokens: int = 32, timeout: float = 900.0
+def expected_populate_stores(ptok: int) -> int:
+    """Minimum distinct ckpt store positions the cursor schedules for a
+    cold ptok-token prompt: the interval points strictly below the
+    terminal, the terminal itself, and the N-1 replay boundary when it
+    does not coincide with a grid point. Conservative by RENDER_SLACK
+    (the terminal guard sits a template tail below ptok)."""
+    terminal = ((ptok - RENDER_SLACK) // CKPT_UNIT) * CKPT_UNIT
+    if terminal <= 0:
+        return 1
+    grid = {b for b in range(CKPT_INTERVAL, terminal, CKPT_INTERVAL)}
+    grid.add(terminal)
+    replay = ptok - 1
+    extra = 1 if replay - max(grid) > RENDER_SLACK else 0
+    return len(grid) + extra
+
+
+def turn_grid_floor(prefix_tok: int) -> int:
+    """Deepest unit-grid boundary every layout stores below p_stable: the
+    render-stable turn floor (rotating layouts additionally store
+    p_stable exactly, so real adoption may run deeper)."""
+    return ((prefix_tok - RENDER_SLACK) // CKPT_UNIT) * CKPT_UNIT
+
+
+def divergent_grid_floor(prefix_tok: int) -> int:
+    """Deepest interval boundary that survives replacing the question
+    tail: the divergent-suffix floor."""
+    return ((prefix_tok - QUESTION_SLACK) // CKPT_INTERVAL) * CKPT_INTERVAL
+
+
+def http_chat(
+    base: str,
+    mid: str,
+    messages: list,
+    *,
+    max_tokens: int = 32,
+    timeout: float = 900.0,
+    **extra,
 ):
     t0 = time.monotonic()
     st, body = Client(base, timeout=timeout).chat(
-        mid, messages, max_tokens=max_tokens, temperature=0.0
+        mid, messages, max_tokens=max_tokens, temperature=0.0, **extra
     )
     wall = time.monotonic() - t0
     text = ""
@@ -138,16 +215,11 @@ def chat(
     if isinstance(body, dict):
         try:
             msg = body["choices"][0]["message"]
-            # text includes any reasoning stream: a fact retrieved
-            # mid-think is just as valid a non-corruption witness as one
-            # in the answer. content is the clean field alone -- what a
-            # real client feeds back as history (reasoning re-sent as
-            # content breaks channel-tagged templates like gpt-oss).
+            # text includes reasoning: a fact retrieved mid-think is a
+            # valid witness. content is what a client feeds back as history.
             content = str(msg.get("content") or "")
-            text = "".join(
-                str(msg.get(k) or "")
-                for k in ("reasoning_content", "reasoning", "content")
-            )
+            reasoning = str(msg.get("reasoning_content") or msg.get("reasoning") or "")
+            text = reasoning + content
         except (KeyError, IndexError, TypeError):
             pass
         ptok = int((body.get("usage") or {}).get("prompt_tokens", 0) or 0)
@@ -171,8 +243,13 @@ class Report:
 
 
 def depth_env(
-    disk_root: str, block_size: int, num_blocks: int, disk_gb: int,
-    *, scheme: str = None, bits: str = None,
+    disk_root: str,
+    block_size: int,
+    num_blocks: int,
+    disk_gb: int,
+    *,
+    scheme: str = None,
+    bits: str = None,
 ) -> dict:
     """Server env for one depth run: APC vars always, KV-quant vars only on
     request - fp16 KV is the default and the acceptance shape."""
@@ -188,10 +265,12 @@ def depth_env(
     return env
 
 
-def serve_args(model_path: str, speculative: bool) -> list:
+def serve_args(model_path: str, speculative: bool, draft_gguf: str = None) -> list:
     args = [model_path, "--no-auth"]
     if speculative:
         args.append("--speculative")
+    if draft_gguf:
+        args += ["--draft-gguf", draft_gguf]
     return args
 
 
@@ -220,6 +299,13 @@ def main() -> int:
     )
     ap.add_argument("--turns", type=int, default=3)
     ap.add_argument("--concurrency", type=int, default=3)
+    ap.add_argument(
+        "--churn",
+        type=int,
+        default=5,
+        help="distinct mid-size prefixes cycled through the record LRU after "
+        "reset (0 disables; GDN eviction pressure needs more, see note)",
+    )
     ap.add_argument("--block-size", type=int, default=16)
     ap.add_argument(
         "--num-blocks",
@@ -242,7 +328,35 @@ def main() -> int:
         default=0.6,
         help="post-restart replay threshold (ckpt clones >100 MB GDN state)",
     )
+    ap.add_argument(
+        "--template-kwargs",
+        default=None,
+        help="JSON chat_template_kwargs for one extra render-variant turn "
+        "(e.g. '{\"enable_thinking\": false}'); model-specific, off by default",
+    )
+    ap.add_argument(
+        "--no-system",
+        action="store_true",
+        help="omit the system message (for templates that reject the role)",
+    )
+    ap.add_argument(
+        "--no-tripwire",
+        action="store_true",
+        help="skip the missed-adoption tripwire phase (boots a third server)",
+    )
+    ap.add_argument(
+        "--require-idle",
+        action="store_true",
+        help="hard-fail instead of warning when the machine is loaded at "
+        "start (wall-clock checks assume an idle machine)",
+    )
     ap.add_argument("--speculative", action="store_true")
+    ap.add_argument(
+        "--draft-gguf",
+        default=None,
+        help="companion drafter GGUF (assistant-shape MTP targets, e.g. "
+        "gemma4; implies --speculative on the server side)",
+    )
     ap.add_argument("--out", required=True, help="artifact dir (logs, report.json)")
     ap.add_argument("--python", default=sys.executable)
     a = ap.parse_args()
@@ -253,38 +367,94 @@ def main() -> int:
     disk_root = os.path.join(out_dir, "apc-disk")
     os.makedirs(disk_root, exist_ok=True)
     rep = Report()
+
+    # log every request/reply to transcript.jsonl for failure diagnosis
+    tpath = os.path.join(out_dir, "transcript.jsonl")
+    tlock = threading.Lock()
+
+    def chat(base, mid, messages, **kw):  # noqa: F811 - logged shadow
+        st, text, content, ptok, wall = http_chat(base, mid, messages, **kw)
+        rec = {
+            "status": st,
+            "ptok": ptok,
+            "wall": round(wall, 1),
+            "q": str(messages[-1].get("content"))[-160:],
+            "text": text[:600],
+        }
+        with tlock:
+            with open(tpath, "a") as f:
+                f.write(json.dumps(rec) + "\n")
+        return st, text, content, ptok, wall
+
     K = tier_keys(a.tier)
     ck = a.tier == "ckpt"
+    template_kwargs = json.loads(a.template_kwargs) if a.template_kwargs else None
     prefix, n_entries = deep_prefix(a.prefix_words)
-    # Correctness probes live at 1/4 and 1/2 log depth: deep inside the
-    # cache-served region, past any fp16 sink and clear of the tail - a
-    # restored cache that decoded to garbage cannot answer them.
-    e1, e2 = n_entries // 4, n_entries // 2
+
+    # Probes sit at 1/4 and 1/2 log depth. Deep single-entry retrieval
+    # is borderline for small models, so the witness calibrates on the
+    # cold reply: only facts it provably retrieved are required later.
+    # Readings below 10 collide with pass/drift digits and are skipped.
+    def pick_probe(start: int) -> int:
+        e = start
+        while entry_facts(e)["reading"] < 10:
+            e += 1
+        return e
+
+    e1 = pick_probe(n_entries // 4)
+    e2 = pick_probe(n_entries // 2)
     f1, f2 = entry_facts(e1), entry_facts(e2)
+    while f1["reading"] == f2["reading"]:  # only if depth spans ~97 entries
+        e2 = pick_probe(e2 + 1)
+        f2 = entry_facts(e2)
     q = (
-        f"Question: how many units did entry {e1} report, and which "
-        f"technician logged entry {e2}? Answer with the number and the name."
+        f"Question: how many units did entries {e1} and {e2} each report, "
+        f"and which technician logged entry {e2}? "
+        "Answer with the two numbers and the name."
     )
+    probes = [
+        (f"reading[{e1}]", re.compile(rf"\b{f1['reading']}\b")),
+        (f"reading[{e2}]", re.compile(rf"\b{f2['reading']}\b")),
+        (f"tech[{e2}]", re.compile(rf"\b{f2['technician']}\b", re.IGNORECASE)),
+    ]
+    witness = []  # calibrated against the cold answer in populate
 
     def facts_ok(text: str) -> bool:
-        return bool(
-            re.search(rf"\b{f1['reading']}\b", text)
-            and re.search(rf"\b{f2['technician']}\b", text, re.IGNORECASE)
-        )
+        return bool(witness) and all(rx.search(text) for _, rx in witness)
 
     def served_ok(text: str, cold: str) -> bool:
-        # A cache-served answer is sound if it retrieves the facts, or if
-        # it reproduces the cold answer byte-for-byte (fidelity fallback:
-        # a model that misreads the log cold must misread it identically
-        # warm - divergence, not wrongness, is the corruption signal).
+        # Divergence from cold, not wrongness, is the corruption signal:
+        # a warm answer passes on the calibrated facts or on byte-identity
+        # with the cold answer.
         return facts_ok(text) or text == cold
 
+    def content_clean(content: str) -> bool:
+        return "<|" not in content
+
     facts_hint = (
-        f"entry {e1} -> {f1['reading']} units, entry {e2} -> {f2['technician']}"
+        f"entry {e1} -> {f1['reading']} units, entry {e2} -> "
+        f"{f2['reading']} units by {f2['technician']}"
     )
+
+    def mk_msgs(user_content: str) -> list:
+        msgs = [] if a.no_system else [{"role": "system", "content": SYSTEM_MSG}]
+        msgs.append({"role": "user", "content": user_content})
+        return msgs
 
     def tick(key: str) -> int:
         return int(stats(base).get(key, 0) or 0)
+
+    def settle(key: str, timeout: float = 15.0) -> int:
+        # retirement stores are async; wait for the counter to hold still
+        last = tick(key)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            time.sleep(0.5)
+            cur = tick(key)
+            if cur == last:
+                return cur
+            last = cur
+        return last
 
     print(f"== APC depth e2e: {label} ==")
     print(
@@ -292,13 +462,31 @@ def main() -> int:
         f"speculative={a.speculative} | out {out_dir}"
     )
 
+    # wall-clock gates assume an idle machine; --require-idle enforces it
+    la1 = os.getloadavg()[0]
+    cores = os.cpu_count() or 1
+    loaded = la1 / cores > 0.35
+    rep.note(
+        "env.load",
+        f"loadavg1 {la1:.1f} on {cores} cores"
+        + (" -- loaded, wall checks unreliable" if loaded else ""),
+    )
+    if a.require_idle and loaded:
+        rep.check("env.idle", False, f"loadavg1 {la1:.1f}/{cores} cores > 0.35")
+        print("== aborting before any server boot (--require-idle) ==")
+        return 1
+
     env_a = depth_env(
-        disk_root, a.block_size, a.num_blocks, a.disk_gb,
-        scheme=a.scheme, bits=a.bits_a,
+        disk_root,
+        a.block_size,
+        a.num_blocks,
+        a.disk_gb,
+        scheme=a.scheme,
+        bits=a.bits_a,
     )
     t_load0 = time.monotonic()
     with ServerProc(
-        serve_args(a.model, a.speculative),
+        serve_args(a.model, a.speculative, a.draft_gguf),
         env_extra=env_a,
         log_path=os.path.join(out_dir, "server-a.log"),
         python=a.python,
@@ -309,26 +497,35 @@ def main() -> int:
         mid = model_id_of(base, srv)
         # absorb first-request one-time costs (kernel warmup) so wall-time
         # comparisons below measure caching, not JIT
-        chat(base, mid, [{"role": "user", "content": "Say ok."}], max_tokens=4)
+        chat(base, mid, mk_msgs("Say ok."), max_tokens=4)
 
         # -- populate ------------------------------------------------------
         st, text, content, ptok, cold_wall = chat(
-            base, mid, [{"role": "user", "content": prefix + q}], max_tokens=256
+            base, mid, mk_msgs(prefix + q), max_tokens=256
         )
         cold_text = text
+        settle(K["stores"])
         s = stats(base)
         rep.check("populate.status", st == 200, f"prompt {ptok} tok, {cold_wall:.1f}s")
         rep.check("populate.answer", len(text) > 0, repr(text[:70]))
-        rep.check("populate.facts", facts_ok(text), facts_hint)
+        # facts the cold answer retrieves become the required witness;
+        # at least one exact reading must land
+        witness[:] = [(n, rx) for n, rx in probes if rx.search(text)]
+        rep.check(
+            "populate.facts",
+            any(n.startswith("reading") for n, _ in witness),
+            f"cold answer retrieves {[n for n, _ in witness]} "
+            f"of {[n for n, _ in probes]} ({facts_hint})",
+        )
+        rep.check("populate.content_clean", content_clean(content), repr(content[:70]))
         rep.check(
             "populate.stores",
             int(s.get(K["stores"], 0)) > 0,
             f"{K['stores']}={s.get(K['stores'])}",
         )
         if ck:
-            # mid-prefill boundaries: a > interval prompt must land interval
-            # grid stores, not just the terminal/replay pair
-            floor = ptok // CKPT_INTERVAL + 1
+            # the cursor's own schedule sets the store floor
+            floor = expected_populate_stores(ptok)
             rep.check(
                 "populate.ckpt_interval",
                 int(s.get("ckpt_stores", 0)) >= floor,
@@ -345,21 +542,26 @@ def main() -> int:
         prefix_tok = ptok
 
         # -- warm ----------------------------------------------------------
-        # Identical replay: ckpt adopts the N-1 replay record, exact needs a
-        # verbatim stored prefix, block walks the grid - all three must
-        # produce a near-full matched prefix on their own tier counter.
+        # An identical replay must adopt the deepest boundary below the
+        # resend, not a shallower interval point.
         m0 = tick(K["matched"])
         st, text, content, ptok, warm_wall = chat(
-            base, mid, [{"role": "user", "content": prefix + q}], max_tokens=256
+            base, mid, mk_msgs(prefix + q), max_tokens=256
         )
         dm = tick(K["matched"]) - m0
+        if ck:
+            warm_floor = prefix_tok - 8  # N-1 replay, small tokenizer slack
+        elif a.tier == "exact":
+            warm_floor = prefix_tok - RENDER_SLACK
+        else:
+            warm_floor = prefix_tok - 2 * a.block_size
         rep.check(
             "warm.status", st == 200, f"{warm_wall:.1f}s vs cold {cold_wall:.1f}s"
         )
         rep.check(
             "warm.matched",
-            dm > 0.5 * prefix_tok,
-            f"{K['matched']} +{dm} of ~{prefix_tok}",
+            warm_floor <= dm <= prefix_tok,
+            f"{K['matched']} +{dm}, expected [{warm_floor}, {prefix_tok}]",
         )
         rep.check(
             "warm.faster",
@@ -368,30 +570,25 @@ def main() -> int:
         )
         # the adopted-cache answer must retrieve the same record-region facts
         rep.check("warm.served_ok", served_ok(text, cold_text), facts_hint)
+        rep.check("warm.content_clean", content_clean(content), repr(content[:70]))
         rep.note("warm.same_as_cold", str(text == cold_text))
 
         # -- divergent suffix ----------------------------------------------
-        # Same prefix, different question: the ckpt tier must adopt a grid /
-        # render-stable boundary below the divergence point (the class bug 1
-        # orphaned when only p=N records existed). Exact tier misses by
-        # design; block tier reuses the shared grid.
+        # Same prefix, different question: ckpt must adopt a boundary below
+        # the divergence point. Exact misses by design.
         m0 = tick(K["matched"])
         st, _, _, _, div_wall = chat(
             base,
             mid,
-            [
-                {
-                    "role": "user",
-                    "content": prefix + "Question: which subsystem appears in entry 7?",
-                }
-            ],
+            mk_msgs(prefix + "Question: which subsystem appears in entry 7?"),
         )
         dm = tick(K["matched"]) - m0
+        div_floor = max(1, divergent_grid_floor(prefix_tok))
         if ck:
             rep.check(
                 "divergent.ckpt_boundary_adopted",
-                dm > 0,
-                f"{K['matched']} +{dm}, {div_wall:.1f}s",
+                dm >= div_floor,
+                f"{K['matched']} +{dm} >= grid floor {div_floor}, {div_wall:.1f}s",
             )
         else:
             rep.note(
@@ -402,13 +599,11 @@ def main() -> int:
             )
 
         # -- turns ---------------------------------------------------------
-        # A real conversation through the real chat template: this is the
-        # production render_ctx path (think-stripping and all) that every
-        # unit test fakes with synthetic ids.
+        # A real conversation through the real chat template: the
+        # production render_ctx path unit tests fake with synthetic ids.
         def history_safe(reply: str) -> str:
-            # A length-capped reasoning reply can leak channel markup into
-            # the content field (server parser gap, noted in the report);
-            # templates reject it, so feed back plain text only.
+            # cascade guard: a leak already failed content_clean; keep
+            # later turns renderable
             if "<|" not in reply:
                 return reply
             seg = reply.rsplit("<|message|>", 1)[-1]
@@ -422,22 +617,23 @@ def main() -> int:
             "Follow-up: name any entry logged as watch, and by whom.",
             "Follow-up: which pass number shows up most often in the log?",
         ]
-        turns_ok, monotone = True, True
+        turns_ok, monotone, turns_clean = True, True, True
         turn_dms = []
         # ground truth for turn 1's question: entry 12 reads (12*7)%97 = 84
         for t_i in range(a.turns):
-            history.append((turn_qs[t_i % len(turn_qs)],
-                            history_safe(last_answer)))
-            msgs = [{"role": "user", "content": prefix + q}]
+            history.append((turn_qs[t_i % len(turn_qs)], history_safe(last_answer)))
+            msgs = mk_msgs(prefix + q)
             for uq, at in history:
                 msgs.append({"role": "assistant", "content": at})
                 msgs.append({"role": "user", "content": uq})
             m0 = tick(K["matched"])
             st, turn_text, last_answer, ptok, wall = chat(
-                base, mid, msgs, max_tokens=96)
+                base, mid, msgs, max_tokens=96
+            )
             dm = tick(K["matched"]) - m0
             turn_dms.append(dm)
             turns_ok &= st == 200 and len(turn_text) > 0
+            turns_clean &= content_clean(last_answer)
             monotone &= ptok > prev_ptok
             prev_ptok = ptok
             extra = ""
@@ -448,46 +644,118 @@ def main() -> int:
                 f"status {st}, prompt {ptok} tok, matched +{dm}, {wall:.1f}s{extra}",
             )
         rep.check("turns.status", turns_ok, f"{a.turns} turns")
+        rep.check(
+            "turns.content_clean",
+            turns_clean,
+            "no channel markup in any turn's content field",
+        )
         rep.check("turns.growing", monotone, "templated prompt grows per turn")
         if a.tier != "exact":
-            # every turn must adopt a stored boundary at least as deep as the
-            # ckpt grid floor / block grid below the shared prefix
+            # every turn must reach the unit-grid floor; rot layouts may
+            # adopt the exact p_stable and run deeper
+            t_floor = (
+                max(1, turn_grid_floor(prefix_tok))
+                if ck
+                else max(
+                    1, ((prefix_tok - QUESTION_SLACK) // a.block_size) * a.block_size
+                )
+            )
             rep.check(
                 "turns.adopted",
-                min(turn_dms) > 0.4 * prefix_tok,
-                f"min +{min(turn_dms)} of ~{prefix_tok} across {a.turns} turns",
+                min(turn_dms) >= t_floor,
+                f"min +{min(turn_dms)} >= floor {t_floor} "
+                f"of ~{prefix_tok} across {a.turns} turns",
             )
 
+        # -- render-variant turn (only with --template-kwargs) -------------
+        # Changed kwargs can break the exact render-stable boundary; the
+        # interval grid below the shared prefix must still adopt.
+        if template_kwargs is not None:
+            msgs = mk_msgs(prefix + q)
+            for uq, at in history:
+                msgs.append({"role": "assistant", "content": at})
+                msgs.append({"role": "user", "content": uq})
+            m0 = tick(K["matched"])
+            st, vtext, vcontent, ptok, wall = chat(
+                base,
+                mid,
+                msgs,
+                max_tokens=96,
+                chat_template_kwargs=template_kwargs,
+            )
+            dm = tick(K["matched"]) - m0
+            rep.check(
+                "variant.status",
+                st == 200 and len(vtext) > 0,
+                f"kwargs {a.template_kwargs}, prompt {ptok} tok, {wall:.1f}s",
+            )
+            rep.check(
+                "variant.content_clean", content_clean(vcontent), repr(vcontent[:70])
+            )
+            if ck:
+                rep.check(
+                    "variant.adopted",
+                    dm >= div_floor,
+                    f"matched +{dm} >= grid floor {div_floor} under "
+                    "changed render kwargs",
+                )
+            else:
+                rep.note("variant.matched", f"+{dm}")
+
         # -- concurrent ----------------------------------------------------
+        # One short client rides the deep burst: the ragged mixed
+        # warm/cold batch where stale pad masks corrupt the short row.
+        deep_wordings = [
+            f"Priority check {i}: what reading did entry {e1} report, and "
+            f"what reading did entry {e2} report? Answer with both numbers."
+            for i in range(a.concurrency)
+        ]
+
         def fire(i):
+            return chat(base, mid, mk_msgs(prefix + deep_wordings[i]), max_tokens=256)
+
+        def fire_short():
+            # plain request: the log-focused system message would make the
+            # model deliberate the instruction hierarchy instead of answering
             return chat(
                 base,
                 mid,
                 [
                     {
                         "role": "user",
-                        "content": prefix
-                        + f"Question {i}: list {i + 2} subsystem names "
-                        "from the log.",
+                        "content": "What is 2 plus 2? Answer with just the number.",
                     }
                 ],
-                max_tokens=96,
+                max_tokens=160,
             )
 
         t0 = time.monotonic()
-        with ThreadPoolExecutor(max_workers=a.concurrency) as ex:
-            res = list(ex.map(fire, range(a.concurrency)))
+        with ThreadPoolExecutor(max_workers=a.concurrency + 1) as ex:
+            futs = [ex.submit(fire, i) for i in range(a.concurrency)]
+            fut_short = ex.submit(fire_short)
+            res = [f.result() for f in futs]
+            short_res = fut_short.result()
         rep.check(
             "concurrent.status",
-            all(st == 200 and text for st, text, _, _, _ in res),
-            f"{a.concurrency} clients, {time.monotonic() - t0:.1f}s wall",
+            all(st == 200 and text for st, text, _, _, _ in res)
+            and short_res[0] == 200,
+            f"{a.concurrency}+1 clients, {time.monotonic() - t0:.1f}s wall",
         )
         rep.check(
-            # every batched reply must name real subsystems from the log:
-            # a corrupted batch row degenerates to text that names none
+            # technician probes excluded: the burst questions ask for
+            # readings only
             "concurrent.coherent",
-            all(any(t in text.lower() for t in _TOPICS) for _, text, _, _, _ in res),
-            "each reply names >=1 log subsystem",
+            all(
+                all(rx.search(text) for n, rx in witness if n.startswith("reading"))
+                for _, text, _, _, _ in res
+            ),
+            "each deep reply retrieves the calibrated readings "
+            + str([n for n, _ in witness if n.startswith("reading")]),
+        )
+        rep.check(
+            "concurrent.short_row_intact",
+            bool(re.search(r"\b4\b", short_res[1])),
+            f"short unrelated row answers 4: {short_res[1]!r:.60}",
         )
         if ck:
             rep.note(
@@ -496,14 +764,41 @@ def main() -> int:
                 "formation correctness, not per-row stores",
             )
 
+        # -- decline/adoption hygiene ---------------------------------------
+        settle(K["stores"])
+        pre_restart = stats(base)
+        if ck:
+            declines = pre_restart.get("ckpt_declines") or {}
+            n_declined = sum(int(v) for k, v in declines.items() if k != "buffered")
+            n_stores = int(pre_restart.get("ckpt_stores", 0) or 0)
+            rep.check(
+                # a mass-decline regression declines more than it stores;
+                # 'buffered' is by design under --speculative on rot layouts
+                "hygiene.declines_bounded",
+                n_declined <= max(4, n_stores),
+                f"non-buffered declines {n_declined} <= stores {n_stores} "
+                f"({json.dumps(declines)})",
+            )
+            rep.check(
+                # no request in this run should be refused a prefix-matching
+                # record; the tripwire phase proves the counter itself works
+                "hygiene.no_missed_adoptions",
+                int(pre_restart.get("ckpt_missed_adoptions", 0) or 0) == 0,
+                f"ckpt_missed_adoptions={pre_restart.get('ckpt_missed_adoptions')}",
+            )
+
         counter_keys = [
-            K["stores"], K["hits"], K["matched"],
-            "disk_writes", "disk_files", "lookups_hit", "matched_tokens",
+            K["stores"],
+            K["hits"],
+            K["matched"],
+            "disk_writes",
+            "disk_files",
+            "lookups_hit",
+            "matched_tokens",
             "disk_hits",
         ]
         if ck:
-            counter_keys.append("ckpt_declines")
-        pre_restart = stats(base)
+            counter_keys += ["ckpt_declines", "ckpt_missed_adoptions"]
         rep.note(
             "counters-a",
             json.dumps({k: pre_restart.get(k) for k in counter_keys}),
@@ -514,7 +809,7 @@ def main() -> int:
 
     # -- restart -----------------------------------------------------------
     with ServerProc(
-        serve_args(a.model, a.speculative),
+        serve_args(a.model, a.speculative, a.draft_gguf),
         env_extra=env_a,
         log_path=os.path.join(out_dir, "server-a2.log"),
         python=a.python,
@@ -522,9 +817,9 @@ def main() -> int:
         srv.wait_ready(timeout=900)
         base = srv.base_url
         mid = model_id_of(base, srv)
-        chat(base, mid, [{"role": "user", "content": "Say ok."}], max_tokens=4)
-        st, text, _, ptok, disk_wall = chat(
-            base, mid, [{"role": "user", "content": prefix + q}], max_tokens=256
+        chat(base, mid, mk_msgs("Say ok."), max_tokens=4)
+        st, text, r_content, ptok, disk_wall = chat(
+            base, mid, mk_msgs(prefix + q), max_tokens=256
         )
         s = stats(base)
         rep.check(
@@ -534,16 +829,14 @@ def main() -> int:
             f"vs cold {cold_wall:.1f}s",
         )
         if ck:
-            # skeleton repair: the fresh process rebuilt a usable record from
-            # the on-disk skeleton and the replay adopted it on the ckpt tier
+            # the fresh process rebuilt a record from the disk skeleton
             rep.check(
                 "restart.skeleton_repair",
                 int(s.get("ckpt_hits", 0) or 0) > 0,
                 f"ckpt_hits={s.get('ckpt_hits')} "
                 f"ckpt_matched_tokens={s.get('ckpt_matched_tokens')}",
             )
-        # the strongest corruption probe in the file: this KV crossed a
-        # process boundary through safetensors shards before answering
+        # this KV crossed a process boundary through safetensors shards
         rep.check("restart.served_ok", served_ok(text, cold_text), facts_hint)
         rep.note("restart.same_as_cold", str(text == cold_text))
         rep.check(
@@ -557,12 +850,74 @@ def main() -> int:
             f"{K['indexed']}={s.get(K['indexed'])}",
         )
 
+        # -- divergent + turn against the restarted process ----------------
+        # The repaired index must survive a divergent suffix and a
+        # follow-up turn. Adoption depth is layout-dependent (grid
+        # boundaries persist on arr layouts, window chains are
+        # memory-only), so matched is reported, not asserted.
+        m0 = tick(K["matched"])
+        st, rd_text, rd_content, _, rd_wall = chat(
+            base,
+            mid,
+            mk_msgs(
+                prefix + f"Question: which technician logged entry {e2}, "
+                f"and what reading did entry {e1} report? "
+                "Answer with the name and the number."
+            ),
+            max_tokens=256,
+        )
+        dm = tick(K["matched"]) - m0
+        rd_req = [
+            (n, rx)
+            for n, rx in witness
+            if n == f"reading[{e1}]" or n.startswith("tech")
+        ]
+        rep.check(
+            # falls back to status plus non-empty when neither asked-for
+            # probe was cold-proven
+            "restart.divergent_ok",
+            st == 200
+            and (
+                all(rx.search(rd_text) for _, rx in rd_req)
+                if rd_req
+                else len(rd_text) > 0
+            ),
+            f"expects calibrated {[n for n, _ in rd_req]} "
+            f"({f1['reading']} / {f2['technician']}), matched +{dm}, {rd_wall:.1f}s",
+        )
+        m0 = tick(K["matched"])
+        msgs = mk_msgs(prefix + q)
+        msgs.append({"role": "assistant", "content": history_safe(r_content)})
+        msgs.append(
+            {
+                "role": "user",
+                "content": f"Follow-up: which technician logged entry {e2}?",
+            }
+        )
+        st, rt_text, rt_content, _, rt_wall = chat(base, mid, msgs, max_tokens=192)
+        dm = tick(K["matched"]) - m0
+        rt_req = [rx for n, rx in witness if n.startswith("tech")]
+        rep.check(
+            "restart.turn_ok",
+            st == 200
+            and (
+                all(rx.search(rt_text) for rx in rt_req) if rt_req else len(rt_text) > 0
+            ),
+            f"expects {f2['technician']!r} (if cold-proven), "
+            f"matched +{dm}, {rt_wall:.1f}s",
+        )
+        rep.check(
+            "restart.content_clean",
+            content_clean(r_content)
+            and content_clean(rd_content)
+            and content_clean(rt_content),
+            "post-restart content fields markup-free",
+        )
+
         # -- reset ---------------------------------------------------------
         st_reset, _ = Client(base).post("/v1/cache/reset")
         h0 = tick("disk_hits")
-        st, text, _, ptok, wall = chat(
-            base, mid, [{"role": "user", "content": prefix + q}], max_tokens=256
-        )
+        st, text, _, ptok, wall = chat(base, mid, mk_msgs(prefix + q), max_tokens=256)
         h1 = tick("disk_hits")
         rep.check(
             "reset.disk_survives",
@@ -571,16 +926,65 @@ def main() -> int:
         )
         rep.check("reset.served_ok", served_ok(text, cold_text), facts_hint)
 
+        # -- churn ---------------------------------------------------------
+        # Distinct mid-size prefixes cycle records through the ckpt LRU,
+        # then the original replay must still serve correctly with no
+        # exception-declines. Forcing real GDN eviction against the 4 GiB
+        # budget needs --churn raised.
+        if a.churn > 0:
+            churn_text, n_churn = deep_prefix(1800)
+            ec = n_churn // 3
+            churn_ok = True
+            for j in range(a.churn):
+                cst, ctext, _, _, _ = chat(
+                    base,
+                    mid,
+                    mk_msgs(
+                        f"Archive {j} of prior mission logs follows.\n"
+                        + churn_text
+                        + f"Question: how many units did entry {ec} report?"
+                    ),
+                    max_tokens=64,
+                )
+                churn_ok &= cst == 200 and len(ctext) > 0
+            settle(K["stores"])
+            d0 = stats(base)
+            m0 = tick(K["matched"])
+            st, text, _, _, wall = chat(base, mid, mk_msgs(prefix + q), max_tokens=256)
+            dm = tick(K["matched"]) - m0
+            rep.check("churn.status", churn_ok, f"{a.churn} distinct prefixes")
+            rep.check(
+                "churn.replay_ok",
+                st == 200 and served_ok(text, cold_text),
+                f"matched +{dm}, {wall:.1f}s",
+            )
+            if ck:
+                declines = stats(base).get("ckpt_declines") or {}
+                rep.check(
+                    "churn.no_exception_declines",
+                    int(declines.get("exception", 0) or 0) == 0,
+                    json.dumps(declines),
+                )
+                rep.note(
+                    "churn.stores",
+                    f"ckpt_stores {d0.get('ckpt_stores')} at churn end, "
+                    f"replay matched +{dm}",
+                )
+
     # -- bitrate-b isolation ------------------------------------------------
     # Only meaningful when a second KV width is requested: the namespaces
     # must not cross-adopt. Skipped entirely on the fp16 acceptance shape.
     if a.bits_b:
         env_b = depth_env(
-            disk_root, a.block_size, a.num_blocks, a.disk_gb,
-            scheme=a.scheme, bits=a.bits_b,
+            disk_root,
+            a.block_size,
+            a.num_blocks,
+            a.disk_gb,
+            scheme=a.scheme,
+            bits=a.bits_b,
         )
         with ServerProc(
-            serve_args(a.model, a.speculative),
+            serve_args(a.model, a.speculative, a.draft_gguf),
             env_extra=env_b,
             log_path=os.path.join(out_dir, "server-b.log"),
             python=a.python,
@@ -588,10 +992,11 @@ def main() -> int:
             srv.wait_ready(timeout=900)
             base = srv.base_url
             mid = model_id_of(base, srv)
-            chat(base, mid, [{"role": "user", "content": "Say ok."}], max_tokens=4)
+            chat(base, mid, mk_msgs("Say ok."), max_tokens=4)
             st, text, _, ptok, wall = chat(
-                base, mid, [{"role": "user", "content": prefix + q}], max_tokens=256
+                base, mid, mk_msgs(prefix + q), max_tokens=256
             )
+            settle(K["stores"])
             s = stats(base)
             rep.check(
                 "bitrate_b.status",
@@ -615,7 +1020,7 @@ def main() -> int:
             )
             m0 = tick(K["matched"])
             st, text, _, ptok, wall2 = chat(
-                base, mid, [{"role": "user", "content": prefix + q}], max_tokens=256
+                base, mid, mk_msgs(prefix + q), max_tokens=256
             )
             dm = tick(K["matched"]) - m0
             rep.check(
@@ -627,6 +1032,65 @@ def main() -> int:
                 "bitrate_b.warm_served_ok", served_ok(text, b_cold_text), facts_hint
             )
 
+    # -- tripwire ------------------------------------------------------------
+    # With replay and turn boundaries off, an identical resend is refused
+    # by the p < len(query) bound and the missed-adoption warning must
+    # fire. The prompt must tokenize under unit plus guard (no adoptable
+    # terminal boundary) yet past the rotating window (windows over ~1300
+    # tokens need --no-tripwire). Disk stays off so a retire skeleton
+    # cannot serve the resend.
+    if ck and not a.no_tripwire:
+        trip_prefix, n_trip = deep_prefix(1050)
+        trip_q = (
+            f"Question: which technician logged entry {n_trip // 2}? "
+            "Answer with the name."
+        )
+        trip_env = dict(env_a)
+        trip_env.pop("APC_DISK_PATH", None)
+        trip_env.pop("APC_DISK_MAX_GB", None)
+        trip_env["GMLX_APC_CKPT_REPLAY"] = "0"
+        trip_env["GMLX_APC_CKPT_TURN"] = "0"
+        trip_env["GMLX_APC_CKPT_TRIPWIRE"] = "2"
+        trip_log = os.path.join(out_dir, "server-c.log")
+        with ServerProc(
+            serve_args(a.model, a.speculative, a.draft_gguf),
+            env_extra=trip_env,
+            log_path=trip_log,
+            python=a.python,
+        ) as srv:
+            srv.wait_ready(timeout=900)
+            base = srv.base_url
+            mid = model_id_of(base, srv)
+            sts = []
+            for _ in range(4):  # populate + 3 refused resends
+                st, _, _, _, _ = chat(
+                    base, mid, mk_msgs(trip_prefix + trip_q), max_tokens=32
+                )
+                sts.append(st)
+            settle("ckpt_stores")
+            s = stats(base)
+            rep.check(
+                "tripwire.setup",
+                all(st == 200 for st in sts)
+                and int(s.get("ckpt_stores", 0) or 0) > 0
+                and int(s.get("ckpt_hits", 0) or 0) == 0,
+                f"stores={s.get('ckpt_stores')} hits={s.get('ckpt_hits')} "
+                "(p=N/retire records only, resends must be refused)",
+            )
+            rep.check(
+                "tripwire.missed_counted",
+                int(s.get("ckpt_missed_adoptions", 0) or 0) >= 3,
+                f"ckpt_missed_adoptions={s.get('ckpt_missed_adoptions')} "
+                ">= 3 refused resends",
+            )
+        with open(trip_log, encoding="utf-8", errors="replace") as f:
+            log_text = f.read()
+        rep.check(
+            "tripwire.warning_logged",
+            "APC ckpt tripwire" in log_text and "prefix-matching record" in log_text,
+            "one-time missed-adoption warning in server-c.log",
+        )
+
     report = {
         "label": label,
         "model": a.model,
@@ -635,6 +1099,8 @@ def main() -> int:
         "bits": [a.bits_a, a.bits_b] if (a.bits_a or a.bits_b) else None,
         "prefix_tokens": prefix_tok,
         "speculative": a.speculative,
+        "system_message": not a.no_system,
+        "template_kwargs": template_kwargs,
         "cold_wall_s": round(cold_wall, 1),
         "warm_wall_s": round(warm_wall, 1),
         "disk_wall_s": round(disk_wall, 1),

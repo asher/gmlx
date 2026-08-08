@@ -8,6 +8,7 @@ wins; a missing handle resolves to ``None`` so a tier whose models aren't
 present is *skipped*, not failed. Nothing here loads a model - it's pure
 path resolution, so it runs on any machine for ``--dry-run``.
 """
+
 from __future__ import annotations
 
 import os
@@ -36,6 +37,11 @@ _CANDIDATES = {
         "gemma-4-12b-it-GGUF/gemma-4-12b-it-Q6_K.gguf",
         "bartowski__gemma-4-12B-it-GGUF/gemma-4-12B-it-Q6_K.gguf",
     ],
+    # gemma-4 12B assistant drafter (--draft-gguf; the SWA + --speculative
+    # depth-matrix row)
+    "gemma4_12b_assistant": [
+        "unsloth__gemma-4-12b-it-GGUF/mtp-gemma-4-12b-it.gguf",
+    ],
     # ckpt-tier (hybrid/SWA) cache scenario
     "gpt_oss_20b": [
         "lmstudio-community__gpt-oss-20b-GGUF/gpt-oss-20b-MXFP4.gguf",
@@ -46,8 +52,8 @@ _CANDIDATES = {
 # remote filename equals the handle's candidate basename, so `gmlx pull <ref>
 # --to <root>/<dir>` lands the file exactly where the registry looks for it. A handle
 # with no public source (None) must be provided by the user - `print_bootstrap` says so.
-# The small dense text models are sourced from public GGUF repos; the gemma-4 family is
-# left unset (no public GGUF distribution): fill in your own `hf:` ref or drop the GGUF in by hand.
+# The E2B handles stay unset (no public GGUF distribution for those exact files):
+# fill in your own `hf:` ref or drop the GGUF in by hand.
 _SOURCES = {
     "qwen3_0_6b_q4": "hf:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q4_K_M.gguf",
     "qwen3_0_6b_q8": "hf:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf",
@@ -55,7 +61,8 @@ _SOURCES = {
     "gemma4_e2b": None,
     "gemma4_e2b_mmproj": None,
     "gemma4_e2b_assistant": None,
-    "gemma4_12b": None,
+    "gemma4_12b": "hf:bartowski/gemma-4-12B-it-GGUF/gemma-4-12B-it-Q6_K.gguf",
+    "gemma4_12b_assistant": "hf:unsloth/gemma-4-12b-it-GGUF/mtp-gemma-4-12b-it.gguf",
     "gpt_oss_20b": "hf:lmstudio-community/gpt-oss-20b-GGUF/gpt-oss-20b-MXFP4.gguf",
 }
 
@@ -92,7 +99,8 @@ class ModelRegistry:
         if p is None:
             raise FileNotFoundError(
                 f"model handle {handle!r} not found under {self._roots()} "
-                f"(candidates: {_CANDIDATES.get(handle)})")
+                f"(candidates: {_CANDIDATES.get(handle)})"
+            )
         return p
 
     def have(self, *handles: str) -> bool:
@@ -146,7 +154,9 @@ class ModelRegistry:
             print(f"all models present under {self._root()} - nothing to fetch.")
             return
         print(f"# models root: {self._root()}")
-        print(f"# {len(missing)} model(s) missing. Run the lines below to fetch them:\n")
+        print(
+            f"# {len(missing)} model(s) missing. Run the lines below to fetch them:\n"
+        )
         for handle, _present, cmd, expected in missing:
             if cmd:
                 print(cmd)
@@ -154,5 +164,7 @@ class ModelRegistry:
                 print(f"# {handle}: no public source - drop a GGUF at {expected}")
         have_unsourced = any(not cmd for _h, present, cmd, _e in plan if not present)
         if have_unsourced:
-            print("\n# (the gemma-4 tiers - judged/vlm/mtp - have no public GGUF source; "
-                  "set their `hf:` ref in models.py _SOURCES, or skip those tiers.)")
+            print(
+                "\n# (the gemma-4 tiers - judged/vlm/mtp - have no public GGUF source; "
+                "set their `hf:` ref in models.py _SOURCES, or skip those tiers.)"
+            )

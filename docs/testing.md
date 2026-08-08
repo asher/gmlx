@@ -106,8 +106,16 @@ python tests/e2e/run_server_e2e.py
 server restarts the same way: real server, real GGUF, standalone.
 `tests/e2e/run_apc_depth_e2e.py` is its deep twin: multi-thousand-token
 prefixes on a large model, `--tier {block,exact,ckpt}` selecting which
-counters must move, with fact-checked answers proving every cache-served
-reply (warm, restart, reset) is uncorrupted.
+counters must move, with cold-calibrated fact witnesses proving every
+cache-served reply is uncorrupted. Reuse depth is asserted against the
+ckpt cursor's own boundary arithmetic, the concurrent burst includes a
+short unrelated client (ragged mixed warm/cold batch), decline and
+missed-adoption counters are bounded, the missed-adoption tripwire is
+fired live, and a churn phase cycles records through the LRU.
+`--template-kwargs` adds a render-variant turn; `--draft-gguf` covers
+assistant-shape MTP targets; wall-clock gates assume an idle machine
+(`--require-idle` enforces it). `tests/test_e2e_harness_smoke.py` pins
+every harness's imports and argparse tree in CI.
 
 ### Pre-release: the APC engagement gate
 
