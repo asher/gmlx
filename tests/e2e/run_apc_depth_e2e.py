@@ -133,12 +133,17 @@ def chat(
     )
     wall = time.monotonic() - t0
     text = ""
+    content = ""
     ptok = 0
     if isinstance(body, dict):
         try:
             msg = body["choices"][0]["message"]
-            # include any reasoning stream: a fact retrieved mid-think is
-            # just as valid a non-corruption witness as one in the answer
+            # text includes any reasoning stream: a fact retrieved
+            # mid-think is just as valid a non-corruption witness as one
+            # in the answer. content is the clean field alone -- what a
+            # real client feeds back as history (reasoning re-sent as
+            # content breaks channel-tagged templates like gpt-oss).
+            content = str(msg.get("content") or "")
             text = "".join(
                 str(msg.get(k) or "")
                 for k in ("reasoning_content", "reasoning", "content")
@@ -146,7 +151,7 @@ def chat(
         except (KeyError, IndexError, TypeError):
             pass
         ptok = int((body.get("usage") or {}).get("prompt_tokens", 0) or 0)
-    return st, text, ptok, wall
+    return st, text, content, ptok, wall
 
 
 class Report:
@@ -307,7 +312,7 @@ def main() -> int:
         chat(base, mid, [{"role": "user", "content": "Say ok."}], max_tokens=4)
 
         # -- populate ------------------------------------------------------
-        st, text, ptok, cold_wall = chat(
+        st, text, content, ptok, cold_wall = chat(
             base, mid, [{"role": "user", "content": prefix + q}], max_tokens=256
         )
         cold_text = text
@@ -344,7 +349,7 @@ def main() -> int:
         # verbatim stored prefix, block walks the grid - all three must
         # produce a near-full matched prefix on their own tier counter.
         m0 = tick(K["matched"])
-        st, text, ptok, warm_wall = chat(
+        st, text, content, ptok, warm_wall = chat(
             base, mid, [{"role": "user", "content": prefix + q}], max_tokens=256
         )
         dm = tick(K["matched"]) - m0
@@ -371,7 +376,7 @@ def main() -> int:
         # orphaned when only p=N records existed). Exact tier misses by
         # design; block tier reuses the shared grid.
         m0 = tick(K["matched"])
-        st, _, _, div_wall = chat(
+        st, _, _, _, div_wall = chat(
             base,
             mid,
             [
@@ -418,7 +423,7 @@ def main() -> int:
                 msgs.append({"role": "assistant", "content": at})
                 msgs.append({"role": "user", "content": uq})
             m0 = tick(K["matched"])
-            st, last_answer, ptok, wall = chat(base, mid, msgs, max_tokens=96)
+            st, turn_text, last_answer, ptok, wall = chat(base, mid, msgs, max_tokens=96)
             dm = tick(K["matched"]) - m0
             turn_dms.append(dm)
             turns_ok &= st == 200 and len(last_answer) > 0
@@ -463,14 +468,14 @@ def main() -> int:
             res = list(ex.map(fire, range(a.concurrency)))
         rep.check(
             "concurrent.status",
-            all(st == 200 and text for st, text, _, _ in res),
+            all(st == 200 and text for st, text, _, _, _ in res),
             f"{a.concurrency} clients, {time.monotonic() - t0:.1f}s wall",
         )
         rep.check(
             # every batched reply must name real subsystems from the log:
             # a corrupted batch row degenerates to text that names none
             "concurrent.coherent",
-            all(any(t in text.lower() for t in _TOPICS) for _, text, _, _ in res),
+            all(any(t in text.lower() for t in _TOPICS) for _, text, _, _, _ in res),
             "each reply names >=1 log subsystem",
         )
         if ck:
@@ -507,7 +512,7 @@ def main() -> int:
         base = srv.base_url
         mid = model_id_of(base, srv)
         chat(base, mid, [{"role": "user", "content": "Say ok."}], max_tokens=4)
-        st, text, ptok, disk_wall = chat(
+        st, text, _, ptok, disk_wall = chat(
             base, mid, [{"role": "user", "content": prefix + q}], max_tokens=256
         )
         s = stats(base)
@@ -544,7 +549,7 @@ def main() -> int:
         # -- reset ---------------------------------------------------------
         st_reset, _ = Client(base).post("/v1/cache/reset")
         h0 = tick("disk_hits")
-        st, text, ptok, wall = chat(
+        st, text, _, ptok, wall = chat(
             base, mid, [{"role": "user", "content": prefix + q}], max_tokens=256
         )
         h1 = tick("disk_hits")
@@ -573,7 +578,7 @@ def main() -> int:
             base = srv.base_url
             mid = model_id_of(base, srv)
             chat(base, mid, [{"role": "user", "content": "Say ok."}], max_tokens=4)
-            st, text, ptok, wall = chat(
+            st, text, _, ptok, wall = chat(
                 base, mid, [{"role": "user", "content": prefix + q}], max_tokens=256
             )
             s = stats(base)
@@ -598,7 +603,7 @@ def main() -> int:
                 f"{K['stores']}={s.get(K['stores'])}",
             )
             m0 = tick(K["matched"])
-            st, text, ptok, wall2 = chat(
+            st, text, _, ptok, wall2 = chat(
                 base, mid, [{"role": "user", "content": prefix + q}], max_tokens=256
             )
             dm = tick(K["matched"]) - m0
