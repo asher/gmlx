@@ -67,13 +67,21 @@ def _clone_single_row(cache: Any) -> Any | None:
 
     Reuses upstream's APC clone so the snapshot matches what
     ``store_exact_cache`` would produce for the non-speculative path.
+    Rotating layers canonicalize first: min(offset, W) tokens in temporal
+    order instead of the untrimmed ring (max_size + prefill_step - 1
+    columns) -- every consumer (exact store, decode-ring slot, splice)
+    needs only the canonical form, which is the shape the lookup paths
+    already restore to.
     """
     from mlx_vlm import apc as _apc
+    from .cache_compat import cache_types
 
     if isinstance(cache, _buffered_types()):
         _log.info("APC clone declined: BufferedRotatingKVCache carries "
                   "start_position no rotating clone preserves")
         return None
+    if isinstance(cache, cache_types("RotatingKVCache")):
+        return _clone_rot_canonical(cache)
     eval_targets: list[Any] = []
     out = _apc._clone_cache_entry_for_apc(
         cache, min_capacity_tokens=None, eval_targets=eval_targets)
@@ -88,21 +96,40 @@ def _clone_single_row(cache: Any) -> Any | None:
     return out
 
 
+def _clone_rot_canonical(cache: Any) -> Any | None:
+    """Canonical rotating clone: same concrete class, buffer trimmed to
+    the canonical window, ring pointer at its end (the restored form)."""
+    import mlx.core as mx
+    from mlx_vlm import apc as _apc
+
+    out = type(cache)(max_size=int(cache.max_size),
+                      keep=int(getattr(cache, "keep", 0) or 0))
+    if cache.keys is None or cache.values is None:
+        out.offset = int(getattr(cache, "offset", 0) or 0)
+        out._idx = int(getattr(cache, "_idx", 0) or 0)
+        return out
+    cw = rotating_canonical_window(cache)
+    if cw is None:
+        _log.info("APC clone declined: rotating buffer has no canonical "
+                  "window (offset=%s, idx=%s)",
+                  getattr(cache, "offset", None),
+                  getattr(cache, "_idx", None))
+        return None
+    tk, tv, (keep, max_size, offset, length) = cw
+    copy = _apc._copy_mlx_array
+    out.keys = copy(tk)
+    out.values = copy(tv)
+    out.offset = int(offset)
+    out._idx = int(length)
+    mx.eval(out.keys, out.values)
+    return out
+
+
 def _clone_lm_twin(cache: Any, eval_targets: list[Any]) -> Any | None:
     from mlx_vlm import apc as _apc
     from .cache_compat import cache_types
 
     copy = _apc._copy_mlx_array
-    if isinstance(cache, cache_types("RotatingKVCache")):
-        out = type(cache)(max_size=int(cache.max_size),
-                          keep=int(getattr(cache, "keep", 0)))
-        out.offset = int(getattr(cache, "offset", 0) or 0)
-        out._idx = int(getattr(cache, "_idx", 0) or 0)
-        if cache.keys is not None and cache.values is not None:
-            out.keys = copy(cache.keys)
-            out.values = copy(cache.values)
-            eval_targets.extend([out.keys, out.values])
-        return out
     if isinstance(cache, cache_types("KVCache")):
         out = type(cache)()
         off = int(getattr(cache, "offset", 0) or 0)

@@ -579,6 +579,33 @@ def test_post_prefill_store_dropped_when_p_stable_landed():
     assert len(_ckpt_records(man)) == 0             # no p=N record
 
 
+def test_rot_clone_canonicalizes():
+    """_clone_single_row trims a wrapped rotating buffer to the canonical
+    window (min(offset, W) columns, ring pointer at the end) while
+    preserving the concrete class; content matches the live canonical
+    window bit-exactly. Below the wrap the partial fill clones whole."""
+    from gmlx.cache_snapshot import (
+        _clone_single_row,
+        rotating_canonical_window,
+        rotating_invariant,
+    )
+    src = next(c for c in make_swa_cache(96, seed=8)
+               if isinstance(c, RotatingKVCache))
+    assert src.keys.shape[2] > ROT_W          # raw ring is untrimmed
+    out = _clone_single_row(src)
+    assert type(out) is type(src)
+    assert out.keys.shape[2] == ROT_W         # canonical: min(96, 32)
+    assert rotating_invariant(out) == (True, True)
+    ko, vo, mo = rotating_canonical_window(src)
+    kw, vw, mw = rotating_canonical_window(out)
+    assert mo == mw
+    assert mx.array_equal(ko, kw).item() and mx.array_equal(vo, vw).item()
+    src2 = next(c for c in make_swa_cache(20, seed=9)
+                if isinstance(c, RotatingKVCache))
+    out2 = _clone_single_row(src2)
+    assert out2.keys.shape[2] == 20 and int(out2.offset) == 20
+
+
 def test_layout_signature_rejects_mismatch():
     man = APCManager(num_blocks=64, block_size=16)
     p = 32
