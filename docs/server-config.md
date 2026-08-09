@@ -927,17 +927,28 @@ models. Each maps 1:1 to the env var mlx-vlm reads at build:
 
 `kv_quant_scheme: kvarn` converts every eligible layer's batch KV cache to
 KVarN (`kv_bits` picks the width, default 6; `kv_tail_tokens` sizes the
-fp16 precision tail, default 1024). Coverage is head_dim-128, -256 and
--512 attention layers: the qwen3.5/3.6 family (hybrid archs convert those
-and leave recurrent layers untouched) and gemma-4 global layers (SWA layers
-stay fp16); ineligible models keep fp16 KV with a
-one-shot log reason, never a silent affine fallback. A kvarn model runs the
-APC on the exact-entry tier (memory and disk; the 16-token block tier
-cannot split kvarn's 128-token records), with entries keyed to the kvarn
-width/tail config so a config change cold-misses instead of adopting a
-stale format. Cascade shared-prefix decode is inactive under kvarn (it
-announces itself once); speculative targets keep their stock spec-engine
-KV handling.
+fp16 precision tail, default 1024). Eligibility is a rule, not a model
+list: attention layers with head_dim 128, 256 or 512 convert (qwen3.5/3.6
+and gemma-4 global layers are the common cases); recurrent, sliding-window
+and head_dim-64 layers (gpt-oss, falcon-h1) stay fp16, and MLA archs whose
+K and V share latent storage (deepseek4, kimi-k3) never convert at all.
+Archs that derive head_dim from hidden/heads (nemotron-h, jamba, lfm2,
+granitemoehybrid) are eligible per checkpoint -- check the config. A model
+where no layer converts keeps fp16 KV with a one-shot log reason, never a
+silent affine fallback.
+
+APC under kvarn keeps the same tier routing as fp16. Dense models run the
+exact-entry tier (memory and disk; the 16-token block tier cannot split
+kvarn's 128-token records). Checkpoint-shaped stacks -- every hybrid-GDN
+and SWA row of the tier table whose attention head_dim is 128/256/512 --
+keep full checkpoint-tier reuse, storing kvarn records: the attention
+payload lives inline in the record rather than in pool blocks, so
+`GMLX_APC_CKPT_BUDGET_MB` becomes the governing memory knob (see the env
+table note). Entries and disk skeletons are keyed to the kvarn width/tail
+config so a config change or a stock-vs-kvarn boot cold-misses instead of
+adopting a stale format. Cascade shared-prefix decode is inactive under
+kvarn (it announces itself once); speculative targets keep their stock
+spec-engine KV handling.
 
 ### Cache keys (`cache:`)
 

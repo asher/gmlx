@@ -213,8 +213,8 @@ The server keeps a cross-request prompt cache: a request whose prefix was seen
 before skips prefill for the cached span. A repeated 32k-token prefix turns tens of
 seconds of prompt processing into a sub-second time-to-first-token. Dense-attention
 models reuse at block granularity; hybrid and sliding-window models reuse
-checkpoint records; pure-recurrent and CacheList archs reuse verbatim
-snapshots.
+checkpoint records (under fp16 or kvarn KV alike); pure-recurrent and
+CacheList archs reuse verbatim snapshots.
 
 What reuse to expect, per family (tier routing:
 [server-config.md](server-config.md#which-tier-serves-which-architecture)):
@@ -404,7 +404,10 @@ Levers, cheapest first:
   `GMLX_KVARN_BITS=k6v5`) trade fidelity for memory at roughly the same speed.
   Covers head_dim-128, -256 and -512 attention layers: the qwen3.5/3.6 family
   and gemma-4 global layers (SWA layers stay fp16, so the gemma-4 saving is
-  modest); anything else declines loudly and stays fp16.
+  modest); anything else declines loudly and stays fp16. Server-side, the
+  prompt cache survives the scheme: hybrid and sliding-window models keep
+  full checkpoint-tier reuse on a kvarn boot (records store the quantized
+  cache, and stock and kvarn boots never adopt each other's entries).
 - `--max-kv-size` caps the cache as a rolling window, trading away the oldest
   context. With `--kv-quant-scheme kvarn` on models the flag applies to (those
   without an arch-specific cache), the window quantizes too: the cap rounds
