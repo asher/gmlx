@@ -127,6 +127,46 @@ def test_deadline_forces_stock():
     assert ar.resolve(g, 11.5) == 0.0  # age 10.5 > deadline 10
 
 
+def test_pacing_survives_promotion_to_prompt_batch():
+    # The regime B regression: the waiter's prompt is admitted into the
+    # prompt batch one tick after pacing starts. The chunk train is still
+    # competing prefill work; dropping pacing at promotion unpaces the
+    # whole prefill and puts the incumbent at the unpaced floor.
+    g = _incumbent_gen(0.0)
+    _add_waiter(g)
+    assert ar.resolve(g, 1.0) == ar.paced_ratio()
+    g._unprocessed_sequences.clear()
+    g._prompt_batch = FakeBatch([7])
+    assert ar.resolve(g, 1.5) == ar.paced_ratio()
+    # prompt batch completes, rows reach decode: back to no waiters
+    g._prompt_batch = None
+    g._generation_batch = FakeBatch([101, 7])
+    assert ar.resolve(g, 2.0) == 0.0
+
+
+def test_prefilling_waiter_does_not_age_toward_deadline():
+    # A deep prompt's paced chunk train can far outlive deadline_s; its
+    # TTFT is bounded by the paced ratio itself ((1+r)x), so only queued
+    # waiters age toward the deadline.
+    g = _incumbent_gen(0.0)
+    _add_waiter(g)
+    ar.resolve(g, 1.0)
+    g._unprocessed_sequences.clear()
+    g._prompt_batch = FakeBatch([7])
+    assert ar.resolve(g, 30.0) == ar.paced_ratio()
+
+
+def test_queued_waiter_behind_prompt_batch_still_ages():
+    g = _incumbent_gen(0.0)
+    _add_waiter(g)
+    ar.resolve(g, 1.0)
+    g._unprocessed_sequences.clear()
+    g._prompt_batch = FakeBatch([7])
+    _add_waiter(g, 8)
+    assert ar.resolve(g, 2.0) == ar.paced_ratio()  # stamps 8 at 2.0
+    assert ar.resolve(g, 13.0) == 0.0  # queued age 11 > deadline 10
+
+
 def test_gate_deferred_time_excluded_from_deadline():
     g = _incumbent_gen(0.0)
     _add_waiter(g)

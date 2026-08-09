@@ -24,8 +24,16 @@ the paced ratio or 0, per tick:
                         grace_ms before the oldest waiter arrived)
                      and C > (1-rho)/rho (hysteresis + dwell)
                      and pending count <= queue_max (own hysteresis)
-                     and the oldest waiter is inside deadline_s
+                     and the oldest QUEUED waiter is inside deadline_s
         0            otherwise
+
+A waiter is a queued sequence or a row of the active prompt batch: a
+prompt being chunked is still competing prefill work, and dropping
+pacing at promotion would unpace the whole chunk train one tick after
+it starts. Only queued waiters age toward the deadline; a prefilling
+waiter's TTFT is already bounded multiplicatively by the paced ratio
+(its chunk train stretches by at most (1+r)x), while a queued waiter's
+wait is what pacing cannot bound.
 
 Only the C conjunct enforces the floor; incumbency decides whether anyone
 is owed it. The queue and deadline conjuncts knowingly abandon the floor
@@ -162,12 +170,23 @@ def _step_cost(st: _AutoState, width: int) -> tuple[float | None, bool]:
     return st.s_by_width[nearest], True
 
 
+def _pb_uids(gen) -> list:
+    """Rows of the active prompt batch: promoted waiters mid-prefill."""
+    pb = gen._prompt_batch
+    return list(getattr(pb, "uids", ())) if pb is not None else []
+
+
 def _stamp(gen, st: _AutoState, now: float) -> None:
+    # A waiter keeps its arrival stamp across promotion into the prompt
+    # batch; the stamp dies when its rows reach the decode batch (or the
+    # request is gone). Dropping it at promotion would both end pacing a
+    # tick after the chunk train starts and reset incumbency comparisons.
     pending_uids = [s[0] for s in gen._unprocessed_sequences]
-    for uid in pending_uids:
+    waiter_uids = pending_uids + _pb_uids(gen)
+    for uid in waiter_uids:
         st.first_seen.setdefault(uid, now)
     for uid in list(st.first_seen):
-        if uid not in set(pending_uids):
+        if uid not in set(waiter_uids):
             del st.first_seen[uid]
     live = list(getattr(gen._generation_batch, "uids", ()))
     for uid in live:
@@ -213,7 +232,8 @@ def resolve(gen, now: float | None = None) -> float:
     prev_tick, st.last_tick = st.last_tick, now
     _stamp(gen, st, now)
     pending = gen._unprocessed_sequences
-    if not pending:
+    prefilling = _pb_uids(gen)
+    if not pending and not prefilling:
         return _resolved(gen, st, 0.0, now, "no waiters")
 
     # Admission-gate coupling: time declined by the gate is not pacing's
@@ -225,11 +245,18 @@ def resolve(gen, now: float | None = None) -> float:
     gate_active = bool(last_decline) and last_decline >= prev_tick > 0.0
     pending_count = 0 if gate_active else len(pending)
 
-    oldest_uid, oldest_seen = None, None
+    # Incumbency compares against the oldest waiter of either kind;
+    # the deadline (below) ages only the queued ones.
+    oldest_seen = None
+    queued_uid, queued_seen = None, None
+    for uid in [s[0] for s in pending] + prefilling:
+        seen = st.first_seen.get(uid, now)
+        if oldest_seen is None or seen < oldest_seen:
+            oldest_seen = seen
     for s in pending:
         seen = st.first_seen.get(s[0], now)
-        if oldest_seen is None or seen < oldest_seen:
-            oldest_uid, oldest_seen = s[0], seen
+        if queued_seen is None or seen < queued_seen:
+            queued_uid, queued_seen = s[0], seen
 
     grace = _envf("GMLX_DECODE_PREFILL_GRACE_MS", 500.0) / 1e3
     incumbent = None
@@ -260,21 +287,26 @@ def resolve(gen, now: float | None = None) -> float:
             f"incumbent uid={incumbent} projected retention "
             f"{1.0 / (1.0 + c):.2f})")
 
+    # Deadline: queued waiters only. A prefilling waiter's TTFT is
+    # bounded by the paced ratio itself (chunk train stretches at most
+    # (1+r)x); a queued waiter's wait has no such bound, so it is the
+    # one the floor is abandoned for.
     deadline = deadline_s()
-    age = now - (oldest_seen if oldest_seen is not None else now)
-    age -= float(gate_deferred.get(oldest_uid, 0.0))
-    if age > deadline:
-        return _resolved(
-            gen, st, 0.0, now,
-            f"oldest waiter {age:.1f}s > deadline {deadline:.1f}s "
-            f"(floor abandoned: incumbent uid={incumbent} projected "
-            f"retention {1.0 / (1.0 + c):.2f})")
+    if queued_seen is not None:
+        age = now - queued_seen
+        age -= float(gate_deferred.get(queued_uid, 0.0))
+        if age > deadline:
+            return _resolved(
+                gen, st, 0.0, now,
+                f"queued waiter {age:.1f}s > deadline {deadline:.1f}s "
+                f"(floor abandoned: incumbent uid={incumbent} projected "
+                f"retention {1.0 / (1.0 + c):.2f})")
 
     return _resolved(
         gen, st, paced_ratio(), now,
         f"incumbent uid={incumbent} (admitted "
         f"{now - st.admitted_at[incumbent]:.1f}s ago), chunk {c:.1f} "
-        f"steps, waiting={len(pending)}")
+        f"steps, waiting={len(pending)}+{len(prefilling)}")
 
 
 def _resolved(gen, st: _AutoState, ratio: float, now: float,
