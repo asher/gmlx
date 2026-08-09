@@ -35,16 +35,12 @@
 <circle cx="887.2" cy="183.9" r="3.9" fill="#0072b2" stroke="#fcfcfb" stroke-width="2.0"/>
 <text x="894.7" y="177.1" font-size="12.8" fill="#0072b2" font-weight="600" style="font-variant-numeric: tabular-nums">1229</text>
 <text x="30.0" y="227.2" font-size="14.2" fill="#898781" text-anchor="middle" transform="rotate(-90.0 30.0 227.2)">prefill tok/s (baseline)</text>
-<line x1="75.0" y1="621.0" x2="939.0" y2="621.0" stroke="#e1e0d9" stroke-width="1.0"/>
-<text x="67.5" y="626.2" font-size="13.5" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">0</text>
-<line x1="75.0" y1="573.1" x2="939.0" y2="573.1" stroke="#e1e0d9" stroke-width="1.0"/>
-<text x="67.5" y="578.4" font-size="13.5" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">20</text>
-<line x1="75.0" y1="525.2" x2="939.0" y2="525.2" stroke="#e1e0d9" stroke-width="1.0"/>
-<text x="67.5" y="530.5" font-size="13.5" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">40</text>
-<line x1="75.0" y1="477.3" x2="939.0" y2="477.3" stroke="#e1e0d9" stroke-width="1.0"/>
-<text x="67.5" y="482.6" font-size="13.5" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">60</text>
-<line x1="75.0" y1="429.4" x2="939.0" y2="429.4" stroke="#e1e0d9" stroke-width="1.0"/>
-<text x="67.5" y="434.7" font-size="13.5" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">80</text>
+<line x1="75.0" y1="589.6" x2="939.0" y2="589.6" stroke="#e1e0d9" stroke-width="1.0"/>
+<text x="67.5" y="594.8" font-size="13.5" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">40</text>
+<line x1="75.0" y1="515.4" x2="939.0" y2="515.4" stroke="#e1e0d9" stroke-width="1.0"/>
+<text x="67.5" y="520.7" font-size="13.5" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">60</text>
+<line x1="75.0" y1="441.3" x2="939.0" y2="441.3" stroke="#e1e0d9" stroke-width="1.0"/>
+<text x="67.5" y="446.5" font-size="13.5" fill="#898781" text-anchor="end" style="font-variant-numeric: tabular-nums">80</text>
 <line x1="75.0" y1="621.0" x2="939.0" y2="621.0" stroke="#c3c2b7" stroke-width="1.2"/>
 <line x1="126.8" y1="621.0" x2="126.8" y2="626.2" stroke="#c3c2b7" stroke-width="1.0"/>
 <text x="126.8" y="642.0" font-size="12.8" fill="#898781" text-anchor="middle" style="font-variant-numeric: tabular-nums">512</text>
@@ -56,19 +52,19 @@
 <text x="843.8" y="642.0" font-size="12.8" fill="#898781" text-anchor="middle" style="font-variant-numeric: tabular-nums">67k</text>
 <line x1="887.2" y1="621.0" x2="887.2" y2="626.2" stroke="#c3c2b7" stroke-width="1.0"/>
 <text x="887.2" y="642.0" font-size="12.8" fill="#898781" text-anchor="middle" style="font-variant-numeric: tabular-nums">90k</text>
-<path d="M126.8,420.6 L439.8,462.3 L642.0,479.3 L843.8,523.0 L887.2,535.1" fill="none" stroke="#6f6f6d" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
-<circle cx="126.8" cy="420.6" r="3.9" fill="#6f6f6d" stroke="#fcfcfb" stroke-width="2.0"/>
-<circle cx="439.8" cy="462.3" r="3.9" fill="#6f6f6d" stroke="#fcfcfb" stroke-width="2.0"/>
-<circle cx="642.0" cy="479.3" r="3.9" fill="#6f6f6d" stroke="#fcfcfb" stroke-width="2.0"/>
-<circle cx="843.8" cy="523.0" r="3.9" fill="#6f6f6d" stroke="#fcfcfb" stroke-width="2.0"/>
-<circle cx="887.2" cy="535.1" r="3.9" fill="#6f6f6d" stroke="#fcfcfb" stroke-width="2.0"/>
-<path d="M126.8,405.7 L439.8,409.1 L642.0,434.4 L843.8,484.6 L887.2,501.7" fill="none" stroke="#0072b2" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
-<circle cx="126.8" cy="405.7" r="3.9" fill="#0072b2" stroke="#fcfcfb" stroke-width="2.0"/>
-<circle cx="439.8" cy="409.1" r="3.9" fill="#0072b2" stroke="#fcfcfb" stroke-width="2.0"/>
-<circle cx="642.0" cy="434.4" r="3.9" fill="#0072b2" stroke="#fcfcfb" stroke-width="2.0"/>
-<circle cx="843.8" cy="484.6" r="3.9" fill="#0072b2" stroke="#fcfcfb" stroke-width="2.0"/>
-<circle cx="887.2" cy="501.7" r="3.9" fill="#0072b2" stroke="#fcfcfb" stroke-width="2.0"/>
-<text x="894.7" y="495.0" font-size="12.8" fill="#0072b2" font-weight="600" style="font-variant-numeric: tabular-nums">49.8</text>
+<path d="M126.8,427.6 L439.8,492.1 L642.0,518.4 L843.8,586.2 L887.2,605.0" fill="none" stroke="#6f6f6d" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="126.8" cy="427.6" r="3.9" fill="#6f6f6d" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="439.8" cy="492.1" r="3.9" fill="#6f6f6d" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="642.0" cy="518.4" r="3.9" fill="#6f6f6d" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="843.8" cy="586.2" r="3.9" fill="#6f6f6d" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="887.2" cy="605.0" r="3.9" fill="#6f6f6d" stroke="#fcfcfb" stroke-width="2.0"/>
+<path d="M126.8,404.5 L439.8,409.7 L642.0,448.9 L843.8,526.7 L887.2,553.2" fill="none" stroke="#0072b2" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="126.8" cy="404.5" r="3.9" fill="#0072b2" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="439.8" cy="409.7" r="3.9" fill="#0072b2" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="642.0" cy="448.9" r="3.9" fill="#0072b2" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="843.8" cy="526.7" r="3.9" fill="#0072b2" stroke="#fcfcfb" stroke-width="2.0"/>
+<circle cx="887.2" cy="553.2" r="3.9" fill="#0072b2" stroke="#fcfcfb" stroke-width="2.0"/>
+<text x="894.7" y="546.5" font-size="12.8" fill="#0072b2" font-weight="600" style="font-variant-numeric: tabular-nums">49.8</text>
 <text x="30.0" y="504.7" font-size="14.2" fill="#898781" text-anchor="middle" transform="rotate(-90.0 30.0 504.7)">decode tok/s</text>
 <text x="507.0" y="660.0" font-size="14.2" fill="#898781" text-anchor="middle">KV depth (tokens, log scale)</text>
 </svg>

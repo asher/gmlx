@@ -16,6 +16,14 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   would waste the panel height on empty space; nearby engine lines
   now read as visually distinct.
 
+- benchmarks.md tracks builds and measured date per model, and merged
+  results carry the newest contributing run date: one model rebenched
+  on newer releases no longer implies the rest was remeasured.
+
+- DeepSeek-V4-Flash IQ2_XXS rebenched on gmlx 0.2.2 + mlx-kquant
+  0.3.11 vs ds4-server b030961 (2026-08-05): prefill 1.11-1.86x and
+  decode 1.05-1.59x across the full d512-500k ladder.
+
 - DeepSeek-V4 single-token decode runs its hyper-connection glue as four
   native mlx-kquant ops instead of about 176 python kernel launches per
   step. `GMLX_HC_M1_FUSED=0` and `GMLX_HC_KQ=0` restore the previous

@@ -35,9 +35,10 @@ same sampler, and the same chat prompts on both engines.
 | | |
 |---|---|
 | **Hardware** | Apple M5 Max, 128 GB unified memory (MacBook Pro) |
-| **gmlx** | `0.1.0` |
-| **mlx-kquant** | `0.3.5` (K-quant + perf kernels) |
+| **gmlx** | `0.1.0` (fleet default) |
+| **mlx-kquant** | `0.3.5` (K-quant + perf kernels; fleet default) |
 | **llama.cpp** | `b9967` |
+| **Build overrides** | models rebenched on newer releases carry their own builds; see Model provenance |
 | **DeepSeek-V4-Flash reference** | ds4-server (dwarfstar) @ `b030961`, ignore-eos patched |
 | **Dates** | 2026-07-05 .. 2026-08-07 |
 | **Prompt corpus** | HuggingFaceH4/ultrachat_200k:train_sft (chat template applied) |
@@ -52,23 +53,28 @@ same sampler, and the same chat prompts on both engines.
 
 Chart labels are sanitized (abliterated community builds render as the
 base model); this table is the honest weight mapping for reproduction.
+Builds is what each model's rows were measured on: models are
+rebenched independently, so a newer build on one row says nothing
+about the others. Measured is the date of the newest run still
+contributing cells to the row (partial reruns fold onto older
+ladders cell by cell).
 
-| Model | GGUF file | Source | MTP |
-|---|---|---|---|
-| Qwen3.5-122B-A10B UD-Q5_K_M | `Qwen3.5-122B-A10B-UD-Q5_K_M-00001-of-00003.gguf` | [HF](https://huggingface.co/unsloth/Qwen3.5-122B-A10B-MTP-GGUF) | native |
-| Qwen3.6-35B-A3B Q6_K | `Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-Q6_K.gguf` | [HF](https://huggingface.co/llmfan46/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-GGUF) | native |
-| Qwen3.6-27B Q6_K | `Qwen_Qwen3.6-27B-Q6_K.gguf` | [HF](https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF) | native |
-| Qwen3.5-9B Q6_K | `Qwen3.5-9B-Q6_K.gguf` | [HF](https://huggingface.co/unsloth/Qwen3.5-9B-MTP-GGUF) | native |
-| gemma-4-31B-it Q6_K | `gemma-4-31B-it-Q6_K.gguf` | - | drafter |
-| gemma-4-26B-A4B-it Q6_K | `google_gemma-4-26B-A4B-it-Q6_K.gguf` | [HF](https://huggingface.co/bartowski/google_gemma-4-26B-A4B-it-GGUF) | drafter |
-| gemma-4-12B-it Q6_K | `gemma-4-12b-it-Q6_K.gguf` | - | drafter |
-| gemma-4-E4B-it Q6_K | `gemma-4-E4B-it-Q6_K.gguf` | - | - |
-| gemma-4-E2B-it UD-Q6_K_XL | `gemma-4-E2B-it-UD-Q6_K_XL.gguf` | - | - |
-| gpt-oss-120b MXFP4 | `gpt-oss-120b-heretic-v2-MXFP4.gguf` | [HF](https://huggingface.co/llmfan46/gpt-oss-120b-heretic-v2-GGUF) | - |
-| gpt-oss-20b MXFP4 | `gpt-oss-20b-mxfp4.gguf` | - | - |
-| Dolphin3.0-Llama3.1-8B Q6_K | `Dolphin3.0-Llama3.1-8B-abliterated.Q6_K.gguf` | [HF](https://huggingface.co/RavichandranJ/Dolphin3-Cyber-8B-GGUF) | - |
-| DeepSeek-V4-Flash UD-IQ3_XXS | `DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf` | [HF](https://huggingface.co/unsloth/DeepSeek-V4-Flash-GGUF) | - |
-| DeepSeek-V4-Flash IQ2_XXS | `DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf` | [HF](https://huggingface.co/antirez/deepseek-v4-gguf) | - |
+| Model | GGUF file | Source | MTP | Builds | Measured |
+|---|---|---|---|---|---|
+| Qwen3.5-122B-A10B UD-Q5_K_M | `Qwen3.5-122B-A10B-UD-Q5_K_M-00001-of-00003.gguf` | [HF](https://huggingface.co/unsloth/Qwen3.5-122B-A10B-MTP-GGUF) | native | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
+| Qwen3.6-35B-A3B Q6_K | `Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-Q6_K.gguf` | [HF](https://huggingface.co/llmfan46/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-GGUF) | native | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
+| Qwen3.6-27B Q6_K | `Qwen_Qwen3.6-27B-Q6_K.gguf` | [HF](https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF) | native | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
+| Qwen3.5-9B Q6_K | `Qwen3.5-9B-Q6_K.gguf` | [HF](https://huggingface.co/unsloth/Qwen3.5-9B-MTP-GGUF) | native | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
+| gemma-4-31B-it Q6_K | `gemma-4-31B-it-Q6_K.gguf` | - | drafter | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
+| gemma-4-26B-A4B-it Q6_K | `google_gemma-4-26B-A4B-it-Q6_K.gguf` | [HF](https://huggingface.co/bartowski/google_gemma-4-26B-A4B-it-GGUF) | drafter | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
+| gemma-4-12B-it Q6_K | `gemma-4-12b-it-Q6_K.gguf` | - | drafter | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
+| gemma-4-E4B-it Q6_K | `gemma-4-E4B-it-Q6_K.gguf` | - | - | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
+| gemma-4-E2B-it UD-Q6_K_XL | `gemma-4-E2B-it-UD-Q6_K_XL.gguf` | - | - | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
+| gpt-oss-120b MXFP4 | `gpt-oss-120b-heretic-v2-MXFP4.gguf` | [HF](https://huggingface.co/llmfan46/gpt-oss-120b-heretic-v2-GGUF) | - | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
+| gpt-oss-20b MXFP4 | `gpt-oss-20b-mxfp4.gguf` | - | - | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
+| Dolphin3.0-Llama3.1-8B Q6_K | `Dolphin3.0-Llama3.1-8B-abliterated.Q6_K.gguf` | [HF](https://huggingface.co/RavichandranJ/Dolphin3-Cyber-8B-GGUF) | - | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
+| DeepSeek-V4-Flash UD-IQ3_XXS | `DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf` | [HF](https://huggingface.co/unsloth/DeepSeek-V4-Flash-GGUF) | - | gmlx 0.1.0 / kq 0.3.5 | 2026-07-13 |
+| DeepSeek-V4-Flash IQ2_XXS | `DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf` | [HF](https://huggingface.co/antirez/deepseek-v4-gguf) | - | gmlx 0.2.2 / kq 0.3.11 | 2026-08-09 |
 
 ## Per-model detail
 
@@ -287,12 +293,13 @@ has no DeepSeek-V4-Flash path. Ratios below are gmlx / ds4-server.
 
 | KV depth | gmlx decode | ds4-server decode | gmlx/ds4-server decode | gmlx prefill | ds4-server prefill | gmlx/ds4-server prefill |
 |---|--:|--:|--:|--:|--:|--:|
-| 512 | 40.1 | 33.7 (33.6-34) | 1.19x | 289.7 (264.7-292.9) | 353.4 (347.2-361.2) | 0.82x |
-| 4.3k | 37.4 (36.8-37.6) | 31.8 (31.6-32.2) | 1.18x | 643 (628.5-649.1) | 546.8 (545.8-559) | 1.18x |
-| 17k | 35.4 (35.1-36.2) | 30.4 (30.2-31.4) | 1.16x | 701.4 (694-709.9) | 538 (534.5-554.6) | 1.30x |
-| 67k | 34.2 (32.6-34.9) | 27.7 (27.4-27.8) | 1.23x | 652.2 (604.8-673.1) | 495.6 (489.4-497.3) | 1.32x |
-| 110k | 30.8 (28.8-32.4) | 24.2 (24-24.8) | 1.27x | 579.9 (535.5-628.4) | 430.4 (422.9-440.3) | 1.35x |
-| 200k | 29.3 (28.9-29.3) | 21.3 (21.2-22) | 1.38x | 537.7 (523.7-542.8) | 356.7 (356-362.6) | 1.51x |
-| 300k | 27.3 (27.2-27.3) | 17.7 (17.6-17.8) | 1.54x | 496.9 (476.9-499.5) | 305.3 (290.9-305.6) | 1.63x |
-| 384k | 25.2 (25-25.3) | 16.4 (16.3-16.5) | 1.54x | 477.8 (476.9-478.6) | 277.1 (276.8-277.4) | 1.72x |
-| 500k | 22.9 (22.8-23.1) | 14.5 (14.4-14.5) | 1.58x | 420.4 (406.7-434.1) | 240.9 (239.3-242.4) | 1.75x |
+| 512 | 42.6 (42.3-43.1) | 40.5 (39.6-40.7) | 1.05x | 541.6 (541.5-548.3) | 489.7 (482-492.1) | 1.11x |
+| 4.3k | 38.8 (37.9-39.7) | 33.4 (33.4-34.6) | 1.16x | 783.5 (733.9-803.4) | 609.5 (572.3-612.9) | 1.29x |
+| 17k | 36.9 (34.8-37.4) | 31.4 (30.8-31.8) | 1.18x | 774.3 (726.3-789.7) | 567.9 (524.6-568.4) | 1.36x |
+| 50k | 34.7 (34.6-35.2) | 28.5 (27.8-28.5) | 1.22x | 765.7 (756.4-767.4) | 525.7 (520.6-525.9) | 1.46x |
+| 67k | 33.8 (32.2-34.3) | 27.3 (27.2-28.1) | 1.24x | 718.2 (651.3-725.6) | 490.6 (450.2-492.4) | 1.46x |
+| 110k | 32.2 (31.8-32.9) | 25.1 (24.1-25.7) | 1.28x | 672 (629.1-680) | 432.4 (411.8-443.4) | 1.55x |
+| 200k | 30.1 (29.5-30.2) | 21.9 (21.3-21.9) | 1.37x | 602.9 (583.8-619.1) | 357.1 (347.8-365.8) | 1.69x |
+| 300k | 27.6 (27.5-27.7) | 18 (18-18.5) | 1.53x | 542.4 (540.8-542.8) | 315.8 (312.4-321.2) | 1.72x |
+| 384k | 24.9 (24.8-25) | 16.2 | 1.54x | 495.4 (493.8-496.9) | 275.9 (275.8-276.1) | 1.80x |
+| 500k | 22.6 (22.6-22.7) | 14.2 | 1.59x | 440.7 (438.9-442.5) | 236.9 (236.5-237.3) | 1.86x |
