@@ -94,6 +94,9 @@ Calibration knobs (documented here, not in the public config reference):
                                       (default 10)
     GMLX_DECODE_PREFILL_GRACE_MS  incumbency grace (default 500)
     GMLX_DECODE_PREFILL_ALPHA     step-cost smoothing (default 0.2)
+    GMLX_DECODE_PREFILL_LOG_S     transition log rate limit (default 1;
+                                      0 logs every transition, for
+                                      debugging sub-second episodes)
 """
 
 from __future__ import annotations
@@ -147,6 +150,7 @@ class _AutoState:
         self.c_since = 0.0
         self.last_resolve_t: float | None = None
         self.last_log = 0.0
+        self.last_logged: float | None = None
         self.last_resolved: float | None = None
 
 
@@ -329,8 +333,15 @@ def resolve(gen, now: float | None = None) -> float:
 
 def _resolved(gen, st: _AutoState, ratio: float, now: float,
               reason: str) -> float:
-    if ratio != st.last_resolved and now - st.last_log >= _LOG_EVERY_S:
+    # Log against the last LOGGED state, not the last resolved one: a
+    # transition suppressed by the rate limit would otherwise leave the
+    # new state permanently unlogged if it persists. Sub-rate-limit
+    # blips (on and back off inside the window) stay invisible; drop
+    # GMLX_DECODE_PREFILL_LOG_S to catch them.
+    every = _envf("GMLX_DECODE_PREFILL_LOG_S", _LOG_EVERY_S)
+    if ratio != st.last_logged and now - st.last_log >= every:
         st.last_log = now
+        st.last_logged = ratio
         _log.info("[sched] pacing %s: %s",
                   "on" if ratio > 0 else "off", reason)
     st.last_resolved = ratio
