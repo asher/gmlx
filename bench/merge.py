@@ -25,9 +25,10 @@ paths = [p for p in glob.glob(os.path.join(root, "**", "serve-bench-*.json"), re
 paths.sort(key=lambda p: os.path.getmtime(p))   # oldest first -> newest wins
 
 # per model: shell (meta/config/models entry) from first sighting; cells last-wins
-shell, results, prov = {}, {}, {}
+shell, results, prov, run_ts = {}, {}, {}, {}
 for p in paths:
     d = json.load(open(p))
+    run_ts[os.path.relpath(p, root)] = str(d.get("meta", {}).get("timestamp", ""))
     for m in d.get("models", []):
         nm = m["name"]
         shell.setdefault(nm, {"meta": d.get("meta", {}), "config": d.get("config", {}),
@@ -42,8 +43,14 @@ for p in paths:
 combined = {"models": [], "results": {}, "provenance": {}}
 for nm in sorted(shell):
     sh = shell[nm]
+    # last_measured: newest run timestamp among the files whose cells actually
+    # won (the shell meta keeps the FIRST sighting, so its timestamp can badly
+    # understate when the surviving numbers were measured).
+    won = {ts for f in set(prov[nm].values()) if (ts := run_ts.get(f, ""))}
     doc = {"meta": sh["meta"], "config": sh["config"], "models": [sh["model"]],
            "results": results[nm], "provenance": prov[nm]}
+    if won:
+        doc["last_measured"] = max(won)
     json.dump(doc, open(os.path.join(out, nm + ".json"), "w"), indent=1)
     combined["models"].append(sh["model"])
     combined["results"].update(results[nm])
