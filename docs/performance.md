@@ -311,11 +311,12 @@ at full speed whenever nothing is decoding, so single-client serving is
 unaffected under every setting.
 
 The deeper the context, the more this matters. In our serve benchmarks on
-the same 35B-A3B, adding a second client at 14k tokens used to drop
-aggregate decode to 0.57x of single-stream; paced, it lands above
-single-stream. At 50k tokens each of two streams held ~10 tok/s under
-alternation and ~50 tok/s paced, because a 50k admission previously froze
-live streams for tens of seconds. The key is `server.decode_prefill_ratio`
+the same 35B-A3B, a second client arriving at 14k tokens under strict
+alternation froze the live stream to 4 percent of its decode rate for the
+whole admission; paced, it keeps 80 percent, with the second client's
+time-to-first-token unchanged. At 50k tokens the admission is roughly a
+minute of prefill and the live stream holds 54 percent instead of 3, a
+~26x higher rate through the window. The key is `server.decode_prefill_ratio`
 ([server-config.md](server-config.md)), the `serve` flag is
 `--decode-prefill-ratio`, and the `GMLX_DECODE_PREFILL_RATIO` env is read
 per scheduler tick, so it can be changed on a live server.
