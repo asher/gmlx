@@ -993,6 +993,10 @@ def test_decode_prefill_ratio_parsed_and_defaults_none():
                         ).decode_prefill_ratio == 1.5            # coerced to float
     assert build_config({"server": {"decode_prefill_ratio": 0}}
                         ).decode_prefill_ratio == 0.0            # 0 => stock sched
+    assert build_config({"server": {"decode_prefill_ratio": "auto"}}
+                        ).decode_prefill_ratio == "auto"
+    assert build_config({"server": {"decode_prefill_ratio": " AUTO "}}
+                        ).decode_prefill_ratio == "auto"         # case/space
     with pytest.raises(ConfigError):
         build_config({"server": {"decode_prefill_ratio": "fast"}})
 

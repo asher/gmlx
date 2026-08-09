@@ -278,15 +278,31 @@ What needs managing is admission: a new request's prompt must prefill while
 existing streams are mid-decode. Prefill runs in 2048-token chunks, and a
 scheduler that simply alternates one decode step with one chunk lets a long
 admission starve live streams, because at depth a chunk costs hundreds of
-decode steps' worth of GPU time. The server paces admissions instead:
-`decode_prefill_ratio` (default `1.0`) admits the next chunk only after the
-decode batch has received that multiple of the previous chunk's GPU time. At
-the default, live streams keep roughly half their throughput while a prompt
-is admitted, and the incoming request's time-to-first-token stretches by up
-to (1 + ratio)x under load. Raise the ratio when live-stream decode matters
-most, lower it toward `0` when time-to-first-token does; `0` restores strict
-alternation. Prefill runs at full speed whenever nothing is decoding, so
-single-client serving is unaffected.
+decode steps' worth of GPU time. Whether pacing admissions helps is decided
+by that same quantity: when a chunk costs a live stream many decode steps
+(deep context), stock scheduling starves it and pacing rescues it; when
+chunks are cheap (shallow prompts, warm prefix hits), pacing only delays
+admission, and a delayed admission narrows the decode batch that aggregate
+throughput comes from.
+
+`decode_prefill_ratio` (default `auto`) measures this per tick and paces
+only when an already-decoding stream that was admitted before the waiters
+arrived would otherwise fall below half its batched decode rate. For
+simultaneous bursts (no incumbent to protect), cheap chunks, deep queues,
+and waiters past a deadline it runs stock scheduling, so one setting serves
+shallow-burst and deep-second-client load alike.
+
+A numeric value pins the static behavior: the decode batch receives that
+multiple of each chunk's GPU time before the next chunk is admitted, and at
+`1.0` live streams keep roughly half their throughput while a prompt is
+admitted. `0` restores strict alternation. Static pacing has two costs
+worth naming. A waiter's time-to-first-token stretch compounds with queue
+depth, since each waiter also waits out the throttled prefill of everyone
+ahead of it: several-fold at moderate bursts, not the single-admission
+(1 + ratio)x. And delaying admission keeps the decode batch narrow, which
+at burst concurrency can cost aggregate throughput outright. Prefill runs
+at full speed whenever nothing is decoding, so single-client serving is
+unaffected under every setting.
 
 The deeper the context, the more this matters. In our serve benchmarks on
 the same 35B-A3B, adding a second client at 14k tokens used to drop

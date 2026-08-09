@@ -8,6 +8,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- decode_prefill_ratio accepts "auto" and it is the new default: pacing
+  turns on only when a live stream admitted before the waiters would
+  drop below half its batched decode rate under stock scheduling, and
+  stands down for bursts, cheap chunks, deep queues, and stale waiters,
+  so one setting serves shallow-burst and deep-second-client load alike.
+  Set a numeric ratio (flag, config, or env) to pin the previous static
+  behavior; GMLX_DECODE_PREFILL_AUTO=0 falls back to the static paced
+  ratio without a restart.
+
 - GMLX_SERVE_MEMSTATS=path.jsonl writes a per-tick serve memory trace:
   MLX counters, free-headroom estimate, and per-owner cache byte
   attribution with allocation shapes marked on change, for diagnosing

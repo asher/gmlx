@@ -417,8 +417,9 @@ class ServerCfg:
     # Decode-priority prefill pacing ratio: a live decode batch gets this
     # multiple of each prefill chunk's GPU time before the next chunk is
     # admitted (1.0 ~= 50/50 split; 0 = stock 1 decode step : 1 chunk).
-    # None => leave the env / branch default (1.0) in place.
-    decode_prefill_ratio: float | None = None
+    # None => leave the env / branch default in place, which is "auto"
+    # (dynamic pacing via auto_ratio); a number pins a static split.
+    decode_prefill_ratio: float | str | None = None
     # Prefill tick budget in wall-clock ms: while decode rows are live, each
     # prefill chunk is halved until its predicted wall time (from the last
     # observed chunk cost) fits this budget, bounding the per-chunk decode
@@ -1246,6 +1247,14 @@ def _normalize_cache(where: str, raw) -> dict:
     return cache
 
 
+def _coerce_ratio(key: str, v, *, where: str = "server"):
+    """decode_prefill_ratio: a float, or the literal string "auto"
+    (case-insensitive, surrounding whitespace stripped)."""
+    if isinstance(v, str) and v.strip().lower() == "auto":
+        return "auto"
+    return _coerce_num(key, v, float, where=where)
+
+
 def _coerce_num(key: str, v, cast, *, where: str = "server"):
     """Coerce a numeric config key (YAML may carry it quoted as a string),
     raising a ConfigError naming the key and the bad value. ``None`` passes."""
@@ -1656,8 +1665,8 @@ def build_config(doc: dict) -> ServerCfg:
             "token_queue_timeout_s", srv.get("token_queue_timeout_s"), float),
         prefill_step_size=_coerce_num(
             "prefill_step_size", srv.get("prefill_step_size"), int),
-        decode_prefill_ratio=_coerce_num(
-            "decode_prefill_ratio", srv.get("decode_prefill_ratio"), float),
+        decode_prefill_ratio=_coerce_ratio(
+            "decode_prefill_ratio", srv.get("decode_prefill_ratio")),
         prefill_tick_ms=_coerce_num(
             "prefill_tick_ms", srv.get("prefill_tick_ms"), float),
         cache_limit_gb=_coerce_num(
