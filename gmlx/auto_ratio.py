@@ -13,7 +13,12 @@ comes from.
 
 Auto mode enforces one user-facing constraint, the retention floor rho
 (default 0.5): a live decoding row is not pushed below rho of its
-contemporaneous no-prefill batched rate. Steady-interleave algebra gives
+contemporaneous no-prefill batched rate. The floor is about sustained
+starvation, so pacing shapes multi-chunk prefill trains; C is measured,
+not predicted, so a single-chunk admission (a warm-prefix suffix, a
+short prompt) completes before its cost is observable, and its worst
+case for an incumbent is one chunk of stall, bounded by the prefill
+step size. Steady-interleave algebra gives
 retention r/(1+r) at ratio r independent of depth, so the floor fixes the
 paced ratio at rho/(1-rho) and the chunk-cost threshold at (1-rho)/rho;
 there is no useful middle ratio (a mid ratio pays for both a narrow
