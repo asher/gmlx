@@ -246,6 +246,10 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_rerank_route(getattr(cfg, "rerank", None))
     install_resolver_error_handlers()
     install_request_timing_log()
+    # Keep this the last BatchGenerator._next wrapper (outermost), so the
+    # trace brackets the full tick including pacing and admission work.
+    from ..serve_memtrace import install_serve_memtrace
+    install_serve_memtrace()
     # Last: the assistant chat wrapper must be outermost (alias ids never
     # reach the model resolver) and wrap the models override above.
     from ..assistant_serve import install_assistant_serve

@@ -6,6 +6,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- GMLX_SERVE_MEMSTATS=path.jsonl writes a per-tick serve memory trace:
+  MLX counters, free-headroom estimate, and per-owner cache byte
+  attribution with allocation shapes marked on change, for diagnosing
+  serve memory growth under load.
+
 ### Fixed
 
 - DeepSeek V4 serves concurrent requests: multi-row prompt batches on
