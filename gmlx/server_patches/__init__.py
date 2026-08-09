@@ -205,6 +205,11 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     # Before the model loads, so the cascade stamp wrapper (installed at load
     # time) wraps this and both survive.
     install_batched_cachelist_admission()
+    # After the pacer above so this wrapper runs outside it: a declined
+    # tick hides the pending list before the pacer looks, the pacer sees
+    # no prefill work, and decode runs unpaced while admission waits.
+    from ..admit_gate import install_admit_headroom_gate
+    install_admit_headroom_gate()
     install_chat_template_kwargs()
     install_thinking_budget_fix()
     install_openai_stop_sequences()

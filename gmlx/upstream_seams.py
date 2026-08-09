@@ -56,7 +56,9 @@ SEAMS: tuple[Seam, ...] = (
     # --- batched serve scheduler + ragged decode (batch_sched / ragged_decode) ---
     Seam("mlx_vlm.generate.ar", "BatchGenerator._next",
          "batch_sched.install_decode_priority_sched (decode-first tick, "
-         "prompt-arm structure, _prompt_time_counter contract)",
+         "prompt-arm structure, _prompt_time_counter contract); "
+         "admit_gate.install_admit_headroom_gate (admission-arm gating "
+         "via the pending-list stash); serve_memtrace (tick bracket)",
          critical=True),
     Seam("mlx_vlm.generate.ar", "BatchGenerator.insert",
          "batch_sched arrival-merge (_unprocessed_sequences append/rebind)"),

@@ -13,11 +13,16 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   attribution with allocation shapes marked on change, for diagnosing
   serve memory growth under load.
 
-### Fixed
+- Serve admission is gated on projected memory headroom: a request whose
+  measured KV and prefill-transient projection does not fit is kept
+  queued and retried each tick instead of committing memory the box does
+  not have. Requests are never failed by the gate, an idle server always
+  admits, and a request deferred past GMLX_ADMIT_DEFER_MAX_S (default
+  60s) is admitted anyway with a loud log. GMLX_ADMIT_HEADROOM=0
+  disables.
 
-- DeepSeek V4 serves concurrent requests: multi-row prompt batches on
-  pooling-cache models failed before prefill, and admission re-merged
-  already-batched caches, killing every request in flight above c=1.
+- /v1/metrics reports residency budget vs resident bytes, live
+  active/cache/headroom memory, and admission deferral counters.
 
 ### Changed
 
@@ -54,6 +59,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The serve free-headroom estimate went negative on models whose load
+  materializes weights into MLX-tracked memory (the same bytes counted
+  twice); the loader now registers only the truly untracked mmap
+  remainder, measured against the load's active-memory delta.
+- DeepSeek V4 serves concurrent requests: multi-row prompt batches on
+  pooling-cache models failed before prefill, and admission re-merged
+  already-batched caches, killing every request in flight above c=1.
 - GGUFs that quantize the MoE router gate (some community DeepSeek quants;
   llama.cpp's own quantize leaves it F32) now load: small quantized tensors
   on raw-array modules are dequantized to f32 at load instead of erroring.

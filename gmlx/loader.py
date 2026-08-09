@@ -2567,9 +2567,19 @@ def _warm_touch_threshold_bytes() -> int:
         return cap
 
 
+def _active_now() -> float | None:
+    """MLX-tracked active bytes, None off-device (baseline for the
+    untracked-weights split in _warm_mmap_residency)."""
+    try:
+        return float(mx.get_active_memory())
+    except Exception:
+        return None
+
+
 def _warm_mmap_residency(
     model, *, log=print, paths: list[str] | None = None,
     batch_bytes: int = 4 << 30, threshold_bytes: int | None = None,
+    active_before: float | None = None,
 ) -> None:
     """Pre-wire GPU residency of mmap-backed weights in small batches.
 
@@ -2592,9 +2602,32 @@ def _warm_mmap_residency(
     """
     arrays = [v for _, v in tree_flatten(model.parameters())]
     total = sum(a.nbytes for a in arrays)
-    # Register before any early return: the MTP seed-cap headroom estimate
-    # needs these bytes counted whether or not the touch pass runs.
-    note_untracked_weights(total)
+    try:
+        _warm_touch_pass(arrays, total, log=log, paths=paths,
+                         batch_bytes=batch_bytes,
+                         threshold_bytes=threshold_bytes)
+    finally:
+        # Register on every exit path: the headroom estimate needs weight
+        # bytes counted whether or not the touch pass ran. Only bytes
+        # invisible to mx.get_active_memory may be registered: weights a
+        # load materializes (owned copies, repacked buffers) are tracked
+        # already, and noting the full total for such a load counts them
+        # twice, driving the headroom estimate negative. The tracked
+        # portion is the active-memory delta across the load; the touch
+        # pass evaluates any still-lazy materialized weights first, so
+        # the delta is settled by this point.
+        tracked = 0.0
+        if active_before is not None:
+            try:
+                tracked = max(0.0, mx.get_active_memory() - active_before)
+            except Exception:
+                tracked = 0.0
+        note_untracked_weights(max(0.0, total - min(tracked, total)))
+
+
+def _warm_touch_pass(
+    arrays, total, *, log, paths, batch_bytes, threshold_bytes,
+) -> None:
     mode = os.environ.get("GMLX_RESIDENCY_WARM", "")
     if mode == "0":
         return
@@ -2767,6 +2800,7 @@ def _install_and_load(
     cast (see ``_FP32_KEEP_BY_MODEL_TYPE``).
     """
     loadlog.stage("loading weights")
+    active_before = _active_now()
     # 5. sanitize first - model.sanitize may rename keys; rebuild meta.
     if sanitize and hasattr(model, "sanitize"):
         hf_weights = model.sanitize(hf_weights)
@@ -2877,7 +2911,7 @@ def _install_and_load(
 
     model.load_weights(list(loadable.items()), strict=False)
     log(f"[load_weights] loaded {len(loadable)} / {len(model_params)} model parameters")
-    _warm_mmap_residency(model, log=log)
+    _warm_mmap_residency(model, log=log, active_before=active_before)
 
     missing = sorted(model_params - set(loadable.keys()))
     if missing:
@@ -3018,6 +3052,7 @@ def load_model(
     """
 
     _log = loadlog.verbose_print
+    active_before = _active_now()
 
     # 0. preflight - discover shards, classify codecs (IQ / unsupported types
     #    refuse here, naming the codec, before kq.load_gguf's cryptic
@@ -3334,7 +3369,8 @@ def load_model(
     _log(
         f"[load_weights] loaded {len(loadable)} / {len(model_params)} model parameters"
     )
-    _warm_mmap_residency(model, log=_log, paths=pf.shards)
+    _warm_mmap_residency(model, log=_log, paths=pf.shards,
+                         active_before=active_before)
 
     # DiffusionGemma's denoiser needs a dense float embedding table for its
     # probability-weighted soft-embedding step; dequantize it post-load.

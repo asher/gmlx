@@ -228,6 +228,34 @@ def install_runtime_snapshot_enrichment() -> None:
     def snapshot():
         base = original()
         base["resident_models"] = _resident_models_view()
+        pool = _get_pool()
+        if pool is not None:
+            try:
+                st = pool.stats()
+                base["residency"] = {
+                    k: st[k] for k in ("budget_bytes", "resident_bytes")
+                    if k in st}
+            except Exception:
+                pass
+        try:
+            import mlx.core as mx
+
+            from ..prefill_decay import headroom_bytes
+
+            head = headroom_bytes()
+            base["memory"] = {
+                "active_bytes": int(mx.get_active_memory()),
+                "cache_bytes": int(mx.get_cache_memory()),
+                "headroom_bytes": None if head is None else int(head),
+            }
+        except Exception:
+            pass
+        try:
+            from ..admit_gate import admit_stats
+
+            base["admission"] = admit_stats()
+        except Exception:
+            pass
         return base
 
     snapshot.__dict__[_PATCH_FLAG] = True
