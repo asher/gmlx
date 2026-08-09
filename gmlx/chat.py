@@ -1570,25 +1570,40 @@ def _wire_ptk(state: ChatState) -> bool:
 
     def _toolbar():
         s = state.sampling
+        # (part, droppable) pairs: on a narrow terminal the sampling knobs
+        # go first so the tail stats (ctx, staged, tok/s) survive whole.
+        # prompt_toolkit would otherwise clip the toolbar tail-first, which
+        # cuts exactly the live numbers a small pane is watched for.
         parts = []
         if state.model_name:
-            parts.append(state.model_name)
+            parts.append((state.model_name, False))
         parts += [
-            f"temp={s['temp']:g}",
-            f"top-p={s['top_p']:g}",
-            f"max-tok={s['max_tokens'] or 'off'}",
+            (f"temp={s['temp']:g}", True),
+            (f"top-p={s['top_p']:g}", True),
+            (f"max-tok={s['max_tokens'] or 'off'}", True),
         ]
         if state.ctx_used and state.ctx_max:
-            parts.append(f"ctx {_fmt_k(state.ctx_used)}/{_fmt_k(state.ctx_max)}")
+            parts.append(
+                (f"ctx {_fmt_k(state.ctx_used)}/{_fmt_k(state.ctx_max)}",
+                 False))
         if state.staged:
-            parts.append(f"+{len(state.staged)} staged")
+            parts.append((f"+{len(state.staged)} staged", False))
         if state.staged_images:
-            parts.append(f"+{len(state.staged_images)} img")
+            parts.append((f"+{len(state.staged_images)} img", False))
         if state.staged_audio:
-            parts.append(f"+{len(state.staged_audio)} aud")
+            parts.append((f"+{len(state.staged_audio)} aud", False))
         if state.last_tps:
-            parts.append(f"{state.last_tps:.1f} tok/s")
-        return " · ".join(parts)
+            parts.append((f"{state.last_tps:.1f} tok/s", False))
+        try:
+            from prompt_toolkit.application import get_app
+            width = get_app().output.get_size().columns
+        except Exception:  # noqa: BLE001 - no app yet: keep everything
+            width = None
+        if width:
+            while (len(" · ".join(p for p, _ in parts)) > width
+                   and any(d for _, d in parts)):
+                parts.pop(next(i for i, (_, d) in enumerate(parts) if d))
+        return " · ".join(p for p, _ in parts)
 
     state.ptk_session = PromptSession(
         history=_ToggleableFileHistory(hist_file),
