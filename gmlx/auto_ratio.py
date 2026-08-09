@@ -23,7 +23,7 @@ the paced ratio or 0, per tick:
     r = rho/(1-rho)  if an incumbent row exists (admitted at least
                         grace_ms before the oldest waiter arrived)
                      and C > (1-rho)/rho (hysteresis + dwell)
-                     and the oldest QUEUED waiter is inside deadline_s
+                     and no queued waiter's paced wait exceeds deadline_s
         0            otherwise
 
 A waiter is a queued sequence or a row of the active prompt batch: a
@@ -33,6 +33,19 @@ it starts. Only queued waiters age toward the deadline; a prefilling
 waiter's TTFT is already bounded multiplicatively by the paced ratio
 (its chunk train stretches by at most (1+r)x), while a queued waiter's
 wait is what pacing cannot bound.
+
+The deadline ages pacing-attributable seconds, not wall time since
+arrival: a queued waiter accrues age only on ticks where a prompt
+train is live and the previous tick resolved paced, bounded at 1 s per
+tick. Time blocked by capacity is deliberately excluded. A waiter
+behind a full decode batch or a memory-gate decline is not waiting on
+pacing, and abandoning the floor for it cannot admit it any sooner:
+ratio 0 creates neither batch slots nor headroom, so an arrival-age
+deadline would starve every incumbent to buy nothing. The sustained
+regime C run measured exactly this shape: four waiters capacity-held
+~50 s at saturation whose final admission was correctly paced, while
+waiters genuinely queued behind paced trains aged to the deadline and
+were shed unpaced.
 
 Only the C conjunct enforces the floor; incumbency decides whether anyone
 is owed it. The deadline conjunct knowingly abandons the floor in favor
@@ -56,10 +69,16 @@ decode step cost s is an exponentially weighted mean per decode width
 is skipped (its bracket reads the chunk's sync, not a step), and C is
 computed residue-corrected as max(0, last_chunk - s) / s because the
 chunk bracket absorbs up to one in-flight decode step. Waiter arrival and
-row admission stamps are kept per uid, bounded by one tick. Time a waiter
-spends declined by the admission gate does not count against the deadline
-(the gate, not pacing, is why it waits), read through getattr defaults so
-either feature works without the other.
+row admission stamps are kept per uid, bounded by one tick.
+
+Admission-gate coupling: on a declined tick the gate hides the pending
+list from the stock body, so this resolver sees no queued waiters and
+accrues nothing, which is the exclusion the design wants (the gate, not
+pacing, is why they wait). The one thing the resolver must do is keep
+stamps and accruals alive for hidden waiters instead of pruning them as
+departed, so it unions the gate's deferred-uid dict
+(``_kq_admit_deferred_s``, read through getattr defaults so either
+feature works without the other) into the waiter set for retention.
 
 State lives on the generator under ``_kq_auto_`` attributes. The kill
 switch GMLX_DECODE_PREFILL_AUTO=0 resolves auto to the static paced ratio
@@ -71,7 +90,7 @@ Calibration knobs (documented here, not in the public config reference):
     GMLX_DECODE_PREFILL_FLOOR     retention floor rho (default 0.5)
     GMLX_DECODE_PREFILL_HYST      C hysteresis band (default 1.5)
     GMLX_DECODE_PREFILL_DWELL_MS  min time in a C state (default 1000)
-    GMLX_DECODE_PREFILL_DEADLINE_S oldest-waiter age forcing ratio 0
+    GMLX_DECODE_PREFILL_DEADLINE_S queued paced-wait forcing ratio 0
                                       (default 10)
     GMLX_DECODE_PREFILL_GRACE_MS  incumbency grace (default 500)
     GMLX_DECODE_PREFILL_ALPHA     step-cost smoothing (default 0.2)
@@ -123,8 +142,10 @@ class _AutoState:
         self.skip_next_step = False
         self.first_seen: dict = {}
         self.admitted_at: dict = {}
+        self.paced_wait: dict = {}
         self.c_on: bool | None = None
         self.c_since = 0.0
+        self.last_resolve_t: float | None = None
         self.last_log = 0.0
         self.last_resolved: float | None = None
 
@@ -182,13 +203,20 @@ def _stamp(gen, st: _AutoState, now: float) -> None:
     # batch; the stamp dies when its rows reach the decode batch (or the
     # request is gone). Dropping it at promotion would both end pacing a
     # tick after the chunk train starts and reset incumbency comparisons.
+    # Gate-deferred waiters are hidden from the pending list on declined
+    # ticks; their stamps and accruals are retained, not pruned.
     pending_uids = [s[0] for s in gen._unprocessed_sequences]
-    waiter_uids = pending_uids + _pb_uids(gen)
+    gate_hidden = list(getattr(gen, "_kq_admit_deferred_s", None) or {})
+    waiter_uids = pending_uids + _pb_uids(gen) + gate_hidden
     for uid in waiter_uids:
         st.first_seen.setdefault(uid, now)
+    keep = set(waiter_uids)
     for uid in list(st.first_seen):
-        if uid not in set(waiter_uids):
+        if uid not in keep:
             del st.first_seen[uid]
+    for uid in list(st.paced_wait):
+        if uid not in keep:
+            del st.paced_wait[uid]
     live = list(getattr(gen._generation_batch, "uids", ()))
     for uid in live:
         st.admitted_at.setdefault(uid, now)
@@ -233,26 +261,35 @@ def resolve(gen, now: float | None = None) -> float:
     _stamp(gen, st, now)
     pending = gen._unprocessed_sequences
     prefilling = _pb_uids(gen)
+
+    # Deadline accrual: queued waiters age only by pacing-attributable
+    # time, ticks spent behind a live paced train. Capacity waits (full
+    # decode batch: no train live; gate declines: pending hidden) accrue
+    # nothing, because ratio 0 cannot admit those waiters any sooner.
+    # The per-tick bound keeps a stalled tick from charging its gap to
+    # pacing.
+    dt = min(max(now - st.last_resolve_t, 0.0), 1.0) \
+        if st.last_resolve_t is not None else 0.0
+    st.last_resolve_t = now
+    if dt > 0.0 and prefilling and (st.last_resolved or 0.0) > 0.0:
+        for s in pending:
+            st.paced_wait[s[0]] = st.paced_wait.get(s[0], 0.0) + dt
+
     if not pending and not prefilling:
         return _resolved(gen, st, 0.0, now, "no waiters")
-
-    # Admission-gate coupling: time declined by the gate is not pacing's
-    # doing, so a waiter's gate-declined seconds do not age it toward
-    # the deadline.
-    gate_deferred = getattr(gen, "_kq_admit_deferred_s", {}) or {}
 
     # Incumbency compares against the oldest waiter of either kind;
     # the deadline (below) ages only the queued ones.
     oldest_seen = None
-    queued_uid, queued_seen = None, None
+    queued_uid, queued_wait = None, 0.0
     for uid in [s[0] for s in pending] + prefilling:
         seen = st.first_seen.get(uid, now)
         if oldest_seen is None or seen < oldest_seen:
             oldest_seen = seen
     for s in pending:
-        seen = st.first_seen.get(s[0], now)
-        if queued_seen is None or seen < queued_seen:
-            queued_uid, queued_seen = s[0], seen
+        wait = st.paced_wait.get(s[0], 0.0)
+        if queued_uid is None or wait > queued_wait:
+            queued_uid, queued_wait = s[0], wait
 
     grace = _envf("GMLX_DECODE_PREFILL_GRACE_MS", 500.0) / 1e3
     incumbent = None
@@ -273,18 +310,15 @@ def resolve(gen, now: float | None = None) -> float:
 
     # Deadline: queued waiters only. A prefilling waiter's TTFT is
     # bounded by the paced ratio itself (chunk train stretches at most
-    # (1+r)x); a queued waiter's wait has no such bound, so it is the
-    # one the floor is abandoned for.
+    # (1+r)x); a queued waiter's paced wait has no such bound, so it is
+    # the one the floor is abandoned for.
     deadline = deadline_s()
-    if queued_seen is not None:
-        age = now - queued_seen
-        age -= float(gate_deferred.get(queued_uid, 0.0))
-        if age > deadline:
-            return _resolved(
-                gen, st, 0.0, now,
-                f"queued waiter {age:.1f}s > deadline {deadline:.1f}s "
-                f"(floor abandoned: incumbent uid={incumbent} projected "
-                f"retention {1.0 / (1.0 + c):.2f})")
+    if queued_uid is not None and queued_wait > deadline:
+        return _resolved(
+            gen, st, 0.0, now,
+            f"queued waiter paced {queued_wait:.1f}s > deadline "
+            f"{deadline:.1f}s (floor abandoned: incumbent uid={incumbent} "
+            f"projected retention {1.0 / (1.0 + c):.2f})")
 
     return _resolved(
         gen, st, paced_ratio(), now,

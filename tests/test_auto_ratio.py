@@ -1,5 +1,5 @@
 """Auto pacing resolver: one case per conjunct, hysteresis, dwell, grace,
-queue band, gate coupling. Pure logic over a fake generator with an
+deadline accrual, gate coupling. Pure logic over a fake generator with an
 injected clock (resolve takes ``now``; nothing sleeps)."""
 
 import gmlx.auto_ratio as ar
@@ -115,11 +115,31 @@ def test_burst_stays_paced():
 
 
 def test_deadline_forces_stock():
+    # A waiter queued behind a live paced train accrues pacing-attributable
+    # age (bounded 1 s per tick) and forces ratio 0 past the deadline.
     g = _incumbent_gen(0.0)
     _add_waiter(g)
-    assert ar.resolve(g, 1.0) == ar.paced_ratio()  # stamps first_seen at 1.0
-    assert ar.resolve(g, 5.0) == ar.paced_ratio()
-    assert ar.resolve(g, 11.5) == 0.0  # age 10.5 > deadline 10
+    assert ar.resolve(g, 1.0) == ar.paced_ratio()
+    g._prompt_batch = FakeBatch([9])   # a train is live; waiter 7 queued
+    t = 1.0
+    while t < 11.0:                    # accrues 1.0 per 1 s tick
+        t += 1.0
+        assert ar.resolve(g, t) == ar.paced_ratio()
+    assert ar.resolve(g, 12.0) == 0.0  # paced wait 11 > deadline 10
+    # stood down is monotone: no further accrual, value holds past deadline
+    assert ar.resolve(g, 13.0) == 0.0
+
+
+def test_capacity_wait_does_not_age_toward_deadline():
+    # No live train means the waiter is blocked by capacity (full decode
+    # batch), not pacing; ratio 0 could not admit it sooner, so it never
+    # ages and the floor holds indefinitely.
+    g = _incumbent_gen(0.0)
+    _add_waiter(g)
+    t = 0.0
+    while t < 30.0:
+        t += 1.0
+        assert ar.resolve(g, t) == ar.paced_ratio()
 
 
 def test_pacing_survives_promotion_to_prompt_batch():
@@ -156,19 +176,41 @@ def test_queued_waiter_behind_prompt_batch_still_ages():
     _add_waiter(g)
     ar.resolve(g, 1.0)
     g._unprocessed_sequences.clear()
-    g._prompt_batch = FakeBatch([7])
-    _add_waiter(g, 8)
-    assert ar.resolve(g, 2.0) == ar.paced_ratio()  # stamps 8 at 2.0
-    assert ar.resolve(g, 13.0) == 0.0  # queued age 11 > deadline 10
+    g._prompt_batch = FakeBatch([7])   # waiter 7 promoted; its train paced
+    _add_waiter(g, 8)                  # 8 queued behind it
+    t = 1.0
+    while t < 11.0:
+        t += 1.0
+        assert ar.resolve(g, t) == ar.paced_ratio()
+    assert ar.resolve(g, 13.0) == 0.0  # 8's paced wait > deadline 10
 
 
-def test_gate_deferred_time_excluded_from_deadline():
+def test_gate_hidden_ticks_freeze_deadline_and_keep_stamps():
+    # The gate hides pending on declined ticks. Hidden ticks accrue no
+    # paced wait (the gate, not pacing, is why the waiter waits), and
+    # stamps survive so incumbency and accrued age resume, not reset.
     g = _incumbent_gen(0.0)
     _add_waiter(g)
-    ar.resolve(g, 1.0)
-    g._kq_admit_deferred_s = {7: 5.0}
-    # age 10.5 minus 5 gate-deferred = 5.5, inside the deadline
-    assert ar.resolve(g, 11.5) == ar.paced_ratio()
+    g._prompt_batch = FakeBatch([9])
+    for t in (1.0, 2.0, 3.0, 4.0, 5.0, 6.0):
+        assert ar.resolve(g, t) == ar.paced_ratio()
+    st = g._kq_auto
+    assert st.paced_wait[7] == 5.0
+    seen = st.first_seen[7]
+    # gate declines: pending stashed empty, deferred dict marks uid 7
+    stash = g._unprocessed_sequences
+    g._unprocessed_sequences = []
+    g._kq_admit_deferred_s = {7: 0.0}
+    for t in (7.0, 8.0, 20.0):
+        ar.resolve(g, t)
+    assert st.paced_wait[7] == 5.0     # frozen, not accrued, not wiped
+    assert st.first_seen[7] == seen    # arrival stamp survives hiding
+    # gate admits: pending restored; accrual resumes where it left off
+    g._unprocessed_sequences = stash
+    g._kq_admit_deferred_s = {}
+    for t in (21.0, 22.0, 23.0, 24.0, 25.0):
+        assert ar.resolve(g, t) == ar.paced_ratio()
+    assert ar.resolve(g, 27.0) == 0.0  # 5 + 6 accrued > deadline 10
 
 
 def test_width_change_freezes_c_state():

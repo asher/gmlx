@@ -251,8 +251,10 @@ that is a multi-second stall per admission. The default `auto` paces only
 when an already-decoding stream admitted before the waiters would otherwise
 fall below half its batched decode rate (the floor;
 `GMLX_DECODE_PREFILL_FLOOR`), and runs stock scheduling for simultaneous
-bursts, cheap chunks, and queued waiters past a deadline (a prompt
-already being prefilled is bounded by pacing itself). A numeric
+bursts, cheap chunks, and queued waiters held behind paced admissions
+past a deadline (a prompt already being prefilled is bounded by pacing
+itself, and time blocked by capacity rather than pacing does not age
+toward the deadline). A numeric
 value pins static pacing: a prefill chunk is admitted only after the decode
 batch has received that multiple of the chunk's GPU time; live streams then
 keep ~half throughput during admissions at `1.0`, while a waiter's

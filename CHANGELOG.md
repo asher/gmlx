@@ -12,8 +12,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   turns on only when a live stream admitted before the waiters would
   drop below half its batched decode rate under stock scheduling, and
   stands down for simultaneous bursts, cheap chunks, and queued waiters
-  stuck past a deadline, so one setting serves shallow-burst and
-  deep-second-client load alike.
+  held behind paced admissions past a deadline, so one setting serves
+  shallow-burst and deep-second-client load alike.
   Set a numeric ratio (flag, config, or env) to pin the previous static
   behavior; GMLX_DECODE_PREFILL_AUTO=0 falls back to the static paced
   ratio without a restart.
