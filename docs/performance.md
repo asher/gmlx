@@ -289,8 +289,8 @@ throughput comes from.
 only when an already-decoding stream that was admitted before the waiters
 arrived would otherwise fall below half its batched decode rate. For
 simultaneous bursts (no incumbent to protect), cheap chunks, deep queues,
-and waiters past a deadline it runs stock scheduling, so one setting serves
-shallow-burst and deep-second-client load alike.
+and queued waiters past a deadline it runs stock scheduling, so one
+setting serves shallow-burst and deep-second-client load alike.
 
 A numeric value pins the static behavior: the decode batch receives that
 multiple of each chunk's GPU time before the next chunk is admitted, and at
