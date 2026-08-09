@@ -31,10 +31,7 @@ classifiers = [
 # mlx / mlx-lm / mlx-vlm move in lockstep with the exact mlx-vlm pin; bump them
 # together per docs/upstream-upgrades.md.
 dependencies = [
-    # >=0.3.7: first release with a cp314 wheel. Below it, a Python 3.14
-    # install (uv and pipx pick the newest interpreter by default) silently
-    # falls back to compiling the Metal kernels from source.
-    "mlx-kquant>=0.3.9",
+    "mlx-kquant>=0.3.10,<0.4",
     "mlx-lm>=0.31",
     # Direct imports of both throughout (mx.*, np.*); declared explicitly
     # rather than inherited through mlx-lm.
