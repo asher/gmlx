@@ -99,24 +99,19 @@ def test_c_hysteresis_and_dwell():
     assert ar.resolve(g, 2.6) == 0.0
 
 
-def test_queue_band_hysteresis(monkeypatch):
-    monkeypatch.setenv("GMLX_DECODE_PREFILL_QUEUE_MAX", "2")
+def test_burst_stays_paced():
+    # The regime C burst regression: a burst of queued waiters is not
+    # queue pressure (they promote into the prompt batch within a tick
+    # or two), and standing down on count was a race against promotion.
+    # A burst paces; only deadline-aged queued waiters abandon the floor.
     g = _incumbent_gen(0.0)
-    for uid in (7, 8, 9):
+    for uid in (7, 8, 9, 10):
         _add_waiter(g, uid)
-    assert ar.resolve(g, 1.0) == 0.0        # 3 > 2: stand down
-    g._unprocessed_sequences.pop()
-    assert ar.resolve(g, 1.1) == 0.0        # 2 == 2: band holds
-    g._unprocessed_sequences.pop()
-    assert ar.resolve(g, 1.2) == ar.paced_ratio()  # 1 < 2: resume
-
-
-def test_queue_band_initializes_permissive():
-    # first contact at pending == queue_max must pace (the certified
-    # second-client case)
-    g = _incumbent_gen(0.0)
-    _add_waiter(g)  # pending == queue_max == 1
     assert ar.resolve(g, 1.0) == ar.paced_ratio()
+    # burst promotes into the prompt batch: still paced
+    g._unprocessed_sequences.clear()
+    g._prompt_batch = FakeBatch([7, 8, 9, 10])
+    assert ar.resolve(g, 2.0) == ar.paced_ratio()
 
 
 def test_deadline_forces_stock():
@@ -174,17 +169,6 @@ def test_gate_deferred_time_excluded_from_deadline():
     g._kq_admit_deferred_s = {7: 5.0}
     # age 10.5 minus 5 gate-deferred = 5.5, inside the deadline
     assert ar.resolve(g, 11.5) == ar.paced_ratio()
-
-
-def test_gate_decline_excludes_pending_count():
-    g = _incumbent_gen(0.0)
-    for uid in (7, 8):
-        _add_waiter(g, uid)
-    assert ar.resolve(g, 1.0) == 0.0  # 2 > queue_max 1: stand down
-    # gate declined on the previous tick: waiters leave the pending count
-    # and the band resumes below queue_max
-    g._kq_admit_last_decline = 1.05
-    assert ar.resolve(g, 1.1) == ar.paced_ratio()
 
 
 def test_width_change_freezes_c_state():

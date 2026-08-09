@@ -288,9 +288,12 @@ throughput comes from.
 `decode_prefill_ratio` (default `auto`) measures this per tick and paces
 only when an already-decoding stream that was admitted before the waiters
 arrived would otherwise fall below half its batched decode rate. For
-simultaneous bursts (no incumbent to protect), cheap chunks, deep queues,
-and queued waiters past a deadline it runs stock scheduling, so one
-setting serves shallow-burst and deep-second-client load alike.
+simultaneous bursts (no incumbent to protect), cheap chunks, and queued
+waiters past a deadline it runs stock scheduling, so one setting serves
+shallow-burst and deep-second-client load alike. Paced admission bounds
+every waiter's time-to-first-token at twice its unpaced prefill, even
+when several arrive at once; a queued waiter that cannot make progress
+past the deadline is what forces stock scheduling.
 
 A numeric value pins the static behavior: the decode batch receives that
 multiple of each chunk's GPU time before the next chunk is admitted, and at

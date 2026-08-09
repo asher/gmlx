@@ -23,7 +23,6 @@ the paced ratio or 0, per tick:
     r = rho/(1-rho)  if an incumbent row exists (admitted at least
                         grace_ms before the oldest waiter arrived)
                      and C > (1-rho)/rho (hysteresis + dwell)
-                     and pending count <= queue_max (own hysteresis)
                      and the oldest QUEUED waiter is inside deadline_s
         0            otherwise
 
@@ -36,9 +35,20 @@ waiter's TTFT is already bounded multiplicatively by the paced ratio
 wait is what pacing cannot bound.
 
 Only the C conjunct enforces the floor; incumbency decides whether anyone
-is owed it. The queue and deadline conjuncts knowingly abandon the floor
-in favor of waiters, and every tick that does so logs the abandonment
-with the incumbent's projected retention.
+is owed it. The deadline conjunct knowingly abandons the floor in favor
+of waiters, and every tick that does so logs the abandonment with the
+incumbent's projected retention.
+
+The deadline is the only abandonment policy; there is deliberately no
+queue-depth term. Waiters drain into the prompt batch within a tick or
+two of arriving, so a count of queued sequences is a race against
+promotion, not a measure of pressure (the same burst can read 4 or 0
+depending on tick phase). Real pressure is waiters that cannot promote,
+and those age in the queue until the deadline abandons the floor for
+them. Standing down on count alone was measured to freeze the incumbent
+to ~0.02 retention during a burst's batched prefill while also finishing
+the incumbent later than pacing would have; the paced alternative holds
+the floor and bounds every burst waiter's TTFT at (1+r)x unpaced.
 
 Signals are measured in the scheduler wrapper with no new sync: the
 decode step cost s is an exponentially weighted mean per decode width
@@ -61,8 +71,6 @@ Calibration knobs (documented here, not in the public config reference):
     GMLX_DECODE_PREFILL_FLOOR     retention floor rho (default 0.5)
     GMLX_DECODE_PREFILL_HYST      C hysteresis band (default 1.5)
     GMLX_DECODE_PREFILL_DWELL_MS  min time in a C state (default 1000)
-    GMLX_DECODE_PREFILL_QUEUE_MAX pending above which pacing stands down
-                                      (default 1, one-count hysteresis)
     GMLX_DECODE_PREFILL_DEADLINE_S oldest-waiter age forcing ratio 0
                                       (default 10)
     GMLX_DECODE_PREFILL_GRACE_MS  incumbency grace (default 500)
@@ -102,10 +110,6 @@ def c_threshold() -> float:
     return (1.0 - rho) / rho
 
 
-def queue_max() -> int:
-    return int(_envf("GMLX_DECODE_PREFILL_QUEUE_MAX", 1))
-
-
 def deadline_s() -> float:
     return _envf("GMLX_DECODE_PREFILL_DEADLINE_S", 10.0)
 
@@ -121,9 +125,6 @@ class _AutoState:
         self.admitted_at: dict = {}
         self.c_on: bool | None = None
         self.c_since = 0.0
-        self.queue_ok = True     # permissive init: first contact at
-        # pending == queue_max is the hold case and must pace
-        self.last_tick = 0.0
         self.last_log = 0.0
         self.last_resolved: float | None = None
 
@@ -229,7 +230,6 @@ def resolve(gen, now: float | None = None) -> float:
     st = _state(gen)
     if now is None:
         now = time.perf_counter()
-    prev_tick, st.last_tick = st.last_tick, now
     _stamp(gen, st, now)
     pending = gen._unprocessed_sequences
     prefilling = _pb_uids(gen)
@@ -237,13 +237,9 @@ def resolve(gen, now: float | None = None) -> float:
         return _resolved(gen, st, 0.0, now, "no waiters")
 
     # Admission-gate coupling: time declined by the gate is not pacing's
-    # doing. Gate-declined waiters leave the pending count while the last
-    # decline was the previous tick, and their declined seconds do not
-    # age them toward the deadline.
+    # doing, so a waiter's gate-declined seconds do not age it toward
+    # the deadline.
     gate_deferred = getattr(gen, "_kq_admit_deferred_s", {}) or {}
-    last_decline = getattr(gen, "_kq_admit_last_decline", 0.0)
-    gate_active = bool(last_decline) and last_decline >= prev_tick > 0.0
-    pending_count = 0 if gate_active else len(pending)
 
     # Incumbency compares against the oldest waiter of either kind;
     # the deadline (below) ages only the queued ones.
@@ -274,18 +270,6 @@ def resolve(gen, now: float | None = None) -> float:
     if not c_wants:
         return _resolved(gen, st, 0.0, now,
                          f"chunk {c:.1f} steps <= {c_threshold():.1f}")
-
-    qmax = queue_max()
-    if pending_count > qmax:
-        st.queue_ok = False
-    elif pending_count < qmax:
-        st.queue_ok = True
-    if not st.queue_ok:
-        return _resolved(
-            gen, st, 0.0, now,
-            f"queue depth {pending_count} > {qmax} (floor abandoned: "
-            f"incumbent uid={incumbent} projected retention "
-            f"{1.0 / (1.0 + c):.2f})")
 
     # Deadline: queued waiters only. A prefilling waiter's TTFT is
     # bounded by the paced ratio itself (chunk train stretches at most

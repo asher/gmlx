@@ -1529,12 +1529,12 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     if ratio is not None:
         if isinstance(ratio, str):
             from .auto_ratio import (c_threshold, deadline_s, floor_rho,
-                                     paced_ratio, queue_max)
+                                     paced_ratio)
             os.environ["GMLX_DECODE_PREFILL_RATIO"] = "auto"
             print(f"[server] decode-prefill pacing ratio: auto "
                   f"(floor {floor_rho():.2f} -> paced {paced_ratio():.2f}, "
                   f"chunk threshold {c_threshold():.1f}, "
-                  f"queue max {queue_max()}, deadline {deadline_s():.1f}s)")
+                  f"deadline {deadline_s():.1f}s)")
         elif ratio < 0:
             print(f"[server] ignoring negative decode-prefill ratio {ratio}")
         else:
