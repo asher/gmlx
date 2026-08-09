@@ -287,7 +287,12 @@ def drafter_sidecar_store(
         if disk is not None:
             try:
                 from mlx_vlm import apc as _apc
-                salted = sidecar_extra_hash(extra_hash)
+                # Both sidecar sides bypass the manager wrappers, so the
+                # wire salt is mixed here and in the lookup twin -- a
+                # drafter cache written under one KV wire config must not
+                # restore under another.
+                salted = sidecar_extra_hash(extra_hash) ^ int(
+                    getattr(manager, "_exact_extra_salt", 0) or 0)
                 khash = _apc._sequence_hash(ids, salted, manager.block_size)
                 disk.save_exact_cache(khash, ids, salted, clones)
                 with manager.lock:
@@ -333,7 +338,8 @@ def drafter_sidecar_lookup(
         disk = getattr(manager, "disk", None)
         if disk is None:
             return None
-        salted = sidecar_extra_hash(extra_hash)
+        salted = sidecar_extra_hash(extra_hash) ^ int(
+            getattr(manager, "_exact_extra_salt", 0) or 0)
         match = disk.find_exact_prefix(
             ids, extra_hash=salted,
             max_prefix_tokens=prefix_len,
@@ -1193,6 +1199,13 @@ def _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
         entries.append(sent)
         from mlx_vlm import apc as _apc
         tid = tuple(ids)
+        # Mirror the manager's wire salt: the read side goes through
+        # lookup_exact_cache, which XORs _exact_extra_salt into the value
+        # that feeds BOTH the sequence hash and the persisted-metadata
+        # check -- a write missing either half is a permanent restart
+        # miss on every salted (kvarn) boot. One variable salts both.
+        salted = int(salted) ^ int(
+            getattr(manager, "_exact_extra_salt", 0) or 0)
         khash = _apc._sequence_hash(tid, salted, manager.block_size)
         disk.save_exact_cache(khash, tid, salted, entries)
         _ckpt_bump(manager, "ckpt_skeleton_writes")
@@ -1419,12 +1432,15 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
                 and last.cache[0] is not None
                 and getattr(last.cache[0], "size", 0) == 1):
             entries = entries[:-1]
+    from .kvarn_cache import KVarNKVCache
     tags = []
     for e in entries:
         if isinstance(e, rot_types):
             tags.append(_rot_tag(e))
         elif isinstance(e, kv_types):
             tags.append("kv")
+        elif type(e) is KVarNKVCache:
+            tags.append(_kvarn_tag(e))
         else:
             tags.append("arr")
     if layout is not None and tuple(layout) != tuple(tags):
@@ -1533,14 +1549,36 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
             elif _is_rot(tag):
                 warm.append(layer_rot[rot_i])
                 rot_i += 1
+            elif _is_kvarn(tag):
+                if int(getattr(e, "offset", -1)) != p:
+                    _log.info(
+                        "APC ckpt disk miss: kvarn offset %d != %d",
+                        int(getattr(e, "offset", -1)), p)
+                    return None, 0
+                # Clone like the record path: the exact tier may serve
+                # this entry list again, and adopted kvarn buffers
+                # mutate in place.
+                clone = _clone_single_row(e)
+                if clone is None:
+                    return None, 0
+                warm.append(clone)
             else:
                 warm.append(e)
+        if any(_is_kvarn(t) for t in tags):
+            # Guard only: ensure_ppb_kvarn armed the sdpa route before
+            # this lookup could run; kept so a future entry path cannot
+            # restore kvarn caches into an unarmed process.
+            from .kvarn_sdpa import install_kvarn_sdpa
+
+            install_kvarn_sdpa()
         targets = []
         for c in warm:
             if getattr(c, "keys", None) is not None:
                 targets.extend([c.keys, c.values])
             elif hasattr(c, "cache"):
                 targets.extend(s for s in c.cache if s is not None)
+            else:
+                targets.extend(_iter_arrays(getattr(c, "state", None)))
         mx.eval(*targets)
         manager.release(blocks)
         manager.release(wblocks)

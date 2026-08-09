@@ -170,6 +170,74 @@ def test_wire_config_mismatch_refuses():
     assert warm is None and got == 0
 
 
+def test_kvarn_disk_restart_roundtrip(tmp_path):
+    # Skeleton write -> process restart -> repair from disk. Exercises
+    # the kvarn tag re-derivation on the loaded entries (without it a
+    # restored KVarNKVCache classifies as "arr" and the layout check
+    # permanently misses).
+    from mlx_vlm.apc import DiskBlockStore
+
+    from gmlx.kvarn_apc import install_kvarn_apc
+
+    install_kvarn_apc()  # the kq_kvarn disk kind (serve installs at boot)
+    p = 48
+    disk = DiskBlockStore(root=tmp_path, namespace="m")
+    man = GmlxAPCManager(num_blocks=8, block_size=16, disk=disk)
+    assert ckpt_store(man, _ids(p), [_hollow_kvarn(p), _arr(seed=p)],
+                      extra_hash=5, skeleton_disk=True)
+    disk.close()
+    disk2 = DiskBlockStore(root=tmp_path, namespace="m")
+    man2 = GmlxAPCManager(num_blocks=8, block_size=16, disk=disk2)
+    try:
+        warm, got = ckpt_lookup(man2, _ids(p) + [999], extra_hash=5,
+                                layout=(KVARN_TAG, "arr"))
+        assert got == p
+        assert type(warm[0]) is KVarNKVCache and warm[0].offset == p
+        # Wrong wire config must cold-miss, not adopt.
+        warm, got = ckpt_lookup(man2, _ids(p) + [999], extra_hash=5,
+                                layout=("kvarn:6:5:1024", "arr"))
+        assert warm is None and got == 0
+    finally:
+        disk2.close()
+
+
+def test_kvarn_disk_write_mirrors_wire_salt(tmp_path):
+    # The skeleton writer bypasses the manager's exact-cache wrapper, so
+    # it must fold _exact_extra_salt into the hash AND the persisted
+    # extra itself; the salted lookup side then matches after a restart
+    # on the same wire config and misses across configs.
+    from mlx_vlm.apc import DiskBlockStore
+
+    from gmlx.kvarn_apc import install_kvarn_apc
+
+    install_kvarn_apc()
+    p = 32
+    disk = DiskBlockStore(root=tmp_path, namespace="m")
+    man = GmlxAPCManager(num_blocks=8, block_size=16, disk=disk)
+    man._exact_extra_salt = 0xA5A5
+    assert ckpt_store(man, _ids(p), [_hollow_kvarn(p), _arr(seed=p)],
+                      extra_hash=5, skeleton_disk=True)
+    disk.close()
+    disk2 = DiskBlockStore(root=tmp_path, namespace="m")
+    man2 = GmlxAPCManager(num_blocks=8, block_size=16, disk=disk2)
+    man2._exact_extra_salt = 0xA5A5
+    try:
+        warm, got = ckpt_lookup(man2, _ids(p) + [999], extra_hash=5,
+                                layout=(KVARN_TAG, "arr"))
+        assert got == p and type(warm[0]) is KVarNKVCache
+    finally:
+        disk2.close()
+    disk3 = DiskBlockStore(root=tmp_path, namespace="m")
+    man3 = GmlxAPCManager(num_blocks=8, block_size=16, disk=disk3)
+    man3._exact_extra_salt = 0x5A5A
+    try:
+        warm, got = ckpt_lookup(man3, _ids(p) + [999], extra_hash=5,
+                                layout=(KVARN_TAG, "arr"))
+        assert warm is None and got == 0
+    finally:
+        disk3.close()
+
+
 def _tokens(n, seed=0):
     rng = np.random.default_rng(seed)
     k = mx.array(rng.standard_normal((1, H, n, 128)).astype(np.float16))
