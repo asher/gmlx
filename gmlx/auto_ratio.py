@@ -266,12 +266,10 @@ def resolve(gen, now: float | None = None) -> float:
     pending = gen._unprocessed_sequences
     prefilling = _pb_uids(gen)
 
-    # Deadline accrual: queued waiters age only by pacing-attributable
-    # time, ticks spent behind a live paced train. Capacity waits (full
-    # decode batch: no train live; gate declines: pending hidden) accrue
-    # nothing, because ratio 0 cannot admit those waiters any sooner.
-    # The per-tick bound keeps a stalled tick from charging its gap to
-    # pacing.
+    # Queued waiters age only while behind a live paced train; capacity
+    # waits (no train, or gate-hidden pending) accrue nothing, since
+    # ratio 0 cannot admit them sooner. The per-tick bound keeps a
+    # stalled tick from charging its gap to pacing.
     dt = min(max(now - st.last_resolve_t, 0.0), 1.0) \
         if st.last_resolve_t is not None else 0.0
     st.last_resolve_t = now
@@ -333,11 +331,9 @@ def resolve(gen, now: float | None = None) -> float:
 
 def _resolved(gen, st: _AutoState, ratio: float, now: float,
               reason: str) -> float:
-    # Log against the last LOGGED state, not the last resolved one: a
-    # transition suppressed by the rate limit would otherwise leave the
-    # new state permanently unlogged if it persists. Sub-rate-limit
-    # blips (on and back off inside the window) stay invisible; drop
-    # GMLX_DECODE_PREFILL_LOG_S to catch them.
+    # Compare against last_logged, not last_resolved: a rate-limited
+    # transition must still log once the window opens, or a persisted
+    # state stays unlogged.
     every = _envf("GMLX_DECODE_PREFILL_LOG_S", _LOG_EVERY_S)
     if ratio != st.last_logged and now - st.last_log >= every:
         st.last_log = now
