@@ -28,10 +28,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - GGUFs that quantize the MoE router gate (some community DeepSeek quants;
   llama.cpp's own quantize leaves it F32) now load: small quantized tensors
   on raw-array modules are dequantized to f32 at load instead of erroring.
-- Speculative serve requests with deep prompts (roughly 30k tokens and up)
-  crashed the server with a Metal out-of-memory abort: MTP prefill chunks
-  ran under the coarse decode command-buffer caps. MTP prompt steps now
-  flip to the fine prefill caps like stock prompt steps do.
+- MTP prefill steps now use fine prefill caps to avoid a transient memory
+  spike that could trigger a Metal OOM.
 
 ## [0.2.2] - 2026-08-06
 
