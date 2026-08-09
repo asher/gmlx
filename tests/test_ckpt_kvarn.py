@@ -201,6 +201,41 @@ def test_kvarn_disk_restart_roundtrip(tmp_path):
         disk2.close()
 
 
+def test_kvarn_rot_disk_restart_roundtrip(tmp_path):
+    # kvarn+rot: boundary/turn-kind skeletons are the only restart-
+    # restorable records (replay skeletons are heavy-suppressed), so the
+    # rot window chain must persist alongside them -- without it the
+    # skeleton loads and then dies at the window-chain lookup.
+    from mlx_vlm.apc import DiskBlockStore
+
+    from gmlx.kvarn_apc import install_kvarn_apc
+
+    install_kvarn_apc()
+    p = 48
+    w = 32
+    rot = RotatingKVCache(max_size=w)
+    mx.random.seed(9)
+    rot.update_and_fetch(mx.random.normal((1, H, p, D)),
+                         mx.random.normal((1, H, p, D)))
+    cache = [_hollow_kvarn(p), rot]
+    ids = list(range(500, 500 + p))
+    disk = DiskBlockStore(root=tmp_path, namespace="m")
+    man = GmlxAPCManager(num_blocks=64, block_size=16, disk=disk)
+    assert ckpt_store(man, ids, cache, extra_hash=5, kind="boundary",
+                      skeleton_disk=True)
+    disk.close()
+    disk2 = DiskBlockStore(root=tmp_path, namespace="m")
+    man2 = GmlxAPCManager(num_blocks=64, block_size=16, disk=disk2)
+    try:
+        warm, got = ckpt_lookup(man2, ids + [999], extra_hash=5,
+                                layout=(KVARN_TAG, f"rot:{w}:0"))
+        assert got == p
+        assert type(warm[0]) is KVarNKVCache and warm[0].offset == p
+        assert type(warm[1]) is RotatingKVCache and warm[1].offset == p
+    finally:
+        disk2.close()
+
+
 def test_kvarn_disk_write_mirrors_wire_salt(tmp_path):
     # The skeleton writer bypasses the manager's exact-cache wrapper, so
     # it must fold _exact_extra_salt into the hash AND the persisted
