@@ -232,10 +232,12 @@ def _ckpt_active(model, mode, block_size: int = 16) -> bool:
         flag = tags is not None
         if flag:
             _log.info(
-                "APC tier: ckpt (layers: %d kv / %d rot / %d arr)",
+                "APC tier: ckpt (layers: %d kv / %d rot / %d arr / "
+                "%d kvarn)",
                 tags.count("kv"),
                 sum(1 for t in tags if t.startswith("rot")),
-                tags.count("arr"))
+                tags.count("arr"),
+                sum(1 for t in tags if t.startswith("kvarn")))
         try:
             model._kq_apc_ckpt = flag
         except Exception:
@@ -579,14 +581,16 @@ def _ckpt_mid_prefill_store(batch) -> None:
     kind = "boundary"
     if bounds and int(bounds[0][0]) == checkpoint_len:
         kind = str(bounds.pop(0)[1])
-    # GDN skeletons inline >100 MB of state; boundaries superseded within
-    # the same prefill do not earn disk, only the terminal does -- and a
-    # replay skeleton would buy restart-repair of an identical resend
-    # only, which does not earn it either.
+    # Inline-heavy skeletons (GDN state >100 MB; kvarn state scales with p
+    # across every attention layer) earn disk only at the terminal --
+    # boundaries superseded within the same prefill do not, and a replay
+    # skeleton would buy restart-repair of an identical resend only,
+    # which does not earn it either.
     layout = _ckpt_layout_for(getattr(batch, "model", None),
                               int(manager.block_size)) or ()
-    skel = "arr" not in layout or (kind != "replay"
-                                   and checkpoint_len >= terminal)
+    heavy = "arr" in layout or any(t.startswith("kvarn") for t in layout)
+    skel = not heavy or (kind != "replay"
+                         and checkpoint_len >= terminal)
     from .cache_snapshot import ckpt_store
 
     if ckpt_store(

@@ -91,9 +91,10 @@ def test_clone_lm_twin_arm():
 
 
 @_NEEDS_GPU
-def test_ckpt_layout_declines_kvarn():
+def test_ckpt_layout_tags_filled_kvarn():
     from gmlx.cache_snapshot import ckpt_layout
 
     from mlx_lm.models.cache import RotatingKVCache
 
-    assert ckpt_layout([_filled(140), RotatingKVCache(max_size=64)]) is None
+    assert ckpt_layout([_filled(140), RotatingKVCache(max_size=64)]) == \
+        ["kvarn:6:6:256", "rot:64:0"]

@@ -22,8 +22,6 @@ from .envflags import env_int
 
 _log = logging.getLogger(__name__)
 
-_KVARN_CKPT_NOTED: list[bool] = []
-
 
 def _layer_has_content(snap: Any) -> bool:
     """True when a snapshotted layer carries reusable state.
@@ -567,12 +565,28 @@ def _is_rot(tag: str) -> bool:
     return tag.startswith("rot")
 
 
+def _kvarn_tag(cache) -> str:
+    """Kvarn layout tag carries the wire config: a record restored into a
+    different width/tail (or a stock boot) must miss, never adopt."""
+    return (f"kvarn:{int(cache.k_bits)}:{int(cache.v_bits)}:"
+            f"{int(cache.tail_cap)}")
+
+
+def _is_kvarn(tag: str) -> bool:
+    return tag.startswith("kvarn")
+
+
 def ckpt_layout(prompt_cache, block_size: int = 16):
-    """Per-layer tags ("kv" | "rot:W:keep" | "arr") for a supported hybrid
-    cache list, else None. Supported: every layer one of the three classes,
-    at least one non-plain-KV layer (pure-KV models belong to the stock
-    block tier), and rotating layers passing the block-grid geometry gate."""
+    """Per-layer tags ("kv" | "rot:W:keep" | "arr" | "kvarn:k:v:tail") for
+    a supported hybrid cache list, else None. Supported: every layer one of
+    the four classes, at least one non-plain-KV layer (pure-KV and pure-
+    kvarn models belong to the block/exact tiers), and rotating layers
+    passing the block-grid geometry gate. Kvarn matches the concrete
+    single-stream class only: the rotating subclass loses window geometry
+    under the plain tag, and batch classes belong to the batch engine --
+    both decline until dedicated support lands."""
     from .cache_compat import cache_types
+    from .kvarn_cache import KVarNKVCache
 
     if not prompt_cache:
         return None
@@ -587,19 +601,20 @@ def ckpt_layout(prompt_cache, block_size: int = 16):
             tags.append("kv")
         elif isinstance(c, arr_types):
             tags.append("arr")
+        elif type(c) is KVarNKVCache:
+            tags.append(_kvarn_tag(c))
         else:
-            if type(c).__name__ == "KVarNKVCache" and not _KVARN_CKPT_NOTED:
-                _KVARN_CKPT_NOTED.append(True)
-                _log.info(
-                    "APC decode-checkpoint tier inactive under kvarn KV "
-                    "(exact-entry APC still applies)"
-                )
             return None
     has_rot = any(_is_rot(t) for t in tags)
+    has_kvarn = any(_is_kvarn(t) for t in tags)
     if not has_rot and "arr" not in tags:
-        return None                       # pure-KV: stock block tier
-    if "kv" not in tags and not has_rot:
-        return None                       # no chain-backed layer: exact tier
+        return None       # pure-KV/pure-kvarn: block/exact tier
+    if "kv" not in tags and not has_rot and not has_kvarn:
+        # Pure-arr: exact tier. A chainless kvarn+arr record still earns
+        # the ckpt tier -- B=1 direct-assign adoption (the exact tier's
+        # merge machinery returns None on mixed stacks), the checkpoint
+        # boundary schedule, and disk skeletons.
+        return None
     if has_rot and rotating_geometry(prompt_cache, block_size) is None:
         return None
     return tags
@@ -905,6 +920,7 @@ def ckpt_store(
     if manager is None or token_ids is None:
         return False
     from .cache_compat import cache_types, runtime_cache_module
+    from .kvarn_cache import KVarNKVCache
 
     kv_types = cache_types("KVCache")
     rot_types = cache_types("RotatingKVCache")
@@ -950,6 +966,11 @@ def ckpt_store(
                           int(c.offset), p)
                 _ckpt_decline(manager, "offset")
                 return False
+            if type(c) is KVarNKVCache and int(c.offset) != p:
+                _log.info("APC ckpt store skipped: kvarn offset %d != %d",
+                          int(c.offset), p)
+                _ckpt_decline(manager, "offset")
+                return False
         has_rot = any(_is_rot(t) for t in layout)
         b_full = _ckpt_block_prefix(p, bs)
         if has_rot and b_full != p:
@@ -979,8 +1000,10 @@ def ckpt_store(
         kv_caches = [c for c in prompt_cache if isinstance(c, kv_types)
                      and not isinstance(c, rot_types)]
         rot_caches = [c for c in prompt_cache if isinstance(c, rot_types)]
-        arr_caches = [c for c in prompt_cache
-                      if not isinstance(c, (kv_types, rot_types))]
+        # Inline-state layers (arr and kvarn), in prompt order: the record
+        # stores full clones, and assembly pulls them positionally by tag.
+        inline_caches = [c for c in prompt_cache
+                         if not isinstance(c, (kv_types, rot_types))]
 
         store_blocks = getattr(manager, "store_ckpt_blocks", None)
 
@@ -1072,7 +1095,7 @@ def ckpt_store(
                 return False
             bounded_blocks = got_win
 
-        states = [_clone_single_row(c) for c in arr_caches]
+        states = [_clone_single_row(c) for c in inline_caches]
         if any(s is None for s in states):
             _ckpt_decline(manager, "clone")
             manager.release(main_blocks)
@@ -1107,9 +1130,10 @@ def ckpt_store(
                              tail_len, states, tails, salted)
         _ckpt_bump(manager, "ckpt_stores")
         _log.info(
-            "APC ckpt store: tokens=%d main=%d window=%d tail=%d states=%d",
+            "APC ckpt store: tokens=%d main=%d window=%d tail=%d states=%d "
+            "rec_mb=%.1f",
             p, len(rec.main_blocks), len(rec.bounded_blocks), tail_len,
-            len(states))
+            len(states), rec.nbytes / (1 << 20))
         return True
     except Exception:
         try:
