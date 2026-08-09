@@ -680,6 +680,17 @@ class _ResidencyPool:
             # BatchGenerator build - this runs before any request reaches it.
             manager = _serving.pop_built_apc_manager()
             if manager is not None:
+                # The kvarn wire salt could not be set at manager build
+                # (pre-load, nothing to probe); set it here, inside the
+                # still-open env window, gated on the loaded model
+                # actually converting. Every manager passes through this
+                # block: GMLX_APC_ENABLED is set only above, and
+                # build_apc_manager returns None without it.
+                from .kvarn_apc import apply_kvarn_salt
+                mc = scratch.model_cache
+                apply_kvarn_salt(
+                    manager,
+                    mc.get("model") if isinstance(mc, dict) else None)
                 scratch.apc_manager = manager
                 if isinstance(scratch.model_cache, dict):
                     scratch.model_cache["apc_manager"] = manager

@@ -21,9 +21,10 @@ apc_pooling arms for pooling caches:
   serve gate (stamp_model) resolve "exact" instead.
 
 Entry isolation: the gmlx APC manager salts exact-tier extra hashes with
-the kvarn wire config (apc_manager.build_apc_manager), so entries written
-under one scheme/width/tail config never warm-adopt under another -- the
-disk namespace is the model path and carries no scheme.
+the kvarn wire config (apply_kvarn_salt, called at residency's post-load
+manager pairing and gated on an actual-conversion probe), so entries
+written under one scheme/width/tail config never warm-adopt under
+another -- the disk namespace is the model path and carries no scheme.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ import os
 
 _FLAG = "_gmlx_kvarn_apc"
 _MODE_STAMP = "_gmlx_kvarn_apc_exact"
+_CONVERTS_ATTR = "_gmlx_kvarn_converts"
 _STATE_ARITY = 10
 
 
@@ -43,9 +45,66 @@ def kvarn_apc_installed() -> bool:
 
 
 def stamp_model(model) -> None:
-    """Mark a model as serving kvarn KV so model_apc_mode resolves exact."""
+    """Mark a model as serving kvarn KV so model_apc_mode resolves exact.
+    Stamps both the model and its language model: the live call sites
+    disagree on which object they pass (the engine passes the top-level
+    model, dispatch and spec_engine the language model)."""
+    for obj in (model, getattr(model, "language_model", None)):
+        if obj is not None:
+            try:
+                setattr(obj, _MODE_STAMP, True)
+            except Exception:
+                pass
+
+
+def kvarn_model_converts(model) -> bool:
+    """True when a kvarn boot converts at least one of this model's cache
+    layers. Structural only -- the scheme window belongs to the caller
+    (residency's env window, or the per-request kwarg in the serve gate).
+    Computed once and stashed on the model so the salt gate and the serve
+    gate read one answer; counts cache types only and retains nothing
+    from make_cache (this runs on the residency load thread). Any failure
+    means False: don't stamp, don't salt."""
+    cached = getattr(model, _CONVERTS_ATTR, None)
+    if cached is not None:
+        return bool(cached)
+    val = False
     try:
-        setattr(model, _MODE_STAMP, True)
+        from .generation import kvarn_unsupported
+
+        if kvarn_unsupported(model) is None:
+            lm = getattr(model, "language_model", None) or model
+            make = getattr(lm, "make_cache", None)
+            if make is None:
+                # No make_cache: upstream builds plain KV for every
+                # layer, and serve converts all of them.
+                val = True
+            else:
+                from .kvarn_cache import convertible_kv_types
+
+                conv = convertible_kv_types()
+                val = any(type(c) in conv for c in make())
+    except Exception:
+        val = False
+    try:
+        setattr(model, _CONVERTS_ATTR, val)
+    except Exception:
+        pass
+    return val
+
+
+def apply_kvarn_salt(manager, model) -> None:
+    """Set the manager's exact-tier wire salt at residency's post-load
+    pairing, gated on the model actually converting: a kvarn-window boot
+    of a zero-conversion arch (deepseek4, recurrent_gemma) runs pure fp16
+    caches, and salting its entries would cold-miss every cross-boot
+    lookup. Failures leave the salt at its XOR-identity default."""
+    try:
+        if manager is None or model is None:
+            return
+        salt = kvarn_entry_salt()
+        if salt and kvarn_model_converts(model):
+            manager._exact_extra_salt = salt
     except Exception:
         pass
 
@@ -142,7 +201,14 @@ def install_kvarn_apc() -> None:
         return stock_dtype_info(dtype)
 
     def mode_wrap(language_model):
-        if getattr(language_model, _MODE_STAMP, False):
+        # Check-down: stamp_model stamps both objects, but a caller may
+        # hand over a wrapper whose language model carries the stamp
+        # (there is no walking up -- children hold no parent reference).
+        if getattr(language_model, _MODE_STAMP, False) or getattr(
+            getattr(language_model, "language_model", None),
+            _MODE_STAMP,
+            False,
+        ):
             return "exact"
         return stock_mode(language_model)
 

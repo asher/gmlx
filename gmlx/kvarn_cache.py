@@ -1215,6 +1215,17 @@ def ensure_registered():
             mod.BatchKVarNKVCache = BatchKVarNKVCache
 
 
+def convertible_kv_types():
+    """Cache classes ``convert_prompt_cache`` maps to KVarNKVCache.
+    ChunkedKVCache is included deliberately: serve's batch build maps it
+    to BatchKVCache and converts that, so converting it here keeps the
+    CLI and serve paths (and the stamp/salt conversion probe) agreeing
+    on llama4-shaped stacks."""
+    from .cache_compat import cache_types
+
+    return cache_types("KVCache") + cache_types("ChunkedKVCache")
+
+
 def convert_prompt_cache(
     prompt_cache,
     k_bits=6,
@@ -1223,15 +1234,15 @@ def convert_prompt_cache(
     sink_tokens=GROUP,
     rotating_window=None,
 ):
-    """Replace every plain KVCache entry with a KVarNKVCache (converting
-    any existing history). With rotating_window set, RotatingKVCache
-    entries built for that window become KVarNRotatingKVCache too.
-    Returns the number of layers converted; other cache kinds are left
-    untouched."""
+    """Replace every plain KVCache or ChunkedKVCache entry with a
+    KVarNKVCache (converting any existing history). With rotating_window
+    set, RotatingKVCache entries built for that window become
+    KVarNRotatingKVCache too. Returns the number of layers converted;
+    other cache kinds are left untouched."""
     from .cache_compat import cache_types
 
     ensure_registered()
-    kv_types = cache_types("KVCache")
+    kv_types = convertible_kv_types()
     rot_types = cache_types("RotatingKVCache") if rotating_window else ()
     n = 0
     for i, c in enumerate(prompt_cache):

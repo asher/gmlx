@@ -360,11 +360,9 @@ def build_apc_manager(model_namespace=None):
         "APC enabled (block_size=%d, num_blocks=%d, disk=%s, gmlx manager)",
         block_size, num_blocks, bool(disk),
     )
-    mgr = GmlxAPCManager(
+    # The kvarn wire salt is applied later, at residency's post-load
+    # manager pairing (kvarn_apc.apply_kvarn_salt): it is gated on an
+    # actual-conversion probe, and this build runs before the model
+    # loads, so there is nothing to probe yet.
+    return GmlxAPCManager(
         num_blocks=num_blocks, block_size=block_size, disk=disk)
-    from .kvarn_apc import kvarn_entry_salt
-
-    salt = kvarn_entry_salt()
-    if salt:
-        mgr._exact_extra_salt = salt
-    return mgr

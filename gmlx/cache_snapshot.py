@@ -270,7 +270,14 @@ def drafter_sidecar_store(
             clone = _clone_single_row(c)
             if clone is None:
                 return False
-            clone.trim(offset - store_len)
+            excess = offset - store_len
+            if excess and int(clone.trim(excess) or 0) != excess:
+                # kvarn trim returns 0 on refusal without raising; an
+                # untrimmed clone must not be stored under a shorter key.
+                _log.info(
+                    "APC sidecar store skipped: trim refused %d rows",
+                    excess)
+                return False
             clones.append(clone)
         ids = tuple(int(t) for t in token_ids)[:store_len]
         idx = _sidecar_index(manager)

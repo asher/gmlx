@@ -342,11 +342,17 @@ def _install_apc_gate(_ar):
             kwargs.get("apc_manager") is not None
             and kwargs.get("kv_quant_scheme") == "kvarn"
         ):
-            from .generation import kvarn_unsupported
+            from .kvarn_apc import (
+                kvarn_apc_installed,
+                kvarn_model_converts,
+                stamp_model,
+            )
 
-            if kvarn_unsupported(model) is None:
-                from .kvarn_apc import kvarn_apc_installed, stamp_model
-
+            # Gate on actual conversion, not mere eligibility: a
+            # zero-conversion stack (recurrent_gemma, deepseek4) runs
+            # pure fp16 caches and must keep its stock tier and
+            # unsalted keys.
+            if kvarn_model_converts(model):
                 if kvarn_apc_installed():
                     # Exact tier only: stamp the model so model_apc_mode
                     # resolves "exact", and drop kv_bits (the scheme owns
