@@ -26,18 +26,59 @@ from gmlx.cache_snapshot import (
     retirement_store,
 )
 
-from test_ckpt_tier import make_hybrid_cache, make_swa_cache
+from test_ckpt_tier import D, H
 
 GDN_TAGS = ("kv", "arr", "arr", "kv", "arr")
 SWA_TAGS = ("kv", "rot:32:0", "rot:32:0", "kv", "rot:32:0")
+KVARN_TAG = "kvarn:6:6:1024"
+KVARN_GDN_TAGS = (KVARN_TAG, "arr", "arr", KVARN_TAG, "arr")
+KVARN_SWA_TAGS = (KVARN_TAG, "rot:32:0", "rot:32:0", KVARN_TAG,
+                  "rot:32:0")
+KVARN_3K_TAGS = (KVARN_TAG, "rot:32:0", "arr", KVARN_TAG, "arr")
 TAIL = 7                       # gen-prompt/think tail the re-render strips
+
+
+def _make_from_tags(tags, p, seed=0):
+    """Cache list matching an arbitrary tag layout at position p; kvarn
+    layers are real empty instances with only offset set (constructor is
+    pure Python; the concrete-class tag rejects stubs)."""
+    import mlx.core as mx
+
+    from gmlx.cache_compat import runtime_cache_module
+    from gmlx.kvarn_cache import KVarNKVCache
+
+    c = runtime_cache_module()
+    out = []
+    for i, t in enumerate(tags):
+        mx.random.seed(seed * 1000 + i)
+        if t == "kv":
+            kc = c.KVCache()
+            kc.state = (mx.random.normal((1, H, p, D)),
+                        mx.random.normal((1, H, p, D)))
+            out.append(kc)
+        elif t.startswith("rot"):
+            rc = c.RotatingKVCache(max_size=int(t.split(":")[1]))
+            rc.update_and_fetch(mx.random.normal((1, H, p, D)),
+                                mx.random.normal((1, H, p, D)))
+            out.append(rc)
+        elif t.startswith("kvarn"):
+            kv = KVarNKVCache()
+            kv.offset = p
+            out.append(kv)
+        else:
+            ac = c.ArraysCache(size=2)
+            ac.cache = [mx.random.normal((1, 3, D)),
+                        mx.random.normal((1, H, D, D))]
+            out.append(ac)
+    return out
 
 
 def _run_request(man, tags, ids, p_stable, monkeypatch):
     """Drive one request through the real store scheduler: arm, walk the
     boundary schedule via the production cursor, post-prefill p=N with
     the production drop gate, then retirement with the re-render LCP."""
-    make = make_hybrid_cache if "arr" in tags else make_swa_cache
+    def make(p, seed=0):
+        return _make_from_tags(tags, p, seed)
     monkeypatch.setattr(retire_key, "lookup_render_ctx",
                         lambda i: {"stub": True})
     monkeypatch.setattr(retire_key, "prompt_stable_lcp",
@@ -84,8 +125,19 @@ def _expected(man, p_stable, query_len):
     (SWA_TAGS, 300, 299, "exact"),
     (SWA_TAGS, 1500, 1499, "exact"),
     (SWA_TAGS, 5000, 4999, "exact"),
+    # Kvarn layouts ride the same gates as their fp16 twins (the arr and
+    # rot gates key on their own tags): kvarn+arr behaves like GDN,
+    # kvarn+rot like SWA, and the three-kind (plamo2-shaped) layout runs
+    # both gates at once.
+    (KVARN_GDN_TAGS, 1500, 1499, 0),
+    (KVARN_GDN_TAGS, 5000, 4999, "grid"),
+    (KVARN_SWA_TAGS, 300, 299, "exact"),
+    (KVARN_SWA_TAGS, 5000, 4999, "exact"),
+    (KVARN_3K_TAGS, 5000, 4999, "grid"),
 ], ids=lambda v: str(v) if not isinstance(v, tuple) else (
-    "gdn" if "arr" in v else "swa"))
+    ("kvarn-" if any(t.startswith("kvarn") for t in v) else "")
+    + ("gdn-swa" if ("arr" in v and any(t.startswith("rot") for t in v))
+       else "gdn" if "arr" in v else "swa")))
 def test_store_lookup_intersection(tags, n, resend, turn2, monkeypatch):
     man = APCManager(num_blocks=1024, block_size=16)
     stable = list(range(1000, 1000 + n - TAIL))
