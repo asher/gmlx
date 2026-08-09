@@ -8,6 +8,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- gmlx chat --server: chat against a running server as a plain client,
+  without the assistant's tools and memory (no background requests).
+  Engages automatically when the config's server is already up and
+  serves the requested model; --local pins the in-process load. An
+  explicit GGUF path always loads the file on disk.
 - decode_prefill_ratio accepts "auto" and it is the new default: live
   streams keep at least half their decode rate while deep prompts admit,
   and pacing stands down wherever it would not help (simultaneous

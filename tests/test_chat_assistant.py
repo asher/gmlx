@@ -315,6 +315,117 @@ def test_no_model_no_default_rejected(monkeypatch, capsys):
         capsys.readouterr().err)
 
 
+# ------------------------------ --server ---------------------------------
+
+def test_server_flag_builds_plain_brain(monkeypatch):
+    """--server rides the assistant plumbing with memory and tools off,
+    even though both default on in AssistantCfg."""
+    import argparse
+
+    _fake_server(monkeypatch, ["alpha"], default="alpha")
+    args = argparse.Namespace(
+        gguf=None, server=True, config=None, profile=None,
+        base_url=None, host=None, port=None, api_key=None,
+        no_start=True, start_timeout=1.0)
+    setup = chat._setup_assistant(args)
+    assert not isinstance(setup, int)
+    brain, model_request, _burl, _extra = setup
+    assert model_request == "alpha"
+    assert brain.memory is None
+    assert len(brain.tools) == 0
+
+
+def test_server_flag_file_arg_rejected(monkeypatch, capsys):
+    _fake_server(monkeypatch, ["served-model"])
+    rc = chat.cmd_chat(["model.gguf", "--server"])
+    assert rc == 2
+    assert "--server chats through the server" in capsys.readouterr().err
+
+
+def test_server_and_assistant_mutually_exclusive(capsys):
+    with pytest.raises(SystemExit):
+        chat.cmd_chat(["--assistant", "--server"])
+    assert "mutually exclusive" in capsys.readouterr().err
+
+
+def test_local_excludes_server_modes(capsys):
+    with pytest.raises(SystemExit):
+        chat.cmd_chat(["--local", "--server"])
+    assert "--local" in capsys.readouterr().err
+
+
+# --------------------------- automatic --server ---------------------------
+
+def _auto_env(monkeypatch, *, up=True, served=(), default=None):
+    """Fake a discoverable config server for _auto_server probes."""
+    monkeypatch.setattr("gmlx.lifecycle.auto_target",
+                        lambda host, port: ("127.0.0.1", 8080))
+    monkeypatch.setattr("gmlx.launch._server_ready",
+                        lambda base_url, api_key=None: up)
+    monkeypatch.setattr(
+        "gmlx.talk_client.probe_capabilities",
+        lambda base_url, api_key=None, timeout=5.0: {
+            "chat_ids": list(served), "default": default,
+        })
+
+
+def _auto_args(argv):
+    parser = chat._build_parser("gmlx chat")
+    return parser.parse_args(argv), parser
+
+
+def test_auto_server_bare_connects(monkeypatch):
+    _auto_env(monkeypatch, served=["alpha"], default="alpha")
+    args, parser = _auto_args([])
+    assert chat._auto_server(args, parser) is True
+    assert args.base_url == "http://127.0.0.1:8080/v1"
+
+
+def test_auto_server_served_id_connects(monkeypatch):
+    _auto_env(monkeypatch, served=["alpha", "beta"])
+    args, parser = _auto_args(["alpha"])
+    assert chat._auto_server(args, parser) is True
+
+
+def test_auto_server_unserved_id_stays_local(monkeypatch):
+    _auto_env(monkeypatch, served=["alpha"])
+    args, parser = _auto_args(["gamma"])
+    assert chat._auto_server(args, parser) is False
+
+
+def test_auto_server_down_stays_local(monkeypatch):
+    _auto_env(monkeypatch, up=False)
+    args, parser = _auto_args([])
+    assert chat._auto_server(args, parser) is False
+
+
+def test_auto_server_local_intent_stays_local(monkeypatch):
+    _auto_env(monkeypatch, served=["alpha"], default="alpha")
+    for argv in (["--local"], ["alpha", "--max-kv-size", "4096"],
+                 ["alpha", "--no-start"]):
+        args, parser = _auto_args(argv)
+        assert chat._auto_server(args, parser) is False, argv
+
+
+def test_auto_server_gguf_path_stays_local_with_hint(
+        monkeypatch, tmp_path, capsys):
+    """An explicit file path pins the local load; a served mapping of the
+    same file only earns a pointer at the id."""
+    from types import SimpleNamespace
+
+    gguf = tmp_path / "alpha.gguf"
+    gguf.write_bytes(b"GGUF")
+    _auto_env(monkeypatch, served=["alpha"])
+    cfg = SimpleNamespace(models=[
+        SimpleNamespace(id="alpha", path=str(gguf))])
+    monkeypatch.setattr("gmlx.launch._discover_config",
+                        lambda: (cfg, str(tmp_path / "gmlx.yaml")))
+    args, parser = _auto_args([str(gguf)])
+    assert chat._auto_server(args, parser) is False
+    out = capsys.readouterr().out
+    assert "serves this file as 'alpha'" in out
+
+
 # ------------------------------- /memory ---------------------------------
 
 class _StubStore:
