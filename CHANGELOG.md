@@ -13,12 +13,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and pacing stands down wherever it would not help (simultaneous
   bursts, cheap chunks, stuck queues). A numeric ratio pins the previous
   static behavior; GMLX_DECODE_PREFILL_AUTO=0 reverts on a live server.
-
 - GMLX_SERVE_MEMSTATS=path.jsonl writes a per-tick serve memory trace:
   MLX counters, free-headroom estimate, and per-owner cache byte
   attribution with allocation shapes marked on change, for diagnosing
   serve memory growth under load.
-
 - Serve admission is gated on projected memory headroom: a request whose
   measured KV and prefill-transient projection does not fit is kept
   queued and retried each tick instead of committing memory the box does
@@ -26,7 +24,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   admits, and a request deferred past GMLX_ADMIT_DEFER_MAX_S (default
   60s) is admitted anyway with a loud log. GMLX_ADMIT_HEADROOM=0
   disables.
-
 - /v1/metrics reports residency budget vs resident bytes, live
   active/cache/headroom memory, and admission deferral counters.
 
@@ -35,19 +32,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - mlx-kquant floor raised to 0.3.11: MoE prefill gather runs 12-28%
   faster per call at chat-chunk widths, lifting serve prefill 20-43%
   shallow and 8-14% deep on many-expert models.
-
 - Bench chart value axes clamp to the data range when a zero anchor
   would waste the panel height on empty space; nearby engine lines
   now read as visually distinct.
-
 - benchmarks.md tracks builds and measured date per model, and merged
   results carry the newest contributing run date: one model rebenched
   on newer releases no longer implies the rest was remeasured.
-
 - DeepSeek-V4-Flash IQ2_XXS rebenched on gmlx 0.2.2 + mlx-kquant
   0.3.11 vs ds4-server b030961 (2026-08-05): prefill 1.11-1.86x and
   decode 1.05-1.59x across the full d512-500k ladder.
-
 - DeepSeek-V4 single-token decode runs its hyper-connection glue as four
   native mlx-kquant ops instead of about 176 python kernel launches per
   step. `GMLX_HC_M1_FUSED=0` and `GMLX_HC_KQ=0` restore the previous
@@ -65,6 +58,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Chat's bottom toolbar no longer clips the live tok/s readout on
+  narrow terminals; sampling knobs are dropped first instead.
 - The serve free-headroom estimate went negative on models whose load
   materializes weights into MLX-tracked memory (the same bytes counted
   twice); the loader now registers only the truly untracked mmap
