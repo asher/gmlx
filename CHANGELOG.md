@@ -30,6 +30,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   on raw-array modules are dequantized to f32 at load instead of erroring.
 - MTP prefill steps now use fine prefill caps to avoid a transient memory
   spike that could trigger a Metal OOM.
+- Prompts short enough to skip chunked prefill also use fine prefill caps;
+  they previously ran under decode caps, and a burst of 1-2k-token requests
+  could crash the server with a Metal OOM.
 
 ## [0.2.2] - 2026-08-06
 
