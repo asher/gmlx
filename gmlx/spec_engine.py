@@ -246,9 +246,9 @@ def _ckpt_active(model, mode, block_size: int = 16) -> bool:
 
 
 def _ckpt_layout_for(model, block_size: int = 16):
-    """The live model's per-layer tags for the lookup-side signature check
-    (compared against the freshly constructed model, never a stored
-    entry). Cached on the model object."""
+    """The model's stock per-layer tags (make_cache probe), cached on the
+    model object. Fallback signature source only -- live batches sign via
+    _ckpt_layout_live, which sees per-request cache conversion."""
     tags = getattr(model, "_kq_apc_ckpt_layout", None)
     if tags is None:
         from .cache_snapshot import ckpt_layout
@@ -263,6 +263,34 @@ def _ckpt_layout_for(model, block_size: int = 16):
         except Exception:
             pass
     return tags or None
+
+
+# Signature for a live stack the layout probe rejects: refuses every
+# record instead of skipping the check (None) or borrowing the stock
+# probe's answer, either of which could adopt a record the live caches
+# cannot carry.
+_LAYOUT_UNSUPPORTED = ("unsupported",)
+
+
+def _ckpt_layout_live(batch, block_size: int = 16):
+    """Per-batch layout signature from the LIVE prompt cache.
+
+    Cache conversion is per-request (kvarn declines on the MTP path for
+    reasons a model-level probe cannot see, and the stock path converts
+    between batch construction and arming), so a model-cached signature
+    from one request would key every later one wrongly. One pass over the
+    cache list, no memoization; the stock make_cache probe serves only
+    batches that carry no caches yet."""
+    caches = getattr(batch, "prompt_cache", None)
+    if caches:
+        from .cache_snapshot import ckpt_layout
+
+        try:
+            tags = tuple(ckpt_layout(caches, block_size) or ())
+        except Exception:
+            tags = ()
+        return tags or _LAYOUT_UNSUPPORTED
+    return _ckpt_layout_for(getattr(batch, "model", None), block_size)
 
 
 def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
@@ -320,7 +348,7 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
                 ids_list,
                 extra_hash=extra_hash,
                 min_prefix_tokens=min_p,
-                layout=_ckpt_layout_for(batch.model, int(manager.block_size)),
+                layout=_ckpt_layout_live(batch, int(manager.block_size)),
             )
             if (
                 cw is not None
@@ -457,7 +485,7 @@ def _ckpt_replay_boundary(batch, meta, restored: int,
     replay = n - 1
     if replay < 2 or replay <= max(0, restored):
         return None
-    tags = _ckpt_layout_for(getattr(batch, "model", None), block_size) or ()
+    tags = _ckpt_layout_live(batch, block_size) or ()
     if "arr" in tags and n < env_int("GMLX_APC_CKPT_REPLAY_MIN", 1024):
         return None
     for t in tags:
@@ -483,7 +511,7 @@ def _ckpt_turn_boundaries(batch, meta, restored: int,
         return []
     ids = meta.get("full_input_ids") or ()
     unit = _ckpt_unit(batch, block_size)
-    tags = _ckpt_layout_for(getattr(batch, "model", None), block_size) or ()
+    tags = _ckpt_layout_live(batch, block_size) or ()
     ws = [int(t.split(":")[1]) for t in tags if t.startswith("rot")]
     # Cheapest boundary this layout could arm: the grid needs one unit
     # of stable prefix; rot-only layouts can also pause exactly at
@@ -586,8 +614,7 @@ def _ckpt_mid_prefill_store(batch) -> None:
     # boundaries superseded within the same prefill do not, and a replay
     # skeleton would buy restart-repair of an identical resend only,
     # which does not earn it either.
-    layout = _ckpt_layout_for(getattr(batch, "model", None),
-                              int(manager.block_size)) or ()
+    layout = _ckpt_layout_live(batch, int(manager.block_size)) or ()
     heavy = "arr" in layout or any(t.startswith("kvarn") for t in layout)
     skel = not heavy or (kind != "replay"
                          and checkpoint_len >= terminal)
@@ -649,7 +676,7 @@ def _snap_fields(batch, manager) -> dict:
     from .cache_snapshot import _DECODE_CKPT_DEFAULT
 
     bs = int(manager.block_size)
-    tags = _ckpt_layout_for(batch.model, bs) or ()
+    tags = _ckpt_layout_live(batch, bs) or ()
     step = int(getattr(batch, "prefill_step_size", 0) or 0)
     grid = math.lcm(step, bs) if step > 0 else bs
     if grid > env_int("GMLX_APC_DECODE_CKPT", _DECODE_CKPT_DEFAULT):
@@ -710,7 +737,7 @@ def _plain_ckpt_init(batch) -> None:
         ids_list,
         extra_hash=extra_hash,
         min_prefix_tokens=view._apc_safe_prefix_lookup_min(ids_list),
-        layout=_ckpt_layout_for(batch.model, bs),
+        layout=_ckpt_layout_live(batch, bs),
     )
     if (
         warm is not None
@@ -1050,6 +1077,28 @@ def install_full_prompt_mtp_prefill() -> None:
         # Stock (non-speculative) batches get the checkpoint tier here:
         # lookup, prefix trim, cursor arming, retirement stash.
         if getattr(self, "draft_kind", None) is None and not _SPEC_APC_DISABLED:
+            try:
+                # Ckpt-active hybrids under kvarn convert their stock B=1
+                # single-stream caches in place before arming, so the
+                # layout signature, lookup, and every store see the same
+                # kvarn classes. Must run here: the outer batch rebuild
+                # (kvarn_serve) would install batch classes the tier is
+                # blind to; after conversion its shared decline predicate
+                # trips instead. kwargs is load-bearing -- stock init
+                # consumes and drops the scheme/bits constructor params.
+                manager, mode = _resolve_l1(self.model)
+                if manager is not None:
+                    from .kvarn_serve import ensure_ppb_kvarn
+
+                    ensure_ppb_kvarn(
+                        self, kwargs,
+                        ckpt_active=_ckpt_active(
+                            self.model, mode, int(manager.block_size)))
+            except Exception:
+                _log.warning(
+                    "kvarn ckpt cache conversion failed; continuing stock",
+                    exc_info=True,
+                )
             try:
                 _plain_ckpt_init(self)
             except Exception:

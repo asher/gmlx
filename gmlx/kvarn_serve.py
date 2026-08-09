@@ -20,7 +20,12 @@ KV_QUANT_SCHEME=kvarn:
   stock init skips ``_make_cache`` entirely when B=1 and kv_bits is None
   (``cache.make_prompt_cache``), which under kvarn is every lone request.
   The wrap rebuilds the empty prompt cache through the wrapped
-  ``_make_cache`` so B=1 batches quantize like the rest.
+  ``_make_cache`` so B=1 batches quantize like the rest. Checkpoint-tier
+  hybrids never reach this rebuild: the spec engine's init wrap calls
+  ``ensure_ppb_kvarn`` first, converting the stock single-stream caches
+  in place (batch classes would blind the ckpt tier), after which the
+  shared decline predicate stops the batch rebuild. Both sites gate on
+  ``_ppb_rebuild_declined`` -- one predicate, no drift.
 
 Speculative targets stay stock: ``spec_cache_build()`` marks the stock
 speculative-cache construction so the ``_make_cache`` wrap declines inside
@@ -75,6 +80,123 @@ def _serve_widths_and_tail():
         tail = 1024
     k_bits, v_bits = _kvarn_widths(bits)
     return k_bits, v_bits, tail
+
+
+_PPB_DECLINE_NOTED: set = set()
+
+
+def _ppb_rebuild_declined(batch, kwargs):
+    """Reason a kvarn cache rebuild must not touch this batch, or None.
+
+    The single decline predicate for BOTH rebuild sites -- the ckpt-tier
+    in-place conversion (ensure_ppb_kvarn, runs first inside the init
+    chain) and the outer batch rebuild (_kvarn_ppb_init) -- so they can
+    never disagree about a batch: drift between two copies is what would
+    let the outer wrap clobber the inner conversion. The scheme comes
+    from the per-request kwarg, never the ambient env (per-model load
+    windows are closed by request time). Config problems (ineligible
+    model, bad widths/tail) decline HERE, leaving the stock single-stream
+    caches -- so a misconfigured kvarn boot degrades to the fp16 paths
+    the ckpt/exact tiers already serve, not to fp16 batch classes.
+    """
+    if kwargs.get("kv_quant_scheme") != "kvarn":
+        return "scheme"
+    if kwargs.get("kv_bits") is not None:
+        return "kv_bits"
+    if kwargs.get("warm_cache") is not None:
+        return "warm_cache"
+    if kwargs.get("draft_model") is not None:
+        return "draft"
+    if kwargs.get("right_pad_per_row") is not None:
+        return "right_pad"
+    if len(batch.uids) != 1:
+        return "batch"
+    if any(
+        getattr(c, "kv_quant_scheme", None) == "kvarn"
+        for c in batch.prompt_cache
+    ):
+        return "converted"
+    # A populated or trimmed batch means a warm cache was adopted after
+    # construction; replacing it would discard the restored prefix while
+    # the input trim stands -- silent prefix loss. Unreadable offsets
+    # decline conservatively for the same reason.
+    try:
+        if any(
+            int(getattr(c, "offset", 0) or 0) for c in batch.prompt_cache
+        ):
+            return "populated"
+    except Exception:
+        return "populated"
+    if int(getattr(batch, "_processed_prompt_columns", 0) or 0):
+        return "trimmed"
+    from .generation import kvarn_unsupported
+    from .kvarn_cache import KVARN_BITS
+
+    reason = kvarn_unsupported(batch.model)
+    if reason is None:
+        k_bits, v_bits, tail = _serve_widths_and_tail()
+        if not (k_bits in KVARN_BITS and v_bits in KVARN_BITS):
+            reason = f"kvarn bits must be one of {KVARN_BITS}"
+        elif tail < 0 or tail % 128:
+            reason = "KV_TAIL_TOKENS must be a multiple of 128 (0 disables)"
+    if reason is not None:
+        key = type(batch.model).__name__
+        if key not in _PPB_DECLINE_NOTED:
+            _PPB_DECLINE_NOTED.add(key)
+            _log.warning(
+                "KV_QUANT_SCHEME=kvarn dropped for %s: %s; KV stays fp16",
+                key,
+                reason,
+            )
+        return "unsupported"
+    return None
+
+
+_CKPT_NOTED = [False]
+
+
+def ensure_ppb_kvarn(batch, kwargs, *, ckpt_active: bool) -> bool:
+    """Convert a ckpt-active hybrid's B=1 prompt cache to kvarn in place.
+
+    Called from the spec engine's PromptProcessingBatch init wrap, before
+    checkpoint-tier lookup/arming: stock init's single-row fast path
+    built single-stream classes -- the world the ckpt tier's layout tags,
+    rot geometry, and clone paths all understand -- and the outer batch
+    rebuild would replace them with batch classes the tier is blind to.
+    Converts plain KV layers only (rot/arr layers stay stock, matching
+    the CLI's make_prompt_cache + convert_prompt_cache path); zero
+    conversions (recurrent_gemma-shaped stacks, or a batch-class list the
+    fast path never built) leave the caches untouched. Returns True when
+    at least one layer converted.
+    """
+    if not ckpt_active:
+        return False
+    if _ppb_rebuild_declined(batch, kwargs) is not None:
+        return False
+    from .kvarn_cache import convert_prompt_cache, ensure_registered
+
+    ensure_registered()
+    k_bits, v_bits, tail = _serve_widths_and_tail()
+    n = convert_prompt_cache(
+        batch.prompt_cache, k_bits=k_bits, v_bits=v_bits, tail_tokens=tail
+    )
+    if not n:
+        return False
+    from .kvarn_sdpa import install_kvarn_sdpa
+
+    install_kvarn_sdpa()
+    if not _CKPT_NOTED[0]:
+        _CKPT_NOTED[0] = True
+        width = (
+            f"kvarn{k_bits}" if k_bits == v_bits else f"kvarn k{k_bits} v{v_bits}"
+        )
+        regions = "sink+tail fp16" if tail else "sink fp16, tail off"
+        print(
+            f"[kv] serve ckpt: {n}/{len(batch.prompt_cache)}-layer "
+            f"{width} KV ({regions})",
+            flush=True,
+        )
+    return True
 
 
 def install_kvarn_serve() -> None:
@@ -188,25 +310,11 @@ def _install_ppb_fastpath(_ar):
         # Stock init's single-row fast path (B=1, kv_bits None, no right
         # padding) builds via cache.make_prompt_cache and never consults
         # the scheme. Rebuild through the wrapped _make_cache; the cache
-        # is still empty here, so the swap is free.
-        if (
-            kwargs.get("kv_quant_scheme") != "kvarn"
-            or kwargs.get("kv_bits") is not None
-            or kwargs.get("warm_cache") is not None
-            or kwargs.get("draft_model") is not None
-            or kwargs.get("right_pad_per_row") is not None
-            or len(self.uids) != 1
-            or any(
-                getattr(c, "kv_quant_scheme", None) == "kvarn"
-                for c in self.prompt_cache
-            )
-        ):
-            return
-        from .generation import kvarn_unsupported
-
-        # Ineligible models skip the rebuild: the wrapped _make_cache
-        # would decline anyway, and the stock single-stream caches stay.
-        if kvarn_unsupported(self.model) is not None:
+        # is still empty here, so the swap is free. Ckpt-active hybrids
+        # were converted in place further down the init chain
+        # (ensure_ppb_kvarn) and decline as already converted; a
+        # warm-adopted cache declines as populated/trimmed.
+        if _ppb_rebuild_declined(self, kwargs) is not None:
             return
         self.prompt_cache = _ar._make_cache(
             self.model,
