@@ -12,6 +12,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   faster per call at chat-chunk widths, lifting serve prefill 20-43%
   shallow and 8-14% deep on many-expert models.
 
+- Bench chart value axes clamp to the data range when a zero anchor
+  would waste the panel height on empty space; nearby engine lines
+  now read as visually distinct.
+
 - DeepSeek-V4 single-token decode runs its hyper-connection glue as four
   native mlx-kquant ops instead of about 176 python kernel launches per
   step. `GMLX_HC_M1_FUSED=0` and `GMLX_HC_KQ=0` restore the previous
