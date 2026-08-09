@@ -6,11 +6,30 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- DeepSeek-V4 single-token decode runs its hyper-connection glue as four
+  native mlx-kquant ops instead of about 176 python kernel launches per
+  step. `GMLX_HC_M1_FUSED=0` and `GMLX_HC_KQ=0` restore the previous
+  routes for A/Bs.
+- DeepSeek-V4 hyper-connections at speculative verify widths run as one
+  fused kernel per call.
+- The hc_expand between attention and the ffn hyper-connection fuses into
+  the following collapse kernel, and dense small-N projections (router
+  gate, indexer weights, hyper head) route through mlx-kquant's
+  skinny_matmul at speculative verify widths when available
+  (GMLX_KQ_SKINNY=0 opts out).
+- The server now sizes command buffers per phase, coarse while decoding
+  and fine during deep prefill, rather than one cap for both.
+  `GMLX_CB_PHASE=0` restores the single cap.
+
 ### Fixed
 
 - GGUFs that quantize the MoE router gate (some community DeepSeek quants;
   llama.cpp's own quantize leaves it F32) now load: small quantized tensors
   on raw-array modules are dequantized to f32 at load instead of erroring.
+- MTP prefill steps now use fine prefill caps to avoid a transient memory
+  spike that could trigger a Metal OOM.
 
 ## [0.2.2] - 2026-08-06
 

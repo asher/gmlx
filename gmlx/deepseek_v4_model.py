@@ -53,6 +53,8 @@ from gmlx.deepseek_v4_hyper_connection import (
     HyperConnection,
     HyperHead,
     hc_expand,
+    hc_expand_collapse,
+    hc_expand_m1,
 )
 
 
@@ -1035,6 +1037,52 @@ def _kq_router_available() -> bool:
     return ok
 
 
+_KQ_SKINNY_STATE = {"ok": None}
+
+
+def _kq_skinny_available() -> bool:
+    """One-time probe for mlx-kquant's skinny_matmul (older builds fall
+    back to the stock matmul)."""
+    ok = _KQ_SKINNY_STATE["ok"]
+    if ok is None:
+        ok = os.environ.get("GMLX_KQ_SKINNY", "1") != "0"
+        if ok:
+            try:
+                import mlx_kquant as kq
+
+                ok = mx.metal.is_available() and hasattr(kq, "skinny_matmul")
+            except Exception:  # noqa: BLE001 - optional dependency
+                ok = False
+        _KQ_SKINNY_STATE["ok"] = ok
+    return ok
+
+
+def _skinny_or_matmul(x, w):
+    """x @ w.T; token widths 2..16 route around MLX's small-N GEMM cliff
+    (the stock path leaves the GEMV specialization at M >= 2 and runs
+    these shapes 4-8x below their bytes)."""
+    if (
+        2 <= x.shape[-2] <= 16
+        and x.shape[-1] % 4 == 0
+        and x.dtype in (mx.float16, mx.bfloat16, mx.float32)
+        and (w.dtype == x.dtype or w.dtype == mx.float32)
+        and mx.default_device() == mx.gpu
+        and _kq_skinny_available()
+    ):
+        import mlx_kquant as kq
+
+        return kq.skinny_matmul(x, w)
+    return x @ w.T
+
+
+def _skinny_linear(lin, x):
+    """lin(x); dense no-bias Linears at token widths 2..16 take the
+    skinny kernel, quantized or biased modules keep their own path."""
+    if type(lin) is nn.Linear and "bias" not in lin:
+        return _skinny_or_matmul(x, lin.weight)
+    return lin(x)
+
+
 class MoEGate(nn.Module):
     def __init__(self, config: ModelArgs, layer_idx: int):
         super().__init__()
@@ -1054,7 +1102,7 @@ class MoEGate(nn.Module):
             )
 
     def __call__(self, x: mx.array, input_ids: Optional[mx.array] = None):
-        logits = x @ self.weight.T
+        logits = _skinny_or_matmul(x, self.weight)
 
         if self.hash:
             if input_ids is None:
@@ -1329,7 +1377,9 @@ class Indexer(nn.Module):
             mx.float32
         )
         scores = mx.maximum(scores, 0) * self.scale
-        weights = self.weights_proj(x).astype(mx.float32) * (self.n_heads**-0.5)
+        weights = _skinny_linear(self.weights_proj, x).astype(mx.float32) * (
+            self.n_heads**-0.5
+        )
         scores = (scores * weights.swapaxes(-1, -2)[..., None]).sum(axis=1)
         if pmask is not None:
             scores = mx.where(
@@ -1382,7 +1432,9 @@ class Indexer(nn.Module):
                 import mlx_kquant as kq
 
                 if hasattr(kq, "dsa_indexer_score_decode"):
-                    weights = self.weights_proj(x) * (self.n_heads**-0.5)
+                    weights = _skinny_linear(self.weights_proj, x) * (
+                        self.n_heads**-0.5
+                    )
                     scores = kq.dsa_indexer_score_decode(
                         q,
                         pooled,
@@ -1570,7 +1622,6 @@ class LocalAttention(nn.Module):
                 sinks=sinks,
             )
         out = self.rope(out, offset, inverse=True)
-
         out = out.reshape(B, self.o_groups, -1, L, self.head_dim)
         out = out.transpose(0, 1, 3, 2, 4).flatten(-2)
         out = self.wo_a(out)
@@ -1729,7 +1780,6 @@ class CompressedAttention(nn.Module):
                 sinks=sinks,
             )
         out = self.rope(out, offset, inverse=True)
-
         out = out.reshape(B, self.o_groups, -1, L, self.head_dim)
         out = out.transpose(0, 1, 3, 2, 4).flatten(-2)
         out = self.wo_a(out)
@@ -1921,7 +1971,6 @@ class SparseCompressedAttention(nn.Module):
                     )
 
         out = self.rope(out, offset, inverse=True)
-
         out = out.reshape(B, self.o_groups, -1, L, self.head_dim)
         out = out.transpose(0, 1, 3, 2, 4).flatten(-2)
         out = self.wo_a(out)
@@ -1989,6 +2038,7 @@ def v4_attention_factory(config: ModelArgs, layer_idx: int) -> nn.Module:
 class DeepseekV4Block(nn.Module):
     def __init__(self, config: ModelArgs, layer_idx: int):
         super().__init__()
+        self.layer_idx = layer_idx
         self.attn = v4_attention_factory(config, layer_idx)
         self.ffn = DeepseekV4MoE(config, layer_idx)
         self.attn_norm = nn.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -2002,16 +2052,43 @@ class DeepseekV4Block(nn.Module):
         mask: Optional[mx.array],
         cache: Optional[Any],
         input_ids: mx.array,
-    ) -> mx.array:
+        carry: Optional[tuple] = None,
+        carry_mode: bool = False,
+    ):
+        if self.attn_hc.m1_fused_ok(h):
+            # attn front; a pending expand from the caller folds into it
+            if carry is not None:
+                h, front = self.attn_hc.fused_m1_expand(
+                    carry, self.attn_norm.weight
+                )
+            else:
+                front = self.attn_hc.fused_m1(h, self.attn_norm.weight)
+            x, post, comb = front
+            x = self.attn(x, mask=mask, cache=cache)
+
+            # ffn front always consumes the attn expand inline
+            h, front = self.ffn_hc.fused_m1_expand(
+                (x, h, post, comb), self.ffn_norm.weight
+            )
+            x, post, comb = front
+            x = self.ffn(x, input_ids)
+            if carry_mode:
+                return h, (x, h, post, comb)
+            return hc_expand_m1(x, h, post, comb)
+
+        if carry is not None:
+            h = hc_expand_m1(*carry)
         residual = h
         x, post, comb = self.attn_hc(h)
         x = self.attn(self.attn_norm(x), mask=mask, cache=cache)
-        h = hc_expand(x, residual, post, comb)
-
-        residual = h
-        x, post, comb = self.ffn_hc(h)
+        residual, x, post, comb = hc_expand_collapse(
+            self.ffn_hc, x, residual, post, comb
+        )
         x = self.ffn(self.ffn_norm(x), input_ids)
-        return hc_expand(x, residual, post, comb)
+        out = hc_expand(x, residual, post, comb)
+        if carry_mode:
+            return out, None
+        return out
 
 
 class DeepseekV4Model(PipelineMixin, nn.Module):
@@ -2066,16 +2143,24 @@ class DeepseekV4Model(PipelineMixin, nn.Module):
 
         captures = []
         cap_set = capture_layers or ()
+        carry = None
         for idx, (layer, layer_cache) in enumerate(
             zip(self.pipeline_layers, cache)
         ):
-            h = layer(h, mask, layer_cache, inputs)
+            h, carry = layer(
+                h, mask, layer_cache, inputs, carry=carry, carry_mode=True
+            )
             if idx in cap_set:
                 # DSpark capture: uniform mean over the hc streams of the
                 # layer output (ds4's dspark_hc_mean_weights = 1/n_hc).
+                if carry is not None:
+                    h = hc_expand_m1(*carry)
+                    carry = None
                 captures.append(
                     h.astype(mx.float32).mean(axis=2).astype(h.dtype)
                 )
+        if carry is not None:
+            h = hc_expand_m1(*carry)
 
         _materialize_cache_arrays(cache)
 

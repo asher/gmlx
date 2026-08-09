@@ -38,8 +38,8 @@ same sampler, and the same chat prompts on both engines.
 | **gmlx** | `0.1.0` |
 | **mlx-kquant** | `0.3.5` (K-quant + perf kernels) |
 | **llama.cpp** | `b9967` |
-| **DeepSeek-V4-Flash reference** | ds4-server (dwarfstar) @ `80ebbc3`, ignore-eos patched |
-| **Dates** | 2026-07-05 .. 2026-07-15 |
+| **DeepSeek-V4-Flash reference** | ds4-server (dwarfstar) @ `b030961`, ignore-eos patched |
+| **Dates** | 2026-07-05 .. 2026-08-07 |
 | **Prompt corpus** | HuggingFaceH4/ultrachat_200k:train_sft (chat template applied) |
 | **Sampling** | temperature 0.6, top-p 0.95, top-k 20, seed 1234 (coupled RNG across engines) |
 | **Speculative draft** | MTP @ 3 draft tokens (native/preserved MTP head, or gemma-4's companion drafter) |
@@ -68,7 +68,7 @@ base model); this table is the honest weight mapping for reproduction.
 | gpt-oss-20b MXFP4 | `gpt-oss-20b-mxfp4.gguf` | - | - |
 | Dolphin3.0-Llama3.1-8B Q6_K | `Dolphin3.0-Llama3.1-8B-abliterated.Q6_K.gguf` | [HF](https://huggingface.co/RavichandranJ/Dolphin3-Cyber-8B-GGUF) | - |
 | DeepSeek-V4-Flash UD-IQ3_XXS | `DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf` | [HF](https://huggingface.co/unsloth/DeepSeek-V4-Flash-GGUF) | - |
-| DeepSeek-V4-Flash IQ2_XXS | `DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf` | [HF](https://huggingface.co/antirez/deepseek-v4-gguf) | - |
+| DeepSeek-V4-Flash IQ2_XXS | `DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf` | [HF](https://huggingface.co/antirez/deepseek-v4-gguf) | - |
 
 ## Per-model detail
 
@@ -287,11 +287,12 @@ has no DeepSeek-V4-Flash path. Ratios below are gmlx / ds4-server.
 
 | KV depth | gmlx decode | ds4-server decode | gmlx/ds4-server decode | gmlx prefill | ds4-server prefill | gmlx/ds4-server prefill |
 |---|--:|--:|--:|--:|--:|--:|
-| 512 | 35.5 (35.3-35.7) | 33.8 (33.6-34.6) | 1.05x | 417.5 (408.9-422.2) | 219.5 (210.2-274.8) | 1.90x |
-| 4.3k | 32.8 (32.7-33) | 28.8 (28.7-29.7) | 1.14x | 649.3 (645.6-660.4) | 369.6 (362-372.6) | 1.76x |
-| 17k | 31.7 | 27.8 (27.5-28.9) | 1.14x | 633 (632.5-633.5) | 373 (344.7-380.5) | 1.70x |
-| 67k | 30.5 (30.1-30.8) | 25.2 (24.1-26.4) | 1.21x | 572.8 (570.2-575.4) | 326 (303.9-328.3) | 1.76x |
-| 110k | 28.6 (28.5-29.3) | 23.6 (23.2-23.9) | 1.21x | 592.9 (588.1-598.3) | 292.8 (282.6-294.3) | 2.02x |
-| 200k | 27.3 (27.2-27.5) | 19.8 (18.9-20.7) | 1.38x | 545 (530-549.5) | 233.2 (224.2-238.6) | 2.34x |
-| 384k | 24 (23.9-24.1) | 15.7 (15.6-15.8) | 1.53x | 459.7 (456.3-460.6) | 171.9 (168.7-172.1) | 2.67x |
-| 500k | 20.7 (20.5-21.6) | 13.2 (13.1-13.7) | 1.57x | 402 (390-404.5) | 141.1 (131.4-141.1) | 2.85x |
+| 512 | 40.1 | 33.7 (33.6-34) | 1.19x | 289.7 (264.7-292.9) | 353.4 (347.2-361.2) | 0.82x |
+| 4.3k | 37.4 (36.8-37.6) | 31.8 (31.6-32.2) | 1.18x | 643 (628.5-649.1) | 546.8 (545.8-559) | 1.18x |
+| 17k | 35.4 (35.1-36.2) | 30.4 (30.2-31.4) | 1.16x | 701.4 (694-709.9) | 538 (534.5-554.6) | 1.30x |
+| 67k | 34.2 (32.6-34.9) | 27.7 (27.4-27.8) | 1.23x | 652.2 (604.8-673.1) | 495.6 (489.4-497.3) | 1.32x |
+| 110k | 30.8 (28.8-32.4) | 24.2 (24-24.8) | 1.27x | 579.9 (535.5-628.4) | 430.4 (422.9-440.3) | 1.35x |
+| 200k | 29.3 (28.9-29.3) | 21.3 (21.2-22) | 1.38x | 537.7 (523.7-542.8) | 356.7 (356-362.6) | 1.51x |
+| 300k | 27.3 (27.2-27.3) | 17.7 (17.6-17.8) | 1.54x | 496.9 (476.9-499.5) | 305.3 (290.9-305.6) | 1.63x |
+| 384k | 25.2 (25-25.3) | 16.4 (16.3-16.5) | 1.54x | 477.8 (476.9-478.6) | 277.1 (276.8-277.4) | 1.72x |
+| 500k | 22.9 (22.8-23.1) | 14.5 (14.4-14.5) | 1.58x | 420.4 (406.7-434.1) | 240.9 (239.3-242.4) | 1.75x |

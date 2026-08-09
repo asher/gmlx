@@ -1013,6 +1013,14 @@ def install_full_prompt_mtp_prefill() -> None:
     def _mtp_prompt_step(self) -> int:
         if self.draft_kind != "mtp":
             return _orig_prompt_step(self)
+        # cb_phase flips fine prefill caps by wrapping the stock
+        # prompt_step, but this body replaces it for MTP batches, so the
+        # flip must happen here too: a multi-thousand-token chunk under
+        # the coarse decode caps keeps every layer's transients live in
+        # one command buffer and OOMs the GPU on deep prompts.
+        if os.environ.get("GMLX_CB_PHASE", "1") != "0":
+            from .cb_phase import flip
+            flip("prefill")
 
         if not hasattr(self, "_mtp_full_input_ids"):
             if self.prefill_step_size is None:

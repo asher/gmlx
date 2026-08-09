@@ -1445,6 +1445,10 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     # (deep-context safety; see server_memory).
     from .server_memory import apply_cache_limit
     apply_cache_limit(cfg)
+    from .cb_phase import COARSE, FINE, install_cb_phase_flips
+    if install_cb_phase_flips():
+        print(f"[server] command buffer caps: per-phase (decode {COARSE}, "
+              f"prefill {FINE})")
     # Single-model --hf-source override (niche): re-register the VLM with the
     # explicit processor source (ModelCfg carries no hf_source field).
     if a.model and a.hf_source and a.mmproj:

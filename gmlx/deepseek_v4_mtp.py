@@ -125,6 +125,15 @@ class DeepseekV4SpecLM(v4.Model):
             hidden.shape[0], hidden.shape[1], args.hc_mult, args.hidden_size
         )
 
+    def chunked_prefill_policy(self, **kwargs):
+        # Stock mlx-vlm disables chunked prefill whenever a drafter is
+        # attached (unknown hidden-capture contracts), which one-shots
+        # the whole prompt on paths that consult this policy. The DSpark
+        # drafter is window-limited (hidden_capture_limit trailing
+        # positions), so last-chunk capture is sufficient and chunked
+        # prefill is always safe for this target.
+        return True
+
     def __call__(
         self,
         inputs: mx.array,
