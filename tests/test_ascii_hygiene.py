@@ -23,6 +23,7 @@ _ALLOWED = {
     "gmlx/tts.py",               # speech-text sanitizer dash/fraction glyphs
     "tests/e2e/checks.py",           # U+FFFD degeneration detection
     "tests/test_chat.py",            # asserts chat status-line separators
+    "tests/test_chat_e2e.py",        # asserts toolbar middot tail
     "tests/test_e2e_checks.py",      # U+FFFD fixtures
     "tests/test_menubar.py",         # asserts menubar glyph labels
     "tests/test_reasoning.py",       # asserts spinner/box output
