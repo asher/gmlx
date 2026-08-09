@@ -881,6 +881,15 @@ def _record_insert(manager, rec) -> None:
             for k in [k for k in chain if idx[k].kind == "replay"]:
                 _release_record(manager, idx.pop(k))
         chain = [k for k in chain if k in idx and idx[k].kind != "replay"]
+        # Strip-on-extend frees superseded records' main chains for the
+        # pool; sub-prefix adoption survives it because those chains are
+        # content-deduped and skeleton re-index re-cuts them. A record
+        # with no main chain (kvarn: inline codes, at most a bounded
+        # window chain) is the only carrier of its boundary -- stripping
+        # it kills divergent-suffix and turn adoption outright -- and
+        # pins no chain the pool could reuse, so it is governed by the
+        # count and byte bounds below instead.
+        chain = [k for k in chain if idx[k].main_blocks]
         chain.sort(key=lambda k: idx[k].p, reverse=True)
         for k in chain[_CKPT_HEAVY_PER_CHAIN - 1:]:
             _release_record(manager, idx.pop(k))

@@ -97,18 +97,44 @@ def test_blockless_store_lookup_roundtrip(p):
     assert all(b.block_hash is None for b in man.pool)
 
 
-def test_blockless_strip_on_extend_releases_cleanly():
+def test_blockless_records_exempt_from_strip_on_extend():
+    # A blockless record is its boundary's only carrier: no main chain
+    # for skeleton re-index to re-cut, so strip-on-extend must not touch
+    # it -- otherwise a divergent suffix or next turn has nothing to
+    # adopt below the terminal (fp16 recovers via chain dedup; kvarn
+    # cannot).
     man = GmlxAPCManager(num_blocks=8, block_size=16)
     for p in (32, 48, 64, 80):
         assert ckpt_store(man, _ids(p), [_hollow_kvarn(p), _arr(seed=p)],
                           extra_hash=7)
     from gmlx.cache_snapshot import _ckpt_records
     recs = _ckpt_records(man)
-    # Heavy-per-chain retention: deepest kept, chain bounded.
-    assert max(r.p for r in recs.values()) == 80
+    assert sorted(r.p for r in recs.values()) == [32, 48, 64, 80]
+    # Divergent suffix (shared 40-token prefix): adopts the shallow
+    # boundary the deeper stores would have stripped.
+    warm, got = ckpt_lookup(man, _ids(40) + [777] * 8, extra_hash=7,
+                            layout=(KVARN_TAG, "arr"))
+    assert got == 32 and type(warm[0]) is KVarNKVCache
     warm, got = ckpt_lookup(man, _ids(80) + [999], extra_hash=7,
                             layout=(KVARN_TAG, "arr"))
     assert got == 80 and type(warm[0]) is KVarNKVCache
+
+
+def test_blockless_records_release_under_byte_budget(monkeypatch):
+    import gmlx.cache_snapshot as cs
+
+    man = GmlxAPCManager(num_blocks=8, block_size=16)
+    for p in (32, 48):
+        assert ckpt_store(man, _ids(p), [_hollow_kvarn(p), _arr(seed=p)],
+                          extra_hash=7)
+    recs = cs._ckpt_records(man)
+    nb = max(r.nbytes for r in recs.values())
+    monkeypatch.setattr(cs, "_CKPT_BUDGET_BYTES", int(nb * 1.5))
+    assert ckpt_store(man, _ids(64), [_hollow_kvarn(64), _arr(seed=64)],
+                      extra_hash=7)
+    # The budget, not strip-on-extend, bounds blockless retention: the
+    # newest record survives, the oldest are released.
+    assert {r.p for r in cs._ckpt_records(man).values()} == {64}
 
 
 def test_offset_gate_declines_stale_kvarn():
