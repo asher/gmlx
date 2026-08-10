@@ -95,22 +95,8 @@ launch carries it into each tool's configuration in that tool's native slot:
 
 ## Flags
 
-| Flag | Meaning |
-|------|---------|
-| `--model ID[@profile]` | Served model (and optional profile) the tool should use. Default: the server's default-marked model. |
-| `--base-url URL` | Target an explicit server. Never auto-started. |
-| `--host H` / `--port P` | Target host/port for the managed server (default `127.0.0.1:8080`). |
-| `--api-key KEY` | Key for a key-protected server, plumbed per the table above. |
-| `--provider-id NAME` | Provider id written into the tool's config. |
-| `--config-path PATH` | Where the tool config is written (default under `~/.config/gmlx`). For open-webui this picks its `DATA_DIR` instead. |
-| `--config-only` | Write the config and print the run command; do not exec. |
-| `--no-start` | Never auto-start a server. |
-| `--start-timeout S` | Cap the auto-start readiness wait (default `0` = unbounded). |
-| `--no-keep` | Do not ask the server to keep `--model` resident. |
-
-Exit codes: `0` tool launched (or server started and ready); `1` server down with
-`--no-start` or `--base-url`, a launchd server mid-restart, or the auto-started
-process died; `2` no config or a malformed config; `130` Ctrl-C during the start wait.
+The full flag table and exit codes are in the CLI reference:
+[cli.md](cli.md#launch-connect-a-coding-agent-or-chat-app).
 
 ## The clients
 

@@ -23,10 +23,6 @@
 | [`gmlx profiles`](#gmlx-profiles) | Show per-family sampling defaults and `@intents`; resolve one model's sampling. |
 | [`gmlx completion`](#gmlx-completion) | Print a shell completion script (zsh, bash, fish). |
 
-`gmlx` is the installed command; every action is a subcommand (`gmlx run`,
-`gmlx serve`, `gmlx init`, and so on). The project, package, and command are
-all named `gmlx`.
-
 Every verb operates on the GGUF file itself: the file on disk is the model.
 Every flag is also visible via `--help`.
 
