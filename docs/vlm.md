@@ -14,7 +14,7 @@ encoders run in float, and the image processor + chat template (including the
 per-family image/audio marker tokens) are synthesized from the two GGUFs' metadata.
 `--hf-source` overrides only when a file omits something.
 
-Vision and audio support is included in the base install. No extra is needed.
+Vision and audio support is included in the base install; no extra is needed.
 
 Where mmproj files come from: llama.cpp-style multimodal GGUF repos ship them
 as `mmproj-*.gguf` siblings of the LLM GGUF in the same Hugging Face repo.
