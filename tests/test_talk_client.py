@@ -213,15 +213,16 @@ def test_stream_chat_yields_deltas_and_markers(monkeypatch):
 def test_stream_chat_relays_timings_marker(monkeypatch):
     with_timings = _chunk({"content": "Hel"})
     with_timings["timings"] = {"predicted_n": 2}
-    usage_only = {"choices": [], "usage": {"total_tokens": 5},
-                  "timings": {"predicted_n": 5}}       # final chunk: no relay
-    resp = _FakeResp(_sse(with_timings, usage_only))
+    final = {"choices": [], "usage": {"total_tokens": 5},
+             "timings": {"predicted_n": 5, "predicted_per_second": 50.0}}
+    resp = _FakeResp(_sse(with_timings, final))
     monkeypatch.setattr(tc, "_open_stream",
                         lambda url, payload, api_key, timeout: resp)
     got = list(tc.stream_chat("http://h:1/v1", model="m", messages=[],
                               max_tokens=10))
     assert {"_timings": {"predicted_n": 2}} in got
-    assert {"_timings": {"predicted_n": 5}} not in got
+    # the final chunk's full timings relay too (rates for the stat line)
+    assert {"_timings": final["timings"]} in got
     assert {"_usage": {"total_tokens": 5}} in got
 
 

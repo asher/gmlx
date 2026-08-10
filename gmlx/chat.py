@@ -836,6 +836,10 @@ def _fmt_stat_line(stats: dict, ctx_used, ctx_max) -> str:
         if stats.get("prompt_tps"):
             p += f" @ {stats['prompt_tps']:.0f} tok/s"
         parts.append(p)
+    # Queue wait + prefill, as one number: everything before the first token
+    # arrived. The gen rate beside it is decode-only, so nothing is blended.
+    if stats.get("ttft_s", 0.0) >= 0.1:
+        parts.append(f"ttft {stats['ttft_s']:.1f}s")
     if stats.get("gen_tokens"):
         parts.append(
             f"gen {_fmt_k(stats['gen_tokens'])} tok @ {stats.get('gen_tps', 0.0):.1f} tok/s"
@@ -1915,6 +1919,9 @@ def _stream_reply(
             "gen_tokens": int(getattr(last, "generation_tokens", 0) or 0),
             "gen_tps": float(getattr(last, "generation_tps", 0.0) or 0.0),
         }
+        ttft = float(getattr(last, "ttft_s", 0.0) or 0.0)
+        if ttft:
+            stats["ttft_s"] = ttft
         accepts = list(getattr(drafter, "accept_lens", None) or [])
         drafts = list(getattr(drafter, "draft_lens", None) or [])
         if drafts:
@@ -2272,6 +2279,7 @@ def _assistant_reply(brain, user_text: str, state: ChatState) -> tuple[str, bool
 
     status_shown = [False]
     t0 = time.monotonic()
+    t_first = [None]                      # first generated-token event
 
     def _clear_status():
         if status_shown[0]:
@@ -2279,13 +2287,19 @@ def _assistant_reply(brain, user_text: str, state: ChatState) -> tuple[str, bool
             sys.stdout.flush()
             status_shown[0] = False
 
+    def _mark_first():
+        if t_first[0] is None:
+            t_first[0] = time.monotonic()
+
     def chunks():
         try:
             for kind, payload in brain.turn(user_text):
                 if kind == "say":
+                    _mark_first()
                     _clear_status()
                     yield SimpleNamespace(text=payload)
                 elif kind == "status":
+                    _mark_first()         # thinking/tool events ride on tokens
                     _clear_status()
                     sys.stdout.write(f"[assistant] {payload}...")
                     sys.stdout.flush()
@@ -2293,17 +2307,29 @@ def _assistant_reply(brain, user_text: str, state: ChatState) -> tuple[str, bool
                 elif kind == "count":
                     # Exact cumulative output tokens for this request round
                     # (gmlx per-chunk stream timings) - feeds the tok/s ticker.
+                    _mark_first()
                     yield SimpleNamespace(text="", generation_tokens=payload)
                 elif kind == "done":
                     u = payload or {}
                     n = int(u.get("completion_tokens") or 0)
-                    el = time.monotonic() - t0
+                    end = time.monotonic()
+                    # ttft covers everything before the first token reached
+                    # this client: queue wait plus prefill.
+                    ttft = (t_first[0] - t0) if t_first[0] is not None else 0.0
+                    tm = u.get("timings") or {}
+                    gen_tps = float(tm.get("predicted_per_second") or 0.0)
+                    if not gen_tps:
+                        # No server timings (foreign server): decode-only
+                        # wall-clock rate, so the wait never dilutes it.
+                        dec = end - t0 - ttft
+                        gen_tps = (n / dec) if dec > 0 and n else 0.0
                     yield SimpleNamespace(
                         text="",
                         prompt_tokens=int(u.get("prompt_tokens") or 0),
-                        prompt_tps=0.0,
+                        prompt_tps=float(tm.get("prompt_per_second") or 0.0),
                         generation_tokens=n,
-                        generation_tps=(n / el) if el > 0 and n else 0.0)
+                        generation_tps=gen_tps,
+                        ttft_s=ttft)
         except TalkClientError as e:
             _clear_status()
             print(f"\n[chat] server error: {e}", file=sys.stderr)

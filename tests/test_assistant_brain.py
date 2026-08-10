@@ -103,13 +103,20 @@ def test_reasoning_deltas_become_status():
 
 
 def test_timings_markers_become_count_events():
+    final_t = {"predicted_n": 5, "predicted_per_second": 50.0,
+               "prompt_per_second": 600.0}
     stream = _stream_script([{"content": "It is "}, {"_timings": {"predicted_n": 3}},
                              {"content": "5pm."}, {"_timings": {"predicted_n": 5}},
                              {"_finish": "stop"},
-                             {"_usage": {"total_tokens": 7}}])
+                             {"_usage": {"completion_tokens": 5}},
+                             {"_timings": final_t}])
     events = list(_brain(stream).turn("hi"))
-    assert [e for e in events if e[0] == "count"] == [("count", 3), ("count", 5)]
+    assert [e for e in events if e[0] == "count"] == [
+        ("count", 3), ("count", 5), ("count", 5)]
     assert ("say", "It is ") in events and ("say", "5pm.") in events
+    # the last timings seen ride on the done stats (decode/prefill rates)
+    assert events[-1] == ("done", {"completion_tokens": 5,
+                                   "timings": final_t})
 
 
 # -- the tool loop -------------------------------------------------------------

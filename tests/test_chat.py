@@ -989,6 +989,19 @@ def test_rate_ticker_exact_from_generation_tokens():
     assert abs(int(status.split()[0]) - 150) <= 2
 
 
+def test_stat_line_shows_ttft_beside_decode_rate():
+    from gmlx.chat import _fmt_stat_line
+
+    line = _fmt_stat_line({"prompt_tokens": 2296, "prompt_tps": 670.0,
+                           "gen_tokens": 607, "gen_tps": 50.3,
+                           "ttft_s": 7.2}, 2900, 0)
+    assert "ttft 7.2s" in line
+    assert "@ 50.3 tok/s" in line
+    # no wait recorded (local pipeline): segment absent
+    line = _fmt_stat_line({"gen_tokens": 607, "gen_tps": 50.3}, 0, 0)
+    assert "ttft" not in line
+
+
 def test_rate_ticker_silent_without_counts():
     from types import SimpleNamespace
     from gmlx.chat import _RateTicker

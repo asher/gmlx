@@ -314,7 +314,7 @@ def stream_chat(base_url: str, *, model: str, messages: list,
                     yield delta
                 if choice.get("finish_reason"):
                     yield {"_finish": choice["finish_reason"]}
-            if chunk.get("choices") and chunk.get("timings"):
+            if chunk.get("timings"):
                 yield {"_timings": chunk["timings"]}
             if chunk.get("usage"):
                 yield {"_usage": chunk["usage"]}
