@@ -11,8 +11,7 @@ connect your coding agent to it, talk to it by voice, build a local RAG
 stack on it, and fine-tune it with LoRA. One command, entirely on your Mac.
 
 It runs the community's K-quant and IQ-quant GGUF builds — size for size,
-the most accurate open quant formats there are — exactly as published:
-nothing converted, nothing re-quantized, none of that accuracy given back
+the most accurate open quant formats there are — exactly as published
 ([accuracy per byte](#accuracy-per-byte)). The companion project
 [mlx-kquant](https://github.com/asher/mlx-kquant) supplies the Metal kernels
 that run these formats natively on Apple's
@@ -140,9 +139,8 @@ gmlx launch pi --model qwen3.6-27b-q6@coding
 ```
 
 Supported: pi, opencode, omp, claude-code, hermes, goose, the aichat and elia
-chat clients, and the Open WebUI browser app — `gmlx launch open-webui` is
-chat in your browser on your own server. A macOS menu-bar app shows what is
-resident and offers unload, restart, and logs, and `gmlx service install`
+chat clients, and the Open WebUI browser app. A macOS menu-bar app shows what
+is resident and offers unload, restart, and logs, and `gmlx service install`
 keeps the server running from login.
 
 Details: the [launch guide](https://github.com/asher/gmlx/blob/main/docs/launch.md).
@@ -191,44 +189,37 @@ M5 Max (128 GB), gmlx prefills faster on every model in our fleet at every
 depth measured, 1.2-1.6x at short context and 2-4x past 100k tokens. At
 matched non-speculative baselines, decode starts at parity and wins
 fleet-wide from 16k tokens as the KV cache deepens; with speculative decoding
-active on both engines, gmlx decodes 1.1-2x ahead at every depth measured,
-and MTP's lift over the same server with it off holds at 1.4-1.8x from 17k
-through 110k, where llama.cpp's speculation gain decays with depth.
-The depth curve is the point: coding harnesses and agent sessions live at
-50-200k tokens of context, and that is where the gap is widest.
-
-| Prefill | Decode (speculation on both engines) | MTP lift at depth |
-|---|---|---|
-| faster on every model at every depth; 2-4x past 100k tokens | 1.1-2x ahead, widening with depth | 1.4-1.8x held from 17k to 110k |
+active on both engines, gmlx decodes 1.1-2x ahead throughout, and MTP's lift
+over the same server with it off holds at 1.4-1.8x from 17k through 110k,
+where llama.cpp's speculation gain decays with depth.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/perf/mtp-lift-dark.svg">
   <img src="https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/perf/mtp-lift.svg" alt="MTP decode lift vs KV depth: gmlx holds its speedup where llama.cpp's decays">
 </picture>
 
-Reference points on the same machine at short context, llama.cpp on the same
-file alongside: gemma-4-12B-it (dense, Q6_K) decodes at ~72 tok/s with MTP vs
-llama.cpp's ~54 with speculation (1.3x), prefilling at ~850 vs ~730 tok/s;
+Reference points at short context: gemma-4-12B-it (dense, Q6_K) decodes at
+~72 tok/s with MTP vs llama.cpp's ~54 with speculation (1.3x), prefilling at
+~850 vs ~730 tok/s;
 Qwen3.5-9B (dense, Q6_K) decodes at ~112 vs ~76 tok/s (1.5x), prefilling at
 ~1600 vs ~1140 tok/s. Absolute numbers scale with the machine's memory
 bandwidth; measure your own with `gmlx run model.gguf --bench "128,512,2048"`.
 
 The speed comes from kernels built for exactly this work: mlx-kquant's fused
 K-quant and IQ matmuls, attention tuned for decode at depth, and a custom MTP
-verify path built for this server. Where llama.cpp still leads, the
-[performance guide](https://github.com/asher/gmlx/blob/main/docs/performance.md)
-says so; the full fleet tables, per-model charts, and methodology are in
+verify path built for this server. The full fleet tables, per-model charts,
+and methodology are in
 [benchmarks.md](https://github.com/asher/gmlx/blob/main/docs/benchmarks.md).
 
 When you want more, the levers are: MTP speculative decoding, which roughly
 doubles decode throughput at short context, automatic on models with a native
 draft head (Qwen3.5/3.6) and available to gemma-4 through a small companion
-drafter (1.9-2.1x at short context); the prompt cache, which removes repeated
-prefill for agent workloads; KV-cache quantization for long contexts; and
-disk-streamed execution for MoE models larger than memory
-([below](#bigger-than-memory)). The file you pick matters too: a uniform
-K-quant decodes meaningfully faster than a heavily mixed one at similar or
-better quality. When and why, with numbers: the
+drafter (1.9-2.1x); the prompt cache, which removes repeated prefill for
+agent workloads; KV-cache quantization for long contexts; and disk-streamed
+execution for MoE models larger than memory ([below](#bigger-than-memory)).
+The file you pick matters too: a uniform K-quant decodes meaningfully faster
+than a heavily mixed one at similar or better quality. When each lever pays
+off, with numbers — and where llama.cpp still leads — is in the
 [performance guide](https://github.com/asher/gmlx/blob/main/docs/performance.md).
 
 ### Bigger than memory
@@ -251,8 +242,8 @@ numbers: the
 ### Accuracy per byte
 
 K-quants are not just fast here; they are more accurate per byte than MLX's
-native (affine) quantization, carrying roughly half the KL divergence at the
-same bitrate (1.8-2.8x across the models measured). Qwen3.6-27B at a 4-bit
+native (affine) quantization, carrying 1.8-2.8x less KL divergence at the
+same bitrate across the models measured. Qwen3.6-27B at a 4-bit
 budget: KLD 0.0577 at 4.69 bpw for MLX affine vs 0.0208 at 4.88 bpw for
 Q4_K_M, a 2.8x cut. The full table and methodology are in
 [mlx-kquant's README](https://github.com/asher/mlx-kquant#why). Converting a
@@ -287,8 +278,8 @@ you can pick another variant.
 
 Vision-language models load as a K-quant LLM GGUF paired with its float `mmproj`
 GGUF: supported families and caveats in the [VLM guide](https://github.com/asher/gmlx/blob/main/docs/vlm.md). Want a family
-that is missing? What it takes, and the acceptance gate every family clears, is
-in the [adding-architectures guide](https://github.com/asher/gmlx/blob/main/docs/adding-architectures.md).
+that is missing? What it takes is in the
+[adding-architectures guide](https://github.com/asher/gmlx/blob/main/docs/adding-architectures.md).
 
 ## How it works
 
@@ -323,10 +314,7 @@ flowchart TB
   serve --> aux["embeddings + rerank<br/>STT + TTS"]
 ```
 
-The loader: preflight (shards, codecs, arch gate), mmap the wire bytes, remap GGUF
-tensor names to mlx-lm parameter names, synthesize the config and tokenizer from the
-GGUF metadata, assemble the model with quantized leaves swapped for `kq.*`-backed
-modules, and generate with mlx-lm's sampler and KV cache. Serving-side mechanics:
+Serving-side mechanics — engine, batching, and the HTTP layers:
 [docs/serving-architecture.md](https://github.com/asher/gmlx/blob/main/docs/serving-architecture.md).
 
 ## Python API
