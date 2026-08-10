@@ -209,8 +209,11 @@ class MuseGlimmerModel(nn.Module):
         inputs: mx.array,
         cache: Optional[Any] = None,
         capture_layers: Optional[tuple] = None,
+        inputs_embeds: Optional[mx.array] = None,
     ):
-        h = self.embed_tokens(inputs)
+        # The embedding norm sits after llama.cpp's build_inp_embd, so injected
+        # multimodal embeddings are normed alongside token embeddings.
+        h = self.embed_tokens(inputs) if inputs_embeds is None else inputs_embeds
         h = mx.fast.rms_norm(h, None, self.args.rms_norm_eps)
 
         if cache is None:
@@ -236,6 +239,17 @@ class MuseGlimmerModel(nn.Module):
         return self.norm(h)
 
 
+def scale_and_softcap(out: mx.array, multiplier: float, cap: float) -> mx.array:
+    """Logit tail shared with the vision-language wrapper: the output multiplier
+    then the gemma-style tanh softcap. Computed in fp32 - llama.cpp's parity
+    oracle scales and softcaps an fp32 ``result_output``, and the softcap is
+    nonlinear enough that bf16 rounding moves argmax at depth."""
+    out = out.astype(mx.float32) * multiplier
+    if cap:
+        out = mx.tanh(out / cap) * cap
+    return out
+
+
 class Model(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
@@ -247,18 +261,13 @@ class Model(nn.Module):
 
     def head(self, h: mx.array) -> mx.array:
         """Logits from a final-normed hidden state: lm_head, output multiplier,
-        tanh softcap. Computed in fp32 - llama.cpp's parity oracle scales and
-        softcaps an fp32 ``result_output``, and the softcap is nonlinear enough
-        that bf16 rounding moves argmax at depth."""
+        tanh softcap."""
         if self.args.tie_word_embeddings:
             out = self.model.embed_tokens.as_linear(h)
         else:
             out = self.lm_head(h)
-        out = out.astype(mx.float32) * self.args.output_multiplier
-        cap = self.args.final_logit_softcapping
-        if cap:
-            out = mx.tanh(out / cap) * cap
-        return out
+        return scale_and_softcap(
+            out, self.args.output_multiplier, self.args.final_logit_softcapping)
 
     def __call__(self, inputs: mx.array, cache: Optional[Any] = None):
         return self.head(self.model(inputs, cache))
