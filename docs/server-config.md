@@ -1788,15 +1788,6 @@ sequenceDiagram
   E-->>C: stream tokens
 ```
 
-In prose, a request flows: (1) the client POSTs a chat completion whose
-`model` is `id@profile`; (2) the mlx-vlm app asks the residency pool for that
-model; (3) the pool has the serving resolver split the id from the profile
-and resolve the file path; (4) a resident model is returned as-is, while a
-cold one is built by the loader (leaves swapped to `kq.*` modules) and cached
-in the pool; (5) the generation arguments are seeded from the active
-profile's sampling; (6) the batch generator decodes and streams tokens back
-to the client.
-
 For the bridge/residency mechanics (how the path-keyed companion registries
 and the context-aware runtime proxy work), see
 [serving-architecture.md](serving-architecture.md).
