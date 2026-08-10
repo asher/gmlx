@@ -51,7 +51,7 @@ names the model and its on-disk size while it loads, and the model is hot for th
 tool's first turn. When nothing is preloaded, the server answers in about a second
 and the model loads lazily on the first request, which makes that first turn slower.
 
-There is no fixed timeout; only the server process dying is a hard failure. Press
+There is no fixed timeout. Only the server process dying is a hard failure. Press
 Ctrl-C to stop waiting (the server keeps starting in the background). With no config
 anywhere, launch prints `gmlx init` guidance and starts nothing.
 
@@ -67,14 +67,14 @@ anywhere, launch prints `gmlx init` guidance and starts nothing.
 ## Choosing the model
 
 `--model ID` picks which served model the tool uses. Without it, the tool gets the
-server's default-marked model. The id half is validated against the served list; an
+server's default-marked model. The id half is validated against the served list. An
 `id@profile` form (`--model qwen3.6-27b@coding`) runs every request from the tool at
 that profile's sampling, validated by the server.
 
 When you pass `--model`, launch also asks the server to keep that model resident
 through its idle-TTL reaper, so a long coding session's model is not idle-unloaded
 mid-use (which would force a cold reload on the next turn). This is not a full pin:
-under memory pressure the pool can still evict it. The request is fire-and-forget;
+under memory pressure the pool can still evict it. The request is fire-and-forget:
 the server warm-loads in the background while the tool execs. `gmlx ps` shows the
 model as `kept`, and `POST /unload {model}` releases it. Pass `--no-keep` to opt out.
 
@@ -111,8 +111,8 @@ on PATH. launch exports:
 
 Claude Code on local models is prefill-heavy: it sends a very long system prompt
 (tens of thousands of tokens) and frequently rewrites its request prefix through
-context compaction and tool-result injection, so KV-prefix reuse across requests is
-limited and turn latency is dominated by prompt processing. Serve with the prompt
+context compaction and tool-result injection. KV-prefix reuse across requests is
+therefore limited, and turn latency is dominated by prompt processing. Serve with the prompt
 cache enabled (`cache:` in the config, see
 [server-config.md](server-config.md#cache-keys-cache)) to soften repeated prefixes,
 and prefer a model and machine with strong prefill throughput.
@@ -143,8 +143,8 @@ A model is required (`inference.model`).
 
 hermes refuses models with less than 64k context at startup, so serve it a model
 whose context window is at least 64k tokens. The window comes from the model's GGUF
-metadata and is not configurable server-side; the `max_kv_size` load key only caps
-the rolling KV cache, it does not change the advertised window.
+metadata and is not configurable server-side. The `max_kv_size` load key caps only
+the rolling KV cache, not the advertised window.
 
 ### goose
 
@@ -152,7 +152,7 @@ Block's goose. Merge style: launch merges the non-secret pointer keys into
 `~/.config/goose/config.yaml` (existing keys preserved) and also exports the same
 values as environment variables at exec, which take precedence in goose. A model is
 required (`GOOSE_MODEL`). The API key travels as `OPENAI_API_KEY` in the exec
-environment only; it is never written into the YAML, where it could clobber a real
+environment only. It is never written into the YAML, where it could clobber a real
 OpenAI credential.
 
 ### aichat
@@ -171,7 +171,7 @@ darrenburns/elia, a chat TUI (not a coding harness). Injection style: launch wri
 fresh `config.toml` under `~/.config/gmlx/elia-xdg` and injects it via
 `XDG_CONFIG_HOME`. Each served id becomes an
 OpenAI-compatible litellm model. Requires elia 1.x or newer (older builds ignore
-custom endpoints); upgrade with `pipx upgrade elia-chat`.
+custom endpoints). Upgrade with `pipx upgrade elia-chat`.
 
 ### open-webui
 
@@ -181,20 +181,21 @@ service rather than a terminal client. Install it separately:
 3.13).
 
 Environment style, no config file: launch exports `OPENAI_API_BASE_URL`,
-`OPENAI_API_KEY`, `ENABLE_OLLAMA_API=false`, and `DATA_DIR`, runs it on port 3000
-(passed as `serve --port`, since `open-webui serve` ignores the `PORT` variable and
-would otherwise collide with the gmlx server on 8080; if the gmlx server itself is
-bound to 3000, Open WebUI bumps to 3001), and prints the URL to
-open. Chat history and its sqlite database land at `DATA_DIR` on the host filesystem
-(default `~/.open-webui`; `--config-path` overrides), not in a Docker volume.
+`OPENAI_API_KEY`, `ENABLE_OLLAMA_API=false`, and `DATA_DIR`, runs it on port 3000,
+and prints the URL to open. The port is passed as `serve --port`, since
+`open-webui serve` ignores the `PORT` variable and would otherwise collide with
+the gmlx server on 8080 (if the gmlx server itself is bound to 3000, Open WebUI
+bumps to 3001). Chat history and its sqlite database land at `DATA_DIR` on the
+host filesystem (default `~/.open-webui`; `--config-path` overrides), not in a
+Docker volume.
 
 launch points Open WebUI's document-RAG embedder back at the gmlx server
 (`RAG_EMBEDDING_ENGINE=openai`) instead of the default local HuggingFace download, so
-it boots cleanly without fetching or caching an embedder. Chat works immediately; run
+it boots cleanly without fetching or caching an embedder. Chat works immediately. Run
 the server with `--embeddings` and document RAG works too (see [rag.md](rag.md)). If the
 server also advertises a reranker (started with `--rerank`), launch turns on Open WebUI's
 hybrid search and points its external reranker at the server's `/v1/rerank`
-(`RAG_RERANKING_ENGINE=external`); reranking only runs under hybrid search.
+(`RAG_RERANKING_ENGINE=external`). Reranking only runs under hybrid search.
 
 Audio is capability-gated: when the server advertises STT and TTS in `/v1/models`
 (run it with `--stt` / `--tts`), launch also wires Open WebUI's audio engines
@@ -227,19 +228,20 @@ and refuses (once) if the file changed on disk while you were editing; Save &
 Reload validates first, then saves and triggers the running server's config
 reload in one step. Open in Editor hands the file to your default text editor
 instead. The item is there whenever the bar knows a config: the tracked
-server's own file or, with everything stopped, the default config location -
-fixing the config is usually why you are there.
+server's own file or, with everything stopped, the default config location.
+Fixing the config is usually why you are there.
 
-Like `serve`, it detaches by default; pass `-f` / `--foreground` to run the event
-loop in place, and `--stop` to quit a detached monitor from the CLI. One menu bar per machine, deduplicated via a pidfile: a second `serve`
-on any port, or a manual `launch menubar`, is a no-op. With no explicit target it
-tracks the primary server (the single managed one, else `127.0.0.1:8080`), following
-it as servers come and go; pass `--url`, `--host`, or `--port` to pin it to one.
+Like `serve`, it detaches by default. Pass `-f` / `--foreground` to run the event
+loop in place, and `--stop` to quit a detached monitor from the CLI. One menu bar
+per machine, deduplicated via a pidfile: a second `serve` on any port, or a manual
+`launch menubar`, is a no-op. With no explicit target it tracks the primary server
+(the single managed one, else `127.0.0.1:8080`), following it as servers come and
+go. Pass `--url`, `--host`, or `--port` to pin it to one.
 
 It reads the API key from the managed server's own `server.api_key`, or takes
 `--api-key` for a server whose config it cannot see. A key-protected server it has no
 key for shows as up with a key-required note, never as down. macOS only (it needs
-`rumps`, a default dependency there); on Linux or over SSH it prints a one-line
+`rumps`, a default dependency there). On Linux or over SSH it prints a one-line
 notice. `--interval S` sets the poll interval (default 4 seconds).
 
 When the tracked server also advertises STT and TTS, the menu gains a voice-chat
