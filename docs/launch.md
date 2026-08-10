@@ -13,7 +13,8 @@ gmlx launch open-webui                        # browser chat app on :3000
 ```
 
 launch never installs the tool itself. If the binary is not on PATH, it prints an
-install hint and exits.
+install hint and exits. The full flag table and exit codes are in the
+[CLI reference](cli.md#launch-connect-a-coding-agent-or-chat-app).
 
 ## How a launch works
 
@@ -92,11 +93,6 @@ launch carries it into each tool's configuration in that tool's native slot:
 | claude-code | `ANTHROPIC_AUTH_TOKEN` in the exec environment |
 | aichat, elia | `api_key` in the injected config |
 | open-webui | `OPENAI_API_KEY` in the exec environment only |
-
-## Flags
-
-The full flag table and exit codes are in the CLI reference:
-[cli.md](cli.md#launch-connect-a-coding-agent-or-chat-app).
 
 ## The clients
 
