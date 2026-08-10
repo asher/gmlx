@@ -10,9 +10,9 @@ or your browser, serve it over OpenAI- and Anthropic-compatible APIs,
 connect your coding agent to it, talk to it by voice, build a local RAG
 stack on it, and fine-tune it with LoRA. One command, entirely on your Mac.
 
-It runs the community's K-quant and IQ-quant GGUF builds — size for size,
-the most accurate open quant formats there are — exactly as published
-([accuracy per byte](#accuracy-per-byte)). The companion project
+It runs the community's K-quant and IQ-quant GGUF builds exactly as
+published. Size for size, these are the most accurate open quant formats
+available ([accuracy per byte](#accuracy-per-byte)). The companion project
 [mlx-kquant](https://github.com/asher/mlx-kquant) supplies the Metal kernels
 that run these formats natively on Apple's
 [MLX](https://github.com/ml-explore/mlx) framework. On the same file, gmlx
@@ -323,7 +323,7 @@ flowchart TB
   serve --> aux["embeddings + rerank<br/>STT + TTS"]
 ```
 
-Serving-side mechanics — engine, batching, and the HTTP layers:
+Serving-side mechanics - engine, batching, and the HTTP layers:
 [docs/serving-architecture.md](https://github.com/asher/gmlx/blob/main/docs/serving-architecture.md).
 
 ## Python API
