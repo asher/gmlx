@@ -21,7 +21,7 @@ import sys
 import mlx.core as mx
 
 from . import prefill_decay
-from .envflags import env_int
+from .envflags import env_bool, env_int
 
 _log = logging.getLogger(__name__)
 
@@ -1305,6 +1305,9 @@ def install_continuous_batch_admission() -> None:
         if not hasattr(self, "_pending_injections"):
             self._pending_injections = []
         self._pending_injections.append(other)
+        _debug_note(f"[mtp] extend buffered: +{len(other._all_uids)} rows "
+                    f"(pending={len(self._pending_injections)}, "
+                    f"active={active})")
 
     SpecBatch.extend = _buffered_extend
 
@@ -1338,19 +1341,74 @@ def install_continuous_batch_admission() -> None:
     # 4. Process pending injections in next() before advancing the generator
     _orig_next = SpecBatch.next
 
+    def _note_last_tokens(self, responses) -> None:
+        # Last delivered token per uid: the bonus a preempt rebuild restarts
+        # from (its KV is not yet in the cache at a round boundary).
+        stash = getattr(self, "_kq_last_tokens", None)
+        if stash is None:
+            stash = self._kq_last_tokens = {}
+        for r in responses:
+            if r.token is not None:
+                stash[r.uid] = int(r.token)
+
+    def _lift_host_cache(c):
+        """Promote a single-sequence host cache to its batch class so the
+        rebuilt batch generator can extend/filter it (same lift the
+        injection path applies to incoming caches)."""
+        if hasattr(c, "filter") and hasattr(c, "extend"):
+            return c
+        lifted = type(c).merge([c])
+        stamp = getattr(c, "_gmlx_cascade", None)
+        if stamp is not None:
+            lifted._gmlx_cascade = stamp
+        return lifted
+
+    def _preempt_scalar(self) -> bool:
+        """Preempt a live scalar (B=1) spec generation so queued rows can
+        join: close the generator at its round boundary (its GeneratorExit
+        handler rolls the target cache back to the delivered tokens), lift
+        the caches to batch classes, and mark the batch armless
+        (hidden=None); _start_rounds then rebuilds it on the batch loop,
+        whose first injection drain admits the waiters. GMLX_MTP_PREEMPT=0
+        leaves the old drain-wait behavior.
+
+        The rebuilt row carries no APC retirement context (batch-loop rows
+        start with retire_ctxs None), so the preempted request's prefix is
+        not offered back to the prompt cache when it finishes."""
+        if not env_bool("GMLX_MTP_PREEMPT", True):
+            return False
+        if not getattr(self, "_sent_first", False):
+            return False
+        last = getattr(self, "_kq_last_tokens", {}).get(self._all_uids[0])
+        if last is None:
+            return False
+        it = self._rounds_iter
+        if it is not None:
+            self._rounds_iter = None
+            it.close()
+        self.prompt_cache = [_lift_host_cache(c) for c in self.prompt_cache]
+        self.first_tokens = mx.array([int(last)], dtype=self.token_dtype)
+        self.hidden = None
+        self.shared_kv_states = None
+        self.prompt_tokens = None
+        self.model._kq_rebuild_emitted = [int(self._num_tokens[0])]
+        _debug_note("[mtp] preempt: scalar generation rebuilt for "
+                    "continuous batching")
+        return True
+
     def _next_with_injection(self):
         pending = getattr(self, "_pending_injections", None)
         # Mid-flight adoption works only when the batch rounds generator is
         # running: it drains model._generator_injections at its round
-        # boundaries. The scalar (B=1) generator never does, so merging uids
-        # into a scalar batch strands the entry -- the injected request's
-        # continuation then re-dispatches from the wrong state (the finished
-        # row's cache) and its stream is silently truncated. Leave scalar
-        # injections buffered; _len_with_promotion adopts them wholesale
-        # (their own cache/hidden/first token) once the current request ends.
+        # boundaries. The scalar (B=1) generator never does, so a live
+        # scalar host is preempted first: its generator closes at the round
+        # boundary and the batch is rebuilt armless on the batch loop.
         # `_all_uids` is an mlx-vlm generator internal (stable under the
         # ==0.6.3 pin); re-verify this batch-vs-scalar signal on a pin lift.
-        if pending and len(self._all_uids) > 1:
+        preempted = False
+        if pending and len(self._all_uids) == 1:
+            preempted = _preempt_scalar(self)
+        if pending and (len(self._all_uids) > 1 or preempted):
             responses = []
             gen_inj = getattr(self.model, "_generator_injections", None)
             if gen_inj is None:
@@ -1396,10 +1454,12 @@ def install_continuous_batch_admission() -> None:
 
             more = _orig_next(self)
             responses.extend(more)
+            _note_last_tokens(self, responses)
             _release_if_finished(self)
             return responses
 
         responses = _orig_next(self)
+        _note_last_tokens(self, responses)
         _release_if_finished(self)
         return responses
 
@@ -1453,7 +1513,10 @@ def install_owned_spec_engine() -> None:
     ):
         batch_size = int(first_bonus.shape[0]) if first_bonus.ndim > 0 else 1
         if draft_kind == "mtp":
-            if batch_size == 1:
+            # hidden=None marks a preempted scalar generation rebuilt for
+            # continuous batching: it must run the batch loop (arm-from-
+            # capture entry), never the scalar fast path.
+            if batch_size == 1 and hidden is not None:
                 if not _first_use_b1[0]:
                     _debug_note("[mtp] owned round: B=1 scalar path")
                     _first_use_b1[0] = True

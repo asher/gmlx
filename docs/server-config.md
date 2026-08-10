@@ -585,13 +585,16 @@ speculates only while at most N requests decode together. A drafter that can
 only handle one sequence clamps any larger value, since exceeding it raises
 rather than running slowly.
 
-A batch that grows past the cap finishes in plain decode. The drafter stays
-loaded and untouched, and the next batch to form re-evaluates. There is no
-mid-flight switch back, so a continuously busy batch keeps decoding plain
-until it drains. `GMLX_MTP_WIDTH_CAP` overrides every model at once (set it to
-`0` to measure a model uncapped) and `--speculative-width-cap` does the same
-from the CLI. The measured numbers behind the defaults are in
-[performance.md](performance.md#mtp-speculative-decoding).
+A batch that grows past the cap converts to plain decode with the drafter
+left loaded, and once it drains back to the cap it re-arms and speculates
+again (a capture round rebuilds the drafter state; mechanics in
+[speculative-batching.md](speculative-batching.md)). `GMLX_MTP_WIDTH_CAP`
+overrides every model at once (set it to `0` to measure a model uncapped) and
+`--speculative-width-cap` does the same from the CLI. `GMLX_MTP_PREEMPT=0`
+and `GMLX_MTP_RESUME=0` disable the batching transitions themselves (a lone
+speculating stream then makes arriving requests wait, and a gated batch
+stays plain until it finishes). The measured numbers behind the defaults are
+in [performance.md](performance.md#mtp-speculative-decoding).
 
 An entry whose file is gone from disk does not stop the server: it is skipped
 with a log warning at startup (and on config reload), disappears from

@@ -8,6 +8,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- serve --speculative: a request arriving while one stream decodes with
+  MTP no longer waits for it to finish; the stream converts to shared
+  batch decode and speculation resumes once the batch drains back under
+  the width cap. GMLX_MTP_PREEMPT / GMLX_MTP_RESUME disable each half.
 - gmlx chat --server: chat against a running server as a plain client,
   without the assistant's tools and memory (no background requests).
   Engages automatically when the config's server is already up and

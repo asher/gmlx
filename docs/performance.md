@@ -153,9 +153,11 @@ One interaction to know about: speculation and batching compete for the same
 bandwidth. Verifying a draft widens each request's weight reads, which is
 nearly free while one stream decodes and costly once several do, so the lift
 falls as concurrency rises. The server handles this for you with a per-model
-batch-width cap: speculation runs while the live batch is narrow and the
-batch finishes in plain decode once it grows past the cap, with the drafter
-left loaded for the next one.
+batch-width cap: speculation runs while the live batch is narrow, the batch
+decodes plain past the cap, and speculation resumes once it drains back
+under it. A lone speculating stream likewise yields to arriving requests
+instead of making them wait. The transition mechanics are in
+[speculative-batching.md](speculative-batching.md).
 
 Where the trade turns depends on the drafter and on whether the target routes
 experts. A native head verified by a dense hybrid-attention target keeps

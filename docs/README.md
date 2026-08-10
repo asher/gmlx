@@ -112,6 +112,10 @@ script; do not edit it by hand.
 [serving-architecture.md](serving-architecture.md) explains how the pieces
 compose: loader, engine, batching, and the HTTP layers.
 
+[speculative-batching.md](speculative-batching.md) covers how speculative
+decoding and continuous batching run together: the two decode loops, the
+width cap, and the preempt + resume transitions between them.
+
 [adding-architectures.md](adding-architectures.md) is what adding a model
 family involves and the acceptance gate an architecture clears to be listed
 as supported.

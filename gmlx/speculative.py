@@ -1465,6 +1465,11 @@ def _lift_injected_cache(cache, other):
 
 _width_cap_memo: tuple[str, int | None] = ("", None)
 
+# A gated batch back under the cap only re-arms when every surviving row
+# still has at least this much budget left; re-arming for a nearly-done row
+# costs more than it saves.
+_RESUME_MIN_REMAINING = 32
+
 
 def _mtp_width_cap(drafter) -> int:
     """Effective MTP batch-width cap: speculate only while the live decode
@@ -1590,9 +1595,9 @@ def _owned_decode_rounds_batch(
     lm,
     prompt_cache: list,
     *,
-    hidden: mx.array,
+    hidden: mx.array | None,
     b: list[int],
-    shared_kv: dict,
+    shared_kv: dict | None,
     seed_tokens: mx.array | None,
     emitted: list[int],
     max_tokens: int,
@@ -1602,7 +1607,7 @@ def _owned_decode_rounds_batch(
     eos_token_ids: set | None = None,
     row_ids: list[int] | None = None,
 ) -> Iterator[tuple[list[int | None], Any]]:
-    """Owned batched MTP decode loop (B >= 2).
+    """Owned batched MTP decode loop (B >= 1 under continuous batching).
 
     Structurally parallel to the B=1 _owned_decode_rounds but tracks per-row
     state (bonus token, KV offset, emitted count, finished flag). Uses
@@ -1617,6 +1622,13 @@ def _owned_decode_rounds_batch(
     New rows' target KV caches are extended into ``prompt_cache``, the
     drafter is prefilled in isolation then merged, and the per-row loop
     state grows to include the newcomers.
+
+    ``hidden=None`` means arm-from-capture: no prefill hidden/shared-KV is
+    available (a preempted scalar generation rebuilt into this loop). The
+    first speculative round is then a capture round: an S=1 verify with
+    hidden/shared-KV capture on, whose state cold-starts the drafter. The
+    same capture round re-arms a width-gated batch that has drained back
+    under the cap (resume; GMLX_MTP_RESUME=0 disables).
     """
     token_dtype = mx.int32
     greedy = sampler is None
@@ -1660,6 +1672,18 @@ def _owned_decode_rounds_batch(
         drafter._kq_head_request = None
     except Exception:
         pass  # slotted/frozen drafter forbids ad-hoc attrs
+    def _reset_armed(n: int) -> None:
+        # B=1-only drafters raise on a left_padding list; fall back bare.
+        try:
+            drafter.reset(model, left_padding=[0] * n)
+        except (TypeError, ValueError):
+            drafter.reset(model)
+
+    # hidden=None with the gate open means no prefill capture exists (a
+    # preempted scalar generation rebuilt into this loop): the first round
+    # must be a capture round that arms the drafter.
+    need_arm = (not gated) and hidden is None
+
     # reset() is bind + empty caches, no compute, so it runs gated too (that
     # keeps "the previous batch already released the drafter" off the critical
     # path). Without left_padding when gated: B=1-only drafters raise on a
@@ -1667,7 +1691,7 @@ def _owned_decode_rounds_batch(
     if gated:
         drafter.reset(model)
     else:
-        drafter.reset(model, left_padding=[0] * len(b))
+        _reset_armed(len(b))
     sampler_rng = _SpeculativeSamplerRNG(drafter, enabled=False)
 
     draft_kwargs = {}
@@ -1675,7 +1699,7 @@ def _owned_decode_rounds_batch(
         draft_kwargs["greedy"] = True
     draft_sampler = _argmax_sampler
 
-    if not gated:
+    if not gated and not need_arm:
         prefill_draft = getattr(drafter, "prefill_from_target_hidden", None)
         if callable(prefill_draft) and seed_tokens is not None:
             sampler_rng.draft_call(
@@ -1691,14 +1715,14 @@ def _owned_decode_rounds_batch(
         # TypeError. Every remaining use of either is behind `not gated`.
         hidden = None
         shared_kv = None
-    else:
+    elif not need_arm:
         if hidden.shape[1] > 1:
             hidden = hidden[:, -1:, :]
         hidden = _mtp_draft_hidden(lm, hidden)
 
     L_prefill = _mtp_cache_offset_max(prompt_cache)
     positions = [L_prefill] * len(b)
-    if not gated:
+    if not gated and not need_arm:
         drafter.set_shared_kv(
             shared_kv, kv_offset=L_prefill,
             position=_mtp_draft_position(mx.array(positions)),
@@ -1739,12 +1763,53 @@ def _owned_decode_rounds_batch(
             return sampler(logprobs).reshape(-1).astype(token_dtype)
 
     def _trip_width_gate(width: int) -> None:
-        """Latch the batch into plain decode for the rest of this generator."""
+        """Latch the batch into plain decode until it drains under the cap."""
         nonlocal gated
         gated = True
         _log_width_cap_once(
             f"trip: B={width} > cap={cap}; batch converts to plain decode "
             f"until drained")
+
+    def _resume_ready() -> bool:
+        """A gated batch back under the cap may re-arm and speculate again."""
+        if not cap or len(active_idx) > cap:
+            return False
+        if not env_bool("GMLX_MTP_RESUME", True):
+            return False
+        if getattr(model, "_generator_injections", None):
+            return False
+        # Re-arming costs a capture forward + a drafter seed; skip it for
+        # rows about to finish anyway.
+        return all(max_tok[i] - emitted[i] >= _RESUME_MIN_REMAINING
+                   for i in active_idx)
+
+    def _arm_capture():
+        """Capture round: an S=1 verify of the pending bonus tokens with
+        hidden/shared-KV capture on, then the drafter cold start from that
+        fresh state (the generator-entry sequence, never stale per-row
+        state). Emits one token per row through the shared round tail."""
+        nonlocal hidden
+        b_arr = mx.array([b[i] for i in active_idx], dtype=token_dtype)
+        with mx.stream(generation_stream):
+            verify = _mtp_verify_target(
+                lm, b_arr[:, None], prompt_cache, sampler,
+                sample_target_tokens=greedy)
+        budgets = [max(1, max_tok[i] - emitted[i]) for i in active_idx]
+        accepted_list, new_tokens_list = _coupled_walk_batch(
+            lm, verify, mx.zeros((len(active_idx), 0), dtype=token_dtype),
+            _walk_sampler, budgets)
+        _reset_armed(len(active_idx))
+        prefill_draft = getattr(drafter, "prefill_from_target_hidden", None)
+        if callable(prefill_draft):
+            # One (bonus, hidden) pair per row; the seed contract accepts a
+            # 1-token capture (draft quality ramps back up over rounds).
+            next_b = mx.array([nt[-1] for nt in new_tokens_list],
+                              dtype=token_dtype)
+            sampler_rng.draft_call(
+                prefill_draft, b_arr[:, None], verify.hidden, next_b,
+                draft_sampler, token_dtype, **draft_kwargs)
+        hidden = _mtp_draft_hidden(lm, verify.hidden[:, -1:, :])
+        return accepted_list, new_tokens_list, verify
 
     def _drain_injections():
         # continuous-batch injection
@@ -1772,7 +1837,10 @@ def _owned_decode_rounds_batch(
                             cache, inj["prompt_cache"][i])
                         extend_fn(other)
 
-                if not gated:
+                # hidden is None while un-armed (arm-from-capture entry):
+                # the drafter holds no state to inject into, and the capture
+                # round will build hidden/shared-KV for every row at once.
+                if not gated and hidden is not None:
                     inject_fn = getattr(drafter, "inject_rows", None)
                     if callable(inject_fn):
                         inject_fn(
@@ -1780,7 +1848,6 @@ def _owned_decode_rounds_batch(
                             inj["first_tokens"], draft_sampler,
                             token_dtype, greedy=True)
 
-                if not gated:
                     inj_hidden = inj["hidden"]
                     if inj_hidden.shape[1] > 1:
                         inj_hidden = inj_hidden[:, -1:, :]
@@ -1814,7 +1881,7 @@ def _owned_decode_rounds_batch(
                     max_tok.append(int(inj_max[row]))
                     B_orig += 1
 
-                if _needs_shared_kv and not gated:
+                if _needs_shared_kv and not gated and shared_kv is not None:
                     # The old raw batch-axis concat crashed on ragged seq
                     # and, when set_shared_kv had normalized into a copy,
                     # never reached the drafter anyway -- whose stored
@@ -1856,6 +1923,21 @@ def _owned_decode_rounds_batch(
         # ratio), so re-check even without an admission.
         if not gated and cap and len(active_idx) > cap:
             _trip_width_gate(len(active_idx))
+        # Resume: a gated batch drained back under the cap re-enters
+        # speculation via a capture round. The gated double buffer holds a
+        # dispatched next step whose input KV is already in the cache, so it
+        # must be consumed, never discarded: one more plain round runs
+        # without re-dispatching, and the round after that arms.
+        dispatch_next = True
+        if gated and _resume_ready():
+            if _gated_pending is None:
+                gated = False
+                need_arm = True
+                _log_width_cap_once(
+                    f"resume: B={len(active_idx)} <= cap={cap}; "
+                    f"re-arming drafter")
+            else:
+                dispatch_next = False
         n_active = len(active_idx)
 
         if gated:
@@ -1883,8 +1965,11 @@ def _owned_decode_rounds_batch(
             # this leaves in the cache is past every retirement's store_len
             # (retirement is driven by `positions`, not the cache offset) and
             # nothing reads the cache offset while gated.
-            _gated_pending = _gated_step(toks)
-            mx.async_eval(_gated_pending)
+            if dispatch_next:
+                _gated_pending = _gated_step(toks)
+                mx.async_eval(_gated_pending)
+            else:
+                _gated_pending = None
             # Under GMLX_ROUND_PROFILE the columns read as dispatch (CPU build
             # of round N+1) / wait (GPU finishing round N) / emit-prep instead
             # of draft / verify / walk.
@@ -1894,6 +1979,15 @@ def _owned_decode_rounds_batch(
             bs = 1
             accepted_list = [0] * n_active
             new_tokens_list = [[int(t)] for t in toks.tolist()]
+            _t1 = time.perf_counter()
+        elif need_arm:
+            need_arm = False
+            _t0 = time.perf_counter()
+            _gap = (_t0 - _prev_end) * 1e3 if _prev_end else 0.0
+            bs = 1
+            max_a = 0
+            accepted_list, new_tokens_list, verify = _arm_capture()
+            _td = _tv = time.perf_counter() if _ROUND_PROFILE else _t0
             _t1 = time.perf_counter()
         else:
             remaining = [
@@ -1993,6 +2087,10 @@ def _owned_decode_rounds_batch(
             rejected_global = bs - (max_a + 1)
             next_shared_kv = _slice_shared_kv_batch(
                 verify.shared_kv_states, rejected_global, accepted_list, max_a)
+            # Track the freshest slice so an injection merge has a live
+            # fallback dict (an armed-from-capture generator starts with
+            # shared_kv=None; the prefill-armed one would go stale).
+            shared_kv = next_shared_kv
         else:
             next_shared_kv = shared_kv
 
@@ -2148,11 +2246,22 @@ def owned_server_rounds_batch(
     b = first_bonus.reshape(-1).tolist()
     _buffer_mtp_target_cache(prompt_cache, drafter, draft_block_size)
     eff_sampler = None if greedy_sampling else sampler
+    # A preempted scalar generation rebuilt into this loop carries its real
+    # emitted counts (the SpecBatch stop_check owns the hard budget; this
+    # only keeps block sizing honest near the end).
+    emitted = getattr(model, "_kq_rebuild_emitted", None)
+    if emitted is not None:
+        try:
+            del model._kq_rebuild_emitted
+        except AttributeError:
+            pass
+    if not emitted or len(emitted) != B:
+        emitted = [1] * B
     yield from _owned_decode_rounds_batch(
         model, drafter, lm, prompt_cache,
         hidden=hidden, b=b, shared_kv=shared_kv_states,
         seed_tokens=prompt_tokens,
-        emitted=[1] * B, max_tokens=max_tokens,
+        emitted=list(emitted), max_tokens=max_tokens,
         sampler=eff_sampler, draft_block_size=draft_block_size,
         stop_check=stop_check, eos_token_ids=eos_token_ids,
         row_ids=row_ids)
