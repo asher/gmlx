@@ -33,7 +33,7 @@ brew install ffmpeg              # voice and non-wav audio only
 
 That is the whole install. `gmlx` lands on your PATH in every terminal, in an
 isolated environment, with a suitable Python fetched for it, and `[all]` turns
-on every optional feature so nothing else is needed later.
+on every optional feature.
 [uv](https://docs.astral.sh/uv/) itself is one command
 (`brew install uv`, or `curl -LsSf https://astral.sh/uv/install.sh | sh`);
 `pipx install "gmlx[all]"` behaves the same way. Upgrade later with
@@ -45,8 +45,7 @@ not using voice.
 
 To install less, name the extras you want instead of `all` - `gmlx[chat]` is
 the common choice, giving up only voice and the assistant. `gmlx init` offers
-to add the rest later, and issues the correct command for however gmlx was
-installed.
+to add the rest later ([adding an extra](#the-extras) below).
 
 A plain venv you manage yourself works as well:
 
@@ -63,10 +62,16 @@ no such step.
 
 The `mlx-kquant` dependency (the Metal kernels) arrives
 as a prebuilt wheel from PyPI on macOS 26 and newer; on older macOS versions
-the install builds it from source, which needs the Xcode Command Line Tools
-(`xcode-select --install`) and takes a few minutes.
+the install builds it from source - the Command Line Tools requirement from
+[What you need](#what-you-need), and a few minutes of compile time.
 
-The extras, all optional:
+Tab completion is worth the one line: add `eval "$(gmlx completion zsh)"` to
+`~/.zshrc` (there are `bash` and `fish` variants). It completes verbs, flags, your
+config's model ids, and the host and port of any running server.
+
+### The extras
+
+All optional:
 
 | Extra | Adds | Needed for |
 |-------|------|------------|
@@ -92,12 +97,6 @@ with the core install; the `tts` extra pins it and adds the
 grapheme-to-phoneme front-end the default Kokoro voice needs. That front-end
 also wants a spaCy English pipeline, which gmlx fetches from Hugging Face on
 first use - no separate install step.
-
-Tab completion is worth the one line: add `eval "$(gmlx completion zsh)"` to
-`~/.zshrc` (there are `bash` and `fish` variants). It completes verbs, flags, your
-config's model ids, and the host and port of any running server.
-
-The installed command is `gmlx`.
 
 ## First generation in two minutes
 
@@ -172,8 +171,7 @@ with progress, rate, and resume built in.
 a repo it lists every quant variant as a ready-to-paste ref. K-quant, legacy, and
 IQ files all load; in the rare case a file uses a codec with no kernel (the
 ternary TQ types, for instance), the verdict names it so you can pick another
-variant. Uniform K-quant files also decode
-faster; see [performance.md](performance.md#choosing-a-quant-for-speed).
+variant. Uniform K-quant files also decode faster than heavily mixed ones.
 
 Set `HF_TOKEN` for gated or private repos. If you already have a model library
 from LM Studio, it serves as-is (the files are plain GGUFs):
