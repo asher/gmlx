@@ -197,11 +197,6 @@ active on both engines, gmlx decodes 1.1-2x ahead throughout. MTP's lift over
 the same server with it off holds at 1.4-1.8x from 17k through 110k, where
 llama.cpp's speculation gain decays with depth.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/perf/mtp-lift-dark.svg">
-  <img src="https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/perf/mtp-lift.svg" alt="MTP decode lift vs KV depth: gmlx holds its speedup where llama.cpp's decays">
-</picture>
-
 Reference points at short context: gemma-4-12B-it (dense, Q6_K) decodes at
 ~72 tok/s with MTP vs llama.cpp's ~54 with speculation (1.3x), prefilling at
 ~850 vs ~730 tok/s;
