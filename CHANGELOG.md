@@ -6,6 +6,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- DeepSeek V4 serves concurrent requests: multi-row prompt batches on
+  pooling-cache models failed before prefill, and admission re-merged
+  already-batched caches, killing every request in flight above c=1.
+
 ### Changed
 
 - mlx-kquant floor raised to 0.3.11: MoE prefill gather runs 12-28%
