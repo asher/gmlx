@@ -296,11 +296,13 @@ def install_stream_thinking_seed() -> None:
                 self.in_thinking = _prompt_tail_opens_thinking(
                     prompt, self.open_close_markers)
                 if prompt.rstrip().endswith("<|start|>assistant"):
-                    # harmony (gpt-oss): the state machine's open/close
-                    # pairs cannot express channel routing, so the stream
-                    # splits through the REPL's marker filter instead.
+                    # harmony (gpt-oss) and ATEM (Muse Glimmer): the state
+                    # machine's open/close pairs cannot express channel or
+                    # recipient routing, so the stream splits through the
+                    # REPL's marker filter instead. Both prompts stop
+                    # mid-header, so the filter starts inside one.
                     from ..reasoning import ReasoningFilter
-                    self._kq_harmony = ReasoningFilter()
+                    self._kq_harmony = ReasoningFilter(start_in_header=True)
                     self._kq_harmony_closed = False
 
         __init__.__dict__[_STREAM_SEED_FLAG] = True
@@ -353,15 +355,21 @@ def install_stream_thinking_seed() -> None:
     if split is not None and not getattr(split, _STREAM_SEED_FLAG, False):
         def _split_thinking_text(text, thinking_start_token=None,
                                  thinking_end_token=None):
-            if text and "<|channel|>" in text:
-                # harmony (gpt-oss): the stock splitter knows none of these
-                # markers and returns the raw markup as content, which the
-                # model's own chat template rejects with a 500 once a client
-                # sends the reply back as history. (Gemma's lopsided
-                # "<|channel>thought" lacks the closing pipe, so this gate
-                # cannot misfire on it.)
+            rendered = _LAST_RENDERED_PROMPT.get()
+            in_header = bool(rendered) and rendered.rstrip().endswith(
+                "<|start|>assistant")
+            if text and ("<|channel|>" in text or (in_header
+                                                   and "<|message|>" in text)):
+                # harmony (gpt-oss) and ATEM (Muse Glimmer): the stock splitter
+                # knows none of these markers and returns the raw markup as
+                # content, which the model's own chat template rejects with a
+                # 500 once a client sends the reply back as history. ATEM emits
+                # no channel marker at all, so it is recognised by the
+                # mid-header prompt tail plus a header close in the reply.
+                # (Gemma's lopsided "<|channel>thought" lacks the closing pipe,
+                # so this gate cannot misfire on it.)
                 from ..reasoning import split_harmony_reply
-                return split_harmony_reply(text)
+                return split_harmony_reply(text, start_in_header=in_header)
             reasoning, content = split(
                 text, thinking_start_token, thinking_end_token)
             if reasoning is None and content and retire_key.truncated_thinking(

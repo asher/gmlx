@@ -912,9 +912,10 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         # same vendored-registration pattern as kimi_k3. The tool parser
         # registers with the model so a later serve template-inference
         # resolves it.
-        from . import muse_glimmer_model
+        from . import muse_glimmer_model, muse_glimmer_tools
 
         muse_glimmer_model.ensure_registered()
+        muse_glimmer_tools.ensure_registered()
     Model, ModelArgs = _get_classes(config)
     model_args = ModelArgs.from_dict(config)
     model = Model(model_args)

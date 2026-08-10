@@ -241,11 +241,12 @@ SEAMS: tuple[Seam, ...] = (
          "server_patches (HF download gate)", critical=True),
     Seam("mlx_vlm.utils", "StoppingCriteria.__call__",
          "server_patches (ignore-EOS)"),
-    # --- tool-parser registry (hy_v3_tools.ensure_registered) ---
+    # --- tool-parser registry (hy_v3_tools / muse_glimmer_tools) ---
     Seam("mlx_vlm.tool_parsers", "_TEMPLATE_MARKERS",
-         "hy_v3_tools.ensure_registered (Hy3 marker prepend)"),
+         "hy_v3_tools / muse_glimmer_tools ensure_registered (marker prepend)"),
     Seam("mlx_vlm.tool_parsers", "load_tool_module",
-         "hy_v3_tools (sys.modules graft resolves through it)"),
+         "hy_v3_tools / muse_glimmer_tools (sys.modules graft resolves "
+         "through it)"),
     # --- APC internals (lone-harvest patch, gmlx manager subclass, apc_pooling) ---
     Seam("mlx_vlm.apc", "harvest_blocks_from_batch_cache",
          "server_patches.install_apc_lone_harvest", critical=True),

@@ -26,11 +26,45 @@ Kill: ``GMLX_FAITHFUL_HISTORY=0``.
 from __future__ import annotations
 
 import importlib
+import json
 import os
 
 # Stock tail: these model types return only the last message when a
 # rendered prompt is requested.
 _LAST_MESSAGE_ONLY = ("paligemma", "molmo", "florence2", "falcon_ocr")
+
+
+def _decode_tool_arguments(msgs: list) -> None:
+    """Decode ``tool_calls[*].function.arguments`` from the OpenAI wire form
+    (a JSON string) into a mapping, in place.
+
+    Muse Glimmer's ATEM template raises outright on a string - "a JSON string
+    cannot be parsed in the HF jinja sandbox" - so a client replaying its own
+    tool turn would 500 on render. Undecodable arguments become an empty
+    mapping, the same fallback the retirement mirror uses
+    (``retire_key.assistant_message_from_reply``).
+    """
+    for i, m in enumerate(msgs):
+        calls = m.get("tool_calls") if isinstance(m, dict) else None
+        if not isinstance(calls, list):
+            continue
+        rebuilt, changed = [], False
+        for call in calls:
+            fn = call.get("function") if isinstance(call, dict) else None
+            args = fn.get("arguments") if isinstance(fn, dict) else None
+            if not isinstance(args, str):
+                rebuilt.append(call)
+                continue
+            try:
+                decoded = json.loads(args)
+            except (json.JSONDecodeError, TypeError):
+                decoded = {}
+            if not isinstance(decoded, dict):
+                decoded = {}
+            rebuilt.append({**call, "function": {**fn, "arguments": decoded}})
+            changed = True
+        if changed:
+            msgs[i] = {**m, "tool_calls": rebuilt}
 
 
 def install_faithful_history() -> None:
@@ -80,6 +114,8 @@ def install_faithful_history() -> None:
                     if (isinstance(m, dict) and "thinking" not in m
                             and m.get("reasoning_content")):
                         msgs[i] = {**m, "thinking": m["reasoning_content"]}
+            elif cfg.get("model_type") == "muse_glimmer":
+                _decode_tool_arguments(msgs)
             if return_messages:
                 return msgs
             if cfg.get("model_type") in _LAST_MESSAGE_ONLY:

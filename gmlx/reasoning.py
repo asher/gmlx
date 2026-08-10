@@ -12,6 +12,11 @@ to read raw:
   * harmony models (gpt-oss): ``<|channel|>analysis<|message|>`` ... ``<|end|>``
     for reasoning, ``<|start|>assistant<|channel|>final<|message|>`` ... for the
     answer (``commentary`` channels carry tool preludes - treated as reasoning).
+  * Onyx ATEM (Muse Glimmer): the routing is a recipient in the message header,
+    ``<|start|>assistant to=self<|message|>`` ... ``<|eom|>`` for reasoning and
+    ``to=user`` (or a tool name) for everything else. The prompt ends at
+    ``<|start|>assistant``, so the first header arrives without its opener -
+    seed with ``start_in_header=True``.
   * Gemma-style ``<|channel>thought`` ... ``<channel|>`` (as detokenized).
 
 ``ReasoningFilter`` is a streaming state machine that strips the markers and
@@ -57,6 +62,13 @@ _MARKERS: tuple[tuple[str, str], ...] = (
     ("<|start|>", _DROP),
     ("<|call|>", _DROP),
     ("<|end|>", _DROP),
+    # Onyx ATEM (Muse Glimmer): no channel marker - the recipient lives in the
+    # header that "<|start|>assistant" opens and "<|message|>" closes, so the
+    # routing is decided in _close_header. "<|eom|>" ends one message of a
+    # multi-message turn; the next header re-decides, and until it arrives the
+    # safe assumption is answer.
+    ("<|eom|>", _ANSWER),
+    ("<|eot|>", _DROP),
     # gemma-style channel (as detokenized - note the lopsided pipes).
     ("<|channel>thought", _REASON),
     ("<channel|>", _ANSWER),
@@ -85,6 +97,15 @@ _MARKERS: tuple[tuple[str, str], ...] = (
     ("<|end_of_msg|>", _DROP),
 )
 
+# Markers that open a message header - text from here to the closing
+# "<|message|>" is routing metadata, never a display span. Harmony puts the
+# channel in the marker itself; ATEM puts the recipient in the header body.
+_HEADER_PREFIXES = ("<|channel|>", "<|start|>assistant")
+
+# ATEM's reasoning recipient. "self" is the only recipient that is not
+# user-visible; "user" and tool namespaces are answer-side.
+_SELF_RECIPIENT = "to=self"
+
 
 class ReasoningFilter:
     """Strip reasoning control markers from a token stream and tag the rest.
@@ -96,12 +117,16 @@ class ReasoningFilter:
     remains at end-of-stream (a partial marker there is just literal text).
     """
 
-    def __init__(self, *, start_in_thinking: bool = False):
+    def __init__(self, *, start_in_thinking: bool = False,
+                 start_in_header: bool = False):
         self._markers = sorted(_MARKERS, key=lambda m: len(m[0]), reverse=True)
         self.mode = _REASON if start_in_thinking else _ANSWER
         self.buf = ""
-        self._swallow = False  # inside a harmony channel header (drop text)
+        self._swallow = False  # inside a message header (drop text)
         self._swallow_budget = 0
+        self._header = ""
+        if start_in_header:
+            self._open_header()
 
     def feed(self, text: str) -> list[tuple[str, str]]:
         self.buf += text
@@ -137,26 +162,43 @@ class ReasoningFilter:
             self.buf = self.buf[len(marker):]
             if action != _DROP:
                 self.mode = action
-            # Harmony headers run "<|channel|>NAME [annotations]<|message|>":
-            # the routing marker opens the header, "<|message|>" closes it,
-            # and annotation text in between is never a display span.
-            if marker.startswith("<|channel|>"):
-                self._swallow = True
-                self._swallow_budget = 256
+            # Message headers run "<|channel|>NAME [annotations]<|message|>"
+            # (harmony) or "<|start|>assistant to=RECIPIENT<|message|>" (ATEM):
+            # an opener marker starts the header, "<|message|>" closes it, and
+            # the text in between is routing, never a display span.
+            if marker.startswith(_HEADER_PREFIXES):
+                self._open_header()
             elif marker == "<|message|>":
-                self._swallow = False
+                self._close_header()
         return [s for s in spans if s[0]]
 
+    def _open_header(self) -> None:
+        self._swallow = True
+        self._swallow_budget = 256
+        self._header = ""
+
+    def _close_header(self) -> None:
+        """End the header and apply its routing. Only an explicit ``to=self``
+        recipient moves the mode: a harmony header is empty (its channel marker
+        already routed), and an ATEM answer/tool header must leave a mode that
+        "<|eom|>" or the initial state already set."""
+        self._swallow = False
+        if _SELF_RECIPIENT in self._header:
+            self.mode = _REASON
+        self._header = ""
+
     def _emit(self, text: str, spans: list[tuple[str, str]]) -> None:
-        """Append a display span, unless a channel header is being swallowed.
+        """Append a display span, unless a message header is being swallowed.
         The budget bounds the swallow: a literal "<|channel|>" in a
         non-harmony reply (no "<|message|>" ever follows) must not eat the
         rest of the message."""
         if self._swallow:
             self._swallow_budget -= len(text)
             if self._swallow_budget >= 0:
+                self._header += text
                 return
             self._swallow = False
+            self._header = ""
         spans.append((text, self.mode))
 
     def _next_marker_pos(self, final: bool) -> int | None:
@@ -202,8 +244,19 @@ class ReasoningFilter:
         return False
 
 
-def split_harmony_reply(text: str) -> tuple[str | None, str]:
-    """Split a complete harmony (gpt-oss) reply into ``(reasoning, content)``.
+def prompt_opens_header(prompt) -> bool:
+    """Whether a rendered ``prompt`` stops inside a message header, so the
+    filter must start mid-header. Both harmony and ATEM generation prompts end
+    at ``<|start|>assistant`` and leave the channel or recipient to the model.
+    Tolerant of token-id prompts (False for non-strings)."""
+    return (isinstance(prompt, str)
+            and prompt.rstrip().endswith("<|start|>assistant"))
+
+
+def split_harmony_reply(text: str, *,
+                        start_in_header: bool = False) -> tuple[str | None, str]:
+    """Split a complete harmony (gpt-oss) or ATEM reply into
+    ``(reasoning, content)``.
 
     The serve path's stock splitter knows none of the harmony markers, so it
     returns the raw channel markup as content - which the model's own chat
@@ -213,8 +266,12 @@ def split_harmony_reply(text: str) -> tuple[str | None, str]:
     commentary channels (tool preludes included) become reasoning, the final
     channel becomes content, and a reply truncated inside analysis returns
     all-reasoning with empty content (the convention the truncated-thinking
-    handling already uses for think-tag models)."""
-    filt = ReasoningFilter()
+    handling already uses for think-tag models).
+
+    ``start_in_header`` seeds the ATEM case, where the generation prompt ends
+    mid-header at ``<|start|>assistant`` and the reply opens with ``
+    to=self<|message|>``."""
+    filt = ReasoningFilter(start_in_header=start_in_header)
     spans = filt.feed(text)
     spans += filt.flush()
     reasoning = "".join(t for t, m in spans if m == _REASON).strip()
@@ -420,11 +477,14 @@ class StreamRenderer:
     generate paths stream a thinking model through the same show/hide styling
     the chat REPL uses. ``start_in_thinking`` seeds the pre-fill-template case
     (the prompt opened the think block, so the stream carries only the close
-    marker)."""
+    marker); ``start_in_header`` the harmony/ATEM case (the prompt stopped
+    mid-header)."""
 
     def __init__(self, display: str = "show", *,
-                 start_in_thinking: bool = False, color: bool | None = None):
-        self._filter = ReasoningFilter(start_in_thinking=start_in_thinking)
+                 start_in_thinking: bool = False,
+                 start_in_header: bool = False, color: bool | None = None):
+        self._filter = ReasoningFilter(start_in_thinking=start_in_thinking,
+                                       start_in_header=start_in_header)
         self._printer = ReasoningPrinter(
             display=display, color=want_color() if color is None else color)
 
@@ -480,6 +540,23 @@ _THINKING_LEVELS = {"on": "on", "off": "off", "adaptive": "adaptive",
                     True: "on", False: "off"}
 
 
+# Templates that grade reasoning depth under a name of their own. The control
+# is spelled reasoning_effort throughout gmlx, so map it onto the template's
+# spelling rather than emitting a variable the template ignores (Muse Glimmer's
+# ATEM template reads reasoning_strength).
+_EFFORT_ALIASES = ("reasoning_strength",)
+
+
+def _effort_variable(template: str) -> str:
+    """The reasoning-depth variable ``template`` reads, defaulting to the
+    canonical ``reasoning_effort``."""
+    if template and "reasoning_effort" not in template:
+        for alias in _EFFORT_ALIASES:
+            if alias in template:
+                return alias
+    return "reasoning_effort"
+
+
 def map_thinking_controls(base: dict, thinking=None, reasoning_effort=None,
                           template: str = "", warn=None) -> dict:
     """Overlay the dedicated thinking controls onto ``base`` template kwargs,
@@ -503,8 +580,9 @@ def map_thinking_controls(base: dict, thinking=None, reasoning_effort=None,
     _warn = warn or (lambda msg: None)
     out = dict(base)
     if reasoning_effort is not None:
-        out["reasoning_effort"] = reasoning_effort
-        if template and "reasoning_effort" not in template:
+        name = _effort_variable(template)
+        out[name] = reasoning_effort
+        if template and name not in template:
             _warn("this model's chat template has no reasoning_effort "
                   "variable; reasoning_effort is likely a no-op")
     if thinking is None:
@@ -532,6 +610,9 @@ def map_thinking_controls(base: dict, thinking=None, reasoning_effort=None,
     elif "reasoning_effort" in template:
         _warn("this model has no thinking switch (reasoning always runs); "
               "use reasoning_effort low|medium|high to size it")
+    elif any(alias in template for alias in _EFFORT_ALIASES):
+        _warn("this model has no thinking switch (reasoning always runs); "
+              "use reasoning_effort to size it")
     else:
         _warn("this model's chat template has no thinking switch; the "
               "thinking control is likely a no-op")
