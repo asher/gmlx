@@ -27,6 +27,7 @@ from .gdn_patches import (
 from .gguf_meta import first_nonzero_int, read_int
 from .loader import (
     _FP32_KEEP_BY_MODEL_TYPE,
+    _active_now,
     _install_and_load,
     _resolve_chat_template,
     build_model,
@@ -37,6 +38,7 @@ from .loader import (
     remap_arrays,
     remap_gemma4_assistant_arrays,
     remap_mtp_arrays,
+    weights_source_key,
 )
 from .native_fp import _strip_weight
 from .populate import maybe_populate_for_load
@@ -136,6 +138,7 @@ def _load_mtp_drafter(
     n_head: int | None = None,
     n_head_kv: int | None = None,
     log=loadlog.verbose_print,
+    source_key: tuple | None = None,
 ):
     """Build + load + bind the native-head MTP drafter (seam 4).
 
@@ -213,6 +216,7 @@ def _load_mtp_drafter(
         log=log,
         sanitize=False,
         fp32_keep=_FP32_KEEP_BY_MODEL_TYPE.get(model_type, ()),
+        source_key=source_key,
     )
     drafter.bind(target)
     from .drafter_protocol import validate_drafter
@@ -295,6 +299,7 @@ def _load_gemma4_assistant_drafter(
     """
     import importlib
 
+    active_before = _active_now()
     arrays, kquant_meta, d_arch, meta, tensor_shapes = load_gguf_wire_bytes(
         draft_gguf_path, zero_copy=zero_copy
     )
@@ -325,7 +330,9 @@ def _load_gemma4_assistant_drafter(
     d_weights, d_meta, d_stats = remap_gemma4_assistant_arrays(arrays, kquant_meta)
     log(f"[mtp] drafter remap: {d_stats}")
 
-    _install_and_load(drafter, d_weights, d_meta, log=log, sanitize=False)
+    _install_and_load(drafter, d_weights, d_meta, log=log, sanitize=False,
+                      source_key=weights_source_key(draft_gguf_path),
+                      active_before=active_before)
     # Ordered-embeddings drafters (E2B/E4B) route the LM head through a
     # MaskedEmbedder that reads embed_tokens.weight as a [vocab, hidden] float
     # matrix (gathers candidate rows then a dense matmul). A kquant wire-byte
@@ -474,6 +481,7 @@ def _load_deepseek4_mtp_drafter(
     loader shape; the block config is the target's config with
     ``compress_ratios`` post-init extended by the MTP layer's ratio 0
     (``ModelArgs.__post_init__`` truncates to num_hidden_layers)."""
+    active_before = _active_now()
     arrays, kquant_meta, d_arch, _meta, _shapes = load_gguf_wire_bytes(
         draft_gguf_path, zero_copy=zero_copy
     )
@@ -490,6 +498,7 @@ def _load_deepseek4_mtp_drafter(
             arrays=arrays,
             kquant_meta=kquant_meta,
             meta=_meta,
+            active_before=active_before,
             log=log,
         )
     if d_arch != "deepseek4_mtp_support":
@@ -531,6 +540,8 @@ def _load_deepseek4_mtp_drafter(
         log=log,
         sanitize=False,
         fp32_keep=_FP32_KEEP_BY_MODEL_TYPE["deepseek_v4"],
+        source_key=weights_source_key(draft_gguf_path),
+        active_before=active_before,
     )
     drafter.bind(target)
 
@@ -756,6 +767,7 @@ def _load_deepseek4_dspark_drafter(
     arrays: dict,
     kquant_meta: dict,
     meta: dict,
+    active_before: float | None = None,
     log=loadlog.verbose_print,
 ):
     """Build + load + bind the DSpark drafter from its companion GGUF (arch
@@ -846,6 +858,8 @@ def _load_deepseek4_dspark_drafter(
             sanitize=False,
             fp32_keep=_FP32_KEEP_BY_MODEL_TYPE["deepseek_v4"]
             + ("confidence_proj.",),
+            source_key=weights_source_key(draft_gguf_path),
+            active_before=active_before,
         )
     finally:
         if force_wire:
@@ -914,6 +928,7 @@ def load_mtp_model(
     maybe_populate_for_load(pf.shards, log=_log)
 
     loadlog.stage("reading tensors")
+    active_before = _active_now()
     arrays, kquant_meta, _arch_meta, meta, tensor_shapes = load_gguf_wire_bytes(
         gguf_path, zero_copy=zero_copy, shards=pf.shards
     )
@@ -996,6 +1011,8 @@ def load_mtp_model(
         sanitize=(_mt in ("deepseek_v4", "hy_v3")),
         no_alias=owned_names,
         fp32_keep=_FP32_KEEP_BY_MODEL_TYPE.get(_mt, ()),
+        source_key=weights_source_key(*pf.shards),
+        active_before=active_before,
     )
 
     # 2b. fused gated-delta verify kernel. The multi-position verify forward is the
@@ -1056,6 +1073,7 @@ def load_mtp_model(
             model,
             n_head=n_head,
             n_head_kv=n_head_kv,
+            source_key=weights_source_key(*pf.shards),
             log=_log,
         )
 
@@ -1233,6 +1251,7 @@ def load_vlm_mtp_model(
             model,
             n_head=n_head,
             n_head_kv=n_head_kv,
+            source_key=weights_source_key(*pf.shards),
             log=_log,
         )
 

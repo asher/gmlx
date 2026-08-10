@@ -168,10 +168,41 @@ def test_seed_step_honors_kill_switch(monkeypatch):
 
 
 def test_note_untracked_weights_accumulates(monkeypatch):
-    monkeypatch.setattr(pd, "_UNTRACKED_WEIGHTS", 0.0)
+    monkeypatch.setattr(pd, "_UNTRACKED_WEIGHTS", {})
     pd.note_untracked_weights(10 * GB)
     pd.note_untracked_weights(5 * GB)
-    assert pd._UNTRACKED_WEIGHTS == 15 * GB
+    assert pd.untracked_weight_bytes() == 15 * GB
+
+
+def test_note_untracked_weights_same_key_first_wins(monkeypatch):
+    # a drafter reloading the target's GGUF maps the same pages: the
+    # re-registration must not double the count (it serialized admissions)
+    monkeypatch.setattr(pd, "_UNTRACKED_WEIGHTS", {})
+    key = ("/models/a.gguf",)
+    pd.note_untracked_weights(87 * GB, key=key)
+    pd.note_untracked_weights(87 * GB, key=key)
+    assert pd.untracked_weight_bytes() == 87 * GB
+    pd.note_untracked_weights(2 * GB, key=key)  # subset re-walk ignored
+    assert pd.untracked_weight_bytes() == 87 * GB
+
+
+def test_note_untracked_weights_first_wins_over_phantom(monkeypatch):
+    # when active memory tracks the wire bytes, the bracketed first walk
+    # registers ~0; a re-walk with no read of its own sees no delta and
+    # would register the full bytes again - it must not override the first
+    monkeypatch.setattr(pd, "_UNTRACKED_WEIGHTS", {})
+    key = ("/models/a.gguf",)
+    pd.note_untracked_weights(0, key=key)
+    pd.note_untracked_weights(28 * GB, key=key)
+    assert pd.untracked_weight_bytes() == 0
+
+
+def test_note_untracked_weights_distinct_keys_sum(monkeypatch):
+    monkeypatch.setattr(pd, "_UNTRACKED_WEIGHTS", {})
+    pd.note_untracked_weights(10 * GB, key=("/models/a.gguf",))
+    pd.note_untracked_weights(4 * GB, key=("/models/b.gguf",))
+    pd.note_untracked_weights(1 * GB)
+    assert pd.untracked_weight_bytes() == 15 * GB
 
 
 # --- arch score profiles -------------------------------------------------
