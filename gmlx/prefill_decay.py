@@ -350,17 +350,42 @@ def note_untracked_weights(nbytes: float) -> None:
     _UNTRACKED_WEIGHTS += float(nbytes)
 
 
-def _headroom_bytes() -> float | None:
+def headroom_bytes() -> float | None:
     """Estimated live free working set: recommended working set minus
     zero-copy weights minus MLX-tracked allocations. The buffer cache counts
     as free (the allocator evicts it under pressure). Sampled fresh per call,
-    never memoized."""
+    never memoized. The one shared accounting: the prefill caps, the serve
+    memory trace, and the admission gate all read this."""
     try:
         ws = float(mx.device_info()["max_recommended_working_set_size"])
         active = float(mx.get_active_memory())
     except Exception:
         return None
     return ws - _UNTRACKED_WEIGHTS - active
+
+
+_headroom_bytes = headroom_bytes
+
+
+def score_transient_bytes(model, prompt_cache, depth: int) -> float:
+    """Projected peak prefill score transient for a request at ``depth``,
+    evaluated at the chunk step the decay policy would actually choose
+    there. Uses the arch's ScoreTransientProfile when one arms (resolved
+    against ``prompt_cache``; a batched cache may disarm the profile, which
+    falls back to the dense model, the conservative side)."""
+    heads = score_heads(model)
+    profile = resolve_score_profile(model, prompt_cache)
+    base = _STOCK_BASE
+    if (profile is not None and profile.base_step
+            and "PREFILL_STEP_SIZE" not in os.environ):
+        base = int(profile.base_step)
+    step = decayed_step(base, depth, heads, profile=profile)
+    if profile is not None:
+        h, bpe, div = (profile.heads, profile.bytes_per_elem,
+                       profile.depth_divisor)
+    else:
+        h, bpe, div = heads, 2, 1
+    return h * step * (depth + step) * bpe / div
 
 
 def _seed_cap_bytes() -> float:

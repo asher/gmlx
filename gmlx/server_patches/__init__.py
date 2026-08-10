@@ -205,6 +205,11 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     # Before the model loads, so the cascade stamp wrapper (installed at load
     # time) wraps this and both survive.
     install_batched_cachelist_admission()
+    # After the pacer above so this wrapper runs outside it: a declined
+    # tick hides the pending list before the pacer looks, the pacer sees
+    # no prefill work, and decode runs unpaced while admission waits.
+    from ..admit_gate import install_admit_headroom_gate
+    install_admit_headroom_gate()
     install_chat_template_kwargs()
     install_thinking_budget_fix()
     install_openai_stop_sequences()
@@ -246,6 +251,10 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_rerank_route(getattr(cfg, "rerank", None))
     install_resolver_error_handlers()
     install_request_timing_log()
+    # Keep this the last BatchGenerator._next wrapper (outermost), so the
+    # trace brackets the full tick including pacing and admission work.
+    from ..serve_memtrace import install_serve_memtrace
+    install_serve_memtrace()
     # Last: the assistant chat wrapper must be outermost (alias ids never
     # reach the model resolver) and wrap the models override above.
     from ..assistant_serve import install_assistant_serve

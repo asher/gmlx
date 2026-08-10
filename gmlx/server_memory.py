@@ -90,6 +90,149 @@ def resolve_cache_limit(cfg_gb, model_paths, ws_bytes) -> tuple[int | None, str]
     return None, "unlimited"
 
 
+# ---- Admission headroom projection ----------------------------------------
+#
+# Byte arithmetic for the admission gate (admit_gate): how much would
+# admitting the candidate rows commit, against the measured free headroom.
+# The KV term is measured, never derived: per cache kind, bytes per row
+# token from a walk of the live decode batch's allocations, folded into an
+# exponentially weighted mean on the generator. It self-corrects as
+# kv_bits, pooling, or quantized storage change underneath.
+#
+# The projection is the padded form: every row is priced at the batch's
+# maximum row length rounded up to the allocation block, because batched
+# caches allocate rows to a shared padded length and under-projection is
+# the direction that fails to prevent an abort. Rotating-window kinds are
+# capped at their window so deep prompts do not price linear growth a ring
+# will never hold.
+
+_KV_EWM_ALPHA = 0.3
+_STEP_BLOCK = 256
+
+
+def _round_block(n: float) -> int:
+    return -(-int(n) // _STEP_BLOCK) * _STEP_BLOCK
+
+
+def admit_reserve_bytes(ws_bytes: float) -> float:
+    """Headroom held back beyond the projection. Also carries the
+    batched-cache growth transient (crossing an allocation-block boundary
+    transiently holds a layer's old and new arrays together) until that is
+    projected explicitly."""
+    env = os.environ.get("GMLX_ADMIT_RESERVE_GB", "")
+    if env:
+        try:
+            return max(0.0, float(env)) * 1e9
+        except ValueError:
+            pass
+    return max(2e9, 0.05 * ws_bytes)
+
+
+def update_kv_rates(gen) -> None:
+    """Fold a fresh per-kind KV bytes-per-row-token measurement of the live
+    decode batch into the generator's running estimate (``_kq_admit_``
+    attrs, the same convention the gate's defer state uses)."""
+    batch = gen._generation_batch
+    rows = len(batch)
+    pc = getattr(batch, "prompt_cache", None)
+    if rows <= 0 or not pc:
+        return
+    from .serve_memtrace import _arrays, _leaf_caches
+
+    fresh: dict = {}
+    live_bytes = 0.0
+    live_depth = 0
+    for c in _leaf_caches(pc):
+        nbytes = 0
+        alen = 0
+        for v in vars(c).values():
+            for a in _arrays(v):
+                nbytes += a.nbytes
+                if a.ndim >= 3:
+                    alen = max(alen, int(a.shape[-2]))
+        if not nbytes:
+            continue
+        live_bytes += nbytes
+        off = getattr(c, "offset", None)
+        off = off if isinstance(off, int) else 0
+        live_depth = max(live_depth, off)
+        tokens = min(off, alen) if off and alen else (off or alen)
+        if tokens <= 0:
+            continue
+        kind = fresh.setdefault(type(c).__name__,
+                                {"rate": 0.0, "window": None})
+        kind["rate"] += nbytes / tokens / rows
+        window = getattr(c, "max_size", None)
+        if isinstance(window, int) and window > 0:
+            kind["window"] = (window if kind["window"] is None
+                              else min(kind["window"], window))
+    if not fresh:
+        return
+    prev = getattr(gen, "_kq_admit_kv_rates", None) or {}
+    merged = {}
+    for name, k in fresh.items():
+        old = prev.get(name)
+        rate = (k["rate"] if old is None else
+                (1 - _KV_EWM_ALPHA) * old["rate"] + _KV_EWM_ALPHA * k["rate"])
+        merged[name] = {"rate": rate, "window": k["window"]}
+    gen._kq_admit_kv_rates = merged
+    gen._kq_admit_live_bytes = live_bytes
+    gen._kq_admit_live_depth = live_depth
+
+
+def project_admission(gen, candidates):
+    """Projected bytes committing ``candidates`` on top of the live batch,
+    against measured headroom.
+
+    Returns ``(projected, headroom, parts)`` with parts a human-readable
+    breakdown, or None when there is no measured basis to project (fresh
+    model, empty batch, probe failure): the gate must admit then.
+    ``candidates`` are pending-queue tuples (uid, prompt, max_tokens, ...).
+    """
+    import mlx.core as mx
+
+    from .prefill_decay import headroom_bytes, score_transient_bytes
+
+    update_kv_rates(gen)
+    rates = getattr(gen, "_kq_admit_kv_rates", None)
+    if not rates:
+        return None
+    head = headroom_bytes()
+    if head is None:
+        return None
+    cand_tokens = []
+    for s in candidates:
+        try:
+            prompt_toks = len(s[1])
+        except TypeError:
+            prompt_toks = 0
+        max_toks = s[2] if isinstance(s[2], int) else 0
+        cand_tokens.append(prompt_toks + max_toks)
+    if not cand_tokens:
+        return None
+    width = len(gen._generation_batch) + len(cand_tokens)
+    depth = _round_block(max([getattr(gen, "_kq_admit_live_depth", 0)]
+                             + cand_tokens))
+    kv_total = 0.0
+    for k in rates.values():
+        capped = depth if k["window"] is None else min(
+            depth, _round_block(k["window"]))
+        kv_total += k["rate"] * width * capped
+    kv_new = max(0.0, kv_total - getattr(gen, "_kq_admit_live_bytes", 0.0))
+    transient = score_transient_bytes(
+        gen.model, getattr(gen._generation_batch, "prompt_cache", None),
+        max(cand_tokens))
+    try:
+        ws = float(mx.device_info()["max_recommended_working_set_size"])
+    except Exception:
+        ws = 0.0
+    reserve = admit_reserve_bytes(ws)
+    projected = kv_new + transient + reserve
+    parts = (f"kv {kv_new / 1e9:.1f} + transient {transient / 1e9:.1f}"
+             f" + reserve {reserve / 1e9:.1f}")
+    return projected, head, parts
+
+
 def apply_cache_limit(cfg) -> None:
     """Resolve and apply the server's cache limit; called once at startup."""
     import mlx.core as mx
