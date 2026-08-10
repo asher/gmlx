@@ -15,9 +15,9 @@ the most accurate open quant formats there are — exactly as published
 ([accuracy per byte](#accuracy-per-byte)). The companion project
 [mlx-kquant](https://github.com/asher/mlx-kquant) supplies the Metal kernels
 that run these formats natively on Apple's
-[MLX](https://github.com/ml-explore/mlx) framework, and on the same file
-gmlx benchmarks faster than llama.cpp, with the gap widest at the
-50-200k-token contexts where coding agents and long sessions live
+[MLX](https://github.com/ml-explore/mlx) framework. On the same file, gmlx
+benchmarks faster than llama.cpp, with the gap widest at the 50-200k-token
+contexts where coding agents and long sessions live
 ([performance](#performance)). A 100B+ model starts generating within
 seconds of launch, and a MoE bigger than RAM still runs, streaming its
 experts from disk ([bigger than memory](#bigger-than-memory)).
@@ -57,13 +57,13 @@ gmlx stop                                       # the server ran detached
 `gmlx[all]` adds every optional feature to the core platform: the upgraded
 chat TUI, voice chat, and the MCP assistant. The core alone already carries
 serving, vision, embeddings, and the menu bar, so `gmlx[chat]` is a smaller
-install that gives up only voice and the assistant; `gmlx init` adds either
-one later. `uv tool` and pipx put `gmlx` on your PATH in every terminal;
+install that gives up only voice and the assistant. `gmlx init` adds either
+one later. `uv tool` and pipx put `gmlx` on your PATH in every terminal.
 `pip install "gmlx[all]"` into a venv you manage works too, with the command
 available only while that venv is active.
 
-A model typically needs roughly its file size in memory, plus the KV cache;
-the exception is MoE models, which can run
+A model typically needs roughly its file size in memory, plus the KV cache.
+The exception is MoE models, which can run
 [bigger than memory](#bigger-than-memory). If anything misbehaves,
 `gmlx doctor` checks the runtime, config, model paths, and services in one
 pass.
@@ -92,9 +92,9 @@ gmlx run model.gguf@creative --prompt "Write a haiku about entropy."
 gmlx chat qwen3.6-27b-q6 --profile instruct   # --profile NAME = the flag form of @NAME
 ```
 
-A `.gguf` path works with no setup; a bare id like `qwen3.6-27b-q6` names a
-model from your server config - `gmlx list` shows yours (the
-[getting-started guide](https://github.com/asher/gmlx/blob/main/docs/getting-started.md) sets one up).
+A `.gguf` path works with no setup. A bare id like `qwen3.6-27b-q6` names a
+model from your server config - `gmlx list` shows yours, and the
+[getting-started guide](https://github.com/asher/gmlx/blob/main/docs/getting-started.md) sets one up.
 
 Details: the [CLI reference](https://github.com/asher/gmlx/blob/main/docs/cli.md).
 
@@ -192,10 +192,10 @@ gmlx and llama.cpp run the same GGUF file, so the comparison is direct: on an
 M5 Max (128 GB), gmlx prefills faster on every model in our fleet at every
 depth measured, 1.2-1.6x at short context and 2-4x past 100k tokens. At
 matched non-speculative baselines, decode starts at parity and wins
-fleet-wide from 16k tokens as the KV cache deepens; with speculative decoding
-active on both engines, gmlx decodes 1.1-2x ahead throughout, and MTP's lift
-over the same server with it off holds at 1.4-1.8x from 17k through 110k,
-where llama.cpp's speculation gain decays with depth.
+fleet-wide from 16k tokens as the KV cache deepens. With speculative decoding
+active on both engines, gmlx decodes 1.1-2x ahead throughout. MTP's lift over
+the same server with it off holds at 1.4-1.8x from 17k through 110k, where
+llama.cpp's speculation gain decays with depth.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/perf/mtp-lift-dark.svg">
@@ -207,7 +207,7 @@ Reference points at short context: gemma-4-12B-it (dense, Q6_K) decodes at
 ~850 vs ~730 tok/s;
 Qwen3.5-9B (dense, Q6_K) decodes at ~112 vs ~76 tok/s (1.5x), prefilling at
 ~1600 vs ~1140 tok/s. Absolute numbers scale with the machine's memory
-bandwidth; measure your own with `gmlx run model.gguf --bench "128,512,2048"`.
+bandwidth. Measure your own with `gmlx run model.gguf --bench "128,512,2048"`.
 
 The speed comes from kernels built for exactly this work: mlx-kquant's fused
 K-quant and IQ matmuls, attention tuned for decode at depth, and a custom MTP
@@ -215,16 +215,18 @@ verify path built for this server. The full fleet tables, per-model charts,
 and methodology are in
 [benchmarks.md](https://github.com/asher/gmlx/blob/main/docs/benchmarks.md).
 
-When you want more, the levers are: MTP speculative decoding, which roughly
-doubles decode throughput at short context, automatic on models with a native
-draft head (Qwen3.5/3.6) and available to gemma-4 through a small companion
-drafter (1.9-2.1x); the prompt cache, which removes repeated prefill for
-agent workloads; KV-cache quantization for long contexts; and disk-streamed
-execution for MoE models larger than memory ([below](#bigger-than-memory)).
-The file you pick matters too: a uniform K-quant decodes meaningfully faster
-than a heavily mixed one at similar or better quality. When each lever pays
-off, with numbers — and where llama.cpp still leads — is in the
-[performance guide](https://github.com/asher/gmlx/blob/main/docs/performance.md).
+When you want more, there are four levers. MTP speculative decoding roughly
+doubles decode throughput at short context; it is automatic on models with a
+native draft head (Qwen3.5/3.6), and a small companion drafter brings it to
+gemma-4 (1.9-2.1x). The prompt cache removes repeated prefill for agent
+workloads. KV-cache quantization frees memory at long contexts. And
+disk-streamed execution runs MoE models larger than memory
+([below](#bigger-than-memory)). The file you pick matters too: a uniform
+K-quant decodes meaningfully faster than a heavily mixed one at similar or
+better quality. The
+[performance guide](https://github.com/asher/gmlx/blob/main/docs/performance.md)
+covers when each lever pays off, with numbers, and where llama.cpp still
+leads.
 
 ### Bigger than memory
 

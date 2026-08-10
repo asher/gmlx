@@ -7,8 +7,8 @@ has a different name, and what works differently on purpose.
 ## Coming from llama.cpp / llama-server
 
 Your GGUFs work as-is: `gmlx run model.gguf` is the moral equivalent of
-`llama-cli -m model.gguf`, and `gmlx serve model.gguf` of `llama-server`;
-the default port is the same 8080.
+`llama-cli -m model.gguf`, and `gmlx serve model.gguf` of `llama-server`.
+The default port is the same 8080.
 
 Common flag equivalents:
 
@@ -29,7 +29,7 @@ Common flag equivalents:
 | `--lora adapter` | `--adapter adapter.gguf` | llama.cpp-format adapter GGUFs interop in both directions ([lora.md](lora.md)) |
 
 `/v1/completions` is served with a minimal surface (single string prompt,
-one choice); `/v1/chat/completions` is the primary route, and Anthropic
+one choice). `/v1/chat/completions` is the primary route, and Anthropic
 Messages and OpenAI Responses run on the same port. Per-request details:
 [server-config.md](server-config.md#api-capabilities).
 
@@ -39,11 +39,11 @@ What carries over: any GGUF you can point at. What does not: Ollama's model
 store and API.
 
 - Ollama's library lives as sha-named blobs, not `.gguf` files, so it cannot
-  be pointed at directly; re-download the models you use with `gmlx pull`
+  be pointed at directly. Re-download the models you use with `gmlx pull`
   (`gmlx validate hf:<org>/<repo>` lists every variant first).
 - gmlx speaks the OpenAI, Anthropic, and OpenAI Responses APIs, not the
   Ollama API (`/api/generate`, `/api/chat`). Clients configured for an
-  OpenAI-compatible endpoint work unchanged; Ollama-native integrations need
+  OpenAI-compatible endpoint work unchanged. Ollama-native integrations need
   their OpenAI mode, pointed at port 8080 (not 11434).
 - Modelfile parameters map onto the YAML config: `num_predict` is the server
   `--max-tokens` default, sampling knobs live per model or in `profiles:`
@@ -61,16 +61,17 @@ gmlx init --models-dir ~/.lmstudio/models -r
 
 The init wizard also offers the LM Studio directory on its own when it
 exists. Ids, sampling profiles, and a default model are then yours to adjust
-in one YAML file; the local server surface (OpenAI API, `/v1/models`) is the
+in one YAML file. The local server surface (OpenAI API, `/v1/models`) is the
 same shape LM Studio's is, plus Anthropic Messages on the same port.
 
 ## Why serve from gmlx
 
 Beyond the kernel-level speed on K-quants ([performance.md](performance.md)):
-warm config reload (SIGHUP / `POST /v1/reload`) without dropping residents;
-residency controls (byte budget, pinning, idle unload, keep tiers);
-loopback-by-default binding that refuses a wide bind without a key;
-cross-request prompt caching with an optional SSD tier; MTP speculative
-decoding on served models; and one-command client hookups
-(`gmlx launch claude-code`, `open-webui`, ...) that never touch your
-dotfiles ([launch.md](launch.md)).
+
+- warm config reload (SIGHUP / `POST /v1/reload`) without dropping residents
+- residency controls: byte budget, pinning, idle unload, keep tiers
+- loopback-by-default binding that refuses a wide bind without a key
+- cross-request prompt caching with an optional SSD tier
+- MTP speculative decoding on served models
+- one-command client hookups (`gmlx launch claude-code`, `open-webui`, ...)
+  that never touch your dotfiles ([launch.md](launch.md))
