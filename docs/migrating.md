@@ -7,9 +7,8 @@ has a different name, and what works differently on purpose.
 ## Coming from llama.cpp / llama-server
 
 Your GGUFs work as-is: `gmlx run model.gguf` is the moral equivalent of
-`llama-cli -m model.gguf`, and `gmlx serve model.gguf` of `llama-server`.
-The default port is the same 8080, and generation runs until the model stops
-by default, like `-n -1`.
+`llama-cli -m model.gguf`, and `gmlx serve model.gguf` of `llama-server`;
+the default port is the same 8080.
 
 Common flag equivalents:
 
