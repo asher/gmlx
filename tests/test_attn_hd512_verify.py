@@ -47,6 +47,41 @@ def test_chunked_prefill_causal_with_cached_prefix(qL, kL, monkeypatch):
     assert err < 2e-2, f"qL={qL} kL={kL} err={err}"
 
 
+@pytest.mark.parametrize("d", [96, 512])
+@pytest.mark.parametrize("qL", [32, 96])
+def test_chunked_prefill_unmasked_stays_unmasked(d, qL, monkeypatch):
+    # mask=None is *unmasked*, not causal. A bidirectional encoder (the
+    # muse-glimmer ViT, hd 96) attends to every key from every query row;
+    # treating None as "causal" silently halved its receptive field.
+    monkeypatch.setattr(
+        attn_hd512, "_orig_sdpa", mx.fast.scaled_dot_product_attention)
+    scale = d**-0.5
+    q, k, v = _rand(qL, kL=qL, hq=16, hkv=16, d=d)
+    out = attn_hd512._chunked_prefill(q, k, v, scale, None, tile=32)
+    err = mx.abs(out.astype(mx.float32)
+                 - _ref(q, k, v, False, scale=scale)).max().item()
+    assert err < 2e-2, f"d={d} qL={qL} err={err}"
+    if qL > 32:
+        causal_err = mx.abs(out.astype(mx.float32)
+                            - _ref(q, k, v, True, scale=scale)).max().item()
+        assert causal_err > 1e-2, "unmasked output collapsed onto the causal one"
+
+
+def test_chunked_prefill_block_diagonal_mask(monkeypatch):
+    # the ViT's window attention: a non-causal array mask, sliced per tile
+    monkeypatch.setattr(
+        attn_hd512, "_orig_sdpa", mx.fast.scaled_dot_product_attention)
+    qL, d = 96, 96
+    q, k, v = _rand(qL, kL=qL, hq=16, hkv=16, d=d)
+    seg = mx.arange(qL) // 32
+    mask = (seg[:, None] == seg[None, :])[None, None]
+    out = attn_hd512._chunked_prefill(q, k, v, d**-0.5, mask, tile=32)
+    ref = mx.fast.scaled_dot_product_attention(
+        q, k, v, scale=d**-0.5, mask=mask)
+    err = mx.abs(out.astype(mx.float32) - ref.astype(mx.float32)).max().item()
+    assert err < 2e-2, f"err={err}"
+
+
 @pytest.mark.parametrize("qL", [3, 4, 6])
 @pytest.mark.parametrize("causal", [True, False])
 def test_verify_gemm_matches_reference(qL, causal):
