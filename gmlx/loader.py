@@ -2622,7 +2622,10 @@ def _warm_mmap_residency(
                 tracked = max(0.0, mx.get_active_memory() - active_before)
             except Exception:
                 tracked = 0.0
-        note_untracked_weights(max(0.0, total - min(tracked, total)))
+        # Keyed by shard paths so a drafter reloading the target's GGUF
+        # replaces its earlier registration instead of double-counting.
+        key = tuple(os.path.abspath(p) for p in paths) if paths else None
+        note_untracked_weights(max(0.0, total - min(tracked, total)), key=key)
 
 
 def _warm_touch_pass(

@@ -338,16 +338,29 @@ def _tick_step(base: int) -> int | None:
     return step
 
 
-_UNTRACKED_WEIGHTS = 0.0
+# Untracked weight bytes keyed by source (GGUF shard paths). Reloading the
+# same file maps the same pages, so same-key registrations replace (max)
+# rather than accumulate; a drafter reload used to double the count and
+# hold headroom negative, serializing admissions.
+_UNTRACKED_WEIGHTS: dict[object, float] = {}
+_UNTRACKED_ANON = "\0anon"
 _HEADROOM_FRACTION = 0.5
 
 
-def note_untracked_weights(nbytes: float) -> None:
+def note_untracked_weights(nbytes: float, key: object = None) -> None:
     """Loader hook: bytes wired at inference but invisible to
-    mx.get_active_memory (zero-copy mmap weights). Accumulates across loads
-    (target model + drafter)."""
-    global _UNTRACKED_WEIGHTS
-    _UNTRACKED_WEIGHTS += float(nbytes)
+    mx.get_active_memory (zero-copy mmap weights). Same-key registrations
+    keep the max, distinct keys sum; key=None accumulates."""
+    if key is None:
+        _UNTRACKED_WEIGHTS[_UNTRACKED_ANON] = (
+            _UNTRACKED_WEIGHTS.get(_UNTRACKED_ANON, 0.0) + float(nbytes))
+    else:
+        _UNTRACKED_WEIGHTS[key] = max(
+            _UNTRACKED_WEIGHTS.get(key, 0.0), float(nbytes))
+
+
+def untracked_weight_bytes() -> float:
+    return sum(_UNTRACKED_WEIGHTS.values())
 
 
 def headroom_bytes() -> float | None:
@@ -361,7 +374,7 @@ def headroom_bytes() -> float | None:
         active = float(mx.get_active_memory())
     except Exception:
         return None
-    return ws - _UNTRACKED_WEIGHTS - active
+    return ws - untracked_weight_bytes() - active
 
 
 _headroom_bytes = headroom_bytes

@@ -63,6 +63,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- serve --speculative no longer serializes concurrent requests: the
+  drafter's reload of the target GGUF counted the shared weights twice,
+  holding admission headroom negative for the server's lifetime.
 - Chat's bottom toolbar no longer clips the live tok/s readout on
   narrow terminals; sampling knobs are dropped first instead.
 - The serve free-headroom estimate went negative on models whose load
