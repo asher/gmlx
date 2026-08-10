@@ -116,7 +116,11 @@ Details: [picking a model for your Mac](https://github.com/asher/gmlx/blob/main/
 
 `serve` runs a continuously batched, multi-model server speaking three dialects on
 one port: OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages, all
-streaming. It handles tool calling, structured output (`response_format:
+streaming. Concurrent requests decode together in one batch, a new prompt's
+prefill is paced so in-flight replies keep streaming, and a memory-headroom
+gate admits new work only when it fits
+([serving concurrent requests](https://github.com/asher/gmlx/blob/main/docs/performance.md#serving-concurrent-requests)).
+It handles tool calling, structured output (`response_format:
 json_schema`, grammar-constrained), logprobs, and vision messages. A YAML config
 gives named models, reusable sampling profiles, aliases, and directory discovery.
 Residency is managed (LRU with pinning and idle unload), and repeated prefixes are
