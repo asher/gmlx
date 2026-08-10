@@ -402,6 +402,17 @@ def _term_size():
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
 
+def _find_last(haystack: list[str], needle: list[str]) -> int:
+    """Last index where ``needle`` appears as a contiguous run in
+    ``haystack``; -1 when absent or empty."""
+    if not needle or len(needle) > len(haystack):
+        return -1
+    for i in range(len(haystack) - len(needle), -1, -1):
+        if haystack[i : i + len(needle)] == needle:
+            return i
+    return -1
+
+
 class StreamRenderer:
     """Answer-channel sink: repaint the current block in place, print completed
     blocks permanently. Plain mode passes text straight through.
@@ -423,7 +434,7 @@ class StreamRenderer:
         size_fn=None,
         clock=None,
         min_repaint_s: float = 0.04,
-        max_repaint_s: float = 0.5,
+        max_repaint_s: float = 0.25,
     ):
         self.mode = mode
         self.theme = theme or resolve_theme(color=(mode != "plain"))
@@ -443,6 +454,13 @@ class StreamRenderer:
         #                            the last screenful
         self._frozen = False       # resized mid-block: appends raw to block end
         self._raw_emitted = 0      # chars of the current block already raw-written
+        self._src_skip = 0         # fence body source lines dropped from live
+        #                            renders: once a fence block scrolls far
+        #                            past the viewport, its committed body
+        #                            lines are immutable, so re-rendering them
+        #                            every paint only burns time (rich re-parse
+        #                            is O(block)); the live render input stays
+        #                            viewport-sized instead
         self._last_paint = 0.0
         self._width = None
         self._backend = _RichBackend(self.theme) if mode == "rich" else None
@@ -473,9 +491,10 @@ class StreamRenderer:
             self._reset_block()
             return
         if tail.strip():
-            self._repaint(self._render(tail)[self._committed :])
+            self._repaint(self._render(self._trimmed(tail))[self._committed :])
         self._painted = 0
         self._committed = 0
+        self._src_skip = 0
         self._screen = []
 
     # -- internals ----------------------------------------------------------------
@@ -486,6 +505,42 @@ class StreamRenderer:
             return self._backend.render(src, width)
         return _render_lite(src, width, self.theme)
 
+    def _trimmed(self, src: str) -> str:
+        """Apply the live trim to a full block source: opening fence line plus
+        the untrimmed body tail. Identity when no trim is active."""
+        if not self._src_skip:
+            return src
+        lines = src.splitlines(keepends=True)
+        return lines[0] + "".join(lines[1 + self._src_skip :])
+
+    def _paint_source(self, budget: int) -> list[str]:
+        """Render the live block for painting. A fence block far taller than
+        the viewport gets its committed body dropped from the render input so
+        per-paint cost stays viewport-sized: the rebase relocates
+        ``_committed`` by finding the currently painted rows inside the
+        trimmed render, and skips the trim entirely on any mismatch (always
+        correct, only slower)."""
+        buf = self._buf
+        body = len(buf._lines) - 1
+        if (
+            buf._fence is not None
+            and len(self._screen) > 4
+            and body - self._src_skip > 2 * budget + 16
+        ):
+            new_skip = body - (budget + 16)
+            candidate = (
+                buf._lines[0]
+                + "".join(buf._lines[1 + new_skip :])
+                + buf._partial
+            )
+            rendered = self._render(candidate)
+            i = _find_last(rendered, self._screen[:-1])
+            if i >= 0:
+                self._src_skip = new_skip
+                self._committed = i
+                return rendered
+        return self._render(self._trimmed(buf.current))
+
     def _finish_block(self, src: str) -> None:
         if self._frozen:
             self._w(src[self._raw_emitted :])
@@ -493,11 +548,12 @@ class StreamRenderer:
             self._reset_block()
             return
         if src.strip():
-            self._repaint(self._render(src)[self._committed :])
+            self._repaint(self._render(self._trimmed(src))[self._committed :])
             self._w("\n")
         self._painted = 0
         self._raw_emitted = 0
         self._committed = 0
+        self._src_skip = 0
         self._screen = []
 
     def _paint_live(self) -> None:
@@ -518,8 +574,8 @@ class StreamRenderer:
             self._freeze(cur)
             return
         self._width = width
-        lines = self._render(cur)[self._committed :]
         budget = max(4, size.lines - 2)
+        lines = self._paint_source(budget)[self._committed :]
         if len(lines) >= budget:
             # Taller than the viewport: rows above the screen edge cannot be
             # repainted in place. Commit everything but the last screenful
@@ -533,13 +589,14 @@ class StreamRenderer:
         else:
             self._repaint(lines)
         # Adapt the paint cadence to what a paint actually costs (render +
-        # write, which blocks when the transport is saturated): spend at most
-        # roughly a sixth of wall time painting, between the min and max.
-        # The interval runs from paint END, so a slow paint never eats the
-        # following quiet period.
+        # write, which blocks when the transport is saturated): painting may
+        # use about a third of wall time, between the min and max. Non-paint
+        # work per chunk is sub-millisecond, so this cannot starve the reader
+        # loop. The interval runs from paint END, so a slow paint never eats
+        # the following quiet period.
         end = self._clock()
         self._interval = min(
-            self._max_repaint, max(self._min_repaint, (end - now) * 6.0)
+            self._max_repaint, max(self._min_repaint, (end - now) * 3.0)
         )
         self._last_paint = end
 

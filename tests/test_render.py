@@ -368,17 +368,62 @@ def test_stream_diff_unchanged_finalize_writes_nothing():
 
 
 def test_stream_adaptive_interval_backs_off():
-    ticks = iter([1.0, 2.0, 2.3, 2.35, 3.0, 4.0, 4.05])
+    ticks = iter([1.0, 2.0, 2.1, 2.2, 2.4, 3.4, 3.45])
     t = _Term()
     r = rd.StreamRenderer(
         "lite", _THEME, write=t.write, size_fn=lambda: t.size,
         clock=lambda: next(ticks),
     )
-    r.feed("a")                     # paint start 1.0, end 2.0 -> interval 0.5
+    r.feed("a")                     # paint start 1.0, end 2.0 -> interval 0.25
     n = len(t.out)
-    r.feed("b")                     # now=2.3: 0.3 since paint end, skipped
+    r.feed("b")                     # now=2.1: 0.1 since paint end, skipped
     assert len(t.out) == n
-    r.feed("c")                     # now=2.35: still inside the interval
+    r.feed("c")                     # now=2.2: still inside the interval
     assert len(t.out) == n
-    r.feed("d")                     # now=3.0: past the interval, paints again
+    r.feed("d")                     # now=2.4: past the interval, paints again
     assert len(t.out) > n
+
+
+# -- fence live-render trimming -------------------------------------------------
+
+
+def test_stream_fence_trim_bounds_render_input():
+    t = _Term(columns=41, lines=8)   # budget 6: trim kicks in past 28 body lines
+    r = t.renderer()
+    r.feed("```\n")
+    for i in range(40):
+        r.feed(f"row {i}\n")
+    assert r._src_skip > 0
+    live = r._trimmed(r._buf.current)
+    assert len(live.splitlines()) <= 2 * 6 + 16 + 2
+    r.feed("```\n")
+    r.feed("\nafter\n")
+    r.finalize()
+    stripped = _strip(t.text())
+    for i in range(40):
+        assert f"row {i}" in stripped, i
+    assert "after" in stripped
+    assert "```" not in stripped
+
+
+def test_stream_fence_trim_resets_between_blocks():
+    t = _Term(columns=41, lines=8)
+    r = t.renderer()
+    r.feed("```\n")
+    for i in range(40):
+        r.feed(f"row {i}\n")
+    r.feed("```\n")
+    assert r._src_skip == 0              # completion resets the trim
+    r.feed("\nplain paragraph text\n")
+    r.finalize()
+    assert "plain paragraph text" in _strip(t.text())
+
+
+def test_stream_paragraph_never_trims():
+    t = _Term(columns=41, lines=8)
+    r = t.renderer()
+    for i in range(40):
+        r.feed(f"word{i} ")
+    assert r._src_skip == 0
+    r.finalize()
+    assert "word39" in _strip(t.text())
