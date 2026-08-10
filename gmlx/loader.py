@@ -907,6 +907,14 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         from . import kimi_k3_model
 
         kimi_k3_model.ensure_registered()
+    if mt == "muse_glimmer":
+        # mlx-lm ships no muse_glimmer module (afmoe is the nearest relative);
+        # same vendored-registration pattern as kimi_k3. The tool parser
+        # registers with the model so a later serve template-inference
+        # resolves it.
+        from . import muse_glimmer_model
+
+        muse_glimmer_model.ensure_registered()
     Model, ModelArgs = _get_classes(config)
     model_args = ModelArgs.from_dict(config)
     model = Model(model_args)

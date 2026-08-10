@@ -185,6 +185,30 @@ FAMILIES: dict[str, dict] = {
             "reasoning-max": {"chat_template_kwargs": {"thinking_effort": "max"}},
         },
     },
+    # https://huggingface.co/meta-models/Muse-Glimmer-30B "Best Practices",
+    # 2026-08 (generation_config carries no sampling): t=1.0/top_p=0.95/top_k=64.
+    # The chat template's reasoning_strength takes low/medium/high/xhigh and
+    # defaults to high; it interpolates the value into the system prompt without
+    # validating it. The reasoning channel's markers are set so the server's
+    # open-think detection, budget criteria, and stream splitter see the real
+    # header rather than the '<think>' default.
+    "muse": {
+        "label": "Muse Glimmer",
+        "arches": ("muse-glimmer",),
+        "base": {"sampling": {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "top_k": 64,
+            "thinking_start_token": "<|start|>assistant to=self<|message|>",
+            "thinking_end_token": "<|eom|>",
+        }},
+        "intents": {
+            "reasoning-low": {"chat_template_kwargs": {"reasoning_strength": "low"}},
+            "reasoning-medium": {"chat_template_kwargs": {"reasoning_strength": "medium"}},
+            "reasoning-high": {"chat_template_kwargs": {"reasoning_strength": "high"}},
+            "reasoning-xhigh": {"chat_template_kwargs": {"reasoning_strength": "xhigh"}},
+        },
+    },
     # Llama 3.x generation_config (t=0.6/top_p=0.9); SmolLM3 card matches
     # closely enough to share.
     "llama": {
