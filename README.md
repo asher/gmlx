@@ -32,8 +32,7 @@ experts from disk ([bigger than memory](#bigger-than-memory)).
   <img src="https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/perf/per-model/deepseek-v4-flash-antirez-iq2xxs-panels.svg" alt="DeepSeek-V4-Flash IQ2_XXS: gmlx vs ds4-server prefill and decode vs KV depth">
 </picture>
 
-DeepSeek-V4-Flash is measured against dwarfstar's ds4-server, since
-llama.cpp has no V4-Flash path
+DeepSeek-V4-Flash is measured against antirez's ds4 (dwarfstar)
 ([benchmarks](https://github.com/asher/gmlx/blob/main/docs/benchmarks.md#deepseek-v4-flash-reference-engine-ds4-server)).
 
 <!-- Demo GIF: record with `vhs docs/assets/demo.tape` (see the tape's header),
