@@ -98,7 +98,7 @@ Pushing further overfits: validation loss climbs and greedy decoding can fall in
 "me hearty, me hearty..." loops. Turn `--iters` down or add data to taste.
 `--num-layers` and `--rank` trade capacity for memory: more adapted layers and a
 higher rank fit more behavior but cost more training memory. The defaults (8 layers,
-rank 8) are a sensible start. Note the walkthrough targets dense bases; on a MoE
+rank 8) are a sensible start. Note the walkthrough targets dense bases. On a MoE
 base the default adaptation keys are untested. Full flag
 table: the [train section of docs/cli.md](cli.md#gmlx-train).
 
@@ -162,5 +162,5 @@ scaling semantics (`delta = (alpha / rank) * B * A`). That buys interop both way
 - One adapter per resident entry, fixed at load: switching adapters means
   addressing a different model id (see the config example above), not a
   per-request parameter.
-- The adapter must match the base architecture (checked at load); matching the
+- The adapter must match the base architecture (checked at load). Matching the
   exact base finetune is your responsibility.

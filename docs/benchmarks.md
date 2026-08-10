@@ -280,9 +280,9 @@ ladders cell by cell).
 
 ## DeepSeek-V4-Flash (reference engine: ds4-server)
 
-This model's comparison engine is **ds4-server** (dwarfstar's
-DeepSeek-V4 server, ignore-eos patched), not llama.cpp -- llama.cpp
-has no DeepSeek-V4-Flash path. Ratios below are gmlx / ds4-server.
+This model's comparison engine is **ds4-server** (antirez's dwarfstar
+ds4 server, ignore-eos patched). Ratios below are
+gmlx / ds4-server.
 
 ### DeepSeek-V4-Flash IQ2_XXS
 

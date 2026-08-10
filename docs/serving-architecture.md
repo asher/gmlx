@@ -89,33 +89,31 @@ flowchart TD
 
 ## Components
 
-1. GGUF on disk: a text LLM GGUF (K-quant: Q4_K / Q6_K / MXFP4 / ...). VLM models
-   add a second `mmproj` GGUF (float or Q8_0) carrying the vision/audio tower.
-
-2. Loader (`gmlx.load_model`): parses the GGUF wire bytes, remaps
+1. Loader (`gmlx.load_model`): parses the GGUF wire bytes (the text LLM GGUF;
+   a VLM adds a second `mmproj` GGUF carrying the vision/audio tower), remaps
    GGUF tensor names to HF names, synthesizes the config and tokenizer (including the
    chat template), builds the stock model class, and swaps the quantized leaves for
    K-quant modules (`KQuantLinear`, `gather_qmm`, `KQuantMultiLinear`). Output is a
    `(model, config, tokenizer)` triple: no safetensors round-trip.
 
-3. Model adapter + residency: a text model is wrapped in
+2. Model adapter + residency: a text model is wrapped in
    `mlx_vlm.models.text_only.Model`, which exposes the `get_input_embeddings` /
    `language_model` interface the engine expects. A `StoppingCriteria` is attached to
    the tokenizer. VLM models are wrapped in their `mlx-vlm` vision/audio model class
    instead. Wrapped models are held in a multi-model residency pool (pinned + LRU)
    that owns a single process-wide `wired_limit`.
 
-4. Engine (`mlx_vlm.generate.ar.BatchGenerator`): continuous (in-flight)
+3. Engine (`mlx_vlm.generate.ar.BatchGenerator`): continuous (in-flight)
    batching over a ragged `BatchKVCache`. The engine is embeds-in: the request path
    precomputes `inputs_embeds` via `get_input_embeddings` and submits them through
    `insert(...)`, then drains tokens with `next()`. Prefix reuse is handled by the APC
    manager: exact-snapshot for hybrid / sliding-window caches, block-level for plain
    attention. Speculative decoding (draft model / MTP) is optional and runs
    gmlx's own verify round, which keeps APC available (upstream disables
-   it under a draft model); see
+   it under a draft model). See
    [server-config.md](server-config.md#speculative-decoding--the-prompt-cache).
 
-5. HTTP layer (`mlx-vlm` FastAPI app): exposes OpenAI Chat Completions
+4. HTTP layer (`mlx-vlm` FastAPI app): exposes OpenAI Chat Completions
    (`/v1/chat/completions`), OpenAI Responses (`/v1/responses`), and Anthropic
    Messages (`/v1/messages`), each with streaming SSE. Tool calls are extracted from
    the raw token stream by `mlx_lm.tool_parsers`, selected automatically from the
@@ -133,6 +131,6 @@ flowchart TD
    profiles, speculative decoding, and batching apply per round
    ([assistant.md](assistant.md#served-assistants)).
 
-6. Clients: any OpenAI- or Anthropic-compatible client. Pointing
+5. Clients: any OpenAI- or Anthropic-compatible client. Pointing
    `ANTHROPIC_BASE_URL` at the `/v1/messages` endpoint lets Anthropic-API tools (for
    example Claude Code) drive a local GGUF model.

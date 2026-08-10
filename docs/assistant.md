@@ -11,7 +11,7 @@ around the server's own chat completions. Configure it once in a top-level
   server-side for any OpenAI client.
 
 It is deliberately a lightweight assistant, not an autonomous agent. Each turn
-runs a bounded tool loop and ends when the model answers; nothing keeps working
+runs a bounded tool loop and ends when the model answers. Nothing keeps working
 in the background afterward. It is built for errand-sized tasks: look something
 up, chain a few tool calls, write a note, remember a fact. The external coding
 agents `gmlx launch` connects (pi, opencode, and friends) are a different
@@ -121,7 +121,7 @@ assistant:
 ```
 
 A stdio tool server runs with a minimal environment (`HOME`, `PATH`, `SHELL`,
-`TERM`, `USER`, `LOGNAME`); `env:` adds to that, and nothing else from this
+`TERM`, `USER`, `LOGNAME`). `env:` adds to that, and nothing else from this
 process's environment is inherited. Pass a secret a server needs explicitly, as
 above -- an `HF_TOKEN` or `OPENAI_API_KEY` sitting in your shell never reaches
 third-party tool code.
@@ -129,7 +129,7 @@ third-party tool code.
 **Document retrieval (RAG as a tool).** Qdrant's official server in embedded
 local mode gives the assistant `qdrant-store` and `qdrant-find` over a vector
 collection on disk -- no database process to run. Ask the assistant to store
-passages and it can retrieve them semantically later; embedding happens
+passages and it can retrieve them semantically later. Embedding happens
 inside the tool server with its own small local model, independent of this
 server's `/v1/embeddings`:
 
@@ -157,7 +157,7 @@ transient context. They never bloat the rolling chat history. Without
 warning.
 
 What gets stored is a distilled fact ("sister Ana, birthday March 12"), not a
-transcript: after each turn, a background request asks the chat model to boil
+transcript. After each turn, a background request asks the chat model to boil
 the exchange down to at most three durable facts, or none, so small talk
 leaves no residue. A new fact that restates an existing one replaces it.
 `extract: false` stores raw user and assistant exchanges instead. `ttl_days`
@@ -177,7 +177,7 @@ per-id store (`assistant-<id>.db`), never this one.
 `--assistant` switches the chat REPL's turn engine from a local model load to
 the assistant on the managed server (auto-started if down, like `talk`). The
 positional argument is a served model id, or omitted for the server's default
-model; a file path is refused, since the server owns the model. Tool activity
+model. A file path is refused, since the server owns the model. Tool activity
 appears as transient status lines while the answer streams.
 
 ```sh
@@ -189,11 +189,11 @@ The terminal experience is unchanged: markdown rendering, reasoning display,
 themes, history, sessions and `--resume`, `/system`, `/retry` and `/undo` (a
 retry or undo rewinds whole tool rounds, so the history never holds a
 half-finished tool exchange), plus `/memory` as above. Sampling flags and
-their `/commands` forward to the server per round once you touch them;
-untouched knobs stay on the server's own defaults. Flags that only make sense
+their `/commands` forward to the server per round once you touch them.
+Untouched knobs stay on the server's own defaults. Flags that only make sense
 for a local load are rejected (`--adapter`, `--mmproj`, chat-template flags)
 or ignored with a printed note (loading, KV-cache, speculative/MTP, CPU
-placement); `/image`, `/audio` and the thinking budget are not available
+placement). `/image`, `/audio` and the thinking budget are not available
 in this mode. `--base-url`, `--api-key`, `--no-start`, and `--start-timeout`
 target a remote or already-running server, exactly as in `talk`.
 
@@ -251,7 +251,7 @@ The routing contract, per request to `/v1/chat/completions`:
 
 Reported usage sums `completion_tokens` across all rounds; `prompt_tokens` is
 the final round's. Concurrent assistant turns are capped (currently 4 per
-server); a request over the cap gets an immediate 429 rather than queueing.
+server), and a request over the cap gets an immediate 429 rather than queueing.
 Three known limits: a `stop` sequence forwards to every round and can in
 principle truncate an intermediate tool round; a non-streaming assistant turn
 cannot be cancelled by client disconnect (it runs its rounds to completion);

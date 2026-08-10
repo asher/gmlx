@@ -67,7 +67,7 @@ curl localhost:8080/v1/chat/completions -d '{
 }'
 ```
 
-Sampling defaults come from the model's family card automatically; add
+Sampling defaults come from the model's family card automatically. Add
 `@coding` / `@instruct` / `@creative` / `@reasoning-low|-medium|-high|-max` to any
 id to switch operating point (`"model": "qwen3.6-27b@coding"`).
 `gmlx profiles` prints the table.
@@ -160,7 +160,7 @@ Unknown keys in the structural namespaces (top-level, `server`, `profiles`,
 `models`, `rules`, `discover`) are a hard error: a typo like `pinned:` for
 `pin:` fails the load instead of silently no-op'ing. To see the whole schema
 with every key and its effective default, run `gmlx serve --print-config`
-(optionally with `--config FILE` / `--models-dir DIR` / a positional GGUF); it
+(optionally with `--config FILE` / `--models-dir DIR` / a positional GGUF). It
 resolves the config for that start mode, prints it as YAML, and exits without
 starting the server.
 
@@ -217,21 +217,21 @@ server:
 ```
 
 Paths in `model_dirs` expand `~`/`$VAR`. A relative `path`/`mmproj`/`draft_gguf`
-on a model is searched against `model_dirs` in order (first existing wins); a
+on a model is searched against `model_dirs` in order (first existing wins). A
 miss raises, listing the roots searched. One root lets every model entry use a
 bare filename.
 
 `token_queue_timeout_s` bounds how long the request loop waits for the next
 token. On timeout the server cancels the in-flight generation (freeing the GPU
-work) and returns an error to the client; a streaming request gets a final
+work) and returns an error to the client. A streaming request gets a final
 `data: {"error": ...}` event. The failure is recorded as `last_error` in
 `/v1/metrics` and logged as a `[req] ... FAILED ...` line. Unset, gmlx
-defaults it to 1800 seconds (an exported `MLX_VLM_TOKEN_QUEUE_TIMEOUT` wins);
+defaults it to 1800 seconds (an exported `MLX_VLM_TOKEN_QUEUE_TIMEOUT` wins).
 mlx-vlm's own 600-second default is shorter than a deep-context dense prefill.
 The timeout triggers mainly on a very long prefill that hasn't emitted its
-first token yet (a big prompt on a large or over-RAM model); raise it for
+first token yet (a big prompt on a large or over-RAM model). Raise it for
 those, or set `0` to wait indefinitely. The value drives mlx-vlm's
-`MLX_VLM_TOKEN_QUEUE_TIMEOUT`; the config is authoritative for a server it
+`MLX_VLM_TOKEN_QUEUE_TIMEOUT`. The config is authoritative for a server it
 starts.
 
 `prefill_step_size` sets the prefill chunk size, in tokens, for every model
@@ -256,7 +256,7 @@ past a deadline (a prompt already being prefilled is bounded by pacing
 itself, and time blocked by capacity rather than pacing does not age
 toward the deadline). A numeric
 value pins static pacing: a prefill chunk is admitted only after the decode
-batch has received that multiple of the chunk's GPU time; live streams then
+batch has received that multiple of the chunk's GPU time. Live streams then
 keep ~half throughput during admissions at `1.0`, while a waiter's
 time-to-first-token stretch compounds with queue depth (each waiter also
 waits out the throttled prefill of everyone ahead of it) and delayed
@@ -277,7 +277,7 @@ is halved until its predicted wall time -- the last observed chunk cost
 scaled to the tier -- fits this budget (default 500 ms, floored at
 `GMLX_PREFILL_MIN_STEP` tokens). Smaller chunks lose some weight
 amortization, so total prefill throughput under load drops a few percent per
-halving tier (worst on MoE); set `0` for batch-job serving where per-stream
+halving tier (worst on MoE). Set `0` for batch-job serving where per-stream
 latency does not matter. Inert whenever nothing is decoding, so
 single-stream time-to-first-token is untouched. Also available as
 `--prefill-tick-ms` on `serve` (the flag wins over the config) or an
@@ -287,8 +287,8 @@ cycle, the tick sets the stall quantum.
 
 `cache_limit_gb` caps MLX's buffer cache (the wired pool of freed GPU buffers
 kept for reuse). Left `null`, the server bounds it automatically only when
-the biggest configured model leaves little GPU working-set slack -- the
-deep-context safety case; see
+the biggest configured model leaves little GPU working-set slack, the
+deep-context safety case. See
 [performance.md](performance.md#the-mlx-buffer-cache-at-deep-context) for the
 policy, the `GMLX_CACHE_LIMIT_GB` env override (env wins over this key), and
 the explicit-unlimited escape.
@@ -311,8 +311,8 @@ preflights credential-less by spec, so a browser client holding a key still
 works, and the actual request authenticates as usual.
 
 `server.api_key` is the sole server-side key source. There is no
-`serve --api-key` flag and no `GMLX_API_KEY` server fallback; this is a
-deliberate simplification, one key in one file, which the lifecycle tools and
+`serve --api-key` flag and no `GMLX_API_KEY` server fallback. This is a
+deliberate simplification: one key in one file, which the lifecycle tools and
 the menu bar can also read. The runfile records only whether a key is set,
 never the key.
 
@@ -362,7 +362,7 @@ gmlx ships those recommendations as data: each model's family is detected
 from its GGUF header (`general.architecture`) at registration/scan, its base
 group becomes the lowest sampling layer, and the intents become addressable
 profiles. `gmlx profiles` prints this table live (add a model id to see one
-model fully resolved); values are cited to the primary model cards in
+model fully resolved). Values are cited to the primary model cards in
 `gmlx/profiles.py`:
 
 | family | GGUF arches | base (general use) | family intents |
@@ -415,7 +415,7 @@ Sampler semantics (matching unpatched mlx_lm / mlx-vlm): a `top_p` or `min_p`
 of `0` means *disabled* (no filter), not "keep only the argmax" - so `top_p: 0`
 is a no-op, exactly as on the stock server. When only `top_p` is set (no
 `top_k`), the nucleus is bounded to the top 1024 candidates so the sort stays
-batched; on a very flat distribution the tail past rank 1024 is dropped.
+batched. On a very flat distribution the tail past rank 1024 is dropped.
 
 Detection reads only the GGUF header (cached across runs in
 `~/.cache/gmlx/header-meta.json`, keyed by mtime+size). An explicit
@@ -466,7 +466,7 @@ profiles:
 into the tokenizer, so unlike `sampling`/`system` it is load-affecting: two
 ids on the same GGUF under different templates are distinct resident entries.
 The value is an inline Jinja string or a path to a `.jinja`/`.txt` file. It
-applies to text and native-head/assistant MTP models; a VLM keeps its
+applies to text and native-head/assistant MTP models. A VLM keeps its
 mmproj-synthesized processor template.
 
 `chat_template_kwargs` passes extra variables to the template's
@@ -477,7 +477,7 @@ by default in those templates but a must-enable for agent / tool-use loops,
 which depend on the model seeing its own prior reasoning. Unlike
 `chat_template`, it is applied per request (not baked into the tokenizer), so
 it is not load-affecting. A client may also send `chat_template_kwargs` on
-the request body (OpenAI-extension style); request keys win over the
+the request body (OpenAI-extension style). Request keys win over the
 profile's.
 
 ```yaml
@@ -586,7 +586,7 @@ only handle one sequence clamps any larger value, since exceeding it raises
 rather than running slowly.
 
 A batch that grows past the cap finishes in plain decode. The drafter stays
-loaded and untouched, and the next batch to form re-evaluates; there is no
+loaded and untouched, and the next batch to form re-evaluates. There is no
 mid-flight switch back, so a continuously busy batch keeps decoding plain
 until it drains. `GMLX_MTP_WIDTH_CAP` overrides every model at once (set it to
 `0` to measure a model uncapped) and `--speculative-width-cap` does the same
@@ -683,8 +683,8 @@ aliases:
   coder: qwen3.6-27b@qwen-coder      # a preset: the 27B with the coder profile baked in
 ```
 
-An alias name must not contain `@` and must not collide with a model id; its
-target id (and profile, if any) must exist. Validated at load.
+An alias name must not contain `@` and must not collide with a model id, and
+its target id (and profile, if any) must exist. Validated at load.
 
 ### `discover`
 
@@ -866,7 +866,7 @@ sole model, else 400.
 
 The same addressing works in the CLI: `gmlx run <id-or-path>@coding`,
 `gmlx run <id> --profile coding`, and identically for `chat`. A bare-path
-`run`/`chat` (no config) still gets its family's base defaults; an explicit
+`run`/`chat` (no config) still gets its family's base defaults. An explicit
 sampling flag always wins, and `--no-family-defaults` (or
 `GMLX_NO_FAMILY_DEFAULTS=1`) opts a run out entirely.
 
@@ -876,7 +876,7 @@ sampling flag always wins, and `--no-family-defaults` (or
 
 ### Sampling keys (`sampling:`)
 
-The request fields mlx-vlm already honours; carried verbatim into generation:
+The request fields mlx-vlm already honours, carried verbatim into generation:
 
 `temperature`, `top_p`, `top_k`, `min_p`, `max_tokens`, `seed`,
 `repetition_penalty`, `presence_penalty`, `frequency_penalty`,
@@ -1787,15 +1787,6 @@ sequenceDiagram
   A->>E: generate(...)
   E-->>C: stream tokens
 ```
-
-In prose, a request flows: (1) the client POSTs a chat completion whose
-`model` is `id@profile`; (2) the mlx-vlm app asks the residency pool for that
-model; (3) the pool has the serving resolver split the id from the profile
-and resolve the file path; (4) a resident model is returned as-is, while a
-cold one is built by the loader (leaves swapped to `kq.*` modules) and cached
-in the pool; (5) the generation arguments are seeded from the active
-profile's sampling; (6) the batch generator decodes and streams tokens back
-to the client.
 
 For the bridge/residency mechanics (how the path-keyed companion registries
 and the context-aware runtime proxy work), see

@@ -48,7 +48,7 @@ load cleanly into wrong weights.
 
 ## The acceptance gate (all must pass)
 
-An architecture is not done when it generates fluent text. It's done when:
+An architecture is done when:
 
 - Strict load: `load_model` builds, swaps, and `load_weights` leaves no
   parameter unfilled. The loader's unfilled-params warning must be empty.
