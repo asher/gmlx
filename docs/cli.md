@@ -275,6 +275,7 @@ decode tok/s, MTP acceptance when speculating, and context fill
 ```sh
 gmlx chat model.gguf --temp 0.7 --system-prompt "You are terse."
 gmlx chat --assistant                 # the tool-loop assistant on the managed server
+gmlx chat --server                    # plain server client, no assistant extras
 ```
 
 With `--assistant` the REPL loads nothing locally: turns run through the
@@ -284,6 +285,18 @@ positional becomes a served model id (or is omitted for the server default).
 `/memory` lists and edits the stored facts. The terminal experience is
 unchanged; local-load flags do not apply. Full contract:
 [assistant.md](assistant.md#text-chat-gmlx-chat---assistant).
+
+`--server` is the same server-backed REPL minus the assistant extras: no
+tools, no memory store, no config `assistant:` block, just plain streamed
+turns against the served model. Use it when the terminal should be a thin
+client and every server request should come from the conversation itself.
+
+When the config's server is already running, a bare `gmlx chat` (or one
+naming a served model id) becomes a `--server` client automatically
+instead of loading a second copy in-process; `--local` forces the local
+load, and any local-load flag does the same. An explicit GGUF path always
+loads the file on disk - if the running server serves that same file, a
+note points at the served id. Chat never auto-starts a server this way.
 
 `/exit` (or Ctrl-D) quits, `/reset` restarts the conversation, `/help` lists
 every command. The terminal is upgraded on top:
@@ -399,10 +412,12 @@ every command. The terminal is upgraded on top:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `gguf` (positional) | - | Path to the GGUF (sharded ok) or a config model id; with `--assistant`, a served model id (optional: server default). |
+| `gguf` (positional) | - | Path to the GGUF (sharded ok) or a config model id; with `--assistant`/`--server`, a served model id (optional: server default). |
 | `--assistant` | - | Chat through the built-in tool-loop assistant on the managed server: MCP tools + long-term memory from the `assistant:` block ([assistant.md](assistant.md)). Local-load flags don't apply. |
-| `--base-url URL` / `--host` / `--port` / `--api-key` | managed server | Assistant mode: target server (as in [`talk`](#gmlx-talk)). |
-| `--no-start` / `--start-timeout S` | - / `180` | Assistant mode: never auto-start the server / auto-start wait. |
+| `--server` | - | Plain server client: the `--assistant` REPL minus tools, memory, and the config `assistant:` block. Automatic when the config's server is up and serves the request. |
+| `--local` | - | Load in-process even when the config's server is running (skips the automatic `--server` mode). |
+| `--base-url URL` / `--host` / `--port` / `--api-key` | managed server | Server modes: target server (as in [`talk`](#gmlx-talk)). |
+| `--no-start` / `--start-timeout S` | - / `180` | Server modes: never auto-start the server / auto-start wait. |
 | `--max-tokens N` | until EOS | Per-reply decode-token cap; default `0` = each reply runs until the model stops (diffusion models fall back to a bounded 2048-token canvas; in `--assistant` mode `0` defers to the server's own default). Pass N to cap (adjustable via `/max-tokens`; `0` removes the cap, and a note says when the cap ended a reply). |
 | `--temp` / `--top-p` / `--top-k` / `--min-p` | family default | Sampling; unset flags seed from the model's [family defaults](#family-defaults-intent-and---profile) (`0.0`/`0.95`/`0`/`0.05` under `--no-family-defaults`). All adjustable in-chat. |
 | `--xtc-probability` / `--xtc-threshold` | `0.0` | XTC sampling (text path, adjustable in-chat). |

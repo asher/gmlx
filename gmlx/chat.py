@@ -100,7 +100,7 @@ def _build_parser(prog: str = "gmlx chat") -> argparse.ArgumentParser:
     )
     from .cli import add_condensed_help
     add_condensed_help(ap, (
-        "gguf", "--assistant", "--config", "--profile", "--system-prompt",
+        "gguf", "--assistant", "--server", "--config", "--profile", "--system-prompt",
         "--reasoning", "--thinking", "--mmproj", "--max-tokens", "--temp",
         "--top-p", "--min-p", "--max-kv-size", "--stream-experts",
         "--resume", "--theme", "--verbose",
@@ -108,7 +108,7 @@ def _build_parser(prog: str = "gmlx chat") -> argparse.ArgumentParser:
     ap.add_argument(
         "gguf", nargs="?", default=None,
         help="Path to the GGUF file (sharded ok), or a config model id. "
-        "Optional with --assistant (server default model).",
+        "Optional with --assistant/--server (server default model).",
     )
 
     # Server-backed assistant mode (no local load; mirrors `gmlx talk`).
@@ -118,6 +118,20 @@ def _build_parser(prog: str = "gmlx chat") -> argparse.ArgumentParser:
         help="Chat through the built-in tool-loop assistant on a running "
         "(auto-started) server: MCP tools + long-term memory from the "
         "config's assistant: block. The positional is a served model id.",
+    )
+    ap.add_argument(
+        "--server",
+        action="store_true",
+        help="Plain server client: chat on a running (auto-started) server "
+        "with no assistant extras (no tools, no memory). The positional is "
+        "a served model id. Engages automatically when the config's server "
+        "is already up and serves the requested model.",
+    )
+    ap.add_argument(
+        "--local",
+        action="store_true",
+        help="Load in-process even when the config's server is running "
+        "(skips the automatic --server client mode).",
     )
     ap.add_argument(
         "--base-url",
@@ -1570,25 +1584,40 @@ def _wire_ptk(state: ChatState) -> bool:
 
     def _toolbar():
         s = state.sampling
+        # (part, droppable) pairs: on a narrow terminal the sampling knobs
+        # go first so the tail stats (ctx, staged, tok/s) survive whole.
+        # prompt_toolkit would otherwise clip the toolbar tail-first, which
+        # cuts exactly the live numbers a small pane is watched for.
         parts = []
         if state.model_name:
-            parts.append(state.model_name)
+            parts.append((state.model_name, False))
         parts += [
-            f"temp={s['temp']:g}",
-            f"top-p={s['top_p']:g}",
-            f"max-tok={s['max_tokens'] or 'off'}",
+            (f"temp={s['temp']:g}", True),
+            (f"top-p={s['top_p']:g}", True),
+            (f"max-tok={s['max_tokens'] or 'off'}", True),
         ]
         if state.ctx_used and state.ctx_max:
-            parts.append(f"ctx {_fmt_k(state.ctx_used)}/{_fmt_k(state.ctx_max)}")
+            parts.append(
+                (f"ctx {_fmt_k(state.ctx_used)}/{_fmt_k(state.ctx_max)}",
+                 False))
         if state.staged:
-            parts.append(f"+{len(state.staged)} staged")
+            parts.append((f"+{len(state.staged)} staged", False))
         if state.staged_images:
-            parts.append(f"+{len(state.staged_images)} img")
+            parts.append((f"+{len(state.staged_images)} img", False))
         if state.staged_audio:
-            parts.append(f"+{len(state.staged_audio)} aud")
+            parts.append((f"+{len(state.staged_audio)} aud", False))
         if state.last_tps:
-            parts.append(f"{state.last_tps:.1f} tok/s")
-        return " · ".join(parts)
+            parts.append((f"{state.last_tps:.1f} tok/s", False))
+        try:
+            from prompt_toolkit.application import get_app
+            width = get_app().output.get_size().columns
+        except Exception:  # noqa: BLE001 - no app yet: keep everything
+            width = None
+        if width:
+            while (len(" · ".join(p for p, _ in parts)) > width
+                   and any(d for _, d in parts)):
+                parts.pop(next(i for i, (_, d) in enumerate(parts) if d))
+        return " · ".join(p for p, _ in parts)
 
     state.ptk_session = PromptSession(
         history=_ToggleableFileHistory(hist_file),
@@ -1948,11 +1977,12 @@ _ASSISTANT_NOOP = (
 
 
 def _assistant_flag_gate(args, parser) -> int | None:
-    """Reject/noop the local-load flags under --assistant. Rejected flags
-    exit 2; server-owned ones print one [chat] note and are ignored."""
+    """Reject/noop the local-load flags under --assistant/--server. Rejected
+    flags exit 2; server-owned ones print one [chat] note and are ignored."""
+    mode = "--server" if getattr(args, "server", False) else "--assistant"
     for attr, flag in _ASSISTANT_REJECT:
         if getattr(args, attr, None) not in (None, False):
-            print(f"error: {flag} is not supported with --assistant "
+            print(f"error: {flag} is not supported with {mode} "
                   "(the server owns the model and its template)",
                   file=sys.stderr)
             return 2
@@ -1966,8 +1996,67 @@ def _assistant_flag_gate(args, parser) -> int | None:
             noop.append(flag)
     if noop:
         print(f"[chat] server owns {', '.join(noop)} - ignored with "
-              "--assistant")
+              f"{mode}")
     return None
+
+
+def _auto_server(args, parser) -> bool:
+    """Whether a bare ``gmlx chat`` should become a --server client: the
+    managed/config server already answers and serves the requested id, and no
+    flag states local intent. Never starts anything; any probe failure means
+    the local load proceeds untouched. An explicit GGUF path always loads
+    locally (the file on disk is what was asked for - the server may hold
+    older bytes at the same path); a hint names the served id when the
+    config maps that file to one."""
+    if args.local or args.assistant or args.server:
+        return False
+    if args.base_url or args.host or args.port or args.no_start:
+        return False              # explicit targeting keeps today's contract
+    for attr, _flag in _ASSISTANT_REJECT + _ASSISTANT_NOOP:
+        if getattr(args, attr, None) not in (None, False):
+            return False          # a local-load flag pins the local path
+    for attr in ("kv_group_size", "quantized_kv_start",
+                 "prefill_feeder", "decode_feeder"):
+        if getattr(args, attr, None) != parser.get_default(attr):
+            return False
+    from . import launch as launch_mod
+    from . import lifecycle
+    try:
+        host, port = lifecycle.auto_target(None, None)
+        base = f"http://{host}:{port}/v1"
+        if not launch_mod._server_ready(base, args.api_key):
+            return False
+        if not args.gguf:
+            args.base_url = base  # server default (or its served-ids error)
+            return True
+        from .talk_client import probe_capabilities
+        served = probe_capabilities(base, args.api_key).get("chat_ids") or []
+    except Exception:             # noqa: BLE001 - probe hiccup = stay local
+        return False
+    requested = args.gguf
+    if "@" in requested and not (requested.endswith(".gguf")
+                                 or os.path.exists(os.path.expanduser(requested))):
+        requested = requested.rpartition("@")[0] or requested
+    if requested in served:
+        args.base_url = base
+        return True
+    if requested.endswith(".gguf") or os.path.exists(
+            os.path.expanduser(requested)):
+        real = os.path.realpath(os.path.expanduser(requested))
+        try:
+            from .launch import _discover_config
+            cfg, _path = _discover_config()
+            models = list(getattr(cfg, "models", None) or [])
+        except Exception:         # noqa: BLE001
+            return False
+        for m in models:
+            if (m.id in served and m.path
+                    and os.path.realpath(os.path.expanduser(m.path)) == real):
+                print(f"[chat] note: the running server serves this file as "
+                      f"'{m.id}' - `gmlx chat {m.id}` rides it without a "
+                      "second load")
+                break
+    return False
 
 
 def _setup_assistant(args):
@@ -2011,7 +2100,8 @@ def _setup_assistant(args):
             args.profile = args.profile or tail
     if requested and (requested.endswith(".gguf")
                       or os.path.exists(os.path.expanduser(requested))):
-        print("error: --assistant chats through the server - pass a served "
+        mode = "--server" if getattr(args, "server", False) else "--assistant"
+        print(f"error: {mode} chats through the server - pass a served "
               "model id, not a file (add it to your config's models:)",
               file=sys.stderr)
         return 2
@@ -2030,31 +2120,36 @@ def _setup_assistant(args):
         return 2
     model_request = f"{model}@{args.profile}" if args.profile else model
 
+    # --server: same plumbing, no assistant extras (config tools and the
+    # memory store stay off even where the config enables them).
+    plain = getattr(args, "server", False)
+
     from .config import AssistantCfg
     a = AssistantCfg()
-    try:
-        if args.config:
-            from . import config as cfgmod
-            a = cfgmod.load_config(args.config).assistant
-        else:
-            from .launch import _discover_config
-            cfg, _path = _discover_config()
-            if cfg is not None:
-                a = cfg.assistant
-    except Exception as e:                    # noqa: BLE001 - degrade
-        print(f"[chat] config: {e} - assistant runs tool-less",
-              file=sys.stderr)
+    if not plain:
+        try:
+            if args.config:
+                from . import config as cfgmod
+                a = cfgmod.load_config(args.config).assistant
+            else:
+                from .launch import _discover_config
+                cfg, _path = _discover_config()
+                if cfg is not None:
+                    a = cfg.assistant
+        except Exception as e:                # noqa: BLE001 - degrade
+            print(f"[chat] config: {e} - assistant runs tool-less",
+                  file=sys.stderr)
 
     from .assistant_brain import AssistantBrain
     from .talk_client import stream_chat as _stream_chat
     from .talk_mcp import connect_servers
     mcp_host, registry, warns = connect_servers(
-        a.mcp, call_timeout_s=a.tool_timeout_s)
+        () if plain else a.mcp, call_timeout_s=a.tool_timeout_s)
     for w in warns:
         print(f"[chat] {w}", file=sys.stderr)
 
     memory = None
-    if a.memory.enabled:                      # the same store talk uses
+    if a.memory.enabled and not plain:        # the same store talk uses
         from .talk_memory import MemoryStore, make_extractor
         extractor = (make_extractor(base_url, model_request, api_key=api_key)
                      if a.memory.extract else None)
@@ -2650,6 +2745,19 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         set_stoch_accept(True)
     brain = None                  # --assistant: server-backed turn engine
     model_request = None
+    if args.local and (args.assistant or args.server):
+        parser.error("--local loads in-process and cannot combine with "
+                     "--assistant/--server")
+    if args.server and args.assistant:
+        parser.error("--assistant and --server are mutually exclusive "
+                     "(--server is the assistant path minus its extras)")
+    if _auto_server(args, parser):
+        args.server = True
+        args.no_start = True      # the probe saw it up; never start one
+        print("[chat] config server is up - chatting through it "
+              "(--local loads in-process instead)")
+    if args.server:
+        args.assistant = True     # same server path; extras off in setup
     if args.assistant:
         rc = _assistant_flag_gate(args, parser)
         if rc is not None:
@@ -2675,15 +2783,17 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         speculative = False
         vlm_mtp = False
     else:
-        # The server-targeting flags only apply under --assistant; without it
-        # chat loads the model in-process. Accepting them silently would leave
-        # the user believing they are on the server while a second copy loads.
+        # The server-targeting flags only apply under --assistant/--server;
+        # without one chat loads the model in-process. Accepting them silently
+        # would leave the user believing they are on the server while a second
+        # copy loads.
         for attr, flag in (("base_url", "--base-url"), ("host", "--host"),
                            ("port", "--port"), ("api_key", "--api-key"),
                            ("no_start", "--no-start")):
             if getattr(args, attr, None) not in (None, False):
                 parser.error(f"{flag} targets a server and needs --assistant "
-                             f"(without it, chat loads the model in-process)")
+                             f"or --server (without one, chat loads the model "
+                             f"in-process)")
         if not args.gguf:
             # Not parser.error: that leads with the full usage dump, which is
             # exactly the wall of text a first-run user shouldn't wade through.
@@ -2930,7 +3040,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         state.ctx_max = None
         state.model_name = model_request[:24]
         state.model_info = {"path": f"{model_request} (via {base_url})",
-                            "model_type": "assistant"}
+                            "model_type": "server" if args.server
+                            else "assistant"}
     else:
         model_key = os.path.abspath(args.gguf)
         try:
@@ -3014,11 +3125,14 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         else:
             print(f"[chat] MTP speculative decoding on ({kind} drafter)")
     if brain is not None:
-        tools = ", ".join(brain.tools.names()) or "(none)"
-        mem = (f" - memory: {brain.memory.count()} items"
-               if brain.memory is not None else "")
-        print(f"[chat] assistant mode: {model_request} via {base_url} - "
-              f"tools: {tools}{mem}")
+        if args.server:
+            print(f"[chat] server mode: {model_request} via {base_url}")
+        else:
+            tools = ", ".join(brain.tools.names()) or "(none)"
+            mem = (f" - memory: {brain.memory.count()} items"
+                   if brain.memory is not None else "")
+            print(f"[chat] assistant mode: {model_request} via {base_url} - "
+                  f"tools: {tools}{mem}")
     first_turn = True
     vlm_msgs: list = []  # rendered messages (media markers pinned per turn)
     vlm_images: list = []  # media paths, in marker order across all turns

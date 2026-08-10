@@ -128,3 +128,13 @@ def _isolated_xdg_data(tmp_path_factory, monkeypatch):
     monkeypatch.setenv(
         "XDG_DATA_HOME", str(tmp_path_factory.mktemp("xdg-data"))
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_live_server(monkeypatch):
+    # chat's automatic --server gate probes the box's managed server; a
+    # live server on the dev machine must not flip test behavior. Tests
+    # that want the probe up re-patch it locally.
+    import gmlx.launch as _launch
+    monkeypatch.setattr(_launch, "_server_ready",
+                        lambda base_url, api_key=None: False)
