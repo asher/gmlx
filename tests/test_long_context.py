@@ -43,7 +43,7 @@ CANDIDATE_ARCHES = [
     "nemotron_h_moe", "deepseek2", "mixtral", "glm4moe", "gpt-oss",
     "seed_oss", "smollm3", "granite", "ernie4_5-moe", "minimax-m2", "minimax-m3",
     "hunyuan-moe", "granitehybrid", "falcon-h1", "qwen3next", "hy_v3",
-    "kimi-k3",
+    "kimi-k3", "muse-glimmer",
 ]
 
 TARGET = int(os.environ.get("KQUANT_LONGCTX_TOKENS", "16384"))
