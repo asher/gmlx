@@ -86,9 +86,9 @@ launch carries it into each tool's configuration in that tool's native slot:
 |--------|--------------------|
 | opencode | `options.apiKey` in the injected config |
 | pi | `apiKey` in the merged provider block |
-| omp | no API-key slot in its provider registry; launch prints a note to configure auth manually |
+| omp | no API-key slot ([omp](#omp-oh-my-pi)) |
 | hermes | `providers.custom.api_key` in the injected config |
-| goose | `OPENAI_API_KEY` in the exec environment only, never written to its `config.yaml` (which may hold a real OpenAI credential) |
+| goose | `OPENAI_API_KEY` in the exec environment only ([goose](#goose)) |
 | claude-code | `ANTHROPIC_AUTH_TOKEN` in the exec environment |
 | aichat, elia | `api_key` in the injected config |
 | open-webui | `OPENAI_API_KEY` in the exec environment only |
@@ -138,14 +138,12 @@ and prefer a model and machine with strong prefill throughput.
 ### opencode
 
 Injection style: launch writes `~/.config/gmlx/opencode.json` and points opencode
-at it via `OPENCODE_CONFIG`. Your own opencode config is untouched. The default model
-lands in the top-level `model` key.
+at it via `OPENCODE_CONFIG`. The default model lands in the top-level `model` key.
 
 ### pi
 
 Merge style: launch merges the provider into `~/.pi/agent/models.json` and
-`~/.pi/agent/settings.json`, setting `defaultProvider` and `defaultModel`. Other
-providers in the files are preserved.
+`~/.pi/agent/settings.json`, setting `defaultProvider` and `defaultModel`.
 
 ### omp (oh-my-pi)
 
@@ -159,7 +157,7 @@ prints a note).
 NousResearch hermes-agent. Injection style: launch writes
 `~/.config/gmlx/hermes-config.yaml` (your `~/.hermes/config.yaml` merged with the
 gmlx provider block) and injects it via `HERMES_CONFIG` plus `CUSTOM_BASE_URL`.
-Your own file is untouched. A model is required (`inference.model`).
+A model is required (`inference.model`).
 
 hermes refuses models with less than 64k context at startup, so serve it a model
 whose context window is at least 64k tokens. The window comes from the model's GGUF
@@ -179,8 +177,8 @@ OpenAI credential.
 
 sigoden/aichat, a chat-focused terminal REPL with tools and agents (not a coding
 harness). Injection style: launch writes a `config.yaml` with an `openai-compatible`
-client under `~/.config/gmlx/aichat/` and injects it via `AICHAT_CONFIG_DIR`;
-your own `~/.config/aichat` is untouched. Every served id is flagged
+client under `~/.config/gmlx/aichat/` and injects it via
+`AICHAT_CONFIG_DIR`. Every served id is flagged
 `supports_function_calling`, so aichat's tools and agents work against the server's
 tool-call surface. Actual tool execution still needs aichat's `llm-functions`
 installed.
@@ -189,7 +187,7 @@ installed.
 
 darrenburns/elia, a chat TUI (not a coding harness). Injection style: launch writes a
 fresh `config.toml` under `~/.config/gmlx/elia-xdg` and injects it via
-`XDG_CONFIG_HOME`; your own `~/.config/elia` is untouched. Each served id becomes an
+`XDG_CONFIG_HOME`. Each served id becomes an
 OpenAI-compatible litellm model. Requires elia 1.x or newer (older builds ignore
 custom endpoints); upgrade with `pipx upgrade elia-chat`.
 

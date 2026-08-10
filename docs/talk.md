@@ -65,10 +65,9 @@ that the cat might actually learn it.
 listening for "hey assistant"
 ```
 
-Useful controls while it runs: Space stops the assistant mid-sentence (and is
-push-to-talk in `ptt` mode), Esc cancels the current turn, `m` mutes the mic, `q`
-quits. Start typing at any time to send a text message instead of speaking; lines
-starting with `/` are commands. Try voices live:
+Useful while it runs: Space stops the assistant mid-sentence, and typing at any
+time sends a text message instead of speaking; the full set is in
+[keys and slash commands](#keys-and-slash-commands). Try voices live:
 
 ```text
 /voice            # list the server's voices
@@ -133,9 +132,8 @@ assistant:
     enabled: true
 ```
 
-Tool calling needs a model that is competent at it. The Qwen3.6-27B class is a good
-fit on a 48 GB or larger machine; Qwen3.5-9B is a workable floor on 32 GB, with more
-tool fumbles. Then:
+Tool calling needs a model that is competent at it; the config's Qwen3.6-27B is
+the recommended class ([model picks](assistant.md#the-tool-loop)). Then:
 
 ```sh
 gmlx talk
@@ -169,24 +167,20 @@ assistant: Ana's birthday is March 12th.
 ```
 
 What got stored is a distilled fact ("sister Ana, birthday March 12"), not a
-transcript. After each turn, a background request asks the chat model to boil the
-exchange down to at most three durable facts, or none, so small talk leaves no
-residue. A new fact that restates an existing one replaces it. Extraction runs off
-the voice path and adds no latency.
+transcript. The distillation runs in the background after each turn, off the
+voice path, so it adds no latency; the rules (at most three durable facts,
+restatement replaces) are in [assistant.md#memory](assistant.md#memory).
 
-Two honest caveats. Each tool round adds seconds (a full model turn plus the tool
-call), so multi-tool answers are noticeably slower than plain chat. And a barge-in
+Two honest caveats. Tool rounds cost time - a model turn plus the call, each -
+so multi-tool answers are noticeably slower than plain chat. And a barge-in
 still interrupts cleanly: the loop commits what you heard and never leaves a
 half-finished tool round in the history.
 
-To inspect or edit memory from inside a session, `/memory` lists the stored
-facts with their ids, `/memory forget ID` removes one, and `/memory clear yes`
-removes them all. The menu-bar app's voice session exposes the same store:
-"Show memory" prints the list into the transcript panel, and "Clear memory"
-wipes it after a confirmation dialog. The store itself is a plain sqlite file
-at `~/.local/share/gmlx/assistant-memory.db` if you want to look deeper.
-It is shared with `gmlx chat --assistant`: a fact taught by voice recalls
-in the text REPL, and vice versa.
+`/memory` inspects and edits the store from inside a session
+([keys and slash commands](#keys-and-slash-commands)); the menu-bar voice
+session exposes the same store through its "Show memory" and "Clear memory"
+items. The store is shared with `gmlx chat --assistant` - details and the
+on-disk location in [assistant.md#memory](assistant.md#memory).
 
 ## Modes
 
