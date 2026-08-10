@@ -34,7 +34,7 @@ mode) whenever you configure the two together. If something is missing at startu
 
 On first run, two small files download into `~/.cache/gmlx/talk/`: the
 sherpa-onnx keyword-spotting bundle and the silero voice-activity model, a few MB
-together. macOS asks for microphone permission once - and the prompt names
+together. macOS asks for microphone permission once, and the prompt names
 your *terminal* (Terminal, iTerm2, your IDE), not gmlx, because macOS grants
 the mic to the app you launched from. Allow it. (Voice sessions started from
 the menu-bar login item are the exception: those prompt as "gmlx" - see
@@ -66,7 +66,7 @@ listening for "hey assistant"
 ```
 
 Useful while it runs: Space stops the assistant mid-sentence, and typing at any
-time sends a text message instead of speaking; the full set is in
+time sends a text message instead of speaking. The full set is in
 [keys and slash commands](#keys-and-slash-commands). Try voices live:
 
 ```text
@@ -87,7 +87,7 @@ than failing.
 [assistant](assistant.md). The model can call tools mid-turn (the standard OpenAI
 tool loop, run against this same server), and the conversation gains long-term
 memory. Tools come from MCP servers you configure; memory is a local store built
-on the server's own embeddings. This section is the voice-flavored tour;
+on the server's own embeddings. This section is the voice-flavored tour.
 [assistant.md](assistant.md) is the full reference, and the same engine also
 drives `gmlx chat --assistant` and served assistant ids.
 
@@ -132,7 +132,7 @@ assistant:
     enabled: true
 ```
 
-Tool calling needs a model that is competent at it; the config's Qwen3.6-27B is
+Tool calling needs a model that is competent at it. The config's Qwen3.6-27B is
 the recommended class ([model picks](assistant.md#the-tool-loop)). Then:
 
 ```sh
@@ -168,7 +168,7 @@ assistant: Ana's birthday is March 12th.
 
 What got stored is a distilled fact ("sister Ana, birthday March 12"), not a
 transcript. The distillation runs in the background after each turn, off the
-voice path, so it adds no latency; the rules (at most three durable facts,
+voice path, so it adds no latency. The rules (at most three durable facts,
 restatement replaces) are in [assistant.md#memory](assistant.md#memory).
 
 Two honest caveats. Tool rounds cost time - a model turn plus the call, each -
@@ -177,7 +177,7 @@ still interrupts cleanly: the loop commits what you heard and never leaves a
 half-finished tool round in the history.
 
 `/memory` inspects and edits the store from inside a session
-([keys and slash commands](#keys-and-slash-commands)); the menu-bar voice
+([keys and slash commands](#keys-and-slash-commands)). The menu-bar voice
 session exposes the same store through its "Show memory" and "Clear memory"
 items. The store is shared with `gmlx chat --assistant` - details and the
 on-disk location in [assistant.md#memory](assistant.md#memory).
@@ -204,7 +204,7 @@ memories; `forget ID` and `clear` manage them), `/devices`, `/help`, `/quit`.
 
 Everything lives in a top-level `talk:` block of the same YAML the server reads. It
 configures the client, so it is not under `server:`. Most keys have a flag mirror
-(`vad.pre_roll_ms` and `push_to_talk_modifier` are config-only); precedence is
+(`vad.pre_roll_ms` and `push_to_talk_modifier` are config-only). Precedence is
 defaults, then YAML, then flags. `--list-devices` and `--list-voices`
 enumerate the device and voice values.
 
@@ -235,7 +235,7 @@ talk:
 
 The assistant itself -- the top-level `assistant:` block with tool servers,
 memory settings, and their defaults -- is documented in
-[assistant.md](assistant.md); it is shared with `gmlx chat --assistant` and
+[assistant.md](assistant.md). It is shared with `gmlx chat --assistant` and
 `server.assistants`, so it does not live under `talk:`. Talk uses it whenever
 `talk.brain: assistant` is set, and everything there applies as-is: MCP
 tool-name prefixing, the degrade-to-warning behavior when a tool server or the
@@ -247,18 +247,19 @@ tool-name prefixing, the degrade-to-warning behavior when a tool server or the
 When the tracked server advertises STT and TTS, the macOS menu bar app
 (`gmlx launch menubar`, raised automatically by a background `serve`) shows a
 "Talk to <model>" item, named after `talk.model` or the server's default model.
-Clicking it starts a voice session inside the menu bar app, no terminal window: the
-bar icon changes to show the state (a microphone while listening, a thought bubble
-while the model thinks, a speaker while it talks, a muted-speaker while the mic is
-off), and the menu offers Stop speaking, Mute mic, and End voice chat. Show
-transcript opens a floating panel with the running conversation text. A Volume
-slider under the session controls scales the voice (and the chimes) relative
-to the system output volume - it applies mid-sentence while dragging, and the
-setting persists across sessions. Mic input has no gain control on purpose:
-software input gain would shift the endpointing and wake-word thresholds and
-clip loud speech; use the macOS Sound settings input level instead.
+Clicking it starts a voice session inside the menu bar app, no terminal window.
+The bar icon changes to show the state (a microphone while listening, a thought
+bubble while the model thinks, a speaker while it talks, a muted-speaker while
+the mic is off), and the menu offers Stop speaking, Mute mic, and End voice
+chat. Show transcript opens a floating panel with the running conversation
+text. A Volume slider under the session controls scales the voice (and the
+chimes) relative to the system output volume. It applies mid-sentence while
+dragging, and the setting persists across sessions. Mic input has no gain
+control on purpose: software input gain would shift the endpointing and
+wake-word thresholds and clip loud speech. Use the macOS Sound settings input
+level instead.
 
-All settings come from the YAML `talk:` block; push-to-talk and text modes fall
+All settings come from the YAML `talk:` block. Push-to-talk and text modes fall
 back to wake mode, since there is no keyboard. A "Talk in a terminal" item opens
 `gmlx talk` in iTerm2 when it is running, otherwise the default terminal handler.
 No AppleScript is involved, so there is no automation-permission popup.
@@ -301,14 +302,14 @@ inference). Holding Globe as a modifier suppresses macOS's own Globe-key
 action, so your "Press Globe key to" setting (emoji, dictation, input
 source) keeps working for bare presses - nothing to reconfigure.
 
-(A bare double-press of Globe was considered and dropped: current macOS
+(A bare double-press of Globe was considered and dropped. Current macOS
 routes the solo Globe press to the system shortcut handler without posting
 an event that session event taps can see - only raw HID sees it - so
 double-press stays available for the system's own dictation shortcut.)
 
 The choice persists across launches. On startup the app re-arms it only
-after a silent permission check - if the grant is missing (denied, or
-silently dropped by an app-stub re-sign after an interpreter upgrade) a
+after a silent permission check. If the grant is missing (denied, or
+silently dropped by an app-stub re-sign after an interpreter upgrade), a
 "not active - needs permission" note appears under the toggle and nothing
 prompts until you flip it again. Granting access in System Settings while
 the bar is running is picked up within a few seconds and the hotkey arms
@@ -324,7 +325,7 @@ grants then attach to the terminal app, not gmlx.
 ## Remote server and scripting
 
 `--base-url http://host:8080/v1` (with `--api-key` if the server has one) points the
-client at a server elsewhere. STT and TTS then run on that machine; only the mic and
+client at a server elsewhere. STT and TTS then run on that machine. Only the mic and
 speaker are local. Without `--base-url`, `talk` targets the managed local server and
 starts it when down (`--no-start` disables that).
 
@@ -349,7 +350,7 @@ mind", and the like) acknowledges and goes back to sleep instead of starting a
 turn -- so "<wake phrase>, stop" kills a long reply by voice. Space and Esc do
 the same from the keyboard, and stop playback within about 150 ms.
 
-Only wake-phrase scoring runs during a reply; full transcription of the open
+Only wake-phrase scoring runs during a reply. Full transcription of the open
 mic stays gated (playback would otherwise be re-transcribed), so `vad` and
 `ptt` modes remain half-duplex, keyboard-interrupt only. One caveat: there is
 no protection against the assistant *speaking* the wake phrase -- if a reply
