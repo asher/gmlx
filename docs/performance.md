@@ -335,8 +335,8 @@ batch jobs that only care about aggregate throughput can set `0`.
 
 Two interactions to know. Pacing applies to speculative (MTP) serving too,
 and the two features divide the work: pacing decides how admissions share
-GPU time, while the width cap decides which decode mode each batch runs in
-(speculative while narrow, plain once it grows past the model's cap). And
+GPU time, while the [width cap](#mtp-speculative-decoding) decides which
+decode mode each batch runs in. And
 the prompt cache is the strongest admission lever of all: a warm prefix
 skips its prefill outright, leaving pacing to govern only the cold suffix.
 Agent sessions that resend a cached history and add a few thousand tokens
@@ -455,6 +455,7 @@ benchmarks should pin it for reproducibility; a negative value (or env
 policy; `0` disables buffer caching entirely. A bounded cache trades a little
 allocator churn for a bounded footprint: transients up to the limit are
 recycled in place, larger ones fall through to fresh allocations.
+
 ## Bigger than memory: MoE offload
 
 MoE models whose files exceed what the GPU can wire still run, on one of

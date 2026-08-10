@@ -17,11 +17,10 @@ This is a capacity feature that makes a 200B-class MoE usable on a
 over-budget case: a model that fits in memory runs several times
 faster on the normal GPU path.
 
-The disk is the engine here: demand misses are served at the drive's
-random-read latency and the feeders read at its queue depth, so disk IO
-performance determines inference performance. Keep the GGUF on the
-internal NVMe SSD for the best result; an external drive works, but
-decode follows its latency and bandwidth down.
+Demand misses are served at the drive's random-read latency and the
+feeders read at its queue depth, so keep the GGUF on the internal NVMe
+SSD for the best result; an external drive works, but decode follows
+its latency and bandwidth down.
 
 Unless a different machine is named inline, measured numbers in this
 guide are from a 14-inch M5 Max MacBook Pro (128 GB); the hardware
@@ -134,6 +133,12 @@ Streaming models engage two feeder paths by default:
   model, a build) it shrinks, keeping its most popular experts, and regrows
   once pressure clears - a long-running model stays a good citizen on a
   machine that is doing other work (`GMLX_DECODE_PRESSURE=0` pins it instead).
+  Same model and box as the prefill measurement above: decode went from 2.4
+  tok/s on the page-cache path to 4.0 tok/s averaged over a 512-token
+  generation (~4.7 steady, ~90% arena hits), against 3.0 tok/s for
+  `--stream-cpu` - so `--stream-experts` now matches `--stream-cpu` on short
+  generations and pulls ahead roughly 1.5x once the arena warms, before the
+  KV-cache advantage at depth.
 - The arena also serves multi-token expert calls whose routed union
   exceeds its slots - the next chat turn's prefill after a decode, or a
   wide speculative verify batch - by halving the chunk along the token axis
@@ -168,12 +173,6 @@ hit rate. Measured on Kimi-K3 UD-IQ2_XXS (662 GB, 62 GB every-token set, M5 Max
 128 GB): decode 0.10 -> 0.38 tok/s, prefill 0.62 -> 0.97 tok/s. The pin is
 skipped with a printed reason when the every-token set would exceed 60%
 of RAM.
-  Same model and
-  box: decode went from 2.4 tok/s on the page-cache path to 4.0 tok/s averaged
-  over a 512-token generation (~4.7 steady, ~90% arena hits), against 3.0
-  tok/s for `--stream-cpu` - so `--stream-experts` now matches `--stream-cpu`
-  on short generations and pulls ahead roughly 1.5x once the arena warms,
-  before the KV-cache advantage at depth.
 
 In server configs the placement is the per-model `stream: experts | cpu`
 key and the feeder opt-outs are `prefill_feeder: false` /
@@ -555,9 +554,8 @@ at top-p 0.95, while the same setting sampled untruncated put one
 wrong-script token into an 11k-token run. The tok/s figures are
 whole-run averages of these single generations at different lengths,
 not controlled A/B numbers; the table above is the measured comparison.
-Each screenshot links to its generated page, committed beside it in
-`docs/assets/perf/` (GitHub shows the page source; download one to
-watch the animation).
+Each screenshot links to its generated page, as with the samples earlier
+in this guide.
 
 The sampling interaction also has a constructive reading. The full pair
 was rerun once on the same prompt and build with cooled sampling, at
@@ -576,8 +574,8 @@ win by softening the levers at the card's temperature.
 
 The same comparison at the deep end of the space. The four Kimi-K3
 settings measured earlier in this guide each ran the same prompt once
-to completion at temperature 1.0. Each screenshot links to its
-generated page, committed beside it in `docs/assets/perf/`:
+to completion at temperature 1.0; screenshots link to the generated
+pages as before:
 
 | | |
 |---|---|

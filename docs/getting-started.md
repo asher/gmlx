@@ -188,18 +188,13 @@ bytes per token = 2 (K and V) x layers x kv_heads x head_dim x 2 (bf16)
 ```
 
 An 8B-class model (32 layers, 8 KV heads, head dim 128) uses 128 KB per token of
-context, so a 32k-token session adds 4 GB on top of the weights. A 32B-class dense
-model (64 layers, same heads) uses 256 KB per token: 8 GB at 32k. The layer and head
-counts are in the GGUF metadata, and the model card lists them too.
+context, so a 32k-token session adds 4 GB on top of the weights. The layer and
+head counts are in the GGUF metadata, and the model card lists them too.
 
 If weights plus cache crowd your RAM, quantize the cache: `--kv-bits 8` roughly
-halves it at nearly no quality cost, and `--kv-bits 4` roughly quarters it with a
-small cost at long range. In server configs the same knob is the `kv_bits` load key.
-
-Several families are much cheaper than the formula suggests. Sliding-window layers
-(gemma) stop growing at the window size, hybrid linear-attention models (Qwen3.5 and
-3.6, Falcon-H1, Granite 4.x) keep a small fixed state on most layers, and MLA models
-(DeepSeek) store a compressed cache. Worked numbers:
+halves it at nearly no quality cost. Several families (sliding-window,
+hybrid linear-attention, MLA) are much cheaper than the formula suggests.
+More worked numbers, the cheaper families, and the rest of the levers:
 [performance.md](performance.md#memory-and-the-kv-cache).
 
 ## Set up the server
