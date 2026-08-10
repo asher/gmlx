@@ -2576,10 +2576,17 @@ def _active_now() -> float | None:
         return None
 
 
+def weights_source_key(*paths: str) -> tuple | None:
+    """Identity of a load's weight bytes (absolute file paths) for the
+    untracked-headroom registry: reloads of the same file replace their
+    earlier registration instead of double-counting."""
+    return tuple(os.path.abspath(p) for p in paths) or None
+
+
 def _warm_mmap_residency(
     model, *, log=print, paths: list[str] | None = None,
     batch_bytes: int = 4 << 30, threshold_bytes: int | None = None,
-    active_before: float | None = None,
+    active_before: float | None = None, source_key: tuple | None = None,
 ) -> None:
     """Pre-wire GPU residency of mmap-backed weights in small batches.
 
@@ -2624,7 +2631,7 @@ def _warm_mmap_residency(
                 tracked = 0.0
         # Keyed by shard paths so a drafter reloading the target's GGUF
         # replaces its earlier registration instead of double-counting.
-        key = tuple(os.path.abspath(p) for p in paths) if paths else None
+        key = source_key or (weights_source_key(*paths) if paths else None)
         note_untracked_weights(max(0.0, total - min(tracked, total)), key=key)
 
 
@@ -2782,6 +2789,7 @@ def _install_and_load(
     sanitize: bool = True,
     no_alias: set[str] | None = None,
     fp32_keep: tuple[str, ...] = (),
+    source_key: tuple | None = None,
 ) -> None:
     """Sanitize -> de-interleave native-fp -> swap kquant leaves -> cast -> load.
 
@@ -2914,7 +2922,8 @@ def _install_and_load(
 
     model.load_weights(list(loadable.items()), strict=False)
     log(f"[load_weights] loaded {len(loadable)} / {len(model_params)} model parameters")
-    _warm_mmap_residency(model, log=log, active_before=active_before)
+    _warm_mmap_residency(model, log=log, active_before=active_before,
+                         source_key=source_key)
 
     missing = sorted(model_params - set(loadable.keys()))
     if missing:
