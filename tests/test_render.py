@@ -326,3 +326,59 @@ def test_feed_strips_model_ansi_and_control_chars():
     assert "\x1b" not in text and "\x00" not in text and "\x07" not in text
     assert "\r" not in text
     assert "hi " in text and "red" in text and "ok" in text
+
+
+# -- diff-aware repaint --------------------------------------------------------
+
+
+def test_stream_diff_append_rewrites_only_changed_rows():
+    t = _Term()
+    r = t.renderer()
+    r.feed("```\nalpha\nbravo\n")
+    t.out.clear()
+    r.feed("charlie\n")             # append: alpha/bravo rows are unchanged
+    paint = _strip(t.text())
+    assert "charlie" in paint
+    assert "alpha" not in paint and "bravo" not in paint
+
+
+def test_stream_diff_oversize_append_stays_small():
+    t = _Term(columns=41, lines=8)  # budget 6: block taller than the viewport
+    r = t.renderer()
+    r.feed("```\n")
+    for i in range(8):
+        r.feed(f"line {i}\n")
+    t.out.clear()
+    r.feed("line 8\n")              # slides the live window by one
+    out = t.text()
+    assert "line 8" in _strip(out)
+    # Only the boundary rows repaint; committed rows never rewrite, so the
+    # cursor-up span stays a couple of rows, not the whole window.
+    assert all(int(n) <= 3 for n in re.findall(r"\x1b\[(\d+)A", out))
+    assert "line 5" not in _strip(out)
+
+
+def test_stream_diff_unchanged_finalize_writes_nothing():
+    t = _Term()
+    r = t.renderer()
+    r.feed("steady text\n")
+    t.out.clear()
+    r.finalize()                    # tail render equals the painted screen
+    assert t.text() == ""
+
+
+def test_stream_adaptive_interval_backs_off():
+    ticks = iter([1.0, 2.0, 2.3, 2.35, 3.0, 4.0, 4.05])
+    t = _Term()
+    r = rd.StreamRenderer(
+        "lite", _THEME, write=t.write, size_fn=lambda: t.size,
+        clock=lambda: next(ticks),
+    )
+    r.feed("a")                     # paint start 1.0, end 2.0 -> interval 0.5
+    n = len(t.out)
+    r.feed("b")                     # now=2.3: 0.3 since paint end, skipped
+    assert len(t.out) == n
+    r.feed("c")                     # now=2.35: still inside the interval
+    assert len(t.out) == n
+    r.feed("d")                     # now=3.0: past the interval, paints again
+    assert len(t.out) > n

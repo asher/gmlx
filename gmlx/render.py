@@ -404,7 +404,15 @@ _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
 class StreamRenderer:
     """Answer-channel sink: repaint the current block in place, print completed
-    blocks permanently. Plain mode passes text straight through."""
+    blocks permanently. Plain mode passes text straight through.
+
+    Repaints are diff-aware: the painted live region is tracked line-by-line
+    and only rows that changed since the last paint are rewritten (a token
+    append usually costs one row, not a screenful), so a fast stream through
+    a slow transport (tmux, ssh, a recorder) does not backpressure the reader
+    loop. The paint interval also adapts to measured paint cost, so an
+    expensive backend (rich re-renders the whole block) degrades to fewer,
+    larger updates instead of falling behind the stream."""
 
     def __init__(
         self,
@@ -415,6 +423,7 @@ class StreamRenderer:
         size_fn=None,
         clock=None,
         min_repaint_s: float = 0.04,
+        max_repaint_s: float = 0.5,
     ):
         self.mode = mode
         self.theme = theme or resolve_theme(color=(mode != "plain"))
@@ -422,7 +431,10 @@ class StreamRenderer:
         self._size = size_fn or _term_size
         self._clock = clock or time.monotonic
         self._min_repaint = min_repaint_s
+        self._max_repaint = max_repaint_s
+        self._interval = min_repaint_s
         self._buf = BlockBuffer()
+        self._screen: list[str] = []  # painted rows of the live region (for diff)
         self._painted = 0          # terminal lines the live block occupies
         self._committed = 0        # rendered lines of the live block already
         #                            scroll-committed: a block taller than the
@@ -464,6 +476,7 @@ class StreamRenderer:
             self._repaint(self._render(tail)[self._committed :])
         self._painted = 0
         self._committed = 0
+        self._screen = []
 
     # -- internals ----------------------------------------------------------------
 
@@ -485,6 +498,7 @@ class StreamRenderer:
         self._painted = 0
         self._raw_emitted = 0
         self._committed = 0
+        self._screen = []
 
     def _paint_live(self) -> None:
         cur = self._buf.current
@@ -495,7 +509,7 @@ class StreamRenderer:
         if not cur.strip():
             return
         now = self._clock()
-        if now - self._last_paint < self._min_repaint:
+        if now - self._last_paint < self._interval:
             return
         self._last_paint = now
         size = self._size()
@@ -513,23 +527,45 @@ class StreamRenderer:
             # keep only the tail live. Rendered prefixes are append-stable
             # for fences, paragraphs and lists (greedy wrap), so committed
             # lines never need rewriting.
-            self._committed += len(lines) - (budget - 1)
+            slide = len(lines) - (budget - 1)
+            self._committed += slide
+            self._repaint(lines[slide:], slide=slide)
+        else:
             self._repaint(lines)
-            self._painted = budget - 1
-            return
-        self._repaint(lines)
+        # Adapt the paint cadence to what a paint actually costs (render +
+        # write, which blocks when the transport is saturated): spend at most
+        # roughly a sixth of wall time painting, between the min and max.
+        # The interval runs from paint END, so a slow paint never eats the
+        # following quiet period.
+        end = self._clock()
+        self._interval = min(
+            self._max_repaint, max(self._min_repaint, (end - now) * 6.0)
+        )
+        self._last_paint = end
 
-    def _repaint(self, lines: list[str]) -> None:
+    def _repaint(self, lines: list[str], slide: int = 0) -> None:
+        """Bring the painted live region to ``lines``, rewriting only rows
+        that differ from what is on screen. ``slide`` is how many top rows of
+        the previous region were scroll-committed by this paint; they stay on
+        screen as-is and drop out of the diff."""
+        keep = self._screen[slide:] if slide else self._screen
+        lim = min(len(keep), len(lines))
+        d = 0
+        while d < lim and keep[d] == lines[d]:
+            d += 1
         out = []
-        if self._painted:
-            out.append(f"\x1b[{self._painted}A")
-        for ln in lines:
+        up = len(keep) - d
+        if up > 0:
+            out.append(f"\x1b[{up}A")
+        for ln in lines[d:]:
             out.append("\x1b[2K" + ln + "\n")
-        extra = self._painted - len(lines)
+        extra = len(keep) - len(lines)
         if extra > 0:
             out.append("\x1b[2K\n" * extra)
             out.append(f"\x1b[{extra}A")
-        self._w("".join(out))
+        if out:
+            self._w("".join(out))
+        self._screen = list(lines)
         self._painted = len(lines)
 
     def _freeze(self, cur: str) -> None:
@@ -548,10 +584,12 @@ class StreamRenderer:
         self._frozen = True
         self._raw_emitted = len(cur)
         self._painted = 0
+        self._screen = []
 
     def _reset_block(self) -> None:
         self._frozen = False
         self._raw_emitted = 0
         self._painted = 0
         self._committed = 0
+        self._screen = []
         self._width = None
