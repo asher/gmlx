@@ -339,9 +339,9 @@ def _tick_step(base: int) -> int | None:
 
 
 # Untracked weight bytes keyed by source (GGUF shard paths). Reloading the
-# same file maps the same pages, so same-key registrations replace (max)
-# rather than accumulate; a drafter reload used to double the count and
-# hold headroom negative, serializing admissions.
+# same file maps the same pages, so only the first registration per key
+# counts; a drafter reload used to double the count and hold headroom
+# negative, serializing admissions.
 _UNTRACKED_WEIGHTS: dict[object, float] = {}
 _UNTRACKED_ANON = "\0anon"
 _HEADROOM_FRACTION = 0.5
@@ -350,13 +350,13 @@ _HEADROOM_FRACTION = 0.5
 def note_untracked_weights(nbytes: float, key: object = None) -> None:
     """Loader hook: bytes wired at inference but invisible to
     mx.get_active_memory (zero-copy mmap weights). Same-key registrations
-    keep the max, distinct keys sum; key=None accumulates."""
+    keep the first (the walk that read the file; re-walks see pages already
+    counted), distinct keys sum; key=None accumulates."""
     if key is None:
         _UNTRACKED_WEIGHTS[_UNTRACKED_ANON] = (
             _UNTRACKED_WEIGHTS.get(_UNTRACKED_ANON, 0.0) + float(nbytes))
     else:
-        _UNTRACKED_WEIGHTS[key] = max(
-            _UNTRACKED_WEIGHTS.get(key, 0.0), float(nbytes))
+        _UNTRACKED_WEIGHTS.setdefault(key, float(nbytes))
 
 
 def untracked_weight_bytes() -> float:

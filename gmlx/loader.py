@@ -2630,7 +2630,7 @@ def _warm_mmap_residency(
             except Exception:
                 tracked = 0.0
         # Keyed by shard paths so a drafter reloading the target's GGUF
-        # replaces its earlier registration instead of double-counting.
+        # cannot register the same pages twice (first registration wins).
         key = source_key or (weights_source_key(*paths) if paths else None)
         note_untracked_weights(max(0.0, total - min(tracked, total)), key=key)
 
@@ -2790,6 +2790,7 @@ def _install_and_load(
     no_alias: set[str] | None = None,
     fp32_keep: tuple[str, ...] = (),
     source_key: tuple | None = None,
+    active_before: float | None = None,
 ) -> None:
     """Sanitize -> de-interleave native-fp -> swap kquant leaves -> cast -> load.
 
@@ -2809,9 +2810,15 @@ def _install_and_load(
 
     ``fp32_keep``: target-name substrings pinned to float32 through the bf16
     cast (see ``_FP32_KEEP_BY_MODEL_TYPE``).
+
+    ``active_before``: active-memory baseline for the untracked-weights split.
+    Callers that read wire bytes before installing must pass the pre-read
+    value; wire reads can grow active memory, and a post-read baseline makes
+    those tracked bytes register as untracked on top of it.
     """
     loadlog.stage("loading weights")
-    active_before = _active_now()
+    if active_before is None:
+        active_before = _active_now()
     # 5. sanitize first - model.sanitize may rename keys; rebuild meta.
     if sanitize and hasattr(model, "sanitize"):
         hf_weights = model.sanitize(hf_weights)
