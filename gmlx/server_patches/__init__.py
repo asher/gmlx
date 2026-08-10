@@ -75,6 +75,7 @@ from .chat_behavior import (
     install_ignore_eos,
     install_openai_stop_sequences,
     install_stream_thinking_seed,
+    install_stream_timings,
     install_thinking_budget_fix,
     install_vanilla_stream_chunks,
 )
@@ -156,6 +157,7 @@ __all__ = [
     "install_server_patches",
     "install_sse_keepalive",
     "install_stream_thinking_seed",
+    "install_stream_timings",
     "install_thinking_budget_fix",
     "install_vanilla_stream_chunks",
     "install_xtc_sampling",
@@ -212,6 +214,7 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_admit_headroom_gate()
     install_chat_template_kwargs()
     install_thinking_budget_fix()
+    install_stream_timings()
     install_openai_stop_sequences()
     install_api_contract()
     # Before the load-offload / profile-capture / keepalive wrappers so they

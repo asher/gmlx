@@ -1319,6 +1319,7 @@ generation dialects. The rest:
 | `presence_penalty` | honored | honored | honored | |
 | `frequency_penalty` | honored | honored | honored | |
 | `stream_options` | honored | ignored | ignored | `include_usage` adds the final usage chunk (chat + `/v1/completions`) |
+| `timings_per_token` | honored | ignored | ignored | streamed chat chunks carry `timings.predicted_n`, the exact cumulative output-token count (llama.cpp convention) |
 | `response_format` | honored | honored | honored | `json_schema` / `json_object`; unknown types are rejected (see below) |
 | `logprobs` | honored | ignored | ignored | chat-only; `/v1/completions` never returns logprobs |
 | `top_logprobs` | honored | ignored | ignored | capped by `TOP_LOGPROBS_K` (below) |

@@ -102,6 +102,16 @@ def test_reasoning_deltas_become_status():
     assert ("say", "It is ") in events
 
 
+def test_timings_markers_become_count_events():
+    stream = _stream_script([{"content": "It is "}, {"_timings": {"predicted_n": 3}},
+                             {"content": "5pm."}, {"_timings": {"predicted_n": 5}},
+                             {"_finish": "stop"},
+                             {"_usage": {"total_tokens": 7}}])
+    events = list(_brain(stream).turn("hi"))
+    assert [e for e in events if e[0] == "count"] == [("count", 3), ("count", 5)]
+    assert ("say", "It is ") in events and ("say", "5pm.") in events
+
+
 # -- the tool loop -------------------------------------------------------------
 def test_tool_round_executes_and_recalls():
     stream = _stream_script(_tool_round(text="Checking. "), _PROSE)

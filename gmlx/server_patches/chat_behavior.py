@@ -624,3 +624,114 @@ def install_vanilla_stream_chunks() -> None:
 
     model_dump_json.__dict__[_PATCH_FLAG] = True
     chunk_cls.model_dump_json = model_dump_json
+
+
+# Per-chunk stream timings
+# A live client display needs the server's exact cumulative output-token count
+# while a reply streams; the OpenAI shape only carries it in the final usage
+# chunk, and counting SSE events undercounts whenever one chunk carries several
+# tokens (an MTP verify round) or a token's delta is suppressed (thinking
+# markers, tool-call markup). The engine's token items do carry exact counts
+# (``token_count``), and each passes through ``GenerationMetrics.record_chunk``
+# right before its chunk is yielded, so the running total is available at the
+# route without touching the upstream generator. This patch mirrors
+# llama.cpp's convention: a request with ``timings_per_token: true`` gets a
+# ``timings`` object on each streamed content chunk, here with the running
+# ``predicted_n``. The count crosses from ``record_chunk`` to the route's SSE
+# rewrite through a per-request contextvar cell: the route wrapper sets it in
+# the request task, and starlette's response task inherits that context.
+# Off by default; without the request field the stream is byte-identical.
+_STREAM_TIMINGS_FLAG = "_kq_gguf_stream_timings_patch"
+
+_stream_count_cell: contextvars.ContextVar = contextvars.ContextVar(
+    "gmlx_stream_token_count", default=None)
+
+
+def _count_record_chunk(original):
+    def record_chunk(self, chunk):
+        original(self, chunk)
+        cell = _stream_count_cell.get()
+        if cell is None:
+            return
+        n = getattr(chunk, "generation_tokens", None)
+        if n:                       # stream_generate results: cumulative
+            cell["n"] = int(n)
+        else:                       # engine tokens: per-item count
+            cell["n"] += int(getattr(chunk, "token_count", 1) or 1)
+    record_chunk.__dict__[_STREAM_TIMINGS_FLAG] = True
+    return record_chunk
+
+
+async def _timings_sse(body, cell):
+    """Wrap a chat-completions SSE body iterator: each content chunk gains a
+    ``timings`` object carrying the running ``predicted_n``. Usage-only and
+    role-only chunks pass through untouched."""
+    import json
+
+    pending = ""
+    try:
+        async for raw in body:
+            pending += raw.decode() if isinstance(raw, (bytes, bytearray)) else raw
+            while "\n\n" in pending:
+                event, pending = pending.split("\n\n", 1)
+                yield _stamp_timings_event(event, cell, json) + "\n\n"
+        if pending:
+            yield pending
+    finally:
+        aclose = getattr(body, "aclose", None)
+        if aclose is not None:
+            try:
+                await aclose()
+            except Exception:
+                pass
+
+
+def _stamp_timings_event(event: str, cell, json) -> str:
+    if not event.startswith("data: "):
+        return event
+    payload = event[len("data: "):]
+    if payload.strip() == "[DONE]":
+        return event
+    try:
+        obj = json.loads(payload)
+    except ValueError:
+        return event
+    choices = obj.get("choices") or []
+    if not choices:
+        return event                            # final usage chunk
+    delta = choices[0].get("delta") or {}
+    if not (delta.get("content") or delta.get("reasoning")
+            or delta.get("tool_calls")):
+        return event                            # role-only or empty delta
+    obj["timings"] = {"predicted_n": cell["n"]}
+    return "data: " + json.dumps(obj)
+
+
+def install_stream_timings() -> None:
+    """Honour ``timings_per_token`` on streamed chat completions: each content
+    chunk carries ``timings.predicted_n``, the exact cumulative output-token
+    count (MTP verify rounds included). Idempotent per route."""
+    from starlette.responses import StreamingResponse
+
+    generation = importlib.import_module("mlx_vlm.server.generation")
+    metrics_cls = generation.GenerationMetrics
+    if not getattr(metrics_cls.record_chunk, _STREAM_TIMINGS_FLAG, False):
+        metrics_cls.record_chunk = _count_record_chunk(metrics_cls.record_chunk)
+
+    app = importlib.import_module("mlx_vlm.server.app").app
+
+    def _make(original):
+        async def endpoint(request, http_request):
+            want = bool(getattr(request, "timings_per_token", False)) \
+                and bool(getattr(request, "stream", False))
+            if not want:
+                return await original(request, http_request)
+            cell = {"n": 0}
+            _stream_count_cell.set(cell)
+            result = await original(request, http_request)
+            if isinstance(result, StreamingResponse):
+                result.body_iterator = _timings_sse(result.body_iterator, cell)
+            return result
+        return endpoint
+
+    _wrap_post_routes(app, _CHAT_PATHS, _STREAM_TIMINGS_FLAG, _make)

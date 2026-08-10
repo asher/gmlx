@@ -182,6 +182,11 @@ class AssistantBrain:
                         if "_finish" in delta:
                             finish = delta["_finish"]
                             continue
+                        if "_timings" in delta:
+                            n = (delta["_timings"] or {}).get("predicted_n")
+                            if n:
+                                yield ("count", int(n))
+                            continue
                         if delta.get("reasoning"):
                             yield ("status", "thinking")
                             continue

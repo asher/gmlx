@@ -427,3 +427,36 @@ def test_stream_paragraph_never_trims():
     assert r._src_skip == 0
     r.finalize()
     assert "word39" in _strip(t.text())
+
+
+# -- live status ticker ----------------------------------------------------------
+
+
+def test_stream_status_paints_on_resting_line():
+    t = _Term()
+    r = t.renderer()
+    r.feed("some streaming text\n")
+    r.set_status("148 tok/s")
+    out = t.text()
+    assert "148 tok/s" in _strip(out)
+    assert out.endswith("\r")        # cursor parked back at line start
+
+
+def test_stream_status_ignored_before_first_paint():
+    t = _Term()
+    r = t.renderer()
+    r.set_status("99 tok/s")
+    assert "99 tok/s" not in t.text()
+
+
+def test_stream_status_cleared_by_block_end_and_finalize():
+    t = _Term()
+    r = t.renderer()
+    r.feed("first block\n")
+    r.set_status("120 tok/s")
+    r.feed("\nsecond block\n")       # separator must clear the ticker line
+    n = t.text().count("\x1b[2K\n")
+    assert n >= 1
+    r.set_status("125 tok/s")
+    r.finalize()
+    assert t.text().rstrip("\n").endswith("\x1b[2K")

@@ -463,6 +463,7 @@ class StreamRenderer:
         #                            viewport-sized instead
         self._last_paint = 0.0
         self._width = None
+        self._status = None        # live one-line ticker under the block
         self._backend = _RichBackend(self.theme) if mode == "rich" else None
 
     # -- public ------------------------------------------------------------------
@@ -478,6 +479,17 @@ class StreamRenderer:
             self._finish_block(src)
         self._paint_live()
 
+    def set_status(self, text: str | None) -> None:
+        """Live one-line ticker under the streaming block (e.g. a tok/s
+        readout). It lives on the cursor's resting line below the painted
+        region, so it needs no diff or commit bookkeeping; block boundaries
+        and finalize clear it. Ignored in plain mode, while frozen, and
+        before the first paint of a block (no resting line yet)."""
+        self._status = text
+        if self.mode == "plain" or self._frozen or not self._painted:
+            return
+        self._paint_status()
+
     def finalize(self) -> None:
         """End of reply: last unthrottled paint of the tail; cursor ends on a
         fresh line below the rendered output."""
@@ -492,6 +504,9 @@ class StreamRenderer:
             return
         if tail.strip():
             self._repaint(self._render(self._trimmed(tail))[self._committed :])
+        if self._status:
+            self._w("\x1b[2K")
+            self._status = None
         self._painted = 0
         self._committed = 0
         self._src_skip = 0
@@ -549,7 +564,7 @@ class StreamRenderer:
             return
         if src.strip():
             self._repaint(self._render(self._trimmed(src))[self._committed :])
-            self._w("\n")
+            self._w("\x1b[2K\n" if self._status else "\n")
         self._painted = 0
         self._raw_emitted = 0
         self._committed = 0
@@ -588,6 +603,8 @@ class StreamRenderer:
             self._repaint(lines[slide:], slide=slide)
         else:
             self._repaint(lines)
+        if self._status:
+            self._paint_status()
         # Adapt the paint cadence to what a paint actually costs (render +
         # write, which blocks when the transport is saturated): painting may
         # use about a third of wall time, between the min and max. Non-paint
@@ -618,8 +635,12 @@ class StreamRenderer:
             out.append("\x1b[2K" + ln + "\n")
         extra = len(keep) - len(lines)
         if extra > 0:
-            out.append("\x1b[2K\n" * extra)
-            out.append(f"\x1b[{extra}A")
+            # A shrink vacates rows below the new region; the ticker's old
+            # resting line sits one row past the vacated span, so clear it
+            # too while we are down there.
+            span = extra + (1 if self._status else 0)
+            out.append("\x1b[2K\n" * span)
+            out.append(f"\x1b[{span}A")
         if out:
             self._w("".join(out))
         self._screen = list(lines)
@@ -631,6 +652,9 @@ class StreamRenderer:
         of this block. With part of the block already scroll-committed the
         painted tail just stays as-is (stale width) and the stream continues
         raw below it."""
+        if self._status:
+            self._w("\x1b[2K")
+            self._status = None
         if self._committed:
             self._w("\n")
         else:
@@ -643,10 +667,17 @@ class StreamRenderer:
         self._painted = 0
         self._screen = []
 
+    def _paint_status(self) -> None:
+        sgr = getattr(self.theme, "stat", "")
+        text = self._status or ""
+        painted = f"{sgr}{text}{self.theme.reset}" if sgr and text else text
+        self._w("\x1b[2K" + painted + "\r")
+
     def _reset_block(self) -> None:
         self._frozen = False
         self._raw_emitted = 0
         self._painted = 0
         self._committed = 0
         self._screen = []
+        self._status = None
         self._width = None

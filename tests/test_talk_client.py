@@ -210,6 +210,30 @@ def test_stream_chat_yields_deltas_and_markers(monkeypatch):
     assert resp.closed
 
 
+def test_stream_chat_relays_timings_marker(monkeypatch):
+    with_timings = _chunk({"content": "Hel"})
+    with_timings["timings"] = {"predicted_n": 2}
+    usage_only = {"choices": [], "usage": {"total_tokens": 5},
+                  "timings": {"predicted_n": 5}}       # final chunk: no relay
+    resp = _FakeResp(_sse(with_timings, usage_only))
+    monkeypatch.setattr(tc, "_open_stream",
+                        lambda url, payload, api_key, timeout: resp)
+    got = list(tc.stream_chat("http://h:1/v1", model="m", messages=[],
+                              max_tokens=10))
+    assert {"_timings": {"predicted_n": 2}} in got
+    assert {"_timings": {"predicted_n": 5}} not in got
+    assert {"_usage": {"total_tokens": 5}} in got
+
+
+def test_probe_capabilities_marks_gmlx_server(monkeypatch):
+    payload = _models_payload()
+    monkeypatch.setattr(tc, "_http_get_json",
+                        lambda url, timeout=5.0, api_key=None: payload)
+    assert not tc.probe_capabilities("http://h:1/v1")["gmlx"]
+    payload["data"][0]["owned_by"] = "gmlx"
+    assert tc.probe_capabilities("http://h:1/v1")["gmlx"]
+
+
 def test_stream_chat_close_on_break(monkeypatch):
     resp = _FakeResp(_sse(_chunk({"content": "a"}), _chunk({"content": "b"})))
     monkeypatch.setattr(tc, "_open_stream",
