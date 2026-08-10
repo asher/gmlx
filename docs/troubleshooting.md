@@ -6,7 +6,7 @@ anything it flags ([reference](cli.md#gmlx-doctor)).
 
 The rest of this page covers the failures new setups actually hit, with the
 diagnostic and the fix. Client-launch problems (a tool will not connect or
-install) live in [launch.md](launch.md#troubleshooting); everything below is
+install) live in [launch.md](launch.md#troubleshooting). Everything below is
 the runtime and server.
 
 ## The install fails compiling the Metal kernels
@@ -32,7 +32,7 @@ lives in the Python venv you installed it into, and each new terminal starts
 with that venv inactive. Run `source <install dir>/.venv/bin/activate` (the
 directory from the [install step](getting-started.md#install)) and the
 command is back. A background server or menu-bar app keeps running either
-way; only the terminal command needs the venv. An install via `uv tool
+way. Only the terminal command needs the venv. An install via `uv tool
 install` or pipx stays on PATH in every terminal and never hits this.
 
 ## A download was interrupted or the disk filled
@@ -42,7 +42,7 @@ Symptom: `gmlx pull` stopped mid-download, or refused to start with
 
 Interrupted downloads resume: re-run the same `pull` and it continues from
 where it stopped (sharded files resume per shard). The disk-space refusal is a
-preflight - it names how much the file needs and how much is free; free space,
+preflight: it names how much the file needs and how much is free. Free space,
 pass `--to DIR` on another volume, or `--force` to skip the check. A download
 that failed mid-write for another reason (network drop, HF hiccup) is also
 safe to re-run.
@@ -62,7 +62,7 @@ downloading. Uniform K-quant files also decode fastest
 ## A configured model is missing from /v1/models
 
 Symptom: an id from your config is not listed, or requesting it returns a 404
-with type `model_file_missing`; `gmlx logs` shows
+with type `model_file_missing`. `gmlx logs` shows
 `[server] skipping model '<id>'` at the last startup or reload.
 
 The entry's GGUF is gone from disk (deleted, moved, or renamed), so the server
@@ -98,7 +98,7 @@ whether an input device is visible at all.
 
 Symptom: `serve` fails to bind, or requests reach some other process.
 
-`gmlx status` shows whether a managed gmlx server already holds the port; if
+`gmlx status` shows whether a managed gmlx server already holds the port. If
 so, `gmlx stop` (or `gmlx restart` after a config change; a launchd-managed
 server stops with `gmlx service uninstall`). If the holder is not gmlx,
 `lsof -i :8080` names it. Either free the port or serve elsewhere with
@@ -111,7 +111,7 @@ seconds.
 
 Nothing was preloaded, so the first request paid the model load. Set
 `server.defaults.model: <id>` in the config, pin one, or pass `--model` to
-`gmlx launch`; the
+`gmlx launch`. The
 auto-start path then loads the weights before binding the port, and the first turn
 is hot. Distinct from this: the first turn on a very long prompt is prefill, not
 loading; see [performance.md](performance.md#the-prompt-cache).
@@ -145,7 +145,7 @@ or `--max-models` so residency stops short of the ceiling.
 
 ## Where the evidence lives
 
-`gmlx logs -n 100` prints the managed server's log (`-f` follows); the files sit
+`gmlx logs -n 100` prints the managed server's log (`-f` follows). The files sit
 under `~/.cache/gmlx/`. Each completed request logs one line with the model,
 token counts, and timing, which is usually enough to see what was slow.
 `gmlx status` reports the process, `gmlx ps` the resident models, and

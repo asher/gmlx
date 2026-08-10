@@ -110,7 +110,7 @@ flowchart TD
    manager: exact-snapshot for hybrid / sliding-window caches, block-level for plain
    attention. Speculative decoding (draft model / MTP) is optional and runs
    gmlx's own verify round, which keeps APC available (upstream disables
-   it under a draft model); see
+   it under a draft model). See
    [server-config.md](server-config.md#speculative-decoding--the-prompt-cache).
 
 4. HTTP layer (`mlx-vlm` FastAPI app): exposes OpenAI Chat Completions
