@@ -129,11 +129,41 @@ def test_ratio_flips_mid_run(paced, monkeypatch):
     assert g.chunks == paced_chunks + 10  # per-tick read: now stock
 
 
+def test_auto_mode_wired_stock_without_incumbent(paced, monkeypatch):
+    monkeypatch.setenv("GMLX_DECODE_PREFILL_RATIO", "auto")
+    g = FakeGen()
+    for _ in range(10):
+        paced(g)
+    # burst shape (no admitted-row stamps precede the waiters): auto
+    # resolves 0 every tick => stock 1 decode : 1 chunk
+    assert g.chunks == 10 and g.decodes == 10
+
+
+def test_auto_kill_switch_paces_static(paced, monkeypatch):
+    monkeypatch.setenv("GMLX_DECODE_PREFILL_RATIO", "auto")
+    monkeypatch.setenv("GMLX_DECODE_PREFILL_AUTO", "0")
+    g = FakeGen()
+    for _ in range(40):
+        paced(g)
+    # auto disabled resolves to the static paced ratio (1.0 at rho 0.5)
+    assert g.decodes / g.chunks == 5.0
+
+
+def test_default_unset_is_auto(paced, monkeypatch):
+    monkeypatch.delenv("GMLX_DECODE_PREFILL_RATIO", raising=False)
+    g = FakeGen()
+    for _ in range(10):
+        paced(g)
+    # auto with no incumbent resolves 0: stock 1 decode : 1 chunk
+    assert g.chunks == 10 and g.decodes == 10
+
+
 def test_bad_ratio_warns_and_defaults(paced, monkeypatch, caplog):
     monkeypatch.setenv("GMLX_DECODE_PREFILL_RATIO", "banana")
     g = FakeGen()
     with caplog.at_level("WARNING"):
         for _ in range(30):
             paced(g)
-    assert g.decodes / g.chunks > 2  # behaved as 1.0
+    # falls back to the default (auto); burst shape resolves stock
+    assert g.chunks == 30 and g.decodes == 30
     assert sum("banana" in r.message for r in caplog.records) == 1

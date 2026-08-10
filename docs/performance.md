@@ -278,22 +278,45 @@ What needs managing is admission: a new request's prompt must prefill while
 existing streams are mid-decode. Prefill runs in 2048-token chunks, and a
 scheduler that simply alternates one decode step with one chunk lets a long
 admission starve live streams, because at depth a chunk costs hundreds of
-decode steps' worth of GPU time. The server paces admissions instead:
-`decode_prefill_ratio` (default `1.0`) admits the next chunk only after the
-decode batch has received that multiple of the previous chunk's GPU time. At
-the default, live streams keep roughly half their throughput while a prompt
-is admitted, and the incoming request's time-to-first-token stretches by up
-to (1 + ratio)x under load. Raise the ratio when live-stream decode matters
-most, lower it toward `0` when time-to-first-token does; `0` restores strict
-alternation. Prefill runs at full speed whenever nothing is decoding, so
-single-client serving is unaffected.
+decode steps' worth of GPU time. Whether pacing admissions helps is decided
+by that same quantity: when a chunk costs a live stream many decode steps
+(deep context), stock scheduling starves it and pacing rescues it; when
+chunks are cheap (shallow prompts, warm prefix hits), pacing only delays
+admission, and a delayed admission narrows the decode batch that aggregate
+throughput comes from.
+
+`decode_prefill_ratio` (default `auto`) measures this per tick and paces
+only when an already-decoding stream that was admitted before the waiters
+arrived would otherwise fall below half its batched decode rate. For
+simultaneous bursts (no incumbent to protect), cheap chunks, and queued
+waiters held behind paced admissions past a deadline it runs stock
+scheduling, so one setting serves shallow-burst and deep-second-client
+load alike. Paced admission bounds every waiter's time-to-first-token at
+twice its unpaced prefill, even when several arrive at once. The
+deadline counts only time pacing itself is responsible for: a waiter
+blocked by a full decode batch or by the memory admission gate is not
+aging toward it, since running unpaced would not admit that waiter any
+sooner.
+
+A numeric value pins the static behavior: the decode batch receives that
+multiple of each chunk's GPU time before the next chunk is admitted, and at
+`1.0` live streams keep roughly half their throughput while a prompt is
+admitted. `0` restores strict alternation. Static pacing has two costs
+worth naming. A waiter's time-to-first-token stretch compounds with queue
+depth, since each waiter also waits out the throttled prefill of everyone
+ahead of it: several-fold at moderate bursts, not the single-admission
+(1 + ratio)x. And delaying admission keeps the decode batch narrow, which
+at burst concurrency can cost aggregate throughput outright. Prefill runs
+at full speed whenever nothing is decoding, so single-client serving is
+unaffected under every setting.
 
 The deeper the context, the more this matters. In our serve benchmarks on
-the same 35B-A3B, adding a second client at 14k tokens used to drop
-aggregate decode to 0.57x of single-stream; paced, it lands above
-single-stream. At 50k tokens each of two streams held ~10 tok/s under
-alternation and ~50 tok/s paced, because a 50k admission previously froze
-live streams for tens of seconds. The key is `server.decode_prefill_ratio`
+the same 35B-A3B, a second client arriving at 14k tokens under strict
+alternation froze the live stream to 4 percent of its decode rate for the
+whole admission; paced, it keeps 80 percent, with the second client's
+time-to-first-token unchanged. At 50k tokens the admission is roughly a
+minute of prefill and the live stream holds 54 percent instead of 3, a
+~26x higher rate through the window. The key is `server.decode_prefill_ratio`
 ([server-config.md](server-config.md)), the `serve` flag is
 `--decode-prefill-ratio`, and the `GMLX_DECODE_PREFILL_RATIO` env is read
 per scheduler tick, so it can be changed on a live server.

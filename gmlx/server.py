@@ -59,6 +59,17 @@ from .envflags import env_bool
 _DEFAULT_DISCOVER_DIR = "."          # zero-config bare start scans the cwd
 
 
+def _ratio_flag(raw: str):
+    """--decode-prefill-ratio value: a float or the literal 'auto'."""
+    if raw.strip().lower() == "auto":
+        return "auto"
+    try:
+        return float(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected a number or 'auto', got {raw!r}")
+
+
 def _has_uvloop() -> bool:
     try:
         import uvloop  # noqa: F401
@@ -780,11 +791,13 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "it to cap peak memory on long prompts, at some "
                          "prefill-throughput cost. Also via PREFILL_STEP_SIZE; "
                          "config mode: server.prefill_step_size.")
-    ap.add_argument("--decode-prefill-ratio", type=float, default=None,
-                    metavar="R",
+    ap.add_argument("--decode-prefill-ratio", type=_ratio_flag,
+                    default=None, metavar="R",
                     help="Decode GPU-time share per prefill chunk under load "
-                         "(default 1.0 ~= 50/50; 0 = stock scheduling). Also "
-                         "via GMLX_DECODE_PREFILL_RATIO; config mode: "
+                         "(default auto: paced or stock per tick from "
+                         "measured load; numeric pins a static split, "
+                         "1.0 ~= 50/50, 0 = stock scheduling). Also via "
+                         "GMLX_DECODE_PREFILL_RATIO; config mode: "
                          "server.decode_prefill_ratio.")
     ap.add_argument("--prefill-tick-ms", type=float, default=None,
                     metavar="MS",
@@ -1514,7 +1527,15 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     if ratio is None:
         ratio = cfg.decode_prefill_ratio
     if ratio is not None:
-        if ratio < 0:
+        if isinstance(ratio, str):
+            from .auto_ratio import (c_threshold, deadline_s, floor_rho,
+                                     paced_ratio)
+            os.environ["GMLX_DECODE_PREFILL_RATIO"] = "auto"
+            print(f"[server] decode-prefill pacing ratio: auto "
+                  f"(floor {floor_rho():.2f} -> paced {paced_ratio():.2f}, "
+                  f"chunk threshold {c_threshold():.1f}, "
+                  f"deadline {deadline_s():.1f}s)")
+        elif ratio < 0:
             print(f"[server] ignoring negative decode-prefill ratio {ratio}")
         else:
             os.environ["GMLX_DECODE_PREFILL_RATIO"] = str(ratio)

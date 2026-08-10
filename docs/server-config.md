@@ -181,7 +181,7 @@ server:
                              #   (null => mlx-vlm's own default, 600; 0 => never)
   prefill_step_size: null    # prefill chunk size in tokens for every model on this server
                              #   (null => the default, 2048; lower caps peak memory on long prompts)
-  decode_prefill_ratio: null # decode GPU-time share per admission prefill chunk under load
+  decode_prefill_ratio: null # admission pacing: auto (default) or a static GPU-time share
                              #   (null => the default, 1.0; 0 => strict alternation; see below)
   prefill_tick_ms: null      # wall-clock budget per prefill chunk while streams decode;
                              #   chunks are halved to fit (null => the default, 500; 0 => full chunks)
@@ -247,14 +247,22 @@ closed, so it cannot be a per-model `load:` key. Also available as
 `decode_prefill_ratio` paces admission prefills against live decode. Stock
 scheduling runs one decode step per prefill chunk, so while any request
 prefills, every decoding stream advances ~1 token per chunk -- at deep context
-that is a multi-second stall per admission. With pacing (default `1.0`), a
-prefill chunk is admitted only after the decode batch has received that
-multiple of the chunk's GPU time: live streams keep ~half throughput during
-admissions, and the incoming request's time-to-first-token stretches up to
-~(1+ratio)x while decode is busy. Raise the ratio to favor decode further,
-lower it toward `0` for TTFT-critical serving, `0` restores stock scheduling.
-Prefill runs at full speed whenever nothing is decoding, so a single-stream
-server is unaffected. Also available as `--decode-prefill-ratio` on `serve`
+that is a multi-second stall per admission. The default `auto` paces only
+when an already-decoding stream admitted before the waiters would otherwise
+fall below half its batched decode rate (the floor;
+`GMLX_DECODE_PREFILL_FLOOR`), and runs stock scheduling for simultaneous
+bursts, cheap chunks, and queued waiters held behind paced admissions
+past a deadline (a prompt already being prefilled is bounded by pacing
+itself, and time blocked by capacity rather than pacing does not age
+toward the deadline). A numeric
+value pins static pacing: a prefill chunk is admitted only after the decode
+batch has received that multiple of the chunk's GPU time; live streams then
+keep ~half throughput during admissions at `1.0`, while a waiter's
+time-to-first-token stretch compounds with queue depth (each waiter also
+waits out the throttled prefill of everyone ahead of it) and delayed
+admission narrows the decode batch. `0` restores stock scheduling. Prefill
+runs at full speed whenever nothing is decoding, so a single-stream server
+is unaffected. Also available as `--decode-prefill-ratio` on `serve`
 (the flag wins over the config) or an exported `GMLX_DECODE_PREFILL_RATIO`
 (read per scheduler tick, so it can be flipped on a live server). Applies to
 speculative (MTP) serving too. Background and measured effects:

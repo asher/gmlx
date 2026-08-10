@@ -8,6 +8,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- decode_prefill_ratio accepts "auto" and it is the new default: live
+  streams keep at least half their decode rate while deep prompts admit,
+  and pacing stands down wherever it would not help (simultaneous
+  bursts, cheap chunks, stuck queues). A numeric ratio pins the previous
+  static behavior; GMLX_DECODE_PREFILL_AUTO=0 reverts on a live server.
+
 - GMLX_SERVE_MEMSTATS=path.jsonl writes a per-tick serve memory trace:
   MLX counters, free-headroom estimate, and per-owner cache byte
   attribution with allocation shapes marked on change, for diagnosing

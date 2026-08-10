@@ -32,9 +32,14 @@ and chunk-size policy (prefill_decay etc.) with no per-model constants.
 Ratio resolution: `gmlx serve --decode-prefill-ratio` / config
 `server.decode_prefill_ratio` both export GMLX_DECODE_PREFILL_RATIO; the
 wrapper reads the env per tick (install order never matters, and a live
-server can be re-paced for an A/B). 0 disables (stock 1:1). Very large
-ratios starve admission at depth: each pending chunk waits ratio x
-chunk_time of decode -- TTFT of queued requests stretches accordingly.
+server can be re-paced for an A/B). The default is ``auto``: the
+per-tick ratio comes from ``auto_ratio``, which selects the paced ratio
+or 0 from measured signals. A numeric value pins a static split
+(0 disables: stock 1:1); every other mechanism below (owed-decode
+arithmetic, stash-and-restore, pressure notes) is identical under both
+spellings. Very large static ratios starve admission at depth: each
+pending chunk waits ratio x chunk_time of decode -- TTFT of queued
+requests stretches accordingly.
 """
 
 from __future__ import annotations
@@ -48,22 +53,28 @@ _log = logging.getLogger(__name__)
 _INSTALLED_FLAG = "_kq_gguf_decode_priority_sched"
 
 
-_ratio_memo = ("", 1.0)
+_ratio_memo: tuple[str, tuple[str, float | None]] = ("", ("static", 1.0))
 
 
-def _ratio() -> float:
-    """Parse GMLX_DECODE_PREFILL_RATIO, memoized on the raw string; warn
-    once per bad value rather than silently defaulting."""
+def _ratio() -> tuple[str, float | None]:
+    """Parse GMLX_DECODE_PREFILL_RATIO into ``(mode, value)``:
+    ``("static", r)`` or ``("auto", None)``. Memoized on the raw string
+    (in auto mode only the parse is memoized, never a resolved ratio);
+    warns once per bad value rather than silently defaulting."""
     global _ratio_memo
-    raw = os.environ.get("GMLX_DECODE_PREFILL_RATIO", "1.0")
+    raw = os.environ.get("GMLX_DECODE_PREFILL_RATIO", "auto")
     if raw == _ratio_memo[0]:
         return _ratio_memo[1]
-    try:
-        val = float(raw)
-    except ValueError:
-        _log.warning(
-            "GMLX_DECODE_PREFILL_RATIO=%r is not a number; using 1.0", raw)
-        val = 1.0
+    if raw.strip().lower() == "auto":
+        val: tuple[str, float | None] = ("auto", None)
+    else:
+        try:
+            val = ("static", float(raw))
+        except ValueError:
+            _log.warning(
+                "GMLX_DECODE_PREFILL_RATIO=%r is not a number or 'auto'; "
+                "using auto", raw)
+            val = ("auto", None)
     _ratio_memo = (raw, val)
     return val
 
@@ -96,10 +107,10 @@ def install_decode_priority_sched() -> None:
             _pd.note_chunk_cost(spent)
         return out
 
-    def _paced_next(self, **kwargs):
-        # Pace only when decode AND prefill work are both live; otherwise
-        # stock behavior (prefill at full speed, untouched TTFT).
-        ratio = _ratio()
+    def _tick(self, ratio, **kwargs):
+        # One scheduler tick at a resolved ratio. Pace only when decode
+        # AND prefill work are both live; otherwise stock behavior
+        # (prefill at full speed, untouched TTFT).
         if ratio <= 0:
             # Ratio 0 is documented as stock: clear the tick term's
             # decode-pressure reading (0 clears, per the hook contract)
@@ -147,8 +158,29 @@ def install_decode_priority_sched() -> None:
         # observe the chunk cost.
         return _observed_next(self, **kwargs)
 
+    def _paced_next(self, **kwargs):
+        mode, value = _ratio()
+        if mode != "auto":
+            return _tick(self, value, **kwargs)
+        from . import auto_ratio
+
+        ratio = auto_ratio.resolve(self)
+        rows = len(self._generation_batch)
+        before = self._prompt_time_counter
+        tic = time.perf_counter()
+        try:
+            return _tick(self, ratio, **kwargs)
+        finally:
+            # The bracket rides syncs the tick already performs (chunk
+            # mx.eval / decode blocking on the previous step); auto's
+            # observe skips the poisoned first bracket after a chunk.
+            auto_ratio.observe(
+                self, time.perf_counter() - tic,
+                self._prompt_time_counter - before, rows)
+
     setattr(_paced_next, _INSTALLED_FLAG, True)
     _ar.BatchGenerator._next = _paced_next
+    mode, value = _ratio()
     _log.info(
-        "decode-priority prefill pacing installed (ratio=%.2f)", _ratio()
-    )
+        "decode-priority prefill pacing installed (%s)",
+        "auto" if mode == "auto" else f"ratio={value:.2f}")
