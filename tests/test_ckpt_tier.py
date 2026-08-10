@@ -10,6 +10,7 @@ cache with KV offsets exactly p.
 import os
 import subprocess
 import sys
+import time as _time
 from types import SimpleNamespace
 
 import mlx.core as mx
@@ -74,6 +75,25 @@ def assert_warm_matches(warm, orig, p):
             assert isinstance(w, ArraysCache)
             for a, b in zip(o.cache, w.cache):
                 assert mx.array_equal(a, b).item()
+
+
+def drain_disk(disk, timeout=30.0):
+    """Block until the APC disk writer has published every queued shard.
+
+    ``save_exact_cache`` only enqueues; a background writer thread indexes
+    the shard later, and the lookup side (``find_exact_prefix``) reads the
+    index with no in-flight wait. Any test that stores and then expects to
+    read the result back must drain first, or it races the writer -- fast
+    locally, lost on a loaded CI runner.
+    """
+    disk._q.join()
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        with disk._in_flight_lock:
+            if not disk._in_flight:
+                return
+        _time.sleep(0.005)
+    raise AssertionError("APC disk writer did not drain within %.1fs" % timeout)
 
 
 def test_ckpt_supported_shapes():
@@ -823,6 +843,9 @@ def test_stripped_boundary_recovers_via_skeleton(tmp_path):
         cache = make_swa_cache(p, seed=12)
         ids = list(range(300, 300 + p))
         assert ckpt_store(man, ids, cache, extra_hash=0)
+        # Recovery reads the skeleton off disk, so the async writer has to
+        # have published it before the lookup runs.
+        drain_disk(disk)
         idx = _ckpt_records(man)
         (key, rec), = list(idx.items())
         _release_record(man, idx.pop(key))
