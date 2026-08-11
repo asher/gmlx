@@ -1231,3 +1231,67 @@ def test_unknown_arch_skips_not_fails():
 def test_unknown_tensor_on_known_arch_hard_fails():
     r = d("llama", "blk.0.this_is_not_a_real_tensor.weight")
     assert r.kind == FAIL
+
+
+# muse-glimmer: sandwich norms with the +1 already baked (consumed as-is),
+# an attention output gate, and interleaved Q/K consumed without a permute.
+def test_muse_glimmer_ffn_norm_pins_to_pre_feedforward():
+    # FFN_NORM/FFN_PRE_NORM collide in TENSOR_NAMES; muse-glimmer's ffn_norm
+    # is the PRE-FFN norm, same as gemma2/gemma3.
+    r = d("muse-glimmer", "blk.1.ffn_norm.weight")
+    assert r.kind == MAP
+    assert r.hf_name == "model.layers.1.pre_feedforward_layernorm.weight"
+
+
+def test_muse_glimmer_norms_are_not_unbaked():
+    # The converter folds the +1 into the four per-layer norms and a plain
+    # nn.RMSNorm consumes them directly - no gemma-style unbake.
+    for t in ("attn_norm", "ffn_norm", "post_attention_norm", "post_ffw_norm"):
+        assert d("muse-glimmer", f"blk.0.{t}.weight").transform == "passthrough"
+    assert d("muse-glimmer", "output_norm.weight").transform == "passthrough"
+
+
+def test_muse_glimmer_post_norms_land_on_the_sandwich_slots():
+    assert (d("muse-glimmer", "blk.2.post_attention_norm.weight").hf_name
+            == "model.layers.2.post_attention_layernorm.weight")
+    assert (d("muse-glimmer", "blk.2.post_ffw_norm.weight").hf_name
+            == "model.layers.2.post_feedforward_layernorm.weight")
+
+
+def test_muse_glimmer_attn_gate_claims_the_gate_projection():
+    # CANONICAL_HF["ATTN_GATE"] points at qwen3.5's linear_attn.in_proj_z, so
+    # muse-glimmer has to claim this row first.
+    r = d("muse-glimmer", "blk.0.attn_gate.weight")
+    assert r.kind == MAP
+    assert r.hf_name == "model.layers.0.self_attn.gate_proj.weight"
+    assert "linear_attn" not in r.hf_name
+
+
+def test_muse_glimmer_qk_are_not_permuted():
+    # LLAMA_ROPE_TYPE_NORM: the converter already un-permuted HF's rotate_half
+    # into interleaved, and the model class ropes with traditional=True. A
+    # qk_permute here would double-apply it (and force _own() copies).
+    for t in ("attn_q", "attn_k"):
+        r = d("muse-glimmer", f"blk.3.{t}.weight")
+        assert r.kind == MAP and r.bid == 3
+        assert r.transform == "passthrough"
+
+
+def test_muse_glimmer_qk_norms_and_projections_resolve_canonically():
+    for gguf, hf in (
+        ("blk.0.attn_q_norm.weight", "model.layers.0.self_attn.q_norm.weight"),
+        ("blk.0.attn_k_norm.weight", "model.layers.0.self_attn.k_norm.weight"),
+        ("blk.0.attn_v.weight", "model.layers.0.self_attn.v_proj.weight"),
+        ("blk.0.attn_output.weight", "model.layers.0.self_attn.o_proj.weight"),
+        ("blk.0.ffn_gate.weight", "model.layers.0.mlp.gate_proj.weight"),
+        ("blk.0.ffn_up.weight", "model.layers.0.mlp.up_proj.weight"),
+        ("blk.0.ffn_down.weight", "model.layers.0.mlp.down_proj.weight"),
+    ):
+        r = d("muse-glimmer", gguf)
+        assert r.kind == MAP and r.hf_name == hf, gguf
+
+
+def test_muse_glimmer_globals_resolve():
+    assert d("muse-glimmer", "token_embd.weight").hf_name == "model.embed_tokens.weight"
+    assert d("muse-glimmer", "output_norm.weight").hf_name == "model.norm.weight"
+    assert d("muse-glimmer", "output.weight").hf_name == "lm_head.weight"
