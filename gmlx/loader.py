@@ -616,6 +616,13 @@ _MTP_TARGET_HOOKS_BY_TYPE = {
         "speculative_argmax_from_hidden",
         "speculative_verify_hidden",
     ),
+    # MuseGlimmerSpecLM (vendored mlx-lm class): same lean set as deepseek_v4.
+    "muse_glimmer": (
+        "rollback_speculative_cache",
+        "speculative_logits_from_hidden",
+        "speculative_argmax_from_hidden",
+        "speculative_verify_hidden",
+    ),
 }
 
 
@@ -751,6 +758,17 @@ def _mtp_target_classes(model_type: str):
             return hy_v3_mtp.HyV3SpecLM(ModelArgs.from_dict(config))
 
         return hy_v3_mtp.HyV3SpecLM, build
+    if model_type == "muse_glimmer":
+        from . import muse_glimmer_mtp, muse_glimmer_tools
+        from .muse_glimmer_model import ModelArgs, ensure_registered
+
+        ensure_registered()
+        muse_glimmer_tools.ensure_registered()
+
+        def build(config):
+            return muse_glimmer_mtp.MuseGlimmerSpecLM(ModelArgs.from_dict(config))
+
+        return muse_glimmer_mtp.MuseGlimmerSpecLM, build
     from .arch_table import MTP_WIRED_MODEL_TYPES
 
     raise NotImplementedError(
@@ -907,6 +925,15 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         from . import kimi_k3_model
 
         kimi_k3_model.ensure_registered()
+    if mt == "muse_glimmer":
+        # mlx-lm ships no muse_glimmer module (afmoe is the nearest relative);
+        # same vendored-registration pattern as kimi_k3. The tool parser
+        # registers with the model so a later serve template-inference
+        # resolves it.
+        from . import muse_glimmer_model, muse_glimmer_tools
+
+        muse_glimmer_model.ensure_registered()
+        muse_glimmer_tools.ensure_registered()
     Model, ModelArgs = _get_classes(config)
     model_args = ModelArgs.from_dict(config)
     model = Model(model_args)
@@ -2690,6 +2717,19 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
                 ".a_folded", ".dt_bias", "_res_score"),
 }
 
+# Params kept at their native f16 through the bf16 cast (no upcast). MLX
+# promotes an f16-weight matmul against f32 activations to f32, so these read
+# half the bytes of an fp32 pin while computing the same values.
+_F16_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
+    # muse_glimmer's mmproj is native F16 and llama.cpp runs the tower with f32
+    # activations. 50 residual layers with large outliers (features span +-76)
+    # compound bf16 rounding into ~10% relative RMS on the projected embeddings
+    # against an f32 run. The tower entry casts its input to f32, so activations
+    # ride fp32 promotion while the weights stay F16 - the oracle's own layout.
+    # Vision only - the text tower's bf16 holds 16k parity.
+    "muse_glimmer": ("vision_tower.", "vision_adapter.", "vision_projection."),
+}
+
 
 def preset_native_fp_wire_env(args) -> None:
     """Pre-set wire mode when a streaming placement is coming.
@@ -2789,6 +2829,7 @@ def _install_and_load(
     sanitize: bool = True,
     no_alias: set[str] | None = None,
     fp32_keep: tuple[str, ...] = (),
+    f16_keep: tuple[str, ...] = (),
     source_key: tuple | None = None,
     active_before: float | None = None,
 ) -> None:
@@ -2809,7 +2850,8 @@ def _install_and_load(
     the same suffix match used for the kquant meta.
 
     ``fp32_keep``: target-name substrings pinned to float32 through the bf16
-    cast (see ``_FP32_KEEP_BY_MODEL_TYPE``).
+    cast (see ``_FP32_KEEP_BY_MODEL_TYPE``). ``f16_keep``: substrings kept at
+    their native f16 instead (see ``_F16_KEEP_BY_MODEL_TYPE``).
 
     ``active_before``: active-memory baseline for the untracked-weights split.
     Callers that read wire bytes before installing must pass the pre-read
@@ -2915,6 +2957,8 @@ def _install_and_load(
             if fp32_keep and any(s in k for s in fp32_keep):
                 if v.dtype != mx.float32:      # e.g. F16 ape tables
                     loadable[k] = v.astype(mx.float32)
+                continue
+            if f16_keep and any(s in k for s in f16_keep):
                 continue
             if v.dtype == mx.float16:
                 # Same-itemsize f16->bf16 gets buffer-donated into the source

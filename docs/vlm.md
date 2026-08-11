@@ -55,6 +55,12 @@ families that share one. An unsupported pairing fails loudly at load with both n
 | Qwen3-Omni | `qwen3vl_merger` + `qwen3vlmoe` | Qwen3-Omni (vision + audio) |
 | gemma-4 omni | `gemma4v`/`gemma4a` | gemma-4-E2B / E4B (vision + audio) |
 | gemma-4 unified | `gemma4uv` | gemma-4-12B (encoder-free unified embedder) |
+| Muse Glimmer | `muse-glimmer` + `muse-glimmer` | Muse-Glimmer-30B |
+
+Muse Glimmer's vision tower and image processor are implemented in gmlx. Neither
+mlx-vlm nor the installed transformers ships the family, so the preprocessing
+ports llama.cpp's `mtmd_image_preprocessor_muse_glimmer`. `--hf-source` is not
+needed.
 
 Qwen2-VL / Qwen2.5-VL mmprojs (`qwen2vl_merger`) are not supported yet. The
 load fails up front with the family named. LLaVA's image processor isn't

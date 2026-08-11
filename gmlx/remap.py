@@ -164,6 +164,18 @@ ARCH_ALIAS = {
     # HF tensor; the split converter's de-interleave preserves group order), so
     # the qwen3.5 tiled-V patch must not fire - see _needs_tiled_v_patch.
     "qwen3next": "QWEN3NEXT",
+    # Meta Muse Glimmer (llama.cpp 'muse-glimmer'): a dense sandwich-norm decoder
+    # with an attention output gate and per-head qk-norm. Almost everything
+    # resolves canonically; see the MUSE_GLIMMER block for the two names that
+    # can't (the ffn_norm collision and attn_gate, which the canonical map homes
+    # on qwen3.5's linear_attn). llama.cpp tags the arch LLAMA_ROPE_TYPE_NORM and
+    # the converter un-permutes HF's rotate_half Q/K into the interleaved layout,
+    # so Q/K pass through un-permuted and the model runs rope traditional=True -
+    # equivalent to qk_permute + traditional=False, without copying every
+    # attn_q/attn_k off the wire. The four per-layer norms carry a baked +1 that
+    # a plain nn.RMSNorm consumes directly, so the arch stays out of
+    # _GEMMA_NORM_BAKED_ARCHS.
+    "muse-glimmer": "MUSE_GLIMMER",
     # DiffusionGemma (llama.cpp 'diffusion-gemma'): an encoder-decoder block-
     # diffusion model on the Gemma-4 MoE backbone. The decoder backbone uses the
     # exact Gemma-4 GGUF tensor names, but the mlx-vlm Model nests them under
@@ -469,6 +481,18 @@ ARCH_PRIORITY_OVERRIDES: dict[str, list[tuple[re.Pattern, str | None, str]]] = {
          "model.layers.{bid}.self_attn.k_proj.bias", "passthrough"),
         (re.compile(r"^blk\.(\d+)\.attn_v\.bias$"),
          "model.layers.{bid}.self_attn.v_proj.bias", "passthrough"),
+    ],
+    "MUSE_GLIMMER": [
+        # Muse Glimmer keeps a separate pre-FFN norm, so ffn_norm is the
+        # pre_feedforward_layernorm. Pin past the FFN_NORM/FFN_PRE_NORM
+        # collision; post_attention_norm and post_ffw_norm resolve canonically.
+        (re.compile(r"^blk\.(\d+)\.ffn_norm\.weight$"),
+         "model.layers.{bid}.pre_feedforward_layernorm.weight", "passthrough"),
+        # Attention output gate (sigmoid(x_norm @ W_gate) * attn_out, before
+        # o_proj). CANONICAL_HF homes ATTN_GATE on qwen3.5's linear_attn
+        # in_proj_z, so claim it here for the afmoe-shaped self_attn.gate_proj.
+        (re.compile(r"^blk\.(\d+)\.attn_gate\.weight$"),
+         "model.layers.{bid}.self_attn.gate_proj.weight", "passthrough"),
     ],
     "ERNIE4_5_MOE": [
         # Baidu ERNIE-4.5-MoE: shared-expert fine-grained MoE with leading dense

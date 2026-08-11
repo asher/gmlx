@@ -8,6 +8,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Muse Glimmer support (GGUF arch `muse-glimmer`, Meta Muse Glimmer 30B):
+  a vendored text decoder with sandwich norms at two epsilons, an
+  attention output gate, and NoPE on the full-attention layers with RoPE
+  only on the 2048-window sliding ones. Vision rides the `muse-glimmer`
+  mmproj through a vendored ViT and a GGUF-only image processor. The ATEM
+  reasoning channel and its XML tool calls are wired through chat, serve,
+  thinking budgets, and the muse profile family (reasoning strength
+  low/medium/high/xhigh). `--draft-gguf` loads the DFlash drafter for
+  speculative decoding.
 - serve --speculative: a request arriving while one stream decodes with
   MTP no longer waits for it to finish; the stream converts to shared
   batch decode and speculation resumes once the batch drains back under

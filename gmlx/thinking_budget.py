@@ -41,7 +41,13 @@ _THINK_PAIRS = (("<think>", "</think>"),
                 ("<mm:think>", "</mm:think>"),
                 # Kimi-K3 XTML sections (multi-token markers; the prompt
                 # pre-opens the think section).
-                ("<|open|>think<|sep|>", "<|close|>think<|sep|>"))
+                ("<|open|>think<|sep|>", "<|close|>think<|sep|>"),
+                # Onyx ATEM (Muse Glimmer): the reasoning message is addressed
+                # to self and ends at <|eom|>. Both literals appear verbatim in
+                # the template source. The generation prompt stops one marker
+                # short (at "<|start|>assistant"), so the block is not
+                # prompt-opened and the model emits the whole header itself.
+                ("<|start|>assistant to=self<|message|>", "<|eom|>"))
 
 # Forced into the thinking block ahead of the first budget-triggered close.
 # The model must see itself DECIDE to answer: a bare close tag cuts the

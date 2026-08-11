@@ -265,8 +265,8 @@ Coverage runs across the major open-weight families: Llama and Mistral;
 Qwen 2 through 3.6, dense and MoE, including the gated-DeltaNet hybrids and
 Qwen3-Next; Gemma 1 through 4 plus DiffusionGemma; DeepSeek V3/R1 and
 V4-Flash; GLM 4 through 5.2; gpt-oss; Kimi-K3; MiniMax M2 and M3; Hunyuan
-A13B and Hy3; Granite, including the 4.x hybrids; Nemotron-H; Falcon-H1;
-ERNIE-4.5; Phi-3; Seed-OSS; and SmolLM3. New architectures land regularly,
+A13B and Hy3; Muse Glimmer; Granite, including the 4.x hybrids; Nemotron-H;
+Falcon-H1; ERNIE-4.5; Phi-3; Seed-OSS; and SmolLM3. New architectures land regularly,
 and a family is listed in the generated
 [architecture coverage matrix](https://github.com/asher/gmlx/blob/main/docs/arch-coverage.md)
 only after token-parity certification against llama.cpp at 16k context; the

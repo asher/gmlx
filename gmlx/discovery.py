@@ -66,7 +66,7 @@ _QUANT_TRAILING = re.compile(
 # (mmproj/assistant/...) plus imatrix provenance (mradermacher `i1`, `imatrix`) -
 # that's quant provenance, not part of the model name, and leaving it in splits
 # one model's quants across two id prefixes (`...instruct.i1-*` vs `...instruct-*`).
-_ID_MARKERS = ("mmproj", "assistant", "draft", "mtp", "gguf",
+_ID_MARKERS = ("mmproj", "assistant", "draft", "mtp", "dflash", "gguf",
                "imatrix", "imat", "i1")
 
 

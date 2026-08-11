@@ -447,6 +447,65 @@ def test_stop_set_dedups_when_eot_equals_eos():
     assert tok._gguf_eos_token_ids.count(1) == 1       # no duplicate
 
 
+# Muse Glimmer declares eot and deliberately not eom. <|eom|> closes a non-final
+# message - the reasoning channel ends on it and the answer follows - so folding
+# it into the stop set would cut every reply off at end-of-thinking. Both routes
+# into the stop set have to agree on that: the metadata read and the chat
+# template heuristic.
+_MUSE_SPECIALS = ["<s>", "</s>", "<pad>", "<|eom|>", "<|eot|>"]
+_MUSE_EOM, _MUSE_EOT = 3, 4
+_MUSE_TEMPLATE = (
+    "{%- for m in messages -%}"
+    "{{- '<|start|>' + m['role'] + '<|message|>' + m['content'] -}}"
+    "{{- '<|eot|>' if loop.last else '<|eom|>' -}}"
+    "{%- endfor -%}"
+    "{%- if add_generation_prompt -%}{{- '<|start|>assistant' -}}{%- endif -%}"
+)
+
+
+def _muse_meta() -> dict:
+    toks = _MUSE_SPECIALS + _ALPHABET + _MERGED
+    meta = {
+        "general.architecture": "muse-glimmer",
+        "tokenizer.ggml.model": "gpt2",
+        "tokenizer.ggml.pre": "llama4",
+        "tokenizer.ggml.tokens": toks,
+        "tokenizer.ggml.merges": _MERGES,
+        "tokenizer.ggml.token_type":
+            [3] * len(_MUSE_SPECIALS) + [1] * (len(toks) - len(_MUSE_SPECIALS)),
+        "tokenizer.ggml.bos_token_id": 0,
+        "tokenizer.ggml.eos_token_id": 1,
+        "tokenizer.ggml.padding_token_id": 2,
+        "tokenizer.chat_template": _MUSE_TEMPLATE,
+    }
+    return meta
+
+
+def test_muse_glimmer_metadata_declares_eot_only():
+    from gmlx.tokenizer import _metadata_stop_ids
+
+    # The real ids, as the 30B GGUF carries them: eos <|end_of_text|> 200001,
+    # eot <|eot|> 200008. <|eom|> is 200007 and appears in no metadata key.
+    meta = {"tokenizer.ggml.eot_token_id": 200008}
+    assert _metadata_stop_ids(meta, 202048) == [200008]
+
+
+def test_muse_glimmer_stop_set_keeps_eot_and_not_eom():
+    meta = _muse_meta()
+    meta["tokenizer.ggml.eot_token_id"] = _MUSE_EOT
+    tok = load_tokenizer_from_gguf(meta, "muse-glimmer")
+    assert _MUSE_EOT in tok._gguf_eos_token_ids
+    assert _MUSE_EOM not in tok._gguf_eos_token_ids
+
+
+def test_muse_glimmer_template_heuristic_also_lands_on_eot():
+    # Without the metadata key, the template heuristic is the only route; the
+    # rendered assistant turn ends on <|eot|>, so it must not adopt <|eom|>.
+    tok = load_tokenizer_from_gguf(_muse_meta(), "muse-glimmer")
+    assert _MUSE_EOT in tok._gguf_eos_token_ids
+    assert _MUSE_EOM not in tok._gguf_eos_token_ids
+
+
 # add_eos_token: a post-processor appends EOS on the raw path (parity with
 # llama.cpp), bypassed on the chat path (add_special_tokens=False) so a template
 # carrying its own EOS never doubles up - symmetric with add_bos_token.

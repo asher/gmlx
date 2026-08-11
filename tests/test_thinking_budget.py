@@ -601,3 +601,42 @@ def test_prompt_open_think_tag_returns_model_spelling():
     assert prompt_open_think_tag(
         "x <|channel>thought reasoning", tokenizer=_Marker()
     ) == "<|channel>thought"
+
+
+class _MuseTok:
+    """Just the surface ``_template_think_pair`` reads."""
+    chat_template = (
+        "{%- if reasoning_strength %}Reasoning strength: {{ reasoning_strength }}"
+        "{%- endif %}<|start|>assistant to=self<|message|>...<|eom|>"
+    )
+
+
+def test_muse_glimmer_think_pair_resolves_from_the_template():
+    from gmlx.thinking_budget import _template_think_pair
+
+    assert _template_think_pair(_MuseTok()) == (
+        "<|start|>assistant to=self<|message|>", "<|eom|>")
+
+
+def test_muse_glimmer_generation_prompt_is_not_open_thinking():
+    """The generation prompt stops at ``<|start|>assistant``; the reasoning
+    header is only completed by what the model generates, so the budget must
+    not start counting yet."""
+    from gmlx.thinking_budget import prompt_opens_thinking
+
+    prompt = "<|start|>user<|message|>hi<|eot|><|start|>assistant"
+    assert not prompt_opens_thinking(prompt, tokenizer=_MuseTok())
+
+
+def test_muse_glimmer_open_reasoning_message_is_detected():
+    from gmlx.thinking_budget import prompt_opens_thinking
+
+    prompt = "<|start|>assistant to=self<|message|>half a thought"
+    assert prompt_opens_thinking(prompt, tokenizer=_MuseTok())
+
+
+def test_muse_glimmer_closed_reasoning_message_is_not_open():
+    from gmlx.thinking_budget import prompt_opens_thinking
+
+    prompt = "<|start|>assistant to=self<|message|>done<|eom|>"
+    assert not prompt_opens_thinking(prompt, tokenizer=_MuseTok())

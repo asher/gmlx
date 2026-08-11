@@ -426,6 +426,7 @@ class ChatState:
     last_stats: dict | None = None
     last_tps: float | None = None
     last_think_open: bool = False
+    last_header_open: bool = False
 
     # session bookkeeping
     session_stats: dict | None = None
@@ -879,6 +880,7 @@ def _end_turn(state: ChatState, reply: str, canceled: bool, cache=None) -> None:
             "ts": now,
             "canceled": bool(canceled),
             "think_open": state.last_think_open,
+            "header_open": state.last_header_open,
             "stats": stats,
         },
         "cache_before": cp.get("cache_before", 0),
@@ -1011,11 +1013,12 @@ def _print_model_info(state: ChatState) -> None:
         print(f"  adapter  {info['adapter']}")
 
 
-def _strip_thinking(text: str, start_in_thinking: bool = False) -> str:
+def _strip_thinking(text: str, start_in_thinking: bool = False,
+                    start_in_header: bool = False) -> str:
     """The answer portion of a raw reply (reasoning spans + markers removed)."""
     from .sessions import split_thinking
 
-    return split_thinking(text, start_in_thinking)[1]
+    return split_thinking(text, start_in_thinking, start_in_header)[1]
 
 
 def _session_doc(state: ChatState) -> dict:
@@ -1073,7 +1076,8 @@ def _copy_last_answer(state: ChatState) -> None:
         print("[chat] nothing to copy yet")
         return
     a = transcript[-1]["assistant"]
-    text = _strip_thinking(a.get("content", ""), a.get("think_open", False))
+    text = _strip_thinking(a.get("content", ""), a.get("think_open", False),
+                           a.get("header_open", False))
     if not text:
         print("[chat] the last reply has no answer text to copy")
         return
@@ -1822,13 +1826,16 @@ def _stream_reply(
     state: ChatState,
     stops: list | None = None,
     start_in_thinking: bool = False,
+    start_in_header: bool = False,
     drafter=None,
 ) -> tuple[str, bool]:
     """Print a streaming reply; Esc or Ctrl-C cancels it (the session keeps
     running) and a ``stops`` sequence ends it cleanly (trimmed). Reasoning
     ("thinking") spans are stripped of their control markers and dimmed (or
     hidden) per ``state.reasoning`` - ``start_in_thinking`` seeds the case
-    where the chat template pre-opens ``<think>`` so only the close is streamed.
+    where the chat template pre-opens ``<think>`` so only the close is streamed,
+    and ``start_in_header`` the harmony/ATEM case where the prompt stops
+    mid-header at ``<|start|>assistant``.
     Returns ``(text_so_far, canceled)`` - the *raw* text (markers intact) so
     multi-turn history stays faithful - and records the reply's tok/s for the
     stat line + toolbar when it completes."""
@@ -1837,8 +1844,10 @@ def _stream_reply(
 
     scanner = StopScanner(stops) if stops else None
     state.last_think_open = bool(start_in_thinking)
+    state.last_header_open = bool(start_in_header)
     display = state.reasoning
-    rf = None if display == "raw" else ReasoningFilter(start_in_thinking=start_in_thinking)
+    rf = None if display == "raw" else ReasoningFilter(
+        start_in_thinking=start_in_thinking, start_in_header=start_in_header)
     theme = state.theme
     renderer = None
     if state.render in ("lite", "rich") and display != "raw":
@@ -1957,6 +1966,14 @@ def _opens_thinking(prompt) -> bool:
     from .thinking_budget import prompt_opens_thinking
 
     return prompt_opens_thinking(prompt)
+
+
+def _opens_header(prompt) -> bool:
+    """Whether a rendered ``prompt`` stops inside a harmony/ATEM message header
+    (see ``reasoning.prompt_opens_header``)."""
+    from .reasoning import prompt_opens_header
+
+    return prompt_opens_header(prompt)
 
 
 def _vlm_message(
@@ -3552,6 +3569,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                     state,
                     stops=args.stop,
                     start_in_thinking=_opens_thinking(prompt_text),
+                    start_in_header=_opens_header(prompt_text),
                     drafter=drafter,
                 )
                 if reply:
@@ -3629,6 +3647,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                     state,
                     stops=args.stop,
                     start_in_thinking=_opens_thinking(prompt),
+                    start_in_header=_opens_header(prompt),
                 )
             finally:
                 clear_finish_key_target()
@@ -3673,6 +3692,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 state,
                 stops=args.stop,
                 start_in_thinking=_opens_thinking(prompt_text),
+                start_in_header=_opens_header(prompt_text),
                 drafter=drafter,
             )
             _end_turn(state, reply, canceled, cache=cache)
@@ -3707,6 +3727,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 state,
                 stops=args.stop,
                 start_in_thinking=_opens_thinking(prompt_text),
+                start_in_header=_opens_header(prompt_text),
             )
             _end_turn(state, reply, canceled)
             continue
@@ -3795,6 +3816,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 state,
                 stops=args.stop,
                 start_in_thinking=_opens_thinking(prompt_text),
+                start_in_header=_opens_header(prompt_text),
             )
         finally:
             clear_finish_key_target()

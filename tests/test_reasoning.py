@@ -537,3 +537,83 @@ def test_split_harmony_reply_shapes():
     assert split_harmony_reply(capped) == ("Count the", "")
     plain = "Six."
     assert split_harmony_reply(plain) == (None, "Six.")
+
+
+# --- muse-glimmer ATEM channel ------------------------------------------------
+#
+# Routing is on the message HEADER, not on a "to=self" marker: any marker whose
+# text can occur in prose would misclassify other models, and one starting with
+# a space or letter would make _partial_tail_start hold that character back at
+# every chunk boundary. The header is swallowed whole and only an explicit
+# "to=self" recipient routes to reasoning.
+
+_MUSE = (
+    "<|start|>assistant to=self<|message|>Work out the capital.<|eom|>"
+    "<|start|>assistant<|message|>The capital of France is Paris.<|eot|>"
+)
+# The generation prompt already ends with "<|start|>assistant", so the FIRST
+# generated turn streams the header tail only - hence the start_in_header seed.
+_MUSE_FIRST = (
+    " to=self<|message|>Work out the capital.<|eom|>"
+    "<|start|>assistant to=user<|message|>The capital of France is Paris.<|eot|>"
+)
+_MUSE_TOOL = (
+    "<|start|>assistant to=self<|message|>Need the weather.<|eom|>"
+    "<|start|>assistant to=weather.get<|message|>"
+    '<atem:function_calls><atem:invoke name="get_weather">'
+    '<atem:parameter name="city">Paris</atem:parameter>'
+    "</atem:invoke></atem:function_calls><|eot|>"
+)
+
+
+def _segment_header(text: str, *, chunk: int = 0):
+    f = ReasoningFilter(start_in_header=True)
+    spans: list[tuple[str, str]] = []
+    if chunk:
+        for i in range(0, len(text), chunk):
+            spans += f.feed(text[i : i + chunk])
+    else:
+        spans += f.feed(text)
+    spans += f.flush()
+    return ("".join(t for t, m in spans if m == "reason"),
+            "".join(t for t, m in spans if m == "answer"))
+
+
+@pytest.mark.parametrize("chunk", [0, 1, 3, 7, 13])
+def test_muse_glimmer_self_channel_then_answer(chunk):
+    reason, answer, _ = _segment(_MUSE, chunk=chunk)
+    assert reason == "Work out the capital."
+    assert answer == "The capital of France is Paris."
+    for frag in ("<|", "|>", "to=self", "message", "eom", "eot"):
+        assert frag not in reason + answer
+
+
+@pytest.mark.parametrize("chunk", [0, 1, 3, 7, 13])
+def test_muse_glimmer_first_turn_needs_the_header_seed(chunk):
+    reason, answer = _segment_header(_MUSE_FIRST, chunk=chunk)
+    assert reason == "Work out the capital."
+    assert answer == "The capital of France is Paris."
+    # " to=user" is header too - it must be swallowed, not leaked as answer text
+    assert "to=user" not in reason + answer
+    assert not answer.startswith(" to=")
+
+
+@pytest.mark.parametrize("chunk", [0, 1, 3, 7, 13])
+def test_muse_glimmer_tool_recipient_is_swallowed_and_call_is_answer(chunk):
+    reason, answer, _ = _segment(_MUSE_TOOL, chunk=chunk)
+    assert reason == "Need the weather."
+    assert "to=weather.get" not in reason + answer
+    # the tool block itself is answer-side, so the tool parser still sees it
+    assert answer.startswith("<atem:function_calls>")
+    assert 'name="get_weather"' in answer
+
+
+@pytest.mark.parametrize("chunk", [0, 1, 3, 7, 13])
+def test_muse_glimmer_eom_returns_to_answer_without_a_self_header(chunk):
+    """A non-final message that is not addressed to self stays answer-side."""
+    text = ("<|start|>assistant to=self<|message|>think<|eom|>"
+            "<|start|>assistant<|message|>first<|eom|>"
+            "<|start|>assistant<|message|>second<|eot|>")
+    reason, answer, _ = _segment(text, chunk=chunk)
+    assert reason == "think"
+    assert answer == "firstsecond"

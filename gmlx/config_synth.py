@@ -128,6 +128,13 @@ GGUF_ARCH_TO_MODEL_TYPE = {
     # per-head qk-norm, plain rope. Native MTP/NextN block past the trunk.
     # Model class vendored from mlx-lm PR #1485.
     "hy_v3": "hy_v3",
+    # Meta Muse Glimmer 30B: dense sandwich-norm decoder with an attention output
+    # gate, per-head qk-norm absorbing qk_scale_factor, and RoPE on the
+    # sliding-window layers only (full-attention layers are NoPE). Logit scale +
+    # tanh softcap on the head. Model class vendored (no mlx-lm class; afmoe is
+    # the nearest relative). Pairs with the Muse Glimmer mmproj (--mmproj) and
+    # the DFlash drafter (--draft-gguf).
+    "muse-glimmer": "muse_glimmer",
     # Moonshot Kimi-K3 (2.8T-A50B): hybrid KDA (linear, per-channel decay) +
     # nope-only MLA layers from the per-layer head_count_kv schedule, latent
     # 896-expert sigmoid MoE behind down/up projections, situ activation,
@@ -1639,6 +1646,64 @@ def _synth_hy_v3(meta, shapes, config: dict) -> None:
     config["rope_parameters"] = rope_parameters
 
 
+# muse-glimmer (Meta Muse Glimmer 30B)
+
+def _synth_muse_glimmer(meta, shapes, config: dict) -> None:
+    """Synthesize a muse_glimmer config from a 'muse-glimmer'-arch GGUF.
+
+    The universal fields cover hidden/layers/heads/kv/ffn/ctx/eps/head_dim/
+    rope_theta/tie/vocab. This adds the per-layer sliding/full schedule, the
+    logit scale + softcap, and the second norm epsilon.
+
+    ``post_norm_eps`` (post-attention and post-FFN norms only) is not in the
+    GGUF: llama.cpp hardcodes 1e-8 (muse-glimmer.cpp:68) and the HF
+    text_config carries the same value. Pinned here, in both those terms, so a
+    future variant that changes it is caught by the parity gate rather than
+    silently mis-normed.
+    """
+    arch = "muse-glimmer"
+    n_layers = config["num_hidden_layers"]
+
+    config["sliding_window"] = _require(
+        _read_int(meta, f"{arch}.attention.sliding_window"),
+        arch=arch, gguf_field=f"{arch}.attention.sliding_window")
+
+    # Per-layer schedule: 1 = sliding (and rope'd), 0 = full (and NoPE). The KV
+    # is a per-layer bool array on every known conversion; llama.cpp also
+    # accepts a scalar period (set_swa_pattern: layer is full when
+    # (i + 1) % period == 0), so honour that form too.
+    key = f"{arch}.attention.sliding_window_pattern"
+    if _array_len(meta, key) == 1:
+        period = _require(_read_int(meta, key), arch=arch, gguf_field=key)
+        pattern = [(i + 1) % period != 0 for i in range(n_layers)]
+    else:
+        pattern = _read_bool_array(meta, key)
+        if pattern is None:
+            # llama.cpp's default period when the key is absent entirely.
+            pattern = [(i + 1) % 4 != 0 for i in range(n_layers)]
+        elif len(pattern) != n_layers:
+            raise ValueError(
+                f"muse-glimmer synth: {key} has {len(pattern)} entries for "
+                f"{n_layers} layers")
+    config["layer_types"] = [
+        "sliding_attention" if v else "full_attention" for v in pattern]
+
+    config["output_multiplier"] = _require(
+        _read_float(meta, f"{arch}.logit_scale"),
+        arch=arch, gguf_field=f"{arch}.logit_scale")
+    # llama.cpp reads the softcap as optional and leaves it 0 (disabled) when
+    # absent; the converter always writes 20.0.
+    config["final_logit_softcapping"] = (
+        _read_float(meta, f"{arch}.final_logit_softcapping") or 0.0)
+    config["post_norm_eps"] = 1e-8
+
+    config["rope_parameters"] = {
+        "rope_theta": _require(config.get("rope_theta"),
+                               arch=arch, gguf_field=f"{arch}.rope.freq_base"),
+        "rope_type": "default",
+    }
+
+
 # granitehybrid (IBM Granite 4.x hybrid: H-Micro / H-Tiny / H-Small)
 
 def _synth_granite_hybrid(meta, shapes, config: dict) -> None:
@@ -2892,6 +2957,7 @@ _SYNTH = {
     "minimax-m3": _synth_minimax_m3,
     "hunyuan-moe": _synth_hunyuan,
     "hy_v3": _synth_hy_v3,
+    "muse-glimmer": _synth_muse_glimmer,
     "granitehybrid": _synth_granite_hybrid,
     "falcon-h1": _synth_falcon_h1,
     "qwen3next": _synth_qwen3next,

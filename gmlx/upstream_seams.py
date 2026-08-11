@@ -241,11 +241,12 @@ SEAMS: tuple[Seam, ...] = (
          "server_patches (HF download gate)", critical=True),
     Seam("mlx_vlm.utils", "StoppingCriteria.__call__",
          "server_patches (ignore-EOS)"),
-    # --- tool-parser registry (hy_v3_tools.ensure_registered) ---
+    # --- tool-parser registry (hy_v3_tools / muse_glimmer_tools) ---
     Seam("mlx_vlm.tool_parsers", "_TEMPLATE_MARKERS",
-         "hy_v3_tools.ensure_registered (Hy3 marker prepend)"),
+         "hy_v3_tools / muse_glimmer_tools ensure_registered (marker prepend)"),
     Seam("mlx_vlm.tool_parsers", "load_tool_module",
-         "hy_v3_tools (sys.modules graft resolves through it)"),
+         "hy_v3_tools / muse_glimmer_tools (sys.modules graft resolves "
+         "through it)"),
     # --- APC internals (lone-harvest patch, gmlx manager subclass, apc_pooling) ---
     Seam("mlx_vlm.apc", "harvest_blocks_from_batch_cache",
          "server_patches.install_apc_lone_harvest", critical=True),
@@ -493,6 +494,38 @@ def vendored_upstream_collisions() -> list[str]:
                 f"{mod_name}: upstream mlx-lm now ships this module; the "
                 f"vendored copy shadows it - reconcile and drop the vendor "
                 f"entry (arch_table._VENDORED_MLX_LM_MODULES)")
+    hits += _vendored_vlm_collisions()
+    return hits
+
+
+# gmlx module -> the mlx-vlm namespace its ensure_registered() grafts into.
+# Each is a package directory upstream, so a native arrival shows up as either
+# a <leaf>.py module or a <leaf>/ package.
+VENDORED_MLX_VLM_MODULES = {
+    "gmlx.muse_glimmer_vlm_model": "mlx_vlm.models.muse_glimmer",
+    "gmlx.hy_v3_tools": "mlx_vlm.tool_parsers.hy_v3",
+    "gmlx.muse_glimmer_tools": "mlx_vlm.tool_parsers.muse_glimmer",
+}
+
+
+def _vendored_vlm_collisions() -> list[str]:
+    """Same check on the mlx-vlm side: our grafts are upstream-first at import
+    time, but a native module arriving under a name we also register is the
+    signal to drop the vendored copy rather than keep shadowing it."""
+    hits = []
+    for mod_name, target in VENDORED_MLX_VLM_MODULES.items():
+        pkg, _, leaf = target.rpartition(".")
+        try:
+            parent = importlib.import_module(pkg)
+        except ImportError:
+            continue
+        root = os.path.dirname(parent.__file__)
+        if (os.path.exists(os.path.join(root, f"{leaf}.py"))
+                or os.path.isdir(os.path.join(root, leaf))):
+            hits.append(
+                f"{mod_name}: upstream mlx-vlm now ships {target}; the "
+                f"vendored copy is only a fallback - reconcile and drop the "
+                f"vendor entry (upstream_seams.VENDORED_MLX_VLM_MODULES)")
     return hits
 
 

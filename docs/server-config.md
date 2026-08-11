@@ -379,6 +379,7 @@ model fully resolved). Values are cited to the primary model cards in
 | `hunyuan` | `hunyuan-moe` | temperature=0.7 top_p=0.8 top_k=20 repetition_penalty=1.05 | - |
 | `hy3` | `hy_v3` | temperature=0.9 thinking_start_token=<think:opensource> thinking_end_token=</think:opensource> | `@reasoning-high`: temperature=0.9 thinking_start_token=<think:opensource> thinking_end_token=</think:opensource> reasoning_effort=high; `@reasoning-low`: temperature=0.9 thinking_start_token=<think:opensource> thinking_end_token=</think:opensource> reasoning_effort=low |
 | `kimi` | `kimi-k3` | temperature=1.0 top_p=0.95 thinking_start_token=<|open|>think<|sep|> thinking_end_token=<|close|>think<|sep|> | `@reasoning-high`: temperature=1.0 top_p=0.95 thinking_start_token=<|open|>think<|sep|> thinking_end_token=<|close|>think<|sep|> thinking_effort=high; `@reasoning-low`: temperature=1.0 top_p=0.95 thinking_start_token=<|open|>think<|sep|> thinking_end_token=<|close|>think<|sep|> thinking_effort=low; `@reasoning-max`: temperature=1.0 top_p=0.95 thinking_start_token=<|open|>think<|sep|> thinking_end_token=<|close|>think<|sep|> thinking_effort=max |
+| `muse` | `muse-glimmer` | temperature=1.0 top_p=0.95 top_k=64 thinking_start_token=<|start|>assistant to=self<|message|> thinking_end_token=<|eom|> | `@reasoning-high`: temperature=1.0 top_p=0.95 top_k=64 thinking_start_token=<|start|>assistant to=self<|message|> thinking_end_token=<|eom|> reasoning_strength=high; `@reasoning-low`: temperature=1.0 top_p=0.95 top_k=64 thinking_start_token=<|start|>assistant to=self<|message|> thinking_end_token=<|eom|> reasoning_strength=low; `@reasoning-medium`: temperature=1.0 top_p=0.95 top_k=64 thinking_start_token=<|start|>assistant to=self<|message|> thinking_end_token=<|eom|> reasoning_strength=medium; `@reasoning-xhigh`: temperature=1.0 top_p=0.95 top_k=64 thinking_start_token=<|start|>assistant to=self<|message|> thinking_end_token=<|eom|> reasoning_strength=xhigh |
 | `llama` | `llama`, `smollm3` | temperature=0.6 top_p=0.9 | - |
 | `mistral` | `mistral3` | temperature=0.15 | - |
 | `default` | *(anything else)* | temperature=0.7 top_p=0.95 | `@coding`: temperature=0.3 top_p=0.95; `@creative`: temperature=1.0 top_p=0.95 min_p=0.05; `@instruct`: temperature=0.7 top_p=0.95 |
@@ -406,6 +407,11 @@ Notes on individual families:
   (`<|open|>think<|sep|>` / `<|close|>think<|sep|>`) are set as the family's
   thinking tokens so open-think detection, thinking budgets, and the stream
   splitter track the model's real section tags.
+- muse: the `@reasoning-*` intents set `reasoning_strength`, the Muse Glimmer
+  template's variable name. It takes `low`/`medium`/`high`/`xhigh` and defaults
+  to `high`. Reasoning is a message channel rather than a tag pair, so the
+  thinking markers are the channel's own delimiters
+  (`<|start|>assistant to=self<|message|>` / `<|eom|>`).
 - qwen3.6 / qwen3: `@instruct` also sets `enable_thinking: false` (the card's
   non-thinking operating point).
 - `default`: the fallback for unknown architectures, the historic scaffold

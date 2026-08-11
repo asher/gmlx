@@ -186,9 +186,10 @@ def _verbose_emitter(prompt, tokenizer, reasoning):
     echoing the prompt-opened think tag so the bare close marker still reads."""
     open_tag = _echo_think_tag(prompt, tokenizer)
     if reasoning in ("show", "hide"):
-        from .reasoning import StreamRenderer
+        from .reasoning import StreamRenderer, prompt_opens_header
 
-        r = StreamRenderer(reasoning, start_in_thinking=open_tag is not None)
+        r = StreamRenderer(reasoning, start_in_thinking=open_tag is not None,
+                           start_in_header=prompt_opens_header(prompt))
         return r.write, r.close
     if open_tag is not None:
         print(open_tag, flush=True)
