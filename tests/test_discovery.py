@@ -848,3 +848,36 @@ def test_read_sampling_normalizes_disabled_sentinels():
           "general.sampling.top_k": -1, "general.sampling.repeat_penalty": 1.0}
     assert disc._read_sampling(kv) == {"temperature": 0.9, "top_p": 0.0,
                                        "top_k": 0}
+
+
+# muse-glimmer: the per-family arch tuple, and the "dflash" id marker
+
+
+def test_muse_glimmer_companion_is_found_by_arch_tuple(tmp_path, monkeypatch):
+    """A muse-glimmer target asks for ``dflash`` only - the deepseek4 arches
+    are not in its tuple, so a dspark sidecar next door is not picked up."""
+    target = tmp_path / "Muse-Glimmer-30B-Q6_K_L.gguf"
+    for name in ("dflash-kquant.gguf", target.name):
+        (tmp_path / name).write_bytes(b"GGUF")
+    metas = {str(tmp_path / "dflash-kquant.gguf"): {"arch": "dflash"},
+             str(target): {"arch": "muse-glimmer"}}
+    monkeypatch.setattr(disc, "header_meta", lambda p: metas.get(str(p)))
+    assert disc.find_mtp_companion(str(target), ("dflash",)) == str(
+        tmp_path / "dflash-kquant.gguf")
+
+
+def test_muse_glimmer_companion_ignores_a_native_dspark_sidecar(
+        tmp_path, monkeypatch):
+    target = tmp_path / "Muse-Glimmer-30B-Q6_K_L.gguf"
+    for name in ("dspark-sidecar.gguf", target.name):
+        (tmp_path / name).write_bytes(b"GGUF")
+    metas = {str(tmp_path / "dspark-sidecar.gguf"): {"arch": "deepseek4-dspark"},
+             str(target): {"arch": "muse-glimmer"}}
+    monkeypatch.setattr(disc, "header_meta", lambda p: metas.get(str(p)))
+    assert disc.find_mtp_companion(str(target), ("dflash",)) is None
+
+
+def test_dflash_is_an_id_marker():
+    """Without this the drafter quant splits the model id and a dflash sidecar
+    is mistaken for a separate model."""
+    assert "dflash" in disc._ID_MARKERS

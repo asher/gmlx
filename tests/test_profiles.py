@@ -157,3 +157,22 @@ def test_describe_complete():
     for r in rows:
         assert set(r["intents"]) == set(profiles.BUILTIN_INTENTS)
         assert r["label"]
+
+
+def test_muse_glimmer_family_carries_the_atem_think_markers_and_four_levels():
+    """The model card's four reasoning levels map onto the template's own
+    ``reasoning_strength`` spelling, and the base sampling seeds the open-think
+    detector with the ATEM header rather than the '<think>' default."""
+    from gmlx.profiles import FAMILIES
+
+    fam = FAMILIES["muse"]
+    assert fam["arches"] == ("muse-glimmer",)
+    s = fam["base"]["sampling"]
+    assert s["thinking_start_token"] == "<|start|>assistant to=self<|message|>"
+    assert s["thinking_end_token"] == "<|eom|>"
+    levels = {
+        name.split("-", 1)[1]: spec["chat_template_kwargs"]["reasoning_strength"]
+        for name, spec in fam["intents"].items()
+    }
+    assert levels == {"low": "low", "medium": "medium",
+                      "high": "high", "xhigh": "xhigh"}

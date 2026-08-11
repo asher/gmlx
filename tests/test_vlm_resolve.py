@@ -18,6 +18,9 @@ from gmlx.vlm import UnsupportedVLMError, resolve_vlm_model_type
     ("qwen3vlmoe", {"clip.vision.projector_type": "qwen3vl_merger"}, "qwen3_omni_moe"),
     ("gemma4", {"clip.vision.projector_type": "gemma4v"}, "gemma4"),
     ("gemma4", {"clip.vision.projector_type": "gemma4uv"}, "gemma4_unified"),
+    ("muse-glimmer", {"clip.projector_type": "muse-glimmer"}, "muse_glimmer"),
+    ("muse-glimmer", {"clip.vision.projector_type": "muse-glimmer"},
+     "muse_glimmer"),
 ])
 def test_supported_families_resolve(llm_arch, mm_meta, expected):
     assert resolve_vlm_model_type(llm_arch, mm_meta) == expected
