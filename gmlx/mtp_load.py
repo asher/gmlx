@@ -1448,14 +1448,21 @@ def load_vlm_mtp_model(
             "this VLM arch can't run text-only MTP"
         )
 
-    # 3. drafter - assistant (a --draft-gguf companion; gemma4) or native-head
-    #    (nextn block inside the LLM GGUF; qwen3.5/3.6).
+    # 3. drafter - assistant (a --draft-gguf companion; gemma4, or a
+    #    muse-glimmer dflash) or native-head (nextn block inside the LLM GGUF;
+    #    qwen3.5/3.6).
     loadlog.stage("loading drafter")
     loadlog.fact("drafter", "assistant" if draft_gguf_path else "native-head")
     if draft_gguf_path:
-        drafter = _load_gemma4_assistant_drafter(
-            draft_gguf_path, model, zero_copy=zero_copy, log=_log
-        )
+        if config.get("model_type") == "muse_glimmer":
+            drafter = _load_dflash_drafter(
+                draft_gguf_path, model, config["text_config"],
+                zero_copy=zero_copy, log=_log
+            )
+        else:
+            drafter = _load_gemma4_assistant_drafter(
+                draft_gguf_path, model, zero_copy=zero_copy, log=_log
+            )
     else:
         # Native head: load_vlm_model already loaded the target and applied the
         # mlx-lm tiled-V patch, but it discards the raw GGUF arrays the drafter's

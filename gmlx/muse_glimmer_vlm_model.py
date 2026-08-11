@@ -41,7 +41,8 @@ from mlx_vlm.models.base import BaseModelConfig, InputEmbeddingsFeatures, Langua
 from mlx_vlm.models.cache import KVCache, RotatingKVCache
 from mlx_vlm.models.interpolate import bilinear_interpolate
 
-from .muse_glimmer_model import MuseGlimmerModel, scale_and_softcap
+from .muse_glimmer_model import MuseGlimmerModel
+from .muse_glimmer_mtp import SpecHooks, _SpecOutput
 
 
 def ensure_registered() -> None:
@@ -310,7 +311,10 @@ class VisionAdapter(nn.Module):
 
 # Text tower, in the shape mlx-vlm's generate stack expects
 
-class LanguageModel(nn.Module):
+class LanguageModel(SpecHooks, nn.Module):
+    """The text tower, carrying the same speculative hooks as the text-only
+    target so ``--mmproj`` and ``--speculative`` compose on one model."""
+
     def __init__(self, config: TextConfig):
         super().__init__()
         self.config = config
@@ -325,15 +329,24 @@ class LanguageModel(nn.Module):
         inputs_embeds: Optional[mx.array] = None,
         mask: Optional[mx.array] = None,
         cache=None,
+        return_hidden: bool = False,
+        return_shared_kv: bool = False,
         **kwargs,
     ):
+        # The backbone builds its own sliding/full masks from the caches.
+        del mask, kwargs
+        want_hidden = return_hidden or return_shared_kv
+        if want_hidden and self._dflash_capture is not None:
+            h, caps = self.model(
+                inputs, cache, capture_layers=self._dflash_capture,
+                inputs_embeds=inputs_embeds)
+            return _SpecOutput(logits=self._spec_logits(h),
+                               hidden_states=[self._dflash_pack(h, caps)])
         h = self.model(inputs, cache=cache, inputs_embeds=inputs_embeds)
-        if self.config.tie_word_embeddings:
-            out = self.model.embed_tokens.as_linear(h)
-        else:
-            out = self.lm_head(h)
-        return LanguageModelOutput(logits=scale_and_softcap(
-            out, self.config.output_multiplier, self.config.final_logit_softcapping))
+        logits = self._spec_logits(h)
+        if not want_hidden:
+            return LanguageModelOutput(logits=logits)
+        return _SpecOutput(logits=logits, hidden_states=[h])
 
     @property
     def layers(self):
