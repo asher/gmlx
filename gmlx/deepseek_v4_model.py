@@ -544,6 +544,56 @@ def _kv_qat_roundtrip(kv: mx.array, n_rot: int) -> mx.array:
     return kv.astype(mx.float16).astype(orig_dtype)
 
 
+# Fused compressor emit-path QAT. GMLX_EMIT_QAT_FUSED is the one rollback
+# gate; the latch below is a permanent fallback after a kernel error, not a
+# second switch.
+_EMIT_QAT_NATIVE = {"on": True}
+
+
+def _emit_qat_fused() -> bool:
+    """Live-read rollback gate for the fused compressor emit QAT.
+
+    Read inside the call path on every call and never cached: the decode
+    A/B harness refuses an arm whose gate is baked at import time or
+    memoized behind a module-level cache."""
+    return os.environ.get("GMLX_EMIT_QAT_FUSED", "1") != "0"
+
+
+def _emit_qat_disarm(exc: Exception) -> None:
+    _EMIT_QAT_NATIVE["on"] = False
+    print(
+        "[dsa] native compressor emit QAT kernel disabled for this process "
+        f"after error (inline fallback active): {exc!r}",
+        file=sys.stderr,
+    )
+
+
+def _compressor_fp8_qat(x: mx.array, n_rot: int) -> mx.array:
+    """Compressor emit-path row round-trip: FP8 on the leading non-RoPE
+    dims, RoPE tail untouched, and no f16 round -- pooled rows feed the
+    indexer pool and the compressed keys, never the f16 KV cache.
+    (ds4.c compressor site: dsv4_fp8_kv_quantize_row, no f16_round)"""
+    d = x.shape[-1]
+    if (
+        _EMIT_QAT_NATIVE["on"]
+        and d > n_rot
+        and (d - n_rot) % 64 == 0
+        and _emit_qat_fused()
+    ):
+        # Fused kernel, bit-identical to the chain below (pinned by
+        # mlx-kquant's test_dsa_kv_qat nof16 bit-identity suite).
+        try:
+            import mlx_kquant as kq
+
+            return kq.dsa_kv_qat(x, n_rot, f16_round=False)
+        except Exception as exc:  # noqa: BLE001 - permanent fallback
+            _emit_qat_disarm(exc)
+    return mx.concatenate(
+        [_fp8_e4m3_roundtrip(x[..., : d - n_rot]), x[..., d - n_rot :]],
+        axis=-1,
+    )
+
+
 def _indexer_qat_roundtrip(x: mx.array) -> mx.array:
     """Indexer activation round-trip: 128-wide Hadamard (scale 1/sqrt(128),
     mx.hadamard_transform's default) then the FP4 round-trip. Applies to
@@ -1280,15 +1330,7 @@ class Compressor(nn.Module):
                 offset=pool_base,
             ).squeeze(1)
             if self._qat == "fp8":
-                new_pooled = mx.concatenate(
-                    [
-                        _fp8_e4m3_roundtrip(
-                            new_pooled[..., : self.head_dim - self.rope_head_dim]
-                        ),
-                        new_pooled[..., self.head_dim - self.rope_head_dim :],
-                    ],
-                    axis=-1,
-                )
+                new_pooled = _compressor_fp8_qat(new_pooled, self.rope_head_dim)
             elif self._qat == "fp4":
                 new_pooled = _indexer_qat_roundtrip(new_pooled)
             if self.overlap and pool_cache is not None:
