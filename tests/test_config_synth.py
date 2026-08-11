@@ -1664,3 +1664,93 @@ def test_qwen3_rope_scaling_none_omitted():
     m["qwen3.rope.scaling.type"] = "none"
     c = synthesize_config(m, tensor_shapes={})
     assert "rope_scaling" not in c
+
+
+def _muse_glimmer_meta() -> dict:
+    arch = "muse-glimmer"
+    m = _base_meta(arch)
+    m[f"{arch}.block_count"] = 4
+    m[f"{arch}.attention.sliding_window"] = 512
+    # 3-of-4 sliding, matching the shipped [T,T,T,F] schedule.
+    m[f"{arch}.attention.sliding_window_pattern"] = [True, True, True, False]
+    m[f"{arch}.logit_scale"] = 0.19611613
+    m[f"{arch}.final_logit_softcapping"] = 20.0
+    return m
+
+
+# Untied head, per-head qk-norms, and the attention output gate.
+_MUSE_GLIMMER_SHAPES = {
+    "output.weight": [64, VOCAB],
+    "blk.0.attn_q_norm.weight": [16],
+    "blk.0.attn_k_norm.weight": [16],
+    "blk.0.attn_gate.weight": [64, 64],
+}
+
+
+def test_muse_glimmer_synth_instantiates():
+    from gmlx import muse_glimmer_model
+    muse_glimmer_model.ensure_registered()
+
+    c = synthesize_config(_muse_glimmer_meta(), tensor_shapes=_MUSE_GLIMMER_SHAPES)
+    assert c["model_type"] == "muse_glimmer"
+    assert c["num_hidden_layers"] == 4
+    assert c["sliding_window"] == 512
+    assert c["layer_types"] == [
+        "sliding_attention", "sliding_attention", "sliding_attention",
+        "full_attention"]
+    assert c["output_multiplier"] == pytest.approx(0.19611613)
+    assert c["final_logit_softcapping"] == 20.0
+    # Not a GGUF field: pinned from llama.cpp + the HF text_config.
+    assert c["post_norm_eps"] == 1e-8
+    assert c["rms_norm_eps"] == pytest.approx(1e-6)
+    assert c["rope_parameters"]["rope_type"] == "default"
+    assert not c["tie_word_embeddings"]
+
+    from gmlx.muse_glimmer_model import Model, ModelArgs
+
+    model = Model(ModelArgs.from_dict(c))
+    mx.eval(model.parameters())
+    out = model(mx.array([[1, 2, 3]]))
+    logits = getattr(out, "logits", out)
+    assert logits.shape == (1, 3, VOCAB)
+    # The softcap bounds every logit, which is what makes it observable.
+    assert float(mx.abs(logits).max().item()) <= 20.0
+
+
+def test_muse_glimmer_synth_scalar_pattern_period():
+    """llama.cpp also accepts a scalar period: full every ``period``-th layer."""
+    m = _muse_glimmer_meta()
+    m["muse-glimmer.attention.sliding_window_pattern"] = 4
+    c = synthesize_config(m, tensor_shapes=_MUSE_GLIMMER_SHAPES)
+    assert c["layer_types"] == [
+        "sliding_attention", "sliding_attention", "sliding_attention",
+        "full_attention"]
+
+
+def test_muse_glimmer_synth_absent_pattern_defaults_to_period_4():
+    m = _muse_glimmer_meta()
+    del m["muse-glimmer.attention.sliding_window_pattern"]
+    c = synthesize_config(m, tensor_shapes=_MUSE_GLIMMER_SHAPES)
+    assert c["layer_types"][3] == "full_attention"
+    assert c["layer_types"][:3] == ["sliding_attention"] * 3
+
+
+def test_muse_glimmer_synth_pattern_length_must_match_layers():
+    m = _muse_glimmer_meta()
+    m["muse-glimmer.attention.sliding_window_pattern"] = [True, False]
+    with pytest.raises(ValueError, match="entries for"):
+        synthesize_config(m, tensor_shapes=_MUSE_GLIMMER_SHAPES)
+
+
+def test_muse_glimmer_synth_requires_logit_scale():
+    m = _muse_glimmer_meta()
+    del m["muse-glimmer.logit_scale"]
+    with pytest.raises(Exception):
+        synthesize_config(m, tensor_shapes=_MUSE_GLIMMER_SHAPES)
+
+
+def test_muse_glimmer_synth_softcap_defaults_off_when_absent():
+    m = _muse_glimmer_meta()
+    del m["muse-glimmer.final_logit_softcapping"]
+    c = synthesize_config(m, tensor_shapes=_MUSE_GLIMMER_SHAPES)
+    assert c["final_logit_softcapping"] == 0.0

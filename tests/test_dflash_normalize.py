@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""dflash -> deepseek4-dspark normalization: llama.cpp's container for the
-DSpark drafter (the unsloth release) translated to the gmlx-native namespace.
+"""The ``dflash`` GGUF container holds two unrelated drafters: DeepSeek-V4's
+DSpark (the unsloth release, normalized into the gmlx-native namespace) and
+Muse Glimmer's, which keeps its own Qwen3-shaped remap. Both are covered here,
+along with the tensor-presence test that tells them apart.
 Name/metadata logic only - synthetic arrays, no GGUF files, no model load."""
 from __future__ import annotations
 
@@ -9,8 +11,10 @@ import pytest
 mx = pytest.importorskip("mlx.core")
 
 from gmlx.mtp_load import (  # noqa: E402
+    dflash_container,
     normalize_dflash_arrays,
     remap_deepseek4_dspark_arrays,
+    remap_muse_glimmer_dflash_arrays,
 )
 
 # Tensor skeleton of the unsloth dspark-DeepSeek-V4-Flash-0731-Q8_0.gguf:
@@ -115,3 +119,91 @@ def test_normalized_set_survives_dspark_remap():
     assert stats["mapped"] == len(
         [n for n in n_arrays if not n.endswith(".scales")]
     )
+
+
+# --- Muse Glimmer's dflash container -----------------------------------------
+
+# 5 Qwen3-shaped layers plus three roots; no markov/confidence/hc head and no
+# attn_q_a, which is what separates it from DSpark.
+_MUSE_BLK_LEAVES = (
+    "attn_norm.weight", "attn_q.weight", "attn_k.weight", "attn_v.weight",
+    "attn_output.weight", "attn_q_norm.weight", "attn_k_norm.weight",
+    "ffn_norm.weight", "ffn_gate.weight", "ffn_up.weight", "ffn_down.weight",
+)
+_MUSE_ROOT_LEAVES = ("fc.weight", "enc.output_norm.weight", "output_norm.weight")
+
+
+def _muse_fixture(n_layers=5):
+    arrays = {}
+    for i in range(n_layers):
+        for leaf in _MUSE_BLK_LEAVES:
+            arrays[f"blk.{i}.{leaf}"] = mx.zeros((2, 2))
+    for leaf in _MUSE_ROOT_LEAVES:
+        arrays[leaf] = mx.zeros((2, 2))
+    kquant = {"blk.0.attn_q.weight": "q4_k", "fc.weight": "q4_k"}
+    arrays["blk.0.attn_q.scales"] = mx.zeros((1,))
+    arrays["fc.scales"] = mx.zeros((1,))
+    return arrays, kquant
+
+
+def test_container_tells_the_two_drafters_apart():
+    muse, _ = _muse_fixture()
+    dspark, _, _ = _dflash_fixture()
+    assert dflash_container(muse) == "muse_glimmer"
+    assert dflash_container(dspark) == "dspark"
+
+
+def test_container_rejects_an_unrecognized_dflash():
+    with pytest.raises(Exception):
+        dflash_container({"blk.0.mystery.weight": mx.zeros((2, 2))})
+
+
+def test_muse_remap_produces_every_drafter_param():
+    arrays, kquant = _muse_fixture()
+    hf, hf_kq, stats = remap_muse_glimmer_dflash_arrays(arrays, kquant)
+    for key in ("fc.weight", "hidden_norm.weight", "norm.weight",
+                "layers.0.input_layernorm.weight",
+                "layers.0.self_attn.q_proj.weight",
+                "layers.0.self_attn.k_proj.weight",
+                "layers.0.self_attn.v_proj.weight",
+                "layers.0.self_attn.o_proj.weight",
+                "layers.0.self_attn.q_norm.weight",
+                "layers.0.self_attn.k_norm.weight",
+                "layers.0.post_attention_layernorm.weight",
+                "layers.4.mlp.gate_proj.weight",
+                "layers.4.mlp.up_proj.weight",
+                "layers.4.mlp.down_proj.weight"):
+        assert key in hf, key
+    assert hf_kq["layers.0.self_attn.q_proj.weight"] == "q4_k"
+    assert hf_kq["fc.weight"] == "q4_k"
+    assert not any(n.startswith("blk.") for n in hf)
+    assert stats["mapped"] == len(
+        [n for n in arrays if not n.endswith(".scales")])
+
+
+def test_muse_remap_keeps_the_two_norms_distinct():
+    """``enc.output_norm`` is the post-fc encoder norm and ``output_norm`` the
+    drafter's final norm; swapping them silently corrupts the borrowed head."""
+    arrays, kquant = _muse_fixture()
+    arrays["enc.output_norm.weight"] = mx.full((2, 2), 3.0)
+    arrays["output_norm.weight"] = mx.full((2, 2), 7.0)
+    hf, _, _ = remap_muse_glimmer_dflash_arrays(arrays, kquant)
+    assert float(hf["hidden_norm.weight"][0, 0]) == 3.0
+    assert float(hf["norm.weight"][0, 0]) == 7.0
+
+
+def test_muse_remap_unknown_tensor_is_hard_error():
+    arrays, kquant = _muse_fixture()
+    arrays["blk.0.mystery.weight"] = mx.zeros((2, 2))
+    with pytest.raises(Exception):
+        remap_muse_glimmer_dflash_arrays(arrays, kquant)
+
+
+def test_dspark_path_is_unchanged_by_the_split():
+    """The muse container must not perturb DSpark: its fixture still lands on
+    the dspark namespace with the same mapped count."""
+    arrays, kquant, meta = _dflash_fixture()
+    n_arrays, n_kquant, n_meta = normalize_dflash_arrays(arrays, kquant, meta)
+    assert "mtp.0.main_proj.weight" in n_arrays
+    assert n_meta["dspark.target_layer_ids"] == [40, 41, 42]
+    assert not any(n.startswith("blk.") for n in n_arrays)

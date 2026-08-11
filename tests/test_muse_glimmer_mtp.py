@@ -1,0 +1,258 @@
+"""Muse Glimmer speculative target: the packed-hidden capture seam and the
+verify/rollback walk, on a tiny random model (no GGUF, no weights).
+
+The seam widens every engine-facing hidden to ``[trunk | cap ...]`` so the
+drafter can read the target's residuals without an engine change. Two things
+have to hold for that to be safe, and both are load-bearing:
+
+- the logits hooks must slice the trunk back out, and
+- the slice must be materialized before it reaches the logit head, which is a
+  quantized kernel on a real model and reads the buffer directly. A lazy
+  strided view hands it the packed strides and it reads the wrong rows -
+  the target emitted token soup and draft acceptance fell to ~3%. Nothing in
+  a float model reproduces that, so the invariant is pinned directly here and
+  the numeric end of it rides the integration tier.
+"""
+
+import mlx.core as mx
+import pytest
+
+from gmlx.config_synth import synthesize_config
+from gmlx.muse_glimmer_model import ModelArgs, ensure_registered
+from gmlx.muse_glimmer_mtp import MuseGlimmerSpecLM
+
+from test_config_synth import _MUSE_GLIMMER_SHAPES, _muse_glimmer_meta
+
+CAPTURE = (0, 2)
+N_GEN = 16
+BLOCK = 4
+# A tiny random model's argmax is near-tied at many steps, and the verify path
+# derives its tokens through a block SDPA (qL = drafts + 1) whose rounding
+# differs from the 1-token decode path by ~1e-3 in logit space. Stop the
+# identity claim at the first step whose top-2 margin sits under that floor.
+GREEDY_TIE_TOL = 1e-2
+
+
+def _build():
+    ensure_registered()
+    cfg = synthesize_config(_muse_glimmer_meta(),
+                            tensor_shapes=_MUSE_GLIMMER_SHAPES)
+    lm = MuseGlimmerSpecLM(ModelArgs.from_dict(cfg))
+    mx.eval(lm.parameters())
+    return lm, cfg
+
+
+def _packed_width(cfg):
+    return cfg["hidden_size"] * (1 + len(CAPTURE))
+
+
+def test_capture_arms_the_packed_hidden():
+    lm, cfg = _build()
+    ids = mx.array([[1, 2, 3, 4]])
+    plain, _ = lm.speculative_verify_hidden(ids, lm.make_cache())
+    assert plain.shape[-1] == cfg["hidden_size"]
+
+    lm.set_dflash_capture(CAPTURE)
+    packed, _ = lm.speculative_verify_hidden(ids, lm.make_cache())
+    assert packed.shape[-1] == _packed_width(cfg)
+    assert lm._dflash_capture == CAPTURE
+
+
+def test_trunk_slice_recovers_the_unpacked_hidden():
+    lm, cfg = _build()
+    ids = mx.array([[1, 2, 3, 4]])
+    bare, _ = lm.speculative_verify_hidden(ids, lm.make_cache())
+    lm.set_dflash_capture(CAPTURE)
+    packed, _ = lm.speculative_verify_hidden(ids, lm.make_cache())
+
+    trunk = lm._dflash_trunk(packed)
+    mx.eval(bare, trunk)
+    assert trunk.shape == bare.shape
+    assert float(mx.abs(trunk - bare).max().item()) == 0.0
+    # and the hooks agree with the unpacked logits
+    lm.set_dflash_capture(())
+    ref = lm.speculative_logits_from_hidden(bare)
+    lm.set_dflash_capture(CAPTURE)
+    got = lm.speculative_logits_from_hidden(packed)
+    mx.eval(ref, got)
+    assert float(mx.abs(ref - got).max().item()) == 0.0
+
+
+def test_trunk_is_materialized_before_the_logit_head(monkeypatch):
+    """White-box on purpose: a float head cannot show the difference, but the
+    real head is a quantized kernel that reads the buffer directly."""
+    lm, cfg = _build()
+    lm.set_dflash_capture(CAPTURE)
+    calls = []
+    real = mx.contiguous
+    monkeypatch.setattr(
+        mx, "contiguous", lambda x, *a, **k: (calls.append(x.shape), real(x, *a, **k))[1])
+    packed = mx.zeros((1, 3, _packed_width(cfg)))
+    lm.speculative_logits_from_hidden(packed)
+    assert calls, (
+        "the packed trunk slice must be materialized before the logit head; "
+        "a lazy strided view makes the quantized kernel read the wrong rows"
+    )
+
+
+def test_argmax_hook_matches_the_logits_hook():
+    lm, _ = _build()
+    lm.set_dflash_capture(CAPTURE)
+    packed, _ = lm.speculative_verify_hidden(
+        mx.array([[1, 2, 3, 4]]), lm.make_cache())
+    logits = lm.speculative_logits_from_hidden(packed)
+    am = lm.speculative_argmax_from_hidden(packed)
+    mx.eval(logits, am)
+    assert am.tolist() == mx.argmax(logits, axis=-1).tolist()
+
+
+def test_rollback_trims_every_layer_cache():
+    lm, _ = _build()
+    cache = lm.make_cache()
+    lm.speculative_verify_hidden(mx.array([[1, 2, 3, 4, 5, 6]]), cache)
+    before = [c.offset for c in cache]
+    lm.speculative_verify_hidden(mx.array([[7] * BLOCK]), cache)
+    assert all(c.offset == b + BLOCK for c, b in zip(cache, before))
+    # accepted=1 keeps the bonus row plus one draft; the rest is rejected
+    lm.rollback_speculative_cache(cache, None, 1, BLOCK)
+    assert all(c.offset == b + 2 for c, b in zip(cache, before))
+
+
+def test_rollback_is_a_noop_when_the_whole_block_is_accepted():
+    lm, _ = _build()
+    cache = lm.make_cache()
+    lm.speculative_verify_hidden(mx.array([[1, 2, 3, 4]]), cache)
+    lm.speculative_verify_hidden(mx.array([[5] * BLOCK]), cache)
+    offsets = [c.offset for c in cache]
+    lm.rollback_speculative_cache(cache, None, BLOCK - 1, BLOCK)
+    assert [c.offset for c in cache] == offsets
+
+
+@pytest.mark.parametrize("armed", [False, True])
+def test_verify_walk_is_token_identical_to_greedy(armed):
+    """The engine contract: whatever the drafter proposes, the walk emits the
+    target's own greedy tokens. Driven with deliberately wrong drafts so every
+    round takes the reject-and-rollback path.
+
+    Parametrized over the capture seam because the bug this guards only
+    appeared with capture armed - the packed slice reached the head unevaluated.
+    """
+    lm, _ = _build()
+    prompt = mx.array([[1, 2, 3, 4, 5]])
+
+    cache = lm.make_cache()
+    h = lm.model(prompt, cache)
+    ref_logits = lm._spec_logits(h)[0, -1]
+    ref, margins = [], []
+    for _ in range(N_GEN):
+        top = mx.sort(ref_logits)[-2:]
+        margins.append(float((top[1] - top[0]).item()))
+        t = int(mx.argmax(ref_logits).item())
+        ref.append(t)
+        ref_logits = lm._spec_logits(lm.model(mx.array([[t]]), cache))[0, -1]
+
+    if armed:
+        lm.set_dflash_capture(CAPTURE)
+    cache2 = lm.make_cache()
+    hid, _ = lm.speculative_verify_hidden(prompt, cache2)
+    tok = int(lm.speculative_argmax_from_hidden(hid)[0, -1].item())
+    got = [tok]
+    while len(got) < N_GEN:
+        drafts = [900 + i for i in range(BLOCK - 1)]   # never the target's pick
+        hid, _ = lm.speculative_verify_hidden(
+            mx.array([[tok] + drafts]), cache2)
+        rows = lm.speculative_argmax_from_hidden(hid)[0].tolist()
+        accepted = 0
+        for i, d in enumerate(drafts):
+            if int(rows[i]) != d:
+                break
+            accepted += 1
+        got.extend(drafts[:accepted])
+        tok = int(rows[accepted])
+        got.append(tok)
+        lm.rollback_speculative_cache(cache2, None, accepted, BLOCK)
+
+    # compare over the prefix whose greedy pick is unambiguous
+    limit = next((i for i, m in enumerate(margins) if m < GREEDY_TIE_TOL), N_GEN)
+    assert limit > 0, "tiny model produced no unambiguous step"
+    assert got[:limit] == ref[:limit]
+
+
+# --- the drafter side of the same seam ---------------------------------------
+
+def _build_drafter(cfg, n_layers=2):
+    from gmlx.muse_glimmer_dflash import (
+        MuseGlimmerDFlashConfig,
+        MuseGlimmerDFlashDrafter,
+    )
+
+    return MuseGlimmerDFlashDrafter(MuseGlimmerDFlashConfig(
+        hidden_size=cfg["hidden_size"],
+        intermediate_size=64,
+        num_hidden_layers=n_layers,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        rms_norm_eps=1e-6,
+        vocab_size=cfg["vocab_size"],
+        max_position_embeddings=1024,
+        rope_theta=10000.0,
+        tie_word_embeddings=False,
+        block_size=BLOCK,
+        mask_token_id=7,
+        target_layer_ids=list(CAPTURE),
+        num_target_layers=cfg["num_hidden_layers"],
+        layer_types=["sliding_attention"] * n_layers,
+        sliding_window=512,
+        draft_window_size=512,
+        final_logit_softcapping=cfg["final_logit_softcapping"],
+        output_multiplier=cfg["output_multiplier"],
+    ))
+
+
+def test_drafter_captures_are_materialized_for_the_quantized_fc(monkeypatch):
+    """Same trap as the logit head: ``fc`` is a quantized 5*hidden -> hidden
+    matmul, so the trailing slice of the packed hidden must not reach it lazily."""
+    lm, cfg = _build()
+    drafter = _build_drafter(cfg)
+    calls = []
+    real = mx.contiguous
+    monkeypatch.setattr(
+        mx, "contiguous", lambda x, *a, **k: (calls.append(x.shape), real(x, *a, **k))[1])
+    drafter._captures(mx.zeros((1, 3, _packed_width(cfg))))
+    assert calls, "the packed capture slice must be materialized before fc"
+
+
+def test_drafter_captures_reject_an_unpacked_hidden():
+    """A target whose ``_dflash_capture`` was never armed hands over a bare
+    trunk; that must fail loudly rather than matmul against garbage."""
+    lm, cfg = _build()
+    drafter = _build_drafter(cfg)
+    with pytest.raises(ValueError, match="packed hidden width"):
+        drafter._captures(mx.zeros((1, 3, cfg["hidden_size"])))
+
+
+def test_drafter_captures_take_the_trailing_block():
+    lm, cfg = _build()
+    drafter = _build_drafter(cfg)
+    h = cfg["hidden_size"]
+    packed = mx.concatenate(
+        [mx.zeros((1, 2, h)), mx.ones((1, 2, h)), mx.full((1, 2, h), 2.0)],
+        axis=-1)
+    caps = drafter._captures(packed)
+    mx.eval(caps)
+    assert caps.shape[-1] == h * len(CAPTURE)
+    assert float(caps[0, 0, 0].item()) == 1.0        # first capture
+    assert float(caps[0, 0, h].item()) == 2.0        # second, in order
+
+
+def test_drafter_satisfies_the_protocol():
+    from gmlx.drafter_protocol import validate_drafter
+
+    lm, cfg = _build()
+    drafter = _build_drafter(cfg)
+    mx.eval(drafter.parameters())
+    drafter.bind(lm)
+    validate_drafter(drafter)
+    assert drafter.uses_shared_kv is False
+    assert drafter.requires_owned_engine is True
