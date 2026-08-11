@@ -58,10 +58,12 @@ _GMLX_CONSUMED = frozenset({
 
 # /v1/chat/completions (openai.py chat_completions_endpoint + the gmlx stop
 # filter). ``tool_choice`` is consumed here: "none" is enforced below, other
-# values are documented as template-dependent.
+# values are documented as template-dependent. ``timings_per_token`` is the
+# per-chunk stream-timings switch (install_stream_timings).
 CHAT_CONSUMED = _GEN_ARGS_CONSUMED | _GMLX_CONSUMED | frozenset({
     "model", "messages", "stream", "stream_options", "adapter_path",
     "resize_shape", "tools", "tool_choice", "top_logprobs", "stop",
+    "timings_per_token",
 })
 
 # /v1/responses (openai.py responses_endpoint). No ``stop`` here: the gmlx

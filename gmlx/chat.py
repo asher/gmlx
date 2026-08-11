@@ -836,6 +836,10 @@ def _fmt_stat_line(stats: dict, ctx_used, ctx_max) -> str:
         if stats.get("prompt_tps"):
             p += f" @ {stats['prompt_tps']:.0f} tok/s"
         parts.append(p)
+    # Queue wait + prefill, as one number: everything before the first token
+    # arrived. The gen rate beside it is decode-only, so nothing is blended.
+    if stats.get("ttft_s", 0.0) >= 0.1:
+        parts.append(f"ttft {stats['ttft_s']:.1f}s")
     if stats.get("gen_tokens"):
         parts.append(
             f"gen {_fmt_k(stats['gen_tokens'])} tok @ {stats.get('gen_tps', 0.0):.1f} tok/s"
@@ -1761,6 +1765,58 @@ class _EscCancel:
             termios.tcsetattr(self.fd, termios.TCSADRAIN, self._saved)
 
 
+class _RateTicker:
+    """Windowed live tok/s for the streaming ticker, from exact cumulative
+    token counts only: local generation chunks carry ``generation_tokens``,
+    and gmlx servers stream the same count per chunk when the client asks
+    for ``timings_per_token`` (adapted into the same field). Chunks without
+    a count are ignored - no estimated rates. Returns a new status string
+    at most a few times a second, else None.
+
+    A server turn can span several requests (the assistant tool loop), each
+    restarting its count at 0; a count below the last one seen rolls the
+    previous request's total into a base offset so the ticker stays
+    cumulative across rounds."""
+
+    WINDOW_S = 2.0
+    PUSH_S = 0.3
+
+    def __init__(self, clock=time.monotonic):
+        self._clock = clock
+        self._window: list[tuple[float, float]] = []
+        self._base = 0
+        self._last_n = 0
+        self._last_push = 0.0
+        self._last_text = None
+
+    def push(self, r) -> str | None:
+        n = int(getattr(r, "generation_tokens", 0) or 0)
+        if not n:
+            return None
+        if n < self._last_n:
+            self._base += self._last_n
+        self._last_n = n
+        total = float(self._base + n)
+        t = self._clock()
+        self._window.append((t, total))
+        while self._window and t - self._window[0][0] > self.WINDOW_S:
+            self._window.pop(0)
+        if t - self._last_push < self.PUSH_S or len(self._window) < 2:
+            return None
+        dt = self._window[-1][0] - self._window[0][0]
+        if dt < 0.5:
+            return None
+        rate = (self._window[-1][1] - self._window[0][1]) / dt
+        text = f"{rate:.0f} tok/s"
+        if text == self._last_text:
+            self._last_push = t
+            return None
+        self._last_push = t
+        self._last_text = text
+        return text
+
+
+
 def _stream_reply(
     chunks,
     state: ChatState,
@@ -1795,6 +1851,7 @@ def _stream_reply(
         theme=theme,
         answer_sink=renderer.feed if renderer else None,
     )
+    ticker = _RateTicker() if renderer is not None else None
 
     def _toggle() -> None:
         # Ctrl-O: collapse<->expand thinking, live for this reply and persisted as
@@ -1833,6 +1890,10 @@ def _stream_reply(
                     if out:
                         _accept(out)
                 printer.tick()
+                if ticker is not None:
+                    status = ticker.push(r)
+                    if status is not None:
+                        renderer.set_status(status)
                 last = r
                 if stopped or esc.pressed():
                     canceled = not stopped
@@ -1858,6 +1919,9 @@ def _stream_reply(
             "gen_tokens": int(getattr(last, "generation_tokens", 0) or 0),
             "gen_tps": float(getattr(last, "generation_tps", 0.0) or 0.0),
         }
+        ttft = float(getattr(last, "ttft_s", 0.0) or 0.0)
+        if ttft:
+            stats["ttft_s"] = ttft
         accepts = list(getattr(drafter, "accept_lens", None) or [])
         drafts = list(getattr(drafter, "draft_lens", None) or [])
         if drafts:
@@ -2159,8 +2223,13 @@ def _setup_assistant(args):
                              max_items=a.memory.max_items)
 
     # Usage chunks are gated on stream_options server-side; sampling knobs
-    # join this dict per turn (see _sync_assistant_extra).
+    # join this dict per turn (see _sync_assistant_extra). Per-chunk stream
+    # timings feed the live tok/s ticker, but only gmlx servers know the
+    # field (strict OpenAI backends reject unknown body params), so it rides
+    # only when the models probe saw gmlx entries.
     extra: dict = {"stream_options": {"include_usage": True}}
+    if caps.get("gmlx"):
+        extra["timings_per_token"] = True
 
     def seam(burl, *, model, messages, max_tokens, api_key=None, tools=None,
              timeout=600.0):
@@ -2210,6 +2279,7 @@ def _assistant_reply(brain, user_text: str, state: ChatState) -> tuple[str, bool
 
     status_shown = [False]
     t0 = time.monotonic()
+    t_first = [None]                      # first generated-token event
 
     def _clear_status():
         if status_shown[0]:
@@ -2217,27 +2287,49 @@ def _assistant_reply(brain, user_text: str, state: ChatState) -> tuple[str, bool
             sys.stdout.flush()
             status_shown[0] = False
 
+    def _mark_first():
+        if t_first[0] is None:
+            t_first[0] = time.monotonic()
+
     def chunks():
         try:
             for kind, payload in brain.turn(user_text):
                 if kind == "say":
+                    _mark_first()
                     _clear_status()
                     yield SimpleNamespace(text=payload)
                 elif kind == "status":
+                    _mark_first()         # thinking/tool events ride on tokens
                     _clear_status()
                     sys.stdout.write(f"[assistant] {payload}...")
                     sys.stdout.flush()
                     status_shown[0] = True
+                elif kind == "count":
+                    # Exact cumulative output tokens for this request round
+                    # (gmlx per-chunk stream timings) - feeds the tok/s ticker.
+                    _mark_first()
+                    yield SimpleNamespace(text="", generation_tokens=payload)
                 elif kind == "done":
                     u = payload or {}
                     n = int(u.get("completion_tokens") or 0)
-                    el = time.monotonic() - t0
+                    end = time.monotonic()
+                    # ttft covers everything before the first token reached
+                    # this client: queue wait plus prefill.
+                    ttft = (t_first[0] - t0) if t_first[0] is not None else 0.0
+                    tm = u.get("timings") or {}
+                    gen_tps = float(tm.get("predicted_per_second") or 0.0)
+                    if not gen_tps:
+                        # No server timings (foreign server): decode-only
+                        # wall-clock rate, so the wait never dilutes it.
+                        dec = end - t0 - ttft
+                        gen_tps = (n / dec) if dec > 0 and n else 0.0
                     yield SimpleNamespace(
                         text="",
                         prompt_tokens=int(u.get("prompt_tokens") or 0),
-                        prompt_tps=0.0,
+                        prompt_tps=float(tm.get("prompt_per_second") or 0.0),
                         generation_tokens=n,
-                        generation_tps=(n / el) if el > 0 and n else 0.0)
+                        generation_tps=gen_tps,
+                        ttft_s=ttft)
         except TalkClientError as e:
             _clear_status()
             print(f"\n[chat] server error: {e}", file=sys.stderr)

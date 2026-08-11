@@ -1737,6 +1737,76 @@ def test_install_openai_stop_wraps_routes_idempotent():
     assert len(_APP.app.router.routes) == n
 
 
+# Per-chunk stream timings: exact cumulative output-token counts stamped onto
+# streamed content chunks when the request asks for timings_per_token.
+def test_count_record_chunk_engine_tokens_and_cumulative_results():
+    recorded = []
+    counted = sp_chat._count_record_chunk(lambda self, c: recorded.append(c))
+    cell = {"n": 0}
+    token = sp_chat._stream_count_cell.set(cell)
+    try:
+        counted(None, types.SimpleNamespace(token_count=3))   # MTP verify round
+        counted(None, types.SimpleNamespace())                # plain token
+        assert cell["n"] == 4
+        counted(None, types.SimpleNamespace(generation_tokens=10))  # cumulative
+        assert cell["n"] == 10
+    finally:
+        sp_chat._stream_count_cell.reset(token)
+    assert len(recorded) == 3                                 # original still ran
+
+
+def test_count_record_chunk_noop_without_cell():
+    counted = sp_chat._count_record_chunk(lambda self, c: None)
+    counted(None, types.SimpleNamespace(token_count=5))       # no cell: no error
+
+
+def test_timings_sse_stamps_content_chunks_only():
+    import asyncio
+    import json
+
+    cell = {"n": 0}
+    role = _sse({"id": "c1", "object": "chat.completion.chunk", "created": 1,
+                 "model": "m",
+                 "choices": [{"index": 0, "delta": {"role": "assistant"},
+                              "finish_reason": None}]})
+    usage = _sse({"id": "c1", "choices": [], "usage": {"total_tokens": 9}})
+    feed = [(0, role), (4, _sse(_chunk(content="hi"))),
+            (9, _sse(_chunk(content=" there"))),
+            (9, _sse(_chunk(finish="stop"))), (9, usage),
+            (9, "data: [DONE]\n\n")]
+
+    async def upstream():
+        for n, e in feed:              # the count advances as the stream does
+            cell["n"] = n
+            yield e
+
+    async def collect():
+        return [e async for e in sp_chat._timings_sse(upstream(), cell)]
+
+    out = asyncio.run(collect())
+    assert out[-1] == "data: [DONE]\n\n"
+    objs = [json.loads(e[len("data: "):]) for e in out
+            if e.startswith("data: ") and "[DONE]" not in e]
+    assert [o["timings"]["predicted_n"] for o in objs if "timings" in o] == [4, 9]
+    assert "timings" not in objs[0]                           # role chunk
+    assert "timings" not in objs[3]                           # finish chunk
+    assert "timings" not in objs[4]                           # usage chunk
+
+
+def test_install_stream_timings_wraps_routes_idempotent():
+    sp.install_stream_timings()
+    generation = importlib.import_module("mlx_vlm.server.generation")
+    assert getattr(generation.GenerationMetrics.record_chunk,
+                   sp_chat._STREAM_TIMINGS_FLAG, False)
+    routes = {getattr(r, "path", None): r for r in _APP.app.router.routes}
+    for path in sp_common._CHAT_PATHS:
+        assert getattr(routes[path].endpoint,
+                       sp_chat._STREAM_TIMINGS_FLAG, False)
+    n = len(_APP.app.router.routes)
+    sp.install_stream_timings()                       # idempotent
+    assert len(_APP.app.router.routes) == n
+
+
 def test_openai_stop_endpoint_e2e_with_stub():
     """POST through FastAPI with a stub original handler: proves the signature
     propagation parses the body and the wrapper trims non-stream responses."""

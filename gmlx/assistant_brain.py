@@ -158,6 +158,7 @@ class AssistantBrain:
         spoken: list = []                # all answer text this turn (memory)
         text_parts: list = []            # current round's uncommitted text
         stats: dict = {}
+        timings: dict | None = None      # last server timings seen (gmlx)
         completed = False
         committed_tool_round = False     # any assistant+tool round appended?
         try:
@@ -181,6 +182,12 @@ class AssistantBrain:
                             continue
                         if "_finish" in delta:
                             finish = delta["_finish"]
+                            continue
+                        if "_timings" in delta:
+                            timings = delta["_timings"] or {}
+                            n = timings.get("predicted_n")
+                            if n:
+                                yield ("count", int(n))
                             continue
                         if delta.get("reasoning"):
                             yield ("status", "thinking")
@@ -269,6 +276,8 @@ class AssistantBrain:
                 except Exception:                 # noqa: BLE001 - best-effort
                     pass
         if completed:
+            if timings:
+                stats = {**stats, "timings": timings}
             yield ("done", stats)
 
     def _execute(self, call: dict) -> str:
