@@ -128,6 +128,7 @@ class UnsupportedArchError(Exception):
 # fails at build. Extend together with the loader dispatch.
 MTP_WIRED_MODEL_TYPES = frozenset({
     "qwen3_5", "qwen3_5_moe", "gemma4_text", "deepseek_v4", "hy_v3",
+    "muse_glimmer",
 })
 
 

@@ -616,6 +616,13 @@ _MTP_TARGET_HOOKS_BY_TYPE = {
         "speculative_argmax_from_hidden",
         "speculative_verify_hidden",
     ),
+    # MuseGlimmerSpecLM (vendored mlx-lm class): same lean set as deepseek_v4.
+    "muse_glimmer": (
+        "rollback_speculative_cache",
+        "speculative_logits_from_hidden",
+        "speculative_argmax_from_hidden",
+        "speculative_verify_hidden",
+    ),
 }
 
 
@@ -751,6 +758,17 @@ def _mtp_target_classes(model_type: str):
             return hy_v3_mtp.HyV3SpecLM(ModelArgs.from_dict(config))
 
         return hy_v3_mtp.HyV3SpecLM, build
+    if model_type == "muse_glimmer":
+        from . import muse_glimmer_mtp, muse_glimmer_tools
+        from .muse_glimmer_model import ModelArgs, ensure_registered
+
+        ensure_registered()
+        muse_glimmer_tools.ensure_registered()
+
+        def build(config):
+            return muse_glimmer_mtp.MuseGlimmerSpecLM(ModelArgs.from_dict(config))
+
+        return muse_glimmer_mtp.MuseGlimmerSpecLM, build
     from .arch_table import MTP_WIRED_MODEL_TYPES
 
     raise NotImplementedError(
