@@ -26,14 +26,19 @@ from test_config_synth import _MUSE_GLIMMER_SHAPES, _muse_glimmer_meta
 CAPTURE = (0, 2)
 N_GEN = 16
 BLOCK = 4
-# A tiny random model's argmax is near-tied at many steps, and the verify path
-# derives its tokens through a block SDPA (qL = drafts + 1) whose rounding
-# differs from the 1-token decode path by ~1e-3 in logit space. Stop the
-# identity claim at the first step whose top-2 margin sits under that floor.
-GREEDY_TIE_TOL = 1e-2
+# Weight init is unseeded, and about a fifth of draws leave the tiny model's
+# top-2 logits tied within the floor below at step 0, which makes the identity
+# claim vacuous. Pin the draw: this one holds a 1.6e-2 minimum top-2 margin
+# across all N_GEN reference steps.
+SEED = 25
+# The verify path derives its tokens through a block SDPA (qL = drafts + 1)
+# whose rounding differs from the 1-token decode path by at most 3e-7 in logit
+# space. A gap above this floor is a real divergence, not rounding.
+GREEDY_TIE_TOL = 1e-3
 
 
 def _build():
+    mx.random.seed(SEED)
     ensure_registered()
     cfg = synthesize_config(_muse_glimmer_meta(),
                             tensor_shapes=_MUSE_GLIMMER_SHAPES)
@@ -137,7 +142,8 @@ def test_verify_walk_is_token_identical_to_greedy(armed):
     Parametrized over the capture seam because the bug this guards only
     appeared with capture armed - the packed slice reached the head unevaluated.
     """
-    lm, _ = _build()
+    lm, cfg = _build()
+    vocab = cfg["vocab_size"]
     prompt = mx.array([[1, 2, 3, 4, 5]])
 
     cache = lm.make_cache()
@@ -151,14 +157,24 @@ def test_verify_walk_is_token_identical_to_greedy(armed):
         ref.append(t)
         ref_logits = lm._spec_logits(lm.model(mx.array([[t]]), cache))[0, -1]
 
+    assert min(margins) > GREEDY_TIE_TOL, (
+        "the pinned draw no longer has an unambiguous greedy chain; choose "
+        "another SEED rather than weakening the identity claim"
+    )
+
     if armed:
         lm.set_dflash_capture(CAPTURE)
     cache2 = lm.make_cache()
     hid, _ = lm.speculative_verify_hidden(prompt, cache2)
     tok = int(lm.speculative_argmax_from_hidden(hid)[0, -1].item())
-    got = [tok]
+    got, accepts = [tok], []
     while len(got) < N_GEN:
-        drafts = [900 + i for i in range(BLOCK - 1)]   # never the target's pick
+        # One past the target's own pick, so position 0 always rejects. Ids stay
+        # in vocab: an out-of-range id is an out-of-bounds gather that reads
+        # uninitialized memory on the CPU backend, and a NaN landing in a
+        # rejected slot does not stay there - it propagates through the masked
+        # SDPA into the accepted row, whose argmax then collapses to 0.
+        drafts = [(ref[len(got)] + 1 + i) % vocab for i in range(BLOCK - 1)]
         hid, _ = lm.speculative_verify_hidden(
             mx.array([[tok] + drafts]), cache2)
         rows = lm.speculative_argmax_from_hidden(hid)[0].tolist()
@@ -167,15 +183,15 @@ def test_verify_walk_is_token_identical_to_greedy(armed):
             if int(rows[i]) != d:
                 break
             accepted += 1
+        accepts.append(accepted)
         got.extend(drafts[:accepted])
         tok = int(rows[accepted])
         got.append(tok)
         lm.rollback_speculative_cache(cache2, None, accepted, BLOCK)
 
-    # compare over the prefix whose greedy pick is unambiguous
-    limit = next((i for i, m in enumerate(margins) if m < GREEDY_TIE_TOL), N_GEN)
-    assert limit > 0, "tiny model produced no unambiguous step"
-    assert got[:limit] == ref[:limit]
+    assert got == ref
+    assert accepts == [0] * len(accepts), (
+        "every round was meant to reject at position 0 and roll back")
 
 
 # --- the drafter side of the same seam ---------------------------------------
