@@ -121,11 +121,12 @@ plumbing at all (`--bench`, `--bench-depths`, `--report-only`, `--stream-cpu`,
 falling back to plain text generation.
 
 A text-only request under `--mmproj` runs through the MTP speculative path
-whenever a drafter is available: a `--draft-gguf` assistant (gemma4) or a
-native `nextn` head in the LLM GGUF (qwen3.5/3.6, no companion needed). The
-verify walk only touches the language model, so a resident VLM gets the decode
-speedup on text turns, token-identical to the same model's text-only MTP. An
-image or audio request uses the plain VLM path; the drafter is idle that turn.
+whenever a drafter is available: a `--draft-gguf` assistant (gemma4,
+muse-glimmer) or a native `nextn` head in the LLM GGUF (qwen3.5/3.6, no
+companion needed). The verify walk only touches the language model, so a
+resident VLM gets the decode speedup on text turns, token-identical to the same
+model's text-only MTP. An image or audio request uses the plain VLM path; the
+drafter is idle that turn.
 
 ### Speculative / MTP
 
@@ -138,9 +139,9 @@ with a warning); `--no-speculative`/`--no-mtp` forces it off.
 
 | Flag | Meaning |
 |------|---------|
-| `--speculative` / `--mtp` | Force MTP speculative decoding on. Native-head models (qwen3.5/3.6 `nextn`) need no companion; gemma4 needs `--draft-gguf`. Native heads are auto-enabled without this. Use it to force the path when a sampler flag would otherwise defer. |
+| `--speculative` / `--mtp` | Force MTP speculative decoding on. Native-head models (qwen3.5/3.6 `nextn`) need no companion; gemma4 and muse-glimmer need `--draft-gguf`. Native heads are auto-enabled without this. Use it to force the path when a sampler flag would otherwise defer. |
 | `--no-speculative` / `--no-mtp` | Disable MTP. Overrides the native-head auto-enable and config `speculative: true`. |
-| `--draft-gguf PATH` | Separate assistant-drafter GGUF (gemma4 two-GGUF MTP shape, or a deepseek4 DSpark/MTP sidecar - gmlx `deepseek4-dspark`, llama.cpp `dflash`, or legacy `deepseek4_mtp_support`); implies `--speculative` (same as `serve`). A sidecar in the target's directory is autodetected without the flag. |
+| `--draft-gguf PATH` | Separate assistant-drafter GGUF (gemma4 two-GGUF MTP shape, a muse-glimmer DFlash drafter, or a deepseek4 DSpark/MTP sidecar - gmlx `deepseek4-dspark`, llama.cpp `dflash`, or legacy `deepseek4_mtp_support`); implies `--speculative` (same as `serve`). A sidecar in the target's directory is autodetected without the flag. |
 | `--draft-block-size N` | Override the MTP draft block size. |
 
 Speculative generation takes only `--temp`/`--top-p`/`--top-k`/`--min-p` plus a
@@ -351,28 +352,28 @@ every command. The terminal is upgraded on top:
   for now.
 - MTP speculative decoding (auto for native heads; `--no-mtp` to disable): a
   native-head model (qwen3.5/3.6 `nextn`) drafts and verifies multiple tokens
-  per step for a decode speedup; gemma4 needs a `--draft-gguf` assistant. The
-  reply streams the same way and ends with the same `tok/s` stat, and the
-  persistent KV cache is reused across turns exactly like the text path. Not
-  combinable with `--adapter` / `--stream-*`. Sampling is
+  per step for a decode speedup; gemma4 and muse-glimmer need a `--draft-gguf`
+  assistant. The reply streams the same way and ends with the same `tok/s`
+  stat, and the persistent KV cache is reused across turns exactly like the
+  text path. Not combinable with `--adapter` / `--stream-*`. Sampling is
   temperature/top-p/top-k/min-p only; the MTP verify walk has no penalty/bias
   hooks, so the other `/` sampling commands don't apply on this path.
   - VLM + MTP: a `--mmproj` VLM with a drafter (a `--draft-gguf` assistant
-    for gemma4, or a native `nextn` head for qwen3.5/3.6) keeps MTP on for
-    text-only turns (the fast path above) while `/image` / `/audio` turns
-    fall back to the plain VLM stream. The first media turn upgrades the
-    session to the VLM path for the rest of the conversation, since the text
-    tokenizer can't render a history that holds image markers. The prior text
-    turns are carried into that re-prefill so nothing is lost.
+    for gemma4 or muse-glimmer, or a native `nextn` head for qwen3.5/3.6)
+    keeps MTP on for text-only turns (the fast path above) while `/image` /
+    `/audio` turns fall back to the plain VLM stream. The first media turn
+    upgrades the session to the VLM path for the rest of the conversation,
+    since the text tokenizer can't render a history that holds image markers.
+    The prior text turns are carried into that re-prefill so nothing is lost.
 - Reasoning display: for thinking models (Qwen3/DeepSeek-R1/GLM `<think>`,
-  gpt-oss harmony channels, Gemma `<|channel>thought`), the chain-of-thought
-  is stripped of its control markers and streamed in the theme's thinking
-  style (italic bright blue under the default `dark` theme) inside a
-  gutter-framed block that closes with a payoff line showing how long the
-  model thought and how many tokens it spent; the final answer follows in
-  normal weight. `--reasoning hide` collapses the reasoning to a single live
-  spinner that resolves to the same payoff, so you see it working without
-  reading it. Ctrl-O toggles expand and collapse live during a reply (and
+  gpt-oss harmony channels, Gemma `<|channel>thought`, Muse Glimmer's ATEM
+  `to=self` channel), the chain-of-thought is stripped of its control markers
+  and streamed in the theme's thinking style (italic bright blue under the
+  default `dark` theme) inside a gutter-framed block that closes with a payoff
+  line showing how long the model thought and how many tokens it spent; the
+  final answer follows in normal weight. `--reasoning hide` collapses the
+  reasoning to a single live spinner that resolves to the same payoff, so you
+  see it working without reading it. Ctrl-O toggles expand and collapse live during a reply (and
   persists as the default for the next). `--reasoning raw` / `/reasoning raw`
   passes everything through verbatim (the old behavior, for when a model's
   markers segment oddly). The stored conversation keeps the raw text in every

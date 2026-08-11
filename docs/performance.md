@@ -130,8 +130,9 @@ Models that ship a native multi-token-prediction head (Qwen3.5 and Qwen3.6) get
 speculative decoding automatically on `run` and `chat`: the head drafts tokens ahead
 and the base model verifies them. Output is exactly what the base model would
 have produced, just faster when drafts are accepted. `--no-mtp` turns it off.
-gemma-4 models take the two-file shape instead: a small companion drafter GGUF via
-`--draft-gguf`. On the server it is the `speculative:` config key.
+gemma-4 and Muse Glimmer take the two-file shape instead: a small companion
+drafter GGUF via `--draft-gguf`. On the server it is the `speculative:` config
+key.
 
 Gains depend on acceptance rate and context depth. In our serve benchmarks (M5
 Max, the same server with MTP off as the baseline), speculation roughly

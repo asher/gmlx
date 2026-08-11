@@ -407,6 +407,11 @@ Notes on individual families:
   (`<|open|>think<|sep|>` / `<|close|>think<|sep|>`) are set as the family's
   thinking tokens so open-think detection, thinking budgets, and the stream
   splitter track the model's real section tags.
+- muse: the `@reasoning-*` intents set `reasoning_strength`, the Muse Glimmer
+  template's variable name. It takes `low`/`medium`/`high`/`xhigh` and defaults
+  to `high`. Reasoning is a message channel rather than a tag pair, so the
+  thinking markers are the channel's own delimiters
+  (`<|start|>assistant to=self<|message|>` / `<|eom|>`).
 - qwen3.6 / qwen3: `@instruct` also sets `enable_thinking: false` (the card's
   non-thinking operating point).
 - `default`: the fallback for unknown architectures, the historic scaffold
