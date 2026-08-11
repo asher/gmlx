@@ -137,6 +137,41 @@ def window_order(grid_w: int, grid_h: int, window: int) -> tuple[list[int], list
     return perm, segment
 
 
+def window_partition(
+    grid_w: int, grid_h: int, window: int
+) -> tuple[list[int], list[tuple[int, int, int]]]:
+    """Patch order that makes window attention batchable without a mask.
+
+    Same window membership as :func:`window_order`, but windows are laid out
+    grouped by size (largest first) instead of row-major, so each group is a
+    contiguous run of equal-length windows. Returns ``(perm, groups)`` with
+    ``groups`` entries ``(start, n_windows, window_len)``: rows
+    ``perm[start : start + n_windows * window_len]`` reshape to
+    ``[n_windows, window_len]`` and attend without any mask. A grid has at
+    most four sizes (interior, right edge, bottom edge, corner), and window
+    order within a group stays row-major. Attention is permutation-invariant
+    over its keys, so the layout change cannot alter the math.
+    """
+    windows: dict[int, list[list[int]]] = {}
+    for wy in range(0, grid_h, window):
+        for wx in range(0, grid_w, window):
+            rows = [
+                gy * grid_w + gx
+                for gy in range(wy, min(wy + window, grid_h))
+                for gx in range(wx, min(wx + window, grid_w))
+            ]
+            if rows:
+                windows.setdefault(len(rows), []).append(rows)
+    perm: list[int] = []
+    groups: list[tuple[int, int, int]] = []
+    for length in sorted(windows, reverse=True):
+        group = windows[length]
+        groups.append((len(perm), len(group), length))
+        for rows in group:
+            perm.extend(rows)
+    return perm, groups
+
+
 def pixel_shuffle_order(grid_w: int, grid_h: int, merge: int) -> list[int]:
     """Gather order that groups each ``merge`` x ``merge`` cell contiguously, in
     row-major cell order (llama.cpp's ``ds_perm``)."""
@@ -161,11 +196,14 @@ def _rope_tables(pos: mx.array, half_dim: int, base: float):
 
 def _rope_half(v: mx.array, cos: mx.array, sin: mx.array) -> mx.array:
     """Interleaved (pairwise) rotation of ``[B, H, L, D]`` by per-position
-    tables of shape ``[L, D // 2]``."""
+    tables of shape ``[L, D // 2]`` (or already broadcast to 4-D, e.g.
+    ``[B, 1, L, D // 2]`` for window-batched attention)."""
     B, H, L, D = v.shape
     v = v.reshape(B, H, L, D // 2, 2)
     x0, x1 = v[..., 0], v[..., 1]
-    c, s = cos[None, None].astype(v.dtype), sin[None, None].astype(v.dtype)
+    if cos.ndim == 2:
+        cos, sin = cos[None, None], sin[None, None]
+    c, s = cos.astype(v.dtype), sin.astype(v.dtype)
     return mx.stack([x0 * c - x1 * s, x0 * s + x1 * c], axis=-1).reshape(B, H, L, D)
 
 
@@ -191,16 +229,45 @@ class VisionAttention(nn.Module):
         self.v_proj = nn.Linear(dim, dim, bias=True)
         self.o_proj = nn.Linear(dim, dim, bias=True)
 
-    def __call__(self, x: mx.array, tables_w, tables_h, mask) -> mx.array:
+    def __call__(self, x: mx.array, tables_w, tables_h, groups) -> mx.array:
+        """``groups`` is None for a global layer (full attention over all
+        patches), or the :func:`window_partition` groups for a window layer:
+        each group's equal-length windows run as one unmasked batched SDPA,
+        skipping the dense scores a block-diagonal mask would compute."""
         B, L, _ = x.shape
-        shape = (B, L, self.n_heads, self.head_dim)
-        q = self.q_proj(x).reshape(shape).transpose(0, 2, 1, 3)
-        k = self.k_proj(x).reshape(shape).transpose(0, 2, 1, 3)
-        v = self.v_proj(x).reshape(shape).transpose(0, 2, 1, 3)
-        q = _rope_2d(q, tables_w, tables_h)
-        k = _rope_2d(k, tables_w, tables_h)
-        out = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale, mask=mask)
-        return self.o_proj(out.transpose(0, 2, 1, 3).reshape(B, L, -1))
+        q = self.q_proj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
+
+        if groups is None:
+            shape = (B, L, self.n_heads, self.head_dim)
+            q = _rope_2d(q.reshape(shape).transpose(0, 2, 1, 3), tables_w, tables_h)
+            k = _rope_2d(k.reshape(shape).transpose(0, 2, 1, 3), tables_w, tables_h)
+            v = v.reshape(shape).transpose(0, 2, 1, 3)
+            out = mx.fast.scaled_dot_product_attention(
+                q, k, v, scale=self.scale, mask=None)
+            return self.o_proj(out.transpose(0, 2, 1, 3).reshape(B, L, -1))
+
+        outs = []
+        for start, n_win, w_len in groups:
+            end = start + n_win * w_len
+            shape = (n_win, w_len, self.n_heads, self.head_dim)
+
+            def _win(t):
+                return t[:, start:end].reshape(shape).transpose(0, 2, 1, 3)
+
+            def _tabs(tables):
+                return tuple(t[start:end].reshape(n_win, 1, w_len, -1)
+                             for t in tables)
+
+            tw, th = _tabs(tables_w), _tabs(tables_h)
+            qg = _rope_2d(_win(q), tw, th)
+            kg = _rope_2d(_win(k), tw, th)
+            og = mx.fast.scaled_dot_product_attention(
+                qg, kg, _win(v), scale=self.scale, mask=None)
+            outs.append(og.transpose(0, 2, 1, 3).reshape(1, n_win * w_len, -1))
+        out = outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=1)
+        return self.o_proj(out)
 
 
 class VisionMLP(nn.Module):
@@ -222,8 +289,8 @@ class VisionLayer(nn.Module):
         self.layer_norm2 = nn.LayerNorm(config.hidden_size, eps=eps)
         self.mlp = VisionMLP(config)
 
-    def __call__(self, x: mx.array, tables_w, tables_h, mask) -> mx.array:
-        x = x + self.self_attn(self.layer_norm1(x), tables_w, tables_h, mask)
+    def __call__(self, x: mx.array, tables_w, tables_h, groups) -> mx.array:
+        x = x + self.self_attn(self.layer_norm1(x), tables_w, tables_h, groups)
         return x + self.mlp(self.layer_norm2(x))
 
 
@@ -255,8 +322,10 @@ class VisionModel(nn.Module):
         if grid_w == side and grid_h == side:
             return self.position_embedding
         grid = self.position_embedding.reshape(side, side, -1)
+        # Stays f32: the add promotes anyway, and rounding the interpolated
+        # table back to the f16 weight dtype would only lose precision.
         resized = bilinear_interpolate(grid.astype(mx.float32), grid_h, grid_w)
-        return resized.reshape(grid_h * grid_w, -1).astype(self.position_embedding.dtype)
+        return resized.reshape(grid_h * grid_w, -1)
 
     def __call__(self, pixel_values: mx.array) -> mx.array:
         """``pixel_values`` is a single image as ``[1, H, W, C]``."""
@@ -267,10 +336,8 @@ class VisionModel(nn.Module):
         x = self.patch_embed(pixel_values).reshape(1, grid_h * grid_w, -1)
         x = x + self._position_embedding(grid_w, grid_h)[None]
 
-        perm, segment = window_order(grid_w, grid_h, self.window)
+        perm, groups = window_partition(grid_w, grid_h, self.window)
         perm = mx.array(perm)
-        seg = mx.array(segment)
-        window_mask = (seg[:, None] == seg[None, :])[None, None]
 
         x = self.pre_layernorm(x)
         x = mx.take(x, perm, axis=1)
@@ -286,7 +353,7 @@ class VisionModel(nn.Module):
         sf = self.config.sparse_factor
         for idx, layer in enumerate(self.layers):
             is_global = idx == n_layer - 1 or (idx + 1) % sf == 0
-            x = layer(x, tables_w, tables_h, None if is_global else window_mask)
+            x = layer(x, tables_w, tables_h, None if is_global else groups)
 
         x = self.post_layernorm(x)
         inverse = mx.zeros(perm.shape, dtype=mx.int32)
@@ -391,7 +458,10 @@ class Model(nn.Module):
         feats = []
         for i, (h, w) in enumerate(image_sizes):
             image = pixel_values[i, :, :h, :w].transpose(1, 2, 0)[None]
-            x = self.vision_tower(image.astype(self.vision_projection.weight.dtype))
+            # f32 activations against F16 weights (the loader's f16_keep set):
+            # dtype promotion computes the whole stack in f32, the oracle's own
+            # layout, at half the resident bytes of an fp32 weight pin.
+            x = self.vision_tower(image.astype(mx.float32))
             grid_h, grid_w = h // patch, w // patch
             order = mx.array(pixel_shuffle_order(grid_w, grid_h, merge))
             n_out = (grid_h // merge) * (grid_w // merge)

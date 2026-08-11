@@ -2715,10 +2715,17 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # computed fp32 (the vendored cast_predicate pins the same set).
     "kimi_k3": (".mlp.gate.weight", ".e_score_correction_bias",
                 ".a_folded", ".dt_bias", "_res_score"),
+}
+
+# Params kept at their native f16 through the bf16 cast (no upcast). MLX
+# promotes an f16-weight matmul against f32 activations to f32, so these read
+# half the bytes of an fp32 pin while computing the same values.
+_F16_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # muse_glimmer's mmproj is native F16 and llama.cpp runs the tower with f32
     # activations. 50 residual layers with large outliers (features span +-76)
     # compound bf16 rounding into ~10% relative RMS on the projected embeddings
-    # against an f32 run; f16->f32 is lossless, so this reproduces the oracle.
+    # against an f32 run. The tower entry casts its input to f32, so activations
+    # ride fp32 promotion while the weights stay F16 - the oracle's own layout.
     # Vision only - the text tower's bf16 holds 16k parity.
     "muse_glimmer": ("vision_tower.", "vision_adapter.", "vision_projection."),
 }
@@ -2822,6 +2829,7 @@ def _install_and_load(
     sanitize: bool = True,
     no_alias: set[str] | None = None,
     fp32_keep: tuple[str, ...] = (),
+    f16_keep: tuple[str, ...] = (),
     source_key: tuple | None = None,
     active_before: float | None = None,
 ) -> None:
@@ -2842,7 +2850,8 @@ def _install_and_load(
     the same suffix match used for the kquant meta.
 
     ``fp32_keep``: target-name substrings pinned to float32 through the bf16
-    cast (see ``_FP32_KEEP_BY_MODEL_TYPE``).
+    cast (see ``_FP32_KEEP_BY_MODEL_TYPE``). ``f16_keep``: substrings kept at
+    their native f16 instead (see ``_F16_KEEP_BY_MODEL_TYPE``).
 
     ``active_before``: active-memory baseline for the untracked-weights split.
     Callers that read wire bytes before installing must pass the pre-read
@@ -2948,6 +2957,8 @@ def _install_and_load(
             if fp32_keep and any(s in k for s in fp32_keep):
                 if v.dtype != mx.float32:      # e.g. F16 ape tables
                     loadable[k] = v.astype(mx.float32)
+                continue
+            if f16_keep and any(s in k for s in f16_keep):
                 continue
             if v.dtype == mx.float16:
                 # Same-itemsize f16->bf16 gets buffer-donated into the source

@@ -18,6 +18,7 @@ mx = pytest.importorskip("mlx.core")
 from gmlx.muse_glimmer_vlm_model import (  # noqa: E402
     pixel_shuffle_order,
     window_order,
+    window_partition,
 )
 from gmlx.vlm import (  # noqa: E402
     _MuseGlimmerGgufImageProcessor,
@@ -72,6 +73,108 @@ def test_inverse_permutation_restores_row_major_order():
     x = mx.arange(35).reshape(35, 1)
     assert mx.take(mx.take(x, perm, axis=0), inverse, axis=0).reshape(-1).tolist() \
         == list(range(35))
+
+
+# --- size-grouped partition (the batched-attention layout) --------------------
+
+
+def test_partition_windows_match_window_order_on_every_grid():
+    # window_partition reorders windows for maskless batching; the membership
+    # of every window must be identical to llama.cpp's row-major layout, or
+    # the attention pattern silently changes.
+    for grid_h in range(1, 12):
+        for grid_w in range(1, 12):
+            perm_o, segment = window_order(grid_w, grid_h, 4)
+            perm_p, groups = window_partition(grid_w, grid_h, 4)
+            assert sorted(perm_p) == list(range(grid_h * grid_w))
+            reference: dict[int, list[int]] = {}
+            for p, s in zip(perm_o, segment):
+                reference.setdefault(s, []).append(p)
+            expected = {frozenset(v) for v in reference.values()}
+            got = set()
+            for start, n_win, w_len in groups:
+                for i in range(n_win):
+                    got.add(frozenset(
+                        perm_p[start + i * w_len:start + (i + 1) * w_len]))
+            assert got == expected, (grid_h, grid_w)
+
+
+def test_partition_groups_tile_the_permutation_exactly():
+    perm, groups = window_partition(9, 6, 4)
+    assert groups[0][0] == 0
+    for (s0, n0, w0), (s1, _, _) in zip(groups, groups[1:]):
+        assert s0 + n0 * w0 == s1
+    s, n, w = groups[-1]
+    assert s + n * w == len(perm) == 54
+
+
+def test_partition_orders_groups_largest_first():
+    # 9 wide x 6 high, window 4: two interior 4x4=16, one right-edge 4x1=4,
+    # two bottom 2x4=8, one corner 2x1=2. Largest first keeps the dominant
+    # batch leading.
+    _, groups = window_partition(9, 6, 4)
+    assert [(n, w) for _, n, w in groups] == [(2, 16), (2, 8), (1, 4), (1, 2)]
+
+
+def test_partition_single_window_grid_is_one_group():
+    perm, groups = window_partition(3, 2, 32)
+    assert perm == list(range(6))
+    assert groups == [(0, 1, 6)]
+
+
+def test_batched_attention_matches_the_masked_reference():
+    """The whole tiny tower, new batched path vs the dense block-diagonal
+    mask it replaced. Any partition or reshape mistake shows up as a large
+    error here; float noise does not."""
+    from gmlx.muse_glimmer_vlm_model import (
+        VisionConfig, VisionModel, _rope_2d, _rope_tables)
+
+    cfg = VisionConfig(num_hidden_layers=4, hidden_size=64,
+                       intermediate_size=128, num_attention_heads=4,
+                       num_position_embeddings=16)   # window side 4
+    model = VisionModel(cfg)
+    mx.eval(model.parameters())
+
+    def masked_reference(pixel_values):
+        patch = cfg.patch_size
+        grid_h = pixel_values.shape[1] // patch
+        grid_w = pixel_values.shape[2] // patch
+        x = model.patch_embed(pixel_values).reshape(1, grid_h * grid_w, -1)
+        x = x + model._position_embedding(grid_w, grid_h)[None]
+        perm, segment = window_order(grid_w, grid_h, model.window)
+        perm, seg = mx.array(perm), mx.array(segment)
+        mask = (seg[:, None] == seg[None, :])[None, None]
+        x = mx.take(model.pre_layernorm(x), perm, axis=1)
+        half = (cfg.hidden_size // cfg.num_attention_heads) // 2
+        tw = _rope_tables(perm % grid_w + 1, half, cfg.rope_theta)
+        th = _rope_tables(perm // grid_w + 1, half, cfg.rope_theta)
+        n_layer = len(model.layers)
+        for idx, layer in enumerate(model.layers):
+            is_global = (idx == n_layer - 1
+                         or (idx + 1) % cfg.sparse_factor == 0)
+            h = layer.layer_norm1(x)
+            a = layer.self_attn
+            B, L, _ = h.shape
+            shp = (B, L, a.n_heads, a.head_dim)
+            q = _rope_2d(a.q_proj(h).reshape(shp).transpose(0, 2, 1, 3), tw, th)
+            k = _rope_2d(a.k_proj(h).reshape(shp).transpose(0, 2, 1, 3), tw, th)
+            v = a.v_proj(h).reshape(shp).transpose(0, 2, 1, 3)
+            o = mx.fast.scaled_dot_product_attention(
+                q, k, v, scale=a.scale, mask=None if is_global else mask)
+            x = x + a.o_proj(o.transpose(0, 2, 1, 3).reshape(B, L, -1))
+            x = x + layer.mlp(layer.layer_norm2(x))
+        x = model.post_layernorm(x)
+        inverse = mx.zeros(perm.shape, dtype=mx.int32)
+        inverse[perm] = mx.arange(perm.size, dtype=mx.int32)
+        return mx.take(x, inverse, axis=1)[0]
+
+    for grid_h, grid_w in [(4, 4), (7, 5), (2, 6), (1, 1)]:
+        img = mx.random.normal(
+            (1, grid_h * cfg.patch_size, grid_w * cfg.patch_size, 3))
+        got, ref = model(img), masked_reference(img)
+        mx.eval(got, ref)
+        err = float(mx.abs(got - ref).max().item())
+        assert err < 1e-4, (grid_h, grid_w, err)
 
 
 # --- pixel shuffle ------------------------------------------------------------

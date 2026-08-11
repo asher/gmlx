@@ -34,6 +34,7 @@ from .gdn_patches import (
 )
 from .gguf_meta import first_nonzero_int, read_int
 from .loader import (
+    _F16_KEEP_BY_MODEL_TYPE,
     _FP32_KEEP_BY_MODEL_TYPE,
     _active_now,
     _install_and_load,
@@ -2086,6 +2087,7 @@ def load_vlm_model(
     #    towers), so model.sanitize must not run - it would re-prefix text keys.
     _install_and_load(model, hf_weights, hf_kquant_meta, log=_log, sanitize=False,
                       fp32_keep=_FP32_KEEP_BY_MODEL_TYPE.get(model_type, ()),
+                      f16_keep=_F16_KEEP_BY_MODEL_TYPE.get(model_type, ()),
                       source_key=weights_source_key(*pf.shards, mmproj_path),
                       active_before=active_before)
     materialize_module_arrays(model)
