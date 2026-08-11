@@ -83,6 +83,10 @@ _MTP_WIDTH_LIMIT_BY_MODEL_TYPE = {
 # losing regime. Uncapped is earned by measurement, not inherited by default.
 _MTP_WIDTH_CAP_FALLBACK = 2
 
+# Drafted depth per DFlash round, matching llama.cpp's n_max=3.
+# GMLX_MUSE_DFLASH_BLOCK overrides, up to the GGUF's dflash.block_size.
+_MUSE_GLIMMER_DFLASH_BLOCK_DEFAULT = 4
+
 
 def _stamp_mtp_width_cap(drafter, model_type: str, *, target=None,
                          log=loadlog.verbose_print):
@@ -774,8 +778,9 @@ def _load_muse_glimmer_dflash_drafter(
     ] or ["full_attention"] * n_layers
     window = int(meta.get("dflash.attention.sliding_window") or 0) or None
     native_total = int(block_size)
+    default_total = min(_MUSE_GLIMMER_DFLASH_BLOCK_DEFAULT, native_total)
     block_total = max(
-        2, min(env_int("GMLX_MUSE_DFLASH_BLOCK", native_total), native_total))
+        2, min(env_int("GMLX_MUSE_DFLASH_BLOCK", default_total), native_total))
 
     config = MuseGlimmerDFlashConfig(
         hidden_size=int(target_config_dict["hidden_size"]),
