@@ -21,8 +21,10 @@ QUESTION=${QUESTION:-"Write a Python LRU cache decorator, then explain it in two
 OUT=${OUT:-docs/assets/demo.gif}
 COLS=${COLS:-110}
 ROWS=${ROWS:-28}
-HOLD=${HOLD:-2.2}
+HOLD=${HOLD:-2.2}                  # keep recording this long past the reply
+LOOP_PAUSE=${LOOP_PAUSE:-5.0}      # still frame at the end, before the loop
 FONT_SIZE=${FONT_SIZE:-16}
+CAST_OUT=${CAST_OUT:-}             # set to keep the cast for re-rendering
 
 # A thinking model spends the whole recording reasoning before it answers, so
 # pick a non-thinking id or intent (@instruct on the Qwen families).
@@ -92,11 +94,11 @@ wait
 
 # End on the stats line. What follows is the session teardown, whose
 # "[server exited]" notice reads as a crashed server in a looping GIF.
-python3 - "$WORK/demo.cast" "$WORK/trim.cast" "$HOLD" <<'PY'
+python3 - "$WORK/demo.cast" "$WORK/trim.cast" <<'PY'
 import json
 import sys
 
-src, dst, hold = sys.argv[1], sys.argv[2], float(sys.argv[3])
+src, dst = sys.argv[1], sys.argv[2]
 lines = open(src).read().splitlines()
 header, events = lines[0], lines[1:]
 cut = max((i for i, ln in enumerate(events)
@@ -108,12 +110,21 @@ with open(dst, "w") as fh:
     fh.write(header + "\n")
     for ev in kept:
         fh.write(json.dumps(ev) + "\n")
-    fh.write(json.dumps([hold, "o", ""]) + "\n")
 PY
 
 # A black background matching the TUI, and an idle limit high enough that agg
 # never silently compresses a real pause into a shorter one.
+# --last-frame-duration is what actually sets the rest before the loop
+# restarts; agg otherwise caps that final frame at 3 seconds.
 agg --font-size "$FONT_SIZE" --idle-time-limit 3600 \
+  --last-frame-duration "$LOOP_PAUSE" \
   --theme "000000,e5e5e5,000000,cd3131,0dbc79,e5e510,2472c8,bc3fbc,11a8cd,e5e5e5,666666,f14c4c,23d18b,f5f543,3b8eea,d670d6,29b8db,ffffff" \
   "$WORK/trim.cast" "$OUT"
 echo "[rec] wrote $OUT"
+
+# The cast is the re-renderable source: keeping it means a later change of
+# font size, theme, or end pause costs an agg run instead of a new recording.
+if [ -n "$CAST_OUT" ]; then
+  cp "$WORK/trim.cast" "$CAST_OUT"
+  echo "[rec] wrote $CAST_OUT"
+fi
