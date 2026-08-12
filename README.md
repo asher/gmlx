@@ -38,9 +38,10 @@ in the context. DeepSeek-V4-Flash is measured against antirez's ds4
 (dwarfstar)
 ([benchmarks](https://github.com/asher/gmlx/blob/main/docs/benchmarks.md#deepseek-v4-flash-reference-engine-ds4-server)).
 
-<!-- Demo GIF: record with `vhs docs/assets/demo.tape` (see the tape's header),
-     then replace this comment with:
-     ![gmlx pulling and running a GGUF](https://github.com/asher/gmlx/blob/main/docs/assets/demo.gif) -->
+![gmlx chat: a 27B model answering through a running server, with live tokens per second](https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/demo.gif)
+
+A 27B model, already resident in a local server, answering at 46 tokens per
+second. Recorded with `docs/assets/record-demo.sh` at true speed.
 
 ## Quickstart
 
