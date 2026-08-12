@@ -656,6 +656,54 @@ def test_env_for_load_params():
                    "MLX_VLM_GGUF_SPEC_WIDTH_CAP": ""}
 
 
+# server.dtype - the activation-dtype knob, server-wide by design
+@pytest.mark.parametrize("dtype", ["auto", "bfloat16", "bf16", "float16", "fp16"])
+def test_server_dtype_accepts_every_offered_value(dtype):
+    doc = _doc()
+    doc["server"]["dtype"] = dtype
+    assert build_config(doc).dtype == dtype
+
+
+def test_server_dtype_defaults_to_none():
+    """Unset leaves the env and the runtime default alone."""
+    assert build_config(_doc()).dtype is None
+
+
+def test_server_dtype_normalizes_case_and_space():
+    doc = _doc()
+    doc["server"]["dtype"] = "  FLOAT16 "
+    assert build_config(doc).dtype == "float16"
+
+
+def test_bad_server_dtype_raises_at_parse():
+    """A typo must not resolve quietly to the default - the whole point of
+    setting it is that the box needs the non-default width."""
+    doc = _doc()
+    doc["server"]["dtype"] = "fp8"
+    with pytest.raises(ConfigError) as e:
+        build_config(doc)
+    assert "server.dtype" in str(e.value) and "fp8" in str(e.value)
+
+
+def test_float32_is_not_a_config_value():
+    """float32 is a certification reference arm, reachable only via the env var."""
+    doc = _doc()
+    doc["server"]["dtype"] = "float32"
+    with pytest.raises(ConfigError):
+        build_config(doc)
+
+
+def test_dtype_is_not_a_per_model_load_key():
+    """The reason to leave bfloat16 is a property of the GPU, not of a model,
+    so `load: {dtype: ...}` is an unknown key: it warns and is dropped rather
+    than forking one model onto a different activation width."""
+    assert "dtype" not in cfgmod.LOAD_ENV
+    doc = _doc()
+    doc["models"]["m-bare"]["overrides"] = {"load": {"dtype": "float16"}}
+    cfg = build_config(doc)
+    assert "GMLX_ACTIVATION_DTYPE" not in cfgmod.env_for(resolve_model("m-bare", cfg))
+
+
 def test_env_for_emits_speculative_flag():
     """The per-build speculative state rides the env window (the only signal that
     reaches the load bridge in the engine's worker thread). Always emitted - "0"

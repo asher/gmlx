@@ -181,6 +181,8 @@ server:
                              #   (null => mlx-vlm's own default, 600; 0 => never)
   prefill_step_size: null    # prefill chunk size in tokens for every model on this server
                              #   (null => the default, 2048; lower caps peak memory on long prompts)
+  dtype: null                # activation dtype for every model on this server: auto, bfloat16,
+                             #   float16 (null => the default, bfloat16; float16 is for M1/M2)
   decode_prefill_ratio: null # admission pacing: auto (default) or a static GPU-time share
                              #   (null => the default, 1.0; 0 => strict alternation; see below)
   prefill_tick_ms: null      # wall-clock budget per prefill chunk while streams decode;
@@ -243,6 +245,31 @@ by design: the engine reads it per request, after the per-model load window has
 closed, so it cannot be a per-model `load:` key. Also available as
 `--prefill-step-size` on `serve` (the flag wins over the config) or an exported
 `PREFILL_STEP_SIZE`. Applies to speculative (MTP) serving too.
+
+`dtype` sets the width the model graph runs at for every model this server
+loads: `auto`, `bfloat16` (the default), or `float16`, with `bf16` and `fp16`
+accepted as spellings of the last two. It covers non-quantized parameters, the
+dequantized embedding table, and every value flowing between quantized
+matmuls. The KV cache follows it, since cache blocks are allocated from the
+dtype of the keys and values written into them. Weights are untouched, so this
+is not a requantization and the GGUF on disk is unchanged.
+
+`float16` exists for Apple GPUs before Apple9, which is to say M1 and M2.
+Those have no native bfloat16 arithmetic, so the Metal compiler expands
+bfloat16 operations into a software sequence. The k-quant matvecs accumulate
+in float32 and are close to unaffected either way; the cost lands on the norm
+and softmax kernels between them. On M3 and later the two widths run at the
+same speed and there is no reason to change this. `auto` resolves to `float16`
+on a pre-Apple9 GPU and `bfloat16` everywhere else, including on a device whose
+architecture cannot be read.
+
+Server-wide by design, and deliberately not a per-model `load:` key: the reason
+to leave bfloat16 is a property of the GPU, not of a model, so a server has one
+right answer for everything it loads. Also available as `--dtype` on `serve`
+(the flag wins over the config) or an exported `GMLX_ACTIVATION_DTYPE`. An
+unrecognized value is a config error rather than a fall back to the default,
+since a silently ignored `dtype:` would read as "the knob does nothing on this
+box".
 
 `decode_prefill_ratio` paces admission prefills against live decode. Stock
 scheduling runs one decode step per prefill chunk, so while any request
@@ -941,6 +968,10 @@ models. Each maps 1:1 to the env var mlx-vlm reads at build:
 > reads it per request, after the per-model load window has closed, so a
 > per-model mapping cannot work. Set `server.prefill_step_size` (see the
 > server key table above).
+>
+> `dtype` is likewise server-level. It could be applied per model, but the
+> reason to leave bfloat16 is that this GPU has no native bfloat16 arithmetic,
+> which is true of every model on the box. Set `server.dtype`.
 
 ### Cache keys (`cache:`)
 
