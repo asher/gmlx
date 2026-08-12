@@ -12,6 +12,8 @@ the integration tests instead.
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 import mlx.core as mx  # noqa: E402
@@ -1220,6 +1222,53 @@ def test_deepseek2_v2_softmax_gating_rejected():
     m["deepseek2.expert_gating_func"] = 1             # softmax (V2)
     with pytest.raises(NotImplementedError):
         synthesize_config(m, tensor_shapes=_DEEPSEEK2_SHAPES)
+
+
+def _deepseek2_yarn_meta() -> dict:
+    # Kimi-K2.7's yarn block: 256k context off a 4k-trained base.
+    m = _deepseek2_meta()
+    arch = "deepseek2"
+    m[f"{arch}.rope.scaling.type"] = "yarn"
+    m[f"{arch}.rope.scaling.factor"] = 64.0
+    m[f"{arch}.rope.scaling.original_context_length"] = 4096
+    m[f"{arch}.rope.scaling.yarn_beta_fast"] = 32.0
+    m[f"{arch}.rope.scaling.yarn_beta_slow"] = 1.0
+    m[f"{arch}.rope.scaling.yarn_log_multiplier"] = 0.1   # = 0.1 * 1.0
+    return m
+
+
+def test_deepseek2_yarn_log_mul_decodes_to_mscale_all_dim():
+    # The converter writes `0.1 * mscale_all_dim`, so a card value of 1.0
+    # arrives as 0.1. Reading it raw hands deepseek_v3 a 10x-too-small
+    # mscale_all_dim, which squares into the attention scale.
+    c = synthesize_config(_deepseek2_yarn_meta(),
+                          tensor_shapes=_DEEPSEEK2_SHAPES)
+    rs = c["rope_scaling"]
+    assert rs["mscale_all_dim"] == pytest.approx(1.0)
+    assert rs["factor"] == 64.0
+    assert rs["original_max_position_embeddings"] == 4096
+    assert rs["beta_fast"] == 32.0 and rs["beta_slow"] == 1.0
+    # Guard the consequence, not just the field: deepseek_v3 multiplies the
+    # attention scale by (0.1 * mscale_all_dim * log(factor) + 1) ** 2.
+    s = 0.1 * rs["mscale_all_dim"] * math.log(rs["factor"]) + 1.0
+    assert s * s == pytest.approx(2.0047, abs=1e-3)
+
+
+def test_deepseek2_without_yarn_has_no_rope_scaling():
+    # Non-yarn conversions carry no scaling block; the synth must not invent
+    # one (a bare `mscale_all_dim` would rescale attention on a model that
+    # never asked for it).
+    c = synthesize_config(_deepseek2_meta(), tensor_shapes=_DEEPSEEK2_SHAPES)
+    assert "rope_scaling" not in c
+
+
+def test_glm_dsa_shares_the_deepseek_yarn_log_mul_convention():
+    # glm-dsa's converter subclasses DeepseekV2Model, so it inherits the same
+    # `0.1 *` encoding and must be decoded the same way.
+    from gmlx.config_synth import _deepseek_mscale_all_dim
+    meta = {"glm-dsa.rope.scaling.yarn_log_multiplier": 0.1}
+    assert _deepseek_mscale_all_dim(meta, "glm-dsa") == pytest.approx(1.0)
+    assert _deepseek_mscale_all_dim({}, "glm-dsa") is None
 
 
 def _deepseek4_meta() -> dict:

@@ -1942,6 +1942,15 @@ def install_expert_streaming(
                                     parts.append(self.__call__(
                                         x[t], indices[t],
                                         *[a[t] for a in orig]))
+                                    # The pieces share one precomputed
+                                    # routing. Thus the stage-time eval of a
+                                    # later piece's indices does not wait for
+                                    # an earlier piece's gather. Staging
+                                    # could overwrite (or resize away) arena
+                                    # slots that the unexecuted gather
+                                    # references. Execute each piece before
+                                    # the next piece stages.
+                                    mx.eval(parts[-1])
                             finally:
                                 object.__setattr__(
                                     self, "_kq_in_split", prev_split)
@@ -2728,6 +2737,7 @@ _F16_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # ride fp32 promotion while the weights stay F16 - the oracle's own layout.
     # Vision only - the text tower's bf16 holds 16k parity.
     "muse_glimmer": ("vision_tower.", "vision_adapter.", "vision_projection."),
+    "kimi_k25": ("vision_tower.", "mm_projector."),
 }
 
 

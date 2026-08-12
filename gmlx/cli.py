@@ -1523,6 +1523,10 @@ def _run_vlm(args) -> int:
             zero_copy=not args.no_zero_copy,
             verbose=args.verbose,
         )
+    # The streaming placement applies only to the text tower. The vision
+    # tower is small, and it stays resident. An over-RAM VLM is over-RAM in
+    # its experts.
+    _apply_placement(args, getattr(model, "language_model", model))
     print_family_note(args)
 
     from mlx_vlm import generate
@@ -1655,6 +1659,7 @@ def _run_vlm_mtp(args) -> int:
             zero_copy=not args.no_zero_copy,
             verbose=args.verbose,
         )
+    _apply_placement(args, getattr(model, "language_model", model))
     print_family_note(args)
     print(
         f"[generate] VLM text-only MTP: max_tokens={max_tokens_label(args)} "
@@ -2012,15 +2017,18 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         )
         return 2
     if args.mmproj:
-        # The VLM path has no bench/report/offload plumbing - refuse rather
-        # than silently dispatch to plain generation.
+        # The VLM path has no bench/report plumbing. Refuse rather than
+        # silently dispatch to plain generation. --stream-experts stays
+        # supported: the placement goes on the text tower after the VLM
+        # load, and the vision tower stays resident. --stream-cpu does not,
+        # because it moves the default device, and it moves the vision tower
+        # to the CPU with it.
         unsupported = [
             flag
             for flag, on in (
                 ("--bench", bool(args.bench)),
                 ("--bench-depths", bool(args.bench_depths)),
                 ("--report-only", args.report_only),
-                ("--stream-experts", args.stream_experts),
                 ("--stream-cpu", args.stream_cpu),
             )
             if on

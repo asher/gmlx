@@ -63,13 +63,22 @@ def test_missing_companion_file_fails_fast(no_heavy_imports, gguf, flag, capsys)
     (["--bench-depths", "0,4096"], "--bench-depths"),
     (["--report-only"], "--report-only"),
     (["--stream-cpu"], "--stream-cpu"),
-    (["--stream-experts"], "--stream-experts"),
 ])
 def test_mmproj_rejects_unsupported_modes(no_heavy_imports, gguf, mmproj,
                                           extra, named, capsys):
     assert cli.main([gguf, "--mmproj", mmproj, *extra]) == 2
     err = capsys.readouterr().err
     assert named in err and "not supported with --mmproj" in err
+
+
+def test_mmproj_accepts_stream_experts(no_heavy_imports, gguf, mmproj):
+    """An over-RAM VLM is over-RAM in its text experts: --stream-experts has to
+    reach the VLM path (placement runs on the text tower post-load) or the
+    family is unloadable rather than merely slow. Clearing the compatibility
+    check means main() runs on into the poisoned loader imports instead of
+    returning 2."""
+    with pytest.raises(ModuleNotFoundError):
+        cli.main([gguf, "--mmproj", mmproj, "--stream-experts"])
 
 
 def test_mmproj_error_names_all_offending_flags(no_heavy_imports, gguf, mmproj,
