@@ -29,14 +29,22 @@ import mlx.core as mx
 from .envflags import env_choice
 
 ENV_VAR = "GMLX_ACTIVATION_DTYPE"
-CHOICES = ("auto", "bfloat16", "bf16", "float16", "fp16")
+# float32 is a reference arm for certification, not a shipping mode: it doubles
+# activation memory and drops the 16-bit fused decode paths (their guards admit
+# float16 and bfloat16 only), which is exactly what makes it a clean baseline to
+# score the two 16-bit widths against. Env-only; the CLI offers the other three.
+CHOICES = ("auto", "bfloat16", "bf16", "float16", "fp16", "float32", "fp32")
 
 _BY_NAME = {
     "bfloat16": mx.bfloat16,
     "bf16": mx.bfloat16,
     "float16": mx.float16,
     "fp16": mx.float16,
+    "float32": mx.float32,
+    "fp32": mx.float32,
 }
+
+_SHORT_NAME = {mx.bfloat16: "bf16", mx.float16: "fp16", mx.float32: "fp32"}
 
 _ARCH_RE = re.compile(r"applegpu_g(\d+)")
 _NATIVE_BF16_GEN = 15  # Apple9 (M3) and later
@@ -84,4 +92,4 @@ def activation_dtype() -> mx.Dtype:
 
 def activation_dtype_name() -> str:
     """Short label for load logs."""
-    return "fp16" if activation_dtype() == mx.float16 else "bf16"
+    return _SHORT_NAME[activation_dtype()]

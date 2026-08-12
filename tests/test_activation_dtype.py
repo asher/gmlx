@@ -53,6 +53,8 @@ def test_default_is_bfloat16():
         ("bf16", mx.bfloat16),
         ("FLOAT16", mx.float16),
         ("  fp16  ", mx.float16),
+        ("float32", mx.float32),
+        ("fp32", mx.float32),
     ],
 )
 def test_explicit_values_and_aliases(monkeypatch, value, expected):
@@ -60,7 +62,25 @@ def test_explicit_values_and_aliases(monkeypatch, value, expected):
     assert dtypes.activation_dtype() == expected
 
 
-@pytest.mark.parametrize("value", ["garbage", "float32", "int8", ""])
+@pytest.mark.parametrize(
+    "value,name",
+    [("bfloat16", "bf16"), ("float16", "fp16"), ("float32", "fp32")],
+)
+def test_short_names_cover_every_choice(monkeypatch, value, name):
+    """Load logs label the dtype; a missing entry would KeyError at load."""
+    monkeypatch.setenv(dtypes.ENV_VAR, value)
+    assert dtypes.activation_dtype_name() == name
+
+
+def test_float32_is_env_only_not_a_cli_choice():
+    """float32 is a certification reference arm, not a shipping mode."""
+    ap = argparse.ArgumentParser()
+    add_load_args(ap)
+    with pytest.raises(SystemExit):
+        ap.parse_args(["--dtype", "float32"])
+
+
+@pytest.mark.parametrize("value", ["garbage", "int8", "float64", ""])
 def test_malformed_degrades_to_default(monkeypatch, value):
     """A bad value must not crash a serve boot; it falls back to bfloat16."""
     monkeypatch.setenv(dtypes.ENV_VAR, value)
