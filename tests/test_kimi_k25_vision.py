@@ -217,3 +217,29 @@ def test_config_synth_without_the_placeholder_token():
     cfg = _synthesize_kimi_k25_vlm_config(
         {"vocab_size": 10}, MM_META, {"tokenizer.ggml.tokens": ["a"]})
     assert "media_placeholder_token_id" not in cfg
+
+
+def test_image_processor_output_survives_a_thread_hop():
+    """The server preprocesses a request on a caller thread and evaluates on
+    the engine thread. The stock KimiK25ImageProcessor returns lazy MLX
+    graphs, and a different thread cannot evaluate them ("There is no
+    Stream(gpu, N) in current thread"). The synthesized processor evaluates
+    its outputs on the building thread."""
+    pytest.importorskip("mlx_vlm")
+    import threading
+
+    from PIL import Image
+
+    from gmlx.vlm import _kimi_k25_image_processor
+
+    proc = _kimi_k25_image_processor(
+        patch_size=14, image_mean=(0.5, 0.5, 0.5), image_std=(0.5, 0.5, 0.5),
+        in_token_limit=1024, merge_kernel_size=[2, 2],
+        patch_limit_on_one_side=64)
+    img = Image.new("RGB", (56, 42), (200, 30, 90))
+    box = {}
+    t = threading.Thread(target=lambda: box.update(proc.preprocess([img])))
+    t.start()
+    t.join()
+    mx.eval(box["pixel_values"], box["image_grid_hws"])
+    assert box["pixel_values"].shape[1:] == (3, 14, 14)

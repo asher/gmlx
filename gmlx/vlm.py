@@ -1929,6 +1929,33 @@ def _synthesize_pixtral_processor(tokenizer, mm_meta: dict):
     return _attach_streaming_helpers(processor, tokenizer)
 
 
+def _kimi_k25_image_processor(**params):
+    """A ``KimiK25ImageProcessor`` whose outputs are evaluated, not lazy.
+
+    The stock processor resizes and patchifies in MLX, thus its outputs are
+    lazy graphs on the default stream of the thread that runs it. MLX default
+    streams are per-thread, and a thread cannot evaluate a lazy array from a
+    different thread. The server preprocesses a request on a caller thread
+    and evaluates on the engine thread, so the stock outputs fail there with
+    "There is no Stream(gpu, N) in current thread". This subclass evaluates
+    the outputs on the thread that builds them. The other supported families
+    preprocess in numpy, so they do not need this today, but mlx-vlm has many
+    MLX-native processors: give a family like this the same wrapper.
+    """
+    from mlx_vlm.models.kimi_k25.processing_kimi_k25 import (
+        KimiK25ImageProcessor,
+    )
+
+    class _Eager(KimiK25ImageProcessor):
+        def preprocess(self, images, return_tensors=None, **kwargs):
+            out = super().preprocess(
+                images, return_tensors=return_tensors, **kwargs)
+            mx.eval([v for v in out.values() if isinstance(v, mx.array)])
+            return out
+
+    return _Eager(**params)
+
+
 def _synthesize_kimi_k25_processor(tokenizer, mm_meta: dict):
     """Build the Kimi-K2.5/K2.7 processor from the GGUFs alone - no HF download.
 
@@ -1940,7 +1967,7 @@ def _synthesize_kimi_k25_processor(tokenizer, mm_meta: dict):
     for it. Its value is 512, the bound of MoonViT's 2-D RoPE table.
     """
     from mlx_vlm.models.kimi_k25.processing_kimi_k25 import (
-        KimiK25ImageProcessor, KimiK25Processor,
+        KimiK25Processor,
     )
 
     patch_size = _mm_int(mm_meta, "clip.vision.patch_size")
@@ -1951,7 +1978,7 @@ def _synthesize_kimi_k25_processor(tokenizer, mm_meta: dict):
     in_token_limit = (int(max_pixels) // (patch_size ** 2)
                       if max_pixels else 16384)
 
-    image_processor = KimiK25ImageProcessor(
+    image_processor = _kimi_k25_image_processor(
         patch_size=patch_size,
         image_mean=tuple(image_mean),
         image_std=tuple(image_std),
