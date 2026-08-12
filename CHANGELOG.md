@@ -22,6 +22,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   GPUs have no native bfloat16 arithmetic, so the compiler expanded every
   bfloat16 operation into a costly software sequence.
 - mlx-kquant floor raised to 0.3.12: IQ4 perf improvements
+- DeepSeek-V4 decodes slightly faster: the compressor emit-path fp8 round-trip
+  runs as one mlx-kquant dispatch instead of a 13-dispatch graph, on
+  every layer that completes a pool window. Bit-identical;
+  GMLX_EMIT_QAT_FUSED=0 restores the graph.
 
 ### Fixed
 
