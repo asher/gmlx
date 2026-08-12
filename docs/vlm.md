@@ -56,11 +56,21 @@ families that share one. An unsupported pairing fails loudly at load with both n
 | gemma-4 omni | `gemma4v`/`gemma4a` | gemma-4-E2B / E4B (vision + audio) |
 | gemma-4 unified | `gemma4uv` | gemma-4-12B (encoder-free unified embedder) |
 | Muse Glimmer | `muse-glimmer` + `muse-glimmer` | Muse-Glimmer-30B |
+| Kimi K2.5 / K2.7 | `kimik25` + `deepseek2` | Kimi-K2.5, Kimi-K2.7-Code |
 
 Muse Glimmer's vision tower and image processor are implemented in gmlx. Neither
 mlx-vlm nor the installed transformers ships the family, so the preprocessing
 ports llama.cpp's `mtmd_image_preprocessor_muse_glimmer`. `--hf-source` is not
 needed.
+
+Kimi K2.x pairs its MoonViT mmproj with the `deepseek2` text tower. The
+converter rewrites the vision Q/K into the split 2-D RoPE layout llama.cpp's
+`build_rope_2d` consumes; the remap puts them back into the interleaved layout
+MoonViT itself uses, so a mis-decoded mmproj shows up as confidently wrong image
+descriptions rather than as a load error. GLM-5.2-V ships the same vision
+encoder under a different text arch and is refused by name. Because K2.x is an
+over-RAM MoE, `--stream-experts` composes with `--mmproj` here: placement runs
+on the text tower after the load and the vision tower stays resident.
 
 Qwen2-VL / Qwen2.5-VL mmprojs (`qwen2vl_merger`) are not supported yet. The
 load fails up front with the family named. LLaVA's image processor isn't

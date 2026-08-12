@@ -2737,6 +2737,7 @@ _F16_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # ride fp32 promotion while the weights stay F16 - the oracle's own layout.
     # Vision only - the text tower's bf16 holds 16k parity.
     "muse_glimmer": ("vision_tower.", "vision_adapter.", "vision_projection."),
+    "kimi_k25": ("vision_tower.", "mm_projector."),
 }
 
 
