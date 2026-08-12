@@ -30,6 +30,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   gather still referenced. This garbled short-prompt prefills on
   low-residency models. Each piece now executes before the next piece
   stages.
+- `--dtype auto|bfloat16|float16` (env `GMLX_ACTIVATION_DTYPE`, which serve
+  reads too) sets the activation dtype for the model graph. `auto` selects
+  float16 on M1 and M2, whose GPUs have no native bfloat16 arithmetic and run
+  it through a compiler-expanded software sequence. The default is unchanged.
 
 ## [0.3.0] - 2026-08-09
 

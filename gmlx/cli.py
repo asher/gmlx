@@ -58,6 +58,24 @@ class _CondensedHelpAction(argparse.Action):
         parser.exit()
 
 
+class _DtypeAction(argparse.Action):
+    """Publish --dtype through the environment as soon as it parses.
+
+    The activation dtype has to reach every loader entry point (the text
+    load, the vision/audio towers, the MTP drafter load) and the module
+    installer, which sit behind different call paths. Setting the variable
+    the resolver already reads covers all of them without threading a kwarg
+    through each signature, and keeps serve, which builds its model list
+    from config rather than these flags, on the same mechanism.
+    """
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        from .dtypes import ENV_VAR  # local: keeps mlx off the --help path
+
+        os.environ[ENV_VAR] = values
+        setattr(namespace, self.dest, values)
+
+
 def format_condensed_help(ap: argparse.ArgumentParser, core) -> str:
     """The short help page: usage over just the core actions, the description,
     the core options, and a pointer at --help-all for the rest."""
@@ -307,6 +325,17 @@ def add_load_args(ap: argparse.ArgumentParser) -> None:
         "--no-zero-copy",
         action="store_true",
         help="memcpy tensors out of the mmap instead of viewing.",
+    )
+    ap.add_argument(
+        "--dtype",
+        choices=("auto", "bfloat16", "float16"),
+        default=None,
+        action=_DtypeAction,
+        metavar="DTYPE",
+        help="Activation dtype for the model graph (default: bfloat16). "
+        "'auto' selects float16 on Apple GPUs without native bfloat16 "
+        "arithmetic (M1, M2), bfloat16 elsewhere. Also settable as "
+        "GMLX_ACTIVATION_DTYPE, which serve reads too.",
     )
 
 
