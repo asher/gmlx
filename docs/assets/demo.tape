@@ -4,30 +4,41 @@
 #   brew install vhs
 #   vhs docs/assets/demo.tape        # writes docs/assets/demo.gif
 #
-# Run it from a scratch directory and pre-pull the model once before recording,
-# so the pull replay is the instant already-downloaded path and the whole tape
-# stays under ~45 seconds:
-#   gmlx pull hf:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q4_K_M.gguf --to .
+# What it shows, in one scene: a 27B model opened by bare id, loading in
+# seconds, streaming a markdown answer with the live tok/s ticker visible.
+# That is the differentiated story; keep the whole GIF under ~20 seconds.
 #
-# The Sleep durations below are first guesses; tune them against the actual
-# pull-replay and load/generate timings on the recording machine before
-# publishing the GIF.
+# Prerequisites on the recording machine:
+#   - a server config written by gmlx init that defines the id below.
+#     Any mid-size id works; edit the Type lines to match your config.
+#   - the model file already local. Nothing downloads on camera.
+#   - a non-thinking model or intent. On-camera reasoning is dead air;
+#     if the reply starts with a think block, switch id or @intent.
+#
+# The Sleep durations are first guesses. Tune them against live timings
+# before publishing: the load sleep should end just after the first tokens
+# appear, and the reply sleep just after the answer completes.
 
 Output docs/assets/demo.gif
 
-Set FontSize 16
+Set FontSize 18
 Set Width 960
 Set Height 540
 Set TypingSpeed 40ms
 
-Type "gmlx pull hf:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q4_K_M.gguf --to ."
+Type "gmlx chat qwen3.6-27b-q6"
 Sleep 500ms
 Enter
+# Zero-copy load: a 27B Q6_K reaches the prompt in a few seconds.
 Sleep 4s
 
-Type `gmlx run Qwen3-0.6B-Q4_K_M.gguf --prompt "Explain KV caching in one sentence." --max-tokens 60`
+Type "Show a Python one-liner that flattens a nested list, then explain it in two sentences."
 Sleep 500ms
 Enter
-Sleep 25s
+# Streaming markdown with the live tok/s ticker; a compact ~200-token reply.
+Sleep 8s
 
-Sleep 3s
+Type "/exit"
+Sleep 500ms
+Enter
+Sleep 2s
