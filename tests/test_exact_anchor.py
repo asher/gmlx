@@ -218,38 +218,111 @@ def test_anchor_at_guard_single_stop(monkeypatch):
     assert calls == [96] and meta.get("checkpoint_done")
 
 
-# -- stock-path init: lookup, in-place trim, no re-arm at the anchor --
+# -- admission pick: the anchor rides the stock warm-batch builder --
 
-def test_plain_anchor_init_restores_and_trims(monkeypatch):
+def _pooling_model(man):
+    """A pooling stack resolves exact and is not ckpt-tier (the layout
+    probe rejects unknown cache classes) -- the ds4 shape."""
     from gmlx.deepseek_v4_cache import PoolingCache
 
-    se._bind_l1_view()
-    man = APCManager(num_blocks=8, block_size=16)
-    anchor_exact_store(man, IDS[:64], make_kv_cache(64))
-    _stub_sys(monkeypatch, 64)
-    monkeypatch.setenv("GMLX_APC_CKPT_SYS_MIN", "16")
-
-    n = len(IDS)
-    # A pooling stack resolves exact and is not ckpt-tier (the layout
-    # probe rejects unknown cache classes) -- the ds4 shape.
-    model = SimpleNamespace(
+    return SimpleNamespace(
         _kq_apc_manager=man, _kq_apc_mode="exact",
         config=SimpleNamespace(),
         make_cache=lambda: [KVCache(),
                             CacheList(KVCache(), PoolingCache(4))])
-    meta = {"full_input_ids": list(IDS), "prefix_len": 0, "extra_hash": 0,
-            "checkpoint_len": 96}
-    batch = SimpleNamespace(
-        model=model, uids=["u1"], _right_pad_per_row=None,
+
+
+def _pick_gen(man):
+    from mlx_vlm.generate.ar import BatchGenerator
+
+    se._install_exact_anchor_pick()
+    gen = SimpleNamespace(
+        apc_manager=man, apc_mode="exact", model=_pooling_model(man),
+        _apc_media_token_ids=lambda: set())
+    for name in ("_apc_pick_for", "_apc_extra_hash",
+                 "_apc_safe_prefix_lookup_min", "_apc_suffix_is_text_only"):
+        setattr(gen, name, getattr(BatchGenerator, name).__get__(gen))
+    return gen
+
+
+def _seq(ids, uid="u1"):
+    return (uid, list(ids), 8, {}, None, None)
+
+
+def test_anchor_pick_returns_a_warm_prefix():
+    man = APCManager(num_blocks=8, block_size=16)
+    anchor_exact_store(man, IDS[:64], make_kv_cache(64))
+    pick = _pick_gen(man)._apc_pick_for(_seq(IDS))
+    assert pick["prefix_len"] == 64 and pick["matched_blocks"] == []
+    assert all(int(c.offset) == 64 for c in pick["warm_cache"])
+    assert pick["full_input_ids"] == IDS
+
+
+def test_anchor_pick_never_shortens_the_stock_pick():
+    man = APCManager(num_blocks=8, block_size=16)
+    anchor_exact_store(man, IDS[:64], make_kv_cache(64))
+    # A deeper stock exact entry wins: the anchor is a floor, not a cap.
+    man.store_exact_cache(IDS[:100], make_kv_cache(100, seed=5))
+    pick = _pick_gen(man)._apc_pick_for(_seq(IDS))
+    assert pick["prefix_len"] == 100
+
+
+def test_anchor_pick_passes_through_without_a_hit():
+    man = APCManager(num_blocks=8, block_size=16)
+    assert _pick_gen(man)._apc_pick_for(_seq(IDS)) is None
+
+
+# -- stock-path init: arms the store, right padding included --
+
+def _plain_batch(man, right_pad, prefix_len=0):
+    n = len(IDS)
+    meta = {"full_input_ids": list(IDS), "prefix_len": prefix_len,
+            "extra_hash": 0, "checkpoint_len": 96}
+    return SimpleNamespace(
+        model=_pooling_model(man), uids=["u1"], _right_pad_per_row=right_pad,
         _apc_manager=man, _apc_mode="exact", _apc_meta=[meta],
         _input_ids=mx.array([IDS]), _inputs_embeds=mx.zeros((1, n, 4)),
         _prompt_kwargs={}, _prompt_length_aware_keys=[],
-        prompt_cache=None)
+        prompt_cache=None), meta
+
+
+def test_plain_anchor_init_arms_on_a_right_padded_row(monkeypatch):
+    se._bind_l1_view()
+    man = APCManager(num_blocks=8, block_size=16)
+    _stub_sys(monkeypatch, 64)
+    monkeypatch.setenv("GMLX_APC_CKPT_SYS_MIN", "16")
+    # Right padding means this row rode a warm batch built for a longer
+    # sibling. Upstream's checkpoint column handles it, so must we: this
+    # is the common shape once any request is warm.
+    batch, meta = _plain_batch(man, right_pad=[0])
     se._plain_anchor_init(batch)
-    assert batch._processed_prompt_columns == 64
-    assert batch._input_ids.shape[1] == n - 64
-    assert all(int(c.offset) == 64 for c in batch.prompt_cache)
-    # Restored exactly at the divergence: nothing below it to store, so
-    # the anchor hook stays unarmed and the stock guard runs alone.
+    assert batch._kq_anchor_armed and meta["checkpoint_len"] == 64
+    # Nothing is trimmed here: restores come from the admission pick.
+    assert batch._input_ids.shape[1] == len(IDS)
+
+
+def test_plain_anchor_init_arms_above_a_shallow_warm_prefix(monkeypatch):
+    se._bind_l1_view()
+    man = APCManager(num_blocks=8, block_size=16)
+    _stub_sys(monkeypatch, 64)
+    monkeypatch.setenv("GMLX_APC_CKPT_SYS_MIN", "16")
+    # A warm row is not an anchored row. The stock exact tier routinely
+    # matches a token or two off an unrelated request; the divergence
+    # still needs its clone.
+    batch, meta = _plain_batch(man, right_pad=[0], prefix_len=1)
+    se._plain_anchor_init(batch)
+    assert batch._kq_anchor_armed and meta["checkpoint_len"] == 64
+
+
+def test_plain_anchor_init_skips_a_row_restored_past_the_divergence(
+        monkeypatch):
+    se._bind_l1_view()
+    man = APCManager(num_blocks=8, block_size=16)
+    _stub_sys(monkeypatch, 64)
+    monkeypatch.setenv("GMLX_APC_CKPT_SYS_MIN", "16")
+    # Restored at the divergence: the anchor it would store exists, so
+    # no second stop and the stock guard runs alone.
+    batch, meta = _plain_batch(man, right_pad=None, prefix_len=64)
+    se._plain_anchor_init(batch)
     assert not getattr(batch, "_kq_anchor_armed", False)
     assert meta["checkpoint_len"] == 96

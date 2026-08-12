@@ -579,6 +579,8 @@ def _exact_anchor_boundary(batch, meta, guard: int,
     ctx = lookup_render_ctx(ids)
     lcp = system_prefix_lcp(ctx, ids) if ctx else None
     if not lcp:
+        _log.info("APC anchor declined: no measurable system prefix "
+                  "(render ctx %s)", "present" if ctx else "missing")
         return None
     pos = min(int(lcp), len(ids) - 1)
     if guard > 0:
@@ -601,6 +603,7 @@ def _exact_anchor_arm(batch, meta, guard: int, restored: int) -> None:
     if pos != guard:
         meta["checkpoint_len"] = pos
     batch._kq_anchor_armed = True
+    _log.info("APC anchor armed: pos=%d guard=%d", pos, guard)
 
 
 def _exact_anchor_store(batch) -> None:
@@ -867,51 +870,93 @@ def _plain_ckpt_init(batch) -> None:
 
 
 def _plain_anchor_init(batch) -> None:
-    """Exact-tier anchor lookup + arming for a stock prompt batch
-    (non-ckpt exact models: DeepSeek-V4-class pooling stacks).
+    """Arm the exact-tier anchor stop on a stock prompt batch (non-ckpt
+    exact models: DeepSeek-V4-class pooling stacks).
 
-    The stock exact LRU is count-capped and every request writes its
-    guard-column entry there, so the shared system prefix is churned out
-    before a sibling arrives; the anchor LRU holds exactly those
-    entries. Lookup and in-place prefix trim mirror ``_plain_ckpt_init``
-    (cold B=1 unbatched rows only; stock warm rows stay stock).
+    Restores come from the admission pick (_install_exact_anchor_pick),
+    so this only schedules the store. Warm and right-padded rows are
+    included: a restored prefix is usually far short of the divergence
+    (a bare bos match off some unrelated request), and upstream's
+    checkpoint column and row extraction handle both shapes. Refusing
+    them would skip every row that rides a warm batch, which on a busy
+    server is nearly all of them. The restored prefix becomes the
+    boundary floor, so a row already past the divergence arms nothing.
     """
     manager = getattr(batch, "_apc_manager", None)
     mode = getattr(batch, "_apc_mode", None)
     meta_list = getattr(batch, "_apc_meta", None) or []
     if (manager is None or mode != "exact" or len(meta_list) != 1
             or meta_list[0] is None or len(batch.uids) != 1
-            or batch._right_pad_per_row is not None
             or batch._inputs_embeds is None):
         return
     if _ckpt_active(batch.model, mode, int(manager.block_size)):
         return                          # ckpt tier owns these models
     meta = meta_list[0]
-    if int(meta.get("prefix_len") or 0):
-        return                          # stock warm row: leave it stock
-    ids_list = [int(t) for t in meta["full_input_ids"]]
-    if len(ids_list) < 2:
+    if len(meta.get("full_input_ids") or ()) < 2:
         return
-    extra_hash = int(meta.get("extra_hash", 0))
-    view = _L1View(batch.model, manager, mode)
-    restored = 0
-    from .cache_snapshot import anchor_exact_lookup
-    warm, ap = anchor_exact_lookup(
-        manager, ids_list, extra_hash=extra_hash,
-        min_prefix_tokens=view._apc_safe_prefix_lookup_min(ids_list))
-    if (warm is not None and 0 < ap < len(ids_list)
-            and view._apc_suffix_is_text_only(ids_list, ap)):
-        batch.prompt_cache = warm
-        batch._input_ids = batch._input_ids[:, ap:]
-        batch._inputs_embeds = batch._inputs_embeds[:, ap:]
-        batch._processed_prompt_columns = ap
-        for k in batch._prompt_length_aware_keys:
-            batch._prompt_kwargs[k] = batch._prompt_kwargs[k][:, ap:, ...]
-        restored = ap
-        _log.info("APC L1 hit: prefix=%d suffix=%d tier=anchor",
-                  ap, len(ids_list) - ap)
-    guard = int(meta.get("checkpoint_len") or 0)
-    _exact_anchor_arm(batch, meta, guard, restored)
+    _exact_anchor_arm(batch, meta, int(meta.get("checkpoint_len") or 0),
+                      int(meta.get("prefix_len") or 0))
+
+
+_ANCHOR_PICK_FLAG = "_kq_exact_anchor_pick"
+
+
+def _install_exact_anchor_pick() -> None:
+    """Consult the anchor LRU inside the stock admission pick.
+
+    The pick is where a warm prefix belongs: admission builds the batch
+    from it (suffix rows, right padding, warm-cache merge) and every
+    downstream path treats an anchor restore exactly like a stock exact
+    one. The anchor wins only when strictly longer than the stock pick,
+    so it never shortens a restore. Idempotent.
+    """
+    from mlx_vlm.generate.ar import BatchGenerator
+    if getattr(BatchGenerator._apc_pick_for, _ANCHOR_PICK_FLAG, False):
+        return
+    _orig = BatchGenerator._apc_pick_for
+
+    def _pick_with_anchor(self, sequence):
+        pick = _orig(self, sequence)
+        try:
+            if _SPEC_APC_DISABLED or getattr(self, "apc_mode", None) != "exact":
+                return pick
+            manager = getattr(self, "apc_manager", None)
+            if manager is None or _ckpt_active(
+                    getattr(self, "model", None), "exact",
+                    int(manager.block_size)):
+                return pick
+            _uid, ids_list, _mt, prompt_kwargs, _lps, _crit = sequence
+            if not ids_list or len(ids_list) < 2:
+                return pick
+            have = int((pick or {}).get("prefix_len") or 0)
+            extra_hash = self._apc_extra_hash(prompt_kwargs or {})
+            floor = max(have, self._apc_safe_prefix_lookup_min(ids_list))
+            from .cache_snapshot import anchor_exact_lookup
+            warm, ap = anchor_exact_lookup(
+                manager, ids_list, extra_hash=extra_hash,
+                min_prefix_tokens=floor)
+            if warm is None or ap <= have or ap >= len(ids_list):
+                return pick
+            if not self._apc_suffix_is_text_only(ids_list, ap):
+                return pick
+            if pick and pick.get("matched_blocks"):
+                manager.release(pick["matched_blocks"])
+            _log.info("APC L1 hit: prefix=%d suffix=%d tier=anchor",
+                      ap, len(ids_list) - ap)
+            return {
+                "matched_blocks": [],
+                "warm_cache": warm,
+                "prefix_len": ap,
+                "extra_hash": extra_hash,
+                "full_input_ids": list(ids_list),
+            }
+        except Exception:
+            _log.warning("APC anchor pick failed; continuing",
+                         exc_info=True)
+            return pick
+
+    _pick_with_anchor.__dict__[_ANCHOR_PICK_FLAG] = True
+    BatchGenerator._apc_pick_for = _pick_with_anchor
 
 
 _PLAIN_DECODE_FLAG = "_kq_ckpt_plain_decode"
@@ -1171,6 +1216,7 @@ def install_full_prompt_mtp_prefill() -> None:
     _install_apc_manager_stash()
     _install_ckpt_checkpoint_store()
     _install_plain_ckpt_decode()
+    _install_exact_anchor_pick()
 
     if getattr(PromptProcessingBatch, _FULL_PREFILL_FLAG, False):
         return
