@@ -6,6 +6,30 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Moonshot Kimi-K2.5 / K2.7 support. K2.x is DeepSeek-V3-shaped, so it
+  loads through the existing `deepseek2` arch and the stock `deepseek_v3`
+  class; what it needed was its own sampling family (t=1.0/top_p=0.95,
+  selected off `general.name` since the arch is shared with DeepSeek) and
+  the surrounding contract - the `<|im_*|>` chat format whose generation
+  prompt leaves `<think>` open, and the `kimi_k2` tool-call section
+  parser - now pinned by tests.
+
+### Fixed
+
+- deepseek2 / glm-dsa yarn scaling: llama.cpp writes
+  `rope.scaling.yarn_log_multiplier` as `0.1 * mscale_all_dim`, and gmlx
+  read it back as `mscale_all_dim` itself. Every yarn-scaled GGUF on
+  those arches (DeepSeek-V3/R1, Kimi-K2.x, GLM-5.2) therefore ran with an
+  attention scale ~1.85x too flat, which reads as fluent but
+  context-blind decoding that degenerates into repetition. `beta_fast` /
+  `beta_slow` now pass through as well.
+- Streaming decode-feeder token-split corruption: staging one split piece
+  could overwrite arena slots an earlier piece's still-lazy gather
+  referenced, garbling short-prompt prefills on low-residency models.
+  Each piece now executes before the next stages.
+
 ## [0.3.0] - 2026-08-09
 
 ### Added

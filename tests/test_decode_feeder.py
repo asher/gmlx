@@ -708,6 +708,82 @@ def test_aligned_reads_and_raw_fallback(monkeypatch, tmp_path):
         assert _arena_slot(raw, 1, kind, s) == _expert_bytes(1, kind, 2)
 
 
+def test_split_pieces_execute_before_next_stage(monkeypatch):
+    """Arena token-split fence: split pieces slice one precomputed routing,
+    so a later piece's stage-time ``mx.eval(indices)`` does not wait for an
+    earlier piece's gather - staging could overwrite arena slots the
+    still-lazy gather references. The wrapper must execute each piece
+    before the next stage() call, and the reassembled output must equal
+    the unsplit reference."""
+    mx.random.seed(4)
+    glu = SwitchGLU(16, 32, 4)
+    mx.eval(glu.parameters())
+    model = _holder_model(glu)
+    model.parameters = lambda: {"glu": glu.parameters()}
+    monkeypatch.setattr(
+        mx, "device_info", lambda: {"max_recommended_working_set_size": 1024}
+    )
+    real_set_wired = mx.set_wired_limit
+    try:
+        install_expert_streaming(model)
+        x4 = mx.random.normal((1, 4, 16))
+        i4 = mx.array([[[0, 2], [1, 3], [2, 0], [3, 1]]], dtype=mx.uint32)
+        ref = mx.array(glu(x4, i4))
+        mx.eval(ref)
+
+        events = []
+
+        class _SplitDF:
+            def ensure_wired(self):
+                pass
+
+            def covers(self, li):
+                return True
+
+            def can_stage_smaller(self, li):
+                return True
+
+            def stage(self, li, ids):
+                if ids.size > 2:
+                    return None  # union over arena slots: force the split
+                events.append("stage")
+                return ids.astype(np.uint32)  # identity: same weights
+
+            def wedged_at(self, li):
+                return False
+
+            @contextmanager
+            def swapped(self, li):
+                yield
+
+        real_eval = mx.eval
+
+        def _recording_eval(*args):
+            if any(
+                isinstance(a, mx.array) and a.dtype in (mx.float32, mx.float16)
+                for a in args
+            ):
+                events.append("eval-out")
+            return real_eval(*args)
+
+        object.__setattr__(glu, "_kq_decode_feeder", _SplitDF())
+        object.__setattr__(glu, "_kq_li", 3)
+        monkeypatch.setattr(mx, "eval", _recording_eval)
+        out = mx.array(glu(x4, i4))
+        monkeypatch.setattr(mx, "eval", real_eval)
+        mx.eval(out)
+        assert mx.allclose(ref, out, atol=1e-6, rtol=1e-6)
+        stages = [i for i, e in enumerate(events) if e == "stage"]
+        assert len(stages) == 4  # one leaf per token
+        for a, b in zip(stages, stages[1:]):
+            assert "eval-out" in events[a:b], (
+                "no piece-output eval between consecutive stage() calls: "
+                f"{events}"
+            )
+    finally:
+        mx.set_wired_limit = real_set_wired
+
+
 def test_wrapper_redirects_dead_ids_on_fallback(monkeypatch):
     """Post-wedge, every non-arena path must see rewritten ids: the
     output equals computing with the dead id replaced, and the decode
