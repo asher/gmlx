@@ -795,9 +795,9 @@ def _evict_for_pool(manager, deficit: int) -> int:
     release, so an unreachable deficit is detected upfront and evicts
     nothing rather than draining the whole index for a store that still
     declines. Plain LRU order on purpose: anchor records get no
-    protection here -- an anchor pinning window blocks on an exhausted
-    pool would starve every future store. Returns the number of records
-    released."""
+    protection here, since an anchor pinning window blocks on an
+    exhausted pool would starve every future store. Returns the number
+    of records released."""
     if not hasattr(manager, "_free_head"):
         return 0
     idx = _ckpt_records(manager)
@@ -831,7 +831,7 @@ def _evict_lru_record(manager, idx, keep):
     """Release and return the eviction victim: the least-recently-used
     non-anchor record, else the least-recently-used anchor, never the
     ``keep`` key (the record being inserted always survives). Lookup
-    hits move_to_end, so anchor order is LRU by last hit -- an anchor
+    hits move_to_end, so anchor order is LRU by last hit: an anchor
     that never serves a sibling ages out, one that does stays hot.
     Caller holds the lock and guarantees a non-keep record exists."""
     key = next((k for k, r in idx.items()
@@ -865,7 +865,7 @@ def _record_insert(manager, rec) -> None:
     Against real memory pressure the exemptions pin little: the count
     and byte bounds evict anchors after non-anchors (LRU by last hit),
     and pool-pressure eviction (_evict_for_pool) gives anchors no
-    protection at all -- position-salted window chains must never sit
+    protection at all: position-salted window chains must never sit
     pinned on an exhausted pool."""
     idx = _ckpt_records(manager)
     key = (rec.ids, rec.extra_hash)

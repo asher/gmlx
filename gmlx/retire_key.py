@@ -258,20 +258,23 @@ def _lcp_len(seq, nxt) -> int:
 
 
 def system_prefix_lcp(ctx: dict, prompt_ids) -> int | None:
-    """Token length of the shared leading-system prefix: the LCP of the
-    live prompt with a render of only the leading system messages.
+    """Token length of the prefix every sibling request shares: the LCP
+    of two probe renders that differ only in a dummy first user turn.
 
     Sibling fan-out requests share the system prompt and tool schemas
     but diverge at the first user message; this is the deepest position
-    one checkpoint can serve all of them. The system-only render goes
+    one checkpoint can serve all of them. A system-only render cannot
+    measure it on every template (gemma folds the system prompt into
+    the first user turn and renders a lone system message to almost
+    nothing), so the offset comes from a divergence probe instead:
+    render leading-system + user "0" and leading-system + user "1"
     through the same template, kwargs (tools included), and tokenizer
-    as the live request, and the LCP clamp keeps the offset honest for
-    templates that render a lone system message differently (gemma
-    folds it into the first user turn: the folded header still matches,
-    the divergence point just lands earlier). Templates that refuse a
-    system-only conversation fail the render and return None. Memoized
-    on the ctx; media prompts return None (expanded media ids cannot be
-    re-encoded from text)."""
+    as the live request, and take where they split. A folding template
+    folds both probes identically, so the split lands exactly where
+    real siblings diverge. Clamped by the LCP with the live
+    prompt in case a template leaks user content into the header.
+    Memoized on the ctx; media prompts return None (expanded media ids
+    cannot be re-encoded from text)."""
     if not ctx or ctx.get("media"):
         return None
     memo = ctx.get("_p_system")
@@ -289,9 +292,10 @@ def system_prefix_lcp(ctx: dict, prompt_ids) -> int | None:
         # No leading system block, or nothing after it (a system-only
         # prompt is covered by the terminal checkpoint already).
         if lead and len(lead) < len(msgs):
-            nxt = _render_ids(ctx, lead)
-            if nxt:
-                lcp = _lcp_len(prompt_ids, nxt)
+            p1 = _render_ids(ctx, lead + [{"role": "user", "content": "0"}])
+            p2 = _render_ids(ctx, lead + [{"role": "user", "content": "1"}])
+            if p1 and p2:
+                lcp = min(_lcp_len(p1, p2), _lcp_len(p1, prompt_ids))
     except Exception:
         _log.debug("system-prefix prediction failed", exc_info=True)
         lcp = None

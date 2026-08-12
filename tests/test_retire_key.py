@@ -374,7 +374,54 @@ def _sys_ctx(next_ids, msgs):
     return ctx
 
 
-def test_system_prefix_lcp_renders_leading_system_only():
+def _probe_ctx(msgs, template):
+    """A ctx whose render/tokenize pair actually varies with the probe
+    messages: ``template`` maps a message list to text; tokens are
+    character codes, so the probe LCP is a plain string LCP."""
+    ctx = _fake_ctx([0])
+    ctx["messages"] = msgs
+    ctx["render"] = lambda p, c, m, **kw: template(m)
+    ctx["preprocess"] = lambda text: [ord(ch) for ch in text]
+    return ctx
+
+
+def _chatml(msgs):
+    return "".join(f"<{m['role']}>{m['content']}</>" for m in msgs)
+
+
+def _folding(msgs):
+    """Gemma-style: system content folds into the first user turn; a
+    system-only conversation renders to almost nothing."""
+    sys_txt = "".join(m["content"] for m in msgs if m["role"] == "system")
+    users = [m for m in msgs if m["role"] == "user"]
+    if not users:
+        return "<bos>"
+    return ("<bos><user>" + sys_txt + "\n\n"
+            + "".join(u["content"] for u in users) + "</>")
+
+
+def test_system_prefix_lcp_probe_pair_explicit_system_block():
+    msgs = [{"role": "system", "content": "policy"},
+            {"role": "user", "content": "real question"}]
+    ctx = _probe_ctx(msgs, _chatml)
+    live = [ord(ch) for ch in _chatml(msgs)]
+    # Probes diverge right after the shared "<system>policy</><user>"
+    # header; the anchor offset includes the user header, which every
+    # sibling also shares.
+    assert rk.system_prefix_lcp(ctx, live) == len("<system>policy</><user>")
+
+
+def test_system_prefix_lcp_probe_pair_folding_template():
+    # The gemma shape: a system-only render measures nothing, but the
+    # probe pair folds identically and splits at the real divergence.
+    msgs = [{"role": "system", "content": "policy"},
+            {"role": "user", "content": "real question"}]
+    ctx = _probe_ctx(msgs, _folding)
+    live = [ord(ch) for ch in _folding(msgs)]
+    assert rk.system_prefix_lcp(ctx, live) == len("<bos><user>policy\n\n")
+
+
+def test_system_prefix_lcp_probe_renders_lead_plus_dummy():
     calls = []
     ctx = _sys_ctx([1, 2, 3], [{"role": "system", "content": "a"},
                                {"role": "system", "content": "b"},
@@ -383,17 +430,18 @@ def test_system_prefix_lcp_renders_leading_system_only():
     ctx["render"] = (lambda p, c, msgs, **kw:
                      (calls.append(list(msgs)), inner(p, c, msgs, **kw))[1])
     assert rk.system_prefix_lcp(ctx, [1, 2, 3, 7, 8]) == 3
-    assert calls == [[{"role": "system", "content": "a"},
-                      {"role": "system", "content": "b"}]]
+    lead = [{"role": "system", "content": "a"},
+            {"role": "system", "content": "b"}]
+    assert calls == [lead + [{"role": "user", "content": "0"}],
+                     lead + [{"role": "user", "content": "1"}]]
     # Memoized: a second call does not re-render.
     assert rk.system_prefix_lcp(ctx, [1, 2, 3, 7, 8]) == 3
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
-def test_system_prefix_lcp_clamps_at_divergence():
-    # A template that renders a lone system block differently (gemma
-    # user-turn folding) diverges early; the LCP keeps only the honest
-    # shared prefix.
+def test_system_prefix_lcp_clamped_by_live_prompt():
+    # The live-prompt clamp guards against a template leaking user
+    # content ahead of the divergence point.
     ctx = _sys_ctx([1, 2, 9, 9], [{"role": "system", "content": "s"},
                                   {"role": "user", "content": "u"}])
     assert rk.system_prefix_lcp(ctx, [1, 2, 3, 4, 5]) == 2

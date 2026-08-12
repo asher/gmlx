@@ -501,7 +501,7 @@ def _ckpt_sys_boundary(batch, meta, restored: int,
     """Anchor stop at the end of the shared system prefix.
 
     Sibling fan-out requests share the system prompt and tool schemas
-    and diverge at the first user message -- generally between grid
+    and diverge at the first user message, generally between grid
     points, so the interval schedule alone wastes up to one interval of
     sibling recompute, and strip-on-extend removes the early boundary
     the siblings need as the chain deepens (the anchor exemption in
@@ -549,7 +549,7 @@ def _sched_insert(bounds: list, pos: int, kind: str, *,
     turn-2 and branch adoption out on recurrent layouts (and satisfy the
     p=N drop with a record turn 2 cannot use). ``upgrade`` lets an
     anchor replace a plain boundary at the same position (strictly more
-    retention, same free adoption) -- never a replay."""
+    retention, same free adoption), never a replay."""
     import bisect
 
     pts = [b for b, _ in bounds]
