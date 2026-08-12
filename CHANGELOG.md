@@ -16,6 +16,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - You can now use `--stream-experts` with `--mmproj` with the cli run/chat
   commands. Server support for vision + streaming still to come.
 
+### Changed
+
+- M1 and M2 now run the model graph in float16 instead of bfloat16. Those
+  GPUs have no native bfloat16 arithmetic, so the compiler expanded every
+  bfloat16 operation into a costly software sequence.
+- mlx-kquant floor raised to 0.3.12: IQ4 perf improvements
+
 ### Fixed
 
 - deepseek2 / glm-dsa yarn scaling. llama.cpp writes
@@ -30,6 +37,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   gather still referenced. This garbled short-prompt prefills on
   low-residency models. Each piece now executes before the next piece
   stages.
+- `--dtype auto|bfloat16|float16` (env `GMLX_ACTIVATION_DTYPE`, which serve
+  reads too) sets the activation dtype for the model graph.
+- serve: `--dtype` and `server.dtype` set the same knob for every model the
+  server loads. An unrecognized value is a config error rather than a silent
+  fall back to the default.
 
 ## [0.3.0] - 2026-08-09
 

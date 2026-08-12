@@ -791,6 +791,13 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "it to cap peak memory on long prompts, at some "
                          "prefill-throughput cost. Also via PREFILL_STEP_SIZE; "
                          "config mode: server.prefill_step_size.")
+    ap.add_argument("--dtype", choices=("auto", "bfloat16", "float16"),
+                    default=None, metavar="DTYPE",
+                    help="Activation dtype for every model this server loads "
+                         "(default auto). auto selects float16 on M1 and M2, "
+                         "whose GPUs have no native bfloat16 arithmetic, and "
+                         "bfloat16 on all other devices. Also via "
+                         "GMLX_ACTIVATION_DTYPE; config mode: server.dtype.")
     ap.add_argument("--decode-prefill-ratio", type=_ratio_flag,
                     default=None, metavar="R",
                     help="Decode GPU-time share per prefill chunk under load "
@@ -1332,7 +1339,8 @@ def _dump_cfg_yaml(cfg: ServerCfg) -> str:
     server = {k: d.pop(k) for k in
               ("host", "port", "api_key", "no_auth", "model_dirs", "budget_gb",
                "max_models", "hf_cache", "menubar", "token_queue_timeout_s",
-               "prefill_step_size", "decode_prefill_ratio", "prefill_tick_ms",
+               "prefill_step_size", "dtype",
+               "decode_prefill_ratio", "prefill_tick_ms",
                "cache_limit_gb", "family_defaults",
                "stochastic_mtp", "gpu_keepwarm", "stt", "tts", "embeddings",
                "rerank",
@@ -1481,6 +1489,14 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
         set_stoch_accept(True)
         print("[server] stochastic MTP acceptance: on (sampled requests keep "
               "the sampling distribution but are not token-identical)")
+    # Activation dtype: flag > config > exported env. Server-wide because the
+    # reason to leave bfloat16 is a property of the GPU, not of a model. Read
+    # at each model's load, so setting it here covers every model this server
+    # loads, including ones registered by a later config reload.
+    dtype = getattr(a, "dtype", None) or cfg.dtype
+    if dtype is not None:
+        os.environ["GMLX_ACTIVATION_DTYPE"] = str(dtype)
+        print(f"[server] activation dtype: {dtype}")
     if cfg.gpu_keepwarm or getattr(a, "gpu_keepwarm", False):
         # Startup-only. The loader's gate starts the heartbeat when a
         # streamed model with a decode feeder loads; the heartbeat itself

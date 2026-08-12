@@ -17,6 +17,7 @@ import mlx.nn as nn
 import mlx_kquant as kq
 
 from . import loadlog
+from .dtypes import activation_dtype, activation_dtype_name
 from .envflags import env_int
 from .gdn_patches import (
     _needs_tiled_v_patch,
@@ -345,24 +346,25 @@ def _load_gemma4_assistant_drafter(
     # MaskedEmbedder that reads embed_tokens.weight as a [vocab, hidden] float
     # matrix (gathers candidate rows then a dense matmul). A kquant wire-byte
     # embed table has row width = bytes-per-row (e.g. 272 for a 256-dim Q8_0 row),
-    # not hidden, so dequantize it to bf16 before bind() - bind closes over
-    # embed_tokens.weight for the head. The centroids Linear stays kquant (it's a
-    # plain matmul). The table is small (vocab x hidden_size), so bf16 is cheap.
+    # not hidden, so dequantize it to the activation dtype before bind() - bind
+    # closes over embed_tokens.weight for the head. The centroids Linear stays
+    # kquant (it's a plain matmul). The table is small (vocab x hidden_size), so
+    # a dense 16-bit copy is cheap.
     if drafter_cfg.get("use_ordered_embeddings"):
         from .modules import KQuantEmbedding
 
         emb = drafter.model.embed_tokens
         if isinstance(emb, KQuantEmbedding):
             w = kq.dequantize(emb["weight"], emb["scales"], emb.kquant_type).astype(
-                mx.bfloat16
+                activation_dtype()
             )
             new_emb = nn.Embedding(emb.num_embeddings, emb.dims)
             new_emb.weight = w
             drafter.model.embed_tokens = new_emb
             mx.eval(new_emb.weight)
             log(
-                f"[mtp] drafter embed_tokens -> bf16 for ordered-embeddings "
-                f"head ({w.shape[0]}x{w.shape[1]})"
+                f"[mtp] drafter embed_tokens -> {activation_dtype_name()} for "
+                f"ordered-embeddings head ({w.shape[0]}x{w.shape[1]})"
             )
     drafter.bind(target)
 

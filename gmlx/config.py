@@ -8,7 +8,7 @@ no mlx), so it loads and tests on any machine.
 
 Shape (see ``docs/server-config.md`` for the full reference)::
 
-    server:    {host, port, api_key, no_auth, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, rerank, menubar, token_queue_timeout_s, prefill_step_size, decode_prefill_ratio, prefill_tick_ms, cache_limit_gb, family_defaults, stochastic_mtp, gpu_keepwarm, assistants, assistant_allow_remote}
+    server:    {host, port, api_key, no_auth, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, rerank, menubar, token_queue_timeout_s, prefill_step_size, dtype, decode_prefill_ratio, prefill_tick_ms, cache_limit_gb, family_defaults, stochastic_mtp, gpu_keepwarm, assistants, assistant_allow_remote}
     profiles:  {<name>: {extends, sampling, load, cache, system}}
     rules:     [{match: <glob>, profile: <name>}]
     models:    {<id>: {path, profile, family, profiles, mmproj, draft_gguf, adapter, stream, moe_experts, moe_expert_mass, moe_miss_shed, moe_layer_shed, moe_prestage, speculative, speculative_width_cap, overrides, pin, ttl_s}}
@@ -67,6 +67,13 @@ LOAD_ENV = {
     "quantized_kv_start": "QUANTIZED_KV_START",
 }
 
+# Accepted `server.dtype` values. float32 is deliberately absent: it is a
+# certification reference arm reachable through the env var, not something a
+# server should be configured into. Validated at parse time, because an
+# unrecognized value would otherwise fall back to bfloat16 at load with
+# nothing said about it.
+SERVER_DTYPES = ("auto", "bfloat16", "bf16", "float16", "fp16")
+
 # APC prompt-cache (+ SSD disk tier) key -> env var (mlx-vlm apc.from_env). The disk
 # sub-block maps to APC_DISK_*; the namespace defaults to the model path downstream.
 CACHE_ENV = {
@@ -104,6 +111,7 @@ _SERVER_KEYS = frozenset({"host", "port", "api_key", "no_auth", "model_dirs",
                           "budget_gb", "max_models", "hf_cache", "cache",
                           "defaults", "stt", "tts", "embeddings", "rerank",
                           "menubar", "token_queue_timeout_s", "prefill_step_size",
+                          "dtype",
                           "decode_prefill_ratio", "prefill_tick_ms",
                           "cache_limit_gb", "family_defaults", "stochastic_mtp",
                           "gpu_keepwarm", "assistants", "assistant_allow_remote"})
@@ -414,6 +422,12 @@ class ServerCfg:
     # env, after the per-model load window has closed. None => leave the env /
     # upstream default in place.
     prefill_step_size: int | None = None
+    # Activation dtype for every model this server loads: "auto" (the runtime
+    # default), "bfloat16" or "float16", plus the "bf16"/"fp16" spellings.
+    # This key is server-wide by design. The reason to leave bfloat16 is that
+    # the GPU has no native bfloat16 arithmetic. That is a property of the
+    # machine, not of one model. None keeps the env or the runtime default.
+    dtype: str | None = None
     # Decode-priority prefill pacing ratio: a live decode batch gets this
     # multiple of each prefill chunk's GPU time before the next chunk is
     # admitted (1.0 ~= 50/50 split; 0 = stock 1 decode step : 1 chunk).
@@ -1080,6 +1094,24 @@ def _validate_stop(where: str, sampling: dict) -> None:
         f"(got {stop!r}); token *ids* are not accepted - use the token's text")
 
 
+def _validate_server_dtype(dtype):
+    """``server.dtype`` must name an activation dtype we actually offer.
+
+    Unlike an unknown key, a bad value here is silent: the loader resolves the
+    env var through env_choice, which falls back to bfloat16 without a word.
+    Someone setting float16 to test a pre-Apple9 box would get the default back
+    and never know, so a typo raises at parse time instead.
+    """
+    if dtype is None:
+        return None
+    value = str(dtype).strip().lower()
+    if value not in SERVER_DTYPES:
+        raise ConfigError(
+            f"server.dtype must be one of {', '.join(SERVER_DTYPES)} "
+            f"(got {dtype!r})")
+    return value
+
+
 def _normalize_optional_bool(value, key: str, where: str = "model"):
     """Normalize a tri-state boolean config value to None / True / False.
     None (absent) means "use the built-in default"; unrecognized values warn
@@ -1665,6 +1697,7 @@ def build_config(doc: dict) -> ServerCfg:
             "token_queue_timeout_s", srv.get("token_queue_timeout_s"), float),
         prefill_step_size=_coerce_num(
             "prefill_step_size", srv.get("prefill_step_size"), int),
+        dtype=_validate_server_dtype(srv.get("dtype")),
         decode_prefill_ratio=_coerce_ratio(
             "decode_prefill_ratio", srv.get("decode_prefill_ratio")),
         prefill_tick_ms=_coerce_num(
