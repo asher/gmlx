@@ -1942,14 +1942,14 @@ def install_expert_streaming(
                                     parts.append(self.__call__(
                                         x[t], indices[t],
                                         *[a[t] for a in orig]))
-                                    # Pieces share one precomputed routing,
-                                    # so the stage-time eval of a later
-                                    # piece's indices does not wait for an
-                                    # earlier piece's gather - staging could
-                                    # overwrite (or resize away) arena slots
-                                    # the unexecuted gather references.
-                                    # Execute each piece before the next
-                                    # stages.
+                                    # The pieces share one precomputed
+                                    # routing. Thus the stage-time eval of a
+                                    # later piece's indices does not wait for
+                                    # an earlier piece's gather. Staging
+                                    # could overwrite (or resize away) arena
+                                    # slots that the unexecuted gather
+                                    # references. Execute each piece before
+                                    # the next piece stages.
                                     mx.eval(parts[-1])
                             finally:
                                 object.__setattr__(

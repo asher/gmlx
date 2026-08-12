@@ -186,11 +186,12 @@ FAMILIES: dict[str, dict] = {
         },
     },
     # moonshotai/Kimi-K2.7-Code model card, 2026-08: t=1.0 (Thinking mode),
-    # top_p 0.95. K2.5/K2.7 convert to llama.cpp 'deepseek2', so a general.name
-    # refinement splits them off the DeepSeek card's t=0.6. Thinking is always
-    # on -- the template opens a bare '<think>' after the generation prompt and
-    # the card states it cannot be disabled -- so there are no reasoning
-    # intents, and the default '<think>'/'</think>' markers already apply.
+    # top_p 0.95. K2.5/K2.7 convert to llama.cpp 'deepseek2', so a
+    # general.name refinement splits them off the DeepSeek card's t=0.6.
+    # Thinking is always on. The template opens a bare '<think>' after the
+    # generation prompt, and the card states that you cannot disable it.
+    # Thus there are no reasoning intents, and the default
+    # '<think>'/'</think>' markers already apply.
     "kimi-k2": {
         "label": "Kimi K2",
         "arches": (),
@@ -261,7 +262,7 @@ _ARCH_TO_FAMILY: dict[str, str] = {
 }
 
 # Optional general.name refinement for arches that span sampling families.
-# Checked before _ARCH_TO_FAMILY; first hit wins.
+# gmlx checks this before _ARCH_TO_FAMILY. The first hit wins.
 _NAME_REFINEMENTS: tuple = (
     # (arch, regex-on-general.name, family-key)
     # Moonshot's K2 line is MLA + fine-grained MoE, so it converts to the same
@@ -321,9 +322,9 @@ def describe() -> list[dict]:
     group, and per-intent resolved groups. Drives ``gmlx profiles``, the docs
     table, and the docs-drift test.
 
-    A family reached only by name refinement lists the arch it splits off,
-    qualified by the matching name -- otherwise it would render as the
-    catch-all, indistinguishable from ``default``."""
+    A family that only a name refinement can reach lists the arch that it
+    splits off, with the matching name. Without that name, the row would
+    render as the catch-all, and you could not tell it from ``default``."""
     refined: dict[str, list[str]] = {}
     for arch, rx, key in _NAME_REFINEMENTS:
         refined.setdefault(key, []).append(f"{arch} named {rx}")

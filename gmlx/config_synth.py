@@ -2267,7 +2267,8 @@ def _synth_nemotron_h_moe(meta, shapes, config: dict) -> None:
 # DeepseekV2Model and its subclasses (deepseek2, glm-dsa) write the yarn log
 # multiplier as `0.1 * mscale_all_dim`, not the value itself
 # ([TAG_DEEPSEEK2_YARN_LOG_MUL_FIX] in upstream conversion/deepseek.py). Other
-# converters write it straight through, so only those arches undo the 0.1.
+# converters write the value without change, thus only those arches undo the
+# 0.1 factor.
 _DEEPSEEK_YARN_LOG_MUL_SCALE = 0.1
 
 

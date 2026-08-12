@@ -74,11 +74,12 @@ def resolve_vlm_model_type(llm_arch: str, mm_meta: dict) -> str:
         # (gmlx.muse_glimmer_vlm_model); mlx-vlm ships no class for either.
         return "muse_glimmer"
     if proj == "kimik25":
-        # Moonshot Kimi-K2.5/K2.7: a MoonViT tower (SigLIP-so400m shape, 2-D RoPE
-        # + a learned position grid interpolated to the image) and a patch-merge
-        # GELU projector onto the deepseek2-arch text tower. GLM-5.2-V reuses the
-        # same encoder and projector under a different text arch, which mlx-vlm
-        # has no class for - name it rather than mis-loading it as Kimi.
+        # Moonshot Kimi-K2.5/K2.7: a MoonViT tower (SigLIP-so400m shape, 2-D
+        # RoPE + a learned position grid that interpolates to the image) and
+        # a patch-merge GELU projector onto the deepseek2-arch text tower.
+        # GLM-5.2-V has the same encoder and projector on a different text
+        # arch. mlx-vlm has no class for it, so name it rather than load it
+        # incorrectly as Kimi.
         if llm_arch != "deepseek2":
             raise UnsupportedVLMError(
                 f"mmproj projector 'kimik25' on LLM arch {llm_arch!r} is not "
@@ -299,7 +300,8 @@ _KIMI_K25_BLK_SUBMAP = {
 }
 _KIMI_K25_TOP_MAP = {
     "v.patch_embd.bias": "vision_tower.patch_embed.proj.bias",
-    # The learned grid arrives [H, W, dim] - Learnable2DInterpPosEmb's own layout.
+    # The learned grid arrives as [H, W, dim], the Learnable2DInterpPosEmb
+    # layout.
     "v.position_embd.weight": "vision_tower.patch_embed.pos_emb.weight",
     "v.post_ln.weight": "vision_tower.final_layernorm.weight",
     "v.post_ln.bias": "vision_tower.final_layernorm.bias",
@@ -338,14 +340,15 @@ def _kimi_k25_vision_name(name: str):
 def _kimi_k25_qkv_split_to_interleaved(arr: mx.array, n_head: int) -> mx.array:
     """Undo the converter's interleaved -> split 2-D RoPE permutation on Q/K.
 
-    MoonViT rotates each head's dims in interleaved pairs, alternating the x and
-    y axes: ``(freq i, axis, pair)``. llama.cpp's ``build_rope_2d`` instead wants
-    all x dims in the first half and all y in the second, so
-    ``conversion/kimivl.py`` permutes Q/K to ``(axis, freq i, pair)`` at
-    conversion time. mlx-vlm implements the native interleaved form, so the
-    permutation has to come back out here - otherwise every patch gets another
-    patch's position and the tower still produces plausible-looking (but wrong)
-    features. V is untouched, as it is in the converter.
+    MoonViT rotates each head's dims in interleaved pairs, which alternate the
+    x and y axes: ``(freq i, axis, pair)``. llama.cpp's ``build_rope_2d``
+    instead needs all x dims in the first half and all y dims in the second
+    half, thus ``conversion/kimivl.py`` permutes Q/K to ``(axis, freq i,
+    pair)`` at conversion time. mlx-vlm implements the native interleaved
+    form, thus this function removes the permutation again. If it stays, each
+    patch gets the position of a different patch, and the tower gives
+    plausible but wrong features. This function does not change V, and the
+    converter does not change V.
     """
     qkv = arr.shape[0] // 3
     tail = arr.shape[1:]
@@ -1176,8 +1179,8 @@ def _synthesize_kimi_k25_vlm_config(
     The tower reads from the mmproj's ``clip.vision.*`` metadata, except the
     learned position grid, which the converter writes as top-level
     ``vision.pos_emb_{height,width}``. The image placeholder is
-    ``<|media_pad|>`` - resolved from the GGUF vocab rather than trusting
-    mlx-vlm's baked-in default, which belongs to a different Kimi release.
+    ``<|media_pad|>``. gmlx resolves its id from the GGUF vocab, because
+    mlx-vlm's default id belongs to a different Kimi release.
     """
     hidden = _mm_int(mm_meta, "clip.vision.embedding_length")
     patch = _mm_int(mm_meta, "clip.vision.patch_size")
@@ -1929,12 +1932,12 @@ def _synthesize_pixtral_processor(tokenizer, mm_meta: dict):
 def _synthesize_kimi_k25_processor(tokenizer, mm_meta: dict):
     """Build the Kimi-K2.5/K2.7 processor from the GGUFs alone - no HF download.
 
-    mlx-vlm's own ``KimiK25Processor`` already does the navit resize/pad/patchify
-    in MLX (no torch), so only its parameters need sourcing. ``in_token_limit``
-    is recovered from ``image_max_pixels``, which the converter writes as
-    ``in_patch_limit * patch_size**2``. ``patch_limit_on_one_side`` is an arch
-    constant with no GGUF field - 512, the same bound MoonViT's 2-D RoPE table
-    is built for.
+    mlx-vlm's own ``KimiK25Processor`` already does the navit resize/pad/
+    patchify in MLX (no torch), thus this function supplies only its
+    parameters. ``in_token_limit`` comes from ``image_max_pixels``, which the
+    converter writes as ``in_patch_limit * patch_size**2``.
+    ``patch_limit_on_one_side`` is an arch constant, and the GGUF has no field
+    for it. Its value is 512, the bound of MoonViT's 2-D RoPE table.
     """
     from mlx_vlm.models.kimi_k25.processing_kimi_k25 import (
         KimiK25ImageProcessor, KimiK25Processor,

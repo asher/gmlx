@@ -64,13 +64,14 @@ ports llama.cpp's `mtmd_image_preprocessor_muse_glimmer`. `--hf-source` is not
 needed.
 
 Kimi K2.x pairs its MoonViT mmproj with the `deepseek2` text tower. The
-converter rewrites the vision Q/K into the split 2-D RoPE layout llama.cpp's
-`build_rope_2d` consumes; the remap puts them back into the interleaved layout
-MoonViT itself uses, so a mis-decoded mmproj shows up as confidently wrong image
-descriptions rather than as a load error. GLM-5.2-V ships the same vision
-encoder under a different text arch and is refused by name. Because K2.x is an
-over-RAM MoE, `--stream-experts` composes with `--mmproj` here: placement runs
-on the text tower after the load and the vision tower stays resident.
+converter rewrites the vision Q/K into the split 2-D RoPE layout that
+llama.cpp's `build_rope_2d` reads. The remap puts them back into the
+interleaved layout of MoonViT. A mis-decoded mmproj thus gives confidently
+wrong image descriptions, and not a load error. GLM-5.2-V has the same vision
+encoder on a different text arch, and gmlx refuses it by name. K2.x is an
+over-RAM MoE, so use `--stream-experts` with `--mmproj`. gmlx puts the
+placement on the text tower after it loads the model, and the vision tower
+stays resident.
 
 Qwen2-VL / Qwen2.5-VL mmprojs (`qwen2vl_merger`) are not supported yet. The
 load fails up front with the family named. LLaVA's image processor isn't

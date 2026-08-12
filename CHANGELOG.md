@@ -8,27 +8,28 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- Moonshot Kimi-K2.5 / K2.7 support. K2.x is DeepSeek-V3-shaped, so it
-  loads through the existing `deepseek2` arch and the stock `deepseek_v3`
-  class; what it needed was its own sampling family (t=1.0/top_p=0.95,
-  selected off `general.name` since the arch is shared with DeepSeek) and
-  the surrounding contract - the `<|im_*|>` chat format whose generation
-  prompt leaves `<think>` open, and the `kimi_k2` tool-call section
-  parser - now pinned by tests.
+- Moonshot Kimi-K2.5 / K2.7 support and tool parser.
+- Kimi K2.x vision (`--mmproj`, projector `kimik25`). The MoonViT tower and
+  the patch-merge projector remap onto mlx-vlm's `kimi_k25`. llama.cpp's
+  converter writes the vision Q/K in the split 2-D RoPE layout, and the
+  remap puts them back into MoonViT's interleaved layout.
+- You can now use `--stream-experts` with `--mmproj` with the cli run/chat
+  commands. Server support for vision + streaming still to come.
 
 ### Fixed
 
-- deepseek2 / glm-dsa yarn scaling: llama.cpp writes
+- deepseek2 / glm-dsa yarn scaling. llama.cpp writes
   `rope.scaling.yarn_log_multiplier` as `0.1 * mscale_all_dim`, and gmlx
-  read it back as `mscale_all_dim` itself. Every yarn-scaled GGUF on
-  those arches (DeepSeek-V3/R1, Kimi-K2.x, GLM-5.2) therefore ran with an
-  attention scale ~1.85x too flat, which reads as fluent but
-  context-blind decoding that degenerates into repetition. `beta_fast` /
+  read it back as `mscale_all_dim` itself. Thus every yarn-scaled GGUF on
+  those arches (DeepSeek-V3/R1, Kimi-K2.x, GLM-5.2) ran with an attention
+  scale approximately 1.85x too flat. Decoding stayed fluent, but it
+  ignored the context and degenerated into repetition. `beta_fast` and
   `beta_slow` now pass through as well.
-- Streaming decode-feeder token-split corruption: staging one split piece
-  could overwrite arena slots an earlier piece's still-lazy gather
-  referenced, garbling short-prompt prefills on low-residency models.
-  Each piece now executes before the next stages.
+- Streaming decode-feeder token-split corruption. When gmlx staged one
+  split piece, it could overwrite arena slots that an earlier piece's lazy
+  gather still referenced. This garbled short-prompt prefills on
+  low-residency models. Each piece now executes before the next piece
+  stages.
 
 ## [0.3.0] - 2026-08-09
 

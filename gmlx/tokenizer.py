@@ -678,9 +678,10 @@ _KIMI_EOG_NAMES = ("[EOT]", "[EOS]")
 
 def _kimi_eog_ids(tokens: list[str], token_types: list[int] | None,
                   pre_id: str) -> list[int]:
-    """Kimi declares no eot/eom id, so llama.cpp folds these into its EOG set
-    by name. Scoped to the Kimi pretokenizer - the spellings are generic
-    enough that a blind vocab scan could retire a live token elsewhere."""
+    """Kimi declares no eot/eom id, thus llama.cpp folds these into its EOG
+    set by name. This applies only to the Kimi pretokenizer, because the
+    spellings are generic. A blind vocab scan could retire a live token in a
+    different model."""
     if pre_id != "kimi-k2":
         return []
     out = []
