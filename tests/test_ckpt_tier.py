@@ -1199,6 +1199,54 @@ def test_first_boundary_promotion_skips_retire_chains():
         [(32, "retire"), (64, "boundary")]
 
 
+def test_anchor_never_shadows_a_deeper_disk_skeleton(tmp_path):
+    """Depth beats retention: with only the anchor pinned in memory and a
+    deeper skeleton on disk, the lookup must return the disk depth. The
+    pinned walk returns on first success, so an anchor left to win here
+    caps every divergent query at its own p (the depth e2e's divergent
+    and turns floors)."""
+    from gmlx.apc_manager import GmlxAPCManager
+    from gmlx.cache_snapshot import _ckpt_records, rotating_canonical_window
+
+    ids = list(range(700, 700 + 96))
+    disk = DiskBlockStore(root=tmp_path, namespace="m")
+    man = GmlxAPCManager(num_blocks=96, block_size=16, disk=disk)
+    try:
+        deep = make_swa_cache(64, seed=11)
+        # The shallow store must carry the same KV as the deep one's
+        # prefix: the block pool dedups the shared chain by token hash,
+        # so mismatched fixture content would be a fixture artifact.
+        shallow = []
+        for c in deep:
+            k, v = rotating_canonical_window(c)[:2] \
+                if isinstance(c, RotatingKVCache) else c.state
+            if isinstance(c, RotatingKVCache):
+                s = RotatingKVCache(max_size=ROT_W)
+                s.update_and_fetch(k[..., :32, :], v[..., :32, :])
+            else:
+                s = KVCache()
+                s.state = (k[..., :32, :], v[..., :32, :])
+            shallow.append(s)
+        assert ckpt_store(man, ids[:32], shallow,
+                          extra_hash=4, kind="anchor")
+        assert ckpt_store(man, ids[:64], deep, extra_hash=4)
+        # Drop the deep record from memory, keeping its disk skeleton:
+        # exactly what strip-on-extend leaves behind as a chain deepens.
+        idx = _ckpt_records(man)
+        for k, r in list(idx.items()):
+            if r.p == 64:
+                idx.pop(k)
+        assert [r.kind for r in idx.values()] == ["anchor"]
+        warm, got = ckpt_lookup(man, ids + [77], extra_hash=4)
+        assert got == 64
+        assert_swa_warm_matches(warm, deep, 64)
+        # Nothing deeper on disk: the anchor still serves.
+        warm, got = ckpt_lookup(man, ids[:48] + [77], extra_hash=4)
+        assert got == 32
+    finally:
+        disk.close()
+
+
 def test_anchor_gets_no_pool_pressure_protection():
     """_evict_for_pool stays plain LRU: an anchor's blocks reclaim like
     any record's, so a pinned anchor can never starve the block pool."""

@@ -1402,9 +1402,11 @@ def ckpt_lookup(
     """Longest checkpoint-tier warm start for ``token_ids``.
 
     Walks pinned records p-descending testing the whole conjunction, then
-    falls back to the disk skeleton (restart repair). ``layout`` rejects
-    records from a different per-layer layout. Returns
-    ``(warm_prompt_cache, p)`` or ``(None, 0)``. Never raises.
+    falls back to the disk skeleton (restart repair). When the deepest
+    pinned candidate is the chain's anchor, the disk tier is consulted
+    first for anything strictly deeper. ``layout`` rejects records from a
+    different per-layer layout. Returns ``(warm_prompt_cache, p)`` or
+    ``(None, 0)``. Never raises.
     """
     if manager is None or token_ids is None:
         return None, 0
@@ -1444,6 +1446,19 @@ def ckpt_lookup(
         if gated:
             _ckpt_decline(manager, "replay_gate")
         cands.sort(key=lambda r: r.p, reverse=True)
+        if cands and cands[0].kind == "anchor":
+            # The anchor is a retention floor, not a depth ceiling. It
+            # sits early on the chain by construction, and the pinned
+            # walk below returns on first success, so without this the
+            # anchor would cap every divergent query at its own p while
+            # a deeper skeleton sits on disk (the position strip-on-
+            # extend drops from memory but the skeleton keeps).
+            warm, p = _ckpt_disk_lookup(
+                manager, ids, extra_hash=extra_hash,
+                min_prefix_tokens=max(min_prefix_tokens, cands[0].p),
+                layout=layout)
+            if warm is not None:
+                return warm, p
         for rec in cands:
             # Assembly runs unlocked (it concatenates and evals block
             # tensors), so the record's chains must be pinned against a
