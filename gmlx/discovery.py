@@ -93,6 +93,7 @@ class ClassifiedGguf:
     quant: str | None    # quant tag from the filename, or None
     loadable: bool          # arch builds a model with no hf override (model kind)
     moe: bool = False       # routed experts present (model kind only)
+    name: str | None = None  # general.name, for family refinement (model kind)
 
 
 # Classification
@@ -157,7 +158,8 @@ def _classify_meta(meta, *, basename: str, path: str) -> ClassifiedGguf:
     experts = read_int(meta, f"{arch}.expert_count") if arch else None
     loadable = bool(arch) and arch in supported_arches()
     return ClassifiedGguf(ap, "model", arch, mtp, quant, loadable,
-                          moe=bool(experts and experts > 0))
+                          moe=bool(experts and experts > 0),
+                          name=read_string(meta, "general.name"))
 
 
 def classify_gguf(path: str) -> ClassifiedGguf | None:
@@ -722,7 +724,7 @@ def _emit_dir(classified, spec, used_ids, out):
                       f"for arch {c.arch!r}; speculative stays off: {c.path}",
                       file=sys.stderr)
                 spec_flag = False
-            fam = _family_profiles.detect_family(c.arch)
+            fam = _family_profiles.detect_family(c.arch, c.name)
             mc = ModelCfg(id=id_for[c.path], path=c.path, speculative=spec_flag,
                           family=fam if fam != "default" else None)
             _fit_in_memory(mc, c)

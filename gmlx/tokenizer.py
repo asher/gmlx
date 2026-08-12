@@ -397,8 +397,10 @@ def load_tokenizer_from_gguf(
 
     template_eos = _infer_turn_end_eos(fast, eos_id, tokens, token_types)
     meta_eos = _metadata_stop_ids(meta, len(tokens))
+    name_eos = _kimi_eog_ids(tokens, token_types, pre_id)
     all_eos = _dedup_ids(
-        ([eos_id] if eos_id is not None else []) + template_eos + meta_eos)
+        ([eos_id] if eos_id is not None else [])
+        + template_eos + meta_eos + name_eos)
     fast._gguf_eos_token_ids = all_eos
 
     extra_eos = [tid for tid in all_eos if tid != eos_id]
@@ -668,6 +670,27 @@ def _metadata_stop_ids(meta, n_vocab: int | None = None) -> list[int]:
                 f"(vocab {n_vocab})")
             continue
         out.append(tid)
+    return out
+
+
+_KIMI_EOG_NAMES = ("[EOT]", "[EOS]")
+
+
+def _kimi_eog_ids(tokens: list[str], token_types: list[int] | None,
+                  pre_id: str) -> list[int]:
+    """Kimi declares no eot/eom id, so llama.cpp folds these into its EOG set
+    by name. Scoped to the Kimi pretokenizer - the spellings are generic
+    enough that a blind vocab scan could retire a live token elsewhere."""
+    if pre_id != "kimi-k2":
+        return []
+    out = []
+    for name in _KIMI_EOG_NAMES:
+        try:
+            tid = tokens.index(name)
+        except ValueError:
+            continue
+        if token_types is None or token_types[tid] == 3:  # control
+            out.append(tid)
     return out
 
 

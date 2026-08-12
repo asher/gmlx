@@ -171,7 +171,7 @@ FAMILIES: dict[str, dict] = {
     # the server's open-think detection, budget criteria, and stream splitter
     # see the model's real section tags.
     "kimi": {
-        "label": "Kimi",
+        "label": "Kimi K3",
         "arches": ("kimi-k3",),
         "base": {"sampling": {
             "temperature": 1.0,
@@ -184,6 +184,18 @@ FAMILIES: dict[str, dict] = {
             "reasoning-high": {"chat_template_kwargs": {"thinking_effort": "high"}},
             "reasoning-max": {"chat_template_kwargs": {"thinking_effort": "max"}},
         },
+    },
+    # moonshotai/Kimi-K2.7-Code model card, 2026-08: t=1.0 (Thinking mode),
+    # top_p 0.95. K2.5/K2.7 convert to llama.cpp 'deepseek2', so a general.name
+    # refinement splits them off the DeepSeek card's t=0.6. Thinking is always
+    # on -- the template opens a bare '<think>' after the generation prompt and
+    # the card states it cannot be disabled -- so there are no reasoning
+    # intents, and the default '<think>'/'</think>' markers already apply.
+    "kimi-k2": {
+        "label": "Kimi K2",
+        "arches": (),
+        "base": {"sampling": {"temperature": 1.0, "top_p": 0.95}},
+        "intents": {},
     },
     # https://huggingface.co/meta-models/Muse-Glimmer-30B "Best Practices",
     # 2026-08 (generation_config carries no sampling): t=1.0/top_p=0.95/top_k=64.
@@ -249,10 +261,12 @@ _ARCH_TO_FAMILY: dict[str, str] = {
 }
 
 # Optional general.name refinement for arches that span sampling families.
-# Checked before _ARCH_TO_FAMILY; first hit wins. None currently needed --
-# the hook exists so a future split (e.g. one arch, two cards) is one line.
+# Checked before _ARCH_TO_FAMILY; first hit wins.
 _NAME_REFINEMENTS: tuple = (
-    # (arch, compiled-regex-on-general.name, family-key)
+    # (arch, regex-on-general.name, family-key)
+    # Moonshot's K2 line is MLA + fine-grained MoE, so it converts to the same
+    # 'deepseek2' arch as DeepSeek V2/V3 but ships a different card.
+    ("deepseek2", r"(?i)\bkimi", "kimi-k2"),
 )
 
 
@@ -305,13 +319,20 @@ def groups_for(family: str | None, intent: str | None = None) -> dict:
 def describe() -> list[dict]:
     """The full table, one row per family: key, label, covered arches, base
     group, and per-intent resolved groups. Drives ``gmlx profiles``, the docs
-    table, and the docs-drift test."""
+    table, and the docs-drift test.
+
+    A family reached only by name refinement lists the arch it splits off,
+    qualified by the matching name -- otherwise it would render as the
+    catch-all, indistinguishable from ``default``."""
+    refined: dict[str, list[str]] = {}
+    for arch, rx, key in _NAME_REFINEMENTS:
+        refined.setdefault(key, []).append(f"{arch} named {rx}")
     rows = []
     for key, fam in FAMILIES.items():
         rows.append({
             "family": key,
             "label": fam["label"],
-            "arches": list(fam["arches"]),
+            "arches": list(fam["arches"]) + refined.get(key, []),
             "base": fam["base"],
             "intents": {name: groups_for(key, name)
                         for name in sorted(BUILTIN_INTENTS)},

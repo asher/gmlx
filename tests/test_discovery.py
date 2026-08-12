@@ -881,3 +881,17 @@ def test_dflash_is_an_id_marker():
     """Without this the drafter quant splits the model id and a dflash sidecar
     is mistaken for a separate model."""
     assert "dflash" in disc._ID_MARKERS
+
+
+def test_model_classification_carries_general_name_for_family_refinement():
+    """Kimi K2.x and DeepSeek share the 'deepseek2' arch, so the generated
+    config's family is only right if the classifier hands general.name to
+    detect_family. Without it every K2 GGUF would inherit DeepSeek's card."""
+    c = _classify({"general.architecture": "deepseek2",
+                   "general.name": "Kimi-K2.7-Code",
+                   "deepseek2.expert_count": 384}, "kimi-k2.7-UD-Q2_K_XL.gguf")
+    assert c.kind == "model"
+    assert c.name == "Kimi-K2.7-Code"
+
+    from gmlx.profiles import detect_family
+    assert detect_family(c.arch, c.name) == "kimi-k2"
