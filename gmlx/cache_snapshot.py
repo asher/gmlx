@@ -355,6 +355,123 @@ def drafter_sidecar_lookup(
         return None
 
 
+# Exact-tier anchor: one whole-prefix clone per system-prompt chain, held in
+# a gmlx-owned side LRU. The upstream exact LRU is count-capped (2 slots by
+# default) and every request writes its guard-column entry there, so sibling
+# fan-out churns out the early shared-prefix entry the siblings need; this
+# index holds nothing but anchors.
+_ANCHOR_ENTRIES = max(1, env_int("GMLX_APC_ANCHOR_ENTRIES", 4))
+# Whole-prefix clones of pooling/MLA stacks run to GBs at deep prefixes, so
+# the index is byte-bounded too; newest always survives.
+_ANCHOR_BUDGET_BYTES = max(
+    1, env_int("GMLX_APC_ANCHOR_BUDGET_MB", 4096)) << 20
+
+
+def _anchor_index(manager: Any) -> "OrderedDict":
+    with manager.lock:
+        idx = getattr(manager, "_kq_anchor_cache", None)
+        if idx is None:
+            idx = OrderedDict()
+            manager._kq_anchor_cache = idx
+        return idx
+
+
+def anchor_exact_store(
+    manager: Any,
+    token_ids,
+    prompt_cache: list,
+    extra_hash: int = 0,
+) -> bool:
+    """Store a whole-prefix clone of ``prompt_cache`` under the anchor key.
+
+    Cloning goes through the upstream exact-clone path (the pooling arms are
+    installed there), so any stack the exact tier serves anchors identically.
+    A re-store under the same key replaces the entry in place, keeping one
+    anchor per chain. Best-effort; never raises.
+    """
+    if manager is None or not prompt_cache:
+        return False
+    try:
+        ids = tuple(int(t) for t in token_ids)
+        if not ids:
+            return False
+        from mlx_vlm import apc as _apc
+        clones = _apc._clone_prompt_cache_for_apc(prompt_cache)
+        if clones is None:
+            _ckpt_decline(manager, "anchor_clone")
+            return False
+        nbytes = _caches_nbytes(clones)
+        key = (ids, int(extra_hash))
+        idx = _anchor_index(manager)
+        with manager.lock:
+            idx[key] = (clones, nbytes)
+            idx.move_to_end(key)
+            while len(idx) > _ANCHOR_ENTRIES:
+                idx.popitem(last=False)
+            total = sum(n for _, n in idx.values())
+            while total > _ANCHOR_BUDGET_BYTES and len(idx) > 1:
+                _, (_, n) = idx.popitem(last=False)
+                total -= n
+        _ckpt_bump(manager, "anchor_stores")
+        _log.info("APC anchor store: tokens=%d", len(ids))
+        return True
+    except Exception:
+        _log.warning("APC anchor store failed; continuing", exc_info=True)
+        return False
+
+
+def anchor_exact_lookup(
+    manager: Any,
+    token_ids,
+    extra_hash: int = 0,
+    min_prefix_tokens: int = 0,
+) -> tuple:
+    """Longest anchor strictly prefixing ``token_ids`` on the same chain.
+
+    Returns ``(warm_prompt_cache, p)`` or ``(None, 0)``. The warm list is a
+    fresh clone with capacity for the full query, decoupled from the stored
+    entry. Never raises.
+    """
+    if manager is None or token_ids is None:
+        return None, 0
+    try:
+        ids = tuple(int(t) for t in token_ids)
+        n = len(ids)
+        idx = _anchor_index(manager)
+        best_key = None
+        with manager.lock:
+            for key in idx:
+                kids, kh = key
+                p = len(kids)
+                if (kh != int(extra_hash)
+                        or not min_prefix_tokens < p < n
+                        or ids[:p] != kids):
+                    continue
+                if best_key is None or p > len(best_key[0]):
+                    best_key = key
+            if best_key is None:
+                return None, 0
+            clones = idx[best_key][0]
+            idx.move_to_end(best_key)
+        from mlx_vlm import apc as _apc
+        warm = _apc._clone_prompt_cache_for_apc(
+            clones, min_capacity_tokens=n + 1)
+        if warm is None:
+            return None, 0
+        p = len(best_key[0])
+        with manager.lock:
+            # Anchor hits are cache-served tokens the upstream ledger never
+            # sees; bumping both keeps token_hit_rate honest.
+            manager.stats.hits += 1
+            manager.stats.matched_tokens += p
+        _ckpt_bump(manager, "anchor_hits")
+        _log.info("APC anchor hit: prefix=%d", p)
+        return warm, p
+    except Exception:
+        _log.warning("APC anchor lookup failed; continuing", exc_info=True)
+        return None, 0
+
+
 # Rotating (sliding-window) snapshot/restore inverse. A live RotatingKVCache
 # buffer has three regimes (contiguous concat-mode, padded in-place growth,
 # rotated ring); the snapshot canonicalizes all three into temporal order at
@@ -639,6 +756,7 @@ _CKPT_STAT_INTS = (
     "ckpt_stores", "ckpt_hits", "ckpt_matched_tokens",
     "ckpt_missed_adoptions", "ckpt_skeleton_writes", "sidecar_writes",
     "retire_fallback_full", "ckpt_pool_evictions",
+    "anchor_stores", "anchor_hits",
 )
 
 
@@ -698,6 +816,9 @@ def ckpt_reset(manager) -> None:
         side = getattr(manager, "_kq_sidecar_cache", None)
         if side:
             side.clear()
+        anchors = getattr(manager, "_kq_anchor_cache", None)
+        if anchors:
+            anchors.clear()
         manager._kq_ckpt_stats = None
 
 

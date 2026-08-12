@@ -51,6 +51,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tool schemas (subagent fan-out) start warm instead of re-prefilling
   the shared prefix after the conversation deepens. GMLX_APC_CKPT_SYS=0
   disables.
+- Prompt cache: exact-tier models (deepseek-v4-class pooling stacks) get
+  the same system-prompt anchor as a whole-prefix snapshot in its own
+  LRU, so sibling fan-out stays warm there too. GMLX_APC_ANCHOR_ENTRIES
+  and GMLX_APC_ANCHOR_BUDGET_MB bound it; GMLX_APC_CKPT_SYS=0 disables.
 
 ## [0.3.0] - 2026-08-09
 

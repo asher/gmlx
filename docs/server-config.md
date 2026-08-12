@@ -1121,7 +1121,10 @@ What a warm hit restores:
   but carry different user turns (parallel agents, subagent bursts) all
   restore from it instead of re-prefilling the shared prefix, and it is
   exempt from the pruning that otherwise keeps only the newest restore
-  points as a conversation deepens. What
+  points as a conversation deepens. Exact-tier models (deepseek-v4-class
+  pooling stacks) get the same anchor as a whole-prefix clone in its own
+  small LRU (`GMLX_APC_ANCHOR_ENTRIES`), where sibling churn through the
+  count-capped exact slots cannot evict it. What
   reuse each family gets from these:
   [performance.md](performance.md#the-prompt-cache). On ckpt-tier
   models prompt prefill runs one request at a time (batched prefill
@@ -1163,8 +1166,10 @@ and store counts surface on the authed `GET /v1/metrics`.
 | `GMLX_APC_CKPT_REPLAY` | `0` disables the replay checkpoint (identical resends prefill cold again). |
 | `GMLX_APC_CKPT_REPLAY_MIN` | Minimum prompt tokens before a replay checkpoint is saved on recurrent (GDN) models (default `1024`; short prompts re-prefill cheaply and are not worth the >100 MB state snapshot). |
 | `GMLX_APC_CKPT_TURN` | `0` disables the turn checkpoint (next-turn reuse falls back to the interval grid). |
-| `GMLX_APC_CKPT_SYS` | `0` disables the system-prompt anchor checkpoint (sibling requests sharing a system prompt fall back to the interval grid, and early restore points age out as conversations deepen). |
-| `GMLX_APC_CKPT_SYS_MIN` | Minimum tokens of shared system prefix before an anchor checkpoint is saved (default `256`; raised to `GMLX_APC_CKPT_REPLAY_MIN` on recurrent models). A shorter shared prefix re-prefills in milliseconds and is not worth a record. |
+| `GMLX_APC_CKPT_SYS` | `0` disables the system-prompt anchor on both tiers (sibling requests sharing a system prompt prefill the shared prefix cold; on hybrid models they also fall back to the interval grid). |
+| `GMLX_APC_CKPT_SYS_MIN` | Minimum tokens of shared system prefix before an anchor is saved (default `256`; raised to `GMLX_APC_CKPT_REPLAY_MIN` on recurrent models). A shorter shared prefix re-prefills in milliseconds and is not worth a record. |
+| `GMLX_APC_ANCHOR_ENTRIES` | Exact-tier anchor LRU entries (default `4`). Exact-mode models (deepseek-v4-class pooling stacks) keep their system-prompt anchors here as whole-prefix clones, out of reach of the count-capped upstream exact LRU that every request's own store would churn. |
+| `GMLX_APC_ANCHOR_BUDGET_MB` | Byte budget for the exact-tier anchor LRU, in MB (default `4096`). A deep shared prefix on a pooling stack clones to GBs; newest always survives. |
 | `GMLX_APC_CKPT_TRIPWIRE` | Requests before the dead-tier tripwires warn (default `5`; `0` silences both). |
 | `GMLX_APC_CKPT_RECORDS` | Checkpoint-record LRU entries (default `32`). |
 | `GMLX_APC_CKPT_BUDGET_MB` | Byte budget for checkpoint-record payload (recurrent states + KV tails), in MB (default `4096`). A GDN record can carry >100 MB of state and each request saves several checkpoints, so expect resident memory to grow toward this budget on hybrid models under sustained multi-turn traffic; lower it if 4 GB of cache is too much for your machine. |
