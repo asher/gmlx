@@ -63,6 +63,10 @@ Phases against one model:
 
 All requests carry a system message unless --no-system (the system-render
 path is part of the shared prefix, so every reuse floor exercises it).
+--system-words N swaps the one-liner for an agent-shaped system prompt of
+N words of tool and policy blocks, the shape the system-prompt anchor
+serves: the shared prefix then ends at the system boundary instead of
+sitting in the user turn, and the divergent request must restore it.
 --speculative adds MTP to every server (spec-path ckpt arming + sidecar).
 `--warm-factor`/`--restart-factor` loosen the wall-clock collapse thresholds
 (ckpt restores clone >100 MB of GDN state; default 0.6x cold). Wall-clock
@@ -135,6 +139,37 @@ SYSTEM_MSG = (
     "You are the flight operations duty assistant. Answer strictly from "
     "the maintenance log you are given."
 )
+
+
+def agent_system(target_words: int) -> str:
+    """Coding-agent-shaped system prompt: identity plus numbered tool and
+    policy blocks, deterministic and non-repetitive (~1.3 tok/word).
+
+    The shape is what the system-prompt anchor keys on. Agent fan-out
+    shares thousands of tokens of system prompt and tool schemas and
+    diverges at the first user message, so the reusable prefix ends at
+    the system boundary. A harness carrying its shared text in the user
+    turn arms no anchor at all.
+    """
+    out = [SYSTEM_MSG, "\n\nTools and policies:\n"]
+    words = len(SYSTEM_MSG.split())
+    i = 0
+    while words < target_words:
+        t = _TOPICS[i % len(_TOPICS)]
+        s = (
+            f"Tool {i} ({t}_probe): reads the {t} channel and returns "
+            f"{(i * 7) % 97} fields; call it at most {i % 4 + 1} times "
+            f"per turn, never before the {_TOPICS[(i + 3) % len(_TOPICS)]} "
+            f"check, and log the result under key K{(i * 31) % 4093}. "
+            f"Policy {i}: when the {t} reading drifts past "
+            f"{(i * 13) % 977}, escalate to the duty engineer and cite "
+            f"entry {max(0, i - 4)}.\n"
+        )
+        out.append(s)
+        words += len(s.split())
+        i += 1
+    return "".join(out)
+
 
 # Session-phase system message: tool output is part of the conversation,
 # so the strict answer-from-the-log framing would invite refusals.
@@ -440,6 +475,15 @@ def main() -> int:
         help="omit the system message (for templates that reject the role)",
     )
     ap.add_argument(
+        "--system-words",
+        type=int,
+        default=0,
+        metavar="N",
+        help="agent-shaped system prompt of N words of tool and policy "
+        "blocks (~1.3 tok/word) shared by every request, instead of the "
+        "one-line default; the shape the system-prompt anchor serves",
+    )
+    ap.add_argument(
         "--no-tripwire",
         action="store_true",
         help="skip the missed-adoption tripwire phase (boots a third server)",
@@ -550,8 +594,12 @@ def main() -> int:
         f"{f2['reading']} units by {f2['technician']}"
     )
 
-    def mk_msgs(user_content: str) -> list:
-        msgs = [] if a.no_system else [{"role": "system", "content": SYSTEM_MSG}]
+    system_msg = agent_system(a.system_words) if a.system_words > 0 \
+        else SYSTEM_MSG
+
+    def mk_msgs(user_content: str, system: str | None = None) -> list:
+        system = system_msg if system is None else system
+        msgs = [] if a.no_system else [{"role": "system", "content": system}]
         msgs.append({"role": "user", "content": user_content})
         return msgs
 
@@ -610,8 +658,13 @@ def main() -> int:
         base = srv.base_url
         mid = model_id_of(base, srv)
         # absorb first-request one-time costs (kernel warmup) so wall-time
-        # comparisons below measure caching, not JIT
-        chat(base, mid, mk_msgs("Say ok."), max_tokens=4)
+        # comparisons below measure caching, not JIT. The warmup stays off
+        # the shared chain: carrying the run's system prompt behind a
+        # two-word user turn would put its own guard-column store at the
+        # system boundary, which then serves every later sibling and hides
+        # whether the anchor works at all.
+        chat(base, mid, [{"role": "user", "content": "Say ok."}],
+             max_tokens=4)
 
         # -- populate ------------------------------------------------------
         st, text, content, ptok, cold_wall = chat(
@@ -710,6 +763,42 @@ def main() -> int:
                 f"status {st}, matched +{dm} "
                 f"({'0 expected' if a.tier == 'exact' else 'grid reuse expected'}), "
                 f"{div_wall:.1f}s",
+            )
+
+        # -- anchor (only with --system-words) ------------------------------
+        # A shared agent-shaped system prompt makes the divergent request a
+        # sibling: it must restore the system block from the anchor stored
+        # during the cold request, on every tier. Without --system-words the
+        # divergence sits a few tokens in and no anchor arms at all, which
+        # is why this gate is opt-in rather than always on.
+        if a.system_words > 0 and not a.no_system:
+            st_all = stats(base)
+            anchored = int(st_all.get("anchor_stores", 0) or 0) + int(
+                st_all.get("ckpt_stores", 0) or 0
+            )
+            # ~1.3 tok/word, less the template scaffolding and the grid or
+            # chunk snap the ckpt tier applies below the boundary.
+            anchor_floor = int(a.system_words * 0.6)
+            rep.check(
+                "anchor.armed",
+                anchored > 0,
+                f"anchor_stores={st_all.get('anchor_stores', 0)} "
+                f"ckpt_stores={st_all.get('ckpt_stores', 0)}",
+            )
+            rep.check(
+                "anchor.divergent_adopted",
+                dm >= anchor_floor,
+                f"divergent matched +{dm} >= system-anchor floor "
+                f"{anchor_floor} ({a.system_words} system words)",
+            )
+            served = int(st_all.get("anchor_hits", 0) or 0) + int(
+                st_all.get("ckpt_hits", 0) or 0
+            )
+            rep.check(
+                "anchor.served",
+                served > 0,
+                f"anchor_hits={st_all.get('anchor_hits', 0)} "
+                f"ckpt_hits={st_all.get('ckpt_hits', 0)}",
             )
 
         # -- turns ---------------------------------------------------------
@@ -1501,7 +1590,10 @@ def main() -> int:
     # fire. The prompt must tokenize under unit plus guard (no adoptable
     # terminal boundary) yet past the rotating window (windows over ~1300
     # tokens need --no-tripwire). Disk stays off so a retire skeleton
-    # cannot serve the resend.
+    # cannot serve the resend, and the system message stays short even
+    # under --system-words: an agent-shaped system block arms the anchor,
+    # which then serves the resends exactly as designed and leaves this
+    # phase with nothing to refuse.
     if ck and not a.no_tripwire:
         trip_prefix, n_trip = deep_prefix(1050)
         trip_q = (
@@ -1527,7 +1619,9 @@ def main() -> int:
             sts = []
             for _ in range(4):  # populate + 3 refused resends
                 st, _, _, _, _ = chat(
-                    base, mid, mk_msgs(trip_prefix + trip_q), max_tokens=32
+                    base, mid,
+                    mk_msgs(trip_prefix + trip_q, system=SYSTEM_MSG),
+                    max_tokens=32,
                 )
                 sts.append(st)
             settle("ckpt_stores")
@@ -1565,6 +1659,7 @@ def main() -> int:
         "session_final_ptok": sess_final_ptok,
         "speculative": a.speculative,
         "system_message": not a.no_system,
+        "system_words": a.system_words or None,
         "template_kwargs": template_kwargs,
         "cold_wall_s": round(cold_wall, 1),
         "warm_wall_s": round(warm_wall, 1),

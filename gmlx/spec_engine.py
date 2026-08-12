@@ -318,6 +318,22 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
                     manager.release(blocks)
                     blocks = []
                 warm, prefix_len, tier = cw, cp, "ckpt"
+        elif mode == "exact":
+            # Exact-tier anchor: the shared-system-prefix clone in the
+            # gmlx anchor LRU wins only when strictly longer than the
+            # stock exact pick. Media guards mirror the stock probe.
+            from .cache_snapshot import anchor_exact_lookup
+            min_p = max(prefix_len,
+                        view._apc_safe_prefix_lookup_min(ids_list))
+            aw, ap = anchor_exact_lookup(
+                manager, ids_list, extra_hash=extra_hash,
+                min_prefix_tokens=min_p)
+            if (aw is not None and ap > prefix_len
+                    and view._apc_suffix_is_text_only(ids_list, ap)):
+                if blocks:
+                    manager.release(blocks)
+                    blocks = []
+                warm, prefix_len, tier = aw, ap, "anchor"
         if warm and 0 < prefix_len < len(ids_list):
             batch.prompt_cache = warm
             # Matched blocks stay acquired until the stock post-prefill
@@ -373,6 +389,9 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
         batch._kq_ckpt_armed = True
         from .cache_snapshot import ckpt_note_armed
         ckpt_note_armed(manager)
+    elif mode == "exact":
+        _exact_anchor_arm(batch, meta, guard,
+                          max(l0_prefix, l1_prefix))
     return l1_prefix
 
 
@@ -496,19 +515,145 @@ def _ckpt_turn_boundaries(batch, meta, restored: int,
     return out
 
 
-def _sched_insert(bounds: list, pos: int, kind: str) -> None:
+def _ckpt_sys_boundary(batch, meta, restored: int,
+                       block_size: int) -> int | None:
+    """Anchor stop at the end of the shared system prefix.
+
+    Sibling fan-out requests share the system prompt and tool schemas
+    and diverge at the first user message, generally between grid
+    points, so the interval schedule alone wastes up to one interval of
+    sibling recompute, and strip-on-extend removes the early boundary
+    the siblings need as the chain deepens (the anchor exemption in
+    _record_insert keeps this one). arr layouts snap the stop down to
+    the chunk grid (off-grid chunking drifts GDN state) and keep the
+    replay byte floor (recurrent state is prompt-length-independent, so
+    a tiny anchor costs the same >100 MB clone as a deep one);
+    attention layouts snap to the block grid, which also satisfies the
+    rotating store's below-window grid gate. GMLX_APC_CKPT_SYS=0
+    disables; GMLX_APC_CKPT_SYS_MIN floors the position (a sub-floor
+    shared prefix re-prefills in milliseconds and is not worth a
+    record).
+    """
+    if env_int("GMLX_APC_CKPT_SYS", 1) == 0:
+        return None
+    ids = meta.get("full_input_ids") or ()
+    tags = _ckpt_layout_for(getattr(batch, "model", None), block_size) or ()
+    floor_min = max(block_size, env_int("GMLX_APC_CKPT_SYS_MIN", 256))
+    if "arr" in tags:
+        floor_min = max(floor_min,
+                        env_int("GMLX_APC_CKPT_REPLAY_MIN", 1024))
+    # Below the floor no anchor can land; skip the render+tokenize
+    # prediction entirely (same rule as the turn boundaries).
+    if len(ids) - 1 < floor_min:
+        return None
+    from .retire_key import lookup_render_ctx, system_prefix_lcp
+    ctx = lookup_render_ctx(ids)
+    lcp = system_prefix_lcp(ctx, ids) if ctx else None
+    if not lcp:
+        return None
+    unit = _ckpt_unit(batch, block_size) if "arr" in tags else block_size
+    pos = (min(int(lcp), len(ids) - 1) // unit) * unit
+    if pos < floor_min or pos <= max(0, restored):
+        return None
+    meta["ckpt_sys_bound"] = pos
+    return pos
+
+
+def _exact_anchor_boundary(batch, meta, guard: int,
+                           restored: int) -> int | None:
+    """Anchor position for an exact-tier (non-ckpt) model: the sibling
+    divergence point, ungridded (exact clones restore at any position).
+    Clamped to the stock guard column, so the prefill pauses at most
+    twice: once for the anchor, once for the stock guard store.
+    GMLX_APC_CKPT_SYS=0 disables (one switch for both tiers);
+    GMLX_APC_CKPT_SYS_MIN floors the position (a sub-floor shared
+    prefix re-prefills in milliseconds and is not worth a clone).
+    """
+    if env_int("GMLX_APC_CKPT_SYS", 1) == 0:
+        return None
+    ids = meta.get("full_input_ids") or ()
+    floor_min = max(2, env_int("GMLX_APC_CKPT_SYS_MIN", 256))
+    if len(ids) - 1 < floor_min:
+        return None
+    from .retire_key import lookup_render_ctx, system_prefix_lcp
+    ctx = lookup_render_ctx(ids)
+    lcp = system_prefix_lcp(ctx, ids) if ctx else None
+    if not lcp:
+        _log.info("APC anchor declined: no measurable system prefix "
+                  "(render ctx %s)", "present" if ctx else "missing")
+        return None
+    pos = min(int(lcp), len(ids) - 1)
+    if guard > 0:
+        pos = min(pos, guard)
+    if pos < floor_min or pos <= max(0, restored):
+        return None
+    return pos
+
+
+def _exact_anchor_arm(batch, meta, guard: int, restored: int) -> None:
+    """Schedule the anchor pause by mirroring its position into
+    ``checkpoint_len`` (the key the stock column truncation reads).
+    ``_exact_anchor_store`` hands the column back to the stock guard
+    after firing, so the stock store still runs exactly as unarmed."""
+    pos = _exact_anchor_boundary(batch, meta, guard, restored)
+    if pos is None:
+        return
+    meta["anchor_len"] = pos
+    meta["anchor_guard"] = guard
+    if pos != guard:
+        meta["checkpoint_len"] = pos
+    batch._kq_anchor_armed = True
+    _log.info("APC anchor armed: pos=%d guard=%d", pos, guard)
+
+
+def _exact_anchor_store(batch) -> None:
+    """Anchor store for exact-tier models: one whole-prefix clone at the
+    sibling divergence, into the gmlx anchor LRU. Runs from the wrapped
+    stock store immediately before the stock body; after firing it
+    restores ``checkpoint_len`` to the stock guard column without
+    latching ``checkpoint_done``, so the stock guard store (and its
+    latch) fire untouched."""
+    manager = getattr(batch, "_apc_manager", None)
+    meta_list = getattr(batch, "_apc_meta", None) or []
+    if manager is None or not meta_list or meta_list[0] is None:
+        return
+    meta = meta_list[0]
+    pos = int(meta.get("anchor_len") or 0)
+    if pos <= 0 or meta.get("anchor_done"):
+        return
+    if batch._row_real_tokens_processed(0) != pos:
+        return
+    meta["anchor_done"] = True
+    guard = int(meta.get("anchor_guard") or 0)
+    if int(meta.get("checkpoint_len") or 0) == pos and pos != guard:
+        meta["checkpoint_len"] = guard
+    cache = batch._apc_prompt_cache_for_store(0)
+    if cache is None:
+        return
+    from .cache_snapshot import anchor_exact_store
+    anchor_exact_store(manager, meta["full_input_ids"][:pos], cache,
+                       extra_hash=int(meta.get("extra_hash", 0)))
+
+
+def _sched_insert(bounds: list, pos: int, kind: str, *,
+                  upgrade: bool = False) -> None:
     """Insert (pos, kind) keeping order. On collision the existing entry
     keeps its kind: a colliding position is always grid-aligned or an
     exact turn boundary, where a plain boundary record adopts freely --
     identical resend included -- while flipping it to replay would gate
     turn-2 and branch adoption out on recurrent layouts (and satisfy the
-    p=N drop with a record turn 2 cannot use)."""
+    p=N drop with a record turn 2 cannot use). ``upgrade`` lets an
+    anchor replace a plain boundary at the same position (strictly more
+    retention, same free adoption), never a replay."""
     import bisect
 
     pts = [b for b, _ in bounds]
     i = bisect.bisect_left(pts, pos)
-    if i >= len(pts) or pts[i] != pos:
-        bounds.insert(i, (pos, kind))
+    if i < len(pts) and pts[i] == pos:
+        if upgrade and bounds[i][1] == "boundary":
+            bounds[i] = (pos, kind)
+        return
+    bounds.insert(i, (pos, kind))
 
 
 def _ckpt_arm_schedule(batch, meta, guard: int, restored: int,
@@ -525,8 +670,13 @@ def _ckpt_arm_schedule(batch, meta, guard: int, restored: int,
     turn = _ckpt_turn_boundaries(batch, meta, restored, block_size)
     for pos in turn:
         _sched_insert(bounds, pos, "boundary")
+    sysb = _ckpt_sys_boundary(batch, meta, restored, block_size)
+    if sysb is not None:
+        _sched_insert(bounds, sysb, "anchor", upgrade=True)
     replay = _ckpt_replay_boundary(batch, meta, restored, block_size)
     if replay is not None:
+        # Colliding with the anchor keeps the anchor (default no-upgrade):
+        # it adopts identical resends freely, replay semantics add nothing.
         _sched_insert(bounds, replay, "replay")
     meta["ckpt_boundaries"] = bounds
     meta["checkpoint_len"] = int(bounds[0][0]) if bounds else 0
@@ -597,7 +747,8 @@ def _install_ckpt_checkpoint_store() -> None:
     and the stock prompt_step call the stock method, so one wrap covers
     both paths). The cursor's advance of ``checkpoint_len`` is what
     suppresses the stock store -- wrapping makes that ordering
-    structural. Idempotent."""
+    structural. Exact-tier anchor batches ride the same wrap with their
+    own single-stop hook. Idempotent."""
     from mlx_vlm.generate.ar import PromptProcessingBatch
     if getattr(PromptProcessingBatch._store_apc_exact_checkpoints,
                _CKPT_STORE_FLAG, False):
@@ -607,6 +758,8 @@ def _install_ckpt_checkpoint_store() -> None:
     def _store_with_ckpt_cursor(self):
         if getattr(self, "_kq_ckpt_armed", False):
             _ckpt_mid_prefill_store(self)
+        elif getattr(self, "_kq_anchor_armed", False):
+            _exact_anchor_store(self)
         _orig(self)
 
     _store_with_ckpt_cursor.__dict__[_CKPT_STORE_FLAG] = True
@@ -714,6 +867,96 @@ def _plain_ckpt_init(batch) -> None:
             "gen": [],
             **_snap_fields(batch, manager),
         }
+
+
+def _plain_anchor_init(batch) -> None:
+    """Arm the exact-tier anchor stop on a stock prompt batch (non-ckpt
+    exact models: DeepSeek-V4-class pooling stacks).
+
+    Restores come from the admission pick (_install_exact_anchor_pick),
+    so this only schedules the store. Warm and right-padded rows are
+    included: a restored prefix is usually far short of the divergence
+    (a bare bos match off some unrelated request), and upstream's
+    checkpoint column and row extraction handle both shapes. Refusing
+    them would skip every row that rides a warm batch, which on a busy
+    server is nearly all of them. The restored prefix becomes the
+    boundary floor, so a row already past the divergence arms nothing.
+    """
+    manager = getattr(batch, "_apc_manager", None)
+    mode = getattr(batch, "_apc_mode", None)
+    meta_list = getattr(batch, "_apc_meta", None) or []
+    if (manager is None or mode != "exact" or len(meta_list) != 1
+            or meta_list[0] is None or len(batch.uids) != 1
+            or batch._inputs_embeds is None):
+        return
+    if _ckpt_active(batch.model, mode, int(manager.block_size)):
+        return                          # ckpt tier owns these models
+    meta = meta_list[0]
+    if len(meta.get("full_input_ids") or ()) < 2:
+        return
+    _exact_anchor_arm(batch, meta, int(meta.get("checkpoint_len") or 0),
+                      int(meta.get("prefix_len") or 0))
+
+
+_ANCHOR_PICK_FLAG = "_kq_exact_anchor_pick"
+
+
+def _install_exact_anchor_pick() -> None:
+    """Consult the anchor LRU inside the stock admission pick.
+
+    The pick is where a warm prefix belongs: admission builds the batch
+    from it (suffix rows, right padding, warm-cache merge) and every
+    downstream path treats an anchor restore exactly like a stock exact
+    one. The anchor wins only when strictly longer than the stock pick,
+    so it never shortens a restore. Idempotent.
+    """
+    from mlx_vlm.generate.ar import BatchGenerator
+    if getattr(BatchGenerator._apc_pick_for, _ANCHOR_PICK_FLAG, False):
+        return
+    _orig = BatchGenerator._apc_pick_for
+
+    def _pick_with_anchor(self, sequence):
+        pick = _orig(self, sequence)
+        try:
+            if _SPEC_APC_DISABLED or getattr(self, "apc_mode", None) != "exact":
+                return pick
+            manager = getattr(self, "apc_manager", None)
+            if manager is None or _ckpt_active(
+                    getattr(self, "model", None), "exact",
+                    int(manager.block_size)):
+                return pick
+            _uid, ids_list, _mt, prompt_kwargs, _lps, _crit = sequence
+            if not ids_list or len(ids_list) < 2:
+                return pick
+            have = int((pick or {}).get("prefix_len") or 0)
+            extra_hash = self._apc_extra_hash(prompt_kwargs or {})
+            floor = max(have, self._apc_safe_prefix_lookup_min(ids_list))
+            from .cache_snapshot import anchor_exact_lookup
+            warm, ap = anchor_exact_lookup(
+                manager, ids_list, extra_hash=extra_hash,
+                min_prefix_tokens=floor)
+            if warm is None or ap <= have or ap >= len(ids_list):
+                return pick
+            if not self._apc_suffix_is_text_only(ids_list, ap):
+                return pick
+            if pick and pick.get("matched_blocks"):
+                manager.release(pick["matched_blocks"])
+            _log.info("APC L1 hit: prefix=%d suffix=%d tier=anchor",
+                      ap, len(ids_list) - ap)
+            return {
+                "matched_blocks": [],
+                "warm_cache": warm,
+                "prefix_len": ap,
+                "extra_hash": extra_hash,
+                "full_input_ids": list(ids_list),
+            }
+        except Exception:
+            _log.warning("APC anchor pick failed; continuing",
+                         exc_info=True)
+            return pick
+
+    _pick_with_anchor.__dict__[_ANCHOR_PICK_FLAG] = True
+    BatchGenerator._apc_pick_for = _pick_with_anchor
 
 
 _PLAIN_DECODE_FLAG = "_kq_ckpt_plain_decode"
@@ -973,6 +1216,7 @@ def install_full_prompt_mtp_prefill() -> None:
     _install_apc_manager_stash()
     _install_ckpt_checkpoint_store()
     _install_plain_ckpt_decode()
+    _install_exact_anchor_pick()
 
     if getattr(PromptProcessingBatch, _FULL_PREFILL_FLAG, False):
         return
@@ -1006,6 +1250,7 @@ def install_full_prompt_mtp_prefill() -> None:
                 and not _SPEC_APC_DISABLED:
             try:
                 _plain_ckpt_init(self)
+                _plain_anchor_init(self)
             except Exception:
                 _log.warning("APC plain ckpt init failed; continuing "
                              "stock", exc_info=True)

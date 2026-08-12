@@ -355,6 +355,123 @@ def drafter_sidecar_lookup(
         return None
 
 
+# Exact-tier anchor: one whole-prefix clone per system-prompt chain, held in
+# a gmlx-owned side LRU. The upstream exact LRU is count-capped (2 slots by
+# default) and every request writes its guard-column entry there, so sibling
+# fan-out churns out the early shared-prefix entry the siblings need; this
+# index holds nothing but anchors.
+_ANCHOR_ENTRIES = max(1, env_int("GMLX_APC_ANCHOR_ENTRIES", 4))
+# Whole-prefix clones of pooling/MLA stacks run to GBs at deep prefixes, so
+# the index is byte-bounded too; newest always survives.
+_ANCHOR_BUDGET_BYTES = max(
+    1, env_int("GMLX_APC_ANCHOR_BUDGET_MB", 4096)) << 20
+
+
+def _anchor_index(manager: Any) -> "OrderedDict":
+    with manager.lock:
+        idx = getattr(manager, "_kq_anchor_cache", None)
+        if idx is None:
+            idx = OrderedDict()
+            manager._kq_anchor_cache = idx
+        return idx
+
+
+def anchor_exact_store(
+    manager: Any,
+    token_ids,
+    prompt_cache: list,
+    extra_hash: int = 0,
+) -> bool:
+    """Store a whole-prefix clone of ``prompt_cache`` under the anchor key.
+
+    Cloning goes through the upstream exact-clone path (the pooling arms are
+    installed there), so any stack the exact tier serves anchors identically.
+    A re-store under the same key replaces the entry in place, keeping one
+    anchor per chain. Best-effort; never raises.
+    """
+    if manager is None or not prompt_cache:
+        return False
+    try:
+        ids = tuple(int(t) for t in token_ids)
+        if not ids:
+            return False
+        from mlx_vlm import apc as _apc
+        clones = _apc._clone_prompt_cache_for_apc(prompt_cache)
+        if clones is None:
+            _ckpt_decline(manager, "anchor_clone")
+            return False
+        nbytes = _caches_nbytes(clones)
+        key = (ids, int(extra_hash))
+        idx = _anchor_index(manager)
+        with manager.lock:
+            idx[key] = (clones, nbytes)
+            idx.move_to_end(key)
+            while len(idx) > _ANCHOR_ENTRIES:
+                idx.popitem(last=False)
+            total = sum(n for _, n in idx.values())
+            while total > _ANCHOR_BUDGET_BYTES and len(idx) > 1:
+                _, (_, n) = idx.popitem(last=False)
+                total -= n
+        _ckpt_bump(manager, "anchor_stores")
+        _log.info("APC anchor store: tokens=%d", len(ids))
+        return True
+    except Exception:
+        _log.warning("APC anchor store failed; continuing", exc_info=True)
+        return False
+
+
+def anchor_exact_lookup(
+    manager: Any,
+    token_ids,
+    extra_hash: int = 0,
+    min_prefix_tokens: int = 0,
+) -> tuple:
+    """Longest anchor strictly prefixing ``token_ids`` on the same chain.
+
+    Returns ``(warm_prompt_cache, p)`` or ``(None, 0)``. The warm list is a
+    fresh clone with capacity for the full query, decoupled from the stored
+    entry. Never raises.
+    """
+    if manager is None or token_ids is None:
+        return None, 0
+    try:
+        ids = tuple(int(t) for t in token_ids)
+        n = len(ids)
+        idx = _anchor_index(manager)
+        best_key = None
+        with manager.lock:
+            for key in idx:
+                kids, kh = key
+                p = len(kids)
+                if (kh != int(extra_hash)
+                        or not min_prefix_tokens < p < n
+                        or ids[:p] != kids):
+                    continue
+                if best_key is None or p > len(best_key[0]):
+                    best_key = key
+            if best_key is None:
+                return None, 0
+            clones = idx[best_key][0]
+            idx.move_to_end(best_key)
+        from mlx_vlm import apc as _apc
+        warm = _apc._clone_prompt_cache_for_apc(
+            clones, min_capacity_tokens=n + 1)
+        if warm is None:
+            return None, 0
+        p = len(best_key[0])
+        with manager.lock:
+            # Anchor hits are cache-served tokens the upstream ledger never
+            # sees; bumping both keeps token_hit_rate honest.
+            manager.stats.hits += 1
+            manager.stats.matched_tokens += p
+        _ckpt_bump(manager, "anchor_hits")
+        _log.info("APC anchor hit: prefix=%d", p)
+        return warm, p
+    except Exception:
+        _log.warning("APC anchor lookup failed; continuing", exc_info=True)
+        return None, 0
+
+
 # Rotating (sliding-window) snapshot/restore inverse. A live RotatingKVCache
 # buffer has three regimes (contiguous concat-mode, padded in-place growth,
 # rotated ring); the snapshot canonicalizes all three into temporal order at
@@ -504,7 +621,8 @@ _CKPT_SALT = 0x7C_4B_D2_0A_86_E5_93
 _BOUNDED_SALT = 0x3A_91_C7_55_0E_D4_26
 
 _CKPT_RECORD_ENTRIES = max(2, env_int("GMLX_APC_CKPT_RECORDS", 32))
-# Strip-on-extend: newest N restorable checkpoints per chain.
+# Strip-on-extend: newest N restorable checkpoints per chain, plus the
+# chain's anchor (see _record_insert).
 _CKPT_HEAVY_PER_CHAIN = max(1, env_int("GMLX_APC_CKPT_HEAVY", 2))
 # Byte budget for record-owned payload (recurrent states + KV tails; chain
 # blocks are bounded by the manager pool). A GDN record can carry >100 MB
@@ -603,10 +721,12 @@ def _ckpt_block_prefix(p: int, block_size: int) -> int:
 
 
 class _CkptRecord:
-    # kind in {"boundary", "replay", "retire"}: prefill-cursor boundaries,
-    # the N-1 identical-replay record, and retirement stores. Retention
-    # differs only in the strip-on-extend exemption (see _record_insert);
-    # the entries cap and byte budget treat all kinds alike.
+    # kind in {"boundary", "anchor", "replay", "retire"}: prefill-cursor
+    # boundaries, the chain's pinned early boundary (sibling fan-out
+    # reuse), the N-1 identical-replay record, and retirement stores.
+    # Retention differs only in _record_insert's strip-on-extend
+    # exemptions and eviction order; adoption gates only ever test for
+    # "replay".
     __slots__ = ("ids", "extra_hash", "p", "b_full", "layout",
                  "main_blocks", "bounded_blocks", "rot_meta", "states",
                  "tails", "nbytes", "kind")
@@ -636,6 +756,7 @@ _CKPT_STAT_INTS = (
     "ckpt_stores", "ckpt_hits", "ckpt_matched_tokens",
     "ckpt_missed_adoptions", "ckpt_skeleton_writes", "sidecar_writes",
     "retire_fallback_full", "ckpt_pool_evictions",
+    "anchor_stores", "anchor_hits",
 )
 
 
@@ -695,6 +816,9 @@ def ckpt_reset(manager) -> None:
         side = getattr(manager, "_kq_sidecar_cache", None)
         if side:
             side.clear()
+        anchors = getattr(manager, "_kq_anchor_cache", None)
+        if anchors:
+            anchors.clear()
         manager._kq_ckpt_stats = None
 
 
@@ -791,7 +915,10 @@ def _evict_for_pool(manager, deficit: int) -> int:
     in-flight lookup pin or another request's chain do not free on
     release, so an unreachable deficit is detected upfront and evicts
     nothing rather than draining the whole index for a store that still
-    declines. Returns the number of records released."""
+    declines. Plain LRU order on purpose: anchor records get no
+    protection here, since an anchor pinning window blocks on an
+    exhausted pool would starve every future store. Returns the number
+    of records released."""
     if not hasattr(manager, "_free_head"):
         return 0
     idx = _ckpt_records(manager)
@@ -821,6 +948,22 @@ def _evict_for_pool(manager, deficit: int) -> int:
     return evicted
 
 
+def _evict_lru_record(manager, idx, keep):
+    """Release and return the eviction victim: the least-recently-used
+    non-anchor record, else the least-recently-used anchor, never the
+    ``keep`` key (the record being inserted always survives). Lookup
+    hits move_to_end, so anchor order is LRU by last hit: an anchor
+    that never serves a sibling ages out, one that does stays hot.
+    Caller holds the lock and guarantees a non-keep record exists."""
+    key = next((k for k, r in idx.items()
+                if r.kind != "anchor" and k != keep), None)
+    if key is None:
+        key = next(k for k in idx if k != keep)
+    victim = idx.pop(key)
+    _release_record(manager, victim)
+    return victim
+
+
 def _record_insert(manager, rec) -> None:
     """Insert a checkpoint record: strip-on-extend superseded records on the
     same chain immediately (LRU would keep exactly the wrong ones - the
@@ -828,18 +971,31 @@ def _record_insert(manager, rec) -> None:
     then bound the index by count and payload bytes, releasing refs on
     everything dropped. The newest record always survives.
 
-    Replay records are exempt from the strip only: growth (a longer
-    boundary or retirement insert) is exactly the moment an identical
-    resend still needs the N-1 record, so a longer non-replay insert
-    never releases one; a newer replay on the same chain supersedes it.
-    The count and byte bounds below evict replay records normally -- the
-    exemption pins nothing against real memory pressure."""
+    Two strip exemptions. Replay: growth (a longer boundary or
+    retirement insert) is exactly the moment an identical resend still
+    needs the N-1 record, so a longer non-replay insert never releases
+    one; a newer replay on the same chain supersedes it. Anchor: the
+    chain's early boundary is what sibling fan-out requests (shared
+    system prompt, disjoint user turns) can adopt, and it is exactly
+    the record strip-on-extend removes first as the chain deepens. The
+    schedule tags the system-prefix stop "anchor"; when no tagged stop
+    exists (no render ctx, completions API), the first restorable
+    boundary on a fresh chain is promoted instead. One anchor per
+    chain: an anchor insert supersedes tagged anchors below it.
+
+    Against real memory pressure the exemptions pin little: the count
+    and byte bounds evict anchors after non-anchors (LRU by last hit),
+    and pool-pressure eviction (_evict_for_pool) gives anchors no
+    protection at all: position-salted window chains must never sit
+    pinned on an exhausted pool."""
     idx = _ckpt_records(manager)
     key = (rec.ids, rec.extra_hash)
     rec.nbytes = _rec_nbytes(rec)
     with manager.lock:
         old = idx.pop(key, None)
         if old is not None:
+            if old.kind == "anchor" and rec.kind == "boundary":
+                rec.kind = "anchor"     # a re-store keeps the anchor tag
             _release_record(manager, old)
         # chain = records whose ids are a strict prefix of this one
         chain = [k for k, r in idx.items()
@@ -849,20 +1005,25 @@ def _record_insert(manager, rec) -> None:
             # One replay per chain: the newer one supersedes outright.
             for k in [k for k in chain if idx[k].kind == "replay"]:
                 _release_record(manager, idx.pop(k))
-        chain = [k for k in chain if k in idx and idx[k].kind != "replay"]
+        elif rec.kind == "anchor":
+            for k in [k for k in chain if idx[k].kind == "anchor"]:
+                _release_record(manager, idx.pop(k))
+        elif rec.kind == "boundary" and not any(
+                idx[k].kind != "replay" for k in chain if k in idx):
+            rec.kind = "anchor"         # first restorable boundary
+        chain = [k for k in chain
+                 if k in idx and idx[k].kind not in ("replay", "anchor")]
         chain.sort(key=lambda k: idx[k].p, reverse=True)
         for k in chain[_CKPT_HEAVY_PER_CHAIN - 1:]:
             _release_record(manager, idx.pop(k))
         idx[key] = rec
         idx.move_to_end(key)
         while len(idx) > _CKPT_RECORD_ENTRIES:
-            _, victim = idx.popitem(last=False)
-            _release_record(manager, victim)
+            _evict_lru_record(manager, idx, key)
         total = sum(int(getattr(r, "nbytes", 0) or 0) for r in idx.values())
         while total > _CKPT_BUDGET_BYTES and len(idx) > 1:
-            _, victim = idx.popitem(last=False)
+            victim = _evict_lru_record(manager, idx, key)
             total -= int(getattr(victim, "nbytes", 0) or 0)
-            _release_record(manager, victim)
 
 
 def ckpt_store(
@@ -1241,9 +1402,11 @@ def ckpt_lookup(
     """Longest checkpoint-tier warm start for ``token_ids``.
 
     Walks pinned records p-descending testing the whole conjunction, then
-    falls back to the disk skeleton (restart repair). ``layout`` rejects
-    records from a different per-layer layout. Returns
-    ``(warm_prompt_cache, p)`` or ``(None, 0)``. Never raises.
+    falls back to the disk skeleton (restart repair). When the deepest
+    pinned candidate is the chain's anchor, the disk tier is consulted
+    first for anything strictly deeper. ``layout`` rejects records from a
+    different per-layer layout. Returns ``(warm_prompt_cache, p)`` or
+    ``(None, 0)``. Never raises.
     """
     if manager is None or token_ids is None:
         return None, 0
@@ -1283,6 +1446,19 @@ def ckpt_lookup(
         if gated:
             _ckpt_decline(manager, "replay_gate")
         cands.sort(key=lambda r: r.p, reverse=True)
+        if cands and cands[0].kind == "anchor":
+            # The anchor is a retention floor, not a depth ceiling. It
+            # sits early on the chain by construction, and the pinned
+            # walk below returns on first success, so without this the
+            # anchor would cap every divergent query at its own p while
+            # a deeper skeleton sits on disk (the position strip-on-
+            # extend drops from memory but the skeleton keeps).
+            warm, p = _ckpt_disk_lookup(
+                manager, ids, extra_hash=extra_hash,
+                min_prefix_tokens=max(min_prefix_tokens, cands[0].p),
+                layout=layout)
+            if warm is not None:
+                return warm, p
         for rec in cands:
             # Assembly runs unlocked (it concatenates and evals block
             # tensors), so the record's chains must be pinned against a

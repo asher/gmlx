@@ -215,22 +215,17 @@ def build_assistant_message(ctx: dict, full_text: str) -> dict:
     return msg
 
 
-def predict_next_ids(ctx: dict, assistant_msg: dict | None) -> list[int] | None:
-    """Render and tokenize the hypothetical next-turn prefix.
-
-    ``assistant_msg=None`` renders the request's own messages with no
-    reply appended -- the render-stable core a next turn extends. One
-    predictor for both questions; a second renderer diverging silently
-    is how the turn-boundary bug stayed invisible."""
+def _render_ids(ctx: dict, msgs: list) -> list[int] | None:
+    """Render ``msgs`` through the request's own template and tokenizer
+    (no generation prompt) and return the token ids. The single render
+    path behind every prefix prediction; a second renderer diverging
+    silently is how the turn-boundary bug stayed invisible."""
     render = ctx.get("render")
     preprocess = ctx.get("preprocess")
     if render is None or preprocess is None:
         return None
     kw = dict(ctx.get("kw") or {})
     kw["add_generation_prompt"] = False
-    msgs = list(ctx["messages"])
-    if assistant_msg is not None:
-        msgs.append(assistant_msg)
     text = render(ctx["processor"], ctx["config"], msgs, **kw)
     if not isinstance(text, str):
         return None
@@ -241,6 +236,71 @@ def predict_next_ids(ctx: dict, assistant_msg: dict | None) -> list[int] | None:
     if ids and isinstance(ids[0], list):
         ids = ids[0]
     return [int(t) for t in ids]
+
+
+def predict_next_ids(ctx: dict, assistant_msg: dict | None) -> list[int] | None:
+    """Render and tokenize the hypothetical next-turn prefix.
+
+    ``assistant_msg=None`` renders the request's own messages with no
+    reply appended -- the render-stable core a next turn extends."""
+    msgs = list(ctx["messages"])
+    if assistant_msg is not None:
+        msgs.append(assistant_msg)
+    return _render_ids(ctx, msgs)
+
+
+def _lcp_len(seq, nxt) -> int:
+    n = min(len(seq), len(nxt))
+    lcp = 0
+    while lcp < n and int(seq[lcp]) == int(nxt[lcp]):
+        lcp += 1
+    return lcp
+
+
+def system_prefix_lcp(ctx: dict, prompt_ids) -> int | None:
+    """Token length of the prefix every sibling request shares: the LCP
+    of two probe renders that differ only in a dummy first user turn.
+
+    Sibling fan-out requests share the system prompt and tool schemas
+    but diverge at the first user message; this is the deepest position
+    one checkpoint can serve all of them. A system-only render cannot
+    measure it on every template (gemma folds the system prompt into
+    the first user turn and renders a lone system message to almost
+    nothing), so the offset comes from a divergence probe instead:
+    render leading-system + user "0" and leading-system + user "1"
+    through the same template, kwargs (tools included), and tokenizer
+    as the live request, and take where they split. A folding template
+    folds both probes identically, so the split lands exactly where
+    real siblings diverge. Clamped by the LCP with the live
+    prompt in case a template leaks user content into the header.
+    Memoized on the ctx; media prompts return None (expanded media ids
+    cannot be re-encoded from text)."""
+    if not ctx or ctx.get("media"):
+        return None
+    memo = ctx.get("_p_system")
+    if memo is not None:
+        return memo if memo >= 0 else None
+    lcp = None
+    try:
+        msgs = list(ctx.get("messages") or ())
+        lead = []
+        for m in msgs:
+            if isinstance(m, dict) and m.get("role") == "system":
+                lead.append(m)
+            else:
+                break
+        # No leading system block, or nothing after it (a system-only
+        # prompt is covered by the terminal checkpoint already).
+        if lead and len(lead) < len(msgs):
+            p1 = _render_ids(ctx, lead + [{"role": "user", "content": "0"}])
+            p2 = _render_ids(ctx, lead + [{"role": "user", "content": "1"}])
+            if p1 and p2:
+                lcp = min(_lcp_len(p1, p2), _lcp_len(p1, prompt_ids))
+    except Exception:
+        _log.debug("system-prefix prediction failed", exc_info=True)
+        lcp = None
+    ctx["_p_system"] = -1 if lcp is None else lcp
+    return lcp
 
 
 # Model types whose prompt-stable prediction already failed once: the

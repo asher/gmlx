@@ -186,7 +186,9 @@ def test_replay_record_survives_retirement_insert():
                             row=0, extra_hash=0)
     idx = _ckpt_records(man)
     assert (n - 1) in [r.p for r in idx.values()]
-    assert {r.kind for r in idx.values()} == {"replay", "boundary",
+    # The terminal store is the chain's first restorable boundary (the
+    # replay below it is gated), so it promotes to anchor.
+    assert {r.kind for r in idx.values()} == {"replay", "anchor",
                                               "retire"}
     # The identical resend adopts at N-1.
     warm, got = ckpt_lookup(man, ids[:n], extra_hash=0)
@@ -239,7 +241,8 @@ def test_replay_record_not_exempt_from_byte_budget(monkeypatch):
     assert ckpt_store(man, list(range(300, 347)),
                       make_hybrid_cache(47, seed=2), extra_hash=1)
     idx = cs._ckpt_records(man)
-    assert [r.kind for r in idx.values()] == ["boundary"]
+    # The surviving boundary is its chain's first, hence anchor.
+    assert [r.kind for r in idx.values()] == ["anchor"]
 
 
 def test_salt_isolation_from_real_tiers():
@@ -529,17 +532,24 @@ def test_pinning_survives_pool_pressure():
     assert_warm_matches(warm, cache, p)
 
 
-def test_strip_on_extend_keeps_newest_two():
+def test_strip_on_extend_keeps_newest_two_plus_anchor():
+    """A growing chain keeps the newest two records plus its anchor:
+    the first restorable boundary is promoted and survives the strip
+    (sibling fan-out adopts exactly that early prefix), while interior
+    boundaries strip as before."""
     from gmlx.cache_snapshot import _ckpt_records
-    man = APCManager(num_blocks=64, block_size=16)
+    man = APCManager(num_blocks=96, block_size=16)
     ids = list(range(400, 400 + 96))
-    for p in (32, 48, 64):
+    for p in (32, 48, 64, 80):
         cache = make_hybrid_cache(p, seed=p)
         assert ckpt_store(man, ids[:p], cache, extra_hash=0)
     idx = _ckpt_records(man)
-    assert sorted(r.p for r in idx.values()) == [48, 64]
+    assert sorted(r.p for r in idx.values()) == [32, 64, 80]
+    assert [r.p for r in idx.values() if r.kind == "anchor"] == [32]
     warm, got = ckpt_lookup(man, ids[:40], extra_hash=0)
-    assert warm is None and got == 0          # p=32 stripped
+    assert got == 32                          # the anchor serves siblings
+    warm, got = ckpt_lookup(man, ids[:50], extra_hash=0)
+    assert got == 32                          # p=48 stripped
     warm, got = ckpt_lookup(man, ids[:66], extra_hash=0)
     assert got == 64
 
@@ -560,7 +570,8 @@ def test_strip_on_extend_exempts_replay():
     assert ckpt_store(man, ids[:80], make_hybrid_cache(80, seed=80),
                       extra_hash=0, kind="retire")
     idx = _ckpt_records(man)
-    assert sorted(r.p for r in idx.values()) == [47, 64, 80]
+    # p=32 promoted to anchor (first restorable boundary), also exempt.
+    assert sorted(r.p for r in idx.values()) == [32, 47, 64, 80]
     warm, got = ckpt_lookup(man, ids[:48], extra_hash=0)
     assert got == 47
 
@@ -1109,3 +1120,143 @@ def test_spec_apc_master_disable_noops_store(monkeypatch):
     assert not hasattr(batch_off, "_apc_manager")        # stock store never armed
     assert not hasattr(batch_off.prompt_cache[0], "_kq_apc_retire")
     assert se._get_spec_prefix_cache(model_off) is None  # L0 off too
+
+
+# -- anchor records: the sibling fan-out exemption --
+
+def test_anchor_kind_exempt_from_strip_and_superseded():
+    """A tagged anchor survives strip-on-extend as the chain deepens; a
+    newer tagged anchor on the same chain supersedes it (one anchor per
+    chain)."""
+    from gmlx.cache_snapshot import _ckpt_records
+
+    man = APCManager(num_blocks=96, block_size=16)
+    ids = list(range(400, 400 + 96))
+    assert ckpt_store(man, ids[:32], make_hybrid_cache(32, seed=32),
+                      extra_hash=0, kind="anchor")
+    for p in (48, 64, 80):
+        assert ckpt_store(man, ids[:p], make_hybrid_cache(p, seed=p),
+                          extra_hash=0)
+    idx = _ckpt_records(man)
+    assert sorted(r.p for r in idx.values()) == [32, 64, 80]
+    assert [r.p for r in idx.values() if r.kind == "anchor"] == [32]
+    # Deeper records exist below the new anchor position: no promotion
+    # happened at 48/64/80 (the chain was never fresh).
+    assert ckpt_store(man, ids[:48], make_hybrid_cache(48, seed=1),
+                      extra_hash=0, kind="anchor")
+    idx = _ckpt_records(man)
+    assert [r.p for r in idx.values() if r.kind == "anchor"] == [48]
+    assert 32 not in [r.p for r in idx.values()]
+
+
+def test_anchor_evicts_after_non_anchors_lru_by_hit(monkeypatch):
+    """Entry-cap pressure: non-anchors go first even when an anchor is
+    older; among anchors the least-recently-hit goes first."""
+    import gmlx.cache_snapshot as cs
+
+    monkeypatch.setattr(cs, "_CKPT_RECORD_ENTRIES", 3)
+    man = APCManager(num_blocks=96, block_size=16)
+    a = list(range(100, 148))
+    b = list(range(300, 364))
+    assert ckpt_store(man, a[:32], make_hybrid_cache(32, seed=1),
+                      extra_hash=0)                       # anchor A
+    assert ckpt_store(man, b[:32], make_hybrid_cache(32, seed=2),
+                      extra_hash=1)                       # anchor B
+    assert ckpt_store(man, b[:48], make_hybrid_cache(48, seed=3),
+                      extra_hash=1)                       # plain boundary
+    warm, got = ckpt_lookup(man, a[:40], extra_hash=0)    # hit refreshes A
+    assert got == 32
+    assert ckpt_store(man, list(range(500, 532)),
+                      make_hybrid_cache(32, seed=4), extra_hash=2)
+    idx = cs._ckpt_records(man)
+    # The plain boundary (B:48) went first despite being newer than both
+    # anchors.
+    assert [(r.p, r.extra_hash) for r in idx.values() if r.kind != "anchor"] \
+        == []
+    assert {r.extra_hash for r in idx.values()} == {0, 1, 2}
+    assert ckpt_store(man, list(range(700, 732)),
+                      make_hybrid_cache(32, seed=5), extra_hash=3)
+    idx = cs._ckpt_records(man)
+    # All anchors now: the least-recently-hit one (B) went; the hit A
+    # record stayed.
+    assert {r.extra_hash for r in idx.values()} == {0, 2, 3}
+
+
+def test_first_boundary_promotion_skips_retire_chains():
+    """Promotion targets boundaries only: a chain whose first record is
+    a retirement store gets no anchor from it, and a later boundary
+    above it does not promote either (the chain is not fresh)."""
+    from gmlx.cache_snapshot import _ckpt_records
+
+    man = APCManager(num_blocks=96, block_size=16)
+    ids = list(range(400, 400 + 96))
+    assert ckpt_store(man, ids[:32], make_hybrid_cache(32, seed=1),
+                      extra_hash=0, kind="retire")
+    assert ckpt_store(man, ids[:64], make_hybrid_cache(64, seed=2),
+                      extra_hash=0)
+    idx = _ckpt_records(man)
+    assert sorted((r.p, r.kind) for r in idx.values()) == \
+        [(32, "retire"), (64, "boundary")]
+
+
+def test_anchor_never_shadows_a_deeper_disk_skeleton(tmp_path):
+    """Depth beats retention: with only the anchor pinned in memory and a
+    deeper skeleton on disk, the lookup must return the disk depth. The
+    pinned walk returns on first success, so an anchor left to win here
+    caps every divergent query at its own p (the depth e2e's divergent
+    and turns floors)."""
+    from gmlx.apc_manager import GmlxAPCManager
+    from gmlx.cache_snapshot import _ckpt_records, rotating_canonical_window
+
+    ids = list(range(700, 700 + 96))
+    disk = DiskBlockStore(root=tmp_path, namespace="m")
+    man = GmlxAPCManager(num_blocks=96, block_size=16, disk=disk)
+    try:
+        deep = make_swa_cache(64, seed=11)
+        # The shallow store must carry the same KV as the deep one's
+        # prefix: the block pool dedups the shared chain by token hash,
+        # so mismatched fixture content would be a fixture artifact.
+        shallow = []
+        for c in deep:
+            k, v = rotating_canonical_window(c)[:2] \
+                if isinstance(c, RotatingKVCache) else c.state
+            if isinstance(c, RotatingKVCache):
+                s = RotatingKVCache(max_size=ROT_W)
+                s.update_and_fetch(k[..., :32, :], v[..., :32, :])
+            else:
+                s = KVCache()
+                s.state = (k[..., :32, :], v[..., :32, :])
+            shallow.append(s)
+        assert ckpt_store(man, ids[:32], shallow,
+                          extra_hash=4, kind="anchor")
+        assert ckpt_store(man, ids[:64], deep, extra_hash=4)
+        # Drop the deep record from memory, keeping its disk skeleton:
+        # exactly what strip-on-extend leaves behind as a chain deepens.
+        idx = _ckpt_records(man)
+        for k, r in list(idx.items()):
+            if r.p == 64:
+                idx.pop(k)
+        assert [r.kind for r in idx.values()] == ["anchor"]
+        warm, got = ckpt_lookup(man, ids + [77], extra_hash=4)
+        assert got == 64
+        assert_swa_warm_matches(warm, deep, 64)
+        # Nothing deeper on disk: the anchor still serves.
+        warm, got = ckpt_lookup(man, ids[:48] + [77], extra_hash=4)
+        assert got == 32
+    finally:
+        disk.close()
+
+
+def test_anchor_gets_no_pool_pressure_protection():
+    """_evict_for_pool stays plain LRU: an anchor's blocks reclaim like
+    any record's, so a pinned anchor can never starve the block pool."""
+    import gmlx.cache_snapshot as cs
+
+    man = APCManager(num_blocks=64, block_size=16)
+    ids = list(range(400, 448))
+    assert ckpt_store(man, ids[:32], make_hybrid_cache(32, seed=1),
+                      extra_hash=0)
+    idx = cs._ckpt_records(man)
+    assert [r.kind for r in idx.values()] == ["anchor"]
+    assert cs._evict_for_pool(man, 1) >= 1
+    assert len(cs._ckpt_records(man)) == 0

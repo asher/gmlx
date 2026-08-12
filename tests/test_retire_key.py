@@ -364,3 +364,114 @@ def test_gen_prompt_text_memoized():
     # The memoized prompt feeds the closer.
     assert rk._virtually_finish(ctx, "deep partial") == \
         "deep partial</think>"
+
+
+# -- system-prefix LCP (the sibling anchor offset) --
+
+def _sys_ctx(next_ids, msgs):
+    ctx = _fake_ctx(next_ids)
+    ctx["messages"] = msgs
+    return ctx
+
+
+def _probe_ctx(msgs, template):
+    """A ctx whose render/tokenize pair actually varies with the probe
+    messages: ``template`` maps a message list to text; tokens are
+    character codes, so the probe LCP is a plain string LCP."""
+    ctx = _fake_ctx([0])
+    ctx["messages"] = msgs
+    ctx["render"] = lambda p, c, m, **kw: template(m)
+    ctx["preprocess"] = lambda text: [ord(ch) for ch in text]
+    return ctx
+
+
+def _chatml(msgs):
+    return "".join(f"<{m['role']}>{m['content']}</>" for m in msgs)
+
+
+def _folding(msgs):
+    """Gemma-style: system content folds into the first user turn; a
+    system-only conversation renders to almost nothing."""
+    sys_txt = "".join(m["content"] for m in msgs if m["role"] == "system")
+    users = [m for m in msgs if m["role"] == "user"]
+    if not users:
+        return "<bos>"
+    return ("<bos><user>" + sys_txt + "\n\n"
+            + "".join(u["content"] for u in users) + "</>")
+
+
+def test_system_prefix_lcp_probe_pair_explicit_system_block():
+    msgs = [{"role": "system", "content": "policy"},
+            {"role": "user", "content": "real question"}]
+    ctx = _probe_ctx(msgs, _chatml)
+    live = [ord(ch) for ch in _chatml(msgs)]
+    # Probes diverge right after the shared "<system>policy</><user>"
+    # header; the anchor offset includes the user header, which every
+    # sibling also shares.
+    assert rk.system_prefix_lcp(ctx, live) == len("<system>policy</><user>")
+
+
+def test_system_prefix_lcp_probe_pair_folding_template():
+    # The gemma shape: a system-only render measures nothing, but the
+    # probe pair folds identically and splits at the real divergence.
+    msgs = [{"role": "system", "content": "policy"},
+            {"role": "user", "content": "real question"}]
+    ctx = _probe_ctx(msgs, _folding)
+    live = [ord(ch) for ch in _folding(msgs)]
+    assert rk.system_prefix_lcp(ctx, live) == len("<bos><user>policy\n\n")
+
+
+def test_system_prefix_lcp_probe_renders_lead_plus_dummy():
+    calls = []
+    ctx = _sys_ctx([1, 2, 3], [{"role": "system", "content": "a"},
+                               {"role": "system", "content": "b"},
+                               {"role": "user", "content": "u"}])
+    inner = ctx["render"]
+    ctx["render"] = (lambda p, c, msgs, **kw:
+                     (calls.append(list(msgs)), inner(p, c, msgs, **kw))[1])
+    assert rk.system_prefix_lcp(ctx, [1, 2, 3, 7, 8]) == 3
+    lead = [{"role": "system", "content": "a"},
+            {"role": "system", "content": "b"}]
+    assert calls == [lead + [{"role": "user", "content": "0"}],
+                     lead + [{"role": "user", "content": "1"}]]
+    # Memoized: a second call does not re-render.
+    assert rk.system_prefix_lcp(ctx, [1, 2, 3, 7, 8]) == 3
+    assert len(calls) == 2
+
+
+def test_system_prefix_lcp_clamped_by_live_prompt():
+    # The live-prompt clamp guards against a template leaking user
+    # content ahead of the divergence point.
+    ctx = _sys_ctx([1, 2, 9, 9], [{"role": "system", "content": "s"},
+                                  {"role": "user", "content": "u"}])
+    assert rk.system_prefix_lcp(ctx, [1, 2, 3, 4, 5]) == 2
+
+
+def test_system_prefix_lcp_requires_system_prefix_and_a_tail():
+    # No leading system block: nothing siblings share by construction.
+    ctx = _sys_ctx([1, 2], [{"role": "user", "content": "u"}])
+    assert rk.system_prefix_lcp(ctx, [1, 2, 3]) is None
+    # System-only prompt: the terminal checkpoint already covers it.
+    ctx = _sys_ctx([1, 2], [{"role": "system", "content": "s"}])
+    assert rk.system_prefix_lcp(ctx, [1, 2, 3]) is None
+    # System block after the first non-system message does not count.
+    ctx = _sys_ctx([1, 2], [{"role": "user", "content": "u"},
+                            {"role": "system", "content": "s"}])
+    assert rk.system_prefix_lcp(ctx, [1, 2, 3]) is None
+
+
+def test_system_prefix_lcp_media_and_failure():
+    assert rk.system_prefix_lcp(
+        _sys_ctx([1], [{"role": "system", "content": "s"},
+                       {"role": "user", "content": "u"}]) | {"media": True},
+        [1, 2]) is None
+    calls = []
+    ctx = _sys_ctx([1, 2], [{"role": "system", "content": "s"},
+                            {"role": "user", "content": "u"}])
+    ctx["render"] = (lambda p, c, msgs, **kw:
+                     (calls.append(1), (_ for _ in ()).throw(
+                         ValueError("template refuses")))[1])
+    assert rk.system_prefix_lcp(ctx, [1, 2]) is None
+    # Failure memoized: no second render attempt.
+    assert rk.system_prefix_lcp(ctx, [1, 2]) is None
+    assert len(calls) == 1
