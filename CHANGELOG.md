@@ -15,8 +15,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the patch-merge projector remap onto mlx-vlm's `kimi_k25`. llama.cpp's
   converter writes the vision Q/K in the split 2-D RoPE layout, and the
   remap puts them back into MoonViT's interleaved layout.
-- You can now use `--stream-experts` with `--mmproj` with the cli run/chat
-  commands. Server support for vision + streaming still to come.
+- You can now use `--stream-experts` with `--mmproj`, on the cli run/chat
+  commands and on a server model entry (`stream: experts`). gmlx puts the
+  placement on the text tower, and the vision tower stays resident. The
+  server refuses `stream: cpu` on a VLM entry.
 
 ### Changed
 

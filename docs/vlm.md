@@ -69,9 +69,7 @@ llama.cpp's `build_rope_2d` reads. The remap puts them back into the
 interleaved layout of MoonViT. A mis-decoded mmproj thus gives confidently
 wrong image descriptions, and not a load error. GLM-5.2-V has the same vision
 encoder on a different text arch, and gmlx refuses it by name. K2.x is an
-over-RAM MoE, so use `--stream-experts` with `--mmproj`. gmlx puts the
-placement on the text tower after it loads the model, and the vision tower
-stays resident.
+over-RAM MoE, so it needs the streaming placement in the caveats below.
 
 Qwen2-VL / Qwen2.5-VL mmprojs (`qwen2vl_merger`) are not supported yet. The
 load fails up front with the family named. LLaVA's image processor isn't
@@ -111,6 +109,13 @@ consumer.
   runs as a plain text model (the vision side is simply absent).
 - Adapters (`--adapter`) don't combine with `--mmproj` yet -- live GGUF LoRA is
   text-path-only and errors loudly.
+- You can use `--stream-experts` (server key `stream: experts`) with
+  `--mmproj`. Use this combination for an over-RAM multimodal MoE. gmlx puts
+  the placement on the text tower after it loads the model, and the vision
+  tower stays on the GPU. You cannot use `--stream-cpu` (server key
+  `stream: cpu`) with `--mmproj`. That mode moves the process to the CPU
+  device, and it moves the vision tower with it. Send only one request at a
+  time to a server that streams a VLM (see [streaming.md](streaming.md)).
 - Speculative decoding (`--speculative`) *does* combine with `--mmproj` when a drafter
   is available -- a native MTP head (e.g. Qwen3.5/3.6) or `--draft-gguf`. Text-only
   turns speculate; media turns fall back to plain decode. With `--mmproj` but no

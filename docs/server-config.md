@@ -644,10 +644,15 @@ cache stay on GPU. With the decode feeder (default, below) it matches
 quantized KV cache extends the advantage to long context. `stream: cpu`
 instead runs the whole model on the CPU device: weights stream from the page
 cache, so a MoE bigger than the wired-memory budget stays serveable.
-Load-affecting (part of the residency identity), text-only models; rejected
-on VLM and speculative/MTP entries. A `stream: cpu` entry switches the whole
-process to the CPU device, so it suits a single-model server rather than
-mixing with GPU-resident models. (The old key `cpu_moe: full | hybrid` is a
+Load-affecting (part of the residency identity). `stream: experts` also
+applies to a VLM entry. gmlx puts the placement on the text tower, and the
+vision tower stays on the GPU. The server refuses `stream: cpu` on a VLM
+entry, and it refuses both values on a speculative/MTP entry. A `stream: cpu`
+entry switches the whole process to the CPU device, so it suits a
+single-model server rather than mixing with GPU-resident models. Send only
+one request at a time to a streamed entry. Concurrent requests turn off the
+streaming tier's decode accelerations, which need a one-token step (see
+[streaming.md](streaming.md)). (The old key `cpu_moe: full | hybrid` is a
 deprecated alias for `stream: cpu | experts` and warns at config load.)
 
 `moe_expert_mass: P` (a share in `(0, 1]`) installs the adaptive lossy
