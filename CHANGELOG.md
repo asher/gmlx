@@ -12,6 +12,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reads too) sets the activation dtype for the model graph. `auto` selects
   float16 on M1 and M2, whose GPUs have no native bfloat16 arithmetic and run
   it through a compiler-expanded software sequence. The default is unchanged.
+- serve: `--dtype` and `server.dtype` set the same knob for every model the
+  server loads. An unrecognized value is a config error rather than a silent
+  fall back to the default.
 
 ## [0.3.0] - 2026-08-09
 
