@@ -226,11 +226,12 @@ def test_is_diffusion_model_detects_the_built_model():
         types.SimpleNamespace(config=types.SimpleNamespace())) is False
 
 
-def test_dequantize_diffusion_embedding_swaps_kquant_to_bf16():
+def test_dequantize_diffusion_embedding_swaps_kquant_to_a_float_table():
     """The denoiser's ``probs @ embed_tokens.weight`` soft-embedding step needs a
     dense float table, so the loader replaces the kquant ``embed_tokens`` with a
-    bf16 ``nn.Embedding`` post-load. Verify the swap and that its values match a
-    reference dequant of the same q8_0 wire bytes (CPU-only, tiny table)."""
+    float ``nn.Embedding`` at the activation dtype post-load. Verify the swap and
+    that its values match a reference dequant of the same q8_0 wire bytes
+    (CPU-only, tiny table)."""
     import types
 
     import mlx.nn as nn
@@ -238,6 +239,7 @@ def test_dequantize_diffusion_embedding_swaps_kquant_to_bf16():
     from gguf.constants import GGMLQuantizationType as GT
     from gguf.quants import dequantize, quantize
 
+    from gmlx.dtypes import activation_dtype
     from gmlx.modules import KQuantEmbedding
 
     rows, dims = 80, 64
@@ -259,9 +261,10 @@ def test_dequantize_diffusion_embedding_swaps_kquant_to_bf16():
         assert isinstance(new, nn.Embedding)
         assert not isinstance(new, KQuantEmbedding)
         assert new.weight.shape == (rows, dims)
-        assert new.weight.dtype == mx.bfloat16
+        assert new.weight.dtype == activation_dtype()
         got = np.array(new.weight.astype(mx.float32))
-        # Same bytes both ways -> only bf16 rounding (~0.4% rel) separates them.
+        # Same bytes both ways -> only 16-bit rounding (bf16 is the coarser of
+        # the two at ~0.4% rel) separates them.
         assert np.allclose(got, ref_deq, atol=2e-3, rtol=0.02)
 
         # A plain (already-float) embedding is left untouched.

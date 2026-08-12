@@ -794,10 +794,11 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--dtype", choices=("auto", "bfloat16", "float16"),
                     default=None, metavar="DTYPE",
                     help="Activation dtype for every model this server loads "
-                         "(default bfloat16). float16 is for M1 and M2, whose "
-                         "GPUs have no native bfloat16 arithmetic; auto picks "
-                         "it on those and bfloat16 elsewhere. Also via "
-                         "GMLX_ACTIVATION_DTYPE; config mode: server.dtype.")
+                         "(default on this test branch: float16; shipping "
+                         "gmlx defaults to bfloat16). float16 is for M1 and "
+                         "M2, whose GPUs have no native bfloat16 arithmetic; "
+                         "auto picks it on those and bfloat16 elsewhere. Also "
+                         "via GMLX_ACTIVATION_DTYPE; config mode: server.dtype.")
     ap.add_argument("--decode-prefill-ratio", type=_ratio_flag,
                     default=None, metavar="R",
                     help="Decode GPU-time share per prefill chunk under load "

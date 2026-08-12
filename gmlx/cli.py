@@ -332,9 +332,10 @@ def add_load_args(ap: argparse.ArgumentParser) -> None:
         default=None,
         action=_DtypeAction,
         metavar="DTYPE",
-        help="Activation dtype for the model graph (default: bfloat16). "
-        "'auto' selects float16 on Apple GPUs without native bfloat16 "
-        "arithmetic (M1, M2), bfloat16 elsewhere. Also settable as "
+        help="Activation dtype for the model graph (default on this test "
+        "branch: float16; shipping gmlx defaults to bfloat16). 'auto' "
+        "selects float16 on Apple GPUs without native bfloat16 arithmetic "
+        "(M1, M2), bfloat16 elsewhere. Also settable as "
         "GMLX_ACTIVATION_DTYPE, which serve reads too.",
     )
 

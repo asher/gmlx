@@ -216,10 +216,13 @@ def test_sanitize_keeps_indexer_only_when_armed():
     assert "model.layers.1.self_attn.q_proj.weight" in dropped
 
 
-def test_sanitize_narrows_f32_indexer_projections_to_bf16():
+def test_sanitize_narrows_f32_indexer_projections_to_the_activation_dtype():
     # Some MSA GGUFs ship the indexer projections as F32; the source
-    # checkpoint is BF16, so the narrow is a bit-exact recovery. Norms and
-    # trunk weights keep their stored dtype.
+    # checkpoint is BF16, so the narrow is a bit-exact recovery at the
+    # default width. Norms and trunk weights keep their stored dtype.
+    from gmlx.dtypes import activation_dtype
+
+    act = activation_dtype()
     m = _model()
     w = {
         "model.layers.1.self_attn.index_q_proj.weight": mx.zeros((16, 64)),
@@ -230,9 +233,10 @@ def test_sanitize_narrows_f32_indexer_projections_to_bf16():
         ),
     }
     out = m.sanitize(dict(w))
-    assert out["model.layers.1.self_attn.index_q_proj.weight"].dtype == mx.bfloat16
+    assert out["model.layers.1.self_attn.index_q_proj.weight"].dtype == act
     assert out["model.layers.1.self_attn.index_q_norm.weight"].dtype == mx.float32
     assert out["model.layers.1.self_attn.q_proj.weight"].dtype == mx.float32
+    # already 16-bit on the wire, so sanitize leaves it as stored
     assert out["model.layers.1.self_attn.index_k_proj.weight"].dtype == mx.bfloat16
 
 

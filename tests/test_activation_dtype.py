@@ -2,9 +2,9 @@
 
 One dtype seeds the graph. The embedding's out_dtype and the loader's cast of
 non-quantized params both read it, and every downstream kquant matmul returns
-its activation dtype. bfloat16 stays the default on every device; float16 is
-opt-in for Apple GPUs before Apple9, which lack native bfloat16 arithmetic.
-CPU-only.
+its activation dtype. This test branch defaults to float16 on every device so
+an M1 or M2 box needs nothing set; shipping gmlx defaults to bfloat16 and
+offers float16 opt-in. CPU-only.
 """
 
 from __future__ import annotations
@@ -39,9 +39,11 @@ def _clean_env():
 # --------------------------------------------------------------- resolution
 
 
-def test_default_is_bfloat16():
-    assert dtypes.activation_dtype() == mx.bfloat16
-    assert dtypes.activation_dtype_name() == "bf16"
+def test_branch_default_is_float16():
+    """The whole point of this branch: nothing set, and the graph is float16."""
+    assert dtypes.DEFAULT == "float16"
+    assert dtypes.activation_dtype() == mx.float16
+    assert dtypes.activation_dtype_name() == "fp16"
 
 
 @pytest.mark.parametrize(
@@ -82,9 +84,9 @@ def test_float32_is_env_only_not_a_cli_choice():
 
 @pytest.mark.parametrize("value", ["garbage", "int8", "float64", ""])
 def test_malformed_degrades_to_default(monkeypatch, value):
-    """A bad value must not crash a serve boot; it falls back to bfloat16."""
+    """A bad value must not crash a serve boot; it falls back to the default."""
     monkeypatch.setenv(dtypes.ENV_VAR, value)
-    assert dtypes.activation_dtype() == mx.bfloat16
+    assert dtypes.activation_dtype() == mx.float16
 
 
 # ------------------------------------------------------------------- auto
@@ -107,7 +109,8 @@ def test_auto_follows_gpu_generation(monkeypatch, gen, expected):
 
 
 def test_explicit_value_overrides_the_auto_rule(monkeypatch):
-    """An M1-class device still honours an explicit bfloat16 request."""
+    """An M1-class device still honours an explicit bfloat16 request, which is
+    how the A/B against shipping behaviour is run on this branch."""
     monkeypatch.setattr(dtypes, "gpu_arch_gen", lambda: 13)
     monkeypatch.setenv(dtypes.ENV_VAR, "bfloat16")
     assert dtypes.activation_dtype() == mx.bfloat16
@@ -179,7 +182,7 @@ def _swapped_embedding(vocab=64, dims=256):
 
 @pytest.mark.parametrize(
     "value,expected",
-    [(None, mx.bfloat16), ("float16", mx.float16), ("bfloat16", mx.bfloat16)],
+    [(None, mx.float16), ("float16", mx.float16), ("bfloat16", mx.bfloat16)],
 )
 def test_embedding_emits_the_activation_dtype(monkeypatch, value, expected):
     """The embedding seeds the graph, so its output dtype is the knob."""

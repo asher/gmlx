@@ -423,7 +423,8 @@ class ServerCfg:
     # upstream default in place.
     prefill_step_size: int | None = None
     # Activation dtype for every model this server loads: "auto", "bfloat16"
-    # (the runtime default) or "float16", plus the "bf16"/"fp16" spellings.
+    # or "float16" (the runtime default on this test branch), plus the
+    # "bf16"/"fp16" spellings.
     # Server-wide by design: the reason to leave bfloat16 is that this GPU
     # predates Apple9 and has no native bfloat16 arithmetic, which is a fact
     # about the box, not about one model. None => leave the env / runtime
