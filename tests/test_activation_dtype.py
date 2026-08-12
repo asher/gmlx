@@ -2,9 +2,9 @@
 
 One dtype seeds the graph. The embedding's out_dtype and the loader's cast of
 non-quantized params both read it, and every downstream kquant matmul returns
-its activation dtype. bfloat16 stays the default on every device; float16 is
-opt-in for Apple GPUs before Apple9, which lack native bfloat16 arithmetic.
-CPU-only.
+its activation dtype. The default is "auto". It gives float16 on Apple GPUs
+before Apple9, which have no native bfloat16 arithmetic, and bfloat16 on all
+other devices. CPU-only.
 """
 
 from __future__ import annotations
@@ -39,9 +39,13 @@ def _clean_env():
 # --------------------------------------------------------------- resolution
 
 
-def test_default_is_bfloat16():
+def test_default_is_auto(monkeypatch):
+    """No variable set gives the same answer as an explicit "auto"."""
+    assert dtypes.DEFAULT == "auto"
+    monkeypatch.setattr(dtypes, "gpu_arch_gen", lambda: 13)
+    assert dtypes.activation_dtype() == mx.float16
+    monkeypatch.setattr(dtypes, "gpu_arch_gen", lambda: 17)
     assert dtypes.activation_dtype() == mx.bfloat16
-    assert dtypes.activation_dtype_name() == "bf16"
 
 
 @pytest.mark.parametrize(
@@ -82,9 +86,10 @@ def test_float32_is_env_only_not_a_cli_choice():
 
 @pytest.mark.parametrize("value", ["garbage", "int8", "float64", ""])
 def test_malformed_degrades_to_default(monkeypatch, value):
-    """A bad value must not crash a serve boot; it falls back to bfloat16."""
+    """A bad value must not stop a serve boot. It falls back to "auto"."""
     monkeypatch.setenv(dtypes.ENV_VAR, value)
-    assert dtypes.activation_dtype() == mx.bfloat16
+    monkeypatch.setattr(dtypes, "gpu_arch_gen", lambda: 13)
+    assert dtypes.activation_dtype() == mx.float16
 
 
 # ------------------------------------------------------------------- auto
@@ -178,11 +183,23 @@ def _swapped_embedding(vocab=64, dims=256):
 
 
 @pytest.mark.parametrize(
-    "value,expected",
-    [(None, mx.bfloat16), ("float16", mx.float16), ("bfloat16", mx.bfloat16)],
+    "value,gen,expected",
+    [
+        (None, 13, mx.float16),         # auto on an M1: the graph runs float16
+        (None, 17, mx.bfloat16),        # auto on an M5: the graph runs bfloat16
+        ("float16", 17, mx.float16),    # a named dtype beats the auto rule
+        ("bfloat16", 13, mx.bfloat16),  # and it beats the rule in both ways
+    ],
 )
-def test_embedding_emits_the_activation_dtype(monkeypatch, value, expected):
-    """The embedding seeds the graph, so its output dtype is the knob."""
+def test_embedding_emits_the_activation_dtype(monkeypatch, value, gen, expected):
+    """The embedding seeds the graph, so its output dtype is the knob.
+
+    Every case pins the GPU generation. The default is now "auto", so an
+    unpinned case would give a different answer on a pre-Apple9 test machine
+    than on an Apple9 one. Both generations run here, because "auto" must
+    reach the graph as each of the two widths.
+    """
+    monkeypatch.setattr(dtypes, "gpu_arch_gen", lambda: gen)
     if value is not None:
         monkeypatch.setenv(dtypes.ENV_VAR, value)
     emb = _swapped_embedding()

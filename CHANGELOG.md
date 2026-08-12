@@ -31,12 +31,16 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   low-residency models. Each piece now executes before the next piece
   stages.
 - `--dtype auto|bfloat16|float16` (env `GMLX_ACTIVATION_DTYPE`, which serve
-  reads too) sets the activation dtype for the model graph. `auto` selects
-  float16 on M1 and M2, whose GPUs have no native bfloat16 arithmetic and run
-  it through a compiler-expanded software sequence. The default is unchanged.
+  reads too) sets the activation dtype for the model graph.
 - serve: `--dtype` and `server.dtype` set the same knob for every model the
   server loads. An unrecognized value is a config error rather than a silent
   fall back to the default.
+
+### Changed
+
+- M1 and M2 now run the model graph in float16 instead of bfloat16. Those
+  GPUs have no native bfloat16 arithmetic, so the compiler expanded every
+  bfloat16 operation into a costly software sequence.
 
 ## [0.3.0] - 2026-08-09
 

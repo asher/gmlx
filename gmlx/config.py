@@ -422,12 +422,11 @@ class ServerCfg:
     # env, after the per-model load window has closed. None => leave the env /
     # upstream default in place.
     prefill_step_size: int | None = None
-    # Activation dtype for every model this server loads: "auto", "bfloat16"
-    # (the runtime default) or "float16", plus the "bf16"/"fp16" spellings.
-    # Server-wide by design: the reason to leave bfloat16 is that this GPU
-    # predates Apple9 and has no native bfloat16 arithmetic, which is a fact
-    # about the box, not about one model. None => leave the env / runtime
-    # default in place.
+    # Activation dtype for every model this server loads: "auto" (the runtime
+    # default), "bfloat16" or "float16", plus the "bf16"/"fp16" spellings.
+    # This key is server-wide by design. The reason to leave bfloat16 is that
+    # the GPU has no native bfloat16 arithmetic. That is a property of the
+    # machine, not of one model. None keeps the env or the runtime default.
     dtype: str | None = None
     # Decode-priority prefill pacing ratio: a live decode batch gets this
     # multiple of each prefill chunk's GPU time before the next chunk is
