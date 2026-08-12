@@ -2264,6 +2264,22 @@ def _synth_nemotron_h_moe(meta, shapes, config: dict) -> None:
         config["num_hidden_layers"] = n_layers
 
 
+# DeepseekV2Model and its subclasses (deepseek2, glm-dsa) write the yarn log
+# multiplier as `0.1 * mscale_all_dim`, not the value itself
+# ([TAG_DEEPSEEK2_YARN_LOG_MUL_FIX] in upstream conversion/deepseek.py). Other
+# converters write it straight through, so only those arches undo the 0.1.
+_DEEPSEEK_YARN_LOG_MUL_SCALE = 0.1
+
+
+def _deepseek_mscale_all_dim(meta, arch: str) -> float | None:
+    """HF ``rope_scaling.mscale_all_dim`` recovered from a deepseek-family
+    GGUF's ``rope.scaling.yarn_log_multiplier``. ``None`` when absent."""
+    log_mul = _read_float(meta, f"{arch}.rope.scaling.yarn_log_multiplier")
+    if log_mul is None:
+        return None
+    return log_mul / _DEEPSEEK_YARN_LOG_MUL_SCALE
+
+
 # deepseek2 (DeepSeek-V2/V3 + GLM-4.x MLA conversions; MLA + fine-grained MoE)
 
 def _synth_deepseek2(meta, shapes, config: dict) -> None:
@@ -2363,7 +2379,8 @@ def _synth_deepseek2(meta, shapes, config: dict) -> None:
 
     # rope scaling (yarn) passthrough when the GGUF carries it. mlx_lm
     # deepseek_v3 reads `factor` / `mscale_all_dim` off rope_scaling for the
-    # attention-scale correction. Absent on non-yarn conversions.
+    # attention-scale correction, and `beta_fast` / `beta_slow` for the ramp.
+    # Absent on non-yarn conversions.
     scaling_type = _read_string(meta, f"{arch}.rope.scaling.type")
     if scaling_type and scaling_type != "none":
         rp: dict[str, Any] = {"type": scaling_type, "rope_type": scaling_type}
@@ -2373,9 +2390,15 @@ def _synth_deepseek2(meta, shapes, config: dict) -> None:
         orig = _read_int(meta, f"{arch}.rope.scaling.original_context_length")
         if orig is not None:
             rp["original_max_position_embeddings"] = orig
-        ymul = _read_float(meta, f"{arch}.rope.scaling.yarn_log_multiplier")
-        if ymul is not None:
-            rp["mscale_all_dim"] = ymul
+        beta_fast = _read_float(meta, f"{arch}.rope.scaling.yarn_beta_fast")
+        if beta_fast is not None:
+            rp["beta_fast"] = beta_fast
+        beta_slow = _read_float(meta, f"{arch}.rope.scaling.yarn_beta_slow")
+        if beta_slow is not None:
+            rp["beta_slow"] = beta_slow
+        mscale_all_dim = _deepseek_mscale_all_dim(meta, arch)
+        if mscale_all_dim is not None:
+            rp["mscale_all_dim"] = mscale_all_dim
         config["rope_scaling"] = rp
 
 
@@ -2494,9 +2517,9 @@ def _synth_glm_moe_dsa(meta, shapes, config: dict) -> None:
         orig = _read_int(meta, f"{arch}.rope.scaling.original_context_length")
         if orig is not None:
             rope_params["original_max_position_embeddings"] = orig
-        ymul = _read_float(meta, f"{arch}.rope.scaling.yarn_log_multiplier")
-        if ymul is not None:
-            rope_params["mscale_all_dim"] = ymul
+        mscale_all_dim = _deepseek_mscale_all_dim(meta, arch)
+        if mscale_all_dim is not None:
+            rope_params["mscale_all_dim"] = mscale_all_dim
     config["rope_parameters"] = rope_params
 
 
