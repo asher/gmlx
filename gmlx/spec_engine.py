@@ -496,19 +496,69 @@ def _ckpt_turn_boundaries(batch, meta, restored: int,
     return out
 
 
-def _sched_insert(bounds: list, pos: int, kind: str) -> None:
+def _ckpt_sys_boundary(batch, meta, restored: int,
+                       block_size: int) -> int | None:
+    """Anchor stop at the end of the shared system prefix.
+
+    Sibling fan-out requests share the system prompt and tool schemas
+    and diverge at the first user message -- generally between grid
+    points, so the interval schedule alone wastes up to one interval of
+    sibling recompute, and strip-on-extend removes the early boundary
+    the siblings need as the chain deepens (the anchor exemption in
+    _record_insert keeps this one). arr layouts snap the stop down to
+    the chunk grid (off-grid chunking drifts GDN state) and keep the
+    replay byte floor (recurrent state is prompt-length-independent, so
+    a tiny anchor costs the same >100 MB clone as a deep one);
+    attention layouts snap to the block grid, which also satisfies the
+    rotating store's below-window grid gate. GMLX_APC_CKPT_SYS=0
+    disables; GMLX_APC_CKPT_SYS_MIN floors the position (a sub-floor
+    shared prefix re-prefills in milliseconds and is not worth a
+    record).
+    """
+    if env_int("GMLX_APC_CKPT_SYS", 1) == 0:
+        return None
+    ids = meta.get("full_input_ids") or ()
+    tags = _ckpt_layout_for(getattr(batch, "model", None), block_size) or ()
+    floor_min = max(block_size, env_int("GMLX_APC_CKPT_SYS_MIN", 256))
+    if "arr" in tags:
+        floor_min = max(floor_min,
+                        env_int("GMLX_APC_CKPT_REPLAY_MIN", 1024))
+    # Below the floor no anchor can land; skip the render+tokenize
+    # prediction entirely (same rule as the turn boundaries).
+    if len(ids) - 1 < floor_min:
+        return None
+    from .retire_key import lookup_render_ctx, system_prefix_lcp
+    ctx = lookup_render_ctx(ids)
+    lcp = system_prefix_lcp(ctx, ids) if ctx else None
+    if not lcp:
+        return None
+    unit = _ckpt_unit(batch, block_size) if "arr" in tags else block_size
+    pos = (min(int(lcp), len(ids) - 1) // unit) * unit
+    if pos < floor_min or pos <= max(0, restored):
+        return None
+    meta["ckpt_sys_bound"] = pos
+    return pos
+
+
+def _sched_insert(bounds: list, pos: int, kind: str, *,
+                  upgrade: bool = False) -> None:
     """Insert (pos, kind) keeping order. On collision the existing entry
     keeps its kind: a colliding position is always grid-aligned or an
     exact turn boundary, where a plain boundary record adopts freely --
     identical resend included -- while flipping it to replay would gate
     turn-2 and branch adoption out on recurrent layouts (and satisfy the
-    p=N drop with a record turn 2 cannot use)."""
+    p=N drop with a record turn 2 cannot use). ``upgrade`` lets an
+    anchor replace a plain boundary at the same position (strictly more
+    retention, same free adoption) -- never a replay."""
     import bisect
 
     pts = [b for b, _ in bounds]
     i = bisect.bisect_left(pts, pos)
-    if i >= len(pts) or pts[i] != pos:
-        bounds.insert(i, (pos, kind))
+    if i < len(pts) and pts[i] == pos:
+        if upgrade and bounds[i][1] == "boundary":
+            bounds[i] = (pos, kind)
+        return
+    bounds.insert(i, (pos, kind))
 
 
 def _ckpt_arm_schedule(batch, meta, guard: int, restored: int,
@@ -525,8 +575,13 @@ def _ckpt_arm_schedule(batch, meta, guard: int, restored: int,
     turn = _ckpt_turn_boundaries(batch, meta, restored, block_size)
     for pos in turn:
         _sched_insert(bounds, pos, "boundary")
+    sysb = _ckpt_sys_boundary(batch, meta, restored, block_size)
+    if sysb is not None:
+        _sched_insert(bounds, sysb, "anchor", upgrade=True)
     replay = _ckpt_replay_boundary(batch, meta, restored, block_size)
     if replay is not None:
+        # Colliding with the anchor keeps the anchor (default no-upgrade):
+        # it adopts identical resends freely, replay semantics add nothing.
         _sched_insert(bounds, replay, "replay")
     meta["ckpt_boundaries"] = bounds
     meta["checkpoint_len"] = int(bounds[0][0]) if bounds else 0

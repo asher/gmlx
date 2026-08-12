@@ -504,7 +504,8 @@ _CKPT_SALT = 0x7C_4B_D2_0A_86_E5_93
 _BOUNDED_SALT = 0x3A_91_C7_55_0E_D4_26
 
 _CKPT_RECORD_ENTRIES = max(2, env_int("GMLX_APC_CKPT_RECORDS", 32))
-# Strip-on-extend: newest N restorable checkpoints per chain.
+# Strip-on-extend: newest N restorable checkpoints per chain, plus the
+# chain's anchor (see _record_insert).
 _CKPT_HEAVY_PER_CHAIN = max(1, env_int("GMLX_APC_CKPT_HEAVY", 2))
 # Byte budget for record-owned payload (recurrent states + KV tails; chain
 # blocks are bounded by the manager pool). A GDN record can carry >100 MB
@@ -603,10 +604,12 @@ def _ckpt_block_prefix(p: int, block_size: int) -> int:
 
 
 class _CkptRecord:
-    # kind in {"boundary", "replay", "retire"}: prefill-cursor boundaries,
-    # the N-1 identical-replay record, and retirement stores. Retention
-    # differs only in the strip-on-extend exemption (see _record_insert);
-    # the entries cap and byte budget treat all kinds alike.
+    # kind in {"boundary", "anchor", "replay", "retire"}: prefill-cursor
+    # boundaries, the chain's pinned early boundary (sibling fan-out
+    # reuse), the N-1 identical-replay record, and retirement stores.
+    # Retention differs only in _record_insert's strip-on-extend
+    # exemptions and eviction order; adoption gates only ever test for
+    # "replay".
     __slots__ = ("ids", "extra_hash", "p", "b_full", "layout",
                  "main_blocks", "bounded_blocks", "rot_meta", "states",
                  "tails", "nbytes", "kind")
@@ -791,7 +794,10 @@ def _evict_for_pool(manager, deficit: int) -> int:
     in-flight lookup pin or another request's chain do not free on
     release, so an unreachable deficit is detected upfront and evicts
     nothing rather than draining the whole index for a store that still
-    declines. Returns the number of records released."""
+    declines. Plain LRU order on purpose: anchor records get no
+    protection here -- an anchor pinning window blocks on an exhausted
+    pool would starve every future store. Returns the number of records
+    released."""
     if not hasattr(manager, "_free_head"):
         return 0
     idx = _ckpt_records(manager)
@@ -821,6 +827,22 @@ def _evict_for_pool(manager, deficit: int) -> int:
     return evicted
 
 
+def _evict_lru_record(manager, idx, keep):
+    """Release and return the eviction victim: the least-recently-used
+    non-anchor record, else the least-recently-used anchor, never the
+    ``keep`` key (the record being inserted always survives). Lookup
+    hits move_to_end, so anchor order is LRU by last hit -- an anchor
+    that never serves a sibling ages out, one that does stays hot.
+    Caller holds the lock and guarantees a non-keep record exists."""
+    key = next((k for k, r in idx.items()
+                if r.kind != "anchor" and k != keep), None)
+    if key is None:
+        key = next(k for k in idx if k != keep)
+    victim = idx.pop(key)
+    _release_record(manager, victim)
+    return victim
+
+
 def _record_insert(manager, rec) -> None:
     """Insert a checkpoint record: strip-on-extend superseded records on the
     same chain immediately (LRU would keep exactly the wrong ones - the
@@ -828,18 +850,31 @@ def _record_insert(manager, rec) -> None:
     then bound the index by count and payload bytes, releasing refs on
     everything dropped. The newest record always survives.
 
-    Replay records are exempt from the strip only: growth (a longer
-    boundary or retirement insert) is exactly the moment an identical
-    resend still needs the N-1 record, so a longer non-replay insert
-    never releases one; a newer replay on the same chain supersedes it.
-    The count and byte bounds below evict replay records normally -- the
-    exemption pins nothing against real memory pressure."""
+    Two strip exemptions. Replay: growth (a longer boundary or
+    retirement insert) is exactly the moment an identical resend still
+    needs the N-1 record, so a longer non-replay insert never releases
+    one; a newer replay on the same chain supersedes it. Anchor: the
+    chain's early boundary is what sibling fan-out requests (shared
+    system prompt, disjoint user turns) can adopt, and it is exactly
+    the record strip-on-extend removes first as the chain deepens. The
+    schedule tags the system-prefix stop "anchor"; when no tagged stop
+    exists (no render ctx, completions API), the first restorable
+    boundary on a fresh chain is promoted instead. One anchor per
+    chain: an anchor insert supersedes tagged anchors below it.
+
+    Against real memory pressure the exemptions pin little: the count
+    and byte bounds evict anchors after non-anchors (LRU by last hit),
+    and pool-pressure eviction (_evict_for_pool) gives anchors no
+    protection at all -- position-salted window chains must never sit
+    pinned on an exhausted pool."""
     idx = _ckpt_records(manager)
     key = (rec.ids, rec.extra_hash)
     rec.nbytes = _rec_nbytes(rec)
     with manager.lock:
         old = idx.pop(key, None)
         if old is not None:
+            if old.kind == "anchor" and rec.kind == "boundary":
+                rec.kind = "anchor"     # a re-store keeps the anchor tag
             _release_record(manager, old)
         # chain = records whose ids are a strict prefix of this one
         chain = [k for k, r in idx.items()
@@ -849,20 +884,25 @@ def _record_insert(manager, rec) -> None:
             # One replay per chain: the newer one supersedes outright.
             for k in [k for k in chain if idx[k].kind == "replay"]:
                 _release_record(manager, idx.pop(k))
-        chain = [k for k in chain if k in idx and idx[k].kind != "replay"]
+        elif rec.kind == "anchor":
+            for k in [k for k in chain if idx[k].kind == "anchor"]:
+                _release_record(manager, idx.pop(k))
+        elif rec.kind == "boundary" and not any(
+                idx[k].kind != "replay" for k in chain if k in idx):
+            rec.kind = "anchor"         # first restorable boundary
+        chain = [k for k in chain
+                 if k in idx and idx[k].kind not in ("replay", "anchor")]
         chain.sort(key=lambda k: idx[k].p, reverse=True)
         for k in chain[_CKPT_HEAVY_PER_CHAIN - 1:]:
             _release_record(manager, idx.pop(k))
         idx[key] = rec
         idx.move_to_end(key)
         while len(idx) > _CKPT_RECORD_ENTRIES:
-            _, victim = idx.popitem(last=False)
-            _release_record(manager, victim)
+            _evict_lru_record(manager, idx, key)
         total = sum(int(getattr(r, "nbytes", 0) or 0) for r in idx.values())
         while total > _CKPT_BUDGET_BYTES and len(idx) > 1:
-            _, victim = idx.popitem(last=False)
+            victim = _evict_lru_record(manager, idx, key)
             total -= int(getattr(victim, "nbytes", 0) or 0)
-            _release_record(manager, victim)
 
 
 def ckpt_store(

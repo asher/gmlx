@@ -46,6 +46,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - serve: `--dtype` and `server.dtype` set the same knob for every model the
   server loads. An unrecognized value is a config error rather than a silent
   fall back to the default.
+- Prompt cache: hybrid-arch models keep an anchor checkpoint at the end
+  of the system prompt, so parallel requests sharing a system prompt and
+  tool schemas (subagent fan-out) start warm instead of re-prefilling
+  the shared prefix after the conversation deepens. GMLX_APC_CKPT_SYS=0
+  disables.
 
 ## [0.3.0] - 2026-08-09
 
