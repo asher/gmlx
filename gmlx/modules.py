@@ -40,6 +40,7 @@ from mlx_kquant.nn import (
 )
 
 from .native_fp import NATIVE_FP_CODECS, NATIVE_FP_GEOMETRY
+from .dtypes import activation_dtype
 from .envflags import env_int
 from .transforms import qk_permute_wire
 
@@ -1539,7 +1540,11 @@ def install_kquant_modules(model: nn.Module,
         if isinstance(module, nn.Embedding):
             num_emb, dims = module.weight.shape
             n_replaced += 1
-            return KQuantEmbedding(num_emb, dims, codec)
+            # The embedding's output dtype seeds the whole graph: every
+            # downstream kquant matmul returns its activation dtype.
+            return KQuantEmbedding(
+                num_emb, dims, codec, out_dtype=activation_dtype()
+            )
         if isinstance(module, _switch_linear_types):
             n_experts, out_dims, in_dims = module.weight.shape
             bias = "bias" in module

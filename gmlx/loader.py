@@ -27,6 +27,7 @@ from mlx.utils import tree_flatten
 import mlx_kquant as kq
 
 from . import loadlog
+from .dtypes import activation_dtype, activation_dtype_name
 from .envflags import env_bool, env_choice, env_float, env_int
 from .attn_hd512 import install_hd512_sdpa
 from .prefill_decay import install_prefill_decay, note_untracked_weights
@@ -2950,6 +2951,8 @@ def _install_and_load(
             f"(no model slot): {redundant[:3]}..."
         )
 
+    act_dtype = activation_dtype()
+    act_name = activation_dtype_name()
     n_cast = 0
     for k in list(loadable):
         v = loadable[k]
@@ -2960,16 +2963,18 @@ def _install_and_load(
                 continue
             if f16_keep and any(s in k for s in f16_keep):
                 continue
+            if v.dtype == act_dtype:
+                continue                       # already the activation dtype
             if v.dtype == mx.float16:
                 # Same-itemsize f16->bf16 gets buffer-donated into the source
                 # view -- a write through the zero-copy file mapping (dropped
                 # on read-only maps, leaving f16 bits typed as bf16). The f32
                 # hop makes both steps size-changing, so neither can donate.
                 v = v.astype(mx.float32)
-            loadable[k] = v.astype(mx.bfloat16)
+            loadable[k] = v.astype(act_dtype)
             n_cast += 1
     if n_cast:
-        log(f"[dtype] cast {n_cast} float params (norms etc.) to bf16")
+        log(f"[dtype] cast {n_cast} float params (norms etc.) to {act_name}")
 
     model.load_weights(list(loadable.items()), strict=False)
     log(f"[load_weights] loaded {len(loadable)} / {len(model_params)} model parameters")
@@ -2992,10 +2997,11 @@ def _dequantize_diffusion_embedding(model, log) -> None:
     (``probs @ embed_tokens.weight``) - in both the model's self-conditioning
     path and the engine's soft-embedding step. That needs a dense float table;
     kquant wire bytes feed neither, and the stock fast path only special-cases
-    ``nn.QuantizedEmbedding``. So dequantize the table to a plain bf16
-    ``nn.Embedding`` (a layout the model handles natively), in row chunks to stay
-    under the single-dispatch grid limit. The tied ``as_linear`` logits then run
-    in bf16. Other quantized leaves are untouched.
+    ``nn.QuantizedEmbedding``. So dequantize the table to a plain
+    ``nn.Embedding`` at the activation dtype (a layout the model handles
+    natively), in row chunks to stay under the single-dispatch grid limit. The
+    tied ``as_linear`` logits then run at that dtype too. Other quantized
+    leaves are untouched.
     """
     emb = model.model.decoder.embed_tokens
     if not isinstance(emb, KQuantEmbedding):
@@ -3003,12 +3009,13 @@ def _dequantize_diffusion_embedding(model, log) -> None:
     n, dims, codec = emb.num_embeddings, emb.dims, emb.kquant_type
     packed, scales = emb["weight"], emb["scales"]
     chunk = 16384
+    act_dtype = activation_dtype()
     rows = [
         kq.dequantize(
             packed[i : i + chunk].reshape(-1, packed.shape[-1]), scales, codec
         )
         .reshape(min(chunk, n - i), dims)
-        .astype(mx.bfloat16)
+        .astype(act_dtype)
         for i in range(0, n, chunk)
     ]
     table = mx.concatenate(rows, axis=0) if len(rows) > 1 else rows[0]
@@ -3017,7 +3024,10 @@ def _dequantize_diffusion_embedding(model, log) -> None:
     new_emb.weight = table
     new_emb.freeze()
     model.model.decoder.embed_tokens = new_emb
-    log(f"[diffusion] dequantized embed_tokens {codec}->bf16 ({n}x{dims})")
+    log(
+        f"[diffusion] dequantized embed_tokens {codec}->"
+        f"{activation_dtype_name()} ({n}x{dims})"
+    )
 
 
 # Archs whose sparse-attention indexer tensors may arrive via a companion
@@ -3405,10 +3415,13 @@ def load_model(
 
     # Cast non-quantized float params (norms, SSM weights, and the F16 matrix
     # weights some conversions ship - e.g. gemma-3n's AltUp/LAuReL/per-layer
-    # projections) to bf16 so activations flow bf16, avoiding float32 kernel
-    # promotion (and bf16xf16 dtype mismatches) in quantized/regular matmul.
+    # projections) to the activation dtype so activations flow at one width,
+    # avoiding float32 kernel promotion (and mixed-width dtype mismatches) in
+    # quantized/regular matmul.
     # Model-types in _FP32_KEEP_BY_MODEL_TYPE pin listed params to float32.
     fp32_keep = _FP32_KEEP_BY_MODEL_TYPE.get(config.get("model_type"), ())
+    act_dtype = activation_dtype()
+    act_name = activation_dtype_name()
     n_cast = 0
     for k in list(loadable):
         v = loadable[k]
@@ -3417,16 +3430,18 @@ def load_model(
                 if v.dtype != mx.float32:      # e.g. F16 ape tables
                     loadable[k] = v.astype(mx.float32)
                 continue
+            if v.dtype == act_dtype:
+                continue                       # already the activation dtype
             if v.dtype == mx.float16:
                 # Same-itemsize f16->bf16 gets buffer-donated into the source
                 # view -- a write through the zero-copy file mapping (dropped
                 # on read-only maps, leaving f16 bits typed as bf16). The f32
                 # hop makes both steps size-changing, so neither can donate.
                 v = v.astype(mx.float32)
-            loadable[k] = v.astype(mx.bfloat16)
+            loadable[k] = v.astype(act_dtype)
             n_cast += 1
     if n_cast:
-        _log(f"[dtype] cast {n_cast} float params (norms etc.) to bf16")
+        _log(f"[dtype] cast {n_cast} float params (norms etc.) to {act_name}")
 
     model.load_weights(list(loadable.items()), strict=False)
     _log(
