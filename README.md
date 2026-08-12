@@ -182,6 +182,14 @@ Beyond plain chat completions:
   so a thin client gets tools (and optionally memory) with no loop of its
   own.
 
+<!-- Concurrency demo video (lab: demo/takes/take3-code-t1-mtp-nocap3.mp4):
+     upload the mp4 by dragging it into the README web editor on github.com,
+     then replace this comment with the minted assets URL on its own line,
+     preceded by the caption:
+     One server, watched live: a single stream decoding with MTP, four
+     concurrent streams joining one batch, and MTP resuming as the batch
+     drains. -->
+
 Details: the [server config reference](https://github.com/asher/gmlx/blob/main/docs/server-config.md) and the
 [assistant guide](https://github.com/asher/gmlx/blob/main/docs/assistant.md).
 
