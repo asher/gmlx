@@ -91,16 +91,15 @@ _MTP_WIDTH_CAP_FALLBACK = 2
 _MUSE_GLIMMER_DFLASH_BLOCK_DEFAULT = 16
 
 
-def _drafter_block_depths(native_total, env_name: str,
-                          preferred_total=None) -> tuple[int, int]:
+def _drafter_block_depths(native_total, preferred_total=None) -> tuple[int, int]:
     """Return (deepest block the drafter can produce, depth drafted per round).
 
-    The runtime depth is the family's preferred depth, which the environment
-    overrides, and neither can pass the drafter's own ceiling.
+    The runtime depth is the family's preferred depth, bounded by the ceiling.
+    --draft-block-size moves it at run time.
     """
     native_total = int(native_total)
     preferred = min(int(preferred_total or native_total), native_total)
-    return native_total, max(2, min(env_int(env_name, preferred), native_total))
+    return native_total, max(2, min(preferred, native_total))
 
 
 def _stamp_mtp_width_cap(drafter, model_type: str, *, target=None,
@@ -794,7 +793,7 @@ def _load_muse_glimmer_dflash_drafter(
     ] or ["full_attention"] * n_layers
     window = int(meta.get("dflash.attention.sliding_window") or 0) or None
     native_total, block_total = _drafter_block_depths(
-        block_size, "GMLX_MUSE_DFLASH_BLOCK", _MUSE_GLIMMER_DFLASH_BLOCK_DEFAULT)
+        block_size, _MUSE_GLIMMER_DFLASH_BLOCK_DEFAULT)
 
     config = MuseGlimmerDFlashConfig(
         hidden_size=int(target_config_dict["hidden_size"]),
@@ -1060,8 +1059,7 @@ def _load_deepseek4_dspark_drafter(
             f"strictly increasing and < {n}"
         )
     args.compress_ratios = list(args.compress_ratios) + [0] * n_stages
-    native_total, block_total = _drafter_block_depths(
-        draft_len + 1, "GMLX_DSPARK_BLOCK")
+    native_total, block_total = _drafter_block_depths(draft_len + 1)
     drafter = DeepseekV4DSparkDrafter(
         DeepseekV4DSparkConfig(
             text=args,

@@ -336,8 +336,6 @@ def test_the_loader_stamps_the_gguf_block_as_the_drafter_ceiling(monkeypatch):
     from gmlx.mtp_load import _MUSE_GLIMMER_DFLASH_BLOCK_DEFAULT as TUNED
 
     _, cfg = _build()
-    monkeypatch.delenv("GMLX_MUSE_DFLASH_BLOCK", raising=False)
-
     deep = _load_drafter_config(cfg, monkeypatch, TUNED + 16)
     assert deep.native_block_size == TUNED + 16
     assert deep.block_size == TUNED

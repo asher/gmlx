@@ -15,8 +15,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Muse-Glimmer DFlash drafts the block its checkpoint was trained for, which
   is 16 tokens per round on the current one, instead of 2. On a machine with
   no NAX tile a verify step costs about the same for 16 rows as for 8, so a
-  full block accepts more tokens for the same forward. `GMLX_MUSE_DFLASH_BLOCK`
-  sets a different depth at load.
+  full block accepts more tokens for the same forward.
 
 ### Fixed
 

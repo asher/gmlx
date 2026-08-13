@@ -155,30 +155,14 @@ class TestDepthWarning:
 
 class TestLoaderDepths:
 
-    def test_the_family_default_bounds_the_runtime_depth(self, monkeypatch):
-        monkeypatch.delenv("GMLX_TEST_BLOCK", raising=False)
-        assert _drafter_block_depths(32, "GMLX_TEST_BLOCK", 16) == (32, 16)
+    def test_the_family_default_bounds_the_runtime_depth(self):
+        assert _drafter_block_depths(32, 16) == (32, 16)
 
-    def test_the_ceiling_bounds_the_family_default(self, monkeypatch):
-        monkeypatch.delenv("GMLX_TEST_BLOCK", raising=False)
-        assert _drafter_block_depths(8, "GMLX_TEST_BLOCK", 16) == (8, 8)
+    def test_the_ceiling_bounds_the_family_default(self):
+        assert _drafter_block_depths(8, 16) == (8, 8)
 
-    def test_no_family_default_drafts_the_full_block(self, monkeypatch):
-        monkeypatch.delenv("GMLX_TEST_BLOCK", raising=False)
-        assert _drafter_block_depths(6, "GMLX_TEST_BLOCK") == (6, 6)
+    def test_no_family_default_drafts_the_full_block(self):
+        assert _drafter_block_depths(6) == (6, 6)
 
-    def test_the_environment_lowers_the_runtime_depth(self, monkeypatch):
-        monkeypatch.setenv("GMLX_TEST_BLOCK", "4")
-        assert _drafter_block_depths(32, "GMLX_TEST_BLOCK", 16) == (32, 4)
-
-    def test_the_environment_raises_the_runtime_depth(self, monkeypatch):
-        monkeypatch.setenv("GMLX_TEST_BLOCK", "24")
-        assert _drafter_block_depths(32, "GMLX_TEST_BLOCK", 16) == (32, 24)
-
-    def test_the_environment_cannot_pass_the_ceiling(self, monkeypatch):
-        monkeypatch.setenv("GMLX_TEST_BLOCK", "64")
-        assert _drafter_block_depths(32, "GMLX_TEST_BLOCK", 16) == (32, 32)
-
-    def test_the_runtime_depth_keeps_one_draft(self, monkeypatch):
-        monkeypatch.setenv("GMLX_TEST_BLOCK", "1")
-        assert _drafter_block_depths(32, "GMLX_TEST_BLOCK", 16) == (32, 2)
+    def test_the_runtime_depth_keeps_one_draft(self):
+        assert _drafter_block_depths(32, 1) == (32, 2)
