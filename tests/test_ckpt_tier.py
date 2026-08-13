@@ -1230,6 +1230,9 @@ def test_anchor_never_shadows_a_deeper_disk_skeleton(tmp_path):
         assert ckpt_store(man, ids[:32], shallow,
                           extra_hash=4, kind="anchor")
         assert ckpt_store(man, ids[:64], deep, extra_hash=4)
+        # The lookup below reads the deep skeleton off disk, so the async
+        # writer has to have published it first.
+        drain_disk(disk)
         # Drop the deep record from memory, keeping its disk skeleton:
         # exactly what strip-on-extend leaves behind as a chain deepens.
         idx = _ckpt_records(man)
