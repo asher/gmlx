@@ -12,14 +12,18 @@ the runtime and server.
 ## The install fails compiling the Metal kernels
 
 Symptom: on macOS versions before 26, `pip install` fails partway through
-building `mlx-kquant`, usually with a compiler or SDK error.
+building `mlx-kquant`. Typical messages are a compiler or SDK error, or
+`cannot execute tool 'metal'`.
 
-On older macOS the kernels build from source, which needs Apple's Xcode
-Command Line Tools. If the build cannot find a compiler, install them
-(`xcode-select --install`) and re-run the pip install. If you upgraded macOS
-recently, the tools may be stale for the new SDK: reinstall them
-(`sudo rm -rf /Library/Developer/CommandLineTools && xcode-select --install`)
-and try again. On macOS 26 and newer none of this applies - the kernels
+On older macOS the kernels build from source, and the build needs full
+Xcode. The C++ parts compile with the Command Line Tools, but the Metal
+shaders compile with `xcrun metal`, which the Command Line Tools do not
+include. Install Xcode, select it
+(`sudo xcode-select -s /Applications/Xcode.app`), and re-run the pip
+install. Recent Xcode versions fetch the Metal toolchain as a separate
+download: run `xcodebuild -downloadComponent MetalToolchain` once. If the
+build still fails after a macOS upgrade, update Xcode so its SDK matches,
+and try again. On macOS 26 and newer none of this applies: the kernels
 arrive as a prebuilt wheel.
 
 ## `gmlx: command not found` in a new terminal

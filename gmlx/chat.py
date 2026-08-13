@@ -1599,11 +1599,14 @@ def _wire_ptk(state: ChatState) -> bool:
         parts = []
         if state.model_name:
             parts.append((state.model_name, False))
-        parts += [
-            (f"temp={s['temp']:g}", True),
-            (f"top-p={s['top_p']:g}", True),
-            (f"max-tok={s['max_tokens'] or 'off'}", True),
-        ]
+        # In server mode the served profile decides sampling, and this client
+        # forwards only the knobs it actually set (see _sync_assistant_extra).
+        # Showing an unforwarded knob would report a value the reply never
+        # used, so those stay off the toolbar until something moves them.
+        for key, label in (("temp", "temp"), ("top_p", "top-p")):
+            if _knob_shown(state, key):
+                parts.append((f"{label}={s[key]:g}", True))
+        parts.append((f"max-tok={s['max_tokens'] or 'off'}", True))
         if state.ctx_used and state.ctx_max:
             parts.append(
                 (f"ctx {_fmt_k(state.ctx_used)}/{_fmt_k(state.ctx_max)}",
@@ -2269,17 +2272,33 @@ def _setup_assistant(args):
     return brain, model_request, base_url, extra
 
 
+def _knob_forwarded(state, key: str) -> bool:
+    """Whether a sampling knob rides along to the server: the CLI set it, or
+    a /command moved it off the session baseline. Everything else is left for
+    the served profile to resolve."""
+    baseline = state.assistant_baseline
+    touched = state.assistant_touched
+    if baseline is None or touched is None:
+        return False
+    return key in touched or state.sampling[key] != baseline[key]
+
+
+def _knob_shown(state, key: str) -> bool:
+    """Whether the toolbar can name a sampling value. A local session owns
+    every knob; a server-mode session owns only the forwarded ones."""
+    if state.assistant_brain is None:
+        return True
+    return _knob_forwarded(state, key)
+
+
 def _sync_assistant_extra(state) -> None:
     """Refresh the forwarded sampling knobs from the live /command values:
     a knob rides along once the CLI set it or a /command moved it off the
     session baseline; everything else stays server-side."""
     extra = state.assistant_extra
-    s = state.sampling
-    baseline = state.assistant_baseline
-    touched = state.assistant_touched
     for key, payload in _ASSISTANT_SAMPLING.items():
-        if key in touched or s[key] != baseline[key]:
-            extra[payload] = s[key]
+        if _knob_forwarded(state, key):
+            extra[payload] = state.sampling[key]
         else:
             extra.pop(payload, None)
 
@@ -2863,8 +2882,9 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
     if _auto_server(args, parser):
         args.server = True
         args.no_start = True      # the probe saw it up; never start one
-        print("[chat] config server is up - chatting through it "
-              "(--local loads in-process instead)")
+        # The server-mode banner below names the id and url; it carries the
+        # --local hint too when the server was picked up automatically.
+        args.auto_server = True
     if args.server:
         args.assistant = True     # same server path; extras off in setup
     if args.assistant:
@@ -3235,7 +3255,9 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             print(f"[chat] MTP speculative decoding on ({kind} drafter)")
     if brain is not None:
         if args.server:
-            print(f"[chat] server mode: {model_request} via {base_url}")
+            hint = (" (--local loads in-process)"
+                    if getattr(args, "auto_server", False) else "")
+            print(f"[chat] server mode: {model_request} via {base_url}{hint}")
         else:
             tools = ", ".join(brain.tools.names()) or "(none)"
             mem = (f" - memory: {brain.memory.count()} items"

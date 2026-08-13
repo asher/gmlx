@@ -10,9 +10,12 @@ can use, so stop wherever your needs are met.
 - An Apple Silicon Mac (any M-series chip).
 - Python 3.11 or newer. Installing with `uv` or `pipx` fetches one for you.
 - Disk space for models.
-- On macOS versions before 26: the Xcode Command Line Tools
-  (`xcode-select --install`), because the install compiles the Metal kernels
-  from source there.
+- macOS 26 or newer, recommended: the Metal kernels then install as a
+  prebuilt wheel. On older macOS versions the install compiles them from
+  source, which needs full Xcode with its Metal toolchain; the Command Line
+  Tools alone do not include the `metal` compiler. Recent Xcode versions
+  fetch that toolchain as a separate download
+  (`xcodebuild -downloadComponent MetalToolchain`).
 - For voice and the browser chat app: [Homebrew](https://brew.sh), used below
   to install `ffmpeg`.
 
@@ -62,7 +65,7 @@ no such step.
 
 The `mlx-kquant` dependency (the Metal kernels) arrives
 as a prebuilt wheel from PyPI on macOS 26 and newer. On older macOS versions
-the install builds it from source: the Command Line Tools requirement from
+the install builds it from source: the full-Xcode requirement from
 [What you need](#what-you-need), and a few minutes of compile time.
 
 Tab completion is worth the one line: add `eval "$(gmlx completion zsh)"` to

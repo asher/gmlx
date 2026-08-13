@@ -11,16 +11,17 @@ connect your coding agent to it, talk to it by voice, build a local RAG
 stack on it, and fine-tune it with LoRA. One command, entirely on your Mac.
 
 It runs the community's K-quant and IQ-quant GGUF builds exactly as
-published. Size for size, these are the most accurate open quant formats
-available ([accuracy per byte](#accuracy-per-byte)). The companion project
-[mlx-kquant](https://github.com/asher/mlx-kquant) supplies the Metal kernels
-that run these formats natively on Apple's
+published. Size for size, these two quant formats are the most accurate
+open formats available ([accuracy per byte](#accuracy-per-byte)). The
+companion project [mlx-kquant](https://github.com/asher/mlx-kquant)
+supplies the Metal kernels that run them natively on Apple's
 [MLX](https://github.com/ml-explore/mlx) framework. On the same file, gmlx
-benchmarks faster than llama.cpp, with the gap widest at the 50-200k-token
+benchmarks faster than llama.cpp. The gap is widest at the 50-200k-token
 contexts where coding agents and long sessions live
 ([performance](#performance)). A 100B+ model starts generating within
-seconds of launch, and a MoE bigger than RAM still runs, streaming its
-experts from disk ([bigger than memory](#bigger-than-memory)).
+seconds of launch. A mixture-of-experts (MoE) model bigger than RAM still
+runs, streaming its experts from disk
+([bigger than memory](#bigger-than-memory)).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/perf/fleet-ratio-dark.svg">
@@ -32,19 +33,25 @@ experts from disk ([bigger than memory](#bigger-than-memory)).
   <img src="https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/perf/per-model/deepseek-v4-flash-antirez-iq2xxs-panels.svg" alt="DeepSeek-V4-Flash IQ2_XXS: gmlx vs ds4-server prefill and decode vs KV depth">
 </picture>
 
-DeepSeek-V4-Flash is measured against antirez's ds4 (dwarfstar)
+In both charts, higher is faster, and depth is the number of tokens already
+in the context. DeepSeek-V4-Flash is measured against antirez's ds4
+(dwarfstar)
 ([benchmarks](https://github.com/asher/gmlx/blob/main/docs/benchmarks.md#deepseek-v4-flash-reference-engine-ds4-server)).
 
-<!-- Demo GIF: record with `vhs docs/assets/demo.tape` (see the tape's header),
-     then replace this comment with:
-     ![gmlx pulling and running a GGUF](https://github.com/asher/gmlx/blob/main/docs/assets/demo.gif) -->
+![gmlx chat: a 27B model answering through a running server, with live tokens per second](https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/demo.gif)
+
+A 27B model, already resident in a local server, answering at 46 tokens per
+second. Recorded with `docs/assets/record-demo.sh` at true speed.
 
 ## Quickstart
 
-Requires an Apple Silicon Mac. [uv](https://docs.astral.sh/uv/) and pipx
-install a suitable Python themselves; a manual install needs Python 3.11+. On
-macOS 26 and newer the Metal kernels install as a prebuilt wheel; older macOS
-builds them from source (Xcode Command Line Tools, a few minutes).
+Requires an Apple Silicon Mac, and macOS 26 or newer is recommended: there
+the Metal kernels install as a prebuilt wheel. On older macOS versions the
+install builds them from source, which needs full Xcode with its Metal
+toolchain and a few minutes; the Command Line Tools alone are not enough
+([troubleshooting](https://github.com/asher/gmlx/blob/main/docs/troubleshooting.md#the-install-fails-compiling-the-metal-kernels)).
+[uv](https://docs.astral.sh/uv/) and pipx install a suitable Python
+themselves; a manual install needs Python 3.11 or newer.
 
 ```sh
 uv tool install "gmlx[all]"     # or: pipx install "gmlx[all]"
@@ -62,19 +69,50 @@ curl localhost:8080/v1/chat/completions -d \
 gmlx stop                                       # the server ran detached
 ```
 
-`gmlx[all]` adds every optional feature to the core platform: the upgraded
-chat TUI, voice chat, and the MCP assistant. The core alone already carries
-serving, vision, embeddings, and the menu bar, so `gmlx[chat]` is a smaller
-install that gives up only voice and the assistant. `gmlx init` adds either
-one later. `uv tool` and pipx put `gmlx` on your PATH in every terminal.
-`pip install "gmlx[all]"` into a venv you manage works too, with the command
-available only while that venv is active.
+This is the one-file form: any local `.gguf` runs, chats, or serves with no
+other setup. The served model id comes from the file name (`qwen3-0.6b`
+here). The intended setup for everything else is `gmlx init`
+([next section](#set-up-with-gmlx-init)).
 
-A model typically needs roughly its file size in memory, plus the KV cache.
-The exception is MoE models, which can run
-[bigger than memory](#bigger-than-memory). If anything misbehaves,
-`gmlx doctor` checks the runtime, config, model paths, and services in one
-pass.
+`gmlx[all]` turns on every optional feature: the upgraded chat TUI, voice
+chat, and the MCP assistant. The core install already carries serving,
+vision, embeddings, and the menu bar, so `gmlx[chat]` is a smaller install
+that gives up only voice and the assistant. `gmlx init` offers to add a
+missing extra later. `uv tool` and pipx put `gmlx` on your PATH in every
+terminal. `pip install "gmlx[all]"` into a venv you manage works too; the
+command then exists only while that venv is active.
+
+A model typically needs roughly its file size in memory, plus the KV cache
+(the per-conversation state, which grows with context length). The exception
+is MoE models, which can run [bigger than memory](#bigger-than-memory). If
+anything misbehaves, `gmlx doctor` checks the runtime, config, model paths,
+and services in one pass.
+
+## Set up with gmlx init
+
+`gmlx init` is the setup path for the rest of the platform. It finds your
+GGUF files, names them, and writes the one config that every other command
+reads. Run bare, it opens a guided wizard:
+
+1. It scans the model folders you name. An existing LM Studio library or
+   Hugging Face cache works as-is.
+2. It shows the models it found. You can rename ids, drop entries, set a
+   default, and add aliases.
+3. It offers the on-disk prompt cache (recommended for coding agents) and
+   the optional speech, embedding, and reranking services.
+4. It previews the config, then writes it to `~/.config/gmlx/gmlx.yaml`.
+
+```sh
+gmlx init       # the guided wizard
+gmlx serve      # start the server: finds the config, detaches, returns
+gmlx list       # the model ids the config defines
+gmlx launch pi  # point a coding agent at the server (auto-starts it)
+```
+
+Every command now takes a model id in place of a path: `gmlx chat
+qwen3-0.6b-q4`, or the quickstart curl with the configured id. Every wizard
+choice also has a flag, so `gmlx init --models-dir ~/models` scaffolds with
+no questions. `gmlx service install` keeps the server running from login.
 
 The [getting-started guide](https://github.com/asher/gmlx/blob/main/docs/getting-started.md)
 is the full walkthrough, from install to a configured server with a
@@ -93,7 +131,8 @@ the model (`--report-only`). `chat` is a multi-turn terminal REPL over a persist
 KV cache: streaming markdown rendering, sessions with `--resume`, `/commands` for
 live sampling changes, `/!` to stage shell output into a message, and image or audio
 input with a vision-language model (drag a file in). Sampling defaults come from each
-model family's model card, and `@intents` switch the operating point per call:
+model family's model card. `@intents` are named presets that switch those
+settings per call:
 
 ```sh
 gmlx run model.gguf@creative --prompt "Write a haiku about entropy."
@@ -101,8 +140,8 @@ gmlx chat qwen3.6-27b-q6 --profile instruct   # --profile NAME = the flag form o
 ```
 
 A `.gguf` path works with no setup. A bare id like `qwen3.6-27b-q6` names a
-model from your server config - `gmlx list` shows yours, and the
-[getting-started guide](https://github.com/asher/gmlx/blob/main/docs/getting-started.md) sets one up.
+model from your server config: `gmlx list` shows yours, and
+[`gmlx init`](#set-up-with-gmlx-init) sets one up.
 
 Details: the [CLI reference](https://github.com/asher/gmlx/blob/main/docs/cli.md).
 
@@ -122,21 +161,33 @@ Details: [picking a model for your Mac](https://github.com/asher/gmlx/blob/main/
 
 ### Serve an API
 
-`serve` runs a continuously batched, multi-model server speaking three dialects on
-one port: OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages, all
-streaming. Concurrent requests decode together in one batch, a new prompt's
-prefill is paced so in-flight replies keep streaming, and a memory-headroom
-gate admits new work only when it fits
+`serve` runs a continuously batched, multi-model server. It speaks three
+API dialects on one port, all streaming: OpenAI Chat Completions, OpenAI
+Responses, and Anthropic Messages. Concurrent requests decode together in
+one batch, a new prompt's prefill is paced so in-flight replies keep
+streaming, and a memory-headroom gate admits new work only when it fits
 ([serving concurrent requests](https://github.com/asher/gmlx/blob/main/docs/performance.md#serving-concurrent-requests)).
-It handles tool calling, structured output (`response_format:
-json_schema`, grammar-constrained), logprobs, and vision messages. A YAML config
-gives named models, reusable sampling profiles, aliases, and directory discovery.
-Residency is managed (LRU with pinning and idle unload), and repeated prefixes are
-served from a cross-request prompt cache with an optional SSD tier. The server
-never contacts Hugging Face to satisfy a request. It binds loopback by default,
-hardened against browser-borne attacks, with static-key auth for anything wider.
-Config-defined assistant ids run the built-in MCP tool loop server-side, so a thin
-client gets tools (and optionally memory) with no loop of its own.
+
+Beyond plain chat completions:
+
+- Tool calling, structured output (`response_format: json_schema`,
+  grammar-constrained), logprobs, and vision messages.
+- A YAML config, written by [`gmlx init`](#set-up-with-gmlx-init): named
+  models, reusable sampling profiles, aliases, and directory discovery.
+- Managed residency (LRU with pinning and idle unload) and a cross-request
+  prompt cache for repeated prefixes, with an optional SSD tier.
+- Loopback by default and hardened against browser-borne attacks, with
+  static-key auth for anything wider. The server never contacts Hugging
+  Face to satisfy a request.
+- Config-defined assistant ids run the built-in MCP tool loop server-side,
+  so a thin client gets tools (and optionally memory) with no loop of its
+  own.
+
+<!-- Concurrency demo video: a GitHub-minted video URL on its own line,
+     preceded by the caption:
+     One server, watched live: a single stream decoding with MTP, four
+     concurrent streams joining one batch, and MTP resuming as the batch
+     drains. -->
 
 Details: the [server config reference](https://github.com/asher/gmlx/blob/main/docs/server-config.md) and the
 [assistant guide](https://github.com/asher/gmlx/blob/main/docs/assistant.md).
@@ -150,6 +201,7 @@ config without touching your dotfiles and auto-starting the server if it is down
 gmlx launch pi --model qwen3.6-27b-q6@coding
 ```
 
+`--model` takes any id from `gmlx list`, with an optional `@intent`.
 Supported: pi, opencode, omp, claude-code, hermes, goose, the aichat and elia
 chat clients, and the Open WebUI browser app. A macOS menu-bar app shows what
 is resident and offers unload, restart, and logs, and `gmlx service install`
@@ -279,11 +331,11 @@ recognizes and can synthesize a config for, or you supply `hf_source`.
 Preflight runs the architecture gate and checks each tensor's codec (its
 GGUF quantization type, like `Q4_K_M`) before any tensor bytes are read.
 Codec coverage spans all 19 K-quant, legacy, and IQ codecs plus the
-native-fp pair mxfp4/nvfp4 (run directly from the file when the model is
-bigger than RAM, repacked for speed when it fits - `GMLX_NATIVE_FP`
-overrides the choice); in the rare case a file uses a type with no kernel
-(ternary TQ, for example), preflight names it and lists what is supported so
-you can pick another variant.
+native-fp pair mxfp4/nvfp4 (layout choice covered in the
+[streaming guide](https://github.com/asher/gmlx/blob/main/docs/streaming.md)).
+In the rare case a file uses a type with no kernel (ternary TQ, for
+example), preflight names it and lists what is supported so you can pick
+another variant.
 
 Vision-language models load as a K-quant LLM GGUF paired with its float `mmproj`
 GGUF: supported families and caveats in the [VLM guide](https://github.com/asher/gmlx/blob/main/docs/vlm.md). Want a family
@@ -323,7 +375,7 @@ flowchart TB
   serve --> aux["embeddings + rerank<br/>STT + TTS"]
 ```
 
-Serving-side mechanics - engine, batching, and the HTTP layers:
+Serving-side mechanics (engine, batching, and the HTTP layers):
 [docs/serving-architecture.md](https://github.com/asher/gmlx/blob/main/docs/serving-architecture.md).
 
 ## Python API
@@ -372,7 +424,7 @@ Guides:
 - [docs/troubleshooting.md](https://github.com/asher/gmlx/blob/main/docs/troubleshooting.md): the common failures and their
   fixes.
 - [docs/migrating.md](https://github.com/asher/gmlx/blob/main/docs/migrating.md): coming from llama.cpp, Ollama, or
-  LM Studio - what carries over and what maps to what.
+  LM Studio: what carries over and what maps to what.
 
 Reference:
 
