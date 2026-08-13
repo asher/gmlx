@@ -183,11 +183,16 @@ Beyond plain chat completions:
   so a thin client gets tools (and optionally memory) with no loop of its
   own.
 
-<!-- Concurrency demo video: a GitHub-minted video URL on its own line,
-     preceded by the caption:
-     One server, watched live: a single stream decoding with MTP, four
-     concurrent streams joining one batch, and MTP resuming as the batch
-     drains. -->
+One chat decodes solo at ~150 tok/s with MTP. Three more prompts then
+arrive. Speculation pauses. The server paces their prefill, so the live
+stream keeps its speed. The four streams then run at 50-57 tok/s each. As
+the sessions finish, speculation re-arms mid-stream. The remaining chat
+returns to about 150 tok/s, through to the end of a 5200-token response.
+
+The video is real time with no edits. The tok/s counters come from the
+server, reflecting the Qwen tokenizer.
+
+https://github.com/user-attachments/assets/de5dab84-3155-4cee-aa57-7d0b9c726ec5
 
 Details: the [server config reference](https://github.com/asher/gmlx/blob/main/docs/server-config.md) and the
 [assistant guide](https://github.com/asher/gmlx/blob/main/docs/assistant.md).
