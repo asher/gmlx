@@ -45,6 +45,7 @@ sequential one.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 from contextvars import ContextVar
@@ -53,7 +54,10 @@ from mlx_vlm import tokenizer_utils as _mlxvlm_tok
 from mlx_vlm.models.text_only import Model as TextOnlyModel
 from mlx_vlm.utils import StoppingCriteria
 
+from .drafter_protocol import native_block_size
 from .loader import load_model
+
+_log = logging.getLogger(__name__)
 
 
 def _is_gguf(path) -> bool:
@@ -729,10 +733,10 @@ def _install_drafter_injection() -> None:
 
 def _apply_draft_block_size_override(result) -> None:
     """Honor GMLX_DRAFT_BLOCK_SIZE (serve --draft-block-size): set the loaded
-    drafter's config block size so the engine drafts N tokens/round. _dflash_block_total
-    reads config.block_size when no explicit override is passed, so this covers both
-    native-head (nextn) and two-GGUF assistant drafters. Best-effort; a frozen config
-    or unset env is a no-op."""
+    drafter's runtime block size so the engine drafts N tokens/round, clamped to
+    the deepest block the drafter can produce. This covers both native-head
+    (nextn) and two-GGUF assistant drafters. Best-effort; a frozen config or an
+    unset env is a no-op."""
     raw = os.environ.get("GMLX_DRAFT_BLOCK_SIZE", "").strip()
     if not raw:
         return
@@ -746,10 +750,17 @@ def _apply_draft_block_size_override(result) -> None:
     cfg = getattr(drafter, "config", None)
     if cfg is None:
         return
+    ceiling = native_block_size(cfg)
+    if ceiling is not None and n > ceiling:
+        _log.warning(
+            "--draft-block-size %d is deeper than this drafter can produce "
+            "(%d); drafting %d token(s)/round", n, ceiling, ceiling - 1)
+        n = ceiling
     try:
-        cfg.block_size = n
         if hasattr(cfg, "runtime_block_size"):
             cfg.runtime_block_size = n
+        else:
+            cfg.block_size = n
     except Exception:
         pass  # frozen/odd config object -> keep the drafter's own default
 

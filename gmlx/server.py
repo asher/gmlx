@@ -734,8 +734,9 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "streamed installs; GMLX_GPU_KEEPWARM=0 disables.")
     ap.add_argument("--draft-block-size", type=int, default=None, metavar="N",
                     help="MTP draft tokens per round (analogous to llama-server "
-                         "--spec-draft-n-max). Default: the drafter's own block "
-                         "size. Also via GMLX_DRAFT_BLOCK_SIZE.")
+                         "--spec-draft-n-max). Raises or lowers the drafter's own "
+                         "default, up to the deepest block it can produce. Also "
+                         "via GMLX_DRAFT_BLOCK_SIZE.")
     ap.add_argument("--chat-template", default=None, metavar="STR|PATH",
                     help="Inline Jinja template, or a path to a .jinja/.txt file, "
                          "replacing a single positional model's GGUF template "

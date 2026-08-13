@@ -51,6 +51,7 @@ import mlx.nn as nn
 from mlx_lm.models.base import create_attention_mask
 
 from . import deepseek_v4_model as v4
+from .drafter_protocol import native_block_size
 from .deepseek_v4_cache import ensure_rollback_attached, set_undo_armed
 from .deepseek_v4_hyper_connection import HyperHead
 
@@ -266,7 +267,8 @@ class DeepseekV4MTPDrafter(nn.Module):
                 "post-init extended with the MTP layer's ratio 0 "
                 f"(got {len(args.compress_ratios)} entries for layer index {n})"
             )
-        self._native_block_size = int(config.block_size)
+        self._native_block_size = (
+            native_block_size(config) or int(config.block_size))
         self._sliding_window = int(args.sliding_window)
         # Engine capture seams keep only this many trailing prompt hiddens:
         # the head attends through a sliding window with relative RoPE, so

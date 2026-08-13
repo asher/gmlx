@@ -41,14 +41,18 @@ from mlx_vlm.speculative.drafters.qwen3_dflash.config import DFlashConfig
 from mlx_vlm.speculative.drafters.qwen3_dflash.dflash import DFlashDraftModel
 
 from . import muse_glimmer_model as mg
+from .drafter_protocol import native_block_size
 
 
 @dataclass
 class MuseGlimmerDFlashConfig(DFlashConfig):
     """``DFlashConfig`` plus the Glimmer logit tail. The drafter borrows the
-    target's LM head, so it must reproduce the target's scale and softcap."""
+    target's LM head, so it must reproduce the target's scale and softcap.
+    ``native_block_size`` is the checkpoint's trained diffusion block, the
+    deepest block this drafter can produce."""
 
     output_multiplier: float = 1.0
+    native_block_size: int | None = None
 
 
 class MuseGlimmerDFlashDrafter(DFlashDraftModel):
@@ -65,7 +69,8 @@ class MuseGlimmerDFlashDrafter(DFlashDraftModel):
 
     def __init__(self, config: MuseGlimmerDFlashConfig):
         super().__init__(config)
-        self._native_block_size = int(config.block_size)
+        self._native_block_size = (
+            native_block_size(config) or int(config.block_size))
         self._hidden = int(config.hidden_size)
         self._n_targets = len(config.target_layer_ids)
         # Only the trailing window of the prompt capture is usable; the engine
