@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-12
+
 ### Added
 
 - Moonshot Kimi-K2.5 / K2.7 support and tool parser.
