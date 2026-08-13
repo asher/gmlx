@@ -219,6 +219,9 @@ def test_config_synth_without_the_placeholder_token():
     assert "media_placeholder_token_id" not in cfg
 
 
+# mlx-vlm's KimiK25ImageProcessor.to_mlx still calls Image.getdata, which
+# Pillow deprecates for removal in Pillow 14. Upstream's call, not ours.
+@pytest.mark.filterwarnings("ignore:Image.Image.getdata is deprecated")
 def test_image_processor_output_survives_a_thread_hop():
     """The server preprocesses a request on a caller thread and evaluates on
     the engine thread. The stock KimiK25ImageProcessor returns lazy MLX

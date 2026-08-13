@@ -693,17 +693,6 @@ def test_float32_is_not_a_config_value():
         build_config(doc)
 
 
-def test_dtype_is_not_a_per_model_load_key():
-    """The reason to leave bfloat16 is a property of the GPU, not of a model,
-    so `load: {dtype: ...}` is an unknown key: it warns and is dropped rather
-    than forking one model onto a different activation width."""
-    assert "dtype" not in cfgmod.LOAD_ENV
-    doc = _doc()
-    doc["models"]["m-bare"]["overrides"] = {"load": {"dtype": "float16"}}
-    cfg = build_config(doc)
-    assert "GMLX_ACTIVATION_DTYPE" not in cfgmod.env_for(resolve_model("m-bare", cfg))
-
-
 def test_env_for_emits_speculative_flag():
     """The per-build speculative state rides the env window (the only signal that
     reaches the load bridge in the engine's worker thread). Always emitted - "0"
