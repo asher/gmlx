@@ -464,6 +464,7 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
     missing_roots = [d for d in cfg.model_dirs
                      if not os.path.isdir(os.path.expanduser(os.path.expandvars(d)))]
     kept, removed, unverified, known_paths = [], [], [], set()
+    known_models = {}                              # resolved path -> ModelCfg
     for mid, mc in cfg.models.items():
         is_hf = str(mc.path).startswith("hf:")
         try:
@@ -489,6 +490,7 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
         kept.append(mid)
         if rp:
             known_paths.add(rp)
+            known_models[rp] = mc
     if missing_roots:
         print(f"warning: model_dirs root(s) not on disk right now: "
               f"{', '.join(missing_roots)} - their entries are kept unverified",
@@ -498,12 +500,16 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
               "are kept unverified", file=sys.stderr)
 
     # Discover, skipping anything already configured (by id or by resolved path).
-    discovered = []
+    # `draft_pairs`: sibling drafters that pair into an entry already configured.
+    discovered, draft_pairs = [], {}
     if dirs:
         specs = [DiscoverSpec(dir=d, recursive=recursive) for d in dirs]
+        stats = {}
         discovered += discovery.scan_dirs(
             specs, dirs,
-            known_ids=set(cfg.models), known_paths=known_paths, progress=True)
+            known_ids=set(cfg.models), known_paths=known_paths,
+            known_models=known_models, progress=True, stats=stats)
+        draft_pairs = stats.get("draft_pairs") or {}
     if scan_cache:
         known_refs = {mc.path for mc in cfg.models.values()
                       if str(mc.path).startswith("hf:")}
@@ -519,7 +525,9 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
         print(f"  remove:  {mid}  ({cfg.models[mid].path} - gone)")
     for m in discovered:
         print(f"  add:     {m.id}  ({discovery._rel(m.path, dirs)})")
-    if not removed and not discovered:
+    for mid, dpath in draft_pairs.items():
+        print(f"  update:  {mid}  (draft_gguf: {discovery._rel(dpath, dirs)})")
+    if not removed and not discovered and not draft_pairs:
         print("  (already in sync)")
         return 0
     if a.dry_run:
@@ -528,8 +536,11 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
 
     new_roots = ([d for d in dirs if d not in cfg.model_dirs]
                  if a.models_dir else [])
-    _apply_sync(path, removed, discovered, dirs, new_roots=new_roots)
-    print(f"\nupdated {path} (+{len(discovered)} / -{len(removed)})")
+    _apply_sync(path, removed, discovered, dirs, new_roots=new_roots,
+                draft_pairs=draft_pairs)
+    changed = (f"\nupdated {path} (+{len(discovered)} / -{len(removed)}"
+               + (f" / ~{len(draft_pairs)}" if draft_pairs else "") + ")")
+    print(changed)
     _reload_running(path, skip=a.no_reload)
     return 0
 
@@ -544,12 +555,15 @@ def _hf_cache_readable() -> bool:
         return False
 
 
-def _apply_sync(path, removed, discovered, dirs, new_roots=()) -> None:
+def _apply_sync(path, removed, discovered, dirs, new_roots=(),
+                draft_pairs=None) -> None:
     """Rewrite ``path``'s ``models:`` block in place, preserving comments and
     hand-edits (ruamel round-trip): delete ``removed`` ids, splice in the newly
     ``discovered`` models. Untouched entries keep their exact formatting.
     ``new_roots`` are --models-dir override roots absent from
-    ``server.model_dirs``; they're appended so the new entries resolve."""
+    ``server.model_dirs``; they're appended so the new entries resolve.
+    ``draft_pairs`` (configured id -> drafter path) adds a ``draft_gguf`` key
+    to that entry; an entry that already has one keeps its value."""
     from ruamel.yaml.comments import CommentedMap
 
     def mutate(doc):
@@ -587,6 +601,10 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=()) -> None:
             if note:
                 models.yaml_set_comment_before_after_key(
                     mc.id, before=note, indent=2)
+        for mid, dpath in (draft_pairs or {}).items():
+            ent = models.get(mid)
+            if isinstance(ent, dict) and not ent.get("draft_gguf"):
+                ent["draft_gguf"] = discovery._rel(dpath, dirs)
         # Cache-resident entries need server.hf_cache to resolve from the cache.
         if any(str(mc.path).startswith("hf:") for mc in discovered):
             srv = doc.get("server")
@@ -604,7 +622,8 @@ def register_downloads(paths: list, config_path=None) -> None:
     ``model_dirs`` root (an explicit ``--to`` elsewhere - the server could
     never discover it), or when the file is already configured. Otherwise the
     same machinery as sync-models end to end: id derivation, mmproj pairing,
-    speculative detection, comment-preserving splice, and a SIGHUP so a
+    drafter pairing, speculative detection, comment-preserving splice, and a
+    SIGHUP so a
     running server serves the new entries immediately. Best-effort by
     contract: the download already succeeded, so a registration problem warns
     and returns instead of failing ``pull``."""
@@ -625,24 +644,36 @@ def register_downloads(paths: list, config_path=None) -> None:
                 wanted.add(ap)
         if not wanted:
             return
-        known_paths = set()
+        known_paths, known_models = set(), {}
         for mc in cfg.models.values():
             try:
-                known_paths.add(resolve_path(mc.path, cfg.model_dirs))
+                rp = resolve_path(mc.path, cfg.model_dirs)
             except ConfigError:
-                pass
+                continue
+            known_paths.add(rp)
+            if rp:
+                known_models[rp] = mc
         # Scan the parent dirs (mmproj pairing needs the siblings), then keep
         # only models whose file is one we just downloaded - a neighbouring
         # file the user left unregistered stays unregistered.
         parents = sorted({os.path.dirname(p) for p in wanted})
         specs = [DiscoverSpec(dir=d, recursive=False) for d in parents]
+        stats = {}
         found = discovery.scan_dirs(specs, cfg.model_dirs,
                                     known_ids=set(cfg.models),
-                                    known_paths=known_paths)
+                                    known_paths=known_paths,
+                                    known_models=known_models, stats=stats)
         newly = [m for m in found if os.path.abspath(m.path) in wanted]
-        if not newly:
+        # Only a drafter from this download may change a configured entry: a
+        # file the user left beside a model stays unregistered.
+        pairs = {mid: dp for mid, dp in (stats.get("draft_pairs") or {}).items()
+                 if os.path.abspath(dp) in wanted}
+        if not newly and not pairs:
             return                     # already configured (a re-pull) - quiet
-        _apply_sync(path, [], newly, cfg.model_dirs)
+        _apply_sync(path, [], newly, cfg.model_dirs, draft_pairs=pairs)
+        for mid, dp in pairs.items():
+            print(f"registered {os.path.basename(dp)} as the drafter of "
+                  f"{mid} in {path}")
         for m in newly:
             extras = [w for w, on in (("vlm", m.mmproj),
                                       ("mtp", m.speculative)) if on]

@@ -721,8 +721,11 @@ its target id (and profile, if any) must exist. Validated at load.
 
 Opt-in header-only directory scan (architecture + `nextn_predict_layers`
 only, zero tensor I/O). Native-head MTP models auto-enable speculative.
-Sibling `mmproj*.gguf` pairs into the model it best matches. Assistant
-drafters are reported but only wired when a model names one via `draft_gguf`.
+Sibling `mmproj*.gguf` pairs into the model it best matches. A sibling
+assistant drafter (gemma4 assistant, DSpark, DFlash) pairs in as that model's
+`draft_gguf`, which turns speculative on; the arch, the hidden size, and the
+filename must all agree. A streamed model gets no drafter, and
+`speculative: false` stops the pairing.
 
 ```yaml
 discover:

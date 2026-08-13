@@ -461,6 +461,45 @@ def test_sync_adds_new_and_removes_gone(monkeypatch, tmp_path):
     assert cfg.models["newbie"].path == "newbie.gguf"  # relative to model_dirs
 
 
+def test_sync_adds_a_drafter_to_an_entry_already_in_the_config(monkeypatch,
+                                                               tmp_path):
+    # The user drops a drafter next to a model the config already carries:
+    # sync adds `draft_gguf` to that entry and leaves the rest of it alone.
+    from gmlx.config import load_config
+    cfg_path, lib = _sync_config(
+        tmp_path,
+        "models:\n  muse:\n    path: muse.gguf\n    pin: true\n")
+    (lib / "muse.gguf").write_bytes(b"x")
+    drafter = str(lib / "dflash-muse.gguf")
+
+    def fake_scan(specs, dirs, **kw):
+        kw["stats"]["draft_pairs"] = {"muse": drafter}
+        return []
+
+    monkeypatch.setattr(srv.discovery, "scan_dirs", fake_scan)
+    assert srv._cmd_sync(["--config", str(cfg_path)]) == 0
+    mc = load_config(cfg_path).models["muse"]
+    assert mc.draft_gguf == "dflash-muse.gguf"    # relative to model_dirs
+    assert mc.pin is True                         # the hand-edit survives
+
+
+def test_sync_dry_run_keeps_a_drafter_pairing_unwritten(monkeypatch, tmp_path,
+                                                        capsys):
+    from gmlx.config import load_config
+    cfg_path, lib = _sync_config(
+        tmp_path, "models:\n  muse:\n    path: muse.gguf\n")
+    (lib / "muse.gguf").write_bytes(b"x")
+
+    def fake_scan(specs, dirs, **kw):
+        kw["stats"]["draft_pairs"] = {"muse": str(lib / "dflash-muse.gguf")}
+        return []
+
+    monkeypatch.setattr(srv.discovery, "scan_dirs", fake_scan)
+    assert srv._cmd_sync(["--config", str(cfg_path), "--dry-run"]) == 0
+    assert "update:  muse" in capsys.readouterr().out
+    assert load_config(cfg_path).models["muse"].draft_gguf is None
+
+
 def test_sync_never_drops_hf_entries_on_unreadable_cache(monkeypatch, tmp_path,
                                                           capsys):
     # An unreadable hf cache means hf: entries CANNOT BE VERIFIED - removing
