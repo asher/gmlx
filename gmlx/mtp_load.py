@@ -84,12 +84,13 @@ _MTP_WIDTH_LIMIT_BY_MODEL_TYPE = {
 # losing regime. Uncapped is earned by measurement, not inherited by default.
 _MTP_WIDTH_CAP_FALLBACK = 2
 
-# Drafted depth per DFlash round. Verify cost on the 30B target rises ~36%
-# from block 3 to 4 (the kquant small-M kernels hold near-flat only through
-# M=3 at these projection shapes), which outweighs block 4's extra accepted
-# tokens; llama.cpp defaults to 4 (n_max=3). GMLX_MUSE_DFLASH_BLOCK
-# overrides, up to the GGUF's dflash.block_size.
-_MUSE_GLIMMER_DFLASH_BLOCK_DEFAULT = 3
+# Drafted depth per DFlash round: the GGUF's trained block, capped at 16.
+# Verify cost on the 30B target is flat from 8 to 16 rows (the kquant
+# split-K tile holds 16 rows in one MMA row-tile), so a full block accepts
+# more tokens for the same forward. Row 17 starts a second row-tile and
+# costs ~55% more. GMLX_MUSE_DFLASH_BLOCK and --draft-block-size override,
+# up to the GGUF's dflash.block_size.
+_MUSE_GLIMMER_DFLASH_BLOCK_DEFAULT = 16
 
 
 def _stamp_mtp_width_cap(drafter, model_type: str, *, target=None,
