@@ -43,6 +43,10 @@ in the context. DeepSeek-V4-Flash is measured against antirez's ds4
 A 27B model, already resident in a local server, answering at 46 tokens per
 second. Recorded with `docs/assets/record-demo.sh` at true speed.
 
+A [one-minute video](#mtp-and-concurrent-streams) below shows the same server move from a
+single chat at full MTP speed to four concurrent streams, and back, with
+no break in the live stream.
+
 ## Quickstart
 
 Requires an Apple Silicon Mac, and macOS 26 or newer is recommended: there
@@ -183,17 +187,6 @@ Beyond plain chat completions:
   so a thin client gets tools (and optionally memory) with no loop of its
   own.
 
-One chat decodes solo at ~150 tok/s with MTP. Three more prompts then
-arrive. Speculation pauses. The server paces their prefill, so the live
-stream keeps its speed. The four streams then run at 50-57 tok/s each. As
-the sessions finish, speculation re-arms mid-stream. The remaining chat
-returns to about 150 tok/s, through to the end of a 5200-token response.
-
-The video is real time with no edits. The tok/s counters come from the
-server, reflecting the Qwen tokenizer.
-
-https://github.com/user-attachments/assets/de5dab84-3155-4cee-aa57-7d0b9c726ec5
-
 Details: the [server config reference](https://github.com/asher/gmlx/blob/main/docs/server-config.md) and the
 [assistant guide](https://github.com/asher/gmlx/blob/main/docs/assistant.md).
 
@@ -283,10 +276,23 @@ workloads. KV-cache quantization frees memory at long contexts. And
 disk-streamed execution runs MoE models larger than memory
 ([below](#bigger-than-memory)). The file you pick matters too: a uniform
 K-quant decodes meaningfully faster than a heavily mixed one at similar or
-better quality. The
-[performance guide](https://github.com/asher/gmlx/blob/main/docs/performance.md)
-covers when each lever pays off, with numbers, and where llama.cpp still
-leads.
+better quality. Details: the
+[performance guide](https://github.com/asher/gmlx/blob/main/docs/performance.md).
+
+### MTP and concurrent streams
+
+The video below shows MTP and concurrent serving together on a live
+server. One chat decodes solo at ~150 tok/s with MTP. Three more prompts
+then arrive. Speculation pauses. The server paces their prefill, so the
+live stream keeps its speed. The four streams then run at 50-57 tok/s
+each. As the sessions finish, speculation re-arms mid-stream. The
+remaining chat returns to ~150 tok/s, through to the end of a 5200-token
+response.
+
+The video is real time with no edits. The tok/s counters come from the
+server, reflecting the Qwen tokenizer.
+
+https://github.com/user-attachments/assets/de5dab84-3155-4cee-aa57-7d0b9c726ec5
 
 ### Bigger than memory
 
