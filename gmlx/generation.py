@@ -818,6 +818,7 @@ def _generate_speculative(
         )
 
     from mlx_lm.sample_utils import make_sampler
+    from .spec_helpers import _resolve_block_total
     from mlx_vlm.generate.ar import generate_step
 
     if (
@@ -859,7 +860,7 @@ def _generate_speculative(
         if temp == 0.0
         else make_sampler(temp=temp, top_p=top_p, top_k=top_k, min_p=min_p)
     )
-    block = draft_block_size or int(getattr(drafter.config, "block_size", 3))
+    block = _resolve_block_total(drafter, draft_block_size)
     eos_ids = set(getattr(tokenizer, "eos_token_ids", None) or [tokenizer.eos_token_id])
 
     detok = tokenizer.detokenizer
@@ -966,6 +967,7 @@ def generate_speculative_owned(
     generate_step. This is the bench_tg_depth default (matches serve);
     GMLX_OWNED_ROUND=0 opts back to mlx-vlm's generate_speculative."""
     from mlx_lm.sample_utils import make_sampler
+    from .spec_helpers import _resolve_block_total
     from mlx_vlm.models import cache as _cache
 
     from .speculative import annotate_sampling_params, stream_speculative
@@ -1001,7 +1003,7 @@ def generate_speculative_owned(
     )
     annotate_sampling_params(
         sampler, temp=temp, top_p=top_p, top_k=top_k, min_p=min_p)
-    block = draft_block_size or int(getattr(drafter.config, "block_size", 3))
+    block = _resolve_block_total(drafter, draft_block_size)
     eos_ids = set(getattr(tokenizer, "eos_token_ids", None) or [tokenizer.eos_token_id])
 
     lm = model.language_model if hasattr(model, "language_model") else model
@@ -1149,6 +1151,7 @@ def _stream_generate_speculative_owned(
     surface as the stock round, but drives ``stream_speculative`` (which
     does its own chunked prefill through the persistent ``prompt_cache``)."""
     from mlx_lm.sample_utils import make_sampler
+    from .spec_helpers import _resolve_block_total
 
     from .speculative import annotate_sampling_params, stream_speculative
 
@@ -1168,7 +1171,7 @@ def _stream_generate_speculative_owned(
     )
     annotate_sampling_params(
         sampler, temp=temp, top_p=top_p, top_k=top_k, min_p=min_p)
-    block = draft_block_size or int(getattr(drafter.config, "block_size", 2))
+    block = _resolve_block_total(drafter, draft_block_size)
     eos_ids = set(getattr(tokenizer, "eos_token_ids", None) or [tokenizer.eos_token_id])
 
     detok = tokenizer.detokenizer
@@ -1276,6 +1279,7 @@ def _stream_generate_speculative(
         return
 
     from mlx_lm.sample_utils import make_sampler
+    from .spec_helpers import _resolve_block_total
     from mlx_vlm.generate.ar import generate_step
 
     if isinstance(prompt, str):
@@ -1295,7 +1299,7 @@ def _stream_generate_speculative(
         if temp == 0.0
         else make_sampler(temp=temp, top_p=top_p, top_k=top_k, min_p=min_p)
     )
-    block = draft_block_size or int(getattr(drafter.config, "block_size", 3))
+    block = _resolve_block_total(drafter, draft_block_size)
     eos_ids = set(getattr(tokenizer, "eos_token_ids", None) or [tokenizer.eos_token_id])
 
     detok = tokenizer.detokenizer

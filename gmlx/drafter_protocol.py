@@ -68,7 +68,13 @@ class BatchDrafterProtocol(Protocol):
         draft_eval_state                -- default None -> sampler_state_attrs
         sampler_state_attrs             -- default ("_seed_token",)
         draft_lens                      -- hasattr guard
-        config.runtime_block_size       -- default None
+        config.runtime_block_size       -- default None: the depth drafted per
+                                           round when the caller asks for none,
+                                           overriding config.block_size
+        config.native_block_size        -- default None (unbounded): the deepest
+                                           block this drafter can produce
+                                           correctly, from the checkpoint or the
+                                           architecture
         cap_at_configured_depth         -- default False
         _native_block_size              -- default configured_block_total
         mtp_width_cap                   -- default 0 (uncapped): speculate
@@ -116,7 +122,31 @@ class BatchDrafterProtocol(Protocol):
         ...
 
 
-# 2. DrafterAdapter -- pure delegator, per-instance
+# 2. Block-depth accessors -- the two quantities config carries
+
+def native_block_size(config: Any) -> int | None:
+    """The deepest block the drafter can produce, or None when unbounded.
+
+    A bound comes from the checkpoint (a trained diffusion block) or from the
+    architecture (one draft row per stage). Families without one leave the
+    field unset, and the caller falls back to their configured depth.
+    """
+    declared = getattr(config, "native_block_size", None)
+    if declared is None:
+        return None
+    declared = int(declared)
+    return declared if declared > 0 else None
+
+
+def default_block_size(config: Any) -> int:
+    """The block total to draft when the caller requests no depth."""
+    runtime = getattr(config, "runtime_block_size", None)
+    if runtime is None:
+        return int(config.block_size)
+    return max(1, int(runtime))
+
+
+# 3. DrafterAdapter -- pure delegator, per-instance
 
 def _check_accepts_left_padding(inner: Any) -> bool:
     """True if inner.reset accepts a left_padding kwarg.
@@ -182,7 +212,7 @@ class DrafterAdapter:
         return getattr(inner, name)
 
 
-# 3. validate_drafter -- load-time crash prevention
+# 4. validate_drafter -- load-time crash prevention
 
 def validate_drafter(drafter: Any) -> None:
     """Check required drafter members exist at load time.
@@ -206,9 +236,20 @@ def validate_drafter(drafter: Any) -> None:
         errors.append("missing config")
     else:
         try:
-            int(drafter.config.block_size)
+            block = int(drafter.config.block_size)
         except (AttributeError, TypeError, ValueError):
             errors.append("config.block_size must be int-castable")
+        else:
+            try:
+                ceiling = native_block_size(drafter.config)
+            except (TypeError, ValueError):
+                errors.append("config.native_block_size must be int-castable")
+            else:
+                if ceiling is not None and ceiling < block:
+                    errors.append(
+                        f"config.native_block_size {ceiling} is below "
+                        f"config.block_size {block}"
+                    )
 
     if not hasattr(drafter, "accept_lens"):
         errors.append("missing accept_lens (must be a list)")

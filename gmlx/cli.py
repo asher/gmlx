@@ -241,7 +241,8 @@ def add_speculative_args(ap: argparse.ArgumentParser) -> None:
         type=int,
         default=None,
         metavar="N",
-        help="Override the MTP draft block size.",
+        help="MTP draft tokens per round. Raises or lowers the drafter's own "
+             "default, up to the deepest block it can produce.",
     )
     ap.add_argument(
         "--stochastic-mtp",

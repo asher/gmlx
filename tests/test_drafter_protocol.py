@@ -11,6 +11,7 @@ import pytest
 from gmlx.drafter_protocol import (
     DrafterAdapter,
     _check_accepts_left_padding,
+    native_block_size,
     validate_drafter,
 )
 
@@ -175,6 +176,25 @@ class TestValidateDrafter:
         assert "missing config" in msg
         assert "missing accept_lens" in msg
         assert "draft_block" in msg
+
+    def test_declared_ceiling_passes(self):
+        d = _FullDrafter()
+        d.config.native_block_size = 16
+        validate_drafter(d)
+        assert native_block_size(d.config) == 16
+
+    def test_ceiling_below_the_configured_depth_fails(self):
+        d = _FullDrafter()
+        d.config.block_size = 8
+        d.config.native_block_size = 4
+        with pytest.raises(RuntimeError, match="native_block_size 4 is below"):
+            validate_drafter(d)
+
+    def test_bad_ceiling(self):
+        d = _FullDrafter()
+        d.config.native_block_size = "deep"
+        with pytest.raises(RuntimeError, match="native_block_size must be int"):
+            validate_drafter(d)
 
     def test_error_names_adapter(self):
         d = _NoLeftPaddingDrafter()

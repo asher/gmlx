@@ -142,7 +142,7 @@ with a warning); `--no-speculative`/`--no-mtp` forces it off.
 | `--speculative` / `--mtp` | Force MTP speculative decoding on. Native-head models (qwen3.5/3.6 `nextn`) need no companion; gemma4 and muse-glimmer need `--draft-gguf`. Native heads are auto-enabled without this. Use it to force the path when a sampler flag would otherwise defer. |
 | `--no-speculative` / `--no-mtp` | Disable MTP. Overrides the native-head auto-enable and config `speculative: true`. |
 | `--draft-gguf PATH` | Separate assistant-drafter GGUF (gemma4 two-GGUF MTP shape, a muse-glimmer DFlash drafter, or a deepseek4 DSpark/MTP sidecar - gmlx `deepseek4-dspark`, llama.cpp `dflash`, or legacy `deepseek4_mtp_support`); implies `--speculative` (same as `serve`). A sidecar in the target's directory is autodetected without the flag. |
-| `--draft-block-size N` | Override the MTP draft block size. |
+| `--draft-block-size N` | MTP draft tokens per round. Raises or lowers the drafter's own default, up to the deepest block it can produce. |
 
 Speculative generation takes only `--temp`/`--top-p`/`--top-k`/`--min-p` plus a
 baked `--system-prompt`; mlx-vlm's verify walk has no stop/bias/penalty/KV
@@ -542,7 +542,7 @@ gmlx serve Qwen3.6-27B-Q4_K_S.gguf --speculative
 | `--hf-source REPO` | Processor/config override for a single VLM model (rarely needed). |
 | `--speculative` | Serve a single positional model with MTP (native-head qwen3.5/3.6; gemma4 also needs `--draft-gguf`). |
 | `--draft-gguf PATH` | Companion drafter GGUF for assistant-shape MTP (gemma4); implies `--speculative`. |
-| `--draft-block-size N` | MTP draft tokens per round (analogous to llama-server `--spec-draft-n-max`). Default: the drafter's own block size; muse-glimmer defaults to 2 drafts and caps N at the loaded block (raise it with `GMLX_MUSE_DFLASH_BLOCK` at load). Also via `GMLX_DRAFT_BLOCK_SIZE`. |
+| `--draft-block-size N` | MTP draft tokens per round (analogous to llama-server `--spec-draft-n-max`). Raises or lowers the drafter's own default, up to the deepest block it can produce (a deeper request clamps, with a warning). Also via `GMLX_DRAFT_BLOCK_SIZE`. |
 | `--adapter PATH` | GGUF LoRA adapter applied live over a single positional model at load (text only, not `--mmproj`/`--speculative`). In config mode set `adapter:` per model instead. |
 | `--stream-cpu` | Run a single positional model entirely on the CPU device: the over-RAM MoE path, same semantics as [`run --stream-cpu`](#loading). In config mode set `stream: cpu` per model instead; see [server-config.md](server-config.md#models). |
 | `--stream-experts` | Routed-expert stacks stream from disk while the every-token layers and KV cache stay on GPU; the decode feeder (default) serves decode from a wired expert arena and makes this the faster placement once warm. Config mode: `stream: experts`. Mutually exclusive with `--stream-cpu`. |

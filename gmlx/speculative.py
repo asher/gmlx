@@ -38,7 +38,7 @@ from .envflags import env_bool, env_int
 from .spec_helpers import (
     _SpeculativeSamplerRNG,
     _buffer_mtp_target_cache,
-    _dflash_block_total,
+    _resolve_block_total,
     _mtp_cache_offset_max,
     _mtp_draft_hidden,
     _mtp_draft_position,
@@ -685,7 +685,7 @@ def _owned_decode_rounds(
     # moot -- disable it to skip the per-round save/restore.
     greedy_draft = greedy or _FORCE_GREEDY_DRAFT
 
-    block_total = _dflash_block_total(drafter, draft_block_size)
+    block_total = _resolve_block_total(drafter, draft_block_size)
     configured_block_total = int(getattr(drafter.config, "block_size", block_total))
     drafter.reset(model)
 
@@ -1647,7 +1647,7 @@ def _owned_decode_rounds_batch(
     gen_rows: list[list[int]] = [[int(t)] for t in b]
     retired = [False] * B_orig
 
-    block_total = _dflash_block_total(drafter, draft_block_size)
+    block_total = _resolve_block_total(drafter, draft_block_size)
     configured_block_total = int(
         getattr(drafter.config, "block_size", block_total))
 

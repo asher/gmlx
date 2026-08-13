@@ -85,12 +85,22 @@ _MTP_WIDTH_LIMIT_BY_MODEL_TYPE = {
 _MTP_WIDTH_CAP_FALLBACK = 2
 
 # Drafted depth per DFlash round: the GGUF's trained block, capped at 16.
-# Verify cost on the 30B target is flat from 8 to 16 rows (the kquant
-# split-K tile holds 16 rows in one MMA row-tile), so a full block accepts
-# more tokens for the same forward. Row 17 starts a second row-tile and
-# costs ~55% more. GMLX_MUSE_DFLASH_BLOCK and --draft-block-size override,
-# up to the GGUF's dflash.block_size.
+# Verify cost on the 30B target is flat from 8 to 16 rows (the kquant split-K
+# tile holds 16 rows in one MMA row-tile). Row 17 starts a second row-tile and
+# costs ~55% more.
 _MUSE_GLIMMER_DFLASH_BLOCK_DEFAULT = 16
+
+
+def _drafter_block_depths(native_total, env_name: str,
+                          preferred_total=None) -> tuple[int, int]:
+    """Return (deepest block the drafter can produce, depth drafted per round).
+
+    The runtime depth is the family's preferred depth, which the environment
+    overrides, and neither can pass the drafter's own ceiling.
+    """
+    native_total = int(native_total)
+    preferred = min(int(preferred_total or native_total), native_total)
+    return native_total, max(2, min(env_int(env_name, preferred), native_total))
 
 
 def _stamp_mtp_width_cap(drafter, model_type: str, *, target=None,
@@ -783,10 +793,8 @@ def _load_muse_glimmer_dflash_drafter(
         "sliding_attention" if bool(t) else "full_attention" for t in pattern
     ] or ["full_attention"] * n_layers
     window = int(meta.get("dflash.attention.sliding_window") or 0) or None
-    native_total = int(block_size)
-    default_total = min(_MUSE_GLIMMER_DFLASH_BLOCK_DEFAULT, native_total)
-    block_total = max(
-        2, min(env_int("GMLX_MUSE_DFLASH_BLOCK", default_total), native_total))
+    native_total, block_total = _drafter_block_depths(
+        block_size, "GMLX_MUSE_DFLASH_BLOCK", _MUSE_GLIMMER_DFLASH_BLOCK_DEFAULT)
 
     config = MuseGlimmerDFlashConfig(
         hidden_size=int(target_config_dict["hidden_size"]),
@@ -802,6 +810,7 @@ def _load_muse_glimmer_dflash_drafter(
         rope_theta=float(meta["dflash.rope.freq_base"]),
         tie_word_embeddings=False,
         block_size=block_total,
+        native_block_size=native_total,
         mask_token_id=int(mask_token_id),
         target_layer_ids=list(layer_ids),
         num_target_layers=n_target_layers,
@@ -1051,8 +1060,8 @@ def _load_deepseek4_dspark_drafter(
             f"strictly increasing and < {n}"
         )
     args.compress_ratios = list(args.compress_ratios) + [0] * n_stages
-    native_total = draft_len + 1
-    block_total = max(2, min(env_int("GMLX_DSPARK_BLOCK", native_total), native_total))
+    native_total, block_total = _drafter_block_depths(
+        draft_len + 1, "GMLX_DSPARK_BLOCK")
     drafter = DeepseekV4DSparkDrafter(
         DeepseekV4DSparkConfig(
             text=args,
@@ -1062,6 +1071,7 @@ def _load_deepseek4_dspark_drafter(
             target_layer_ids=layer_ids,
             markov_rank=int(_dspark_meta(meta, "markov_rank", 256)),
             block_size=block_total,
+            native_block_size=native_total,
         )
     )
     log(
