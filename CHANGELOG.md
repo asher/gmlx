@@ -17,6 +17,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   remap puts them back into MoonViT's interleaved layout.
 - You can now use `--stream-experts` with `--mmproj` with the cli run/chat
   commands. Server support for vision + streaming still to come.
+- The server accepts `stream: experts` on a VLM entry, so you can serve an
+  over-RAM VLM. gmlx puts the placement on the text tower, and the vision
+  tower stays resident. The server refuses `stream: cpu` on a VLM entry.
+  Send only one request at a time to a streamed entry (see streaming.md).
 
 ### Changed
 

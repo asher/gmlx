@@ -59,8 +59,10 @@ model's hot set. The decode feeder's exit stats (printed at `-v` on
 `run` and `chat`, always in server logs) show the arena hit rate a
 session settled at.
 
-Streaming applies to text models - the server rejects `stream` on VLM
-and speculative entries. On the CLI, MTP composes with
+You can stream a text model, or the text tower of a vision model. The
+server accepts `stream: experts` on a VLM entry, and puts the placement
+on the text tower. The server refuses `stream: cpu` on a VLM entry. It
+also refuses `stream` on a speculative entry. On the CLI, MTP composes with
 `--stream-experts` (not `--stream-cpu`) but defers by default: auto-MTP
 stays off and an explicit `--speculative` opts in. The lossy `--moe-*`
 levers below are hard-incompatible with MTP and force plain decoding.
@@ -175,6 +177,14 @@ of RAM.
 In server configs the placement is the per-model `stream: experts | cpu`
 key and the feeder opt-outs are `prefill_feeder: false` /
 `decode_feeder: false`.
+
+Send only one request at a time to a server that streams a model. The
+engine can batch concurrent requests, but the streaming tier makes decode
+faster only when a step contains one token. The wired-memory refresh, the
+lookahead prestage, and the GPU-side token path each test the step width,
+and each stays off when a step contains more than one token. A second
+concurrent request thus puts both requests on the slow path, and the
+arena loses the hit rate that it built. This does not affect prefill.
 
 When a larger-than-RAM model is released, its page cache is also released, via
 `msync(MS_INVALIDATE)` over the shards - at process exit, or at unload on a
