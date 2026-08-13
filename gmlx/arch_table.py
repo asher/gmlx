@@ -132,10 +132,39 @@ MTP_WIRED_MODEL_TYPES = frozenset({
 })
 
 
+# model_types whose MTP drafter ships as a companion GGUF, and the arches that
+# companion can carry, best container first. The loader reads a row to find the
+# sidecar of a target; discovery reads it backwards to pair a drafter it found.
+# Extend it together with the loader dispatch.
+MTP_DRAFTER_ARCHES = {
+    # `dflash` is llama.cpp's DSpark container, `deepseek4_mtp_support` the
+    # legacy nextn one.
+    "deepseek_v4": ("deepseek4-dspark", "dflash", "deepseek4_mtp_support"),
+    "muse_glimmer": ("dflash",),
+    "gemma4_text": ("gemma4_assistant", "gemma4-assistant", "gemma4_mtp"),
+}
+
+
 def mtp_wired(gguf_arch: str | None) -> bool:
     """True iff a native-head MTP GGUF of this arch has a wired target class."""
     model_type = config_synth.GGUF_ARCH_TO_MODEL_TYPE.get(gguf_arch or "")
     return model_type in MTP_WIRED_MODEL_TYPES
+
+
+def drafter_arches(model_type: str) -> tuple:
+    """The companion-GGUF arches that can draft for ``model_type``, best
+    container first. ``()`` if the type has no companion drafter."""
+    return MTP_DRAFTER_ARCHES.get(model_type, ())
+
+
+def drafter_serves(drafter_arch: str | None, gguf_arch: str | None) -> bool | None:
+    """Whether a ``drafter_arch`` drafter can serve a ``gguf_arch`` target.
+    ``None`` when no row lists ``drafter_arch``: the table has no opinion."""
+    rows = [t for t, arches in MTP_DRAFTER_ARCHES.items()
+            if drafter_arch in arches]
+    if not rows:
+        return None
+    return config_synth.GGUF_ARCH_TO_MODEL_TYPE.get(gguf_arch or "") in rows
 
 
 def has_synth(gguf_arch: str) -> bool:

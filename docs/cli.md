@@ -738,6 +738,11 @@ the first existing default config unless `--config` is given. Scanning
 recurses by default, because `pull` nests downloads under
 `<dir>/<org>__<repo>/`.
 
+A sibling drafter GGUF pairs into the model it serves as that model's
+`draft_gguf`, reported as `update:`. This works on entries the config already
+carries; an entry with its own `draft_gguf` keeps it. See
+[`discover`](server-config.md#discover) for the rules.
+
 With `--from-hf-cache` (or a config already carrying `server.hf_cache: true`)
 it also reconciles cache-resident GGUFs, adding new `hf:` entries and dropping
 ones that are no longer cached, and flips `server.hf_cache` on for them.

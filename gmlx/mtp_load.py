@@ -1191,9 +1191,11 @@ def load_mtp_model(
         # deepseek4_mtp_support), never as in-GGUF nextn tensors; the
         # native-head extraction below is qwen-shaped and cannot serve it,
         # even though the V4 metadata advertises mtp_num_hidden_layers.
+        from . import arch_table
         from .discovery import find_mtp_companion
 
-        draft_gguf_path = find_mtp_companion(gguf_path)
+        draft_gguf_path = find_mtp_companion(
+            gguf_path, arch_table.drafter_arches("deepseek_v4"))
         if draft_gguf_path is None:
             raise ValueError(
                 "deepseek_v4 MTP needs its companion drafter GGUF (arch "
@@ -1206,9 +1208,11 @@ def load_mtp_model(
     if not assistant and config_dict.get("model_type") == "muse_glimmer":
         # Muse Glimmer's drafter is likewise a companion GGUF (arch dflash),
         # never an in-file nextn block.
+        from . import arch_table
         from .discovery import find_mtp_companion
 
-        draft_gguf_path = find_mtp_companion(gguf_path, ("dflash",))
+        draft_gguf_path = find_mtp_companion(
+            gguf_path, arch_table.drafter_arches("muse_glimmer"))
         if draft_gguf_path is None:
             raise ValueError(
                 "muse_glimmer MTP needs its companion DFlash drafter GGUF "

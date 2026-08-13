@@ -699,12 +699,14 @@ def _deepseek4_mtp_companion(gguf_path: str) -> str | None:
     it (auto enable; the loader re-resolves the same path when
     draft_gguf_path is not given). Header-cache peeks only."""
     try:
+        from . import arch_table
         from .discovery import find_mtp_companion, header_meta
 
         meta = header_meta(gguf_path)
         if not meta or meta.get("arch") != "deepseek4":
             return None
-        return find_mtp_companion(gguf_path)
+        return find_mtp_companion(gguf_path,
+                                  arch_table.drafter_arches("deepseek_v4"))
     except Exception:
         return None
 

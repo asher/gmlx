@@ -6,6 +6,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `init`, `sync-models`, and `pull` now pair a sibling drafter (gemma4
+  assistant, DSpark, DFlash) into the model it serves as that model's
+  `draft_gguf`, which turns speculative decoding on. `sync-models` also adds
+  the key to a model the config already carries. Before, you added it by hand.
+
 ## [0.3.1] - 2026-08-12
 
 ### Added
