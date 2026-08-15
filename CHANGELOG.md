@@ -25,6 +25,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The server always decoded up to 32 requests together, which slows every
   stream past the width where total throughput stops growing.
 
+### Fixed
+- Sampled speculative verify and the server's unfiltered sampler computed
+  logprob math at the activation dtype; float16 rows reached categorical
+  unwidened. Both now widen to float32 first (greedy paths unchanged).
+- MiniMax MSA indexer projections stay F32 under float16 activations; the
+  bfloat16 exact-bit narrowing does not exist at float16.
+
 ## [0.3.2] - 2026-08-13
 
 ### Changed

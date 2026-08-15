@@ -637,12 +637,13 @@ class Model(nn.Module):
                 and v.dtype == mx.float32
             ):
                 # Some MSA GGUFs store the indexer projections as F32. The
-                # source checkpoint is BF16, so narrowing to the activation
-                # dtype halves the memory and keeps the indexer matmul at the
-                # graph's width; at bfloat16 it recovers the original bits
-                # exactly. Norms stay F32 (tiny, and the norm math runs in F32
-                # regardless).
-                v = v.astype(activation_dtype())
+                # source checkpoint is BF16, so narrowing to bfloat16 recovers
+                # the original bits exactly and halves the memory. float16
+                # cannot represent those bits; keep F32 there (MLX promotes
+                # the indexer matmul). Norms stay F32 (tiny, and the norm math
+                # runs in F32 regardless).
+                if activation_dtype() != mx.float16:
+                    v = v.astype(activation_dtype())
             renamed[rename(k)] = v
         weights = renamed
 
