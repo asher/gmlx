@@ -31,6 +31,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unwidened. Both now widen to float32 first (greedy paths unchanged).
 - MiniMax MSA indexer projections stay F32 under float16 activations; the
   bfloat16 exact-bit narrowing does not exist at float16.
+- gemma-4 applied the final logit softcap at the activation dtype, rounding
+  every logit by up to ~0.12 nats at bfloat16 and flipping near-tie top-1
+  picks. The softcap now computes in float32 and emits float32 logits, like
+  muse-glimmer. GMLX_G4_SOFTCAP_F32=0 restores the old behavior.
 
 ## [0.3.2] - 2026-08-13
 
