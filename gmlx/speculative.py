@@ -2175,9 +2175,11 @@ def _owned_decode_rounds_batch(
                     if callable(filter_drafter):
                         filter_drafter(keep_mx)
                     hidden = hidden[keep_mx]
-                    for k in next_shared_kv:
-                        K_next, V_next = next_shared_kv[k]
-                        next_shared_kv[k] = (K_next[keep_mx], V_next[keep_mx])
+                    if _needs_shared_kv:
+                        for k in next_shared_kv:
+                            K_next, V_next = next_shared_kv[k]
+                            next_shared_kv[k] = (
+                                K_next[keep_mx], V_next[keep_mx])
                 active_idx = [active_idx[j] for j in keep_slots]
 
         if not gated:

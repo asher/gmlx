@@ -181,6 +181,19 @@ def _finish_row0(orig, tok):
     return orig == 0
 
 
+def test_row_finish_filters_without_shared_kv():
+    """A drafter with uses_shared_kv=False leaves next_shared_kv None; the
+    first mid-batch row finish takes the keep-slots filter, which must not
+    iterate it (the qwen35 owned-MTP concurrent-serve crash)."""
+    d = _ArmableDrafter(cap=4)
+    d.uses_shared_kv = False
+    out, lm, cache = _drive_armless(
+        d, B=2, max_tokens=40, rounds=6, stop_check=_finish_row0)
+    assert cache[0].width == 1  # row 0 filtered out, loop kept running
+    assert all(toks[0] is None for toks, _ in out[1:])
+    assert all(toks[1] is not None for toks, _ in out)
+
+
 def test_resume_after_drain_rearms_and_streams():
     """B=3 over cap=2 gates at formation; row 0 finishing drains the batch to
     the cap. The next round consumes the dispatched plain lookahead (its KV
