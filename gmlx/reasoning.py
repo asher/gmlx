@@ -275,7 +275,11 @@ def split_harmony_reply(text: str, *,
     spans = filt.feed(text)
     spans += filt.flush()
     reasoning = "".join(t for t, m in spans if m == _REASON).strip()
-    content = "".join(t for t, m in spans if m == _ANSWER).strip()
+    # Newline-trim only: a full strip eats first-line code indent, which
+    # breaks verbatim-code replies (llama.cpp keeps it).
+    content = "".join(t for t, m in spans if m == _ANSWER).strip("\n")
+    if not content.strip():
+        content = ""
     return (reasoning or None, content)
 
 
