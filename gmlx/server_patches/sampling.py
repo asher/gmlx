@@ -218,6 +218,24 @@ class _FastPositionedSampler:
         self.top_k = int(top_k or 0)
         self.min_p = float(min_p or 0.0)
         self.seed = DEFAULT_SEED if seed is None else int(seed)
+        # Per-request seeds (uid -> seed) and the row->uid context for the
+        # draw in flight, maintained by gmlx.seed_rows. A row with a
+        # registered seed draws from its own key stream; every other row
+        # keeps the stock derivation byte for byte.
+        self._kq_row_seeds: dict = {}
+        self._kq_rows = None
+
+    def _row_keys(self, row_ids, positions):
+        import mlx.core as mx
+        from mlx_vlm.server.generation import _position_keys, _position_seed
+        rows = self._kq_rows
+        seeds = self._kq_row_seeds
+        if not seeds or rows is None or len(rows) != len(row_ids):
+            return _position_keys(self.seed, row_ids, positions)
+        return mx.stack([
+            mx.random.key(_position_seed(
+                seeds.get(u, self.seed), row, pos))
+            for u, row, pos in zip(rows, row_ids, positions)])
 
     @property
     def _has_filter(self):
@@ -274,10 +292,9 @@ class _FastPositionedSampler:
 
     def sample_target(self, logprobs, *, row_ids, positions):
         import mlx.core as mx
-        from mlx_vlm.server.generation import _position_keys
         if logprobs.shape[0] != len(row_ids) or len(row_ids) != len(positions):
             raise ValueError("row_ids and positions must match logprobs batch size.")
-        keys = _position_keys(self.seed, row_ids, positions)        # [B, 2]
+        keys = self._row_keys(row_ids, positions)                   # [B, 2]
 
         def _cat(row, key):
             return mx.random.categorical(row, key=key)

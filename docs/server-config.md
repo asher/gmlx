@@ -934,6 +934,18 @@ The request fields mlx-vlm already honours, carried verbatim into generation:
 `repetition_context_size`, `enable_thinking`, `thinking_budget`,
 `thinking_start_token`, `thinking_end_token`.
 
+`seed` is honored per request, in-batch: each seeded request draws its
+tokens from its own key stream while unseeded rows in the same batch keep
+the shared stream, byte for byte. Seed guarantees a deterministic sampling
+stream for that request. It does not guarantee bitwise-identical output
+across runs with different batch composition, because batched matmul
+reduction order shifts logits at float tolerance; the same composition
+(for example a solo replay) reproduces exactly. With speculative decoding,
+drafts are greedy and a seeded single-stream request's target draws come
+from the same per-request key stream, so a replay matches only across runs
+with the same speculation setting; seeded rows inside a batched
+speculative decode fall back to the shared stream.
+
 `thinking_start_token` / `thinking_end_token` override the `<think>` /
 `</think>` defaults everywhere the server needs the model's real reasoning
 markers (open-think detection, `thinking_budget`, the streamed

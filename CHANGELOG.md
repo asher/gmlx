@@ -16,6 +16,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A prompt that cannot fit in memory now gets a 400 with the numbers before
   the stream opens, instead of dying mid-stream (`GMLX_PREFLIGHT_MEM=0`
   disables).
+- `seed` is now honored per request inside a batch. Before, only the first
+  request's seed took effect and it colored every row.
 
 ## [0.3.2] - 2026-08-13
 

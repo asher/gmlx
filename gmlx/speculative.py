@@ -524,8 +524,29 @@ _SIDECAR_DISABLED = (
 )
 
 
+def _seeded_target_draw(sampler, logprobs, base_pos):
+    """Target draws for a seeded lone row: per-position keys from the
+    request's own seed, through the sampler's keyed path. Falls back to
+    the process stream (stock behavior) whenever the row is not seeded
+    or the sampler has no keyed path."""
+    rows = getattr(sampler, "_kq_rows", None)
+    seeds = getattr(sampler, "_kq_row_seeds", None)
+    target = getattr(sampler, "sample_target", None)
+    if (base_pos is None or not seeds or not rows or target is None
+            or len(set(rows)) != 1 or seeds.get(rows[0]) is None):
+        return sampler(logprobs)
+    n = int(logprobs.shape[0])
+    saved = sampler._kq_rows
+    sampler._kq_rows = [rows[0]] * n
+    try:
+        return target(logprobs, row_ids=[0] * n,
+                      positions=[base_pos + 1 + j for j in range(n)])
+    finally:
+        sampler._kq_rows = saved
+
+
 def _coupled_walk(lm, verify, draft_tokens: mx.array, sampler, budget: int,
-                  top2=None, pq=None):
+                  top2=None, pq=None, base_pos=None):
     """Rejection walk with a single host sync.
 
     Sample every verify position into one deferred graph (sequentially, so the
@@ -563,7 +584,8 @@ def _coupled_walk(lm, verify, draft_tokens: mx.array, sampler, budget: int,
             if sampler is None:
                 target = mx.argmax(logprobs, axis=-1)                 # [n_pos]
             else:
-                target = sampler(logprobs).reshape(-1)                # [n_pos]
+                target = _seeded_target_draw(
+                    sampler, logprobs, base_pos).reshape(-1)          # [n_pos]
         draft_row = draft_tokens.reshape(-1)
         if n_draft > 0:
             match = (target[:n_draft] == draft_row).astype(mx.int32)
@@ -840,7 +862,8 @@ def _owned_decode_rounds(
                     lm, verify, draft_tokens, _walk_sampler,
                     max_tokens - emitted,
                     top2=list(top2_stash) if top2_stash else None,
-                    pq=list(pq_stash) if pq_stash else None)
+                    pq=list(pq_stash) if pq_stash else None,
+                    base_pos=emitted)
             stoch_stash.clear()
             if top2_stash is not None:
                 # Consumed; the accept hook below re-seeds entry 0 for the
