@@ -52,6 +52,13 @@ Phases against one model:
                 the followers for the leader's stores so they admit warm,
                 on the exact tier the numbers are noted (user-turn stores
                 land at retirement, past the hold ceiling)
+  queue-cap     (only with --queue-cap) the main servers boot with
+                GMLX_QUEUE_DEPTH_CAP=1; a flood past the decode batch
+                must draw immediate 503s carrying the Retry-After
+                contract while the rest of the flood serves, the
+                rejections counter must move, and a retry after the
+                drain must succeed (Unit 5's wire contract, which unit
+                tests fake)
   session       (only with --session N) an agent-shaped conversation on a
                 dedicated server: N turns of growing history with streamed
                 replies, tool-call/tool-role messages, a mid-stream client
@@ -296,6 +303,43 @@ def http_chat(
     return st, text, content, ptok, wall
 
 
+def raw_chat(
+    base: str,
+    mid: str,
+    messages: list,
+    *,
+    max_tokens: int = 24,
+    timeout: float = 900.0,
+):
+    """One chat POST that surfaces the raw HTTP contract: (status,
+    headers, parsed JSON body). A rejection returns its error body and
+    headers instead of raising (queue-cap phase reads Retry-After)."""
+    body = {
+        "model": mid,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": 0.0,
+    }
+    req = urllib.request.Request(
+        f"{base}/v1/chat/completions",
+        data=json.dumps(body).encode(),
+        method="POST",
+    )
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = resp.read().decode("utf-8", "replace")
+            return resp.status, resp.headers, json.loads(payload or "{}")
+    except urllib.error.HTTPError as e:
+        try:
+            parsed = json.loads(e.read().decode("utf-8", "replace") or "{}")
+        except json.JSONDecodeError:
+            parsed = {}
+        return e.code, e.headers, parsed
+    except Exception as e:  # noqa: BLE001 - report, don't raise
+        return -1, {}, {"error": {"message": f"{type(e).__name__}: {e}"}}
+
+
 def sse_chat(
     base: str,
     mid: str,
@@ -489,6 +533,14 @@ def main() -> int:
         "one-line default; the shape the system-prompt anchor serves",
     )
     ap.add_argument(
+        "--queue-cap",
+        action="store_true",
+        help="queue-cap phase: boot the main servers with "
+        "GMLX_QUEUE_DEPTH_CAP=1 and flood past the decode batch; tail "
+        "arrivals must draw an immediate 503 with the Retry-After "
+        "contract and the server must recover",
+    )
+    ap.add_argument(
         "--no-tripwire",
         action="store_true",
         help="skip the missed-adoption tripwire phase (boots a third server)",
@@ -651,6 +703,10 @@ def main() -> int:
         scheme=a.scheme,
         bits=a.bits_a,
     )
+    if a.queue_cap:
+        # cap 1 = one waiter past the decode batch. Unreachable by every
+        # other phase: their concurrency stays far below the batch size.
+        env_a["GMLX_QUEUE_DEPTH_CAP"] = "1"
     t_load0 = time.monotonic()
     with ServerProc(
         serve_args(a.model, a.speculative, a.draft_gguf),
@@ -1291,6 +1347,101 @@ def main() -> int:
                 "burst.fresh_holds",
                 f"+{d_holds} (last reason "
                 f"{str(fr1.get('last_hold_reason'))[:80]!r})",
+            )
+
+        # -- queue cap -----------------------------------------------------
+        # Unit 5's wire contract. The servers run at cap 1, and depth
+        # counts past the decode slots (completion batch), so the flood
+        # must exceed the batch; tail arrivals then land while the queue
+        # is deep and must be rejected at the socket, never mid-stream.
+        if a.queue_cap:
+            flood = 44
+            q0 = ((Client(base).metrics()[1] or {}).get("server")
+                  or {}).get("queue") or {}
+
+            def fire_q(i):
+                return raw_chat(
+                    base,
+                    mid,
+                    mk_msgs(
+                        f"Flood {i}: what is 2 plus {i % 7}? "
+                        "Answer with just the number.",
+                        system=SYSTEM_MSG,
+                    ),
+                    max_tokens=24,
+                )
+
+            t0 = time.monotonic()
+            with ThreadPoolExecutor(max_workers=flood) as ex:
+                qres = list(ex.map(fire_q, range(flood)))
+            q_wall = time.monotonic() - t0
+            n200 = sum(1 for st, _, _ in qres if st == 200)
+            rejects = [(h, b) for st, h, b in qres if st == 503]
+            q1 = ((Client(base).metrics()[1] or {}).get("server")
+                  or {}).get("queue") or {}
+            d_rej = int(q1.get("rejections", 0) or 0) - int(
+                q0.get("rejections", 0) or 0
+            )
+            rep.check(
+                "queuecap.rejected",
+                len(rejects) >= 1,
+                f"{len(rejects)} of {flood} drew 503 at cap 1, "
+                f"{q_wall:.1f}s wall",
+            )
+            rep.check(
+                "queuecap.no_other_errors",
+                n200 + len(rejects) == flood,
+                f"{n200} served + {len(rejects)} rejected == {flood}",
+            )
+
+            def retry_ok(h) -> bool:
+                try:
+                    return 2 <= int(h.get("Retry-After", "")) <= 60
+                except (TypeError, ValueError):
+                    return False
+
+            first_retry = (
+                rejects[0][0].get("Retry-After") if rejects else None
+            )
+            rep.check(
+                "queuecap.retry_after",
+                bool(rejects) and all(retry_ok(h) for h, _ in rejects),
+                f"every 503 carries Retry-After in [2, 60] "
+                f"(first: {first_retry}s)",
+            )
+            err0 = (rejects[0][1].get("error") or {}) if rejects else {}
+            rep.check(
+                "queuecap.body_contract",
+                bool(rejects)
+                and all(
+                    (b.get("error") or {}).get("type") == "server_overloaded"
+                    and int((b.get("error") or {}).get("queue_cap", 0) or 0)
+                    == 1
+                    and int((b.get("error") or {}).get("queue_depth", 0) or 0)
+                    >= 1
+                    for _, b in rejects
+                ),
+                "type/queue_cap/queue_depth on every 503 "
+                f"(first depth {err0.get('queue_depth')})",
+            )
+            rep.check(
+                "queuecap.metrics_counted",
+                d_rej >= len(rejects),
+                f"queue.rejections +{d_rej} >= {len(rejects)} observed 503s",
+            )
+            st, text, _, _, _ = chat(
+                base,
+                mid,
+                mk_msgs(
+                    "What is 2 plus 2? Answer with just the number.",
+                    system=SYSTEM_MSG,
+                ),
+                max_tokens=8,
+            )
+            rep.check(
+                "queuecap.recovers",
+                st == 200 and "4" in text,
+                f"post-drain retry status {st}: {text[:40]!r}",
             )
 
     # -- bitrate-b isolation ------------------------------------------------
