@@ -663,6 +663,14 @@ def main() -> int:
     def tick(key: str) -> int:
         return int(stats(base).get(key, 0) or 0)
 
+    def reuse_tick() -> int:
+        # Total reused prefix tokens: APC adoption plus spec prefix-cache
+        # restores. The MTP serve path's first reuse layer never moves the
+        # manager's matched counter, but a warm turn is warm either way.
+        s = stats(base)
+        return int(s.get(K["matched"], 0) or 0) + int(
+            s.get("spec_prefix_hit_tokens", 0) or 0)
+
     def settle(key: str, timeout: float = 15.0) -> int:
         # retirement stores are async; wait for the counter to hold still
         last = tick(key)
@@ -900,11 +908,11 @@ def main() -> int:
             for uq, at in history:
                 msgs.append({"role": "assistant", "content": at})
                 msgs.append({"role": "user", "content": uq})
-            m0 = tick(K["matched"])
+            m0 = reuse_tick()
             st, turn_text, last_answer, ptok, wall = chat(
                 base, mid, msgs, max_tokens=96
             )
-            dm = tick(K["matched"]) - m0
+            dm = reuse_tick() - m0
             turn_dms.append(dm)
             turns_ok &= st == 200 and len(turn_text) > 0
             turns_clean &= content_clean(last_answer)
@@ -949,7 +957,7 @@ def main() -> int:
             for uq, at in history:
                 msgs.append({"role": "assistant", "content": at})
                 msgs.append({"role": "user", "content": uq})
-            m0 = tick(K["matched"])
+            m0 = reuse_tick()
             st, vtext, vcontent, ptok, wall = chat(
                 base,
                 mid,
@@ -957,7 +965,7 @@ def main() -> int:
                 max_tokens=96,
                 chat_template_kwargs=template_kwargs,
             )
-            dm = tick(K["matched"]) - m0
+            dm = reuse_tick() - m0
             rep.check(
                 "variant.status",
                 st == 200 and len(vtext) > 0,
@@ -1599,11 +1607,11 @@ def main() -> int:
                         {"role": "assistant", "content": summary},
                         {"role": "user", "content": q},
                     ]
-                    m0 = tick(K["matched"])
+                    m0 = reuse_tick()
                     st, text, content, ptok_t, wall = chat(
                         base, mid, msgs, max_tokens=SESSION_REPLY_TOKENS
                     )
-                    dm = tick(K["matched"]) - m0
+                    dm = reuse_tick() - m0
                     turns_ok &= st == 200 and len(text) > 0
                     clean_ok &= content_clean(content)
                     comp_row = (st, sess_facts(text), dm, wall)
@@ -1700,7 +1708,7 @@ def main() -> int:
                         0,
                         ((root_ptok - QUESTION_SLACK) // a.block_size) * a.block_size,
                     )
-                m0 = tick(K["matched"])
+                m0 = reuse_tick()
                 if stream:
                     st, text, content, events, wall = schat(
                         base,
@@ -1726,11 +1734,11 @@ def main() -> int:
                         hist = history
                         block = [{"role": "user", "content": dump + "\n" + q_t}]
                         msgs = root + hist + block
-                        m0 = tick(K["matched"])
+                        m0 = reuse_tick()
                         st, text, content, ptok_t, wall = chat(
                             base, mid, msgs, max_tokens=SESSION_REPLY_TOKENS
                         )
-                dm = tick(K["matched"]) - m0
+                dm = reuse_tick() - m0
                 if is_abort:
                     abort_ok = st == 200 and events >= 24
                     settle(K["stores"])
