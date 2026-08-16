@@ -309,6 +309,15 @@ deep-context safety case. See
 policy, the `GMLX_CACHE_LIMIT_GB` env override (env wins over this key), and
 the explicit-unlimited escape.
 
+A text request whose prompt alone cannot fit in memory gets an immediate
+HTTP 400 with the estimated need and the available budget in the body,
+instead of dying mid-stream. The estimate prices prompt KV at the model's
+per-token cost (GQA heads, MLA latents, sliding windows, and quantized KV
+all lower it) plus the prefill score transient, against the working set
+with the batch drained. `max_tokens` counts only when the request pins it
+explicitly; default-max requests are never rejected on generation length.
+Media requests are not estimated in v1. `GMLX_PREFLIGHT_MEM=0` disables.
+
 Requests beyond the waiting-queue cap get an immediate HTTP 503 with a
 `Retry-After` header instead of queueing toward the token-queue timeout. The
 JSON body names the cap and the current depth; the header value is the

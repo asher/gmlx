@@ -260,6 +260,8 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_request_timing_log()
     from ..queue_cap import install_queue_depth_cap
     install_queue_depth_cap()
+    from ..mem_preflight import install_memory_preflight
+    install_memory_preflight()
     # Keep this the last BatchGenerator._next wrapper (outermost), so the
     # trace brackets the full tick including pacing and admission work.
     from ..serve_memtrace import install_serve_memtrace

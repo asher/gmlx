@@ -13,6 +13,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   starts the rest warm (`GMLX_APC_FRESH_WAIT_MS`, `0` disables).
 - Requests beyond the queue cap now get an immediate 503 with Retry-After
   instead of queueing toward the timeout (`GMLX_QUEUE_DEPTH_CAP`).
+- A prompt that cannot fit in memory now gets a 400 with the numbers before
+  the stream opens, instead of dying mid-stream (`GMLX_PREFLIGHT_MEM=0`
+  disables).
 
 ## [0.3.2] - 2026-08-13
 
