@@ -1183,6 +1183,8 @@ and store counts surface on the authed `GET /v1/metrics`.
 | `GMLX_APC_CKPT_BUDGET_MB` | Byte budget for checkpoint-record payload (recurrent states + KV tails), in MB (default `4096`). A GDN record can carry >100 MB of state and each request saves several checkpoints, so expect resident memory to grow toward this budget on hybrid models under sustained multi-turn traffic; lower it if 4 GB of cache is too much for your machine. |
 | `GMLX_APC_DECODE_CKPT` | Decode-time snapshot interval in generated tokens on hybrid models, anchored to the prompt end (default `512`; `0` off; widens automatically with context). |
 | `GMLX_APC_RETIRE_LCP` | `0` keys retirement on the forwarded ids instead of the predicted next-turn render (also disables decode-time snapshots, which key on the prediction). |
+| `GMLX_APC_FRESH_WAIT_MS` | Hold ceiling for the freshness admission gate, in ms (default `500`; `0` disables the gate). Sibling requests that arrive together admit one formation apart instead of together and cold: the first request prefills and stores the shared prefix, and the held siblings then admit warm. A sibling held past the ceiling admits cold. |
+| `GMLX_APC_FRESH_MIN` | Minimum uncovered shared-prefix tokens before the gate holds a sibling (default `256`). Below the floor the duplicate prefill costs less than the wait. |
 | `GMLX_FAITHFUL_HISTORY` | `0` restores mlx-vlm's stock chat-history rebuild, which drops `reasoning_content` from non-tool assistant messages before the template sees it (see `chat_template_kwargs`). |
 
 ---

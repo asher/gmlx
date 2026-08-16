@@ -212,6 +212,10 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     # no prefill work, and decode runs unpaced while admission waits.
     from ..admit_gate import install_admit_headroom_gate
     install_admit_headroom_gate()
+    # After the headroom gate so a truncated tick still projects memory
+    # for the rows it admits.
+    from ..fresh_gate import install_fresh_admission_gate
+    install_fresh_admission_gate()
     install_chat_template_kwargs()
     install_thinking_budget_fix()
     install_stream_timings()

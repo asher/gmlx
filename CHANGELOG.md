@@ -6,6 +6,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Sibling requests that arrive together no longer each prefill the shared
+  prefix cold: the server admits the first one, waits for its stores, and
+  starts the rest warm (`GMLX_APC_FRESH_WAIT_MS`, `0` disables).
+
 ## [0.3.2] - 2026-08-13
 
 ### Changed
