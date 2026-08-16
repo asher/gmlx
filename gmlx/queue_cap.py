@@ -13,9 +13,13 @@ tokens per request / current aggregate decode rate), clamped to [2, 60]
 seconds, static 5 when no stats exist yet. Estimation reads existing
 metrics counters only; nothing new lands in the token loop.
 
-Depth is the in-flight census minus the decode slots: requests the
-server has accepted and not finished, beyond the ones a full decode
-batch can be serving.
+Depth is the engine's waiting census: requests sitting in the server's
+request queue plus prompt candidates the batch generator has not yet
+admitted. The metrics in-flight gauge is not a usable source: the
+gmlx-owned chat routes never call begin_request, so it reads zero under
+any load (the depth e2e queue-cap phase caught exactly this). A tiny
+publisher wrapper on ``BatchGenerator._next`` keeps a weakref to the
+live generator so the check can read its pending list.
 
 Knobs:
     GMLX_QUEUE_DEPTH_CAP   waiting-queue cap (default
@@ -27,10 +31,12 @@ from __future__ import annotations
 import importlib
 import logging
 import os
+import weakref
 
 _log = logging.getLogger(__name__)
 
 _CAP_FLAG = "_kq_gguf_queue_cap"
+_PUB_FLAG = "_kq_gguf_queue_census"
 _RETRY_MIN_S = 2
 _RETRY_MAX_S = 60
 _RETRY_DEFAULT_S = 5
@@ -38,6 +44,9 @@ _RETRY_DEFAULT_S = 5
 # Server-wide counters for /v1/metrics.
 _REJECTIONS = 0
 _LAST_REJECT = ""
+
+# Weakref to the live BatchGenerator, published by the census wrapper.
+_GEN_REF = None
 
 
 def queue_cap_stats() -> dict:
@@ -63,9 +72,22 @@ def _cap() -> int:
     return max(4 * _decode_concurrency(), 32)
 
 
-def _queue_depth(metrics) -> int:
-    in_flight = int(getattr(metrics, "_in_flight", 0) or 0)
-    return max(0, in_flight - _decode_concurrency())
+def _waiting_depth(rg) -> int:
+    """Requests waiting for a decode slot: the server request queue plus
+    the batch generator's unadmitted prompt candidates. Both reads are
+    racy by design; the cap needs magnitude, not a barrier."""
+    depth = 0
+    qsize = getattr(getattr(rg, "requests", None), "qsize", None)
+    if callable(qsize):
+        try:
+            depth += max(0, int(qsize()))
+        except Exception:
+            pass
+    gen = _GEN_REF() if _GEN_REF is not None else None
+    pending = getattr(gen, "_unprocessed_sequences", None)
+    if pending is not None:
+        depth += len(pending)
+    return depth
 
 
 def _retry_after_s(metrics, depth: int) -> int:
@@ -89,13 +111,13 @@ def check_queue_depth():
         if cap <= 0:
             return None
         runtime = importlib.import_module("mlx_vlm.server.runtime").runtime
-        metrics = getattr(runtime, "metrics", None)
-        if metrics is None:
+        rg = getattr(runtime, "response_generator", None)
+        if rg is None:
             return None
-        depth = _queue_depth(metrics)
+        depth = _waiting_depth(rg)
         if depth < cap:
             return None
-        retry = _retry_after_s(metrics, depth)
+        retry = _retry_after_s(getattr(runtime, "metrics", None), depth)
         global _REJECTIONS, _LAST_REJECT
         _REJECTIONS += 1
         _LAST_REJECT = f"depth {depth} at cap {cap}, retry {retry}s"
@@ -117,6 +139,28 @@ def check_queue_depth():
         return None
 
 
+def _install_census() -> None:
+    """Publish a weakref to the live BatchGenerator from its tick.
+
+    Pure passthrough wrapper; the engine swaps generators across idle
+    gaps, so the ref re-publishes whenever the instance changes."""
+    from mlx_vlm.generate import ar as _ar
+
+    if getattr(_ar.BatchGenerator._next, _PUB_FLAG, False):
+        return
+    _orig_next = _ar.BatchGenerator._next
+
+    def _published_next(self, **kwargs):
+        global _GEN_REF
+        ref = _GEN_REF
+        if ref is None or ref() is not self:
+            _GEN_REF = weakref.ref(self)
+        return _orig_next(self, **kwargs)
+
+    setattr(_published_next, _PUB_FLAG, True)
+    _ar.BatchGenerator._next = _published_next
+
+
 def install_queue_depth_cap() -> None:
     """Wrap the generation POST routes with the queue-depth check.
 
@@ -126,6 +170,7 @@ def install_queue_depth_cap() -> None:
     """
     if _cap() <= 0:
         return
+    _install_census()
     from .server_patches._common import _CHAT_PATHS, _wrap_post_routes
 
     app = importlib.import_module("mlx_vlm.server.app").app

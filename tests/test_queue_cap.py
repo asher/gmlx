@@ -15,11 +15,23 @@ _APP = importlib.import_module("mlx_vlm.server.app")
 _RUNTIME = importlib.import_module("mlx_vlm.server.runtime").runtime
 
 
-def _metrics(in_flight=0, done=0, toks=0, gen_toks=0, decode_s=0.0):
+def _metrics(done=0, toks=0, gen_toks=0, decode_s=0.0):
     return SimpleNamespace(
-        _in_flight=in_flight, _requests_completed=done,
+        _requests_completed=done,
         _completion_tokens_total=toks, _generated_tokens_total=gen_toks,
         _decode_time_total_s=decode_s)
+
+
+def _rg(qsize=0):
+    return SimpleNamespace(requests=SimpleNamespace(qsize=lambda: qsize))
+
+
+def _census(monkeypatch, rg_qsize=0, pending=0):
+    """Wire a fake waiting census: server queue size + generator pending."""
+    monkeypatch.setattr(_RUNTIME, "response_generator", _rg(rg_qsize),
+                        raising=False)
+    gen = SimpleNamespace(_unprocessed_sequences=[object()] * pending)
+    monkeypatch.setattr(qc, "_GEN_REF", lambda: gen)
 
 
 def test_default_cap_formula():
@@ -31,10 +43,39 @@ def test_cap_env_override(monkeypatch):
     assert qc._cap() == 7
 
 
-def test_depth_subtracts_decode_slots():
-    conc = qc._decode_concurrency()
-    assert qc._queue_depth(_metrics(in_flight=conc + 10)) == 10
-    assert qc._queue_depth(_metrics(in_flight=3)) == 0
+def test_depth_counts_queue_and_pending(monkeypatch):
+    gen = SimpleNamespace(_unprocessed_sequences=[1, 2, 3])
+    monkeypatch.setattr(qc, "_GEN_REF", lambda: gen)
+    assert qc._waiting_depth(_rg(qsize=2)) == 5
+
+
+def test_depth_survives_dead_generator(monkeypatch):
+    monkeypatch.setattr(qc, "_GEN_REF", lambda: None)
+    assert qc._waiting_depth(_rg(qsize=1)) == 1
+
+
+def test_depth_survives_broken_qsize(monkeypatch):
+    monkeypatch.setattr(qc, "_GEN_REF", None)
+    rg = SimpleNamespace(
+        requests=SimpleNamespace(qsize=lambda: 1 / 0))
+    assert qc._waiting_depth(rg) == 0
+
+
+def test_census_publisher_stashes_generator():
+    from mlx_vlm.generate import ar as _ar
+
+    qc._install_census()
+    assert getattr(_ar.BatchGenerator._next, qc._PUB_FLAG, False)
+
+    class _Stub:  # SimpleNamespace refuses weakrefs
+        _unprocessed_sequences = [1]
+
+    stub = _Stub()
+    try:
+        _ar.BatchGenerator._next(stub)
+    except Exception:
+        pass  # stock body needs real state; publish happens first
+    assert qc._GEN_REF() is stub
 
 
 def test_retry_after_no_stats_is_static():
@@ -50,16 +91,15 @@ def test_retry_after_estimate_and_clamp():
 
 
 def test_check_below_cap_admits(monkeypatch):
-    monkeypatch.setattr(_RUNTIME, "metrics", _metrics(in_flight=1),
-                        raising=False)
+    _census(monkeypatch, rg_qsize=0, pending=1)
+    monkeypatch.setattr(_RUNTIME, "metrics", _metrics(), raising=False)
     assert qc.check_queue_depth() is None
 
 
 def test_check_at_cap_rejects(monkeypatch):
     monkeypatch.setenv("GMLX_QUEUE_DEPTH_CAP", "4")
-    conc = qc._decode_concurrency()
-    monkeypatch.setattr(_RUNTIME, "metrics",
-                        _metrics(in_flight=conc + 4), raising=False)
+    _census(monkeypatch, rg_qsize=1, pending=3)
+    monkeypatch.setattr(_RUNTIME, "metrics", _metrics(), raising=False)
     resp = qc.check_queue_depth()
     assert resp is not None and resp.status_code == 503
     assert resp.headers["retry-after"] == str(qc._RETRY_DEFAULT_S)
@@ -67,15 +107,13 @@ def test_check_at_cap_rejects(monkeypatch):
 
 def test_check_disabled_by_zero(monkeypatch):
     monkeypatch.setenv("GMLX_QUEUE_DEPTH_CAP", "0")
-    monkeypatch.setattr(_RUNTIME, "metrics", _metrics(in_flight=999),
-                        raising=False)
+    _census(monkeypatch, rg_qsize=999, pending=0)
     assert qc.check_queue_depth() is None
 
 
-def test_probe_failure_admits(monkeypatch):
+def test_check_no_engine_admits(monkeypatch):
     monkeypatch.setenv("GMLX_QUEUE_DEPTH_CAP", "1")
-    monkeypatch.setattr(_RUNTIME, "metrics",
-                        SimpleNamespace(_in_flight="not a number"),
+    monkeypatch.setattr(_RUNTIME, "response_generator", None,
                         raising=False)
     assert qc.check_queue_depth() is None
 
@@ -91,9 +129,9 @@ def test_route_rejects_with_503_body(app_routes, monkeypatch):
     from fastapi.testclient import TestClient
 
     monkeypatch.setenv("GMLX_QUEUE_DEPTH_CAP", "2")
-    conc = qc._decode_concurrency()
+    _census(monkeypatch, rg_qsize=2, pending=3)
     monkeypatch.setattr(_RUNTIME, "metrics",
-                        _metrics(in_flight=conc + 5, done=2, toks=100,
+                        _metrics(done=2, toks=100,
                                  gen_toks=100, decode_s=10.0),
                         raising=False)
     qc.install_queue_depth_cap()
@@ -115,9 +153,8 @@ def test_route_at_cap_minus_one_serves(app_routes, monkeypatch):
     from fastapi.testclient import TestClient
 
     monkeypatch.setenv("GMLX_QUEUE_DEPTH_CAP", "6")
-    conc = qc._decode_concurrency()
-    monkeypatch.setattr(_RUNTIME, "metrics",
-                        _metrics(in_flight=conc + 5), raising=False)
+    _census(monkeypatch, rg_qsize=5, pending=0)
+    monkeypatch.setattr(_RUNTIME, "metrics", _metrics(), raising=False)
     seen = []
 
     async def _stub(*a, **k):
