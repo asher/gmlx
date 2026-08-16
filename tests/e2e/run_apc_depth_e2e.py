@@ -975,12 +975,34 @@ def main() -> int:
                 "variant.content_clean", content_clean(vcontent), repr(vcontent[:70])
             )
             if ck:
-                rep.check(
-                    "variant.adopted",
-                    dm >= div_floor,
-                    f"matched +{dm} >= grid floor {div_floor} under "
-                    "changed render kwargs",
-                )
+                if dm >= div_floor:
+                    rep.check(
+                        "variant.adopted",
+                        True,
+                        f"matched +{dm} >= grid floor {div_floor} under "
+                        "changed render kwargs",
+                    )
+                else:
+                    # Kwargs that rewrite the prompt head (gpt-oss
+                    # reasoning_effort edits the system block) leave no
+                    # shared prefix; the identical resend then proves
+                    # adoption under the new render shape instead.
+                    m0 = reuse_tick()
+                    st2, vtext2, _, _, wall2 = chat(
+                        base,
+                        mid,
+                        msgs,
+                        max_tokens=96,
+                        chat_template_kwargs=template_kwargs,
+                    )
+                    dm2 = reuse_tick() - m0
+                    rep.check(
+                        "variant.adopted",
+                        st2 == 200 and dm2 >= div_floor,
+                        f"kwargs change matched +{dm} (head divergence); "
+                        f"resend adopted +{dm2} >= {div_floor}, "
+                        f"{wall2:.1f}s",
+                    )
             else:
                 rep.note("variant.matched", f"+{dm}")
 
