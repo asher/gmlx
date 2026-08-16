@@ -262,6 +262,12 @@ def install_runtime_snapshot_enrichment() -> None:
             base["freshness"] = fresh_stats()
         except Exception:
             pass
+        try:
+            from ..queue_cap import queue_cap_stats
+
+            base["queue"] = queue_cap_stats()
+        except Exception:
+            pass
         return base
 
     snapshot.__dict__[_PATCH_FLAG] = True

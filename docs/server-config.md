@@ -309,6 +309,14 @@ deep-context safety case. See
 policy, the `GMLX_CACHE_LIMIT_GB` env override (env wins over this key), and
 the explicit-unlimited escape.
 
+Requests beyond the waiting-queue cap get an immediate HTTP 503 with a
+`Retry-After` header instead of queueing toward the token-queue timeout. The
+JSON body names the cap and the current depth; the header value is the
+estimated drain time, clamped to 2-60 seconds. Harness SDKs back off on 503
+and retry, which beats holding a silent socket for half an hour.
+`GMLX_QUEUE_DEPTH_CAP` sets the cap (default 4 x the decode batch size,
+floored at 32; `0` disables the check).
+
 While a streaming request is silent (most notably during that long prefill),
 the server emits an SSE comment line (`: keepalive`) every 15 seconds so
 clients with a between-bytes read timeout don't drop the connection before

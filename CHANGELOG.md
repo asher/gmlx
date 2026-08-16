@@ -11,6 +11,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Sibling requests that arrive together no longer each prefill the shared
   prefix cold: the server admits the first one, waits for its stores, and
   starts the rest warm (`GMLX_APC_FRESH_WAIT_MS`, `0` disables).
+- Requests beyond the queue cap now get an immediate 503 with Retry-After
+  instead of queueing toward the timeout (`GMLX_QUEUE_DEPTH_CAP`).
 
 ## [0.3.2] - 2026-08-13
 
