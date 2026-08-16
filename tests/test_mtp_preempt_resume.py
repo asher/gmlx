@@ -493,3 +493,171 @@ def test_preempt_waits_for_first_delivery(monkeypatch):
     assert model._kq_rebuild_emitted == [1]
     assert [(r.uid, r.token) for r in responses] == [
         (7, 12), (0, 101), (7, 101)]
+
+
+# -- preempt capture: the closed round's undelivered tail ------------------
+
+
+class _EchoDrafter(_ArmableDrafter):
+    """Draft the echo target's own continuation, so every draft accepts and
+    a round yields several tokens (the mid-round preempt window)."""
+
+    def draft_block(self, b, hidden, kv, n, sampler, dtype, **kw):
+        if not isinstance(b, mx.array):
+            b = mx.array([b])
+        b0 = b.reshape(-1).astype(mx.int32)
+        return mx.stack([(b0 + 1) % VOCAB, (b0 + 2) % VOCAB],
+                        axis=1).astype(dtype)
+
+
+def test_scalar_close_captures_undelivered_tail():
+    """A preempt close mid-round hands the verified undelivered tokens to
+    model._kq_preempt_capture instead of trimming them; a plain close (no
+    capture attr) keeps the old trim."""
+    d = _EchoDrafter(cap=0)
+    lm = _VerifyEchoLM()
+    model = SimpleNamespace()
+    shared = {"full": (mx.zeros((1, 2, 4, 4)), mx.zeros((1, 2, 4, 4)))}
+    gen = spec._owned_decode_rounds(
+        model, d, lm, [_FakeCache(width=1)],
+        hidden=mx.zeros((1, 4, 8)), b=5, shared_kv=shared,
+        seed_tokens=None, emitted=1, max_tokens=20, sampler=None,
+        draft_block_size=None)
+    assert next(gen) == 6              # round is [6, 7, 8]; one delivered
+    captured = []
+    model._kq_preempt_capture = captured
+    gen.close()
+    assert captured == [7, 8]
+
+
+def _capturing_rounds(calls):
+    """_recording_rounds plus the capture contract: a preempt close hands
+    two undelivered tokens to model._kq_preempt_capture."""
+
+    inner = _recording_rounds(calls)
+
+    def fake_rounds(model, draft_model, prompt_cache, hidden, **kw):
+        it = inner(model, draft_model, prompt_cache, hidden, **kw)
+        n = 0
+        try:
+            for toks, meta in it:
+                n += 1
+                yield toks, meta
+        except GeneratorExit:
+            cap = getattr(model, "_kq_preempt_capture", None)
+            if cap is not None:
+                base = 100 * len(calls)
+                cap.extend([base + n + 1, base + n + 2])
+            it.close()
+            raise
+
+    return fake_rounds
+
+
+def test_preempt_delivers_captured_tail(monkeypatch):
+    """The captured tail reaches the wire ahead of the waiter's admission,
+    and the rebuild resumes from the tail's last token (the round's bonus,
+    whose KV is not in the cache)."""
+    from mlx_vlm.generate import ar
+    from gmlx.spec_engine import install_continuous_batch_admission
+
+    install_continuous_batch_admission()
+    calls = []
+    monkeypatch.setattr(ar, "run_speculative_server_rounds",
+                        _capturing_rounds(calls))
+
+    model = SimpleNamespace()
+    host = _make_batch(ar, uids=(0,), model=model)
+    assert [r.token for r in host.next()] == [5]
+    assert [r.token for r in host.next()] == [101]
+
+    host.extend(_make_batch(ar, uids=(7,), model=model))
+    responses = host.next()
+    assert calls[0]["closed"] is True
+    assert len(calls) == 2
+    assert calls[1]["first_bonus"].tolist() == [103]
+    # first token + round token + two captured
+    assert model._kq_rebuild_emitted == [4]
+    assert [(r.uid, r.token) for r in responses] == [
+        (0, 102), (0, 103), (7, 12), (0, 201), (7, 201)]
+
+
+def test_preempt_captured_tail_finishes_row(monkeypatch):
+    """A captured token that exhausts the budget finishes the row: the tail
+    truncates at the finish, no rebuild happens, and the waiter promotes."""
+    from mlx_vlm.generate import ar
+    from gmlx.spec_engine import install_continuous_batch_admission
+
+    install_continuous_batch_admission()
+    calls = []
+    monkeypatch.setattr(ar, "run_speculative_server_rounds",
+                        _capturing_rounds(calls))
+
+    model = SimpleNamespace()
+    host = _make_batch(ar, uids=(0,), model=model, max_tokens=3)
+    host.next()
+    host.next()
+    host.extend(_make_batch(ar, uids=(7,), model=model))
+
+    responses = host.next()
+    assert len(calls) == 1                       # no rebuild
+    assert responses[0].uid == 0
+    assert responses[0].token == 102
+    assert responses[0].finish_reason == "length"
+    # 103 dropped past the finish; the waiter promoted and sent its first
+    assert [(r.uid, r.token) for r in responses[1:]] == [(7, 12)]
+
+
+# -- gated injection: double buffer consumed, never discarded --------------
+
+
+class _InputLogEchoLM(_VerifyEchoLM):
+    def __init__(self):
+        super().__init__()
+        self.plain_inputs = []
+
+    def __call__(self, x, cache=None, return_hidden=False,
+                 return_shared_kv=False, **kw):
+        if not return_hidden:
+            self.plain_inputs.append(x.reshape(-1).tolist())
+        return super().__call__(x, cache=cache, return_hidden=return_hidden,
+                                return_shared_kv=return_shared_kv, **kw)
+
+
+def test_injection_consumes_gated_double_buffer():
+    """An injection landing while the gated buffer holds a dispatched step
+    consumes that step (no forward) and admits at the next boundary. The
+    old discard re-forwarded the step's inputs, double-writing their KV
+    and skipping one delivered token per row."""
+    d = _StrictDrafter(cap=1)
+    model = SimpleNamespace()
+    lm = _InputLogEchoLM()
+    prompt_cache = [_FakeCache(width=2)]
+    gen = _owned_decode_rounds_batch(
+        model, d, lm, prompt_cache,
+        hidden=None, b=[1, 2], shared_kv=None, seed_tokens=None,
+        emitted=[1, 1], max_tokens=10, sampler=None,
+        draft_block_size=None)
+    toks, _ = next(gen)
+    assert toks == [2, 3]
+    assert lm.plain_inputs == [[1, 2], [2, 3]]   # prime + dispatch
+
+    model._generator_injections = [{
+        "uids": ["w"],
+        "prompt_cache": [_FakeCache(width=1, offset=9)],
+        "hidden": mx.zeros((1, 1, 8)),
+        "prompt_tokens": mx.zeros((1, 4), dtype=mx.int32),
+        "first_tokens": mx.array([7], dtype=mx.int32),
+        "first_tokens_list": [7],
+        "shared_kv_states": None,
+    }]
+    toks, _ = next(gen)
+    # hold round: the buffered step is emitted with no new forward
+    assert toks == [3, 4]
+    assert lm.plain_inputs == [[1, 2], [2, 3]]
+
+    toks, _ = next(gen)
+    gen.close()
+    # admission landed; every forwarded input advanced exactly once per row
+    assert toks == [4, 5, 8]
+    assert lm.plain_inputs[2][:2] == [3, 4]

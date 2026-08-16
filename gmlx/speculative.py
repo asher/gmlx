@@ -886,6 +886,24 @@ def _owned_decode_rounds(
                     delivered += 1
                     yield tok
             except GeneratorExit:
+                capture = getattr(model, "_kq_preempt_capture", None)
+                if capture is not None:
+                    # Preempt close, not a stop: the round completed and
+                    # verified, so the undelivered tail is real output.
+                    # Hand it to the rebuilder instead of trimming it --
+                    # a trim here loses one token per preempt, because the
+                    # rebuild re-forwards the last DELIVERED token whose
+                    # KV the trim left in the cache (duplicate position)
+                    # and the first undelivered token never reaches the
+                    # wire. Keep the accepts (normal round-end state);
+                    # the bonus stays out of the cache as the rebuild's
+                    # first input.
+                    capture.extend(int(t) for t in new_tokens[delivered:])
+                    if _has_rollback and accepted < bs - 1:
+                        with mx.stream(generation_stream):
+                            _rollback_fn(prompt_cache, verify.gdn_states,
+                                         accepted, bs)
+                    raise
                 # Consumer stopped mid-round (EOS / stop string). Roll the target
                 # cache back to exactly the delivered tokens so the finish seam
                 # sees KV consistent with what was consumed (APC retirement
@@ -1145,6 +1163,12 @@ def owned_server_rounds(
         # the locals, so this can't double-store. See _retire_b1.
         if rounds is not None:
             rounds.close()
+        if (retire_ctx is not None
+                and getattr(model, "_kq_preempt_capture", None) is not None):
+            # Preempt close: the cache keeps the captured round tail past
+            # `generated`, so a snapshot here would disagree with the
+            # delivered stream. The rebuilt row drops retirement by design.
+            retire_ctx = None
         if retire_ctx is not None:
             _retire_b1(model, prompt_cache, generated, retire_ctx,
                        drafter=drafter, sidecar_ctx=sidecar_ctx)
@@ -1767,8 +1791,10 @@ def _owned_decode_rounds_batch(
 
     # Double buffer for gated (plain-decode) rounds: the tokens the GPU is
     # already computing. None means "re-prime", set whenever the batch shape
-    # changes under us (injection, row retirement, adoption).
+    # changes under us (row retirement, adoption). An injection instead
+    # holds admission one round so the buffer is consumed, never discarded.
     _gated_pending = None
+    _inject_hold = False
 
     def _gated_step(inputs):
         """One plain target decode step: [n_active] tokens in, [n_active] out.
@@ -1836,13 +1862,20 @@ def _owned_decode_rounds_batch(
 
     def _drain_injections():
         # continuous-batch injection
-        nonlocal hidden, B_orig, _gated_pending
+        nonlocal hidden, B_orig, _gated_pending, _inject_hold
         gen_inj = getattr(model, "_generator_injections", None)
         if gen_inj:
+            if _gated_pending is not None:
+                # The buffer holds a dispatched step whose input KV is
+                # already in the target cache; it must be consumed, never
+                # discarded. Discarding skips one delivered token per row,
+                # and the re-prime re-forwards its inputs, duplicating
+                # their KV. Hold admission one round: the caller consumes
+                # the step without re-dispatching, and the next boundary
+                # admits with the buffer empty.
+                _inject_hold = True
+                return
             n_before = B_orig
-            # The batch is about to widen; anything already dispatched was
-            # shaped for the old width, so re-prime rather than slice.
-            _gated_pending = None
             # Trip BEFORE processing: a tripping drain must not pay
             # inject_rows, which teacher-forces the whole injected prompt
             # through a drafter this batch will never use again. The queue can
@@ -1951,7 +1984,8 @@ def _owned_decode_rounds_batch(
         # dispatched next step whose input KV is already in the cache, so it
         # must be consumed, never discarded: one more plain round runs
         # without re-dispatching, and the round after that arms.
-        dispatch_next = True
+        dispatch_next = not _inject_hold
+        _inject_hold = False
         if gated and _resume_ready():
             if _gated_pending is None:
                 gated = False

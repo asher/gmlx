@@ -1610,12 +1610,15 @@ def install_continuous_batch_admission() -> None:
 
     def _preempt_scalar(self) -> bool:
         """Preempt a live scalar (B=1) spec generation so queued rows can
-        join: close the generator at its round boundary (its GeneratorExit
-        handler rolls the target cache back to the delivered tokens), lift
-        the caches to batch classes, and mark the batch armless
-        (hidden=None); _start_rounds then rebuilds it on the batch loop,
-        whose first injection drain admits the waiters. GMLX_MTP_PREEMPT=0
-        leaves the old drain-wait behavior.
+        join: close the generator, deliver the closed round's undelivered
+        tail (the scalar path yields one token per next(), so a close
+        usually lands mid-round; those tokens are verified and their KV
+        stays in the cache), lift the caches to batch classes, and mark
+        the batch armless (hidden=None); _start_rounds then rebuilds it on
+        the batch loop, whose first injection drain admits the waiters.
+        The rebuild resumes from the round's bonus token, whose KV is not
+        in the cache. GMLX_MTP_PREEMPT=0 leaves the old drain-wait
+        behavior.
 
         The rebuilt row carries no APC retirement context (batch-loop rows
         start with retire_ctxs None), so the preempted request's prefix is
@@ -1628,9 +1631,36 @@ def install_continuous_batch_admission() -> None:
         if last is None:
             return False
         it = self._rounds_iter
+        captured = []
         if it is not None:
             self._rounds_iter = None
-            it.close()
+            self.model._kq_preempt_capture = captured
+            try:
+                it.close()
+            finally:
+                try:
+                    del self.model._kq_preempt_capture
+                except AttributeError:
+                    pass
+        responses = []
+        uid = self._all_uids[0]
+        for tok in captured:
+            if self._finished[0]:
+                break
+            tok = int(tok)
+            self._num_tokens[0] += 1
+            finish = self._finish_reason(0, tok)
+            if finish is not None:
+                self._finished[0] = True
+            responses.append(self.Response(
+                uid=uid, token=tok, token_logprob=0.0, finish_reason=finish))
+            last = tok
+        self._kq_preempt_responses = responses
+        if self._finished[0]:
+            # The captured tail finished the row; nothing to rebuild. The
+            # pending injections promote through __len__ once drained.
+            self._refresh_uids()
+            return False
         self.prompt_cache = [_lift_host_cache(c) for c in self.prompt_cache]
         self.first_tokens = mx.array([int(last)], dtype=self.token_dtype)
         self.hidden = None
@@ -1653,8 +1683,11 @@ def install_continuous_batch_admission() -> None:
         preempted = False
         if pending and len(self._all_uids) == 1:
             preempted = _preempt_scalar(self)
+        # The preempt capture: verified tokens the closed round had not yet
+        # delivered. They precede everything this call returns.
+        pre_responses = self.__dict__.pop("_kq_preempt_responses", None) or []
         if pending and (len(self._all_uids) > 1 or preempted):
-            responses = []
+            responses = list(pre_responses)
             gen_inj = getattr(self.model, "_generator_injections", None)
             if gen_inj is None:
                 self.model._generator_injections = []
@@ -1703,7 +1736,7 @@ def install_continuous_batch_admission() -> None:
             _release_if_finished(self)
             return responses
 
-        responses = _orig_next(self)
+        responses = pre_responses + _orig_next(self)
         _note_last_tokens(self, responses)
         _release_if_finished(self)
         return responses
