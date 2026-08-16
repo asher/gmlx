@@ -13,12 +13,43 @@ KV+GDN sub-caches).
 from __future__ import annotations
 
 import logging
+import weakref
 from collections import OrderedDict
 from typing import Any
 
 import mlx.core as mx
 
 _log = logging.getLogger(__name__)
+
+# Module-wide counters, merged into /v1/cache/stats: spec-path reuse is
+# invisible to the APC manager's counters, and a warm turn served from
+# this cache must not read as a cold miss (one live model per server).
+_HITS = 0
+_HIT_TOKENS = 0
+_STORES = 0
+_LIVE_CACHES: "weakref.WeakSet[SpecPrefixCache]" = weakref.WeakSet()
+
+
+def spec_prefix_stats() -> dict:
+    return {
+        "spec_prefix_hits": _HITS,
+        "spec_prefix_hit_tokens": _HIT_TOKENS,
+        "spec_prefix_stores": _STORES,
+    }
+
+
+def spec_prefix_stats_clear() -> None:
+    global _HITS, _HIT_TOKENS, _STORES
+    _HITS = 0
+    _HIT_TOKENS = 0
+    _STORES = 0
+
+
+def clear_all_spec_prefix_caches() -> None:
+    """Drop every live cache's entries (the /v1/cache/reset memory
+    contract: pinned snapshots run to GBs and must not survive it)."""
+    for cache in list(_LIVE_CACHES):
+        cache.clear()
 
 _CACHELIST_TAG = "_CacheList"
 _ARRAYS_TAG = "_ArraysCache"
@@ -239,6 +270,7 @@ class SpecPrefixCache:
         self._min_prefix = min_prefix
         self._max_bytes = max_bytes
         self._total_bytes = 0
+        _LIVE_CACHES.add(self)
 
     def lookup(
         self, token_ids: mx.array
@@ -267,6 +299,9 @@ class SpecPrefixCache:
 
         if best is not None and best_len >= self._min_prefix:
             self._entries.move_to_end(best[1].token_ids)
+            global _HITS, _HIT_TOKENS
+            _HITS += 1
+            _HIT_TOKENS += best_len
             return best
         return None
 
@@ -313,6 +348,8 @@ class SpecPrefixCache:
         self._entries[ids] = entry
         self._entries.move_to_end(ids)
         self._total_bytes += entry.nbytes
+        global _STORES
+        _STORES += 1
 
         while self._entries and (
             len(self._entries) > self._max

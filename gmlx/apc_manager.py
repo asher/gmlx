@@ -86,14 +86,18 @@ class GmlxAPCManager(_apc.APCManager):
         wrap: super() + merge). Visible at /v1/cache/stats -- a ckpt
         model with zeroed ckpt_* keys is broken, not idle."""
         from .cache_snapshot import ckpt_stats_snapshot
+        from .prefix_cache import spec_prefix_stats
         snap = super().stats_snapshot()
         snap.update(ckpt_stats_snapshot(self))
+        snap.update(spec_prefix_stats())
         return snap
 
     def reset_stats(self) -> None:
         from .cache_snapshot import ckpt_stats_clear
+        from .prefix_cache import spec_prefix_stats_clear
         super().reset_stats()
         ckpt_stats_clear(self)
+        spec_prefix_stats_clear()
 
     def clear(self) -> None:
         """Stock clear plus the ckpt tier: the pool wipe zeroes the block
@@ -102,9 +106,13 @@ class GmlxAPCManager(_apc.APCManager):
         lookup can never pin a record between the pool wipe and the
         record drop."""
         from .cache_snapshot import ckpt_reset
+        from .prefix_cache import clear_all_spec_prefix_caches
         with self.lock:
             super().clear()
             ckpt_reset(self)
+        # Outside the manager lock: the spec prefix cache has its own
+        # lifetime and its pinned snapshots must not survive a reset.
+        clear_all_spec_prefix_caches()
 
     def store_ckpt_blocks(self, token_ids, layer_keys, layer_values,
                           *, extra_hash=0, disk=True):
