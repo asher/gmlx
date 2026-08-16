@@ -31,10 +31,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unwidened. Both now widen to float32 first (greedy paths unchanged).
 - MiniMax MSA indexer projections stay F32 under float16 activations; the
   bfloat16 exact-bit narrowing does not exist at float16.
-- Non-streamed ATEM/harmony replies (Muse Glimmer, gpt-oss) lost the leading
-  indentation of their first content line: the reasoning splitter stripped
-  all whitespace instead of only marker-adjacent newlines. Verbatim code
-  answers came back misindented on line one.
+- Non-streamed replies lost the leading indentation of their first content
+  line: the reasoning splitters (ATEM/harmony and the think-tag path all
+  served models use) stripped all content whitespace. Verbatim code answers
+  came back misindented on line one. Content now keeps first-line indent
+  and still drops leading blank lines and trailing whitespace.
 - gemma-4 applied the final logit softcap at the activation dtype, rounding
   every logit by up to ~0.12 nats at bfloat16 and flipping near-tie top-1
   picks. The softcap now computes in float32 and emits float32 logits, like

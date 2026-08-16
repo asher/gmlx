@@ -330,6 +330,39 @@ def test_nonstream_split_strips_xtml_section_markers():
         sp_chat._LAST_RENDERED_PROMPT.reset(tok)
 
 
+def test_nonstream_split_keeps_first_line_code_indent():
+    """The stock splitter .strip()s content, which deletes the first line's
+    leading indent from verbatim-code replies. The seeded splitter trims
+    newlines only, for every marker branch and the no-marker fallthrough."""
+    app_mod = importlib.import_module("mlx_vlm.server.app")
+    rs = importlib.import_module("mlx_vlm.server.responses_state")
+    sp.install_stream_thinking_seed()
+    split = app_mod._split_thinking_text
+    tok = sp_chat._LAST_RENDERED_PROMPT.set(None)
+    try:
+        # open+close pair
+        r, c = split("<think>plan</think>\n\n    if x:\n        y()")
+        assert r == "plan"
+        assert c == "    if x:\n        y()"
+        # close-only (prompt-opened block)
+        r, c = split("plan\n</think>\n\n\tdoc = doc || document;")
+        assert r == "plan"
+        assert c == "\tdoc = doc || document;"
+        # no marker at all
+        assert split("    indented") == (None, "    indented")
+        # whitespace-only content collapses to empty
+        assert split("<think>plan</think>\n  \n") == ("plan", "")
+        # XTML section strip keeps the indent too
+        text = ("plan<|close|>think<|sep|><|open|>response<|sep|>"
+                "    return 4;<|close|>response<|sep|><|end_of_msg|>")
+        r, c = split(text, "<|open|>think<|sep|>", "<|close|>think<|sep|>")
+        assert c == "    return 4;"
+        # the /v1/responses module global got the same splitter
+        assert rs._split_thinking is split
+    finally:
+        sp_chat._LAST_RENDERED_PROMPT.reset(tok)
+
+
 def test_install_thinking_budget_fix_applies_and_idempotent():
     # Fail-loud guard: asserts the seam bound to the REAL mlx-vlm symbol, so a
     # rename of ResponseGenerator._make_thinking_budget_criteria turns into a CI
