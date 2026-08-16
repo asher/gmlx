@@ -47,6 +47,11 @@ Phases against one model:
   churn         distinct mid-size prefixes cycle records through the ckpt
                 LRU, then the original replay must still serve correctly
                 with no exception-declines
+  burst         (block/exact) K siblings sharing a cold user-turn prefix
+                fire at once; on the block tier the fresh gate must hold
+                the followers for the leader's stores so they admit warm,
+                on the exact tier the numbers are noted (user-turn stores
+                land at retirement, past the hold ceiling)
   session       (only with --session N) an agent-shaped conversation on a
                 dedicated server: N turns of growing history with streamed
                 replies, tool-call/tool-role messages, a mid-stream client
@@ -767,39 +772,49 @@ def main() -> int:
 
         # -- anchor (only with --system-words) ------------------------------
         # A shared agent-shaped system prompt makes the divergent request a
-        # sibling: it must restore the system block from the anchor stored
-        # during the cold request, on every tier. Without --system-words the
-        # divergence sits a few tokens in and no anchor arms at all, which
-        # is why this gate is opt-in rather than always on.
+        # sibling: on the ckpt and exact tiers it must restore the system
+        # block from the anchor stored during the cold request; the block
+        # tier serves the same prefix from the block chain with no anchor.
+        # Without --system-words the divergence sits a few tokens in and no
+        # anchor arms at all, which is why this gate is opt-in.
         if a.system_words > 0 and not a.no_system:
             st_all = stats(base)
-            anchored = int(st_all.get("anchor_stores", 0) or 0) + int(
-                st_all.get("ckpt_stores", 0) or 0
-            )
             # ~1.3 tok/word, less the template scaffolding and the grid or
             # chunk snap the ckpt tier applies below the boundary.
             anchor_floor = int(a.system_words * 0.6)
-            rep.check(
-                "anchor.armed",
-                anchored > 0,
-                f"anchor_stores={st_all.get('anchor_stores', 0)} "
-                f"ckpt_stores={st_all.get('ckpt_stores', 0)}",
-            )
             rep.check(
                 "anchor.divergent_adopted",
                 dm >= anchor_floor,
                 f"divergent matched +{dm} >= system-anchor floor "
                 f"{anchor_floor} ({a.system_words} system words)",
             )
-            served = int(st_all.get("anchor_hits", 0) or 0) + int(
-                st_all.get("ckpt_hits", 0) or 0
-            )
-            rep.check(
-                "anchor.served",
-                served > 0,
-                f"anchor_hits={st_all.get('anchor_hits', 0)} "
-                f"ckpt_hits={st_all.get('ckpt_hits', 0)}",
-            )
+            if a.tier == "block":
+                # Pure-KV models never enter the anchor code: the stock
+                # block tier already serves siblings at block granularity.
+                rep.note(
+                    "anchor.scope",
+                    "block tier serves the system prefix from the block "
+                    "chain; no anchor arms",
+                )
+            else:
+                anchored = int(st_all.get("anchor_stores", 0) or 0) + int(
+                    st_all.get("ckpt_stores", 0) or 0
+                )
+                rep.check(
+                    "anchor.armed",
+                    anchored > 0,
+                    f"anchor_stores={st_all.get('anchor_stores', 0)} "
+                    f"ckpt_stores={st_all.get('ckpt_stores', 0)}",
+                )
+                served = int(st_all.get("anchor_hits", 0) or 0) + int(
+                    st_all.get("ckpt_hits", 0) or 0
+                )
+                rep.check(
+                    "anchor.served",
+                    served > 0,
+                    f"anchor_hits={st_all.get('anchor_hits', 0)} "
+                    f"ckpt_hits={st_all.get('ckpt_hits', 0)}",
+                )
 
         # -- turns ---------------------------------------------------------
         # A real conversation through the real chat template: the
@@ -1173,6 +1188,110 @@ def main() -> int:
                     f"ckpt_stores {d0.get('ckpt_stores')} at churn end, "
                     f"replay matched +{dm}",
                 )
+
+        # -- sibling burst -------------------------------------------------
+        # Unit 4 fresh gate: K siblings sharing a cold user-turn prefix
+        # arrive together. On the block tier the followers must end warm
+        # (held for the leader's post-prefill stores). The exact tier
+        # stores user-turn prefixes only at retirement, beyond the hold
+        # ceiling, so its numbers are reported, not gated. Ckpt-tier
+        # models admit one row at a time; no co-admission window exists.
+        if a.tier == "ckpt":
+            rep.note(
+                "burst.scope",
+                "ckpt tier admits B=1; no co-admission window to gate",
+            )
+        else:
+            burst_text, n_burst = deep_prefix(
+                a.prefix_words // 2, header="Sibling-burst variant log.\n"
+            )
+            eb = n_burst // 2
+            fb = entry_facts(eb)
+            plug_text, n_plug = deep_prefix(2000, header="Burst plug log.\n")
+            m0 = tick(K["matched"])
+            fr0 = ((Client(base).metrics()[1] or {}).get("server")
+                   or {}).get("freshness") or {}
+
+            def fire_plug():
+                # unrelated prefill in flight while the siblings land, so
+                # they queue up and co-admit in one formation tick -- the
+                # exact window the fresh gate exists for
+                return chat(
+                    base,
+                    mid,
+                    mk_msgs(plug_text + "Say ok."),
+                    max_tokens=16,
+                )
+
+            def fire_sib(i):
+                return chat(
+                    base,
+                    mid,
+                    mk_msgs(
+                        burst_text
+                        + f"Sibling {i}: how many units did entry {eb} "
+                        "report? Answer with just the number."
+                    ),
+                    max_tokens=64,
+                )
+
+            t0 = time.monotonic()
+            with ThreadPoolExecutor(max_workers=a.concurrency + 1) as ex:
+                fut_plug = ex.submit(fire_plug)
+                time.sleep(0.25)
+                futs = [ex.submit(fire_sib, i) for i in range(a.concurrency)]
+                bres = [f.result() for f in futs]
+                plug_res = fut_plug.result()
+            b_wall = time.monotonic() - t0
+            settle(K["stores"])
+            dm = tick(K["matched"]) - m0
+            fr1 = ((Client(base).metrics()[1] or {}).get("server")
+                   or {}).get("freshness") or {}
+            d_holds = int(fr1.get("holds", 0) or 0) - int(
+                fr0.get("holds", 0) or 0
+            )
+            rep.check(
+                "burst.status",
+                all(st == 200 and text for st, text, _, _, _ in bres)
+                and plug_res[0] == 200,
+                f"{a.concurrency} cold siblings behind a plug prefill, "
+                f"{b_wall:.1f}s wall",
+            )
+            rep.check(
+                "burst.coherent",
+                all(
+                    re.search(rf"\b{fb['reading']}\b", text)
+                    for _, text, _, _, _ in bres
+                ),
+                f"entry {eb} -> {fb['reading']} units in every reply",
+            )
+            floor = int(0.6 * (a.prefix_words // 2)) * (a.concurrency - 1)
+            if a.tier == "block":
+                rep.check(
+                    "burst.gate_held",
+                    d_holds >= 1,
+                    f"fresh holds +{d_holds} (>=1: the siblings "
+                    "co-admitted and a follower was deferred)",
+                )
+                rep.check(
+                    "burst.followers_warm",
+                    dm >= floor,
+                    f"matched +{dm} >= floor {floor} "
+                    f"({a.concurrency - 1} followers), fresh holds "
+                    f"+{d_holds}",
+                )
+            else:
+                rep.note(
+                    "burst.followers",
+                    f"matched +{dm} (floor would be {floor}), fresh "
+                    f"holds +{d_holds}; exact tier stores user-turn "
+                    "prefixes at retirement, past the hold ceiling",
+                )
+            rep.note(
+                "burst.fresh_holds",
+                f"+{d_holds} (last reason "
+                f"{str(fr1.get('last_hold_reason'))[:80]!r})",
+            )
 
     # -- bitrate-b isolation ------------------------------------------------
     # Only meaningful when a second KV width is requested: the namespaces
