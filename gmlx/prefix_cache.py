@@ -23,6 +23,7 @@ _log = logging.getLogger(__name__)
 _CACHELIST_TAG = "_CacheList"
 _ARRAYS_TAG = "_ArraysCache"
 _POOLING_TAG = "_PoolingCache"
+_QUANT_TAG = "_QuantizedKV"
 
 
 def _trim_rotating_state(c: Any, keys: mx.array, values: mx.array):
@@ -91,7 +92,16 @@ def _snapshot_entry(c: Any) -> Any:
     if isinstance(c, cache_types("ArraysCache")):
         return (_ARRAYS_TAG, list(c.cache), c.left_padding, c.lengths)
     state = c.state
-    offset = getattr(c, "offset", state[0].shape[2])
+    if isinstance(state[0], (tuple, list)):
+        # Quantized KV (spec KV_BITS path): a (packed, scales, biases)
+        # triple per side, trimmed to offset by the state property. Group
+        # quantization runs along head_dim, so the seq axis slices freely.
+        keys = tuple(mx.contiguous(a) for a in state[0])
+        values = tuple(mx.contiguous(a) for a in state[1])
+        return (_QUANT_TAG, keys, values, int(c.offset))
+    offset = getattr(c, "offset", None)
+    if offset is None:
+        offset = state[0].shape[2]
     _idx = getattr(c, "_idx", 0)
     if isinstance(c, cache_types("RotatingKVCache")):
         # When no trim/reorder applies, the returned arrays are the live ring
@@ -122,6 +132,12 @@ def _restore_entry(c: Any, snap: Any) -> None:
                    for a in cache_list]
         c.left_padding = left_padding
         c.lengths = lengths
+        return
+    if isinstance(snap, tuple) and snap[0] == _QUANT_TAG:
+        _, keys, values, offset = snap
+        c.keys = tuple(mx.contiguous(a) for a in keys)
+        c.values = tuple(mx.contiguous(a) for a in values)
+        c.offset = offset
         return
     keys, values, offset, _idx = snap
     c.keys, c.values = _owned_pair(keys, values)
@@ -155,6 +171,9 @@ def _collect_snapshot_arrays(snaps: list[Any], out: list[mx.array]) -> None:
                 out.append(left_padding)
             if lengths is not None:
                 out.append(lengths)
+        elif isinstance(snap, tuple) and len(snap) == 4 and snap[0] == _QUANT_TAG:
+            out.extend(snap[1])
+            out.extend(snap[2])
         elif isinstance(snap, tuple) and len(snap) == 4:
             out.extend([snap[0], snap[1]])
 
