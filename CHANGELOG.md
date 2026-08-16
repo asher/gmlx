@@ -18,6 +18,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   disables).
 - `seed` is now honored per request inside a batch. Before, only the first
   request's seed took effect and it colored every row.
+- Short prompts on sliding-window models now cache their block-aligned
+  prefix at retirement instead of nothing, so an immediate follow-up
+  turn starts warm.
 
 ## [0.3.2] - 2026-08-13
 

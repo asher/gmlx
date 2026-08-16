@@ -144,9 +144,11 @@ def test_retirement_uses_newest_snap_at_or_below_lcp():
 
 
 def test_retirement_rotating_uses_grid_snap():
-    """Below the window an off-grid retirement still needs the aligned
-    decode snapshot (beyond it the full sequence stores directly -- see
-    test_retirement_rotating_off_grid_beyond_window_stores)."""
+    """When the whole-sequence store cannot run (replayable prefix
+    below the full length), the aligned decode snapshot still serves a
+    rotating retirement. With no cap the same shape now stores its
+    grid prefix directly -- see
+    test_retirement_rotating_short_prompt_stores_grid_prefix."""
     from test_ckpt_tier import assert_swa_warm_matches, make_swa_cache
 
     man = APCManager(num_blocks=64, block_size=16)
@@ -155,7 +157,7 @@ def test_retirement_rotating_uses_grid_snap():
     cache = make_swa_cache(n, seed=21)
     snap_src = make_swa_cache(16, seed=22)
     states = [c for c in snap_src if hasattr(c, "max_size")]
-    assert retirement_store(man, "ckpt", ids, cache,
+    assert retirement_store(man, "ckpt", ids, cache, max_len=20,
                             decode_snaps=[(16, states)])
     warm, got = ckpt_lookup(man, ids[:16] + [1], extra_hash=0)
     assert got == 16 and warm is not None
