@@ -290,6 +290,13 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
         prefix_len = 0
         tier = "exact"
         pick = view._apc_pick_for((0, ids_list, 0, prompt_kwargs, None, None))
+        # Same trivial-pick floor as the admission wrapper: a sub-block
+        # exact restore saves nothing and its nonzero l1_prefix would skip
+        # the L0 hidden store for this request.
+        if (pick is not None and not pick.get("matched_blocks")
+                and 0 < int(pick.get("prefix_len") or 0)
+                < int(manager.block_size)):
+            pick = None
         if pick is not None:
             warm = pick.get("warm_cache")
             blocks = list(pick.get("matched_blocks") or ())
@@ -928,6 +935,15 @@ def _install_exact_anchor_pick() -> None:
             _uid, ids_list, _mt, prompt_kwargs, _lps, _crit = sequence
             if not ids_list or len(ids_list) < 2:
                 return pick
+            # Floor trivial exact picks: a sub-block restore (a bare-BOS
+            # match off an unrelated request) saves nothing but suffix-
+            # constructs the batch, knocking the spec path's ids out of
+            # render space (anchor + retirement keys). Real warm picks are
+            # thousands of tokens and pass untouched.
+            if (pick is not None and not pick.get("matched_blocks")
+                    and 0 < int(pick.get("prefix_len") or 0)
+                    < int(manager.block_size)):
+                pick = None
             have = int((pick or {}).get("prefix_len") or 0)
             extra_hash = self._apc_extra_hash(prompt_kwargs or {})
             floor = max(have, self._apc_safe_prefix_lookup_min(ids_list))
@@ -1079,6 +1095,7 @@ def _mtp_prefill_init(batch) -> None:
     batch._mtp_l1_prefix_len = 0
 
     if batch._inputs_embeds is None:
+        _log.info("KQDBG mtp_prefill_init: inputs_embeds None, ladder skipped")
         return
 
     # Gated to B=1 because PromptProcessingBatch prefills one request at a
