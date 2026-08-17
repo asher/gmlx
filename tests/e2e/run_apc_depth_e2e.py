@@ -554,6 +554,14 @@ def main() -> int:
         "empty content and the turn chain degenerates",
     )
     ap.add_argument(
+        "--system-suffix",
+        default=None,
+        metavar="TEXT",
+        help="text appended to every system message, e.g. 'Reasoning "
+        "strength: low.' for ATEM reasoning models whose default strength "
+        "meanders past any reply budget at depth",
+    )
+    ap.add_argument(
         "--require-idle",
         action="store_true",
         help="hard-fail instead of warning when the machine is loaded at "
@@ -659,11 +667,12 @@ def main() -> int:
         f"{f2['reading']} units by {f2['technician']}"
     )
 
-    system_msg = agent_system(a.system_words) if a.system_words > 0 \
-        else SYSTEM_MSG
+    sfx = ("\n\n" + a.system_suffix) if a.system_suffix else ""
+    system_msg = (agent_system(a.system_words) if a.system_words > 0
+                  else SYSTEM_MSG) + sfx
 
     def mk_msgs(user_content: str, system: str | None = None) -> list:
-        system = system_msg if system is None else system
+        system = system_msg if system is None else system + sfx
         msgs = [] if a.no_system else [{"role": "system", "content": system}]
         msgs.append({"role": "user", "content": user_content})
         return msgs
@@ -1585,7 +1594,8 @@ def main() -> int:
             chat(base, mid, mk_msgs("Say ok."), max_tokens=4)
 
             root = (
-                [] if a.no_system else [{"role": "system", "content": SESSION_SYSTEM}]
+                [] if a.no_system
+                else [{"role": "system", "content": SESSION_SYSTEM + sfx}]
             )
             root = root + [{"role": "user", "content": prefix + q}]
             st, text, content, ptok, wall = chat(
@@ -1971,6 +1981,7 @@ def main() -> int:
         "speculative": a.speculative,
         "system_message": not a.no_system,
         "system_words": a.system_words or None,
+        "system_suffix": a.system_suffix,
         "template_kwargs": template_kwargs,
         "cold_wall_s": round(cold_wall, 1),
         "warm_wall_s": round(warm_wall, 1),
