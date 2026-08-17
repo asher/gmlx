@@ -174,6 +174,40 @@ def test_armless_capture_skips_entry_seed():
     assert len(d.prefill_calls) == 1
 
 
+class _WrongDraftDrafter(_ArmableDrafter):
+    """One deliberately wrong draft token per round, so every armed round
+    rejects at position 0 and takes the rollback seam."""
+
+    def draft_block(self, b, hidden, kv, n, sampler, dtype, **kw):
+        self.draft_calls.append(int(b.shape[0]))
+        return ((b[:, None] + 5) % VOCAB).astype(dtype)
+
+
+class _ScalarRollbackLM(_VerifyEchoLM):
+    """int(accepted) is the dsv4/muse scalar-only rollback contract: a
+    one-element list raises TypeError instead of recording."""
+
+    def __init__(self):
+        super().__init__()
+        self.rollback_accepted = []
+
+    def rollback_speculative_cache(self, prompt_cache, gdn_states, accepted,
+                                   block_size):
+        self.rollback_accepted.append(int(accepted))
+
+
+def test_width_one_rejection_calls_scalar_rollback():
+    """A width-1 batch spec round that rejects a draft must hand the rollback
+    hook that row's int, not a one-element list (models defining the hook are
+    B=1-limited, so wider spec rounds cannot reach it)."""
+    d = _WrongDraftDrafter(cap=1)
+    lm = _ScalarRollbackLM()
+    out, _, _ = _drive_armless(d, B=1, max_tokens=4, lm=lm)
+    assert lm.rollback_accepted and all(a == 0 for a in lm.rollback_accepted)
+    # the stream stays the plain echo chain despite every-round rejection
+    assert [toks for toks, _ in out] == [[2], [3], [4]]
+
+
 # -- resume (gated batch drains under the cap) ----------------------------
 
 

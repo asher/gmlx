@@ -2146,8 +2146,12 @@ def _owned_decode_rounds_batch(
 
         if any(a < bs - 1 for a in accepted_list) and _has_rollback:
             with mx.stream(generation_stream):
-                _rollback_fn(prompt_cache, verify.gdn_states,
-                             accepted_list, bs)
+                # Rollback hooks are scalar-only: every model that defines
+                # one is B=1-limited, so spec rounds with a rollback only
+                # run at width 1 here (wider batches gate at formation).
+                # Pass that row's int, not a one-element list.
+                acc = accepted_list[0] if n_active == 1 else accepted_list
+                _rollback_fn(prompt_cache, verify.gdn_states, acc, bs)
 
         if _needs_shared_kv and not gated:
             rejected_global = bs - (max_a + 1)
