@@ -406,6 +406,26 @@ def test_b_equals_cap_one_speculates():
         _drive(d, B=1, max_tokens=3)
 
 
+class _B1OnlyDrafter(_StrictDrafter):
+    """reset refuses any left_padding list, even the trivial [0] -- the
+    dsv4/muse B=1-only contract."""
+
+    def reset(self, model, left_padding=None):
+        if left_padding is not None:
+            raise NotImplementedError("B=1 only")
+        return super().reset(model, left_padding=left_padding)
+
+
+def test_b1_only_drafter_arms_bare_at_width_one():
+    """A width-1 batch (a preempted scalar rebuilds into the batch loop at
+    B=1) must arm a B=1-only drafter with a bare reset, not crash on the
+    trivial [0] padding list."""
+    d = _B1OnlyDrafter(cap=1, limit=1)
+    with pytest.raises(AssertionError, match="draft_block"):
+        _drive(d, B=1, max_tokens=3)
+    assert d.reset_calls == [None]
+
+
 def test_env_zero_ungates_a_capped_drafter(monkeypatch):
     monkeypatch.setenv("GMLX_MTP_WIDTH_CAP", "0")
     d = _StrictDrafter(cap=2)

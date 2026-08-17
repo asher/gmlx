@@ -1725,6 +1725,15 @@ def _owned_decode_rounds_batch(
             drafter.reset(model, left_padding=[0] * n)
         except (TypeError, ValueError):
             drafter.reset(model)
+        except NotImplementedError:
+            # B=1-only drafters refuse any padding list, even the trivial
+            # [0] a width-1 batch passes (a preempted scalar rebuilds into
+            # this loop at B=1; formation gates wider batches and
+            # injections trip the gate before crossing the cap). One row
+            # has no left padding, so the bare scalar arm is identical.
+            if n != 1:
+                raise
+            drafter.reset(model)
 
     # hidden=None with the gate open means no prefill capture exists (a
     # preempted scalar generation rebuilt into this loop): the first round
