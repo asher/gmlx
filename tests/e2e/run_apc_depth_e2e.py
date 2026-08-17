@@ -546,6 +546,14 @@ def main() -> int:
         help="skip the missed-adoption tripwire phase (boots a third server)",
     )
     ap.add_argument(
+        "--reply-tokens",
+        type=int,
+        default=SESSION_REPLY_TOKENS,
+        help="session-phase reply budget (default 512); reasoning-channel "
+        "models at depth need 2048+ or replies truncate mid-think with "
+        "empty content and the turn chain degenerates",
+    )
+    ap.add_argument(
         "--require-idle",
         action="store_true",
         help="hard-fail instead of warning when the machine is loaded at "
@@ -1581,7 +1589,7 @@ def main() -> int:
             )
             root = root + [{"role": "user", "content": prefix + q}]
             st, text, content, ptok, wall = chat(
-                base, mid, root, max_tokens=SESSION_REPLY_TOKENS
+                base, mid, root, max_tokens=a.reply_tokens
             )
             settle(K["stores"])
             # the session runs under its own system message, so the log
@@ -1633,7 +1641,7 @@ def main() -> int:
                     ]
                     m0 = reuse_tick()
                     st, text, content, ptok_t, wall = chat(
-                        base, mid, msgs, max_tokens=SESSION_REPLY_TOKENS
+                        base, mid, msgs, max_tokens=a.reply_tokens
                     )
                     dm = reuse_tick() - m0
                     turns_ok &= st == 200 and len(text) > 0
@@ -1738,14 +1746,14 @@ def main() -> int:
                         base,
                         mid,
                         msgs,
-                        max_tokens=1024 if is_abort else SESSION_REPLY_TOKENS,
+                        max_tokens=1024 if is_abort else a.reply_tokens,
                         abort_after=24 if is_abort else None,
                         **extra,
                     )
                     ptok_t = 0
                 else:
                     st, text, content, ptok_t, wall = chat(
-                        base, mid, msgs, max_tokens=SESSION_REPLY_TOKENS, **extra
+                        base, mid, msgs, max_tokens=a.reply_tokens, **extra
                     )
                     events = 0
                 if kind == "tool" and tool_state == "untried":
@@ -1760,7 +1768,7 @@ def main() -> int:
                         msgs = root + hist + block
                         m0 = reuse_tick()
                         st, text, content, ptok_t, wall = chat(
-                            base, mid, msgs, max_tokens=SESSION_REPLY_TOKENS
+                            base, mid, msgs, max_tokens=a.reply_tokens
                         )
                 dm = reuse_tick() - m0
                 if is_abort:
@@ -1959,6 +1967,7 @@ def main() -> int:
         "prefix_tokens": prefix_tok,
         "session_turns": a.session or None,
         "session_final_ptok": sess_final_ptok,
+        "reply_tokens": a.reply_tokens,
         "speculative": a.speculative,
         "system_message": not a.no_system,
         "system_words": a.system_words or None,
