@@ -341,6 +341,15 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
                     manager.release(blocks)
                     blocks = []
                 warm, prefix_len, tier = aw, ap, "anchor"
+        if warm and 0 < prefix_len < len(ids_list) and tier in (
+                "exact", "anchor"):
+            # Same batch-aware merge admission applies to its picks: raw
+            # exact/anchor clones carry single-row leaves (left_padding
+            # None, scalar offsets) and crash the batch cache classes'
+            # update path (mx.depends on a None) when the suffix forwards.
+            from mlx_vlm import apc as _apc
+            warm, _ = _apc.make_warm_batch_exact_cache_multi(
+                [warm], [prefix_len])
         if warm and 0 < prefix_len < len(ids_list):
             batch.prompt_cache = warm
             # Matched blocks stay acquired until the stock post-prefill
@@ -1114,6 +1123,18 @@ def _mtp_prefill_init(batch) -> None:
                 "(owned-path APC requires single-request prefill)", b)
         return
 
+    # Upstream admission already restored a prefix and built this batch
+    # suffix-only: the owned ladder's keys (L0 and L1 both) are full-prompt
+    # token ids, so every lookup and store here would run in the wrong
+    # space -- a suffix-keyed L0 entry cross-hits a later turn's suffix and
+    # its restore clobbers the upstream warm cache. Leave these batches to
+    # the stock machinery, which owns their meta and store schedule.
+    up_meta = getattr(batch, "_apc_meta", None) or []
+    if up_meta and isinstance(up_meta[0], dict) \
+            and int(up_meta[0].get("prefix_len") or 0) > 0:
+        batch._mtp_upstream_warm = True
+        return
+
     restored = 0
     spec_cache = _get_spec_prefix_cache(batch.model)
     if spec_cache is not None:
@@ -1440,7 +1461,8 @@ def install_full_prompt_mtp_prefill() -> None:
         b = int(full_hidden.shape[0]) if full_ids is not None else 0
         spec_cache = (
             _get_spec_prefix_cache(self.model)
-            if b == 1 and l1_prefix == 0 else None
+            if b == 1 and l1_prefix == 0
+            and not getattr(self, "_mtp_upstream_warm", False) else None
         )
         if spec_cache is not None and full_ids is not None:
             spec_cache.store(full_ids, result.prompt_cache, full_hidden)
