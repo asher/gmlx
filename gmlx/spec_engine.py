@@ -149,6 +149,21 @@ def _install_apc_manager_stash() -> None:
         except Exception:
             pass
         _orig_init(self, model, processor, **kwargs)
+        # APC arrived armed but upstream's quantized-KV opt-out dropped it
+        # (ar.py nulls the manager whenever kv_bits is set; no tier serves
+        # quantized caches). The mode probe still reads "block" for these
+        # models, so without this line the server boots silent and every
+        # request prefills cold. Draft-model batches are excluded: upstream
+        # nulls their manager by design and the owned ladder resolves (and
+        # warns) through _resolve_l1.
+        if (kwargs.get("apc_manager") is not None
+                and kwargs.get("kv_bits") is not None
+                and kwargs.get("draft_model") is None
+                and getattr(self, "apc_manager", None) is None):
+            _log.warning(
+                "APC OFF: KV quantization (kv_bits=%s) opts out of the "
+                "block APC tier upstream -- every request prefills cold",
+                kwargs.get("kv_bits"))
         # Ckpt-tier models form prompt batches one request at a time: the
         # owned APC declines B>1 prefill, so a coalesced burst would go
         # all-cold, and B>1 prompt batching is not a throughput win anyway
