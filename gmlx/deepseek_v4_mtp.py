@@ -109,8 +109,6 @@ class DeepseekV4SpecLM(v4.Model):
         super().__init__(config)
         # The verify rollback path needs the rotating undo log on the class.
         ensure_rollback_attached()
-        # Hard-disable the L1 shared-APC tier for V4 v1 (spec_engine reads it).
-        self._kq_apc_mode = None
         # Set by the DSpark loader: tuple of trunk layer ids whose hc-mean
         # outputs the drafter consumes. When set, every engine-facing hidden
         # is PACKED 3D: [raw_4d.flatten(hc) | cap_l0 | cap_l1 | ...].
