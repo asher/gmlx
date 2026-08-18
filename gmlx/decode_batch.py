@@ -1,18 +1,12 @@
 """Decode concurrency control (GMLX_DECODE_BATCH).
 
-completion_batch_size bounds how many requests decode together in one
-BatchGenerator step. Upstream defaults it to 32 and the server never
-passes the kwarg, so 32 is hard-wired on the serve path. Measured
-aggregate decode throughput saturates far below that on this hardware
-class (bandwidth-bound batched attention; see the lab batched-decode
-ladder): rows admitted past the knee add latency for every active
-request without adding tokens per second. The serve default here is
-deliberately small; raise it per deployment when the model and depths
-in play still measure gains past it.
+Bounds how many requests decode together in one batch step. Upstream
+hard-wires 32; aggregate throughput saturates well below that at depth
+while per-stream latency keeps degrading.
 
 Knobs:
     GMLX_DECODE_BATCH   decode concurrency (default 8; 0 = upstream
-                        default, currently 32)
+                        default)
 """
 
 from __future__ import annotations

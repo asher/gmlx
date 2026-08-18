@@ -137,9 +137,7 @@ def _install_apc_manager_stash() -> None:
     _orig_init = BatchGenerator.__init__
 
     def _init_with_stash(self, model, processor, **kwargs):
-        # The server never passes completion_batch_size, hard-wiring
-        # decode concurrency to upstream's 32. Inject the gmlx control
-        # (GMLX_DECODE_BATCH); explicit callers keep their value.
+        # upstream server never passes completion_batch_size; inject ours
         if "completion_batch_size" not in kwargs:
             from .decode_batch import decode_batch
             kwargs["completion_batch_size"] = decode_batch()

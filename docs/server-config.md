@@ -319,12 +319,9 @@ explicitly; default-max requests are never rejected on generation length.
 Media requests are not estimated in v1. `GMLX_PREFLIGHT_MEM=0` disables.
 
 Decode concurrency (how many requests generate tokens together in one batch
-step) defaults to 8. The upstream engine hard-wires it to 32, far past the
-point where aggregate throughput stops growing on measured hardware: extra
-rows past that knee slow every active request without producing more tokens
-per second overall. `GMLX_DECODE_BATCH` sets it (`0` restores the upstream
-default). Raise it only if your model and typical context depths still
-measure aggregate gains past 8.
+step) defaults to 8; past that width aggregate throughput gains shrink while
+every stream slows. `GMLX_DECODE_BATCH` sets it (`0` restores the upstream
+default of 32).
 
 Requests beyond the waiting-queue cap get an immediate HTTP 503 with a
 `Retry-After` header instead of queueing toward the token-queue timeout. The
