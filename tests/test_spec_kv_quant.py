@@ -132,6 +132,34 @@ def test_quantized_trim_rollback_exact():
             assert mx.array_equal(pa, pb).item()
 
 
+def test_prefix_cache_quantized_roundtrip():
+    # The spec prefix cache must snapshot quantized targets: state entries
+    # are (packed, scales, biases) triples, and the old array-only path
+    # crashed every MTP store under KV_BITS. Store, mutate the live cache,
+    # restore into a fresh one, and the pre-mutation triples must match.
+    from gmlx.prefix_cache import SpecPrefixCache
+
+    mx.random.seed(11)
+    a = QuantizedKVCache(group_size=64, bits=8)
+    _fill(a, [mx.random.normal((1, 2, 40, 64)).astype(mx.bfloat16)])
+    ref = [tuple(mx.contiguous(x) for x in side) for side in a.state]
+    cache = SpecPrefixCache()
+    cache.store(mx.array(list(range(40))), [a], mx.zeros((1, 1, 8)))
+    _fill(a, [mx.random.normal((1, 2, 5, 64)).astype(mx.bfloat16)])
+
+    hit = cache.lookup(mx.array(list(range(41))))
+    assert hit is not None and hit[0] == 40
+    b = QuantizedKVCache(group_size=64, bits=8)
+    cache.restore(hit[1], [b])
+    assert b.offset == 40
+    for got, want in zip((b.keys, b.values), ref):
+        for pg, pw in zip(got, want):
+            assert mx.array_equal(pg, pw).item()
+    # restored cache must keep decoding past the snapshot point
+    b.update_and_fetch(*2 * (mx.random.normal((1, 2, 1, 64)).astype(mx.bfloat16),))
+    assert b.offset == 41
+
+
 def _dequant_ref(q, qc, scale):
     # upstream per-token verify loop on dequantized KV
     keys = mx.dequantize(*qc.keys, group_size=qc.group_size, bits=qc.bits)

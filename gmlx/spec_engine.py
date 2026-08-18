@@ -137,6 +137,10 @@ def _install_apc_manager_stash() -> None:
     _orig_init = BatchGenerator.__init__
 
     def _init_with_stash(self, model, processor, **kwargs):
+        # upstream server never passes completion_batch_size; inject ours
+        if "completion_batch_size" not in kwargs:
+            from .decode_batch import decode_batch
+            kwargs["completion_batch_size"] = decode_batch()
         # Kill switch (re-read per call): with spec APC off, stock ar.py
         # must not see the manager on the speculative path either -- since
         # mlx-vlm 0.6.4 its own post-prefill exact store handles B=1 MTP
@@ -149,6 +153,21 @@ def _install_apc_manager_stash() -> None:
         except Exception:
             pass
         _orig_init(self, model, processor, **kwargs)
+        # APC arrived armed but upstream's quantized-KV opt-out dropped it
+        # (ar.py nulls the manager whenever kv_bits is set; no tier serves
+        # quantized caches). The mode probe still reads "block" for these
+        # models, so without this line the server boots silent and every
+        # request prefills cold. Draft-model batches are excluded: upstream
+        # nulls their manager by design and the owned ladder resolves (and
+        # warns) through _resolve_l1.
+        if (kwargs.get("apc_manager") is not None
+                and kwargs.get("kv_bits") is not None
+                and kwargs.get("draft_model") is None
+                and getattr(self, "apc_manager", None) is None):
+            _log.warning(
+                "APC OFF: KV quantization (kv_bits=%s) opts out of the "
+                "block APC tier upstream -- every request prefills cold",
+                kwargs.get("kv_bits"))
         # Ckpt-tier models form prompt batches one request at a time: the
         # owned APC declines B>1 prefill, so a coalesced burst would go
         # all-cold, and B>1 prompt batching is not a throughput win anyway
@@ -290,6 +309,13 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
         prefix_len = 0
         tier = "exact"
         pick = view._apc_pick_for((0, ids_list, 0, prompt_kwargs, None, None))
+        # Same trivial-pick floor as the admission wrapper: a sub-block
+        # exact restore saves nothing and its nonzero l1_prefix would skip
+        # the L0 hidden store for this request.
+        if (pick is not None and not pick.get("matched_blocks")
+                and 0 < int(pick.get("prefix_len") or 0)
+                < int(manager.block_size)):
+            pick = None
         if pick is not None:
             warm = pick.get("warm_cache")
             blocks = list(pick.get("matched_blocks") or ())
@@ -334,6 +360,15 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
                     manager.release(blocks)
                     blocks = []
                 warm, prefix_len, tier = aw, ap, "anchor"
+        if warm and 0 < prefix_len < len(ids_list) and tier in (
+                "exact", "anchor"):
+            # Same batch-aware merge admission applies to its picks: raw
+            # exact/anchor clones carry single-row leaves (left_padding
+            # None, scalar offsets) and crash the batch cache classes'
+            # update path (mx.depends on a None) when the suffix forwards.
+            from mlx_vlm import apc as _apc
+            warm, _ = _apc.make_warm_batch_exact_cache_multi(
+                [warm], [prefix_len])
         if warm and 0 < prefix_len < len(ids_list):
             batch.prompt_cache = warm
             # Matched blocks stay acquired until the stock post-prefill
@@ -928,6 +963,15 @@ def _install_exact_anchor_pick() -> None:
             _uid, ids_list, _mt, prompt_kwargs, _lps, _crit = sequence
             if not ids_list or len(ids_list) < 2:
                 return pick
+            # Floor trivial exact picks: a sub-block restore (a bare-BOS
+            # match off an unrelated request) saves nothing but suffix-
+            # constructs the batch, knocking the spec path's ids out of
+            # render space (anchor + retirement keys). Real warm picks are
+            # thousands of tokens and pass untouched.
+            if (pick is not None and not pick.get("matched_blocks")
+                    and 0 < int(pick.get("prefix_len") or 0)
+                    < int(manager.block_size)):
+                pick = None
             have = int((pick or {}).get("prefix_len") or 0)
             extra_hash = self._apc_extra_hash(prompt_kwargs or {})
             floor = max(have, self._apc_safe_prefix_lookup_min(ids_list))
@@ -1079,6 +1123,7 @@ def _mtp_prefill_init(batch) -> None:
     batch._mtp_l1_prefix_len = 0
 
     if batch._inputs_embeds is None:
+        _log.info("KQDBG mtp_prefill_init: inputs_embeds None, ladder skipped")
         return
 
     # Gated to B=1 because PromptProcessingBatch prefills one request at a
@@ -1095,6 +1140,18 @@ def _mtp_prefill_init(batch) -> None:
             _log.warning(
                 "APC skipped: prefill batch B=%d > 1 "
                 "(owned-path APC requires single-request prefill)", b)
+        return
+
+    # Upstream admission already restored a prefix and built this batch
+    # suffix-only: the owned ladder's keys (L0 and L1 both) are full-prompt
+    # token ids, so every lookup and store here would run in the wrong
+    # space -- a suffix-keyed L0 entry cross-hits a later turn's suffix and
+    # its restore clobbers the upstream warm cache. Leave these batches to
+    # the stock machinery, which owns their meta and store schedule.
+    up_meta = getattr(batch, "_apc_meta", None) or []
+    if up_meta and isinstance(up_meta[0], dict) \
+            and int(up_meta[0].get("prefix_len") or 0) > 0:
+        batch._mtp_upstream_warm = True
         return
 
     restored = 0
@@ -1423,7 +1480,8 @@ def install_full_prompt_mtp_prefill() -> None:
         b = int(full_hidden.shape[0]) if full_ids is not None else 0
         spec_cache = (
             _get_spec_prefix_cache(self.model)
-            if b == 1 and l1_prefix == 0 else None
+            if b == 1 and l1_prefix == 0
+            and not getattr(self, "_mtp_upstream_warm", False) else None
         )
         if spec_cache is not None and full_ids is not None:
             spec_cache.store(full_ids, result.prompt_cache, full_hidden)
@@ -1610,12 +1668,15 @@ def install_continuous_batch_admission() -> None:
 
     def _preempt_scalar(self) -> bool:
         """Preempt a live scalar (B=1) spec generation so queued rows can
-        join: close the generator at its round boundary (its GeneratorExit
-        handler rolls the target cache back to the delivered tokens), lift
-        the caches to batch classes, and mark the batch armless
-        (hidden=None); _start_rounds then rebuilds it on the batch loop,
-        whose first injection drain admits the waiters. GMLX_MTP_PREEMPT=0
-        leaves the old drain-wait behavior.
+        join: close the generator, deliver the closed round's undelivered
+        tail (the scalar path yields one token per next(), so a close
+        usually lands mid-round; those tokens are verified and their KV
+        stays in the cache), lift the caches to batch classes, and mark
+        the batch armless (hidden=None); _start_rounds then rebuilds it on
+        the batch loop, whose first injection drain admits the waiters.
+        The rebuild resumes from the round's bonus token, whose KV is not
+        in the cache. GMLX_MTP_PREEMPT=0 leaves the old drain-wait
+        behavior.
 
         The rebuilt row carries no APC retirement context (batch-loop rows
         start with retire_ctxs None), so the preempted request's prefix is
@@ -1628,9 +1689,36 @@ def install_continuous_batch_admission() -> None:
         if last is None:
             return False
         it = self._rounds_iter
+        captured = []
         if it is not None:
             self._rounds_iter = None
-            it.close()
+            self.model._kq_preempt_capture = captured
+            try:
+                it.close()
+            finally:
+                try:
+                    del self.model._kq_preempt_capture
+                except AttributeError:
+                    pass
+        responses = []
+        uid = self._all_uids[0]
+        for tok in captured:
+            if self._finished[0]:
+                break
+            tok = int(tok)
+            self._num_tokens[0] += 1
+            finish = self._finish_reason(0, tok)
+            if finish is not None:
+                self._finished[0] = True
+            responses.append(self.Response(
+                uid=uid, token=tok, token_logprob=0.0, finish_reason=finish))
+            last = tok
+        self._kq_preempt_responses = responses
+        if self._finished[0]:
+            # The captured tail finished the row; nothing to rebuild. The
+            # pending injections promote through __len__ once drained.
+            self._refresh_uids()
+            return False
         self.prompt_cache = [_lift_host_cache(c) for c in self.prompt_cache]
         self.first_tokens = mx.array([int(last)], dtype=self.token_dtype)
         self.hidden = None
@@ -1653,8 +1741,11 @@ def install_continuous_batch_admission() -> None:
         preempted = False
         if pending and len(self._all_uids) == 1:
             preempted = _preempt_scalar(self)
+        # The preempt capture: verified tokens the closed round had not yet
+        # delivered. They precede everything this call returns.
+        pre_responses = self.__dict__.pop("_kq_preempt_responses", None) or []
         if pending and (len(self._all_uids) > 1 or preempted):
-            responses = []
+            responses = list(pre_responses)
             gen_inj = getattr(self.model, "_generator_injections", None)
             if gen_inj is None:
                 self.model._generator_injections = []
@@ -1703,7 +1794,7 @@ def install_continuous_batch_admission() -> None:
             _release_if_finished(self)
             return responses
 
-        responses = _orig_next(self)
+        responses = pre_responses + _orig_next(self)
         _note_last_tokens(self, responses)
         _release_if_finished(self)
         return responses

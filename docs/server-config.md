@@ -309,6 +309,28 @@ deep-context safety case. See
 policy, the `GMLX_CACHE_LIMIT_GB` env override (env wins over this key), and
 the explicit-unlimited escape.
 
+A text request whose prompt alone cannot fit in memory gets an immediate
+HTTP 400 with the estimated need and the available budget in the body,
+instead of dying mid-stream. The estimate prices prompt KV at the model's
+per-token cost (GQA heads, MLA latents, sliding windows, and quantized KV
+all lower it) plus the prefill score transient, against the working set
+with the batch drained. `max_tokens` counts only when the request pins it
+explicitly; default-max requests are never rejected on generation length.
+Media requests are not estimated in v1. `GMLX_PREFLIGHT_MEM=0` disables.
+
+Decode concurrency (how many requests generate tokens together in one batch
+step) defaults to 8; past that width aggregate throughput gains shrink while
+every stream slows. `GMLX_DECODE_BATCH` sets it (`0` restores the upstream
+default of 32).
+
+Requests beyond the waiting-queue cap get an immediate HTTP 503 with a
+`Retry-After` header instead of queueing toward the token-queue timeout. The
+JSON body names the cap and the current depth; the header value is the
+estimated drain time, clamped to 2-60 seconds. Harness SDKs back off on 503
+and retry, which beats holding a silent socket for half an hour.
+`GMLX_QUEUE_DEPTH_CAP` sets the cap (default 2 x the decode concurrency;
+`0` disables the check).
+
 While a streaming request is silent (most notably during that long prefill),
 the server emits an SSE comment line (`: keepalive`) every 15 seconds so
 clients with a between-bytes read timeout don't drop the connection before
@@ -917,6 +939,18 @@ The request fields mlx-vlm already honours, carried verbatim into generation:
 `repetition_context_size`, `enable_thinking`, `thinking_budget`,
 `thinking_start_token`, `thinking_end_token`.
 
+`seed` is honored per request, in-batch: each seeded request draws its
+tokens from its own key stream while unseeded rows in the same batch keep
+the shared stream, byte for byte. Seed guarantees a deterministic sampling
+stream for that request. It does not guarantee bitwise-identical output
+across runs with different batch composition, because batched matmul
+reduction order shifts logits at float tolerance; the same composition
+(for example a solo replay) reproduces exactly. With speculative decoding,
+drafts are greedy and a seeded single-stream request's target draws come
+from the same per-request key stream, so a replay matches only across runs
+with the same speculation setting; seeded rows inside a batched
+speculative decode fall back to the shared stream.
+
 `thinking_start_token` / `thinking_end_token` override the `<think>` /
 `</think>` defaults everywhere the server needs the model's real reasoning
 markers (open-think detection, `thinking_budget`, the streamed
@@ -1183,6 +1217,8 @@ and store counts surface on the authed `GET /v1/metrics`.
 | `GMLX_APC_CKPT_BUDGET_MB` | Byte budget for checkpoint-record payload (recurrent states + KV tails), in MB (default `4096`). A GDN record can carry >100 MB of state and each request saves several checkpoints, so expect resident memory to grow toward this budget on hybrid models under sustained multi-turn traffic; lower it if 4 GB of cache is too much for your machine. |
 | `GMLX_APC_DECODE_CKPT` | Decode-time snapshot interval in generated tokens on hybrid models, anchored to the prompt end (default `512`; `0` off; widens automatically with context). |
 | `GMLX_APC_RETIRE_LCP` | `0` keys retirement on the forwarded ids instead of the predicted next-turn render (also disables decode-time snapshots, which key on the prediction). |
+| `GMLX_APC_FRESH_WAIT_MS` | Hold ceiling for the freshness admission gate, in ms (default `500`; `0` disables the gate). Sibling requests that arrive together admit one formation apart instead of together and cold: the first request prefills and stores the shared prefix, and the held siblings then admit warm. A sibling held past the ceiling admits cold. |
+| `GMLX_APC_FRESH_MIN` | Minimum uncovered shared-prefix tokens before the gate holds a sibling (default `256`). Below the floor the duplicate prefill costs less than the wait. |
 | `GMLX_FAITHFUL_HISTORY` | `0` restores mlx-vlm's stock chat-history rebuild, which drops `reasoning_content` from non-tool assistant messages before the template sees it (see `chat_template_kwargs`). |
 
 ---

@@ -524,8 +524,29 @@ _SIDECAR_DISABLED = (
 )
 
 
+def _seeded_target_draw(sampler, logprobs, base_pos):
+    """Target draws for a seeded lone row: per-position keys from the
+    request's own seed, through the sampler's keyed path. Falls back to
+    the process stream (stock behavior) whenever the row is not seeded
+    or the sampler has no keyed path."""
+    rows = getattr(sampler, "_kq_rows", None)
+    seeds = getattr(sampler, "_kq_row_seeds", None)
+    target = getattr(sampler, "sample_target", None)
+    if (base_pos is None or not seeds or not rows or target is None
+            or len(set(rows)) != 1 or seeds.get(rows[0]) is None):
+        return sampler(logprobs)
+    n = int(logprobs.shape[0])
+    saved = sampler._kq_rows
+    sampler._kq_rows = [rows[0]] * n
+    try:
+        return target(logprobs, row_ids=[0] * n,
+                      positions=[base_pos + 1 + j for j in range(n)])
+    finally:
+        sampler._kq_rows = saved
+
+
 def _coupled_walk(lm, verify, draft_tokens: mx.array, sampler, budget: int,
-                  top2=None, pq=None):
+                  top2=None, pq=None, base_pos=None):
     """Rejection walk with a single host sync.
 
     Sample every verify position into one deferred graph (sequentially, so the
@@ -563,7 +584,8 @@ def _coupled_walk(lm, verify, draft_tokens: mx.array, sampler, budget: int,
             if sampler is None:
                 target = mx.argmax(logprobs, axis=-1)                 # [n_pos]
             else:
-                target = sampler(logprobs).reshape(-1)                # [n_pos]
+                target = _seeded_target_draw(
+                    sampler, logprobs, base_pos).reshape(-1)          # [n_pos]
         draft_row = draft_tokens.reshape(-1)
         if n_draft > 0:
             match = (target[:n_draft] == draft_row).astype(mx.int32)
@@ -840,7 +862,8 @@ def _owned_decode_rounds(
                     lm, verify, draft_tokens, _walk_sampler,
                     max_tokens - emitted,
                     top2=list(top2_stash) if top2_stash else None,
-                    pq=list(pq_stash) if pq_stash else None)
+                    pq=list(pq_stash) if pq_stash else None,
+                    base_pos=emitted)
             stoch_stash.clear()
             if top2_stash is not None:
                 # Consumed; the accept hook below re-seeds entry 0 for the
@@ -863,6 +886,24 @@ def _owned_decode_rounds(
                     delivered += 1
                     yield tok
             except GeneratorExit:
+                capture = getattr(model, "_kq_preempt_capture", None)
+                if capture is not None:
+                    # Preempt close, not a stop: the round completed and
+                    # verified, so the undelivered tail is real output.
+                    # Hand it to the rebuilder instead of trimming it --
+                    # a trim here loses one token per preempt, because the
+                    # rebuild re-forwards the last DELIVERED token whose
+                    # KV the trim left in the cache (duplicate position)
+                    # and the first undelivered token never reaches the
+                    # wire. Keep the accepts (normal round-end state);
+                    # the bonus stays out of the cache as the rebuild's
+                    # first input.
+                    capture.extend(int(t) for t in new_tokens[delivered:])
+                    if _has_rollback and accepted < bs - 1:
+                        with mx.stream(generation_stream):
+                            _rollback_fn(prompt_cache, verify.gdn_states,
+                                         accepted, bs)
+                    raise
                 # Consumer stopped mid-round (EOS / stop string). Roll the target
                 # cache back to exactly the delivered tokens so the finish seam
                 # sees KV consistent with what was consumed (APC retirement
@@ -1122,6 +1163,12 @@ def owned_server_rounds(
         # the locals, so this can't double-store. See _retire_b1.
         if rounds is not None:
             rounds.close()
+        if (retire_ctx is not None
+                and getattr(model, "_kq_preempt_capture", None) is not None):
+            # Preempt close: the cache keeps the captured round tail past
+            # `generated`, so a snapshot here would disagree with the
+            # delivered stream. The rebuilt row drops retirement by design.
+            retire_ctx = None
         if retire_ctx is not None:
             _retire_b1(model, prompt_cache, generated, retire_ctx,
                        drafter=drafter, sidecar_ctx=sidecar_ctx)
@@ -1678,6 +1725,15 @@ def _owned_decode_rounds_batch(
             drafter.reset(model, left_padding=[0] * n)
         except (TypeError, ValueError):
             drafter.reset(model)
+        except NotImplementedError:
+            # B=1-only drafters refuse any padding list, even the trivial
+            # [0] a width-1 batch passes (a preempted scalar rebuilds into
+            # this loop at B=1; formation gates wider batches and
+            # injections trip the gate before crossing the cap). One row
+            # has no left padding, so the bare scalar arm is identical.
+            if n != 1:
+                raise
+            drafter.reset(model)
 
     # hidden=None with the gate open means no prefill capture exists (a
     # preempted scalar generation rebuilt into this loop): the first round
@@ -1744,8 +1800,10 @@ def _owned_decode_rounds_batch(
 
     # Double buffer for gated (plain-decode) rounds: the tokens the GPU is
     # already computing. None means "re-prime", set whenever the batch shape
-    # changes under us (injection, row retirement, adoption).
+    # changes under us (row retirement, adoption). An injection instead
+    # holds admission one round so the buffer is consumed, never discarded.
     _gated_pending = None
+    _inject_hold = False
 
     def _gated_step(inputs):
         """One plain target decode step: [n_active] tokens in, [n_active] out.
@@ -1813,13 +1871,20 @@ def _owned_decode_rounds_batch(
 
     def _drain_injections():
         # continuous-batch injection
-        nonlocal hidden, B_orig, _gated_pending
+        nonlocal hidden, B_orig, _gated_pending, _inject_hold
         gen_inj = getattr(model, "_generator_injections", None)
         if gen_inj:
+            if _gated_pending is not None:
+                # The buffer holds a dispatched step whose input KV is
+                # already in the target cache; it must be consumed, never
+                # discarded. Discarding skips one delivered token per row,
+                # and the re-prime re-forwards its inputs, duplicating
+                # their KV. Hold admission one round: the caller consumes
+                # the step without re-dispatching, and the next boundary
+                # admits with the buffer empty.
+                _inject_hold = True
+                return
             n_before = B_orig
-            # The batch is about to widen; anything already dispatched was
-            # shaped for the old width, so re-prime rather than slice.
-            _gated_pending = None
             # Trip BEFORE processing: a tripping drain must not pay
             # inject_rows, which teacher-forces the whole injected prompt
             # through a drafter this batch will never use again. The queue can
@@ -1928,7 +1993,8 @@ def _owned_decode_rounds_batch(
         # dispatched next step whose input KV is already in the cache, so it
         # must be consumed, never discarded: one more plain round runs
         # without re-dispatching, and the round after that arms.
-        dispatch_next = True
+        dispatch_next = not _inject_hold
+        _inject_hold = False
         if gated and _resume_ready():
             if _gated_pending is None:
                 gated = False
@@ -2080,8 +2146,12 @@ def _owned_decode_rounds_batch(
 
         if any(a < bs - 1 for a in accepted_list) and _has_rollback:
             with mx.stream(generation_stream):
-                _rollback_fn(prompt_cache, verify.gdn_states,
-                             accepted_list, bs)
+                # Rollback hooks are scalar-only: every model that defines
+                # one is B=1-limited, so spec rounds with a rollback only
+                # run at width 1 here (wider batches gate at formation).
+                # Pass that row's int, not a one-element list.
+                acc = accepted_list[0] if n_active == 1 else accepted_list
+                _rollback_fn(prompt_cache, verify.gdn_states, acc, bs)
 
         if _needs_shared_kv and not gated:
             rejected_global = bs - (max_a + 1)
@@ -2152,9 +2222,11 @@ def _owned_decode_rounds_batch(
                     if callable(filter_drafter):
                         filter_drafter(keep_mx)
                     hidden = hidden[keep_mx]
-                    for k in next_shared_kv:
-                        K_next, V_next = next_shared_kv[k]
-                        next_shared_kv[k] = (K_next[keep_mx], V_next[keep_mx])
+                    if _needs_shared_kv:
+                        for k in next_shared_kv:
+                            K_next, V_next = next_shared_kv[k]
+                            next_shared_kv[k] = (
+                                K_next[keep_mx], V_next[keep_mx])
                 active_idx = [active_idx[j] for j in keep_slots]
 
         if not gated:

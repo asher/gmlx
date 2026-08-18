@@ -756,7 +756,7 @@ _CKPT_STAT_INTS = (
     "ckpt_stores", "ckpt_hits", "ckpt_matched_tokens",
     "ckpt_missed_adoptions", "ckpt_skeleton_writes", "sidecar_writes",
     "retire_fallback_full", "ckpt_pool_evictions",
-    "anchor_stores", "anchor_hits",
+    "ckpt_grid_truncate", "anchor_stores", "anchor_hits",
 )
 
 
@@ -1034,7 +1034,8 @@ def ckpt_store(
     extra_hash: int = 0,
     skeleton_disk: bool = True,
     kind: str = "boundary",
-) -> bool:
+    grid_truncate: bool = False,
+) -> int:
     """Store a hybrid checkpoint at ``p = len(token_ids)``.
 
     Single-row cache list, KV/rotating offsets == p. Plain KV rides the
@@ -1045,10 +1046,16 @@ def ckpt_store(
     skeleton inlines recurrent state, >100 MB per GDN checkpoint --
     interval boundaries superseded minutes later do not earn that).
     ``kind`` stamps the record's retention class (see _CkptRecord).
-    Never raises.
+    ``grid_truncate`` turns the below-window off-grid rotating decline
+    into a terminal store at the largest block-aligned prefix: pre-wrap
+    the buffer is a temporal prefix, so a slice is a faithful shorter
+    run. Non-recurrent layouts only (state cannot rewind), memory-only
+    (the live cache's offset would stamp a mismatched skeleton).
+    Returns the stored length in tokens, 0 when nothing stored. Never
+    raises.
     """
     if manager is None or token_ids is None:
-        return False
+        return 0
     from .cache_compat import cache_types, runtime_cache_module
 
     kv_types = cache_types("KVCache")
@@ -1062,7 +1069,7 @@ def ckpt_store(
         layout = ckpt_layout(prompt_cache, bs)
         if p < 2 or layout is None:
             _ckpt_decline(manager, "layout")
-            return False
+            return 0
         if kind == "replay" and "arr" in layout:
             # The disk path knows no kinds, so a skeleton here would let
             # a restart serve this record past the replay adopt gate --
@@ -1081,7 +1088,7 @@ def ckpt_store(
                 "APC ckpt store declined: BufferedRotatingKVCache rows "
                 "cannot snapshot (support deferred)")
             _ckpt_decline(manager, "buffered")
-            return False
+            return 0
         for c in prompt_cache:
             off = getattr(c, "offset", None)
             if off is not None and not isinstance(c, rot_types) \
@@ -1089,14 +1096,15 @@ def ckpt_store(
                 _log.info("APC ckpt store skipped: KV offset %d != %d",
                           int(off), p)
                 _ckpt_decline(manager, "offset")
-                return False
+                return 0
             if isinstance(c, rot_types) and int(c.offset) != p:
                 _log.info("APC ckpt store skipped: rot offset %d != %d",
                           int(c.offset), p)
                 _ckpt_decline(manager, "offset")
-                return False
+                return 0
         has_rot = any(_is_rot(t) for t in layout)
         b_full = _ckpt_block_prefix(p, bs)
+        trunc_from = None
         if has_rot and b_full != p:
             # Off-grid p is storable once the window has wrapped: the
             # canonical window is then exactly W tokens -- whole blocks
@@ -1111,14 +1119,32 @@ def ckpt_store(
                 _log.warning("APC ckpt store declined: rotating geometry "
                              "unavailable at grid gate")
                 _ckpt_decline(manager, "layout")
-                return False
+                return 0
             if p < geom[0]:
+                has_arr = any(not isinstance(c, (kv_types, rot_types))
+                              for c in prompt_cache)
+                if not grid_truncate or has_arr or b_full < 2:
+                    _log.info(
+                        "APC ckpt store declined: off-grid rotating store "
+                        "below the window (p=%d < W=%d, %d %% %d != 0)",
+                        p, geom[0], p, bs)
+                    _ckpt_decline(manager, "grid")
+                    return 0
+                # Terminal grid store: pre-wrap the buffer is a temporal
+                # prefix, so the block-aligned slice is a faithful
+                # shorter run. Memory-only: a skeleton would stamp the
+                # live cache's deeper offset.
+                trunc_from = p
+                p = b_full
+                ids = ids[:p]
+                # No skeleton and no window-chain disk blocks: without
+                # the skeleton nothing re-indexes them after a restart.
+                skeleton_disk = False
+                rot_disk = False
+                _ckpt_bump(manager, "ckpt_grid_truncate")
                 _log.info(
-                    "APC ckpt store declined: off-grid rotating store "
-                    "below the window (p=%d < W=%d, %d %% %d != 0)",
-                    p, geom[0], p, bs)
-                _ckpt_decline(manager, "grid")
-                return False
+                    "APC ckpt store: terminal grid store at %d (prompt "
+                    "%d below window %d)", p, trunc_from, geom[0])
         tail_len = p - b_full
         salted = ckpt_extra_hash(extra_hash)
         kv_caches = [c for c in prompt_cache if isinstance(c, kv_types)
@@ -1185,21 +1211,29 @@ def ckpt_store(
                 ids[:b_full], lk, lv, extra=salted, disk=True,
                 need=b_full // bs, what="main")
             if got_main is None:
-                return False
+                return 0
             main_blocks = got_main
 
         rot_meta = None
         if rot_caches:
             canon = [rotating_canonical_window(c) for c in rot_caches]
+            if trunc_from is not None:
+                # Slice each canonical window to the terminal grid p and
+                # restamp its meta as the shorter run's canonical form
+                # (pre-wrap: L == offset == p, idx == L).
+                canon = [None if cw is None else
+                         (cw[0][..., :p, :], cw[1][..., :p, :],
+                          (cw[2][0], cw[2][1], p, p))
+                         for cw in canon]
             if any(cw is None for cw in canon):
                 _ckpt_decline(manager, "canon")
                 manager.release(main_blocks)
-                return False
+                return 0
             metas = {cw[2] for cw in canon}
             if len(metas) != 1:
                 _ckpt_decline(manager, "canon")
                 manager.release(main_blocks)
-                return False
+                return 0
             rot_meta = canon[0][2]
             keep, _w, _off, L = rot_meta
             canon_ids = ids[:keep] + ids[p - (L - keep):p]
@@ -1214,7 +1248,7 @@ def ckpt_store(
                 need=L // bs, what="window")
             if got_win is None:
                 manager.release(main_blocks)
-                return False
+                return 0
             bounded_blocks = got_win
 
         states = [_clone_single_row(c) for c in arr_caches]
@@ -1222,7 +1256,7 @@ def ckpt_store(
             _ckpt_decline(manager, "clone")
             manager.release(main_blocks)
             manager.release(bounded_blocks)
-            return False
+            return 0
         tails = None
         if tail_len and kv_caches:
             tails = []
@@ -1235,7 +1269,7 @@ def ckpt_store(
                     _ckpt_decline(manager, "clone")
                     manager.release(main_blocks)
                     manager.release(bounded_blocks)
-                    return False
+                    return 0
                 tails.append(t)
 
         rec = _CkptRecord(
@@ -1255,7 +1289,7 @@ def ckpt_store(
             "APC ckpt store: tokens=%d main=%d window=%d tail=%d states=%d",
             p, len(rec.main_blocks), len(rec.bounded_blocks), tail_len,
             len(states))
-        return True
+        return p
     except Exception:
         try:
             _ckpt_decline(manager, "exception")
@@ -1264,7 +1298,7 @@ def ckpt_store(
         except Exception:
             pass  # best-effort release on the failure path
         _log.warning("APC ckpt store failed; continuing", exc_info=True)
-        return False
+        return 0
 
 
 def _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
@@ -1854,9 +1888,9 @@ def _snap_assemble(prompt_cache: list[Any], states: list[Any],
 
 def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
                      max_len, decode_snaps) -> int:
-    """Ckpt-mode retirement: the full sequence when it can store whole,
-    else the newest decode-time snapshot at or below the replayable
-    prefix. Never spills to the exact tier -- on ckpt models the exact
+    """Ckpt-mode retirement: the full sequence when it can store whole
+    (a short rotating prompt truncates to the block grid), else the
+    newest decode-time snapshot at or below the replayable prefix. Never spills to the exact tier -- on ckpt models the exact
     tier stays empty, so the stock warm path never bypasses arming.
     Returns the stored length (0 = nothing)."""
     try:
@@ -1867,12 +1901,14 @@ def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
             # The row is already single-row on the B=1 path; ckpt_store
             # slices it directly (its own stores copy internally), so no
             # full-cache clone happens -- the exact tier's whole sin. A
-            # rotating layer declines here below the window (a sub-wrap
-            # store needs the block grid); the ring below holds aligned
-            # clones for exactly that case.
-            if ckpt_store(manager, ids, prompt_cache,
-                          extra_hash=extra_hash, kind="retire"):
-                return len(ids)
+            # rotating layer below the window stores its block-grid
+            # prefix (grid_truncate); the ring below holds aligned
+            # clones for the post-wrap off-grid cases.
+            stored = ckpt_store(manager, ids, prompt_cache,
+                                extra_hash=extra_hash,
+                                grid_truncate=True, kind="retire")
+            if stored:
+                return stored
         for p, states in sorted(decode_snaps or (),
                                 key=lambda s: s[0], reverse=True):
             if not 2 <= p <= cap:
@@ -1893,13 +1929,15 @@ def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
         # Reason-counted so fallback traffic is distinguishable from
         # turn reuse. Only when the whole-sequence branch above did not
         # already try (cap == len means it ran and declined).
-        if cap < len(ids) and len(ids) >= 2 and ckpt_store(
-                manager, ids, prompt_cache, extra_hash=extra_hash,
-                kind="retire"):
-            _ckpt_bump(manager, "retire_fallback_full")
-            _log.info("APC retirement: full-sequence fallback stored at "
-                      "%d (replayable prefix %d)", len(ids), cap)
-            return len(ids)
+        if cap < len(ids) and len(ids) >= 2:
+            stored = ckpt_store(manager, ids, prompt_cache,
+                                extra_hash=extra_hash,
+                                grid_truncate=True, kind="retire")
+            if stored:
+                _ckpt_bump(manager, "retire_fallback_full")
+                _log.info("APC retirement: full-sequence fallback stored "
+                          "at %d (replayable prefix %d)", stored, cap)
+                return stored
         _log.info("APC retirement skipped: no decode snapshot at or "
                   "below the replayable prefix %d (full %d)",
                   cap, len(ids))

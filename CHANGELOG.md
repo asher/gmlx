@@ -6,6 +6,25 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Sibling requests that arrive together no longer each prefill the shared
+  prefix cold: the server admits the first one, waits for its stores, and
+  starts the rest warm (`GMLX_APC_FRESH_WAIT_MS`, `0` disables).
+- Requests beyond the queue cap now get an immediate 503 with Retry-After
+  instead of queueing toward the timeout (`GMLX_QUEUE_DEPTH_CAP`).
+- A prompt that cannot fit in memory now gets a 400 with the numbers before
+  the stream opens, instead of dying mid-stream (`GMLX_PREFLIGHT_MEM=0`
+  disables).
+- `seed` is now honored per request inside a batch. Before, only the first
+  request's seed took effect and it colored every row.
+- Short prompts on sliding-window models now cache their block-aligned
+  prefix at retirement instead of nothing, so an immediate follow-up
+  turn starts warm.
+- Decode concurrency is now a control (`GMLX_DECODE_BATCH`, default 8).
+  The server always decoded up to 32 requests together, which slows every
+  stream past the width where total throughput stops growing.
+
 ## [0.3.2] - 2026-08-13
 
 ### Changed

@@ -186,6 +186,8 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
         install_step_timing()
     if os.environ.get("GMLX_DISABLE_FAST_SAMPLER") != "1":
         install_fast_sampler()
+    from ..seed_rows import install_per_request_seed
+    install_per_request_seed()
     from .. import spec_engine
     spec_engine.install_full_prompt_mtp_prefill()
     spec_engine.install_owned_spec_engine()
@@ -212,6 +214,10 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     # no prefill work, and decode runs unpaced while admission waits.
     from ..admit_gate import install_admit_headroom_gate
     install_admit_headroom_gate()
+    # After the headroom gate so a truncated tick still projects memory
+    # for the rows it admits.
+    from ..fresh_gate import install_fresh_admission_gate
+    install_fresh_admission_gate()
     install_chat_template_kwargs()
     install_thinking_budget_fix()
     install_stream_timings()
@@ -254,6 +260,10 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_rerank_route(getattr(cfg, "rerank", None))
     install_resolver_error_handlers()
     install_request_timing_log()
+    from ..queue_cap import install_queue_depth_cap
+    install_queue_depth_cap()
+    from ..mem_preflight import install_memory_preflight
+    install_memory_preflight()
     # Keep this the last BatchGenerator._next wrapper (outermost), so the
     # trace brackets the full tick including pacing and admission work.
     from ..serve_memtrace import install_serve_memtrace

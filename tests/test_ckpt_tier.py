@@ -323,7 +323,8 @@ def test_swa_store_lookup_roundtrip(p):
 def test_swa_store_declines_off_grid_below_window():
     """Below the wrap there is no rot tail mechanism: an off-grid store
     would need a partial window block. Beyond it (see the roundtrip
-    params) off-grid p stores."""
+    params) off-grid p stores. Without grid_truncate the store declines
+    whole."""
     from gmlx.cache_snapshot import _ckpt_stats
     man = APCManager(num_blocks=64, block_size=16)
     p = 20                                    # < W=32 and 20 % 16 != 0
@@ -333,17 +334,104 @@ def test_swa_store_declines_off_grid_below_window():
     assert _ckpt_stats(man)["ckpt_declines"] == {"grid": 1}
 
 
-def test_retirement_rotating_without_snap_declines():
-    """No exact-tier fallback: a below-window off-grid rotating
-    retirement with no decode snapshot stores nothing, and the exact
-    tier stays empty so the stock warm path never bypasses ckpt
-    arming."""
+def assert_grid_warm_matches(warm, orig, p):
+    """warm at truncated p vs the deeper original: rot canonical is the
+    temporal prefix [0..p), plain KV the same slice."""
+    from gmlx.cache_snapshot import rotating_canonical_window
+    assert len(warm) == len(orig)
+    for w, o in zip(warm, orig):
+        if isinstance(o, RotatingKVCache):
+            kw, vw, mw = rotating_canonical_window(w)
+            assert mw[2] == p and mw[3] == p
+            assert mx.array_equal(kw, o.keys[..., :p, :]).item()
+            assert mx.array_equal(vw, o.values[..., :p, :]).item()
+        else:
+            assert int(w.offset) == p
+            assert mx.array_equal(
+                w.keys[..., :p, :], o.keys[..., :p, :]).item()
+            assert mx.array_equal(
+                w.values[..., :p, :], o.values[..., :p, :]).item()
+
+
+def test_grid_truncate_store_lookup_roundtrip():
+    """grid_truncate turns the below-window decline into a terminal
+    store at b_full; the record is a faithful shorter run."""
+    import gmlx.cache_snapshot as cs
+    man = APCManager(num_blocks=64, block_size=16)
+    p = 20
+    cache = make_swa_cache(p, seed=5)
+    ids = list(range(300, 300 + p))
+    assert ckpt_store(man, ids, cache, extra_hash=2,
+                      grid_truncate=True) == 16
+    st = cs._ckpt_stats(man)
+    assert st["ckpt_grid_truncate"] == 1
+    assert st["ckpt_declines"] == {}
+    rec = next(iter(cs._ckpt_records(man).values()))
+    assert rec.p == 16 and rec.b_full == 16
+    assert rec.ids == tuple(ids[:16])
+    warm, got = ckpt_lookup(man, ids + [1], extra_hash=2)
+    assert got == 16
+    assert_grid_warm_matches(warm, cache, 16)
+
+
+def test_grid_truncate_sub_block_declines():
+    """b_full < 2: nothing block-aligned to keep, decline as before."""
+    from gmlx.cache_snapshot import _ckpt_stats
+    man = APCManager(num_blocks=64, block_size=16)
+    p = 10                                    # b_full = 0
+    cache = make_swa_cache(p, seed=5)
+    assert ckpt_store(man, list(range(300, 300 + p)), cache,
+                      extra_hash=2, grid_truncate=True) == 0
+    assert _ckpt_stats(man)["ckpt_declines"] == {"grid": 1}
+
+
+def test_grid_truncate_recurrent_layout_declines():
+    """State cannot rewind: an arr layer in the layout keeps the
+    decline even with grid_truncate."""
+    from gmlx.cache_snapshot import _ckpt_stats
+    man = APCManager(num_blocks=64, block_size=16)
+    p = 20
+    cache = make_swa_cache(p, seed=5)
+    arr = ArraysCache(size=2)
+    arr.cache = [mx.random.normal((1, 3, D)),
+                 mx.random.normal((1, H, D, D))]
+    cache.append(arr)
+    assert ckpt_store(man, list(range(300, 300 + p)), cache,
+                      extra_hash=2, grid_truncate=True) == 0
+    assert _ckpt_stats(man)["ckpt_declines"] == {"grid": 1}
+    assert all(b.ref_cnt == 0 for b in man.pool)
+
+
+def test_grid_truncate_beyond_window_stores_full():
+    """At or beyond the wrap the off-grid store already works whole;
+    grid_truncate must not truncate it."""
+    from gmlx.cache_snapshot import _ckpt_stats
+    man = APCManager(num_blocks=64, block_size=16)
+    p = 40                                    # >= W=32, unaligned
+    cache = make_swa_cache(p, seed=5)
+    ids = list(range(300, 300 + p))
+    assert ckpt_store(man, ids, cache, extra_hash=2,
+                      grid_truncate=True) == p
+    assert _ckpt_stats(man)["ckpt_grid_truncate"] == 0
+    warm, got = ckpt_lookup(man, ids + [1], extra_hash=2)
+    assert got == p
+    assert_swa_warm_matches(warm, cache, p)
+
+
+def test_retirement_rotating_short_prompt_stores_grid_prefix():
+    """A below-window off-grid rotating retirement with no decode
+    snapshot stores the block-grid prefix (grid_truncate), not nothing.
+    No exact-tier fallback: the exact tier stays empty so the stock
+    warm path never bypasses ckpt arming."""
     man = APCManager(num_blocks=64, block_size=16)
     p = 20                                    # < W and unaligned
     cache = make_swa_cache(p, seed=3)
     ids = list(range(300, 300 + p))
-    assert not retirement_store(man, "ckpt", ids, cache, row=0,
-                                extra_hash=1)
+    assert retirement_store(man, "ckpt", ids, cache, row=0,
+                            extra_hash=1) == 16
+    warm, got = ckpt_lookup(man, ids + [1], extra_hash=1)
+    assert got == 16
+    assert_grid_warm_matches(warm, cache, 16)
     entry, plen = man.lookup_exact_cache(ids + [1], extra_hash=1)
     assert entry is None and plen == 0
     assert man.stats_snapshot()["exact_stores"] == 0
