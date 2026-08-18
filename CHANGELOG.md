@@ -21,6 +21,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Short prompts on sliding-window models now cache their block-aligned
   prefix at retirement instead of nothing, so an immediate follow-up
   turn starts warm.
+- Decode concurrency is now a control (`GMLX_DECODE_BATCH`, default 8).
+  The server always decoded up to 32 requests together, which slows every
+  stream past the width where total throughput stops growing.
 
 ## [0.3.2] - 2026-08-13
 
