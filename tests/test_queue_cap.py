@@ -35,7 +35,13 @@ def _census(monkeypatch, rg_qsize=0, pending=0):
 
 
 def test_default_cap_formula():
-    assert qc._cap() == max(4 * qc._decode_concurrency(), 32)
+    assert qc._cap() == 2 * qc._decode_concurrency()
+
+
+def test_cap_tracks_decode_batch(monkeypatch):
+    monkeypatch.delenv("GMLX_QUEUE_DEPTH_CAP", raising=False)
+    monkeypatch.setenv("GMLX_DECODE_BATCH", "6")
+    assert qc._cap() == 12
 
 
 def test_cap_env_override(monkeypatch):

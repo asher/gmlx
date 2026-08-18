@@ -318,13 +318,21 @@ with the batch drained. `max_tokens` counts only when the request pins it
 explicitly; default-max requests are never rejected on generation length.
 Media requests are not estimated in v1. `GMLX_PREFLIGHT_MEM=0` disables.
 
+Decode concurrency (how many requests generate tokens together in one batch
+step) defaults to 8. The upstream engine hard-wires it to 32, far past the
+point where aggregate throughput stops growing on measured hardware: extra
+rows past that knee slow every active request without producing more tokens
+per second overall. `GMLX_DECODE_BATCH` sets it (`0` restores the upstream
+default). Raise it only if your model and typical context depths still
+measure aggregate gains past 8.
+
 Requests beyond the waiting-queue cap get an immediate HTTP 503 with a
 `Retry-After` header instead of queueing toward the token-queue timeout. The
 JSON body names the cap and the current depth; the header value is the
 estimated drain time, clamped to 2-60 seconds. Harness SDKs back off on 503
 and retry, which beats holding a silent socket for half an hour.
-`GMLX_QUEUE_DEPTH_CAP` sets the cap (default 4 x the decode batch size,
-floored at 32; `0` disables the check).
+`GMLX_QUEUE_DEPTH_CAP` sets the cap (default 2 x the decode concurrency;
+`0` disables the check).
 
 While a streaming request is silent (most notably during that long prefill),
 the server emits an SSE comment line (`: keepalive`) every 15 seconds so

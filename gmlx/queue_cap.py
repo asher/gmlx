@@ -22,8 +22,8 @@ publisher wrapper on ``BatchGenerator._next`` keeps a weakref to the
 live generator so the check can read its pending list.
 
 Knobs:
-    GMLX_QUEUE_DEPTH_CAP   waiting-queue cap (default
-                               max(4 x decode concurrency, 32); 0 = off)
+    GMLX_QUEUE_DEPTH_CAP   waiting-queue cap (default 2 x decode
+                               concurrency; 0 = off)
 """
 
 from __future__ import annotations
@@ -56,10 +56,10 @@ def queue_cap_stats() -> dict:
 
 def _decode_concurrency() -> int:
     try:
-        from mlx_vlm.generate.ar import DEFAULT_COMPLETION_BATCH_SIZE
-        return int(DEFAULT_COMPLETION_BATCH_SIZE)
+        from .decode_batch import decode_batch
+        return int(decode_batch())
     except Exception:
-        return 32
+        return 8
 
 
 def _cap() -> int:
@@ -69,7 +69,7 @@ def _cap() -> int:
             return int(raw)
         except ValueError:
             pass
-    return max(4 * _decode_concurrency(), 32)
+    return 2 * _decode_concurrency()
 
 
 def _waiting_depth(rg) -> int:
