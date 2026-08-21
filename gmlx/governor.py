@@ -120,6 +120,45 @@ def _env_f(name: str, default: float) -> float:
         return default
 
 
+_inject_memo: tuple[str, tuple] = ("", ())
+
+
+def _inject_directives() -> tuple:
+    """Parsed GMLX_OOM_INJECT directives (U5 fault injection): a
+    comma-separated list of kind@tick, e.g. ``yellow@40,orange@120,
+    red@200``. The governor forces the named band's condition at that
+    tick, once; ``throw@N`` and ``kill@N`` belong to the tick guard.
+    Never set in production."""
+    global _inject_memo
+    raw = os.environ.get("GMLX_OOM_INJECT", "")
+    if raw == _inject_memo[0]:
+        return _inject_memo[1]
+    out = []
+    for part in raw.split(","):
+        if "@" not in part:
+            continue
+        kind, _, t = part.partition("@")
+        try:
+            out.append((kind.strip(), int(t)))
+        except ValueError:
+            _log.warning("GMLX_OOM_INJECT: unparsable directive %r", part)
+    _inject_memo = (raw, tuple(out))
+    return _inject_memo[1]
+
+
+def _fire_injections(st: "_GovState") -> set:
+    fired = set()
+    for kind, tick in _inject_directives():
+        key = (kind, tick)
+        if st.tick_no >= tick and key not in st.injected:
+            st.injected.add(key)
+            if kind in ("yellow", "orange", "red"):
+                fired.add(kind)
+                _log.warning("[governor] INJECT: forcing %s at tick %d",
+                             kind, st.tick_no)
+    return fired
+
+
 def governor_enabled() -> bool:
     return os.environ.get("GMLX_GOVERNOR", "1") != "0"
 
@@ -165,6 +204,8 @@ class _GovState:
         self.reg_bytes = 0.0
         self.reg_sampled_tick = -999
         self.last_victim_uid = None
+        # U5 fault injection: (kind, tick) directives already fired
+        self.injected: set = set()
 
 
 def _state(gen) -> _GovState:
@@ -496,6 +537,15 @@ def _governor_tick(gen) -> None:
     orange_now = (head - ko * demand
                   < _shed_transient_bytes(gen, st) + reserve)
     red_now = (head - demand < 0.0) or st.orange_failed
+
+    forced = _fire_injections(st)
+    if "yellow" in forced:
+        ttc = 0.0
+        st.green_streak = 0
+    if "orange" in forced:
+        orange_now = True
+    if "red" in forced:
+        red_now = True
 
     dwelled = time.perf_counter() - st.band_entered >= min_dwell
     if ttc > ky:

@@ -74,6 +74,41 @@ class _TickState:
         self.fail_streak = 0
         self.rebuilt: set = set()
         self.last_victim = None
+        self.ticks = 0
+        self.injected: set = set()
+
+
+def _maybe_inject(st: _TickState) -> None:
+    """U5 fault injection: GMLX_OOM_INJECT directives ``throw@N`` (a
+    synthetic allocator error at tick N, exercising the containment
+    ladder end to end) and ``kill@N`` (SIGKILL the worker, exercising
+    the supervisor path). Band directives belong to the governor.
+    Never set in production."""
+    raw = os.environ.get("GMLX_OOM_INJECT", "")
+    if not raw:
+        return
+    for part in raw.split(","):
+        kind, _, t = part.partition("@")
+        kind = kind.strip()
+        if kind not in ("throw", "kill"):
+            continue
+        try:
+            tick = int(t)
+        except ValueError:
+            continue
+        if st.ticks < tick or (kind, tick) in st.injected:
+            continue
+        st.injected.add((kind, tick))
+        if kind == "kill":
+            _log.error("[tick-guard] INJECT: SIGKILL at tick %d", st.ticks)
+            import signal
+
+            os.kill(os.getpid(), signal.SIGKILL)
+        _log.warning("[tick-guard] INJECT: synthetic allocator throw at "
+                     "tick %d", st.ticks)
+        raise RuntimeError(
+            "[metal::malloc] Attempting to allocate 1 bytes "
+            "(GMLX_OOM_INJECT synthetic)")
 
 
 def _state(gen) -> _TickState:
@@ -204,8 +239,10 @@ def install_tick_guard() -> bool:
 
     def _guarded_next(self, **kwargs):
         st = _state(self)
+        st.ticks += 1
         _harvest_pending(self, st)
         try:
+            _maybe_inject(st)
             out = _orig(self, **kwargs)
         except RuntimeError as e:
             if not is_memory_error(e):

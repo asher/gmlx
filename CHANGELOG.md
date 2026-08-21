@@ -18,6 +18,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   event with `finish_reason: shed` mid-stream.
 - Cancelling one request in a speculative batch now frees its memory right
   away instead of holding it until the whole batch finishes.
+- The server derives a capacity table at model load (max context by batch
+  width, single-buffer and buffer-count ceilings) and logs it; a model that
+  cannot hold any context refuses at boot with the numbers instead of
+  aborting later (`GMLX_OVERCOMMIT=1` overrides). Decode concurrency is
+  bounded by the derived width; the table shows at `/v1/metrics`.
+- Loading or swapping a model that cannot fit the measured free working
+  set now fails with the numbers instead of taking down the server.
 - Sibling requests that arrive together no longer each prefill the shared
   prefix cold: the server admits the first one, waits for its stores, and
   starts the rest warm (`GMLX_APC_FRESH_WAIT_MS`, `0` disables).

@@ -251,6 +251,17 @@ def test_admission_hold_and_ceiling_handoff(rig):
     assert evicted == [1.0]
 
 
+def test_inject_forces_bands_once(rig, monkeypatch):
+    monkeypatch.setenv("GMLX_OOM_INJECT", "yellow@2")
+    gen = FakeGen(rows=2, rate=1e6)
+    st = gov._state(gen)
+    gov._governor_tick(gen)
+    assert st.band == gov.GREEN
+    gov._governor_tick(gen)                     # forced at tick 2
+    assert st.band == gov.YELLOW
+    assert ("yellow", 2) in st.injected
+
+
 def test_kill_switch(monkeypatch):
     monkeypatch.setenv("GMLX_GOVERNOR", "0")
     assert gov.install_governor() is False

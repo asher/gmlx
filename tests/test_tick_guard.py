@@ -144,6 +144,19 @@ def test_non_memory_errors_propagate(wrapped):
     assert drains == []
 
 
+def test_inject_throw_is_contained(wrapped, monkeypatch):
+    gen, script, drains = wrapped
+    monkeypatch.setenv("GMLX_OOM_INJECT", "throw@2")
+    monkeypatch.setattr(tg.mx, "clear_cache", lambda: None)
+    script.append(([], [resp(7, 11)]))
+    tick(gen)                              # tick 1: normal
+    assert tick(gen) == ([], [])           # tick 2: synthetic, contained
+    assert drains == ["engine-tick"]
+    script.append(([], [resp(7, 12)]))
+    tick(gen)                              # fires once; tick 3 normal
+    assert gen._kq_tick_guard.fail_streak == 0
+
+
 def test_kill_switch(monkeypatch):
     monkeypatch.setenv("GMLX_TICK_GUARD", "0")
     orig = ar.BatchGenerator._next
