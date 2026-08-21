@@ -580,6 +580,7 @@ def _coupled_walk(lm, verify, draft_tokens: mx.array, sampler, budget: int,
                     pq_arr = _pq_graph(logits[:n_draft], pq)
                 else:
                     _pq_stats["misaligned"] += 1
+            logits = logits.astype(mx.float32)  # 16-bit logprob math skews sampled verify
             logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
             if sampler is None:
                 target = mx.argmax(logprobs, axis=-1)                 # [n_pos]
@@ -649,6 +650,7 @@ def _coupled_walk_batch(
             target = verify.target_tokens                                # [B, n_pos]
         else:
             logits = lm.speculative_logits_from_hidden(verify.hidden)    # [B, n_pos, V]
+            logits = logits.astype(mx.float32)  # 16-bit logprob math skews sampled verify
             logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
             if sampler is None:
                 target = mx.argmax(logprobs, axis=-1)                    # [B, n_pos]
@@ -1817,6 +1819,7 @@ def _owned_decode_rounds_batch(
             logits = getattr(out, "logits", out)[:, -1, :]
             if greedy:
                 return mx.argmax(logits, axis=-1).astype(token_dtype)
+            logits = logits.astype(mx.float32)  # 16-bit logprob math skews sampled verify
             logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
             return sampler(logprobs).reshape(-1).astype(token_dtype)
 

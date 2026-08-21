@@ -40,6 +40,7 @@ from .cascade_sdpa import install_cascade_sdpa, install_cascade_stamp
 from .sparse_sdpa import install_sparse_sdpa
 from .arrays_cache_fix import install_arrays_cache_fix
 from .gemma4_sync import install_gemma4_nosync
+from .softcap_f32 import install_gemma4_softcap_f32
 from .quantized_sdpa_fix import install_quantized_sdpa_mask_fix
 from .rope_batch_fix import install_rope_batch_fix
 from .rotating_cache_fix import install_rotating_cache_fix
@@ -2930,6 +2931,8 @@ def _install_and_load(
         log("[install] gemma-4 host-sync-free masks/rope offsets active")
     if install_gemma4_batched_sdpa() and _gemma4_target(model):
         log("[install] gemma-4 hd512 batched-decode row route active")
+    if install_gemma4_softcap_f32() and _gemma4_target(model):
+        log("[install] gemma-4 float32 logit softcap active")
     if install_cascade_sdpa() and install_cascade_stamp():
         log("[install] shared-prefix cascade decode route active")
     if install_sparse_sdpa():
@@ -3391,6 +3394,8 @@ def load_model(
         _log("[install] gemma-4 host-sync-free masks/rope offsets active")
     if install_gemma4_batched_sdpa() and _gemma4_target(model):
         _log("[install] gemma-4 hd512 batched-decode row route active")
+    if install_gemma4_softcap_f32() and _gemma4_target(model):
+        _log("[install] gemma-4 float32 logit softcap active")
     if install_cascade_sdpa() and install_cascade_stamp():
         _log("[install] shared-prefix cascade decode route active")
     if install_sparse_sdpa():

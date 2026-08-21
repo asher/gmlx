@@ -539,6 +539,20 @@ def test_split_harmony_reply_shapes():
     assert split_harmony_reply(plain) == (None, "Six.")
 
 
+def test_split_harmony_reply_keeps_first_line_code_indent():
+    from gmlx.reasoning import split_harmony_reply
+    full = ('<|channel|>analysis<|message|>Recall the body.'
+            "<|end|><|start|>assistant<|channel|>final<|message|>"
+            '\n    """\n    Docstring.\n')
+    r, c = split_harmony_reply(full)
+    assert r == "Recall the body."
+    assert c == '    """\n    Docstring.'
+    # whitespace-only content collapses to empty
+    ws = ('<|channel|>analysis<|message|>x'
+          "<|end|><|start|>assistant<|channel|>final<|message|>\n  \n")
+    assert split_harmony_reply(ws) == ("x", "")
+
+
 # --- muse-glimmer ATEM channel ------------------------------------------------
 #
 # Routing is on the message HEADER, not on a "to=self" marker: any marker whose

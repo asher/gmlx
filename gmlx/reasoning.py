@@ -275,8 +275,18 @@ def split_harmony_reply(text: str, *,
     spans = filt.feed(text)
     spans += filt.flush()
     reasoning = "".join(t for t, m in spans if m == _REASON).strip()
-    content = "".join(t for t, m in spans if m == _ANSWER).strip()
+    content = trim_content_ws("".join(t for t, m in spans if m == _ANSWER))
     return (reasoning or None, content)
+
+
+def trim_content_ws(text: str) -> str:
+    """Trim reply content: drop leading blank lines and trailing whitespace,
+    keep the first content line's indent (a full strip eats verbatim-code
+    indentation)."""
+    lines = (text or "").split("\n")
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    return "\n".join(lines).rstrip()
 
 
 _DIM = "\x1b[2m"

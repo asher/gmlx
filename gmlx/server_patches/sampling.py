@@ -283,7 +283,9 @@ class _FastPositionedSampler:
         # them so the returned ids keep the caller's shape (matches top_p_sampling).
         import mlx.core as mx
         if not self._has_filter:
-            return mx.random.categorical(logprobs * (1.0 / self.temperature), axis=-1)
+            # f32: float16 logprobs would otherwise reach categorical unwidened
+            lp = logprobs.astype(mx.float32)
+            return mx.random.categorical(lp * (1.0 / self.temperature), axis=-1)
         lead = logprobs.shape[:-1]
         lp2 = logprobs.reshape(-1, logprobs.shape[-1])
         masked, part, order = self._filtered(lp2)
@@ -300,7 +302,7 @@ class _FastPositionedSampler:
             return mx.random.categorical(row, key=key)
 
         if not self._has_filter:
-            scaled = logprobs * (1.0 / self.temperature)
+            scaled = logprobs.astype(mx.float32) * (1.0 / self.temperature)
             return mx.vmap(_cat, in_axes=(0, 0))(scaled, keys)
         # only this tiny categorical-over-k is per-row keyed; the filter is batched.
         masked, part, order = self._filtered(logprobs)

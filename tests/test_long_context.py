@@ -20,7 +20,9 @@ dominate. So every loadable arch is exercised at >=16k tokens, two ways:
     real attention bug diverges in the first few characters.
 
 Both are ``integration`` + ``slow`` and skip unless the env points at real
-models (see ``conftest``). Select one arch with ``-k qwen2`` and/or shrink the
+models (see ``conftest``). Both sweep the 16-bit activation dtypes (float16 is
+the pre-Apple9 auto choice; its narrower range must hold at depth too). Select
+one arch with ``-k qwen2``, one dtype with ``-k float16``, and/or shrink the
 length with ``KQUANT_LONGCTX_TOKENS=4096`` for a quick run; the defaults sweep
 every arch whose GGUF is present at >=16k and can take minutes on large models.
 """
@@ -47,6 +49,10 @@ CANDIDATE_ARCHES = [
 ]
 
 TARGET = int(os.environ.get("KQUANT_LONGCTX_TOKENS", "16384"))
+
+# Both 16-bit widths. float16 is the auto choice on pre-Apple9 GPUs and has
+# a narrower exponent range, so depth signatures must hold under both.
+ACTIVATION_DTYPES = ("bfloat16", "float16")
 
 # Arches whose mlx-lm model has a known upper-context limitation vs the GGUF
 # reference, so token-for-token parity is only expected up to this length:
@@ -206,8 +212,10 @@ def _llama_complete(binary, model_path, prompt_text, n, ctx):
 
 
 # tests
+@pytest.mark.parametrize("dtype", ACTIVATION_DTYPES)
 @pytest.mark.parametrize("arch", CANDIDATE_ARCHES)
-def test_long_decode_integrity(arch, gguf_index):
+def test_long_decode_integrity(arch, dtype, gguf_index, monkeypatch):
+    monkeypatch.setenv("GMLX_ACTIVATION_DTYPE", dtype)
     path = _require(gguf_index, arch)
     model, config, tok = _load(path)
     vocab = int(config["vocab_size"])
@@ -251,10 +259,12 @@ def test_long_decode_integrity(arch, gguf_index):
         f"- degeneration")
 
 
+@pytest.mark.parametrize("dtype", ACTIVATION_DTYPES)
 @pytest.mark.parametrize("arch", CANDIDATE_ARCHES)
-def test_long_prefill_parity(arch, gguf_index, llamacpp_bin):
+def test_long_prefill_parity(arch, dtype, gguf_index, llamacpp_bin, monkeypatch):
     from mlx_lm.generate import stream_generate
 
+    monkeypatch.setenv("GMLX_ACTIVATION_DTYPE", dtype)
     if arch in PARITY_SKIP:
         pytest.skip(f"{arch}: {PARITY_SKIP[arch]}")
     path = _require(gguf_index, arch)

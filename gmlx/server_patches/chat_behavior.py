@@ -259,7 +259,38 @@ _XTML_SECTION_MARKERS = (
 def _strip_xtml_sections(content: str) -> str:
     for m in _XTML_SECTION_MARKERS:
         content = content.replace(m, "")
-    return content.strip()
+    return _trim_content_ws(content)
+
+
+def _trim_content_ws(text: str) -> str:
+    from ..reasoning import trim_content_ws
+    return trim_content_ws(text)
+
+
+def _split_thinking_keep_indent(rs, cls, text, start_token, end_token):
+    """rs._split_thinking with content whitespace preserved. Same marker
+    walk as stock; only the content-side .strip() calls are narrowed
+    (upstream body seam-fingerprinted via app._split_thinking_text)."""
+    if not text:
+        return None, text
+    for start_marker, end_marker in cls._build_open_close_markers(
+            start_token, end_token):
+        start = text.find(start_marker)
+        end = text.find(end_marker, start if start >= 0 else 0)
+        if 0 <= start < end:
+            reasoning = text[start + len(start_marker):end].strip()
+            content = rs._strip_content_markers(
+                text[:start] + text[end + len(end_marker):])
+            return reasoning or None, _trim_content_ws(content)
+        if end_marker in text:
+            reasoning, content = text.split(end_marker, 1)
+            reasoning = rs._clean_reasoning(reasoning, start_marker)
+            return (reasoning or None,
+                    _trim_content_ws(rs._strip_content_markers(content)))
+        if start_marker in text:
+            reasoning = rs._clean_reasoning(text, start_marker)
+            return reasoning or None, ""
+    return None, _trim_content_ws(rs._strip_content_markers(text))
 
 _LAST_RENDERED_PROMPT: contextvars.ContextVar = contextvars.ContextVar(
     "kq_last_rendered_prompt", default=None)
@@ -370,8 +401,10 @@ def install_stream_thinking_seed() -> None:
                 # so this gate cannot misfire on it.)
                 from ..reasoning import split_harmony_reply
                 return split_harmony_reply(text, start_in_header=in_header)
-            reasoning, content = split(
-                text, thinking_start_token, thinking_end_token)
+            # Stock walk with content whitespace preserved: the stock
+            # splitter's .strip() eats first-line code indent.
+            reasoning, content = _split_thinking_keep_indent(
+                rs, cls, text, thinking_start_token, thinking_end_token)
             if reasoning is None and content and retire_key.truncated_thinking(
                     text, cls._build_open_close_markers(
                         thinking_start_token, thinking_end_token),
@@ -383,6 +416,9 @@ def install_stream_thinking_seed() -> None:
 
         _split_thinking_text.__dict__[_STREAM_SEED_FLAG] = True
         app._split_thinking_text = _split_thinking_text
+        # The /v1/responses output builder calls the responses_state module
+        # global directly; give it the same splitter.
+        rs._split_thinking = _split_thinking_text
 
 
 # ignore-eos: forced-length decode (server-level)
