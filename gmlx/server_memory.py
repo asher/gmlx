@@ -332,13 +332,13 @@ def project_admission(gen, candidates):
 
 
 def apply_cache_limit(cfg) -> None:
-    """Resolve and apply the server's cache limit; called once at startup."""
+    """Resolve and apply the server's cache limit; called once at startup.
+    Working-set source: capacity (the one accounting, U4)."""
     import mlx.core as mx
 
-    try:
-        ws = float(mx.device_info()["max_recommended_working_set_size"])
-    except Exception:
-        ws = 0.0
+    from .capacity import working_set_bytes
+
+    ws = working_set_bytes() or 0.0
     paths = [str(mc.path) for mc in getattr(cfg, "models", {}).values()]
     limit, source = resolve_cache_limit(
         getattr(cfg, "cache_limit_gb", None), paths, ws)

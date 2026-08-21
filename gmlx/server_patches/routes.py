@@ -269,6 +269,14 @@ def install_runtime_snapshot_enrichment() -> None:
         except Exception:
             pass
         try:
+            from ..capacity import get_table
+
+            cap = get_table()
+            if cap is not None:
+                base["capacity"] = cap
+        except Exception:
+            pass
+        try:
             from ..queue_cap import queue_cap_stats
 
             base["queue"] = queue_cap_stats()

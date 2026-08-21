@@ -128,13 +128,11 @@ def _gguf_footprint_bytes(model_path: str) -> int:
 
 
 def _default_budget_bytes() -> int:
-    """``_DEFAULT_BUDGET_FRACTION`` of the GPU's recommended working set."""
-    import mlx.core as mx
+    """``_DEFAULT_BUDGET_FRACTION`` of the GPU's recommended working set
+    (working-set source: capacity, the one accounting)."""
+    from .capacity import working_set_bytes
 
-    try:
-        working_set = int(mx.device_info()["max_recommended_working_set_size"])
-    except Exception:
-        working_set = _FALLBACK_WORKING_SET
+    working_set = working_set_bytes() or _FALLBACK_WORKING_SET
     return int(_DEFAULT_BUDGET_FRACTION * working_set)
 
 
@@ -645,6 +643,13 @@ class _ResidencyPool:
         from . import server_bridge_vlm as _serving
 
         _warn_if_batch_unsafe(model_path)
+        # U4: model load and swap take the same headroom check a request
+        # takes, and the capacity table is derived (header-based, no
+        # load needed) and gated before the box's biggest allocation
+        # starts. Both raise with the numbers; GMLX_OVERCOMMIT=1 skips.
+        from .capacity import install_boot_table, preload_gate
+        preload_gate(footprint, str(model_path))
+        install_boot_table(str(model_path), footprint, str(model_path))
         scratch = _Scratch()
         token = _build_scratch.set(scratch)
         # Per-model load-param + APC/SSD-KV env window: set this model's vars
