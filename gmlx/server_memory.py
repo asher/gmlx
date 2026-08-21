@@ -116,24 +116,100 @@ def _round_block(n: float) -> int:
     return -(-int(n) // _STEP_BLOCK) * _STEP_BLOCK
 
 
-def admit_reserve_bytes(ws_bytes: float) -> float:
-    """Headroom held back beyond the projection. Also carries the
-    batched-cache growth transient (crossing an allocation-block boundary
-    transiently holds a layer's old and new arrays together) until that is
-    projected explicitly."""
+def admit_reserve_bytes(ws_bytes: float, gen=None) -> float:
+    """Headroom held back beyond the projection, geometry-derived when a
+    measured batch walk is available: one cache's transient (a filter
+    gather or a join holds one layer's old and new arrays together) plus
+    the whole-shed term (a single-row drop under per-cache eval holds
+    live / (rows x caches) extra). The old constant (max of 2 GB and 5
+    percent of the working set) stands in until the first walk, and
+    GMLX_ADMIT_RESERVE_GB overrides everything. Decimal GB (1e9)
+    throughout; GiB consumers convert at the edge."""
     env = os.environ.get("GMLX_ADMIT_RESERVE_GB", "")
     if env:
         try:
             return max(0.0, float(env)) * 1e9
         except ValueError:
             pass
+    max_cache = getattr(gen, "_kq_admit_max_cache_bytes", 0.0) if gen \
+        else 0.0
+    if max_cache > 0:
+        live = getattr(gen, "_kq_admit_live_bytes", 0.0)
+        rows = max(1, batch_rows(gen))
+        n_caches = max(1, getattr(gen, "_kq_admit_n_caches", 1))
+        shed_term = live / (rows * n_caches)
+        return max(1e9, max_cache + shed_term)
     return max(2e9, 0.05 * ws_bytes)
+
+
+class cache_release_gate:
+    """Pre-armed cache gate for a mutation seam that frees big arrays:
+    pin the cache limit at its current fill immediately before the
+    mutation, so every byte the mutation frees releases straight to the
+    OS instead of growing the pool; synchronize the seam's stream on
+    exit (a bare synchronize covers only the default stream), then
+    restore the previous limit. Used after the fact the same call can
+    no-op or evict the wrong end, so arm it before, never after."""
+
+    def __init__(self, stream=None):
+        self._stream = stream
+        self._old = None
+
+    def __enter__(self):
+        import mlx.core as mx
+
+        self._old = mx.set_cache_limit(int(mx.get_cache_memory()))
+        return self
+
+    def __exit__(self, *exc):
+        import mlx.core as mx
+
+        try:
+            if self._stream is not None:
+                mx.synchronize(self._stream)
+            else:
+                mx.synchronize()
+        finally:
+            if self._old is not None:
+                mx.set_cache_limit(self._old)
+        return False
+
+
+def spec_state_bytes(gen):
+    """Speculative-batch resident bytes the cache walk cannot see:
+    the parked batch attrs (hidden, shared KV snapshot, prompt tokens,
+    first tokens) and the drafter's own head KV. Returns
+    ``(depth_scaled, row_const)``: bytes that grow with context depth
+    (the shared KV snapshot and the drafter cache) and bytes that are
+    per-row constants. Both zero when the batch is not speculative."""
+    from .serve_memtrace import _arrays
+
+    batch = gen._generation_batch
+    depth_scaled = 0.0
+    row_const = 0.0
+    for name in ("shared_kv_states",):
+        depth_scaled += sum(a.nbytes for a in _arrays(
+            getattr(batch, name, None), 3))
+    for name in ("hidden", "prompt_tokens", "first_tokens"):
+        row_const += sum(a.nbytes for a in _arrays(
+            getattr(batch, name, None), 3))
+    draft = getattr(gen, "draft_model", None)
+    dcache = getattr(draft, "_cache", None)
+    if dcache:
+        for c in dcache:
+            for v in vars(c).values():
+                depth_scaled += sum(a.nbytes for a in _arrays(v))
+    return depth_scaled, row_const
 
 
 def update_kv_rates(gen) -> None:
     """Fold a fresh per-kind KV bytes-per-row-token measurement of the live
     decode batch into the generator's running estimate (``_kq_admit_``
-    attrs, the same convention the gate's defer state uses)."""
+    attrs, the same convention the gate's defer state uses). Speculative
+    state is folded in the same pass: depth-scaled spec bytes (shared KV
+    snapshot, drafter head KV) become a synthetic per-kind rate so the
+    projection prices their growth, and per-row constants land in
+    ``_kq_admit_spec_row_const``."""
     batch = gen._generation_batch
     rows = batch_rows(gen)
     pc = getattr(batch, "prompt_cache", None)
@@ -144,6 +220,8 @@ def update_kv_rates(gen) -> None:
     fresh: dict = {}
     live_bytes = 0.0
     live_depth = 0
+    max_cache_bytes = 0.0
+    n_caches = 0
     for c in _leaf_caches(pc):
         nbytes = 0
         alen = 0
@@ -155,6 +233,8 @@ def update_kv_rates(gen) -> None:
         if not nbytes:
             continue
         live_bytes += nbytes
+        max_cache_bytes = max(max_cache_bytes, float(nbytes))
+        n_caches += 1
         off = getattr(c, "offset", None)
         off = off if isinstance(off, int) else 0
         live_depth = max(live_depth, off)
@@ -170,6 +250,11 @@ def update_kv_rates(gen) -> None:
                               else min(kind["window"], window))
     if not fresh:
         return
+    spec_depth_bytes, spec_row_const = spec_state_bytes(gen)
+    if spec_depth_bytes and live_depth > 0:
+        fresh["_spec_state"] = {
+            "rate": spec_depth_bytes / live_depth / rows, "window": None}
+    live_bytes += spec_depth_bytes + spec_row_const
     prev = getattr(gen, "_kq_admit_kv_rates", None) or {}
     merged = {}
     for name, k in fresh.items():
@@ -180,6 +265,10 @@ def update_kv_rates(gen) -> None:
     gen._kq_admit_kv_rates = merged
     gen._kq_admit_live_bytes = live_bytes
     gen._kq_admit_live_depth = live_depth
+    gen._kq_admit_spec_row_const = (spec_row_const / rows
+                                    if spec_row_const else 0.0)
+    gen._kq_admit_max_cache_bytes = max_cache_bytes
+    gen._kq_admit_n_caches = n_caches
 
 
 def project_admission(gen, candidates):
@@ -220,6 +309,7 @@ def project_admission(gen, candidates):
         capped = depth if k["window"] is None else min(
             depth, _round_block(k["window"]))
         kv_total += k["rate"] * width * capped
+    kv_total += getattr(gen, "_kq_admit_spec_row_const", 0.0) * width
     kv_new = max(0.0, kv_total - getattr(gen, "_kq_admit_live_bytes", 0.0))
     transient = score_transient_bytes(
         gen.model, getattr(gen._generation_batch, "prompt_cache", None),
@@ -228,7 +318,7 @@ def project_admission(gen, candidates):
         ws = float(mx.device_info()["max_recommended_working_set_size"])
     except Exception:
         ws = 0.0
-    reserve = admit_reserve_bytes(ws)
+    reserve = admit_reserve_bytes(ws, gen)
     projected = kv_new + transient + reserve
     parts = (f"kv {kv_new / 1e9:.1f} + transient {transient / 1e9:.1f}"
              f" + reserve {reserve / 1e9:.1f}")
