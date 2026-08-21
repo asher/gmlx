@@ -22,7 +22,10 @@ prompt batch in flight, admitting is the only way to make progress, so
 the gate never declines an idle server. And a request deferred longer
 than GMLX_ADMIT_DEFER_MAX_S seconds is admitted anyway, loudly: a gate
 that silently holds a request forever is a worse failure than the one it
-prevents.
+prevents. That blind admission is one row per tick, not a full prompt
+batch: the ceiling tick trims the pending list to its head row, and the
+rest re-project next tick, so past-ceiling admission stays serialized
+for as long as the projection keeps failing.
 
 The projection is conservative in one direction by design: a finished
 batch that has not yet released its footprint makes measured headroom
@@ -46,7 +49,8 @@ Knobs:
     GMLX_ADMIT_RESERVE_GB       headroom held back beyond the projection
                                     (server_memory; default
                                     max(2, 0.05 x working set))
-    GMLX_ADMIT_DEFER_MAX_S      defer ceiling, admit past it (default 60)
+    GMLX_ADMIT_DEFER_MAX_S      defer ceiling, admit one row blind per
+                                    tick past it (default 60)
 """
 
 from __future__ import annotations
@@ -139,10 +143,18 @@ def _should_decline(gen) -> bool:
 
     waited = max((deferred.get(u, 0.0) for u in uids), default=0.0)
     if waited > _defer_max_s():
+        # The one deliberate blind spot: past the ceiling the gate admits
+        # against a failing projection. Blind admission is one row, not a
+        # full prompt batch: flag the tick so the wrapper trims pending
+        # to the head row, and the rest re-project next tick (admitting
+        # one by one only while the projection keeps failing).
+        gen._kq_admit_ceiling_tick = True
         _log.warning(
-            "[admit] defer ceiling %.0fs hit: admitting uid=%s anyway "
-            "(projected %.1f GB > headroom %.1f GB)",
-            _defer_max_s(), uids, projected / 1e9, headroom / 1e9)
+            "[admit] defer ceiling %.0fs hit: admitting one row blind "
+            "uid=%s (projected %.1f GB > headroom %.1f GB; %d more "
+            "candidates re-project next tick)",
+            _defer_max_s(), uids[0] if uids else None, projected / 1e9,
+            headroom / 1e9, max(0, len(uids) - 1))
         return False
 
     first = any(u not in deferred for u in uids)
@@ -170,6 +182,28 @@ def _log_admit(gen, uids, deferred) -> None:
                   uids, max(waited))
 
 
+def _one_row_next(gen, orig_next, kwargs):
+    """Run one tick with pending trimmed to the head row (defer-ceiling
+    blind admission). The stock body sees a one-row pending list, so the
+    blind prompt batch is one row instead of up to prefill_batch_size
+    rows; the trimmed rows keep their queue positions and re-project
+    next tick. Same merge-never-clobber restore as the decline path:
+    an insert() from a handler thread mid-call lands at the tail."""
+    stash_pending = gen._unprocessed_sequences
+    head = stash_pending[0]
+    gen._unprocessed_sequences = [head]
+    try:
+        return orig_next(gen, **kwargs)
+    finally:
+        leftover = gen._unprocessed_sequences
+        gen._unprocessed_sequences = stash_pending
+        if not any(s is head for s in leftover):
+            stash_pending.pop(0)  # the stock body consumed the head row
+        arrived = [s for s in leftover if s is not head]
+        if arrived:
+            stash_pending.extend(arrived)
+
+
 def install_admit_headroom_gate() -> None:
     """Gate prompt-batch formation on projected memory headroom.
 
@@ -195,7 +229,12 @@ def install_admit_headroom_gate() -> None:
             _log.warning("admit gate decision failed; admitting",
                          exc_info=True)
             decline = False
+        ceiling = getattr(self, "_kq_admit_ceiling_tick", False)
+        if ceiling:
+            self._kq_admit_ceiling_tick = False
         if not decline:
+            if ceiling and len(self._unprocessed_sequences) > 1:
+                return _one_row_next(self, _orig_next, kwargs)
             return _orig_next(self, **kwargs)
         stash_pending = self._unprocessed_sequences
         self._unprocessed_sequences = []
