@@ -173,7 +173,8 @@ def unregister_cache(name: str) -> None:
 
 
 def governor_stats() -> dict:
-    return dict(_STATS)
+    # enabled distinguishes guards-off from guards-quiet in metrics
+    return dict(_STATS, enabled=governor_enabled())
 
 
 class _GovState:
