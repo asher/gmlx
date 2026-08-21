@@ -102,6 +102,7 @@ _REG: dict = {}
 # Server-wide counters for /v1/metrics.
 _STATS = {
     "band": "green",
+    "band_changed_at": 0.0,
     "yellow_entries": 0,
     "orange_evictions": 0,
     "orange_retires": 0,
@@ -473,6 +474,9 @@ def _enter(gen, st: _GovState, band: int, ws: float, margin: float) -> None:
     st.band = band
     st.band_entered = time.perf_counter()
     _STATS["band"] = _BAND_NAMES[band]
+    # wall-clock stamp: the band is per batch cycle and goes stale when
+    # the engine idles; metrics readers get the age, not a false green
+    _STATS["band_changed_at"] = time.time()
     if band >= YELLOW and up:
         try:
             mx.reset_peak_memory()
