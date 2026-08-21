@@ -2854,6 +2854,10 @@ def _load_chat_backend(args, kv_kwargs, *, speculative: bool,
         b = _ChatBackend()
         b.config = {}
         return b
+    from .tool_preflight import check_or_exit
+
+    check_or_exit(args.gguf,
+                  streaming=getattr(args, "stream_experts", False))
     if vlm_mtp:
         return _backend_vlm_mtp(args)
     if args.mmproj is not None:
