@@ -1594,12 +1594,69 @@ def install_continuous_batch_admission() -> None:
     def _release_if_finished(self) -> None:
         if _orig_len(self) == 0:
             _release_heavy_state(self)
+            return
+        _shed_finished_attr_rows(self)
+
+    def _shed_finished_attr_rows(self) -> None:
+        """Per-row release of the batch-held start-time snapshots.
+
+        The live rounds generator sheds a finished or filtered row's KV,
+        drafter state, and its own hidden/shared_kv slices at the next
+        round boundary; the batch object's prefill-time copies (hidden,
+        shared_kv_states, prompt_tokens, first_tokens) stayed resident
+        until the whole batch finished. Slice them by the surviving rows
+        instead. Injected rows carry no snapshot here (their state rides
+        the injection queue into the generator), so the snapshot covers
+        the first first_tokens.shape[0] physical rows only. Slices are
+        lazy and ride the tick's eval; nothing here forces a sync.
+
+        Runs only once the rounds generator holds the state: pre-start,
+        _start_rounds still needs the snapshots row-aligned with the
+        caches (finished rows included; the generator stop_checks them
+        out itself), so a first-token finish must not slice here."""
+        if self._rounds_iter is None:
+            return
+        ft = getattr(self, "first_tokens", None)
+        if ft is None or getattr(self, _RELEASED_FLAG, False):
+            return
+        rows = getattr(self, "_kq_attr_rows", None)
+        if rows is None:
+            try:
+                rows = self._kq_attr_rows = list(range(ft.shape[0]))
+            except Exception:
+                return
+        keep = [p for p in rows
+                if p < len(self._finished) and not self._finished[p]]
+        if len(keep) == len(rows):
+            return
+        if not keep:
+            self.hidden = None
+            self.shared_kv_states = None
+            self.prompt_tokens = None
+            self.first_tokens = None
+            self._kq_attr_rows = []
+            return
+        keep_set = set(keep)
+        pos = [i for i, p in enumerate(rows) if p in keep_set]
+        idx = mx.array(pos, dtype=mx.int32)
+        for name in ("hidden", "prompt_tokens", "first_tokens"):
+            arr = getattr(self, name, None)
+            if arr is not None:
+                setattr(self, name, arr[idx])
+        kv = getattr(self, "shared_kv_states", None)
+        if isinstance(kv, dict) and kv:
+            # New dict, new arrays: the generator may still hold (and
+            # slice) the originals; never mutate a possibly shared dict.
+            self.shared_kv_states = {
+                k: (K[idx], V[idx]) for k, (K, V) in kv.items()}
+        self._kq_attr_rows = keep
 
     # 2. Buffer extend() instead of raising
     def _buffered_extend(self, other):
         active = sum(not d for d in self._finished)
         if active == 0:
             pending = getattr(self, "_pending_injections", [])
+            self.__dict__.pop("_kq_attr_rows", None)
             self.__dict__.update(other.__dict__)
             self._pending_injections = pending
             setattr(self, _RELEASED_FLAG, False)
@@ -1624,6 +1681,7 @@ def install_continuous_batch_admission() -> None:
             if pending:
                 other = pending.pop(0)
                 remaining = pending[:]
+                self.__dict__.pop("_kq_attr_rows", None)
                 self.__dict__.update(other.__dict__)
                 self._pending_injections = remaining
                 setattr(self, _RELEASED_FLAG, False)
@@ -1635,7 +1693,50 @@ def install_continuous_batch_admission() -> None:
 
     _orig_filter = SpecBatch.filter
 
+    def _compact_prestart_rows(self, keep) -> None:
+        """Physically drop rows from a batch whose rounds generator has
+        not started: filter the caches through their own filter (lifting
+        host caches first) and slice snapshots plus bookkeeping to the
+        same keep list. Pre-start, the batch object owns all state, so
+        the drop frees the rows' bytes immediately instead of marking
+        them finished and waiting for a generator that has no round
+        boundary yet."""
+        idx = mx.array(keep, dtype=mx.int32)
+        self.prompt_cache = [_lift_host_cache(c) for c in self.prompt_cache]
+        for c in self.prompt_cache:
+            c.filter(idx)
+        for name in ("hidden", "prompt_tokens", "first_tokens"):
+            arr = getattr(self, name, None)
+            if arr is not None:
+                setattr(self, name, arr[idx])
+        kv = getattr(self, "shared_kv_states", None)
+        if isinstance(kv, dict) and kv:
+            self.shared_kv_states = {
+                k: (K[idx], V[idx]) for k, (K, V) in kv.items()}
+        self._all_uids = [self._all_uids[i] for i in keep]
+        self.uids = list(self._all_uids)
+        self.max_tokens = [self.max_tokens[i] for i in keep]
+        self._num_tokens = [self._num_tokens[i] for i in keep]
+        self._finished = [False] * len(keep)
+        self.__dict__.pop("_kq_attr_rows", None)
+
     def _filter_with_release(self, keep):
+        # Pre-start strict subset (a cancel or a governor retire landing
+        # before the first tick): compact physically. Live or degenerate
+        # cases keep the upstream mark-finished contract; the running
+        # generator sheds the row at its next round boundary and the
+        # snapshot shed below covers the batch-held copies.
+        if (len(keep) < len(self.uids)
+                and keep
+                and self._rounds_iter is None
+                and not getattr(self, _RELEASED_FLAG, False)
+                and getattr(self, "first_tokens", None) is not None
+                and self.uids == self._all_uids
+                and not any(self._finished)
+                and all(hasattr(c, "filter") or hasattr(type(c), "merge")
+                        for c in self.prompt_cache)):
+            _compact_prestart_rows(self, list(keep))
+            return
         _orig_filter(self, keep)
         _release_if_finished(self)
 

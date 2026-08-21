@@ -174,6 +174,20 @@ SEAMS: tuple[Seam, ...] = (
          "spec_engine.install_full_prompt_mtp_prefill", critical=True),
     Seam("mlx_vlm.generate.ar", "SpeculativeGenerationBatch.next",
          "spec_engine.install_continuous_batch_admission", critical=True),
+    Seam("mlx_vlm.generate.ar", "SpeculativeGenerationBatch.filter",
+         "spec_engine._filter_with_release (per-row release rides the "
+         "mark-finished contract; the rounds generator sheds via "
+         "stop_check)", critical=True),
+    Seam("mlx_vlm.generate.ar", "SpeculativeGenerationBatch.__len__",
+         "spec_engine._len_with_promotion (patched semantics are D-3's "
+         "hazard; decision modules count rows via _orig_len only)",
+         critical=True),
+    Seam("mlx_vlm.generate.ar", "GenerationBatch._eval_pending_state",
+         "governor shed ordering (eval-before-the-gather is load-bearing "
+         "ground truth for filter under pressure)", critical=True),
+    Seam("mlx_vlm.generate.ar", "BatchGenerator.remove",
+         "governor retire rung + tick_guard rebuild (queue pop / "
+         "prompt-batch clear / decode filter semantics)", critical=True),
     Seam("mlx_vlm.generate.ar", "run_speculative_server_rounds",
          "spec_engine.install_owned_spec_engine", critical=True),
     Seam("mlx_vlm.speculative.utils", "make_speculative_prompt_cache",
@@ -310,6 +324,17 @@ SEAMS: tuple[Seam, ...] = (
          "arrays_cache_fix (prepare wrap)"),
     Seam("mlx_vlm.models.cache", "BatchKVCache",
          "mtp_drafter / cache_snapshot row round-trip"),
+    Seam("mlx_vlm.models.cache", "BatchKVCache.filter",
+         "spec_engine per-row release + governor retire (physical row "
+         "drop through the cache's own filter)", critical=True),
+    Seam("mlx_vlm.models.cache", "BatchKVCache.extract",
+         "governor orange retire (contiguous single-row extract before "
+         "filter)", critical=True),
+    Seam("mlx_vlm.models.cache", "ArraysCache.extract",
+         "governor orange retire (GDN hybrid row extract)"),
+    Seam("mlx_vlm.models.cache", "_BaseCache.nbytes",
+         "governor green sampling + registered-cache bytes() protocol",
+         critical=True),
     Seam("mlx_vlm.models.cache", "BatchRotatingKVCache",
          "cache_compat (rollback attach, safe KV-quant exclusion)"),
     Seam("mlx_vlm.models.cache", "BufferedRotatingKVCache",
