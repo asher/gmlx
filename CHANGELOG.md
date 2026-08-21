@@ -8,6 +8,16 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The server now governs memory pressure at runtime instead of dying on it:
+  under pressure it stops admitting, throttles allocation, shrinks prefill
+  chunks and speculative width, evicts idle caches, and as a last resort
+  retires or fails the largest request with a clear error
+  (`GMLX_GOVERNOR=0` disables; band and shed counters at `/v1/metrics`).
+- A request shed under memory pressure now gets a typed answer instead of a
+  hung stream: a 500 with the numbers before first byte, or a terminal SSE
+  event with `finish_reason: shed` mid-stream.
+- Cancelling one request in a speculative batch now frees its memory right
+  away instead of holding it until the whole batch finishes.
 - Sibling requests that arrive together no longer each prefill the shared
   prefix cold: the server admits the first one, waits for its stores, and
   starts the rest warm (`GMLX_APC_FRESH_WAIT_MS`, `0` disables).
