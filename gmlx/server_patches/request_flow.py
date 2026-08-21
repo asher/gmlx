@@ -100,6 +100,33 @@ def install_chat_load_offload() -> None:
 _KEEPALIVE_FLAG = "_kq_gguf_sse_keepalive"
 
 
+def _upgrade_shed_chunk(item, json_mod):
+    """The upstream stream handlers swallow a mid-stream RowShedError
+    into a plain ``data: {"error": str}`` event; recognize ours by the
+    self-owned marker in the message and upgrade it to the contract's
+    terminal shape (typed error object plus finish_reason "shed").
+    Returns the upgraded SSE string, or None to pass the chunk through."""
+    from .row_failed import SHED_MARKER
+
+    try:
+        text = item.decode() if isinstance(item, bytes) else item
+        if not isinstance(text, str) or not text.startswith("data: {"):
+            return None
+        if SHED_MARKER not in text:
+            return None
+        payload = json_mod.loads(text[len("data: "):].strip())
+    except Exception:
+        return None
+    msg = payload.get("error")
+    if not isinstance(msg, str) or SHED_MARKER not in msg:
+        return None
+    return "data: " + json_mod.dumps({
+        "error": {"message": msg, "type": "server_overloaded_shed",
+                  "code": "row_shed"},
+        "finish_reason": "shed",
+    }) + "\n\n"
+
+
 async def _keepalive_sse(body, interval: float | None):
     """Yield ``body``'s chunks unchanged, inserting a ``: keepalive`` SSE
     comment whenever the upstream is silent for ``interval`` seconds
@@ -139,6 +166,11 @@ async def _keepalive_sse(body, interval: float | None):
                 yield ": keepalive\n\n"
                 continue
             if kind == "chunk":
+                upgraded = _upgrade_shed_chunk(item, json)
+                if upgraded is not None:
+                    yield upgraded
+                    yield "data: [DONE]\n\n"
+                    return
                 yield item
             elif kind == "error":
                 from .row_failed import RowShedError

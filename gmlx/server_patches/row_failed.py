@@ -33,6 +33,14 @@ _pending: list = []
 _pending_lock = threading.Lock()
 
 
+# The self-owned signature the SSE layer keys the terminal-event
+# upgrade on: upstream stream handlers stringify the exception into a
+# plain {"error": str} event, and this phrase is how that event is
+# recognized as ours (single source of truth; RowShedError builds its
+# message from it).
+SHED_MARKER = "shed under memory pressure"
+
+
 class RowShedError(RuntimeError):
     """A request permanently failed by the memory governor or the tick
     guard's containment ladder. Retryable after backoff."""
@@ -44,7 +52,7 @@ class RowShedError(RuntimeError):
         prompt_len = self.info.get("prompt_len")
         why = self.info.get("error") or "memory pressure"
         super().__init__(
-            f"request shed under memory pressure after "
+            f"request {SHED_MARKER} after "
             f"{delivered if delivered is not None else 0} tokens "
             f"(prompt {prompt_len if prompt_len is not None else '?'} "
             f"tokens): {why}. The request is retryable after backoff.")

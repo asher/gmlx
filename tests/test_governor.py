@@ -325,6 +325,32 @@ def test_keepalive_sse_translates_shed_error():
     assert chunks[2] == "data: [DONE]\n\n"
 
 
+def test_keepalive_sse_upgrades_swallowed_shed_chunk():
+    # The upstream chat/responses stream handlers catch the error and
+    # yield a plain {"error": str} event; the wrapper must upgrade it.
+    import asyncio
+    import json
+
+    from gmlx.server_patches.request_flow import _keepalive_sse
+
+    err = RowShedError(7, {"prompt_len": 4, "delivered": 2,
+                           "error": "pressure"})
+
+    async def body():
+        yield "data: x\n\n"
+        yield f"data: {json.dumps({'error': str(err)})}\n\n"
+        yield "data: [DONE]\n\n"  # never reached by the wrapper
+
+    async def run():
+        return [c async for c in _keepalive_sse(body(), None)]
+
+    chunks = asyncio.run(run())
+    payload = json.loads(chunks[1][len("data: "):])
+    assert payload["finish_reason"] == "shed"
+    assert payload["error"]["type"] == "server_overloaded_shed"
+    assert chunks[2] == "data: [DONE]\n\n" and len(chunks) == 3
+
+
 def test_keepalive_sse_other_errors_still_raise():
     import asyncio
 
