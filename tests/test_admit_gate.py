@@ -231,6 +231,61 @@ def test_update_kv_rates_and_projection(monkeypatch):
     assert "kv" in parts and "reserve" in parts
 
 
+def _spec_gen(rows=1):
+    g = FakeGen(rows=rows)
+    b = g._generation_batch
+    b.hidden = mx.zeros((rows, 16, 8))            # row const
+    b.first_tokens = mx.zeros((rows,), dtype=mx.int32)
+    b.shared_kv_states = [mx.zeros((rows, 4, 64))]  # depth scaled
+    g.draft_model = SimpleNamespace(_cache=[FakeKV(rows=rows, offset=100)])
+    return g
+
+
+def test_spec_state_bytes_split():
+    g = _spec_gen()
+    depth_scaled, row_const = sm.spec_state_bytes(g)
+    dkv = g.draft_model._cache[0]
+    assert depth_scaled == (g._generation_batch.shared_kv_states[0].nbytes
+                            + dkv.keys.nbytes + dkv.values.nbytes)
+    assert row_const == (g._generation_batch.hidden.nbytes
+                         + g._generation_batch.first_tokens.nbytes)
+    plain = FakeGen(rows=1)
+    assert sm.spec_state_bytes(plain) == (0.0, 0.0)
+
+
+def test_update_kv_rates_folds_spec_state():
+    g = _spec_gen()
+    sm.update_kv_rates(g)
+    rates = g._kq_admit_kv_rates
+    depth_scaled, row_const = sm.spec_state_bytes(g)
+    assert rates["_spec_state"]["rate"] == pytest.approx(
+        depth_scaled / 100)  # live depth 100, one row
+    assert rates["_spec_state"]["window"] is None
+    kv = g._generation_batch.prompt_cache[0]
+    assert g._kq_admit_live_bytes == pytest.approx(
+        kv.keys.nbytes + kv.values.nbytes + depth_scaled + row_const)
+    assert g._kq_admit_spec_row_const == pytest.approx(row_const)
+    plain = FakeGen(rows=1)
+    sm.update_kv_rates(plain)
+    assert "_spec_state" not in plain._kq_admit_kv_rates
+    assert plain._kq_admit_spec_row_const == 0.0
+
+
+def test_projection_prices_spec_growth(monkeypatch):
+    import gmlx.prefill_decay as pd
+
+    monkeypatch.setenv("GMLX_ADMIT_RESERVE_GB", "2")
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 10e9)
+    plain, spec = FakeGen(rows=1), _spec_gen()
+    p_plain = sm.project_admission(plain, [_pending(2, 300, 200)])[0]
+    p_spec = sm.project_admission(spec, [_pending(2, 300, 200)])[0]
+    depth_scaled, row_const = sm.spec_state_bytes(spec)
+    # spec projects extra: rate x width x depth + const x width - live spec
+    extra = (depth_scaled / 100) * 2 * 512 + row_const * 2 \
+        - (depth_scaled + row_const)
+    assert p_spec - p_plain == pytest.approx(extra, rel=0.01)
+
+
 def test_projection_window_caps_rotating_kinds(monkeypatch):
     import gmlx.prefill_decay as pd
 

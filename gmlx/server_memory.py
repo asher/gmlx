@@ -130,10 +130,41 @@ def admit_reserve_bytes(ws_bytes: float) -> float:
     return max(2e9, 0.05 * ws_bytes)
 
 
+def spec_state_bytes(gen):
+    """Speculative-batch resident bytes the cache walk cannot see:
+    the parked batch attrs (hidden, shared KV snapshot, prompt tokens,
+    first tokens) and the drafter's own head KV. Returns
+    ``(depth_scaled, row_const)``: bytes that grow with context depth
+    (the shared KV snapshot and the drafter cache) and bytes that are
+    per-row constants. Both zero when the batch is not speculative."""
+    from .serve_memtrace import _arrays
+
+    batch = gen._generation_batch
+    depth_scaled = 0.0
+    row_const = 0.0
+    for name in ("shared_kv_states",):
+        depth_scaled += sum(a.nbytes for a in _arrays(
+            getattr(batch, name, None), 3))
+    for name in ("hidden", "prompt_tokens", "first_tokens"):
+        row_const += sum(a.nbytes for a in _arrays(
+            getattr(batch, name, None), 3))
+    draft = getattr(gen, "draft_model", None)
+    dcache = getattr(draft, "_cache", None)
+    if dcache:
+        for c in dcache:
+            for v in vars(c).values():
+                depth_scaled += sum(a.nbytes for a in _arrays(v))
+    return depth_scaled, row_const
+
+
 def update_kv_rates(gen) -> None:
     """Fold a fresh per-kind KV bytes-per-row-token measurement of the live
     decode batch into the generator's running estimate (``_kq_admit_``
-    attrs, the same convention the gate's defer state uses)."""
+    attrs, the same convention the gate's defer state uses). Speculative
+    state is folded in the same pass: depth-scaled spec bytes (shared KV
+    snapshot, drafter head KV) become a synthetic per-kind rate so the
+    projection prices their growth, and per-row constants land in
+    ``_kq_admit_spec_row_const``."""
     batch = gen._generation_batch
     rows = batch_rows(gen)
     pc = getattr(batch, "prompt_cache", None)
@@ -170,6 +201,11 @@ def update_kv_rates(gen) -> None:
                               else min(kind["window"], window))
     if not fresh:
         return
+    spec_depth_bytes, spec_row_const = spec_state_bytes(gen)
+    if spec_depth_bytes and live_depth > 0:
+        fresh["_spec_state"] = {
+            "rate": spec_depth_bytes / live_depth / rows, "window": None}
+    live_bytes += spec_depth_bytes + spec_row_const
     prev = getattr(gen, "_kq_admit_kv_rates", None) or {}
     merged = {}
     for name, k in fresh.items():
@@ -180,6 +216,8 @@ def update_kv_rates(gen) -> None:
     gen._kq_admit_kv_rates = merged
     gen._kq_admit_live_bytes = live_bytes
     gen._kq_admit_live_depth = live_depth
+    gen._kq_admit_spec_row_const = (spec_row_const / rows
+                                    if spec_row_const else 0.0)
 
 
 def project_admission(gen, candidates):
@@ -220,6 +258,7 @@ def project_admission(gen, candidates):
         capped = depth if k["window"] is None else min(
             depth, _round_block(k["window"]))
         kv_total += k["rate"] * width * capped
+    kv_total += getattr(gen, "_kq_admit_spec_row_const", 0.0) * width
     kv_new = max(0.0, kv_total - getattr(gen, "_kq_admit_live_bytes", 0.0))
     transient = score_transient_bytes(
         gen.model, getattr(gen._generation_batch, "prompt_cache", None),
