@@ -205,6 +205,9 @@ SEAMS: tuple[Seam, ...] = (
          "server_bridge_vlm (GGUF model resource loader)", critical=True),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._make_sampler",
          "server_patches.install_fast_sampler"),
+    Seam("mlx_vlm.server.generation", "ResponseGenerator._step",
+         "server_patches.row_failed (permanently failed rows delivered "
+         "to their response queues on the engine thread)", critical=True),
     Seam("mlx_vlm.server.generation", "GenerationArguments.to_template_kwargs",
          "server_patches (chat_template_kwargs transform)"),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._preprocess_request",

@@ -127,51 +127,65 @@ def _should_decline(gen) -> bool:
     now = time.perf_counter()
     deferred = getattr(gen, "_kq_admit_deferred_s", {})
 
+    from .governor import admission_hold_reason
     from .server_memory import project_admission
 
-    verdict = project_admission(gen, pending[: len(uids)])
-    if verdict is None:
-        # No basis to project (nothing measured yet): admit. The first
-        # request on a freshly loaded model cannot be the one that
-        # exhausts a box sized for the model.
-        _log_admit(gen, uids, deferred)
-        return False
-    projected, headroom, parts = verdict
-    if projected <= headroom:
-        _log_admit(gen, uids, deferred)
-        return False
+    hold = admission_hold_reason(gen)
+    if hold:
+        projected, headroom, parts = 0.0, 0.0, hold
+    else:
+        verdict = project_admission(gen, pending[: len(uids)])
+        if verdict is None:
+            # No basis to project (nothing measured yet): admit. The
+            # first request on a freshly loaded model cannot be the one
+            # that exhausts a box sized for the model.
+            _log_admit(gen, uids, deferred)
+            return False
+        projected, headroom, parts = verdict
+        if projected <= headroom:
+            _log_admit(gen, uids, deferred)
+            return False
 
     waited = max((deferred.get(u, 0.0) for u in uids), default=0.0)
     if waited > _defer_max_s():
-        # The one deliberate blind spot: past the ceiling the gate admits
-        # against a failing projection. Blind admission is one row, not a
-        # full prompt batch: flag the tick so the wrapper trims pending
-        # to the head row, and the rest re-project next tick (admitting
-        # one by one only while the projection keeps failing).
+        # Past the ceiling the gate no longer admits blind: the governor
+        # sheds first (registered-cache evict + pool reclaim), then the
+        # admit lands into recovered headroom. Admission is still one
+        # row, not a full prompt batch: flag the tick so the wrapper
+        # trims pending to the head row, and the rest re-project next
+        # tick (admitting one by one only while the projection fails).
+        from .governor import make_room_for_admission
+
+        try:
+            make_room_for_admission(gen)
+        except Exception:
+            _log.warning("[admit] ceiling handoff shed failed",
+                         exc_info=True)
         gen._kq_admit_ceiling_tick = True
         _log.warning(
-            "[admit] defer ceiling %.0fs hit: admitting one row blind "
-            "uid=%s (projected %.1f GB > headroom %.1f GB; %d more "
-            "candidates re-project next tick)",
-            _defer_max_s(), uids[0] if uids else None, projected / 1e9,
-            headroom / 1e9, max(0, len(uids) - 1))
+            "[admit] defer ceiling %.0fs hit: admitting one row past "
+            "ceiling uid=%s (%s; projected %.1f GB > headroom %.1f GB; "
+            "%d more candidates re-project next tick)",
+            _defer_max_s(), uids[0] if uids else None, parts,
+            projected / 1e9, headroom / 1e9, max(0, len(uids) - 1))
         return False
 
     first = any(u not in deferred for u in uids)
     _note_decline(gen, uids, now)
     global _DEFERRALS, _LAST_DEFER
-    _LAST_DEFER = (f"projected {projected / 1e9:.1f} GB ({parts}) > "
-                   f"headroom {headroom / 1e9:.1f} GB")
+    if hold:
+        _LAST_DEFER = hold
+    else:
+        _LAST_DEFER = (f"projected {projected / 1e9:.1f} GB ({parts}) > "
+                       f"headroom {headroom / 1e9:.1f} GB")
     if first:
         _DEFERRALS += 1
     last_log = getattr(gen, "_kq_admit_last_log", 0.0)
     if first or now - last_log > _LOG_EVERY_S:
         gen._kq_admit_last_log = now
         _log.info(
-            "[admit] deferred uid=%s: projected %.1f GB (%s) > headroom "
-            "%.1f GB; waiting=%d, decoding=%d",
-            uids, projected / 1e9, parts, headroom / 1e9,
-            len(pending), batch_rows(gen))
+            "[admit] deferred uid=%s: %s; waiting=%d, decoding=%d",
+            uids, _LAST_DEFER, len(pending), batch_rows(gen))
     return True
 
 

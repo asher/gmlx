@@ -92,6 +92,7 @@
   "mlx_vlm.server.generation:GenerationArguments.to_template_kwargs": "4da06fa052db0f207a0854aeace13e2bb529300b8ae7b87093bd560ceb92437e",
   "mlx_vlm.server.generation:ResponseGenerator._make_sampler": "24f0c94e3ad85564ff09e4859bdd764032444952c36487f4659c0e29f7d797ce",
   "mlx_vlm.server.generation:ResponseGenerator._preprocess_request": "5d89b1f03ae7156daf671c3c4999673ef2bc77bc5d650847abfc882099cd38f9",
+  "mlx_vlm.server.generation:ResponseGenerator._step": "c0c0b8ed81ed430f439f30520f316fd8f866ef6e695a764e81d92ed27a991136",
   "mlx_vlm.server.generation:load_model_resources": "b06b6cdcad1974f365577b6ff5a6ca04ffdc1127746109387888b36b41c5c423",
   "mlx_vlm.server.generation:run_speculative_server_rounds": "5953a756bf2aed0230fb31f50320d7ad12f32a6e0a28ea161a9f3f59fd71da9f",
   "mlx_vlm.server.openai:_infer_tool_parser_from_processor": "d7fdc11617d5e8c5e59491d49f502966810fb97a52a62c8f0c09770425d6a59e",

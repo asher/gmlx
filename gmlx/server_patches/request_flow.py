@@ -100,13 +100,22 @@ def install_chat_load_offload() -> None:
 _KEEPALIVE_FLAG = "_kq_gguf_sse_keepalive"
 
 
-async def _keepalive_sse(body, interval: float):
+async def _keepalive_sse(body, interval: float | None):
     """Yield ``body``'s chunks unchanged, inserting a ``: keepalive`` SSE
-    comment whenever the upstream is silent for ``interval`` seconds. A pump
-    task feeds a queue so the timeout never cancels the upstream generator;
-    closing this generator cancels the pump and closes ``body``, preserving
-    the disconnect path (stream finally -> token_iter.close -> batch cancel)."""
+    comment whenever the upstream is silent for ``interval`` seconds
+    (``None`` disables the keepalive but keeps the error translation). A
+    pump task feeds a queue so the timeout never cancels the upstream
+    generator; closing this generator cancels the pump and closes
+    ``body``, preserving the disconnect path (stream finally ->
+    token_iter.close -> batch cancel).
+
+    A ``RowShedError`` surfacing mid-stream becomes a terminal SSE error
+    event with its own finish_reason and a clean close: by then the
+    headers are long gone, and the client must be able to tell a
+    governor shed from both a normal stop and a transport fault (a
+    dropped connection means worker death and has its own retry rule)."""
     import asyncio
+    import json
 
     queue: "asyncio.Queue" = asyncio.Queue()
 
@@ -132,6 +141,23 @@ async def _keepalive_sse(body, interval: float):
             if kind == "chunk":
                 yield item
             elif kind == "error":
+                from .row_failed import RowShedError
+
+                if isinstance(item, RowShedError):
+                    payload = {
+                        "error": {
+                            "message": str(item),
+                            "type": "server_overloaded_shed",
+                            "code": "row_shed",
+                            **{k: item.info[k]
+                               for k in ("prompt_len", "delivered")
+                               if item.info.get(k) is not None},
+                        },
+                        "finish_reason": "shed",
+                    }
+                    yield f"data: {json.dumps(payload)}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
                 raise item
             else:
                 return
@@ -165,9 +191,13 @@ def install_sse_keepalive() -> None:
         async def endpoint(*args, **kwargs):
             result = await original(*args, **kwargs)
             interval = env_float("GMLX_SSE_KEEPALIVE_S", 15.0)
-            if interval > 0 and isinstance(result, StreamingResponse):
+            if isinstance(result, StreamingResponse):
+                # interval <= 0 disables the keepalive but keeps the
+                # shed-error translation: a terminal event beats a
+                # dropped connection regardless of keepalive policy.
                 result.body_iterator = _keepalive_sse(
-                    result.body_iterator, interval)
+                    result.body_iterator,
+                    interval if interval > 0 else None)
             return result
         return endpoint
 

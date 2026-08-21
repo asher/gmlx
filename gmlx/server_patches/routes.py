@@ -263,6 +263,12 @@ def install_runtime_snapshot_enrichment() -> None:
         except Exception:
             pass
         try:
+            from ..governor import governor_stats
+
+            base["governor"] = governor_stats()
+        except Exception:
+            pass
+        try:
             from ..queue_cap import queue_cap_stats
 
             base["queue"] = queue_cap_stats()

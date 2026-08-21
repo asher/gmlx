@@ -252,6 +252,13 @@ async def _blocking_completion(request, runtime, gen_mod, start, stops,
         raise
     except Exception as e:
         _record_failure(runtime, request.model, False, str(e))
+        from .row_failed import RowShedError
+
+        if isinstance(e, RowShedError):
+            # The shed contract: the 500 body carries the numbers and
+            # the retry-after-backoff hint (message built for clients;
+            # no paths or internals).
+            raise HTTPException(status_code=500, detail=str(e))
         # Generic body: raw exception text can carry paths and internals;
         # the recorded failure reaches the operator via the [req] log line.
         raise HTTPException(status_code=500,

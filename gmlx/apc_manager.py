@@ -114,6 +114,65 @@ class GmlxAPCManager(_apc.APCManager):
         # lifetime and its pinned snapshots must not survive a reset.
         clear_all_spec_prefix_caches()
 
+    def governor_bytes(self) -> int:
+        """Resident GPU bytes this manager holds: committed pool blocks
+        plus exact-prefix clones. Attribute math only, no device sync;
+        the governor samples this on a slow cadence."""
+        total = 0
+        with self.lock:
+            for b in self.pool:
+                for arrs in (b.keys, b.values):
+                    if arrs:
+                        total += sum(a.nbytes for a in arrs)
+            for e in self._exact_cache.values():
+                for c in e.prompt_cache:
+                    nb = getattr(c, "nbytes", 0)
+                    total += int(nb) if isinstance(nb, int) else 0
+        return total
+
+    def governor_evict(self, fraction: float) -> int:
+        """Evict ``fraction`` of reclaimable bytes for the governor's
+        orange rung: exact-prefix clones oldest-first, then unreferenced
+        pool blocks through the stock LRU eviction (hash entry removed,
+        slabs nulled, block returned empty to the free queue). Rows in
+        flight never lose blocks: only ref_cnt 0 blocks sit in the free
+        queue."""
+        fraction = min(1.0, max(0.0, float(fraction)))
+        freed = 0
+        with self.lock:
+            n = len(self._exact_cache)
+            for _ in range(max(1, round(n * fraction)) if n else 0):
+                if not self._exact_cache:
+                    break
+                _, e = self._exact_cache.popitem(last=False)
+                for c in e.prompt_cache:
+                    nb = getattr(c, "nbytes", 0)
+                    freed += int(nb) if isinstance(nb, int) else 0
+            committed = sum(
+                1 for b in self.pool if b.keys and b.ref_cnt == 0)
+            target = int(committed * fraction)
+            evicted = 0
+            guard = len(self.pool)
+            while evicted < target and guard > 0:
+                guard -= 1
+                head = self._free_head
+                if head is None:
+                    break
+                had_slabs = bool(head.keys)
+                nb = (sum(a.nbytes for a in head.keys or ())
+                      + sum(a.nbytes for a in head.values or ()))
+                b = self._evict_lru()
+                if b is None:
+                    break
+                # Return the emptied block to the queue tail; empty
+                # blocks cycling there is harmless (order matters only
+                # among committed blocks).
+                self._free_push(b)
+                if had_slabs:
+                    freed += nb
+                    evicted += 1
+        return freed
+
     def store_ckpt_blocks(self, token_ids, layer_keys, layer_values,
                           *, extra_hash=0, disk=True):
         """Block store for checkpoint chains: always per-block -- the

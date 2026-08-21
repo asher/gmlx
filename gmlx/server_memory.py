@@ -322,6 +322,12 @@ def project_admission(gen, candidates):
     projected = kv_new + transient + reserve
     parts = (f"kv {kv_new / 1e9:.1f} + transient {transient / 1e9:.1f}"
              f" + reserve {reserve / 1e9:.1f}")
+    # Stash for the governor's per-tick demand model: while a join is
+    # pending (or its prompt batch is in flight) the declared next-tick
+    # peak includes this projection, without re-walking anything.
+    import time
+
+    gen._kq_admit_last_projection = (time.perf_counter(), projected)
     return projected, head, parts
 
 

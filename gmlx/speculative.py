@@ -1561,7 +1561,23 @@ def _mtp_width_cap(drafter) -> int:
         _log_width_cap_once(
             f"clamp: requested {cap or 'uncapped'} -> {limit} (drafter limit)")
         cap = limit
+    if _gov_width_clamp >= 1 and (cap == 0 or cap > _gov_width_clamp):
+        _log_width_cap_once(
+            f"clamp: governor caps width at {_gov_width_clamp}")
+        cap = _gov_width_clamp
     return cap
+
+
+_gov_width_clamp = 0
+
+
+def set_governor_width_clamp(n: int) -> None:
+    """Runtime speculative-width clamp for the memory governor's yellow
+    demand rung: clamps the resolved cap (env and stamp included), 0
+    clears. The verify transient is width x block x vocab, so this caps
+    the next tick's declared peak at spec-throughput cost only."""
+    global _gov_width_clamp
+    _gov_width_clamp = max(0, int(n))
 
 
 _width_cap_logged: set[str] = set()

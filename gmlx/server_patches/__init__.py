@@ -268,6 +268,16 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     # admission work.
     from ..serve_memtrace import install_serve_memtrace
     install_serve_memtrace()
+    # Outside the trace (band decisions and shed work show up as tick
+    # time, which the trace should attribute) and inside the tick guard
+    # (a memory error a governor action itself trips must be contained
+    # like any other).
+    from ..governor import install_governor
+    install_governor()
+    # The rows the guard or the governor fail permanently must reach
+    # their handlers (typed error + close on the response queue).
+    from .row_failed import install_row_failed_bridge
+    install_row_failed_bridge()
     # The true last BatchGenerator._next wrapper (outermost): the tick
     # guard must see every error the tick can raise, and its recovery
     # time must not pollute the trace's tick bracket.
