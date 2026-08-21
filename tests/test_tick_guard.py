@@ -147,6 +147,7 @@ def test_non_memory_errors_propagate(wrapped):
 def test_inject_throw_is_contained(wrapped, monkeypatch):
     gen, script, drains = wrapped
     monkeypatch.setenv("GMLX_OOM_INJECT", "throw@2")
+    tg._INJECT_FIRED.clear()
     monkeypatch.setattr(tg.mx, "clear_cache", lambda: None)
     script.append(([], [resp(7, 11)]))
     tick(gen)                              # tick 1: normal

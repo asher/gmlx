@@ -78,6 +78,9 @@ class _TickState:
         self.injected: set = set()
 
 
+_INJECT_FIRED: set = set()
+
+
 def _maybe_inject(st: _TickState) -> None:
     """U5 fault injection: GMLX_OOM_INJECT directives ``throw@N`` (a
     synthetic allocator error at tick N, exercising the containment
@@ -96,8 +99,10 @@ def _maybe_inject(st: _TickState) -> None:
             tick = int(t)
         except ValueError:
             continue
-        if st.ticks < tick or (kind, tick) in st.injected:
+        # once per process: tick counters restart per batch cycle
+        if st.ticks < tick or (kind, tick) in _INJECT_FIRED:
             continue
+        _INJECT_FIRED.add((kind, tick))
         st.injected.add((kind, tick))
         if kind == "kill":
             _log.error("[tick-guard] INJECT: SIGKILL at tick %d", st.ticks)

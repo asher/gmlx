@@ -146,11 +146,18 @@ def _inject_directives() -> tuple:
     return _inject_memo[1]
 
 
+# Directives fire once per PROCESS, not per batch generator: tick
+# counters restart with every batch cycle, and a soak crosses the
+# trigger tick once per cycle.
+_INJECT_FIRED: set = set()
+
+
 def _fire_injections(st: "_GovState") -> set:
     fired = set()
     for kind, tick in _inject_directives():
         key = (kind, tick)
-        if st.tick_no >= tick and key not in st.injected:
+        if st.tick_no >= tick and key not in _INJECT_FIRED:
+            _INJECT_FIRED.add(key)
             st.injected.add(key)
             if kind in ("yellow", "orange", "red"):
                 fired.add(kind)

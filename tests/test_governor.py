@@ -70,6 +70,8 @@ def rig(monkeypatch):
     import gmlx.prefill_decay as pd
     monkeypatch.setattr(pd, "untracked_weight_bytes", lambda: 50e9)
     gov._REG.clear()
+    gov._INJECT_FIRED.clear()
+    tg._INJECT_FIRED.clear()
     for k in gov._STATS:
         if isinstance(gov._STATS[k], int):
             gov._STATS[k] = 0
