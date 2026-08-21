@@ -294,8 +294,12 @@ class GmlxAPCManager(_apc.APCManager):
                 try:
                     # The shard crosses to the disk writer thread; hand it
                     # evaluated arrays only (loop paths that skip the slab
-                    # copies leave these lazy).
-                    mx.eval(list(layer_keys) + list(layer_values))
+                    # copies leave these lazy). Owned survivors: the slices
+                    # are the live generation's KV, retained by the prompt
+                    # cache; the guard drains before this handler continues.
+                    from .eval_guard import guard
+                    guard.eval(*(list(layer_keys) + list(layer_values)),
+                               site="apc-disk-save", owner="owned")
                     self.disk.save_layer_major_blocks(
                         disk_blocks, layer_keys, layer_values, self.block_size
                     )

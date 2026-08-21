@@ -656,7 +656,11 @@ def warm_kernel_pipelines() -> int:
         nonlocal n
         try:
             out = fn()
-            mx.eval(*(out if isinstance(out, (tuple, list)) else (out,)))
+            # Scratch survivors (warm-path probe tensors); the guard
+            # drains so the next fire() is not the poisoning commit.
+            from .eval_guard import guard
+            guard.eval(*(out if isinstance(out, (tuple, list)) else (out,)),
+                       site="dsa-warm-probe", owner="scratch")
             n += 1
         except Exception:  # noqa: BLE001 - warm only, probes stay live
             pass

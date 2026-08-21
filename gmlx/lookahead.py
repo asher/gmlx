@@ -390,7 +390,12 @@ class LookaheadHook:
             t1 = time.perf_counter()
             ph["build"] += t1 - t0
         try:
-            mx.eval(indices, *[t for _, _, pair in lazy for t in pair])
+            # Mixed ownership: the predictor tensors are scratch (the
+            # handler discards them) but indices is owned state the tick
+            # continues with; the guard drains before either happens.
+            from .eval_guard import guard
+            guard.eval(indices, *[t for _, _, pair in lazy for t in pair],
+                       site="lookahead-joint", owner="owned")
         except Exception as exc:
             # Joint eval: the failing predictor is unattributable, so
             # disable every one this hook owns rather than loop forever.
@@ -402,7 +407,9 @@ class LookaheadHook:
                     f"{type(exc).__name__}: {exc}"
                 )
             lazy = []
-            mx.eval(indices)
+            # Post-drain re-eval of the owned half on the same stream:
+            # legitimate now, the poisoning commit before the guard.
+            guard.eval(indices, site="lookahead-indices", owner="owned")
         if ph is not None:
             ph["sync"] += time.perf_counter() - t1
         by_pred: dict = {}

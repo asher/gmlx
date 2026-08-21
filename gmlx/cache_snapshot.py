@@ -1205,8 +1205,11 @@ def ckpt_store(
             # Evaluate before storing: the shard payload crosses to the
             # disk writer thread, and evaluating arrays that share
             # unevaluated inputs from two threads is undefined in mlx.
-            import mlx.core as mx
-            mx.eval(lk + lv)
+            # Owned survivors: lk/lv slice the live prompt cache, whose
+            # own pending graph rides the same tape; the guard drains
+            # before the store's except path releases and declines.
+            from .eval_guard import guard
+            guard.eval(*(lk + lv), site="ckpt-store-main", owner="owned")
             got_main = _chained(
                 ids[:b_full], lk, lv, extra=salted, disk=True,
                 need=b_full // bs, what="main")
@@ -1240,9 +1243,10 @@ def ckpt_store(
             bsalt = bounded_extra_hash(extra_hash, p)
             canon_k = [cw[0] for cw in canon]
             canon_v = [cw[1] for cw in canon]
-            # Same writer-thread rule as the main chain above.
-            import mlx.core as mx
-            mx.eval(canon_k + canon_v)
+            # Same writer-thread rule and ownership as the main chain.
+            from .eval_guard import guard
+            guard.eval(*(canon_k + canon_v), site="ckpt-store-window",
+                       owner="owned")
             got_win = _chained(
                 canon_ids, canon_k, canon_v, extra=bsalt, disk=rot_disk,
                 need=L // bs, what="window")
@@ -1702,7 +1706,11 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
                 targets.extend([c.keys, c.values])
             elif hasattr(c, "cache"):
                 targets.extend(s for s in c.cache if s is not None)
-        mx.eval(*targets)
+        # Scratch survivors: the warm-cache arrays were built by this
+        # restore from pool blocks; the except path's release-and-decline
+        # is the right exit and now runs post-drain.
+        from .eval_guard import guard
+        guard.eval(*targets, site="ckpt-disk-lookup", owner="scratch")
         manager.release(blocks)
         manager.release(wblocks)
         # ckpt_* only: lookup_exact_cache above already fed the upstream
