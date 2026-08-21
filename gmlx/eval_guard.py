@@ -235,6 +235,20 @@ def _guarded(path: str, arrays, site: str, owner: str):
         raise
 
 
+def drain_for(site: str) -> None:
+    """Stamp, drain in the measured order, clear: for a handler that
+    caught a memory error around something other than a bare eval (the
+    engine tick). The stamp keeps the staleness clock honest for the
+    drain's duration exactly as the guarded evals do."""
+    if not _enabled():
+        return
+    _stamp(site, "sync")
+    try:
+        _drain(site)
+    finally:
+        _clear_stamp()
+
+
 def guard_eval(*arrays, site: str, owner: str) -> None:
     """mx.eval with the drain-stamp-reraise contract (sync path)."""
     return _guarded("sync", arrays, site, owner)
