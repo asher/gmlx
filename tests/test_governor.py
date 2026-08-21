@@ -223,6 +223,31 @@ def test_red_on_negative_next_tick_headroom(rig, monkeypatch):
     assert "governor red" in failed[0][1]["error"]
 
 
+def test_red_does_not_latch_on_healthy_headroom(rig, monkeypatch):
+    # One forced red tick on a healthy box: survivors keep growing, so
+    # the shed's measured recovery is <= 0. The failed-recovery latch
+    # must not re-arm red from red (only orange escalates on it); the
+    # band de-escalates and exactly one row is shed.
+    monkeypatch.setenv("GMLX_OOM_INJECT", "red@1")
+    monkeypatch.setenv("GMLX_GOV_MIN_DWELL_S", "0")
+    failed = []
+    monkeypatch.setattr(tg, "_row_failed_callbacks",
+                        [lambda uid, info: failed.append(uid)])
+    gen = FakeGen(rows=2, rate=1e6)
+    st = gov._state(gen)
+    tg_st = tg._state(gen)
+    tg_st.ledger[0] = tg._Row([1] * 8, 64, {}, None, None)
+    tg_st.ledger[1] = tg._Row([1] * 4, 64, {}, None, None)
+    gov._governor_tick(gen)
+    assert st.band == gov.RED and failed == [0]
+    rig["active"] += 1e9                        # survivors grew
+    for _ in range(int(gov._env_f("GMLX_GOV_DY", 8)) + 2):
+        gov._governor_tick(gen)
+    assert st.band == gov.GREEN
+    assert failed == [0]                        # no repeat sheds
+    assert not st.orange_failed
+
+
 def test_shed_rate_cap(rig, monkeypatch):
     monkeypatch.setenv("GMLX_GOV_SHEDS_PER_MIN", "1")
     failed = []

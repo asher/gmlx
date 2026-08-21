@@ -523,11 +523,14 @@ def _governor_tick(gen) -> None:
     demand = _demand_bytes(gen, st)
     ttc = head / max(demand, 1.0)
 
-    # measured recovery report for the last shed
+    # measured recovery report for the last shed. Only orange arms the
+    # failed-recovery escalation: in red the direct headroom condition
+    # governs, and a tiny shed against still-growing survivors would
+    # otherwise re-latch red forever on a healthy box.
     if st.shed_measure_from is not None:
         recovered = st.shed_measure_from - float(mx.get_active_memory())
         _STATS["last_recovered_bytes"] = int(recovered)
-        if recovered <= 0 and st.band >= ORANGE:
+        if recovered <= 0 and st.band == ORANGE:
             st.orange_failed = True
         st.shed_measure_from = None
         st.pending_shed_bytes = 0.0
