@@ -167,11 +167,19 @@ def test_seed_step_honors_kill_switch(monkeypatch):
     assert pd.decayed_seed_step(2048, 10_000_000, HEADS) == 2048
 
 
-def test_note_untracked_weights_accumulates(monkeypatch):
+def _fresh_registry(monkeypatch):
     monkeypatch.setattr(pd, "_UNTRACKED_WEIGHTS", {})
+    monkeypatch.setattr(pd, "_UNTRACKED_OWNERS", {})
+    monkeypatch.setattr(pd, "_WEIGHTS_OWNER", None)
+
+
+def test_note_untracked_weights_unkeyed_dropped(monkeypatch):
+    # unkeyed bytes could never be forgotten at eviction; the old anonymous
+    # accumulator was the eviction leak in miniature, so key=None is dropped
+    _fresh_registry(monkeypatch)
     pd.note_untracked_weights(10 * GB)
     pd.note_untracked_weights(5 * GB)
-    assert pd.untracked_weight_bytes() == 15 * GB
+    assert pd.untracked_weight_bytes() == 0
 
 
 def test_note_untracked_weights_same_key_first_wins(monkeypatch):
@@ -198,11 +206,70 @@ def test_note_untracked_weights_first_wins_over_phantom(monkeypatch):
 
 
 def test_note_untracked_weights_distinct_keys_sum(monkeypatch):
-    monkeypatch.setattr(pd, "_UNTRACKED_WEIGHTS", {})
+    _fresh_registry(monkeypatch)
     pd.note_untracked_weights(10 * GB, key=("/models/a.gguf",))
     pd.note_untracked_weights(4 * GB, key=("/models/b.gguf",))
-    pd.note_untracked_weights(1 * GB)
-    assert pd.untracked_weight_bytes() == 15 * GB
+    pd.note_untracked_weights(1 * GB)  # unkeyed: dropped
+    assert pd.untracked_weight_bytes() == 14 * GB
+
+
+def test_forget_drops_bytes_at_zero_owners(monkeypatch):
+    # the eviction leak: a torn-down model's registration must leave the
+    # estimate, or every model ever loaded stays subtracted from headroom
+    # and the admission gate defers every request to the ceiling
+    _fresh_registry(monkeypatch)
+    pd.set_untracked_weights_owner("entry-a")
+    pd.note_untracked_weights(87 * GB, key=("/models/a.gguf",))
+    pd.set_untracked_weights_owner(None)
+    pd.forget_untracked_weights("entry-a")
+    assert pd.untracked_weight_bytes() == 0
+
+
+def test_shared_key_survives_until_last_owner(monkeypatch):
+    # two resident entries sharing shards (target + paired drafter reload,
+    # the designed first-wins case): evicting either alone must keep the
+    # pages counted; a build-window diff would under-attribute here and
+    # flip the defect optimistic
+    _fresh_registry(monkeypatch)
+    key = ("/models/a.gguf",)
+    pd.set_untracked_weights_owner("entry-a")
+    pd.note_untracked_weights(87 * GB, key=key)
+    pd.set_untracked_weights_owner("entry-b")
+    pd.note_untracked_weights(87 * GB, key=key)  # re-registration: first wins
+    pd.set_untracked_weights_owner(None)
+    pd.forget_untracked_weights("entry-a")
+    assert pd.untracked_weight_bytes() == 87 * GB
+    pd.forget_untracked_weights("entry-b")
+    assert pd.untracked_weight_bytes() == 0
+
+
+def test_forget_leaves_other_entries_and_ownerless_keys(monkeypatch):
+    _fresh_registry(monkeypatch)
+    pd.note_untracked_weights(5 * GB, key=("/m/cli.gguf",))  # no owner window
+    pd.set_untracked_weights_owner("entry-a")
+    pd.note_untracked_weights(10 * GB, key=("/m/a.gguf",))
+    pd.set_untracked_weights_owner("entry-b")
+    pd.note_untracked_weights(4 * GB, key=("/m/b.gguf",))
+    pd.set_untracked_weights_owner(None)
+    pd.forget_untracked_weights("entry-a")
+    assert pd.untracked_weight_bytes() == 9 * GB
+    pd.forget_untracked_weights("entry-b")
+    assert pd.untracked_weight_bytes() == 5 * GB  # ownerless key persists
+
+
+def test_deduct_shrinks_registration_floored_at_zero(monkeypatch):
+    # streamed-out expert bytes are page cache, not wired weights: the
+    # streaming install deducts them or headroom sits permanently negative
+    _fresh_registry(monkeypatch)
+    key = ("/models/moe.gguf",)
+    pd.note_untracked_weights(162 * GB, key=key)
+    pd.deduct_untracked_weights(150 * GB, key)
+    assert pd.untracked_weight_bytes() == 12 * GB
+    pd.deduct_untracked_weights(50 * GB, key)
+    assert pd.untracked_weight_bytes() == 0
+    pd.deduct_untracked_weights(1 * GB, ("/models/other.gguf",))  # unknown
+    pd.deduct_untracked_weights(1 * GB, None)                     # keyless
+    assert pd.untracked_weight_bytes() == 0
 
 
 # --- arch score profiles -------------------------------------------------

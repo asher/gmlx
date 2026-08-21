@@ -110,6 +110,8 @@ import logging
 import os
 import time
 
+from .batch_rows import batch_rows
+
 _log = logging.getLogger(__name__)
 
 _LOG_EVERY_S = 1.0
@@ -237,7 +239,7 @@ def _stamp(gen, st: _AutoState, now: float) -> None:
 def _c_term(gen, st: _AutoState, now: float) -> tuple[bool, float]:
     """C-threshold conjunct with hysteresis, dwell, and the width-change
     freeze. Returns (pacing_wanted, C)."""
-    width = len(gen._generation_batch)
+    width = batch_rows(gen)
     s, frozen = _step_cost(st, width)
     last_chunk = getattr(gen, "_kq_last_chunk_time", 0.0)
     if s is None or s <= 0.0 or last_chunk <= 0.0:
@@ -308,7 +310,7 @@ def resolve(gen, now: float | None = None) -> float:
         return _resolved(
             gen, st, 0.0, now,
             f"no incumbent (waiting={len(pending)}, "
-            f"width={len(gen._generation_batch)})")
+            f"width={batch_rows(gen)})")
 
     c_wants, c = _c_term(gen, st, now)
     if not c_wants:

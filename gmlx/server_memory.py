@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import os
 
+from .batch_rows import batch_rows
+
 GIB = 1 << 30
 _AUTO_PRESSURE = 0.6      # engage when weights > 60% of the working set
 _AUTO_SLACK_FRACTION = 0.25
@@ -133,7 +135,7 @@ def update_kv_rates(gen) -> None:
     decode batch into the generator's running estimate (``_kq_admit_``
     attrs, the same convention the gate's defer state uses)."""
     batch = gen._generation_batch
-    rows = len(batch)
+    rows = batch_rows(gen)
     pc = getattr(batch, "prompt_cache", None)
     if rows <= 0 or not pc:
         return
@@ -210,7 +212,7 @@ def project_admission(gen, candidates):
         cand_tokens.append(prompt_toks + max_toks)
     if not cand_tokens:
         return None
-    width = len(gen._generation_batch) + len(cand_tokens)
+    width = batch_rows(gen) + len(cand_tokens)
     depth = _round_block(max([getattr(gen, "_kq_admit_live_depth", 0)]
                              + cand_tokens))
     kv_total = 0.0

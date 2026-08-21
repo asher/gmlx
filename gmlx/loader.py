@@ -30,7 +30,11 @@ from . import loadlog
 from .dtypes import activation_dtype, activation_dtype_name
 from .envflags import env_bool, env_choice, env_float, env_int
 from .attn_hd512 import install_hd512_sdpa
-from .prefill_decay import install_prefill_decay, note_untracked_weights
+from .prefill_decay import (
+    deduct_untracked_weights,
+    install_prefill_decay,
+    note_untracked_weights,
+)
 from . import gpt_oss_prefill  # noqa: F401  (registers gpt_oss score profile)
 from .modules import install_fused_moe_glu, install_hyv3_shexp_fold
 from .occupancy_fuse import install_occupancy_fuse
@@ -2078,6 +2082,17 @@ def install_expert_streaming(
                 m._kq_cpu_only = True
             offloaded += sum(a.nbytes for _, a in tree_flatten(m.parameters()))
             n_wrapped += 1
+    if over_budget and offloaded:
+        # An over-budget model registered at ~full size in the untracked-
+        # weights registry (the residency warm pass skips it, so its
+        # tracked delta is small), but its streamed experts are page
+        # cache, never wired: deduct them or headroom_bytes() sits
+        # permanently negative and both the admission gate and the
+        # request preflight starve every request. Same 0.9 x working-set
+        # budget test as _warm_touch_pass, so the deduction fires exactly
+        # when the touch pass skipped.
+        deduct_untracked_weights(
+            offloaded, getattr(model, "_kq_weights_key", None))
     if n_cpu_only_codec:
         print(
             f"[stream] {n_cpu_only_codec} expert stacks use a CPU-only codec "
@@ -2616,8 +2631,8 @@ def _active_now() -> float | None:
 
 def weights_source_key(*paths: str) -> tuple | None:
     """Identity of a load's weight bytes (absolute file paths) for the
-    untracked-headroom registry: reloads of the same file replace their
-    earlier registration instead of double-counting."""
+    untracked-headroom registry: reloads of the same file count once (the
+    first registration per key wins; see note_untracked_weights)."""
     return tuple(os.path.abspath(p) for p in paths) or None
 
 
@@ -2670,6 +2685,10 @@ def _warm_mmap_residency(
         # Keyed by shard paths so a drafter reloading the target's GGUF
         # cannot register the same pages twice (first registration wins).
         key = source_key or (weights_source_key(*paths) if paths else None)
+        if key is not None:
+            # install_expert_streaming reads this to deduct streamed-out
+            # expert bytes from the same registration.
+            object.__setattr__(model, "_kq_weights_key", key)
         note_untracked_weights(max(0.0, total - min(tracked, total)), key=key)
 
 

@@ -35,6 +35,8 @@ import logging
 import os
 import time
 
+from .batch_rows import batch_rows
+
 _log = logging.getLogger(__name__)
 
 _INSTALLED_FLAG = "_kq_gguf_fresh_gate"
@@ -155,7 +157,7 @@ def _keep_count(gen):
             del held[uid]
     if manager is None or len(pending) < 2 or gen._prompt_batch is not None:
         return None
-    num_to_add = gen.completion_batch_size - len(gen._generation_batch)
+    num_to_add = gen.completion_batch_size - batch_rows(gen)
     if num_to_add < gen.prefill_batch_size:
         return None
     wait = _wait_ms()

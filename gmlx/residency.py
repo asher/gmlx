@@ -670,6 +670,14 @@ class _ResidencyPool:
             "1", "true", "True", "yes")
         os.environ["GMLX_APC_ENABLED"] = "1" if enabled else "0"
         os.environ["APC_ENABLED"] = "0"
+        # Untracked-weights ownership window: every registration the stock
+        # load performs on this entry's behalf (the model walk, a drafter
+        # reload, the MTP stash build) attributes its key to this entry, so
+        # _teardown can forget exactly those keys. Same cross-thread module-
+        # global pattern as set_build_spec, serialized by the build lock.
+        from .prefill_decay import (
+            forget_untracked_weights, set_untracked_weights_owner)
+        set_untracked_weights_owner(cache_key)
         try:
             self._stock_get(model_path, adapter_path, model_kind=model_kind)
             # Wire the bridge-built manager everywhere the stock load would
@@ -686,7 +694,13 @@ class _ResidencyPool:
                 rg = scratch.response_generator
                 if rg is not None:
                     rg.apc_manager = manager
+        except BaseException:
+            # A failed build never reaches _teardown: drop its partial
+            # registrations here or they tax headroom forever.
+            forget_untracked_weights(cache_key)
+            raise
         finally:
+            set_untracked_weights_owner(None)
             _serving.set_build_spec(None)
             _serving.pop_built_apc_manager()
             self._restore_env(apc_saved)
@@ -777,6 +791,13 @@ class _ResidencyPool:
             release_streaming_for(entry.model_path)
         except Exception:
             pass
+        # Every eviction and reap funnels through here: drop this entry's
+        # untracked-weights attributions so an evicted model stops taxing
+        # headroom_bytes(). The registry forgets exactly the keys this
+        # entry's build registered; bytes leave the estimate only at zero
+        # owners, so a resident sibling sharing shards keeps them counted.
+        from .prefill_decay import forget_untracked_weights
+        forget_untracked_weights(entry.cache_key)
 
 
 def _pinned_from_env(preload_path):

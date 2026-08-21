@@ -62,6 +62,7 @@ Knobs:
 from __future__ import annotations
 
 import os
+import threading
 from typing import Callable, NamedTuple, Optional
 
 import mlx.core as mx
@@ -341,26 +342,77 @@ def _tick_step(base: int) -> int | None:
 # Untracked weight bytes keyed by source (GGUF shard paths). Reloading the
 # same file maps the same pages, so only the first registration per key
 # counts; a drafter reload used to double the count and hold headroom
-# negative, serializing admissions.
+# negative, serializing admissions. Keys carry an owner set (the residency
+# entries whose builds registered them): a key's bytes leave the estimate
+# when its last owner is forgotten at teardown, so an evicted model stops
+# taxing headroom while a sibling sharing its shards keeps them counted.
+# Keys registered outside any owner window (single-model CLI runs) live
+# for the process, which is their actual lifetime.
 _UNTRACKED_WEIGHTS: dict[object, float] = {}
-_UNTRACKED_ANON = "\0anon"
+_UNTRACKED_OWNERS: dict[object, set] = {}
+_UNTRACKED_LOCK = threading.Lock()
+_WEIGHTS_OWNER: object | None = None
 _HEADROOM_FRACTION = 0.5
+
+
+def set_untracked_weights_owner(owner: object | None) -> None:
+    """Open (or close, with None) the ownership window: registrations
+    attribute their key to ``owner``. A module global rather than a
+    ContextVar: the residency pool opens the window on the request thread
+    while the model builds on the engine's worker thread, and builds are
+    serialized by the pool's build lock, so one window is live at a time."""
+    global _WEIGHTS_OWNER
+    _WEIGHTS_OWNER = owner
 
 
 def note_untracked_weights(nbytes: float, key: object = None) -> None:
     """Loader hook: bytes wired at inference but invisible to
     mx.get_active_memory (zero-copy mmap weights). Same-key registrations
     keep the first (the walk that read the file; re-walks see pages already
-    counted), distinct keys sum; key=None accumulates."""
+    counted), distinct keys sum. Every registration attributes ``key`` to
+    the current owner whether or not its bytes were freshly counted, so a
+    shared key (a drafter reloading the target's shards) stays counted
+    until the last owning entry is torn down. ``key=None`` is dropped:
+    unkeyed bytes could never be forgotten, which is the eviction leak in
+    miniature."""
     if key is None:
-        _UNTRACKED_WEIGHTS[_UNTRACKED_ANON] = (
-            _UNTRACKED_WEIGHTS.get(_UNTRACKED_ANON, 0.0) + float(nbytes))
-    else:
+        return
+    with _UNTRACKED_LOCK:
         _UNTRACKED_WEIGHTS.setdefault(key, float(nbytes))
+        if _WEIGHTS_OWNER is not None:
+            _UNTRACKED_OWNERS.setdefault(key, set()).add(_WEIGHTS_OWNER)
+
+
+def forget_untracked_weights(owner: object) -> None:
+    """Drop ``owner``'s attributions; a key's bytes leave the estimate only
+    at zero owners. Called with exactly the keys that owner's build
+    registered (recorded in the owner sets, never re-derived from paths)
+    by the residency teardown that every eviction and reap funnels
+    through, and by a failed build's unwind."""
+    with _UNTRACKED_LOCK:
+        for key in [k for k, o in _UNTRACKED_OWNERS.items() if owner in o]:
+            owners = _UNTRACKED_OWNERS[key]
+            owners.discard(owner)
+            if not owners:
+                del _UNTRACKED_OWNERS[key]
+                _UNTRACKED_WEIGHTS.pop(key, None)
+
+
+def deduct_untracked_weights(nbytes: float, key: object) -> None:
+    """Shrink ``key``'s registration by ``nbytes``, floored at zero:
+    streamed-out expert bytes are page cache, not wired weights, and never
+    belong in the estimate (see install_expert_streaming)."""
+    if key is None or nbytes <= 0:
+        return
+    with _UNTRACKED_LOCK:
+        if key in _UNTRACKED_WEIGHTS:
+            _UNTRACKED_WEIGHTS[key] = max(
+                0.0, _UNTRACKED_WEIGHTS[key] - float(nbytes))
 
 
 def untracked_weight_bytes() -> float:
-    return sum(_UNTRACKED_WEIGHTS.values())
+    with _UNTRACKED_LOCK:
+        return sum(_UNTRACKED_WEIGHTS.values())
 
 
 def headroom_bytes() -> float | None:

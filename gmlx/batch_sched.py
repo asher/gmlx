@@ -48,6 +48,8 @@ import logging
 import os
 import time
 
+from .batch_rows import batch_rows
+
 _log = logging.getLogger(__name__)
 
 _INSTALLED_FLAG = "_kq_gguf_decode_priority_sched"
@@ -118,7 +120,7 @@ def install_decode_priority_sched() -> None:
             # pressure value.
             _pd.note_decode_pressure(0)
             return _observed_next(self, **kwargs)
-        decode_rows = len(self._generation_batch)
+        decode_rows = batch_rows(self)
         _pd.note_decode_pressure(decode_rows)
         prefill_live = self._prompt_batch is not None or bool(
             self._unprocessed_sequences
@@ -165,7 +167,7 @@ def install_decode_priority_sched() -> None:
         from . import auto_ratio
 
         ratio = auto_ratio.resolve(self)
-        rows = len(self._generation_batch)
+        rows = batch_rows(self)
         before = self._prompt_time_counter
         tic = time.perf_counter()
         try:

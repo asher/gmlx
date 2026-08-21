@@ -102,7 +102,7 @@
   "mlx_vlm.utils:get_model_path": "05ededc2a873924088ca751e359bb1022055016cacdf472ac0a19d7327f1cc87"
  },
  "generated_with": {
-  "mlx": "0.31.2",
+  "mlx": "0.32.1",
   "mlx-lm": "0.31.3",
   "mlx-vlm": "0.6.4"
  }

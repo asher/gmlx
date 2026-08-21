@@ -254,3 +254,46 @@ def test_empty_batch_projection_none():
     g = FakeGen(rows=0)
     g._generation_batch.prompt_cache = []
     assert sm.project_admission(g, [_pending(1)]) is None
+
+
+def test_defer_ceiling_admits_one_row_per_tick(gated, monkeypatch):
+    # past the ceiling the gate admits blind by design, but one row per
+    # tick: the stock body must never form a full blind prompt batch
+    wrapped, clock = gated
+    _always_decline(monkeypatch)
+    monkeypatch.setenv("GMLX_ADMIT_DEFER_MAX_S", "1")
+    g = FakeGen(rows=1, pending=(1, 2, 3, 4, 5))
+    g.prefill_batch_size = 4
+    per_tick = []
+    for _ in range(12):
+        clock.advance(0.6)
+        before = len(g.admitted)
+        wrapped(g)
+        per_tick.append(len(g.admitted) - before)
+        assert not getattr(g, "_kq_admit_ceiling_tick", False)  # cleared
+    assert max(per_tick) == 1
+    assert g.admitted == [1, 2, 3, 4, 5]  # FCFS survives the trims
+    # the final row admits through the stock path (nothing left to trim),
+    # which rebinds the list; the trimmed ticks preserved identity
+    assert g._unprocessed_sequences == []
+
+
+def test_one_row_next_restore_semantics():
+    g = FakeGen(rows=1, pending=(1, 2, 3))
+    pending = g._unprocessed_sequences
+
+    def consume_with_arrival(self, **kw):
+        # stock body consumed the head; a handler-thread insert landed in
+        # the temp list mid-call
+        self._unprocessed_sequences = [_pending(9)]
+        return "r"
+
+    assert ag._one_row_next(g, consume_with_arrival, {}) == "r"
+    assert g._unprocessed_sequences is pending
+    assert [s[0] for s in pending] == [2, 3, 9]  # arrival at the tail
+
+    def untouched(self, **kw):
+        return "r2"
+
+    assert ag._one_row_next(g, untouched, {}) == "r2"
+    assert [s[0] for s in pending] == [2, 3, 9]  # unconsumed head kept
