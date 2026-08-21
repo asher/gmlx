@@ -286,6 +286,35 @@ def test_projection_prices_spec_growth(monkeypatch):
     assert p_spec - p_plain == pytest.approx(extra, rel=0.01)
 
 
+def test_reserve_geometry_derived_after_walk(monkeypatch):
+    monkeypatch.delenv("GMLX_ADMIT_RESERVE_GB", raising=False)
+    g = FakeGen(rows=1)
+    sm.update_kv_rates(g)
+    kv = g._generation_batch.prompt_cache[0]
+    cache_bytes = kv.keys.nbytes + kv.values.nbytes
+    want = max(1e9, cache_bytes + g._kq_admit_live_bytes / (1 * 1))
+    assert sm.admit_reserve_bytes(120e9, g) == pytest.approx(want)
+    # no walk yet: the old constant stands in
+    assert sm.admit_reserve_bytes(120e9, FakeGen(rows=1)) == \
+        pytest.approx(max(2e9, 0.05 * 120e9))
+    # env still wins
+    monkeypatch.setenv("GMLX_ADMIT_RESERVE_GB", "3")
+    assert sm.admit_reserve_bytes(120e9, g) == 3e9
+
+
+def test_cache_release_gate_arms_syncs_and_restores(monkeypatch):
+    calls = []
+    monkeypatch.setattr(mx, "get_cache_memory", lambda: 777)
+    monkeypatch.setattr(mx, "set_cache_limit",
+                        lambda n: calls.append(("limit", n)) or 555)
+    monkeypatch.setattr(mx, "synchronize",
+                        lambda *a: calls.append(("sync", a)))
+    with sm.cache_release_gate():
+        calls.append(("body",))
+    assert calls == [("limit", 777), ("body",), ("sync", ()),
+                     ("limit", 555)]
+
+
 def test_projection_window_caps_rotating_kinds(monkeypatch):
     import gmlx.prefill_decay as pd
 
