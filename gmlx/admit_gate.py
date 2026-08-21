@@ -55,6 +55,8 @@ import logging
 import os
 import time
 
+from .batch_rows import batch_rows
+
 _log = logging.getLogger(__name__)
 
 _INSTALLED_FLAG = "_kq_gguf_admit_headroom"
@@ -109,11 +111,11 @@ def _should_decline(gen) -> bool:
     pending = gen._unprocessed_sequences
     if not pending or gen._prompt_batch is not None:
         return False
-    num_to_add = gen.completion_batch_size - len(gen._generation_batch)
+    num_to_add = gen.completion_batch_size - batch_rows(gen)
     if num_to_add < gen.prefill_batch_size:
         return False
     # Nothing to wait for: admitting is the only way to make progress.
-    if len(gen._generation_batch) == 0:
+    if batch_rows(gen) == 0:
         return False
 
     uids = _candidate_uids(gen)
@@ -157,7 +159,7 @@ def _should_decline(gen) -> bool:
             "[admit] deferred uid=%s: projected %.1f GB (%s) > headroom "
             "%.1f GB; waiting=%d, decoding=%d",
             uids, projected / 1e9, parts, headroom / 1e9,
-            len(pending), len(gen._generation_batch))
+            len(pending), batch_rows(gen))
     return True
 
 
