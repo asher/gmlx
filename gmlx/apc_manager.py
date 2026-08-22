@@ -284,10 +284,13 @@ class GmlxAPCManager(_apc.APCManager):
 
         h = _store_helpers()
         if h is None:
-            return super().store_kv_blocks(
+            out = super().store_kv_blocks(
                 token_ids, layer_keys, layer_values,
                 extra_hash=extra_hash,
                 skip_first_n_tokens=skip_first_n_tokens)
+            # The upstream base store has the same inline exact branch.
+            self._trim_exact_to_budget()
+            return out
         is_ckpt = _ckpt_disk is not None
         allow_disk = self.disk is not None and (_ckpt_disk is None
                                                 or _ckpt_disk)
@@ -343,6 +346,10 @@ class GmlxAPCManager(_apc.APCManager):
                         self._exact_cache.popitem(last=False)
                     self.stats.exact_stores += 1
                     layer_major_stored = True
+                    # Inline exact entry: enforce the byte budget here
+                    # too, not just in store_exact_cache (lock is an
+                    # RLock, safe to re-enter).
+                    self._trim_exact_to_budget()
             parent = _seed_parent
             for i in range(skip_full):
                 chunk = tuple(
