@@ -15,11 +15,14 @@ ids the request forwarded. At retirement, ``next_turn_lcp`` re-renders the
 hypothetical next turn (messages plus this completion, parsed into the
 same assistant-message shape the API response carries) through the same
 template and tokenizer, and returns the longest common prefix with the
-sequence we actually forwarded. Rendering ``messages + [assistant]`` with
-no trailing message models the tool-continuation case: a strip-mode
-template drops the chain's thinking only when a later non-tool user query
-arrives, and that future is unknowable at retirement -- those entries miss
-and age out, which is the documented cost of strip mode, not a defect.
+sequence we actually forwarded. When the request declares tools the
+render appends no trailing message (a tool result may come next, and
+strip-mode templates keep the chain's thinking for tool continuations);
+without tools the next client message can only be a user turn, so the
+render appends a dummy user probe and strip-mode templates apply their
+strip, landing the LCP at the true replay boundary. Non-strip templates
+diverge at the user header either way, so the probe changes nothing for
+them.
 
 Prediction errors are safe by construction: lookup still requires an exact
 token-prefix match, so a wrong LCP costs reuse, never correctness.
@@ -38,8 +41,11 @@ _log = logging.getLogger(__name__)
 _LOCK = threading.Lock()
 _TEXT_MEMO: collections.OrderedDict = collections.OrderedDict()
 _IDS_MEMO: collections.OrderedDict = collections.OrderedDict()
-_TEXT_MEMO_CAP = 16
-_IDS_MEMO_CAP = 16
+# Sized for the soak/prod ceiling: 8 sessions + 4 spike + cancels can
+# hold >16 requests between submit and retire; an evicted ctx silently
+# degrades retirement to a full-depth store.
+_TEXT_MEMO_CAP = 64
+_IDS_MEMO_CAP = 64
 
 # Mirrors the endpoint's control-token scrub of post-tool-call text.
 _CONTROL_TOKEN_RE = re.compile(r"<\|[^>]+\|>|<[^>]+>")
@@ -373,7 +379,15 @@ def next_turn_lcp(ctx: dict, seq: list[int], generated: list[int],
         if partial:
             full_text = _virtually_finish(ctx, full_text)
         msg = build_assistant_message(ctx, full_text)
-        nxt = predict_next_ids(ctx, msg)
+        if (ctx.get("kw") or {}).get("tools"):
+            nxt = predict_next_ids(ctx, msg)
+        else:
+            # No tools declared: the next message can only be a user
+            # turn. The dummy probe makes strip-mode templates apply
+            # their think-strip, so the LCP lands where the replay
+            # actually diverges instead of at the full stored chain.
+            nxt = _render_ids(ctx, list(ctx["messages"]) + [
+                msg, {"role": "user", "content": "0"}])
         if not nxt:
             return None
         n = min(len(seq), len(nxt))
