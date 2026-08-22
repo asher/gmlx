@@ -193,6 +193,9 @@ def test_rope_apply_rotary_mirror():
                 1,
             ),
             ("self.", "rotary_emb.", 9),
+            # The fused kernel is Metal-only; the owned mirror also
+            # checks the active device.
+            ("rotary_emb.fused_apply", "fused_rope_active(rotary_emb)", 1),
             # Owned per-ndim memo replaces the instance dict so a
             # stock-compiled entry can never masquerade as owned.
             (

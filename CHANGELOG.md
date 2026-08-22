@@ -33,6 +33,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - serve: two model ids over one GGUF that differ in drafter (a companion
   `draft_gguf` and a `native_mtp: true` sibling) both loaded whichever was
   registered last; each build now carries its own drafter.
+- The owned Qwen3.5 forward dispatched its fused MRoPE Metal kernel
+  whatever the default device; stock MLX raises on the CPU device
+  (`KQUANT_FORCE_CPU=1`). The cos/sin route now takes over there.
 
 - Sibling requests that arrive together no longer each prefill the shared
   prefix cold: the server admits the first one, waits for its stores, and

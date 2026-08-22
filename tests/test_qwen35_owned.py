@@ -626,3 +626,30 @@ def test_copies_match_upstream_source():
         assert norm(getattr(qwen35_owned, name)) == norm(getattr(_L, name)), (
             f"owned copy of {name} drifted from the upstream original"
         )
+
+
+def test_forward_on_the_cpu_device_skips_the_fused_rope(monkeypatch):
+    """Stock MLX raises when the fused MRoPE kernel is dispatched on the
+    CPU device; the owned forward takes the cos/sin route there. A fresh
+    model for the CPU arm keeps its compiled-apply memo empty, so a fused
+    dispatch cannot hide behind a cached kernel."""
+    from gmlx import qwen35_rope
+
+    ids = mx.array([[1, 2, 3, 4]])
+    _, owned = _pair()
+    ref = owned(ids, cache=owned.make_cache()).logits
+    mx.eval(ref)
+
+    def _no_kernel(*args, **kwargs):
+        raise AssertionError("fused apply dispatched on the CPU device")
+
+    monkeypatch.setattr(qwen35_rope, "_compiled_mrope_apply", _no_kernel)
+    _, owned_cpu = _pair()
+    prev = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        out = owned_cpu(ids, cache=owned_cpu.make_cache()).logits
+        mx.eval(out)
+    finally:
+        mx.set_default_device(prev)
+    assert _close(ref, out, 1e-3)

@@ -50,7 +50,7 @@ from .dflash_drafter import DFlashCaptureHooks
 from mlx_vlm.models.qwen3_5.config import ModelConfig as _Q35ModelConfig
 from mlx_vlm.models.qwen3_5.config import TextConfig as _Q35TextConfig
 
-from .qwen35_rope import rope_cos_sin
+from .qwen35_rope import fused_rope_active, rope_cos_sin
 
 _OWNED_CALLS = 0
 
@@ -364,7 +364,7 @@ def _owned_model_call(
     if position_ids is not None:
         for layer in self.layers:
             if not layer.is_linear:
-                if not layer.self_attn.rotary_emb.fused_apply:
+                if not fused_rope_active(layer.self_attn.rotary_emb):
                     position_embeddings = rope_cos_sin(
                         layer.self_attn.rotary_emb, h, position_ids
                     )
