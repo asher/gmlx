@@ -290,6 +290,24 @@ def test_plain_step_tick_disables_on_failure():
     assert "gen" not in stash
 
 
+def test_plain_step_tick_reads_step_tuple_rows():
+    # _step returns (tokens, lps, top_idx, top_lp); slot 0 is the flat
+    # per-row token list. Rows past the first must accrue, and a None
+    # emission skips that tick without disabling the row (the v1 tick
+    # indexed the tuple itself, killing every row past the first).
+    s1 = {"mode": "exact", "gen": []}
+    s2 = {"mode": "exact", "gen": []}
+    gb = SimpleNamespace(uids=[1, 2], prompt_cache=[SimpleNamespace()],
+                         _kq_apc_retire_rows={1: s1, 2: s2})
+    spec_engine._plain_step_tick(gb, ([5, 9], None, None, None))
+    assert s1["gen"] == [5] and s2["gen"] == [9]
+    spec_engine._plain_step_tick(gb, ([6, None], None, None, None))
+    assert s1["gen"] == [5, 6] and s2["gen"] == [9]
+    assert s2.get("snap_ok") is not False
+    spec_engine._plain_step_tick(gb, (None, None, None, None))
+    assert s1["gen"] == [5, 6] and s2["gen"] == [9]
+
+
 def test_render_memo_preprocess_failure_is_safe():
     # A dead generator behind the memo's weakref must degrade to "no
     # prediction", never break retirement.

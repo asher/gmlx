@@ -1064,13 +1064,23 @@ def _plain_step_tick(gb, out) -> None:
         return
     if not reg:
         return
+    # _step returns (tokens, lps, top_idx, top_lp); slot 0 is the flat
+    # per-row token list.
+    rows = out[0] if isinstance(out, tuple) else out
+    if rows is None:
+        return
     solo = len(gb.uids) == 1
     for i, uid in enumerate(gb.uids):
         stash = reg.get(uid)
         if stash is None or "gen" not in stash:
             continue
+        tok = rows[i] if i < len(rows) else None
+        if tok is None:
+            continue                    # no emission for this row this tick
         try:
-            stash["gen"].append(int(out[i][0]))
+            if isinstance(tok, (list, tuple)):
+                tok = tok[0]
+            stash["gen"].append(int(tok))
             if solo and stash.get("mode") == "ckpt":
                 from .cache_snapshot import decode_ckpt_tick
                 decode_ckpt_tick(stash, gb.prompt_cache, stash["gen"])
