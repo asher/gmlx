@@ -2249,6 +2249,11 @@ def _print_umbrella_help(prog: str = "gmlx") -> None:
 
 def umbrella_main(argv: list[str] | None = None) -> int:
     """Dispatch ``gmlx <verb> ...`` to the matching entry point."""
+    from ._exitfix import guarded
+    return guarded(_umbrella_impl, argv)
+
+
+def _umbrella_impl(argv: list[str] | None = None) -> int:
     import warnings
 
     # Validation warnings (unrecognized config keys, ...) are user-facing on
@@ -2404,4 +2409,5 @@ def umbrella_main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    from gmlx._exitfix import guarded
+    sys.exit(guarded(main))
