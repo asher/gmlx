@@ -281,7 +281,9 @@ def _sample_rows(sampler, rows: mx.array, support: Optional[mx.array], vocab: in
     make_sampler bounds-checks top_k against the row width, so the draw is
     rebuilt from the sampler's annotated params; a serve sampler guards its
     own width and is called directly; an opaque sampler gets the scattered
-    row. Same precedence as speculative._stoch_supported_sampler."""
+    row. Same precedence as speculative._stoch_supported_sampler. The
+    compiled sampler must never see a compact row: its ValueError is raised
+    mid-trace and leaves ``mx.random.state`` holding a tracer."""
     if support is None:
         toks = sampler(rows).reshape(-1)
         return toks, toks
@@ -680,3 +682,67 @@ class DFlash2Drafter(DFlashDrafter):
             if p + 1 < cands.shape[0]:
                 row, support = edges[p][idx[0]][None], cands[p + 1][None]
         return mx.stack(toks)[None]
+
+
+# --- target side --------------------------------------------------------------
+
+class DFlashCaptureHooks:
+    """Packed-hidden capture for owned qwen3.5 LanguageModels.
+
+    While armed, every hidden the engine sees is ``[trunk | cap ...]``: the
+    final normed hidden followed by the raw outputs of the captured layers,
+    in layer order. The stock ``__call__`` (mrope position resolution, head)
+    stays inherited; this wrapper only installs the owned forward's capture
+    sink around it and repacks ``hidden_states[-1]``. The logits hooks slice
+    the trunk back out, materialized, before the quantized head.
+
+    ``speculative_verify_hidden`` and ``speculative_verify_logits`` both go
+    through ``self(...)`` with ``return_hidden`` set, so both return the
+    packed hidden (with correct logits): the contract the drafter wants, and
+    independent of which hook ``_mtp_verify_target`` tries first.
+    """
+
+    _dflash_capture: Optional[tuple] = None
+
+    def set_dflash_capture(self, layer_ids) -> None:
+        # Around nn.Module.__setattr__, which would route a tuple into the
+        # parameter tree.
+        object.__setattr__(self, "_dflash_capture",
+                           tuple(int(i) for i in layer_ids) or None)
+
+    def _dflash_trunk(self, hidden: mx.array) -> mx.array:
+        if self._dflash_capture is None:
+            return hidden
+        # The trunk lead is a strided view of the packed hidden, and the head
+        # is a quantized kernel that reads the buffer directly; slicing
+        # lazily hands it the packed strides. Materialize first.
+        return mx.contiguous(hidden[..., : int(self.args.hidden_size)])
+
+    def __call__(self, inputs, inputs_embeds=None, mask=None, cache=None, **kwargs):
+        ids = self._dflash_capture
+        if ids is None or not kwargs.get("return_hidden"):
+            return super().__call__(inputs, inputs_embeds=inputs_embeds,
+                                    mask=mask, cache=cache, **kwargs)
+        sink: list = []
+        object.__setattr__(self.model, "_dflash_sink", sink)
+        object.__setattr__(self.model, "_dflash_layers", ids)
+        try:
+            out = super().__call__(inputs, inputs_embeds=inputs_embeds,
+                                   mask=mask, cache=cache, **kwargs)
+        finally:
+            object.__setattr__(self.model, "_dflash_sink", None)
+        final = out.hidden_states[-1]
+        if len(sink) != len(ids):
+            if int(final.shape[1]) == 0:
+                return out
+            raise RuntimeError(
+                f"dflash capture collected {len(sink)} of {len(ids)} layers")
+        out.hidden_states = [*out.hidden_states[:-1],
+                             mx.concatenate([final, *sink], axis=-1)]
+        return out
+
+    def speculative_logits_from_hidden(self, hidden: mx.array) -> mx.array:
+        return super().speculative_logits_from_hidden(self._dflash_trunk(hidden))
+
+    def speculative_argmax_from_hidden(self, hidden: mx.array):
+        return super().speculative_argmax_from_hidden(self._dflash_trunk(hidden))
