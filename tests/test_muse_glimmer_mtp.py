@@ -197,12 +197,10 @@ def test_verify_walk_is_token_identical_to_greedy(armed):
 # --- the drafter side of the same seam ---------------------------------------
 
 def _build_drafter(cfg, n_layers=2, block_size=BLOCK, native_block_size=None):
-    from gmlx.muse_glimmer_dflash import (
-        MuseGlimmerDFlashConfig,
-        MuseGlimmerDFlashDrafter,
-    )
+    from gmlx.dflash_drafter import DFlashConfig
+    from gmlx.muse_glimmer_dflash import MuseGlimmerDFlashDrafter
 
-    return MuseGlimmerDFlashDrafter(MuseGlimmerDFlashConfig(
+    return MuseGlimmerDFlashDrafter(DFlashConfig(
         hidden_size=cfg["hidden_size"],
         intermediate_size=64,
         num_hidden_layers=n_layers,
@@ -221,7 +219,6 @@ def _build_drafter(cfg, n_layers=2, block_size=BLOCK, native_block_size=None):
         num_target_layers=cfg["num_hidden_layers"],
         layer_types=["sliding_attention"] * n_layers,
         sliding_window=512,
-        draft_window_size=512,
         final_logit_softcapping=cfg["final_logit_softcapping"],
         output_multiplier=cfg["output_multiplier"],
     ))

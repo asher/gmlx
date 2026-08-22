@@ -760,10 +760,8 @@ def _load_muse_glimmer_dflash_drafter(
     """Build + load + bind the Muse Glimmer DFlash drafter, and wire the
     target's ``_dflash_capture`` so every engine-facing hidden carries the
     five captured residuals."""
-    from .muse_glimmer_dflash import (
-        MuseGlimmerDFlashConfig,
-        MuseGlimmerDFlashDrafter,
-    )
+    from .dflash_drafter import DFlashConfig
+    from .muse_glimmer_dflash import MuseGlimmerDFlashDrafter
 
     layers = meta.get("dflash.target_layers")
     block_size = meta.get("dflash.block_size")
@@ -795,7 +793,7 @@ def _load_muse_glimmer_dflash_drafter(
     native_total, block_total = _drafter_block_depths(
         block_size, _MUSE_GLIMMER_DFLASH_BLOCK_DEFAULT)
 
-    config = MuseGlimmerDFlashConfig(
+    config = DFlashConfig(
         hidden_size=int(target_config_dict["hidden_size"]),
         intermediate_size=int(meta["dflash.feed_forward_length"]),
         num_hidden_layers=n_layers,
@@ -815,9 +813,6 @@ def _load_muse_glimmer_dflash_drafter(
         num_target_layers=n_target_layers,
         layer_types=layer_types,
         sliding_window=window,
-        # The ring is temporal-ordered and rollback-slack backed, which the
-        # split inject/draft forward needs (it reads cache.state directly).
-        draft_window_size=window,
         final_logit_softcapping=target_config_dict.get(
             "final_logit_softcapping") or None,
         output_multiplier=float(target_config_dict.get("output_multiplier", 1.0)),
