@@ -9,12 +9,16 @@ the byte or peak class they move and are measured before/after:
     headroom(n) = WS x (1 - M) - tracked(n)     [tracked = active
                   minus zero-copy weights; prefill_decay.headroom
                   minus the margin M x WS]
-    demand(n)   = declared next-tick peak: per-token KV rates x rows
-                  x measured tokens/tick, plus the last admission
-                  projection while a join is pending or its prompt
-                  batch is in flight, plus the priced transient of a
-                  scheduled shed
-    ttc(n)      = headroom(n) / max(demand(n), 1)
+    rate(n)     = recurring next-tick growth: per-token KV rates x
+                  rows x measured tokens/tick
+    oneshot(n)  = one-time costs: the last admission projection while
+                  a join is pending or its prompt batch is in flight,
+                  plus the priced transient of a scheduled shed.
+                  One-shot bytes are subtracted from headroom ONCE;
+                  they are never multiplied into the rate math (a
+                  deep pending prompt batch projects tens of GB and
+                  would otherwise collapse ttc at zero pressure)
+    ttc(n)      = max(0, headroom(n) - oneshot(n)) / max(rate(n), 1)
 
 Bands are rates, not levels: a deep batch at flat headroom is green;
 a shallow one growing fast is not.
@@ -29,10 +33,10 @@ a shallow one growing fast is not.
           speculative width. Demand rungs declare a peak class:
           success is a lower get_peak_memory delta across the
           following ticks (reset on band entry), never freed bytes.
-  orange  headroom - k_o x demand < shed_transient(largest row)
-          + reserve (the threshold includes orange's own cost so the
-          shed can still afford itself): evict registered caches by
-          fraction, then retire the largest row through the tick
+  orange  headroom - oneshot - k_o x rate < shed_transient(largest
+          row) + reserve (the threshold includes orange's own cost so
+          the shed can still afford itself): evict registered caches
+          by fraction, then retire the largest row through the tick
           guard's ledger (remove + requeue same uid; APC turns the
           replay into a prefix hit), gated on the APC disk tier
           being armed; without it a retire is a cold re-prefill,
@@ -282,20 +286,30 @@ def _sample_registered(st: _GovState) -> float:
     return total
 
 
-def _demand_bytes(gen, st: _GovState) -> float:
+def _demand_bytes(gen, st: _GovState) -> tuple:
+    """(rate, oneshot): per-tick recurring growth vs one-time costs.
+
+    The split is load-bearing. Rate demand recurs every tick, so
+    time-to-collision and the orange lookahead multiply it. The
+    admission projection is a ONE-TIME allocation (the pending prompt
+    batch's join): it is compared against headroom once, never
+    multiplied into the rate math. Folding a deep prompt batch's
+    projection (tens of GB for 8x40k rows) into the rate collapsed
+    ttc against ~80 GB of real headroom and drove a shed storm at
+    zero pressure."""
     rates = getattr(gen, "_kq_admit_kv_rates", None) or {}
     rate_sum = sum(k.get("rate", 0.0) for k in rates.values())
     rows = batch_rows(gen)
-    demand = rate_sum * rows * max(st.tok_ema, 1.0)
+    rate = rate_sum * rows * max(st.tok_ema, 1.0)
+    oneshot = st.pending_shed_bytes
     proj = getattr(gen, "_kq_admit_last_projection", None)
     if proj is not None:
         stamp, projected = proj
         join_relevant = (gen._unprocessed_sequences
                          or gen._prompt_batch is not None)
         if join_relevant and time.perf_counter() - stamp < 30.0:
-            demand += projected
-    demand += st.pending_shed_bytes
-    return demand
+            oneshot += projected
+    return rate, oneshot
 
 
 def _shed_transient_bytes(gen, st: _GovState) -> float:
@@ -363,7 +377,8 @@ def _arm_demand_rung(gen, st: _GovState) -> None:
         st.rung = 1
         return
     if st.rung == 1:
-        if not st.width_clamped:
+        if not st.width_clamped and getattr(gen, "draft_model", None) \
+                is not None:
             from .speculative import set_governor_width_clamp
 
             clamp = max(1, batch_rows(gen) // 2)
@@ -531,27 +546,33 @@ def _governor_tick(gen) -> None:
     if head is None:
         return
     _sample_registered(st)
-    demand = _demand_bytes(gen, st)
-    ttc = head / max(demand, 1.0)
-
-    # measured recovery report for the last shed. Only orange arms the
-    # failed-recovery escalation: in red the direct headroom condition
-    # governs, and a tiny shed against still-growing survivors would
-    # otherwise re-latch red forever on a healthy box.
-    if st.shed_measure_from is not None:
-        recovered = st.shed_measure_from - float(mx.get_active_memory())
-        _STATS["last_recovered_bytes"] = int(recovered)
-        if recovered <= 0 and st.band == ORANGE:
-            st.orange_failed = True
-        st.shed_measure_from = None
-        st.pending_shed_bytes = 0.0
+    rate, oneshot = _demand_bytes(gen, st)
+    demand = rate + oneshot
+    # ttc counts recurring growth against the headroom left after the
+    # pending one-shot lands; one-shot costs are subtracted once,
+    # never treated as a per-tick rate
+    ttc = max(0.0, head - oneshot) / max(rate, 1.0)
 
     from .server_memory import admit_reserve_bytes
 
     reserve = admit_reserve_bytes(ws, gen)
-    orange_now = (head - ko * demand
+    orange_now = (head - oneshot - ko * rate
                   < _shed_transient_bytes(gen, st) + reserve)
     red_now = (head - demand < 0.0) or st.orange_failed
+
+    # measured recovery report for the last shed. Only orange arms the
+    # failed-recovery escalation, and only while the orange condition
+    # still holds at measurement time: a concurrent workload refilling
+    # the evicted cache makes the raw byte delta negative even when
+    # pressure is gone, and that alone must not escalate.
+    if st.shed_measure_from is not None:
+        recovered = st.shed_measure_from - float(mx.get_active_memory())
+        _STATS["last_recovered_bytes"] = int(recovered)
+        if recovered <= 0 and st.band == ORANGE and orange_now:
+            st.orange_failed = True
+            red_now = True
+        st.shed_measure_from = None
+        st.pending_shed_bytes = 0.0
 
     forced = _fire_injections(st)
     if "yellow" in forced:
@@ -571,10 +592,12 @@ def _governor_tick(gen) -> None:
     if red_now and batch_rows(gen) > 0:
         _enter(gen, st, RED, ws, margin)
         if _shed_allowed(st):
-            _fail_largest(
-                gen, st,
-                f"governor red: headroom {head / 1e9:.2f} GB below "
-                f"next-tick demand {demand / 1e9:.2f} GB")
+            why = (f"headroom {head / 1e9:.2f} GB below next-tick "
+                   f"demand {demand / 1e9:.2f} GB"
+                   if head - demand < 0.0 else
+                   f"orange recovery failed with headroom "
+                   f"{head / 1e9:.2f} GB, demand {demand / 1e9:.2f} GB")
+            _fail_largest(gen, st, f"governor red: {why}")
         st.orange_failed = False
         return
     if orange_now and batch_rows(gen) > 0:
@@ -588,7 +611,12 @@ def _governor_tick(gen) -> None:
                 f"evict {st.evict_fraction:.1f} freed {freed / 1e9:.2f} GB")
             st.shed_times.append(time.perf_counter())
             st.shed_measure_from = float(before)
-            if st.evict_fraction >= 1.0 and freed < demand:
+            # dry = a full-fraction evict cannot clear the orange
+            # condition's shortfall (not the whole demand figure: the
+            # one-shot lands once and headroom may absorb most of it)
+            shortfall = (_shed_transient_bytes(gen, st) + reserve
+                         + oneshot + ko * rate - head)
+            if st.evict_fraction >= 1.0 and freed < shortfall:
                 # registered caches are dry; the width lever is next
                 if _apc_disk_armed(gen):
                     _retire_largest(gen, st)

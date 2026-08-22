@@ -87,6 +87,25 @@ def test_green_when_headroom_flat(rig):
     assert rig["mem_limits"] == []
 
 
+def test_oneshot_projection_does_not_collapse_ttc(rig):
+    # The 35B APC-on soak storm: a pending deep prompt batch projects
+    # tens of GB (one-time join cost) against ~80 GB headroom with a
+    # tiny recurring rate. The one-shot is subtracted once, never
+    # multiplied into ttc or the orange lookahead: the band stays
+    # green and admissions are not held.
+    import time as _t
+    gen = FakeGen(rows=2, rate=1e6)
+    gen._unprocessed_sequences = [("u", None)]   # join pending
+    gen._kq_admit_last_projection = (_t.perf_counter(), 25e9)
+    st = gov._state(gen)
+    for _ in range(6):
+        gov._governor_tick(gen)
+    assert st.band == gov.GREEN
+    assert gov.admission_hold_reason(gen) is None
+    assert gov._STATS["red_failures"] == 0
+    assert gov._STATS["orange_evictions"] == 0
+
+
 def test_yellow_arms_throttle_and_restores(rig, monkeypatch):
     monkeypatch.setenv("GMLX_GOV_MIN_DWELL_S", "0")
     gen = FakeGen(rows=2, rate=1e6)
@@ -116,6 +135,7 @@ def test_yellow_demand_rungs_on_measured_miss(rig, monkeypatch):
     monkeypatch.setattr(spec, "set_governor_width_clamp",
                         lambda n: clamps.append(n))
     gen = FakeGen(rows=4, rate=2.0e9)
+    gen.draft_model = object()      # rung 2 only clamps armed speculation
     st = gov._state(gen)
     # peak keeps climbing every tick: every rung window is a miss
     for i in range(10):
@@ -146,14 +166,15 @@ def test_orange_evicts_registered_then_retires(rig, monkeypatch):
         return int(1e9)
 
     gov.register_cache("t", lambda: 4e9, evict)
-    gen = FakeGen(rows=2, rate=1e6, live=30e9)
+    gen = FakeGen(rows=2, rate=1e6, live=21e9)
     st = gov._state(gen)
     tg_st = tg._state(gen)
     tg_st.ledger[0] = tg._Row([1] * 8, 64, {}, None, None)
     tg_st.ledger[1] = tg._Row([1] * 4, 64, {}, None, None)
     gen.apc_manager = types.SimpleNamespace(disk=object())
 
-    rig["head"] = 34e9  # orange: 34-4*demand < shed(2*15e9+7.5e9)+2e9
+    # orange, barely: head_eff 28e9 < shed(21e9 + 5.25e9) + reserve 2e9
+    rig["head"] = 34e9
     gov._governor_tick(gen)
     assert st.band == gov.ORANGE
     assert evictions == [0.5]
@@ -161,8 +182,8 @@ def test_orange_evicts_registered_then_retires(rig, monkeypatch):
 
     gov._governor_tick(gen)                     # fraction ramped to 1.0
     assert evictions == [0.5, 1.0]
-    # registered dry (freed 1e9 < demand is False: demand tiny) -> no
-    # retire when the evict still frees at least the demand
+    # full-fraction evict covers the SHORTFALL (0.25e9 < freed 1e9),
+    # so the condition is clearable and no retire fires
     assert gen.removed == []
 
 
