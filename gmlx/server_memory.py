@@ -209,7 +209,9 @@ def update_kv_rates(gen) -> None:
     state is folded in the same pass: depth-scaled spec bytes (shared KV
     snapshot, drafter head KV) become a synthetic per-kind rate so the
     projection prices their growth, and per-row constants land in
-    ``_kq_admit_spec_row_const``."""
+    ``_kq_admit_spec_row_const``. Offset-less caches (recurrent and conv
+    state) are constant-size: they join the per-row constant, never the
+    rate map."""
     batch = gen._generation_batch
     rows = batch_rows(gen)
     pc = getattr(batch, "prompt_cache", None)
@@ -220,6 +222,7 @@ def update_kv_rates(gen) -> None:
     fresh: dict = {}
     live_bytes = 0.0
     live_depth = 0
+    state_row_bytes = 0.0
     max_cache_bytes = 0.0
     n_caches = 0
     for c in _leaf_caches(pc):
@@ -237,10 +240,14 @@ def update_kv_rates(gen) -> None:
         n_caches += 1
         off = getattr(c, "offset", None)
         off = off if isinstance(off, int) else 0
-        live_depth = max(live_depth, off)
-        tokens = min(off, alen) if off and alen else (off or alen)
-        if tokens <= 0:
+        if off <= 0:
+            # No token offset means constant-size state, not KV: charge
+            # per row, never per token. A bytes/state_dim rate would
+            # scale constant state with depth.
+            state_row_bytes += nbytes
             continue
+        live_depth = max(live_depth, off)
+        tokens = min(off, alen) if alen else off
         kind = fresh.setdefault(type(c).__name__,
                                 {"rate": 0.0, "window": None})
         kind["rate"] += nbytes / tokens / rows
@@ -265,8 +272,8 @@ def update_kv_rates(gen) -> None:
     gen._kq_admit_kv_rates = merged
     gen._kq_admit_live_bytes = live_bytes
     gen._kq_admit_live_depth = live_depth
-    gen._kq_admit_spec_row_const = (spec_row_const / rows
-                                    if spec_row_const else 0.0)
+    row_const = spec_row_const + state_row_bytes
+    gen._kq_admit_spec_row_const = row_const / rows if row_const else 0.0
     gen._kq_admit_max_cache_bytes = max_cache_bytes
     gen._kq_admit_n_caches = n_caches
 

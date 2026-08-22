@@ -231,6 +231,37 @@ def test_update_kv_rates_and_projection(monkeypatch):
     assert "kv" in parts and "reserve" in parts
 
 
+class FakeStateCache:
+    """Offset-less constant-size state (GDN/conv), ArraysCache-shaped."""
+
+    def __init__(self, rows=1):
+        self.cache = [mx.zeros((rows, 4, 128, 32), dtype=mx.float16)]
+
+
+def test_state_cache_is_row_const_not_rate(monkeypatch):
+    import gmlx.prefill_decay as pd
+
+    monkeypatch.setenv("GMLX_ADMIT_RESERVE_GB", "2")
+    g = FakeGen(rows=1)
+    kv = g._generation_batch.prompt_cache[0]
+    state = FakeStateCache(rows=1)
+    g._generation_batch.prompt_cache.append(state)
+    sm.update_kv_rates(g)
+    assert "FakeStateCache" not in g._kq_admit_kv_rates
+    state_bytes = state.cache[0].nbytes
+    assert g._kq_admit_spec_row_const == pytest.approx(state_bytes)
+    assert g._kq_admit_live_depth == 100
+
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 10e9)
+    per_tok = (kv.keys.nbytes + kv.values.nbytes) / kv.offset
+    projected, head, parts = sm.project_admission(g, [_pending(2, 300, 200)])
+    kv_total = per_tok * 2 * 512 + state_bytes * 2
+    kv_new = kv_total - (kv.keys.nbytes + kv.values.nbytes + state_bytes)
+    assert projected == pytest.approx(
+        kv_new + pd.score_transient_bytes(g.model, None, 500)
+        + sm.admit_reserve_bytes(0), rel=0.05)
+
+
 def _spec_gen(rows=1):
     g = FakeGen(rows=rows)
     b = g._generation_batch
