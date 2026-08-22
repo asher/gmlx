@@ -141,6 +141,8 @@ MTP_DRAFTER_ARCHES = {
     # legacy nextn one.
     "deepseek_v4": ("deepseek4-dspark", "dflash", "deepseek4_mtp_support"),
     "muse_glimmer": ("dflash",),
+    # DFlash 2 drafters (z-lab) for Qwen3.5/3.6/3.8 dense targets.
+    "qwen3_5": ("dflash",),
     "gemma4_text": ("gemma4_assistant", "gemma4-assistant", "gemma4_mtp"),
 }
 
