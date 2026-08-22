@@ -337,7 +337,9 @@ def project_admission(gen, candidates):
         capped = live_depth if k["window"] is None else min(
             live_depth, _round_block(k["window"]))
         model_now += k["rate"] * rows * capped
-    if live_bytes > 0 and model_now > _MODEL_NOW_TOL * live_bytes:
+    if live_bytes > 0 and model_now > 0 and not (
+            live_bytes / _MODEL_NOW_TOL <= model_now
+            <= _MODEL_NOW_TOL * live_bytes):
         scale = live_bytes / model_now
         kv_total *= scale
         _log.warning(

@@ -330,6 +330,25 @@ def test_poisoned_rate_is_rescaled(monkeypatch, caplog):
                              + sm.admit_reserve_bytes(0))
 
 
+def test_understated_rate_is_rescaled_up(monkeypatch, caplog):
+    import gmlx.prefill_decay as pd
+
+    monkeypatch.setenv("GMLX_ADMIT_RESERVE_GB", "2")
+    g = FakeGen(rows=1)
+    kv = g._generation_batch.prompt_cache[0]
+    honest_per_tok = (kv.keys.nbytes + kv.values.nbytes) / kv.offset
+    g._kq_admit_kv_rates = {"FakeKV": {"rate": honest_per_tok * 1e-3,
+                                       "window": None}}
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 10e9)
+    with caplog.at_level("WARNING"):
+        projected, head, parts = sm.project_admission(
+            g, [_pending(2, 300, 200)])
+    assert "projection rescaled" in caplog.text
+    live = kv.keys.nbytes + kv.values.nbytes
+    # rescale restores the honest scale: kv_total ~= live * depth growth
+    assert projected >= 0.5 * (honest_per_tok * 2 * 512 - live)
+
+
 def _spec_gen(rows=1):
     g = FakeGen(rows=rows)
     b = g._generation_batch
