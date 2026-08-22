@@ -218,11 +218,14 @@ accept against (forced, Muse v1 fell from 6.7 to 1.7 accepted per round), so
 `--stochastic-mtp` keeps exact-match there and says so in the log.
 
 Measured (M3 Max, greedy, a gsm8k prompt, 300 tokens): Qwen3.8-27B
-UD-Q6_K_XL decodes at 14.3 tok/s plain, 31.0 tok/s on its native head (mean
-accept 1.9) and 36.5 tok/s with the DFlash 2 drafter (mean accept 4.8 at
-block 8, 69% of drafts accepted). Muse-Glimmer-30B Q6_K_L goes from a mean
-accept of 5.1 with its DFlash v1 drafter to 6.5 with DFlash 2 (49 rounds to
-40 for the same 300 tokens, about 25% more tok/s).
+UD-Q6_K_XL decodes at 14.1 tok/s plain, 31.0 tok/s on its native head (mean
+accept 1.9) and 47.5 tok/s with the DFlash 2 drafter (mean accept 4.8 at
+block 8, 69% of drafts accepted; a block-8 round is 107 ms of verify).
+Muse-Glimmer-30B Q6_K_L goes from a mean accept of 5.1 with its DFlash v1
+drafter to 6.5 with DFlash 2 (49 rounds to 40 for the same 300 tokens, about
+25% more tok/s). llama.cpp's DFlash 2 implementation on the same GGUF pair
+and prompt produces the identical greedy text and accepts 66.6% of 7 drafts
+per round to gmlx's 68.6%.
 
 Muse Glimmer's DFlash v1 drafter runs on the same code. Its block attends the
 drafter's last `sliding_window - 1` committed positions; the mask trims the
