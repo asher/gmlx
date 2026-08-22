@@ -736,6 +736,11 @@ def _owned_decode_rounds(
     if stoch and not block_stash:
         draft_sampler = _stoch_draft_sampler(stoch_stash)
         draft_kwargs = {}
+    elif stoch:
+        # A block drafter draws its own q rows; the greedy kwarg would draft
+        # the argmax path and leave the stash empty.
+        draft_sampler = sampler
+        draft_kwargs = {}
     else:
         draft_sampler = _argmax_sampler if greedy_draft else sampler
         draft_kwargs = ({"greedy": True}
