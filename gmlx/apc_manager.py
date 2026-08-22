@@ -183,6 +183,13 @@ class GmlxAPCManager(_apc.APCManager):
         snap = super().stats_snapshot()
         snap.update(ckpt_stats_snapshot(self))
         snap.update(spec_prefix_stats())
+        # Upstream's APCStats.snapshot is a fixed whitelist; the byte
+        # gauges the budget trims maintain have to be merged here or
+        # they never reach /metrics.
+        for key in ("pool_bytes", "exact_bytes"):
+            val = getattr(self.stats, key, None)
+            if val is not None:
+                snap[key] = int(val)
         return snap
 
     def reset_stats(self) -> None:

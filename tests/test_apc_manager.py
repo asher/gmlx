@@ -259,3 +259,49 @@ def test_exact_tier_byte_budget(monkeypatch):
     monkeypatch.setenv("APC_EXACT_CACHE_ENTRIES", "2")
     m2.autosize(_fake_model())
     assert getattr(m2, "_exact_budget_bytes", None) is None
+
+
+def test_exact_bytes_reaches_stats_snapshot():
+    # Three silent gaps found on the DSv4-Flash cert, locked here:
+    # the byte gauge must survive trim -> stats attr -> stats_snapshot
+    # (upstream's APCStats.snapshot is a fixed whitelist that drops
+    # dynamically-set attrs).
+    import mlx.core as mx
+
+    from mlx_vlm.apc import APCExactCacheEntry
+
+    class FakeKVClone:
+        def __init__(self):
+            self.keys = mx.zeros((1, 4, 64, 64), dtype=mx.float16)
+
+    m = GmlxAPCManager(num_blocks=8, block_size=16)
+    m._exact_budget_bytes = 10 * FakeKVClone().keys.nbytes
+    m._exact_cache[1] = APCExactCacheEntry(
+        token_ids=(1,), extra_hash=0,
+        prompt_cache=[FakeKVClone()], last_used=1.0)
+    m._trim_exact_to_budget()
+    snap = m.stats_snapshot()
+    assert snap.get("exact_bytes") == FakeKVClone().keys.nbytes
+
+
+def test_inline_layer_major_store_enforces_budget():
+    # store_kv_blocks' inline exact branch bypassed the budget wrappers
+    # (count cap only); the trim must fire there too.
+    import mlx.core as mx
+
+    m = GmlxAPCManager(num_blocks=4, block_size=16)
+    m._exact_cache_max = 64
+    m._exact_budget_bytes = 1e12
+    m._layer_major_memory_min_tokens = 32
+    ks = [mx.zeros((1, 2, 160, 8)) for _ in range(2)]
+    vs = [mx.zeros((1, 2, 160, 8)) for _ in range(2)]
+    m.store_kv_blocks(list(range(160)), ks, vs)
+    assert m.stats.exact_stores == 1
+    one = m.stats.exact_bytes
+    assert one > 0
+    m._exact_budget_bytes = int(1.5 * one)  # fits one entry, not two
+    for i in range(3):
+        m.store_kv_blocks(list(range(1000 + i, 1160 + i)), ks, vs)
+    assert len(m._exact_cache) == 1
+    assert m.stats.exact_bytes <= m._exact_budget_bytes
+    assert m.stats_snapshot().get("exact_bytes") == m.stats.exact_bytes
