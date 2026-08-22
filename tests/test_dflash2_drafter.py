@@ -812,7 +812,7 @@ def test_plain_rounds_pass_no_stash(monkeypatch, sampled):
     assert seen and all(s is None for s in seen)
 
 
-def test_v1_rows_keep_exact_match_under_stochastic(monkeypatch):
+def test_v1_rows_keep_exact_match_under_stochastic(monkeypatch, caplog):
     """Independent block rows are not a conditional proposal; the engine
     keeps exact-match for such drafters (measured on Muse v1: 6.7 -> 1.7
     accepted per round when forced)."""
@@ -829,8 +829,10 @@ def test_v1_rows_keep_exact_match_under_stochastic(monkeypatch):
     monkeypatch.setattr(type(drafter), "stochastic_draft", False)
     seen = _recording(drafter, monkeypatch)
     mx.random.seed(SEED)
-    _engine_walk(lm, drafter, mx.array([[1, 2, 3, 4, 5]]), 8, sampler=_annotated())
+    with caplog.at_level("WARNING"):
+        _engine_walk(lm, drafter, mx.array([[1, 2, 3, 4, 5]]), 8, sampler=_annotated())
     assert seen and all(s is None for s in seen)
+    assert "independent rows" in caplog.text and "opaque" not in caplog.text
 
 
 @pytest.mark.parametrize("switch", ["_PQ_LOG", "_TOP2_LOG", "_STOCH_ACCEPT"])

@@ -719,7 +719,7 @@ def _owned_decode_rounds(
             "GMLX_MTP_STOCH_ACCEPT: %s drafts independent rows per block; "
             "using exact-match", getattr(drafter, "kind_label", "drafter"))
         stoch = False
-    if _STOCH_ACCEPT and not greedy and not stoch:
+    elif _STOCH_ACCEPT and not greedy and not stoch:
         _log.warning(
             "GMLX_MTP_STOCH_ACCEPT: sampler's effective distribution is "
             "not reconstructable (opaque sampler); using exact-match")
