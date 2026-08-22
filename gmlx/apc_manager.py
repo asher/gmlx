@@ -145,11 +145,14 @@ class GmlxAPCManager(_apc.APCManager):
         budget = getattr(self, "_exact_budget_bytes", None)
         if not budget:
             return
-        from .serve_memtrace import _arrays
+        from .serve_memtrace import _arrays, _leaf_caches
 
         def entry_bytes(e):
+            # _leaf_caches unwraps CacheList layers (deepseek_v4 wraps
+            # local + pools per layer); walking the wrapper's vars sees
+            # cache objects, not arrays, and counts zero.
             total = 0
-            for c in e.prompt_cache:
+            for c in _leaf_caches(e.prompt_cache):
                 for v in vars(c).values():
                     for a in _arrays(v):
                         total += a.nbytes

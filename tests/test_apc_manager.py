@@ -284,6 +284,34 @@ def test_exact_bytes_reaches_stats_snapshot():
     assert snap.get("exact_bytes") == FakeKVClone().keys.nbytes
 
 
+def test_exact_bytes_counts_cachelist_wrapped_layers():
+    # deepseek_v4 make_cache wraps each sparse layer's caches in a
+    # CacheList; walking the wrapper's vars sees cache objects, not
+    # arrays, so the gauge read ~0 on the DSv4-Flash cert. entry_bytes
+    # must unwrap one CacheList level and descend tuple-packed pools.
+    import mlx.core as mx
+
+    from mlx_vlm.apc import APCExactCacheEntry
+
+    class FakePool:
+        def __init__(self):
+            self._pbuf = (mx.zeros((1, 32, 8), dtype=mx.float16),
+                          mx.zeros((1, 32, 8), dtype=mx.float16))
+
+    class FakeList:
+        def __init__(self):
+            self.caches = [FakePool()]
+
+    m = GmlxAPCManager(num_blocks=8, block_size=16)
+    m._exact_budget_bytes = 10 ** 9
+    m._exact_cache[1] = APCExactCacheEntry(
+        token_ids=(1,), extra_hash=0,
+        prompt_cache=[FakeList()], last_used=1.0)
+    m._trim_exact_to_budget()
+    expect = sum(a.nbytes for a in FakePool()._pbuf)
+    assert m.stats.exact_bytes == expect
+
+
 def test_inline_layer_major_store_enforces_budget():
     # store_kv_blocks' inline exact branch bypassed the budget wrappers
     # (count cap only); the trim must fire there too.
