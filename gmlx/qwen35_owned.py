@@ -45,6 +45,8 @@ import mlx.nn as nn
 from mlx_vlm.models.base import create_attention_mask
 from mlx_vlm.models.cache import ArraysCache, KVCache
 from mlx_vlm.models.qwen3_5 import language as _L
+
+from .dflash_drafter import DFlashCaptureHooks
 from mlx_vlm.models.qwen3_5.config import ModelConfig as _Q35ModelConfig
 from mlx_vlm.models.qwen3_5.config import TextConfig as _Q35TextConfig
 
@@ -326,12 +328,19 @@ def _owned_model_call(
     if cache is None:
         cache = [None] * len(self.layers)
 
+    # Packed-hidden capture armed by DFlashCaptureHooks for this call. A
+    # separate sink, so capture never implies target_verify (which would
+    # route a prefill chunk's GEMMs through the verify-kernel family).
+    dflash_sink = getattr(self, "_dflash_sink", None)
+    dflash_set = set(getattr(self, "_dflash_layers", ())) if dflash_sink is not None else set()
+
     fa_cache = cache[self.fa_idx]
     if (
         h.shape[0] > 1
         and h.shape[1] > 1
         and hidden_sink is None
         and gdn_sink is None
+        and dflash_sink is None
         and fa_cache is not None
         and hasattr(fa_cache, "extract")
         and hasattr(fa_cache.__class__, "merge")
@@ -375,6 +384,8 @@ def _owned_model_call(
         )
         if hidden_sink is not None and i in capture_set:
             hidden_sink.append(h)
+        if i in dflash_set:
+            dflash_sink.append(h)
 
     return self.norm(h)
 
@@ -401,12 +412,12 @@ class OwnedQwen3_5Model(_L.Qwen3_5Model):
         self.fa_idx = args.full_attention_interval - 1
 
 
-class OwnedQwen3_5LanguageModel(_L.LanguageModel):
+class OwnedQwen3_5LanguageModel(DFlashCaptureHooks, _L.LanguageModel):
     """Stock LanguageModel wrapper over the owned model scaffold.
 
     The wrapper __call__ (mrope position resolution, sinks, head) and all
-    speculative_* hooks are inherited stock; only the inner model class
-    changes. __init__ mirrors the stock body instead of calling it so the
+    speculative_* hooks are inherited stock, under the DFlash capture
+    mixin; only the inner model class changes. __init__ mirrors the stock body instead of calling it so the
     stock Qwen3_5Model is never built and thrown away.
     """
 
@@ -445,7 +456,7 @@ def _moe_classes():
             self.ssm_idx = 0
             self.fa_idx = args.full_attention_interval - 1
 
-    class OwnedQwen3_5MoeLanguageModel(_ML.LanguageModel):
+    class OwnedQwen3_5MoeLanguageModel(DFlashCaptureHooks, _ML.LanguageModel):
         def __init__(self, args, config=None):
             nn.Module.__init__(self)
             self.args = args
