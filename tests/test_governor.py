@@ -491,3 +491,25 @@ def test_apc_governor_bytes_and_evict():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_red_reclaims_before_shedding(rig, monkeypatch):
+    # Static red with a fat reclaimable cache: evict + pool clear
+    # restore headroom, so no row is shed.
+    failed = []
+    monkeypatch.setattr(tg, "_row_failed_callbacks",
+                        [lambda uid, info: failed.append(uid)])
+    gen = FakeGen(rows=2, rate=60e9, live=30e9)
+    st = gov._state(gen)
+    st.obs_delta_ema = 20e9
+    tg_st = tg._state(gen)
+    tg_st.ledger[0] = tg._Row([1] * 8, 64, {}, None, None)
+    tg_st.ledger[1] = tg._Row([1] * 4, 64, {}, None, None)
+    gov._REG["pool"] = (lambda: 50e9,
+                        lambda fraction: (rig.__setitem__("head", 200e9),
+                                          50e9)[1])
+    gov._governor_tick(gen)
+    assert failed == []
+    assert gov._STATS["red_failures"] == 0
+    assert "shed skipped" in gov._STATS["last_action"]
+    assert st.band == gov.RED  # band holds; next healthy ticks demote

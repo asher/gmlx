@@ -604,9 +604,24 @@ def _governor_tick(gen) -> None:
     if red_now and batch_rows(gen) > 0:
         _enter(gen, st, RED, ws, margin)
         if _shed_allowed(st):
+            static_red = head - demand < 0.0
+            if static_red and not st.orange_failed:
+                # Reclaim before destroying work: registered caches and
+                # the MLX buffer pool can hold tens of GB. The
+                # orange-failed path already ran and failed an evict.
+                freed = _evict_registered(1.0)
+                mx.clear_cache()
+                head2, _ = _headroom_and_ws(margin)
+                if head2 is not None and head2 - demand >= 0.0:
+                    _STATS["last_action"] = (
+                        f"red reclaim freed {freed / 1e9:.2f} GB, "
+                        "shed skipped")
+                    st.orange_failed = False
+                    return
+                head = head2 if head2 is not None else head
             why = (f"headroom {head / 1e9:.2f} GB below next-tick "
                    f"demand {demand / 1e9:.2f} GB"
-                   if head - demand < 0.0 else
+                   if static_red else
                    f"orange recovery failed with headroom "
                    f"{head / 1e9:.2f} GB, demand {demand / 1e9:.2f} GB")
             _fail_largest(gen, st, f"governor red: {why}")
