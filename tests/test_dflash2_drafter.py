@@ -734,3 +734,102 @@ def test_verify_walk_is_token_identical_to_greedy():
         drafter.accept_verified_tokens(hid, mx.array([drafts]), accepted, [], None, greedy=True)
         assert drafter._cache[0].offset == fa.offset
     assert got[:N_GEN] == ref
+
+
+def _engine_walk(lm, drafter, prompt, n, *, sampler=None):
+    """Drive the engine's round loop the way generate_speculative seeds it."""
+    from gmlx import speculative as sp
+
+    lm.set_dflash_capture(CAPTURE)
+    cache = lm.make_cache()
+    out = lm(prompt, cache=cache, return_hidden=True, return_shared_kv=True)
+    hidden = out.hidden_states[-1]
+    first = out.logits[:, -1, :]
+    b = int((mx.argmax(first, axis=-1) if sampler is None else sampler(first)).item())
+    sp._buffer_mtp_target_cache(cache, drafter, BLOCK)
+    toks = [b]
+    toks.extend(sp._owned_decode_rounds(
+        lm, drafter, lm, cache, hidden=hidden, b=b,
+        shared_kv=out.shared_kv_states, seed_tokens=prompt, emitted=1,
+        max_tokens=n, sampler=sampler, draft_block_size=BLOCK))
+    return toks
+
+
+def _engine_reference(lm, prompt, n):
+    """Greedy chain the way the engine sees it: plain prefill picks the first
+    token, every later token comes off the verify path."""
+    cache = lm.make_cache()
+    logits = lm(prompt, cache=cache).logits[0, -1]
+    ref = []
+    for _ in range(n):
+        t = int(mx.argmax(logits).item())
+        ref.append(t)
+        hid, _ = _verify(lm, mx.array([[t]]), cache)
+        logits = lm.speculative_logits_from_hidden(hid)[0, -1]
+    return ref
+
+
+def test_engine_rounds_emit_the_greedy_chain():
+    lm = _target()
+    prompt = mx.array([[1, 2, 3, 4, 5]])
+    ref = _engine_reference(lm, prompt, N_GEN)
+    assert len(set(ref)) >= 4
+    got = _engine_walk(lm, _drafter(lm), prompt, N_GEN)
+    assert got[:N_GEN] == ref
+
+
+def _recording(drafter, monkeypatch):
+    """Record, per draft_block call, the stash row counts after the call (the
+    engine clears the stash lists once a round is walked)."""
+    seen = []
+    orig = drafter.draft_block
+
+    def draft_block(*a, **kw):
+        out = orig(*a, **kw)
+        st = kw.get("stash")
+        seen.append(None if st is None else {
+            "rows": int(out.shape[1]),
+            **{f: (None if getattr(st, f) is None else len(getattr(st, f)))
+               for f in ("q", "pq", "top2")}})
+        return out
+
+    monkeypatch.setattr(drafter, "draft_block", draft_block)
+    return seen
+
+
+@pytest.mark.parametrize("sampled", [False, True])
+def test_plain_rounds_pass_no_stash(monkeypatch, sampled):
+    from gmlx import speculative as sp
+
+    for name in ("_PQ_LOG", "_TOP2_LOG", "_STOCH_ACCEPT"):
+        monkeypatch.setattr(sp, name, False)
+    lm = _target()
+    drafter = _drafter(lm)
+    seen = _recording(drafter, monkeypatch)
+    mx.random.seed(SEED)
+    _engine_walk(lm, drafter, mx.array([[1, 2, 3, 4, 5]]), 8,
+                 sampler=_annotated() if sampled else None)
+    assert seen and all(s is None for s in seen)
+
+
+@pytest.mark.parametrize("switch", ["_PQ_LOG", "_TOP2_LOG", "_STOCH_ACCEPT"])
+def test_instrumented_rounds_hand_the_block_drafter_a_stash(monkeypatch, switch):
+    """One stash per round with one entry per drafted row, and the round loop
+    walks it without a head-shaped wrapper."""
+    from gmlx import speculative as sp
+
+    for name in ("_PQ_LOG", "_TOP2_LOG", "_STOCH_ACCEPT"):
+        monkeypatch.setattr(sp, name, name == switch)
+    lm = _target()
+    drafter = _drafter(lm)
+    seen = _recording(drafter, monkeypatch)
+    mx.random.seed(SEED)
+    toks = _engine_walk(lm, drafter, mx.array([[1, 2, 3, 4, 5]]), 12,
+                        sampler=_annotated())
+    assert len(toks) >= 12 and all(isinstance(t, int) for t in toks)
+    field = {"_PQ_LOG": "pq", "_TOP2_LOG": "top2", "_STOCH_ACCEPT": "q"}[switch]
+    assert seen and seen[0]["rows"] == BLOCK - 1
+    for s in seen:
+        assert s is not None
+        assert s[field] == s["rows"]
+        assert all(s[o] is None for o in ("q", "pq", "top2") if o != field)
