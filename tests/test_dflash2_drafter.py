@@ -812,6 +812,27 @@ def test_plain_rounds_pass_no_stash(monkeypatch, sampled):
     assert seen and all(s is None for s in seen)
 
 
+def test_v1_rows_keep_exact_match_under_stochastic(monkeypatch):
+    """Independent block rows are not a conditional proposal; the engine
+    keeps exact-match for such drafters (measured on Muse v1: 6.7 -> 1.7
+    accepted per round when forced)."""
+    from gmlx import speculative as sp
+    from gmlx.muse_glimmer_dflash import MuseGlimmerDFlashDrafter
+
+    assert MuseGlimmerDFlashDrafter.stochastic_draft is False
+    assert DFlash2Drafter.stochastic_draft is True
+    for name in ("_PQ_LOG", "_TOP2_LOG"):
+        monkeypatch.setattr(sp, name, False)
+    monkeypatch.setattr(sp, "_STOCH_ACCEPT", True)
+    lm = _target()
+    drafter = _drafter(lm)
+    monkeypatch.setattr(type(drafter), "stochastic_draft", False)
+    seen = _recording(drafter, monkeypatch)
+    mx.random.seed(SEED)
+    _engine_walk(lm, drafter, mx.array([[1, 2, 3, 4, 5]]), 8, sampler=_annotated())
+    assert seen and all(s is None for s in seen)
+
+
 @pytest.mark.parametrize("switch", ["_PQ_LOG", "_TOP2_LOG", "_STOCH_ACCEPT"])
 def test_instrumented_rounds_hand_the_block_drafter_a_stash(monkeypatch, switch):
     """One stash per round with one entry per drafted row, and the round loop

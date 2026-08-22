@@ -27,8 +27,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - `--stochastic-mtp` with a block drafter (Muse Glimmer DFlash) stashed one
-  proposal row per block and misaligned the walk; block drafters now record
-  every draft row.
+  proposal row per block and misaligned the walk; DFlash 2 records every
+  draft row, and a DFlash v1 drafter (independent rows) keeps exact-match
+  acceptance with a log line instead.
 - serve: two model ids over one GGUF that differ in drafter (a companion
   `draft_gguf` and a `native_mtp: true` sibling) both loaded whichever was
   registered last; each build now carries its own drafter.

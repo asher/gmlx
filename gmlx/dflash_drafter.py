@@ -438,6 +438,9 @@ class DFlashDrafter(nn.Module):
     # The stock MTP round doesn't know the packed-hidden target hooks.
     requires_owned_engine = True
     supports_q_stash = True
+    # v1 rows are independent given the anchor, so a row-wise draw is not a
+    # proposal the p/q walk can accept against; exact-match stays.
+    stochastic_draft = False
 
     def __init__(self, config: DFlashConfig):
         super().__init__()
@@ -643,6 +646,7 @@ class DFlash2Drafter(DFlashDrafter):
 
     layer_class = DFlash2DecoderLayer
     kind_label = "dflash2"
+    stochastic_draft = True
 
     def __init__(self, config: DFlashConfig):
         if not config.is_dflash2:

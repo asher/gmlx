@@ -714,6 +714,11 @@ def _owned_decode_rounds(
     drafter.reset(model)
 
     stoch = _STOCH_ACCEPT and not greedy and _stoch_supported_sampler(sampler)
+    if stoch and not getattr(drafter, "stochastic_draft", True):
+        _log.warning(
+            "GMLX_MTP_STOCH_ACCEPT: %s drafts independent rows per block; "
+            "using exact-match", getattr(drafter, "kind_label", "drafter"))
+        stoch = False
     if _STOCH_ACCEPT and not greedy and not stoch:
         _log.warning(
             "GMLX_MTP_STOCH_ACCEPT: sampler's effective distribution is "
