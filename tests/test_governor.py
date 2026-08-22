@@ -1,6 +1,7 @@
 """Governor band ladder: sampling, rungs, shed paths, client bridge."""
 
 import queue
+import time
 import types
 
 import pytest
@@ -88,11 +89,9 @@ def test_green_when_headroom_flat(rig):
 
 
 def test_oneshot_projection_does_not_collapse_ttc(rig):
-    # The 35B APC-on soak storm: a pending deep prompt batch projects
-    # tens of GB (one-time join cost) against ~80 GB headroom with a
-    # tiny recurring rate. The one-shot is subtracted once, never
-    # multiplied into ttc or the orange lookahead: the band stays
-    # green and admissions are not held.
+    # a pending deep prompt batch projects tens of GB (one-time join
+    # cost) against wide headroom and a tiny rate: the band stays
+    # green and admissions are not held
     import time as _t
     gen = FakeGen(rows=2, rate=1e6)
     gen._unprocessed_sequences = [("u", None)]   # join pending
@@ -106,6 +105,38 @@ def test_oneshot_projection_does_not_collapse_ttc(rig):
     assert gov._STATS["orange_evictions"] == 0
 
 
+def test_static_box_never_sheds_sweep(rig):
+    # arch-independence invariant: sweep the decision inputs across
+    # the realistic space. With a static box (no measured growth), a
+    # claimed rate or one-shot of any size may throttle but must
+    # never shed; when headroom also covers the level terms, the band
+    # never passes yellow.
+    import itertools
+    import gmlx.server_memory as sm
+    for head, rate, oneshot, live, rows in itertools.product(
+            (8e9, 34e9, 94e9), (1e3, 1e9, 60e9), (0.0, 25e9, 60e9),
+            (1e9, 30e9), (1, 8)):
+        rig["head"] = head + 0.05 * 120e9
+        gen = FakeGen(rows=rows, rate=rate, live=live)
+        if oneshot:
+            gen._unprocessed_sequences = [("u", None)]
+            gen._kq_admit_last_projection = (time.perf_counter(), oneshot)
+        st = gov._state(gen)
+        tg_st = tg._state(gen)
+        for u in range(rows):
+            tg_st.ledger[u] = tg._Row([1] * 4, 64, {}, None, None)
+        for _ in range(6):
+            gov._governor_tick(gen)
+        combo = f"head={head:g} rate={rate:g} oneshot={oneshot:g} "                 f"live={live:g} rows={rows}"
+        assert gen.removed == [], combo
+        assert gov._STATS["red_failures"] == 0, combo
+        assert gov._STATS["orange_retires"] == 0, combo
+        st_bytes = gov._shed_transient_bytes(gen, st)
+        if head - oneshot > st_bytes + sm.admit_reserve_bytes(120e9, gen)                 + 4 * 64e6:
+            assert st.band <= gov.YELLOW, combo
+        gov._STATS["orange_evictions"] = 0
+
+
 def test_yellow_arms_throttle_and_restores(rig, monkeypatch):
     monkeypatch.setenv("GMLX_GOV_MIN_DWELL_S", "0")
     gen = FakeGen(rows=2, rate=1e6)
@@ -113,6 +144,7 @@ def test_yellow_arms_throttle_and_restores(rig, monkeypatch):
     # demand so high that ttc <= KY but orange threshold not crossed:
     # head 94e9, KY=16 -> rate*rows*1 >= 5.9e9 per tick
     gen._kq_admit_kv_rates["layers.0.k"]["rate"] = 3.0e9
+    st.obs_delta_ema = 1e9      # measured growth corroborates the claim
     gov._governor_tick(gen)
     assert st.band == gov.YELLOW
     # armed: tracked budget + untracked weights, cache pool to zero
@@ -137,9 +169,11 @@ def test_yellow_demand_rungs_on_measured_miss(rig, monkeypatch):
     gen = FakeGen(rows=4, rate=2.0e9)
     gen.draft_model = object()      # rung 2 only clamps armed speculation
     st = gov._state(gen)
-    # peak keeps climbing every tick: every rung window is a miss
-    for i in range(10):
+    # peak and active keep climbing: every rung window is a miss and
+    # measured growth corroborates the claimed rate
+    for i in range(16):
         rig["peak"] = 20e9 + i * 1e9
+        rig["active"] = 20e9 + i * 1.5e9
         gov._governor_tick(gen)
     assert st.band == gov.YELLOW
     assert gen.prefill_step_size == 1024        # rung 1: halved
@@ -163,17 +197,19 @@ def test_orange_evicts_registered_then_retires(rig, monkeypatch):
     def evict(f):
         evictions.append(f)
         rig["active"] -= 1e9  # measured recovery: active actually drops
-        return int(1e9)
+        return int(9e9)
 
-    gov.register_cache("t", lambda: 4e9, evict)
-    gen = FakeGen(rows=2, rate=1e6, live=21e9)
+    gov.register_cache("t", lambda: 12e9, evict)
+    gen = FakeGen(rows=2, rate=1e9, live=21e9)
     st = gov._state(gen)
+    st.obs_delta_ema = 0.3e9    # observed growth keeps the clock running
     tg_st = tg._state(gen)
     tg_st.ledger[0] = tg._Row([1] * 8, 64, {}, None, None)
     tg_st.ledger[1] = tg._Row([1] * 4, 64, {}, None, None)
     gen.apc_manager = types.SimpleNamespace(disk=object())
 
-    # orange, barely: head_eff 28e9 < shed(21e9 + 5.25e9) + reserve 2e9
+    # orange: ttc 28/2 = 14 <= 16 and head_eff 28e9 - ko*rate 8e9
+    # < shed(21e9 + 5.25e9) + reserve 2e9
     rig["head"] = 34e9
     gov._governor_tick(gen)
     assert st.band == gov.ORANGE
@@ -182,7 +218,7 @@ def test_orange_evicts_registered_then_retires(rig, monkeypatch):
 
     gov._governor_tick(gen)                     # fraction ramped to 1.0
     assert evictions == [0.5, 1.0]
-    # full-fraction evict covers the SHORTFALL (0.25e9 < freed 1e9),
+    # full-fraction evict covers the shortfall (8.25e9 < freed 9e9),
     # so the condition is clearable and no retire fires
     assert gen.removed == []
 
@@ -192,6 +228,7 @@ def test_orange_retire_when_caches_dry(rig, monkeypatch):
     gov.register_cache("dry", lambda: 0, lambda f: 0)
     gen = FakeGen(rows=2, rate=2e9, live=30e9)
     st = gov._state(gen)
+    st.obs_delta_ema = 1e9
     st.evict_fraction = 1.0                     # already ramped
     tg_st = tg._state(gen)
     tg_st.ledger[0] = tg._Row([1] * 8, 64, {}, None, None)
@@ -216,6 +253,7 @@ def test_orange_without_apc_falls_to_red(rig, monkeypatch):
                         [lambda uid, info: failed.append(uid)])
     gen = FakeGen(rows=2, rate=2e9, live=30e9)
     st = gov._state(gen)
+    st.obs_delta_ema = 1e9
     st.evict_fraction = 1.0
     tg_st = tg._state(gen)
     tg_st.ledger[0] = tg._Row([1] * 8, 64, {}, None, None)
@@ -237,6 +275,7 @@ def test_red_on_negative_next_tick_headroom(rig, monkeypatch):
                         [lambda uid, info: failed.append((uid, info))])
     gen = FakeGen(rows=2, rate=60e9, live=30e9)  # demand > headroom
     st = gov._state(gen)
+    st.obs_delta_ema = 20e9     # observed growth backs the claim
     tg_st = tg._state(gen)
     tg_st.ledger[0] = tg._Row([1] * 8, 64, {}, None, None)
     tg_st.ledger[1] = tg._Row([1] * 4, 64, {}, None, None)
@@ -277,6 +316,7 @@ def test_shed_rate_cap(rig, monkeypatch):
     monkeypatch.setattr(tg, "_row_failed_callbacks",
                         [lambda uid, info: failed.append(uid)])
     gen = FakeGen(rows=3, rate=60e9, live=30e9)
+    gov._state(gen).obs_delta_ema = 20e9
     tg_st = tg._state(gen)
     for u in range(3):
         tg_st.ledger[u] = tg._Row([1] * (8 - u), 64, {}, None, None)
@@ -289,6 +329,7 @@ def test_shed_rate_cap(rig, monkeypatch):
 def test_admission_hold_and_ceiling_handoff(rig):
     gen = FakeGen(rows=2, rate=3.0e9)
     assert gov.admission_hold_reason(gen) is None
+    gov._state(gen).obs_delta_ema = 1e9
     gov._governor_tick(gen)
     assert gov.admission_hold_reason(gen) == "governor yellow"
 

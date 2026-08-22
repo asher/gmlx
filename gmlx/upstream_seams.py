@@ -183,8 +183,8 @@ SEAMS: tuple[Seam, ...] = (
          "hazard; decision modules count rows via _orig_len only)",
          critical=True),
     Seam("mlx_vlm.generate.ar", "GenerationBatch._eval_pending_state",
-         "governor shed ordering (eval-before-the-gather is load-bearing "
-         "ground truth for filter under pressure)", critical=True),
+         "governor shed ordering (filter under pressure requires "
+         "eval before the gather)", critical=True),
     Seam("mlx_vlm.generate.ar", "BatchGenerator.remove",
          "governor retire rung + tick_guard rebuild (queue pop / "
          "prompt-batch clear / decode filter semantics)", critical=True),
