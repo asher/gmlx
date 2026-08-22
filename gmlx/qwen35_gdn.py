@@ -202,6 +202,7 @@ class OwnedQwen3_5GatedDeltaNet(_L.Qwen3_5GatedDeltaNet):
             S == 1
             and gdn_sink is None
             and fused
+            and _gp.gpu_active()
             and _gp._gdn_fused_decode_kernel is not None
             and (mask is None or not isinstance(mask, mx.array))
             and cache is not None
@@ -214,6 +215,7 @@ class OwnedQwen3_5GatedDeltaNet(_L.Qwen3_5GatedDeltaNet):
             )
         if (
             fused
+            and _gp.gpu_active()
             and gdn_sink is not None
             and S > 1
             and _gp._gdn_fused_verify_kernel is not None

@@ -12,6 +12,7 @@ the tests here are structural and fast.
 """
 
 import dataclasses
+import os
 
 import numpy as np
 import mlx.core as mx
@@ -36,6 +37,12 @@ from test_vlm_mtp_gating import _cfg, _top
 
 CAPTURE = (0, 2)
 BLOCK = 4
+
+# speculative_verify_logits runs upstream's lm_head verify GEMV, a Metal
+# kernel gated on import-time availability, not the active device.
+_NEEDS_GPU = pytest.mark.skipif(
+    bool(os.environ.get("KQUANT_FORCE_CPU")),
+    reason="upstream's lm_head verify GEMV is Metal-only")
 TOP_K = 4
 N_GEN = 16
 # With tied embeddings every random draw of the tiny target collapses its
@@ -198,6 +205,7 @@ def test_argmax_hook_matches_the_logits_hook():
     assert am.tolist() == mx.argmax(logits, axis=-1).tolist()
 
 
+@_NEEDS_GPU
 def test_verify_logits_returns_correct_logits_and_the_packed_hidden():
     """Unreachable for this target today (the argmax and logits hooks answer
     first), pinned so a dispatch-order change cannot bring back a stride bug."""
