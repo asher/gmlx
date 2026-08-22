@@ -210,8 +210,12 @@ plain decoding and sampled output follows the target's sampler. On the sampled
 path each draft row is drawn with the target's temperature, top-p and min-p
 over the selector's candidates (top-k is bounded by the 16 candidates); the
 reference implementation applies temperature only. `--stochastic-mtp` applies
-to these drafters too: the drafter draws each row from the sharpened proposal
-and records it, and the p/q walk accepts against it.
+to DFlash 2 as well: the drafter draws each row from the sharpened proposal
+and records it, and the p/q walk accepts against it (Qwen3.8 at temperature
+1.0: mean accept 4.2 exact-match, 5.0 stochastic). A DFlash v1 drafter
+proposes independent rows per block, which is not a proposal the walk can
+accept against (forced, Muse v1 fell from 6.7 to 1.7 accepted per round), so
+`--stochastic-mtp` keeps exact-match there and says so in the log.
 
 Measured (M3 Max, greedy, a gsm8k prompt, 300 tokens): Qwen3.8-27B
 UD-Q6_K_XL decodes at 14.3 tok/s plain, 31.0 tok/s on its native head (mean
