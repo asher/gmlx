@@ -1,7 +1,7 @@
 """DeepSeek-V4-Flash MTP: drafter/SpecLM unit tests + tiny greedy-identity A/B.
 
 The losslessness contract is drafter-independent (the verify walk emits the
-target's own tokens), so the load-bearing gates are the CACHE paths:
+target's own tokens), so the gates that matter are the CACHE paths:
 
 - all-reject rounds: every round rolls back the verify write (2- or 3-wide;
   S=2/S=3), exercising the rotating-cache one-update undo log (the

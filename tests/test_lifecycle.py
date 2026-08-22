@@ -311,7 +311,7 @@ def test_copy_stub_external_stamp(monkeypatch, tmp_path):
     assert lc.procname._copy_stub(dest, stamp=stamp) is False
 
 
-# The bundle is launchd-load-bearing (the LaunchAgent references it by
+# launchd depends on the bundle (the LaunchAgent references it by
 # absolute path), so it lives in Application Support - cache cleaners delete
 # ~/.cache. A pre-relocation bundle in the cache is retired.
 def test_menubar_bundle_relocates_to_app_support(monkeypatch, tmp_path):

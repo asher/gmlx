@@ -1,7 +1,7 @@
 """Kimi-K2.5/K2.7 vision (mmproj projector ``kimik25`` -> mlx-vlm kimi_k25).
 
 CPU-only: synthetic mmproj metadata + tensors, no GGUF and no real weights.
-The load-bearing property is the Q/K RoPE de-permutation - MoonViT rotates
+The property under test is the Q/K RoPE de-permutation - MoonViT rotates
 interleaved (x, y) dim pairs, llama.cpp's converter rewrites Q/K into the
 split halves ``build_rope_2d`` wants, and mlx-vlm implements the interleaved
 form. Getting that wrong still produces finite, plausible-looking features, so

@@ -102,7 +102,7 @@ def test_pin_protected_even_when_over_budget():
 def test_kept_model_is_still_lru_evicted_under_pressure():
     # The keep tier exempts a model from the idle-TTL reaper, NOT from LRU: under
     # byte pressure a kept-but-unpinned model is still a valid eviction victim
-    # (the load-bearing difference from a full pin).
+    # (the difference from a full pin).
     proxy, pool, teardowns = make_pool(25, {"A": 10, "B": 10, "C": 10})
     acquire(pool, "A")
     pool.set_keep("A", True)        # keep A (TTL-exempt) but do NOT pin it

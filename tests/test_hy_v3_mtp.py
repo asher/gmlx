@@ -1,7 +1,7 @@
 """Hy3 (hy_v3) MTP: drafter/SpecLM unit tests + tiny greedy-identity A/B.
 
 The losslessness contract is drafter-independent (the verify walk emits the
-target's own tokens), so the load-bearing gates are the cache paths:
+target's own tokens), so the gates that matter are the cache paths:
 
 - reject rounds (random drafter vs random target): every rejection trims the
   verify tail from the plain per-layer KVCaches via

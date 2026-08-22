@@ -11,7 +11,7 @@ them) so cache-type resolution by module attribute keeps working.
 Delete this file once installed mlx-lm ships PoolingCache natively.
 
 The one-update undo log (``trim(n)``, n <= 2, after verify writes that may
-complete pool windows) is load-bearing for MTP draft rejection - see
+complete pool windows) is what makes MTP draft rejection correct - see
 gmlx/deepseek_v4_mtp.py. The rotating-cache undo wrap at the bottom of
 this file is the matching piece for ``RotatingKVCache`` (port of omlx
 patches/mlx_lm_mtp/cache_rollback.py, extended to 3-wide verifies for S=3

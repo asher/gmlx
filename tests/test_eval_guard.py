@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Guarded eval contract (gmlx/eval_guard.py) and the bare-eval ban.
 
-The ban half is the load-bearing regression: no mx.eval or
+The ban half is the regression that matters: no mx.eval or
 mx.async_eval call may sit under an except-carrying try anywhere in
 gmlx. That is what keeps a sixth catch-and-continue-around-eval site
 from shipping unrouted, and it subsumes checking that the five known
