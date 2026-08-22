@@ -161,6 +161,9 @@ class GmlxAPCManager(_apc.APCManager):
             while total > budget and len(self._exact_cache) > 1:
                 k, _ = self._exact_cache.popitem(last=False)
                 total -= sizes.pop(k, 0)
+            # Mirror of pool_bytes for the exact tier: lets harnesses
+            # separate budgeted, evictable retention from real residue.
+            self.stats.exact_bytes = int(total)
 
     def lookup_exact_cache(self, *args, **kwargs):
         self._trim_exact_to_budget()
