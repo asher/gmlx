@@ -42,6 +42,7 @@ What adding an architecture involves, and the full acceptance gate:
 
 ```sh
 ruff check .
+pre-commit install   # optional: runs the same check on each commit
 ```
 
 ## Things to know before you patch

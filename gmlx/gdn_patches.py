@@ -19,6 +19,11 @@ from .envflags import env_bool
 from .patching import ClassPatch
 
 
+def gpu_active() -> bool:
+    """Metal kernels dispatch only while the default device is the GPU."""
+    return mx.default_device() == mx.gpu
+
+
 # One-shot routing dump for the GDN call: which branch each distinct
 # (S, B, sink, mask) shape takes. GMLX_GDN_ROUTE_DEBUG=1.
 _ROUTE_DEBUG = env_bool("GMLX_GDN_ROUTE_DEBUG", False)
@@ -829,6 +834,8 @@ _F16_HEAD_GEMV = (
 def _f16_head_gemv(x, w):
     """x [B, M, K], w [N, K] (dense bf16/f16) -> [B, M, N] == x @ w.T.
     M-stationary GEMV-ext; ~95% of peak at M=2..8 where mx.matmul is ~68%."""
+    if not gpu_active():
+        return x @ w.T
     B, M, Kd = x.shape
     Nd = w.shape[0]
     BN = (32 // 8) * 2  # ROWS_PER_SG * NSG

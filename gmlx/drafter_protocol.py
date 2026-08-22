@@ -34,9 +34,24 @@ How to adapt a new mlx-vlm drafter
 from __future__ import annotations
 
 import inspect
-from typing import Any, Protocol, runtime_checkable
+from dataclasses import dataclass
+from typing import Any, Optional, Protocol, runtime_checkable
 
 import mlx.core as mx
+
+
+@dataclass
+class DraftStash:
+    """Instrument rows a block drafter records for one round, one entry per
+    draft position in draft order (no seed entry: block drafters have no
+    head pick at position 0). ``q``: the full-vocab proposal each token was
+    drawn from (stochastic acceptance). ``pq``: log-domain draft rows for the
+    p/q counterfactual log. ``top2``: the runner-up token per row. A list is
+    present only while its instrument is on."""
+
+    q: list | None = None
+    pq: list | None = None
+    top2: list | None = None
 
 
 # 1. BatchDrafterProtocol -- the contract as typed documentation
@@ -115,7 +130,11 @@ class BatchDrafterProtocol(Protocol):
         sampler: Any,
         token_dtype: Any = mx.int32,
         greedy: bool = False,
+        stash: Optional["DraftStash"] = None,
     ) -> mx.array:
+        """``stash`` is passed only to drafters flagging ``supports_q_stash``:
+        they draw every draft row themselves and record one q / pq / top2
+        entry per draft, in draft order, on the lists the stash carries."""
         ...
 
     def bind(self, target_model: Any) -> "BatchDrafterProtocol":

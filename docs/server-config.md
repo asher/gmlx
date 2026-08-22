@@ -592,6 +592,9 @@ models:
   gemma-31b-mtp:                     # assistant-shape MTP (separate drafter GGUF)
     path: google_gemma-4-31B-it-Q6_K_L.gguf
     draft_gguf: gemma-4-31B-it-assistant.Q8_0.gguf       # implies speculative
+    native_mtp: false                # true: the GGUF's own MTP head drafts even
+                                     #   with draft_gguf set (a companion otherwise wins);
+                                     #   a sibling id over the same GGUF may choose differently
     speculative_width_cap: null      # speculate only up to this many live streams
                                      #   (null => the drafter family default;
                                      #    0 => uncapped; see below)
@@ -606,7 +609,7 @@ models:
 ```
 
 Per-model keys: `path` (required), `profile`, `family`, `profiles`, `mmproj`,
-`draft_gguf`, `adapter`, `stream`, `moe_experts`, `moe_expert_mass`,
+`draft_gguf`, `native_mtp`, `adapter`, `stream`, `moe_experts`, `moe_expert_mass`,
 `moe_miss_shed`, `moe_layer_shed`, `moe_prestage`, `prefill_feeder`,
 `decode_feeder`, `speculative`, `speculative_width_cap`, `overrides`
 (`{sampling, load, cache, system, chat_template, chat_template_kwargs,
@@ -746,8 +749,11 @@ only, zero tensor I/O). Native-head MTP models auto-enable speculative.
 Sibling `mmproj*.gguf` pairs into the model it best matches. A sibling
 assistant drafter (gemma4 assistant, DSpark, DFlash) pairs in as that model's
 `draft_gguf`, which turns speculative on; the arch, the hidden size, and the
-filename must all agree. A streamed model gets no drafter, and
-`speculative: false` stops the pairing.
+filename must all agree. A drafter whose header names its base model (a
+DFlash 2 drafter does) pairs with that model wherever the scan found it, and a
+DFlash 2 drafter replaces a DFlash v1 sibling already paired on the same
+target; a drafter that names a different base model never pairs. A streamed
+model gets no drafter, and `speculative: false` stops the pairing.
 
 ```yaml
 discover:

@@ -717,8 +717,12 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "decoding (native-head qwen3.5/3.6; gemma4 also needs "
                          "--draft-gguf).")
     ap.add_argument("--draft-gguf", default=None,
-                    help="Companion drafter GGUF for assistant-shape MTP (gemma4); "
-                         "implies --speculative.")
+                    help="Companion drafter GGUF for assistant-shape MTP (gemma4, "
+                         "DFlash); implies --speculative.")
+    ap.add_argument("--native-mtp", action="store_true",
+                    help="Draft with the model's own MTP head even when "
+                         "--draft-gguf is set. Same as the per-model config key "
+                         "native_mtp.")
     ap.add_argument("--stochastic-mtp", action="store_true",
                     help="Accept MTP drafts by p/q rejection sampling on sampled "
                          "requests (server-wide): same output distribution as "
@@ -946,6 +950,8 @@ def _bg_serve_args(a, cfg_path) -> list:
         out.append("--speculative")
     if a.draft_gguf:
         out += ["--draft-gguf", _abs(a.draft_gguf)]
+    if getattr(a, "native_mtp", False):
+        out.append("--native-mtp")
     if getattr(a, "draft_block_size", None):
         out += ["--draft-block-size", str(a.draft_block_size)]
     if getattr(a, "chat_template", None):
@@ -1416,7 +1422,8 @@ def _single_model_cfg(a) -> ServerCfg:
     mp = os.path.abspath(os.path.expanduser(a.model))
     mid, _q = discovery.derive_id(os.path.basename(a.model))
     mid = mid or "model"
-    speculative = bool(a.speculative or a.draft_gguf)
+    native_mtp = bool(getattr(a, "native_mtp", False))
+    speculative = bool(a.speculative or a.draft_gguf or native_mtp)
     # A --chat-template override rides on the model's overrides (the same slot a
     # config `overrides: {chat_template: ...}` uses), so it flows through resolve_model
     # -> the load bridge identically.
@@ -1427,7 +1434,8 @@ def _single_model_cfg(a) -> ServerCfg:
         path=mp,
         mmproj=os.path.abspath(os.path.expanduser(a.mmproj)) if a.mmproj else None,
         draft_gguf=(os.path.abspath(os.path.expanduser(a.draft_gguf))
-                    if a.draft_gguf else None),
+                    if a.draft_gguf and not native_mtp else None),
+        native_mtp=native_mtp,
         adapter=(os.path.abspath(os.path.expanduser(a.adapter))
                  if a.adapter else None),
         speculative=speculative,

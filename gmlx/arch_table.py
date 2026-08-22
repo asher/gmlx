@@ -67,7 +67,7 @@ _FAMILY_NOTES = {
     "qwen2":          ("qwen2",    "Qwen2 / Qwen2.5 dense; QKV biases, tied embeddings on 0.5B/1.5B"),
     "qwen2moe":       ("qwen2",    "Qwen1.5-MoE-A2.7B; routed switch_mlp experts + shared expert + sigmoid shared gate; QKV biases; moe_intermediate from ffn_gate_exps shape (GGUF omits the KV key)"),
     "qwen3":          ("qwen3",    "Qwen3 dense (0.6B-32B); per-head qk-norm, NEOX rope (no qk-permute)"),
-    "qwen35":         ("qwen3",    "Qwen3.5 dense hybrid: gated-DeltaNet linear attention with a full-attention layer every full_attention_interval; fused-GDN Metal kernels at runtime (GMLX_FUSED_GDN=0 disables); native-head MTP (nextn) -> --speculative needs no companion GGUF"),
+    "qwen35":         ("qwen3",    "Qwen3.5/3.6/3.8 dense hybrid: gated-DeltaNet linear attention with a full-attention layer every full_attention_interval; fused-GDN Metal kernels at runtime (GMLX_FUSED_GDN=0 disables); native-head MTP (nextn) -> --speculative needs no companion GGUF; a DFlash 2 drafter GGUF (--draft-gguf, z-lab Qwen3.8-27B-DFlash2) wins over the head when configured"),
     "qwen35moe":      ("qwen3",    "Qwen3.5/3.6 MoE (e.g. Qwen3.6-27B): the qwen35 gated-DeltaNet hybrid + fine-grained MoE with shared expert; fused-GDN kernels + native-head MTP as on qwen35"),
     "qwen3moe":       ("qwen3",    "Qwen3-MoE (30B-A3B / 235B-A22B); all-MoE switch_mlp, no shared expert"),
     "qwen3vlmoe":     ("qwen3",    "Qwen3-Omni thinker text tower (MoE, qwen3moe layout); pairs with the Qwen3-Omni mmproj (--mmproj) for vision + audio input"),
@@ -141,6 +141,8 @@ MTP_DRAFTER_ARCHES = {
     # legacy nextn one.
     "deepseek_v4": ("deepseek4-dspark", "dflash", "deepseek4_mtp_support"),
     "muse_glimmer": ("dflash",),
+    # DFlash 2 drafters (z-lab) for Qwen3.5/3.6/3.8 dense targets.
+    "qwen3_5": ("dflash",),
     "gemma4_text": ("gemma4_assistant", "gemma4-assistant", "gemma4_mtp"),
 }
 

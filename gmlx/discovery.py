@@ -67,8 +67,11 @@ _QUANT_TRAILING = re.compile(
 # (mmproj/assistant/...) plus imatrix provenance (mradermacher `i1`, `imatrix`) -
 # that's quant provenance, not part of the model name, and leaving it in splits
 # one model's quants across two id prefixes (`...instruct.i1-*` vs `...instruct-*`).
-_ID_MARKERS = ("mmproj", "assistant", "draft", "mtp", "dflash", "gguf",
-               "imatrix", "imat", "i1")
+_ID_MARKERS = ("mmproj", "assistant", "draft", "mtp", "dflash2", "dflash",
+               "gguf", "imatrix", "imat", "i1")
+# A trailing parameter-count token (``-27B``, ``_30B-A3B``, `` 1.9B``): a
+# basename carrying one needs no ``general.size_label`` appended.
+_SIZE_TOKEN_RE = re.compile(r"(?i)[-_ ]\d+(\.\d+)?[bm](-a\d+(\.\d+)?[bm])?$")
 
 
 # Encoder/embedding architectures (not generative decoders). A GGUF on one of
@@ -97,6 +100,12 @@ class ClassifiedGguf:
     name: str | None = None  # general.name, for family refinement (model kind)
     # hidden size; on a drafter, its target's (see `_drafter_hidden_size`)
     n_embd: int | None = None
+    # drafter kind: "dflash2" for a DFlash 2 header, else the arch
+    drafter_kind: str | None = None
+    # base-model ids the header declares (general.basename + size_label,
+    # general.base_model.0.name), slugged like filename ids; `general.name`
+    # is deliberately not one (it names the file, not the base model)
+    declared: tuple = ()
 
 
 # Classification
@@ -106,6 +115,35 @@ def is_drafter_arch(arch: str | None) -> bool:
     if arch in _DRAFTER_ARCHES:
         return True
     return bool(arch) and ("assistant" in arch or "_mtp" in arch)
+
+
+def _declared_base_ids(meta) -> tuple:
+    """The base-model ids a GGUF header declares, as filename-style slugs.
+    ``general.basename`` gets ``general.size_label`` appended when it carries
+    no size token of its own (bartowski's ``Muse-Glimmer`` + ``30B``), so it
+    meets the drafter's ``Muse-Glimmer-30B`` on equal terms."""
+    out: list[str] = []
+    base = read_string(meta, "general.basename")
+    if base:
+        size = read_string(meta, "general.size_label")
+        if size and not _SIZE_TOKEN_RE.search(base):
+            base = f"{base}-{size}"
+        out.append(base)
+    base_model = read_string(meta, "general.base_model.0.name")
+    if base_model:
+        out.append(base_model)
+    ids: list[str] = []
+    for raw in out:
+        slug, _q = derive_id(raw)
+        if slug and slug != "model" and slug not in ids:
+            ids.append(slug)
+    return tuple(ids)
+
+
+def _drafter_kind(meta, arch: str | None) -> str | None:
+    if (read_int(meta, "dflash.selector_top_k") or 0) > 0:
+        return "dflash2"
+    return arch
 
 
 def _looks_like_drafter(meta, arch: str | None) -> bool:
@@ -169,7 +207,9 @@ def _classify_meta(meta, *, basename: str, path: str) -> ClassifiedGguf:
         return ClassifiedGguf(ap, "adapter", arch, False, quant, False)
     if _looks_like_drafter(meta, arch):
         return ClassifiedGguf(ap, "drafter", arch, False, quant, False,
-                              n_embd=_drafter_hidden_size(meta, arch))
+                              n_embd=_drafter_hidden_size(meta, arch),
+                              drafter_kind=_drafter_kind(meta, arch),
+                              declared=_declared_base_ids(meta))
     emb = _embedding_kind(meta, basename, arch)
     if emb:
         return ClassifiedGguf(ap, emb, arch, False, quant, False)
@@ -181,7 +221,8 @@ def _classify_meta(meta, *, basename: str, path: str) -> ClassifiedGguf:
     return ClassifiedGguf(ap, "model", arch, mtp, quant, loadable,
                           moe=bool(experts and experts > 0),
                           name=read_string(meta, "general.name"),
-                          n_embd=_hidden_size(meta, arch))
+                          n_embd=_hidden_size(meta, arch),
+                          declared=_declared_base_ids(meta))
 
 
 def classify_gguf(path: str) -> ClassifiedGguf | None:
@@ -287,8 +328,8 @@ def _read_header(path: str) -> tuple:
 
 
 def header_meta(path: str) -> dict | None:
-    """``{"arch", "name", "kind", "mtp", "sampling"}`` from a GGUF's header, or
-    ``None`` when the file is missing/unreadable. Unlike :func:`classify_gguf`
+    """``{"arch", "name", "kind", "mtp", "sampling", "drafter_kind"}`` from a
+    GGUF's header, or ``None`` when the file is missing/unreadable. Unlike :func:`classify_gguf`
     this is **silent** on failure - registration over a config that references a
     not-yet-pulled file must not spam stderr. A sharded model's configured path
     is its first shard, which carries the full KV block, so a plain read of the
@@ -303,9 +344,10 @@ def header_meta(path: str) -> dict | None:
     disk = _load_header_cache()
     ent = disk.get(ap)
     if (isinstance(ent, dict) and ent.get("mtime") == int(st.st_mtime)
-            and ent.get("size") == st.st_size and "sampling" in ent):
+            and ent.get("size") == st.st_size and "sampling" in ent
+            and "drafter_kind" in ent):
         meta = {k: ent.get(k) for k in ("arch", "name", "kind", "mtp",
-                                        "sampling")}
+                                        "sampling", "drafter_kind")}
         _HEADER_MEMO[ap] = meta
         return meta
     try:
@@ -314,7 +356,7 @@ def header_meta(path: str) -> dict | None:
         _HEADER_MEMO[ap] = None                  # unreadable-as-GGUF is stable
         return None
     meta = {"arch": c.arch, "name": name, "kind": c.kind, "mtp": c.mtp,
-            "sampling": sampling}
+            "sampling": sampling, "drafter_kind": c.drafter_kind}
     _HEADER_MEMO[ap] = meta
     disk[ap] = {"mtime": int(st.st_mtime), "size": st.st_size, **meta}
     _save_header_cache(disk)
@@ -741,6 +783,12 @@ def _emit_dir(classified, spec, used_ids, out, *, configured=None,
                   for c in g if c.kind == "model" and c.loadable]
     id_for = _assign_ids(all_models, used_ids)
 
+    all_made: list[tuple[ModelCfg, ClassifiedGguf]] = []
+    all_old: list = []
+    all_old_ids: set = set()
+    drafter_kinds: dict[str, str | None] = {}
+    unpaired: list[ClassifiedGguf] = []
+    cross: list[ClassifiedGguf] = []
     for _dir, group in sorted(by_dir.items()):
         models = [c for c in group if c.kind == "model" and c.loadable]
         for c in group:
@@ -785,7 +833,11 @@ def _emit_dir(classified, spec, used_ids, out, *, configured=None,
         # `made` and only this lookup can pair it.
         old = _configured_in_dir(_dir, configured) if drafters else []
         old_ids = {mc.id for mc, _c in old}
+        all_made.extend(made)
+        all_old.extend(e for e in old if e[0].id not in all_old_ids)
+        all_old_ids.update(old_ids)
         for dr in drafters:
+            drafter_kinds[dr.path] = dr.drafter_kind
             targets = ([] if spec.speculative is False
                        else _drafter_targets(dr, made + old))
             for mc in targets:
@@ -798,8 +850,37 @@ def _emit_dir(classified, spec, used_ids, out, *, configured=None,
                 print(f"[discover] drafter paired (speculative on for {ids}): "
                       f"{dr.path}", file=sys.stderr)
             else:
-                print(f"[discover] assistant drafter (configure via "
-                      f"draft_gguf: on its model): {dr.path}", file=sys.stderr)
+                unpaired.append(dr)
+            if dr.declared and (not targets or dr.drafter_kind == "dflash2"):
+                cross.append(dr)
+
+    # Cross-directory pass: a drafter that declares its base model (a DFlash 2
+    # header does) pairs with that model wherever the scan found it, and a
+    # DFlash 2 drafter takes over a target its same-directory DFlash v1
+    # sibling claimed above. Declared hits only; the filename rule stays
+    # same-directory.
+    if spec.speculative is not False:
+        pool = all_made + all_old
+        for dr in cross:
+            targets = _drafter_targets(dr, pool, declared_only=True,
+                                       drafter_kinds=drafter_kinds)
+            for mc in targets:
+                loser = mc.draft_gguf
+                mc.draft_gguf = dr.path
+                mc.speculative = True
+                if mc.id in all_old_ids:
+                    draft_pairs[mc.id] = dr.path
+                if loser and loser != dr.path:
+                    print(f"[discover] drafter superseded for {mc.id}: "
+                          f"{loser} -> {dr.path}", file=sys.stderr)
+            if targets:
+                ids = ", ".join(mc.id for mc in targets)
+                print(f"[discover] drafter paired (speculative on for {ids}): "
+                      f"{dr.path}", file=sys.stderr)
+                unpaired = [d for d in unpaired if d.path != dr.path]
+    for dr in unpaired:
+        print(f"[discover] assistant drafter (configure via "
+              f"draft_gguf: on its model): {dr.path}", file=sys.stderr)
 
 
 def _assign_ids(models, used_ids: set) -> dict[str, str]:
@@ -894,23 +975,58 @@ def _configured_in_dir(dirpath: str, configured) -> list:
     return out
 
 
-def _drafter_targets(dr: ClassifiedGguf, made) -> list:
-    """The models the sibling drafter ``dr`` can serve; empty leaves it unpaired.
+def _target_ids(c: ClassifiedGguf) -> set:
+    """Ids a target answers to: its declared base ids plus ``general.name``."""
+    ids = set(c.declared)
+    if c.name:
+        slug, _q = derive_id(c.name)
+        if slug and slug != "model":
+            ids.add(slug)
+    return ids
+
+
+def _drafter_targets(dr: ClassifiedGguf, made, *, declared_only: bool = False,
+                     drafter_kinds: dict | None = None) -> list:
+    """The models the drafter ``dr`` can serve; empty leaves it unpaired.
 
     A candidate must have a wired MTP class, a resident placement (MTP needs a
     resident base), an arch that :data:`arch_table.MTP_DRAFTER_ARCHES` lists
     for this drafter, and an equal hidden size where both files declare one.
     The size is the only test that separates the two ``dflash`` drafters, the
-    DSpark sidecar and the Muse Glimmer one.
+    DSpark sidecar and the Muse Glimmer one. A paired candidate is off the
+    table unless a DFlash 2 drafter is replacing an incumbent of another kind
+    (``drafter_kinds``: drafter path -> kind).
 
-    The filename then selects among the candidates, on the
-    :func:`_best_mmproj_target` rule; a lone candidate pairs without it. Two
-    quants of one target both pair on purpose."""
+    Header identity decides first: a hit when the drafter's declared base ids
+    meet the target's; a veto when both declare and disjointly. Otherwise
+    (``declared_only`` off) the filename selects among the candidates, on the
+    :func:`_best_mmproj_target` rule, and a lone candidate pairs without it.
+    Two quants of one target both pair on purpose."""
+    kinds = drafter_kinds or {}
+    supersede = dr.drafter_kind == "dflash2"
+
+    def _open(mc) -> bool:
+        if mc.draft_gguf is None or mc.draft_gguf == dr.path:
+            return True
+        return supersede and kinds.get(mc.draft_gguf) != "dflash2"
+
     cands = [(mc, c) for mc, c in made
              if _arch_table.mtp_wired(c.arch) and not mc.stream
-             and mc.draft_gguf is None
+             and _open(mc)
              and _arch_table.drafter_serves(dr.arch, c.arch) is not False
              and not (dr.n_embd and c.n_embd and dr.n_embd != c.n_embd)]
+    if not cands:
+        return []
+    if dr.declared:
+        hits = [mc for mc, c in cands if set(dr.declared) & _target_ids(c)]
+        if hits:
+            return hits
+        cands = [(mc, c) for mc, c in cands if not c.declared]
+        if not cands:
+            return []
+    if declared_only:
+        return []
+    cands = [(mc, c) for mc, c in cands if mc.draft_gguf is None]
     if not cands:
         return []
     core, _ = derive_id(os.path.basename(dr.path))   # markers (dflash/draft) stripped

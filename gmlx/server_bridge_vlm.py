@@ -160,10 +160,17 @@ def _resolve_mtp_spec(model_path: str) -> dict | None:
     env = os.environ.get("MLX_VLM_GGUF_SPECULATIVE", "").strip().lower()
     if env in ("0", "false", "no", "off"):
         return None
+    on = env in ("1", "true", "yes", "on")
     spec = _GGUF_MTP_REGISTRY.get(os.path.abspath(model_path))
     if spec is not None:
+        # Inside a per-id window the window's drafter wins: two ids on one
+        # GGUF may differ (companion vs native_mtp) and the registry keeps
+        # only the last registration.
+        if on and "MLX_VLM_GGUF_DRAFT" in os.environ:
+            draft = os.environ.get("MLX_VLM_GGUF_DRAFT")
+            return {"draft_gguf_path": os.path.abspath(draft) if draft else None}
         return spec
-    if env in ("1", "true", "yes", "on"):
+    if on:
         draft = os.environ.get("MLX_VLM_GGUF_DRAFT")
         return {"draft_gguf_path": os.path.abspath(draft) if draft else None}
     return None

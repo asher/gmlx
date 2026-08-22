@@ -626,3 +626,37 @@ def test_copies_match_upstream_source():
         assert norm(getattr(qwen35_owned, name)) == norm(getattr(_L, name)), (
             f"owned copy of {name} drifted from the upstream original"
         )
+
+
+def test_forward_on_the_cpu_device_skips_the_metal_kernels(monkeypatch):
+    """Stock MLX raises when a Metal kernel is dispatched on the CPU
+    device; the owned forward takes the pure-MLX routes there. Every
+    kernel the forward can reach is poisoned, and the CPU arm is a fresh
+    model so the compiled-apply memo cannot hide a fused dispatch."""
+    from gmlx import gdn_patches, qwen35_rope, qwen35_verify_linear
+
+    ids = mx.array([[1, 2, 3, 4]])
+    _, owned = _pair()
+    ref = owned(ids, cache=owned.make_cache()).logits
+    mx.eval(ref)
+
+    def _no_kernel(*args, **kwargs):
+        raise AssertionError("Metal kernel dispatched on the CPU device")
+
+    monkeypatch.setattr(qwen35_rope, "_compiled_mrope_apply", _no_kernel)
+    monkeypatch.setattr(gdn_patches, "_F16_HEAD_GEMV", _no_kernel)
+    monkeypatch.setattr(gdn_patches, "_gdn_fused_decode_kernel", _no_kernel)
+    monkeypatch.setattr(gdn_patches, "_gdn_fused_verify_kernel", _no_kernel)
+    monkeypatch.setattr(qwen35_verify_linear, "_TARGET_VERIFY_GEMV", _no_kernel)
+    _, owned_cpu = _pair()
+    prev = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        out = owned_cpu(ids, cache=owned_cpu.make_cache()).logits
+        hid, _, _ = owned_cpu.speculative_verify_hidden(
+            ids, owned_cpu.make_cache()
+        )
+        mx.eval(out, hid)
+    finally:
+        mx.set_default_device(prev)
+    assert _close(ref, out, 1e-3)

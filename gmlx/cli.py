@@ -245,6 +245,13 @@ def add_speculative_args(ap: argparse.ArgumentParser) -> None:
              "default, up to the deepest block it can produce.",
     )
     ap.add_argument(
+        "--native-mtp",
+        action="store_true",
+        help="Draft with the GGUF's own MTP head (qwen3.5/3.6/3.8 'nextn') "
+        "even when a --draft-gguf or config draft_gguf companion is set. "
+        "An external drafter otherwise wins. Error if the GGUF has no head.",
+    )
+    ap.add_argument(
         "--stochastic-mtp",
         action="store_true",
         help="Accept MTP drafts by p/q rejection sampling instead of exact "
@@ -654,14 +661,18 @@ def _has_native_mtp_head(gguf_path: str) -> bool:
 def resolve_speculative(args, gguf_path: str) -> tuple[bool, str]:
     """Decide whether run/chat takes the MTP path, plus a note to print.
 
-    Precedence: --no-speculative/--no-mtp (off) > explicit --speculative/--mtp or
-    --draft-gguf (on) > auto. Auto enables MTP iff the GGUF has a native head and no
-    hard-incompatible flag (--mmproj/--adapter/--stream-cpu/--moe-*) is set; sampler
-    flags the MTP walk can't honor are dropped with a warning at generation (--no-mtp
-    honors them via plain decoding), not deferred. The note is empty when the user
-    was explicit."""
+    Precedence: --no-speculative/--no-mtp (off) > --native-mtp (the head; drops a
+    configured draft_gguf) > explicit --speculative/--mtp or --draft-gguf (on) >
+    auto. Auto enables MTP iff the GGUF has a native head and no hard-incompatible
+    flag (--mmproj/--adapter/--stream-cpu/--moe-*) is set; sampler flags the MTP
+    walk can't honor are dropped with a warning at generation (--no-mtp honors
+    them via plain decoding), not deferred. The note is empty when the user was
+    explicit."""
     if getattr(args, "no_speculative", False):
         return False, ""
+    if getattr(args, "native_mtp", False):
+        apply_native_mtp(args, gguf_path)
+        return True, ""
     spec = getattr(args, "speculative", None)
     if spec or getattr(args, "draft_gguf", None):
         return True, ""
@@ -689,10 +700,42 @@ def resolve_speculative(args, gguf_path: str) -> tuple[bool, str]:
             f"({os.path.basename(companion)}) -> speculative decoding on "
             "(--no-mtp to disable)"
         )
-    return True, (
-        "[mtp] native MTP head detected -> speculative decoding on "
-        "(--no-mtp to disable)"
-    )
+    note = ("[mtp] native MTP head detected -> speculative decoding on "
+            "(--no-mtp to disable)")
+    sibling = _sibling_drafter(gguf_path)
+    if sibling:
+        note += (f"; sibling drafter {os.path.basename(sibling)} found, pass "
+                 "--draft-gguf to use it")
+    return True, note
+
+
+def apply_native_mtp(args, gguf_path: str) -> None:
+    """``--native-mtp``: the head drafts; a configured companion is dropped.
+    Exits when the GGUF carries no head, rather than decoding plain."""
+    if not _has_native_mtp_head(gguf_path):
+        print(f"error: --native-mtp: no native MTP head (nextn) in {gguf_path}",
+              file=sys.stderr)
+        raise SystemExit(2)
+    if getattr(args, "draft_gguf", None):
+        print(f"[mtp] --native-mtp: using the head; companion drafter "
+              f"{os.path.basename(args.draft_gguf)} not loaded")
+        args.draft_gguf = None
+    args.speculative = True
+
+
+def _sibling_drafter(gguf_path: str) -> str | None:
+    """A same-directory companion drafter for a native-head target that the
+    user did not configure (auto stays on the head). Header-cache peeks."""
+    try:
+        from . import arch_table, config_synth
+        from .discovery import find_mtp_companion, header_meta
+
+        meta = header_meta(gguf_path)
+        mt = config_synth.GGUF_ARCH_TO_MODEL_TYPE.get((meta or {}).get("arch") or "")
+        arches = arch_table.drafter_arches(mt) if mt else ()
+        return find_mtp_companion(gguf_path, arches) if arches else None
+    except Exception:
+        return None
 
 
 def _deepseek4_mtp_companion(gguf_path: str) -> str | None:
@@ -724,6 +767,9 @@ def _vlm_mtp_drafter_available(args) -> bool:
     the on/off toggle matter."""
     if getattr(args, "no_speculative", False):
         return False
+    if getattr(args, "native_mtp", False):
+        apply_native_mtp(args, args.gguf)
+        return True
     if getattr(args, "speculative", None) is False:
         return False  # explicit config opt-out
     if getattr(args, "draft_gguf", None):
@@ -1156,6 +1202,8 @@ def _run_bench_depths(args) -> int:
     decode_tokens = args.bench_decode_tokens or 128
     # bool(): --speculative defaults to the auto sentinel None, which would
     # otherwise render as "speculative=None" in the banner below.
+    if getattr(args, "native_mtp", False) and not args.no_speculative:
+        apply_native_mtp(args, args.gguf)
     speculative = bool(args.speculative) and not args.no_speculative
 
     from . import loadlog

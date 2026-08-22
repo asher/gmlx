@@ -651,9 +651,25 @@ def test_env_for_load_params():
     env = cfgmod.env_for(r)
     assert env == {"KV_BITS": "8", "KV_GROUP_SIZE": "64", "MAX_KV_SIZE": "4096",
                    "MLX_VLM_GGUF_SPECULATIVE": "0",
+                   # always emitted; "" = the GGUF's own head
+                   "MLX_VLM_GGUF_DRAFT": "",
                    # always emitted; "" = no per-model cap, use the family
                    # default (see test_env_for_always_emits_width_cap)
                    "MLX_VLM_GGUF_SPEC_WIDTH_CAP": ""}
+
+
+def test_env_for_emits_the_per_id_drafter():
+    """Two ids on one GGUF may differ in drafter (companion vs native_mtp);
+    the path registry keeps only the last one, so the window carries it."""
+    def env_draft(draft):
+        r = cfgmod.ResolvedModel(
+            id="x", path="/p", sampling={}, load={}, cache={}, system=None,
+            speculative=True, mmproj=None, draft_gguf=draft, pin=False,
+            ttl_s=None)
+        return cfgmod.env_for(r)["MLX_VLM_GGUF_DRAFT"]
+
+    assert env_draft("/m/draft.gguf") == "/m/draft.gguf"
+    assert env_draft(None) == ""
 
 
 # server.dtype - the activation-dtype knob, server-wide by design
