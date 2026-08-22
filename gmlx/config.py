@@ -123,7 +123,7 @@ _OVERRIDE_KEYS = frozenset({"sampling", "load", "cache", "system",
                             "chat_template", "chat_template_kwargs",
                             "thinking", "reasoning_effort"})
 _MODEL_KEYS = frozenset({"path", "profile", "family", "profiles", "mmproj",
-                         "draft_gguf", "adapter", "stream",
+                         "draft_gguf", "native_mtp", "adapter", "stream",
                          "cpu_moe",  # deprecated alias for `stream:`
                          "moe_experts", "moe_expert_mass",
                          "moe_miss_shed", "moe_layer_shed", "moe_prestage",
@@ -228,6 +228,9 @@ class ModelCfg:
     profiles: dict = field(default_factory=dict)
     mmproj: str | None = None
     draft_gguf: str | None = None
+    # Draft with the GGUF's own MTP head even when draft_gguf is set (an
+    # external drafter otherwise wins).
+    native_mtp: bool = False
     adapter: str | None = None          # GGUF LoRA adapter applied live at load
     # Execution placement (normalized by _normalize_stream): "experts" streams
     # only the routed-expert stacks from disk (every-token layers + KV cache
@@ -917,10 +920,11 @@ def resolve_model(
         chat_template_kwargs=chat_template_kwargs,
         thinking=thinking,
         reasoning_effort=reasoning_effort,
-        speculative=bool(model.speculative or model.draft_gguf),
+        speculative=bool(model.speculative or model.draft_gguf or model.native_mtp),
         speculative_width_cap=model.speculative_width_cap,
         mmproj=resolve_path(model.mmproj, cfg.model_dirs),
-        draft_gguf=resolve_path(model.draft_gguf, cfg.model_dirs),
+        draft_gguf=(None if model.native_mtp
+                    else resolve_path(model.draft_gguf, cfg.model_dirs)),
         adapter=resolve_path(model.adapter, cfg.model_dirs),
         stream=model.stream or None,
         moe_experts=model.moe_experts,
@@ -1415,6 +1419,7 @@ def _parse_model(model_id: str, raw: dict) -> ModelCfg:
         profiles=norm_tweaks,
         mmproj=raw.get("mmproj"),
         draft_gguf=raw.get("draft_gguf"),
+        native_mtp=bool(raw.get("native_mtp", False)),
         adapter=raw.get("adapter"),
         stream=_normalize_stream(raw.get("stream"), f"model {model_id!r}",
                                  legacy=raw.get("cpu_moe")),
