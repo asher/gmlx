@@ -29,6 +29,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `--stochastic-mtp` with a block drafter (Muse Glimmer DFlash) stashed one
   proposal row per block and misaligned the walk; block drafters now record
   every draft row.
+- serve: two model ids over one GGUF that differ in drafter (a companion
+  `draft_gguf` and a `native_mtp: true` sibling) both loaded whichever was
+  registered last; each build now carries its own drafter.
 
 - Sibling requests that arrive together no longer each prefill the shared
   prefix cold: the server admits the first one, waits for its stores, and

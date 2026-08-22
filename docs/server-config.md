@@ -593,7 +593,8 @@ models:
     path: google_gemma-4-31B-it-Q6_K_L.gguf
     draft_gguf: gemma-4-31B-it-assistant.Q8_0.gguf       # implies speculative
     native_mtp: false                # true: the GGUF's own MTP head drafts even
-                                     #   with draft_gguf set (a companion otherwise wins)
+                                     #   with draft_gguf set (a companion otherwise wins);
+                                     #   a sibling id over the same GGUF may choose differently
     speculative_width_cap: null      # speculate only up to this many live streams
                                      #   (null => the drafter family default;
                                      #    0 => uncapped; see below)
