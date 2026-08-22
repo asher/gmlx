@@ -458,7 +458,10 @@ class GmlxAPCManager(_apc.APCManager):
             return new_blocks
 
 
-_POOL_BUDGET_FRACTION = 0.2
+# The pool is the cheapest use of free RAM (recompute avoided) and it
+# self-registers with the governor as evictable, so it can take a large
+# share: pressure reclaims it before any request is shed.
+_POOL_BUDGET_FRACTION = 0.5
 _EXACT_BUDGET_FRACTION = 0.15
 _BLOCK_SIZES = (16, 32, 64, 128, 256)
 

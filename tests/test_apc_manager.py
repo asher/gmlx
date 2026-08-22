@@ -180,7 +180,7 @@ def test_autosize_extends_pool_to_budget_share(monkeypatch):
     m = GmlxAPCManager(num_blocks=2048, block_size=16)
     m.autosize(_fake_model())
     per_tok = 10 * 2 * 4 * 64 * 2.0  # layers x 2KV x kv_heads x hd x fp16
-    want = min(int(100 * GB * 0.2 // (16 * per_tok)),
+    want = min(int(100 * GB * 0.5 // (16 * per_tok)),
                450000 // (2 * 10))
     assert m.num_blocks == want > 2048
     assert len(m.pool) == want
@@ -216,8 +216,8 @@ def test_auto_block_size_covers_budget(monkeypatch, tmp_path):
     monkeypatch.delenv("APC_BLOCK_SIZE", raising=False)
     monkeypatch.delenv("APC_MAX_POOL_TENSORS", raising=False)
     bs = am._auto_block_size(str(f))
-    # budget tokens ~ (114e9 * 0.2) / 90e3 = 253k; need = 96*253k/450k = 54
-    assert bs == 64
+    # budget tokens ~ (114e9 * 0.5) / 90e3 = 633k; need = 96*633k/450k = 135
+    assert bs == 256
     # tiny model: 16 suffices, keep stock default
     monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 8e9)
     assert am._auto_block_size(str(f)) is None
