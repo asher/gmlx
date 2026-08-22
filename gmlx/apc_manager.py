@@ -81,7 +81,7 @@ class GmlxAPCManager(_apc.APCManager):
     override defers to the stock store instead.
     """
 
-    def autosize(self, model, budget_fraction: float = 0.2) -> None:
+    def autosize(self, model, budget_fraction: float = None) -> None:
         """Raise the pool cap to a working-budget share when
         APC_NUM_BLOCKS is unset. Blocks allocate lazily, so the cap
         costs nothing until committed; the budget bound keeps a full
@@ -89,6 +89,8 @@ class GmlxAPCManager(_apc.APCManager):
         the cap never shrinks (committed blocks would dangle)."""
         if model is None or os.environ.get("APC_NUM_BLOCKS"):
             return
+        if budget_fraction is None:
+            budget_fraction = _POOL_BUDGET_FRACTION
         import mlx.core as mx
 
         from .capacity import working_budget_bytes
@@ -413,6 +415,46 @@ class GmlxAPCManager(_apc.APCManager):
             return new_blocks
 
 
+_POOL_BUDGET_FRACTION = 0.2
+_BLOCK_SIZES = (16, 32, 64, 128, 256)
+
+
+def _auto_block_size(model_path):
+    """Smallest block size whose tensor-capped pool covers the byte
+    budget autosize will ask for. Committed blocks cost K+V arrays per
+    layer, so at block_size 16 the Metal resource limit (proxied by
+    APC_MAX_POOL_TENSORS) binds far below the byte budget on deep
+    workloads. None keeps the stock default (non-GGUF path, unreadable
+    header, or 16 already suffices)."""
+    if not model_path:
+        return None
+    try:
+        from .capacity import working_budget_bytes
+        from .tool_preflight import _kv_costs, _shards, _synth_config
+
+        shards = _shards(str(model_path))
+        cfg = _synth_config(shards[0])
+        costs = _kv_costs(cfg) if cfg else None
+        budget = working_budget_bytes()
+        if not (costs and budget):
+            return None
+        per_tok = sum(bpt for _w, bpt in costs)
+        if per_tok <= 0:
+            return None
+        weights = float(sum(os.path.getsize(p) for p in shards))
+        budget_tokens = (max(0.0, budget - weights)
+                         * _POOL_BUDGET_FRACTION / per_tok)
+        max_tensors = int(os.environ.get("APC_MAX_POOL_TENSORS", "450000"))
+        need = 2 * len(costs) * budget_tokens / max(1, max_tensors)
+        for bs in _BLOCK_SIZES:
+            if bs >= need:
+                return bs if bs > _apc.DEFAULT_BLOCK_SIZE else None
+        return _BLOCK_SIZES[-1]
+    except Exception:
+        _log.debug("APC block-size derivation skipped", exc_info=True)
+        return None
+
+
 def build_apc_manager(model_namespace=None):
     """Build the gmlx APC manager from the env vars ``from_env`` reads.
 
@@ -426,7 +468,10 @@ def build_apc_manager(model_namespace=None):
     """
     if os.environ.get("GMLX_APC_ENABLED") != "1":
         return None
-    block_size = int(os.environ.get("APC_BLOCK_SIZE", _apc.DEFAULT_BLOCK_SIZE))
+    env_bs = os.environ.get("APC_BLOCK_SIZE")
+    block_size = (int(env_bs) if env_bs else
+                  _auto_block_size(model_namespace)
+                  or _apc.DEFAULT_BLOCK_SIZE)
     num_blocks = int(os.environ.get("APC_NUM_BLOCKS", _apc.DEFAULT_NUM_BLOCKS))
 
     disk = None

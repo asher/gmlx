@@ -199,3 +199,28 @@ def test_autosize_env_and_floor_win(monkeypatch):
     assert m.num_blocks == 2048  # never shrinks
     m.autosize(None)
     assert m.num_blocks == 2048
+
+
+def test_auto_block_size_covers_budget(monkeypatch, tmp_path):
+    from gmlx import apc_manager as am
+    from gmlx import capacity, tool_preflight as tp
+
+    f = tmp_path / "m.gguf"
+    f.write_bytes(b"\0" * 1024)
+    monkeypatch.setattr(tp, "_shards", lambda p: [str(f)])
+    monkeypatch.setattr(tp, "_synth_config", lambda p: {"ok": True})
+    layers = 48
+    monkeypatch.setattr(tp, "_kv_costs",
+                        lambda cfg: [(None, 90e3 / layers)] * layers)
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 114e9)
+    monkeypatch.delenv("APC_BLOCK_SIZE", raising=False)
+    monkeypatch.delenv("APC_MAX_POOL_TENSORS", raising=False)
+    bs = am._auto_block_size(str(f))
+    # budget tokens ~ (114e9 * 0.2) / 90e3 = 253k; need = 96*253k/450k = 54
+    assert bs == 64
+    # tiny model: 16 suffices, keep stock default
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 8e9)
+    assert am._auto_block_size(str(f)) is None
+    # non-derivable header keeps default
+    monkeypatch.setattr(tp, "_synth_config", lambda p: None)
+    assert am._auto_block_size(str(f)) is None
