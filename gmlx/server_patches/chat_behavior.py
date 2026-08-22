@@ -343,10 +343,10 @@ def install_stream_thinking_seed() -> None:
         original_feed = cls.feed
         delta_cls = rs.ThinkingStreamDelta
 
-        def feed(self, text):
+        def feed(self, text, **kw):
             filt = getattr(self, "_kq_harmony", None)
             if filt is None:
-                return original_feed(self, text)
+                return original_feed(self, text, **kw)
             spans = filt.feed(text or "")
             reasoning = "".join(t for t, m in spans if m == "reason")
             content = "".join(t for t, m in spans if m == "answer")
@@ -385,7 +385,8 @@ def install_stream_thinking_seed() -> None:
     split = getattr(app, "_split_thinking_text", None)
     if split is not None and not getattr(split, _STREAM_SEED_FLAG, False):
         def _split_thinking_text(text, thinking_start_token=None,
-                                 thinking_end_token=None):
+                                 thinking_end_token=None,
+                                 starts_in_thinking=False, processor=None):
             rendered = _LAST_RENDERED_PROMPT.get()
             in_header = bool(rendered) and rendered.rstrip().endswith(
                 "<|start|>assistant")
@@ -405,10 +406,11 @@ def install_stream_thinking_seed() -> None:
             # splitter's .strip() eats first-line code indent.
             reasoning, content = _split_thinking_keep_indent(
                 rs, cls, text, thinking_start_token, thinking_end_token)
-            if reasoning is None and content and retire_key.truncated_thinking(
-                    text, cls._build_open_close_markers(
-                        thinking_start_token, thinking_end_token),
-                    _LAST_RENDERED_PROMPT.get()):
+            if reasoning is None and content and (
+                    starts_in_thinking or retire_key.truncated_thinking(
+                        text, cls._build_open_close_markers(
+                            thinking_start_token, thinking_end_token),
+                        _LAST_RENDERED_PROMPT.get())):
                 return content, ""
             if thinking_start_token == _XTML_THINK_OPEN and content:
                 content = _strip_xtml_sections(content)
@@ -637,6 +639,22 @@ def install_openai_stop_sequences() -> None:
 
     _wrap_post_routes(app, _CHAT_PATHS, _STOP_FLAG, _make)
 
+    # Anthropic dialect: upstream cuts at the stop sequence verbatim, but the
+    # Messages API trims the whitespace run preceding a stop hit. Wrap the
+    # module helper so a cut also rstrips; no-hit text passes through.
+    an = importlib.import_module("mlx_vlm.server.anthropic")
+    stock_apply = getattr(an, "_apply_stop_sequences", None)
+    if stock_apply is not None and not getattr(
+            stock_apply, _STOP_FLAG, False):
+        def _apply_stop_sequences(text, stop_sequences):
+            out, seq = stock_apply(text, stop_sequences)
+            if seq is not None:
+                out = out.rstrip()
+            return out, seq
+
+        _apply_stop_sequences.__dict__[_STOP_FLAG] = True
+        an._apply_stop_sequences = _apply_stop_sequences
+
 
 def install_vanilla_stream_chunks() -> None:
     """Serialize streaming chat-completion chunks as byte-vanilla OpenAI.
@@ -668,6 +686,25 @@ def install_vanilla_stream_chunks() -> None:
 
     model_dump_json.__dict__[_PATCH_FLAG] = True
     chunk_cls.model_dump_json = model_dump_json
+
+    # Non-stream twin (mlx-vlm >= 0.6.15): GenerationTimings grew optional
+    # draft_* fields, so the ChatResponse body carries timings nulls unless
+    # they are stripped. Scoped to timings: choices[].logprobs stays null
+    # per the OpenAI wire.
+    resp_cls = getattr(schemas, "ChatResponse", None)
+    if resp_cls is not None and not getattr(
+            resp_cls.model_dump, _PATCH_FLAG, False):
+        original_dump = resp_cls.model_dump
+
+        def model_dump(self, **kwargs):
+            d = original_dump(self, **kwargs)
+            t = d.get("timings")
+            if isinstance(t, dict):
+                d["timings"] = {k: v for k, v in t.items() if v is not None}
+            return d
+
+        model_dump.__dict__[_PATCH_FLAG] = True
+        resp_cls.model_dump = model_dump
 
 
 # Per-chunk stream timings

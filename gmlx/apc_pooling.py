@@ -262,6 +262,27 @@ def install_pooling_apc_support() -> None:
     apc._safetensors_dtype_info = dtype_info
     disk_cls._snapshot_exact_cache_entry = snap_entry
     disk_cls._load_exact_cache_entry = load_entry
+
+    # mlx-vlm >= 0.6.15 dispatches recursive clone/merge through the
+    # apc_adapters registry, bypassing the module functions patched above,
+    # so PoolingCache needs a registry rule as well.
+    try:
+        adapters = importlib.import_module("mlx_vlm.apc_adapters")
+    except ModuleNotFoundError:
+        adapters = None
+    if adapters is not None:
+        class _PoolingCloneAdapter:
+            def clone(self, c, *, min_capacity_tokens, eval_targets):
+                return clone_entry(c, min_capacity_tokens=min_capacity_tokens,
+                                   eval_targets=eval_targets)
+
+            def merge_rows(self, caches, prefix_lens):
+                return BatchPoolingCache.merge(caches)
+
+        rules = adapters._clone_rules()
+        if not any(t is PoolingCache for t, _ in rules):
+            rules.insert(0, (PoolingCache, _PoolingCloneAdapter()))
+
     apc._kq_pooling_apc = True
 
 

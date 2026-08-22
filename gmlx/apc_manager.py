@@ -427,8 +427,7 @@ class GmlxAPCManager(_apc.APCManager):
                 b.parent_hash = parent
                 b.token_ids = chunk
                 b.extra_hash = extra_hash
-                b.keys = k_slabs
-                b.values = v_slabs
+                b.set_kv(k_slabs, v_slabs)
                 b.ref_cnt = 1
                 self.hash_table[h2] = b
                 new_blocks.append(b)

@@ -205,7 +205,7 @@ def test_predict_render_gets_generation_prompt_off():
 def test_block_store_truncates_ids(monkeypatch):
     seen = {}
 
-    def harvest(manager, cache, row, ids, extra_hash=0):
+    def harvest(manager, cache, ids, batch_idx=None, extra_hash=0):
         seen["ids"] = list(ids)
         return ["b"]
 

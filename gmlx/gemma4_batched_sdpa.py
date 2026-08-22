@@ -10,7 +10,7 @@ routes -- the extra launches hide in in-encoder concurrency.
 
 Gemma-4 text attention lives in two upstream modules, one per load path:
 text-only GGUFs build from mlx_lm.models.gemma4_text (wrapped in
-mlx_vlm.models.text_only), multimodal loads from mlx_vlm.models.gemma4's
+gmlx.vlm_text_only), multimodal loads from mlx_vlm.models.gemma4's
 language module. Both import a module-level scaled_dot_product_attention and
 call it with the cache in hand -- the only seam where left padding is
 visible -- so the route installs on both, each chained to that module's own

@@ -56,8 +56,16 @@ def test_gen_args_allowlist_matches_upstream_source():
     """Every field _build_gen_args / the structured-output extractor reads is
     in _GEN_ARGS_CONSUMED - and nothing more. An upstream mlx-vlm bump that
     adds or drops a gen-arg field must fail here."""
+    # 0.6.15 moved the real body to request_normalization; app._build_gen_args
+    # is a delegator, so scrape both.
+    import mlx_vlm.server.request_normalization as _rn
     scraped = _scrape_request_reads(
-        _APP._build_gen_args, _APP._extract_response_format_schema)
+        _APP._build_gen_args, _rn._build_gen_args,
+        _rn._standard_reasoning_control,
+        _rn._extract_response_format_schema)
+    # _request_field_is_set reads without getattr; assert the two standard
+    # reasoning fields it consumes explicitly.
+    scraped |= {"reasoning", "reasoning_effort"}
     # enable_thinking rides through _request_field_or_default with the name
     # built at the call site; assert it separately if the regex misses it.
     scraped.add("enable_thinking")

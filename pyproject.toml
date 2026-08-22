@@ -41,25 +41,29 @@ dependencies = [
     # gmlx/upstream_seams.py); point releases move them (0.6.4 vendored
     # switch_layers and rewrote the cache module - see
     # gmlx/cache_compat.py for the dual-origin cache-class rules).
-    "mlx-vlm==0.6.4",
+    # 0.6.15 requires mlx>=0.32.0; mlx-kquant must be a build carrying the
+    # matching mlx pin (PyPI 0.3.13 still pins mlx==0.31.2 - a source build
+    # from main tip 827bfa5 or a later PyPI release is required).
+    "mlx-vlm==0.6.15",
     # Encoder embedders (the EmbeddingGemma GGUF path + the safetensors BERT /
     # ModernBERT / XLM-RoBERTa `/v1/embeddings` backends) build from mlx-embeddings
     # model classes. Lazy-imported only when an encoder embedder loads (no CLI
     # startup cost); every transitive dep is already pulled by mlx-vlm/transformers.
     "mlx-embeddings",
     # >=4.52: vlm.py imports transformers.BaseVideoProcessor at module top
-    # (mlx-vlm itself pins transformers>=5.5.0, so the resolved floor is higher).
-    # <5.13: transformers 5.13 AutoTokenizer.register() requires a config
-    # class, and mlx-lm (<=0.31.3) registers its NewlineTokenizer by string
-    # name -- `import mlx_lm` crashes. Lift once mlx-lm ships the fix.
-    "transformers>=4.52,<5.13",
+    # (mlx-vlm itself pins transformers>=5.5.0, so the resolved floor is
+    # higher). The old <5.13 ceiling (AutoTokenizer.register() vs mlx-lm's
+    # NewlineTokenizer) no longer reproduces on 5.15.1.
+    "transformers>=4.52",
     "tokenizers",
     "gguf",
     # comment-preserving YAML round-trip for `gmlx sync-models`.
     "ruamel.yaml",
     # config.py loads model/profile YAML with PyYAML at module top.
     "pyyaml",
-    "fastapi",
+    # gmlx route surgery (server_patches._common) edits app.router.routes
+    # directly; fastapi 0.141 moved included-router internals.
+    "fastapi>=0.95.1,<0.141",
     "uvicorn",
     # `gmlx menubar`: a macOS status-bar monitor for a backgrounded server.
     "rumps>=0.4,<0.5; sys_platform == 'darwin'",

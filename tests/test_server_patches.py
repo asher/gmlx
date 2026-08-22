@@ -820,7 +820,8 @@ def test_stream_chunk_keeps_real_usage_and_timings():
     ``choices: []``) are real values, not ``None`` - they must be preserved."""
     Chunk, _, _, Usage, Timings = _stream_schemas()
     sp.install_vanilla_stream_chunks()
-    timings = Timings(**{f: 0.0 for f in Timings.model_fields})
+    timings = Timings(**{f: 0.0 for f, info in Timings.model_fields.items()
+                         if info.is_required()})
     out = Chunk(model="m", choices=[],
                 usage=Usage(prompt_tokens=3, completion_tokens=2, total_tokens=5),
                 timings=timings).model_dump_json()

@@ -530,7 +530,9 @@ def vendored_upstream_collisions() -> list[str]:
 # Each is a package directory upstream, so a native arrival shows up as either
 # a <leaf>.py module or a <leaf>/ package.
 VENDORED_MLX_VLM_MODULES = {
-    "gmlx.muse_glimmer_vlm_model": "mlx_vlm.models.muse_glimmer",
+    # muse_glimmer model: shipped upstream in mlx-vlm 0.6.15; the graft is
+    # upstream-first so gmlx.muse_glimmer_vlm_model is dead code under this
+    # pin. Delete the module at the vendoring review.
     "gmlx.hy_v3_tools": "mlx_vlm.tool_parsers.hy_v3",
     "gmlx.muse_glimmer_tools": "mlx_vlm.tool_parsers.muse_glimmer",
 }
