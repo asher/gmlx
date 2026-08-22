@@ -20,7 +20,7 @@ from typing import Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from .gdn_patches import _F16_HEAD_GEMV, _f16_head_gemv
+from .gdn_patches import _F16_HEAD_GEMV, _f16_head_gemv, gpu_active
 
 __all__ = ["verify_linear", "verify_linears"]
 
@@ -684,7 +684,10 @@ def verify_linear(linear, x: mx.array, target_verify: bool):
     M-stationary GEMV-ext claims verify-shaped non-quantized linears
     first (same condition as gdn_patches._patch_bf16_verify_linear),
     everything else lands on the verbatim upstream dispatcher above.
+    Both are Metal kernels: the CPU device takes the plain linear.
     """
+    if not gpu_active():
+        return linear(x)
     if (
         _F16_HEAD_GEMV is not None
         and target_verify
