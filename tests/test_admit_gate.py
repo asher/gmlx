@@ -262,6 +262,74 @@ def test_state_cache_is_row_const_not_rate(monkeypatch):
         + sm.admit_reserve_bytes(0), rel=0.05)
 
 
+class FakeRotKV(FakeKV):
+    pass
+
+
+class FakeQuantKV:
+    """Quantized storage: (data, scales, biases) tuples, offset-bearing."""
+
+    def __init__(self, rows=1, length=256, offset=100):
+        self.keys = (mx.zeros((rows, 4, length, 8), dtype=mx.uint32),
+                     mx.zeros((rows, 4, length, 1), dtype=mx.float16),
+                     mx.zeros((rows, 4, length, 1), dtype=mx.float16))
+        self.values = (mx.zeros((rows, 4, length, 8), dtype=mx.uint32),
+                       mx.zeros((rows, 4, length, 1), dtype=mx.float16),
+                       mx.zeros((rows, 4, length, 1), dtype=mx.float16))
+        self.offset = offset
+
+
+def _zoo_gen():
+    g = FakeGen(rows=1)
+    g._generation_batch.prompt_cache = [
+        FakeKV(offset=100),
+        FakeRotKV(offset=100, window=128),
+        FakeQuantKV(offset=100),
+        FakeStateCache(),
+    ]
+    return g
+
+
+def test_cache_zoo_rates_and_consistency(monkeypatch, caplog):
+    import gmlx.prefill_decay as pd
+
+    monkeypatch.setenv("GMLX_ADMIT_RESERVE_GB", "2")
+    g = _zoo_gen()
+    sm.update_kv_rates(g)
+    rates = g._kq_admit_kv_rates
+    assert set(rates) == {"FakeKV", "FakeRotKV", "FakeQuantKV"}
+    assert rates["FakeRotKV"]["window"] == 128
+    assert g._kq_admit_spec_row_const > 0  # state cache landed here
+
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 10e9)
+    with caplog.at_level("WARNING"):
+        out = sm.project_admission(g, [_pending(2, 300, 200)])
+    assert out is not None
+    assert "projection rescaled" not in caplog.text
+
+
+def test_poisoned_rate_is_rescaled(monkeypatch, caplog):
+    import gmlx.prefill_decay as pd
+
+    monkeypatch.setenv("GMLX_ADMIT_RESERVE_GB", "2")
+    g = FakeGen(rows=1)
+    kv = g._generation_batch.prompt_cache[0]
+    honest_per_tok = (kv.keys.nbytes + kv.values.nbytes) / kv.offset
+    # Poison the live kind: the EWMA merge keeps only kinds present in
+    # the fresh walk, so the bad rate must ride an existing kind.
+    g._kq_admit_kv_rates = {"FakeKV": {"rate": 1e9, "window": None}}
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 10e9)
+    with caplog.at_level("WARNING"):
+        projected, head, parts = sm.project_admission(
+            g, [_pending(2, 300, 200)])
+    assert "projection rescaled" in caplog.text
+    honest_kv_new = honest_per_tok * 2 * 512 - (kv.keys.nbytes
+                                                + kv.values.nbytes)
+    assert projected < 10 * (honest_kv_new
+                             + pd.score_transient_bytes(g.model, None, 500)
+                             + sm.admit_reserve_bytes(0))
+
+
 def _spec_gen(rows=1):
     g = FakeGen(rows=rows)
     b = g._generation_batch

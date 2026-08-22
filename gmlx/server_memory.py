@@ -24,9 +24,12 @@ receipts are unchanged by this policy.
 
 from __future__ import annotations
 
+import logging
 import os
 
 from .batch_rows import batch_rows
+
+_log = logging.getLogger(__name__)
 
 GIB = 1 << 30
 _AUTO_PRESSURE = 0.6      # engage when weights > 60% of the working set
@@ -110,6 +113,7 @@ def resolve_cache_limit(cfg_gb, model_paths, ws_bytes) -> tuple[int | None, str]
 
 _KV_EWM_ALPHA = 0.3
 _STEP_BLOCK = 256
+_MODEL_NOW_TOL = 1.5
 
 
 def _round_block(n: float) -> int:
@@ -197,8 +201,13 @@ def spec_state_bytes(gen):
     dcache = getattr(draft, "_cache", None)
     if dcache:
         for c in dcache:
-            for v in vars(c).values():
-                depth_scaled += sum(a.nbytes for a in _arrays(v))
+            nbytes = sum(a.nbytes for v in vars(c).values()
+                         for a in _arrays(v))
+            off = getattr(c, "offset", None)
+            if isinstance(off, int) and off > 0:
+                depth_scaled += nbytes
+            else:
+                row_const += nbytes
     return depth_scaled, row_const
 
 
@@ -317,7 +326,24 @@ def project_admission(gen, candidates):
             depth, _round_block(k["window"]))
         kv_total += k["rate"] * width * capped
     kv_total += getattr(gen, "_kq_admit_spec_row_const", 0.0) * width
-    kv_new = max(0.0, kv_total - getattr(gen, "_kq_admit_live_bytes", 0.0))
+    live_bytes = getattr(gen, "_kq_admit_live_bytes", 0.0)
+    # Self-consistency: the rate model evaluated at the live batch must
+    # reproduce the measured bytes. A model that overstates the present
+    # overstates the future by the same factor; rescale and say so.
+    rows = batch_rows(gen)
+    live_depth = getattr(gen, "_kq_admit_live_depth", 0)
+    model_now = getattr(gen, "_kq_admit_spec_row_const", 0.0) * rows
+    for k in rates.values():
+        capped = live_depth if k["window"] is None else min(
+            live_depth, _round_block(k["window"]))
+        model_now += k["rate"] * rows * capped
+    if live_bytes > 0 and model_now > _MODEL_NOW_TOL * live_bytes:
+        scale = live_bytes / model_now
+        kv_total *= scale
+        _log.warning(
+            "[admit] projection rescaled x%.3f: model %.1f GB vs measured"
+            " %.1f GB", scale, model_now / 1e9, live_bytes / 1e9)
+    kv_new = max(0.0, kv_total - live_bytes)
     transient = score_transient_bytes(
         gen.model, getattr(gen._generation_batch, "prompt_cache", None),
         max(cand_tokens))
