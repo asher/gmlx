@@ -44,7 +44,7 @@ FAMILIES: dict[str, dict] = {
     # so the base omits it; the instruct point carries the shared 1.5.
     # Covers Qwen3.5 (same thinking/coding points) and Qwen3-Next.
     "qwen3.6": {
-        "label": "Qwen3.5 / Qwen3.6",
+        "label": "Qwen3.5 / 3.6 / 3.8",
         "arches": ("qwen35", "qwen35moe", "qwen3next"),
         "base": {"sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 20,
                               "min_p": 0.0}},
