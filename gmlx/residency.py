@@ -699,6 +699,10 @@ class _ResidencyPool:
                 rg = scratch.response_generator
                 if rg is not None:
                     rg.apc_manager = manager
+                try:
+                    manager.autosize(getattr(rg, "model", None))
+                except Exception:
+                    _log.warning("APC pool autosize skipped", exc_info=True)
         except BaseException:
             # A failed build never reaches _teardown: drop its partial
             # registrations here or they tax headroom forever.

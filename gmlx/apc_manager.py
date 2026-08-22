@@ -81,6 +81,48 @@ class GmlxAPCManager(_apc.APCManager):
     override defers to the stock store instead.
     """
 
+    def autosize(self, model, budget_fraction: float = 0.2) -> None:
+        """Raise the pool cap to a working-budget share when
+        APC_NUM_BLOCKS is unset. Blocks allocate lazily, so the cap
+        costs nothing until committed; the budget bound keeps a full
+        pool inside the working set. Explicit APC_NUM_BLOCKS wins and
+        the cap never shrinks (committed blocks would dangle)."""
+        if model is None or os.environ.get("APC_NUM_BLOCKS"):
+            return
+        import mlx.core as mx
+
+        from .capacity import working_budget_bytes
+        from .mem_preflight import kv_layer_costs
+        from .prefill_decay import untracked_weight_bytes
+
+        costs = kv_layer_costs(model)
+        budget = working_budget_bytes()
+        if not costs or not budget:
+            return
+        per_tok = sum(bpt for _w, bpt in costs)
+        if per_tok <= 0:
+            return
+        weights = float(mx.get_active_memory()) + untracked_weight_bytes()
+        target = int(max(0.0, budget - weights) * budget_fraction
+                     // (self.block_size * per_tok))
+        # A committed block holds K+V arrays per layer; the pool competes
+        # with everything else against the Metal resource limit, which is
+        # what APC_MAX_POOL_TENSORS guards.
+        tensors_per_block = 2 * len(costs)
+        max_tensors = int(os.environ.get("APC_MAX_POOL_TENSORS", "450000"))
+        target = min(target, max_tensors // max(1, tensors_per_block))
+        if target <= self.num_blocks:
+            return
+        with self.lock:
+            for i in range(len(self.pool), target):
+                b = _apc.APCBlock(block_id=i)
+                self.pool.append(b)
+                self._free_push(b)
+            self.num_blocks = target
+        _log.info(
+            "APC pool auto-sized: %d blocks (%.1f GB cap, %.1f KB/token)",
+            target, target * self.block_size * per_tok / 1e9, per_tok / 1e3)
+
     def stats_snapshot(self) -> dict:
         """Stock snapshot plus the gmlx ckpt-tier side counters (pure
         wrap: super() + merge). Visible at /v1/cache/stats -- a ckpt

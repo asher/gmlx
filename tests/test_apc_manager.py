@@ -154,3 +154,48 @@ def test_failed_load_drains_the_channel(monkeypatch):
     assert serving.pop_built_apc_manager() is None          # but never leaks
     assert os.environ.get("APC_ENABLED") is None
     assert os.environ.get("GMLX_APC_ENABLED") is None
+
+
+# -- pool autosize --
+
+def _fake_model(layers=10, n_kv=4, head_dim=64):
+    cfg = SimpleNamespace(num_hidden_layers=layers, num_attention_heads=8,
+                          num_key_value_heads=n_kv, head_dim=head_dim)
+    return SimpleNamespace(config=cfg)
+
+
+def _autosize_rig(monkeypatch, budget):
+    import mlx.core as mx
+
+    from gmlx import capacity, prefill_decay
+
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: budget)
+    monkeypatch.setattr(prefill_decay, "untracked_weight_bytes", lambda: 0.0)
+    monkeypatch.setattr(mx, "get_active_memory", lambda: 0)
+
+
+def test_autosize_extends_pool_to_budget_share(monkeypatch):
+    monkeypatch.delenv("APC_NUM_BLOCKS", raising=False)
+    _autosize_rig(monkeypatch, budget=100 * GB)
+    m = GmlxAPCManager(num_blocks=2048, block_size=16)
+    m.autosize(_fake_model())
+    per_tok = 10 * 2 * 4 * 64 * 2.0  # layers x 2KV x kv_heads x hd x fp16
+    want = min(int(100 * GB * 0.2 // (16 * per_tok)),
+               450000 // (2 * 10))
+    assert m.num_blocks == want > 2048
+    assert len(m.pool) == want
+    assert m.pool[-1].block_id == want - 1
+
+
+def test_autosize_env_and_floor_win(monkeypatch):
+    _autosize_rig(monkeypatch, budget=100 * GB)
+    m = GmlxAPCManager(num_blocks=2048, block_size=16)
+    monkeypatch.setenv("APC_NUM_BLOCKS", "2048")
+    m.autosize(_fake_model())
+    assert m.num_blocks == 2048
+    monkeypatch.delenv("APC_NUM_BLOCKS", raising=False)
+    _autosize_rig(monkeypatch, budget=1 * GB)  # target below current cap
+    m.autosize(_fake_model(layers=100))
+    assert m.num_blocks == 2048  # never shrinks
+    m.autosize(None)
+    assert m.num_blocks == 2048
