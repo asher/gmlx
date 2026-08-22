@@ -1023,6 +1023,10 @@ def env_for(resolved: ResolvedModel) -> dict[str, str]:
     # explicit "0" forces a non-speculative load even when a sibling id registered
     # the same GGUF for MTP (the lossless-oracle case: one GGUF, spec-on + spec-off).
     env["MLX_VLM_GGUF_SPECULATIVE"] = "1" if resolved.speculative else "0"
+    # The drafter is per id too: two ids on one GGUF may differ (a companion
+    # drafter vs native_mtp), and the path registry keeps only the last one.
+    # Always emitted; "" means "this id drafts with the GGUF's own head".
+    env["MLX_VLM_GGUF_DRAFT"] = resolved.draft_gguf or ""
     # Same reasoning, same always-emit rule: "" means "this id declares no cap,
     # use the drafter family default". Emitting only when set would let a
     # sibling id's cap linger in the process env and be inherited here.
