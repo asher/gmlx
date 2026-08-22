@@ -158,7 +158,7 @@ def test_verify_returns_the_packed_hidden_with_gdn_states():
 
 
 def test_trunk_slice_recovers_the_unpacked_hidden():
-    lm, cfg = _target(), _tcfg()
+    lm = _target()
     ids = mx.array([[1, 2, 3, 4]])
     bare, _ = _verify(lm, ids, lm.make_cache())
     lm.set_dflash_capture(CAPTURE)

@@ -162,7 +162,8 @@ def main() -> int:
           f"own={path_o.tolist()} ref={path_t[0].tolist()}")
     if not same:
         failures.append("greedy path")
-    c_own = sorted(cands.tolist()[0]); c_ref = sorted(cands_t[0].tolist()[0])
+    c_own = sorted(cands.tolist()[0])
+    c_ref = sorted(cands_t[0].tolist()[0])
     if c_own != c_ref:
         failures.append("candidates")
         print("  candidate sets differ at position 0")
@@ -185,7 +186,8 @@ def main() -> int:
     # the reference's q rows are in its own candidate order; map to ours
     q_ref = []
     for p in range(L):
-        ours = cands[p].tolist(); ref_order = cands_s[0, p].tolist()
+        ours = cands[p].tolist()
+        ref_order = cands_s[0, p].tolist()
         perm = [ref_order.index(t) for t in ours]
         q_ref.append(q_rows[0, p][mx.array(perm)])
     q_ref = mx.stack(q_ref)

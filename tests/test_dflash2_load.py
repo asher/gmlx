@@ -3,7 +3,6 @@ header-to-config builder, companion routing and the width cap. Tiny random
 tensors; the real checkpoints ride the integration tier."""
 
 import dataclasses
-import os
 from types import SimpleNamespace
 
 import mlx.core as mx
