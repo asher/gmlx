@@ -609,10 +609,11 @@ class DFlashDrafter(nn.Module):
         sampler,
         token_dtype: mx.Dtype = mx.int32,
         greedy: bool = False,
+        stash: Optional[DraftStash] = None,
     ) -> None:
         """Seed the ring from the trailing prompt hiddens. DFlash needs no
         draft seed: rounds start from the engine-passed bonus token."""
-        del input_ids, bonus_token, sampler, token_dtype, greedy
+        del input_ids, bonus_token, sampler, token_dtype, greedy, stash
         if int(hidden.shape[1]) == 0:
             return
         limit = self.hidden_capture_limit
@@ -627,12 +628,13 @@ class DFlashDrafter(nn.Module):
         sampler,
         token_dtype: mx.Dtype = mx.int32,
         greedy: bool = False,
+        stash: Optional[DraftStash] = None,
     ) -> None:
         """Inject the committed positions' captures. ``verify_hidden[:, p]`` is
         the target hidden at verify position ``p``; 0..accepted were committed
         (the accepted drafts plus the row the new bonus was sampled from),
         matching the rolled-back target 1:1."""
-        del draft_tokens, new_tokens, sampler, token_dtype, greedy
+        del draft_tokens, new_tokens, sampler, token_dtype, greedy, stash
         self.append_context(self._captures(verify_hidden[:, : int(accepted) + 1]))
 
 
