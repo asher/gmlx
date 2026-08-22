@@ -82,12 +82,14 @@ class GmlxAPCManager(_apc.APCManager):
     """
 
     def autosize(self, model, budget_fraction: float = None) -> None:
-        """Raise the pool cap to a working-budget share when
-        APC_NUM_BLOCKS is unset. Blocks allocate lazily, so the cap
-        costs nothing until committed; the budget bound keeps a full
-        pool inside the working set. Explicit APC_NUM_BLOCKS wins and
-        the cap never shrinks (committed blocks would dangle)."""
-        if model is None or os.environ.get("APC_NUM_BLOCKS"):
+        """Size the caches to the box post-load. Pool: raise the block
+        cap to a working-budget share when APC_NUM_BLOCKS is unset
+        (blocks allocate lazily, so the cap costs nothing until
+        committed; never shrinks, committed blocks would dangle).
+        Exact tier: when APC_EXACT_CACHE_ENTRIES is unset, replace the
+        2-entry count cap with a byte budget (entries are full KV
+        snapshots; counting them says nothing about their cost)."""
+        if model is None:
             return
         if budget_fraction is None:
             budget_fraction = _POOL_BUDGET_FRACTION
@@ -105,7 +107,15 @@ class GmlxAPCManager(_apc.APCManager):
         if per_tok <= 0:
             return
         weights = float(mx.get_active_memory()) + untracked_weight_bytes()
-        target = int(max(0.0, budget - weights) * budget_fraction
+        free = max(0.0, budget - weights)
+        if not os.environ.get("APC_EXACT_CACHE_ENTRIES"):
+            self._exact_budget_bytes = free * _EXACT_BUDGET_FRACTION
+            self._exact_cache_max = 64
+            _log.info("APC exact tier budget: %.1f GB (count cap 64)",
+                      self._exact_budget_bytes / 1e9)
+        if os.environ.get("APC_NUM_BLOCKS"):
+            return
+        target = int(free * budget_fraction
                      // (self.block_size * per_tok))
         # A committed block holds K+V arrays per layer; the pool competes
         # with everything else against the Metal resource limit, which is
@@ -124,6 +134,39 @@ class GmlxAPCManager(_apc.APCManager):
         _log.info(
             "APC pool auto-sized: %d blocks (%.1f GB cap, %.1f KB/token)",
             target, target * self.block_size * per_tok / 1e9, per_tok / 1e3)
+
+    def _trim_exact_to_budget(self) -> None:
+        """Evict oldest exact entries until their bytes fit the budget
+        autosize stashed. No-op without a budget (explicit
+        APC_EXACT_CACHE_ENTRIES keeps stock count semantics)."""
+        budget = getattr(self, "_exact_budget_bytes", None)
+        if not budget:
+            return
+        from .serve_memtrace import _arrays
+
+        def entry_bytes(e):
+            total = 0
+            for c in e.prompt_cache:
+                for v in vars(c).values():
+                    for a in _arrays(v):
+                        total += a.nbytes
+            return total
+
+        with self.lock:
+            sizes = {k: entry_bytes(e) for k, e in self._exact_cache.items()}
+            total = sum(sizes.values())
+            while total > budget and len(self._exact_cache) > 1:
+                k, _ = self._exact_cache.popitem(last=False)
+                total -= sizes.pop(k, 0)
+
+    def lookup_exact_cache(self, *args, **kwargs):
+        self._trim_exact_to_budget()
+        return super().lookup_exact_cache(*args, **kwargs)
+
+    def store_exact_cache(self, *args, **kwargs):
+        out = super().store_exact_cache(*args, **kwargs)
+        self._trim_exact_to_budget()
+        return out
 
     def stats_snapshot(self) -> dict:
         """Stock snapshot plus the gmlx ckpt-tier side counters (pure
@@ -416,6 +459,7 @@ class GmlxAPCManager(_apc.APCManager):
 
 
 _POOL_BUDGET_FRACTION = 0.2
+_EXACT_BUDGET_FRACTION = 0.15
 _BLOCK_SIZES = (16, 32, 64, 128, 256)
 
 

@@ -224,3 +224,38 @@ def test_auto_block_size_covers_budget(monkeypatch, tmp_path):
     # non-derivable header keeps default
     monkeypatch.setattr(tp, "_synth_config", lambda p: None)
     assert am._auto_block_size(str(f)) is None
+
+
+def test_exact_tier_byte_budget(monkeypatch):
+    import mlx.core as mx
+
+    from mlx_vlm.apc import APCExactCacheEntry
+
+    from gmlx import capacity, prefill_decay
+
+    monkeypatch.delenv("APC_EXACT_CACHE_ENTRIES", raising=False)
+    monkeypatch.delenv("APC_NUM_BLOCKS", raising=False)
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 100 * GB)
+    monkeypatch.setattr(prefill_decay, "untracked_weight_bytes", lambda: 0.0)
+    monkeypatch.setattr(mx, "get_active_memory", lambda: 0)
+    m = GmlxAPCManager(num_blocks=8, block_size=16)
+    m.autosize(_fake_model())
+    assert m._exact_cache_max == 64
+
+    class FakeKVClone:
+        def __init__(self):
+            self.keys = mx.zeros((1, 4, 256, 64), dtype=mx.float16)
+
+    m._exact_budget_bytes = 3 * FakeKVClone().keys.nbytes  # fits 3 entries
+    for i in range(5):
+        m._exact_cache[i] = APCExactCacheEntry(
+            token_ids=(i,), extra_hash=0,
+            prompt_cache=[FakeKVClone()], last_used=float(i))
+    m._trim_exact_to_budget()
+    assert set(m._exact_cache) == {2, 3, 4}  # oldest two evicted
+
+    # explicit env keeps stock count semantics: no budget stashed
+    m2 = GmlxAPCManager(num_blocks=8, block_size=16)
+    monkeypatch.setenv("APC_EXACT_CACHE_ENTRIES", "2")
+    m2.autosize(_fake_model())
+    assert getattr(m2, "_exact_budget_bytes", None) is None
