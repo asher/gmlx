@@ -27,7 +27,12 @@ from mlx_vlm.models.rope_utils import (  # sectioned-style branches only
     _section_cos_sin,
 )
 
-__all__ = ["rope_cos_sin", "rope_apply_rotary", "apply_multimodal_rotary_pos_emb"]
+__all__ = [
+    "rope_cos_sin",
+    "rope_apply_rotary",
+    "fused_rope_active",
+    "apply_multimodal_rotary_pos_emb",
+]
 
 
 # --- verbatim upstream copies (rope_utils.py) ---
@@ -502,6 +507,12 @@ def rope_cos_sin(rotary_emb, x, position_ids):
     return cos, sin
 
 
+def fused_rope_active(rotary_emb) -> bool:
+    """The fused apply is a Metal kernel; it runs only while the default
+    device is the GPU. A CPU default device takes the cos/sin route."""
+    return bool(rotary_emb.fused_apply) and mx.default_device() == mx.gpu
+
+
 def rope_apply_rotary(
     rotary_emb,
     q,
@@ -516,7 +527,7 @@ def rope_apply_rotary(
     on the instance under an owned attr so a stock-compiled entry can
     never masquerade as the owned path."""
     if (
-        rotary_emb.fused_apply
+        fused_rope_active(rotary_emb)
         and unsqueeze_dim == 1
         and position_ids.ndim in (2, 3)
         and q.ndim == 4
