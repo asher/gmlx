@@ -89,6 +89,12 @@ _MTP_WIDTH_CAP_FALLBACK = 2
 # tile holds 16 rows in one MMA row-tile). Row 17 starts a second row-tile and
 # costs ~55% more.
 _MUSE_GLIMMER_DFLASH_BLOCK_DEFAULT = 16
+# Drafted depth per round by dflash container. None drafts the GGUF's trained
+# block (DFlash2: Qwen3.8 8, Muse 16); --draft-block-size moves it below that.
+_DFLASH_BLOCK_DEFAULT = {
+    "muse_glimmer": _MUSE_GLIMMER_DFLASH_BLOCK_DEFAULT,
+    "dflash2": None,
+}
 
 
 def _drafter_block_depths(native_total, preferred_total=None) -> tuple[int, int]:
@@ -103,20 +109,26 @@ def _drafter_block_depths(native_total, preferred_total=None) -> tuple[int, int]
 
 
 def _stamp_mtp_width_cap(drafter, model_type: str, *, target=None,
+                         hard_limit: int | None = None,
                          log=loadlog.verbose_print):
     """Stamp mtp_width_cap / mtp_width_limit for the runtime gate.
 
     Call on the raw drafter BEFORE any DrafterAdapter wrap: the adapter
     forwards attribute reads but a setattr would land on the wrapper.
     A routed-expert ``target`` caps at 1 whatever its family default says.
+    ``hard_limit`` is a drafter-imposed ceiling (the B=1-only DFlash
+    drafters) that replaces the family's table row.
     MLX_VLM_GGUF_SPEC_WIDTH_CAP (per-model config, load-window env) overrides
-    both and is itself clamped by the family's hard limit.
+    both and is itself clamped by the hard limit.
     """
-    limit = _MTP_WIDTH_LIMIT_BY_MODEL_TYPE.get(model_type, 0)
+    if hard_limit is not None:
+        limit = int(hard_limit)
+    else:
+        limit = _MTP_WIDTH_LIMIT_BY_MODEL_TYPE.get(model_type, 0)
     cap = _MTP_WIDTH_CAP_BY_MODEL_TYPE.get(model_type)
     if cap is None:
         cap = limit if limit >= 1 else _MTP_WIDTH_CAP_FALLBACK
-        if model_type not in _MTP_WIDTH_LIMIT_BY_MODEL_TYPE:
+        if hard_limit is None and model_type not in _MTP_WIDTH_LIMIT_BY_MODEL_TYPE:
             log(f"[mtp] width cap: model_type {model_type!r} unmapped, "
                 f"defaulting to {cap} (uncapped is measurement-earned)")
     # MoE verify multiplies the expert union each drafted position touches, and
@@ -671,26 +683,30 @@ def _dflash_rename(name: str, last_stage: int) -> str:
 def dflash_container(arrays: dict) -> str:
     """Which drafter a llama.cpp ``dflash`` GGUF actually holds.
 
-    The arch tag is shared: llama.cpp packages both the DeepSeek-V4 DSpark
-    drafter and the Muse Glimmer one under ``dflash``, and picks its graph on
-    ``dsv4_hc_mult``. Tensor presence is the equivalent split here - DSpark
-    carries the markov/confidence heads and MLA's ``attn_q_a``, Muse Glimmer
-    carries plain ``attn_q`` with per-head QK-norms and no hyper-connections.
+    The arch tag is shared: llama.cpp packages the DeepSeek-V4 DSpark drafter,
+    the Muse Glimmer DFlash one and the DFlash 2 drafters under ``dflash``,
+    and picks its graph on header keys. Tensor presence is the equivalent
+    split here - DSpark carries the markov/confidence heads and MLA's
+    ``attn_q_a``, DFlash 2 the candidate selector, Muse Glimmer plain
+    ``attn_q`` with per-head QK-norms and no hyper-connections.
     """
     if any(n.startswith(("markov_w1", "markov_w2", "conf_proj", "output_hc_"))
            or ".attn_q_a" in n for n in arrays):
         return "dspark"
+    if any(n.startswith("selector_hidden") for n in arrays):
+        return "dflash2"
     if any(".attn_q_norm" in n for n in arrays):
         return "muse_glimmer"
     raise RuntimeError(
         "dflash GGUF matches no known drafter container (expected DSpark's "
-        "markov/confidence heads or Muse Glimmer's attn_q_norm)"
+        "markov/confidence heads, DFlash 2's selector, or Muse Glimmer's "
+        "attn_q_norm)"
     )
 
 
-# The closed tensor set of a Muse Glimmer dflash drafter, onto mlx-vlm's
-# DFlashDraftModel tree. Per-block leaves (blk.{i}.<key> -> layers.{i}.<value>):
-_MUSE_GLIMMER_DFLASH_BLK = {
+# The closed tensor set of a DFlash drafter, onto gmlx's DFlashDrafter tree.
+# Per-block leaves (blk.{i}.<key> -> layers.{i}.<value>):
+_DFLASH_BLK = {
     "attn_norm": "input_layernorm.weight",
     "attn_q": "self_attn.q_proj.weight",
     "attn_k": "self_attn.k_proj.weight",
@@ -703,20 +719,44 @@ _MUSE_GLIMMER_DFLASH_BLK = {
     "ffn_up": "mlp.up_proj.weight",
     "ffn_down": "mlp.down_proj.weight",
 }
+# DFlash 2 adds the grouped dynamic convolutions around both sublayers. The
+# F32 base kernel has no ``.weight`` suffix on either side.
+_DFLASH2_BLK = {
+    "attn_conv_base": "attention_conv.base_kernel",
+    "attn_conv_proj": "attention_conv.kernel_projection.weight",
+    "ffn_conv_base": "mlp_conv.base_kernel",
+    "ffn_conv_proj": "mlp_conv.kernel_projection.weight",
+}
 # Drafter-level leaves. ``enc.output_norm`` closes the encoder that fuses the
 # target captures (llama.cpp's dflash graph<true>); ``output_norm`` is the
 # decoder's final norm before the borrowed LM head.
-_MUSE_GLIMMER_DFLASH_ROOT = {
+_DFLASH_ROOT = {
     "fc": "fc.weight",
     "enc.output_norm": "hidden_norm.weight",
     "output_norm": "norm.weight",
 }
+_DFLASH2_ROOT = {
+    "selector_hidden": "candidate_selector.hidden_projection.weight",
+    "selector_predecessor": "candidate_selector.predecessor_codebook.weight",
+    "selector_successor": "candidate_selector.successor_codebook.weight",
+}
+_DFLASH_CONTAINER_MAPS = {
+    "muse_glimmer": (_DFLASH_BLK, _DFLASH_ROOT),
+    "dflash2": ({**_DFLASH_BLK, **_DFLASH2_BLK}, {**_DFLASH_ROOT, **_DFLASH2_ROOT}),
+}
+# Which target families a container can drive. A load-time check; the
+# arch-tag filter (arch_table.drafter_serves) is discovery's pairing-time one.
+_DFLASH_CONTAINER_TARGETS = {
+    "dflash2": ("qwen3_5", "qwen3_5_text", "muse_glimmer"),
+    "muse_glimmer": ("muse_glimmer",),
+}
 
 
-def remap_muse_glimmer_dflash_arrays(arrays: dict, kquant_meta: dict):
-    """Remap a Muse Glimmer ``dflash`` GGUF onto the drafter param tree.
+def remap_dflash_arrays(arrays: dict, kquant_meta: dict, container: str):
+    """Remap a ``dflash`` GGUF of ``container`` onto the drafter param tree.
     Closed tensor set: unknown names are hard errors (converter drift must
     surface at load, not as an unfilled param)."""
+    blk_map, root_map = _DFLASH_CONTAINER_MAPS[container]
     hf_weights: dict[str, mx.array] = {}
     hf_kquant_meta: dict[str, str] = {}
     stats = {"mapped": 0}
@@ -726,14 +766,14 @@ def remap_muse_glimmer_dflash_arrays(arrays: dict, kquant_meta: dict):
         base = name[: -len(".weight")] if name.endswith(".weight") else name
         if base.startswith("blk."):
             _, idx, leaf = base.split(".", 2)
-            target = _MUSE_GLIMMER_DFLASH_BLK.get(leaf)
+            target = blk_map.get(leaf)
             if target is not None:
                 target = f"layers.{idx}.{target}"
         else:
-            target = _MUSE_GLIMMER_DFLASH_ROOT.get(base)
+            target = root_map.get(base)
         if target is None:
             raise RuntimeError(
-                f"muse-glimmer dflash remap: unknown tensor {name!r} "
+                f"{container} dflash remap: unknown tensor {name!r} "
                 f"(the drafter tensor set is closed)"
             )
         hf_weights[target] = arr
@@ -746,23 +786,32 @@ def remap_muse_glimmer_dflash_arrays(arrays: dict, kquant_meta: dict):
     return hf_weights, hf_kquant_meta, stats
 
 
-def _load_muse_glimmer_dflash_drafter(
+def remap_muse_glimmer_dflash_arrays(arrays: dict, kquant_meta: dict):
+    return remap_dflash_arrays(arrays, kquant_meta, "muse_glimmer")
+
+
+def _dflash_config_from_meta(
     draft_gguf_path: str,
-    target,
+    meta: dict,
     target_config_dict: dict,
+    container: str,
     *,
     arrays: dict,
-    kquant_meta: dict,
-    meta: dict,
-    active_before: float | None = None,
-    log=loadlog.verbose_print,
+    shapes: dict | None = None,
 ):
-    """Build + load + bind the Muse Glimmer DFlash drafter, and wire the
-    target's ``_dflash_capture`` so every engine-facing hidden carries the
-    five captured residuals."""
+    """DFlashConfig for a ``dflash`` GGUF against its target, plus the
+    capture layer ids. Drafter header keys win over the target's for the
+    logit tail; ``dflash.attention.causal`` absent reads as non-causal
+    (llama.cpp's reading of the same header)."""
     from .dflash_drafter import DFlashConfig
-    from .muse_glimmer_dflash import MuseGlimmerDFlashDrafter
 
+    family = target_config_dict.get("model_type")
+    allowed = _DFLASH_CONTAINER_TARGETS[container]
+    if family is not None and family not in allowed:
+        raise ValueError(
+            f"{draft_gguf_path}: the {container} drafter serves "
+            f"{'/'.join(allowed)} targets, not {family}"
+        )
     layers = meta.get("dflash.target_layers")
     block_size = meta.get("dflash.block_size")
     mask_token_id = meta.get("tokenizer.ggml.mask_token_id")
@@ -783,6 +832,22 @@ def _load_muse_glimmer_dflash_drafter(
             f"{draft_gguf_path}: dflash.target_layers {layers} must be "
             f"strictly increasing and within [1, {n_target_layers}]"
         )
+    hidden = int(target_config_dict["hidden_size"])
+    declared = meta.get("dflash.embedding_length")
+    if declared is not None and int(declared) != hidden:
+        raise ValueError(
+            f"{draft_gguf_path}: dflash.embedding_length {declared} != "
+            f"target hidden_size {hidden}"
+        )
+    vocab = int(target_config_dict["vocab_size"])
+    if container == "dflash2" and shapes:
+        for name in ("selector_predecessor.weight", "selector_successor.weight"):
+            ne = shapes.get(name)
+            if ne is not None and int(ne[-1]) != vocab:
+                raise ValueError(
+                    f"{draft_gguf_path}: {name} has {ne[-1]} rows, the "
+                    f"target vocab is {vocab}"
+                )
     n_layers = 1 + max(
         int(n.split(".")[1]) for n in arrays if n.startswith("blk."))
     pattern = meta.get("dflash.attention.sliding_window_pattern") or ()
@@ -791,20 +856,30 @@ def _load_muse_glimmer_dflash_drafter(
     ] or ["full_attention"] * n_layers
     window = int(meta.get("dflash.attention.sliding_window") or 0) or None
     native_total, block_total = _drafter_block_depths(
-        block_size, _MUSE_GLIMMER_DFLASH_BLOCK_DEFAULT)
-
+        block_size, _DFLASH_BLOCK_DEFAULT[container])
+    rope_scaling = None
+    rs_type = meta.get("dflash.rope.scaling.type")
+    if rs_type and rs_type != "none":
+        rope_scaling = {"type": rs_type, "rope_type": rs_type}
+        factor = meta.get("dflash.rope.scaling.factor")
+        if factor is not None:
+            rope_scaling["factor"] = float(factor)
+    causal = meta.get("dflash.attention.causal")
+    softcap = meta.get("dflash.final_logit_softcapping",
+                       target_config_dict.get("final_logit_softcapping"))
     config = DFlashConfig(
-        hidden_size=int(target_config_dict["hidden_size"]),
+        hidden_size=hidden,
         intermediate_size=int(meta["dflash.feed_forward_length"]),
         num_hidden_layers=n_layers,
         num_attention_heads=int(meta["dflash.attention.head_count"]),
         num_key_value_heads=int(meta["dflash.attention.head_count_kv"]),
         head_dim=int(meta["dflash.attention.key_length"]),
         rms_norm_eps=float(meta["dflash.attention.layer_norm_rms_epsilon"]),
-        vocab_size=int(target_config_dict["vocab_size"]),
+        vocab_size=vocab,
         max_position_embeddings=int(meta.get("dflash.context_length")
                                     or target_config_dict["max_position_embeddings"]),
         rope_theta=float(meta["dflash.rope.freq_base"]),
+        rope_scaling=rope_scaling,
         tie_word_embeddings=False,
         block_size=block_total,
         native_block_size=native_total,
@@ -813,18 +888,59 @@ def _load_muse_glimmer_dflash_drafter(
         num_target_layers=n_target_layers,
         layer_types=layer_types,
         sliding_window=window,
-        final_logit_softcapping=target_config_dict.get(
-            "final_logit_softcapping") or None,
-        output_multiplier=float(target_config_dict.get("output_multiplier", 1.0)),
+        is_causal=None if causal is None else bool(causal),
+        final_logit_softcapping=softcap or None,
+        output_multiplier=float(meta.get(
+            "dflash.logit_scale", target_config_dict.get("output_multiplier", 1.0))),
+        input_embedding_scale=float(meta.get("dflash.embedding_scale", 1.0)),
+        conv_kernel_size=int(meta.get("dflash.conv_kernel_size") or 0),
+        conv_group_size=int(meta.get("dflash.conv_group_size") or 0),
+        selector_rank=int(meta.get("dflash.selector_rank") or 0),
+        selector_top_k=int(meta.get("dflash.selector_top_k") or 0),
     )
+    return config, layer_ids
+
+
+def _wire_dflash_capture(target, layer_ids) -> None:
+    """Arm the target's packed-hidden capture for ``layer_ids``."""
+    lm = getattr(target, "language_model", target)
+    if not callable(getattr(lm, "set_dflash_capture", None)):
+        raise RuntimeError(
+            "DFlash drafters need a target carrying the _dflash_capture seam "
+            f"(muse_glimmer, owned qwen3_5); got {type(lm).__name__}"
+        )
+    lm.set_dflash_capture(layer_ids)
+
+
+def _load_muse_glimmer_dflash_drafter(
+    draft_gguf_path: str,
+    target,
+    target_config_dict: dict,
+    *,
+    arrays: dict,
+    kquant_meta: dict,
+    meta: dict,
+    shapes: dict | None = None,
+    active_before: float | None = None,
+    log=loadlog.verbose_print,
+):
+    """Build + load + bind the Muse Glimmer DFlash drafter, and wire the
+    target's ``_dflash_capture`` so every engine-facing hidden carries the
+    five captured residuals."""
+    from .muse_glimmer_dflash import MuseGlimmerDFlashDrafter
+
+    config, layer_ids = _dflash_config_from_meta(
+        draft_gguf_path, meta, target_config_dict, "muse_glimmer",
+        arrays=arrays, shapes=shapes)
     drafter = MuseGlimmerDFlashDrafter(config)
     log(
-        f"[mtp] drafter: muse-glimmer dflash layers={n_layers} "
-        f"targets={layer_ids} block_total={block_total} window={window}"
+        f"[mtp] drafter: muse-glimmer dflash layers={config.num_hidden_layers} "
+        f"targets={layer_ids} block_total={config.block_size} "
+        f"window={config.sliding_window} causal={bool(config.is_causal)}"
     )
 
-    d_weights, d_meta, d_stats = remap_muse_glimmer_dflash_arrays(
-        arrays, kquant_meta)
+    d_weights, d_meta, d_stats = remap_dflash_arrays(
+        arrays, kquant_meta, "muse_glimmer")
     log(f"[mtp] drafter remap: {d_stats}")
     _install_and_load(
         drafter,
@@ -836,14 +952,7 @@ def _load_muse_glimmer_dflash_drafter(
         active_before=active_before,
     )
     drafter.bind(target)
-
-    lm = getattr(target, "language_model", target)
-    if not callable(getattr(lm, "set_dflash_capture", None)):
-        raise RuntimeError(
-            "DFlash drafter needs a muse_glimmer target carrying the "
-            f"_dflash_capture seam; got {type(lm).__name__}"
-        )
-    lm.set_dflash_capture(layer_ids)
+    _wire_dflash_capture(target, layer_ids)
 
     from .drafter_protocol import validate_drafter
 
@@ -851,7 +960,62 @@ def _load_muse_glimmer_dflash_drafter(
     # No draft-side head quantization: Muse Glimmer GGUFs ship a quantized
     # output.weight, which _patch_draft_head_quantized leaves alone anyway.
     log("[mtp] dflash drafter bound; target capture layers wired")
-    _stamp_mtp_width_cap(drafter, "muse_glimmer", target=target, log=log)
+    _stamp_mtp_width_cap(drafter, "muse_glimmer", target=target,
+                         hard_limit=1, log=log)
+    return drafter
+
+
+def _load_dflash2_drafter(
+    draft_gguf_path: str,
+    target,
+    target_config_dict: dict,
+    *,
+    arrays: dict,
+    kquant_meta: dict,
+    meta: dict,
+    shapes: dict | None = None,
+    active_before: float | None = None,
+    log=loadlog.verbose_print,
+):
+    """Build + load + bind a DFlash 2 drafter (conv-wrapped draft layers plus
+    the candidate selector) and wire the target's ``_dflash_capture``."""
+    from .dflash_drafter import DFlash2Drafter
+
+    config, layer_ids = _dflash_config_from_meta(
+        draft_gguf_path, meta, target_config_dict, "dflash2",
+        arrays=arrays, shapes=shapes)
+    drafter = DFlash2Drafter(config)
+    log(
+        f"[mtp] drafter: dflash2 layers={config.num_hidden_layers} "
+        f"targets={layer_ids} block_total={config.block_size} "
+        f"(native {config.native_block_size}) window={config.sliding_window} "
+        f"causal={bool(config.is_causal)} selector top_k={config.selector_top_k} "
+        f"rank={config.selector_rank} conv={config.conv_kernel_size}x"
+        f"{config.conv_group_size} logit_scale={config.output_multiplier} "
+        f"softcap={config.final_logit_softcapping}"
+    )
+
+    d_weights, d_meta, d_stats = remap_dflash_arrays(arrays, kquant_meta, "dflash2")
+    log(f"[mtp] drafter remap: {d_stats}")
+    _install_and_load(
+        drafter,
+        d_weights,
+        d_meta,
+        log=log,
+        sanitize=False,
+        source_key=weights_source_key(draft_gguf_path),
+        active_before=active_before,
+    )
+    drafter.bind(target)
+    _wire_dflash_capture(target, layer_ids)
+
+    from .drafter_protocol import validate_drafter
+
+    validate_drafter(drafter)
+    log("[mtp] dflash2 drafter bound; target capture layers wired")
+    _stamp_mtp_width_cap(
+        drafter, str(target_config_dict.get("model_type") or "dflash2"),
+        target=target, hard_limit=1, log=log)
     return drafter
 
 
@@ -863,34 +1027,62 @@ def _load_dflash_drafter(
     zero_copy: bool = True,
     log=loadlog.verbose_print,
 ):
-    """Load a Muse Glimmer ``dflash`` companion drafter."""
+    """Load a ``dflash`` companion drafter: Muse Glimmer's DFlash or a DFlash
+    2 drafter, by container. DSpark's ``dflash`` GGUFs load through the
+    deepseek_v4 path."""
     active_before = _active_now()
-    arrays, kquant_meta, d_arch, meta, _shapes = load_gguf_wire_bytes(
+    arrays, kquant_meta, d_arch, meta, shapes = load_gguf_wire_bytes(
         draft_gguf_path, zero_copy=zero_copy
     )
     if d_arch != "dflash":
         raise ValueError(
-            f"{draft_gguf_path}: expected a dflash drafter GGUF for a "
-            f"muse_glimmer target, got arch {d_arch!r}"
+            f"{draft_gguf_path}: expected a dflash drafter GGUF, got arch "
+            f"{d_arch!r}"
         )
     container = dflash_container(arrays)
-    if container != "muse_glimmer":
-        raise ValueError(
-            f"{draft_gguf_path}: this dflash GGUF holds the {container} "
-            f"drafter, which a muse_glimmer target cannot drive"
-        )
     log(f"[mtp] drafter gguf ({d_arch}/{container}): {len(arrays)} arrays, "
         f"{len(kquant_meta)} kquant")
-    return _load_muse_glimmer_dflash_drafter(
+    loaders = {
+        "dflash2": _load_dflash2_drafter,
+        "muse_glimmer": _load_muse_glimmer_dflash_drafter,
+    }
+    loader = loaders.get(container)
+    if loader is None:
+        raise ValueError(
+            f"{draft_gguf_path}: this dflash GGUF holds the {container} "
+            f"drafter, which loads only against a deepseek_v4 target"
+        )
+    return loader(
         draft_gguf_path,
         target,
         target_config_dict,
         arrays=arrays,
         kquant_meta=kquant_meta,
         meta=meta,
+        shapes=shapes,
         active_before=active_before,
         log=log,
     )
+
+
+def _drafter_header_arch(draft_gguf_path: str) -> str | None:
+    """The companion GGUF's ``general.architecture`` from a header-only read."""
+    from .discovery import header_meta
+
+    meta = header_meta(draft_gguf_path)
+    return meta.get("arch") if meta else None
+
+
+def _assistant_kind(model_type: str | None, draft_gguf_path: str) -> str:
+    """Which companion loader a ``--draft-gguf`` takes: ``deepseek4`` for a
+    deepseek_v4 target (its drafters share the ``dflash`` tag with DSpark),
+    ``dflash`` for a muse_glimmer target or any ``dflash`` header, else
+    ``gemma4``. Each loader validates the pairing it is handed."""
+    if model_type == "deepseek_v4":
+        return "deepseek4"
+    if model_type == "muse_glimmer" or _drafter_header_arch(draft_gguf_path) == "dflash":
+        return "dflash"
+    return "gemma4"
 
 
 def normalize_dflash_arrays(arrays: dict, kquant_meta: dict, meta: dict):
@@ -1326,11 +1518,16 @@ def load_mtp_model(
     loadlog.stage("loading drafter")
     loadlog.fact("drafter", "assistant" if assistant else "native-head")
     if assistant:
-        if _mt == "deepseek_v4":
+        if int(config_dict.get("mtp_num_hidden_layers", 0)) >= 1:
+            _log(f"[mtp] native MTP head present; using external drafter "
+                 f"{os.path.basename(draft_gguf_path)} (pass --native-mtp to "
+                 f"use the head)")
+        kind = _assistant_kind(_mt, draft_gguf_path)
+        if kind == "deepseek4":
             drafter = _load_deepseek4_mtp_drafter(
                 draft_gguf_path, model, config_dict, zero_copy=zero_copy, log=_log
             )
-        elif _mt == "muse_glimmer":
+        elif kind == "dflash":
             drafter = _load_dflash_drafter(
                 draft_gguf_path, model, config_dict, zero_copy=zero_copy, log=_log
             )
@@ -1472,7 +1669,11 @@ def load_vlm_mtp_model(
     loadlog.stage("loading drafter")
     loadlog.fact("drafter", "assistant" if draft_gguf_path else "native-head")
     if draft_gguf_path:
-        if config.get("model_type") == "muse_glimmer":
+        if int((config.get("text_config") or {}).get("mtp_num_hidden_layers", 0)) >= 1:
+            _log(f"[mtp] native MTP head present; using external drafter "
+                 f"{os.path.basename(draft_gguf_path)} (pass --native-mtp to "
+                 f"use the head)")
+        if _assistant_kind(config.get("model_type"), draft_gguf_path) == "dflash":
             drafter = _load_dflash_drafter(
                 draft_gguf_path, model, config["text_config"],
                 zero_copy=zero_copy, log=_log
