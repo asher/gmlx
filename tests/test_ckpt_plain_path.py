@@ -175,6 +175,109 @@ def test_gen_batch_retire_uses_decode_snap_on_divergence(monkeypatch):
             assert mx.array_equal(a, b).item()
 
 
+def _batched_hybrid_cache(lens, total):
+    """LAYOUT-shaped B=len(lens) batch caches: BatchKVCache rows merged
+    from different lengths (left-padded), row-dim ArraysCache states."""
+    from mlx_vlm.models.cache import ArraysCache, BatchKVCache, KVCache
+
+    H, D = 2, 8
+    caches = []
+    for i, kind in enumerate(LAYOUT):
+        mx.random.seed(7000 + i)
+        if kind == "kv":
+            rows = []
+            for p in lens:
+                c = KVCache()
+                c.state = (mx.random.normal((1, H, p, D)),
+                           mx.random.normal((1, H, p, D)))
+                rows.append(c)
+            caches.append(BatchKVCache.merge(rows))
+        else:
+            c = ArraysCache(size=2)
+            c.cache = [mx.random.normal((len(lens), 3, D)),
+                       mx.random.normal((len(lens), H, D, D))]
+            caches.append(c)
+    assert max(lens) == total
+    return caches
+
+
+def test_gen_batch_filter_retires_leaving_row_batched():
+    from mlx_vlm.generate.ar import GenerationBatch
+
+    spec_engine._install_plain_ckpt_decode()
+    man = APCManager(num_blocks=64, block_size=16)
+    full = list(range(700, 724))
+    gen = list(range(970, 986))                 # row 1: 24 + 16 = 40
+    stash = {"full_ids": full, "extra_hash": 0, "mode": "ckpt",
+             "manager": man, "render_ctx": None, "snap_ok": True,
+             "gen": gen}
+    gb = GenerationBatch.empty(model=None, sampler=None, stop_criteria=None)
+    gb.uids = [7, 8]
+    gb.max_tokens = [64, 64]
+    gb._num_tokens = [0, 0]
+    gb.prompt_cache = _batched_hybrid_cache([48, 40], 48)
+    gb._kq_apc_retire_rows = {8: stash}
+    gb.filter([0])
+    assert gb.uids == [7]
+    assert gb._kq_apc_retire_rows == {}
+    warm, got = ckpt_lookup(man, full + gen + [1], extra_hash=0)
+    assert got == 40
+
+
+def test_gen_batch_extend_carries_stash():
+    from mlx_vlm.generate.ar import GenerationBatch
+
+    spec_engine._install_plain_ckpt_decode()
+    stash = {"full_ids": [1, 2], "mode": "ckpt", "gen": []}
+    other = GenerationBatch.empty(model=None, sampler=None,
+                                  stop_criteria=None)
+    other.uids = [9]
+    other.prompt_cache = make_hybrid_cache(8, seed=21)
+    other.prompt_cache[0]._kq_apc_retire = stash
+    gb = GenerationBatch.empty(model=None, sampler=None, stop_criteria=None)
+    gb.extend(other)
+    assert gb._kq_apc_retire_rows == {9: stash}
+    assert other.prompt_cache[0]._kq_apc_retire is None
+
+
+def test_exact_anchor_init_arms_retire_stash():
+    spec_engine._bind_l1_view()
+    man = APCManager(num_blocks=64, block_size=16)
+    ids = list(range(800, 848))
+    model = SimpleNamespace(_kq_apc_ckpt=False, config=SimpleNamespace())
+    b = _plain_batch(man, ids, model=model)
+    spec_engine._plain_anchor_init(b)
+    stash = b.prompt_cache[0]._kq_apc_retire
+    assert stash["mode"] == "exact" and stash["manager"] is man
+    assert stash["full_ids"] == ids and stash["gen"] == []
+
+
+def test_gen_batch_filter_retires_exact_row():
+    from mlx_vlm.generate.ar import GenerationBatch
+    from mlx_vlm.models.cache import KVCache
+
+    spec_engine._install_plain_ckpt_decode()
+    man = APCManager(num_blocks=64, block_size=16)
+    full = list(range(850, 882))
+    gen = list(range(990, 1006))                # 32 + 16 = 48
+    caches = []
+    for i in range(2):
+        mx.random.seed(8100 + i)
+        c = KVCache()
+        c.state = (mx.random.normal((1, 2, 48, 8)),
+                   mx.random.normal((1, 2, 48, 8)))
+        caches.append(c)
+    stash = {"full_ids": full, "extra_hash": 0, "mode": "exact",
+             "manager": man, "render_ctx": None, "gen": gen}
+    caches[0]._kq_apc_retire = stash
+    gb = GenerationBatch.empty(model=None, sampler=None, stop_criteria=None)
+    gb.uids = [11]
+    gb.prompt_cache = caches
+    gb.filter([])
+    warm, got = man.lookup_exact_cache(full + gen + [1], extra_hash=0)
+    assert got == 48 and warm is not None
+
+
 def test_plain_step_tick_disables_on_failure():
     # Runs per token: a deterministic failure must strike once, not
     # emit a traceback per step.
