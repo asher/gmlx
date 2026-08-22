@@ -8,6 +8,28 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- DFlash 2 drafters (Inco AI / z-lab) for Qwen3.8-27B and Muse-Glimmer-30B:
+  `--draft-gguf <DFlash2>.gguf`, or `gmlx discover` pairs a drafter with the
+  base model its header declares, across directories. A DFlash 2 pairing
+  replaces a DFlash v1 sibling on Muse Glimmer. Exact-match acceptance, so
+  greedy output stays token-identical; `--stochastic-mtp` applies as well.
+- `--native-mtp` (run/chat/serve) and the per-model `native_mtp` config key
+  draft with the GGUF's own MTP head when a companion drafter is configured;
+  a configured companion otherwise wins over the head.
+
+### Changed
+
+- Muse Glimmer's DFlash drafter runs on gmlx's own DFlash base. Its block
+  attention now applies the reference sliding-window mask over the
+  drafter's committed positions (a full ring trims the oldest keys per block
+  row); output is unchanged until the ring fills.
+
+### Fixed
+
+- `--stochastic-mtp` with a block drafter (Muse Glimmer DFlash) stashed one
+  proposal row per block and misaligned the walk; block drafters now record
+  every draft row.
+
 - Sibling requests that arrive together no longer each prefill the shared
   prefix cold: the server admits the first one, waits for its stores, and
   starts the rest warm (`GMLX_APC_FRESH_WAIT_MS`, `0` disables).
