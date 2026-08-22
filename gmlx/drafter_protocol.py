@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Optional, Protocol, runtime_checkable
 
 import mlx.core as mx
 
@@ -130,7 +130,11 @@ class BatchDrafterProtocol(Protocol):
         sampler: Any,
         token_dtype: Any = mx.int32,
         greedy: bool = False,
+        stash: Optional["DraftStash"] = None,
     ) -> mx.array:
+        """``stash`` is passed only to drafters flagging ``supports_q_stash``:
+        they draw every draft row themselves and record one q / pq / top2
+        entry per draft, in draft order, on the lists the stash carries."""
         ...
 
     def bind(self, target_model: Any) -> "BatchDrafterProtocol":
