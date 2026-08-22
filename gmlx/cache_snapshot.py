@@ -755,7 +755,8 @@ def _ckpt_records(manager) -> "OrderedDict":
 _CKPT_STAT_INTS = (
     "ckpt_stores", "ckpt_hits", "ckpt_matched_tokens",
     "ckpt_missed_adoptions", "ckpt_skeleton_writes", "sidecar_writes",
-    "retire_fallback_full", "ckpt_pool_evictions",
+    "retire_fallback_full", "retire_fallback_skipped",
+    "ckpt_pool_evictions",
     "ckpt_grid_truncate", "anchor_stores", "anchor_hits",
 )
 
@@ -1938,6 +1939,20 @@ def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
         # turn reuse. Only when the whole-sequence branch above did not
         # already try (cap == len means it ran and declined).
         if cap < len(ids) and len(ids) >= 2:
+            # The fallback serves raw-continuation clients only (a
+            # re-rendered turn diverges at cap). On a pressured pool it
+            # evicts adoptable prefixes to store unmatchable chains --
+            # the 122B cert churn spiral -- so it yields at 90 percent
+            # occupancy.
+            used = int(getattr(getattr(manager, "stats", None),
+                               "pool_used", 0) or 0)
+            total = int(getattr(manager, "num_blocks", 0) or 0)
+            if total and used * 10 >= total * 9:
+                _ckpt_bump(manager, "retire_fallback_skipped")
+                _log.info("APC retirement: fallback skipped, pool "
+                          "%d/%d (replayable prefix %d)",
+                          used, total, cap)
+                return 0
             stored = ckpt_store(manager, ids, prompt_cache,
                                 extra_hash=extra_hash,
                                 grid_truncate=True, kind="retire")

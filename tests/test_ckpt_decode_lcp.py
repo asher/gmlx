@@ -187,6 +187,22 @@ def test_retirement_snap_past_lcp_falls_back_to_full():
     assert cs.ckpt_stats_snapshot(man)["retire_fallback_full"] == 1
 
 
+def test_retirement_fallback_yields_on_pressured_pool():
+    """The full-sequence fallback serves raw-continuation clients only;
+    at 90 percent pool occupancy it must yield instead of evicting
+    adoptable prefixes to store unmatchable chains (122B cert churn)."""
+    man = APCManager(num_blocks=64, block_size=16)
+    man.stats.pool_used = 58                  # 58/64 > 0.9
+    cache = make_hybrid_cache(96, seed=6)
+    ids = list(range(96))
+    snaps = [(90, _arr_states(make_hybrid_cache(90, seed=95)))]
+    assert not retirement_store(man, "ckpt", ids, cache, max_len=80,
+                                decode_snaps=snaps)
+    snap = cs.ckpt_stats_snapshot(man)
+    assert snap["retire_fallback_skipped"] == 1
+    assert snap["retire_fallback_full"] == 0
+
+
 def test_retirement_snap_path_never_falls_back():
     man = APCManager(num_blocks=64, block_size=16)
     cache = make_hybrid_cache(96, seed=5)
