@@ -106,6 +106,9 @@ class GmlxAPCManager(_apc.APCManager):
         per_tok = sum(bpt for _w, bpt in costs)
         if per_tok <= 0:
             return
+        # Stashed for stats: lets /metrics report committed pool bytes so
+        # harnesses can separate evictable cache growth from real residue.
+        self._pool_per_token_bytes = per_tok
         weights = float(mx.get_active_memory()) + untracked_weight_bytes()
         free = max(0.0, budget - weights)
         if not os.environ.get("APC_EXACT_CACHE_ENTRIES"):
@@ -455,6 +458,9 @@ class GmlxAPCManager(_apc.APCManager):
                         "APC disk save scheduling failed: %s", e)
             self.stats.pool_used = sum(
                 1 for x in self.pool if x.block_hash is not None)
+            self.stats.pool_bytes = int(
+                self.stats.pool_used * self.block_size
+                * getattr(self, "_pool_per_token_bytes", 0))
             return new_blocks
 
 
