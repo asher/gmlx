@@ -70,11 +70,23 @@ def test_upstream_bug_still_present_exit_segv():
     # Tripwire: when this run starts exiting 0, mlx fixed upstream #4248.
     # Retire the guard then (drop the version from _AFFECTED_MLX) after the
     # usual A/B on the serve path.
+    #
+    # The GIL-less decref lands as SIGSEGV, or as a Py_FatalError SIGABRT
+    # on CPythons that detect the NULL thread state first (seen on 3.13);
+    # the abort path must show the fatal-error signature so an unrelated
+    # abort cannot pass as the bug.
     r = subprocess.run(
         [sys.executable, "-c", CHILD.format(root=ROOT, guard="", code="")],
         capture_output=True,
     )
-    assert r.returncode in (-11, 139)
+    if r.returncode in (-6, 134):
+        err = r.stderr.decode(errors="replace")
+        assert ("thread state is NULL" in err
+                or "runtime state: finalizing" in err), (
+            r.returncode, err[-500:])
+    else:
+        assert r.returncode in (-11, 139), (
+            r.returncode, r.stderr.decode(errors="replace")[-500:])
 
 
 @NEEDS_BUG
