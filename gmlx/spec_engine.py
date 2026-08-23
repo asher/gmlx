@@ -153,6 +153,17 @@ def _install_apc_manager_stash() -> None:
         except Exception:
             pass
         _orig_init(self, model, processor, **kwargs)
+        # Stock admission forms a prompt batch only when free slots >=
+        # prefill_batch_size. Stock pairs 32/8 (24 slots stay open); the
+        # injected width cap pairs 8/8, where a full prefill group equals
+        # the whole batch and no request can join while any row decodes:
+        # serving degrades to FIFO. Groups of 1 keep insertion live at
+        # every width; B>1 prompt batching is no throughput win (see the
+        # ckpt formation gate below).
+        pbs = getattr(self, "prefill_batch_size", None)
+        cbs = getattr(self, "completion_batch_size", None)
+        if pbs is not None and cbs is not None and pbs >= cbs:
+            self.prefill_batch_size = 1
         # APC arrived armed but upstream's quantized-KV opt-out dropped it
         # (ar.py nulls the manager whenever kv_bits is set; no tier serves
         # quantized caches). The mode probe still reads "block" for these
