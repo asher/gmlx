@@ -166,6 +166,30 @@ def truncated_thinking(text, pairs, prompt) -> bool:
     return any(prompt.rfind(sm) > prompt.rfind(em) for sm, em in pairs)
 
 
+_CHANNEL_HINTS = ("<|channel|>", "<|channel>", "<|start|>assistant")
+
+
+def _channel_split(full_text: str):
+    """Segment channel-marker reasoning (harmony analysis channels,
+    gemma-style thought channels) that the tag-pair splitter cannot see.
+    Harmony templates refuse messages whose content carries raw
+    ``<|channel|>`` tags, so an unsplit echo makes every next-turn
+    render prediction fail and retirement stores full-depth unmatchable
+    keys. Returns (reasoning, content), or (None, None) when no channel
+    marker is present or nothing classified as reasoning."""
+    if not any(m in full_text for m in _CHANNEL_HINTS):
+        return None, None
+    from .reasoning import ReasoningFilter
+
+    f = ReasoningFilter()
+    spans = f.feed(full_text) + f.flush()
+    reasoning = "".join(t for t, m in spans if m == "reason").strip()
+    content = "".join(t for t, m in spans if m == "answer").strip()
+    if not reasoning:
+        return None, None
+    return reasoning, content
+
+
 def build_assistant_message(ctx: dict, full_text: str) -> dict:
     """Parse a completion into the assistant message a client echoes back.
 
@@ -181,6 +205,10 @@ def build_assistant_message(ctx: dict, full_text: str) -> dict:
     ts = kw.get("thinking_start_token")
     te = kw.get("thinking_end_token")
     reasoning, content = srv._split_thinking(full_text, ts, te)
+    if reasoning is None:
+        ch_reasoning, ch_content = _channel_split(full_text)
+        if ch_reasoning is not None:
+            reasoning, content = ch_reasoning, ch_content
     if reasoning is None and content and truncated_thinking(
             full_text, _thinking_markers(kw), _gen_prompt_text(ctx)):
         reasoning, content = content, ""
@@ -216,6 +244,9 @@ def build_assistant_message(ctx: dict, full_text: str) -> dict:
     if reasoning:
         msg["reasoning_content"] = reasoning
         msg["reasoning"] = reasoning
+        # Harmony templates read analysis text from this field and raise
+        # on raw channel tags in content; think-tag templates ignore it.
+        msg["thinking"] = reasoning
     if tool_calls:
         msg["tool_calls"] = tool_calls
     return msg

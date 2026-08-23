@@ -756,7 +756,7 @@ def _ckpt_records(manager) -> "OrderedDict":
 _CKPT_STAT_INTS = (
     "ckpt_stores", "ckpt_hits", "ckpt_matched_tokens",
     "ckpt_missed_adoptions", "ckpt_skeleton_writes", "sidecar_writes",
-    "retire_fallback_full", "retire_fallback_skipped",
+    "retire_fallback_suppressed",
     "ckpt_pool_evictions", "ckpt_governor_released",
     "ckpt_evict_own_chain",
     "ckpt_grid_truncate", "anchor_stores", "anchor_hits",
@@ -1552,10 +1552,11 @@ def ckpt_lookup(
                             while m < lim and tid[m] == rec.ids[m]:
                                 m += 1
                             _log.info(
-                                "APC ckpt diverged: rec.p=%d first "
-                                "mismatch at %d (query %r vs rec %r)",
-                                rec.p, m, tid[m:m + 4],
-                                rec.ids[m:m + 4])
+                                "APC ckpt diverged: rec.p=%d kind=%s "
+                                "layout=%s first mismatch at %d "
+                                "(query %r vs rec %r)",
+                                rec.p, rec.kind, rec.layout, m,
+                                tid[m:m + 4], rec.ids[m:m + 4])
                     continue
                 if (not min_prefix_tokens < rec.p < n
                         or (layout is not None
@@ -2026,36 +2027,25 @@ def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
                 _log.info("APC retirement: decode ckpt stored at %d "
                           "(cap %d, full %d)", p, cap, len(ids))
                 return p
-        # No snapshot at or below the replayable prefix: fall back to the
-        # full sequence under its verbatim key rather than storing
-        # nothing. A re-rendered turn will not adopt it, but a raw
-        # continuation client replays prompt+gen exactly and does.
-        # Reason-counted so fallback traffic is distinguishable from
-        # turn reuse. Only when the whole-sequence branch above did not
-        # already try (cap == len means it ran and declined).
+        # No snapshot at or below the replayable prefix. cap < len only
+        # when the next-turn render prediction SUCCEEDED: the client came
+        # through the chat template and provably re-renders, so a
+        # full-sequence store under the verbatim key can never match its
+        # next turn -- it only ages in the pool and burns an
+        # ids_diverged decline on every later same-chain lookup (the
+        # gemma-4/gpt-oss cert arms: ~410 declines each, every one a
+        # retire-kind record past the strip boundary). The prefill-side
+        # p_stable turn boundary of this same request covers turn-2, so
+        # storing nothing here loses nothing reachable. Raw-continuation
+        # clients have no render ctx (lcp None -> cap == len) and keep
+        # the whole-sequence branch above. Counter kept for visibility;
+        # the 90-percent-occupancy yield (122B churn spiral) is subsumed.
         if cap < len(ids) and len(ids) >= 2:
-            # The fallback serves raw-continuation clients only (a
-            # re-rendered turn diverges at cap). On a pressured pool it
-            # evicts adoptable prefixes to store unmatchable chains --
-            # the 122B cert churn spiral -- so it yields at 90 percent
-            # occupancy.
-            used = int(getattr(getattr(manager, "stats", None),
-                               "pool_used", 0) or 0)
-            total = int(getattr(manager, "num_blocks", 0) or 0)
-            if total and used * 10 >= total * 9:
-                _ckpt_bump(manager, "retire_fallback_skipped")
-                _log.info("APC retirement: fallback skipped, pool "
-                          "%d/%d (replayable prefix %d)",
-                          used, total, cap)
-                return 0
-            stored = ckpt_store(manager, ids, prompt_cache,
-                                extra_hash=extra_hash,
-                                grid_truncate=True, kind="retire")
-            if stored:
-                _ckpt_bump(manager, "retire_fallback_full")
-                _log.info("APC retirement: full-sequence fallback stored "
-                          "at %d (replayable prefix %d)", stored, cap)
-                return stored
+            _ckpt_bump(manager, "retire_fallback_suppressed")
+            _log.info(
+                "APC retirement: predicted-diverged fallback suppressed "
+                "(replayable prefix %d, full %d)", cap, len(ids))
+            return 0
         _log.info("APC retirement skipped: no decode snapshot at or "
                   "below the replayable prefix %d (full %d)",
                   cap, len(ids))

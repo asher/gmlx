@@ -170,37 +170,25 @@ def test_retirement_rotating_uses_grid_snap():
     assert man.stats_snapshot()["exact_stores"] == 0
 
 
-def test_retirement_snap_past_lcp_falls_back_to_full():
-    """A snapshot past the replayable prefix stays unusable, but the
-    retirement now stores the full sequence under its verbatim key
-    (raw-continuation clients) instead of storing nothing."""
+def test_retirement_predicted_diverged_suppresses_fallback():
+    """cap < len only when the next-turn render prediction succeeded:
+    the client provably re-renders, so a full-sequence verbatim store
+    can never match its next turn -- it ages in the pool and burns an
+    ids_diverged decline per later same-chain lookup (gemma-4/gpt-oss
+    cert arms, ~410 each). With no snapshot at or below the boundary
+    the retirement stores nothing, counted."""
     man = APCManager(num_blocks=64, block_size=16)
     cache = make_hybrid_cache(96, seed=4)
     ids = list(range(96))
     snaps = [(90, _arr_states(make_hybrid_cache(90, seed=93)))]
-    assert retirement_store(man, "ckpt", ids, cache, max_len=80,
-                            decode_snaps=snaps)
+    assert not retirement_store(man, "ckpt", ids, cache, max_len=80,
+                                decode_snaps=snaps)
     _, got = ckpt_lookup(man, ids[:90] + [1], extra_hash=0)
     assert got == 0                       # the past-cap snap stayed unused
     _, got = ckpt_lookup(man, ids + [1], extra_hash=0)
-    assert got == 96                      # verbatim fallback record
-    assert cs.ckpt_stats_snapshot(man)["retire_fallback_full"] == 1
-
-
-def test_retirement_fallback_yields_on_pressured_pool():
-    """The full-sequence fallback serves raw-continuation clients only;
-    at 90 percent pool occupancy it must yield instead of evicting
-    adoptable prefixes to store unmatchable chains (122B cert churn)."""
-    man = APCManager(num_blocks=64, block_size=16)
-    man.stats.pool_used = 58                  # 58/64 > 0.9
-    cache = make_hybrid_cache(96, seed=6)
-    ids = list(range(96))
-    snaps = [(90, _arr_states(make_hybrid_cache(90, seed=95)))]
-    assert not retirement_store(man, "ckpt", ids, cache, max_len=80,
-                                decode_snaps=snaps)
+    assert got == 0                       # no verbatim fallback record
     snap = cs.ckpt_stats_snapshot(man)
-    assert snap["retire_fallback_skipped"] == 1
-    assert snap["retire_fallback_full"] == 0
+    assert snap["retire_fallback_suppressed"] == 1
 
 
 def test_retirement_snap_path_never_falls_back():
@@ -210,7 +198,7 @@ def test_retirement_snap_path_never_falls_back():
     snaps = [(64, _arr_states(make_hybrid_cache(64, seed=94)))]
     assert retirement_store(man, "ckpt", ids, cache, max_len=80,
                             decode_snaps=snaps)
-    assert cs.ckpt_stats_snapshot(man)["retire_fallback_full"] == 0
+    assert cs.ckpt_stats_snapshot(man)["retire_fallback_suppressed"] == 0
 
 
 def test_governor_evict_releases_ckpt_records():
