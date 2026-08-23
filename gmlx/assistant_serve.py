@@ -491,13 +491,9 @@ def _wrap_chat_routes(app, state) -> None:
 
 
 def _wrap_models_routes(app, state) -> None:
-    from .server_patches._common import _remove_routes
+    from .server_patches._common import _find_route, _remove_routes
     for path in ("/models", "/v1/models"):
-        route = next(
-            (r for r in app.router.routes
-             if getattr(r, "path", None) == path
-             and "GET" in (getattr(r, "methods", None) or ())),
-            None)
+        route = _find_route(app, path, "GET")
         if route is None or getattr(route.endpoint, _ASSISTANT_FLAG, False):
             continue
         original = route.endpoint
@@ -525,13 +521,9 @@ def _wrap_foreign_routes(app, state) -> None:
     """Assistant ids are chat-completions only: 400 on the responses /
     anthropic surfaces (in each surface's own error shape). Reading the
     cached request body is safe - the original handler re-parses it."""
-    from .server_patches._common import _remove_routes
+    from .server_patches._common import _find_route, _remove_routes
     for path in _GUARDED_PATHS:
-        route = next(
-            (r for r in app.router.routes
-             if getattr(r, "path", None) == path
-             and "POST" in (getattr(r, "methods", None) or ())),
-            None)
+        route = _find_route(app, path, "POST")
         if route is None or getattr(route.endpoint, _ASSISTANT_FLAG, False):
             continue
         original = route.endpoint

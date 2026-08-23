@@ -29,9 +29,10 @@ _SCHEMAS = importlib.import_module("mlx_vlm.server.schemas")
 
 @pytest.fixture(autouse=True)
 def _restore_routes():
-    saved = list(_APP.app.router.routes)
+    from gmlx.server_patches import _common as sp_common
+    saved = sp_common._snapshot_routes(_APP.app)
     yield
-    _APP.app.router.routes[:] = saved
+    sp_common._restore_routes(_APP.app, saved)
 
 
 def _cfg(assistants, *, mcp=None, host="127.0.0.1", allow_remote=False,

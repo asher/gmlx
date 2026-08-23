@@ -126,9 +126,10 @@ def test_check_no_engine_admits(monkeypatch):
 
 @pytest.fixture
 def app_routes():
-    saved = list(_APP.app.router.routes)
+    from gmlx.server_patches import _common as sp_common
+    saved = sp_common._snapshot_routes(_APP.app)
     yield _APP.app
-    _APP.app.router.routes[:] = saved
+    sp_common._restore_routes(_APP.app, saved)
 
 
 def test_route_rejects_with_503_body(app_routes, monkeypatch):
@@ -168,9 +169,9 @@ def test_route_at_cap_minus_one_serves(app_routes, monkeypatch):
         return {"ok": True}
 
     for path in ("/v1/chat/completions",):
-        route = next(r for r in _APP.app.router.routes
-                     if getattr(r, "path", None) == path
-                     and "POST" in (getattr(r, "methods", None) or ()))
+        from gmlx.server_patches._common import _find_route
+        route = _find_route(_APP.app, path, "POST")
+        assert route is not None
         import inspect
         _stub.__signature__ = inspect.signature(route.endpoint)
         from gmlx.server_patches._common import _remove_routes

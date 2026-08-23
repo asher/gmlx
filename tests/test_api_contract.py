@@ -29,9 +29,9 @@ _DOCS = Path(__file__).resolve().parents[1] / "docs" / "server-config.md"
 
 @pytest.fixture(autouse=True)
 def _restore_routes():
-    saved = list(_APP.app.router.routes)
+    saved = sp_common._snapshot_routes(_APP.app)
     yield
-    _APP.app.router.routes[:] = saved
+    sp_common._restore_routes(_APP.app, saved)
 
 
 # -- allowlist drift guards ------------------------------------------------
