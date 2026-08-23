@@ -1160,7 +1160,7 @@ def test_gpt_oss_norms_and_attention_via_canonical():
 def test_gpt_oss_attention_sinks_no_weight_suffix():
     # Per-head learned sinks are a raw array on the module (self.sinks), NOT a
     # sub-module, so the HF target has no ".weight". No canonical enum carries
-    # the GGUF `attn_sinks` name, so the override is load-bearing.
+    # the GGUF `attn_sinks` name, so mapping requires the override.
     r = d("gpt-oss", "blk.7.attn_sinks.weight")
     assert r.kind == MAP and r.bid == 7 and r.transform == "passthrough"
     assert r.hf_name == "model.layers.7.self_attn.sinks"

@@ -272,6 +272,50 @@ def test_deduct_shrinks_registration_floored_at_zero(monkeypatch):
     assert pd.untracked_weight_bytes() == 0
 
 
+def _fresh_streamed(monkeypatch):
+    _fresh_registry(monkeypatch)
+    monkeypatch.setattr(pd, "_STREAMED_TRACKED", {})
+
+
+def test_streamed_credit_raises_headroom(monkeypatch):
+    # allocator-tracked streamed expert arrays sit inside active memory but
+    # their pages are reclaimable file cache: without the add-back, an
+    # over-RAM streaming model reads ~-150 GB headroom and every request
+    # sheds from red (the 153 GB DSv4 verify)
+    _fresh_streamed(monkeypatch)
+    monkeypatch.setattr(
+        pd.mx, "device_info",
+        lambda: {"max_recommended_working_set_size": 120 * GB})
+    monkeypatch.setattr(pd.mx, "get_active_memory", lambda: 237 * GB)
+    assert pd.headroom_bytes() == -117 * GB
+    pd.note_streamed_tracked_bytes(156 * GB, key=("/models/moe.gguf",))
+    assert pd.headroom_bytes() == 39 * GB
+
+
+def test_streamed_credit_keyless_and_first_wins(monkeypatch):
+    _fresh_streamed(monkeypatch)
+    pd.note_streamed_tracked_bytes(10 * GB)          # keyless: dropped
+    assert pd.streamed_tracked_bytes() == 0
+    key = ("/models/moe.gguf",)
+    pd.note_streamed_tracked_bytes(156 * GB, key=key)
+    pd.note_streamed_tracked_bytes(156 * GB, key=key)  # reload: first wins
+    assert pd.streamed_tracked_bytes() == 156 * GB
+
+
+def test_forget_drops_streamed_credit_with_owner(monkeypatch):
+    # an evicted streaming model must stop crediting headroom, or the
+    # phantom credit overstates free working set for its successors
+    _fresh_streamed(monkeypatch)
+    key = ("/models/moe.gguf",)
+    pd.set_untracked_weights_owner("entry-a")
+    pd.note_untracked_weights(0.0, key=key)  # warm pass: tracked load
+    pd.note_streamed_tracked_bytes(156 * GB, key=key)
+    pd.set_untracked_weights_owner(None)
+    assert pd.streamed_tracked_bytes() == 156 * GB
+    pd.forget_untracked_weights("entry-a")
+    assert pd.streamed_tracked_bytes() == 0
+
+
 # --- arch score profiles -------------------------------------------------
 
 FLASH = pd.ScoreTransientProfile(heads=1, bytes_per_elem=4, depth_divisor=4)

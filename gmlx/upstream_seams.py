@@ -174,6 +174,20 @@ SEAMS: tuple[Seam, ...] = (
          "spec_engine.install_full_prompt_mtp_prefill", critical=True),
     Seam("mlx_vlm.generate.ar", "SpeculativeGenerationBatch.next",
          "spec_engine.install_continuous_batch_admission", critical=True),
+    Seam("mlx_vlm.generate.ar", "SpeculativeGenerationBatch.filter",
+         "spec_engine._filter_with_release (per-row release rides the "
+         "mark-finished contract; the rounds generator sheds via "
+         "stop_check)", critical=True),
+    Seam("mlx_vlm.generate.ar", "SpeculativeGenerationBatch.__len__",
+         "spec_engine._len_with_promotion (patched semantics are D-3's "
+         "hazard; decision modules count rows via _orig_len only)",
+         critical=True),
+    Seam("mlx_vlm.generate.ar", "GenerationBatch._eval_pending_state",
+         "governor shed ordering (filter under pressure requires "
+         "eval before the gather)", critical=True),
+    Seam("mlx_vlm.generate.ar", "BatchGenerator.remove",
+         "governor retire rung + tick_guard rebuild (queue pop / "
+         "prompt-batch clear / decode filter semantics)", critical=True),
     Seam("mlx_vlm.generate.ar", "run_speculative_server_rounds",
          "spec_engine.install_owned_spec_engine", critical=True),
     Seam("mlx_vlm.speculative.utils", "make_speculative_prompt_cache",
@@ -191,6 +205,9 @@ SEAMS: tuple[Seam, ...] = (
          "server_bridge_vlm (GGUF model resource loader)", critical=True),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._make_sampler",
          "server_patches.install_fast_sampler"),
+    Seam("mlx_vlm.server.generation", "ResponseGenerator._step",
+         "server_patches.row_failed (permanently failed rows delivered "
+         "to their response queues on the engine thread)", critical=True),
     Seam("mlx_vlm.server.generation", "GenerationArguments.to_template_kwargs",
          "server_patches (chat_template_kwargs transform)"),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._preprocess_request",
@@ -310,6 +327,17 @@ SEAMS: tuple[Seam, ...] = (
          "arrays_cache_fix (prepare wrap)"),
     Seam("mlx_vlm.models.cache", "BatchKVCache",
          "mtp_drafter / cache_snapshot row round-trip"),
+    Seam("mlx_vlm.models.cache", "BatchKVCache.filter",
+         "spec_engine per-row release + governor retire (physical row "
+         "drop through the cache's own filter)", critical=True),
+    Seam("mlx_vlm.models.cache", "BatchKVCache.extract",
+         "governor orange retire (contiguous single-row extract before "
+         "filter)", critical=True),
+    Seam("mlx_vlm.models.cache", "ArraysCache.extract",
+         "governor orange retire (GDN hybrid row extract)"),
+    Seam("mlx_vlm.models.cache", "_BaseCache.nbytes",
+         "governor green sampling + registered-cache bytes() protocol",
+         critical=True),
     Seam("mlx_vlm.models.cache", "BatchRotatingKVCache",
          "cache_compat (rollback attach, safe KV-quant exclusion)"),
     Seam("mlx_vlm.models.cache", "BufferedRotatingKVCache",
@@ -502,7 +530,9 @@ def vendored_upstream_collisions() -> list[str]:
 # Each is a package directory upstream, so a native arrival shows up as either
 # a <leaf>.py module or a <leaf>/ package.
 VENDORED_MLX_VLM_MODULES = {
-    "gmlx.muse_glimmer_vlm_model": "mlx_vlm.models.muse_glimmer",
+    # muse_glimmer model: shipped upstream in mlx-vlm 0.6.15; the graft is
+    # upstream-first so gmlx.muse_glimmer_vlm_model is dead code under this
+    # pin. Delete the module at the vendoring review.
     "gmlx.hy_v3_tools": "mlx_vlm.tool_parsers.hy_v3",
     "gmlx.muse_glimmer_tools": "mlx_vlm.tool_parsers.muse_glimmer",
 }

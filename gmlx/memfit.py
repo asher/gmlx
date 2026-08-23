@@ -27,8 +27,8 @@ FIT_FITS = "fits"
 FIT_TIGHT = "tight"
 FIT_OVER = "over"
 
-_TIGHT_SHARE = 0.65   # above this share of RAM, KV headroom gets scarce
-_OVER_SHARE = 0.85    # above this, the GPU path can't hold weights + cache
+# The share bars (0.65 tight, 0.85 over) live in capacity (the one
+# accounting, U4); classify_fit delegates to it.
 
 
 def total_ram_bytes() -> int | None:
@@ -42,17 +42,14 @@ def total_ram_bytes() -> int | None:
 
 def classify_fit(size_bytes: int, ram_bytes: int | None = None) -> str | None:
     """``fits`` / ``tight`` / ``over`` for a model of ``size_bytes``, or ``None``
-    when the size or RAM is unknown."""
+    when the size or RAM is unknown. The share bars are capacity's."""
+    from .capacity import classify_weight_share
+
     if ram_bytes is None:
         ram_bytes = total_ram_bytes()
     if not ram_bytes or not size_bytes or size_bytes <= 0:
         return None
-    share = size_bytes / ram_bytes
-    if share <= _TIGHT_SHARE:
-        return FIT_FITS
-    if share <= _OVER_SHARE:
-        return FIT_TIGHT
-    return FIT_OVER
+    return classify_weight_share(size_bytes, ram_bytes)
 
 
 def fit_label(fit: str | None) -> str:

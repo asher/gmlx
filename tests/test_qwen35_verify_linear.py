@@ -33,6 +33,8 @@ _COPIES = (
     "_target_verify_qlinear_header",
     "_target_verify_qmv_kernel",
     "_target_verify_qargmax_kernel",
+    "_target_verify_masked_qargmax_kernel",
+    "_can_target_verify_quantized_head",
     "_can_target_verify_quantized",
     "_target_verify_quantized_linear",
     "_decode_quantized_linears_fused",
@@ -76,6 +78,67 @@ def test_gemv_kernel_assignment_matches_upstream_source():
     assert _assign_source(vl, "_TARGET_VERIFY_GEMV") == _assign_source(
         _L, "_TARGET_VERIFY_GEMV"
     )
+
+
+def test_masked_source_assignment_matches_upstream_source():
+    """The masked-argmax Metal source is derived from the base argmax
+    source by the same replace upstream applies."""
+    assert _assign_source(
+        vl, "_TARGET_VERIFY_MASKED_QARGMAX_SOURCE"
+    ) == _assign_source(_L, "_TARGET_VERIFY_MASKED_QARGMAX_SOURCE")
+
+
+# ---------------------------------------------------------------------------
+# kquant leaves stay on the mlx-kquant kernel path
+# ---------------------------------------------------------------------------
+
+
+def test_kquant_leaf_declines_affine_fast_paths():
+    """A kquant leaf must decline every affine fast-path gate and reach its
+    own __call__ with the input untouched: that call is where mlx-kquant's
+    verify kernels engage (kq.quantized_matmul picks verify_qmv at verify
+    shapes). Four independent facts exclude it from the affine qmv/argmax/
+    masked-argmax kernels and the fused decode concat; if any one flips in
+    a future resplice or mlx-kquant change, re-audit the routing."""
+    kqnn = pytest.importorskip("mlx_kquant.nn")
+    kql = kqnn.KQuantLinear(512, 1024, False, "q6_k")
+
+    assert not isinstance(kql, nn.QuantizedLinear)
+    assert kql.mode != "affine"
+    assert kql.biases is None
+    assert kql.scales.dtype == mx.uint8
+
+    xv = mx.zeros((2, 5, 512), dtype=mx.bfloat16)  # verify-shaped
+    assert not vl._can_target_verify_quantized_head(kql)
+    assert not vl._can_target_verify_quantized(kql, xv)
+    assert vl._decode_quantized_linears_fused(
+        [kql] * 4, mx.zeros((1, 1, 512), dtype=mx.bfloat16)
+    ) is None
+
+
+def test_kquant_leaf_routes_to_own_forward(monkeypatch):
+    """verify_linear/verify_linears hand a kquant leaf straight to
+    linear(x): one call, the same array object, no timewise slicing and no
+    affine kernel in between."""
+    kqnn = pytest.importorskip("mlx_kquant.nn")
+    kql = kqnn.KQuantLinear(512, 1024, False, "q6_k")
+    calls = []
+    sentinel = mx.zeros((2, 5, 1024), dtype=mx.bfloat16)
+    monkeypatch.setattr(
+        kqnn.KQuantLinear,
+        "__call__",
+        lambda self, x: (calls.append(x), sentinel)[1],
+    )
+
+    xv = mx.zeros((2, 5, 512), dtype=mx.bfloat16)
+    out = vl.verify_linear(kql, xv, True)
+    assert out is sentinel
+    assert len(calls) == 1 and calls[0] is xv
+
+    calls.clear()
+    outs = vl.verify_linears((kql, kql), xv, True)
+    assert outs == (sentinel, sentinel)
+    assert len(calls) == 2 and all(c is xv for c in calls)
 
 
 # ---------------------------------------------------------------------------

@@ -56,3 +56,31 @@ def test_stash_wrapper_injects(monkeypatch):
     seen.clear()
     ar.BatchGenerator(SimpleNamespace(), None, completion_batch_size=3)
     assert seen["completion_batch_size"] == 3
+
+
+def test_stash_wrapper_clamps_full_width_prefill_group(monkeypatch):
+    # Stock admission needs prefill_batch_size free slots to form a
+    # prompt batch; a prefill group >= the width freezes insertion
+    # while any row decodes (8/8 served FIFO). The wrapper clamps the
+    # group to 1 only in that regime.
+    from mlx_vlm.generate import ar
+
+    import gmlx.spec_engine as spec_engine
+
+    class _BG:
+        def __init__(self, model, processor, **kwargs):
+            self.completion_batch_size = kwargs.get(
+                "completion_batch_size", 32)
+            self.prefill_batch_size = kwargs.get("prefill_batch_size", 8)
+
+    monkeypatch.setattr(ar, "BatchGenerator", _BG)
+    spec_engine._install_apc_manager_stash()
+
+    monkeypatch.setenv("GMLX_DECODE_BATCH", "8")
+    gen = ar.BatchGenerator(SimpleNamespace(), None)
+    assert gen.completion_batch_size == 8
+    assert gen.prefill_batch_size == 1
+
+    gen = ar.BatchGenerator(SimpleNamespace(), None,
+                            completion_batch_size=32)
+    assert gen.prefill_batch_size == 8

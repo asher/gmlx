@@ -128,13 +128,11 @@ def _gguf_footprint_bytes(model_path: str) -> int:
 
 
 def _default_budget_bytes() -> int:
-    """``_DEFAULT_BUDGET_FRACTION`` of the GPU's recommended working set."""
-    import mlx.core as mx
+    """``_DEFAULT_BUDGET_FRACTION`` of the GPU's recommended working set
+    (working-set source: capacity, the one accounting)."""
+    from .capacity import working_set_bytes
 
-    try:
-        working_set = int(mx.device_info()["max_recommended_working_set_size"])
-    except Exception:
-        working_set = _FALLBACK_WORKING_SET
+    working_set = working_set_bytes() or _FALLBACK_WORKING_SET
     return int(_DEFAULT_BUDGET_FRACTION * working_set)
 
 
@@ -645,6 +643,30 @@ class _ResidencyPool:
         from . import server_bridge_vlm as _serving
 
         _warn_if_batch_unsafe(model_path)
+        # U4: model load and swap take the same headroom check a request
+        # takes, and the capacity table is derived (header-based, no
+        # load needed) and gated before the box's biggest allocation
+        # starts. Both raise with the numbers; GMLX_OVERCOMMIT=1 skips.
+        from .capacity import (
+            install_boot_table,
+            preload_gate,
+            preload_gate_bytes,
+            streamed_expert_bytes,
+        )
+        gate_bytes = footprint
+        if getattr(build_spec, "stream", None) == "experts":
+            streamed = streamed_expert_bytes(str(model_path))
+            gate_bytes = preload_gate_bytes(footprint, "experts", streamed)
+            if streamed:
+                _log.info(
+                    "preload gate: stream=experts discounts %.1f GB of "
+                    "routed-expert bytes (gating on %.1f GB resident)",
+                    streamed / 1e9, gate_bytes / 1e9)
+        preload_gate(gate_bytes, str(model_path))
+        # The boot table feeds request admission (width/ctx budgets), so a
+        # streaming model's table must also price only the resident share:
+        # the expert stacks decode through the disk arena, not the KV budget.
+        install_boot_table(str(model_path), gate_bytes, str(model_path))
         scratch = _Scratch()
         token = _build_scratch.set(scratch)
         # Per-model load-param + APC/SSD-KV env window: set this model's vars
@@ -694,6 +716,10 @@ class _ResidencyPool:
                 rg = scratch.response_generator
                 if rg is not None:
                     rg.apc_manager = manager
+                try:
+                    manager.autosize(getattr(rg, "model", None))
+                except Exception:
+                    _log.warning("APC pool autosize skipped", exc_info=True)
         except BaseException:
             # A failed build never reaches _teardown: drop its partial
             # registrations here or they tax headroom forever.

@@ -81,6 +81,102 @@ class GmlxAPCManager(_apc.APCManager):
     override defers to the stock store instead.
     """
 
+    def autosize(self, model, budget_fraction: float = None) -> None:
+        """Size the caches to the box post-load. Pool: raise the block
+        cap to a working-budget share when APC_NUM_BLOCKS is unset
+        (blocks allocate lazily, so the cap costs nothing until
+        committed; never shrinks, committed blocks would dangle).
+        Exact tier: when APC_EXACT_CACHE_ENTRIES is unset, replace the
+        2-entry count cap with a byte budget (entries are full KV
+        snapshots; counting them says nothing about their cost)."""
+        if model is None:
+            return
+        if budget_fraction is None:
+            budget_fraction = _POOL_BUDGET_FRACTION
+        import mlx.core as mx
+
+        from .capacity import working_budget_bytes
+        from .mem_preflight import kv_layer_costs
+        from .prefill_decay import untracked_weight_bytes
+
+        costs = kv_layer_costs(model)
+        budget = working_budget_bytes()
+        if not costs or not budget:
+            return
+        per_tok = sum(bpt for _w, bpt in costs)
+        if per_tok <= 0:
+            return
+        # Stashed for stats: lets /metrics report committed pool bytes so
+        # harnesses can separate evictable cache growth from real residue.
+        self._pool_per_token_bytes = per_tok
+        weights = float(mx.get_active_memory()) + untracked_weight_bytes()
+        free = max(0.0, budget - weights)
+        if not os.environ.get("APC_EXACT_CACHE_ENTRIES"):
+            self._exact_budget_bytes = free * _EXACT_BUDGET_FRACTION
+            self._exact_cache_max = 64
+            _log.info("APC exact tier budget: %.1f GB (count cap 64)",
+                      self._exact_budget_bytes / 1e9)
+        if os.environ.get("APC_NUM_BLOCKS"):
+            return
+        target = int(free * budget_fraction
+                     // (self.block_size * per_tok))
+        # A committed block holds K+V arrays per layer; the pool competes
+        # with everything else against the Metal resource limit, which is
+        # what APC_MAX_POOL_TENSORS guards.
+        tensors_per_block = 2 * len(costs)
+        max_tensors = int(os.environ.get("APC_MAX_POOL_TENSORS", "450000"))
+        target = min(target, max_tensors // max(1, tensors_per_block))
+        if target <= self.num_blocks:
+            return
+        with self.lock:
+            for i in range(len(self.pool), target):
+                b = _apc.APCBlock(block_id=i)
+                self.pool.append(b)
+                self._free_push(b)
+            self.num_blocks = target
+        _log.info(
+            "APC pool auto-sized: %d blocks (%.1f GB cap, %.1f KB/token)",
+            target, target * self.block_size * per_tok / 1e9, per_tok / 1e3)
+
+    def _trim_exact_to_budget(self) -> None:
+        """Evict oldest exact entries until their bytes fit the budget
+        autosize stashed. No-op without a budget (explicit
+        APC_EXACT_CACHE_ENTRIES keeps stock count semantics)."""
+        budget = getattr(self, "_exact_budget_bytes", None)
+        if not budget:
+            return
+        from .serve_memtrace import _arrays, _leaf_caches
+
+        def entry_bytes(e):
+            # _leaf_caches unwraps CacheList layers (deepseek_v4 wraps
+            # local + pools per layer); walking the wrapper's vars sees
+            # cache objects, not arrays, and counts zero.
+            total = 0
+            for c in _leaf_caches(e.prompt_cache):
+                for v in vars(c).values():
+                    for a in _arrays(v):
+                        total += a.nbytes
+            return total
+
+        with self.lock:
+            sizes = {k: entry_bytes(e) for k, e in self._exact_cache.items()}
+            total = sum(sizes.values())
+            while total > budget and len(self._exact_cache) > 1:
+                k, _ = self._exact_cache.popitem(last=False)
+                total -= sizes.pop(k, 0)
+            # Mirror of pool_bytes for the exact tier: lets harnesses
+            # separate budgeted, evictable retention from real residue.
+            self.stats.exact_bytes = int(total)
+
+    def lookup_exact_cache(self, *args, **kwargs):
+        self._trim_exact_to_budget()
+        return super().lookup_exact_cache(*args, **kwargs)
+
+    def store_exact_cache(self, *args, **kwargs):
+        out = super().store_exact_cache(*args, **kwargs)
+        self._trim_exact_to_budget()
+        return out
+
     def stats_snapshot(self) -> dict:
         """Stock snapshot plus the gmlx ckpt-tier side counters (pure
         wrap: super() + merge). Visible at /v1/cache/stats -- a ckpt
@@ -90,6 +186,13 @@ class GmlxAPCManager(_apc.APCManager):
         snap = super().stats_snapshot()
         snap.update(ckpt_stats_snapshot(self))
         snap.update(spec_prefix_stats())
+        # Upstream's APCStats.snapshot is a fixed whitelist; the byte
+        # gauges the budget trims maintain have to be merged here or
+        # they never reach /metrics.
+        for key in ("pool_bytes", "exact_bytes"):
+            val = getattr(self.stats, key, None)
+            if val is not None:
+                snap[key] = int(val)
         return snap
 
     def reset_stats(self) -> None:
@@ -114,6 +217,73 @@ class GmlxAPCManager(_apc.APCManager):
         # lifetime and its pinned snapshots must not survive a reset.
         clear_all_spec_prefix_caches()
 
+    def governor_bytes(self) -> int:
+        """Resident GPU bytes this manager holds: committed pool blocks
+        plus exact-prefix clones. Attribute math only, no device sync;
+        the governor samples this on a slow cadence."""
+        total = 0
+        with self.lock:
+            for b in self.pool:
+                for arrs in (b.keys, b.values):
+                    if arrs:
+                        total += sum(a.nbytes for a in arrs)
+            for e in self._exact_cache.values():
+                for c in e.prompt_cache:
+                    nb = getattr(c, "nbytes", 0)
+                    total += int(nb) if isinstance(nb, int) else 0
+            idx = getattr(self, "_kq_ckpt_records", None)
+            for rec in (idx or {}).values():
+                total += int(getattr(rec, "nbytes", 0) or 0)
+        return total
+
+    def governor_evict(self, fraction: float) -> int:
+        """Evict ``fraction`` of reclaimable bytes for the governor's
+        orange rung: exact-prefix clones oldest-first, then unreferenced
+        pool blocks through the stock LRU eviction (hash entry removed,
+        slabs nulled, block returned empty to the free queue). Rows in
+        flight never lose blocks: only ref_cnt 0 blocks sit in the free
+        queue."""
+        fraction = min(1.0, max(0.0, float(fraction)))
+        freed = 0
+        # Ckpt records first: releasing them unpins their blocks, so the
+        # pool eviction below can reclaim those in the same pass. Without
+        # this the pinned share is invisible to red-band reclaim.
+        from .cache_snapshot import ckpt_governor_release
+        freed += ckpt_governor_release(self, fraction)
+        with self.lock:
+            n = len(self._exact_cache)
+            for _ in range(max(1, round(n * fraction)) if n else 0):
+                if not self._exact_cache:
+                    break
+                _, e = self._exact_cache.popitem(last=False)
+                for c in e.prompt_cache:
+                    nb = getattr(c, "nbytes", 0)
+                    freed += int(nb) if isinstance(nb, int) else 0
+            committed = sum(
+                1 for b in self.pool if b.keys and b.ref_cnt == 0)
+            target = int(committed * fraction)
+            evicted = 0
+            guard = len(self.pool)
+            while evicted < target and guard > 0:
+                guard -= 1
+                head = self._free_head
+                if head is None:
+                    break
+                had_slabs = bool(head.keys)
+                nb = (sum(a.nbytes for a in head.keys or ())
+                      + sum(a.nbytes for a in head.values or ()))
+                b = self._evict_lru()
+                if b is None:
+                    break
+                # Return the emptied block to the queue tail; empty
+                # blocks cycling there is harmless (order matters only
+                # among committed blocks).
+                self._free_push(b)
+                if had_slabs:
+                    freed += nb
+                    evicted += 1
+        return freed
+
     def store_ckpt_blocks(self, token_ids, layer_keys, layer_values,
                           *, extra_hash=0, disk=True):
         """Block store for checkpoint chains: always per-block -- the
@@ -132,10 +302,13 @@ class GmlxAPCManager(_apc.APCManager):
 
         h = _store_helpers()
         if h is None:
-            return super().store_kv_blocks(
+            out = super().store_kv_blocks(
                 token_ids, layer_keys, layer_values,
                 extra_hash=extra_hash,
                 skip_first_n_tokens=skip_first_n_tokens)
+            # The upstream base store has the same inline exact branch.
+            self._trim_exact_to_budget()
+            return out
         is_ckpt = _ckpt_disk is not None
         allow_disk = self.disk is not None and (_ckpt_disk is None
                                                 or _ckpt_disk)
@@ -191,6 +364,10 @@ class GmlxAPCManager(_apc.APCManager):
                         self._exact_cache.popitem(last=False)
                     self.stats.exact_stores += 1
                     layer_major_stored = True
+                    # Inline exact entry: enforce the byte budget here
+                    # too, not just in store_exact_cache (lock is an
+                    # RLock, safe to re-enter).
+                    self._trim_exact_to_budget()
             parent = _seed_parent
             for i in range(skip_full):
                 chunk = tuple(
@@ -281,8 +458,7 @@ class GmlxAPCManager(_apc.APCManager):
                 b.parent_hash = parent
                 b.token_ids = chunk
                 b.extra_hash = extra_hash
-                b.keys = k_slabs
-                b.values = v_slabs
+                b.set_kv(k_slabs, v_slabs)
                 b.ref_cnt = 1
                 self.hash_table[h2] = b
                 new_blocks.append(b)
@@ -294,8 +470,12 @@ class GmlxAPCManager(_apc.APCManager):
                 try:
                     # The shard crosses to the disk writer thread; hand it
                     # evaluated arrays only (loop paths that skip the slab
-                    # copies leave these lazy).
-                    mx.eval(list(layer_keys) + list(layer_values))
+                    # copies leave these lazy). Owned survivors: the slices
+                    # are the live generation's KV, retained by the prompt
+                    # cache; the guard drains before this handler continues.
+                    from .eval_guard import guard
+                    guard.eval(*(list(layer_keys) + list(layer_values)),
+                               site="apc-disk-save", owner="owned")
                     self.disk.save_layer_major_blocks(
                         disk_blocks, layer_keys, layer_values, self.block_size
                     )
@@ -305,7 +485,54 @@ class GmlxAPCManager(_apc.APCManager):
                         "APC disk save scheduling failed: %s", e)
             self.stats.pool_used = sum(
                 1 for x in self.pool if x.block_hash is not None)
+            self.stats.pool_bytes = int(
+                self.stats.pool_used * self.block_size
+                * getattr(self, "_pool_per_token_bytes", 0))
             return new_blocks
+
+
+# The pool is the cheapest use of free RAM (recompute avoided) and it
+# self-registers with the governor as evictable, so it can take a large
+# share: pressure reclaims it before any request is shed.
+_POOL_BUDGET_FRACTION = 0.5
+_EXACT_BUDGET_FRACTION = 0.15
+_BLOCK_SIZES = (16, 32, 64, 128, 256)
+
+
+def _auto_block_size(model_path):
+    """Smallest block size whose tensor-capped pool covers the byte
+    budget autosize will ask for. Committed blocks cost K+V arrays per
+    layer, so at block_size 16 the Metal resource limit (proxied by
+    APC_MAX_POOL_TENSORS) binds far below the byte budget on deep
+    workloads. None keeps the stock default (non-GGUF path, unreadable
+    header, or 16 already suffices)."""
+    if not model_path:
+        return None
+    try:
+        from .capacity import working_budget_bytes
+        from .tool_preflight import _kv_costs, _shards, _synth_config
+
+        shards = _shards(str(model_path))
+        cfg = _synth_config(shards[0])
+        costs = _kv_costs(cfg) if cfg else None
+        budget = working_budget_bytes()
+        if not (costs and budget):
+            return None
+        per_tok = sum(bpt for _w, bpt in costs)
+        if per_tok <= 0:
+            return None
+        weights = float(sum(os.path.getsize(p) for p in shards))
+        budget_tokens = (max(0.0, budget - weights)
+                         * _POOL_BUDGET_FRACTION / per_tok)
+        max_tensors = int(os.environ.get("APC_MAX_POOL_TENSORS", "450000"))
+        need = 2 * len(costs) * budget_tokens / max(1, max_tensors)
+        for bs in _BLOCK_SIZES:
+            if bs >= need:
+                return bs if bs > _apc.DEFAULT_BLOCK_SIZE else None
+        return _BLOCK_SIZES[-1]
+    except Exception:
+        _log.debug("APC block-size derivation skipped", exc_info=True)
+        return None
 
 
 def build_apc_manager(model_namespace=None):
@@ -321,7 +548,10 @@ def build_apc_manager(model_namespace=None):
     """
     if os.environ.get("GMLX_APC_ENABLED") != "1":
         return None
-    block_size = int(os.environ.get("APC_BLOCK_SIZE", _apc.DEFAULT_BLOCK_SIZE))
+    env_bs = os.environ.get("APC_BLOCK_SIZE")
+    block_size = (int(env_bs) if env_bs else
+                  _auto_block_size(model_namespace)
+                  or _apc.DEFAULT_BLOCK_SIZE)
     num_blocks = int(os.environ.get("APC_NUM_BLOCKS", _apc.DEFAULT_NUM_BLOCKS))
 
     disk = None

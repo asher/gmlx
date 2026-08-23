@@ -39,7 +39,7 @@ def _restore_mlxvlm():
         "build_gen_args": _APP._build_gen_args,
         "snapshot": _APP._server_runtime_snapshot,
         "get_model_path": _UTILS.get_model_path,
-        "routes": list(fastapi_app.router.routes),
+        "routes": sp_common._snapshot_routes(fastapi_app),
         "handlers": dict(fastapi_app.exception_handlers),
         "deps": getattr(getattr(_APP, "_protocol_deps", None), "build_gen_args", None),
         "pool": getattr(_PKG, "_kq_residency_pool", None),
@@ -74,7 +74,7 @@ def _restore_mlxvlm():
     _APP._build_gen_args = saved["build_gen_args"]
     _APP._server_runtime_snapshot = saved["snapshot"]
     _UTILS.get_model_path = saved["get_model_path"]
-    fastapi_app.router.routes[:] = saved["routes"]
+    sp_common._restore_routes(fastapi_app, saved["routes"])
     fastapi_app.exception_handlers.clear()
     fastapi_app.exception_handlers.update(saved["handlers"])
     if getattr(_APP, "_protocol_deps", None) is not None and saved["deps"] is not None:
@@ -820,7 +820,8 @@ def test_stream_chunk_keeps_real_usage_and_timings():
     ``choices: []``) are real values, not ``None`` - they must be preserved."""
     Chunk, _, _, Usage, Timings = _stream_schemas()
     sp.install_vanilla_stream_chunks()
-    timings = Timings(**{f: 0.0 for f in Timings.model_fields})
+    timings = Timings(**{f: 0.0 for f, info in Timings.model_fields.items()
+                         if info.is_required()})
     out = Chunk(model="m", choices=[],
                 usage=Usage(prompt_tokens=3, completion_tokens=2, total_tokens=5),
                 timings=timings).model_dump_json()

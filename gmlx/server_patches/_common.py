@@ -58,10 +58,50 @@ def _get_pool():
     return getattr(pkg, "_kq_residency_pool", None) if pkg else None
 
 
+def _iter_route_lists(app):
+    """Yield every list that can hold API routes. fastapi < 0.137 inlines
+    include_router contents into ``app.router.routes``; 0.137+ keeps them
+    inside ``_IncludedRouter`` wrappers (the real router hangs off
+    ``original_router``), so route surgery must walk both levels."""
+    stack = [app.router.routes]
+    seen = set()
+    while stack:
+        routes = stack.pop()
+        if id(routes) in seen:
+            continue
+        seen.add(id(routes))
+        yield routes
+        for r in routes:
+            for holder in (r, getattr(r, "original_router", None)):
+                sub = getattr(holder, "routes", None) if holder else None
+                if isinstance(sub, list):
+                    stack.append(sub)
+
+
+def _invalidate_route_caches(app) -> None:
+    """Drop _IncludedRouter's lazily built match cache after mutating a
+    wrapped router's routes list; it only rebuilds on a version bump."""
+    for r in app.router.routes:
+        if hasattr(r, "_effective_candidates_version"):
+            r._effective_candidates_version = None
+            r._effective_candidates = []
+
+
+def _find_route(app, path, method):
+    """The route serving ``method path``, wherever fastapi keeps it."""
+    for routes in _iter_route_lists(app):
+        for r in routes:
+            if (getattr(r, "path", None) == path
+                    and method in (getattr(r, "methods", None) or ())):
+                return r
+    return None
+
+
 def _remove_routes(app, *paths) -> None:
-    keep = [r for r in app.router.routes
-            if getattr(r, "path", None) not in paths]
-    app.router.routes[:] = keep
+    for routes in list(_iter_route_lists(app)):
+        routes[:] = [r for r in routes
+                     if getattr(r, "path", None) not in paths]
+    _invalidate_route_caches(app)
 
 
 def _wrap_post_routes(app, paths, flag, make_endpoint) -> None:
@@ -74,11 +114,7 @@ def _wrap_post_routes(app, paths, flag, make_endpoint) -> None:
     returns the bare async replacement; this helper owns the signature/flag copy
     and the remove+re-add, so the boilerplate lives in one place."""
     for path in paths:
-        route = next(
-            (r for r in app.router.routes
-             if getattr(r, "path", None) == path
-             and "POST" in (getattr(r, "methods", None) or ())),
-            None)
+        route = _find_route(app, path, "POST")
         if route is None or getattr(route.endpoint, flag, False):
             continue
         original = route.endpoint
@@ -123,3 +159,18 @@ def _error_content(path: str, status: int, err_type: str, message: str,
         return {"type": "error",
                 "error": {"type": a_type, "message": message, **extra}}
     return {"error": {"type": err_type, "message": message, **extra}}
+
+
+def _snapshot_routes(app):
+    """Pair every reachable route list with a copy, for exact restore.
+
+    Restoring writes back into the same list objects (the wrapper's
+    inner list included), so surgery done between snapshot and restore
+    is fully undone under either fastapi route layout."""
+    return [(routes, list(routes)) for routes in _iter_route_lists(app)]
+
+
+def _restore_routes(app, snapshot) -> None:
+    for routes, copy in snapshot:
+        routes[:] = copy
+    _invalidate_route_caches(app)

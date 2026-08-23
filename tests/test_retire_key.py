@@ -127,7 +127,9 @@ def test_prompt_stable_lcp_renders_without_assistant_once():
     ctx["render"] = render
     assert rk.prompt_stable_lcp(ctx, [1, 2, 3, 9]) == 3
     assert rk.prompt_stable_lcp(ctx, [1, 2, 3, 9]) == 3   # ctx memo
-    assert calls == [(1, False)]          # no assistant message appended
+    # One render only (the memo), no assistant appended: the toolless
+    # branch appends the dummy-user demotion probe, so two messages.
+    assert calls == [(2, False)]
 
 
 def test_prompt_stable_lcp_failure_memoized():
@@ -185,6 +187,36 @@ def test_build_assistant_message_no_open_block_stays_content():
     assert "reasoning_content" not in msg
 
 
+def test_build_assistant_message_harmony_channel_split():
+    # Harmony templates raise on raw <|channel|> tags in content, which
+    # made every next-turn render prediction fail and retirement store
+    # full-depth unmatchable keys (gpt-oss cert: 406 ids_diverged).
+    ctx = _fake_ctx([1])
+    ctx["_gen_prompt"] = "<|start|>assistant"
+    msg = rk.build_assistant_message(
+        ctx, "<|channel|>analysis<|message|>weigh the options<|end|>"
+             "<|start|>assistant<|channel|>final<|message|>the answer")
+    assert msg["content"] == "the answer"
+    assert msg["reasoning_content"] == "weigh the options"
+    assert msg["thinking"] == "weigh the options"
+    assert "<|channel|>" not in msg["content"]
+
+
+def test_build_assistant_message_gemma_channel_split():
+    ctx = _fake_ctx([1])
+    ctx["_gen_prompt"] = "<|turn>model\n"
+    msg = rk.build_assistant_message(
+        ctx, "<|channel>thought\nponder the ask\n<channel|>the answer")
+    assert msg["content"] == "the answer"
+    assert msg["reasoning_content"] == "ponder the ask"
+
+
+def test_channel_split_ignores_markerless_text():
+    assert rk._channel_split("plain reply, no markers") == (None, None)
+    r, c = rk._channel_split("<|channel|>final<|message|>answer only")
+    assert r is None and c is None  # nothing classified as reasoning
+
+
 def test_predict_render_gets_generation_prompt_off():
     seen = {}
 
@@ -205,7 +237,7 @@ def test_predict_render_gets_generation_prompt_off():
 def test_block_store_truncates_ids(monkeypatch):
     seen = {}
 
-    def harvest(manager, cache, row, ids, extra_hash=0):
+    def harvest(manager, cache, ids, batch_idx=None, extra_hash=0):
         seen["ids"] = list(ids)
         return ["b"]
 

@@ -1173,6 +1173,10 @@ def _run_bench_depths(args) -> int:
         convs = _load_chat_dataset(ds_id, ds_split)
         print(f"[bench] {len(convs)} conversations loaded")
 
+    from .tool_preflight import check_or_exit
+
+    check_or_exit(args.gguf, ctx_tokens=max(depths) + decode_tokens,
+                  streaming=getattr(args, "stream_experts", False))
     preset_native_fp_wire_env(args)
     drafter = None
     if speculative:
@@ -1362,11 +1366,14 @@ def _run_generate(args) -> int:
     from .chat import fold_thinking_flag, parse_logit_bias, parse_template_config
     from .generation import generate
     from .loader import load_model, preset_native_fp_wire_env
+    from .tool_preflight import check_or_exit
 
     # Parse before the model load so a JSON typo fails fast.
     template_kwargs = fold_thinking_flag(
         args, parse_template_config(args.chat_template_config))
     logit_bias = parse_logit_bias(args.logit_bias)
+    check_or_exit(args.gguf,
+                  streaming=getattr(args, "stream_experts", False))
     preset_native_fp_wire_env(args)
 
     from .thinking_budget import install_finish_thinking_key
@@ -2242,6 +2249,11 @@ def _print_umbrella_help(prog: str = "gmlx") -> None:
 
 def umbrella_main(argv: list[str] | None = None) -> int:
     """Dispatch ``gmlx <verb> ...`` to the matching entry point."""
+    from ._exitfix import guarded
+    return guarded(_umbrella_impl, argv)
+
+
+def _umbrella_impl(argv: list[str] | None = None) -> int:
     import warnings
 
     # Validation warnings (unrecognized config keys, ...) are user-facing on
@@ -2397,4 +2409,5 @@ def umbrella_main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    from gmlx._exitfix import guarded
+    sys.exit(guarded(main))

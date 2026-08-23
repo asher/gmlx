@@ -201,7 +201,11 @@ def test_row_snapshot_buffered_rotating_declines():
 
 def _manager():
     from mlx_vlm.apc import APCManager
-    return APCManager(num_blocks=256, block_size=16)
+    m = APCManager(num_blocks=256, block_size=16)
+    # 0.6.15 declines exact stores under APC_EXACT_MIN_TOKENS (default 16);
+    # these tests use short sequences on purpose.
+    m.exact_cache_min_tokens = 1
+    return m
 
 
 def test_retirement_store_exact_round_trip():
@@ -574,6 +578,7 @@ def test_sidecar_disk_restart(tmp_path):
     drafter = _FakeDrafter([_kv_row(24, 0)])
     mgr1 = APCManager(num_blocks=64, block_size=16,
                       disk=DiskBlockStore(tmp_path / "apc", namespace="t"))
+    mgr1.exact_cache_min_tokens = 1
     try:
         assert drafter_sidecar_store(mgr1, drafter, ids, 20)
     finally:
@@ -581,6 +586,7 @@ def test_sidecar_disk_restart(tmp_path):
 
     mgr2 = APCManager(num_blocks=64, block_size=16,
                       disk=DiskBlockStore(tmp_path / "apc", namespace="t"))
+    mgr2.exact_cache_min_tokens = 1
     try:
         probe = ids + [99]
         side = drafter_sidecar_lookup(mgr2, probe, 20)

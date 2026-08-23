@@ -1385,10 +1385,12 @@ is worse than an error. Two guardrails:
   they cannot drift.
 
 The standard sampling parameters (`max_tokens` / `max_output_tokens`,
-`temperature`, `top_p`, `top_k`, `min_p`, `repetition_penalty`,
-`presence_penalty`, `frequency_penalty` and their `*_context_size`
-companions, `enable_thinking`, `thinking_budget`) are honored on all three
-generation dialects. The rest:
+`temperature`, `top_p`, `top_k`, `min_p`, `top_n_sigma`, `p_less`,
+`typical_p`, `repetition_penalty`, `presence_penalty`, `frequency_penalty`
+and their `*_context_size` companions, `enable_thinking`,
+`thinking_budget`, and the OpenAI standard `reasoning` /
+`reasoning_effort` controls) are honored on all three generation
+dialects. The rest:
 
 | Parameter | `/v1/chat/completions` | `/v1/responses` | `/v1/messages` | Notes |
 |-----------|------------------------|-----------------|----------------|-------|

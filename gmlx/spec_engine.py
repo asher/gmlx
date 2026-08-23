@@ -153,6 +153,17 @@ def _install_apc_manager_stash() -> None:
         except Exception:
             pass
         _orig_init(self, model, processor, **kwargs)
+        # Stock admission forms a prompt batch only when free slots >=
+        # prefill_batch_size. Stock pairs 32/8 (24 slots stay open); the
+        # injected width cap pairs 8/8, where a full prefill group equals
+        # the whole batch and no request can join while any row decodes:
+        # serving degrades to FIFO. Groups of 1 keep insertion live at
+        # every width; B>1 prompt batching is no throughput win (see the
+        # ckpt formation gate below).
+        pbs = getattr(self, "prefill_batch_size", None)
+        cbs = getattr(self, "completion_batch_size", None)
+        if pbs is not None and cbs is not None and pbs >= cbs:
+            self.prefill_batch_size = 1
         # APC arrived armed but upstream's quantized-KV opt-out dropped it
         # (ar.py nulls the manager whenever kv_bits is set; no tier serves
         # quantized caches). The mode probe still reads "block" for these
@@ -931,6 +942,21 @@ def _plain_anchor_init(batch) -> None:
         return
     _exact_anchor_arm(batch, meta, int(meta.get("checkpoint_len") or 0),
                       int(meta.get("prefix_len") or 0))
+    # Retirement stash, independent of the anchor outcome: exact-tier
+    # rows retire their full post-decode row at filter (the per-turn
+    # store the post-prefill exact store cannot cover), warm rows
+    # included -- the decode cache holds the full sequence either way.
+    if not _SPEC_APC_RETIRE_DISABLED and batch.prompt_cache:
+        from .retire_key import lookup_render_ctx
+        ids_list = [int(t) for t in meta["full_input_ids"]]
+        batch.prompt_cache[0]._kq_apc_retire = {
+            "full_ids": ids_list,
+            "extra_hash": int(meta.get("extra_hash", 0)),
+            "mode": "exact",
+            "manager": manager,
+            "render_ctx": lookup_render_ctx(ids_list),
+            "gen": [],
+        }
 
 
 _ANCHOR_PICK_FLAG = "_kq_exact_anchor_pick"
@@ -1006,35 +1032,85 @@ def _install_exact_anchor_pick() -> None:
 _PLAIN_DECODE_FLAG = "_kq_ckpt_plain_decode"
 
 
+def _retire_rows(gb) -> dict:
+    """uid -> retire-stash registry on a generation batch.
+
+    Stashes arm on the B=1 prompt batch's cache object (the only stable
+    home before the decode batch exists); the first decode-side touch
+    lifts them here so they survive ``extend`` rebuilding the cache
+    objects at continuous-batch injection."""
+    reg = getattr(gb, "_kq_apc_retire_rows", None)
+    if reg is None:
+        reg = {}
+        gb._kq_apc_retire_rows = reg
+    return reg
+
+
+def _lift_cache_stash(gb) -> None:
+    if not getattr(gb, "prompt_cache", None) or len(gb.uids) != 1:
+        return
+    stash = getattr(gb.prompt_cache[0], "_kq_apc_retire", None)
+    if stash is not None:
+        gb.prompt_cache[0]._kq_apc_retire = None
+        _retire_rows(gb)[gb.uids[0]] = stash
+
+
 def _plain_step_tick(gb, out) -> None:
-    """Per-token accounting + snapshot tick for a lone stock-path ckpt
-    row. Runs per step, so a deterministic failure disables the hook for
-    the request on first strike instead of emitting a traceback per
-    token; dropping ``gen`` also quiets retirement (its offset check
-    would skip anyway on a broken count)."""
-    stash = None
+    """Per-token accounting + snapshot tick for stock-path retire rows.
+
+    Rows are tracked per uid so accounting survives ``extend`` merges.
+    Runs per step, so a deterministic failure disables the hook for that
+    row on first strike instead of emitting a traceback per token;
+    dropping ``gen`` also quiets retirement (its offset check would skip
+    anyway on a broken count). The decode-time snapshot ring stays B=1
+    (its clones ride the live single-row caches); rows in a B>1 batch
+    retire snapshot-free, under their verbatim key or an LCP cap the
+    tier arm can serve without a ring."""
     try:
-        if len(gb.uids) == 1 and gb.prompt_cache:
-            stash = getattr(gb.prompt_cache[0], "_kq_apc_retire", None)
-            if (stash is not None and stash.get("mode") == "ckpt"
-                    and "gen" in stash):
-                stash["gen"].append(int(out[0][0]))
+        _lift_cache_stash(gb)
+        reg = getattr(gb, "_kq_apc_retire_rows", None)
+    except Exception:
+        _log.warning("APC plain decode hook failed; continuing",
+                     exc_info=True)
+        return
+    if not reg:
+        return
+    # _step returns (tokens, lps, top_idx, top_lp); slot 0 is the flat
+    # per-row token list.
+    rows = out[0] if isinstance(out, tuple) else out
+    if rows is None:
+        return
+    solo = len(gb.uids) == 1
+    for i, uid in enumerate(gb.uids):
+        stash = reg.get(uid)
+        if stash is None or "gen" not in stash:
+            continue
+        tok = rows[i] if i < len(rows) else None
+        if tok is None:
+            continue                    # no emission for this row this tick
+        try:
+            if isinstance(tok, (list, tuple)):
+                tok = tok[0]
+            stash["gen"].append(int(tok))
+            if solo and stash.get("mode") == "ckpt":
                 from .cache_snapshot import decode_ckpt_tick
                 decode_ckpt_tick(stash, gb.prompt_cache, stash["gen"])
-    except Exception:
-        if stash is not None:
+        except Exception:
             stash.pop("gen", None)
             stash["snap_ok"] = False
-        _log.warning("APC plain decode hook failed; disabled for "
-                     "this request", exc_info=True)
+            _log.warning("APC plain decode hook failed; disabled for "
+                         "this request", exc_info=True)
 
 
 def _plain_retire(stash: dict, prompt_cache: list) -> None:
-    """Retire a finished stock-path B=1 ckpt row.
+    """Retire a finished stock-path row off a single-row cache list.
 
     Offset invariants mirror ``speculative._retire_b1``: the stock step
     loop forwards each token as it emits it, so a clean finish leaves
     ``offset == len(seq)`` (an abort between steps leaves the same).
+    ``stash["mode"]`` picks the tier arm: "ckpt" stores blocks +
+    sidecar, "exact" a whole-row snapshot (DeepSeek-V4-class pooling
+    stacks).
     """
     try:
         manager = stash.get("manager")
@@ -1058,7 +1134,8 @@ def _plain_retire(stash: dict, prompt_cache: list) -> None:
             lcp = next_turn_lcp(stash.get("render_ctx"), seq, gen)
         max_len = lcp if lcp is not None and lcp < len(seq) else None
         ok = retirement_store(
-            manager, "ckpt", seq, prompt_cache, row=0,
+            manager, stash.get("mode") or "ckpt", seq, prompt_cache,
+            row=0,
             extra_hash=int(stash.get("extra_hash", 0)), max_len=max_len,
             decode_snaps=stash.get("snaps"))
         if ok:
@@ -1068,18 +1145,24 @@ def _plain_retire(stash: dict, prompt_cache: list) -> None:
 
 
 def _install_plain_ckpt_decode() -> None:
-    """Stock-path decode hooks for the checkpoint tier.
+    """Stock-path decode hooks for the retirement store (ckpt + exact).
 
-    Token accounting and decode-time snapshots ride ``_step``; retirement
-    fires from ``filter`` when the lone row leaves (finish or client
-    abort), while its plain single-row caches are still live. B>1
-    batches are untouched: a mid-flight merge rebuilds the cache objects
-    and the stash dies with them (intended v1 scope). Idempotent."""
+    Token accounting rides ``_step``; retirement fires from ``filter``
+    for every leaving row (finish or client abort). A lone row retires
+    off its live single-row caches; a row leaving a B>1 batch is first
+    extracted via ``row_snapshot`` (padding-trimmed clones with row-true
+    offsets), so retirement survives concurrency instead of firing only
+    when the batch happens to drain to one row. Stashes live in a
+    uid-keyed registry lifted across ``extend`` (the seam that rebuilds
+    cache objects at continuous-batch injection).
+    GMLX_APC_RETIRE_BATCH=0 restores the lone-row-only v1 scope.
+    Idempotent."""
     from mlx_vlm.generate.ar import GenerationBatch
     if getattr(GenerationBatch._step, _PLAIN_DECODE_FLAG, False):
         return
     _orig_step = GenerationBatch._step
     _orig_filter = GenerationBatch.filter
+    _orig_extend = GenerationBatch.extend
 
     def _step_with_ckpt(self):
         out = _orig_step(self)
@@ -1088,21 +1171,53 @@ def _install_plain_ckpt_decode() -> None:
 
     def _filter_with_ckpt(self, keep):
         try:
-            if not keep and len(self.uids) == 1 and self.prompt_cache:
-                stash = getattr(self.prompt_cache[0], "_kq_apc_retire",
-                                None)
-                if stash is not None and stash.get("mode") == "ckpt":
-                    self.prompt_cache[0]._kq_apc_retire = None
-                    _plain_retire(stash, self.prompt_cache)
+            _lift_cache_stash(self)
+            reg = getattr(self, "_kq_apc_retire_rows", None)
+            if reg and self.prompt_cache:
+                keep_set = set(keep)
+                solo = len(self.uids) == 1
+                batched_ok = os.environ.get(
+                    "GMLX_APC_RETIRE_BATCH") != "0"
+                for i, uid in enumerate(self.uids):
+                    if i in keep_set:
+                        continue
+                    stash = reg.pop(uid, None)
+                    if stash is None:
+                        continue
+                    if solo:
+                        _plain_retire(stash, self.prompt_cache)
+                    elif batched_ok:
+                        from .cache_snapshot import row_snapshot
+                        rows = row_snapshot(self.prompt_cache, i)
+                        if rows is None:
+                            _log.info("APC retire skipped: row %d "
+                                      "extract unavailable", i)
+                        else:
+                            _plain_retire(stash, rows)
         except Exception:
             _log.warning("APC plain retire hook failed; continuing",
                          exc_info=True)
         _orig_filter(self, keep)
 
+    def _extend_with_ckpt(self, other):
+        try:
+            _lift_cache_stash(self)
+            _lift_cache_stash(other)
+            other_reg = getattr(other, "_kq_apc_retire_rows", None)
+            if other_reg:
+                _retire_rows(self).update(other_reg)
+                other._kq_apc_retire_rows = {}
+        except Exception:
+            _log.warning("APC retire stash carry failed; continuing",
+                         exc_info=True)
+        _orig_extend(self, other)
+
     _step_with_ckpt.__dict__[_PLAIN_DECODE_FLAG] = True
     _filter_with_ckpt.__dict__[_PLAIN_DECODE_FLAG] = True
+    _extend_with_ckpt.__dict__[_PLAIN_DECODE_FLAG] = True
     GenerationBatch._step = _step_with_ckpt
     GenerationBatch.filter = _filter_with_ckpt
+    GenerationBatch.extend = _extend_with_ckpt
 
 
 def _mtp_prefill_init(batch) -> None:
@@ -1594,12 +1709,69 @@ def install_continuous_batch_admission() -> None:
     def _release_if_finished(self) -> None:
         if _orig_len(self) == 0:
             _release_heavy_state(self)
+            return
+        _shed_finished_attr_rows(self)
+
+    def _shed_finished_attr_rows(self) -> None:
+        """Per-row release of the batch-held start-time snapshots.
+
+        The live rounds generator sheds a finished or filtered row's KV,
+        drafter state, and its own hidden/shared_kv slices at the next
+        round boundary; the batch object's prefill-time copies (hidden,
+        shared_kv_states, prompt_tokens, first_tokens) stayed resident
+        until the whole batch finished. Slice them by the surviving rows
+        instead. Injected rows carry no snapshot here (their state rides
+        the injection queue into the generator), so the snapshot covers
+        the first first_tokens.shape[0] physical rows only. Slices are
+        lazy and ride the tick's eval; nothing here forces a sync.
+
+        Runs only once the rounds generator holds the state: pre-start,
+        _start_rounds still needs the snapshots row-aligned with the
+        caches (finished rows included; the generator stop_checks them
+        out itself), so a first-token finish must not slice here."""
+        if self._rounds_iter is None:
+            return
+        ft = getattr(self, "first_tokens", None)
+        if ft is None or getattr(self, _RELEASED_FLAG, False):
+            return
+        rows = getattr(self, "_kq_attr_rows", None)
+        if rows is None:
+            try:
+                rows = self._kq_attr_rows = list(range(ft.shape[0]))
+            except Exception:
+                return
+        keep = [p for p in rows
+                if p < len(self._finished) and not self._finished[p]]
+        if len(keep) == len(rows):
+            return
+        if not keep:
+            self.hidden = None
+            self.shared_kv_states = None
+            self.prompt_tokens = None
+            self.first_tokens = None
+            self._kq_attr_rows = []
+            return
+        keep_set = set(keep)
+        pos = [i for i, p in enumerate(rows) if p in keep_set]
+        idx = mx.array(pos, dtype=mx.int32)
+        for name in ("hidden", "prompt_tokens", "first_tokens"):
+            arr = getattr(self, name, None)
+            if arr is not None:
+                setattr(self, name, arr[idx])
+        kv = getattr(self, "shared_kv_states", None)
+        if isinstance(kv, dict) and kv:
+            # New dict, new arrays: the generator may still hold (and
+            # slice) the originals; never mutate a possibly shared dict.
+            self.shared_kv_states = {
+                k: (K[idx], V[idx]) for k, (K, V) in kv.items()}
+        self._kq_attr_rows = keep
 
     # 2. Buffer extend() instead of raising
     def _buffered_extend(self, other):
         active = sum(not d for d in self._finished)
         if active == 0:
             pending = getattr(self, "_pending_injections", [])
+            self.__dict__.pop("_kq_attr_rows", None)
             self.__dict__.update(other.__dict__)
             self._pending_injections = pending
             setattr(self, _RELEASED_FLAG, False)
@@ -1624,6 +1796,7 @@ def install_continuous_batch_admission() -> None:
             if pending:
                 other = pending.pop(0)
                 remaining = pending[:]
+                self.__dict__.pop("_kq_attr_rows", None)
                 self.__dict__.update(other.__dict__)
                 self._pending_injections = remaining
                 setattr(self, _RELEASED_FLAG, False)
@@ -1635,7 +1808,50 @@ def install_continuous_batch_admission() -> None:
 
     _orig_filter = SpecBatch.filter
 
+    def _compact_prestart_rows(self, keep) -> None:
+        """Physically drop rows from a batch whose rounds generator has
+        not started: filter the caches through their own filter (lifting
+        host caches first) and slice snapshots plus bookkeeping to the
+        same keep list. Pre-start, the batch object owns all state, so
+        the drop frees the rows' bytes immediately instead of marking
+        them finished and waiting for a generator that has no round
+        boundary yet."""
+        idx = mx.array(keep, dtype=mx.int32)
+        self.prompt_cache = [_lift_host_cache(c) for c in self.prompt_cache]
+        for c in self.prompt_cache:
+            c.filter(idx)
+        for name in ("hidden", "prompt_tokens", "first_tokens"):
+            arr = getattr(self, name, None)
+            if arr is not None:
+                setattr(self, name, arr[idx])
+        kv = getattr(self, "shared_kv_states", None)
+        if isinstance(kv, dict) and kv:
+            self.shared_kv_states = {
+                k: (K[idx], V[idx]) for k, (K, V) in kv.items()}
+        self._all_uids = [self._all_uids[i] for i in keep]
+        self.uids = list(self._all_uids)
+        self.max_tokens = [self.max_tokens[i] for i in keep]
+        self._num_tokens = [self._num_tokens[i] for i in keep]
+        self._finished = [False] * len(keep)
+        self.__dict__.pop("_kq_attr_rows", None)
+
     def _filter_with_release(self, keep):
+        # Pre-start strict subset (a cancel or a governor retire landing
+        # before the first tick): compact physically. Live or degenerate
+        # cases keep the upstream mark-finished contract; the running
+        # generator sheds the row at its next round boundary and the
+        # snapshot shed below covers the batch-held copies.
+        if (len(keep) < len(self.uids)
+                and keep
+                and self._rounds_iter is None
+                and not getattr(self, _RELEASED_FLAG, False)
+                and getattr(self, "first_tokens", None) is not None
+                and self.uids == self._all_uids
+                and not any(self._finished)
+                and all(hasattr(c, "filter") or hasattr(type(c), "merge")
+                        for c in self.prompt_cache)):
+            _compact_prestart_rows(self, list(keep))
+            return
         _orig_filter(self, keep)
         _release_if_finished(self)
 

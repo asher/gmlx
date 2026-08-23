@@ -491,7 +491,7 @@ def _synth_diffusion_gemma(meta, shapes, config: dict) -> None:
     # `generation_config.json`, but the llama.cpp GGUF conversion drops them
     # (it carries only `diffusion.canvas_length` + the scalar eos), so each is
     # read from `diffusion.eb_*` when present and otherwise filled from the
-    # canonical DiffusionGemma default below. Baking the defaults is load-bearing
+    # canonical DiffusionGemma default below. Baking the defaults is required
     # for both reported behaviours: without `diffusion_stopping_config` the
     # denoiser never early-stops and runs the full `max_denoising_steps` schedule
     # every canvas (~3-4x slower decode), and without the turn-end token in the
@@ -885,7 +885,7 @@ def _synth_gemma3n(meta, shapes, config: dict) -> None:
     (already on ``config``) plus the gemma-3n-specific knobs into a
     ``text_config`` dict and replaces ``config`` with ``{model_type, text_config}``.
 
-    Two GGUF<->HF conversions are load-bearing:
+    Two GGUF<->HF conversions must be exact:
       - ``sliding_window_pattern`` (1=sliding, 0=full) -> ``layer_types``.
       - ``activation_sparsity_scale`` stores the *precomputed* gelu-topk std
         multiplier m = sqrt(2)*erfinv(2p-1); mlx_lm wants the raw sparsity fraction
@@ -1037,7 +1037,7 @@ def _synth_gemma(meta, shapes, config: dict) -> None:
     extractor produces. Gemma is always tied (no output.weight tensor) and its
     RMSNorm bakes +1 (undone at remap via gemma_norm_minus_one).
 
-    The one load-bearing detail is head_dim: Gemma-1 7B has head_dim=256 while
+    The one detail that must come from the header is head_dim: Gemma-1 7B has head_dim=256 while
     hidden_size // num_attention_heads = 192, so head_dim must come from
     `attention.key_length` (which the universal extractor reads) - never the
     hidden//heads fallback. Guard it explicitly."""

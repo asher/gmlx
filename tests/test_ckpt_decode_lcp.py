@@ -170,21 +170,25 @@ def test_retirement_rotating_uses_grid_snap():
     assert man.stats_snapshot()["exact_stores"] == 0
 
 
-def test_retirement_snap_past_lcp_falls_back_to_full():
-    """A snapshot past the replayable prefix stays unusable, but the
-    retirement now stores the full sequence under its verbatim key
-    (raw-continuation clients) instead of storing nothing."""
+def test_retirement_predicted_diverged_suppresses_fallback():
+    """cap < len only when the next-turn render prediction succeeded:
+    the client provably re-renders, so a full-sequence verbatim store
+    can never match its next turn -- it ages in the pool and burns an
+    ids_diverged decline per later same-chain lookup (gemma-4/gpt-oss
+    cert arms, ~410 each). With no snapshot at or below the boundary
+    the retirement stores nothing, counted."""
     man = APCManager(num_blocks=64, block_size=16)
     cache = make_hybrid_cache(96, seed=4)
     ids = list(range(96))
     snaps = [(90, _arr_states(make_hybrid_cache(90, seed=93)))]
-    assert retirement_store(man, "ckpt", ids, cache, max_len=80,
-                            decode_snaps=snaps)
+    assert not retirement_store(man, "ckpt", ids, cache, max_len=80,
+                                decode_snaps=snaps)
     _, got = ckpt_lookup(man, ids[:90] + [1], extra_hash=0)
     assert got == 0                       # the past-cap snap stayed unused
     _, got = ckpt_lookup(man, ids + [1], extra_hash=0)
-    assert got == 96                      # verbatim fallback record
-    assert cs.ckpt_stats_snapshot(man)["retire_fallback_full"] == 1
+    assert got == 0                       # no verbatim fallback record
+    snap = cs.ckpt_stats_snapshot(man)
+    assert snap["retire_fallback_suppressed"] == 1
 
 
 def test_retirement_snap_path_never_falls_back():
@@ -194,7 +198,90 @@ def test_retirement_snap_path_never_falls_back():
     snaps = [(64, _arr_states(make_hybrid_cache(64, seed=94)))]
     assert retirement_store(man, "ckpt", ids, cache, max_len=80,
                             decode_snaps=snaps)
-    assert cs.ckpt_stats_snapshot(man)["retire_fallback_full"] == 0
+    assert cs.ckpt_stats_snapshot(man)["retire_fallback_suppressed"] == 0
+
+
+def test_governor_evict_releases_ckpt_records():
+    """The governor's red-band reclaim must reach ckpt records: releasing
+    them unpins their blocks so the pool eviction in the same pass can
+    reclaim those too (122B run-3 shed: pinned share invisible to
+    reclaim). Fraction 1.0 empties the index; freed bytes and the
+    ckpt_governor_released counter report the work."""
+    from gmlx.apc_manager import GmlxAPCManager
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    for i in range(3):
+        ids = list(range(i * 1000, i * 1000 + 64))
+        assert ckpt_store(man, ids, make_hybrid_cache(64, seed=40 + i))
+    idx = man._kq_ckpt_records
+    assert len(idx) == 3
+    pinned = sum(1 for b in man.pool if b.ref_cnt > 0)
+    assert pinned > 0
+    before = man.governor_bytes()
+    freed = man.governor_evict(1.0)
+    assert freed > 0
+    assert len(man._kq_ckpt_records) == 0
+    assert all(b.ref_cnt == 0 for b in man.pool)
+    assert man.governor_bytes() < before
+    assert cs.ckpt_stats_snapshot(man)["ckpt_governor_released"] == 3
+
+
+def test_governor_evict_fraction_releases_lru_first():
+    from gmlx.apc_manager import GmlxAPCManager
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    for i in range(4):
+        ids = list(range(i * 1000, i * 1000 + 32))
+        assert ckpt_store(man, ids, make_hybrid_cache(32, seed=50 + i))
+    man.governor_evict(0.5)
+    keys = [k[0][0] for k in man._kq_ckpt_records.keys()]
+    # Oldest two chains released, newest two kept.
+    assert keys == [2000, 3000]
+
+
+def test_pool_eviction_prefers_fattest_chain():
+    """Pool-pressure eviction charges the chain group holding the most
+    blocks, deepest record first, so under round-robin sessions no
+    store evicts the record the next session is about to reuse (the
+    122B run-4 starvation was plain LRU doing exactly that). The lean
+    chain survives; the fat chain degrades to its shallower record."""
+    man = APCManager(num_blocks=16, block_size=16)
+    ids_a = list(range(1000, 1160))
+    ids_b = list(range(5000, 5064))
+    # Chain A: anchor at 96 (6 blocks) extended to 160 (10 blocks,
+    # prefix shared). Chain B: one record at 64 (4 blocks).
+    assert ckpt_store(man, ids_a[:96], make_hybrid_cache(96, seed=60))
+    assert ckpt_store(man, ids_a, make_hybrid_cache(160, seed=61))
+    assert ckpt_store(man, ids_b, make_hybrid_cache(64, seed=62))
+    # Pool full (10 + 4 unique blocks, 2 free): a 4-block store for a
+    # third chain must evict, and the victim is A's deepest record.
+    ids_c = list(range(9000, 9064))
+    assert ckpt_store(man, ids_c, make_hybrid_cache(64, seed=63))
+    ps = {r.p for r in cs._ckpt_records(man).values()
+          if r.ids[0] == 1000}
+    assert 160 not in ps and 96 in ps
+    _, got = ckpt_lookup(man, ids_b + [1], extra_hash=0)
+    assert got == 64                    # lean chain untouched
+    _, got = ckpt_lookup(man, ids_a + [1], extra_hash=0)
+    assert got == 96                    # fat chain degrades, not zeroed
+
+
+def test_pool_eviction_counts_own_chain_recycle():
+    """A store whose own chain group is the fattest recycles its own
+    record and the ckpt_evict_own_chain counter says so. A clean extend
+    shares its prefix blocks and rarely evicts, so the pressured case
+    is a divergent branch: same first block, disjoint tail."""
+    man = APCManager(num_blocks=12, block_size=16)
+    ids_a = list(range(1000, 1096))
+    assert ckpt_store(man, ids_a, make_hybrid_cache(96, seed=70))
+    assert ckpt_store(man, list(range(5000, 5032)),
+                      make_hybrid_cache(32, seed=71))
+    # Branch of A: shares only the first block, needs 7 fresh of 4
+    # free; A (6 held) is the fattest group, so A's own record is the
+    # victim, not the bystander.
+    branch = ids_a[:16] + list(range(7000, 7112))
+    assert ckpt_store(man, branch, make_hybrid_cache(128, seed=72))
+    assert cs.ckpt_stats_snapshot(man)["ckpt_evict_own_chain"] >= 1
+    _, got = ckpt_lookup(man, list(range(5000, 5032)) + [1], extra_hash=0)
+    assert got == 32                    # bystander chain survives
 
 
 def test_record_byte_budget_evicts_lru(monkeypatch):

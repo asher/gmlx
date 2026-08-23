@@ -129,7 +129,7 @@ def _needs_tiled_v_patch(config: dict) -> bool:
 
     Note: the synthesized config also carries ``kv_head_layout="tiled"`` for
     forward-compat, but the *installed* mlx-lm has no consumer for that field -
-    this monkey-patch is the load-bearing mechanism today.
+    this monkey-patch is the only mechanism today.
 
     qwen3_next is EXCLUDED despite its asymmetric heads (16 k / 32 v): its
     GGUFs keep V heads in HF grouped order (the legacy fused ssm_in layout is

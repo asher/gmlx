@@ -4,7 +4,7 @@ Every buffer-read binding releases the GIL around its wait
 (to_scalar, tolist, the nd-array export), so a thread stuck on an
 unsignaled event does not freeze the process: other threads keep
 running and an in-process watchdog thread can observe the hang and
-kill the process itself. This is load-bearing for supervision design
+kill the process itself. Supervision design rests on this
 (a hung worker answers health checks; only the stalled thread's own
 progress signal goes quiet).
 

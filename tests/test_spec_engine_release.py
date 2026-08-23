@@ -223,5 +223,172 @@ def test_owned_round_wrapper_frame_pins_nothing(monkeypatch):
     gen.close()
 
 
+# --- per-row release (U3 prerequisite) ---------------------------------
+
+
+class _FilterCache:
+    """Batch-class stand-in: records filter keep lists."""
+
+    def __init__(self):
+        self.filtered = []
+
+    def filter(self, idx):
+        self.filtered.append([int(i) for i in idx.tolist()])
+
+    def extend(self, other):
+        pass
+
+
+def _make_dict_batch(ar, *, uids, max_tokens, cache=None):
+    B = len(uids)
+    return ar.SpeculativeGenerationBatch(
+        model=object(),
+        draft_model=_Drafter(),
+        draft_kind="mtp",
+        uids=list(uids),
+        first_tokens=mx.array([5] * B),
+        prompt_cache=[cache if cache is not None else _Entry()],
+        sampler=None,
+        stop_criteria=lambda tok: False,
+        max_tokens=list(max_tokens),
+        hidden=mx.zeros((B, 1, 8)),
+        shared_kv_states={"l0": (mx.zeros((B, 2, 4)), mx.ones((B, 2, 4)))},
+        prompt_tokens=mx.zeros((B, 3), dtype=mx.int32),
+        greedy_sampling=True,
+    )
+
+
+def test_live_filter_sheds_snapshot_rows(monkeypatch):
+    # A row removed while the rounds generator runs keeps the upstream
+    # mark-finished contract (the generator sheds its KV at the round
+    # boundary) but the batch-held start-time snapshots must slice now.
+    from mlx_vlm.generate import ar
+
+    install_continuous_batch_admission()
+
+    def fake_rounds(model, draft_model, prompt_cache, hidden, **kw):
+        while True:
+            yield [11, 12, 13], None
+
+    monkeypatch.setattr(ar, "run_speculative_server_rounds", fake_rounds)
+    batch = _make_dict_batch(ar, uids=(0, 1, 2), max_tokens=(100,) * 3)
+    cache = batch.prompt_cache[0]
+    batch.next()  # first tokens
+    batch.next()  # rounds started
+    assert batch._rounds_iter is not None
+
+    batch.filter([0, 2])  # drop uid 1 mid-flight
+
+    assert batch.uids == [0, 2]
+    assert batch._finished == [False, True, False]
+    assert batch.first_tokens.shape == (2,)
+    assert batch.hidden.shape == (2, 1, 8)
+    assert batch.prompt_tokens.shape == (2, 3)
+    K, V = batch.shared_kv_states["l0"]
+    assert K.shape == (2, 2, 4) and V.shape == (2, 2, 4)
+    assert batch._kq_attr_rows == [0, 2]
+    assert batch.prompt_cache[0] is cache  # generator-owned; untouched
+
+
+def test_natural_finish_sheds_snapshot_rows(monkeypatch):
+    from mlx_vlm.generate import ar
+
+    install_continuous_batch_admission()
+
+    def fake_rounds(model, draft_model, prompt_cache, hidden, **kw):
+        while True:
+            yield [11, 21], None
+
+    monkeypatch.setattr(ar, "run_speculative_server_rounds", fake_rounds)
+    batch = _make_dict_batch(ar, uids=(0, 1), max_tokens=(100, 2))
+    batch.next()  # first tokens: row 1 at 1/2
+    out = batch.next()  # row 1 hits length
+    assert any(r.uid == 1 and r.finish_reason == "length" for r in out)
+
+    assert batch.first_tokens.shape == (1,)
+    assert batch.hidden.shape == (1, 1, 8)
+    K, _ = batch.shared_kv_states["l0"]
+    assert K.shape == (1, 2, 4)
+    assert batch._kq_attr_rows == [0]
+
+
+def test_first_token_finish_defers_shed_until_rounds_start(monkeypatch):
+    # Pre-start, _start_rounds still needs snapshots row-aligned with
+    # the caches; the shed must wait for the generator to own the state.
+    from mlx_vlm.generate import ar
+
+    install_continuous_batch_admission()
+
+    def fake_rounds(model, draft_model, prompt_cache, hidden, **kw):
+        while True:
+            yield [11, 21], None
+
+    monkeypatch.setattr(ar, "run_speculative_server_rounds", fake_rounds)
+    batch = _make_dict_batch(ar, uids=(0, 1), max_tokens=(100, 1))
+    out = batch.next()  # row 1 finishes on its first token
+    assert any(r.uid == 1 and r.finish_reason == "length" for r in out)
+    assert batch.first_tokens.shape == (2,)  # deferred: rounds not started
+
+    batch.next()  # rounds start; shed catches up
+    assert batch.first_tokens.shape == (1,)
+    assert batch._kq_attr_rows == [0]
+
+
+def test_prestart_filter_compacts_rows(monkeypatch):
+    from mlx_vlm.generate import ar
+
+    install_continuous_batch_admission()
+    cache = _FilterCache()
+    batch = _make_dict_batch(ar, uids=(0, 1, 2), max_tokens=(9, 9, 9),
+                             cache=cache)
+
+    batch.filter([0, 2])  # cancel uid 1 before the first tick
+
+    assert cache.filtered == [[0, 2]]
+    assert batch._all_uids == [0, 2] and batch.uids == [0, 2]
+    assert batch._finished == [False, False]
+    assert batch._num_tokens == [0, 0]
+    assert batch.max_tokens == [9, 9]
+    assert batch.first_tokens.shape == (2,)
+    assert batch.hidden.shape == (2, 1, 8)
+    K, V = batch.shared_kv_states["l0"]
+    assert K.shape == (2, 2, 4) and V.shape == (2, 2, 4)
+    assert len(batch) == 2
+
+
+def test_prestart_abort_releases_fully(monkeypatch):
+    from mlx_vlm.generate import ar
+
+    install_continuous_batch_admission()
+    batch = _make_dict_batch(ar, uids=(0, 1), max_tokens=(9, 9))
+    batch.filter([])
+
+    assert getattr(batch, _RELEASED_FLAG, False) is True
+    assert batch.prompt_cache == []
+    assert batch.hidden is None
+    assert batch.shared_kv_states is None
+    assert batch.first_tokens is None
+
+
+def test_promotion_drops_stale_attr_rows(monkeypatch):
+    from mlx_vlm.generate import ar
+
+    install_continuous_batch_admission()
+
+    def fake_rounds(model, draft_model, prompt_cache, hidden, **kw):
+        yield [11], None
+
+    monkeypatch.setattr(ar, "run_speculative_server_rounds", fake_rounds)
+    batch = _make_batch(ar, max_tokens=2)
+    batch.next()
+    batch.next()  # finishes + releases
+    batch.__dict__["_kq_attr_rows"] = [7]  # stale survivor
+
+    fresh = _make_batch(ar, max_tokens=5, uids=(1,))
+    batch._pending_injections = [fresh]
+    assert len(batch) == 1  # promotion adopts the pending batch
+    assert "_kq_attr_rows" not in batch.__dict__
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

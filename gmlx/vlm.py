@@ -1625,7 +1625,7 @@ def _synthesize_gemma4_unified_processor(tokenizer, mm_meta: dict):
     1e-6). So mean = std = 0.5 (the SigLIP [-1, 1] convention gemma-4 vision uses)
     and the GGUF's ``clip.vision.image_mean/std`` = [0]/[1] placeholders produce
     the same embedder output to ~1e-6. We keep mean = std = 0.5 to stay faithful
-    to the documented gemma-4 preprocessing; it is not load-bearing for parity.
+    to the documented gemma-4 preprocessing; parity does not depend on it.
     """
     from mlx_vlm.models.gemma4_unified.processing_gemma4_unified import (
         Gemma4UnifiedAudioFeatureExtractor, Gemma4UnifiedImageProcessor,

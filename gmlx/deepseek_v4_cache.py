@@ -11,7 +11,7 @@ them) so cache-type resolution by module attribute keeps working.
 Delete this file once installed mlx-lm ships PoolingCache natively.
 
 The one-update undo log (``trim(n)``, n <= 2, after verify writes that may
-complete pool windows) is load-bearing for MTP draft rejection - see
+complete pool windows) is what makes MTP draft rejection correct - see
 gmlx/deepseek_v4_mtp.py. The rotating-cache undo wrap at the bottom of
 this file is the matching piece for ``RotatingKVCache`` (port of omlx
 patches/mlx_lm_mtp/cache_rollback.py, extended to 3-wide verifies for S=3
@@ -391,6 +391,14 @@ class PoolingCache(_BaseCache):
     def meta_state(self, v):
         self.ratio = v
 
+    @classmethod
+    def from_state(cls, state, meta_state):
+        # APC clone path: the state setter needs ratio (buffer alloc), so
+        # construct before restoring rather than relying on setter order.
+        c = cls(meta_state)
+        c.state = state
+        return c
+
     def is_trimmable(self):
         # Trim-by-1 contract (MTP draft rejection): possible while the last
         # token still sits in the remainder buffer, or via the one-update
@@ -767,6 +775,13 @@ class BatchPoolingCache(_BaseCache):
     @meta_state.setter
     def meta_state(self, v):
         self.ratio, self.remainder, self._pool_lengths, self._processed = v
+
+    @classmethod
+    def from_state(cls, state, meta_state):
+        c = cls(meta_state[0], [0] * len(meta_state[1]))
+        c.meta_state = meta_state
+        c.state = state
+        return c
 
     def is_trimmable(self):
         # Trim-by-1 contract (MTP draft rejection): possible while every

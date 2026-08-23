@@ -263,6 +263,20 @@ def install_runtime_snapshot_enrichment() -> None:
         except Exception:
             pass
         try:
+            from ..governor import governor_stats
+
+            base["governor"] = governor_stats()
+        except Exception:
+            pass
+        try:
+            from ..capacity import get_table
+
+            cap = get_table()
+            if cap is not None:
+                base["capacity"] = cap
+        except Exception:
+            pass
+        try:
             from ..queue_cap import queue_cap_stats
 
             base["queue"] = queue_cap_stats()
@@ -563,6 +577,10 @@ def install_embeddings_route(embeddings_model: str | None) -> None:
     thread (``subservice.SingleWorker``), so requests serialize against each
     other but interleave freely with LLM batch decode."""
     if not embeddings_model:
+        # mlx-vlm >= 0.6.15 ships a stock /v1/embeddings route; the no-config
+        # contract is a 404, so drop it rather than let it hub-load a model.
+        _remove_routes(importlib.import_module("mlx_vlm.server.app").app,
+                       "/embeddings", "/v1/embeddings")
         return
     from fastapi.responses import JSONResponse
     from starlette.concurrency import run_in_threadpool

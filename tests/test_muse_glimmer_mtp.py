@@ -3,7 +3,7 @@ verify/rollback walk, on a tiny random model (no GGUF, no weights).
 
 The seam widens every engine-facing hidden to ``[trunk | cap ...]`` so the
 drafter can read the target's residuals without an engine change. Two things
-have to hold for that to be safe, and both are load-bearing:
+have to hold for that to be safe:
 
 - the logits hooks must slice the trunk back out, and
 - the slice must be materialized before it reaches the logit head, which is a

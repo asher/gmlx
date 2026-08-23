@@ -191,7 +191,7 @@ def test_prefill_from_target_hidden_chunked_feed(monkeypatch, chunk, h_len, n):
     # The head seed must feed the SAME (token, hidden) pairs in the same
     # order regardless of chunk size, and seed from the final position. A
     # one-shot full-length pass materializes attention quadratically in the
-    # prompt (~30 GB at 32k), so the loop is load-bearing for memory; this
+    # prompt (~30 GB at 32k), so memory depends on the loop; this
     # pins its slicing arithmetic. Numerical equivalence across a real chunk
     # boundary is covered by the model-gated prefill-parity suite.
     from gmlx import mtp_drafter as md

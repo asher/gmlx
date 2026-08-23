@@ -25,7 +25,12 @@ def _upstream_default() -> int:
 
 
 def decode_batch() -> int:
-    """Effective serve-path decode concurrency, always positive."""
+    """Effective serve-path decode concurrency, always positive.
+
+    An explicit GMLX_DECODE_BATCH wins; the default is bounded by the
+    boot capacity table's frontier width when one is installed (U4:
+    min(default, widest batch that still reaches a working context)),
+    so a near-capacity model never boots wider than it can hold."""
     raw = os.environ.get("GMLX_DECODE_BATCH", "").strip()
     if raw:
         try:
@@ -36,4 +41,12 @@ def decode_batch() -> int:
             return v
         if v == 0:
             return _upstream_default()
+    try:
+        from .capacity import frontier_width
+
+        fw = frontier_width()
+        if fw:
+            return min(DEFAULT_DECODE_BATCH, fw)
+    except Exception:
+        pass
     return DEFAULT_DECODE_BATCH

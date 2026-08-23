@@ -51,7 +51,7 @@ import sys
 from contextvars import ContextVar
 
 from mlx_vlm import tokenizer_utils as _mlxvlm_tok
-from mlx_vlm.models.text_only import Model as TextOnlyModel
+from gmlx.vlm_text_only import Model as TextOnlyModel
 from mlx_vlm.utils import StoppingCriteria
 
 from .drafter_protocol import native_block_size
@@ -780,6 +780,11 @@ def install_gguf_server_bridge() -> None:
     generation = importlib.import_module("mlx_vlm.server.generation")
     if getattr(generation, _BRIDGE_FLAG, False):
         return
+
+    # Engine threads must not exit while holding thread-local compile
+    # cache entries (mlx 0.32.1 TSD segfault; see _exitfix).
+    from ._exitfix import install_engine_thread_guard
+    install_engine_thread_guard(generation)
 
     original = generation.load_model_resources
 

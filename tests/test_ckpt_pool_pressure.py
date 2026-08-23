@@ -20,10 +20,15 @@ def _ids(p):
     return list(range(300, 300 + p))
 
 
-def test_store_evicts_lru_records_under_pool_pressure():
+def test_store_evicts_deepest_own_chain_record_under_pool_pressure():
     # 10-block pool: rec48 pins 3 main + 2 window, rec64 shares the main
     # prefix and adds 1 main + 2 window (8 pinned). The p=80 store needs
-    # 1 main + 2 window fresh blocks with only 2 free.
+    # 1 main + 2 window fresh blocks with only 2 free. Fat-chain
+    # eviction (the 122B run-4 starvation fix) recycles the storing
+    # chain's own deepest stale record: rec64 is superseded by the
+    # incoming p=80, while the shallow rec48 keeps serving shorter
+    # prefixes and branches (plain LRU evicted the oldest record and
+    # starved cross-session adoption round-robin).
     man = GmlxAPCManager(num_blocks=10, block_size=16)
     assert ckpt_store(man, _ids(48), make_swa_cache(48, seed=1), extra_hash=0)
     assert ckpt_store(man, _ids(64), make_swa_cache(64, seed=2), extra_hash=0)
@@ -31,9 +36,10 @@ def test_store_evicts_lru_records_under_pool_pressure():
     snap = man.stats_snapshot()
     assert snap["ckpt_pool_evictions"] >= 1
     assert snap["ckpt_declines"].get("short_chain") is None
-    # oldest record evicted, newest stored record intact and adoptable
+    assert snap["ckpt_evict_own_chain"] >= 1
+    # deepest superseded record evicted; shallow and newest both live
     ps = {rec.p for rec in _ckpt_records(man).values()}
-    assert 48 not in ps and 80 in ps
+    assert 64 not in ps and 48 in ps and 80 in ps
     warm, got = ckpt_lookup(man, _ids(80) + [1, 2], extra_hash=0)
     assert got == 80
 

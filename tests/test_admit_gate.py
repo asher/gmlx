@@ -231,6 +231,208 @@ def test_update_kv_rates_and_projection(monkeypatch):
     assert "kv" in parts and "reserve" in parts
 
 
+class FakeStateCache:
+    """Offset-less constant-size state (GDN/conv), ArraysCache-shaped."""
+
+    def __init__(self, rows=1):
+        self.cache = [mx.zeros((rows, 4, 128, 32), dtype=mx.float16)]
+
+
+def test_state_cache_is_row_const_not_rate(monkeypatch):
+    import gmlx.prefill_decay as pd
+
+    monkeypatch.setenv("GMLX_ADMIT_RESERVE_GB", "2")
+    g = FakeGen(rows=1)
+    kv = g._generation_batch.prompt_cache[0]
+    state = FakeStateCache(rows=1)
+    g._generation_batch.prompt_cache.append(state)
+    sm.update_kv_rates(g)
+    assert "FakeStateCache" not in g._kq_admit_kv_rates
+    state_bytes = state.cache[0].nbytes
+    assert g._kq_admit_spec_row_const == pytest.approx(state_bytes)
+    assert g._kq_admit_live_depth == 100
+
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 10e9)
+    per_tok = (kv.keys.nbytes + kv.values.nbytes) / kv.offset
+    projected, head, parts = sm.project_admission(g, [_pending(2, 300, 200)])
+    kv_total = per_tok * 2 * 512 + state_bytes * 2
+    kv_new = kv_total - (kv.keys.nbytes + kv.values.nbytes + state_bytes)
+    assert projected == pytest.approx(
+        kv_new + pd.score_transient_bytes(g.model, None, 500)
+        + sm.admit_reserve_bytes(0), rel=0.05)
+
+
+class FakeRotKV(FakeKV):
+    pass
+
+
+class FakeQuantKV:
+    """Quantized storage: (data, scales, biases) tuples, offset-bearing."""
+
+    def __init__(self, rows=1, length=256, offset=100):
+        self.keys = (mx.zeros((rows, 4, length, 8), dtype=mx.uint32),
+                     mx.zeros((rows, 4, length, 1), dtype=mx.float16),
+                     mx.zeros((rows, 4, length, 1), dtype=mx.float16))
+        self.values = (mx.zeros((rows, 4, length, 8), dtype=mx.uint32),
+                       mx.zeros((rows, 4, length, 1), dtype=mx.float16),
+                       mx.zeros((rows, 4, length, 1), dtype=mx.float16))
+        self.offset = offset
+
+
+def _zoo_gen():
+    g = FakeGen(rows=1)
+    g._generation_batch.prompt_cache = [
+        FakeKV(offset=100),
+        FakeRotKV(offset=100, window=128),
+        FakeQuantKV(offset=100),
+        FakeStateCache(),
+    ]
+    return g
+
+
+def test_cache_zoo_rates_and_consistency(monkeypatch, caplog):
+    import gmlx.prefill_decay as pd
+
+    monkeypatch.setenv("GMLX_ADMIT_RESERVE_GB", "2")
+    g = _zoo_gen()
+    sm.update_kv_rates(g)
+    rates = g._kq_admit_kv_rates
+    assert set(rates) == {"FakeKV", "FakeRotKV", "FakeQuantKV"}
+    assert rates["FakeRotKV"]["window"] == 128
+    assert g._kq_admit_spec_row_const > 0  # state cache landed here
+
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 10e9)
+    with caplog.at_level("WARNING"):
+        out = sm.project_admission(g, [_pending(2, 300, 200)])
+    assert out is not None
+    assert "projection rescaled" not in caplog.text
+
+
+def test_poisoned_rate_is_rescaled(monkeypatch, caplog):
+    import gmlx.prefill_decay as pd
+
+    monkeypatch.setenv("GMLX_ADMIT_RESERVE_GB", "2")
+    g = FakeGen(rows=1)
+    kv = g._generation_batch.prompt_cache[0]
+    honest_per_tok = (kv.keys.nbytes + kv.values.nbytes) / kv.offset
+    # Poison the live kind: the EWMA merge keeps only kinds present in
+    # the fresh walk, so the bad rate must ride an existing kind.
+    g._kq_admit_kv_rates = {"FakeKV": {"rate": 1e9, "window": None}}
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 10e9)
+    with caplog.at_level("WARNING"):
+        projected, head, parts = sm.project_admission(
+            g, [_pending(2, 300, 200)])
+    assert "projection rescaled" in caplog.text
+    honest_kv_new = honest_per_tok * 2 * 512 - (kv.keys.nbytes
+                                                + kv.values.nbytes)
+    assert projected < 10 * (honest_kv_new
+                             + pd.score_transient_bytes(g.model, None, 500)
+                             + sm.admit_reserve_bytes(0))
+
+
+def test_understated_rate_is_rescaled_up(monkeypatch, caplog):
+    import gmlx.prefill_decay as pd
+
+    monkeypatch.setenv("GMLX_ADMIT_RESERVE_GB", "2")
+    g = FakeGen(rows=1)
+    kv = g._generation_batch.prompt_cache[0]
+    honest_per_tok = (kv.keys.nbytes + kv.values.nbytes) / kv.offset
+    g._kq_admit_kv_rates = {"FakeKV": {"rate": honest_per_tok * 1e-3,
+                                       "window": None}}
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 10e9)
+    with caplog.at_level("WARNING"):
+        projected, head, parts = sm.project_admission(
+            g, [_pending(2, 300, 200)])
+    assert "projection rescaled" in caplog.text
+    live = kv.keys.nbytes + kv.values.nbytes
+    # rescale restores the honest scale: kv_total ~= live * depth growth
+    assert projected >= 0.5 * (honest_per_tok * 2 * 512 - live)
+
+
+def _spec_gen(rows=1):
+    g = FakeGen(rows=rows)
+    b = g._generation_batch
+    b.hidden = mx.zeros((rows, 16, 8))            # row const
+    b.first_tokens = mx.zeros((rows,), dtype=mx.int32)
+    b.shared_kv_states = [mx.zeros((rows, 4, 64))]  # depth scaled
+    g.draft_model = SimpleNamespace(_cache=[FakeKV(rows=rows, offset=100)])
+    return g
+
+
+def test_spec_state_bytes_split():
+    g = _spec_gen()
+    depth_scaled, row_const = sm.spec_state_bytes(g)
+    dkv = g.draft_model._cache[0]
+    assert depth_scaled == (g._generation_batch.shared_kv_states[0].nbytes
+                            + dkv.keys.nbytes + dkv.values.nbytes)
+    assert row_const == (g._generation_batch.hidden.nbytes
+                         + g._generation_batch.first_tokens.nbytes)
+    plain = FakeGen(rows=1)
+    assert sm.spec_state_bytes(plain) == (0.0, 0.0)
+
+
+def test_update_kv_rates_folds_spec_state():
+    g = _spec_gen()
+    sm.update_kv_rates(g)
+    rates = g._kq_admit_kv_rates
+    depth_scaled, row_const = sm.spec_state_bytes(g)
+    assert rates["_spec_state"]["rate"] == pytest.approx(
+        depth_scaled / 100)  # live depth 100, one row
+    assert rates["_spec_state"]["window"] is None
+    kv = g._generation_batch.prompt_cache[0]
+    assert g._kq_admit_live_bytes == pytest.approx(
+        kv.keys.nbytes + kv.values.nbytes + depth_scaled + row_const)
+    assert g._kq_admit_spec_row_const == pytest.approx(row_const)
+    plain = FakeGen(rows=1)
+    sm.update_kv_rates(plain)
+    assert "_spec_state" not in plain._kq_admit_kv_rates
+    assert plain._kq_admit_spec_row_const == 0.0
+
+
+def test_projection_prices_spec_growth(monkeypatch):
+    import gmlx.prefill_decay as pd
+
+    monkeypatch.setenv("GMLX_ADMIT_RESERVE_GB", "2")
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 10e9)
+    plain, spec = FakeGen(rows=1), _spec_gen()
+    p_plain = sm.project_admission(plain, [_pending(2, 300, 200)])[0]
+    p_spec = sm.project_admission(spec, [_pending(2, 300, 200)])[0]
+    depth_scaled, row_const = sm.spec_state_bytes(spec)
+    # spec projects extra: rate x width x depth + const x width - live spec
+    extra = (depth_scaled / 100) * 2 * 512 + row_const * 2 \
+        - (depth_scaled + row_const)
+    assert p_spec - p_plain == pytest.approx(extra, rel=0.01)
+
+
+def test_reserve_geometry_derived_after_walk(monkeypatch):
+    monkeypatch.delenv("GMLX_ADMIT_RESERVE_GB", raising=False)
+    g = FakeGen(rows=1)
+    sm.update_kv_rates(g)
+    kv = g._generation_batch.prompt_cache[0]
+    cache_bytes = kv.keys.nbytes + kv.values.nbytes
+    want = max(1e9, cache_bytes + g._kq_admit_live_bytes / (1 * 1))
+    assert sm.admit_reserve_bytes(120e9, g) == pytest.approx(want)
+    # no walk yet: the old constant stands in
+    assert sm.admit_reserve_bytes(120e9, FakeGen(rows=1)) == \
+        pytest.approx(max(2e9, 0.05 * 120e9))
+    # env still wins
+    monkeypatch.setenv("GMLX_ADMIT_RESERVE_GB", "3")
+    assert sm.admit_reserve_bytes(120e9, g) == 3e9
+
+
+def test_cache_release_gate_arms_syncs_and_restores(monkeypatch):
+    calls = []
+    monkeypatch.setattr(mx, "get_cache_memory", lambda: 777)
+    monkeypatch.setattr(mx, "set_cache_limit",
+                        lambda n: calls.append(("limit", n)) or 555)
+    monkeypatch.setattr(mx, "synchronize",
+                        lambda *a: calls.append(("sync", a)))
+    with sm.cache_release_gate():
+        calls.append(("body",))
+    assert calls == [("limit", 777), ("body",), ("sync", ()),
+                     ("limit", 555)]
+
+
 def test_projection_window_caps_rotating_kinds(monkeypatch):
     import gmlx.prefill_decay as pd
 

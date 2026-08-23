@@ -15,6 +15,7 @@ generations, off the per-round hot path.
 from __future__ import annotations
 
 import logging
+import os
 from collections import OrderedDict
 from typing import Any
 
@@ -755,7 +756,9 @@ def _ckpt_records(manager) -> "OrderedDict":
 _CKPT_STAT_INTS = (
     "ckpt_stores", "ckpt_hits", "ckpt_matched_tokens",
     "ckpt_missed_adoptions", "ckpt_skeleton_writes", "sidecar_writes",
-    "retire_fallback_full", "ckpt_pool_evictions",
+    "retire_fallback_suppressed",
+    "ckpt_pool_evictions", "ckpt_governor_released",
+    "ckpt_evict_own_chain",
     "ckpt_grid_truncate", "anchor_stores", "anchor_hits",
 )
 
@@ -904,25 +907,86 @@ def _free_block_count(manager) -> int:
     return n
 
 
-def _evict_for_pool(manager, deficit: int) -> int:
-    """Release least-recently-used records until ``deficit`` blocks sit on
-    the pool free list, always at least one when the deficit is
-    reachable (the caller loops on retry, so each call must make
-    progress). Window chains are position-salted (no dedup), so on
-    large-window models pinned records exhaust the pool long before the
-    entry or byte bounds trip; insert-time eviction then never runs
-    again because no store can complete. Blocks a record shares with an
-    in-flight lookup pin or another request's chain do not free on
-    release, so an unreachable deficit is detected upfront and evicts
-    nothing rather than draining the whole index for a store that still
-    declines. Plain LRU order on purpose: anchor records get no
-    protection here, since an anchor pinning window blocks on an
-    exhausted pool would starve every future store. Returns the number
-    of records released."""
+def ckpt_governor_release(manager, fraction: float) -> int:
+    """Governor rung: release ``fraction`` of ckpt records LRU-first and
+    return the bytes freed. Records are retention, never correctness --
+    dropping one costs the next lookup a warm start. Releasing unpins
+    the record's blocks, so the manager's pool eviction running in the
+    same governor pass can actually reclaim them; without this the
+    pinned share is invisible to red-band reclaim (the 122B run-3 shed:
+    11.2 GB recovered, shortfall anyway). Plain LRU, anchors included:
+    on red band the cheapest global order is the point; fairness across
+    chains is the pool path's concern, not the emergency one's."""
+    idx = _ckpt_records(manager)
+    if not idx:
+        return 0
+    fraction = min(1.0, max(0.0, float(fraction)))
+    freed = 0
+    released = 0
+    with manager.lock:
+        n = len(idx)
+        take = max(1, round(n * fraction)) if n and fraction > 0 else 0
+        for _ in range(take):
+            if not idx:
+                break
+            _, rec = idx.popitem(last=False)
+            freed += int(getattr(rec, "nbytes", 0) or 0)
+            _release_record(manager, rec)
+            released += 1
+    if released:
+        _ckpt_bump(manager, "ckpt_governor_released", released)
+    return freed
+
+
+def _fatchain_victim(idx, bs: int):
+    """Key of the eviction victim: the deepest non-anchor record of the
+    chain group holding the most blocks, the group's anchor only once
+    nothing else in it is left. Groups are keyed by the first block of
+    ids: turns of one session share it, and shared-system-prefix
+    siblings land together, which matches how their blocks pool."""
+    tally: dict[Any, list] = {}
+    for k, r in idx.items():
+        g = r.ids[:bs]
+        held = len(r.main_blocks or ()) + len(r.bounded_blocks or ())
+        t = tally.setdefault(g, [0, []])
+        t[0] += held
+        t[1].append(k)
+    keys = tally[max(tally, key=lambda g: tally[g][0])][1]
+    non_anchor = [k for k in keys if idx[k].kind != "anchor"]
+    return max(non_anchor or keys, key=lambda k: idx[k].p)
+
+
+def _evict_for_pool(manager, deficit: int, store_ids=None) -> int:
+    """Release records until ``deficit`` blocks sit on the pool free
+    list, always at least one when the deficit is reachable (the caller
+    loops on retry, so each call must make progress). Window chains are
+    position-salted (no dedup), so on large-window models pinned
+    records exhaust the pool long before the entry or byte bounds trip;
+    insert-time eviction then never runs again because no store can
+    complete. Blocks a record shares with an in-flight lookup pin or
+    another request's chain do not free on release, so an unreachable
+    deficit is detected upfront and evicts nothing rather than draining
+    the whole index for a store that still declines.
+
+    Victim order is fattest-chain-deepest-first, not LRU. Under
+    round-robin sessions on a saturated pool, LRU's victim is exactly
+    the session due to run next: every store evicts a record about to
+    be reused, everyone pays the store and nobody collects the hit (the
+    122B run-4 starvation: 1519 stores, 182 hits). Charging the chain
+    group holding the most blocks makes chains equilibrate toward a
+    fair share, and taking its deepest record first degrades that
+    session to a shallower warm start instead of zeroing anyone.
+    Anchors still go last within their group and get no absolute
+    protection, since an anchor pinning window blocks on an exhausted
+    pool would starve every future store. ``store_ids`` marks the
+    storing chain so self-recycled evictions are visible in the stats.
+    Returns the number of records released."""
     if not hasattr(manager, "_free_head"):
         return 0
     idx = _ckpt_records(manager)
-    evicted = 0
+    bs = int(getattr(manager, "block_size", 0) or 1)
+    own_group = tuple(store_ids[:bs]) if store_ids is not None else None
+    evicted = own = 0
     with manager.lock:
         # Census stays inside the call: each retry round's evictions
         # change both the ref counts and the deficit, so a hoisted copy
@@ -942,9 +1006,13 @@ def _evict_for_pool(manager, deficit: int) -> int:
         target = _free_block_count(manager) + deficit
         while idx and (evicted == 0
                        or _free_block_count(manager) < target):
-            _, victim = idx.popitem(last=False)
+            victim = idx.pop(_fatchain_victim(idx, bs))
+            if own_group is not None and victim.ids[:bs] == own_group:
+                own += 1
             _release_record(manager, victim)
             evicted += 1
+    if own:
+        _ckpt_bump(manager, "ckpt_evict_own_chain", own)
     return evicted
 
 
@@ -1183,7 +1251,8 @@ def ckpt_store(
             while len(blocks) < need:
                 got = len(blocks)
                 manager.release(blocks)
-                evicted = _evict_for_pool(manager, need - got)
+                evicted = _evict_for_pool(manager, need - got,
+                                          store_ids=ids)
                 if not evicted:
                     _log.info(
                         "APC ckpt store declined: %s chain short (%d/%d "
@@ -1205,8 +1274,11 @@ def ckpt_store(
             # Evaluate before storing: the shard payload crosses to the
             # disk writer thread, and evaluating arrays that share
             # unevaluated inputs from two threads is undefined in mlx.
-            import mlx.core as mx
-            mx.eval(lk + lv)
+            # Owned survivors: lk/lv slice the live prompt cache, whose
+            # own pending graph rides the same tape; the guard drains
+            # before the store's except path releases and declines.
+            from .eval_guard import guard
+            guard.eval(*(lk + lv), site="ckpt-store-main", owner="owned")
             got_main = _chained(
                 ids[:b_full], lk, lv, extra=salted, disk=True,
                 need=b_full // bs, what="main")
@@ -1240,9 +1312,10 @@ def ckpt_store(
             bsalt = bounded_extra_hash(extra_hash, p)
             canon_k = [cw[0] for cw in canon]
             canon_v = [cw[1] for cw in canon]
-            # Same writer-thread rule as the main chain above.
-            import mlx.core as mx
-            mx.eval(canon_k + canon_v)
+            # Same writer-thread rule and ownership as the main chain.
+            from .eval_guard import guard
+            guard.eval(*(canon_k + canon_v), site="ckpt-store-window",
+                       owner="owned")
             got_win = _chained(
                 canon_ids, canon_k, canon_v, extra=bsalt, disk=rot_disk,
                 need=L // bs, what="window")
@@ -1452,14 +1525,38 @@ def ckpt_lookup(
         with manager.lock:
             gen = int(getattr(manager, "_kq_ckpt_gen", 0))
             cands, gated, refused = [], 0, 0
+            salted = diverged = 0
+            bs = int(getattr(manager, "block_size", 0) or 1)
             for rec in idx.values():
                 # Last-token sentinel before the full slice compare:
                 # unrelated queries reject in O(1), so tallying refused
                 # matches here costs the hot path nothing and the miss
                 # path never rescans the index.
-                if (rec.extra_hash != int(extra_hash) or not rec.ids
-                        or rec.p > n or tid[rec.p - 1] != rec.ids[-1]
+                if rec.extra_hash != int(extra_hash):
+                    if rec.ids and tid[:bs] == rec.ids[:bs]:
+                        salted += 1
+                    continue
+                if (not rec.ids or rec.p > n
+                        or tid[rec.p - 1] != rec.ids[-1]
                         or tid[:rec.p] != rec.ids):
+                    # Same-chain records that diverge before their own p
+                    # (first block matches, full slice does not) were
+                    # invisible: the 9B probe showed adoption dying here
+                    # with zero counters moving.
+                    if (rec.ids and len(tid) >= bs
+                            and tid[:bs] == rec.ids[:bs]):
+                        diverged += 1
+                        if os.environ.get("GMLX_APC_CKPT_DEBUG"):
+                            m = 0
+                            lim = min(len(tid), rec.p)
+                            while m < lim and tid[m] == rec.ids[m]:
+                                m += 1
+                            _log.info(
+                                "APC ckpt diverged: rec.p=%d kind=%s "
+                                "layout=%s first mismatch at %d "
+                                "(query %r vs rec %r)",
+                                rec.p, rec.kind, rec.layout, m,
+                                tid[m:m + 4], rec.ids[m:m + 4])
                     continue
                 if (not min_prefix_tokens < rec.p < n
                         or (layout is not None
@@ -1479,6 +1576,10 @@ def ckpt_lookup(
                 cands.append(rec)
         if gated:
             _ckpt_decline(manager, "replay_gate")
+        if salted:
+            _ckpt_decline(manager, "salt")
+        if diverged:
+            _ckpt_decline(manager, "ids_diverged")
         cands.sort(key=lambda r: r.p, reverse=True)
         if cands and cands[0].kind == "anchor":
             # The anchor is a retention floor, not a depth ceiling. It
@@ -1702,7 +1803,11 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
                 targets.extend([c.keys, c.values])
             elif hasattr(c, "cache"):
                 targets.extend(s for s in c.cache if s is not None)
-        mx.eval(*targets)
+        # Scratch survivors: the warm-cache arrays were built by this
+        # restore from pool blocks; the except path's release-and-decline
+        # is the right exit and now runs post-drain.
+        from .eval_guard import guard
+        guard.eval(*targets, site="ckpt-disk-lookup", owner="scratch")
         manager.release(blocks)
         manager.release(wblocks)
         # ckpt_* only: lookup_exact_cache above already fed the upstream
@@ -1922,22 +2027,25 @@ def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
                 _log.info("APC retirement: decode ckpt stored at %d "
                           "(cap %d, full %d)", p, cap, len(ids))
                 return p
-        # No snapshot at or below the replayable prefix: fall back to the
-        # full sequence under its verbatim key rather than storing
-        # nothing. A re-rendered turn will not adopt it, but a raw
-        # continuation client replays prompt+gen exactly and does.
-        # Reason-counted so fallback traffic is distinguishable from
-        # turn reuse. Only when the whole-sequence branch above did not
-        # already try (cap == len means it ran and declined).
+        # No snapshot at or below the replayable prefix. cap < len only
+        # when the next-turn render prediction SUCCEEDED: the client came
+        # through the chat template and provably re-renders, so a
+        # full-sequence store under the verbatim key can never match its
+        # next turn -- it only ages in the pool and burns an
+        # ids_diverged decline on every later same-chain lookup (the
+        # gemma-4/gpt-oss cert arms: ~410 declines each, every one a
+        # retire-kind record past the strip boundary). The prefill-side
+        # p_stable turn boundary of this same request covers turn-2, so
+        # storing nothing here loses nothing reachable. Raw-continuation
+        # clients have no render ctx (lcp None -> cap == len) and keep
+        # the whole-sequence branch above. Counter kept for visibility;
+        # the 90-percent-occupancy yield (122B churn spiral) is subsumed.
         if cap < len(ids) and len(ids) >= 2:
-            stored = ckpt_store(manager, ids, prompt_cache,
-                                extra_hash=extra_hash,
-                                grid_truncate=True, kind="retire")
-            if stored:
-                _ckpt_bump(manager, "retire_fallback_full")
-                _log.info("APC retirement: full-sequence fallback stored "
-                          "at %d (replayable prefix %d)", stored, cap)
-                return stored
+            _ckpt_bump(manager, "retire_fallback_suppressed")
+            _log.info(
+                "APC retirement: predicted-diverged fallback suppressed "
+                "(replayable prefix %d, full %d)", cap, len(ids))
+            return 0
         _log.info("APC retirement skipped: no decode snapshot at or "
                   "below the replayable prefix %d (full %d)",
                   cap, len(ids))
@@ -2011,7 +2119,7 @@ def retirement_store(
             return 0
         from mlx_vlm import apc as _apc
         blocks = _apc.harvest_blocks_from_batch_cache(
-            manager, prompt_cache, row, ids, extra_hash=extra_hash)
+            manager, prompt_cache, ids, batch_idx=row, extra_hash=extra_hash)
         manager.release(blocks)
         if not blocks:
             return 0

@@ -27,6 +27,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from gmlx import server_bridge_vlm as serving  # noqa: E402
 from gmlx import server_patches as sp  # noqa: E402
+from gmlx.server_patches import _common as sp_common  # noqa: E402
 from gmlx.server_patches import hardening as sp_hardening  # noqa: E402
 from gmlx.config import build_config  # noqa: E402
 from gmlx.residency import _http_from_resolver_error  # noqa: E402
@@ -158,7 +159,7 @@ def wire_app():
         "build_gen_args": _APP._build_gen_args,
         "snapshot": _APP._server_runtime_snapshot,
         "get_model_path": _UTILS.get_model_path,
-        "routes": list(fastapi_app.router.routes),
+        "routes": sp_common._snapshot_routes(fastapi_app),
         "handlers": dict(fastapi_app.exception_handlers),
         "middleware": list(fastapi_app.user_middleware),
         "mw_kwargs": [(m, dict(getattr(m, "kwargs", {}) or {}))
@@ -260,7 +261,7 @@ def wire_app():
         cls = getattr(_SCHEMAS, name)
         cls.model_fields["model"].default = default
         cls.model_rebuild(force=True)
-    fastapi_app.router.routes[:] = saved["routes"]
+    sp_common._restore_routes(fastapi_app, saved["routes"])
     fastapi_app.exception_handlers.clear()
     fastapi_app.exception_handlers.update(saved["handlers"])
     fastapi_app.user_middleware[:] = saved["middleware"]
