@@ -619,6 +619,26 @@ def _governor_tick(gen) -> None:
                     st.orange_failed = False
                     return
                 head = head2 if head2 is not None else head
+            elif st.orange_failed:
+                # Orange's full evict ran dry a tick ago, but rows
+                # finish and caches regenerate between ticks: reclaim
+                # and re-check the orange shortfall against current
+                # headroom before failing a row permanently (122B
+                # run-5 shed: red fail while the burst was already
+                # draining). Pressure that survives the re-check still
+                # sheds.
+                freed = _evict_registered(1.0)
+                mx.clear_cache()
+                head2, _ = _headroom_and_ws(margin)
+                if (head2 is not None and head2 - demand >= 0.0
+                        and head2 - oneshot - ko * rate
+                        >= _shed_transient_bytes(gen, st) + reserve):
+                    _STATS["last_action"] = (
+                        f"red retry freed {freed / 1e9:.2f} GB, "
+                        "shed skipped")
+                    st.orange_failed = False
+                    return
+                head = head2 if head2 is not None else head
             why = (f"headroom {head / 1e9:.2f} GB below next-tick "
                    f"demand {demand / 1e9:.2f} GB"
                    if static_red else

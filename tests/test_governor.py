@@ -269,6 +269,36 @@ def test_orange_without_apc_falls_to_red(rig, monkeypatch):
     assert gov._STATS["red_failures"] == 1
 
 
+def test_orange_failed_red_retries_reclaim_when_pressure_drained(
+        rig, monkeypatch):
+    """The orange-failed red entry re-reclaims and re-measures before
+    failing a row: rows finish and caches regenerate between ticks, so
+    a burst that drained by the red tick sheds nothing (122B run-5: red
+    fail while phase-6 streams were completing). Persistent pressure
+    still sheds (test_orange_without_apc_falls_to_red)."""
+    monkeypatch.setenv("GMLX_GOV_MIN_DWELL_S", "0")
+    gov.register_cache("dry", lambda: 0, lambda f: 0)
+    failed = []
+    monkeypatch.setattr(tg, "_row_failed_callbacks",
+                        [lambda uid, info: failed.append(uid)])
+    gen = FakeGen(rows=2, rate=2e9, live=30e9)
+    st = gov._state(gen)
+    st.obs_delta_ema = 1e9
+    st.evict_fraction = 1.0
+    tg_st = tg._state(gen)
+    tg_st.ledger[0] = tg._Row([1] * 8, 64, {}, None, None)
+    tg_st.ledger[1] = tg._Row([1] * 4, 64, {}, None, None)
+
+    rig["head"] = 44e9
+    gov._governor_tick(gen)
+    assert st.band == gov.ORANGE and st.orange_failed
+    rig["head"] = 200e9                         # burst drained
+    gov._governor_tick(gen)
+    assert failed == [] and gov._STATS["red_failures"] == 0
+    assert not st.orange_failed
+    assert gov._STATS["last_action"].startswith("red retry")
+
+
 def test_red_on_negative_next_tick_headroom(rig, monkeypatch):
     failed = []
     monkeypatch.setattr(tg, "_row_failed_callbacks",
