@@ -663,7 +663,10 @@ class _ResidencyPool:
                     "routed-expert bytes (gating on %.1f GB resident)",
                     streamed / 1e9, gate_bytes / 1e9)
         preload_gate(gate_bytes, str(model_path))
-        install_boot_table(str(model_path), footprint, str(model_path))
+        # The boot table feeds request admission (width/ctx budgets), so a
+        # streaming model's table must also price only the resident share:
+        # the expert stacks decode through the disk arena, not the KV budget.
+        install_boot_table(str(model_path), gate_bytes, str(model_path))
         scratch = _Scratch()
         token = _build_scratch.set(scratch)
         # Per-model load-param + APC/SSD-KV env window: set this model's vars
