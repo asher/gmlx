@@ -74,6 +74,26 @@ def test_tools_present_keeps_tool_continuation_render():
     assert lcp == len(seq)
 
 
+def test_prompt_stable_demotes_last_assistant():
+    # Boundary placement must see the future demotion: with a prior
+    # assistant carrying reasoning in the messages, p_stable ends
+    # before its think block, not at the prompt tail.
+    ctx = _ctx()
+    ctx["messages"] = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "ok", "reasoning_content": "xy"},
+        {"role": "user", "content": "more"},
+    ]
+    # Live prompt render: assistant is not last -> think stripped by
+    # _strip_render, but simulate the normalizer keeping it for the
+    # last assistant by rendering the prompt with think present.
+    prompt = "U:hi;A:<think>xy</think>ok;U:more;A:"
+    prompt_ids = _ords(prompt)
+    lcp = retire_key.prompt_stable_lcp(ctx, prompt_ids)
+    # Demoted render "U:hi;A:ok;U:more;U:0;" diverges at the think.
+    assert lcp == len("U:hi;A:")
+
+
 def test_non_strip_template_unchanged_by_probe():
     def keep_render(processor, config, msgs, **kw):
         out = []

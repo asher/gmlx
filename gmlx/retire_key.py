@@ -335,7 +335,17 @@ def prompt_stable_lcp(ctx: dict, prompt_ids) -> int | None:
         return memo if memo >= 0 else None
     lcp = None
     try:
-        nxt = predict_next_ids(ctx, None)
+        if (ctx.get("kw") or {}).get("tools"):
+            nxt = predict_next_ids(ctx, None)
+        else:
+            # Same demotion probe as next_turn_lcp: a toolless next
+            # turn appends a user message, demoting the prompt's last
+            # assistant so the template strips its think block. Without
+            # it p_stable lands past think tokens the next render drops
+            # (the 9B probe: every record diverged at the prior
+            # assistant's think-open, position 358).
+            nxt = _render_ids(ctx, list(ctx["messages"]) + [
+                {"role": "user", "content": "0"}])
         if nxt:
             seq = [int(t) for t in prompt_ids]
             n = min(len(seq), len(nxt))

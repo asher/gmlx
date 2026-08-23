@@ -15,6 +15,7 @@ generations, off the per-round hot path.
 from __future__ import annotations
 
 import logging
+import os
 from collections import OrderedDict
 from typing import Any
 
@@ -1457,14 +1458,37 @@ def ckpt_lookup(
         with manager.lock:
             gen = int(getattr(manager, "_kq_ckpt_gen", 0))
             cands, gated, refused = [], 0, 0
+            salted = diverged = 0
+            bs = int(getattr(manager, "block_size", 0) or 1)
             for rec in idx.values():
                 # Last-token sentinel before the full slice compare:
                 # unrelated queries reject in O(1), so tallying refused
                 # matches here costs the hot path nothing and the miss
                 # path never rescans the index.
-                if (rec.extra_hash != int(extra_hash) or not rec.ids
-                        or rec.p > n or tid[rec.p - 1] != rec.ids[-1]
+                if rec.extra_hash != int(extra_hash):
+                    if rec.ids and tid[:bs] == rec.ids[:bs]:
+                        salted += 1
+                    continue
+                if (not rec.ids or rec.p > n
+                        or tid[rec.p - 1] != rec.ids[-1]
                         or tid[:rec.p] != rec.ids):
+                    # Same-chain records that diverge before their own p
+                    # (first block matches, full slice does not) were
+                    # invisible: the 9B probe showed adoption dying here
+                    # with zero counters moving.
+                    if (rec.ids and len(tid) >= bs
+                            and tid[:bs] == rec.ids[:bs]):
+                        diverged += 1
+                        if os.environ.get("GMLX_APC_CKPT_DEBUG"):
+                            m = 0
+                            lim = min(len(tid), rec.p)
+                            while m < lim and tid[m] == rec.ids[m]:
+                                m += 1
+                            _log.info(
+                                "APC ckpt diverged: rec.p=%d first "
+                                "mismatch at %d (query %r vs rec %r)",
+                                rec.p, m, tid[m:m + 4],
+                                rec.ids[m:m + 4])
                     continue
                 if (not min_prefix_tokens < rec.p < n
                         or (layout is not None
@@ -1484,6 +1508,10 @@ def ckpt_lookup(
                 cands.append(rec)
         if gated:
             _ckpt_decline(manager, "replay_gate")
+        if salted:
+            _ckpt_decline(manager, "salt")
+        if diverged:
+            _ckpt_decline(manager, "ids_diverged")
         cands.sort(key=lambda r: r.p, reverse=True)
         if cands and cands[0].kind == "anchor":
             # The anchor is a retention floor, not a depth ceiling. It
