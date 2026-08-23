@@ -213,6 +213,42 @@ def test_retirement_snap_path_never_falls_back():
     assert cs.ckpt_stats_snapshot(man)["retire_fallback_full"] == 0
 
 
+def test_governor_evict_releases_ckpt_records():
+    """The governor's red-band reclaim must reach ckpt records: releasing
+    them unpins their blocks so the pool eviction in the same pass can
+    reclaim those too (122B run-3 shed: pinned share invisible to
+    reclaim). Fraction 1.0 empties the index; freed bytes and the
+    ckpt_governor_released counter report the work."""
+    from gmlx.apc_manager import GmlxAPCManager
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    for i in range(3):
+        ids = list(range(i * 1000, i * 1000 + 64))
+        assert ckpt_store(man, ids, make_hybrid_cache(64, seed=40 + i))
+    idx = man._kq_ckpt_records
+    assert len(idx) == 3
+    pinned = sum(1 for b in man.pool if b.ref_cnt > 0)
+    assert pinned > 0
+    before = man.governor_bytes()
+    freed = man.governor_evict(1.0)
+    assert freed > 0
+    assert len(man._kq_ckpt_records) == 0
+    assert all(b.ref_cnt == 0 for b in man.pool)
+    assert man.governor_bytes() < before
+    assert cs.ckpt_stats_snapshot(man)["ckpt_governor_released"] == 3
+
+
+def test_governor_evict_fraction_releases_lru_first():
+    from gmlx.apc_manager import GmlxAPCManager
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    for i in range(4):
+        ids = list(range(i * 1000, i * 1000 + 32))
+        assert ckpt_store(man, ids, make_hybrid_cache(32, seed=50 + i))
+    man.governor_evict(0.5)
+    keys = [k[0][0] for k in man._kq_ckpt_records.keys()]
+    # Oldest two chains released, newest two kept.
+    assert keys == [2000, 3000]
+
+
 def test_record_byte_budget_evicts_lru(monkeypatch):
     man = APCManager(num_blocks=64, block_size=16)
     ids_a = list(range(100, 132))

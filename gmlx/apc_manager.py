@@ -231,6 +231,9 @@ class GmlxAPCManager(_apc.APCManager):
                 for c in e.prompt_cache:
                     nb = getattr(c, "nbytes", 0)
                     total += int(nb) if isinstance(nb, int) else 0
+            idx = getattr(self, "_kq_ckpt_records", None)
+            for rec in (idx or {}).values():
+                total += int(getattr(rec, "nbytes", 0) or 0)
         return total
 
     def governor_evict(self, fraction: float) -> int:
@@ -242,6 +245,11 @@ class GmlxAPCManager(_apc.APCManager):
         queue."""
         fraction = min(1.0, max(0.0, float(fraction)))
         freed = 0
+        # Ckpt records first: releasing them unpins their blocks, so the
+        # pool eviction below can reclaim those in the same pass. Without
+        # this the pinned share is invisible to red-band reclaim.
+        from .cache_snapshot import ckpt_governor_release
+        freed += ckpt_governor_release(self, fraction)
         with self.lock:
             n = len(self._exact_cache)
             for _ in range(max(1, round(n * fraction)) if n else 0):

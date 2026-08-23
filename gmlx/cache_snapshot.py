@@ -757,7 +757,7 @@ _CKPT_STAT_INTS = (
     "ckpt_stores", "ckpt_hits", "ckpt_matched_tokens",
     "ckpt_missed_adoptions", "ckpt_skeleton_writes", "sidecar_writes",
     "retire_fallback_full", "retire_fallback_skipped",
-    "ckpt_pool_evictions",
+    "ckpt_pool_evictions", "ckpt_governor_released",
     "ckpt_grid_truncate", "anchor_stores", "anchor_hits",
 )
 
@@ -904,6 +904,36 @@ def _free_block_count(manager) -> int:
         n += 1
         b = b.next
     return n
+
+
+def ckpt_governor_release(manager, fraction: float) -> int:
+    """Governor rung: release ``fraction`` of ckpt records LRU-first and
+    return the bytes freed. Records are retention, never correctness --
+    dropping one costs the next lookup a warm start. Releasing unpins
+    the record's blocks, so the manager's pool eviction running in the
+    same governor pass can actually reclaim them; without this the
+    pinned share is invisible to red-band reclaim (the 122B run-3 shed:
+    11.2 GB recovered, shortfall anyway). Plain LRU, anchors included,
+    for the same reason as _evict_for_pool."""
+    idx = _ckpt_records(manager)
+    if not idx:
+        return 0
+    fraction = min(1.0, max(0.0, float(fraction)))
+    freed = 0
+    released = 0
+    with manager.lock:
+        n = len(idx)
+        take = max(1, round(n * fraction)) if n and fraction > 0 else 0
+        for _ in range(take):
+            if not idx:
+                break
+            _, rec = idx.popitem(last=False)
+            freed += int(getattr(rec, "nbytes", 0) or 0)
+            _release_record(manager, rec)
+            released += 1
+    if released:
+        _ckpt_bump(manager, "ckpt_governor_released", released)
+    return freed
 
 
 def _evict_for_pool(manager, deficit: int) -> int:
