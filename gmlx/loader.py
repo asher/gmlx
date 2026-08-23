@@ -2083,16 +2083,30 @@ def install_expert_streaming(
             offloaded += sum(a.nbytes for _, a in tree_flatten(m.parameters()))
             n_wrapped += 1
     if over_budget and offloaded:
-        # An over-budget model registered at ~full size in the untracked-
-        # weights registry (the residency warm pass skips it, so its
-        # tracked delta is small), but its streamed experts are page
-        # cache, never wired: deduct them or headroom_bytes() sits
-        # permanently negative and both the admission gate and the
-        # request preflight starve every request. Same 0.9 x working-set
-        # budget test as _warm_touch_pass, so the deduction fires exactly
-        # when the touch pass skipped.
-        deduct_untracked_weights(
-            offloaded, getattr(model, "_kq_weights_key", None))
+        # Streamed expert bytes are page cache, never wired, and must not
+        # tax headroom_bytes() or the admission gate and request preflight
+        # starve every request. Which side of the accounting they sit on
+        # depends on how the load materialized them: registered untracked
+        # (zero-copy walk, small tracked delta) they need deducting; but a
+        # load whose arrays landed allocator-tracked (untracked registered
+        # ~0) has them inside mx.get_active_memory instead, and headroom
+        # needs the add-back credit. tracked = total - untracked splits
+        # the two regimes; the credit is clamped to the expert share.
+        # Same 0.9 x working-set budget test as _warm_touch_pass.
+        key = getattr(model, "_kq_weights_key", None)
+        from .prefill_decay import (
+            note_streamed_tracked_bytes,
+            untracked_weight_bytes_for,
+        )
+        tracked = max(0.0, total_bytes - untracked_weight_bytes_for(key))
+        credit = min(float(offloaded), tracked)
+        if credit > 0:
+            note_streamed_tracked_bytes(credit, key)
+            print(
+                f"[stream] headroom credits {credit / 1e9:.1f} GB of "
+                "allocator-tracked expert bytes as reclaimable page cache"
+            )
+        deduct_untracked_weights(offloaded, key)
     if n_cpu_only_codec:
         print(
             f"[stream] {n_cpu_only_codec} expert stacks use a CPU-only codec "

@@ -396,6 +396,7 @@ def forget_untracked_weights(owner: object) -> None:
             if not owners:
                 del _UNTRACKED_OWNERS[key]
                 _UNTRACKED_WEIGHTS.pop(key, None)
+                _STREAMED_TRACKED.pop(key, None)
 
 
 def deduct_untracked_weights(nbytes: float, key: object) -> None:
@@ -415,18 +416,49 @@ def untracked_weight_bytes() -> float:
         return sum(_UNTRACKED_WEIGHTS.values())
 
 
+def untracked_weight_bytes_for(key: object) -> float:
+    with _UNTRACKED_LOCK:
+        return _UNTRACKED_WEIGHTS.get(key, 0.0)
+
+
+# The untracked registry's mirror image: bytes mx.get_active_memory counts
+# that are not live working set. A streamed model's expert stacks can load
+# as allocator-tracked zero-copy arrays; their pages are file-backed and
+# reclaimed under pressure (decode reads them through the disk arena), so
+# leaving them in the active term holds headroom ~150 GB negative on an
+# over-RAM model and the governor sheds every request from red. Same key,
+# owner, and teardown lifecycle as the untracked registry.
+_STREAMED_TRACKED: dict[object, float] = {}
+
+
+def note_streamed_tracked_bytes(nbytes: float, key: object = None) -> None:
+    if key is None or nbytes <= 0:
+        return
+    with _UNTRACKED_LOCK:
+        _STREAMED_TRACKED.setdefault(key, float(nbytes))
+        if _WEIGHTS_OWNER is not None:
+            _UNTRACKED_OWNERS.setdefault(key, set()).add(_WEIGHTS_OWNER)
+
+
+def streamed_tracked_bytes() -> float:
+    with _UNTRACKED_LOCK:
+        return sum(_STREAMED_TRACKED.values())
+
+
 def headroom_bytes() -> float | None:
     """Estimated live free working set: recommended working set minus
-    zero-copy weights minus MLX-tracked allocations. The buffer cache counts
-    as free (the allocator evicts it under pressure). Sampled fresh per call,
-    never memoized. The one shared accounting: the prefill caps, the serve
-    memory trace, and the admission gate all read this."""
+    zero-copy weights minus MLX-tracked allocations, plus the streamed
+    expert bytes the tracker counts but the pager can reclaim. The buffer
+    cache counts as free (the allocator evicts it under pressure). Sampled
+    fresh per call, never memoized. The one shared accounting: the prefill
+    caps, the serve memory trace, and the admission gate all read this."""
     try:
         ws = float(mx.device_info()["max_recommended_working_set_size"])
         active = float(mx.get_active_memory())
     except Exception:
         return None
-    return ws - untracked_weight_bytes() - active
+    return (ws - untracked_weight_bytes() + streamed_tracked_bytes()
+            - active)
 
 
 _headroom_bytes = headroom_bytes

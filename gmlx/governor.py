@@ -329,10 +329,15 @@ def _pause_admission(gen, st: _GovState) -> None:
 
 
 def _arm_throttle(gen, st: _GovState, ws: float, margin: float) -> None:
-    from .prefill_decay import untracked_weight_bytes
+    from .prefill_decay import streamed_tracked_bytes, untracked_weight_bytes
 
     if st.saved_mem_limit is None:
-        limit = int(ws * (1.0 - margin) + untracked_weight_bytes())
+        # The limit speaks allocator terms: allocator-tracked streamed
+        # expert bytes sit inside it without occupying working set, so a
+        # limit that ignores them would refuse every allocation on an
+        # over-RAM streaming model.
+        limit = int(ws * (1.0 - margin) + untracked_weight_bytes()
+                    + streamed_tracked_bytes())
         try:
             st.saved_mem_limit = mx.set_memory_limit(limit)
         except Exception:
