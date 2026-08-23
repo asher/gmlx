@@ -249,6 +249,53 @@ def test_governor_evict_fraction_releases_lru_first():
     assert keys == [2000, 3000]
 
 
+def test_pool_eviction_prefers_fattest_chain():
+    """Pool-pressure eviction charges the chain group holding the most
+    blocks, deepest record first, so under round-robin sessions no
+    store evicts the record the next session is about to reuse (the
+    122B run-4 starvation was plain LRU doing exactly that). The lean
+    chain survives; the fat chain degrades to its shallower record."""
+    man = APCManager(num_blocks=16, block_size=16)
+    ids_a = list(range(1000, 1160))
+    ids_b = list(range(5000, 5064))
+    # Chain A: anchor at 96 (6 blocks) extended to 160 (10 blocks,
+    # prefix shared). Chain B: one record at 64 (4 blocks).
+    assert ckpt_store(man, ids_a[:96], make_hybrid_cache(96, seed=60))
+    assert ckpt_store(man, ids_a, make_hybrid_cache(160, seed=61))
+    assert ckpt_store(man, ids_b, make_hybrid_cache(64, seed=62))
+    # Pool full (10 + 4 unique blocks, 2 free): a 4-block store for a
+    # third chain must evict, and the victim is A's deepest record.
+    ids_c = list(range(9000, 9064))
+    assert ckpt_store(man, ids_c, make_hybrid_cache(64, seed=63))
+    ps = {r.p for r in cs._ckpt_records(man).values()
+          if r.ids[0] == 1000}
+    assert 160 not in ps and 96 in ps
+    _, got = ckpt_lookup(man, ids_b + [1], extra_hash=0)
+    assert got == 64                    # lean chain untouched
+    _, got = ckpt_lookup(man, ids_a + [1], extra_hash=0)
+    assert got == 96                    # fat chain degrades, not zeroed
+
+
+def test_pool_eviction_counts_own_chain_recycle():
+    """A store whose own chain group is the fattest recycles its own
+    record and the ckpt_evict_own_chain counter says so. A clean extend
+    shares its prefix blocks and rarely evicts, so the pressured case
+    is a divergent branch: same first block, disjoint tail."""
+    man = APCManager(num_blocks=12, block_size=16)
+    ids_a = list(range(1000, 1096))
+    assert ckpt_store(man, ids_a, make_hybrid_cache(96, seed=70))
+    assert ckpt_store(man, list(range(5000, 5032)),
+                      make_hybrid_cache(32, seed=71))
+    # Branch of A: shares only the first block, needs 7 fresh of 4
+    # free; A (6 held) is the fattest group, so A's own record is the
+    # victim, not the bystander.
+    branch = ids_a[:16] + list(range(7000, 7112))
+    assert ckpt_store(man, branch, make_hybrid_cache(128, seed=72))
+    assert cs.ckpt_stats_snapshot(man)["ckpt_evict_own_chain"] >= 1
+    _, got = ckpt_lookup(man, list(range(5000, 5032)) + [1], extra_hash=0)
+    assert got == 32                    # bystander chain survives
+
+
 def test_record_byte_budget_evicts_lru(monkeypatch):
     man = APCManager(num_blocks=64, block_size=16)
     ids_a = list(range(100, 132))

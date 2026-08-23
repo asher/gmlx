@@ -758,6 +758,7 @@ _CKPT_STAT_INTS = (
     "ckpt_missed_adoptions", "ckpt_skeleton_writes", "sidecar_writes",
     "retire_fallback_full", "retire_fallback_skipped",
     "ckpt_pool_evictions", "ckpt_governor_released",
+    "ckpt_evict_own_chain",
     "ckpt_grid_truncate", "anchor_stores", "anchor_hits",
 )
 
@@ -913,8 +914,9 @@ def ckpt_governor_release(manager, fraction: float) -> int:
     the record's blocks, so the manager's pool eviction running in the
     same governor pass can actually reclaim them; without this the
     pinned share is invisible to red-band reclaim (the 122B run-3 shed:
-    11.2 GB recovered, shortfall anyway). Plain LRU, anchors included,
-    for the same reason as _evict_for_pool."""
+    11.2 GB recovered, shortfall anyway). Plain LRU, anchors included:
+    on red band the cheapest global order is the point; fairness across
+    chains is the pool path's concern, not the emergency one's."""
     idx = _ckpt_records(manager)
     if not idx:
         return 0
@@ -936,25 +938,55 @@ def ckpt_governor_release(manager, fraction: float) -> int:
     return freed
 
 
-def _evict_for_pool(manager, deficit: int) -> int:
-    """Release least-recently-used records until ``deficit`` blocks sit on
-    the pool free list, always at least one when the deficit is
-    reachable (the caller loops on retry, so each call must make
-    progress). Window chains are position-salted (no dedup), so on
-    large-window models pinned records exhaust the pool long before the
-    entry or byte bounds trip; insert-time eviction then never runs
-    again because no store can complete. Blocks a record shares with an
-    in-flight lookup pin or another request's chain do not free on
-    release, so an unreachable deficit is detected upfront and evicts
-    nothing rather than draining the whole index for a store that still
-    declines. Plain LRU order on purpose: anchor records get no
-    protection here, since an anchor pinning window blocks on an
-    exhausted pool would starve every future store. Returns the number
-    of records released."""
+def _fatchain_victim(idx, bs: int):
+    """Key of the eviction victim: the deepest non-anchor record of the
+    chain group holding the most blocks, the group's anchor only once
+    nothing else in it is left. Groups are keyed by the first block of
+    ids: turns of one session share it, and shared-system-prefix
+    siblings land together, which matches how their blocks pool."""
+    tally: dict[Any, list] = {}
+    for k, r in idx.items():
+        g = r.ids[:bs]
+        held = len(r.main_blocks or ()) + len(r.bounded_blocks or ())
+        t = tally.setdefault(g, [0, []])
+        t[0] += held
+        t[1].append(k)
+    keys = tally[max(tally, key=lambda g: tally[g][0])][1]
+    non_anchor = [k for k in keys if idx[k].kind != "anchor"]
+    return max(non_anchor or keys, key=lambda k: idx[k].p)
+
+
+def _evict_for_pool(manager, deficit: int, store_ids=None) -> int:
+    """Release records until ``deficit`` blocks sit on the pool free
+    list, always at least one when the deficit is reachable (the caller
+    loops on retry, so each call must make progress). Window chains are
+    position-salted (no dedup), so on large-window models pinned
+    records exhaust the pool long before the entry or byte bounds trip;
+    insert-time eviction then never runs again because no store can
+    complete. Blocks a record shares with an in-flight lookup pin or
+    another request's chain do not free on release, so an unreachable
+    deficit is detected upfront and evicts nothing rather than draining
+    the whole index for a store that still declines.
+
+    Victim order is fattest-chain-deepest-first, not LRU. Under
+    round-robin sessions on a saturated pool, LRU's victim is exactly
+    the session due to run next: every store evicts a record about to
+    be reused, everyone pays the store and nobody collects the hit (the
+    122B run-4 starvation: 1519 stores, 182 hits). Charging the chain
+    group holding the most blocks makes chains equilibrate toward a
+    fair share, and taking its deepest record first degrades that
+    session to a shallower warm start instead of zeroing anyone.
+    Anchors still go last within their group and get no absolute
+    protection, since an anchor pinning window blocks on an exhausted
+    pool would starve every future store. ``store_ids`` marks the
+    storing chain so self-recycled evictions are visible in the stats.
+    Returns the number of records released."""
     if not hasattr(manager, "_free_head"):
         return 0
     idx = _ckpt_records(manager)
-    evicted = 0
+    bs = int(getattr(manager, "block_size", 0) or 1)
+    own_group = tuple(store_ids[:bs]) if store_ids is not None else None
+    evicted = own = 0
     with manager.lock:
         # Census stays inside the call: each retry round's evictions
         # change both the ref counts and the deficit, so a hoisted copy
@@ -974,9 +1006,13 @@ def _evict_for_pool(manager, deficit: int) -> int:
         target = _free_block_count(manager) + deficit
         while idx and (evicted == 0
                        or _free_block_count(manager) < target):
-            _, victim = idx.popitem(last=False)
+            victim = idx.pop(_fatchain_victim(idx, bs))
+            if own_group is not None and victim.ids[:bs] == own_group:
+                own += 1
             _release_record(manager, victim)
             evicted += 1
+    if own:
+        _ckpt_bump(manager, "ckpt_evict_own_chain", own)
     return evicted
 
 
@@ -1215,7 +1251,8 @@ def ckpt_store(
             while len(blocks) < need:
                 got = len(blocks)
                 manager.release(blocks)
-                evicted = _evict_for_pool(manager, need - got)
+                evicted = _evict_for_pool(manager, need - got,
+                                          store_ids=ids)
                 if not evicted:
                     _log.info(
                         "APC ckpt store declined: %s chain short (%d/%d "

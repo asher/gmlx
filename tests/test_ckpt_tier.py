@@ -1339,8 +1339,9 @@ def test_anchor_never_shadows_a_deeper_disk_skeleton(tmp_path):
 
 
 def test_anchor_gets_no_pool_pressure_protection():
-    """_evict_for_pool stays plain LRU: an anchor's blocks reclaim like
-    any record's, so a pinned anchor can never starve the block pool."""
+    """_evict_for_pool gives anchors no absolute protection: once a
+    chain group has nothing else left its anchor reclaims like any
+    record, so a pinned anchor can never starve the block pool."""
     import gmlx.cache_snapshot as cs
 
     man = APCManager(num_blocks=64, block_size=16)
