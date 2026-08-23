@@ -60,8 +60,10 @@ dependencies = [
     "ruamel.yaml",
     # config.py loads model/profile YAML with PyYAML at module top.
     "pyyaml",
-    # gmlx route surgery (server_patches._common) edits app.router.routes
-    # directly; fastapi 0.141 moved included-router internals.
+    # gmlx route surgery (server_patches._common) walks both route
+    # layouts: inline (< 0.137) and _IncludedRouter wrappers (0.137+,
+    # verified through 0.140.13). The ceiling guards the next layout
+    # change.
     "fastapi>=0.95.1,<0.141",
     "uvicorn",
     # `gmlx menubar`: a macOS status-bar monitor for a backgrounded server.
