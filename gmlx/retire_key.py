@@ -424,11 +424,20 @@ def next_turn_lcp(ctx: dict, seq: list[int], generated: list[int],
             nxt = predict_next_ids(ctx, msg)
         else:
             # No tools declared: the next message can only be a user
-            # turn. The dummy probe makes strip-mode templates apply
-            # their think-strip, so the LCP lands where the replay
-            # actually diverges instead of at the full stored chain.
+            # turn, and standard clients never resend reasoning fields
+            # (the DeepSeek API contract; OpenAI-style clients echo
+            # content only), so the probe echoes the message without
+            # them. Strip-mode templates strip demoted think either
+            # way; keep-mode templates (deepseek4 chat) render attached
+            # reasoning verbatim, which would predict a full replay no
+            # client performs. The dummy user probe still makes
+            # strip-mode templates apply their strip, so the LCP lands
+            # where the replay actually diverges.
+            echo = {k: v for k, v in msg.items()
+                    if k not in ("reasoning_content", "reasoning",
+                                 "thinking")}
             nxt = _render_ids(ctx, list(ctx["messages"]) + [
-                msg, {"role": "user", "content": "0"}])
+                echo, {"role": "user", "content": "0"}])
         if not nxt:
             return None
         n = min(len(seq), len(nxt))

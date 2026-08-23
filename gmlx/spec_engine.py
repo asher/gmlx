@@ -1133,6 +1133,9 @@ def _plain_retire(stash: dict, prompt_cache: list) -> None:
             from .retire_key import next_turn_lcp
             lcp = next_turn_lcp(stash.get("render_ctx"), seq, gen)
         max_len = lcp if lcp is not None and lcp < len(seq) else None
+        _log.info("APC retire: seq=%d ctx=%s lcp=%s cap=%s",
+                  len(seq), stash.get("render_ctx") is not None,
+                  lcp, max_len)
         ok = retirement_store(
             manager, stash.get("mode") or "ckpt", seq, prompt_cache,
             row=0,
