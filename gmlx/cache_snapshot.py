@@ -2119,7 +2119,7 @@ def retirement_store(
             return 0
         from mlx_vlm import apc as _apc
         blocks = _apc.harvest_blocks_from_batch_cache(
-            manager, prompt_cache, row, ids, extra_hash=extra_hash)
+            manager, prompt_cache, ids, batch_idx=row, extra_hash=extra_hash)
         manager.release(blocks)
         if not blocks:
             return 0

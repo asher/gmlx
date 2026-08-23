@@ -577,6 +577,10 @@ def install_embeddings_route(embeddings_model: str | None) -> None:
     thread (``subservice.SingleWorker``), so requests serialize against each
     other but interleave freely with LLM batch decode."""
     if not embeddings_model:
+        # mlx-vlm >= 0.6.15 ships a stock /v1/embeddings route; the no-config
+        # contract is a 404, so drop it rather than let it hub-load a model.
+        _remove_routes(importlib.import_module("mlx_vlm.server.app").app,
+                       "/embeddings", "/v1/embeddings")
         return
     from fastapi.responses import JSONResponse
     from starlette.concurrency import run_in_threadpool

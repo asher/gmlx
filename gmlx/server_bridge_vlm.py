@@ -51,7 +51,7 @@ import sys
 from contextvars import ContextVar
 
 from mlx_vlm import tokenizer_utils as _mlxvlm_tok
-from mlx_vlm.models.text_only import Model as TextOnlyModel
+from gmlx.vlm_text_only import Model as TextOnlyModel
 from mlx_vlm.utils import StoppingCriteria
 
 from .drafter_protocol import native_block_size

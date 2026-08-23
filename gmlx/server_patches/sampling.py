@@ -317,10 +317,16 @@ def install_fast_sampler() -> None:
     from mlx_vlm.server import generation as gen
     if getattr(gen.ResponseGenerator._make_sampler, _FAST_SAMPLER_FLAG, False):
         return
+    stock_make_sampler = gen.ResponseGenerator._make_sampler
 
     def _make_sampler(self, args):
         if args.temperature == 0:
             return None
+        # 0.6.15 samplers the fast path does not implement; use stock.
+        if (getattr(args, "top_n_sigma", 0.0) > 0
+                or getattr(args, "p_less", False)
+                or getattr(args, "typical_p", 1.0) < 1.0):
+            return stock_make_sampler(self, args)
         return _FastPositionedSampler(
             temperature=args.temperature,
             top_p=getattr(args, "top_p", 1.0),

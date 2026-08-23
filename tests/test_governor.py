@@ -497,8 +497,7 @@ def test_apc_governor_bytes_and_evict():
     # commit two blocks; block 0 stays referenced by a live row
     for i, ref in ((0, 1), (1, 0)):
         b = mgr.pool[i]
-        b.keys = [mx.zeros((1, 1, 4, 8))]
-        b.values = [mx.zeros((1, 1, 4, 8))]
+        b.set_kv([mx.zeros((1, 1, 4, 8))], [mx.zeros((1, 1, 4, 8))])
         b.block_hash = 1000 + i
         mgr.hash_table[1000 + i] = b
         b.ref_cnt = ref
