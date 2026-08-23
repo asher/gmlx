@@ -210,6 +210,38 @@ def _log_table(t: dict) -> None:
         t["trained_ctx"])
 
 
+def streamed_expert_bytes(gguf_path: str) -> int:
+    """A-priori bytes of the routed-expert stacks (the tensors
+    ``stream: experts`` serves from disk instead of wiring), summed from
+    the GGUF header's tensor records without touching data. 0 when the
+    header cannot be read; the caller then gates on the full size."""
+    try:
+        from gguf import GGUFReader
+
+        from .preflight import find_split_shards
+
+        total = 0
+        for shard in find_split_shards(gguf_path):
+            for t in GGUFReader(shard).tensors:
+                name = str(t.name)
+                if "_exps." in name or name.endswith("_exps"):
+                    total += int(t.n_bytes)
+        return total
+    except Exception:
+        return 0
+
+
+def preload_gate_bytes(footprint: int, stream, expert_bytes: int) -> int:
+    """Resident bytes the preload gate should judge. ``stream: experts``
+    never wires the routed-expert stacks (they decode through the disk
+    arena), so gating such a model on its full on-disk size refuses
+    exactly the over-RAM serving the mode exists for; ``stream: cpu``
+    still occupies unified RAM, so it gets no discount."""
+    if stream == "experts" and expert_bytes > 0:
+        return max(0, int(footprint) - int(expert_bytes))
+    return int(footprint)
+
+
 def preload_gate(weight_bytes: float, model_id: str) -> None:
     """The same headroom check a request takes, at model load and swap:
     a build whose weights cannot fit the measured free working set (the

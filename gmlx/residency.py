@@ -647,8 +647,22 @@ class _ResidencyPool:
         # takes, and the capacity table is derived (header-based, no
         # load needed) and gated before the box's biggest allocation
         # starts. Both raise with the numbers; GMLX_OVERCOMMIT=1 skips.
-        from .capacity import install_boot_table, preload_gate
-        preload_gate(footprint, str(model_path))
+        from .capacity import (
+            install_boot_table,
+            preload_gate,
+            preload_gate_bytes,
+            streamed_expert_bytes,
+        )
+        gate_bytes = footprint
+        if getattr(build_spec, "stream", None) == "experts":
+            streamed = streamed_expert_bytes(str(model_path))
+            gate_bytes = preload_gate_bytes(footprint, "experts", streamed)
+            if streamed:
+                _log.info(
+                    "preload gate: stream=experts discounts %.1f GB of "
+                    "routed-expert bytes (gating on %.1f GB resident)",
+                    streamed / 1e9, gate_bytes / 1e9)
+        preload_gate(gate_bytes, str(model_path))
         install_boot_table(str(model_path), footprint, str(model_path))
         scratch = _Scratch()
         token = _build_scratch.set(scratch)
