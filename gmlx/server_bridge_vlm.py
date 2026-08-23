@@ -781,6 +781,11 @@ def install_gguf_server_bridge() -> None:
     if getattr(generation, _BRIDGE_FLAG, False):
         return
 
+    # Engine threads must not exit while holding thread-local compile
+    # cache entries (mlx 0.32.1 TSD segfault; see _exitfix).
+    from ._exitfix import install_engine_thread_guard
+    install_engine_thread_guard(generation)
+
     original = generation.load_model_resources
 
     def load_model_resources(model_path, adapter_path=None):

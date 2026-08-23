@@ -101,3 +101,99 @@ def test_cli_entry_exits_clean():
     )
     assert r.returncode == 0, r.stderr.decode()[-500:]
     assert r.stdout.strip()
+
+
+# Thread-exit guard: the engine thread parks instead of exiting at
+# stop_and_join, and the parked frame must not pin the generator.
+
+class _FakeEngine:
+    """Minimal ResponseGenerator shape: queue-fed loop on a daemon thread."""
+
+    def __init__(self):
+        import queue
+        import threading
+        self.requests = queue.Queue()
+        self._stop = False
+        class _Weights:
+            pass
+        self.model = _Weights()   # stands in for the loaded weights
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        while not self._stop:
+            if self.requests.get() is None:
+                break
+
+    def stop_and_join(self):
+        self._stop = True
+        self.requests.put(None)
+        self._thread.join(timeout=5.0)
+
+
+def _patched_engine_class(monkeypatch, affected):
+    import types
+
+    from gmlx import _exitfix
+
+    cls = type("_FakeEngineCopy", (_FakeEngine,), {})
+    mod = types.SimpleNamespace(ResponseGenerator=cls)
+    monkeypatch.setattr(_exitfix, "thread_guard_affected", lambda: affected)
+    _exitfix.install_engine_thread_guard(mod)
+    return cls
+
+
+def test_thread_guard_parks_thread_and_signals_drained(monkeypatch):
+    import time
+    cls = _patched_engine_class(monkeypatch, affected=True)
+    eng = cls()
+    t = eng._thread
+    t0 = time.monotonic()
+    eng.stop_and_join()
+    # Returned on the drained event, not the 5s join timeout. The guard
+    # clears the instance dict afterwards, so assert via timing.
+    assert time.monotonic() - t0 < 4.0
+    assert t.is_alive()          # parked, not exited: TSD dtor never runs
+
+
+def test_thread_guard_parked_skeleton_releases_model(monkeypatch):
+    # The instance itself stays pinned by Thread.run()'s stack, but the
+    # guard empties it: the model (weights) must be collectable and the
+    # parked skeleton's __dict__ empty.
+    import gc
+    import time
+    import weakref
+    cls = _patched_engine_class(monkeypatch, affected=True)
+    eng = cls()
+    t = eng._thread
+    ref = weakref.ref(eng.model)
+    eng.stop_and_join()
+    for _ in range(50):
+        gc.collect()
+        if ref() is None:
+            break
+        time.sleep(0.02)
+    assert ref() is None         # weights released despite the parked thread
+    assert eng.__dict__ == {}
+    assert t.is_alive()
+
+
+def test_thread_guard_unaffected_keeps_stock_join(monkeypatch):
+    cls = _patched_engine_class(monkeypatch, affected=False)
+    eng = cls()
+    t = eng._thread
+    eng.stop_and_join()
+    t.join(timeout=5.0)
+    assert not t.is_alive()      # stock behavior: thread exits
+
+
+def test_thread_guard_install_is_idempotent(monkeypatch):
+    import types
+
+    from gmlx import _exitfix
+    cls = type("_FakeEngineCopy2", (_FakeEngine,), {})
+    mod = types.SimpleNamespace(ResponseGenerator=cls)
+    _exitfix.install_engine_thread_guard(mod)
+    first = cls._run
+    _exitfix.install_engine_thread_guard(mod)
+    assert cls._run is first
