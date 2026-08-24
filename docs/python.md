@@ -87,6 +87,7 @@ Long prompts and thinking models:
 | `prefill_step_size` | model-aware | Prefill chunk width; the default follows the deployed choice per model. |
 | `prefill_progress` | `False` | Show a stderr spinner during a long prefill (TTY only; cleared before the first token). |
 | `thinking_budget` | `None` | Cap reasoning tokens: after roughly N thinking tokens a `</think>` is forced so the model answers. No-op when the model never opens a `<think>` block. |
+| `thinking_start_token` / `thinking_end_token` | `None` | Reasoning markers for a model whose spelling is not detected from its tokenizer or template; the end tag is the one the budget forces. |
 | `verbose` | `False` | Stream text and timing to stdout while generating. |
 
 ## Benchmark

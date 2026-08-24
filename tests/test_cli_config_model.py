@@ -364,3 +364,43 @@ def test_chat_parser_has_family_flags():
     args = chat._build_parser("gmlx chat").parse_args(
         ["x.gguf", "--profile", "coding", "--no-family-defaults"])
     assert args.profile == "coding" and args.no_family_defaults
+
+
+def _thinking_config(tmp_path):
+    gguf = tmp_path / "m.gguf"
+    gguf.write_bytes(b"GGUF")
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(
+        f"server: {{model_dirs: [{tmp_path}]}}\n"
+        "models:\n"
+        "  m:\n"
+        "    path: m.gguf\n"
+        "    overrides:\n"
+        "      sampling: {thinking_budget: 512, "
+        "thinking_start_token: '<t>', thinking_end_token: '</t>'}\n")
+    return str(cfg)
+
+
+def test_thinking_keys_reach_run_args(tmp_path):
+    """The thinking sampling keys are honored by the server; the CLI overlay
+    used to drop them, so a configured cap was silent on run/chat."""
+    _, args = _resolve(["m", "--config", _thinking_config(tmp_path)])
+    assert args.thinking_budget == 512
+    assert args.thinking_start_token == "<t>"
+    assert args.thinking_end_token == "</t>"
+
+
+def test_thinking_keys_reach_chat_args(tmp_path):
+    cfg = _thinking_config(tmp_path)
+    parser = chat._build_parser("gmlx chat")
+    argv = ["m", "--config", cfg]
+    args = parser.parse_args(argv)
+    assert cli.maybe_load_from_config(args, parser, argv) is None
+    assert args.thinking_budget == 512
+    assert args.thinking_end_token == "</t>"
+
+
+def test_explicit_thinking_budget_beats_config(tmp_path):
+    cfg = _thinking_config(tmp_path)
+    _, args = _resolve(["m", "--config", cfg, "--thinking-budget", "8"])
+    assert args.thinking_budget == 8

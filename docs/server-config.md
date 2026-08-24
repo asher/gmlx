@@ -963,6 +963,12 @@ markers (open-think detection, `thinking_budget`, the streamed
 reasoning/answer splitter). Set on a family card when a model spells them
 differently (the `hy3` card pins `<think:opensource>` / `</think:opensource>`).
 
+All three thinking keys apply to `run` and `chat` as well, through the config
+overlay ([cli.md](cli.md#resolving-a-model-from-a-config)); they map onto
+`--thinking-budget`, `--thinking-start-token`, and `--thinking-end-token`, and
+an explicit flag wins. The REPL's reasoning rendering detects markers on its
+own and is unaffected by the two token keys.
+
 `thinking_budget` is off by default (unset means unlimited thinking). Set it
 on a profile or per model to cap reasoning tokens: once ~N thinking tokens
 are produced the engine forces `</think>` so the model answers. A per-request

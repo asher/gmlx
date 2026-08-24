@@ -505,6 +505,45 @@ def test_factory_returns_none_without_think_token():
     assert make_thinking_budget_processor(_NoThink(), 64) is None
 
 
+# --- configured markers (family card / config sampling keys) ----------------
+
+CFG_OPEN, CFG_CLOSE = 77, 78
+
+
+class _CfgTok:
+    """Carries both the default spelling and a custom one as single tokens,
+    so a configured pair has to beat the probe rather than be its only hit."""
+
+    _MAP = {"\n": [NL], "</think>": [END], "<think>": [START],
+            "<t>": [CFG_OPEN], "</t>": [CFG_CLOSE]}
+
+    def encode(self, text, add_special_tokens=True):
+        return self._MAP.get(text, [])
+
+
+def test_configured_markers_win_over_the_probe():
+    start, end = _thinking_token_seqs(
+        _CfgTok(), start_token="<t>", end_token="</t>")
+    assert start == (CFG_OPEN,) and end == (CFG_CLOSE,)
+    p = make_thinking_budget_processor(
+        _CfgTok(), 64, start_token="<t>", end_token="</t>")
+    assert p.end_seq == (CFG_CLOSE,) and p.forced_ids == [NL, CFG_CLOSE]
+
+
+def test_unencodable_configured_end_falls_back_to_the_probe():
+    """A marker the vocab has no tokens for must not disarm the cap."""
+    start, end = _thinking_token_seqs(
+        _CfgTok(), start_token="<nope>", end_token="</nope>")
+    assert start == (START,) and end == (END,)
+
+
+def test_configured_markers_drive_prompt_open_detection():
+    assert prompt_opens_thinking("...<|assistant|><t>", "<t>", "</t>") is True
+    assert prompt_opens_thinking("...<t>x</t>\n", "<t>", "</t>") is False
+    # the default probe does not know the spelling, so it reads as closed
+    assert prompt_opens_thinking("...<|assistant|><t>") is False
+
+
 def test_negative_budget_is_noop():
     assert make_thinking_budget_processor(_FakeTok(), -1) is None
     assert make_thinking_budget_processor(_FakeTok(), None) is None

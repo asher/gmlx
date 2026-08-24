@@ -109,6 +109,7 @@ Supported families, usage, and caveats: [docs/vlm.md](vlm.md).
 | `--audio PATH\|URL` | Audio to prepend (comma-separated for several). Requires an omni mmproj with an audio tower. |
 | `--resize-shape N\|WxH` | Resize images before encoding (e.g. `448` or `672x448`). Controls the soft-token count, a big prefill-cost lever. |
 | `--thinking-budget N` | Cap thinking tokens (VLM generate path). |
+| `--thinking-start-token STR` / `--thinking-end-token STR` | Reasoning markers, when the model's spelling is not detected from its template. The end tag is what the budget forces. |
 
 `run --mmproj` honours the full sampling surface from the table above
 (`--top-p`/`--top-k`/`--min-p`, the repetition/presence/frequency penalties,
@@ -203,7 +204,9 @@ match, the model's resolved path and its merged profile/override settings are
 overlaid onto the run: sampling (`temp`, `top-p`, `top-k`, `min-p`, penalties,
 `max-tokens`, `stop`, `seed`, XTC), KV-cache
 (`kv-bits`/`kv-group-size`/`max-kv-size`/`quantized-kv-start`), `system`,
-`chat_template`, `enable_thinking`, `mmproj`, `adapter`, speculative/draft, and
+`chat_template`, `enable_thinking`, the thinking keys (`thinking_budget`,
+`thinking_start_token`, `thinking_end_token`), `mmproj`, `adapter`,
+speculative/draft, and
 `stream` placement. Flags you pass explicitly always win; the config only
 fills what you left at its default. Models defined as `hf:` paths resolve to
 their local Hugging Face cache file (offline; `gmlx pull` them first). The
@@ -428,6 +431,7 @@ every command. The terminal is upgraded on top:
 | `--prefill-step-size N` | `2048` / `8192` streaming | Prefill chunk size (peak-memory cap for `/load`-ed long prompts). Streaming `--stream-cpu` / `--stream-experts` models default to `8192`, same as `run`. |
 | `--stream-cpu` / `--stream-experts` / `--moe-experts` / `--moe-expert-mass` / `--moe-expert-probe` / `--moe-miss-shed` / `--moe-layer-shed` / `--gpu-keepwarm` | - | Execution placement and lossy MoE fan-out, same as [`run`](#loading), including larger-than-RAM streaming `--stream-cpu` chat (text path only). |
 | `--resize-shape N\|WxH` / `--thinking-budget N` | - | Image resolution (soft-token count, VLM mode) / thinking-token cap (text + VLM; adjustable via `/thinking-budget`). |
+| `--thinking-start-token STR` / `--thinking-end-token STR` | detected | Reasoning markers, for a model whose spelling the template probe misses. |
 | `--reasoning {show,hide,raw}` | `show` | How a thinking model's reasoning is displayed: gutter-framed with payoff, collapsed spinner, or verbatim. Live toggle: Ctrl-O or `/reasoning`. |
 | `--render {auto,plain,lite,rich}` | `auto` | Reply markdown rendering (`auto`: rich when installed on a color TTY). Switch live with `/render`. |
 | `--theme NAME` | `dark` | Color theme (`dark`, `light`, `dark-hc`, `nord`, `dracula`, `solarized-dark`, `gruvbox`). Switch live with `/theme`. |

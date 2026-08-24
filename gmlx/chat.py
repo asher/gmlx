@@ -417,6 +417,8 @@ class ChatState:
     vlm: bool = False
     system_prompt: str | None = None
     thinking_budget: int | None = None
+    thinking_start_token: str | None = None
+    thinking_end_token: str | None = None
     sampling: dict = dataclasses.field(default_factory=dict)
     transcript: list = dataclasses.field(default_factory=list)
     replay_messages: list | None = None  # deferred history prefill (--resume)
@@ -1981,6 +1983,16 @@ def _opens_thinking(prompt) -> bool:
     return prompt_opens_thinking(prompt)
 
 
+def _vlm_thinking_tokens(state) -> dict:
+    """The configured reasoning markers as mlx-vlm generate kwargs, omitting
+    the ones left unset - mlx-vlm defaults them to ``<think>`` / ``</think>``
+    and encodes whatever it is given, so an explicit None would fail there."""
+    return {k: v for k, v in (
+        ("thinking_start_token", state.thinking_start_token),
+        ("thinking_end_token", state.thinking_end_token),
+    ) if v}
+
+
 def _opens_header(prompt) -> bool:
     """Whether a rendered ``prompt`` stops inside a harmony/ATEM message header
     (see ``reasoning.prompt_opens_header``)."""
@@ -3178,6 +3190,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
 
     state.system_prompt = getattr(args, "system_prompt", None)
     state.thinking_budget = getattr(args, "thinking_budget", None)
+    state.thinking_start_token = getattr(args, "thinking_start_token", None)
+    state.thinking_end_token = getattr(args, "thinking_end_token", None)
     if args.assistant:
         # The session key is the served id, not a file path.
         model_key = model_request
@@ -3654,8 +3668,12 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 vtok,
                 None,
                 start_in_thinking=isinstance(prompt, str)
-                and prompt_opens_thinking(prompt, tokenizer=vtok),
+                and prompt_opens_thinking(
+                    prompt, state.thinking_start_token,
+                    state.thinking_end_token, tokenizer=vtok),
                 interruptible=True,
+                start_token=state.thinking_start_token,
+                end_token=state.thinking_end_token,
             )
             set_finish_key_target(tbp)
             try:
@@ -3678,6 +3696,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                         logit_bias=logit_bias,
                         resize_shape=resize_shape,
                         thinking_budget=state.thinking_budget,
+                        **_vlm_thinking_tokens(state),
                         logits_processors=[tbp] if tbp is not None else None,
                         **kv_kwargs,
                     ),
@@ -3831,8 +3850,12 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         tbp = make_thinking_budget_processor(
             tok,
             state.thinking_budget,
-            start_in_thinking=prompt_opens_thinking(prompt_text),
+            start_in_thinking=prompt_opens_thinking(
+                prompt_text, state.thinking_start_token,
+                state.thinking_end_token),
             interruptible=True,
+            start_token=state.thinking_start_token,
+            end_token=state.thinking_end_token,
         )
         if tbp is not None:
             logits_processors = list(logits_processors) + [tbp]
