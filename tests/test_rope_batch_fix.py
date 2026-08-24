@@ -1,23 +1,31 @@
-"""rope_batch_fix: mx.fast.rope scalar-offset batch corruption at T == 1.
+"""rope_batch_fix: mx.fast.rope scalar-offset batch corruption.
 
-Upstream (stock mlx 0.31.2, Metal): rope with a scalar offset (plain
-int, 0-d array, or size-1 array) on a (B, *, 1, D) input with B > 1
-corrupts every batch row past the first (out-of-bounds reads; CPU path
-is correct). The fix expands any offset carrying fewer entries than B
-to a per-row int32 array, which routes onto the healthy kernel.
+Upstream history, two defects:
+1. Single dispatch path (row-contiguous, T == 1, scalar offset): stock
+   mlx 0.31.2 spanned the grid over one batch, leaving rows past the
+   first unwritten (stale or donated buffer contents). Fixed in mlx
+   0.32.1 (grid spans B*N); a guard test pins the fixed behavior.
+2. General path (every other layout): still broken in 0.32.1. The host
+   passes offset.strides()[0] as the per-batch offset stride, which is
+   1 for a shape-(1,) array, so the kernel reads offset[batch] past the
+   end of a size-1 offset buffer for every batch row after the first.
+   Plain ints and 0-d arrays take stride 0 there and are safe.
 
-The tripwires fail when an mlx upgrade fixes the kernel, which is the
-signal to drop the workaround. The array-offset tripwires MUST run in
-fresh subprocesses: the OOB read lands on the buffer a previously
-expanded offset left behind, so an in-process run that already
-dispatched a fixed call reads primed memory and looks clean.
+The fix expands any offset carrying fewer entries than B at T == 1 to a
+per-row int32 array. It does not cover the T > 1 size-1 case (its
+trigger requires shape[-2] == 1); no gmlx path passes that shape.
+
+The tripwires slice the offset out of a poison-valued array, so the OOB
+read is deterministic: it lands inside the same live buffer and each
+corrupt batch row rotates by exactly its poison value, with no
+dependence on allocator history. They fail when an mlx upgrade fixes
+the general-path stride handling, which is the signal to re-evaluate
+the workaround.
 """
 
 from __future__ import annotations
 
 import os
-import subprocess
-import sys
 
 import mlx.core as mx
 import pytest
@@ -74,51 +82,57 @@ def _rand(shape):
     return x
 
 
+_POISON = [48, 9000, 17000, 23000]
+
+
+def _poison_offset():
+    pool = mx.array(_POISON, dtype=mx.int32)
+    off = pool[:1]
+    mx.eval(off)
+    return off, pool
+
+
+def _general_arm(layout):
+    # Shapes whose T == 1 non-contiguity, T > 1, or head-seq transposed
+    # strides dispatch the general kernel with batch count 4.
+    if layout == "noncontig_t1":
+        return mx.swapaxes(_rand((8, 4, 1, D)), 0, 1)
+    if layout == "t8":
+        return _rand((4, 8, 8, D))
+    return mx.swapaxes(_rand((4, 3, 8, D)), 1, 2)
+
+
 @pytest.mark.skipif(ON_CPU, reason="upstream bug is GPU-only")
-def test_upstream_bug_still_present():
-    # When this fails after an mlx bump, the kernel got fixed upstream:
-    # drop rope_batch_fix and this file together.
-    x = _rand((2, 1, D))
-    gpu = _rope(_stock(), x, 48, stream=mx.gpu)
-    cpu = _rope(_stock(), x, 48, stream=mx.cpu)
+def test_upstream_single_path_fixed():
+    # mlx 0.32.1 spans the single-path grid over all B*N rows. If this
+    # fails, the 0.31.2 unwritten-batch-rows bug is back.
+    for off in (48, mx.array(48), _poison_offset()[0]):
+        x = _rand((2, 1, D))
+        gpu = _rope(_stock(), x, off, stream=mx.gpu)
+        cpu = _rope(_stock(), x, off, stream=mx.cpu)
+        mx.eval(gpu, cpu)
+        assert mx.allclose(gpu, cpu, atol=1e-3).item()
+
+
+@pytest.mark.skipif(ON_CPU, reason="upstream bug is GPU-only")
+@pytest.mark.parametrize("layout", ["noncontig_t1", "t8", "hst"])
+def test_upstream_bug_still_present(layout):
+    # When a layout goes clean after an mlx bump, the general-path
+    # offset-stride handling got fixed upstream: re-evaluate the
+    # workaround (and the T > 1 size-1 gap it does not cover).
+    off, pool = _poison_offset()
+    x = _general_arm(layout)
+    gpu = _rope(_stock(), x, off, stream=mx.gpu)
+    cpu = _rope(_stock(), x, off, stream=mx.cpu)
     mx.eval(gpu, cpu)
+    assert mx.allclose(gpu[0], cpu[0], atol=1e-3).item()
     assert not mx.allclose(gpu[1], cpu[1], atol=1e-3).item()
-
-
-_VARIANT_SCRIPT = """
-import mlx.core as mx
-D = 64
-freqs = mx.array([10000.0 ** (2 * i / D) for i in range(D // 2)],
-                 dtype=mx.float32)
-off = {"zerod": mx.array(48), "size1": mx.array([48])}["{variant}"]
-mx.random.seed(0)
-x = mx.random.normal((4, 8, 1, D)).astype(mx.float32)
-mx.eval(x)
-
-
-def rope(stream):
-    return mx.fast.rope(x, D, traditional=False, base=None, scale=1.0,
-                        offset=off, freqs=freqs, stream=stream)
-
-
-gpu, cpu = rope(mx.gpu), rope(mx.cpu)
-mx.eval(gpu, cpu)
-print("CORRUPT" if mx.abs(gpu - cpu).max().item() > 1e-3 else "CLEAN")
-"""
-
-
-@pytest.mark.skipif(ON_CPU, reason="upstream bug is GPU-only")
-@pytest.mark.parametrize("variant", ["zerod", "size1"])
-def test_upstream_bug_still_present_scalar_arrays(variant):
-    # Fresh process per variant: in-process the fix's own expanded-offset
-    # buffer primes the OOB read and hides the bug. When a variant prints
-    # CLEAN after an mlx bump, the kernel got fixed upstream.
-    env = {k: v for k, v in os.environ.items() if k != "KQUANT_FORCE_CPU"}
-    out = subprocess.run(
-        [sys.executable, "-c", _VARIANT_SCRIPT.replace("{variant}", variant)],
-        capture_output=True, text=True, env=env, timeout=120)
-    assert out.returncode == 0, out.stderr
-    assert out.stdout.strip() == "CORRUPT", (variant, out.stdout)
+    # The corrupt rows rotate by exactly their poison values: the same
+    # call with the full poison pool as a per-batch offset agrees.
+    ref = _rope(_stock(), x, pool, stream=mx.cpu)
+    mx.eval(ref)
+    for b in range(1, 4):
+        assert mx.allclose(gpu[b], ref[b], atol=1e-2).item(), (layout, b)
 
 
 def test_fix_matches_cpu_reference(installed):
