@@ -86,20 +86,24 @@ def _stash_template_kwargs(args, request, _processor):
         or "enable_thinking" in spec_sampling
         or os.environ.get("MLX_VLM_ENABLE_THINKING") is not None
     )
-    if not thinking_explicit:
-        # The z.ai / GLM API spelling as a top-level request field:
-        # `thinking: {"type": "enabled"|"disabled"}`. A dedicated control,
-        # so it maps onto whatever switch this model's template reads.
-        from ..reasoning import map_thinking_controls, thinking_flag
+    # Dedicated request controls: `thinking` as the z.ai / GLM dict
+    # ({"type": "enabled"|"disabled"}) or a plain on/off/adaptive value
+    # (the chat client forwards --thinking verbatim), and a top-level
+    # `reasoning_effort`. Mapped onto whatever switch this model's
+    # template reads.
+    raw = getattr(request, "thinking", None) if not thinking_explicit else None
+    req_effort = getattr(request, "reasoning_effort", None)
+    if raw is not None or req_effort is not None:
+        from ..reasoning import map_thinking_controls
 
-        flag = thinking_flag(getattr(request, "thinking", None))
-        if flag is not None:
-            args.enable_thinking = flag
-            merged = map_thinking_controls(merged, flag, None, template,
-                                           warn=_warn_thinking)
-            thinking_explicit = True
-        else:
-            args.enable_thinking = True
+        merged = map_thinking_controls(merged, raw, req_effort, template,
+                                       warn=_warn_thinking)
+    if not thinking_explicit:
+        from ..reasoning import thinking_switch_flag
+
+        flag = thinking_switch_flag(raw) if raw is not None else None
+        args.enable_thinking = True if flag is None else flag
+        thinking_explicit = flag is not None
     if merged:
         args._kq_template_kwargs = merged
     args._kq_thinking_explicit = thinking_explicit
@@ -110,7 +114,14 @@ def install_chat_template_kwargs() -> None:
     """Forward arbitrary ``chat_template_kwargs`` (active profile + request, request
     wins) into ``apply_chat_template``. Two idempotent halves: a gen-args transform
     stashes the merged dict on the args object; a ``GenerationArguments.to_template_kwargs``
-    wrapper folds that stash into the kwargs mlx-vlm passes to the template."""
+    wrapper folds that stash into the kwargs mlx-vlm passes to the template.
+
+    The pop below leaves ``enable_thinking`` absent so the template's own
+    default governs; ``get_chat_template`` would then re-inject False
+    (mlx-vlm >= 0.6.15), so the render seam is guarded too."""
+    from ..reasoning import install_template_default_thinking
+
+    install_template_default_thinking()
     _install_gen_args_transform(_CTKW_FLAG, _stash_template_kwargs)
 
     gen = importlib.import_module("mlx_vlm.server.generation")

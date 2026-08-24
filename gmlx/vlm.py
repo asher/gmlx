@@ -2219,6 +2219,11 @@ def load_vlm_model(
     """
     _log = loadlog.verbose_print
 
+    # Absent enable_thinking must keep meaning "template default" when
+    # mlx-vlm renders the prompt (chat and run paths both call in here).
+    from .reasoning import install_template_default_thinking
+    install_template_default_thinking()
+
     # 1. LLM GGUF - preflight gates the text arch (llama/gemma4/...) as usual.
     loadlog.stage("reading gguf metadata")
     pf = preflight(gguf_path, arch=arch)

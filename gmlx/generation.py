@@ -226,6 +226,8 @@ def generate(
     quantized_kv_start: int = 0,
     prefill_step_size: int | None = None,
     thinking_budget: int | None = None,
+    thinking_start_token: str | None = None,
+    thinking_end_token: str | None = None,
     apply_chat_template: bool = True,
     prefill_progress: bool = False,
     over_generation: int = 0,
@@ -255,6 +257,9 @@ def generate(
     generated or the tokenizer lacks a ``</think>`` token. With or without a
     budget, ^T (see ``thinking_budget.install_finish_thinking_key``, armed by
     the CLI entry points) force-closes an open thinking block the same way.
+    ``thinking_start_token`` / ``thinking_end_token`` name the reasoning
+    markers for a model whose spelling the tokenizer/template probe does not
+    recognize; unset, the probe decides.
     Returns the generated text. ``prefill_progress`` shows a stderr spinner during a long prefill
     (TTY only; cleared before the first token).
     ``reasoning`` shapes how a *verbose* stream displays a thinking model's
@@ -323,9 +328,13 @@ def generate(
         tbp = make_thinking_budget_processor(
             tokenizer,
             thinking_budget,
-            start_in_thinking=prompt_opens_thinking(prompt, tokenizer=tokenizer),
+            start_in_thinking=prompt_opens_thinking(
+                prompt, thinking_start_token, thinking_end_token,
+                tokenizer=tokenizer),
             verbose=verbose,
             interruptible=True,
+            start_token=thinking_start_token,
+            end_token=thinking_end_token,
         )
         if tbp is not None:
             logits_processors = list(logits_processors) + [tbp]
@@ -420,6 +429,8 @@ def generate(
                 tokenizer, 0, start_in_thinking=False, verbose=verbose,
                 # Seam detection needs the model's untouched stop behavior.
                 eos_floor=False,
+                start_token=thinking_start_token,
+                end_token=thinking_end_token,
             )
             if tbp is not None:
                 over_logits_processors = list(logits_processors) + [tbp]

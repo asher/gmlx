@@ -351,6 +351,10 @@ async def _stream_response(release, alias_id, brain, user_text, request):
                 kind, payload = await queue.get()
                 if kind == "say":
                     yield _chunk(cid, created, alias_id, {"content": payload})
+                elif kind == "think":
+                    # The gmlx streaming convention for chain-of-thought;
+                    # OpenAI clients ignore the unknown delta field.
+                    yield _chunk(cid, created, alias_id, {"reasoning": payload})
                 elif kind == "status":
                     yield f": assistant {payload}\n\n"
                 elif kind == "_finished":

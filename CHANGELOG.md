@@ -8,6 +8,20 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `/thinking [on|off|adaptive|default]` in chat flips the model's reasoning
+  switch mid-session, in both server and local modes.
+- Server-mode chat now forwards `--thinking` and `--reasoning-effort` (they
+  were silently dropped); the server also accepts plain
+  `thinking: on|off|adaptive` request values and a top-level
+  `reasoning_effort` field.
+- The `thinking` control maps onto Kimi K2.x's bare `thinking` template
+  variable, so `thinking: off` works for Kimi K2.7.
+- The config thinking keys (`thinking_budget`, `thinking_start_token`,
+  `thinking_end_token`) now apply to `run` and `chat`, not just `serve`,
+  with matching `--thinking-start-token`/`--thinking-end-token` flags.
+- Server and assistant chat render the model's chain-of-thought through the
+  standard reasoning display (it used to collapse into a "thinking..."
+  status line); `serve --assistant` streams it as `reasoning` deltas.
 - The server now governs memory pressure at runtime instead of dying on it:
   under pressure it stops admitting, throttles allocation, shrinks prefill
   chunks and speculative width, evicts idle caches, and as a last resort
@@ -58,6 +72,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   row); output is unchanged until the ring fills.
 
 ### Fixed
+- Served and VLM-local models stopped thinking by default on mlx-vlm 0.6.15,
+  which injects `enable_thinking=false` into every render where the kwarg is
+  absent; absent now means the template's own default again.
+- Text-only served models build mlx-vlm cache classes again, keeping prompt
+  caching engaged (the gmlx.cache crash fix built mlx-lm classes the APC
+  engine's checks ignore).
 - serve: evicting a streamed MoE model left its weights resident, so every
   later load deferred with a negative free working set until restart.
 - Plain text models (qwen3, llama) failed every request with a missing

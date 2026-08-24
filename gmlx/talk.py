@@ -519,6 +519,10 @@ class TalkLoop:
                         self.tts_q.put((cancel, chunk))
                 elif kind == "status":
                     self.events.put(("status", ev[1]))
+                elif kind == "think":
+                    # Voice never speaks chain-of-thought; the text only
+                    # keeps the thinking indicator alive.
+                    self.events.put(("status", "thinking"))
                 elif kind == "done":
                     self.events.put(("stats", ev[1]))
         except Exception as e:            # noqa: BLE001 - surface, keep loop up

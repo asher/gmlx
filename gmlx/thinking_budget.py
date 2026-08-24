@@ -87,23 +87,30 @@ def _template_think_pair(tokenizer):
     return None
 
 
-def prompt_open_think_tag(prompt, start_token: str = "<think>",
-                          end_token: str = "</think>", tokenizer=None):
+def prompt_open_think_tag(prompt, start_token: str | None = None,
+                          end_token: str | None = None, tokenizer=None):
     """The start marker of the thinking block a rendered ``prompt`` ends
     inside (its last start marker not yet closed by a later end marker), or
     None when the prompt is closed. The returned spelling is the model's own,
-    so a raw printer can echo it to make the stream well-formed."""
+    so a raw printer can echo it to make the stream well-formed.
+
+    A full configured pair (``start_token`` and ``end_token``, from a family
+    card or the user's config) names the tags this model really emits, so it
+    wins over the tokenizer probe below."""
     if not isinstance(prompt, str):
         return None
-    pairs = [(start_token, end_token)]
-    if tokenizer is not None:
-        tpair = _template_think_pair(tokenizer)
-        s = getattr(tokenizer, "think_start", None)
-        e = getattr(tokenizer, "think_end", None)
-        if tpair is not None:
-            pairs = [tpair]
-        elif s and e:
-            pairs = [(s, e)]
+    if start_token and end_token:
+        pairs = [(start_token, end_token)]
+    else:
+        pairs = [(start_token or "<think>", end_token or "</think>")]
+        if tokenizer is not None:
+            tpair = _template_think_pair(tokenizer)
+            s = getattr(tokenizer, "think_start", None)
+            e = getattr(tokenizer, "think_end", None)
+            if tpair is not None:
+                pairs = [tpair]
+            elif s and e:
+                pairs = [(s, e)]
     if pairs == [("<think>", "</think>")]:
         pairs = list(_THINK_PAIRS)
     for start, end in pairs:
@@ -113,8 +120,8 @@ def prompt_open_think_tag(prompt, start_token: str = "<think>",
     return None
 
 
-def prompt_opens_thinking(prompt, start_token: str = "<think>",
-                          end_token: str = "</think>", tokenizer=None) -> bool:
+def prompt_opens_thinking(prompt, start_token: str | None = None,
+                          end_token: str | None = None, tokenizer=None) -> bool:
     """Whether the rendered ``prompt`` ends inside an open thinking block.
 
     This is the right signal for seeding the budget processor's in-thinking state.
@@ -124,7 +131,8 @@ def prompt_opens_thinking(prompt, start_token: str = "<think>",
     this instead of ``enable_thinking`` honors an explicit budget regardless of the
     flag (the flag only shapes the prompt, via the template). Pass ``tokenizer`` to
     use the model's detected markers instead of the defaults; with the defaults,
-    every known think-tag spelling (``_THINK_PAIRS``) is scanned."""
+    every known think-tag spelling (``_THINK_PAIRS``) is scanned. A configured
+    ``start_token``/``end_token`` pair wins over both."""
     return prompt_open_think_tag(
         prompt, start_token=start_token, end_token=end_token, tokenizer=tokenizer
     ) is not None
@@ -150,7 +158,25 @@ def _single_token_id(tokenizer, text: str):
     return int(ids[0]) if ids is not None and len(ids) == 1 else None
 
 
-def _thinking_token_seqs(tokenizer):
+def _tag_pair_seqs(tokenizer, start_tag, end_tag):
+    """``(start_seq, end_seq)`` for a known marker spelling, or None when the
+    end tag does not encode at all (the caller then keeps probing). Single
+    vocab entries are preferred over the BPE pieces of the same spelling;
+    ``start_tag`` may be None, which yields a None start_seq."""
+    if not end_tag:
+        return None
+    end_id = _single_token_id(tokenizer, end_tag)
+    if end_id is not None:
+        start_id = _single_token_id(tokenizer, start_tag) if start_tag else None
+        return ((start_id,) if start_id is not None else None, (end_id,))
+    end_ids = _encode_ids(tokenizer, end_tag)
+    if not end_ids:
+        return None
+    start_ids = _encode_ids(tokenizer, start_tag) if start_tag else None
+    return (tuple(start_ids) if start_ids else None, tuple(end_ids))
+
+
+def _thinking_token_seqs(tokenizer, start_token=None, end_token=None):
     """``(start_seq, end_seq)`` token-id tuples for the model's thinking
     delimiters, from mlx-lm's ``TokenizerWrapper`` inference (covers ``<think>``,
     ``<longcat_think>``, and the ``<|channel>thought`` / ``<channel|>`` channel
@@ -161,21 +187,18 @@ def _thinking_token_seqs(tokenizer):
     model it resolves ``</think>`` to its trailing ``'>'`` piece, which then
     (dis)arms the processor on every ``>`` the model emits. ``end_seq`` is
     ``None`` when no thinking convention is detected. A chat template that
-    names one of the ``_THINK_PAIRS`` spellings wins over everything: it is
-    the ground truth for which tags the model actually emits (see
-    ``_template_think_pair``)."""
+    names one of the ``_THINK_PAIRS`` spellings wins over everything except a
+    configured ``end_token``: the template is the ground truth for which tags
+    the model actually emits (see ``_template_think_pair``), and configured
+    markers are the user's word for a model neither one recognizes."""
+    seqs = _tag_pair_seqs(tokenizer, start_token, end_token)
+    if seqs is not None:
+        return seqs
     pair = _template_think_pair(tokenizer)
     if pair is not None:
-        start_tag, end_tag = pair
-        end_id = _single_token_id(tokenizer, end_tag)
-        if end_id is not None:
-            start_id = _single_token_id(tokenizer, start_tag)
-            return ((start_id,) if start_id is not None else None, (end_id,))
-        end_ids = _encode_ids(tokenizer, end_tag)
-        if end_ids is not None and len(end_ids):
-            start_ids = _encode_ids(tokenizer, start_tag)
-            start_seq = tuple(start_ids) if start_ids else None
-            return (start_seq, tuple(end_ids))
+        seqs = _tag_pair_seqs(tokenizer, *pair)
+        if seqs is not None:
+            return seqs
     end = getattr(tokenizer, "think_end_tokens", None)
     if end:
         start = getattr(tokenizer, "think_start_tokens", None)
@@ -414,7 +437,7 @@ def think_tokenizer_for(processor):
 
 def make_thinking_budget_processor(
     tokenizer, budget, *, start_in_thinking=True, verbose=False,
-    eos_floor=True, interruptible=False,
+    eos_floor=True, interruptible=False, start_token=None, end_token=None,
 ):
     """Build a thinking-budget logits processor, or ``None`` if unsupported.
 
@@ -426,6 +449,8 @@ def make_thinking_budget_processor(
     Resolves the model's thinking delimiters via mlx-lm's tokenizer inference
     (``<think>``, ``<longcat_think>``, and the ``<|channel>thought`` /
     ``<channel|>`` channel format), so the cap is not tied to one spelling.
+    ``start_token``/``end_token`` (a family card's or the user's configured
+    markers) override that inference for a model it does not recognize.
     Returns ``None`` (warning when ``verbose``) when no thinking-end token is
     detected; the caller then generates uncapped. ``budget=0`` force-closes as
     soon as a thinking block opens.
@@ -451,11 +476,13 @@ def make_thinking_budget_processor(
         # An implicit (^T-only) processor is best-effort: a tokenizer the
         # probe can't handle must not break plain generation.
         try:
-            start_seq, end_seq = _thinking_token_seqs(tokenizer)
+            start_seq, end_seq = _thinking_token_seqs(
+                tokenizer, start_token, end_token)
         except Exception:  # noqa: BLE001
             return None
     else:
-        start_seq, end_seq = _thinking_token_seqs(tokenizer)
+        start_seq, end_seq = _thinking_token_seqs(
+            tokenizer, start_token, end_token)
     if not end_seq:
         if verbose and budget is not None:
             print(

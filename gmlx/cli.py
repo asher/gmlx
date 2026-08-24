@@ -502,6 +502,20 @@ def add_vlm_shared_args(ap: argparse.ArgumentParser) -> None:
         help="Cap thinking tokens: force </think> after ~N reasoning tokens "
         "(text + VLM modes; no-op when thinking is disabled).",
     )
+    ap.add_argument(
+        "--thinking-start-token",
+        default=None,
+        metavar="STR",
+        help="Reasoning open marker, for a model whose spelling is not "
+        "detected from its template (default: detected).",
+    )
+    ap.add_argument(
+        "--thinking-end-token",
+        default=None,
+        metavar="STR",
+        help="Reasoning close marker, the tag --thinking-budget forces "
+        "(default: detected).",
+    )
 
 
 def add_placement_args(ap: argparse.ArgumentParser) -> None:
@@ -1560,6 +1574,8 @@ def _run_generate(args) -> int:
         quantized_kv_start=args.quantized_kv_start,
         prefill_step_size=args.prefill_step_size,
         thinking_budget=args.thinking_budget,
+        thinking_start_token=args.thinking_start_token,
+        thinking_end_token=args.thinking_end_token,
         apply_chat_template=not args.no_chat_template,
         prefill_progress=sys.stdout.isatty() and not args.verbose,
         over_generation=args.over_generation,
@@ -1653,6 +1669,12 @@ def _run_vlm(args) -> int:
         extra["resize_shape"] = parse_resize_shape(args.resize_shape)
     if args.thinking_budget is not None:
         extra["thinking_budget"] = args.thinking_budget
+    # mlx-vlm's own criteria enforces the budget here, so it needs the markers
+    # as well; it defaults them to <think> / </think>.
+    if args.thinking_start_token:
+        extra["thinking_start_token"] = args.thinking_start_token
+    if args.thinking_end_token:
+        extra["thinking_end_token"] = args.thinking_end_token
     if args.kv_bits is not None:
         extra.update(
             kv_bits=args.kv_bits,
@@ -1678,7 +1700,9 @@ def _run_vlm(args) -> int:
 
     install_finish_thinking_key()
     tbp = make_thinking_budget_processor(
-        think_tokenizer_for(processor), None, interruptible=True
+        think_tokenizer_for(processor), None, interruptible=True,
+        start_token=args.thinking_start_token,
+        end_token=args.thinking_end_token,
     )
     if tbp is not None:
         extra["logits_processors"] = [tbp]
@@ -1800,6 +1824,11 @@ _CFG_SAMPLING_TO_ARG = {
     "stop": "stop",
     "xtc_probability": "xtc_probability",
     "xtc_threshold": "xtc_threshold",
+    # Thinking keys: same names as the served sampling keys, so one family
+    # card or model entry caps and delimits reasoning on every verb.
+    "thinking_budget": "thinking_budget",
+    "thinking_start_token": "thinking_start_token",
+    "thinking_end_token": "thinking_end_token",
 }
 _CFG_LOAD_TO_ARG = {
     "kv_bits": "kv_bits",

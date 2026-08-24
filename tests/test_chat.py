@@ -1044,3 +1044,33 @@ def test_rate_ticker_throttles_pushes():
         if tk.push(SimpleNamespace(text="hello world here", generation_tokens=i * 5)):
             pushes += 1
     assert 0 < pushes <= 18
+
+
+def test_slash_thinking_local_maps_template_spelling(capsys):
+    from gmlx.chat import ChatState, _slash_thinking
+
+    state = ChatState(template_kwargs={},
+                      template_text="{% if enable_thinking %}{% endif %}")
+    _slash_thinking("/thinking", "off", state)
+    assert state.template_kwargs == {"enable_thinking": False}
+    _slash_thinking("/thinking", "", state)
+    assert "thinking = enable_thinking=False" in capsys.readouterr().out
+    _slash_thinking("/thinking", "default", state)
+    assert state.template_kwargs == {}
+
+    # Kimi K2.x bare-thinking spelling
+    state = ChatState(template_kwargs={},
+                      template_text="thinking is defined and thinking is false")
+    _slash_thinking("/thinking", "off", state)
+    assert state.template_kwargs == {"thinking": False}
+    _slash_thinking("/thinking", "on", state)
+    assert state.template_kwargs == {"thinking": True}
+
+
+def test_slash_thinking_rejects_bad_value(capsys):
+    from gmlx.chat import ChatState, _slash_thinking
+
+    state = ChatState(template_kwargs={"enable_thinking": True})
+    _slash_thinking("/thinking", "sideways", state)
+    assert "on, off, adaptive, or default" in capsys.readouterr().out
+    assert state.template_kwargs == {"enable_thinking": True}  # untouched

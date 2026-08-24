@@ -32,6 +32,7 @@ takes an injectable ``write`` sink and ``clock``.
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 from .render import _CONTROL_CHARS
@@ -529,6 +530,17 @@ def thinking_flag(value) -> bool | None:
     return None
 
 
+def thinking_switch_flag(value) -> bool | None:
+    """``value`` (the z.ai dict, a bool, or an on/off string) as an on/off
+    bool; None for adaptive or anything unrecognized."""
+    flag = thinking_flag(value)
+    if flag is not None:
+        return flag
+    if isinstance(value, (str, bool)):
+        return {"on": True, "off": False}.get(_THINKING_LEVELS.get(value))
+    return None
+
+
 def normalize_template_kwargs(kwargs: dict) -> dict:
     """Translate ``thinking: {"type": ...}`` (the z.ai / GLM API request
     schema users copy from provider docs) into ``enable_thinking``, the
@@ -543,11 +555,52 @@ def normalize_template_kwargs(kwargs: dict) -> dict:
     return out
 
 
+_TEMPLATE_DEFAULT_FLAG = "_kq_template_default_thinking"
+
+
+def install_template_default_thinking() -> None:
+    """Keep an absent ``enable_thinking`` meaning "the template's own default".
+
+    mlx-vlm >= 0.6.15 ``get_chat_template`` injects ``enable_thinking=False``
+    whenever the kwarg is missing and the tokenizer's ``apply_chat_template``
+    accepts it - a ``**kwargs`` signature always does - so every default-on
+    reasoning template renders the dead ``<think></think>`` prefill and the
+    model stops thinking. Seed the kwarg with a Jinja ``Undefined``: the
+    injection sees it as present and stands down, and the template evaluates
+    ``enable_thinking is defined`` as false - same semantics as a truly
+    absent variable. An explicit value passes through untouched. Idempotent;
+    rebinds the module global both ``apply_chat_template`` call sites
+    resolve at call time."""
+    import importlib
+
+    pu = importlib.import_module("mlx_vlm.prompt_utils")
+    original = pu.get_chat_template
+    if getattr(original, _TEMPLATE_DEFAULT_FLAG, False):
+        return
+    from jinja2 import Undefined
+
+    undef = Undefined(name="enable_thinking")
+
+    def get_chat_template(processor, messages, add_generation_prompt,
+                          tokenize=False, **kwargs):
+        if "enable_thinking" not in kwargs:
+            kwargs["enable_thinking"] = undef
+        return original(processor, messages, add_generation_prompt,
+                        tokenize=tokenize, **kwargs)
+
+    get_chat_template.__dict__[_TEMPLATE_DEFAULT_FLAG] = True
+    pu.get_chat_template = get_chat_template
+
+
 # Values accepted for the model-agnostic `thinking` control (CLI flag,
 # config/profile key, z.ai-style request field).
 _THINKING_LEVELS = {"on": "on", "off": "off", "adaptive": "adaptive",
                     "enabled": "on", "disabled": "off",
                     True: "on", False: "off"}
+
+
+# A bare `thinking` template variable (not preserve_thinking / enable_thinking).
+_BARE_THINKING_RE = re.compile(r"(?<![A-Za-z_])thinking(?![A-Za-z_])")
 
 
 # Templates that grade reasoning depth under a name of their own. The control
@@ -579,7 +632,8 @@ def map_thinking_controls(base: dict, thinking=None, reasoning_effort=None,
     ``thinking`` (on/off/adaptive; enabled/disabled, plain bools, and the
     z.ai dict shape accepted) becomes MiniMax's three-state ``thinking_mode``
     where present, ``enable_thinking`` next (Qwen3.x, GLM, DeepSeek-V4
-    alias), or Hy3's ``reasoning_effort: no_think`` dialect.
+    alias), a bare ``thinking`` variable next (Kimi K2.x), or Hy3's
+    ``reasoning_effort: no_think`` dialect.
     ``reasoning_effort`` passes through under its own name (level names are
     the model's own; its template validates them), and an explicit level -
     argument or ``base`` key - wins over one a ``thinking`` switch would
@@ -614,6 +668,11 @@ def map_thinking_controls(base: dict, thinking=None, reasoning_effort=None,
               "chat template has no such variable - ignored")
     elif "enable_thinking" in template or not template:
         out["enable_thinking"] = mode == "on"
+    elif _BARE_THINKING_RE.search(template):
+        # Kimi K2.x: a bare `thinking` variable gates the pre-filled
+        # think-open (`thinking is defined and thinking is false` renders
+        # the closed pair). The lookarounds skip preserve_thinking etc.
+        out["thinking"] = mode == "on"
     elif "no_think" in template and "reasoning_effort" in template:
         out.setdefault("reasoning_effort",
                        "no_think" if mode == "off" else "high")

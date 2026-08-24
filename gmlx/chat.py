@@ -417,6 +417,10 @@ class ChatState:
     vlm: bool = False
     system_prompt: str | None = None
     thinking_budget: int | None = None
+    thinking_start_token: str | None = None
+    thinking_end_token: str | None = None
+    template_kwargs: dict | None = None  # live per-turn render kwargs (/thinking)
+    template_text: str = ""              # template source, for switch mapping
     sampling: dict = dataclasses.field(default_factory=dict)
     transcript: list = dataclasses.field(default_factory=list)
     replay_messages: list | None = None  # deferred history prefill (--resume)
@@ -727,6 +731,7 @@ def _print_shim_help(state: ChatState) -> None:
         "- '/system [text|off]' show or set the system prompt "
         "(setting restarts the chat)"
     )
+    print("- '/thinking [on|off|default]' the model's reasoning switch")
     print("- '/thinking-budget [N|off]' cap thinking tokens per reply")
     print(
         "- '/reasoning [show|hide|raw]' control how thinking is displayed "
@@ -1192,6 +1197,54 @@ def _slash_memory(cmd, arg, state):
     return None
 
 
+# Switch variables map_thinking_controls can set; /thinking default clears them.
+_THINKING_SWITCH_KEYS = ("thinking_mode", "enable_thinking", "thinking")
+
+
+def _slash_thinking(cmd, arg, state):
+    """Toggle the model's own reasoning switch per turn. Server mode sets or
+    clears the forwarded ``thinking`` request field (the server maps it onto
+    the template's spelling); local mode maps it here and mutates the live
+    template kwargs."""
+    if arg and arg not in ("on", "off", "adaptive", "default"):
+        print("[chat] /thinking takes on, off, adaptive, or default")
+        return None
+    if state.assistant_brain is not None:
+        extra = state.assistant_extra
+        if not arg:
+            print(f"[chat] thinking = {extra.get('thinking', 'default')}")
+        elif arg == "default":
+            extra.pop("thinking", None)
+            print("[chat] thinking = default (next reply)")
+        else:
+            extra["thinking"] = arg
+            print(f"[chat] thinking = {arg} (next reply)")
+        return None
+    tkw = state.template_kwargs
+    if tkw is None:
+        print("[chat] no chat template on this path - /thinking unavailable")
+        return None
+    if not arg:
+        current = next((f"{k}={tkw[k]}" for k in _THINKING_SWITCH_KEYS
+                        if k in tkw), "default")
+        print(f"[chat] thinking = {current}")
+        return None
+    for k in _THINKING_SWITCH_KEYS:
+        tkw.pop(k, None)
+    if arg == "default":
+        print("[chat] thinking = default (next reply)")
+        return None
+    from .reasoning import map_thinking_controls
+
+    mapped = map_thinking_controls(
+        {}, arg, None, state.template_text,
+        warn=lambda msg: print(f"[thinking] {msg}"))
+    tkw.update(mapped)
+    if mapped:
+        print(f"[chat] thinking = {arg} (next reply)")
+    return None
+
+
 def _slash_thinking_budget(cmd, arg, state):
     if state.assistant_brain is not None:
         print("[chat] the server owns thinking budgets - not available "
@@ -1424,6 +1477,7 @@ _SLASH_HANDLERS = {
     "/reset": _slash_reset,
     "/system": _slash_system,
     "/memory": _slash_memory,
+    "/thinking": _slash_thinking,
     "/thinking-budget": _slash_thinking_budget,
     "/copy": _slash_copy,
     "/save": _slash_save,
@@ -1478,6 +1532,9 @@ def _completion_options(buf: str, text: str) -> list[str] | None:
         return [o for o in ("show", "hide", "raw") if o.startswith(text)]
     if buf.startswith("/render "):
         return [o for o in ("plain", "lite", "rich") if o.startswith(text)]
+    if buf.startswith("/thinking "):
+        return [o for o in ("on", "off", "adaptive", "default")
+                if o.startswith(text)]
     if buf.startswith("/thinking-budget "):
         return [o for o in ("off",) if o.startswith(text)]
     if buf.startswith("/load-session "):
@@ -1981,6 +2038,16 @@ def _opens_thinking(prompt) -> bool:
     return prompt_opens_thinking(prompt)
 
 
+def _vlm_thinking_tokens(state) -> dict:
+    """The configured reasoning markers as mlx-vlm generate kwargs, omitting
+    the ones left unset - mlx-vlm defaults them to ``<think>`` / ``</think>``
+    and encodes whatever it is given, so an explicit None would fail there."""
+    return {k: v for k, v in (
+        ("thinking_start_token", state.thinking_start_token),
+        ("thinking_end_token", state.thinking_end_token),
+    ) if v}
+
+
 def _opens_header(prompt) -> bool:
     """Whether a rendered ``prompt`` stops inside a harmony/ATEM message header
     (see ``reasoning.prompt_opens_header``)."""
@@ -2338,12 +2405,31 @@ def _assistant_reply(brain, user_text: str, state: ChatState) -> tuple[str, bool
         if t_first[0] is None:
             t_first[0] = time.monotonic()
 
+    open_think = [False]
+
+    def _think_close():
+        if open_think[0]:
+            open_think[0] = False
+            return "</think>"
+        return ""
+
     def chunks():
         try:
             for kind, payload in brain.turn(user_text):
                 if kind == "say":
                     _mark_first()
                     _clear_status()
+                    yield SimpleNamespace(text=_think_close() + payload)
+                elif kind == "think":
+                    # Chain-of-thought streams through the same reasoning
+                    # renderer as a local turn (state.reasoning, Ctrl-O):
+                    # re-wrap the spans in <think> markers so _stream_reply's
+                    # ReasoningFilter styles them.
+                    _mark_first()
+                    _clear_status()
+                    if not open_think[0]:
+                        open_think[0] = True
+                        payload = "<think>" + payload
                     yield SimpleNamespace(text=payload)
                 elif kind == "status":
                     _mark_first()         # thinking/tool events ride on tokens
@@ -2357,6 +2443,9 @@ def _assistant_reply(brain, user_text: str, state: ChatState) -> tuple[str, bool
                     _mark_first()
                     yield SimpleNamespace(text="", generation_tokens=payload)
                 elif kind == "done":
+                    tail = _think_close()
+                    if tail:
+                        yield SimpleNamespace(text=tail)
                     u = payload or {}
                     n = int(u.get("completion_tokens") or 0)
                     end = time.monotonic()
@@ -2918,6 +3007,12 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         args.gguf = model_request        # session naming/matching key
         if args.seed is not None:
             assistant_extra["seed"] = args.seed
+        # The server owns the template, so it maps these onto the model's
+        # own switch spelling (see reasoning.map_thinking_controls).
+        if args.thinking is not None:
+            assistant_extra["thinking"] = args.thinking
+        if args.reasoning_effort is not None:
+            assistant_extra["reasoning_effort"] = args.reasoning_effort
         if args.stop:
             assistant_extra["stop"] = list(args.stop)
         if logit_bias:
@@ -3073,6 +3168,9 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
     state = _wire_input(no_history=args.no_history)
     state.vlm = args.mmproj is not None
     state.reasoning = args.reasoning
+    state.template_kwargs = template_kwargs
+    if brain is None:
+        state.template_text = _template_text(args)
     from .reasoning import want_color as _want_color
     from .render import resolve_render_mode
     from .theme import register_user_themes, resolve_theme
@@ -3178,6 +3276,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
 
     state.system_prompt = getattr(args, "system_prompt", None)
     state.thinking_budget = getattr(args, "thinking_budget", None)
+    state.thinking_start_token = getattr(args, "thinking_start_token", None)
+    state.thinking_end_token = getattr(args, "thinking_end_token", None)
     if args.assistant:
         # The session key is the served id, not a file path.
         model_key = model_request
@@ -3654,8 +3754,12 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 vtok,
                 None,
                 start_in_thinking=isinstance(prompt, str)
-                and prompt_opens_thinking(prompt, tokenizer=vtok),
+                and prompt_opens_thinking(
+                    prompt, state.thinking_start_token,
+                    state.thinking_end_token, tokenizer=vtok),
                 interruptible=True,
+                start_token=state.thinking_start_token,
+                end_token=state.thinking_end_token,
             )
             set_finish_key_target(tbp)
             try:
@@ -3678,6 +3782,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                         logit_bias=logit_bias,
                         resize_shape=resize_shape,
                         thinking_budget=state.thinking_budget,
+                        **_vlm_thinking_tokens(state),
                         logits_processors=[tbp] if tbp is not None else None,
                         **kv_kwargs,
                     ),
@@ -3831,8 +3936,12 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         tbp = make_thinking_budget_processor(
             tok,
             state.thinking_budget,
-            start_in_thinking=prompt_opens_thinking(prompt_text),
+            start_in_thinking=prompt_opens_thinking(
+                prompt_text, state.thinking_start_token,
+                state.thinking_end_token),
             interruptible=True,
+            start_token=state.thinking_start_token,
+            end_token=state.thinking_end_token,
         )
         if tbp is not None:
             logits_processors = list(logits_processors) + [tbp]

@@ -114,6 +114,72 @@ def test_status_lines_are_transient(monkeypatch, tmp_path, capsys):
     assert "ok" in out
 
 
+def test_think_events_render_as_reasoning(monkeypatch, tmp_path, capsys):
+    """Chain-of-thought streams through the REPL's reasoning display in
+    server/assistant mode (it used to collapse into a status ping)."""
+    brain = _FakeBrain()
+    real_turn = brain.turn
+
+    def thinking_turn(user_text):
+        yield ("think", "weighing the options")
+        yield from real_turn(user_text)
+
+    brain.turn = thinking_turn
+    rc, _s, _b, _e = _run(monkeypatch, tmp_path, ["go"], brain=brain)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "weighing the options" in out      # rendered, not swallowed
+    assert "[assistant] thinking" not in out
+    assert "Hello there" in out
+
+
+def test_thinking_and_effort_forwarded_to_server(monkeypatch, tmp_path):
+    """--thinking / --reasoning-effort ride the request in server mode; the
+    server maps them onto the model's own template spelling (they used to be
+    silently dropped)."""
+    _rc, _s, _b, extra = _run(monkeypatch, tmp_path, ["hi"],
+                              extra_argv=["--thinking", "off",
+                                          "--reasoning-effort", "low"])
+    assert extra["thinking"] == "off"
+    assert extra["reasoning_effort"] == "low"
+
+
+def test_thinking_not_forwarded_when_unset(monkeypatch, tmp_path):
+    _rc, _s, _b, extra = _run(monkeypatch, tmp_path, ["hi"])
+    assert "thinking" not in extra and "reasoning_effort" not in extra
+
+
+def test_slash_thinking_toggles_forwarded_field(monkeypatch, tmp_path, capsys):
+    """/thinking off|default sets and clears the forwarded request field
+    mid-session in server/assistant mode."""
+    _rc, _s, _b, extra = _run(
+        monkeypatch, tmp_path,
+        ["/thinking off", "hi", "/thinking", "/thinking default", "again"])
+    out = capsys.readouterr().out
+    assert "thinking = off (next reply)" in out
+    assert "thinking = off\n" in out               # bare /thinking reports it
+    assert "thinking = default (next reply)" in out
+    assert "thinking" not in extra                 # cleared by default
+
+
+def test_think_events_hidden_when_reasoning_hide(monkeypatch, tmp_path,
+                                                 capsys):
+    brain = _FakeBrain()
+    real_turn = brain.turn
+
+    def thinking_turn(user_text):
+        yield ("think", "weighing the options")
+        yield from real_turn(user_text)
+
+    brain.turn = thinking_turn
+    rc, _s, _b, _e = _run(monkeypatch, tmp_path, ["go"], brain=brain,
+                          extra_argv=("--reasoning", "hide"))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "weighing the options" not in out
+    assert "Hello there" in out
+
+
 def test_system_prompt_reaches_brain(monkeypatch, tmp_path):
     seen = []
     brain = _FakeBrain()
