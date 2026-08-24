@@ -714,7 +714,12 @@ def _owned_decode_rounds(
     drafter.reset(model)
 
     stoch = _STOCH_ACCEPT and not greedy and _stoch_supported_sampler(sampler)
-    if _STOCH_ACCEPT and not greedy and not stoch:
+    if stoch and not getattr(drafter, "stochastic_draft", True):
+        _log.warning(
+            "GMLX_MTP_STOCH_ACCEPT: %s drafts independent rows per block; "
+            "using exact-match", getattr(drafter, "kind_label", "drafter"))
+        stoch = False
+    elif _STOCH_ACCEPT and not greedy and not stoch:
         _log.warning(
             "GMLX_MTP_STOCH_ACCEPT: sampler's effective distribution is "
             "not reconstructable (opaque sampler); using exact-match")
@@ -726,9 +731,20 @@ def _owned_decode_rounds(
     sampler_rng = _SpeculativeSamplerRNG(
         drafter, enabled=not greedy_draft and not stoch)
 
+    # Block drafters (DFlash) draw every draft row themselves and record the
+    # round's q / pq / top2 rows through a DraftStash, one entry per draft in
+    # draft order; the head-shaped sampler wrappers below would see one row
+    # per block and misalign the walk.
+    block_stash = getattr(drafter, "supports_q_stash", False)
+
     stoch_stash: list[mx.array] = []
-    if stoch:
+    if stoch and not block_stash:
         draft_sampler = _stoch_draft_sampler(stoch_stash)
+        draft_kwargs = {}
+    elif stoch:
+        # A block drafter draws its own q rows; the greedy kwarg would draft
+        # the argmax path and leave the stash empty.
+        draft_sampler = sampler
         draft_kwargs = {}
     else:
         draft_sampler = _argmax_sampler if greedy_draft else sampler
@@ -737,7 +753,9 @@ def _owned_decode_rounds(
                         else {})
 
     top2_stash: list | None = None
-    if _TOP2_LOG:
+    if _TOP2_LOG and block_stash:
+        top2_stash = []
+    elif _TOP2_LOG:
         # Stash each draft-head sampling's second choice for the rescue-rate
         # log. Forces the logits path (no internal-argmax fast path) so the
         # wrapper sees every pick; the drafted tokens themselves are
@@ -767,6 +785,8 @@ def _owned_decode_rounds(
         # head's raw logits; under stochastic acceptance both premises are
         # gone, so the two modes are mutually exclusive.
         _log.warning("GMLX_MTP_PQ_LOG disabled: stochastic acceptance on")
+    elif _PQ_LOG and block_stash:
+        pq_stash = []
     elif _PQ_LOG:
         # Same alignment protocol as the top2 stash: entry 0 is the seed pick
         # deposited by the previous round's accept hook (or the prefill),
@@ -779,6 +799,12 @@ def _owned_decode_rounds(
             return _inner(logits)
 
         draft_kwargs = {}
+
+    if block_stash and (stoch or top2_stash is not None or pq_stash is not None):
+        from .drafter_protocol import DraftStash
+
+        draft_kwargs = {**draft_kwargs, "stash": DraftStash(
+            q=stoch_stash if stoch else None, pq=pq_stash, top2=top2_stash)}
 
     # Sidecar warm start: adopt the restored head KV (prefix rows) so the
     # suffix-only hidden below teacher-forces at its true positions instead

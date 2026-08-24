@@ -270,9 +270,9 @@ and methodology are in
 
 When you want more, there are four levers. MTP speculative decoding roughly
 doubles decode throughput at short context; it is automatic on models with a
-native draft head (Qwen3.5/3.6), and a small companion drafter brings it to
-gemma-4 (1.9-2.1x). The prompt cache removes repeated prefill for agent
-workloads. KV-cache quantization frees memory at long contexts. And
+native draft head (Qwen3.5/3.6/3.8), and a companion drafter brings it to
+gemma-4 (1.9-2.1x) and, as DFlash 2, to Qwen3.8 and Muse Glimmer. The prompt
+cache removes repeated prefill for agent workloads. KV-cache quantization frees memory at long contexts. And
 disk-streamed execution runs MoE models larger than memory
 ([below](#bigger-than-memory)). The file you pick matters too: a uniform
 K-quant decodes meaningfully faster than a heavily mixed one at similar or
@@ -325,7 +325,7 @@ keeps it.
 ## Supported architectures
 
 Coverage runs across the major open-weight families: Llama and Mistral;
-Qwen 2 through 3.6, dense and MoE, including the gated-DeltaNet hybrids and
+Qwen 2 through 3.8, dense and MoE, including the gated-DeltaNet hybrids and
 Qwen3-Next; Gemma 1 through 4 plus DiffusionGemma; DeepSeek V3/R1 and
 V4-Flash; GLM 4 through 5.2; gpt-oss; Kimi-K3; MiniMax M2 and M3; Hunyuan
 A13B and Hy3; Muse Glimmer; Granite, including the 4.x hybrids; Nemotron-H;

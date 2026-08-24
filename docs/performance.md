@@ -126,13 +126,14 @@ The practical rules:
 
 ## MTP speculative decoding
 
-Models that ship a native multi-token-prediction head (Qwen3.5 and Qwen3.6) get
-speculative decoding automatically on `run` and `chat`: the head drafts tokens ahead
-and the base model verifies them. Output is exactly what the base model would
-have produced, just faster when drafts are accepted. `--no-mtp` turns it off.
-gemma-4 and Muse Glimmer take the two-file shape instead: a small companion
-drafter GGUF via `--draft-gguf`. On the server it is the `speculative:` config
-key.
+Models that ship a native multi-token-prediction head (Qwen3.5, 3.6 and 3.8)
+get speculative decoding automatically on `run` and `chat`: the head drafts
+tokens ahead and the base model verifies them. Output is exactly what the base
+model would have produced, just faster when drafts are accepted. `--no-mtp`
+turns it off. gemma-4 and Muse Glimmer take the two-file shape instead: a small
+companion drafter GGUF via `--draft-gguf`. On the server it is the
+`speculative:` config key. A configured companion wins over a native head;
+`--native-mtp` (or the per-model `native_mtp: true` key) forces the head.
 
 Gains depend on acceptance rate and context depth. In our serve benchmarks (M5
 Max, the same server with MTP off as the baseline), speculation roughly
@@ -183,6 +184,53 @@ about a third fewer at 4-bit in our measurements (9B hybrid, temperature 0.6),
 which can outweigh the memory saved. Keep the KV cache in full precision when
 speculation is on if you can. If memory forces quantization, prefer 8-bit,
 which perturbs the distribution far less.
+
+### DFlash 2 drafters
+
+[DFlash 2](https://inco.ai/blog/dflash2/) is a block-diffusion drafter from
+Inco AI / z-lab with checkpoints for Qwen3.8-27B and Muse-Glimmer-30B (the
+llama.cpp conversions are the `dflash` GGUFs with a candidate selector). One
+drafter forward proposes a whole block of tokens: the drafter reads five of
+the target's residual streams, denoises a block of mask tokens in a single
+pass, and a selector walks one path through the top-16 candidates of every
+block position. The target verifies the block in one forward, so a round costs
+one small forward plus one verify instead of one verify per drafted token.
+
+Pairing: `gmlx run target.gguf --draft-gguf <DFlash2>.gguf`, or let discovery
+do it. A DFlash 2 header declares its base model, so `gmlx discover` pairs it
+with that model across directories (the `<publisher>__<repo>/` layout keeps
+drafter and target apart); a DFlash 2 drafter also replaces a same-directory
+DFlash v1 pairing on Muse Glimmer. The drafted depth defaults to the
+checkpoint's trained block (8 on Qwen3.8, 16 on Muse Glimmer);
+`--draft-block-size` lowers it. The drafter is single-stream (server width
+cap 1).
+
+Acceptance is exact-match by default, so greedy output is token-identical to
+plain decoding and sampled output follows the target's sampler. On the sampled
+path each draft row is drawn with the target's temperature, top-p and min-p
+over the selector's candidates (top-k is bounded by the 16 candidates); the
+reference implementation applies temperature only. `--stochastic-mtp` applies
+to DFlash 2 as well: the drafter draws each row from the sharpened proposal
+and records it, and the p/q walk accepts against it (Qwen3.8 at temperature
+1.0: mean accept 4.2 exact-match, 5.0 stochastic). A DFlash v1 drafter
+proposes independent rows per block, which is not a proposal the walk can
+accept against (forced, Muse v1 fell from 6.7 to 1.7 accepted per round), so
+`--stochastic-mtp` keeps exact-match there and says so in the log.
+
+Measured (M3 Max, greedy, a gsm8k prompt, 300 tokens): Qwen3.8-27B
+UD-Q6_K_XL decodes at 14.1 tok/s plain, 31.0 tok/s on its native head (mean
+accept 1.9) and 47.5 tok/s with the DFlash 2 drafter (mean accept 4.8 at
+block 8, 69% of drafts accepted; a block-8 round is 107 ms of verify).
+Muse-Glimmer-30B Q6_K_L goes from a mean accept of 5.1 with its DFlash v1
+drafter to 6.5 with DFlash 2 (49 rounds to 40 for the same 300 tokens, about
+25% more tok/s). llama.cpp's DFlash 2 implementation on the same GGUF pair
+and prompt produces the identical greedy text and accepts 66.6% of 7 drafts
+per round to gmlx's 68.6%.
+
+Muse Glimmer's DFlash v1 drafter runs on the same code. Its block attends the
+drafter's last `sliding_window - 1` committed positions; the mask trims the
+ring's rollback slack and, once the ring is full, block row `i` drops the
+oldest `i` keys exactly as the reference does.
 
 ### Stochastic acceptance (opt-in)
 

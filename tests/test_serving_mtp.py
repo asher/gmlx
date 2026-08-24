@@ -80,6 +80,24 @@ def test_unregistered_gguf_resolves_none():
     assert serving._resolve_mtp_spec("/m/plain.gguf") is None
 
 
+def test_per_id_window_drafter_wins_over_the_registry(monkeypatch):
+    """A companion id and a native_mtp id on one GGUF: the last registration
+    is not the build's; the env window names this build's drafter."""
+    serving.register_gguf_mtp("/m/target.gguf")  # the native id registered last
+    monkeypatch.setenv("MLX_VLM_GGUF_SPECULATIVE", "1")
+    monkeypatch.setenv("MLX_VLM_GGUF_DRAFT", "/m/draft.gguf")
+    assert serving._resolve_mtp_spec("/m/target.gguf") == {
+        "draft_gguf_path": "/m/draft.gguf"}
+    serving.register_gguf_mtp("/m/target.gguf", draft_gguf_path="/m/draft.gguf")
+    monkeypatch.setenv("MLX_VLM_GGUF_DRAFT", "")
+    assert serving._resolve_mtp_spec("/m/target.gguf") == {"draft_gguf_path": None}
+    # Outside a window the registry answers as before.
+    monkeypatch.delenv("MLX_VLM_GGUF_DRAFT")
+    monkeypatch.delenv("MLX_VLM_GGUF_SPECULATIVE")
+    assert serving._resolve_mtp_spec("/m/target.gguf") == {
+        "draft_gguf_path": "/m/draft.gguf"}
+
+
 def test_env_fallback_native_and_assistant(monkeypatch):
     monkeypatch.setenv("MLX_VLM_GGUF_SPECULATIVE", "1")
     assert serving._resolve_mtp_spec("/some/unreg.gguf") == {"draft_gguf_path": None}
@@ -94,11 +112,14 @@ def test_env_falsey_does_not_enable(monkeypatch):
     assert serving._resolve_mtp_spec("/some/unreg.gguf") is None
 
 
-def test_registry_wins_over_env(monkeypatch):
+def test_registry_wins_over_a_window_without_a_drafter_key(monkeypatch):
+    """Only a window that names its drafter (the residency env always emits
+    the key) overrides the registry; a bare speculative flag does not."""
     monkeypatch.setenv("MLX_VLM_GGUF_SPECULATIVE", "1")
-    monkeypatch.setenv("MLX_VLM_GGUF_DRAFT", "/env/draft.gguf")
-    serving.register_gguf_mtp("/m/target.gguf")  # native, no draft
-    assert serving._resolve_mtp_spec("/m/target.gguf") == {"draft_gguf_path": None}
+    monkeypatch.delenv("MLX_VLM_GGUF_DRAFT", raising=False)
+    serving.register_gguf_mtp("/m/target.gguf", draft_gguf_path="/m/draft.gguf")
+    assert serving._resolve_mtp_spec("/m/target.gguf") == {
+        "draft_gguf_path": "/m/draft.gguf"}
 
 
 def test_serve_speculative_flag_routes_speculative(installed_bridge, tmp_path):

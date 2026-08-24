@@ -969,12 +969,22 @@ def _build_model_info(args, config, drafter, vlm_mtp: bool) -> dict:
     if getattr(args, "adapter", None):
         info["adapter"] = args.adapter
     if drafter is not None:
-        kind = "assistant" if args.draft_gguf else "native-head"
+        kind = _drafter_kind_label(drafter, args)
         block = getattr(getattr(drafter, "config", None), "block_size", None)
         info["drafter"] = f"{kind} MTP" + (f" (block {block})" if block else "")
         if vlm_mtp:
             info["drafter"] += ", text-only turns"
     return info
+
+
+_DRAFTER_KIND_LABELS = {"dflash2": "DFlash2", "dflash": "DFlash"}
+
+
+def _drafter_kind_label(drafter, args) -> str:
+    label = _DRAFTER_KIND_LABELS.get(getattr(drafter, "kind_label", None))
+    if label:
+        return label
+    return "assistant" if getattr(args, "draft_gguf", None) else "native-head"
 
 
 def _print_model_info(state: ChatState) -> None:
@@ -2044,6 +2054,7 @@ _ASSISTANT_NOOP = (
     ("speculative", "--speculative"),
     ("no_speculative", "--no-speculative"),
     ("draft_gguf", "--draft-gguf"),
+    ("native_mtp", "--native-mtp"),
     ("stochastic_mtp", "--stochastic-mtp"),
     ("kv_bits", "--kv-bits"),
     ("prefill_step_size", "--prefill-step-size"),
@@ -3249,7 +3260,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             "a file from Finder into the prompt"
         )
     if drafter is not None:
-        kind = "assistant" if args.draft_gguf else "native-head"
+        kind = _drafter_kind_label(drafter, args)
         if vlm_mtp:
             print(
                 f"[chat] MTP speculative decoding on text-only turns "

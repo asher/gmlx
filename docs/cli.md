@@ -122,8 +122,8 @@ falling back to plain text generation.
 
 A text-only request under `--mmproj` runs through the MTP speculative path
 whenever a drafter is available: a `--draft-gguf` assistant (gemma4,
-muse-glimmer) or a native `nextn` head in the LLM GGUF (qwen3.5/3.6, no
-companion needed). The verify walk only touches the language model, so a
+muse-glimmer, a DFlash 2 drafter) or a native `nextn` head in the LLM GGUF
+(qwen3.5/3.6/3.8, no companion needed). The verify walk only touches the language model, so a
 resident VLM gets the decode speedup on text turns, token-identical to the same
 model's text-only MTP. An image or audio request uses the plain VLM path; the
 drafter is idle that turn.
@@ -139,9 +139,10 @@ with a warning); `--no-speculative`/`--no-mtp` forces it off.
 
 | Flag | Meaning |
 |------|---------|
-| `--speculative` / `--mtp` | Force MTP speculative decoding on. Native-head models (qwen3.5/3.6 `nextn`) need no companion; gemma4 and muse-glimmer need `--draft-gguf`. Native heads are auto-enabled without this. Use it to force the path when a sampler flag would otherwise defer. |
+| `--speculative` / `--mtp` | Force MTP speculative decoding on. Native-head models (qwen3.5/3.6/3.8 `nextn`) need no companion; gemma4 and muse-glimmer need `--draft-gguf`. Native heads are auto-enabled without this. Use it to force the path when a sampler flag would otherwise defer. |
+| `--native-mtp` | Draft with the GGUF's own `nextn` head even when a `--draft-gguf` or config `draft_gguf` companion is set (a configured companion otherwise wins). Exit `2` if the GGUF has no head. |
 | `--no-speculative` / `--no-mtp` | Disable MTP. Overrides the native-head auto-enable and config `speculative: true`. |
-| `--draft-gguf PATH` | Separate assistant-drafter GGUF (gemma4 two-GGUF MTP shape, a muse-glimmer DFlash drafter, or a deepseek4 DSpark/MTP sidecar - gmlx `deepseek4-dspark`, llama.cpp `dflash`, or legacy `deepseek4_mtp_support`); implies `--speculative` (same as `serve`). A sidecar in the target's directory is autodetected without the flag. |
+| `--draft-gguf PATH` | Separate assistant-drafter GGUF (gemma4 two-GGUF MTP shape, a muse-glimmer DFlash drafter, a DFlash 2 drafter for qwen3.8 or muse-glimmer, or a deepseek4 DSpark/MTP sidecar - gmlx `deepseek4-dspark`, llama.cpp `dflash`, or legacy `deepseek4_mtp_support`); implies `--speculative` (same as `serve`). A deepseek4 or muse-glimmer sidecar in the target's directory is autodetected without the flag; a native-head target stays on its head and names a sibling drafter it found. |
 | `--draft-block-size N` | MTP draft tokens per round. Raises or lowers the drafter's own default, up to the deepest block it can produce. |
 
 Speculative generation takes only `--temp`/`--top-p`/`--top-k`/`--min-p` plus a
@@ -351,9 +352,10 @@ every command. The terminal is upgraded on top:
   re-prefill the conversation each time; the KV-cached fast path is text-only
   for now.
 - MTP speculative decoding (auto for native heads; `--no-mtp` to disable): a
-  native-head model (qwen3.5/3.6 `nextn`) drafts and verifies multiple tokens
-  per step for a decode speedup; gemma4 and muse-glimmer need a `--draft-gguf`
-  assistant. The reply streams the same way and ends with the same `tok/s`
+  native-head model (qwen3.5/3.6/3.8 `nextn`) drafts and verifies multiple
+  tokens per step for a decode speedup; gemma4 and muse-glimmer need a
+  `--draft-gguf` assistant, and a DFlash 2 `--draft-gguf` drafter serves
+  qwen3.8 and muse-glimmer (`--native-mtp` keeps the head). The reply streams the same way and ends with the same `tok/s`
   stat, and the persistent KV cache is reused across turns exactly like the
   text path. Not combinable with `--adapter` / `--stream-*`. Sampling is
   temperature/top-p/top-k/min-p only; the MTP verify walk has no penalty/bias
@@ -440,7 +442,7 @@ every command. The terminal is upgraded on top:
 | `--no-autosave` | - | Don't autosave the session after each turn. |
 | `--resume [NAME]` | - | Resume a saved session (default: this model's latest). |
 | `--adapter PATH` | - | GGUF LoRA adapter applied live over the base (text path only). |
-| `--speculative`/`--mtp` / `--draft-gguf PATH` / `--draft-block-size N` / `--no-speculative`/`--no-mtp` | - | MTP speculative decoding, same surface as [`run`](#speculative--mtp): native-head qwen3.5/3.6 needs no companion, gemma4 needs `--draft-gguf`. With `--mmproj` (a VLM with a drafter), text-only turns take the MTP path and media turns fall back to VLM. Not combinable with `--adapter`/`--stream-*`. |
+| `--speculative`/`--mtp` / `--draft-gguf PATH` / `--native-mtp` / `--draft-block-size N` / `--no-speculative`/`--no-mtp` | - | MTP speculative decoding, same surface as [`run`](#speculative--mtp): native-head qwen3.5/3.6/3.8 needs no companion, gemma4 needs `--draft-gguf`. With `--mmproj` (a VLM with a drafter), text-only turns take the MTP path and media turns fall back to VLM. Not combinable with `--adapter`/`--stream-*`. |
 | `--mmproj PATH` | - | Vision/audio projector GGUF; enables multimodal chat (`/image`, `/audio`, drag-and-drop). |
 | `--arch` / `--hf-source` / `--chat-template` / `--no-remap` / `--no-zero-copy` | - | Loading flags, same as [`run`](#loading). |
 | `--no-chat-template` | - | Send each turn verbatim, applying no chat template (base / non-instruct GGUFs that carry no template). Plain-text models only. |
@@ -540,8 +542,9 @@ gmlx serve Qwen3.6-27B-Q4_K_S.gguf --speculative
 | `--hf-cache` (alias `--from-hf-cache`) | Resolve named hf repo ids from the local hf cache only (never the network). Off means no HF access at all. |
 | `--mmproj PATH` | Float mmproj GGUF; makes a single positional model a VLM. |
 | `--hf-source REPO` | Processor/config override for a single VLM model (rarely needed). |
-| `--speculative` | Serve a single positional model with MTP (native-head qwen3.5/3.6; gemma4 also needs `--draft-gguf`). |
-| `--draft-gguf PATH` | Companion drafter GGUF for assistant-shape MTP (gemma4); implies `--speculative`. |
+| `--speculative` | Serve a single positional model with MTP (native-head qwen3.5/3.6/3.8; gemma4 also needs `--draft-gguf`). |
+| `--draft-gguf PATH` | Companion drafter GGUF for assistant-shape MTP (gemma4, DFlash, DFlash 2); implies `--speculative`. |
+| `--native-mtp` | Draft with the model's own head even when `--draft-gguf` is set; same as the per-model `native_mtp` config key. |
 | `--draft-block-size N` | MTP draft tokens per round (analogous to llama-server `--spec-draft-n-max`). Raises or lowers the drafter's own default, up to the deepest block it can produce (a deeper request clamps, with a warning). Also via `GMLX_DRAFT_BLOCK_SIZE`. |
 | `--adapter PATH` | GGUF LoRA adapter applied live over a single positional model at load (text only, not `--mmproj`/`--speculative`). In config mode set `adapter:` per model instead. |
 | `--stream-cpu` | Run a single positional model entirely on the CPU device: the over-RAM MoE path, same semantics as [`run --stream-cpu`](#loading). In config mode set `stream: cpu` per model instead; see [server-config.md](server-config.md#models). |
