@@ -637,6 +637,8 @@ class _ResidencyPool:
             )
             self._teardown(victim)
             del self._entries[victim.cache_key]
+            if self._proxy._last_entry is victim:
+                self._proxy._last_entry = None
 
     def _build(self, cache_key, model_path, adapter_path, model_kind, footprint,
                *, ttl=None, env=None, build_spec=None) -> _Entry:
@@ -824,6 +826,14 @@ class _ResidencyPool:
         # owners, so a resident sibling sharing shards keeps them counted.
         from .prefill_decay import forget_untracked_weights
         forget_untracked_weights(entry.cache_key)
+        # The model modules sit in reference cycles (feeder<->module among
+        # others) that refcounting cannot reclaim, and an idle server may not
+        # run a gen-2 GC for a long time. The next load's preload_gate
+        # re-measures headroom immediately, so a swap on a near-full box
+        # defers against hundreds of GB of already-dead arrays unless the
+        # cycles are collected here.
+        import gc
+        gc.collect()
 
 
 def _pinned_from_env(preload_path):
