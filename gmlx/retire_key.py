@@ -433,9 +433,18 @@ def next_turn_lcp(ctx: dict, seq: list[int], generated: list[int],
             # client performs. The dummy user probe still makes
             # strip-mode templates apply their strip, so the LCP lands
             # where the replay actually diverges.
-            echo = {k: v for k, v in msg.items()
-                    if k not in ("reasoning_content", "reasoning",
-                                 "thinking")}
+            # Exception: a truthy preserve_thinking template kwarg is
+            # the client declaring the keep-reasoning protocol (agent
+            # profiles resend reasoning_content and the template
+            # renders it; the faithful-history server patch exists for
+            # exactly this), so the echo keeps the fields and the
+            # prediction follows the request's own render kwargs.
+            if (ctx.get("kw") or {}).get("preserve_thinking"):
+                echo = dict(msg)
+            else:
+                echo = {k: v for k, v in msg.items()
+                        if k not in ("reasoning_content", "reasoning",
+                                     "thinking")}
             nxt = _render_ids(ctx, list(ctx["messages"]) + [
                 echo, {"role": "user", "content": "0"}])
         if not nxt:
