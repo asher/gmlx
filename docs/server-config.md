@@ -546,9 +546,9 @@ thus the cache hit rate), never the validity of a hit.
 a model's `overrides` / profile tweaks) for the two reasoning controls models
 spell differently. There is no cross-model standard for the template
 variable: MiniMax-M3 reads a three-state `thinking_mode`, Qwen3.x and GLM
-read `enable_thinking`, Hy3 grades a `reasoning_effort` scale that includes
-a `no_think` level, and gpt-oss grades `reasoning_effort` but cannot disable
-reasoning. Unlike a raw `chat_template_kwargs` entry, these keys are mapped
+read `enable_thinking`, Kimi K2.x reads a bare `thinking` variable, Hy3
+grades a `reasoning_effort` scale that includes a `no_think` level, and
+gpt-oss grades `reasoning_effort` but cannot disable reasoning. Unlike a raw `chat_template_kwargs` entry, these keys are mapped
 onto the serving model's own spelling at request time (by inspecting its
 chat template), so one profile applies across models. `thinking` takes
 `on`/`off`/`adaptive` (`adaptive` is MiniMax-only); `reasoning_effort` takes

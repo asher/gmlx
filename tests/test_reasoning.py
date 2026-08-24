@@ -655,3 +655,48 @@ def test_undefined_sentinel_renders_like_an_absent_variable():
 
     assert env.from_string("{{ enable_thinking }}").render(
         enable_thinking=undef) == ""
+
+
+# Kimi K2.x generation-prompt tail: a bare `thinking` variable gates the
+# pre-filled think-open; `thinking is false` renders the closed pair.
+_KIMI_TAIL = (
+    "{%- set preserve_thinking = preserve_thinking | default(true) -%}"
+    "{%- if add_generation_prompt -%}<|im_assistant|>assistant<|im_middle|>"
+    "{%- if thinking is defined and thinking is false -%}<think></think>"
+    "{%- else -%}<think>{%- endif -%}{%- endif -%}")
+
+
+def test_bare_thinking_spelling_maps_kimi_switch():
+    from gmlx.reasoning import map_thinking_controls
+    assert map_thinking_controls({}, "off", None, _KIMI_TAIL) == \
+        {"thinking": False}
+    assert map_thinking_controls({}, "on", None, _KIMI_TAIL) == \
+        {"thinking": True}
+    # preserve_thinking / enable_thinking do not count as the bare spelling
+    out = map_thinking_controls(
+        {}, "off", None, "{% if preserve_thinking %}{% endif %}")
+    assert "thinking" not in out
+    out = map_thinking_controls({}, "off", None, "enable_thinking gate")
+    assert out == {"enable_thinking": False}
+
+
+def test_kimi_tail_renders_closed_pair_for_thinking_false():
+    jinja2 = pytest.importorskip("jinja2")
+    t = jinja2.Environment().from_string(_KIMI_TAIL)
+    assert t.render(add_generation_prompt=True,
+                    thinking=False).endswith("<think></think>")
+    assert t.render(add_generation_prompt=True).endswith("<think>")
+    assert t.render(add_generation_prompt=True,
+                    thinking=True).endswith("<think>")
+
+
+def test_thinking_switch_flag_coercions():
+    from gmlx.reasoning import thinking_switch_flag
+    assert thinking_switch_flag({"type": "disabled"}) is False
+    assert thinking_switch_flag({"type": "enabled"}) is True
+    assert thinking_switch_flag("off") is False
+    assert thinking_switch_flag("on") is True
+    assert thinking_switch_flag(True) is True
+    assert thinking_switch_flag(False) is False
+    assert thinking_switch_flag("adaptive") is None
+    assert thinking_switch_flag(["x"]) is None

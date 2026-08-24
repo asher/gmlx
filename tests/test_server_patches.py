@@ -1555,6 +1555,43 @@ def test_install_chat_template_kwargs_idempotent_and_noop_default():
         "enable_thinking": gen.GenerationArguments().enable_thinking}
 
 
+_KIMI_TAIL = (
+    "{%- if thinking is defined and thinking is false -%}<think></think>"
+    "{%- else -%}<think>{%- endif -%}")
+
+
+def test_request_thinking_off_maps_onto_kimi_bare_switch():
+    """A plain --thinking value forwarded by the chat client (or any client's
+    `thinking: "off"`) must reach the template as the model's own switch
+    spelling - Kimi K2.x reads a bare `thinking` variable."""
+    gen = importlib.import_module("mlx_vlm.server.generation")
+    proc = types.SimpleNamespace(chat_template=_KIMI_TAIL)
+    req = types.SimpleNamespace(model_fields_set=set(),
+                                chat_template_kwargs=None, thinking="off")
+    out = sp_chat._stash_template_kwargs(gen.GenerationArguments(), req, proc)
+    assert out._kq_template_kwargs == {"thinking": False}
+    assert out.enable_thinking is False
+    assert out._kq_thinking_explicit is True
+
+    req = types.SimpleNamespace(model_fields_set=set(),
+                                chat_template_kwargs=None, thinking="on")
+    out = sp_chat._stash_template_kwargs(gen.GenerationArguments(), req, proc)
+    assert out._kq_template_kwargs == {"thinking": True}
+    assert out.enable_thinking is True
+
+
+def test_request_reasoning_effort_field_maps_onto_template():
+    gen = importlib.import_module("mlx_vlm.server.generation")
+    proc = types.SimpleNamespace(chat_template="reads reasoning_effort")
+    req = types.SimpleNamespace(model_fields_set=set(),
+                                chat_template_kwargs=None,
+                                reasoning_effort="low")
+    out = sp_chat._stash_template_kwargs(gen.GenerationArguments(), req, proc)
+    assert out._kq_template_kwargs == {"reasoning_effort": "low"}
+    assert out.enable_thinking is True             # effort alone: not a switch
+    assert out._kq_thinking_explicit is False
+
+
 class _RecordingTok:
     """A tokenizer stand-in whose **kwargs signature makes mlx-vlm's
     enable_thinking capability probe say yes (the 0.6.15 injection path)."""

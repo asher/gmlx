@@ -88,7 +88,7 @@ family sets no value.
 | `--system-prompt STR` | - | System message for the chat template. |
 | `--reasoning {show,hide,raw}` | `show` | How a thinking model's reasoning is displayed, same as chat: `show` styles it under a `thinking` label and strips the control markers, `hide` collapses it to the elapsed/token payoff line, `raw` streams everything verbatim. Display-only: image/audio requests print raw. |
 | `--chat-template-config JSON` | - | Extra chat-template kwargs, e.g. `'{"enable_thinking": false}'`. |
-| `--thinking {on,off,adaptive}` | - | Reasoning switch, mapped onto whatever variable this model's chat template reads (`enable_thinking`, MiniMax `thinking_mode`, Hy3 `reasoning_effort: no_think`). `adaptive` is MiniMax-only. |
+| `--thinking {on,off,adaptive}` | - | Reasoning switch, mapped onto whatever variable this model's chat template reads (`enable_thinking`, Kimi K2.x `thinking`, MiniMax `thinking_mode`, Hy3 `reasoning_effort: no_think`). `adaptive` is MiniMax-only. |
 | `--reasoning-effort LEVEL` | - | Reasoning depth for models that grade it (gpt-oss/GLM `low`/`medium`/`high`, Hy3 `no_think`/`low`/`high`, DeepSeek-V4 `high`/`max`); the model's template validates the level. |
 | `--xtc-probability F` / `--xtc-threshold F` | `0.0` | XTC sampling (text path). |
 | `--repetition-context-size N` | `20` | How many recent tokens the repetition penalty considers. |

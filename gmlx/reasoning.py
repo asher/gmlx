@@ -32,6 +32,7 @@ takes an injectable ``write`` sink and ``clock``.
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 from .render import _CONTROL_CHARS
@@ -529,6 +530,17 @@ def thinking_flag(value) -> bool | None:
     return None
 
 
+def thinking_switch_flag(value) -> bool | None:
+    """``value`` (the z.ai dict, a bool, or an on/off string) as an on/off
+    bool; None for adaptive or anything unrecognized."""
+    flag = thinking_flag(value)
+    if flag is not None:
+        return flag
+    if isinstance(value, (str, bool)):
+        return {"on": True, "off": False}.get(_THINKING_LEVELS.get(value))
+    return None
+
+
 def normalize_template_kwargs(kwargs: dict) -> dict:
     """Translate ``thinking: {"type": ...}`` (the z.ai / GLM API request
     schema users copy from provider docs) into ``enable_thinking``, the
@@ -587,6 +599,10 @@ _THINKING_LEVELS = {"on": "on", "off": "off", "adaptive": "adaptive",
                     True: "on", False: "off"}
 
 
+# A bare `thinking` template variable (not preserve_thinking / enable_thinking).
+_BARE_THINKING_RE = re.compile(r"(?<![A-Za-z_])thinking(?![A-Za-z_])")
+
+
 # Templates that grade reasoning depth under a name of their own. The control
 # is spelled reasoning_effort throughout gmlx, so map it onto the template's
 # spelling rather than emitting a variable the template ignores (Muse Glimmer's
@@ -616,7 +632,8 @@ def map_thinking_controls(base: dict, thinking=None, reasoning_effort=None,
     ``thinking`` (on/off/adaptive; enabled/disabled, plain bools, and the
     z.ai dict shape accepted) becomes MiniMax's three-state ``thinking_mode``
     where present, ``enable_thinking`` next (Qwen3.x, GLM, DeepSeek-V4
-    alias), or Hy3's ``reasoning_effort: no_think`` dialect.
+    alias), a bare ``thinking`` variable next (Kimi K2.x), or Hy3's
+    ``reasoning_effort: no_think`` dialect.
     ``reasoning_effort`` passes through under its own name (level names are
     the model's own; its template validates them), and an explicit level -
     argument or ``base`` key - wins over one a ``thinking`` switch would
@@ -651,6 +668,11 @@ def map_thinking_controls(base: dict, thinking=None, reasoning_effort=None,
               "chat template has no such variable - ignored")
     elif "enable_thinking" in template or not template:
         out["enable_thinking"] = mode == "on"
+    elif _BARE_THINKING_RE.search(template):
+        # Kimi K2.x: a bare `thinking` variable gates the pre-filled
+        # think-open (`thinking is defined and thinking is false` renders
+        # the closed pair). The lookarounds skip preserve_thinking etc.
+        out["thinking"] = mode == "on"
     elif "no_think" in template and "reasoning_effort" in template:
         out.setdefault("reasoning_effort",
                        "no_think" if mode == "off" else "high")

@@ -86,20 +86,24 @@ def _stash_template_kwargs(args, request, _processor):
         or "enable_thinking" in spec_sampling
         or os.environ.get("MLX_VLM_ENABLE_THINKING") is not None
     )
-    if not thinking_explicit:
-        # The z.ai / GLM API spelling as a top-level request field:
-        # `thinking: {"type": "enabled"|"disabled"}`. A dedicated control,
-        # so it maps onto whatever switch this model's template reads.
-        from ..reasoning import map_thinking_controls, thinking_flag
+    # Dedicated request controls: `thinking` as the z.ai / GLM dict
+    # ({"type": "enabled"|"disabled"}) or a plain on/off/adaptive value
+    # (the chat client forwards --thinking verbatim), and a top-level
+    # `reasoning_effort`. Mapped onto whatever switch this model's
+    # template reads.
+    raw = getattr(request, "thinking", None) if not thinking_explicit else None
+    req_effort = getattr(request, "reasoning_effort", None)
+    if raw is not None or req_effort is not None:
+        from ..reasoning import map_thinking_controls
 
-        flag = thinking_flag(getattr(request, "thinking", None))
-        if flag is not None:
-            args.enable_thinking = flag
-            merged = map_thinking_controls(merged, flag, None, template,
-                                           warn=_warn_thinking)
-            thinking_explicit = True
-        else:
-            args.enable_thinking = True
+        merged = map_thinking_controls(merged, raw, req_effort, template,
+                                       warn=_warn_thinking)
+    if not thinking_explicit:
+        from ..reasoning import thinking_switch_flag
+
+        flag = thinking_switch_flag(raw) if raw is not None else None
+        args.enable_thinking = True if flag is None else flag
+        thinking_explicit = flag is not None
     if merged:
         args._kq_template_kwargs = merged
     args._kq_thinking_explicit = thinking_explicit

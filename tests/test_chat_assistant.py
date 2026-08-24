@@ -133,6 +133,22 @@ def test_think_events_render_as_reasoning(monkeypatch, tmp_path, capsys):
     assert "Hello there" in out
 
 
+def test_thinking_and_effort_forwarded_to_server(monkeypatch, tmp_path):
+    """--thinking / --reasoning-effort ride the request in server mode; the
+    server maps them onto the model's own template spelling (they used to be
+    silently dropped)."""
+    _rc, _s, _b, extra = _run(monkeypatch, tmp_path, ["hi"],
+                              extra_argv=["--thinking", "off",
+                                          "--reasoning-effort", "low"])
+    assert extra["thinking"] == "off"
+    assert extra["reasoning_effort"] == "low"
+
+
+def test_thinking_not_forwarded_when_unset(monkeypatch, tmp_path):
+    _rc, _s, _b, extra = _run(monkeypatch, tmp_path, ["hi"])
+    assert "thinking" not in extra and "reasoning_effort" not in extra
+
+
 def test_think_events_hidden_when_reasoning_hide(monkeypatch, tmp_path,
                                                  capsys):
     brain = _FakeBrain()

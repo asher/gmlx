@@ -2952,6 +2952,12 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         args.gguf = model_request        # session naming/matching key
         if args.seed is not None:
             assistant_extra["seed"] = args.seed
+        # The server owns the template, so it maps these onto the model's
+        # own switch spelling (see reasoning.map_thinking_controls).
+        if args.thinking is not None:
+            assistant_extra["thinking"] = args.thinking
+        if args.reasoning_effort is not None:
+            assistant_extra["reasoning_effort"] = args.reasoning_effort
         if args.stop:
             assistant_extra["stop"] = list(args.stop)
         if logit_bias:
