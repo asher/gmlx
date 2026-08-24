@@ -86,7 +86,7 @@ class LanguageModel(nn.Module):
         if hasattr(self._model, "make_cache"):
             return self._model.make_cache()
 
-        from .cache import KVCache
+        from mlx_lm.models.cache import KVCache
 
         return [KVCache() for _ in self.layers]
 
