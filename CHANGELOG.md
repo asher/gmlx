@@ -93,6 +93,21 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`GMLX_GOV_RESERVE_GB`, default max(8, 10% of RAM)).
 - The MLX buffer cache is always bounded now (4-12 GiB); MLX's default let
   it hold 27-48 GB of freed buffers on an 8B model.
+- Shell completion offered nothing for `gmlx launch <harness> --model`;
+  it now lists the config's model ids and aliases.
+- Served and VLM-local models stopped thinking by default on mlx-vlm 0.6.15,
+  which injects `enable_thinking=false` into every render where the kwarg is
+  absent; absent now means the template's own default again.
+- Text-only served models build mlx-vlm cache classes again, keeping prompt
+  caching engaged (the gmlx.cache crash fix built mlx-lm classes the APC
+  engine's checks ignore).
+- serve: evicting a streamed MoE model left its weights resident, so every
+  later load deferred with a negative free working set until restart.
+- Plain text models (qwen3, llama) failed every request with a missing
+  gmlx.cache import.
+- The exit-segfault guards (process exit and engine-thread park) armed only
+  on mlx 0.32.1 exactly; newer mlx wheels carry the same unfixed upstream bug
+  and ran unguarded. The guards now arm on every mlx from 0.32.1 on.
 - Sampled speculative verify and the server's unfiltered sampler computed
   logprob math at the activation dtype; float16 rows reached categorical
   unwidened. Both now widen to float32 first (greedy paths unchanged).
