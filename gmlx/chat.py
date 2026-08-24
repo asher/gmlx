@@ -419,6 +419,8 @@ class ChatState:
     thinking_budget: int | None = None
     thinking_start_token: str | None = None
     thinking_end_token: str | None = None
+    template_kwargs: dict | None = None  # live per-turn render kwargs (/thinking)
+    template_text: str = ""              # template source, for switch mapping
     sampling: dict = dataclasses.field(default_factory=dict)
     transcript: list = dataclasses.field(default_factory=list)
     replay_messages: list | None = None  # deferred history prefill (--resume)
@@ -729,6 +731,7 @@ def _print_shim_help(state: ChatState) -> None:
         "- '/system [text|off]' show or set the system prompt "
         "(setting restarts the chat)"
     )
+    print("- '/thinking [on|off|default]' the model's reasoning switch")
     print("- '/thinking-budget [N|off]' cap thinking tokens per reply")
     print(
         "- '/reasoning [show|hide|raw]' control how thinking is displayed "
@@ -1194,6 +1197,54 @@ def _slash_memory(cmd, arg, state):
     return None
 
 
+# Switch variables map_thinking_controls can set; /thinking default clears them.
+_THINKING_SWITCH_KEYS = ("thinking_mode", "enable_thinking", "thinking")
+
+
+def _slash_thinking(cmd, arg, state):
+    """Toggle the model's own reasoning switch per turn. Server mode sets or
+    clears the forwarded ``thinking`` request field (the server maps it onto
+    the template's spelling); local mode maps it here and mutates the live
+    template kwargs."""
+    if arg and arg not in ("on", "off", "adaptive", "default"):
+        print("[chat] /thinking takes on, off, adaptive, or default")
+        return None
+    if state.assistant_brain is not None:
+        extra = state.assistant_extra
+        if not arg:
+            print(f"[chat] thinking = {extra.get('thinking', 'default')}")
+        elif arg == "default":
+            extra.pop("thinking", None)
+            print("[chat] thinking = default (next reply)")
+        else:
+            extra["thinking"] = arg
+            print(f"[chat] thinking = {arg} (next reply)")
+        return None
+    tkw = state.template_kwargs
+    if tkw is None:
+        print("[chat] no chat template on this path - /thinking unavailable")
+        return None
+    if not arg:
+        current = next((f"{k}={tkw[k]}" for k in _THINKING_SWITCH_KEYS
+                        if k in tkw), "default")
+        print(f"[chat] thinking = {current}")
+        return None
+    for k in _THINKING_SWITCH_KEYS:
+        tkw.pop(k, None)
+    if arg == "default":
+        print("[chat] thinking = default (next reply)")
+        return None
+    from .reasoning import map_thinking_controls
+
+    mapped = map_thinking_controls(
+        {}, arg, None, state.template_text,
+        warn=lambda msg: print(f"[thinking] {msg}"))
+    tkw.update(mapped)
+    if mapped:
+        print(f"[chat] thinking = {arg} (next reply)")
+    return None
+
+
 def _slash_thinking_budget(cmd, arg, state):
     if state.assistant_brain is not None:
         print("[chat] the server owns thinking budgets - not available "
@@ -1426,6 +1477,7 @@ _SLASH_HANDLERS = {
     "/reset": _slash_reset,
     "/system": _slash_system,
     "/memory": _slash_memory,
+    "/thinking": _slash_thinking,
     "/thinking-budget": _slash_thinking_budget,
     "/copy": _slash_copy,
     "/save": _slash_save,
@@ -1480,6 +1532,9 @@ def _completion_options(buf: str, text: str) -> list[str] | None:
         return [o for o in ("show", "hide", "raw") if o.startswith(text)]
     if buf.startswith("/render "):
         return [o for o in ("plain", "lite", "rich") if o.startswith(text)]
+    if buf.startswith("/thinking "):
+        return [o for o in ("on", "off", "adaptive", "default")
+                if o.startswith(text)]
     if buf.startswith("/thinking-budget "):
         return [o for o in ("off",) if o.startswith(text)]
     if buf.startswith("/load-session "):
@@ -3113,6 +3168,9 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
     state = _wire_input(no_history=args.no_history)
     state.vlm = args.mmproj is not None
     state.reasoning = args.reasoning
+    state.template_kwargs = template_kwargs
+    if brain is None:
+        state.template_text = _template_text(args)
     from .reasoning import want_color as _want_color
     from .render import resolve_render_mode
     from .theme import register_user_themes, resolve_theme

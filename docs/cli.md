@@ -331,6 +331,9 @@ every command. The terminal is upgraded on top:
   tokens, average tok/s, MTP acceptance).
 - `/system [text|off]` shows or sets the system prompt at runtime (setting
   restarts the conversation).
+- `/thinking [on|off|adaptive|default]` flips the model's own reasoning
+  switch per turn, mapped onto its template spelling (`default` restores the
+  template's default; same mapping as `--thinking`).
 - `/thinking-budget [N|off]` caps a thinking model's reasoning tokens per
   reply, adjustable mid-session.
 - `/copy` copies the last answer to the clipboard, thinking stripped

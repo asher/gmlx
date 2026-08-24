@@ -149,6 +149,19 @@ def test_thinking_not_forwarded_when_unset(monkeypatch, tmp_path):
     assert "thinking" not in extra and "reasoning_effort" not in extra
 
 
+def test_slash_thinking_toggles_forwarded_field(monkeypatch, tmp_path, capsys):
+    """/thinking off|default sets and clears the forwarded request field
+    mid-session in server/assistant mode."""
+    _rc, _s, _b, extra = _run(
+        monkeypatch, tmp_path,
+        ["/thinking off", "hi", "/thinking", "/thinking default", "again"])
+    out = capsys.readouterr().out
+    assert "thinking = off (next reply)" in out
+    assert "thinking = off\n" in out               # bare /thinking reports it
+    assert "thinking = default (next reply)" in out
+    assert "thinking" not in extra                 # cleared by default
+
+
 def test_think_events_hidden_when_reasoning_hide(monkeypatch, tmp_path,
                                                  capsys):
     brain = _FakeBrain()
