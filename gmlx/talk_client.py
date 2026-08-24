@@ -420,7 +420,9 @@ class ServerChatBrain:
     chain-of-thought in a separate ``delta.reasoning`` field, and any inline
     control markers still in ``delta.content`` are split out by
     :class:`~gmlx.reasoning.ReasoningFilter` - both surface as
-    ``("status", "thinking")`` events; only answer spans become ``("say", ...)``.
+    ``("think", <text>)`` events, which a voice consumer treats as a
+    thinking status and the chat REPL renders through its reasoning
+    display; only answer spans become ``("say", ...)``.
     History keeps the clean answer text (resending thinking is not OpenAI chat
     convention and would bloat every re-prefill)."""
 
@@ -460,7 +462,7 @@ class ServerChatBrain:
                     completed = True
                     continue
                 if delta.get("reasoning"):
-                    yield ("status", "thinking")
+                    yield ("think", delta["reasoning"])
                     continue
                 text = delta.get("content")
                 if not text:
@@ -470,11 +472,13 @@ class ServerChatBrain:
                         answer.append(span)
                         yield ("say", span)
                     elif span:
-                        yield ("status", "thinking")
+                        yield ("think", span)
             for span, mode in rf.flush():
                 if mode == "answer" and span:
                     answer.append(span)
                     yield ("say", span)
+                elif span:
+                    yield ("think", span)
         finally:
             # Runs on completion and on cancellation (generator .close()):
             # a canceled turn still keeps what was already said, so the next

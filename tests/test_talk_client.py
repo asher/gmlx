@@ -266,7 +266,8 @@ def test_brain_says_answers_only(monkeypatch):
     events = list(brain.turn("capital of France?"))
     says = "".join(t for k, t in events if k == "say")
     assert says == "Paris is the answer."
-    assert ("status", "thinking") in events
+    thinks = "".join(t for k, t in events if k == "think")
+    assert "let me think" in thinks and "more inline" in thinks
     assert events[-1] == ("done", {"total_tokens": 9})
     # History: system + user + clean assistant answer (no markers/thinking).
     assert brain.messages[0]["role"] == "system"

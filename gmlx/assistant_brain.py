@@ -7,7 +7,9 @@ execute the named tools, append the results as ``role: tool`` messages, and
 re-call - until the model answers in prose or the round cap forces it to.
 Implements the same :class:`~gmlx.talk_client.Brain` protocol as
 ``ServerChatBrain``, so the audio loop and TUI are unchanged; tool activity
-surfaces as ``("status", ...)`` events.
+surfaces as ``("status", ...)`` events and chain-of-thought as
+``("think", <text>)`` (spoken never, rendered by the chat REPL's
+reasoning display).
 
 Cancellation contract: the loop cancels a turn by closing the generator, so
 GeneratorExit lands at the most recent yield. This brain yields a status
@@ -190,7 +192,7 @@ class AssistantBrain:
                                 yield ("count", int(n))
                             continue
                         if delta.get("reasoning"):
-                            yield ("status", "thinking")
+                            yield ("think", delta["reasoning"])
                             continue
                         for tc in delta.get("tool_calls") or []:
                             slot = calls.setdefault(
@@ -211,11 +213,13 @@ class AssistantBrain:
                                 text_parts.append(span)
                                 yield ("say", span)
                             elif span:
-                                yield ("status", "thinking")
+                                yield ("think", span)
                     for span, mode in rf.flush():
                         if mode == "answer" and span:
                             text_parts.append(span)
                             yield ("say", span)
+                        elif span:
+                            yield ("think", span)
                 finally:
                     close = getattr(deltas, "close", None)
                     if close is not None:         # generators; plain iters ok

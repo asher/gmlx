@@ -114,6 +114,43 @@ def test_status_lines_are_transient(monkeypatch, tmp_path, capsys):
     assert "ok" in out
 
 
+def test_think_events_render_as_reasoning(monkeypatch, tmp_path, capsys):
+    """Chain-of-thought streams through the REPL's reasoning display in
+    server/assistant mode (it used to collapse into a status ping)."""
+    brain = _FakeBrain()
+    real_turn = brain.turn
+
+    def thinking_turn(user_text):
+        yield ("think", "weighing the options")
+        yield from real_turn(user_text)
+
+    brain.turn = thinking_turn
+    rc, _s, _b, _e = _run(monkeypatch, tmp_path, ["go"], brain=brain)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "weighing the options" in out      # rendered, not swallowed
+    assert "[assistant] thinking" not in out
+    assert "Hello there" in out
+
+
+def test_think_events_hidden_when_reasoning_hide(monkeypatch, tmp_path,
+                                                 capsys):
+    brain = _FakeBrain()
+    real_turn = brain.turn
+
+    def thinking_turn(user_text):
+        yield ("think", "weighing the options")
+        yield from real_turn(user_text)
+
+    brain.turn = thinking_turn
+    rc, _s, _b, _e = _run(monkeypatch, tmp_path, ["go"], brain=brain,
+                          extra_argv=("--reasoning", "hide"))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "weighing the options" not in out
+    assert "Hello there" in out
+
+
 def test_system_prompt_reaches_brain(monkeypatch, tmp_path):
     seen = []
     brain = _FakeBrain()

@@ -2350,12 +2350,31 @@ def _assistant_reply(brain, user_text: str, state: ChatState) -> tuple[str, bool
         if t_first[0] is None:
             t_first[0] = time.monotonic()
 
+    open_think = [False]
+
+    def _think_close():
+        if open_think[0]:
+            open_think[0] = False
+            return "</think>"
+        return ""
+
     def chunks():
         try:
             for kind, payload in brain.turn(user_text):
                 if kind == "say":
                     _mark_first()
                     _clear_status()
+                    yield SimpleNamespace(text=_think_close() + payload)
+                elif kind == "think":
+                    # Chain-of-thought streams through the same reasoning
+                    # renderer as a local turn (state.reasoning, Ctrl-O):
+                    # re-wrap the spans in <think> markers so _stream_reply's
+                    # ReasoningFilter styles them.
+                    _mark_first()
+                    _clear_status()
+                    if not open_think[0]:
+                        open_think[0] = True
+                        payload = "<think>" + payload
                     yield SimpleNamespace(text=payload)
                 elif kind == "status":
                     _mark_first()         # thinking/tool events ride on tokens
@@ -2369,6 +2388,9 @@ def _assistant_reply(brain, user_text: str, state: ChatState) -> tuple[str, bool
                     _mark_first()
                     yield SimpleNamespace(text="", generation_tokens=payload)
                 elif kind == "done":
+                    tail = _think_close()
+                    if tail:
+                        yield SimpleNamespace(text=tail)
                     u = payload or {}
                     n = int(u.get("completion_tokens") or 0)
                     end = time.monotonic()

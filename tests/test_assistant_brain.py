@@ -94,11 +94,11 @@ def test_system_prompt_sent_but_not_in_history():
     assert all(m.get("role") != "system" for m in b.messages)
 
 
-def test_reasoning_deltas_become_status():
+def test_reasoning_deltas_become_think_events():
     stream = _stream_script([{"reasoning": "hmm"}, {"reasoning": "hm2"}]
                             + _PROSE)
     events = list(_brain(stream).turn("hi"))
-    assert events.count(("status", "thinking")) == 2
+    assert [t for k, t in events if k == "think"] == ["hmm", "hm2"]
     assert ("say", "It is ") in events
 
 
