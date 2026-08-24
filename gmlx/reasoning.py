@@ -543,6 +543,43 @@ def normalize_template_kwargs(kwargs: dict) -> dict:
     return out
 
 
+_TEMPLATE_DEFAULT_FLAG = "_kq_template_default_thinking"
+
+
+def install_template_default_thinking() -> None:
+    """Keep an absent ``enable_thinking`` meaning "the template's own default".
+
+    mlx-vlm >= 0.6.15 ``get_chat_template`` injects ``enable_thinking=False``
+    whenever the kwarg is missing and the tokenizer's ``apply_chat_template``
+    accepts it - a ``**kwargs`` signature always does - so every default-on
+    reasoning template renders the dead ``<think></think>`` prefill and the
+    model stops thinking. Seed the kwarg with a Jinja ``Undefined``: the
+    injection sees it as present and stands down, and the template evaluates
+    ``enable_thinking is defined`` as false - same semantics as a truly
+    absent variable. An explicit value passes through untouched. Idempotent;
+    rebinds the module global both ``apply_chat_template`` call sites
+    resolve at call time."""
+    import importlib
+
+    pu = importlib.import_module("mlx_vlm.prompt_utils")
+    original = pu.get_chat_template
+    if getattr(original, _TEMPLATE_DEFAULT_FLAG, False):
+        return
+    from jinja2 import Undefined
+
+    undef = Undefined(name="enable_thinking")
+
+    def get_chat_template(processor, messages, add_generation_prompt,
+                          tokenize=False, **kwargs):
+        if "enable_thinking" not in kwargs:
+            kwargs["enable_thinking"] = undef
+        return original(processor, messages, add_generation_prompt,
+                        tokenize=tokenize, **kwargs)
+
+    get_chat_template.__dict__[_TEMPLATE_DEFAULT_FLAG] = True
+    pu.get_chat_template = get_chat_template
+
+
 # Values accepted for the model-agnostic `thinking` control (CLI flag,
 # config/profile key, z.ai-style request field).
 _THINKING_LEVELS = {"on": "on", "off": "off", "adaptive": "adaptive",

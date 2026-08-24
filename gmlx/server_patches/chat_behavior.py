@@ -110,7 +110,14 @@ def install_chat_template_kwargs() -> None:
     """Forward arbitrary ``chat_template_kwargs`` (active profile + request, request
     wins) into ``apply_chat_template``. Two idempotent halves: a gen-args transform
     stashes the merged dict on the args object; a ``GenerationArguments.to_template_kwargs``
-    wrapper folds that stash into the kwargs mlx-vlm passes to the template."""
+    wrapper folds that stash into the kwargs mlx-vlm passes to the template.
+
+    The pop below leaves ``enable_thinking`` absent so the template's own
+    default governs; ``get_chat_template`` would then re-inject False
+    (mlx-vlm >= 0.6.15), so the render seam is guarded too."""
+    from ..reasoning import install_template_default_thinking
+
+    install_template_default_thinking()
     _install_gen_args_transform(_CTKW_FLAG, _stash_template_kwargs)
 
     gen = importlib.import_module("mlx_vlm.server.generation")

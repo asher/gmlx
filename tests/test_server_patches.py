@@ -59,6 +59,8 @@ def _restore_mlxvlm():
     saved["apc_lone_flag"] = getattr(apc, "_kq_lone_harvest", False)
     gen = importlib.import_module("mlx_vlm.server.generation")
     saved["to_template_kwargs"] = gen.GenerationArguments.to_template_kwargs
+    pu = importlib.import_module("mlx_vlm.prompt_utils")
+    saved["get_chat_template"] = pu.get_chat_template
     saved["make_sampler"] = gen.ResponseGenerator._make_sampler
     schemas = importlib.import_module("mlx_vlm.server.schemas")
     saved["stream_chunk_dump"] = schemas.ChatStreamChunk.model_dump_json
@@ -69,6 +71,7 @@ def _restore_mlxvlm():
     apc.harvest_blocks_from_batch_cache = saved["apc_harvest"]
     apc._kq_lone_harvest = saved["apc_lone_flag"]
     gen.GenerationArguments.to_template_kwargs = saved["to_template_kwargs"]
+    pu.get_chat_template = saved["get_chat_template"]
     gen.ResponseGenerator._make_sampler = saved["make_sampler"]
     schemas.ChatStreamChunk.model_dump_json = saved["stream_chunk_dump"]
     _APP._build_gen_args = saved["build_gen_args"]
@@ -1550,6 +1553,49 @@ def test_install_chat_template_kwargs_idempotent_and_noop_default():
     # a request/spec with no kwargs leaves to_template_kwargs untouched (stock keys)
     assert gen.GenerationArguments().to_template_kwargs() == {
         "enable_thinking": gen.GenerationArguments().enable_thinking}
+
+
+class _RecordingTok:
+    """A tokenizer stand-in whose **kwargs signature makes mlx-vlm's
+    enable_thinking capability probe say yes (the 0.6.15 injection path)."""
+    chat_template = "{{ messages }}"
+
+    def __init__(self):
+        self.kwargs = {}
+
+    def apply_chat_template(self, messages, **kwargs):
+        self.kwargs = kwargs
+        return "rendered"
+
+
+def test_template_default_thinking_blocks_0615_false_injection():
+    """Regression: mlx-vlm >= 0.6.15 get_chat_template injects
+    enable_thinking=False when the kwarg is absent, so served models with
+    default-on reasoning templates rendered the dead think prefill and
+    stopped thinking. The seeded Jinja Undefined must reach the tokenizer
+    instead of False, and an explicit value must pass through verbatim."""
+    import jinja2
+
+    from gmlx import reasoning
+
+    sp.install_chat_template_kwargs()      # installs the render guard too
+    pu = importlib.import_module("mlx_vlm.prompt_utils")
+    assert getattr(pu.get_chat_template, reasoning._TEMPLATE_DEFAULT_FLAG, False)
+
+    tok = _RecordingTok()
+    msgs = [{"role": "user", "content": "hi"}]
+    assert pu.get_chat_template(tok, msgs, True) == "rendered"
+    assert isinstance(tok.kwargs["enable_thinking"], jinja2.Undefined)
+
+    pu.get_chat_template(tok, msgs, True, enable_thinking=False)
+    assert tok.kwargs["enable_thinking"] is False
+    pu.get_chat_template(tok, msgs, True, enable_thinking=True)
+    assert tok.kwargs["enable_thinking"] is True
+
+    # idempotent: a second install keeps the same wrapper
+    fn = pu.get_chat_template
+    reasoning.install_template_default_thinking()
+    assert pu.get_chat_template is fn
 
 
 # 8. OpenAI stop sequences
