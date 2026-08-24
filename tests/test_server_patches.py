@@ -2133,10 +2133,7 @@ class _RecordingAPC:
 
 def test_lone_harvest_stores_plain_kvcache():
     """After install, a plain KVCache (offset, no _idx) harvests its
-    [0, offset) row. Stock declined it through mlx-vlm 0.6.3 (the gap the
-    patch fills); 0.6.4 absorbed the fallback but not the quantized guard
-    (see test_lone_harvest_skips_unsupported_cache), so the replacement
-    installs on every version and no stock baseline is asserted here."""
+    [0, offset) row (batch_idx omitted = lone request)."""
     import mlx.core as mx
     apc = importlib.import_module("mlx_vlm.apc")
 
@@ -2146,7 +2143,7 @@ def test_lone_harvest_stores_plain_kvcache():
 
     sp.install_apc_lone_harvest()
     mgr2 = _RecordingAPC()
-    out = apc.harvest_blocks_from_batch_cache(mgr2, cache, 0, list(range(40)))
+    out = apc.harvest_blocks_from_batch_cache(mgr2, cache, list(range(40)))
     assert out == ["blk"]
     assert len(mgr2.calls) == 1
     assert mgr2.calls[0]["n_tokens"] == 40
@@ -2165,7 +2162,8 @@ def test_lone_harvest_preserves_batched_path():
     cache = [_FakeBatchKVCache(keys, values, idx=48, left_padding=mx.array([0, 16]))]
     mgr = _RecordingAPC()
     # row 1 has 16 left-pad -> harvested span is 48-16 = 32
-    out = apc.harvest_blocks_from_batch_cache(mgr, cache, 1, list(range(48)))
+    out = apc.harvest_blocks_from_batch_cache(mgr, cache, list(range(48)),
+                                              batch_idx=1)
     assert out == ["blk"]
     assert mgr.calls[0]["layer_shapes"] == [(1, 2, 32, 8)]
 
@@ -2180,12 +2178,30 @@ def test_lone_harvest_skips_unsupported_cache():
 
     # no _idx, no offset
     nocache = [_FakeKVCache(mx.zeros((1, 2, 8, 8)), mx.zeros((1, 2, 8, 8)), None)]
-    assert apc.harvest_blocks_from_batch_cache(mgr, nocache, 0, list(range(8))) == []
+    assert apc.harvest_blocks_from_batch_cache(mgr, nocache, list(range(8))) == []
 
     # quantized: keys is a tuple, not an mx.array
     quant = [_FakeKVCache((mx.zeros((1, 2, 8, 4)),), (mx.zeros((1, 2, 8, 4)),), 8)]
-    assert apc.harvest_blocks_from_batch_cache(mgr, quant, 0, list(range(8))) == []
+    assert apc.harvest_blocks_from_batch_cache(mgr, quant, list(range(8))) == []
     assert mgr.calls == []
+
+
+def test_lone_harvest_matches_stock_signature():
+    """The replacement accepts exactly the stock 0.6.15 calling
+    convention: (manager, caches, full_token_ids) positional with
+    batch_idx keyword-only. A drift here turns every harvest into a
+    warned-and-skipped TypeError, so the signature is pinned."""
+    import inspect
+    apc = importlib.import_module("mlx_vlm.apc")
+    sp.install_apc_lone_harvest()
+    params = inspect.signature(apc.harvest_blocks_from_batch_cache).parameters
+    kinds = {n: p.kind for n, p in params.items()}
+    pos = [n for n, k in kinds.items()
+           if k == inspect.Parameter.POSITIONAL_OR_KEYWORD]
+    assert pos == ["apc_manager", "batch_caches", "full_token_ids"]
+    for kw in ("batch_idx", "extra_hash", "skip_first_n_tokens"):
+        assert kinds[kw] == inspect.Parameter.KEYWORD_ONLY
+    assert params["batch_idx"].default is None
 
 
 def test_lone_harvest_install_idempotent():
