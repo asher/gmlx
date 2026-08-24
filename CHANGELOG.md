@@ -104,7 +104,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   governor idle. It now samples the kernel's reclaimable pages every
   tick and goes red below a floor (`GMLX_GOV_KERNEL_FLOOR_GB`, default
   8): caches evicted, buffer cache cleared, largest request failed with
-  the numbers if that did not clear it.
+  the numbers if that did not clear it. Prefix-cache block stores, which
+  run uninterrupted between ticks, check the same floor per block and
+  stop storing below it.
 - The governor's ceiling was 95% of Metal's recommended working set,
   which on a 128 GB box left the kernel and every other process 14 GB.
   It is now the lower of that and physical RAM minus a reserve
