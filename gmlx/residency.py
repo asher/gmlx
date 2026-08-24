@@ -776,17 +776,16 @@ class _ResidencyPool:
         # Capture the expert prefetcher before the stock unload empties
         # model_cache; it holds one open fd per GGUF shard and nothing else
         # closes it (repeated load/unload cycles would creep toward EMFILE).
-        _prefetcher = getattr(entry.model_cache.get("model"),
-                              "_kq_prefetcher", None)
+        owner = _streaming_owner(entry.model_cache.get("model"))
+        _prefetcher = getattr(owner, "_kq_prefetcher", None)
         # Same for the prefill feeder: shard fds + staging pools + ~GBs of
         # host ring slots that must not outlive the model.
-        _feeder = getattr(entry.model_cache.get("model"), "_kq_feeder", None)
+        _feeder = getattr(owner, "_kq_feeder", None)
         # And the decode feeder: its mlocked wired arena (a large fraction of
         # RAM on hybrid over-RAM MoE models), read pool, and shard fds sit in
         # a feeder<->module reference cycle, so refcounting alone won't
         # reclaim them before the next model sizes its own arena.
-        _decode_feeder = getattr(entry.model_cache.get("model"),
-                                 "_kq_decode_feeder", None)
+        _decode_feeder = getattr(owner, "_kq_decode_feeder", None)
         scratch = _Scratch()
         scratch.response_generator = entry.response_generator
         scratch.model_cache = entry.model_cache
@@ -831,9 +830,40 @@ class _ResidencyPool:
         # run a gen-2 GC for a long time. The next load's preload_gate
         # re-measures headroom immediately, so a swap on a near-full box
         # defers against hundreds of GB of already-dead arrays unless the
-        # cycles are collected here.
+        # cycles are collected here. A collection while this frame or the
+        # entry still points at the model frees nothing (the closer loop's
+        # last bound method alone pins the feeder and, through it, every
+        # expert weight): drop every reference first, then collect.
+        entry.model_cache = {}
+        entry.response_generator = None
+        entry.apc_manager = None
+        del scratch, owner, close, _prefetcher, _feeder, _decode_feeder
         import gc
         gc.collect()
+
+
+_STREAMING_ATTRS = ("_kq_prefetcher", "_kq_feeder", "_kq_decode_feeder")
+
+
+def _streaming_owner(model):
+    """The module the loader hung the streaming helpers on. The served
+    object is usually a wrapper (the text-only vlm adapter, whose
+    ``language_model._model`` is the stock model) that forwards no
+    attributes, so reading the helpers off the wrapper finds nothing and
+    the feeders' worker threads outlive the model, pinning every expert
+    weight through their frames. Descend the wrapper chain to the first
+    module that carries a helper; the original object when none does."""
+    seen = set()
+    cur = model
+    while cur is not None and id(cur) not in seen:
+        if any(getattr(cur, a, None) is not None for a in _STREAMING_ATTRS):
+            return cur
+        seen.add(id(cur))
+        nxt = getattr(cur, "language_model", None)
+        if nxt is None:
+            nxt = getattr(cur, "_model", None)
+        cur = nxt
+    return model
 
 
 def _pinned_from_env(preload_path):
