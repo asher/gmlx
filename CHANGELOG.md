@@ -97,6 +97,23 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   later load deferred with a negative free working set until restart.
 - Plain text models (qwen3, llama) failed every request with a missing
   gmlx.cache import.
+- The memory governor could read green while the box was out of free
+  pages: it priced only MLX's own counters, and MLX's buffer cache reads
+  as free inside the process while the kernel counts it as wired. A
+  128 GB box froze and panicked under a long-context batch with the
+  governor idle. It now samples the kernel's reclaimable pages every
+  tick and goes red below a floor (`GMLX_GOV_KERNEL_FLOOR_GB`, default
+  8): caches evicted, buffer cache cleared, largest request failed with
+  the numbers if that did not clear it.
+- The governor's ceiling was 95% of Metal's recommended working set,
+  which on a 128 GB box left the kernel and every other process 14 GB.
+  It is now the lower of that and physical RAM minus a reserve
+  (`GMLX_GOV_RESERVE_GB`, default max(8, 10% of RAM)); admission and the
+  capacity table price against the same ceiling.
+- The MLX buffer cache is now always bounded (4-12 GiB from working-set
+  slack) instead of only when a near-RAM-size model is configured; MLX's
+  default lets it grow to the memory limit, and it held 27-48 GB of wired
+  freed buffers on an 8B model.
 - Sampled speculative verify and the server's unfiltered sampler computed
   logprob math at the activation dtype; float16 rows reached categorical
   unwidened. Both now widen to float32 first (greedy paths unchanged).

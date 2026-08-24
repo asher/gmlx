@@ -71,6 +71,20 @@ Knobs (all calib values are U5's to tighten):
     GMLX_GOVERNOR=0          kill switch, checked at install
     GMLX_GOV_MARGIN          M, margin fraction of WS (default 0.05,
                              D-4's decision; mirrors 1 - wired frac)
+    GMLX_GOV_RESERVE_GB      absolute bytes left to the kernel and every
+                             other process: the ceiling on tracked
+                             bytes is min(WS x (1 - M), RAM - reserve)
+                             (default max(8, 10% of RAM))
+    GMLX_GOV_KERNEL_FLOOR_GB kernel reclaimable floor (free + purgeable
+                             + speculative + file-backed pages, read
+                             from host_statistics64 every tick): below
+                             it the band is red at once, whatever the
+                             MLX-side rate math says (default 8; 0
+                             disables). This is the counter that
+                             predicts the free-page livelock panic;
+                             MLX cannot see it because its buffer
+                             cache reads as free inside the process
+                             and wired to the kernel
     GMLX_GOV_KY              yellow entry ttc in ticks (default 16)
     GMLX_GOV_DY              green dwell ticks to de-escalate
                              (default 8)
@@ -116,6 +130,9 @@ _STATS = {
     "sheds_suppressed": 0,
     "last_action": None,
     "last_recovered_bytes": 0,
+    "kernel_reclaimable_bytes": None,
+    "kernel_floor_reds": 0,
+    "kernel_floor": None,
 }
 
 
@@ -260,6 +277,12 @@ def make_room_for_admission(gen) -> None:
 
 # ---------------------------------------------------------------- sampling
 
+def _ceiling_bytes(ws: float, margin: float) -> float:
+    from .capacity import ceiling_bytes
+
+    return ceiling_bytes(ws, margin)
+
+
 def _headroom_and_ws(margin: float):
     from .prefill_decay import headroom_bytes
 
@@ -270,7 +293,19 @@ def _headroom_and_ws(margin: float):
         ws = float(mx.device_info()["max_recommended_working_set_size"])
     except Exception:
         return None, 0.0
-    return head - margin * ws, ws
+    # headroom_bytes is measured against the full WS; shift it down to
+    # the governed ceiling
+    return head - (ws - _ceiling_bytes(ws, margin)), ws
+
+
+def _kernel_reclaimable():
+    from .kernel_vm import reclaimable_bytes
+
+    return reclaimable_bytes()
+
+
+def _kernel_floor_bytes() -> float:
+    return _env_f("GMLX_GOV_KERNEL_FLOOR_GB", 8.0) * 1e9
 
 
 def _sample_registered(st: _GovState) -> float:
@@ -336,7 +371,7 @@ def _arm_throttle(gen, st: _GovState, ws: float, margin: float) -> None:
         # expert bytes sit inside it without occupying working set, so a
         # limit that ignores them would refuse every allocation on an
         # over-RAM streaming model.
-        limit = int(ws * (1.0 - margin) + untracked_weight_bytes()
+        limit = int(_ceiling_bytes(ws, margin) + untracked_weight_bytes()
                     + streamed_tracked_bytes())
         try:
             st.saved_mem_limit = mx.set_memory_limit(limit)
@@ -606,6 +641,38 @@ def _governor_tick(gen) -> None:
     else:
         st.green_streak = 0
 
+    # Kernel floor: the box's reclaimable pages, not the process's
+    # view. Below the floor nothing else in this tick matters: the
+    # rate math can read green while the kernel is a few hundred MB
+    # from a livelock (2026-08-24: active 87 GB + cache 27 GB on a
+    # 128 GB box, governor green throughout).
+    floor = _kernel_floor_bytes()
+    recl = _kernel_reclaimable() if floor > 0 else None
+    _STATS["kernel_reclaimable_bytes"] = (
+        None if recl is None else int(recl))
+    if recl is not None and recl < floor:
+        _enter(gen, st, RED, ws, margin)
+        _STATS["kernel_floor_reds"] += 1
+        freed = _evict_registered(1.0)
+        mx.clear_cache()
+        recl2 = _kernel_reclaimable()
+        _log.warning("[governor] kernel floor: reclaimable %.2f GB < "
+                     "%.2f GB; evicted %.2f GB, cache cleared, now "
+                     "%.2f GB", recl / 1e9, floor / 1e9, freed / 1e9,
+                     (recl2 or 0) / 1e9)
+        if recl2 is not None and recl2 >= floor:
+            _STATS["last_action"] = (
+                f"kernel floor reclaim freed {freed / 1e9:.2f} GB")
+            st.orange_failed = False
+            return
+        if batch_rows(gen) > 0 and _shed_allowed(st):
+            _fail_largest(gen, st, (
+                f"governor red: kernel reclaimable "
+                f"{(recl2 or 0) / 1e9:.2f} GB below floor "
+                f"{floor / 1e9:.2f} GB"))
+        st.orange_failed = False
+        return
+
     if red_now and batch_rows(gen) > 0:
         _enter(gen, st, RED, ws, margin)
         if _shed_allowed(st):
@@ -753,5 +820,28 @@ def install_governor() -> bool:
 
     setattr(_governed_next, _INSTALLED_FLAG, True)
     _ar.BatchGenerator._next = _governed_next
-    _log.info("memory governor installed")
+    floor = _kernel_floor_bytes()
+    floor_note = "off"
+    if floor > 0:
+        from .kernel_vm import selfcheck
+
+        why = selfcheck()
+        if why is None:
+            floor_note = f"{floor / 1e9:.1f} GB"
+        else:
+            floor_note = f"off ({why})"
+            os.environ["GMLX_GOV_KERNEL_FLOOR_GB"] = "0"
+    _STATS["kernel_floor"] = floor_note
+    try:
+        margin = _env_f("GMLX_GOV_MARGIN", 0.05)
+        ws = float(mx.device_info()["max_recommended_working_set_size"])
+        ceiling = f"{_ceiling_bytes(ws, margin) / 1e9:.1f} GB"
+    except Exception:
+        ceiling = "unknown"
+    # Startup banner, not an ops message: install runs before uvicorn's
+    # dictConfig wires the gmlx logger, so an INFO record here would be
+    # dropped silently (the 2026-08-24 crash log has no governor line
+    # at all). print keeps the armed state visible.
+    print(f"[governor] installed: ceiling {ceiling}, kernel floor "
+          f"{floor_note}")
     return True

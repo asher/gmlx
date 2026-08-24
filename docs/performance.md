@@ -489,11 +489,16 @@ MLX keeps freed GPU buffers in a wired reuse pool (the buffer cache). That is
 normally free performance, but deep-context serving of a near-RAM-size model
 retains multi-gigabyte prefill transients in the pool, and the accumulated
 wired footprint can exhaust free pages. The failure is a system freeze, not
-a clean error. The server therefore bounds the cache automatically when the
-biggest configured model uses more than ~60% of the GPU working set, capping
-it at a quarter of the remaining slack (clamped to 4-12 GiB) and logging one
-`[serve] MLX cache limit: ...` line. Models with ample slack keep an
-unbounded cache -- the policy never engages there.
+a clean error. The server therefore always bounds the cache and logs one
+`[serve] MLX cache limit: ...` line: when the biggest configured model uses
+more than ~60% of the GPU working set the cap is a quarter of the remaining
+slack, otherwise 5% of the working set, clamped to 4-12 GiB either way.
+MLX's own default is the memory limit (1.5x the working set), and the cache
+is wired: the process reads it as free while the kernel counts it against
+its free pages, which is how a small model at long context can still walk
+the box into a freeze. The runtime governor backs this up by sampling the
+kernel's reclaimable pages every tick and going red below a floor
+(`GMLX_GOV_KERNEL_FLOOR_GB`); see [cli.md](cli.md#environment-variables).
 
 Override it explicitly when needed: the `server.cache_limit_gb` config key or
 the `GMLX_CACHE_LIMIT_GB` env (env wins). A GiB value pins the limit
