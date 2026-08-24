@@ -295,6 +295,24 @@ class GmlxAPCManager(_apc.APCManager):
             token_ids, layer_keys, layer_values, extra_hash=extra_hash,
             _ckpt_disk=bool(disk))
 
+    @staticmethod
+    def _kernel_floor_hit() -> bool:
+        """True when the kernel's reclaimable pages sit below the
+        governor floor (GMLX_GOV_KERNEL_FLOOR_GB). A block store runs
+        as one uninterrupted call between governed ticks (~30 s for an
+        80k-token row), so it checks the floor itself per block and
+        stops storing rather than wiring the box past it."""
+        try:
+            floor = float(os.environ.get("GMLX_GOV_KERNEL_FLOOR_GB", "8"))
+        except ValueError:
+            floor = 8.0
+        if floor <= 0:
+            return False
+        from .kernel_vm import reclaimable_bytes
+
+        recl = reclaimable_bytes()
+        return recl is not None and recl < floor * 1e9
+
     def store_kv_blocks(self, token_ids, layer_keys, layer_values,
                         *, extra_hash=0, skip_first_n_tokens=0,
                         _ckpt_disk=None):
@@ -426,6 +444,16 @@ class GmlxAPCManager(_apc.APCManager):
                         i,
                         n_full,
                     )
+                    if not allow_disk:
+                        break
+                    parent = h2
+                    continue
+                if self._kernel_floor_hit():
+                    self.stats.record_reject(
+                        "kernel_floor", block=i, n_full=n_full)
+                    _apc.logger.warning(
+                        "APC store stopped at block %d/%d: kernel "
+                        "reclaimable below the governor floor", i, n_full)
                     if not allow_disk:
                         break
                     parent = h2
