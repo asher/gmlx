@@ -10,6 +10,7 @@ Logic is a faithful copy (acceptance must stay token-identical to the validated
 path); keep it in sync when mlx-vlm's round changes in a way we want to track.
 """
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any
 from collections.abc import Callable
@@ -26,7 +27,23 @@ _log = logging.getLogger(__name__)
 
 # Shared generation stream (the drafter model pins no stream of its own, so the
 # round and verify forward run here; cross-stream deps are handled by MLX events).
-generation_stream = mx.new_thread_local_stream(mx.default_device())
+# On a CPU default device the round loop stays on the default stream: a second
+# CPU stream intermittently dies with a bus error in mlx's CPU gather mid
+# _stochastic_walk on loaded hosts (hosted-CI runners), and CPU-only runs gain
+# nothing from the split. GMLX_SPEC_STREAM=new / =default overrides either way.
+
+
+def _generation_stream():
+    mode = os.environ.get("GMLX_SPEC_STREAM", "").lower()
+    dev = mx.default_device()
+    if mode == "new":
+        return mx.new_thread_local_stream(dev)
+    if mode == "default" or dev == mx.Device(mx.cpu):
+        return mx.default_stream(dev)
+    return mx.new_thread_local_stream(dev)
+
+
+generation_stream = _generation_stream()
 
 
 # --- draft/target sampler RNG coupling -------------------------------------

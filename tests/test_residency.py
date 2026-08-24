@@ -88,6 +88,52 @@ def test_byte_budget_evicts_lru_unpinned():
     assert pool.stats()["resident_bytes"] == 20 * GB
 
 
+def test_failed_build_after_eviction_drops_proxy_last_ref():
+    # A build that fails after evicting for room (a preload-gate deferral)
+    # must not leave the proxy's _last_entry pinning the evicted model: with
+    # the model's internal reference cycles that kept the evicted weights
+    # measurable as live, so the gate deferred every later load.
+    import gc
+    import weakref
+
+    proxy = _RuntimeProxy(_FakeOriginal())
+    teardowns = []
+
+    def fake_stock_get(model_path, adapter_path, *, model_kind="auto"):
+        if model_path == "B":
+            raise RuntimeError("build failed")
+        proxy.apc_manager = f"APC:{model_path}"
+        proxy.response_generator = f"RG:{model_path}"
+        proxy.model_cache = {
+            "cache_key": (model_path, adapter_path, model_kind),
+            "model_path": model_path,
+            "model": f"M:{model_path}",
+        }
+
+    def fake_stock_unload():
+        teardowns.append(proxy.model_cache.get("model_path"))
+        return True
+
+    pool = _ResidencyPool(
+        proxy, fake_stock_get, fake_stock_unload, int(15 * GB), (),
+        max_models=None, footprint_fn=lambda p: int(10 * GB))
+    a = acquire(pool, "A")
+    assert proxy._last_entry is a
+    ref = weakref.ref(a)
+    try:
+        pool.acquire("B", None, "auto")  # evicts A, then the build raises
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("B build should have raised")
+    assert teardowns == ["A"]
+    assert proxy._last_entry is not a
+    _active_entry.set(None)
+    del a
+    gc.collect()
+    assert ref() is None
+
+
 def test_pin_protected_even_when_over_budget():
     # Two 10 GB models can't both fit a 15 GB budget, but A is pinned: it is
     # never evicted, so B is admitted over budget rather than refused.
