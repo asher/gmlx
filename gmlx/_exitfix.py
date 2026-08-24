@@ -23,7 +23,18 @@ import atexit
 import os
 import sys
 
-_AFFECTED_MLX = ("0.32.1",)
+# Upstream #4248 (landed 0.32.0 -> 0.32.1) has no fixed release yet, so
+# every mlx from 0.32.1 on is exposed. Narrow to a closed range once a
+# fixed version ships.
+_AFFECTED_MLX_MIN = (0, 32, 1)
+
+
+def _mlx_affected(version: str) -> bool:
+    try:
+        parts = tuple(int(x) for x in version.split(".")[:3])
+    except ValueError:
+        return False
+    return parts >= _AFFECTED_MLX_MIN
 
 _code: int | None = None
 _armed = False
@@ -37,7 +48,7 @@ def affected() -> bool:
     if mx is None:
         # mlx never imported: no compile cache exists, nothing to guard.
         return False
-    return getattr(mx, "__version__", "") in _AFFECTED_MLX
+    return _mlx_affected(getattr(mx, "__version__", ""))
 
 
 def arm() -> None:
@@ -110,7 +121,7 @@ def thread_guard_affected() -> bool:
     mx = sys.modules.get("mlx.core")
     if mx is None:
         return False
-    return getattr(mx, "__version__", "") in _AFFECTED_MLX
+    return _mlx_affected(getattr(mx, "__version__", ""))
 
 
 def install_engine_thread_guard(generation_module) -> None:
