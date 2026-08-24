@@ -379,7 +379,7 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
             # update path (mx.depends on a None) when the suffix forwards.
             from mlx_vlm import apc as _apc
             warm, _ = _apc.make_warm_batch_exact_cache_multi(
-                [warm], [prefix_len])
+                [warm], prefix_lens=[prefix_len])
         if warm and 0 < prefix_len < len(ids_list):
             batch.prompt_cache = warm
             # Matched blocks stay acquired until the stock post-prefill

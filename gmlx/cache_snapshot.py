@@ -281,7 +281,8 @@ def drafter_sidecar_store(
             try:
                 from mlx_vlm import apc as _apc
                 salted = sidecar_extra_hash(extra_hash)
-                khash = _apc._sequence_hash(ids, salted, manager.block_size)
+                khash = _apc._sequence_hash(ids, extra_hash=salted,
+                                            block_size=manager.block_size)
                 disk.save_exact_cache(khash, ids, salted, clones)
                 with manager.lock:
                     manager.stats.disk_writes += 1
@@ -1412,7 +1413,8 @@ def _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
         entries.append(sent)
         from mlx_vlm import apc as _apc
         tid = tuple(ids)
-        khash = _apc._sequence_hash(tid, salted, manager.block_size)
+        khash = _apc._sequence_hash(tid, extra_hash=salted,
+                                    block_size=manager.block_size)
         disk.save_exact_cache(khash, tid, salted, entries)
         _ckpt_bump(manager, "ckpt_skeleton_writes")
         with manager.lock:

@@ -100,7 +100,7 @@ def _covered_len(manager, ids, extra_hash: int) -> int:
             parent = _apc.SEED_PARENT_HASH
             for i in range(len(tt) // bs):
                 chunk = tt[i * bs:(i + 1) * bs]
-                h = _apc._hash_tokens(parent, chunk, extra_hash)
+                h = _apc._hash_tokens(parent, tokens=chunk, extra=extra_hash)
                 blk = table.get(h)
                 if blk is None or blk.token_ids != chunk:
                     break
