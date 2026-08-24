@@ -180,12 +180,15 @@ class _DaemonReadPool:
             if item is None:
                 return
             fut, fn, args = item
-            if not fut.set_running_or_notify_cancel():
-                continue
-            try:
-                fut.set_result(fn(*args))
-            except BaseException as exc:
-                fut.set_exception(exc)
+            if fut.set_running_or_notify_cancel():
+                try:
+                    fut.set_result(fn(*args))
+                except BaseException as exc:
+                    fut.set_exception(exc)
+            # A worker blocked in get() is a live frame: locals kept
+            # from the last item (the feeder's bound method, the
+            # future) would pin the feeder and its modules past unload.
+            del item, fut, fn, args
 
     def submit(self, fn, *args) -> Future:
         fut: Future = Future()

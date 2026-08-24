@@ -58,6 +58,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   row); output is unchanged until the ring fills.
 
 ### Fixed
+- serve: evicting a streamed MoE model left its weights resident, so every
+  later load deferred with a negative free working set until restart.
+- Plain text models (qwen3, llama) failed every request with a missing
+  gmlx.cache import.
 - Sampled speculative verify and the server's unfiltered sampler computed
   logprob math at the activation dtype; float16 rows reached categorical
   unwidened. Both now widen to float32 first (greedy paths unchanged).
