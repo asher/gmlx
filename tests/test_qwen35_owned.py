@@ -659,4 +659,6 @@ def test_forward_on_the_cpu_device_skips_the_metal_kernels(monkeypatch):
         mx.eval(out, hid)
     finally:
         mx.set_default_device(prev)
-    assert _close(ref, out, 1e-3)
+    # Not 1e-3: the GPU arm's f32 GEMMs run at TF32 precision on M5 while
+    # the CPU arm is exact f32, so the forwards differ by a few e-3.
+    assert _close(ref, out, 1e-2)

@@ -323,11 +323,14 @@ def test_lattice_matches_a_numpy_transcription_and_greedy_walk_is_argmax():
     c = np.array(cands)
     for p in range(L):
         assert set(c[p].tolist()) == set(np.argsort(lg[p])[-k:].tolist())
+    # Not 1e-4: MLX dispatches the f32 GEMMs here through the tensor cores
+    # at TF32 precision where available, so the lattice scores differ from
+    # the full-f32 numpy transcription by up to ~1e-3.
     ref_first = lg[0][c[0]] + succ[c[0]] @ (pred[5] * hp[0])
-    assert np.allclose(np.array(first), ref_first, atol=1e-4)
+    assert np.allclose(np.array(first), ref_first, atol=2e-3)
     for p in range(1, L):
         ref = lg[p][c[p]][None, :] + (pred[c[p - 1]] * hp[p][None, :]) @ succ[c[p]].T
-        assert np.allclose(np.array(edges[p - 1]), ref, atol=1e-4)
+        assert np.allclose(np.array(edges[p - 1]), ref, atol=2e-3)
 
     path = greedy_walk(cands, first, edges)
     sel_i = int(np.argmax(ref_first))
@@ -413,7 +416,9 @@ def test_ring_is_temporal_and_the_window_trims_the_slack(n_rows):
     drafter.reset(lm)
     drafter.append_context(caps[:, -7:])
     got = _draft_hidden(drafter, block)
-    assert np.allclose(want, got, atol=1e-4), np.abs(want - got).max()
+    # Not 1e-4: TF32 tensor-core GEMMs accumulate ~2e-3 across the drafter
+    # forward; the trimmed-vs-fresh split this test pins diverges by ~O(1).
+    assert np.allclose(want, got, atol=5e-3), np.abs(want - got).max()
 
     drafter.reset(lm)
     drafter.append_context(caps[:, -6:])
