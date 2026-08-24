@@ -40,6 +40,33 @@ def pytest_configure(config):
 
     arm()
 
+    # Track every daemon read pool so the autouse fixture below can shut
+    # down the ones a test leaks. Leaked pools park their workers in
+    # queue.get forever; past ~100 live threads faulthandler truncates
+    # fatal-error dumps, cutting off the main thread's stack (the one that
+    # names the crashing test).
+    from gmlx import decode_feeder
+
+    orig_init = decode_feeder._DaemonReadPool.__init__
+
+    def tracking_init(self, *args, **kwargs):
+        orig_init(self, *args, **kwargs)
+        _read_pools.append(self)
+
+    decode_feeder._DaemonReadPool.__init__ = tracking_init
+
+
+_read_pools: list = []
+
+
+@pytest.fixture(autouse=True)
+def _shutdown_read_pools():
+    yield
+    # wait=False: a deliberately wedged worker (feeder wedge tests) never
+    # takes its poison pill; joining it would hang the suite.
+    while _read_pools:
+        _read_pools.pop().shutdown(wait=False)
+
 
 def pytest_sessionfinish(session, exitstatus):
     from gmlx._exitfix import set_code
