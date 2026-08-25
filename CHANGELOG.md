@@ -72,6 +72,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   row); output is unchanged until the ring fills.
 
 ### Fixed
+
+- Shell completion offered nothing for `gmlx launch <harness> --model`;
+  it now lists the config's model ids and aliases.
 - Served and VLM-local models stopped thinking by default on mlx-vlm 0.6.15,
   which injects `enable_thinking=false` into every render where the kwarg is
   absent; absent now means the template's own default again.
