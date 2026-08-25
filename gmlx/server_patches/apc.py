@@ -27,10 +27,13 @@ def install_apc_lone_harvest() -> None:
     function by module attribute (``_apc.harvest_blocks_from_batch_cache``), so
     replacing it on the module is picked up at the call site without a fork.
 
-    mlx-vlm 0.6.4 absorbed the offset fallback into the stock harvest, but
-    without the quantized (tuple ``keys``) guard: stock raises where this
-    declines. The replacement stays installed on every version -- it is a
-    strict superset of both stock behaviors."""
+    Against the pinned mlx-vlm 0.6.15 the replacement's behavioral delta
+    is the quantized (tuple ``keys``) decline: stock dequantizes and
+    stores, this keeps the block tier out of quantized-KV serving.
+
+    Signature contract: matches the 0.6.15 harvest exactly --
+    ``full_token_ids`` third positional, ``batch_idx`` keyword-only
+    (None = lone request). All callers use that convention."""
     import mlx.core as mx
 
     apc = importlib.import_module("mlx_vlm.apc")
@@ -38,8 +41,9 @@ def install_apc_lone_harvest() -> None:
         return
 
     def harvest_blocks_from_batch_cache(
-        apc_manager, batch_caches, batch_idx, full_token_ids,
-        *, extra_hash=0, skip_first_n_tokens=0):
+        apc_manager, batch_caches, full_token_ids,
+        *, batch_idx=None, extra_hash=0, skip_first_n_tokens=0):
+        row = 0 if batch_idx is None else int(batch_idx)
         layer_keys = []
         layer_values = []
         for c in batch_caches:
@@ -60,13 +64,13 @@ def install_apc_lone_harvest() -> None:
                 left_padding = None
             if left_padding is not None:
                 try:
-                    lp = int(left_padding[batch_idx].item())
+                    lp = int(left_padding[row].item())
                 except Exception:
                     lp = 0
             else:
                 lp = 0
-            layer_keys.append(keys[batch_idx:batch_idx + 1, :, lp:idx, :])
-            layer_values.append(values[batch_idx:batch_idx + 1, :, lp:idx, :])
+            layer_keys.append(keys[row:row + 1, :, lp:idx, :])
+            layer_values.append(values[row:row + 1, :, lp:idx, :])
         return apc_manager.store_kv_blocks(
             full_token_ids, layer_keys, layer_values,
             extra_hash=extra_hash, skip_first_n_tokens=skip_first_n_tokens)
