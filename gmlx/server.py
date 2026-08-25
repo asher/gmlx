@@ -745,6 +745,15 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                     help="Inline Jinja template, or a path to a .jinja/.txt file, "
                          "replacing a single positional model's GGUF template "
                          "(config mode: set it per profile/model instead).")
+    ap.add_argument("--thinking", choices=("on", "off", "adaptive"), default=None,
+                    help="Reasoning switch for a single positional model, mapped "
+                         "onto the variable its chat template reads (config mode: "
+                         "the per-profile/model `thinking:` key). Default: the "
+                         "template's own default.")
+    ap.add_argument("--thinking-budget", type=int, default=None, metavar="N",
+                    help="Cap a single positional model's thinking tokens per "
+                         "request; 0 closes thinking at once (config mode: the "
+                         "sampling `thinking_budget:` key; requests may override).")
     ap.add_argument("--adapter", default=None, metavar="PATH",
                     help="GGUF LoRA adapter applied live over a single positional "
                          "model at load - base stays K-quant, no merge (config mode: "
@@ -960,6 +969,10 @@ def _bg_serve_args(a, cfg_path) -> list:
                 _abs(ct) if os.path.exists(os.path.expanduser(ct)) else ct]
     if a.adapter:
         out += ["--adapter", _abs(a.adapter)]
+    if getattr(a, "thinking", None) is not None:
+        out += ["--thinking", a.thinking]
+    if getattr(a, "thinking_budget", None) is not None:
+        out += ["--thinking-budget", str(a.thinking_budget)]
     if getattr(a, "stream_cpu", False):
         out.append("--stream-cpu")
     if getattr(a, "stream_experts", False):
@@ -1429,6 +1442,10 @@ def _single_model_cfg(a) -> ServerCfg:
     # -> the load bridge identically.
     overrides = ({"chat_template": a.chat_template}
                  if getattr(a, "chat_template", None) else {})
+    if getattr(a, "thinking", None) is not None:
+        overrides["thinking"] = a.thinking
+    if getattr(a, "thinking_budget", None) is not None:
+        overrides["sampling"] = {"thinking_budget": a.thinking_budget}
     model = ModelCfg(
         id=mid,
         path=mp,
