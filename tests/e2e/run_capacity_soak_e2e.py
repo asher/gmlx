@@ -704,9 +704,9 @@ def main() -> int:
                 if st != 200:
                     stats.finding({"cycle": cycle, "op": "unload_primary", "status": st,
                                    "body": str(body)[:200]})
-                st, body = plain_chat(base, {"model": ids[0], "max_tokens": 8,
-                                             "messages": [{"role": "user", "content": "Say ok."}]},
-                                      a.request_timeout)
+                st, body, _ = plain_chat(base, {"model": ids[0], "max_tokens": 8,
+                                                "messages": [{"role": "user", "content": "Say ok."}]},
+                                         a.request_timeout)
                 kind = classify(st, body)
                 if kind not in ("ok", "shed", "load_deferred"):
                     stats.finding({"cycle": cycle, "op": "reload_primary", "status": st,
