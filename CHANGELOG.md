@@ -73,6 +73,18 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Prompt-cache retirement on hybrid models predicted the next turn with
+  reasoning fields echoed back, so keep-mode chat templates (deepseek4)
+  predicted a full replay no client sends and stored a dead chain; the
+  prediction now echoes content only, unless the request's
+  `preserve_thinking` template kwarg declares the keep-reasoning protocol.
+- Exact-tier prompt-cache hits under serve `kv_bits` crashed the batch
+  update path (a float row joined a quantized batch); the warm merge now
+  re-quantizes the stored row to the live KV policy.
+- Same-stream prompt-cache snapshots of rotating layers (exact retirement,
+  drafter KV sidecars) were stored in canonical order, which permutes fp16
+  summation order and shifted logits on MoE models on the resumed turn;
+  they now copy the ring bitwise.
 - Shell completion offered nothing for `gmlx launch <harness> --model`;
   it now lists the config's model ids and aliases.
 - Served and VLM-local models stopped thinking by default on mlx-vlm 0.6.15,
