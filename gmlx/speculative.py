@@ -1527,17 +1527,24 @@ def _retire_batch_row(model, prompt_cache: list, slot: int,
 def _retire_batch_row_exact(manager, prompt_cache: list, slot: int,
                             retire: dict, gen_row: list[int],
                             position: int) -> None:
-    """Exact-tier retirement of one batch row. Offset invariants mirror
-    ``_retire_b1``: ``position == len(seq) - 1`` is the round-boundary
-    state (the newest token's KV pends; store everything but it),
-    ``== len(seq)`` a mid-round close; anything else is a stale tail and
+    """Exact-tier retirement of one batch row. The key is chosen from the
+    KV the row actually holds (``row_kv_len``), mirroring ``_retire_b1``'s
+    two clean states: ``len(seq) - 1`` (the newest token's KV pends the
+    next verify; store everything but it) or ``len(seq)`` (committed).
+    ``position`` is the loop's accepted-token count and can lag the
+    cache by the verify input (2026-08-25 soak: rows covered len(seq)
+    while position read len(seq) - 1); anything else is a stale tail and
     is skipped rather than stored under a key it does not cover."""
+    from .cache_snapshot import retirement_store, row_kv_len
     seq = retire["full_ids"] + [int(t) for t in gen_row]
-    if position == len(seq) - 1:
+    covered = row_kv_len(prompt_cache, slot)
+    if covered is None:
+        covered = position
+    if covered == len(seq) - 1:
         seq = seq[:-1]
-    elif position != len(seq):
-        _log.info("APC retire skipped (row): position %d != tokens %d",
-                  position, len(seq))
+    elif covered != len(seq):
+        _log.info("APC retire skipped (row): KV covers %d, tokens %d "
+                  "(position %d)", covered, len(seq), position)
         return
     lcp = None
     if os.environ.get("GMLX_APC_RETIRE_LCP") != "0":
@@ -1547,7 +1554,6 @@ def _retire_batch_row_exact(manager, prompt_cache: list, slot: int,
     max_len = lcp if lcp is not None and lcp < len(seq) else None
     _log.info("APC retire (row): seq=%d ctx=%s lcp=%s cap=%s", len(seq),
               retire.get("render_ctx") is not None, lcp, max_len)
-    from .cache_snapshot import retirement_store
     ok = retirement_store(
         manager, "exact", seq, prompt_cache, row=slot,
         extra_hash=int(retire.get("extra_hash", 0)), max_len=max_len)

@@ -448,15 +448,44 @@ def test_retire_batch_row_exact_mode_stores_the_row(monkeypatch):
                           len(seq) - 1)
         snap, prefix_len = mgr.lookup_exact_cache(seq)
         assert prefix_len == len(seq) - 1 and snap is not None
-        # stale tail: the row's KV count disagrees with the key
+        # stale tail: the row's KV covers neither len(seq) nor len(seq) - 1
         mgr2 = _manager()
         try:
-            _retire_batch_row(_fake_model(mgr2), [_kv_row(len(seq) - 1, 0)],
+            _retire_batch_row(_fake_model(mgr2), [_kv_row(len(seq) - 3, 0)],
                               0, dict(ctx), gen_row, len(seq) - 3)
             snap, prefix_len = mgr2.lookup_exact_cache(seq)
             assert prefix_len == 0 and snap is None
         finally:
             mgr2.close()
+    finally:
+        mgr.close()
+
+
+def test_row_kv_len_reads_per_row_offsets():
+    from mlx_vlm.models.cache import BatchKVCache
+    from gmlx.cache_snapshot import row_kv_len
+    batch = BatchKVCache.merge([_kv_row(5, 0), _kv_row(3, 1)])
+    assert row_kv_len([batch], 0) == 5
+    assert row_kv_len([batch], 1) == 3
+    assert row_kv_len([_kv_row(7, 0)], 0) == 7
+    assert row_kv_len([], 0) is None
+
+
+def test_retire_batch_row_exact_keys_on_the_row_kv(monkeypatch):
+    # position lags the cache by the verify input: the row holds len(seq)
+    # tokens of KV, so the whole sequence is the key (not seq[:-1]).
+    from gmlx.speculative import _retire_batch_row
+    monkeypatch.setenv("GMLX_APC_RETIRE_LCP", "0")
+    mgr = _manager()
+    try:
+        full_ids = list(range(1, 20))
+        gen_row = [50, 51, 52]
+        seq = full_ids + gen_row
+        ctx = {"full_ids": full_ids, "extra_hash": 0, "mode": "exact"}
+        _retire_batch_row(_fake_model(mgr), [_kv_row(len(seq), 0)], 0, ctx,
+                          gen_row, len(seq) - 1)
+        snap, prefix_len = mgr.lookup_exact_cache(seq + [99])
+        assert prefix_len == len(seq) and snap is not None
     finally:
         mgr.close()
 

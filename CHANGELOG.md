@@ -12,86 +12,45 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   set the reasoning switch and thinking-token cap for a single positional
   model without a config file (the same `thinking:` / sampling
   `thinking_budget:` keys a config sets).
-- `/v1/metrics`: live `requests[]` (per-request state, queue position,
-  tokens, elapsed, TTFT, decode tok/s, prefix-cache tier and warm tokens,
-  speculative acceptance). One snapshot per resident engine, merged;
-  drafted models report rows too, and gmlx's own `ckpt` / `anchor`
-  restores show as the row's cache tier with the restored token count.
-- `/v1/metrics`: `concurrency` section (`decode_batch`, `queue_cap`,
-  `in_flight`, `waiting`, the last summed over every resident engine);
-  `queue` gains `waiting`, `cap`, `eta_s`;
-  `resident_models[]` gains `in_flight` (busy minus the preload's
-  lifetime hold, so idle reads 0; the menu bar uses it).
-- `GET /health?ready=1`: keyless readiness (200, or 503 + `Retry-After`
-  with reason `pressure` / `queue` / `busy`; `busy` only once every
-  resident model's engine is at its decode width).
-- `GET /metrics?format=prometheus` (or a `text/plain` / OpenMetrics
-  `Accept`): Prometheus rendering of the metrics snapshot.
-- `POST /v1/cache/reset` takes `{"model": "<id>"}`; with no body it now
-  clears every resident model's cache, not just the request context's.
-- `POST /v1/estimate` (or `"dry_run": true` on chat completions): the
-  memory preflight as a query - prompt tokens, warm prefix tokens (block
-  chain, exact index, or checkpoint-tier record), KV bytes needed, fits
-  now / fits drained, first-token ETA.
-- `GET /v1/capacity/plan?width=W&depth=D`: the fan-out policy answered
-  from the capacity table, governor band and free slots.
-- `/v1/metrics`: `rates` section (aggregate live decode rate, recent
-  prefill / decode rates, lifetime decode rate).
-- A load the gate defers (resident models pinned or busy) answers a typed
-  `503 model_load_deferred` + `Retry-After` on the chat routes instead of
-  a generic 500 with a traceback.
-- `/v1/models`: `context_length` (trained context) and
-  `max_context_at_width_1`; `gmlx launch pi` writes them as pi's
-  `contextWindow` / `maxTokens` instead of leaving the 128k / 16k
-  defaults.
+- `/v1/metrics`: live per-request rows (state, queue position, tokens,
+  TTFT, decode tok/s, prefix-cache tier, speculative acceptance), plus
+  `concurrency` and `rates` sections; `queue` and `resident_models[]`
+  report waiting depth and in-flight counts.
+- `GET /health?ready=1`: keyless readiness; 503 + `Retry-After` with
+  reason `pressure`, `queue`, or `busy`.
+- `GET /metrics?format=prometheus`: Prometheus rendering of the snapshot.
+- `POST /v1/cache/reset` takes `{"model": "<id>"}`; with no body it clears
+  every resident model's cache.
+- `POST /v1/estimate` (or `"dry_run": true` on chat completions): memory
+  preflight for a prompt (warm prefix tokens, KV bytes, fits now or after
+  drain, first-token ETA).
+- `GET /v1/capacity/plan?width=W&depth=D`: fan-out policy from the
+  capacity table, governor band, and free slots.
+- `/v1/models`: `context_length` and `max_context_at_width_1`; `gmlx
+  launch pi` writes them as pi's `contextWindow` / `maxTokens`.
 
 ### Fixed
 
-- The load gate judged a model load against the raw Metal working set
-  (no margin, no kernel reserve) and never asked the kernel: it admitted
-  an 86.7 GB load next to a pinned 31.5 GB resident on a 112 GB wire
-  limit (Metal OOM in the mmap warm) and, earlier, an 81 GB load with
-  another app's pages in the compressor. Loads are now judged against
-  the serve ceiling (`ceiling_bytes`, the one the boot table and request
-  admission use) and must leave the governor's kernel-reclaimable floor
-  standing; both refusals are the typed 503 `model_load_deferred`.
-- Speculative decode (a drafter or native MTP) on exact-tier models
-  (DeepSeek V4) never retired finished rows into the prefix cache: the
-  batch loop dropped the request's retirement context at entry, exact
-  stores were skipped in any batch, and the spec path's buffered
-  sliding-window layers were declined by the snapshot. Rows now retire
-  at any width (padding-trimmed row snapshots, the store the stock batch
-  path already takes) and buffered rotating layers snapshot as their
-  canonical window.
-- A gate-deferred load that begins inside the handler (the room went to
-  another request between the chat pre-warm and the acquire, or a route
-  without a pre-warm) surfaced as the stock 500; it now serves the same
-  typed 503 `model_load_deferred` + `Retry-After` as the pre-warm.
-- Queue depth cap (`GMLX_QUEUE_DEPTH_CAP`): under the residency pool the
-  check read the request's engine through the pool's per-request guard,
-  which hid the batch generator's pending census, so the cap never fired
-  for non-speculative models (bursts queued without bound). The check now
-  judges the pool-wide waiting depth `/v1/metrics` and readiness report.
-- Speculative decode (a drafter or native MTP) at decode width > 1 on
-  models with sliding-window layers (DeepSeek V4): the first mid-decode
-  admission crashed every batched stream (`'BufferedRotatingKVCache'
-  object has no attribute 'extend'`, then `object of type 'int' has no
-  len()` from the V4 pooling cache). The live batch's single-row layer
-  caches are now lifted to their batch classes before the injected row
-  extends them, and injected `CacheList` members lift individually.
+- The load gate judged loads against the raw working set with no margin or
+  kernel reserve and admitted an 86.7 GB load next to a pinned 31.5 GB
+  resident (Metal OOM). Loads now respect the serve ceiling and kernel floor.
+- A load the gate defers (pinned or busy residents, or inside the handler)
+  surfaced as a 500 with a traceback; it is now a typed
+  `503 model_load_deferred` + `Retry-After`.
+- Speculative decode on exact-tier models (DeepSeek V4) never retired
+  finished rows into the prefix cache; rows now retire at any batch width.
+- Speculative decode at width > 1 on sliding-window models (DeepSeek V4)
+  crashed every batched stream on the first mid-decode admission.
+- `GMLX_QUEUE_DEPTH_CAP` never fired for non-speculative models under the
+  residency pool, so bursts queued without bound.
 
 ### Changed
 
-- `POST /unload` of the preloaded primary now succeeds: an explicit unload
-  releases the preload's lifetime hold (in-flight streams still 409).
-- The prefix cache's key salt no longer folds in a content hash of the
-  prompt's embedding matrix. gmlx wires the APC manager onto the generator
-  after construction, so its `apc_mode` stayed unset, the server skipped
-  the semantic-salt precompute, and the engine's fallback hashed the
-  embeddings per request (redundant with the token chain, and a salt no
-  out-of-band probe could reproduce). The mode is now stamped at wiring
-  time. On-disk prefix caches written before this change miss once and
-  are rewritten under the new keys.
+- `POST /unload` of the preloaded primary now succeeds; in-flight streams
+  still 409.
+- The prefix cache key salt no longer hashes the prompt's embedding matrix
+  per request. On-disk prefix caches written before this miss once and are
+  rewritten.
 
 ## [0.4.1] - 2026-08-24
 

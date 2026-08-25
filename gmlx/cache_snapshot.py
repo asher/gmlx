@@ -1968,6 +1968,35 @@ def _grid_ceil(n: int, g: int) -> int:
     return -(-int(n) // g) * g
 
 
+def row_kv_len(prompt_cache, row: int = 0) -> int | None:
+    """Tokens of KV the cache holds for ``row``: the max per-row offset
+    across layers (batch classes carry one offset per row; single-row
+    classes a scalar; CacheList members are read through). None when no
+    layer reports one. Cheap - no clone - so a store can pick its key
+    from what the row actually covers."""
+    best = None
+    for c in prompt_cache or ():
+        members = getattr(c, "caches", None)
+        if isinstance(members, (tuple, list)):
+            n = row_kv_len(list(members), row)
+        else:
+            off = getattr(c, "offset", None)
+            if off is None:
+                continue
+            try:
+                if hasattr(off, "ndim") and off.ndim >= 1:
+                    if row >= off.shape[0]:
+                        continue
+                    n = int(off[row].item())
+                else:
+                    n = int(off)
+            except (TypeError, ValueError, AttributeError):
+                continue
+        if n is not None and (best is None or n > best):
+            best = n
+    return best
+
+
 def _cache_offset_max(prompt_cache) -> int:
     p = 0
     for c in prompt_cache or ():
