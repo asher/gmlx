@@ -168,10 +168,13 @@ def test_row_snapshot_empty_cache_list_input():
     assert row_snapshot([], 0) is None
 
 
-def test_row_snapshot_single_row_rotating_wrapped_canonical():
-    # B=1 rot caches route through _clone_single_row: exact-tier stores
-    # for rot archs outside the ckpt geometry hold the canonical window
-    # (temporal order, min(offset, W) tokens), not the untrimmed ring.
+def test_row_snapshot_single_row_rotating_wrapped_faithful():
+    # B=1 rot caches route through _clone_row_faithful: exact-tier stores
+    # are same-stream resumes (next turn of the same conversation), so
+    # the ring copies bitwise (buffer order and _idx preserved), never
+    # the canonical temporal reorder. Reordering holds the same window
+    # but permutes fp16 summation order, which MoE routing amplifies
+    # into visible logit swings on the restored arm.
     max_size = 8
     c = _rot_row(max_size, 20, 0)
     snap = row_snapshot([c], 0)
@@ -179,9 +182,10 @@ def test_row_snapshot_single_row_rotating_wrapped_canonical():
     s = snap[0]
     assert type(s) is RotatingKVCache
     assert s.offset == 20
-    assert s.keys.shape[2] == max_size
-    got = [float(s.keys[0, 0, j, 0]) for j in range(max_size)]
-    assert got == [7.0 * t for t in range(12, 20)]
+    assert s._idx == c._idx
+    assert s.keys.shape == c.keys.shape
+    assert mx.array_equal(s.keys, c.keys).item()
+    assert mx.array_equal(s.values, c.values).item()
 
 
 def test_row_snapshot_buffered_rotating_declines():

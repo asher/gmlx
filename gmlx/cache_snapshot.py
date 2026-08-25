@@ -66,14 +66,29 @@ def _buffered_types() -> tuple:
 def _clone_single_row(cache: Any) -> Any | None:
     """Deep-copy an already-single-row cache, preserving its concrete kind.
 
-    Reuses upstream's APC clone so the snapshot matches what
-    ``store_exact_cache`` would produce for the non-speculative path.
-    Rotating layers canonicalize first: min(offset, W) tokens in temporal
-    order instead of the untrimmed ring (max_size + prefill_step - 1
-    columns) -- every consumer (exact store, decode-ring slot, splice)
-    needs only the canonical form, which is the shape the lookup paths
-    already restore to.
+    Rotating layers canonicalize: min(offset, W) tokens in temporal order
+    instead of the untrimmed ring. For CROSS-REQUEST store consumers
+    (ckpt-tier chained blocks and their decode snapshots) that is the
+    required form -- the chain key is content-addressed over the canonical
+    window and a future request can never reproduce this stream's ring
+    phase. Same-stream resumes must use ``_clone_row_faithful`` instead.
     """
+    return _clone_row(cache, rot_canonical=True)
+
+
+def _clone_row_faithful(cache: Any) -> Any | None:
+    """Deep-copy a single-row cache bitwise, rotating rings included.
+
+    For SAME-STREAM consumers (exact retirement, the rung ring, drafter
+    KV sidecars): the restored state must replay bitwise against the live
+    row. The canonical rotating reorder holds the same window but permutes
+    fp16 summation order inside it, which MoE routing amplifies into
+    visible logit swings.
+    """
+    return _clone_row(cache, rot_canonical=False)
+
+
+def _clone_row(cache: Any, *, rot_canonical: bool) -> Any | None:
     from mlx_vlm import apc as _apc
     from .cache_compat import cache_types
 
@@ -81,7 +96,7 @@ def _clone_single_row(cache: Any) -> Any | None:
         _log.info("APC clone declined: BufferedRotatingKVCache carries "
                   "start_position no rotating clone preserves")
         return None
-    if isinstance(cache, cache_types("RotatingKVCache")):
+    if rot_canonical and isinstance(cache, cache_types("RotatingKVCache")):
         return _clone_rot_canonical(cache)
     eval_targets: list[Any] = []
     out = _apc._clone_cache_entry_for_apc(
@@ -131,6 +146,18 @@ def _clone_lm_twin(cache: Any, eval_targets: list[Any]) -> Any | None:
     from .cache_compat import cache_types
 
     copy = _apc._copy_mlx_array
+    if isinstance(cache, cache_types("RotatingKVCache")):
+        # Faithful ring copy for the mlx_lm twin (the faithful path only;
+        # canonical requests never reach here).
+        out = type(cache)(max_size=int(cache.max_size),
+                          keep=int(getattr(cache, "keep", 0) or 0))
+        out.offset = int(getattr(cache, "offset", 0) or 0)
+        out._idx = int(getattr(cache, "_idx", 0) or 0)
+        if cache.keys is not None and cache.values is not None:
+            out.keys = copy(cache.keys)
+            out.values = copy(cache.values)
+            eval_targets.extend([out.keys, out.values])
+        return out
     if isinstance(cache, cache_types("KVCache")):
         out = type(cache)()
         off = int(getattr(cache, "offset", 0) or 0)
@@ -185,11 +212,11 @@ def row_snapshot(prompt_cache: list[Any], row: int = 0) -> list[Any] | None:
                 # the whole stack; any other row doesn't exist.
                 if row != 0:
                     return None
-                snap = _clone_single_row(cache)
+                snap = _clone_row_faithful(cache)
         else:
             # Already single-row (B=1 without a batch wrapper); clone so the
             # stored copy is decoupled from the live decode cache.
-            snap = _clone_single_row(cache)
+            snap = _clone_row_faithful(cache)
         if snap is None or not _layer_has_content(snap):
             return None
         snaps.append(snap)
@@ -260,7 +287,7 @@ def drafter_sidecar_store(
                     "APC sidecar store skipped: head offset %d < %d",
                     offset, store_len)
                 return False
-            clone = _clone_single_row(c)
+            clone = _clone_row_faithful(c)
             if clone is None:
                 return False
             clone.trim(offset - store_len)
@@ -323,7 +350,7 @@ def drafter_sidecar_lookup(
             if entry is not None:
                 idx.move_to_end(key)
         if entry is not None:
-            return [_clone_single_row(c) for c in entry]
+            return [_clone_row_faithful(c) for c in entry]
         disk = getattr(manager, "disk", None)
         if disk is None:
             return None
@@ -351,7 +378,7 @@ def drafter_sidecar_lookup(
             idx.move_to_end(key)
             while len(idx) > _SIDECAR_ENTRIES:
                 idx.popitem(last=False)
-        return [_clone_single_row(c) for c in caches]
+        return [_clone_row_faithful(c) for c in caches]
     except Exception:
         _log.warning("APC sidecar lookup failed; continuing", exc_info=True)
         return None
