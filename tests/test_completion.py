@@ -123,6 +123,15 @@ def test_model_positional_lists_config_ids_and_files(tmp_path):
     assert "assistant -> qwen-fast" in helper
 
 
+def test_launch_model_flag_lists_config_ids_without_files(tmp_path):
+    cfg = _write_cfg(tmp_path)
+    lines = completion._complete(
+        ["launch", "opencode", "--config", cfg, "--model", ""])
+    vals = _vals(lines)
+    assert "::files" not in vals
+    assert "qwen-fast" in vals and "gemma-vlm" in vals and "q" in vals
+
+
 def test_model_positional_drops_off_once_model_given(tmp_path):
     cfg = _write_cfg(tmp_path)
     # A model is already in place; the next bare word is not a second model.
