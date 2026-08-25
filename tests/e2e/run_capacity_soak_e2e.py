@@ -5,12 +5,15 @@ number of cycles, with the live-request metrics checked for invariants on
 every tick.
 
 Per client, a randomized mix of: cold deep-prefix prompts, exact warm
-resends, sibling prefixes, growing session chains with compaction-style
-rewrites, streams aborted mid-prefill / mid-decode, tiny budgets, sampler
-variety, thinking flips, dry-run estimates (``/v1/estimate`` and
-``dry_run`` on chat, including a prompt far past the context), capacity
-plan and readiness probes, same-client bursts past the decode width (queue
-cap 503s), and - on a multi-model config - requests for a model that is
+resends, sibling prefixes, growing session chains (answers appended
+verbatim, compaction-style rewrites), streams aborted mid-prefill /
+mid-decode, tiny budgets, sampler variety, thinking flips, dry-run
+estimates (``/v1/estimate`` and ``dry_run`` on chat, including a prompt
+far past the context and the continuation of an answered session, which
+exact-tier models should report warm), capacity plan and readiness
+probes, staggered same-client bursts past the queue cap (typed 503s; a
+soak whose bursts never draw one is a finding), and - on a multi-model
+config - requests for a model that is
 not resident (load-by-request, typed 503 while the resident one is busy,
 LRU switching once idle). A controller samples ``/v1/metrics`` every
 second and, once per cycle, fires the operator actions: scoped and
@@ -20,7 +23,8 @@ render.
 Pass criterion is mechanical: every response is either a success or one
 of the contract's typed refusals (queue-cap 503 + Retry-After, 503
 ``model_load_deferred``, a governor shed), every stream parses, the
-metrics invariants hold on every sample, the server log carries no
+metrics invariants hold on every sample (including no stale waiting
+census at idle), the server log carries no
 exception outside the shed / client-abort classes, and the process
 survives. Sheds are tallied, not failed: they are the governor's verdict
 on the box, reported so the operator can judge the configuration.
@@ -81,6 +85,7 @@ class Stats:
         self.walls: list = []
         self.samples = 0
         self.invariant_failures: list = []
+        self.ghost_streak = 0
 
     def count(self, key, d=None):
         with self.lock:
@@ -209,7 +214,8 @@ def worker(wid, args, base, ids, prefixes, stop_at, stats, journal, rng, shared)
         i += 1
         weights = {"cold": 12, "warm": 8, "sibling": 8, "session": 12, "stream": 12,
                    "abort": 12, "tiny": 4, "sampled": 6, "kwargs": 4, "estimate": 8,
-                   "estimate_long": 3, "plan": 4, "ready": 4, "burst": 5}
+                   "estimate_long": 3, "estimate_session": 4, "plan": 4, "ready": 4,
+                   "burst": 5}
         if multi:
             weights["cross"] = 8
         action = rng.choices(list(weights), weights=list(weights.values()))[0]
@@ -225,6 +231,14 @@ def worker(wid, args, base, ids, prefixes, stop_at, stats, journal, rng, shared)
         sys_msg = {"role": "system", "content": "You are the maintenance log assistant."}
         body = {"model": mid, "temperature": 0.0, "max_tokens": rng.choice([48, 96, 192, 384])}
         stream, abort_after = False, None
+        sess = None                      # the session list a 200 answer extends
+        if action == "estimate_session":
+            long_sessions = [x for x in sessions if len(x) >= 3]
+            if long_sessions:
+                sess = rng.choice(long_sessions)
+            else:
+                action = "estimate"      # no answered session yet
+                stats.count("estimate_session_fallback", stats.typed)
         rec = {"wid": wid, "i": i, "action": action, "model": mid, "t": round(time.time(), 1)}
         t0 = time.monotonic()
 
@@ -258,11 +272,17 @@ def worker(wid, args, base, ids, prefixes, stop_at, stats, journal, rng, shared)
             body["messages"] = [sys_msg, {"role": "user",
                                           "content": prefix + f"Sibling {rng.randrange(1000)}. " + q}]
         elif action == "session":
+            # a growing chat: every answered turn is appended verbatim, so
+            # the next turn is a continuation of a retired row (the shape
+            # the exact tier serves); occasional compaction rewrites the
+            # middle the way an agent harness does
             if sessions and (len(sessions) >= 3 or rng.random() < 0.7):
                 s = rng.choice(sessions)
                 if len(s) > 12 and rng.random() < 0.3:
                     del s[2:len(s) - 2]
                     s.insert(2, {"role": "assistant", "content": "Summary: readings nominal."})
+                if s[-1].get("role") == "user":
+                    s.pop()              # last turn got no answer; replace it
                 s.append({"role": "user", "content": q})
                 body["messages"] = list(s)
             else:
@@ -270,9 +290,14 @@ def worker(wid, args, base, ids, prefixes, stop_at, stats, journal, rng, shared)
                 sessions.append(s)
                 body["messages"] = list(s)
                 sessions[:] = sessions[-4:]
-        elif action in ("estimate", "estimate_long"):
+            sess = s
+        elif action in ("estimate", "estimate_long", "estimate_session"):
             if action == "estimate_long":
                 body["messages"] = [sys_msg, {"role": "user", "content": (prefix + "\n") * 40 + q}]
+            elif action == "estimate_session":
+                # continuation of an answered session: exact-tier models
+                # (retired prompt+answer rows) should report a warm prefix
+                body["messages"] = list(sess) + [{"role": "user", "content": q}]
             else:
                 body["messages"] = [sys_msg, {"role": "user", "content": prefix + q}]
             if rng.random() < 0.5:
@@ -307,6 +332,9 @@ def worker(wid, args, base, ids, prefixes, stop_at, stats, journal, rng, shared)
                 rec["prompt_tokens"] = payload.get("prompt_tokens")
                 rec["warm"] = payload.get("warm_tokens")
                 rec["tier"] = payload.get("cache_tier")
+                if action == "estimate_session":
+                    stats.count("estimate_session_warm" if rec["warm"] else
+                                "estimate_session_cold", stats.typed)
             else:
                 stats.finding({**rec, "payload": str(payload)[:300]})
             journal.write(rec)
@@ -360,10 +388,12 @@ def worker(wid, args, base, ids, prefixes, stop_at, stats, journal, rng, shared)
             ts = [threading.Thread(target=one, args=(j,), daemon=True) for j in range(k)]
             for t in ts:
                 t.start()
+                time.sleep(0.2)          # let the queue build: the cap is judged at arrival
             for t in ts:
                 t.join(timeout=args.request_timeout + 30)
             rec.update(wall=round(time.monotonic() - t0, 1), n=len(outs),
-                       statuses=[o[0] for o in outs])
+                       statuses=[o[0] for o in outs],
+                       n503=sum(1 for o in outs if o[0] == 503))
             for st_, ev_, term_, err_ in outs:
                 kind = classify(st_, term_ if st_ != 200 else None)
                 if st_ == 200:
@@ -416,6 +446,10 @@ def worker(wid, args, base, ids, prefixes, stop_at, stats, journal, rng, shared)
                                      or {}).get("cached_tokens")
                     if not content and action != "tiny" and rec.get("finish") != "length":
                         rec["empty"] = True
+                    if rec.get("cached"):
+                        stats.count(f"{action}:cached", stats.typed)
+                    if sess is not None and content:
+                        sess.append({"role": "assistant", "content": content})
                 except Exception:
                     stats.finding({**rec, "note": "response shape", "payload": str(payload)[:200]})
             journal.write(rec)
@@ -462,6 +496,15 @@ def check_sample(s: dict, ids: list, width: int, stats: Stats) -> None:
         bad.append(f"resident in_flight {res_if} != concurrency.in_flight {conc['in_flight']}")
     if isinstance(conc.get("waiting"), int) and conc["waiting"] < 0:
         bad.append("negative waiting")
+    # a waiting census with no live rows and nothing in flight is a stale
+    # count (it makes readiness 503 and, with the cap, rejects at idle)
+    if isinstance(conc.get("waiting"), int) and conc["waiting"] > 0 \
+            and not rows and conc.get("in_flight") == 0:
+        stats.ghost_streak += 1
+        if stats.ghost_streak == 3:
+            bad.append(f"waiting {conc['waiting']} with no rows and in_flight 0 for 3 samples")
+    else:
+        stats.ghost_streak = 0
     rates = s.get("rates") or {}
     if not {"decode_tok_s", "decode_streams"} <= set(rates):
         bad.append("rates missing")
@@ -681,6 +724,9 @@ def main() -> int:
         if srv.proc.poll() is not None:
             stats.finding({"server_died": srv.proc.returncode})
 
+    if stats.actions.get("burst", 0) >= 3 and not stats.typed.get("queue_cap"):
+        stats.finding({"note": "queue cap never fired",
+                       "bursts": stats.actions["burst"], "k": a.width + a.cap + 1})
     walls = sorted(stats.walls)
     report = {
         "label": label, "models": a.models, "cycles": a.cycles, "cycle_minutes": a.cycle_minutes,

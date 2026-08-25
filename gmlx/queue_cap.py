@@ -21,9 +21,12 @@ any load (the depth e2e queue-cap phase caught exactly this). A tiny
 publisher wrapper on ``BatchGenerator._next`` keeps a weakref to the
 live generator so the check can read its pending list; the live-request
 publisher (which sees the engine and its generator together on every
-tick) registers the pair, so with several resident models the check
-reads the requested model's own generator and the metrics census sums
-every engine's queue rather than the last-used one.
+tick) registers the pair, so with several resident models the check,
+the metrics census and readiness all judge the same pool-wide figure:
+every resident engine's queue summed, not the last-used one. (Handlers
+see the residency proxy's per-request guard around the engine, so the
+census unwraps it before the registry lookup; judged through the guard,
+the pending list was invisible and the cap never fired with a pool.)
 
 Knobs:
     GMLX_QUEUE_DEPTH_CAP   waiting-queue cap (default 2 x decode
@@ -165,6 +168,10 @@ def _waiting_depth(rg) -> int:
     """Requests waiting for a decode slot: the server request queue plus
     the batch generator's unadmitted prompt candidates. Both reads are
     racy by design; the cap needs magnitude, not a barrier."""
+    # Handlers see the residency proxy's per-request _GenerationGuard,
+    # not the entry's ResponseGenerator; the engine registry is keyed by
+    # the real object, so unwrap before the identity lookup.
+    rg = getattr(rg, "_rg", rg)
     depth = 0
     qsize = getattr(getattr(rg, "requests", None), "qsize", None)
     if callable(qsize):
@@ -206,10 +213,10 @@ def check_queue_depth():
         if cap <= 0:
             return None
         runtime = importlib.import_module("mlx_vlm.server.runtime").runtime
-        rg = getattr(runtime, "response_generator", None)
-        if rg is None:
-            return None
-        depth = _waiting_depth(rg)
+        # Pool-wide census (every resident engine), the same figure
+        # /v1/metrics and readiness report; without a pool, the runtime's
+        # engine. No engine at all: nothing can be waiting.
+        depth = _waiting_depth_all()
         if depth < cap:
             return None
         retry = _retry_after_s(getattr(runtime, "metrics", None), depth)

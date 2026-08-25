@@ -1528,14 +1528,55 @@ def _lift_injected_cache(cache, other):
     (gemma drafter-MTP c>1, 2026-07-23 bench). Lift via the class's own
     merge when either batch-only attr is absent; merge temporal-orders
     rotated content, so mid-rotation injected streams stay correct."""
+    members = getattr(cache, "caches", None)
+    others = getattr(other, "caches", None)
+    if isinstance(members, (tuple, list)) and isinstance(others, (tuple, list)):
+        # CacheList (DeepSeek V4: MLA + sliding-window per layer): the
+        # list's extend zips members, so each member lifts on its own.
+        other.caches = tuple(_lift_injected_cache(c, o)
+                             for c, o in zip(members, others))
+        return other
     if ((hasattr(cache, "_idx") and not hasattr(other, "_idx"))
-            or (hasattr(cache, "rotated") and not hasattr(other, "rotated"))):
+            or (hasattr(cache, "rotated") and not hasattr(other, "rotated"))
+            # classes without the batch API at all (DeepSeek V4's
+            # PoolingCache: no _idx, no rotated; its batch class
+            # extend() read len() of a scalar remainder)
+            or (_batch_capable(cache) and not _batch_capable(other)
+                and callable(getattr(type(other), "merge", None)))):
         lifted = type(other).merge([other])
         stamp = getattr(other, "_gmlx_cascade", None)
         if stamp is not None:
             lifted._gmlx_cascade = stamp
         return lifted
     return other
+
+
+def _batch_capable(cache) -> bool:
+    return (callable(getattr(cache, "extend", None))
+            and callable(getattr(cache, "filter", None)))
+
+
+def _lift_live_cache(cache):
+    """The live batch's own layer caches must be batch classes before an
+    injection extends them. A batch formed from a single row keeps the
+    prefill's single-sequence classes, and the spec swap-in
+    BufferedRotatingKVCache (SWA layers) has no extend at all: DeepSeek V4
+    with a drafter or MTP crashed every batched stream on the first
+    mid-decode admission ('BufferedRotatingKVCache' object has no
+    attribute 'extend', 2026-08-25 soak). Lift through the class's own
+    merge, as _lift_injected_cache does for the incoming side; CacheList
+    members lift individually so the list object survives."""
+    members = getattr(cache, "caches", None)
+    if isinstance(members, (tuple, list)):
+        if not all(_batch_capable(m) for m in members):
+            cache.caches = tuple(_lift_live_cache(m) for m in members)
+        return cache
+    if _batch_capable(cache) or not callable(getattr(type(cache), "merge", None)):
+        return cache
+    lifted = type(cache).merge([cache])
+    from .cascade_sdpa import carry_stamp
+    carry_stamp(cache, lifted)
+    return lifted
 
 
 _width_cap_memo: tuple[str, int | None] = ("", None)
@@ -1941,6 +1982,9 @@ def _owned_decode_rounds_batch(
             for inj in gen_inj:
                 B_new = len(inj["uids"])
                 for i, cache in enumerate(prompt_cache):
+                    lifted = _lift_live_cache(cache)
+                    if lifted is not cache:
+                        prompt_cache[i] = cache = lifted
                     extend_fn = getattr(cache, "extend", None)
                     if callable(extend_fn):
                         other = _lift_injected_cache(

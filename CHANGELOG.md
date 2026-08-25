@@ -45,6 +45,21 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `contextWindow` / `maxTokens` instead of leaving the 128k / 16k
   defaults.
 
+### Fixed
+
+- Queue depth cap (`GMLX_QUEUE_DEPTH_CAP`): under the residency pool the
+  check read the request's engine through the pool's per-request guard,
+  which hid the batch generator's pending census, so the cap never fired
+  for non-speculative models (bursts queued without bound). The check now
+  judges the pool-wide waiting depth `/v1/metrics` and readiness report.
+- Speculative decode (a drafter or native MTP) at decode width > 1 on
+  models with sliding-window layers (DeepSeek V4): the first mid-decode
+  admission crashed every batched stream (`'BufferedRotatingKVCache'
+  object has no attribute 'extend'`, then `object of type 'int' has no
+  len()` from the V4 pooling cache). The live batch's single-row layer
+  caches are now lifted to their batch classes before the injected row
+  extends them, and injected `CacheList` members lift individually.
+
 ### Changed
 
 - `POST /unload` of the preloaded primary now succeeds: an explicit unload

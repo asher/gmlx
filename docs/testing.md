@@ -120,11 +120,15 @@ switch in both directions once idle, with `/v1/estimate` and
 
 `tests/e2e/run_capacity_soak_e2e.py --models ID=PATH[:spec|:draft=PATH]...
 --cycles N --cycle-minutes M --clients K --out DIR`: seeded chaos for N
-cycles against one server - cold / warm / sibling / session prompts,
-aborted streams, tiny budgets, sampler and thinking variety, dry-run
-estimates (including past-context prompts), plan and readiness probes,
-bursts past the queue cap, cross-model requests on multi-model configs -
-with `/v1/metrics` sampled every second and checked for invariants, and
+cycles against one server - cold / warm / sibling prompts, growing
+sessions (answers appended verbatim, compaction rewrites), aborted
+streams, tiny budgets, sampler and thinking variety, dry-run estimates
+(including past-context prompts and answered-session continuations,
+which exact-tier models should report warm), plan and readiness probes,
+staggered bursts past the queue cap (a run whose bursts never draw a
+typed 503 is a finding), cross-model requests on multi-model configs -
+with `/v1/metrics` sampled every second and checked for invariants
+(including no stale waiting census at idle), and
 operator ops (cache resets, idle unloads, a Prometheus render) fired
 during load. Typed refusals and governor sheds are tallied; anything
 else non-200, any metrics invariant break, and any unexpected server-log

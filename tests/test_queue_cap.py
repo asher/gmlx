@@ -243,3 +243,50 @@ def test_waiting_depth_all_sums_every_resident_engine():
         pkg._kq_residency_pool = saved_pool
         qc._ENGINES.clear()
         qc._ENGINES.update(saved)
+
+
+def test_depth_unwraps_the_residency_guard():
+    """Handlers see runtime.response_generator as a _GenerationGuard; the
+    engine registry is keyed by the real object, so the guard must not
+    hide the generator's pending list."""
+    from gmlx.residency import _GenerationGuard
+    saved = dict(qc._ENGINES)
+    qc._ENGINES.clear()
+    try:
+        a, ga = _Rg(qsize=1), _Gen(pending=3)
+        qc.note_engine(a, ga)
+        assert qc._waiting_depth(_GenerationGuard(a, None)) == 4
+    finally:
+        qc._ENGINES.clear()
+        qc._ENGINES.update(saved)
+
+
+def test_check_judges_the_pool_census_through_the_guard(monkeypatch):
+    """With a residency pool the check sums every resident engine (the
+    figure /v1/metrics and readiness report) rather than probing the
+    proxied runtime engine, which read 0 pending under load."""
+    from gmlx.residency import _GenerationGuard
+    pkg = importlib.import_module("mlx_vlm.server")
+    saved_pool = getattr(pkg, "_kq_residency_pool", None)
+    saved = dict(qc._ENGINES)
+    qc._ENGINES.clear()
+    monkeypatch.setenv("GMLX_QUEUE_DEPTH_CAP", "4")
+    try:
+        a, ga = _Rg(qsize=1), _Gen(pending=3)
+        qc.note_engine(a, ga)
+        monkeypatch.setattr(_RUNTIME, "response_generator",
+                            _GenerationGuard(a, None), raising=False)
+        monkeypatch.setattr(_RUNTIME, "metrics", _metrics(), raising=False)
+        pkg._kq_residency_pool = SimpleNamespace(
+            response_generators=lambda: [("/a", a)],
+            stats=lambda: {"resident": []})
+        resp = qc.check_queue_depth()
+        assert resp is not None and resp.status_code == 503
+        # nothing resident: nothing waiting, admit (a load may follow)
+        pkg._kq_residency_pool = SimpleNamespace(
+            response_generators=lambda: [], stats=lambda: {"resident": []})
+        assert qc.check_queue_depth() is None
+    finally:
+        pkg._kq_residency_pool = saved_pool
+        qc._ENGINES.clear()
+        qc._ENGINES.update(saved)
