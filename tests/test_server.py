@@ -75,6 +75,38 @@ def test_single_model_cfg_chat_template_rides_overrides(tmp_path):
     assert resolve_model(mid, cfg).chat_template == "/tmpl/x.jinja"
 
 
+def test_single_model_cfg_thinking_flags_ride_overrides(tmp_path):
+    """--thinking / --thinking-budget land on the same override slots a config
+    sets (`thinking:` and sampling `thinking_budget:`) and resolve onto the
+    ResolvedModel; 0 is a real budget, not "unset"."""
+    from gmlx.config import resolve_model
+    g = tmp_path / "Qwen3-0.6B-Q4_K_M.gguf"
+    g.write_text("x")
+    cfg = srv._single_model_cfg(_ns(model=str(g), thinking="off", thinking_budget=0))
+    (mid, m), = cfg.models.items()
+    assert m.overrides == {"thinking": "off", "sampling": {"thinking_budget": 0}}
+    rm = resolve_model(mid, cfg)
+    assert rm.thinking == "off"
+    assert rm.sampling["thinking_budget"] == 0
+    cfg = srv._single_model_cfg(_ns(model=str(g), thinking_budget=512))
+    (mid, m), = cfg.models.items()
+    assert m.overrides == {"sampling": {"thinking_budget": 512}}
+    assert resolve_model(mid, cfg).thinking is None
+
+
+def test_bg_serve_args_forwards_thinking_flags():
+    """--thinking / --thinking-budget must survive the background re-exec."""
+    import argparse
+    ap = argparse.ArgumentParser()
+    srv._add_serve_args(ap)
+    a = ap.parse_args(["m.gguf", "--thinking", "off", "--thinking-budget", "0"])
+    out = srv._bg_serve_args(a, None)
+    assert out[out.index("--thinking") + 1] == "off"
+    assert out[out.index("--thinking-budget") + 1] == "0"
+    bare = srv._bg_serve_args(ap.parse_args(["m.gguf"]), None)
+    assert "--thinking" not in bare and "--thinking-budget" not in bare
+
+
 def test_single_model_cfg_no_chat_template_has_empty_overrides(tmp_path):
     g = tmp_path / "Qwen3-0.6B-Q4_K_M.gguf"
     g.write_text("x")

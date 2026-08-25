@@ -6,6 +6,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `gmlx serve model.gguf --thinking on|off|adaptive` and `--thinking-budget N`
+  set the reasoning switch and thinking-token cap for a single positional
+  model without a config file (the same `thinking:` / sampling
+  `thinking_budget:` keys a config sets).
+
 ## [0.4.1] - 2026-08-24
 
 ### Fixed
