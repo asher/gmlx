@@ -73,49 +73,23 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- Prompt-cache retirement on hybrid models predicted the next turn with
-  reasoning fields echoed back, so keep-mode chat templates (deepseek4)
-  predicted a full replay no client sends and stored a dead chain; the
-  prediction now echoes content only, unless the request's
-  `preserve_thinking` template kwarg declares the keep-reasoning protocol.
+- Hybrid prompt-cache retirement predicted the next turn with reasoning
+  echoed back and stored a dead chain on keep-mode templates (deepseek4);
+  it now echoes content only unless `preserve_thinking` is set.
 - Exact-tier prompt-cache hits under serve `kv_bits` crashed the batch
-  update path (a float row joined a quantized batch); the warm merge now
-  re-quantizes the stored row to the live KV policy.
-- Same-stream prompt-cache snapshots of rotating layers (exact retirement,
-  drafter KV sidecars) were stored in canonical order, which permutes fp16
-  summation order and shifted logits on MoE models on the resumed turn;
-  they now copy the ring bitwise.
-- Shell completion offered nothing for `gmlx launch <harness> --model`;
-  it now lists the config's model ids and aliases.
-- Served and VLM-local models stopped thinking by default on mlx-vlm 0.6.15,
-  which injects `enable_thinking=false` into every render where the kwarg is
-  absent; absent now means the template's own default again.
-- Text-only served models build mlx-vlm cache classes again, keeping prompt
-  caching engaged (the gmlx.cache crash fix built mlx-lm classes the APC
-  engine's checks ignore).
-- serve: evicting a streamed MoE model left its weights resident, so every
-  later load deferred with a negative free working set until restart.
-- Plain text models (qwen3, llama) failed every request with a missing
-  gmlx.cache import.
-- The memory governor could read green while the box was out of free
-  pages: it priced only MLX's own counters, and MLX's buffer cache reads
-  as free inside the process while the kernel counts it as wired. A
-  128 GB box froze and panicked under a long-context batch with the
-  governor idle. It now samples the kernel's reclaimable pages every
-  tick and goes red below a floor (`GMLX_GOV_KERNEL_FLOOR_GB`, default
-  8): caches evicted, buffer cache cleared, largest request failed with
-  the numbers if that did not clear it. Prefix-cache block stores, which
-  run uninterrupted between ticks, check the same floor per block and
-  stop storing below it.
-- The governor's ceiling was 95% of Metal's recommended working set,
-  which on a 128 GB box left the kernel and every other process 14 GB.
-  It is now the lower of that and physical RAM minus a reserve
-  (`GMLX_GOV_RESERVE_GB`, default max(8, 10% of RAM)); admission and the
-  capacity table price against the same ceiling.
-- The MLX buffer cache is now always bounded (4-12 GiB from working-set
-  slack) instead of only when a near-RAM-size model is configured; MLX's
-  default lets it grow to the memory limit, and it held 27-48 GB of wired
-  freed buffers on an 8B model.
+  update path; the warm merge now re-quantizes to the live KV policy.
+- Same-stream snapshots of rotating layers (exact retirement, drafter
+  sidecars) reordered the ring and shifted MoE logits on the resumed turn;
+  they now copy it bitwise.
+- The memory governor read green while the box ran out of free pages (MLX
+  buffer cache counted as free); a 128 GB box froze under a long-context
+  batch. It now goes red below a kernel reclaimable floor
+  (`GMLX_GOV_KERNEL_FLOOR_GB`, default 8) and block stores stop at it.
+- The governor ceiling was 95% of the Metal working set, leaving the kernel
+  14 GB on a 128 GB box; it is now capped at RAM minus a reserve
+  (`GMLX_GOV_RESERVE_GB`, default max(8, 10% of RAM)).
+- The MLX buffer cache is always bounded now (4-12 GiB); MLX's default let
+  it hold 27-48 GB of freed buffers on an 8B model.
 - Sampled speculative verify and the server's unfiltered sampler computed
   logprob math at the activation dtype; float16 rows reached categorical
   unwidened. Both now widen to float32 first (greedy paths unchanged).
