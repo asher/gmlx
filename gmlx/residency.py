@@ -172,6 +172,7 @@ class _Entry:
     ttl: float | None = None  # idle auto-unload seconds (None/0 => never)
     last_access: float = 0.0    # monotonic time of the last acquire/touch
     busy: int = 0               # in-flight refcount; busy entries are never LRU-evicted
+    retained: int = 0           # of ``busy``: process-lifetime holds (preload), not requests
 
 
 class _BusyHold:
@@ -345,6 +346,35 @@ class _RuntimeProxy:
         return getattr(self._original, name)
 
 
+def _stamp_apc_mode(rg) -> None:
+    """Set ``rg.apc_mode`` the way ``ResponseGenerator.__init__`` would have
+    had the manager existed at construction. gmlx wires the manager in
+    post-load, so without this the generator's mode stays None, the server
+    skips the semantic-salt precompute, and the engine's fallback folds a
+    content hash of the prompt's embedding matrix into every cache key: a
+    per-request hashing cost, and a salt nothing outside the engine (the
+    dry-run's warm-prefix probe) can reproduce."""
+    if getattr(rg, "apc_mode", None) is not None:
+        return
+    model = getattr(rg, "model", None)
+    if model is None:
+        return
+    mode = getattr(model, "_kq_apc_mode", None)
+    if mode is None:
+        try:
+            from mlx_vlm import apc as _apc
+            lm = getattr(model, "language_model", None) or model
+            mode = _apc.model_apc_mode(lm)
+        except Exception:
+            _log.warning("apc_mode probe skipped", exc_info=True)
+            return
+    if mode is not None:
+        try:
+            rg.apc_mode = mode
+        except Exception:
+            pass
+
+
 class _ResidencyPool:
     """Pinned + LRU pool of resident models, backed by stock load/teardown."""
 
@@ -473,6 +503,70 @@ class _ResidencyPool:
             return sorted({str(e.model_path) for e in self._entries.values()
                            if e.busy > 0})
 
+    def mark_retained(self, hold) -> None:
+        """Count ``hold`` (a ``_BusyHold`` the caller keeps for the process
+        lifetime, e.g. the primary preload) as retained, so ``stats()`` can
+        report ``in_flight`` = busy minus retained: the streams actually
+        generating, which is what a dispatcher or the menu bar wants."""
+        entry = getattr(hold, "_entry", None)
+        if entry is None:
+            return
+        with self._lock:
+            entry.retained += 1
+
+    def unmark_retained(self, hold) -> None:
+        """Undo :meth:`mark_retained` before the hold is released (an
+        explicit unload drops the preload's lifetime hold)."""
+        entry = getattr(hold, "_entry", None)
+        if entry is None:
+            return
+        with self._lock:
+            entry.retained = max(0, entry.retained - 1)
+
+    def resident_entry(self, model_path):
+        """The resident entry backing ``model_path`` (the one carrying the
+        resident adapter when several profiles are loaded), or None. Never
+        loads: a dry-run must not pull a model in."""
+        with self._lock:
+            hits = [e for e in self._entries.values()
+                    if str(e.model_path) == str(model_path)]
+        if not hits:
+            return None
+        return max(hits, key=lambda e: e.last_access)
+
+    def model_path_for_generator(self, rg) -> str | None:
+        """The resident model path whose ``response_generator`` is ``rg``
+        (identity match), or None. The live-request view labels engine
+        rows with a model id this way; the engine itself has no notion
+        of which configured id it serves."""
+        with self._lock:
+            for e in self._entries.values():
+                if e.response_generator is rg:
+                    return str(e.model_path)
+        return None
+
+    def apc_managers(self, model_path=None) -> list:
+        """``(model_path, apc_manager)`` for every resident entry that has
+        one, or just the entries at ``model_path``. The per-model cache
+        reset walks this; ``runtime.apc_manager`` alone resolves to the
+        current request context's entry, which is one model at most."""
+        with self._lock:
+            return [(str(e.model_path), e.apc_manager)
+                    for e in self._entries.values()
+                    if e.apc_manager is not None
+                    and (model_path is None
+                         or str(e.model_path) == str(model_path))]
+
+    def response_generators(self) -> list:
+        """``(model_path, response_generator)`` for every resident entry
+        that has an engine. The waiting census sums every engine's
+        queue; ``runtime.response_generator`` outside a request context
+        resolves to the last-used entry only."""
+        with self._lock:
+            return [(str(e.model_path), e.response_generator)
+                    for e in self._entries.values()
+                    if e.response_generator is not None]
+
     def evict(self, model_path) -> bool:
         """Tear down every resident entry backing ``model_path`` (a GGUF abspath),
         across all of its load profiles. Returns whether anything was evicted;
@@ -544,6 +638,8 @@ class _ResidencyPool:
                         "kept": e.model_path in self._keep_paths,
                         "seq": e.seq,
                         "busy": e.busy,
+                        "retained": e.retained,
+                        "in_flight": max(0, e.busy - e.retained),
                         "footprint_bytes": e.footprint,
                         "ttl_s": e.ttl,
                         "idle_s": max(0.0, now - e.last_access),
@@ -718,6 +814,7 @@ class _ResidencyPool:
                 rg = scratch.response_generator
                 if rg is not None:
                     rg.apc_manager = manager
+                    _stamp_apc_mode(rg)
                 try:
                     manager.autosize(getattr(rg, "model", None))
                 except Exception:

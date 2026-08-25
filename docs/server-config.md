@@ -1290,15 +1290,17 @@ is enabled. These are the config-server overrides and additions:
 
 | Endpoint | Behaviour |
 |----------|-----------|
-| `GET /v1/models`, `GET /models` | Configured/discovered ids + alias presets, each with `resident` / `pinned` / `speculative` / `vlm` / `profile` / `default` markers. Never the HF cache. |
-| `GET /health` | Liveness only: `{"status": "healthy"}`, no model/adapter paths, no context fields. The one route api-key auth exempts, so it deliberately leaks nothing. |
-| `GET /v1/metrics` | The stock runtime snapshot (under its `server` key) enriched with `resident_models[]` (per-entry ids, pinned, `idle_s`, `ttl_s`, footprint), alongside the context limits / APC detail. Authed like every other endpoint; what `gmlx ps` reads. |
+| `GET /v1/models`, `GET /models` | Configured/discovered ids + alias presets, each with `resident` / `pinned` / `speculative` / `vlm` / `profile` / `default` markers, plus `context_length` (the GGUF's trained context) and `max_context_at_width_1` (what the capacity table says fits at width 1; only for the model the table was derived from, else `null`). `gmlx launch pi` writes the smaller of the two as pi's `contextWindow`. Never the HF cache. |
+| `GET /health` | Liveness only: `{"status": "healthy", "pid": N}`, no model/adapter paths, no context fields. The one route api-key auth exempts, so it deliberately leaks nothing. `?ready=1` adds a readiness verdict: 200 with `"ready": true`, or 503 with `"ready": false`, a one-word `reason` (`pressure` when the governor is orange/red, `queue` when requests are waiting for a slot, `busy` when every resident model's engine is at its decode width) and a `Retry-After` header from the same drain estimate a queue-cap 503 carries. Still keyless; see [Capacity and live-request metrics](#capacity-and-live-request-metrics). |
+| `GET /v1/metrics`, `GET /metrics` | The stock runtime snapshot (under its `server` key) enriched with `resident_models[]`, the memory governor, the capacity table, `concurrency`, `queue`, and the live `requests[]` view; see [Capacity and live-request metrics](#capacity-and-live-request-metrics). Authed like every other endpoint; what `gmlx ps` reads. `?format=prometheus` (or `Accept: text/plain` / an OpenMetrics `Accept`) renders the same snapshot as Prometheus text (`gmlx_*` gauges and `*_total` counters; lists of models become `model`-labelled series, the capacity tables `width`/`depth`-labelled ones, `governor.band` a `band`-labelled indicator plus `gmlx_governor_band_level` 0-3). |
 | `POST /v1/completions` | Classic OpenAI text completions, no chat template applied. Scope: a single string `prompt`, `n=1`; supports `max_tokens`, `temperature`, `top_p`, `seed`, `stop`, `stream` (SSE with a final `[DONE]`), plus `profile` and the other shared sampling extras. List / token-array prompts, `n > 1`, `echo`, `suffix`, and `best_of > 1` are rejected with a 400. |
 | `POST /v1/messages/count_tokens` | (stock) Anthropic-style token counting: same body shape as `/v1/messages`, returns `{"input_tokens": N}` after applying the chat template. |
 | `GET /v1/cache/stats` | Automatic Prefix Cache statistics, or `{"enabled": false}` when APC is off. On checkpoint-tier models (hybrid/SWA archs) the snapshot carries the `ckpt_*` counter family beside the stock fields; see [Checkpoint-tier counters](#checkpoint-tier-counters). |
-| `POST /v1/cache/reset` | (stock) clears the Automatic Prefix Cache. |
+| `POST /v1/cache/reset` | Clears the Automatic Prefix Cache. With no body, every resident model's (the stock handler reached only the request context's manager); `{"model": "<id>"}` clears one resident model's. Returns `{"enabled", "status": "cleared" \| "no_cache", "models": [ids cleared]}`; 404 `unknown_model` / `not_resident` for a bad id. The disk tier's files are untouched, as before. |
 | `POST /v1/images/generations`, `POST /v1/images/edits` | (stock mlx-vlm routes) not usable with GGUF text models - they require an MLX image-generation checkpoint, which gmlx does not serve; a request against a configured GGUF fails with an error. |
-| `POST /unload` | `{"model": "<id>"}` evicts just that resident entry (also clearing any keep mark); an empty body clears the whole pool. |
+| `POST /unload` | `{"model": "<id>"}` evicts just that resident entry (also clearing any keep mark); an empty body clears the whole pool. An explicit unload outranks the preload's lifetime hold (that hold guards against implicit eviction, not the operator), so the preloaded primary unloads too; a model with in-flight streams still answers 409. A model unloaded this way and later reloaded by request has no lifetime hold - it is TTL/LRU-managed like any other until a `/v1/reload` with `preload` re-pins it. |
+| `POST /v1/estimate` | Dry-run admission: the same body as `/v1/chat/completions`, answered with the numbers instead of a generation (`prompt_tokens`, `warm_tokens`, `need_bytes`, `fits_now`, `fits_drained`, `est_ttft_s`, ...). `"dry_run": true` on `/v1/chat/completions` returns the same estimate (that form goes through the queue cap; this route does not). See [Capacity and live-request metrics](#capacity-and-live-request-metrics). |
+| `GET /v1/capacity/plan?width=W&depth=D` | The fan-out policy: can `W` streams run at `D` tokens each (`ok`, from the capacity table), and may they start now (`admit_now`, from the governor band, the waiting census and the free decode slots), with `reason`. |
 | `POST /v1/keep` | `{"model": "<id>", "warm": true}` keeps a model resident through the idle-TTL reaper (still LRU-evictable; the keep tier above), and by default background-loads it so it is hot before the first request. `gmlx launch --model <id>` fires this once the server is up, and a `gmlx talk` / menu-bar voice session holds its model this way for the session's lifetime. `{"model": "<id>", "keep": false}` releases the hold without evicting; `/unload` releases and evicts. |
 | `POST /v1/reload` | (config mode only) re-reads the config and re-registers models, keeping warm entries whose load signature is unchanged. In non-config modes it returns 200 with `{"status": "unsupported"}`. `SIGHUP` triggers the same reload; see [Reloading the config](#reloading-the-config). |
 | `POST /v1/audio/transcriptions` | (only with `server.stt:` / `--stt`) OpenAI-compatible speech-to-text; see below. |
@@ -1306,6 +1308,65 @@ is enabled. These are the config-server overrides and additions:
 | `POST /v1/audio/speech` | (only with `server.tts:` / `--tts`) OpenAI-compatible text-to-speech; see below. |
 | `POST /v1/embeddings` | (only with `server.embeddings:` / `--embeddings`) OpenAI-compatible text embeddings; see below. |
 | `POST /v1/rerank` | (only with `server.rerank:` / `--rerank`) Cohere/Jina-shaped reranking; see below. Also served at `/rerank`. |
+
+### Capacity and live-request metrics
+
+`GET /v1/metrics` carries, under `server`, everything a load balancer or a
+harness that fans out subagents needs to size its work to the server. All
+of it is read-only and cheap (the poll is on the request log's silent
+list); the keyless `GET /health?ready=1` gives the coarse yes/no without
+the key.
+
+| Section | Fields | Meaning |
+|---|---|---|
+| `concurrency` | `decode_batch`, `queue_cap`, `in_flight`, `waiting` | The effective decode width (`GMLX_DECODE_BATCH`, bounded by the capacity frontier), the waiting-queue cap, streams generating now (each resident entry's `in_flight`: its busy refcount minus the process-lifetime hold the primary preload keeps, so an idle server reads 0), and requests waiting for a slot (every resident engine's server queue plus its unadmitted prompts, summed). Each resident model decodes on its own engine with its own width, so `in_flight` is server-wide while `resident_models[].in_flight` is the per-model number to compare against `decode_batch`. |
+| `queue` | `waiting`, `cap`, `eta_s`, `rejections`, `last_reject_reason` | The waiting census again, the cap it is judged against, and the drain estimate in seconds a client would get as `Retry-After` right now (`0` with nothing waiting; the same formula: waiting x mean tokens per request / aggregate decode rate, clamped 2-60 s). |
+| `requests[]` | `id`, `uid`, `model`, `state`, `position`, `prompt_tokens`, `generated`, `max_tokens`, `elapsed_s`, `ttft_s`, `decode_tok_s`, `cache {tier, warm_tokens}`, `speculative {rounds, accepted, drafted, accept_rate}` | One row per request the serve path knows about, queued rows first in queue order. `state` is `queued` (server queue or engine-side unadmitted; `position` is the place in line), `prefill`, or `decode`. `cache.tier` is the prefix-cache hit the row got (`exact`, `block`, or gmlx's own `ckpt` / `anchor` restores; `miss`; `hit` when only the warm-token count is known) and `warm_tokens` how many prompt tokens it reused. `speculative` is the drafter's acceptance since the row started (exact at batch width 1, shared across the batch otherwise) and `null` without a drafter. Rows come from each engine's tick, refreshed at most four times a second per engine and merged across resident models (`position` is the place in that model's queue); an idle engine contributes nothing. Drafted models (`draft_gguf` / `speculative: true`) report rows like any other; their `speculative` numbers are the drafter's per-generation round tally, which is exact at batch width 1 and shared across a wider speculative batch. |
+| `governor` | `band`, counters | The memory governor's band and shed history; see the `GMLX_GOVERNOR` / `GMLX_GOV_*` rows in [cli.md](cli.md#environment-variables). |
+| `capacity` | `max_ctx` by width, `max_width_at_depth`, byte budgets | The boot capacity table (`GMLX_OVERCOMMIT=1` disables its ceilings); absent for an HF fall-through load. |
+| `rates` | `decode_tok_s`, `decode_streams`, `prefill_tok_s_recent`, `decode_tok_s_recent`, `decode_tok_s_lifetime` | The aggregate decode rate right now (the sum over the rows in `requests[]` that are decoding) and how many streams it is spread over; the mean prefill and per-stream decode rates over the last eight completed requests (what the dry-run's `est_ttft_s` is computed from); the lifetime mean decode rate. |
+
+The sections are independent: a server without a capacity table (an HF
+fall-through load) omits `capacity` and everything else still appears;
+any probe failure inside a section leaves that section's live fields
+`null` rather than failing the snapshot.
+
+**Asking before sending.** Two routes turn the same numbers into
+answers a dispatcher can act on without a refused request:
+
+- `POST /v1/estimate` (or `"dry_run": true` on `/v1/chat/completions`)
+  takes a chat-completions body and returns, for a resident model:
+  `prompt_tokens` (the rendered prompt, tokenized the way the request
+  would be), `warm_tokens` and `cache_tier` (how much of the prefix the
+  prefix cache already holds: the block chain or the exact index; which
+  server holds your prefix, and how much of it, is the routing signal
+  across machines), `need_bytes` (the prompt's KV plus the prefill
+  transient, plus `max_tokens` when the body pins one - exactly what the
+  memory preflight prices), `avail_now_bytes` / `fits_now` (against the
+  live headroom) and `avail_drained_bytes` / `fits_drained` (against the
+  working set with the batch drained: the preflight's own refusal line),
+  `context_ok` against `context_limit` (`context_limit_source` says
+  whether that is the configured `max_kv_size` or, with nothing
+  configured, the GGUF's trained context), and `est_ttft_s`
+  (queue drain plus the cold suffix at the recent prefill rate). A model
+  that is not resident answers `resident: false` with null fits - the
+  dry-run never loads a model. Requests carrying images / audio / video
+  render but are not priced (`media: true`), matching the preflight.
+- `GET /v1/capacity/plan?width=W&depth=D` evaluates the fan-out policy
+  where the numbers live: `ok` when the capacity table holds `W` streams
+  at `D` tokens each (`max_context_at_width` is read at the smallest
+  tabulated width >= `W`, so it is conservative between rows), and
+  `admit_now` when, on top of that, the governor is not orange/red,
+  nothing is waiting, and at least `W` decode slots are free (one under
+  yellow). `reason` names the first condition that fails. Without a
+  table (an HF fall-through load, or `GMLX_OVERCOMMIT=1`) `ok` is null
+  and only the timing is judged.
+
+The Prometheus rendering (`?format=prometheus`) flattens these to
+`gmlx_concurrency_in_flight`, `gmlx_queue_eta_s`,
+`gmlx_governor_band{band="green"} 1`, `gmlx_capacity_max_ctx{width="8"}`,
+`gmlx_resident_models_busy{model="<id>"}` and so on; `requests[]` is
+high-cardinality and contributes only `gmlx_requests_count`.
 
 ### Reloading the config
 

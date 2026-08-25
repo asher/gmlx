@@ -11,6 +11,7 @@ import time
 
 from fastapi import Request  # module-level so stringized annotations resolve
 
+from .. import capacity as _capacity
 from .. import server_bridge_vlm as serving
 from ._common import (
     _PATCH_FLAG,
@@ -54,6 +55,11 @@ def _models_payload() -> dict:
             "profile": profile if alias_of else rm.profile_name,
             "family": getattr(rm, "family", None),   # sampling family (profiles.py)
             "default": mid == default_id,            # aliases never == default_id
+            # The GGUF's trained context, and (for the model the capacity
+            # table was derived from) how much of it fits at width 1 - what
+            # a harness sizes its context window / compaction from.
+            "context_length": _capacity.trained_context_length(rm.path),
+            "max_context_at_width_1": _capacity.max_context_at_width_1(rm.path),
             **({"alias_of": alias_of} if alias_of else {}),
         }
 
@@ -209,6 +215,7 @@ def _resident_models_view() -> list:
             "pinned": e["pinned"],
             "kept": e.get("kept", False),
             "busy": e.get("busy", 0),
+            "in_flight": e.get("in_flight", e.get("busy", 0)),
             "footprint_bytes": e["footprint_bytes"],
             "idle_s": round(e.get("idle_s", 0.0), 1),
             "ttl_s": e.get("ttl_s"),
@@ -282,6 +289,24 @@ def install_runtime_snapshot_enrichment() -> None:
             base["queue"] = queue_cap_stats()
         except Exception:
             pass
+        try:
+            from ..queue_cap import concurrency_stats
+
+            base["concurrency"] = concurrency_stats()
+        except Exception:
+            pass
+        try:
+            from ..estimate import rates_view
+
+            base["rates"] = rates_view()
+        except Exception:
+            pass
+        try:
+            from ..live_requests import live_requests_view
+
+            base["requests"] = live_requests_view()
+        except Exception:
+            pass
         return base
 
     snapshot.__dict__[_PATCH_FLAG] = True
@@ -323,6 +348,10 @@ def install_pool_aware_unload() -> None:
                 return JSONResponse(status_code=404, content={
                     "status": "unknown_model", "model": model_id})
             from ..residency import ModelBusyError
+            # An explicit unload outranks the preload's lifetime hold (it
+            # guards against implicit eviction, not against the operator);
+            # real in-flight streams still answer 409 below.
+            _release_preload_holds(pool, path)
             try:
                 evicted = pool.evict(path)
             except ModelBusyError as e:
@@ -332,6 +361,8 @@ def install_pool_aware_unload() -> None:
             return {"status": "success" if evicted else "not_resident",
                     "unloaded": model_id if evicted else None}
 
+        if pool is not None:
+            _release_preload_holds(pool, None)
         cleared = pool.clear() if pool is not None else False
         busy = pool.busy_paths() if pool is not None else []
         if busy:
@@ -710,8 +741,34 @@ _WARM_DEFAULT = object()
 
 # Preload holds retained for the process lifetime so a background-warmed preload
 # stays eviction-proof, exactly as mlx-vlm's lifespan preload hold does (its hold
-# lives as long as the lifespan context - here, as long as this module).
+# lives as long as the lifespan context - here, as long as this module). An
+# explicit ``/unload`` releases them (see _release_preload_holds).
 _PRELOAD_HOLDS: list = []
+
+
+def _release_preload_holds(pool, path) -> int:
+    """Drop the preload's lifetime hold(s) on ``path`` (every path when
+    None) ahead of an explicit unload, so the eviction sees only real
+    in-flight streams. Returns how many holds were released. A model
+    reloaded later by request has no lifetime hold: it is TTL/LRU-managed
+    like any other until a ``/v1/reload`` with ``preload`` re-pins it."""
+    released = 0
+    for hold in list(_PRELOAD_HOLDS):
+        entry = getattr(hold, "_entry", None)
+        if entry is None:
+            _PRELOAD_HOLDS.remove(hold)
+            continue
+        if path is not None and str(entry.model_path) != str(path):
+            continue
+        try:
+            if hasattr(pool, "unmark_retained"):
+                pool.unmark_retained(hold)
+            hold.release()
+        except Exception:
+            pass
+        _PRELOAD_HOLDS.remove(hold)
+        released += 1
+    return released
 
 
 def _load_resident(model_id, adapter=_WARM_DEFAULT):
@@ -796,6 +853,9 @@ def spawn_preload_warm(model_id: str | None, extras=()):
                 hold = _load_resident(model_id)
                 if hold is not None:
                     _PRELOAD_HOLDS.append(hold)       # retain -> eviction-proof
+                    pool = _get_pool()
+                    if pool is not None and hasattr(pool, "mark_retained"):
+                        pool.mark_retained(hold)      # not an in-flight stream
             except Exception:
                 pass
         for mid in extras:

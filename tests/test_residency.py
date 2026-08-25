@@ -577,3 +577,18 @@ def test_teardown_collects_the_model_cycle_before_returning():
     acquire(pool, "B")  # evicts A; no gc.collect() here on purpose
     assert models["A"]() is None
     assert models["B"]() is not None
+
+
+def test_stats_in_flight_excludes_retained_holds():
+    # The primary preload keeps a busy hold for the process lifetime; it
+    # must not read as a generating stream.
+    from types import SimpleNamespace
+    proxy, pool, _ = make_pool(25, {"A": 10})
+    entry = pool.acquire("A", None, "auto")  # hold kept: busy 1 (the lifetime hold)
+    pool.mark_retained(SimpleNamespace(_entry=entry))
+    row = pool.stats()["resident"][0]
+    assert (row["busy"], row["retained"], row["in_flight"]) == (1, 1, 0)
+    pool.acquire("A", None, "auto")          # a real request, hold kept
+    row = pool.stats()["resident"][0]
+    assert (row["busy"], row["in_flight"]) == (2, 1)
+    pool.mark_retained(SimpleNamespace(_entry=None))   # tolerated

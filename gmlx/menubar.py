@@ -126,7 +126,7 @@ def poll(url: str, api_key: str | None = None, timeout: float = 1.5) -> dict:
         snap["resident"] = ([e for e in rm if isinstance(e, dict)]
                             if isinstance(rm, list) else [])
         snap["queue_depth"] = int(srv.get("request_queue_depth") or 0)
-        snap["in_flight"] = sum(int(e.get("busy") or 0)
+        snap["in_flight"] = sum(int(e.get("in_flight", e.get("busy")) or 0)
                                 for e in snap["resident"])
     except urllib.error.HTTPError as e:
         if e.code == 401:

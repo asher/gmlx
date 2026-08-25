@@ -190,3 +190,56 @@ def test_install_idempotent(app_routes):
     n = len(_APP.app.router.routes)
     qc.install_queue_depth_cap()
     assert len(_APP.app.router.routes) == n
+
+
+# per-engine census (several resident models)
+class _Rg:
+    def __init__(self, qsize=0):
+        self.requests = SimpleNamespace(qsize=lambda: qsize)
+
+
+class _Gen:
+    def __init__(self, pending=0):
+        self._unprocessed_sequences = [object()] * pending
+
+
+def test_note_engine_scopes_pending_to_its_engine():
+    saved = dict(qc._ENGINES)
+    qc._ENGINES.clear()
+    try:
+        a, ga = _Rg(qsize=1), _Gen(pending=3)
+        b = _Rg(qsize=2)
+        qc.note_engine(a, ga)
+        qc.note_engine(a, ga)                      # identity fast path
+        assert qc._waiting_depth(a) == 4
+        # a registered generator belongs to a; b's queue is just its qsize
+        other = _Gen(pending=9)
+        qc._GEN_REF = lambda: other
+        assert qc._waiting_depth(b) == 2
+        del ga
+        assert qc._waiting_depth(a) == 1           # dead generator: queue only
+    finally:
+        qc._ENGINES.clear()
+        qc._ENGINES.update(saved)
+        qc._GEN_REF = None
+
+
+def test_waiting_depth_all_sums_every_resident_engine():
+    pkg = importlib.import_module("mlx_vlm.server")
+    saved_pool = getattr(pkg, "_kq_residency_pool", None)
+    saved = dict(qc._ENGINES)
+    qc._ENGINES.clear()
+    try:
+        a, b = _Rg(qsize=1), _Rg(qsize=2)
+        ga = _Gen(pending=2)
+        qc.note_engine(a, ga)
+        pkg._kq_residency_pool = SimpleNamespace(
+            response_generators=lambda: [("/a", a), ("/b", b)],
+            stats=lambda: {"resident": []})
+        assert qc._waiting_depth_all() == 1 + 2 + 2
+        assert qc.concurrency_stats()["waiting"] == 5
+        assert qc.queue_cap_stats()["waiting"] == 5
+    finally:
+        pkg._kq_residency_pool = saved_pool
+        qc._ENGINES.clear()
+        qc._ENGINES.update(saved)

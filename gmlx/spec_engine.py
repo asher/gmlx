@@ -422,6 +422,10 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
             # materializes).
             held_blocks = blocks
             l1_prefix = prefix_len
+            # Observability only: the live request view reads the
+            # restored prefix from here (meta keeps prefix_len 0 so the
+            # stock machinery does not account it twice).
+            batch._kq_apc_restored = (int(prefix_len), str(tier))
             _log.info(
                 "APC L1 hit: prefix=%d suffix=%d tier=%s",
                 prefix_len, len(ids_list) - prefix_len, tier,
@@ -926,6 +930,7 @@ def _plain_ckpt_init(batch) -> None:
         for k in batch._prompt_length_aware_keys:
             batch._prompt_kwargs[k] = batch._prompt_kwargs[k][:, cp:, ...]
         restored = cp
+        batch._kq_apc_restored = (int(cp), "ckpt")     # live request view
         _log.info("APC L1 hit: prefix=%d suffix=%d tier=ckpt",
                   cp, len(ids_list) - cp)
     guard = int(meta.get("checkpoint_len") or 0)

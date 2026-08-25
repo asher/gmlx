@@ -328,3 +328,51 @@ def install_boot_table(gguf_path: str, weight_bytes: float | None,
 def clear_table() -> None:
     global _TABLE
     _TABLE = None
+
+
+# GGUF path -> (mtime, trained context) for /v1/models; a header scan per
+# configured model per listing would otherwise be 50 mmaps a call.
+_CTX_CACHE: dict = {}
+
+
+def trained_context_length(gguf_path) -> int | None:
+    """The GGUF's trained context (``<arch>.context_length``), or None
+    when the header cannot be read. Cached by path + mtime."""
+    if not gguf_path:
+        return None
+    try:
+        mtime = os.path.getmtime(gguf_path)
+    except OSError:
+        return None
+    hit = _CTX_CACHE.get(gguf_path)
+    if hit is not None and hit[0] == mtime:
+        return hit[1]
+    value = None
+    try:
+        from .headerscan import scan_gguf
+
+        kv = scan_gguf(gguf_path, include_tensors=False).kv
+        arch = kv.get("general.architecture")
+        raw = kv.get(f"{arch}.context_length") if arch else None
+        if raw is None:
+            raw = next((v for k, v in kv.items()
+                        if k.endswith(".context_length")), None)
+        if isinstance(raw, (int, float)) and int(raw) > 0:
+            value = int(raw)
+    except Exception:
+        _log.debug("context_length scan failed for %s", gguf_path, exc_info=True)
+    _CTX_CACHE[gguf_path] = (mtime, value)
+    return value
+
+
+def max_context_at_width_1(gguf_path) -> int | None:
+    """What the installed capacity table says fits at width 1 - only for
+    the model it was derived from (the boot model); None otherwise, or
+    with overcommit armed."""
+    t = _TABLE
+    if t is None or overcommit() or not gguf_path:
+        return None
+    if str(t.get("path")) != str(gguf_path):
+        return None
+    v = t["max_ctx"].get(1)
+    return int(v) if isinstance(v, int) and v > 0 else None

@@ -12,6 +12,43 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   set the reasoning switch and thinking-token cap for a single positional
   model without a config file (the same `thinking:` / sampling
   `thinking_budget:` keys a config sets).
+- `/v1/metrics`: live `requests[]` (per-request state, queue position,
+  tokens, elapsed, TTFT, decode tok/s, prefix-cache tier and warm tokens,
+  speculative acceptance). One snapshot per resident engine, merged;
+  drafted models report rows too, and gmlx's own `ckpt` / `anchor`
+  restores show as the row's cache tier with the restored token count.
+- `/v1/metrics`: `concurrency` section (`decode_batch`, `queue_cap`,
+  `in_flight`, `waiting`, the last summed over every resident engine);
+  `queue` gains `waiting`, `cap`, `eta_s`;
+  `resident_models[]` gains `in_flight` (busy minus the preload's
+  lifetime hold, so idle reads 0; the menu bar uses it).
+- `GET /health?ready=1`: keyless readiness (200, or 503 + `Retry-After`
+  with reason `pressure` / `queue` / `busy`; `busy` only once every
+  resident model's engine is at its decode width).
+- `GET /metrics?format=prometheus` (or a `text/plain` / OpenMetrics
+  `Accept`): Prometheus rendering of the metrics snapshot.
+- `POST /v1/cache/reset` takes `{"model": "<id>"}`; with no body it now
+  clears every resident model's cache, not just the request context's.
+- `POST /v1/estimate` (or `"dry_run": true` on chat completions): the
+  memory preflight as a query - prompt tokens, warm prefix tokens, KV
+  bytes needed, fits now / fits drained, first-token ETA.
+- `GET /v1/capacity/plan?width=W&depth=D`: the fan-out policy answered
+  from the capacity table, governor band and free slots.
+- `/v1/metrics`: `rates` section (aggregate live decode rate, recent
+  prefill / decode rates, lifetime decode rate).
+
+### Changed
+
+- `POST /unload` of the preloaded primary now succeeds: an explicit unload
+  releases the preload's lifetime hold (in-flight streams still 409).
+- The prefix cache's key salt no longer folds in a content hash of the
+  prompt's embedding matrix. gmlx wires the APC manager onto the generator
+  after construction, so its `apc_mode` stayed unset, the server skipped
+  the semantic-salt precompute, and the engine's fallback hashed the
+  embeddings per request (redundant with the token chain, and a salt no
+  out-of-band probe could reproduce). The mode is now stamped at wiring
+  time. On-disk prefix caches written before this change miss once and
+  are rewritten under the new keys.
 
 ## [0.4.1] - 2026-08-24
 

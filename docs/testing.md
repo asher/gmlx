@@ -102,6 +102,27 @@ python tests/e2e/run_server_e2e.py --dry-run
 python tests/e2e/run_server_e2e.py
 ```
 
+`tests/e2e/run_capacity_e2e.py` drives the capacity-facing surface against a
+live server on a tiny GGUF (decode width 2, queue cap 3, six concurrent
+streams): `/health?ready=1` flipping to 503 under load, `/v1/metrics`
+`concurrency` / `queue` / `requests[]` agreeing with the batch, the Prometheus
+rendering, the scoped `/v1/cache/reset`, the dry-run estimate and the
+capacity plan, and an explicit unload of the preloaded model. Exit 0 on
+pass; no judge.
+
+`tests/e2e/run_capacity_multi_e2e.py` is the longer, multi-model version: a
+config with three models (by default a 27B Q8 with a DFlash drafter, a 30B
+Q4 with its own drafter, and a 0.6B), warmed one by one, then rounds of
+mixed-model concurrent streams (`--rounds`, `--streams`, `--max-tokens`,
+`--width`, `--cap`) while sampling `/v1/metrics`. It asserts the
+multi-engine invariants: rows labelled with the model they run on and rows
+from several models in one sample, `resident_models[].in_flight` summing to
+`concurrency.in_flight`, decode rows per model within the width, speculative
+stats on the drafted models' rows, the warm cache tier on a repeated prompt,
+a scoped reset that leaves another model's streams alone, unload plus
+reload-by-request of a secondary model, Prometheus labels for every model,
+and a green governor throughout. About three minutes; exit 0 on pass.
+
 `tests/e2e/run_apc_disk_e2e.py` exercises disk-backed APC prefix reuse across
 server restarts the same way: real server, real GGUF, standalone.
 `tests/e2e/run_apc_depth_e2e.py` is its deep twin: multi-thousand-token
