@@ -55,7 +55,10 @@ def test_affected_gates(monkeypatch):
     monkeypatch.setenv("GMLX_EXITFIX", "0")
     assert not ef.affected()
     monkeypatch.delenv("GMLX_EXITFIX", raising=False)
+    # No fixed mlx release exists: everything from 0.32.1 on stays gated.
     FakeMx.__version__ = "0.33.0"
+    assert ef.affected()
+    FakeMx.__version__ = "0.32.0"
     assert not ef.affected()
 
 
