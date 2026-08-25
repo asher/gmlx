@@ -92,6 +92,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--streams", type=int, default=6)
+    ap.add_argument("--draft-gguf", default=None, help="draft_gguf for the config entry")
+    ap.add_argument("--speculative", action="store_true", help="speculative: true on the entry")
     ap.add_argument("--log", default="/tmp/gmlx-capacity-e2e.log")
     a = ap.parse_args()
     model_path = os.path.expanduser(a.model)
@@ -106,6 +108,10 @@ def main() -> int:
     with open(cfg_path, "w") as f:
         f.write("server:\n  cache:\n    enabled: true\nmodels:\n  tiny:\n"
                 f"    path: {model_path}\n")
+        if a.draft_gguf:
+            f.write(f"    draft_gguf: {os.path.expanduser(a.draft_gguf)}\n")
+        if a.speculative:
+            f.write("    speculative: true\n")
     with ServerProc(["--config", cfg_path], env_extra=env, log_path=a.log) as srv:
         srv.wait_ready()
         base = srv.base_url

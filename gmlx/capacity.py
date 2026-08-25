@@ -269,6 +269,13 @@ def preload_gate_bytes(footprint: int, stream, expert_bytes: int) -> int:
     return int(footprint)
 
 
+class LoadDeferred(RuntimeError):
+    """The load gate's retryable refusal: the weights would fit this box,
+    but not next to what is resident and pinned or busy right now. A
+    ``RuntimeError`` so every existing handler still sees a load failure;
+    the chat pre-warm turns it into a typed 503 with ``Retry-After``."""
+
+
 def preload_gate(weight_bytes: float, model_id: str) -> None:
     """The same headroom check a request takes, at model load and swap:
     a build whose weights cannot fit the measured free working set (the
@@ -288,7 +295,7 @@ def preload_gate(weight_bytes: float, model_id: str) -> None:
             f"{1 - margin():.2f}). GMLX_OVERCOMMIT=1 overrides; for MoE "
             f"models --stream-experts serves the experts from disk.")
     if head is not None and weight_bytes > head:
-        raise RuntimeError(
+        raise LoadDeferred(
             f"model load deferred: {model_id} weights "
             f"{weight_bytes / GB:.1f} GB exceed the measured free "
             f"working set {head / GB:.1f} GB (resident models are "

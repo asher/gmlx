@@ -37,6 +37,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   from the capacity table, governor band and free slots.
 - `/v1/metrics`: `rates` section (aggregate live decode rate, recent
   prefill / decode rates, lifetime decode rate).
+- A load the gate defers (resident models pinned or busy) answers a typed
+  `503 model_load_deferred` + `Retry-After` on the chat routes instead of
+  a generic 500 with a traceback.
+- `/v1/models`: `context_length` (trained context) and
+  `max_context_at_width_1`; `gmlx launch pi` writes them as pi's
+  `contextWindow` / `maxTokens` instead of leaving the 128k / 16k
+  defaults.
 
 ### Changed
 

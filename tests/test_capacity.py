@@ -122,8 +122,8 @@ def test_preload_gate(rig, monkeypatch):
     monkeypatch.setattr(pd, "headroom_bytes", lambda: 5.0 * GB)
 
     cap.preload_gate(4.0 * GB, "small")       # fits: no raise
-    with pytest.raises(RuntimeError, match="deferred"):
-        cap.preload_gate(10.0 * GB, "busybox")
+    with pytest.raises(cap.LoadDeferred, match="deferred"):
+        cap.preload_gate(10.0 * GB, "busybox")           # typed: the 503 seam
     with pytest.raises(RuntimeError, match="does not fit"):
         cap.preload_gate(25.0 * GB, "huge")
     monkeypatch.setenv("GMLX_OVERCOMMIT", "1")

@@ -8,6 +8,7 @@ import importlib
 
 
 from .. import server_bridge_vlm as serving
+from ..capacity import LoadDeferred
 from ._common import (
     _CHAT_PATHS,
     _wrap_post_routes,
@@ -53,6 +54,30 @@ async def _extract_request_model(values, inherit):
     return None, inherit
 
 
+def _load_deferred_response(model_id, exc):
+    """503 for a gate-deferred load: typed error body carrying the gate's
+    numbers, ``Retry-After`` from the live admission state (the readiness
+    verdict's own backoff when the server is busy, else the floor)."""
+    from fastapi.responses import JSONResponse
+
+    from ..queue_cap import _RETRY_MIN_S
+
+    retry = _RETRY_MIN_S
+    try:
+        from .capacity_routes import readiness
+
+        ready, _reason, r = readiness()
+        if not ready and r:
+            retry = max(int(r), int(_RETRY_MIN_S))
+    except Exception:
+        pass
+    return JSONResponse(status_code=503, content={
+        "error": {"message": str(exc), "type": "model_load_deferred",
+                  "code": "load_deferred", "model": model_id},
+        "retry_after_s": int(retry),
+    }, headers={"Retry-After": str(int(retry))})
+
+
 def install_chat_load_offload() -> None:
     """Wrap the model-serving routes (chat / anthropic / responses) to resolve +
     load the request's model off the event loop before the stock handler runs.
@@ -84,6 +109,12 @@ def install_chat_load_offload() -> None:
             if model_id is not None:
                 try:
                     await asyncio.to_thread(_routes._warm_and_release, model_id, adapter)
+                except LoadDeferred as exc:
+                    # The gate's retryable refusal (resident models pinned
+                    # or busy): a typed 503 + Retry-After, the shape a
+                    # dispatcher keys on, instead of the stock handler
+                    # re-hitting the gate and answering a generic 500.
+                    return _load_deferred_response(model_id, exc)
                 except Exception:
                     pass        # stock handler re-resolves + surfaces errors
             return await original(*args, **kwargs)

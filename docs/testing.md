@@ -110,6 +110,14 @@ rendering, the scoped `/v1/cache/reset`, the dry-run estimate and the
 capacity plan, and an explicit unload of the preloaded model. Exit 0 on
 pass; no judge.
 
+`tests/e2e/run_residency_switch_e2e.py --primary ID=PATH[:spec] --second
+ID=PATH[:spec|:draft=PATH]`: two models that cannot both be resident in
+one server. Asserts the load gate's typed 503 while the preloaded primary
+is held, the explicit unload that frees it, load-by-request, a burst on
+the second model with the first refused while it is busy, and the LRU
+switch in both directions once idle, with `/v1/estimate` and
+`/v1/capacity/plan` tracking the resident model throughout.
+
 `tests/e2e/run_capacity_multi_e2e.py` is the longer, multi-model version: a
 config with three models (by default a 27B Q8 with a DFlash drafter, a 30B
 Q4 with its own drafter, and a 0.6B), warmed one by one, then rounds of

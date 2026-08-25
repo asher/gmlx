@@ -2385,6 +2385,43 @@ def test_chat_load_offload_swallows_warm_error(monkeypatch):
     assert ran == ["m"]
 
 
+def test_chat_load_offload_deferred_load_is_a_typed_503(monkeypatch):
+    """The gate's retryable refusal never reaches the stock handler (which
+    would 500 with a traceback): the pre-warm answers 503 with the typed
+    body and a Retry-After."""
+    from gmlx.capacity import LoadDeferred
+    import gmlx.server_patches.capacity_routes as cr
+
+    ran = []
+
+    async def fake_handler(request, http_request):
+        ran.append(request.model)
+        return {"ok": True}
+
+    def deferred(model_id, adapter):
+        raise LoadDeferred("model load deferred: m weights 86.7 GB exceed the "
+                           "measured free working set 27.0 GB")
+
+    _register_fake_chat(fake_handler)
+    monkeypatch.setattr(sp_routes, "_warm_and_release", deferred)
+    monkeypatch.setattr(cr, "readiness", lambda: (False, "busy", 7))
+    sp.install_chat_load_offload()
+
+    res = asyncio.run(_chat_endpoint()(_FakeReq(model="m"), object()))
+    assert res.status_code == 503 and res.headers["Retry-After"] == "7"
+    import json as _json
+    body = _json.loads(res.body)
+    assert body["error"]["type"] == "model_load_deferred"
+    assert body["error"]["model"] == "m" and "86.7 GB" in body["error"]["message"]
+    assert body["retry_after_s"] == 7
+    assert ran == []                                        # stock handler never ran
+
+    # idle server: the floor
+    monkeypatch.setattr(cr, "readiness", lambda: (True, "ok", 0))
+    res = asyncio.run(_chat_endpoint()(_FakeReq(model="m"), object()))
+    assert res.status_code == 503 and int(res.headers["Retry-After"]) >= 1
+
+
 def test_chat_load_offload_skips_when_no_model(monkeypatch):
     seen = []
 
