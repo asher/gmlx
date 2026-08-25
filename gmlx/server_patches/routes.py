@@ -935,3 +935,22 @@ def install_resolver_error_handlers() -> None:
                                 headers=headers)
         return JSONResponse(status_code=exc.status_code,
                             content={"detail": detail}, headers=headers)
+
+    # A chat template that rejects the conversation (raise_exception in the
+    # template: unexpected role, misplaced system message, malformed tool
+    # call) is a client error: 400 with the template's own message instead
+    # of a 500 traceback. Scoped to the exact TemplateError class
+    # transformers' raise_exception raises; subclasses (syntax errors,
+    # undefined variables) are template bugs and stay 500, with a clean
+    # body instead of a stack.
+    import jinja2
+
+    @app.exception_handler(jinja2.exceptions.TemplateError)
+    async def _template_error(request, exc):
+        if type(exc) is jinja2.exceptions.TemplateError:
+            return _resolver_response(
+                request, 400, "invalid_request_error",
+                f"chat template rejected the conversation: {exc}")
+        return _resolver_response(
+            request, 500, "server_error",
+            f"chat template failed to render: {exc}")

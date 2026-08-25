@@ -1635,6 +1635,90 @@ def test_template_default_thinking_blocks_0615_false_injection():
     assert pu.get_chat_template is fn
 
 
+# The old-style role dispatch from issue #66: no developer alias, else-raise.
+_ROLE_RAISE_TMPL = ("{% if m.role == 'system' %}{% elif m.role == 'user' %}"
+                    "{% else %}{{ raise_exception('Unexpected message role.') }}"
+                    "{% endif %}")
+
+
+def test_normalize_developer_roles():
+    msgs = [{"role": "developer", "content": "terse"},
+            {"role": "user", "content": "hi"}, "not-a-dict"]
+    out = sp_chat._normalize_developer_roles(msgs, _ROLE_RAISE_TMPL)
+    assert out[0] == {"role": "system", "content": "terse"}
+    assert out[1]["role"] == "user" and out[2] == "not-a-dict"
+    assert msgs[0]["role"] == "developer"          # input not mutated
+    # a template that handles developer gets the messages verbatim
+    assert sp_chat._normalize_developer_roles(
+        msgs, "role == 'developer'") is msgs
+    # nothing to rewrite -> same object
+    plain = [{"role": "user", "content": "hi"}]
+    assert sp_chat._normalize_developer_roles(plain, _ROLE_RAISE_TMPL) is plain
+    assert sp_chat._normalize_developer_roles("prompt", _ROLE_RAISE_TMPL) == \
+        "prompt"
+
+
+def test_install_role_normalization_rewrites_before_render():
+    """Issue #66: a developer-role request against a template without the
+    alias must render as system instead of raising in the template."""
+    class _Recorder:
+        chat_template = _ROLE_RAISE_TMPL
+
+        def apply_chat_template(self, messages, **kwargs):
+            self.messages = messages
+            return "rendered"
+
+    sp.install_role_normalization()
+    openai = importlib.import_module("mlx_vlm.server.openai")
+    assert getattr(openai.apply_chat_template,
+                   sp_chat._ROLE_NORM_FLAG, False)
+
+    tok = _Recorder()
+    out = openai.apply_chat_template(
+        tok, {"model_type": "gguf-llama"},
+        [{"role": "developer", "content": "terse"},
+         {"role": "user", "content": "hi"}])
+    assert out == "rendered"
+    assert [m["role"] for m in tok.messages
+            if isinstance(m, dict) and "role" in m][:2] == ["system", "user"]
+
+    # idempotent
+    fn = openai.apply_chat_template
+    sp.install_role_normalization()
+    assert openai.apply_chat_template is fn
+
+
+def test_template_error_becomes_clean_400():
+    """A raise_exception from the chat template answers 400 with the
+    template's message; template bugs (subclasses) stay 500, clean body."""
+    import jinja2
+    from fastapi.testclient import TestClient
+
+    app = _APP.app
+    if not any(getattr(r, "path", None) == "/test/raise-template"
+               for r in app.router.routes):
+        @app.get("/test/raise-template")
+        async def _raise_template():
+            raise jinja2.exceptions.TemplateError("Unexpected message role.")
+
+        @app.get("/test/raise-template-bug")
+        async def _raise_template_bug():
+            raise jinja2.exceptions.TemplateSyntaxError("bad", 1)
+
+    sp.install_resolver_error_handlers()
+    client = TestClient(app, raise_server_exceptions=False)
+    r = client.get("/test/raise-template")
+    assert r.status_code == 400
+    assert r.json()["error"] == {
+        "type": "invalid_request_error",
+        "message": "chat template rejected the conversation: "
+                   "Unexpected message role."}
+    r2 = client.get("/test/raise-template-bug")
+    assert r2.status_code == 500
+    assert r2.json()["error"]["type"] == "server_error"
+    assert "chat template failed to render" in r2.json()["error"]["message"]
+
+
 # 8. OpenAI stop sequences
 def test_request_stop_sequences_normalizes():
     assert sp_chat._request_stop_sequences(types.SimpleNamespace(stop="END")) == ["END"]

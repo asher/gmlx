@@ -219,8 +219,8 @@ SEAMS: tuple[Seam, ...] = (
          "key-merge wrap)"),
     Seam("mlx_vlm.server.anthropic", "apply_chat_template",
          "server_patches._common._render_target_modules (faithful "
-         "history, retire capture, and thinking seed wrap every "
-         "captured render binding)"),
+         "history, retire capture, thinking seed, and developer-role "
+         "normalization wrap every captured render binding)"),
     Seam("mlx_vlm.server.app", "_protocol_deps",
          "server_patches._common._render_target_modules (deps captures "
          "the openai function object at namespace construction)"),

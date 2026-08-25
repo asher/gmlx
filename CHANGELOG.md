@@ -6,6 +6,16 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Requests using the OpenAI `developer` role failed with a 500 on models
+  whose chat template predates the alias ("Unexpected message role.", #66);
+  the server now rewrites `developer` to `system` before render for
+  templates that do not handle it.
+- A chat template that rejects a conversation (`raise_exception`: misplaced
+  system message, malformed tool call) now answers a clean 400 carrying the
+  template's own message instead of a 500 traceback.
+
 ## [0.4.0] - 2026-08-24
 
 ### Added

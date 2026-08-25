@@ -74,6 +74,7 @@ from .chat_behavior import (
     install_chat_template_kwargs,
     install_ignore_eos,
     install_openai_stop_sequences,
+    install_role_normalization,
     install_stream_thinking_seed,
     install_stream_timings,
     install_thinking_budget_fix,
@@ -151,6 +152,7 @@ __all__ = [
     "install_reload_route",
     "install_request_profile_capture",
     "install_request_timing_log",
+    "install_role_normalization",
     "install_rerank_route",
     "install_resolver_error_handlers",
     "install_runtime_snapshot_enrichment",
@@ -250,6 +252,9 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_apc_lone_harvest()
     install_retire_render_capture()
     install_stream_thinking_seed()
+    # Outermost render wrap: the retire capture below it must memoize the
+    # normalized messages, so the next-turn prediction renders identically.
+    install_role_normalization()
     install_keep_route()
     install_reload_route(reload_fn)
     install_audio_transcription_route(getattr(cfg, "stt", None))
