@@ -473,3 +473,45 @@ def test_clear_skips_busy_entries():
     pool.release(busy)
     assert pool.clear() is True
     assert pool.busy_paths() == []
+
+
+def test_deferred_load_inside_the_handler_is_the_typed_503(monkeypatch):
+    # The chat pre-warm answers a gate-deferred load typed; a load that only
+    # begins at the handler's own acquire (the room went to another request
+    # in between) used to fall to mlx-vlm's generic 500. pooled_get_cached_model
+    # now raises the same 503 body + Retry-After as an HTTPException, which
+    # the endpoint wrappers re-raise untouched.
+    from fastapi import FastAPI, HTTPException
+    from fastapi.testclient import TestClient
+
+    from gmlx.capacity import LoadDeferred
+    import gmlx.server_patches.capacity_routes as cr
+
+    pool, app_mod, _threads = install_with_fakes(monkeypatch, budget_bytes=GB)
+    getter = app_mod.get_cached_model
+
+    def deferred(*a, **k):
+        raise LoadDeferred("model load deferred: m weights 86.7 GB exceed the "
+                           "measured free working set -0.7 GB")
+
+    monkeypatch.setattr(pool, "acquire", deferred)
+    monkeypatch.setattr(cr, "readiness", lambda: (False, "busy", 9))
+
+    api = FastAPI()
+
+    @api.get("/probe/{model}")
+    def probe(model: str):
+        try:
+            getter(model)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        return {"ok": True}
+
+    r = TestClient(api).get("/probe/m")
+    assert r.status_code == 503
+    assert r.headers["retry-after"] == "9"
+    err = r.json()["detail"]["error"]
+    assert err["type"] == "model_load_deferred" and err["model"] == "m"
+    assert err["retry_after_s"] == 9 and "86.7 GB" in err["message"]

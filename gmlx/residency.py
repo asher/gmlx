@@ -44,6 +44,7 @@ from dataclasses import dataclass
 
 
 from . import loadlog
+from .capacity import LoadDeferred
 from .envflags import env_float
 
 _log = logging.getLogger(__name__)
@@ -972,6 +973,25 @@ def _pinned_from_env(preload_path):
     return pinned
 
 
+def _http_from_load_deferred(model_id, exc):
+    """The gate's retryable refusal (``capacity.LoadDeferred``) as the
+    ``fastapi.HTTPException`` mlx-vlm's endpoints re-raise untouched: the
+    typed 503 body the chat pre-warm serves (``model_load_deferred``) with
+    the same ``Retry-After``; the app's HTTPException handler unwraps the
+    envelope and forwards the header."""
+    import json
+
+    from fastapi import HTTPException
+
+    from .server_patches.request_flow import _load_deferred_response
+    resp = _load_deferred_response(model_id, exc)
+    body = json.loads(bytes(resp.body))
+    err = dict(body["error"])
+    err["retry_after_s"] = body.get("retry_after_s")
+    return HTTPException(status_code=503, detail={"error": err},
+                         headers={"Retry-After": resp.headers["retry-after"]})
+
+
 def _http_from_resolver_error(exc):
     """Translate a serving resolver error into the ``fastapi.HTTPException`` that
     mlx-vlm's endpoints re-raise untouched (each wraps ``get_cached_model`` in
@@ -1090,6 +1110,12 @@ def install_gguf_residency_pool(budget_bytes=None, max_models=None, pinned=None)
             entry = pool.acquire(load_path, adapter_path, model_kind,
                                  ttl=ttl, cache_key_extra=cache_key_extra, env=env,
                                  build_spec=build_spec)
+        except LoadDeferred as e:
+            # The chat pre-warm answers the common case typed; a load that
+            # begins here (another request took the room between the
+            # pre-warm and this acquire, or a route without a pre-warm)
+            # must serve the same 503, not the stock handler's 500.
+            raise _http_from_load_deferred(str(model_path), e) from e
         except FileNotFoundError as e:
             # Absolute-path entries skip the resolver's existence check by
             # contract ("you said exactly where it is"), so a deleted file

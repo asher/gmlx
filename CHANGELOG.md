@@ -47,6 +47,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A gate-deferred load that begins inside the handler (the room went to
+  another request between the chat pre-warm and the acquire, or a route
+  without a pre-warm) surfaced as the stock 500; it now serves the same
+  typed 503 `model_load_deferred` + `Retry-After` as the pre-warm.
 - Queue depth cap (`GMLX_QUEUE_DEPTH_CAP`): under the residency pool the
   check read the request's engine through the pool's per-request guard,
   which hid the batch generator's pending census, so the cap never fired
