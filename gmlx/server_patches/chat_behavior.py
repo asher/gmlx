@@ -143,6 +143,53 @@ def install_chat_template_kwargs() -> None:
     cls.to_template_kwargs = to_template_kwargs
 
 
+# OpenAI `developer` role for templates that do not handle it
+# The OpenAI API treats `developer` as the successor of `system`, and
+# harnesses (Codex-style clients) send it unconditionally. Chat templates
+# that predate the alias raise ("Unexpected message role.") instead of
+# rendering. Rewrite developer -> system only when the effective template
+# never mentions the role; a template that handles it gets the messages
+# verbatim.
+_ROLE_NORM_FLAG = "_kq_gguf_role_normalization"
+
+
+def _normalize_developer_roles(prompt, template: str):
+    """``prompt`` with `developer` roles rewritten to `system` when
+    ``template`` never mentions the role; otherwise (and for non-list
+    prompts) unchanged."""
+    if not isinstance(prompt, list) or "developer" in template:
+        return prompt
+    if not any(isinstance(m, dict) and m.get("role") == "developer"
+               for m in prompt):
+        return prompt
+    return [{**m, "role": "system"}
+            if isinstance(m, dict) and m.get("role") == "developer" else m
+            for m in prompt]
+
+
+def install_role_normalization() -> None:
+    """Rewrite the OpenAI `developer` role to `system` before render for
+    models whose chat template does not handle it. Wraps every captured
+    ``apply_chat_template`` binding; install last among the render wraps so
+    the retire capture memoizes the normalized messages. Idempotent."""
+    from ._common import _render_target_modules
+
+    def _wrap(fn):
+        def apply_chat_template(processor, config, prompt, *a, **kw):
+            override = kw.get("chat_template")
+            template = override if isinstance(override, str) and override \
+                else _model_template_text(processor)
+            return fn(processor, config,
+                      _normalize_developer_roles(prompt, template), *a, **kw)
+        apply_chat_template.__dict__[_ROLE_NORM_FLAG] = True
+        return apply_chat_template
+
+    for target in _render_target_modules():
+        fn = getattr(target, "apply_chat_template", None)
+        if fn is not None and not getattr(fn, _ROLE_NORM_FLAG, False):
+            target.apply_chat_template = _wrap(fn)
+
+
 # thinking_budget for models that generate <think> (not just pre-fill it)
 # mlx-vlm's ThinkingBudgetCriteria gates both token counting and the forced close
 # on ``enable_thinking``, which ResponseGenerator only sets True when the *prompt*
