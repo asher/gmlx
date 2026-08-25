@@ -1355,10 +1355,15 @@ answers a dispatcher can act on without a refused request:
   render but are not priced (`media: true`), matching the preflight.
 - A chat request for a model the load gate cannot admit right now (its
   weights would fit the box, but not next to what is resident and
-  pinned or busy) answers `503` with `{"error": {"type":
-  "model_load_deferred", ...}}`, the gate's numbers in the message, and
-  `Retry-After`. Explicitly `POST /unload` the resident model, or retry
-  once its streams drain and the pool can evict it.
+  pinned or busy, or not without pushing the kernel under the governor's
+  reclaimable floor while other processes hold the rest) answers `503`
+  with `{"error": {"type": "model_load_deferred", ...}}`, the gate's
+  numbers in the message, and `Retry-After`. The gate judges the load
+  against the serve ceiling (working set less margin and kernel reserve,
+  the same ceiling request admission uses) and against the kernel's own
+  reclaimable count, so a load that would Metal-OOM in the weight warm
+  is refused before it starts. Explicitly `POST /unload` the resident
+  model, or retry once its streams drain and the pool can evict it.
 - `GET /v1/capacity/plan?width=W&depth=D` evaluates the fan-out policy
   where the numbers live: `ok` when the capacity table holds `W` streams
   at `D` tokens each (`max_context_at_width` is read at the smallest

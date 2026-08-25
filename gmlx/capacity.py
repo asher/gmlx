@@ -287,6 +287,15 @@ def preload_gate(weight_bytes: float, model_id: str) -> None:
 
     head = headroom_bytes()
     budget = working_budget_bytes()
+    ws = working_set_bytes()
+    if head is not None and budget is not None and ws is not None:
+        # headroom_bytes() is measured against Metal's full recommended
+        # working set; a load is judged against the serve ceiling (margin
+        # and kernel reserve, ceiling_bytes), the same ceiling the boot
+        # table and request admission use. Judged raw, the gate admitted
+        # an 86.7 GB load next to a pinned 31.5 GB resident (118 GB on a
+        # 112 GB wire limit) and Metal OOM'd in the mmap warm (2026-08-25).
+        head -= max(0.0, ws - budget)
     if budget is not None and weight_bytes > budget:
         raise RuntimeError(
             f"model does not fit: {model_id} weights "
@@ -301,6 +310,34 @@ def preload_gate(weight_bytes: float, model_id: str) -> None:
             f"working set {head / GB:.1f} GB (resident models are "
             f"pinned or busy). Retry when a slot frees, or "
             f"GMLX_OVERCOMMIT=1 overrides.")
+    _kernel_gate(weight_bytes, model_id)
+
+
+def _kernel_gate(weight_bytes: float, model_id: str) -> None:
+    """The kernel's side of the same question: MLX accounting cannot see
+    other processes' pages (2026-08-25: ~16 GB of another app's pages in
+    the compressor let an 81 GB load through and Metal OOM'd). Below the
+    governor's kernel floor the serve loop sheds anyway, so a load that
+    would land there is deferred, not started. Reads the armed floor (0
+    without a governor: CLI paths, tests) and the same reclaimable sum
+    the governor samples."""
+    try:
+        from .governor import armed_kernel_floor_bytes
+        from .kernel_vm import reclaimable_bytes
+
+        floor = float(armed_kernel_floor_bytes() or 0.0)
+        if floor <= 0:
+            return
+        rec = reclaimable_bytes()
+    except Exception:
+        return
+    if rec is None or weight_bytes <= rec - floor:
+        return
+    raise LoadDeferred(
+        f"model load deferred: {model_id} weights {weight_bytes / GB:.1f} GB "
+        f"exceed the kernel's reclaimable memory {rec / GB:.1f} GB less the "
+        f"{floor / GB:.1f} GB floor (other processes hold the rest). Retry "
+        f"when memory frees, or GMLX_OVERCOMMIT=1 overrides.")
 
 
 def install_boot_table(gguf_path: str, weight_bytes: float | None,

@@ -47,6 +47,22 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The load gate judged a model load against the raw Metal working set
+  (no margin, no kernel reserve) and never asked the kernel: it admitted
+  an 86.7 GB load next to a pinned 31.5 GB resident on a 112 GB wire
+  limit (Metal OOM in the mmap warm) and, earlier, an 81 GB load with
+  another app's pages in the compressor. Loads are now judged against
+  the serve ceiling (`ceiling_bytes`, the one the boot table and request
+  admission use) and must leave the governor's kernel-reclaimable floor
+  standing; both refusals are the typed 503 `model_load_deferred`.
+- Speculative decode (a drafter or native MTP) on exact-tier models
+  (DeepSeek V4) never retired finished rows into the prefix cache: the
+  batch loop dropped the request's retirement context at entry, exact
+  stores were skipped in any batch, and the spec path's buffered
+  sliding-window layers were declined by the snapshot. Rows now retire
+  at any width (padding-trimmed row snapshots, the store the stock batch
+  path already takes) and buffered rotating layers snapshot as their
+  canonical window.
 - A gate-deferred load that begins inside the handler (the room went to
   another request between the chat pre-warm and the acquire, or a route
   without a pre-warm) surfaced as the stock 500; it now serves the same

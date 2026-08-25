@@ -93,9 +93,7 @@ def _clone_row(cache: Any, *, rot_canonical: bool) -> Any | None:
     from .cache_compat import cache_types
 
     if isinstance(cache, _buffered_types()):
-        _log.info("APC clone declined: BufferedRotatingKVCache carries "
-                  "start_position no rotating clone preserves")
-        return None
+        return _clone_buffered_window(cache)
     if rot_canonical and isinstance(cache, cache_types("RotatingKVCache")):
         return _clone_rot_canonical(cache)
     eval_targets: list[Any] = []
@@ -137,6 +135,47 @@ def _clone_rot_canonical(cache: Any) -> Any | None:
     out.values = copy(tv)
     out.offset = int(offset)
     out._idx = int(length)
+    mx.eval(out.keys, out.values)
+    return out
+
+
+def _clone_buffered_window(cache: Any) -> Any | None:
+    """Clone of a BufferedRotatingKVCache (the spec-path swap-in) as the
+    plain RotatingKVCache the model's make_cache produces.
+
+    The buffered cache keeps its window as a linear temporal buffer
+    ``[0, _idx)`` plus rollback slack, so the canonical window (the
+    trailing ``min(offset, max_size)`` tokens in temporal order) is also
+    its faithful state: no ring phase to permute, hence one clone serves
+    both consumers. The result is what a stored entry restores into (the
+    spec path re-swaps on its next prefill). ``keep > 0`` never reaches
+    the swap; declined."""
+    import mlx.core as mx
+    from mlx_vlm import apc as _apc
+    from mlx_vlm.models.cache import RotatingKVCache
+
+    keep = int(getattr(cache, "keep", 0) or 0)
+    if keep:
+        _log.info("APC clone declined: BufferedRotatingKVCache with keep=%d",
+                  keep)
+        return None
+    max_size = int(cache.max_size)
+    offset = int(getattr(cache, "offset", 0) or 0)
+    out = RotatingKVCache(max_size=max_size, keep=0)
+    out.offset = offset
+    if cache.keys is None or cache.values is None:
+        out._idx = 0
+        return out
+    idx = int(cache._idx)
+    L = min(offset, max_size)
+    if idx < L or L <= 0:
+        _log.info("APC clone declined: buffered window covers %d of %d "
+                  "tokens", idx, L)
+        return None
+    copy = _apc._copy_mlx_array
+    out.keys = copy(cache.keys[..., idx - L:idx, :])
+    out.values = copy(cache.values[..., idx - L:idx, :])
+    out._idx = L
     mx.eval(out.keys, out.values)
     return out
 
@@ -2163,6 +2202,14 @@ def retirement_store(
         if mode == "exact":
             snap = row_snapshot(prompt_cache, row)
             if snap is None:
+                return 0
+            covered = _cache_offset_max(snap)
+            if covered and covered != len(ids):
+                # An exact entry replays bitwise from its key; a row whose
+                # KV count disagrees with the key (a batch row with a
+                # pending or stale tail) must not be stored under it.
+                _log.info("APC retirement skipped: row covers %d tokens, "
+                          "key %d", covered, len(ids))
                 return 0
             if max_len is not None and max_len < len(ids):
                 if max_len < 2:
