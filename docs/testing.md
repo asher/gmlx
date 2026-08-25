@@ -118,6 +118,19 @@ the second model with the first refused while it is busy, and the LRU
 switch in both directions once idle, with `/v1/estimate` and
 `/v1/capacity/plan` tracking the resident model throughout.
 
+`tests/e2e/run_capacity_soak_e2e.py --models ID=PATH[:spec|:draft=PATH]...
+--cycles N --cycle-minutes M --clients K --out DIR`: seeded chaos for N
+cycles against one server - cold / warm / sibling / session prompts,
+aborted streams, tiny budgets, sampler and thinking variety, dry-run
+estimates (including past-context prompts), plan and readiness probes,
+bursts past the queue cap, cross-model requests on multi-model configs -
+with `/v1/metrics` sampled every second and checked for invariants, and
+operator ops (cache resets, idle unloads, a Prometheus render) fired
+during load. Typed refusals and governor sheds are tallied; anything
+else non-200, any metrics invariant break, and any unexpected server-log
+exception is a finding. `report.json` and a per-request journal land in
+`--out`.
+
 `tests/e2e/run_capacity_multi_e2e.py` is the longer, multi-model version: a
 config with three models (by default a 27B Q8 with a DFlash drafter, a 30B
 Q4 with its own drafter, and a 0.6B), warmed one by one, then rounds of

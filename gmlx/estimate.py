@@ -250,13 +250,42 @@ def _warm_tokens(manager, ids: list, extra_hash: int, model=None) -> tuple:
         pass
     try:
         hit = manager.find_exact_prefix(ids, extra_hash=extra_hash)
-        if hit:                                  # (cache_hash, prefix_len)
+        if hit:                                  # (cache_hash, prefix_len): disk shards
             n = int(hit[1]) if isinstance(hit, (tuple, list)) else int(hit)
             if n > best:
                 best, tier = n, "exact"
     except Exception:
         pass
+    n = _exact_peek(manager, ids, extra_hash)
+    if n > best:
+        best, tier = n, "exact"
     return best, tier
+
+
+def _exact_peek(manager, ids: list, extra_hash: int) -> int:
+    """Deepest in-memory exact-tier entry that is a strict prefix of
+    ``ids`` at the same salt (``lookup_exact_cache``'s rule, without the
+    clone). The exact tier stores a finished row whole (prompt plus the
+    answer), so it serves the next turn of a conversation, never a
+    verbatim resend of the same prompt."""
+    cache = getattr(manager, "_exact_cache", None)
+    if not cache or len(ids) < 2:
+        return 0
+    tid = tuple(int(t) for t in ids)
+    max_len = len(tid) - 1
+    best = 0
+    try:
+        with manager.lock:
+            for entry in list(cache.values()):
+                toks = getattr(entry, "token_ids", None) or ()
+                n = len(toks)
+                if (getattr(entry, "extra_hash", 0) != extra_hash or n <= best
+                        or n > max_len or tid[:n] != tuple(toks)):
+                    continue
+                best = n
+    except Exception:
+        return 0
+    return best
 
 
 def _queue_wait_s(metrics, waiting: int) -> float:

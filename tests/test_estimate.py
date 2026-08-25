@@ -487,3 +487,40 @@ def test_ckpt_peek_reports_deepest_pinned_record_without_assembly():
     model = SimpleNamespace(_kq_apc_ckpt_layout=("kv", "arr"))
     assert est._warm_tokens(man, ids, 0, model) == (64, "ckpt")
     assert est._warm_tokens(man, ids, 0, None) == (16, "block")
+
+
+def test_exact_peek_reads_the_in_memory_exact_tier():
+    """find_exact_prefix scans disk shards only; the in-memory exact tier
+    (retirement stores on exact-mode models) is peeked with the stock
+    lookup's rule: strict prefix of the query, same salt, deepest wins."""
+    import threading
+    from collections import OrderedDict
+
+    class _Man:
+        lock = threading.RLock()
+
+        def lookup_prefix(self, ids, extra_hash=0):
+            return [], 0
+
+        def release(self, blocks):
+            pass
+
+        def find_exact_prefix(self, ids, extra_hash=0):
+            return None
+
+    man = _Man()
+    ids = list(range(100, 200))
+    man._exact_cache = OrderedDict()
+    man._exact_cache[1] = SimpleNamespace(token_ids=tuple(ids[:40]), extra_hash=0)
+    man._exact_cache[2] = SimpleNamespace(token_ids=tuple(ids[:70]), extra_hash=0)
+    man._exact_cache[3] = SimpleNamespace(token_ids=tuple(ids[:90]), extra_hash=5)   # other salt
+    man._exact_cache[4] = SimpleNamespace(token_ids=tuple(ids), extra_hash=0)        # whole query: no
+    assert est._exact_peek(man, ids, 0) == 70
+    assert est._exact_peek(man, ids, 5) == 90
+    assert est._exact_peek(man, ids[:30], 0) == 0
+    assert est._warm_tokens(man, ids, 0) == (70, "exact")
+    # a stored row longer than the query (verbatim resend after a retirement
+    # store) never matches - the tier serves the next turn
+    man._exact_cache = OrderedDict([(9, SimpleNamespace(token_ids=tuple(ids + [1, 2]), extra_hash=0))])
+    assert est._exact_peek(man, ids, 0) == 0
+    assert est._exact_peek(man, ids + [1, 2, 3], 0) == len(ids) + 2

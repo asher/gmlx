@@ -236,10 +236,23 @@ def main() -> int:
                                                   "fits_now", "fits_drained")}))
         check("estimate context_ok with limit", est.get("context_ok") is True
               and isinstance(est.get("context_limit"), int), str(est.get("context_limit")))
-        check("estimate warm prefix after the same prompt ran",
-              isinstance(est.get("warm_tokens"), int) and est["warm_tokens"] > 0
-              and est.get("cache_tier") in ("block", "exact", "ckpt"),
-              f"warm={est.get('warm_tokens')} tier={est.get('cache_tier')}")
+        warm_est, warm_how = est, "repeat"
+        if not est.get("warm_tokens"):
+            # exact-tier models store the finished row whole (prompt plus
+            # answer) and serve the next turn, never a verbatim resend:
+            # probe the continuation instead
+            try:
+                answer = body["choices"][0]["message"].get("content") or ""
+            except Exception:
+                answer = ""
+            cont = long_msgs + [{"role": "assistant", "content": answer},
+                                {"role": "user", "content": "And the third note?"}]
+            st, warm_est = c.post("/v1/estimate", {"model": mid, "messages": cont, "max_tokens": 64})
+            warm_how = "continuation"
+        check("estimate warm prefix after the same prompt ran (repeat or continuation)",
+              isinstance(warm_est.get("warm_tokens"), int) and warm_est["warm_tokens"] > 0
+              and warm_est.get("cache_tier") in ("block", "exact", "ckpt"),
+              f"{warm_how}: warm={warm_est.get('warm_tokens')} tier={warm_est.get('cache_tier')}")
         check("estimate est_ttft_s is a non-negative number",
               isinstance(est.get("est_ttft_s"), (int, float)) and est["est_ttft_s"] >= 0,
               str(est.get("est_ttft_s")))
