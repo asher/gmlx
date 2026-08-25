@@ -289,6 +289,35 @@ def _ckpt_layout_for(model, block_size: int = 16):
     return tags or None
 
 
+def _live_kv_quant_config():
+    """The serve KV quant policy as a warm-merge config, or None.
+
+    Env-sourced (KV_BITS / KV_QUANT_SCHEME / KV_GROUP_SIZE) like the
+    owned B=1 spec path: serve config feeds these vars and the engine
+    reads the same channel, so the merged warm batch matches the live
+    ``_make_cache`` layer types. Key/value split overrides are not
+    exposed in gmlx config and stay None."""
+    raw = os.environ.get("KV_BITS", "")
+    if not raw:
+        return None
+    try:
+        bits = float(raw)
+    except ValueError:
+        return None
+    if bits <= 0:
+        return None
+    try:
+        from mlx_vlm.kv_quant import from_legacy
+        pol = from_legacy(
+            bits, os.environ.get("KV_QUANT_SCHEME") or None,
+            int(os.environ.get("KV_GROUP_SIZE", "64") or 64))
+        return pol.to_config() if pol is not None else None
+    except Exception:
+        _log.warning("KV quant policy resolve failed; warm merge stays "
+                     "float", exc_info=True)
+        return None
+
+
 def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
     """Consult the shared APCManager below L0 and arm the stock post-prefill
     store (mid-prefill exact checkpoints + post-prefill exact store / block
@@ -377,9 +406,14 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
             # exact/anchor clones carry single-row leaves (left_padding
             # None, scalar offsets) and crash the batch cache classes'
             # update path (mx.depends on a None) when the suffix forwards.
+            # kv_quant_config re-quantizes the float snapshot to the live
+            # _make_cache layer types under serve kv_bits (stored exact
+            # entries stay float; a float row joining a quantized batch
+            # breaks the update path).
             from mlx_vlm import apc as _apc
             warm, _ = _apc.make_warm_batch_exact_cache_multi(
-                [warm], [prefix_len])
+                [warm], prefix_lens=[prefix_len],
+                kv_quant_config=_live_kv_quant_config())
         if warm and 0 < prefix_len < len(ids_list):
             batch.prompt_cache = warm
             # Matched blocks stay acquired until the stock post-prefill
@@ -1133,6 +1167,9 @@ def _plain_retire(stash: dict, prompt_cache: list) -> None:
             from .retire_key import next_turn_lcp
             lcp = next_turn_lcp(stash.get("render_ctx"), seq, gen)
         max_len = lcp if lcp is not None and lcp < len(seq) else None
+        _log.info("APC retire: seq=%d ctx=%s lcp=%s cap=%s",
+                  len(seq), stash.get("render_ctx") is not None,
+                  lcp, max_len)
         ok = retirement_store(
             manager, stash.get("mode") or "ckpt", seq, prompt_cache,
             row=0,

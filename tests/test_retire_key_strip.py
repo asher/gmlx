@@ -94,7 +94,13 @@ def test_prompt_stable_demotes_last_assistant():
     assert lcp == len("U:hi;A:")
 
 
-def test_non_strip_template_unchanged_by_probe():
+def test_keep_template_caps_at_think_via_client_echo():
+    # Keep-mode template (dwarfstar deepseek4 chat-v2 class): renders
+    # attached reasoning verbatim wherever it appears. Standard clients
+    # never resend reasoning_content (the DeepSeek API contract), so the
+    # probe echoes content only and the next turn diverges at the think
+    # block, not at the user header. Predicting len(seq) here stored a
+    # dead full-depth chain every turn on the live DSv4-Flash serve.
     def keep_render(processor, config, msgs, **kw):
         out = []
         for m in msgs:
@@ -112,5 +118,36 @@ def test_non_strip_template_unchanged_by_probe():
     ctx["render"] = keep_render
     seq, gen = _seq_and_gen()
     lcp = retire_key.next_turn_lcp(ctx, seq, gen)
-    # Divergence at the user header: the full generation still matches.
+    assert lcp == len("U:hi;A:")
+
+
+def test_preserve_thinking_kwarg_keeps_reasoning_in_echo():
+    # A truthy preserve_thinking template kwarg declares the
+    # keep-reasoning protocol: the client resends reasoning_content and
+    # the template renders it, so the probe echoes the fields and the
+    # full generation replays.
+    def keep_render(processor, config, msgs, **kw):
+        out = []
+        for m in msgs:
+            if m.get("role") == "user":
+                out.append(f"U:{m['content']};")
+            elif m.get("role") == "assistant":
+                think = (f"<think>{m['reasoning_content']}</think>"
+                         if kw.get("preserve_thinking")
+                         and m.get("reasoning_content") else "")
+                out.append(f"A:{think}{m.get('content') or ''};")
+        if kw.get("add_generation_prompt"):
+            out.append("A:")
+        return "".join(out)
+
+    ctx = _ctx(preserve_thinking=True)
+    ctx["render"] = keep_render
+    seq, gen = _seq_and_gen()
+    lcp = retire_key.next_turn_lcp(ctx, seq, gen)
     assert lcp == len(seq)
+
+    # Flag present but false: standard echo, strip prediction holds.
+    ctx = _ctx(preserve_thinking=False)
+    ctx["render"] = keep_render
+    lcp = retire_key.next_turn_lcp(ctx, seq, gen)
+    assert lcp == len("U:hi;A:")

@@ -73,18 +73,24 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- Shell completion offered nothing for `gmlx launch <harness> --model`;
-  it now lists the config's model ids and aliases.
-- Served and VLM-local models stopped thinking by default on mlx-vlm 0.6.15,
-  which injects `enable_thinking=false` into every render where the kwarg is
-  absent; absent now means the template's own default again.
-- Text-only served models build mlx-vlm cache classes again, keeping prompt
-  caching engaged (the gmlx.cache crash fix built mlx-lm classes the APC
-  engine's checks ignore).
-- serve: evicting a streamed MoE model left its weights resident, so every
-  later load deferred with a negative free working set until restart.
-- Plain text models (qwen3, llama) failed every request with a missing
-  gmlx.cache import.
+- Hybrid prompt-cache retirement predicted the next turn with reasoning
+  echoed back and stored a dead chain on keep-mode templates (deepseek4);
+  it now echoes content only unless `preserve_thinking` is set.
+- Exact-tier prompt-cache hits under serve `kv_bits` crashed the batch
+  update path; the warm merge now re-quantizes to the live KV policy.
+- Same-stream snapshots of rotating layers (exact retirement, drafter
+  sidecars) reordered the ring and shifted MoE logits on the resumed turn;
+  they now copy it bitwise.
+- The memory governor read green while the box ran out of free pages (MLX
+  buffer cache counted as free); a 128 GB box froze under a long-context
+  batch. It now goes red below a kernel reclaimable floor
+  (`GMLX_GOV_KERNEL_FLOOR_GB`, default min(8, 10% of RAM)) and block stores
+  stop at it.
+- The governor ceiling was 95% of the Metal working set, leaving the kernel
+  14 GB on a 128 GB box; it is now capped at RAM minus a reserve
+  (`GMLX_GOV_RESERVE_GB`, default max(8, 10% of RAM)).
+- The MLX buffer cache is always bounded now (4-12 GiB); MLX's default let
+  it hold 27-48 GB of freed buffers on an 8B model.
 - Sampled speculative verify and the server's unfiltered sampler computed
   logprob math at the activation dtype; float16 rows reached categorical
   unwidened. Both now widen to float32 first (greedy paths unchanged).

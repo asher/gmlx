@@ -51,10 +51,14 @@ def test_auto_engages_under_pressure(monkeypatch):
     assert src.startswith("auto")
 
 
-def test_auto_silent_with_slack(monkeypatch):
-    # 25 GiB weights (gemma-31b): no pressure, unlimited, receipts untouched.
+def test_auto_bounded_with_slack(monkeypatch):
+    # 25 GiB weights (gemma-31b): no pressure, but the cache is still
+    # bounded. MLX's default cache limit is the memory limit (1.5x the
+    # working set); an unbounded cache held 27-48 GB of wired freed
+    # buffers on an 8B model and walked a 128 GB box into a panic.
     limit, src = _resolve(monkeypatch, weights=25 * GIB)
-    assert limit is None and src == "unlimited"
+    assert limit is not None and 4 * GIB <= limit <= 12 * GIB
+    assert src.startswith("auto")
 
 
 def test_auto_clamps():
@@ -62,6 +66,11 @@ def test_auto_clamps():
     assert sm.auto_cache_limit_bytes(200 * GIB, 121 * GIB) == 12 * GIB
     # Nearly no slack -> floor.
     assert sm.auto_cache_limit_bytes(100 * GIB, 99 * GIB) == 4 * GIB
+    # No pressure: 5% of the working set, same clamp.
+    assert sm.auto_cache_limit_bytes(120 * GIB, 25 * GIB) == 6 * GIB
+    assert sm.auto_cache_limit_bytes(40 * GIB, 5 * GIB) == 4 * GIB
+    assert sm.auto_cache_limit_bytes(400 * GIB, 5 * GIB) == 12 * GIB
+    # Unknown working set: nothing to bound against.
     assert sm.auto_cache_limit_bytes(0, 0) is None
 
 

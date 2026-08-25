@@ -187,8 +187,8 @@ server:
                              #   (null => the default, 1.0; 0 => strict alternation; see below)
   prefill_tick_ms: null      # wall-clock budget per prefill chunk while streams decode;
                              #   chunks are halved to fit (null => the default, 500; 0 => full chunks)
-  cache_limit_gb: null       # MLX buffer-cache cap in GiB (null => auto: bounded only when the
-                             #   biggest model leaves little working-set slack; negative => never bound)
+  cache_limit_gb: null       # MLX buffer-cache cap in GiB (null => auto: 4-12 GiB, sized from the
+                             #   working-set slack; negative => never bound)
   family_defaults: true      # built-in per-family model-card sampling + @intents (false turns them off)
   stochastic_mtp: false      # p/q acceptance for sampled MTP requests: same output
                              #   distribution, higher acceptance, NOT token-identical
@@ -302,9 +302,10 @@ live server). Composes with `decode_prefill_ratio`: the ratio sets the duty
 cycle, the tick sets the stall quantum.
 
 `cache_limit_gb` caps MLX's buffer cache (the wired pool of freed GPU buffers
-kept for reuse). Left `null`, the server bounds it automatically only when
-the biggest configured model leaves little GPU working-set slack, the
-deep-context safety case. See
+kept for reuse). Left `null`, the server always bounds it: 4-12 GiB sized
+from the working-set slack the biggest configured model leaves. MLX's own
+default is the memory limit, and an uncapped cache can hold tens of GB of
+wired buffers the kernel counts against its free pages. See
 [performance.md](performance.md#the-mlx-buffer-cache-at-deep-context) for the
 policy, the `GMLX_CACHE_LIMIT_GB` env override (env wins over this key), and
 the explicit-unlimited escape.

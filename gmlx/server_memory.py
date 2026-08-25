@@ -15,11 +15,15 @@ Explicit values: GiB float; ``0`` disables the cache entirely (MLX semantics);
 ``off``/``none``/``unlimited`` (or any negative number) force unlimited and
 suppress the auto policy.
 
-Auto policy: when the largest configured model's weight bytes exceed
-``_AUTO_PRESSURE`` of the recommended working set, cap the cache at a quarter
-of the remaining slack, clamped to [4, 12] GiB. Models with ample slack are
-untouched (an unbounded cache is strictly good there), so small/medium-model
-receipts are unchanged by this policy.
+Auto policy: always bounded. When the largest configured model's weight
+bytes exceed ``_AUTO_PRESSURE`` of the recommended working set, cap the
+cache at a quarter of the remaining slack, clamped to [4, 12] GiB.
+Otherwise cap it at ``_AUTO_SLACK_SHARE`` of the working set, same clamp.
+MLX's own default is the memory limit (1.5x the working set), so an
+uncapped cache can hold tens of GB of wired freed buffers; the kernel
+counts those against its free pages while the process reads them as
+free, and that gap walked a 128 GB box into a free-page panic
+(2026-08-24: 27-48 GB of cache on an 8B model).
 """
 
 from __future__ import annotations
@@ -32,8 +36,9 @@ from .batch_rows import batch_rows
 _log = logging.getLogger(__name__)
 
 GIB = 1 << 30
-_AUTO_PRESSURE = 0.6      # engage when weights > 60% of the working set
+_AUTO_PRESSURE = 0.6      # pressure formula when weights > 60% of WS
 _AUTO_SLACK_FRACTION = 0.25
+_AUTO_SLACK_SHARE = 0.05  # otherwise: 5% of the working set
 _AUTO_FLOOR = 4 * GIB
 _AUTO_CEIL = 12 * GIB
 _UNLIMITED_WORDS = ("off", "none", "unlimited")
@@ -54,11 +59,14 @@ def model_weight_bytes(path: str) -> int:
 
 
 def auto_cache_limit_bytes(ws_bytes: float, weight_bytes: float) -> int | None:
-    """The auto policy value, or None when pressure is low."""
-    if ws_bytes <= 0 or weight_bytes <= _AUTO_PRESSURE * ws_bytes:
+    """The auto policy value; None only when the working set is unknown."""
+    if ws_bytes <= 0:
         return None
-    slack = ws_bytes - weight_bytes
-    return int(min(max(_AUTO_SLACK_FRACTION * slack, _AUTO_FLOOR), _AUTO_CEIL))
+    if weight_bytes > _AUTO_PRESSURE * ws_bytes:
+        raw = _AUTO_SLACK_FRACTION * (ws_bytes - weight_bytes)
+    else:
+        raw = _AUTO_SLACK_SHARE * ws_bytes
+    return int(min(max(raw, _AUTO_FLOOR), _AUTO_CEIL))
 
 
 def _parse_explicit(raw: str) -> tuple[bool, int | None]:
@@ -92,7 +100,7 @@ def resolve_cache_limit(cfg_gb, model_paths, ws_bytes) -> tuple[int | None, str]
     if auto is not None:
         return auto, (f"auto: weights {weights / GIB:.1f} GiB of "
                       f"{ws_bytes / GIB:.1f} GiB working set")
-    return None, "unlimited"
+    return None, "unlimited (working set unknown)"
 
 
 # ---- Admission headroom projection ----------------------------------------

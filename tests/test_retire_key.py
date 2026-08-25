@@ -507,3 +507,27 @@ def test_system_prefix_lcp_media_and_failure():
     # Failure memoized: no second render attempt.
     assert rk.system_prefix_lcp(ctx, [1, 2]) is None
     assert len(calls) == 1
+
+
+def test_lcp_no_tools_echo_drops_reasoning():
+    # Keep-mode templates (deepseek4 chat) render attached reasoning
+    # verbatim, but standard clients never resend it: the demotion
+    # probe must echo content only, or the prediction claims a full
+    # replay no client performs and retirement stores dead full-depth
+    # chains (found live on DSv4-Flash thinking, 2026-08-23).
+    seen = {}
+
+    def render(p, c, msgs, **kw):
+        seen["reasoning"] = any(
+            m.get("reasoning_content") or m.get("thinking")
+            for m in msgs
+            if isinstance(m, dict) and m.get("role") == "assistant")
+        return "RENDER"
+
+    ctx = _fake_ctx(next_ids=[1, 2, 9, 9],
+                    decoded="<think>plan</think>answer")
+    ctx["render"] = render
+    ctx["kw"] = {"thinking_start_token": "<think>",
+                 "thinking_end_token": "</think>"}
+    assert rk.next_turn_lcp(ctx, [1, 2, 3, 4], [4]) == 2
+    assert seen["reasoning"] is False

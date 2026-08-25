@@ -65,6 +65,10 @@ def rig(monkeypatch):
         gov.mx, "set_cache_limit",
         lambda v: (box["cache_limits"].append(v), 7)[1])
     monkeypatch.setattr(gov, "_maybe_register_apc", lambda gen: None)
+    box["kernel"] = 40e9
+    monkeypatch.setattr(gov, "_kernel_reclaimable", lambda: box["kernel"])
+    monkeypatch.setenv("GMLX_GOV_KERNEL_FLOOR_GB", "8")
+    monkeypatch.delenv("GMLX_GOV_RESERVE_GB", raising=False)
     import gmlx.server_memory as sm
     monkeypatch.setattr(sm, "admit_reserve_bytes",
                         lambda ws, gen=None: 2e9)
@@ -542,3 +546,124 @@ def test_red_reclaims_before_shedding(rig, monkeypatch):
     assert gov._STATS["red_failures"] == 0
     assert "shed skipped" in gov._STATS["last_action"]
     assert st.band == gov.RED  # band holds; next healthy ticks demote
+
+
+# ---------------------------------------------------------------- kernel floor
+
+def test_kernel_floor_reds_while_rate_math_is_green(rig, monkeypatch):
+    # The 2026-08-24 shape: MLX-side headroom 100 GB, flat demand, and
+    # the kernel down to its last pages. The band must go red and shed
+    # a row at once; no rate clock, no orange dwell.
+    failed = []
+    monkeypatch.setattr(tg, "_row_failed_callbacks",
+                        [lambda uid, info: failed.append((uid, info))])
+    evicted = []
+    gov.register_cache("apc", lambda: 30e9,
+                       lambda f: (evicted.append(f), 30e9)[1])
+    gen = FakeGen(rows=2, rate=1e6, live=8e9)
+    tg_st = tg._state(gen)
+    tg_st.ledger[0] = tg._Row([1] * 8, 64, {}, None, None)
+    tg_st.ledger[1] = tg._Row([1] * 4, 64, {}, None, None)
+    rig["kernel"] = 0.5e9          # below the rig's 8 GB floor
+    gov._governor_tick(gen)
+    st = gov._state(gen)
+    assert st.band == gov.RED
+    assert evicted == [1.0]
+    assert failed and failed[0][0] == 0
+    assert "kernel reclaimable" in failed[0][1]["error"]
+    assert gov._STATS["kernel_floor_reds"] == 1
+    assert gov._STATS["kernel_reclaimable_bytes"] == int(0.5e9)
+
+
+def test_kernel_floor_reclaim_alone_can_clear(rig, monkeypatch):
+    # Evict + cache clear brings the kernel back above the floor: no
+    # row is failed, the band stays red until the normal ladder
+    # de-escalates it.
+    failed = []
+    monkeypatch.setattr(tg, "_row_failed_callbacks",
+                        [lambda uid, info: failed.append((uid, info))])
+    samples = iter([2e9, 20e9])
+    monkeypatch.setattr(gov, "_kernel_reclaimable", lambda: next(samples))
+    gen = FakeGen(rows=2)
+    tg_st = tg._state(gen)
+    tg_st.ledger[0] = tg._Row([1] * 8, 64, {}, None, None)
+    gov._governor_tick(gen)
+    assert gov._state(gen).band == gov.RED
+    assert failed == []
+    assert "kernel floor reclaim" in gov._STATS["last_action"]
+
+
+def test_kernel_floor_off_never_samples(rig, monkeypatch):
+    monkeypatch.setenv("GMLX_GOV_KERNEL_FLOOR_GB", "0")
+    calls = []
+    monkeypatch.setattr(gov, "_kernel_reclaimable",
+                        lambda: (calls.append(1), 0)[1])
+    gen = FakeGen(rows=2)
+    gov._governor_tick(gen)
+    assert calls == []
+    assert gov._state(gen).band == gov.GREEN
+    assert gov._STATS["kernel_reclaimable_bytes"] is None
+
+
+def test_kernel_floor_healthy_is_inert(rig):
+    gen = FakeGen(rows=2)
+    rig["kernel"] = 30e9
+    gov._governor_tick(gen)
+    assert gov._state(gen).band == gov.GREEN
+    assert gov._STATS["kernel_floor_reds"] == 0
+
+
+def test_kernel_floor_wins_over_no_rows(rig, monkeypatch):
+    # Zero decode rows: nothing to shed, but reclaim still runs and the
+    # band still reports red (admission holds).
+    evicted = []
+    gov.register_cache("apc", lambda: 30e9,
+                       lambda f: (evicted.append(f), 1e9)[1])
+    gen = FakeGen(rows=0)
+    rig["kernel"] = 1e9
+    gov._governor_tick(gen)
+    assert gov._state(gen).band == gov.RED
+    assert evicted == [1.0]
+    assert gov.admission_hold_reason(gen) == "governor red"
+
+
+# ---------------------------------------------------------------- ceiling
+
+def test_ceiling_reserve_binds_when_ws_is_close_to_ram(monkeypatch):
+    monkeypatch.delenv("GMLX_GOV_RESERVE_GB", raising=False)
+    monkeypatch.setattr(gov.mx, "device_info", lambda: {
+        "max_recommended_working_set_size": 130e9, "memory_size": 137e9})
+    # WS x 0.95 = 123.5 GB but RAM - 13.7 GB reserve = 123.3 GB wins
+    assert gov._ceiling_bytes(130e9, 0.05) == pytest.approx(123.3e9)
+    # Metal's own recommendation binds when it is the lower one
+    monkeypatch.setattr(gov.mx, "device_info", lambda: {
+        "max_recommended_working_set_size": 120e9, "memory_size": 137e9})
+    assert gov._ceiling_bytes(120e9, 0.05) == pytest.approx(114e9)
+    # Env reserve overrides the RAM-derived default
+    monkeypatch.setenv("GMLX_GOV_RESERVE_GB", "40")
+    assert gov._ceiling_bytes(120e9, 0.05) == pytest.approx(97e9)
+
+
+def test_headroom_shifts_by_ceiling_gap(monkeypatch):
+    import gmlx.prefill_decay as pd
+    monkeypatch.setenv("GMLX_GOV_RESERVE_GB", "40")
+    monkeypatch.setattr(gov.mx, "device_info", lambda: {
+        "max_recommended_working_set_size": 120e9, "memory_size": 137e9})
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 50e9)
+    head, ws = gov._headroom_and_ws(0.05)
+    assert ws == 120e9
+    # ceiling 97 GB: headroom drops by the 23 GB the WS sits above it
+    assert head == pytest.approx(50e9 - 23e9)
+
+
+def test_arm_throttle_limit_uses_ceiling(rig, monkeypatch):
+    monkeypatch.setenv("GMLX_GOV_RESERVE_GB", "40")
+    monkeypatch.setattr(gov.mx, "device_info", lambda: {
+        "max_recommended_working_set_size": 120e9, "memory_size": 137e9})
+    import gmlx.prefill_decay as pd
+    monkeypatch.setattr(pd, "streamed_tracked_bytes", lambda: 0.0)
+    gen = FakeGen(rows=2)
+    st = gov._state(gen)
+    gov._arm_throttle(gen, st, 120e9, 0.05)
+    # 97 GB ceiling + 50 GB untracked weights
+    assert rig["mem_limits"] == [int(97e9 + 50e9)]

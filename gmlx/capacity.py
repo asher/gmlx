@@ -72,9 +72,36 @@ def working_set_bytes() -> float | None:
     return ws if ws > 0 else None
 
 
+def reserve_bytes(mem_size: float) -> float:
+    """Bytes left to the kernel and every other process on the box
+    (GMLX_GOV_RESERVE_GB, default max(8 GB, 10% of RAM))."""
+    default = max(8e9, 0.10 * mem_size)
+    try:
+        return float(os.environ.get("GMLX_GOV_RESERVE_GB",
+                                    str(default / 1e9))) * 1e9
+    except ValueError:
+        return default
+
+
+def ceiling_bytes(ws: float, m: float | None = None) -> float:
+    """The one ceiling on tracked bytes: Metal's recommended working
+    set less the margin, but never closer to physical RAM than the
+    reserve. Metal's recommendation assumes the GPU owns the box; a
+    serve process sharing it with the kernel and the user does not
+    (2026-08-24: WS x 0.95 = 114 GB on a 128 GB box, box panicked)."""
+    import mlx.core as mx
+
+    cap = ws * (1.0 - (margin() if m is None else m))
+    try:
+        mem = float(mx.device_info()["memory_size"])
+    except Exception:
+        return cap
+    return min(cap, mem - reserve_bytes(mem))
+
+
 def working_budget_bytes() -> float | None:
     ws = working_set_bytes()
-    return None if ws is None else ws * (1.0 - margin())
+    return None if ws is None else ceiling_bytes(ws)
 
 
 def classify_weight_share(size_bytes: int, ram_bytes: int) -> str:
@@ -143,7 +170,7 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None
 
     heads = cfg.get("num_attention_heads")
     heads = heads if isinstance(heads, int) and heads > 0 else None
-    budget = ws * (1.0 - margin())
+    budget = ceiling_bytes(ws)
     reserve = admit_reserve_bytes(ws)
 
     from .mem_preflight import prompt_kv_bytes

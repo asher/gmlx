@@ -333,3 +333,38 @@ def test_inline_layer_major_store_enforces_budget():
     assert len(m._exact_cache) == 1
     assert m.stats.exact_bytes <= m._exact_budget_bytes
     assert m.stats_snapshot().get("exact_bytes") == m.stats.exact_bytes
+
+
+def test_store_stops_at_kernel_floor(monkeypatch):
+    # A block store is one call between governed ticks; it must stop
+    # wiring pages itself when the kernel is below the floor.
+    import mlx.core as mx
+    import gmlx.kernel_vm as kv
+    from gmlx.apc_manager import GmlxAPCManager
+
+    import gmlx.governor as gov
+
+    monkeypatch.delenv("GMLX_APC_PAGED", raising=False)
+    monkeypatch.setattr(gov, "_ARMED_FLOOR", 8e9)   # as install_governor arms it
+    man = GmlxAPCManager(num_blocks=16, block_size=16)
+    ids = list(range(96))
+    lk = [mx.random.normal((1, 2, 96, 8)).astype(mx.float16)]
+    lv = [mx.random.normal((1, 2, 96, 8)).astype(mx.float16)]
+    calls = []
+
+    def scripted():
+        calls.append(1)
+        return 100e9 if len(calls) <= 2 else 1e9   # floor hit at block 3
+
+    monkeypatch.setattr(kv, "reclaimable_bytes", scripted)
+    blocks = man.store_kv_blocks(ids, lk, lv, extra_hash=0)
+    man.release(blocks)
+    assert len(blocks) == 2
+    assert man.stats.rejects_by_reason.get("kernel_floor") == 1
+
+    monkeypatch.setattr(gov, "_ARMED_FLOOR", 0.0)   # no governor installed
+    man2 = GmlxAPCManager(num_blocks=16, block_size=16)
+    blocks = man2.store_kv_blocks(ids, lk, lv, extra_hash=0)
+    man2.release(blocks)
+    assert len(blocks) == 6
+    assert "kernel_floor" not in man2.stats.rejects_by_reason
