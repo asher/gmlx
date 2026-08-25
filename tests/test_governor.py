@@ -67,7 +67,7 @@ def rig(monkeypatch):
     monkeypatch.setattr(gov, "_maybe_register_apc", lambda gen: None)
     box["kernel"] = 40e9
     monkeypatch.setattr(gov, "_kernel_reclaimable", lambda: box["kernel"])
-    monkeypatch.delenv("GMLX_GOV_KERNEL_FLOOR_GB", raising=False)
+    monkeypatch.setenv("GMLX_GOV_KERNEL_FLOOR_GB", "8")
     monkeypatch.delenv("GMLX_GOV_RESERVE_GB", raising=False)
     import gmlx.server_memory as sm
     monkeypatch.setattr(sm, "admit_reserve_bytes",
@@ -564,7 +564,7 @@ def test_kernel_floor_reds_while_rate_math_is_green(rig, monkeypatch):
     tg_st = tg._state(gen)
     tg_st.ledger[0] = tg._Row([1] * 8, 64, {}, None, None)
     tg_st.ledger[1] = tg._Row([1] * 4, 64, {}, None, None)
-    rig["kernel"] = 0.5e9          # below the 8 GB default floor
+    rig["kernel"] = 0.5e9          # below the rig's 8 GB floor
     gov._governor_tick(gen)
     st = gov._state(gen)
     assert st.band == gov.RED

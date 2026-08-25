@@ -84,7 +84,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The memory governor read green while the box ran out of free pages (MLX
   buffer cache counted as free); a 128 GB box froze under a long-context
   batch. It now goes red below a kernel reclaimable floor
-  (`GMLX_GOV_KERNEL_FLOOR_GB`, default 8) and block stores stop at it.
+  (`GMLX_GOV_KERNEL_FLOOR_GB`, default min(8, 10% of RAM)) and block stores
+  stop at it.
 - The governor ceiling was 95% of the Metal working set, leaving the kernel
   14 GB on a 128 GB box; it is now capped at RAM minus a reserve
   (`GMLX_GOV_RESERVE_GB`, default max(8, 10% of RAM)).

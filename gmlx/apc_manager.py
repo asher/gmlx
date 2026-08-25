@@ -298,20 +298,19 @@ class GmlxAPCManager(_apc.APCManager):
     @staticmethod
     def _kernel_floor_hit() -> bool:
         """True when the kernel's reclaimable pages sit below the
-        governor floor (GMLX_GOV_KERNEL_FLOOR_GB). A block store runs
+        floor the installed governor armed (0 without a governor, so
+        CLI paths and tests never stop a store). A block store runs
         as one uninterrupted call between governed ticks (~30 s for an
         80k-token row), so it checks the floor itself per block and
         stops storing rather than wiring the box past it."""
-        try:
-            floor = float(os.environ.get("GMLX_GOV_KERNEL_FLOOR_GB", "8"))
-        except ValueError:
-            floor = 8.0
-        if floor <= 0:
-            return False
+        from .governor import armed_kernel_floor_bytes
         from .kernel_vm import reclaimable_bytes
 
+        floor = armed_kernel_floor_bytes()
+        if floor <= 0:
+            return False
         recl = reclaimable_bytes()
-        return recl is not None and recl < floor * 1e9
+        return recl is not None and recl < floor
 
     def store_kv_blocks(self, token_ids, layer_keys, layer_values,
                         *, extra_hash=0, skip_first_n_tokens=0,

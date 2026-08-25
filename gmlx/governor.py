@@ -305,7 +305,27 @@ def _kernel_reclaimable():
 
 
 def _kernel_floor_bytes() -> float:
-    return _env_f("GMLX_GOV_KERNEL_FLOOR_GB", 8.0) * 1e9
+    """Kernel reclaimable floor in bytes. Env override, else the lower
+    of 8 GB and 10% of physical RAM so a small box is not always below
+    it."""
+    raw = os.environ.get("GMLX_GOV_KERNEL_FLOOR_GB")
+    if raw not in (None, ""):
+        return _env_f("GMLX_GOV_KERNEL_FLOOR_GB", 8.0) * 1e9
+    try:
+        mem = float(mx.device_info()["memory_size"])
+    except Exception:
+        return 8e9
+    return min(8e9, 0.10 * mem)
+
+
+# Floor armed by install_governor after the kernel sampler self-check;
+# 0 when no governor is installed (CLI paths, tests) or the sampler is
+# unavailable. Store-side checks read this, never the env directly.
+_ARMED_FLOOR = 0.0
+
+
+def armed_kernel_floor_bytes() -> float:
+    return _ARMED_FLOOR
 
 
 def _sample_registered(st: _GovState) -> float:
@@ -832,6 +852,8 @@ def install_governor() -> bool:
             floor_note = f"off ({why})"
             os.environ["GMLX_GOV_KERNEL_FLOOR_GB"] = "0"
     _STATS["kernel_floor"] = floor_note
+    global _ARMED_FLOOR
+    _ARMED_FLOOR = 0.0 if floor_note.startswith("off") else floor
     try:
         margin = _env_f("GMLX_GOV_MARGIN", 0.05)
         ws = float(mx.device_info()["max_recommended_working_set_size"])

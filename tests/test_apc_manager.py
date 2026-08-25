@@ -342,8 +342,10 @@ def test_store_stops_at_kernel_floor(monkeypatch):
     import gmlx.kernel_vm as kv
     from gmlx.apc_manager import GmlxAPCManager
 
+    import gmlx.governor as gov
+
     monkeypatch.delenv("GMLX_APC_PAGED", raising=False)
-    monkeypatch.setenv("GMLX_GOV_KERNEL_FLOOR_GB", "8")
+    monkeypatch.setattr(gov, "_ARMED_FLOOR", 8e9)   # as install_governor arms it
     man = GmlxAPCManager(num_blocks=16, block_size=16)
     ids = list(range(96))
     lk = [mx.random.normal((1, 2, 96, 8)).astype(mx.float16)]
@@ -360,7 +362,7 @@ def test_store_stops_at_kernel_floor(monkeypatch):
     assert len(blocks) == 2
     assert man.stats.rejects_by_reason.get("kernel_floor") == 1
 
-    monkeypatch.setenv("GMLX_GOV_KERNEL_FLOOR_GB", "0")
+    monkeypatch.setattr(gov, "_ARMED_FLOOR", 0.0)   # no governor installed
     man2 = GmlxAPCManager(num_blocks=16, block_size=16)
     blocks = man2.store_kv_blocks(ids, lk, lv, extra_hash=0)
     man2.release(blocks)
