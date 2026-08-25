@@ -450,3 +450,40 @@ def test_stamp_apc_mode_sets_generator_mode_once(monkeypatch):
     rg3 = SimpleNamespace(apc_mode=None)                # no model: a no-op
     _stamp_apc_mode(rg3)
     assert rg3.apc_mode is None
+
+
+def test_ckpt_peek_reports_deepest_pinned_record_without_assembly():
+    """The checkpoint tier (hybrid models) keeps its warm starts in pinned
+    records, not the block chain: the dry-run's probe reads the deepest
+    matching record's depth and neither assembles a cache nor moves a
+    counter."""
+    import threading
+    from collections import OrderedDict
+
+    from gmlx.cache_snapshot import _CkptRecord, ckpt_peek
+
+    class _Man:
+        block_size = 16
+        lock = threading.RLock()
+        _kq_ckpt_gen = 0
+
+    man = _Man()
+    ids = list(range(100, 200))
+    man._kq_ckpt_records = OrderedDict()
+    for p, kind in ((32, "anchor"), (64, "boundary")):
+        rec = _CkptRecord(ids=tuple(ids[:p]), extra_hash=0, p=p, kind=kind, layout=("kv", "arr"))
+        man._kq_ckpt_records[(rec.ids, 0)] = rec
+    assert ckpt_peek(man, ids, extra_hash=0, layout=("kv", "arr")) == 64
+    assert ckpt_peek(man, ids, extra_hash=7, layout=("kv", "arr")) == 0      # other salt
+    assert ckpt_peek(man, ids, extra_hash=0, layout=("kv",)) == 0            # other layout
+    assert ckpt_peek(man, ids[:40], extra_hash=0, layout=("kv", "arr")) == 32  # 64 > n
+    assert ckpt_peek(man, [5] + ids, extra_hash=0) == 0                      # diverged
+    assert ckpt_peek(None, ids) == 0
+
+    # and the estimate's probe prefers it over a shallower block-chain match
+    man.lookup_prefix = lambda ids, extra_hash=0: ([], 16)
+    man.release = lambda blocks: None
+    man.find_exact_prefix = lambda ids, extra_hash=0: None
+    model = SimpleNamespace(_kq_apc_ckpt_layout=("kv", "arr"))
+    assert est._warm_tokens(man, ids, 0, model) == (64, "ckpt")
+    assert est._warm_tokens(man, ids, 0, None) == (16, "block")

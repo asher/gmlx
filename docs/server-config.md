@@ -1338,7 +1338,8 @@ answers a dispatcher can act on without a refused request:
   takes a chat-completions body and returns, for a resident model:
   `prompt_tokens` (the rendered prompt, tokenized the way the request
   would be), `warm_tokens` and `cache_tier` (how much of the prefix the
-  prefix cache already holds: the block chain or the exact index; which
+  prefix cache already holds: the block chain, the exact index, or a
+  pinned checkpoint record on `ckpt`-tier models; which
   server holds your prefix, and how much of it, is the routing signal
   across machines), `need_bytes` (the prompt's KV plus the prefill
   transient, plus `max_tokens` when the body pins one - exactly what the

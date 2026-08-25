@@ -232,7 +232,7 @@ def main() -> int:
               and isinstance(est.get("context_limit"), int), str(est.get("context_limit")))
         check("estimate warm prefix after the same prompt ran",
               isinstance(est.get("warm_tokens"), int) and est["warm_tokens"] > 0
-              and est.get("cache_tier") in ("block", "exact"),
+              and est.get("cache_tier") in ("block", "exact", "ckpt"),
               f"warm={est.get('warm_tokens')} tier={est.get('cache_tier')}")
         check("estimate est_ttft_s is a non-negative number",
               isinstance(est.get("est_ttft_s"), (int, float)) and est["est_ttft_s"] >= 0,

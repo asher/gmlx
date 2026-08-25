@@ -1527,6 +1527,88 @@ def _assemble_from_record(manager, rec, geometry_check=None):
     return warm
 
 
+def _ckpt_scan(manager, tid: tuple, extra_hash: int, min_prefix_tokens: int,
+               layout) -> tuple:
+    """Candidate records for ``tid`` under the manager lock: the pinned
+    records whose ids are a strict prefix of the query at the same salt
+    and layout, plus the tallies the miss path reports (``gated``,
+    ``refused``, ``salted``, ``diverged``) and the index generation the
+    caller checks its assembly against. Pure: bumps no counters."""
+    n = len(tid)
+    idx = _ckpt_records(manager)
+    with manager.lock:
+        gen = int(getattr(manager, "_kq_ckpt_gen", 0))
+        cands, gated, refused = [], 0, 0
+        salted = diverged = 0
+        bs = int(getattr(manager, "block_size", 0) or 1)
+        for rec in idx.values():
+            # Last-token sentinel before the full slice compare:
+            # unrelated queries reject in O(1), so tallying refused
+            # matches here costs the hot path nothing and the miss
+            # path never rescans the index.
+            if rec.extra_hash != int(extra_hash):
+                if rec.ids and tid[:bs] == rec.ids[:bs]:
+                    salted += 1
+                continue
+            if (not rec.ids or rec.p > n
+                    or tid[rec.p - 1] != rec.ids[-1]
+                    or tid[:rec.p] != rec.ids):
+                # Same-chain records that diverge before their own p
+                # (first block matches, full slice does not) were
+                # invisible: the 9B probe showed adoption dying here
+                # with zero counters moving.
+                if (rec.ids and len(tid) >= bs
+                        and tid[:bs] == rec.ids[:bs]):
+                    diverged += 1
+                    if os.environ.get("GMLX_APC_CKPT_DEBUG"):
+                        m = 0
+                        lim = min(len(tid), rec.p)
+                        while m < lim and tid[m] == rec.ids[m]:
+                            m += 1
+                        _log.info(
+                            "APC ckpt diverged: rec.p=%d kind=%s "
+                            "layout=%s first mismatch at %d "
+                            "(query %r vs rec %r)",
+                            rec.p, rec.kind, rec.layout, m,
+                            tid[m:m + 4], rec.ids[m:m + 4])
+                continue
+            if (not min_prefix_tokens < rec.p < n
+                    or (layout is not None
+                        and tuple(layout) != rec.layout)):
+                refused += 1
+                continue
+            # Recurrent-state replay records serve identical resends
+            # only: at exactly one token past the record, the warm
+            # turn forwards a single token and stays bit-identical to
+            # armed cold. A longer suffix would chunk off the grid
+            # the record was built on and drift. Attention-only
+            # replay records split exactly and adopt freely.
+            if (rec.kind == "replay" and "arr" in (rec.layout or ())
+                    and rec.p != n - 1):
+                gated += 1
+                continue
+            cands.append(rec)
+    return cands, gated, refused, salted, diverged, gen
+
+
+def ckpt_peek(manager, token_ids, *, extra_hash: int = 0,
+              min_prefix_tokens: int = 0, layout=None) -> int:
+    """How deep the checkpoint tier could warm-start ``token_ids``: the
+    deepest pinned record's ``p``, or 0. The dry-run's probe: it neither
+    assembles a cache nor consults the disk skeleton, and moves no
+    counter. Never raises."""
+    if manager is None or token_ids is None:
+        return 0
+    try:
+        tid = tuple(int(t) for t in token_ids)
+        cands = _ckpt_scan(manager, tid, extra_hash, min_prefix_tokens,
+                           layout)[0]
+        return max((int(r.p) for r in cands), default=0)
+    except Exception:
+        _log.debug("APC ckpt peek failed", exc_info=True)
+        return 0
+
+
 def ckpt_lookup(
     manager: Any,
     token_ids,
@@ -1550,59 +1632,8 @@ def ckpt_lookup(
         ids = [int(t) for t in token_ids]
         tid = tuple(ids)
         idx = _ckpt_records(manager)
-        n = len(ids)
-        with manager.lock:
-            gen = int(getattr(manager, "_kq_ckpt_gen", 0))
-            cands, gated, refused = [], 0, 0
-            salted = diverged = 0
-            bs = int(getattr(manager, "block_size", 0) or 1)
-            for rec in idx.values():
-                # Last-token sentinel before the full slice compare:
-                # unrelated queries reject in O(1), so tallying refused
-                # matches here costs the hot path nothing and the miss
-                # path never rescans the index.
-                if rec.extra_hash != int(extra_hash):
-                    if rec.ids and tid[:bs] == rec.ids[:bs]:
-                        salted += 1
-                    continue
-                if (not rec.ids or rec.p > n
-                        or tid[rec.p - 1] != rec.ids[-1]
-                        or tid[:rec.p] != rec.ids):
-                    # Same-chain records that diverge before their own p
-                    # (first block matches, full slice does not) were
-                    # invisible: the 9B probe showed adoption dying here
-                    # with zero counters moving.
-                    if (rec.ids and len(tid) >= bs
-                            and tid[:bs] == rec.ids[:bs]):
-                        diverged += 1
-                        if os.environ.get("GMLX_APC_CKPT_DEBUG"):
-                            m = 0
-                            lim = min(len(tid), rec.p)
-                            while m < lim and tid[m] == rec.ids[m]:
-                                m += 1
-                            _log.info(
-                                "APC ckpt diverged: rec.p=%d kind=%s "
-                                "layout=%s first mismatch at %d "
-                                "(query %r vs rec %r)",
-                                rec.p, rec.kind, rec.layout, m,
-                                tid[m:m + 4], rec.ids[m:m + 4])
-                    continue
-                if (not min_prefix_tokens < rec.p < n
-                        or (layout is not None
-                            and tuple(layout) != rec.layout)):
-                    refused += 1
-                    continue
-                # Recurrent-state replay records serve identical resends
-                # only: at exactly one token past the record, the warm
-                # turn forwards a single token and stays bit-identical to
-                # armed cold. A longer suffix would chunk off the grid
-                # the record was built on and drift. Attention-only
-                # replay records split exactly and adopt freely.
-                if (rec.kind == "replay" and "arr" in (rec.layout or ())
-                        and rec.p != n - 1):
-                    gated += 1
-                    continue
-                cands.append(rec)
+        cands, gated, refused, salted, diverged, gen = _ckpt_scan(
+            manager, tid, extra_hash, min_prefix_tokens, layout)
         if gated:
             _ckpt_decline(manager, "replay_gate")
         if salted:

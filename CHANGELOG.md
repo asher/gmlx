@@ -30,8 +30,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `POST /v1/cache/reset` takes `{"model": "<id>"}`; with no body it now
   clears every resident model's cache, not just the request context's.
 - `POST /v1/estimate` (or `"dry_run": true` on chat completions): the
-  memory preflight as a query - prompt tokens, warm prefix tokens, KV
-  bytes needed, fits now / fits drained, first-token ETA.
+  memory preflight as a query - prompt tokens, warm prefix tokens (block
+  chain, exact index, or checkpoint-tier record), KV bytes needed, fits
+  now / fits drained, first-token ETA.
 - `GET /v1/capacity/plan?width=W&depth=D`: the fan-out policy answered
   from the capacity table, governor band and free slots.
 - `/v1/metrics`: `rates` section (aggregate live decode rate, recent

@@ -219,13 +219,25 @@ def _normalize_messages(messages) -> tuple:
     return out, media
 
 
-def _warm_tokens(manager, ids: list, extra_hash: int) -> tuple:
+def _warm_tokens(manager, ids: list, extra_hash: int, model=None) -> tuple:
     """``(warm_tokens, tier)``: how much of ``ids`` the APC already holds,
-    from the memory block chain and the exact-cache index. Neither probe
-    loads a cache; matched blocks are released at once."""
+    from the memory block chain, the exact-cache index and (for models on
+    the checkpoint tier) the pinned checkpoint records. No probe loads or
+    assembles a cache; matched blocks are released at once."""
     best, tier = 0, None
     if manager is None or len(ids) < 2:
         return best, tier
+    if model is not None:
+        try:
+            from .cache_snapshot import ckpt_peek
+            from .spec_engine import _ckpt_layout_for
+
+            n = ckpt_peek(manager, ids, extra_hash=extra_hash,
+                          layout=_ckpt_layout_for(model, int(manager.block_size)))
+            if n > best:
+                best, tier = int(n), "ckpt"
+        except Exception:
+            pass
     try:
         blocks, n = manager.lookup_prefix(ids, extra_hash=extra_hash)
         try:
@@ -415,7 +427,7 @@ def _estimate_bound(body, out, t0, path, pkg, rg, model, processor, config,
                 tenant=tenant_id, image_hash=0, media={},
                 model=getattr(model, "language_model", model),
                 processor=processor)
-        warm, tier = _warm_tokens(entry.apc_manager, ids, extra_hash)
+        warm, tier = _warm_tokens(entry.apc_manager, ids, extra_hash, model)
         out["warm_tokens"], out["cache_tier"] = warm, tier
     except Exception:
         _log.debug("estimate: apc probe failed", exc_info=True)
