@@ -183,6 +183,12 @@ class HyperConnection(nn.Module):
 
     def __call__(self, h: mx.array):
         B, T, hc, D = h.shape
+        if B * T <= 8 and self._hclr_ok(h.dtype):
+            norm, front, epi = _kq_hc()
+            xn = norm(h, self.norm.weight, self.norm.eps)
+            lo, inj = front(xn, self.down.weight, self.inject.weight,
+                            self.norm.weight.dtype)
+            return epi(lo, self.up.weight, xn), inj
         xn = self.norm(h)
         xf = xn.reshape(B, T, hc * D)
         lo = nn.silu(self.down(xf) * (1.0 / hc))
@@ -192,6 +198,28 @@ class HyperConnection(nn.Module):
             return mixed
         inj = 2.0 * mx.sigmoid(self.inject(xf) * (1.0 / hc))
         return mixed, inj
+
+    def _hclr_ok(self, h_dtype) -> bool:
+        """Fused-path eligibility: kq hc_lowrank ops present, q8_0 down/up
+        wire, f32 inject, half norm gain, kernel-aligned shapes. Cached per
+        module after the first call (weights are frozen post-load)."""
+        ok = self.__dict__.get("_hclr_cache")
+        if ok is None:
+            ok = (
+                self.hc == 4
+                and "inject" in self
+                and getattr(self.down, "kquant_type", None) == "q8_0"
+                and getattr(self.up, "kquant_type", None) == "q8_0"
+                and self.inject.weight.dtype == mx.float32
+                and self.norm.weight.dtype in (mx.float16, mx.bfloat16)
+                and self.hidden % 64 == 0
+                and self.down.weight.shape[0] % 32 == 0
+                and self.down.weight.shape[0] <= 512
+            )
+            self.__dict__["_hclr_cache"] = ok
+        return (ok and _kq_hc() is not None
+                and (h_dtype == mx.float32
+                     or h_dtype == self.norm.weight.dtype))
 
 
 def _hc_combine(h: mx.array, out: mx.array, inject: mx.array) -> mx.array:
@@ -364,6 +392,30 @@ class GatedDeltaNet(nn.Module):
 _KQ_TOPK_UNSET = object()
 _kq_topk_fn = _KQ_TOPK_UNSET
 _kq_score_fn = _KQ_TOPK_UNSET
+_kq_hc_fns = _KQ_TOPK_UNSET
+
+
+def _kq_hc():
+    """kq fused low-rank hyper-connection (norm, front, epilogue) ops, or
+    None (eager op chain). ``GMLX_Q4_HC_FUSED=0`` disables."""
+    global _kq_hc_fns
+    if _kq_hc_fns is _KQ_TOPK_UNSET:
+        from .envflags import env_bool
+        fns = None
+        if env_bool("GMLX_Q4_HC_FUSED", True):
+            try:
+                import mlx_kquant as _kq
+                norm = getattr(_kq, "hc_lowrank_norm", None)
+                front = getattr(_kq, "hc_lowrank_front", None)
+                epi = getattr(_kq, "hc_lowrank_epilogue", None)
+                if (norm is not None and front is not None
+                        and epi is not None
+                        and mx.default_device().type == mx.DeviceType.gpu):
+                    fns = (norm, front, epi)
+            except ImportError:
+                pass
+        _kq_hc_fns = fns
+    return _kq_hc_fns
 
 
 def _kq_topk():
