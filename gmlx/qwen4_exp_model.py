@@ -394,6 +394,7 @@ _kq_topk_fn = _KQ_TOPK_UNSET
 _kq_score_fn = _KQ_TOPK_UNSET
 _kq_hc_fns = _KQ_TOPK_UNSET
 _kq_paged_fn = _KQ_TOPK_UNSET
+_kq_bs_fn = _KQ_TOPK_UNSET
 
 
 def _kq_hc():
@@ -446,6 +447,24 @@ def _kq_paged():
                 pass
         _kq_paged_fn = fn
     return _kq_paged_fn
+
+
+def _kq_bs_prefill():
+    """kq block-sparse FA prefill over QSA-selected 4-row pages, or None
+    (dense-masked stock FA). ``GMLX_Q4_QSA_BS_PREFILL=0`` disables."""
+    global _kq_bs_fn
+    if _kq_bs_fn is _KQ_TOPK_UNSET:
+        from .envflags import env_bool
+        fn = None
+        if env_bool("GMLX_Q4_QSA_BS_PREFILL", True):
+            try:
+                import mlx_kquant as _kq
+                if mx.default_device().type == mx.DeviceType.gpu:
+                    fn = getattr(_kq, "sdpa_prefill_block_sparse", None)
+            except ImportError:
+                pass
+        _kq_bs_fn = fn
+    return _kq_bs_fn
 
 
 def _kq_topk():
@@ -845,6 +864,41 @@ class Attention(nn.Module):
             mask=bias.reshape(B * L, 1, 1, W))
         return out.reshape(B, L, H, D).transpose(0, 2, 1, 3)
 
+    def _block_sparse_prefill(self, q, k, v, sel, offset, key_len, bs):
+        """Prefill chunk with every query sparse: fold queries into 4-wide
+        windows and walk each window's own page list (union of its queries'
+        selected blocks plus the window's tail span) through the kq
+        block-sparse FA kernel. One host sync reads the widest union;
+        prefill graphs rebuild per chunk anyway."""
+        L = q.shape[2]
+        r = self.ratio
+        n_qt = L // r
+        nb_total = (key_len + r - 1) // r
+        topk = self.indexer.block_topk
+        g = sel[0].astype(mx.int32).reshape(n_qt, r * topk)
+        w4 = offset + mx.arange(n_qt, dtype=mx.int32) * r
+        span = mx.stack(
+            [w4 // r, mx.minimum((w4 + r) // r, nb_total - 1)], axis=1)
+        srt = mx.sort(mx.concatenate([g, span], axis=1), axis=1)
+        newv = mx.concatenate(
+            [mx.ones((n_qt, 1), dtype=mx.bool_), srt[:, 1:] != srt[:, :-1]],
+            axis=1)
+        counts = newv.sum(axis=1).astype(mx.int32)
+        max_p = int(counts.max())  # host sync
+        slot = mx.cumsum(newv.astype(mx.int32), axis=1) - 1
+        pages = mx.put_along_axis(
+            mx.full((n_qt, max_p), -1, dtype=mx.int32), slot, srt, axis=1)
+        lut = mx.put_along_axis(
+            mx.zeros((n_qt, nb_total), dtype=mx.int32), srt, slot, axis=1)
+        pm = mx.zeros((n_qt, max_p), dtype=mx.uint16)
+        selq = sel[0].astype(mx.int32).reshape(n_qt, r, topk)
+        for qi in range(r):
+            slots_q = mx.take_along_axis(lut, selq[:, qi], axis=1)
+            pm = pm | mx.put_along_axis(
+                mx.zeros((n_qt, max_p), dtype=mx.uint16), slots_q,
+                mx.array(1 << qi, dtype=mx.uint16), axis=1)
+        return bs(q, k, v, self.scale, pages, pm, counts, offset)
+
     def _paged_attention(self, q, k, v, sel, key_len, paged):
         """Decode (L=1): kq page-gather sdpa straight over the KV cache
         with the selected 4-row blocks as pages -- no per-token K/V copy.
@@ -917,6 +971,12 @@ class Attention(nn.Module):
                 out = self._paged_attention(q, k, v, sel, key_len, paged)
             elif L <= 8 and all_sparse and not isinstance(mask, mx.array):
                 out = self._gathered_attention(q, k, v, sel, complete, offset, L)
+            elif (B == 1 and all_sparse and not isinstance(mask, mx.array)
+                  and L % 4 == 0 and self.ratio == 4 and D == 256
+                  and H == 12 * Hkv and q.dtype in (mx.bfloat16, mx.float16)
+                  and (bs := _kq_bs_prefill()) is not None):
+                out = self._block_sparse_prefill(q, k, v, sel, offset,
+                                                 key_len, bs)
             else:
                 qsa = _qsa_token_mask(sel, complete, offset, L, key_len,
                                       self.ratio, self.indexer.block_topk)
