@@ -44,6 +44,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   still 409.
 - Prefix cache key salt no longer hashes the embedding matrix per request;
   older on-disk prefix caches miss once and are rewritten.
+- Stale runfiles no longer cause a running server refusal, with cleanup support.
 
 ## [0.4.1] - 2026-08-24
 

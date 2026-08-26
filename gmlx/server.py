@@ -1064,14 +1064,27 @@ def _add_target_args(ap: argparse.ArgumentParser) -> None:
                     "else 8080).")
 
 
-def _ambiguous_runs(a) -> list | None:
-    """The managed runfiles when a bare lifecycle verb has more than one server
-    to choose from (no --host/--port given), else None."""
+def _ambiguous_runs(a, *, prune: bool = False) -> list | None:
+    """The live managed runfiles when a bare lifecycle verb has more than
+    one server to choose from (no --host/--port given), else None. Stale
+    runfiles (dead or recycled pid) never make a verb ambiguous: with
+    ``prune`` they are cleared here and reported; otherwise they are just
+    left out of the count (``status`` lists them itself)."""
     if a.host is not None or a.port is not None:
         return None
     from . import lifecycle
-    runs = lifecycle.list_runs()
-    return runs if len(runs) > 1 else None
+    live, stale = lifecycle.classify_runs()
+    if prune and stale:
+        removed = lifecycle.prune_stale_runs()
+        if removed:
+            print(_stale_summary(removed, "cleared"), file=sys.stderr)
+    return live if len(live) > 1 else None
+
+
+def _stale_summary(runs: list, verb: str) -> str:
+    what = ", ".join(f"{r.get('host')}:{r.get('port')} ({r.get('stale_reason')}, "
+                     f"{r.get('age')})" for r in runs)
+    return f"{verb} {len(runs)} stale runfile{'s' if len(runs) != 1 else ''}: {what}"
 
 
 def _refuse_ambiguous(prog: str, runs: list) -> int:
@@ -1082,6 +1095,17 @@ def _refuse_ambiguous(prog: str, runs: list) -> int:
     return 2
 
 
+def _cmd_stop_stale(prog: str) -> int:
+    from . import lifecycle
+    _live, stale = lifecycle.classify_runs()
+    if not stale:
+        print("no stale runfiles")
+        return 0
+    removed = lifecycle.prune_stale_runs()
+    print(_stale_summary(removed, "cleared") if removed else "no stale runfiles")
+    return 0
+
+
 def _cmd_stop(argv: list, prog: str = "gmlx stop") -> int:
     ap = argparse.ArgumentParser(
         prog=prog,
@@ -1090,9 +1114,15 @@ def _cmd_stop(argv: list, prog: str = "gmlx stop") -> int:
     ap.add_argument("--timeout", type=float, default=15.0,
                     help="Seconds to wait for graceful shutdown before SIGKILL "
                          "(SIGKILL cuts any in-flight generation). Default 15.")
+    ap.add_argument("--stale", action="store_true",
+                    help="Only clear runfiles whose server is gone (exited or "
+                         "pid recycled); signals nothing. A bare `stop` clears "
+                         "them too, on its way to the live server.")
     a = ap.parse_args(argv)
     from . import lifecycle
-    runs = _ambiguous_runs(a)
+    if a.stale:
+        return _cmd_stop_stale(prog)
+    runs = _ambiguous_runs(a, prune=True)
     if runs:
         return _refuse_ambiguous(prog, runs)
     host, port = lifecycle.auto_target(a.host, a.port)
@@ -1110,7 +1140,7 @@ def _cmd_restart(argv: list, prog: str = "gmlx restart") -> int:
                     help="Readiness wait for the new process (default 40).")
     a = ap.parse_args(argv)
     from . import lifecycle
-    runs = _ambiguous_runs(a)
+    runs = _ambiguous_runs(a, prune=True)
     if runs:
         return _refuse_ambiguous(prog, runs)
     host, port = lifecycle.auto_target(a.host, a.port)
@@ -1127,6 +1157,8 @@ def _cmd_status(argv: list, prog: str = "gmlx status") -> int:
     ap.add_argument("--json", action="store_true", help="Emit JSON.")
     a = ap.parse_args(argv)
     from . import lifecycle
+    stale = [] if (a.host is not None or a.port is not None) \
+        else lifecycle.classify_runs()[1]
     runs = _ambiguous_runs(a)
     if runs:
         # Several managed servers: report on all of them instead of guessing.
@@ -1134,12 +1166,30 @@ def _cmd_status(argv: list, prog: str = "gmlx status") -> int:
             infos = [lifecycle.status_info(r.get("host"), r.get("port"))
                      for r in runs]
             infos = [i for i in infos if i]
-            print(json.dumps(infos, indent=2))
+            print(json.dumps({"servers": infos, "stale": stale}, indent=2))
             return 0 if any(i["running"] for i in infos) else 3
         rcs = [lifecycle.status(r.get("host"), r.get("port")) for r in runs]
+        _print_stale(stale)
         return 0 if 0 in rcs else 3
     host, port = lifecycle.auto_target(a.host, a.port)
-    return lifecycle.status(host, port, as_json=a.json)
+    rc = lifecycle.status(host, port, as_json=a.json)
+    # A bare status on the one live server still owes the user the stale
+    # leftovers (an e2e harness or a crash leaves them; nothing else lists
+    # them), minus the target itself, which status() just described.
+    if not a.json:
+        _print_stale([r for r in stale
+                      if (r.get("host"), r.get("port")) != (host, port)])
+    return rc
+
+
+def _print_stale(stale: list) -> None:
+    if not stale:
+        return
+    for r in stale:
+        print(f"stale runfile {r.get('host')}:{r.get('port')}: "
+              f"{r.get('stale_reason')}, {r.get('age')}")
+    print(f"  {len(stale)} stale runfile{'s' if len(stale) != 1 else ''} - "
+          f"`gmlx stop --stale` clears them")
 
 
 def _cmd_logs(argv: list, prog: str = "gmlx logs") -> int:
