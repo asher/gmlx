@@ -62,6 +62,9 @@ GGUF_ARCH_TO_MODEL_TYPE = {
     "gemma-embedding": "gemma_embedding",
     "qwen35": "qwen3_5",
     "qwen35moe": "qwen3_5_moe",
+    # Qwen3.8-Flash-Next: the qwen35 hybrid + hyper-connections + QSA sparse
+    # attention + PLE n-gram embeddings; vendored gmlx.qwen4_exp_model.
+    "qwen4exp": "qwen4_exp",
     "qwen3": "qwen3",
     "qwen3moe": "qwen3_moe",
     # Qwen3-VL / Qwen3-Omni text tower. Structurally a Qwen3-MoE (identical
@@ -2951,6 +2954,110 @@ def _print_summary(config: dict, arch: str) -> None:
 # truth for which arches synthesize_config() completes (`_supported()` is its
 # key set). Multi-arch synthesizers bind their arch via lambda so every entry
 # is callable as fn(meta, shapes, config).
+# qwen4exp (Qwen3.8-Flash-Next)
+
+def _synth_qwen4exp(meta, shapes, config: dict) -> None:
+    """The qwen35 hybrid fields, plus hyper-connections, the QSA indexer and
+    the PLE n-gram table. Field names match ``gmlx.qwen4_exp_model.ModelArgs``.
+    The three PLE hash constant arrays are UINT64 in the GGUF; the reader
+    hands them back as numpy uint64, ``int()`` keeps them exact."""
+    arch = "qwen4exp"
+    _synth_qwen35(meta, shapes, config, arch)
+
+    n_layer = config["num_hidden_layers"]
+    head_dim = config.get("head_dim") or (
+        config["hidden_size"] // config["num_attention_heads"])
+    n_rot = _read_int(meta, f"{arch}.rope.dimension_count")
+    if n_rot:
+        config["partial_rotary_factor"] = n_rot / head_dim
+    config["mrope_section"] = config["rope_parameters"]["mrope_section"]
+
+    config["num_experts"] = _require(
+        _read_int(meta, f"{arch}.expert_count"),
+        arch=arch, gguf_field=f"{arch}.expert_count")
+    config["num_experts_per_tok"] = _require(
+        _read_int(meta, f"{arch}.expert_used_count"),
+        arch=arch, gguf_field=f"{arch}.expert_used_count")
+    config["moe_intermediate_size"] = _require(
+        _read_int(meta, f"{arch}.expert_feed_forward_length"),
+        arch=arch, gguf_field=f"{arch}.expert_feed_forward_length")
+    config["shared_expert_intermediate_size"] = (
+        _read_int(meta, f"{arch}.expert_shared_feed_forward_length")
+        or config["moe_intermediate_size"])
+    config["norm_topk_prob"] = True
+
+    config["hc_count"] = _require(
+        _read_int(meta, f"{arch}.hyper_connection.count"),
+        arch=arch, gguf_field=f"{arch}.hyper_connection.count")
+    config["hc_lowrank"] = _require(
+        _read_int(meta, f"{arch}.hyper_connection.low_rank"),
+        arch=arch, gguf_field=f"{arch}.hyper_connection.low_rank")
+
+    # QSA indexer: per-layer compress ratios (0 = dense layer / GDN layer).
+    # A file without the indexer keys loads dense, as llama.cpp does.
+    ratios = _read_int_array(meta, f"{arch}.attention.compress_ratios")
+    if ratios:
+        if len(ratios) < n_layer:
+            raise ValueError(
+                f"qwen4exp synth: attention.compress_ratios has {len(ratios)} "
+                f"entries for {n_layer} layers")
+        config["compress_ratios"] = [int(r) for r in ratios[:n_layer]]
+        config["indexer_n_heads"] = _require(
+            _read_int(meta, f"{arch}.attention.indexer.head_count"),
+            arch=arch, gguf_field=f"{arch}.attention.indexer.head_count")
+        config["indexer_head_dim"] = _require(
+            _read_int(meta, f"{arch}.attention.indexer.key_length"),
+            arch=arch, gguf_field=f"{arch}.attention.indexer.key_length")
+        config["indexer_budget"] = _require(
+            _read_int(meta, f"{arch}.attention.indexer.top_k"),
+            arch=arch, gguf_field=f"{arch}.attention.indexer.top_k")
+    else:
+        config["compress_ratios"] = [0] * n_layer
+
+    # PLE n-gram hash embeddings (layer ids are 0-based in the GGUF).
+    ple_layers = _read_int_array(meta, f"{arch}.ple.layers")
+    if ple_layers:
+        config["ple_layer_ids"] = [int(i) for i in ple_layers]
+        for cfg, key in (("ple_ngram_size", "ngram_size"),
+                         ("ple_heads_per_ngram", "heads_per_ngram"),
+                         ("ple_conv_kernel", "conv_kernel"),
+                         ("ple_eos_token_id", "eos_token_id")):
+            config[cfg] = _require(
+                _read_int(meta, f"{arch}.ple.{key}"),
+                arch=arch, gguf_field=f"{arch}.ple.{key}")
+        config["ple_image_token_id"] = _read_int(meta, f"{arch}.ple.image_token_id")
+        for cfg, key in (("ple_layer_multipliers", "layer_multipliers"),
+                         ("ple_head_offsets", "head_offsets"),
+                         ("ple_head_vocab_sizes", "head_vocab_sizes")):
+            vals = _read_int_array(meta, f"{arch}.ple.{key}")
+            if not vals:
+                raise ValueError(
+                    f"qwen4exp synth: missing {arch}.ple.{key} (needed to "
+                    f"hash n-grams into the PLE table)")
+            config[cfg] = [int(v) for v in vals]
+        n_heads = (config["ple_ngram_size"] - 1) * config["ple_heads_per_ngram"]
+        if (len(config["ple_head_offsets"]) != n_heads
+                or len(config["ple_head_vocab_sizes"]) != n_heads):
+            raise ValueError(
+                f"qwen4exp synth: {n_heads} PLE heads but "
+                f"{len(config['ple_head_offsets'])} offsets / "
+                f"{len(config['ple_head_vocab_sizes'])} vocab sizes")
+        table = shapes.get("per_layer_token_embd.weight")
+        if table is None:
+            raise ValueError(
+                "qwen4exp synth: ple.layers set but per_layer_token_embd.weight "
+                "is missing")
+        config["ple_embed_dim"] = int(table[0])
+        config["ple_table_rows"] = int(table[1])
+        dim_meta = _read_int(meta, f"{arch}.embedding_length_per_layer_input")
+        if dim_meta and dim_meta != config["ple_embed_dim"]:
+            raise ValueError(
+                f"qwen4exp synth: embedding_length_per_layer_input={dim_meta} "
+                f"but the PLE table row is {config['ple_embed_dim']} wide")
+    else:
+        config["ple_layer_ids"] = []
+
+
 _SYNTH = {
     "gemma4": _synth_gemma4,
     "qwen3": _synth_qwen3,
@@ -2964,6 +3071,7 @@ _SYNTH = {
     "glm4": _synth_glm4,
     "qwen35": lambda m, s, c: _synth_qwen35(m, s, c, "qwen35"),
     "qwen35moe": lambda m, s, c: _synth_qwen35(m, s, c, "qwen35moe"),
+    "qwen4exp": _synth_qwen4exp,
     "mistral3": _synth_mistral3,
     "nemotron_h_moe": _synth_nemotron_h_moe,
     "deepseek2": _synth_deepseek2,

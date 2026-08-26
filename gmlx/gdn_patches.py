@@ -142,7 +142,10 @@ def _needs_tiled_v_patch(config: dict) -> bool:
     group order), and mlx-lm's qwen3_next consumes grouped directly - the
     tiled fixup would corrupt its K->V mapping.
     """
-    if config.get("model_type") == "qwen3_next":
+    if config.get("model_type") in ("qwen3_next", "qwen4_exp"):
+        # qwen4_exp: V heads ARE tiled on the wire, but the vendored
+        # GatedDeltaNet tiles q/k explicitly before the scan, so it needs no
+        # module-global fixup (and must not inherit the cross-load hazard).
         return False
     k = config.get("linear_num_key_heads", 0)
     v = config.get("linear_num_value_heads", 0)

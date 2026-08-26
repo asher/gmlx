@@ -1351,6 +1351,144 @@ def test_deepseek4_synth_instantiates():
     assert out.shape[-1] == VOCAB
 
 
+def _qwen4exp_meta(with_indexer: bool = True, with_ple: bool = True) -> dict:
+    arch = "qwen4exp"
+    m = _base_meta(arch)
+    m[f"{arch}.block_count"] = 4
+    m[f"{arch}.attention.head_count"] = 4
+    m[f"{arch}.attention.head_count_kv"] = 2
+    m[f"{arch}.attention.key_length"] = 16
+    m[f"{arch}.attention.value_length"] = 16
+    m[f"{arch}.rope.freq_base"] = 10000000.0
+    m[f"{arch}.rope.dimension_count"] = 8      # partial rotary 8 of 16
+    m[f"{arch}.rope.dimension_sections"] = [3, 3, 2, 0]
+    m[f"{arch}.full_attention_interval"] = 4
+    m[f"{arch}.ssm.conv_kernel"] = 4
+    m[f"{arch}.ssm.state_size"] = 32
+    m[f"{arch}.ssm.group_count"] = 2           # k heads
+    m[f"{arch}.ssm.time_step_rank"] = 4        # v heads
+    m[f"{arch}.ssm.inner_size"] = 128          # 4 v heads x 32
+    m[f"{arch}.expert_count"] = 8
+    m[f"{arch}.expert_used_count"] = 2
+    m[f"{arch}.expert_feed_forward_length"] = 16
+    m[f"{arch}.expert_shared_feed_forward_length"] = 16
+    m[f"{arch}.hyper_connection.count"] = 4
+    m[f"{arch}.hyper_connection.low_rank"] = 8
+    if with_indexer:
+        m[f"{arch}.attention.indexer.head_count"] = 2
+        m[f"{arch}.attention.indexer.key_length"] = 32
+        m[f"{arch}.attention.indexer.top_k"] = 8     # 2 blocks of 4
+        m[f"{arch}.attention.compress_ratios"] = [0, 0, 0, 4]
+    if with_ple:
+        m[f"{arch}.ple.layers"] = [1]
+        m[f"{arch}.ple.ngram_size"] = 3
+        m[f"{arch}.ple.heads_per_ngram"] = 8
+        m[f"{arch}.ple.conv_kernel"] = 4
+        m[f"{arch}.ple.eos_token_id"] = 1
+        m[f"{arch}.ple.image_token_id"] = 2
+        m[f"{arch}.embedding_length_per_layer_input"] = 8
+        # the real 45-bit multipliers: the hash must survive the KV round trip
+        m[f"{arch}.ple.layer_multipliers"] = [
+            23703573157769, 20109073645365, 8052911324071]
+        m[f"{arch}.ple.head_offsets"] = [50 * i for i in range(16)]
+        m[f"{arch}.ple.head_vocab_sizes"] = [50] * 16
+    return m
+
+
+# conv_dim = 2 * (2 k heads x 32) + 128 = 256; shapes in GGUF native order.
+_QWEN4EXP_SHAPES = {
+    "output.weight": [64, VOCAB],
+    "blk.0.ssm_conv1d.weight": [4, 256],
+    "blk.0.ssm_norm.weight": [32],
+    "blk.0.ssm_a": [4],
+    "per_layer_token_embd.weight": [8, 800],
+}
+
+
+def test_qwen4exp_synth_instantiates():
+    # Qwen3.8-Flash-Next: qwen35 GDN hybrid + hyper-connections + QSA sparse
+    # attention + PLE n-gram hash embeddings. A tiny prefill + decode through
+    # all four mechanisms (the 12-token prefill crosses the 2-block sparse
+    # budget) proves config/model agree, and that the cached step matches a
+    # full recompute.
+    from gmlx import qwen4_exp_model
+    qwen4_exp_model.ensure_registered()
+
+    c = synthesize_config(_qwen4exp_meta(), tensor_shapes=_QWEN4EXP_SHAPES)
+    assert c["model_type"] == "qwen4_exp"
+    assert c["linear_num_value_heads"] == 4 and c["linear_num_key_heads"] == 2
+    assert c["linear_key_head_dim"] == 32 and c["linear_value_head_dim"] == 32
+    assert c["kv_head_layout"] == "tiled"
+    assert c["partial_rotary_factor"] == pytest.approx(0.5)
+    assert c["mrope_section"] == [3, 3, 2]
+    assert c["num_experts"] == 8 and c["num_experts_per_tok"] == 2
+    assert c["moe_intermediate_size"] == 16
+    assert c["shared_expert_intermediate_size"] == 16
+    assert c["hc_count"] == 4 and c["hc_lowrank"] == 8
+    assert c["compress_ratios"] == [0, 0, 0, 4]
+    assert c["indexer_n_heads"] == 2 and c["indexer_head_dim"] == 32
+    assert c["indexer_budget"] == 8
+    assert c["ple_layer_ids"] == [1] and c["ple_ngram_size"] == 3
+    assert c["ple_heads_per_ngram"] == 8 and c["ple_conv_kernel"] == 4
+    assert c["ple_eos_token_id"] == 1 and c["ple_image_token_id"] == 2
+    assert c["ple_layer_multipliers"] == [
+        23703573157769, 20109073645365, 8052911324071]
+    assert len(c["ple_head_offsets"]) == 16
+    assert c["ple_embed_dim"] == 8 and c["ple_table_rows"] == 800
+    assert c["tie_word_embeddings"] is False
+    Model, ModelArgs = _get_classes(c)
+    model = Model(ModelArgs.from_dict(c))
+    mx.eval(model.parameters())
+    assert [layer.is_linear for layer in model.layers] == [True, True, True, False]
+    assert "ple" in model.layers[1] and "ple_embed" in model.model
+    cache = model.make_cache()
+    ids = mx.array([[3, 5, 7, 1, 9, 2, 4, 6, 8, 10, 11, 12]])
+    out = model(ids, cache=cache)
+    mx.eval(out)
+    assert out.shape == (1, 12, VOCAB)
+    step = mx.array([[13]])
+    out = model(step, cache=cache)
+    mx.eval(out)
+    full = model(mx.concatenate([ids, step], axis=1))
+    mx.eval(full)
+    assert mx.abs(full[0, -1] - out[0, -1]).max().item() < 1e-4
+    assert cache[3].offset == 13 and cache[3].n_blocks == 3
+
+
+def test_qwen4exp_synth_dense_without_indexer_and_ple():
+    # No indexer keys and no ple.layers: every attention layer is dense and no
+    # PLE block is built (llama.cpp builds the same dense graph).
+    from gmlx import qwen4_exp_model
+    qwen4_exp_model.ensure_registered()
+    shapes = {k: v for k, v in _QWEN4EXP_SHAPES.items()
+              if k != "per_layer_token_embd.weight"}
+    c = synthesize_config(_qwen4exp_meta(with_indexer=False, with_ple=False),
+                          tensor_shapes=shapes)
+    assert c["compress_ratios"] == [0, 0, 0, 0] and c["ple_layer_ids"] == []
+    Model, ModelArgs = _get_classes(c)
+    model = Model(ModelArgs.from_dict(c))
+    assert "ple" not in model.layers[1] and "ple_embed" not in model.model
+    assert "indexer" not in model.layers[3].self_attn
+
+
+def test_qwen4exp_requires_hyper_connection_keys():
+    m = _qwen4exp_meta()
+    del m["qwen4exp.hyper_connection.count"]
+    with pytest.raises(ValueError, match="hyper_connection.count"):
+        synthesize_config(m, tensor_shapes=_QWEN4EXP_SHAPES)
+
+
+def test_qwen4exp_ple_needs_table_and_hash_constants():
+    m = _qwen4exp_meta()
+    shapes = {k: v for k, v in _QWEN4EXP_SHAPES.items()
+              if k != "per_layer_token_embd.weight"}
+    with pytest.raises(ValueError, match="per_layer_token_embd"):
+        synthesize_config(m, tensor_shapes=shapes)
+    del m["qwen4exp.ple.layer_multipliers"]
+    with pytest.raises(ValueError, match="layer_multipliers"):
+        synthesize_config(m, tensor_shapes=_QWEN4EXP_SHAPES)
+
+
 def test_deepseek4_layer_count_not_nextn_subtracted():
     # nextn_predict_layers=1 is in the metadata but the MTP layer ships in a
     # separate GGUF - block_count already excludes it. The universal

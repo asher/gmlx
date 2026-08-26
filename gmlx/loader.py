@@ -931,6 +931,13 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         from . import kimi_k3_model
 
         kimi_k3_model.ensure_registered()
+    if mt == "qwen4_exp":
+        # Neither pinned mlx-lm nor mlx-vlm ships qwen4_exp (llama.cpp PR
+        # #27742); same vendored-registration pattern as deepseek_v4, plus
+        # QSAKVCache injection into the cache modules.
+        from . import qwen4_exp_model
+
+        qwen4_exp_model.ensure_registered()
     if mt == "muse_glimmer":
         # mlx-lm ships no muse_glimmer module (afmoe is the nearest relative);
         # same vendored-registration pattern as kimi_k3. The tool parser

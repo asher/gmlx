@@ -45,7 +45,7 @@ FAMILIES: dict[str, dict] = {
     # Covers Qwen3.5 (same thinking/coding points) and Qwen3-Next.
     "qwen3.6": {
         "label": "Qwen3.5 / 3.6 / 3.8",
-        "arches": ("qwen35", "qwen35moe", "qwen3next"),
+        "arches": ("qwen35", "qwen35moe", "qwen3next", "qwen4exp"),
         "base": {"sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 20,
                               "min_p": 0.0}},
         "intents": {
