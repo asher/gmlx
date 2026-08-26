@@ -575,9 +575,13 @@ def test_profile_label_is_stable_across_acquires_and_unique_per_entry():
         # two labels, no duplicate series
         pool.acquire("/abs/a.gguf", "/abs/lora.gguf", "auto")
         pool.acquire("/abs/a.gguf", None, "auto", cache_key_extra=("kv4",))
+        # ... and a service-kind route (--embeddings) on the same GGUF: the
+        # kind is the only key component that differs
+        pool.acquire("/abs/a.gguf", None, "embedding")
         labs = labels()
-        assert len(labs) == 3 and len({tuple(sorted(d.items())) for d in labs}) == 3
+        assert len(labs) == 4 and len({tuple(sorted(d.items())) for d in labs}) == 4
         assert {"model": "a.gguf", "profile": "lora.gguf"} in labs
+        assert {"model": "a.gguf", "profile": "embedding"} in labs
         pool.release(e)
     finally:
         pkg._kq_residency_pool = saved

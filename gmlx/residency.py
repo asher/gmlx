@@ -167,13 +167,21 @@ def profile_label(cache_key: tuple) -> str:
     when neither applies. Unique per entry (the pool is keyed on
     ``cache_key``) and unchanged for the entry's lifetime and across
     reloads of the same config - a metrics label, unlike ``seq``, which
-    is the LRU clock and re-stamps on every acquire."""
+    is the LRU clock and re-stamps on every acquire. Every key component
+    but the path contributes: adapter, model kind (when not the chat
+    default), load-signature extras."""
     import hashlib
 
     parts = []
     adapter = cache_key[1] if len(cache_key) > 1 else None
     if adapter:
         parts.append(os.path.basename(str(adapter)))
+    # model_kind is part of the key too: an --embeddings / --rerank / audio
+    # route pointed at a GGUF that also serves chat is a second entry with
+    # the same adapter and extras.
+    kind = cache_key[2] if len(cache_key) > 2 else None
+    if kind and str(kind) not in ("auto", "text_generation"):
+        parts.append(str(kind))
     extras = tuple(cache_key[3:])
     if extras:
         parts.append(hashlib.blake2b(repr(extras).encode(),
