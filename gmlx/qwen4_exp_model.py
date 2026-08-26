@@ -393,6 +393,7 @@ _KQ_TOPK_UNSET = object()
 _kq_topk_fn = _KQ_TOPK_UNSET
 _kq_score_fn = _KQ_TOPK_UNSET
 _kq_hc_fns = _KQ_TOPK_UNSET
+_kq_paged_fn = _KQ_TOPK_UNSET
 
 
 def _kq_hc():
@@ -416,6 +417,35 @@ def _kq_hc():
                 pass
         _kq_hc_fns = fns
     return _kq_hc_fns
+
+
+def _kq_paged():
+    """kq page-gather decode sdpa with 4-row pages at head_dim 256, or
+    None (gathered-KV eager path). ``GMLX_Q4_QSA_PAGED_SDPA=0`` disables.
+    Requires a kq build whose sdpa_decode_gqa_paged accepts tile_c=4
+    (probed once with a dry call)."""
+    global _kq_paged_fn
+    if _kq_paged_fn is _KQ_TOPK_UNSET:
+        from .envflags import env_bool
+        fn = None
+        if env_bool("GMLX_Q4_QSA_PAGED_SDPA", True):
+            try:
+                import mlx_kquant as _kq
+                cand = getattr(_kq, "sdpa_decode_gqa_paged", None)
+                if cand is not None and mx.default_device().type == mx.DeviceType.gpu:
+                    try:
+                        cand(mx.zeros((1, 2, 1, 256), dtype=mx.bfloat16),
+                             mx.zeros((1, 1, 8, 256), dtype=mx.bfloat16),
+                             mx.zeros((1, 1, 8, 256), dtype=mx.bfloat16),
+                             1.0, mx.zeros((1, 1, 2), dtype=mx.int32),
+                             tile_c=4)
+                        fn = cand
+                    except (TypeError, ValueError):
+                        fn = None  # older kq: fixed 16-row pages
+            except ImportError:
+                pass
+        _kq_paged_fn = fn
+    return _kq_paged_fn
 
 
 def _kq_topk():
@@ -815,6 +845,20 @@ class Attention(nn.Module):
             mask=bias.reshape(B * L, 1, 1, W))
         return out.reshape(B, L, H, D).transpose(0, 2, 1, 3)
 
+    def _paged_attention(self, q, k, v, sel, key_len, paged):
+        """Decode (L=1): kq page-gather sdpa straight over the KV cache
+        with the selected 4-row blocks as pages -- no per-token K/V copy.
+        The partial tail block is appended when present; a full tail
+        contributes nothing in the gathered path and is omitted here."""
+        B = q.shape[0]
+        Hkv = k.shape[1]
+        pages = sel[:, 0, :].astype(mx.int32)
+        if key_len % self.ratio:
+            tail = mx.full((B, 1), key_len // self.ratio, dtype=mx.int32)
+            pages = mx.concatenate([pages, tail], axis=-1)
+        pages = mx.broadcast_to(pages[:, None, :], (B, Hkv, pages.shape[-1]))
+        return paged(q, k, v, self.scale, pages, tile_c=4)
+
     def __call__(self, x: mx.array, mask=None, cache=None,
                  positions=None) -> mx.array:
         """``positions`` is the ``[3, B, L]`` mrope position block for this
@@ -866,7 +910,12 @@ class Attention(nn.Module):
             sel, complete = selection
             key_len = k.shape[2]
             all_sparse = (offset + 1) // self.ratio > self.indexer.block_topk
-            if L <= 8 and all_sparse and not isinstance(mask, mx.array):
+            paged = _kq_paged() if (
+                L == 1 and self.ratio == 4 and D == 256
+                and q.dtype in (mx.bfloat16, mx.float16)) else None
+            if paged is not None and all_sparse and not isinstance(mask, mx.array):
+                out = self._paged_attention(q, k, v, sel, key_len, paged)
+            elif L <= 8 and all_sparse and not isinstance(mask, mx.array):
                 out = self._gathered_attention(q, k, v, sel, complete, offset, L)
             else:
                 qsa = _qsa_token_mask(sel, complete, offset, L, key_len,
