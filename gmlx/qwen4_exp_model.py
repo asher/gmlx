@@ -363,6 +363,7 @@ class GatedDeltaNet(nn.Module):
 
 _KQ_TOPK_UNSET = object()
 _kq_topk_fn = _KQ_TOPK_UNSET
+_kq_score_fn = _KQ_TOPK_UNSET
 
 
 def _kq_topk():
@@ -381,6 +382,33 @@ def _kq_topk():
                 pass
         _kq_topk_fn = fn
     return _kq_topk_fn
+
+
+def _kq_score():
+    """kq fused decode-width indexer score (4-head band), or None.
+    ``GMLX_Q4_QSA_KQ_SCORE=0`` disables. Requires a kq build whose
+    dsa_indexer_score_decode accepts 4 heads (probed once with a dry
+    shape check on the host validator)."""
+    global _kq_score_fn
+    if _kq_score_fn is _KQ_TOPK_UNSET:
+        from .envflags import env_bool
+        fn = None
+        if env_bool("GMLX_Q4_QSA_KQ_SCORE", True):
+            try:
+                import mlx_kquant as _kq
+                cand = getattr(_kq, "dsa_indexer_score_decode", None)
+                if cand is not None and mx.default_device().type == mx.DeviceType.gpu:
+                    try:
+                        cand(mx.zeros((1, 4, 1, 128), dtype=mx.bfloat16),
+                             mx.zeros((1, 8, 128), dtype=mx.bfloat16),
+                             mx.zeros((1, 1, 4), dtype=mx.bfloat16), 0, 4)
+                        fn = cand
+                    except ValueError:
+                        fn = None  # older kq: 64-head band only
+            except ImportError:
+                pass
+        _kq_score_fn = fn
+    return _kq_score_fn
 
 
 # mrope (vision positions). Text-only calls pass positions=None and take the
@@ -590,16 +618,19 @@ class QSAIndexer(nn.Module):
         return _apply_rope_cos_sin(pooled[:, None], cos, sin,
                                    self.rotary_dims)[:, 0]
 
-    def scores(self, x: mx.array, blocks: mx.array, offset: int,
-               cos=None, sin=None) -> mx.array:
-        """``[B, L, n_blocks]`` f32 block scores for the queries in ``x``."""
+    def _queries(self, x: mx.array, offset: int, cos, sin) -> mx.array:
+        """Normed, roped indexer queries ``[B, H, L, D]``."""
         B, L, _ = x.shape
         q = self.q_proj(x).reshape(B, L, self.n_heads, self.head_dim)
         q = self.q_norm(q).transpose(0, 2, 1, 3)
         if cos is not None:
-            q = _apply_rope_cos_sin(q, cos, sin, self.rotary_dims)
-        else:
-            q = self._rope(q, offset)
+            return _apply_rope_cos_sin(q, cos, sin, self.rotary_dims)
+        return self._rope(q, offset)
+
+    def scores(self, x: mx.array, blocks: mx.array, offset: int,
+               cos=None, sin=None) -> mx.array:
+        """``[B, L, n_blocks]`` f32 block scores for the queries in ``x``."""
+        q = self._queries(x, offset, cos, sin)
         s = q.astype(mx.float32) @ blocks.astype(mx.float32)[:, None].transpose(0, 1, 3, 2)
         s = mx.maximum(s, 0).sum(axis=1)
         return s * (1.0 / math.sqrt(self.head_dim))
@@ -624,15 +655,27 @@ class QSAIndexer(nn.Module):
             blocks = cache.finished_blocks(n_blocks, finish)
         else:
             blocks = finish(ik_all[:, :n_blocks * r], 0)
-        s = self.scores(x, blocks, offset, cos=cos, sin=sin)
         query_ends = offset + mx.arange(L) + 1
         complete = query_ends // r
-        valid = mx.arange(n_blocks)[None, None, :] < complete[None, :, None]
-        s = mx.where(valid, s, -mx.inf)
         k = self.block_topk
         topk = _kq_topk()
-        if (topk is not None and k == 512 and n_blocks >= k
-                and x.dtype in (mx.float16, mx.bfloat16)):
+        kq_ok = (topk is not None and k == 512 and n_blocks >= k
+                 and x.dtype in (mx.float16, mx.bfloat16))
+        if kq_ok and L <= 4 and _kq_score() is not None:
+            # Fused decode/verify path: one kernel scores every pooled block
+            # (relu dots summed over the 4 heads, per-row visibility baked as
+            # finite_min) and the radix top-k consumes its 16-bit rows
+            # directly. Replaces the astype/matmul/relu/sum/where chain.
+            q = self._queries(x, offset, cos, sin).astype(x.dtype)
+            w = mx.full((B, L, self.n_heads),
+                        1.0 / math.sqrt(self.head_dim), dtype=x.dtype)
+            s16 = _kq_score()(q, blocks.astype(x.dtype), w, offset, self.ratio)
+            sel = topk(s16, k, True)[:, 0].astype(mx.int64)
+            return sel, complete
+        s = self.scores(x, blocks, offset, cos=cos, sin=sin)
+        valid = mx.arange(n_blocks)[None, None, :] < complete[None, :, None]
+        s = mx.where(valid, s, -mx.inf)
+        if kq_ok:
             # kq radix top-k (one threadgroup per row) replaces the
             # sort-based argpartition. Selection is set-equivalent up to
             # ties at the threshold, and the mask/gather consumers are
