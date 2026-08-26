@@ -110,13 +110,18 @@ class LanguageModel(nn.Module):
         """The ``[3, B, L]`` mrope block for this window, or ``None`` for the
         pure-text fast path (no vision in this request yet)."""
         B, L = inputs.shape
-        if position_ids is not None:
-            if position_ids.ndim == 2:
-                position_ids = mx.broadcast_to(position_ids[None], (3, B, L))
-            return position_ids
         offset = 0
         if cache is not None and cache[self.model.fa_idx] is not None:
             offset = cache[self.model.fa_idx].offset
+        if position_ids is not None:
+            if position_ids.ndim == 2:
+                position_ids = mx.broadcast_to(
+                    position_ids[None], (3,) + position_ids.shape)
+            if position_ids.shape[-1] > L:
+                # Chunked prefill hands the full-sequence block with each
+                # window; take this window's slice.
+                position_ids = position_ids[:, :, offset:offset + L]
+            return position_ids
         pids = self._position_ids
         if pids is not None and pids.ndim == 3 and pids.shape[1] == B \
                 and pids.shape[-1] >= offset + L:
