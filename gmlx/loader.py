@@ -2766,6 +2766,10 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # computed fp32 (the vendored cast_predicate pins the same set).
     "kimi_k3": (".mlp.gate.weight", ".e_score_correction_bias",
                 ".a_folded", ".dt_bias", "_res_score"),
+    # qwen4_exp: softmax top-10-of-512 routing is fp32 in llama.cpp (F32
+    # wire); the GDN decay params feed the fp32 scan; the per-stream inject
+    # scalars scale the residual streams directly.
+    "qwen4_exp": (".mlp.gate.weight", ".A_log", ".dt_bias", ".inject.weight"),
 }
 
 # Params kept at their native f16 through the bf16 cast (no upcast). MLX
@@ -3531,6 +3535,14 @@ def load_model(
         "qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"
     ):
         _patch_gated_delta_fused_decode(model)
+
+    if config.get("model_type") == "qwen4_exp":
+        from .qwen4_exp_model import prepare_runtime
+
+        counts = prepare_runtime(model)
+        loadlog.verbose_print(
+            f"[patch] qwen4_exp: fused GDN decode on {counts['gdn_fused']} "
+            f"layers, b/a matvecs concatenated on {counts['gdn_ba_cat']}")
 
     if config.get("model_type") == "deepseek_v4":
         from .deepseek_v4_model import install_gemv_row_fusion, warm_kernel_pipelines

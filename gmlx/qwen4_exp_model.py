@@ -202,8 +202,17 @@ def _hc_combine(h: mx.array, out: mx.array, inject: mx.array) -> mx.array:
 
 
 class GatedDeltaNet(nn.Module):
+    """qwen3.5 gated DeltaNet with a sigmoid output gate and the GGUF tiled
+    K->V head pairing applied explicitly. Attribute and cache layout match
+    mlx-lm's ``GatedDeltaNet`` so the fused S=1 decode kernel body in
+    ``gdn_patches`` (conv -> silu -> q/k norm -> scan -> gated norm in one
+    launch) runs unchanged; ``gdn_gate_sigmoid`` selects its gate."""
+
+    gdn_gate_sigmoid = True
+
     def __init__(self, args: ModelArgs):
         super().__init__()
+        self._fused_decode = False
         self.hidden_size = args.hidden_size
         self.num_v_heads = args.linear_num_value_heads
         self.num_k_heads = args.linear_num_key_heads
@@ -232,9 +241,27 @@ class GatedDeltaNet(nn.Module):
         self.norm = RMSNormGatedSigmoid(self.head_v_dim, eps=self.eps)
         self.out_proj = nn.Linear(self.value_dim, self.hidden_size, bias=False)
 
+    def _fused_decode_ok(self, B, S, mask, cache) -> bool:
+        if not (self._fused_decode and S == 1 and cache is not None
+                and cache[1] is not None and cache[1].shape[0] == B):
+            return False
+        if mask is not None and isinstance(mask, mx.array):
+            return False
+        from . import gdn_patches as _gp
+
+        return (
+            _gp._gdn_fused_decode_kernel is not None and _gp.gpu_active()
+            and self.head_v_dim % (16 if B == 1 else 32) == 0
+            and self.head_k_dim % 32 == 0
+        )
+
     def __call__(self, inputs: mx.array, mask: Optional[mx.array] = None,
                  cache=None) -> mx.array:
         B, S, _ = inputs.shape
+        if self._fused_decode_ok(B, S, mask, cache):
+            from . import gdn_patches as _gp
+
+            return _gp._gdn_fused_decode_body(self, inputs, cache)
         qkv = self.in_proj_qkv(inputs)
         z = self.in_proj_z(inputs).reshape(B, S, self.num_v_heads, self.head_v_dim)
         b = self.in_proj_b(inputs)
@@ -764,6 +791,26 @@ class PLELayer(nn.Module):
             normed = mx.where(mask[..., None], normed, 0)
         out = gated + self._conv(normed, cache)
         return h + out.reshape(B, T, hc, D)
+
+
+def prepare_runtime(model) -> dict:
+    """Arm the owned kernel routes after the weights are loaded: the fused
+    S=1 GDN decode kernel (``GMLX_FUSED_GDN=0`` disables) and the
+    concatenated b/a decay matvec it consumes. Returns counts for the load
+    log."""
+    from . import gdn_patches as _gp
+    from .envflags import env_bool
+
+    counts = {"gdn_fused": 0, "gdn_ba_cat": 0}
+    fused = env_bool("GMLX_FUSED_GDN", True) and _gp._gdn_fused_decode_kernel is not None
+    cat_ba = env_bool("GMLX_GDN_BA_CAT", True)
+    for m in model.modules():
+        if isinstance(m, GatedDeltaNet):
+            m._fused_decode = fused
+            counts["gdn_fused"] += int(fused)
+            if fused and cat_ba and _gp._gdn_try_cat_ba(m):
+                counts["gdn_ba_cat"] += 1
+    return counts
 
 
 # Layers and model

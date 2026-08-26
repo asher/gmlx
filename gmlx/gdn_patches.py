@@ -360,7 +360,8 @@ _GDN_FUSED_DECODE_SRC = r"""
             int dv = sg * n_dv + td;
             float xn = my_out[td] * rms_denom * (float)norm_weight[dv];
             float zv = (float)z[(b_idx * Hv + hv_idx) * Dv + dv];
-            float gate = zv * (1.0f / (1.0f + exp(-zv)));
+            float sig = 1.0f / (1.0f + exp(-zv));
+            float gate = GATE_SIGMOID ? sig : zv * sig;
             y[(b_idx * Hv + hv_idx) * Dv + dv] = (InT)(gate * xn);
         }
     }
@@ -485,6 +486,8 @@ def _gdn_fused_decode_body(self, inputs, cache, *, vlm_cache_advance=False):
             ("SG", SG),
             ("TILED", tiled),
             ("CONV_BF16", 1),
+            # output gate: silu(z) (qwen3.5) or sigmoid(z) (qwen4exp)
+            ("GATE_SIGMOID", int(bool(getattr(self, "gdn_gate_sigmoid", False)))),
         ],
         grid=(32, SG, B * self.num_v_heads),
         threadgroup=(32, SG, 1),
@@ -744,7 +747,8 @@ _GDN_FUSED_VERIFY_SRC = r"""
                 int dv = sg * n_dv + td;
                 float xn = out_t[td] * rms_denom * (float)norm_weight[dv];
                 float zv = (float)z[(((uint)b_idx * Tn + t) * Hv + hv_idx) * Dv + dv];
-                float gate = zv * (1.0f / (1.0f + exp(-zv)));
+                float sig = 1.0f / (1.0f + exp(-zv));
+                float gate = GATE_SIGMOID ? sig : zv * sig;
                 y[(((uint)b_idx * Tn + t) * Hv + hv_idx) * Dv + dv] = (InT)(gate * xn);
             }
         }
@@ -988,6 +992,8 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink):
             ("SG", SG),
             ("TILED", tiled),
             ("CONV_BF16", 1),
+            # output gate: silu(z) (qwen3.5) or sigmoid(z) (qwen4exp)
+            ("GATE_SIGMOID", int(bool(getattr(self, "gdn_gate_sigmoid", False)))),
         ],
         grid=(32, SG, B * self.num_v_heads),
         threadgroup=(32, SG, 1),
