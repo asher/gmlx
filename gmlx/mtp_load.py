@@ -79,6 +79,8 @@ _MTP_WIDTH_LIMIT_BY_MODEL_TYPE = {
     "deepseek_v4": 1,
     "deepseek4": 1,
     "muse_glimmer": 1,
+    # Qwen4ExpMTPDrafter.make_cache raises on batched left_padding.
+    "qwen4_exp": 1,
 }
 # Unknown arch: cap conservatively rather than opting a new family into the
 # losing regime. Uncapped is earned by measurement, not inherited by default.
@@ -592,6 +594,69 @@ def _load_deepseek4_mtp_drafter(
     return drafter
 
 
+def _load_qwen4exp_mtp_drafter(
+    draft_gguf_path: str,
+    target,
+    target_config_dict: dict,
+    *,
+    zero_copy: bool = True,
+    log=loadlog.verbose_print,
+):
+    """Build + load + bind the Qwen3.8-Flash-Next MTP drafter from its
+    companion GGUF (arch ``qwen4exp-mtp``: the HF ``mtp.*`` tree, tensor
+    names already in the drafter's layout under ``mtp.``)."""
+    active_before = _active_now()
+    arrays, kquant_meta, d_arch, meta, _shapes = load_gguf_wire_bytes(
+        draft_gguf_path, zero_copy=zero_copy
+    )
+    from .qwen4_exp_model import ModelArgs, ensure_registered
+    from .qwen4_exp_mtp import (
+        MTP_ARCH,
+        Qwen4ExpMTPConfig,
+        Qwen4ExpMTPDrafter,
+        remap_qwen4exp_mtp_arrays,
+    )
+
+    if d_arch != MTP_ARCH:
+        raise ValueError(
+            f"{draft_gguf_path}: expected a {MTP_ARCH} drafter GGUF for a "
+            f"qwen4_exp target, got arch {d_arch!r}"
+        )
+    log(f"[mtp] drafter gguf ({d_arch}): {len(arrays)} arrays, "
+        f"{len(kquant_meta)} kquant")
+
+    ensure_registered()
+    args = ModelArgs.from_dict(target_config_dict)
+    ratio = int(meta.get(f"{MTP_ARCH}.attention.compress_ratio", 4) or 0)
+    drafter = Qwen4ExpMTPDrafter(Qwen4ExpMTPConfig(
+        text=args, block_size=env_int("GMLX_Q4_MTP_BLOCK", 4),
+        compress_ratio=ratio))
+    log(f"[mtp] drafter: qwen4exp MTP layer, QSA ratio={ratio} "
+        f"block_size={drafter.config.block_size}")
+
+    d_weights, d_meta, d_stats = remap_qwen4exp_mtp_arrays(arrays, kquant_meta)
+    log(f"[mtp] drafter remap: {d_stats}")
+    _install_and_load(
+        drafter,
+        d_weights,
+        d_meta,
+        log=log,
+        sanitize=False,
+        fp32_keep=_FP32_KEEP_BY_MODEL_TYPE["qwen4_exp"],
+        source_key=weights_source_key(draft_gguf_path),
+        active_before=active_before,
+    )
+    drafter.bind(target)
+
+    from .drafter_protocol import validate_drafter
+
+    validate_drafter(drafter)
+    log("[mtp] drafter bound to target embeddings + LM head")
+    _patch_draft_head_quantized(drafter)
+    _stamp_mtp_width_cap(drafter, "qwen4_exp", target=target, log=log)
+    return drafter
+
+
 # The closed per-stage tensor set of a deepseek4-dspark GGUF (81 tensors for
 # 3 stages, verified against both the antirez DSpark-support sidecar and the
 # scripts/convert_dspark_sidecar.py output). Stage entries land under
@@ -1080,6 +1145,8 @@ def _assistant_kind(model_type: str | None, draft_gguf_path: str) -> str:
     ``gemma4``. Each loader validates the pairing it is handed."""
     if model_type == "deepseek_v4":
         return "deepseek4"
+    if model_type == "qwen4_exp":
+        return "qwen4exp"
     if model_type == "muse_glimmer" or _drafter_header_arch(draft_gguf_path) == "dflash":
         return "dflash"
     return "gemma4"
@@ -1401,6 +1468,23 @@ def load_mtp_model(
         assistant = True
         loadlog.fact("mtp_companion", os.path.basename(draft_gguf_path))
         _log(f"[mtp] companion drafter autodetected: {draft_gguf_path}")
+    if not assistant and config_dict.get("model_type") == "qwen4_exp":
+        # Qwen3.8-Flash-Next's head lives in the HF safetensors only; the
+        # companion GGUF (arch qwen4exp-mtp) is the drafter.
+        from . import arch_table
+        from .discovery import find_mtp_companion
+
+        draft_gguf_path = find_mtp_companion(
+            gguf_path, arch_table.drafter_arches("qwen4_exp"))
+        if draft_gguf_path is None:
+            raise ValueError(
+                "qwen4_exp MTP needs its companion drafter GGUF (arch "
+                "qwen4exp-mtp, built from the HF mtp.* tensors); none found "
+                f"next to {gguf_path} - pass --draft-gguf <path>."
+            )
+        assistant = True
+        loadlog.fact("mtp_companion", os.path.basename(draft_gguf_path))
+        _log(f"[mtp] companion drafter autodetected: {draft_gguf_path}")
     if not assistant and config_dict.get("model_type") == "muse_glimmer":
         # Muse Glimmer's drafter is likewise a companion GGUF (arch dflash),
         # never an in-file nextn block.
@@ -1500,6 +1584,14 @@ def load_mtp_model(
         if is_owned_language_model(model):
             prepare_gdn(model)
         _patch_dense_head_verify(model)
+    elif config_dict.get("model_type") == "qwen4_exp":
+        # Vendored tree: arm the fused GDN decode + verify routes.
+        from .qwen4_exp_model import prepare_runtime
+
+        counts = prepare_runtime(model.language_model)
+        _log(f"[patch] qwen4_exp: fused GDN decode on {counts['gdn_fused']} "
+             f"layers, verify on {counts['gdn_fused_verify']}, b/a cat on "
+             f"{counts['gdn_ba_cat']}")
     elif config_dict.get("model_type") in ("gemma4", "gemma4_text"):
         # gemma4 MTP target (assistant drafter): none of the qwen verify
         # levers apply here, so none are installed.
@@ -1525,6 +1617,10 @@ def load_mtp_model(
         kind = _assistant_kind(_mt, draft_gguf_path)
         if kind == "deepseek4":
             drafter = _load_deepseek4_mtp_drafter(
+                draft_gguf_path, model, config_dict, zero_copy=zero_copy, log=_log
+            )
+        elif kind == "qwen4exp":
+            drafter = _load_qwen4exp_mtp_drafter(
                 draft_gguf_path, model, config_dict, zero_copy=zero_copy, log=_log
             )
         elif kind == "dflash":

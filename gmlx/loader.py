@@ -629,6 +629,13 @@ _MTP_TARGET_HOOKS_BY_TYPE = {
         "speculative_argmax_from_hidden",
         "speculative_verify_hidden",
     ),
+    # Qwen4ExpSpecLM (vendored mlx-lm class): same lean set as deepseek_v4.
+    "qwen4_exp": (
+        "rollback_speculative_cache",
+        "speculative_logits_from_hidden",
+        "speculative_argmax_from_hidden",
+        "speculative_verify_hidden",
+    ),
 }
 
 
@@ -764,6 +771,16 @@ def _mtp_target_classes(model_type: str):
             return hy_v3_mtp.HyV3SpecLM(ModelArgs.from_dict(config))
 
         return hy_v3_mtp.HyV3SpecLM, build
+    if model_type == "qwen4_exp":
+        from . import qwen4_exp_mtp
+        from .qwen4_exp_model import ModelArgs, ensure_registered
+
+        ensure_registered()
+
+        def build(config):
+            return qwen4_exp_mtp.Qwen4ExpSpecLM(ModelArgs.from_dict(config))
+
+        return qwen4_exp_mtp.Qwen4ExpSpecLM, build
     if model_type == "muse_glimmer":
         from . import muse_glimmer_mtp, muse_glimmer_tools
         from .muse_glimmer_model import ModelArgs, ensure_registered

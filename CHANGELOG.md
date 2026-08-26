@@ -13,6 +13,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   embeddings (the 320M-row table stays zero-copy, rows gathered per token).
   Fused GDN decode kernel with the sigmoid output gate; fused MoE gathers
   at the 640-wide experts.
+- qwen4exp MTP speculative decoding from a companion drafter GGUF (arch
+  `qwen4exp-mtp`, built from the HF `mtp.*` tensors; autodetected next to
+  the target or passed with `--draft-gguf`). Full-prompt teacher-forced
+  seeding; verify rollback rewinds the GDN, PLE and QSA cache state to the
+  accepted prefix.
 - `gmlx serve model.gguf --thinking on|off|adaptive` and `--thinking-budget N`
   set the reasoning switch and thinking-token cap for a single positional
   model without a config file (the same `thinking:` / sampling

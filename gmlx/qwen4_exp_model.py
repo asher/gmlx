@@ -213,6 +213,7 @@ class GatedDeltaNet(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
         self._fused_decode = False
+        self._fused_verify = False
         self.hidden_size = args.hidden_size
         self.num_v_heads = args.linear_num_value_heads
         self.num_k_heads = args.linear_num_key_heads
@@ -255,13 +256,43 @@ class GatedDeltaNet(nn.Module):
             and self.head_k_dim % 32 == 0
         )
 
+    def _fused_verify_ok(self, B, mask, cache) -> bool:
+        if not (self._fused_verify and cache is not None):
+            return False
+        if mask is not None and not (
+            isinstance(mask, mx.array) and mask.ndim == 2 and mask.shape[0] == B
+        ):
+            return False
+        from . import gdn_patches as _gp
+
+        return (
+            _gp._gdn_fused_verify_kernel is not None and _gp.gpu_active()
+            and self.head_v_dim % (16 if B == 1 else 32) == 0
+            and self.head_k_dim % 32 == 0
+        )
+
     def __call__(self, inputs: mx.array, mask: Optional[mx.array] = None,
-                 cache=None) -> mx.array:
+                 cache=None, gdn_sink=None) -> mx.array:
+        """``gdn_sink`` (a list) marks the MTP verify forward: every call
+        appends the record ``rollback_verify_sink`` needs to rewind this
+        layer's cache to a shorter accepted prefix."""
         B, S, _ = inputs.shape
         if self._fused_decode_ok(B, S, mask, cache):
             from . import gdn_patches as _gp
 
             return _gp._gdn_fused_decode_body(self, inputs, cache)
+        pre = (cache[0], cache[1]) if cache is not None else (None, None)
+        if gdn_sink is not None and S > 1 and self._fused_verify_ok(B, mask, cache):
+            from . import gdn_patches as _gp
+
+            rec: list = []
+            out = _gp._gdn_fused_verify_body(self, inputs, mask, cache, rec)
+            gdn_sink.append({
+                "kind": "gdn", "layer": self, "cache": cache, "pre": pre,
+                "inputs": inputs, "mask": mask, "conv_input": rec[-1][9],
+                "inter": rec[-1][11], "K": self.conv_kernel_size,
+            })
+            return out
         qkv = self.in_proj_qkv(inputs)
         z = self.in_proj_z(inputs).reshape(B, S, self.num_v_heads, self.head_v_dim)
         b = self.in_proj_b(inputs)
@@ -290,6 +321,12 @@ class GatedDeltaNet(nn.Module):
                 cache[0] = mx.take_along_axis(conv_input, positions, axis=1)
             else:
                 cache[0] = mx.contiguous(conv_input[:, -n_keep:, :])
+        if gdn_sink is not None:
+            gdn_sink.append({
+                "kind": "gdn", "layer": self, "cache": cache, "pre": pre,
+                "inputs": inputs, "mask": mask, "conv_input": conv_input,
+                "inter": None, "K": self.conv_kernel_size,
+            })
         conv_out = nn.silu(self.conv1d(conv_input))
 
         q, k, v = [
@@ -697,17 +734,19 @@ class PLEEmbedding(nn.Module):
         valid = (src[None] > prev_eos) & (src[None] >= 0)
         return mx.where(valid, gathered, self.eos_token_id)
 
-    def row_ids(self, input_ids: mx.array, cache) -> mx.array:
+    def prev_history(self, cache, B: int) -> mx.array:
+        """The ``[B, context_len]`` token history before this call (EOS
+        filled when the cache is fresh or was built for another batch)."""
+        if cache is not None and cache[3] is not None and cache[3].shape[0] == B:
+            return cache[3]
+        return mx.full((B, self.context_len), self.eos_token_id, dtype=mx.int64)
+
+    def row_ids(self, input_ids: mx.array, cache, prev=None) -> mx.array:
         """``[B, T, n_heads]`` table rows for the tokens in ``input_ids``."""
         ids = input_ids.astype(mx.int64)
         B, T = ids.shape
-        prev = None
-        if cache is not None and cache[3] is not None:
-            prev = cache[3]
-            if prev.shape[0] != B:
-                prev = None
         if prev is None:
-            prev = mx.full((B, self.context_len), self.eos_token_id, dtype=mx.int64)
+            prev = self.prev_history(cache, B)
         hist = mx.concatenate([prev, ids], axis=1)
         if cache is not None:
             cache[3] = mx.contiguous(hist[:, -self.context_len:])
@@ -728,11 +767,11 @@ class PLEEmbedding(nn.Module):
         rows = mx.concatenate(blocks, axis=-1)[:, -T:]
         return rows.astype(mx.int32)
 
-    def __call__(self, input_ids: mx.array, cache, table) -> mx.array:
+    def __call__(self, input_ids: mx.array, cache, table, prev=None) -> mx.array:
         """``table`` is the model-level row table (``model.ple_embed``); it is
         passed in rather than owned so the 320M-row weight has one parameter
         path independent of which layer hosts the PLE block."""
-        rows = self.row_ids(input_ids, cache)
+        rows = self.row_ids(input_ids, cache, prev=prev)
         emb = table(rows)
         return emb.reshape(*emb.shape[:-2], -1)
 
@@ -770,12 +809,13 @@ class PLELayer(nn.Module):
         conv_input = mx.concatenate([state, x], axis=1)
         if cache is not None:
             cache[2] = mx.contiguous(conv_input[:, -self.conv_state_len:])
-        return nn.silu(self.conv1d(conv_input))
+        return nn.silu(self.conv1d(conv_input)), conv_input
 
     def __call__(self, h: mx.array, input_ids: mx.array, cache, table,
-                 mask=None) -> mx.array:
+                 mask=None, gdn_sink=None) -> mx.array:
         B, T, hc, D = h.shape
-        emb = self.embedding(input_ids, cache, table)
+        prev = self.embedding.prev_history(cache, B)
+        emb = self.embedding(input_ids, cache, table, prev=prev)
         keys = self.norm_key(self.key_proj(emb).reshape(B, T, hc, D))
         values = self.value_proj(emb)
         queries = self.norm_query(h)
@@ -789,8 +829,14 @@ class PLELayer(nn.Module):
         if isinstance(mask, mx.array) and mask.ndim == 2 and mask.shape[0] == B:
             gated = mx.where(mask[..., None], gated, 0)
             normed = mx.where(mask[..., None], normed, 0)
-        out = gated + self._conv(normed, cache)
-        return h + out.reshape(B, T, hc, D)
+        conv, conv_input = self._conv(normed, cache)
+        if gdn_sink is not None:
+            gdn_sink.append({
+                "kind": "ple", "cache": cache, "prev": prev, "ids": input_ids,
+                "ctx": self.embedding.context_len, "conv_input": conv_input,
+                "L": self.conv_state_len,
+            })
+        return h + (gated + conv).reshape(B, T, hc, D)
 
 
 def prepare_runtime(model) -> dict:
@@ -801,16 +847,52 @@ def prepare_runtime(model) -> dict:
     from . import gdn_patches as _gp
     from .envflags import env_bool
 
-    counts = {"gdn_fused": 0, "gdn_ba_cat": 0}
-    fused = env_bool("GMLX_FUSED_GDN", True) and _gp._gdn_fused_decode_kernel is not None
+    counts = {"gdn_fused": 0, "gdn_ba_cat": 0, "gdn_fused_verify": 0}
+    want = env_bool("GMLX_FUSED_GDN", True)
+    fused = want and _gp._gdn_fused_decode_kernel is not None
+    fused_verify = want and _gp._gdn_fused_verify_kernel is not None
     cat_ba = env_bool("GMLX_GDN_BA_CAT", True)
     for m in model.modules():
         if isinstance(m, GatedDeltaNet):
             m._fused_decode = fused
+            m._fused_verify = fused_verify
             counts["gdn_fused"] += int(fused)
+            counts["gdn_fused_verify"] += int(fused_verify)
             if fused and cat_ba and _gp._gdn_try_cat_ba(m):
                 counts["gdn_ba_cat"] += 1
     return counts
+
+
+def rollback_verify_sink(sink, n: int) -> None:
+    """Rewind the recurrent caches after an MTP verify forward over ``S``
+    positions to the state after its first ``n`` (the accepted prefix).
+
+    GDN: the conv state is a window of the recorded conv input and the scan
+    state is the fused verify kernel's per-position intermediate; without
+    intermediates (unfused path) the layer is re-run over the prefix from
+    its pre-verify state. PLE: both the token history and the conv state are
+    windows of recorded arrays. KV caches are trimmed by the caller.
+    """
+    for e in sink:
+        cache = e["cache"]
+        if cache is None:
+            continue
+        if e["kind"] == "gdn":
+            K = e["K"]
+            if e["inter"] is not None:
+                cache[0] = mx.contiguous(e["conv_input"][:, n:n + K - 1, :])
+                cache[1] = mx.contiguous(e["inter"][:, n - 1])
+                continue
+            cache[0], cache[1] = e["pre"]
+            mask = e["mask"]
+            if isinstance(mask, mx.array):
+                mask = mask[:, :n]
+            e["layer"](e["inputs"][:, :n], mask=mask, cache=cache)
+        elif e["kind"] == "ple":
+            hist = mx.concatenate([e["prev"], e["ids"][:, :n].astype(mx.int64)],
+                                  axis=1)
+            cache[3] = mx.contiguous(hist[:, -e["ctx"]:])
+            cache[2] = mx.contiguous(e["conv_input"][:, n:n + e["L"], :])
 
 
 # Layers and model
@@ -835,12 +917,12 @@ class DecoderLayer(nn.Module):
             self.ple = PLELayer(args)
 
     def __call__(self, h: mx.array, input_ids: mx.array, mask=None, cache=None,
-                 ple_table=None):
+                 ple_table=None, gdn_sink=None):
         if "ple" in self:
-            h = self.ple(h, input_ids, cache, ple_table, mask)
+            h = self.ple(h, input_ids, cache, ple_table, mask, gdn_sink=gdn_sink)
         mixed, inject = self.hc_attn(h)
         if self.is_linear:
-            out = self.linear_attn(mixed, mask=mask, cache=cache)
+            out = self.linear_attn(mixed, mask=mask, cache=cache, gdn_sink=gdn_sink)
         else:
             out = self.self_attn(mixed, mask=mask, cache=cache)
         h = _hc_combine(h, out, inject)
@@ -870,7 +952,7 @@ class Qwen4ExpModel(nn.Module):
             (i for i, t in enumerate(args.layer_types) if t == "full_attention"), 0)
 
     def __call__(self, inputs: mx.array, cache=None, input_embeddings=None,
-                 return_streams: bool = False):
+                 return_streams: bool = False, gdn_sink=None):
         h = input_embeddings if input_embeddings is not None else self.embed_tokens(inputs)
         B, T, D = h.shape
         h = mx.broadcast_to(h[:, :, None, :], (B, T, self.hc, D))
@@ -882,7 +964,8 @@ class Qwen4ExpModel(nn.Module):
         table = self.ple_embed if "ple_embed" in self else None
         for layer, c in zip(self.layers, cache):
             mask = ssm_mask if layer.is_linear else fa_mask
-            h = layer(h, inputs, mask=mask, cache=c, ple_table=table)
+            h = layer(h, inputs, mask=mask, cache=c, ple_table=table,
+                      gdn_sink=gdn_sink)
         out = self.hc_head(h)
         if return_streams:
             return out, h
