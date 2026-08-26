@@ -313,6 +313,39 @@ def preload_gate(weight_bytes: float, model_id: str) -> None:
     _kernel_gate(weight_bytes, model_id)
 
 
+_SETTLE_S = 3.0          # how long a short load waits for memory on its way
+_SETTLE_STEP_S = 0.25
+_SETTLE_RISE = 256 * 1024 * 1024   # a sample must gain this much to count as rising
+
+
+def _settle_reclaimable(sample, rec, need: float):
+    """Re-sample the kernel's reclaimable memory while it is still rising,
+    for at most ``_SETTLE_S``. The kernel returns a torn-down model's
+    pages asynchronously: a request that arrives right after an unload
+    (a reload, or the switch that caused the eviction) would otherwise
+    read the pre-release number and be deferred for memory that lands a
+    moment later (2026-08-25: a 104 GB reload deferred straight after its
+    own unload). Two consecutive samples that do not rise, or ``need``
+    reached, end the wait; the caller re-judges the returned reading."""
+    import time
+
+    deadline = time.monotonic() + _SETTLE_S
+    flat = 0
+    while rec is not None and rec < need and time.monotonic() < deadline:
+        time.sleep(_SETTLE_STEP_S)
+        new = sample()
+        if new is None:
+            return rec
+        if new < rec + _SETTLE_RISE:
+            flat += 1
+            if flat >= 2:
+                return max(rec, new)
+        else:
+            flat = 0
+        rec = max(rec, new)
+    return rec
+
+
 def _kernel_gate(weight_bytes: float, model_id: str) -> None:
     """The kernel's side of the same question: MLX accounting cannot see
     other processes' pages (2026-08-25: ~16 GB of another app's pages in
@@ -331,6 +364,9 @@ def _kernel_gate(weight_bytes: float, model_id: str) -> None:
         rec = reclaimable_bytes()
     except Exception:
         return
+    if rec is None or weight_bytes <= rec - floor:
+        return
+    rec = _settle_reclaimable(reclaimable_bytes, rec, weight_bytes + floor)
     if rec is None or weight_bytes <= rec - floor:
         return
     raise LoadDeferred(

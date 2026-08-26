@@ -1363,8 +1363,10 @@ answers a dispatcher can act on without a refused request:
   against the serve ceiling (working set less margin and kernel reserve,
   the same ceiling request admission uses) and against the kernel's own
   reclaimable count, so a load that would Metal-OOM in the weight warm
-  is refused before it starts. Explicitly `POST /unload` the resident
-  model, or retry once its streams drain and the pool can evict it.
+  is refused before it starts. Memory the kernel is still returning (an
+  unload or eviction a moment earlier) is waited for, up to 3 s, before
+  a load is deferred. Explicitly `POST /unload` the resident model, or
+  retry once its streams drain and the pool can evict it.
 - `GET /v1/capacity/plan?width=W&depth=D` evaluates the fan-out policy
   where the numbers live: `ok` when the capacity table holds `W` streams
   at `D` tokens each (`max_context_at_width` is read at the smallest

@@ -33,7 +33,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - The load gate judged loads against the raw working set with no margin or
   kernel reserve and admitted an 86.7 GB load next to a pinned 31.5 GB
-  resident (Metal OOM). Loads now respect the serve ceiling and kernel floor.
+  resident (Metal OOM). Loads now respect the serve ceiling and kernel floor;
+  the kernel check waits up to 3 s for memory still being returned (a reload
+  straight after an unload read the pre-release count and was deferred).
 - A load the gate defers (pinned or busy residents, or inside the handler)
   surfaced as a 500 with a traceback; it is now a typed
   `503 model_load_deferred` + `Retry-After`.
