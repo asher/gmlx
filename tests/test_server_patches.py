@@ -2954,3 +2954,27 @@ def test_spawn_preload_warm_fills_context_length_cache(monkeypatch):
                         lambda p: seen.append(p) or None)
     sp.spawn_preload_warm(None).join(timeout=5)
     assert sorted(seen) == ["/abs/glm.gguf", "/abs/qwen.gguf"]
+
+
+def test_unload_keyword_probe_never_retries_a_failed_eviction():
+    """A TypeError from inside the eviction propagates; only a pool whose
+    ``evict`` lacks the keyword is called the old way."""
+    from types import SimpleNamespace
+
+    calls = []
+
+    def evict_new(path, *, ignore_retained=False):
+        calls.append(("new", path, ignore_retained))
+        raise TypeError("from inside _teardown")
+
+    def evict_old(path):
+        calls.append(("old", path))
+        return True
+
+    with pytest.raises(TypeError, match="_teardown"):
+        sp_routes._evict_ignoring_retained(SimpleNamespace(evict=evict_new), "/p")
+    assert calls == [("new", "/p", True)]              # no second, keywordless call
+    assert sp_routes._evict_ignoring_retained(SimpleNamespace(evict=evict_old), "/p")
+    assert calls[-1] == ("old", "/p")
+    assert sp_routes._clear_ignoring_retained(
+        SimpleNamespace(clear=lambda **kw: kw)) == {"ignore_retained": True}

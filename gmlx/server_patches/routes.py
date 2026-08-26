@@ -755,21 +755,33 @@ _WARM_DEFAULT = object()
 _PRELOAD_HOLDS: list = []
 
 
+def _accepts_ignore_retained(fn) -> bool:
+    """Signature probe, not a ``try: ... except TypeError`` around the
+    call: a TypeError raised inside a teardown must propagate, not retry
+    a destructive eviction without the keyword."""
+    import inspect
+
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return "ignore_retained" in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
 def _evict_ignoring_retained(pool, path) -> bool:
     """``pool.evict(path)`` with the preload's lifetime hold discounted
     from the busy count (pools without the keyword count it as busy, the
     old behaviour)."""
-    try:
+    if _accepts_ignore_retained(pool.evict):
         return pool.evict(path, ignore_retained=True)
-    except TypeError:
-        return pool.evict(path)
+    return pool.evict(path)
 
 
 def _clear_ignoring_retained(pool) -> bool:
-    try:
+    if _accepts_ignore_retained(pool.clear):
         return pool.clear(ignore_retained=True)
-    except TypeError:
-        return pool.clear()
+    return pool.clear()
 
 
 def _release_preload_holds(pool, path, *, only_evicted: bool = False) -> int:
