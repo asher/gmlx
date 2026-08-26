@@ -107,6 +107,11 @@ def resolve_vlm_model_type(llm_arch: str, mm_meta: dict) -> str:
         # dense vs MoE; both share one vision encoder (deepstack disabled).
         if llm_arch == "qwen35moe":
             return "qwen3_5_moe"
+        # Qwen3.8-Flash-Next (llama.cpp arch tag qwen4exp) - the qwen4exp
+        # hybrid text model with the same Qwen3-VL vision tower; both text
+        # and wrapper classes are vendored (gmlx.qwen4_exp_vlm_model).
+        if llm_arch == "qwen4exp":
+            return "qwen4_exp"
         return "qwen3_5"
     if llm_arch == "gemma4":
         # gemma-4 ships two omni families: the E-series (E2B/E4B) with CLIP +
@@ -828,7 +833,7 @@ def remap_vision_arrays(
             out[tgt] = arr
         return out, skipped, vis_kqmeta
 
-    if model_type in ("qwen3_5", "qwen3_5_moe"):
+    if model_type in ("qwen3_5", "qwen3_5_moe", "qwen4_exp"):
         for name, arr in arrays.items():
             if name.endswith(".scales") or name.endswith(".biases"):
                 continue
@@ -1019,10 +1024,13 @@ def _synthesize_qwen35_vlm_config(
     miscomputes image position ids."""
     text_config = dict(text_config)
     text_config["model_type"] = model_type
+    # The qwen4exp pair reuses the qwen3_5 tower class, whose VisionConfig
+    # whitelists its own model_type names.
+    vision_mt = "qwen3_5" if model_type == "qwen4_exp" else model_type
     config = {
         "model_type": model_type,
         "text_config": text_config,
-        "vision_config": _synthesize_qwen35_vision_config(mm_meta, model_type),
+        "vision_config": _synthesize_qwen35_vision_config(mm_meta, vision_mt),
         "vocab_size": int(text_config.get("vocab_size", 248320)),
     }
     for key, tok in (("image_token_id", "<|image_pad|>"),
@@ -1316,7 +1324,7 @@ def synthesize_vlm_config(
             text_config, mm_meta, standardize=standardize)
     if model_type == "gemma4_unified":
         return _synthesize_gemma4_unified_vlm_config(text_config, mm_meta)
-    if model_type in ("qwen3_5", "qwen3_5_moe"):
+    if model_type in ("qwen3_5", "qwen3_5_moe", "qwen4_exp"):
         return _synthesize_qwen35_vlm_config(
             text_config, mm_meta, model_type, llm_meta)
     if model_type == "qwen3_omni_moe":
@@ -1512,6 +1520,11 @@ def _synthesize_vlm_processor(model_type: str, tokenizer, mm_meta: dict):
         return _attach_streaming_helpers(
             _synthesize_gemma4_unified_processor(tokenizer, mm_meta), tokenizer)
     if model_type in ("qwen3_5", "qwen3_5_moe"):
+        return _synthesize_qwen35_processor(tokenizer, mm_meta)
+    if model_type == "qwen4_exp":
+        import mlx_vlm.prompt_utils as _prompt_utils
+        _prompt_utils.MODEL_CONFIG.setdefault(
+            "qwen4_exp", _prompt_utils.MessageFormat.LIST_WITH_IMAGE_FIRST)
         return _synthesize_qwen35_processor(tokenizer, mm_meta)
     if model_type == "qwen3_omni_moe":
         return _synthesize_qwen3_omni_processor(tokenizer, mm_meta)
@@ -2257,6 +2270,11 @@ def load_vlm_model(
         from . import muse_glimmer_tools, muse_glimmer_vlm_model
         muse_glimmer_vlm_model.ensure_registered()
         muse_glimmer_tools.ensure_registered()
+    elif model_type == "qwen4_exp":
+        # Likewise vendored (text + wrapper; the vision tower is mlx-vlm's
+        # qwen3_5 Qwen3-VL class).
+        from . import qwen4_exp_vlm_model
+        qwen4_exp_vlm_model.ensure_registered()
     with_audio = bool(mm_meta.get("clip.has_audio_encoder"))
     _log(f"[vlm] model_type={model_type} audio={with_audio}")
 
@@ -2327,6 +2345,12 @@ def load_vlm_model(
                       source_key=weights_source_key(*pf.shards, mmproj_path),
                       active_before=active_before)
     materialize_module_arrays(model)
+    if model_type == "qwen4_exp":
+        from .qwen4_exp_model import prepare_runtime
+        counts = prepare_runtime(model.language_model)
+        _log(f"[vlm] qwen4_exp: fused GDN decode on {counts['gdn_fused']} "
+             f"layers, verify on {counts['gdn_fused_verify']}, b/a cat on "
+             f"{counts['gdn_ba_cat']}")
 
     # 5. processor (image preprocessing + tokenizer + chat template). Synthesized
     #    from the two GGUFs by default (the LLM GGUF carries the tokenizer + chat

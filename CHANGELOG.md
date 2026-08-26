@@ -18,6 +18,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the target or passed with `--draft-gguf`). Full-prompt teacher-forced
   seeding; verify rollback rewinds the GDN, PLE and QSA cache state to the
   accepted prefix.
+- qwen4exp VLM pairing: the Qwen3-VL mmproj (`qwen3vl_merger`) loads onto a
+  vendored wrapper reusing the qwen3.5 vision tower; interleaved mrope
+  position ids thread through the attention and the QSA indexer (block keys
+  roped at their cached positions), text-only turns keep the fast rope path.
 - `gmlx serve model.gguf --thinking on|off|adaptive` and `--thinking-budget N`
   set the reasoning switch and thinking-token cap for a single positional
   model without a config file (the same `thinking:` / sampling

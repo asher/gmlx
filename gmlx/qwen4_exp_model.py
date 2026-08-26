@@ -361,6 +361,48 @@ class GatedDeltaNet(nn.Module):
         return self.out_proj(out.reshape(B, S, -1))
 
 
+# mrope (vision positions). Text-only calls pass positions=None and take the
+# scalar-offset mx.fast.rope path; the two agree exactly when the three
+# position streams are equal (interleaved sections tile the same frequency
+# ladder). The VLM wrapper passes [3, B, L] t/h/w position ids.
+
+
+def _mrope_selector(sections: List[int], half: int) -> mx.array:
+    """``[half]`` stream index per frequency: freq ``j`` reads stream
+    ``j % 3`` while ``j < sections[j % 3] * 3`` (HF interleaved layout)."""
+    sel = []
+    for j in range(half):
+        src = j % 3
+        assert j < sections[src] * 3, (j, sections)
+        sel.append(src)
+    return mx.array(sel, dtype=mx.int32)
+
+
+def _mrope_cos_sin(positions: mx.array, rotary_dims: int, base: float,
+                   selector: mx.array):
+    """``positions [3, B, L]`` -> ``(cos, sin)`` each ``[B, L, rotary_dims]``
+    in the non-traditional (rotate-half) layout."""
+    half = rotary_dims // 2
+    inv = mx.power(base, -mx.arange(0, half, dtype=mx.float32) / half)
+    freqs = positions.astype(mx.float32)[..., None] * inv  # [3, B, L, half]
+    _, B, L, _ = freqs.shape
+    idx = mx.broadcast_to(selector[None, None, None, :], (1, B, L, half))
+    freqs = mx.take_along_axis(freqs, idx.astype(mx.uint32), axis=0)[0]
+    emb = mx.concatenate([freqs, freqs], axis=-1)
+    return mx.cos(emb), mx.sin(emb)
+
+
+def _apply_rope_cos_sin(x: mx.array, cos: mx.array, sin: mx.array,
+                        rotary_dims: int) -> mx.array:
+    """Rotate the first ``rotary_dims`` of ``x [B, H, L, D]`` with
+    ``cos/sin [B, L, rotary_dims]`` (rotate-half pairing)."""
+    half = rotary_dims // 2
+    xr, xp = x[..., :rotary_dims], x[..., rotary_dims:]
+    rot = mx.concatenate([-xr[..., half:], xr[..., :half]], axis=-1)
+    c, sn = cos[:, None].astype(x.dtype), sin[:, None].astype(x.dtype)
+    return mx.concatenate([xr * c + rot * sn, xp], axis=-1)
+
+
 # QSA: cache, indexer, attention
 
 
@@ -381,10 +423,11 @@ class QSAKVCache(KVCache):
         super().__init__()
         self.ratio = ratio
         self.ik = None       # [B, cap, index_dim]
+        self.pos = None      # [3, B, cap] mrope positions (VLM loads only)
         self.blocks = None   # [B, n_blocks, index_dim]
         self.n_blocks = 0
 
-    def update_and_fetch_qsa(self, keys, values, ik):
+    def update_and_fetch_qsa(self, keys, values, ik, pos=None):
         prev = self.offset
         k, v = super().update_and_fetch(keys, values)
         n = ik.shape[1]
@@ -398,7 +441,16 @@ class QSAKVCache(KVCache):
                 self.ik = mx.concatenate([self.ik, new], axis=1)
             else:
                 self.ik = new
+            if pos is not None:
+                newp = mx.zeros((3, B, self.ik.shape[1] - (
+                    0 if self.pos is None else self.pos.shape[2])), mx.int32)
+                self.pos = (newp if self.pos is None else
+                            mx.concatenate([self.pos[:, :, :prev] if prev %
+                                            self.step else self.pos, newp],
+                                           axis=2))
         self.ik[:, prev:prev + n, :] = ik
+        if pos is not None:
+            self.pos[:, :, prev:prev + n] = pos.astype(mx.int32)
         return k, v, self.ik[:, :self.offset, :]
 
     def finished_blocks(self, n_blocks: int, finish):
@@ -418,16 +470,22 @@ class QSAKVCache(KVCache):
     @property
     def state(self):
         if self.offset == self.keys.shape[2]:
-            return self.keys, self.values, self.ik[:, :self.offset]
+            base = (self.keys, self.values, self.ik[:, :self.offset])
+            return base if self.pos is None else base + (
+                self.pos[:, :, :self.offset],)
+        tail = () if self.pos is None else (self.pos[:, :, :self.offset],)
         return (
             self.keys[..., :self.offset, :],
             self.values[..., :self.offset, :],
             self.ik[:, :self.offset],
-        )
+        ) + tail
 
     @state.setter
     def state(self, v):
-        self.keys, self.values, self.ik = v
+        if len(v) == 4:
+            self.keys, self.values, self.ik, self.pos = v
+        else:
+            self.keys, self.values, self.ik = v
         self.offset = self.keys.shape[2]
         self.blocks, self.n_blocks = None, 0
 
@@ -481,29 +539,51 @@ class QSAIndexer(nn.Module):
         return mx.fast.rope(x, self.rotary_dims, traditional=False,
                             base=self.rope_theta, scale=scale, offset=offset)
 
-    def finish_blocks(self, raw: mx.array, start_block: int) -> mx.array:
-        """Mean-pool ``[B, m * r, D]`` raw keys into ``[B, m, D]`` block keys,
-        k_norm, then rope at the block start positions (``scale=r`` makes
-        position ``i`` of the call land on token ``(start_block + i) * r``)."""
+    def _pooled(self, raw: mx.array):
         B, n, D = raw.shape
         m = n // self.ratio
         pooled = raw[:, :m * self.ratio].reshape(B, m, self.ratio, D)
         pooled = pooled.astype(mx.float32).mean(axis=2).astype(raw.dtype)
-        pooled = self.k_norm(pooled)
-        return self._rope(pooled[:, None], start_block,
+        return self.k_norm(pooled)
+
+    def finish_blocks(self, raw: mx.array, start_block: int) -> mx.array:
+        """Mean-pool ``[B, m * r, D]`` raw keys into ``[B, m, D]`` block keys,
+        k_norm, then rope at the block start positions (``scale=r`` makes
+        position ``i`` of the call land on token ``(start_block + i) * r``)."""
+        return self._rope(self._pooled(raw)[:, None], start_block,
                           scale=float(self.ratio))[:, 0]
 
-    def scores(self, x: mx.array, blocks: mx.array, offset: int) -> mx.array:
+    def finish_blocks_at(self, raw: mx.array, start_block: int,
+                         pos_all: mx.array, selector: mx.array) -> mx.array:
+        """``finish_blocks`` with explicit mrope positions: block ``i`` is
+        roped at the cached position of its start token
+        (``pos_all[:, :, (start_block + i) * r]``), matching the reference's
+        ``full_cos.index_select(group_starts)``."""
+        pooled = self._pooled(raw)
+        m = pooled.shape[1]
+        starts = (start_block + mx.arange(m, dtype=mx.int32)) * self.ratio
+        pos = mx.take(pos_all, starts.astype(mx.uint32), axis=2)  # [3, B, m]
+        cos, sin = _mrope_cos_sin(pos, self.rotary_dims, self.rope_theta,
+                                  selector)
+        return _apply_rope_cos_sin(pooled[:, None], cos, sin,
+                                   self.rotary_dims)[:, 0]
+
+    def scores(self, x: mx.array, blocks: mx.array, offset: int,
+               cos=None, sin=None) -> mx.array:
         """``[B, L, n_blocks]`` f32 block scores for the queries in ``x``."""
         B, L, _ = x.shape
         q = self.q_proj(x).reshape(B, L, self.n_heads, self.head_dim)
         q = self.q_norm(q).transpose(0, 2, 1, 3)
-        q = self._rope(q, offset)
+        if cos is not None:
+            q = _apply_rope_cos_sin(q, cos, sin, self.rotary_dims)
+        else:
+            q = self._rope(q, offset)
         s = q.astype(mx.float32) @ blocks.astype(mx.float32)[:, None].transpose(0, 1, 3, 2)
         s = mx.maximum(s, 0).sum(axis=1)
         return s * (1.0 / math.sqrt(self.head_dim))
 
-    def select(self, x: mx.array, ik_all: mx.array, cache, offset: int):
+    def select(self, x: mx.array, ik_all: mx.array, cache, offset: int,
+               cos=None, sin=None, pos_all=None, selector=None):
         """Top-k complete blocks per query, or None when every query is
         still dense. Returns ``(blocks [B, L, topk], complete_counts [L])``."""
         B, L, _ = x.shape
@@ -512,11 +592,17 @@ class QSAIndexer(nn.Module):
         n_blocks = key_len // r
         if n_blocks <= self.block_topk:
             return None
-        if cache is not None:
-            blocks = cache.finished_blocks(n_blocks, self.finish_blocks)
+        if pos_all is not None:
+            def finish(raw, start_block):
+                return self.finish_blocks_at(raw, start_block, pos_all,
+                                             selector)
         else:
-            blocks = self.finish_blocks(ik_all[:, :n_blocks * r], 0)
-        s = self.scores(x, blocks, offset)
+            finish = self.finish_blocks
+        if cache is not None:
+            blocks = cache.finished_blocks(n_blocks, finish)
+        else:
+            blocks = finish(ik_all[:, :n_blocks * r], 0)
+        s = self.scores(x, blocks, offset, cos=cos, sin=sin)
         query_ends = offset + mx.arange(L) + 1
         complete = query_ends // r
         valid = mx.arange(n_blocks)[None, None, :] < complete[None, :, None]
@@ -566,6 +652,8 @@ class Attention(nn.Module):
         self.q_norm = nn.RMSNorm(D, eps=args.rms_norm_eps)
         self.k_norm = nn.RMSNorm(D, eps=args.rms_norm_eps)
         self.ratio = int(args.compress_ratios[layer_idx])
+        self._mrope_selector = _mrope_selector(
+            list(args.mrope_section), self.rotary_dims // 2)
         if self.ratio > 0:
             self.indexer = QSAIndexer(args, self.ratio, self.rotary_dims)
 
@@ -599,7 +687,10 @@ class Attention(nn.Module):
             mask=bias.reshape(B * L, 1, 1, W))
         return out.reshape(B, L, H, D).transpose(0, 2, 1, 3)
 
-    def __call__(self, x: mx.array, mask=None, cache=None) -> mx.array:
+    def __call__(self, x: mx.array, mask=None, cache=None,
+                 positions=None) -> mx.array:
+        """``positions`` is the ``[3, B, L]`` mrope position block for this
+        window (VLM loads); ``None`` takes the scalar-offset text path."""
         B, L, _ = x.shape
         H, Hkv, D = self.num_attention_heads, self.num_key_value_heads, self.head_dim
         qg = self.q_proj(x).reshape(B, L, H, 2 * D)
@@ -610,19 +701,33 @@ class Attention(nn.Module):
         v = self.v_proj(x).reshape(B, L, Hkv, D).transpose(0, 2, 1, 3)
 
         offset = cache.offset if cache is not None else 0
-        q = self._rope(q, offset)
-        k = self._rope(k, offset)
+        cos = sin = None
+        if positions is not None:
+            cos, sin = _mrope_cos_sin(positions, self.rotary_dims,
+                                      self.rope_theta, self._mrope_selector)
+            q = _apply_rope_cos_sin(q, cos, sin, self.rotary_dims)
+            k = _apply_rope_cos_sin(k, cos, sin, self.rotary_dims)
+        else:
+            q = self._rope(q, offset)
+            k = self._rope(k, offset)
 
         selection = None
         if "indexer" in self:
             ik = self.indexer.k_proj(x)
             if cache is not None and hasattr(cache, "update_and_fetch_qsa"):
-                k, v, ik_all = cache.update_and_fetch_qsa(k, v, ik)
-                selection = self.indexer.select(x, ik_all, cache, offset)
+                k, v, ik_all = cache.update_and_fetch_qsa(k, v, ik,
+                                                          pos=positions)
+                selection = self.indexer.select(
+                    x, ik_all, cache, offset, cos=cos, sin=sin,
+                    pos_all=cache.pos, selector=self._mrope_selector)
             elif cache is not None:
                 k, v = cache.update_and_fetch(k, v)
             else:
-                selection = self.indexer.select(x, ik, None, 0)
+                selection = self.indexer.select(
+                    x, ik, None, 0, cos=cos, sin=sin,
+                    pos_all=(positions.astype(mx.int32)
+                             if positions is not None else None),
+                    selector=self._mrope_selector)
         elif cache is not None:
             k, v = cache.update_and_fetch(k, v)
 
@@ -917,14 +1022,15 @@ class DecoderLayer(nn.Module):
             self.ple = PLELayer(args)
 
     def __call__(self, h: mx.array, input_ids: mx.array, mask=None, cache=None,
-                 ple_table=None, gdn_sink=None):
+                 ple_table=None, gdn_sink=None, positions=None):
         if "ple" in self:
             h = self.ple(h, input_ids, cache, ple_table, mask, gdn_sink=gdn_sink)
         mixed, inject = self.hc_attn(h)
         if self.is_linear:
             out = self.linear_attn(mixed, mask=mask, cache=cache, gdn_sink=gdn_sink)
         else:
-            out = self.self_attn(mixed, mask=mask, cache=cache)
+            out = self.self_attn(mixed, mask=mask, cache=cache,
+                                 positions=positions)
         h = _hc_combine(h, out, inject)
         mixed, inject = self.hc_ffn(h)
         out = self.mlp(mixed)
@@ -952,7 +1058,7 @@ class Qwen4ExpModel(nn.Module):
             (i for i, t in enumerate(args.layer_types) if t == "full_attention"), 0)
 
     def __call__(self, inputs: mx.array, cache=None, input_embeddings=None,
-                 return_streams: bool = False, gdn_sink=None):
+                 return_streams: bool = False, gdn_sink=None, position_ids=None):
         h = input_embeddings if input_embeddings is not None else self.embed_tokens(inputs)
         B, T, D = h.shape
         h = mx.broadcast_to(h[:, :, None, :], (B, T, self.hc, D))
@@ -965,7 +1071,7 @@ class Qwen4ExpModel(nn.Module):
         for layer, c in zip(self.layers, cache):
             mask = ssm_mask if layer.is_linear else fa_mask
             h = layer(h, inputs, mask=mask, cache=c, ple_table=table,
-                      gdn_sink=gdn_sink)
+                      gdn_sink=gdn_sink, positions=position_ids)
         out = self.hc_head(h)
         if return_streams:
             return out, h
