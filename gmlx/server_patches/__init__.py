@@ -80,6 +80,13 @@ from .chat_behavior import (
     install_thinking_budget_fix,
     install_vanilla_stream_chunks,
 )
+from .capacity_routes import (
+    install_capacity_plan,
+    install_estimate,
+    install_health_readiness,
+    install_metrics_prometheus,
+    install_scoped_cache_reset,
+)
 from .completions import install_completions_route
 from .hardening import (
     disable_credentialed_cors,
@@ -140,11 +147,13 @@ __all__ = [
     "install_fast_sampler",
     "install_gen_args_profile_injection",
     "install_health_liveness_override",
+    "install_health_readiness",
     "install_hf_download_gate",
     "install_ignore_eos",
     "install_json_content_type_tolerance",
     "install_keep_route",
     "install_loopback_host_guard",
+    "install_metrics_prometheus",
     "install_models_endpoint_override",
     "install_openai_stop_sequences",
     "install_optional_request_model",
@@ -154,6 +163,9 @@ __all__ = [
     "install_request_timing_log",
     "install_role_normalization",
     "install_rerank_route",
+    "install_scoped_cache_reset",
+    "install_capacity_plan",
+    "install_estimate",
     "install_resolver_error_handlers",
     "install_runtime_snapshot_enrichment",
     "install_server_patches",
@@ -241,6 +253,13 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_hf_download_gate(bool(getattr(cfg, "hf_cache", False)))
     install_runtime_snapshot_enrichment()
     install_pool_aware_unload()
+    # After the liveness override (replaces its handler) and the residency
+    # pool install (the scoped reset walks the pool's entries).
+    install_health_readiness()
+    install_metrics_prometheus()
+    install_scoped_cache_reset()
+    install_capacity_plan()
+    install_estimate()
     # Render-wrap nesting per target: seed(retire(faithful(orig))).
     # Faithful innermost so the retire capture memoizes it and predictions
     # see the render the server produces. Seed outermost for two reasons:
@@ -283,6 +302,10 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     # their handlers (typed error + close on the response queue).
     from .row_failed import install_row_failed_bridge
     install_row_failed_bridge()
+    # Outside the row-failed bridge (reads ``active`` after the bridge has
+    # popped shed rows, so a shed uid never lingers in the live view).
+    from ..live_requests import install_live_requests
+    install_live_requests()
     # The true last BatchGenerator._next wrapper (outermost): the tick
     # guard must see every error the tick can raise, and its recovery
     # time must not pollute the trace's tick bracket.

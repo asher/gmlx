@@ -12,6 +12,38 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   set the reasoning switch and thinking-token cap for a single positional
   model without a config file (the same `thinking:` / sampling
   `thinking_budget:` keys a config sets).
+- `/v1/metrics`: live per-request rows, `concurrency` and `rates`
+  sections, waiting depth and in-flight counts.
+- `GET /health?ready=1`: keyless readiness; 503 + `Retry-After` with
+  reason `pressure`, `queue`, or `busy`.
+- `GET /metrics?format=prometheus`: Prometheus rendering of the snapshot.
+- `POST /v1/cache/reset` takes `{"model": "<id>"}`; with no body it clears
+  every resident model's cache.
+- `POST /v1/estimate` (or `"dry_run": true` on chat completions): memory
+  preflight for a prompt without loading or generating.
+- `GET /v1/capacity/plan?width=W&depth=D`: fan-out policy from the
+  capacity table, governor band, and free slots.
+- `/v1/models`: `context_length` and `max_context_at_width_1`; `gmlx
+  launch pi` writes them as pi's `contextWindow` / `maxTokens`.
+
+### Fixed
+
+- Model loads are gated on the serve ceiling and the kernel floor (a
+  co-load could Metal-OOM); memory still being freed is waited for.
+- A deferred load answers `503 model_load_deferred` + `Retry-After`, not
+  a 500.
+- Speculative decode retires finished rows into the prefix cache at any
+  batch width.
+- Speculative decode at width > 1 on sliding-window models crashed on the
+  first mid-decode admission.
+- `GMLX_QUEUE_DEPTH_CAP` now fires under the residency pool.
+
+### Changed
+
+- `POST /unload` of the preloaded primary succeeds; in-flight streams
+  still 409.
+- Prefix cache key salt no longer hashes the embedding matrix per request;
+  older on-disk prefix caches miss once and are rewritten.
 
 ## [0.4.1] - 2026-08-24
 

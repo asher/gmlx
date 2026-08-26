@@ -93,9 +93,7 @@ def _clone_row(cache: Any, *, rot_canonical: bool) -> Any | None:
     from .cache_compat import cache_types
 
     if isinstance(cache, _buffered_types()):
-        _log.info("APC clone declined: BufferedRotatingKVCache carries "
-                  "start_position no rotating clone preserves")
-        return None
+        return _clone_buffered_window(cache)
     if rot_canonical and isinstance(cache, cache_types("RotatingKVCache")):
         return _clone_rot_canonical(cache)
     eval_targets: list[Any] = []
@@ -137,6 +135,56 @@ def _clone_rot_canonical(cache: Any) -> Any | None:
     out.values = copy(tv)
     out.offset = int(offset)
     out._idx = int(length)
+    mx.eval(out.keys, out.values)
+    return out
+
+
+def _clone_buffered_window(cache: Any) -> Any | None:
+    """Clone of a BufferedRotatingKVCache (the spec-path swap-in) as the
+    plain RotatingKVCache the model's make_cache produces.
+
+    The buffered cache keeps its window as a linear temporal buffer
+    ``[0, _idx)`` plus rollback slack, so the canonical window (the
+    trailing ``min(offset, max_size)`` tokens in temporal order) is also
+    its faithful state: no ring phase to permute, hence one clone serves
+    both consumers. The result is what a stored entry restores into (the
+    spec path re-swaps on its next prefill). ``keep > 0`` never reaches
+    the swap; declined."""
+    import mlx.core as mx
+    from mlx_vlm import apc as _apc
+    from mlx_vlm.models.cache import RotatingKVCache
+
+    keep = int(getattr(cache, "keep", 0) or 0)
+    if keep:
+        _log.info("APC clone declined: BufferedRotatingKVCache with keep=%d",
+                  keep)
+        return None
+    max_size = int(cache.max_size)
+    offset = int(getattr(cache, "offset", 0) or 0)
+    out = RotatingKVCache(max_size=max_size, keep=0)
+    out.offset = offset
+    if cache.keys is None or cache.values is None:
+        out._idx = 0
+        return out
+    idx = int(cache._idx)
+    L = min(offset, max_size)
+    if idx < L or L <= 0:
+        _log.info("APC clone declined: buffered window covers %d of %d "
+                  "tokens", idx, L)
+        return None
+    # The trailing slice is the canonical window only while the buffer's
+    # linear layout holds (``start_position == offset - _idx``, which
+    # from_cache establishes and compact/update preserve). Decline loudly
+    # rather than store a window that starts somewhere else.
+    start = getattr(cache, "start_position", None)
+    if start is not None and int(start) != offset - idx:
+        _log.warning("APC clone declined: buffered window start %s != "
+                     "offset %d - idx %d", start, offset, idx)
+        return None
+    copy = _apc._copy_mlx_array
+    out.keys = copy(cache.keys[..., idx - L:idx, :])
+    out.values = copy(cache.values[..., idx - L:idx, :])
+    out._idx = L
     mx.eval(out.keys, out.values)
     return out
 
@@ -1527,6 +1575,88 @@ def _assemble_from_record(manager, rec, geometry_check=None):
     return warm
 
 
+def _ckpt_scan(manager, tid: tuple, extra_hash: int, min_prefix_tokens: int,
+               layout) -> tuple:
+    """Candidate records for ``tid`` under the manager lock: the pinned
+    records whose ids are a strict prefix of the query at the same salt
+    and layout, plus the tallies the miss path reports (``gated``,
+    ``refused``, ``salted``, ``diverged``) and the index generation the
+    caller checks its assembly against. Pure: bumps no counters."""
+    n = len(tid)
+    idx = _ckpt_records(manager)
+    with manager.lock:
+        gen = int(getattr(manager, "_kq_ckpt_gen", 0))
+        cands, gated, refused = [], 0, 0
+        salted = diverged = 0
+        bs = int(getattr(manager, "block_size", 0) or 1)
+        for rec in idx.values():
+            # Last-token sentinel before the full slice compare:
+            # unrelated queries reject in O(1), so tallying refused
+            # matches here costs the hot path nothing and the miss
+            # path never rescans the index.
+            if rec.extra_hash != int(extra_hash):
+                if rec.ids and tid[:bs] == rec.ids[:bs]:
+                    salted += 1
+                continue
+            if (not rec.ids or rec.p > n
+                    or tid[rec.p - 1] != rec.ids[-1]
+                    or tid[:rec.p] != rec.ids):
+                # Same-chain records that diverge before their own p
+                # (first block matches, full slice does not) were
+                # invisible: the 9B probe showed adoption dying here
+                # with zero counters moving.
+                if (rec.ids and len(tid) >= bs
+                        and tid[:bs] == rec.ids[:bs]):
+                    diverged += 1
+                    if os.environ.get("GMLX_APC_CKPT_DEBUG"):
+                        m = 0
+                        lim = min(len(tid), rec.p)
+                        while m < lim and tid[m] == rec.ids[m]:
+                            m += 1
+                        _log.info(
+                            "APC ckpt diverged: rec.p=%d kind=%s "
+                            "layout=%s first mismatch at %d "
+                            "(query %r vs rec %r)",
+                            rec.p, rec.kind, rec.layout, m,
+                            tid[m:m + 4], rec.ids[m:m + 4])
+                continue
+            if (not min_prefix_tokens < rec.p < n
+                    or (layout is not None
+                        and tuple(layout) != rec.layout)):
+                refused += 1
+                continue
+            # Recurrent-state replay records serve identical resends
+            # only: at exactly one token past the record, the warm
+            # turn forwards a single token and stays bit-identical to
+            # armed cold. A longer suffix would chunk off the grid
+            # the record was built on and drift. Attention-only
+            # replay records split exactly and adopt freely.
+            if (rec.kind == "replay" and "arr" in (rec.layout or ())
+                    and rec.p != n - 1):
+                gated += 1
+                continue
+            cands.append(rec)
+    return cands, gated, refused, salted, diverged, gen
+
+
+def ckpt_peek(manager, token_ids, *, extra_hash: int = 0,
+              min_prefix_tokens: int = 0, layout=None) -> int:
+    """How deep the checkpoint tier could warm-start ``token_ids``: the
+    deepest pinned record's ``p``, or 0. The dry-run's probe: it neither
+    assembles a cache nor consults the disk skeleton, and moves no
+    counter. Never raises."""
+    if manager is None or token_ids is None:
+        return 0
+    try:
+        tid = tuple(int(t) for t in token_ids)
+        cands = _ckpt_scan(manager, tid, extra_hash, min_prefix_tokens,
+                           layout)[0]
+        return max((int(r.p) for r in cands), default=0)
+    except Exception:
+        _log.debug("APC ckpt peek failed", exc_info=True)
+        return 0
+
+
 def ckpt_lookup(
     manager: Any,
     token_ids,
@@ -1550,59 +1680,8 @@ def ckpt_lookup(
         ids = [int(t) for t in token_ids]
         tid = tuple(ids)
         idx = _ckpt_records(manager)
-        n = len(ids)
-        with manager.lock:
-            gen = int(getattr(manager, "_kq_ckpt_gen", 0))
-            cands, gated, refused = [], 0, 0
-            salted = diverged = 0
-            bs = int(getattr(manager, "block_size", 0) or 1)
-            for rec in idx.values():
-                # Last-token sentinel before the full slice compare:
-                # unrelated queries reject in O(1), so tallying refused
-                # matches here costs the hot path nothing and the miss
-                # path never rescans the index.
-                if rec.extra_hash != int(extra_hash):
-                    if rec.ids and tid[:bs] == rec.ids[:bs]:
-                        salted += 1
-                    continue
-                if (not rec.ids or rec.p > n
-                        or tid[rec.p - 1] != rec.ids[-1]
-                        or tid[:rec.p] != rec.ids):
-                    # Same-chain records that diverge before their own p
-                    # (first block matches, full slice does not) were
-                    # invisible: the 9B probe showed adoption dying here
-                    # with zero counters moving.
-                    if (rec.ids and len(tid) >= bs
-                            and tid[:bs] == rec.ids[:bs]):
-                        diverged += 1
-                        if os.environ.get("GMLX_APC_CKPT_DEBUG"):
-                            m = 0
-                            lim = min(len(tid), rec.p)
-                            while m < lim and tid[m] == rec.ids[m]:
-                                m += 1
-                            _log.info(
-                                "APC ckpt diverged: rec.p=%d kind=%s "
-                                "layout=%s first mismatch at %d "
-                                "(query %r vs rec %r)",
-                                rec.p, rec.kind, rec.layout, m,
-                                tid[m:m + 4], rec.ids[m:m + 4])
-                    continue
-                if (not min_prefix_tokens < rec.p < n
-                        or (layout is not None
-                            and tuple(layout) != rec.layout)):
-                    refused += 1
-                    continue
-                # Recurrent-state replay records serve identical resends
-                # only: at exactly one token past the record, the warm
-                # turn forwards a single token and stays bit-identical to
-                # armed cold. A longer suffix would chunk off the grid
-                # the record was built on and drift. Attention-only
-                # replay records split exactly and adopt freely.
-                if (rec.kind == "replay" and "arr" in (rec.layout or ())
-                        and rec.p != n - 1):
-                    gated += 1
-                    continue
-                cands.append(rec)
+        cands, gated, refused, salted, diverged, gen = _ckpt_scan(
+            manager, tid, extra_hash, min_prefix_tokens, layout)
         if gated:
             _ckpt_decline(manager, "replay_gate")
         if salted:
@@ -1898,6 +1977,35 @@ def _grid_ceil(n: int, g: int) -> int:
     return -(-int(n) // g) * g
 
 
+def row_kv_len(prompt_cache, row: int = 0) -> int | None:
+    """Tokens of KV the cache holds for ``row``: the max per-row offset
+    across layers (batch classes carry one offset per row; single-row
+    classes a scalar; CacheList members are read through). None when no
+    layer reports one. Cheap - no clone - so a store can pick its key
+    from what the row actually covers."""
+    best = None
+    for c in prompt_cache or ():
+        members = getattr(c, "caches", None)
+        if isinstance(members, (tuple, list)):
+            n = row_kv_len(list(members), row)
+        else:
+            off = getattr(c, "offset", None)
+            if off is None:
+                continue
+            try:
+                if hasattr(off, "ndim") and off.ndim >= 1:
+                    if row >= off.shape[0]:
+                        continue
+                    n = int(off[row].item())
+                else:
+                    n = int(off)
+            except (TypeError, ValueError, AttributeError):
+                continue
+        if n is not None and (best is None or n > best):
+            best = n
+    return best
+
+
 def _cache_offset_max(prompt_cache) -> int:
     p = 0
     for c in prompt_cache or ():
@@ -2132,6 +2240,14 @@ def retirement_store(
         if mode == "exact":
             snap = row_snapshot(prompt_cache, row)
             if snap is None:
+                return 0
+            covered = _cache_offset_max(snap)
+            if covered and covered != len(ids):
+                # An exact entry replays bitwise from its key; a row whose
+                # KV count disagrees with the key (a batch row with a
+                # pending or stale tail) must not be stored under it.
+                _log.warning("APC retirement skipped: row covers %d tokens, "
+                             "key %d", covered, len(ids))
                 return 0
             if max_len is not None and max_len < len(ids):
                 if max_len < 2:

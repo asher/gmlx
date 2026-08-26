@@ -1465,12 +1465,15 @@ def _retire_b1(model, prompt_cache: list, generated: list[int],
 def _retire_batch_row(model, prompt_cache: list, slot: int,
                       retire: dict, gen_row: list[int],
                       position: int) -> None:
-    """Store a finished batch row's KV into the shared APC (block mode only).
+    """Store a finished batch row's KV into the shared APC (block + exact).
 
-    Exact-mode retirement is a full per-row cache clone -- never taken at
-    B>1 (it stalls the co-resident lanes; the drafter-state sidecar is the
-    planned fix). Block mode harvests only not-yet-cached 16-token blocks,
-    which is cheap enough to run between rounds. ``position`` is the row's
+    Block mode harvests only not-yet-cached 16-token blocks, which is
+    cheap enough to run between rounds. Exact mode (DeepSeek-V4-class
+    pooling stacks) extracts the row (``row_snapshot``: padding-trimmed
+    clones with row-true offsets) and stores it whole, the same store the
+    stock batch path takes at filter; a drafted V4 server otherwise never
+    fed the exact tier under load (2026-08-25 soak: zero retirements).
+    ckpt mode stays unwired at B>1 (v1). ``position`` is the row's
     absolute token offset in the batch cache; content is aligned with the
     token sequence up to ``len(seq) - 1`` (the newest token's KV pends the
     next verify), so anything the guard passes is faithfully covered.
@@ -1480,14 +1483,18 @@ def _retire_batch_row(model, prompt_cache: list, slot: int,
         manager = getattr(model, "_kq_apc_manager", None)
         if manager is None:
             return
-        if retire.get("mode") != "block":
-            # exact = full row clone (stalls co-resident lanes); ckpt =
-            # affordable but unwired at B>1 in v1 -- the eligible fleet is
-            # thinking-template models whose retirement keys structurally
-            # miss on chat turns, so the stall buys nothing yet.
+        mode = retire.get("mode")
+        if mode == "exact":
+            _retire_batch_row_exact(manager, prompt_cache, slot, retire,
+                                    gen_row, position)
+            return
+        if mode != "block":
+            # ckpt = affordable but unwired at B>1 in v1 -- the eligible
+            # fleet is thinking-template models whose retirement keys
+            # structurally miss on chat turns, so the stall buys nothing yet.
             _log.debug(
                 "APC retire skipped at B>1: %s-mode store not taken in a "
-                "live batch", retire.get("mode"))
+                "live batch", mode)
             return
         seq = retire["full_ids"] + [int(t) for t in gen_row]
         store_len = len(seq) - 1
@@ -1517,6 +1524,43 @@ def _retire_batch_row(model, prompt_cache: list, slot: int,
         _log.warning("APC retire failed; continuing", exc_info=True)
 
 
+def _retire_batch_row_exact(manager, prompt_cache: list, slot: int,
+                            retire: dict, gen_row: list[int],
+                            position: int) -> None:
+    """Exact-tier retirement of one batch row. The key is chosen from the
+    KV the row actually holds (``row_kv_len``), mirroring ``_retire_b1``'s
+    two clean states: ``len(seq) - 1`` (the newest token's KV pends the
+    next verify; store everything but it) or ``len(seq)`` (committed).
+    ``position`` is the loop's accepted-token count and can lag the
+    cache by the verify input (2026-08-25 soak: rows covered len(seq)
+    while position read len(seq) - 1); anything else is a stale tail and
+    is skipped rather than stored under a key it does not cover."""
+    from .cache_snapshot import retirement_store, row_kv_len
+    seq = retire["full_ids"] + [int(t) for t in gen_row]
+    covered = row_kv_len(prompt_cache, slot)
+    if covered is None:
+        covered = position
+    if covered == len(seq) - 1:
+        seq = seq[:-1]
+    elif covered != len(seq):
+        _log.info("APC retire skipped (row): KV covers %d, tokens %d "
+                  "(position %d)", covered, len(seq), position)
+        return
+    lcp = None
+    if os.environ.get("GMLX_APC_RETIRE_LCP") != "0":
+        from .retire_key import next_turn_lcp
+        lcp = next_turn_lcp(retire.get("render_ctx"), seq,
+                            [int(t) for t in gen_row])
+    max_len = lcp if lcp is not None and lcp < len(seq) else None
+    _log.info("APC retire (row): seq=%d ctx=%s lcp=%s cap=%s", len(seq),
+              retire.get("render_ctx") is not None, lcp, max_len)
+    ok = retirement_store(
+        manager, "exact", seq, prompt_cache, row=slot,
+        extra_hash=int(retire.get("extra_hash", 0)), max_len=max_len)
+    if ok:
+        _log.info("APC retire store (row): tokens=%d", ok)
+
+
 # Batched B>1 owned MTP round
 
 def _lift_injected_cache(cache, other):
@@ -1528,14 +1572,55 @@ def _lift_injected_cache(cache, other):
     (gemma drafter-MTP c>1, 2026-07-23 bench). Lift via the class's own
     merge when either batch-only attr is absent; merge temporal-orders
     rotated content, so mid-rotation injected streams stay correct."""
+    members = getattr(cache, "caches", None)
+    others = getattr(other, "caches", None)
+    if isinstance(members, (tuple, list)) and isinstance(others, (tuple, list)):
+        # CacheList (DeepSeek V4: MLA + sliding-window per layer): the
+        # list's extend zips members, so each member lifts on its own.
+        other.caches = tuple(_lift_injected_cache(c, o)
+                             for c, o in zip(members, others))
+        return other
     if ((hasattr(cache, "_idx") and not hasattr(other, "_idx"))
-            or (hasattr(cache, "rotated") and not hasattr(other, "rotated"))):
+            or (hasattr(cache, "rotated") and not hasattr(other, "rotated"))
+            # classes without the batch API at all (DeepSeek V4's
+            # PoolingCache: no _idx, no rotated; its batch class
+            # extend() read len() of a scalar remainder)
+            or (_batch_capable(cache) and not _batch_capable(other)
+                and callable(getattr(type(other), "merge", None)))):
         lifted = type(other).merge([other])
         stamp = getattr(other, "_gmlx_cascade", None)
         if stamp is not None:
             lifted._gmlx_cascade = stamp
         return lifted
     return other
+
+
+def _batch_capable(cache) -> bool:
+    return (callable(getattr(cache, "extend", None))
+            and callable(getattr(cache, "filter", None)))
+
+
+def _lift_live_cache(cache):
+    """The live batch's own layer caches must be batch classes before an
+    injection extends them. A batch formed from a single row keeps the
+    prefill's single-sequence classes, and the spec swap-in
+    BufferedRotatingKVCache (SWA layers) has no extend at all: DeepSeek V4
+    with a drafter or MTP crashed every batched stream on the first
+    mid-decode admission ('BufferedRotatingKVCache' object has no
+    attribute 'extend', 2026-08-25 soak). Lift through the class's own
+    merge, as _lift_injected_cache does for the incoming side; CacheList
+    members lift individually so the list object survives."""
+    members = getattr(cache, "caches", None)
+    if isinstance(members, (tuple, list)):
+        if not all(_batch_capable(m) for m in members):
+            cache.caches = tuple(_lift_live_cache(m) for m in members)
+        return cache
+    if _batch_capable(cache) or not callable(getattr(type(cache), "merge", None)):
+        return cache
+    lifted = type(cache).merge([cache])
+    from .cascade_sdpa import carry_stamp
+    carry_stamp(cache, lifted)
+    return lifted
 
 
 _width_cap_memo: tuple[str, int | None] = ("", None)
@@ -1686,6 +1771,7 @@ def _owned_decode_rounds_batch(
     lm,
     prompt_cache: list,
     *,
+    retire_ctx0: dict | None = None,
     hidden: mx.array | None,
     b: list[int],
     shared_kv: dict | None,
@@ -1735,6 +1821,8 @@ def _owned_decode_rounds_batch(
     # retire context (APC is gated to single-request prefill); rows injected
     # from a B=1 prefill carry theirs on the injected cache's first entry.
     retire_ctxs: list[dict | None] = [None] * B_orig
+    if retire_ctx0 is not None and B_orig == 1:
+        retire_ctxs[0] = retire_ctx0
     gen_rows: list[list[int]] = [[int(t)] for t in b]
     retired = [False] * B_orig
 
@@ -1941,6 +2029,9 @@ def _owned_decode_rounds_batch(
             for inj in gen_inj:
                 B_new = len(inj["uids"])
                 for i, cache in enumerate(prompt_cache):
+                    lifted = _lift_live_cache(cache)
+                    if lifted is not cache:
+                        prompt_cache[i] = cache = lifted
                     extend_fn = getattr(cache, "extend", None)
                     if callable(extend_fn):
                         other = _lift_injected_cache(
@@ -2361,6 +2452,11 @@ def owned_server_rounds_batch(
     lm = model.language_model if hasattr(model, "language_model") else model
     B = int(first_bonus.shape[0])
     b = first_bonus.reshape(-1).tolist()
+    # Pop the retirement context before buffering (the swap-in kills the
+    # stash attr; see owned_server_rounds). A single-request prefill that
+    # enters the batch loop directly (the residency pool routes every
+    # serve row here) retires its row like the scalar path does.
+    retire_ctx0 = _pop_retire_ctx(prompt_cache) if B == 1 else None
     _buffer_mtp_target_cache(prompt_cache, drafter, draft_block_size)
     eff_sampler = None if greedy_sampling else sampler
     # A preempted scalar generation rebuilt into this loop carries its real
@@ -2381,4 +2477,4 @@ def owned_server_rounds_batch(
         emitted=list(emitted), max_tokens=max_tokens,
         sampler=eff_sampler, draft_block_size=draft_block_size,
         stop_check=stop_check, eos_token_ids=eos_token_ids,
-        row_ids=row_ids)
+        row_ids=row_ids, retire_ctx0=retire_ctx0)

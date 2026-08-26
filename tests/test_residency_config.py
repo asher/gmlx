@@ -473,3 +473,124 @@ def test_clear_skips_busy_entries():
     pool.release(busy)
     assert pool.clear() is True
     assert pool.busy_paths() == []
+
+
+def test_deferred_load_inside_the_handler_is_the_typed_503(monkeypatch):
+    # The chat pre-warm answers a gate-deferred load typed; a load that only
+    # begins at the handler's own acquire (the room went to another request
+    # in between) used to fall to mlx-vlm's generic 500. pooled_get_cached_model
+    # now raises the same 503 body + Retry-After as an HTTPException, which
+    # the endpoint wrappers re-raise untouched.
+    from fastapi import FastAPI, HTTPException
+    from fastapi.testclient import TestClient
+
+    from gmlx.capacity import LoadDeferred
+    import gmlx.server_patches.capacity_routes as cr
+
+    pool, app_mod, _threads = install_with_fakes(monkeypatch, budget_bytes=GB)
+    getter = app_mod.get_cached_model
+
+    def deferred(*a, **k):
+        raise LoadDeferred("model load deferred: m weights 86.7 GB exceed the "
+                           "measured free working set -0.7 GB")
+
+    monkeypatch.setattr(pool, "acquire", deferred)
+    monkeypatch.setattr(cr, "readiness", lambda: (False, "busy", 9))
+
+    api = FastAPI()
+
+    @api.get("/probe/{model}")
+    def probe(model: str):
+        try:
+            getter(model)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        return {"ok": True}
+
+    r = TestClient(api).get("/probe/m")
+    assert r.status_code == 503
+    assert r.headers["retry-after"] == "9"
+    err = r.json()["detail"]["error"]
+    assert err["type"] == "model_load_deferred" and err["model"] == "m"
+    assert err["retry_after_s"] == 9 and "86.7 GB" in err["message"]
+
+
+def test_evict_and_clear_can_discount_retained_holds():
+    """An explicit unload judges busy-ness on real streams: the preload's
+    process-lifetime hold (retained) is discounted, a second acquire is
+    not, and a refused eviction leaves the entry (and so the hold) in
+    place - ``entry_resident`` is how the route tells the two apart."""
+    from gmlx import residency
+    from gmlx.residency import ModelBusyError
+
+    _proxy, pool, _env, teardowns = make_pool()
+    entry = _acq(pool, "/abs/a.gguf")
+    hold = residency._BusyHold(pool, entry)
+    pool.mark_retained(hold)
+    assert entry.busy == 1 and entry.retained == 1
+    with pytest.raises(ModelBusyError):
+        pool.evict("/abs/a.gguf")                    # stock: the hold counts
+    stream = _acq(pool, "/abs/a.gguf")               # a real in-flight stream
+    assert stream is entry and entry.busy == 2
+    with pytest.raises(ModelBusyError) as ei:
+        pool.evict("/abs/a.gguf", ignore_retained=True)
+    assert ei.value.in_flight == 1                   # the stream, not the hold
+    assert pool.entry_resident(entry)
+    assert pool.clear(ignore_retained=True) is False and pool.entry_resident(entry)
+    pool.release(entry)                              # stream done
+    assert pool.evict("/abs/a.gguf", ignore_retained=True) is True
+    assert not pool.entry_resident(entry) and teardowns == ["/abs/a.gguf"]
+    hold.release()                                   # late release: harmless
+
+
+def test_profile_label_is_stable_across_acquires_and_unique_per_entry():
+    """The metrics label for a resident entry must not move: ``seq`` is
+    the LRU clock (re-stamped per acquire) and labelling on it minted a
+    new Prometheus series on every scrape. ``profile`` is fixed for the
+    entry's lifetime and still distinguishes two entries on one GGUF."""
+    import importlib
+    from gmlx.server_patches import capacity_routes as cr
+    from gmlx.server_patches import routes as sp_routes
+
+    _proxy, pool, _env, _td = make_pool()
+    pkg = importlib.import_module("mlx_vlm.server")
+    saved = getattr(pkg, "_kq_residency_pool", None)
+    pkg._kq_residency_pool = pool
+    try:
+        def labels():
+            return [cr._entry_label(e, i)
+                    for i, e in enumerate(sp_routes._resident_models_view())]
+
+        e = _acq(pool, "/abs/a.gguf")
+        first = labels()
+        seq0 = pool.stats()["resident"][0]["seq"]
+        for _ in range(3):
+            pool.release(_acq(pool, "/abs/a.gguf"))
+        assert pool.stats()["resident"][0]["seq"] > seq0        # LRU clock moved
+        assert labels() == first                                 # label did not
+        assert first == [{"model": "a.gguf", "profile": "default"}]
+        # same GGUF, an adapter and a different load signature: two entries,
+        # two labels, no duplicate series
+        pool.acquire("/abs/a.gguf", "/abs/lora.gguf", "auto")
+        pool.acquire("/abs/a.gguf", None, "auto", cache_key_extra=("kv4",))
+        # ... and a service-kind route (--embeddings) on the same GGUF: the
+        # kind is the only key component that differs
+        pool.acquire("/abs/a.gguf", None, "embedding")
+        # upstream's explicit text_generation kind is its own key: it must
+        # not collapse into the same ``default`` label as gmlx's ``auto``
+        pool.acquire("/abs/a.gguf", None, "text_generation")
+        # a config-mode load names the entry by the id that built it
+        pool.acquire("/abs/a.gguf", None, "auto", cache_key_extra=("kv8",),
+                     loaded_as="a-q8@coder")
+        labs = labels()
+        assert len(labs) == 6 and len({tuple(sorted(d.items())) for d in labs}) == 6
+        named = [d for d in labs if d["model"] == "a-q8@coder"]
+        assert len(named) == 1 and named[0]["profile"] != "default"
+        assert {"model": "a.gguf", "profile": "lora.gguf"} in labs
+        assert {"model": "a.gguf", "profile": "embedding"} in labs
+        assert {"model": "a.gguf", "profile": "text_generation"} in labs
+        pool.release(e)
+    finally:
+        pkg._kq_residency_pool = saved

@@ -19,7 +19,14 @@ admitted. The metrics in-flight gauge is not a usable source: the
 gmlx-owned chat routes never call begin_request, so it reads zero under
 any load (the depth e2e queue-cap phase caught exactly this). A tiny
 publisher wrapper on ``BatchGenerator._next`` keeps a weakref to the
-live generator so the check can read its pending list.
+live generator so the check can read its pending list; the live-request
+publisher (which sees the engine and its generator together on every
+tick) registers the pair, so with several resident models the check,
+the metrics census and readiness all judge the same pool-wide figure:
+every resident engine's queue summed, not the last-used one. (Handlers
+see the residency proxy's per-request guard around the engine, so the
+census unwraps it before the registry lookup; judged through the guard,
+the pending list was invisible and the cap never fired with a pool.)
 
 Knobs:
     GMLX_QUEUE_DEPTH_CAP   waiting-queue cap (default 2 x decode
@@ -45,13 +52,98 @@ _RETRY_DEFAULT_S = 5
 _REJECTIONS = 0
 _LAST_REJECT = ""
 
-# Weakref to the live BatchGenerator, published by the census wrapper.
+# Weakref to the live BatchGenerator, published by the census wrapper
+# (the most recently ticked one; the fallback when the engine has no
+# registered generator).
 _GEN_REF = None
+# id(response_generator) -> (weakref rg, weakref BatchGenerator), from the
+# live-request publisher's tick.
+_ENGINES: dict = {}
+
+
+def note_engine(rg, gen) -> None:
+    """Remember which BatchGenerator serves ``rg`` (called per tick; a
+    cheap identity check keeps the common case free)."""
+    key = id(rg)
+    cur = _ENGINES.get(key)
+    if cur is not None and cur[1]() is gen and cur[0]() is rg:
+        return
+    try:
+        _ENGINES[key] = (weakref.ref(rg), weakref.ref(gen))
+    except TypeError:
+        return
+    for k, (r, g) in list(_ENGINES.items()):
+        if r() is None or g() is None:
+            _ENGINES.pop(k, None)
+
+
+def _all_engines() -> list | None:
+    """Every resident engine, or None without a residency pool."""
+    try:
+        pkg = importlib.import_module("mlx_vlm.server")
+        pool = getattr(pkg, "_kq_residency_pool", None)
+        if pool is None or not hasattr(pool, "response_generators"):
+            return None
+        return [rg for _, rg in pool.response_generators()]
+    except Exception:
+        return None
+
+
+def _waiting_depth_all() -> int:
+    """The waiting census across every resident engine; falls back to the
+    runtime's current engine without a pool. 0 with no engine at all."""
+    rgs = _all_engines()
+    if rgs is None:
+        runtime = importlib.import_module("mlx_vlm.server.runtime").runtime
+        rg = getattr(runtime, "response_generator", None)
+        return _waiting_depth(rg) if rg is not None else 0
+    return sum(_waiting_depth(rg) for rg in rgs)
 
 
 def queue_cap_stats() -> dict:
-    return {"rejections": _REJECTIONS,
-            "last_reject_reason": _LAST_REJECT or None}
+    """The ``queue`` section of /v1/metrics: the rejection counters plus
+    the live waiting census, the cap it is judged against, and the
+    drain estimate a client would get as Retry-After right now
+    (``eta_s`` is 0 with nothing waiting). Read-only; a probe failure
+    leaves the live fields None rather than failing the snapshot."""
+    out = {"rejections": _REJECTIONS,
+           "last_reject_reason": _LAST_REJECT or None,
+           "waiting": None, "cap": _cap(), "eta_s": None}
+    try:
+        runtime = importlib.import_module("mlx_vlm.server.runtime").runtime
+        # No engine yet (nothing loaded): nothing can be waiting.
+        depth = _waiting_depth_all()
+        out["waiting"] = depth
+        out["eta_s"] = (_retry_after_s(getattr(runtime, "metrics", None),
+                                       depth) if depth > 0 else 0)
+    except Exception:
+        pass
+    return out
+
+
+def concurrency_stats() -> dict:
+    """The ``concurrency`` section of /v1/metrics: the effective decode
+    width (``decode_batch``), the waiting-queue cap, streams generating
+    now (``in_flight``, the residency pool's busy refcounts summed) and
+    the waiting census. The four numbers a dispatcher needs to size a
+    fan-out without guessing at ``GMLX_DECODE_BATCH``."""
+    out = {"decode_batch": _decode_concurrency(), "queue_cap": _cap(),
+           "in_flight": None, "waiting": None}
+    try:
+        pkg = importlib.import_module("mlx_vlm.server")
+        pool = getattr(pkg, "_kq_residency_pool", None)
+        if pool is not None:
+            # in_flight excludes process-lifetime holds (the primary
+            # preload); older pool stats without it fall back to busy.
+            out["in_flight"] = sum(int(e.get("in_flight", e.get("busy")) or 0)
+                                   for e in pool.stats().get("resident", []))
+    except Exception:
+        pass
+    try:
+        out["waiting"] = _waiting_depth_all()
+    except Exception:
+        pass
+    return out
 
 
 def _decode_concurrency() -> int:
@@ -76,6 +168,10 @@ def _waiting_depth(rg) -> int:
     """Requests waiting for a decode slot: the server request queue plus
     the batch generator's unadmitted prompt candidates. Both reads are
     racy by design; the cap needs magnitude, not a barrier."""
+    # Handlers see the residency proxy's per-request _GenerationGuard,
+    # not the entry's ResponseGenerator; the engine registry is keyed by
+    # the real object, so unwrap before the identity lookup.
+    rg = getattr(rg, "_rg", rg)
     depth = 0
     qsize = getattr(getattr(rg, "requests", None), "qsize", None)
     if callable(qsize):
@@ -83,7 +179,13 @@ def _waiting_depth(rg) -> int:
             depth += max(0, int(qsize()))
         except Exception:
             pass
-    gen = _GEN_REF() if _GEN_REF is not None else None
+    reg = _ENGINES.get(id(rg))
+    if reg is not None and reg[0]() is rg:
+        gen = reg[1]()
+    elif _ENGINES:
+        gen = None      # another engine's generator is not this queue
+    else:
+        gen = _GEN_REF() if _GEN_REF is not None else None
     pending = getattr(gen, "_unprocessed_sequences", None)
     if pending is not None:
         depth += len(pending)
@@ -111,10 +213,10 @@ def check_queue_depth():
         if cap <= 0:
             return None
         runtime = importlib.import_module("mlx_vlm.server.runtime").runtime
-        rg = getattr(runtime, "response_generator", None)
-        if rg is None:
-            return None
-        depth = _waiting_depth(rg)
+        # Pool-wide census (every resident engine), the same figure
+        # /v1/metrics and readiness report; without a pool, the runtime's
+        # engine. No engine at all: nothing can be waiting.
+        depth = _waiting_depth_all()
         if depth < cap:
             return None
         retry = _retry_after_s(getattr(runtime, "metrics", None), depth)

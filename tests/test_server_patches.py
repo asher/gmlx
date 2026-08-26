@@ -2385,6 +2385,43 @@ def test_chat_load_offload_swallows_warm_error(monkeypatch):
     assert ran == ["m"]
 
 
+def test_chat_load_offload_deferred_load_is_a_typed_503(monkeypatch):
+    """The gate's retryable refusal never reaches the stock handler (which
+    would 500 with a traceback): the pre-warm answers 503 with the typed
+    body and a Retry-After."""
+    from gmlx.capacity import LoadDeferred
+    import gmlx.server_patches.capacity_routes as cr
+
+    ran = []
+
+    async def fake_handler(request, http_request):
+        ran.append(request.model)
+        return {"ok": True}
+
+    def deferred(model_id, adapter):
+        raise LoadDeferred("model load deferred: m weights 86.7 GB exceed the "
+                           "measured free working set 27.0 GB")
+
+    _register_fake_chat(fake_handler)
+    monkeypatch.setattr(sp_routes, "_warm_and_release", deferred)
+    monkeypatch.setattr(cr, "readiness", lambda: (False, "busy", 7))
+    sp.install_chat_load_offload()
+
+    res = asyncio.run(_chat_endpoint()(_FakeReq(model="m"), object()))
+    assert res.status_code == 503 and res.headers["Retry-After"] == "7"
+    import json as _json
+    body = _json.loads(res.body)
+    assert body["error"]["type"] == "model_load_deferred"
+    assert body["error"]["model"] == "m" and "86.7 GB" in body["error"]["message"]
+    assert body["retry_after_s"] == 7
+    assert ran == []                                        # stock handler never ran
+
+    # idle server: the floor
+    monkeypatch.setattr(cr, "readiness", lambda: (True, "ok", 0))
+    res = asyncio.run(_chat_endpoint()(_FakeReq(model="m"), object()))
+    assert res.status_code == 503 and int(res.headers["Retry-After"]) >= 1
+
+
 def test_chat_load_offload_skips_when_no_model(monkeypatch):
     seen = []
 
@@ -2831,3 +2868,113 @@ def test_faithful_history_aliases_gpt_oss_thinking():
           "reasoning_content": "r"}],
         return_messages=True)
     assert "thinking" not in msgs[0]
+
+
+def test_unload_409_keeps_the_preload_hold(monkeypatch):
+    """A failed /unload must not unpin the preload: the eviction judges
+    busy-ness with the lifetime hold discounted, and the hold is dropped
+    only once the entry is really gone. Before, the hold was released
+    ahead of the evict, so a 409 on a real stream silently left the
+    primary LRU/TTL-evictable for the rest of the process."""
+    from types import SimpleNamespace
+    from fastapi.testclient import TestClient
+    from gmlx.residency import ModelBusyError
+
+    _register({"models": {"qwen": {"path": "/abs/qwen.gguf"}}})
+    monkeypatch.setattr(serving, "resolve_request_model",
+                        lambda mid: ("/abs/qwen.gguf", None))
+    entry = SimpleNamespace(model_path="/abs/qwen.gguf")
+
+    class _Hold:
+        def __init__(self):
+            self._entry, self.released = entry, False
+
+        def release(self):
+            self.released = True
+
+    class _FakePool:
+        busy = 1                       # one real stream
+        calls: list = []
+
+        def evict(self, path, *, ignore_retained=False):
+            self.calls.append(("evict", path, ignore_retained))
+            if self.busy:
+                raise ModelBusyError(path, self.busy)
+            self.resident = False
+            return True
+
+        def clear(self, *, ignore_retained=False):
+            self.calls.append(("clear", ignore_retained))
+            return False
+
+        def busy_paths(self):
+            return ["/abs/qwen.gguf"]
+
+        resident = True
+
+        def entry_resident(self, e):
+            return self.resident and e is entry
+
+        def unmark_retained(self, hold):
+            self.calls.append(("unmark", hold))
+
+    pool = _FakePool()
+    _PKG._kq_residency_pool = pool
+    hold = _Hold()
+    sp_routes._PRELOAD_HOLDS[:] = [hold]
+    try:
+        sp.install_pool_aware_unload()
+        client = TestClient(_APP.app)
+        r = client.post("/unload", json={"model": "qwen"})
+        assert r.status_code == 409 and r.json()["in_flight"] == 1
+        assert pool.calls[0] == ("evict", "/abs/qwen.gguf", True)
+        assert sp_routes._PRELOAD_HOLDS == [hold] and not hold.released
+        # the all-models form skips the busy model and keeps its hold too
+        r = client.post("/unload")
+        assert r.status_code == 200 and r.json()["status"] == "busy"
+        assert sp_routes._PRELOAD_HOLDS == [hold] and not hold.released
+        # the stream ends: the unload succeeds and only then drops the hold
+        pool.busy = 0
+        r = client.post("/unload", json={"model": "qwen"})
+        assert r.status_code == 200 and r.json()["unloaded"] == "qwen"
+        assert sp_routes._PRELOAD_HOLDS == [] and hold.released
+    finally:
+        sp_routes._PRELOAD_HOLDS.clear()
+
+
+def test_spawn_preload_warm_fills_context_length_cache(monkeypatch):
+    """The first /v1/models after boot must not pay the per-GGUF header
+    scans on the event loop: the preload thread warms the cache first."""
+    import gmlx.capacity as cap
+
+    _register({"models": {"qwen": {"path": "/abs/qwen.gguf"},
+                          "glm": {"path": "/abs/glm.gguf"}}})
+    seen = []
+    monkeypatch.setattr(cap, "trained_context_length",
+                        lambda p: seen.append(p) or None)
+    sp.spawn_preload_warm(None).join(timeout=5)
+    assert sorted(seen) == ["/abs/glm.gguf", "/abs/qwen.gguf"]
+
+
+def test_unload_keyword_probe_never_retries_a_failed_eviction():
+    """A TypeError from inside the eviction propagates; only a pool whose
+    ``evict`` lacks the keyword is called the old way."""
+    from types import SimpleNamespace
+
+    calls = []
+
+    def evict_new(path, *, ignore_retained=False):
+        calls.append(("new", path, ignore_retained))
+        raise TypeError("from inside _teardown")
+
+    def evict_old(path):
+        calls.append(("old", path))
+        return True
+
+    with pytest.raises(TypeError, match="_teardown"):
+        sp_routes._evict_ignoring_retained(SimpleNamespace(evict=evict_new), "/p")
+    assert calls == [("new", "/p", True)]              # no second, keywordless call
+    assert sp_routes._evict_ignoring_retained(SimpleNamespace(evict=evict_old), "/p")
+    assert calls[-1] == ("old", "/p")
+    assert sp_routes._clear_ignoring_retained(
+        SimpleNamespace(clear=lambda **kw: kw)) == {"ignore_retained": True}

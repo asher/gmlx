@@ -450,9 +450,10 @@ def test_retirement_rotating_off_grid_beyond_window_stores():
 
 def test_buffered_rotating_declines_loudly():
     """The spec path swaps rot layers to BufferedRotatingKVCache after
-    prefill; its start_position/slack-buffer geometry has no canonical
-    window yet, so stores and clones must decline (counted), never
-    snapshot it silently wrong."""
+    prefill; the ckpt chained-block store declines it (counted), never
+    snapshots it silently wrong. The row clone itself now serves the
+    buffer's canonical window (a linear temporal buffer has no ring
+    phase) as a plain RotatingKVCache, which the exact tier stores."""
     from mlx_vlm.models.cache import BufferedRotatingKVCache
     from gmlx.cache_snapshot import _ckpt_stats, _clone_single_row
     man = APCManager(num_blocks=64, block_size=16)
@@ -464,7 +465,11 @@ def test_buffered_rotating_declines_loudly():
     assert not ckpt_store(man, ids, buffered, extra_hash=0)
     assert _ckpt_stats(man)["ckpt_declines"] == {"buffered": 1}
     assert all(b.ref_cnt == 0 for b in man.pool)
-    assert _clone_single_row(buffered[1]) is None
+    clone = _clone_single_row(buffered[1])
+    assert isinstance(clone, RotatingKVCache)
+    assert not isinstance(clone, BufferedRotatingKVCache)
+    assert clone.offset == buffered[1].offset
+    assert clone._idx == min(p, int(buffered[1].max_size))
 
 
 def test_lookup_pins_blocks_against_concurrent_release(monkeypatch):
@@ -1352,3 +1357,18 @@ def test_anchor_gets_no_pool_pressure_protection():
     assert [r.kind for r in idx.values()] == ["anchor"]
     assert cs._evict_for_pool(man, 1) >= 1
     assert len(cs._ckpt_records(man)) == 0
+
+
+def test_buffered_clone_declines_a_non_linear_window():
+    """The trailing-slice clone is the canonical window only under the
+    buffer's linear-layout invariant (``start_position == offset - _idx``);
+    a buffer that breaks it is declined loudly, never stored wrong."""
+    from mlx_vlm.models.cache import BufferedRotatingKVCache
+    from gmlx.cache_snapshot import _clone_single_row
+    cache = make_swa_cache(48, seed=9)
+    rot = next(c for c in cache if isinstance(c, RotatingKVCache))
+    buffered = BufferedRotatingKVCache.from_cache(rot, buffer_size=16)
+    assert buffered.start_position == buffered.offset - buffered._idx
+    assert _clone_single_row(buffered) is not None
+    buffered.start_position += 1
+    assert _clone_single_row(buffered) is None

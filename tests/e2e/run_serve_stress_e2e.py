@@ -40,10 +40,14 @@ from server_proc import ServerProc  # noqa: E402
 LOG_BAD = re.compile(
     r"Traceback|ERROR|CRITICAL|bad_cast|NotImplementedError|Segmentation|"
     r"Fatal|panic|assert", re.IGNORECASE)
-# Lines the server emits at ERROR level for CLIENT behavior the chaos
-# deliberately causes (mid-stream disconnects); not findings.
+# Lines the server emits at ERROR / WARNING level for CLIENT behavior the
+# chaos deliberately causes (mid-stream disconnects); not findings.
+# ``stream_closed_before_completion`` is mlx-vlm's record of a stream the
+# client closed early ("Request failed: ... error=..." - the "error=" token
+# is what LOG_BAD matches).
 LOG_BENIGN = re.compile(
-    r"ClientDisconnect|Broken pipe|Connection reset|ConnectionResetError")
+    r"ClientDisconnect|Broken pipe|Connection reset|ConnectionResetError|"
+    r"stream_closed_before_completion")
 
 PREFIX_SIZES = (800, 2000, 4000, 6000)
 

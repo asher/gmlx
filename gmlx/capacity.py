@@ -269,6 +269,13 @@ def preload_gate_bytes(footprint: int, stream, expert_bytes: int) -> int:
     return int(footprint)
 
 
+class LoadDeferred(RuntimeError):
+    """The load gate's retryable refusal: the weights would fit this box,
+    but not next to what is resident and pinned or busy right now. A
+    ``RuntimeError`` so every existing handler still sees a load failure;
+    the chat pre-warm turns it into a typed 503 with ``Retry-After``."""
+
+
 def preload_gate(weight_bytes: float, model_id: str) -> None:
     """The same headroom check a request takes, at model load and swap:
     a build whose weights cannot fit the measured free working set (the
@@ -280,6 +287,15 @@ def preload_gate(weight_bytes: float, model_id: str) -> None:
 
     head = headroom_bytes()
     budget = working_budget_bytes()
+    ws = working_set_bytes()
+    if head is not None and budget is not None and ws is not None:
+        # headroom_bytes() is measured against Metal's full recommended
+        # working set; a load is judged against the serve ceiling (margin
+        # and kernel reserve, ceiling_bytes), the same ceiling the boot
+        # table and request admission use. Judged raw, the gate admitted
+        # an 86.7 GB load next to a pinned 31.5 GB resident (118 GB on a
+        # 112 GB wire limit) and Metal OOM'd in the mmap warm (2026-08-25).
+        head -= max(0.0, ws - budget)
     if budget is not None and weight_bytes > budget:
         raise RuntimeError(
             f"model does not fit: {model_id} weights "
@@ -288,12 +304,76 @@ def preload_gate(weight_bytes: float, model_id: str) -> None:
             f"{1 - margin():.2f}). GMLX_OVERCOMMIT=1 overrides; for MoE "
             f"models --stream-experts serves the experts from disk.")
     if head is not None and weight_bytes > head:
-        raise RuntimeError(
+        raise LoadDeferred(
             f"model load deferred: {model_id} weights "
             f"{weight_bytes / GB:.1f} GB exceed the measured free "
             f"working set {head / GB:.1f} GB (resident models are "
             f"pinned or busy). Retry when a slot frees, or "
             f"GMLX_OVERCOMMIT=1 overrides.")
+    _kernel_gate(weight_bytes, model_id)
+
+
+_SETTLE_S = 3.0          # how long a short load waits for memory on its way
+_SETTLE_STEP_S = 0.25
+_SETTLE_RISE = 256 * 1024 * 1024   # a sample must gain this much to count as rising
+
+
+def _settle_reclaimable(sample, rec, need: float):
+    """Re-sample the kernel's reclaimable memory while it is still rising,
+    for at most ``_SETTLE_S``. The kernel returns a torn-down model's
+    pages asynchronously: a request that arrives right after an unload
+    (a reload, or the switch that caused the eviction) would otherwise
+    read the pre-release number and be deferred for memory that lands a
+    moment later (2026-08-25: a 104 GB reload deferred straight after its
+    own unload). Two consecutive samples that do not rise, or ``need``
+    reached, end the wait; the caller re-judges the returned reading."""
+    import time
+
+    deadline = time.monotonic() + _SETTLE_S
+    flat = 0
+    while rec is not None and rec < need and time.monotonic() < deadline:
+        time.sleep(_SETTLE_STEP_S)
+        new = sample()
+        if new is None:
+            return rec
+        if new < rec + _SETTLE_RISE:
+            flat += 1
+            if flat >= 2:
+                return max(rec, new)
+        else:
+            flat = 0
+        rec = max(rec, new)
+    return rec
+
+
+def _kernel_gate(weight_bytes: float, model_id: str) -> None:
+    """The kernel's side of the same question: MLX accounting cannot see
+    other processes' pages (2026-08-25: ~16 GB of another app's pages in
+    the compressor let an 81 GB load through and Metal OOM'd). Below the
+    governor's kernel floor the serve loop sheds anyway, so a load that
+    would land there is deferred, not started. Reads the armed floor (0
+    without a governor: CLI paths, tests) and the same reclaimable sum
+    the governor samples."""
+    try:
+        from .governor import armed_kernel_floor_bytes
+        from .kernel_vm import reclaimable_bytes
+
+        floor = float(armed_kernel_floor_bytes() or 0.0)
+        if floor <= 0:
+            return
+        rec = reclaimable_bytes()
+    except Exception:
+        return
+    if rec is None or weight_bytes <= rec - floor:
+        return
+    rec = _settle_reclaimable(reclaimable_bytes, rec, weight_bytes + floor)
+    if rec is None or weight_bytes <= rec - floor:
+        return
+    raise LoadDeferred(
+        f"model load deferred: {model_id} weights {weight_bytes / GB:.1f} GB "
+        f"exceed the kernel's reclaimable memory {rec / GB:.1f} GB less the "
+        f"{floor / GB:.1f} GB floor (other processes hold the rest). Retry "
+        f"when memory frees, or GMLX_OVERCOMMIT=1 overrides.")
 
 
 def install_boot_table(gguf_path: str, weight_bytes: float | None,
@@ -328,3 +408,51 @@ def install_boot_table(gguf_path: str, weight_bytes: float | None,
 def clear_table() -> None:
     global _TABLE
     _TABLE = None
+
+
+# GGUF path -> (mtime, trained context) for /v1/models; a header scan per
+# configured model per listing would otherwise be 50 mmaps a call.
+_CTX_CACHE: dict = {}
+
+
+def trained_context_length(gguf_path) -> int | None:
+    """The GGUF's trained context (``<arch>.context_length``), or None
+    when the header cannot be read. Cached by path + mtime."""
+    if not gguf_path:
+        return None
+    try:
+        mtime = os.path.getmtime(gguf_path)
+    except OSError:
+        return None
+    hit = _CTX_CACHE.get(gguf_path)
+    if hit is not None and hit[0] == mtime:
+        return hit[1]
+    value = None
+    try:
+        from .headerscan import scan_gguf
+
+        kv = scan_gguf(gguf_path, include_tensors=False).kv
+        arch = kv.get("general.architecture")
+        raw = kv.get(f"{arch}.context_length") if arch else None
+        if raw is None:
+            raw = next((v for k, v in kv.items()
+                        if k.endswith(".context_length")), None)
+        if isinstance(raw, (int, float)) and int(raw) > 0:
+            value = int(raw)
+    except Exception:
+        _log.debug("context_length scan failed for %s", gguf_path, exc_info=True)
+    _CTX_CACHE[gguf_path] = (mtime, value)
+    return value
+
+
+def max_context_at_width_1(gguf_path) -> int | None:
+    """What the installed capacity table says fits at width 1 - only for
+    the model it was derived from (the boot model); None otherwise, or
+    with overcommit armed."""
+    t = _TABLE
+    if t is None or overcommit() or not gguf_path:
+        return None
+    if str(t.get("path")) != str(gguf_path):
+        return None
+    v = t["max_ctx"].get(1)
+    return int(v) if isinstance(v, int) and v > 0 else None

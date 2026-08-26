@@ -120,14 +120,52 @@ def test_preload_gate(rig, monkeypatch):
     rig(weights_gb=10.0, ws_gb=20.0)
     import gmlx.prefill_decay as pd
     monkeypatch.setattr(pd, "headroom_bytes", lambda: 5.0 * GB)
+    monkeypatch.setattr(cap, "working_budget_bytes", lambda: 20.0 * GB)
+    monkeypatch.setattr(cap, "_kernel_gate", lambda w, m: None)
 
     cap.preload_gate(4.0 * GB, "small")       # fits: no raise
-    with pytest.raises(RuntimeError, match="deferred"):
-        cap.preload_gate(10.0 * GB, "busybox")
+    with pytest.raises(cap.LoadDeferred, match="deferred"):
+        cap.preload_gate(10.0 * GB, "busybox")           # typed: the 503 seam
     with pytest.raises(RuntimeError, match="does not fit"):
         cap.preload_gate(25.0 * GB, "huge")
     monkeypatch.setenv("GMLX_OVERCOMMIT", "1")
     cap.preload_gate(25.0 * GB, "huge")       # override skips
+
+
+def test_preload_gate_judges_the_serve_ceiling(rig, monkeypatch):
+    # headroom_bytes() is measured against the full working set; the gate
+    # takes the margin + reserve off it (the ceiling everything else uses).
+    # 2026-08-25: judged raw, 86.7 GB was admitted next to a pinned 31.5 GB
+    # resident on a 112 GB wire limit and Metal OOM'd.
+    rig(weights_gb=10.0, ws_gb=20.0)
+    import gmlx.prefill_decay as pd
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 5.0 * GB)
+    monkeypatch.setattr(cap, "working_budget_bytes", lambda: 18.0 * GB)
+    monkeypatch.setattr(cap, "_kernel_gate", lambda w, m: None)
+    cap.preload_gate(3.0 * GB, "fits")                   # 5 - (20 - 18) = 3
+    with pytest.raises(cap.LoadDeferred, match="free working set 3.0 GB"):
+        cap.preload_gate(3.5 * GB, "edge")
+
+
+def test_preload_gate_kernel_floor(rig, monkeypatch):
+    # The kernel's view: other processes' pages are invisible to MLX
+    # accounting, so a load must also leave the governor's reclaimable
+    # floor standing. No armed floor (no governor) = no kernel check.
+    rig(weights_gb=10.0, ws_gb=20.0)
+    import gmlx.governor as gov
+    import gmlx.kernel_vm as kv
+    import gmlx.prefill_decay as pd
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 50.0 * GB)
+    monkeypatch.setattr(cap, "working_budget_bytes", lambda: 20.0 * GB)
+    monkeypatch.setattr(kv, "reclaimable_bytes", lambda: 6.0 * GB)
+    monkeypatch.setattr(gov, "armed_kernel_floor_bytes", lambda: 0.0)
+    cap.preload_gate(4.0 * GB, "unarmed")               # no governor: MLX only
+    monkeypatch.setattr(gov, "armed_kernel_floor_bytes", lambda: 3.0 * GB)
+    cap.preload_gate(3.0 * GB, "fits")                   # 6 - 3 floor = 3
+    with pytest.raises(cap.LoadDeferred, match="reclaimable memory 6.0 GB"):
+        cap.preload_gate(4.0 * GB, "squeezed")
+    monkeypatch.setattr(kv, "reclaimable_bytes", lambda: None)
+    cap.preload_gate(4.0 * GB, "no-probe")               # probe unavailable admits
 
 
 def test_memfit_delegates_to_capacity(monkeypatch):
@@ -140,3 +178,43 @@ def test_memfit_delegates_to_capacity(monkeypatch):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_kernel_gate_waits_for_memory_still_being_freed(rig, monkeypatch):
+    """A reload right after an unload reads the kernel before the torn-down
+    model's pages are back: the gate re-samples while reclaimable rises
+    and admits once it clears, and only defers once it stops rising."""
+    rig(weights_gb=10.0, ws_gb=200.0)
+    import gmlx.governor as gov
+    import gmlx.kernel_vm as kv
+    import gmlx.prefill_decay as pd
+    import time as _time
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 500.0 * GB)
+    monkeypatch.setattr(cap, "working_budget_bytes", lambda: 200.0 * GB)
+    monkeypatch.setattr(gov, "armed_kernel_floor_bytes", lambda: 8.0 * GB)
+    slept = []
+    monkeypatch.setattr(_time, "sleep", lambda s: slept.append(s))
+    # rising: 20 -> 60 -> 100 -> 120 GB; 104 + 8 needs 112
+    readings = iter([60.0 * GB, 100.0 * GB, 120.0 * GB, 120.0 * GB])
+    monkeypatch.setattr(kv, "reclaimable_bytes",
+                        lambda: next(readings, 120.0 * GB))
+    cap.preload_gate(104.0 * GB, "reload")             # first read 60: waits, admits
+    assert len(slept) == 2                              # 100, then 120 cleared it
+    # flat: 20 -> 20 -> 20: two non-rising samples end the wait, deferred
+    slept.clear()
+    monkeypatch.setattr(kv, "reclaimable_bytes", lambda: 20.0 * GB)
+    with pytest.raises(cap.LoadDeferred, match="reclaimable memory 20.0 GB"):
+        cap.preload_gate(104.0 * GB, "other-process")
+    assert len(slept) == 2
+    # rising but never enough: the deadline ends it
+    slept.clear()
+    clock = [0.0]
+    monkeypatch.setattr(_time, "monotonic", lambda: clock[0])
+
+    def creeping():
+        clock[0] += 1.0
+        return 20.0 * GB + clock[0] * GB
+    monkeypatch.setattr(kv, "reclaimable_bytes", creeping)
+    with pytest.raises(cap.LoadDeferred):
+        cap.preload_gate(104.0 * GB, "creeping")
+    assert 0 < len(slept) <= 4

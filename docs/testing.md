@@ -102,6 +102,52 @@ python tests/e2e/run_server_e2e.py --dry-run
 python tests/e2e/run_server_e2e.py
 ```
 
+`tests/e2e/run_capacity_e2e.py` drives the capacity-facing surface against a
+live server on a tiny GGUF (decode width 2, queue cap 3, six concurrent
+streams): `/health?ready=1` flipping to 503 under load, `/v1/metrics`
+`concurrency` / `queue` / `requests[]` agreeing with the batch, the Prometheus
+rendering, the scoped `/v1/cache/reset`, the dry-run estimate and the
+capacity plan, and an explicit unload of the preloaded model. Exit 0 on
+pass; no judge.
+
+`tests/e2e/run_residency_switch_e2e.py --primary ID=PATH[:spec] --second
+ID=PATH[:spec|:draft=PATH]`: two models that cannot both be resident in
+one server. Asserts the load gate's typed 503 while the preloaded primary
+is held, the explicit unload that frees it, load-by-request, a burst on
+the second model with the first refused while it is busy, and the LRU
+switch in both directions once idle, with `/v1/estimate` and
+`/v1/capacity/plan` tracking the resident model throughout.
+
+`tests/e2e/run_capacity_soak_e2e.py --models ID=PATH[:spec|:draft=PATH]...
+--cycles N --cycle-minutes M --clients K --out DIR`: seeded chaos for N
+cycles against one server - cold / warm / sibling prompts, growing
+sessions (answers appended verbatim, compaction rewrites), aborted
+streams, tiny budgets, sampler and thinking variety, dry-run estimates
+(including past-context prompts and answered-session continuations,
+which exact-tier models should report warm), plan and readiness probes,
+staggered bursts past the queue cap (a run whose bursts never draw a
+typed 503 is a finding), cross-model requests on multi-model configs -
+with `/v1/metrics` sampled every second and checked for invariants
+(including no stale waiting census at idle), and
+operator ops (cache resets, idle unloads, a Prometheus render) fired
+during load. Typed refusals and governor sheds are tallied; anything
+else non-200, any metrics invariant break, and any unexpected server-log
+exception is a finding. `report.json` and a per-request journal land in
+`--out`.
+
+`tests/e2e/run_capacity_multi_e2e.py` is the longer, multi-model version: a
+config with three models (by default a 27B Q8 with a DFlash drafter, a 30B
+Q4 with its own drafter, and a 0.6B), warmed one by one, then rounds of
+mixed-model concurrent streams (`--rounds`, `--streams`, `--max-tokens`,
+`--width`, `--cap`) while sampling `/v1/metrics`. It asserts the
+multi-engine invariants: rows labelled with the model they run on and rows
+from several models in one sample, `resident_models[].in_flight` summing to
+`concurrency.in_flight`, decode rows per model within the width, speculative
+stats on the drafted models' rows, the warm cache tier on a repeated prompt,
+a scoped reset that leaves another model's streams alone, unload plus
+reload-by-request of a secondary model, Prometheus labels for every model,
+and a green governor throughout. About three minutes; exit 0 on pass.
+
 `tests/e2e/run_apc_disk_e2e.py` exercises disk-backed APC prefix reuse across
 server restarts the same way: real server, real GGUF, standalone.
 `tests/e2e/run_apc_depth_e2e.py` is its deep twin: multi-thousand-token
