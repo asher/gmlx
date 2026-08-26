@@ -238,6 +238,10 @@ class _GovState:
         self.reg_bytes = 0.0
         self.reg_sampled_tick = -999
         self.last_victim_uid = None
+        # kernel-floor trend: last sub-floor reclaimable sample, and the
+        # last wall time a stable (non-collapsing) breach was logged
+        self.floor_recl_prev = None
+        self.floor_warned_at = 0.0
         # U5 fault injection: (kind, tick) directives already fired
         self.injected: set = set()
 
@@ -671,27 +675,56 @@ def _governor_tick(gen) -> None:
     _STATS["kernel_reclaimable_bytes"] = (
         None if recl is None else int(recl))
     if recl is not None and recl < floor:
-        _enter(gen, st, RED, ws, margin)
         _STATS["kernel_floor_reds"] += 1
         freed = _evict_registered(1.0)
         mx.clear_cache()
         recl2 = _kernel_reclaimable()
-        _log.warning("[governor] kernel floor: reclaimable %.2f GB < "
-                     "%.2f GB; evicted %.2f GB, cache cleared, now "
-                     "%.2f GB", recl / 1e9, floor / 1e9, freed / 1e9,
-                     (recl2 or 0) / 1e9)
         if recl2 is not None and recl2 >= floor:
+            _enter(gen, st, RED, ws, margin)
+            _log.warning("[governor] kernel floor: reclaimable %.2f GB < "
+                         "%.2f GB; evicted %.2f GB, cache cleared, now "
+                         "%.2f GB", recl / 1e9, floor / 1e9, freed / 1e9,
+                         recl2 / 1e9)
             _STATS["last_action"] = (
                 f"kernel floor reclaim freed {freed / 1e9:.2f} GB")
+            st.floor_recl_prev = None
             st.orange_failed = False
             return
+        # Still below floor with nothing left to reclaim. A near-RAM-
+        # sized model holds the box here at steady state, and shedding
+        # rows cannot raise it (the pressure is wired weights) -- so a
+        # STABLE breach only observes and logs. The full RED + shed
+        # response is reserved for the livelock signature (2026-08-24
+        # freeze): reclaimable in active collapse, or through half the
+        # floor.
+        cur = (recl2 or 0)
+        prev = st.floor_recl_prev
+        st.floor_recl_prev = cur
+        collapsing = (cur < 0.5 * floor
+                      or (prev is not None and prev - cur > 1e9))
+        if not collapsing:
+            now = time.perf_counter()
+            if now - st.floor_warned_at >= 30.0:
+                st.floor_warned_at = now
+                _log.warning("[governor] kernel floor: reclaimable "
+                             "%.2f GB < %.2f GB but stable; nothing to "
+                             "reclaim (evicted %.2f GB); holding, no "
+                             "shed", cur / 1e9, floor / 1e9, freed / 1e9)
+            _STATS["last_action"] = "kernel floor stable; no shed"
+            return
+        _enter(gen, st, RED, ws, margin)
+        _log.warning("[governor] kernel floor: reclaimable %.2f GB < "
+                     "%.2f GB and collapsing (prev %.2f GB); evicted "
+                     "%.2f GB", cur / 1e9, floor / 1e9,
+                     (prev or 0) / 1e9, freed / 1e9)
         if batch_rows(gen) > 0 and _shed_allowed(st):
             _fail_largest(gen, st, (
                 f"governor red: kernel reclaimable "
-                f"{(recl2 or 0) / 1e9:.2f} GB below floor "
-                f"{floor / 1e9:.2f} GB"))
+                f"{cur / 1e9:.2f} GB below floor "
+                f"{floor / 1e9:.2f} GB and collapsing"))
         st.orange_failed = False
         return
+    st.floor_recl_prev = None
 
     if red_now and batch_rows(gen) > 0:
         _enter(gen, st, RED, ws, margin)

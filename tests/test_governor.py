@@ -575,6 +575,67 @@ def test_kernel_floor_reds_while_rate_math_is_green(rig, monkeypatch):
     assert gov._STATS["kernel_reclaimable_bytes"] == int(0.5e9)
 
 
+def test_kernel_floor_stable_breach_holds_no_shed(rig, monkeypatch):
+    # A near-RAM-sized model parks reclaimable just under the floor for
+    # the whole serve (2026-08-26 ladder: 6.8-7.9 GB under an 8 GB
+    # floor for minutes, evict freeing 0.00 GB every tick). Stable
+    # sub-floor must observe only: no shed, no red band, admissions
+    # keep flowing.
+    failed = []
+    monkeypatch.setattr(tg, "_row_failed_callbacks",
+                        [lambda uid, info: failed.append((uid, info))])
+    gen = FakeGen(rows=1, rate=1e6, live=8e9)
+    tg_st = tg._state(gen)
+    tg_st.ledger[0] = tg._Row([1] * 8, 64, {}, None, None)
+    for kernel in (7.9e9, 7.5e9, 7.2e9, 7.4e9):   # oscillating, stable
+        rig["kernel"] = kernel
+        gov._governor_tick(gen)
+    st = gov._state(gen)
+    assert failed == []
+    assert st.band != gov.RED
+    assert gov._STATS["last_action"] == "kernel floor stable; no shed"
+    assert gov._STATS["kernel_floor_reds"] == 4
+
+
+def test_kernel_floor_collapse_trend_sheds(rig, monkeypatch):
+    # Same sub-floor band, but reclaimable dropping >1 GB/tick: the
+    # livelock signature. The trend (not the absolute level) must
+    # escalate to red + shed.
+    failed = []
+    monkeypatch.setattr(tg, "_row_failed_callbacks",
+                        [lambda uid, info: failed.append((uid, info))])
+    gen = FakeGen(rows=1, rate=1e6, live=8e9)
+    tg_st = tg._state(gen)
+    tg_st.ledger[0] = tg._Row([1] * 8, 64, {}, None, None)
+    rig["kernel"] = 7.5e9
+    gov._governor_tick(gen)
+    assert failed == []                            # first sample: no trend yet
+    rig["kernel"] = 6.0e9                          # -1.5 GB in one tick
+    gov._governor_tick(gen)
+    st = gov._state(gen)
+    assert st.band == gov.RED
+    assert failed and "collapsing" in failed[0][1]["error"]
+
+
+def test_kernel_floor_trend_resets_above_floor(rig, monkeypatch):
+    # A recovery above the floor clears the trend sample: a later
+    # breach must not compare against the stale pre-recovery value and
+    # false-trigger the collapse response.
+    failed = []
+    monkeypatch.setattr(tg, "_row_failed_callbacks",
+                        [lambda uid, info: failed.append((uid, info))])
+    gen = FakeGen(rows=1, rate=1e6, live=8e9)
+    tg_st = tg._state(gen)
+    tg_st.ledger[0] = tg._Row([1] * 8, 64, {}, None, None)
+    rig["kernel"] = 7.9e9
+    gov._governor_tick(gen)
+    rig["kernel"] = 30e9                           # recovered
+    gov._governor_tick(gen)
+    rig["kernel"] = 6.5e9                          # new breach, stable level
+    gov._governor_tick(gen)
+    assert failed == []
+
+
 def test_kernel_floor_reclaim_alone_can_clear(rig, monkeypatch):
     # Evict + cache clear brings the kernel back above the floor: no
     # row is failed, the band stays red until the normal ladder
