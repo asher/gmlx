@@ -15,9 +15,10 @@ the loader autodetects next to the target. Reference forward (ollama
 
 ``h_4d`` is the target's PRE-mixer four-stream hidden ``[B,S,4,D]``; the
 rollout feeds the head's own pre-mixer output as the next hidden.
-``pre_fc_norm_hidden`` carries one ``[4 * D]`` gamma; the reference norms
-over the flattened streams (one statistic), ``GMLX_Q4_MTP_GROUPED_HNORM=1``
-norms per stream for an acceptance A/B.
+``pre_fc_norm_hidden`` carries one ``[4 * D]`` gamma; per-stream statistics
+(grouped) beat the flat reading 6/6 prompts on acceptance (62.8->69.8 pct
+class deltas), so grouped is the default; ``GMLX_Q4_MTP_GROUPED_HNORM=0``
+restores the flat reading for A/B.
 
 Design mirrors ``deepseek_v4_mtp``: ``Qwen4ExpSpecLM`` subclasses the
 vendored ``Model`` so the text remap loads onto it unchanged and adds the
@@ -184,7 +185,7 @@ class Qwen4ExpMTPDrafter(QwenMTPDrafter):
         self.layers = [q4.DecoderLayer(head_args, 0)]
         self.hyper_connection_mixer = q4.HyperConnection(
             D, hc, args.hc_lowrank, eps, inject=False)
-        self._grouped_hnorm = env_bool("GMLX_Q4_MTP_GROUPED_HNORM", False)
+        self._grouped_hnorm = env_bool("GMLX_Q4_MTP_GROUPED_HNORM", True)
         # Full-prompt seeding by default (the head attends through QSA over
         # its whole KV); GMLX_Q4_MTP_SEED_WINDOW=n keeps only the trailing
         # n prompt hiddens (20 KB/token at D=2560).
