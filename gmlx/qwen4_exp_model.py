@@ -361,6 +361,28 @@ class GatedDeltaNet(nn.Module):
         return self.out_proj(out.reshape(B, S, -1))
 
 
+_KQ_TOPK_UNSET = object()
+_kq_topk_fn = _KQ_TOPK_UNSET
+
+
+def _kq_topk():
+    """kq radix top-k for the QSA block selection, or None (stock
+    argpartition). ``GMLX_Q4_QSA_KQ_TOPK=0`` disables."""
+    global _kq_topk_fn
+    if _kq_topk_fn is _KQ_TOPK_UNSET:
+        from .envflags import env_bool
+        fn = None
+        if env_bool("GMLX_Q4_QSA_KQ_TOPK", True):
+            try:
+                import mlx_kquant as _kq
+                if mx.default_device().type == mx.DeviceType.gpu:
+                    fn = getattr(_kq, "dsa_topk_indices", None)
+            except ImportError:
+                pass
+        _kq_topk_fn = fn
+    return _kq_topk_fn
+
+
 # mrope (vision positions). Text-only calls pass positions=None and take the
 # scalar-offset mx.fast.rope path; the two agree exactly when the three
 # position streams are equal (interleaved sections tile the same frequency
@@ -608,7 +630,17 @@ class QSAIndexer(nn.Module):
         valid = mx.arange(n_blocks)[None, None, :] < complete[None, :, None]
         s = mx.where(valid, s, -mx.inf)
         k = self.block_topk
-        sel = mx.argpartition(s, kth=-k, axis=-1)[..., -k:]
+        topk = _kq_topk()
+        if topk is not None and k == 512 and n_blocks >= k:
+            # kq radix top-k (one threadgroup per row) replaces the
+            # sort-based argpartition. Selection is set-equivalent up to
+            # ties at the threshold, and the mask/gather consumers are
+            # order-insensitive. Scores narrow to the activation dtype for
+            # the kernel's 16-bit wire.
+            sel = topk(s.astype(x.dtype)[:, None], k, True)[:, 0]
+            sel = sel.astype(mx.int64)
+        else:
+            sel = mx.argpartition(s, kth=-k, axis=-1)[..., -k:]
         return sel, complete
 
 
