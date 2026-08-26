@@ -515,3 +515,31 @@ def test_deferred_load_inside_the_handler_is_the_typed_503(monkeypatch):
     err = r.json()["detail"]["error"]
     assert err["type"] == "model_load_deferred" and err["model"] == "m"
     assert err["retry_after_s"] == 9 and "86.7 GB" in err["message"]
+
+
+def test_evict_and_clear_can_discount_retained_holds():
+    """An explicit unload judges busy-ness on real streams: the preload's
+    process-lifetime hold (retained) is discounted, a second acquire is
+    not, and a refused eviction leaves the entry (and so the hold) in
+    place - ``entry_resident`` is how the route tells the two apart."""
+    from gmlx import residency
+    from gmlx.residency import ModelBusyError
+
+    _proxy, pool, _env, teardowns = make_pool()
+    entry = _acq(pool, "/abs/a.gguf")
+    hold = residency._BusyHold(pool, entry)
+    pool.mark_retained(hold)
+    assert entry.busy == 1 and entry.retained == 1
+    with pytest.raises(ModelBusyError):
+        pool.evict("/abs/a.gguf")                    # stock: the hold counts
+    stream = _acq(pool, "/abs/a.gguf")               # a real in-flight stream
+    assert stream is entry and entry.busy == 2
+    with pytest.raises(ModelBusyError) as ei:
+        pool.evict("/abs/a.gguf", ignore_retained=True)
+    assert ei.value.in_flight == 1                   # the stream, not the hold
+    assert pool.entry_resident(entry)
+    assert pool.clear(ignore_retained=True) is False and pool.entry_resident(entry)
+    pool.release(entry)                              # stream done
+    assert pool.evict("/abs/a.gguf", ignore_retained=True) is True
+    assert not pool.entry_resident(entry) and teardowns == ["/abs/a.gguf"]
+    hold.release()                                   # late release: harmless

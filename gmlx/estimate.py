@@ -169,7 +169,10 @@ def capacity_plan(width: int, depth: int) -> dict:
         out["slots"] = slots
     except Exception:
         _log.debug("capacity plan: concurrency read failed", exc_info=True)
-        band, slots = None, None
+        slots = None
+    # The band the payload reports is the band the reason is judged on,
+    # even when the concurrency read failed after it was set.
+    band = out["band"]
 
     if out["ok"] is False:
         out["reason"] = (f"depth {depth} exceeds max context "
@@ -222,8 +225,13 @@ def _normalize_messages(messages) -> tuple:
 def _warm_tokens(manager, ids: list, extra_hash: int, model=None) -> tuple:
     """``(warm_tokens, tier)``: how much of ``ids`` the APC already holds,
     from the memory block chain, the exact-cache index and (for models on
-    the checkpoint tier) the pinned checkpoint records. No probe loads or
-    assembles a cache; matched blocks are released at once."""
+    the checkpoint tier) the pinned checkpoint records. No probe assembles
+    or restores a cache; matched blocks are released at once. The exact
+    index probe does open the header of every on-disk exact shard it
+    considers (``estimate_ms`` carries that cost). ``tier`` names the
+    deepest tier holding the prefix, which is the warm count's source,
+    not necessarily the tier the real request would restore from (the
+    runtime picks by its own precedence)."""
     best, tier = 0, None
     if manager is None or len(ids) < 2:
         return best, tier

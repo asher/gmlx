@@ -476,16 +476,26 @@ class _ResidencyPool:
                     return entry.cache_key[1]
         return None
 
-    def clear(self) -> bool:
+    @staticmethod
+    def _live_count(entry: _Entry, ignore_retained: bool) -> int:
+        return max(0, entry.busy - entry.retained) if ignore_retained else entry.busy
+
+    def entry_resident(self, entry) -> bool:
+        """Whether ``entry`` (a hold's ``_entry``) is still in the pool -
+        false once an eviction tore it down."""
+        with self._lock:
+            return any(e is entry for e in self._entries.values())
+
+    def clear(self, *, ignore_retained: bool = False) -> bool:
         """Tear down every resident entry that has no in-flight request. A busy
         entry (a client is mid-stream on it) is skipped, not stopped - tearing
         it down would kill that client's running generation; the TTL reaper or
         a later unload collects it once released. Returns whether anything was
-        torn down."""
+        torn down. ``ignore_retained`` as in :meth:`evict`."""
         with self._build_lock, self._lock:
             cleared = False
             for key, entry in list(self._entries.items()):
-                if entry.busy > 0:
+                if self._live_count(entry, ignore_retained) > 0:
                     loadlog.verbose_print(
                         f"[residency] unload skipping busy model "
                         f"{os.path.basename(str(entry.model_path))} "
@@ -568,11 +578,15 @@ class _ResidencyPool:
                     for e in self._entries.values()
                     if e.response_generator is not None]
 
-    def evict(self, model_path) -> bool:
+    def evict(self, model_path, *, ignore_retained: bool = False) -> bool:
         """Tear down every resident entry backing ``model_path`` (a GGUF abspath),
         across all of its load profiles. Returns whether anything was evicted;
         raises :class:`ModelBusyError` if the model has in-flight requests (an
         unload must never stop another client's running generation).
+        ``ignore_retained`` discounts process-lifetime holds (the preload's,
+        see :meth:`mark_retained`) from that count, so an explicit unload can
+        judge busy-ness on real streams alone without dropping the hold first
+        - a 409 must leave the preload exactly as pinned as it found it.
 
         Also drops any keep mark - an explicit unload is a full release, so the
         path won't be silently re-kept (and TTL-exempted) on a later reload."""
@@ -580,7 +594,8 @@ class _ResidencyPool:
             self._keep_paths.discard(model_path)
             keys = [k for k, e in self._entries.items()
                     if e.model_path == model_path]
-            in_flight = sum(self._entries[k].busy for k in keys)
+            in_flight = sum(self._live_count(self._entries[k], ignore_retained)
+                            for k in keys)
             if in_flight:
                 raise ModelBusyError(model_path, in_flight)
             for k in keys:

@@ -5,9 +5,13 @@ The routes a load balancer or a harness dispatcher reaches for first:
 
 * ``GET /health?ready=1`` answers 200 or 503 (+ ``Retry-After``) from the
   same numbers the admission path uses (governor band, decode width vs
-  in-flight, waiting census). It stays on the auth-exempt route and adds
-  only ``ready`` and a one-word ``reason``, so it leaks nothing the
-  liveness body does not already.
+  in-flight, waiting census). It stays on the auth-exempt route (a load
+  balancer polls it keyless) and adds ``ready``, a one-word ``reason``
+  (``pressure`` / ``queue`` / ``busy``) and a ``Retry-After`` derived from
+  the recent decode rate. That is deliberately more than the liveness
+  body says - a coarse busy/not-busy plus a rough throughput hint - and
+  it is all an unauthenticated caller can learn here; the numbers behind
+  it stay on the authed ``/metrics``.
 * ``GET /metrics`` (and ``/v1/metrics``) render Prometheus text when the
   client asks for it (``?format=prometheus`` or an ``Accept`` header
   naming ``text/plain`` / OpenMetrics). The JSON body is unchanged for
@@ -147,16 +151,24 @@ def _label_str(labels: dict) -> str:
 
 
 def _entry_label(entry: dict, index: int) -> dict:
+    # A resident entry also carries its pool ``seq``: two entries can back
+    # the same GGUF (different load profiles / adapters) and would otherwise
+    # share a label set - and Prometheus drops the whole scrape on a
+    # duplicate sample, not just the row.
+    extra = {}
+    seq = entry.get("seq")
+    if isinstance(seq, int) and not isinstance(seq, bool):
+        extra["seq"] = str(seq)
     ids = entry.get("ids")
     if isinstance(ids, list) and ids:
-        return {"model": str(ids[0])}
+        return {"model": str(ids[0]), **extra}
     for key in ("id", "model"):
         if isinstance(entry.get(key), str):
-            return {"model": entry[key]}
+            return {"model": entry[key], **extra}
     path = entry.get("model_path")
     if isinstance(path, str) and path:
-        return {"model": os.path.basename(path)}
-    return {"index": str(index)}
+        return {"model": os.path.basename(path), **extra}
+    return {"index": str(index), **extra}
 
 
 _SKIP_LISTS = ("recent", "requests", "preload_failures", "available_models")

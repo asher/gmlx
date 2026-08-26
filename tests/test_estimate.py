@@ -524,3 +524,17 @@ def test_exact_peek_reads_the_in_memory_exact_tier():
     man._exact_cache = OrderedDict([(9, SimpleNamespace(token_ids=tuple(ids + [1, 2]), extra_hash=0))])
     assert est._exact_peek(man, ids, 0) == 0
     assert est._exact_peek(man, ids + [1, 2, 3], 0) == len(ids) + 2
+
+
+def test_plan_reason_follows_reported_band_when_concurrency_fails(monkeypatch):
+    """If the concurrency read throws after the band was recorded, the
+    reason is still judged on the band the payload reports."""
+    _env(monkeypatch, band="red")
+
+    def _boom():
+        raise RuntimeError("no engine")
+
+    monkeypatch.setattr(qc, "concurrency_stats", _boom)
+    p = est.capacity_plan(1, 100)
+    assert p["band"] == "red" and p["reason"] == "governor red"
+    assert p["admit_now"] is False

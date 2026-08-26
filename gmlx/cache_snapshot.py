@@ -172,6 +172,15 @@ def _clone_buffered_window(cache: Any) -> Any | None:
         _log.info("APC clone declined: buffered window covers %d of %d "
                   "tokens", idx, L)
         return None
+    # The trailing slice is the canonical window only while the buffer's
+    # linear layout holds (``start_position == offset - _idx``, which
+    # from_cache establishes and compact/update preserve). Decline loudly
+    # rather than store a window that starts somewhere else.
+    start = getattr(cache, "start_position", None)
+    if start is not None and int(start) != offset - idx:
+        _log.warning("APC clone declined: buffered window start %s != "
+                     "offset %d - idx %d", start, offset, idx)
+        return None
     copy = _apc._copy_mlx_array
     out.keys = copy(cache.keys[..., idx - L:idx, :])
     out.values = copy(cache.values[..., idx - L:idx, :])
@@ -2237,8 +2246,8 @@ def retirement_store(
                 # An exact entry replays bitwise from its key; a row whose
                 # KV count disagrees with the key (a batch row with a
                 # pending or stale tail) must not be stored under it.
-                _log.info("APC retirement skipped: row covers %d tokens, "
-                          "key %d", covered, len(ids))
+                _log.warning("APC retirement skipped: row covers %d tokens, "
+                             "key %d", covered, len(ids))
                 return 0
             if max_len is not None and max_len < len(ids):
                 if max_len < 2:

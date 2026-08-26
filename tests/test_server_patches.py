@@ -2868,3 +2868,89 @@ def test_faithful_history_aliases_gpt_oss_thinking():
           "reasoning_content": "r"}],
         return_messages=True)
     assert "thinking" not in msgs[0]
+
+
+def test_unload_409_keeps_the_preload_hold(monkeypatch):
+    """A failed /unload must not unpin the preload: the eviction judges
+    busy-ness with the lifetime hold discounted, and the hold is dropped
+    only once the entry is really gone. Before, the hold was released
+    ahead of the evict, so a 409 on a real stream silently left the
+    primary LRU/TTL-evictable for the rest of the process."""
+    from types import SimpleNamespace
+    from fastapi.testclient import TestClient
+    from gmlx.residency import ModelBusyError
+
+    _register({"models": {"qwen": {"path": "/abs/qwen.gguf"}}})
+    monkeypatch.setattr(serving, "resolve_request_model",
+                        lambda mid: ("/abs/qwen.gguf", None))
+    entry = SimpleNamespace(model_path="/abs/qwen.gguf")
+
+    class _Hold:
+        def __init__(self):
+            self._entry, self.released = entry, False
+
+        def release(self):
+            self.released = True
+
+    class _FakePool:
+        busy = 1                       # one real stream
+        calls: list = []
+
+        def evict(self, path, *, ignore_retained=False):
+            self.calls.append(("evict", path, ignore_retained))
+            if self.busy:
+                raise ModelBusyError(path, self.busy)
+            self.resident = False
+            return True
+
+        def clear(self, *, ignore_retained=False):
+            self.calls.append(("clear", ignore_retained))
+            return False
+
+        def busy_paths(self):
+            return ["/abs/qwen.gguf"]
+
+        resident = True
+
+        def entry_resident(self, e):
+            return self.resident and e is entry
+
+        def unmark_retained(self, hold):
+            self.calls.append(("unmark", hold))
+
+    pool = _FakePool()
+    _PKG._kq_residency_pool = pool
+    hold = _Hold()
+    sp_routes._PRELOAD_HOLDS[:] = [hold]
+    try:
+        sp.install_pool_aware_unload()
+        client = TestClient(_APP.app)
+        r = client.post("/unload", json={"model": "qwen"})
+        assert r.status_code == 409 and r.json()["in_flight"] == 1
+        assert pool.calls[0] == ("evict", "/abs/qwen.gguf", True)
+        assert sp_routes._PRELOAD_HOLDS == [hold] and not hold.released
+        # the all-models form skips the busy model and keeps its hold too
+        r = client.post("/unload")
+        assert r.status_code == 200 and r.json()["status"] == "busy"
+        assert sp_routes._PRELOAD_HOLDS == [hold] and not hold.released
+        # the stream ends: the unload succeeds and only then drops the hold
+        pool.busy = 0
+        r = client.post("/unload", json={"model": "qwen"})
+        assert r.status_code == 200 and r.json()["unloaded"] == "qwen"
+        assert sp_routes._PRELOAD_HOLDS == [] and hold.released
+    finally:
+        sp_routes._PRELOAD_HOLDS.clear()
+
+
+def test_spawn_preload_warm_fills_context_length_cache(monkeypatch):
+    """The first /v1/models after boot must not pay the per-GGUF header
+    scans on the event loop: the preload thread warms the cache first."""
+    import gmlx.capacity as cap
+
+    _register({"models": {"qwen": {"path": "/abs/qwen.gguf"},
+                          "glm": {"path": "/abs/glm.gguf"}}})
+    seen = []
+    monkeypatch.setattr(cap, "trained_context_length",
+                        lambda p: seen.append(p) or None)
+    sp.spawn_preload_warm(None).join(timeout=5)
+    assert sorted(seen) == ["/abs/glm.gguf", "/abs/qwen.gguf"]

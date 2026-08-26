@@ -1291,7 +1291,7 @@ is enabled. These are the config-server overrides and additions:
 | Endpoint | Behaviour |
 |----------|-----------|
 | `GET /v1/models`, `GET /models` | Configured/discovered ids + alias presets, each with `resident` / `pinned` / `speculative` / `vlm` / `profile` / `default` markers, plus `context_length` (the GGUF's trained context) and `max_context_at_width_1` (what the capacity table says fits at width 1; only for the model the table was derived from, else `null`). `gmlx launch pi` writes the smaller of the two as pi's `contextWindow`. Never the HF cache. |
-| `GET /health` | Liveness only: `{"status": "healthy", "pid": N}`, no model/adapter paths, no context fields. The one route api-key auth exempts, so it deliberately leaks nothing. `?ready=1` adds a readiness verdict: 200 with `"ready": true`, or 503 with `"ready": false`, a one-word `reason` (`pressure` when the governor is orange/red, `queue` when requests are waiting for a slot, `busy` when every resident model's engine is at its decode width) and a `Retry-After` header from the same drain estimate a queue-cap 503 carries. Still keyless; see [Capacity and live-request metrics](#capacity-and-live-request-metrics). |
+| `GET /health` | Liveness only: `{"status": "healthy", "pid": N}`, no model/adapter paths, no context fields. The one route api-key auth exempts, so the liveness body deliberately leaks nothing. `?ready=1` adds a readiness verdict - deliberately a little more than liveness (a coarse busy/not-busy and a throughput-derived wait hint, which is all a keyless caller can learn; the numbers behind it stay on the authed metrics): 200 with `"ready": true`, or 503 with `"ready": false`, a one-word `reason` (`pressure` when the governor is orange/red, `queue` when requests are waiting for a slot, `busy` when every resident model's engine is at its decode width) and a `Retry-After` header from the same drain estimate a queue-cap 503 carries. Still keyless; see [Capacity and live-request metrics](#capacity-and-live-request-metrics). |
 | `GET /v1/metrics`, `GET /metrics` | The stock runtime snapshot (under its `server` key) enriched with `resident_models[]`, the memory governor, the capacity table, `concurrency`, `queue`, and the live `requests[]` view; see [Capacity and live-request metrics](#capacity-and-live-request-metrics). Authed like every other endpoint; what `gmlx ps` reads. `?format=prometheus` (or `Accept: text/plain` / an OpenMetrics `Accept`) renders the same snapshot as Prometheus text (`gmlx_*` gauges and `*_total` counters; lists of models become `model`-labelled series, the capacity tables `width`/`depth`-labelled ones, `governor.band` a `band`-labelled indicator plus `gmlx_governor_band_level` 0-3). |
 | `POST /v1/completions` | Classic OpenAI text completions, no chat template applied. Scope: a single string `prompt`, `n=1`; supports `max_tokens`, `temperature`, `top_p`, `seed`, `stop`, `stream` (SSE with a final `[DONE]`), plus `profile` and the other shared sampling extras. List / token-array prompts, `n > 1`, `echo`, `suffix`, and `best_of > 1` are rejected with a 400. |
 | `POST /v1/messages/count_tokens` | (stock) Anthropic-style token counting: same body shape as `/v1/messages`, returns `{"input_tokens": N}` after applying the chat template. |
@@ -1338,8 +1338,9 @@ answers a dispatcher can act on without a refused request:
   takes a chat-completions body and returns, for a resident model:
   `prompt_tokens` (the rendered prompt, tokenized the way the request
   would be), `warm_tokens` and `cache_tier` (how much of the prefix the
-  prefix cache already holds: the block chain, the exact index, or a
-  pinned checkpoint record on `ckpt`-tier models; which
+  prefix cache already holds, and the deepest tier holding it: the block
+  chain, the exact index, or a pinned checkpoint record on `ckpt`-tier
+  models - the request itself restores by the runtime's own precedence; which
   server holds your prefix, and how much of it, is the routing signal
   across machines), `need_bytes` (the prompt's KV plus the prefill
   transient, plus `max_tokens` when the body pins one - exactly what the
@@ -1377,8 +1378,10 @@ answers a dispatcher can act on without a refused request:
 The Prometheus rendering (`?format=prometheus`) flattens these to
 `gmlx_concurrency_in_flight`, `gmlx_queue_eta_s`,
 `gmlx_governor_band{band="green"} 1`, `gmlx_capacity_max_ctx{width="8"}`,
-`gmlx_resident_models_busy{model="<id>"}` and so on; `requests[]` is
-high-cardinality and contributes only `gmlx_requests_count`.
+`gmlx_resident_models_busy{model="<id>",seq="<n>"}` (the pool sequence
+keeps two entries backing one GGUF at different profiles as distinct
+series) and so on; `requests[]` is high-cardinality and contributes only
+`gmlx_requests_count`.
 
 ### Reloading the config
 

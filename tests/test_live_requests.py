@@ -113,8 +113,9 @@ def test_tier_captured_at_prefill_survives_into_decode():
     rows = lr.build_rows(rg, gen, active, now=2.0)
     assert rows[0]["state"] == "decode" and rows[0]["cache"]["tier"] == "exact"
 
-    # uid gone from active -> memo dropped
-    lr.build_rows(rg, _engine(), {}, now=3.0)
+    # uid gone from active -> memo dropped (by the publish tick, which
+    # runs whether or not rows get built)
+    lr.publish(rg, _engine(), {}, force=True)
     assert (id(rg), 1) not in lr._TIER
 
 
@@ -402,3 +403,54 @@ def test_gmlx_restored_prefix_sets_tier_and_warm_tokens():
                              _kq_apc_restored=(100, "exact"))
     rows = lr.build_rows(rg, _engine(prompt=prompt), {5: {}, 6: {}}, now=3.0)
     assert {r["cache"]["tier"] for r in rows} == {"miss"}
+
+
+def test_memos_pruned_when_engine_drains(monkeypatch):
+    """The tier/warm memos are pruned from publish, on every tick: an
+    engine that drains to empty skips the row build, which used to be
+    exactly when its finished rows were never forgotten (one leaked entry
+    per request for the process lifetime)."""
+    a = _Engine()
+    prompt = SimpleNamespace(uids=[7], _cached_tokens_per_row=[10],
+                             _apc_meta=[{"prefix_len": 10, "apc_blocks": []}])
+    lr.publish(a, _engine(prompt=prompt), {7: {"queued_at": 0.0}}, force=True)
+    assert (id(a), 7) in lr._TIER
+    lr.publish(a, _engine(), {}, force=True)          # drained: no rows built
+    assert not lr._TIER and not lr._WARM
+    # the rate-limited tick prunes too (the memo update runs ahead of it)
+    lr.publish(a, _engine(prompt=prompt), {7: {"queued_at": 0.0}}, force=True)
+    lr.publish(a, _engine(), {})
+    assert not lr._TIER
+
+
+def test_dead_engine_drops_every_registry():
+    a = _Engine()
+    _PKG._kq_residency_pool = _Pool(a)
+    serving._PATH_TO_IDS["/abs/q.gguf"] = ["q"]
+    prompt = SimpleNamespace(uids=[7], _cached_tokens_per_row=[10],
+                             _apc_meta=[{"prefix_len": 10, "apc_blocks": []}])
+    lr.publish(a, _engine(prompt=prompt), {7: {"queued_at": 0.0}}, force=True)
+    key = id(a)
+    assert (key, 7) in lr._TIER and key in lr._MODEL_ID
+    _PKG._kq_residency_pool.rg = None                  # the pool's own ref
+    del a
+    assert lr.live_requests_view() == []
+    assert not lr._TIER and not lr._WARM and key not in lr._MODEL_ID
+
+
+def test_model_id_memoized_per_engine():
+    """Resolving the engine's model id walks the residency pool under its
+    lock, which an eviction holds across a whole teardown; the mapping is
+    fixed per engine, so it is resolved once."""
+    a = _Engine()
+    pool = _Pool(a)
+    calls = []
+    orig = pool.model_path_for_generator
+    pool.model_path_for_generator = lambda rg: calls.append(rg) or orig(rg)
+    _PKG._kq_residency_pool = pool
+    serving._PATH_TO_IDS["/abs/q.gguf"] = ["q"]
+    assert lr._model_id(a) == "q" and lr._model_id(a) == "q"
+    assert len(calls) == 1
+    b = _Engine()                                      # unknown engine: not memoized
+    assert lr._model_id(b) is None and lr._model_id(b) is None
+    assert len(calls) == 3 and id(b) not in lr._MODEL_ID

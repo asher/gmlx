@@ -10,6 +10,7 @@ import os
 import time
 
 from fastapi import Request  # module-level so stringized annotations resolve
+from starlette.concurrency import run_in_threadpool
 
 from .. import capacity as _capacity
 from .. import server_bridge_vlm as serving
@@ -130,7 +131,10 @@ def install_models_endpoint_override(stt_model: str | None = None,
     app = importlib.import_module("mlx_vlm.server.app").app
 
     async def models_endpoint():
-        payload = _models_payload()
+        # Off the event loop: the first call after boot scans each configured
+        # GGUF's header for its trained context (tens of ms of pure Python
+        # per file), which would stall every in-flight SSE stream.
+        payload = await run_in_threadpool(_models_payload)
         if stt_model:
             payload["data"].append(_service_entry("whisper-1", "stt", stt_model))
         if tts_model:
@@ -212,6 +216,7 @@ def _resident_models_view() -> list:
         out.append({
             "ids": path_to_ids.get(e["model_path"], []),
             "model_path": e["model_path"],
+            "seq": e.get("seq"),
             "pinned": e["pinned"],
             "kept": e.get("kept", False),
             "busy": e.get("busy", 0),
@@ -350,20 +355,24 @@ def install_pool_aware_unload() -> None:
             from ..residency import ModelBusyError
             # An explicit unload outranks the preload's lifetime hold (it
             # guards against implicit eviction, not against the operator);
-            # real in-flight streams still answer 409 below.
-            _release_preload_holds(pool, path)
+            # real in-flight streams still answer 409. The eviction judges
+            # busy-ness with the hold discounted and the hold is dropped only
+            # after it succeeds: a 409 must leave the preload pinned, or the
+            # operator's "busy, try again" would silently make it evictable.
             try:
-                evicted = pool.evict(path)
+                evicted = _evict_ignoring_retained(pool, path)
             except ModelBusyError as e:
                 return JSONResponse(status_code=409, content={
                     "status": "busy", "model": model_id,
                     "in_flight": e.in_flight})
+            _release_preload_holds(pool, path, only_evicted=True)
             return {"status": "success" if evicted else "not_resident",
                     "unloaded": model_id if evicted else None}
 
+        cleared = _clear_ignoring_retained(pool) if pool is not None else False
         if pool is not None:
-            _release_preload_holds(pool, None)
-        cleared = pool.clear() if pool is not None else False
+            # Same rule: a model skipped as busy keeps its preload hold.
+            _release_preload_holds(pool, None, only_evicted=True)
         busy = pool.busy_paths() if pool is not None else []
         if busy:
             return {"status": "success" if cleared else "busy",
@@ -746,12 +755,31 @@ _WARM_DEFAULT = object()
 _PRELOAD_HOLDS: list = []
 
 
-def _release_preload_holds(pool, path) -> int:
+def _evict_ignoring_retained(pool, path) -> bool:
+    """``pool.evict(path)`` with the preload's lifetime hold discounted
+    from the busy count (pools without the keyword count it as busy, the
+    old behaviour)."""
+    try:
+        return pool.evict(path, ignore_retained=True)
+    except TypeError:
+        return pool.evict(path)
+
+
+def _clear_ignoring_retained(pool) -> bool:
+    try:
+        return pool.clear(ignore_retained=True)
+    except TypeError:
+        return pool.clear()
+
+
+def _release_preload_holds(pool, path, *, only_evicted: bool = False) -> int:
     """Drop the preload's lifetime hold(s) on ``path`` (every path when
-    None) ahead of an explicit unload, so the eviction sees only real
-    in-flight streams. Returns how many holds were released. A model
-    reloaded later by request has no lifetime hold: it is TTL/LRU-managed
-    like any other until a ``/v1/reload`` with ``preload`` re-pins it."""
+    None). With ``only_evicted`` the holds whose entry is still resident
+    (an unload that found the model busy and skipped it) are kept, so a
+    409'd unload leaves the preload eviction-proof. Returns how many holds
+    were released. A model reloaded later by request has no lifetime hold:
+    it is TTL/LRU-managed like any other until a ``/v1/reload`` with
+    ``preload`` re-pins it."""
     released = 0
     for hold in list(_PRELOAD_HOLDS):
         entry = getattr(hold, "_entry", None)
@@ -760,6 +788,10 @@ def _release_preload_holds(pool, path) -> int:
             continue
         if path is not None and str(entry.model_path) != str(path):
             continue
+        if only_evicted:
+            resident = getattr(pool, "entry_resident", None)
+            if callable(resident) and resident(entry):
+                continue
         try:
             if hasattr(pool, "unmark_retained"):
                 pool.unmark_retained(hold)
@@ -834,6 +866,17 @@ def _preload_extra_over_budget(model_id: str) -> bool:
         return False
 
 
+def _warm_context_lengths() -> None:
+    """Fill ``capacity.trained_context_length``'s cache for every
+    configured model, so the first ``/v1/models`` after boot does not pay
+    the header scans on the request path. Best-effort."""
+    try:
+        for rm in serving.resolved_models().values():
+            _capacity.trained_context_length(rm.path)
+    except Exception:
+        pass
+
+
 def spawn_preload_warm(model_id: str | None, extras=()):
     """Background-load the preload set without blocking startup. The primary
     ``model_id`` keeps its busy hold for the process lifetime so it stays
@@ -848,6 +891,7 @@ def spawn_preload_warm(model_id: str | None, extras=()):
     import threading
 
     def _run():
+        _warm_context_lengths()
         if model_id:
             try:
                 hold = _load_resident(model_id)

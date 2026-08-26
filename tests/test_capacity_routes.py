@@ -437,3 +437,18 @@ def test_readiness_busy_needs_every_model_at_width(monkeypatch):
     assert cr.readiness() == (True, "ok", 0)
     _PKG._kq_residency_pool = _MultiPool([4, 4])
     assert cr.readiness() == (False, "busy", qc._RETRY_MIN_S)
+
+
+def test_flatten_prometheus_distinct_series_per_resident_entry():
+    """Two resident entries backing the same GGUF (different load
+    profiles) must not collapse into duplicate samples - Prometheus drops
+    the whole scrape on one. The pool ``seq`` tells them apart."""
+    text = cr.flatten_prometheus({"resident_models": [
+        {"ids": ["qwen"], "seq": 3, "busy": 1, "model_path": "/abs/q.gguf"},
+        {"ids": ["qwen"], "seq": 7, "busy": 0, "model_path": "/abs/q.gguf"},
+    ]})
+    lines = text.splitlines()
+    assert 'gmlx_resident_models_busy{model="qwen",seq="3"} 1' in lines
+    assert 'gmlx_resident_models_busy{model="qwen",seq="7"} 0' in lines
+    samples = [ln.split(" ")[0] for ln in lines if not ln.startswith("#")]
+    assert len(samples) == len(set(samples))

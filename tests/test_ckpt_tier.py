@@ -1357,3 +1357,18 @@ def test_anchor_gets_no_pool_pressure_protection():
     assert [r.kind for r in idx.values()] == ["anchor"]
     assert cs._evict_for_pool(man, 1) >= 1
     assert len(cs._ckpt_records(man)) == 0
+
+
+def test_buffered_clone_declines_a_non_linear_window():
+    """The trailing-slice clone is the canonical window only under the
+    buffer's linear-layout invariant (``start_position == offset - _idx``);
+    a buffer that breaks it is declined loudly, never stored wrong."""
+    from mlx_vlm.models.cache import BufferedRotatingKVCache
+    from gmlx.cache_snapshot import _clone_single_row
+    cache = make_swa_cache(48, seed=9)
+    rot = next(c for c in cache if isinstance(c, RotatingKVCache))
+    buffered = BufferedRotatingKVCache.from_cache(rot, buffer_size=16)
+    assert buffered.start_position == buffered.offset - buffered._idx
+    assert _clone_single_row(buffered) is not None
+    buffered.start_position += 1
+    assert _clone_single_row(buffered) is None

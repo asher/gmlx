@@ -74,6 +74,7 @@ _WARM: dict = {}          # (id(rg), uid) -> prefix tokens a gmlx-owned tier res
 # Speculative engines: id(rg) -> {"ref", "snap", "rows": {uid: row state}}
 _SPEC: dict = {}
 _THREAD_RG: dict = {}     # engine thread ident -> id(rg) of its speculative loop
+_MODEL_ID: dict = {}      # id(rg) -> (weakref | None, model id): fixed per engine
 _SPEC_FLAG = "_kq_gguf_live_requests_spec"
 
 
@@ -82,6 +83,29 @@ def _snap_key(rg) -> int:
 
 
 def _model_id(rg) -> str | None:
+    """The configured id the engine ``rg`` serves. Memoized per engine:
+    the mapping is fixed for the engine's lifetime, and resolving it walks
+    the residency pool under its lock - which an eviction holds across a
+    whole teardown, so an unmemoized tick would stall every other resident
+    model's decode for that long."""
+    key = _snap_key(rg)
+    memo = _MODEL_ID.get(key)
+    if memo is not None:
+        ref, mid = memo
+        if ref is None or ref() is rg:
+            return mid
+        _MODEL_ID.pop(key, None)         # id reused by a new engine
+    mid = _resolve_model_id(rg)
+    if mid is not None:
+        try:
+            ref = weakref.ref(rg)
+        except TypeError:
+            ref = None
+        _MODEL_ID[key] = (ref, mid)
+    return mid
+
+
+def _resolve_model_id(rg) -> str | None:
     try:
         import importlib
 
@@ -335,11 +359,20 @@ def build_rows(rg, batch_gen, active, now=None) -> list:
     except Exception:
         pass
 
+    return rows
+
+
+def _prune_memos(key, active) -> None:
+    """Drop the tier/warm memos of ``key``'s finished rows. Runs from
+    ``publish`` on every tick, not from ``build_rows``: an engine that
+    drains to empty skips the row build, which is exactly when its last
+    rows need forgetting (else the memos grow by one entry per request
+    for the process lifetime, and a reused ``id(rg)`` could read a dead
+    engine's tier)."""
     for memo in (_TIER, _WARM):
         for k in list(memo):
             if k[0] == key and k[1] not in active:
                 memo.pop(k, None)
-    return rows
 
 
 # --- speculative engines -------------------------------------------------
@@ -431,6 +464,7 @@ def publish(rg, batch_gen, active, *, force: bool = False) -> None:
     try:
         key = _snap_key(rg)
         _memo_tiers(rg, batch_gen, active)
+        _prune_memos(key, active or {})
         if batch_gen is not None:
             try:
                 from .queue_cap import note_engine
@@ -477,6 +511,11 @@ def live_requests_view() -> list:
             if ref is not None and ref() is None:      # engine torn down
                 _SNAPS.pop(key, None)
                 _SPEC.pop(key, None)
+                _MODEL_ID.pop(key, None)
+                for memo in (_TIER, _WARM):
+                    for k in list(memo):
+                        if k[0] == key:
+                            memo.pop(k, None)
                 continue
             if snap["rows"] and now - snap["at"] <= _STALE_S:
                 out.extend(snap["rows"])
@@ -491,6 +530,7 @@ def _reset() -> None:
     _WARM.clear()
     _SPEC.clear()
     _THREAD_RG.clear()
+    _MODEL_ID.clear()
 
 
 def install_live_requests() -> None:
