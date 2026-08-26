@@ -631,7 +631,8 @@ class QSAIndexer(nn.Module):
         s = mx.where(valid, s, -mx.inf)
         k = self.block_topk
         topk = _kq_topk()
-        if topk is not None and k == 512 and n_blocks >= k:
+        if (topk is not None and k == 512 and n_blocks >= k
+                and x.dtype in (mx.float16, mx.bfloat16)):
             # kq radix top-k (one threadgroup per row) replaces the
             # sort-based argpartition. Selection is set-equivalent up to
             # ties at the threshold, and the mask/gather consumers are
