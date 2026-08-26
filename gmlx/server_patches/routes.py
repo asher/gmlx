@@ -216,6 +216,7 @@ def _resident_models_view() -> list:
         out.append({
             "ids": path_to_ids.get(e["model_path"], []),
             "model_path": e["model_path"],
+            "loaded_as": e.get("loaded_as"),
             "profile": e.get("profile"),
             "pinned": e["pinned"],
             "kept": e.get("kept", False),

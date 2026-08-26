@@ -581,8 +581,13 @@ def test_profile_label_is_stable_across_acquires_and_unique_per_entry():
         # upstream's explicit text_generation kind is its own key: it must
         # not collapse into the same ``default`` label as gmlx's ``auto``
         pool.acquire("/abs/a.gguf", None, "text_generation")
+        # a config-mode load names the entry by the id that built it
+        pool.acquire("/abs/a.gguf", None, "auto", cache_key_extra=("kv8",),
+                     loaded_as="a-q8@coder")
         labs = labels()
-        assert len(labs) == 5 and len({tuple(sorted(d.items())) for d in labs}) == 5
+        assert len(labs) == 6 and len({tuple(sorted(d.items())) for d in labs}) == 6
+        named = [d for d in labs if d["model"] == "a-q8@coder"]
+        assert len(named) == 1 and named[0]["profile"] != "default"
         assert {"model": "a.gguf", "profile": "lora.gguf"} in labs
         assert {"model": "a.gguf", "profile": "embedding"} in labs
         assert {"model": "a.gguf", "profile": "text_generation"} in labs

@@ -206,6 +206,7 @@ class _Entry:
     last_access: float = 0.0    # monotonic time of the last acquire/touch
     busy: int = 0               # in-flight refcount; busy entries are never LRU-evicted
     retained: int = 0           # of ``busy``: process-lifetime holds (preload), not requests
+    loaded_as: str | None = None  # the configured ``id[@profile]`` whose request built it
 
 
 class _BusyHold:
@@ -448,7 +449,8 @@ class _ResidencyPool:
 
     # public
     def acquire(self, model_path, adapter_path, model_kind, *,
-                ttl=None, cache_key_extra=(), env=None, build_spec=None) -> _Entry:
+                ttl=None, cache_key_extra=(), env=None, build_spec=None,
+                loaded_as=None) -> _Entry:
         # ``cache_key_extra`` (a model's load_signature) distinguishes two ids
         # backed by the same GGUF but loaded with different params (kv bits,
         # mmproj, drafter) - they become separate resident entries.
@@ -487,6 +489,10 @@ class _ResidencyPool:
                 self._evict_for_room(incoming)
             entry = self._build(cache_key, model_path, adapter_path, model_kind,
                                 incoming, ttl=ttl, env=env, build_spec=build_spec)
+            # The id that built the entry names it for the process lifetime
+            # (a metrics label wants a name fixed per entry; aliases sharing
+            # the signature reuse this entry and keep the first name).
+            entry.loaded_as = loaded_as
             with self._lock:
                 self._entries[cache_key] = entry
                 self._touch(entry)
@@ -682,6 +688,7 @@ class _ResidencyPool:
                 "resident": [
                     {
                         "model_path": e.model_path,
+                        "loaded_as": e.loaded_as,
                         "profile": profile_label(e.cache_key),
                         "pinned": e.pinned,
                         "kept": e.model_path in self._keep_paths,
@@ -1135,6 +1142,7 @@ def install_gguf_residency_pool(budget_bytes=None, max_models=None, pinned=None)
         cache_key_extra = ()
         env = None
         build_spec = None
+        loaded_as = None
         load_path = model_path
         if _serving.server_config() is not None:
             try:
@@ -1152,12 +1160,13 @@ def install_gguf_residency_pool(budget_bytes=None, max_models=None, pinned=None)
             cache_key_extra = spec.load_signature()
             env = _config.env_for(spec)
             build_spec = spec          # crosses into the load worker thread (see _build)
+            loaded_as = spec.id + (f"@{spec.profile_name}" if spec.profile_name else "")
         if adapter_path is inherit:
             adapter_path = pool.resident_adapter(load_path)
         try:
             entry = pool.acquire(load_path, adapter_path, model_kind,
                                  ttl=ttl, cache_key_extra=cache_key_extra, env=env,
-                                 build_spec=build_spec)
+                                 build_spec=build_spec, loaded_as=loaded_as)
         except LoadDeferred as e:
             # The chat pre-warm answers the common case typed; a load that
             # begins here (another request took the room between the

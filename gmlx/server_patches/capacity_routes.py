@@ -162,6 +162,13 @@ def _entry_label(entry: dict, index: int) -> dict:
     profile = entry.get("profile")
     if isinstance(profile, str) and profile:
         extra["profile"] = profile
+    # ``model`` is the configured id that built the entry when known (two
+    # ids on one GGUF with different load params are two entries; naming
+    # each by its own id reads better than ids[0] of the path), else the
+    # path's first id.
+    loaded_as = entry.get("loaded_as")
+    if isinstance(loaded_as, str) and loaded_as:
+        return {"model": loaded_as, **extra}
     ids = entry.get("ids")
     if isinstance(ids, list) and ids:
         return {"model": str(ids[0]), **extra}

@@ -1378,10 +1378,12 @@ answers a dispatcher can act on without a refused request:
 The Prometheus rendering (`?format=prometheus`) flattens these to
 `gmlx_concurrency_in_flight`, `gmlx_queue_eta_s`,
 `gmlx_governor_band{band="green"} 1`, `gmlx_capacity_max_ctx{width="8"}`,
-`gmlx_resident_models_busy{model="<id>",profile="default"}` (the
-profile label - adapter basename and/or a short hash of the load
-signature - keeps two entries backing one GGUF as distinct series, and
-is fixed for the entry's lifetime) and so on; `requests[]` is high-cardinality and contributes only
+`gmlx_resident_models_busy{model="<id>",profile="default"}` (`model`
+is the configured `id[@profile]` whose request built the entry; the
+`profile` label - adapter basename, model kind and/or a short hash of
+the load signature, `default` for a bare single-model launch - keeps
+two entries backing one GGUF as distinct series; both are fixed for the
+entry's lifetime) and so on; `requests[]` is high-cardinality and contributes only
 `gmlx_requests_count`.
 
 ### Reloading the config
