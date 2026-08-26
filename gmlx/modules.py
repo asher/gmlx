@@ -693,6 +693,11 @@ def _eligible_kq_block(m, caps):
     # plain silu(gate) * up shared expert only (qwen3-next MLP shape)
     if hasattr(se, "activation"):
         return False
+    # unquantized shared expert (e.g. the qwen4exp MTP companion keeps its
+    # dense tensors bf16) stays on the unfused path
+    for attr in ("gate_proj", "up_proj", "down_proj"):
+        if not hasattr(getattr(se, attr), "kquant_type"):
+            return False
     # the GLU gather runs both shexp slots with one codec
     if se.gate_proj.kquant_type != se.up_proj.kquant_type:
         return False
