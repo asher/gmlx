@@ -627,9 +627,9 @@ gmlx stop                        # SIGTERM the process group, then SIGKILL after
 
 | Command | Meaning |
 |---------|---------|
-| `gmlx stop [--host H --port P] [--timeout S]` | Stop a backgrounded server: SIGTERM the whole process group, then SIGKILL after `--timeout` (default `15`, cutting any in-flight generation). Verifies the pid is ours before signalling; a stale runfile is just cleared. |
+| `gmlx stop [--host H --port P] [--timeout S]` | Stop a backgrounded server: SIGTERM the whole process group, then SIGKILL after `--timeout` (default `15`, cutting any in-flight generation). Verifies the pid is ours before signalling; a stale runfile is just cleared. A bare `stop` also clears every other stale runfile it finds (dead or recycled pid) on its way to the live server, and reports them; `--stale` clears only those and signals nothing. |
 | `gmlx restart [...] [--start-timeout S]` | Stop, then relaunch with the runfile's recorded arguments (absolute `--config`, so it relaunches faithfully from any directory). |
-| `gmlx status [--json]` | Process-layer status: pid, uptime, url, log, how it's managed. No API key (uses the auth-exempt `/health`). Resident-model detail lives in `ps`. |
+| `gmlx status [--json]` | Process-layer status: pid, uptime, url, log, how it's managed. No API key (uses the auth-exempt `/health`). Resident-model detail lives in `ps`. Stale runfiles are listed as such, with the reason (`pid N exited`, `pid N is now another process`) and age, and never make a bare verb ambiguous; `--json` puts them under `stale`. |
 | `gmlx logs [-n N] [-f] [--clear]` | Print the last `N` lines of the server log (`-n`/`--lines`). `-f`/`--follow` follows (`tail -f`); `--clear` truncates the file (keeps it). |
 
 Each completed generation request logs one timestamped line with the endpoint,
