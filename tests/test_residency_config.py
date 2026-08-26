@@ -543,3 +543,41 @@ def test_evict_and_clear_can_discount_retained_holds():
     assert pool.evict("/abs/a.gguf", ignore_retained=True) is True
     assert not pool.entry_resident(entry) and teardowns == ["/abs/a.gguf"]
     hold.release()                                   # late release: harmless
+
+
+def test_profile_label_is_stable_across_acquires_and_unique_per_entry():
+    """The metrics label for a resident entry must not move: ``seq`` is
+    the LRU clock (re-stamped per acquire) and labelling on it minted a
+    new Prometheus series on every scrape. ``profile`` is fixed for the
+    entry's lifetime and still distinguishes two entries on one GGUF."""
+    import importlib
+    from gmlx.server_patches import capacity_routes as cr
+    from gmlx.server_patches import routes as sp_routes
+
+    _proxy, pool, _env, _td = make_pool()
+    pkg = importlib.import_module("mlx_vlm.server")
+    saved = getattr(pkg, "_kq_residency_pool", None)
+    pkg._kq_residency_pool = pool
+    try:
+        def labels():
+            return [cr._entry_label(e, i)
+                    for i, e in enumerate(sp_routes._resident_models_view())]
+
+        e = _acq(pool, "/abs/a.gguf")
+        first = labels()
+        seq0 = pool.stats()["resident"][0]["seq"]
+        for _ in range(3):
+            pool.release(_acq(pool, "/abs/a.gguf"))
+        assert pool.stats()["resident"][0]["seq"] > seq0        # LRU clock moved
+        assert labels() == first                                 # label did not
+        assert first == [{"model": "a.gguf", "profile": "default"}]
+        # same GGUF, an adapter and a different load signature: two entries,
+        # two labels, no duplicate series
+        pool.acquire("/abs/a.gguf", "/abs/lora.gguf", "auto")
+        pool.acquire("/abs/a.gguf", None, "auto", cache_key_extra=("kv4",))
+        labs = labels()
+        assert len(labs) == 3 and len({tuple(sorted(d.items())) for d in labs}) == 3
+        assert {"model": "a.gguf", "profile": "lora.gguf"} in labs
+        pool.release(e)
+    finally:
+        pkg._kq_residency_pool = saved

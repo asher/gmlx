@@ -160,6 +160,27 @@ class ModelBusyError(RuntimeError):
             f"{model_path} has {in_flight} in-flight request(s)")
 
 
+def profile_label(cache_key: tuple) -> str:
+    """A short, stable name for what distinguishes one resident entry
+    from another on the same GGUF: the adapter's basename and/or a hash
+    of the load signature (kv bits, mmproj, drafter ...), ``default``
+    when neither applies. Unique per entry (the pool is keyed on
+    ``cache_key``) and unchanged for the entry's lifetime and across
+    reloads of the same config - a metrics label, unlike ``seq``, which
+    is the LRU clock and re-stamps on every acquire."""
+    import hashlib
+
+    parts = []
+    adapter = cache_key[1] if len(cache_key) > 1 else None
+    if adapter:
+        parts.append(os.path.basename(str(adapter)))
+    extras = tuple(cache_key[3:])
+    if extras:
+        parts.append(hashlib.blake2b(repr(extras).encode(),
+                                     digest_size=4).hexdigest())
+    return "+".join(parts) or "default"
+
+
 @dataclass
 class _Entry:
     cache_key: tuple
@@ -650,6 +671,7 @@ class _ResidencyPool:
                 "resident": [
                     {
                         "model_path": e.model_path,
+                        "profile": profile_label(e.cache_key),
                         "pinned": e.pinned,
                         "kept": e.model_path in self._keep_paths,
                         "seq": e.seq,

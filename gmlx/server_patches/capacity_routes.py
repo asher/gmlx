@@ -151,14 +151,17 @@ def _label_str(labels: dict) -> str:
 
 
 def _entry_label(entry: dict, index: int) -> dict:
-    # A resident entry also carries its pool ``seq``: two entries can back
-    # the same GGUF (different load profiles / adapters) and would otherwise
-    # share a label set - and Prometheus drops the whole scrape on a
-    # duplicate sample, not just the row.
+    # A resident entry also carries its ``profile`` (adapter / load
+    # signature, ``residency.profile_label``): two entries can back the same
+    # GGUF and would otherwise share a label set - and Prometheus drops the
+    # whole scrape on a duplicate sample, not just the row. The label is
+    # fixed for the entry's lifetime (the pool's ``seq`` is not: it is the
+    # LRU clock, and a label that moved per acquire would mint a new series
+    # on every scrape).
     extra = {}
-    seq = entry.get("seq")
-    if isinstance(seq, int) and not isinstance(seq, bool):
-        extra["seq"] = str(seq)
+    profile = entry.get("profile")
+    if isinstance(profile, str) and profile:
+        extra["profile"] = profile
     ids = entry.get("ids")
     if isinstance(ids, list) and ids:
         return {"model": str(ids[0]), **extra}
