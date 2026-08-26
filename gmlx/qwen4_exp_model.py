@@ -975,6 +975,55 @@ class SparseMoeBlock(nn.Module):
 # PLE n-gram hash embeddings
 
 
+def _make_ple_hash_kernel():
+    """One-dispatch n-gram row hash: thread (b, t, head) recomputes the
+    eager chain (shift-with-EOS-cut, 64-bit mix, mod + offset) for its
+    head. Integer ALU only. hist is [B, T + CTX] int64; out [B, T, NH]
+    int32 (table rows stay below 2^31)."""
+    source = """
+        const uint gid = thread_position_in_grid.x;
+        const int T = hist_shape[1] - CTX;
+        const int nh = gid % NH;
+        const int t = (gid / NH) % T;
+        const int b = gid / (uint)(NH * T);
+        const size_t hbase = (size_t)b * (T + CTX);
+        const int p = CTX + t;
+        const int n = 2 + nh / HPN;
+        ulong mixed = (ulong)hist[hbase + p] * mults[0];
+        bool eos_seen = false;
+        for (int sh = 1; sh < n; sh++) {
+            const long tok = hist[hbase + p - sh];
+            eos_seen = eos_seen || (tok == EOS);
+            mixed ^= (eos_seen ? (ulong)EOS : (ulong)tok) * mults[sh];
+        }
+        out[gid] = (int)(mixed % sizes[nh] + offsets[nh]);
+    """
+    return mx.fast.metal_kernel(
+        name="ple_hash_rows",
+        input_names=["hist", "mults", "sizes", "offsets"],
+        output_names=["out"],
+        source=source,
+        ensure_row_contiguous=True,
+    )
+
+
+_ple_hash_kernel = None
+
+
+def _ple_hash():
+    """The fused PLE row-hash kernel, or None (eager op chain).
+    ``GMLX_Q4_PLE_FUSED_HASH=0`` disables."""
+    global _ple_hash_kernel
+    if _ple_hash_kernel is None:
+        from .envflags import env_bool
+        if (env_bool("GMLX_Q4_PLE_FUSED_HASH", True)
+                and mx.default_device().type == mx.DeviceType.gpu):
+            _ple_hash_kernel = _make_ple_hash_kernel()
+        else:
+            _ple_hash_kernel = False
+    return _ple_hash_kernel or None
+
+
 class PLEEmbedding(nn.Module):
     """Hash the token history into per-head row ids and gather the rows.
 
@@ -996,6 +1045,7 @@ class PLEEmbedding(nn.Module):
         self.eos_token_id = args.ple_eos_token_id
         self.embed_dim = args.ple_embed_dim
         self._mults = [int(m) for m in args.ple_layer_multipliers]
+        self._mults_u64 = mx.array(self._mults, dtype=mx.uint64)
         self._sizes = mx.array([int(s) for s in args.ple_head_vocab_sizes],
                                dtype=mx.uint64)
         self._offsets = mx.array([int(o) for o in args.ple_head_offsets],
@@ -1032,6 +1082,20 @@ class PLEEmbedding(nn.Module):
         hist = mx.concatenate([prev, ids], axis=1)
         if cache is not None:
             cache[3] = mx.contiguous(hist[:, -self.context_len:])
+        kern = _ple_hash() if self.ngram_size <= 3 else None
+        if kern is not None:
+            nh = self.n_heads
+            return kern(
+                inputs=[hist, self._mults_u64, self._sizes, self._offsets],
+                template=[("CTX", self.context_len),
+                          ("HPN", self.heads_per_ngram),
+                          ("NH", nh),
+                          ("EOS", self.eos_token_id)],
+                grid=(B * T * nh, 1, 1),
+                threadgroup=(min(256, B * T * nh), 1, 1),
+                output_shapes=[(B, T, nh)],
+                output_dtypes=[mx.int32],
+            )[0]
         shifted = [
             self._shift_right_ignore_eos(hist, s).astype(mx.uint64)
             for s in range(self.ngram_size)
