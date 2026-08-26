@@ -1451,7 +1451,10 @@ def test_qwen4exp_synth_instantiates():
     mx.eval(out)
     full = model(mx.concatenate([ids, step], axis=1))
     mx.eval(full)
-    assert mx.abs(full[0, -1] - out[0, -1]).max().item() < 1e-4
+    # Not 1e-4: on M5 the GPU arm's f32 GEMMs run at TF32 precision while
+    # the decode-step GEMVs are exact, so full-vs-step drifts ~5e-4 across
+    # the 4 layers (CPU passes 1e-4).
+    assert mx.abs(full[0, -1] - out[0, -1]).max().item() < 2e-3
     assert cache[3].offset == 13 and cache[3].n_blocks == 3
 
 
