@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-08-25
+
 ### Added
 
 - `gmlx serve model.gguf --thinking on|off|adaptive` and `--thinking-budget N`
