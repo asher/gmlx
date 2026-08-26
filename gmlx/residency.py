@@ -168,8 +168,8 @@ def profile_label(cache_key: tuple) -> str:
     ``cache_key``) and unchanged for the entry's lifetime and across
     reloads of the same config - a metrics label, unlike ``seq``, which
     is the LRU clock and re-stamps on every acquire. Every key component
-    but the path contributes: adapter, model kind (when not the chat
-    default), load-signature extras."""
+    but the path contributes: adapter, model kind (when not ``auto``),
+    load-signature extras."""
     import hashlib
 
     parts = []
@@ -178,9 +178,12 @@ def profile_label(cache_key: tuple) -> str:
         parts.append(os.path.basename(str(adapter)))
     # model_kind is part of the key too: an --embeddings / --rerank / audio
     # route pointed at a GGUF that also serves chat is a second entry with
-    # the same adapter and extras.
+    # the same adapter and extras. Only ``auto`` (what gmlx's own loads
+    # pass) collapses into ``default``; upstream's ``text_generation`` is a
+    # different key and labels itself, so the label stays unique even if
+    # the stock lifespan preload ever fires alongside ours.
     kind = cache_key[2] if len(cache_key) > 2 else None
-    if kind and str(kind) not in ("auto", "text_generation"):
+    if kind and str(kind) != "auto":
         parts.append(str(kind))
     extras = tuple(cache_key[3:])
     if extras:

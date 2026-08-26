@@ -578,10 +578,14 @@ def test_profile_label_is_stable_across_acquires_and_unique_per_entry():
         # ... and a service-kind route (--embeddings) on the same GGUF: the
         # kind is the only key component that differs
         pool.acquire("/abs/a.gguf", None, "embedding")
+        # upstream's explicit text_generation kind is its own key: it must
+        # not collapse into the same ``default`` label as gmlx's ``auto``
+        pool.acquire("/abs/a.gguf", None, "text_generation")
         labs = labels()
-        assert len(labs) == 4 and len({tuple(sorted(d.items())) for d in labs}) == 4
+        assert len(labs) == 5 and len({tuple(sorted(d.items())) for d in labs}) == 5
         assert {"model": "a.gguf", "profile": "lora.gguf"} in labs
         assert {"model": "a.gguf", "profile": "embedding"} in labs
+        assert {"model": "a.gguf", "profile": "text_generation"} in labs
         pool.release(e)
     finally:
         pkg._kq_residency_pool = saved
