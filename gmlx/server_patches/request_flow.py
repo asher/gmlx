@@ -114,7 +114,11 @@ def install_chat_load_offload() -> None:
                     # or busy): a typed 503 + Retry-After, the shape a
                     # dispatcher keys on, instead of the stock handler
                     # re-hitting the gate and answering a generic 500.
-                    return _load_deferred_response(model_id, exc)
+                    # Off the loop: readiness() inside settles/scans for
+                    # seconds, which head-of-line-blocked every request
+                    # while a load was being refused.
+                    return await asyncio.to_thread(
+                        _load_deferred_response, model_id, exc)
                 except Exception:
                     pass        # stock handler re-resolves + surfaces errors
             return await original(*args, **kwargs)

@@ -304,13 +304,33 @@ def preload_gate(weight_bytes: float, model_id: str) -> None:
             f"{1 - margin():.2f}). GMLX_OVERCOMMIT=1 overrides; for MoE "
             f"models --stream-experts serves the experts from disk.")
     if head is not None and weight_bytes > head:
-        raise LoadDeferred(
+        _defer(
             f"model load deferred: {model_id} weights "
             f"{weight_bytes / GB:.1f} GB exceed the measured free "
             f"working set {head / GB:.1f} GB (resident models are "
             f"pinned or busy). Retry when a slot frees, or "
             f"GMLX_OVERCOMMIT=1 overrides.")
     _kernel_gate(weight_bytes, model_id)
+
+
+_DEFER_WARN_S = 10.0
+_defer_warned_at = 0.0
+
+
+def _defer(msg: str) -> None:
+    """Log and raise a LoadDeferred. The 503 body reaches only the client,
+    so without this line a refusing gate leaves no server-side trace at
+    all (2026-08-26: two bench arms deferred for their whole 240 s startup
+    window with an empty log). Rate-limited so a client retry loop cannot
+    flood."""
+    global _defer_warned_at
+    import time
+
+    now = time.monotonic()
+    if now - _defer_warned_at >= _DEFER_WARN_S:
+        _defer_warned_at = now
+        _log.warning("[capacity] %s", msg)
+    raise LoadDeferred(msg)
 
 
 _SETTLE_S = 3.0          # how long a short load waits for memory on its way
@@ -369,7 +389,7 @@ def _kernel_gate(weight_bytes: float, model_id: str) -> None:
     rec = _settle_reclaimable(reclaimable_bytes, rec, weight_bytes + floor)
     if rec is None or weight_bytes <= rec - floor:
         return
-    raise LoadDeferred(
+    _defer(
         f"model load deferred: {model_id} weights {weight_bytes / GB:.1f} GB "
         f"exceed the kernel's reclaimable memory {rec / GB:.1f} GB less the "
         f"{floor / GB:.1f} GB floor (other processes hold the rest). Retry "

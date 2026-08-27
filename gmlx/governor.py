@@ -696,12 +696,17 @@ def _governor_tick(gen) -> None:
         # STABLE breach only observes and logs. The full RED + shed
         # response is reserved for the livelock signature (2026-08-24
         # freeze): reclaimable in active collapse, or through half the
-        # floor.
+        # floor. Half-floor needs a second sub-floor sample to confirm:
+        # a neighbor teardown transient reads deep-but-recovering on its
+        # first sample (2026-08-26: 3.6 GB false shed 10 s after an
+        # 84 GB exit). Quarter-floor is last-pages territory and reds
+        # immediately (2026-08-24 freeze read 0.5 GB).
         cur = (recl2 or 0)
         prev = st.floor_recl_prev
         st.floor_recl_prev = cur
-        collapsing = (cur < 0.5 * floor
-                      or (prev is not None and prev - cur > 1e9))
+        collapsing = (cur < 0.25 * floor
+                      or (prev is not None
+                          and (cur < 0.5 * floor or prev - cur > 1e9)))
         if not collapsing:
             now = time.perf_counter()
             if now - st.floor_warned_at >= 30.0:

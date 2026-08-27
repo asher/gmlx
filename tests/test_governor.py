@@ -636,6 +636,46 @@ def test_kernel_floor_trend_resets_above_floor(rig, monkeypatch):
     assert failed == []
 
 
+def test_kernel_floor_first_sample_transient_holds(rig, monkeypatch):
+    # 2026-08-26 false shed: 3.64 GB read 10 s after a neighbor's 84 GB
+    # exit, recovering to 4.13 GB one tick later. Below half floor but
+    # above quarter floor on a FIRST sample must hold for the trend
+    # confirmation; the recovery tick then reads stable. No shed.
+    failed = []
+    monkeypatch.setattr(tg, "_row_failed_callbacks",
+                        [lambda uid, info: failed.append((uid, info))])
+    gen = FakeGen(rows=1, rate=1e6, live=8e9)
+    tg_st = tg._state(gen)
+    tg_st.ledger[0] = tg._Row([1] * 8, 64, {}, None, None)
+    rig["kernel"] = 3.64e9         # under floor/2, over floor/4
+    gov._governor_tick(gen)
+    assert failed == []
+    rig["kernel"] = 4.13e9         # recovering
+    gov._governor_tick(gen)
+    st = gov._state(gen)
+    assert failed == []
+    assert st.band != gov.RED
+
+
+def test_kernel_floor_sustained_half_floor_sheds(rig, monkeypatch):
+    # Two consecutive samples under half floor is confirmed collapse
+    # even without a >1 GB/tick drop: red + shed on the second.
+    failed = []
+    monkeypatch.setattr(tg, "_row_failed_callbacks",
+                        [lambda uid, info: failed.append((uid, info))])
+    gen = FakeGen(rows=1, rate=1e6, live=8e9)
+    tg_st = tg._state(gen)
+    tg_st.ledger[0] = tg._Row([1] * 8, 64, {}, None, None)
+    rig["kernel"] = 3.6e9
+    gov._governor_tick(gen)
+    assert failed == []
+    rig["kernel"] = 3.5e9
+    gov._governor_tick(gen)
+    st = gov._state(gen)
+    assert st.band == gov.RED
+    assert failed and "collapsing" in failed[0][1]["error"]
+
+
 def test_kernel_floor_reclaim_alone_can_clear(rig, monkeypatch):
     # Evict + cache clear brings the kernel back above the floor: no
     # row is failed, the band stays red until the normal ladder
