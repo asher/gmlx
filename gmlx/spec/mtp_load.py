@@ -161,6 +161,41 @@ def _stamp_mtp_width_cap(drafter, model_type: str, *, target=None,
     return drafter
 
 
+def require_native_head_tensors(arrays: dict, config_dict: dict) -> None:
+    """The header key can outlive the tensors: a hand-stripped quant keeps
+    ``nextn_predict_layers`` while the nextn block is gone, and a
+    header/tensor block-index mismatch yields an empty remap the same way.
+    Both native-head families (qwen3.5, hy_v3) carry the head as
+    ``blk.{num_hidden_layers}.nextn.*``. On the text path this runs before
+    the target load does any heavy work; the VLM loader constructs the
+    target first by design, so there the check only beats the drafter
+    remap, not the target build."""
+    num_mtp = int(config_dict.get("mtp_num_hidden_layers", 1))
+    layers = config_dict.get("num_hidden_layers")
+    if layers is None:
+        raise ValueError(
+            "config carries no num_hidden_layers; cannot locate the native "
+            "MTP head block"
+        )
+    marker = f"blk.{int(layers)}.nextn."
+    if not any(marker in n for n in arrays):
+        raise ValueError(
+            f"header declares a native MTP head ({num_mtp} layer(s)) but the "
+            f"file carries no {marker}* tensors - likely a quant with the "
+            f"head stripped; use --no-mtp, a head-carrying quant, or "
+            f"--draft-gguf with a companion drafter"
+        )
+
+
+def _stamp_draft_source(drafter, path: str | None) -> None:
+    """Best-effort: serve's drafter-source log line falls back to the
+    explicit --draft-gguf path when the stamp cannot be set."""
+    try:
+        drafter._gmlx_draft_source = path
+    except AttributeError:
+        pass
+
+
 def _load_mtp_drafter(
     arrays: dict,
     kquant_meta: dict,
@@ -1508,6 +1543,8 @@ def load_mtp_model(
             f"({arch}.nextn_predict_layers absent / 0) - pass draft_gguf_path "
             f"for assistant-shape MTP (gemma4), or use a native-head GGUF"
         )
+    if not assistant:
+        require_native_head_tensors(arrays, config_dict)
 
     n_head = read_int(meta, f"{arch}.attention.head_count")
     n_head_kv = first_nonzero_int(meta, f"{arch}.attention.head_count_kv")
@@ -1643,6 +1680,9 @@ def load_mtp_model(
             source_key=weights_source_key(*pf.shards),
             log=_log,
         )
+    # Companion GGUF path (explicit or autodetected) vs the in-file head;
+    # serve's drafter-source log line reads this stamp.
+    _stamp_draft_source(drafter, draft_gguf_path if assistant else None)
 
     # 4. tokenizer (synthesized; multi-EOS wrapped) - same as the text path.
     loadlog.stage("building tokenizer")
@@ -1801,6 +1841,7 @@ def load_vlm_mtp_model(
                 "this VLM can't run text-only MTP (pass --draft-gguf for a gemma4 "
                 "assistant drafter, or use a native-head qwen3.5/3.6 LLM GGUF)"
             )
+        require_native_head_tensors(arrays, config_dict)
         n_head = read_int(meta, f"{arch_r}.attention.head_count")
         n_head_kv = first_nonzero_int(meta, f"{arch_r}.attention.head_count_kv")
         if _needs_tiled_v_patch(config_dict):
@@ -1832,6 +1873,7 @@ def load_vlm_mtp_model(
             source_key=weights_source_key(*pf.shards),
             log=_log,
         )
+    _stamp_draft_source(drafter, draft_gguf_path)
 
     # 5. wrap the raw GGUF tokenizer (multi-EOS) for generate_speculative.
     loadlog.stage("building tokenizer")

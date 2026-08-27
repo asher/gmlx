@@ -2278,6 +2278,12 @@ def load_vlm_model(
         qwen4_exp_vlm_model.ensure_registered()
     with_audio = bool(mm_meta.get("clip.has_audio_encoder"))
     _log(f"[vlm] model_type={model_type} audio={with_audio}")
+    if model_type in ("qwen3_5", "qwen3_5_moe"):
+        # Plain VLM builds never install the MTP verify patch set, so the
+        # stock ragged decode (ungated 1024-thread kernels) stays bound on
+        # batched mixed-depth streams; pre-M3 needs the gated dispatch.
+        from gmlx.spec.ragged_decode import install_pre_m3_ragged_guard
+        install_pre_m3_ragged_guard()
 
     # The text tower nests under `language_model.` for most VLMs, but under
     # `thinker.language_model.` for the omni family (vision+audio+text Thinker).

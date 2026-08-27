@@ -433,6 +433,7 @@ def _load_serveable_mtp(
     from gmlx.cache.compat import ensure_runtime_origin_make_cache
     ensure_runtime_origin_make_cache(model.language_model)
     _MTP_DRAFTER_STASH[os.path.abspath(gguf_path)] = (drafter, "mtp")
+    _log_drafter_source(gguf_path, drafter, draft_gguf_path)
     processor = _make_text_processor(tokenizer)
     return model, processor, model.config
 
@@ -464,6 +465,7 @@ def _load_serveable_vlm_mtp(
         verbose=False,
     )
     _MTP_DRAFTER_STASH[os.path.abspath(gguf_path)] = (drafter, "mtp")
+    _log_drafter_source(gguf_path, drafter, draft_gguf_path)
     # The VLM model's own dataclass config is attribute-readable already (unlike the
     # text MTP wrapper's dict), so hand it back directly like _load_serveable_vlm.
     return model, processor, model.config
@@ -772,6 +774,63 @@ def _apply_draft_block_size_override(result) -> None:
         pass  # frozen/odd config object -> keep the drafter's own default
 
 
+def _log_drafter_source(gguf_path: str, drafter, draft_gguf_path: str | None) -> None:
+    """Name the drafter's real source. The engine's own line names the stash
+    key (the target GGUF) and reads as the model drafting for itself; that
+    line is suppressed by :class:`_DrafterSourceFilter`. The loader stamps
+    the resolved companion path (``_gmlx_draft_source``, None for the
+    in-file head), so autodetected companions are named too."""
+    kind = getattr(drafter, "kind_label", None) or type(drafter).__name__
+    source = getattr(drafter, "_gmlx_draft_source", draft_gguf_path)
+    if draft_gguf_path:
+        _log.info("[mtp] drafter: companion %s (%s)",
+                  os.path.abspath(draft_gguf_path), kind)
+    elif source:
+        _log.info("[mtp] drafter: autodetected companion %s (%s)",
+                  os.path.abspath(source), kind)
+    else:
+        _log.info("[mtp] drafter: native MTP head of %s",
+                  os.path.basename(gguf_path))
+
+
+class _DrafterSourceFilter(logging.Filter):
+    """Drop the engine's ``Loading speculative drafter`` record for
+    bridge-managed loads; every other record passes through."""
+
+    def filter(self, record):
+        if str(record.msg).startswith("Loading speculative drafter"):
+            args = record.args or ()
+            path = args[-1] if args else None
+            if isinstance(path, str) and os.path.abspath(path) in _MTP_DRAFTER_STASH:
+                return False
+        return True
+
+
+def _degrade_failed_mtp(model_path: str, error: str) -> None:
+    """A failed speculative build must not take the server down: log the
+    cause loudly, clear the per-build drafter state, and let the caller
+    retry the same GGUF as a plain load. The text path fails before its
+    target build; the VLM loader constructs the target before the head
+    check by design, so a VLM degrade pays a full build and then a plain
+    rebuild. The [spec] per-request lines never appear for a degraded
+    model, so the state is observable. ``error`` is a string, not the
+    exception: a live exception's traceback pins the loader frames (and
+    the partial target's arrays) that clear_cache is meant to let go."""
+    _log.error(
+        "speculative (MTP) load failed for %s - serving plain "
+        "(no speculative decoding): %s", model_path, error
+    )
+    os.environ.pop("MLX_VLM_DRAFT_MODEL", None)
+    os.environ.pop("MLX_VLM_DRAFT_KIND", None)
+    drop_mtp_stash(model_path)
+    try:
+        import mlx.core as mx
+
+        mx.clear_cache()
+    except Exception:
+        pass
+
+
 def install_gguf_server_bridge() -> None:
     """Route ``*.gguf`` model paths in mlx-vlm's server through gmlx.
 
@@ -872,13 +931,30 @@ def install_gguf_server_bridge() -> None:
                 # requests keep the full VLM forward.
                 os.environ["MLX_VLM_DRAFT_MODEL"] = model_path
                 os.environ["MLX_VLM_DRAFT_KIND"] = "mtp"
+                # Deliberately broad: whatever killed the speculative build
+                # (bad companion, stripped head, OOM mid-load), a degraded
+                # plain model beats a dead server. The except block only
+                # captures the message - see _degrade_failed_mtp on why the
+                # exception object must not outlive the block.
+                try:
+                    return load_serveable_model(
+                        model_path,
+                        mmproj_path=vlm["mmproj_path"],
+                        hf_source=vlm.get("hf_source"),
+                        speculative=True,
+                        draft_gguf_path=mtp.get("draft_gguf_path"),
+                        chat_template=chat_template,
+                        adapter_gguf=adapter_gguf,
+                        stream=stream,
+                        **feeders,
+                    )
+                except Exception as e:
+                    err = f"{type(e).__name__}: {e}"
+                _degrade_failed_mtp(model_path, err)
                 return load_serveable_model(
                     model_path,
                     mmproj_path=vlm["mmproj_path"],
                     hf_source=vlm.get("hf_source"),
-                    speculative=True,
-                    draft_gguf_path=mtp.get("draft_gguf_path"),
-                    chat_template=chat_template,
                     adapter_gguf=adapter_gguf,
                     stream=stream,
                     **feeders,
@@ -899,15 +975,27 @@ def install_gguf_server_bridge() -> None:
                 # while the target loads just below.
                 os.environ["MLX_VLM_DRAFT_MODEL"] = model_path
                 os.environ["MLX_VLM_DRAFT_KIND"] = "mtp"
-                return load_serveable_model(
-                    model_path,
-                    speculative=True,
-                    draft_gguf_path=mtp.get("draft_gguf_path"),
-                    chat_template=chat_template,
-                    adapter_gguf=adapter_gguf,
-                    stream=stream,
-                    **feeders,
-                )
+                # Same deliberately-broad catch and message-only capture as
+                # the VLM x MTP branch above.
+                try:
+                    return load_serveable_model(
+                        model_path,
+                        speculative=True,
+                        draft_gguf_path=mtp.get("draft_gguf_path"),
+                        chat_template=chat_template,
+                        adapter_gguf=adapter_gguf,
+                        stream=stream,
+                        **feeders,
+                    )
+                except Exception as e:
+                    err = f"{type(e).__name__}: {e}"
+                _degrade_failed_mtp(model_path, err)
+                # Same call as the plain load below on purpose: an explicit
+                # degraded return, not a fallthrough.
+                return load_serveable_model(model_path,
+                                            chat_template=chat_template,
+                                            adapter_gguf=adapter_gguf,
+                                            stream=stream, **feeders)
             # Plain text load (stale drafter env already popped above).
             return load_serveable_model(model_path, chat_template=chat_template,
                                         adapter_gguf=adapter_gguf,
@@ -916,6 +1004,15 @@ def install_gguf_server_bridge() -> None:
 
     generation.load_model_resources = load_model_resources
     setattr(generation, _BRIDGE_FLAG, True)
+    # generation.py logs on the parent "mlx_vlm.server" logger.
+    engine_log = logging.getLogger("mlx_vlm.server")
+    if not any(isinstance(f, _DrafterSourceFilter) for f in engine_log.filters):
+        engine_log.addFilter(_DrafterSourceFilter())
+    # Serve builds that bypass the MTP patch set (plain text with
+    # GMLX_QWEN_OWNED=0, plain qwen VLM) keep the stock ragged decode
+    # bound; on pre-M3 that means ungated 1024-thread launches.
+    from gmlx.spec.ragged_decode import install_pre_m3_ragged_guard
+    install_pre_m3_ragged_guard()
     _install_drafter_injection()
 
 
