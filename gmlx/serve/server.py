@@ -17,7 +17,8 @@ Start modes (resolution order):
   config already carrying ``hf_cache: true``) it also reconciles cache-resident GGUFs.
   Default config unless ``--config``.
 * ``launch <harness>`` - point a coding harness (opencode, ...) at a **running** server
-  and exec it (see :mod:`launch`). No auto-install; the server must already be up.
+  and exec it (see :mod:`gmlx.commands.launch`). No auto-install; the server must
+  already be up.
 * ``--config FILE`` - serve a YAML config (named models + profiles).
 * ``--models-dir DIR`` - serve a discovery scan of a directory (in-memory config).
 * a positional ``model.gguf`` - serve a single model (wrapped as a one-model config).

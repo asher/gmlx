@@ -3,7 +3,7 @@
 mlx-vlm's model-management surface assumes a single HF-resolved model. For a
 GGUF-only, multi-model, config-driven server that surface is wrong in five places;
 this module installs late-bound monkeypatches over each seam (the same no-fork
-pattern as :mod:`server_bridge_vlm` / :mod:`residency`):
+pattern as :mod:`gmlx.serve.bridge_vlm` / :mod:`gmlx.serve.residency`):
 
 * **Sampling-profile injection** - a request's unset sampling fields take their
   values from the resolved profile (``serving.get_active_spec()``), not mlx-vlm's
