@@ -41,7 +41,7 @@ from mlx_kquant.nn import (
 
 from .native_fp import NATIVE_FP_CODECS, NATIVE_FP_GEOMETRY
 from .dtypes import activation_dtype
-from gmlx.envflags import env_int
+from gmlx.envflags import env_bool, env_int
 from .transforms import qk_permute_wire
 
 _SWITCH_TYPES = None
@@ -131,6 +131,16 @@ _FUSED_MOE_ROUTER_ENABLED = True
 # gemma-4 layer body) on top of _FUSED_MOE_ENABLED; separate for A/B
 # attribution.
 _FUSED_MOE_GLUE_ENABLED = True
+
+# Prefill gate+up concat: sorted-prefill expert calls run one gather on the
+# concatenated [E, 2*inter] gate+up wire bytes instead of two, halving the
+# gather launches (and tile-map builds on the seg path) per MoE layer. Costs
+# one extra resident copy of the gate+up expert bytes, so the install caps
+# the model-wide copy at GMLX_MOE_GATEUP_CONCAT_MAX_MB (expert-heavy MoE
+# models would double most of their weight bytes and blow the wired limit).
+# GMLX_MOE_GATEUP_CONCAT=0 disables (skips the install-time concat too).
+_GATEUP_CONCAT_ENABLED = env_bool("GMLX_MOE_GATEUP_CONCAT", True)
+_GATEUP_CONCAT_MAX_MB = env_int("GMLX_MOE_GATEUP_CONCAT_MAX_MB", 2048)
 
 
 def _kq_fused_device_ok(*mods) -> bool:
@@ -597,12 +607,37 @@ def _make_fused_kquant(base_cls, caps):
                     h, down.weight, down.kquant_type, idx, **dkw)
                 y = y.reshape(*indices.shape, y.shape[-1])
             else:
-                y = super().__call__(x, indices)
+                y = self._kq_prefill_gate_up(x, indices)
+                if y is None:
+                    y = super().__call__(x, indices)
             if scores is not None and y.ndim == scores.ndim + 1:
                 if getattr(self, "_kq_shexp_mod", None) is not None:
                     return y  # unmixed: caller mixes + adds its shexp
                 y = (y * scores[..., None].astype(y.dtype)).sum(-2)
             return y
+
+        def _kq_prefill_gate_up(self, x, indices):
+            """Sorted-prefill widths: one gather over the concatenated
+            gate+up wire bytes (install_kquant_glu_fusion builds
+            ``_kq_gate_up``), then the stock activation + down gather.
+            Mirrors mlx-lm SwitchGLU.__call__ exactly apart from the
+            single fused projection; returns None when ineligible so the
+            caller falls back to the stock two-gather path."""
+            gu = getattr(self, "_kq_gate_up", None)
+            if (gu is None or not _GATEUP_CONCAT_ENABLED
+                    or indices.size < 64 or self.training):
+                return None
+            from mlx_lm.models.switch_layers import (
+                _gather_sort, _scatter_unsort)
+            x = mx.expand_dims(x, (-2, -3))
+            x, idx, inv_order = _gather_sort(x, indices)
+            h = gu(x, idx, sorted_indices=True)
+            half = h.shape[-1] // 2
+            x_gate, x_up = h[..., :half], h[..., half:]
+            y = self.down_proj(
+                self.activation(x_up, x_gate), idx, sorted_indices=True)
+            y = _scatter_unsort(y, inv_order, indices.shape)
+            return y.squeeze(-2)
 
     _FusedKQuantSwitchGLU.__name__ = "_FusedKQuantSwitchGLU"
     return _FusedKQuantSwitchGLU
@@ -611,6 +646,7 @@ def _make_fused_kquant(base_cls, caps):
 def _install_kquant_glu_fusion(model, caps) -> int:
     classes: dict = {}
     n = 0
+    budget = _GATEUP_CONCAT_MAX_MB * (1 << 20)
     for _, m in model.named_modules():
         if not _eligible_kquant_glu(m, caps):
             continue
@@ -633,8 +669,40 @@ def _install_kquant_glu_fusion(model, caps) -> int:
                     m, attr, proj.bias.astype(mx.float32))
             mx.eval(m._kq_gb32, m._kq_ub32, m._kq_db32)
         _swap_class(m, classes, _make_fused_kquant, caps)
+        if _GATEUP_CONCAT_ENABLED:
+            budget = _install_gateup_concat(m, budget)
         n += 1
     return n
+
+
+def _install_gateup_concat(m, budget_bytes) -> int:
+    """Stamp ``_kq_gate_up``: a KQuantSwitchLinear over the concatenated
+    [E, 2*inter, K] gate+up wire bytes ([gate; up] row order, matching the
+    ``h[..., :half]`` split in _kq_prefill_gate_up). Eligibility beyond
+    _eligible_kquant_glu: gate/up must be shape-identical (same codec is
+    already guaranteed) and the copy must fit the remaining model-wide
+    byte budget (returned decremented) -- expert-heavy models would
+    otherwise double most of their resident weight bytes. Eagerly
+    evaluated so the copy lands at load time, not as a first-prefill
+    hitch; the originals stay live for the fused decode kernels, so this
+    holds a second resident copy of those bytes."""
+    gate, up = m.gate_proj, m.up_proj
+    if gate.weight.shape != up.weight.shape:
+        return budget_bytes
+    cost = gate.weight.nbytes + up.weight.nbytes
+    if cost > budget_bytes:
+        return budget_bytes
+    e, out, _ = gate.weight.shape
+    gu = KQuantSwitchLinear(
+        e, 2 * out, 256, bias="bias" in gate, codec=gate.kquant_type)
+    gu.weight = mx.concatenate([gate.weight, up.weight], axis=1)
+    if "bias" in gate:
+        gu.bias = mx.concatenate([gate.bias, up.bias], axis=1)
+        mx.eval(gu.weight, gu.bias)
+    else:
+        mx.eval(gu.weight)
+    object.__setattr__(m, "_kq_gate_up", gu)
+    return budget_bytes - cost
 
 
 # Regime 3: qwen3-next-shaped MoE block (router + SwitchGLU + shared expert)
