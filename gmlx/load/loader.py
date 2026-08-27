@@ -2798,6 +2798,12 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # wire); the GDN decay params feed the fp32 scan; the per-stream inject
     # scalars scale the residual streams directly.
     "qwen4_exp": (".mlp.gate.weight", ".A_log", ".dt_bias", ".inject.weight"),
+    # glm5_next: hyper-connection mixers are fp32 like deepseek_v4; sigmoid
+    # top-8-of-288 routing + correction bias is near-tie-heavy; the KDA
+    # decay params feed the fp32 recurrence; the indexer head-weights GEMM
+    # and ape table are fp32 per llama.cpp PR 27754.
+    "glm5_next": ("_hc.", ".mlp.gate.weight", ".e_score_correction_bias",
+                  ".a_folded", ".dt_bias", ".ape", ".weights_proj."),
 }
 
 # Params kept at their native f16 through the bf16 cast (no upcast). MLX
@@ -2946,12 +2952,14 @@ def _install_and_load(
     if active_before is None:
         active_before = _active_now()
     # 5. sanitize first - model.sanitize may rename keys; rebuild meta.
+    # Codec'd tensors can land on non-``.weight`` raw leaves (hc ``fn``),
+    # so only the vestigial wire siblings are excluded from the rematch.
     if sanitize and hasattr(model, "sanitize"):
         hf_weights = model.sanitize(hf_weights)
         new_meta: dict[str, str] = {}
         unmatched_meta = set(hf_kquant_meta)
         for new_k in hf_weights:
-            if not new_k.endswith(".weight"):
+            if new_k.endswith(".scales") or new_k.endswith(".biases"):
                 continue
             for old_k in list(unmatched_meta):
                 if new_k == old_k or new_k.endswith("." + old_k):
@@ -3404,12 +3412,14 @@ def load_model(
         _patch_dsv32_dense_default(model)  # exact default; GMLX_DSV32_SPARSE=1 -> sparse (experimental)
 
     # 5. sanitize first - model.sanitize may rename keys; rebuild meta.
+    # Codec'd tensors can land on non-``.weight`` raw leaves (hc ``fn``),
+    # so only the vestigial wire siblings are excluded from the rematch.
     if hasattr(model, "sanitize"):
         hf_weights = model.sanitize(hf_weights)
         new_meta: dict[str, str] = {}
         unmatched_meta = set(hf_kquant_meta)
         for new_k in hf_weights:
-            if not new_k.endswith(".weight"):
+            if new_k.endswith(".scales") or new_k.endswith(".biases"):
                 continue
             for old_k in list(unmatched_meta):
                 if new_k == old_k or new_k.endswith("." + old_k):
