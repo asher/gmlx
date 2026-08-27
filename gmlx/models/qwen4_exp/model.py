@@ -189,13 +189,17 @@ class HyperConnection(nn.Module):
             lo, inj = front(xn, self.down.weight, self.inject.weight,
                             self.norm.weight.dtype)
             return epi(lo, self.up.weight, xn), inj
-        xn = self.norm(h)
+        xn = _hc_norm_kern(h, self.norm.weight, self.norm.eps)
+        if xn is None:
+            xn = self.norm(h)
         xf = xn.reshape(B, T, hc * D)
         lo = nn.silu(self.down(xf) * (1.0 / hc))
         up_out = self.up(lo)
         if "inject" not in self:
             return _hc_mix(up_out, xn)
-        return _hc_mix_inject(up_out, xn, self.inject(xf))
+        inj_out = self.inject(xf)
+        r = _hc_epi_kern(up_out, xn, inj_out)
+        return r if r is not None else _hc_mix_inject(up_out, xn, inj_out)
 
     def _hclr_ok(self, h_dtype) -> bool:
         """Fused-path eligibility: kq hc_lowrank ops present, q8_0 down/up
@@ -220,6 +224,141 @@ class HyperConnection(nn.Module):
                      or h_dtype == self.norm.weight.dtype))
 
 
+# Prefill-width HC kernels: the compiled epilogues still run the
+# [B, T, hc, D] elementwise chains at ~1/4 of achievable bandwidth (the
+# mean-over-streams and broadcast-combine patterns defeat mx.compile's
+# fusion). Three single-pass kernels cover the norm, the mix+inject
+# epilogue, and the combine; each falls back to the op path when
+# ineligible. GMLX_Q4_HC_PREFILL_KERN=0 disables all three.
+
+_HC_NORM_SRC = r"""
+    uint lane = thread_position_in_threadgroup.x;
+    uint sg   = thread_position_in_threadgroup.y;
+    uint row  = thread_position_in_grid.z;      // b*T*hc + ...
+    uint s_idx = row % HC;
+    uint flat = sg * 32 + lane;
+    auto x_ = x + (size_t)row * D;
+    auto y_ = y + (size_t)row * D;
+    auto g_ = gamma + (size_t)s_idx * D;
+
+    threadgroup float ssq[SGS];
+    float acc = 0.0f;
+    for (uint d = flat; d < (uint)D; d += SGS * 32) {
+        float xv = (float)x_[d];
+        acc += xv * xv;
+    }
+    acc = simd_sum(acc);
+    if (lane == 0) ssq[sg] = acc;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float tot = 0.0f;
+    for (int s = 0; s < SGS; ++s) tot += ssq[s];
+    float scale = rsqrt(tot / (float)D + eps[0]);
+    for (uint d = flat; d < (uint)D; d += SGS * 32)
+        y_[d] = (InT)((float)x_[d] * scale * (float)g_[d]);
+"""
+
+_HC_EPI_SRC = r"""
+    uint gid = thread_position_in_grid.x;       // b*T*D + ...
+    uint bt = gid / D;
+    uint d = gid % D;
+    auto u_ = upo + (size_t)bt * HC * D + d;
+    auto x_ = xn + (size_t)bt * HC * D + d;
+    float acc = 0.0f;
+    for (int s = 0; s < HC; ++s) {
+        float uv = (float)u_[(size_t)s * D];
+        float sig = 1.0f / (1.0f + metal::precise::exp(-uv));
+        acc += sig * (float)x_[(size_t)s * D];
+    }
+    mixed[gid] = (InT)(acc * (1.0f / (float)HC));
+    if (d < (uint)HC) {
+        float iv = injo[(size_t)bt * HC + d] * (1.0f / (float)HC);
+        inj[(size_t)bt * HC + d] =
+            2.0f / (1.0f + metal::precise::exp(-iv));
+    }
+"""
+
+_HC_COMBINE_SRC = r"""
+    uint gid = thread_position_in_grid.x;       // b*T*hc*D + ...
+    uint d = gid % D;
+    uint s_idx = (gid / D) % HC;
+    uint bt = gid / (HC * D);
+    yn[gid] = (InT)((float)h[gid]
+        + (float)out[(size_t)bt * D + d] * inj[(size_t)bt * HC + s_idx]);
+"""
+
+_hc_prefill_kerns = None
+
+
+def _hc_kerns():
+    """The prefill-width HC kernels (norm, epi, combine), or None."""
+    global _hc_prefill_kerns
+    if _hc_prefill_kerns is None:
+        from gmlx.envflags import env_bool
+        if (env_bool("GMLX_Q4_HC_PREFILL_KERN", True)
+                and mx.metal.is_available()
+                and mx.default_device().type == mx.DeviceType.gpu):
+            _hc_prefill_kerns = (
+                mx.fast.metal_kernel(
+                    name="gmlx_hc_norm",
+                    input_names=["x", "gamma", "eps"],
+                    output_names=["y"], source=_HC_NORM_SRC),
+                mx.fast.metal_kernel(
+                    name="gmlx_hc_epi",
+                    input_names=["upo", "xn", "injo"],
+                    output_names=["mixed", "inj"], source=_HC_EPI_SRC),
+                mx.fast.metal_kernel(
+                    name="gmlx_hc_combine",
+                    input_names=["h", "out", "inj"],
+                    output_names=["yn"], source=_HC_COMBINE_SRC),
+            )
+        else:
+            _hc_prefill_kerns = False
+    return _hc_prefill_kerns or None
+
+
+def _hc_norm_kern(x: mx.array, weight: mx.array, eps: float) -> mx.array:
+    B, T, hc, D = x.shape
+    kerns = _hc_kerns()
+    SGS = 8
+    if kerns is None or B * T <= 8 or D % (SGS * 32) or x.dtype not in (
+            mx.float16, mx.bfloat16):
+        return None
+    return kerns[0](
+        inputs=[x, weight.astype(x.dtype), mx.array([eps], dtype=mx.float32)],
+        template=[("InT", x.dtype), ("D", D), ("HC", hc), ("SGS", SGS)],
+        grid=(32, SGS, B * T * hc), threadgroup=(32, SGS, 1),
+        output_shapes=[x.shape], output_dtypes=[x.dtype])[0]
+
+
+def _hc_epi_kern(up_out: mx.array, xn: mx.array, inj_out: mx.array):
+    B, T, hc, D = xn.shape
+    kerns = _hc_kerns()
+    if (kerns is None or B * T <= 8 or D < hc
+            or xn.dtype not in (mx.float16, mx.bfloat16)):
+        return None
+    return kerns[1](
+        inputs=[up_out, xn, inj_out.astype(mx.float32)],
+        template=[("InT", xn.dtype), ("D", D), ("HC", hc)],
+        grid=(B * T * D, 1, 1), threadgroup=(min(256, B * T * D), 1, 1),
+        output_shapes=[(B, T, D), (B, T, hc)],
+        output_dtypes=[xn.dtype, mx.float32])
+
+
+def _hc_combine_kern(h: mx.array, out: mx.array, inject: mx.array):
+    B, T, hc, D = h.shape
+    kerns = _hc_kerns()
+    if (kerns is None or h.dtype not in (mx.float16, mx.bfloat16)
+            or out.dtype != h.dtype or inject.dtype != mx.float32
+            or inject.shape != (B, T, hc)):
+        return None
+    n = B * T * hc * D
+    return kerns[2](
+        inputs=[h, out, inject],
+        template=[("InT", h.dtype), ("D", D), ("HC", hc)],
+        grid=(n, 1, 1), threadgroup=(min(256, n), 1, 1),
+        output_shapes=[h.shape], output_dtypes=[h.dtype])[0]
+
+
 @mx.compile
 def _hc_mix(up_out: mx.array, xn: mx.array) -> mx.array:
     B, T, hc, D = xn.shape
@@ -237,8 +376,16 @@ def _hc_mix_inject(up_out: mx.array, xn: mx.array, inj_out: mx.array):
 
 
 @mx.compile
-def _hc_combine(h: mx.array, out: mx.array, inject: mx.array) -> mx.array:
+def _hc_combine_ops(h: mx.array, out: mx.array, inject: mx.array) -> mx.array:
     return h + out[:, :, None, :] * inject[..., None]
+
+
+def _hc_combine(h: mx.array, out: mx.array, inject: mx.array) -> mx.array:
+    if h.shape[0] * h.shape[1] > 8:
+        y = _hc_combine_kern(h, out, inject)
+        if y is not None:
+            return y
+    return _hc_combine_ops(h, out, inject)
 
 
 # Gated DeltaNet
