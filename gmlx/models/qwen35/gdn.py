@@ -204,7 +204,7 @@ class OwnedQwen3_5GatedDeltaNet(_L.Qwen3_5GatedDeltaNet):
             and (mask is None or not isinstance(mask, mx.array))
             and cache is not None
             and cache[1] is not None
-            and Dv % (16 if B == 1 else 32) == 0
+            and Dv % _gp.gdn_sg(B) == 0
             and self.head_k_dim % 32 == 0
         ):
             return _gp._gdn_fused_decode_body(
@@ -216,7 +216,7 @@ class OwnedQwen3_5GatedDeltaNet(_L.Qwen3_5GatedDeltaNet):
             and gdn_sink is not None
             and S > 1
             and _gp._gdn_fused_verify_kernel is not None
-            and Dv % 16 == 0
+            and Dv % _gp.gdn_sg(B) == 0
             and self.head_k_dim % 32 == 0
         ):
             return _gp._gdn_fused_verify_body(

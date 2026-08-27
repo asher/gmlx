@@ -280,7 +280,7 @@ class GatedDeltaNet(nn.Module):
 
         return (
             _gp._gdn_fused_decode_kernel is not None and _gp.gpu_active()
-            and self.head_v_dim % (16 if B == 1 else 32) == 0
+            and self.head_v_dim % _gp.gdn_sg(B) == 0
             and self.head_k_dim % 32 == 0
         )
 
@@ -295,7 +295,7 @@ class GatedDeltaNet(nn.Module):
 
         return (
             _gp._gdn_fused_verify_kernel is not None and _gp.gpu_active()
-            and self.head_v_dim % (16 if B == 1 else 32) == 0
+            and self.head_v_dim % _gp.gdn_sg(B) == 0
             and self.head_k_dim % 32 == 0
         )
 

@@ -189,6 +189,20 @@ def _load_mtp_drafter(
     first_mtp_block = int(config_dict["num_hidden_layers"])
     model_type = config_dict.get("model_type", "")
 
+    # The header key can outlive the tensors (a hand-stripped quant keeps
+    # nextn_predict_layers while the nextn block is gone); the remap below
+    # would then build a drafter with no weights. Check presence up front so
+    # the failure names the real cause.
+    head_marker = (f"blk.{first_mtp_block}." if model_type == "hy_v3"
+                   else ".nextn.")
+    if not any(head_marker in n for n in arrays):
+        raise ValueError(
+            f"header declares a native MTP head ({num_mtp} layer(s)) but the "
+            f"file carries no {head_marker.strip('.')} tensors - likely a "
+            f"quant with the head stripped; use --no-mtp, a head-carrying "
+            f"quant, or --draft-gguf with a companion drafter"
+        )
+
     if model_type == "hy_v3":
         from gmlx.models.hy_v3.model import ModelArgs
         from gmlx.models.hy_v3.mtp import HyV3MTPConfig, HyV3MTPDrafter

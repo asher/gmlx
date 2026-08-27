@@ -15,13 +15,34 @@ import atexit
 import sys
 
 import gmlx.load.loadlog as loadlog
-from gmlx.envflags import env_bool
+from gmlx.envflags import env_bool, env_int
 from .patching import ClassPatch
 
 
 def gpu_active() -> bool:
     """Metal kernels dispatch only while the default device is the GPU."""
     return mx.default_device() == mx.gpu
+
+
+def gdn_sg(B: int) -> int:
+    """Simdgroups per (batch, head) tile of the fused GDN kernels.
+
+    ``mx.fast.metal_kernel`` emits no ``max_total_threads_per_threadgroup``
+    launch bound, so the compiled pipeline's thread ceiling is register-
+    allocation dependent. On pre-M3 GPUs it lands below the 512/1024 threads
+    the M3+ shape (16/32 simdgroups of 32) asks for - measured 448 on an M1
+    Max for the verify pipeline - and the launch throws at eval. 8 simdgroups
+    (256 threads) fits every observed ceiling. GMLX_GDN_SG forces a value.
+    """
+    forced = env_int("GMLX_GDN_SG", 0)
+    if forced > 0:
+        return forced
+    from gmlx.load.dtypes import gpu_arch_gen
+
+    gen = gpu_arch_gen()
+    if 0 < gen < 15:
+        return 8
+    return 16 if B == 1 else 32
 
 
 # One-shot routing dump for the GDN call: which branch each distinct
@@ -404,7 +425,7 @@ def _gdn_fused_decode_body(self, inputs, cache, *, vlm_cache_advance=False):
     has no such metadata, so the text path leaves it False)."""
     B, S, _ = inputs.shape
     Dv = self.head_v_dim
-    SG = 16 if B == 1 else 32
+    SG = gdn_sg(B)
 
     qkv = self.in_proj_qkv(inputs)
     zba_w = getattr(self, "_gdn_zba_weight", None)
@@ -516,7 +537,7 @@ def _gdn_fused_decode_call(self, inputs, mask=None, cache=None):
     B, S, _ = inputs.shape
     state = cache[1] if cache else None
     Dv = self.head_v_dim
-    SG = 16 if B == 1 else 32
+    SG = gdn_sg(B)
     # A mask that excludes nothing must not cost the fused kernel: BatchGenerator
     # hands every batched decode step an ssm mask built from the cache's left
     # padding, and at S=1 that mask is all-true, so bailing on `mask is not None`
@@ -904,7 +925,7 @@ def _gdn_fused_verify_call(
         and (mask is None or not isinstance(mask, mx.array))
         and cache is not None
         and cache[1] is not None
-        and Dv % (16 if B == 1 else 32) == 0
+        and Dv % gdn_sg(B) == 0
         and self.head_k_dim % 32 == 0
     ):
         if _ROUTE_DEBUG:
@@ -915,7 +936,7 @@ def _gdn_fused_verify_call(
         or gdn_sink is None
         or S <= 1
         or _gdn_fused_verify_kernel is None
-        or Dv % 16 != 0
+        or Dv % gdn_sg(B) != 0
         or self.head_k_dim % 32 != 0
     ):
         if _ROUTE_DEBUG:
@@ -1005,7 +1026,7 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink):
         self._gdn_verify_conv_weight = cw
     conv_weight = cw[1]
 
-    SG = 16 if B == 1 else 32
+    SG = gdn_sg(B)
     tiled = int(self.num_k_heads != self.num_v_heads)
     y, new_state, inter = _gdn_fused_verify_kernel(
         inputs=[
