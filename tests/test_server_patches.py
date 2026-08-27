@@ -2530,6 +2530,45 @@ def test_spawn_preload_warm_retains_hold(monkeypatch):
         sp_routes._PRELOAD_HOLDS.clear()
 
 
+def test_spawn_preload_warm_retries_deferred(monkeypatch):
+    # A LoadDeferred at boot is a neighbor-teardown transient, not a
+    # verdict: the preload must retry with backoff, not silently give
+    # up on its first attempt (2026-08-26 stalls: the preload died on
+    # the transient and the server never warmed).
+    from gmlx.capacity import LoadDeferred
+
+    calls = []
+    naps = []
+
+    def fake_load(m, *a, **k):
+        calls.append(m)
+        if len(calls) < 3:
+            raise LoadDeferred("transient")
+        return None
+
+    monkeypatch.setattr(sp_routes, "_load_resident", fake_load)
+    monkeypatch.setattr(sp_routes.time, "sleep", lambda s: naps.append(s))
+    sp.spawn_preload_warm("m").join(timeout=5)
+    assert calls == ["m", "m", "m"]      # deferred twice, then landed
+    assert naps == [10.0, 20.0]          # linear backoff
+
+
+def test_spawn_preload_warm_deferred_gives_up_at_deadline(monkeypatch):
+    from gmlx.capacity import LoadDeferred
+
+    calls = []
+
+    def fake_load(m, *a, **k):
+        calls.append(m)
+        raise LoadDeferred("transient")
+
+    monkeypatch.setattr(sp_routes, "_load_resident", fake_load)
+    monkeypatch.setattr(sp_routes.time, "sleep", lambda s: None)
+    monkeypatch.setenv("GMLX_PRELOAD_RETRY_S", "0")
+    sp.spawn_preload_warm("m").join(timeout=5)
+    assert calls == ["m"]                # zero budget: one attempt, no loop
+
+
 def test_spawn_preload_warm_extras_after_primary(monkeypatch):
     order = []
 

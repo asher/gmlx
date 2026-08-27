@@ -10,6 +10,20 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `qwen4exp` (Qwen3.8-Flash-Next, llama.cpp PR 27742) loads: the qwen3.5
+  hybrid plus hyper-connections, QSA sparse attention and PLE n-gram hash
+  embeddings (the 320M-row table stays zero-copy, rows gathered per token).
+  Fused GDN decode kernel with the sigmoid output gate; fused MoE gathers
+  at the 640-wide experts.
+- qwen4exp MTP speculative decoding from a companion drafter GGUF (arch
+  `qwen4exp-mtp`, built from the HF `mtp.*` tensors; autodetected next to
+  the target or passed with `--draft-gguf`). Full-prompt teacher-forced
+  seeding; verify rollback rewinds the GDN, PLE and QSA cache state to the
+  accepted prefix.
+- qwen4exp VLM pairing: the Qwen3-VL mmproj (`qwen3vl_merger`) loads onto a
+  vendored wrapper reusing the qwen3.5 vision tower; interleaved mrope
+  position ids thread through the attention and the QSA indexer (block keys
+  roped at their cached positions), text-only turns keep the fast rope path.
 - `gmlx serve model.gguf --thinking on|off|adaptive` and `--thinking-budget N`
   set the reasoning switch and thinking-token cap for a single positional
   model without a config file (the same `thinking:` / sampling

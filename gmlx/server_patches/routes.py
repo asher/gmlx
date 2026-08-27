@@ -900,21 +900,44 @@ def spawn_preload_warm(model_id: str | None, extras=()):
     LRU/TTL-evictable (retained holds on a multi-model set would wedge the
     pool); over-budget streaming extras are skipped with a notice. Best-effort
     per model: a load failure is swallowed and that model loads lazily on
-    first request. Returns the started daemon thread (tests join on it)."""
+    first request -- except the gate's retryable LoadDeferred, which is
+    retried with backoff for up to GMLX_PRELOAD_RETRY_S (default 600):
+    a server booted while a neighbor's teardown is still unwinding must
+    not permanently lose its preload to that transient. Returns the
+    started daemon thread (tests join on it)."""
     import threading
 
     def _run():
         _warm_context_lengths()
         if model_id:
             try:
-                hold = _load_resident(model_id)
-                if hold is not None:
-                    _PRELOAD_HOLDS.append(hold)       # retain -> eviction-proof
-                    pool = _get_pool()
-                    if pool is not None and hasattr(pool, "mark_retained"):
-                        pool.mark_retained(hold)      # not an in-flight stream
-            except Exception:
-                pass
+                retry_s = float(os.environ.get("GMLX_PRELOAD_RETRY_S", "") or 600.0)
+            except ValueError:
+                retry_s = 600.0
+            deadline = time.monotonic() + retry_s
+            attempt = 0
+            while True:
+                try:
+                    hold = _load_resident(model_id)
+                    if hold is not None:
+                        _PRELOAD_HOLDS.append(hold)   # retain -> eviction-proof
+                        pool = _get_pool()
+                        if pool is not None and hasattr(pool, "mark_retained"):
+                            pool.mark_retained(hold)  # not an in-flight stream
+                    break
+                except _capacity.LoadDeferred as exc:
+                    attempt += 1
+                    wait = min(60.0, 10.0 * attempt)
+                    if time.monotonic() + wait > deadline:
+                        print(f"[server] preload: giving up after {attempt} "
+                              f"deferred attempt(s); loads lazily on first "
+                              f"request ({exc})")
+                        break
+                    print(f"[server] preload: deferred, retry {attempt} in "
+                          f"{wait:.0f}s ({exc})")
+                    time.sleep(wait)
+                except Exception:
+                    break
         for mid in extras:
             if _preload_extra_over_budget(mid):
                 print(f"[server] preload: skipping {mid} - over the wired "

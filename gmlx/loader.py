@@ -629,6 +629,13 @@ _MTP_TARGET_HOOKS_BY_TYPE = {
         "speculative_argmax_from_hidden",
         "speculative_verify_hidden",
     ),
+    # Qwen4ExpSpecLM (vendored mlx-lm class): same lean set as deepseek_v4.
+    "qwen4_exp": (
+        "rollback_speculative_cache",
+        "speculative_logits_from_hidden",
+        "speculative_argmax_from_hidden",
+        "speculative_verify_hidden",
+    ),
 }
 
 
@@ -764,6 +771,16 @@ def _mtp_target_classes(model_type: str):
             return hy_v3_mtp.HyV3SpecLM(ModelArgs.from_dict(config))
 
         return hy_v3_mtp.HyV3SpecLM, build
+    if model_type == "qwen4_exp":
+        from . import qwen4_exp_mtp
+        from .qwen4_exp_model import ModelArgs, ensure_registered
+
+        ensure_registered()
+
+        def build(config):
+            return qwen4_exp_mtp.Qwen4ExpSpecLM(ModelArgs.from_dict(config))
+
+        return qwen4_exp_mtp.Qwen4ExpSpecLM, build
     if model_type == "muse_glimmer":
         from . import muse_glimmer_mtp, muse_glimmer_tools
         from .muse_glimmer_model import ModelArgs, ensure_registered
@@ -931,6 +948,13 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         from . import kimi_k3_model
 
         kimi_k3_model.ensure_registered()
+    if mt == "qwen4_exp":
+        # Neither pinned mlx-lm nor mlx-vlm ships qwen4_exp (llama.cpp PR
+        # #27742); same vendored-registration pattern as deepseek_v4, plus
+        # QSAKVCache injection into the cache modules.
+        from . import qwen4_exp_model
+
+        qwen4_exp_model.ensure_registered()
     if mt == "muse_glimmer":
         # mlx-lm ships no muse_glimmer module (afmoe is the nearest relative);
         # same vendored-registration pattern as kimi_k3. The tool parser
@@ -2759,6 +2783,10 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # computed fp32 (the vendored cast_predicate pins the same set).
     "kimi_k3": (".mlp.gate.weight", ".e_score_correction_bias",
                 ".a_folded", ".dt_bias", "_res_score"),
+    # qwen4_exp: softmax top-10-of-512 routing is fp32 in llama.cpp (F32
+    # wire); the GDN decay params feed the fp32 scan; the per-stream inject
+    # scalars scale the residual streams directly.
+    "qwen4_exp": (".mlp.gate.weight", ".A_log", ".dt_bias", ".inject.weight"),
 }
 
 # Params kept at their native f16 through the bf16 cast (no upcast). MLX
@@ -3524,6 +3552,14 @@ def load_model(
         "qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"
     ):
         _patch_gated_delta_fused_decode(model)
+
+    if config.get("model_type") == "qwen4_exp":
+        from .qwen4_exp_model import prepare_runtime
+
+        counts = prepare_runtime(model)
+        loadlog.verbose_print(
+            f"[patch] qwen4_exp: fused GDN decode on {counts['gdn_fused']} "
+            f"layers, b/a matvecs concatenated on {counts['gdn_ba_cat']}")
 
     if config.get("model_type") == "deepseek_v4":
         from .deepseek_v4_model import install_gemv_row_fusion, warm_kernel_pipelines

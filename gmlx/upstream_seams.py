@@ -538,6 +538,7 @@ VENDORED_MLX_VLM_MODULES = {
     # pin. Delete the module at the vendoring review.
     "gmlx.hy_v3_tools": "mlx_vlm.tool_parsers.hy_v3",
     "gmlx.muse_glimmer_tools": "mlx_vlm.tool_parsers.muse_glimmer",
+    "gmlx.qwen4_exp_vlm_model": "mlx_vlm.models.qwen4_exp",
 }
 
 

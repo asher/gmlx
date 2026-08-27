@@ -397,7 +397,7 @@ def load_tokenizer_from_gguf(
 
     template_eos = _infer_turn_end_eos(fast, eos_id, tokens, token_types)
     meta_eos = _metadata_stop_ids(meta, len(tokens))
-    name_eos = _kimi_eog_ids(tokens, token_types, pre_id)
+    name_eos = _named_eog_ids(tokens, token_types, pre_id)
     all_eos = _dedup_ids(
         ([eos_id] if eos_id is not None else [])
         + template_eos + meta_eos + name_eos)
@@ -673,24 +673,36 @@ def _metadata_stop_ids(meta, n_vocab: int | None = None) -> list[int]:
     return out
 
 
-_KIMI_EOG_NAMES = ("[EOT]", "[EOS]")
+# Stop-token spellings llama.cpp folds into its EOG set by name
+# (llama-vocab.cpp special_eog_ids scan), regardless of what the GGUF eos
+# metadata declares.
+_EOG_NAMES = (
+    "<|eot_id|>", "<|im_end|>", "<|end|>", "<|return|>", "<|call|>",
+    "<|flush|>", "<|calls|>", "<end_of_turn>", "<|endoftext|>", "</s>",
+    "<|eom_id|>", "<EOT>", "_<EOT>", "[EOT]", "[EOS]", "<|end_of_text|>",
+    "<end_of_utterance>", "<eos>", "<turn|>", "<|tool_response>",
+    "<｜end▁of▁sentence｜>", "[e~[",
+)
 
 
-def _kimi_eog_ids(tokens: list[str], token_types: list[int] | None,
-                  pre_id: str) -> list[int]:
-    """Kimi declares no eot/eom id, thus llama.cpp folds these into its EOG
-    set by name. This applies only to the Kimi pretokenizer, because the
-    spellings are generic. A blind vocab scan could retire a live token in a
-    different model."""
-    if pre_id != "kimi-k2":
-        return []
+def _named_eog_ids(tokens: list[str], token_types: list[int] | None,
+                   pre_id: str) -> list[int]:
+    """GGUF eos metadata is often incomplete: qwen4exp marks only <|im_end|>
+    while <|endoftext|> is a real stop, Kimi declares no eot/eom id at all.
+    Match llama.cpp and fold these spellings in by name, but only when the
+    token is control-typed: a plain-text token sharing a spelling must stay
+    live. Kimi ships no token_type array, so its two bracket names keep the
+    old pretokenizer-gated path."""
     out = []
-    for name in _KIMI_EOG_NAMES:
+    for name in _EOG_NAMES:
         try:
             tid = tokens.index(name)
         except ValueError:
             continue
-        if token_types is None or token_types[tid] == 3:  # control
+        if token_types is not None:
+            if token_types[tid] == 3:  # control
+                out.append(tid)
+        elif pre_id == "kimi-k2" and name in ("[EOT]", "[EOS]"):
             out.append(tid)
     return out
 
