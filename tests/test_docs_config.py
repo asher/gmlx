@@ -73,7 +73,7 @@ def test_family_table_in_sync_with_profiles_py():
     """Every family row in the doc table is regenerated from profiles.describe()
     and must appear verbatim - a changed base value, arch list, or intent delta
     in code fails here until the doc row is updated."""
-    from gmlx import profiles as fp
+    import gmlx.gen.profiles as fp
     doc = _DOC.read_text()
     for row in fp.describe():
         fam = row["family"]
@@ -116,7 +116,7 @@ def test_cache_keys_documented():
 
 def test_builtin_intents_documented():
     """Every addressable built-in intent is named in the profiles section."""
-    from gmlx import profiles as fp
+    import gmlx.gen.profiles as fp
     doc = _DOC.read_text()
     for name in fp.BUILTIN_INTENTS:
         assert f"@{name}" in doc, f"intent @{name} not documented"

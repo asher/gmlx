@@ -1,11 +1,11 @@
 mlx-lm - https://github.com/ml-explore/mlx-lm
 
 gmlx vendors model/cache classes from unmerged mlx-lm pull requests, with
-modifications: gmlx/deepseek_v4_model.py and
-gmlx/deepseek_v4_hyper_connection.py from PR #1192 (DeepSeek V4 Flash),
-gmlx/minimax_m3_model.py from PR #1401 (MiniMax M3),
-gmlx/hy_v3_model.py from PR #1485 (Tencent Hy3), and
-gmlx/deepseek_v4_cache.py (PoolingCache/BatchPoolingCache) from PR #1192.
+modifications: gmlx/models/deepseek_v4/model.py and
+gmlx/models/deepseek_v4/hyper_connection.py from PR #1192 (DeepSeek V4 Flash),
+gmlx/models/minimax_m3.py from PR #1401 (MiniMax M3),
+gmlx/models/hy_v3/model.py from PR #1485 (Tencent Hy3), and
+gmlx/models/deepseek_v4/cache.py (PoolingCache/BatchPoolingCache) from PR #1192.
 mlx-lm is distributed under the MIT License:
 
 MIT License

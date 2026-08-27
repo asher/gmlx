@@ -3,7 +3,7 @@
 #
 # Builds a disposable venv (never touches the dev venv), installs this
 # checkout plus the newest mlx-vlm, and runs the seam contract check
-# (gmlx.upstream_seams) and an import smoke. Nonzero exit = drift; the
+# (gmlx.upstream.seams) and an import smoke. Nonzero exit = drift; the
 # report names each moved or rewritten symbol. Run this when upstream cuts a
 # release, before users hit it - see docs/upstream-upgrades.md.
 set -euo pipefail
@@ -25,10 +25,10 @@ for p in ("mlx", "mlx-lm", "mlx-vlm"):
     print(f"  {p} {md.version(p)}")'
 
 echo "== seam check =="
-"$py" -m gmlx.upstream_seams
+"$py" -m gmlx.upstream.seams
 
 echo "== import smoke =="
-"$py" -c "import gmlx.loader, gmlx.modules, gmlx.spec_engine, \
-gmlx.server_patches, gmlx.apc_pooling; print('  imports OK')"
+"$py" -c "import gmlx.load.loader, gmlx.load.modules, gmlx.spec.engine, \
+gmlx.serve.patches, gmlx.cache.apc_pooling; print('  imports OK')"
 
 echo "canary PASS: latest mlx-vlm matches the pinned seam contract"

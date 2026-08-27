@@ -62,7 +62,7 @@ An architecture is done when:
   Paris in 20 greedy tokens.
 - No-loop: ~300 greedy tokens with no n-gram (window 8) repeating 4+ times.
 - 16k long-context parity vs llama.cpp:
-  `tests/test_long_context.py::test_long_prefill_parity`. A >=16k-token prompt,
+  `tests/gen/test_long_context.py::test_long_prefill_parity`. A >=16k-token prompt,
   greedy-decoded, agrees as text with llama.cpp on the same file. Short-prompt
   parity is necessary but not sufficient: rope, KV-cache, GQA-layout, and
   permute bugs only surface at depth. Prepend BOS for `add_bos_token=True` archs
@@ -105,7 +105,7 @@ gmlx run model.gguf --prompt "What is the capital of France?" --max-tokens 20
 # Long-context parity + decode integrity (needs a real GGUF + llama.cpp;
 # without KQUANT_LLAMACPP_BIN the parity half skips and only integrity runs)
 KQUANT_TEST_GGUF_DIR=~/models KQUANT_LLAMACPP_BIN=/path/to/llama-completion \
-  pytest tests/test_long_context.py -k <arch>
+  pytest tests/gen/test_long_context.py -k <arch>
 
 # Coverage table stays truthful
 python scripts/check-coverage.py --check --strict

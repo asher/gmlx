@@ -114,7 +114,7 @@ def test_python_doc_defaults_match_signature(start, end, func_name):
 def test_preflight_fields_documented():
     """The Preflight dataclass fields named in the doc still exist."""
     pytest.importorskip("mlx_lm")
-    from gmlx.preflight import Preflight
+    from gmlx.load.preflight import Preflight
 
     doc_named = {"arch", "shards", "codec_histogram", "n_tensors", "n_params"}
     fields = set(Preflight.__dataclass_fields__)

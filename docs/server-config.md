@@ -402,7 +402,7 @@ from its GGUF header (`general.architecture`) at registration/scan, its base
 group becomes the lowest sampling layer, and the intents become addressable
 profiles. `gmlx profiles` prints this table live (add a model id to see one
 model fully resolved). Values are cited to the primary model cards in
-`gmlx/profiles.py`:
+`gmlx/gen/profiles.py`:
 
 | family | GGUF arches | base (general use) | family intents |
 |--------|-------------|--------------------|----------------|
@@ -1475,7 +1475,7 @@ is worse than an error. Two guardrails:
   accepted and skipped. Every ignored parameter a request sets draws one
   `warning` line in the server log naming it.
 - The table is kept in lockstep with the allowlists the warning uses
-  (`gmlx/server_patches/api_contract.py`); a test cross-checks the two, so
+  (`gmlx/serve/patches/api_contract.py`); a test cross-checks the two, so
   they cannot drift.
 
 The standard sampling parameters (`max_tokens` / `max_output_tokens`,

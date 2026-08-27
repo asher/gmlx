@@ -1,6 +1,6 @@
 llama.cpp / ggml - https://github.com/ggml-org/llama.cpp
 
-The pre-tokenizer split regex patterns in gmlx/tokenizer.py are
+The pre-tokenizer split regex patterns in gmlx/load/tokenizer.py are
 transcribed from llama.cpp's tokenizer (llama-vocab.cpp), and the GGUF
 metadata/quantization-type conventions follow ggml's reference
 implementation. llama.cpp is distributed under the MIT License:

@@ -120,14 +120,14 @@ _HD512_FLAGS = [
 
 @pytest.mark.parametrize("name,attr,default", _HD512_FLAGS)
 def test_attn_hd512_flag_defaults_and_flip(flagmod, name, attr, default):
-    mod = flagmod("gmlx.attn_hd512", **{name: None})
+    mod = flagmod("gmlx.upstream.attn_hd512", **{name: None})
     assert getattr(mod, attr) is default
     flip = "0" if default else "1"
-    mod = flagmod("gmlx.attn_hd512", **{name: flip})
+    mod = flagmod("gmlx.upstream.attn_hd512", **{name: flip})
     assert getattr(mod, attr) is (not default)
     # word forms now accepted
     word = "off" if default else "on"
-    mod = flagmod("gmlx.attn_hd512", **{name: word})
+    mod = flagmod("gmlx.upstream.attn_hd512", **{name: word})
     assert getattr(mod, attr) is (not default)
 
 
@@ -136,10 +136,10 @@ def test_hd512_install_kill_switch(flagmod):
 
     orig = mx.fast.scaled_dot_product_attention
     try:
-        mod = flagmod("gmlx.attn_hd512", GMLX_HD512="0")
+        mod = flagmod("gmlx.upstream.attn_hd512", GMLX_HD512="0")
         assert mod.install_hd512_sdpa() is False
         assert mx.fast.scaled_dot_product_attention is orig
-        mod = flagmod("gmlx.attn_hd512", GMLX_HD512=None)
+        mod = flagmod("gmlx.upstream.attn_hd512", GMLX_HD512=None)
         assert mod.install_hd512_sdpa() is True
         assert mx.fast.scaled_dot_product_attention is not orig
     finally:
@@ -148,7 +148,7 @@ def test_hd512_install_kill_switch(flagmod):
 
 def test_speculative_flag_defaults(flagmod):
     mod = flagmod(
-        "gmlx.speculative",
+        "gmlx.spec.speculative",
         GMLX_MTP_COUPLED_DRAFT=None,
         GMLX_ROUND_PROFILE=None,
         GMLX_MTP_TOP2_LOG=None,
@@ -162,10 +162,10 @@ def test_speculative_flag_defaults(flagmod):
 
 
 def test_speculative_flag_flips(flagmod):
-    mod = flagmod("gmlx.speculative", GMLX_MTP_COUPLED_DRAFT="1")
+    mod = flagmod("gmlx.spec.speculative", GMLX_MTP_COUPLED_DRAFT="1")
     assert mod._FORCE_GREEDY_DRAFT is False
     mod = flagmod(
-        "gmlx.speculative",
+        "gmlx.spec.speculative",
         GMLX_MTP_COUPLED_DRAFT=None,
         GMLX_ROUND_PROFILE="1",
         GMLX_MTP_TOP2_LOG="1",
@@ -178,7 +178,7 @@ def test_speculative_flag_flips(flagmod):
 @pytest.mark.parametrize("name", ["GMLX_SPEC_APC", "GMLX_SPEC_APC_SIDECAR"])
 def test_speculative_sidecar_kill_switch(flagmod, name):
     mod = flagmod(
-        "gmlx.speculative",
+        "gmlx.spec.speculative",
         GMLX_ROUND_PROFILE=None,
         GMLX_MTP_TOP2_LOG=None,
         **{name: "0"},
@@ -187,9 +187,9 @@ def test_speculative_sidecar_kill_switch(flagmod, name):
 
 
 def test_mtp_drafter_postnorm_feed_flag(flagmod):
-    mod = flagmod("gmlx.mtp_drafter", GMLX_MTP_POSTNORM_FEED=None)
+    mod = flagmod("gmlx.spec.mtp_drafter", GMLX_MTP_POSTNORM_FEED=None)
     assert mod._POSTNORM_FEED is False
-    mod = flagmod("gmlx.mtp_drafter", GMLX_MTP_POSTNORM_FEED="1")
+    mod = flagmod("gmlx.spec.mtp_drafter", GMLX_MTP_POSTNORM_FEED="1")
     assert mod._POSTNORM_FEED is True
 
 
@@ -213,7 +213,7 @@ class _BoomModules:
 
 
 def test_fused_gdn_kill_switch_decode(monkeypatch):
-    patches = importlib.import_module("gmlx.gdn_patches")
+    patches = importlib.import_module("gmlx.upstream.gdn_patches")
     if patches._gdn_fused_decode_kernel is None:
         pytest.skip("fused gdn decode kernel unavailable")
     from mlx_lm.models.qwen3_5 import GatedDeltaNet
@@ -238,7 +238,7 @@ def test_fused_gdn_kill_switch_decode(monkeypatch):
 
 
 def test_fused_gdn_kill_switch_verify(monkeypatch):
-    patches = importlib.import_module("gmlx.gdn_patches")
+    patches = importlib.import_module("gmlx.upstream.gdn_patches")
     if patches._gdn_fused_verify_kernel is None:
         pytest.skip("fused gdn verify kernel unavailable")
     from mlx_vlm.models.qwen3_5.language import Qwen3_5GatedDeltaNet
@@ -263,7 +263,7 @@ def test_fused_gdn_kill_switch_verify(monkeypatch):
 
 
 def test_gdn_zba_default_off_and_opt_in(monkeypatch):
-    patches = importlib.import_module("gmlx.gdn_patches")
+    patches = importlib.import_module("gmlx.upstream.gdn_patches")
     if patches._gdn_fused_decode_kernel is None:
         pytest.skip("fused gdn decode kernel unavailable")
     from mlx_lm.models.qwen3_5 import GatedDeltaNet
@@ -305,7 +305,7 @@ _DSV32_KILL_SITES = [
 
 @pytest.mark.parametrize("name,fn,flag,clsname", _DSV32_KILL_SITES)
 def test_dsv32_kill_switches(monkeypatch, name, fn, flag, clsname):
-    patches = importlib.import_module("gmlx.dsv32_patches")
+    patches = importlib.import_module("gmlx.upstream.dsv32_patches")
     dsv32 = importlib.import_module("mlx_lm.models.deepseek_v32")
     patch = getattr(patches, fn)
     cls = getattr(dsv32, clsname) if clsname else None
@@ -333,7 +333,7 @@ def test_dsv32_kill_switches(monkeypatch, name, fn, flag, clsname):
 
 def test_dsv32_mask_decode_opt_in(monkeypatch):
     # Inverted default: stock gather decode by default, mask path opt-in.
-    patches = importlib.import_module("gmlx.dsv32_patches")
+    patches = importlib.import_module("gmlx.upstream.dsv32_patches")
     dsv32 = importlib.import_module("mlx_lm.models.deepseek_v32")
     cp = patches._MASK_DECODE_PATCH
     saved_call = dsv32.DeepseekV32Attention.__call__
@@ -354,7 +354,7 @@ def test_dsv32_mask_decode_opt_in(monkeypatch):
 
 
 def test_dsv32_sparse_opt_in(monkeypatch):
-    patches = importlib.import_module("gmlx.dsv32_patches")
+    patches = importlib.import_module("gmlx.upstream.dsv32_patches")
     warns = []
     monkeypatch.setattr(patches.loadlog, "warn", lambda *a, **k: warns.append(a))
     # default (unset): dense-default patch walks the model, no warning
@@ -369,7 +369,7 @@ def test_dsv32_sparse_opt_in(monkeypatch):
 
 
 def test_f16_head_kernel_kill_switch(monkeypatch):
-    patches = importlib.import_module("gmlx.gdn_patches")
+    patches = importlib.import_module("gmlx.upstream.gdn_patches")
     if patches._F16_HEAD_GEMV is None:
         pytest.skip("f16 head gemv kernel unavailable")
 
@@ -392,7 +392,7 @@ def test_f16_head_kernel_kill_switch(monkeypatch):
 
 
 def test_gemma_fused_glu_tristate_unset_default():
-    modules = importlib.import_module("gmlx.modules")
+    modules = importlib.import_module("gmlx.load.modules")
     src = inspect.getsource(modules)
     assert 'os.environ.get("GMLX_GEMMA_FUSED_GLU", "")' in src
     assert 'env == "1"' in src  # force-on arm
@@ -400,8 +400,8 @@ def test_gemma_fused_glu_tristate_unset_default():
 
 
 def test_gdn_zba_merge_content_and_load_order():
-    loader = importlib.import_module("gmlx.loader")
-    patches = importlib.import_module("gmlx.gdn_patches")
+    loader = importlib.import_module("gmlx.load.loader")
+    patches = importlib.import_module("gmlx.upstream.gdn_patches")
     if patches._gdn_fused_decode_kernel is None:
         pytest.skip("fused gdn decode kernel unavailable")
     import inspect
@@ -438,7 +438,7 @@ def test_ignore_eos_gate_is_a_bool_flag(monkeypatch):
     """`GMLX_IGNORE_EOS=0` must disable the benchmark mode. The gate used
     `os.environ.get(...)`, whose '0' is truthy, so opting out turned it on and
     every completion ran to max_tokens."""
-    from gmlx import server
+    import gmlx.serve.server as server
 
     src = inspect.getsource(server._serve)
     assert 'os.environ.get("GMLX_IGNORE_EOS")' not in src

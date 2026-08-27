@@ -9,4 +9,4 @@
   where a tone sweep would not.
 
 The e2e chat script accepts overrides (`--image PATH` / `$GMLX_E2E_IMAGE`);
-`tests/test_vlm_integration.py` uses the bundled files directly.
+`tests/load/test_vlm_integration.py` uses the bundled files directly.

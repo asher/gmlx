@@ -481,9 +481,10 @@ version converts to the Apache License 2.0 four years after its release. No clai
 are made against inference outputs, and downloaded model weights carry their own
 licenses.
 
-Exception: the DSpark draft-model module (`deepseek_v4_dspark.py`), the
-sidecar converter (`scripts/convert_dspark_sidecar.py`), the mlx-lm-style
-model modules (`kimi_k3_model.py`, `minimax_m3_model.py`, `hy_v3_model.py`),
+Exception: the DSpark draft-model module (`gmlx/models/deepseek_v4/dspark.py`),
+the sidecar converter (`scripts/convert_dspark_sidecar.py`), the mlx-lm-style
+model modules (`gmlx/models/kimi_k3.py`, `gmlx/models/minimax_m3.py`,
+`gmlx/models/hy_v3/model.py`),
 and the Kimi-K3 tests are MIT licensed (see
 [LICENSE-MIT](https://github.com/asher/gmlx/blob/main/LICENSE-MIT)), so the
 model classes can be reused freely in mlx-lm-based projects and the DSpark

@@ -1,13 +1,16 @@
 """Every relative import in the gmlx tree names a module that exists.
 
 Vendored files are the motivating class: a module copied out of another
-package keeps its package-relative imports, which then point into gmlx
-instead (vlm_text_only.py, vendored from mlx-vlm 0.6.4 models/text_only.py,
-kept `from .cache import KVCache` -> the nonexistent gmlx.cache). When the
-import sits inside a function only a live server exercises, no unit test
-trips it - so this resolves the target purely on the filesystem, without
-importing anything: function-local imports and modules with heavy optional
-dependencies (the misaki vendor tree) are all checked the same way.
+package keeps its package-relative imports, which then resolve inside gmlx
+instead (models/vlm_text_only.py, vendored from mlx-vlm 0.6.4
+models/text_only.py, once kept `from .cache import KVCache`). The hazard has
+sharpened since the package restructure: gmlx.cache is now a real package,
+so a stale relative import at the wrong depth can silently bind an existing
+gmlx module instead of failing. When the import sits inside a function only
+a live server exercises, no unit test trips it - so this resolves the target
+purely on the filesystem, without importing anything: function-local imports
+and modules with heavy optional dependencies (the misaki vendor tree) are
+all checked the same way.
 """
 import ast
 from pathlib import Path

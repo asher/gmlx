@@ -28,6 +28,7 @@ right document for the task at hand.
 | Load and generate from your own Python | [python.md](python.md) |
 | Check whether an architecture is supported | [arch-coverage.md](arch-coverage.md) |
 | Add support for a new architecture | [adding-architectures.md](adding-architectures.md) |
+| Find your way around the source tree | the package table in [CONTRIBUTING.md](../CONTRIBUTING.md#things-to-know-before-you-patch) |
 
 ## Start here
 
