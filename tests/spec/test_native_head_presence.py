@@ -40,6 +40,13 @@ def test_hy3_block_marker():
         require_native_head_tensors(arrays, _config("hy_v3", layers=80))
 
 
+def test_malformed_config_gets_a_named_failure():
+    config = _config("qwen3_5")
+    del config["num_hidden_layers"]
+    with pytest.raises(ValueError, match="num_hidden_layers"):
+        require_native_head_tensors({"blk.0.attn_q.weight": None}, config)
+
+
 def test_present_head_passes():
     arrays = {"blk.64.nextn.eh_proj.weight": None}
     require_native_head_tensors(arrays, _config("qwen3_5"))

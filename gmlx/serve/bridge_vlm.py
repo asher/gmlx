@@ -809,11 +809,13 @@ class _DrafterSourceFilter(logging.Filter):
 def _degrade_failed_mtp(model_path: str, error: str) -> None:
     """A failed speculative build must not take the server down: log the
     cause loudly, clear the per-build drafter state, and let the caller
-    retry the same GGUF as a plain load. The [spec] per-request lines never
-    appear for a degraded model, so the state is observable. ``error`` is a
-    string, not the exception: a live exception's traceback pins the loader
-    frames (and the partial target's arrays) that clear_cache is meant to
-    let go."""
+    retry the same GGUF as a plain load. The text path fails before its
+    target build; the VLM loader constructs the target before the head
+    check by design, so a VLM degrade pays a full build and then a plain
+    rebuild. The [spec] per-request lines never appear for a degraded
+    model, so the state is observable. ``error`` is a string, not the
+    exception: a live exception's traceback pins the loader frames (and
+    the partial target's arrays) that clear_cache is meant to let go."""
     _log.error(
         "speculative (MTP) load failed for %s - serving plain "
         "(no speculative decoding): %s", model_path, error
@@ -988,6 +990,8 @@ def install_gguf_server_bridge() -> None:
                 except Exception as e:
                     err = f"{type(e).__name__}: {e}"
                 _degrade_failed_mtp(model_path, err)
+                # Same call as the plain load below on purpose: an explicit
+                # degraded return, not a fallthrough.
                 return load_serveable_model(model_path,
                                             chat_template=chat_template,
                                             adapter_gguf=adapter_gguf,

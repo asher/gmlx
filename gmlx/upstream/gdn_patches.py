@@ -38,7 +38,8 @@ def gdn_sg(B: int) -> int:
     doubles when SG halves), so its pipeline has its own, lower ceiling.
     SG=8 shrinks threads x regs by ~30% at Dv=128 - directionally safe but
     unvalidated on M1/M2 hardware; if it still throws, GMLX_GDN_SG=4 is the
-    next step. M2 is clamped on the M1 evidence, not its own measurement.
+    next step (restart required: the cache reads the env once per process).
+    M2 is clamped on the M1 evidence, not its own measurement.
     """
     forced = env_int("GMLX_GDN_SG", 0)
     if forced > 0:

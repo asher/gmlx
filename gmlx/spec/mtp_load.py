@@ -166,10 +166,18 @@ def require_native_head_tensors(arrays: dict, config_dict: dict) -> None:
     ``nextn_predict_layers`` while the nextn block is gone, and a
     header/tensor block-index mismatch yields an empty remap the same way.
     Both native-head families (qwen3.5, hy_v3) carry the head as
-    ``blk.{num_hidden_layers}.nextn.*``. Runs before the target load does
-    any heavy work, so the failure is fast and names the real cause."""
+    ``blk.{num_hidden_layers}.nextn.*``. On the text path this runs before
+    the target load does any heavy work; the VLM loader constructs the
+    target first by design, so there the check only beats the drafter
+    remap, not the target build."""
     num_mtp = int(config_dict.get("mtp_num_hidden_layers", 1))
-    marker = f"blk.{int(config_dict['num_hidden_layers'])}.nextn."
+    layers = config_dict.get("num_hidden_layers")
+    if layers is None:
+        raise ValueError(
+            "config carries no num_hidden_layers; cannot locate the native "
+            "MTP head block"
+        )
+    marker = f"blk.{int(layers)}.nextn."
     if not any(marker in n for n in arrays):
         raise ValueError(
             f"header declares a native MTP head ({num_mtp} layer(s)) but the "
