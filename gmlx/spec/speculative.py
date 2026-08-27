@@ -480,6 +480,18 @@ def _stoch_draft_sampler(stash: list):
     return sampler
 
 
+def _accepted_prefix(flags: list, n: int) -> int:
+    """Length of the leading all-true run, host-side on purpose. The
+    on-device ``cumprod().sum()`` scalar this replaces was observed reaching
+    ``.item()`` unmaterialized on the CPU stream (garbage count, then a wild
+    index into the walk rows: the py3.14 CI segfault); the walks pull the
+    per-position rows in the same sync anyway, so the count is free here."""
+    i = 0
+    while i < n and flags[i]:
+        i += 1
+    return i
+
+
 def _stochastic_walk(lm, verify, draft_tokens: mx.array, sampler, budget: int,
                      q_rows: list[mx.array]):
     """Leviathan rejection walk with a single host sync.
@@ -499,20 +511,19 @@ def _stochastic_walk(lm, verify, draft_tokens: mx.array, sampler, budget: int,
         p_at = mx.take_along_axis(p_n, draft_row[:, None], axis=-1)[:, 0]
         q_at = mx.take_along_axis(q, draft_row[:, None], axis=-1)[:, 0]
         u = mx.random.uniform(shape=(n_draft,))
-        acc = (u * q_at < p_at).astype(mx.int32)
-        accepted = mx.cumprod(acc).sum()
+        acc = u * q_at < p_at
         res = mx.maximum(p_n - q, 0.0)
         z = res.sum(axis=-1, keepdims=True)
         res = mx.where(z > 0, res / z, p_n)
         res_tokens = mx.random.categorical(mx.log(res), axis=-1)  # [n_draft]
         bonus = mx.random.categorical(mx.log(p[n_draft:]), axis=-1)  # [1]
-    mx.eval(accepted, res_tokens, bonus, draft_row)               # the one sync
-    acc_i = int(accepted.item())
+    mx.eval(acc, res_tokens, bonus, draft_row)                    # the one sync
+    acc_i = _accepted_prefix(acc.tolist(), n_draft)
     drf = draft_row.tolist()
     if acc_i == n_draft:
         new = drf + bonus.tolist()
     else:
-        new = drf[:acc_i] + [int(res_tokens[acc_i].item())]
+        new = drf[:acc_i] + [int(res_tokens.tolist()[acc_i])]
     return acc_i, new[:budget]
 
 
@@ -551,7 +562,7 @@ def _coupled_walk(lm, verify, draft_tokens: mx.array, sampler, budget: int,
 
     Sample every verify position into one deferred graph (sequentially, so the
     per-position RNG draws stay coupled to the drafter's), then take the
-    accepted-prefix length from an on-device cumprod of leading matches. All
+    accepted-prefix length from the leading run of matches host-side. All
     positions share one lm_head projection. Returns (accepted, new_tokens),
     where new_tokens is the accepted drafts plus the bonus token at the first
     rejection (or the natural next token if every draft is accepted), clamped to
@@ -588,11 +599,6 @@ def _coupled_walk(lm, verify, draft_tokens: mx.array, sampler, budget: int,
                 target = _seeded_target_draw(
                     sampler, logprobs, base_pos).reshape(-1)          # [n_pos]
         draft_row = draft_tokens.reshape(-1)
-        if n_draft > 0:
-            match = (target[:n_draft] == draft_row).astype(mx.int32)
-            accepted = mx.cumprod(match).sum()
-        else:
-            accepted = mx.array(0, dtype=mx.int32)
     _tb1 = time.perf_counter() if _WALK_PROFILE else 0.0
     head_ms = 0.0
     if head_out is not None:
@@ -602,13 +608,13 @@ def _coupled_walk(lm, verify, draft_tokens: mx.array, sampler, budget: int,
     if pq_arr is not None:
         extras.append(pq_arr)
     if extras:
-        mx.eval(target, accepted, *extras)                            # the one sync
+        mx.eval(target, draft_row, *extras)                           # the one sync
     else:
-        mx.eval(target, accepted)                                     # the one sync
+        mx.eval(target, draft_row)                                    # the one sync
     _tb2 = time.perf_counter() if _WALK_PROFILE else 0.0
-    acc = int(accepted.item())
     tgt = target.tolist()
     drf = draft_row.tolist()
+    acc = _accepted_prefix([t == d for t, d in zip(tgt, drf)], n_draft)
     if pq_arr is not None:
         _pq_accumulate(pq_arr.tolist(), tgt, drf, n_draft)
     new = drf[:acc] + [tgt[acc]]
@@ -636,8 +642,8 @@ def _coupled_walk_batch(
 ) -> tuple[list[int], list[list[int]]]:
     """Batched rejection walk with a single host sync.
 
-    Per-row cumprod over matches yields an accepted count per row [B], all in
-    one deferred graph evaluated with a single mx.eval. Returns
+    Per-row leading-match counts are taken host-side after one deferred
+    graph evaluated with a single mx.eval. Returns
     (accepted_list, new_tokens_list) where each row's new_tokens is the
     accepted drafts plus the bonus at the first rejection, clamped to that
     row's budget.
@@ -657,18 +663,14 @@ def _coupled_walk_batch(
             else:
                 flat = logprobs.reshape(-1, logprobs.shape[-1])          # [B*n_pos, V]
                 target = sampler(flat).reshape(B, n_pos)                 # [B, n_pos]
-        if n_draft > 0:
-            match = (target[:, :n_draft] == draft_tokens).astype(mx.int32)
-            accepted = mx.cumprod(match, axis=1).sum(axis=1)             # [B]
-        else:
-            accepted = mx.zeros(B, dtype=mx.int32)
-    mx.eval(target, accepted)                                            # the one sync
-    acc_list = accepted.tolist()
+    mx.eval(target, draft_tokens)                                        # the one sync
     tgt = target.tolist()
     drf = draft_tokens.tolist()
+    acc_list: list[int] = []
     new_tokens_list: list[list[int]] = []
     for i in range(B):
-        a = acc_list[i]
+        a = _accepted_prefix([t == d for t, d in zip(tgt[i], drf[i])], n_draft)
+        acc_list.append(a)
         new = drf[i][:a] + [tgt[i][a]]
         new_tokens_list.append(new[:budgets[i]])
     return acc_list, new_tokens_list
