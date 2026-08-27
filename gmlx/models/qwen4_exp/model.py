@@ -198,7 +198,9 @@ class HyperConnection(nn.Module):
         up_out = self.up(lo)
         if "inject" not in self:
             return _hc_mix(up_out, xn)
-        inj_out = self.inject(xf)
+        inj_out = _hc_inject_kern(xf, self.inject.weight)
+        if inj_out is None:
+            inj_out = self.inject(xf)
         r = _hc_epi_kern(up_out, xn, inj_out)
         if r is not None:
             return r
@@ -232,9 +234,11 @@ class HyperConnection(nn.Module):
 # Prefill-width HC kernels: the compiled epilogues still run the
 # [B, T, hc, D] elementwise chains at ~1/4 of achievable bandwidth (the
 # mean-over-streams and broadcast-combine patterns defeat mx.compile's
-# fusion). Three single-pass kernels cover the norm, the mix+inject
-# epilogue, and the combine; each falls back to the op path when
-# ineligible. GMLX_Q4_HC_PREFILL_KERN=0 disables all three.
+# fusion), and the inject GEMV's [hc, hc*D] fp32 weight forces the
+# stock matmul onto a promoted fp32 path that re-reads x. Four
+# single-pass kernels cover the norm, the mix+inject epilogue, the
+# combine, and the inject GEMV; each falls back to the op path when
+# ineligible. GMLX_Q4_HC_PREFILL_KERN=0 disables all four.
 
 _HC_NORM_SRC = r"""
     uint lane = thread_position_in_threadgroup.x;
@@ -299,11 +303,41 @@ _HC_COMBINE_SRC = r"""
                        * inj[(size_t)bt * HC + s_idx]));
 """
 
+_HC_INJECT_SRC = r"""
+    uint lane = thread_position_in_threadgroup.x;
+    uint sg   = thread_position_in_threadgroup.y;
+    uint bt   = thread_position_in_grid.z;      // b*T + ...
+    uint flat = sg * 32 + lane;
+    auto x_ = x + (size_t)bt * N;
+
+    // fp32 accumulation over fp32 weights, matching the stock promoted
+    // matmul; only the reduction order differs (fp32 lsb class, rounded
+    // to InT by the epi kernel before the sigmoid)
+    threadgroup float part[SGS * HC];
+    float acc[HC];
+    for (int s = 0; s < HC; ++s) acc[s] = 0.0f;
+    for (uint i = flat; i < (uint)N; i += SGS * 32) {
+        float xv = (float)x_[i];
+        for (int s = 0; s < HC; ++s)
+            acc[s] += xv * w[(size_t)s * N + i];
+    }
+    for (int s = 0; s < HC; ++s) {
+        float v = simd_sum(acc[s]);
+        if (lane == 0) part[sg * HC + s] = v;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0 && lane < (uint)HC) {
+        float tot = 0.0f;
+        for (int g = 0; g < SGS; ++g) tot += part[g * HC + lane];
+        y[(size_t)bt * HC + lane] = tot;
+    }
+"""
+
 _hc_prefill_kerns = None
 
 
 def _hc_kerns():
-    """The prefill-width HC kernels (norm, epi, combine), or None."""
+    """The prefill-width HC kernels (norm, epi, combine, inject), or None."""
     global _hc_prefill_kerns
     if _hc_prefill_kerns is None:
         from gmlx.envflags import env_bool
@@ -323,6 +357,10 @@ def _hc_kerns():
                     name="gmlx_hc_combine",
                     input_names=["h", "out", "inj"],
                     output_names=["yn"], source=_HC_COMBINE_SRC),
+                mx.fast.metal_kernel(
+                    name="gmlx_hc_inject",
+                    input_names=["x", "w"],
+                    output_names=["y"], source=_HC_INJECT_SRC),
             )
         else:
             _hc_prefill_kerns = False
@@ -355,6 +393,22 @@ def _hc_epi_kern(up_out: mx.array, xn: mx.array, inj_out: mx.array):
         grid=(B * T * D, 1, 1), threadgroup=(min(256, B * T * D), 1, 1),
         output_shapes=[(B, T, D), (B, T, hc)],
         output_dtypes=[xn.dtype, mx.float32])
+
+
+def _hc_inject_kern(xf: mx.array, weight: mx.array):
+    B, T, N = xf.shape
+    kerns = _hc_kerns()
+    SGS = 8
+    if (kerns is None or B * T <= 8 or N % (SGS * 32)
+            or weight.dtype != mx.float32
+            or xf.dtype not in (mx.float16, mx.bfloat16)):
+        return None
+    hc = weight.shape[0]
+    return kerns[3](
+        inputs=[xf, weight],
+        template=[("InT", xf.dtype), ("N", N), ("HC", hc), ("SGS", SGS)],
+        grid=(32, SGS, B * T), threadgroup=(32, SGS, 1),
+        output_shapes=[(B, T, hc)], output_dtypes=[mx.float32])[0]
 
 
 def _hc_combine_kern(h: mx.array, out: mx.array, inject: mx.array):
