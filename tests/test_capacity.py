@@ -168,6 +168,32 @@ def test_preload_gate_kernel_floor(rig, monkeypatch):
     cap.preload_gate(4.0 * GB, "no-probe")               # probe unavailable admits
 
 
+def test_kernel_gate_credits_page_cache_resident_bytes(rig, monkeypatch):
+    # 2026-08-26 ladder stall: a fully-cached 90 GB model was refused
+    # because raw reclaimable (91 GB, mostly the model's OWN cached
+    # bytes) sat under weights + floor (98 GB). Wiring cached pages
+    # converts them, it does not allocate: the gate must judge only the
+    # not-yet-resident bytes.
+    rig(weights_gb=90.0, ws_gb=200.0)
+    import gmlx.governor as gov
+    import gmlx.kernel_vm as kv
+    import gmlx.prefill_decay as pd
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 500.0 * GB)
+    monkeypatch.setattr(cap, "working_budget_bytes", lambda: 200.0 * GB)
+    monkeypatch.setattr(gov, "armed_kernel_floor_bytes", lambda: 8.0 * GB)
+    monkeypatch.setattr(kv, "reclaimable_bytes", lambda: 91.0 * GB)
+    monkeypatch.setattr(cap, "_resident_shard_bytes", lambda m: 87.0 * GB)
+    cap.preload_gate(90.0 * GB, "cached")           # need 3 GB <= 91 - 8
+    monkeypatch.setattr(cap, "_resident_shard_bytes", lambda m: 92.0 * GB)
+    cap.preload_gate(90.0 * GB, "fully-cached")     # need <= 0: admit outright
+    monkeypatch.setattr(cap, "_resident_shard_bytes", lambda m: 0.0)
+    with pytest.raises(cap.LoadDeferred, match="90.0 GB not yet page-cached"):
+        cap.preload_gate(90.0 * GB, "cold")
+    monkeypatch.setattr(cap, "_resident_shard_bytes", lambda m: 5.0 * GB)
+    with pytest.raises(cap.LoadDeferred, match="85.0 GB not yet page-cached"):
+        cap.preload_gate(90.0 * GB, "barely-cached")
+
+
 def test_memfit_delegates_to_capacity(monkeypatch):
     from gmlx.memfit import classify_fit
     assert classify_fit(65, 100) == "fits"
