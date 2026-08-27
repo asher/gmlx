@@ -1056,6 +1056,34 @@ class Attention(nn.Module):
                 mx.array(1 << qi, dtype=mx.uint16), axis=1)
         return bs(q, k, v, self.scale, pages, pm, counts, offset)
 
+    def _split_regime_prefill(self, q, k, v, sel, complete, offset, L,
+                              key_len, bs):
+        """Mixed prefill window spanning the causal/sparse boundary
+        (a query is sparse once its complete-block count exceeds
+        block_topk): split the query axis exactly at the boundary and give
+        each span its native path -- flash-causal SDPA for the causal
+        prefix, the L<=8 gathered path for the (at most ratio-1) ragged
+        queries up to the next 4-aligned window, and the block-sparse FA
+        kernel for the aligned sparse tail. Replaces the dense-masked SDPA
+        fallback that materialized an [L, key_len] token mask for the
+        whole window."""
+        r, topk = self.ratio, self.indexer.block_topk
+        c = min(L, max(0, r * (topk + 1) - 1 - offset))
+        s = min(L, -(-c // r) * r)
+        outs = []
+        if c > 0:
+            outs.append(mx.fast.scaled_dot_product_attention(
+                q[..., :c, :], k[..., :offset + c, :],
+                v[..., :offset + c, :], scale=self.scale, mask="causal"))
+        if s > c:
+            outs.append(self._gathered_attention(
+                q[..., c:s, :], k, v, sel[:, c:s], complete[c:s],
+                offset + c, s - c))
+        if L > s:
+            outs.append(self._block_sparse_prefill(
+                q[..., s:, :], k, v, sel[:, s:], offset + s, key_len, bs))
+        return mx.concatenate(outs, axis=2) if len(outs) > 1 else outs[0]
+
     def _paged_attention(self, q, k, v, sel, key_len, paged):
         """Decode (L=1): kq page-gather sdpa straight over the KV cache
         with the selected 4-row blocks as pages -- no per-token K/V copy.
@@ -1134,6 +1162,14 @@ class Attention(nn.Module):
                   and (bs := _kq_bs_prefill()) is not None):
                 out = self._block_sparse_prefill(q, k, v, sel, offset,
                                                  key_len, bs)
+            elif (B == 1 and not all_sparse and L > 8
+                  and not isinstance(mask, mx.array)
+                  and offset % 4 == 0 and L % 4 == 0
+                  and self.ratio == 4 and D == 256 and H == 12 * Hkv
+                  and q.dtype in (mx.bfloat16, mx.float16)
+                  and (bs := _kq_bs_prefill()) is not None):
+                out = self._split_regime_prefill(q, k, v, sel, complete,
+                                                 offset, L, key_len, bs)
             else:
                 qsa = _qsa_token_mask(sel, complete, offset, L, key_len,
                                       self.ratio, self.indexer.block_topk)
