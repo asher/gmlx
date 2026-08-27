@@ -177,6 +177,7 @@ def _restore_entry(c: Any, snap: Any) -> None:
         # place, and the stored entry may be restored more than once.
         c.state = tuple(mx.contiguous(a) for a in state)
         c.meta_state = meta_state
+        return
     if isinstance(snap, tuple) and snap[0] == _QUANT_TAG:
         _, keys, values, offset = snap
         c.keys = tuple(mx.contiguous(a) for a in keys)
