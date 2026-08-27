@@ -199,7 +199,11 @@ class HyperConnection(nn.Module):
             return _hc_mix(up_out, xn)
         inj_out = self.inject(xf)
         r = _hc_epi_kern(up_out, xn, inj_out)
-        return r if r is not None else _hc_mix_inject(up_out, xn, inj_out)
+        if r is not None:
+            return r
+        # inj stays eager: compiling this sigmoid shifts its fp32 lsb and
+        # the drift compounds across 96 combines per token
+        return _hc_mix(up_out, xn), 2.0 * mx.sigmoid(inj_out * (1.0 / hc))
 
     def _hclr_ok(self, h_dtype) -> bool:
         """Fused-path eligibility: kq hc_lowrank ops present, q8_0 down/up
@@ -364,15 +368,6 @@ def _hc_mix(up_out: mx.array, xn: mx.array) -> mx.array:
     B, T, hc, D = xn.shape
     gate = mx.sigmoid(up_out).reshape(B, T, hc, D)
     return (gate * xn).mean(axis=2)
-
-
-@mx.compile
-def _hc_mix_inject(up_out: mx.array, xn: mx.array, inj_out: mx.array):
-    B, T, hc, D = xn.shape
-    gate = mx.sigmoid(up_out).reshape(B, T, hc, D)
-    mixed = (gate * xn).mean(axis=2)
-    inj = 2.0 * mx.sigmoid(inj_out * (1.0 / hc))
-    return mixed, inj
 
 
 @mx.compile

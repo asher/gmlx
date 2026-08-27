@@ -31,21 +31,31 @@ def _q8_wire(rng, rows, cols):
     return quants.quantize(wf, GT.Q8_0).astype(np.uint8)
 
 
-def _build(rng):
-    import mlx_kquant as kq
-    if not hasattr(kq, "moe_glu_gather_kq"):
-        pytest.skip("mlx_kquant without fused MoE kernels")
-    model = _Holder(SwitchGLU(DIM, HID, E))
-    meta = {f"experts.{p}.weight": "q8_0"
-            for p in ("gate_proj", "up_proj", "down_proj")}
-    modules.install_kquant_modules(model, meta)
+def _write_wire(rng, model):
     for proj, cols in (("gate_proj", DIM), ("up_proj", DIM),
                        ("down_proj", HID)):
         leaf = getattr(model.experts, proj)
         wire = np.stack(
             [_q8_wire(rng, leaf.weight.shape[1], cols) for _ in range(E)], 0)
         leaf.weight = mx.array(wire)
-    assert modules.install_fused_moe_glu(model) == 1
+
+
+def _build(rng, weights_after_install=False):
+    import mlx_kquant as kq
+    if not hasattr(kq, "moe_glu_gather_kq"):
+        pytest.skip("mlx_kquant without fused MoE kernels")
+    model = _Holder(SwitchGLU(DIM, HID, E))
+    model.eval()  # training=True would skip the concat path entirely
+    meta = {f"experts.{p}.weight": "q8_0"
+            for p in ("gate_proj", "up_proj", "down_proj")}
+    modules.install_kquant_modules(model, meta)
+    if weights_after_install:
+        # loader order: module install first, weight update afterwards
+        assert modules.install_fused_moe_glu(model) == 1
+        _write_wire(rng, model)
+    else:
+        _write_wire(rng, model)
+        assert modules.install_fused_moe_glu(model) == 1
     return model
 
 
@@ -56,15 +66,23 @@ def _prefill_inputs(rng, tokens, k=4):
 
 
 @pytest.mark.parametrize("tokens", [16, 150])
-def test_concat_prefill_matches_stock(tokens, monkeypatch):
+@pytest.mark.parametrize("weights_after_install", [False, True])
+def test_concat_prefill_matches_stock(tokens, weights_after_install,
+                                      monkeypatch):
     rng = np.random.default_rng(7)
-    model = _build(rng)
-    assert getattr(model.experts, "_kq_gate_up", None) is not None
-    gu = model.experts._kq_gate_up
-    assert gu.weight.shape == (E, 2 * HID, model.experts.gate_proj.weight.shape[2])
+    model = _build(rng, weights_after_install=weights_after_install)
+    # install only stamps the pending flag; the concat is built from the
+    # live wire bytes on the first sorted-prefill call (the loader writes
+    # weights after module install, so an eager build would freeze the
+    # ctor placeholders)
+    assert getattr(model.experts, "_kq_gate_up", None) is None
+    assert model.experts._kq_gate_up_pending
     x, inds = _prefill_inputs(rng, tokens)  # tokens*4 >= 64: sorted prefill
     y_concat = model.experts(x, inds)
     mx.eval(y_concat)
+    gu = model.experts._kq_gate_up
+    assert gu is not None and not model.experts._kq_gate_up_pending
+    assert gu.weight.shape == (E, 2 * HID, model.experts.gate_proj.weight.shape[2])
     monkeypatch.setattr(modules, "_GATEUP_CONCAT_ENABLED", False)
     y_stock = model.experts(x, inds)
     mx.eval(y_stock)
@@ -78,6 +96,7 @@ def test_concat_skipped_when_disabled(monkeypatch):
     monkeypatch.setattr(modules, "_GATEUP_CONCAT_ENABLED", False)
     model = _build(np.random.default_rng(7))
     assert getattr(model.experts, "_kq_gate_up", None) is None
+    assert not getattr(model.experts, "_kq_gate_up_pending", False)
 
 
 def test_decode_width_ignores_concat():

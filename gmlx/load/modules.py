@@ -618,15 +618,22 @@ def _make_fused_kquant(base_cls, caps):
 
         def _kq_prefill_gate_up(self, x, indices):
             """Sorted-prefill widths: one gather over the concatenated
-            gate+up wire bytes (install_kquant_glu_fusion builds
-            ``_kq_gate_up``), then the stock activation + down gather.
-            Mirrors mlx-lm SwitchGLU.__call__ exactly apart from the
-            single fused projection; returns None when ineligible so the
-            caller falls back to the stock two-gather path."""
-            gu = getattr(self, "_kq_gate_up", None)
-            if (gu is None or not _GATEUP_CONCAT_ENABLED
-                    or indices.size < 64 or self.training):
+            gate+up wire bytes (built here on the first eligible call,
+            from the pending stamp _install_gateup_concat left), then the
+            stock activation + down gather. Mirrors mlx-lm
+            SwitchGLU.__call__ exactly apart from the single fused
+            projection; returns None when ineligible so the caller falls
+            back to the stock two-gather path."""
+            if (not _GATEUP_CONCAT_ENABLED or indices.size < 64
+                    or self.training):
                 return None
+            gu = getattr(self, "_kq_gate_up", None)
+            if gu is None:
+                if not getattr(self, "_kq_gate_up_pending", False):
+                    return None
+                gu = _build_gateup_concat(self)
+                object.__setattr__(self, "_kq_gate_up", gu)
+                object.__setattr__(self, "_kq_gate_up_pending", False)
             from mlx_lm.models.switch_layers import (
                 _gather_sort, _scatter_unsort)
             x = mx.expand_dims(x, (-2, -3))
@@ -676,22 +683,34 @@ def _install_kquant_glu_fusion(model, caps) -> int:
 
 
 def _install_gateup_concat(m, budget_bytes) -> int:
-    """Stamp ``_kq_gate_up``: a KQuantSwitchLinear over the concatenated
-    [E, 2*inter, K] gate+up wire bytes ([gate; up] row order, matching the
-    ``h[..., :half]`` split in _kq_prefill_gate_up). Eligibility beyond
-    _eligible_kquant_glu: gate/up must be shape-identical (same codec is
-    already guaranteed) and the copy must fit the remaining model-wide
-    byte budget (returned decremented) -- expert-heavy models would
-    otherwise double most of their resident weight bytes. Eagerly
-    evaluated so the copy lands at load time, not as a first-prefill
-    hitch; the originals stay live for the fused decode kernels, so this
-    holds a second resident copy of those bytes."""
+    """Stamp ``_kq_gate_up_pending``: the module builds its concatenated
+    gate+up KQuantSwitchLinear on the first sorted-prefill call
+    (_kq_prefill_gate_up). Install time only decides eligibility and the
+    model-wide byte budget -- the wire-byte SHAPES are final at install,
+    but the VALUES are not: module install runs before the load pipeline
+    writes the real weights, so an install-time concat freezes the ctor
+    placeholders (live bug: the fused path multiplied against zeros).
+    Eligibility beyond _eligible_kquant_glu: gate/up must be
+    shape-identical (same codec is already guaranteed) and the copy must
+    fit the remaining budget (returned decremented) -- expert-heavy
+    models would otherwise double most of their resident weight bytes."""
     gate, up = m.gate_proj, m.up_proj
     if gate.weight.shape != up.weight.shape:
         return budget_bytes
     cost = gate.weight.nbytes + up.weight.nbytes
     if cost > budget_bytes:
         return budget_bytes
+    object.__setattr__(m, "_kq_gate_up_pending", True)
+    return budget_bytes - cost
+
+
+def _build_gateup_concat(m):
+    """The concatenated [E, 2*inter] gate+up KQuantSwitchLinear ([gate; up]
+    row order, matching the ``h[..., :half]`` split in
+    _kq_prefill_gate_up), built from the live wire bytes. The originals
+    stay live for the fused decode kernels, so this holds a second
+    resident copy of those bytes."""
+    gate, up = m.gate_proj, m.up_proj
     e, out, _ = gate.weight.shape
     gu = KQuantSwitchLinear(
         e, 2 * out, 256, bias="bias" in gate, codec=gate.kquant_type)
@@ -701,8 +720,7 @@ def _install_gateup_concat(m, budget_bytes) -> int:
         mx.eval(gu.weight, gu.bias)
     else:
         mx.eval(gu.weight)
-    object.__setattr__(m, "_kq_gate_up", gu)
-    return budget_bytes - cost
+    return gu
 
 
 # Regime 3: qwen3-next-shaped MoE block (router + SwitchGLU + shared expert)
