@@ -7,22 +7,28 @@ reads as the model drafting for itself)."""
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
+
+import pytest
 
 import gmlx.serve.bridge_vlm as bridge
 
 
 class _Drafter:
-    pass
+    _gmlx_draft_source = None
 
 
 class _DFlash2Drafter:
     kind_label = "dflash2"
 
+    def __init__(self, source=None):
+        self._gmlx_draft_source = source
+
 
 class _QwenMTPDrafter:
-    pass
+    _gmlx_draft_source = None
 
 
 _QwenMTPDrafter.__name__ = "QwenMTPDrafter"
@@ -33,7 +39,7 @@ def test_degrade_clears_drafter_state(monkeypatch):
     monkeypatch.setenv("MLX_VLM_DRAFT_MODEL", path)
     monkeypatch.setenv("MLX_VLM_DRAFT_KIND", "mtp")
     bridge._MTP_DRAFTER_STASH[os.path.abspath(path)] = (_Drafter(), "mtp")
-    bridge._degrade_failed_mtp(path, ValueError("no companion"))
+    bridge._degrade_failed_mtp(path, "ValueError: no companion")
     assert "MLX_VLM_DRAFT_MODEL" not in os.environ
     assert "MLX_VLM_DRAFT_KIND" not in os.environ
     assert os.path.abspath(path) not in bridge._MTP_DRAFTER_STASH
@@ -61,14 +67,25 @@ def test_filter_drops_only_the_stash_keyed_line():
         bridge._MTP_DRAFTER_STASH.pop(os.path.abspath(path), None)
 
 
+def test_filter_target_string_still_in_upstream_source():
+    # The filter keys on the engine's literal message prefix; an upstream
+    # rename would silently stop the suppression, so pin it to the source.
+    generation = pytest.importorskip("mlx_vlm.server.generation")
+    src = inspect.getsource(generation)
+    assert "Loading speculative drafter" in src
+
+
 def test_drafter_source_lines(caplog):
     with caplog.at_level(logging.INFO, logger="gmlx.serve.bridge_vlm"):
         bridge._log_drafter_source(
-            "/m/target.gguf", _DFlash2Drafter(), "/m/drafter.gguf")
+            "/m/target.gguf", _DFlash2Drafter("/m/drafter.gguf"),
+            "/m/drafter.gguf")
         bridge._log_drafter_source("/m/target.gguf", _QwenMTPDrafter(), None)
-        bridge._log_drafter_source("/m/target.gguf", _DFlash2Drafter(), None)
+        bridge._log_drafter_source(
+            "/m/target.gguf", _DFlash2Drafter("/m/found.gguf"), None)
     lines = [r.getMessage() for r in caplog.records]
-    assert any("companion" in ln and "drafter.gguf" in ln and "dflash2" in ln
-               for ln in lines)
+    assert any("companion" in ln and "/m/drafter.gguf" in ln
+               and "dflash2" in ln for ln in lines)
     assert any("native MTP head of target.gguf" in ln for ln in lines)
-    assert any("autodetected dflash2 companion" in ln for ln in lines)
+    assert any("autodetected companion" in ln and "/m/found.gguf" in ln
+               and "dflash2" in ln for ln in lines)

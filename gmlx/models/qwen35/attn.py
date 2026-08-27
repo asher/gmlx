@@ -415,11 +415,13 @@ def ragged_decode_attention(queries, keys, values, pads, scale):
     """
     if not mx.metal.is_available():
         return None
-    # Both kernels launch 1024-thread groups, and metal_kernel emits no
-    # max_total_threads_per_threadgroup bound, so a pre-M3 pipeline can
-    # compile with a lower ceiling (measured 640 on an M1 Max) and the
-    # launch throws at eval. None routes the caller to its per-pad-group
-    # mx.fast SDPA fallback. GMLX_FORCE_RAGGED_SDPA=1 overrides for A/B.
+    # The one-pass and two-pass-reduce launches are 1024-thread groups,
+    # and the two-pass scan reaches (32, gqa_factor) - 512 at 16x GQA;
+    # metal_kernel emits no max_total_threads_per_threadgroup bound, so a
+    # pre-M3 pipeline can compile with a lower ceiling (measured 640 on an
+    # M1 Max) and the launch throws at eval. All three launches sit below
+    # this gate. None routes the caller to its per-pad-group mx.fast SDPA
+    # fallback. GMLX_FORCE_RAGGED_SDPA=1 overrides for A/B.
     if not _wide_threadgroups_ok():
         return None
     if (

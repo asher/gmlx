@@ -13,6 +13,7 @@ import mlx.nn as nn
 
 import atexit
 import sys
+from functools import lru_cache
 
 import gmlx.load.loadlog as loadlog
 from gmlx.envflags import env_bool, env_int
@@ -24,15 +25,20 @@ def gpu_active() -> bool:
     return mx.default_device() == mx.gpu
 
 
+@lru_cache(maxsize=None)
 def gdn_sg(B: int) -> int:
     """Simdgroups per (batch, head) tile of the fused GDN kernels.
 
     ``mx.fast.metal_kernel`` emits no ``max_total_threads_per_threadgroup``
     launch bound, so the compiled pipeline's thread ceiling is register-
-    allocation dependent. On pre-M3 GPUs it lands below the 512/1024 threads
-    the M3+ shape (16/32 simdgroups of 32) asks for - measured 448 on an M1
-    Max for the verify pipeline - and the launch throws at eval. 8 simdgroups
-    (256 threads) fits every observed ceiling. GMLX_GDN_SG forces a value.
+    allocation dependent; the M1 Max compiled the 16-simdgroup verify
+    pipeline to a 448-thread ceiling and the 512-thread launch threw at
+    eval. Note the ceiling is a register budget, not a thread count: a
+    smaller SG spends more registers per thread (``my_out[Dv / SG]``
+    doubles when SG halves), so its pipeline has its own, lower ceiling.
+    SG=8 shrinks threads x regs by ~30% at Dv=128 - directionally safe but
+    unvalidated on M1/M2 hardware; if it still throws, GMLX_GDN_SG=4 is the
+    next step. M2 is clamped on the M1 evidence, not its own measurement.
     """
     forced = env_int("GMLX_GDN_SG", 0)
     if forced > 0:

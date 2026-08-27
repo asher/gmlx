@@ -159,3 +159,45 @@ def test_declines_unsupported_head_dim(unified):
     v = mx.random.normal((2, KV_HEADS, 512, d)).astype(DTYPE)
     mx.eval(q, k, v)
     assert lang._qwen3_5_ragged_decode_attention(q, k, v, [0, 0], d**-0.5) is None
+
+
+def test_pre_m3_rebinds_even_with_plan_env_off(monkeypatch):
+    """Pre-M3 the rebind is a threadgroup guard, not an optimization:
+    GMLX_RAGGED_UNIFIED_PLAN=0 must not leave the stock 1024-thread
+    kernels bound."""
+    lang = _lang()
+    import gmlx.spec.ragged_decode as ragged_decode
+    from gmlx.models.qwen35 import attn
+
+    monkeypatch.setattr(attn, "_wide_threadgroups_ok", lambda: False)
+    monkeypatch.setenv("GMLX_RAGGED_UNIFIED_PLAN", "0")
+    orig = lang._qwen3_5_ragged_decode_attention
+    try:
+        lang._qwen3_5_ragged_decode_attention = object()
+        ragged_decode.install_unified_ragged_plan()
+        assert (lang._qwen3_5_ragged_decode_attention
+                is attn.ragged_decode_attention)
+    finally:
+        lang._qwen3_5_ragged_decode_attention = orig
+
+
+def test_guard_rebinds_pre_m3_and_noops_on_wide(monkeypatch):
+    lang = _lang()
+    import gmlx.spec.ragged_decode as ragged_decode
+    from gmlx.models.qwen35 import attn
+
+    monkeypatch.delenv("GMLX_RAGGED_UNIFIED_PLAN", raising=False)
+    orig = lang._qwen3_5_ragged_decode_attention
+    sentinel = object()
+    try:
+        lang._qwen3_5_ragged_decode_attention = sentinel
+        monkeypatch.setattr(attn, "_wide_threadgroups_ok", lambda: True)
+        ragged_decode.install_pre_m3_ragged_guard()
+        assert lang._qwen3_5_ragged_decode_attention is sentinel
+
+        monkeypatch.setattr(attn, "_wide_threadgroups_ok", lambda: False)
+        ragged_decode.install_pre_m3_ragged_guard()
+        assert (lang._qwen3_5_ragged_decode_attention
+                is attn.ragged_decode_attention)
+    finally:
+        lang._qwen3_5_ragged_decode_attention = orig

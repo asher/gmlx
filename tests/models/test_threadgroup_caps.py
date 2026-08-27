@@ -22,8 +22,10 @@ def _clean(monkeypatch):
     monkeypatch.delenv("GMLX_GDN_SG", raising=False)
     monkeypatch.delenv("GMLX_FORCE_RAGGED_SDPA", raising=False)
     attn._wide_threadgroups_ok.cache_clear()
+    gp.gdn_sg.cache_clear()
     yield
     attn._wide_threadgroups_ok.cache_clear()
+    gp.gdn_sg.cache_clear()
 
 
 # ------------------------------------------------------------------ gdn_sg
@@ -32,6 +34,7 @@ def _clean(monkeypatch):
 def test_gdn_sg_m3_and_later_keeps_wide_shape(monkeypatch):
     for gen in (15, 16, 17):
         monkeypatch.setattr(dtypes, "gpu_arch_gen", lambda g=gen: g)
+        gp.gdn_sg.cache_clear()
         assert gp.gdn_sg(1) == 16
         assert gp.gdn_sg(4) == 32
 
@@ -39,6 +42,7 @@ def test_gdn_sg_m3_and_later_keeps_wide_shape(monkeypatch):
 def test_gdn_sg_pre_m3_clamps_to_8(monkeypatch):
     for gen in (13, 14):
         monkeypatch.setattr(dtypes, "gpu_arch_gen", lambda g=gen: g)
+        gp.gdn_sg.cache_clear()
         assert gp.gdn_sg(1) == 8
         assert gp.gdn_sg(4) == 8
 
