@@ -6,7 +6,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.4.2] - 2026-08-25
+## [0.4.3] - 2026-08-26
 
 ### Added
 
@@ -24,6 +24,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   vendored wrapper reusing the qwen3.5 vision tower; interleaved mrope
   position ids thread through the attention and the QSA indexer (block keys
   roped at their cached positions), text-only turns keep the fast rope path.
+
+## [0.4.2] - 2026-08-25
+
+### Added
+
 - `gmlx serve model.gguf --thinking on|off|adaptive` and `--thinking-budget N`
   set the reasoning switch and thinking-token cap for a single positional
   model without a config file (the same `thinking:` / sampling
