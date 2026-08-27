@@ -1341,13 +1341,12 @@ def _run_bench_depths(args) -> int:
     if convs is not None:
         seed = int(getattr(args, "bench_chat_seed", 42))
         from gmlx.tui.chat import fold_thinking_flag
-
-        tkw = fold_thinking_flag(args, parse_template_config(args.chat_template_config))
-        prompt_source = _ChatPromptSource(convs, tok, seed=seed, template_kwargs=tkw)
-        print(
-            f"[bench] prompt slice seed {seed}"
-            + (f" template_config={tkw}" if tkw else "")
-        )
+        tkw = fold_thinking_flag(
+            args, parse_template_config(args.chat_template_config))
+        prompt_source = _ChatPromptSource(
+            convs, tok, seed=seed, template_kwargs=tkw)
+        print(f"[bench] prompt slice seed {seed}"
+              + (f" template_config={tkw}" if tkw else ""))
 
     corpus_label = chat_ds if chat_ds else "synthetic"
     print(
@@ -1615,7 +1614,6 @@ def _run_generate(args) -> int:
     _apply_placement(args, model)
 
     from gmlx.gen.diffusion import is_diffusion_model
-
     if is_diffusion_model(model) and not args._max_tokens_capped:
         # Bounded canvas fallback, shown in the banner; see the constant.
         args.max_tokens = _DIFFUSION_MAX_TOKENS
@@ -2089,7 +2087,6 @@ def split_path_intent(args) -> None:
         return
     head, tail = raw.rsplit("@", 1)
     import gmlx.gen.profiles as fam
-
     if tail in fam.BUILTIN_INTENTS and os.path.exists(os.path.expanduser(head)):
         args.gguf = head
         args.profile = args.profile or tail
@@ -2190,7 +2187,6 @@ def maybe_load_from_config(args, parser, argv) -> int | None:
         # Family detection before resolution, so the family base layer (and
         # family-resolved @intents) shape the overlay exactly like the server.
         from gmlx.load.discovery import fill_families
-
         fill_families(cfg)
         rm = cfgmod.resolve_cli_model(
             raw, cfg, request_profile=getattr(args, "profile", None)
@@ -2544,7 +2540,6 @@ def _umbrella_impl(argv: list[str] | None = None) -> int:
             break
     if verb != "doctor":  # doctor must run on a broken env to diagnose it
         from gmlx.upstream.seams import check_upstream_versions
-
         try:
             check_upstream_versions()
         except RuntimeError as e:
@@ -2561,17 +2556,8 @@ def _umbrella_impl(argv: list[str] | None = None) -> int:
             from gmlx.talk.main import cmd_talk
 
             return cmd_talk(rest, prog=f"{prog} talk")
-        if verb in (
-            "serve",
-            "init",
-            "sync-models",
-            "launch",
-            "stop",
-            "restart",
-            "status",
-            "logs",
-            "service",
-        ):
+        if verb in ("serve", "init", "sync-models", "launch", "stop", "restart",
+                    "status", "logs", "service"):
             from gmlx.serve.server import main as server_main
 
             return server_main(

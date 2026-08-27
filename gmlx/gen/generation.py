@@ -518,7 +518,6 @@ def generate(
         temp=temp, top_p=top_p, top_k=top_k, min_p=min_p, **xtc_kwargs
     )
     from gmlx.load.tokenizer import merge_suppressed_tokens
-
     logit_bias = merge_suppressed_tokens(logit_bias, tokenizer)
     logits_processors = make_logits_processors(
         logit_bias=logit_bias or None,
@@ -1103,7 +1102,6 @@ def _generate_speculative(
     # 4D hidden + rotating-undo rollback) must not run mlx-vlm's stock round;
     # stochastic acceptance also lives only in the owned walk.
     from gmlx.spec.speculative import use_owned_engine
-
     if use_owned_engine(drafter, temp):
         return generate_speculative_owned(
             model,
@@ -1607,8 +1605,8 @@ def _stream_generate_speculative(
     # next turn. GMLX_OWNED_ROUND=0 opts back to the stock round, except for
     # drafters whose contract demands the owned engine.
     from gmlx.spec.speculative import use_owned_engine
-
-    if os.environ.get("GMLX_OWNED_ROUND") != "0" or use_owned_engine(drafter, temp):
+    if (os.environ.get("GMLX_OWNED_ROUND") != "0"
+            or use_owned_engine(drafter, temp)):
         yield from _stream_generate_speculative_owned(
             model,
             drafter,

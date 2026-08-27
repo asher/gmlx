@@ -2660,7 +2660,7 @@ def _synth_deepseek4(meta, shapes, config: dict) -> None:
     DeepSeek V4 Flash (dwarfstar/antirez conversion; llama.cpp has no support
     for this arch - the GGUF layout is defined by the ds4 reference
     engine's loader). The
-    model class is vendored from mlx-lm PR #1192 (gmlx/deepseek_v4_model).
+    model class is vendored from mlx-lm PR #1192 (gmlx/models/deepseek_v4/model.py).
 
     Shape: single shared 512-dim KV latent (head_count_kv=1, K=V), low-rank q
     and grouped low-rank output projections, per-layer compress_ratios

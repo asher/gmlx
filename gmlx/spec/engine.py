@@ -57,7 +57,6 @@ def _get_spec_prefix_cache(model):
     cache = getattr(model, "_spec_prefix_cache", None)
     if cache is None:
         from gmlx.cache.prefix_cache import SpecPrefixCache
-
         max_entries = env_int("GMLX_SPEC_APC_ENTRIES", 4)
         budget_mb = env_int("GMLX_SPEC_APC_BUDGET_MB", 8192)
         cache = SpecPrefixCache(max_entries=max_entries, max_bytes=budget_mb << 20)
@@ -282,7 +281,6 @@ def _ckpt_layout_for(model, block_size: int = 16):
     tags = getattr(model, "_kq_apc_ckpt_layout", None)
     if tags is None:
         from gmlx.cache.snapshot import ckpt_layout
-
         lm = getattr(model, "language_model", None) or model
         try:
             tags = tuple(ckpt_layout(lm.make_cache(), block_size) or ())
@@ -406,8 +404,8 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
             # wins only when strictly longer than the exact-tier pick.
             # Media guards mirror the stock exact probe.
             from gmlx.cache.snapshot import ckpt_lookup
-
-            min_p = max(prefix_len, view._apc_safe_prefix_lookup_min(ids_list))
+            min_p = max(prefix_len,
+                        view._apc_safe_prefix_lookup_min(ids_list))
             cw, cp = ckpt_lookup(
                 manager,
                 ids_list,
@@ -480,8 +478,8 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
             # cache entry, same discipline as the retirement context.
             if not _SPEC_APC_SIDECAR_DISABLED:
                 from gmlx.cache.snapshot import drafter_sidecar_lookup
-
-                side = drafter_sidecar_lookup(manager, ids_list, prefix_len, extra_hash)
+                side = drafter_sidecar_lookup(
+                    manager, ids_list, prefix_len, extra_hash)
                 if side:
                     batch.prompt_cache[0]._kq_apc_drafter_warm = side
                     _log.info("APC sidecar hit: prefix=%d", prefix_len)
@@ -910,7 +908,6 @@ def _snap_fields(batch, manager) -> dict:
     """
     import math
     from gmlx.cache.snapshot import _DECODE_CKPT_DEFAULT
-
     bs = int(manager.block_size)
     tags = _ckpt_layout_live(batch, bs) or ()
     step = int(getattr(batch, "prefill_step_size", 0) or 0)
@@ -967,7 +964,6 @@ def _plain_ckpt_init(batch) -> None:
     view = _L1View(batch.model, manager, mode)
     restored = 0
     from gmlx.cache.snapshot import ckpt_lookup
-
     warm, cp = ckpt_lookup(
         manager,
         ids_list,
@@ -998,7 +994,6 @@ def _plain_ckpt_init(batch) -> None:
     ckpt_note_armed(manager)
     if not _SPEC_APC_RETIRE_DISABLED and batch.prompt_cache:
         from gmlx.cache.retire_key import lookup_render_ctx
-
         batch.prompt_cache[0]._kq_apc_retire = {
             "full_ids": ids_list,
             "extra_hash": extra_hash,
@@ -1191,7 +1186,6 @@ def _plain_step_tick(gb, out) -> None:
             stash["gen"].append(int(tok))
             if solo and stash.get("mode") == "ckpt":
                 from gmlx.cache.snapshot import decode_ckpt_tick
-
                 decode_ckpt_tick(stash, gb.prompt_cache, stash["gen"])
         except Exception:
             stash.pop("gen", None)
@@ -1219,7 +1213,6 @@ def _plain_retire(stash: dict, prompt_cache: list) -> None:
             return
         seq = [int(t) for t in stash["full_ids"]] + gen
         from gmlx.cache.snapshot import _cache_offset_max, retirement_store
-
         offset = _cache_offset_max(prompt_cache)
         if offset == len(seq) - 1:
             seq = seq[:-1]
@@ -1231,7 +1224,6 @@ def _plain_retire(stash: dict, prompt_cache: list) -> None:
         lcp = None
         if os.environ.get("GMLX_APC_RETIRE_LCP") != "0":
             from gmlx.cache.retire_key import next_turn_lcp
-
             lcp = next_turn_lcp(stash.get("render_ctx"), seq, gen)
         max_len = lcp if lcp is not None and lcp < len(seq) else None
         _log.info("APC retire: seq=%d ctx=%s lcp=%s cap=%s",
@@ -1412,7 +1404,6 @@ def _mtp_prefill_init(batch) -> None:
         meta = (batch._apc_meta or [{}])[0] or {}
         full_ids = [int(t) for t in batch._mtp_full_input_ids[0].tolist()]
         from gmlx.cache.retire_key import lookup_render_ctx
-
         batch.prompt_cache[0]._kq_apc_retire = {
             "full_ids": full_ids,
             "extra_hash": int(meta.get("extra_hash", 0)),

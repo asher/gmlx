@@ -1393,7 +1393,6 @@ def _slash_render(cmd, arg, state):
         return None
     if arg == "rich" and not rich_available():
         from gmlx.commands.extras import install_hint
-
         print(f"[chat] rich not installed ({install_hint('chat')})")
         return None
     state.render = arg
@@ -2282,7 +2281,6 @@ def _setup_assistant(args):
     base_url, api_key = ns.base_url, ns.api_key
 
     from gmlx.talk.client import TalkClientError, probe_capabilities
-
     try:
         caps = probe_capabilities(base_url, api_key)
     except TalkClientError as e:
@@ -2341,7 +2339,6 @@ def _setup_assistant(args):
     plain = getattr(args, "server", False)
 
     from gmlx.config import AssistantCfg
-
     a = AssistantCfg()
     if not plain:
         try:
@@ -2368,21 +2365,12 @@ def _setup_assistant(args):
     memory = None
     if a.memory.enabled and not plain:        # the same store talk uses
         from gmlx.assistant.memory import MemoryStore, make_extractor
-
-        extractor = (
-            make_extractor(base_url, model_request, api_key=api_key)
-            if a.memory.extract
-            else None
-        )
-        memory = MemoryStore(
-            base_url=base_url,
-            api_key=api_key,
-            path=a.memory.path,
-            top_k=a.memory.top_k,
-            extract=extractor,
-            ttl_days=a.memory.ttl_days,
-            max_items=a.memory.max_items,
-        )
+        extractor = (make_extractor(base_url, model_request, api_key=api_key)
+                     if a.memory.extract else None)
+        memory = MemoryStore(base_url=base_url, api_key=api_key,
+                             path=a.memory.path, top_k=a.memory.top_k,
+                             extract=extractor, ttl_days=a.memory.ttl_days,
+                             max_items=a.memory.max_items)
 
     # Usage chunks are gated on stream_options server-side; sampling knobs
     # join this dict per turn (see _sync_assistant_extra). Per-chunk stream
@@ -3221,7 +3209,6 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         # chat prints the family note up front: its load is backgrounded and
         # joined mid-REPL, so there is no clean post-load spot for it.
         from gmlx.commands.cli import print_family_note
-
         print_family_note(args)
         if args.adapter and args.mmproj:
             print(
@@ -3499,7 +3486,6 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         _bind_model_state()
 
     from gmlx.commands.extras import install_hint
-
     editor = (
         "prompt_toolkit"
         if state.ptk_session is not None
@@ -4085,7 +4071,6 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             **xtc_kwargs,
         )
         from gmlx.load.tokenizer import merge_suppressed_tokens
-
         logit_bias = merge_suppressed_tokens(logit_bias, tok)
         logits_processors = make_logits_processors(
             logit_bias=logit_bias,
