@@ -209,6 +209,12 @@ class Glm5NextMTPDrafter(QwenMTPDrafter):
 
     def __init__(self, config: Glm5NextMTPConfig):
         nn.Module.__init__(self)
+        if int(config.block_size) != 2:
+            # The accept-path trim rewinds the drafter's own PoolingCache
+            # through its one-update undo log; a deeper rollout appends one
+            # update per draft and cannot rewind past the last one.
+            raise ValueError(
+                "Glm5NextMTPDrafter supports block_size=2 only (v1)")
         self.config = config
         self._native_block_size = (
             native_block_size(config) or int(config.block_size))

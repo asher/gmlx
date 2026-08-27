@@ -252,8 +252,10 @@ def _load_mtp_drafter(
         drafter = Glm5NextMTPDrafter(
             Glm5NextMTPConfig(
                 text_config=ModelArgs.from_dict(config_dict),
-                # < 2 would make the owned decode loop exit after one token.
-                block_size=max(2, env_int("GMLX_GLM5_MTP_BLOCK", 2)),
+                # Pinned at 2: < 2 exits the owned decode loop after one
+                # token, and > 2 needs a multi-update PoolingCache undo log
+                # the drafter-side accept trim does not have yet.
+                block_size=2,
             )
         )
         log(
