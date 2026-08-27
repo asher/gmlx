@@ -731,8 +731,13 @@ _GDN_FUSED_VERIFY_SRC = r"""
             float out = 0.0f;
             for (int i = 0; i < n_per_t; ++i) { st[td][i] += kn[i] * delta; out += st[td][i] * qn[i]; }
             out = simd_sum(out);
-            auto states_t = states + ((((uint)b_idx * Tn + t) * Hv + hv_idx) * Dv + dv) * Dk;
-            for (int i = 0; i < n_per_t; ++i) states_t[n_per_t * lane + i] = (StT)st[td][i];
+            // Rollback targets are positions 0..Tn-2 only (the state after
+            // all Tn positions is state_out and rollback never fires on
+            // full accept), so the last position is not recorded.
+            if (t + 1 < Tn) {
+                auto states_t = states + ((((uint)b_idx * (Tn - 1) + t) * Hv + hv_idx) * Dv + dv) * Dk;
+                for (int i = 0; i < n_per_t; ++i) states_t[n_per_t * lane + i] = (StT)st[td][i];
+            }
             out_t[td] = out;
             if (lane == 0) my_sumsq += out * out;
         }
@@ -1000,7 +1005,10 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink):
         output_shapes=[
             (B, S, self.num_v_heads, Dv),
             state.shape,
-            (B, S, self.num_v_heads, Dv, self.head_k_dim),
+            # Per-position rollback states for positions 0..S-2; position
+            # S-1 would duplicate state_out and no rollback path reads it
+            # (every engine call site guards accepted < bs - 1).
+            (B, S - 1, self.num_v_heads, Dv, self.head_k_dim),
         ],
         output_dtypes=[conv_input.dtype, state.dtype, state.dtype],
     )
