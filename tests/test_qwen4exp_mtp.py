@@ -13,7 +13,7 @@ from gmlx.qwen4_exp_mtp import (
     Qwen4ExpSpecLM,
     remap_qwen4exp_mtp_arrays,
 )
-from tests.test_config_synth import _QWEN4EXP_SHAPES, _qwen4exp_meta
+from test_config_synth import _QWEN4EXP_SHAPES, _qwen4exp_meta
 
 
 def _args(**over):

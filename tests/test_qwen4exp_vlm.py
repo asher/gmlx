@@ -10,7 +10,7 @@ from gmlx.qwen4_exp_model import (
     ModelArgs,
     ensure_registered,
 )
-from tests.test_config_synth import _QWEN4EXP_SHAPES, _qwen4exp_meta
+from test_config_synth import _QWEN4EXP_SHAPES, _qwen4exp_meta
 
 _MM_META = {
     "clip.projector_type": "qwen3vl_merger",
