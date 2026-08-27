@@ -691,6 +691,7 @@ class Glm5NextDeltaAttention(nn.Module):
         x: mx.array,
         mask: Optional[mx.array] = None,
         cache: Optional[Any] = None,
+        gdn_sink: Optional[list] = None,
     ) -> mx.array:
         B, T, _ = x.shape
         dtype = x.dtype
@@ -701,6 +702,17 @@ class Glm5NextDeltaAttention(nn.Module):
         else:
             q_state = k_state = v_state = ssm_state = None
             lengths = None
+
+        if gdn_sink is not None and cache is not None:
+            # MTP verify forward: record the pre-update recurrent state (the
+            # slot arrays are immutable; the writes below replace them) plus
+            # this call's inputs so rollback_verify_sink can replay the
+            # accepted prefix from the pre-state.
+            gdn_sink.append({
+                "layer": self, "cache": cache,
+                "pre": (q_state, k_state, v_state, ssm_state),
+                "inputs": x, "mask": mask,
+            })
 
         q_conv, q_state = self.q_conv(self.q_proj(x), q_state, mask, lengths)
         k_conv, k_state = self.k_conv(self.k_proj(x), k_state, mask, lengths)
@@ -750,6 +762,22 @@ class Glm5NextDeltaAttention(nn.Module):
         return self.o_proj(out.astype(dtype))
 
 
+def rollback_verify_sink(sink: list, n: int) -> None:
+    """Rewind the KDA caches after an MTP verify forward over S positions
+    to the state after its first ``n`` (the accepted prefix): restore the
+    recorded pre-verify conv tails + recurrent state, then replay the layer
+    over the accepted prefix. O(n <= block) per layer; the KV/pool leaves
+    are trimmed by the caller."""
+    for e in sink:
+        cache = e["cache"]
+        for i, v in enumerate(e["pre"]):
+            cache[i] = v
+        mask = e["mask"]
+        if isinstance(mask, mx.array):
+            mask = mask[:, :n]
+        e["layer"](e["inputs"][:, :n], mask=mask, cache=cache)
+
+
 class Glm5NextDecoderLayer(nn.Module):
     """Hyper-connected block: hc_pre -> norm -> sublayer -> hc_expand, twice.
     The eager and fused-M=1 routes mirror deepseek_v4's block and must stay
@@ -781,7 +809,10 @@ class Glm5NextDecoderLayer(nn.Module):
         cache: Optional[Any],
         carry: Optional[tuple] = None,
         carry_mode: bool = False,
+        gdn_sink: Optional[list] = None,
     ):
+        akw = {"gdn_sink": gdn_sink} if (
+            gdn_sink is not None and self.is_linear) else {}
         if self.attn_hc.m1_fused_ok(h):
             # attn front; a pending expand from the caller folds into it
             if carry is not None:
@@ -790,7 +821,7 @@ class Glm5NextDecoderLayer(nn.Module):
             else:
                 front = self.attn_hc.fused_m1(h, self.input_layernorm.weight)
             x, post, comb = front
-            x = self.self_attn(x, mask=mask, cache=cache)
+            x = self.self_attn(x, mask=mask, cache=cache, **akw)
 
             # ffn front always consumes the attn expand inline
             h, front = self.ffn_hc.fused_m1_expand(
@@ -805,7 +836,8 @@ class Glm5NextDecoderLayer(nn.Module):
             h = hc_expand_m1(*carry)
         residual = h
         x, post, comb = self.attn_hc(h)
-        x = self.self_attn(self.input_layernorm(x), mask=mask, cache=cache)
+        x = self.self_attn(self.input_layernorm(x), mask=mask, cache=cache,
+                           **akw)
         residual, x, post, comb = hc_expand_collapse(
             self.ffn_hc, x, residual, post, comb)
         x = self.mlp(self.post_attention_layernorm(x))
@@ -833,6 +865,7 @@ class Glm5NextModel(nn.Module):
         inputs: mx.array,
         cache: Optional[List[Any]] = None,
         return_raw_hidden: bool = False,
+        gdn_sink: Optional[list] = None,
     ) -> mx.array:
         h = self.embed_tokens(inputs)
         if cache is None:
@@ -853,7 +886,8 @@ class Glm5NextModel(nn.Module):
         carry = None
         for layer, layer_cache in zip(self.layers, cache):
             mask = ssm_mask if layer.is_linear else attn_mask
-            h, carry = layer(h, mask, layer_cache, carry=carry, carry_mode=True)
+            h, carry = layer(h, mask, layer_cache, carry=carry,
+                             carry_mode=True, gdn_sink=gdn_sink)
         if carry is not None:
             h = hc_expand_m1(*carry)
 

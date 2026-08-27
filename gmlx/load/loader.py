@@ -636,6 +636,13 @@ _MTP_TARGET_HOOKS_BY_TYPE = {
         "speculative_argmax_from_hidden",
         "speculative_verify_hidden",
     ),
+    # Glm5NextSpecLM (vendored mlx-lm class): same lean set as deepseek_v4.
+    "glm5_next": (
+        "rollback_speculative_cache",
+        "speculative_logits_from_hidden",
+        "speculative_argmax_from_hidden",
+        "speculative_verify_hidden",
+    ),
 }
 
 
@@ -794,6 +801,16 @@ def _mtp_target_classes(model_type: str):
             return muse_glimmer_mtp.MuseGlimmerSpecLM(ModelArgs.from_dict(config))
 
         return muse_glimmer_mtp.MuseGlimmerSpecLM, build
+    if model_type == "glm5_next":
+        import gmlx.models.glm5_next.mtp as glm5_next_mtp
+        from gmlx.models.glm5_next.model import ModelArgs, ensure_registered
+
+        ensure_registered()
+
+        def build(config):
+            return glm5_next_mtp.Glm5NextSpecLM(ModelArgs.from_dict(config))
+
+        return glm5_next_mtp.Glm5NextSpecLM, build
     from .arch_table import MTP_WIRED_MODEL_TYPES
 
     raise NotImplementedError(
