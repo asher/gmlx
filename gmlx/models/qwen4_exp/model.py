@@ -257,8 +257,10 @@ _HC_NORM_SRC = r"""
     float tot = 0.0f;
     for (int s = 0; s < SGS; ++s) tot += ssq[s];
     float scale = rsqrt(tot / (float)D + eps[0]);
+    // normalized value rounds to InT before the gain multiply, matching
+    // mx.fast.rms_norm's rounding points
     for (uint d = flat; d < (uint)D; d += SGS * 32)
-        y_[d] = (InT)((float)x_[d] * scale * (float)g_[d]);
+        y_[d] = (InT)((float)(InT)((float)x_[d] * scale) * (float)g_[d]);
 """
 
 _HC_EPI_SRC = r"""
@@ -267,17 +269,21 @@ _HC_EPI_SRC = r"""
     uint d = gid % D;
     auto u_ = upo + (size_t)bt * HC * D + d;
     auto x_ = xn + (size_t)bt * HC * D + d;
+    // InT casts mirror the eager op chain's per-op rounding (sigmoid ->
+    // InT gate, gate*xn -> InT product, fp32 mean); without them the
+    // fp32 drift compounds across the 96 combines per token
     float acc = 0.0f;
     for (int s = 0; s < HC; ++s) {
         float uv = (float)u_[(size_t)s * D];
-        float sig = 1.0f / (1.0f + metal::precise::exp(-uv));
-        acc += sig * (float)x_[(size_t)s * D];
+        float sig = (float)(InT)(1.0f / (1.0f + metal::precise::exp(-uv)));
+        acc += (float)(InT)(sig * (float)x_[(size_t)s * D]);
     }
     mixed[gid] = (InT)(acc * (1.0f / (float)HC));
     if (d < (uint)HC) {
-        float iv = injo[(size_t)bt * HC + d] * (1.0f / (float)HC);
+        float iv = (float)(InT)(injo[(size_t)bt * HC + d]
+                                * (1.0f / (float)HC));
         inj[(size_t)bt * HC + d] =
-            2.0f / (1.0f + metal::precise::exp(-iv));
+            2.0f * (float)(InT)(1.0f / (1.0f + metal::precise::exp(-iv)));
     }
 """
 
@@ -286,8 +292,10 @@ _HC_COMBINE_SRC = r"""
     uint d = gid % D;
     uint s_idx = (gid / D) % HC;
     uint bt = gid / (HC * D);
+    // product rounds to InT before the add, mirroring the eager ops
     yn[gid] = (InT)((float)h[gid]
-        + (float)out[(size_t)bt * D + d] * inj[(size_t)bt * HC + s_idx]);
+        + (float)(InT)((float)out[(size_t)bt * D + d]
+                       * inj[(size_t)bt * HC + s_idx]));
 """
 
 _hc_prefill_kerns = None
