@@ -1179,6 +1179,32 @@ class Attention(nn.Module):
                   and (bs := _kq_bs_prefill()) is not None):
                 out = self._split_regime_prefill(q, k, v, sel, complete,
                                                  offset, L, key_len, bs)
+            elif (B == 1 and L > 8 and L % 4 != 0
+                  and not isinstance(mask, mx.array)
+                  and (all_sparse or offset % 4 == 0)
+                  and self.ratio == 4 and D == 256 and H == 12 * Hkv
+                  and q.dtype in (mx.bfloat16, mx.float16)
+                  and (offset + (L - L % 4) + 1) // self.ratio
+                  > self.indexer.block_topk
+                  and (bs := _kq_bs_prefill()) is not None):
+                # Ragged window (serve one-shots whole prompts, so L rarely
+                # lands on a multiple of 4): 4-aligned head through the
+                # kernel paths, the <=3 tail queries through the gathered
+                # path. Without this the whole chunk pays the dense token
+                # mask.
+                Lh = L - L % 4
+                if all_sparse:
+                    head = self._block_sparse_prefill(
+                        q[..., :Lh, :], k, v, sel[:, :Lh], offset,
+                        key_len, bs)
+                else:
+                    head = self._split_regime_prefill(
+                        q[..., :Lh, :], k, v, sel[:, :Lh], complete[:Lh],
+                        offset, Lh, key_len, bs)
+                tail = self._gathered_attention(
+                    q[..., Lh:, :], k, v, sel[:, Lh:], complete[Lh:],
+                    offset + Lh, L - Lh)
+                out = mx.concatenate([head, tail], axis=2)
             else:
                 qsa = _qsa_token_mask(sel, complete, offset, L, key_len,
                                       self.ratio, self.indexer.block_topk)
