@@ -1253,6 +1253,10 @@ class SparseMoeBlock(nn.Module):
         scores = mx.take_along_axis(gates, inds, axis=-1)
         if self.norm_topk_prob:
             scores = scores / scores.sum(axis=-1, keepdims=True)
+        # Routing math runs fp32 (kept router weights); the weighted sum
+        # returns to the activation dtype so the fp32 scores do not
+        # promote the residual stream for every downstream layer.
+        scores = scores.astype(x.dtype)
         y = self.switch_mlp(x, inds)
         y = (y * scores[..., None]).sum(axis=-2)
         shared_y = self.shared_expert(x)
