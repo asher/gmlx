@@ -687,10 +687,13 @@ _GDN_FUSED_VERIFY_SRC = r"""
     }
 
     for (uint t = 0; t < Tn; ++t) {
-        float ab = (float)a[(b_idx * Tn + t) * Hv + hv_idx] + dtb;
+        // ba packs the b then a projections per position ([B, T, 2, Hv]):
+        // one combined gemv upstream instead of two tiny dispatches.
+        uint ba_base = ((b_idx * Tn + t) * 2) * Hv;
+        float ab = (float)ba[ba_base + Hv + hv_idx] + dtb;
         float sp = ab > 20.0f ? ab : log(1.0f + exp(ab));
         float g = exp(-A * sp);
-        float beta = 1.0f / (1.0f + exp(-(float)b[(b_idx * Tn + t) * Hv + hv_idx]));
+        float beta = 1.0f / (1.0f + exp(-(float)ba[ba_base + hv_idx]));
 
         auto ci_t = ci_b + t * conv_dim;
         float qn[n_per_t], kn[n_per_t];
@@ -773,8 +776,7 @@ _gdn_fused_verify_kernel = (
         input_names=[
             "conv_input",
             "conv_weight",
-            "a",
-            "b",
+            "ba",
             "A_log",
             "dt_bias",
             "state_in",
@@ -937,8 +939,40 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink):
 
     mixed_qkv = self.in_proj_qkv(inputs)
     z = _bf16_verify_linear(self.in_proj_z, inputs)
-    b = _bf16_verify_linear(self.in_proj_b, inputs)
-    a = _bf16_verify_linear(self.in_proj_a, inputs)
+    # b and a are tiny [D -> Hv] dense rows; two separate dispatches cost
+    # ~2x the combined one at these sizes, so run them as one [2 * Hv]
+    # gemv against the concatenated weight (row-independent, bit-exact).
+    ba_key = (id(self.in_proj_b.weight), id(self.in_proj_a.weight))
+    cba = getattr(self, "_gdn_verify_ba_weight", None)
+    if cba is None or cba[0] != ba_key:
+        fuse_ok = (
+            _F16_HEAD_GEMV is not None
+            and getattr(self.in_proj_b, "bias", None) is None
+            and getattr(self.in_proj_a, "bias", None) is None
+            and not hasattr(self.in_proj_b, "scales")
+            and not hasattr(self.in_proj_a, "scales")
+            and self.in_proj_b.weight.dtype == self.in_proj_a.weight.dtype
+        )
+        wba = None
+        if fuse_ok:
+            wba = mx.concatenate(
+                [self.in_proj_b.weight, self.in_proj_a.weight], axis=0
+            )
+            mx.eval(wba)
+        cba = (ba_key, wba)
+        self._gdn_verify_ba_weight = cba
+    if cba[1] is not None:
+        ba = _f16_head_gemv(inputs, cba[1])
+    else:
+        ba = mx.concatenate(
+            [
+                _bf16_verify_linear(self.in_proj_b, inputs),
+                _bf16_verify_linear(self.in_proj_a, inputs),
+            ],
+            axis=-1,
+        )
+    b = ba[..., : self.num_v_heads]
+    a = ba[..., self.num_v_heads :]
     z = z.reshape(B, S, self.num_v_heads, Dv)
 
     conv_state = cache[0] if (cache is not None and cache[0] is not None) else None
@@ -977,8 +1011,7 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink):
         inputs=[
             conv_input,
             conv_weight,
-            a,
-            b,
+            ba,
             self.A_log,
             self.dt_bias,
             state,
