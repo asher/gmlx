@@ -350,7 +350,17 @@ class Glm5NextIndexer(nn.Module):
         scores = mx.maximum(scores, 0)
         scores = (scores * w.swapaxes(-1, -2)[..., None]).sum(axis=1)
 
-        pmask = pool_cache.make_mask(L, offset) if pool_cache is not None else None
+        if pool_cache is not None:
+            pmask = pool_cache.make_mask(L, offset)
+        elif L > 1:
+            # Cacheless forward: apply the same visibility predicate
+            # (p < (q + 1) // kpool) so early queries cannot burn selection
+            # slots on their own future's pools.
+            pool_idx = mx.arange(pooled.shape[1])
+            query_idx = mx.arange(offset + 1, offset + L + 1)
+            pmask = pool_idx < query_idx[:, None] // self.kpool
+        else:
+            pmask = None
         if pmask is not None:
             scores = mx.where(
                 pmask if pmask.ndim == 3 else pmask[None],
@@ -411,6 +421,9 @@ class Glm5NextMLAAttention(nn.Module):
             self.num_heads * self.v_head_dim, hidden, bias=False)
         self.indexer = Glm5NextIndexer(args)
         self._kpool = args.index_kpool
+        # Debug/test seam: False routes sparse decode through the masked
+        # path instead of the latent gather (same function).
+        self._decode_gather = True
 
     def _sparse_mask(self, sel_pools, offset: int, L: int, S: int):
         """Bool visibility mask [B, L, S] for the masked-SDPA sparse path:
@@ -484,7 +497,8 @@ class Glm5NextMLAAttention(nn.Module):
         q = q.reshape(B, L, self.num_heads, self.q_head_dim).transpose(
             0, 2, 1, 3)
 
-        if sel_pools is not None and L == 1 and isinstance(offset, int):
+        if (sel_pools is not None and L == 1 and isinstance(offset, int)
+                and self._decode_gather):
             # Sparse decode: gather the selected latents + the tail rows and
             # run absorbed MQA over them. Every gathered row is a complete
             # visible pool member or the tail, so no mask is needed.

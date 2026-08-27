@@ -45,8 +45,15 @@ CANDIDATE_ARCHES = [
     "nemotron_h_moe", "deepseek2", "mixtral", "glm4moe", "gpt-oss",
     "seed_oss", "smollm3", "granite", "ernie4_5-moe", "minimax-m2", "minimax-m3",
     "hunyuan-moe", "granitehybrid", "falcon-h1", "qwen3next", "hy_v3",
-    "kimi-k3", "muse-glimmer", "qwen4exp",
+    "kimi-k3", "muse-glimmer", "qwen4exp", "glm5next",
 ]
+
+# Per-arch extra flags for the llama.cpp reference run.
+#   glm5next - the flash-attention path casts the NoPE MLA latents to f16
+#   and corrupts; llama.cpp PR 27754 is verified with -fa off.
+PARITY_EXTRA_ARGS: dict[str, list[str]] = {
+    "glm5next": ["-fa", "off"],
+}
 
 TARGET = int(os.environ.get("KQUANT_LONGCTX_TOKENS", "16384"))
 
@@ -190,7 +197,7 @@ def _build_prompt(tok, n_tokens):
     return decoded, tok.encode(decoded, add_special_tokens=False)
 
 
-def _llama_complete(binary, model_path, prompt_text, n, ctx):
+def _llama_complete(binary, model_path, prompt_text, n, ctx, extra_args=()):
     """Greedy llama.cpp continuation + reported prompt-token count."""
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
         f.write(prompt_text)
@@ -201,7 +208,8 @@ def _llama_complete(binary, model_path, prompt_text, n, ctx):
         ngl = os.environ.get("KQUANT_LLAMACPP_NGL", "99")
         cmd = [binary, "-m", model_path, "-f", pf, "-no-cnv",
                "--temp", "0", "-n", str(n), "-ngl", ngl, "-c", str(ctx),
-               "--no-warmup", "--no-display-prompt", "--simple-io", "-s", "0"]
+               "--no-warmup", "--no-display-prompt", "--simple-io", "-s", "0",
+               *extra_args]
         r = subprocess.run(
             cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL,
             timeout=int(os.environ.get("KQUANT_LLAMACPP_TIMEOUT", "1200")))
@@ -284,7 +292,8 @@ def test_long_prefill_parity(arch, dtype, gguf_index, llamacpp_bin, monkeypatch)
     mx.clear_cache()
     llama_ctx = min(_ctx(config), len(ids) + 24 + 64)
     llama_cont, n_prompt = _llama_complete(
-        llamacpp_bin, path, prompt_text, n=24, ctx=llama_ctx)
+        llamacpp_bin, path, prompt_text, n=24, ctx=llama_ctx,
+        extra_args=PARITY_EXTRA_ARGS.get(arch, ()))
     model, _, _ = _load(path)
 
     # llama.cpp prepends BOS by default; match it when it did (SPM archs) and
