@@ -34,6 +34,7 @@ plain NEOX rope.
 
 import importlib
 import math
+import os
 import sys
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
@@ -1612,3 +1613,40 @@ class Model(nn.Module):
             else:
                 caches.append(KVCache())
         return caches
+
+
+# Arch-default prefill chunk once the split-regime QSA path is armed (8192
+# measured 913 vs 758 tps at d8192 over the stock 2048 chunk: MoE gather
+# segments grow ~19 -> ~35 TF and the split path keeps QSA out of the dense
+# token-mask quadratic). Without the kq block-sparse prefill kernel the big
+# window falls back to that dense mask and loses, so the profile only arms
+# with the kernel present. Score transient: the indexer's [B, heads, L,
+# depth/ratio] fp32 block scores. GMLX_Q4_PREFILL_STEP overrides in either
+# direction; an explicit PREFILL_STEP_SIZE (flag/config/env) wins over both,
+# and the decode-pressure tick term shrinks live chunks regardless of base.
+_Q4_BASE_STEP: Optional[int] = 8192
+
+
+def _q4_base_step() -> Optional[int]:
+    env = os.environ.get("GMLX_Q4_PREFILL_STEP")
+    if env:
+        try:
+            n = int(env)
+            return n if n > 0 else None
+        except ValueError:
+            return None
+    return _Q4_BASE_STEP
+
+
+_prefill_decay = importlib.import_module("gmlx.gen.prefill_decay")
+
+_prefill_score_profile = _prefill_decay.build_score_profile(
+    profile=lambda: _prefill_decay.ScoreTransientProfile(
+        heads=4, bytes_per_elem=4, depth_divisor=4,
+        base_step=_q4_base_step()),
+    kernels_armed=lambda: _kq_bs_prefill() is not None,
+    require_cache=QSAKVCache,
+)
+
+
+_prefill_decay.register_score_profile("qwen4_exp", _prefill_score_profile)
