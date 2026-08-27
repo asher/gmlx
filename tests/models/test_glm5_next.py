@@ -450,6 +450,44 @@ def test_streamed_prefill_matches_short_path(monkeypatch):
     np.testing.assert_allclose(streamed, base, rtol=5e-3, atol=5e-3)
 
 
+@pytest.mark.parametrize("total", [14, 15, 16, 17, 21])
+def test_gathered_sparse_prefill_matches_masked_path(monkeypatch, total):
+    # The union-gather sparse application must match both the full-width
+    # masked (streamed) application and the plain unstreamed forward, at
+    # every prompt-length residue mod kpool, with multi-block and partial
+    # query blocks, and at nonzero chunk offsets.
+    args = _tiny_args()
+    model = _random_model(args, seed=31)
+    toks = [int(t) for t in
+            np.random.RandomState(3).randint(2, 60, size=total)]
+    base = np.array(model(mx.array([toks]), cache=model.make_cache()),
+                    dtype=np.float32)
+
+    monkeypatch.setattr(glm5_model, "_STREAM_MIN_KEYS", 4)
+    monkeypatch.setattr(glm5_model, "_STREAM_Q", 4)
+
+    def run(split):
+        cache = model.make_cache()
+        if split:
+            model(mx.array([toks[:split]]), cache=cache)
+            out = model(mx.array([toks[split:]]), cache=cache)
+        else:
+            out = model(mx.array([toks]), cache=cache)
+        return np.array(out, dtype=np.float32)[0, -1]
+
+    for split in (0, 6, 9):
+        monkeypatch.setattr(glm5_model, "_SPARSE_GATHER", True)
+        gathered = run(split)
+        monkeypatch.setattr(glm5_model, "_SPARSE_GATHER", False)
+        masked = run(split)
+        np.testing.assert_allclose(
+            gathered, masked, rtol=2e-3, atol=2e-3,
+            err_msg=f"gather vs masked, split={split}")
+        np.testing.assert_allclose(
+            gathered, base[0, -1], rtol=5e-3, atol=5e-3,
+            err_msg=f"gather vs base, split={split}")
+
+
 def test_sparse_disable_is_identity_below_threshold(monkeypatch):
     args = _tiny_args()
     model = _random_model(args)

@@ -79,6 +79,7 @@ from gmlx.models.kimi_k3 import ShortConv1d, _kda_decay_lb
 _MOE_MIX_SCORES = os.environ.get("GMLX_GLM5_MOE_MIX", "1") != "0"
 _SPARSE_DISABLE = os.environ.get("GMLX_GLM5_SPARSE_DISABLE", "0") == "1"
 _ABSORBED_PREFILL = os.environ.get("GMLX_GLM5_ABSORBED_PREFILL", "0") == "1"
+_SPARSE_GATHER = os.environ.get("GMLX_GLM5_SPARSE_GATHER", "1") != "0"
 
 
 def ensure_registered() -> None:
@@ -499,6 +500,95 @@ class Glm5NextMLAAttention(nn.Module):
         # path instead of the latent gather (same function).
         self._decode_gather = True
 
+    def _gathered_sparse_prefill(
+        self, q_n, latent_d, sel_pools, offset: int, L: int, S: int
+    ) -> mx.array:
+        """Sparse prefill over gathered keys instead of a full-width mask.
+
+        Selections inside a 512-query block overlap heavily (~0.5-0.8 of
+        the visible pools measured on real prompts), so per block the keys
+        reduce to: the union of pools every block query could see whole
+        (pool id < the block's earliest tail start), gathered once, plus
+        the block's dense local span, where per-query tails and pools that
+        complete mid-block live. Visibility per row is rebuilt over the
+        gathered columns - selected-pool membership for the union part,
+        ``causal & (tail | selected-member)`` for the local part - so the
+        attended set per query is exactly the masked path's.
+
+        Spilled selections (queries with fewer visible pools than
+        select_k) can only name invisible pools, which are all >= the
+        query's own pool horizon and therefore >= the union cutoff: the
+        keep filters drop every spill.
+
+        One bounded host sync per block reads the union size; each block's
+        output is eval'd so the [H, block, G] score transient is freed
+        before the next block (the _chunked_prefill memory idiom)."""
+        r = self._kpool
+        n_pools = S // r
+        outs = []
+        for j0 in range(0, L, _STREAM_Q):
+            j1 = min(j0 + _STREAM_Q, L)
+            lb = j1 - j0
+            ls = (offset + j0 + 1) // r * r
+            lp = ls // r
+            sel_j = sel_pools[0, j0:j1]
+
+            parts = []
+            mask_parts = []
+            q_abs = offset + mx.arange(j0, j1)[:, None]
+
+            if lp > 0:
+                keep = sel_j < lp
+                safe = mx.where(keep, sel_j, n_pools)
+                present = mx.zeros((n_pools + 1,), dtype=mx.bool_)
+                present = mx.put_along_axis(
+                    present, safe.reshape(-1), mx.array(True), axis=0
+                )[:lp]
+                pres_i = present.astype(mx.int32)
+                ranks = mx.cumsum(pres_i) - pres_i
+                U = int(present.sum())
+                if U > 0:
+                    ids = mx.arange(lp)
+                    order = mx.argsort(mx.where(present, ids, lp + ids))
+                    ptok = (order[:U, None] * r
+                            + mx.arange(r)).reshape(-1)
+                    parts.append(ptok)
+                    sel_rank = mx.where(
+                        keep,
+                        mx.take(ranks, mx.minimum(sel_j, lp - 1)),
+                        U)
+                    vis_p = mx.zeros((lb, U + 1), dtype=mx.bool_)
+                    vis_p = mx.put_along_axis(
+                        vis_p, sel_rank, mx.array(True), axis=-1)[:, :U]
+                    mask_parts.append(mx.broadcast_to(
+                        vis_p[..., None], (lb, U, r)).reshape(lb, -1))
+
+            local = mx.arange(ls, offset + j1)
+            parts.append(local)
+            causal = local[None] <= q_abs
+            tail = local[None] >= (q_abs + 1) // r * r
+            npl = (offset + j1 - 1) // r - lp + 1
+            keep_l = (sel_j >= lp) & (sel_j < lp + npl)
+            bm = mx.zeros((lb, npl + 1), dtype=mx.bool_)
+            bm = mx.put_along_axis(
+                bm, mx.where(keep_l, sel_j - lp, npl), mx.array(True),
+                axis=-1)[:, :npl]
+            member = mx.take_along_axis(
+                bm, mx.broadcast_to((local // r - lp)[None], causal.shape),
+                axis=-1)
+            mask_parts.append(causal & (tail | member))
+
+            tok = parts[0] if len(parts) == 1 else mx.concatenate(parts)
+            kv_g = mx.take(latent_d[0, 0], tok, axis=0)[None, None]
+            blk_mask = (mask_parts[0] if len(mask_parts) == 1
+                        else mx.concatenate(mask_parts, axis=-1))
+            out_b = scaled_dot_product_attention(
+                q_n[:, :, j0:j1], kv_g, kv_g, cache=None, scale=self.scale,
+                mask=blk_mask[None, None])
+            mx.eval(out_b)
+            outs.append(out_b)
+        return outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=2)
+
     def _sparse_mask(self, sel_pools, offset: int, L: int, S: int):
         """Bool visibility mask [B, L, S] for the masked-SDPA sparse path:
         causal AND (own trailing tail OR a selected pool's member).
@@ -593,22 +683,31 @@ class Glm5NextMLAAttention(nn.Module):
                 q_n, kv_g, kv_g, cache=None, scale=self.scale, mask=None)
             out = self.unembed_out(out)
         elif sel_pools is not None:
-            # Sparse prefill/chunk: selection mask over the full latent.
+            # Sparse prefill/chunk: gathered keys past the streaming
+            # threshold, a selection mask over the full latent below it.
             latent_d = _dequantized(latent_all, kv_cache)
-            smask = self._sparse_mask(
-                sel_pools, offset, L, latent_d.shape[2])[:, None]
-            if latent_d.shape[2] > _STREAM_MIN_KEYS:
+            S = latent_d.shape[2]
+            if (S > _STREAM_MIN_KEYS and B == 1 and _SPARSE_GATHER
+                    and isinstance(offset, int)):
+                q_n = self.embed_q(q)
+                out = self._gathered_sparse_prefill(
+                    q_n, latent_d, sel_pools, offset, L, S)
+                out = self.unembed_out(out)
+            elif S > _STREAM_MIN_KEYS:
+                smask = self._sparse_mask(sel_pools, offset, L, S)[:, None]
                 q_n = self.embed_q(q)
                 out = _streamed_absorbed_attention(
                     q_n, latent_d, smask, self.scale)
                 out = self.unembed_out(out)
             elif _ABSORBED_PREFILL:
+                smask = self._sparse_mask(sel_pools, offset, L, S)[:, None]
                 q_n = self.embed_q(q)
                 out = scaled_dot_product_attention(
                     q_n, latent_d, latent_d, cache=None, scale=self.scale,
                     mask=smask)
                 out = self.unembed_out(out)
             else:
+                smask = self._sparse_mask(sel_pools, offset, L, S)[:, None]
                 k = self.embed_q(latent_d, transpose=False)
                 v = self.unembed_out(latent_d)
                 out = scaled_dot_product_attention(
