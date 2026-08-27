@@ -87,7 +87,7 @@ def mtp_draft_gguf():
 
 @pytest.fixture(scope="session")
 def mtp_model(mtp_gguf, mtp_draft_gguf):
-    from gmlx.mtp_load import load_mtp_model
+    from gmlx.spec.mtp_load import load_mtp_model
     return load_mtp_model(
         mtp_gguf, draft_gguf_path=mtp_draft_gguf, verbose=False
     )
@@ -117,7 +117,7 @@ def _ref_first_token(model, ids):
 
 
 def _make_processor(tokenizer):
-    from gmlx.server_bridge_vlm import _make_text_processor
+    from gmlx.serve.bridge_vlm import _make_text_processor
     return _make_text_processor(tokenizer)
 
 
@@ -131,7 +131,7 @@ def _embed_prompts(model, ids_list):
 
 
 def _install_patches():
-    from gmlx.spec_engine import (
+    from gmlx.spec.engine import (
         install_full_prompt_mtp_prefill,
         install_owned_spec_engine,
         install_continuous_batch_admission,
@@ -153,7 +153,8 @@ def _snapshot_q35_seams():
     # of this file (the tests themselves skip without the env var).
     try:
         from mlx_vlm.models.qwen3_5 import language as q35
-        from gmlx import gdn_patches, qwen35_verify_fold
+        import gmlx.upstream.gdn_patches as gdn_patches
+        import gmlx.models.qwen35.verify_fold as qwen35_verify_fold
         return (
             q35._target_verify_left_padded_attention,
             q35.scaled_dot_product_attention,
@@ -173,7 +174,8 @@ def teardown_module(module):
     if _q35_seams is None:
         return
     from mlx_vlm.models.qwen3_5 import language as q35
-    from gmlx import gdn_patches, qwen35_verify_fold
+    import gmlx.upstream.gdn_patches as gdn_patches
+    import gmlx.models.qwen35.verify_fold as qwen35_verify_fold
     (q35._target_verify_left_padded_attention,
      q35.scaled_dot_product_attention,
      q35._target_verify_linear) = _q35_seams[:3]
@@ -295,7 +297,7 @@ def test_prefill_step_env_override(monkeypatch):
 
     from mlx_vlm.generate.ar import PromptProcessingBatch
 
-    from gmlx import spec_engine
+    import gmlx.spec.engine as spec_engine
 
     spec_engine.install_full_prompt_mtp_prefill()
     monkeypatch.setattr(spec_engine, "_mtp_prefill_init", lambda s: None)
@@ -455,7 +457,7 @@ def test_apc_restore_transparency(mtp_model):
     is introduced by the snapshot/restore path itself)."""
     from mlx_lm.models.cache import make_prompt_cache
 
-    from gmlx.prefix_cache import SpecPrefixCache
+    from gmlx.cache.prefix_cache import SpecPrefixCache
 
     model, drafter, config, tokenizer = mtp_model
     lm = model.language_model
@@ -659,8 +661,8 @@ def test_l1_sidecar_warm_start(mtp_model):
     keeps first-token parity. Third run disables the sidecar via the kill
     switch and must fall back to a plain L1 hit (acceptance-parity numbers
     are the D-run's job; this certifies plumbing + correctness)."""
-    import gmlx.speculative as _spec
-    import gmlx.spec_engine as _eng
+    import gmlx.spec.speculative as _spec
+    import gmlx.spec.engine as _eng
     from mlx_vlm.apc import APCManager
 
     model, drafter, config, tokenizer = mtp_model
@@ -740,7 +742,7 @@ def test_ckpt_warm_start_and_fallback(mtp_model):
     tier is invisible both ways: a re-run of the cold turn stores stock
     exact entries again, and the following warm turn hits tier=exact with
     the same parity."""
-    import gmlx.spec_engine as _eng
+    import gmlx.spec.engine as _eng
     from mlx_vlm.apc import APCManager
 
     model, drafter, config, tokenizer = mtp_model
@@ -933,7 +935,7 @@ def test_l1_kill_switch(mtp_model, monkeypatch):
     """GMLX_SPEC_APC=0 must disable the L1 lookup even with a manager
     stashed. (The flag is read at import; patch the module constant.)"""
     from mlx_vlm.apc import APCManager
-    import gmlx.spec_engine as spec_engine
+    import gmlx.spec.engine as spec_engine
 
     model, drafter, config, tokenizer = mtp_model
     _install_patches()
@@ -1099,10 +1101,10 @@ def test_width_cap_gated_batch_matches_ungated_greedy(mtp_model, monkeypatch,
     be token-identical to the same batch decoded speculatively: MTP is a
     speed optimization, so gating it may not move a single token.
 
-    Unit coverage for the gate's mechanics is tests/test_mtp_width_cap.py;
+    Unit coverage for the gate's mechanics is tests/spec/test_mtp_width_cap.py;
     this is the end-to-end arm through the real engine and a real model.
     """
-    import gmlx.speculative as spec
+    import gmlx.spec.speculative as spec
 
     model, drafter, config, tokenizer = mtp_model
     if not _drafter_supports_batch(drafter):
@@ -1139,7 +1141,7 @@ def test_width_cap_leaves_single_stream_speculating(mtp_model, monkeypatch,
                                                     capfd):
     """A cap only gates batches wider than it: a lone request still drafts,
     which is where the whole speedup lives."""
-    import gmlx.speculative as spec
+    import gmlx.spec.speculative as spec
 
     model, drafter, config, tokenizer = mtp_model
     ids = [_build_prompt(tokenizer, 300, seed=_SEED)]
@@ -1345,7 +1347,7 @@ def test_apc_hit_on_injected_request(mtp_model):
     apc_hit_seen = False
 
     # Capture APC log to verify the hit actually fired.
-    apc_log = logging.getLogger("gmlx.spec_engine")
+    apc_log = logging.getLogger("gmlx.spec.engine")
     log_messages = []
     handler = logging.Handler()
     handler.emit = lambda record: log_messages.append(record.getMessage())

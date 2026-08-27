@@ -14,7 +14,7 @@ import pytest
 from gguf import GGUFWriter, GGMLQuantizationType as GT, quants  # noqa: E402
 from gguf.constants import GGML_QUANT_SIZES  # noqa: E402
 
-from gmlx.preflight import (  # noqa: E402
+from gmlx.load.preflight import (  # noqa: E402
     SUPPORTED_QUANT_TYPES,
     UnsupportedCodecError,
     find_split_shards,

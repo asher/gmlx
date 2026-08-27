@@ -11,14 +11,15 @@ import pytest
 
 pytest.importorskip("mlx_vlm")
 
-import gmlx.capacity as cap  # noqa: E402
-import gmlx.estimate as est  # noqa: E402
-import gmlx.queue_cap as qc  # noqa: E402
-from gmlx import launch, server_bridge_vlm as serving  # noqa: E402
+import gmlx.serve.capacity as cap  # noqa: E402
+import gmlx.serve.estimate as est  # noqa: E402
+import gmlx.serve.queue_cap as qc  # noqa: E402
+import gmlx.commands.launch as launch  # noqa: E402
+import gmlx.serve.bridge_vlm as serving  # noqa: E402
 from gmlx.config import build_config  # noqa: E402
-from gmlx.server_patches import _common as sp_common  # noqa: E402
-from gmlx.server_patches import capacity_routes as cr  # noqa: E402
-from gmlx.server_patches import routes as sp_routes  # noqa: E402
+from gmlx.serve.patches import _common as sp_common  # noqa: E402
+from gmlx.serve.patches import capacity_routes as cr  # noqa: E402
+from gmlx.serve.patches import routes as sp_routes  # noqa: E402
 
 _APP = importlib.import_module("mlx_vlm.server.app")
 _PKG = importlib.import_module("mlx_vlm.server")
@@ -43,7 +44,7 @@ def _restore(monkeypatch):
 
 
 def _env(monkeypatch, *, band="green", width=4, in_flight=0, waiting=0, table=True):
-    import gmlx.governor as gov
+    import gmlx.serve.governor as gov
     monkeypatch.setattr(gov, "governor_stats", lambda: {"band": band})
     monkeypatch.setattr(qc, "concurrency_stats", lambda: {
         "decode_batch": width, "queue_cap": 2 * width,
@@ -107,7 +108,7 @@ def test_plan_route(monkeypatch):
 
 # --- rates
 def test_rates_view(monkeypatch):
-    import gmlx.live_requests as lr
+    import gmlx.serve.live_requests as lr
     monkeypatch.setattr(lr, "live_requests_view", lambda: [
         {"state": "decode", "decode_tok_s": 30.5},
         {"state": "decode", "decode_tok_s": 40.0},
@@ -180,8 +181,8 @@ def test_estimate_validation_and_non_resident():
 def test_estimate_resident_prices_like_the_preflight(monkeypatch):
     import mlx.core as mx
 
-    import gmlx.mem_preflight as mp
-    import gmlx.prefill_decay as pd
+    import gmlx.serve.mem_preflight as mp
+    import gmlx.gen.prefill_decay as pd
 
     serving.register_resolved_models(build_config(
         {"models": {"q": {"path": "/abs/q.gguf"}}}))
@@ -219,7 +220,7 @@ def test_estimate_resident_prices_like_the_preflight(monkeypatch):
     monkeypatch.setattr(gen_mod, "get_configured_context_limit", lambda: 8)
     monkeypatch.setattr(_RUNTIME, "metrics", SimpleNamespace(
         _recent=[{"prefill_tok_s": 100.0}], _requests_completed=0), raising=False)
-    import gmlx.governor as gov
+    import gmlx.serve.governor as gov
     monkeypatch.setattr(gov, "governor_stats", lambda: {"band": "green"})
     monkeypatch.setattr(qc, "concurrency_stats", lambda: {
         "decode_batch": 4, "queue_cap": 8, "in_flight": 1, "waiting": 0})
@@ -244,7 +245,7 @@ def test_estimate_resident_prices_like_the_preflight(monkeypatch):
 
     # nothing configured: judged against the GGUF's trained context instead
     monkeypatch.setattr(gen_mod, "get_configured_context_limit", lambda: None)
-    import gmlx.capacity as _cap
+    import gmlx.serve.capacity as _cap
     monkeypatch.setattr(_cap, "trained_context_length", lambda p: 200)
     st, out = est.estimate_request(body)
     assert out["context_limit"] == 200 and out["context_limit_source"] == "trained"
@@ -286,7 +287,7 @@ def test_estimate_route_and_chat_dry_run(monkeypatch):
 
 # --- context window on /v1/models and in launch pi
 def test_trained_context_length_cached_by_mtime(monkeypatch, tmp_path):
-    import gmlx.headerscan as hs
+    import gmlx.load.headerscan as hs
     f = tmp_path / "m.gguf"
     f.write_bytes(b"GGUF")
     calls = []
@@ -406,7 +407,7 @@ def test_unload_route_drops_preload_hold_then_evicts():
 
 
 def test_pool_unmark_retained_and_resident_entry():
-    from gmlx import residency
+    import gmlx.serve.residency as residency
 
     pool = residency._ResidencyPool.__new__(residency._ResidencyPool)
     import threading
@@ -429,7 +430,7 @@ def test_stamp_apc_mode_sets_generator_mode_once(monkeypatch):
     the semantic salt instead of the engine hashing the embedding matrix."""
     from mlx_vlm import apc as _apc
 
-    from gmlx.residency import _stamp_apc_mode
+    from gmlx.serve.residency import _stamp_apc_mode
 
     class _LM:
         pass
@@ -460,7 +461,7 @@ def test_ckpt_peek_reports_deepest_pinned_record_without_assembly():
     import threading
     from collections import OrderedDict
 
-    from gmlx.cache_snapshot import _CkptRecord, ckpt_peek
+    from gmlx.cache.snapshot import _CkptRecord, ckpt_peek
 
     class _Man:
         block_size = 16

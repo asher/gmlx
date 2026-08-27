@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Decode feeder (``gmlx.decode_feeder``): arena residency bookkeeping -
+"""Decode feeder (``gmlx.stream.decode_feeder``): arena residency bookkeeping -
 adopt-on-miss, popularity-driven eviction that never touches a slot the
 current call routes to, overflow fallback, weight-swap restore - plus the
 offload wrapper's decode-feeder branch. Pure CPU: ``arena_alloc`` is faked
@@ -14,8 +14,8 @@ import numpy as np
 import mlx.core as mx
 from mlx_lm.models.switch_layers import SwitchGLU
 
-import gmlx.loader
-from gmlx.loader import (
+import gmlx.load.loader
+from gmlx.load.loader import (
     _decode_arena_bytes,
     _resolve_feeder_defaults,
     install_expert_streaming,
@@ -77,7 +77,7 @@ def _fake_arena_alloc(shape):
 def _make_feeder(monkeypatch, tmp_path, slots_per_layer=2, n_layers=2,
                  pressure=False):
     import mlx_kquant as kq
-    from gmlx.decode_feeder import DecodeFeeder
+    from gmlx.stream.decode_feeder import DecodeFeeder
 
     monkeypatch.setattr(kq, "arena_alloc", _fake_arena_alloc, raising=False)
     # Residency defaults on for streamed runs; the fake numpy arena has no
@@ -160,7 +160,7 @@ def test_swapped_installs_views_and_restores(monkeypatch, tmp_path):
 def _pressure_setup(monkeypatch, level, *, cooldown=1000, regrow_polls=2):
     """Poll every stage call against a mutable fake level; ``cooldown``
     high by default so a sustained level takes exactly one step."""
-    from gmlx import decode_feeder as dfm
+    import gmlx.stream.decode_feeder as dfm
 
     monkeypatch.setattr(dfm, "_PRESSURE_POLL_EVERY", 1)
     monkeypatch.setattr(dfm, "_PRESSURE_COOLDOWN_POLLS", cooldown)
@@ -230,7 +230,7 @@ def test_pressure_regrow_after_sustained_normal(monkeypatch, tmp_path):
         seen_kwargs.append(include_inactive)
         return avail["v"]
 
-    monkeypatch.setattr(gmlx.loader, "_available_ram_bytes", _fake_avail)
+    monkeypatch.setattr(gmlx.load.loader, "_available_ram_bytes", _fake_avail)
     feeder, _ = _make_feeder(
         monkeypatch, tmp_path, slots_per_layer=4, pressure=True)
     feeder.ensure_wired()
@@ -261,7 +261,7 @@ def test_pressure_regrow_after_sustained_normal(monkeypatch, tmp_path):
 
 
 def test_pressure_disabled_by_env(monkeypatch, tmp_path):
-    from gmlx import decode_feeder as dfm
+    import gmlx.stream.decode_feeder as dfm
 
     def _boom():
         raise AssertionError("pressure polled while disabled")
@@ -282,7 +282,7 @@ def test_arena_budget_math(monkeypatch):
     monkeypatch.delenv("GMLX_DECODE_PAGECACHE_GB", raising=False)
     monkeypatch.delenv("GMLX_DECODE_ARENA_FORCE", raising=False)
     monkeypatch.setattr(
-        gmlx.loader, "_available_ram_bytes", lambda: None
+        gmlx.load.loader, "_available_ram_bytes", lambda: None
     )  # available-RAM ceiling out of the way for the deterministic cases
     monkeypatch.setattr(
         mx, "device_info", lambda: {"memory_size": 1000 << 30}
@@ -314,7 +314,7 @@ def test_arena_budget_math(monkeypatch):
     # Available-RAM ceiling binds when the machine is busy: 40 GB
     # reclaimable minus the floor beats the fraction of a 100 GB machine.
     monkeypatch.setattr(
-        gmlx.loader, "_available_ram_bytes", lambda: 40 << 30
+        gmlx.load.loader, "_available_ram_bytes", lambda: 40 << 30
     )
     monkeypatch.setenv("GMLX_DECODE_RAM_FLOOR_GB", "5")
     # The floor is the base margin plus the page-cache reserve (2.5 GB
@@ -343,7 +343,7 @@ def test_arena_budget_math(monkeypatch):
     monkeypatch.setenv("GMLX_DECODE_ARENA_FORCE", "1")
     assert _decode_arena_bytes(60 << 30, offsets, budget=None) == 200 << 30
     monkeypatch.delenv("GMLX_DECODE_ARENA_FORCE", raising=False)
-    monkeypatch.setattr(gmlx.loader, "_available_ram_bytes", lambda: None)
+    monkeypatch.setattr(gmlx.load.loader, "_available_ram_bytes", lambda: None)
     assert _decode_arena_bytes(60 << 30, offsets, budget=None) == 200 << 30
 
 
@@ -565,7 +565,7 @@ def _wedge_setup(monkeypatch, tmp_path, wedge_offs, timeout="0.2", **kw):
     distinct offset."""
     import threading
 
-    from gmlx import decode_feeder as dfm
+    import gmlx.stream.decode_feeder as dfm
 
     monkeypatch.setattr(dfm, "_PAGE", 16)
     monkeypatch.setenv("GMLX_DECODE_READ_TIMEOUT", timeout)
@@ -587,7 +587,7 @@ def test_wedged_read_quarantines_and_zero_maps(monkeypatch, tmp_path):
     """A read that outlives the timeout quarantines its slot, drops the
     expert to the layer's zero slot (gathers contribute nothing for it)
     and replaces the stranded worker; decode continues."""
-    from gmlx import decode_feeder as dfm
+    import gmlx.stream.decode_feeder as dfm
 
     # Layer 0 gate stack starts at offset 0; expert 1's gate read is at 64.
     feeder, release = _wedge_setup(
@@ -619,7 +619,7 @@ def test_wedged_read_quarantines_and_zero_maps(monkeypatch, tmp_path):
 
 
 def test_staging_disabled_after_max_wedges(monkeypatch, tmp_path):
-    from gmlx import decode_feeder as dfm
+    import gmlx.stream.decode_feeder as dfm
 
     monkeypatch.setattr(dfm, "_MAX_WEDGES", 1)
     feeder, release = _wedge_setup(
@@ -654,7 +654,7 @@ def test_wedged_layer_never_resizes(monkeypatch, tmp_path):
     the buffer the zombie read may still write into."""
     level = {"v": 1}
     _pressure_setup(monkeypatch, level)
-    from gmlx import decode_feeder as dfm
+    import gmlx.stream.decode_feeder as dfm
 
     monkeypatch.setattr(dfm, "_PAGE", 16)
     monkeypatch.setenv("GMLX_DECODE_READ_TIMEOUT", "0.2")
@@ -689,7 +689,7 @@ def test_aligned_reads_and_raw_fallback(monkeypatch, tmp_path):
     """Byte movement is exact when the alignment forces a nonzero head
     offset inside the bounce (stride 48 vs 32-byte pages), and with the
     kill switch the raw pread path serves identically."""
-    from gmlx import decode_feeder as dfm
+    import gmlx.stream.decode_feeder as dfm
 
     monkeypatch.setattr(dfm, "_PAGE", 32)
     feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4)
@@ -874,7 +874,7 @@ def _wait_published(feeder, li, timeout=5.0):
 
 
 def _counting_reads(monkeypatch):
-    from gmlx import decode_feeder as dfm
+    import gmlx.stream.decode_feeder as dfm
 
     calls = []
     real = dfm.read_range
@@ -915,7 +915,7 @@ def test_prestage_settle_joins_inflight(monkeypatch, tmp_path):
     import threading
     import time
 
-    from gmlx import decode_feeder as dfm
+    import gmlx.stream.decode_feeder as dfm
 
     monkeypatch.setattr(dfm, "_PAGE", 16)
     monkeypatch.setenv("GMLX_DECODE_READ_TIMEOUT", "5")
@@ -958,7 +958,7 @@ def test_settle_waits_unrouted_pending(monkeypatch, tmp_path):
     wait-and-publish path.)"""
     import threading
 
-    from gmlx import decode_feeder as dfm
+    import gmlx.stream.decode_feeder as dfm
 
     monkeypatch.setattr(dfm, "_PAGE", 16)
     monkeypatch.setenv("GMLX_DECODE_READ_TIMEOUT", "5")
@@ -1101,7 +1101,7 @@ def test_read_pool_on_start_hook():
     drops its disk-I/O priority there) before serving reads."""
     import threading
 
-    from gmlx.decode_feeder import _DaemonReadPool
+    from gmlx.stream.decode_feeder import _DaemonReadPool
 
     ran = threading.Event()
     pool = _DaemonReadPool(1, on_start=ran.set)
@@ -1117,7 +1117,7 @@ def test_exit_close_hook_holds_only_weakref(monkeypatch, tmp_path):
     import gc
     import weakref
 
-    from gmlx.decode_feeder import _register_exit_close
+    from gmlx.stream.decode_feeder import _register_exit_close
 
     hooks = []
     monkeypatch.setattr(atexit, "register", hooks.append)
@@ -1136,7 +1136,7 @@ def test_close_stats_gated_on_stats_verbose(capsys):
     wedge anomaly warning prints regardless."""
     import time as _time
 
-    from gmlx.decode_feeder import DecodeFeeder
+    from gmlx.stream.decode_feeder import DecodeFeeder
 
     def bare(verbose):
         f = object.__new__(DecodeFeeder)
@@ -1466,9 +1466,9 @@ def test_available_ram_counts_active_file_cache(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: _R())
     page = 16384
-    assert gmlx.loader._available_ram_bytes() == (1000 + 500 + 700000) * page
+    assert gmlx.load.loader._available_ram_bytes() == (1000 + 500 + 700000) * page
     # Strict no-victims set: free + purgeable + speculative only.
-    assert gmlx.loader._available_ram_bytes(include_inactive=False) == \
+    assert gmlx.load.loader._available_ram_bytes(include_inactive=False) == \
         (1000 + 500 + 5000) * page
 
 
@@ -1486,7 +1486,7 @@ def test_available_ram_fallback_without_file_backed_line(monkeypatch):
         stdout = out
 
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: _R())
-    assert gmlx.loader._available_ram_bytes() == \
+    assert gmlx.load.loader._available_ram_bytes() == \
         (1000 + 500 + 5000 + 200000) * 16384
 
 

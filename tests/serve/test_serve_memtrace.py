@@ -6,7 +6,7 @@ import mlx.core as mx
 
 from mlx_vlm.generate import ar
 
-import gmlx.serve_memtrace as smt
+import gmlx.serve.memtrace as smt
 
 
 class FakeKV:

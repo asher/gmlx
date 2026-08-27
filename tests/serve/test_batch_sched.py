@@ -6,7 +6,7 @@ import pytest
 
 from mlx_vlm.generate import ar
 
-import gmlx.batch_sched as batch_sched
+import gmlx.serve.batch_sched as batch_sched
 
 
 class _Clock:

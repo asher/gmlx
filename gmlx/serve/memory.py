@@ -51,7 +51,7 @@ def model_weight_bytes(path: str) -> int:
     if not path or str(path).startswith("hf:"):
         return 0
     try:
-        from .preflight import find_split_shards
+        from gmlx.load.preflight import find_split_shards
 
         return sum(os.path.getsize(p) for p in find_split_shards(str(path)))
     except Exception:
@@ -194,7 +194,7 @@ def spec_state_bytes(gen):
     ``(depth_scaled, row_const)``: bytes that grow with context depth
     (the shared KV snapshot and the drafter cache) and bytes that are
     per-row constants. Both zero when the batch is not speculative."""
-    from .serve_memtrace import _arrays
+    from .memtrace import _arrays
 
     batch = gen._generation_batch
     depth_scaled = 0.0
@@ -234,7 +234,7 @@ def update_kv_rates(gen) -> None:
     pc = getattr(batch, "prompt_cache", None)
     if rows <= 0 or not pc:
         return
-    from .serve_memtrace import _arrays, _leaf_caches
+    from .memtrace import _arrays, _leaf_caches
 
     fresh: dict = {}
     live_bytes = 0.0
@@ -306,7 +306,7 @@ def project_admission(gen, candidates):
     """
     import mlx.core as mx
 
-    from .prefill_decay import headroom_bytes, score_transient_bytes
+    from gmlx.gen.prefill_decay import headroom_bytes, score_transient_bytes
 
     update_kv_rates(gen)
     rates = getattr(gen, "_kq_admit_kv_rates", None)
@@ -390,7 +390,7 @@ def apply_cache_limit(cfg) -> None:
             print(f"[serve] MLX cache limit: unlimited ({source})")
         return
     mx.set_cache_limit(limit)
-    from .prefill_decay import note_cache_limit
+    from gmlx.gen.prefill_decay import note_cache_limit
 
     note_cache_limit(limit)
     print(f"[serve] MLX cache limit: {limit / GIB:.1f} GiB ({source})")

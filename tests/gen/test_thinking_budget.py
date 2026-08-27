@@ -9,7 +9,7 @@ that mimic mlx-lm's contract: ``tokens`` is the full accumulated sequence
 
 import mlx.core as mx
 
-from gmlx.thinking_budget import (
+from gmlx.gen.thinking_budget import (
     ThinkingBudgetProcessor,
     _thinking_token_seqs,
     make_thinking_budget_processor,
@@ -213,7 +213,7 @@ def test_first_close_carries_wrap_phrase_recloses_terse():
 
 
 def test_factory_wrap_phrase_only_on_first_close_and_budget_gt0():
-    from gmlx.thinking_budget import _BUDGET_WRAP_PHRASE
+    from gmlx.gen.thinking_budget import _BUDGET_WRAP_PHRASE
 
     class _PhraseTok(_FakeTok):
         _MAP = dict(_FakeTok._MAP, **{_BUDGET_WRAP_PHRASE: [90, 91]})
@@ -291,7 +291,7 @@ def test_factory_interruptible_without_budget():
 
 
 def test_finish_key_target_round_trip():
-    from gmlx.thinking_budget import (
+    from gmlx.gen.thinking_budget import (
         clear_finish_key_target,
         finish_thinking_now,
         set_finish_key_target,
@@ -332,7 +332,7 @@ def test_factory_tolerates_int_eos_attr():
 
 
 def test_finish_key_unsupported_notes_once(capsys):
-    from gmlx.thinking_budget import (
+    from gmlx.gen.thinking_budget import (
         FinishKeyUnsupported,
         clear_finish_key_target,
         finish_thinking_now,
@@ -591,7 +591,7 @@ def test_prompt_opens_thinking_kimi_k3_xtml():
 def test_template_think_pair_kimi_k3_macro_concat():
     # The K3 jinja builds markers via open_tag('think') macro concatenation -
     # the literal '<|open|>think<|sep|>' never appears in the template source.
-    from gmlx.thinking_budget import _template_think_pair
+    from gmlx.gen.thinking_budget import _template_think_pair
 
     class _Tok:
         chat_template = (
@@ -624,7 +624,7 @@ def test_prompt_opens_thinking_uses_tokenizer_markers():
 
 
 def test_prompt_open_think_tag_returns_model_spelling():
-    from gmlx.thinking_budget import prompt_open_think_tag
+    from gmlx.gen.thinking_budget import prompt_open_think_tag
 
     assert prompt_open_think_tag("...<|assistant|><think>\n") == "<think>"
     assert prompt_open_think_tag(
@@ -651,7 +651,7 @@ class _MuseTok:
 
 
 def test_muse_glimmer_think_pair_resolves_from_the_template():
-    from gmlx.thinking_budget import _template_think_pair
+    from gmlx.gen.thinking_budget import _template_think_pair
 
     assert _template_think_pair(_MuseTok()) == (
         "<|start|>assistant to=self<|message|>", "<|eom|>")
@@ -661,21 +661,21 @@ def test_muse_glimmer_generation_prompt_is_not_open_thinking():
     """The generation prompt stops at ``<|start|>assistant``; the reasoning
     header is only completed by what the model generates, so the budget must
     not start counting yet."""
-    from gmlx.thinking_budget import prompt_opens_thinking
+    from gmlx.gen.thinking_budget import prompt_opens_thinking
 
     prompt = "<|start|>user<|message|>hi<|eot|><|start|>assistant"
     assert not prompt_opens_thinking(prompt, tokenizer=_MuseTok())
 
 
 def test_muse_glimmer_open_reasoning_message_is_detected():
-    from gmlx.thinking_budget import prompt_opens_thinking
+    from gmlx.gen.thinking_budget import prompt_opens_thinking
 
     prompt = "<|start|>assistant to=self<|message|>half a thought"
     assert prompt_opens_thinking(prompt, tokenizer=_MuseTok())
 
 
 def test_muse_glimmer_closed_reasoning_message_is_not_open():
-    from gmlx.thinking_budget import prompt_opens_thinking
+    from gmlx.gen.thinking_budget import prompt_opens_thinking
 
     prompt = "<|start|>assistant to=self<|message|>done<|eom|>"
     assert not prompt_opens_thinking(prompt, tokenizer=_MuseTok())

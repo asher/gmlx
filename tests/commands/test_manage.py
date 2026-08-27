@@ -15,7 +15,8 @@ import pytest
 from gguf import GGMLQuantizationType as GT  # noqa: E402
 from gguf import GGUFWriter, quants  # noqa: E402
 
-from gmlx import manage, remote  # noqa: E402
+import gmlx.commands.manage as manage  # noqa: E402
+import gmlx.load.remote as remote  # noqa: E402
 
 
 def _weight(codec):
@@ -1015,7 +1016,7 @@ def test_ps_unreachable_server(capsys):
 def test_ps_bare_resolves_managed_target(monkeypatch, capsys):
     # Bare `ps` must share status/stop's target resolution instead of silently
     # probing 8080 (which can be a different server than the managed one).
-    from gmlx import lifecycle
+    import gmlx.serve.lifecycle as lifecycle
     monkeypatch.setattr(lifecycle, "auto_target", lambda h, p: ("127.0.0.1", 1))
     rc = manage.cmd_ps([])
     assert rc == 3
@@ -1054,7 +1055,7 @@ def test_rm_reloads_running_server(monkeypatch, tmp_path):
     # rm rewrites the config like init/sync-models/pull do - it must SIGHUP a
     # server running that config the same way, or the removed id stays served
     # (a phantom in /v1/models) until a manual reload.
-    from gmlx import server as srv_mod
+    import gmlx.serve.server as srv_mod
     calls = []
     monkeypatch.setattr(srv_mod, "_reload_running",
                         lambda path, skip: calls.append((str(path), skip)))
@@ -1231,7 +1232,7 @@ def test_validate_directory_is_clean_verdict(tmp_path, capsys):
 
 
 def test_shard_names_zero_total_rejected():
-    from gmlx import remote
+    import gmlx.load.remote as remote
     with pytest.raises(remote.RemoteError, match="zero shard"):
         manage._shard_names("m-00001-of-00000.gguf")
 
@@ -1250,7 +1251,7 @@ def _http_416(content_range):
 
 
 def test_url_download_416_stale_oversized_part_rejected(tmp_path, monkeypatch):
-    from gmlx import remote
+    import gmlx.load.remote as remote
     dest = tmp_path / "m.gguf"
     (tmp_path / "m.gguf.part").write_bytes(b"12345")
     monkeypatch.setattr(remote, "http_open", _http_416("bytes */3"))
@@ -1260,7 +1261,7 @@ def test_url_download_416_stale_oversized_part_rejected(tmp_path, monkeypatch):
 
 
 def test_url_download_416_exact_size_promotes(tmp_path, monkeypatch):
-    from gmlx import remote
+    import gmlx.load.remote as remote
     dest = tmp_path / "m.gguf"
     (tmp_path / "m.gguf.part").write_bytes(b"12345")
     monkeypatch.setattr(remote, "http_open", _http_416("bytes */5"))
@@ -1296,7 +1297,7 @@ def test_rm_drops_dangling_assistant_aliases(tmp_path, capsys):
 
 # size + RAM-fit reporting (validate / pull)
 def _ram(monkeypatch, n_bytes):
-    from gmlx import memfit
+    import gmlx.load.memfit as memfit
     monkeypatch.setattr(memfit, "total_ram_bytes", lambda: n_bytes)
 
 

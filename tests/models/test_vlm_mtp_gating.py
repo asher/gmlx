@@ -19,10 +19,13 @@ from mlx_vlm.models.qwen3_5 import language as _L
 from mlx_vlm.models.qwen3_5.config import TextConfig as Q35TextConfig
 from mlx_vlm.models.qwen3_5.language import LanguageModel as Q35LanguageModel
 
-from gmlx import gdn_patches as gp
-from gmlx import qwen35_attn, qwen35_gdn, qwen35_owned, qwen35_verify_fold
-from gmlx.mtp_load import _install_stock_qwen35_verify_patches
-from gmlx.ragged_decode import install_unified_ragged_plan
+import gmlx.upstream.gdn_patches as gp
+import gmlx.models.qwen35.attn as qwen35_attn
+import gmlx.models.qwen35.gdn as qwen35_gdn
+import gmlx.models.qwen35.owned as qwen35_owned
+import gmlx.models.qwen35.verify_fold as qwen35_verify_fold
+from gmlx.spec.mtp_load import _install_stock_qwen35_verify_patches
+from gmlx.spec.ragged_decode import install_unified_ragged_plan
 
 
 def _cfg():
@@ -128,13 +131,13 @@ def test_stock_tree_gets_full_patch_regime(_patch_state):
         "gmlx"
     )
     assert _L.scaled_dot_product_attention.__module__ == (
-        "gmlx.qwen35_verify_fold"
+        "gmlx.models.qwen35.verify_fold"
     )
     assert (
         _L._qwen3_5_ragged_decode_attention
         is qwen35_attn.ragged_decode_attention
     )
-    assert _L.Qwen3_5GatedDeltaNet.__call__.__module__ == "gmlx.gdn_patches"
+    assert _L.Qwen3_5GatedDeltaNet.__call__.__module__ == "gmlx.upstream.gdn_patches"
 
 
 def test_unified_ragged_plan_reinstalls_after_restore(_patch_state):

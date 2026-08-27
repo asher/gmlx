@@ -241,7 +241,7 @@ def test_long_decode_integrity(arch, dtype, gguf_index, monkeypatch):
     # Belt and braces with the logit mask above: stream_generate also STOPS
     # at an EOS token id, and a NaN-corrupted argmax could land on one and
     # end the run before depth; clearing the EOG set keeps it decoding.
-    from gmlx.overgen import suppressed_eos
+    from gmlx.spec.overgen import suppressed_eos
     with suppressed_eos(tok):
         ids, finite, _ = _greedy(model, tok, seed_ids, n, logits_processors=procs)
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from gmlx import pin_weights
+import gmlx.stream.pin_weights as pin_weights
 
 
 def _write_model(path):

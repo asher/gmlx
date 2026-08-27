@@ -16,7 +16,7 @@ import pytest
 pytest.importorskip("mlx_vlm.models.qwen3_5.language")
 import mlx_vlm.models.qwen3_5.language as q35l
 
-from gmlx import gdn_patches
+import gmlx.upstream.gdn_patches as gdn_patches
 
 
 def _install():

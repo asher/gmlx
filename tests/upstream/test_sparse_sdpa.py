@@ -14,7 +14,7 @@ import pytest
 
 from mlx_lm.models import llama as llama_mod
 
-from gmlx import sparse_sdpa as sp
+import gmlx.upstream.sparse_sdpa as sp
 
 _SEAM_MODS = []
 for _pkg, _name in sp._MODULES:

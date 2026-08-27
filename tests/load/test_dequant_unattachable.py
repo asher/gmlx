@@ -11,7 +11,7 @@ import mlx.nn as nn
 import mlx_kquant as kq
 import pytest
 
-from gmlx.modules import dequantize_unattachable_leaves, install_kquant_modules
+from gmlx.load.modules import dequantize_unattachable_leaves, install_kquant_modules
 
 
 class RawGate(nn.Module):

@@ -1,7 +1,7 @@
 DeepSeek-V4-Flash-0731 - the upstream checkpoint's reference inference code
 (https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731)
 
-The DSpark draft-model forward semantics in gmlx/deepseek_v4_dspark.py are
+The DSpark draft-model forward semantics in gmlx/models/deepseek_v4/dspark.py are
 reimplemented from the reference DSparkBlock in inference/model.py. The
 repository is distributed under the MIT License:
 

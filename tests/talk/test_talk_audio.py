@@ -5,8 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from gmlx import talk_audio as ta
-from gmlx.talk_audio import EnergyVAD, Endpointer, rms_dbfs
+import gmlx.talk.audio as ta
+from gmlx.talk.audio import EnergyVAD, Endpointer, rms_dbfs
 
 
 def _frame(level: int) -> np.ndarray:

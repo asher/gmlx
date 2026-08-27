@@ -56,7 +56,7 @@ def _headers(api_key: str | None, extra: dict | None = None) -> dict:
 def _http_get_json(url: str, timeout: float = 5.0,
                    api_key: str | None = None):
     """GET + parse JSON (lifecycle.get_json). Seam: monkeypatched in tests."""
-    from .lifecycle import get_json
+    from gmlx.serve.lifecycle import get_json
 
     return get_json(url, api_key=api_key, timeout=timeout)
 
@@ -419,7 +419,7 @@ class ServerChatBrain:
     Thinking never reaches the speaker: mlx-vlm streams reasoning models'
     chain-of-thought in a separate ``delta.reasoning`` field, and any inline
     control markers still in ``delta.content`` are split out by
-    :class:`~gmlx.reasoning.ReasoningFilter` - both surface as
+    :class:`~gmlx.tui.reasoning.ReasoningFilter` - both surface as
     ``("think", <text>)`` events, which a voice consumer treats as a
     thinking status and the chat REPL renders through its reasoning
     display; only answer spans become ``("say", ...)``.
@@ -442,7 +442,7 @@ class ServerChatBrain:
                          if self.system else [])
 
     def turn(self, user_text: str) -> Iterator[BrainEvent]:
-        from .reasoning import ReasoningFilter
+        from gmlx.tui.reasoning import ReasoningFilter
 
         self.messages.append({"role": "user", "content": user_text})
         rf = ReasoningFilter()

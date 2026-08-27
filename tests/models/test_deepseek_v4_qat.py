@@ -5,7 +5,7 @@ The V4 Flash checkpoint was quantization-aware-trained with fp8/fp4 round
 trips on the KV latent, the compressor pool rows, and the indexer
 activations; ds4 (the parity reference engine - llama.cpp has no deepseek4
 support) applies them at inference (ds4.c:2440-2620) and matches the
-official API logits. gmlx.deepseek_v4_model reproduces them in pure MLX
+official API logits. gmlx.models.deepseek_v4.model reproduces them in pure MLX
 - a deliberate deviation from upstream mlx-lm PR #1192, which omits them.
 These tests pin the emulation to hand-computed vectors of the C algorithms:
 
@@ -26,7 +26,7 @@ import os
 import mlx.core as mx
 import pytest
 
-from gmlx.deepseek_v4_model import (  # noqa: E402
+from gmlx.models.deepseek_v4.model import (  # noqa: E402
     _e2m1_round,
     _e4m3_round,
     _fp4_e2m1_roundtrip,
@@ -276,7 +276,7 @@ def _adversarial_flat(seed: int) -> mx.array:
 
 
 def test_exp2i_bit_identity_full_range():
-    from gmlx.deepseek_v4_model import _exp2i
+    from gmlx.models.deepseek_v4.model import _exp2i
 
     e = mx.arange(-126, 128).astype(mx.float32)
     assert mx.array_equal(_exp2i(e), _ref_exp2i(e)).item()

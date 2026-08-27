@@ -21,7 +21,8 @@ from mlx_vlm.models.qwen3_5.config import TextConfig as Q35TextConfig
 from mlx_vlm.models.qwen3_5.language import LanguageModel as Q35LanguageModel
 from mlx_vlm.models.qwen3_5.language import Qwen3_5GatedDeltaNet
 
-from gmlx import gdn_patches, qwen35_gdn
+import gmlx.upstream.gdn_patches as gdn_patches
+import gmlx.models.qwen35.gdn as qwen35_gdn
 
 ATOL = 2e-3
 _NEEDS_GPU = pytest.mark.skipif(

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import mlx.nn as nn
 
-from gmlx import occupancy_fuse as of
+import gmlx.upstream.occupancy_fuse as of
 
 
 class _PlainAttention(nn.Module):

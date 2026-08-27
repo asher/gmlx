@@ -28,7 +28,7 @@ from unittest import mock
 import numpy as np
 import pytest
 
-from gmlx.native_fp import (  # noqa: E402
+from gmlx.load.native_fp import (  # noqa: E402
     E2M1_VALUES,
     mxfp4_deinterleave,
     nvfp4_deinterleave,
@@ -156,7 +156,7 @@ def _tiny_switch_model(n_experts=4, out_dims=64, in_dims=128, bias=False):
 
 
 def test_preset_native_fp_wire_env():
-    from gmlx.loader import preset_native_fp_wire_env
+    from gmlx.load.loader import preset_native_fp_wire_env
 
     with mock.patch.dict(os.environ):
         os.environ.pop("GMLX_NATIVE_FP", None)
@@ -178,7 +178,7 @@ def test_preset_native_fp_wire_env():
 
 
 def test_lift_stream_cb_caps():
-    from gmlx.cli import _lift_stream_cb_caps
+    from gmlx.commands.cli import _lift_stream_cb_caps
 
     with mock.patch.dict(os.environ):
         for k in ("MLX_MAX_OPS_PER_BUFFER", "MLX_MAX_MB_PER_BUFFER"):
@@ -197,7 +197,7 @@ def test_lift_stream_cb_caps():
 
 
 def test_resolve_native_fp_wire_modes(monkeypatch):
-    from gmlx import loader
+    import gmlx.load.loader as loader
 
     meta = {"blk.0.ffn_gate_exps.weight": "mxfp4"}
     weights = {"blk.0.ffn_gate_exps.weight": np.zeros(64, np.uint8)}
@@ -241,7 +241,7 @@ def test_resolve_native_fp_wire_modes(monkeypatch):
 def test_install_packed_default_unchanged():
     import mlx.core as mx
 
-    from gmlx.modules import NativeFPSwitchLinear, install_kquant_modules
+    from gmlx.load.modules import NativeFPSwitchLinear, install_kquant_modules
 
     model = _tiny_switch_model()
     n = install_kquant_modules(model, {"experts.weight": "mxfp4"})
@@ -257,7 +257,7 @@ def test_install_wire_dispatches_kquant_switchlinear(codec, bpr):
         pytest.skip("mlx-kquant build lacks the fp4 codecs")
     import mlx.core as mx
 
-    from gmlx.modules import KQuantSwitchLinear, install_kquant_modules
+    from gmlx.load.modules import KQuantSwitchLinear, install_kquant_modules
 
     model = _tiny_switch_model(n_experts=4, out_dims=64, in_dims=128)
     n = install_kquant_modules(model, {"experts.weight": codec},
@@ -275,7 +275,7 @@ def test_install_wire_dispatches_kquant_switchlinear(codec, bpr):
 def test_install_native_fp_non_switch_fails_loud(native_fp_wire):
     import mlx.nn as nn
 
-    from gmlx.modules import install_kquant_modules
+    from gmlx.load.modules import install_kquant_modules
 
     class Tiny(nn.Module):
         def __init__(self):
@@ -298,7 +298,7 @@ def test_install_native_fp_multilinear_dispatches_wire(native_fp_wire):
     import mlx.core as mx
     import mlx.nn as nn
 
-    from gmlx.modules import (KQuantMultiLinear, MultiLinear,
+    from gmlx.load.modules import (KQuantMultiLinear, MultiLinear,
                               install_kquant_modules)
 
     if MultiLinear is None:
@@ -326,9 +326,9 @@ def test_native_fp_multilinear_keys_exempt_from_repack():
     # (KQuantMultiLinear reads ggml wire, not MLX packed layout).
     import mlx.nn as nn
 
-    from gmlx import loader
-    from gmlx.modules import MultiLinear
-    from gmlx.native_fp import repack_native_fp_weights
+    import gmlx.load.loader as loader
+    from gmlx.load.modules import MultiLinear
+    from gmlx.load.native_fp import repack_native_fp_weights
 
     if MultiLinear is None:
         pytest.skip("mlx-lm build lacks mla.MultiLinear")
@@ -351,8 +351,8 @@ def test_native_fp_multilinear_keys_exempt_from_repack():
 
 
 def test_expert_gpu_ok_gates_cpu_only_codecs(monkeypatch):
-    from gmlx import loader
-    from gmlx.loader import _kq_expert_gpu_ok
+    import gmlx.load.loader as loader
+    from gmlx.load.loader import _kq_expert_gpu_ok
 
     # Stub the capability registry so the test is independent of which
     # codecs the installed kq build has Metal kernels for (fp4 flipped to
@@ -444,7 +444,7 @@ def test_wire_switchlinear_parity(codec, n_tok, topk, n_experts, tol):
         pytest.skip("mlx-kquant build lacks the fp4 codecs")
     import mlx.core as mx
 
-    from gmlx.modules import KQuantSwitchLinear
+    from gmlx.load.modules import KQuantSwitchLinear
 
     out_dims, in_dims = 32, 128
     rng = np.random.RandomState(7)
@@ -476,7 +476,7 @@ def test_wire_vs_packed_switchlinear_parity_mxfp4():
 
     if not mx.metal.is_available():
         pytest.skip("packed arm needs the stock Metal mxfp4 kernels")
-    from gmlx.modules import KQuantSwitchLinear, NativeFPSwitchLinear
+    from gmlx.load.modules import KQuantSwitchLinear, NativeFPSwitchLinear
 
     n_experts, out_dims, in_dims, n_tok, topk = 4, 32, 128, 3, 2
     rng = np.random.RandomState(11)

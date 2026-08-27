@@ -9,9 +9,9 @@ import argparse
 
 import pytest
 
-from gmlx import chat as chatmod
-from gmlx import server as srv
-from gmlx import train as trainmod
+import gmlx.tui.chat as chatmod
+import gmlx.serve.server as srv
+import gmlx.commands.train as trainmod
 
 
 def _serve_ns(argv):
@@ -22,7 +22,7 @@ def _serve_ns(argv):
 
 # --- run/chat: -v/--verbose parity (load diagnostics vs spinner) ---
 def test_run_chat_verbose_flag_parity():
-    from gmlx import cli as climod
+    import gmlx.commands.cli as climod
 
     for build in (climod._build_parser, chatmod._build_parser):
         ap = build()

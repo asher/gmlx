@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from contextvars import copy_context
 
-from gmlx.residency import (  # noqa: E402
+from gmlx.serve.residency import (  # noqa: E402
     _BusyHold,
     _GenerationGuard,
     _ResidencyPool,
@@ -237,7 +237,7 @@ def test_all_busy_exceeds_budget_with_warning(caplog):
     # as all-pinned) and say so, rather than killing A's generation.
     proxy, pool, teardowns = make_pool(15, {"A": 10, "B": 10})
     pool.acquire("A", None, "auto")        # hold kept: in-flight
-    with caplog.at_level("WARNING", logger="gmlx.residency"):
+    with caplog.at_level("WARNING", logger="gmlx.serve.residency"):
         acquire(pool, "B")
     assert teardowns == []
     assert resident(pool) == {"A", "B"}
@@ -313,7 +313,7 @@ def test_proxy_wraps_entry_generator_with_request_hold():
 
 
 def test_teardown_drops_mtp_stash():
-    from gmlx import server_bridge_vlm as serving
+    import gmlx.serve.bridge_vlm as serving
 
     proxy, pool, teardowns = make_pool(15, {"/m/a.gguf": 10, "/m/b.gguf": 10})
     serving._MTP_DRAFTER_STASH["/m/a.gguf"] = (object(), "mtp")
@@ -440,7 +440,7 @@ def test_flush_all_closes_resident_apc():
 def test_warn_if_batch_unsafe_fires_once_for_gemma2(monkeypatch, caplog, capsys):
     """gemma2 warns once on load (batched decode is unreliable); a clean arch is
     silent; a header-read failure is silent. Pure header read - no model, no GPU."""
-    from gmlx import residency
+    import gmlx.serve.residency as residency
 
     class _Field:
         def __init__(self, s):
@@ -458,7 +458,7 @@ def test_warn_if_batch_unsafe_fires_once_for_gemma2(monkeypatch, caplog, capsys)
     monkeypatch.setattr("gguf.GGUFReader", _Reader)
     residency._batch_unsafe_warned.clear()
 
-    with caplog.at_level("WARNING", logger="gmlx.residency"):
+    with caplog.at_level("WARNING", logger="gmlx.serve.residency"):
         # a clean (sdpa) arch never warns
         _Reader.arch = "qwen3"
         residency._warn_if_batch_unsafe("/x/qwen3.gguf")
@@ -486,7 +486,7 @@ def test_module_annotations_resolve():
     annotation introspection raises TypeError."""
     import typing
 
-    from gmlx import residency
+    import gmlx.serve.residency as residency
 
     typing.get_type_hints(residency)
 

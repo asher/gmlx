@@ -10,7 +10,7 @@ import pytest
 
 pytest.importorskip("mlx_lm")
 
-from gmlx import server_bridge_lm as server_bridge  # noqa: E402
+import gmlx.serve.bridge_lm as server_bridge  # noqa: E402
 
 
 class _Provider:
@@ -107,7 +107,7 @@ def test_register_resolved_models_waits_for_build_lock():
     import time
     import types
 
-    from gmlx import server_bridge_vlm as bridge
+    import gmlx.serve.bridge_vlm as bridge
     from gmlx.config import build_config
 
     cfg = build_config({"server": {}, "models": {}})

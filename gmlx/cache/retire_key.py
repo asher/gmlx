@@ -179,7 +179,7 @@ def _channel_split(full_text: str):
     marker is present or nothing classified as reasoning."""
     if not any(m in full_text for m in _CHANNEL_HINTS):
         return None, None
-    from .reasoning import ReasoningFilter
+    from gmlx.tui.reasoning import ReasoningFilter
 
     f = ReasoningFilter()
     spans = f.feed(full_text) + f.flush()

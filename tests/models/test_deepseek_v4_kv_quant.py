@@ -11,8 +11,8 @@ test_deepseek_v4_mtp.py. Real-GGUF behavior is gated separately (chat/run
 import mlx.core as mx
 import pytest
 
-from gmlx.deepseek_v4_cache import PoolingCache
-from gmlx.generation import quantize_pooled_caches
+from gmlx.models.deepseek_v4.cache import PoolingCache
+from gmlx.gen.generation import quantize_pooled_caches
 
 D = 64  # pooled row width; mx.quantize needs group >= 32 dividing D
 
@@ -39,7 +39,7 @@ def test_pooled_roundtrip_tolerance():
 
 
 def test_gather_matches_dense_dequant():
-    from gmlx.deepseek_v4_model import _sparse_topk_gather
+    from gmlx.models.deepseek_v4.model import _sparse_topk_gather
 
     mx.random.seed(1)
     q = _qcache()

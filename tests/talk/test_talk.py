@@ -7,7 +7,7 @@ import time
 import numpy as np
 import pytest
 
-from gmlx.talk import (
+from gmlx.talk.main import (
     CAPTURING,
     IDLE,
     LISTENING,
@@ -19,7 +19,7 @@ from gmlx.talk import (
     TalkStateMachine,
     looks_hallucinated,
 )
-from gmlx.talk_audio import FRAME_SAMPLES, Endpointer, EnergyVAD
+from gmlx.talk.audio import FRAME_SAMPLES, Endpointer, EnergyVAD
 
 
 def test_wake_mode_full_turn():
@@ -347,7 +347,7 @@ def _wake_frame():
 
 
 def _make_loop(mode="wake", **kw):
-    from gmlx.talk import TalkStateMachine
+    from gmlx.talk.main import TalkStateMachine
     backend = FakeBackend()
     said = []
 
@@ -388,7 +388,7 @@ def _pump_until(loop, cond, timeout=5.0):
 
 
 def test_loop_full_voice_turn(capsys):
-    from gmlx.talk import IDLE, LISTENING
+    from gmlx.talk.main import IDLE, LISTENING
     loop = _make_loop("wake")
     loop.start_threads()
     try:
@@ -414,7 +414,7 @@ def test_loop_full_voice_turn(capsys):
 
 
 def test_loop_typed_turn(capsys):
-    from gmlx.talk import LISTENING
+    from gmlx.talk.main import LISTENING
     loop = _make_loop("vad")
     loop.start_threads()
     try:
@@ -432,7 +432,7 @@ def test_loop_wake_barge_in_stop_phrase(capsys):
     """Wake phrase mid-reply stops it; a follow-up "Stop." never reaches the
     brain and the loop rests."""
     import threading
-    from gmlx.talk import IDLE, LISTENING, SPEAKING
+    from gmlx.talk.main import IDLE, LISTENING, SPEAKING
 
     class SlowBrain(FakeBrain):
         def __init__(self):
@@ -477,7 +477,7 @@ def test_loop_wake_barge_in_stop_phrase(capsys):
 
 
 def test_loop_hallucination_never_becomes_turn():
-    from gmlx.talk import LISTENING
+    from gmlx.talk.main import LISTENING
 
     def ghost_transcribe(base_url, wav_bytes, api_key=None, language=None):
         return "Thank you."
@@ -777,7 +777,7 @@ def test_memory_slash(capsys):
 # cmd_talk plumbing (pure helpers)
 def test_merged_settings_precedence():
     from gmlx.config import TalkCfg, TalkVad
-    from gmlx.talk import _build_parser, _merged_settings
+    from gmlx.talk.main import _build_parser, _merged_settings
     cfg = TalkCfg(voice="am_adam", mode="vad",
                   vad=TalkVad(silence_ms=700.0))
     args = _build_parser("t").parse_args(["--voice", "af_bella"])
@@ -799,7 +799,7 @@ def test_merged_settings_precedence():
 
 
 def test_pick_model_order():
-    from gmlx.talk import _pick_model
+    from gmlx.talk.main import _pick_model
     caps = {"default": "d", "chat_ids": ["a", "b", "d"]}
     assert _pick_model("x@coding", caps) == "x@coding"
     assert _pick_model(None, caps) == "d"
@@ -808,7 +808,7 @@ def test_pick_model_order():
 
 
 def test_capability_guidance(capsys):
-    from gmlx.talk import _capability_guidance
+    from gmlx.talk.main import _capability_guidance
     ok = _capability_guidance({"stt": True, "tts": True}, needs_stt=True,
                               explicit_url=False, out=sys.stdout)
     assert ok
@@ -828,9 +828,9 @@ import sys  # noqa: E402  (used by the capability tests above)
 def test_list_voices_explains_missing_tts(tmp_path, monkeypatch, capsys):
     """`--list-voices` against a server with no TTS configured points at the
     config fix, not at a missing route (which reads as a version mismatch)."""
-    from gmlx import launch as launch_mod
-    from gmlx import talk_client as tc
-    from gmlx.talk import cmd_talk
+    import gmlx.commands.launch as launch_mod
+    import gmlx.talk.client as tc
+    from gmlx.talk.main import cmd_talk
 
     cfg = tmp_path / "gmlx.yaml"
     cfg.write_text("models: {}\n")
@@ -900,7 +900,7 @@ def test_slash_wake_outside_wake_mode_hints(capsys):
 
 def test_merged_settings_brain_and_assistant():
     from gmlx.config import AssistantCfg, TalkCfg
-    from gmlx.talk import _build_parser, _merged_settings
+    from gmlx.talk.main import _build_parser, _merged_settings
     cfg = TalkCfg(brain="assistant",
                   assistant=AssistantCfg(max_tool_rounds=3))
     args = _build_parser("t").parse_args([])
@@ -916,7 +916,7 @@ def test_tts_worker_merges_ready_sentences():
     one synthesis call - the reply is spoken with the text's own cadence, not
     one isolated utterance (and one round trip) per sentence."""
     import threading
-    from gmlx.talk import _TURN_END
+    from gmlx.talk.main import _TURN_END
 
     loop = _make_loop("vad")
     cancel = threading.Event()
@@ -937,7 +937,7 @@ def test_tts_worker_merge_respects_cap_and_turns():
     """The merge stops at _MERGE_CHARS and never crosses into another turn's
     chunks; the boundary item is processed on its own, not dropped."""
     import threading
-    from gmlx.talk import _MERGE_CHARS
+    from gmlx.talk.main import _MERGE_CHARS
 
     loop = _make_loop("vad")
     c1, c2 = threading.Event(), threading.Event()
@@ -967,7 +967,7 @@ def test_tts_worker_merged_chunk_skipped_when_canceled():
 
 
 def test_playback_survives_backend_play_error(capsys):
-    from gmlx.talk import IDLE, LISTENING
+    from gmlx.talk.main import IDLE, LISTENING
 
     loop = _make_loop("wake")
     real_play = loop.backend.play
@@ -1030,7 +1030,7 @@ def test_keys_poll_collapses_an_escape_sequence(monkeypatch):
     import os as _os
     import sys as _sys
 
-    from gmlx.talk import _Keys
+    from gmlx.talk.main import _Keys
 
     r_fd, w_fd = _os.pipe()
     try:

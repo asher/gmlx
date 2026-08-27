@@ -23,7 +23,7 @@ import pytest
 
 pytest.importorskip("mlx_vlm")
 
-from gmlx import server_bridge_vlm as serving  # noqa: E402
+import gmlx.serve.bridge_vlm as serving  # noqa: E402
 
 
 def _emb(tag):

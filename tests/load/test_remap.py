@@ -11,7 +11,7 @@ MoE split + architectural ``.scale`` claims, and the universal skip/fail edges.
 from __future__ import annotations
 
 
-from gmlx.remap import parse_gguf_name, RemapDecision  # noqa: E402
+from gmlx.load.remap import parse_gguf_name, RemapDecision  # noqa: E402
 
 MAP = RemapDecision.KIND_MAP
 SKIP = RemapDecision.KIND_SKIP
@@ -1103,7 +1103,7 @@ def test_kimi_k3_kda_conv_weight_array_transform():
     # Both wire layouts reshape to mlx Conv1d (d_inner, d_conv, 1) exactly.
     import mlx.core as mx
     import numpy as np
-    from gmlx.loader import remap_arrays
+    from gmlx.load.loader import remap_arrays
     d_inner, d_conv = 6, 4
     base = np.arange(d_inner * d_conv, dtype=np.float32)
     arrays = {

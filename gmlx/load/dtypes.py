@@ -34,7 +34,7 @@ import re
 
 import mlx.core as mx
 
-from .envflags import env_choice
+from gmlx.envflags import env_choice
 
 ENV_VAR = "GMLX_ACTIVATION_DTYPE"
 # "auto" reads the GPU generation. Name a dtype to override the rule.

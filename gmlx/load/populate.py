@@ -38,7 +38,7 @@ import os
 import threading
 import time
 
-from .envflags import env_bool, env_float
+from gmlx.envflags import env_bool, env_float
 
 _POPULATE_CHUNK = 32 << 20
 _POPULATE_WORKERS = 8

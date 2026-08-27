@@ -34,20 +34,20 @@ import mlx.core as mx
 from mlx_vlm.models import base as _B
 from mlx_vlm.models.qwen3_5 import language as _L
 
-from . import loadlog
-from .envflags import env_bool
-from .qwen35_gdn import owned_gdn_active as owned_attn_active  # one switch
-from .qwen35_owned import _qwen3_5_left_padding_info
-from .qwen35_rope import apply_multimodal_rotary_pos_emb as _apply_mrope
-from .qwen35_rope import rope_apply_rotary
-from .qwen35_verify_fold import _pads_list
-from .qwen35_verify_linear import verify_linear, verify_linears
+import gmlx.load.loadlog as loadlog
+from gmlx.envflags import env_bool
+from .gdn import owned_gdn_active as owned_attn_active  # one switch
+from .owned import _qwen3_5_left_padding_info
+from .rope import apply_multimodal_rotary_pos_emb as _apply_mrope
+from .rope import rope_apply_rotary
+from .verify_fold import _pads_list
+from .verify_linear import verify_linear, verify_linears
 
 __all__ = ["owned_attn_active", "rebind_attn", "OwnedQwen3_5Attention"]
 
 
 # --- verbatim upstream copies (source-equality-tested; see
-#     tests/test_qwen35_attn.py) ---
+#     tests/models/test_qwen35_attn.py) ---
 
 _QWEN3_5_RAGGED_SDPA_ONE_PASS_SOURCE = r"""
     uint q_batch_head_idx = threadgroup_position_in_grid.y;
@@ -604,7 +604,7 @@ def _left_padded_attention(queries, keys, values, *, cache, scale, mask):
         and queries.shape[2] == 1
         and env_bool("GMLX_CASCADE_SDPA", True)
     ):
-        from .cascade_sdpa import _claim as _cascade_claim
+        from gmlx.upstream.cascade_sdpa import _claim as _cascade_claim
 
         output = _cascade_claim(queries, keys, values, cache, scale,
                                 None, None)
@@ -724,7 +724,7 @@ def _verify_attention(queries, keys, values, *, cache, scale, mask):
         # claim re-derives pads itself and declines right padding and
         # width-mismatched arrays; None means "causal" on this
         # resolver, so map it before the claim.
-        from .cascade_sdpa import _claim as _cascade_claim
+        from gmlx.upstream.cascade_sdpa import _claim as _cascade_claim
 
         output = _cascade_claim(
             queries, keys, values, cache, scale,

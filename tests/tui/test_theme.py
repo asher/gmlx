@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""`gmlx.theme`: slot resolution across color depths, colorblind remap,
+"""`gmlx.tui.theme`: slot resolution across color depths, colorblind remap,
 NO_COLOR emptiness, and the rich Theme bridge. CPU-only, no terminal needed."""
 from __future__ import annotations
 
 import pytest
 
-from gmlx import theme as th
+import gmlx.tui.theme as th
 
 
 def test_all_themes_resolve_every_slot():

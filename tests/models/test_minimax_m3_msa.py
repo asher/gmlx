@@ -15,8 +15,8 @@ from __future__ import annotations
 import mlx.core as mx
 from mlx.utils import tree_flatten, tree_unflatten
 
-from gmlx.minimax_m3_model import MSAKVCache, ModelArgs, Model
-from gmlx.remap import parse_gguf_name, RemapDecision
+from gmlx.models.minimax_m3 import MSAKVCache, ModelArgs, Model
+from gmlx.load.remap import parse_gguf_name, RemapDecision
 from mlx_lm.models.cache import KVCache
 
 MAP = RemapDecision.KIND_MAP
@@ -257,7 +257,7 @@ def test_quant_predicate_protects_indexer():
 # -- sidecar resolution ------------------------------------------------------
 
 def test_sidecar_resolver_discovery_and_gates(tmp_path, monkeypatch):
-    from gmlx.loader import _resolve_indexer_sidecar
+    from gmlx.load.loader import _resolve_indexer_sidecar
 
     gguf = tmp_path / "model.gguf"
     gguf.write_bytes(b"")
@@ -344,7 +344,7 @@ def _m3_meta_and_shapes(with_indexer_kvs: bool, with_tensor: bool):
 
 
 def test_synth_arms_msa_from_indexer_tensor_and_kvs():
-    from gmlx.config_synth import synthesize_config
+    from gmlx.load.config_synth import synthesize_config
 
     meta, shapes = _m3_meta_and_shapes(True, True)
     cfg = synthesize_config(meta, shapes)
@@ -357,7 +357,7 @@ def test_synth_arms_msa_from_indexer_tensor_and_kvs():
 
 
 def test_synth_defaults_when_tensors_present_without_kvs():
-    from gmlx.config_synth import synthesize_config
+    from gmlx.load.config_synth import synthesize_config
 
     meta, shapes = _m3_meta_and_shapes(False, True)
     cfg = synthesize_config(meta, shapes)
@@ -367,7 +367,7 @@ def test_synth_defaults_when_tensors_present_without_kvs():
 
 
 def test_synth_dense_when_no_indexer_tensors():
-    from gmlx.config_synth import synthesize_config
+    from gmlx.load.config_synth import synthesize_config
 
     meta, shapes = _m3_meta_and_shapes(False, False)
     cfg = synthesize_config(meta, shapes)
@@ -397,7 +397,7 @@ class _FakeTok:
 
 
 def test_thinking_seqs_prefer_template_spelling():
-    from gmlx.thinking_budget import _thinking_token_seqs
+    from gmlx.gen.thinking_budget import _thinking_token_seqs
 
     start, end = _thinking_token_seqs(_FakeTok())
     assert end == (13,)   # </mm:think>, not </think>
@@ -405,7 +405,7 @@ def test_thinking_seqs_prefer_template_spelling():
 
 
 def test_thinking_budget_forces_mm_close():
-    from gmlx.thinking_budget import make_thinking_budget_processor
+    from gmlx.gen.thinking_budget import make_thinking_budget_processor
 
     p = make_thinking_budget_processor(_FakeTok(), 0)
     assert p is not None
@@ -413,7 +413,7 @@ def test_thinking_budget_forces_mm_close():
 
 
 def test_prompt_opens_thinking_mm():
-    from gmlx.thinking_budget import prompt_opens_thinking
+    from gmlx.gen.thinking_budget import prompt_opens_thinking
 
     assert prompt_opens_thinking("...<mm:think>reasoning", tokenizer=_FakeTok())
     assert not prompt_opens_thinking(
@@ -422,7 +422,7 @@ def test_prompt_opens_thinking_mm():
 
 
 def test_reasoning_filter_mm_markers():
-    from gmlx.reasoning import ReasoningFilter
+    from gmlx.tui.reasoning import ReasoningFilter
 
     f = ReasoningFilter()
     spans = f.feed("<mm:think>plan</mm:think>Hello") + f.flush()

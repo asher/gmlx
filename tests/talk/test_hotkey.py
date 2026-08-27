@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from gmlx.hotkey import (
+from gmlx.talk.hotkey import (
     PUSH_TO_TALK_MODIFIERS,
     combo_label,
     privacy_pane_url,
@@ -48,7 +48,7 @@ def test_privacy_pane_url():
 
 
 def test_unknown_modifier_rejected():
-    from gmlx.hotkey import HotkeyTap
+    from gmlx.talk.hotkey import HotkeyTap
     with pytest.raises(ValueError):
         HotkeyTap("globe-space", lambda: None)      # old trigger name
     with pytest.raises(ValueError):
@@ -60,7 +60,7 @@ def test_held_combo_fires_once_and_swallows_repeats():
     (a held combo would otherwise chime-spam and thrash listen/dismiss),
     but the repeats and the key-up still get swallowed - no spaces leak
     into the focused app."""
-    from gmlx.hotkey import HotkeyTap
+    from gmlx.talk.hotkey import HotkeyTap
     fired = []
     tap = HotkeyTap("globe", lambda: fired.append(1))
     assert tap._handle_space(True, _FN) is True      # matched down: fire

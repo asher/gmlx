@@ -10,8 +10,8 @@ import mlx.core as mx
 import numpy as np
 import pytest
 
-import gmlx.qwen4_exp_model as q4
-from gmlx.qwen4_exp_model import ModelArgs, PLEEmbedding
+import gmlx.models.qwen4_exp.model as q4
+from gmlx.models.qwen4_exp.model import ModelArgs, PLEEmbedding
 
 _EOS = 248044
 _PLE_KW = dict(

@@ -13,7 +13,8 @@ import time
 
 import pytest
 
-from gmlx import chat, cli  # noqa: E402
+import gmlx.tui.chat as chat  # noqa: E402
+import gmlx.commands.cli as cli  # noqa: E402
 
 
 @pytest.fixture
@@ -63,7 +64,7 @@ def test_chat_template_config_reaches_apply_chat_template():
     tokenizer's apply_chat_template - the generic passthrough forwards ANY key
     (e.g. preserve_thinking for Qwen3.6 / Gemma-4), not just enable_thinking."""
     pytest.importorskip("mlx_lm")
-    from gmlx import generation
+    import gmlx.gen.generation as generation
 
     template_kwargs = chat.parse_template_config('{"preserve_thinking": true}')
     captured: dict = {}
@@ -457,7 +458,7 @@ def test_run_remote_ref_hints_pull(capsys):
 def test_run_bad_template_config_fails_before_load(tmp_path, monkeypatch, capsys):
     fake = tmp_path / "m.gguf"
     fake.write_bytes(b"GGUF")
-    from gmlx import loader
+    import gmlx.load.loader as loader
 
     def no_load(*a, **k):
         raise AssertionError("load_model must not run on a config typo")
@@ -470,7 +471,7 @@ def test_run_bad_template_config_fails_before_load(tmp_path, monkeypatch, capsys
 
 # new sampling/config surface: stop sequences, logit bias, resize shape
 def test_stop_scanner_basic_and_trim():
-    from gmlx.generation import StopScanner
+    from gmlx.gen.generation import StopScanner
 
     sc = StopScanner(["STOP"])
     out1, hit1 = sc.feed("hello ")
@@ -480,7 +481,7 @@ def test_stop_scanner_basic_and_trim():
 
 
 def test_stop_scanner_split_across_segments():
-    from gmlx.generation import StopScanner
+    from gmlx.gen.generation import StopScanner
 
     sc = StopScanner(["<|end|>"])
     text = ""
@@ -493,7 +494,7 @@ def test_stop_scanner_split_across_segments():
 
 
 def test_stop_scanner_no_match_flush():
-    from gmlx.generation import StopScanner
+    from gmlx.gen.generation import StopScanner
 
     sc = StopScanner(["NEVER"])
     out, hit = sc.feed("short")
@@ -502,7 +503,7 @@ def test_stop_scanner_no_match_flush():
 
 
 def test_stop_scanner_earliest_of_multiple():
-    from gmlx.generation import StopScanner
+    from gmlx.gen.generation import StopScanner
 
     sc = StopScanner(["BBB", "A"])
     out, hit = sc.feed("xyABBB")
@@ -633,7 +634,7 @@ def test_render_command_sets_mode(state, capsys):
 
 
 def test_render_command_rich_requires_rich(state, monkeypatch):
-    from gmlx import render as rd
+    import gmlx.tui.render as rd
 
     monkeypatch.setattr(rd, "_rich_ok", False)
     state.render = "lite"
@@ -860,7 +861,7 @@ def test_esc_typed_before_cbreak_entry_still_cancels(monkeypatch):
     import pty
     import threading
 
-    from gmlx.chat import _EscCancel
+    from gmlx.tui.chat import _EscCancel
 
     import select
 
@@ -908,7 +909,7 @@ def test_handoff_esc_drains_typeahead():
     from prompt_toolkit.key_binding.key_processor import KeyPress
     from prompt_toolkit.keys import Keys
 
-    from gmlx.chat import _handoff_esc
+    from gmlx.tui.chat import _handoff_esc
 
     with create_pipe_input() as inp:
         state = chat.ChatState(ptk_session=SimpleNamespace(input=inp))
@@ -974,7 +975,7 @@ def test_xtc_rides_along_to_the_assistant_server(state, capsys):
 
 def test_rate_ticker_exact_from_generation_tokens():
     from types import SimpleNamespace
-    from gmlx.chat import _RateTicker
+    from gmlx.tui.chat import _RateTicker
 
     now = [0.0]
     tk = _RateTicker(clock=lambda: now[0])
@@ -990,7 +991,7 @@ def test_rate_ticker_exact_from_generation_tokens():
 
 
 def test_stat_line_shows_ttft_beside_decode_rate():
-    from gmlx.chat import _fmt_stat_line
+    from gmlx.tui.chat import _fmt_stat_line
 
     line = _fmt_stat_line({"prompt_tokens": 2296, "prompt_tps": 670.0,
                            "gen_tokens": 607, "gen_tps": 50.3,
@@ -1004,7 +1005,7 @@ def test_stat_line_shows_ttft_beside_decode_rate():
 
 def test_rate_ticker_silent_without_counts():
     from types import SimpleNamespace
-    from gmlx.chat import _RateTicker
+    from gmlx.tui.chat import _RateTicker
 
     now = [0.0]
     tk = _RateTicker(clock=lambda: now[0])
@@ -1015,7 +1016,7 @@ def test_rate_ticker_silent_without_counts():
 
 def test_rate_ticker_accumulates_across_round_restarts():
     from types import SimpleNamespace
-    from gmlx.chat import _RateTicker
+    from gmlx.tui.chat import _RateTicker
 
     now = [0.0]
     tk = _RateTicker(clock=lambda: now[0])
@@ -1034,7 +1035,7 @@ def test_rate_ticker_accumulates_across_round_restarts():
 
 def test_rate_ticker_throttles_pushes():
     from types import SimpleNamespace
-    from gmlx.chat import _RateTicker
+    from gmlx.tui.chat import _RateTicker
 
     now = [0.0]
     tk = _RateTicker(clock=lambda: now[0])
@@ -1047,7 +1048,7 @@ def test_rate_ticker_throttles_pushes():
 
 
 def test_slash_thinking_local_maps_template_spelling(capsys):
-    from gmlx.chat import ChatState, _slash_thinking
+    from gmlx.tui.chat import ChatState, _slash_thinking
 
     state = ChatState(template_kwargs={},
                       template_text="{% if enable_thinking %}{% endif %}")
@@ -1068,7 +1069,7 @@ def test_slash_thinking_local_maps_template_spelling(capsys):
 
 
 def test_slash_thinking_rejects_bad_value(capsys):
-    from gmlx.chat import ChatState, _slash_thinking
+    from gmlx.tui.chat import ChatState, _slash_thinking
 
     state = ChatState(template_kwargs={"enable_thinking": True})
     _slash_thinking("/thinking", "sideways", state)

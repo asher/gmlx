@@ -2,8 +2,8 @@
 
 Connects the ``assistant.mcp`` servers (stdio ``command`` or streamable-HTTP
 ``url``) via the official ``mcp`` SDK ([assistant] extra) and exposes each
-server's tools as :class:`~gmlx.assistant_brain.Tool` entries in a
-:class:`~gmlx.assistant_brain.ToolRegistry` - the assistant brain never
+server's tools as :class:`~gmlx.assistant.brain.Tool` entries in a
+:class:`~gmlx.assistant.brain.ToolRegistry` - the assistant brain never
 knows tools came from MCP.
 
 The SDK is asyncio-native and its sessions are async context managers; the
@@ -28,7 +28,7 @@ import re
 import sys
 import threading
 
-from .assistant_brain import Tool, ToolRegistry
+from .brain import Tool, ToolRegistry
 
 
 class TalkMcpError(RuntimeError):
@@ -38,7 +38,7 @@ class TalkMcpError(RuntimeError):
 def assistant_extra_hint() -> str:
     """The missing-assistant-extra warning. A function, not a constant: the
     install command depends on how gmlx itself was installed."""
-    from .extras import install_hint
+    from gmlx.commands.extras import install_hint
     return f"MCP tools need the assistant extra: {install_hint('assistant')}"
 
 
@@ -61,7 +61,7 @@ def _result_text(result) -> str:
 def stderr_log_path(name: str):
     """Where a stdio server's stderr lands - a per-server file in the cache
     dir, so tool-server logging never interleaves with the REPL / voice UI."""
-    from .lifecycle import runtime_dir
+    from gmlx.serve.lifecycle import runtime_dir
     safe = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-") or "server"
     return runtime_dir() / f"mcp-{safe}.log"
 

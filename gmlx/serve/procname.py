@@ -36,7 +36,7 @@ import tempfile
 from pathlib import Path
 
 PROC_NAME = "gmlx"
-BUNDLE_ID = "org.gmlx.menubar"
+BUNDLE_ID = "org.gmlx.commands.menubar"
 
 _INFO_PLIST = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

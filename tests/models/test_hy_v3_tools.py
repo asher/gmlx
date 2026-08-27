@@ -1,4 +1,4 @@
-"""Hy3 tool-call parser (``gmlx.hy_v3_tools``). CPU-only, no model load.
+"""Hy3 tool-call parser (``gmlx.models.hy_v3.tools``). CPU-only, no model load.
 
 Exercises ``parse_tool_call`` on wrapper-inner text as mlx-vlm's
 ``process_tool_calls`` hands it over (the wrapper tags are the module's
@@ -12,8 +12,8 @@ import sys
 
 import pytest
 
-from gmlx import hy_v3_tools
-from gmlx.hy_v3_tools import parse_tool_call, tool_call_end, tool_call_start
+import gmlx.models.hy_v3.tools as hy_v3_tools
+from gmlx.models.hy_v3.tools import parse_tool_call, tool_call_end, tool_call_start
 
 _TOOLS = [
     {

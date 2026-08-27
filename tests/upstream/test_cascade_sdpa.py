@@ -14,7 +14,7 @@ import importlib
 
 from mlx_lm.models import llama as llama_mod
 
-from gmlx import cascade_sdpa as cs
+import gmlx.upstream.cascade_sdpa as cs
 
 _SEAM_MODS = []
 for _pkg, _name in cs._MODULES:
@@ -211,7 +211,7 @@ def test_route_verify_width_matches_masked_reference(monkeypatch, qL, pads):
 def test_qwen_owned_path_claims(monkeypatch):
     """The owned qwen left-padded decode resolver routes stamped B>1
     qL==1 calls through the cascade claim before the ragged kernels."""
-    from gmlx import qwen35_attn as qa
+    import gmlx.models.qwen35.attn as qa
 
     monkeypatch.setenv("GMLX_CASCADE_MIN_P", "256")
     P, pads = 1024, [0, 64, 32]
@@ -246,7 +246,7 @@ def test_qwen_owned_path_claims(monkeypatch):
 def test_qwen_owned_verify_width_claims(monkeypatch):
     """The owned qwen verify resolver routes stamped B>1 qL>1 calls
     through the cascade claim ahead of the padded masked-sdpa branch."""
-    from gmlx import qwen35_attn as qa
+    import gmlx.models.qwen35.attn as qa
 
     monkeypatch.setenv("GMLX_CASCADE_MIN_P", "256")
     P, sp, qL = 1024, 96, 4

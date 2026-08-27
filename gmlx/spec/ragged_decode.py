@@ -11,7 +11,7 @@ The bail is unnecessary: both metal kernels partition the PADDED ``k_size``
 and mask per-row via ``pads``, so one plan computed from ``k_size`` is
 correct for every row (shorter rows just early-exit more blocks). This seam
 rebinds the module global with the unified-plan dispatch, which lives in
-``gmlx.qwen35_attn`` (the owned attention calls it directly).
+``gmlx.models.qwen35.attn`` (the owned attention calls it directly).
 
 The installer runs for stock-built qwen MTP targets (multimodal
 loads, via ``mtp_load._install_stock_qwen35_verify_patches``) and is the
@@ -36,7 +36,7 @@ def install_unified_ragged_plan() -> None:
         return
     from mlx_vlm.models.qwen3_5 import language as _lang
 
-    from .qwen35_attn import ragged_decode_attention
+    from gmlx.models.qwen35.attn import ragged_decode_attention
 
     # Identity check instead of a latch: no attribute stamped onto the
     # owned function, and a test that restores the upstream global gets

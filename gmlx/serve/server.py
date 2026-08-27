@@ -38,8 +38,8 @@ import os
 import sys
 from pathlib import Path
 
-from . import discovery
-from .config import (
+import gmlx.load.discovery as discovery
+from gmlx.config import (
     DEFAULT_CONFIG_WRITE,
     LOOPBACK_HOSTS,
     ConfigError,
@@ -54,7 +54,7 @@ from .config import (
     load_config,
     resolve_path,
 )
-from .envflags import env_bool
+from gmlx.envflags import env_bool
 
 _DEFAULT_DISCOVER_DIR = "."          # zero-config bare start scans the cwd
 
@@ -87,7 +87,9 @@ def _import_serving():
     ``--help`` never need it, and a missing mlx-vlm names the fix instead of a
     bare ModuleNotFoundError."""
     try:
-        from . import residency, server_patches, server_bridge_vlm  # noqa: F401
+        from . import residency  # noqa: F401
+        from . import patches as server_patches  # noqa: F401
+        from . import bridge_vlm as server_bridge_vlm  # noqa: F401
     except ImportError as exc:
         root = (exc.name or "").split(".")[0]
         if root in ("mlx_vlm", "fastapi", "uvicorn", "starlette"):
@@ -101,7 +103,7 @@ def _import_serving():
 
 def main(argv: list | None = None, prog: str | None = None) -> int:
     """``prog`` overrides the help/usage program name (the ``gmlx`` umbrella
-    passes ``gmlx <verb>``; a bare ``python -m gmlx.server`` keeps the
+    passes ``gmlx <verb>``; a bare ``python -m gmlx.serve.server`` keeps the
     ``gmlx serve`` defaults)."""
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "init":
@@ -109,7 +111,7 @@ def main(argv: list | None = None, prog: str | None = None) -> int:
     if argv and argv[0] == "sync-models":
         return _cmd_sync(argv[1:], prog=prog or "gmlx sync-models")
     if argv and argv[0] == "launch":
-        from .launch import cmd_launch
+        from gmlx.commands.launch import cmd_launch
         return cmd_launch(argv[1:], prog=prog or "gmlx launch")
     # Lifecycle verbs for a backgrounded server - explicit branches before the serve
     # fallthrough so they aren't parsed as the positional GGUF.
@@ -248,7 +250,7 @@ def _want_interactive(a) -> bool:
 
 
 def _init_interactive(a) -> int:
-    from . import wizard
+    import gmlx.commands.wizard as wizard
     default_out = a.out or DEFAULT_CONFIG_WRITE
     try:
         outcome = wizard.run_wizard(
@@ -282,7 +284,7 @@ def _resolve_services(a):
 def _resolve_duration(flag: str, value, ap):
     if value is None:
         return None
-    from .wizard import parse_duration
+    from gmlx.commands.wizard import parse_duration
     try:
         return parse_duration(value)
     except ValueError:
@@ -291,7 +293,8 @@ def _resolve_duration(flag: str, value, ap):
 
 
 def _install_for_services(stt_v, tts_v, emb_v) -> None:
-    from . import embeddings as _emb, extras
+    from . import embeddings as _emb
+    import gmlx.commands.extras as extras
     wanted = []
     if stt_v:
         wanted.append("stt")
@@ -687,7 +690,7 @@ def register_downloads(paths: list, config_path=None) -> None:
 
 # serve
 def _add_serve_args(ap: argparse.ArgumentParser) -> None:
-    from .cli import mass_share
+    from gmlx.commands.cli import mass_share
 
     ap.add_argument("model", nargs="?", default=None,
                     help="A single GGUF to serve (sharded ok).")
@@ -1393,7 +1396,7 @@ def _resolve_cfg(a) -> tuple:
 
 def _make_reload_fn(path):
     def _reload():
-        from .server_bridge_vlm import register_resolved_models
+        from .bridge_vlm import register_resolved_models
         cfg = load_config(path)
         register_resolved_models(cfg)        # warm entries persist (keyed by path)
         return {"models": len(cfg.models)}
@@ -1558,10 +1561,10 @@ def _resolve_service(key: str, resolver, value, model_dirs):
 
 
 def _serve(cfg: ServerCfg, a, reload_fn) -> int:
-    from . import server_bridge_vlm as serving
+    from . import bridge_vlm as serving
     from .residency import install_gguf_residency_pool
-    from .server_patches import install_server_patches
-    from .server_bridge_vlm import (
+    from .patches import install_server_patches
+    from .bridge_vlm import (
         install_gguf_server_bridge,
         register_gguf_vlm,
         register_resolved_models,
@@ -1571,7 +1574,7 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     # MLX buffer-cache limit: explicit env/config wins, else the auto policy
     # bounds the cache when the biggest configured model leaves little slack
     # (deep-context safety; see server_memory).
-    from .server_memory import apply_cache_limit
+    from .memory import apply_cache_limit
     apply_cache_limit(cfg)
     from .cb_phase import COARSE, FINE, install_cb_phase_flips
     if install_cb_phase_flips():
@@ -1591,7 +1594,7 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     if cfg.stochastic_mtp or getattr(a, "stochastic_mtp", False):
         # Startup-only, like the timeout below; a config reload does not
         # re-apply it.
-        from .speculative import set_stoch_accept
+        from gmlx.spec.speculative import set_stoch_accept
 
         set_stoch_accept(True)
         print("[server] stochastic MTP acceptance: on (sampled requests keep "
@@ -1802,7 +1805,7 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     cfg.host, cfg.port = host, port
     install_server_patches(cfg, reload_fn=reload_fn)
     if getattr(a, "ignore_eos", False) or env_bool("GMLX_IGNORE_EOS", False):
-        from .server_patches import install_ignore_eos
+        from .patches import install_ignore_eos
         install_ignore_eos()
         print("[server] ignore-eos: decode runs to max_tokens (EOS suppressed)")
 
@@ -1843,7 +1846,7 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
 
     import uvicorn
 
-    from . import server_patches
+    from . import patches as server_patches
 
     # Preload off the startup path: mlx-vlm's lifespan loads MLX_VLM_PRELOAD_MODEL
     # synchronously *before* the port accepts connections, so a big model makes the

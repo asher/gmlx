@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reranking core (``gmlx.rerank``): GGUF ref resolution, request validation,
+"""Reranking core (``gmlx.serve.rerank``): GGUF ref resolution, request validation,
 the yes/no single-token guard, the P(yes) scoring math (fake model on CPU), and
 the run_rerank driver (sorting / top_n / response shape). CPU only - the loader is
 stubbed, no real model is loaded; only tiny scoring math touches mlx (forced onto
@@ -10,7 +10,7 @@ import math
 
 import pytest
 
-from gmlx import rerank as rr  # noqa: E402
+import gmlx.serve.rerank as rr  # noqa: E402
 from gmlx.config import ConfigError  # noqa: E402
 from gmlx.config import build_config  # noqa: E402
 

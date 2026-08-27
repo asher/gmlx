@@ -8,7 +8,7 @@ path. Both are checked against the same eager reference.
 import mlx.core as mx
 import pytest
 
-from gmlx.deepseek_v4_hyper_connection import (
+from gmlx.models.deepseek_v4.hyper_connection import (
     HyperConnection,
     hc_expand,
     hc_expand_collapse,

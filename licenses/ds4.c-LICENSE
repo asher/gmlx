@@ -1,10 +1,10 @@
 ds4.c (dwarfstar) - the DeepSeek-V4-Flash C reference engine
 
 The QAT simulation round-trips (fp8/fp4/Hadamard chains), compressor QAT
-sites, and sink-attention semantics in gmlx/deepseek_v4_model.py are
+sites, and sink-attention semantics in gmlx/models/deepseek_v4/model.py are
 reimplemented from ds4.c's reference behavior (functions cited in comments);
 numeric parity against ds4.c gates the port. The DSpark drafter runtime in
-gmlx/deepseek_v4_dspark.py and the deepseek4-dspark sidecar layout emitted
+gmlx/models/deepseek_v4/dspark.py and the deepseek4-dspark sidecar layout emitted
 by scripts/convert_dspark_sidecar.py are likewise reimplemented from ds4.c
 and its gguf-tools/deepseek4-quantize.c. ds4.c is distributed under the
 MIT License:

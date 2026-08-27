@@ -60,7 +60,7 @@ from mlx_lm.models import cache as _lm_cache
 from mlx_lm.models.cache import KVCache
 from mlx_lm.models.switch_layers import SwitchGLU
 
-from gmlx.dtypes import activation_dtype
+from gmlx.load.dtypes import activation_dtype
 
 
 def ensure_registered() -> None:

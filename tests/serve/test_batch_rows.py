@@ -11,10 +11,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import gmlx
-from gmlx.batch_rows import batch_rows, batch_rows_of
+from gmlx.serve.batch_rows import batch_rows, batch_rows_of
 
 DECISION_MODULES = (
-    "admit_gate", "server_memory", "batch_sched", "auto_ratio", "fresh_gate",
+    "serve/admit_gate", "serve/memory", "serve/batch_sched",
+    "serve/auto_ratio", "cache/fresh_gate",
 )
 
 
@@ -76,7 +77,7 @@ def test_should_decline_never_lens_the_batch():
     # the full predicate (num_to_add, empty check, projection width) must
     # run on pure reads. Rates are absent so the projection returns None
     # and the gate admits, exercising every read on the way.
-    from gmlx.admit_gate import _should_decline
+    from gmlx.serve.admit_gate import _should_decline
 
     gen = _gen(
         _LenRaisesBatch([False]),
@@ -89,7 +90,7 @@ def test_should_decline_never_lens_the_batch():
 
 
 def test_project_admission_never_lens_the_batch():
-    from gmlx.server_memory import project_admission, update_kv_rates
+    from gmlx.serve.memory import project_admission, update_kv_rates
 
     gen = _gen(_LenRaisesBatch([False, False]))
     update_kv_rates(gen)  # empty prompt_cache: measures nothing, purely
@@ -97,7 +98,7 @@ def test_project_admission_never_lens_the_batch():
 
 
 def test_keep_count_never_lens_the_batch():
-    from gmlx.fresh_gate import _keep_count
+    from gmlx.cache.fresh_gate import _keep_count
 
     gen = _gen(
         _LenRaisesBatch([False]),
@@ -111,7 +112,7 @@ def test_keep_count_never_lens_the_batch():
 
 
 def test_auto_ratio_c_term_never_lens_the_batch():
-    from gmlx import auto_ratio
+    import gmlx.serve.auto_ratio as auto_ratio
 
     gen = _gen(_LenRaisesBatch([False, False]), _kq_last_chunk_time=0.0)
     st = auto_ratio._AutoState()

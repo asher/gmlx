@@ -14,7 +14,7 @@ import mlx.core as mx
 import numpy as np
 import pytest
 
-from gmlx.vlm import (
+from gmlx.load.vlm import (
     _kimi_k25_qkv_split_to_interleaved,
     _kimi_k25_vision_name,
     _synthesize_kimi_k25_vlm_config,
@@ -233,7 +233,7 @@ def test_image_processor_output_survives_a_thread_hop():
 
     from PIL import Image
 
-    from gmlx.vlm import _kimi_k25_image_processor
+    from gmlx.load.vlm import _kimi_k25_image_processor
 
     proc = _kimi_k25_image_processor(
         patch_size=14, image_mean=(0.5, 0.5, 0.5), image_std=(0.5, 0.5, 0.5),

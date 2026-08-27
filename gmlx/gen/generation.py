@@ -15,7 +15,7 @@ import time
 
 import mlx.core as mx
 
-from . import loader
+import gmlx.load.loader as loader
 
 
 # Tokens per target prefill forward on the speculative path only. mlx-vlm forces
@@ -77,7 +77,7 @@ def _prefill_progress_ui(stream=None):
     long prefill, updates the label per chunk, and closes it on the final
     ``(total, total)`` call, which fires before the first decoded token.
     ``close`` is idempotent (also called from a ``finally``)."""
-    from .spinner import Spinner
+    from gmlx.spinner import Spinner
 
     state: dict = {}
 
@@ -116,7 +116,7 @@ def kv_quantization_unsupported(model) -> str | None:
         caches = make()
     except Exception:
         return None
-    from .cache_compat import cache_types
+    from gmlx.cache.compat import cache_types
 
     rotating = (cache_types("RotatingKVCache")
                 + cache_types("BatchRotatingKVCache"))
@@ -151,7 +151,7 @@ def quantize_pooled_caches(caches, bits: int, group_size: int = 64) -> int:
     (deepseek4 compressor pools -- the only KV that grows with context;
     sliding windows are size-capped and stay fp16). Returns the number
     armed. The caches must be fresh: no pooled rows landed yet."""
-    from .deepseek_v4_cache import PoolingCache
+    from gmlx.models.deepseek_v4.cache import PoolingCache
 
     if bits not in _KV_QUANT_BITS:
         return 0
@@ -181,12 +181,12 @@ def _echo_think_tag(prompt, tokenizer):
 
 def _verbose_emitter(prompt, tokenizer, reasoning):
     """``(write, close)`` for a verbose stream. ``reasoning`` show/hide styles
-    a thinking model's chain-of-thought through :class:`~gmlx.reasoning.
+    a thinking model's chain-of-thought through :class:`~gmlx.tui.reasoning.
     StreamRenderer` (the chat REPL's rendering); anything else prints raw,
     echoing the prompt-opened think tag so the bare close marker still reads."""
     open_tag = _echo_think_tag(prompt, tokenizer)
     if reasoning in ("show", "hide"):
-        from .reasoning import StreamRenderer, prompt_opens_header
+        from gmlx.tui.reasoning import StreamRenderer, prompt_opens_header
 
         r = StreamRenderer(reasoning, start_in_thinking=open_tag is not None,
                            start_in_header=prompt_opens_header(prompt))
@@ -283,7 +283,7 @@ def generate(
     sampler = make_sampler(
         temp=temp, top_p=top_p, top_k=top_k, min_p=min_p, **xtc_kwargs
     )
-    from .tokenizer import merge_suppressed_tokens
+    from gmlx.load.tokenizer import merge_suppressed_tokens
     logit_bias = merge_suppressed_tokens(logit_bias, tokenizer)
     logits_processors = make_logits_processors(
         logit_bias=logit_bias or None,
@@ -384,7 +384,7 @@ def generate(
     if prompt_cache is not None:
         gen_kwargs["prompt_cache"] = prompt_cache
     # Module-attribute lookup so the monkeypatch seam
-    # gmlx.loader._resolve_prefill_step stays live for this path.
+    # gmlx.load.loader._resolve_prefill_step stays live for this path.
     step, defaulted = loader._resolve_prefill_step(model, prefill_step_size)
     if defaulted and verbose:
         print(
@@ -578,7 +578,7 @@ def _generate_over(
     from mlx_lm.generate import stream_generate
     from mlx_lm.models.cache import make_prompt_cache
 
-    from .overgen import (
+    from gmlx.spec.overgen import (
         append_log,
         build_critique_bridge,
         collect_interim_eos,
@@ -807,7 +807,7 @@ def _generate_speculative(
     # Drafters whose hooks only the owned engine understands (deepseek_v4:
     # 4D hidden + rotating-undo rollback) must not run mlx-vlm's stock round;
     # stochastic acceptance also lives only in the owned walk.
-    from .speculative import use_owned_engine
+    from gmlx.spec.speculative import use_owned_engine
     if use_owned_engine(drafter, temp):
         return generate_speculative_owned(
             model, drafter, tokenizer, prompt,
@@ -829,7 +829,7 @@ def _generate_speculative(
         )
 
     from mlx_lm.sample_utils import make_sampler
-    from .spec_helpers import _resolve_block_total
+    from gmlx.spec.helpers import _resolve_block_total
     from mlx_vlm.generate.ar import generate_step
 
     if (
@@ -978,10 +978,10 @@ def generate_speculative_owned(
     generate_step. This is the bench_tg_depth default (matches serve);
     GMLX_OWNED_ROUND=0 opts back to mlx-vlm's generate_speculative."""
     from mlx_lm.sample_utils import make_sampler
-    from .spec_helpers import _resolve_block_total
+    from gmlx.spec.helpers import _resolve_block_total
     from mlx_vlm.models import cache as _cache
 
-    from .speculative import annotate_sampling_params, stream_speculative
+    from gmlx.spec.speculative import annotate_sampling_params, stream_speculative
 
     if (
         isinstance(prompt, str)
@@ -1162,9 +1162,9 @@ def _stream_generate_speculative_owned(
     surface as the stock round, but drives ``stream_speculative`` (which
     does its own chunked prefill through the persistent ``prompt_cache``)."""
     from mlx_lm.sample_utils import make_sampler
-    from .spec_helpers import _resolve_block_total
+    from gmlx.spec.helpers import _resolve_block_total
 
-    from .speculative import annotate_sampling_params, stream_speculative
+    from gmlx.spec.speculative import annotate_sampling_params, stream_speculative
 
     if isinstance(prompt, str):
         add_special = tokenizer.bos_token is None or not prompt.startswith(
@@ -1279,7 +1279,7 @@ def _stream_generate_speculative(
     # EOS / a stop string), so the persistent chat cache stays clean for the
     # next turn. GMLX_OWNED_ROUND=0 opts back to the stock round, except for
     # drafters whose contract demands the owned engine.
-    from .speculative import use_owned_engine
+    from gmlx.spec.speculative import use_owned_engine
     if (os.environ.get("GMLX_OWNED_ROUND") != "0"
             or use_owned_engine(drafter, temp)):
         yield from _stream_generate_speculative_owned(
@@ -1290,7 +1290,7 @@ def _stream_generate_speculative(
         return
 
     from mlx_lm.sample_utils import make_sampler
-    from .spec_helpers import _resolve_block_total
+    from gmlx.spec.helpers import _resolve_block_total
     from mlx_vlm.generate.ar import generate_step
 
     if isinstance(prompt, str):

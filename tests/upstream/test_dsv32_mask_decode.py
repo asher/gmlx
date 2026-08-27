@@ -17,7 +17,7 @@ and (4) unflagged instances stay on the stock path even with the class patched.
 import mlx.core as mx
 import pytest
 
-import gmlx.dsv32_patches as dsv32_patches
+import gmlx.upstream.dsv32_patches as dsv32_patches
 from mlx_lm.models.deepseek_v32 import DeepseekV32Attention
 from mlx_lm.models.glm_moe_dsa import Model, ModelArgs
 

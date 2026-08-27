@@ -121,7 +121,7 @@ def install_loopback_host_guard(bind_host: str) -> None:
     clients) is allowed. Idempotent."""
     from fastapi.responses import JSONResponse
 
-    from ..config import LOOPBACK_HOSTS
+    from gmlx.config import LOOPBACK_HOSTS
 
     app = importlib.import_module("mlx_vlm.server.app").app
     if getattr(app.state, _HOST_GUARD_FLAG, False):

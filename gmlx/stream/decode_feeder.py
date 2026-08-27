@@ -47,8 +47,9 @@ from functools import lru_cache
 
 import numpy as np
 
-from . import keepwarm, loadlog
-from .envflags import env_bool, env_int
+from . import keepwarm
+import gmlx.load.loadlog as loadlog
+from gmlx.envflags import env_bool, env_int
 from .feeder_common import ATTRS, KINDS, read_range, swapped_weights, verify_zero_copy
 
 # Miss-pull parallelism: per layer, up to top_k experts x 3 stacks of
@@ -58,7 +59,7 @@ from .feeder_common import ATTRS, KINDS, read_range, swapped_weights, verify_zer
 _READ_WORKERS = 12
 
 # Lookahead prestage (see ``prestage``): predictions from the lookahead
-# hook (gmlx.lookahead) pre-read the next MoE layer's likely misses while
+# hook (gmlx.stream.lookahead) pre-read the next MoE layer's likely misses while
 # the current layer computes. Capped at GMLX_DECODE_LOOKAHEAD_K ranked predictions
 # per call (the ranking head is far more reliable than its tail - wasted
 # reads scale with the cap and the ~25% mispredict rate) on a small
@@ -1242,7 +1243,7 @@ class DecodeFeeder:
         the memory is ours to take back."""
         need = self._arena_bytes_at(self._pressure_steps - 1) - self.arena_bytes
         try:
-            from .loader import _available_ram_bytes, _ram_floor_bytes
+            from gmlx.load.loader import _available_ram_bytes, _ram_floor_bytes
 
             avail = _available_ram_bytes(include_inactive=False)
         except Exception:

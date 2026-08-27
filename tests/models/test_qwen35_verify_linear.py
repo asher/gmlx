@@ -20,8 +20,8 @@ pytest.importorskip("mlx_vlm.models.qwen3_5.language")
 
 from mlx_vlm.models.qwen3_5 import language as _L
 
-from gmlx import gdn_patches as gp
-from gmlx import qwen35_verify_linear as vl
+import gmlx.upstream.gdn_patches as gp
+import gmlx.models.qwen35.verify_linear as vl
 
 _NEEDS_GPU = pytest.mark.skipif(
     bool(os.environ.get("KQUANT_FORCE_CPU")),

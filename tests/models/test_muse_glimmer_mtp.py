@@ -17,9 +17,9 @@ have to hold for that to be safe:
 import mlx.core as mx
 import pytest
 
-from gmlx.config_synth import synthesize_config
-from gmlx.muse_glimmer_model import ModelArgs, ensure_registered
-from gmlx.muse_glimmer_mtp import MuseGlimmerSpecLM
+from gmlx.load.config_synth import synthesize_config
+from gmlx.models.muse_glimmer.model import ModelArgs, ensure_registered
+from gmlx.models.muse_glimmer.mtp import MuseGlimmerSpecLM
 
 from test_config_synth import _MUSE_GLIMMER_SHAPES, _muse_glimmer_meta
 
@@ -197,8 +197,8 @@ def test_verify_walk_is_token_identical_to_greedy(armed):
 # --- the drafter side of the same seam ---------------------------------------
 
 def _build_drafter(cfg, n_layers=2, block_size=BLOCK, native_block_size=None):
-    from gmlx.dflash_drafter import DFlashConfig
-    from gmlx.muse_glimmer_dflash import MuseGlimmerDFlashDrafter
+    from gmlx.spec.dflash_drafter import DFlashConfig
+    from gmlx.models.muse_glimmer.dflash import MuseGlimmerDFlashDrafter
 
     return MuseGlimmerDFlashDrafter(DFlashConfig(
         hidden_size=cfg["hidden_size"],
@@ -261,7 +261,7 @@ def test_drafter_captures_take_the_trailing_block():
 
 
 def test_drafter_satisfies_the_protocol():
-    from gmlx.drafter_protocol import validate_drafter
+    from gmlx.spec.drafter_protocol import validate_drafter
 
     lm, cfg = _build()
     drafter = _build_drafter(cfg)
@@ -276,7 +276,7 @@ def test_a_shallow_default_still_drafts_the_trained_block_on_request():
     """The loader defaults the runtime depth below the checkpoint's block. A
     deeper ``--draft-block-size`` must reach the drafter and produce that many
     drafts, which is what the depth ceiling exists for."""
-    from gmlx.spec_helpers import _resolve_block_total
+    from gmlx.spec.helpers import _resolve_block_total
 
     lm, cfg = _build()
     drafter = _build_drafter(cfg, block_size=2, native_block_size=BLOCK)
@@ -294,8 +294,8 @@ def test_a_shallow_default_still_drafts_the_trained_block_on_request():
 
 def _load_drafter_config(cfg, monkeypatch, block_size):
     """Drive the GGUF loader far enough to capture the config it builds."""
-    from gmlx import muse_glimmer_dflash as mgd
-    from gmlx import mtp_load
+    import gmlx.models.muse_glimmer.dflash as mgd
+    import gmlx.spec.mtp_load as mtp_load
 
     captured = {}
 
@@ -330,7 +330,7 @@ def _load_drafter_config(cfg, monkeypatch, block_size):
 def test_the_loader_stamps_the_gguf_block_as_the_drafter_ceiling(monkeypatch):
     """The runtime depth is a tuned default; the checkpoint's trained block is
     the ceiling a deeper ``--draft-block-size`` is allowed to reach."""
-    from gmlx.mtp_load import _MUSE_GLIMMER_DFLASH_BLOCK_DEFAULT as TUNED
+    from gmlx.spec.mtp_load import _MUSE_GLIMMER_DFLASH_BLOCK_DEFAULT as TUNED
 
     _, cfg = _build()
     deep = _load_drafter_config(cfg, monkeypatch, TUNED + 16)
@@ -343,7 +343,7 @@ def test_the_loader_stamps_the_gguf_block_as_the_drafter_ceiling(monkeypatch):
 
 
 def test_an_undeclared_ceiling_keeps_the_configured_depth():
-    from gmlx.spec_helpers import _resolve_block_total
+    from gmlx.spec.helpers import _resolve_block_total
 
     _, cfg = _build()
     drafter = _build_drafter(cfg, block_size=BLOCK)

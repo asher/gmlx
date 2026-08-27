@@ -50,10 +50,10 @@ import mlx.nn as nn
 
 from mlx_lm.models.base import create_attention_mask
 
-from . import deepseek_v4_model as v4
-from .drafter_protocol import native_block_size
-from .deepseek_v4_cache import ensure_rollback_attached, set_undo_armed
-from .deepseek_v4_hyper_connection import HyperHead
+from . import model as v4
+from gmlx.spec.drafter_protocol import native_block_size
+from .cache import ensure_rollback_attached, set_undo_armed
+from .hyper_connection import HyperHead
 
 
 @dataclass
@@ -342,7 +342,7 @@ class DeepseekV4MTPDrafter(nn.Module):
     def make_cache(self) -> List[Any]:
         # Runtime-matching origin: the drafter KV sidecar hands these to the
         # mlx-vlm apc clone path, which isinstance-gates on its own classes.
-        from .cache_compat import construction_cache_module
+        from gmlx.cache.compat import construction_cache_module
 
         return [construction_cache_module().RotatingKVCache(
             max_size=self._sliding_window)]

@@ -14,7 +14,7 @@ import sys
 
 import pytest
 
-from gmlx import lifecycle as lc  # noqa: E402
+import gmlx.serve.lifecycle as lc  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -92,7 +92,7 @@ def test_auto_target_config_beats_hardcoded_default():
 
 
 def test_bare_status_lists_all_when_multiple(monkeypatch, capsys):
-    from gmlx import server as srv
+    import gmlx.serve.server as srv
     lc.write_run("127.0.0.1", 9001, {"pid": 11, "host": "127.0.0.1", "port": 9001,
                                      "managed_by": "detach"})
     lc.write_run("127.0.0.1", 9002, {"pid": 22, "host": "127.0.0.1", "port": 9002,
@@ -105,7 +105,7 @@ def test_bare_status_lists_all_when_multiple(monkeypatch, capsys):
 
 
 def test_bare_stop_refuses_when_multiple(monkeypatch, capsys):
-    from gmlx import server as srv
+    import gmlx.serve.server as srv
     lc.write_run("127.0.0.1", 9001, {"pid": 11, "host": "127.0.0.1", "port": 9001})
     lc.write_run("127.0.0.1", 9002, {"pid": 22, "host": "127.0.0.1", "port": 9002})
     monkeypatch.setattr(lc, "identity_ok", lambda run: True)     # both live
@@ -661,10 +661,10 @@ def test_tail_log_clear_truncates_keeps_file():
 def test_render_plist_round_trip():
     args = lc.child_argv(["--config", "/abs/c.yaml", "--host", "127.0.0.1",
                           "--port", "8080"])
-    raw = lc.render_plist("com.gmlx.server.x", args, "/abs/server.log",
+    raw = lc.render_plist("com.gmlx.serve.server.x", args, "/abs/server.log",
                           env={"PATH": "/venv/bin:/usr/bin"}, keepalive=True)
     pl = plistlib.loads(raw)
-    assert pl["Label"] == "com.gmlx.server.x"
+    assert pl["Label"] == "com.gmlx.serve.server.x"
     assert pl["ProgramArguments"] == args
     assert os.path.isabs(pl["ProgramArguments"][0])
     assert pl["KeepAlive"] == {"SuccessfulExit": False}
@@ -846,7 +846,7 @@ def _fake_start_background(monkeypatch, calls):
 
 
 def test_service_install_menubar_starts_server_and_records_autostart(monkeypatch):
-    from gmlx import menubar as mb
+    import gmlx.commands.menubar as mb
     monkeypatch.setattr(lc, "_require_macos", lambda what: 0)
     _happy_launchctl(monkeypatch)
     started = []
@@ -871,7 +871,7 @@ def test_service_install_menubar_starts_server_and_records_autostart(monkeypatch
 
 
 def test_service_install_menubar_no_autostart(monkeypatch):
-    from gmlx import menubar as mb
+    import gmlx.commands.menubar as mb
     monkeypatch.setattr(lc, "_require_macos", lambda what: 0)
     _happy_launchctl(monkeypatch)
     _fake_start_background(monkeypatch, [])
@@ -885,7 +885,7 @@ def test_service_install_menubar_no_autostart(monkeypatch):
 
 def test_service_install_menubar_keeps_running_server(monkeypatch):
     # A healthy server already on the bind is adopted, not restarted.
-    from gmlx import menubar as mb
+    import gmlx.commands.menubar as mb
     monkeypatch.setattr(lc, "_require_macos", lambda what: 0)
     _happy_launchctl(monkeypatch)
     monkeypatch.setattr(lc, "stop_menubar", lambda: False)
@@ -913,7 +913,7 @@ def test_service_install_menubar_refuses_over_headless_agent(monkeypatch, capsys
 
 
 def test_service_uninstall_removes_menubar_agent_and_autostart(monkeypatch, capsys):
-    from gmlx import menubar as mb
+    import gmlx.commands.menubar as mb
     monkeypatch.setattr(lc, "_require_macos", lambda what: 0)
     _happy_launchctl(monkeypatch)
     mp = lc._menubar_agent_plist_path()
@@ -1274,7 +1274,7 @@ def test_prune_respects_a_runfile_rewritten_by_a_new_serve(monkeypatch):
 
 
 def test_bare_stop_clears_stale_then_stops_the_live_one(monkeypatch, capsys):
-    from gmlx import server as srv
+    import gmlx.serve.server as srv
     lc.write_run("127.0.0.1", 9001, {"pid": 11, "host": "127.0.0.1", "port": 9001})
     lc.write_run("127.0.0.1", 9002, {"pid": 22, "host": "127.0.0.1", "port": 9002})
     lc.write_run("127.0.0.1", 9003, {"pid": 33, "host": "127.0.0.1", "port": 9003})
@@ -1290,7 +1290,7 @@ def test_bare_stop_clears_stale_then_stops_the_live_one(monkeypatch, capsys):
 
 
 def test_stop_stale_signals_nothing(monkeypatch, capsys):
-    from gmlx import server as srv
+    import gmlx.serve.server as srv
     lc.write_run("127.0.0.1", 9001, {"pid": 11, "host": "127.0.0.1", "port": 9001})
     lc.write_run("127.0.0.1", 9002, {"pid": 22, "host": "127.0.0.1", "port": 9002})
     _live_by_pid(monkeypatch, {22})
@@ -1304,7 +1304,7 @@ def test_stop_stale_signals_nothing(monkeypatch, capsys):
 
 def test_bare_status_lists_stale_with_reason(monkeypatch, capsys):
     import json
-    from gmlx import server as srv
+    import gmlx.serve.server as srv
     lc.write_run("127.0.0.1", 9001, {"pid": 11, "host": "127.0.0.1", "port": 9001,
                                      "managed_by": "detach"})
     lc.write_run("127.0.0.1", 9002, {"pid": 22, "host": "127.0.0.1", "port": 9002,

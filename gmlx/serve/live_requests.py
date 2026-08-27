@@ -116,7 +116,7 @@ def _resolve_model_id(rg) -> str | None:
         path = pool.model_path_for_generator(rg)
         if not path:
             return None
-        from . import server_bridge_vlm as serving
+        from . import bridge_vlm as serving
 
         ids = getattr(serving, "_PATH_TO_IDS", {}).get(path) or []
         return ids[0] if ids else os.path.basename(path)

@@ -13,9 +13,9 @@ from mlx_vlm.generate import ar  # noqa: E402
 from mlx_vlm.server import generation as gen_mod  # noqa: E402
 from mlx_vlm.server.generation import _position_keys  # noqa: E402
 
-import gmlx.seed_rows as sr  # noqa: E402
-import gmlx.speculative as spec  # noqa: E402
-from gmlx.server_patches.sampling import _FastPositionedSampler  # noqa: E402
+import gmlx.serve.seed_rows as sr  # noqa: E402
+import gmlx.spec.speculative as spec  # noqa: E402
+from gmlx.serve.patches.sampling import _FastPositionedSampler  # noqa: E402
 
 
 def _sampler(**kw):

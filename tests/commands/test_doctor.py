@@ -13,7 +13,7 @@ import pytest
 from gguf import GGMLQuantizationType as GT  # noqa: E402
 from gguf import GGUFWriter  # noqa: E402
 
-from gmlx import doctor  # noqa: E402
+import gmlx.commands.doctor as doctor  # noqa: E402
 
 # Bound before the autouse pin below so the server tests can call the real one.
 _real_check_server = doctor.check_server
@@ -157,7 +157,7 @@ assistant:
 """
     cfg, lib = _cfg(tmp_path, body)
     _mint(lib / "m.gguf")
-    from gmlx import extras
+    import gmlx.commands.extras as extras
     monkeypatch.setattr(extras, "extra_installed", lambda x: x != "assistant")
     monkeypatch.setattr(extras, "ffmpeg_present", lambda: False)
     rc = doctor.cmd_doctor(["--config", str(cfg)])
@@ -170,7 +170,7 @@ assistant:
 
 
 def test_assistant_exposure_warn_names_scoping(tmp_path, monkeypatch, capsys):
-    from gmlx import extras
+    import gmlx.commands.extras as extras
     monkeypatch.setattr(extras, "extra_installed", lambda x: True)
     body = """
 server:
@@ -209,7 +209,7 @@ models:
 
 
 def test_mcp_row_scans_alias_lists_too(tmp_path, monkeypatch, capsys):
-    from gmlx import extras
+    import gmlx.commands.extras as extras
     monkeypatch.setattr(extras, "extra_installed", lambda x: True)
     body = """
 server:
@@ -258,7 +258,7 @@ def test_doctor_prints_running_server_row(tmp_path, monkeypatch, capsys):
     # The server row a user actually reads: a healthy background server prints
     # PASS with the running-at host:port (pid) detail through the real
     # check_server, end to end in cmd_doctor (the autouse pin is overridden).
-    from gmlx import lifecycle
+    import gmlx.serve.lifecycle as lifecycle
     monkeypatch.setattr(doctor, "check_server", _real_check_server)
     monkeypatch.setattr(lifecycle, "list_runs",
                         lambda: [{"host": "127.0.0.1", "port": 8080,
@@ -275,7 +275,7 @@ def test_doctor_prints_running_server_row(tmp_path, monkeypatch, capsys):
 
 
 def test_stale_server_warns(monkeypatch):
-    from gmlx import lifecycle
+    import gmlx.serve.lifecycle as lifecycle
     monkeypatch.setattr(lifecycle, "list_runs",
                         lambda: [{"host": "127.0.0.1", "port": 8080,
                                   "pid": 99999999}])
@@ -286,7 +286,7 @@ def test_stale_server_warns(monkeypatch):
 
 
 def test_healthy_server_passes(monkeypatch):
-    from gmlx import lifecycle
+    import gmlx.serve.lifecycle as lifecycle
     monkeypatch.setattr(lifecycle, "list_runs",
                         lambda: [{"host": "127.0.0.1", "port": 8080,
                                   "pid": 1234}])
@@ -326,7 +326,7 @@ def test_launcher_pass_with_working_stub(monkeypatch):
 
     if _sys.platform != "darwin":
         pytest.skip("launcher stub is macOS-only")
-    from gmlx import procname
+    import gmlx.serve.procname as procname
     monkeypatch.setattr(procname, "named_python", lambda: _sys.executable)
     c = _real_check_launcher()
     assert c["status"] == "PASS"
@@ -337,7 +337,7 @@ def test_launcher_fail_reports_dyld_line(monkeypatch, tmp_path):
 
     if _sys.platform != "darwin":
         pytest.skip("launcher stub is macOS-only")
-    from gmlx import procname
+    import gmlx.serve.procname as procname
     bad = tmp_path / "gmlx"
     bad.write_text("#!/bin/sh\n"
                    "echo 'dyld[1]: Library not loaded: @executable_path/../"
@@ -354,7 +354,7 @@ def test_launcher_warn_when_no_stub(monkeypatch):
 
     if _sys.platform != "darwin":
         pytest.skip("launcher stub is macOS-only")
-    from gmlx import procname
+    import gmlx.serve.procname as procname
     monkeypatch.setattr(procname, "named_python", lambda: None)
     c = _real_check_launcher()
     assert c["status"] == "WARN"
@@ -371,7 +371,7 @@ def test_extras_row_follows_running_server_config(tmp_path, monkeypatch, capsys)
     served.write_text(talk_body.replace("<LIB>", str(lib)))
 
     from gmlx import config as cfgmod
-    from gmlx import extras
+    import gmlx.commands.extras as extras
     served_cfg = cfgmod.load_config(str(served))
     monkeypatch.setattr(doctor, "_running_configs",
                         lambda path: [(served_cfg, str(served))])
@@ -387,13 +387,13 @@ def test_extras_row_follows_running_server_config(tmp_path, monkeypatch, capsys)
     assert f"[server config {served}]" in out
     # The command depends on how gmlx was installed (uv tool / pipx / pip),
     # so assert the row carries whatever this environment's is.
-    from gmlx import extras
+    import gmlx.commands.extras as extras
     assert extras.install_hint("talk") in out
     assert "PASS  ffmpeg" in out                   # audio need carried over too
 
 
 def test_running_configs_skip_stale_and_primary(tmp_path, monkeypatch):
-    from gmlx import lifecycle
+    import gmlx.serve.lifecycle as lifecycle
     lib = tmp_path / "lib"
     lib.mkdir()
     primary = tmp_path / "cfg.yaml"
@@ -417,9 +417,9 @@ def test_agents_row_states(monkeypatch, tmp_path):
     import sys as _sys
     if _sys.platform != "darwin":
         pytest.skip("launchd is macOS-only")
-    from gmlx import lifecycle
-    plists = [tmp_path / "com.gmlx.menubar.plist",
-              tmp_path / "com.gmlx.server.127-0-0-1-8080.plist"]
+    import gmlx.serve.lifecycle as lifecycle
+    plists = [tmp_path / "com.gmlx.commands.menubar.plist",
+              tmp_path / "com.gmlx.serve.server.127-0-0-1-8080.plist"]
     for p in plists:
         p.write_text("x")
     monkeypatch.setattr(doctor, "_agent_plists", lambda: sorted(plists))
@@ -427,10 +427,10 @@ def test_agents_row_states(monkeypatch, tmp_path):
     c = _real_check_agents()
     assert c["status"] == "PASS" and "2 agents" in c["detail"]
     monkeypatch.setattr(lifecycle, "agent_loaded",
-                        lambda label: label == "com.gmlx.menubar")
+                        lambda label: label == "com.gmlx.commands.menubar")
     c = _real_check_agents()
     assert c["status"] == "WARN"
-    assert "com.gmlx.server.127-0-0-1-8080" in c["detail"]
+    assert "com.gmlx.serve.server.127-0-0-1-8080" in c["detail"]
     assert "gmlx service" in c["detail"]
 
 
@@ -441,7 +441,7 @@ def test_agents_row_absent_without_plists(monkeypatch):
 
 # memory row: RAM vs configured model sizes
 def _ram(monkeypatch, n_bytes):
-    from gmlx import memfit
+    import gmlx.load.memfit as memfit
     monkeypatch.setattr(memfit, "total_ram_bytes", lambda: n_bytes)
 
 

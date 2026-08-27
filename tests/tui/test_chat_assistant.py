@@ -16,8 +16,8 @@ import pytest
 
 pytest.importorskip("mlx_lm")  # noqa: F841 - cmd_chat imports sampler modules
 
-from gmlx import chat  # noqa: E402
-from gmlx.assistant_brain import ToolRegistry  # noqa: E402
+import gmlx.tui.chat as chat  # noqa: E402
+from gmlx.assistant.brain import ToolRegistry  # noqa: E402
 
 
 class _Scripted:
@@ -349,9 +349,9 @@ def _fake_server(monkeypatch, served, default=None):
         ns.base_url = "http://127.0.0.1:8080/v1"
         return None
 
-    monkeypatch.setattr("gmlx.launch._ensure_server", ensure)
+    monkeypatch.setattr("gmlx.commands.launch._ensure_server", ensure)
     monkeypatch.setattr(
-        "gmlx.talk_client.probe_capabilities",
+        "gmlx.talk.client.probe_capabilities",
         lambda base_url, api_key=None, timeout=5.0: {
             "stt": False, "tts": False, "chat_ids": list(served),
             "default": default,
@@ -424,12 +424,12 @@ def test_local_excludes_server_modes(capsys):
 
 def _auto_env(monkeypatch, *, up=True, served=(), default=None):
     """Fake a discoverable config server for _auto_server probes."""
-    monkeypatch.setattr("gmlx.lifecycle.auto_target",
+    monkeypatch.setattr("gmlx.serve.lifecycle.auto_target",
                         lambda host, port: ("127.0.0.1", 8080))
-    monkeypatch.setattr("gmlx.launch._server_ready",
+    monkeypatch.setattr("gmlx.commands.launch._server_ready",
                         lambda base_url, api_key=None: up)
     monkeypatch.setattr(
-        "gmlx.talk_client.probe_capabilities",
+        "gmlx.talk.client.probe_capabilities",
         lambda base_url, api_key=None, timeout=5.0: {
             "chat_ids": list(served), "default": default,
         })
@@ -484,7 +484,7 @@ def test_auto_server_gguf_path_stays_local_with_hint(
     _auto_env(monkeypatch, served=["alpha"])
     cfg = SimpleNamespace(models=[
         SimpleNamespace(id="alpha", path=str(gguf))])
-    monkeypatch.setattr("gmlx.launch._discover_config",
+    monkeypatch.setattr("gmlx.commands.launch._discover_config",
                         lambda: (cfg, str(tmp_path / "gmlx.yaml")))
     args, parser = _auto_args([str(gguf)])
     assert chat._auto_server(args, parser) is False

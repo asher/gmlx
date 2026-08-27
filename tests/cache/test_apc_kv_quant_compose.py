@@ -8,7 +8,7 @@ tests pin the seams gmlx rides so the owned L1 merge stays aligned.
 
 import mlx.core as mx
 
-from gmlx import spec_engine
+import gmlx.spec.engine as spec_engine
 
 
 def test_live_kv_quant_config_off_without_env(monkeypatch):

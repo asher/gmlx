@@ -23,9 +23,9 @@ import mlx.core as mx
 import mlx.utils as mu
 import pytest
 
-from gmlx import deepseek_v4_model as v4
-from gmlx.config_synth import synthesize_config
-from gmlx.deepseek_v4_mtp import (
+import gmlx.models.deepseek_v4.model as v4
+from gmlx.load.config_synth import synthesize_config
+from gmlx.models.deepseek_v4.mtp import (
     DeepseekV4MTPConfig,
     DeepseekV4MTPDrafter,
     DeepseekV4SpecLM,
@@ -59,7 +59,7 @@ def _randomize_zero_params(mod) -> None:
 
 
 def _build_target(cfg):
-    from gmlx.loader import MTPTextTarget
+    from gmlx.load.loader import MTPTextTarget
 
     lm = DeepseekV4SpecLM(v4.ModelArgs.from_dict(cfg))
     mx.eval(lm.parameters())
@@ -99,7 +99,7 @@ def _greedy_reference(lm, prompt, n_gen):
 
 
 def _spec_decode(target, lm, drafter, prompt, n_gen, block=2):
-    from gmlx.speculative import stream_speculative
+    from gmlx.spec.speculative import stream_speculative
 
     drafter.reset(target)
     return list(
@@ -199,7 +199,7 @@ def test_rotating_undo_replay_is_bit_identical():
     # same stream with only the confirmed token.
     from mlx_lm.models.cache import RotatingKVCache
 
-    from gmlx.deepseek_v4_cache import ensure_rollback_attached, set_undo_armed
+    from gmlx.models.deepseek_v4.cache import ensure_rollback_attached, set_undo_armed
 
     ensure_rollback_attached()
     mx.random.seed(3)
@@ -236,7 +236,7 @@ def test_rotating_undo_replay_is_bit_identical():
 def test_rotating_undo_unarmed_update_not_trimmable():
     from mlx_lm.models.cache import RotatingKVCache
 
-    from gmlx.deepseek_v4_cache import ensure_rollback_attached
+    from gmlx.models.deepseek_v4.cache import ensure_rollback_attached
 
     ensure_rollback_attached()
     cache = RotatingKVCache(max_size=4)
@@ -251,7 +251,7 @@ def test_rotating_undo_unarmed_update_not_trimmable():
 def test_pooling_cache_trim_through_completed_window():
     # trim(1) when the rejected token completed a pool window must restore
     # the pre-update state and replay the confirmed token exactly.
-    from gmlx.deepseek_v4_cache import PoolingCache
+    from gmlx.models.deepseek_v4.cache import PoolingCache
 
     mx.random.seed(5)
     ratio = 4
@@ -312,7 +312,7 @@ def test_rotating_undo_replay_3wide():
     # cache must each equal a control that saw only the confirmed prefix.
     from mlx_lm.models.cache import RotatingKVCache
 
-    from gmlx.deepseek_v4_cache import ensure_rollback_attached, set_undo_armed
+    from gmlx.models.deepseek_v4.cache import ensure_rollback_attached, set_undo_armed
 
     ensure_rollback_attached()
     mx.random.seed(11)
@@ -363,7 +363,7 @@ def test_pooling_cache_trim_window_recompletion():
     # the pooled row must come back from the post-append stash (the
     # compressor inputs are gone), bit-identical to a control that only
     # ever saw the confirmed tokens.
-    from gmlx.deepseek_v4_cache import PoolingCache
+    from gmlx.models.deepseek_v4.cache import PoolingCache
 
     mx.random.seed(13)
     ratio = 4
@@ -477,7 +477,7 @@ def test_default_drafter_block_size_is_4():
 
 
 def test_speclm_hooks_match_loader_contract():
-    from gmlx.loader import _MTP_TARGET_HOOKS_BY_TYPE
+    from gmlx.load.loader import _MTP_TARGET_HOOKS_BY_TYPE
 
     hooks = _MTP_TARGET_HOOKS_BY_TYPE["deepseek_v4"]
     for hook in hooks:
@@ -485,7 +485,7 @@ def test_speclm_hooks_match_loader_contract():
 
 
 def test_drafter_validates_and_rejects_batch():
-    from gmlx.drafter_protocol import validate_drafter
+    from gmlx.spec.drafter_protocol import validate_drafter
 
     cfg = _tiny_config()
     target, _lm = _build_target(cfg)
@@ -508,7 +508,7 @@ def test_drafter_requires_extended_compress_ratios():
 def test_mtp_remap_covers_closed_tensor_set():
     from mlx.utils import tree_flatten
 
-    from gmlx.mtp_load import (
+    from gmlx.spec.mtp_load import (
         _DEEPSEEK4_MTP_MAP,
         _DEEPSEEK4_MTP_RAW,
         remap_deepseek4_mtp_arrays,
@@ -596,7 +596,7 @@ def test_batch_pooling_cache_verify_sized_undo_armed():
     # block-4 verify write (L=4) cleared it and the first rejection past
     # the remainder buffer crashed rollback on every APC-restored (batch
     # lifted) request. Parity with the scalar cache: L <= 6.
-    from gmlx.deepseek_v4_cache import BatchPoolingCache
+    from gmlx.models.deepseek_v4.cache import BatchPoolingCache
 
     mx.random.seed(19)
     b = BatchPoolingCache(4, [0, 0])
@@ -613,7 +613,7 @@ def test_batch_pooling_cache_trim_window_recompletion():
     # Batch twin of test_pooling_cache_trim_window_recompletion, including
     # the per-row watermark move (pooled rows kept above the restored
     # watermark) and a ragged case where only one row re-completes.
-    from gmlx.deepseek_v4_cache import BatchPoolingCache
+    from gmlx.models.deepseek_v4.cache import BatchPoolingCache
 
     mx.random.seed(23)
     ratio, B, D, G = 4, 2, 8, 2

@@ -10,8 +10,8 @@ import mlx.core as mx
 import pytest
 
 pytest.importorskip("gguf")
-from gmlx import adapter  # noqa: E402
-from gmlx.transforms import qk_permute_wire  # noqa: E402
+import gmlx.load.adapter as adapter  # noqa: E402
+from gmlx.load.transforms import qk_permute_wire  # noqa: E402
 
 # llama-arch geometry: 4 q-heads, 2 kv-heads, head_dim 8 -> q_out 32, k_out 16.
 N_HEAD, N_HEAD_KV, HEAD_DIM = 4, 2, 8

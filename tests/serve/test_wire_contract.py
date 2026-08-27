@@ -25,12 +25,12 @@ pytest.importorskip("mlx_vlm")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from gmlx import server_bridge_vlm as serving  # noqa: E402
-from gmlx import server_patches as sp  # noqa: E402
-from gmlx.server_patches import _common as sp_common  # noqa: E402
-from gmlx.server_patches import hardening as sp_hardening  # noqa: E402
+import gmlx.serve.bridge_vlm as serving  # noqa: E402
+import gmlx.serve.patches as sp  # noqa: E402
+from gmlx.serve.patches import _common as sp_common  # noqa: E402
+from gmlx.serve.patches import hardening as sp_hardening  # noqa: E402
 from gmlx.config import build_config  # noqa: E402
-from gmlx.residency import _http_from_resolver_error  # noqa: E402
+from gmlx.serve.residency import _http_from_resolver_error  # noqa: E402
 
 _APP = importlib.import_module("mlx_vlm.server.app")
 _PKG = importlib.import_module("mlx_vlm.server")

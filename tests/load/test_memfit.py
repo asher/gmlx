@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Size-vs-RAM verdicts (``gmlx.memfit``) - the shared classification behind
+"""Size-vs-RAM verdicts (``gmlx.load.memfit``) - the shared classification behind
 validate/pull's size line and doctor's memory row. CPU-only."""
 
 from __future__ import annotations
 
-from gmlx import memfit
+import gmlx.load.memfit as memfit
 
 _GB = 1 << 30
 

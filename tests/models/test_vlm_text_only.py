@@ -1,4 +1,4 @@
-"""The vendored text-only adapter (gmlx.vlm_text_only, from mlx-vlm 0.6.4
+"""The vendored text-only adapter (gmlx.models.vlm_text_only, from mlx-vlm 0.6.4
 models/text_only.py). Vendoring moved the module out of mlx_vlm.models, so
 package-relative imports the original relied on must have been rewritten;
 the make_cache fallback's `.cache` was missed, and every served request
@@ -6,7 +6,7 @@ against an mlx-lm model without its own make_cache died in
 make_prompt_cache (ModuleNotFoundError: gmlx.cache)."""
 import mlx.nn as nn
 
-from gmlx.vlm_text_only import LanguageModel
+from gmlx.models.vlm_text_only import LanguageModel
 
 
 class _BareModel(nn.Module):

@@ -5,7 +5,7 @@ and parked whenever no decode is touching it."""
 
 import time
 
-from gmlx import keepwarm
+import gmlx.stream.keepwarm as keepwarm
 
 
 def _wait_for(cond, timeout=2.0):

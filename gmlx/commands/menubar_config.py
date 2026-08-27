@@ -37,7 +37,7 @@ def validate_config_text(text: str) -> tuple:
     ``ok`` true - the server itself would still start on such a config."""
     import yaml
 
-    from .config import ConfigError, build_config, resolve_path
+    from gmlx.config import ConfigError, build_config, resolve_path
 
     try:
         doc = yaml.safe_load(text)

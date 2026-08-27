@@ -51,7 +51,7 @@ def install_rotating_cache_fix():
         return
     from mlx_lm.models.base import create_causal_mask
 
-    from .cache_compat import cache_types
+    from gmlx.cache.compat import cache_types
 
     for RotatingKVCache in cache_types("RotatingKVCache"):
         _install_notrim(RotatingKVCache, create_causal_mask)

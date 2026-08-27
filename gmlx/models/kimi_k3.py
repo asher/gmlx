@@ -201,7 +201,7 @@ class KimiK3MoE(nn.Module):
         # this block directly rather than swapping the forward.
         if (getattr(self, "_kq_expert_probe", None) is not None
                 or getattr(self, "_kq_expert_mass", None) is not None):
-            from .moe_experts import _apply_expert_controls
+            from gmlx.stream.moe_experts import _apply_expert_controls
 
             inds, weights = _apply_expert_controls(self, inds, weights)
 

@@ -2,7 +2,7 @@
 
 import pytest
 
-from gmlx import server_memory as sm
+import gmlx.serve.memory as sm
 
 GIB = sm.GIB
 WS = 120 * GIB

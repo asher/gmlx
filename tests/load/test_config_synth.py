@@ -20,7 +20,7 @@ import mlx.core as mx  # noqa: E402
 from mlx.utils import tree_flatten  # noqa: E402
 from mlx_lm.utils import _get_classes  # noqa: E402
 
-from gmlx.config_synth import synthesize_config  # noqa: E402
+from gmlx.load.config_synth import synthesize_config  # noqa: E402
 
 VOCAB = 32
 
@@ -497,7 +497,7 @@ def test_minimax_m3_synth_instantiates():
     # expert, sigmoid + correction bias, routed scaling; SwiGLU-OAI activation.
     # The model class is the gmlx-vendored mlx-lm PR #1401 module,
     # registered into mlx_lm.models exactly as the loader does it.
-    from gmlx import minimax_m3_model
+    import gmlx.models.minimax_m3 as minimax_m3_model
     minimax_m3_model.ensure_registered()
 
     c = synthesize_config(_minimax_m3_meta(), tensor_shapes=_MINIMAX_M3_SHAPES)
@@ -637,7 +637,7 @@ def test_hy_v3_synth_instantiates():
     # behind one leading dense layer; NextN block excluded from the trunk.
     # The model class is the gmlx-vendored mlx-lm PR #1485 module,
     # registered into mlx_lm.models exactly as the loader does it.
-    from gmlx import hy_v3_model
+    import gmlx.models.hy_v3.model as hy_v3_model
     hy_v3_model.ensure_registered()
 
     c = synthesize_config(_hy_v3_meta(), tensor_shapes=_HY_V3_SHAPES)
@@ -673,7 +673,7 @@ def test_hy_v3_synth_instantiates():
 
 
 def test_hy_v3_sanitize_strips_nextn_block():
-    from gmlx import hy_v3_model
+    import gmlx.models.hy_v3.model as hy_v3_model
     hy_v3_model.ensure_registered()
     c = synthesize_config(_hy_v3_meta(), tensor_shapes=_HY_V3_SHAPES)
     Model, ModelArgs = _get_classes(c)
@@ -1066,7 +1066,7 @@ def test_qwen3next_tiled_v_patch_excluded():
     # qwen3next has asymmetric linear K/V heads (the tiled-V predicate's
     # trigger) but its wire V order is HF-grouped - the qwen3.5 tiled fixup
     # must NOT engage for it.
-    from gmlx.gdn_patches import _needs_tiled_v_patch
+    from gmlx.upstream.gdn_patches import _needs_tiled_v_patch
     c = synthesize_config(_qwen3next_meta(), tensor_shapes={})
     assert c["linear_num_key_heads"] != c["linear_num_value_heads"]
     assert _needs_tiled_v_patch(c) is False
@@ -1082,7 +1082,7 @@ def test_qwen3next_split_gdn_patch_forward_parity():
     # the way llama.cpp's converter does (per-k-head de-interleave: q|k|v
     # flattened head-major -> attn_qkv, z -> attn_gate), load the halves into a
     # patched copy, and compare logits - prefill and a cached decode step.
-    from gmlx.gdn_patches import _patch_qwen3next_split_gdn
+    from gmlx.upstream.gdn_patches import _patch_qwen3next_split_gdn
     c = synthesize_config(_qwen3next_meta(), tensor_shapes={})
     Model, ModelArgs = _get_classes(c)
     mx.random.seed(0)
@@ -1265,7 +1265,7 @@ def test_deepseek2_without_yarn_has_no_rope_scaling():
 def test_glm_dsa_shares_the_deepseek_yarn_log_mul_convention():
     # glm-dsa's converter subclasses DeepseekV2Model, so it inherits the same
     # `0.1 *` encoding and must be decoded the same way.
-    from gmlx.config_synth import _deepseek_mscale_all_dim
+    from gmlx.load.config_synth import _deepseek_mscale_all_dim
     meta = {"glm-dsa.rope.scaling.yarn_log_multiplier": 0.1}
     assert _deepseek_mscale_all_dim(meta, "glm-dsa") == pytest.approx(1.0)
     assert _deepseek_mscale_all_dim({}, "glm-dsa") is None
@@ -1320,7 +1320,7 @@ def test_deepseek4_synth_instantiates():
     # over one layer of each attention variant proves config/model agree.
     # Model class = gmlx-vendored mlx-lm PR #1192, registered into
     # mlx_lm.models exactly as the loader does it.
-    from gmlx import deepseek_v4_model
+    import gmlx.models.deepseek_v4.model as deepseek_v4_model
     deepseek_v4_model.ensure_registered()
 
     c = synthesize_config(_deepseek4_meta(), tensor_shapes=_DEEPSEEK4_SHAPES)
@@ -1411,7 +1411,7 @@ def test_qwen4exp_synth_instantiates():
     # all four mechanisms (the 12-token prefill crosses the 2-block sparse
     # budget) proves config/model agree, and that the cached step matches a
     # full recompute.
-    from gmlx import qwen4_exp_model
+    import gmlx.models.qwen4_exp.model as qwen4_exp_model
     qwen4_exp_model.ensure_registered()
 
     c = synthesize_config(_qwen4exp_meta(), tensor_shapes=_QWEN4EXP_SHAPES)
@@ -1461,7 +1461,7 @@ def test_qwen4exp_synth_instantiates():
 def test_qwen4exp_synth_dense_without_indexer_and_ple():
     # No indexer keys and no ple.layers: every attention layer is dense and no
     # PLE block is built (llama.cpp builds the same dense graph).
-    from gmlx import qwen4_exp_model
+    import gmlx.models.qwen4_exp.model as qwen4_exp_model
     qwen4_exp_model.ensure_registered()
     shapes = {k: v for k, v in _QWEN4EXP_SHAPES.items()
               if k != "per_layer_token_embd.weight"}
@@ -1629,7 +1629,7 @@ def test_unsupported_but_mapped_arch_raises_not_implemented(monkeypatch):
     # lands; that interim state must hard-fail with NotImplementedError, not
     # silently emit a half-built config. Every shipped arch currently has a
     # synthesizer, so inject a fake mapping to exercise the branch.
-    import gmlx.config_synth as cs
+    import gmlx.load.config_synth as cs
     monkeypatch.setitem(cs.GGUF_ARCH_TO_MODEL_TYPE, "_fake_pending", "llama")
     with pytest.raises(NotImplementedError):
         synthesize_config({"general.architecture": "_fake_pending"},
@@ -1777,7 +1777,7 @@ def test_hunyuan_norm_topk_patch():
     # adds it. On real A13B the missing rescale degenerates generation from
     # the first token, so pin the patch's exact semantics: stock output with
     # scores renormalized to sum to 1 over the selected top-k.
-    from gmlx.loader import _patch_hunyuan_norm_topk
+    from gmlx.load.loader import _patch_hunyuan_norm_topk
     from mlx_lm.models.hunyuan import MoeBlock
 
     c = synthesize_config(_hunyuan_meta(), tensor_shapes=_HUNYUAN_SHAPES)
@@ -1816,7 +1816,7 @@ def test_zero_count_guard_is_a_named_refusal():
     # A corrupt GGUF declaring head_count=0 reaches a division somewhere in
     # per-arch synthesis; the entry points must surface a ValueError (clean
     # CLI error), not a ZeroDivisionError traceback.
-    from gmlx.config_synth import _zero_count_guard
+    from gmlx.load.config_synth import _zero_count_guard
 
     @_zero_count_guard
     def synth():
@@ -1878,7 +1878,7 @@ _MUSE_GLIMMER_SHAPES = {
 
 
 def test_muse_glimmer_synth_instantiates():
-    from gmlx import muse_glimmer_model
+    import gmlx.models.muse_glimmer.model as muse_glimmer_model
     muse_glimmer_model.ensure_registered()
 
     c = synthesize_config(_muse_glimmer_meta(), tensor_shapes=_MUSE_GLIMMER_SHAPES)
@@ -1896,7 +1896,7 @@ def test_muse_glimmer_synth_instantiates():
     assert c["rope_parameters"]["rope_type"] == "default"
     assert not c["tie_word_embeddings"]
 
-    from gmlx.muse_glimmer_model import Model, ModelArgs
+    from gmlx.models.muse_glimmer.model import Model, ModelArgs
 
     model = Model(ModelArgs.from_dict(c))
     mx.eval(model.parameters())

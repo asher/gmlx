@@ -20,8 +20,11 @@ pytest.importorskip("mlx_vlm.models.gemma4.language")
 from mlx_vlm.models.gemma4 import language as _G
 from mlx_vlm.models.gemma4.config import TextConfig
 
-from gmlx import attn_hd512, gemma4_batched_sdpa, gemma4_owned, gemma4_sync
-from gmlx.gemma4_owned import (
+import gmlx.upstream.attn_hd512 as attn_hd512
+import gmlx.models.gemma4.batched_sdpa as gemma4_batched_sdpa
+import gmlx.models.gemma4.owned as gemma4_owned
+import gmlx.models.gemma4.sync as gemma4_sync
+from gmlx.models.gemma4.owned import (
     OwnedGemma4Attention,
     OwnedGemma4LanguageModel,
     OwnedGemma4TextModel,
@@ -75,7 +78,7 @@ PROMPT = (3, 17, 42, 99, 7, 63, 5, 28)
 
 
 def test_loader_selects_owned_by_default(monkeypatch):
-    from gmlx import loader
+    import gmlx.load.loader as loader
 
     monkeypatch.delenv("GMLX_GEMMA_OWNED", raising=False)
     cls, build = loader._mtp_target_classes("gemma4_text")
@@ -83,7 +86,7 @@ def test_loader_selects_owned_by_default(monkeypatch):
 
 
 def test_loader_env_reverts_to_stock(monkeypatch):
-    from gmlx import loader
+    import gmlx.load.loader as loader
 
     monkeypatch.setenv("GMLX_GEMMA_OWNED", "0")
     cls, build = loader._mtp_target_classes("gemma4_text")

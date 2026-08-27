@@ -17,8 +17,8 @@ from types import SimpleNamespace
 import mlx.core as mx
 import pytest
 
-from gmlx.speculative import _owned_decode_rounds_batch, _width_cap_logged
-import gmlx.speculative as spec
+from gmlx.spec.speculative import _owned_decode_rounds_batch, _width_cap_logged
+import gmlx.spec.speculative as spec
 
 from test_mtp_width_cap import _FakeCache, _StrictDrafter
 
@@ -313,7 +313,7 @@ def test_rebuild_emitted_override_consumed():
     """owned_server_rounds_batch picks up model._kq_rebuild_emitted (the
     preempted host's real emitted count), applies it to the budget, and
     deletes the attribute."""
-    from gmlx.speculative import owned_server_rounds_batch
+    from gmlx.spec.speculative import owned_server_rounds_batch
 
     d = _ArmableDrafter(cap=0)
     lm = _VerifyEchoLM()
@@ -340,7 +340,7 @@ def test_rebuild_emitted_override_consumed():
 def test_rebuild_emitted_length_mismatch_ignored():
     """A stale or mis-sized override must not survive into an unrelated
     batch: wrong length falls back to the fresh-generator default."""
-    from gmlx.speculative import owned_server_rounds_batch
+    from gmlx.spec.speculative import owned_server_rounds_batch
 
     d = _ArmableDrafter(cap=0)
     lm = _VerifyEchoLM()
@@ -444,7 +444,7 @@ def _recording_rounds(calls):
 
 def test_preempt_rebuilds_scalar_for_waiters(monkeypatch):
     from mlx_vlm.generate import ar
-    from gmlx.spec_engine import install_continuous_batch_admission
+    from gmlx.spec.engine import install_continuous_batch_admission
 
     install_continuous_batch_admission()
     calls = []
@@ -480,7 +480,7 @@ def test_preempt_rebuilds_scalar_for_waiters(monkeypatch):
 
 def test_preempt_env_kill_switch(monkeypatch):
     from mlx_vlm.generate import ar
-    from gmlx.spec_engine import install_continuous_batch_admission
+    from gmlx.spec.engine import install_continuous_batch_admission
 
     install_continuous_batch_admission()
     monkeypatch.setenv("GMLX_MTP_PREEMPT", "0")
@@ -506,7 +506,7 @@ def test_preempt_waits_for_first_delivery(monkeypatch):
     """A batch that has not delivered its first tokens has no bonus to
     rebuild from; the preempt fires on the following next() instead."""
     from mlx_vlm.generate import ar
-    from gmlx.spec_engine import install_continuous_batch_admission
+    from gmlx.spec.engine import install_continuous_batch_admission
 
     install_continuous_batch_admission()
     calls = []
@@ -593,7 +593,7 @@ def test_preempt_delivers_captured_tail(monkeypatch):
     and the rebuild resumes from the tail's last token (the round's bonus,
     whose KV is not in the cache)."""
     from mlx_vlm.generate import ar
-    from gmlx.spec_engine import install_continuous_batch_admission
+    from gmlx.spec.engine import install_continuous_batch_admission
 
     install_continuous_batch_admission()
     calls = []
@@ -620,7 +620,7 @@ def test_preempt_captured_tail_finishes_row(monkeypatch):
     """A captured token that exhausts the budget finishes the row: the tail
     truncates at the finish, no rebuild happens, and the waiter promotes."""
     from mlx_vlm.generate import ar
-    from gmlx.spec_engine import install_continuous_batch_admission
+    from gmlx.spec.engine import install_continuous_batch_admission
 
     install_continuous_batch_admission()
     calls = []

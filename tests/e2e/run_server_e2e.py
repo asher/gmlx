@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end test driver for the gmlx server.
 
-Launches the real server (``python -m gmlx.server``) across a matrix of start
+Launches the real server (``python -m gmlx.serve.server``) across a matrix of start
 modes and config features, fires a fixed prompt suite plus per-feature post-checks at
 each, and grades every response two ways: deterministic *floor* checks (transport,
 schema, repetition, mojibake, NaN - ``checks.py``) and a decoupled LLM-as-judge pass

@@ -5,9 +5,9 @@ from __future__ import annotations
 
 import pytest
 
-from gmlx import profiles
+import gmlx.gen.profiles as profiles
 from gmlx.config import SAMPLING_KEYS
-from gmlx.config_synth import GGUF_ARCH_TO_MODEL_TYPE
+from gmlx.load.config_synth import GGUF_ARCH_TO_MODEL_TYPE
 
 
 # Table shape
@@ -163,7 +163,7 @@ def test_muse_glimmer_family_carries_the_atem_think_markers_and_four_levels():
     """The model card's four reasoning levels map onto the template's own
     ``reasoning_strength`` spelling, and the base sampling seeds the open-think
     detector with the ATEM header rather than the '<think>' default."""
-    from gmlx.profiles import FAMILIES
+    from gmlx.gen.profiles import FAMILIES
 
     fam = FAMILIES["muse"]
     assert fam["arches"] == ("muse-glimmer",)

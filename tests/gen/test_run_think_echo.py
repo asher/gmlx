@@ -5,7 +5,7 @@ mlx_lm.generate are mocked; no model loads."""
 import importlib
 import types
 
-from gmlx.generation import generate
+from gmlx.gen.generation import generate
 
 mlx_lm_pkg = importlib.import_module("mlx_lm")
 mlg = importlib.import_module("mlx_lm.generate")

@@ -7,9 +7,9 @@ import pytest
 
 from mlx_vlm.generate import ar
 
-import gmlx.admit_gate as ag
-import gmlx.batch_sched as batch_sched
-import gmlx.server_memory as sm
+import gmlx.serve.admit_gate as ag
+import gmlx.serve.batch_sched as batch_sched
+import gmlx.serve.memory as sm
 
 
 class _Clock:
@@ -206,7 +206,7 @@ def test_gate_outside_pacer_composes(monkeypatch):
 
 
 def test_update_kv_rates_and_projection(monkeypatch):
-    import gmlx.prefill_decay as pd
+    import gmlx.gen.prefill_decay as pd
 
     monkeypatch.setenv("GMLX_ADMIT_RESERVE_GB", "2")
     g = FakeGen(rows=1)
@@ -239,7 +239,7 @@ class FakeStateCache:
 
 
 def test_state_cache_is_row_const_not_rate(monkeypatch):
-    import gmlx.prefill_decay as pd
+    import gmlx.gen.prefill_decay as pd
 
     monkeypatch.setenv("GMLX_ADMIT_RESERVE_GB", "2")
     g = FakeGen(rows=1)
@@ -291,7 +291,7 @@ def _zoo_gen():
 
 
 def test_cache_zoo_rates_and_consistency(monkeypatch, caplog):
-    import gmlx.prefill_decay as pd
+    import gmlx.gen.prefill_decay as pd
 
     monkeypatch.setenv("GMLX_ADMIT_RESERVE_GB", "2")
     g = _zoo_gen()
@@ -309,7 +309,7 @@ def test_cache_zoo_rates_and_consistency(monkeypatch, caplog):
 
 
 def test_poisoned_rate_is_rescaled(monkeypatch, caplog):
-    import gmlx.prefill_decay as pd
+    import gmlx.gen.prefill_decay as pd
 
     monkeypatch.setenv("GMLX_ADMIT_RESERVE_GB", "2")
     g = FakeGen(rows=1)
@@ -331,7 +331,7 @@ def test_poisoned_rate_is_rescaled(monkeypatch, caplog):
 
 
 def test_understated_rate_is_rescaled_up(monkeypatch, caplog):
-    import gmlx.prefill_decay as pd
+    import gmlx.gen.prefill_decay as pd
 
     monkeypatch.setenv("GMLX_ADMIT_RESERVE_GB", "2")
     g = FakeGen(rows=1)
@@ -390,7 +390,7 @@ def test_update_kv_rates_folds_spec_state():
 
 
 def test_projection_prices_spec_growth(monkeypatch):
-    import gmlx.prefill_decay as pd
+    import gmlx.gen.prefill_decay as pd
 
     monkeypatch.setenv("GMLX_ADMIT_RESERVE_GB", "2")
     monkeypatch.setattr(pd, "headroom_bytes", lambda: 10e9)
@@ -434,7 +434,7 @@ def test_cache_release_gate_arms_syncs_and_restores(monkeypatch):
 
 
 def test_projection_window_caps_rotating_kinds(monkeypatch):
-    import gmlx.prefill_decay as pd
+    import gmlx.gen.prefill_decay as pd
 
     monkeypatch.setenv("GMLX_ADMIT_RESERVE_GB", "2")
     g = FakeGen(rows=1)

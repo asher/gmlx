@@ -2,14 +2,14 @@
 """The upstream seam contract: every mlx-vlm/mlx-lm symbol gmlx patches
 or deep-imports must exist and match its pinned source fingerprint. A failure
 here names the exact seam that drifted - re-audit the using site, then
-`python -m gmlx.upstream_seams --regen` after a deliberate bump."""
+`python -m gmlx.upstream.seams --regen` after a deliberate bump."""
 from __future__ import annotations
 
 import importlib.metadata as md
 
 import pytest
 
-from gmlx import upstream_seams as us
+import gmlx.upstream.seams as us
 
 
 def test_all_seams_present_and_unchanged():

@@ -25,7 +25,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import pytest
 
-import gmlx.deepseek_v4_model as md
+import gmlx.models.deepseek_v4.model as md
 
 kq = pytest.importorskip("mlx_kquant")
 

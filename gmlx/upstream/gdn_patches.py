@@ -14,8 +14,8 @@ import mlx.nn as nn
 import atexit
 import sys
 
-from . import loadlog
-from .envflags import env_bool
+import gmlx.load.loadlog as loadlog
+from gmlx.envflags import env_bool
 from .patching import ClassPatch
 
 
@@ -498,7 +498,7 @@ def _gdn_fused_decode_body(self, inputs, cache, *, vlm_cache_advance=False):
         cache[1] = state
         cache.advance(S)
         if vlm_cache_advance:
-            from .qwen35_owned import (
+            from gmlx.models.qwen35.owned import (
                 _qwen3_5_advance_left_padding_info,
                 _qwen3_5_advance_lengths_info,
             )
@@ -1050,7 +1050,7 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink):
         cache[1] = new_state
         if hasattr(cache, "advance"):
             cache.advance(S)
-            from .qwen35_owned import (
+            from gmlx.models.qwen35.owned import (
                 _qwen3_5_advance_left_padding_info,
                 _qwen3_5_advance_lengths_info,
             )
@@ -1548,7 +1548,7 @@ def _patch_mlxvlm_gated_delta_tiled_v() -> None:
         if not hasattr(vgd, _name):
             raise RuntimeError(
                 f"mlx-vlm gated_delta seam {_name!r} is gone - re-audit "
-                f"against the pinned seams (gmlx.upstream_seams)")
+                f"against the pinned seams (gmlx.upstream.seams)")
 
     # Regular prefill: rebind the import-time copies to the tiled mlx-lm ones.
     vgd.gated_delta_ops = gd.gated_delta_ops

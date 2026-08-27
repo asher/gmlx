@@ -11,9 +11,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from gmlx import talk_mcp
+import gmlx.assistant.mcp as talk_mcp
 from gmlx.config import McpServerCfg
-from gmlx.talk_mcp import (McpToolHost, assistant_extra_hint,
+from gmlx.assistant.mcp import (McpToolHost, assistant_extra_hint,
                                TalkMcpError, _result_text, connect_servers)
 
 
@@ -143,7 +143,7 @@ def test_result_text_shapes():
 
 
 def test_extras_table_has_assistant():
-    from gmlx import extras
+    import gmlx.commands.extras as extras
     assert extras.extra_packages("assistant") == ["mcp"]
     assert isinstance(extras.extra_installed("assistant"), bool)
 

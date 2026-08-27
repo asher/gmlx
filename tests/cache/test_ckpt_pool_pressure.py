@@ -12,8 +12,8 @@ gemma-4 12B (W=1024: 64 pinned blocks per record).
 
 from test_ckpt_tier import make_swa_cache
 
-from gmlx.apc_manager import GmlxAPCManager
-from gmlx.cache_snapshot import _ckpt_records, ckpt_lookup, ckpt_store
+from gmlx.cache.apc_manager import GmlxAPCManager
+from gmlx.cache.snapshot import _ckpt_records, ckpt_lookup, ckpt_store
 
 
 def _ids(p):

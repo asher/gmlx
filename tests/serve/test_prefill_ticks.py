@@ -13,8 +13,8 @@ import pytest
 
 from mlx_vlm.generate import ar
 
-import gmlx.batch_sched as batch_sched
-from gmlx import prefill_decay as pd
+import gmlx.serve.batch_sched as batch_sched
+import gmlx.gen.prefill_decay as pd
 
 HEADS = 32
 

@@ -7,7 +7,7 @@ import pytest
 
 from mlx_vlm.generate import ar
 
-import gmlx.fresh_gate as fg
+import gmlx.cache.fresh_gate as fg
 
 
 class FakeBlock:

@@ -127,7 +127,7 @@ def _spec_bytes(batch):
 
 def _headroom():
     try:
-        from .prefill_decay import headroom_bytes
+        from gmlx.gen.prefill_decay import headroom_bytes
 
         head = headroom_bytes()
         return None if head is None else int(head)

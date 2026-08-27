@@ -11,7 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from gmlx import launch, lifecycle  # noqa: E402
+import gmlx.commands.launch as launch  # noqa: E402
+import gmlx.serve.lifecycle as lifecycle  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -480,7 +481,7 @@ def test_cmd_launch_bare_prints_help(capsys):
 
 def test_cmd_launch_menubar_routes(monkeypatch):
     seen = {}
-    import gmlx.menubar as mb
+    import gmlx.commands.menubar as mb
 
     def fake_menubar(argv, prog=None):
         seen["argv"] = argv
@@ -1661,20 +1662,20 @@ def test_autostart_raises_menubar_when_interactive(monkeypatch):
 
 
 def test_toml_basic_string_escapes_control_chars():
-    from gmlx.launch import _toml_basic_string
+    from gmlx.commands.launch import _toml_basic_string
     s = _toml_basic_string("k\nevil=true")
     assert "\n" not in s
     assert tomllib.loads(f"x = {s}")["x"] == "k\nevil=true"  # parse-back proof
 
 
 def test_load_json_on_directory_is_launch_error(tmp_path):
-    from gmlx.launch import LaunchError, _load_json
+    from gmlx.commands.launch import LaunchError, _load_json
     with pytest.raises(LaunchError):
         _load_json(tmp_path)
 
 
 def test_write_text_atomic_leaves_no_tmp(tmp_path):
-    from gmlx.launch import _write_text_atomic
+    from gmlx.commands.launch import _write_text_atomic
     p = tmp_path / "cfg.json"
     _write_text_atomic(p, "{}")
     assert p.read_text() == "{}"

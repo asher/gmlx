@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from gmlx.drafter_protocol import (
+from gmlx.spec.drafter_protocol import (
     DrafterAdapter,
     _check_accepts_left_padding,
     native_block_size,

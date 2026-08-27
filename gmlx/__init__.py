@@ -20,28 +20,28 @@ import importlib
 # doesn't pay the MLX + kernel-extension import, and so a broken runtime
 # environment fails at first *use* with a message naming the missing piece.
 _EXPORTS = {
-    "load_model": "loader",
-    "generate": "generation",
-    "bench": "benchmarks",
+    "load_model": "load.loader",
+    "generate": "gen.generation",
+    "bench": "gen.benchmarks",
     # The preflight function is deliberately not exported: it shares its name
-    # with its submodule, and once anything imports gmlx.preflight (the
+    # with its submodule, and once anything imports gmlx.load.preflight (the
     # loader does) the submodule attribute shadows a lazy export - the name
     # would resolve to the function or the module depending on import order.
-    # Use `from gmlx.preflight import preflight`.
-    "UnsupportedCodecError": "preflight",
-    "ARCH_TABLE": "arch_table",
-    "UnsupportedArchError": "arch_table",
-    "KQuantLinear": "modules",
-    "KQuantEmbedding": "modules",
-    "KQuantSwitchLinear": "modules",
-    "KQuantMultiLinear": "modules",
-    "install_kquant_modules": "modules",
-    "install_gguf_bridge": "server_bridge_lm",
+    # Use `from gmlx.load.preflight import preflight`.
+    "UnsupportedCodecError": "load.preflight",
+    "ARCH_TABLE": "load.arch_table",
+    "UnsupportedArchError": "load.arch_table",
+    "KQuantLinear": "load.modules",
+    "KQuantEmbedding": "load.modules",
+    "KQuantSwitchLinear": "load.modules",
+    "KQuantMultiLinear": "load.modules",
+    "install_kquant_modules": "load.modules",
+    "install_gguf_bridge": "serve.bridge_lm",
     # Tokenizer-only entry points: synthesize the HF tokenizer from GGUF
     # metadata without paying the model load. Used by eval tooling (mlx-kld)
     # that needs tokenizer parity checks before deciding to load weights.
-    "detect_arch": "remap",
-    "load_tokenizer_from_gguf": "tokenizer",
+    "detect_arch": "load.remap",
+    "load_tokenizer_from_gguf": "load.tokenizer",
 }
 
 __all__ = list(_EXPORTS)

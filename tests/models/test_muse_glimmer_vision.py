@@ -15,12 +15,12 @@ import pytest
 
 mx = pytest.importorskip("mlx.core")
 
-from gmlx.muse_glimmer_vlm_model import (  # noqa: E402
+from gmlx.models.muse_glimmer.vlm_model import (  # noqa: E402
     pixel_shuffle_order,
     window_order,
     window_partition,
 )
-from gmlx.vlm import (  # noqa: E402
+from gmlx.load.vlm import (  # noqa: E402
     _MuseGlimmerGgufImageProcessor,
     _muse_glimmer_vision_name,
     remap_vision_arrays,
@@ -126,7 +126,7 @@ def test_batched_attention_matches_the_masked_reference():
     """The whole tiny tower, new batched path vs the dense block-diagonal
     mask it replaced. Any partition or reshape mistake shows up as a large
     error here; float noise does not."""
-    from gmlx.muse_glimmer_vlm_model import (
+    from gmlx.models.muse_glimmer.vlm_model import (
         VisionConfig, VisionModel, _rope_2d, _rope_tables)
 
     cfg = VisionConfig(num_hidden_layers=4, hidden_size=64,

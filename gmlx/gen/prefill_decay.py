@@ -67,7 +67,7 @@ from typing import Callable, NamedTuple, Optional
 
 import mlx.core as mx
 
-from .envflags import env_bool, env_float, env_int
+from gmlx.envflags import env_bool, env_float, env_int
 
 _WS_CAP_BYTES: float | None = None
 _FLAG = "_gmlx_prefill_decay"

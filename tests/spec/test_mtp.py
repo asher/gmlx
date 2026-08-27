@@ -19,7 +19,8 @@ pytest.importorskip("mlx_vlm")
 import mlx.core as mx  # noqa: E402
 from mlx.utils import tree_flatten  # noqa: E402
 
-from gmlx import gdn_patches, loader  # noqa: E402
+import gmlx.upstream.gdn_patches as gdn_patches  # noqa: E402
+import gmlx.load.loader as loader  # noqa: E402
 
 
 @pytest.fixture
@@ -107,8 +108,8 @@ def test_tiled_state_ops_uses_modulo_kv_mapping(cpu_device):
 
 # drafter remap coverage (opt-in integration)
 def _find_mtp_gguf(gguf_dir):
-    from gmlx.config_synth import synthesize_config
-    from gmlx.preflight import preflight
+    from gmlx.load.config_synth import synthesize_config
+    from gmlx.load.preflight import preflight
     for path in sorted(gguf_dir.rglob("*.gguf")):
         try:
             pf = preflight(str(path))
@@ -127,8 +128,8 @@ def _find_mtp_gguf(gguf_dir):
 
 def test_mtp_drafter_remap_full_coverage(gguf_dir, cpu_device):
     """Every drafter param has a remapped source tensor of matching shape."""
-    from gmlx.config_synth import synthesize_config
-    from gmlx.preflight import preflight
+    from gmlx.load.config_synth import synthesize_config
+    from gmlx.load.preflight import preflight
 
     path, arch = _find_mtp_gguf(gguf_dir)
     if path is None:
@@ -147,7 +148,7 @@ def test_mtp_drafter_remap_full_coverage(gguf_dir, cpu_device):
         {"model_type": "qwen3_5_mtp", "text_config": dict(config)})
     drafter = drafter_mod.Qwen3_5MTPDraftModel(mtp_config)
 
-    from gmlx import gguf_meta
+    import gmlx.load.gguf_meta as gguf_meta
     n_head = gguf_meta.read_int(meta, f"{arch}.attention.head_count")
     n_head_kv = gguf_meta.first_nonzero_int(
         meta, f"{arch}.attention.head_count_kv")
@@ -174,7 +175,7 @@ def test_mtp_drafter_remap_full_coverage(gguf_dir, cpu_device):
 def test_seed_chunk_follows_prefill_step(monkeypatch):
     # Unset, the TF seed chunk tracks the serve prefill chunk so one knob
     # caps both attention transients; GMLX_HEAD_SEED_CHUNK still wins.
-    from gmlx import mtp_drafter as md
+    import gmlx.spec.mtp_drafter as md
 
     monkeypatch.setattr(md, "_SEED_CHUNK", None)
     monkeypatch.delenv("PREFILL_STEP_SIZE", raising=False)
@@ -194,7 +195,7 @@ def test_prefill_from_target_hidden_chunked_feed(monkeypatch, chunk, h_len, n):
     # prompt (~30 GB at 32k), so memory depends on the loop; this
     # pins its slicing arithmetic. Numerical equivalence across a real chunk
     # boundary is covered by the model-gated prefill-parity suite.
-    from gmlx import mtp_drafter as md
+    import gmlx.spec.mtp_drafter as md
 
     monkeypatch.setattr(md, "_SEED_CHUNK", chunk)
     D = 4

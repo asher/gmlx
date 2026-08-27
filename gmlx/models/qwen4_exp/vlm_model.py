@@ -6,7 +6,7 @@ on LLM arch ``qwen4exp``).
 mlx-vlm ships no qwen4_exp package. The vision half is the same Qwen3-VL ViT
 the qwen3.5/3.6 pair uses (mlx-vlm's ``qwen3_5.vision.VisionModel``; the GGUF
 disables deepstack), so this module reuses it wholesale; the text half is the
-vendored :mod:`gmlx.qwen4_exp_model`, wrapped in the ``language_model`` shape
+vendored :mod:`gmlx.models.qwen4_exp.model`, wrapped in the ``language_model`` shape
 mlx-vlm's generate stack expects.
 
 Positions: text-only rows keep the scalar-offset fast rope; when images are
@@ -42,8 +42,8 @@ from mlx_vlm.models.qwen3_5.language import LanguageModel as _Q35LanguageModel
 from mlx_vlm.models.qwen3_5.vision import VisionModel
 from mlx_vlm.models.qwen3_vl.qwen3_vl import Model as _Qwen3VLModel
 
-from . import qwen4_exp_model as q4
-from .qwen4_exp_model import ModelArgs as TextConfig
+from . import model as q4
+from .model import ModelArgs as TextConfig
 
 
 def ensure_registered() -> None:

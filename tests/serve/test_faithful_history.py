@@ -4,7 +4,7 @@ import importlib
 
 import pytest
 
-from gmlx.server_patches.render import install_faithful_history
+from gmlx.serve.patches.render import install_faithful_history
 
 openai_mod = importlib.import_module("mlx_vlm.server.openai")
 prompt_utils = importlib.import_module("mlx_vlm.prompt_utils")
@@ -126,7 +126,7 @@ def test_all_render_bindings_wrapped():
 
 
 def test_retire_capture_covers_all_bindings():
-    from gmlx.server_patches.apc import install_retire_render_capture
+    from gmlx.serve.patches.apc import install_retire_render_capture
     install_faithful_history()
     install_retire_render_capture()
     for t in (openai_mod, anthropic_mod) + ((_deps,) if _deps else ()):
@@ -144,8 +144,8 @@ def test_stash_sees_final_render_not_message_list():
     # Installer-order contract: the thinking-seed stash wraps outside the
     # faithful wrap. Inside, the faithful wrap's return_messages=True call
     # would stash None and the thinking splitters lose the prompt.
-    from gmlx.server_patches import chat_behavior as cb
-    from gmlx.server_patches.chat_behavior import install_stream_thinking_seed
+    from gmlx.serve.patches import chat_behavior as cb
+    from gmlx.serve.patches.chat_behavior import install_stream_thinking_seed
     install_faithful_history()
     install_stream_thinking_seed()
     tok = cb._LAST_RENDERED_PROMPT.set("sentinel")
@@ -161,9 +161,9 @@ def test_prediction_render_excludes_the_stash():
     # Installer nesting: seed(retire(faithful)). The captured render must
     # be the faithful wrapper, not the seed wrapper, so predictions never
     # write the request contextvar the thinking splitters read.
-    from gmlx.server_patches import chat_behavior as cb
-    from gmlx.server_patches.apc import install_retire_render_capture
-    from gmlx.server_patches.chat_behavior import install_stream_thinking_seed
+    from gmlx.serve.patches import chat_behavior as cb
+    from gmlx.serve.patches.apc import install_retire_render_capture
+    from gmlx.serve.patches.chat_behavior import install_stream_thinking_seed
     install_faithful_history()
     install_retire_render_capture()
     install_stream_thinking_seed()
@@ -179,7 +179,7 @@ def test_prediction_render_excludes_the_stash():
 
 
 def test_retire_capture_wraps_faithful_render():
-    from gmlx.server_patches.apc import install_retire_render_capture
+    from gmlx.serve.patches.apc import install_retire_render_capture
     install_faithful_history()
     install_retire_render_capture()
     outer = openai_mod.apply_chat_template

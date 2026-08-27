@@ -10,14 +10,14 @@ def fake_kq(monkeypatch):
     calls = []
     fake = SimpleNamespace(
         set_cb_caps=lambda ops, mb: calls.append((ops, mb)) or (50, 50))
-    from gmlx import cb_phase
+    import gmlx.serve.cb_phase as cb_phase
     monkeypatch.setitem(cb_phase._state, "kq", fake)
     monkeypatch.setitem(cb_phase._state, "phase", None)
     return calls
 
 
 def test_flip_dedupes(fake_kq):
-    from gmlx import cb_phase
+    import gmlx.serve.cb_phase as cb_phase
 
     cb_phase.flip("decode")
     cb_phase.flip("decode")
@@ -27,7 +27,7 @@ def test_flip_dedupes(fake_kq):
 
 
 def test_flip_noop_without_kq(monkeypatch):
-    from gmlx import cb_phase
+    import gmlx.serve.cb_phase as cb_phase
 
     monkeypatch.setitem(cb_phase._state, "kq", False)
     monkeypatch.setitem(cb_phase._state, "phase", None)
@@ -35,7 +35,7 @@ def test_flip_noop_without_kq(monkeypatch):
 
 
 def test_install_disabled_by_env(monkeypatch, fake_kq):
-    from gmlx import cb_phase
+    import gmlx.serve.cb_phase as cb_phase
 
     monkeypatch.setenv("GMLX_CB_PHASE", "0")
     assert cb_phase.install_cb_phase_flips() is False
@@ -45,7 +45,7 @@ def test_install_wraps_engine_once(monkeypatch, fake_kq):
     pytest.importorskip("mlx_vlm")
     from mlx_vlm.generate import ar
 
-    from gmlx import cb_phase
+    import gmlx.serve.cb_phase as cb_phase
 
     saved = (ar.GenerationBatch._step, ar.SpeculativeGenerationBatch.next,
              ar.PromptProcessingBatch.prompt_step,
@@ -74,7 +74,7 @@ def test_phase_invariant_across_request_sequences(monkeypatch, fake_kq):
     pytest.importorskip("mlx_vlm")
     from mlx_vlm.generate import ar
 
-    from gmlx import cb_phase
+    import gmlx.serve.cb_phase as cb_phase
 
     seen = []
 

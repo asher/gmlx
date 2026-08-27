@@ -48,7 +48,7 @@ class SubserviceRequestError(Exception):
 
 class GGUFModelHolder:
     """Process-wide single-model cache for a GGUF-backed sub-service: loads via
-    the runtime's own :func:`gmlx.loader.load_model` (an mlx-lm ``Model``
+    the runtime's own :func:`gmlx.load.loader.load_model` (an mlx-lm ``Model``
     with K-quant leaves) and keeps it **separate** from the chat residency pool -
     a RAG re-index must not evict the chat model, nor the reverse. Reload only
     on a path change. Subclass per service: the class attributes hold the state,
@@ -61,7 +61,7 @@ class GGUFModelHolder:
     @classmethod
     def get(cls, model_path: str):
         if cls.model is None or model_path != cls.model_path:
-            from .loader import load_model
+            from gmlx.load.loader import load_model
             model, _config, tokenizer = load_model(model_path, verbose=False)
             cls.model, cls.tokenizer = model, tokenizer
             cls.model_path = model_path
@@ -105,7 +105,7 @@ def effective_model(requested: str, configured: str, *, accepted_names,
     ``resolver`` maps to the configured repo are accepted; anything else is
     rejected with a 400 - clients must not be able to make the server pull
     arbitrary HF repos."""
-    from .config import ConfigError
+    from gmlx.config import ConfigError
 
     req = (requested or "").strip()
     if req.lower() in accepted_names or req == configured:

@@ -116,7 +116,7 @@ loop. The CLI equivalent is `gmlx run --bench`.
 
 ```python
 from gmlx import UnsupportedCodecError, UnsupportedArchError
-from gmlx.preflight import preflight
+from gmlx.load.preflight import preflight
 
 pf = preflight("model.gguf")
 pf.arch, pf.shards, pf.codec_histogram, pf.n_tensors, pf.n_params

@@ -63,7 +63,7 @@ GGUF_ARCH_TO_MODEL_TYPE = {
     "qwen35": "qwen3_5",
     "qwen35moe": "qwen3_5_moe",
     # Qwen3.8-Flash-Next: the qwen35 hybrid + hyper-connections + QSA sparse
-    # attention + PLE n-gram embeddings; vendored gmlx.qwen4_exp_model.
+    # attention + PLE n-gram embeddings; vendored gmlx.models.qwen4_exp.model.
     "qwen4exp": "qwen4_exp",
     "qwen3": "qwen3",
     "qwen3moe": "qwen3_moe",
@@ -2958,7 +2958,7 @@ def _print_summary(config: dict, arch: str) -> None:
 
 def _synth_qwen4exp(meta, shapes, config: dict) -> None:
     """The qwen35 hybrid fields, plus hyper-connections, the QSA indexer and
-    the PLE n-gram table. Field names match ``gmlx.qwen4_exp_model.ModelArgs``.
+    the PLE n-gram table. Field names match ``gmlx.models.qwen4_exp.model.ModelArgs``.
     The three PLE hash constant arrays are UINT64 in the GGUF; the reader
     hands them back as numpy uint64, ``int()`` keeps them exact."""
     arch = "qwen4exp"

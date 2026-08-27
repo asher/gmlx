@@ -13,9 +13,9 @@ from types import SimpleNamespace
 import mlx.core as mx
 from mlx_vlm.apc import APCManager
 
-from gmlx import cache_snapshot as cs
-from gmlx import retire_key
-from gmlx.cache_snapshot import (
+import gmlx.cache.snapshot as cs
+import gmlx.cache.retire_key as retire_key
+from gmlx.cache.snapshot import (
     ckpt_lookup,
     ckpt_store,
     decode_ckpt_tick,
@@ -207,7 +207,7 @@ def test_governor_evict_releases_ckpt_records():
     reclaim those too (122B run-3 shed: pinned share invisible to
     reclaim). Fraction 1.0 empties the index; freed bytes and the
     ckpt_governor_released counter report the work."""
-    from gmlx.apc_manager import GmlxAPCManager
+    from gmlx.cache.apc_manager import GmlxAPCManager
     man = GmlxAPCManager(num_blocks=64, block_size=16)
     for i in range(3):
         ids = list(range(i * 1000, i * 1000 + 64))
@@ -226,7 +226,7 @@ def test_governor_evict_releases_ckpt_records():
 
 
 def test_governor_evict_fraction_releases_lru_first():
-    from gmlx.apc_manager import GmlxAPCManager
+    from gmlx.cache.apc_manager import GmlxAPCManager
     man = GmlxAPCManager(num_blocks=64, block_size=16)
     for i in range(4):
         ids = list(range(i * 1000, i * 1000 + 32))
@@ -303,7 +303,7 @@ def test_record_byte_budget_evicts_lru(monkeypatch):
 
 
 def test_sidecar_byte_budget(monkeypatch):
-    from gmlx.cache_snapshot import _sidecar_index, drafter_sidecar_store
+    from gmlx.cache.snapshot import _sidecar_index, drafter_sidecar_store
     from test_ckpt_tier import KVCache
 
     man = APCManager(num_blocks=8, block_size=16)
@@ -339,7 +339,7 @@ def test_skeleton_disk_flag(monkeypatch):
 
 
 def test_cursor_skeleton_policy(monkeypatch):
-    from gmlx import spec_engine
+    import gmlx.spec.engine as spec_engine
 
     seen = []
 

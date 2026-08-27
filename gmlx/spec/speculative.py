@@ -30,12 +30,12 @@ from typing import Any
 from collections.abc import Callable, Iterator
 
 import mlx.core as mx
-from .envflags import env_bool, env_int
+from gmlx.envflags import env_bool, env_int
 
 # Speculative round helpers + the draft/target RNG coupler, owned here (see
 # spec_helpers) instead of mlx-vlm's private speculative API. The drafter model
 # classes and mlx_vlm.models.cache are still consumed from mlx-vlm by design.
-from .spec_helpers import (
+from .helpers import (
     _SpeculativeSamplerRNG,
     _buffer_mtp_target_cache,
     _resolve_block_total,
@@ -1157,7 +1157,7 @@ def owned_server_rounds(
         for tok in rounds:
             generated.append(tok)
             if retire_ctx is not None and retire_ctx.get("mode") == "ckpt":
-                from .cache_snapshot import decode_ckpt_tick
+                from gmlx.cache.snapshot import decode_ckpt_tick
                 decode_ckpt_tick(retire_ctx, prompt_cache, generated)
             # Finish eagerly on the token that ends the request: the server
             # abandons finished generators (close fires only at GC, often
@@ -1236,7 +1236,7 @@ def _ckpt_post_prefill(model, prompt_cache: list, retire_ctx: dict) -> None:
         manager = getattr(model, "_kq_apc_manager", None)
         if manager is None:
             return
-        from .cache_snapshot import ckpt_full_store_redundant, ckpt_store
+        from gmlx.cache.snapshot import ckpt_full_store_redundant, ckpt_store
         meta = retire_ctx.get("apc_meta")
         if ckpt_full_store_redundant(meta):
             _log.info("APC ckpt post-prefill store skipped: render-stable "
@@ -1301,7 +1301,7 @@ def _sidecar_post_prefill(drafter, sidecar_ctx: dict | None) -> None:
         manager = sidecar_ctx.get("manager")
         if manager is None:
             return
-        from .cache_snapshot import drafter_sidecar_store
+        from gmlx.cache.snapshot import drafter_sidecar_store
         extra_hash = int(sidecar_ctx.get("extra_hash", 0))
         if sidecar_ctx.get("mode") == "ckpt":
             # One sidecar key per adoptable target record, derived from
@@ -1428,7 +1428,7 @@ def _retire_b1(model, prompt_cache: list, generated: list[int],
         # failure) keeps today's behavior.
         lcp = None
         if os.environ.get("GMLX_APC_RETIRE_LCP") != "0":
-            from .retire_key import next_turn_lcp
+            from gmlx.cache.retire_key import next_turn_lcp
             lcp = next_turn_lcp(retire.get("render_ctx"), seq,
                                 [int(t) for t in generated])
         max_len = None
@@ -1437,7 +1437,7 @@ def _retire_b1(model, prompt_cache: list, generated: list[int],
             _log.info(
                 "APC retire key: next-turn render diverges at %d/%d",
                 lcp, len(seq))
-        from .cache_snapshot import retirement_store
+        from gmlx.cache.snapshot import retirement_store
         ok = retirement_store(
             manager, retire.get("mode"), seq, prompt_cache,
             row=0, extra_hash=int(retire.get("extra_hash", 0)),
@@ -1453,7 +1453,7 @@ def _retire_b1(model, prompt_cache: list, generated: list[int],
                 and (sidecar_ctx is None
                      or getattr(drafter, "_kq_head_request", None)
                      is sidecar_ctx)):
-            from .cache_snapshot import drafter_sidecar_store
+            from gmlx.cache.snapshot import drafter_sidecar_store
             if drafter_sidecar_store(
                     manager, drafter, seq, len(seq),
                     int(retire.get("extra_hash", 0))):
@@ -1506,7 +1506,7 @@ def _retire_batch_row(model, prompt_cache: list, slot: int,
         # Blocks are prefix-causal, so the next-turn LCP key is a plain
         # harvest truncation here (see _retire_b1 for the rationale).
         if os.environ.get("GMLX_APC_RETIRE_LCP") != "0":
-            from .retire_key import next_turn_lcp
+            from gmlx.cache.retire_key import next_turn_lcp
             lcp = next_turn_lcp(retire.get("render_ctx"), seq,
                                 [int(t) for t in gen_row])
             if lcp is not None and lcp < store_len:
@@ -1514,7 +1514,7 @@ def _retire_batch_row(model, prompt_cache: list, slot: int,
                     "APC retire key (row): next-turn render diverges at "
                     "%d/%d", lcp, store_len)
                 store_len = lcp
-        from .cache_snapshot import retirement_store
+        from gmlx.cache.snapshot import retirement_store
         ok = retirement_store(
             manager, "block", seq[:store_len], prompt_cache,
             row=slot, extra_hash=int(retire.get("extra_hash", 0)))
@@ -1535,7 +1535,7 @@ def _retire_batch_row_exact(manager, prompt_cache: list, slot: int,
     cache by the verify input (2026-08-25 soak: rows covered len(seq)
     while position read len(seq) - 1); anything else is a stale tail and
     is skipped rather than stored under a key it does not cover."""
-    from .cache_snapshot import retirement_store, row_kv_len
+    from gmlx.cache.snapshot import retirement_store, row_kv_len
     seq = retire["full_ids"] + [int(t) for t in gen_row]
     covered = row_kv_len(prompt_cache, slot)
     if covered is None:
@@ -1548,7 +1548,7 @@ def _retire_batch_row_exact(manager, prompt_cache: list, slot: int,
         return
     lcp = None
     if os.environ.get("GMLX_APC_RETIRE_LCP") != "0":
-        from .retire_key import next_turn_lcp
+        from gmlx.cache.retire_key import next_turn_lcp
         lcp = next_turn_lcp(retire.get("render_ctx"), seq,
                             [int(t) for t in gen_row])
     max_len = lcp if lcp is not None and lcp < len(seq) else None
@@ -1618,7 +1618,7 @@ def _lift_live_cache(cache):
     if _batch_capable(cache) or not callable(getattr(type(cache), "merge", None)):
         return cache
     lifted = type(cache).merge([cache])
-    from .cascade_sdpa import carry_stamp
+    from gmlx.upstream.cascade_sdpa import carry_stamp
     carry_stamp(cache, lifted)
     return lifted
 

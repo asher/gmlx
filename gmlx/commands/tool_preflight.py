@@ -41,7 +41,7 @@ def _enabled() -> bool:
 
 
 def _shards(gguf_path: str) -> list[str]:
-    from .preflight import shard_names
+    from gmlx.load.preflight import shard_names
 
     d, base = os.path.split(gguf_path)
     try:
@@ -53,8 +53,8 @@ def _shards(gguf_path: str) -> list[str]:
 
 
 def _synth_config(gguf_path: str) -> dict | None:
-    from .config_synth import synthesize_config
-    from .headerscan import scan_gguf
+    from gmlx.load.config_synth import synthesize_config
+    from gmlx.load.headerscan import scan_gguf
 
     scan = scan_gguf(gguf_path, include_tensors=True)
     shapes = {t.name: list(t.shape) for t in scan.tensors}
@@ -72,13 +72,13 @@ def working_set_bytes() -> float | None:
 
 
 def _kv_costs(cfg: dict):
-    from .mem_preflight import kv_layer_costs
+    from gmlx.serve.mem_preflight import kv_layer_costs
 
     return kv_layer_costs(SimpleNamespace(config=cfg))
 
 
 def _need_at(weights: float, costs, heads: int | None, ctx: int) -> float:
-    from .mem_preflight import prompt_kv_bytes
+    from gmlx.serve.mem_preflight import prompt_kv_bytes
 
     kv = prompt_kv_bytes(costs, ctx)
     transient = 0.0

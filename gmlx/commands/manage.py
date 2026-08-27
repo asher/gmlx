@@ -6,7 +6,7 @@ file rather than the Hugging Face blob cache.
 ``validate`` accepts a local path, an ``hf:<org>/<repo>/<file.gguf>[@rev]`` id, or
 an ``http(s)://`` URL. A local file is classified by reading its header with
 gguf-py; a remote ref is checked by range-reading just the GGUF header (a few MB)
-- see :mod:`gmlx.remote`. Both report the architecture (and whether the
+- see :mod:`gmlx.load.remote`. Both report the architecture (and whether the
 installed ``mlx-lm`` implements it) plus the per-tensor codec histogram, and they
 agree by reusing preflight's codec sets.
 
@@ -33,9 +33,9 @@ import time
 import urllib.error
 import urllib.request
 
-from .textfmt import plural_s
-from . import remote
-from .preflight import (
+from gmlx.textfmt import plural_s
+import gmlx.load.remote as remote
+from gmlx.load.preflight import (
     NATIVE_FP_TYPES,
     NATIVE_TYPES,
     SPLIT_SHARD_RE,
@@ -51,8 +51,8 @@ def _classify_local(path: str, *, arch: str | None = None) -> remote.HeaderRepor
     reusing preflight's codec sets so a local verdict matches the remote one."""
     from gguf import GGUFReader
 
-    from .gguf_meta import read_string
-    from .remap import detect_arch
+    from gmlx.load.gguf_meta import read_string
+    from gmlx.load.remap import detect_arch
 
     shards = find_split_shards(path)
     reader0 = GGUFReader(shards[0], "r")
@@ -77,7 +77,7 @@ def _arch_status(arch: str | None, *, hf_source: str | None = None):
     loader does (mapping -> not-disabled -> mlx-lm has the model -> config synth)."""
     if not arch:
         return False, "could not determine architecture from GGUF metadata"
-    from .arch_table import UnsupportedArchError, gate
+    from gmlx.load.arch_table import UnsupportedArchError, gate
     try:
         gate(arch, hf_source=hf_source)
         return True, None
@@ -167,13 +167,13 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
     adapter = report.gguf_type == "adapter"
     # A draft model (MTP / DSpark / assistant) is likewise a companion: it
     # rides a target model, so the standalone arch gate doesn't apply.
-    from .discovery import is_drafter_arch
+    from gmlx.load.discovery import is_drafter_arch
     drafter = not (mmproj or adapter) and is_drafter_arch(report.arch)
     if mmproj or adapter or drafter:
         arch_ok, arch_err = False, None
     else:
         arch_ok, arch_err = _arch_status(report.arch, hf_source=hf_source)
-    from .memfit import classify_fit, total_ram_bytes
+    from gmlx.load.memfit import classify_fit, total_ram_bytes
     ram = total_ram_bytes()
     return {
         "ref": ref.raw,
@@ -227,7 +227,7 @@ def _print_report(v: dict) -> None:
         sline = f"  size: {_human_gb(size)}"
         if v.get("n_shards", 1) > 1:
             sline += f"  ({v['n_shards']} shards)"
-        from .memfit import fit_sentence
+        from gmlx.load.memfit import fit_sentence
         note = (fit_sentence(size, v.get("ram_bytes"))
                 if v.get("fit") is not None else None)
         if note:
@@ -270,8 +270,8 @@ def _print_report(v: dict) -> None:
 def _print_repo_listing(e: remote.AmbiguousRepo) -> None:
     """The pick-one repo listing, with per-variant size and a fits-this-Mac
     column when both the sizes and the machine RAM are known."""
-    from .lifecycle import human_gb
-    from .memfit import classify_fit, fit_label, total_ram_bytes
+    from gmlx.serve.lifecycle import human_gb
+    from gmlx.load.memfit import classify_fit, fit_label, total_ram_bytes
 
     ram = total_ram_bytes()
     shown = e.refs[:40]
@@ -575,7 +575,7 @@ def _model_dir_dest(config_path: str | None = None) -> str:
     root (where ``pull`` lands files unless ``--to`` is given). Searches the standard
     config locations unless ``config_path`` is given. Raises :class:`remote.RemoteError`
     with an actionable message when there's no config or no ``model_dirs``."""
-    from . import config as cfgmod
+    import gmlx.config as cfgmod
 
     if config_path:
         config_path = os.path.expanduser(config_path)
@@ -851,7 +851,7 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
             if v.get("fit") in ("tight", "over"):
                 # Advisory only - the file may be destined for another machine
                 # or a streaming setup, so the pull itself proceeds.
-                from .memfit import fit_sentence
+                from gmlx.load.memfit import fit_sentence
                 note = fit_sentence(v["size_bytes"], v.get("ram_bytes"))
                 if note:
                     print(f"note: {note}", file=sys.stderr)
@@ -896,7 +896,7 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
         if not a.no_register:
             # Close pull's own loop: a file that landed under a model_dirs
             # root becomes a served model without a separate sync-models run.
-            from .server import register_downloads
+            from gmlx.serve.server import register_downloads
             register_downloads(downloaded, a.config)
     return 0 if all_ok else 1
 
@@ -906,7 +906,7 @@ def _try_resolve(p, model_dirs) -> str | None:
     """resolve_path that returns None instead of raising on a miss."""
     if not p:
         return None
-    from .config import resolve_path
+    from gmlx.config import resolve_path
     try:
         return resolve_path(p, model_dirs)
     except Exception:                        # noqa: BLE001 - missing is fine here
@@ -940,7 +940,7 @@ def _rm_resolve_target(cfg, requested):
     entry = cfg.models.get(target)
     disc: list = []
     if cfg.discover:
-        from . import discovery
+        import gmlx.load.discovery as discovery
         try:
             disc = discovery.scan_dirs(
                 cfg.discover, cfg.model_dirs, known_ids=set(cfg.models),
@@ -1054,7 +1054,7 @@ def _rm_update_config(cfg_path, target, aliases_to_drop, default_cleared, *,
                       skip_reload) -> None:
     """Drop the model entry, dead aliases, dangling assistants, and the
     cleared default from the YAML, then live-reload a running server."""
-    from . import config as cfgmod
+    import gmlx.config as cfgmod
 
     assistants_dropped: list[str] = []
 
@@ -1090,7 +1090,7 @@ def _rm_update_config(cfg_path, target, aliases_to_drop, default_cleared, *,
               + ", ".join(sorted(assistants_dropped)), file=sys.stderr)
     # Same live-reload as init/sync-models/pull: without it, a running
     # server keeps advertising the removed id until the next restart.
-    from .server import _reload_running
+    from gmlx.serve.server import _reload_running
     _reload_running(cfg_path, skip=skip_reload)
 
 
@@ -1144,7 +1144,7 @@ def cmd_rm(argv: list | None = None, prog: str = "gmlx rm") -> int:
               file=sys.stderr)
         return 2
 
-    from . import config as cfgmod
+    import gmlx.config as cfgmod
 
     cfg_path = _resolve_config_path(a, cfgmod)
     if cfg_path is None:
@@ -1205,14 +1205,14 @@ def cmd_rm(argv: list | None = None, prog: str = "gmlx rm") -> int:
 
 # list - the server's discovery scan, as a table
 def _human_gb(n_bytes: int, decimals: int = 1) -> str:
-    from .lifecycle import human_gb
+    from gmlx.serve.lifecycle import human_gb
     return human_gb(n_bytes, decimals)
 
 
 def _model_size_bytes(path: str, model_dirs: list[str]) -> int | None:
     """Total on-disk bytes for a model's GGUF (all shards for a split file)."""
-    from . import config as cfgmod
-    from .preflight import find_split_shards
+    import gmlx.config as cfgmod
+    from gmlx.load.preflight import find_split_shards
     try:
         resolved = cfgmod.resolve_path(path, model_dirs)
         return sum(os.path.getsize(p) for p in find_split_shards(resolved))
@@ -1264,7 +1264,7 @@ def cmd_list(argv: list | None = None, prog: str = "gmlx list") -> int:
                     help="Also show each model's GGUF path.")
     a = ap.parse_args(argv)
 
-    from . import config as cfgmod
+    import gmlx.config as cfgmod
 
     cfg_path = _resolve_config_path(a, cfgmod)
     if cfg_path is None:
@@ -1283,7 +1283,7 @@ def cmd_list(argv: list | None = None, prog: str = "gmlx list") -> int:
                      "source": "config", "default": mid == default_model,
                      "flags": _model_flags(m)})
     if cfg.discover:
-        from . import discovery
+        import gmlx.load.discovery as discovery
         try:
             disc = discovery.scan_dirs(
                 cfg.discover, cfg.model_dirs, known_ids=set(cfg.models),
@@ -1382,7 +1382,7 @@ def cmd_ps(argv: list | None = None, prog: str = "gmlx ps") -> int:
     else:
         # Same target resolution as status/stop/logs, so every bare lifecycle
         # verb reports on the same server.
-        from . import lifecycle
+        import gmlx.serve.lifecycle as lifecycle
         host, port = lifecycle.auto_target(a.host, a.port)
         root = f"http://{host}:{port}"
     api_key = a.api_key or os.environ.get("GMLX_API_KEY")
@@ -1449,8 +1449,8 @@ def _fmt_pairs(sampling: dict | None, ctk: dict | None = None) -> str:
 def _profiles_for_model(a, cfg, cfg_path: str) -> int:
     """The `gmlx profiles <id>` body: every addressable profile resolved for
     one configured model, plus the config layers that shape the merge."""
-    from . import config as cfgmod
-    from . import profiles as fam_profiles
+    import gmlx.config as cfgmod
+    import gmlx.gen.profiles as fam_profiles
 
     names = cfgmod.profile_names(cfg)
     head, _req = cfgmod.split_address(a.model, names)
@@ -1520,8 +1520,8 @@ def cmd_profiles(argv: list | None = None, prog: str = "gmlx profiles") -> int:
                     help="Emit the table / resolution as JSON.")
     a = ap.parse_args(argv)
 
-    from . import config as cfgmod
-    from . import profiles as fam_profiles
+    import gmlx.config as cfgmod
+    import gmlx.gen.profiles as fam_profiles
 
     # The table form works with no config; the per-model form needs one.
     cfg, cfg_path = None, None
@@ -1539,7 +1539,7 @@ def cmd_profiles(argv: list | None = None, prog: str = "gmlx profiles") -> int:
         except cfgmod.ConfigError as e:
             print(f"error: {e}", file=sys.stderr)
             return 2
-        from . import discovery
+        import gmlx.load.discovery as discovery
         discovery.fill_families(cfg)         # header-only reads; silent on misses
 
     if a.model:

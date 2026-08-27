@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Speech-to-text core (``gmlx.stt``): alias resolution, the request-model
+"""Speech-to-text core (``gmlx.serve.stt``): alias resolution, the request-model
 policy, OpenAI response shaping, and the transcription driver with a stubbed
 mlx-whisper. Pure CPU - mlx-whisper itself is never imported (the import is
 forced-missing where the gate is under test), no audio is decoded."""
@@ -13,7 +13,7 @@ import types
 import pytest
 
 
-from gmlx import stt  # noqa: E402
+import gmlx.serve.stt as stt  # noqa: E402
 from gmlx.config import build_config  # noqa: E402
 
 TURBO = "mlx-community/whisper-large-v3-turbo"

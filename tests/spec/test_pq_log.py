@@ -16,8 +16,8 @@ import pytest
 
 import mlx.core as mx  # noqa: E402
 
-import gmlx.speculative as sp  # noqa: E402
-from gmlx.speculative import (  # noqa: E402
+import gmlx.spec.speculative as sp  # noqa: E402
+from gmlx.spec.speculative import (  # noqa: E402
     _coupled_walk,
     _pq_expected_tokens,
     _pq_graph,

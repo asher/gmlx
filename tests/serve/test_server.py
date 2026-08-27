@@ -12,9 +12,9 @@ import types
 
 import pytest
 
-from gmlx import server as srv  # noqa: E402
-from gmlx import server_patches as sp  # noqa: E402
-from gmlx.server_patches import observability as sp_obs  # noqa: E402
+import gmlx.serve.server as srv  # noqa: E402
+import gmlx.serve.patches as sp  # noqa: E402
+from gmlx.serve.patches import observability as sp_obs  # noqa: E402
 from gmlx.config import ModelCfg, ServerCfg, ServerDefaults  # noqa: E402
 
 
@@ -239,7 +239,7 @@ def test_print_config_reflects_cli_flags(tmp_path, capsys):
 def test_serve_backgrounds_by_default(monkeypatch, tmp_path):
     g = tmp_path / "m.gguf"
     g.write_text("x")
-    from gmlx import lifecycle as lc
+    import gmlx.serve.lifecycle as lc
     seen = {}
 
     def fake_bg(serve_args, **kw):
@@ -267,7 +267,7 @@ def test_serve_backgrounds_by_default(monkeypatch, tmp_path):
 def test_serve_foreground_flag_runs_in_place(monkeypatch, tmp_path):
     g = tmp_path / "m.gguf"
     g.write_text("x")
-    from gmlx import lifecycle as lc
+    import gmlx.serve.lifecycle as lc
     seen = {}
 
     def fake_bg(*a, **k):
@@ -290,7 +290,7 @@ def test_serve_foreground_flag_runs_in_place(monkeypatch, tmp_path):
 def test_serve_no_menubar_flag_skips_menu(monkeypatch, tmp_path):
     g = tmp_path / "m.gguf"
     g.write_text("x")
-    from gmlx import lifecycle as lc
+    import gmlx.serve.lifecycle as lc
     seen = {}
     def fake_mb(*a, **k):
         seen["mb"] = True
@@ -708,7 +708,7 @@ def test_main_dispatches_sync(monkeypatch):
 
 # _reload_running: after init/sync rewrites a config, SIGHUP a server running from it
 def test_reload_running_signals_and_reports(monkeypatch, capsys):
-    from gmlx import lifecycle as lc
+    import gmlx.serve.lifecycle as lc
     seen = {}
 
     def _fake_reload(p):
@@ -723,7 +723,7 @@ def test_reload_running_signals_and_reports(monkeypatch, capsys):
 
 
 def test_reload_running_skip_is_noop(monkeypatch):
-    from gmlx import lifecycle as lc
+    import gmlx.serve.lifecycle as lc
     called = {"reload": False}
     monkeypatch.setattr(lc, "reload_config",
                         lambda p: called.__setitem__("reload", True) or [])
@@ -732,7 +732,7 @@ def test_reload_running_skip_is_noop(monkeypatch):
 
 
 def test_reload_running_never_raises(monkeypatch, capsys):
-    from gmlx import lifecycle as lc
+    import gmlx.serve.lifecycle as lc
 
     def _boom(p):
         raise RuntimeError("signalling blew up")
@@ -743,7 +743,7 @@ def test_reload_running_never_raises(monkeypatch, capsys):
 
 
 def test_reload_running_no_servers_is_quiet(monkeypatch, capsys):
-    from gmlx import lifecycle as lc
+    import gmlx.serve.lifecycle as lc
     monkeypatch.setattr(lc, "reload_config", lambda p: [])
     srv._reload_running("/some/cfg.yaml", skip=False)
     assert capsys.readouterr().out == ""               # nothing running -> no note
@@ -961,9 +961,9 @@ def _stub_serving_stack(monkeypatch):
 
     import uvicorn
 
-    import gmlx.residency as residency_mod
-    import gmlx.server_patches as sp_mod
-    import gmlx.server_bridge_vlm as serving_mod
+    import gmlx.serve.residency as residency_mod
+    import gmlx.serve.patches as sp_mod
+    import gmlx.serve.bridge_vlm as serving_mod
 
     calls = {}
     monkeypatch.setattr(serving_mod, "register_resolved_models", lambda cfg: None)
@@ -1209,8 +1209,8 @@ def test_resolve_service_uses_model_dirs(tmp_path):
     _resolve_service with the REAL resolvers and a relative path."""
     import os
 
-    from gmlx.embeddings import resolve_embeddings_model
-    from gmlx.rerank import resolve_rerank_model
+    from gmlx.serve.embeddings import resolve_embeddings_model
+    from gmlx.serve.rerank import resolve_rerank_model
 
     sub = tmp_path / "sub"
     sub.mkdir()

@@ -9,8 +9,9 @@ import mlx.core as mx
 import mlx.nn as nn
 import pytest
 
-from gmlx import adapter, modules  # noqa: E402
-from gmlx.transforms import qk_permute_wire  # noqa: E402
+import gmlx.load.adapter as adapter  # noqa: E402
+import gmlx.load.modules as modules  # noqa: E402
+from gmlx.load.transforms import qk_permute_wire  # noqa: E402
 
 
 def _lm(module_path, a, b, scale, transform="passthrough"):
@@ -140,7 +141,7 @@ def test_apply_reads_head_counts_from_config(monkeypatch, config, expected):
     seen = {}
     monkeypatch.setattr(adapter, "load_lora_adapter",
                         lambda path, **kw: _plan({}))
-    monkeypatch.setattr("gmlx.modules.install_lora_adapter",
+    monkeypatch.setattr("gmlx.load.modules.install_lora_adapter",
                         lambda model, plan, *, n_head=None, n_head_kv=None:
                         seen.update(n_head=n_head, n_head_kv=n_head_kv) or 0)
     adapter.apply_gguf_adapter(object(), config, "ignored.gguf")
@@ -154,7 +155,7 @@ def test_apply_reads_head_counts_from_object_config(monkeypatch):
 
     seen = {}
     monkeypatch.setattr(adapter, "load_lora_adapter", lambda path, **kw: _plan({}))
-    monkeypatch.setattr("gmlx.modules.install_lora_adapter",
+    monkeypatch.setattr("gmlx.load.modules.install_lora_adapter",
                         lambda model, plan, *, n_head=None, n_head_kv=None:
                         seen.update(n_head=n_head, n_head_kv=n_head_kv) or 0)
     adapter.apply_gguf_adapter(object(), _Cfg(), "ignored.gguf")

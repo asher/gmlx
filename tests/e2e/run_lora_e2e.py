@@ -15,7 +15,7 @@ safetensors, no merge:
      adapter and the response diverges from the base - with greedy decoding so the
      check is deterministic.
 
-Both verbs run as real subprocesses (the console script + ``gmlx.server``), so
+Both verbs run as real subprocesses (the console script + ``gmlx.serve.server``), so
 argparse, the monkeypatch wiring, uvicorn, and the residency pool all get exercised.
 
 Not ``test_``-prefixed, so pytest skips it - it needs the GPU and a base GGUF. Run

@@ -11,7 +11,7 @@ import pytest
 
 pytest.importorskip("yaml")
 
-from gmlx import discovery as disc  # noqa: E402
+import gmlx.load.discovery as disc  # noqa: E402
 from gmlx.config import DiscoverSpec, ModelCfg, build_config  # noqa: E402
 
 
@@ -637,7 +637,7 @@ def test_scaffold_emits_rerank_when_set():
 def test_find_retrieval_models_filters_to_decoder_archs(monkeypatch):
     """Only decoder-arch (supported) embedder / reranker GGUFs are returned; chat
     models and encoder-arch retrieval GGUFs are dropped."""
-    from gmlx.discovery import ClassifiedGguf
+    from gmlx.load.discovery import ClassifiedGguf
     files = {
         "/m/qwen3-embed.gguf":
             ClassifiedGguf("/m/qwen3-embed.gguf", "embedding", "qwen3", False, "Q8_0", False),
@@ -660,7 +660,7 @@ def test_find_retrieval_models_filters_to_decoder_archs(monkeypatch):
 def test_find_retrieval_models_surfaces_supported_encoder(monkeypatch):
     """An encoder embedder we CAN build (gemma-embedding, now in supported_arches)
     is surfaced; an encoder we can't (bert) is still dropped."""
-    from gmlx.discovery import ClassifiedGguf
+    from gmlx.load.discovery import ClassifiedGguf
     files = {
         "/m/egemma.gguf":
             ClassifiedGguf("/m/egemma.gguf", "embedding", "gemma-embedding",
@@ -1065,5 +1065,5 @@ def test_model_classification_carries_general_name_for_family_refinement():
     assert c.kind == "model"
     assert c.name == "Kimi-K2.7-Code"
 
-    from gmlx.profiles import detect_family
+    from gmlx.gen.profiles import detect_family
     assert detect_family(c.arch, c.name) == "kimi-k2"

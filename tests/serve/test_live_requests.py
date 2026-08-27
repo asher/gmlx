@@ -9,8 +9,8 @@ import pytest
 
 pytest.importorskip("mlx_vlm")
 
-import gmlx.live_requests as lr  # noqa: E402
-from gmlx import server_bridge_vlm as serving  # noqa: E402
+import gmlx.serve.live_requests as lr  # noqa: E402
+import gmlx.serve.bridge_vlm as serving  # noqa: E402
 
 _PKG = importlib.import_module("mlx_vlm.server")
 
@@ -221,7 +221,7 @@ def test_install_wraps_step_passthrough_and_idempotent(monkeypatch):
 
 
 def test_snapshot_enrichment_carries_requests(monkeypatch):
-    from gmlx.server_patches import routes as sp_routes
+    from gmlx.serve.patches import routes as sp_routes
     _APP = importlib.import_module("mlx_vlm.server.app")
     saved = _APP._server_runtime_snapshot
     _APP._server_runtime_snapshot = lambda: {"loaded_model": "x"}

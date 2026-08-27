@@ -7,7 +7,7 @@ fail *here*, by name, not three stages later at the remap gate.
 """
 import pytest
 
-from gmlx.vlm import UnsupportedVLMError, resolve_vlm_model_type
+from gmlx.load.vlm import UnsupportedVLMError, resolve_vlm_model_type
 
 
 @pytest.mark.parametrize("llm_arch,mm_meta,expected", [

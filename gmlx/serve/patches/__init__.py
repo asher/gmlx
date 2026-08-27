@@ -184,7 +184,7 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     """Install the full config-driven HTTP surface for a registered ``ServerCfg``.
     Call after register_resolved_models + the bridge/residency installs, before
     ``uvicorn.run``."""
-    from ..config import LOOPBACK_HOSTS
+    from gmlx.config import LOOPBACK_HOSTS
 
     install_api_key_auth(getattr(cfg, "api_key", None))
     install_json_content_type_tolerance()
@@ -202,14 +202,14 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
         install_fast_sampler()
     from ..seed_rows import install_per_request_seed
     install_per_request_seed()
-    from .. import spec_engine
+    import gmlx.spec.engine as spec_engine
     spec_engine.install_full_prompt_mtp_prefill()
     spec_engine.install_owned_spec_engine()
     spec_engine.install_continuous_batch_admission()
     spec_engine.install_spec_kv_quant()
     from ..batch_sched import install_decode_priority_sched
     install_decode_priority_sched()
-    from ..apc_pooling import (
+    from gmlx.cache.apc_pooling import (
         install_batched_cachelist_admission,
         install_pooled_prefill_batch_gate,
         install_pooled_prompt_kv_quant,
@@ -230,7 +230,7 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_admit_headroom_gate()
     # After the headroom gate so a truncated tick still projects memory
     # for the rows it admits.
-    from ..fresh_gate import install_fresh_admission_gate
+    from gmlx.cache.fresh_gate import install_fresh_admission_gate
     install_fresh_admission_gate()
     install_chat_template_kwargs()
     install_thinking_budget_fix()
@@ -290,7 +290,7 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_memory_preflight()
     # Late so the trace brackets the full tick including pacing and
     # admission work.
-    from ..serve_memtrace import install_serve_memtrace
+    from gmlx.serve.memtrace import install_serve_memtrace
     install_serve_memtrace()
     # Outside the trace (band decisions and shed work show up as tick
     # time, which the trace should attribute) and inside the tick guard
@@ -313,7 +313,7 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_tick_guard()
     # Last: the assistant chat wrapper must be outermost (alias ids never
     # reach the model resolver) and wrap the models override above.
-    from ..assistant_serve import install_assistant_serve
+    from gmlx.assistant.serve import install_assistant_serve
     install_assistant_serve(cfg)
     # True last: the keepalive body wrapper must be outermost on every
     # streaming route, including the assistant-re-registered chat routes.

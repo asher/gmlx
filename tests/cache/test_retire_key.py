@@ -4,9 +4,9 @@ import mlx.core as mx
 import pytest
 from mlx_vlm.models.cache import KVCache, RotatingKVCache
 
-from gmlx import cache_snapshot as cs
-from gmlx import retire_key as rk
-from gmlx import speculative as sp
+import gmlx.cache.snapshot as cs
+import gmlx.cache.retire_key as rk
+import gmlx.spec.speculative as sp
 
 
 @pytest.fixture(autouse=True)

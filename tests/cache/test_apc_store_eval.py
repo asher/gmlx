@@ -14,7 +14,7 @@ import mlx.core as mx
 
 apc = pytest.importorskip("mlx_vlm.apc")
 
-from gmlx.apc_manager import GmlxAPCManager  # noqa: E402
+from gmlx.cache.apc_manager import GmlxAPCManager  # noqa: E402
 
 # The stock method, captured at import: nothing in gmlx may mutate it.
 _STOCK_STORE = apc.APCManager.store_kv_blocks

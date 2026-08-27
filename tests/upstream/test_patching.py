@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from gmlx.patching import ClassPatch
+from gmlx.upstream.patching import ClassPatch
 
 
 def test_install_once_and_stock_capture():

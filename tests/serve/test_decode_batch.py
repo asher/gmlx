@@ -8,7 +8,7 @@ import pytest
 
 pytest.importorskip("mlx_vlm")
 
-import gmlx.decode_batch as db  # noqa: E402
+import gmlx.serve.decode_batch as db  # noqa: E402
 
 
 def test_default(monkeypatch):
@@ -38,7 +38,7 @@ def test_garbage_falls_back(monkeypatch):
 def test_stash_wrapper_injects(monkeypatch):
     from mlx_vlm.generate import ar
 
-    import gmlx.spec_engine as spec_engine
+    import gmlx.spec.engine as spec_engine
 
     seen = {}
 
@@ -65,7 +65,7 @@ def test_stash_wrapper_clamps_full_width_prefill_group(monkeypatch):
     # group to 1 only in that regime.
     from mlx_vlm.generate import ar
 
-    import gmlx.spec_engine as spec_engine
+    import gmlx.spec.engine as spec_engine
 
     class _BG:
         def __init__(self, model, processor, **kwargs):

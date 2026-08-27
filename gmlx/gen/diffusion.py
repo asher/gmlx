@@ -37,7 +37,7 @@ def _diffusion_io(tokenizer):
     """Build the (processor, engine-tokenizer, skip-ids) triple the denoiser
     needs from a gmlx ``TokenizerWrapper`` - the same adapter the server
     uses, so run/chat/serve share one tokenizer seam."""
-    from .server_bridge_vlm import _make_text_processor
+    from gmlx.serve.bridge_vlm import _make_text_processor
 
     processor = _make_text_processor(tokenizer)
     backend = processor.tokenizer  # callable HF tokenizer carrying stopping_criteria

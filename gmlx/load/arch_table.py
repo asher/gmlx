@@ -70,7 +70,7 @@ _FAMILY_NOTES = {
     "qwen35":         ("qwen3",    "Qwen3.5/3.6/3.8 dense hybrid: gated-DeltaNet linear attention with a full-attention layer every full_attention_interval; fused-GDN Metal kernels at runtime (GMLX_FUSED_GDN=0 disables); native-head MTP (nextn) -> --speculative needs no companion GGUF; a DFlash 2 drafter GGUF (--draft-gguf, z-lab Qwen3.8-27B-DFlash2) wins over the head when configured"),
     "qwen35moe":      ("qwen3",    "Qwen3.5/3.6 MoE (e.g. Qwen3.6-27B): the qwen35 gated-DeltaNet hybrid + fine-grained MoE with shared expert; fused-GDN kernels + native-head MTP as on qwen35"),
     "qwen3moe":       ("qwen3",    "Qwen3-MoE (30B-A3B / 235B-A22B); all-MoE switch_mlp, no shared expert"),
-    "qwen4exp":       ("qwen3",    "Qwen3.8-Flash-Next (llama.cpp PR 27742): the qwen35 gated-DeltaNet hybrid (sigmoid output gate, tiled V heads) + every-layer 512-expert MoE with shared expert, plus hyper-connections (4 residual streams, low-rank sigmoid mixers replacing every norm), QSA sparse attention (4-head indexer over mean-pooled blocks of 4 keys, top 512 blocks + the incomplete tail; dense below 2052 cached tokens) and PLE n-gram hash embeddings on layer 1 (320M-row IQ4_NL table kept as wire bytes, rows gathered per token). Vendored gmlx.qwen4_exp_model; all norms arrive +1 baked (passthrough). The MTP head is not in the GGUF (the converter drops it): --speculative needs the qwen4exp-mtp companion GGUF (autodetected next to the target, or --draft-gguf) built from the HF mtp.* tensors. Pairs with the Qwen3-VL mmproj (--mmproj) via a vendored wrapper on the qwen3_5 vision tower"),
+    "qwen4exp":       ("qwen3",    "Qwen3.8-Flash-Next (llama.cpp PR 27742): the qwen35 gated-DeltaNet hybrid (sigmoid output gate, tiled V heads) + every-layer 512-expert MoE with shared expert, plus hyper-connections (4 residual streams, low-rank sigmoid mixers replacing every norm), QSA sparse attention (4-head indexer over mean-pooled blocks of 4 keys, top 512 blocks + the incomplete tail; dense below 2052 cached tokens) and PLE n-gram hash embeddings on layer 1 (320M-row IQ4_NL table kept as wire bytes, rows gathered per token). Vendored gmlx.models.qwen4_exp.model; all norms arrive +1 baked (passthrough). The MTP head is not in the GGUF (the converter drops it): --speculative needs the qwen4exp-mtp companion GGUF (autodetected next to the target, or --draft-gguf) built from the HF mtp.* tensors. Pairs with the Qwen3-VL mmproj (--mmproj) via a vendored wrapper on the qwen3_5 vision tower"),
     "qwen3vlmoe":     ("qwen3",    "Qwen3-Omni thinker text tower (MoE, qwen3moe layout); pairs with the Qwen3-Omni mmproj (--mmproj) for vision + audio input"),
     "llama":          ("llama",    "Llama-2/3, Mistral-7B-as-llama, Vicuna; SPM merges reconstructed from scores. Sparse-MoE variants (Mixtral-8x7B/8x22B) ship under this arch with an expert count -> routed to model_type=mixtral (block_sparse_moe + SwitchGLU); legacy per-expert split weights are coalesced to the stacked form on load"),
     "mistral3":       ("llama",    "llama.cpp 'mistral3' = Ministral-3 / Mistral-Small-3.1, Llama layout"),
@@ -185,22 +185,22 @@ def has_synth(gguf_arch: str) -> bool:
 # (and the vendored file).
 _VENDORED_MLX_LM_MODULES = {
     # mlx-lm PR #1401 (MiniMax-M3 text backbone).
-    "minimax_m3": "gmlx.minimax_m3_model",
+    "minimax_m3": "gmlx.models.minimax_m3",
     # llama.cpp PR #27742 (Qwen3.8-Flash-Next); mlx-vlm main carries a
     # qwen4_exp package but the pinned release does not, and mlx-lm has none.
-    "qwen4_exp": "gmlx.qwen4_exp_model",
+    "qwen4_exp": "gmlx.models.qwen4_exp.model",
     # mlx-lm PR #1192 (DeepSeek V4 Flash), + vendored hyper_connection and
     # PoolingCache/BatchPoolingCache companions injected by ensure_registered.
-    "deepseek_v4": "gmlx.deepseek_v4_model",
+    "deepseek_v4": "gmlx.models.deepseek_v4.model",
     # mlx-lm PR #1485 (Tencent Hy3, supersedes #1211).
-    "hy_v3": "gmlx.hy_v3_model",
+    "hy_v3": "gmlx.models.hy_v3.model",
     # llama.cpp PR #26185 (Kimi-K3); no upstream mlx-lm class (kimi_linear is
     # the nearest relative and lacks the five K3-only mechanisms).
-    "kimi_k3": "gmlx.kimi_k3_model",
+    "kimi_k3": "gmlx.models.kimi_k3",
     # llama.cpp LLM_ARCH_MUSE_GLIMMER; no upstream mlx-lm class (afmoe is the
     # nearest relative and has neither the NoPE/RoPE inversion nor the second
     # norm epsilon).
-    "muse_glimmer": "gmlx.muse_glimmer_model",
+    "muse_glimmer": "gmlx.models.muse_glimmer.model",
 }
 
 

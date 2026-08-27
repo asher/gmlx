@@ -111,8 +111,8 @@ def _owned_pair(keys: mx.array, values: mx.array):
 
 def _snapshot_entry(c: Any) -> Any:
     """Snapshot one prompt_cache entry, preserving offset for all cache types."""
-    from .cache_compat import cache_types
-    from .deepseek_v4_cache import BatchPoolingCache, PoolingCache
+    from .compat import cache_types
+    from gmlx.models.deepseek_v4.cache import BatchPoolingCache, PoolingCache
     if isinstance(c, cache_types("CacheList")):
         return (_CACHELIST_TAG, [_snapshot_entry(sub) for sub in c.caches])
     if isinstance(c, (PoolingCache, BatchPoolingCache)):
@@ -146,7 +146,7 @@ def _snapshot_entry(c: Any) -> Any:
 
 def _restore_entry(c: Any, snap: Any) -> None:
     """Restore one prompt_cache entry from a snapshot."""
-    from .cache_compat import cache_types
+    from .compat import cache_types
     if isinstance(snap, tuple) and snap[0] == _CACHELIST_TAG:
         if isinstance(c, cache_types("CacheList")):
             for sub, sub_snap in zip(c.caches, snap[1]):

@@ -5,7 +5,7 @@ The standard OpenAI tool loop run against the server's own
 ``/v1/chat/completions``: stream a turn, accumulate ``tool_calls`` deltas,
 execute the named tools, append the results as ``role: tool`` messages, and
 re-call - until the model answers in prose or the round cap forces it to.
-Implements the same :class:`~gmlx.talk_client.Brain` protocol as
+Implements the same :class:`~gmlx.talk.client.Brain` protocol as
 ``ServerChatBrain``, so the audio loop and TUI are unchanged; tool activity
 surfaces as ``("status", ...)`` events and chain-of-thought as
 ``("think", <text>)`` (spoken never, rendered by the chat REPL's
@@ -33,7 +33,7 @@ import threading
 from dataclasses import dataclass, field
 from collections.abc import Callable, Iterator
 
-from .talk_client import BrainEvent, stream_chat
+from gmlx.talk.client import BrainEvent, stream_chat
 
 
 @dataclass
@@ -147,7 +147,7 @@ class AssistantBrain:
 
     # -- the tool loop -------------------------------------------------------
     def turn(self, user_text: str) -> Iterator[BrainEvent]:
-        from .reasoning import ReasoningFilter
+        from gmlx.tui.reasoning import ReasoningFilter
 
         memory_facts: list = []
         if self.memory is not None:

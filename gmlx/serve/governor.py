@@ -288,7 +288,7 @@ def _ceiling_bytes(ws: float, margin: float) -> float:
 
 
 def _headroom_and_ws(margin: float):
-    from .prefill_decay import headroom_bytes
+    from gmlx.gen.prefill_decay import headroom_bytes
 
     head = headroom_bytes()
     if head is None:
@@ -388,7 +388,7 @@ def _pause_admission(gen, st: _GovState) -> None:
 
 
 def _arm_throttle(gen, st: _GovState, ws: float, margin: float) -> None:
-    from .prefill_decay import streamed_tracked_bytes, untracked_weight_bytes
+    from gmlx.gen.prefill_decay import streamed_tracked_bytes, untracked_weight_bytes
 
     if st.saved_mem_limit is None:
         # The limit speaks allocator terms: allocator-tracked streamed
@@ -442,7 +442,7 @@ def _arm_demand_rung(gen, st: _GovState) -> None:
     if st.rung == 1:
         if not st.width_clamped and getattr(gen, "draft_model", None) \
                 is not None:
-            from .speculative import set_governor_width_clamp
+            from gmlx.spec.speculative import set_governor_width_clamp
 
             clamp = max(1, batch_rows(gen) // 2)
             set_governor_width_clamp(clamp)
@@ -459,7 +459,7 @@ def _restore_demand_rungs(gen, st: _GovState) -> None:
         st.saved_prefill_step = None
     if st.width_clamped:
         try:
-            from .speculative import set_governor_width_clamp
+            from gmlx.spec.speculative import set_governor_width_clamp
 
             set_governor_width_clamp(0)
         except Exception:
@@ -624,7 +624,7 @@ def _governor_tick(gen) -> None:
     # pending one-shot lands
     ttc = max(0.0, head - oneshot) / max(rate, 1.0)
 
-    from .server_memory import admit_reserve_bytes
+    from .memory import admit_reserve_bytes
 
     reserve = admit_reserve_bytes(ws, gen)
     # escalation clock is rate-only: an oversized pending one-shot is

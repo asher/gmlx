@@ -31,7 +31,7 @@ import time
 import mlx.core as mx
 import numpy as np
 
-from .envflags import env_bool, env_choice, env_float, env_int
+from gmlx.envflags import env_bool, env_choice, env_float, env_int
 
 _VARIANTS = ("ratio", "raw")
 
@@ -393,7 +393,7 @@ class LookaheadHook:
             # Mixed ownership: the predictor tensors are scratch (the
             # handler discards them) but indices is owned state the tick
             # continues with; the guard drains before either happens.
-            from .eval_guard import guard
+            from gmlx.eval_guard import guard
             guard.eval(indices, *[t for _, _, pair in lazy for t in pair],
                        site="lookahead-joint", owner="owned")
         except Exception as exc:

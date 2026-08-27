@@ -17,8 +17,8 @@ import mlx.core as mx
 import pytest
 from mlx_vlm.apc import APCManager, DiskBlockStore
 
-from gmlx.cache_compat import runtime_cache_module
-from gmlx.cache_snapshot import (
+from gmlx.cache.compat import runtime_cache_module
+from gmlx.cache.snapshot import (
     _CKPT_SALT,
     _SIDECAR_SALT,
     ckpt_extra_hash,
@@ -125,7 +125,7 @@ def test_store_lookup_roundtrip(p):
     assert_warm_matches(warm, cache, p)
     # The checkpoint record pins its chain: main blocks stay ref-held
     # until the record is released (pin rather than repair).
-    from gmlx.cache_snapshot import _ckpt_records, _release_record
+    from gmlx.cache.snapshot import _ckpt_records, _release_record
     held = [b for b in man.pool if b.block_hash is not None]
     if p >= 16:
         assert held and all(b.ref_cnt == 1 for b in held)
@@ -171,7 +171,7 @@ def test_replay_record_survives_retirement_insert():
     """The N-1 replay record exists for the identical resend, which
     arrives after retirement grows the chain -- exactly the moment
     strip-on-extend used to release it."""
-    from gmlx.cache_snapshot import _ckpt_records
+    from gmlx.cache.snapshot import _ckpt_records
 
     man = APCManager(num_blocks=64, block_size=16)
     n = 48
@@ -197,7 +197,7 @@ def test_replay_record_survives_retirement_insert():
 
 
 def test_newer_replay_supersedes_older_on_chain():
-    from gmlx.cache_snapshot import _ckpt_records
+    from gmlx.cache.snapshot import _ckpt_records
 
     man = APCManager(num_blocks=64, block_size=16)
     ids = list(range(100, 196))
@@ -210,7 +210,7 @@ def test_newer_replay_supersedes_older_on_chain():
 
 
 def test_replay_record_not_exempt_from_entry_cap(monkeypatch):
-    import gmlx.cache_snapshot as cs
+    import gmlx.cache.snapshot as cs
 
     monkeypatch.setattr(cs, "_CKPT_RECORD_ENTRIES", 2)
     man = APCManager(num_blocks=64, block_size=16)
@@ -230,7 +230,7 @@ def test_replay_record_not_exempt_from_entry_cap(monkeypatch):
 
 
 def test_replay_record_not_exempt_from_byte_budget(monkeypatch):
-    import gmlx.cache_snapshot as cs
+    import gmlx.cache.snapshot as cs
 
     man = APCManager(num_blocks=64, block_size=16)
     assert ckpt_store(man, list(range(100, 147)),
@@ -288,7 +288,7 @@ def make_swa_cache(p, seed=0):
 
 
 def assert_swa_warm_matches(warm, orig, p):
-    from gmlx.cache_snapshot import (rotating_canonical_window,
+    from gmlx.cache.snapshot import (rotating_canonical_window,
                                      rotating_invariant)
     assert len(warm) == len(orig)
     for w, o in zip(warm, orig):
@@ -325,7 +325,7 @@ def test_swa_store_declines_off_grid_below_window():
     would need a partial window block. Beyond it (see the roundtrip
     params) off-grid p stores. Without grid_truncate the store declines
     whole."""
-    from gmlx.cache_snapshot import _ckpt_stats
+    from gmlx.cache.snapshot import _ckpt_stats
     man = APCManager(num_blocks=64, block_size=16)
     p = 20                                    # < W=32 and 20 % 16 != 0
     cache = make_swa_cache(p)
@@ -337,7 +337,7 @@ def test_swa_store_declines_off_grid_below_window():
 def assert_grid_warm_matches(warm, orig, p):
     """warm at truncated p vs the deeper original: rot canonical is the
     temporal prefix [0..p), plain KV the same slice."""
-    from gmlx.cache_snapshot import rotating_canonical_window
+    from gmlx.cache.snapshot import rotating_canonical_window
     assert len(warm) == len(orig)
     for w, o in zip(warm, orig):
         if isinstance(o, RotatingKVCache):
@@ -356,7 +356,7 @@ def assert_grid_warm_matches(warm, orig, p):
 def test_grid_truncate_store_lookup_roundtrip():
     """grid_truncate turns the below-window decline into a terminal
     store at b_full; the record is a faithful shorter run."""
-    import gmlx.cache_snapshot as cs
+    import gmlx.cache.snapshot as cs
     man = APCManager(num_blocks=64, block_size=16)
     p = 20
     cache = make_swa_cache(p, seed=5)
@@ -376,7 +376,7 @@ def test_grid_truncate_store_lookup_roundtrip():
 
 def test_grid_truncate_sub_block_declines():
     """b_full < 2: nothing block-aligned to keep, decline as before."""
-    from gmlx.cache_snapshot import _ckpt_stats
+    from gmlx.cache.snapshot import _ckpt_stats
     man = APCManager(num_blocks=64, block_size=16)
     p = 10                                    # b_full = 0
     cache = make_swa_cache(p, seed=5)
@@ -388,7 +388,7 @@ def test_grid_truncate_sub_block_declines():
 def test_grid_truncate_recurrent_layout_declines():
     """State cannot rewind: an arr layer in the layout keeps the
     decline even with grid_truncate."""
-    from gmlx.cache_snapshot import _ckpt_stats
+    from gmlx.cache.snapshot import _ckpt_stats
     man = APCManager(num_blocks=64, block_size=16)
     p = 20
     cache = make_swa_cache(p, seed=5)
@@ -405,7 +405,7 @@ def test_grid_truncate_recurrent_layout_declines():
 def test_grid_truncate_beyond_window_stores_full():
     """At or beyond the wrap the off-grid store already works whole;
     grid_truncate must not truncate it."""
-    from gmlx.cache_snapshot import _ckpt_stats
+    from gmlx.cache.snapshot import _ckpt_stats
     man = APCManager(num_blocks=64, block_size=16)
     p = 40                                    # >= W=32, unaligned
     cache = make_swa_cache(p, seed=5)
@@ -455,7 +455,7 @@ def test_buffered_rotating_declines_loudly():
     buffer's canonical window (a linear temporal buffer has no ring
     phase) as a plain RotatingKVCache, which the exact tier stores."""
     from mlx_vlm.models.cache import BufferedRotatingKVCache
-    from gmlx.cache_snapshot import _ckpt_stats, _clone_single_row
+    from gmlx.cache.snapshot import _ckpt_stats, _clone_single_row
     man = APCManager(num_blocks=64, block_size=16)
     p = 48
     cache = make_swa_cache(p, seed=6)
@@ -477,7 +477,7 @@ def test_lookup_pins_blocks_against_concurrent_release(monkeypatch):
     chains between selection and assembly; the lookup must pin them (+1
     ref under the lock) so assembly reads live tensors, and drop the pin
     on every exit path."""
-    import gmlx.cache_snapshot as cs
+    import gmlx.cache.snapshot as cs
 
     man = APCManager(num_blocks=64, block_size=16)
     p = 32
@@ -510,7 +510,7 @@ def test_lookup_skips_record_released_after_selection(monkeypatch):
     """A candidate released after selection but before its turn in the
     walk is refused via the index membership check, never assembled from
     recycled blocks; surviving records keep their pins."""
-    import gmlx.cache_snapshot as cs
+    import gmlx.cache.snapshot as cs
 
     man = APCManager(num_blocks=64, block_size=16)
     ids = list(range(100, 196))
@@ -551,8 +551,8 @@ def test_lookup_survives_concurrent_clear(monkeypatch):
     rebuilt under the held refs, so releasing them afterwards would push
     already-free blocks twice and corrupt the list. The generation check
     drops the refs instead and discards the pre-clear warm result."""
-    import gmlx.cache_snapshot as cs
-    from gmlx.apc_manager import GmlxAPCManager
+    import gmlx.cache.snapshot as cs
+    from gmlx.cache.apc_manager import GmlxAPCManager
 
     man = GmlxAPCManager(num_blocks=64, block_size=16)
     p = 32
@@ -583,7 +583,7 @@ def test_store_exception_after_insert_keeps_record_pinned(monkeypatch):
     """An exception after _record_insert transferred chain ownership must
     not release the blocks on the except path: the record is live in the
     index, so a second release would strip its pins while it serves."""
-    import gmlx.cache_snapshot as cs
+    import gmlx.cache.snapshot as cs
 
     man = APCManager(num_blocks=64, block_size=16)
     p = 32
@@ -630,7 +630,7 @@ def test_strip_on_extend_keeps_newest_two_plus_anchor():
     the first restorable boundary is promoted and survives the strip
     (sibling fan-out adopts exactly that early prefix), while interior
     boundaries strip as before."""
-    from gmlx.cache_snapshot import _ckpt_records
+    from gmlx.cache.snapshot import _ckpt_records
     man = APCManager(num_blocks=96, block_size=16)
     ids = list(range(400, 400 + 96))
     for p in (32, 48, 64, 80):
@@ -651,7 +651,7 @@ def test_strip_on_extend_exempts_replay():
     """A growing chain strips boundary records past the cap but never a
     replay record; the replay stays adoptable through terminal and
     retirement inserts."""
-    from gmlx.cache_snapshot import _ckpt_records
+    from gmlx.cache.snapshot import _ckpt_records
     man = APCManager(num_blocks=64, block_size=16)
     ids = list(range(400, 400 + 96))
     assert ckpt_store(man, ids[:32], make_hybrid_cache(32, seed=32),
@@ -673,7 +673,7 @@ def test_replay_gate_arr_adopts_exact_resend_only():
     """A recurrent-state replay record serves the identical resend
     (query = record + 1 token) and refuses longer suffixes -- the
     refusal is reason-counted and feeds missed-adoption accounting."""
-    import gmlx.cache_snapshot as cs
+    import gmlx.cache.snapshot as cs
     man = APCManager(num_blocks=64, block_size=16)
     ids = list(range(400, 432))
     assert ckpt_store(man, ids, make_hybrid_cache(32, seed=5),
@@ -704,7 +704,7 @@ def test_replay_arr_skeleton_forced_off(tmp_path):
     serve a restart past the adopt gate; ckpt_store forces it off even
     when the caller asks for one. Rot-only replay keeps its skeleton
     (free adoption makes the disk hit equivalent)."""
-    import gmlx.cache_snapshot as cs
+    import gmlx.cache.snapshot as cs
     disk = DiskBlockStore(root=tmp_path, namespace="m")
     man = APCManager(num_blocks=64, block_size=16, disk=disk)
     ids = list(range(100, 132))
@@ -722,7 +722,7 @@ def test_post_prefill_store_records_boundary():
     """The spec-path p=N store appends to the settled variable the
     sidecar key set and the Stage 6 drop gate read; a declined store
     appends nothing."""
-    from gmlx.speculative import _ckpt_post_prefill
+    from gmlx.spec.speculative import _ckpt_post_prefill
     man = APCManager(num_blocks=64, block_size=16)
     ids = list(range(100, 132))
     model = SimpleNamespace(_kq_apc_manager=man)
@@ -740,7 +740,7 @@ def test_full_store_drop_gate():
     """p=N drops only when an armed render-stable boundary LANDED --
     armed-then-declined keeps it (nothing else would cover turn 2's
     prefix class)."""
-    from gmlx.cache_snapshot import ckpt_full_store_redundant
+    from gmlx.cache.snapshot import ckpt_full_store_redundant
     assert not ckpt_full_store_redundant(None)
     assert not ckpt_full_store_redundant({})
     assert not ckpt_full_store_redundant(
@@ -751,8 +751,8 @@ def test_full_store_drop_gate():
 
 
 def test_post_prefill_store_dropped_when_p_stable_landed():
-    from gmlx.cache_snapshot import _ckpt_records
-    from gmlx.speculative import _ckpt_post_prefill
+    from gmlx.cache.snapshot import _ckpt_records
+    from gmlx.spec.speculative import _ckpt_post_prefill
     man = APCManager(num_blocks=64, block_size=16)
     ids = list(range(100, 132))
     model = SimpleNamespace(_kq_apc_manager=man)
@@ -768,7 +768,7 @@ def test_rot_clone_canonicalizes():
     window (min(offset, W) columns, ring pointer at the end) while
     preserving the concrete class; content matches the live canonical
     window bit-exactly. Below the wrap the partial fill clones whole."""
-    from gmlx.cache_snapshot import (
+    from gmlx.cache.snapshot import (
         _clone_single_row,
         rotating_canonical_window,
         rotating_invariant,
@@ -812,7 +812,7 @@ def test_swa_disk_restart_roundtrip(tmp_path, p):
     persistence by kind; the stock manager's fallback disk-writes every
     chain, and testing on it hid a live bug where rot window chains never
     reached disk at all."""
-    from gmlx.apc_manager import GmlxAPCManager
+    from gmlx.cache.apc_manager import GmlxAPCManager
     cache = make_swa_cache(p, seed=11)
     ids = list(range(700, 700 + p))
     disk = DiskBlockStore(root=tmp_path, namespace="m")
@@ -827,7 +827,7 @@ def test_swa_disk_restart_roundtrip(tmp_path, p):
         assert_swa_warm_matches(warm, cache, p)
         # Disk half of the geometry check: the stored entries carry the
         # writer's window, so a reader with a different one must miss.
-        from gmlx.cache_snapshot import ckpt_layout
+        from gmlx.cache.snapshot import ckpt_layout
         live = tuple(ckpt_layout(cache, 16))
         other = tuple(t if not t.startswith("rot") else "rot:64:0"
                       for t in live)
@@ -879,7 +879,7 @@ def test_layout_geometry_rejects_window_mismatch():
     cache = make_swa_cache(p, seed=7)
     ids = list(range(300, 300 + p))
     assert ckpt_store(man, ids, cache, extra_hash=0)
-    from gmlx.cache_snapshot import ckpt_layout
+    from gmlx.cache.snapshot import ckpt_layout
     live = tuple(ckpt_layout(cache, 16))
     other = tuple(t if not t.startswith("rot") else "rot:64:0"
                   for t in live)
@@ -892,7 +892,7 @@ def test_layout_geometry_rejects_window_mismatch():
 def test_short_main_chain_declines_and_spares_chain():
     """A store that cannot pin its main chain is declined outright: an
     unpinnable record would displace restorable ones via strip-on-extend."""
-    from gmlx.cache_snapshot import _ckpt_records
+    from gmlx.cache.snapshot import _ckpt_records
     man = APCManager(num_blocks=2, block_size=16)
     ids = list(range(400, 400 + 96))
     good = make_hybrid_cache(32, seed=1)
@@ -912,7 +912,7 @@ def test_ckpt_store_suppresses_layer_major():
     """Above the layer-major threshold the stock store returns no blocks
     and clones the prefix into the 2-slot exact LRU; the gmlx manager's
     ckpt path must stay per-block and leave the exact LRU alone."""
-    from gmlx.apc_manager import GmlxAPCManager
+    from gmlx.cache.apc_manager import GmlxAPCManager
     man = GmlxAPCManager(num_blocks=64, block_size=16)
     man._layer_major_memory_min_tokens = 32
     p = 64
@@ -938,8 +938,8 @@ def test_stripped_boundary_recovers_via_skeleton(tmp_path):
     skeleton + memory blocks. This is the divergent-suffix recovery
     path -- suppressing boundary skeletons broke it live (2d matrix,
     gemma-4: divergent/turn adoption fell to +0)."""
-    from gmlx.apc_manager import GmlxAPCManager
-    from gmlx.cache_snapshot import _ckpt_records, _release_record
+    from gmlx.cache.apc_manager import GmlxAPCManager
+    from gmlx.cache.snapshot import _ckpt_records, _release_record
     disk = DiskBlockStore(root=tmp_path, namespace="m")
     man = GmlxAPCManager(num_blocks=64, block_size=16, disk=disk)
     try:
@@ -967,7 +967,7 @@ def test_window_chain_disk_follows_kind(tmp_path):
     still writes its skeleton -- within the process the skeleton
     re-indexes a record whose blocks survived strip-on-extend; the main
     chain writes through regardless (it dedups)."""
-    from gmlx.apc_manager import GmlxAPCManager
+    from gmlx.cache.apc_manager import GmlxAPCManager
     disk = DiskBlockStore(root=tmp_path, namespace="m")
     man = GmlxAPCManager(num_blocks=64, block_size=16, disk=disk)
     try:
@@ -1093,7 +1093,7 @@ class _HybridModel:
 
 
 def test_ckpt_active_gating(monkeypatch):
-    import gmlx.spec_engine as se
+    import gmlx.spec.engine as se
 
     monkeypatch.setattr(se, "_SPEC_APC_CKPT_DISABLED", False)
     assert se._ckpt_active(_HybridModel(), "exact") is True
@@ -1110,7 +1110,7 @@ def test_ckpt_active_gating(monkeypatch):
 
 
 def test_mid_prefill_store_supersedes_stock(monkeypatch):
-    import gmlx.spec_engine as se
+    import gmlx.spec.engine as se
 
     man = APCManager(num_blocks=64, block_size=16)
     ckpt_len = 32
@@ -1151,8 +1151,8 @@ def test_master_kill_switch_cascades():
     the derived flags in spec_engine, plus engine.speculative's independent
     env read. Fresh interpreter because the flags burn at import."""
     code = (
-        "import gmlx.spec_engine as se;"
-        "import gmlx.speculative as sp;"
+        "import gmlx.spec.engine as se;"
+        "import gmlx.spec.speculative as sp;"
         "assert se._SPEC_APC_DISABLED;"
         "assert se._SPEC_APC_RETIRE_DISABLED;"
         "assert se._SPEC_APC_SIDECAR_DISABLED;"
@@ -1174,7 +1174,7 @@ def test_spec_apc_master_disable_noops_store(monkeypatch):
     real owned-prefill APC entrypoint against a real APCManager with the master
     switch off and assert nothing is armed or stored; the switched-on control
     proves the same drive does store."""
-    import gmlx.spec_engine as se
+    import gmlx.spec.engine as se
 
     p = 48
     ids = mx.array([list(range(100, 100 + p))])
@@ -1221,7 +1221,7 @@ def test_anchor_kind_exempt_from_strip_and_superseded():
     """A tagged anchor survives strip-on-extend as the chain deepens; a
     newer tagged anchor on the same chain supersedes it (one anchor per
     chain)."""
-    from gmlx.cache_snapshot import _ckpt_records
+    from gmlx.cache.snapshot import _ckpt_records
 
     man = APCManager(num_blocks=96, block_size=16)
     ids = list(range(400, 400 + 96))
@@ -1245,7 +1245,7 @@ def test_anchor_kind_exempt_from_strip_and_superseded():
 def test_anchor_evicts_after_non_anchors_lru_by_hit(monkeypatch):
     """Entry-cap pressure: non-anchors go first even when an anchor is
     older; among anchors the least-recently-hit goes first."""
-    import gmlx.cache_snapshot as cs
+    import gmlx.cache.snapshot as cs
 
     monkeypatch.setattr(cs, "_CKPT_RECORD_ENTRIES", 3)
     man = APCManager(num_blocks=96, block_size=16)
@@ -1279,7 +1279,7 @@ def test_first_boundary_promotion_skips_retire_chains():
     """Promotion targets boundaries only: a chain whose first record is
     a retirement store gets no anchor from it, and a later boundary
     above it does not promote either (the chain is not fresh)."""
-    from gmlx.cache_snapshot import _ckpt_records
+    from gmlx.cache.snapshot import _ckpt_records
 
     man = APCManager(num_blocks=96, block_size=16)
     ids = list(range(400, 400 + 96))
@@ -1298,8 +1298,8 @@ def test_anchor_never_shadows_a_deeper_disk_skeleton(tmp_path):
     pinned walk returns on first success, so an anchor left to win here
     caps every divergent query at its own p (the depth e2e's divergent
     and turns floors)."""
-    from gmlx.apc_manager import GmlxAPCManager
-    from gmlx.cache_snapshot import _ckpt_records, rotating_canonical_window
+    from gmlx.cache.apc_manager import GmlxAPCManager
+    from gmlx.cache.snapshot import _ckpt_records, rotating_canonical_window
 
     ids = list(range(700, 700 + 96))
     disk = DiskBlockStore(root=tmp_path, namespace="m")
@@ -1347,7 +1347,7 @@ def test_anchor_gets_no_pool_pressure_protection():
     """_evict_for_pool gives anchors no absolute protection: once a
     chain group has nothing else left its anchor reclaims like any
     record, so a pinned anchor can never starve the block pool."""
-    import gmlx.cache_snapshot as cs
+    import gmlx.cache.snapshot as cs
 
     man = APCManager(num_blocks=64, block_size=16)
     ids = list(range(400, 448))
@@ -1364,7 +1364,7 @@ def test_buffered_clone_declines_a_non_linear_window():
     buffer's linear-layout invariant (``start_position == offset - _idx``);
     a buffer that breaks it is declined loudly, never stored wrong."""
     from mlx_vlm.models.cache import BufferedRotatingKVCache
-    from gmlx.cache_snapshot import _clone_single_row
+    from gmlx.cache.snapshot import _clone_single_row
     cache = make_swa_cache(48, seed=9)
     rot = next(c for c in cache if isinstance(c, RotatingKVCache))
     buffered = BufferedRotatingKVCache.from_cache(rot, buffer_size=16)

@@ -23,7 +23,8 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO))
 
-from gmlx import arch_table, config_synth  # noqa: E402
+import gmlx.load.arch_table as arch_table  # noqa: E402
+import gmlx.load.config_synth as config_synth  # noqa: E402
 
 
 def mlx_lm_model_types() -> dict[str, bool]:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline-resolve window (``gmlx.hf_cache.offline_resolve``): a local path or
+"""Offline-resolve window (``gmlx.serve.hf_cache.offline_resolve``): a local path or
 empty ref is a no-op; a repo id is ensured in the HF cache (cache-only probe, with
 a one-time download only on a genuine miss) and then loaded with ``HF_HUB_OFFLINE``
 forced on for the duration and restored after. Pure CPU - ``huggingface_hub`` is
@@ -11,7 +11,7 @@ import types
 
 import pytest
 
-from gmlx import hf_cache
+import gmlx.serve.hf_cache as hf_cache
 
 
 def _stub_hf(monkeypatch, *, cached: bool, offline_start: bool = False):

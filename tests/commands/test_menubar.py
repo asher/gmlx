@@ -11,7 +11,7 @@ import urllib.error
 
 import pytest
 
-from gmlx import menubar as mb  # noqa: E402
+import gmlx.commands.menubar as mb  # noqa: E402
 
 
 class _Resp:
@@ -129,7 +129,7 @@ def test_menu_key_required_state():
 
 def test_menu_launchd_restart_not_stop():
     run = {"pid": None, "port": 9000, "managed_by": "launchd",
-           "label": "com.gmlx.server.x", "log": "/tmp/l.log"}
+           "label": "com.gmlx.serve.server.x", "log": "/tmp/l.log"}
     m = mb.build_menu_model(_snap(url="http://127.0.0.1:9000"), run)
     assert m["can_stop"] is False           # launchd: stop is `service uninstall`
     assert m["can_restart"] is True         # but a kickstart restart is offered
@@ -166,7 +166,7 @@ def test_cmd_menubar_without_rumps(monkeypatch, capsys):
             raise ImportError("no rumps")
         return real_import(name, *a, **k)
 
-    from gmlx import lifecycle as lc
+    import gmlx.serve.lifecycle as lc
     monkeypatch.setattr(lc, "auto_target", lambda h, p: ("127.0.0.1", 8080))
     monkeypatch.setattr(lc, "write_menubar_run", lambda *a, **k: None)
     monkeypatch.setattr(builtins, "__import__", _no_rumps)
@@ -181,7 +181,7 @@ def test_cmd_menubar_foreground_guard_discounts_own_pid(monkeypatch, capsys):
     without the exemption every spawned bar refused its own record and died
     (`serve` and `launch menubar` printed success but no bar appeared)."""
     pytest.importorskip("rumps")
-    from gmlx import lifecycle as lc
+    import gmlx.serve.lifecycle as lc
     seen = {}
 
     def fake_alive(*, ignore_pid=None):
@@ -198,7 +198,7 @@ def test_cmd_menubar_foreground_guard_discounts_own_pid(monkeypatch, capsys):
 # default (no --foreground) detaches via the lifecycle helper - no rumps import here
 def test_cmd_menubar_background_delegates(monkeypatch, capsys):
     seen = {}
-    from gmlx import lifecycle as lc
+    import gmlx.serve.lifecycle as lc
     monkeypatch.setattr(lc, "gui_session_available", lambda: True)
     monkeypatch.setattr(lc, "start_menubar",
                         lambda extra=None: seen.update(extra=extra) or 0)
@@ -213,7 +213,7 @@ def test_cmd_menubar_background_delegates(monkeypatch, capsys):
 def test_cmd_menubar_background_explicit_url_pins(monkeypatch, capsys):
     """An explicit --url pins the bar to that server (passed through, and printed)."""
     seen = {}
-    from gmlx import lifecycle as lc
+    import gmlx.serve.lifecycle as lc
     monkeypatch.setattr(lc, "gui_session_available", lambda: True)
     monkeypatch.setattr(lc, "start_menubar",
                         lambda extra=None: seen.update(extra=extra) or 0)
@@ -224,7 +224,7 @@ def test_cmd_menubar_background_explicit_url_pins(monkeypatch, capsys):
 
 
 def test_cmd_menubar_background_needs_gui(monkeypatch, capsys):
-    from gmlx import lifecycle as lc
+    import gmlx.serve.lifecycle as lc
     monkeypatch.setattr(lc, "gui_session_available", lambda: False)
     monkeypatch.setattr(lc, "auto_target", lambda h, p: ("127.0.0.1", 8080))
     rc = mb.cmd_menubar([])
@@ -415,7 +415,7 @@ def test_no_talk_flags_covers_merged_settings():
     menu bar resolves purely from YAML."""
     from gmlx.config import TalkCfg
     flags = mb._no_talk_flags()
-    s = __import__("gmlx.talk", fromlist=["_merged_settings"])._merged_settings(
+    s = __import__("gmlx.talk.main", fromlist=["_merged_settings"])._merged_settings(
         flags, TalkCfg())
     assert s["mode"] == "wake" and s["wake_word"] == "hey assistant"
     assert s["chime"] is True                      # no_chime=False keeps chime
@@ -569,7 +569,7 @@ def test_log_merger_missing_file_is_silent(tmp_path):
 
 # tap-to-talk hotkey: persisted settings + menu model
 def test_menubar_settings_roundtrip(tmp_path, monkeypatch):
-    from gmlx import lifecycle
+    import gmlx.serve.lifecycle as lifecycle
     monkeypatch.setattr(lifecycle, "runtime_dir", lambda: tmp_path)
     assert mb.load_menubar_settings() == {"hotkey": "off", "autostart": None,
                                           "volume": 1.0}
@@ -579,7 +579,7 @@ def test_menubar_settings_roundtrip(tmp_path, monkeypatch):
 
 
 def test_menubar_settings_tolerate_garbage(tmp_path, monkeypatch):
-    from gmlx import lifecycle
+    import gmlx.serve.lifecycle as lifecycle
     monkeypatch.setattr(lifecycle, "runtime_dir", lambda: tmp_path)
     (tmp_path / "menubar-settings.json").write_text("{not json")
     assert mb.load_menubar_settings()["hotkey"] == "off"
@@ -630,7 +630,7 @@ def test_down_message_crash_vs_hang():
 
 
 def test_menubar_settings_autostart_roundtrip(tmp_path, monkeypatch):
-    from gmlx import lifecycle
+    import gmlx.serve.lifecycle as lifecycle
     monkeypatch.setattr(lifecycle, "runtime_dir", lambda: tmp_path)
     assert mb.load_menubar_settings()["autostart"] is None
     rec = {"argv": ["/stub", "-m", "gmlx", "serve", "--foreground"],
@@ -647,7 +647,8 @@ def test_menubar_settings_autostart_roundtrip(tmp_path, monkeypatch):
 
 
 def _seed_autostart(tmp_path, monkeypatch, launched, *, boot="1234"):
-    from gmlx import lifecycle, procname
+    import gmlx.serve.lifecycle as lifecycle
+    import gmlx.serve.procname as procname
     monkeypatch.setattr(lifecycle, "runtime_dir", lambda: tmp_path)
     monkeypatch.setattr(lifecycle, "boot_time", lambda: boot)
     monkeypatch.setattr(lifecycle, "read_run", lambda h, p: None)
@@ -663,7 +664,7 @@ def _seed_autostart(tmp_path, monkeypatch, launched, *, boot="1234"):
 def test_autostart_runs_once_per_boot(tmp_path, monkeypatch):
     """The boot stamp is the don't-fight-the-user rule: a KeepAlive respawn
     of the menu bar mid-session must not resurrect a stopped server."""
-    from gmlx import lifecycle
+    import gmlx.serve.lifecycle as lifecycle
     launched = []
     _seed_autostart(tmp_path, monkeypatch, launched)
     mb._autostart_server_once()
@@ -680,7 +681,7 @@ def test_autostart_runs_once_per_boot(tmp_path, monkeypatch):
 
 
 def test_autostart_skips_running_server_and_empty_record(tmp_path, monkeypatch):
-    from gmlx import lifecycle
+    import gmlx.serve.lifecycle as lifecycle
     launched = []
     _seed_autostart(tmp_path, monkeypatch, launched)
     monkeypatch.setattr(lifecycle, "read_run",

@@ -32,7 +32,7 @@ from typing import Any, List, Optional
 
 import mlx.core as mx
 
-from . import muse_glimmer_model as mg
+from . import model as mg
 
 
 @dataclass

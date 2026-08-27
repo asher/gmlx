@@ -15,7 +15,7 @@ computable per-entry facts (entry_facts), and every cache-served answer
 must retrieve the cold-proven probe facts or match the cold answer
 byte-for-byte. Reuse floors come from the ckpt cursor's own schedule
 arithmetic (the expected_* helpers mirror _ckpt_cursor_init and
-_ckpt_turn_boundaries in gmlx/spec_engine.py): an identical resend must
+_ckpt_turn_boundaries in gmlx/spec/engine.py): an identical resend must
 adopt the N-1 replay boundary, turns the render-stable grid floor, a
 divergent suffix the interval grid floor. The content field must stay
 markup-free everywhere.
@@ -118,7 +118,7 @@ from run_apc_disk_e2e import (  # noqa: E402
     wait_disk_drained,
 )
 
-# Mirrors of the ckpt cursor's schedule arithmetic (gmlx/spec_engine.py):
+# Mirrors of the ckpt cursor's schedule arithmetic (gmlx/spec/engine.py):
 # boundaries sit on unit = lcm(prefill_step 2048, block 16); interval
 # points land every GMLX_APC_CKPT_INTERVAL (default 4096) snapped to that
 # grid; the replay boundary is N-1; turn boundaries are the unit-grid

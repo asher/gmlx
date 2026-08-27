@@ -5,7 +5,7 @@ import mlx.core as mx
 import pytest
 from mlx_vlm.models.cache import RotatingKVCache
 
-from gmlx.cache_snapshot import (
+from gmlx.cache.snapshot import (
     rotating_canonical_window,
     rotating_geometry,
     rotating_invariant,

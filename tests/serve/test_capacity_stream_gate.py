@@ -7,7 +7,7 @@ DSv4 GGUF regression: refused on full size after the gate shipped)."""
 
 import numpy as np
 
-from gmlx.capacity import preload_gate_bytes, streamed_expert_bytes
+from gmlx.serve.capacity import preload_gate_bytes, streamed_expert_bytes
 
 
 def _mint_moe(path):

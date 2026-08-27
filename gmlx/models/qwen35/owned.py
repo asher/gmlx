@@ -46,11 +46,11 @@ from mlx_vlm.models.base import create_attention_mask
 from mlx_vlm.models.cache import ArraysCache, KVCache
 from mlx_vlm.models.qwen3_5 import language as _L
 
-from .dflash_drafter import DFlashCaptureHooks
+from gmlx.spec.dflash_drafter import DFlashCaptureHooks
 from mlx_vlm.models.qwen3_5.config import ModelConfig as _Q35ModelConfig
 from mlx_vlm.models.qwen3_5.config import TextConfig as _Q35TextConfig
 
-from .qwen35_rope import fused_rope_active, rope_cos_sin
+from .rope import fused_rope_active, rope_cos_sin
 
 _OWNED_CALLS = 0
 
@@ -288,7 +288,7 @@ def _batched_padded_prefill(self, inputs, h, cache, position_ids):
         for i, cache_entry in enumerate(current_cache):
             row_caches[i].append(cache_entry)
 
-    from .cascade_sdpa import carry_stamp
+    from gmlx.upstream.cascade_sdpa import carry_stamp
 
     for i, entries in enumerate(row_caches):
         if cache[i] is None:
@@ -398,7 +398,7 @@ class OwnedQwen3_5Model(_L.Qwen3_5Model):
     __call__ = _owned_model_call
 
     def __init__(self, args: _Q35TextConfig):
-        from .qwen35_layers import OwnedQwen3_5DecoderLayer
+        from .layers import OwnedQwen3_5DecoderLayer
 
         nn.Module.__init__(self)
         self.args = args
@@ -437,7 +437,7 @@ class OwnedQwen3_5LanguageModel(DFlashCaptureHooks, _L.LanguageModel):
 def _moe_classes():
     from mlx_vlm.models.qwen3_5_moe import language as _ML
 
-    from .qwen35_layers import moe_layer_classes
+    from .layers import moe_layer_classes
 
     _, OwnedQwen3_5MoeDecoderLayer = moe_layer_classes()
 

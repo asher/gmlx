@@ -58,7 +58,7 @@ def import_mlx_whisper():
     try:
         import mlx_whisper
     except ImportError as exc:
-        from .extras import install_hint
+        from gmlx.commands.extras import install_hint
         raise ImportError(
             "speech-to-text requires the optional stt extra:\n"
             f"    {install_hint('stt')}\n"

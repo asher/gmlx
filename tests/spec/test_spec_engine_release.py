@@ -18,7 +18,7 @@ import pytest
 
 import mlx.core as mx
 
-from gmlx.spec_engine import (
+from gmlx.spec.engine import (
     _OWNED_MTP_ROUND_FLAG,
     _RELEASED_FLAG,
     install_continuous_batch_admission,
@@ -188,7 +188,7 @@ def test_owned_round_wrapper_frame_pins_nothing(monkeypatch):
     # its argument bindings must not re-pin what the inner loop released.
     from mlx_vlm.generate import ar
     from mlx_vlm.server import generation as gen_mod
-    from gmlx import speculative as spec
+    import gmlx.spec.speculative as spec
 
     def fake_inner(model, drafter, prompt_cache, hidden, **kw):
         del model, drafter, prompt_cache, hidden, kw  # inner pins nothing

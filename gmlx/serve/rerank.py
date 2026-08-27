@@ -11,7 +11,7 @@ The model is a **Qwen3-Reranker GGUF** - a Qwen3 causal LM fine-tuned to answer
 "yes"/"no" to whether a document satisfies a query. The relevance score is the
 probability it assigns "yes" over "no" at the final position (a softmax over the
 two token logits, i.e. ``sigmoid(yes - no)``) - the model's native mechanism. So
-the runtime loads it like any decoder GGUF (:func:`gmlx.loader.load_model`);
+the runtime loads it like any decoder GGUF (:func:`gmlx.load.loader.load_model`);
 there is no classifier head and no extra package. (BGE/Jina BERT cross-encoders,
 which llama.cpp reranks via a ``cls.output.weight`` head, are not mlx-lm arches
 and are out of scope here.)
@@ -120,7 +120,7 @@ def resolve_rerank_model(value, model_dirs=()) -> str:
     reached via an alias - resolves from the local HF cache (never the network);
     a relative path is searched under ``model_dirs``, same as a ``models:``
     entry. Anything else raises a :class:`~gmlx.config.ConfigError`."""
-    from .config import ConfigError, resolve_path
+    from gmlx.config import ConfigError, resolve_path
     if value is True:
         value = DEFAULT_RERANK_ALIAS
     v = str(value).strip()

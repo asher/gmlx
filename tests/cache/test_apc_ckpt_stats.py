@@ -15,8 +15,8 @@ import mlx.core as mx
 import pytest
 from mlx_vlm.apc import APCManager, DiskBlockStore
 
-from gmlx.apc_manager import GmlxAPCManager
-from gmlx.cache_snapshot import (
+from gmlx.cache.apc_manager import GmlxAPCManager
+from gmlx.cache.snapshot import (
     ckpt_lookup,
     ckpt_note_armed,
     ckpt_store,
@@ -149,7 +149,7 @@ def test_clear_drops_records_and_counters():
 
 
 def test_mode_none_warns_once_with_class_names(monkeypatch, caplog):
-    import gmlx.spec_engine as se
+    import gmlx.spec.engine as se
 
     se._bind_l1_view()
     monkeypatch.setattr(se, "_SPEC_APC_DISABLED", False)
@@ -163,7 +163,7 @@ def test_mode_none_warns_once_with_class_names(monkeypatch, caplog):
 
     model = _Model()
     model._kq_apc_manager = APCManager(num_blocks=4, block_size=16)
-    with caplog.at_level(logging.WARNING, logger="gmlx.spec_engine"):
+    with caplog.at_level(logging.WARNING, logger="gmlx.spec.engine"):
         assert se._resolve_l1(model) == (None, None)
         assert se._resolve_l1(model) == (None, None)
     warns = [r for r in caplog.records if "APC OFF" in r.getMessage()]
@@ -172,7 +172,7 @@ def test_mode_none_warns_once_with_class_names(monkeypatch, caplog):
 
 
 def test_ckpt_tier_log_once(monkeypatch, caplog):
-    import gmlx.spec_engine as se
+    import gmlx.spec.engine as se
     from test_ckpt_tier import ArraysCache
 
     monkeypatch.setattr(se, "_SPEC_APC_CKPT_DISABLED", False)
@@ -182,7 +182,7 @@ def test_ckpt_tier_log_once(monkeypatch, caplog):
             return [KVCache(), ArraysCache(size=2)]
 
     m = _Hybrid()
-    with caplog.at_level(logging.INFO, logger="gmlx.spec_engine"):
+    with caplog.at_level(logging.INFO, logger="gmlx.spec.engine"):
         assert se._ckpt_active(m, "exact") is True
         assert se._ckpt_active(m, "exact") is True
     logs = [r for r in caplog.records if "APC tier: ckpt" in r.getMessage()]
@@ -196,7 +196,7 @@ def _tripwire_records(caplog):
 def test_tripwire_fires_once_on_armed_without_stores(monkeypatch, caplog):
     monkeypatch.setenv("GMLX_APC_CKPT_TRIPWIRE", "3")
     man = APCManager(num_blocks=4, block_size=16)
-    with caplog.at_level(logging.WARNING, logger="gmlx.cache_snapshot"):
+    with caplog.at_level(logging.WARNING, logger="gmlx.cache.snapshot"):
         for _ in range(3):
             ckpt_note_armed(man)
         assert not _tripwire_records(caplog)
@@ -212,7 +212,7 @@ def test_tripwire_silent_when_stores_land(monkeypatch, caplog):
     man = APCManager(num_blocks=64, block_size=16)
     assert ckpt_store(man, _ids(32), make_hybrid_cache(32, seed=5),
                       extra_hash=0)
-    with caplog.at_level(logging.WARNING, logger="gmlx.cache_snapshot"):
+    with caplog.at_level(logging.WARNING, logger="gmlx.cache.snapshot"):
         for _ in range(10):
             ckpt_note_armed(man)
     assert not _tripwire_records(caplog)
@@ -224,7 +224,7 @@ def test_tripwire_fires_once_on_missed_adoptions(monkeypatch, caplog):
     p = 32
     assert ckpt_store(man, _ids(p), make_hybrid_cache(p, seed=6),
                       extra_hash=0)
-    with caplog.at_level(logging.WARNING, logger="gmlx.cache_snapshot"):
+    with caplog.at_level(logging.WARNING, logger="gmlx.cache.snapshot"):
         for _ in range(4):
             # Identical resend: the record prefixes the query but the
             # strict p-bound refuses it -- the bug-1 signature.
@@ -245,7 +245,7 @@ def test_tripwire_silent_on_unrelated_traffic(monkeypatch, caplog):
     man = APCManager(num_blocks=64, block_size=16)
     assert ckpt_store(man, _ids(32), make_hybrid_cache(32, seed=7),
                       extra_hash=0)
-    with caplog.at_level(logging.WARNING, logger="gmlx.cache_snapshot"):
+    with caplog.at_level(logging.WARNING, logger="gmlx.cache.snapshot"):
         for i in range(6):
             warm, got = ckpt_lookup(man, _ids(40, base=5000 * (i + 1)),
                                     extra_hash=0)

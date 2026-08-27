@@ -126,7 +126,7 @@ def _summary(name: str, base_url: str, models: list,
 def _http_get_json(url: str, timeout: float = 5.0, headers: dict | None = None):
     """GET ``url`` and parse JSON (lifecycle.get_json). Seam: monkeypatched in
     tests so the probe is exercised without a live server."""
-    from .lifecycle import get_json
+    from gmlx.serve.lifecycle import get_json
 
     return get_json(url, timeout=timeout, headers=headers)
 
@@ -135,7 +135,7 @@ def _http_post_json(url: str, body: dict, *, api_key: str | None = None,
                     timeout: float = 3.0):
     """POST ``body`` as JSON and parse the reply (lifecycle.post_json). Seam:
     monkeypatched in tests."""
-    from .lifecycle import post_json
+    from gmlx.serve.lifecycle import post_json
 
     return post_json(url, body, api_key=api_key, timeout=timeout)
 
@@ -179,7 +179,7 @@ def _keep_model(a) -> None:
 
 def _server_root(base_url: str) -> str:
     """The server root for ``/health`` (strip a trailing ``/v1``)."""
-    from .lifecycle import server_root
+    from gmlx.serve.lifecycle import server_root
 
     return server_root(base_url)
 
@@ -1012,7 +1012,7 @@ def _discover_config():
     """The first existing default-location config, loaded. Returns ``(cfg, cfg_path)``:
     ``(None, None)`` if none exists; ``(None, path)`` if it exists but won't load
     (malformed != absent)."""
-    from . import config
+    import gmlx.config as config
     for p in config.default_config_paths():
         if p.exists():
             cfg_path = str(p)
@@ -1025,7 +1025,7 @@ def _discover_config():
 
 def _human_size(n: int | None) -> str | None:
     """A human byte-count string (e.g. ``16.8 GB``); ``None`` for falsy/unknown."""
-    from .lifecycle import human_gb
+    from gmlx.serve.lifecycle import human_gb
 
     return human_gb(n) if n else None
 
@@ -1033,7 +1033,7 @@ def _human_size(n: int | None) -> str | None:
 def _shard_siblings(path: str) -> list:
     """All existing shards of a ``*-00001-of-00003.gguf`` set if ``path`` is one;
     else ``[path]``. Size is cosmetic, so gaps are tolerated."""
-    from .preflight import shard_names
+    from gmlx.load.preflight import shard_names
     d, base = os.path.split(path)
     try:
         names = shard_names(base)
@@ -1069,7 +1069,7 @@ def _preload_descr(cfg):
     """``(preload_id, label)`` for the model the server preloads at startup (pin ->
     default -> sole model), label carrying a human size when the file is locatable;
     ``(None, None)`` when nothing preloads. Cosmetic - never raises."""
-    from .server import _preload_id
+    from gmlx.serve.server import _preload_id
     try:
         pid = _preload_id(cfg)
     except Exception:
@@ -1104,7 +1104,8 @@ def _autostart(*, base, host, port, api_key, cfg, cfg_path, start_timeout, confi
     lives (Ctrl-C bails, leaving it running). Returns ``(rc, ready, preload_id)`` - the
     caller execs the harness iff ``ready``."""
     import time
-    from . import lifecycle, spinner
+    import gmlx.serve.lifecycle as lifecycle
+    import gmlx.spinner as spinner
 
     preload_id, label = _preload_descr(cfg)
     spin_text = (f"starting server - loading {label}" if preload_id
@@ -1158,14 +1159,14 @@ def _ensure_server(a) -> int | None:
     """Start-if-down: resolve the endpoint onto ``a`` and, when nothing is reachable,
     auto-start a background server from a default-location config (or guide to `init`).
     Returns ``None`` to proceed to the harness, or an int exit code to return directly."""
-    from . import lifecycle
+    import gmlx.serve.lifecycle as lifecycle
 
     if a.base_url or a.host or a.port:
         url_host = url_port = None
         if a.base_url:
             # Harness clients (talk STT/TTS especially) expect the /v1 base;
             # accept a bare http://host:port like the default path builds.
-            from .talk_client import ensure_v1_base
+            from gmlx.talk.client import ensure_v1_base
             a.base_url = ensure_v1_base(a.base_url)
             # The URL's own bind, not 8080: harnesses derive their listen port
             # from a.port and would collide with the server otherwise.

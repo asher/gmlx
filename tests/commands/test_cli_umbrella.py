@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import pytest
 
-from gmlx import chat, cli, manage, server  # noqa: E402
+import gmlx.tui.chat as chat  # noqa: E402
+import gmlx.commands.cli as cli  # noqa: E402
+import gmlx.commands.manage as manage  # noqa: E402
+import gmlx.serve.server as server  # noqa: E402
 
 
 @pytest.fixture
@@ -145,7 +148,7 @@ def test_deleted_cwd_gives_actionable_error(tmp_path, monkeypatch, capsys):
     # a verb.
     import os
 
-    from gmlx import cli
+    import gmlx.commands.cli as cli
 
     def _gone():
         raise FileNotFoundError(2, "No such file or directory")
@@ -176,7 +179,7 @@ def test_run_help_all_is_complete(capsys):
 
 
 def test_chat_help_is_condensed(capsys):
-    from gmlx import chat
+    import gmlx.tui.chat as chat
     with pytest.raises(SystemExit):
         chat.cmd_chat(["--help"])
     out = capsys.readouterr().out
@@ -186,7 +189,7 @@ def test_chat_help_is_condensed(capsys):
 
 
 def test_chat_help_all_is_complete(capsys):
-    from gmlx import chat
+    import gmlx.tui.chat as chat
     with pytest.raises(SystemExit):
         chat.cmd_chat(["--help-all"])
     out = capsys.readouterr().out

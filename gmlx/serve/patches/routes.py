@@ -13,7 +13,7 @@ from fastapi import Request  # module-level so stringized annotations resolve
 from starlette.concurrency import run_in_threadpool
 
 from .. import capacity as _capacity
-from .. import server_bridge_vlm as serving
+import gmlx.serve.bridge_vlm as serving
 from ._common import (
     _PATCH_FLAG,
     _get_pool,
@@ -106,7 +106,7 @@ def _service_file_on_disk(value, model_dirs) -> bool:
     if not _emb._is_gguf_ref(value):
         return True
     try:
-        from ..config import resolve_path
+        from gmlx.config import resolve_path
         p = resolve_path(value, list(model_dirs))
         return bool(p) and os.path.exists(p)
     except Exception:
@@ -253,7 +253,7 @@ def install_runtime_snapshot_enrichment() -> None:
         try:
             import mlx.core as mx
 
-            from ..prefill_decay import headroom_bytes
+            from gmlx.gen.prefill_decay import headroom_bytes
 
             head = headroom_bytes()
             base["memory"] = {
@@ -270,7 +270,7 @@ def install_runtime_snapshot_enrichment() -> None:
         except Exception:
             pass
         try:
-            from ..fresh_gate import fresh_stats
+            from gmlx.cache.fresh_gate import fresh_stats
 
             base["freshness"] = fresh_stats()
         except Exception:
@@ -867,7 +867,7 @@ def _preload_extra_over_budget(model_id: str) -> bool:
     primary preload may be a streaming model. False when undeterminable (the
     warm itself then degrades best-effort)."""
     try:
-        from ..preflight import find_split_shards
+        from gmlx.load.preflight import find_split_shards
 
         path = serving.resolved_models()[model_id].path
         total = sum(os.path.getsize(p) for p in find_split_shards(path))

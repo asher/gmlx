@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""`gmlx.render`: block segmentation, lite styling/wrapping, and the
+"""`gmlx.tui.render`: block segmentation, lite styling/wrapping, and the
 in-place streaming repaint machinery. CPU-only - injected write/size/clock."""
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ import re
 
 import pytest
 
-from gmlx import render as rd
-from gmlx.theme import resolve_theme
+import gmlx.tui.render as rd
+from gmlx.tui.theme import resolve_theme
 
 _THEME = resolve_theme("dark", depth=1 << 24)
 _PLAIN = resolve_theme("dark", color=False)
@@ -317,7 +317,7 @@ def test_stream_rich_mode_smoke():
 def test_feed_strips_model_ansi_and_control_chars():
     # Model output is untrusted terminal input: ESC/OSC/C0 must not reach the
     # user's terminal through any render mode.
-    from gmlx.render import StreamRenderer
+    from gmlx.tui.render import StreamRenderer
     out = []
     r = StreamRenderer("plain", write=out.append)
     r.feed("hi \x1b[31mred\x1b]0;evil\x07\x00 there\rok\n")

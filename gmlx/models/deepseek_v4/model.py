@@ -47,9 +47,9 @@ from mlx_lm.models.mla import MultiLinear
 from mlx_lm.models.pipeline import PipelineMixin
 from mlx_lm.models.switch_layers import SwitchGLU
 
-from gmlx import prefill_decay as _prefill_decay
-from gmlx.deepseek_v4_cache import BatchPoolingCache, PoolingCache
-from gmlx.deepseek_v4_hyper_connection import (
+import gmlx.gen.prefill_decay as _prefill_decay
+from gmlx.models.deepseek_v4.cache import BatchPoolingCache, PoolingCache
+from gmlx.models.deepseek_v4.hyper_connection import (
     HyperConnection,
     HyperHead,
     hc_expand,
@@ -658,7 +658,7 @@ def warm_kernel_pipelines() -> int:
             out = fn()
             # Scratch survivors (warm-path probe tensors); the guard
             # drains so the next fire() is not the poisoning commit.
-            from .eval_guard import guard
+            from gmlx.eval_guard import guard
             guard.eval(*(out if isinstance(out, (tuple, list)) else (out,)),
                        site="dsa-warm-probe", owner="scratch")
             n += 1
@@ -2169,7 +2169,7 @@ class DeepseekV4Model(PipelineMixin, nn.Module):
         if cache is None:
             cache = [None] * len(self.pipeline_layers)
 
-        from .cache_compat import cache_types
+        from gmlx.cache.compat import cache_types
 
         cache_list_types = cache_types("CacheList")
         first_cache = cache[0]
@@ -2264,7 +2264,7 @@ class Model(nn.Module):
         # mlx-vlm serve its apc/batch machinery isinstance-gates on its own
         # (vendored since 0.6.4) classes; under the pure mlx-lm CLI, on
         # mlx-lm's.
-        from .cache_compat import construction_cache_module
+        from gmlx.cache.compat import construction_cache_module
 
         cmod = construction_cache_module()
         caches = []

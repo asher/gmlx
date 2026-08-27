@@ -13,7 +13,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from gmlx import config, discovery, extras, server, wizard
+from gmlx import config
+import gmlx.load.discovery as discovery
+import gmlx.commands.extras as extras
+import gmlx.serve.server as server
+import gmlx.commands.wizard as wizard
 from gmlx.config import ModelCfg
 
 yaml = pytest.importorskip("yaml")

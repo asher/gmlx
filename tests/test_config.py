@@ -1965,7 +1965,7 @@ def test_scalar_cache_disk_raises_config_error():
 def test_resolve_overlays_gguf_header_sampling(monkeypatch):
     """The GGUF's embedded general.sampling.* beats the family guess but loses
     to profiles/overrides."""
-    import gmlx.discovery as _disc
+    import gmlx.load.discovery as _disc
     monkeypatch.setattr(_disc, "header_sampling",
                         lambda p: {"temperature": 0.7, "top_p": 0.8})
     cfg = build_config({
@@ -1979,7 +1979,7 @@ def test_resolve_overlays_gguf_header_sampling(monkeypatch):
 
 
 def test_resolve_header_sampling_off_with_family_defaults(monkeypatch):
-    import gmlx.discovery as _disc
+    import gmlx.load.discovery as _disc
     monkeypatch.setattr(_disc, "header_sampling",
                         lambda p: {"temperature": 0.7})
     doc = {"server": {"family_defaults": False},

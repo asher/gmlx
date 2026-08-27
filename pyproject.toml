@@ -25,7 +25,7 @@ classifiers = [
 ]
 # mlx-kquant supplies the K-quant ops/kernels + the C++ GGUF wire-byte reader.
 # mlx-lm carries a floor only (a source/git install still satisfies it);
-# check_upstream_versions (gmlx.upstream_seams) enforces the same floor at
+# check_upstream_versions (gmlx.upstream.seams) enforces the same floor at
 # runtime and warns on versions newer than the qualified set - a stale venv
 # resolves these constraints only once, so the pip pin alone can't catch it.
 # mlx / mlx-lm / mlx-vlm move in lockstep with the exact mlx-vlm pin; bump them
@@ -38,9 +38,9 @@ dependencies = [
     "mlx",
     "numpy",
     # Exact pin: gmlx patches ~30 private mlx-vlm symbols (see
-    # gmlx/upstream_seams.py); point releases move them (0.6.4 vendored
+    # gmlx/upstream/seams.py); point releases move them (0.6.4 vendored
     # switch_layers and rewrote the cache module - see
-    # gmlx/cache_compat.py for the dual-origin cache-class rules).
+    # gmlx/cache/compat.py for the dual-origin cache-class rules).
     # 0.6.15 requires mlx>=0.32.0; mlx-kquant 0.4.0 (PyPI) carries the
     # matching mlx 0.32.1 pin; <0.5 guards the next kquant breaking change.
     "mlx-vlm==0.6.15",
@@ -141,13 +141,14 @@ Issues = "https://github.com/asher/gmlx/issues"
 
 [project.scripts]
 # `gmlx <verb>` (run / chat / serve / init / sync-models / ...) is the umbrella command.
-gmlx = "gmlx.cli:umbrella_main"
+gmlx = "gmlx.commands.cli:umbrella_main"
 
 [tool.setuptools.packages.find]
 include = ["gmlx*"]
 
 [tool.setuptools.package-data]
-gmlx = ["upstream_seams.json", "_vendor/misaki/LICENSE", "_vendor/misaki/data/*",
+"gmlx.upstream" = ["seams.json"]
+gmlx = ["_vendor/misaki/LICENSE", "_vendor/misaki/data/*",
             "_vendor/misaki/g2pkc/*.csv", "_vendor/misaki/g2pkc/*.txt"]
 
 [tool.pytest.ini_options]
@@ -163,8 +164,8 @@ extend-exclude = ["gmlx/_vendor"]
 
 [tool.ruff.lint.per-file-ignores]
 # Lambda assignment is idiomatic for the tests' one-line monkeypatch stubs.
-"tests/*" = ["E731"]
+"tests/**" = ["E731"]
 # Verbatim upstream copies (source-equality-tested); a noqa comment would
 # break the byte fidelity the equality tests certify.
-"gmlx/qwen35_verify_linear.py" = ["E741"]
-"gmlx/gemma4_owned.py" = ["E741"]
+"gmlx/models/qwen35/verify_linear.py" = ["E741"]
+"gmlx/models/gemma4/owned.py" = ["E741"]

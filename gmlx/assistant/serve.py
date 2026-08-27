@@ -2,7 +2,7 @@
 chat-completions.
 
 ``server.assistants`` exposes pseudo-model ids that run requests through
-:class:`~gmlx.assistant_brain.AssistantBrain` server-side, so thin
+:class:`~gmlx.assistant.brain.AssistantBrain` server-side, so thin
 clients (curl, Open WebUI, phone apps) get MCP tools with no client loop.
 Routing contract per request to ``/v1/chat/completions``:
 
@@ -51,8 +51,8 @@ import threading
 import time
 import uuid
 
-from .assistant_brain import AssistantBrain, ToolRegistry
-from .talk_client import TalkClientError, stream_chat
+from .brain import AssistantBrain, ToolRegistry
+from gmlx.talk.client import TalkClientError, stream_chat
 
 _ASSISTANT_FLAG = "_kq_gguf_assistant_serve"
 _MAX_CONCURRENT_TURNS = 4    # immediate 429 above this, per process
@@ -473,7 +473,7 @@ async def _assistant_completion(state, alias_id, alias, registry, request):
 # -- route wrappers ----------------------------------------------------------
 
 def _wrap_chat_routes(app, state) -> None:
-    from .server_patches._common import _CHAT_PATHS, _wrap_post_routes
+    from gmlx.serve.patches._common import _CHAT_PATHS, _wrap_post_routes
 
     def _make(original):
         async def endpoint(request, http_request):
@@ -495,7 +495,7 @@ def _wrap_chat_routes(app, state) -> None:
 
 
 def _wrap_models_routes(app, state) -> None:
-    from .server_patches._common import _find_route, _remove_routes
+    from gmlx.serve.patches._common import _find_route, _remove_routes
     for path in ("/models", "/v1/models"):
         route = _find_route(app, path, "GET")
         if route is None or getattr(route.endpoint, _ASSISTANT_FLAG, False):
@@ -525,7 +525,7 @@ def _wrap_foreign_routes(app, state) -> None:
     """Assistant ids are chat-completions only: 400 on the responses /
     anthropic surfaces (in each surface's own error shape). Reading the
     cached request body is safe - the original handler re-parses it."""
-    from .server_patches._common import _find_route, _remove_routes
+    from gmlx.serve.patches._common import _find_route, _remove_routes
     for path in _GUARDED_PATHS:
         route = _find_route(app, path, "POST")
         if route is None or getattr(route.endpoint, _ASSISTANT_FLAG, False):
@@ -567,7 +567,7 @@ def _wrap_foreign_routes(app, state) -> None:
 # -- startup -----------------------------------------------------------------
 
 def _build_state(cfg) -> _AssistantState:
-    from .talk_mcp import connect_servers
+    from .mcp import connect_servers
     state = _AssistantState(cfg, _self_base_url(cfg))
     aliases = cfg.assistants
 
@@ -613,7 +613,7 @@ def _open_memory(state: _AssistantState, alias_id: str, alias):
     No hard dependency on cfg.embeddings: the store embeds via the server's
     own /v1/embeddings at runtime and self-disables if that 404s - the unset
     config is only an early liveness warning."""
-    from .talk_memory import MemoryStore, default_memory_path, make_extractor
+    from .memory import MemoryStore, default_memory_path, make_extractor
     if not getattr(state.cfg, "embeddings", None):
         print(f"[server] assistant '{alias_id}': memory will be inert - "
               "/v1/embeddings is not served (set server.embeddings)",

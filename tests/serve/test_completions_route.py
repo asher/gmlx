@@ -12,7 +12,7 @@ import pytest
 
 pytest.importorskip("mlx_vlm")
 
-from gmlx import server_patches as sp  # noqa: E402
+import gmlx.serve.patches as sp  # noqa: E402
 
 _APP = importlib.import_module("mlx_vlm.server.app")
 _GEN = importlib.import_module("mlx_vlm.server.generation")
@@ -59,7 +59,7 @@ class _FakeRG:
 
 @pytest.fixture(autouse=True)
 def _restore():
-    from gmlx.server_patches import _common as sp_common
+    from gmlx.serve.patches import _common as sp_common
     saved_routes = sp_common._snapshot_routes(_APP.app)
     saved_gcm = _APP.get_cached_model
     saved_rg = _RUNTIME.response_generator
@@ -224,7 +224,7 @@ def test_ignored_fields_warn_on_completions(caplog):
 
     client, _ = _client()
     with caplog.at_level(logging.WARNING,
-                         logger="gmlx.server_patches.api_contract"):
+                         logger="gmlx.serve.patches.api_contract"):
         r = client.post("/v1/completions", json={
             "model": "m", "prompt": "p", "logprobs": 3, "user": "u"})
     assert r.status_code == 200

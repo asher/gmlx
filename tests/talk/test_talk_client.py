@@ -7,8 +7,8 @@ import json
 import numpy as np
 import pytest
 
-from gmlx import talk_client as tc
-from gmlx.talk_client import (
+import gmlx.talk.client as tc
+from gmlx.talk.client import (
     SentenceChunker,
     ServerChatBrain,
     TalkClientError,

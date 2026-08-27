@@ -42,8 +42,8 @@ import time
 
 import numpy as np
 
-from . import talk_client
-from .talk_client import TalkClientError
+import gmlx.talk.client as talk_client
+from gmlx.talk.client import TalkClientError
 
 # Similarity floor for injection: below this a memory is unrelated noise and
 # saying nothing beats saying something irrelevant.
@@ -87,7 +87,7 @@ def make_extractor(base_url: str, model: str, *,
     completion per remembered exchange, run on the store's background thread.
     Returns ``extract(user_text, answer) -> [fact, ...]``."""
     def extract(user_text: str, answer: str) -> list:
-        from .reasoning import ReasoningFilter
+        from gmlx.tui.reasoning import ReasoningFilter
 
         prompt = (f"user: {user_text}\n"
                   f"assistant: {answer[:_ANSWER_SNIPPET_CHARS]}")

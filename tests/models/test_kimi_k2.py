@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import pytest
 
-from gmlx import profiles
-from gmlx.thinking_budget import prompt_opens_thinking
+import gmlx.gen.profiles as profiles
+from gmlx.gen.thinking_budget import prompt_opens_thinking
 
 # The generation prompt the K2.x template renders for a single user turn.
 KIMI_GEN_PROMPT = (

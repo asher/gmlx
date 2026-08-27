@@ -4,7 +4,7 @@
 This is the one tier that drives the *real* program in a *real* pseudo-terminal -
 the only way to exercise what only exists under a tty: prompt_toolkit's live editing
 session, the streaming reply, and the termios Esc-cancel. The faster, deterministic
-loop + session coverage lives in ``tests/test_chat_e2e.py`` (CPU, no tty, no model);
+loop + session coverage lives in ``tests/tui/test_chat_e2e.py`` (CPU, no tty, no model);
 this fills the integration gap those mocks can't reach.
 
 It spawns ``gmlx chat <gguf>`` over a pty (stdlib :mod:`pty`, no ``pexpect``) and
@@ -43,7 +43,7 @@ it directly with the project interpreter::
     python tests/e2e/run_chat_pty_e2e.py --print-pull    # how to fetch the model
 
 A missing model (or missing console script) is a **SKIP** (exit 0), never a failure.
-Also collected by pytest as ``tests/test_chat_pty.py`` when ``KQUANT_TEST_GGUF_DIR``
+Also collected by pytest as ``tests/tui/test_chat_pty.py`` when ``KQUANT_TEST_GGUF_DIR``
 is set (the shared integration-test gate).
 """
 from __future__ import annotations

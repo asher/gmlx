@@ -8,7 +8,7 @@ from __future__ import annotations
 import mlx.core as mx
 import pytest
 
-from gmlx.loader import _own, _RemapDict
+from gmlx.load.loader import _own, _RemapDict
 
 
 def test_own_bf16_copies_via_f32():
@@ -39,8 +39,8 @@ def test_remap_result_allows_native_fp_repack():
     # a phantom "remap collision".
     import numpy as np
 
-    from gmlx.loader import remap_arrays
-    from gmlx.native_fp import repack_native_fp_weights
+    from gmlx.load.loader import remap_arrays
+    from gmlx.load.native_fp import repack_native_fp_weights
 
     raw = mx.array(np.zeros((4, 2 * 17), dtype=np.uint8))  # 2 mxfp4 blocks/row
     arrays = {

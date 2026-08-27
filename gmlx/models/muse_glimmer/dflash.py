@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import mlx.core as mx
 
-from . import muse_glimmer_model as mg
-from .dflash_drafter import DFlashConfig, DFlashDrafter
+from . import model as mg
+from gmlx.spec.dflash_drafter import DFlashConfig, DFlashDrafter
 
 __all__ = ["DFlashConfig", "MuseGlimmerDFlashDrafter"]
 

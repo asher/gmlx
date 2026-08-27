@@ -26,8 +26,13 @@ import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import discovery, embeddings, extras, rerank, stt, tts
-from .config import DiscoverSpec, ModelCfg
+import gmlx.load.discovery as discovery
+import gmlx.serve.embeddings as embeddings
+from . import extras
+import gmlx.serve.rerank as rerank
+import gmlx.serve.stt as stt
+import gmlx.serve.tts as tts
+from gmlx.config import DiscoverSpec, ModelCfg
 
 # Common places people keep a local GGUF folder; the first that already exists is
 # offered as the dir prompt's default. If none exist, ~/models is suggested anyway -
@@ -284,7 +289,7 @@ def _profiles_step(io: WizardIO, models: list) -> None:
     renders it. No prompt appears when no family has intents to pin."""
     if not models:
         return
-    from . import profiles as fam_profiles
+    import gmlx.gen.profiles as fam_profiles
     by_fam: dict = {}
     for mc in models:
         by_fam.setdefault(getattr(mc, "family", None) or "default", []).append(mc)
@@ -534,7 +539,7 @@ def _configure_talk(io: WizardIO, *, stt_model, tts_model,
             "from the menu bar).")
     # Options derive from the canonical tuple so the wizard can never write a
     # modifier the config loader rejects.
-    from .hotkey import PUSH_TO_TALK_MODIFIERS
+    from gmlx.talk.hotkey import PUSH_TO_TALK_MODIFIERS
     labels = {"globe": "Globe/fn - Apple keyboards",
               "right-command": "Right Command - for keyboards without a "
                                "Globe key",
