@@ -53,7 +53,7 @@ from __future__ import annotations
 
 import mlx.core as mx
 
-from .envflags import env_bool, env_int
+from gmlx.envflags import env_bool, env_int
 
 try:
     import mlx_kquant

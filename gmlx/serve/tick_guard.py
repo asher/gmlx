@@ -199,7 +199,7 @@ def _rebuild_row(gen, st: _TickState, uid) -> None:
 
 
 def _contain(gen, st: _TickState, e: RuntimeError) -> None:
-    from .eval_guard import drain_for
+    from gmlx.eval_guard import drain_for
 
     st.fail_streak += 1
     _log.warning("[tick-guard] engine tick memory error (streak %d): %s",

@@ -46,7 +46,7 @@ import logging
 import os
 from contextlib import contextmanager
 
-_log = logging.getLogger("gmlx.kvarn_serve")
+_log = logging.getLogger("gmlx.cache.kvarn_serve")
 
 _MAKE_CACHE_FLAG = "_gmlx_kvarn_make_cache"
 _APC_GATE_FLAG = "_gmlx_kvarn_apc_gate"

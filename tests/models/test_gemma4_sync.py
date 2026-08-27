@@ -14,7 +14,7 @@ import pytest
 pytest.importorskip("mlx_vlm.models.gemma4.language")
 from mlx_vlm.models.gemma4 import language as g4
 
-from gmlx import gemma4_sync
+import gmlx.models.gemma4.sync as gemma4_sync
 
 from test_forward_contract_pins import _g4_lm, _ids, PROMPT
 

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 
-from gmlx.menubar_config import ConfigDraft, validate_config_text
+from gmlx.commands.menubar_config import ConfigDraft, validate_config_text
 
 
 # validate_config_text

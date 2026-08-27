@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Live check of the capacity-facing surface against a real server.
 
-Launches ``gmlx.server`` on a tiny GGUF with a decode width of 2 and a
+Launches ``gmlx.serve.server`` on a tiny GGUF with a decode width of 2 and a
 queue cap of 3, fires six concurrent streams at it, and asserts what the
 new endpoints report while the batch is full and after it drains:
 

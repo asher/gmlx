@@ -273,7 +273,7 @@ def install_queue_depth_cap() -> None:
     if _cap() <= 0:
         return
     _install_census()
-    from .server_patches._common import _CHAT_PATHS, _wrap_post_routes
+    from gmlx.serve.patches._common import _CHAT_PATHS, _wrap_post_routes
 
     app = importlib.import_module("mlx_vlm.server.app").app
     paths = _CHAT_PATHS + ("/responses", "/v1/responses",

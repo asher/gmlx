@@ -6,7 +6,8 @@ path + merged sampling/template/load settings are overlaid onto the CLI args
 are pure."""
 from __future__ import annotations
 
-from gmlx import chat, cli
+import gmlx.tui.chat as chat
+import gmlx.commands.cli as cli
 
 
 def _config(tmp_path, *, body=None, model_path="m-Q4_K_M.gguf"):
@@ -197,7 +198,7 @@ def test_chat_draft_gguf_implies_speculative(tmp_path):
 def _seed(argv, monkeypatch, meta):
     """Parse run argv and apply split_path_intent + apply_family_defaults with
     a monkeypatched header read (no real GGUF needed)."""
-    import gmlx.discovery as disc
+    import gmlx.load.discovery as disc
     monkeypatch.setattr(disc, "header_meta", lambda p: meta)
     parser = cli._build_parser("gmlx run")
     args = parser.parse_args(argv)
@@ -298,7 +299,7 @@ def test_no_family_defaults_with_profile_errors(tmp_path, monkeypatch, capsys):
 def test_config_resolved_skips_family_seeding(tmp_path, monkeypatch):
     f = tmp_path / "g.gguf"
     f.write_bytes(b"x")
-    import gmlx.discovery as disc
+    import gmlx.load.discovery as disc
     monkeypatch.setattr(disc, "header_meta", lambda p: _GEMMA)
     parser = cli._build_parser("gmlx run")
     args = parser.parse_args([str(f)])

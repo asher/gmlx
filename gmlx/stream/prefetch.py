@@ -54,8 +54,8 @@ def expert_offset_map(
     slice at index ``e``; 0 when the tensor is not a recognizable 3-dim
     stack (callers must then skip per-expert slicing). ``kind`` is the
     projection name from the tensor: "gate", "up", "down" or "gate_up"."""
-    from .headerscan import scan_gguf
-    from .preflight import find_split_shards
+    from gmlx.load.headerscan import scan_gguf
+    from gmlx.load.preflight import find_split_shards
 
     out: dict[int, list[tuple[str, int, int, int, str]]] = {}
     for path in find_split_shards(gguf_path):

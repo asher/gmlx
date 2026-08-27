@@ -41,7 +41,7 @@ from mlx_kquant.nn import (
 
 from .native_fp import NATIVE_FP_CODECS, NATIVE_FP_GEOMETRY
 from .dtypes import activation_dtype
-from .envflags import env_int
+from gmlx.envflags import env_int
 from .transforms import qk_permute_wire
 
 _SWITCH_TYPES = None
@@ -388,7 +388,7 @@ def _eligible_gptoss_mlp(m, caps):
     the down gather (kq.gather_qmv_mix_bias) and the top-k/softmax epilogue
     into kq.moe_router_topk; gate/up ride kq.moe_glu_gather as in the plain
     SwitchGLU swap. Already-swapped instances fail the module check (the
-    fused subclass lives in gmlx.modules)."""
+    fused subclass lives in gmlx.load.modules)."""
     if not caps.has_mix_bias or not caps.router_ok:
         return False
     if type(m).__name__ != "MLPBlock" or "gpt_oss" not in type(m).__module__:
@@ -744,7 +744,7 @@ def _make_fused_block(base_cls, caps):
                 if expert_ctl:
                     # Stock forward with the fan-out hook at the selection
                     # seam (the eligibility check asserted this shape).
-                    from .moe_experts import qwen3_next_moe_forward
+                    from gmlx.stream.moe_experts import qwen3_next_moe_forward
 
                     return qwen3_next_moe_forward(self, x)
                 return super().__call__(x)
@@ -775,7 +775,7 @@ def _make_fused_block(base_cls, caps):
             if expert_ctl:
                 # Adaptive fan-out on the routed slots only; the trailing
                 # shared-gate mix weight rides along untouched.
-                from .moe_experts import _apply_expert_controls
+                from gmlx.stream.moe_experts import _apply_expert_controls
 
                 k = self.top_k
                 inds, routed = _apply_expert_controls(

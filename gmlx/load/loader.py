@@ -28,26 +28,26 @@ import mlx_kquant as kq
 
 from . import loadlog
 from .dtypes import activation_dtype, activation_dtype_name
-from .envflags import env_bool, env_choice, env_float, env_int
-from .attn_hd512 import install_hd512_sdpa
-from .prefill_decay import (
+from gmlx.envflags import env_bool, env_choice, env_float, env_int
+from gmlx.upstream.attn_hd512 import install_hd512_sdpa
+from gmlx.gen.prefill_decay import (
     deduct_untracked_weights,
     install_prefill_decay,
     note_untracked_weights,
 )
-from . import gpt_oss_prefill  # noqa: F401  (registers gpt_oss score profile)
+import gmlx.upstream.gpt_oss_prefill as gpt_oss_prefill  # noqa: F401  (registers gpt_oss score profile)
 from .modules import install_fused_moe_glu, install_hyv3_shexp_fold
-from .occupancy_fuse import install_occupancy_fuse
-from .qkv_fuse import install_fused_qkv
-from .gemma4_batched_sdpa import install_gemma4_batched_sdpa
-from .cascade_sdpa import install_cascade_sdpa, install_cascade_stamp
-from .sparse_sdpa import install_sparse_sdpa
-from .arrays_cache_fix import install_arrays_cache_fix
-from .gemma4_sync import install_gemma4_nosync
-from .softcap_f32 import install_gemma4_softcap_f32
-from .quantized_sdpa_fix import install_quantized_sdpa_mask_fix
-from .rope_batch_fix import install_rope_batch_fix
-from .rotating_cache_fix import install_rotating_cache_fix
+from gmlx.upstream.occupancy_fuse import install_occupancy_fuse
+from gmlx.upstream.qkv_fuse import install_fused_qkv
+from gmlx.models.gemma4.batched_sdpa import install_gemma4_batched_sdpa
+from gmlx.upstream.cascade_sdpa import install_cascade_sdpa, install_cascade_stamp
+from gmlx.upstream.sparse_sdpa import install_sparse_sdpa
+from gmlx.upstream.arrays_cache_fix import install_arrays_cache_fix
+from gmlx.models.gemma4.sync import install_gemma4_nosync
+from gmlx.upstream.softcap_f32 import install_gemma4_softcap_f32
+from gmlx.upstream.quantized_sdpa_fix import install_quantized_sdpa_mask_fix
+from gmlx.upstream.rope_batch_fix import install_rope_batch_fix
+from gmlx.upstream.rotating_cache_fix import install_rotating_cache_fix
 from .modules import (
     KQuantEmbedding,
     dequantize_unattachable_leaves,
@@ -59,7 +59,7 @@ from .populate import (
     wait_for as wait_for_populate,
 )
 from .preflight import find_split_shards, preflight
-from .dsv32_patches import (
+from gmlx.upstream.dsv32_patches import (
     _patch_dsv32_dense_default,
     _patch_dsv32_indexer_fp32,
     _patch_dsv32_indexer_rope,
@@ -67,7 +67,7 @@ from .dsv32_patches import (
     _patch_dsv32_moe_gate_fp32,
     _patch_dsv32_moe_scores,
 )
-from .gdn_patches import (
+from gmlx.upstream.gdn_patches import (
     _needs_tiled_v_patch,
     _patch_gated_delta_fused_decode,
     _patch_gated_delta_tiled_v,
@@ -712,7 +712,7 @@ def _mtp_target_classes(model_type: str):
         # the stock class wholesale.
         language_model_cls = lang.LanguageModel
         if env_bool("GMLX_QWEN_OWNED", True):
-            from . import qwen35_owned
+            import gmlx.models.qwen35.owned as qwen35_owned
 
             language_model_cls = qwen35_owned.language_model_class(sub)
 
@@ -740,7 +740,7 @@ def _mtp_target_classes(model_type: str):
         # patch regime still installs and covers it).
         language_model_cls = lang.LanguageModel
         if env_bool("GMLX_GEMMA_OWNED", True):
-            from . import gemma4_owned
+            import gmlx.models.gemma4.owned as gemma4_owned
 
             language_model_cls = gemma4_owned.OwnedGemma4LanguageModel
 
@@ -751,8 +751,8 @@ def _mtp_target_classes(model_type: str):
     if model_type == "deepseek_v4":
         # Vendored mlx-lm-class target (no mlx-vlm counterpart): the SpecLM
         # subclass carries the speculative_* hooks + rotating-undo arming.
-        from . import deepseek_v4_mtp
-        from .deepseek_v4_model import ModelArgs, ensure_registered
+        import gmlx.models.deepseek_v4.mtp as deepseek_v4_mtp
+        from gmlx.models.deepseek_v4.model import ModelArgs, ensure_registered
 
         ensure_registered()
 
@@ -761,8 +761,9 @@ def _mtp_target_classes(model_type: str):
 
         return deepseek_v4_mtp.DeepseekV4SpecLM, build
     if model_type == "hy_v3":
-        from . import hy_v3_mtp, hy_v3_tools
-        from .hy_v3_model import ModelArgs, ensure_registered
+        import gmlx.models.hy_v3.mtp as hy_v3_mtp
+        import gmlx.models.hy_v3.tools as hy_v3_tools
+        from gmlx.models.hy_v3.model import ModelArgs, ensure_registered
 
         ensure_registered()
         hy_v3_tools.ensure_registered()
@@ -772,8 +773,8 @@ def _mtp_target_classes(model_type: str):
 
         return hy_v3_mtp.HyV3SpecLM, build
     if model_type == "qwen4_exp":
-        from . import qwen4_exp_mtp
-        from .qwen4_exp_model import ModelArgs, ensure_registered
+        import gmlx.models.qwen4_exp.mtp as qwen4_exp_mtp
+        from gmlx.models.qwen4_exp.model import ModelArgs, ensure_registered
 
         ensure_registered()
 
@@ -782,8 +783,9 @@ def _mtp_target_classes(model_type: str):
 
         return qwen4_exp_mtp.Qwen4ExpSpecLM, build
     if model_type == "muse_glimmer":
-        from . import muse_glimmer_mtp, muse_glimmer_tools
-        from .muse_glimmer_model import ModelArgs, ensure_registered
+        import gmlx.models.muse_glimmer.mtp as muse_glimmer_mtp
+        import gmlx.models.muse_glimmer.tools as muse_glimmer_tools
+        from gmlx.models.muse_glimmer.model import ModelArgs, ensure_registered
 
         ensure_registered()
         muse_glimmer_tools.ensure_registered()
@@ -924,35 +926,36 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         # mlx-lm ships no minimax_m3 module yet (PR #1401 unmerged); register
         # the vendored copy into the mlx_lm.models namespace so _get_classes
         # (and every other importer) resolves it. Upstream wins if present.
-        from . import minimax_m3_model
+        import gmlx.models.minimax_m3 as minimax_m3_model
 
         minimax_m3_model.ensure_registered()
     if mt == "deepseek_v4":
         # mlx-lm ships no deepseek_v4 module yet (PR #1192 unmerged); same
         # vendored-registration pattern as minimax_m3, plus PoolingCache
         # injection into mlx_lm.models.cache.
-        from . import deepseek_v4_model
+        import gmlx.models.deepseek_v4.model as deepseek_v4_model
 
         deepseek_v4_model.ensure_registered()
     if mt == "hy_v3":
         # mlx-lm ships no hy_v3 module yet (PR #1485 unmerged); same vendored-
         # registration pattern as minimax_m3. The tool parser registers with
         # the model so a later serve template-inference resolves it.
-        from . import hy_v3_model, hy_v3_tools
+        import gmlx.models.hy_v3.model as hy_v3_model
+        import gmlx.models.hy_v3.tools as hy_v3_tools
 
         hy_v3_model.ensure_registered()
         hy_v3_tools.ensure_registered()
     if mt == "kimi_k3":
         # mlx-lm ships no kimi_k3 module (llama.cpp PR #26185 arch); same
         # vendored-registration pattern as minimax_m3.
-        from . import kimi_k3_model
+        import gmlx.models.kimi_k3 as kimi_k3_model
 
         kimi_k3_model.ensure_registered()
     if mt == "qwen4_exp":
         # Neither pinned mlx-lm nor mlx-vlm ships qwen4_exp (llama.cpp PR
         # #27742); same vendored-registration pattern as deepseek_v4, plus
         # QSAKVCache injection into the cache modules.
-        from . import qwen4_exp_model
+        import gmlx.models.qwen4_exp.model as qwen4_exp_model
 
         qwen4_exp_model.ensure_registered()
     if mt == "muse_glimmer":
@@ -960,7 +963,8 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         # same vendored-registration pattern as kimi_k3. The tool parser
         # registers with the model so a later serve template-inference
         # resolves it.
-        from . import muse_glimmer_model, muse_glimmer_tools
+        import gmlx.models.muse_glimmer.model as muse_glimmer_model
+        import gmlx.models.muse_glimmer.tools as muse_glimmer_tools
 
         muse_glimmer_model.ensure_registered()
         muse_glimmer_tools.ensure_registered()
@@ -999,7 +1003,7 @@ def _patch_hunyuan_norm_topk(model) -> None:
                 getattr(self, "_kq_expert_mass", None) is not None
                 or getattr(self, "_kq_expert_probe", None) is not None
             ):
-                from .moe_experts import _apply_expert_controls
+                from gmlx.stream.moe_experts import _apply_expert_controls
 
                 inds, scores = _apply_expert_controls(self, inds, scores)
             y = self.switch_mlp(x, inds)
@@ -1068,7 +1072,7 @@ _CPU_OFFLOAD_CLASS_CACHE: dict = {}
 # GPU stream (prefill regime). Decode calls (1-few tokens) stay on CPU.
 _STREAM_GPU_TOKENS_DEFAULT = 32
 # Streaming-mode expert calls at or above this many tokens are treated as
-# prefill by the sequential-prefetch hook (see gmlx.prefetch).
+# prefill by the sequential-prefetch hook (see gmlx.stream.prefetch).
 _STREAM_PREFETCH_MIN_TOKENS = 32
 
 
@@ -1535,7 +1539,7 @@ def _phase_dump():
         flush=True,
     )
     try:
-        from .lookahead import _LA_PHASE as lap
+        from gmlx.stream.lookahead import _LA_PHASE as lap
     except Exception:
         lap = None
     if lap is not None:
@@ -1619,7 +1623,7 @@ def install_expert_streaming(
     stay on the default (GPU) stream. Returns ``(n_wrapped, offloaded_bytes)``.
 
     ``gguf_path`` (the loaded checkpoint) enables sequential expert prefetch
-    for streaming-mode models - see ``gmlx.prefetch``. Without it,
+    for streaming-mode models - see ``gmlx.stream.prefetch``. Without it,
     over-budget prefill demand-faults expert bytes at random-read bandwidth.
     """
     from .modules import switch_layer_types
@@ -1651,14 +1655,14 @@ def install_expert_streaming(
     prefetcher = None
     if streaming:
         _neutralize_wired_limit_sweep()
-        from .prefetch import maybe_make_prefetcher
+        from gmlx.stream.prefetch import maybe_make_prefetcher
 
         prefetcher = maybe_make_prefetcher(gguf_path)
         if prefetcher is not None:
             object.__setattr__(model, "_kq_prefetcher", prefetcher)
         # Wire the every-token weights before the decode feeder sizes its
         # arena: pinned every-token pages come out of the same wired budget.
-        from .pin_weights import maybe_pin_weights
+        from gmlx.stream.pin_weights import maybe_pin_weights
 
         weights_pin = maybe_pin_weights(gguf_path)
         if weights_pin is not None:
@@ -2118,7 +2122,7 @@ def install_expert_streaming(
         # the two regimes; the credit is clamped to the expert share.
         # Same 0.9 x working-set budget test as _warm_touch_pass.
         key = getattr(model, "_kq_weights_key", None)
-        from .prefill_decay import (
+        from gmlx.gen.prefill_decay import (
             note_streamed_tracked_bytes,
             untracked_weight_bytes_for,
         )
@@ -2164,7 +2168,7 @@ def install_expert_streaming(
         and moe_modules
         and feeder_prefill
     ):
-        from .feeder import maybe_make_prefill_feeder
+        from gmlx.stream.prefill_feeder import maybe_make_prefill_feeder
 
         feeder = maybe_make_prefill_feeder(prefetcher.offsets, moe_modules)
         if feeder is not None:
@@ -2189,7 +2193,7 @@ def install_expert_streaming(
         and moe_modules
         and feeder_decode
     ):
-        from .decode_feeder import maybe_make_decode_feeder
+        from gmlx.stream.decode_feeder import maybe_make_decode_feeder
 
         pin = getattr(model, "_kq_weights_pin", None)
         arena = _decode_arena_bytes(
@@ -2229,7 +2233,7 @@ def install_expert_streaming(
     if streaming and env_bool("GMLX_GPU_RESIDENT", True):
         _install_gpu_residency(model, moe_modules)
     if streaming and dfeeder is not None:
-        from . import gpu_token
+        import gmlx.stream.gpu_token as gpu_token
 
         if gpu_token.autonomous_enabled():
             if gpu_token.route_shed_op() is None:
@@ -2259,7 +2263,7 @@ def install_expert_streaming(
                 )
     if streaming and dfeeder is not None and env_bool(
             "GMLX_GPU_KEEPWARM", True):
-        from . import keepwarm
+        import gmlx.stream.keepwarm as keepwarm
 
         keepwarm.start()
         loadlog.info(
@@ -2285,7 +2289,7 @@ def install_expert_streaming(
             "GMLX_DECODE_LOOKAHEAD=1 enables)"
         )
     if streaming and (la_probe or la_prefetch):
-        from .lookahead import install_lookahead
+        from gmlx.stream.lookahead import install_lookahead
 
         n_la = install_lookahead(
             model, layers, probe=la_probe, prefetch=la_prefetch,
@@ -3219,7 +3223,7 @@ def load_model(
 
     # Larger-than-RAM shards leave a stale cache remnant that taxes the next
     # process's fault path; sweep it back to the free list at exit.
-    from .pagecache import register_streaming_release
+    from gmlx.stream.pagecache import register_streaming_release
     register_streaming_release(pf.shards)
 
     # 1. load wire bytes via kq.load_gguf (now known IQ-free; shards reused).
@@ -3554,7 +3558,7 @@ def load_model(
         _patch_gated_delta_fused_decode(model)
 
     if config.get("model_type") == "qwen4_exp":
-        from .qwen4_exp_model import prepare_runtime
+        from gmlx.models.qwen4_exp.model import prepare_runtime
 
         counts = prepare_runtime(model)
         loadlog.verbose_print(
@@ -3562,7 +3566,10 @@ def load_model(
             f"layers, b/a matvecs concatenated on {counts['gdn_ba_cat']}")
 
     if config.get("model_type") == "deepseek_v4":
-        from .deepseek_v4_model import install_gemv_row_fusion, warm_kernel_pipelines
+        from gmlx.models.deepseek_v4.model import (
+            install_gemv_row_fusion,
+            warm_kernel_pipelines,
+        )
 
         n_fused_gemv = install_gemv_row_fusion(model)
         if n_fused_gemv:
@@ -3686,7 +3693,7 @@ def _load_config_from_source(hf_source: str) -> dict:
             return json.load(f)
     from huggingface_hub import hf_hub_download
 
-    from .hf_cache import network_fetch_allowed
+    from gmlx.serve.hf_cache import network_fetch_allowed
     with network_fetch_allowed():
         path = hf_hub_download(hf_source, "config.json")
     with open(path, "r") as f:

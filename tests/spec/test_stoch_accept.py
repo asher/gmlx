@@ -16,8 +16,8 @@ import pytest
 
 import mlx.core as mx  # noqa: E402
 
-import gmlx.speculative as sp  # noqa: E402
-from gmlx.speculative import (  # noqa: E402
+import gmlx.spec.speculative as sp  # noqa: E402
+from gmlx.spec.speculative import (  # noqa: E402
     _pq_probs,
     _stoch_supported_sampler,
     _stoch_target_probs,
@@ -143,7 +143,7 @@ def test_acceptance_rate_and_output_marginal_match_theory():
 
 
 def test_target_probs_matches_serve_fast_sampler():
-    from gmlx.server_patches.sampling import _FastPositionedSampler
+    from gmlx.serve.patches.sampling import _FastPositionedSampler
 
     mx.random.seed(5)
     rng = np.random.default_rng(5)

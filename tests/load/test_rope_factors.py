@@ -14,7 +14,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
-from gmlx.loader import _FactoredRoPE, _patch_rope_factors
+from gmlx.load.loader import _FactoredRoPE, _patch_rope_factors
 
 
 def _llama3_factors(dims: int, base: float, cfg: dict) -> np.ndarray:

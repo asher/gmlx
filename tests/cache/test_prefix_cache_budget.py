@@ -12,7 +12,7 @@ import mlx.core as mx
 
 from mlx_lm.models.cache import KVCache, RotatingKVCache
 
-from gmlx.prefix_cache import SpecPrefixCache, _snapshot_entry
+from gmlx.cache.prefix_cache import SpecPrefixCache, _snapshot_entry
 
 
 def _fill_rotating(window: int, total: int, keep: int = 0):
@@ -163,7 +163,7 @@ class TestSnapshotIsolation:
         c.values = c.keys
         snap = _snapshot_entry(c)
         dst = RotatingKVCache(8)
-        from gmlx.prefix_cache import _restore_entry
+        from gmlx.cache.prefix_cache import _restore_entry
         _restore_entry(dst, snap)
         assert dst.keys is dst.values
 
@@ -209,7 +209,7 @@ class TestByteBudget:
 
 class TestSpecPrefixStats:
     def test_counters_and_reset_contract(self):
-        import gmlx.prefix_cache as pc
+        import gmlx.cache.prefix_cache as pc
 
         pc.spec_prefix_stats_clear()
         cache = SpecPrefixCache()

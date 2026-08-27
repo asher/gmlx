@@ -19,10 +19,10 @@ pytest.importorskip("mlx_vlm.models.diffusion_gemma")
 
 from mlx.utils import tree_flatten  # noqa: E402
 
-from gmlx import config_synth  # noqa: E402
-from gmlx.config_synth import supported_arches, synthesize_config  # noqa: E402
-from gmlx.loader import _dequantize_diffusion_embedding, build_model  # noqa: E402
-from gmlx.remap import parse_gguf_name  # noqa: E402
+import gmlx.load.config_synth as config_synth  # noqa: E402
+from gmlx.load.config_synth import supported_arches, synthesize_config  # noqa: E402
+from gmlx.load.loader import _dequantize_diffusion_embedding, build_model  # noqa: E402
+from gmlx.load.remap import parse_gguf_name  # noqa: E402
 
 ARCH = "diffusion-gemma"
 VOCAB = 64
@@ -218,7 +218,7 @@ def test_is_diffusion_model_detects_the_built_model():
     real diffusion model and stay quiet on an ordinary one."""
     import types
 
-    from gmlx.diffusion import is_diffusion_model
+    from gmlx.gen.diffusion import is_diffusion_model
 
     model, _ = build_model(synthesize_config(_tiny_meta(), {}))
     assert is_diffusion_model(model) is True
@@ -238,7 +238,7 @@ def test_dequantize_diffusion_embedding_swaps_kquant_to_bf16():
     from gguf.constants import GGMLQuantizationType as GT
     from gguf.quants import dequantize, quantize
 
-    from gmlx.modules import KQuantEmbedding
+    from gmlx.load.modules import KQuantEmbedding
 
     rows, dims = 80, 64
     ref_tab = (np.random.RandomState(0).randn(rows, dims) * 0.1).astype(np.float32)

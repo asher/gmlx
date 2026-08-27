@@ -1,6 +1,6 @@
 """Launch / poll / tear down a real ``gmlx`` server subprocess.
 
-Drives the actual entry point (``python -m gmlx.server``) on a free port so the
+Drives the actual entry point (``python -m gmlx.serve.server``) on a free port so the
 e2e exercises the whole wiring - argparse, monkeypatches, uvicorn, the residency
 pool - exactly as a user runs it. Each scenario gets a fresh process in its own
 session (clean group kill), with stdout/stderr captured to a log so a launch
@@ -52,7 +52,7 @@ class ServerProc:
         # --foreground keeps the server attached to THIS process (the default start is
         # detached-background, which would exit the launcher and leak the child); the
         # menubar is GUI-only noise the harness never wants.
-        return [self.python, "-m", "gmlx.server", *self.serve_args,
+        return [self.python, "-m", "gmlx.serve.server", *self.serve_args,
                 "--foreground", "--no-menubar",
                 "--host", "127.0.0.1", "--port", str(self.port)]
 

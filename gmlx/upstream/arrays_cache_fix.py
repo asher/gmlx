@@ -34,7 +34,7 @@ def install_arrays_cache_fix() -> bool:
     call: an origin module imported after the first install still gets
     patched by the next.
     """
-    from .cache_compat import cache_types
+    from gmlx.cache.compat import cache_types
 
     for cls in cache_types("ArraysCache"):
         orig = cls.prepare

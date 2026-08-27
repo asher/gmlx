@@ -12,7 +12,7 @@ import pytest
 
 import mlx.core as mx  # noqa: E402
 
-from gmlx.transforms import (  # noqa: E402
+from gmlx.load.transforms import (  # noqa: E402
     coalesce_split_experts,
     fuse_shexp_gate_up,
     qk_permute_wire,

@@ -29,7 +29,10 @@ from mlx_vlm.models.qwen3_5 import language as _L
 from mlx_vlm.models.qwen3_5_moe import language as _ML
 from mlx_vlm.models import rope_utils as _RU
 
-from gmlx import qwen35_attn, qwen35_gdn, qwen35_layers, qwen35_rope
+import gmlx.models.qwen35.attn as qwen35_attn
+import gmlx.models.qwen35.gdn as qwen35_gdn
+import gmlx.models.qwen35.layers as qwen35_layers
+import gmlx.models.qwen35.rope as qwen35_rope
 
 
 def _norm(fn) -> str:

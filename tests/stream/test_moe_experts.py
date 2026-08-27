@@ -14,8 +14,8 @@ import mlx.nn as nn
 import numpy as np
 import pytest
 
-from gmlx.loader import install_expert_streaming, install_moe_experts_override
-from gmlx.moe_experts import (
+from gmlx.load.loader import install_expert_streaming, install_moe_experts_override
+from gmlx.stream.moe_experts import (
     _INLINE_SWAPS,
     ExpertProbe,
     _block_class,
@@ -239,7 +239,7 @@ def _arch_fixtures():
     from mlx_lm.models.qwen3_moe import Qwen3MoeSparseMoeBlock
     from mlx_lm.models.qwen3_next import Qwen3NextSparseMoeBlock
 
-    from gmlx.minimax_m3_model import MiniMaxM3SparseMoeBlock
+    from gmlx.models.minimax_m3 import MiniMaxM3SparseMoeBlock
 
     common = dict(
         hidden_size=16,
@@ -323,7 +323,7 @@ def test_m3_block_hands_scores_to_scores_sink():
 
 
 def test_hunyuan_seam_gated_by_attrs():
-    from gmlx.loader import _patch_hunyuan_norm_topk
+    from gmlx.load.loader import _patch_hunyuan_norm_topk
 
     args = SimpleNamespace(
         hidden_size=16,
@@ -407,7 +407,7 @@ def test_mass_composes_with_fixed_k(monkeypatch):
 def _hy_v3_moe():
     """Real hy_v3 MoE block (its gate submodule sits at ``router``), the
     SwitchGLU swapped for the kquant fixture the offload installer wraps."""
-    from gmlx.hy_v3_model import MoE
+    from gmlx.models.hy_v3.model import MoE
 
     args = SimpleNamespace(
         hidden_size=32,
@@ -457,7 +457,7 @@ def test_hy_v3_router_attr_is_hooked(monkeypatch):
 
 # miss-shed / layer-shed installers (--moe-miss-shed / --moe-layer-shed)
 def test_miss_shed_install_targets_decode_feeder_layers(monkeypatch, capsys):
-    from gmlx.moe_experts import install_moe_miss_shed
+    from gmlx.stream.moe_experts import install_moe_miss_shed
 
     block = _Block(_kquant_glu(), _TupleGate())
     model = _shell(block)
@@ -480,7 +480,7 @@ def test_miss_shed_install_targets_decode_feeder_layers(monkeypatch, capsys):
     assert not hasattr(block.gate, "_kq_miss_shed")
     # Confirmation banners are verbose-only.
     assert "miss-shed 0.9" not in capsys.readouterr().out
-    from gmlx import loadlog
+    import gmlx.load.loadlog as loadlog
     monkeypatch.setattr(loadlog, "_LAST_VERBOSE", True)
     object.__setattr__(block.switch_mlp, "_kq_miss_shed", None)
     assert install_moe_miss_shed(model, 0.9) == 1
@@ -488,7 +488,7 @@ def test_miss_shed_install_targets_decode_feeder_layers(monkeypatch, capsys):
 
 
 def test_layer_shed_install_targets_streamed_glus(monkeypatch, capsys):
-    from gmlx.moe_experts import install_moe_layer_shed
+    from gmlx.stream.moe_experts import install_moe_layer_shed
 
     block = _Block(_kquant_glu(), _TupleGate())
     model = _shell(block)
@@ -510,14 +510,14 @@ def test_layer_shed_install_targets_streamed_glus(monkeypatch, capsys):
     assert not hasattr(block.gate, "_kq_layer_shed")
     # Confirmation banners are verbose-only.
     assert "layer-shed 0.1" not in capsys.readouterr().out
-    from gmlx import loadlog
+    import gmlx.load.loadlog as loadlog
     monkeypatch.setattr(loadlog, "_LAST_VERBOSE", True)
     assert install_moe_layer_shed(model, 0.1) == 1
     assert "layer-shed 0.1" in capsys.readouterr().out
 
 
 def _k3_block():
-    from gmlx.kimi_k3_model import KimiK3MoE
+    from gmlx.models.kimi_k3 import KimiK3MoE
 
     args = SimpleNamespace(
         hidden_size=32,

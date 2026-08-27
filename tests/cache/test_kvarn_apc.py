@@ -17,7 +17,7 @@ from mlx_vlm import apc  # noqa: E402
 from mlx_vlm.models.cache import KVCache  # noqa: E402
 
 from gmlx import kvarn_apc  # noqa: E402
-from gmlx.kvarn_cache import BatchKVarNKVCache, KVarNKVCache  # noqa: E402
+from gmlx.cache.kvarn_cache import BatchKVarNKVCache, KVarNKVCache  # noqa: E402
 
 _NEEDS_GPU = pytest.mark.skipif(
     mx.default_device() != mx.gpu,
@@ -265,7 +265,7 @@ def test_entry_salt(restorable):
 
 
 def test_manager_salts_exact_hashes(restorable):
-    from gmlx.apc_manager import GmlxAPCManager
+    from gmlx.cache.apc_manager import GmlxAPCManager
 
     seen = []
     restorable.setattr(
@@ -291,7 +291,7 @@ def test_manager_salts_exact_hashes(restorable):
 
 
 def test_layer_has_content_kvarn_arm():
-    from gmlx.cache_snapshot import _layer_has_content
+    from gmlx.cache.snapshot import _layer_has_content
 
     assert not _layer_has_content(KVarNKVCache())
 
@@ -299,7 +299,7 @@ def test_layer_has_content_kvarn_arm():
 @_NEEDS_GPU
 def test_layer_has_content_and_row_snapshot(restorable):
     kvarn_apc.install_kvarn_apc()
-    from gmlx.cache_snapshot import _layer_has_content, row_snapshot
+    from gmlx.cache.snapshot import _layer_has_content, row_snapshot
 
     k, v = _slab(300, b=2)
     batch = BatchKVarNKVCache([0, 64], tail_tokens=256)

@@ -4,9 +4,9 @@ import mlx.core as mx
 import mlx.nn as nn
 import pytest
 
-from gmlx.config_synth import synthesize_config
-from gmlx.qwen4_exp_model import Model, ModelArgs, ensure_registered
-from gmlx.qwen4_exp_mtp import (
+from gmlx.load.config_synth import synthesize_config
+from gmlx.models.qwen4_exp.model import Model, ModelArgs, ensure_registered
+from gmlx.models.qwen4_exp.mtp import (
     MTP_ARCH,
     Qwen4ExpMTPConfig,
     Qwen4ExpMTPDrafter,
@@ -175,9 +175,9 @@ def test_remap_strips_prefix_and_threads_codecs():
 
 
 def test_arch_table_and_loader_rows():
-    from gmlx import arch_table
-    from gmlx.loader import _MTP_TARGET_HOOKS_BY_TYPE, _mtp_target_classes
-    from gmlx.mtp_load import _assistant_kind
+    import gmlx.load.arch_table as arch_table
+    from gmlx.load.loader import _MTP_TARGET_HOOKS_BY_TYPE, _mtp_target_classes
+    from gmlx.spec.mtp_load import _assistant_kind
 
     assert arch_table.drafter_arches("qwen4_exp") == (MTP_ARCH,)
     assert arch_table.drafter_serves(MTP_ARCH, "qwen4exp") is True

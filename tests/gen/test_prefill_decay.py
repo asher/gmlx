@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 
-from gmlx import prefill_decay as pd
+import gmlx.gen.prefill_decay as pd
 
 HEADS = 32
 GB = 1e9
@@ -518,7 +518,7 @@ def test_build_callable_profile_resolved_per_call():
 # --- seed profile threading + logging ---------------------------------------
 
 def test_seed_profile_resolves_against_drafter_cache(monkeypatch):
-    from gmlx.mtp_drafter import QwenMTPDrafter
+    from gmlx.spec.mtp_drafter import QwenMTPDrafter
     prov = pd.build_score_profile(profile=FLASH, require_cache=_Pool)
     _register(monkeypatch, "fake_arch", prov)
     drafter = SimpleNamespace(config=SimpleNamespace(model_type="fake_arch"),

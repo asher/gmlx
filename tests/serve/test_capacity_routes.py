@@ -10,12 +10,12 @@ import pytest
 
 pytest.importorskip("mlx_vlm")
 
-import gmlx.queue_cap as qc  # noqa: E402
-from gmlx import server_bridge_vlm as serving  # noqa: E402
+import gmlx.serve.queue_cap as qc  # noqa: E402
+import gmlx.serve.bridge_vlm as serving  # noqa: E402
 from gmlx.config import build_config  # noqa: E402
-from gmlx.server_patches import _common as sp_common  # noqa: E402
-from gmlx.server_patches import capacity_routes as cr  # noqa: E402
-from gmlx.server_patches import hardening as sp_hardening  # noqa: E402
+from gmlx.serve.patches import _common as sp_common  # noqa: E402
+from gmlx.serve.patches import capacity_routes as cr  # noqa: E402
+from gmlx.serve.patches import hardening as sp_hardening  # noqa: E402
 
 _APP = importlib.import_module("mlx_vlm.server.app")
 _PKG = importlib.import_module("mlx_vlm.server")
@@ -124,7 +124,7 @@ def test_concurrency_stats_without_pool(monkeypatch):
 
 # readiness
 def _ready_env(monkeypatch, band="green", in_flight=0, width=4, waiting=0):
-    import gmlx.governor as gov
+    import gmlx.serve.governor as gov
     monkeypatch.setattr(gov, "governor_stats", lambda: {"band": band})
     monkeypatch.setattr(qc, "concurrency_stats", lambda: {
         "decode_batch": width, "queue_cap": 2 * width,
@@ -164,7 +164,7 @@ def test_readiness_busy_at_width(monkeypatch):
 
 
 def test_readiness_probe_failure_reads_ready(monkeypatch):
-    import gmlx.governor as gov
+    import gmlx.serve.governor as gov
 
     def _boom():
         raise RuntimeError("no governor")

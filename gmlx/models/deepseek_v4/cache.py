@@ -12,7 +12,7 @@ Delete this file once installed mlx-lm ships PoolingCache natively.
 
 The one-update undo log (``trim(n)``, n <= 2, after verify writes that may
 complete pool windows) is what makes MTP draft rejection correct - see
-gmlx/deepseek_v4_mtp.py. The rotating-cache undo wrap at the bottom of
+gmlx/models/deepseek_v4/mtp.py. The rotating-cache undo wrap at the bottom of
 this file is the matching piece for ``RotatingKVCache`` (port of omlx
 patches/mlx_lm_mtp/cache_rollback.py, extended to 3-wide verifies for S=3
 rounds).
@@ -1194,7 +1194,7 @@ def _wrap_rotating(cls, fields) -> None:
 def ensure_rollback_attached() -> None:
     """Attach the MTP undo log to every loaded origin's rotating caches
     (idempotent per class; mlx-vlm vendored its own since 0.6.4)."""
-    from .cache_compat import cache_types
+    from gmlx.cache.compat import cache_types
 
     for cls in cache_types("RotatingKVCache"):
         _wrap_rotating(cls, ("keys", "values", "offset", "_idx"))

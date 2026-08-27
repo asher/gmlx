@@ -9,7 +9,7 @@ import pytest
 
 pytest.importorskip("mlx_vlm")
 
-import gmlx.queue_cap as qc  # noqa: E402
+import gmlx.serve.queue_cap as qc  # noqa: E402
 
 _APP = importlib.import_module("mlx_vlm.server.app")
 _RUNTIME = importlib.import_module("mlx_vlm.server.runtime").runtime
@@ -126,7 +126,7 @@ def test_check_no_engine_admits(monkeypatch):
 
 @pytest.fixture
 def app_routes():
-    from gmlx.server_patches import _common as sp_common
+    from gmlx.serve.patches import _common as sp_common
     saved = sp_common._snapshot_routes(_APP.app)
     yield _APP.app
     sp_common._restore_routes(_APP.app, saved)
@@ -169,12 +169,12 @@ def test_route_at_cap_minus_one_serves(app_routes, monkeypatch):
         return {"ok": True}
 
     for path in ("/v1/chat/completions",):
-        from gmlx.server_patches._common import _find_route
+        from gmlx.serve.patches._common import _find_route
         route = _find_route(_APP.app, path, "POST")
         assert route is not None
         import inspect
         _stub.__signature__ = inspect.signature(route.endpoint)
-        from gmlx.server_patches._common import _remove_routes
+        from gmlx.serve.patches._common import _remove_routes
         _remove_routes(_APP.app, path)
         _APP.app.add_api_route(path, _stub, methods=["POST"],
                                include_in_schema=False)
@@ -249,7 +249,7 @@ def test_depth_unwraps_the_residency_guard():
     """Handlers see runtime.response_generator as a _GenerationGuard; the
     engine registry is keyed by the real object, so the guard must not
     hide the generator's pending list."""
-    from gmlx.residency import _GenerationGuard
+    from gmlx.serve.residency import _GenerationGuard
     saved = dict(qc._ENGINES)
     qc._ENGINES.clear()
     try:
@@ -265,7 +265,7 @@ def test_check_judges_the_pool_census_through_the_guard(monkeypatch):
     """With a residency pool the check sums every resident engine (the
     figure /v1/metrics and readiness report) rather than probing the
     proxied runtime engine, which read 0 pending under load."""
-    from gmlx.residency import _GenerationGuard
+    from gmlx.serve.residency import _GenerationGuard
     pkg = importlib.import_module("mlx_vlm.server")
     saved_pool = getattr(pkg, "_kq_residency_pool", None)
     saved = dict(qc._ENGINES)

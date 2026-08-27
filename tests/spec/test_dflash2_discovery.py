@@ -5,8 +5,8 @@ import os
 
 import pytest
 
-from gmlx import arch_table
-from gmlx import discovery as disc
+import gmlx.load.arch_table as arch_table
+import gmlx.load.discovery as disc
 from gmlx.config import DiscoverSpec
 
 # Header facts per file stem, mirroring the on-disk layout

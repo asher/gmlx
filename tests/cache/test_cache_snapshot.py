@@ -11,8 +11,8 @@ Model-free; run with KQUANT_FORCE_CPU=1 to stay off the GPU.
 import mlx.core as mx
 import pytest
 
-from gmlx.cache_compat import runtime_cache_module
-from gmlx.cache_snapshot import (
+from gmlx.cache.compat import runtime_cache_module
+from gmlx.cache.snapshot import (
     retirement_store,
     row_snapshot,
 )
@@ -316,7 +316,7 @@ def _ctx(full_ids):
 
 
 def test_pop_retire_ctx_detaches_from_first_entry():
-    from gmlx.speculative import _pop_retire_ctx
+    from gmlx.spec.speculative import _pop_retire_ctx
     cache = [_kv_row(4, 0)]
     cache[0]._kq_apc_retire = _ctx([1, 2])
     ctx = _pop_retire_ctx(cache)
@@ -332,7 +332,7 @@ def test_pop_retire_ctx_detaches_from_first_entry():
 
 
 def test_retire_b1_stores_on_offset_match():
-    from gmlx.speculative import _retire_b1
+    from gmlx.spec.speculative import _retire_b1
     mgr = _manager()
     try:
         full_ids = list(range(1, 10))
@@ -350,7 +350,7 @@ def test_retire_b1_stores_on_offset_match():
 def test_retire_b1_pending_token_stores_all_but_last():
     # Round-boundary invariant: the newest sampled token's KV pends the next
     # verify, so offset == len(seq) - 1 is a clean finish -> store seq[:-1].
-    from gmlx.speculative import _retire_b1
+    from gmlx.spec.speculative import _retire_b1
     mgr = _manager()
     try:
         full_ids = list(range(1, 10))
@@ -366,7 +366,7 @@ def test_retire_b1_pending_token_stores_all_but_last():
 
 
 def test_retire_b1_skips_on_offset_mismatch():
-    from gmlx.speculative import _retire_b1
+    from gmlx.spec.speculative import _retire_b1
     mgr = _manager()
     try:
         full_ids = list(range(1, 10))
@@ -384,7 +384,7 @@ def test_retire_b1_skips_on_offset_mismatch():
 
 
 def test_retire_b1_noop_without_manager_or_context():
-    from gmlx.speculative import _retire_b1
+    from gmlx.spec.speculative import _retire_b1
     cache = [_kv_row(6, 0)]
     # no retire context
     mgr = _manager()
@@ -404,7 +404,7 @@ def test_retire_b1_noop_without_manager_or_context():
 
 
 def test_retire_batch_row_block_mode_harvests():
-    from gmlx.speculative import _retire_batch_row
+    from gmlx.spec.speculative import _retire_batch_row
     mgr = _manager()
     try:
         block = 16
@@ -435,7 +435,7 @@ def test_retire_batch_row_exact_mode_stores_the_row(monkeypatch):
     # a drafter): the round-boundary state (position == len(seq) - 1, the
     # newest token's KV pending) stores everything but that token; a
     # position that disagrees with the token count stores nothing.
-    from gmlx.speculative import _retire_batch_row
+    from gmlx.spec.speculative import _retire_batch_row
     monkeypatch.setenv("GMLX_APC_RETIRE_LCP", "0")
     mgr = _manager()
     try:
@@ -463,7 +463,7 @@ def test_retire_batch_row_exact_mode_stores_the_row(monkeypatch):
 
 def test_row_kv_len_reads_per_row_offsets():
     from mlx_vlm.models.cache import BatchKVCache
-    from gmlx.cache_snapshot import row_kv_len
+    from gmlx.cache.snapshot import row_kv_len
     batch = BatchKVCache.merge([_kv_row(5, 0), _kv_row(3, 1)])
     assert row_kv_len([batch], 0) == 5
     assert row_kv_len([batch], 1) == 3
@@ -474,7 +474,7 @@ def test_row_kv_len_reads_per_row_offsets():
 def test_retire_batch_row_exact_keys_on_the_row_kv(monkeypatch):
     # position lags the cache by the verify input: the row holds len(seq)
     # tokens of KV, so the whole sequence is the key (not seq[:-1]).
-    from gmlx.speculative import _retire_batch_row
+    from gmlx.spec.speculative import _retire_batch_row
     monkeypatch.setenv("GMLX_APC_RETIRE_LCP", "0")
     mgr = _manager()
     try:
@@ -501,7 +501,7 @@ def test_retirement_store_exact_refuses_a_row_that_does_not_cover_the_key():
 
 
 def test_retire_batch_row_short_position_skips():
-    from gmlx.speculative import _retire_batch_row
+    from gmlx.spec.speculative import _retire_batch_row
     mgr = _manager()
     try:
         full_ids = list(range(1, 40))
@@ -526,7 +526,7 @@ def test_retire_batch_row_short_position_skips():
 # isolation, coverage guards
 # --------------------------------------------------------------------------
 
-from gmlx.cache_snapshot import (  # noqa: E402
+from gmlx.cache.snapshot import (  # noqa: E402
     drafter_sidecar_lookup,
     drafter_sidecar_store,
 )
@@ -620,7 +620,7 @@ def test_sidecar_store_does_not_evict_real_exact_entries():
 
 
 def test_sidecar_index_capacity_lru():
-    from gmlx import cache_snapshot as cs
+    import gmlx.cache.snapshot as cs
     mgr = _manager()
     old = cs._SIDECAR_ENTRIES
     cs._SIDECAR_ENTRIES = 2
@@ -693,7 +693,7 @@ def test_sidecar_store_guards():
 
 
 def test_pop_drafter_warm_detaches_from_first_entry():
-    from gmlx.speculative import _pop_drafter_warm
+    from gmlx.spec.speculative import _pop_drafter_warm
     cache = [_kv_row(4, 0)]
     side = [_kv_row(3, 50)]
     cache[0]._kq_apc_drafter_warm = side
@@ -705,7 +705,7 @@ def test_pop_drafter_warm_detaches_from_first_entry():
 
 
 def test_sidecar_post_prefill_covered_stores_both_keys():
-    from gmlx.speculative import _sidecar_post_prefill
+    from gmlx.spec.speculative import _sidecar_post_prefill
     mgr = _manager()
     try:
         full_ids = list(range(1, 13))  # 12 prompt tokens
@@ -725,7 +725,7 @@ def test_sidecar_post_prefill_uncovered_head_skipped():
     # Suffix-only seeded head (offset < prompt len): rows sit at the wrong
     # positions; storing it would poison future turns. Flag stays False so
     # the retirement-time sidecar is skipped too.
-    from gmlx.speculative import _sidecar_post_prefill
+    from gmlx.spec.speculative import _sidecar_post_prefill
     mgr = _manager()
     try:
         full_ids = list(range(1, 13))
@@ -751,7 +751,7 @@ def test_sidecar_post_prefill_ckpt_keys_mirror_landed_stores():
     live apc_meta at consumption time -- the p=N store lands AFTER
     sidecar_ctx is built, so a frozen copy would orphan the full-prompt
     key. Keys: deepest landed prefill boundary + N iff its store landed."""
-    from gmlx.speculative import _sidecar_post_prefill
+    from gmlx.spec.speculative import _sidecar_post_prefill
     mgr = _manager()
     try:
         full_ids = list(range(1, 13))          # n=12
@@ -775,7 +775,7 @@ def test_sidecar_post_prefill_keys_landed_turn_boundary():
     demands an exact-length entry there: every landed turn boundary gets
     a key, or the drafter head starts cold on exactly the turn the
     boundary exists for. Armed-but-declined bounds stay unkeyed."""
-    from gmlx.speculative import _sidecar_post_prefill
+    from gmlx.spec.speculative import _sidecar_post_prefill
     mgr = _manager()
     try:
         full_ids = list(range(1, 13))
@@ -798,7 +798,7 @@ def test_sidecar_post_prefill_keys_landed_turn_boundary():
 def test_sidecar_post_prefill_ckpt_no_orphan_full_key():
     """Drop-branch mirror: when the p=N store did not land there is no
     target record at N, and a sidecar key there would only burn slots."""
-    from gmlx.speculative import _sidecar_post_prefill
+    from gmlx.spec.speculative import _sidecar_post_prefill
     mgr = _manager()
     try:
         full_ids = list(range(1, 13))
@@ -815,7 +815,7 @@ def test_sidecar_post_prefill_ckpt_no_orphan_full_key():
 
 
 def test_retire_b1_stores_sidecar_when_covered():
-    from gmlx.speculative import _retire_b1
+    from gmlx.spec.speculative import _retire_b1
     mgr = _manager()
     try:
         full_ids = list(range(1, 10))
@@ -838,7 +838,7 @@ def test_retire_b1_stores_sidecar_when_covered():
 
 
 def test_retire_b1_skips_sidecar_when_uncovered():
-    from gmlx.speculative import _retire_b1
+    from gmlx.spec.speculative import _retire_b1
     mgr = _manager()
     try:
         full_ids = list(range(1, 10))
@@ -861,7 +861,7 @@ def test_retire_b1_sidecar_requires_request_nonce():
     # A lazy (GC-time) retirement can observe a drafter reseeded by a later
     # request; the sidecar store must be skipped unless the drafter's nonce
     # is this request's own sidecar_ctx object. Target retirement unaffected.
-    from gmlx.speculative import _retire_b1
+    from gmlx.spec.speculative import _retire_b1
     mgr = _manager()
     try:
         full_ids = list(range(1, 10))
@@ -894,7 +894,7 @@ def test_owned_server_rounds_releases_request_state_on_finish(monkeypatch):
     # refs frees them immediately -- no gc pass, no close() needed.
     import weakref
     from types import SimpleNamespace
-    from gmlx import speculative as spec
+    import gmlx.spec.speculative as spec
 
     def fake_rounds(model, drafter, lm, prompt_cache, **kwargs):
         for t in (11, 12, 13):

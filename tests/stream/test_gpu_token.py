@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GPU-autonomous token (``gmlx.gpu_token`` + the wrapper's route_shed
+"""GPU-autonomous token (``gmlx.stream.gpu_token`` + the wrapper's route_shed
 branch): slot-table snapshots, the boundary step's fence ordering
 (popularity -> flush -> prestage -> snapshot), and numeric transparency of
 the no-eval decode path. Requires an mlx_kquant build with ``route_shed``
@@ -16,8 +16,8 @@ import pytest
 import mlx.core as mx
 from mlx_lm.models.switch_layers import SwitchGLU
 
-from gmlx.gpu_token import GpuTokenState, route_shed_op
-from gmlx.loader import install_expert_streaming
+from gmlx.stream.gpu_token import GpuTokenState, route_shed_op
+from gmlx.load.loader import install_expert_streaming
 
 from test_decode_feeder import _make_feeder
 
@@ -200,7 +200,7 @@ def test_on_layer_entry_ticks_refresh(monkeypatch, tmp_path):
     gt._hot_hit = 0.5
     feeder._layer_lookups = {0: 10}
     feeder._layer_hits = {0: 10}
-    import gmlx.gpu_token as gpu_token_mod
+    import gmlx.stream.gpu_token as gpu_token_mod
 
     monkeypatch.setattr(gpu_token_mod, "_REFRESH_TOKENS", 2)
     assert not gt.layer_autonomous(0)

@@ -9,8 +9,8 @@ import pytest
 
 import mlx.core as mx
 
-from gmlx.kvarn_cache import BatchKVarNKVCache, KVarNKVCache, KVarNView
-from gmlx.kvarn_sdpa import kvarn_attention
+from gmlx.cache.kvarn_cache import BatchKVarNKVCache, KVarNKVCache, KVarNView
+from gmlx.cache.kvarn_sdpa import kvarn_attention
 
 _NEEDS_GPU = pytest.mark.skipif(
     mx.default_device() != mx.gpu,
@@ -179,7 +179,7 @@ def test_unregistered_mask_falls_back():
 
 
 def test_make_mask_registers_starts():
-    from gmlx.quantized_sdpa_fix import _registered_starts
+    from gmlx.upstream.quantized_sdpa_fix import _registered_starts
 
     c = BatchKVarNKVCache([0, 5, 9])
     mask = c.make_mask(1, window_size=None)
@@ -222,7 +222,7 @@ def test_qwen35_arm_uses_cache_pads(d):
     # pads on the cache; the arm must recover per-row starts from it.
     # d=256 is the shape every real qwen3.5/3.6 checkpoint dispatches.
     pytest.importorskip("mlx_vlm.models.qwen3_5")
-    from gmlx.qwen35_attn import _kvarn_attention
+    from gmlx.models.qwen35.attn import _kvarn_attention
 
     pads = [0, 150, 296]
     c, _ = _decode_setup(600, pads, d=d)

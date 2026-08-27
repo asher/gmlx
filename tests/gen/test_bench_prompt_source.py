@@ -3,7 +3,7 @@ pure function of (seed, depth, k), independent of which other depths the
 process drew first (single-depth bisect cells must be content-identical to
 the same depth inside a multi-depth sweep)."""
 
-from gmlx.benchmarks import _ChatPromptSource
+from gmlx.gen.benchmarks import _ChatPromptSource
 
 
 class _StubTok:
@@ -102,7 +102,7 @@ def test_loaded_conversations_end_on_assistant(monkeypatch):
     import sys
     import types
 
-    from gmlx import benchmarks
+    import gmlx.gen.benchmarks as benchmarks
 
     rows = [
         {"messages": [{"role": "user", "content": "q1"},

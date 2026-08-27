@@ -14,12 +14,12 @@ from types import SimpleNamespace
 import mlx.core as mx
 import pytest
 
-from gmlx.speculative import (
+from gmlx.spec.speculative import (
     _mtp_width_cap,
     _owned_decode_rounds_batch,
     _width_cap_logged,
 )
-import gmlx.speculative as spec
+import gmlx.spec.speculative as spec
 
 VOCAB = 32
 
@@ -168,7 +168,7 @@ def _drive(drafter, *, B=3, max_tokens=3, sampler=None, model=None,
 # -- load-time stamping --------------------------------------------------
 
 def _stamped(model_type, env=None, monkeypatch=None, target=None):
-    from gmlx.mtp_load import _stamp_mtp_width_cap
+    from gmlx.spec.mtp_load import _stamp_mtp_width_cap
 
     if env is not None:
         monkeypatch.setenv("MLX_VLM_GGUF_SPEC_WIDTH_CAP", env)
@@ -220,7 +220,7 @@ MOE_PROJ_ATTR = _FakeProj(weight=None, num_experts=6)
 # -- structural MoE detection --------------------------------------------
 
 def test_model_is_moe_detects_stacked_expert_weight():
-    from gmlx.loader import model_is_moe
+    from gmlx.load.loader import model_is_moe
 
     assert model_is_moe(_fake_model(MOE_PROJ_3D))
     assert model_is_moe(_fake_model(MOE_PROJ_ATTR))
@@ -230,20 +230,20 @@ def test_model_is_moe_false_on_dense():
     """A dense 2D weight must NOT read as MoE. _switch_num_experts would return
     weight.shape[0] here (the output width), which is why it can't be the
     test."""
-    from gmlx.loader import model_is_moe
+    from gmlx.load.loader import model_is_moe
 
     assert not model_is_moe(_fake_model(DENSE_PROJ))
 
 
 def test_model_is_moe_walks_the_vlm_wrapper():
-    from gmlx.loader import model_is_moe
+    from gmlx.load.loader import model_is_moe
 
     assert model_is_moe(_fake_model(MOE_PROJ_3D, vlm=True))
     assert not model_is_moe(_fake_model(DENSE_PROJ, vlm=True))
 
 
 def test_model_is_moe_no_layers_is_false():
-    from gmlx.loader import model_is_moe
+    from gmlx.load.loader import model_is_moe
 
     assert not model_is_moe(SimpleNamespace())
 

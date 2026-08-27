@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Numerics for the unified ragged decode plan (gmlx.ragged_decode).
+"""Numerics for the unified ragged decode plan (gmlx.spec.ragged_decode).
 
 Stock ``_qwen3_5_ragged_decode_attention`` requires every row of a batch to
 land in the same sdpa-vector plan bucket and returns None otherwise, dropping
@@ -85,7 +85,7 @@ def _rel_err(got, ref):
 def unified():
     if not mx.metal.is_available():
         pytest.skip("ragged decode kernels are Metal-only")
-    from gmlx import ragged_decode
+    import gmlx.spec.ragged_decode as ragged_decode
 
     ragged_decode.install_unified_ragged_plan()
     return ragged_decode

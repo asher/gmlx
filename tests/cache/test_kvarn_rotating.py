@@ -9,7 +9,7 @@ import pytest
 
 import mlx.core as mx
 
-from gmlx.kvarn_cache import (
+from gmlx.cache.kvarn_cache import (
     GROUP,
     KVarNKVCache,
     KVarNRotatingKVCache,
@@ -334,7 +334,7 @@ def test_meta_arity_fail_closed_both_directions():
 def test_save_load_prompt_cache_file(tmp_path):
     from mlx_lm.models.cache import load_prompt_cache, save_prompt_cache
 
-    from gmlx.kvarn_cache import ensure_registered
+    from gmlx.cache.kvarn_cache import ensure_registered
 
     ensure_registered()
     c = _rot()
@@ -350,7 +350,7 @@ def test_save_load_prompt_cache_file(tmp_path):
 
 @_NEEDS_GPU
 def test_clone_lm_twin():
-    from gmlx.cache_snapshot import _clone_lm_twin
+    from gmlx.cache.snapshot import _clone_lm_twin
 
     c = _rot()
     k, v = _tokens(2000)
@@ -437,7 +437,7 @@ def _ops_ok(monkeypatch):
 
 @_NEEDS_GPU
 def test_setup_converts_rotating_stack(_ops_ok, capsys):
-    from gmlx.generation import setup_kvarn_cache
+    from gmlx.gen.generation import setup_kvarn_cache
 
     pc = setup_kvarn_cache(_MakeCacheLess(), None, 1024, 4096)
     assert pc is not None and len(pc) == 2
@@ -448,7 +448,7 @@ def test_setup_converts_rotating_stack(_ops_ok, capsys):
 
 
 def test_setup_declines_below_floor(_ops_ok, capsys):
-    from gmlx.generation import setup_kvarn_cache
+    from gmlx.gen.generation import setup_kvarn_cache
 
     assert setup_kvarn_cache(_MakeCacheLess(), None, 1024, 512) is None
     err = capsys.readouterr().err
@@ -457,7 +457,7 @@ def test_setup_declines_below_floor(_ops_ok, capsys):
 
 @_NEEDS_GPU
 def test_setup_without_window_stays_plain(_ops_ok, capsys):
-    from gmlx.generation import setup_kvarn_cache
+    from gmlx.gen.generation import setup_kvarn_cache
 
     pc = setup_kvarn_cache(_MakeCacheLess(), None, 1024, None)
     assert pc is not None
@@ -466,7 +466,7 @@ def test_setup_without_window_stays_plain(_ops_ok, capsys):
 
 
 def test_kv_bits_rotating_reason():
-    from gmlx.generation import kv_quantization_unsupported
+    from gmlx.gen.generation import kv_quantization_unsupported
 
     m = _MakeCacheLess()
     assert kv_quantization_unsupported(m) is None
@@ -508,7 +508,7 @@ def _ref_attention(q, cache, qL):
 @_NEEDS_GPU
 @pytest.mark.parametrize("ql", [1, 2, 4])
 def test_post_wrap_decode_matches_reference(ql):
-    from gmlx.kvarn_sdpa import kvarn_attention
+    from gmlx.cache.kvarn_sdpa import kvarn_attention
 
     c = _rot()
     k, v = _tokens(2000)
@@ -526,7 +526,7 @@ def test_post_wrap_decode_matches_reference(ql):
 def test_pre_wrap_tail_saturated_split():
     # Small fill where the precision tail covers nearly everything: the
     # decode split widens the body to qL (base-cache behavior preserved).
-    from gmlx.kvarn_sdpa import kvarn_attention
+    from gmlx.cache.kvarn_sdpa import kvarn_attention
 
     c = _rot()
     k, v = _tokens(WIN - 255)

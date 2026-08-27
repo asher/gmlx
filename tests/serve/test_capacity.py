@@ -2,7 +2,7 @@
 
 import pytest
 
-import gmlx.capacity as cap
+import gmlx.serve.capacity as cap
 
 GB = 1e9
 
@@ -20,7 +20,7 @@ BPT = 2 * 8 * 64 * 2 * 10  # 20480 B/token across layers
 def rig(monkeypatch, tmp_path):
     f = tmp_path / "m.gguf"
     f.write_bytes(b"x")
-    import gmlx.tool_preflight as tp
+    import gmlx.commands.tool_preflight as tp
 
     box = {"ws": 20.0 * GB, "max_buffer": 0.0, "resource_limit": 499000}
 
@@ -38,7 +38,7 @@ def rig(monkeypatch, tmp_path):
             "max_recommended_working_set_size": box["ws"],
             "max_buffer_length": box["max_buffer"],
             "resource_limit": box["resource_limit"]})
-        import gmlx.server_memory as sm
+        import gmlx.serve.memory as sm
         monkeypatch.setattr(sm, "admit_reserve_bytes",
                             lambda ws, gen=None: 1.0 * GB)
         return str(f)
@@ -108,7 +108,7 @@ def test_frontier_width_and_decode_bound(rig, monkeypatch):
               if t["max_ctx"][w] >= 4096]
     assert cap.frontier_width() == max(widths)
 
-    from gmlx.decode_batch import decode_batch
+    from gmlx.serve.decode_batch import decode_batch
     monkeypatch.delenv("GMLX_DECODE_BATCH", raising=False)
     monkeypatch.setattr(cap, "frontier_width", lambda min_ctx=4096: 2)
     assert decode_batch() == 2
@@ -118,7 +118,7 @@ def test_frontier_width_and_decode_bound(rig, monkeypatch):
 
 def test_preload_gate(rig, monkeypatch):
     rig(weights_gb=10.0, ws_gb=20.0)
-    import gmlx.prefill_decay as pd
+    import gmlx.gen.prefill_decay as pd
     monkeypatch.setattr(pd, "headroom_bytes", lambda: 5.0 * GB)
     monkeypatch.setattr(cap, "working_budget_bytes", lambda: 20.0 * GB)
     monkeypatch.setattr(cap, "_kernel_gate", lambda w, m: None)
@@ -138,7 +138,7 @@ def test_preload_gate_judges_the_serve_ceiling(rig, monkeypatch):
     # 2026-08-25: judged raw, 86.7 GB was admitted next to a pinned 31.5 GB
     # resident on a 112 GB wire limit and Metal OOM'd.
     rig(weights_gb=10.0, ws_gb=20.0)
-    import gmlx.prefill_decay as pd
+    import gmlx.gen.prefill_decay as pd
     monkeypatch.setattr(pd, "headroom_bytes", lambda: 5.0 * GB)
     monkeypatch.setattr(cap, "working_budget_bytes", lambda: 18.0 * GB)
     monkeypatch.setattr(cap, "_kernel_gate", lambda w, m: None)
@@ -152,9 +152,9 @@ def test_preload_gate_kernel_floor(rig, monkeypatch):
     # accounting, so a load must also leave the governor's reclaimable
     # floor standing. No armed floor (no governor) = no kernel check.
     rig(weights_gb=10.0, ws_gb=20.0)
-    import gmlx.governor as gov
-    import gmlx.kernel_vm as kv
-    import gmlx.prefill_decay as pd
+    import gmlx.serve.governor as gov
+    import gmlx.serve.kernel_vm as kv
+    import gmlx.gen.prefill_decay as pd
     monkeypatch.setattr(pd, "headroom_bytes", lambda: 50.0 * GB)
     monkeypatch.setattr(cap, "working_budget_bytes", lambda: 20.0 * GB)
     monkeypatch.setattr(kv, "reclaimable_bytes", lambda: 6.0 * GB)
@@ -175,9 +175,9 @@ def test_kernel_gate_credits_page_cache_resident_bytes(rig, monkeypatch):
     # converts them, it does not allocate: the gate must judge only the
     # not-yet-resident bytes.
     rig(weights_gb=90.0, ws_gb=200.0)
-    import gmlx.governor as gov
-    import gmlx.kernel_vm as kv
-    import gmlx.prefill_decay as pd
+    import gmlx.serve.governor as gov
+    import gmlx.serve.kernel_vm as kv
+    import gmlx.gen.prefill_decay as pd
     monkeypatch.setattr(pd, "headroom_bytes", lambda: 500.0 * GB)
     monkeypatch.setattr(cap, "working_budget_bytes", lambda: 200.0 * GB)
     monkeypatch.setattr(gov, "armed_kernel_floor_bytes", lambda: 8.0 * GB)
@@ -195,7 +195,7 @@ def test_kernel_gate_credits_page_cache_resident_bytes(rig, monkeypatch):
 
 
 def test_memfit_delegates_to_capacity(monkeypatch):
-    from gmlx.memfit import classify_fit
+    from gmlx.load.memfit import classify_fit
     assert classify_fit(65, 100) == "fits"
     assert classify_fit(66, 100) == "tight"
     assert classify_fit(85, 100) == "tight"
@@ -211,9 +211,9 @@ def test_kernel_gate_waits_for_memory_still_being_freed(rig, monkeypatch):
     model's pages are back: the gate re-samples while reclaimable rises
     and admits once it clears, and only defers once it stops rising."""
     rig(weights_gb=10.0, ws_gb=200.0)
-    import gmlx.governor as gov
-    import gmlx.kernel_vm as kv
-    import gmlx.prefill_decay as pd
+    import gmlx.serve.governor as gov
+    import gmlx.serve.kernel_vm as kv
+    import gmlx.gen.prefill_decay as pd
     import time as _time
     monkeypatch.setattr(pd, "headroom_bytes", lambda: 500.0 * GB)
     monkeypatch.setattr(cap, "working_budget_bytes", lambda: 200.0 * GB)

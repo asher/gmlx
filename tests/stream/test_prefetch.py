@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import struct
 
-from gmlx import prefetch as pf
+import gmlx.stream.prefetch as pf
 
 
 def _make(tmp_path, offsets_for_file):

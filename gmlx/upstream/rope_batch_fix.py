@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import mlx.core as mx
 
-from .envflags import env_bool
+from gmlx.envflags import env_bool
 
 _installed = False
 _orig_rope = None

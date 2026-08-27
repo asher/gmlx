@@ -25,7 +25,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from .textfmt import plural_s
+from gmlx.textfmt import plural_s
 from . import procname
 
 try:
@@ -151,7 +151,7 @@ def _config_target() -> tuple | None:
     Best-effort by design: the lifecycle verbs must keep working against a
     corrupt or absent config, so any problem here just means no opinion."""
     try:
-        from .config import default_config_paths, load_config
+        from gmlx.config import default_config_paths, load_config
         for p in default_config_paths():
             if p.exists():
                 cfg = load_config(p)
@@ -991,7 +991,7 @@ def _require_macos(what: str) -> int:
 
 
 def _label(host: str, port) -> str:
-    return f"com.gmlx.server.{_key(host, port)}"
+    return f"com.gmlx.serve.server.{_key(host, port)}"
 
 
 def _plist_path(host: str, port) -> Path:
@@ -999,7 +999,7 @@ def _plist_path(host: str, port) -> Path:
             / f"{_label(host, port)}.plist")
 
 
-MENUBAR_AGENT_LABEL = "com.gmlx.menubar"
+MENUBAR_AGENT_LABEL = "com.gmlx.commands.menubar"
 
 
 def _menubar_agent_plist_path() -> Path:
@@ -1036,7 +1036,7 @@ def agent_loaded(label: str) -> bool:
 
 
 def menubar_agent_loaded() -> bool:
-    """True when the com.gmlx.menubar LaunchAgent is loaded - killing
+    """True when the com.gmlx.commands.menubar LaunchAgent is loaded - killing
     that bar's pid just makes KeepAlive respawn it; it is quit from its own
     menu (clean exit) or removed with `service uninstall`."""
     return agent_loaded(MENUBAR_AGENT_LABEL)
@@ -1186,7 +1186,7 @@ def service_install_menubar(serve_args: list, *, host: str, port: int,
         if rc != 0:
             return rc
     run = read_run(host, port) or {}
-    from . import menubar as _mb
+    import gmlx.commands.menubar as _mb
     settings = _mb.load_menubar_settings()
     settings["autostart"] = ({
         "argv": [str(x) for x in (run.get("argv") or [])],
@@ -1256,7 +1256,7 @@ def service_uninstall(host: str, port) -> int:
     mb_removed = _remove_agent(MENUBAR_AGENT_LABEL, _menubar_agent_plist_path())
     if mb_removed:
         try:
-            from . import menubar as _mb
+            import gmlx.commands.menubar as _mb
             settings = _mb.load_menubar_settings()
             settings["autostart"] = None
             _mb.save_menubar_settings(settings)
@@ -1303,7 +1303,7 @@ def service_status(host: str, port) -> int:
     if mb_loaded or _menubar_agent_plist_path().exists():
         auto = None
         try:
-            from . import menubar as _mb
+            import gmlx.commands.menubar as _mb
             auto = _mb.load_menubar_settings().get("autostart")
         except Exception:
             pass
@@ -1319,7 +1319,7 @@ def service_status(host: str, port) -> int:
         print(f"launchd agent {label}: not loaded")
         others = sorted(p.stem for p in
                         Path("~/Library/LaunchAgents").expanduser()
-                        .glob("com.gmlx.server.*.plist") if p.stem != label)
+                        .glob("com.gmlx.serve.server.*.plist") if p.stem != label)
         if others:
             print(f"  installed agent(s): {', '.join(others)} - target one "
                   f"with --host/--port")

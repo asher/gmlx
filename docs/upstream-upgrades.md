@@ -2,7 +2,7 @@
 
 gmlx monkeypatches ~30 private symbols across mlx-vlm and mlx-lm and
 deep-imports model internals (the full inventory lives in
-`gmlx/upstream_seams.py`). That surface is safe **only under the exact
+`gmlx/upstream/seams.py`). That surface is safe **only under the exact
 `mlx-vlm==` pin in pyproject** - upstream point releases move it. Example:
 mlx-vlm 0.6.4 vendored mlx-lm's `switch_layers` module, which silently
 un-matched our MoE expert leaf swap and surfaced as an opaque `gather_mm`
@@ -13,7 +13,7 @@ Three layers of defense:
 - **Exact pin** (`pyproject.toml`): `mlx-vlm==X.Y.Z`; mlx and mlx-lm move in
   lockstep with it (mlx-lm carries a floor so source/git installs still
   resolve).
-- **Seam contract** (`tests/test_upstream_seams.py`): every patched symbol is
+- **Seam contract** (`tests/upstream/test_upstream_seams.py`): every patched symbol is
   pinned to a source fingerprint; any drift fails CI naming the exact seam.
 - **Runtime gate** (`check_upstream_versions`, called at CLI entry): a stale
   venv resolves pip constraints only once, so below-floor versions refuse to
@@ -40,7 +40,7 @@ gmlx site that consumes it.
    ```sh
    python3 -m venv /tmp/gmlx-bump && . /tmp/gmlx-bump/bin/activate
    pip install -e /path/to/gmlx && pip install mlx-vlm==<target>
-   python -m gmlx.upstream_seams   # drift report
+   python -m gmlx.upstream.seams   # drift report
    ```
 
 2. **Re-audit each drifted seam.** Diff the upstream source between the pinned
@@ -52,7 +52,7 @@ gmlx site that consumes it.
    (regen refuses to run once our installers have patched the process):
 
    ```sh
-   python -m gmlx.upstream_seams --regen
+   python -m gmlx.upstream.seams --regen
    ```
 
    This also records the qualified versions the runtime gate warns against.
@@ -70,14 +70,14 @@ gmlx site that consumes it.
 6. **Env-gated integration tests**:
 
    ```sh
-   KQUANT_TEST_MTP_GGUF=<path> pytest tests/test_full_prompt_prefill.py \
-       tests/test_qwen35_verify_fold.py
+   KQUANT_TEST_MTP_GGUF=<path> pytest tests/spec/test_full_prompt_prefill.py \
+       tests/models/test_qwen35_verify_fold.py
    ```
 
 7. **Pin bump commit**: pyproject pin(s) + the regenerated
-   `gmlx/upstream_seams.json` together, as their own commit.
+   `gmlx/upstream/seams.json` together, as their own commit.
 
-## Cache-class origins (`gmlx/cache_compat.py`)
+## Cache-class origins (`gmlx/cache/compat.py`)
 
 mlx-vlm <= 0.6.3 re-exported mlx-lm's KV-cache classes; 0.6.4 vendored its
 own `models/cache.py`, so the same cache kind has two class identities and
@@ -100,7 +100,7 @@ code:
 ## Adding a new seam
 
 Any new monkeypatch or deep import of upstream internals gets a row in
-`SEAMS` (`gmlx/upstream_seams.py`) in the same change, then
-`python -m gmlx.upstream_seams --regen`. Critical seams (correctness or
+`SEAMS` (`gmlx/upstream/seams.py`) in the same change, then
+`python -m gmlx.upstream.seams --regen`. Critical seams (correctness or
 a hard feature dependency) set `critical=True` and their installer must raise
 when the seam is missing; optional accelerations warn once and fall back.

@@ -18,8 +18,8 @@ from __future__ import annotations
 import mlx.core as mx
 import pytest
 
-from gmlx.arrays_cache_fix import install_arrays_cache_fix
-from gmlx.cache_compat import cache_types
+from gmlx.upstream.arrays_cache_fix import install_arrays_cache_fix
+from gmlx.cache.compat import cache_types
 
 
 @pytest.fixture(autouse=True)

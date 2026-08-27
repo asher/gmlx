@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import pytest
 
-from gmlx import arch_table, config_synth  # noqa: E402
-from gmlx.arch_table import UnsupportedArchError, gate  # noqa: E402
+import gmlx.load.arch_table as arch_table  # noqa: E402
+import gmlx.load.config_synth as config_synth  # noqa: E402
+from gmlx.load.arch_table import UnsupportedArchError, gate  # noqa: E402
 
 
 def test_supported_arch_resolves():
@@ -76,7 +77,7 @@ def test_missing_mlx_lm_model_refused_mode_b(monkeypatch):
 def test_load_config_from_source_local_dir(tmp_path):
     # A local dir with a config.json is used directly - no network.
     pytest.importorskip("mlx_lm")
-    from gmlx.loader import _load_config_from_source
+    from gmlx.load.loader import _load_config_from_source
 
     (tmp_path / "config.json").write_text(
         '{"model_type": "qwen2", "hidden_size": 64}')
@@ -90,7 +91,7 @@ def test_load_config_from_source_hf_id(tmp_path, monkeypatch):
     pytest.importorskip("mlx_lm")
     import huggingface_hub
 
-    from gmlx.loader import _load_config_from_source
+    from gmlx.load.loader import _load_config_from_source
 
     fetched = tmp_path / "config.json"
     fetched.write_text('{"model_type": "llama"}')

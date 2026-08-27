@@ -25,7 +25,7 @@ matmul alone runs at 33.7 GB/s), fused [6144x4096] = 126 us; gate+up
 fused wins 1.17x. Fusing is an occupancy lever here, not a launch-count
 lever: the whole non-matmul dispatch soup costs ~1.2 ms per step flat.
 
-Mechanics follow gmlx.qkv_fuse (gpt-oss): class-swap eligible modules
+Mechanics follow gmlx.upstream.qkv_fuse (gpt-oss): class-swap eligible modules
 onto a subclass whose batched-decode path (L == 1, B >= 2) runs ONE
 matmul over row-concatenated wire bytes, split afterwards. B == 1
 stays stock: the M=1 matvec grids already fill the chip and the

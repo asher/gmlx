@@ -128,7 +128,7 @@ def _should_decline(gen) -> bool:
     deferred = getattr(gen, "_kq_admit_deferred_s", {})
 
     from .governor import admission_hold_reason
-    from .server_memory import project_admission
+    from .memory import project_admission
 
     hold = admission_hold_reason(gen)
     if hold:

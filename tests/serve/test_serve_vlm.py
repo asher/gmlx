@@ -12,7 +12,7 @@ import pytest
 
 pytest.importorskip("mlx_vlm")
 
-from gmlx import server_bridge_vlm as serving  # noqa: E402
+import gmlx.serve.bridge_vlm as serving  # noqa: E402
 
 _ENV_KEYS = ("MLX_VLM_GGUF_MMPROJ", "MLX_VLM_GGUF_HF_SOURCE")
 
@@ -80,7 +80,7 @@ class _FakeVLMModel:
 
 @pytest.fixture
 def fake_load_vlm_model(monkeypatch):
-    """Stub ``gmlx.vlm.load_vlm_model`` without importing the heavy real
+    """Stub ``gmlx.load.vlm.load_vlm_model`` without importing the heavy real
     module; records its call and returns ``(model, config_dict, processor)``
     (the loader's order, which the server branch must reorder)."""
     calls = []
@@ -93,9 +93,9 @@ def fake_load_vlm_model(monkeypatch):
         )
         return _FakeVLMModel(), {"model_type": "gemma4_unified"}, processor
 
-    mod = types.ModuleType("gmlx.vlm")
+    mod = types.ModuleType("gmlx.load.vlm")
     mod.load_vlm_model = _fake
-    monkeypatch.setitem(sys.modules, "gmlx.vlm", mod)
+    monkeypatch.setitem(sys.modules, "gmlx.load.vlm", mod)
     return calls, processor
 
 
@@ -120,8 +120,8 @@ def spy_placement(monkeypatch):
     """Record the placement/lever installers instead of running them, so the
     branch is testable without a streamed model. Each entry is
     ``(target, args, kwargs)`` keyed by installer name."""
-    import gmlx.loader as loader
-    import gmlx.moe_experts as moe_experts
+    import gmlx.load.loader as loader
+    import gmlx.stream.moe_experts as moe_experts
 
     seen: dict[str, tuple] = {}
 

@@ -21,7 +21,7 @@ import pytest
 
 from mlx_lm.models.qwen3_5 import GatedDeltaNet
 
-patches = importlib.import_module("gmlx.gdn_patches")
+patches = importlib.import_module("gmlx.upstream.gdn_patches")
 
 
 def _bare_gdn(dtype=mx.float32, hv=2, k=4):

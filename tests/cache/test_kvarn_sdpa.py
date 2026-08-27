@@ -11,8 +11,8 @@ import pytest
 
 import mlx.core as mx
 
-from gmlx.kvarn_cache import KVarNKVCache
-from gmlx.kvarn_sdpa import install_kvarn_sdpa, kvarn_attention
+from gmlx.cache.kvarn_cache import KVarNKVCache
+from gmlx.cache.kvarn_sdpa import install_kvarn_sdpa, kvarn_attention
 
 _NEEDS_GPU = pytest.mark.skipif(
     mx.default_device() != mx.gpu,

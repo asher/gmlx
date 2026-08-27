@@ -12,7 +12,7 @@ import mlx.nn as nn
 import numpy as np
 import pytest
 
-from gmlx.modules import install_fused_moe_glu, install_hyv3_shexp_fold
+from gmlx.load.modules import install_fused_moe_glu, install_hyv3_shexp_fold
 
 
 class _Shell(nn.Module):
@@ -28,7 +28,7 @@ def _kq_moe(codec="iq4_xs", shexp_codec="q8_0", d=256, inter=256,
     reads shapes + codecs, and the kernel calls are faked)."""
     from mlx_kquant.nn import KQuantLinear, KQuantSwitchLinear
 
-    from gmlx.hy_v3_model import MoE
+    from gmlx.models.hy_v3.model import MoE
 
     args = SimpleNamespace(
         hidden_size=d,
@@ -101,7 +101,7 @@ def test_block_env_disables_fold(monkeypatch):
 def test_fused_branch_rides_shexp_kernels(monkeypatch):
     import mlx_kquant as kq
 
-    from gmlx import modules
+    import gmlx.load.modules as modules
 
     blk = _kq_moe()
     _installed(blk)
@@ -143,7 +143,7 @@ def test_fused_branch_rides_shexp_kernels(monkeypatch):
 
 
 def test_stamped_fallback_single_shexp_add(monkeypatch):
-    from gmlx.hy_v3_model import MLP
+    from gmlx.models.hy_v3.model import MLP
 
     blk = _kq_moe()
     _installed(blk)
@@ -197,7 +197,7 @@ def _stub_moe(mixed, stamp):
     (False, False, 1),  # stock shape
 ])
 def test_moe_contract_adds_shexp_once(monkeypatch, mixed, stamp, n_shexp):
-    from gmlx.hy_v3_model import MLP
+    from gmlx.models.hy_v3.model import MLP
 
     blk = _stub_moe(mixed, stamp)
     calls = []
@@ -214,7 +214,7 @@ def test_moe_contract_adds_shexp_once(monkeypatch, mixed, stamp, n_shexp):
 
 
 def test_mix_env_off_keeps_scores_out(monkeypatch):
-    from gmlx import hy_v3_model
+    import gmlx.models.hy_v3.model as hy_v3_model
 
     monkeypatch.setattr(hy_v3_model, "_MOE_MIX_SCORES", False)
     blk = _stub_moe(mixed=False, stamp=False)

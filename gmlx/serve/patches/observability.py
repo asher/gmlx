@@ -67,7 +67,7 @@ def uvicorn_log_config(level: str | None = None) -> dict:
             f["fmt"] = "%(asctime)s " + f["fmt"]
             f.setdefault("datefmt", "%Y-%m-%d %H:%M:%S")
     cfg.setdefault("filters", {})["kq_access_noise"] = {
-        "()": "gmlx.server_patches.observability._AccessNoiseFilter"}
+        "()": "gmlx.serve.patches.observability._AccessNoiseFilter"}
     acc = cfg["loggers"].setdefault("uvicorn.access", {})
     acc["filters"] = [*acc.get("filters", []), "kq_access_noise"]
     # Route the package's own loggers (residency, speculative, spec_engine, ...)

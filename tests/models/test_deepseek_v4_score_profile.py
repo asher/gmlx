@@ -7,9 +7,9 @@ from types import SimpleNamespace
 import mlx.core as mx
 import pytest
 
-from gmlx import deepseek_v4_model as dsv4
-from gmlx import prefill_decay as pd
-from gmlx.deepseek_v4_cache import BatchPoolingCache, PoolingCache
+import gmlx.models.deepseek_v4.model as dsv4
+import gmlx.gen.prefill_decay as pd
+from gmlx.models.deepseek_v4.cache import BatchPoolingCache, PoolingCache
 
 
 @pytest.fixture

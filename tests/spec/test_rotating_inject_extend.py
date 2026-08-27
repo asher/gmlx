@@ -17,7 +17,7 @@ from mlx_vlm.models.cache import (
     RotatingKVCache,
 )
 
-from gmlx.speculative import _lift_injected_cache, _lift_live_cache
+from gmlx.spec.speculative import _lift_injected_cache, _lift_live_cache
 
 H, D = 2, 4
 

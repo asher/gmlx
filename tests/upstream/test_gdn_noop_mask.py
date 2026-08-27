@@ -17,11 +17,11 @@ from __future__ import annotations
 
 import mlx.core as mx
 
-from gmlx.gdn_patches import _mask_excludes_nothing
+from gmlx.upstream.gdn_patches import _mask_excludes_nothing
 
 
 def _reset_memo():
-    import gmlx.gdn_patches as g
+    import gmlx.upstream.gdn_patches as g
 
     g._noop_mask_memo = (None, False)
 

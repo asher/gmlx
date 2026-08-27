@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from gmlx.assistant_brain import (AssistantBrain, Tool, ToolRegistry,
+from gmlx.assistant.brain import (AssistantBrain, Tool, ToolRegistry,
                                   _call_with_timeout)
 
 

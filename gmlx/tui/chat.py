@@ -98,7 +98,7 @@ def _build_parser(prog: str = "gmlx chat") -> argparse.ArgumentParser:
         "Esc or Ctrl-C cancels a reply.",
         add_help=False,
     )
-    from .cli import add_condensed_help
+    from gmlx.commands.cli import add_condensed_help
     add_condensed_help(ap, (
         "gguf", "--assistant", "--server", "--config", "--profile", "--system-prompt",
         "--reasoning", "--thinking", "--mmproj", "--max-tokens", "--temp",
@@ -156,7 +156,7 @@ def _build_parser(prog: str = "gmlx chat") -> argparse.ArgumentParser:
 
     # Load options (the `run` subset that applies to an interactive session;
     # shared builders keep the two surfaces in sync).
-    from .cli import (
+    from gmlx.commands.cli import (
         add_config_profile_args,
         add_kv_cache_args,
         add_load_args,
@@ -324,7 +324,7 @@ def _template_text(args) -> str:
     if not path or not os.path.exists(os.path.expanduser(str(path))):
         return ""
     try:
-        from .headerscan import scan_gguf
+        from gmlx.load.headerscan import scan_gguf
 
         t = scan_gguf(os.path.expanduser(str(path)), include_tensors=False).kv.get(
             "tokenizer.chat_template"
@@ -341,7 +341,7 @@ def fold_thinking_flag(args, tkw: dict) -> dict:
     into the template kwargs, spelled as the variables this model's chat
     template actually reads. ``tkw`` (the ``--chat-template-config`` blob)
     passes through verbatim; the dedicated flags overlay it. See
-    :func:`gmlx.reasoning.map_thinking_controls` for the spelling table."""
+    :func:`gmlx.tui.reasoning.map_thinking_controls` for the spelling table."""
     t = getattr(args, "thinking", None)
     effort = getattr(args, "reasoning_effort", None)
     if t is None and effort is None:
@@ -972,7 +972,7 @@ def _build_model_info(args, config, drafter, vlm_mtp: bool) -> dict:
     """Model card, built once post-load (a header-only GGUF re-read)."""
     info: dict = {"path": os.path.abspath(args.gguf)}
     try:
-        from .preflight import preflight
+        from gmlx.load.preflight import preflight
 
         pf = preflight(args.gguf, arch=args.arch)
         info.update(
@@ -1392,7 +1392,7 @@ def _slash_render(cmd, arg, state):
         print("[chat] /render needs one of: plain, lite, rich")
         return None
     if arg == "rich" and not rich_available():
-        from .extras import install_hint
+        from gmlx.commands.extras import install_hint
 
         print(f"[chat] rich not installed ({install_hint('chat')})")
         return None
@@ -1850,7 +1850,7 @@ class _EscCancel:
             elif ch == b"\x0f" and self._on_toggle is not None:
                 self._on_toggle()
             elif ch == b"\x14":
-                from .thinking_budget import finish_thinking_now
+                from gmlx.gen.thinking_budget import finish_thinking_now
 
                 finish_thinking_now()
         return hit
@@ -1932,7 +1932,7 @@ def _stream_reply(
     Returns ``(text_so_far, canceled)`` - the *raw* text (markers intact) so
     multi-turn history stays faithful - and records the reply's tok/s for the
     stat line + toolbar when it completes."""
-    from .generation import StopScanner
+    from gmlx.gen.generation import StopScanner
     from .reasoning import ReasoningFilter, ReasoningPrinter, want_color
 
     scanner = StopScanner(stops) if stops else None
@@ -2062,7 +2062,7 @@ def _opens_thinking(prompt) -> bool:
     """Whether a rendered ``prompt`` pre-opens a ``<think>`` block (so the model
     streams only the close). Tolerant of token-id prompts - returns False for
     non-strings, so callers pass the string render where they have one."""
-    from .thinking_budget import prompt_opens_thinking
+    from gmlx.gen.thinking_budget import prompt_opens_thinking
 
     return prompt_opens_thinking(prompt)
 
@@ -2215,8 +2215,8 @@ def _auto_server(args, parser) -> bool:
                  "prefill_feeder", "decode_feeder"):
         if getattr(args, attr, None) != parser.get_default(attr):
             return False
-    from . import launch as launch_mod
-    from . import lifecycle
+    import gmlx.commands.launch as launch_mod
+    import gmlx.serve.lifecycle as lifecycle
     try:
         host, port = lifecycle.auto_target(None, None)
         base = f"http://{host}:{port}/v1"
@@ -2225,7 +2225,7 @@ def _auto_server(args, parser) -> bool:
         if not args.gguf:
             args.base_url = base  # server default (or its served-ids error)
             return True
-        from .talk_client import probe_capabilities
+        from gmlx.talk.client import probe_capabilities
         served = probe_capabilities(base, args.api_key).get("chat_ids") or []
     except Exception:             # noqa: BLE001 - probe hiccup = stay local
         return False
@@ -2240,7 +2240,7 @@ def _auto_server(args, parser) -> bool:
             os.path.expanduser(requested)):
         real = os.path.realpath(os.path.expanduser(requested))
         try:
-            from .launch import _discover_config
+            from gmlx.commands.launch import _discover_config
             cfg, _path = _discover_config()
             models = list(getattr(cfg, "models", None) or [])
         except Exception:         # noqa: BLE001
@@ -2263,7 +2263,7 @@ def _setup_assistant(args):
     stream seam reads every round."""
     import atexit
 
-    from . import launch as launch_mod
+    import gmlx.commands.launch as launch_mod
 
     ns = argparse.Namespace(
         harness=None,
@@ -2281,7 +2281,7 @@ def _setup_assistant(args):
         return rc
     base_url, api_key = ns.base_url, ns.api_key
 
-    from .talk_client import TalkClientError, probe_capabilities
+    from gmlx.talk.client import TalkClientError, probe_capabilities
 
     try:
         caps = probe_capabilities(base_url, api_key)
@@ -2340,16 +2340,16 @@ def _setup_assistant(args):
     # memory store stay off even where the config enables them).
     plain = getattr(args, "server", False)
 
-    from .config import AssistantCfg
+    from gmlx.config import AssistantCfg
 
     a = AssistantCfg()
     if not plain:
         try:
             if args.config:
-                from . import config as cfgmod
+                import gmlx.config as cfgmod
                 a = cfgmod.load_config(args.config).assistant
             else:
-                from .launch import _discover_config
+                from gmlx.commands.launch import _discover_config
                 cfg, _path = _discover_config()
                 if cfg is not None:
                     a = cfg.assistant
@@ -2357,9 +2357,9 @@ def _setup_assistant(args):
             print(f"[chat] config: {e} - assistant runs tool-less",
                   file=sys.stderr)
 
-    from .assistant_brain import AssistantBrain
-    from .talk_client import stream_chat as _stream_chat
-    from .talk_mcp import connect_servers
+    from gmlx.assistant.brain import AssistantBrain
+    from gmlx.talk.client import stream_chat as _stream_chat
+    from gmlx.assistant.mcp import connect_servers
     mcp_host, registry, warns = connect_servers(
         () if plain else a.mcp, call_timeout_s=a.tool_timeout_s)
     for w in warns:
@@ -2367,7 +2367,7 @@ def _setup_assistant(args):
 
     memory = None
     if a.memory.enabled and not plain:        # the same store talk uses
-        from .talk_memory import MemoryStore, make_extractor
+        from gmlx.assistant.memory import MemoryStore, make_extractor
 
         extractor = (
             make_extractor(base_url, model_request, api_key=api_key)
@@ -2468,7 +2468,7 @@ def _assistant_reply(brain, user_text: str, state: ChatState) -> tuple[str, bool
     closes the brain turn - partial text commits, tool rounds stay atomic."""
     from types import SimpleNamespace
 
-    from .talk_client import TalkClientError
+    from gmlx.talk.client import TalkClientError
 
     status_shown = [False]
     t0 = time.monotonic()
@@ -2760,8 +2760,8 @@ def _backend_vlm_mtp(args) -> _ChatBackend:
     # stream.
     from mlx_vlm.models.cache import make_prompt_cache as _mtp_make_cache
 
-    from . import loadlog
-    from .mtp_load import load_vlm_mtp_model
+    import gmlx.load.loadlog as loadlog
+    from gmlx.spec.mtp_load import load_vlm_mtp_model
 
     b = _ChatBackend()
     with loadlog.load_ui(args.verbose, args.gguf):
@@ -2781,8 +2781,8 @@ def _backend_vlm_mtp(args) -> _ChatBackend:
 
 
 def _backend_vlm(args) -> _ChatBackend:
-    from . import loadlog
-    from .vlm import load_vlm_model
+    import gmlx.load.loadlog as loadlog
+    from gmlx.load.vlm import load_vlm_model
 
     b = _ChatBackend()
     with loadlog.load_ui(args.verbose, args.gguf):
@@ -2805,10 +2805,10 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
     # across turns exactly like the plain text path.
     from mlx_vlm.models.cache import make_prompt_cache as _mtp_make_cache
 
-    from . import loadlog
-    from .cli import _apply_placement
-    from .loader import preset_native_fp_wire_env
-    from .mtp_load import load_mtp_model
+    import gmlx.load.loadlog as loadlog
+    from gmlx.commands.cli import _apply_placement
+    from gmlx.load.loader import preset_native_fp_wire_env
+    from gmlx.spec.mtp_load import load_mtp_model
 
     b = _ChatBackend()
     preset_native_fp_wire_env(args)
@@ -2829,7 +2829,7 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
 
     mtp_kvarn_cfg = None
     if (getattr(args, "kv_quant_scheme", None) or "uniform") == "kvarn":
-        from .generation import _kvarn_widths, setup_kvarn_mtp_cache
+        from gmlx.gen.generation import _kvarn_widths, setup_kvarn_mtp_cache
 
         tail = int(getattr(args, "kv_tail_tokens", 1024) or 0)
         block = args.draft_block_size or int(getattr(b.drafter.config, "block_size", 3))
@@ -2854,7 +2854,7 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
     # an accurate note instead of the generic dropped-flags warning.
     mtp_quantize_pools = None
     if kv_kwargs.get("kv_bits") is not None:
-        from .generation import quantize_pooled_caches
+        from gmlx.gen.generation import quantize_pooled_caches
 
         bits = kv_kwargs["kv_bits"]
         group = kv_kwargs.get("kv_group_size", 64)
@@ -2875,11 +2875,11 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
         # reads back - one cache, reused across turns (like the text path).
         c = _mtp_make_cache(b.model.language_model)
         if mtp_quantize_pools is not None:
-            from .generation import quantize_pooled_caches
+            from gmlx.gen.generation import quantize_pooled_caches
 
             quantize_pooled_caches(c, *mtp_quantize_pools)
         if mtp_kvarn_cfg is not None:
-            from .kvarn_cache import convert_prompt_cache
+            from gmlx.cache.kvarn_cache import convert_prompt_cache
 
             convert_prompt_cache(c, **mtp_kvarn_cfg)
         return c
@@ -2891,9 +2891,9 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
 def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
     from mlx_lm.models.cache import make_prompt_cache
 
-    from . import loadlog
-    from .envflags import env_bool
-    from .loader import load_model, preset_native_fp_wire_env
+    import gmlx.load.loadlog as loadlog
+    from gmlx.envflags import env_bool
+    from gmlx.load.loader import load_model, preset_native_fp_wire_env
 
     # Sets GMLX_NATIVE_FP before the load reads it - on the background
     # path load_model runs off-thread, so the env must be in place here.
@@ -2918,11 +2918,11 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
     def _new_text_cache():
         c = make_prompt_cache(b.model, args.max_kv_size)
         if quantize_pools is not None:
-            from .generation import quantize_pooled_caches
+            from gmlx.gen.generation import quantize_pooled_caches
 
             quantize_pooled_caches(c, *quantize_pools)
         if kvarn_cfg is not None:
-            from .kvarn_cache import convert_prompt_cache
+            from gmlx.cache.kvarn_cache import convert_prompt_cache
 
             convert_prompt_cache(c, **kvarn_cfg)
         return c
@@ -2937,16 +2937,16 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
         if not args.no_chat_template:
             _require_chat_template(b.tok, verbatim_hint=True)
 
-        from .cli import _apply_placement
+        from gmlx.commands.cli import _apply_placement
 
         _apply_placement(args, b.model)
-        from .loader import _resolve_prefill_step
+        from gmlx.load.loader import _resolve_prefill_step
 
         step, defaulted = _resolve_prefill_step(
             b.model, kv_kwargs.get("prefill_step_size")
         )
         if defaulted:
-            from . import loadlog
+            import gmlx.load.loadlog as loadlog
 
             loadlog.info(
                 f"[prefill] streaming model: chunk size defaults to {step} "
@@ -2956,7 +2956,7 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
             kv_kwargs["prefill_step_size"] = step
 
         if (getattr(args, "kv_quant_scheme", None) or "uniform") == "kvarn":
-            from .generation import (
+            from gmlx.gen.generation import (
                 _kvarn_rotating_window,
                 _kvarn_widths,
                 setup_kvarn_cache,
@@ -2988,11 +2988,11 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
         # flag is honored by packing those at rest instead; the fp16
         # sliding windows are size-capped either way.
         if kv_kwargs.get("kv_bits") is not None:
-            from .generation import kv_quantization_unsupported
+            from gmlx.gen.generation import kv_quantization_unsupported
 
             reason = kv_quantization_unsupported(b.model, max_kv_size=args.max_kv_size)
             if reason:
-                from .generation import quantize_pooled_caches
+                from gmlx.gen.generation import quantize_pooled_caches
 
                 bits = kv_kwargs["kv_bits"]
                 group = kv_kwargs.get("kv_group_size", 64)
@@ -3010,8 +3010,8 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
                 kv_kwargs["kv_bits"] = None
 
         if args.adapter:
-            from .adapter import apply_gguf_adapter
-            from .discovery import header_meta
+            from gmlx.load.adapter import apply_gguf_adapter
+            from gmlx.load.discovery import header_meta
 
             adapter = os.path.abspath(os.path.expanduser(args.adapter))
             base_arch = getattr(args, "arch", None) or (
@@ -3056,7 +3056,7 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
         # deferred model-dependent setup.
         if load_thread.is_alive():
             if sys.stderr.isatty():
-                from .spinner import Spinner
+                from gmlx.spinner import Spinner
 
                 with Spinner(f"loading {os.path.basename(args.gguf)}"):
                     load_thread.join()
@@ -3070,7 +3070,7 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
         if status == "err":
             # Same merged reason line + dedupe flag as the run path, so the
             # CLI backstop doesn't stack a second "error:" line.
-            from .loadlog import report_failure
+            from gmlx.load.loadlog import report_failure
 
             report_failure(payload, cap.stage if cap is not None else None)
             raise payload
@@ -3093,7 +3093,7 @@ def _load_chat_backend(
         b = _ChatBackend()
         b.config = {}
         return b
-    from .tool_preflight import check_or_exit
+    from gmlx.commands.tool_preflight import check_or_exit
 
     check_or_exit(args.gguf,
                   streaming=getattr(args, "stream_experts", False))
@@ -3111,7 +3111,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
     parser = _build_parser(prog)
     args = parser.parse_args(argv)
     if args.stochastic_mtp:
-        from .speculative import set_stoch_accept
+        from gmlx.spec.speculative import set_stoch_accept
 
         set_stoch_accept(True)
     brain = None  # --assistant: server-backed turn engine
@@ -3135,7 +3135,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         if rc is not None:
             return rc
         if args.gguf:
-            from .cli import split_path_intent
+            from gmlx.commands.cli import split_path_intent
 
             split_path_intent(args)  # id@profile -> id + --profile
         logit_bias = parse_logit_bias(args.logit_bias)
@@ -3190,7 +3190,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         # By-name config fallback (same rules as `gmlx run`): a positional that isn't
         # an on-disk file is resolved against the server config by id/alias, applying that
         # model's path + sampling/template/load settings.
-        from .cli import (
+        from gmlx.commands.cli import (
             apply_family_defaults,
             maybe_load_from_config,
             split_path_intent,
@@ -3220,7 +3220,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             return rc
         # chat prints the family note up front: its load is backgrounded and
         # joined mid-REPL, so there is no clean post-load spot for it.
-        from .cli import print_family_note
+        from gmlx.commands.cli import print_family_note
 
         print_family_note(args)
         if args.adapter and args.mmproj:
@@ -3247,7 +3247,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 file=sys.stderr,
             )
             return 2
-        from .cli import (
+        from gmlx.commands.cli import (
             _vlm_mtp_drafter_available,
             mtp_dropped_chat_flags,
             resolve_speculative,
@@ -3335,7 +3335,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
     # theme definition warns rather than blocking the session.
     cfg_theme = None
     try:
-        from . import config as cfgmod
+        import gmlx.config as cfgmod
 
         _theme_cfg, _ = cfgmod.load_cli_config(getattr(args, "config", None))
     except cfgmod.ConfigError:
@@ -3446,7 +3446,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
     else:
         model_key = os.path.abspath(args.gguf)
         try:
-            from .discovery import derive_id
+            from gmlx.load.discovery import derive_id
 
             state.model_name = derive_id(os.path.basename(args.gguf))[0][:24]
         except Exception:
@@ -3498,7 +3498,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         cache = backend.new_text_cache()
         _bind_model_state()
 
-    from .extras import install_hint
+    from gmlx.commands.extras import install_hint
 
     editor = (
         "prompt_toolkit"
@@ -3702,8 +3702,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 return 2
             _apply_session(doc, spath.stem)
 
-    from .cli import _DIFFUSION_MAX_TOKENS, _UNCAPPED_MAX_TOKENS
-    from .thinking_budget import install_finish_thinking_key
+    from gmlx.commands.cli import _DIFFUSION_MAX_TOKENS, _UNCAPPED_MAX_TOKENS
+    from gmlx.gen.thinking_budget import install_finish_thinking_key
 
     install_finish_thinking_key()  # ^T closes an open thinking block
 
@@ -3834,7 +3834,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 # cache append of the plain MTP path). Also record the turn in
                 # vlm_msgs so the first image turn can re-prefill the full history on
                 # the VLM path; once any media enters, the session stays on that path.
-                from .generation import stream_generate_speculative
+                from gmlx.gen.generation import stream_generate_speculative
 
                 messages = list(state.take("replay_messages") or [])
                 if first_turn and state.system_prompt:
@@ -3904,7 +3904,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             # budget-less interruptible processor rides along only so ^T can
             # close a thinking block (mlx-vlm's generate_step applies extra
             # logits_processors with the same (tokens, logits) contract).
-            from .thinking_budget import (
+            from gmlx.gen.thinking_budget import (
                 clear_finish_key_target,
                 make_thinking_budget_processor,
                 prompt_opens_thinking,
@@ -3966,7 +3966,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             # templating + cache append as the plain text path below). Sampling is
             # temp/top-p/top-k/min-p only - mlx-vlm's MTP walk exposes no penalty/
             # bias/stop hooks, so the REPL's other sampling /commands don't apply.
-            from .generation import stream_generate_speculative
+            from gmlx.gen.generation import stream_generate_speculative
 
             messages = list(state.take("replay_messages") or [])
             if first_turn and state.system_prompt:
@@ -4005,12 +4005,12 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             _end_turn(state, reply, canceled, cache=cache)
             continue
 
-        from .diffusion import is_diffusion_model
+        from gmlx.gen.diffusion import is_diffusion_model
 
         if is_diffusion_model(model):
             # Non-autoregressive: denoise a canvas via mlx-vlm. No cross-turn KV
             # cache, and the AR sampler/stop controls don't apply.
-            from .diffusion import stream as diffusion_stream
+            from gmlx.gen.diffusion import stream as diffusion_stream
 
             messages = list(state.take("replay_messages") or [])
             if first_turn and state.system_prompt:
@@ -4084,7 +4084,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             min_p=s["min_p"],
             **xtc_kwargs,
         )
-        from .tokenizer import merge_suppressed_tokens
+        from gmlx.load.tokenizer import merge_suppressed_tokens
 
         logit_bias = merge_suppressed_tokens(logit_bias, tok)
         logits_processors = make_logits_processors(
@@ -4099,7 +4099,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         # the rendered prompt actually opens a <think> block (see generation.generate).
         # Built even with no budget set (interruptible): it never trips on its
         # own, but ^T can close the thinking block through it mid-reply.
-        from .thinking_budget import (
+        from gmlx.gen.thinking_budget import (
             clear_finish_key_target,
             make_thinking_budget_processor,
             prompt_opens_thinking,

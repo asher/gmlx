@@ -88,7 +88,7 @@ def install_decode_priority_sched() -> None:
     passes straight through at ratio <= 0 (stock scheduling)."""
     from mlx_vlm.generate import ar as _ar
 
-    from . import prefill_decay as _pd
+    import gmlx.gen.prefill_decay as _pd
 
     if getattr(_ar.BatchGenerator._next, _INSTALLED_FLAG, False):
         return

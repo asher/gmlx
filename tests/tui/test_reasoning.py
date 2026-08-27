@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Streaming reasoning/thinking segmentation + display (``gmlx.reasoning``).
+"""Streaming reasoning/thinking segmentation + display (``gmlx.tui.reasoning``).
 
 CPU-only and model-free: drives the filter/printer with the raw transcripts the
 common reasoning formats actually stream, including marker splits across feed
@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from gmlx import chat
-from gmlx.reasoning import ReasoningFilter, ReasoningPrinter
+import gmlx.tui.chat as chat
+from gmlx.tui.reasoning import ReasoningFilter, ReasoningPrinter
 
 
 def _segment(text: str, *, start: bool = False, chunk: int = 0):
@@ -300,7 +300,7 @@ def test_raw_display_bypasses_answer_sink():
 
 
 def test_themed_printer_uses_theme_slot():
-    from gmlx.theme import resolve_theme
+    from gmlx.tui.theme import resolve_theme
 
     out = []
     t = resolve_theme("nord", depth=1 << 24)
@@ -313,7 +313,7 @@ def test_themed_printer_uses_theme_slot():
 
 # StreamRenderer: the run CLI's (write, close) glue over filter + printer.
 def test_stream_renderer_show_styles_and_strips(capsys):
-    from gmlx.reasoning import StreamRenderer
+    from gmlx.tui.reasoning import StreamRenderer
 
     r = StreamRenderer("show", color=False)
     text = "<think>" + _QWEN
@@ -327,7 +327,7 @@ def test_stream_renderer_show_styles_and_strips(capsys):
 
 
 def test_stream_renderer_prefill_close_only(capsys):
-    from gmlx.reasoning import StreamRenderer
+    from gmlx.tui.reasoning import StreamRenderer
 
     # Pre-fill template: the prompt opened the block, the stream only closes it.
     r = StreamRenderer("hide", start_in_thinking=True, color=False)
@@ -342,7 +342,7 @@ def test_stream_renderer_prefill_close_only(capsys):
 # -- provider-doc thinking switch spellings ------------------------------------
 
 def test_thinking_flag_zai_shapes():
-    from gmlx.reasoning import thinking_flag
+    from gmlx.tui.reasoning import thinking_flag
     assert thinking_flag({"type": "disabled"}) is False
     assert thinking_flag({"type": "enabled"}) is True
     assert thinking_flag({"type": "auto"}) is None       # unknown -> untouched
@@ -352,7 +352,7 @@ def test_thinking_flag_zai_shapes():
 
 
 def test_normalize_template_kwargs_translates_thinking():
-    from gmlx.reasoning import normalize_template_kwargs
+    from gmlx.tui.reasoning import normalize_template_kwargs
     assert normalize_template_kwargs({"thinking": {"type": "disabled"}}) == \
         {"enable_thinking": False}
     # An explicit enable_thinking wins over the translated spelling.
@@ -364,14 +364,14 @@ def test_normalize_template_kwargs_translates_thinking():
 
 
 def test_parse_template_config_translates_thinking():
-    from gmlx.chat import parse_template_config
+    from gmlx.tui.chat import parse_template_config
     assert parse_template_config('{"thinking": {"type": "disabled"}}') == \
         {"enable_thinking": False}
 
 
 def test_fold_thinking_flag(monkeypatch):
     from types import SimpleNamespace
-    import gmlx.chat as chat
+    import gmlx.tui.chat as chat
 
     monkeypatch.setattr(chat, "_template_text",
                         lambda a: "{% if enable_thinking %}...{% endif %}")
@@ -390,7 +390,7 @@ def test_fold_thinking_flag_hy3_dialect(monkeypatch):
     """Hy3 has no enable_thinking; its template grades reasoning_effort with
     a no_think level - --thinking maps onto that spelling."""
     from types import SimpleNamespace
-    import gmlx.chat as chat
+    import gmlx.tui.chat as chat
 
     monkeypatch.setattr(chat, "_template_text",
                         lambda a: "reasoning_effort in ['low','high','no_think']")
@@ -406,7 +406,7 @@ def test_fold_thinking_flag_hy3_dialect(monkeypatch):
 def test_fold_thinking_flag_gpt_oss_warns(monkeypatch, capsys):
     """gpt-oss grades reasoning_effort but cannot disable reasoning."""
     from types import SimpleNamespace
-    import gmlx.chat as chat
+    import gmlx.tui.chat as chat
 
     monkeypatch.setattr(chat, "_template_text",
                         lambda a: 'set reasoning_effort = "medium"')
@@ -417,7 +417,7 @@ def test_fold_thinking_flag_gpt_oss_warns(monkeypatch, capsys):
 
 def test_fold_reasoning_effort_passthrough_and_noop_warning(monkeypatch, capsys):
     from types import SimpleNamespace
-    import gmlx.chat as chat
+    import gmlx.tui.chat as chat
 
     monkeypatch.setattr(chat, "_template_text",
                         lambda a: 'set reasoning_effort = "medium"')
@@ -432,7 +432,7 @@ def test_fold_reasoning_effort_passthrough_and_noop_warning(monkeypatch, capsys)
 def test_fold_thinking_flag_minimax_thinking_mode(monkeypatch):
     """MiniMax-M3: three-state thinking_mode (enabled/disabled/adaptive)."""
     from types import SimpleNamespace
-    import gmlx.chat as chat
+    import gmlx.tui.chat as chat
 
     monkeypatch.setattr(chat, "_template_text",
                         lambda a: 'thinking_mode == "adaptive"')
@@ -446,7 +446,7 @@ def test_fold_thinking_flag_minimax_thinking_mode(monkeypatch):
 
 def test_fold_thinking_adaptive_elsewhere_warns(monkeypatch, capsys):
     from types import SimpleNamespace
-    import gmlx.chat as chat
+    import gmlx.tui.chat as chat
 
     monkeypatch.setattr(chat, "_template_text",
                         lambda a: "{% if enable_thinking %}...{% endif %}")
@@ -460,7 +460,7 @@ def test_map_thinking_controls_base_is_verbatim():
     """An explicitly passed chat_template_kwargs dict is never reinterpreted:
     keys named like the controls pass through untouched; only the dedicated
     control arguments are mapped."""
-    from gmlx.reasoning import map_thinking_controls
+    from gmlx.tui.reasoning import map_thinking_controls
 
     base = {"thinking": "deep", "reasoning_effort": "medium", "x": 1}
     assert map_thinking_controls(base, template="enable_thinking") == base
@@ -472,7 +472,7 @@ def test_map_thinking_controls_base_is_verbatim():
 def test_map_thinking_controls_value_spellings(capsys):
     """Bools, enabled/disabled, and the z.ai dict shape all normalize; an
     unrecognized value warns and is dropped."""
-    from gmlx.reasoning import map_thinking_controls
+    from gmlx.tui.reasoning import map_thinking_controls
 
     tmpl = "{% if enable_thinking %}{% endif %}"
     warns = []
@@ -529,7 +529,7 @@ def test_swallow_budget_bounds_literal_channel_mention():
 
 
 def test_split_harmony_reply_shapes():
-    from gmlx.reasoning import split_harmony_reply
+    from gmlx.tui.reasoning import split_harmony_reply
     full = ('<|channel|>analysis<|message|>Count the entries.'
             "<|end|><|start|>assistant<|channel|>final<|message|>Six.")
     assert split_harmony_reply(full) == ("Count the entries.", "Six.")
@@ -540,7 +540,7 @@ def test_split_harmony_reply_shapes():
 
 
 def test_split_harmony_reply_keeps_first_line_code_indent():
-    from gmlx.reasoning import split_harmony_reply
+    from gmlx.tui.reasoning import split_harmony_reply
     full = ('<|channel|>analysis<|message|>Recall the body.'
             "<|end|><|start|>assistant<|channel|>final<|message|>"
             '\n    """\n    Docstring.\n')
@@ -667,7 +667,7 @@ _KIMI_TAIL = (
 
 
 def test_bare_thinking_spelling_maps_kimi_switch():
-    from gmlx.reasoning import map_thinking_controls
+    from gmlx.tui.reasoning import map_thinking_controls
     assert map_thinking_controls({}, "off", None, _KIMI_TAIL) == \
         {"thinking": False}
     assert map_thinking_controls({}, "on", None, _KIMI_TAIL) == \
@@ -691,7 +691,7 @@ def test_kimi_tail_renders_closed_pair_for_thinking_false():
 
 
 def test_thinking_switch_flag_coercions():
-    from gmlx.reasoning import thinking_switch_flag
+    from gmlx.tui.reasoning import thinking_switch_flag
     assert thinking_switch_flag({"type": "disabled"}) is False
     assert thinking_switch_flag({"type": "enabled"}) is True
     assert thinking_switch_flag("off") is False

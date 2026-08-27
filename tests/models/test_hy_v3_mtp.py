@@ -19,9 +19,9 @@ chunking.
 import mlx.core as mx
 import pytest
 
-from gmlx.config_synth import synthesize_config
-from gmlx.hy_v3_model import ModelArgs, ensure_registered
-from gmlx.hy_v3_mtp import HyV3MTPConfig, HyV3MTPDrafter, HyV3SpecLM
+from gmlx.load.config_synth import synthesize_config
+from gmlx.models.hy_v3.model import ModelArgs, ensure_registered
+from gmlx.models.hy_v3.mtp import HyV3MTPConfig, HyV3MTPDrafter, HyV3SpecLM
 
 from test_config_synth import _HY_V3_SHAPES, _hy_v3_meta
 from test_deepseek_v4_mtp import _randomize_zero_params
@@ -46,7 +46,7 @@ def _tiny_config() -> dict:
 
 
 def _build_target(cfg):
-    from gmlx.loader import MTPTextTarget
+    from gmlx.load.loader import MTPTextTarget
 
     lm = HyV3SpecLM(ModelArgs.from_dict(cfg))
     mx.eval(lm.parameters())
@@ -89,7 +89,7 @@ def _greedy_reference(lm, prompt, n_gen):
 
 
 def _spec_decode(target, lm, drafter, prompt, n_gen, block=2):
-    from gmlx.speculative import stream_speculative
+    from gmlx.spec.speculative import stream_speculative
 
     drafter.reset(target)
     return list(
@@ -186,14 +186,14 @@ def test_mtp_greedy_identity_accept_path(block):
 
 
 def test_speclm_hooks_match_loader_contract():
-    from gmlx.loader import _MTP_TARGET_HOOKS_BY_TYPE
+    from gmlx.load.loader import _MTP_TARGET_HOOKS_BY_TYPE
 
     for hook in _MTP_TARGET_HOOKS_BY_TYPE["hy_v3"]:
         assert callable(getattr(HyV3SpecLM, hook, None)), hook
 
 
 def test_drafter_validates_and_rejects_batch():
-    from gmlx.drafter_protocol import validate_drafter
+    from gmlx.spec.drafter_protocol import validate_drafter
 
     cfg = _tiny_config()
     drafter = _build_drafter(cfg)
@@ -210,7 +210,7 @@ def test_drafter_validates_and_rejects_batch():
 
 
 def test_router_params_pinned_fp32():
-    from gmlx.loader import _FP32_KEEP_BY_MODEL_TYPE
+    from gmlx.load.loader import _FP32_KEEP_BY_MODEL_TYPE
 
     pins = _FP32_KEEP_BY_MODEL_TYPE["hy_v3"]
     for name in (
@@ -236,7 +236,7 @@ def test_mtp_remap_covers_closed_tensor_set():
     hy3-1M-MTP-IQ2_M.gguf, with tiny shapes."""
     from mlx.utils import tree_flatten
 
-    from gmlx.loader import remap_mtp_arrays
+    from gmlx.load.loader import remap_mtp_arrays
 
     cfg = _tiny_config()
     drafter = _build_drafter(cfg)

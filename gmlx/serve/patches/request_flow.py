@@ -7,7 +7,7 @@ from __future__ import annotations
 import importlib
 
 
-from .. import server_bridge_vlm as serving
+import gmlx.serve.bridge_vlm as serving
 from ..capacity import LoadDeferred
 from ._common import (
     _CHAT_PATHS,
@@ -250,7 +250,7 @@ def install_sse_keepalive() -> None:
     keepalive wrapper is outermost. Idempotent per route."""
     from starlette.responses import StreamingResponse
 
-    from ..envflags import env_float
+    from gmlx.envflags import env_float
 
     app = importlib.import_module("mlx_vlm.server.app").app
 

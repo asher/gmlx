@@ -28,7 +28,7 @@ target's own greedy/sampled tokens, so the drafter only sets how many draft
 tokens are accepted (speed), never which tokens (output). The KV construction is
 a pure perf knob -- validated token-identical across KV-window choices.
 
-Contract consumed by ``gmlx.speculative`` (and, for B>1, mlx-vlm's
+Contract consumed by ``gmlx.spec.speculative`` (and, for B>1, mlx-vlm's
 stock ``_mtp_rounds_batch`` until M2 owns the batched round): ``reset``,
 ``prefill_from_target_hidden``, ``set_shared_kv``, ``draft_block``,
 ``accept_verified_tokens`` (+ ``_batch`` / ``filter_batch`` for B>1),
@@ -47,9 +47,9 @@ import mlx.nn as nn
 from mlx_vlm.models.base import create_attention_mask
 from mlx_vlm.models.cache import BatchKVCache, KVCache
 
-from . import prefill_decay
+import gmlx.gen.prefill_decay as prefill_decay
 from .drafter_protocol import native_block_size
-from .envflags import env_bool, env_int
+from gmlx.envflags import env_bool, env_int
 from mlx_vlm.models.qwen3_5.language import Qwen3_5DecoderLayer
 from mlx_vlm.models.qwen3_5_moe.language import Qwen3_5MoeDecoderLayer
 

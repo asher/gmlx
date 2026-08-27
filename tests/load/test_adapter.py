@@ -7,7 +7,7 @@ from __future__ import annotations
 import mlx.core as mx
 import pytest
 
-from gmlx import adapter  # noqa: E402
+import gmlx.load.adapter as adapter  # noqa: E402
 
 # in=128, out=64, rank=8 -> shared dim 8 is unambiguous
 IN, OUT, R = 128, 64, 8

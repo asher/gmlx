@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """EXTRA_PACKAGES mirrors pyproject's [project.optional-dependencies] by hand
-(see gmlx/extras.py docstring); this anchors the two against drift."""
+(see gmlx/commands/extras.py docstring); this anchors the two against drift."""
 from __future__ import annotations
 
 import re
 import tomllib
 from pathlib import Path
 
-from gmlx import extras
+import gmlx.commands.extras as extras
 
 _SELF_REF = re.compile(r"^gmlx\[([^\]]+)\]$")
 
@@ -16,7 +16,7 @@ def _pyproject_extras() -> dict[str, set[str]]:
     """The declared optional-dependency sets, with self-referential entries
     like ``gmlx[stt,tts]`` flattened into the component extras' packages -
     recursively, since ``all`` nests ``talk`` which nests ``stt,tts``."""
-    root = Path(extras.__file__).resolve().parent.parent
+    root = Path(extras.__file__).resolve().parents[2]
     with open(root / "pyproject.toml", "rb") as f:
         declared = tomllib.load(f)["project"]["optional-dependencies"]
 

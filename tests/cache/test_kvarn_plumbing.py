@@ -9,7 +9,7 @@ import pytest
 
 import mlx.core as mx
 
-from gmlx.generation import _kvarn_widths, kvarn_unsupported, setup_kvarn_cache
+from gmlx.gen.generation import _kvarn_widths, kvarn_unsupported, setup_kvarn_cache
 
 _NEEDS_GPU = pytest.mark.skipif(
     mx.default_device() != mx.gpu,
@@ -40,7 +40,7 @@ class _FakeModel:
 
 
 def _parser():
-    from gmlx.cli import add_kv_cache_args
+    from gmlx.commands.cli import add_kv_cache_args
 
     ap = argparse.ArgumentParser()
     add_kv_cache_args(ap)
@@ -67,7 +67,7 @@ def test_cli_rejects_unknown_scheme():
 
 
 def test_config_keys_registered():
-    from gmlx.cli import _CFG_LOAD_TO_ARG
+    from gmlx.commands.cli import _CFG_LOAD_TO_ARG
     from gmlx.config import LOAD_ENV
 
     assert LOAD_ENV["kv_quant_scheme"] == "KV_QUANT_SCHEME"
@@ -130,7 +130,7 @@ def test_unsupported_mixed_dims(_ops_ok, monkeypatch):
 
 def test_unsupported_gemma4_owned_tree(_ops_ok, monkeypatch):
     monkeypatch.delenv("GMLX_KVARN", raising=False)
-    from gmlx import gemma4_owned
+    import gmlx.models.gemma4.owned as gemma4_owned
 
     owned = _FakeModel(head_dim=256)
     monkeypatch.setattr(gemma4_owned, "is_owned_language_model", lambda m: m is owned)
@@ -204,7 +204,7 @@ class _ProbeKV(_TrimKV):
 
 
 def test_chat_can_trim_prefers_probe():
-    from gmlx.chat import _can_trim
+    from gmlx.tui.chat import _can_trim
 
     assert _can_trim([_TrimKV(), _ProbeKV(ok_below=5)], 5)
     assert not _can_trim([_TrimKV(), _ProbeKV(ok_below=5)], 6)
@@ -213,7 +213,7 @@ def test_chat_can_trim_prefers_probe():
 
 
 def test_chat_trim_to_checks_returns():
-    from gmlx.chat import _trim_to
+    from gmlx.tui.chat import _trim_to
 
     ok = [_TrimKV(10), _TrimKV(10)]
     assert _trim_to(ok, 4)
@@ -225,7 +225,7 @@ def test_chat_trim_to_checks_returns():
 
 
 def test_chat_trim_to_respects_probe():
-    from gmlx.chat import _trim_to
+    from gmlx.tui.chat import _trim_to
 
     cache = [_ProbeKV(offset=10, ok_below=3)]
     assert not _trim_to(cache, 4)  # needs 6, probe caps at 3

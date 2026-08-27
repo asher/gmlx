@@ -8,7 +8,7 @@ import pytest
 
 pytest.importorskip("mlx_vlm")
 
-import gmlx.mem_preflight as mp  # noqa: E402
+import gmlx.serve.mem_preflight as mp  # noqa: E402
 from mlx_vlm.server.generation import PromptTooLongError  # noqa: E402
 
 
@@ -89,7 +89,7 @@ def tight(monkeypatch):
     """A box where 100k tokens of DENSE KV (0.8 GB) does not fit."""
     monkeypatch.setattr(mp, "available_drained_bytes", lambda: 0.5e9)
     monkeypatch.setattr(
-        "gmlx.prefill_decay.score_transient_bytes",
+        "gmlx.gen.prefill_decay.score_transient_bytes",
         lambda model, pc, depth: 0.0)
 
 

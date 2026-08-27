@@ -20,7 +20,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 
-from .adapter import save_lora_adapter
+from gmlx.load.adapter import save_lora_adapter
 
 _A, _B = ".lora_a", ".lora_b"
 
@@ -81,9 +81,9 @@ def train_lora(gguf_path: str, data: str, out_path: str, *, iters: int = 150,
 
     from mlx_kquant.mlx_lm_patch import patch_mlx_lm_lora
 
-    from . import loadlog
-    from .loader import load_model
-    from .preflight import preflight
+    import gmlx.load.loadlog as loadlog
+    from gmlx.load.loader import load_model
+    from gmlx.load.preflight import preflight
 
     mx.random.seed(seed)
     patch_mlx_lm_lora()  # KQuantLinear.to_lora + rely on the extension's vjp
@@ -179,7 +179,7 @@ def cmd_train(argv: list[str], prog: str = "gmlx train") -> int:
     if (not os.path.exists(os.path.expanduser(base))
             and "/" not in base and os.sep not in base
             and not base.lower().endswith(".gguf")):
-        from . import config as cfgmod
+        import gmlx.config as cfgmod
         try:
             cfg, cfg_path = cfgmod.load_cli_config(a.config)
             rm = cfgmod.resolve_cli_model(base, cfg) if cfg is not None else None

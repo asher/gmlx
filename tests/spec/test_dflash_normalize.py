@@ -10,7 +10,7 @@ import pytest
 
 mx = pytest.importorskip("mlx.core")
 
-from gmlx.mtp_load import (  # noqa: E402
+from gmlx.spec.mtp_load import (  # noqa: E402
     dflash_container,
     normalize_dflash_arrays,
     remap_deepseek4_dspark_arrays,

@@ -26,8 +26,8 @@ subclasses) drops the match. The sliding-layer RotatingKVCache carries no
 """
 from __future__ import annotations
 
-from . import cache_compat
-from . import prefill_decay as _prefill_decay
+import gmlx.cache.compat as cache_compat
+import gmlx.gen.prefill_decay as _prefill_decay
 
 _prefill_score_profile = _prefill_decay.build_score_profile(
     profile=_prefill_decay.ScoreTransientProfile(

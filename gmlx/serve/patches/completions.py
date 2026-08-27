@@ -22,7 +22,7 @@ from typing import Any, List, Optional
 from fastapi import HTTPException, Request  # module-level: stringized annotations
 from pydantic import BaseModel, ConfigDict
 
-from ..generation import StopScanner
+from gmlx.gen.generation import StopScanner
 from ._common import _remove_routes
 from .api_contract import COMPLETIONS_CONSUMED, warn_ignored_fields
 from .chat_behavior import _request_stop_sequences

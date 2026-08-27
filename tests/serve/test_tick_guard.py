@@ -7,7 +7,7 @@ import pytest
 from mlx_vlm.generate import ar
 
 import gmlx.eval_guard as eg
-import gmlx.tick_guard as tg
+import gmlx.serve.tick_guard as tg
 
 
 class FakeGB:

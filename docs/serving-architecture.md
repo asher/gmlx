@@ -120,7 +120,7 @@ flowchart TD
    model's chat template, and re-emitted in each protocol's content shape.
    Each request's sampling parameters resolve through the config precedence chain
    before generation, lowest layer first: the model family's model-card defaults
-   (`gmlx.profiles`, keyed off the GGUF header arch and cached in
+   (`gmlx.gen.profiles`, keyed off the GGUF header arch and cached in
    `~/.cache/gmlx/header-meta.json`), then server defaults, matched rules,
    the model's profile or a request `@intent`, per-model overrides, and finally
    the request's own fields. `server.family_defaults: false` removes the family

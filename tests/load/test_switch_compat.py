@@ -16,7 +16,7 @@ import pytest
 
 from mlx_lm.models import switch_layers as lm_sl
 
-from gmlx import modules
+import gmlx.load.modules as modules
 
 
 @pytest.fixture

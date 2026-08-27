@@ -19,7 +19,7 @@ from mlx_vlm.models.cache import (  # noqa: E402
 from mlx_vlm.server import generation as gen  # noqa: E402
 
 from gmlx import kvarn_serve  # noqa: E402
-from gmlx.kvarn_cache import BatchKVarNKVCache  # noqa: E402
+from gmlx.cache.kvarn_cache import BatchKVarNKVCache  # noqa: E402
 
 _NEEDS_GPU = pytest.mark.skipif(
     mx.default_device() != mx.gpu,
@@ -197,7 +197,7 @@ def test_apc_gate(restorable, _ops_ok):
 def test_safe_quant_kvarn_arm(restorable, _ops_ok):
     import importlib
 
-    from gmlx.apc_pooling import install_safe_kv_quantization
+    from gmlx.cache.apc_pooling import install_safe_kv_quantization
 
     # importlib, not `import mlx_vlm.generate as ...`: the package exports
     # a `generate` function that shadows the submodule attribute.
@@ -225,7 +225,7 @@ def test_safe_quant_kvarn_arm(restorable, _ops_ok):
 
 
 def test_cascade_declines_kvarn():
-    from gmlx import cascade_sdpa
+    import gmlx.upstream.cascade_sdpa as cascade_sdpa
 
     class _KvarnCache:
         kv_quant_scheme = "kvarn"

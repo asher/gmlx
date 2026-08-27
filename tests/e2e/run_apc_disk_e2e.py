@@ -21,7 +21,7 @@ cache **survives a server restart** plus the properties that make that useful:
               does NOT see the first model's blocks (disk_hits == 0) and writes its
               own namespace subdirectory.
 
-Both servers run as real subprocesses (`gmlx.server`), so argparse, the
+Both servers run as real subprocesses (`gmlx.serve.server`), so argparse, the
 monkeypatch wiring, uvicorn, the residency pool, and mlx-vlm's APC all get
 exercised end to end.
 

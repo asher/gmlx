@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prefill feeder (``gmlx.feeder``): router-aware partial staging -
+"""Prefill feeder (``gmlx.stream.prefill_feeder``): router-aware partial staging -
 sparse slot fill at original expert indices, drain-on-new-pass interplay
 with whole-layer staging, weight-swap restore - and the offload wrapper's
 branch ordering between arena, partial and whole-layer paths. Pure CPU:
@@ -14,7 +14,7 @@ import numpy as np
 import mlx.core as mx
 from mlx_lm.models.switch_layers import SwitchGLU
 
-from gmlx.loader import install_expert_streaming
+from gmlx.load.loader import install_expert_streaming
 
 from test_decode_feeder import (
     _KINDS,
@@ -28,7 +28,7 @@ from test_decode_feeder import (
 
 def _make_prefill_feeder(monkeypatch, tmp_path, n_layers=2):
     import mlx_kquant as kq
-    from gmlx.feeder import PrefillFeeder
+    from gmlx.stream.prefill_feeder import PrefillFeeder
 
     monkeypatch.setattr(kq, "arena_alloc", _fake_arena_alloc, raising=False)
     offsets, modules = _make_fixture(tmp_path, n_layers)
@@ -47,7 +47,7 @@ def test_gapped_coverage_alternates_slots(monkeypatch, tmp_path):
     same-parity neighbors would otherwise share a slot and the pipelined
     staging of the next layer would overwrite the one in use."""
     import mlx_kquant as kq
-    from gmlx.feeder import PrefillFeeder
+    from gmlx.stream.prefill_feeder import PrefillFeeder
 
     monkeypatch.setattr(kq, "arena_alloc", _fake_arena_alloc, raising=False)
     offsets, modules = _make_fixture(tmp_path, 5)
@@ -192,7 +192,7 @@ def test_wrapper_partial_branch_and_ordering(monkeypatch):
 def test_slot_itemsize_and_wide_slot_view():
     """>2 GiB stacks: the slot granule widens past uint8 and slot_view
     lands back on the layer geometry byte-for-byte."""
-    from gmlx.feeder_common import slot_itemsize, slot_view
+    from gmlx.stream.feeder_common import slot_itemsize, slot_view
     import mlx_kquant as kq
 
     # In-int32 slots stay plain uint8; past int32 the granule is the widest

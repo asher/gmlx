@@ -25,8 +25,11 @@ from mlx_vlm.models.qwen3_5.language import LanguageModel as Q35LanguageModel
 from mlx_vlm.models.qwen3_5.language import Qwen3_5GatedDeltaNet
 from mlx_vlm.models.qwen3_5 import language as _L
 
-from gmlx import gdn_patches, qwen35_attn, qwen35_gdn, qwen35_verify_fold
-from gmlx import ragged_decode
+import gmlx.upstream.gdn_patches as gdn_patches
+import gmlx.models.qwen35.attn as qwen35_attn
+import gmlx.models.qwen35.gdn as qwen35_gdn
+import gmlx.models.qwen35.verify_fold as qwen35_verify_fold
+import gmlx.spec.ragged_decode as ragged_decode
 
 ATOL = 2e-2
 _NEEDS_GPU = pytest.mark.skipif(

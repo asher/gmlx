@@ -18,7 +18,20 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import sys
+
 import pytest
+
+# The suite is split into per-subsystem directories, but tests import shared
+# helpers from sibling directories by module basename (pytest prepend mode).
+# Make every test directory importable up front so collection order and
+# single-file runs cannot break those imports.
+_TESTS_DIR = Path(__file__).resolve().parent
+for _sub in sorted(_TESTS_DIR.iterdir()):
+    if _sub.is_dir() and any(_sub.glob("test_*.py")):
+        _p = str(_sub)
+        if _p not in sys.path:
+            sys.path.insert(0, _p)
 
 
 def pytest_configure(config):
@@ -45,7 +58,7 @@ def pytest_configure(config):
     # queue.get forever; past ~100 live threads faulthandler truncates
     # fatal-error dumps, cutting off the main thread's stack (the one that
     # names the crashing test).
-    from gmlx import decode_feeder
+    import gmlx.stream.decode_feeder as decode_feeder
 
     orig_init = decode_feeder._DaemonReadPool.__init__
 
@@ -118,7 +131,7 @@ def gguf_index(gguf_dir) -> dict:
     their first shard. Lets a parity test ask for "a gemma2 model" without hard-
     coding filenames.
     """
-    from gmlx.headerscan import scan_gguf
+    from gmlx.load.headerscan import scan_gguf
 
     index: dict[str, list[str]] = {}
     for path in sorted(gguf_dir.rglob("*.gguf")):
@@ -177,6 +190,6 @@ def _no_live_server(monkeypatch):
     # chat's automatic --server gate probes the box's managed server; a
     # live server on the dev machine must not flip test behavior. Tests
     # that want the probe up re-patch it locally.
-    import gmlx.launch as _launch
+    import gmlx.commands.launch as _launch
     monkeypatch.setattr(_launch, "_server_ready",
                         lambda base_url, api_key=None: False)

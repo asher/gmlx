@@ -26,7 +26,7 @@ import mlx.nn as nn
 import mlx_kquant as kq
 import numpy as np
 
-from gmlx.dflash_drafter import CandidateSelector, GroupedDynamicConv, greedy_walk
+from gmlx.spec.dflash_drafter import CandidateSelector, GroupedDynamicConv, greedy_walk
 
 _REF_NAMES = ("_sampling_probs", "_sample_probs", "_grouped_dynamic_convolve",
               "GroupedDynamicCausalConv", "CandidateSelector")

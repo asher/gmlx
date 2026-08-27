@@ -35,7 +35,7 @@ import logging
 import os
 import time
 
-from .batch_rows import batch_rows
+from gmlx.serve.batch_rows import batch_rows
 
 _log = logging.getLogger(__name__)
 

@@ -114,8 +114,8 @@ def available_drained_bytes():
     weight allocations are not subtracted, which only admits more."""
     import mlx.core as mx
 
-    from .prefill_decay import untracked_weight_bytes
-    from .server_memory import admit_reserve_bytes
+    from gmlx.gen.prefill_decay import untracked_weight_bytes
+    from .memory import admit_reserve_bytes
 
     try:
         ws = float(mx.device_info()["max_recommended_working_set_size"])
@@ -127,7 +127,7 @@ def available_drained_bytes():
 
 
 def _need_bytes(model, costs, prompt_tokens: int, gen_tokens: int = 0):
-    from .prefill_decay import score_transient_bytes
+    from gmlx.gen.prefill_decay import score_transient_bytes
 
     kv = prompt_kv_bytes(costs, prompt_tokens + gen_tokens)
     return kv + score_transient_bytes(model, None, prompt_tokens)

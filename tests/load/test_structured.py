@@ -20,7 +20,7 @@ import pytest
 
 from tokenizers import pre_tokenizers  # noqa: E402
 
-from gmlx.tokenizer import load_tokenizer_from_gguf  # noqa: E402
+from gmlx.load.tokenizer import load_tokenizer_from_gguf  # noqa: E402
 
 # A self-contained minimal ByteLevel BPE (256 byte-alphabet tokens + specials +
 # a couple of merges), identical in spirit to test_tokenizer.py - no download.

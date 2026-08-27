@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from gmlx import cli
+import gmlx.commands.cli as cli
 
 
 @pytest.fixture(autouse=True)
@@ -28,7 +28,8 @@ def gguf(tmp_path):
 @pytest.fixture
 def gen(monkeypatch):
     """Stub the plain-path load/generate seams; returns the recorded generate call."""
-    from gmlx import generation, loader
+    import gmlx.gen.generation as generation
+    import gmlx.load.loader as loader
 
     seen = {}
 
@@ -97,8 +98,8 @@ def test_prompt_file_missing_exits_2(gguf, gen, capsys):
 
 # exit 1 = load refusal (docs/cli.md)
 def test_run_codec_refusal_exits_1(gguf, monkeypatch, capsys):
-    from gmlx import loader
-    from gmlx.preflight import UnsupportedCodecError
+    import gmlx.load.loader as loader
+    from gmlx.load.preflight import UnsupportedCodecError
 
     exc = UnsupportedCodecError("gemma4", {"TQ1_0": 3})
 
@@ -132,15 +133,16 @@ def test_run_adapter_conflicts_exit_2(gguf, extra, named, capsys):
 def report_stubs(monkeypatch):
     """Stub the _report_only seams (wire bytes + remap + inventory + tokenizer);
     poison the model-build/generate seams. Returns the preflight module."""
-    import gmlx.preflight as preflight_mod
-    import gmlx.tokenizer as tok_mod
-    from gmlx import generation, loader
+    import gmlx.load.preflight as preflight_mod
+    import gmlx.load.tokenizer as tok_mod
+    import gmlx.gen.generation as generation
+    import gmlx.load.loader as loader
 
     monkeypatch.setattr(preflight_mod, "preflight", lambda path, arch=None: None)
     monkeypatch.setattr(
         loader, "load_gguf_wire_bytes",
         lambda path, zero_copy=True: ({"t": 0}, {"t": {}}, "gemma4", {}, {}))
-    from gmlx import gguf_meta
+    import gmlx.load.gguf_meta as gguf_meta
     monkeypatch.setattr(gguf_meta, "read_int", lambda meta, key: None)
     monkeypatch.setattr(gguf_meta, "first_nonzero_int", lambda meta, key: None)
     monkeypatch.setattr(
@@ -178,7 +180,7 @@ def test_report_only_inventories_and_skips_generate(gguf, report_stubs, capsys):
 
 def test_report_only_swallows_arch_error(gguf, report_stubs, monkeypatch, capsys):
     # an arch the loader can't build must still inventory (rc 0)
-    from gmlx.arch_table import UnsupportedArchError
+    from gmlx.load.arch_table import UnsupportedArchError
 
     def boom(path, arch=None):
         raise UnsupportedArchError("arch 'foo' not supported")
@@ -190,7 +192,7 @@ def test_report_only_swallows_arch_error(gguf, report_stubs, monkeypatch, capsys
 
 def test_report_only_codec_error_still_refuses(gguf, report_stubs, monkeypatch,
                                                capsys):
-    from gmlx.preflight import UnsupportedCodecError
+    from gmlx.load.preflight import UnsupportedCodecError
 
     def boom(path, arch=None):
         raise UnsupportedCodecError("gemma4", {"TQ1_0": 3})
@@ -203,7 +205,8 @@ def test_report_only_codec_error_still_refuses(gguf, report_stubs, monkeypatch,
 
 # --bench-depths list validation (before any load)
 def test_bench_depths_bad_list_exits_2(gguf, monkeypatch, capsys):
-    from gmlx import loader, mtp_load
+    import gmlx.load.loader as loader
+    import gmlx.spec.mtp_load as mtp_load
 
     monkeypatch.setattr(loader, "load_model",
                         lambda *a, **k: pytest.fail("must not load"))

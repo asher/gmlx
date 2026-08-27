@@ -14,7 +14,7 @@ import pytest
 
 pytest.importorskip("mlx_vlm")
 
-from gmlx import server_bridge_vlm as serving  # noqa: E402
+import gmlx.serve.bridge_vlm as serving  # noqa: E402
 
 _ENV_KEYS = (
     "MLX_VLM_GGUF_SPECULATIVE",
@@ -129,7 +129,7 @@ def test_serve_speculative_flag_routes_speculative(installed_bridge, tmp_path):
     load through the bridge routes speculative."""
     import argparse
 
-    from gmlx import server
+    import gmlx.serve.server as server
 
     patched, _, serveable_calls = installed_bridge
     gguf = tmp_path / "target.gguf"
@@ -160,7 +160,7 @@ class _FakeTarget:
 
 @pytest.fixture
 def fake_load_mtp_model(monkeypatch):
-    """Stub ``gmlx.mtp_load.load_mtp_model`` (imported lazily inside the
+    """Stub ``gmlx.spec.mtp_load.load_mtp_model`` (imported lazily inside the
     speculative branch). Records its call; returns ``(model, drafter, config,
     tokenizer)`` in the loader's order."""
     calls = []
@@ -174,9 +174,9 @@ def fake_load_mtp_model(monkeypatch):
         tok = types.SimpleNamespace(eos_token_ids={1})
         return _FakeTarget(), drafter, {"model_type": "qwen3_5_moe"}, tok
 
-    mtp_load = types.ModuleType("gmlx.mtp_load")
+    mtp_load = types.ModuleType("gmlx.spec.mtp_load")
     mtp_load.load_mtp_model = _fake
-    monkeypatch.setitem(sys.modules, "gmlx.mtp_load", mtp_load)
+    monkeypatch.setitem(sys.modules, "gmlx.spec.mtp_load", mtp_load)
     # The processor builder reaches StoppingCriteria / detokenizer - keep CPU-cheap.
     monkeypatch.setattr(serving, "_build_detokenizer", lambda backend: object())
     monkeypatch.setattr(serving, "StoppingCriteria",
@@ -226,7 +226,7 @@ def test_speculative_branch_threads_chat_template(fake_load_mtp_model):
 # load_serveable_model VLM x MTP branch (fake load_vlm_mtp_model)
 @pytest.fixture
 def fake_load_vlm_mtp_model(monkeypatch):
-    """Stub ``gmlx.mtp_load.load_vlm_mtp_model`` (lazy import in the VLM x MTP
+    """Stub ``gmlx.spec.mtp_load.load_vlm_mtp_model`` (lazy import in the VLM x MTP
     branch). Records its call; returns ``(model, drafter, config, tokenizer,
     processor)`` in the loader's order. The VLM model's config is attribute-readable
     already (unlike the text MTP wrapper's dict), so no _AttrDict promotion."""
@@ -247,9 +247,9 @@ def fake_load_vlm_mtp_model(monkeypatch):
         processor = object()  # the loader hands back an engine-ready VLM processor
         return model, drafter, {"model_type": "qwen3_5"}, tok, processor
 
-    mtp_load = types.ModuleType("gmlx.mtp_load")
+    mtp_load = types.ModuleType("gmlx.spec.mtp_load")
     mtp_load.load_vlm_mtp_model = _fake
-    monkeypatch.setitem(sys.modules, "gmlx.mtp_load", mtp_load)
+    monkeypatch.setitem(sys.modules, "gmlx.spec.mtp_load", mtp_load)
     return calls, drafter
 
 
@@ -693,7 +693,7 @@ def test_prompt_step_caps_mtp_hidden_capture():
     import mlx.core as mx
     from mlx_vlm.generate.ar import PromptProcessingBatch
 
-    from gmlx.spec_engine import install_full_prompt_mtp_prefill
+    from gmlx.spec.engine import install_full_prompt_mtp_prefill
 
     install_full_prompt_mtp_prefill()
 
@@ -746,8 +746,8 @@ def test_prompt_step_caps_mtp_hidden_capture():
 def test_load_vlm_mtp_model_applies_chat_template(monkeypatch):
     """The chat_template param must land on the tokenizer AND the processor
     (which snapshots the tokenizer's template at construction)."""
-    import gmlx.mtp_load as mtp_load
-    import gmlx.vlm as vlm_mod
+    import gmlx.spec.mtp_load as mtp_load
+    import gmlx.load.vlm as vlm_mod
 
     class _Tok:
         chat_template = "{{ gguf }}"

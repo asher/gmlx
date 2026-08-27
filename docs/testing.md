@@ -16,7 +16,7 @@ The CPU tier runs everything on synthetic inputs: no model is loaded and no GPU
 kernel is dispatched, so it runs anywhere, including CI. It covers the remap
 tables, config/tokenizer synthesis, the arch gate, weight transforms, preflight,
 the config loader, the family sampling profiles, discovery, the serving id-layer,
-residency, the server patches, and the `chat` REPL, where `tests/test_chat_e2e.py`
+residency, the server patches, and the `chat` REPL, where `tests/tui/test_chat_e2e.py`
 drives the real multi-turn loop with the model layer faked, plus the live
 prompt_toolkit session over a pipe:
 
@@ -35,11 +35,11 @@ you point the suite at a GGUF library:
 
 | module | gate | what it checks |
 | --- | --- | --- |
-| `tests/test_batch_parity.py` | `KQUANT_TEST_GGUF_DIR` | batched decode is faithful to single-stream (b=1 token-exact, uniform-batch determinism, ragged divergence only at logit ties) |
-| `tests/test_long_context.py` | `KQUANT_TEST_GGUF_DIR` | long-decode integrity at >=16k (in-range, finite logprobs, no single-token collapse); attention bugs only surface at depth |
-| `tests/test_mtp.py` (one case) | `KQUANT_TEST_GGUF_DIR` | a native-head MTP GGUF's drafter has full remap coverage (the rest of the module is CPU-only) |
-| `tests/test_long_context.py::test_long_prefill_parity` | also `KQUANT_LLAMACPP_BIN` | long-prefill greedy output agrees with llama.cpp |
-| `tests/test_serve_apc_engagement.py` | `KQUANT_TEST_GGUF_DIR` (+ `GMLX_TEST_BIG_GGUFS=1` for the multi-GB rows) | the APC engagement gate: one model per cache-shape family (dense/block, SWA-MoE/ckpt, GDN/ckpt, CacheList/exact) served end-to-end, asserting that family's own tier counters move - a tier silently dead for an arch class fails by name |
+| `tests/gen/test_batch_parity.py` | `KQUANT_TEST_GGUF_DIR` | batched decode is faithful to single-stream (b=1 token-exact, uniform-batch determinism, ragged divergence only at logit ties) |
+| `tests/gen/test_long_context.py` | `KQUANT_TEST_GGUF_DIR` | long-decode integrity at >=16k (in-range, finite logprobs, no single-token collapse); attention bugs only surface at depth |
+| `tests/spec/test_mtp.py` (one case) | `KQUANT_TEST_GGUF_DIR` | a native-head MTP GGUF's drafter has full remap coverage (the rest of the module is CPU-only) |
+| `tests/gen/test_long_context.py::test_long_prefill_parity` | also `KQUANT_LLAMACPP_BIN` | long-prefill greedy output agrees with llama.cpp |
+| `tests/serve/test_serve_apc_engagement.py` | `KQUANT_TEST_GGUF_DIR` (+ `GMLX_TEST_BIG_GGUFS=1` for the multi-GB rows) | the APC engagement gate: one model per cache-shape family (dense/block, SWA-MoE/ckpt, GDN/ckpt, CacheList/exact) served end-to-end, asserting that family's own tier counters move - a tier silently dead for an arch class fails by name |
 
 `KQUANT_TEST_GGUF_DIR` is searched recursively for `*.gguf`. Each test selects a model
 by architecture (read from the GGUF header), so it auto-skips any arch you don't have.
@@ -55,7 +55,7 @@ marker-carrying parity modules.
 gmlx pull hf:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q4_K_M.gguf --to ~/models/qwen3-0.6b
 
 # run the batched-decode parity suite against just that arch
-KQUANT_TEST_GGUF_DIR=~/models pytest tests/test_batch_parity.py -k qwen3
+KQUANT_TEST_GGUF_DIR=~/models pytest tests/gen/test_batch_parity.py -k qwen3
 ```
 
 For the long-context layer, a small SWA model exercises it (Qwen3 isn't in its arch sweep):
@@ -65,7 +65,7 @@ gmlx pull hf:ggml-org/gemma-3-1b-it-GGUF/gemma-3-1b-it-Q4_K_M.gguf --to ~/models
 
 # quick pass: shorten the 16k default so a small model finishes in seconds
 KQUANT_TEST_GGUF_DIR=~/models KQUANT_LONGCTX_TOKENS=4096 \
-  pytest tests/test_long_context.py::test_long_decode_integrity -k gemma3
+  pytest tests/gen/test_long_context.py::test_long_decode_integrity -k gemma3
 ```
 
 Knobs:
@@ -85,7 +85,7 @@ have in one run; drop `-k` to do so.
 
 ## 3. Server end-to-end harness
 
-`tests/e2e/` launches the real `gmlx.server` across a matrix of start modes and
+`tests/e2e/` launches the real `gmlx.serve.server` across a matrix of start modes and
 config features, fires a prompt suite at each live server, and grades every response (floor
 checks + an LLM-as-judge). It loads models and needs the GPU, so it is not part of the
 pytest suite. Its own guide (tiers, grading, model bootstrap, output format) lives in
@@ -177,7 +177,7 @@ checklist step precisely because no automated environment runs it:
 
 ```sh
 KQUANT_TEST_GGUF_DIR=~/llm/gguf-test GMLX_TEST_BIG_GGUFS=1 \
-  pytest tests/test_serve_apc_engagement.py -v
+  pytest tests/serve/test_serve_apc_engagement.py -v
 ```
 
 Every family with a staged GGUF must pass; a family skipping for a
@@ -192,7 +192,7 @@ K-quant GGUF base (emitting a GGUF adapter), then `gmlx serve --adapter` the bas
 assert the served output shifted. The pirate finetune is graded by a deterministic marker
 check with greedy decoding. Both verbs run as real subprocesses; it needs a base GGUF + the
 GPU, so it's standalone, not pytest. The adapter writer + train-driver fidelity are
-CPU-tested in `tests/test_adapter_save.py` / `tests/test_train.py`.
+CPU-tested in `tests/load/test_adapter_save.py` / `tests/commands/test_train.py`.
 
 ```sh
 python tests/e2e/run_lora_e2e.py                     # prep -> train -> serve -> assert
@@ -209,7 +209,7 @@ KV cache, then a live `/temp` + `/sampling` slash command, then Esc-cancel of a 
 then `q` quits clean. An optional multimodal arm (stage `assets/cats.jpg` with `/image`,
 generate about it) runs when a VLM GGUF + projector are on disk. It loads a model and needs the GPU, so it's standalone, not
 pytest. A missing model is a SKIP. The deterministic loop + session coverage is CPU-tested,
-no tty, in `tests/test_chat_e2e.py`.
+no tty, in `tests/tui/test_chat_e2e.py`.
 
 ```sh
 python tests/e2e/run_chat_pty_e2e.py                 # text arm (+ vlm if present)

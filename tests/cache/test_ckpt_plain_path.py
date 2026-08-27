@@ -10,8 +10,9 @@ from types import SimpleNamespace
 import mlx.core as mx
 from mlx_vlm.apc import APCManager
 
-from gmlx import retire_key, spec_engine
-from gmlx.cache_snapshot import ckpt_lookup, ckpt_store
+import gmlx.cache.retire_key as retire_key
+import gmlx.spec.engine as spec_engine
+from gmlx.cache.snapshot import ckpt_lookup, ckpt_store
 from test_ckpt_tier import LAYOUT, make_hybrid_cache
 
 TAGS = tuple("arr" if k == "arr" else "kv" for k in LAYOUT)

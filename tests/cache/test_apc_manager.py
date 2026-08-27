@@ -12,9 +12,9 @@ import pytest
 
 apc = pytest.importorskip("mlx_vlm.apc")
 
-from gmlx import server_bridge_vlm as serving  # noqa: E402
-from gmlx.apc_manager import GmlxAPCManager, build_apc_manager  # noqa: E402
-from gmlx.residency import _RuntimeProxy, _ResidencyPool, _active_entry  # noqa: E402
+import gmlx.serve.bridge_vlm as serving  # noqa: E402
+from gmlx.cache.apc_manager import GmlxAPCManager, build_apc_manager  # noqa: E402
+from gmlx.serve.residency import _RuntimeProxy, _ResidencyPool, _active_entry  # noqa: E402
 
 GB = 1024**3
 
@@ -167,7 +167,8 @@ def _fake_model(layers=10, n_kv=4, head_dim=64):
 def _autosize_rig(monkeypatch, budget):
     import mlx.core as mx
 
-    from gmlx import capacity, prefill_decay
+    import gmlx.serve.capacity as capacity
+    import gmlx.gen.prefill_decay as prefill_decay
 
     monkeypatch.setattr(capacity, "working_budget_bytes", lambda: budget)
     monkeypatch.setattr(prefill_decay, "untracked_weight_bytes", lambda: 0.0)
@@ -202,8 +203,9 @@ def test_autosize_env_and_floor_win(monkeypatch):
 
 
 def test_auto_block_size_covers_budget(monkeypatch, tmp_path):
-    from gmlx import apc_manager as am
-    from gmlx import capacity, tool_preflight as tp
+    import gmlx.cache.apc_manager as am
+    import gmlx.serve.capacity as capacity
+    import gmlx.commands.tool_preflight as tp
 
     f = tmp_path / "m.gguf"
     f.write_bytes(b"\0" * 1024)
@@ -231,7 +233,8 @@ def test_exact_tier_byte_budget(monkeypatch):
 
     from mlx_vlm.apc import APCExactCacheEntry
 
-    from gmlx import capacity, prefill_decay
+    import gmlx.serve.capacity as capacity
+    import gmlx.gen.prefill_decay as prefill_decay
 
     monkeypatch.delenv("APC_EXACT_CACHE_ENTRIES", raising=False)
     monkeypatch.delenv("APC_NUM_BLOCKS", raising=False)
@@ -339,10 +342,10 @@ def test_store_stops_at_kernel_floor(monkeypatch):
     # A block store is one call between governed ticks; it must stop
     # wiring pages itself when the kernel is below the floor.
     import mlx.core as mx
-    import gmlx.kernel_vm as kv
-    from gmlx.apc_manager import GmlxAPCManager
+    import gmlx.serve.kernel_vm as kv
+    from gmlx.cache.apc_manager import GmlxAPCManager
 
-    import gmlx.governor as gov
+    import gmlx.serve.governor as gov
 
     monkeypatch.delenv("GMLX_APC_PAGED", raising=False)
     monkeypatch.setattr(gov, "_ARMED_FLOOR", 8e9)   # as install_governor arms it

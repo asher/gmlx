@@ -11,8 +11,8 @@ import types
 
 import mlx.core as mx
 
-from gmlx.deepseek_v4_cache import BatchPoolingCache, PoolingCache
-from gmlx.deepseek_v4_model import Compressor
+from gmlx.models.deepseek_v4.cache import BatchPoolingCache, PoolingCache
+from gmlx.models.deepseek_v4.model import Compressor
 
 D_MODEL = 64
 HEAD = 32

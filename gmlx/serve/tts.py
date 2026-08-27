@@ -3,7 +3,7 @@
 Backed by the optional `mlx-audio <https://pypi.org/project/mlx-audio/>`_
 package (``pip install 'gmlx[tts]'``). TTS checkpoints are not GGUFs -
 the community ships them as MLX-format (or safetensors -> MLX) repos - so like
-the STT path (:mod:`gmlx.stt`) this loads MLX-format checkpoints directly:
+the STT path (:mod:`gmlx.serve.stt`) this loads MLX-format checkpoints directly:
 any mlx-community TTS repo (Kokoro, Qwen3-TTS, ...) or a local converted dir.
 The loaded model is cached process-wide, so repeat requests don't reload.
 
@@ -83,7 +83,7 @@ def import_mlx_audio():
     try:
         import mlx_audio
     except ImportError as exc:
-        from .extras import install_hint
+        from gmlx.commands.extras import install_hint
         raise ImportError(
             "text-to-speech requires the optional tts extra:\n"
             f"    {install_hint('tts')}\n"
@@ -143,7 +143,7 @@ def _ensure_misaki() -> None:
     import importlib.util
     if "misaki" in sys.modules or importlib.util.find_spec("misaki"):
         return
-    from ._vendor import misaki
+    from gmlx._vendor import misaki
     sys.modules["misaki"] = misaki
 
 

@@ -24,7 +24,7 @@ from mlx_lm.models import base as lm_base
 pytest.importorskip("mlx_vlm.models.base")
 from mlx_vlm.models import base as vlm_base
 
-from gmlx import quantized_sdpa_fix as qf
+import gmlx.upstream.quantized_sdpa_fix as qf
 
 _orig_lm = lm_base.quantized_scaled_dot_product_attention
 _orig_vlm = vlm_base.quantized_scaled_dot_product_attention

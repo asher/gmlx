@@ -8,8 +8,8 @@ import pytest
 
 import mlx.core as mx
 
-from gmlx.kvarn_cache import KVarNKVCache
-from gmlx.prefix_cache import (
+from gmlx.cache.kvarn_cache import KVarNKVCache
+from gmlx.cache.prefix_cache import (
     _KVARN_TAG,
     _eval_snapshot,
     _restore_entry,
@@ -78,7 +78,7 @@ def test_prefix_restore_does_not_alias_stored_entry():
 
 @_NEEDS_GPU
 def test_clone_lm_twin_arm():
-    from gmlx.cache_snapshot import _clone_lm_twin
+    from gmlx.cache.snapshot import _clone_lm_twin
 
     live = _filled(300)
     targets = []
@@ -92,7 +92,7 @@ def test_clone_lm_twin_arm():
 
 @_NEEDS_GPU
 def test_ckpt_layout_tags_filled_kvarn():
-    from gmlx.cache_snapshot import ckpt_layout
+    from gmlx.cache.snapshot import ckpt_layout
 
     from mlx_lm.models.cache import RotatingKVCache
 

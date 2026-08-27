@@ -11,8 +11,9 @@ import pytest
 pytest.importorskip("gguf")
 import mlx.nn as nn  # noqa: E402
 
-from gmlx import adapter, train  # noqa: E402
-from gmlx.transforms import qk_permute_wire  # noqa: E402
+import gmlx.load.adapter as adapter  # noqa: E402
+import gmlx.commands.train as train  # noqa: E402
+from gmlx.load.transforms import qk_permute_wire  # noqa: E402
 
 LoRALinear = pytest.importorskip("mlx_lm.tuner.lora").LoRALinear
 

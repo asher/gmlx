@@ -12,8 +12,8 @@ import mlx.core as mx  # noqa: E402
 from mlx_lm.models.switch_layers import SwitchGLU  # noqa: E402
 from mlx_lm.utils import _get_classes  # noqa: E402
 
-from gmlx.config_synth import synthesize_config  # noqa: E402
-from gmlx.loader import (  # noqa: E402
+from gmlx.load.config_synth import synthesize_config  # noqa: E402
+from gmlx.load.loader import (  # noqa: E402
     _resolve_prefill_step,
     install_expert_streaming,
     moe_streaming_active,
@@ -237,7 +237,7 @@ def test_prefetcher_window_and_pass_reset(monkeypatch):
     once per pass, and a backward layer jump (next prefill chunk) resets.
     Runs in advise mode; the default pread mode shares the same window
     bookkeeping and differs only in the per-layer population call."""
-    from gmlx.prefetch import ExpertPrefetcher
+    from gmlx.stream.prefetch import ExpertPrefetcher
 
     monkeypatch.setenv("GMLX_STREAM_PREFETCH_MODE", "advise")
     offsets = {li: [] for li in range(6)}  # empty ranges: _advise no-ops
@@ -263,7 +263,7 @@ def test_prefetcher_window_and_pass_reset(monkeypatch):
 
 
 def test_prefetch_offset_regex():
-    from gmlx.prefetch import _EXPS_RE
+    from gmlx.stream.prefetch import _EXPS_RE
 
     assert _EXPS_RE.fullmatch("blk.7.ffn_gate_exps.weight").group(1) == "7"
     assert _EXPS_RE.fullmatch("blk.61.ffn_down_exps.weight")
@@ -364,7 +364,7 @@ def test_moe_experts_override_targets_offloaded_router(monkeypatch):
     raise; a model with no offloaded experts is a no-op."""
     import mlx.nn as nn
 
-    from gmlx.loader import install_moe_experts_override
+    from gmlx.load.loader import install_moe_experts_override
 
     class _Gate(nn.Module):  # DeepSeek-style: top_k lives on the gate
         def __init__(self):

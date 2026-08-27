@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Live serve-content contract for harmony (gpt-oss) models.
 
-Boots a real ``gmlx.server`` on a harmony GGUF and asserts the response
+Boots a real ``gmlx.serve.server`` on a harmony GGUF and asserts the response
 contract the unit seams cannot prove end-to-end: ``content`` and
 ``reasoning_content`` carry no channel markup (non-stream and stream), a
 ``finish_reason=length`` reply truncated inside analysis returns empty

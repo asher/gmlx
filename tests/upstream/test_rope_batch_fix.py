@@ -30,7 +30,7 @@ import os
 import mlx.core as mx
 import pytest
 
-from gmlx import rope_batch_fix as rbf
+import gmlx.upstream.rope_batch_fix as rbf
 
 D = 64
 FREQS = mx.array([10000.0 ** (2 * i / D) for i in range(D // 2)],

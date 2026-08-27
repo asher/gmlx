@@ -12,9 +12,9 @@ import json
 import numpy as np
 import pytest
 
-from gmlx import talk_client
-from gmlx.talk_client import TalkClientError
-from gmlx.talk_memory import MemoryStore, default_memory_path
+import gmlx.talk.client as talk_client
+from gmlx.talk.client import TalkClientError
+from gmlx.assistant.memory import MemoryStore, default_memory_path
 
 # Fixed fake embedding space: axis 0 = tea, 1 = bikes, 2 = weather. remember()
 # prefixes rows with "user: ", so match on substrings.
@@ -94,7 +94,7 @@ def test_prune_time_corruption_also_quarantined(tmp_path, monkeypatch):
     # open-time prune; construction must still self-heal, not abort.
     import sqlite3
 
-    from gmlx import talk_memory
+    import gmlx.assistant.memory as talk_memory
 
     def bad_prune(self):
         raise sqlite3.DatabaseError("database disk image is malformed")
@@ -296,7 +296,7 @@ def test_recall_caches_matrix_and_tracks_inserts(tmp_path):
 
 
 def test_cache_capacity_doubles(tmp_path, monkeypatch):
-    from gmlx import talk_memory
+    import gmlx.assistant.memory as talk_memory
     monkeypatch.setattr(talk_memory, "_INITIAL_CAP", 1)
     m = _store(tmp_path)
     m.remember("green tea daily", "")
@@ -311,7 +311,7 @@ def test_cache_capacity_doubles(tmp_path, monkeypatch):
 def test_recall_correct_after_growth(tmp_path, monkeypatch):
     # The promise behind the doubling rule: recall stays CORRECT after the
     # cache matrix has grown - rows appended through growth are recallable.
-    from gmlx import talk_memory
+    import gmlx.assistant.memory as talk_memory
     monkeypatch.setattr(talk_memory, "_INITIAL_CAP", 1)
     m = _store(tmp_path)
     m.remember("I like green tea", "")
@@ -433,7 +433,7 @@ def test_old_schema_gains_recalled_column(tmp_path):
 
 
 def test_make_extractor_prompts_and_parses(monkeypatch):
-    from gmlx import talk_memory
+    import gmlx.assistant.memory as talk_memory
     seen = {}
 
     def fake_stream(base_url, *, model, messages, max_tokens,
@@ -456,8 +456,8 @@ def test_make_extractor_prompts_and_parses(monkeypatch):
 def test_extractor_strips_reasoning_from_facts(monkeypatch):
     """A thinking model's chain-of-thought (reasoning deltas or inline
     <think> spans) must not be stored as facts."""
-    from gmlx import talk_client
-    from gmlx.talk_memory import make_extractor
+    import gmlx.talk.client as talk_client
+    from gmlx.assistant.memory import make_extractor
 
     def fake_stream_chat(base_url, **kw):
         yield {"reasoning": "the user seems to hate cats"}

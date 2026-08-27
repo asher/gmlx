@@ -20,7 +20,7 @@ from .generation import (
     generate_speculative,
     generate_speculative_owned,
 )
-from . import loader
+import gmlx.load.loader as loader
 
 
 def _synth_prompt_ids(tokenizer, n: int) -> list[int]:

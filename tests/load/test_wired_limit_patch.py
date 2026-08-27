@@ -13,7 +13,7 @@ import importlib
 import mlx.core as mx
 import pytest
 
-from gmlx.loader import _install_wired_limit_warn_once
+from gmlx.load.loader import _install_wired_limit_warn_once
 
 # `import mlx_lm.generate` binds the function mlx_lm re-exports in
 # __init__, not the submodule - same trap the loader patches around.

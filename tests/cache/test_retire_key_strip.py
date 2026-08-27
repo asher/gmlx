@@ -10,7 +10,7 @@ template strips and the LCP lands at the replay boundary.
 
 from types import SimpleNamespace
 
-from gmlx import retire_key
+import gmlx.cache.retire_key as retire_key
 
 
 def _ords(s):

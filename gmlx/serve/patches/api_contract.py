@@ -27,7 +27,7 @@ _MESSAGES_PATHS = ("/messages", "/v1/messages")
 # shape-agnostic ``_build_gen_args`` (getattr-based, so it reads these off any
 # request object), or a gmlx server patch. A set-but-unlisted field draws the
 # one-line warning below. The docs/server-config.md "Parameter support" table
-# is derived from these sets, and tests/test_api_contract.py cross-checks
+# is derived from these sets, and tests/serve/test_api_contract.py cross-checks
 # both (and fails when an upstream schema grows a field not classified here),
 # so update table, test, and set together.
 

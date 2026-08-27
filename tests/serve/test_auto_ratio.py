@@ -2,7 +2,7 @@
 deadline accrual, gate coupling. Pure logic over a fake generator with an
 injected clock (resolve takes ``now``; nothing sleeps)."""
 
-import gmlx.auto_ratio as ar
+import gmlx.serve.auto_ratio as ar
 
 
 class FakeBatch:
@@ -219,7 +219,7 @@ def test_suppressed_transition_logs_when_rate_window_opens(caplog):
     import logging
     g = _incumbent_gen(0.0)
     _add_waiter(g)
-    with caplog.at_level(logging.INFO, logger="gmlx.auto_ratio"):
+    with caplog.at_level(logging.INFO, logger="gmlx.serve.auto_ratio"):
         ar.resolve(g, 1.0)                  # logs: pacing on
         g._unprocessed_sequences.clear()
         ar.resolve(g, 1.5)                  # off, suppressed (< 1 s)
@@ -233,7 +233,7 @@ def test_log_rate_env_zero_logs_every_transition(caplog, monkeypatch):
     monkeypatch.setenv("GMLX_DECODE_PREFILL_LOG_S", "0")
     g = _incumbent_gen(0.0)
     _add_waiter(g)
-    with caplog.at_level(logging.INFO, logger="gmlx.auto_ratio"):
+    with caplog.at_level(logging.INFO, logger="gmlx.serve.auto_ratio"):
         ar.resolve(g, 1.0)
         g._unprocessed_sequences.clear()
         ar.resolve(g, 1.2)

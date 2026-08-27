@@ -34,7 +34,7 @@ def install_pooling_apc_support() -> None:
     Idempotent. A missing upstream symbol raises: silently skipping would
     leave serve APC dead for every pooling-cache model (deepseek-v4), which
     is exactly the drift this install exists to prevent (see
-    gmlx.upstream_seams).
+    gmlx.upstream.seams).
     """
     apc = importlib.import_module("mlx_vlm.apc")
     if getattr(apc, "_kq_pooling_apc", False):
@@ -53,9 +53,9 @@ def install_pooling_apc_support() -> None:
         raise RuntimeError(
             "APC pooling support cannot install: mlx-vlm apc surface "
             f"changed ({e}) - re-audit against the pinned seams "
-            "(gmlx.upstream_seams)") from e
+            "(gmlx.upstream.seams)") from e
 
-    from .deepseek_v4_cache import BatchPoolingCache, PoolingCache
+    from gmlx.models.deepseek_v4.cache import BatchPoolingCache, PoolingCache
 
     def supports_exact(c):
         # Without this arm model_apc_mode resolves to None for pooling
@@ -299,8 +299,8 @@ def install_safe_kv_quantization() -> None:
 
     if getattr(lm_gen, "_kq_safe_kv_quant", False):
         return
-    from .cache_compat import cache_types
-    from .deepseek_v4_cache import PoolingCache
+    from .compat import cache_types
+    from gmlx.models.deepseek_v4.cache import PoolingCache
 
     def _pack_pools(c, group_size, bits):
         subs = getattr(c, "caches", None)
@@ -349,7 +349,7 @@ def install_safe_kv_quantization() -> None:
     if stock is None:
         raise RuntimeError(
             "mlx_vlm.generate.common.maybe_quantize_kv_cache is gone - "
-            "re-audit against the pinned seams (gmlx.upstream_seams)")
+            "re-audit against the pinned seams (gmlx.upstream.seams)")
 
     def safe_vlm_maybe_quantize(prompt_cache, quantized_kv_start,
                                 kv_group_size, kv_bits, **kwargs):
@@ -379,7 +379,7 @@ def model_has_pools(model) -> bool:
     Walks ``make_cache()`` once and memoizes on the model, so the pooled
     seams can gate without paying a cache build per call.
     """
-    from .deepseek_v4_cache import PoolingCache
+    from gmlx.models.deepseek_v4.cache import PoolingCache
 
     cached = getattr(model, "_kq_has_pools", None)
     if cached is not None:
@@ -562,7 +562,7 @@ def install_pooled_prompt_kv_quant() -> None:
                 "kv_bits=%s: pooled storage needs an integer affine width; "
                 "pools stay fp16", bits)
             return
-        from .generation import quantize_pooled_caches
+        from gmlx.gen.generation import quantize_pooled_caches
 
         group = int(kwargs.get("kv_group_size") or 64)
         n = quantize_pooled_caches(self.prompt_cache, int(fbits), group)

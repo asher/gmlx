@@ -25,7 +25,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import pytest
 
-import gmlx.dsv32_patches as dsv32_patches
+import gmlx.upstream.dsv32_patches as dsv32_patches
 from mlx_lm.models.cache import KVCache
 from mlx_lm.models.deepseek_v32 import Indexer, MoEGate
 from mlx_lm.models.glm_moe_dsa import Model, ModelArgs

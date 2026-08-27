@@ -16,7 +16,7 @@ import pytest
 from gguf import GGMLQuantizationType as GT  # noqa: E402
 from gguf import GGUFWriter, quants  # noqa: E402
 
-from gmlx import remote  # noqa: E402
+import gmlx.load.remote as remote  # noqa: E402
 
 
 def _weight(codec):

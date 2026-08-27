@@ -16,14 +16,14 @@ import pytest
 
 pytest.importorskip("mlx_vlm")
 
-from gmlx import server_patches as sp  # noqa: E402
-from gmlx.server_patches import _common as sp_common  # noqa: E402
-from gmlx.server_patches import chat_behavior as sp_chat  # noqa: E402
-from gmlx.server_patches import hardening as sp_hardening  # noqa: E402
-from gmlx.server_patches import request_flow as sp_flow  # noqa: E402
-from gmlx.server_patches import routes as sp_routes  # noqa: E402
-from gmlx.server_patches import sampling as sp_sampling  # noqa: E402
-from gmlx import server_bridge_vlm as serving  # noqa: E402
+import gmlx.serve.patches as sp  # noqa: E402
+from gmlx.serve.patches import _common as sp_common  # noqa: E402
+from gmlx.serve.patches import chat_behavior as sp_chat  # noqa: E402
+from gmlx.serve.patches import hardening as sp_hardening  # noqa: E402
+from gmlx.serve.patches import request_flow as sp_flow  # noqa: E402
+from gmlx.serve.patches import routes as sp_routes  # noqa: E402
+from gmlx.serve.patches import sampling as sp_sampling  # noqa: E402
+import gmlx.serve.bridge_vlm as serving  # noqa: E402
 from gmlx.config import ResolvedModel, build_config  # noqa: E402
 
 _APP = importlib.import_module("mlx_vlm.server.app")
@@ -880,7 +880,7 @@ def test_log_aux_request_failed_status_and_skips_none(capsys):
 def test_speech_route_emits_req_line(monkeypatch, capsys):
     from fastapi.testclient import TestClient
 
-    from gmlx import tts
+    import gmlx.serve.tts as tts
     monkeypatch.setattr(tts, "run_synthesis",
                         lambda *a, **k: (b"AUDIODATA", "audio/mpeg"))
     sp.install_audio_speech_route("mlx-community/Kokoro-82M-bf16")
@@ -897,7 +897,7 @@ def test_speech_route_emits_req_line(monkeypatch, capsys):
 def test_embeddings_route_emits_req_line(monkeypatch, capsys):
     from fastapi.testclient import TestClient
 
-    from gmlx import embeddings as emb
+    import gmlx.serve.embeddings as emb
     payload = {"object": "list", "data": [{"embedding": [0.1, 0.2, 0.3]}],
                "model": "m", "usage": {"prompt_tokens": 7}}
     monkeypatch.setattr(emb, "run_embeddings", lambda *a, **k: payload)
@@ -915,7 +915,7 @@ def test_transcriptions_route_emits_req_line(monkeypatch, capsys):
     pytest.importorskip("multipart")               # python-multipart (stt extra)
     from fastapi.testclient import TestClient
 
-    from gmlx import stt
+    import gmlx.serve.stt as stt
     monkeypatch.setattr(stt, "run_transcription",
                         lambda *a, **k: ({"text": "hi"}, "application/json"))
     sp.install_audio_transcription_route("mlx-community/whisper-large-v3-turbo")
@@ -982,7 +982,7 @@ def test_speech_route_synthesizes(monkeypatch):
     type, not 422 it away as a query param."""
     from fastapi.testclient import TestClient
 
-    from gmlx import tts
+    import gmlx.serve.tts as tts
 
     captured = {}
 
@@ -1007,7 +1007,7 @@ def test_speech_route_synthesizes(monkeypatch):
 def test_speech_route_maps_request_error_to_4xx(monkeypatch):
     from fastapi.testclient import TestClient
 
-    from gmlx import tts
+    import gmlx.serve.tts as tts
 
     def boom(text, **kw):
         raise tts.TTSRequestError(400, "field 'input' is required")
@@ -1045,7 +1045,7 @@ def test_embeddings_route_embeds(monkeypatch):
     must consume JSON and return the OpenAI embeddings payload."""
     from fastapi.testclient import TestClient
 
-    from gmlx import embeddings as emb
+    import gmlx.serve.embeddings as emb
 
     captured = {}
 
@@ -1075,7 +1075,7 @@ def test_embeddings_route_embeds(monkeypatch):
 def test_embeddings_route_maps_request_error_to_4xx(monkeypatch):
     from fastapi.testclient import TestClient
 
-    from gmlx import embeddings as emb
+    import gmlx.serve.embeddings as emb
 
     def boom(inputs, **kw):
         raise emb.EmbeddingsRequestError(400, "field 'input' is required")
@@ -1094,7 +1094,7 @@ def test_embeddings_route_missing_file_is_typed_404(monkeypatch):
     # raw 500 errno.
     from fastapi.testclient import TestClient
 
-    from gmlx import embeddings as emb
+    import gmlx.serve.embeddings as emb
 
     def boom(inputs, **kw):
         raise FileNotFoundError("[Errno 2] No such file: '/lib/e.gguf'")
@@ -1131,7 +1131,7 @@ def test_rerank_route_reranks(monkeypatch):
     """POST a real JSON body and get the Cohere/Jina rerank payload back."""
     from fastapi.testclient import TestClient
 
-    from gmlx import rerank as rr
+    import gmlx.serve.rerank as rr
 
     captured = {}
 
@@ -1159,7 +1159,7 @@ def test_rerank_top_k_alias(monkeypatch):
     (and a real `top_n` still wins) so results get limited."""
     from fastapi.testclient import TestClient
 
-    from gmlx import rerank as rr
+    import gmlx.serve.rerank as rr
 
     captured = {}
 
@@ -1243,7 +1243,7 @@ def test_auto_docs_routes_removed():
 def test_model_not_found_str_is_plain():
     # ModelNotFound subclasses KeyError, whose __str__ is repr() - that
     # double-quoted the message in every HTTP error body built from str(exc).
-    from gmlx import server_bridge_vlm as serving
+    import gmlx.serve.bridge_vlm as serving
     msg = str(serving.ModelNotFound("default", ["a", "b"]))
     assert msg.startswith("unknown model id 'default'")
     assert not msg.startswith('"')
@@ -1613,7 +1613,7 @@ def test_template_default_thinking_blocks_0615_false_injection():
     instead of False, and an explicit value must pass through verbatim."""
     import jinja2
 
-    from gmlx import reasoning
+    import gmlx.tui.reasoning as reasoning
 
     sp.install_chat_template_kwargs()      # installs the render guard too
     pu = importlib.import_module("mlx_vlm.prompt_utils")
@@ -2389,8 +2389,8 @@ def test_chat_load_offload_deferred_load_is_a_typed_503(monkeypatch):
     """The gate's retryable refusal never reaches the stock handler (which
     would 500 with a traceback): the pre-warm answers 503 with the typed
     body and a Retry-After."""
-    from gmlx.capacity import LoadDeferred
-    import gmlx.server_patches.capacity_routes as cr
+    from gmlx.serve.capacity import LoadDeferred
+    import gmlx.serve.patches.capacity_routes as cr
 
     ran = []
 
@@ -2489,7 +2489,7 @@ def test_load_offload_covers_raw_request_routes(monkeypatch):
 
 
 def test_warm_and_release_drops_hold(monkeypatch):
-    from gmlx import residency
+    import gmlx.serve.residency as residency
     released = []
 
     class FakeHold:
@@ -2507,7 +2507,7 @@ def test_warm_and_release_drops_hold(monkeypatch):
 
 
 def test_spawn_preload_warm_retains_hold(monkeypatch):
-    from gmlx import residency
+    import gmlx.serve.residency as residency
 
     class FakeHold:
         def __init__(self):
@@ -2535,7 +2535,7 @@ def test_spawn_preload_warm_retries_deferred(monkeypatch):
     # verdict: the preload must retry with backoff, not silently give
     # up on its first attempt (2026-08-26 stalls: the preload died on
     # the transient and the server never warmed).
-    from gmlx.capacity import LoadDeferred
+    from gmlx.serve.capacity import LoadDeferred
 
     calls = []
     naps = []
@@ -2554,7 +2554,7 @@ def test_spawn_preload_warm_retries_deferred(monkeypatch):
 
 
 def test_spawn_preload_warm_deferred_gives_up_at_deadline(monkeypatch):
-    from gmlx.capacity import LoadDeferred
+    from gmlx.serve.capacity import LoadDeferred
 
     calls = []
 
@@ -2769,7 +2769,7 @@ def test_body_profile_shapes_resolution_like_residency():
 def test_voices_route_lists_and_404s_when_unconfigured(monkeypatch):
     from fastapi.testclient import TestClient
 
-    from gmlx import tts
+    import gmlx.serve.tts as tts
     monkeypatch.setattr(tts, "available_voices",
                         lambda m: ["af_heart", "am_adam"])
     sp.install_audio_voices_route("mlx-community/Kokoro-82M-bf16")
@@ -2871,8 +2871,8 @@ def test_stream_harmony_filter_routes_channels():
 
 
 def test_faithful_history_aliases_gpt_oss_thinking():
-    from gmlx.server_patches import _common as sp_common
-    from gmlx.server_patches import render as sp_render
+    from gmlx.serve.patches import _common as sp_common
+    from gmlx.serve.patches import render as sp_render
 
     def fake(processor, config, prompt, add_generation_prompt=True,
              return_messages=False, num_images=0, num_audios=0, **kwargs):
@@ -2917,7 +2917,7 @@ def test_unload_409_keeps_the_preload_hold(monkeypatch):
     primary LRU/TTL-evictable for the rest of the process."""
     from types import SimpleNamespace
     from fastapi.testclient import TestClient
-    from gmlx.residency import ModelBusyError
+    from gmlx.serve.residency import ModelBusyError
 
     _register({"models": {"qwen": {"path": "/abs/qwen.gguf"}}})
     monkeypatch.setattr(serving, "resolve_request_model",
@@ -2984,7 +2984,7 @@ def test_unload_409_keeps_the_preload_hold(monkeypatch):
 def test_spawn_preload_warm_fills_context_length_cache(monkeypatch):
     """The first /v1/models after boot must not pay the per-GGUF header
     scans on the event loop: the preload thread warms the cache first."""
-    import gmlx.capacity as cap
+    import gmlx.serve.capacity as cap
 
     _register({"models": {"qwen": {"path": "/abs/qwen.gguf"},
                           "glm": {"path": "/abs/glm.gguf"}}})

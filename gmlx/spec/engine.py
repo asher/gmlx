@@ -20,8 +20,8 @@ import sys
 
 import mlx.core as mx
 
-from . import prefill_decay
-from .envflags import env_bool, env_int
+import gmlx.gen.prefill_decay as prefill_decay
+from gmlx.envflags import env_bool, env_int
 
 _log = logging.getLogger(__name__)
 
@@ -56,7 +56,7 @@ def _get_spec_prefix_cache(model):
         return None
     cache = getattr(model, "_spec_prefix_cache", None)
     if cache is None:
-        from .prefix_cache import SpecPrefixCache
+        from gmlx.cache.prefix_cache import SpecPrefixCache
 
         max_entries = env_int("GMLX_SPEC_APC_ENTRIES", 4)
         budget_mb = env_int("GMLX_SPEC_APC_BUDGET_MB", 8192)
@@ -139,7 +139,7 @@ def _install_apc_manager_stash() -> None:
     def _init_with_stash(self, model, processor, **kwargs):
         # upstream server never passes completion_batch_size; inject ours
         if "completion_batch_size" not in kwargs:
-            from .decode_batch import decode_batch
+            from gmlx.serve.decode_batch import decode_batch
             kwargs["completion_batch_size"] = decode_batch()
         # Kill switch (re-read per call): with spec APC off, stock ar.py
         # must not see the manager on the speculative path either -- since
@@ -253,7 +253,7 @@ def _ckpt_active(model, mode, block_size: int = 16) -> bool:
         return False
     flag = getattr(model, "_kq_apc_ckpt", None)
     if flag is None:
-        from .cache_snapshot import ckpt_layout
+        from gmlx.cache.snapshot import ckpt_layout
         lm = getattr(model, "language_model", None) or model
         try:
             tags = ckpt_layout(lm.make_cache(), block_size)
@@ -281,7 +281,7 @@ def _ckpt_layout_for(model, block_size: int = 16):
     _ckpt_layout_live, which sees per-request cache conversion."""
     tags = getattr(model, "_kq_apc_ckpt_layout", None)
     if tags is None:
-        from .cache_snapshot import ckpt_layout
+        from gmlx.cache.snapshot import ckpt_layout
 
         lm = getattr(model, "language_model", None) or model
         try:
@@ -313,7 +313,7 @@ def _ckpt_layout_live(batch, block_size: int = 16):
     batches that carry no caches yet."""
     caches = getattr(batch, "prompt_cache", None)
     if caches:
-        from .cache_snapshot import ckpt_layout
+        from gmlx.cache.snapshot import ckpt_layout
 
         try:
             tags = tuple(ckpt_layout(caches, block_size) or ())
@@ -405,7 +405,7 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
             # Checkpoint tier: the longest salted sidecar + block chain
             # wins only when strictly longer than the exact-tier pick.
             # Media guards mirror the stock exact probe.
-            from .cache_snapshot import ckpt_lookup
+            from gmlx.cache.snapshot import ckpt_lookup
 
             min_p = max(prefix_len, view._apc_safe_prefix_lookup_min(ids_list))
             cw, cp = ckpt_lookup(
@@ -428,7 +428,7 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
             # Exact-tier anchor: the shared-system-prefix clone in the
             # gmlx anchor LRU wins only when strictly longer than the
             # stock exact pick. Media guards mirror the stock probe.
-            from .cache_snapshot import anchor_exact_lookup
+            from gmlx.cache.snapshot import anchor_exact_lookup
             min_p = max(prefix_len,
                         view._apc_safe_prefix_lookup_min(ids_list))
             aw, ap = anchor_exact_lookup(
@@ -479,7 +479,7 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
             # owned round a warm drafter start. Stash rides the first
             # cache entry, same discipline as the retirement context.
             if not _SPEC_APC_SIDECAR_DISABLED:
-                from .cache_snapshot import drafter_sidecar_lookup
+                from gmlx.cache.snapshot import drafter_sidecar_lookup
 
                 side = drafter_sidecar_lookup(manager, ids_list, prefix_len, extra_hash)
                 if side:
@@ -512,7 +512,7 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
                            int(manager.block_size))
         batch._apc_harvest_enabled = False
         batch._kq_ckpt_armed = True
-        from .cache_snapshot import ckpt_note_armed
+        from gmlx.cache.snapshot import ckpt_note_armed
         ckpt_note_armed(manager)
     elif mode == "exact":
         _exact_anchor_arm(batch, meta, guard,
@@ -622,7 +622,7 @@ def _ckpt_turn_boundaries(batch, meta, restored: int,
     need = unit if ("arr" in tags or not ws) else min(unit, max(ws))
     if len(ids) - 1 < need:
         return []
-    from .retire_key import lookup_render_ctx, prompt_stable_lcp
+    from gmlx.cache.retire_key import lookup_render_ctx, prompt_stable_lcp
     ctx = lookup_render_ctx(ids)
     p_stable = prompt_stable_lcp(ctx, ids) if ctx else None
     if not p_stable or p_stable < 2:
@@ -671,7 +671,7 @@ def _ckpt_sys_boundary(batch, meta, restored: int,
     # prediction entirely (same rule as the turn boundaries).
     if len(ids) - 1 < floor_min:
         return None
-    from .retire_key import lookup_render_ctx, system_prefix_lcp
+    from gmlx.cache.retire_key import lookup_render_ctx, system_prefix_lcp
     ctx = lookup_render_ctx(ids)
     lcp = system_prefix_lcp(ctx, ids) if ctx else None
     if not lcp:
@@ -700,7 +700,7 @@ def _exact_anchor_boundary(batch, meta, guard: int,
     floor_min = max(2, env_int("GMLX_APC_CKPT_SYS_MIN", 256))
     if len(ids) - 1 < floor_min:
         return None
-    from .retire_key import lookup_render_ctx, system_prefix_lcp
+    from gmlx.cache.retire_key import lookup_render_ctx, system_prefix_lcp
     ctx = lookup_render_ctx(ids)
     lcp = system_prefix_lcp(ctx, ids) if ctx else None
     if not lcp:
@@ -755,7 +755,7 @@ def _exact_anchor_store(batch) -> None:
     cache = batch._apc_prompt_cache_for_store(0)
     if cache is None:
         return
-    from .cache_snapshot import anchor_exact_store
+    from gmlx.cache.snapshot import anchor_exact_store
     anchor_exact_store(manager, meta["full_input_ids"][:pos], cache,
                        extra_hash=int(meta.get("extra_hash", 0)))
 
@@ -851,7 +851,7 @@ def _ckpt_mid_prefill_store(batch) -> None:
     heavy = "arr" in layout or any(t.startswith("kvarn") for t in layout)
     skel = not heavy or (kind != "replay"
                          and checkpoint_len >= terminal)
-    from .cache_snapshot import ckpt_store
+    from gmlx.cache.snapshot import ckpt_store
 
     if ckpt_store(
             manager, meta["full_input_ids"][:checkpoint_len],
@@ -909,7 +909,7 @@ def _snap_fields(batch, manager) -> dict:
     a wrapped window is whole blocks at any p.
     """
     import math
-    from .cache_snapshot import _DECODE_CKPT_DEFAULT
+    from gmlx.cache.snapshot import _DECODE_CKPT_DEFAULT
 
     bs = int(manager.block_size)
     tags = _ckpt_layout_live(batch, bs) or ()
@@ -966,7 +966,7 @@ def _plain_ckpt_init(batch) -> None:
     extra_hash = int(meta.get("extra_hash", 0))
     view = _L1View(batch.model, manager, mode)
     restored = 0
-    from .cache_snapshot import ckpt_lookup
+    from gmlx.cache.snapshot import ckpt_lookup
 
     warm, cp = ckpt_lookup(
         manager,
@@ -994,10 +994,10 @@ def _plain_ckpt_init(batch) -> None:
     _ckpt_arm_schedule(batch, meta, guard, restored, bs)
     batch._apc_harvest_enabled = False
     batch._kq_ckpt_armed = True
-    from .cache_snapshot import ckpt_note_armed
+    from gmlx.cache.snapshot import ckpt_note_armed
     ckpt_note_armed(manager)
     if not _SPEC_APC_RETIRE_DISABLED and batch.prompt_cache:
-        from .retire_key import lookup_render_ctx
+        from gmlx.cache.retire_key import lookup_render_ctx
 
         batch.prompt_cache[0]._kq_apc_retire = {
             "full_ids": ids_list,
@@ -1044,7 +1044,7 @@ def _plain_anchor_init(batch) -> None:
     # store the post-prefill exact store cannot cover), warm rows
     # included -- the decode cache holds the full sequence either way.
     if not _SPEC_APC_RETIRE_DISABLED and batch.prompt_cache:
-        from .retire_key import lookup_render_ctx
+        from gmlx.cache.retire_key import lookup_render_ctx
         ids_list = [int(t) for t in meta["full_input_ids"]]
         batch.prompt_cache[0]._kq_apc_retire = {
             "full_ids": ids_list,
@@ -1098,7 +1098,7 @@ def _install_exact_anchor_pick() -> None:
             have = int((pick or {}).get("prefix_len") or 0)
             extra_hash = self._apc_extra_hash(prompt_kwargs or {})
             floor = max(have, self._apc_safe_prefix_lookup_min(ids_list))
-            from .cache_snapshot import anchor_exact_lookup
+            from gmlx.cache.snapshot import anchor_exact_lookup
             warm, ap = anchor_exact_lookup(
                 manager, ids_list, extra_hash=extra_hash,
                 min_prefix_tokens=floor)
@@ -1190,7 +1190,7 @@ def _plain_step_tick(gb, out) -> None:
                 tok = tok[0]
             stash["gen"].append(int(tok))
             if solo and stash.get("mode") == "ckpt":
-                from .cache_snapshot import decode_ckpt_tick
+                from gmlx.cache.snapshot import decode_ckpt_tick
 
                 decode_ckpt_tick(stash, gb.prompt_cache, stash["gen"])
         except Exception:
@@ -1218,7 +1218,7 @@ def _plain_retire(stash: dict, prompt_cache: list) -> None:
         if not gen:
             return
         seq = [int(t) for t in stash["full_ids"]] + gen
-        from .cache_snapshot import _cache_offset_max, retirement_store
+        from gmlx.cache.snapshot import _cache_offset_max, retirement_store
 
         offset = _cache_offset_max(prompt_cache)
         if offset == len(seq) - 1:
@@ -1230,7 +1230,7 @@ def _plain_retire(stash: dict, prompt_cache: list) -> None:
             return
         lcp = None
         if os.environ.get("GMLX_APC_RETIRE_LCP") != "0":
-            from .retire_key import next_turn_lcp
+            from gmlx.cache.retire_key import next_turn_lcp
 
             lcp = next_turn_lcp(stash.get("render_ctx"), seq, gen)
         max_len = lcp if lcp is not None and lcp < len(seq) else None
@@ -1292,7 +1292,7 @@ def _install_plain_ckpt_decode() -> None:
                     if solo:
                         _plain_retire(stash, self.prompt_cache)
                     elif batched_ok:
-                        from .cache_snapshot import row_snapshot
+                        from gmlx.cache.snapshot import row_snapshot
                         rows = row_snapshot(self.prompt_cache, i)
                         if rows is None:
                             _log.info("APC retire skipped: row %d "
@@ -1411,7 +1411,7 @@ def _mtp_prefill_init(batch) -> None:
     if manager is not None and not _SPEC_APC_RETIRE_DISABLED and batch.prompt_cache:
         meta = (batch._apc_meta or [{}])[0] or {}
         full_ids = [int(t) for t in batch._mtp_full_input_ids[0].tolist()]
-        from .retire_key import lookup_render_ctx
+        from gmlx.cache.retire_key import lookup_render_ctx
 
         batch.prompt_cache[0]._kq_apc_retire = {
             "full_ids": full_ids,
@@ -1541,7 +1541,7 @@ def install_full_prompt_mtp_prefill() -> None:
                 # consumes and drops the scheme/bits constructor params.
                 manager, mode = _resolve_l1(self.model)
                 if manager is not None:
-                    from .kvarn_serve import ensure_ppb_kvarn
+                    from gmlx.cache.kvarn_serve import ensure_ppb_kvarn
 
                     ensure_ppb_kvarn(
                         self, kwargs,
@@ -1569,7 +1569,7 @@ def install_full_prompt_mtp_prefill() -> None:
         # the coarse decode caps keeps every layer's transients live in
         # one command buffer and OOMs the GPU on deep prompts.
         if os.environ.get("GMLX_CB_PHASE", "1") != "0":
-            from .cb_phase import flip
+            from gmlx.serve.cb_phase import flip
             flip("prefill")
 
         if not hasattr(self, "_mtp_full_input_ids"):
@@ -1678,8 +1678,10 @@ def install_full_prompt_mtp_prefill() -> None:
                     cache = getattr(result, "prompt_cache", None) or []
                     stash = getattr(cache[0], "_kq_apc_retire", None) if cache else None
                     if stash is not None and stash.get("mode") == "ckpt":
-                        from .cache_snapshot import (
-                            ckpt_full_store_redundant, ckpt_store)
+                        from gmlx.cache.snapshot import (
+                            ckpt_full_store_redundant,
+                            ckpt_store,
+                        )
                         m = stash.get("apc_meta")
                         if ckpt_full_store_redundant(m):
                             _log.info("APC ckpt post-prefill store "
@@ -2184,7 +2186,7 @@ def install_owned_spec_engine() -> None:
     if getattr(_orig, _OWNED_MTP_ROUND_FLAG, False):
         return
 
-    from gmlx.speculative import (
+    from gmlx.spec.speculative import (
         owned_server_rounds,
         owned_server_rounds_batch,
     )
@@ -2389,7 +2391,7 @@ def install_spec_kv_quant() -> None:
         return
     kind = params[0]
 
-    from .cache_compat import cache_types
+    from gmlx.cache.compat import cache_types
 
     plain_kv = cache_types("KVCache")
     rotating = cache_types("RotatingKVCache") + cache_types("BatchRotatingKVCache")
@@ -2407,9 +2409,9 @@ def install_spec_kv_quant() -> None:
             )
 
     def _kvarn_spec_convert(lm, caches):
-        from .generation import _kvarn_widths, kvarn_unsupported
-        from .kvarn_cache import KVARN_BITS, convert_prompt_cache
-        from .kvarn_sdpa import install_kvarn_sdpa
+        from gmlx.gen.generation import _kvarn_widths, kvarn_unsupported
+        from gmlx.cache.kvarn_cache import KVARN_BITS, convert_prompt_cache
+        from gmlx.cache.kvarn_sdpa import install_kvarn_sdpa
 
         _, env_bits, tail = params
         reason = kvarn_unsupported(lm)
@@ -2431,7 +2433,7 @@ def install_spec_kv_quant() -> None:
             _decline_kvarn("no plain KV-cache layers in this arch's stack")
             return caches
         install_kvarn_sdpa()
-        from .generation import harden_mtp_rollback
+        from gmlx.gen.generation import harden_mtp_rollback
 
         harden_mtp_rollback(lm)
         if not _noted[0]:
@@ -2447,7 +2449,7 @@ def install_spec_kv_quant() -> None:
         return caches
 
     def _quantizing_spec_cache(lm, *, draft_kind, batch_size, left_padding, make_cache):
-        from .kvarn_serve import spec_cache_build
+        from gmlx.cache.kvarn_serve import spec_cache_build
 
         # The stock make_cache closure passes the boot scheme through;
         # suspend the serve wrap so spec targets never get a batch kvarn
@@ -2481,7 +2483,7 @@ def install_spec_kv_quant() -> None:
                 )
             return caches
         if kind == "kvarn":
-            from .cache_compat import cache_types
+            from gmlx.cache.compat import cache_types
 
             if any(type(c) in cache_types("BatchKVCache") for c in caches):
                 _decline_kvarn(

@@ -3,9 +3,9 @@
 import mlx.core as mx
 import mlx.nn as nn
 
-from gmlx import vlm as gvlm
-from gmlx.config_synth import synthesize_config
-from gmlx.qwen4_exp_model import (
+import gmlx.load.vlm as gvlm
+from gmlx.load.config_synth import synthesize_config
+from gmlx.models.qwen4_exp.model import (
     Model as TextModel,
     ModelArgs,
     ensure_registered,
@@ -36,7 +36,7 @@ def test_resolve_and_config_synth():
 
 def _tiny_vlm():
     ensure_registered()
-    from gmlx import qwen4_exp_vlm_model as vm
+    import gmlx.models.qwen4_exp.vlm_model as vm
 
     vm.ensure_registered()
     text = dict(synthesize_config(_qwen4exp_meta(True, True), _QWEN4EXP_SHAPES))
@@ -122,10 +122,10 @@ def test_get_rope_index_borrowed_semantics():
 def test_registered_module_and_seam_row():
     import sys
 
-    from gmlx import qwen4_exp_vlm_model as vm
-    from gmlx.upstream_seams import VENDORED_MLX_VLM_MODULES
+    import gmlx.models.qwen4_exp.vlm_model as vm
+    from gmlx.upstream.seams import VENDORED_MLX_VLM_MODULES
 
     vm.ensure_registered()
     assert "mlx_vlm.models.qwen4_exp" in sys.modules
-    assert VENDORED_MLX_VLM_MODULES["gmlx.qwen4_exp_vlm_model"] == \
+    assert VENDORED_MLX_VLM_MODULES["gmlx.models.qwen4_exp.vlm_model"] == \
         "mlx_vlm.models.qwen4_exp"

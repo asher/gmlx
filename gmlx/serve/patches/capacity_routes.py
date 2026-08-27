@@ -24,7 +24,7 @@ The routes a load balancer or a harness dispatcher reaches for first:
   ``"dry_run": true`` on chat completions) answer the questions a
   dispatcher asks before sending: does this fan-out fit, may it start
   now, does this prompt fit, how warm is its prefix, how long to first
-  token (``gmlx.estimate``).
+  token (``gmlx.serve.estimate``).
 """
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ from fastapi import Request
 
 from ._common import (_CHAT_PATHS, _find_route, _get_pool, _remove_routes,
                       _wrap_post_routes)
-from .. import server_bridge_vlm as serving
+import gmlx.serve.bridge_vlm as serving
 
 _log = logging.getLogger(__name__)
 
@@ -356,7 +356,7 @@ def install_scoped_cache_reset() -> None:
 def install_capacity_plan() -> None:
     """``GET /v1/capacity/plan?width=W&depth=D`` (and ``/capacity/plan``):
     the fan-out policy answered from the capacity table, the governor
-    band and the live concurrency (``gmlx.estimate.capacity_plan``).
+    band and the live concurrency (``gmlx.serve.estimate.capacity_plan``).
     Authed like the metrics routes. Idempotent."""
     from fastapi.responses import JSONResponse
 
@@ -403,7 +403,7 @@ def _tenant_of(request) -> str | None:
 
 def install_estimate() -> None:
     """``POST /v1/estimate`` (and ``/estimate``): dry-run a chat-completions
-    body (``gmlx.estimate.estimate_request``), and ``"dry_run": true`` on
+    body (``gmlx.serve.estimate.estimate_request``), and ``"dry_run": true`` on
     the chat-completions routes, which answers the same estimate instead
     of generating. Idempotent."""
     from fastapi.responses import JSONResponse

@@ -19,7 +19,7 @@ import os
 from collections import OrderedDict
 from typing import Any
 
-from .envflags import env_int
+from gmlx.envflags import env_int
 
 _log = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ def _buffered_types() -> tuple:
     RotatingKVCache but carries ``start_position`` and a slack buffer no
     rotating clone or canonical window preserves -- every snapshot path
     declines it loudly until dedicated support lands."""
-    from .cache_compat import cache_types
+    from .compat import cache_types
 
     try:
         return cache_types("BufferedRotatingKVCache")
@@ -92,7 +92,7 @@ def _clone_row_faithful(cache: Any) -> Any | None:
 
 def _clone_row(cache: Any, *, rot_canonical: bool) -> Any | None:
     from mlx_vlm import apc as _apc
-    from .cache_compat import cache_types
+    from .compat import cache_types
 
     if isinstance(cache, _buffered_types()):
         return _clone_buffered_window(cache)
@@ -193,7 +193,7 @@ def _clone_buffered_window(cache: Any) -> Any | None:
 
 def _clone_lm_twin(cache: Any, eval_targets: list[Any]) -> Any | None:
     from mlx_vlm import apc as _apc
-    from .cache_compat import cache_types
+    from .compat import cache_types
 
     copy = _apc._copy_mlx_array
     if isinstance(cache, cache_types("RotatingKVCache")):
@@ -589,7 +589,7 @@ def rotating_geometry(prompt_cache, block_size: int):
     across layers; window and keep whole numbers of blocks, so checkpoint
     boundaries are rotation boundaries and the keep region restores as a
     prefix slice of whole blocks."""
-    from .cache_compat import cache_types
+    from .compat import cache_types
 
     rot_types = cache_types("RotatingKVCache")
     geoms = {(int(c.max_size), int(c.keep))
@@ -666,7 +666,7 @@ def rotating_restore(keys, values, meta):
     pointer is checked against what the chain actually returned, never
     trusted). Returns the cache or None.
     """
-    from .cache_compat import construction_cache_module
+    from .compat import construction_cache_module
 
     if meta is None:
         _log.warning("APC rotating restore rejected: no stored meta")
@@ -793,7 +793,7 @@ def ckpt_layout(prompt_cache, block_size: int = 16):
     single-stream class only: the rotating subclass loses window geometry
     under the plain tag, and batch classes belong to the batch engine --
     both decline until dedicated support lands."""
-    from .cache_compat import cache_types
+    from .compat import cache_types
     from .kvarn_cache import KVarNKVCache
 
     if not prompt_cache:
@@ -1253,7 +1253,7 @@ def ckpt_store(
     """
     if manager is None or token_ids is None:
         return 0
-    from .cache_compat import cache_types, runtime_cache_module
+    from .compat import cache_types, runtime_cache_module
     from .kvarn_cache import KVarNKVCache
 
     kv_types = cache_types("KVCache")
@@ -1420,7 +1420,7 @@ def ckpt_store(
             # Owned survivors: lk/lv slice the live prompt cache, whose
             # own pending graph rides the same tape; the guard drains
             # before the store's except path releases and declines.
-            from .eval_guard import guard
+            from gmlx.eval_guard import guard
             guard.eval(*(lk + lv), site="ckpt-store-main", owner="owned")
             got_main = _chained(
                 ids[:b_full], lk, lv, extra=salted, disk=True,
@@ -1456,7 +1456,7 @@ def ckpt_store(
             canon_k = [cw[0] for cw in canon]
             canon_v = [cw[1] for cw in canon]
             # Same writer-thread rule and ownership as the main chain.
-            from .eval_guard import guard
+            from gmlx.eval_guard import guard
             guard.eval(*(canon_k + canon_v), site="ckpt-store-window",
                        owner="owned")
             got_win = _chained(
@@ -1525,7 +1525,7 @@ def _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
     disk = getattr(manager, "disk", None)
     if disk is None:
         return
-    from .cache_compat import runtime_cache_module
+    from .compat import runtime_cache_module
     try:
         rcm = runtime_cache_module()
         entries: list[Any] = []
@@ -1576,7 +1576,7 @@ def _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
 def _assemble_from_record(manager, rec, geometry_check=None):
     """Warm cache list from a pinned record, or None (conjunction fail)."""
     import mlx.core as mx
-    from .cache_compat import runtime_cache_module
+    from .compat import runtime_cache_module
 
     rcm = runtime_cache_module()
     n_kv = sum(1 for t in rec.layout if t == "kv")
@@ -1843,7 +1843,7 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
     machinery, chains from the salted block keyspaces. p comes from the
     lookup's matched length, never from a placeholder."""
     import mlx.core as mx
-    from .cache_compat import cache_types, runtime_cache_module
+    from .compat import cache_types, runtime_cache_module
 
     kv_types = cache_types("KVCache")
     rot_types = cache_types("RotatingKVCache")
@@ -2014,7 +2014,7 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
         # Scratch survivors: the warm-cache arrays were built by this
         # restore from pool blocks; the except path's release-and-decline
         # is the right exit and now runs post-drain.
-        from .eval_guard import guard
+        from gmlx.eval_guard import guard
         guard.eval(*targets, site="ckpt-disk-lookup", owner="scratch")
         manager.release(blocks)
         manager.release(wblocks)
@@ -2038,7 +2038,7 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
 def _truncate_kv_snapshot(snap: list[Any], n: int) -> list[Any] | None:
     """Trim a row snapshot to its first ``n`` tokens, or None if any layer
     cannot be truncated faithfully (rotation, recurrent state, pooling)."""
-    from .cache_compat import cache_types
+    from .compat import cache_types
 
     kv_types = cache_types("KVCache")
     for c in snap:
@@ -2173,7 +2173,7 @@ def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
             _log.info("APC decode ckpt frozen: render diverges at %d "
                       "(live %d)", pred, p)
             return
-        from .cache_compat import cache_types
+        from .compat import cache_types
         kv_types = cache_types("KVCache")
         rot_types = cache_types("RotatingKVCache")
         states = []
@@ -2203,7 +2203,7 @@ def _snap_assemble(prompt_cache: list[Any], states: list[Any],
     """Rebuild a single-row cache list at snapshot position ``p``: plain
     KV sliced from the live row, rotating windows and recurrent states
     from the snapshot clones."""
-    from .cache_compat import cache_types, construction_cache_module
+    from .compat import cache_types, construction_cache_module
 
     kv_types = cache_types("KVCache")
     rot_types = cache_types("RotatingKVCache")

@@ -26,7 +26,7 @@ import sys
 
 from mlx_lm.models.cache import make_prompt_cache
 
-from .loader import load_model
+from gmlx.load.loader import load_model
 
 _BRIDGE_FLAG = "_kq_gguf_bridge_installed"
 

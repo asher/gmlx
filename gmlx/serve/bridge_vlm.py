@@ -13,7 +13,7 @@ that server by replacing only that load step:
   tokenizer into the processor shape the server expects (a callable
   ``.tokenizer`` carrying a ``StoppingCriteria`` plus a copy-safe streaming
   ``.detokenizer``). With an associated float ``mmproj`` GGUF it instead loads
-  a two-GGUF VLM via :func:`gmlx.vlm.load_vlm_model` - a real mlx-vlm
+  a two-GGUF VLM via :func:`gmlx.load.vlm.load_vlm_model` - a real mlx-vlm
   vision/audio model whose synthesized processor is already engine-ready, so the
   multimodal request path (``prepare_inputs`` -> ``get_input_embeddings`` ->
   ``BatchGenerator``) runs stock.
@@ -51,11 +51,11 @@ import sys
 from contextvars import ContextVar
 
 from mlx_vlm import tokenizer_utils as _mlxvlm_tok
-from gmlx.vlm_text_only import Model as TextOnlyModel
+from gmlx.models.vlm_text_only import Model as TextOnlyModel
 from mlx_vlm.utils import StoppingCriteria
 
-from .drafter_protocol import native_block_size
-from .loader import load_model
+from gmlx.spec.drafter_protocol import native_block_size
+from gmlx.load.loader import load_model
 
 _log = logging.getLogger(__name__)
 
@@ -346,7 +346,7 @@ def _ensure_text_embedding_probe(model, raw_model) -> None:
             f"served text model {type(raw_model).__name__!r} exposes no token "
             f"embedding the batched engine can reach (probed {_EMBED_ATTR_NAMES} "
             f"on self / .model / .language_model / .language_model.model) - wire "
-            f"its layout into gmlx.server_bridge_vlm._find_token_embedding")
+            f"its layout into gmlx.serve.bridge_vlm._find_token_embedding")
     object.__setattr__(lm, "_token_embedding", lambda: emb)
 
 
@@ -356,7 +356,7 @@ def _load_serveable_vlm(
     """Load a two-GGUF VLM (K-quant LLM + float mmproj) for the batched engine.
 
     Unlike the text path there is no adapter and no ``text_only`` wrap:
-    :func:`gmlx.vlm.load_vlm_model` returns the *real* mlx-vlm vision/audio
+    :func:`gmlx.load.vlm.load_vlm_model` returns the *real* mlx-vlm vision/audio
     ``Model`` (already exposing ``get_input_embeddings`` and a ``config`` with
     ``model_type`` / ``image_token_id``) plus a GGUF-synthesized processor that
     already carries the full contract the engine reads: a callable
@@ -366,7 +366,7 @@ def _load_serveable_vlm(
     the return order differs (``load_vlm_model`` yields ``(model, config,
     processor)``; the server wants ``(model, processor, config)``).
     """
-    from .vlm import load_vlm_model
+    from gmlx.load.vlm import load_vlm_model
 
     model, _config_dict, processor = load_vlm_model(
         gguf_path, mmproj_path, hf_source=hf_source, verbose=False
@@ -413,7 +413,7 @@ def _load_serveable_mtp(
       the drafter-load patch (:func:`_install_drafter_injection`) hands it to the
       engine when it asks to load a drafter for this GGUF.
     """
-    from .mtp_load import load_mtp_model
+    from gmlx.spec.mtp_load import load_mtp_model
 
     model, drafter, _config, tokenizer = load_mtp_model(
         gguf_path, draft_gguf_path=draft_gguf_path,
@@ -430,7 +430,7 @@ def _load_serveable_mtp(
     # Runtime-origin cache identities for the apc/ar isinstance gates; a
     # vlm-native LanguageModel target makes this a no-op, an mlx-lm-style
     # target (deepseek_v4 et al) needs it since mlx-vlm 0.6.4.
-    from .cache_compat import ensure_runtime_origin_make_cache
+    from gmlx.cache.compat import ensure_runtime_origin_make_cache
     ensure_runtime_origin_make_cache(model.language_model)
     _MTP_DRAFTER_STASH[os.path.abspath(gguf_path)] = (drafter, "mtp")
     processor = _make_text_processor(tokenizer)
@@ -456,7 +456,7 @@ def _load_serveable_vlm_mtp(
     The drafter is the gemma4 assistant (``draft_gguf_path``) or the qwen3.5/3.6
     native head; ``load_vlm_mtp_model`` picks by ``draft_gguf_path``.
     """
-    from .mtp_load import load_vlm_mtp_model
+    from gmlx.spec.mtp_load import load_vlm_mtp_model
 
     model, drafter, _config, _tokenizer, processor = load_vlm_mtp_model(
         gguf_path, mmproj_path, hf_source=hf_source,
@@ -481,11 +481,11 @@ def _apply_gguf_adapter(raw_model, config, adapter_gguf: str,
     ``base_gguf_path`` supplies the base's GGUF arch so an adapter trained for a
     different family fails with the clean arch-mismatch message up front, instead
     of the structural missing-targets raise from :func:`install_lora_adapter`."""
-    from .adapter import apply_gguf_adapter
+    from gmlx.load.adapter import apply_gguf_adapter
 
     base_arch = None
     if base_gguf_path:
-        from .discovery import header_meta
+        from gmlx.load.discovery import header_meta
         base_arch = (header_meta(base_gguf_path) or {}).get("arch")
     return apply_gguf_adapter(raw_model, config, adapter_gguf,
                               base_arch=base_arch)
@@ -516,33 +516,33 @@ def _install_stream_placement(
         # The whole model runs on the CPU device, and this device change
         # applies to the process. Use it for one over-RAM model. Do not mix
         # it with GPU-resident models in one config-mode server.
-        from .loader import configure_stream_cpu
+        from gmlx.load.loader import configure_stream_cpu
         configure_stream_cpu(
             text_model, gguf_path=gguf_path,
             feeder_prefill=feeder_prefill, feeder_decode=feeder_decode)
     elif stream:  # "experts": routed experts stream; rest of model + KV on GPU
-        from .loader import install_expert_streaming
+        from gmlx.load.loader import install_expert_streaming
         install_expert_streaming(
             text_model, gguf_path=gguf_path,
             feeder_prefill=feeder_prefill, feeder_decode=feeder_decode)
     if moe_experts is not None:
-        from .loader import install_moe_experts_override
+        from gmlx.load.loader import install_moe_experts_override
         install_moe_experts_override(text_model, moe_experts)
     if moe_expert_mass is not None:
-        from .moe_experts import install_moe_expert_mass
+        from gmlx.stream.moe_experts import install_moe_expert_mass
         install_moe_expert_mass(text_model, moe_expert_mass)
     if moe_miss_shed is not None:
-        from .moe_experts import install_moe_miss_shed
+        from gmlx.stream.moe_experts import install_moe_miss_shed
         install_moe_miss_shed(text_model, moe_miss_shed)
     if moe_prestage == "keepers":
         if moe_miss_shed is None:
             print("[stream] moe_prestage: keepers ignored: it needs "
                   "moe_miss_shed")
         else:
-            from .moe_experts import install_moe_prestage_keepers
+            from gmlx.stream.moe_experts import install_moe_prestage_keepers
             install_moe_prestage_keepers(text_model)
     if moe_layer_shed is not None:
-        from .moe_experts import install_moe_layer_shed
+        from gmlx.stream.moe_experts import install_moe_layer_shed
         install_moe_layer_shed(text_model, moe_layer_shed)
 
 
@@ -667,7 +667,7 @@ def load_serveable_model(
     raw_model, config, tokenizer = load_model(
         gguf_path, chat_template=chat_template, verbose=False)
 
-    from .diffusion import is_diffusion_model
+    from gmlx.gen.diffusion import is_diffusion_model
 
     if is_diffusion_model(raw_model):
         # A DiffusionGemma checkpoint is already a real mlx-vlm Model; the
@@ -689,7 +689,7 @@ def load_serveable_model(
     # mlx-lm-arch caches must carry the vlm runtime's class identities or
     # apc/ar isinstance-gates (own classes since mlx-vlm 0.6.4) resolve
     # model_apc_mode to None and APC silently disengages for this model.
-    from .cache_compat import ensure_runtime_origin_make_cache
+    from gmlx.cache.compat import ensure_runtime_origin_make_cache
     ensure_runtime_origin_make_cache(raw_model)
     model = TextOnlyModel(raw_model, config=_as_dict(config))
     _ensure_inner_config(model, _AttrDict(_as_dict(config)))
@@ -790,7 +790,7 @@ def install_gguf_server_bridge() -> None:
 
     # Engine threads must not exit while holding thread-local compile
     # cache entries (mlx 0.32.1 TSD segfault; see _exitfix).
-    from ._exitfix import install_engine_thread_guard
+    from gmlx._exitfix import install_engine_thread_guard
     install_engine_thread_guard(generation)
 
     original = generation.load_model_resources
@@ -809,7 +809,7 @@ def install_gguf_server_bridge() -> None:
         # the residency build window), published on the module channel, and
         # wired in by residency after the load returns. Applies to GGUF and
         # fall-through loads alike - any pooled model can enable the cache.
-        from .apc_manager import build_apc_manager
+        from gmlx.cache.apc_manager import build_apc_manager
         manager = build_apc_manager(model_namespace=model_path)
         if manager is not None:
             publish_built_apc_manager(manager)
@@ -1005,7 +1005,7 @@ def _fill_families(cfg) -> None:
     :func:`config.resolve_model` sees it with no signature changes. The logic
     (and its silent-miss / kill-switch behaviour) lives in
     :func:`discovery.fill_families`, shared with the run/chat config overlay."""
-    from .discovery import fill_families
+    from gmlx.load.discovery import fill_families
     fill_families(cfg)
 
 
@@ -1063,7 +1063,7 @@ def _register_one(mid: str, rm) -> None:
 
 
 def _register_resolved_models_locked(cfg) -> None:
-    from .config import MissingModelFile, resolve_model
+    from gmlx.config import MissingModelFile, resolve_model
 
     _clear_registries()
     for root in getattr(cfg, "model_dirs", None) or []:
@@ -1097,7 +1097,7 @@ def reregister_missing_models() -> bool:
     this, a healed model serves fine while staying invisible to clients that
     enumerate models. Cheap when nothing is missing (a set-membership pass);
     one resolve attempt per still-missing id otherwise. True if any healed."""
-    from .config import ConfigError, resolve_model
+    from gmlx.config import ConfigError, resolve_model
 
     cfg = _SERVER_CFG
     if cfg is None:
@@ -1143,7 +1143,7 @@ def aliases() -> dict:
     cfg = _SERVER_CFG
     if cfg is None:
         return {}
-    from .config import profile_names, split_address
+    from gmlx.config import profile_names, split_address
     known = profile_names(cfg)
     return {name: split_address(target, known)
             for name, target in cfg.aliases.items()}
@@ -1174,7 +1174,7 @@ def split_profile_address(model_field: str) -> tuple[str, str | None]:
     and ids/aliases containing ``@``-like text stay intact. ``(head, profile|None)``."""
     if _SERVER_CFG is None:
         return model_field, None
-    from .config import profile_names, split_address
+    from gmlx.config import profile_names, split_address
     return split_address(model_field, profile_names(_SERVER_CFG))
 
 
@@ -1203,7 +1203,12 @@ def resolve_request_model(model_field: str | None, *,
     **never** an HF fetch. Re-resolves through :func:`config.resolve_model` so the
     chosen profile reshapes the merged sampling/load spec (and a skipped model
     self-heals here the moment its file is back)."""
-    from .config import MissingModelFile, profile_names, resolve_model, split_address
+    from gmlx.config import (
+        MissingModelFile,
+        profile_names,
+        resolve_model,
+        split_address,
+    )
 
     cfg = _SERVER_CFG
     if cfg is None:

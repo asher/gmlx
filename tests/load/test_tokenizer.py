@@ -15,7 +15,7 @@ import numpy as np
 
 from tokenizers import pre_tokenizers  # noqa: E402
 
-from gmlx.tokenizer import load_tokenizer_from_gguf  # noqa: E402
+from gmlx.load.tokenizer import load_tokenizer_from_gguf  # noqa: E402
 
 # Special tokens occupy ids 0..2; the byte alphabet follows.
 _SPECIALS = ["<s>", "</s>", "<pad>"]
@@ -136,7 +136,7 @@ def test_qwen_isolates_each_digit():
 def test_digit_clause_selected_by_pre():
     # The selector picks the family-correct digit clause from the GGUF pre hint;
     # unlisted pres keep the historical single-digit default (no regression).
-    from gmlx.tokenizer import _bytelevel_split_patterns
+    from gmlx.load.tokenizer import _bytelevel_split_patterns
     for pre in ("llama-bpe", "llama3"):
         assert r"\p{N}{1,3}" in _bytelevel_split_patterns(pre)[0]
     assert r"\p{N}+" in _bytelevel_split_patterns("gpt-2")[0]
@@ -146,7 +146,7 @@ def test_digit_clause_selected_by_pre():
     # PRE_TYPE_MINIMAX_M2 regex is the o200k pattern verbatim - full-pattern
     # override, not a digit-clause swap (16k parity fails 15492-vs-16384
     # prompt tokens on the digit grouping alone without it).
-    from gmlx.tokenizer import O200K_PATTERN
+    from gmlx.load.tokenizer import O200K_PATTERN
     assert _bytelevel_split_patterns("minimax-m2") == (O200K_PATTERN,)
 
 
@@ -155,7 +155,7 @@ def test_deepseek3_pre_is_multi_regex_sequence():
     # same case covers pre='deepseek-v3', 'joyai-llm' [DeepSeek V4 Flash], and
     # 'hunyuan-dense'). The selector must return the tuple, and the builder
     # must chain one Split per pattern (mirroring sequential splitting).
-    from gmlx.tokenizer import _DEEPSEEK3_PATTERNS, _bytelevel_split_patterns
+    from gmlx.load.tokenizer import _DEEPSEEK3_PATTERNS, _bytelevel_split_patterns
     for pre in ("deepseek-v3", "joyai-llm", "hunyuan-dense"):
         assert _bytelevel_split_patterns(pre) == _DEEPSEEK3_PATTERNS
     assert len(_DEEPSEEK3_PATTERNS) == 3
@@ -180,7 +180,7 @@ def test_kimi_k2_pre_full_pattern_override():
     # engine and behave: Han runs isolate, digits group to 3, contractions
     # attach.
     from tokenizers import Regex
-    from gmlx.tokenizer import KIMI_K2_PATTERN, _bytelevel_split_patterns
+    from gmlx.load.tokenizer import KIMI_K2_PATTERN, _bytelevel_split_patterns
 
     assert _bytelevel_split_patterns("kimi-k2") == (KIMI_K2_PATTERN,)
     split = pre_tokenizers.Split(
@@ -197,7 +197,7 @@ def test_kimi_k2_pre_skips_nfc_normalizer():
     # llama.cpp's kimi-k2 hand splitter and tokenization_kimi.py apply no
     # unicode normalization; NFC would merge decomposed combining marks
     # (e + U+0301 -> e-acute) and shift split boundaries vs the oracle.
-    from gmlx.tokenizer import _build_bytelevel_bpe
+    from gmlx.load.tokenizer import _build_bytelevel_bpe
 
     kimi = _build_bytelevel_bpe(["a", "b"], [], pre_id="kimi-k2")
     assert kimi.normalizer is None
@@ -364,7 +364,7 @@ def test_reader_and_dict_paths_agree(tmp_path):
 # --chat-template resolution: inline string, file path, and the two
 # silent-garbage paths (mistyped file path, malformed Jinja) that must raise.
 def test_resolve_chat_template_inline_and_file(tmp_path):
-    from gmlx.loader import _resolve_chat_template
+    from gmlx.load.loader import _resolve_chat_template
 
     inline = "{{ messages[0]['content'] }}"
     assert _resolve_chat_template(None) is None
@@ -377,7 +377,7 @@ def test_resolve_chat_template_inline_and_file(tmp_path):
 def test_resolve_chat_template_path_typo_raises():
     import pytest
 
-    from gmlx.loader import _resolve_chat_template
+    from gmlx.load.loader import _resolve_chat_template
 
     with pytest.raises(ValueError, match="not found"):
         _resolve_chat_template("/no/such/template.jinja")
@@ -386,7 +386,7 @@ def test_resolve_chat_template_path_typo_raises():
 def test_resolve_chat_template_bad_jinja_raises():
     import pytest
 
-    from gmlx.loader import _resolve_chat_template
+    from gmlx.load.loader import _resolve_chat_template
 
     with pytest.raises(ValueError, match="not valid Jinja"):
         _resolve_chat_template("{% if %}")
@@ -398,7 +398,7 @@ def test_resolve_chat_template_bad_jinja_raises():
 # eot_token_id - so a loader that stops only on eos runs past the model's own
 # turn boundary into degenerate looping output.
 def test_metadata_stop_ids_reads_eot_eom_fim():
-    from gmlx.tokenizer import _metadata_stop_ids
+    from gmlx.load.tokenizer import _metadata_stop_ids
 
     meta = {
         "tokenizer.ggml.eot_token_id": 154827,   # GLM <|user|>
@@ -482,7 +482,7 @@ def _muse_meta() -> dict:
 
 
 def test_muse_glimmer_metadata_declares_eot_only():
-    from gmlx.tokenizer import _metadata_stop_ids
+    from gmlx.load.tokenizer import _metadata_stop_ids
 
     # The real ids, as the 30B GGUF carries them: eos <|end_of_text|> 200001,
     # eot <|eot|> 200008. <|eom|> is 200007 and appears in no metadata key.
@@ -535,7 +535,7 @@ def test_add_bos_and_eos_together_wrap_raw_path():
 # footgun - _-prefixed attrs don't proxy), so exercise it through the wrapper.
 def test_suppress_tokens_merge_through_tokenizer_wrapper():
     from mlx_lm.tokenizer_utils import TokenizerWrapper
-    from gmlx.tokenizer import merge_suppressed_tokens
+    from gmlx.load.tokenizer import merge_suppressed_tokens
 
     meta = _bytelevel_meta()
     meta["tokenizer.ggml.suppress_tokens"] = [5, 6]
@@ -549,7 +549,7 @@ def test_suppress_tokens_merge_through_tokenizer_wrapper():
 
 
 def test_suppress_tokens_absent_is_noop():
-    from gmlx.tokenizer import merge_suppressed_tokens
+    from gmlx.load.tokenizer import merge_suppressed_tokens
 
     tok = load_tokenizer_from_gguf(_bytelevel_meta(), "qwen2")
     assert tok.gguf_suppress_tokens == []
@@ -579,7 +579,7 @@ def test_token_type_length_mismatch_tolerated():
 
 
 def test_out_of_range_suppress_tokens_ignored():
-    from gmlx.tokenizer import merge_suppressed_tokens
+    from gmlx.load.tokenizer import merge_suppressed_tokens
     tok = load_tokenizer_from_gguf(_bytelevel_meta(), "qwen2")
     tok.gguf_suppress_tokens = [3, -1, len(tok) + 5]
     merged = merge_suppressed_tokens(None, tok)

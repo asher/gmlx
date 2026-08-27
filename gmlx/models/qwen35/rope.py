@@ -11,7 +11,7 @@ runs from this module.
 
 The upstream bodies are verbatim copies, source-equality-tested
 against the pinned mlx-vlm release every run (see
-tests/test_qwen35_rope.py). The two sectioned-style helpers aliased
+tests/models/test_qwen35_rope.py). The two sectioned-style helpers aliased
 below are dead branches for the interleaved style qwen3.5 pins; they
 are imported rather than copied so the verbatim bodies that mention
 them stay byte-identical.

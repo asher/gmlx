@@ -79,7 +79,7 @@ class _DtypeAction(argparse.Action):
     """
 
     def __call__(self, parser, namespace, values, option_string=None):
-        from .dtypes import ENV_VAR  # local: keeps mlx off the --help path
+        from gmlx.load.dtypes import ENV_VAR  # local: keeps mlx off the --help path
 
         os.environ[ENV_VAR] = values
         setattr(namespace, self.dest, values)
@@ -703,7 +703,7 @@ def _has_native_mtp_head(gguf_path: str) -> bool:
     and the family-defaults probe share one read; the verdict matches
     serve/discovery exactly."""
     try:
-        from .discovery import header_meta
+        from gmlx.load.discovery import header_meta
 
         meta = header_meta(gguf_path)
     except Exception:
@@ -780,8 +780,9 @@ def _sibling_drafter(gguf_path: str) -> str | None:
     """A same-directory companion drafter for a native-head target that the
     user did not configure (auto stays on the head). Header-cache peeks."""
     try:
-        from . import arch_table, config_synth
-        from .discovery import find_mtp_companion, header_meta
+        import gmlx.load.arch_table as arch_table
+        import gmlx.load.config_synth as config_synth
+        from gmlx.load.discovery import find_mtp_companion, header_meta
 
         meta = header_meta(gguf_path)
         mt = config_synth.GGUF_ARCH_TO_MODEL_TYPE.get((meta or {}).get("arch") or "")
@@ -796,8 +797,8 @@ def _deepseek4_mtp_companion(gguf_path: str) -> str | None:
     it (auto enable; the loader re-resolves the same path when
     draft_gguf_path is not given). Header-cache peeks only."""
     try:
-        from . import arch_table
-        from .discovery import find_mtp_companion, header_meta
+        import gmlx.load.arch_table as arch_table
+        from gmlx.load.discovery import find_mtp_companion, header_meta
 
         meta = header_meta(gguf_path)
         if not meta or meta.get("arch") != "deepseek4":
@@ -1156,8 +1157,8 @@ def print_family_note(args) -> None:
 
 def _report_only(args) -> int:
     """Load wire bytes + remap, print the inventory and the rendered prompt."""
-    from .gguf_meta import first_nonzero_int, read_int
-    from .loader import (
+    from gmlx.load.gguf_meta import first_nonzero_int, read_int
+    from gmlx.load.loader import (
         _resolve_chat_template,
         load_gguf_wire_bytes,
         print_inventory,
@@ -1167,8 +1168,8 @@ def _report_only(args) -> int:
     # Codec preflight so an IQ / unsupported-codec GGUF refuses cleanly here
     # instead of crashing kq.load_gguf. The arch gate is *skipped* - report-only
     # should still inventory an arch the loader can't yet build.
-    from .arch_table import UnsupportedArchError
-    from .preflight import preflight
+    from gmlx.load.arch_table import UnsupportedArchError
+    from gmlx.load.preflight import preflight
 
     try:
         preflight(args.gguf, arch=args.arch)
@@ -1203,7 +1204,7 @@ def _report_only(args) -> int:
     # Render the prompt the way generate would, so --report-only can preview a
     # --chat-template override without building the model.
     if not args.no_chat_template:
-        from .tokenizer import load_tokenizer_from_gguf
+        from gmlx.load.tokenizer import load_tokenizer_from_gguf
 
         override = _resolve_chat_template(args.chat_template)
         tok = load_tokenizer_from_gguf(meta, arch, chat_template_override=override)
@@ -1219,9 +1220,9 @@ def _report_only(args) -> int:
 
 
 def _run_bench(args) -> int:
-    from . import loadlog
-    from .benchmarks import bench
-    from .loader import load_model, preset_native_fp_wire_env
+    import gmlx.load.loadlog as loadlog
+    from gmlx.gen.benchmarks import bench
+    from gmlx.load.loader import load_model, preset_native_fp_wire_env
 
     # Fail fast on a malformed length list - before the multi-GB load.
     try:
@@ -1269,10 +1270,14 @@ def _run_bench(args) -> int:
 def _run_bench_depths(args) -> int:
     """``tg@depth`` benchmark: decode tok/s measured at each context depth,
     with an optional MTP speculative A/B (accept-rate + speedup) per depth."""
-    from .benchmarks import _ChatPromptSource, _load_chat_dataset, bench_tg_depth
-    from .chat import parse_template_config
-    from .loader import load_model, preset_native_fp_wire_env
-    from .mtp_load import load_mtp_model
+    from gmlx.gen.benchmarks import (
+        _ChatPromptSource,
+        _load_chat_dataset,
+        bench_tg_depth,
+    )
+    from gmlx.tui.chat import parse_template_config
+    from gmlx.load.loader import load_model, preset_native_fp_wire_env
+    from gmlx.spec.mtp_load import load_mtp_model
 
     try:
         depths = _parse_int_list(args.bench_depths, flag="--bench-depths")
@@ -1286,7 +1291,7 @@ def _run_bench_depths(args) -> int:
         apply_native_mtp(args, args.gguf)
     speculative = bool(args.speculative) and not args.no_speculative
 
-    from . import loadlog
+    import gmlx.load.loadlog as loadlog
 
     # load the chat corpus BEFORE the model: dataset prepare can spike
     # several GB, which an over-RAM wired load leaves no headroom for
@@ -1335,7 +1340,7 @@ def _run_bench_depths(args) -> int:
     prompt_source = None
     if convs is not None:
         seed = int(getattr(args, "bench_chat_seed", 42))
-        from .chat import fold_thinking_flag
+        from gmlx.tui.chat import fold_thinking_flag
 
         tkw = fold_thinking_flag(args, parse_template_config(args.chat_template_config))
         prompt_source = _ChatPromptSource(convs, tok, seed=seed, template_kwargs=tkw)
@@ -1444,7 +1449,7 @@ def _apply_placement(args, model) -> None:
         feeder_decode=getattr(args, "decode_feeder", None),
     )
     if stream_cpu:
-        from .loader import configure_stream_cpu
+        from gmlx.load.loader import configure_stream_cpu
 
         n, _ = configure_stream_cpu(model, gguf_path=gguf_path, **feeders)
         if n == 0:
@@ -1453,7 +1458,7 @@ def _apply_placement(args, model) -> None:
                 "(dense?) model on the CPU device"
             )
     else:
-        from .loader import install_expert_streaming
+        from gmlx.load.loader import install_expert_streaming
 
         n, _ = install_expert_streaming(
             model,
@@ -1469,38 +1474,42 @@ def _apply_placement(args, model) -> None:
             return
 
     if getattr(args, "moe_experts", None) is not None:
-        from .loader import install_moe_experts_override
+        from gmlx.load.loader import install_moe_experts_override
 
         install_moe_experts_override(model, args.moe_experts)
     if getattr(args, "moe_expert_mass", None) is not None:
-        from .moe_experts import install_moe_expert_mass
+        from gmlx.stream.moe_experts import install_moe_expert_mass
 
         install_moe_expert_mass(model, args.moe_expert_mass)
     elif getattr(args, "moe_expert_probe", False):
-        from .moe_experts import install_moe_expert_probe
+        from gmlx.stream.moe_experts import install_moe_expert_probe
 
         install_moe_expert_probe(model)
     if getattr(args, "moe_miss_shed", None) is not None:
-        from .moe_experts import install_moe_miss_shed
+        from gmlx.stream.moe_experts import install_moe_miss_shed
 
         install_moe_miss_shed(model, args.moe_miss_shed)
     if getattr(args, "moe_prestage", "ranked") == "keepers":
         if getattr(args, "moe_miss_shed", None) is None:
             print("[stream] --moe-prestage keepers ignored: it needs --moe-miss-shed")
         else:
-            from .moe_experts import install_moe_prestage_keepers
+            from gmlx.stream.moe_experts import install_moe_prestage_keepers
 
             install_moe_prestage_keepers(model)
     if getattr(args, "moe_layer_shed", None) is not None:
-        from .moe_experts import install_moe_layer_shed
+        from gmlx.stream.moe_experts import install_moe_layer_shed
 
         install_moe_layer_shed(model, args.moe_layer_shed)
 
 
 def _run_generate(args) -> int:
-    from .chat import fold_thinking_flag, parse_logit_bias, parse_template_config
-    from .generation import generate
-    from .loader import load_model, preset_native_fp_wire_env
+    from gmlx.tui.chat import (
+        fold_thinking_flag,
+        parse_logit_bias,
+        parse_template_config,
+    )
+    from gmlx.gen.generation import generate
+    from gmlx.load.loader import load_model, preset_native_fp_wire_env
     from .tool_preflight import check_or_exit
 
     # Parse before the model load so a JSON typo fails fast.
@@ -1512,7 +1521,7 @@ def _run_generate(args) -> int:
                   streaming=getattr(args, "stream_experts", False))
     preset_native_fp_wire_env(args)
 
-    from .thinking_budget import install_finish_thinking_key
+    from gmlx.gen.thinking_budget import install_finish_thinking_key
 
     install_finish_thinking_key()  # ^T closes an open thinking block
 
@@ -1537,9 +1546,9 @@ def _run_generate(args) -> int:
                 f"(set --no-mtp to apply via plain decoding)",
                 file=sys.stderr,
             )
-        from . import loadlog
-        from .generation import generate_speculative
-        from .mtp_load import load_mtp_model
+        import gmlx.load.loadlog as loadlog
+        from gmlx.gen.generation import generate_speculative
+        from gmlx.spec.mtp_load import load_mtp_model
 
         with loadlog.load_ui(args.verbose, args.gguf):
             model, drafter, _config, tok = load_mtp_model(
@@ -1590,7 +1599,7 @@ def _run_generate(args) -> int:
         warn_cap_hit(args, stats.get("tokens"))
         return 0
 
-    from . import loadlog
+    import gmlx.load.loadlog as loadlog
 
     with loadlog.load_ui(args.verbose, args.gguf):
         model, config, tok = load_model(
@@ -1605,7 +1614,7 @@ def _run_generate(args) -> int:
     print_family_note(args)
     _apply_placement(args, model)
 
-    from .diffusion import is_diffusion_model
+    from gmlx.gen.diffusion import is_diffusion_model
 
     if is_diffusion_model(model) and not args._max_tokens_capped:
         # Bounded canvas fallback, shown in the banner; see the constant.
@@ -1613,8 +1622,8 @@ def _run_generate(args) -> int:
         args._max_tokens_capped = True
 
     if args.adapter:
-        from .adapter import apply_gguf_adapter
-        from .discovery import header_meta
+        from gmlx.load.adapter import apply_gguf_adapter
+        from gmlx.load.discovery import header_meta
 
         adapter = os.path.abspath(os.path.expanduser(args.adapter))
         # Base arch gates the adapter up front: a mismatched family fails with
@@ -1680,8 +1689,12 @@ def _run_vlm(args) -> int:
     The sampling surface mirrors the text path where mlx-vlm's generate supports
     it; --stop / --xtc-* stay text-only (mlx-vlm has no seam for them here).
     """
-    from .chat import fold_thinking_flag, parse_logit_bias, parse_template_config
-    from .vlm import load_vlm_model
+    from gmlx.tui.chat import (
+        fold_thinking_flag,
+        parse_logit_bias,
+        parse_template_config,
+    )
+    from gmlx.load.vlm import load_vlm_model
 
     # Parse before the model load so a JSON typo fails fast.
     template_kwargs = fold_thinking_flag(
@@ -1695,7 +1708,7 @@ def _run_vlm(args) -> int:
 
     images = [s for s in (args.image or "").split(",") if s.strip()]
     audios = [s for s in (args.audio or "").split(",") if s.strip()]
-    from . import loadlog
+    import gmlx.load.loadlog as loadlog
 
     with loadlog.load_ui(args.verbose, args.gguf):
         model, config, processor = load_vlm_model(
@@ -1732,7 +1745,7 @@ def _run_vlm(args) -> int:
             **template_kwargs,
         )
 
-    from .chat import parse_resize_shape
+    from gmlx.tui.chat import parse_resize_shape
 
     rep = args.repetition_penalty
     extra = {
@@ -1776,7 +1789,7 @@ def _run_vlm(args) -> int:
     # logits_processors with the mlx-lm (tokens, logits) contract, so the
     # budget-less interruptible processor rides along (mlx-vlm's own criteria
     # still enforces --thinking-budget).
-    from .thinking_budget import (
+    from gmlx.gen.thinking_budget import (
         clear_finish_key_target,
         install_finish_thinking_key,
         make_thinking_budget_processor,
@@ -1825,10 +1838,10 @@ def _run_vlm_mtp(args) -> int:
     the speculative speedup. Image/audio requests are routed to ``_run_vlm`` upstream;
     the drafter is simply unused for those.
     """
-    from .chat import fold_thinking_flag, parse_template_config
-    from .generation import generate_speculative
-    from .mtp_load import load_vlm_mtp_model
-    from .thinking_budget import install_finish_thinking_key
+    from gmlx.tui.chat import fold_thinking_flag, parse_template_config
+    from gmlx.gen.generation import generate_speculative
+    from gmlx.spec.mtp_load import load_vlm_mtp_model
+    from gmlx.gen.thinking_budget import install_finish_thinking_key
 
     install_finish_thinking_key()  # ^T prints the MTP-path notice here
     if args.seed is not None:
@@ -1844,7 +1857,7 @@ def _run_vlm_mtp(args) -> int:
             f"(set --no-mtp to apply via plain decoding)",
             file=sys.stderr,
         )
-    from . import loadlog
+    import gmlx.load.loadlog as loadlog
 
     with loadlog.load_ui(args.verbose, args.gguf):
         model, drafter, _config, tok, _processor = load_vlm_mtp_model(
@@ -2075,7 +2088,7 @@ def split_path_intent(args) -> None:
     if os.path.exists(os.path.expanduser(raw)):
         return
     head, tail = raw.rsplit("@", 1)
-    from . import profiles as fam
+    import gmlx.gen.profiles as fam
 
     if tail in fam.BUILTIN_INTENTS and os.path.exists(os.path.expanduser(head)):
         args.gguf = head
@@ -2104,8 +2117,8 @@ def apply_family_defaults(args, parser, argv) -> int | None:
             )
             return 2
         return None
-    from . import profiles as fam
-    from .discovery import header_meta
+    import gmlx.gen.profiles as fam
+    from gmlx.load.discovery import header_meta
 
     if intent is not None and intent not in fam.BUILTIN_INTENTS:
         print(
@@ -2168,7 +2181,7 @@ def maybe_load_from_config(args, parser, argv) -> int | None:
     # typo'd path never silently reads the default config.
     if "/" in raw or os.sep in raw or raw.lower().endswith(".gguf"):
         return None
-    from . import config as cfgmod
+    import gmlx.config as cfgmod
 
     try:
         cfg, cfg_path = cfgmod.load_cli_config(getattr(args, "config", None))
@@ -2176,7 +2189,7 @@ def maybe_load_from_config(args, parser, argv) -> int | None:
             return None
         # Family detection before resolution, so the family base layer (and
         # family-resolved @intents) shape the overlay exactly like the server.
-        from .discovery import fill_families
+        from gmlx.load.discovery import fill_families
 
         fill_families(cfg)
         rm = cfgmod.resolve_cli_model(
@@ -2228,7 +2241,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     if args.draft_gguf:
         args.speculative = True  # same implication as `serve`
     if args.stochastic_mtp:
-        from .speculative import set_stoch_accept
+        from gmlx.spec.speculative import set_stoch_accept
 
         set_stoch_accept(True)
     if args.adapter and (args.mmproj or args.speculative):
@@ -2316,8 +2329,8 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         if val and not os.path.exists(os.path.expanduser(val)):
             print(f"error: {flag}: no such file: {val}", file=sys.stderr)
             return 2
-    from .arch_table import UnsupportedArchError
-    from .preflight import UnsupportedCodecError
+    from gmlx.load.arch_table import UnsupportedArchError
+    from gmlx.load.preflight import UnsupportedCodecError
 
     # Resolve --prompt-file here so it applies in every mode (generate, VLM,
     # bench prompts, --report-only template preview), not just plain generate.
@@ -2363,7 +2376,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         # UnsupportedVLMError, without importing transformers-heavy .vlm on
         # the text-only path: if .vlm was never imported, the exception
         # cannot be one of its.
-        vlm_mod = sys.modules.get("gmlx.vlm")
+        vlm_mod = sys.modules.get("gmlx.load.vlm")
         if vlm_mod is not None and isinstance(e, vlm_mod.UnsupportedVLMError):
             return _report_error(e)
         raise
@@ -2442,7 +2455,7 @@ def _print_umbrella_help(prog: str = "gmlx") -> None:
 
 def umbrella_main(argv: list[str] | None = None) -> int:
     """Dispatch ``gmlx <verb> ...`` to the matching entry point."""
-    from ._exitfix import guarded
+    from gmlx._exitfix import guarded
     return guarded(_umbrella_impl, argv)
 
 
@@ -2530,7 +2543,7 @@ def _umbrella_impl(argv: list[str] | None = None) -> int:
             rest = [tok]
             break
     if verb != "doctor":  # doctor must run on a broken env to diagnose it
-        from .upstream_seams import check_upstream_versions
+        from gmlx.upstream.seams import check_upstream_versions
 
         try:
             check_upstream_versions()
@@ -2541,11 +2554,11 @@ def _umbrella_impl(argv: list[str] | None = None) -> int:
         if verb == "run":
             return main(rest, prog=f"{prog} run")
         if verb == "chat":
-            from .chat import cmd_chat
+            from gmlx.tui.chat import cmd_chat
 
             return cmd_chat(rest, prog=f"{prog} chat")
         if verb == "talk":
-            from .talk import cmd_talk
+            from gmlx.talk.main import cmd_talk
 
             return cmd_talk(rest, prog=f"{prog} talk")
         if verb in (
@@ -2559,7 +2572,7 @@ def _umbrella_impl(argv: list[str] | None = None) -> int:
             "logs",
             "service",
         ):
-            from .server import main as server_main
+            from gmlx.serve.server import main as server_main
 
             return server_main(
                 rest if verb == "serve" else [verb, *rest], prog=f"{prog} {verb}"
@@ -2599,12 +2612,12 @@ def _umbrella_impl(argv: list[str] | None = None) -> int:
         # UnsupportedCodecError, UnsupportedVLMError, ...) - `run` formats
         # them itself, but verbs like `chat` rely on this backstop. Their
         # messages are written to stand alone; a traceback adds nothing.
-        from .arch_table import UnsupportedArchError
-        from .preflight import UnsupportedCodecError
+        from gmlx.load.arch_table import UnsupportedArchError
+        from gmlx.load.preflight import UnsupportedCodecError
 
         if isinstance(e, (UnsupportedArchError, UnsupportedCodecError)):
             return _report_error(e)
-        vlm_mod = sys.modules.get("gmlx.vlm")
+        vlm_mod = sys.modules.get("gmlx.load.vlm")
         if vlm_mod is not None and isinstance(e, vlm_mod.UnsupportedVLMError):
             return _report_error(e)
         # Truly unexpected: a raw traceback helps a bug report but buries the

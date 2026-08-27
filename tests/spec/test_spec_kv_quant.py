@@ -13,7 +13,8 @@ from mlx_vlm.generate import ar  # noqa: E402
 from mlx_vlm.server import generation as gen  # noqa: E402
 from mlx_vlm.speculative import utils as su  # noqa: E402
 
-from gmlx import qwen35_verify_fold, spec_engine  # noqa: E402
+import gmlx.models.qwen35.verify_fold as qwen35_verify_fold  # noqa: E402
+import gmlx.spec.engine as spec_engine  # noqa: E402
 
 
 class _SSMCache:
@@ -137,7 +138,7 @@ def test_prefix_cache_quantized_roundtrip():
     # are (packed, scales, biases) triples, and the old array-only path
     # crashed every MTP store under KV_BITS. Store, mutate the live cache,
     # restore into a fresh one, and the pre-mutation triples must match.
-    from gmlx.prefix_cache import SpecPrefixCache
+    from gmlx.cache.prefix_cache import SpecPrefixCache
 
     mx.random.seed(11)
     a = QuantizedKVCache(group_size=64, bits=8)

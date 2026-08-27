@@ -43,9 +43,9 @@ import mlx.nn as nn
 
 from mlx_lm.models.base import create_attention_mask
 
-from . import qwen4_exp_model as q4
-from .envflags import env_bool, env_int
-from .mtp_drafter import QwenMTPDrafter
+from . import model as q4
+from gmlx.envflags import env_bool, env_int
+from gmlx.spec.mtp_drafter import QwenMTPDrafter
 
 MTP_ARCH = "qwen4exp-mtp"
 

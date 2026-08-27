@@ -16,7 +16,7 @@ import pytest
 from gguf import GGUFWriter  # noqa: E402
 from tokenizers import pre_tokenizers  # noqa: E402
 
-# Vocab mirrors tests/test_tokenizer.py: 3 specials + the byte alphabet + two
+# Vocab mirrors tests/load/test_tokenizer.py: 3 specials + the byte alphabet + two
 # merged tokens, so encode() round-trips ASCII with no download.
 _SPECIALS = ["<s>", "</s>", "<pad>"]
 _ALPHABET = sorted(pre_tokenizers.ByteLevel.alphabet())
@@ -158,7 +158,7 @@ def test_materialize_module_arrays_reaches_non_parameters():
     import mlx.nn as nn
     from mlx.utils import tree_flatten
 
-    from gmlx.loader import materialize_module_arrays
+    from gmlx.load.loader import materialize_module_arrays
 
     class Rope(nn.Module):
         def __init__(self):

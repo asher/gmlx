@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from gmlx import populate
+import gmlx.load.populate as populate
 
 
 @pytest.fixture(autouse=True)

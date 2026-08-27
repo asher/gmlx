@@ -20,9 +20,9 @@ import mlx.nn as nn
 from mlx_vlm.models.qwen3_5 import language as _L
 from mlx_vlm.models.switch_layers import SwitchGLU
 
-from .qwen35_attn import OwnedQwen3_5Attention
-from .qwen35_gdn import OwnedQwen3_5GatedDeltaNet
-from .qwen35_verify_linear import verify_linear, verify_linears
+from .attn import OwnedQwen3_5Attention
+from .gdn import OwnedQwen3_5GatedDeltaNet
+from .verify_linear import verify_linear, verify_linears
 
 # The two MoE classes resolve lazily through the module __getattr__
 # (moe_layer_classes), so only the dense pair is name-checkable here.

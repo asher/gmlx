@@ -11,7 +11,7 @@ re-calls set_shared_kv with the widened per-row arrays."""
 
 import mlx.core as mx
 
-from gmlx.speculative import _merge_injected_shared_kv, _pad_shared_kv_seq
+from gmlx.spec.speculative import _merge_injected_shared_kv, _pad_shared_kv_seq
 
 H, D = 2, 4
 

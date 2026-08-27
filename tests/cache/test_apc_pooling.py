@@ -10,11 +10,11 @@ NotImplementedError mid-generation."""
 import mlx.core as mx
 import pytest
 
-from gmlx.apc_pooling import (
+from gmlx.cache.apc_pooling import (
     install_pooling_apc_support,
     install_safe_kv_quantization,
 )
-from gmlx.deepseek_v4_cache import PoolingCache
+from gmlx.models.deepseek_v4.cache import PoolingCache
 
 D = 64
 
@@ -88,7 +88,7 @@ def test_clone_roundtrip(quantized):
 def test_model_apc_mode_resolves_exact_for_pooling_stack():
     # Gate ahead of every other arm: if the support predicate rejects
     # PoolingCache, model_apc_mode is None and serve-side APC never engages.
-    from gmlx.cache_compat import construction_cache_module
+    from gmlx.cache.compat import construction_cache_module
     _c = construction_cache_module()
     CacheList, RotatingKVCache = _c.CacheList, _c.RotatingKVCache
 
@@ -115,7 +115,7 @@ def test_apc_engages_for_mlx_lm_origin_model():
     from mlx_lm.models.cache import KVCache, RotatingKVCache
     from mlx_vlm import apc
 
-    from gmlx.cache_compat import (
+    from gmlx.cache.compat import (
         ensure_runtime_origin_make_cache,
         runtime_cache_module,
     )
@@ -151,7 +151,7 @@ def test_spec_apc_kill_switch_strips_manager_from_stock(monkeypatch):
     import importlib
     from types import SimpleNamespace
 
-    import gmlx.spec_engine as spec_engine
+    import gmlx.spec.engine as spec_engine
 
     ar = importlib.import_module("mlx_vlm.generate.ar")
     seen = {}
@@ -194,7 +194,7 @@ def test_kv_bits_apc_optout_warns_at_boot(monkeypatch, caplog):
     import logging
     from types import SimpleNamespace
 
-    import gmlx.spec_engine as spec_engine
+    import gmlx.spec.engine as spec_engine
 
     ar = importlib.import_module("mlx_vlm.generate.ar")
 
@@ -210,12 +210,12 @@ def test_kv_bits_apc_optout_warns_at_boot(monkeypatch, caplog):
     spec_engine._install_apc_manager_stash()
     mgr = object()
 
-    with caplog.at_level(logging.WARNING, logger="gmlx.spec_engine"):
+    with caplog.at_level(logging.WARNING, logger="gmlx.spec.engine"):
         ar.BatchGenerator(SimpleNamespace(), None, apc_manager=mgr, kv_bits=8)
     assert any("APC OFF: KV quantization" in r.message for r in caplog.records)
 
     caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="gmlx.spec_engine"):
+    with caplog.at_level(logging.WARNING, logger="gmlx.spec.engine"):
         ar.BatchGenerator(SimpleNamespace(), None, apc_manager=mgr)
         ar.BatchGenerator(SimpleNamespace(), None, apc_manager=mgr,
                           kv_bits=8, draft_model=object())
@@ -227,11 +227,11 @@ def test_kv_bits_apc_optout_warns_at_boot(monkeypatch, caplog):
 def test_rebind_to_runtime_origin_recurses_and_skips_ours():
     from mlx_lm.models.cache import CacheList, KVCache, RotatingKVCache
 
-    from gmlx.cache_compat import (
+    from gmlx.cache.compat import (
         rebind_to_runtime_origin,
         runtime_cache_module,
     )
-    from gmlx.deepseek_v4_cache import PoolingCache
+    from gmlx.models.deepseek_v4.cache import PoolingCache
 
     vlm = runtime_cache_module()
     pool = _pool(rows=0, remainder=0)
@@ -247,7 +247,7 @@ def test_warm_batch_adoption_merges_pooling_stack():
     # After an exact hit the engine merges the restored row into batch
     # caches via _merge_exact_cache_entries; a None there silently falls
     # back to cold prefill, so the hit must survive the merge.
-    from gmlx.cache_compat import construction_cache_module
+    from gmlx.cache.compat import construction_cache_module
     _c = construction_cache_module()
     CacheList, RotatingKVCache = _c.CacheList, _c.RotatingKVCache
 
@@ -278,11 +278,11 @@ def test_warm_batch_adoption_merges_pooling_stack():
 
 def test_row_snapshot_v4_stack():
     # The merge blocker: a deepseek4-shaped cache row must snapshot whole.
-    from gmlx.cache_compat import construction_cache_module
+    from gmlx.cache.compat import construction_cache_module
     _c = construction_cache_module()
     CacheList, RotatingKVCache = _c.CacheList, _c.RotatingKVCache
 
-    from gmlx.cache_snapshot import row_snapshot
+    from gmlx.cache.snapshot import row_snapshot
 
     mx.random.seed(3)
     rot = RotatingKVCache(max_size=8)
@@ -330,7 +330,7 @@ def test_disk_roundtrip_zero_width_values(tmp_path):
     # deepseek4's DSA local caches store keys with zero-width values;
     # mx.save_safetensors rejects zero-size arrays, so the shard writer
     # spills them to metadata and the reader synthesizes zeros.
-    from gmlx.cache_compat import construction_cache_module
+    from gmlx.cache.compat import construction_cache_module
     _c = construction_cache_module()
     CacheList, RotatingKVCache = _c.CacheList, _c.RotatingKVCache
 
@@ -371,7 +371,7 @@ def test_disk_roundtrip_zero_width_values(tmp_path):
 
 def test_safe_kv_quantization_packs_pools_and_skips_rotating():
     from mlx_lm.generate import maybe_quantize_kv_cache
-    from gmlx.cache_compat import construction_cache_module
+    from gmlx.cache.compat import construction_cache_module
     _c = construction_cache_module()
     CacheList, KVCache, RotatingKVCache = _c.CacheList, _c.KVCache, _c.RotatingKVCache
 
@@ -442,7 +442,7 @@ def _install_on_fake(monkeypatch):
             self.prompt_cache = k["model"].make_cache()
 
     monkeypatch.setattr(ar, "PromptProcessingBatch", _FakePPB)
-    from gmlx.apc_pooling import install_pooled_prompt_kv_quant
+    from gmlx.cache.apc_pooling import install_pooled_prompt_kv_quant
 
     install_pooled_prompt_kv_quant()
     return _FakePPB
@@ -488,7 +488,7 @@ def test_pooled_prompt_kv_quant_kill_switch(monkeypatch):
 def test_pooled_prompt_kv_quant_idempotent(monkeypatch):
     ppb = _install_on_fake(monkeypatch)
     wrapped = ppb.__init__
-    from gmlx.apc_pooling import install_pooled_prompt_kv_quant
+    from gmlx.cache.apc_pooling import install_pooled_prompt_kv_quant
 
     install_pooled_prompt_kv_quant()
     assert ppb.__init__ is wrapped
@@ -509,7 +509,7 @@ def _install_gate_on_fake(monkeypatch):
                 "prefill_batch_size", DEFAULT_PREFILL_B)
 
     monkeypatch.setattr(ar, "BatchGenerator", _FakeBG)
-    from gmlx.apc_pooling import install_pooled_prefill_batch_gate
+    from gmlx.cache.apc_pooling import install_pooled_prefill_batch_gate
 
     install_pooled_prefill_batch_gate()
     return _FakeBG
@@ -540,14 +540,14 @@ def test_prefill_gate_kill_switch(monkeypatch):
 def test_prefill_gate_idempotent(monkeypatch):
     bg = _install_gate_on_fake(monkeypatch)
     wrapped = bg.__init__
-    from gmlx.apc_pooling import install_pooled_prefill_batch_gate
+    from gmlx.cache.apc_pooling import install_pooled_prefill_batch_gate
 
     install_pooled_prefill_batch_gate()
     assert bg.__init__ is wrapped
 
 
 def test_model_has_pools_memoizes(monkeypatch):
-    from gmlx.apc_pooling import model_has_pools
+    from gmlx.cache.apc_pooling import model_has_pools
 
     m = _V4ish()
     calls = []
@@ -559,8 +559,8 @@ def test_model_has_pools_memoizes(monkeypatch):
 
 
 def test_is_batched_cache_sees_through_cachelist():
-    from gmlx.apc_pooling import _is_batched_cache
-    from gmlx.deepseek_v4_cache import BatchPoolingCache
+    from gmlx.cache.apc_pooling import _is_batched_cache
+    from gmlx.models.deepseek_v4.cache import BatchPoolingCache
 
     scalar = SimpleNamespace(caches=[_pool(rows=0, remainder=0)])
     batched = SimpleNamespace(caches=[BatchPoolingCache(4, [0, 0])])
@@ -569,7 +569,7 @@ def test_is_batched_cache_sees_through_cachelist():
 
 
 def test_batched_pool_carries_left_padding():
-    from gmlx.deepseek_v4_cache import BatchPoolingCache
+    from gmlx.models.deepseek_v4.cache import BatchPoolingCache
 
     b = BatchPoolingCache(4, [0, 0, 0])
     # The admission path lifts only caches missing this attribute.
@@ -608,7 +608,7 @@ def test_admission_does_not_remerge_batched_cachelist(monkeypatch):
             calls.append("list-extend")
 
     monkeypatch.setattr(ar, "_extend_cache", lambda a, b: None, raising=False)
-    from gmlx.apc_pooling import install_batched_cachelist_admission
+    from gmlx.cache.apc_pooling import install_batched_cachelist_admission
 
     install_batched_cachelist_admission()
     # Already-batched left side: extend only, no second merge.

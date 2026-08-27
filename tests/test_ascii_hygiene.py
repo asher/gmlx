@@ -11,27 +11,27 @@ _ROOT = Path(__file__).resolve().parent.parent
 
 # Each entry earns its place with rendered UI glyphs, glyph logic, or fixtures.
 _ALLOWED = {
-    "gmlx/chat.py",              # status-line middot separators
-    "gmlx/menubar.py",           # status dots, emoji, HIG menu ellipses
-    "gmlx/reasoning.py",         # braille spinner, box drawing, check mark
-    "gmlx/render.py",            # markdown rules, borders, bullets
-    "gmlx/sessions.py",          # separators in exported markdown
+    "gmlx/tui/chat.py",              # status-line middot separators
+    "gmlx/commands/menubar.py",           # status dots, emoji, HIG menu ellipses
+    "gmlx/tui/reasoning.py",         # braille spinner, box drawing, check mark
+    "gmlx/tui/render.py",            # markdown rules, borders, bullets
+    "gmlx/tui/sessions.py",          # separators in exported markdown
     "gmlx/spinner.py",           # braille frames
-    "gmlx/talk.py",              # VU-meter blocks, status glyphs
-    "gmlx/talk_memory.py",       # bullet char in list-marker-strip regex
-    "gmlx/tokenizer.py",         # U+2581 / U+0120 tokenizer markers
-    "gmlx/tts.py",               # speech-text sanitizer dash/fraction glyphs
+    "gmlx/talk/main.py",              # VU-meter blocks, status glyphs
+    "gmlx/assistant/memory.py",       # bullet char in list-marker-strip regex
+    "gmlx/load/tokenizer.py",         # U+2581 / U+0120 tokenizer markers
+    "gmlx/serve/tts.py",               # speech-text sanitizer dash/fraction glyphs
     "tests/e2e/checks.py",           # U+FFFD degeneration detection
-    "tests/test_chat.py",            # asserts chat status-line separators
-    "tests/test_chat_e2e.py",        # asserts toolbar middot tail
+    "tests/tui/test_chat.py",            # asserts chat status-line separators
+    "tests/tui/test_chat_e2e.py",        # asserts toolbar middot tail
     "tests/test_e2e_checks.py",      # U+FFFD fixtures
-    "tests/test_menubar.py",         # asserts menubar glyph labels
-    "tests/test_reasoning.py",       # asserts spinner/box output
-    "tests/test_render.py",          # asserts rendered rules; CJK width fixture
-    "tests/test_server_patches.py",  # multilingual tokenizer fixtures
-    "tests/test_tokenizer.py",       # U+FFFD control-token / byte-level fixtures
-    "tests/test_tts.py",             # multi-script sanitizer fixtures
-    "tests/test_talk_audio.py",      # asserts VU-meter block output
+    "tests/commands/test_menubar.py",         # asserts menubar glyph labels
+    "tests/tui/test_reasoning.py",       # asserts spinner/box output
+    "tests/tui/test_render.py",          # asserts rendered rules; CJK width fixture
+    "tests/serve/test_server_patches.py",  # multilingual tokenizer fixtures
+    "tests/load/test_tokenizer.py",       # U+FFFD control-token / byte-level fixtures
+    "tests/serve/test_tts.py",             # multi-script sanitizer fixtures
+    "tests/talk/test_talk_audio.py",      # asserts VU-meter block output
 }
 
 

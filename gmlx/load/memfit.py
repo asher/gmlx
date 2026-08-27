@@ -43,7 +43,7 @@ def total_ram_bytes() -> int | None:
 def classify_fit(size_bytes: int, ram_bytes: int | None = None) -> str | None:
     """``fits`` / ``tight`` / ``over`` for a model of ``size_bytes``, or ``None``
     when the size or RAM is unknown. The share bars are capacity's."""
-    from .capacity import classify_weight_share
+    from gmlx.serve.capacity import classify_weight_share
 
     if ram_bytes is None:
         ram_bytes = total_ram_bytes()
@@ -61,7 +61,7 @@ def fit_label(fit: str | None) -> str:
 def fit_sentence(size_bytes: int, ram_bytes: int | None = None) -> str | None:
     """A one-line human verdict for a single model, or ``None`` when unknown.
     Used by ``validate`` (report line) and ``pull`` (post-verdict note)."""
-    from .lifecycle import human_gb
+    from gmlx.serve.lifecycle import human_gb
 
     if ram_bytes is None:
         ram_bytes = total_ram_bytes()

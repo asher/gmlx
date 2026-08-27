@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent / "e2e"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "e2e"))
 
 import run_chat_pty_e2e as harness  # noqa: E402
 from models import ModelRegistry  # noqa: E402

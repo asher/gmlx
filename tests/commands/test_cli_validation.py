@@ -10,11 +10,11 @@ import sys
 
 import pytest
 
-from gmlx import cli  # noqa: E402
+import gmlx.commands.cli as cli  # noqa: E402
 
 # The modules main() imports for its dispatch exception types - transitively
 # heavy (transformers). Poisoning them proves a check runs *before* them.
-_HEAVY = ("gmlx.arch_table", "gmlx.preflight", "gmlx.vlm")
+_HEAVY = ("gmlx.load.arch_table", "gmlx.load.preflight", "gmlx.load.vlm")
 
 
 @pytest.fixture
@@ -111,7 +111,8 @@ def test_mmproj_no_warning_when_flags_unset(gguf, mmproj, monkeypatch, capsys):
 @pytest.fixture
 def spec_stubs(monkeypatch):
     """Stub the MTP load/generate seams so the speculative branch runs on CPU."""
-    from gmlx import generation, mtp_load
+    import gmlx.gen.generation as generation
+    import gmlx.spec.mtp_load as mtp_load
 
     class _Tok:
         chat_template = None
@@ -251,7 +252,8 @@ def draft(tmp_path):
 @pytest.fixture
 def vlm_mtp_stubs(monkeypatch):
     """Stub the VLM x MTP load/generate seams + the plain-VLM fallback (CPU)."""
-    from gmlx import generation, mtp_load
+    import gmlx.gen.generation as generation
+    import gmlx.spec.mtp_load as mtp_load
 
     class _Tok:
         chat_template = None

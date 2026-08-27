@@ -7,7 +7,7 @@ pytest.importorskip("mlx_vlm.models.qwen3_5.language")
 from mlx_vlm.models.cache import KVCache
 from mlx_vlm.models.qwen3_5 import language as q35
 
-from gmlx import qwen35_verify_fold
+import gmlx.models.qwen35.verify_fold as qwen35_verify_fold
 
 
 def _rand(hq, hkv, qL, kL, d=64):

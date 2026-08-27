@@ -39,7 +39,7 @@ import mlx.core as mx
 
 from . import keepwarm
 from .decode_feeder import _DECAY_EVERY
-from .envflags import env_bool, env_float, env_int
+from gmlx.envflags import env_bool, env_float, env_int
 
 _ENV = "GMLX_GPU_AUTONOMOUS"
 # Adaptive mode: a layer goes syncless once its measured hit rate clears
@@ -90,7 +90,7 @@ def register_exit_stats(gt: GpuTokenState) -> None:
             g.boundary()
         line = g.close_stats()
         if line:
-            from . import loadlog
+            import gmlx.load.loadlog as loadlog
 
             loadlog.info(line)
 

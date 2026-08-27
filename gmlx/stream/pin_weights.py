@@ -30,7 +30,7 @@ import ctypes
 import os
 from concurrent.futures import ThreadPoolExecutor
 
-from .envflags import env_bool
+from gmlx.envflags import env_bool
 
 # Every-token set = everything the expert prefetcher does not stream
 # (keep the two definitions in lockstep via the shared regex).
@@ -67,8 +67,8 @@ def every_token_ranges(gguf_path: str) -> dict[str, list[tuple[int, int]]]:
     """``shard_path -> [(offset, nbytes), ...]``: merged, page-aligned byte
     ranges of every non-expert tensor. Headers and metadata are read once
     at load and stay unpinned."""
-    from .headerscan import scan_gguf
-    from .preflight import find_split_shards
+    from gmlx.load.headerscan import scan_gguf
+    from gmlx.load.preflight import find_split_shards
 
     out: dict[str, list[tuple[int, int]]] = {}
     for path in find_split_shards(gguf_path):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Text-embeddings core (``gmlx.embeddings``): alias resolution, the
+"""Text-embeddings core (``gmlx.serve.embeddings``): alias resolution, the
 request-model policy, input normalization, vector encoding, both embed drivers
 (stubbed mlx-embeddings + the GGUF decoder-LM backend with a stubbed loader),
 and the background pre-warm. CPU only - neither mlx-embeddings nor a real model
@@ -13,7 +13,7 @@ import sys
 import numpy as np
 import pytest
 
-from gmlx import embeddings as emb  # noqa: E402
+import gmlx.serve.embeddings as emb  # noqa: E402
 from gmlx.config import build_config  # noqa: E402
 
 EGEMMA = "mlx-community/embeddinggemma-300m-8bit"       # an mlx-tier (encoder) repo

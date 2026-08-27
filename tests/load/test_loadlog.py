@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""`gmlx.loadlog`: load-time output routing - verbose gating, stage/spinner
+"""`gmlx.load.loadlog`: load-time output routing - verbose gating, stage/spinner
 plumbing, warn channel, facts, and the `load_ui` CLI wrapper. Also covers
 `generation._prefill_progress_ui` (the run prefill spinner). CPU-only."""
 from __future__ import annotations
@@ -12,7 +12,7 @@ from collections import Counter
 
 import pytest
 
-from gmlx import loadlog
+import gmlx.load.loadlog as loadlog
 
 
 class _FakeSpinner:
@@ -313,7 +313,7 @@ def _wait_for(pred, timeout=2.0):
 
 def _prefill_ui():
     pytest.importorskip("mlx_lm")
-    from gmlx import generation
+    import gmlx.gen.generation as generation
 
     stream = _FakeTty()
     cb, close = generation._prefill_progress_ui(stream=stream)
@@ -346,7 +346,7 @@ def test_generate_wires_progress_callback_only_when_opted_in(monkeypatch):
     pytest.importorskip("mlx_lm")
     import mlx_lm
 
-    from gmlx import generation
+    import gmlx.gen.generation as generation
 
     captured: list[dict] = []
 

@@ -43,9 +43,9 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 
 
-from . import loadlog
+import gmlx.load.loadlog as loadlog
 from .capacity import LoadDeferred
-from .envflags import env_float
+from gmlx.envflags import env_float
 
 _log = logging.getLogger(__name__)
 
@@ -66,7 +66,7 @@ _build_scratch: ContextVar["_Scratch | None"] = ContextVar(
 # lone case: it hand-rolls the +/-50 attn-logit softcap then applies the mask manually
 # instead of via scaled_dot_product_attention. Verified upstream, not a gmlx/kq
 # bug - single-stream matches llama.cpp token-for-token, and the sdpa-based gemma3 /
-# gemma4 batch cleanly (see tests/test_batch_parity.py CANDIDATE_ARCHES note).
+# gemma4 batch cleanly (see tests/gen/test_batch_parity.py CANDIDATE_ARCHES note).
 _BATCH_UNSAFE_ARCHES = {"gemma2"}
 _batch_unsafe_warned: set = set()
 
@@ -121,7 +121,7 @@ def _gguf_footprint_bytes(model_path: str) -> int:
     bytes zero-copy. Returns 0 if the path can't be sized (e.g. a non-GGUF
     mlx-vlm source), so such a model simply doesn't count against the budget."""
     try:
-        from .preflight import find_split_shards
+        from gmlx.load.preflight import find_split_shards
 
         return sum(os.path.getsize(s) for s in find_split_shards(model_path))
     except Exception:
@@ -475,7 +475,7 @@ class _ResidencyPool:
         # Header-only, so the cost is milliseconds; the loader re-validates.
         if (isinstance(model_path, str) and model_path.endswith(".gguf")
                 and os.path.isfile(model_path)):
-            from .preflight import preflight
+            from gmlx.load.preflight import preflight
             preflight(model_path)
         with self._build_lock:
             with self._lock:
@@ -794,7 +794,7 @@ class _ResidencyPool:
 
     def _build(self, cache_key, model_path, adapter_path, model_kind, footprint,
                *, ttl=None, env=None, build_spec=None) -> _Entry:
-        from . import server_bridge_vlm as _serving
+        from . import bridge_vlm as _serving
 
         _warn_if_batch_unsafe(model_path)
         # U4: model load and swap take the same headroom check a request
@@ -851,8 +851,10 @@ class _ResidencyPool:
         # reload, the MTP stash build) attributes its key to this entry, so
         # _teardown can forget exactly those keys. Same cross-thread module-
         # global pattern as set_build_spec, serialized by the build lock.
-        from .prefill_decay import (
-            forget_untracked_weights, set_untracked_weights_owner)
+        from gmlx.gen.prefill_decay import (
+            forget_untracked_weights,
+            set_untracked_weights_owner,
+        )
         set_untracked_weights_owner(cache_key)
         try:
             self._stock_get(model_path, adapter_path, model_kind=model_kind)
@@ -870,7 +872,7 @@ class _ResidencyPool:
                 # actually converting. Every manager passes through this
                 # block: GMLX_APC_ENABLED is set only above, and
                 # build_apc_manager returns None without it.
-                from .kvarn_apc import apply_kvarn_salt
+                from gmlx.cache.kvarn_apc import apply_kvarn_salt
                 mc = scratch.model_cache
                 apply_kvarn_salt(
                     manager,
@@ -932,7 +934,7 @@ class _ResidencyPool:
                 os.environ[k] = old
 
     def _teardown(self, entry: _Entry):
-        from . import server_bridge_vlm as _serving
+        from . import bridge_vlm as _serving
 
         # Drop any stashed in-memory MTP drafter for this path, or its weights
         # stay referenced after the model is gone.
@@ -974,11 +976,11 @@ class _ResidencyPool:
             except Exception:
                 pass
         # A larger-than-RAM model leaves a page-cache remnant that taxes
-        # whoever faults next (gmlx.pagecache). Process exit sweeps it for
+        # whoever faults next (gmlx.stream.pagecache). Process exit sweeps it for
         # CLI runs; a long-lived server sweeps at eviction, before the next
         # model loads against the stale cache. No-op for in-RAM models.
         try:
-            from .pagecache import release_streaming_for
+            from gmlx.stream.pagecache import release_streaming_for
             release_streaming_for(entry.model_path)
         except Exception:
             pass
@@ -987,7 +989,7 @@ class _ResidencyPool:
         # headroom_bytes(). The registry forgets exactly the keys this
         # entry's build registered; bytes leave the estimate only at zero
         # owners, so a resident sibling sharing shards keeps them counted.
-        from .prefill_decay import forget_untracked_weights
+        from gmlx.gen.prefill_decay import forget_untracked_weights
         forget_untracked_weights(entry.cache_key)
         # The model modules sit in reference cycles (feeder<->module among
         # others) that refcounting cannot reclaim, and an idle server may not
@@ -1049,7 +1051,7 @@ def _http_from_load_deferred(model_id, exc):
 
     from fastapi import HTTPException
 
-    from .server_patches.request_flow import _load_deferred_response
+    from gmlx.serve.patches.request_flow import _load_deferred_response
     resp = _load_deferred_response(model_id, exc)
     body = json.loads(bytes(resp.body))
     err = dict(body["error"])
@@ -1070,7 +1072,7 @@ def _http_from_resolver_error(exc):
     resolver error."""
     from fastapi import HTTPException
 
-    from . import server_bridge_vlm as _serving
+    from . import bridge_vlm as _serving
     if isinstance(exc, _serving.ModelNotFound):
         return HTTPException(status_code=404, detail={"error": {
             "type": "model_not_found", "message": str(exc),
@@ -1139,8 +1141,8 @@ def install_gguf_residency_pool(budget_bytes=None, max_models=None, pinned=None)
 
     inherit = app._INHERIT_ADAPTER
 
-    from . import config as _config
-    from . import server_bridge_vlm as _serving
+    import gmlx.config as _config
+    from . import bridge_vlm as _serving
 
     def pooled_get_cached_model(model_path, adapter_path=inherit, *, model_kind="auto"):
         # In config mode the incoming ``model_path`` is a friendly id (maybe

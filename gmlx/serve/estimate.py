@@ -145,7 +145,7 @@ def capacity_plan(width: int, depth: int) -> dict:
                          and out["max_context_at_width"] >= depth)
             out["model"] = os.path.basename(str(t.get("path") or "")) or None
             try:
-                from . import server_bridge_vlm as serving
+                from . import bridge_vlm as serving
 
                 ids = getattr(serving, "_PATH_TO_IDS", {}).get(str(t.get("path"))) or []
                 if ids:
@@ -237,8 +237,8 @@ def _warm_tokens(manager, ids: list, extra_hash: int, model=None) -> tuple:
         return best, tier
     if model is not None:
         try:
-            from .cache_snapshot import ckpt_peek
-            from .spec_engine import _ckpt_layout_for
+            from gmlx.cache.snapshot import ckpt_peek
+            from gmlx.spec.engine import _ckpt_layout_for
 
             n = ckpt_peek(manager, ids, extra_hash=extra_hash,
                           layout=_ckpt_layout_for(model, int(manager.block_size)))
@@ -319,7 +319,7 @@ def estimate_request(body: dict, *, tenant_id=None) -> tuple:
     with the estimate (``resident: false`` and null fits for a model that
     is not loaded; ``media: true`` and null fits when the request carries
     images / audio / video)."""
-    from . import server_bridge_vlm as serving
+    from . import bridge_vlm as serving
 
     t0 = time.perf_counter()
     model_id = body.get("model") if isinstance(body, dict) else None
@@ -473,7 +473,7 @@ def _estimate_bound(body, out, t0, path, pkg, rg, model, processor, config,
     try:
         from .mem_preflight import (_need_bytes, available_drained_bytes,
                                     kv_layer_costs)
-        from .prefill_decay import headroom_bytes
+        from gmlx.gen.prefill_decay import headroom_bytes
 
         bits = getattr(rg, "kv_bits", None)
         bpe = bits / 8.0 if isinstance(bits, int) and bits > 0 else 2.0

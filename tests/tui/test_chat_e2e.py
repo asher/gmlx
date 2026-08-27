@@ -5,7 +5,7 @@ Two tiers, both CPU-only and deterministic - no GPU, no real terminal, no model:
 
 * **Tier 1 - loop driver.** Stub the model load + streaming generator and feed a
   scripted line list through the REPL's one input seam (``state.input_fn``),
-  then run the real :func:`gmlx.chat.cmd_chat`. This exercises the actual
+  then run the real :func:`gmlx.tui.chat.cmd_chat`. This exercises the actual
   multi-turn loop: KV-cache continuity across turns, every ``/command`` dispatched
   through the loop (not just the helper in isolation), ``/!`` shell staging ->
   next-turn composition, ``/load`` prefill, ``/image``/``/audio`` media staging and
@@ -13,7 +13,7 @@ Two tiers, both CPU-only and deterministic - no GPU, no real terminal, no model:
   and the per-reply stat line.
 
 * **Tier 2 - prompt_toolkit keystroke harness.** Drive the *real* session that
-  :func:`gmlx.chat._wire_ptk` builds, over a pipe input + dummy output, feeding
+  :func:`gmlx.tui.chat._wire_ptk` builds, over a pipe input + dummy output, feeding
   raw keystrokes and asserting on the accepted line / live toolbar. This covers the
   editing features the scripted path can't: completion-as-you-type, fish-style ghost
   auto-suggest from history, the bottom toolbar, and bracketed paste.
@@ -31,7 +31,7 @@ import pytest
 
 mlx_lm = pytest.importorskip("mlx_lm")  # noqa: F841 - gate: real sampler/cache modules
 
-from gmlx import chat  # noqa: E402
+import gmlx.tui.chat as chat  # noqa: E402
 
 # A streaming chunk carries only the three fields _stream_reply reads.
 _Chunk = collections.namedtuple("_Chunk", "text generation_tokens generation_tps")
@@ -145,12 +145,12 @@ def _run_text_chat(monkeypatch, tmp_path, lines, *, extra_argv=(), reply="Hello 
 
     monkeypatch.setattr(chat, "_wire_input", lambda no_history: chat.ChatState(
         history_enabled=True, history_loaded=True, input_fn=scripted))
-    monkeypatch.setattr("gmlx.cli.maybe_load_from_config", lambda *a, **k: None)
-    monkeypatch.setattr("gmlx.loader.load_model",
+    monkeypatch.setattr("gmlx.commands.cli.maybe_load_from_config", lambda *a, **k: None)
+    monkeypatch.setattr("gmlx.load.loader.load_model",
                         load_model or (lambda *a, **k: (object(), {}, _FakeTok())))
-    monkeypatch.setattr("gmlx.loader._resolve_prefill_step",
+    monkeypatch.setattr("gmlx.load.loader._resolve_prefill_step",
                         lambda model, step: (None, False))
-    monkeypatch.setattr("gmlx.cli._apply_placement", lambda args, model: None)
+    monkeypatch.setattr("gmlx.commands.cli._apply_placement", lambda args, model: None)
     monkeypatch.setattr("mlx_lm.models.cache.make_prompt_cache", fake_mpc)
     if tty:
         monkeypatch.setattr(chat.sys, "stdin", _TTYStdin())
@@ -214,12 +214,12 @@ def _run_text_chat_kv(monkeypatch, tmp_path, lines, *, extra_argv=(), kv_cls=_KV
 
     monkeypatch.setattr(chat, "_wire_input", lambda no_history: chat.ChatState(
         history_enabled=True, history_loaded=True, input_fn=scripted))
-    monkeypatch.setattr("gmlx.cli.maybe_load_from_config", lambda *a, **k: None)
-    monkeypatch.setattr("gmlx.loader.load_model",
+    monkeypatch.setattr("gmlx.commands.cli.maybe_load_from_config", lambda *a, **k: None)
+    monkeypatch.setattr("gmlx.load.loader.load_model",
                         lambda *a, **k: (object(), {}, _FakeTok()))
-    monkeypatch.setattr("gmlx.loader._resolve_prefill_step",
+    monkeypatch.setattr("gmlx.load.loader._resolve_prefill_step",
                         lambda model, step: (None, False))
-    monkeypatch.setattr("gmlx.cli._apply_placement", lambda args, model: None)
+    monkeypatch.setattr("gmlx.commands.cli._apply_placement", lambda args, model: None)
     monkeypatch.setattr("mlx_lm.models.cache.make_prompt_cache", fake_mpc)
     monkeypatch.setattr(
         importlib.import_module("mlx_lm.generate"), "stream_generate", stream)
@@ -389,7 +389,7 @@ def test_thinking_budget_reaches_generation(monkeypatch, tmp_path):
     # The --thinking-budget promise: the cap is installed into generation, not
     # just constructible - a ThinkingBudgetProcessor rides the logits_processors
     # handed to stream_generate.
-    from gmlx.thinking_budget import ThinkingBudgetProcessor
+    from gmlx.gen.thinking_budget import ThinkingBudgetProcessor
     _rc, _s, stream = _run_text_chat(
         monkeypatch, tmp_path, ["hi", "/exit"],
         extra_argv=["--thinking-budget", "64"])
@@ -557,8 +557,8 @@ def _run_vlm_chat(monkeypatch, tmp_path, lines):
 
     monkeypatch.setattr(chat, "_wire_input", lambda no_history: chat.ChatState(
         history_enabled=True, history_loaded=True, input_fn=scripted))
-    monkeypatch.setattr("gmlx.cli.maybe_load_from_config", lambda *a, **k: None)
-    monkeypatch.setattr("gmlx.vlm.load_vlm_model",
+    monkeypatch.setattr("gmlx.commands.cli.maybe_load_from_config", lambda *a, **k: None)
+    monkeypatch.setattr("gmlx.load.vlm.load_vlm_model",
                         lambda *a, **k: (object(), {"model_type": "fake"}, object()))
     monkeypatch.setattr(chat, "_vlm_message", fake_vlm_message)
     monkeypatch.setattr("mlx_vlm.prompt_utils.get_chat_template",
@@ -652,12 +652,12 @@ def _run_vlm_mtp_chat(monkeypatch, tmp_path, lines, *, native=False):
 
     monkeypatch.setattr(chat, "_wire_input", lambda no_history: chat.ChatState(
         history_enabled=True, history_loaded=True, input_fn=scripted))
-    monkeypatch.setattr("gmlx.cli.maybe_load_from_config", lambda *a, **k: None)
+    monkeypatch.setattr("gmlx.commands.cli.maybe_load_from_config", lambda *a, **k: None)
     monkeypatch.setattr(
-        "gmlx.mtp_load.load_vlm_mtp_model",
+        "gmlx.spec.mtp_load.load_vlm_mtp_model",
         lambda *a, **k: (_Model(), object(), {"model_type": "fake"}, _FakeTok(),
                          object()))
-    monkeypatch.setattr("gmlx.generation.stream_generate_speculative", sstream)
+    monkeypatch.setattr("gmlx.gen.generation.stream_generate_speculative", sstream)
     monkeypatch.setattr(chat, "_vlm_message", fake_vlm_message)
     monkeypatch.setattr("mlx_vlm.prompt_utils.get_chat_template",
                         lambda processor, msgs, add_generation_prompt=True, **kw: msgs)
@@ -671,7 +671,7 @@ def _run_vlm_mtp_chat(monkeypatch, tmp_path, lines, *, native=False):
     proj.write_bytes(b"GGUF")
     argv = [str(gguf), "--mmproj", str(proj)]
     if native:
-        monkeypatch.setattr("gmlx.cli._has_native_mtp_head",
+        monkeypatch.setattr("gmlx.commands.cli._has_native_mtp_head",
                             lambda *a, **k: True)
     else:
         draft = tmp_path / "draft.gguf"
@@ -910,13 +910,13 @@ if __name__ == "__main__":
 
 
 def _saved_sessions():
-    from gmlx import sessions as ss
+    import gmlx.tui.sessions as ss
 
     return {s["name"]: s for s in ss.list_sessions()}
 
 
 def test_autosave_writes_after_each_turn(monkeypatch, tmp_path):
-    from gmlx import sessions as ss
+    import gmlx.tui.sessions as ss
 
     _rc, _s, stream = _run_text_chat(monkeypatch, tmp_path, ["hi", "again", "/exit"])
     saved = _saved_sessions()
@@ -935,7 +935,7 @@ def test_no_autosave_flag(monkeypatch, tmp_path):
 
 
 def test_undo_updates_the_autosaved_file(monkeypatch, tmp_path):
-    from gmlx import sessions as ss
+    import gmlx.tui.sessions as ss
 
     _run_text_chat_kv(monkeypatch, tmp_path, ["hi", "again", "/undo", "/exit"])
     doc, _ = ss.load_session(next(iter(_saved_sessions())))
@@ -943,7 +943,7 @@ def test_undo_updates_the_autosaved_file(monkeypatch, tmp_path):
 
 
 def test_save_and_export_commands(monkeypatch, tmp_path, capsys):
-    from gmlx import sessions as ss
+    import gmlx.tui.sessions as ss
 
     md = tmp_path / "out.md"
     _run_text_chat(monkeypatch, tmp_path,
@@ -958,7 +958,7 @@ def test_save_and_export_commands(monkeypatch, tmp_path, capsys):
 
 
 def test_load_session_restores_history_and_replays(monkeypatch, tmp_path, capsys):
-    from gmlx import sessions as ss
+    import gmlx.tui.sessions as ss
 
     gguf = tmp_path / "model.gguf"
     ss.save_session({
@@ -987,7 +987,7 @@ def test_load_session_restores_history_and_replays(monkeypatch, tmp_path, capsys
 
 
 def test_resume_flag_picks_latest_for_model(monkeypatch, tmp_path, capsys):
-    from gmlx import sessions as ss
+    import gmlx.tui.sessions as ss
 
     gguf = tmp_path / "model.gguf"
     ss.save_session({
@@ -1006,7 +1006,7 @@ def test_resume_flag_picks_latest_for_model(monkeypatch, tmp_path, capsys):
 
 
 def test_resume_model_mismatch_refuses(monkeypatch, tmp_path, capsys):
-    from gmlx import sessions as ss
+    import gmlx.tui.sessions as ss
 
     ss.save_session({"model": {"path": "/elsewhere/other.gguf"}, "messages": []},
                     "wrongmodel")
@@ -1028,7 +1028,7 @@ def test_resume_with_no_sessions_starts_fresh(monkeypatch, tmp_path, capsys):
 
 
 def test_undo_on_restored_turn_rebuilds_cleanly(monkeypatch, tmp_path, capsys):
-    from gmlx import sessions as ss
+    import gmlx.tui.sessions as ss
 
     gguf = tmp_path / "model.gguf"
     ss.save_session({

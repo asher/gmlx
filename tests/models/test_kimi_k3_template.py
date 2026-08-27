@@ -15,7 +15,7 @@ import pytest
 jinja2 = pytest.importorskip("jinja2")
 from jinja2.sandbox import ImmutableSandboxedEnvironment  # noqa: E402
 
-_TMPL = (Path(__file__).parent / "fixtures"
+_TMPL = (Path(__file__).parents[1] / "fixtures"
          / "kimi_k3_template.jinja").read_text()
 
 GEN_TAIL_THINK = '<|open|>message role="assistant"<|sep|><|open|>think<|sep|>'
@@ -136,7 +136,7 @@ class _StubWrapper:
 
 
 def test_detect_xtml_thinking_flips_wrapper_default():
-    from gmlx.loader import _detect_xtml_thinking
+    from gmlx.load.loader import _detect_xtml_thinking
 
     w = _StubWrapper()
     _detect_xtml_thinking(w, _StubRaw(), lambda *_: None)
@@ -148,7 +148,7 @@ def test_detect_xtml_thinking_flips_wrapper_default():
 
 
 def test_detect_xtml_thinking_ignores_non_xtml_templates():
-    from gmlx.loader import _detect_xtml_thinking
+    from gmlx.load.loader import _detect_xtml_thinking
 
     class _PlainRaw(_StubRaw):
         chat_template = "{{ messages }}"
@@ -162,7 +162,7 @@ def test_detect_xtml_thinking_ignores_non_xtml_templates():
 
 
 def test_detect_xtml_thinking_respects_existing_detection():
-    from gmlx.loader import _detect_xtml_thinking
+    from gmlx.load.loader import _detect_xtml_thinking
 
     class _Failing(_StubRaw):
         def apply_chat_template(self, messages, **kwargs):

@@ -11,7 +11,9 @@ import textwrap
 
 import pytest
 
-from gmlx import cli, completion, lifecycle
+import gmlx.commands.cli as cli
+import gmlx.commands.completion as completion
+import gmlx.serve.lifecycle as lifecycle
 
 
 def _vals(lines):

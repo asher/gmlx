@@ -43,7 +43,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
-from . import loadlog
+import gmlx.load.loadlog as loadlog
 
 _PROBE_GRID_DEFAULT = (0.7, 0.8, 0.82, 0.85, 0.87, 0.9, 0.95, 0.99)
 

@@ -24,8 +24,9 @@ from mlx_vlm.models.qwen3_5_moe.config import TextConfig as MoeTextConfig
 from mlx_vlm.models.qwen3_5_moe.language import LanguageModel as MoeStock
 from mlx_vlm.models import activations as _A
 
-from gmlx import qwen35_layers, qwen35_owned
-from gmlx.gdn_patches import (
+import gmlx.models.qwen35.layers as qwen35_layers
+import gmlx.models.qwen35.owned as qwen35_owned
+from gmlx.upstream.gdn_patches import (
     _patch_gated_delta_tiled_v,
     _patch_mlxvlm_gated_delta_tiled_v,
 )
@@ -181,8 +182,8 @@ def _close(a, b, atol):
 def test_constructed_tree_is_owned():
     _stock, owned = _pair()
     block_cls, layer_cls = qwen35_layers.moe_layer_classes()
-    from gmlx.qwen35_attn import OwnedQwen3_5Attention
-    from gmlx.qwen35_gdn import OwnedQwen3_5GatedDeltaNet
+    from gmlx.models.qwen35.attn import OwnedQwen3_5Attention
+    from gmlx.models.qwen35.gdn import OwnedQwen3_5GatedDeltaNet
 
     assert all(type(layer) is layer_cls for layer in owned.model.layers)
     assert all(type(layer.mlp) is block_cls for layer in owned.model.layers)

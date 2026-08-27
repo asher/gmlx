@@ -20,7 +20,8 @@ pytest.importorskip("mlx_vlm.models.gemma4.language")
 from mlx_lm.models import gemma4_text as g4t
 from mlx_vlm.models.gemma4 import language as g4v
 
-from gmlx import attn_hd512, gemma4_batched_sdpa as gb
+import gmlx.upstream.attn_hd512 as attn_hd512
+import gmlx.models.gemma4.batched_sdpa as gb
 
 
 def _chain(fn):

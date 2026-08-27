@@ -27,7 +27,7 @@ from transformers.image_processing_utils import ImageProcessingMixin
 
 from . import loadlog
 from .config_synth import synthesize_config
-from .gdn_patches import (
+from gmlx.upstream.gdn_patches import (
     _needs_tiled_v_patch,
     _patch_gated_delta_tiled_v,
     _tiled_v_patch_applied,
@@ -71,7 +71,7 @@ def resolve_vlm_model_type(llm_arch: str, mm_meta: dict) -> str:
     if proj == "muse-glimmer":
         # Meta Muse Glimmer: a 50-layer window-attention ViT + a 2-layer GELU
         # adapter onto the muse-glimmer text tower. Both halves are vendored
-        # (gmlx.muse_glimmer_vlm_model); mlx-vlm ships no class for either.
+        # (gmlx.models.muse_glimmer.vlm_model); mlx-vlm ships no class for either.
         return "muse_glimmer"
     if proj == "kimik25":
         # Moonshot Kimi-K2.5/K2.7: a MoonViT tower (SigLIP-so400m shape, 2-D
@@ -109,7 +109,7 @@ def resolve_vlm_model_type(llm_arch: str, mm_meta: dict) -> str:
             return "qwen3_5_moe"
         # Qwen3.8-Flash-Next (llama.cpp arch tag qwen4exp) - the qwen4exp
         # hybrid text model with the same Qwen3-VL vision tower; both text
-        # and wrapper classes are vendored (gmlx.qwen4_exp_vlm_model).
+        # and wrapper classes are vendored (gmlx.models.qwen4_exp.vlm_model).
         if llm_arch == "qwen4exp":
             return "qwen4_exp"
         return "qwen3_5"
@@ -244,7 +244,7 @@ def _pixtral_vision_name(name: str):
 
 
 # Muse Glimmer: a LayerNorm/GELU ViT with 2-D RoPE and window attention, onto
-# the vendored gmlx.muse_glimmer_vlm_model tower. Every block tensor carries a
+# the vendored gmlx.models.muse_glimmer.vlm_model tower. Every block tensor carries a
 # bias. Q/K stay un-permuted - the converter already emits the interleaved
 # layout llama.cpp's rope mode 0 (and this port's rope) consumes, the same
 # decision the text tower records in remap.ARCH_ALIAS.
@@ -2234,7 +2234,7 @@ def load_vlm_model(
 
     # Absent enable_thinking must keep meaning "template default" when
     # mlx-vlm renders the prompt (chat and run paths both call in here).
-    from .reasoning import install_template_default_thinking
+    from gmlx.tui.reasoning import install_template_default_thinking
     install_template_default_thinking()
 
     # 1. LLM GGUF - preflight gates the text arch (llama/gemma4/...) as usual.
@@ -2267,13 +2267,14 @@ def load_vlm_model(
     if model_type == "muse_glimmer":
         # mlx-vlm ships no muse_glimmer package; graft the vendored model +
         # tool parser in before get_model_and_args resolves the model_type.
-        from . import muse_glimmer_tools, muse_glimmer_vlm_model
+        import gmlx.models.muse_glimmer.tools as muse_glimmer_tools
+        import gmlx.models.muse_glimmer.vlm_model as muse_glimmer_vlm_model
         muse_glimmer_vlm_model.ensure_registered()
         muse_glimmer_tools.ensure_registered()
     elif model_type == "qwen4_exp":
         # Likewise vendored (text + wrapper; the vision tower is mlx-vlm's
         # qwen3_5 Qwen3-VL class).
-        from . import qwen4_exp_vlm_model
+        import gmlx.models.qwen4_exp.vlm_model as qwen4_exp_vlm_model
         qwen4_exp_vlm_model.ensure_registered()
     with_audio = bool(mm_meta.get("clip.has_audio_encoder"))
     _log(f"[vlm] model_type={model_type} audio={with_audio}")
@@ -2346,7 +2347,7 @@ def load_vlm_model(
                       active_before=active_before)
     materialize_module_arrays(model)
     if model_type == "qwen4_exp":
-        from .qwen4_exp_model import prepare_runtime
+        from gmlx.models.qwen4_exp.model import prepare_runtime
         counts = prepare_runtime(model.language_model)
         _log(f"[vlm] qwen4_exp: fused GDN decode on {counts['gdn_fused']} "
              f"layers, verify on {counts['gdn_fused_verify']}, b/a cat on "
@@ -2368,7 +2369,7 @@ def load_vlm_model(
         if not src.exists():
             from huggingface_hub import snapshot_download
 
-            from .hf_cache import network_fetch_allowed
+            from gmlx.serve.hf_cache import network_fetch_allowed
             with network_fetch_allowed():
                 src = Path(snapshot_download(
                     repo_id=hf_source,

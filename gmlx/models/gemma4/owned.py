@@ -31,7 +31,7 @@ stock-built trees (multimodal construction, ``GMLX_GEMMA_OWNED=0``):
 subclass overrides shadow the base-class patches structurally, so both
 regimes coexist in one process. Mirror drift is alarmed by
 substitution-normalized source equality against the pinned upstream
-bodies in ``tests/test_gemma4_owned.py``.
+bodies in ``tests/models/test_gemma4_owned.py``.
 """
 
 from __future__ import annotations
@@ -46,8 +46,9 @@ from mlx_vlm.models.base import (
 )
 from mlx_vlm.models.gemma4 import language as _G
 
-from . import attn_hd512, gemma4_batched_sdpa
-from .envflags import env_bool
+import gmlx.upstream.attn_hd512 as attn_hd512
+from . import batched_sdpa as gemma4_batched_sdpa
+from gmlx.envflags import env_bool
 
 _OWNED_MASK_CALLS = 0
 _OWNED_SDPA_CALLS = 0

@@ -9,9 +9,9 @@ import mlx.core as mx
 import pytest
 from mlx.utils import tree_flatten
 
-from gmlx import mtp_load
-from gmlx.dflash_drafter import DFlash2Drafter, DFlashDrafter
-from gmlx.mtp_load import (
+import gmlx.spec.mtp_load as mtp_load
+from gmlx.spec.dflash_drafter import DFlash2Drafter, DFlashDrafter
+from gmlx.spec.mtp_load import (
     _assistant_kind,
     _dflash_config_from_meta,
     _stamp_mtp_width_cap,
@@ -278,7 +278,7 @@ def _wire(arrays, weights):
 
 
 def test_dflash2_loader_builds_binds_and_arms_the_target(tmp_path, monkeypatch):
-    from gmlx import qwen35_owned
+    import gmlx.models.qwen35.owned as qwen35_owned
 
     cfg = dataclasses.replace(_cfg(), tie_word_embeddings=False)
     mx.random.seed(2)

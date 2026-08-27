@@ -1,7 +1,7 @@
 # Server end-to-end test harness
 
 A black-box regression harness for the gmlx server. It launches the **real** entry
-point (`python -m gmlx.server`) across a matrix of start modes and config features,
+point (`python -m gmlx.serve.server`) across a matrix of start modes and config features,
 fires a fixed prompt suite plus per-feature post-checks at each live server, and grades
 every response for errors, incoherence, and regressions.
 

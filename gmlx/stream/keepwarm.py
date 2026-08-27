@@ -27,7 +27,7 @@ import time
 
 import mlx.core as mx
 
-from .envflags import env_float
+from gmlx.envflags import env_float
 
 _PERIOD_S = 0.5e-3
 _DIM = 256

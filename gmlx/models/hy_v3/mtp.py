@@ -42,9 +42,9 @@ import mlx.nn as nn
 
 from mlx_lm.models.base import create_attention_mask
 
-from . import hy_v3_model as hy
-from .drafter_protocol import native_block_size
-from .mtp_drafter import QwenMTPDrafter
+from . import model as hy
+from gmlx.spec.drafter_protocol import native_block_size
+from gmlx.spec.mtp_drafter import QwenMTPDrafter
 
 
 @dataclass

@@ -134,7 +134,7 @@ def frontier_width(min_ctx: int = _FRONTIER_MIN_CTX) -> int | None:
 
 
 def _transient_bytes(heads: int | None, depth: int) -> float:
-    from .tool_preflight import _SCORE_CHUNK
+    from gmlx.commands.tool_preflight import _SCORE_CHUNK
 
     if not heads:
         return 0.0
@@ -149,8 +149,8 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None
     behavior then)."""
     import mlx.core as mx
 
-    from .server_memory import admit_reserve_bytes
-    from .tool_preflight import _kv_costs, _shards, _synth_config
+    from .memory import admit_reserve_bytes
+    from gmlx.commands.tool_preflight import _kv_costs, _shards, _synth_config
 
     try:
         shards = _shards(gguf_path)
@@ -245,7 +245,7 @@ def streamed_expert_bytes(gguf_path: str) -> int:
     try:
         from gguf import GGUFReader
 
-        from .preflight import find_split_shards
+        from gmlx.load.preflight import find_split_shards
 
         total = 0
         for shard in find_split_shards(gguf_path):
@@ -283,7 +283,7 @@ def preload_gate(weight_bytes: float, model_id: str) -> None:
     of aborting the box's biggest allocation. GMLX_OVERCOMMIT=1 skips."""
     if overcommit() or weight_bytes <= 0:
         return
-    from .prefill_decay import headroom_bytes
+    from gmlx.gen.prefill_decay import headroom_bytes
 
     head = headroom_bytes()
     budget = working_budget_bytes()
@@ -410,8 +410,8 @@ def _resident_shard_bytes(model_id) -> float:
     not a path or residency cannot be read -- the gate then judges the
     full weight bytes, the conservative side."""
     try:
-        from .populate import resident_fraction
-        from .preflight import find_split_shards
+        from gmlx.load.populate import resident_fraction
+        from gmlx.load.preflight import find_split_shards
 
         path = str(model_id)
         if not os.path.exists(path):
@@ -479,7 +479,7 @@ def trained_context_length(gguf_path) -> int | None:
         return hit[1]
     value = None
     try:
-        from .headerscan import scan_gguf
+        from gmlx.load.headerscan import scan_gguf
 
         kv = scan_gguf(gguf_path, include_tensors=False).kv
         arch = kv.get("general.architecture")

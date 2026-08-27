@@ -5,7 +5,7 @@ import os
 import mlx.core as mx
 import pytest
 
-from gmlx import attn_hd512
+import gmlx.upstream.attn_hd512 as attn_hd512
 
 HQ, HKV, D = 32, 4, 512
 KL = 4096

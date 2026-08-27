@@ -5,13 +5,13 @@ Three backends, chosen by what ``embeddings:`` points at:
 * **GGUF decoder-LM** (a ``*.gguf`` file or ``hf:<org>/<repo>/<file>.gguf`` ref) -
   e.g. ``Qwen3-Embedding-{0.6,4,8}B``. These *are* the Qwen3 dense decoder trunk
   plus last-token (EOS) pooling and an L2-norm, so the runtime's own
-  :func:`gmlx.loader.load_model` loads them and one prefill forward over
+  :func:`gmlx.load.loader.load_model` loads them and one prefill forward over
   ``model.model`` (the trunk) gives the hidden states we pool - no separate
   download, no encoder framework. This path is **not** capped at the BERT window,
   so long documents (30k-token transcripts) embed without silent truncation.
 
 * **GGUF encoder** (a ``*.gguf`` / ``hf:`` ref to an encoder arch), e.g.
-  EmbeddingGemma. Same :func:`gmlx.loader.load_model`, but the GGUF builds an
+  EmbeddingGemma. Same :func:`gmlx.load.loader.load_model`, but the GGUF builds an
   mlx-embeddings ``Model`` (a bidirectional backbone + mean-pool + dense head +
   L2-norm) that returns pooled ``text_embeds`` itself, so we just forward each
   text.
@@ -291,7 +291,7 @@ def resolve_embeddings_model(value, model_dirs=()) -> str:
     # dir. A gguf ref (whether passed directly or reached via a gguf-tier alias)
     # resolves to its local file; a repo id / dir is the mlx-embeddings backend.
     if _is_gguf_ref(v):
-        from .config import resolve_path
+        from gmlx.config import resolve_path
         return resolve_path(v, list(model_dirs))  # hf: -> cache; path -> abs
     expanded = os.path.expanduser(v)
     if os.path.isdir(expanded):

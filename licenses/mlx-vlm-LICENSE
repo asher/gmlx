@@ -1,13 +1,13 @@
 mlx-vlm - https://github.com/Blaizzy/mlx-vlm
 
 gmlx primarily uses mlx-vlm as an installed dependency, patched at runtime
-(see gmlx/upstream_seams.py), but two modules carry code copied or ported
+(see gmlx/upstream/seams.py), but two modules carry code copied or ported
 from it, with modifications:
 
-- gmlx/server_patches/apc.py: the batched-eval store_kv_blocks replacement
+- gmlx/serve/patches/apc.py: the batched-eval store_kv_blocks replacement
   is a verbatim copy of mlx_vlm.apc.APCManager.store_kv_blocks with the
   per-block mx.eval hoisted into chunked batches.
-- gmlx/thinking_budget.py: ported from mlx-vlm's ThinkingBudgetCriteria
+- gmlx/gen/thinking_budget.py: ported from mlx-vlm's ThinkingBudgetCriteria
   stopping-criteria callback, reworked as an mlx-lm logits processor.
 
 mlx-vlm is distributed under the MIT License:

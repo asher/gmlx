@@ -56,9 +56,9 @@ from typing import Any, List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from . import deepseek_v4_model as v4
-from .drafter_protocol import native_block_size
-from .deepseek_v4_hyper_connection import HyperHead
+from . import model as v4
+from gmlx.spec.drafter_protocol import native_block_size
+from .hyper_connection import HyperHead
 
 
 def _env_float(name: str, default: float) -> float:
@@ -268,7 +268,7 @@ class DeepseekV4DSparkDrafter(nn.Module):
         return self
 
     def make_cache(self) -> List[Any]:
-        from .cache_compat import construction_cache_module
+        from gmlx.cache.compat import construction_cache_module
 
         rot = construction_cache_module().RotatingKVCache
         return [rot(max_size=self._sliding_window) for _ in self.stages]

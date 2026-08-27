@@ -3,14 +3,14 @@ omlx - https://github.com/jundot/omlx
 DeepSeek-V4-Flash support ports code from omlx (Apache-2.0), with
 modifications:
 
-- gmlx/deepseek_v4_cache.py: PoolingCache/BatchPoolingCache came from
+- gmlx/models/deepseek_v4/cache.py: PoolingCache/BatchPoolingCache came from
   mlx-lm PR 1192 by way of omlx patches/deepseek_v4/cache_extras.py; the
   rotating-cache MTP undo wrap is a port of
   omlx patches/mlx_lm_mtp/cache_rollback.py.
-- gmlx/deepseek_v4_mtp.py: MTP speculative target wrapper + native-head
+- gmlx/models/deepseek_v4/mtp.py: MTP speculative target wrapper + native-head
   drafter, ported from omlx patches/mlx_lm_mtp (verbatim rollback
   semantics, gmlx loader/engine integration).
-- gmlx/deepseek_v4_model.py: the native-kernel dispatch blocks
+- gmlx/models/deepseek_v4/model.py: the native-kernel dispatch blocks
   (sparse attention / indexer / window arms) follow omlx's
   probe-and-permanently-disable dispatch pattern.
 

@@ -30,10 +30,10 @@ import re
 import sys
 from dataclasses import dataclass
 
-from .textfmt import plural_s
-from .extras import install_hint
-from . import profiles as _family_profiles
-from .config import DiscoverSpec, ModelCfg
+from gmlx.textfmt import plural_s
+from gmlx.commands.extras import install_hint
+import gmlx.gen.profiles as _family_profiles
+from gmlx.config import DiscoverSpec, ModelCfg
 from .config_synth import supported_arches
 from .gguf_meta import read_int, read_string
 from .preflight import is_first_shard as _is_first_shard
@@ -368,7 +368,7 @@ def header_sampling(path) -> dict:
     to gmlx sampling keys. ``{}`` when absent/unreadable/not-a-local-file."""
     if not path or str(path).startswith("hf:"):
         try:
-            from .config import resolve_path
+            from gmlx.config import resolve_path
             path = resolve_path(str(path), [])
         except Exception:
             return {}
@@ -425,8 +425,8 @@ def fill_families(cfg) -> None:
     the stat-validated cache above, so repeat calls are cheap."""
     if not cfg.family_defaults:
         return
-    from . import profiles as _profiles
-    from .config import ConfigError, resolve_path
+    import gmlx.gen.profiles as _profiles
+    from gmlx.config import ConfigError, resolve_path
     for mc in cfg.models.values():
         if mc.family is not None:
             continue
@@ -1107,7 +1107,7 @@ def family_comment(mc: ModelCfg) -> str:
         return ""
     # `sampling (<src>):` and not `<src>: ...` -- a comment starting with a
     # bare `word:` reads as a commented-out option key (see
-    # tests/test_discovery.py `_uncomment_hints`).
+    # tests/load/test_discovery.py `_uncomment_hints`).
     return f"sampling ({src}): {' '.join(parts)}" if parts else f"sampling ({src})"
 
 
@@ -1398,7 +1398,7 @@ def _scaffold_models_block(models, dirs) -> list[str]:
     lines.append("  #   cache, system, chat_template(_kwargs); always wins "
                  "over any profile) |")
     # Every wrapped line below must carry a `<placeholder>` (or `{...}`) so
-    # _uncomment_hints's per-line heuristic (tests/test_discovery.py) leaves this
+    # _uncomment_hints's per-line heuristic (tests/load/test_discovery.py) leaves this
     # prose-only reference block commented instead of splicing a bare
     # `key: value | key: value` fragment into the parsed YAML.
     lines.append("  #   adapter: <lora.gguf> | pin: true (never auto-unload) | "
@@ -1453,7 +1453,7 @@ def _scaffold_models_block(models, dirs) -> list[str]:
 
 def _scaffold_talk_block(talk) -> list[str]:
     """talk: voice-chat block (real values, or the commented field reference)."""
-    from .hotkey import PUSH_TO_TALK_MODIFIERS
+    from gmlx.talk.hotkey import PUSH_TO_TALK_MODIFIERS
     modifiers = " | ".join(PUSH_TO_TALK_MODIFIERS)
     alternates = " | ".join(m for m in PUSH_TO_TALK_MODIFIERS if m != "globe")
     lines: list[str] = []

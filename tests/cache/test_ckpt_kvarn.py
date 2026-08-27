@@ -13,10 +13,10 @@ import mlx.core as mx
 import numpy as np
 import pytest
 
-from gmlx.apc_manager import GmlxAPCManager
-from gmlx.cache_compat import runtime_cache_module
-from gmlx.cache_snapshot import ckpt_layout, ckpt_lookup, ckpt_store
-from gmlx.kvarn_cache import (
+from gmlx.cache.apc_manager import GmlxAPCManager
+from gmlx.cache.compat import runtime_cache_module
+from gmlx.cache.snapshot import ckpt_layout, ckpt_lookup, ckpt_store
+from gmlx.cache.kvarn_cache import (
     BatchKVarNKVCache,
     KVarNKVCache,
     KVarNRotatingKVCache,
@@ -107,7 +107,7 @@ def test_blockless_records_exempt_from_strip_on_extend():
     for p in (32, 48, 64, 80):
         assert ckpt_store(man, _ids(p), [_hollow_kvarn(p), _arr(seed=p)],
                           extra_hash=7)
-    from gmlx.cache_snapshot import _ckpt_records
+    from gmlx.cache.snapshot import _ckpt_records
     recs = _ckpt_records(man)
     assert sorted(r.p for r in recs.values()) == [32, 48, 64, 80]
     # Divergent suffix (shared 40-token prefix): adopts the shallow
@@ -121,7 +121,7 @@ def test_blockless_records_exempt_from_strip_on_extend():
 
 
 def test_blockless_records_release_under_byte_budget(monkeypatch):
-    import gmlx.cache_snapshot as cs
+    import gmlx.cache.snapshot as cs
 
     man = GmlxAPCManager(num_blocks=8, block_size=16)
     for p in (32, 48):
@@ -177,7 +177,7 @@ def test_kvarn_disk_restart_roundtrip(tmp_path):
     # permanently misses).
     from mlx_vlm.apc import DiskBlockStore
 
-    from gmlx.kvarn_apc import install_kvarn_apc
+    from gmlx.cache.kvarn_apc import install_kvarn_apc
 
     install_kvarn_apc()  # the kq_kvarn disk kind (serve installs at boot)
     p = 48
@@ -208,7 +208,7 @@ def test_kvarn_rot_disk_restart_roundtrip(tmp_path):
     # skeleton loads and then dies at the window-chain lookup.
     from mlx_vlm.apc import DiskBlockStore
 
-    from gmlx.kvarn_apc import install_kvarn_apc
+    from gmlx.cache.kvarn_apc import install_kvarn_apc
 
     install_kvarn_apc()
     p = 48
@@ -243,7 +243,7 @@ def test_kvarn_disk_write_mirrors_wire_salt(tmp_path):
     # on the same wire config and misses across configs.
     from mlx_vlm.apc import DiskBlockStore
 
-    from gmlx.kvarn_apc import install_kvarn_apc
+    from gmlx.cache.kvarn_apc import install_kvarn_apc
 
     install_kvarn_apc()
     p = 32

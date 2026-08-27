@@ -11,8 +11,8 @@ import mlx.core as mx
 
 import mlx_kquant as kq
 
-from . import loadlog
-from .envflags import env_bool, env_int
+import gmlx.load.loadlog as loadlog
+from gmlx.envflags import env_bool, env_int
 from .patching import ClassPatch
 
 
@@ -223,7 +223,7 @@ def _dsv32_dense_f32(linear, x):
     """fp32 projection ``x @ W^T (+bias)`` for an indexer linear, dequantizing a
     KQuantLinear weight to fp32 (kq.quantized_matmul forces bf16 output, which
     rounds the top-k scores) or upcasting a float nn.Linear. ``x`` must be fp32."""
-    from .modules import KQuantLinear
+    from gmlx.load.modules import KQuantLinear
 
     if isinstance(linear, KQuantLinear):
         w = kq.dequantize(linear["weight"], linear["scales"], linear.kquant_type)

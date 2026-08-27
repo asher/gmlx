@@ -22,7 +22,7 @@ import sys
 
 import numpy as np
 
-from . import loadlog
+import gmlx.load.loadlog as loadlog
 
 _MS_INVALIDATE = 0x0002
 _PROT_READ = 0x1

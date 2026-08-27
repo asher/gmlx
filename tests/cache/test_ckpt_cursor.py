@@ -13,9 +13,9 @@ from types import SimpleNamespace
 import mlx.core as mx
 from mlx_vlm.apc import APCManager
 
-import gmlx.spec_engine as se
-from gmlx.cache_snapshot import ckpt_lookup
-from gmlx.speculative import _sidecar_boundary
+import gmlx.spec.engine as se
+from gmlx.cache.snapshot import ckpt_lookup
+from gmlx.spec.speculative import _sidecar_boundary
 
 from test_ckpt_tier import make_hybrid_cache
 
@@ -139,7 +139,7 @@ def test_replay_boundary_skipped_when_restored_past():
 # -- Stage 6: render-stable turn boundaries --
 
 def _stub_p_stable(monkeypatch, p_stable):
-    from gmlx import retire_key
+    import gmlx.cache.retire_key as retire_key
     monkeypatch.setattr(retire_key, "lookup_render_ctx",
                         lambda ids: {"stub": True})
     monkeypatch.setattr(retire_key, "prompt_stable_lcp",
@@ -192,7 +192,7 @@ def test_turn_boundary_kill_switch(monkeypatch):
 
 
 def test_turn_boundary_no_render_ctx(monkeypatch):
-    from gmlx import retire_key
+    import gmlx.cache.retire_key as retire_key
     monkeypatch.setattr(retire_key, "lookup_render_ctx", lambda ids: None)
     meta = _arm_meta(5000, ("kv", "arr"))
     assert meta["ckpt_p_stable_bounds"] == []
@@ -202,7 +202,7 @@ def test_turn_boundary_no_render_ctx(monkeypatch):
 def test_turn_boundary_small_prompt_skips_prediction(monkeypatch):
     # Below the cheapest armable boundary the render+tokenize prediction
     # is pure cost; the schedule must not even look up the render ctx.
-    from gmlx import retire_key
+    import gmlx.cache.retire_key as retire_key
 
     def _boom(ids):
         raise AssertionError("render ctx consulted below the arm floor")
@@ -418,7 +418,7 @@ def test_ckpt_formation_serializes_prefill(monkeypatch):
 # -- system-prefix anchor boundary --
 
 def _stub_sys(monkeypatch, lcp):
-    from gmlx import retire_key
+    import gmlx.cache.retire_key as retire_key
     monkeypatch.setattr(retire_key, "lookup_render_ctx",
                         lambda ids: {"stub": True})
     monkeypatch.setattr(retire_key, "prompt_stable_lcp",

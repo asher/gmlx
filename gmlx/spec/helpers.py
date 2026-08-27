@@ -20,7 +20,7 @@ import mlx.nn as nn
 
 from mlx_vlm.models import cache
 
-from .cache_compat import cache_types
+from gmlx.cache.compat import cache_types
 from .drafter_protocol import default_block_size, native_block_size
 
 _log = logging.getLogger(__name__)

@@ -16,8 +16,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from gmlx.cache_compat import runtime_cache_module
-from gmlx.kvarn_apc import (
+from gmlx.cache.compat import runtime_cache_module
+from gmlx.cache.kvarn_apc import (
     _MODE_STAMP,
     apply_kvarn_salt,
     install_kvarn_apc,
@@ -25,7 +25,7 @@ from gmlx.kvarn_apc import (
     kvarn_model_converts,
     stamp_model,
 )
-from gmlx.kvarn_cache import KVarNKVCache, convert_prompt_cache
+from gmlx.cache.kvarn_cache import KVarNKVCache, convert_prompt_cache
 
 _cache = runtime_cache_module()
 ArraysCache = _cache.ArraysCache
@@ -157,7 +157,7 @@ def test_salt_zero_outside_kvarn_window(_ops_ok, monkeypatch):
 def test_build_apc_manager_never_salts(_ops_ok, monkeypatch):
     # The build runs pre-load with nothing to probe; the salt belongs to
     # residency's post-load pairing only.
-    from gmlx.apc_manager import build_apc_manager
+    from gmlx.cache.apc_manager import build_apc_manager
 
     monkeypatch.setenv("KV_QUANT_SCHEME", "kvarn")
     monkeypatch.setenv("GMLX_APC_ENABLED", "1")
@@ -180,7 +180,7 @@ def test_gated_init_zero_conversion_keeps_stock_path(_ops_ok):
     # recurrent_gemma-shaped: ckpt-shaped but kvarn converts nothing --
     # no stamp, kv_bits and the manager untouched, so fp16 ckpt records
     # keep storing exactly as on a stock boot.
-    from gmlx.kvarn_serve import _install_apc_gate
+    from gmlx.cache.kvarn_serve import _install_apc_gate
 
     install_kvarn_apc()
     ar = _fake_ar()
@@ -195,7 +195,7 @@ def test_gated_init_zero_conversion_keeps_stock_path(_ops_ok):
 
 
 def test_gated_init_converting_model_stamps(_ops_ok):
-    from gmlx.kvarn_serve import _install_apc_gate
+    from gmlx.cache.kvarn_serve import _install_apc_gate
 
     install_kvarn_apc()
     ar = _fake_ar()

@@ -41,7 +41,7 @@ from typing import Any
 
 import yaml
 
-from . import profiles as _family_profiles
+import gmlx.gen.profiles as _family_profiles
 from .envflags import env_bool
 
 # Canonical key sets / env mappings
@@ -359,7 +359,7 @@ class TalkCfg:
     mode: str = "wake"                # wake | vad | ptt | text
     wake_word: str = "hey assistant"  # any text phrase (sherpa-onnx KWS)
     wake_threshold: float = 0.3
-    # Menu bar global hotkey: <modifier>+Space (see gmlx.hotkey's
+    # Menu bar global hotkey: <modifier>+Space (see gmlx.talk.hotkey's
     # PUSH_TO_TALK_MODIFIERS; right-side keys for Globe-less keyboards).
     push_to_talk_modifier: str = "globe"
     vad: TalkVad = field(default_factory=TalkVad)
@@ -841,7 +841,7 @@ def resolve_model(
             chat_template_kwargs, base.get("chat_template_kwargs", {}))
         # The GGUF's own embedded model-card sampling (general.sampling.*)
         # refines the arch-family guess; profiles/overrides still win.
-        from .discovery import header_sampling
+        from gmlx.load.discovery import header_sampling
         try:
             hs = header_sampling(resolve_path(model.path, cfg.model_dirs))
         except ConfigError:
@@ -1637,7 +1637,7 @@ def _parse_talk(raw) -> TalkCfg:
     if brain not in TALK_BRAINS:
         raise ConfigError(
             f"talk.brain: {brain!r} is not one of {'/'.join(TALK_BRAINS)}")
-    from .hotkey import PUSH_TO_TALK_MODIFIERS
+    from gmlx.talk.hotkey import PUSH_TO_TALK_MODIFIERS
     ptt = str(raw.get("push_to_talk_modifier", "globe")).strip().lower()
     if ptt not in PUSH_TO_TALK_MODIFIERS:
         raise ConfigError(

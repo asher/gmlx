@@ -1,7 +1,7 @@
 """Unit tests for the over-generation probe helpers (no model forward pass)."""
 import json
 
-from gmlx import overgen
+import gmlx.spec.overgen as overgen
 
 
 class _FakeTok:

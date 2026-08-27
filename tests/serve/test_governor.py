@@ -8,9 +8,9 @@ import pytest
 
 import mlx.core as mx
 
-import gmlx.governor as gov
-import gmlx.tick_guard as tg
-from gmlx.server_patches.row_failed import RowShedError
+import gmlx.serve.governor as gov
+import gmlx.serve.tick_guard as tg
+from gmlx.serve.patches.row_failed import RowShedError
 
 
 class FakeGB:
@@ -69,10 +69,10 @@ def rig(monkeypatch):
     monkeypatch.setattr(gov, "_kernel_reclaimable", lambda: box["kernel"])
     monkeypatch.setenv("GMLX_GOV_KERNEL_FLOOR_GB", "8")
     monkeypatch.delenv("GMLX_GOV_RESERVE_GB", raising=False)
-    import gmlx.server_memory as sm
+    import gmlx.serve.memory as sm
     monkeypatch.setattr(sm, "admit_reserve_bytes",
                         lambda ws, gen=None: 2e9)
-    import gmlx.prefill_decay as pd
+    import gmlx.gen.prefill_decay as pd
     monkeypatch.setattr(pd, "untracked_weight_bytes", lambda: 50e9)
     gov._REG.clear()
     gov._INJECT_FIRED.clear()
@@ -116,7 +116,7 @@ def test_static_box_never_sheds_sweep(rig):
     # never shed; when headroom also covers the level terms, the band
     # never passes yellow.
     import itertools
-    import gmlx.server_memory as sm
+    import gmlx.serve.memory as sm
     for head, rate, oneshot, live, rows in itertools.product(
             (8e9, 34e9, 94e9), (1e3, 1e9, 60e9), (0.0, 25e9, 60e9),
             (1e9, 30e9), (1, 8)):
@@ -167,7 +167,7 @@ def test_yellow_arms_throttle_and_restores(rig, monkeypatch):
 def test_yellow_demand_rungs_on_measured_miss(rig, monkeypatch):
     monkeypatch.setenv("GMLX_GOV_RUNG_TICKS", "2")
     clamps = []
-    import gmlx.speculative as spec
+    import gmlx.spec.speculative as spec
     monkeypatch.setattr(spec, "set_governor_width_clamp",
                         lambda n: clamps.append(n))
     gen = FakeGen(rows=4, rate=2.0e9)
@@ -396,7 +396,7 @@ def test_kill_switch(monkeypatch):
 def test_row_failed_bridge_delivers_and_closes(monkeypatch):
     from mlx_vlm.server import generation as gen_mod
 
-    from gmlx.server_patches.row_failed import install_row_failed_bridge
+    from gmlx.serve.patches.row_failed import install_row_failed_bridge
 
     install_row_failed_bridge()
     stepped = []
@@ -429,7 +429,7 @@ def test_keepalive_sse_translates_shed_error():
     import asyncio
     import json
 
-    from gmlx.server_patches.request_flow import _keepalive_sse
+    from gmlx.serve.patches.request_flow import _keepalive_sse
 
     async def body():
         yield "data: x\n\n"
@@ -454,7 +454,7 @@ def test_keepalive_sse_upgrades_swallowed_shed_chunk():
     import asyncio
     import json
 
-    from gmlx.server_patches.request_flow import _keepalive_sse
+    from gmlx.serve.patches.request_flow import _keepalive_sse
 
     err = RowShedError(7, {"prompt_len": 4, "delivered": 2,
                            "error": "pressure"})
@@ -477,7 +477,7 @@ def test_keepalive_sse_upgrades_swallowed_shed_chunk():
 def test_keepalive_sse_other_errors_still_raise():
     import asyncio
 
-    from gmlx.server_patches.request_flow import _keepalive_sse
+    from gmlx.serve.patches.request_flow import _keepalive_sse
 
     async def body():
         yield "a"
@@ -495,7 +495,7 @@ def test_keepalive_sse_other_errors_still_raise():
 def test_apc_governor_bytes_and_evict():
     from mlx_vlm import apc as _apc
 
-    from gmlx.apc_manager import GmlxAPCManager
+    from gmlx.cache.apc_manager import GmlxAPCManager
 
     mgr = GmlxAPCManager(num_blocks=4, block_size=4)
     # commit two blocks; block 0 stays referenced by a live row
@@ -746,7 +746,7 @@ def test_ceiling_reserve_binds_when_ws_is_close_to_ram(monkeypatch):
 
 
 def test_headroom_shifts_by_ceiling_gap(monkeypatch):
-    import gmlx.prefill_decay as pd
+    import gmlx.gen.prefill_decay as pd
     monkeypatch.setenv("GMLX_GOV_RESERVE_GB", "40")
     monkeypatch.setattr(gov.mx, "device_info", lambda: {
         "max_recommended_working_set_size": 120e9, "memory_size": 137e9})
@@ -761,7 +761,7 @@ def test_arm_throttle_limit_uses_ceiling(rig, monkeypatch):
     monkeypatch.setenv("GMLX_GOV_RESERVE_GB", "40")
     monkeypatch.setattr(gov.mx, "device_info", lambda: {
         "max_recommended_working_set_size": 120e9, "memory_size": 137e9})
-    import gmlx.prefill_decay as pd
+    import gmlx.gen.prefill_decay as pd
     monkeypatch.setattr(pd, "streamed_tracked_bytes", lambda: 0.0)
     gen = FakeGen(rows=2)
     st = gov._state(gen)

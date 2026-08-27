@@ -17,7 +17,7 @@ import subprocess
 import sys
 import warnings
 
-from .textfmt import plural_s as _s
+from gmlx.textfmt import plural_s as _s
 
 
 def _check(name: str, status: str, detail: str) -> dict:
@@ -68,7 +68,7 @@ def check_kernels() -> dict:
 
 def check_config(config_path):
     """Returns ``(check, cfg, path)`` - cfg/path are None when unloadable."""
-    from . import config as cfgmod
+    import gmlx.config as cfgmod
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         try:
@@ -98,7 +98,7 @@ def check_models(cfg, *, deep: bool = False) -> dict:
                           "none configured (discover: scan active)")
         return _check("models", "WARN",
                       "no models: add entries under models: or a discover: scan")
-    from .config import ConfigError, resolve_path
+    from gmlx.config import ConfigError, resolve_path
     from .manage import _shard_names
     misses: list[str] = []
     for mid, m in cfg.models.items():
@@ -119,7 +119,7 @@ def check_models(cfg, *, deep: bool = False) -> dict:
                     misses.append(
                         f"{mid}: missing shard(s) {', '.join(gaps[:3])}")
                 elif deep:
-                    from .preflight import preflight
+                    from gmlx.load.preflight import preflight
                     try:
                         preflight(rp)
                     except Exception as e:      # noqa: BLE001 - report, not raise
@@ -146,7 +146,7 @@ def check_services(cfg):
     pass"). Alias / HF-repo values have nothing to stat and just count."""
     if cfg is None:
         return None
-    from .server_patches.routes import _service_file_on_disk
+    from gmlx.serve.patches.routes import _service_file_on_disk
     svcs = [("embeddings", cfg.embeddings), ("rerank", cfg.rerank),
             ("stt", cfg.stt), ("tts", cfg.tts)]
     svcs = [(n, v) for n, v in svcs if v]
@@ -174,7 +174,7 @@ def check_services(cfg):
 
 
 def check_server() -> dict:
-    from . import lifecycle
+    import gmlx.serve.lifecycle as lifecycle
     runs = lifecycle.list_runs()
     if not runs:
         return _check("server", "SKIP",
@@ -212,7 +212,7 @@ def check_agents():
     does nothing at login, so it gets a WARN with the re-load step."""
     if sys.platform != "darwin":
         return None
-    from . import lifecycle
+    import gmlx.serve.lifecycle as lifecycle
     plists = _agent_plists()
     if not plists:
         return None
@@ -239,7 +239,7 @@ def check_launcher():
     dyld before any Python runs. Prove the copy executes."""
     if sys.platform != "darwin":
         return None
-    from . import procname
+    import gmlx.serve.procname as procname
     stub = procname.named_python()
     if stub is None:
         return _check("launcher", "WARN",
@@ -264,8 +264,8 @@ def _running_configs(primary_path) -> list:
     whatever config each server was actually started with - a
     `serve --config other.yaml` can enable stt/tts that the default-location
     config leaves commented out."""
-    from . import config as cfgmod
-    from . import lifecycle
+    import gmlx.config as cfgmod
+    import gmlx.serve.lifecycle as lifecycle
     seen = set()
     if primary_path:
         seen.add(os.path.abspath(os.path.expanduser(str(primary_path))))
@@ -289,7 +289,7 @@ def _needed_extras(cfg) -> list[str]:
     """Extras the config's features require (empty without a config)."""
     if cfg is None:
         return []
-    from .config import TalkCfg
+    from gmlx.config import TalkCfg
     need = []
     if cfg.stt:
         need.append("stt")
@@ -381,7 +381,7 @@ def check_mcp(cfg):
 def check_assistant_exposure(cfg):
     """None unless served assistants sit on a non-loopback bind. WARN names
     which aliases inherit the full shared tool list vs carry their own."""
-    from .config import LOOPBACK_HOSTS
+    from gmlx.config import LOOPBACK_HOSTS
     if cfg is None or not cfg.assistants or cfg.host in LOOPBACK_HOSTS:
         return None
     parts = []
@@ -413,8 +413,8 @@ def check_memory(cfg) -> dict:
     fit threshold that isn't set to stream gets a WARN naming it - the server
     would load it into memory pressure (or fail) on first request. Advisory:
     smaller models on the same config keep serving either way."""
-    from .lifecycle import human_gb
-    from .memfit import classify_fit, total_ram_bytes
+    from gmlx.serve.lifecycle import human_gb
+    from gmlx.load.memfit import classify_fit, total_ram_bytes
 
     ram = total_ram_bytes()
     if ram is None:

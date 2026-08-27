@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""`gmlx.sessions`: schema round-trip, atomic writes, listing/lookup, and
+"""`gmlx.tui.sessions`: schema round-trip, atomic writes, listing/lookup, and
 markdown export. Pure file logic - no model, no terminal."""
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from gmlx import sessions as ss
+import gmlx.tui.sessions as ss
 
 
 def _doc(model="/m/x.gguf", msgs=None):

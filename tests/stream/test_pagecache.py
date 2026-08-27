@@ -1,4 +1,4 @@
-"""Exit-time page-cache release (gmlx.pagecache): the MS_INVALIDATE sweep
+"""Exit-time page-cache release (gmlx.stream.pagecache): the MS_INVALIDATE sweep
 and its larger-than-RAM registration gate."""
 
 import os
@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from gmlx import pagecache
+import gmlx.stream.pagecache as pagecache
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "darwin", reason="Darwin UBC semantics"
@@ -80,7 +80,7 @@ def test_release_streaming_for_sweeps_evicted_group(cached_file, monkeypatch):
 def test_sweep_log_gated_on_session_verbosity(cached_file, monkeypatch, capsys):
     """The sweep itself always runs; its chatter follows the load session's
     verbosity, captured at registration time."""
-    from gmlx import loadlog
+    import gmlx.load.loadlog as loadlog
 
     monkeypatch.setattr(pagecache, "_groups", [])
     monkeypatch.setattr(pagecache, "_hook_installed", True)

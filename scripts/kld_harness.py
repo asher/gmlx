@@ -68,8 +68,8 @@ def build_arm(name: str, model, tail_tokens: int):
     if name.startswith("kvarn"):
         import re
 
-        from gmlx.kvarn_cache import convert_prompt_cache
-        from gmlx.kvarn_sdpa import install_kvarn_sdpa, kvarn_ops_missing
+        from gmlx.cache.kvarn_cache import convert_prompt_cache
+        from gmlx.cache.kvarn_sdpa import install_kvarn_sdpa, kvarn_ops_missing
 
         reason = kvarn_ops_missing()
         if reason:
@@ -135,7 +135,7 @@ def main():
     ap.add_argument("--json", default=None)
     args = ap.parse_args()
 
-    from gmlx.loader import load_model
+    from gmlx.load.loader import load_model
 
     model, _config, tok = load_model(args.gguf)
     info = mx.device_info()

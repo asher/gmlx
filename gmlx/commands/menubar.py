@@ -35,10 +35,10 @@ import urllib.request
 from collections import deque
 from urllib.parse import urlparse
 
-from .lifecycle import get_json as _get_json
-from .lifecycle import human_gb
-from .lifecycle import post_json as _post_json
-from .lifecycle import server_root as _server_root
+from gmlx.serve.lifecycle import get_json as _get_json
+from gmlx.serve.lifecycle import human_gb
+from gmlx.serve.lifecycle import post_json as _post_json
+from gmlx.serve.lifecycle import server_root as _server_root
 
 
 def _split_url(url: str) -> tuple:
@@ -60,7 +60,7 @@ def _key_from_config(run: dict | None) -> str | None:
     if not cfg_path:
         return None
     try:
-        from .config import load_config
+        from gmlx.config import load_config
         return getattr(load_config(cfg_path), "api_key", None)
     except Exception:
         return None  # best-effort config read; unreadable -> no key
@@ -79,7 +79,7 @@ def talk_model_from_config(run: dict | None) -> str | None:
     if not cfg_path:
         return None
     try:
-        from .config import load_config
+        from gmlx.config import load_config
         return getattr(load_config(cfg_path).talk, "model", None)
     except Exception:
         return None  # best-effort config read; unreadable -> unset
@@ -88,11 +88,11 @@ def talk_model_from_config(run: dict | None) -> str | None:
 def ptt_modifier_from_config(run: dict | None) -> str:
     """``talk.push_to_talk_modifier`` from the managed server's recorded
     config; ``"globe"`` when unset, unreadable, or invalid."""
-    from .hotkey import PUSH_TO_TALK_MODIFIERS
+    from gmlx.talk.hotkey import PUSH_TO_TALK_MODIFIERS
     cfg_path = (run or {}).get("config_abspath")
     if cfg_path:
         try:
-            from .config import load_config
+            from gmlx.config import load_config
             mod = getattr(load_config(cfg_path).talk,
                           "push_to_talk_modifier", "globe")
             if mod in PUSH_TO_TALK_MODIFIERS:
@@ -156,7 +156,7 @@ def _existing_default_config() -> str | None:
     never started, or cleanly stopped): the first default config location that
     exists. The config is exactly what you want to edit while the server is down."""
     try:
-        from .config import default_config_paths
+        from gmlx.config import default_config_paths
         for p in default_config_paths():
             if p.exists():
                 return str(p)
@@ -180,7 +180,7 @@ def _port_of(snapshot: dict, run: dict | None) -> int | None:
 # user's config file.
 
 def menubar_settings_path():
-    from . import lifecycle
+    import gmlx.serve.lifecycle as lifecycle
     return lifecycle.runtime_dir() / "menubar-settings.json"
 
 
@@ -243,7 +243,8 @@ def _autostart_server_once() -> None:
     server the user deliberately stopped stays stopped until the next
     login. Best-effort: any failure just leaves the bar showing "down" with
     its one-click Start."""
-    from . import lifecycle, procname
+    import gmlx.serve.lifecycle as lifecycle
+    import gmlx.serve.procname as procname
     auto = load_menubar_settings().get("autostart")
     if not auto:
         return
@@ -704,7 +705,7 @@ class _MenuBarApp:
         # Dynamic mode: no fixed target - resolve the primary server now (and on every
         # poll), so one menu bar follows "the" server as servers come and go.
         if dynamic:
-            from . import lifecycle
+            import gmlx.serve.lifecycle as lifecycle
             host, port = lifecycle.auto_target(None, None)
             url = f"http://{host}:{port}"
         self.url = url
@@ -742,12 +743,12 @@ class _MenuBarApp:
         each tick so it follows the single/primary server), else the fixed target."""
         if not self._dynamic:
             return self.url, self.host, self.port
-        from . import lifecycle
+        import gmlx.serve.lifecycle as lifecycle
         host, port = lifecycle.auto_target(None, None)
         return f"http://{host}:{port}", host, port
 
     def _runinfo(self, host=None, port=None) -> dict | None:
-        from . import lifecycle
+        import gmlx.serve.lifecycle as lifecycle
         return lifecycle.read_run(self.host if host is None else host,
                                   self.port if port is None else port)
 
@@ -814,7 +815,7 @@ class _MenuBarApp:
     def _stop(self) -> None:
         self._notify.expect()            # bar-initiated: the down is expected
         def work():
-            from . import lifecycle
+            import gmlx.serve.lifecycle as lifecycle
             lifecycle.stop(self.host, self.port)
         self._spawn(work)
 
@@ -822,7 +823,7 @@ class _MenuBarApp:
         self._notify.expect()            # kickstart/restart dips are expected
         run = self._runinfo()
         def work():
-            from . import lifecycle
+            import gmlx.serve.lifecycle as lifecycle
             if run and run.get("managed_by") == "launchd":
                 label = run.get("label") or lifecycle._label(self.host, self.port)
                 subprocess.run(
@@ -835,7 +836,7 @@ class _MenuBarApp:
     def _log_sources(self) -> list:
         """(label, path) pairs for the unified logs panel - the tracked
         server's log plus this process's own, when they exist."""
-        from . import lifecycle
+        import gmlx.serve.lifecycle as lifecycle
         out = []
         run = self._runinfo()
         log = (run or {}).get("log")
@@ -885,8 +886,8 @@ class _MenuBarApp:
 
         def boot():
             try:
-                from . import talk as talk_mod
-                from .talk_client import ensure_v1_base, probe_capabilities
+                import gmlx.talk.main as talk_mod
+                from gmlx.talk.client import ensure_v1_base, probe_capabilities
                 # _current_target returns a bare http://host:port; the talk
                 # client's audio routes exist only under /v1.
                 base = ensure_v1_base(url)
@@ -1020,7 +1021,7 @@ class _MenuBarApp:
         if self._hotkey_arming:
             return
         self._hotkey_arming = True
-        from . import hotkey
+        import gmlx.talk.hotkey as hotkey
         tap = hotkey.HotkeyTap(self._ptt_modifier, self._on_hotkey_fire)
 
         def work():
@@ -1064,7 +1065,7 @@ class _MenuBarApp:
                 or not self._hotkey_available()):
             return
         try:
-            from . import hotkey
+            import gmlx.talk.hotkey as hotkey
             if hotkey.preflight():
                 self._arm_hotkey_async()
             else:
@@ -1081,7 +1082,7 @@ class _MenuBarApp:
                 or "needs permission" not in (self._hotkey_error or "")):
             return
         try:
-            from . import hotkey
+            import gmlx.talk.hotkey as hotkey
             if hotkey.preflight():
                 self._hotkey_error = None
                 self._arm_hotkey_async()
@@ -1105,7 +1106,7 @@ class _MenuBarApp:
         # Pick up config edits to talk.push_to_talk_modifier on re-enable.
         url_, host, port = self._current_target()
         self._ptt_modifier = ptt_modifier_from_config(self._runinfo(host, port))
-        from . import hotkey
+        import gmlx.talk.hotkey as hotkey
         if not (hotkey.preflight() or hotkey.request()):
             self._hotkey_error = "not active - needs permission"
             self._refresh(None)          # paint before the modal alert
@@ -1190,7 +1191,7 @@ class _MenuBarApp:
         hotkey = None
         if self._hotkey_available():
             self._repreflight_hotkey()
-            from .hotkey import combo_label
+            from gmlx.talk.hotkey import combo_label
             hotkey = {"enabled": self._settings.get("hotkey", "off") != "off",
                       "available": True, "error": self._hotkey_error,
                       "label": combo_label(self._ptt_modifier)}
@@ -1203,7 +1204,7 @@ class _MenuBarApp:
 
     def _post_down_notification(self, snap: dict,
                                 run: dict | None = None) -> None:
-        from . import lifecycle
+        import gmlx.serve.lifecycle as lifecycle
         try:
             pid_dead = bool(run) and not lifecycle.identity_ok(run)
         except Exception:
@@ -1388,11 +1389,11 @@ def cmd_menubar(argv: list | None = None,
     if a.launchd:
         # launchd-parented: re-exec through the (just refreshed) app bundle
         # so ps and TCC prompts read "gmlx" - see procname.launchd_reexec.
-        from . import procname
+        import gmlx.serve.procname as procname
         procname.launchd_reexec(procname.menubar_bundle,
                                 ["launch", "menubar", *argv])
 
-    from . import lifecycle
+    import gmlx.serve.lifecycle as lifecycle
     if a.stop:
         if lifecycle.menubar_alive() and lifecycle.menubar_agent_loaded():
             print("the menu bar runs as a launchd agent (killing it would "

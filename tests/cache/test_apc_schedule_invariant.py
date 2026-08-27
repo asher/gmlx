@@ -16,9 +16,9 @@ from types import SimpleNamespace
 import pytest
 from mlx_vlm.apc import APCManager
 
-import gmlx.spec_engine as se
-from gmlx import retire_key
-from gmlx.cache_snapshot import (
+import gmlx.spec.engine as se
+import gmlx.cache.retire_key as retire_key
+from gmlx.cache.snapshot import (
     _ckpt_records,
     ckpt_full_store_redundant,
     ckpt_lookup,
@@ -44,8 +44,8 @@ def _make_from_tags(tags, p, seed=0):
     pure Python; the concrete-class tag rejects stubs)."""
     import mlx.core as mx
 
-    from gmlx.cache_compat import runtime_cache_module
-    from gmlx.kvarn_cache import KVarNKVCache
+    from gmlx.cache.compat import runtime_cache_module
+    from gmlx.cache.kvarn_cache import KVarNKVCache
 
     c = runtime_cache_module()
     out = []

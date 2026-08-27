@@ -2,7 +2,7 @@
 
 import pytest
 
-import gmlx.tool_preflight as tp
+import gmlx.commands.tool_preflight as tp
 
 GB = 1e9
 

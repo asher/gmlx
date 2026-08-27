@@ -9,7 +9,7 @@ import importlib
 import os
 
 
-from .. import server_bridge_vlm as serving
+import gmlx.serve.bridge_vlm as serving
 from ._common import (
     _CHAT_PATHS,
     _PATCH_FLAG,
@@ -42,7 +42,7 @@ def _merged_template_kwargs(request, spec, template: str = "") -> dict:
     the variables ``template`` reads), then request ``chat_template_kwargs``
     merged on top - a request's explicit kwargs always win, verbatim. Either
     side absent => the other; both absent => {}."""
-    from ..reasoning import map_thinking_controls, normalize_template_kwargs
+    from gmlx.tui.reasoning import map_thinking_controls, normalize_template_kwargs
 
     merged: dict = {}
     spec_kw = getattr(spec, "chat_template_kwargs", None) if spec is not None else None
@@ -94,12 +94,12 @@ def _stash_template_kwargs(args, request, _processor):
     raw = getattr(request, "thinking", None) if not thinking_explicit else None
     req_effort = getattr(request, "reasoning_effort", None)
     if raw is not None or req_effort is not None:
-        from ..reasoning import map_thinking_controls
+        from gmlx.tui.reasoning import map_thinking_controls
 
         merged = map_thinking_controls(merged, raw, req_effort, template,
                                        warn=_warn_thinking)
     if not thinking_explicit:
-        from ..reasoning import thinking_switch_flag
+        from gmlx.tui.reasoning import thinking_switch_flag
 
         flag = thinking_switch_flag(raw) if raw is not None else None
         args.enable_thinking = True if flag is None else flag
@@ -119,7 +119,7 @@ def install_chat_template_kwargs() -> None:
     The pop below leaves ``enable_thinking`` absent so the template's own
     default governs; ``get_chat_template`` would then re-inject False
     (mlx-vlm >= 0.6.15), so the render seam is guarded too."""
-    from ..reasoning import install_template_default_thinking
+    from gmlx.tui.reasoning import install_template_default_thinking
 
     install_template_default_thinking()
     _install_gen_args_transform(_CTKW_FLAG, _stash_template_kwargs)
@@ -321,7 +321,7 @@ def _strip_xtml_sections(content: str) -> str:
 
 
 def _trim_content_ws(text: str) -> str:
-    from ..reasoning import trim_content_ws
+    from gmlx.tui.reasoning import trim_content_ws
     return trim_content_ws(text)
 
 
@@ -390,7 +390,7 @@ def install_stream_thinking_seed() -> None:
                     # recipient routing, so the stream splits through the
                     # REPL's marker filter instead. Both prompts stop
                     # mid-header, so the filter starts inside one.
-                    from ..reasoning import ReasoningFilter
+                    from gmlx.tui.reasoning import ReasoningFilter
                     self._kq_harmony = ReasoningFilter(start_in_header=True)
                     self._kq_harmony_closed = False
 
@@ -439,7 +439,7 @@ def install_stream_thinking_seed() -> None:
     # partial reasoning as content. Shared rule with the retirement mirror
     # (retire_key.truncated_thinking); this side supplies the prompt from
     # the request contextvar.
-    from .. import retire_key
+    import gmlx.cache.retire_key as retire_key
     split = getattr(app, "_split_thinking_text", None)
     if split is not None and not getattr(split, _STREAM_SEED_FLAG, False):
         def _split_thinking_text(text, thinking_start_token=None,
@@ -458,7 +458,7 @@ def install_stream_thinking_seed() -> None:
                 # mid-header prompt tail plus a header close in the reply.
                 # (Gemma's lopsided "<|channel>thought" lacks the closing pipe,
                 # so this gate cannot misfire on it.)
-                from ..reasoning import split_harmony_reply
+                from gmlx.tui.reasoning import split_harmony_reply
                 return split_harmony_reply(text, start_in_header=in_header)
             # Stock walk with content whitespace preserved: the stock
             # splitter's .strip() eats first-line code indent.
@@ -638,7 +638,7 @@ async def _stop_filter_sse(body, stops: list):
     """Wrap a chat-completions SSE body iterator with stop-sequence filtering.
     On a hit: emit the pre-stop text, a ``finish_reason="stop"`` chunk and
     ``[DONE]``, then close the upstream generator (cancelling generation)."""
-    from ..generation import StopScanner
+    from gmlx.gen.generation import StopScanner
 
     st = {"scanner": StopScanner(stops), "meta": {}}
     pending = ""    # partial SSE event split across upstream yields

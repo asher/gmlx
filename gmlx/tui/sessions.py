@@ -36,7 +36,7 @@ def sessions_dir() -> Path:
 def default_session_name(model_path: str) -> str:
     """``<model-slug>-YYYYmmdd-HHMMSS`` - unique enough per chat session."""
     try:
-        from .discovery import derive_id
+        from gmlx.load.discovery import derive_id
 
         slug = derive_id(os.path.basename(model_path))[0]
     except Exception:

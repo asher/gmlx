@@ -10,7 +10,7 @@ import shutil
 import numpy as np
 import pytest
 
-from gmlx.headerscan import scan_gguf
+from gmlx.load.headerscan import scan_gguf
 
 
 def _mint(path, *, big_arrays=False, tensors=True):
@@ -97,7 +97,7 @@ def test_truncated_file_detected(tmp_path):
 
 
 def test_preflight_refuses_truncated(tmp_path):
-    from gmlx.preflight import preflight
+    from gmlx.load.preflight import preflight
 
     p = _mint(tmp_path / "m.gguf")
     with open(p, "r+b") as f:

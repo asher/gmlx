@@ -20,7 +20,7 @@ pytest.importorskip("mlx_vlm.models.rope_utils")
 from mlx_vlm.models import rope_utils as _R
 from mlx_vlm.models.qwen3_5.language import Qwen3_5RotaryEmbedding
 
-from gmlx import qwen35_rope as rp
+import gmlx.models.qwen35.rope as rp
 
 _NEEDS_GPU = pytest.mark.skipif(
     bool(os.environ.get("KQUANT_FORCE_CPU")),

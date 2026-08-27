@@ -5,7 +5,7 @@ import importlib
 import json
 import types
 
-from gmlx.generation import _generate_over
+from gmlx.gen.generation import _generate_over
 
 # mlx_lm re-exports the `generate` function over the submodule name, so attribute
 # access returns the function; import the real modules explicitly.
@@ -86,7 +86,7 @@ def test_verbose_phase1_uses_styled_emitter(monkeypatch, capsys):
     """Verbose phase 1 streams through the main path's emitter (thinking
     rendering included) and closes it before the seam marker; phase 2
     still prints raw."""
-    import gmlx.generation as g
+    import gmlx.gen.generation as g
 
     got = {"chunks": [], "closed": 0, "reasoning": None}
 
@@ -230,7 +230,7 @@ def test_seam_text_filled_from_decode_when_blank(monkeypatch, tmp_path):
 def test_over_generation_with_prompt_cache_kwarg(monkeypatch):
     """--kv-bits on a rotating-cache model puts prompt_cache into gen_kwargs;
     the over-generation branch must not re-pass it to stream_generate."""
-    import gmlx.generation as generation
+    import gmlx.gen.generation as generation
 
     _patch_stream(
         monkeypatch,

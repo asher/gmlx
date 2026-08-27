@@ -276,7 +276,7 @@ class GatedDeltaNet(nn.Module):
             return False
         if mask is not None and isinstance(mask, mx.array):
             return False
-        from . import gdn_patches as _gp
+        import gmlx.upstream.gdn_patches as _gp
 
         return (
             _gp._gdn_fused_decode_kernel is not None and _gp.gpu_active()
@@ -291,7 +291,7 @@ class GatedDeltaNet(nn.Module):
             isinstance(mask, mx.array) and mask.ndim == 2 and mask.shape[0] == B
         ):
             return False
-        from . import gdn_patches as _gp
+        import gmlx.upstream.gdn_patches as _gp
 
         return (
             _gp._gdn_fused_verify_kernel is not None and _gp.gpu_active()
@@ -306,12 +306,12 @@ class GatedDeltaNet(nn.Module):
         layer's cache to a shorter accepted prefix."""
         B, S, _ = inputs.shape
         if self._fused_decode_ok(B, S, mask, cache):
-            from . import gdn_patches as _gp
+            import gmlx.upstream.gdn_patches as _gp
 
             return _gp._gdn_fused_decode_body(self, inputs, cache)
         pre = (cache[0], cache[1]) if cache is not None else (None, None)
         if gdn_sink is not None and S > 1 and self._fused_verify_ok(B, mask, cache):
-            from . import gdn_patches as _gp
+            import gmlx.upstream.gdn_patches as _gp
 
             rec: list = []
             out = _gp._gdn_fused_verify_body(self, inputs, mask, cache, rec)
@@ -402,7 +402,7 @@ def _kq_hc():
     None (eager op chain). ``GMLX_Q4_HC_FUSED=0`` disables."""
     global _kq_hc_fns
     if _kq_hc_fns is _KQ_TOPK_UNSET:
-        from .envflags import env_bool
+        from gmlx.envflags import env_bool
         fns = None
         if env_bool("GMLX_Q4_HC_FUSED", True):
             try:
@@ -427,7 +427,7 @@ def _kq_paged():
     (probed once with a dry call)."""
     global _kq_paged_fn
     if _kq_paged_fn is _KQ_TOPK_UNSET:
-        from .envflags import env_bool
+        from gmlx.envflags import env_bool
         fn = None
         if env_bool("GMLX_Q4_QSA_PAGED_SDPA", True):
             try:
@@ -454,7 +454,7 @@ def _kq_bs_prefill():
     (dense-masked stock FA). ``GMLX_Q4_QSA_BS_PREFILL=0`` disables."""
     global _kq_bs_fn
     if _kq_bs_fn is _KQ_TOPK_UNSET:
-        from .envflags import env_bool
+        from gmlx.envflags import env_bool
         fn = None
         if env_bool("GMLX_Q4_QSA_BS_PREFILL", True):
             try:
@@ -472,7 +472,7 @@ def _kq_topk():
     argpartition). ``GMLX_Q4_QSA_KQ_TOPK=0`` disables."""
     global _kq_topk_fn
     if _kq_topk_fn is _KQ_TOPK_UNSET:
-        from .envflags import env_bool
+        from gmlx.envflags import env_bool
         fn = None
         if env_bool("GMLX_Q4_QSA_KQ_TOPK", True):
             try:
@@ -492,7 +492,7 @@ def _kq_score():
     shape check on the host validator)."""
     global _kq_score_fn
     if _kq_score_fn is _KQ_TOPK_UNSET:
-        from .envflags import env_bool
+        from gmlx.envflags import env_bool
         fn = None
         if env_bool("GMLX_Q4_QSA_KQ_SCORE", True):
             try:
@@ -1075,7 +1075,7 @@ def _ple_hash():
     ``GMLX_Q4_PLE_FUSED_HASH=0`` disables."""
     global _ple_hash_kernel
     if _ple_hash_kernel is None:
-        from .envflags import env_bool
+        from gmlx.envflags import env_bool
         if (env_bool("GMLX_Q4_PLE_FUSED_HASH", True)
                 and mx.default_device().type == mx.DeviceType.gpu):
             _ple_hash_kernel = _make_ple_hash_kernel()
@@ -1250,8 +1250,8 @@ def prepare_runtime(model) -> dict:
     S=1 GDN decode kernel (``GMLX_FUSED_GDN=0`` disables) and the
     concatenated b/a decay matvec it consumes. Returns counts for the load
     log."""
-    from . import gdn_patches as _gp
-    from .envflags import env_bool
+    import gmlx.upstream.gdn_patches as _gp
+    from gmlx.envflags import env_bool
 
     counts = {"gdn_fused": 0, "gdn_ba_cat": 0, "gdn_fused_verify": 0}
     want = env_bool("GMLX_FUSED_GDN", True)

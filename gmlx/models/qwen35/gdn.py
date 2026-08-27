@@ -20,14 +20,11 @@ import mlx.nn as nn
 
 from mlx_vlm.models.qwen3_5 import language as _L
 
-from . import gdn_patches as _gp
-from .envflags import env_bool
-from .loadlog import verbose_print
-from .qwen35_owned import (
-    _qwen3_5_advance_left_padding_info,
-    _qwen3_5_advance_lengths_info,
-)
-from .qwen35_verify_linear import verify_linear, verify_linears
+import gmlx.upstream.gdn_patches as _gp
+from gmlx.envflags import env_bool
+from gmlx.load.loadlog import verbose_print
+from .owned import _qwen3_5_advance_left_padding_info, _qwen3_5_advance_lengths_info
+from .verify_linear import verify_linear, verify_linears
 
 
 _QWEN_GDN_FAMILY = ("qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text")

@@ -14,9 +14,9 @@ import mlx.core as mx
 from mlx_vlm.apc import APCManager
 from mlx_vlm.models.cache import CacheList, KVCache
 
-import gmlx.cache_snapshot as cs
-import gmlx.spec_engine as se
-from gmlx.cache_snapshot import anchor_exact_lookup, anchor_exact_store
+import gmlx.cache.snapshot as cs
+import gmlx.spec.engine as se
+from gmlx.cache.snapshot import anchor_exact_lookup, anchor_exact_store
 
 
 def make_kv_cache(p, layers=2, seed=0):
@@ -109,7 +109,7 @@ def test_anchor_cleared_by_ckpt_reset():
 # -- boundary: ungridded divergence, clamped to the stock guard --
 
 def _stub_sys(monkeypatch, lcp):
-    from gmlx import retire_key
+    import gmlx.cache.retire_key as retire_key
     monkeypatch.setattr(retire_key, "lookup_render_ctx",
                         lambda ids: {"messages": ()})
     monkeypatch.setattr(retire_key, "system_prefix_lcp",
@@ -146,7 +146,7 @@ def test_anchor_boundary_floor_kill_restored(monkeypatch):
 
 
 def test_anchor_boundary_no_render_ctx(monkeypatch):
-    from gmlx import retire_key
+    import gmlx.cache.retire_key as retire_key
     monkeypatch.setattr(retire_key, "lookup_render_ctx", lambda ids: None)
     batch, meta = _bmeta()
     assert se._exact_anchor_boundary(batch, meta, 4000, 0) is None
@@ -223,7 +223,7 @@ def test_anchor_at_guard_single_stop(monkeypatch):
 def _pooling_model(man):
     """A pooling stack resolves exact and is not ckpt-tier (the layout
     probe rejects unknown cache classes) -- the ds4 shape."""
-    from gmlx.deepseek_v4_cache import PoolingCache
+    from gmlx.models.deepseek_v4.cache import PoolingCache
 
     return SimpleNamespace(
         _kq_apc_manager=man, _kq_apc_mode="exact",

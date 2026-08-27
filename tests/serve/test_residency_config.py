@@ -13,9 +13,9 @@ import types
 
 import pytest
 
-from gmlx import residency  # noqa: E402
-from gmlx import server_bridge_vlm as serving  # noqa: E402
-from gmlx.residency import (  # noqa: E402
+import gmlx.serve.residency as residency  # noqa: E402
+import gmlx.serve.bridge_vlm as serving  # noqa: E402
+from gmlx.serve.residency import (  # noqa: E402
     _active_entry,
     _ResidencyPool,
     _RuntimeProxy,
@@ -376,7 +376,8 @@ def test_resolver_error_becomes_http_404_through_dispatch(monkeypatch, capsys):
 def test_http_from_resolver_error_maps_status():
     # mlx-vlm endpoints swallow non-HTTPException into a 500; the resolver errors
     # must become HTTPException with the right 4xx + the available ids/profiles.
-    from gmlx import residency, server_bridge_vlm as serving
+    import gmlx.serve.residency as residency
+    import gmlx.serve.bridge_vlm as serving
     nf = residency._http_from_resolver_error(
         serving.ModelNotFound("x", ["a", "b"]))
     assert nf.status_code == 404
@@ -452,7 +453,7 @@ def test_stats_exposes_ttl_and_idle():
 # explicit unload vs in-flight requests: an /unload must never stop another
 # client's running generation
 def test_evict_refuses_busy_model():
-    from gmlx.residency import ModelBusyError
+    from gmlx.serve.residency import ModelBusyError
     _proxy, pool, _seen, teardowns = make_pool()
     entry = _acq(pool, "/m/a.gguf")            # acquire holds busy=1
     with pytest.raises(ModelBusyError):
@@ -484,8 +485,8 @@ def test_deferred_load_inside_the_handler_is_the_typed_503(monkeypatch):
     from fastapi import FastAPI, HTTPException
     from fastapi.testclient import TestClient
 
-    from gmlx.capacity import LoadDeferred
-    import gmlx.server_patches.capacity_routes as cr
+    from gmlx.serve.capacity import LoadDeferred
+    import gmlx.serve.patches.capacity_routes as cr
 
     pool, app_mod, _threads = install_with_fakes(monkeypatch, budget_bytes=GB)
     getter = app_mod.get_cached_model
@@ -522,8 +523,8 @@ def test_evict_and_clear_can_discount_retained_holds():
     process-lifetime hold (retained) is discounted, a second acquire is
     not, and a refused eviction leaves the entry (and so the hold) in
     place - ``entry_resident`` is how the route tells the two apart."""
-    from gmlx import residency
-    from gmlx.residency import ModelBusyError
+    import gmlx.serve.residency as residency
+    from gmlx.serve.residency import ModelBusyError
 
     _proxy, pool, _env, teardowns = make_pool()
     entry = _acq(pool, "/abs/a.gguf")
@@ -551,8 +552,8 @@ def test_profile_label_is_stable_across_acquires_and_unique_per_entry():
     new Prometheus series on every scrape. ``profile`` is fixed for the
     entry's lifetime and still distinguishes two entries on one GGUF."""
     import importlib
-    from gmlx.server_patches import capacity_routes as cr
-    from gmlx.server_patches import routes as sp_routes
+    from gmlx.serve.patches import capacity_routes as cr
+    from gmlx.serve.patches import routes as sp_routes
 
     _proxy, pool, _env, _td = make_pool()
     pkg = importlib.import_module("mlx_vlm.server")

@@ -10,7 +10,7 @@ shape error at MoE prefill). This module makes the contract explicit:
 - ``SEAMS`` declares each (module, attr) we touch, why, and whether a missing
   seam must abort install (``critical``) or only costs an acceleration.
 - ``upstream_seams.json`` pins a source fingerprint for each seam, captured
-  at the qualified upstream versions. ``tests/test_upstream_seams.py`` fails
+  at the qualified upstream versions. ``tests/upstream/test_upstream_seams.py`` fails
   with the symbol's name when upstream drifts under the pin.
 - ``check_upstream_versions()`` is the runtime gate: below-floor upstream
   versions raise with an actionable message (stale venvs resolve pyproject
@@ -18,7 +18,7 @@ shape error at MoE prefill). This module makes the contract explicit:
   newer than the qualified set warn once.
 
 On a deliberate upstream bump: re-audit the drifted seams, then
-``python -m gmlx.upstream_seams --regen`` (see docs/upstream-upgrades.md).
+``python -m gmlx.upstream.seams --regen`` (see docs/upstream-upgrades.md).
 """
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ import re
 import sys
 from dataclasses import dataclass
 
-_JSON_PATH = os.path.join(os.path.dirname(__file__), "upstream_seams.json")
+_JSON_PATH = os.path.join(os.path.dirname(__file__), "seams.json")
 
 # Hard floors: below these, core wiring (switch_layers geometry, cache
 # protocol, server engine) predates what gmlx targets; refuse to run.
@@ -331,7 +331,7 @@ SEAMS: tuple[Seam, ...] = (
          critical=True, attr_optional=True),
     Seam("mlx_vlm.generate", "maybe_quantize_kv_cache",
          "apc_pooling (rotating-safe KV-quant replacement)", critical=True),
-    # --- cache classes (dual-origin via gmlx.cache_compat; on <= 0.6.3
+    # --- cache classes (dual-origin via gmlx.cache.compat; on <= 0.6.3
     # the vlm module re-exports mlx-lm's classes, so these fingerprint the
     # same source) ---
     Seam("mlx_vlm.models.cache", "KVCache",
@@ -515,7 +515,7 @@ def check_seams() -> list[str]:
         if want == "<unpinned>":
             problems.append(
                 f"{_key(seam)}: no pinned fingerprint - run "
-                f"`python -m gmlx.upstream_seams --regen`")
+                f"`python -m gmlx.upstream.seams --regen`")
         elif got != want:
             problems.append(
                 f"{_key(seam)}: source changed under the pin - re-audit "
@@ -531,7 +531,7 @@ def vendored_upstream_collisions() -> list[str]:
     mlx_lm.models namespace, so an upstream module of the same name would be
     silently shadowed; flag it so the vendored copy gets reconciled/dropped.
     """
-    from .arch_table import _VENDORED_MLX_LM_MODULES
+    from gmlx.load.arch_table import _VENDORED_MLX_LM_MODULES
     import mlx_lm.models as lm_models
     root = os.path.dirname(lm_models.__file__)
     hits = []
@@ -551,11 +551,11 @@ def vendored_upstream_collisions() -> list[str]:
 # a <leaf>.py module or a <leaf>/ package.
 VENDORED_MLX_VLM_MODULES = {
     # muse_glimmer model: shipped upstream in mlx-vlm 0.6.15; the graft is
-    # upstream-first so gmlx.muse_glimmer_vlm_model is dead code under this
+    # upstream-first so gmlx.models.muse_glimmer.vlm_model is dead code under this
     # pin. Delete the module at the vendoring review.
-    "gmlx.hy_v3_tools": "mlx_vlm.tool_parsers.hy_v3",
-    "gmlx.muse_glimmer_tools": "mlx_vlm.tool_parsers.muse_glimmer",
-    "gmlx.qwen4_exp_vlm_model": "mlx_vlm.models.qwen4_exp",
+    "gmlx.models.hy_v3.tools": "mlx_vlm.tool_parsers.hy_v3",
+    "gmlx.models.muse_glimmer.tools": "mlx_vlm.tool_parsers.muse_glimmer",
+    "gmlx.models.qwen4_exp.vlm_model": "mlx_vlm.models.qwen4_exp",
 }
 
 

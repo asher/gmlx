@@ -17,14 +17,14 @@ pytest.importorskip("mlx_vlm")
 
 from fastapi import Request  # noqa: E402
 
-from gmlx import server_patches as sp  # noqa: E402
-from gmlx.server_patches import _common as sp_common  # noqa: E402
-from gmlx.server_patches import api_contract as sp_api  # noqa: E402
+import gmlx.serve.patches as sp  # noqa: E402
+from gmlx.serve.patches import _common as sp_common  # noqa: E402
+from gmlx.serve.patches import api_contract as sp_api  # noqa: E402
 
 _APP = importlib.import_module("mlx_vlm.server.app")
 _SCHEMAS = importlib.import_module("mlx_vlm.server.schemas")
 
-_DOCS = Path(__file__).resolve().parents[1] / "docs" / "server-config.md"
+_DOCS = Path(__file__).resolve().parents[2] / "docs" / "server-config.md"
 
 
 @pytest.fixture(autouse=True)
@@ -39,7 +39,7 @@ def _restore_routes():
 # know about (which would make the warning fire on a field that actually
 # works, or stay silent on one that doesn't). To update: re-read what the
 # handler / _build_gen_args / gmlx patches read off the request, adjust the
-# sets in gmlx/server_patches/api_contract.py, the docs/server-config.md
+# sets in gmlx/serve/patches/api_contract.py, the docs/server-config.md
 # "Parameter support" table, and the hand lists below - together.
 
 def _scrape_request_reads(*funcs) -> set:
@@ -162,7 +162,7 @@ def _capture_warnings():
     records = []
     handler = logging.Handler()
     handler.emit = lambda r: records.append(r.getMessage())
-    logger = logging.getLogger("gmlx.server_patches.api_contract")
+    logger = logging.getLogger("gmlx.serve.patches.api_contract")
     logger.addHandler(handler)
     logger.setLevel(logging.WARNING)
     return records, handler, logger

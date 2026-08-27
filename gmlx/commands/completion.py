@@ -138,11 +138,11 @@ def _named_value_candidates(flag: str) -> list[str]:
     (themes, sampling profiles)."""
     try:
         if flag == "--theme":
-            from .theme import list_themes
+            from gmlx.tui.theme import list_themes
 
             return [f"{t}\tcolor theme" for t in list_themes()]
         if flag == "--profile":
-            from .profiles import builtin_intents
+            from gmlx.gen.profiles import builtin_intents
 
             return [f"{i}\tbuilt-in intent" for i in sorted(builtin_intents())]
     except Exception:  # noqa: BLE001 - value candidates are best-effort
@@ -172,7 +172,7 @@ def _config_path_from(words: list[str]) -> str | None:
             return words[i + 1]
         if w.startswith("--config="):
             return w.split("=", 1)[1]
-    from . import config as cfgmod
+    import gmlx.config as cfgmod
 
     return next((str(p) for p in cfgmod.default_config_paths() if p.exists()), None)
 
@@ -183,7 +183,7 @@ def _model_candidates(words: list[str]) -> list[str]:
     path = _config_path_from(words)
     if not path or not os.path.exists(os.path.expanduser(path)):
         return []
-    from . import config as cfgmod
+    import gmlx.config as cfgmod
 
     try:
         cfg = cfgmod.load_config(os.path.expanduser(path))
@@ -211,7 +211,7 @@ def _harness_candidates() -> list[str]:
 def _running_servers() -> list[dict]:
     """Runfile dicts for backgrounded servers (newest first), or ``[]``."""
     try:
-        from . import lifecycle
+        import gmlx.serve.lifecycle as lifecycle
 
         return list(reversed(lifecycle.list_runs()))
     except Exception:  # noqa: BLE001 - a missing/odd state dir just yields nothing

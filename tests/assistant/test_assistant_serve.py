@@ -16,11 +16,11 @@ pytest.importorskip("mlx_vlm")
 from fastapi import Request as _Request  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from gmlx import assistant_serve as aserve  # noqa: E402
-from gmlx import server_patches as sp  # noqa: E402
-from gmlx.server_patches import _common as sp_common  # noqa: E402
-from gmlx import talk_mcp  # noqa: E402
-from gmlx.assistant_brain import Tool, ToolRegistry  # noqa: E402
+import gmlx.assistant.serve as aserve  # noqa: E402
+import gmlx.serve.patches as sp  # noqa: E402
+from gmlx.serve.patches import _common as sp_common  # noqa: E402
+import gmlx.assistant.mcp as talk_mcp  # noqa: E402
+from gmlx.assistant.brain import Tool, ToolRegistry  # noqa: E402
 from gmlx.config import build_config  # noqa: E402
 
 _APP = importlib.import_module("mlx_vlm.server.app")
@@ -29,7 +29,7 @@ _SCHEMAS = importlib.import_module("mlx_vlm.server.schemas")
 
 @pytest.fixture(autouse=True)
 def _restore_routes():
-    from gmlx.server_patches import _common as sp_common
+    from gmlx.serve.patches import _common as sp_common
     saved = sp_common._snapshot_routes(_APP.app)
     yield
     sp_common._restore_routes(_APP.app, saved)
@@ -283,7 +283,7 @@ def test_default_max_tokens_when_unset(monkeypatch):
 
 def test_upstream_error_is_502(monkeypatch):
     def broken(base_url, **kw):
-        from gmlx.talk_client import TalkClientError
+        from gmlx.talk.client import TalkClientError
         raise TalkClientError("chat failed: HTTP 500")
         yield  # pragma: no cover
 
@@ -381,7 +381,7 @@ def test_stream_tool_status_is_comment_line(monkeypatch):
 
 def test_stream_upstream_error_in_band(monkeypatch):
     def broken(base_url, **kw):
-        from gmlx.talk_client import TalkClientError
+        from gmlx.talk.client import TalkClientError
         raise TalkClientError("boom")
         yield  # pragma: no cover
 
@@ -491,7 +491,7 @@ def test_memory_default_off_and_per_alias_store(monkeypatch, tmp_path):
         def __init__(self, **kw):
             created.append(kw)
 
-    import gmlx.talk_memory as tm
+    import gmlx.assistant.memory as tm
     monkeypatch.setattr(tm, "MemoryStore", FakeStore)
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
     monkeypatch.setattr(

@@ -28,7 +28,7 @@ from pathlib import Path
 
 from mlx_vlm import apc as _apc
 
-from .envflags import env_int
+from gmlx.envflags import env_int
 
 _log = logging.getLogger(__name__)
 
@@ -95,9 +95,9 @@ class GmlxAPCManager(_apc.APCManager):
             budget_fraction = _POOL_BUDGET_FRACTION
         import mlx.core as mx
 
-        from .capacity import working_budget_bytes
-        from .mem_preflight import kv_layer_costs
-        from .prefill_decay import untracked_weight_bytes
+        from gmlx.serve.capacity import working_budget_bytes
+        from gmlx.serve.mem_preflight import kv_layer_costs
+        from gmlx.gen.prefill_decay import untracked_weight_bytes
 
         costs = kv_layer_costs(model)
         budget = working_budget_bytes()
@@ -145,7 +145,7 @@ class GmlxAPCManager(_apc.APCManager):
         budget = getattr(self, "_exact_budget_bytes", None)
         if not budget:
             return
-        from .serve_memtrace import _arrays, _leaf_caches
+        from gmlx.serve.memtrace import _arrays, _leaf_caches
 
         def entry_bytes(e):
             # _leaf_caches unwraps CacheList layers (deepseek_v4 wraps
@@ -181,7 +181,7 @@ class GmlxAPCManager(_apc.APCManager):
         """Stock snapshot plus the gmlx ckpt-tier side counters (pure
         wrap: super() + merge). Visible at /v1/cache/stats -- a ckpt
         model with zeroed ckpt_* keys is broken, not idle."""
-        from .cache_snapshot import ckpt_stats_snapshot
+        from .snapshot import ckpt_stats_snapshot
         from .prefix_cache import spec_prefix_stats
         snap = super().stats_snapshot()
         snap.update(ckpt_stats_snapshot(self))
@@ -196,7 +196,7 @@ class GmlxAPCManager(_apc.APCManager):
         return snap
 
     def reset_stats(self) -> None:
-        from .cache_snapshot import ckpt_stats_clear
+        from .snapshot import ckpt_stats_clear
         from .prefix_cache import spec_prefix_stats_clear
         super().reset_stats()
         ckpt_stats_clear(self)
@@ -208,7 +208,7 @@ class GmlxAPCManager(_apc.APCManager):
         must not survive it. One lock span (RLock) so a concurrent
         lookup can never pin a record between the pool wipe and the
         record drop."""
-        from .cache_snapshot import ckpt_reset
+        from .snapshot import ckpt_reset
         from .prefix_cache import clear_all_spec_prefix_caches
         with self.lock:
             super().clear()
@@ -248,7 +248,7 @@ class GmlxAPCManager(_apc.APCManager):
         # Ckpt records first: releasing them unpins their blocks, so the
         # pool eviction below can reclaim those in the same pass. Without
         # this the pinned share is invisible to red-band reclaim.
-        from .cache_snapshot import ckpt_governor_release
+        from .snapshot import ckpt_governor_release
         freed += ckpt_governor_release(self, fraction)
         with self.lock:
             n = len(self._exact_cache)
@@ -321,8 +321,8 @@ class GmlxAPCManager(_apc.APCManager):
         as one uninterrupted call between governed ticks (~30 s for an
         80k-token row), so it checks the floor itself per block and
         stops storing rather than wiring the box past it."""
-        from .governor import armed_kernel_floor_bytes
-        from .kernel_vm import reclaimable_bytes
+        from gmlx.serve.governor import armed_kernel_floor_bytes
+        from gmlx.serve.kernel_vm import reclaimable_bytes
 
         floor = armed_kernel_floor_bytes()
         if floor <= 0:
@@ -518,7 +518,7 @@ class GmlxAPCManager(_apc.APCManager):
                     # copies leave these lazy). Owned survivors: the slices
                     # are the live generation's KV, retained by the prompt
                     # cache; the guard drains before this handler continues.
-                    from .eval_guard import guard
+                    from gmlx.eval_guard import guard
                     guard.eval(*(list(layer_keys) + list(layer_values)),
                                site="apc-disk-save", owner="owned")
                     self.disk.save_layer_major_blocks(
@@ -554,8 +554,8 @@ def _auto_block_size(model_path):
     if not model_path:
         return None
     try:
-        from .capacity import working_budget_bytes
-        from .tool_preflight import _kv_costs, _shards, _synth_config
+        from gmlx.serve.capacity import working_budget_bytes
+        from gmlx.commands.tool_preflight import _kv_costs, _shards, _synth_config
 
         shards = _shards(str(model_path))
         cfg = _synth_config(shards[0])

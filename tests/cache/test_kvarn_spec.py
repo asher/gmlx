@@ -17,8 +17,8 @@ from mlx_vlm.generate import ar  # noqa: E402
 from mlx_vlm.server import generation as gen  # noqa: E402
 from mlx_vlm.speculative import utils as su  # noqa: E402
 
-from gmlx import spec_engine  # noqa: E402
-from gmlx.kvarn_cache import KVarNKVCache  # noqa: E402
+import gmlx.spec.engine as spec_engine  # noqa: E402
+from gmlx.cache.kvarn_cache import KVarNKVCache  # noqa: E402
 
 _NEEDS_GPU = pytest.mark.skipif(
     mx.default_device() != mx.gpu,
@@ -223,7 +223,7 @@ def test_reads_kv_back_detection():
 
 
 def test_shared_kv_readback_guard():
-    from gmlx.spec_helpers import _mtp_shared_kv_from_prompt_cache
+    from gmlx.spec.helpers import _mtp_shared_kv_from_prompt_cache
 
     class _Layer:
         layer_type = "full_attention"
@@ -242,7 +242,7 @@ def test_shared_kv_readback_guard():
 
 
 def test_mtp_run_flags_keep_kvarn():
-    from gmlx.cli import mtp_dropped_run_flags
+    from gmlx.commands.cli import mtp_dropped_run_flags
 
     ns = argparse.Namespace(
         stop=None,
@@ -263,7 +263,7 @@ def test_mtp_run_flags_keep_kvarn():
 
 
 def test_mtp_setup_declines_shared_kv_drafter(_ops_ok, capsys):
-    from gmlx.generation import setup_kvarn_mtp_cache
+    from gmlx.gen.generation import setup_kvarn_mtp_cache
 
     class _SharedDrafter:
         pass  # no uses_shared_kv attr: conservative default True
@@ -274,7 +274,7 @@ def test_mtp_setup_declines_shared_kv_drafter(_ops_ok, capsys):
 
 @_NEEDS_GPU
 def test_mtp_setup_builds_and_warns_wide_block(_ops_ok, capsys):
-    from gmlx.generation import setup_kvarn_mtp_cache
+    from gmlx.gen.generation import setup_kvarn_mtp_cache
 
     pc = setup_kvarn_mtp_cache(_FakeLM(), _Drafter(), None, 1024, 6)
     assert pc is not None
@@ -289,7 +289,7 @@ def test_mtp_setup_builds_and_warns_wide_block(_ops_ok, capsys):
 
 @_NEEDS_GPU
 def test_hy3_rollback_with_kvarn_leaves():
-    from gmlx.hy_v3_mtp import HyV3SpecLM
+    from gmlx.models.hy_v3.mtp import HyV3SpecLM
 
     caches = [_filled(130, seed=s) for s in (0, 1)]
     HyV3SpecLM.rollback_speculative_cache(None, caches, None, 1, 4)
@@ -298,7 +298,7 @@ def test_hy3_rollback_with_kvarn_leaves():
 
 @_NEEDS_GPU
 def test_hy3_rollback_consults_probe_before_mutating():
-    from gmlx.hy_v3_mtp import HyV3SpecLM
+    from gmlx.models.hy_v3.mtp import HyV3SpecLM
 
     class _ProbeStuck:
         def is_trimmable(self):
@@ -331,7 +331,7 @@ class _Refuser:
 
 
 def test_rollback_guard_pre_checks_trim():
-    from gmlx.generation import harden_mtp_rollback
+    from gmlx.gen.generation import harden_mtp_rollback
 
     calls = []
 
@@ -358,7 +358,7 @@ def test_rollback_guard_pre_checks_trim():
 
 @_NEEDS_GPU
 def test_rollback_guard_installed_by_mtp_setup(_ops_ok):
-    from gmlx.generation import setup_kvarn_mtp_cache
+    from gmlx.gen.generation import setup_kvarn_mtp_cache
 
     class _RollbackLM(_FakeLM):
         def rollback_speculative_cache(self, caches, gdn_states, accepted, block_size):

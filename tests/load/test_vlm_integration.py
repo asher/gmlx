@@ -29,13 +29,13 @@ _NEEDS_GPU = pytest.mark.skipif(
     bool(os.environ.get("KQUANT_FORCE_CPU")),
     reason="real-weights VLM forward is a GPU workload")
 
-CATS = Path(__file__).parent / "e2e" / "assets" / "cats.jpg"
-SPEECH = Path(__file__).parent / "e2e" / "assets" / "speech.wav"
+CATS = Path(__file__).parents[1] / "e2e" / "assets" / "cats.jpg"
+SPEECH = Path(__file__).parents[1] / "e2e" / "assets" / "speech.wav"
 
 
 def _paired_models(gguf_dir):
     from gmlx.config import DiscoverSpec
-    from gmlx.discovery import scan_dirs
+    from gmlx.load.discovery import scan_dirs
 
     spec = DiscoverSpec(
         dir=None, recursive=True, pair_mmproj=True, speculative="auto"
@@ -44,7 +44,7 @@ def _paired_models(gguf_dir):
 
 
 def _mmproj_has_audio(mmproj_path: str) -> bool:
-    from gmlx.headerscan import scan_gguf
+    from gmlx.load.headerscan import scan_gguf
 
     kv = scan_gguf(mmproj_path, include_tensors=False).kv
     return bool(kv.get("clip.has_audio_encoder")) or any(
@@ -96,8 +96,8 @@ def test_vlm_image_turn(vlm_pair):
         pytest.skip(f"bundled test image missing: {CATS}")
     import mlx.core as mx
 
-    from gmlx.chat import _vlm_message
-    from gmlx.vlm import load_vlm_model
+    from gmlx.tui.chat import _vlm_message
+    from gmlx.load.vlm import load_vlm_model
 
     model, config, processor = load_vlm_model(
         vlm_pair.path, vlm_pair.mmproj, return_tokenizer=False
@@ -142,8 +142,8 @@ def test_vlm_audio_turn(audio_pair):
         pytest.skip(f"bundled test clip missing: {SPEECH}")
     import mlx.core as mx
 
-    from gmlx.chat import _vlm_message
-    from gmlx.vlm import load_vlm_model
+    from gmlx.tui.chat import _vlm_message
+    from gmlx.load.vlm import load_vlm_model
 
     model, config, processor = load_vlm_model(
         audio_pair.path, audio_pair.mmproj, return_tokenizer=False

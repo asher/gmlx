@@ -85,7 +85,7 @@ ARCH_ALIAS = {
     # low-rank output proj (wq_a/wkv/wo_a/wo_b under `attn.*`), per-layer
     # compressor + lightning-indexer tensors, hyper-connection params (raw
     # arrays, no .weight), MoE under `ffn.*` with hash-router tid2eid tables.
-    # Complete override block; targets follow gmlx.deepseek_v4_model
+    # Complete override block; targets follow gmlx.models.deepseek_v4.model
     # (vendored mlx-lm PR #1192). NEOX-style tail rope on q/kv after the
     # low-rank projections => everything passes through un-permuted.
     "deepseek4": "DEEPSEEK4",
@@ -95,7 +95,7 @@ ARCH_ALIAS = {
     # routed_up around the experts), and an MLA sigmoid output gate. The MLA
     # rows mirror DEEPSEEK2 (same absorbed k_b/v_b layout -> embed_q/
     # unembed_out); everything else is K3-only, so it gets a complete override
-    # block. Targets follow gmlx.kimi_k3_model. ssm_a stays the folded
+    # block. Targets follow gmlx.models.kimi_k3. ssm_a stays the folded
     # -exp(A_log) (a_folded) and must NOT go through ssm_a_to_a_log.
     "kimi-k3": "KIMI_K3",
     "glm4moe": "GLM4MOE",
@@ -1325,7 +1325,7 @@ ARCH_PRIORITY_OVERRIDES: dict[str, list[tuple[re.Pattern, str | None, str]]] = {
         # rope-free (nope-only MLA), so there's no Q/K permute anywhere.
         #
         # MLA attention (absorbed layout, as DEEPSEEK2; targets follow
-        # mlx_lm.models.deepseek_v3 naming in gmlx.kimi_k3_model).
+        # mlx_lm.models.deepseek_v3 naming in gmlx.models.kimi_k3).
         (re.compile(r"^blk\.(\d+)\.attn_q_a\.weight$"),
          "model.layers.{bid}.self_attn.q_a_proj.weight", "passthrough"),
         (re.compile(r"^blk\.(\d+)\.attn_q_a_norm\.weight$"),
@@ -1444,7 +1444,7 @@ ARCH_PRIORITY_OVERRIDES: dict[str, list[tuple[re.Pattern, str | None, str]]] = {
         # Complete override block - none of the MLA-lite / compressor /
         # hyper-connection names exist in the canonical map, and the ones that
         # do (attn_norm, ffn_norm, ffn_gate_inp, exp_probs_b) target different
-        # module paths in the vendored gmlx.deepseek_v4_model (block attrs
+        # module paths in the vendored gmlx.models.deepseek_v4.model (block attrs
         # `attn_norm`/`ffn_norm`, MoE under `ffn.gate`). All passthrough: no
         # gemma unbake, and the NEOX-style tail rope is applied to q/kv after
         # the low-rank projections, so there's no llama Q/K permute to undo.

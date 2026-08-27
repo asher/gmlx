@@ -331,7 +331,7 @@ class StatusLine:
     ``write`` is injectable for tests."""
 
     def __init__(self, write=None, color: bool | None = None):
-        from .reasoning import want_color
+        from gmlx.tui.reasoning import want_color
         self._write = write or (lambda s: (sys.stdout.write(s),
                                            sys.stdout.flush()))
         self.color = want_color() if color is None else color
@@ -381,7 +381,7 @@ class TalkLoop:
                  transcribe=None, synthesize=None,
                  wake_threshold: float = 0.3, make_wake=None,
                  on_display=None):
-        from . import talk_client
+        from . import client as talk_client
         self.on_display = on_display  # headless sink; None -> terminal TUI
         self.m = machine
         self.backend = backend
@@ -430,7 +430,7 @@ class TalkLoop:
                 pass
 
     def _listener(self) -> None:
-        from .talk_audio import rms_dbfs
+        from .audio import rms_dbfs
         try:
             while not self.done.is_set():
                 try:
@@ -475,9 +475,8 @@ class TalkLoop:
         t.start()
 
     def _run_turn(self, source, cancel) -> None:
-        from .talk_audio import RATE
-        from .talk_client import (SentenceChunker, TalkClientError,
-                                  encode_wav)
+        from .audio import RATE
+        from .client import SentenceChunker, TalkClientError, encode_wav
         if isinstance(source, str):
             text = source
         else:
@@ -541,7 +540,7 @@ class TalkLoop:
         self.events.put(("turn_done", None))
 
     def _tts_worker(self) -> None:
-        from .talk_client import TalkClientError
+        from .client import TalkClientError
         carry = _NO_ITEM
         while not self.done.is_set():
             if carry is not _NO_ITEM:
@@ -608,7 +607,7 @@ class TalkLoop:
     def _chime(self, kind: str) -> None:
         if not self.chime:
             return
-        from .talk_audio import earcon
+        from .audio import earcon
         pcm, rate = earcon(kind)
         self.play_q.put((None, None, pcm, rate))
 
@@ -713,7 +712,7 @@ class TalkLoop:
         if self.m.mode == "text":
             return
         if self.vad is None:
-            from .talk_audio import make_vad
+            from .audio import make_vad
             self.vad = make_vad()
         if not self._input_started:
             self.backend.start_input(self.on_frame)
@@ -834,7 +833,7 @@ class TalkLoop:
         return None
 
     def _slash(self, line: str) -> str | None:
-        from .talk_client import list_voices
+        from .client import list_voices
         parts = line.split(None, 1)
         cmd, arg = parts[0].lower(), (parts[1].strip() if len(parts) > 1
                                       else "")
@@ -880,7 +879,7 @@ class TalkLoop:
             else:
                 factory = self._make_wake
                 if factory is None:
-                    from .talk_audio import make_wake_detector as factory
+                    from .audio import make_wake_detector as factory
                 detector, hint = factory(arg, threshold=self.wake_threshold)
                 if detector is None:              # keep the old detector
                     self._print(f"[talk] {hint}")
@@ -1035,10 +1034,10 @@ def _build_parser(prog: str) -> argparse.ArgumentParser:
 def _load_talk_cfg(config_path: str | None):
     """(TalkCfg, why) from --config, else the first default-location config,
     else built-in defaults."""
-    from . import config as cfgmod
+    import gmlx.config as cfgmod
     if config_path:
         return cfgmod.load_config(config_path).talk
-    from .launch import _discover_config
+    from gmlx.commands.launch import _discover_config
     cfg, _path = _discover_config()
     return cfg.talk if cfg is not None else cfgmod.TalkCfg()
 
@@ -1090,7 +1089,7 @@ def _capability_guidance(caps: dict, *, needs_stt: bool, explicit_url: bool,
                if need and not caps.get(name)]
     if not missing:
         return True
-    from .extras import install_hint
+    from gmlx.commands.extras import install_hint
     what = " + ".join(missing)
     print(f"[talk] the server is up but has no {what} service enabled",
           file=out)
@@ -1124,9 +1123,14 @@ def build_talk_loop(s: dict, *, base_url: str, api_key: str | None,
     Fatal problems raise :class:`TalkSetupError`; non-fatal degradations
     (missing wake engine, energy-gate VAD, MCP servers down) go to ``warn``."""
     warn = warn or (lambda m: print(f"[talk] {m}", file=sys.stderr))
-    from .talk_audio import (Endpointer, SoundDeviceBackend, TalkAudioError,
-                             make_vad, make_wake_detector)
-    from .talk_client import ServerChatBrain
+    from .audio import (
+        Endpointer,
+        SoundDeviceBackend,
+        TalkAudioError,
+        make_vad,
+        make_wake_detector,
+    )
+    from .client import ServerChatBrain
     try:
         backend = SoundDeviceBackend(s["input_device"], s["output_device"])
     except (ImportError, TalkAudioError) as e:
@@ -1152,8 +1156,8 @@ def build_talk_loop(s: dict, *, base_url: str, api_key: str | None,
 
     mcp_host = None
     if s["brain"] == "assistant":
-        from .assistant_brain import AssistantBrain
-        from .talk_mcp import connect_servers
+        from gmlx.assistant.brain import AssistantBrain
+        from gmlx.assistant.mcp import connect_servers
         a = s["assistant"]
         mcp_host, registry, mcp_warnings = connect_servers(
             a.mcp, call_timeout_s=a.tool_timeout_s)
@@ -1164,7 +1168,7 @@ def build_talk_loop(s: dict, *, base_url: str, api_key: str | None,
                  f"{', '.join(registry.names()) or '(none connected)'}")
         memory = None
         if a.memory.enabled:
-            from .talk_memory import MemoryStore, make_extractor
+            from gmlx.assistant.memory import MemoryStore, make_extractor
             extractor = (make_extractor(base_url, model, api_key=api_key)
                          if a.memory.extract else None)
             memory = MemoryStore(base_url=base_url, api_key=api_key,
@@ -1197,7 +1201,7 @@ def build_talk_loop(s: dict, *, base_url: str, api_key: str | None,
     # Hold the model resident (and warm it) for the session's lifetime: a
     # live mic with no model loaded is not a real mode of operation. Off the
     # startup path - a slow load must not delay the mic coming up.
-    from .talk_client import keep_model
+    from .client import keep_model
     threading.Thread(target=keep_model, args=(base_url, model),
                      kwargs={"api_key": api_key}, daemon=True,
                      name="talk-keep").start()
@@ -1216,7 +1220,7 @@ def cmd_talk(argv: list | None = None, prog: str = "gmlx talk") -> int:
     args = _build_parser(prog).parse_args(
         sys.argv[1:] if argv is None else list(argv))
 
-    from .talk_audio import TalkAudioError
+    from .audio import TalkAudioError
     try:
         talk_cfg = _load_talk_cfg(args.config)
     except Exception as e:                      # ConfigError etc.
@@ -1225,7 +1229,7 @@ def cmd_talk(argv: list | None = None, prog: str = "gmlx talk") -> int:
     s = _merged_settings(args, talk_cfg)
 
     if args.list_devices:
-        from .talk_audio import SoundDeviceBackend
+        from .audio import SoundDeviceBackend
         try:
             print(SoundDeviceBackend().describe_devices())
         except (ImportError, TalkAudioError) as e:
@@ -1234,7 +1238,7 @@ def cmd_talk(argv: list | None = None, prog: str = "gmlx talk") -> int:
         return 0
 
     # Server: reuse launch's start-if-down machinery wholesale.
-    from . import launch as launch_mod
+    import gmlx.commands.launch as launch_mod
     ns = argparse.Namespace(
         harness=None, rerun_label="talk", base_url=args.base_url,
         host=args.host, port=args.port, api_key=args.api_key,
@@ -1245,8 +1249,7 @@ def cmd_talk(argv: list | None = None, prog: str = "gmlx talk") -> int:
         return rc
     base_url, api_key = ns.base_url, ns.api_key
 
-    from .talk_client import (TalkClientError, list_voices,
-                              probe_capabilities)
+    from .client import TalkClientError, list_voices, probe_capabilities
     try:
         caps = probe_capabilities(base_url, api_key)
     except TalkClientError as e:

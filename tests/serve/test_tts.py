@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Text-to-speech core (``gmlx.tts``): alias resolution, the request-model
+"""Text-to-speech core (``gmlx.serve.tts``): alias resolution, the request-model
 policy, audio encoding, the synthesis driver with a stubbed mlx-audio, and the
 background pre-warm. Pure CPU - mlx-audio itself is never imported (the import
 is forced-missing where the gate is under test), no model is loaded."""
@@ -12,7 +12,7 @@ import types
 import numpy as np
 import pytest
 
-from gmlx import tts  # noqa: E402
+import gmlx.serve.tts as tts  # noqa: E402
 from gmlx.config import build_config  # noqa: E402
 
 KOKORO = "mlx-community/Kokoro-82M-bf16"

@@ -5,7 +5,7 @@
 mlx-vlm has no muse_glimmer package, so this module supplies the vision half of
 the pair: a 50-layer ViT, the pixel-shuffle downsample, and the adapter MLP that
 lands in the text tower's residual width. The text half is the same vendored
-class the text-only path uses (:mod:`gmlx.muse_glimmer_model`), wrapped here in
+class the text-only path uses (:mod:`gmlx.models.muse_glimmer.model`), wrapped here in
 the ``language_model`` shape mlx-vlm's generate stack expects.
 
 The tower is ported from llama.cpp's ``clip_graph_muse_glimmer::build`` plus the
@@ -41,8 +41,8 @@ from mlx_vlm.models.base import BaseModelConfig, InputEmbeddingsFeatures, Langua
 from mlx_vlm.models.cache import KVCache, RotatingKVCache
 from mlx_vlm.models.interpolate import bilinear_interpolate
 
-from .muse_glimmer_model import MuseGlimmerModel
-from .muse_glimmer_mtp import SpecHooks, _SpecOutput
+from .model import MuseGlimmerModel
+from .mtp import SpecHooks, _SpecOutput
 
 
 def ensure_registered() -> None:

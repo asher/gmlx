@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 
-from gmlx import manage
+import gmlx.commands.manage as manage
 
 
 def _cfg(tmp_path, body: str) -> str:

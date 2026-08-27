@@ -8,7 +8,7 @@ import pytest
 
 import mlx.core as mx
 
-from gmlx.kvarn_cache import GROUP, KVarNKVCache, KVarNView, convert_prompt_cache
+from gmlx.cache.kvarn_cache import GROUP, KVarNKVCache, KVarNView, convert_prompt_cache
 
 _NEEDS_GPU = pytest.mark.skipif(
     mx.default_device() != mx.gpu,
@@ -179,7 +179,7 @@ def test_layout_version_fail_closed():
 def test_save_load_prompt_cache_file(tmp_path):
     from mlx_lm.models.cache import load_prompt_cache, save_prompt_cache
 
-    from gmlx.kvarn_cache import ensure_registered
+    from gmlx.cache.kvarn_cache import ensure_registered
 
     ensure_registered()
     ref = _filled(300)

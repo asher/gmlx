@@ -17,9 +17,9 @@ import mlx.nn as nn
 import mlx_kquant as kq
 import pytest
 
-from gmlx import dtypes
-from gmlx.cli import add_load_args
-from gmlx.modules import install_kquant_modules
+import gmlx.load.dtypes as dtypes
+from gmlx.commands.cli import add_load_args
+from gmlx.load.modules import install_kquant_modules
 
 
 @pytest.fixture(autouse=True)

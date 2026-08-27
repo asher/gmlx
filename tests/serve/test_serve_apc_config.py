@@ -7,7 +7,7 @@ import types
 
 import mlx.nn as nn
 
-from gmlx.server_bridge_vlm import _AttrDict, _ensure_inner_config
+from gmlx.serve.bridge_vlm import _AttrDict, _ensure_inner_config
 
 
 def test_attaches_config_to_nn_module_inner_lm():

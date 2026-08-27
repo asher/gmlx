@@ -29,8 +29,8 @@ _NEEDS_GPU = pytest.mark.skipif(
 
 def _qwen_mtp_pair(gguf_dir):
     from gmlx.config import DiscoverSpec
-    from gmlx.discovery import scan_dirs
-    from gmlx.headerscan import scan_gguf
+    from gmlx.load.discovery import scan_dirs
+    from gmlx.load.headerscan import scan_gguf
 
     spec = DiscoverSpec(
         dir=None, recursive=True, pair_mmproj=True, speculative="auto"
@@ -53,9 +53,9 @@ def vlm_mtp_load(gguf_dir):
     tests in the same run see clean globals."""
     from mlx_vlm.models.qwen3_5 import language as _L
 
-    from gmlx import gdn_patches as gp
-    from gmlx import qwen35_verify_fold
-    from gmlx.mtp_load import load_vlm_mtp_model
+    import gmlx.upstream.gdn_patches as gp
+    import gmlx.models.qwen35.verify_fold as qwen35_verify_fold
+    from gmlx.spec.mtp_load import load_vlm_mtp_model
 
     pair = _qwen_mtp_pair(gguf_dir)
     saved = {
@@ -98,7 +98,8 @@ def test_vlm_mtp_target_is_stock_with_full_patch_regime(vlm_mtp_load):
     from mlx_lm.models import gated_delta as gd
     from mlx_vlm.models.qwen3_5 import language as _L
 
-    from gmlx import qwen35_attn, qwen35_owned
+    import gmlx.models.qwen35.attn as qwen35_attn
+    import gmlx.models.qwen35.owned as qwen35_owned
 
     model, drafter, _tok = vlm_mtp_load
     lm = model.language_model
@@ -125,13 +126,13 @@ def test_vlm_mtp_target_is_stock_with_full_patch_regime(vlm_mtp_load):
         "gmlx"
     )
     assert _L.scaled_dot_product_attention.__module__ == (
-        "gmlx.qwen35_verify_fold"
+        "gmlx.models.qwen35.verify_fold"
     )
     assert (
         _L._qwen3_5_ragged_decode_attention
         is qwen35_attn.ragged_decode_attention
     )
-    assert _L.Qwen3_5GatedDeltaNet.__call__.__module__ == "gmlx.gdn_patches"
+    assert _L.Qwen3_5GatedDeltaNet.__call__.__module__ == "gmlx.upstream.gdn_patches"
 
     assert drafter is not None
 

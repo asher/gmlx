@@ -169,7 +169,7 @@ def _summary_line(name: str, elapsed: float, collected: dict) -> str:
         parts.append(arch)
     size = collected.get("size_bytes")
     if size:
-        from .lifecycle import human_gb
+        from gmlx.serve.lifecycle import human_gb
 
         parts.append(human_gb(size))
     codecs = collected.get("codecs")
@@ -264,7 +264,7 @@ def load_ui(verbose: bool, path: str):
     if verbose:
         yield
         return
-    from .spinner import Spinner
+    from gmlx.spinner import Spinner
 
     name = os.path.basename(path)
     base = f"loading {name}"

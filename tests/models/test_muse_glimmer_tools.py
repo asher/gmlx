@@ -1,4 +1,4 @@
-"""Muse Glimmer ATEM tool-call parser (``gmlx.muse_glimmer_tools``).
+"""Muse Glimmer ATEM tool-call parser (``gmlx.models.muse_glimmer.tools``).
 CPU-only, no model load.
 
 Exercises ``parse_tool_call`` on wrapper-inner text as mlx-vlm's
@@ -13,8 +13,8 @@ import sys
 
 import pytest
 
-from gmlx import muse_glimmer_tools
-from gmlx.muse_glimmer_tools import (
+import gmlx.models.muse_glimmer.tools as muse_glimmer_tools
+from gmlx.models.muse_glimmer.tools import (
     parse_tool_call,
     tool_call_end,
     tool_call_start,

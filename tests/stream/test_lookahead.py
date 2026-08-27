@@ -1,4 +1,4 @@
-"""Lookahead predictor + recall probe (gmlx.lookahead), and the offload
+"""Lookahead predictor + recall probe (gmlx.stream.lookahead), and the offload
 wrapper's lookahead seam."""
 
 import mlx.core as mx
@@ -6,8 +6,8 @@ import mlx.nn as nn
 import numpy as np
 import pytest
 
-from gmlx.loader import install_expert_streaming
-from gmlx.lookahead import (
+from gmlx.load.loader import install_expert_streaming
+from gmlx.stream.lookahead import (
     LookaheadProbe,
     _gate_module_select,
     _norm_gains,
@@ -78,7 +78,7 @@ def test_lookahead_family_default(monkeypatch):
     tax measured above its stall savings there); everything else defaults ON;
     an explicit GMLX_DECODE_LOOKAHEAD always wins."""
     from gmlx.envflags import env_bool
-    from gmlx.loader import _lookahead_default
+    from gmlx.load.loader import _lookahead_default
 
     m = _FakeModel(1)
     assert _lookahead_default(m)  # no model_type: on
@@ -290,7 +290,7 @@ def test_rank_gate_trims_and_recovers():
     """Per-rank hit EMAs start optimistic, trim the unreliable tail below
     min_p, and re-qualify ranks that start hitting again (the full width
     keeps being observed while gated)."""
-    from gmlx.lookahead import RankGate
+    from gmlx.stream.lookahead import RankGate
 
     g = RankGate(0.5)
     assert g.k(1, 3) == 3  # warm start: submit everything
@@ -418,7 +418,7 @@ def test_depth2_probe_merges_both_sources(monkeypatch):
 def test_depth2_gate_keys_are_independent(monkeypatch):
     """The rank gate scores depth-1 and depth-2 predictions of one layer
     as separate populations."""
-    from gmlx.lookahead import RankGate
+    from gmlx.stream.lookahead import RankGate
 
     g = RankGate(0.5)
     for _ in range(400):
@@ -538,7 +538,7 @@ def test_sigmoid_bias_select_kimi_k3_args_k():
     mx.random.seed(5)
     blk = _KimiK3MoE()
     assert _router_fn_for(blk) is not None or True  # name-based list below
-    from gmlx.lookahead import _SIGMOID_BIAS_BLOCKS
+    from gmlx.stream.lookahead import _SIGMOID_BIAS_BLOCKS
     assert "KimiK3MoE" in _SIGMOID_BIAS_BLOCKS
     x = mx.random.normal((1, 1, DIM))
     ids_mx, _ = _sigmoid_bias_select(blk)(x)

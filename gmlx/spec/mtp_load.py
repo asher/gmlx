@@ -16,17 +16,17 @@ import mlx.nn as nn
 
 import mlx_kquant as kq
 
-from . import loadlog
-from .dtypes import activation_dtype, activation_dtype_name
-from .envflags import env_int
-from .gdn_patches import (
+import gmlx.load.loadlog as loadlog
+from gmlx.load.dtypes import activation_dtype, activation_dtype_name
+from gmlx.envflags import env_int
+from gmlx.upstream.gdn_patches import (
     _needs_tiled_v_patch,
     _patch_dense_head_verify,
     _patch_gated_delta_tiled_v,
     _patch_mlxvlm_gated_delta_tiled_v,
 )
-from .gguf_meta import first_nonzero_int, read_int
-from .loader import (
+from gmlx.load.gguf_meta import first_nonzero_int, read_int
+from gmlx.load.loader import (
     _FP32_KEEP_BY_MODEL_TYPE,
     _active_now,
     _install_and_load,
@@ -41,13 +41,13 @@ from .loader import (
     remap_mtp_arrays,
     weights_source_key,
 )
-from .native_fp import _strip_weight
-from .populate import maybe_populate_for_load
-from .populate import wait_for as wait_for_populate
-from .preflight import preflight
-from .qwen35_gdn import prepare_gdn
-from .qwen35_owned import is_owned_language_model
-from .transforms import coalesce_split_experts
+from gmlx.load.native_fp import _strip_weight
+from gmlx.load.populate import maybe_populate_for_load
+from gmlx.load.populate import wait_for as wait_for_populate
+from gmlx.load.preflight import preflight
+from gmlx.models.qwen35.gdn import prepare_gdn
+from gmlx.models.qwen35.owned import is_owned_language_model
+from gmlx.load.transforms import coalesce_split_experts
 
 
 # Per-family MTP batch-width caps, keyed on model_type (NEVER isinstance:
@@ -190,8 +190,8 @@ def _load_mtp_drafter(
     model_type = config_dict.get("model_type", "")
 
     if model_type == "hy_v3":
-        from .hy_v3_model import ModelArgs
-        from .hy_v3_mtp import HyV3MTPConfig, HyV3MTPDrafter
+        from gmlx.models.hy_v3.model import ModelArgs
+        from gmlx.models.hy_v3.mtp import HyV3MTPConfig, HyV3MTPDrafter
 
         drafter = HyV3MTPDrafter(
             HyV3MTPConfig(
@@ -223,7 +223,7 @@ def _load_mtp_drafter(
         # weight tree, so the remap/install below is identical either way.
         # Default owned; GMLX_OWNED_MTP_DRAFTER=0 falls back for A/B.
         if os.environ.get("GMLX_OWNED_MTP_DRAFTER", "1") != "0":
-            from gmlx.mtp_drafter import QwenMTPDrafter
+            from gmlx.spec.mtp_drafter import QwenMTPDrafter
 
             drafter = QwenMTPDrafter(mtp_config)
             log("[mtp] drafter: owned QwenMTPDrafter (decode-time-only KV)")
@@ -341,7 +341,7 @@ def _load_gemma4_assistant_drafter(
         f"{len(kquant_meta)} kquant"
     )
 
-    from .config_synth import synthesize_gemma4_assistant_config
+    from gmlx.load.config_synth import synthesize_gemma4_assistant_config
 
     drafter_cfg = synthesize_gemma4_assistant_config(meta, tensor_shapes)
     tc = drafter_cfg["text_config"]
@@ -375,7 +375,7 @@ def _load_gemma4_assistant_drafter(
     # kquant (it's a plain matmul). The table is small (vocab x hidden_size), so
     # a dense 16-bit copy is cheap.
     if drafter_cfg.get("use_ordered_embeddings"):
-        from .modules import KQuantEmbedding
+        from gmlx.load.modules import KQuantEmbedding
 
         emb = drafter.model.embed_tokens
         if isinstance(emb, KQuantEmbedding):
@@ -552,8 +552,8 @@ def _load_deepseek4_mtp_drafter(
         f"{len(kquant_meta)} kquant"
     )
 
-    from .deepseek_v4_model import ModelArgs, ensure_registered
-    from .deepseek_v4_mtp import DeepseekV4MTPConfig, DeepseekV4MTPDrafter
+    from gmlx.models.deepseek_v4.model import ModelArgs, ensure_registered
+    from gmlx.models.deepseek_v4.mtp import DeepseekV4MTPConfig, DeepseekV4MTPDrafter
 
     ensure_registered()
     args = ModelArgs.from_dict(target_config_dict)
@@ -609,8 +609,8 @@ def _load_qwen4exp_mtp_drafter(
     arrays, kquant_meta, d_arch, meta, _shapes = load_gguf_wire_bytes(
         draft_gguf_path, zero_copy=zero_copy
     )
-    from .qwen4_exp_model import ModelArgs, ensure_registered
-    from .qwen4_exp_mtp import (
+    from gmlx.models.qwen4_exp.model import ModelArgs, ensure_registered
+    from gmlx.models.qwen4_exp.mtp import (
         MTP_ARCH,
         Qwen4ExpMTPConfig,
         Qwen4ExpMTPDrafter,
@@ -992,7 +992,7 @@ def _load_muse_glimmer_dflash_drafter(
     """Build + load + bind the Muse Glimmer DFlash drafter, and wire the
     target's ``_dflash_capture`` so every engine-facing hidden carries the
     five captured residuals."""
-    from .muse_glimmer_dflash import MuseGlimmerDFlashDrafter
+    from gmlx.models.muse_glimmer.dflash import MuseGlimmerDFlashDrafter
 
     config, layer_ids = _dflash_config_from_meta(
         draft_gguf_path, meta, target_config_dict, "muse_glimmer",
@@ -1132,7 +1132,7 @@ def _load_dflash_drafter(
 
 def _drafter_header_arch(draft_gguf_path: str) -> str | None:
     """The companion GGUF's ``general.architecture`` from a header-only read."""
-    from .discovery import header_meta
+    from gmlx.load.discovery import header_meta
 
     meta = header_meta(draft_gguf_path)
     return meta.get("arch") if meta else None
@@ -1285,11 +1285,11 @@ def _load_deepseek4_dspark_drafter(
     target hiddens from ``dspark.target_layer_ids``, plus markov/confidence
     heads). Also wires the target's ``_dspark_capture`` so every
     engine-facing hidden carries the capture pack."""
-    from .deepseek_v4_dspark import (
+    from gmlx.models.deepseek_v4.dspark import (
         DeepseekV4DSparkConfig,
         DeepseekV4DSparkDrafter,
     )
-    from .deepseek_v4_model import ModelArgs, ensure_registered
+    from gmlx.models.deepseek_v4.model import ModelArgs, ensure_registered
 
     ensure_registered()
     n_stages = 1 + max(
@@ -1349,7 +1349,7 @@ def _load_deepseek4_dspark_drafter(
     # GMLX_NATIVE_FP (or a kq build without the codecs) wins.
     import mlx_kquant as kq
 
-    from .native_fp import NATIVE_FP_CODECS
+    from gmlx.load.native_fp import NATIVE_FP_CODECS
 
     fp_codecs = {c for c in d_meta.values() if c in NATIVE_FP_CODECS}
     force_wire = (
@@ -1445,7 +1445,7 @@ def load_mtp_model(
     arrays, kquant_meta, _n = coalesce_split_experts(arrays, kquant_meta)
     _log(f"[gguf] {len(arrays)} arrays, {len(kquant_meta)} kquant")
 
-    from .config_synth import synthesize_config
+    from gmlx.load.config_synth import synthesize_config
 
     config_dict = synthesize_config(meta, tensor_shapes)
     assistant = draft_gguf_path is not None
@@ -1454,8 +1454,8 @@ def load_mtp_model(
         # deepseek4_mtp_support), never as in-GGUF nextn tensors; the
         # native-head extraction below is qwen-shaped and cannot serve it,
         # even though the V4 metadata advertises mtp_num_hidden_layers.
-        from . import arch_table
-        from .discovery import find_mtp_companion
+        import gmlx.load.arch_table as arch_table
+        from gmlx.load.discovery import find_mtp_companion
 
         draft_gguf_path = find_mtp_companion(
             gguf_path, arch_table.drafter_arches("deepseek_v4"))
@@ -1471,8 +1471,8 @@ def load_mtp_model(
     if not assistant and config_dict.get("model_type") == "qwen4_exp":
         # Qwen3.8-Flash-Next's head lives in the HF safetensors only; the
         # companion GGUF (arch qwen4exp-mtp) is the drafter.
-        from . import arch_table
-        from .discovery import find_mtp_companion
+        import gmlx.load.arch_table as arch_table
+        from gmlx.load.discovery import find_mtp_companion
 
         draft_gguf_path = find_mtp_companion(
             gguf_path, arch_table.drafter_arches("qwen4_exp"))
@@ -1488,8 +1488,8 @@ def load_mtp_model(
     if not assistant and config_dict.get("model_type") == "muse_glimmer":
         # Muse Glimmer's drafter is likewise a companion GGUF (arch dflash),
         # never an in-file nextn block.
-        from . import arch_table
-        from .discovery import find_mtp_companion
+        import gmlx.load.arch_table as arch_table
+        from gmlx.load.discovery import find_mtp_companion
 
         draft_gguf_path = find_mtp_companion(
             gguf_path, arch_table.drafter_arches("muse_glimmer"))
@@ -1586,7 +1586,7 @@ def load_mtp_model(
         _patch_dense_head_verify(model)
     elif config_dict.get("model_type") == "qwen4_exp":
         # Vendored tree: arm the fused GDN decode + verify routes.
-        from .qwen4_exp_model import prepare_runtime
+        from gmlx.models.qwen4_exp.model import prepare_runtime
 
         counts = prepare_runtime(model.language_model)
         _log(f"[patch] qwen4_exp: fused GDN decode on {counts['gdn_fused']} "
@@ -1648,7 +1648,7 @@ def load_mtp_model(
     loadlog.stage("building tokenizer")
     from mlx_lm.tokenizer_utils import TokenizerWrapper
 
-    from .tokenizer import load_tokenizer_from_gguf
+    from gmlx.load.tokenizer import load_tokenizer_from_gguf
 
     template_override = _resolve_chat_template(chat_template)
     raw_tokenizer = load_tokenizer_from_gguf(
@@ -1674,12 +1674,12 @@ def _install_stock_qwen35_verify_patches(model) -> None:
     landed. The ``GMLX_QWEN_OWNED=0`` text fallback does not take this
     path: bare stock plus tiled-V is its debugging contract.
     """
-    from .gdn_patches import (
+    from gmlx.upstream.gdn_patches import (
         _patch_batched_verify_sdpa,
         _patch_bf16_verify_linear,
         _patch_gated_delta_fused_verify,
     )
-    from .qwen35_verify_fold import install_qwen35_verify_fold
+    from gmlx.models.qwen35.verify_fold import install_qwen35_verify_fold
     from .ragged_decode import install_unified_ragged_plan
 
     _patch_gated_delta_fused_verify(model)
@@ -1724,7 +1724,7 @@ def load_vlm_mtp_model(
 
     from mlx_lm.tokenizer_utils import TokenizerWrapper
 
-    from .vlm import load_vlm_model
+    from gmlx.load.vlm import load_vlm_model
 
     # 1. target VLM - .language_model is the hook-bearing text class.
     model, config, processor, raw_tokenizer = load_vlm_model(
@@ -1786,7 +1786,7 @@ def load_vlm_mtp_model(
         # are forward-time rebinds, so applying them after the target load is safe):
         #   - mlx-vlm-side tiled-V for the MTP state-capture ops/kernels, and
         #   - the fused gated-delta verify kernel (the MTP round's roofline).
-        from .config_synth import synthesize_config
+        from gmlx.load.config_synth import synthesize_config
 
         pf = preflight(gguf_path, arch=arch)
         arch_r = pf.arch

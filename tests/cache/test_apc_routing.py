@@ -14,8 +14,8 @@ from mlx_vlm.apc import model_apc_mode
 
 import pytest
 
-from gmlx.cache_compat import runtime_cache_module
-from gmlx.cache_snapshot import ckpt_layout, ckpt_supported
+from gmlx.cache.compat import runtime_cache_module
+from gmlx.cache.snapshot import ckpt_layout, ckpt_supported
 
 _cache = runtime_cache_module()
 
@@ -94,7 +94,7 @@ KVARN_TAG = "kvarn:6:6:1024"
 
 
 def _kvarn_gdn():
-    from gmlx.kvarn_cache import KVarNKVCache
+    from gmlx.cache.kvarn_cache import KVarNKVCache
     out = []
     for kind in ("kvarn", "arr", "arr", "kvarn", "arr"):
         out.append(KVarNKVCache() if kind == "kvarn"
@@ -103,7 +103,7 @@ def _kvarn_gdn():
 
 
 def _kvarn_swa():
-    from gmlx.kvarn_cache import KVarNKVCache
+    from gmlx.cache.kvarn_cache import KVarNKVCache
     out = []
     for kind in ("kvarn", "rot", "rot", "kvarn", "rot"):
         out.append(KVarNKVCache() if kind == "kvarn"
@@ -112,7 +112,7 @@ def _kvarn_swa():
 
 
 def _kvarn_three_kind():
-    from gmlx.kvarn_cache import KVarNKVCache
+    from gmlx.cache.kvarn_cache import KVarNKVCache
     return [KVarNKVCache(), _cache.RotatingKVCache(max_size=32),
             _cache.ArraysCache(size=2), KVarNKVCache(),
             _cache.ArraysCache(size=2)]
@@ -139,7 +139,7 @@ def test_kvarn_family_routing_pinned(family, factory, ckpt, tags):
     # Production truth needs the kvarn arms installed (serve installs
     # them at boot): the model_apc_mode wrap resolves kvarn stacks to
     # "exact"; bare upstream would say None.
-    from gmlx.kvarn_apc import install_kvarn_apc
+    from gmlx.cache.kvarn_apc import install_kvarn_apc
 
     install_kvarn_apc()
     from mlx_vlm import apc

@@ -20,7 +20,7 @@ from typing import Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from .gdn_patches import _F16_HEAD_GEMV, _f16_head_gemv, gpu_active
+from gmlx.upstream.gdn_patches import _F16_HEAD_GEMV, _f16_head_gemv, gpu_active
 
 __all__ = ["verify_linear", "verify_linears"]
 

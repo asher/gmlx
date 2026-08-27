@@ -61,13 +61,13 @@ def family(request, gguf_index):
     if not paths:
         pytest.skip(f"no {arch!r} GGUF under KQUANT_TEST_GGUF_DIR "
                     f"(have: {sorted(gguf_index)})")
-    from gmlx import server_bridge_vlm as serving
-    from gmlx import spec_engine
+    import gmlx.serve.bridge_vlm as serving
+    import gmlx.spec.engine as spec_engine
 
     spec_engine.install_full_prompt_mtp_prefill()   # the serve installs
     if scheme == "kvarn":
-        from gmlx.kvarn_apc import install_kvarn_apc
-        from gmlx.kvarn_serve import install_kvarn_serve
+        from gmlx.cache.kvarn_apc import install_kvarn_apc
+        from gmlx.cache.kvarn_serve import install_kvarn_serve
 
         install_kvarn_serve()
         install_kvarn_apc()
@@ -115,8 +115,8 @@ def _drive(model, processor, ids, manager, scheme=None):
 def test_family_tier_engages(family):
     from mlx_vlm.apc import model_apc_mode
 
-    from gmlx.apc_manager import GmlxAPCManager
-    from gmlx.cache_snapshot import ckpt_supported
+    from gmlx.cache.apc_manager import GmlxAPCManager
+    from gmlx.cache.snapshot import ckpt_supported
 
     fam, tier, prompt_tokens, model, processor, scheme = family
     tokenizer = processor.tokenizer

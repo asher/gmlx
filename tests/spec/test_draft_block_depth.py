@@ -14,9 +14,9 @@ import logging
 
 import pytest
 
-from gmlx.drafter_protocol import default_block_size, native_block_size
-from gmlx.mtp_load import _drafter_block_depths
-from gmlx.spec_helpers import _mtp_next_block_size, _resolve_block_total
+from gmlx.spec.drafter_protocol import default_block_size, native_block_size
+from gmlx.spec.mtp_load import _drafter_block_depths
+from gmlx.spec.helpers import _mtp_next_block_size, _resolve_block_total
 
 
 class _Cfg:
@@ -133,20 +133,20 @@ class TestDepthWarning:
 
     def test_a_deeper_request_warns_once(self, caplog):
         drafter = _muse(block_size=4, native=16)
-        with caplog.at_level(logging.WARNING, logger="gmlx.spec_helpers"):
+        with caplog.at_level(logging.WARNING, logger="gmlx.spec.helpers"):
             assert _resolve_block_total(drafter, 24) == 16
             assert _mtp_next_block_size(drafter, 24, 16, 128) == 16
         warned = [r for r in caplog.records if "deeper than" in r.message]
         assert len(warned) == 1
 
     def test_a_request_within_the_ceiling_is_silent(self, caplog):
-        with caplog.at_level(logging.WARNING, logger="gmlx.spec_helpers"):
+        with caplog.at_level(logging.WARNING, logger="gmlx.spec.helpers"):
             assert _resolve_block_total(_muse(block_size=4, native=16), 16) == 16
         assert not [r for r in caplog.records if "deeper than" in r.message]
 
     def test_the_configured_default_is_silent(self, caplog):
         drafter = _muse(block_size=16, native=16, runtime=32)
-        with caplog.at_level(logging.WARNING, logger="gmlx.spec_helpers"):
+        with caplog.at_level(logging.WARNING, logger="gmlx.spec.helpers"):
             assert _resolve_block_total(drafter, None) == 16
         assert not [r for r in caplog.records if "deeper than" in r.message]
 

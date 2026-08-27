@@ -23,12 +23,12 @@ from mlx_vlm.models.qwen3_5 import language as _L
 from mlx_vlm.models.qwen3_5.config import TextConfig as Q35TextConfig
 from mlx_vlm.models.qwen3_5.language import LanguageModel as Q35LanguageModel
 
-from gmlx import qwen35_owned
-from gmlx.gdn_patches import (
+import gmlx.models.qwen35.owned as qwen35_owned
+from gmlx.upstream.gdn_patches import (
     _patch_gated_delta_tiled_v,
     _patch_mlxvlm_gated_delta_tiled_v,
 )
-from gmlx.loader import _mtp_target_classes
+from gmlx.load.loader import _mtp_target_classes
 
 ATOL = 2e-3  # differing-route bound (shortcut removed / kernel path)
 TIGHT_ATOL = 1e-5  # same-ops bound
@@ -307,7 +307,7 @@ def test_fully_padded_row_is_structural():
     # stock class needs gmlx's guard patch for this; the owned forward
     # handles it structurally. Install the guard so the stock arm can be
     # compared at all.
-    from gmlx.gdn_patches import _patch_qwen35_empty_sequence_guard
+    from gmlx.upstream.gdn_patches import _patch_qwen35_empty_sequence_guard
 
     _patch_qwen35_empty_sequence_guard()
     stock, owned = _pair()
@@ -633,7 +633,9 @@ def test_forward_on_the_cpu_device_skips_the_metal_kernels(monkeypatch):
     device; the owned forward takes the pure-MLX routes there. Every
     kernel the forward can reach is poisoned, and the CPU arm is a fresh
     model so the compiled-apply memo cannot hide a fused dispatch."""
-    from gmlx import gdn_patches, qwen35_rope, qwen35_verify_linear
+    import gmlx.upstream.gdn_patches as gdn_patches
+    import gmlx.models.qwen35.rope as qwen35_rope
+    import gmlx.models.qwen35.verify_linear as qwen35_verify_linear
 
     ids = mx.array([[1, 2, 3, 4]])
     _, owned = _pair()

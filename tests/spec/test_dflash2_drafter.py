@@ -20,8 +20,8 @@ import pytest
 
 from mlx_vlm.models.cache import BufferedRotatingKVCache, KVCache
 
-from gmlx import qwen35_owned
-from gmlx.dflash_drafter import (
+import gmlx.models.qwen35.owned as qwen35_owned
+from gmlx.spec.dflash_drafter import (
     DFlash2Drafter,
     DFlashConfig,
     DFlashDrafter,
@@ -31,7 +31,7 @@ from gmlx.dflash_drafter import (
     draw_rows,
     greedy_walk,
 )
-from gmlx.drafter_protocol import DraftStash
+from gmlx.spec.drafter_protocol import DraftStash
 
 from test_vlm_mtp_gating import _cfg, _top
 
@@ -240,7 +240,7 @@ def test_rollback_trims_every_layer_cache():
 # --- drafter -----------------------------------------------------------------
 
 def test_drafter_satisfies_the_protocol():
-    from gmlx.drafter_protocol import validate_drafter
+    from gmlx.spec.drafter_protocol import validate_drafter
 
     lm = _target()
     drafter = _drafter(lm)
@@ -481,7 +481,7 @@ def test_second_choice_is_the_runner_up():
 
 
 def test_stochastic_draw_stashes_the_array_it_drew_from(monkeypatch):
-    from gmlx.speculative import _STOCH_DRAFT, _pq_probs
+    from gmlx.spec.speculative import _STOCH_DRAFT, _pq_probs
 
     rows, support = _rows()
     seen = []
@@ -521,7 +521,7 @@ def test_stochastic_draw_frequencies_match_the_stashed_q():
 def _annotated(temp=1.0, top_p=0.95, top_k=20, min_p=0.0):
     from mlx_lm.sample_utils import make_sampler
 
-    from gmlx.speculative import annotate_sampling_params
+    from gmlx.spec.speculative import annotate_sampling_params
 
     sampler = make_sampler(temp=temp, top_p=top_p, top_k=top_k, min_p=min_p)
     annotate_sampling_params(sampler, temp=temp, top_p=top_p, top_k=top_k, min_p=min_p)
@@ -540,7 +540,7 @@ def test_the_cli_sampler_cannot_take_a_compact_row():
 
 
 def test_annotated_sampler_is_reconstructed_on_the_compact_row(monkeypatch):
-    from gmlx.speculative import _pq_probs
+    from gmlx.spec.speculative import _pq_probs
 
     rows, support = _rows()
     sampler = _annotated()
@@ -646,7 +646,7 @@ def test_stochastic_draft_walks_the_realized_predecessor():
 
 
 def test_pq_graph_separates_the_sweep_on_a_padded_row():
-    from gmlx.speculative import _PQ_SWEEP, _pq_graph
+    from gmlx.spec.speculative import _PQ_SWEEP, _pq_graph
 
     lm = _target()
     drafter = _drafter(lm)
@@ -751,7 +751,7 @@ def test_verify_walk_is_token_identical_to_greedy():
 
 def _engine_walk(lm, drafter, prompt, n, *, sampler=None):
     """Drive the engine's round loop the way generate_speculative seeds it."""
-    from gmlx import speculative as sp
+    import gmlx.spec.speculative as sp
 
     lm.set_dflash_capture(CAPTURE)
     cache = lm.make_cache()
@@ -812,7 +812,7 @@ def _recording(drafter, monkeypatch):
 
 @pytest.mark.parametrize("sampled", [False, True])
 def test_plain_rounds_pass_no_stash(monkeypatch, sampled):
-    from gmlx import speculative as sp
+    import gmlx.spec.speculative as sp
 
     for name in ("_PQ_LOG", "_TOP2_LOG", "_STOCH_ACCEPT"):
         monkeypatch.setattr(sp, name, False)
@@ -829,8 +829,8 @@ def test_v1_rows_keep_exact_match_under_stochastic(monkeypatch, caplog):
     """Independent block rows are not a conditional proposal; the engine
     keeps exact-match for such drafters (measured on Muse v1: 6.7 -> 1.7
     accepted per round when forced)."""
-    from gmlx import speculative as sp
-    from gmlx.muse_glimmer_dflash import MuseGlimmerDFlashDrafter
+    import gmlx.spec.speculative as sp
+    from gmlx.models.muse_glimmer.dflash import MuseGlimmerDFlashDrafter
 
     assert MuseGlimmerDFlashDrafter.stochastic_draft is False
     assert DFlash2Drafter.stochastic_draft is True
@@ -852,7 +852,7 @@ def test_v1_rows_keep_exact_match_under_stochastic(monkeypatch, caplog):
 def test_instrumented_rounds_hand_the_block_drafter_a_stash(monkeypatch, switch):
     """One stash per round with one entry per drafted row, and the round loop
     walks it without a head-shaped wrapper."""
-    from gmlx import speculative as sp
+    import gmlx.spec.speculative as sp
 
     for name in ("_PQ_LOG", "_TOP2_LOG", "_STOCH_ACCEPT"):
         monkeypatch.setattr(sp, name, name == switch)

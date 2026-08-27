@@ -1,6 +1,6 @@
 """APC (prefix-cache) engine patches: lone-sequence harvest and retirement
 render capture. The batched store eval lives on the gmlx-owned manager
-subclass (``gmlx.apc_manager.GmlxAPCManager``), not as a method patch here."""
+subclass (``gmlx.cache.apc_manager.GmlxAPCManager``), not as a method patch here."""
 
 from __future__ import annotations
 
@@ -96,7 +96,7 @@ def install_retire_render_capture() -> None:
 
     if os.environ.get("GMLX_APC_RETIRE_LCP") == "0":
         return
-    from .. import retire_key
+    import gmlx.cache.retire_key as retire_key
 
     from ._common import _render_target_modules
     gen_mod = importlib.import_module("mlx_vlm.server.generation")

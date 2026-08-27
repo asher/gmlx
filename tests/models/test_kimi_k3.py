@@ -17,8 +17,8 @@ import pytest
 
 import mlx.core as mx
 
-from gmlx import kimi_k3_model
-from gmlx.kimi_k3_model import (
+import gmlx.models.kimi_k3 as kimi_k3_model
+from gmlx.models.kimi_k3 import (
     Model,
     ModelArgs,
     _ResidualMixer,
@@ -171,7 +171,7 @@ def test_kda_kernel_matches_ops_with_k3_decay():
 
 def test_kda_decay_forms():
     # lb form: decay = exp(lb * sigmoid(exp(A_log)*(a + dt))), in (exp(lb), 1).
-    from gmlx.kimi_k3_model import _kda_decay_lb, _kda_decay_softplus
+    from gmlx.models.kimi_k3 import _kda_decay_lb, _kda_decay_softplus
 
     H, D = 2, 4
     a_folded = -mx.array([1.5, 3.0])          # -exp(A_log)
@@ -294,7 +294,7 @@ def test_moe_selection_matches_reference():
 def test_synth_config_instantiates_model():
     # The _synth_kimi_k3 output must build this module 1:1 via ModelArgs
     # (the same path loader.build_model takes after ensure_registered).
-    from gmlx.config_synth import synthesize_config
+    from gmlx.load.config_synth import synthesize_config
     from test_config_synth import _KIMI_K3_SHAPES, _kimi_k3_meta
 
     kimi_k3_model.ensure_registered()
@@ -337,7 +337,7 @@ def test_remap_covers_every_wire_tensor_onto_real_params():
     # targets vs module attribute names).
     from mlx.utils import tree_flatten
 
-    from gmlx.remap import RemapDecision, parse_gguf_name
+    from gmlx.load.remap import RemapDecision, parse_gguf_name
 
     args = _tiny_args()
     model = Model(args)

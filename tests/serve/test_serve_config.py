@@ -11,7 +11,7 @@ import pytest
 pytest.importorskip("yaml")
 pytest.importorskip("mlx_vlm")
 
-from gmlx import server_bridge_vlm as serving  # noqa: E402
+import gmlx.serve.bridge_vlm as serving  # noqa: E402
 from gmlx.config import build_config  # noqa: E402
 
 
@@ -319,7 +319,7 @@ def _fam_doc():
 
 
 def test_register_fills_family_from_header(monkeypatch):
-    import gmlx.discovery as disc
+    import gmlx.load.discovery as disc
     monkeypatch.setattr(
         disc, "header_meta",
         lambda p: {"arch": "gemma4", "name": None, "kind": "model", "mtp": False})
@@ -337,7 +337,7 @@ def test_register_fills_family_from_header(monkeypatch):
 
 
 def test_register_missing_file_keeps_family_none(monkeypatch, capsys):
-    import gmlx.discovery as disc
+    import gmlx.load.discovery as disc
     monkeypatch.setattr(disc, "header_meta", lambda p: None)
     cfg = build_config(_fam_doc())
     serving.register_resolved_models(cfg)
@@ -354,7 +354,7 @@ def test_register_missing_file_keeps_family_none(monkeypatch, capsys):
 
 
 def test_register_kill_switch_skips_detection(monkeypatch):
-    import gmlx.discovery as disc
+    import gmlx.load.discovery as disc
 
     def _boom(p):
         raise AssertionError("header read attempted with family_defaults off")
