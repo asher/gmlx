@@ -407,6 +407,49 @@ def test_sparse_decode_gather_matches_masked_path():
             rtol=2e-3, atol=2e-3, err_msg=f"decode step {step}")
 
 
+def test_streamed_absorbed_attention_matches_sdpa(monkeypatch):
+    # The online-softmax key-block accumulation must reproduce plain
+    # masked SDPA, including rows whose first blocks are fully masked.
+    import mlx.core as _mx
+
+    monkeypatch.setattr(glm5_model, "_STREAM_BLOCK", 8)
+    mx.random.seed(17)
+    B, H, L, S, D = 1, 4, 6, 29, 16
+    q = mx.random.normal((B, H, L, D)) * 0.5
+    latent = mx.random.normal((B, 1, S, D)) * 0.5
+    mask = _mx.random.uniform(shape=(B, 1, L, S)) > 0.4
+    # Guarantee every row attends to something.
+    mask = mask | (mx.arange(S) == 0)[None, None, None]
+
+    got = np.array(glm5_model._streamed_absorbed_attention(
+        q, latent, mask, 0.25), dtype=np.float32)
+
+    qn = np.array(q, dtype=np.float64) * 0.25
+    kn = np.array(latent, dtype=np.float64)[:, 0]
+    s = np.einsum("bhld,bsd->bhls", qn, kn)
+    s = np.where(np.array(mask), s, -np.inf)
+    p = np.exp(s - s.max(-1, keepdims=True))
+    p = p / p.sum(-1, keepdims=True)
+    ref = np.einsum("bhls,bsd->bhld", p, kn)
+    np.testing.assert_allclose(got, ref, rtol=2e-3, atol=2e-3)
+
+
+def test_streamed_prefill_matches_short_path(monkeypatch):
+    # Force the streaming thresholds tiny: a full-model prefill through the
+    # streamed branches must match the plain (unstreamed) forward.
+    args = _tiny_args()
+    model = _random_model(args, seed=31)
+    toks = [3, 9, 27, 40, 11, 5, 33, 60, 2, 17, 44, 8, 19, 52, 7, 21]
+
+    base = np.array(model(mx.array([toks]), cache=model.make_cache()),
+                    dtype=np.float32)
+    monkeypatch.setattr(glm5_model, "_STREAM_MIN_KEYS", 4)
+    monkeypatch.setattr(glm5_model, "_STREAM_BLOCK", 8)
+    streamed = np.array(model(mx.array([toks]), cache=model.make_cache()),
+                        dtype=np.float32)
+    np.testing.assert_allclose(streamed, base, rtol=5e-3, atol=5e-3)
+
+
 def test_sparse_disable_is_identity_below_threshold(monkeypatch):
     args = _tiny_args()
     model = _random_model(args)

@@ -343,13 +343,6 @@ class Glm5NextIndexer(nn.Module):
         # near-tied pools; the weight tensor itself is kept fp32.
         w = (x.astype(mx.float32) @ self.weights_proj.weight.T) * self._w_scale
 
-        # relu sits BETWEEN the per-head dot and the head weighting: the
-        # weights are sign-free, so moving it is a different function.
-        scores = q.astype(mx.float32) @ pooled[:, None].swapaxes(-1, -2).astype(
-            mx.float32)
-        scores = mx.maximum(scores, 0)
-        scores = (scores * w.swapaxes(-1, -2)[..., None]).sum(axis=1)
-
         if pool_cache is not None:
             pmask = pool_cache.make_mask(L, offset)
         elif L > 1:
@@ -361,19 +354,37 @@ class Glm5NextIndexer(nn.Module):
             pmask = pool_idx < query_idx[:, None] // self.kpool
         else:
             pmask = None
-        if pmask is not None:
-            scores = mx.where(
-                pmask if pmask.ndim == 3 else pmask[None],
-                scores,
-                mx.finfo(scores.dtype).min,
-            )
+        if pmask is not None and pmask.ndim == 2:
+            pmask = pmask[None]
 
-        # Top-k over POOLS, never over member cells: relu drives most pool
-        # scores to exactly 0.0, tie groups span pools, and an unordered
-        # cell-level cut leaves partial pools (measured 5-7% of query rows
-        # in the reference tree). Whole-pool selection leaves none.
-        return mx.argpartition(-scores, kth=self.select_k - 1, axis=-1)[
-            ..., : self.select_k]
+        # Scoring is chunked over queries (the reference chunks by 512):
+        # the fp32 [B, heads, chunk, pools] score tile plus its relu copy
+        # stay bounded no matter the prefill chunk width. (The pool axis
+        # still scales with depth; the kq indexer kernels take over there.)
+        pooled_t = pooled[:, None].swapaxes(-1, -2).astype(mx.float32)
+        sel_parts = []
+        for j0 in range(0, L, 512):
+            j1 = min(j0 + 512, L)
+            # relu sits BETWEEN the per-head dot and the head weighting:
+            # the weights are sign-free, so moving it is a different
+            # function.
+            s = q[:, :, j0:j1].astype(mx.float32) @ pooled_t
+            s = mx.maximum(s, 0)
+            s = (s * w[:, j0:j1].swapaxes(-1, -2)[..., None]).sum(axis=1)
+            if pmask is not None:
+                s = mx.where(
+                    pmask[:, j0:j1], s, mx.finfo(s.dtype).min)
+            # Top-k over POOLS, never over member cells: relu drives most
+            # pool scores to exactly 0.0, tie groups span pools, and an
+            # unordered cell-level cut leaves partial pools (measured 5-7%
+            # of query rows in the reference tree). Whole-pool selection
+            # leaves none.
+            sel_parts.append(
+                mx.argpartition(-s, kth=self.select_k - 1, axis=-1)[
+                    ..., : self.select_k])
+        if len(sel_parts) == 1:
+            return sel_parts[0]
+        return mx.concatenate(sel_parts, axis=1)
 
 
 def _dequantized(kv, cache):
@@ -382,6 +393,69 @@ def _dequantized(kv, cache):
         return mx.dequantize(
             *kv, group_size=cache.group_size, bits=cache.bits)
     return kv
+
+
+# MLX's fused attention kernel caps at head dim 128, so every L>1 MLA
+# forward here runs composite and materializes [B, H, L, S] scores - at
+# 16k keys that is a multi-GB transient on top of a ~101 GB resident
+# model. Beyond _STREAM_MIN_KEYS the L>1 paths switch to an absorbed
+# online-softmax accumulation over [_STREAM_Q x _STREAM_BLOCK] tiles: no
+# per-head K/V expansion, peak bounded by a few score tiles at any depth.
+_STREAM_MIN_KEYS = 4096
+_STREAM_BLOCK = 2048
+_STREAM_Q = 512
+_NEG = mx.array(-1e30, dtype=mx.float32)
+
+
+def _streamed_absorbed_attention(q_n, latent, mask, scale):
+    """Absorbed MQA over the latent, streamed over key blocks.
+
+    ``q_n`` [B, H, L, D] (post embed_q), ``latent`` [B, 1, S, D], ``mask``
+    bool with trailing axes [.., L, S] (True = attend) or None. Exact
+    online softmax in fp32, tiled [_STREAM_Q x _STREAM_BLOCK]. The mask
+    folds into the score GEMM as a finite -1e30 additive bias (mx.addmm):
+    masked lanes underflow to exactly zero through exp once any real key
+    raises the row max, and an all-masked tile stays finite (exp(0))
+    until a later block's corr factor annihilates it; a row with no
+    visible key anywhere cannot occur under causal masking. mx.depends
+    chains every tile on the previous tile's accumulators - without the
+    edge the scheduler sees the score tiles as independent and
+    materializes all of them at once, which is worse than the composite
+    path this replaces."""
+    B, H, L, D = q_n.shape
+    S = latent.shape[2]
+    outs = []
+    prev = None
+    for q0 in range(0, L, _STREAM_Q):
+        q1 = min(q0 + _STREAM_Q, L)
+        q32 = (q_n[:, :, q0:q1] * scale).astype(mx.float32)
+        m = lse = acc = None
+        for s0 in range(0, S, _STREAM_BLOCK):
+            s1 = min(s0 + _STREAM_BLOCK, S)
+            kb = latent[:, :, s0:s1].astype(mx.float32)
+            if prev is not None:
+                (kb,) = mx.depends([kb], prev)
+            kt = kb.swapaxes(-1, -2)
+            if mask is not None:
+                am = mx.where(mask[..., q0:q1, s0:s1], 0.0, _NEG)
+                s = mx.addmm(am, q32, kt)  # [B, H, q1-q0, s1-s0]
+            else:
+                s = q32 @ kt
+            if acc is None:
+                m = s.max(axis=-1, keepdims=True)
+                p = mx.exp(s - m)
+                acc = p @ kb
+                lse = p.sum(axis=-1, keepdims=True)
+            else:
+                m_new = mx.maximum(m, s.max(axis=-1, keepdims=True))
+                p = mx.exp(s - m_new)
+                corr = mx.exp(m - m_new)
+                acc = acc * corr + p @ kb
+                lse = lse * corr + p.sum(axis=-1, keepdims=True)
+                m = m_new
+            prev = [acc, lse]
+        outs.append((acc / mx.maximum(lse, 1e-30)).astype(q_n.dtype))
+    return outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=2)
 
 
 class Glm5NextMLAAttention(nn.Module):
@@ -519,11 +593,16 @@ class Glm5NextMLAAttention(nn.Module):
                 q_n, kv_g, kv_g, cache=None, scale=self.scale, mask=None)
             out = self.unembed_out(out)
         elif sel_pools is not None:
-            # Sparse prefill/chunk: masked SDPA with the selection mask.
+            # Sparse prefill/chunk: selection mask over the full latent.
             latent_d = _dequantized(latent_all, kv_cache)
             smask = self._sparse_mask(
                 sel_pools, offset, L, latent_d.shape[2])[:, None]
-            if _ABSORBED_PREFILL:
+            if latent_d.shape[2] > _STREAM_MIN_KEYS:
+                q_n = self.embed_q(q)
+                out = _streamed_absorbed_attention(
+                    q_n, latent_d, smask, self.scale)
+                out = self.unembed_out(out)
+            elif _ABSORBED_PREFILL:
                 q_n = self.embed_q(q)
                 out = scaled_dot_product_attention(
                     q_n, latent_d, latent_d, cache=None, scale=self.scale,
@@ -534,8 +613,24 @@ class Glm5NextMLAAttention(nn.Module):
                 v = self.unembed_out(latent_d)
                 out = scaled_dot_product_attention(
                     q, k, v, cache=None, scale=self.scale, mask=smask)
-        elif L == 1 or _ABSORBED_PREFILL:
+        elif L == 1:
             # Dense absorbed (MQA over the latent; V is the same rows).
+            q_n = self.embed_q(q)
+            out = scaled_dot_product_attention(
+                q_n, latent_all, latent_all, cache=kv_cache, scale=self.scale,
+                mask=mask)
+            out = self.unembed_out(out)
+        elif (offset + L > _STREAM_MIN_KEYS
+              and isinstance(offset, int) and not isinstance(mask, str)):
+            # Deep dense prefill chunk: streamed absorbed attention.
+            latent_d = _dequantized(latent_all, kv_cache)
+            q_n = self.embed_q(q)
+            out = _streamed_absorbed_attention(
+                q_n, latent_d, mask[:, None] if (
+                    mask is not None and mask.ndim == 3) else mask,
+                self.scale)
+            out = self.unembed_out(out)
+        elif _ABSORBED_PREFILL:
             q_n = self.embed_q(q)
             out = scaled_dot_product_attention(
                 q_n, latent_all, latent_all, cache=kv_cache, scale=self.scale,
