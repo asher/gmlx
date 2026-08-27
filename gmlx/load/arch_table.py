@@ -79,6 +79,7 @@ _FAMILY_NOTES = {
     "deepseek4":      ("deepseek", "DeepSeek V4 Flash (256x8.4B, dwarfstar 'deepseek4' arch, not a llama.cpp conversion; parity reference is the ds4 engine). MLA-lite attention (low-rank q, single shared 512-dim KV latent K=V, grouped low-rank output proj, per-head fp32 sinks, tail-64 NEOX rope with inverse-rope'd output) in three per-layer variants from compress_ratios: sliding-window(128), +compressed pool, +lightning-indexer top-512 sparse. Manifold-constrained hyper-connections (4-stream 4D hidden, Sinkhorn mixing). Every-layer 256-expert MoE, sqrt-softplus gating + selection-only correction bias, first 3 layers hash-routed (tid2eid), shared expert, clamped SwiGLU. QAT round-trips (fp8-E4M3 KV, Hadamard+fp4-E2M1 indexer) reproduced on-path for logit parity. Model class vendored from mlx-lm PR #1192; separate MTP drafter GGUF (--draft-gguf, or autodetected next to the target) for speculative decoding - the DSpark sidecar in either container (gmlx deepseek4-dspark or llama.cpp dflash, e.g. the unsloth dspark release), or the legacy deepseek4_mtp_support nextn file"),
     "glm-dsa":        ("deepseek", "GLM-5.2 (DeepSeek-V3.2): deepseek2 MLA + fine-grained sigmoid-gated MoE plus a per-layer DSA 'lightning indexer' (top-k sparse-attention key selection) + an MTP/nextn layer (dropped on load). Reuses the DEEPSEEK2 remap (indexer.* patterns appended) -> mlx-lm model_type glm_moe_dsa (subclasses deepseek_v32)"),
     "glm4moe":        ("glm",      "GLM-4.5 / 4.6 (incl. GLM-4.5-Air); standard MHA (qk-norm, partial rotary) + DeepSeek-V3-style fine-grained sigmoid-gated MoE (shared expert, group routing, leading dense block). NextN/MTP layer dropped on load"),
+    "glm5next":       ("glm",      "GLM-5.3-Flash (320B-A18B, llama.cpp PR #27754); hybrid KDA linear attention (kimi-k3's per-key-channel-decay delta rule with a -5.0 lower-bound sigmoid decay gate and a low-rank g_a/g_b output gate, short conv1d Q/K/V) 3 of every 4 layers + nope-only MLA on the rest (per-layer head_count_kv, 0 = KDA; absorbed embed_q/unembed_out, head dim 256, NO rope anywhere). MLA layers carry a pooled DSA lightning indexer: keys+gates pooled 4:1 through an additive-positional-table compressor, top-512 pools expanded x4 + partial tail = 2051 sparse keys (dense below that). Fine-grained sigmoid MoE (288 experts top-8, selection-only correction bias, x2.5 renorm, 1 shared expert, 3 leading dense layers) with clamped SwiGLU (limit 10) everywhere. 4-stream sinkhorn hyper-connections (deepseek4's parameterization; final collapse = unweighted mean). Native MTP/NextN block past the trunk. glm4 BPE pretokenizer (ignore_merges), [gMASK]<sop> chat format, reasoning_effort template control. Hybrid cache is non-trimmable -> chat re-prefills on trim. Pairs with its mmproj (--mmproj) for vision. Model class vendored (no upstream mlx-lm class)"),
     "gpt-oss":        ("gpt-oss",  "OpenAI gpt-oss 20B/120B; MoE (no dense MLP) with per-head attention sinks, alternating sliding/full attention, YaRN rope, and native MXFP4 experts (packed-repacked in RAM, or zero-copy GGUF wire bytes for streaming/over-RAM - never dequantized). Attn/embed/output Q8_0; router/norms/biases F32"),
     "seed_oss":       ("seed_oss", "ByteDance Seed-OSS 36B dense; plain Llama layout, explicit head_dim from attention.key_length (!= hidden//heads), NEOX rope (no qk-permute); F32 q/k/v attention biases claimed explicitly (attention_bias derived from tensor presence); tie_word_embeddings derived from output.weight presence"),
     "smollm3":        ("llama",    "HuggingFace SmolLM3-3B; Llama backbone (reuses the LLAMA remap alias incl. qk-permute, NORM rope) with NoPE on every 4th layer - llama.cpp hardcodes the step to 4, matching mlx-lm's no_rope_layer_interval default, so no GGUF KV drives it"),
@@ -129,7 +130,7 @@ class UnsupportedArchError(Exception):
 # fails at build. Extend together with the loader dispatch.
 MTP_WIRED_MODEL_TYPES = frozenset({
     "qwen3_5", "qwen3_5_moe", "gemma4_text", "deepseek_v4", "hy_v3",
-    "muse_glimmer", "qwen4_exp",
+    "muse_glimmer", "qwen4_exp", "glm5_next",
 })
 
 
@@ -201,6 +202,10 @@ _VENDORED_MLX_LM_MODULES = {
     # nearest relative and has neither the NoPE/RoPE inversion nor the second
     # norm epsilon).
     "muse_glimmer": "gmlx.models.muse_glimmer.model",
+    # llama.cpp PR #27754 (GLM-5.3-Flash); no upstream mlx-lm class (kimi_k3
+    # is the nearest relative and has none of the indexer/hyper-connection/
+    # clamped-swiglu mechanisms).
+    "glm5_next": "gmlx.models.glm5_next.model",
 }
 
 

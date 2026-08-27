@@ -89,6 +89,9 @@ _DIGIT_CLAUSE_BY_PRE = {
     "qwen35": r"\p{N}", "qwen35moe": r"\p{N}",
     "llama-bpe": r"\p{N}{1,3}", "llama3": r"\p{N}{1,3}",
     "gpt-2": r"\p{N}+",
+    # llama.cpp CHATGLM4 (glm4/glm4moe/glm-dsa/glm5next GGUFs) is the generic
+    # pattern with cl100k digit grouping.
+    "glm4": r"\p{N}{1,3}", "chatglm-bpe": r"\p{N}{1,3}",
 }
 _DEFAULT_DIGIT_CLAUSE = r"\p{N}"
 
@@ -485,9 +488,16 @@ def _build_bytelevel_bpe(tokens: list[str], raw_merges: list[str],
         loadlog.verbose_print(
             f"[tokenizer] dropped {len(parsed) - len(merges)} merges whose "
             "parts/product are not vocab entries (control-token spellings)")
+    # glm4's tokenizer.json sets "ignore_merges": true - vocab entries are
+    # emitted directly without merge derivation. Without it greedy BPE cannot
+    # reach some entries: " CJK" spellings lose to a shorter first merge and
+    # stop short, inflating mixed Chinese-English token counts ~13%. Applied
+    # to pre=glm4 only (chatglm-bpe shares the split pattern but is a
+    # different tokenizer not confirmed to declare the flag).
     tok = Tokenizer(models.BPE(
         vocab=vocab, merges=merges,
-        byte_fallback=False, fuse_unk=False))
+        byte_fallback=False, fuse_unk=False,
+        ignore_merges=(pre_id == "glm4")))
     # tiktoken-family pres (kimi-k2) split raw codepoints - llama.cpp's
     # hand-coded splitter and the HF reference apply no unicode
     # normalization, and NFC here would merge decomposed combining marks

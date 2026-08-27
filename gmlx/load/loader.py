@@ -951,6 +951,13 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         import gmlx.models.kimi_k3 as kimi_k3_model
 
         kimi_k3_model.ensure_registered()
+    if mt == "glm5_next":
+        # mlx-lm ships no glm5_next module (llama.cpp PR #27754 arch); same
+        # vendored-registration pattern as kimi_k3, plus the deepseek_v4
+        # PoolingCache injection its hybrid cache depends on.
+        import gmlx.models.glm5_next.model as glm5_next_model
+
+        glm5_next_model.ensure_registered()
     if mt == "qwen4_exp":
         # Neither pinned mlx-lm nor mlx-vlm ships qwen4_exp (llama.cpp PR
         # #27742); same vendored-registration pattern as deepseek_v4, plus

@@ -98,6 +98,18 @@ ARCH_ALIAS = {
     # block. Targets follow gmlx.models.kimi_k3. ssm_a stays the folded
     # -exp(A_log) (a_folded) and must NOT go through ssm_a_to_a_log.
     "kimi-k3": "KIMI_K3",
+    # GLM-5.3-Flash (llama.cpp PR #27754 'glm5next'): hybrid KDA linear
+    # attention + nope-only MLA (per-layer head_count_kv, 0 = KDA) like
+    # kimi-k3, but with a pooled lightning indexer on the MLA layers, 4-stream
+    # hyper-connections (deepseek4-style hc_* tensors at the layer level), a
+    # low-rank KDA output gate (ssm_g_a/ssm_g_b), and a plain V3-style MoE
+    # (no latent projections, bias on mlp.gate). Rope-free => everything
+    # passes through. Complete override block; targets follow
+    # gmlx.models.glm5_next. The NextN/MTP block (blk.45) maps its nextn.*
+    # extras to canonical enums with no HF target (auto-SKIP); its standard
+    # tensors land on model.layers.45.* and glm5_next.sanitize drops them
+    # (the MTP drafter loads them separately).
+    "glm5next": "GLM5NEXT",
     "glm4moe": "GLM4MOE",
     # OpenAI gpt-oss (llama.cpp arch 'gpt-oss' / LLM_ARCH_OPENAI_MOE): MoE with
     # attention sinks, sliding/full alternating attention, and MXFP4 experts.
@@ -1429,6 +1441,142 @@ ARCH_PRIORITY_OVERRIDES: dict[str, list[tuple[re.Pattern, str | None, str]]] = {
         (re.compile(r"^blk\.(\d+)\.ffn_down_exps\.weight$"),
          "model.layers.{bid}.mlp.switch_mlp.down_proj.weight", "passthrough"),
         # Shared experts (full width, fused into one KimiK3MLP).
+        (re.compile(r"^blk\.(\d+)\.ffn_gate_shexp\.weight$"),
+         "model.layers.{bid}.mlp.shared_experts.gate_proj.weight",
+         "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_up_shexp\.weight$"),
+         "model.layers.{bid}.mlp.shared_experts.up_proj.weight",
+         "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_down_shexp\.weight$"),
+         "model.layers.{bid}.mlp.shared_experts.down_proj.weight",
+         "passthrough"),
+    ],
+    "GLM5NEXT": [
+        # GLM-5.3-Flash. Every per-layer tensor is claimed explicitly; only
+        # token_embd/output_norm/output resolve via the canonical map. All
+        # attention-side targets normalize onto self_attn.* (the KIMI_K3
+        # convention - NOT deepseek4's attn.*), including the indexer
+        # compressor. Rope-free (nope-only MLA), so no Q/K permute anywhere.
+        #
+        # MLA attention (absorbed layout, as DEEPSEEK2/KIMI_K3; k_b/v_b pass
+        # through onto the embed_q/unembed_out MultiLinears byte-identical).
+        (re.compile(r"^blk\.(\d+)\.attn_q_a\.weight$"),
+         "model.layers.{bid}.self_attn.q_a_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_q_a_norm\.weight$"),
+         "model.layers.{bid}.self_attn.q_a_layernorm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_q_b\.weight$"),
+         "model.layers.{bid}.self_attn.q_b_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_kv_a_mqa\.weight$"),
+         "model.layers.{bid}.self_attn.kv_a_proj_with_mqa.weight",
+         "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_kv_a_norm\.weight$"),
+         "model.layers.{bid}.self_attn.kv_a_layernorm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_k_b\.weight$"),
+         "model.layers.{bid}.self_attn.embed_q.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_v_b\.weight$"),
+         "model.layers.{bid}.self_attn.unembed_out.weight", "passthrough"),
+        # KDA in-projections (attn_q/k/v only exist on recurrent layers).
+        (re.compile(r"^blk\.(\d+)\.attn_q\.weight$"),
+         "model.layers.{bid}.self_attn.q_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_k\.weight$"),
+         "model.layers.{bid}.self_attn.k_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_v\.weight$"),
+         "model.layers.{bid}.self_attn.v_proj.weight", "passthrough"),
+        # Shared output projection (KDA n_head*v_head_dim == MLA
+        # n_head*v_head_dim == 8192, so both layer types share the target).
+        (re.compile(r"^blk\.(\d+)\.attn_output\.weight$"),
+         "model.layers.{bid}.self_attn.o_proj.weight", "passthrough"),
+        # KDA short conv1d weights: GGUF ships [d_conv, 1, d_inner] ne; mlx
+        # Conv1d wants (d_inner, d_conv, 1).
+        (re.compile(r"^blk\.(\d+)\.ssm_conv1d_q\.weight$"),
+         "model.layers.{bid}.self_attn.q_conv.conv.weight", "kda_conv_weight"),
+        (re.compile(r"^blk\.(\d+)\.ssm_conv1d_k\.weight$"),
+         "model.layers.{bid}.self_attn.k_conv.conv.weight", "kda_conv_weight"),
+        (re.compile(r"^blk\.(\d+)\.ssm_conv1d_v\.weight$"),
+         "model.layers.{bid}.self_attn.v_conv.conv.weight", "kda_conv_weight"),
+        # KDA decay path: f_b(f_a(x)) + dt_bias, folded a, per-head beta.
+        (re.compile(r"^blk\.(\d+)\.ssm_f_a\.weight$"),
+         "model.layers.{bid}.self_attn.f_a_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ssm_f_b\.weight$"),
+         "model.layers.{bid}.self_attn.f_b_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ssm_beta\.weight$"),
+         "model.layers.{bid}.self_attn.b_proj.weight", "passthrough"),
+        # ssm_a is the FOLDED -exp(A_log) (as KIMI_K3): keep folded, never
+        # ssm_a_to_a_log (log of a negative = NaN).
+        (re.compile(r"^blk\.(\d+)\.ssm_a$"),
+         "model.layers.{bid}.self_attn.a_folded", "flatten"),
+        (re.compile(r"^blk\.(\d+)\.ssm_dt\.bias$"),
+         "model.layers.{bid}.self_attn.dt_bias", "passthrough"),
+        # Low-rank KDA output gate (kimi-linear's factored g_a/g_b pair,
+        # unfused - unlike K3's full-rank ssm_g).
+        (re.compile(r"^blk\.(\d+)\.ssm_g_a\.weight$"),
+         "model.layers.{bid}.self_attn.g_a_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ssm_g_b\.weight$"),
+         "model.layers.{bid}.self_attn.g_b_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ssm_norm\.weight$"),
+         "model.layers.{bid}.self_attn.o_norm.weight", "passthrough"),
+        # Pooled lightning indexer (MLA layers): glm-dsa-style scorer (wq_b/
+        # wk/k_norm/weights_proj) plus a deepseek4-style kpool compressor
+        # (additive positional table + gate; no wkv, no norm - GLM pools the
+        # scorer's own keys).
+        (re.compile(r"^blk\.(\d+)\.indexer\.attn_q_b\.weight$"),
+         "model.layers.{bid}.self_attn.indexer.wq_b.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.indexer\.attn_k\.weight$"),
+         "model.layers.{bid}.self_attn.indexer.wk.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.indexer\.k_norm\.weight$"),
+         "model.layers.{bid}.self_attn.indexer.k_norm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.indexer\.k_norm\.bias$"),
+         "model.layers.{bid}.self_attn.indexer.k_norm.bias", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.indexer\.proj\.weight$"),
+         "model.layers.{bid}.self_attn.indexer.weights_proj.weight",
+         "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.indexer_compressor_ape\.weight$"),
+         "model.layers.{bid}.self_attn.indexer.compressor.ape", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.indexer_compressor_gate\.weight$"),
+         "model.layers.{bid}.self_attn.indexer.compressor.wgate.weight",
+         "passthrough"),
+        # Hyper-connections: raw fp32 arrays on HyperConnection (fn/base/
+        # scale, no `.weight`), layer-level attrs as in DEEPSEEK4. No
+        # output_hc_* head - the final collapse is an unweighted mean.
+        (re.compile(r"^blk\.(\d+)\.hc_attn_fn\.weight$"),
+         "model.layers.{bid}.attn_hc.fn", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.hc_attn_base\.weight$"),
+         "model.layers.{bid}.attn_hc.base", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.hc_attn_scale\.weight$"),
+         "model.layers.{bid}.attn_hc.scale", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.hc_ffn_fn\.weight$"),
+         "model.layers.{bid}.ffn_hc.fn", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.hc_ffn_base\.weight$"),
+         "model.layers.{bid}.ffn_hc.base", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.hc_ffn_scale\.weight$"),
+         "model.layers.{bid}.ffn_hc.scale", "passthrough"),
+        # Per-layer norms (act on the collapsed stream).
+        (re.compile(r"^blk\.(\d+)\.attn_norm\.weight$"),
+         "model.layers.{bid}.input_layernorm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_norm\.weight$"),
+         "model.layers.{bid}.post_attention_layernorm.weight", "passthrough"),
+        # Dense MLP (leading first_k_dense_replace layers; clamped swiglu is
+        # model-side).
+        (re.compile(r"^blk\.(\d+)\.ffn_gate\.weight$"),
+         "model.layers.{bid}.mlp.gate_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_up\.weight$"),
+         "model.layers.{bid}.mlp.up_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_down\.weight$"),
+         "model.layers.{bid}.mlp.down_proj.weight", "passthrough"),
+        # MoE router + sigmoid correction bias (both on mlp.gate, as
+        # DEEPSEEK2 - the model exposes selection as a gate submodule).
+        (re.compile(r"^blk\.(\d+)\.ffn_gate_inp\.weight$"),
+         "model.layers.{bid}.mlp.gate.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.exp_probs_b\.bias$"),
+         "model.layers.{bid}.mlp.gate.e_score_correction_bias", "passthrough"),
+        # Routed experts (already stacked) -> switch_mlp.
+        (re.compile(r"^blk\.(\d+)\.ffn_gate_exps\.weight$"),
+         "model.layers.{bid}.mlp.switch_mlp.gate_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_up_exps\.weight$"),
+         "model.layers.{bid}.mlp.switch_mlp.up_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_down_exps\.weight$"),
+         "model.layers.{bid}.mlp.switch_mlp.down_proj.weight", "passthrough"),
+        # Shared expert (full width).
         (re.compile(r"^blk\.(\d+)\.ffn_gate_shexp\.weight$"),
          "model.layers.{bid}.mlp.shared_experts.gate_proj.weight",
          "passthrough"),
