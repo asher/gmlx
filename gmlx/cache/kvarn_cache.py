@@ -1113,7 +1113,7 @@ class BatchKVarNKVCache(_base_cache()):
             N, offset=self._idx, left_padding=self.left_padding, **kwargs
         )
         if N == 1 and not any(v is not None for v in kwargs.values()):
-            from .quantized_sdpa_fix import _register_starts
+            from gmlx.upstream.quantized_sdpa_fix import _register_starts
 
             _register_starts(mask, self.left_padding)
         return mask
@@ -1221,7 +1221,7 @@ def convertible_kv_types():
     to BatchKVCache and converts that, so converting it here keeps the
     CLI and serve paths (and the stamp/salt conversion probe) agreeing
     on llama4-shaped stacks."""
-    from .cache_compat import cache_types
+    from .compat import cache_types
 
     return cache_types("KVCache") + cache_types("ChunkedKVCache")
 
@@ -1239,7 +1239,7 @@ def convert_prompt_cache(
     set, RotatingKVCache entries built for that window become
     KVarNRotatingKVCache too. Returns the number of layers converted;
     other cache kinds are left untouched."""
-    from .cache_compat import cache_types
+    from .compat import cache_types
 
     ensure_registered()
     kv_types = convertible_kv_types()

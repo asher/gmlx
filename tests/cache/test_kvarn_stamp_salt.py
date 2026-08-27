@@ -81,7 +81,7 @@ def _llama4():
 
 @pytest.fixture
 def _ops_ok(monkeypatch):
-    from gmlx import kvarn_sdpa
+    from gmlx.cache import kvarn_sdpa
 
     monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
     for k in ("GMLX_KVARN", "GMLX_KVARN_BITS", "KV_BITS", "KV_TAIL_TOKENS"):

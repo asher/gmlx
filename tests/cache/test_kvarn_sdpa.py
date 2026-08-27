@@ -143,7 +143,7 @@ def test_kill_switch_forces_materialize(monkeypatch):
     cache = _filled(700)
     q = _make_q(1)
     monkeypatch.setenv("GMLX_KVARN_SDPA", "0")
-    from gmlx import kvarn_sdpa
+    from gmlx.cache import kvarn_sdpa
 
     off = kvarn_attention(q, cache, SCALE, None)
     ref = kvarn_sdpa._prefill(q, cache, SCALE, None)

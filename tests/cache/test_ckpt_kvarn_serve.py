@@ -53,7 +53,7 @@ class _HybridLM:
 
 @pytest.fixture
 def _ops_ok(monkeypatch):
-    from gmlx import kvarn_sdpa
+    from gmlx.cache import kvarn_sdpa
 
     monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
     for k in ("GMLX_KVARN", "GMLX_KVARN_BITS", "KV_BITS", "KV_TAIL_TOKENS"):
@@ -115,7 +115,7 @@ def test_predicate_config_declines(_ops_ok, monkeypatch):
 
 
 def test_ensure_converts_in_place(_ops_ok, monkeypatch, capsys):
-    from gmlx import kvarn_serve
+    from gmlx.cache import kvarn_serve
 
     monkeypatch.setattr(kvarn_serve, "_CKPT_NOTED", [False])
     monkeypatch.setenv("KV_TAIL_TOKENS", "256")
@@ -258,7 +258,8 @@ import importlib
 # importlib, not `import mlx_vlm.generate.ar as ...`: the package exports
 # a `generate` function that shadows the submodule attribute.
 ar = importlib.import_module("mlx_vlm.generate.ar")
-from gmlx import kvarn_serve as ks, spec_engine
+import gmlx.spec.engine as spec_engine
+from gmlx.cache import kvarn_serve as ks
 spec_engine.install_full_prompt_mtp_prefill()
 ks.install_kvarn_serve()
 

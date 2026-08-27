@@ -28,7 +28,7 @@ import sys
 
 import mlx.core as mx
 
-from .envflags import env_bool
+from gmlx.envflags import env_bool
 from .kvarn_cache import BatchKVarNKVCache, KVarNView
 
 _MODEL_PREFIXES = ("mlx_lm.models.", "mlx_vlm.models.", "gmlx.")
@@ -191,7 +191,7 @@ def _batch_starts(cache, mask):
     masks fall back to the materialize path."""
     if not isinstance(mask, mx.array):
         return None
-    from .quantized_sdpa_fix import _registered_starts
+    from gmlx.upstream.quantized_sdpa_fix import _registered_starts
 
     return _registered_starts(mask)
 

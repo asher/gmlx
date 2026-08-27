@@ -67,7 +67,7 @@ def spec_cache_build():
 
 
 def _serve_widths_and_tail():
-    from .generation import _kvarn_widths
+    from gmlx.gen.generation import _kvarn_widths
 
     raw = os.environ.get("KV_BITS", "")
     try:
@@ -129,7 +129,7 @@ def _ppb_rebuild_declined(batch, kwargs):
         return "populated"
     if int(getattr(batch, "_processed_prompt_columns", 0) or 0):
         return "trimmed"
-    from .generation import kvarn_unsupported
+    from gmlx.gen.generation import kvarn_unsupported
     from .kvarn_cache import KVARN_BITS
 
     reason = kvarn_unsupported(batch.model)
@@ -237,8 +237,8 @@ def _install_make_cache(_ar, _gen):
                 ),
                 **kwargs,
             )
-        from .cache_compat import cache_types
-        from .generation import kvarn_unsupported
+        from .compat import cache_types
+        from gmlx.gen.generation import kvarn_unsupported
         from .kvarn_cache import (
             KVARN_BITS,
             BatchKVarNKVCache,

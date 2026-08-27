@@ -18,7 +18,7 @@ from mlx_vlm.models.cache import (  # noqa: E402
 )
 from mlx_vlm.server import generation as gen  # noqa: E402
 
-from gmlx import kvarn_serve  # noqa: E402
+from gmlx.cache import kvarn_serve  # noqa: E402
 from gmlx.cache.kvarn_cache import BatchKVarNKVCache  # noqa: E402
 
 _NEEDS_GPU = pytest.mark.skipif(
@@ -46,7 +46,7 @@ class _LayersLM:
 
 @pytest.fixture
 def _ops_ok(monkeypatch):
-    from gmlx import kvarn_sdpa
+    from gmlx.cache import kvarn_sdpa
 
     monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
     monkeypatch.delenv("GMLX_KVARN", raising=False)
@@ -159,7 +159,7 @@ def test_spec_build_suspends_kvarn(restorable, _ops_ok):
 def test_apc_gate(restorable, _ops_ok):
     from mlx_vlm import apc
 
-    from gmlx import kvarn_apc
+    from gmlx.cache import kvarn_apc
 
     class _FakeBG:
         def __init__(self, model, *args, **kwargs):

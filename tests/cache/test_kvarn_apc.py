@@ -16,7 +16,7 @@ pytest.importorskip("mlx_vlm.apc")
 from mlx_vlm import apc  # noqa: E402
 from mlx_vlm.models.cache import KVCache  # noqa: E402
 
-from gmlx import kvarn_apc  # noqa: E402
+from gmlx.cache import kvarn_apc  # noqa: E402
 from gmlx.cache.kvarn_cache import BatchKVarNKVCache, KVarNKVCache  # noqa: E402
 
 _NEEDS_GPU = pytest.mark.skipif(
