@@ -380,6 +380,13 @@ def y_scale(vals, logy, zero=False):
             return (math.log2(max(v, 1e-6)) - math.log2(lo)) / \
                    (math.log2(hi) - math.log2(lo) or 1.0)
         return ticks, to_f
+    # Anchor at zero only when the data actually reaches into the bottom
+    # fifth of the range. Two engine lines pinned high in a zero-anchored
+    # panel (decode 40 vs 43) are visually indistinguishable; clamping to
+    # the data range spends the panel height on the gap between the lines
+    # and lets the tick labels say the baseline is not zero.
+    if zero and lo > 0.20 * hi:
+        zero = False
     if zero:
         lo = 0.0
     pad = (hi - lo) * 0.08 or 1.0

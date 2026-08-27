@@ -86,20 +86,24 @@ def _stash_template_kwargs(args, request, _processor):
         or "enable_thinking" in spec_sampling
         or os.environ.get("MLX_VLM_ENABLE_THINKING") is not None
     )
-    if not thinking_explicit:
-        # The z.ai / GLM API spelling as a top-level request field:
-        # `thinking: {"type": "enabled"|"disabled"}`. A dedicated control,
-        # so it maps onto whatever switch this model's template reads.
-        from ..reasoning import map_thinking_controls, thinking_flag
+    # Dedicated request controls: `thinking` as the z.ai / GLM dict
+    # ({"type": "enabled"|"disabled"}) or a plain on/off/adaptive value
+    # (the chat client forwards --thinking verbatim), and a top-level
+    # `reasoning_effort`. Mapped onto whatever switch this model's
+    # template reads.
+    raw = getattr(request, "thinking", None) if not thinking_explicit else None
+    req_effort = getattr(request, "reasoning_effort", None)
+    if raw is not None or req_effort is not None:
+        from ..reasoning import map_thinking_controls
 
-        flag = thinking_flag(getattr(request, "thinking", None))
-        if flag is not None:
-            args.enable_thinking = flag
-            merged = map_thinking_controls(merged, flag, None, template,
-                                           warn=_warn_thinking)
-            thinking_explicit = True
-        else:
-            args.enable_thinking = True
+        merged = map_thinking_controls(merged, raw, req_effort, template,
+                                       warn=_warn_thinking)
+    if not thinking_explicit:
+        from ..reasoning import thinking_switch_flag
+
+        flag = thinking_switch_flag(raw) if raw is not None else None
+        args.enable_thinking = True if flag is None else flag
+        thinking_explicit = flag is not None
     if merged:
         args._kq_template_kwargs = merged
     args._kq_thinking_explicit = thinking_explicit
@@ -110,7 +114,14 @@ def install_chat_template_kwargs() -> None:
     """Forward arbitrary ``chat_template_kwargs`` (active profile + request, request
     wins) into ``apply_chat_template``. Two idempotent halves: a gen-args transform
     stashes the merged dict on the args object; a ``GenerationArguments.to_template_kwargs``
-    wrapper folds that stash into the kwargs mlx-vlm passes to the template."""
+    wrapper folds that stash into the kwargs mlx-vlm passes to the template.
+
+    The pop below leaves ``enable_thinking`` absent so the template's own
+    default governs; ``get_chat_template`` would then re-inject False
+    (mlx-vlm >= 0.6.15), so the render seam is guarded too."""
+    from ..reasoning import install_template_default_thinking
+
+    install_template_default_thinking()
     _install_gen_args_transform(_CTKW_FLAG, _stash_template_kwargs)
 
     gen = importlib.import_module("mlx_vlm.server.generation")
@@ -130,6 +141,53 @@ def install_chat_template_kwargs() -> None:
 
     to_template_kwargs.__dict__[_CTKW_FLAG] = True
     cls.to_template_kwargs = to_template_kwargs
+
+
+# OpenAI `developer` role for templates that do not handle it
+# The OpenAI API treats `developer` as the successor of `system`, and
+# harnesses (Codex-style clients) send it unconditionally. Chat templates
+# that predate the alias raise ("Unexpected message role.") instead of
+# rendering. Rewrite developer -> system only when the effective template
+# never mentions the role; a template that handles it gets the messages
+# verbatim.
+_ROLE_NORM_FLAG = "_kq_gguf_role_normalization"
+
+
+def _normalize_developer_roles(prompt, template: str):
+    """``prompt`` with `developer` roles rewritten to `system` when
+    ``template`` never mentions the role; otherwise (and for non-list
+    prompts) unchanged."""
+    if not isinstance(prompt, list) or "developer" in template:
+        return prompt
+    if not any(isinstance(m, dict) and m.get("role") == "developer"
+               for m in prompt):
+        return prompt
+    return [{**m, "role": "system"}
+            if isinstance(m, dict) and m.get("role") == "developer" else m
+            for m in prompt]
+
+
+def install_role_normalization() -> None:
+    """Rewrite the OpenAI `developer` role to `system` before render for
+    models whose chat template does not handle it. Wraps every captured
+    ``apply_chat_template`` binding; install last among the render wraps so
+    the retire capture memoizes the normalized messages. Idempotent."""
+    from ._common import _render_target_modules
+
+    def _wrap(fn):
+        def apply_chat_template(processor, config, prompt, *a, **kw):
+            override = kw.get("chat_template")
+            template = override if isinstance(override, str) and override \
+                else _model_template_text(processor)
+            return fn(processor, config,
+                      _normalize_developer_roles(prompt, template), *a, **kw)
+        apply_chat_template.__dict__[_ROLE_NORM_FLAG] = True
+        return apply_chat_template
+
+    for target in _render_target_modules():
+        fn = getattr(target, "apply_chat_template", None)
+        if fn is not None and not getattr(fn, _ROLE_NORM_FLAG, False):
+            target.apply_chat_template = _wrap(fn)
 
 
 # thinking_budget for models that generate <think> (not just pre-fill it)
@@ -259,7 +317,38 @@ _XTML_SECTION_MARKERS = (
 def _strip_xtml_sections(content: str) -> str:
     for m in _XTML_SECTION_MARKERS:
         content = content.replace(m, "")
-    return content.strip()
+    return _trim_content_ws(content)
+
+
+def _trim_content_ws(text: str) -> str:
+    from ..reasoning import trim_content_ws
+    return trim_content_ws(text)
+
+
+def _split_thinking_keep_indent(rs, cls, text, start_token, end_token):
+    """rs._split_thinking with content whitespace preserved. Same marker
+    walk as stock; only the content-side .strip() calls are narrowed
+    (upstream body seam-fingerprinted via app._split_thinking_text)."""
+    if not text:
+        return None, text
+    for start_marker, end_marker in cls._build_open_close_markers(
+            start_token, end_token):
+        start = text.find(start_marker)
+        end = text.find(end_marker, start if start >= 0 else 0)
+        if 0 <= start < end:
+            reasoning = text[start + len(start_marker):end].strip()
+            content = rs._strip_content_markers(
+                text[:start] + text[end + len(end_marker):])
+            return reasoning or None, _trim_content_ws(content)
+        if end_marker in text:
+            reasoning, content = text.split(end_marker, 1)
+            reasoning = rs._clean_reasoning(reasoning, start_marker)
+            return (reasoning or None,
+                    _trim_content_ws(rs._strip_content_markers(content)))
+        if start_marker in text:
+            reasoning = rs._clean_reasoning(text, start_marker)
+            return reasoning or None, ""
+    return None, _trim_content_ws(rs._strip_content_markers(text))
 
 _LAST_RENDERED_PROMPT: contextvars.ContextVar = contextvars.ContextVar(
     "kq_last_rendered_prompt", default=None)
@@ -296,11 +385,13 @@ def install_stream_thinking_seed() -> None:
                 self.in_thinking = _prompt_tail_opens_thinking(
                     prompt, self.open_close_markers)
                 if prompt.rstrip().endswith("<|start|>assistant"):
-                    # harmony (gpt-oss): the state machine's open/close
-                    # pairs cannot express channel routing, so the stream
-                    # splits through the REPL's marker filter instead.
+                    # harmony (gpt-oss) and ATEM (Muse Glimmer): the state
+                    # machine's open/close pairs cannot express channel or
+                    # recipient routing, so the stream splits through the
+                    # REPL's marker filter instead. Both prompts stop
+                    # mid-header, so the filter starts inside one.
                     from ..reasoning import ReasoningFilter
-                    self._kq_harmony = ReasoningFilter()
+                    self._kq_harmony = ReasoningFilter(start_in_header=True)
                     self._kq_harmony_closed = False
 
         __init__.__dict__[_STREAM_SEED_FLAG] = True
@@ -310,10 +401,10 @@ def install_stream_thinking_seed() -> None:
         original_feed = cls.feed
         delta_cls = rs.ThinkingStreamDelta
 
-        def feed(self, text):
+        def feed(self, text, **kw):
             filt = getattr(self, "_kq_harmony", None)
             if filt is None:
-                return original_feed(self, text)
+                return original_feed(self, text, **kw)
             spans = filt.feed(text or "")
             reasoning = "".join(t for t, m in spans if m == "reason")
             content = "".join(t for t, m in spans if m == "answer")
@@ -352,22 +443,32 @@ def install_stream_thinking_seed() -> None:
     split = getattr(app, "_split_thinking_text", None)
     if split is not None and not getattr(split, _STREAM_SEED_FLAG, False):
         def _split_thinking_text(text, thinking_start_token=None,
-                                 thinking_end_token=None):
-            if text and "<|channel|>" in text:
-                # harmony (gpt-oss): the stock splitter knows none of these
-                # markers and returns the raw markup as content, which the
-                # model's own chat template rejects with a 500 once a client
-                # sends the reply back as history. (Gemma's lopsided
-                # "<|channel>thought" lacks the closing pipe, so this gate
-                # cannot misfire on it.)
+                                 thinking_end_token=None,
+                                 starts_in_thinking=False, processor=None):
+            rendered = _LAST_RENDERED_PROMPT.get()
+            in_header = bool(rendered) and rendered.rstrip().endswith(
+                "<|start|>assistant")
+            if text and ("<|channel|>" in text or (in_header
+                                                   and "<|message|>" in text)):
+                # harmony (gpt-oss) and ATEM (Muse Glimmer): the stock splitter
+                # knows none of these markers and returns the raw markup as
+                # content, which the model's own chat template rejects with a
+                # 500 once a client sends the reply back as history. ATEM emits
+                # no channel marker at all, so it is recognised by the
+                # mid-header prompt tail plus a header close in the reply.
+                # (Gemma's lopsided "<|channel>thought" lacks the closing pipe,
+                # so this gate cannot misfire on it.)
                 from ..reasoning import split_harmony_reply
-                return split_harmony_reply(text)
-            reasoning, content = split(
-                text, thinking_start_token, thinking_end_token)
-            if reasoning is None and content and retire_key.truncated_thinking(
-                    text, cls._build_open_close_markers(
-                        thinking_start_token, thinking_end_token),
-                    _LAST_RENDERED_PROMPT.get()):
+                return split_harmony_reply(text, start_in_header=in_header)
+            # Stock walk with content whitespace preserved: the stock
+            # splitter's .strip() eats first-line code indent.
+            reasoning, content = _split_thinking_keep_indent(
+                rs, cls, text, thinking_start_token, thinking_end_token)
+            if reasoning is None and content and (
+                    starts_in_thinking or retire_key.truncated_thinking(
+                        text, cls._build_open_close_markers(
+                            thinking_start_token, thinking_end_token),
+                        _LAST_RENDERED_PROMPT.get())):
                 return content, ""
             if thinking_start_token == _XTML_THINK_OPEN and content:
                 content = _strip_xtml_sections(content)
@@ -375,6 +476,9 @@ def install_stream_thinking_seed() -> None:
 
         _split_thinking_text.__dict__[_STREAM_SEED_FLAG] = True
         app._split_thinking_text = _split_thinking_text
+        # The /v1/responses output builder calls the responses_state module
+        # global directly; give it the same splitter.
+        rs._split_thinking = _split_thinking_text
 
 
 # ignore-eos: forced-length decode (server-level)
@@ -593,6 +697,22 @@ def install_openai_stop_sequences() -> None:
 
     _wrap_post_routes(app, _CHAT_PATHS, _STOP_FLAG, _make)
 
+    # Anthropic dialect: upstream cuts at the stop sequence verbatim, but the
+    # Messages API trims the whitespace run preceding a stop hit. Wrap the
+    # module helper so a cut also rstrips; no-hit text passes through.
+    an = importlib.import_module("mlx_vlm.server.anthropic")
+    stock_apply = getattr(an, "_apply_stop_sequences", None)
+    if stock_apply is not None and not getattr(
+            stock_apply, _STOP_FLAG, False):
+        def _apply_stop_sequences(text, stop_sequences):
+            out, seq = stock_apply(text, stop_sequences)
+            if seq is not None:
+                out = out.rstrip()
+            return out, seq
+
+        _apply_stop_sequences.__dict__[_STOP_FLAG] = True
+        an._apply_stop_sequences = _apply_stop_sequences
+
 
 def install_vanilla_stream_chunks() -> None:
     """Serialize streaming chat-completion chunks as byte-vanilla OpenAI.
@@ -624,3 +744,133 @@ def install_vanilla_stream_chunks() -> None:
 
     model_dump_json.__dict__[_PATCH_FLAG] = True
     chunk_cls.model_dump_json = model_dump_json
+
+    # Non-stream twin (mlx-vlm >= 0.6.15): GenerationTimings grew optional
+    # draft_* fields, so the ChatResponse body carries timings nulls unless
+    # they are stripped. Scoped to timings: choices[].logprobs stays null
+    # per the OpenAI wire.
+    resp_cls = getattr(schemas, "ChatResponse", None)
+    if resp_cls is not None and not getattr(
+            resp_cls.model_dump, _PATCH_FLAG, False):
+        original_dump = resp_cls.model_dump
+
+        def model_dump(self, **kwargs):
+            d = original_dump(self, **kwargs)
+            t = d.get("timings")
+            if isinstance(t, dict):
+                d["timings"] = {k: v for k, v in t.items() if v is not None}
+            return d
+
+        model_dump.__dict__[_PATCH_FLAG] = True
+        resp_cls.model_dump = model_dump
+
+
+# Per-chunk stream timings
+# A live client display needs the server's exact cumulative output-token count
+# while a reply streams; the OpenAI shape only carries it in the final usage
+# chunk, and counting SSE events undercounts whenever one chunk carries several
+# tokens (an MTP verify round) or a token's delta is suppressed (thinking
+# markers, tool-call markup). The engine's token items do carry exact counts
+# (``token_count``), and each passes through ``GenerationMetrics.record_chunk``
+# right before its chunk is yielded, so the running total is available at the
+# route without touching the upstream generator. This patch mirrors
+# llama.cpp's convention: a request with ``timings_per_token: true`` gets a
+# ``timings`` object on each streamed content chunk, here with the running
+# ``predicted_n``. The count crosses from ``record_chunk`` to the route's SSE
+# rewrite through a per-request contextvar cell: the route wrapper sets it in
+# the request task, and starlette's response task inherits that context.
+# Off by default; without the request field the stream is byte-identical.
+_STREAM_TIMINGS_FLAG = "_kq_gguf_stream_timings_patch"
+
+_stream_count_cell: contextvars.ContextVar = contextvars.ContextVar(
+    "gmlx_stream_token_count", default=None)
+
+
+def _count_record_chunk(original):
+    def record_chunk(self, chunk):
+        original(self, chunk)
+        cell = _stream_count_cell.get()
+        if cell is None:
+            return
+        n = getattr(chunk, "generation_tokens", None)
+        if n:                       # stream_generate results: cumulative
+            cell["n"] = int(n)
+        else:                       # engine tokens: per-item count
+            cell["n"] += int(getattr(chunk, "token_count", 1) or 1)
+    record_chunk.__dict__[_STREAM_TIMINGS_FLAG] = True
+    return record_chunk
+
+
+async def _timings_sse(body, cell):
+    """Wrap a chat-completions SSE body iterator: each content chunk gains a
+    ``timings`` object carrying the running ``predicted_n``. Usage-only and
+    role-only chunks pass through untouched."""
+    import json
+
+    pending = ""
+    try:
+        async for raw in body:
+            pending += raw.decode() if isinstance(raw, (bytes, bytearray)) else raw
+            while "\n\n" in pending:
+                event, pending = pending.split("\n\n", 1)
+                yield _stamp_timings_event(event, cell, json) + "\n\n"
+        if pending:
+            yield pending
+    finally:
+        aclose = getattr(body, "aclose", None)
+        if aclose is not None:
+            try:
+                await aclose()
+            except Exception:
+                pass
+
+
+def _stamp_timings_event(event: str, cell, json) -> str:
+    if not event.startswith("data: "):
+        return event
+    payload = event[len("data: "):]
+    if payload.strip() == "[DONE]":
+        return event
+    try:
+        obj = json.loads(payload)
+    except ValueError:
+        return event
+    choices = obj.get("choices") or []
+    if not choices:
+        return event                            # final usage chunk
+    delta = choices[0].get("delta") or {}
+    if not (delta.get("content") or delta.get("reasoning")
+            or delta.get("tool_calls")):
+        return event                            # role-only or empty delta
+    obj["timings"] = {"predicted_n": cell["n"]}
+    return "data: " + json.dumps(obj)
+
+
+def install_stream_timings() -> None:
+    """Honour ``timings_per_token`` on streamed chat completions: each content
+    chunk carries ``timings.predicted_n``, the exact cumulative output-token
+    count (MTP verify rounds included). Idempotent per route."""
+    from starlette.responses import StreamingResponse
+
+    generation = importlib.import_module("mlx_vlm.server.generation")
+    metrics_cls = generation.GenerationMetrics
+    if not getattr(metrics_cls.record_chunk, _STREAM_TIMINGS_FLAG, False):
+        metrics_cls.record_chunk = _count_record_chunk(metrics_cls.record_chunk)
+
+    app = importlib.import_module("mlx_vlm.server.app").app
+
+    def _make(original):
+        async def endpoint(request, http_request):
+            want = bool(getattr(request, "timings_per_token", False)) \
+                and bool(getattr(request, "stream", False))
+            if not want:
+                return await original(request, http_request)
+            cell = {"n": 0}
+            _stream_count_cell.set(cell)
+            result = await original(request, http_request)
+            if isinstance(result, StreamingResponse):
+                result.body_iterator = _timings_sse(result.body_iterator, cell)
+            return result
+        return endpoint
+
+    _wrap_post_routes(app, _CHAT_PATHS, _STREAM_TIMINGS_FLAG, _make)

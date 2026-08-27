@@ -205,3 +205,24 @@ class TestByteBudget:
         cache.clear()
         assert cache.total_bytes == 0
         assert len(cache) == 0
+
+
+class TestSpecPrefixStats:
+    def test_counters_and_reset_contract(self):
+        import gmlx.prefix_cache as pc
+
+        pc.spec_prefix_stats_clear()
+        cache = SpecPrefixCache()
+        ids = mx.array(list(range(40)))
+        cache.store(ids, [_fill_kv(40)], mx.zeros((1, 1, 4)))
+        hit = cache.lookup(mx.array(list(range(41))))
+        assert hit is not None
+        s = pc.spec_prefix_stats()
+        assert s["spec_prefix_stores"] == 1
+        assert s["spec_prefix_hits"] == 1
+        assert s["spec_prefix_hit_tokens"] == 40
+        # /v1/cache/reset drops live entries; counters clear separately
+        pc.clear_all_spec_prefix_caches()
+        assert len(cache) == 0
+        pc.spec_prefix_stats_clear()
+        assert pc.spec_prefix_stats()["spec_prefix_hits"] == 0

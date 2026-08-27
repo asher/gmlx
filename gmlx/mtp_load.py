@@ -17,6 +17,7 @@ import mlx.nn as nn
 import mlx_kquant as kq
 
 from . import loadlog
+from .dtypes import activation_dtype, activation_dtype_name
 from .envflags import env_int
 from .gdn_patches import (
     _needs_tiled_v_patch,
@@ -27,6 +28,7 @@ from .gdn_patches import (
 from .gguf_meta import first_nonzero_int, read_int
 from .loader import (
     _FP32_KEEP_BY_MODEL_TYPE,
+    _active_now,
     _install_and_load,
     _resolve_chat_template,
     build_model,
@@ -37,6 +39,7 @@ from .loader import (
     remap_arrays,
     remap_gemma4_assistant_arrays,
     remap_mtp_arrays,
+    weights_source_key,
 )
 from .native_fp import _strip_weight
 from .populate import maybe_populate_for_load
@@ -75,27 +78,59 @@ _MTP_WIDTH_LIMIT_BY_MODEL_TYPE = {
     "hy_v3": 1,
     "deepseek_v4": 1,
     "deepseek4": 1,
+    "muse_glimmer": 1,
+    # Qwen4ExpMTPDrafter.make_cache raises on batched left_padding.
+    "qwen4_exp": 1,
 }
 # Unknown arch: cap conservatively rather than opting a new family into the
 # losing regime. Uncapped is earned by measurement, not inherited by default.
 _MTP_WIDTH_CAP_FALLBACK = 2
 
+# Drafted depth per DFlash round: the GGUF's trained block, capped at 16.
+# Verify cost on the 30B target is flat from 8 to 16 rows (the kquant split-K
+# tile holds 16 rows in one MMA row-tile). Row 17 starts a second row-tile and
+# costs ~55% more.
+_MUSE_GLIMMER_DFLASH_BLOCK_DEFAULT = 16
+# Drafted depth per round by dflash container. None drafts the GGUF's trained
+# block (DFlash2: Qwen3.8 8, Muse 16); --draft-block-size moves it below that.
+_DFLASH_BLOCK_DEFAULT = {
+    "muse_glimmer": _MUSE_GLIMMER_DFLASH_BLOCK_DEFAULT,
+    "dflash2": None,
+}
+
+
+def _drafter_block_depths(native_total, preferred_total=None) -> tuple[int, int]:
+    """Return (deepest block the drafter can produce, depth drafted per round).
+
+    The runtime depth is the family's preferred depth, bounded by the ceiling.
+    --draft-block-size moves it at run time.
+    """
+    native_total = int(native_total)
+    preferred = min(int(preferred_total or native_total), native_total)
+    return native_total, max(2, min(preferred, native_total))
+
 
 def _stamp_mtp_width_cap(drafter, model_type: str, *, target=None,
+                         hard_limit: int | None = None,
                          log=loadlog.verbose_print):
     """Stamp mtp_width_cap / mtp_width_limit for the runtime gate.
 
     Call on the raw drafter BEFORE any DrafterAdapter wrap: the adapter
     forwards attribute reads but a setattr would land on the wrapper.
     A routed-expert ``target`` caps at 1 whatever its family default says.
+    ``hard_limit`` is a drafter-imposed ceiling (the B=1-only DFlash
+    drafters) that replaces the family's table row.
     MLX_VLM_GGUF_SPEC_WIDTH_CAP (per-model config, load-window env) overrides
-    both and is itself clamped by the family's hard limit.
+    both and is itself clamped by the hard limit.
     """
-    limit = _MTP_WIDTH_LIMIT_BY_MODEL_TYPE.get(model_type, 0)
+    if hard_limit is not None:
+        limit = int(hard_limit)
+    else:
+        limit = _MTP_WIDTH_LIMIT_BY_MODEL_TYPE.get(model_type, 0)
     cap = _MTP_WIDTH_CAP_BY_MODEL_TYPE.get(model_type)
     if cap is None:
         cap = limit if limit >= 1 else _MTP_WIDTH_CAP_FALLBACK
-        if model_type not in _MTP_WIDTH_LIMIT_BY_MODEL_TYPE:
+        if hard_limit is None and model_type not in _MTP_WIDTH_LIMIT_BY_MODEL_TYPE:
             log(f"[mtp] width cap: model_type {model_type!r} unmapped, "
                 f"defaulting to {cap} (uncapped is measurement-earned)")
     # MoE verify multiplies the expert union each drafted position touches, and
@@ -136,6 +171,7 @@ def _load_mtp_drafter(
     n_head: int | None = None,
     n_head_kv: int | None = None,
     log=loadlog.verbose_print,
+    source_key: tuple | None = None,
 ):
     """Build + load + bind the native-head MTP drafter (seam 4).
 
@@ -213,6 +249,7 @@ def _load_mtp_drafter(
         log=log,
         sanitize=False,
         fp32_keep=_FP32_KEEP_BY_MODEL_TYPE.get(model_type, ()),
+        source_key=source_key,
     )
     drafter.bind(target)
     from .drafter_protocol import validate_drafter
@@ -295,6 +332,7 @@ def _load_gemma4_assistant_drafter(
     """
     import importlib
 
+    active_before = _active_now()
     arrays, kquant_meta, d_arch, meta, tensor_shapes = load_gguf_wire_bytes(
         draft_gguf_path, zero_copy=zero_copy
     )
@@ -325,29 +363,32 @@ def _load_gemma4_assistant_drafter(
     d_weights, d_meta, d_stats = remap_gemma4_assistant_arrays(arrays, kquant_meta)
     log(f"[mtp] drafter remap: {d_stats}")
 
-    _install_and_load(drafter, d_weights, d_meta, log=log, sanitize=False)
+    _install_and_load(drafter, d_weights, d_meta, log=log, sanitize=False,
+                      source_key=weights_source_key(draft_gguf_path),
+                      active_before=active_before)
     # Ordered-embeddings drafters (E2B/E4B) route the LM head through a
     # MaskedEmbedder that reads embed_tokens.weight as a [vocab, hidden] float
     # matrix (gathers candidate rows then a dense matmul). A kquant wire-byte
     # embed table has row width = bytes-per-row (e.g. 272 for a 256-dim Q8_0 row),
-    # not hidden, so dequantize it to bf16 before bind() - bind closes over
-    # embed_tokens.weight for the head. The centroids Linear stays kquant (it's a
-    # plain matmul). The table is small (vocab x hidden_size), so bf16 is cheap.
+    # not hidden, so dequantize it to the activation dtype before bind() - bind
+    # closes over embed_tokens.weight for the head. The centroids Linear stays
+    # kquant (it's a plain matmul). The table is small (vocab x hidden_size), so
+    # a dense 16-bit copy is cheap.
     if drafter_cfg.get("use_ordered_embeddings"):
         from .modules import KQuantEmbedding
 
         emb = drafter.model.embed_tokens
         if isinstance(emb, KQuantEmbedding):
             w = kq.dequantize(emb["weight"], emb["scales"], emb.kquant_type).astype(
-                mx.bfloat16
+                activation_dtype()
             )
             new_emb = nn.Embedding(emb.num_embeddings, emb.dims)
             new_emb.weight = w
             drafter.model.embed_tokens = new_emb
             mx.eval(new_emb.weight)
             log(
-                f"[mtp] drafter embed_tokens -> bf16 for ordered-embeddings "
-                f"head ({w.shape[0]}x{w.shape[1]})"
+                f"[mtp] drafter embed_tokens -> {activation_dtype_name()} for "
+                f"ordered-embeddings head ({w.shape[0]}x{w.shape[1]})"
             )
     drafter.bind(target)
 
@@ -474,10 +515,17 @@ def _load_deepseek4_mtp_drafter(
     loader shape; the block config is the target's config with
     ``compress_ratios`` post-init extended by the MTP layer's ratio 0
     (``ModelArgs.__post_init__`` truncates to num_hidden_layers)."""
+    active_before = _active_now()
     arrays, kquant_meta, d_arch, _meta, _shapes = load_gguf_wire_bytes(
         draft_gguf_path, zero_copy=zero_copy
     )
     if d_arch == "dflash":
+        container = dflash_container(arrays)
+        if container != "dspark":
+            raise ValueError(
+                f"{draft_gguf_path}: this dflash GGUF holds the {container} "
+                f"drafter, which a deepseek_v4 target cannot drive"
+            )
         arrays, kquant_meta, _meta = normalize_dflash_arrays(
             arrays, kquant_meta, _meta
         )
@@ -490,6 +538,7 @@ def _load_deepseek4_mtp_drafter(
             arrays=arrays,
             kquant_meta=kquant_meta,
             meta=_meta,
+            active_before=active_before,
             log=log,
         )
     if d_arch != "deepseek4_mtp_support":
@@ -531,6 +580,8 @@ def _load_deepseek4_mtp_drafter(
         log=log,
         sanitize=False,
         fp32_keep=_FP32_KEEP_BY_MODEL_TYPE["deepseek_v4"],
+        source_key=weights_source_key(draft_gguf_path),
+        active_before=active_before,
     )
     drafter.bind(target)
 
@@ -540,6 +591,69 @@ def _load_deepseek4_mtp_drafter(
     log("[mtp] drafter bound to target embeddings + LM head")
     _patch_draft_head_quantized(drafter)
     _stamp_mtp_width_cap(drafter, "deepseek_v4", target=target, log=log)
+    return drafter
+
+
+def _load_qwen4exp_mtp_drafter(
+    draft_gguf_path: str,
+    target,
+    target_config_dict: dict,
+    *,
+    zero_copy: bool = True,
+    log=loadlog.verbose_print,
+):
+    """Build + load + bind the Qwen3.8-Flash-Next MTP drafter from its
+    companion GGUF (arch ``qwen4exp-mtp``: the HF ``mtp.*`` tree, tensor
+    names already in the drafter's layout under ``mtp.``)."""
+    active_before = _active_now()
+    arrays, kquant_meta, d_arch, meta, _shapes = load_gguf_wire_bytes(
+        draft_gguf_path, zero_copy=zero_copy
+    )
+    from .qwen4_exp_model import ModelArgs, ensure_registered
+    from .qwen4_exp_mtp import (
+        MTP_ARCH,
+        Qwen4ExpMTPConfig,
+        Qwen4ExpMTPDrafter,
+        remap_qwen4exp_mtp_arrays,
+    )
+
+    if d_arch != MTP_ARCH:
+        raise ValueError(
+            f"{draft_gguf_path}: expected a {MTP_ARCH} drafter GGUF for a "
+            f"qwen4_exp target, got arch {d_arch!r}"
+        )
+    log(f"[mtp] drafter gguf ({d_arch}): {len(arrays)} arrays, "
+        f"{len(kquant_meta)} kquant")
+
+    ensure_registered()
+    args = ModelArgs.from_dict(target_config_dict)
+    ratio = int(meta.get(f"{MTP_ARCH}.attention.compress_ratio", 4) or 0)
+    drafter = Qwen4ExpMTPDrafter(Qwen4ExpMTPConfig(
+        text=args, block_size=env_int("GMLX_Q4_MTP_BLOCK", 4),
+        compress_ratio=ratio))
+    log(f"[mtp] drafter: qwen4exp MTP layer, QSA ratio={ratio} "
+        f"block_size={drafter.config.block_size}")
+
+    d_weights, d_meta, d_stats = remap_qwen4exp_mtp_arrays(arrays, kquant_meta)
+    log(f"[mtp] drafter remap: {d_stats}")
+    _install_and_load(
+        drafter,
+        d_weights,
+        d_meta,
+        log=log,
+        sanitize=False,
+        fp32_keep=_FP32_KEEP_BY_MODEL_TYPE["qwen4_exp"],
+        source_key=weights_source_key(draft_gguf_path),
+        active_before=active_before,
+    )
+    drafter.bind(target)
+
+    from .drafter_protocol import validate_drafter
+
+    validate_drafter(drafter)
+    log("[mtp] drafter bound to target embeddings + LM head")
+    _patch_draft_head_quantized(drafter)
+    _stamp_mtp_width_cap(drafter, "qwen4_exp", target=target, log=log)
     return drafter
 
 
@@ -629,6 +743,413 @@ def _dflash_rename(name: str, last_stage: int) -> str:
             f"(the drafter tensor set is closed)"
         )
     return mapped.replace("{L}", str(last_stage)) + suffix
+
+
+def dflash_container(arrays: dict) -> str:
+    """Which drafter a llama.cpp ``dflash`` GGUF actually holds.
+
+    The arch tag is shared: llama.cpp packages the DeepSeek-V4 DSpark drafter,
+    the Muse Glimmer DFlash one and the DFlash 2 drafters under ``dflash``,
+    and picks its graph on header keys. Tensor presence is the equivalent
+    split here - DSpark carries the markov/confidence heads and MLA's
+    ``attn_q_a``, DFlash 2 the candidate selector, Muse Glimmer plain
+    ``attn_q`` with per-head QK-norms and no hyper-connections.
+    """
+    if any(n.startswith(("markov_w1", "markov_w2", "conf_proj", "output_hc_"))
+           or ".attn_q_a" in n for n in arrays):
+        return "dspark"
+    if any(n.startswith("selector_hidden") for n in arrays):
+        return "dflash2"
+    if any(".attn_q_norm" in n for n in arrays):
+        return "muse_glimmer"
+    raise RuntimeError(
+        "dflash GGUF matches no known drafter container (expected DSpark's "
+        "markov/confidence heads, DFlash 2's selector, or Muse Glimmer's "
+        "attn_q_norm)"
+    )
+
+
+# The closed tensor set of a DFlash drafter, onto gmlx's DFlashDrafter tree.
+# Per-block leaves (blk.{i}.<key> -> layers.{i}.<value>):
+_DFLASH_BLK = {
+    "attn_norm": "input_layernorm.weight",
+    "attn_q": "self_attn.q_proj.weight",
+    "attn_k": "self_attn.k_proj.weight",
+    "attn_v": "self_attn.v_proj.weight",
+    "attn_output": "self_attn.o_proj.weight",
+    "attn_q_norm": "self_attn.q_norm.weight",
+    "attn_k_norm": "self_attn.k_norm.weight",
+    "ffn_norm": "post_attention_layernorm.weight",
+    "ffn_gate": "mlp.gate_proj.weight",
+    "ffn_up": "mlp.up_proj.weight",
+    "ffn_down": "mlp.down_proj.weight",
+}
+# DFlash 2 adds the grouped dynamic convolutions around both sublayers. The
+# F32 base kernel has no ``.weight`` suffix on either side.
+_DFLASH2_BLK = {
+    "attn_conv_base": "attention_conv.base_kernel",
+    "attn_conv_proj": "attention_conv.kernel_projection.weight",
+    "ffn_conv_base": "mlp_conv.base_kernel",
+    "ffn_conv_proj": "mlp_conv.kernel_projection.weight",
+}
+# Drafter-level leaves. ``enc.output_norm`` closes the encoder that fuses the
+# target captures (llama.cpp's dflash graph<true>); ``output_norm`` is the
+# decoder's final norm before the borrowed LM head.
+_DFLASH_ROOT = {
+    "fc": "fc.weight",
+    "enc.output_norm": "hidden_norm.weight",
+    "output_norm": "norm.weight",
+}
+_DFLASH2_ROOT = {
+    "selector_hidden": "candidate_selector.hidden_projection.weight",
+    "selector_predecessor": "candidate_selector.predecessor_codebook.weight",
+    "selector_successor": "candidate_selector.successor_codebook.weight",
+}
+_DFLASH_CONTAINER_MAPS = {
+    "muse_glimmer": (_DFLASH_BLK, _DFLASH_ROOT),
+    "dflash2": ({**_DFLASH_BLK, **_DFLASH2_BLK}, {**_DFLASH_ROOT, **_DFLASH2_ROOT}),
+}
+# Which target families a container can drive. A load-time check; the
+# arch-tag filter (arch_table.drafter_serves) is discovery's pairing-time one.
+_DFLASH_CONTAINER_TARGETS = {
+    "dflash2": ("qwen3_5", "qwen3_5_text", "muse_glimmer"),
+    "muse_glimmer": ("muse_glimmer",),
+}
+
+
+def remap_dflash_arrays(arrays: dict, kquant_meta: dict, container: str):
+    """Remap a ``dflash`` GGUF of ``container`` onto the drafter param tree.
+    Closed tensor set: unknown names are hard errors (converter drift must
+    surface at load, not as an unfilled param)."""
+    blk_map, root_map = _DFLASH_CONTAINER_MAPS[container]
+    hf_weights: dict[str, mx.array] = {}
+    hf_kquant_meta: dict[str, str] = {}
+    stats = {"mapped": 0}
+    for name, arr in arrays.items():
+        if name.endswith((".scales", ".biases")):
+            continue
+        base = name[: -len(".weight")] if name.endswith(".weight") else name
+        if base.startswith("blk."):
+            _, idx, leaf = base.split(".", 2)
+            target = blk_map.get(leaf)
+            if target is not None:
+                target = f"layers.{idx}.{target}"
+        else:
+            target = root_map.get(base)
+        if target is None:
+            raise RuntimeError(
+                f"{container} dflash remap: unknown tensor {name!r} "
+                f"(the drafter tensor set is closed)"
+            )
+        hf_weights[target] = arr
+        codec = kquant_meta.get(name)
+        if codec is not None:
+            hf_weights[_strip_weight(target) + ".scales"] = arrays.get(
+                _strip_weight(name) + ".scales")
+            hf_kquant_meta[target] = codec
+        stats["mapped"] += 1
+    return hf_weights, hf_kquant_meta, stats
+
+
+def remap_muse_glimmer_dflash_arrays(arrays: dict, kquant_meta: dict):
+    return remap_dflash_arrays(arrays, kquant_meta, "muse_glimmer")
+
+
+def _dflash_config_from_meta(
+    draft_gguf_path: str,
+    meta: dict,
+    target_config_dict: dict,
+    container: str,
+    *,
+    arrays: dict,
+    shapes: dict | None = None,
+):
+    """DFlashConfig for a ``dflash`` GGUF against its target, plus the
+    capture layer ids. Drafter header keys win over the target's for the
+    logit tail; ``dflash.attention.causal`` absent reads as non-causal
+    (llama.cpp's reading of the same header)."""
+    from .dflash_drafter import DFlashConfig
+
+    family = target_config_dict.get("model_type")
+    allowed = _DFLASH_CONTAINER_TARGETS[container]
+    if family is not None and family not in allowed:
+        raise ValueError(
+            f"{draft_gguf_path}: the {container} drafter serves "
+            f"{'/'.join(allowed)} targets, not {family}"
+        )
+    layers = meta.get("dflash.target_layers")
+    block_size = meta.get("dflash.block_size")
+    mask_token_id = meta.get("tokenizer.ggml.mask_token_id")
+    if not layers or block_size is None or mask_token_id is None:
+        raise ValueError(
+            f"{draft_gguf_path}: dflash.target_layers / dflash.block_size / "
+            f"tokenizer.ggml.mask_token_id missing - re-run the converter"
+        )
+    # llama.cpp indexes the residual ENTERING a layer, so the converter writes
+    # the HF ids (layer outputs) one higher. Undo that: the capture seam takes
+    # layer-output indices.
+    layer_ids = tuple(int(i) - 1 for i in layers)
+    n_target_layers = int(target_config_dict["num_hidden_layers"])
+    if list(layer_ids) != sorted(set(layer_ids)) or not (
+        0 <= layer_ids[0] and layer_ids[-1] < n_target_layers
+    ):
+        raise ValueError(
+            f"{draft_gguf_path}: dflash.target_layers {layers} must be "
+            f"strictly increasing and within [1, {n_target_layers}]"
+        )
+    hidden = int(target_config_dict["hidden_size"])
+    declared = meta.get("dflash.embedding_length")
+    if declared is not None and int(declared) != hidden:
+        raise ValueError(
+            f"{draft_gguf_path}: dflash.embedding_length {declared} != "
+            f"target hidden_size {hidden}"
+        )
+    vocab = int(target_config_dict["vocab_size"])
+    if container == "dflash2" and shapes:
+        for name in ("selector_predecessor.weight", "selector_successor.weight"):
+            ne = shapes.get(name)
+            if ne is not None and int(ne[-1]) != vocab:
+                raise ValueError(
+                    f"{draft_gguf_path}: {name} has {ne[-1]} rows, the "
+                    f"target vocab is {vocab}"
+                )
+    n_layers = 1 + max(
+        int(n.split(".")[1]) for n in arrays if n.startswith("blk."))
+    pattern = meta.get("dflash.attention.sliding_window_pattern") or ()
+    layer_types = [
+        "sliding_attention" if bool(t) else "full_attention" for t in pattern
+    ] or ["full_attention"] * n_layers
+    window = int(meta.get("dflash.attention.sliding_window") or 0) or None
+    native_total, block_total = _drafter_block_depths(
+        block_size, _DFLASH_BLOCK_DEFAULT[container])
+    rope_scaling = None
+    rs_type = meta.get("dflash.rope.scaling.type")
+    if rs_type and rs_type != "none":
+        rope_scaling = {"type": rs_type, "rope_type": rs_type}
+        factor = meta.get("dflash.rope.scaling.factor")
+        if factor is not None:
+            rope_scaling["factor"] = float(factor)
+    causal = meta.get("dflash.attention.causal")
+    softcap = meta.get("dflash.final_logit_softcapping",
+                       target_config_dict.get("final_logit_softcapping"))
+    config = DFlashConfig(
+        hidden_size=hidden,
+        intermediate_size=int(meta["dflash.feed_forward_length"]),
+        num_hidden_layers=n_layers,
+        num_attention_heads=int(meta["dflash.attention.head_count"]),
+        num_key_value_heads=int(meta["dflash.attention.head_count_kv"]),
+        head_dim=int(meta["dflash.attention.key_length"]),
+        rms_norm_eps=float(meta["dflash.attention.layer_norm_rms_epsilon"]),
+        vocab_size=vocab,
+        max_position_embeddings=int(meta.get("dflash.context_length")
+                                    or target_config_dict["max_position_embeddings"]),
+        rope_theta=float(meta["dflash.rope.freq_base"]),
+        rope_scaling=rope_scaling,
+        tie_word_embeddings=False,
+        block_size=block_total,
+        native_block_size=native_total,
+        mask_token_id=int(mask_token_id),
+        target_layer_ids=list(layer_ids),
+        num_target_layers=n_target_layers,
+        layer_types=layer_types,
+        sliding_window=window,
+        is_causal=None if causal is None else bool(causal),
+        final_logit_softcapping=softcap or None,
+        output_multiplier=float(meta.get(
+            "dflash.logit_scale", target_config_dict.get("output_multiplier", 1.0))),
+        input_embedding_scale=float(meta.get("dflash.embedding_scale", 1.0)),
+        conv_kernel_size=int(meta.get("dflash.conv_kernel_size") or 0),
+        conv_group_size=int(meta.get("dflash.conv_group_size") or 0),
+        selector_rank=int(meta.get("dflash.selector_rank") or 0),
+        selector_top_k=int(meta.get("dflash.selector_top_k") or 0),
+    )
+    return config, layer_ids
+
+
+def _wire_dflash_capture(target, layer_ids) -> None:
+    """Arm the target's packed-hidden capture for ``layer_ids``."""
+    lm = getattr(target, "language_model", target)
+    if not callable(getattr(lm, "set_dflash_capture", None)):
+        raise RuntimeError(
+            "DFlash drafters need a target carrying the _dflash_capture seam "
+            f"(muse_glimmer, owned qwen3_5); got {type(lm).__name__}"
+        )
+    lm.set_dflash_capture(layer_ids)
+
+
+def _load_muse_glimmer_dflash_drafter(
+    draft_gguf_path: str,
+    target,
+    target_config_dict: dict,
+    *,
+    arrays: dict,
+    kquant_meta: dict,
+    meta: dict,
+    shapes: dict | None = None,
+    active_before: float | None = None,
+    log=loadlog.verbose_print,
+):
+    """Build + load + bind the Muse Glimmer DFlash drafter, and wire the
+    target's ``_dflash_capture`` so every engine-facing hidden carries the
+    five captured residuals."""
+    from .muse_glimmer_dflash import MuseGlimmerDFlashDrafter
+
+    config, layer_ids = _dflash_config_from_meta(
+        draft_gguf_path, meta, target_config_dict, "muse_glimmer",
+        arrays=arrays, shapes=shapes)
+    drafter = MuseGlimmerDFlashDrafter(config)
+    log(
+        f"[mtp] drafter: muse-glimmer dflash layers={config.num_hidden_layers} "
+        f"targets={layer_ids} block_total={config.block_size} "
+        f"window={config.sliding_window} causal={bool(config.is_causal)}"
+    )
+
+    d_weights, d_meta, d_stats = remap_dflash_arrays(
+        arrays, kquant_meta, "muse_glimmer")
+    log(f"[mtp] drafter remap: {d_stats}")
+    _install_and_load(
+        drafter,
+        d_weights,
+        d_meta,
+        log=log,
+        sanitize=False,
+        source_key=weights_source_key(draft_gguf_path),
+        active_before=active_before,
+    )
+    drafter.bind(target)
+    _wire_dflash_capture(target, layer_ids)
+
+    from .drafter_protocol import validate_drafter
+
+    validate_drafter(drafter)
+    # No draft-side head quantization: Muse Glimmer GGUFs ship a quantized
+    # output.weight, which _patch_draft_head_quantized leaves alone anyway.
+    log("[mtp] dflash drafter bound; target capture layers wired")
+    _stamp_mtp_width_cap(drafter, "muse_glimmer", target=target,
+                         hard_limit=1, log=log)
+    return drafter
+
+
+def _load_dflash2_drafter(
+    draft_gguf_path: str,
+    target,
+    target_config_dict: dict,
+    *,
+    arrays: dict,
+    kquant_meta: dict,
+    meta: dict,
+    shapes: dict | None = None,
+    active_before: float | None = None,
+    log=loadlog.verbose_print,
+):
+    """Build + load + bind a DFlash 2 drafter (conv-wrapped draft layers plus
+    the candidate selector) and wire the target's ``_dflash_capture``."""
+    from .dflash_drafter import DFlash2Drafter
+
+    config, layer_ids = _dflash_config_from_meta(
+        draft_gguf_path, meta, target_config_dict, "dflash2",
+        arrays=arrays, shapes=shapes)
+    drafter = DFlash2Drafter(config)
+    log(
+        f"[mtp] drafter: dflash2 layers={config.num_hidden_layers} "
+        f"targets={layer_ids} block_total={config.block_size} "
+        f"(native {config.native_block_size}) window={config.sliding_window} "
+        f"causal={bool(config.is_causal)} selector top_k={config.selector_top_k} "
+        f"rank={config.selector_rank} conv={config.conv_kernel_size}x"
+        f"{config.conv_group_size} logit_scale={config.output_multiplier} "
+        f"softcap={config.final_logit_softcapping}"
+    )
+
+    d_weights, d_meta, d_stats = remap_dflash_arrays(arrays, kquant_meta, "dflash2")
+    log(f"[mtp] drafter remap: {d_stats}")
+    _install_and_load(
+        drafter,
+        d_weights,
+        d_meta,
+        log=log,
+        sanitize=False,
+        source_key=weights_source_key(draft_gguf_path),
+        active_before=active_before,
+    )
+    drafter.bind(target)
+    _wire_dflash_capture(target, layer_ids)
+
+    from .drafter_protocol import validate_drafter
+
+    validate_drafter(drafter)
+    log("[mtp] dflash2 drafter bound; target capture layers wired")
+    _stamp_mtp_width_cap(
+        drafter, str(target_config_dict.get("model_type") or "dflash2"),
+        target=target, hard_limit=1, log=log)
+    return drafter
+
+
+def _load_dflash_drafter(
+    draft_gguf_path: str,
+    target,
+    target_config_dict: dict,
+    *,
+    zero_copy: bool = True,
+    log=loadlog.verbose_print,
+):
+    """Load a ``dflash`` companion drafter: Muse Glimmer's DFlash or a DFlash
+    2 drafter, by container. DSpark's ``dflash`` GGUFs load through the
+    deepseek_v4 path."""
+    active_before = _active_now()
+    arrays, kquant_meta, d_arch, meta, shapes = load_gguf_wire_bytes(
+        draft_gguf_path, zero_copy=zero_copy
+    )
+    if d_arch != "dflash":
+        raise ValueError(
+            f"{draft_gguf_path}: expected a dflash drafter GGUF, got arch "
+            f"{d_arch!r}"
+        )
+    container = dflash_container(arrays)
+    log(f"[mtp] drafter gguf ({d_arch}/{container}): {len(arrays)} arrays, "
+        f"{len(kquant_meta)} kquant")
+    loaders = {
+        "dflash2": _load_dflash2_drafter,
+        "muse_glimmer": _load_muse_glimmer_dflash_drafter,
+    }
+    loader = loaders.get(container)
+    if loader is None:
+        raise ValueError(
+            f"{draft_gguf_path}: this dflash GGUF holds the {container} "
+            f"drafter, which loads only against a deepseek_v4 target"
+        )
+    return loader(
+        draft_gguf_path,
+        target,
+        target_config_dict,
+        arrays=arrays,
+        kquant_meta=kquant_meta,
+        meta=meta,
+        shapes=shapes,
+        active_before=active_before,
+        log=log,
+    )
+
+
+def _drafter_header_arch(draft_gguf_path: str) -> str | None:
+    """The companion GGUF's ``general.architecture`` from a header-only read."""
+    from .discovery import header_meta
+
+    meta = header_meta(draft_gguf_path)
+    return meta.get("arch") if meta else None
+
+
+def _assistant_kind(model_type: str | None, draft_gguf_path: str) -> str:
+    """Which companion loader a ``--draft-gguf`` takes: ``deepseek4`` for a
+    deepseek_v4 target (its drafters share the ``dflash`` tag with DSpark),
+    ``dflash`` for a muse_glimmer target or any ``dflash`` header, else
+    ``gemma4``. Each loader validates the pairing it is handed."""
+    if model_type == "deepseek_v4":
+        return "deepseek4"
+    if model_type == "qwen4_exp":
+        return "qwen4exp"
+    if model_type == "muse_glimmer" or _drafter_header_arch(draft_gguf_path) == "dflash":
+        return "dflash"
+    return "gemma4"
 
 
 def normalize_dflash_arrays(arrays: dict, kquant_meta: dict, meta: dict):
@@ -756,6 +1277,7 @@ def _load_deepseek4_dspark_drafter(
     arrays: dict,
     kquant_meta: dict,
     meta: dict,
+    active_before: float | None = None,
     log=loadlog.verbose_print,
 ):
     """Build + load + bind the DSpark drafter from its companion GGUF (arch
@@ -791,8 +1313,7 @@ def _load_deepseek4_dspark_drafter(
             f"strictly increasing and < {n}"
         )
     args.compress_ratios = list(args.compress_ratios) + [0] * n_stages
-    native_total = draft_len + 1
-    block_total = max(2, min(env_int("GMLX_DSPARK_BLOCK", native_total), native_total))
+    native_total, block_total = _drafter_block_depths(draft_len + 1)
     drafter = DeepseekV4DSparkDrafter(
         DeepseekV4DSparkConfig(
             text=args,
@@ -802,6 +1323,7 @@ def _load_deepseek4_dspark_drafter(
             target_layer_ids=layer_ids,
             markov_rank=int(_dspark_meta(meta, "markov_rank", 256)),
             block_size=block_total,
+            native_block_size=native_total,
         )
     )
     log(
@@ -846,6 +1368,8 @@ def _load_deepseek4_dspark_drafter(
             sanitize=False,
             fp32_keep=_FP32_KEEP_BY_MODEL_TYPE["deepseek_v4"]
             + ("confidence_proj.",),
+            source_key=weights_source_key(draft_gguf_path),
+            active_before=active_before,
         )
     finally:
         if force_wire:
@@ -914,6 +1438,7 @@ def load_mtp_model(
     maybe_populate_for_load(pf.shards, log=_log)
 
     loadlog.stage("reading tensors")
+    active_before = _active_now()
     arrays, kquant_meta, _arch_meta, meta, tensor_shapes = load_gguf_wire_bytes(
         gguf_path, zero_copy=zero_copy, shards=pf.shards
     )
@@ -929,14 +1454,50 @@ def load_mtp_model(
         # deepseek4_mtp_support), never as in-GGUF nextn tensors; the
         # native-head extraction below is qwen-shaped and cannot serve it,
         # even though the V4 metadata advertises mtp_num_hidden_layers.
+        from . import arch_table
         from .discovery import find_mtp_companion
 
-        draft_gguf_path = find_mtp_companion(gguf_path)
+        draft_gguf_path = find_mtp_companion(
+            gguf_path, arch_table.drafter_arches("deepseek_v4"))
         if draft_gguf_path is None:
             raise ValueError(
                 "deepseek_v4 MTP needs its companion drafter GGUF (arch "
                 "deepseek4-dspark or deepseek4_mtp_support); none found next "
                 f"to {gguf_path} - pass --draft-gguf <path>."
+            )
+        assistant = True
+        loadlog.fact("mtp_companion", os.path.basename(draft_gguf_path))
+        _log(f"[mtp] companion drafter autodetected: {draft_gguf_path}")
+    if not assistant and config_dict.get("model_type") == "qwen4_exp":
+        # Qwen3.8-Flash-Next's head lives in the HF safetensors only; the
+        # companion GGUF (arch qwen4exp-mtp) is the drafter.
+        from . import arch_table
+        from .discovery import find_mtp_companion
+
+        draft_gguf_path = find_mtp_companion(
+            gguf_path, arch_table.drafter_arches("qwen4_exp"))
+        if draft_gguf_path is None:
+            raise ValueError(
+                "qwen4_exp MTP needs its companion drafter GGUF (arch "
+                "qwen4exp-mtp, built from the HF mtp.* tensors); none found "
+                f"next to {gguf_path} - pass --draft-gguf <path>."
+            )
+        assistant = True
+        loadlog.fact("mtp_companion", os.path.basename(draft_gguf_path))
+        _log(f"[mtp] companion drafter autodetected: {draft_gguf_path}")
+    if not assistant and config_dict.get("model_type") == "muse_glimmer":
+        # Muse Glimmer's drafter is likewise a companion GGUF (arch dflash),
+        # never an in-file nextn block.
+        from . import arch_table
+        from .discovery import find_mtp_companion
+
+        draft_gguf_path = find_mtp_companion(
+            gguf_path, arch_table.drafter_arches("muse_glimmer"))
+        if draft_gguf_path is None:
+            raise ValueError(
+                "muse_glimmer MTP needs its companion DFlash drafter GGUF "
+                f"(arch dflash); none found next to {gguf_path} - pass "
+                "--draft-gguf <path>."
             )
         assistant = True
         loadlog.fact("mtp_companion", os.path.basename(draft_gguf_path))
@@ -996,6 +1557,8 @@ def load_mtp_model(
         sanitize=(_mt in ("deepseek_v4", "hy_v3")),
         no_alias=owned_names,
         fp32_keep=_FP32_KEEP_BY_MODEL_TYPE.get(_mt, ()),
+        source_key=weights_source_key(*pf.shards),
+        active_before=active_before,
     )
 
     # 2b. fused gated-delta verify kernel. The multi-position verify forward is the
@@ -1021,6 +1584,14 @@ def load_mtp_model(
         if is_owned_language_model(model):
             prepare_gdn(model)
         _patch_dense_head_verify(model)
+    elif config_dict.get("model_type") == "qwen4_exp":
+        # Vendored tree: arm the fused GDN decode + verify routes.
+        from .qwen4_exp_model import prepare_runtime
+
+        counts = prepare_runtime(model.language_model)
+        _log(f"[patch] qwen4_exp: fused GDN decode on {counts['gdn_fused']} "
+             f"layers, verify on {counts['gdn_fused_verify']}, b/a cat on "
+             f"{counts['gdn_ba_cat']}")
     elif config_dict.get("model_type") in ("gemma4", "gemma4_text"):
         # gemma4 MTP target (assistant drafter): none of the qwen verify
         # levers apply here, so none are installed.
@@ -1039,8 +1610,21 @@ def load_mtp_model(
     loadlog.stage("loading drafter")
     loadlog.fact("drafter", "assistant" if assistant else "native-head")
     if assistant:
-        if _mt == "deepseek_v4":
+        if int(config_dict.get("mtp_num_hidden_layers", 0)) >= 1:
+            _log(f"[mtp] native MTP head present; using external drafter "
+                 f"{os.path.basename(draft_gguf_path)} (pass --native-mtp to "
+                 f"use the head)")
+        kind = _assistant_kind(_mt, draft_gguf_path)
+        if kind == "deepseek4":
             drafter = _load_deepseek4_mtp_drafter(
+                draft_gguf_path, model, config_dict, zero_copy=zero_copy, log=_log
+            )
+        elif kind == "qwen4exp":
+            drafter = _load_qwen4exp_mtp_drafter(
+                draft_gguf_path, model, config_dict, zero_copy=zero_copy, log=_log
+            )
+        elif kind == "dflash":
+            drafter = _load_dflash_drafter(
                 draft_gguf_path, model, config_dict, zero_copy=zero_copy, log=_log
             )
         else:
@@ -1056,6 +1640,7 @@ def load_mtp_model(
             model,
             n_head=n_head,
             n_head_kv=n_head_kv,
+            source_key=weights_source_key(*pf.shards),
             log=_log,
         )
 
@@ -1174,14 +1759,25 @@ def load_vlm_mtp_model(
             "this VLM arch can't run text-only MTP"
         )
 
-    # 3. drafter - assistant (a --draft-gguf companion; gemma4) or native-head
-    #    (nextn block inside the LLM GGUF; qwen3.5/3.6).
+    # 3. drafter - assistant (a --draft-gguf companion; gemma4, or a
+    #    muse-glimmer dflash) or native-head (nextn block inside the LLM GGUF;
+    #    qwen3.5/3.6).
     loadlog.stage("loading drafter")
     loadlog.fact("drafter", "assistant" if draft_gguf_path else "native-head")
     if draft_gguf_path:
-        drafter = _load_gemma4_assistant_drafter(
-            draft_gguf_path, model, zero_copy=zero_copy, log=_log
-        )
+        if int((config.get("text_config") or {}).get("mtp_num_hidden_layers", 0)) >= 1:
+            _log(f"[mtp] native MTP head present; using external drafter "
+                 f"{os.path.basename(draft_gguf_path)} (pass --native-mtp to "
+                 f"use the head)")
+        if _assistant_kind(config.get("model_type"), draft_gguf_path) == "dflash":
+            drafter = _load_dflash_drafter(
+                draft_gguf_path, model, config["text_config"],
+                zero_copy=zero_copy, log=_log
+            )
+        else:
+            drafter = _load_gemma4_assistant_drafter(
+                draft_gguf_path, model, zero_copy=zero_copy, log=_log
+            )
     else:
         # Native head: load_vlm_model already loaded the target and applied the
         # mlx-lm tiled-V patch, but it discards the raw GGUF arrays the drafter's
@@ -1233,6 +1829,7 @@ def load_vlm_mtp_model(
             model,
             n_head=n_head,
             n_head_kv=n_head_kv,
+            source_key=weights_source_key(*pf.shards),
             log=_log,
         )
 

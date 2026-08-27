@@ -348,6 +348,31 @@ def _load_json(path: Path) -> dict:
     return doc
 
 
+# pi's defaults are contextWindow 128000 / maxTokens 16384. A 32k model
+# advertised as 128k never compacts and overflows the server instead, and pi
+# pins max_tokens on every request, which gmlx's preflight prices into the KV
+# estimate - 16k of generation headroom per subagent is real memory. Cap
+# generation at this many tokens (or a quarter of the window when smaller).
+_PI_MAX_TOKENS_CAP = 8192
+_PI_MAX_TOKENS_FLOOR = 1024
+
+
+def pi_model_entry(m: dict) -> dict:
+    """One ``models[]`` entry for pi's ``models.json``: the id, plus
+    ``contextWindow`` / ``maxTokens`` when ``/v1/models`` reports the GGUF's
+    context (the smaller of the trained context and what fits at width 1)."""
+    entry = {"id": m["id"]}
+    sizes = [v for v in (m.get("context_length"), m.get("max_context_at_width_1"))
+             if isinstance(v, int) and v > 0]
+    if not sizes:
+        return entry
+    window = min(sizes)
+    entry["contextWindow"] = window
+    entry["maxTokens"] = max(_PI_MAX_TOKENS_FLOOR,
+                             min(_PI_MAX_TOKENS_CAP, window // 4))
+    return entry
+
+
 def build_pi_configs(base_url: str, models: list, *,
                      provider_id: str = _PROVIDER_ID,
                      default_model: str | None = None,
@@ -364,7 +389,7 @@ def build_pi_configs(base_url: str, models: list, *,
         "api": "openai-completions",
         # pi requires an apiKey; a placeholder when the server has no auth.
         "apiKey": api_key or provider_id,
-        "models": [{"id": m["id"]} for m in chat_models(models)],
+        "models": [pi_model_entry(m) for m in chat_models(models)],
     }
     models_doc["providers"] = providers
 

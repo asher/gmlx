@@ -205,6 +205,9 @@ def _prefill_eligible(q, k, v, mask):
     qL = q.shape[2]
     if qL <= 8 or qL > k.shape[2]:
         return False
+    # None (a bidirectional encoder's full attention) and "causal" both tile by
+    # query rows; _chunked_prefill keeps them apart, since only causal may also
+    # slice keys to the tile horizon.
     if _causal_str(mask):
         return True
     # an array mask we can slice along the query axis (sliding-window layers)
@@ -217,17 +220,18 @@ def _chunked_prefill(q, k, v, scale, mask, tile, sinks=None):
     under attention sinks, a per-head additive logit in every row's softmax
     denominator regardless of key slicing. Causal: also slice keys to the tile
     horizon (mask='causal' keeps it causal). Array mask (sliding): slice the
-    mask's query rows, keep all keys.
+    mask's query rows, keep all keys. ``mask=None`` is *unmasked*, not causal:
+    a bidirectional encoder (a vision tower) attends to every key from every
+    query row, so its keys are never sliced.
 
     Each tile is eval'd before the next so its [Hq, tile, kL] score is freed
     instead of accumulating across tiles (and layers) in one lazy graph -- without
     this, peak memory stays as high as the full materialization and still swaps."""
     skw = {} if sinks is None else {"sinks": sinks}
     qL = q.shape[2]
-    arr = isinstance(mask, mx.array)
+    causal = isinstance(mask, str) and mask == "causal"
     if qL <= tile:
-        return _orig_sdpa(q, k, v, scale=scale,
-                          mask=(mask if arr else "causal"), **skw)
+        return _orig_sdpa(q, k, v, scale=scale, mask=mask, **skw)
     # With a cached prefix (kL > qL, chunk 2+ of a chunked prefill) the causal
     # horizon of query row t is offset + t, not t: slicing keys to t1 would
     # select only the head of the cached prefix and drop the chunk's own keys.
@@ -236,13 +240,13 @@ def _chunked_prefill(q, k, v, scale, mask, tile, sinks=None):
     for t0 in range(0, qL, tile):
         t1 = min(t0 + tile, qL)
         qt = q[:, :, t0:t1, :]
-        if arr:
-            ot = _orig_sdpa(qt, k, v, scale=scale, mask=mask[..., t0:t1, :],
-                            **skw)
-        else:
+        if causal:
             ot = _orig_sdpa(qt, k[:, :, :offset + t1, :],
                             v[:, :, :offset + t1, :],
                             scale=scale, mask="causal", **skw)
+        else:
+            sliced = mask[..., t0:t1, :] if isinstance(mask, mx.array) else None
+            ot = _orig_sdpa(qt, k, v, scale=scale, mask=sliced, **skw)
         mx.eval(ot)
         outs.append(ot)
     return mx.concatenate(outs, axis=2)

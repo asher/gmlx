@@ -8,7 +8,7 @@ no mlx), so it loads and tests on any machine.
 
 Shape (see ``docs/server-config.md`` for the full reference)::
 
-    server:    {host, port, api_key, no_auth, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, rerank, menubar, token_queue_timeout_s, prefill_step_size, decode_prefill_ratio, prefill_tick_ms, cache_limit_gb, family_defaults, stochastic_mtp, gpu_keepwarm, assistants, assistant_allow_remote}
+    server:    {host, port, api_key, no_auth, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, rerank, menubar, token_queue_timeout_s, prefill_step_size, dtype, decode_prefill_ratio, prefill_tick_ms, cache_limit_gb, family_defaults, stochastic_mtp, gpu_keepwarm, assistants, assistant_allow_remote}
     profiles:  {<name>: {extends, sampling, load, cache, system}}
     rules:     [{match: <glob>, profile: <name>}]
     models:    {<id>: {path, profile, family, profiles, mmproj, draft_gguf, adapter, stream, moe_experts, moe_expert_mass, moe_miss_shed, moe_layer_shed, moe_prestage, speculative, speculative_width_cap, overrides, pin, ttl_s}}
@@ -68,6 +68,13 @@ LOAD_ENV = {
     "quantized_kv_start": "QUANTIZED_KV_START",
 }
 
+# Accepted `server.dtype` values. float32 is deliberately absent: it is a
+# certification reference arm reachable through the env var, not something a
+# server should be configured into. Validated at parse time, because an
+# unrecognized value would otherwise fall back to bfloat16 at load with
+# nothing said about it.
+SERVER_DTYPES = ("auto", "bfloat16", "bf16", "float16", "fp16")
+
 # APC prompt-cache (+ SSD disk tier) key -> env var (mlx-vlm apc.from_env). The disk
 # sub-block maps to APC_DISK_*; the namespace defaults to the model path downstream.
 CACHE_ENV = {
@@ -105,6 +112,7 @@ _SERVER_KEYS = frozenset({"host", "port", "api_key", "no_auth", "model_dirs",
                           "budget_gb", "max_models", "hf_cache", "cache",
                           "defaults", "stt", "tts", "embeddings", "rerank",
                           "menubar", "token_queue_timeout_s", "prefill_step_size",
+                          "dtype",
                           "decode_prefill_ratio", "prefill_tick_ms",
                           "cache_limit_gb", "family_defaults", "stochastic_mtp",
                           "gpu_keepwarm", "assistants", "assistant_allow_remote"})
@@ -116,7 +124,7 @@ _OVERRIDE_KEYS = frozenset({"sampling", "load", "cache", "system",
                             "chat_template", "chat_template_kwargs",
                             "thinking", "reasoning_effort"})
 _MODEL_KEYS = frozenset({"path", "profile", "family", "profiles", "mmproj",
-                         "draft_gguf", "adapter", "stream",
+                         "draft_gguf", "native_mtp", "adapter", "stream",
                          "cpu_moe",  # deprecated alias for `stream:`
                          "moe_experts", "moe_expert_mass",
                          "moe_miss_shed", "moe_layer_shed", "moe_prestage",
@@ -221,6 +229,9 @@ class ModelCfg:
     profiles: dict = field(default_factory=dict)
     mmproj: str | None = None
     draft_gguf: str | None = None
+    # Draft with the GGUF's own MTP head even when draft_gguf is set (an
+    # external drafter otherwise wins).
+    native_mtp: bool = False
     adapter: str | None = None          # GGUF LoRA adapter applied live at load
     # Execution placement (normalized by _normalize_stream): "experts" streams
     # only the routed-expert stacks from disk (every-token layers + KV cache
@@ -415,11 +426,18 @@ class ServerCfg:
     # env, after the per-model load window has closed. None => leave the env /
     # upstream default in place.
     prefill_step_size: int | None = None
+    # Activation dtype for every model this server loads: "auto" (the runtime
+    # default), "bfloat16" or "float16", plus the "bf16"/"fp16" spellings.
+    # This key is server-wide by design. The reason to leave bfloat16 is that
+    # the GPU has no native bfloat16 arithmetic. That is a property of the
+    # machine, not of one model. None keeps the env or the runtime default.
+    dtype: str | None = None
     # Decode-priority prefill pacing ratio: a live decode batch gets this
     # multiple of each prefill chunk's GPU time before the next chunk is
     # admitted (1.0 ~= 50/50 split; 0 = stock 1 decode step : 1 chunk).
-    # None => leave the env / branch default (1.0) in place.
-    decode_prefill_ratio: float | None = None
+    # None => leave the env / branch default in place, which is "auto"
+    # (dynamic pacing via auto_ratio); a number pins a static split.
+    decode_prefill_ratio: float | str | None = None
     # Prefill tick budget in wall-clock ms: while decode rows are live, each
     # prefill chunk is halved until its predicted wall time (from the last
     # observed chunk cost) fits this budget, bounding the per-chunk decode
@@ -903,10 +921,11 @@ def resolve_model(
         chat_template_kwargs=chat_template_kwargs,
         thinking=thinking,
         reasoning_effort=reasoning_effort,
-        speculative=bool(model.speculative or model.draft_gguf),
+        speculative=bool(model.speculative or model.draft_gguf or model.native_mtp),
         speculative_width_cap=model.speculative_width_cap,
         mmproj=resolve_path(model.mmproj, cfg.model_dirs),
-        draft_gguf=resolve_path(model.draft_gguf, cfg.model_dirs),
+        draft_gguf=(None if model.native_mtp
+                    else resolve_path(model.draft_gguf, cfg.model_dirs)),
         adapter=resolve_path(model.adapter, cfg.model_dirs),
         stream=model.stream or None,
         moe_experts=model.moe_experts,
@@ -1005,6 +1024,10 @@ def env_for(resolved: ResolvedModel) -> dict[str, str]:
     # explicit "0" forces a non-speculative load even when a sibling id registered
     # the same GGUF for MTP (the lossless-oracle case: one GGUF, spec-on + spec-off).
     env["MLX_VLM_GGUF_SPECULATIVE"] = "1" if resolved.speculative else "0"
+    # The drafter is per id too: two ids on one GGUF may differ (a companion
+    # drafter vs native_mtp), and the path registry keeps only the last one.
+    # Always emitted; "" means "this id drafts with the GGUF's own head".
+    env["MLX_VLM_GGUF_DRAFT"] = resolved.draft_gguf or ""
     # Same reasoning, same always-emit rule: "" means "this id declares no cap,
     # use the drafter family default". Emitting only when set would let a
     # sibling id's cap linger in the process env and be inherited here.
@@ -1078,6 +1101,24 @@ def _validate_stop(where: str, sampling: dict) -> None:
     raise ConfigError(
         f"{where} sampling.stop must be a string or a list of strings "
         f"(got {stop!r}); token *ids* are not accepted - use the token's text")
+
+
+def _validate_server_dtype(dtype):
+    """``server.dtype`` must name an activation dtype we actually offer.
+
+    Unlike an unknown key, a bad value here is silent: the loader resolves the
+    env var through env_choice, which falls back to bfloat16 without a word.
+    Someone setting float16 to test a pre-Apple9 box would get the default back
+    and never know, so a typo raises at parse time instead.
+    """
+    if dtype is None:
+        return None
+    value = str(dtype).strip().lower()
+    if value not in SERVER_DTYPES:
+        raise ConfigError(
+            f"server.dtype must be one of {', '.join(SERVER_DTYPES)} "
+            f"(got {dtype!r})")
+    return value
 
 
 def _normalize_optional_bool(value, key: str, where: str = "model"):
@@ -1247,6 +1288,14 @@ def _normalize_cache(where: str, raw) -> dict:
     return cache
 
 
+def _coerce_ratio(key: str, v, *, where: str = "server"):
+    """decode_prefill_ratio: a float, or the literal string "auto"
+    (case-insensitive, surrounding whitespace stripped)."""
+    if isinstance(v, str) and v.strip().lower() == "auto":
+        return "auto"
+    return _coerce_num(key, v, float, where=where)
+
+
 def _coerce_num(key: str, v, cast, *, where: str = "server"):
     """Coerce a numeric config key (YAML may carry it quoted as a string),
     raising a ConfigError naming the key and the bad value. ``None`` passes."""
@@ -1375,6 +1424,7 @@ def _parse_model(model_id: str, raw: dict) -> ModelCfg:
         profiles=norm_tweaks,
         mmproj=raw.get("mmproj"),
         draft_gguf=raw.get("draft_gguf"),
+        native_mtp=bool(raw.get("native_mtp", False)),
         adapter=raw.get("adapter"),
         stream=_normalize_stream(raw.get("stream"), f"model {model_id!r}",
                                  legacy=raw.get("cpu_moe")),
@@ -1657,8 +1707,9 @@ def build_config(doc: dict) -> ServerCfg:
             "token_queue_timeout_s", srv.get("token_queue_timeout_s"), float),
         prefill_step_size=_coerce_num(
             "prefill_step_size", srv.get("prefill_step_size"), int),
-        decode_prefill_ratio=_coerce_num(
-            "decode_prefill_ratio", srv.get("decode_prefill_ratio"), float),
+        dtype=_validate_server_dtype(srv.get("dtype")),
+        decode_prefill_ratio=_coerce_ratio(
+            "decode_prefill_ratio", srv.get("decode_prefill_ratio")),
         prefill_tick_ms=_coerce_num(
             "prefill_tick_ms", srv.get("prefill_tick_ms"), float),
         cache_limit_gb=_coerce_num(

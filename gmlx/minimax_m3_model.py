@@ -60,6 +60,8 @@ from mlx_lm.models import cache as _lm_cache
 from mlx_lm.models.cache import KVCache
 from mlx_lm.models.switch_layers import SwitchGLU
 
+from gmlx.dtypes import activation_dtype
+
 
 def ensure_registered() -> None:
     """Make ``import mlx_lm.models.minimax_m3`` resolve, preferring upstream."""
@@ -634,11 +636,14 @@ class Model(nn.Module):
                 and k.endswith("proj.weight")
                 and v.dtype == mx.float32
             ):
-                # Some MSA GGUFs store the indexer projections as F32; the
-                # source checkpoint is BF16, so narrowing recovers the
-                # original bits at half the memory (norms stay F32 - tiny,
-                # and the norm math runs in F32 regardless).
-                v = v.astype(mx.bfloat16)
+                # Some MSA GGUFs store the indexer projections as F32. The
+                # source checkpoint is BF16, so narrowing to bfloat16 recovers
+                # the original bits exactly and halves the memory. float16
+                # cannot represent those bits; keep F32 there (MLX promotes
+                # the indexer matmul). Norms stay F32 (tiny, and the norm math
+                # runs in F32 regardless).
+                if activation_dtype() != mx.float16:
+                    v = v.astype(activation_dtype())
             renamed[rename(k)] = v
         weights = renamed
 

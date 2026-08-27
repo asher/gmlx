@@ -157,3 +157,43 @@ def test_describe_complete():
     for r in rows:
         assert set(r["intents"]) == set(profiles.BUILTIN_INTENTS)
         assert r["label"]
+
+
+def test_muse_glimmer_family_carries_the_atem_think_markers_and_four_levels():
+    """The model card's four reasoning levels map onto the template's own
+    ``reasoning_strength`` spelling, and the base sampling seeds the open-think
+    detector with the ATEM header rather than the '<think>' default."""
+    from gmlx.profiles import FAMILIES
+
+    fam = FAMILIES["muse"]
+    assert fam["arches"] == ("muse-glimmer",)
+    s = fam["base"]["sampling"]
+    assert s["thinking_start_token"] == "<|start|>assistant to=self<|message|>"
+    assert s["thinking_end_token"] == "<|eom|>"
+    levels = {
+        name.split("-", 1)[1]: spec["chat_template_kwargs"]["reasoning_strength"]
+        for name, spec in fam["intents"].items()
+    }
+    assert levels == {"low": "low", "medium": "medium",
+                      "high": "high", "xhigh": "xhigh"}
+
+
+def test_kimi_k2_refines_off_the_deepseek_arch():
+    """K2.5/K2.7 convert to 'deepseek2' but ship Moonshot's card (t=1.0), so the
+    general.name refinement has to split them off DeepSeek's t=0.6 while
+    leaving real DeepSeek conversions - and a nameless GGUF - alone."""
+    assert profiles.detect_family("deepseek2", "Kimi-K2.7-Code") == "kimi-k2"
+    assert profiles.detect_family("deepseek2", "Kimi-K2.5") == "kimi-k2"
+    assert profiles.detect_family("deepseek2", "DeepSeek-V3") == "deepseek"
+    assert profiles.detect_family("deepseek2", None) == "deepseek"
+    # K3 is its own arch and keeps its own family.
+    assert profiles.detect_family("kimi-k3", "Kimi-K3") == "kimi"
+    s = profiles.family_base("kimi-k2")["sampling"]
+    assert s["temperature"] == 1.0 and s["top_p"] == 0.95
+
+
+def test_kimi_k2_has_no_reasoning_intents():
+    """K2.7 forces thinking on - the template opens a bare '<think>' after the
+    generation prompt - so there is no effort knob to address."""
+    assert profiles.FAMILIES["kimi-k2"]["intents"] == {}
+    assert profiles.FAMILIES["kimi-k2"]["arches"] == ()

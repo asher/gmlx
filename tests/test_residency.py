@@ -88,6 +88,52 @@ def test_byte_budget_evicts_lru_unpinned():
     assert pool.stats()["resident_bytes"] == 20 * GB
 
 
+def test_failed_build_after_eviction_drops_proxy_last_ref():
+    # A build that fails after evicting for room (a preload-gate deferral)
+    # must not leave the proxy's _last_entry pinning the evicted model: with
+    # the model's internal reference cycles that kept the evicted weights
+    # measurable as live, so the gate deferred every later load.
+    import gc
+    import weakref
+
+    proxy = _RuntimeProxy(_FakeOriginal())
+    teardowns = []
+
+    def fake_stock_get(model_path, adapter_path, *, model_kind="auto"):
+        if model_path == "B":
+            raise RuntimeError("build failed")
+        proxy.apc_manager = f"APC:{model_path}"
+        proxy.response_generator = f"RG:{model_path}"
+        proxy.model_cache = {
+            "cache_key": (model_path, adapter_path, model_kind),
+            "model_path": model_path,
+            "model": f"M:{model_path}",
+        }
+
+    def fake_stock_unload():
+        teardowns.append(proxy.model_cache.get("model_path"))
+        return True
+
+    pool = _ResidencyPool(
+        proxy, fake_stock_get, fake_stock_unload, int(15 * GB), (),
+        max_models=None, footprint_fn=lambda p: int(10 * GB))
+    a = acquire(pool, "A")
+    assert proxy._last_entry is a
+    ref = weakref.ref(a)
+    try:
+        pool.acquire("B", None, "auto")  # evicts A, then the build raises
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("B build should have raised")
+    assert teardowns == ["A"]
+    assert proxy._last_entry is not a
+    _active_entry.set(None)
+    del a
+    gc.collect()
+    assert ref() is None
+
+
 def test_pin_protected_even_when_over_budget():
     # Two 10 GB models can't both fit a 15 GB budget, but A is pinned: it is
     # never evicted, so B is admitted over budget rather than refused.
@@ -102,7 +148,7 @@ def test_pin_protected_even_when_over_budget():
 def test_kept_model_is_still_lru_evicted_under_pressure():
     # The keep tier exempts a model from the idle-TTL reaper, NOT from LRU: under
     # byte pressure a kept-but-unpinned model is still a valid eviction victim
-    # (the load-bearing difference from a full pin).
+    # (the difference from a full pin).
     proxy, pool, teardowns = make_pool(25, {"A": 10, "B": 10, "C": 10})
     acquire(pool, "A")
     pool.set_keep("A", True)        # keep A (TTL-exempt) but do NOT pin it
@@ -443,3 +489,106 @@ def test_module_annotations_resolve():
     from gmlx import residency
 
     typing.get_type_hints(residency)
+
+
+def test_teardown_closes_streaming_helpers_under_the_serving_wrapper():
+    # The served object is a wrapper (the text-only vlm adapter) around the
+    # stock model the loader hung the streaming helpers on. Teardown must
+    # find and close them through the wrapper: unclosed feeders keep their
+    # worker threads, whose frames pin every expert weight past unload.
+    closed = []
+
+    class _Helper:
+        def __init__(self, name):
+            self.name = name
+
+        def close(self):
+            closed.append(self.name)
+
+    class _Inner:
+        pass
+
+    class _LanguageModel:
+        def __init__(self, model):
+            self._model = model
+
+    class _Wrapper:
+        def __init__(self, model):
+            self.language_model = _LanguageModel(model)
+
+    proxy = _RuntimeProxy(_FakeOriginal())
+
+    def fake_stock_get(model_path, adapter_path, *, model_kind="auto"):
+        inner = _Inner()
+        for attr in ("_kq_prefetcher", "_kq_feeder", "_kq_decode_feeder"):
+            setattr(inner, attr, _Helper(f"{model_path}:{attr}"))
+        proxy.apc_manager = None
+        proxy.response_generator = None
+        proxy.model_cache = {
+            "cache_key": (model_path, adapter_path, model_kind),
+            "model_path": model_path,
+            "model": _Wrapper(inner),
+        }
+
+    pool = _ResidencyPool(
+        proxy, fake_stock_get, lambda: True, int(15 * GB), (),
+        max_models=None, footprint_fn=lambda p: int(10 * GB))
+    acquire(pool, "A")
+    acquire(pool, "B")  # evicts A
+    assert sorted(closed) == [
+        "A:_kq_decode_feeder", "A:_kq_feeder", "A:_kq_prefetcher"]
+
+
+def test_teardown_collects_the_model_cycle_before_returning():
+    # The evicted model's modules sit in reference cycles; teardown must
+    # collect them itself, after dropping its own references, so the next
+    # load's headroom gate measures the freed bytes instead of deferring
+    # against a model that is only dead once a later gen-2 pass runs.
+    import weakref
+
+    class _Feeder:
+        def __init__(self, model):
+            self.model = model  # feeder<->module cycle, as the loader builds
+
+        def close(self):
+            pass
+
+    class _Model:
+        def __init__(self):
+            self._kq_decode_feeder = _Feeder(self)
+
+    proxy = _RuntimeProxy(_FakeOriginal())
+    models = {}
+
+    def fake_stock_get(model_path, adapter_path, *, model_kind="auto"):
+        models[model_path] = weakref.ref(m := _Model())
+        proxy.apc_manager = None
+        proxy.response_generator = None
+        proxy.model_cache = {
+            "cache_key": (model_path, adapter_path, model_kind),
+            "model_path": model_path,
+            "model": m,
+        }
+
+    pool = _ResidencyPool(
+        proxy, fake_stock_get, lambda: True, int(15 * GB), (),
+        max_models=None, footprint_fn=lambda p: int(10 * GB))
+    acquire(pool, "A")
+    acquire(pool, "B")  # evicts A; no gc.collect() here on purpose
+    assert models["A"]() is None
+    assert models["B"]() is not None
+
+
+def test_stats_in_flight_excludes_retained_holds():
+    # The primary preload keeps a busy hold for the process lifetime; it
+    # must not read as a generating stream.
+    from types import SimpleNamespace
+    proxy, pool, _ = make_pool(25, {"A": 10})
+    entry = pool.acquire("A", None, "auto")  # hold kept: busy 1 (the lifetime hold)
+    pool.mark_retained(SimpleNamespace(_entry=entry))
+    row = pool.stats()["resident"][0]
+    assert (row["busy"], row["retained"], row["in_flight"]) == (1, 1, 0)
+    pool.acquire("A", None, "auto")          # a real request, hold kept
+    row = pool.stats()["resident"][0]
+    assert (row["busy"], row["in_flight"]) == (2, 1)
+    pool.mark_retained(SimpleNamespace(_entry=None))   # tolerated

@@ -1,7 +1,7 @@
 """DeepSeek-V4-Flash MTP: drafter/SpecLM unit tests + tiny greedy-identity A/B.
 
 The losslessness contract is drafter-independent (the verify walk emits the
-target's own tokens), so the load-bearing gates are the CACHE paths:
+target's own tokens), so the gates that matter are the CACHE paths:
 
 - all-reject rounds: every round rolls back the verify write (2- or 3-wide;
   S=2/S=3), exercising the rotating-cache one-update undo log (the
@@ -589,3 +589,120 @@ def test_cacheless_forward_matches_cached():
     got = lm(prompt).logits
     assert got.shape == ref.shape
     assert mx.abs(got.astype(mx.float32) - ref.astype(mx.float32)).max().item() < 1e-5
+
+
+def test_batch_pooling_cache_verify_sized_undo_armed():
+    # Regression: the batch cache stashed its undo only for L <= 2, so a
+    # block-4 verify write (L=4) cleared it and the first rejection past
+    # the remainder buffer crashed rollback on every APC-restored (batch
+    # lifted) request. Parity with the scalar cache: L <= 6.
+    from gmlx.deepseek_v4_cache import BatchPoolingCache
+
+    mx.random.seed(19)
+    b = BatchPoolingCache(4, [0, 0])
+    b.accumulate_windows(
+        mx.random.normal((2, 1, 8)), mx.random.normal((2, 1, 2)), 0)
+    b.accumulate_windows(
+        mx.random.normal((2, 4, 8)), mx.random.normal((2, 4, 2)), 0)
+    assert b._can_trim(2)
+    assert b._can_trim(3)
+    assert b.trim(2) == 2
+
+
+def test_batch_pooling_cache_trim_window_recompletion():
+    # Batch twin of test_pooling_cache_trim_window_recompletion, including
+    # the per-row watermark move (pooled rows kept above the restored
+    # watermark) and a ragged case where only one row re-completes.
+    from gmlx.deepseek_v4_cache import BatchPoolingCache
+
+    mx.random.seed(23)
+    ratio, B, D, G = 4, 2, 8, 2
+
+    def feed(cache, kv, gate, raws, valid=None):
+        L = kv.shape[1]
+        if valid is not None:
+            cache.prepare(lengths=valid)
+        r_kv, _, _ = cache.accumulate_windows(kv, gate, 0)
+        if valid is not None:
+            cache.finalize()
+        for i in range(B):
+            vl = L if valid is None else valid[i]
+            for j in range(vl):
+                raws[i].append(kv[i, j])
+        # Deterministic compressor stand-in fed from the raw history, so
+        # control and test pooled rows are comparable bit-for-bit.
+        new_counts = [
+            len(raws[i]) // ratio - cache._pool_lengths[i] for i in range(B)]
+        max_new = max(new_counts)
+        if max_new > 0:
+            px = mx.zeros((B, max_new, D))
+            for i in range(B):
+                pl = cache._pool_lengths[i]
+                for j in range(new_counts[i]):
+                    w = mx.stack(
+                        raws[i][(pl + j) * ratio:(pl + j + 1) * ratio])
+                    px[i, j] = w.mean(axis=0)
+            cache.update_and_fetch(px)
+
+    def check(control, test_cache):
+        assert control.remainder == test_cache.remainder
+        assert control._pool_lengths == test_cache._pool_lengths
+        for i in range(B):
+            r = control.remainder[i]
+            if r > 0:
+                assert mx.array_equal(
+                    control.buf_kv[i, :r], test_cache.buf_kv[i, :r])
+            pl = control._pool_lengths[i]
+            if pl > 0:
+                assert mx.array_equal(
+                    control.pooled[i, :pl], test_cache.pooled[i, :pl])
+        if control._prev_kv is not None:
+            assert test_cache._prev_kv is not None
+            for i in range(B):
+                if control._pool_lengths[i] > 0:
+                    assert mx.array_equal(
+                        control._prev_kv[i], test_cache._prev_kv[i])
+
+    def run(pre_count, upd_len, n_trim, ragged=False):
+        pre = [(mx.random.normal((B, 1, D)), mx.random.normal((B, 1, G)))
+               for _ in range(pre_count)]
+        rag = (mx.random.normal((B, 2, D)), mx.random.normal((B, 2, G)))
+        upd = mx.random.normal((B, upd_len, D))
+        upd_g = mx.random.normal((B, upd_len, G))
+        k = upd_len - n_trim
+
+        test_cache = BatchPoolingCache(ratio, [0] * B)
+        raws = [[] for _ in range(B)]
+        for kv, g in pre:
+            feed(test_cache, kv, g, raws)
+        if ragged:
+            feed(test_cache, rag[0], rag[1], raws, valid=[2, 1])
+        feed(test_cache, upd, upd_g, raws)
+        assert test_cache._can_trim(n_trim)
+        assert test_cache.trim(n_trim) == n_trim
+
+        control = BatchPoolingCache(ratio, [0] * B)
+        raws_c = [[] for _ in range(B)]
+        for kv, g in pre:
+            feed(control, kv, g, raws_c)
+        if ragged:
+            feed(control, rag[0], rag[1], raws_c, valid=[2, 1])
+        if k > 0:
+            feed(control, upd[:, :k], upd_g[:, :k], raws_c)
+        check(control, test_cache)
+
+    # rem 2 + 3-wide: trim(1) re-completes (total 4), trim(2) stays in
+    # the buffer (total 3).
+    run(2, 3, 1)
+    run(2, 3, 2)
+    # rem 3 + 3-wide: both trims re-complete a window.
+    run(3, 3, 1)
+    run(3, 3, 2)
+    # block-4 verify shapes (the live crash): rem 1 + 4-wide.
+    run(1, 4, 2)
+    run(3, 4, 2)
+    run(3, 4, 3)
+    # ragged remainders [r, r-1]: one row re-completes, the other stays
+    # in its buffer -- the per-row branch split.
+    run(2, 3, 1, ragged=True)
+    run(3, 4, 2, ragged=True)

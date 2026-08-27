@@ -326,6 +326,8 @@ def _complete(argv: list[str]) -> list[str]:
             named = _named_value_candidates(opt[0])
             if named:
                 return named
+            if opt[1] == "MODEL":            # a served model id (launch --model)
+                return _model_candidates(pre[1:])
             # An endpoint flag (--host/--port/--url/--base-url) completes from the
             # servers currently running; any other value flag (a temperature, a
             # token count) has nothing to enumerate.

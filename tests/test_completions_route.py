@@ -59,11 +59,12 @@ class _FakeRG:
 
 @pytest.fixture(autouse=True)
 def _restore():
-    saved_routes = list(_APP.app.router.routes)
+    from gmlx.server_patches import _common as sp_common
+    saved_routes = sp_common._snapshot_routes(_APP.app)
     saved_gcm = _APP.get_cached_model
     saved_rg = _RUNTIME.response_generator
     yield
-    _APP.app.router.routes[:] = saved_routes
+    sp_common._restore_routes(_APP.app, saved_routes)
     _APP.get_cached_model = saved_gcm
     _RUNTIME.response_generator = saved_rg
 

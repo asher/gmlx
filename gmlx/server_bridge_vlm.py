@@ -45,15 +45,19 @@ sequential one.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 from contextvars import ContextVar
 
 from mlx_vlm import tokenizer_utils as _mlxvlm_tok
-from mlx_vlm.models.text_only import Model as TextOnlyModel
+from gmlx.vlm_text_only import Model as TextOnlyModel
 from mlx_vlm.utils import StoppingCriteria
 
+from .drafter_protocol import native_block_size
 from .loader import load_model
+
+_log = logging.getLogger(__name__)
 
 
 def _is_gguf(path) -> bool:
@@ -156,10 +160,17 @@ def _resolve_mtp_spec(model_path: str) -> dict | None:
     env = os.environ.get("MLX_VLM_GGUF_SPECULATIVE", "").strip().lower()
     if env in ("0", "false", "no", "off"):
         return None
+    on = env in ("1", "true", "yes", "on")
     spec = _GGUF_MTP_REGISTRY.get(os.path.abspath(model_path))
     if spec is not None:
+        # Inside a per-id window the window's drafter wins: two ids on one
+        # GGUF may differ (companion vs native_mtp) and the registry keeps
+        # only the last registration.
+        if on and "MLX_VLM_GGUF_DRAFT" in os.environ:
+            draft = os.environ.get("MLX_VLM_GGUF_DRAFT")
+            return {"draft_gguf_path": os.path.abspath(draft) if draft else None}
         return spec
-    if env in ("1", "true", "yes", "on"):
+    if on:
         draft = os.environ.get("MLX_VLM_GGUF_DRAFT")
         return {"draft_gguf_path": os.path.abspath(draft) if draft else None}
     return None
@@ -480,6 +491,61 @@ def _apply_gguf_adapter(raw_model, config, adapter_gguf: str,
                               base_arch=base_arch)
 
 
+def _install_stream_placement(
+    text_model,
+    *,
+    gguf_path: str,
+    stream,
+    feeder_prefill: bool | None,
+    feeder_decode: bool | None,
+    moe_experts: int | None = None,
+    moe_expert_mass: float | None = None,
+    moe_miss_shed: float | None = None,
+    moe_prestage: str | None = None,
+    moe_layer_shed: float | None = None,
+) -> None:
+    """Put the execution placement and the lossy MoE levers on a text tower.
+
+    ``text_model`` must be the text tower. On a VLM, use the
+    ``language_model``. The vision tower is small, and it stays on the GPU.
+
+    The levers come after the placement, because each one hooks the streamed
+    layers that the placement makes.
+    """
+    if stream == "cpu":
+        # The whole model runs on the CPU device, and this device change
+        # applies to the process. Use it for one over-RAM model. Do not mix
+        # it with GPU-resident models in one config-mode server.
+        from .loader import configure_stream_cpu
+        configure_stream_cpu(
+            text_model, gguf_path=gguf_path,
+            feeder_prefill=feeder_prefill, feeder_decode=feeder_decode)
+    elif stream:  # "experts": routed experts stream; rest of model + KV on GPU
+        from .loader import install_expert_streaming
+        install_expert_streaming(
+            text_model, gguf_path=gguf_path,
+            feeder_prefill=feeder_prefill, feeder_decode=feeder_decode)
+    if moe_experts is not None:
+        from .loader import install_moe_experts_override
+        install_moe_experts_override(text_model, moe_experts)
+    if moe_expert_mass is not None:
+        from .moe_experts import install_moe_expert_mass
+        install_moe_expert_mass(text_model, moe_expert_mass)
+    if moe_miss_shed is not None:
+        from .moe_experts import install_moe_miss_shed
+        install_moe_miss_shed(text_model, moe_miss_shed)
+    if moe_prestage == "keepers":
+        if moe_miss_shed is None:
+            print("[stream] moe_prestage: keepers ignored: it needs "
+                  "moe_miss_shed")
+        else:
+            from .moe_experts import install_moe_prestage_keepers
+            install_moe_prestage_keepers(text_model)
+    if moe_layer_shed is not None:
+        from .moe_experts import install_moe_layer_shed
+        install_moe_layer_shed(text_model, moe_layer_shed)
+
+
 def load_serveable_model(
     gguf_path: str,
     *,
@@ -524,11 +590,13 @@ def load_serveable_model(
     text path (no merge, no requant). The VLM and speculative/MTP paths don't yet wire
     adapter apply, so an adapter on those raises rather than silently dropping it.
 
-    ``stream`` selects the text-path execution placement: ``"experts"`` streams
+    ``stream`` selects the execution placement: ``"experts"`` streams
     only the routed-expert stacks from disk while the every-token layers + KV
     cache stay on GPU; ``"cpu"`` runs the whole model on the CPU device (all
-    weights streamed through the page cache). Like the adapter, the VLM and
-    MTP paths raise rather than silently dropping it.
+    weights streamed through the page cache). ``"experts"`` also applies to a
+    VLM base. It goes on the text tower, and the vision tower stays on the
+    GPU. The MTP path, and ``"cpu"`` on a VLM, raise rather than silently
+    dropping it, as the adapter does.
 
     The lossy MoE levers (config ``moe_experts: K`` / ``moe_expert_mass: P`` /
     ``moe_miss_shed: P`` / ``moe_layer_shed: P``) install their filters/hooks
@@ -538,14 +606,18 @@ def load_serveable_model(
     prestage through the miss-shed policy and additionally needs
     ``moe_miss_shed`` (announced as ignored without it).
     """
-    def _reject_unwired(base_kind: str) -> None:
+    def _reject_unwired(base_kind: str, *, streamable: bool = False) -> None:
         # Raising beats silently dropping the option on bases that don't
-        # wire it yet.
+        # wire it yet. A streamable base accepts stream: experts, which goes
+        # on the text tower. It refuses stream: cpu, because that mode moves
+        # the process to the CPU device and moves the vision tower with it.
+        # A speculative base refuses both, because the engine loads the
+        # drafter after this function, and the drafter gets no placement.
         if adapter_gguf is not None:
             raise NotImplementedError(
                 f"live GGUF LoRA on a {base_kind} base is not wired yet; "
                 f"adapter={adapter_gguf!r}")
-        if stream:
+        if stream and not (streamable and stream == "experts"):
             raise NotImplementedError(
                 f"stream placement on a {base_kind} base is not wired yet; "
                 f"stream={stream!r}")
@@ -563,6 +635,11 @@ def load_serveable_model(
                 )
         moe_experts = moe_expert_mass = None
         moe_miss_shed = moe_layer_shed = moe_prestage = None
+    _levers = dict(
+        moe_experts=moe_experts, moe_expert_mass=moe_expert_mass,
+        moe_miss_shed=moe_miss_shed, moe_prestage=moe_prestage,
+        moe_layer_shed=moe_layer_shed)
+
     if mmproj_path is not None and speculative:
         # VLM x MTP: text-only requests speculate; image/audio requests prefill media
         # into the KV and decode normally (verify is token-only over that cache).
@@ -572,8 +649,14 @@ def load_serveable_model(
             draft_gguf_path=draft_gguf_path, chat_template=chat_template)
 
     if mmproj_path is not None:
-        _reject_unwired("VLM")
-        return _load_serveable_vlm(gguf_path, mmproj_path, hf_source=hf_source)
+        _reject_unwired("VLM", streamable=True)
+        model, processor, config = _load_serveable_vlm(
+            gguf_path, mmproj_path, hf_source=hf_source)
+        _install_stream_placement(
+            getattr(model, "language_model", model), gguf_path=gguf_path,
+            stream=stream, feeder_prefill=feeder_prefill,
+            feeder_decode=feeder_decode, **_levers)
+        return model, processor, config
 
     if speculative:
         _reject_unwired("speculative/MTP")
@@ -598,38 +681,10 @@ def load_serveable_model(
     if adapter_gguf is not None:
         _apply_gguf_adapter(raw_model, config, adapter_gguf,
                             base_gguf_path=gguf_path)
-    if stream == "cpu":
-        # Whole model on the CPU device (process-global). Intended for a single
-        # over-RAM positional model; mixing with GPU-resident models in one
-        # config-mode server is unsupported.
-        from .loader import configure_stream_cpu
-        configure_stream_cpu(
-            raw_model, gguf_path=gguf_path,
-            feeder_prefill=feeder_prefill, feeder_decode=feeder_decode)
-    elif stream:  # "experts": routed experts stream; rest of model + KV on GPU
-        from .loader import install_expert_streaming
-        install_expert_streaming(
-            raw_model, gguf_path=gguf_path,
-            feeder_prefill=feeder_prefill, feeder_decode=feeder_decode)
-    if moe_experts is not None:
-        from .loader import install_moe_experts_override
-        install_moe_experts_override(raw_model, moe_experts)
-    if moe_expert_mass is not None:
-        from .moe_experts import install_moe_expert_mass
-        install_moe_expert_mass(raw_model, moe_expert_mass)
-    if moe_miss_shed is not None:
-        from .moe_experts import install_moe_miss_shed
-        install_moe_miss_shed(raw_model, moe_miss_shed)
-    if moe_prestage == "keepers":
-        if moe_miss_shed is None:
-            print("[stream] moe_prestage: keepers ignored: it needs "
-                  "moe_miss_shed")
-        else:
-            from .moe_experts import install_moe_prestage_keepers
-            install_moe_prestage_keepers(raw_model)
-    if moe_layer_shed is not None:
-        from .moe_experts import install_moe_layer_shed
-        install_moe_layer_shed(raw_model, moe_layer_shed)
+    _install_stream_placement(
+        raw_model, gguf_path=gguf_path, stream=stream,
+        feeder_prefill=feeder_prefill, feeder_decode=feeder_decode,
+        **_levers)
     processor = _make_text_processor(tokenizer)
     # mlx-lm-arch caches must carry the vlm runtime's class identities or
     # apc/ar isinstance-gates (own classes since mlx-vlm 0.6.4) resolve
@@ -685,10 +740,10 @@ def _install_drafter_injection() -> None:
 
 def _apply_draft_block_size_override(result) -> None:
     """Honor GMLX_DRAFT_BLOCK_SIZE (serve --draft-block-size): set the loaded
-    drafter's config block size so the engine drafts N tokens/round. _dflash_block_total
-    reads config.block_size when no explicit override is passed, so this covers both
-    native-head (nextn) and two-GGUF assistant drafters. Best-effort; a frozen config
-    or unset env is a no-op."""
+    drafter's runtime block size so the engine drafts N tokens/round, clamped to
+    the deepest block the drafter can produce. This covers both native-head
+    (nextn) and two-GGUF assistant drafters. Best-effort; a frozen config or an
+    unset env is a no-op."""
     raw = os.environ.get("GMLX_DRAFT_BLOCK_SIZE", "").strip()
     if not raw:
         return
@@ -702,10 +757,17 @@ def _apply_draft_block_size_override(result) -> None:
     cfg = getattr(drafter, "config", None)
     if cfg is None:
         return
+    ceiling = native_block_size(cfg)
+    if ceiling is not None and n > ceiling:
+        _log.warning(
+            "--draft-block-size %d is deeper than this drafter can produce "
+            "(%d); drafting %d token(s)/round", n, ceiling, ceiling - 1)
+        n = ceiling
     try:
-        cfg.block_size = n
         if hasattr(cfg, "runtime_block_size"):
             cfg.runtime_block_size = n
+        else:
+            cfg.block_size = n
     except Exception:
         pass  # frozen/odd config object -> keep the drafter's own default
 
@@ -725,6 +787,11 @@ def install_gguf_server_bridge() -> None:
     generation = importlib.import_module("mlx_vlm.server.generation")
     if getattr(generation, _BRIDGE_FLAG, False):
         return
+
+    # Engine threads must not exit while holding thread-local compile
+    # cache entries (mlx 0.32.1 TSD segfault; see _exitfix).
+    from ._exitfix import install_engine_thread_guard
+    install_engine_thread_guard(generation)
 
     original = generation.load_model_resources
 

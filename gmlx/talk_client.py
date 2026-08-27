@@ -155,6 +155,7 @@ def probe_capabilities(base_url: str, api_key: str | None = None,
             "tts": any(e.get("tts") for e in entries),
             "chat_ids": chat_ids,
             "default": default,
+            "gmlx": any(e.get("owned_by") == "gmlx" for e in entries),
         }
 
     return _decode_body("capability probe", _caps)
@@ -278,11 +279,13 @@ def stream_chat(base_url: str, *, model: str, messages: list,
                 timeout: float = 600.0,
                 extra: dict | None = None) -> Iterator[dict]:
     """Stream ``/v1/chat/completions`` -> the raw ``delta`` dict per SSE chunk
-    (plus ``{"_finish": ...}``/``{"_usage": ...}`` markers). ``tools`` is an
-    OpenAI function-spec list (the assistant brain's loop); ``tool_calls``
-    deltas pass through verbatim. ``extra`` merges additional payload fields
-    (sampling passthrough, stream_options). Closing the generator closes the
-    HTTP response - that is the cancellation path."""
+    (plus ``{"_finish": ...}``/``{"_usage": ...}``/``{"_timings": ...}``
+    markers; ``_timings`` relays a chunk's ``timings`` object, sent per content
+    chunk by gmlx servers when the request carries ``timings_per_token``).
+    ``tools`` is an OpenAI function-spec list (the assistant brain's loop);
+    ``tool_calls`` deltas pass through verbatim. ``extra`` merges additional
+    payload fields (sampling passthrough, stream_options). Closing the
+    generator closes the HTTP response - that is the cancellation path."""
     payload = {"model": model, "messages": messages, "stream": True}
     if max_tokens is not None:      # None = server default (uncapped chat)
         payload["max_tokens"] = max_tokens
@@ -311,6 +314,8 @@ def stream_chat(base_url: str, *, model: str, messages: list,
                     yield delta
                 if choice.get("finish_reason"):
                     yield {"_finish": choice["finish_reason"]}
+            if chunk.get("timings"):
+                yield {"_timings": chunk["timings"]}
             if chunk.get("usage"):
                 yield {"_usage": chunk["usage"]}
     finally:
@@ -400,6 +405,7 @@ class SentenceChunker:
 # Brain protocol (the phase-2 seam)
 
 BrainEvent = tuple  # ("say", text) | ("status", label) | ("done", stats: dict)
+                    # | ("count", n) - cumulative output tokens this round
 
 
 class Brain(Protocol):
@@ -414,7 +420,9 @@ class ServerChatBrain:
     chain-of-thought in a separate ``delta.reasoning`` field, and any inline
     control markers still in ``delta.content`` are split out by
     :class:`~gmlx.reasoning.ReasoningFilter` - both surface as
-    ``("status", "thinking")`` events; only answer spans become ``("say", ...)``.
+    ``("think", <text>)`` events, which a voice consumer treats as a
+    thinking status and the chat REPL renders through its reasoning
+    display; only answer spans become ``("say", ...)``.
     History keeps the clean answer text (resending thinking is not OpenAI chat
     convention and would bloat every re-prefill)."""
 
@@ -454,7 +462,7 @@ class ServerChatBrain:
                     completed = True
                     continue
                 if delta.get("reasoning"):
-                    yield ("status", "thinking")
+                    yield ("think", delta["reasoning"])
                     continue
                 text = delta.get("content")
                 if not text:
@@ -464,11 +472,13 @@ class ServerChatBrain:
                         answer.append(span)
                         yield ("say", span)
                     elif span:
-                        yield ("status", "thinking")
+                        yield ("think", span)
             for span, mode in rf.flush():
                 if mode == "answer" and span:
                     answer.append(span)
                     yield ("say", span)
+                elif span:
+                    yield ("think", span)
         finally:
             # Runs on completion and on cancellation (generator .close()):
             # a canceled turn still keeps what was already said, so the next

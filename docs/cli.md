@@ -23,10 +23,6 @@
 | [`gmlx profiles`](#gmlx-profiles) | Show per-family sampling defaults and `@intents`; resolve one model's sampling. |
 | [`gmlx completion`](#gmlx-completion) | Print a shell completion script (zsh, bash, fish). |
 
-`gmlx` is the installed command; every action is a subcommand (`gmlx run`,
-`gmlx serve`, `gmlx init`, and so on). The project, package, and command are
-all named `gmlx`.
-
 Every verb operates on the GGUF file itself: the file on disk is the model.
 Every flag is also visible via `--help`.
 
@@ -92,7 +88,7 @@ family sets no value.
 | `--system-prompt STR` | - | System message for the chat template. |
 | `--reasoning {show,hide,raw}` | `show` | How a thinking model's reasoning is displayed, same as chat: `show` styles it under a `thinking` label and strips the control markers, `hide` collapses it to the elapsed/token payoff line, `raw` streams everything verbatim. Display-only: image/audio requests print raw. |
 | `--chat-template-config JSON` | - | Extra chat-template kwargs, e.g. `'{"enable_thinking": false}'`. |
-| `--thinking {on,off,adaptive}` | - | Reasoning switch, mapped onto whatever variable this model's chat template reads (`enable_thinking`, MiniMax `thinking_mode`, Hy3 `reasoning_effort: no_think`). `adaptive` is MiniMax-only. |
+| `--thinking {on,off,adaptive}` | - | Reasoning switch, mapped onto whatever variable this model's chat template reads (`enable_thinking`, Kimi K2.x `thinking`, MiniMax `thinking_mode`, Hy3 `reasoning_effort: no_think`). `adaptive` is MiniMax-only. |
 | `--reasoning-effort LEVEL` | - | Reasoning depth for models that grade it (gpt-oss/GLM `low`/`medium`/`high`, Hy3 `no_think`/`low`/`high`, DeepSeek-V4 `high`/`max`); the model's template validates the level. |
 | `--xtc-probability F` / `--xtc-threshold F` | `0.0` | XTC sampling (text path). |
 | `--repetition-context-size N` | `20` | How many recent tokens the repetition penalty considers. |
@@ -114,6 +110,7 @@ Supported families, usage, and caveats: [docs/vlm.md](vlm.md).
 | `--audio PATH\|URL` | Audio to prepend (comma-separated for several). Requires an omni mmproj with an audio tower. |
 | `--resize-shape N\|WxH` | Resize images before encoding (e.g. `448` or `672x448`). Controls the soft-token count, a big prefill-cost lever. |
 | `--thinking-budget N` | Cap thinking tokens (VLM generate path). |
+| `--thinking-start-token STR` / `--thinking-end-token STR` | Reasoning markers, when the model's spelling is not detected from its template. The end tag is what the budget forces. |
 
 `run --mmproj` honours the full sampling surface from the table above
 (`--top-p`/`--top-k`/`--min-p`, the repetition/presence/frequency penalties,
@@ -126,11 +123,12 @@ plumbing at all (`--bench`, `--bench-depths`, `--report-only`, `--stream-cpu`,
 falling back to plain text generation.
 
 A text-only request under `--mmproj` runs through the MTP speculative path
-whenever a drafter is available: a `--draft-gguf` assistant (gemma4) or a
-native `nextn` head in the LLM GGUF (qwen3.5/3.6, no companion needed). The
-verify walk only touches the language model, so a resident VLM gets the decode
-speedup on text turns, token-identical to the same model's text-only MTP. An
-image or audio request uses the plain VLM path; the drafter is idle that turn.
+whenever a drafter is available: a `--draft-gguf` assistant (gemma4,
+muse-glimmer, a DFlash 2 drafter) or a native `nextn` head in the LLM GGUF
+(qwen3.5/3.6/3.8, no companion needed). The verify walk only touches the language model, so a
+resident VLM gets the decode speedup on text turns, token-identical to the same
+model's text-only MTP. An image or audio request uses the plain VLM path; the
+drafter is idle that turn.
 
 ### Speculative / MTP
 
@@ -143,10 +141,11 @@ with a warning); `--no-speculative`/`--no-mtp` forces it off.
 
 | Flag | Meaning |
 |------|---------|
-| `--speculative` / `--mtp` | Force MTP speculative decoding on. Native-head models (qwen3.5/3.6 `nextn`) need no companion; gemma4 needs `--draft-gguf`. Native heads are auto-enabled without this. Use it to force the path when a sampler flag would otherwise defer. |
+| `--speculative` / `--mtp` | Force MTP speculative decoding on. Native-head models (qwen3.5/3.6/3.8 `nextn`) need no companion; gemma4 and muse-glimmer need `--draft-gguf`. Native heads are auto-enabled without this. Use it to force the path when a sampler flag would otherwise defer. |
+| `--native-mtp` | Draft with the GGUF's own `nextn` head even when a `--draft-gguf` or config `draft_gguf` companion is set (a configured companion otherwise wins). Exit `2` if the GGUF has no head. |
 | `--no-speculative` / `--no-mtp` | Disable MTP. Overrides the native-head auto-enable and config `speculative: true`. |
-| `--draft-gguf PATH` | Separate assistant-drafter GGUF (gemma4 two-GGUF MTP shape, or a deepseek4 DSpark/MTP sidecar - gmlx `deepseek4-dspark`, llama.cpp `dflash`, or legacy `deepseek4_mtp_support`); implies `--speculative` (same as `serve`). A sidecar in the target's directory is autodetected without the flag. |
-| `--draft-block-size N` | Override the MTP draft block size. |
+| `--draft-gguf PATH` | Separate assistant-drafter GGUF (gemma4 two-GGUF MTP shape, a muse-glimmer DFlash drafter, a DFlash 2 drafter for qwen3.8 or muse-glimmer, a deepseek4 DSpark/MTP sidecar - gmlx `deepseek4-dspark`, llama.cpp `dflash`, or legacy `deepseek4_mtp_support` - or a `qwen4exp-mtp` head for Qwen3.8-Flash-Next); implies `--speculative` (same as `serve`). A deepseek4, muse-glimmer, or qwen4exp sidecar in the target's directory is autodetected without the flag; a native-head target stays on its head and names a sibling drafter it found. |
+| `--draft-block-size N` | MTP draft tokens per round. Raises or lowers the drafter's own default, up to the deepest block it can produce. |
 
 Speculative generation takes only `--temp`/`--top-p`/`--top-k`/`--min-p` plus a
 baked `--system-prompt`; the MTP verify walk (gmlx's owned engine, or mlx-vlm's
@@ -211,7 +210,9 @@ overlaid onto the run: sampling (`temp`, `top-p`, `top-k`, `min-p`, penalties,
 `max-tokens`, `stop`, `seed`, XTC), KV-cache
 (`kv-bits`/`kv-group-size`/`kv-quant-scheme`/`kv-tail-tokens`/`max-kv-size`/
 `quantized-kv-start`), `system`,
-`chat_template`, `enable_thinking`, `mmproj`, `adapter`, speculative/draft, and
+`chat_template`, `enable_thinking`, the thinking keys (`thinking_budget`,
+`thinking_start_token`, `thinking_end_token`), `mmproj`, `adapter`,
+speculative/draft, and
 `stream` placement. Flags you pass explicitly always win; the config only
 fills what you left at its default. Models defined as `hf:` paths resolve to
 their local Hugging Face cache file (offline; `gmlx pull` them first). The
@@ -281,6 +282,7 @@ decode tok/s, MTP acceptance when speculating, and context fill
 ```sh
 gmlx chat model.gguf --temp 0.7 --system-prompt "You are terse."
 gmlx chat --assistant                 # the tool-loop assistant on the managed server
+gmlx chat --server                    # plain server client, no assistant extras
 ```
 
 With `--assistant` the REPL loads nothing locally: turns run through the
@@ -290,6 +292,18 @@ positional becomes a served model id (or is omitted for the server default).
 `/memory` lists and edits the stored facts. The terminal experience is
 unchanged; local-load flags do not apply. Full contract:
 [assistant.md](assistant.md#text-chat-gmlx-chat---assistant).
+
+`--server` is the same server-backed REPL minus the assistant extras: no
+tools, no memory store, no config `assistant:` block, just plain streamed
+turns against the served model. Use it when the terminal should be a thin
+client and every server request should come from the conversation itself.
+
+When the config's server is already running, a bare `gmlx chat` (or one
+naming a served model id) becomes a `--server` client automatically
+instead of loading a second copy in-process; `--local` forces the local
+load, and any local-load flag does the same. An explicit GGUF path always
+loads the file on disk - if the running server serves that same file, a
+note points at the served id. Chat never auto-starts a server this way.
 
 `/exit` (or Ctrl-D) quits, `/reset` restarts the conversation, `/help` lists
 every command. The terminal is upgraded on top:
@@ -324,6 +338,9 @@ every command. The terminal is upgraded on top:
   tokens, average tok/s, MTP acceptance).
 - `/system [text|off]` shows or sets the system prompt at runtime (setting
   restarts the conversation).
+- `/thinking [on|off|adaptive|default]` flips the model's own reasoning
+  switch per turn, mapped onto its template spelling (`default` restores the
+  template's default; same mapping as `--thinking`).
 - `/thinking-budget [N|off]` caps a thinking model's reasoning tokens per
   reply, adjustable mid-session.
 - `/copy` copies the last answer to the clipboard, thinking stripped
@@ -348,29 +365,30 @@ every command. The terminal is upgraded on top:
   re-prefill the conversation each time; the KV-cached fast path is text-only
   for now.
 - MTP speculative decoding (auto for native heads; `--no-mtp` to disable): a
-  native-head model (qwen3.5/3.6 `nextn`) drafts and verifies multiple tokens
-  per step for a decode speedup; gemma4 needs a `--draft-gguf` assistant. The
-  reply streams the same way and ends with the same `tok/s` stat, and the
-  persistent KV cache is reused across turns exactly like the text path. Not
-  combinable with `--adapter` / `--stream-*`. Sampling is
+  native-head model (qwen3.5/3.6/3.8 `nextn`) drafts and verifies multiple
+  tokens per step for a decode speedup; gemma4 and muse-glimmer need a
+  `--draft-gguf` assistant, and a DFlash 2 `--draft-gguf` drafter serves
+  qwen3.8 and muse-glimmer (`--native-mtp` keeps the head). The reply streams the same way and ends with the same `tok/s`
+  stat, and the persistent KV cache is reused across turns exactly like the
+  text path. Not combinable with `--adapter` / `--stream-*`. Sampling is
   temperature/top-p/top-k/min-p only; the MTP verify walk has no penalty/bias
   hooks, so the other `/` sampling commands don't apply on this path.
   - VLM + MTP: a `--mmproj` VLM with a drafter (a `--draft-gguf` assistant
-    for gemma4, or a native `nextn` head for qwen3.5/3.6) keeps MTP on for
-    text-only turns (the fast path above) while `/image` / `/audio` turns
-    fall back to the plain VLM stream. The first media turn upgrades the
-    session to the VLM path for the rest of the conversation, since the text
-    tokenizer can't render a history that holds image markers. The prior text
-    turns are carried into that re-prefill so nothing is lost.
+    for gemma4 or muse-glimmer, or a native `nextn` head for qwen3.5/3.6)
+    keeps MTP on for text-only turns (the fast path above) while `/image` /
+    `/audio` turns fall back to the plain VLM stream. The first media turn
+    upgrades the session to the VLM path for the rest of the conversation,
+    since the text tokenizer can't render a history that holds image markers.
+    The prior text turns are carried into that re-prefill so nothing is lost.
 - Reasoning display: for thinking models (Qwen3/DeepSeek-R1/GLM `<think>`,
-  gpt-oss harmony channels, Gemma `<|channel>thought`), the chain-of-thought
-  is stripped of its control markers and streamed in the theme's thinking
-  style (italic bright blue under the default `dark` theme) inside a
-  gutter-framed block that closes with a payoff line showing how long the
-  model thought and how many tokens it spent; the final answer follows in
-  normal weight. `--reasoning hide` collapses the reasoning to a single live
-  spinner that resolves to the same payoff, so you see it working without
-  reading it. Ctrl-O toggles expand and collapse live during a reply (and
+  gpt-oss harmony channels, Gemma `<|channel>thought`, Muse Glimmer's ATEM
+  `to=self` channel), the chain-of-thought is stripped of its control markers
+  and streamed in the theme's thinking style (italic bright blue under the
+  default `dark` theme) inside a gutter-framed block that closes with a payoff
+  line showing how long the model thought and how many tokens it spent; the
+  final answer follows in normal weight. `--reasoning hide` collapses the
+  reasoning to a single live spinner that resolves to the same payoff, so you
+  see it working without reading it. Ctrl-O toggles expand and collapse live during a reply (and
   persists as the default for the next). `--reasoning raw` / `/reasoning raw`
   passes everything through verbatim (the old behavior, for when a model's
   markers segment oddly). The stored conversation keeps the raw text in every
@@ -406,10 +424,12 @@ every command. The terminal is upgraded on top:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `gguf` (positional) | - | Path to the GGUF (sharded ok) or a config model id; with `--assistant`, a served model id (optional: server default). |
+| `gguf` (positional) | - | Path to the GGUF (sharded ok) or a config model id; with `--assistant`/`--server`, a served model id (optional: server default). |
 | `--assistant` | - | Chat through the built-in tool-loop assistant on the managed server: MCP tools + long-term memory from the `assistant:` block ([assistant.md](assistant.md)). Local-load flags don't apply. |
-| `--base-url URL` / `--host` / `--port` / `--api-key` | managed server | Assistant mode: target server (as in [`talk`](#gmlx-talk)). |
-| `--no-start` / `--start-timeout S` | - / `180` | Assistant mode: never auto-start the server / auto-start wait. |
+| `--server` | - | Plain server client: the `--assistant` REPL minus tools, memory, and the config `assistant:` block. Automatic when the config's server is up and serves the request. |
+| `--local` | - | Load in-process even when the config's server is running (skips the automatic `--server` mode). |
+| `--base-url URL` / `--host` / `--port` / `--api-key` | managed server | Server modes: target server (as in [`talk`](#gmlx-talk)). |
+| `--no-start` / `--start-timeout S` | - / `180` | Server modes: never auto-start the server / auto-start wait. |
 | `--max-tokens N` | until EOS | Per-reply decode-token cap; default `0` = each reply runs until the model stops (diffusion models fall back to a bounded 2048-token canvas; in `--assistant` mode `0` defers to the server's own default). Pass N to cap (adjustable via `/max-tokens`; `0` removes the cap, and a note says when the cap ended a reply). |
 | `--temp` / `--top-p` / `--top-k` / `--min-p` | family default | Sampling; unset flags seed from the model's [family defaults](#family-defaults-intent-and---profile) (`0.0`/`0.95`/`0`/`0.05` under `--no-family-defaults`). All adjustable in-chat. |
 | `--xtc-probability` / `--xtc-threshold` | `0.0` | XTC sampling (text path, adjustable in-chat). |
@@ -422,6 +442,7 @@ every command. The terminal is upgraded on top:
 | `--prefill-step-size N` | `2048` / `8192` streaming | Prefill chunk size (peak-memory cap for `/load`-ed long prompts). Streaming `--stream-cpu` / `--stream-experts` models default to `8192`, same as `run`. |
 | `--stream-cpu` / `--stream-experts` / `--moe-experts` / `--moe-expert-mass` / `--moe-expert-probe` / `--moe-miss-shed` / `--moe-layer-shed` / `--gpu-keepwarm` | - | Execution placement and lossy MoE fan-out, same as [`run`](#loading), including larger-than-RAM streaming `--stream-cpu` chat (text path only). |
 | `--resize-shape N\|WxH` / `--thinking-budget N` | - | Image resolution (soft-token count, VLM mode) / thinking-token cap (text + VLM; adjustable via `/thinking-budget`). |
+| `--thinking-start-token STR` / `--thinking-end-token STR` | detected | Reasoning markers, for a model whose spelling the template probe misses. |
 | `--reasoning {show,hide,raw}` | `show` | How a thinking model's reasoning is displayed: gutter-framed with payoff, collapsed spinner, or verbatim. Live toggle: Ctrl-O or `/reasoning`. |
 | `--render {auto,plain,lite,rich}` | `auto` | Reply markdown rendering (`auto`: rich when installed on a color TTY). Switch live with `/render`. |
 | `--theme NAME` | `dark` | Color theme (`dark`, `light`, `dark-hc`, `nord`, `dracula`, `solarized-dark`, `gruvbox`). Switch live with `/theme`. |
@@ -436,7 +457,7 @@ every command. The terminal is upgraded on top:
 | `--no-autosave` | - | Don't autosave the session after each turn. |
 | `--resume [NAME]` | - | Resume a saved session (default: this model's latest). |
 | `--adapter PATH` | - | GGUF LoRA adapter applied live over the base (text path only). |
-| `--speculative`/`--mtp` / `--draft-gguf PATH` / `--draft-block-size N` / `--no-speculative`/`--no-mtp` | - | MTP speculative decoding, same surface as [`run`](#speculative--mtp): native-head qwen3.5/3.6 needs no companion, gemma4 needs `--draft-gguf`. With `--mmproj` (a VLM with a drafter), text-only turns take the MTP path and media turns fall back to VLM. Not combinable with `--adapter`/`--stream-*`. |
+| `--speculative`/`--mtp` / `--draft-gguf PATH` / `--native-mtp` / `--draft-block-size N` / `--no-speculative`/`--no-mtp` | - | MTP speculative decoding, same surface as [`run`](#speculative--mtp): native-head qwen3.5/3.6/3.8 needs no companion, gemma4 needs `--draft-gguf`. With `--mmproj` (a VLM with a drafter), text-only turns take the MTP path and media turns fall back to VLM. Not combinable with `--adapter`/`--stream-*`. |
 | `--mmproj PATH` | - | Vision/audio projector GGUF; enables multimodal chat (`/image`, `/audio`, drag-and-drop). |
 | `--arch` / `--hf-source` / `--chat-template` / `--no-remap` / `--no-zero-copy` | - | Loading flags, same as [`run`](#loading). |
 | `--no-chat-template` | - | Send each turn verbatim, applying no chat template (base / non-instruct GGUFs that carry no template). Plain-text models only. |
@@ -536,9 +557,10 @@ gmlx serve Qwen3.6-27B-Q4_K_S.gguf --speculative
 | `--hf-cache` (alias `--from-hf-cache`) | Resolve named hf repo ids from the local hf cache only (never the network). Off means no HF access at all. |
 | `--mmproj PATH` | Float mmproj GGUF; makes a single positional model a VLM. |
 | `--hf-source REPO` | Processor/config override for a single VLM model (rarely needed). |
-| `--speculative` | Serve a single positional model with MTP (native-head qwen3.5/3.6; gemma4 also needs `--draft-gguf`). |
-| `--draft-gguf PATH` | Companion drafter GGUF for assistant-shape MTP (gemma4); implies `--speculative`. |
-| `--draft-block-size N` | MTP draft tokens per round (analogous to llama-server `--spec-draft-n-max`). Default: the drafter's own block size. Also via `GMLX_DRAFT_BLOCK_SIZE`. |
+| `--speculative` | Serve a single positional model with MTP (native-head qwen3.5/3.6/3.8; gemma4 also needs `--draft-gguf`). |
+| `--draft-gguf PATH` | Companion drafter GGUF for assistant-shape MTP (gemma4, DFlash, DFlash 2); implies `--speculative`. |
+| `--native-mtp` | Draft with the model's own head even when `--draft-gguf` is set; same as the per-model `native_mtp` config key. |
+| `--draft-block-size N` | MTP draft tokens per round (analogous to llama-server `--spec-draft-n-max`). Raises or lowers the drafter's own default, up to the deepest block it can produce (a deeper request clamps, with a warning). Also via `GMLX_DRAFT_BLOCK_SIZE`. |
 | `--adapter PATH` | GGUF LoRA adapter applied live over a single positional model at load (text only, not `--mmproj`/`--speculative`). In config mode set `adapter:` per model instead. |
 | `--stream-cpu` | Run a single positional model entirely on the CPU device: the over-RAM MoE path, same semantics as [`run --stream-cpu`](#loading). In config mode set `stream: cpu` per model instead; see [server-config.md](server-config.md#models). |
 | `--stream-experts` | Routed-expert stacks stream from disk while the every-token layers and KV cache stay on GPU; the decode feeder (default) serves decode from a wired expert arena and makes this the faster placement once warm. Config mode: `stream: experts`. Mutually exclusive with `--stream-cpu`. |
@@ -547,6 +569,8 @@ gmlx serve Qwen3.6-27B-Q4_K_S.gguf --speculative
 | `--moe-layer-shed P` | Lossy per-token layer skip for a single positional model, same semantics as [`run --moe-layer-shed`](#loading). Config mode: `moe_layer_shed: P` per model. |
 | `--gpu-keepwarm` | Hold GPU clocks up while a streamed model decodes, same semantics as [`run --gpu-keepwarm`](#loading). Default on for streamed installs; `GMLX_GPU_KEEPWARM=0` disables (the flag and config `server.gpu_keepwarm` remain as explicit enables). |
 | `--chat-template STR\|PATH` | Inline Jinja, or a `.jinja`/`.txt` path, replacing a single positional model's GGUF template. In config mode set it per profile/model (`chat_template:` / `overrides: {chat_template: ...}`) instead; see [server-config.md](server-config.md). |
+| `--thinking {on,off,adaptive}` | Reasoning switch for a single positional model, mapped onto whatever variable its chat template reads (same mapping as [`run --thinking`](#generation)). Default: the template's own default. In config mode set `thinking:` per profile/model instead. |
+| `--thinking-budget N` | Cap a single positional model's thinking tokens per request; `0` closes thinking at once. A request's own `thinking_budget` still wins. In config mode set `thinking_budget:` in the profile/model `sampling:` block instead. |
 | `--host ADDR` | Bind address (default from config or `127.0.0.1`). A non-loopback host refuses to start without `server.api_key` unless `--no-auth` opts out. |
 | `--port N` | Port (default from config or `8080`). |
 | `-f`, `--foreground` | Run the server attached to this terminal (blocking) instead of the default detached background start. The background start returns at once (so `gmlx launch` works in the same shell), lands a runfile and log under `~/.cache/gmlx/`, and on a macOS GUI session also raises the [menu-bar monitor](#launch-menubar). Manage it with [`stop`/`restart`/`status`/`logs`](#background-mode--server-lifecycle). |
@@ -611,9 +635,9 @@ gmlx stop                        # SIGTERM the process group, then SIGKILL after
 
 | Command | Meaning |
 |---------|---------|
-| `gmlx stop [--host H --port P] [--timeout S]` | Stop a backgrounded server: SIGTERM the whole process group, then SIGKILL after `--timeout` (default `15`, cutting any in-flight generation). Verifies the pid is ours before signalling; a stale runfile is just cleared. |
+| `gmlx stop [--host H --port P] [--timeout S]` | Stop a backgrounded server: SIGTERM the whole process group, then SIGKILL after `--timeout` (default `15`, cutting any in-flight generation). Verifies the pid is ours before signalling; a stale runfile is just cleared. A bare `stop` also clears every other stale runfile it finds (dead or recycled pid) on its way to the live server, and reports them; `--stale` clears only those and signals nothing. |
 | `gmlx restart [...] [--start-timeout S]` | Stop, then relaunch with the runfile's recorded arguments (absolute `--config`, so it relaunches faithfully from any directory). |
-| `gmlx status [--json]` | Process-layer status: pid, uptime, url, log, how it's managed. No API key (uses the auth-exempt `/health`). Resident-model detail lives in `ps`. |
+| `gmlx status [--json]` | Process-layer status: pid, uptime, url, log, how it's managed. No API key (uses the auth-exempt `/health`). Resident-model detail lives in `ps`. Stale runfiles are listed as such, with the reason (`pid N exited`, `pid N is now another process`) and age, and never make a bare verb ambiguous; `--json` puts them under `stale`. |
 | `gmlx logs [-n N] [-f] [--clear]` | Print the last `N` lines of the server log (`-n`/`--lines`). `-f`/`--follow` follows (`tail -f`); `--clear` truncates the file (keeps it). |
 
 Each completed generation request logs one timestamped line with the endpoint,
@@ -733,6 +757,11 @@ into your model dir; it's the incremental counterpart to `init`. Operates on
 the first existing default config unless `--config` is given. Scanning
 recurses by default, because `pull` nests downloads under
 `<dir>/<org>__<repo>/`.
+
+A sibling drafter GGUF pairs into the model it serves as that model's
+`draft_gguf`, reported as `update:`. This works on entries the config already
+carries; an entry with its own `draft_gguf` keeps it. See
+[`discover`](server-config.md#discover) for the rules.
 
 With `--from-hf-cache` (or a config already carrying `server.hf_cache: true`)
 it also reconciles cache-resident GGUFs, adding new `hf:` entries and dropping
@@ -1222,6 +1251,9 @@ This is the supported set:
 | `GMLX_ARENA_STAGE_MAX_TOKENS` | Largest expert call served router-aware (decode-feeder arena or partial ring staging) instead of whole-layer staging. Default `64`; above it a chunk routes to nearly every expert anyway. |
 | `GMLX_ARENA_SPLIT_MAX_TOKENS` | Largest expert call the decode arena serves by token-splitting when its routed union exceeds the arena's slots (a chat-turn prefill after decode, or a wide speculative verify batch). Halves recurse until each piece fits, keeping reads on the arena's read pool instead of the CPU page-cache gather. Default `256`; `0` disables. |
 | `GMLX_DECODE_PRESSURE` | Set `0` to keep the decode-feeder arena at its sized capacity regardless of system memory pressure. Default on: the arena shrinks (keeping its most popular experts) when the kernel reports pressure and regrows once pressure clears and reclaimable RAM returns. |
+| `GMLX_GOVERNOR=0` | Disable the runtime memory governor (default on). Band and shed counters, the kernel reclaimable sample, and the armed floor show at `/v1/metrics`. |
+| `GMLX_GOV_KERNEL_FLOOR_GB` | Kernel reclaimable floor in GB (free + purgeable + speculative + file-backed pages, read from the kernel every governed tick). Below it the governor goes red at once: it evicts registered caches, clears the MLX buffer cache, and fails the largest request if that did not clear the floor; prefix-cache block stores stop at the same floor while a governor is installed. Default: the lower of `8` and 10% of RAM; `0` disables. This is the counter that predicts a free-page freeze; MLX cannot see it because its buffer cache reads as free inside the process and wired to the kernel. |
+| `GMLX_GOV_RESERVE_GB` | Bytes left to the kernel and every other process: the ceiling on the server's tracked memory is the lower of Metal's recommended working set less the margin and physical RAM minus this reserve. Default `max(8, 10% of RAM)`. |
 | `GMLX_GPU_KEEPWARM=0` | Disable GPU keep-warm (default on for streamed installs; see `--gpu-keepwarm`). |
 | `GMLX_GPU_RESIDENT=0` | Skip wiring the every-token (non-expert) weights into the Metal residency set on streamed installs (default on: command buffers otherwise re-wire those pages on every use). |
 | `GMLX_KEEPWARM_IDLE_S` | Seconds without streamed-decode activity before the keep-warm heartbeat parks (default `1`; `0` beats continuously). |

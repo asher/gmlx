@@ -104,10 +104,12 @@ def test_bare_status_lists_all_when_multiple(monkeypatch, capsys):
     assert ":9001" in out and ":9002" in out                     # both reported
 
 
-def test_bare_stop_refuses_when_multiple(capsys):
+def test_bare_stop_refuses_when_multiple(monkeypatch, capsys):
     from gmlx import server as srv
     lc.write_run("127.0.0.1", 9001, {"pid": 11, "host": "127.0.0.1", "port": 9001})
     lc.write_run("127.0.0.1", 9002, {"pid": 22, "host": "127.0.0.1", "port": 9002})
+    monkeypatch.setattr(lc, "identity_ok", lambda run: True)     # both live
+    monkeypatch.setattr(lc, "pid_alive", lambda pid: True)
     assert srv._cmd_stop([]) == 2
     err = capsys.readouterr().err
     assert "9001" in err and "9002" in err and "--port" in err
@@ -311,7 +313,7 @@ def test_copy_stub_external_stamp(monkeypatch, tmp_path):
     assert lc.procname._copy_stub(dest, stamp=stamp) is False
 
 
-# The bundle is launchd-load-bearing (the LaunchAgent references it by
+# launchd depends on the bundle (the LaunchAgent references it by
 # absolute path), so it lives in Application Support - cache cleaners delete
 # ~/.cache. A pre-relocation bundle in the cache is retired.
 def test_menubar_bundle_relocates_to_app_support(monkeypatch, tmp_path):
@@ -1214,3 +1216,115 @@ def test_restart_reraises_auto_menubar(monkeypatch):
                         lambda **kw: raised.append(kw.get("auto")) or 0)
     assert lc.restart("127.0.0.1", 8080) == 0
     assert raised == [True]                             # bar comes back auto-raised
+
+
+# stale runfiles: identified with a reason, never ambiguous, cleared by stop
+def _live_by_pid(monkeypatch, live_pids):
+    monkeypatch.setattr(lc, "pid_alive", lambda pid: pid in live_pids)
+    monkeypatch.setattr(lc, "identity_ok",
+                        lambda run: run.get("pid") in live_pids)
+
+
+def test_stale_reason_names_the_cause(monkeypatch):
+    monkeypatch.setattr(lc, "pid_alive", lambda pid: pid == 500)
+    monkeypatch.setattr(lc, "_proc_cmdline", lambda pid: "/usr/bin/vim notes.txt")
+    assert lc.stale_reason({"pid": 400, "port": 1}) == "pid 400 exited"
+    assert lc.stale_reason({"pid": 500, "port": 1}) == \
+        "pid 500 is now another process (vim)"
+    assert lc.stale_reason({"pid": None, "port": 1}) == "no pid recorded"
+    assert lc.stale_reason(None) == "unreadable runfile"
+    assert lc.stale_reason({"pid": 400, "managed_by": "launchd"}) is None
+    monkeypatch.setattr(lc, "_proc_cmdline", lambda pid: "gmlx serve --port 1")
+    assert lc.stale_reason({"pid": 500, "port": 1}) is None
+
+
+def test_classify_and_prune_keep_the_live_server(monkeypatch):
+    import time
+    lc.write_run("127.0.0.1", 9001, {"pid": 11, "host": "127.0.0.1", "port": 9001,
+                                     "started_at": time.time() - 3 * 86400})
+    lc.write_run("127.0.0.1", 9002, {"pid": 22, "host": "127.0.0.1", "port": 9002,
+                                     "started_at": time.time() - 90})
+    _live_by_pid(monkeypatch, {22})
+    live, stale = lc.classify_runs()
+    assert [r["port"] for r in live] == [9002]
+    assert [(r["port"], r["stale_reason"], r["age"]) for r in stale] == \
+        [(9001, "pid 11 exited", "started 3d ago")]
+    assert lc.auto_target(None, None) == ("127.0.0.1", 9002)      # live wins
+    removed = lc.prune_stale_runs()
+    assert [r["port"] for r in removed] == [9001]
+    assert [r["port"] for r in lc.list_runs()] == [9002]
+    assert lc.prune_stale_runs() == []
+
+
+def test_prune_respects_a_runfile_rewritten_by_a_new_serve(monkeypatch):
+    lc.write_run("127.0.0.1", 9001, {"pid": 11, "host": "127.0.0.1", "port": 9001})
+    _live_by_pid(monkeypatch, set())
+    # a serve wins the spawn guard and writes a live runfile between the
+    # classification and the removal
+    real_read = lc.read_run
+
+    def rewrite_then_read(host, port):
+        lc.write_run(host, port, {"pid": 33, "host": host, "port": port})
+        _live_by_pid(monkeypatch, {33})
+        return real_read(host, port)
+
+    monkeypatch.setattr(lc, "read_run", rewrite_then_read)
+    assert lc.prune_stale_runs() == []
+    assert real_read("127.0.0.1", 9001)["pid"] == 33
+
+
+def test_bare_stop_clears_stale_then_stops_the_live_one(monkeypatch, capsys):
+    from gmlx import server as srv
+    lc.write_run("127.0.0.1", 9001, {"pid": 11, "host": "127.0.0.1", "port": 9001})
+    lc.write_run("127.0.0.1", 9002, {"pid": 22, "host": "127.0.0.1", "port": 9002})
+    lc.write_run("127.0.0.1", 9003, {"pid": 33, "host": "127.0.0.1", "port": 9003})
+    _live_by_pid(monkeypatch, {22})
+    stopped = []
+    monkeypatch.setattr(lc, "stop", lambda h, p, timeout: stopped.append(p) or 0)
+    assert srv._cmd_stop([]) == 0
+    err = capsys.readouterr().err
+    assert "cleared 2 stale runfiles" in err and "9001" in err and "9003" in err
+    assert "pid 11 exited" in err
+    assert stopped == [9002]                                     # not ambiguous
+    assert [r["port"] for r in lc.list_runs()] == [9002]
+
+
+def test_stop_stale_signals_nothing(monkeypatch, capsys):
+    from gmlx import server as srv
+    lc.write_run("127.0.0.1", 9001, {"pid": 11, "host": "127.0.0.1", "port": 9001})
+    lc.write_run("127.0.0.1", 9002, {"pid": 22, "host": "127.0.0.1", "port": 9002})
+    _live_by_pid(monkeypatch, {22})
+    monkeypatch.setattr(lc, "stop", lambda *a, **k: pytest.fail("must not signal"))
+    assert srv._cmd_stop(["--stale"]) == 0
+    assert "cleared 1 stale runfile:" in capsys.readouterr().out
+    assert [r["port"] for r in lc.list_runs()] == [9002]
+    assert srv._cmd_stop(["--stale"]) == 0
+    assert "no stale runfiles" in capsys.readouterr().out
+
+
+def test_bare_status_lists_stale_with_reason(monkeypatch, capsys):
+    import json
+    from gmlx import server as srv
+    lc.write_run("127.0.0.1", 9001, {"pid": 11, "host": "127.0.0.1", "port": 9001,
+                                     "managed_by": "detach"})
+    lc.write_run("127.0.0.1", 9002, {"pid": 22, "host": "127.0.0.1", "port": 9002,
+                                     "managed_by": "detach", "started_at": 0})
+    _live_by_pid(monkeypatch, {11})
+    monkeypatch.setattr(lc, "_health_ok", lambda h, p, timeout=1.5: True)
+    assert srv._cmd_status([]) == 0                             # the live one
+    out = capsys.readouterr().out
+    assert "http://127.0.0.1:9001: up" in out
+    assert "stale runfile 127.0.0.1:9002: pid 22 exited" in out
+    assert "gmlx stop --stale" in out
+    assert [r["port"] for r in lc.list_runs()] == [9001, 9002]  # status clears nothing
+    # explicit target on the stale one: the reason, not just "not running"
+    assert srv._cmd_status(["--port", "9002"]) == 3
+    assert "not running (stale runfile: pid 22 exited" in capsys.readouterr().out
+    # json: live servers plus the stale list, only when several runfiles
+    lc.write_run("127.0.0.1", 9003, {"pid": 33, "host": "127.0.0.1", "port": 9003,
+                                     "managed_by": "detach"})
+    _live_by_pid(monkeypatch, {11, 33})
+    assert srv._cmd_status(["--json"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert [s["port"] for s in doc["servers"]] == [9001, 9003]
+    assert [s["port"] for s in doc["stale"]] == [9002]

@@ -19,6 +19,11 @@ from .envflags import env_bool
 from .patching import ClassPatch
 
 
+def gpu_active() -> bool:
+    """Metal kernels dispatch only while the default device is the GPU."""
+    return mx.default_device() == mx.gpu
+
+
 # One-shot routing dump for the GDN call: which branch each distinct
 # (S, B, sink, mask) shape takes. GMLX_GDN_ROUTE_DEBUG=1.
 _ROUTE_DEBUG = env_bool("GMLX_GDN_ROUTE_DEBUG", False)
@@ -129,7 +134,7 @@ def _needs_tiled_v_patch(config: dict) -> bool:
 
     Note: the synthesized config also carries ``kv_head_layout="tiled"`` for
     forward-compat, but the *installed* mlx-lm has no consumer for that field -
-    this monkey-patch is the load-bearing mechanism today.
+    this monkey-patch is the only mechanism today.
 
     qwen3_next is EXCLUDED despite its asymmetric heads (16 k / 32 v): its
     GGUFs keep V heads in HF grouped order (the legacy fused ssm_in layout is
@@ -137,7 +142,10 @@ def _needs_tiled_v_patch(config: dict) -> bool:
     group order), and mlx-lm's qwen3_next consumes grouped directly - the
     tiled fixup would corrupt its K->V mapping.
     """
-    if config.get("model_type") == "qwen3_next":
+    if config.get("model_type") in ("qwen3_next", "qwen4_exp"):
+        # qwen4_exp: V heads ARE tiled on the wire, but the vendored
+        # GatedDeltaNet tiles q/k explicitly before the scan, so it needs no
+        # module-global fixup (and must not inherit the cross-load hazard).
         return False
     k = config.get("linear_num_key_heads", 0)
     v = config.get("linear_num_value_heads", 0)
@@ -352,7 +360,8 @@ _GDN_FUSED_DECODE_SRC = r"""
             int dv = sg * n_dv + td;
             float xn = my_out[td] * rms_denom * (float)norm_weight[dv];
             float zv = (float)z[(b_idx * Hv + hv_idx) * Dv + dv];
-            float gate = zv * (1.0f / (1.0f + exp(-zv)));
+            float sig = 1.0f / (1.0f + exp(-zv));
+            float gate = GATE_SIGMOID ? sig : zv * sig;
             y[(b_idx * Hv + hv_idx) * Dv + dv] = (InT)(gate * xn);
         }
     }
@@ -477,6 +486,8 @@ def _gdn_fused_decode_body(self, inputs, cache, *, vlm_cache_advance=False):
             ("SG", SG),
             ("TILED", tiled),
             ("CONV_BF16", 1),
+            # output gate: silu(z) (qwen3.5) or sigmoid(z) (qwen4exp)
+            ("GATE_SIGMOID", int(bool(getattr(self, "gdn_gate_sigmoid", False)))),
         ],
         grid=(32, SG, B * self.num_v_heads),
         threadgroup=(32, SG, 1),
@@ -676,10 +687,13 @@ _GDN_FUSED_VERIFY_SRC = r"""
     }
 
     for (uint t = 0; t < Tn; ++t) {
-        float ab = (float)a[(b_idx * Tn + t) * Hv + hv_idx] + dtb;
+        // ba packs the b then a projections per position ([B, T, 2, Hv]):
+        // one combined gemv upstream instead of two tiny dispatches.
+        uint ba_base = ((b_idx * Tn + t) * 2) * Hv;
+        float ab = (float)ba[ba_base + Hv + hv_idx] + dtb;
         float sp = ab > 20.0f ? ab : log(1.0f + exp(ab));
         float g = exp(-A * sp);
-        float beta = 1.0f / (1.0f + exp(-(float)b[(b_idx * Tn + t) * Hv + hv_idx]));
+        float beta = 1.0f / (1.0f + exp(-(float)ba[ba_base + hv_idx]));
 
         auto ci_t = ci_b + t * conv_dim;
         float qn[n_per_t], kn[n_per_t];
@@ -720,8 +734,13 @@ _GDN_FUSED_VERIFY_SRC = r"""
             float out = 0.0f;
             for (int i = 0; i < n_per_t; ++i) { st[td][i] += kn[i] * delta; out += st[td][i] * qn[i]; }
             out = simd_sum(out);
-            auto states_t = states + ((((uint)b_idx * Tn + t) * Hv + hv_idx) * Dv + dv) * Dk;
-            for (int i = 0; i < n_per_t; ++i) states_t[n_per_t * lane + i] = (StT)st[td][i];
+            // Rollback targets are positions 0..Tn-2 only (the state after
+            // all Tn positions is state_out and rollback never fires on
+            // full accept), so the last position is not recorded.
+            if (t + 1 < Tn) {
+                auto states_t = states + ((((uint)b_idx * (Tn - 1) + t) * Hv + hv_idx) * Dv + dv) * Dk;
+                for (int i = 0; i < n_per_t; ++i) states_t[n_per_t * lane + i] = (StT)st[td][i];
+            }
             out_t[td] = out;
             if (lane == 0) my_sumsq += out * out;
         }
@@ -736,7 +755,8 @@ _GDN_FUSED_VERIFY_SRC = r"""
                 int dv = sg * n_dv + td;
                 float xn = out_t[td] * rms_denom * (float)norm_weight[dv];
                 float zv = (float)z[(((uint)b_idx * Tn + t) * Hv + hv_idx) * Dv + dv];
-                float gate = zv * (1.0f / (1.0f + exp(-zv)));
+                float sig = 1.0f / (1.0f + exp(-zv));
+                float gate = GATE_SIGMOID ? sig : zv * sig;
                 y[(((uint)b_idx * Tn + t) * Hv + hv_idx) * Dv + dv] = (InT)(gate * xn);
             }
         }
@@ -756,8 +776,7 @@ _gdn_fused_verify_kernel = (
         input_names=[
             "conv_input",
             "conv_weight",
-            "a",
-            "b",
+            "ba",
             "A_log",
             "dt_bias",
             "state_in",
@@ -829,6 +848,8 @@ _F16_HEAD_GEMV = (
 def _f16_head_gemv(x, w):
     """x [B, M, K], w [N, K] (dense bf16/f16) -> [B, M, N] == x @ w.T.
     M-stationary GEMV-ext; ~95% of peak at M=2..8 where mx.matmul is ~68%."""
+    if not gpu_active():
+        return x @ w.T
     B, M, Kd = x.shape
     Nd = w.shape[0]
     BN = (32 // 8) * 2  # ROWS_PER_SG * NSG
@@ -918,8 +939,40 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink):
 
     mixed_qkv = self.in_proj_qkv(inputs)
     z = _bf16_verify_linear(self.in_proj_z, inputs)
-    b = _bf16_verify_linear(self.in_proj_b, inputs)
-    a = _bf16_verify_linear(self.in_proj_a, inputs)
+    # b and a are tiny [D -> Hv] dense rows; two separate dispatches cost
+    # ~2x the combined one at these sizes, so run them as one [2 * Hv]
+    # gemv against the concatenated weight (row-independent, bit-exact).
+    ba_key = (id(self.in_proj_b.weight), id(self.in_proj_a.weight))
+    cba = getattr(self, "_gdn_verify_ba_weight", None)
+    if cba is None or cba[0] != ba_key:
+        fuse_ok = (
+            _F16_HEAD_GEMV is not None
+            and getattr(self.in_proj_b, "bias", None) is None
+            and getattr(self.in_proj_a, "bias", None) is None
+            and not hasattr(self.in_proj_b, "scales")
+            and not hasattr(self.in_proj_a, "scales")
+            and self.in_proj_b.weight.dtype == self.in_proj_a.weight.dtype
+        )
+        wba = None
+        if fuse_ok:
+            wba = mx.concatenate(
+                [self.in_proj_b.weight, self.in_proj_a.weight], axis=0
+            )
+            mx.eval(wba)
+        cba = (ba_key, wba)
+        self._gdn_verify_ba_weight = cba
+    if cba[1] is not None:
+        ba = _f16_head_gemv(inputs, cba[1])
+    else:
+        ba = mx.concatenate(
+            [
+                _bf16_verify_linear(self.in_proj_b, inputs),
+                _bf16_verify_linear(self.in_proj_a, inputs),
+            ],
+            axis=-1,
+        )
+    b = ba[..., : self.num_v_heads]
+    a = ba[..., self.num_v_heads :]
     z = z.reshape(B, S, self.num_v_heads, Dv)
 
     conv_state = cache[0] if (cache is not None and cache[0] is not None) else None
@@ -958,8 +1011,7 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink):
         inputs=[
             conv_input,
             conv_weight,
-            a,
-            b,
+            ba,
             self.A_log,
             self.dt_bias,
             state,
@@ -978,13 +1030,18 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink):
             ("SG", SG),
             ("TILED", tiled),
             ("CONV_BF16", 1),
+            # output gate: silu(z) (qwen3.5) or sigmoid(z) (qwen4exp)
+            ("GATE_SIGMOID", int(bool(getattr(self, "gdn_gate_sigmoid", False)))),
         ],
         grid=(32, SG, B * self.num_v_heads),
         threadgroup=(32, SG, 1),
         output_shapes=[
             (B, S, self.num_v_heads, Dv),
             state.shape,
-            (B, S, self.num_v_heads, Dv, self.head_k_dim),
+            # Per-position rollback states for positions 0..S-2; position
+            # S-1 would duplicate state_out and no rollback path reads it
+            # (every engine call site guards accepted < bs - 1).
+            (B, S - 1, self.num_v_heads, Dv, self.head_k_dim),
         ],
         output_dtypes=[conv_input.dtype, state.dtype, state.dtype],
     )

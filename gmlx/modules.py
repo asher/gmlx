@@ -40,6 +40,7 @@ from mlx_kquant.nn import (
 )
 
 from .native_fp import NATIVE_FP_CODECS, NATIVE_FP_GEOMETRY
+from .dtypes import activation_dtype
 from .envflags import env_int
 from .transforms import qk_permute_wire
 
@@ -674,10 +675,16 @@ def _eligible_kq_block(m, caps):
             return False
     if sw.gate_proj.kquant_type != sw.up_proj.kquant_type:
         return False
-    # kernel geometry: K of both matvecs % 256, N (= down K) % 256
+    # kernel geometry: whole codec blocks on both matvec K dims (the kq
+    # kernels stride K in block-width chunks; q8_0 off 256 takes the
+    # generic q8_0_ext instantiation) and N % 8 for the grid. Inter is
+    # the down matvec's K, checked in the down codec's own block width
+    # (qwen4exp's 640-wide experts: IQ4_NL blocks of 32).
     d_in = _kq_wire_k(sw.gate_proj.weight, sw.gate_proj.kquant_type)
     inter = sw.gate_proj.weight.shape[1]
-    if d_in <= 0 or d_in % 256 or inter % 256:
+    if d_in <= 0 or inter % 8:
+        return False
+    if _kq_wire_k(sw.down_proj.weight, sw.down_proj.kquant_type) != inter:
         return False
     se = m.shared_expert
     for attr in ("gate_proj", "up_proj", "down_proj"):
@@ -686,6 +693,11 @@ def _eligible_kq_block(m, caps):
     # plain silu(gate) * up shared expert only (qwen3-next MLP shape)
     if hasattr(se, "activation"):
         return False
+    # unquantized shared expert (e.g. the qwen4exp MTP companion keeps its
+    # dense tensors bf16) stays on the unfused path
+    for attr in ("gate_proj", "up_proj", "down_proj"):
+        if not hasattr(getattr(se, attr), "kquant_type"):
+            return False
     # the GLU gather runs both shexp slots with one codec
     if se.gate_proj.kquant_type != se.up_proj.kquant_type:
         return False
@@ -833,10 +845,16 @@ def _eligible_hyv3_shexp(m, caps):
         return False
     if getattr(sw, "_kq_glu_act", None) != "silu":
         return False
-    # kernel geometry: K of both matvecs % 256, N (= down K) % 256
+    # kernel geometry: whole codec blocks on both matvec K dims (the kq
+    # kernels stride K in block-width chunks; q8_0 off 256 takes the
+    # generic q8_0_ext instantiation) and N % 8 for the grid. Inter is
+    # the down matvec's K, checked in the down codec's own block width
+    # (qwen4exp's 640-wide experts: IQ4_NL blocks of 32).
     d_in = _kq_wire_k(sw.gate_proj.weight, sw.gate_proj.kquant_type)
     inter = sw.gate_proj.weight.shape[1]
-    if d_in <= 0 or d_in % 256 or inter % 256:
+    if d_in <= 0 or inter % 8:
+        return False
+    if _kq_wire_k(sw.down_proj.weight, sw.down_proj.kquant_type) != inter:
         return False
     for attr in ("gate_proj", "up_proj", "down_proj"):
         if not hasattr(se, attr):
@@ -1539,7 +1557,11 @@ def install_kquant_modules(model: nn.Module,
         if isinstance(module, nn.Embedding):
             num_emb, dims = module.weight.shape
             n_replaced += 1
-            return KQuantEmbedding(num_emb, dims, codec)
+            # The embedding's output dtype seeds the whole graph: every
+            # downstream kquant matmul returns its activation dtype.
+            return KQuantEmbedding(
+                num_emb, dims, codec, out_dtype=activation_dtype()
+            )
         if isinstance(module, _switch_linear_types):
             n_experts, out_dims, in_dims = module.weight.shape
             bias = "bias" in module

@@ -18,7 +18,7 @@ This is LOSSY and therefore strictly opt-in: GMLX_SPARSE_ATTN=1 enables
 the route, GMLX_SPARSE_K sets the kept-token budget (default 2048), and
 GMLX_SPARSE_MIN_S (default 8192) keeps it off shallow contexts where
 full attention is already cheap. Forced sink + recency residency is
-load-bearing: without it approximate indexers fail catastrophically
+required: without it approximate indexers fail catastrophically
 (stage-2 finding), so it is not configurable.
 
 Claims are limited to quality-gated architectures (llama-family full

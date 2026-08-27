@@ -1,0 +1,8 @@
+# Run `pre-commit install` once to enable. Mirrors the CI lint job: ruff
+# check at the CI pin (ruff format is not enforced in this repo).
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.20
+    hooks:
+      - id: ruff
+        args: [--fix]

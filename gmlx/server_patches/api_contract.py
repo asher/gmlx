@@ -35,11 +35,14 @@ _MESSAGES_PATHS = ("/messages", "/v1/messages")
 # every field read there via getattr/_request_field_or_default.
 _GEN_ARGS_CONSUMED = frozenset({
     "max_tokens", "max_output_tokens", "temperature", "top_p", "top_k",
-    "min_p", "seed", "logprobs", "repetition_penalty",
+    "min_p", "top_n_sigma", "p_less", "typical_p",
+    "seed", "logprobs", "repetition_penalty",
     "repetition_context_size", "presence_penalty", "presence_context_size",
     "frequency_penalty", "frequency_context_size", "logit_bias",
     "enable_thinking", "thinking_budget", "thinking_start_token",
     "thinking_end_token", "response_format", "text",
+    # standard reasoning control (mapped onto enable_thinking upstream)
+    "reasoning", "reasoning_effort",
     # masked-diffusion knobs (read for every request shape)
     "max_denoising_steps", "block_length", "num_to_transfer",
     "max_transfer_per_step", "editing_threshold", "max_post_steps",
@@ -58,10 +61,12 @@ _GMLX_CONSUMED = frozenset({
 
 # /v1/chat/completions (openai.py chat_completions_endpoint + the gmlx stop
 # filter). ``tool_choice`` is consumed here: "none" is enforced below, other
-# values are documented as template-dependent.
+# values are documented as template-dependent. ``timings_per_token`` is the
+# per-chunk stream-timings switch (install_stream_timings).
 CHAT_CONSUMED = _GEN_ARGS_CONSUMED | _GMLX_CONSUMED | frozenset({
     "model", "messages", "stream", "stream_options", "adapter_path",
     "resize_shape", "tools", "tool_choice", "top_logprobs", "stop",
+    "timings_per_token",
 })
 
 # /v1/responses (openai.py responses_endpoint). No ``stop`` here: the gmlx

@@ -51,6 +51,7 @@ import mlx.nn as nn
 from mlx_lm.models.base import create_attention_mask
 
 from . import deepseek_v4_model as v4
+from .drafter_protocol import native_block_size
 from .deepseek_v4_cache import ensure_rollback_attached, set_undo_armed
 from .deepseek_v4_hyper_connection import HyperHead
 
@@ -108,8 +109,6 @@ class DeepseekV4SpecLM(v4.Model):
         super().__init__(config)
         # The verify rollback path needs the rotating undo log on the class.
         ensure_rollback_attached()
-        # Hard-disable the L1 shared-APC tier for V4 v1 (spec_engine reads it).
-        self._kq_apc_mode = None
         # Set by the DSpark loader: tuple of trunk layer ids whose hc-mean
         # outputs the drafter consumes. When set, every engine-facing hidden
         # is PACKED 3D: [raw_4d.flatten(hc) | cap_l0 | cap_l1 | ...].
@@ -124,6 +123,15 @@ class DeepseekV4SpecLM(v4.Model):
         return hidden[..., :lead].reshape(
             hidden.shape[0], hidden.shape[1], args.hc_mult, args.hidden_size
         )
+
+    def chunked_prefill_policy(self, **kwargs):
+        # Stock mlx-vlm disables chunked prefill whenever a drafter is
+        # attached (unknown hidden-capture contracts), which one-shots
+        # the whole prompt on paths that consult this policy. The DSpark
+        # drafter is window-limited (hidden_capture_limit trailing
+        # positions), so last-chunk capture is sufficient and chunked
+        # prefill is always safe for this target.
+        return True
 
     def __call__(
         self,
@@ -257,7 +265,8 @@ class DeepseekV4MTPDrafter(nn.Module):
                 "post-init extended with the MTP layer's ratio 0 "
                 f"(got {len(args.compress_ratios)} entries for layer index {n})"
             )
-        self._native_block_size = int(config.block_size)
+        self._native_block_size = (
+            native_block_size(config) or int(config.block_size))
         self._sliding_window = int(args.sliding_window)
         # Engine capture seams keep only this many trailing prompt hiddens:
         # the head attends through a sliding window with relative RoPE, so

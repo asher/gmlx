@@ -44,6 +44,7 @@ from dataclasses import dataclass
 
 
 from . import loadlog
+from .capacity import LoadDeferred
 from .envflags import env_float
 
 _log = logging.getLogger(__name__)
@@ -128,13 +129,11 @@ def _gguf_footprint_bytes(model_path: str) -> int:
 
 
 def _default_budget_bytes() -> int:
-    """``_DEFAULT_BUDGET_FRACTION`` of the GPU's recommended working set."""
-    import mlx.core as mx
+    """``_DEFAULT_BUDGET_FRACTION`` of the GPU's recommended working set
+    (working-set source: capacity, the one accounting)."""
+    from .capacity import working_set_bytes
 
-    try:
-        working_set = int(mx.device_info()["max_recommended_working_set_size"])
-    except Exception:
-        working_set = _FALLBACK_WORKING_SET
+    working_set = working_set_bytes() or _FALLBACK_WORKING_SET
     return int(_DEFAULT_BUDGET_FRACTION * working_set)
 
 
@@ -161,6 +160,38 @@ class ModelBusyError(RuntimeError):
             f"{model_path} has {in_flight} in-flight request(s)")
 
 
+def profile_label(cache_key: tuple) -> str:
+    """A short, stable name for what distinguishes one resident entry
+    from another on the same GGUF: the adapter's basename and/or a hash
+    of the load signature (kv bits, mmproj, drafter ...), ``default``
+    when neither applies. Unique per entry (the pool is keyed on
+    ``cache_key``) and unchanged for the entry's lifetime and across
+    reloads of the same config - a metrics label, unlike ``seq``, which
+    is the LRU clock and re-stamps on every acquire. Every key component
+    but the path contributes: adapter, model kind (when not ``auto``),
+    load-signature extras."""
+    import hashlib
+
+    parts = []
+    adapter = cache_key[1] if len(cache_key) > 1 else None
+    if adapter:
+        parts.append(os.path.basename(str(adapter)))
+    # model_kind is part of the key too: an --embeddings / --rerank / audio
+    # route pointed at a GGUF that also serves chat is a second entry with
+    # the same adapter and extras. Only ``auto`` (what gmlx's own loads
+    # pass) collapses into ``default``; upstream's ``text_generation`` is a
+    # different key and labels itself, so the label stays unique even if
+    # the stock lifespan preload ever fires alongside ours.
+    kind = cache_key[2] if len(cache_key) > 2 else None
+    if kind and str(kind) != "auto":
+        parts.append(str(kind))
+    extras = tuple(cache_key[3:])
+    if extras:
+        parts.append(hashlib.blake2b(repr(extras).encode(),
+                                     digest_size=4).hexdigest())
+    return "+".join(parts) or "default"
+
+
 @dataclass
 class _Entry:
     cache_key: tuple
@@ -174,6 +205,8 @@ class _Entry:
     ttl: float | None = None  # idle auto-unload seconds (None/0 => never)
     last_access: float = 0.0    # monotonic time of the last acquire/touch
     busy: int = 0               # in-flight refcount; busy entries are never LRU-evicted
+    retained: int = 0           # of ``busy``: process-lifetime holds (preload), not requests
+    loaded_as: str | None = None  # the configured ``id[@profile]`` whose request built it
 
 
 class _BusyHold:
@@ -347,6 +380,35 @@ class _RuntimeProxy:
         return getattr(self._original, name)
 
 
+def _stamp_apc_mode(rg) -> None:
+    """Set ``rg.apc_mode`` the way ``ResponseGenerator.__init__`` would have
+    had the manager existed at construction. gmlx wires the manager in
+    post-load, so without this the generator's mode stays None, the server
+    skips the semantic-salt precompute, and the engine's fallback folds a
+    content hash of the prompt's embedding matrix into every cache key: a
+    per-request hashing cost, and a salt nothing outside the engine (the
+    dry-run's warm-prefix probe) can reproduce."""
+    if getattr(rg, "apc_mode", None) is not None:
+        return
+    model = getattr(rg, "model", None)
+    if model is None:
+        return
+    mode = getattr(model, "_kq_apc_mode", None)
+    if mode is None:
+        try:
+            from mlx_vlm import apc as _apc
+            lm = getattr(model, "language_model", None) or model
+            mode = _apc.model_apc_mode(lm)
+        except Exception:
+            _log.warning("apc_mode probe skipped", exc_info=True)
+            return
+    if mode is not None:
+        try:
+            rg.apc_mode = mode
+        except Exception:
+            pass
+
+
 class _ResidencyPool:
     """Pinned + LRU pool of resident models, backed by stock load/teardown."""
 
@@ -387,7 +449,8 @@ class _ResidencyPool:
 
     # public
     def acquire(self, model_path, adapter_path, model_kind, *,
-                ttl=None, cache_key_extra=(), env=None, build_spec=None) -> _Entry:
+                ttl=None, cache_key_extra=(), env=None, build_spec=None,
+                loaded_as=None) -> _Entry:
         # ``cache_key_extra`` (a model's load_signature) distinguishes two ids
         # backed by the same GGUF but loaded with different params (kv bits,
         # mmproj, drafter) - they become separate resident entries.
@@ -426,6 +489,10 @@ class _ResidencyPool:
                 self._evict_for_room(incoming)
             entry = self._build(cache_key, model_path, adapter_path, model_kind,
                                 incoming, ttl=ttl, env=env, build_spec=build_spec)
+            # The id that built the entry names it for the process lifetime
+            # (a metrics label wants a name fixed per entry; aliases sharing
+            # the signature reuse this entry and keep the first name).
+            entry.loaded_as = loaded_as
             with self._lock:
                 self._entries[cache_key] = entry
                 self._touch(entry)
@@ -447,16 +514,26 @@ class _ResidencyPool:
                     return entry.cache_key[1]
         return None
 
-    def clear(self) -> bool:
+    @staticmethod
+    def _live_count(entry: _Entry, ignore_retained: bool) -> int:
+        return max(0, entry.busy - entry.retained) if ignore_retained else entry.busy
+
+    def entry_resident(self, entry) -> bool:
+        """Whether ``entry`` (a hold's ``_entry``) is still in the pool -
+        false once an eviction tore it down."""
+        with self._lock:
+            return any(e is entry for e in self._entries.values())
+
+    def clear(self, *, ignore_retained: bool = False) -> bool:
         """Tear down every resident entry that has no in-flight request. A busy
         entry (a client is mid-stream on it) is skipped, not stopped - tearing
         it down would kill that client's running generation; the TTL reaper or
         a later unload collects it once released. Returns whether anything was
-        torn down."""
+        torn down. ``ignore_retained`` as in :meth:`evict`."""
         with self._build_lock, self._lock:
             cleared = False
             for key, entry in list(self._entries.items()):
-                if entry.busy > 0:
+                if self._live_count(entry, ignore_retained) > 0:
                     loadlog.verbose_print(
                         f"[residency] unload skipping busy model "
                         f"{os.path.basename(str(entry.model_path))} "
@@ -475,11 +552,79 @@ class _ResidencyPool:
             return sorted({str(e.model_path) for e in self._entries.values()
                            if e.busy > 0})
 
-    def evict(self, model_path) -> bool:
+    def mark_retained(self, hold) -> None:
+        """Count ``hold`` (a ``_BusyHold`` the caller keeps for the process
+        lifetime, e.g. the primary preload) as retained, so ``stats()`` can
+        report ``in_flight`` = busy minus retained: the streams actually
+        generating, which is what a dispatcher or the menu bar wants."""
+        entry = getattr(hold, "_entry", None)
+        if entry is None:
+            return
+        with self._lock:
+            entry.retained += 1
+
+    def unmark_retained(self, hold) -> None:
+        """Undo :meth:`mark_retained` before the hold is released (an
+        explicit unload drops the preload's lifetime hold)."""
+        entry = getattr(hold, "_entry", None)
+        if entry is None:
+            return
+        with self._lock:
+            entry.retained = max(0, entry.retained - 1)
+
+    def resident_entry(self, model_path):
+        """The resident entry backing ``model_path`` (the one carrying the
+        resident adapter when several profiles are loaded), or None. Never
+        loads: a dry-run must not pull a model in."""
+        with self._lock:
+            hits = [e for e in self._entries.values()
+                    if str(e.model_path) == str(model_path)]
+        if not hits:
+            return None
+        return max(hits, key=lambda e: e.last_access)
+
+    def model_path_for_generator(self, rg) -> str | None:
+        """The resident model path whose ``response_generator`` is ``rg``
+        (identity match), or None. The live-request view labels engine
+        rows with a model id this way; the engine itself has no notion
+        of which configured id it serves."""
+        with self._lock:
+            for e in self._entries.values():
+                if e.response_generator is rg:
+                    return str(e.model_path)
+        return None
+
+    def apc_managers(self, model_path=None) -> list:
+        """``(model_path, apc_manager)`` for every resident entry that has
+        one, or just the entries at ``model_path``. The per-model cache
+        reset walks this; ``runtime.apc_manager`` alone resolves to the
+        current request context's entry, which is one model at most."""
+        with self._lock:
+            return [(str(e.model_path), e.apc_manager)
+                    for e in self._entries.values()
+                    if e.apc_manager is not None
+                    and (model_path is None
+                         or str(e.model_path) == str(model_path))]
+
+    def response_generators(self) -> list:
+        """``(model_path, response_generator)`` for every resident entry
+        that has an engine. The waiting census sums every engine's
+        queue; ``runtime.response_generator`` outside a request context
+        resolves to the last-used entry only."""
+        with self._lock:
+            return [(str(e.model_path), e.response_generator)
+                    for e in self._entries.values()
+                    if e.response_generator is not None]
+
+    def evict(self, model_path, *, ignore_retained: bool = False) -> bool:
         """Tear down every resident entry backing ``model_path`` (a GGUF abspath),
         across all of its load profiles. Returns whether anything was evicted;
         raises :class:`ModelBusyError` if the model has in-flight requests (an
         unload must never stop another client's running generation).
+        ``ignore_retained`` discounts process-lifetime holds (the preload's,
+        see :meth:`mark_retained`) from that count, so an explicit unload can
+        judge busy-ness on real streams alone without dropping the hold first
+        - a 409 must leave the preload exactly as pinned as it found it.
 
         Also drops any keep mark - an explicit unload is a full release, so the
         path won't be silently re-kept (and TTL-exempted) on a later reload."""
@@ -487,7 +632,8 @@ class _ResidencyPool:
             self._keep_paths.discard(model_path)
             keys = [k for k, e in self._entries.items()
                     if e.model_path == model_path]
-            in_flight = sum(self._entries[k].busy for k in keys)
+            in_flight = sum(self._live_count(self._entries[k], ignore_retained)
+                            for k in keys)
             if in_flight:
                 raise ModelBusyError(model_path, in_flight)
             for k in keys:
@@ -542,10 +688,14 @@ class _ResidencyPool:
                 "resident": [
                     {
                         "model_path": e.model_path,
+                        "loaded_as": e.loaded_as,
+                        "profile": profile_label(e.cache_key),
                         "pinned": e.pinned,
                         "kept": e.model_path in self._keep_paths,
                         "seq": e.seq,
                         "busy": e.busy,
+                        "retained": e.retained,
+                        "in_flight": max(0, e.busy - e.retained),
                         "footprint_bytes": e.footprint,
                         "ttl_s": e.ttl,
                         "idle_s": max(0.0, now - e.last_access),
@@ -639,12 +789,38 @@ class _ResidencyPool:
             )
             self._teardown(victim)
             del self._entries[victim.cache_key]
+            if self._proxy._last_entry is victim:
+                self._proxy._last_entry = None
 
     def _build(self, cache_key, model_path, adapter_path, model_kind, footprint,
                *, ttl=None, env=None, build_spec=None) -> _Entry:
         from . import server_bridge_vlm as _serving
 
         _warn_if_batch_unsafe(model_path)
+        # U4: model load and swap take the same headroom check a request
+        # takes, and the capacity table is derived (header-based, no
+        # load needed) and gated before the box's biggest allocation
+        # starts. Both raise with the numbers; GMLX_OVERCOMMIT=1 skips.
+        from .capacity import (
+            install_boot_table,
+            preload_gate,
+            preload_gate_bytes,
+            streamed_expert_bytes,
+        )
+        gate_bytes = footprint
+        if getattr(build_spec, "stream", None) == "experts":
+            streamed = streamed_expert_bytes(str(model_path))
+            gate_bytes = preload_gate_bytes(footprint, "experts", streamed)
+            if streamed:
+                _log.info(
+                    "preload gate: stream=experts discounts %.1f GB of "
+                    "routed-expert bytes (gating on %.1f GB resident)",
+                    streamed / 1e9, gate_bytes / 1e9)
+        preload_gate(gate_bytes, str(model_path))
+        # The boot table feeds request admission (width/ctx budgets), so a
+        # streaming model's table must also price only the resident share:
+        # the expert stacks decode through the disk arena, not the KV budget.
+        install_boot_table(str(model_path), gate_bytes, str(model_path))
         scratch = _Scratch()
         token = _build_scratch.set(scratch)
         # Per-model load-param + APC/SSD-KV env window: set this model's vars
@@ -670,6 +846,14 @@ class _ResidencyPool:
             "1", "true", "True", "yes")
         os.environ["GMLX_APC_ENABLED"] = "1" if enabled else "0"
         os.environ["APC_ENABLED"] = "0"
+        # Untracked-weights ownership window: every registration the stock
+        # load performs on this entry's behalf (the model walk, a drafter
+        # reload, the MTP stash build) attributes its key to this entry, so
+        # _teardown can forget exactly those keys. Same cross-thread module-
+        # global pattern as set_build_spec, serialized by the build lock.
+        from .prefill_decay import (
+            forget_untracked_weights, set_untracked_weights_owner)
+        set_untracked_weights_owner(cache_key)
         try:
             self._stock_get(model_path, adapter_path, model_kind=model_kind)
             # Wire the bridge-built manager everywhere the stock load would
@@ -697,7 +881,18 @@ class _ResidencyPool:
                 rg = scratch.response_generator
                 if rg is not None:
                     rg.apc_manager = manager
+                    _stamp_apc_mode(rg)
+                try:
+                    manager.autosize(getattr(rg, "model", None))
+                except Exception:
+                    _log.warning("APC pool autosize skipped", exc_info=True)
+        except BaseException:
+            # A failed build never reaches _teardown: drop its partial
+            # registrations here or they tax headroom forever.
+            forget_untracked_weights(cache_key)
+            raise
         finally:
+            set_untracked_weights_owner(None)
             _serving.set_build_spec(None)
             _serving.pop_built_apc_manager()
             self._restore_env(apc_saved)
@@ -745,17 +940,16 @@ class _ResidencyPool:
         # Capture the expert prefetcher before the stock unload empties
         # model_cache; it holds one open fd per GGUF shard and nothing else
         # closes it (repeated load/unload cycles would creep toward EMFILE).
-        _prefetcher = getattr(entry.model_cache.get("model"),
-                              "_kq_prefetcher", None)
+        owner = _streaming_owner(entry.model_cache.get("model"))
+        _prefetcher = getattr(owner, "_kq_prefetcher", None)
         # Same for the prefill feeder: shard fds + staging pools + ~GBs of
         # host ring slots that must not outlive the model.
-        _feeder = getattr(entry.model_cache.get("model"), "_kq_feeder", None)
+        _feeder = getattr(owner, "_kq_feeder", None)
         # And the decode feeder: its mlocked wired arena (a large fraction of
         # RAM on hybrid over-RAM MoE models), read pool, and shard fds sit in
         # a feeder<->module reference cycle, so refcounting alone won't
         # reclaim them before the next model sizes its own arena.
-        _decode_feeder = getattr(entry.model_cache.get("model"),
-                                 "_kq_decode_feeder", None)
+        _decode_feeder = getattr(owner, "_kq_decode_feeder", None)
         scratch = _Scratch()
         scratch.response_generator = entry.response_generator
         scratch.model_cache = entry.model_cache
@@ -788,6 +982,52 @@ class _ResidencyPool:
             release_streaming_for(entry.model_path)
         except Exception:
             pass
+        # Every eviction and reap funnels through here: drop this entry's
+        # untracked-weights attributions so an evicted model stops taxing
+        # headroom_bytes(). The registry forgets exactly the keys this
+        # entry's build registered; bytes leave the estimate only at zero
+        # owners, so a resident sibling sharing shards keeps them counted.
+        from .prefill_decay import forget_untracked_weights
+        forget_untracked_weights(entry.cache_key)
+        # The model modules sit in reference cycles (feeder<->module among
+        # others) that refcounting cannot reclaim, and an idle server may not
+        # run a gen-2 GC for a long time. The next load's preload_gate
+        # re-measures headroom immediately, so a swap on a near-full box
+        # defers against hundreds of GB of already-dead arrays unless the
+        # cycles are collected here. A collection while this frame or the
+        # entry still points at the model frees nothing (the closer loop's
+        # last bound method alone pins the feeder and, through it, every
+        # expert weight): drop every reference first, then collect.
+        entry.model_cache = {}
+        entry.response_generator = None
+        entry.apc_manager = None
+        del scratch, owner, close, _prefetcher, _feeder, _decode_feeder
+        import gc
+        gc.collect()
+
+
+_STREAMING_ATTRS = ("_kq_prefetcher", "_kq_feeder", "_kq_decode_feeder")
+
+
+def _streaming_owner(model):
+    """The module the loader hung the streaming helpers on. The served
+    object is usually a wrapper (the text-only vlm adapter, whose
+    ``language_model._model`` is the stock model) that forwards no
+    attributes, so reading the helpers off the wrapper finds nothing and
+    the feeders' worker threads outlive the model, pinning every expert
+    weight through their frames. Descend the wrapper chain to the first
+    module that carries a helper; the original object when none does."""
+    seen = set()
+    cur = model
+    while cur is not None and id(cur) not in seen:
+        if any(getattr(cur, a, None) is not None for a in _STREAMING_ATTRS):
+            return cur
+        seen.add(id(cur))
+        nxt = getattr(cur, "language_model", None)
+        if nxt is None:
+            nxt = getattr(cur, "_model", None)
+        cur = nxt
+    return model
 
 
 def _pinned_from_env(preload_path):
@@ -797,6 +1037,25 @@ def _pinned_from_env(preload_path):
     extra = os.environ.get("MLX_VLM_PINNED_MODELS", "")
     pinned.update(p.strip() for p in extra.split(",") if p.strip())
     return pinned
+
+
+def _http_from_load_deferred(model_id, exc):
+    """The gate's retryable refusal (``capacity.LoadDeferred``) as the
+    ``fastapi.HTTPException`` mlx-vlm's endpoints re-raise untouched: the
+    typed 503 body the chat pre-warm serves (``model_load_deferred``) with
+    the same ``Retry-After``; the app's HTTPException handler unwraps the
+    envelope and forwards the header."""
+    import json
+
+    from fastapi import HTTPException
+
+    from .server_patches.request_flow import _load_deferred_response
+    resp = _load_deferred_response(model_id, exc)
+    body = json.loads(bytes(resp.body))
+    err = dict(body["error"])
+    err["retry_after_s"] = body.get("retry_after_s")
+    return HTTPException(status_code=503, detail={"error": err},
+                         headers={"Retry-After": resp.headers["retry-after"]})
 
 
 def _http_from_resolver_error(exc):
@@ -894,6 +1153,7 @@ def install_gguf_residency_pool(budget_bytes=None, max_models=None, pinned=None)
         cache_key_extra = ()
         env = None
         build_spec = None
+        loaded_as = None
         load_path = model_path
         if _serving.server_config() is not None:
             try:
@@ -911,12 +1171,19 @@ def install_gguf_residency_pool(budget_bytes=None, max_models=None, pinned=None)
             cache_key_extra = spec.load_signature()
             env = _config.env_for(spec)
             build_spec = spec          # crosses into the load worker thread (see _build)
+            loaded_as = spec.id + (f"@{spec.profile_name}" if spec.profile_name else "")
         if adapter_path is inherit:
             adapter_path = pool.resident_adapter(load_path)
         try:
             entry = pool.acquire(load_path, adapter_path, model_kind,
                                  ttl=ttl, cache_key_extra=cache_key_extra, env=env,
-                                 build_spec=build_spec)
+                                 build_spec=build_spec, loaded_as=loaded_as)
+        except LoadDeferred as e:
+            # The chat pre-warm answers the common case typed; a load that
+            # begins here (another request took the room between the
+            # pre-warm and this acquire, or a route without a pre-warm)
+            # must serve the same 503, not the stock handler's 500.
+            raise _http_from_load_deferred(str(model_path), e) from e
         except FileNotFoundError as e:
             # Absolute-path entries skip the resolver's existence check by
             # contract ("you said exactly where it is"), so a deleted file

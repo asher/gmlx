@@ -70,6 +70,9 @@ class _FakeConfig:
 class _FakeVLMModel:
     def __init__(self):
         self.config = _FakeConfig()
+        # A real mlx-vlm Model holds its text tower here. The streaming
+        # placement must go on the tower, not on the wrapper.
+        self.language_model = object()
 
     def get_input_embeddings(self, *a, **k):  # pragma: no cover - presence only
         raise NotImplementedError
@@ -110,6 +113,77 @@ def test_vlm_branch_returns_model_processor_config(fake_load_vlm_model):
     # Loaded quietly, with hf_source threaded and mmproj passed through verbatim.
     assert calls == [{"gguf": "/m/llm.gguf", "mmproj": "/m/mmproj.gguf",
                       "hf_source": "hf/repo", "verbose": False}]
+
+
+@pytest.fixture
+def spy_placement(monkeypatch):
+    """Record the placement/lever installers instead of running them, so the
+    branch is testable without a streamed model. Each entry is
+    ``(target, args, kwargs)`` keyed by installer name."""
+    import gmlx.loader as loader
+    import gmlx.moe_experts as moe_experts
+
+    seen: dict[str, tuple] = {}
+
+    def _spy(name, module=loader):
+        def _fake(target, *args, **kwargs):
+            seen[name] = (target, args, kwargs)
+        monkeypatch.setattr(module, name, _fake, raising=True)
+
+    _spy("install_expert_streaming")
+    _spy("configure_stream_cpu")
+    _spy("install_moe_experts_override")
+    _spy("install_moe_expert_mass", moe_experts)
+    _spy("install_moe_miss_shed", moe_experts)
+    _spy("install_moe_layer_shed", moe_experts)
+    return seen
+
+
+def test_vlm_stream_experts_places_on_the_text_tower(
+        fake_load_vlm_model, spy_placement):
+    model, _proc, _config = serving.load_serveable_model(
+        "/m/llm.gguf", mmproj_path="/m/mmproj.gguf", stream="experts",
+        feeder_prefill=True, feeder_decode=False,
+    )
+    target, _args, kwargs = spy_placement["install_expert_streaming"]
+    # The tower, not the VLM wrapper: the vision tower stays on the GPU.
+    assert target is model.language_model
+    assert kwargs == {"gguf_path": "/m/llm.gguf",
+                      "feeder_prefill": True, "feeder_decode": False}
+    assert "configure_stream_cpu" not in spy_placement
+
+
+def test_vlm_stream_experts_installs_the_moe_levers(
+        fake_load_vlm_model, spy_placement):
+    model, _proc, _config = serving.load_serveable_model(
+        "/m/llm.gguf", mmproj_path="/m/mmproj.gguf", stream="experts",
+        moe_experts=4, moe_expert_mass=0.8, moe_miss_shed=0.9,
+        moe_layer_shed=0.1,
+    )
+    for name, value in (("install_moe_experts_override", 4),
+                        ("install_moe_expert_mass", 0.8),
+                        ("install_moe_miss_shed", 0.9),
+                        ("install_moe_layer_shed", 0.1)):
+        target, args, _kwargs = spy_placement[name]
+        assert target is model.language_model
+        assert args == (value,)
+
+
+def test_vlm_stream_cpu_is_refused(fake_load_vlm_model):
+    # stream: cpu moves the device for the process, so it moves the vision
+    # tower to the CPU with the text tower.
+    with pytest.raises(NotImplementedError, match="stream"):
+        serving.load_serveable_model(
+            "/m/llm.gguf", mmproj_path="/m/mmproj.gguf", stream="cpu")
+
+
+def test_vlm_mtp_stream_is_refused(fake_load_vlm_model):
+    # The engine loads the MTP drafter after this function, and the drafter
+    # gets no placement.
+    with pytest.raises(NotImplementedError, match="VLM x MTP"):
+        serving.load_serveable_model(
+            "/m/llm.gguf", mmproj_path="/m/mmproj.gguf", stream="experts",
+            speculative=True)
 
 
 def test_text_branch_does_not_touch_vlm_loader(fake_load_vlm_model, monkeypatch):

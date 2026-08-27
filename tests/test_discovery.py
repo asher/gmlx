@@ -201,7 +201,12 @@ def fake_classify(monkeypatch):
         if name.startswith("mmproj"):
             meta = {"general.architecture": "clip"}
         elif "assistant" in name:
-            meta = {"general.architecture": "gemma4_assistant"}
+            # the drafter carries the hidden size of the target it drafts for
+            meta = {"general.architecture": "gemma4_assistant",
+                    "gemma4_assistant.embedding_length_out": 5376}
+        elif "gemma" in name:
+            meta = {"general.architecture": "gemma4",
+                    "gemma4.embedding_length": 5376}
         elif "nomtp" in name:
             meta = {"general.architecture": "qwen3"}
         elif "bad" in name:
@@ -256,7 +261,147 @@ def test_scan_drafter_not_standalone(tmp_path, fake_classify):
     models = _scan(root)
     assert len(models) == 1                       # the assistant is not a model
     assert models[0].id == "gemma-4-31b-it-q6"
-    assert models[0].draft_gguf is None           # never auto-wired
+    # the assistant pairs into the model it serves, not into an entry of its own
+    assert models[0].draft_gguf.endswith("gemma-4-31B-it-assistant.Q8_0.gguf")
+    assert models[0].speculative is True
+
+
+# drafter pairing - a sibling drafter becomes the `draft_gguf` of its target
+def _drafter_classify(monkeypatch, *, target_arch="muse-glimmer",
+                      target_embd=6656, draft_embd=6656):
+    """Classify a `dflash*` file as a drafter and every other file as a
+    target of ``target_arch``, with the hidden size each one declares."""
+    def _f(path):
+        name = os.path.basename(path)
+        if name.lower().startswith("dflash"):
+            meta = {"general.architecture": "dflash",
+                    "dflash.embedding_length": draft_embd}
+        else:
+            meta = {"general.architecture": target_arch,
+                    f"{target_arch}.embedding_length": target_embd}
+        return disc._classify_meta(meta, basename=name, path=path)
+
+    monkeypatch.setattr(disc, "classify_gguf", _f)
+
+
+def test_scan_pairs_sibling_dflash_drafter(tmp_path, monkeypatch):
+    _drafter_classify(monkeypatch)
+    root = _write(tmp_path, "Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf",
+                  "dflash-Muse-Glimmer-30B-Q4_K_M.gguf")
+    models = _scan(root)
+    assert len(models) == 1
+    assert models[0].draft_gguf.endswith("dflash-Muse-Glimmer-30B-Q4_K_M.gguf")
+    assert models[0].speculative is True
+
+
+def test_drafter_pairs_into_every_quant_of_its_target(tmp_path, monkeypatch):
+    # Two quants of one target share the drafter: each entry can serve.
+    _drafter_classify(monkeypatch)
+    root = _write(tmp_path, "Muse-Glimmer-30B-Q4_K_M.gguf",
+                  "Muse-Glimmer-30B-Q6_K.gguf",
+                  "dflash-Muse-Glimmer-30B-Q4_K_M.gguf")
+    models = _scan(root)
+    assert len(models) == 2
+    assert all(m.draft_gguf and m.speculative for m in models)
+
+
+def test_drafter_unpaired_on_hidden_size_mismatch(tmp_path, monkeypatch, capsys):
+    # llama.cpp writes the DeepSeek DSpark sidecar under the same `dflash` arch,
+    # so the arch alone must not pair it with a muse-glimmer target.
+    _drafter_classify(monkeypatch, target_embd=4096, draft_embd=6656)
+    root = _write(tmp_path, "Muse-Glimmer-30B-Q4_K_M.gguf",
+                  "dflash-DeepSeek-V4-Q4_K_M.gguf")
+    models = _scan(root)
+    assert models[0].draft_gguf is None
+    assert models[0].speculative is False
+    assert "assistant drafter (configure via" in capsys.readouterr().err
+
+
+def test_drafter_unpaired_when_speculative_false(tmp_path, monkeypatch):
+    _drafter_classify(monkeypatch)
+    root = _write(tmp_path, "Muse-Glimmer-30B-Q4_K_M.gguf",
+                  "dflash-Muse-Glimmer-30B-Q4_K_M.gguf")
+    models = _scan(root, speculative=False)
+    assert models[0].draft_gguf is None
+    assert models[0].speculative is False
+
+
+def test_drafter_unpaired_when_arch_has_no_mtp_class(tmp_path, monkeypatch):
+    # `llama` builds a model, but the loader has no MTP target class for it,
+    # so `speculative` would fail at build time.
+    _drafter_classify(monkeypatch, target_arch="llama", target_embd=6656)
+    root = _write(tmp_path, "Some-Llama-8B-Q4_K_M.gguf",
+                  "dflash-Some-Llama-8B-Q4_K_M.gguf")
+    models = _scan(root)
+    assert models[0].draft_gguf is None
+
+
+def test_generic_drafter_name_unpaired_when_several_candidates(
+        tmp_path, monkeypatch):
+    # A filename with no model name in it carries no signal, and two targets
+    # of equal hidden size are both plausible.
+    _drafter_classify(monkeypatch)
+    root = _write(tmp_path, "Muse-Glimmer-30B-Q4_K_M.gguf",
+                  "Other-Muse-Model-Q4_K_M.gguf", "dflash-Q4_K_M.gguf")
+    models = _scan(root)
+    assert all(m.draft_gguf is None for m in models)
+
+
+def test_drafter_pairs_into_a_model_already_in_the_config(tmp_path, monkeypatch):
+    # The scan skips a configured file, so the drafter would have no candidate
+    # without `known_models`. The pairing goes to stats for the caller to write.
+    _drafter_classify(monkeypatch)
+    root = _write(tmp_path, "Muse-Glimmer-30B-Q4_K_M.gguf",
+                  "dflash-Muse-Glimmer-30B-Q4_K_M.gguf")
+    target = str(root / "Muse-Glimmer-30B-Q4_K_M.gguf")
+    mc = ModelCfg(id="muse-30b", path=target)
+    spec = DiscoverSpec(dir=str(root), recursive=False, pair_mmproj=True,
+                        speculative="auto")
+    stats = {}
+    models = disc.scan_dirs([spec], [str(root)], known_paths={target},
+                            known_models={target: mc}, stats=stats)
+    assert models == []                          # the target stays configured
+    assert stats["draft_pairs"] == {
+        "muse-30b": str(root / "dflash-Muse-Glimmer-30B-Q4_K_M.gguf")}
+    assert mc.draft_gguf and mc.speculative is True
+
+
+def test_drafter_without_a_hidden_size_pairs_with_its_lone_target(
+        tmp_path, monkeypatch):
+    # A DSpark sidecar declares no hidden size, and its filename shares too
+    # little with the target quant to pass the name test. The arch table plus
+    # a single candidate still settle it (llama.cpp's own sidecar layout).
+    def _f(path):
+        name = os.path.basename(path)
+        meta = ({"general.architecture": "deepseek4-dspark"}
+                if "DSpark" in name else {"general.architecture": "deepseek4"})
+        return disc._classify_meta(meta, basename=name, path=path)
+
+    monkeypatch.setattr(disc, "classify_gguf", _f)
+    root = _write(tmp_path, "DeepSeek-V4-Flash-0731-UD-IQ3_XXS.gguf",
+                  "DeepSeek-V4-Flash-0731-DSpark-MXFP4-Q8_0.gguf")
+    models = _scan(root)
+    assert len(models) == 1
+    assert models[0].draft_gguf.endswith("DSpark-MXFP4-Q8_0.gguf")
+
+
+def test_drafter_unpaired_across_model_families(tmp_path, fake_classify):
+    # A gemma4 assistant cannot draft for a qwen target: the arch table says
+    # which model types each drafter arch serves.
+    root = _write(tmp_path, "Qwen3.6-27B-Q4_K_S.gguf",
+                  "gemma-4-31B-it-assistant.Q8_0.gguf")
+    by_id = {m.id: m for m in _scan(root)}
+    assert by_id["qwen3.6-27b-q4"].draft_gguf is None
+
+
+def test_streamed_model_gets_no_drafter():
+    # MTP needs a fully resident base, thus an over-RAM entry stays plain.
+    mc = ModelCfg(id="m-q4", path="/m/M-Q4_K_M.gguf", stream="experts")
+    target = disc.ClassifiedGguf("/m/M-Q4_K_M.gguf", "model", "muse-glimmer",
+                                 False, "Q4_K_M", True, n_embd=6656)
+    drafter = disc.ClassifiedGguf("/m/dflash-M-Q4_K_M.gguf", "drafter", "dflash",
+                                  False, "Q4_K_M", False, n_embd=6656)
+    assert disc._drafter_targets(drafter, [(mc, target)]) == []
 
 
 def test_scan_adapter_not_standalone(tmp_path, monkeypatch, capsys):
@@ -381,6 +526,21 @@ def test_scaffold_round_trips_through_build_config():
     assert cfg.models["gemma-e4b-vlm"].mmproj.endswith("mmproj-bf16.gguf")
     # Paths rendered relative to the model_dirs root.
     assert cfg.models["qwen3.6-27b"].path == "qwen3.6-27b/m-Q4_K_S.gguf"
+
+
+def test_scaffold_writes_a_paired_drafter():
+    import yaml
+    models = [ModelCfg(id="muse-glimmer-30b-q4",
+                       path="/models/muse/m-Q4_K_M.gguf",
+                       draft_gguf="/models/muse/dflash-m-Q4_K_M.gguf",
+                       speculative=True)]
+    text = disc.scaffold_yaml(models, model_dirs=["/models"])
+    cfg = build_config(yaml.safe_load(text))
+    mc = cfg.models["muse-glimmer-30b-q4"]
+    assert mc.draft_gguf == "muse/dflash-m-Q4_K_M.gguf"
+    assert mc.speculative is False        # the drafter key turns it on at load
+    # no live `speculative` key: the reference block keeps the only mention
+    assert not [ln for ln in text.splitlines() if ln.strip() == "speculative: true"]
 
 
 def test_scaffold_anchors_relative_model_dirs(tmp_path, monkeypatch):
@@ -552,6 +712,17 @@ def test_model_to_entry_includes_mmproj_and_speculative():
     }
 
 
+def test_model_to_entry_draft_gguf_implies_speculative():
+    # `draft_gguf` turns speculative decoding on by itself, so the entry keeps
+    # no second `speculative` key.
+    mc = ModelCfg(id="g", path="/models/llm-Q6_K.gguf",
+                  draft_gguf="/models/dflash-llm-Q4_K_M.gguf", speculative=True)
+    assert disc.model_to_entry(mc, ["/models"]) == {
+        "path": "llm-Q6_K.gguf",
+        "draft_gguf": "dflash-llm-Q4_K_M.gguf",
+    }
+
+
 def test_model_to_entry_absolute_when_outside_model_dirs():
     mc = ModelCfg(id="x", path="/elsewhere/x-Q4_0.gguf")
     assert disc.model_to_entry(mc, ["/models"]) == {"path": "/elsewhere/x-Q4_0.gguf"}
@@ -668,7 +839,8 @@ def test_header_meta_reads_and_memoizes(_hm, tmp_path):
     f.write_bytes(b"x")
     meta = disc.header_meta(str(f))
     assert meta == {"arch": "gemma4", "name": "Gemma 4 12B It",
-                    "kind": "model", "mtp": False, "sampling": {}}
+                    "kind": "model", "mtp": False, "sampling": {},
+                    "drafter_kind": None}
     disc.header_meta(str(f))
     assert _hm["n"] == 1                         # second hit is the memo
 
@@ -848,3 +1020,50 @@ def test_read_sampling_normalizes_disabled_sentinels():
           "general.sampling.top_k": -1, "general.sampling.repeat_penalty": 1.0}
     assert disc._read_sampling(kv) == {"temperature": 0.9, "top_p": 0.0,
                                        "top_k": 0}
+
+
+# muse-glimmer: the per-family arch tuple, and the "dflash" id marker
+
+
+def test_muse_glimmer_companion_is_found_by_arch_tuple(tmp_path, monkeypatch):
+    """A muse-glimmer target asks for ``dflash`` only - the deepseek4 arches
+    are not in its tuple, so a dspark sidecar next door is not picked up."""
+    target = tmp_path / "Muse-Glimmer-30B-Q6_K_L.gguf"
+    for name in ("dflash-kquant.gguf", target.name):
+        (tmp_path / name).write_bytes(b"GGUF")
+    metas = {str(tmp_path / "dflash-kquant.gguf"): {"arch": "dflash"},
+             str(target): {"arch": "muse-glimmer"}}
+    monkeypatch.setattr(disc, "header_meta", lambda p: metas.get(str(p)))
+    assert disc.find_mtp_companion(str(target), ("dflash",)) == str(
+        tmp_path / "dflash-kquant.gguf")
+
+
+def test_muse_glimmer_companion_ignores_a_native_dspark_sidecar(
+        tmp_path, monkeypatch):
+    target = tmp_path / "Muse-Glimmer-30B-Q6_K_L.gguf"
+    for name in ("dspark-sidecar.gguf", target.name):
+        (tmp_path / name).write_bytes(b"GGUF")
+    metas = {str(tmp_path / "dspark-sidecar.gguf"): {"arch": "deepseek4-dspark"},
+             str(target): {"arch": "muse-glimmer"}}
+    monkeypatch.setattr(disc, "header_meta", lambda p: metas.get(str(p)))
+    assert disc.find_mtp_companion(str(target), ("dflash",)) is None
+
+
+def test_dflash_is_an_id_marker():
+    """Without this the drafter quant splits the model id and a dflash sidecar
+    is mistaken for a separate model."""
+    assert "dflash" in disc._ID_MARKERS
+
+
+def test_model_classification_carries_general_name_for_family_refinement():
+    """Kimi K2.x and DeepSeek share the 'deepseek2' arch, so the generated
+    config's family is only right if the classifier hands general.name to
+    detect_family. Without it every K2 GGUF would inherit DeepSeek's card."""
+    c = _classify({"general.architecture": "deepseek2",
+                   "general.name": "Kimi-K2.7-Code",
+                   "deepseek2.expert_count": 384}, "kimi-k2.7-UD-Q2_K_XL.gguf")
+    assert c.kind == "model"
+    assert c.name == "Kimi-K2.7-Code"
+
+    from gmlx.profiles import detect_family
+    assert detect_family(c.arch, c.name) == "kimi-k2"

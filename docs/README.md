@@ -21,6 +21,7 @@ right document for the task at hand.
 | Run a vision or audio-input model | [vlm.md](vlm.md) |
 | Fine-tune with LoRA on a quantized base | [lora.md](lora.md) |
 | Make it faster | [performance.md](performance.md) |
+| See the numbers behind the performance claims | [benchmarks.md](benchmarks.md) |
 | Run a MoE model bigger than RAM | [streaming.md](streaming.md) |
 | Fix something that broke | run `gmlx doctor`, then [troubleshooting.md](troubleshooting.md) |
 | Look up a flag or config key | [cli.md](cli.md), [server-config.md](server-config.md) |
@@ -111,12 +112,20 @@ script; do not edit it by hand.
 [serving-architecture.md](serving-architecture.md) explains how the pieces
 compose: loader, engine, batching, and the HTTP layers.
 
+[speculative-batching.md](speculative-batching.md) covers how speculative
+decoding and continuous batching run together: the two decode loops, the
+width cap, and the preempt + resume transitions between them.
+
 [adding-architectures.md](adding-architectures.md) is what adding a model
 family involves and the acceptance gate an architecture clears to be listed
 as supported.
 
 [testing.md](testing.md) describes the test tiers, the end-to-end harnesses, and
 the manual voice-loop pass.
+
+[upstream-upgrades.md](upstream-upgrades.md) is the maintainer's guide to
+bumping the pinned mlx-vlm/mlx-lm/mlx versions: the seam contract, the canary
+script, and the qualification steps.
 
 [CONTRIBUTING.md](../CONTRIBUTING.md) has the development setup and expectations
 for pull requests; [CHANGELOG.md](../CHANGELOG.md) records what shipped when.

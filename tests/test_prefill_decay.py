@@ -167,11 +167,153 @@ def test_seed_step_honors_kill_switch(monkeypatch):
     assert pd.decayed_seed_step(2048, 10_000_000, HEADS) == 2048
 
 
-def test_note_untracked_weights_accumulates(monkeypatch):
-    monkeypatch.setattr(pd, "_UNTRACKED_WEIGHTS", 0.0)
+def _fresh_registry(monkeypatch):
+    monkeypatch.setattr(pd, "_UNTRACKED_WEIGHTS", {})
+    monkeypatch.setattr(pd, "_UNTRACKED_OWNERS", {})
+    monkeypatch.setattr(pd, "_WEIGHTS_OWNER", None)
+
+
+def test_note_untracked_weights_unkeyed_dropped(monkeypatch):
+    # unkeyed bytes could never be forgotten at eviction; the old anonymous
+    # accumulator was the eviction leak in miniature, so key=None is dropped
+    _fresh_registry(monkeypatch)
     pd.note_untracked_weights(10 * GB)
     pd.note_untracked_weights(5 * GB)
-    assert pd._UNTRACKED_WEIGHTS == 15 * GB
+    assert pd.untracked_weight_bytes() == 0
+
+
+def test_note_untracked_weights_same_key_first_wins(monkeypatch):
+    # a drafter reloading the target's GGUF maps the same pages: the
+    # re-registration must not double the count (it serialized admissions)
+    monkeypatch.setattr(pd, "_UNTRACKED_WEIGHTS", {})
+    key = ("/models/a.gguf",)
+    pd.note_untracked_weights(87 * GB, key=key)
+    pd.note_untracked_weights(87 * GB, key=key)
+    assert pd.untracked_weight_bytes() == 87 * GB
+    pd.note_untracked_weights(2 * GB, key=key)  # subset re-walk ignored
+    assert pd.untracked_weight_bytes() == 87 * GB
+
+
+def test_note_untracked_weights_first_wins_over_phantom(monkeypatch):
+    # when active memory tracks the wire bytes, the bracketed first walk
+    # registers ~0; a re-walk with no read of its own sees no delta and
+    # would register the full bytes again - it must not override the first
+    monkeypatch.setattr(pd, "_UNTRACKED_WEIGHTS", {})
+    key = ("/models/a.gguf",)
+    pd.note_untracked_weights(0, key=key)
+    pd.note_untracked_weights(28 * GB, key=key)
+    assert pd.untracked_weight_bytes() == 0
+
+
+def test_note_untracked_weights_distinct_keys_sum(monkeypatch):
+    _fresh_registry(monkeypatch)
+    pd.note_untracked_weights(10 * GB, key=("/models/a.gguf",))
+    pd.note_untracked_weights(4 * GB, key=("/models/b.gguf",))
+    pd.note_untracked_weights(1 * GB)  # unkeyed: dropped
+    assert pd.untracked_weight_bytes() == 14 * GB
+
+
+def test_forget_drops_bytes_at_zero_owners(monkeypatch):
+    # the eviction leak: a torn-down model's registration must leave the
+    # estimate, or every model ever loaded stays subtracted from headroom
+    # and the admission gate defers every request to the ceiling
+    _fresh_registry(monkeypatch)
+    pd.set_untracked_weights_owner("entry-a")
+    pd.note_untracked_weights(87 * GB, key=("/models/a.gguf",))
+    pd.set_untracked_weights_owner(None)
+    pd.forget_untracked_weights("entry-a")
+    assert pd.untracked_weight_bytes() == 0
+
+
+def test_shared_key_survives_until_last_owner(monkeypatch):
+    # two resident entries sharing shards (target + paired drafter reload,
+    # the designed first-wins case): evicting either alone must keep the
+    # pages counted; a build-window diff would under-attribute here and
+    # flip the defect optimistic
+    _fresh_registry(monkeypatch)
+    key = ("/models/a.gguf",)
+    pd.set_untracked_weights_owner("entry-a")
+    pd.note_untracked_weights(87 * GB, key=key)
+    pd.set_untracked_weights_owner("entry-b")
+    pd.note_untracked_weights(87 * GB, key=key)  # re-registration: first wins
+    pd.set_untracked_weights_owner(None)
+    pd.forget_untracked_weights("entry-a")
+    assert pd.untracked_weight_bytes() == 87 * GB
+    pd.forget_untracked_weights("entry-b")
+    assert pd.untracked_weight_bytes() == 0
+
+
+def test_forget_leaves_other_entries_and_ownerless_keys(monkeypatch):
+    _fresh_registry(monkeypatch)
+    pd.note_untracked_weights(5 * GB, key=("/m/cli.gguf",))  # no owner window
+    pd.set_untracked_weights_owner("entry-a")
+    pd.note_untracked_weights(10 * GB, key=("/m/a.gguf",))
+    pd.set_untracked_weights_owner("entry-b")
+    pd.note_untracked_weights(4 * GB, key=("/m/b.gguf",))
+    pd.set_untracked_weights_owner(None)
+    pd.forget_untracked_weights("entry-a")
+    assert pd.untracked_weight_bytes() == 9 * GB
+    pd.forget_untracked_weights("entry-b")
+    assert pd.untracked_weight_bytes() == 5 * GB  # ownerless key persists
+
+
+def test_deduct_shrinks_registration_floored_at_zero(monkeypatch):
+    # streamed-out expert bytes are page cache, not wired weights: the
+    # streaming install deducts them or headroom sits permanently negative
+    _fresh_registry(monkeypatch)
+    key = ("/models/moe.gguf",)
+    pd.note_untracked_weights(162 * GB, key=key)
+    pd.deduct_untracked_weights(150 * GB, key)
+    assert pd.untracked_weight_bytes() == 12 * GB
+    pd.deduct_untracked_weights(50 * GB, key)
+    assert pd.untracked_weight_bytes() == 0
+    pd.deduct_untracked_weights(1 * GB, ("/models/other.gguf",))  # unknown
+    pd.deduct_untracked_weights(1 * GB, None)                     # keyless
+    assert pd.untracked_weight_bytes() == 0
+
+
+def _fresh_streamed(monkeypatch):
+    _fresh_registry(monkeypatch)
+    monkeypatch.setattr(pd, "_STREAMED_TRACKED", {})
+
+
+def test_streamed_credit_raises_headroom(monkeypatch):
+    # allocator-tracked streamed expert arrays sit inside active memory but
+    # their pages are reclaimable file cache: without the add-back, an
+    # over-RAM streaming model reads ~-150 GB headroom and every request
+    # sheds from red (the 153 GB DSv4 verify)
+    _fresh_streamed(monkeypatch)
+    monkeypatch.setattr(
+        pd.mx, "device_info",
+        lambda: {"max_recommended_working_set_size": 120 * GB})
+    monkeypatch.setattr(pd.mx, "get_active_memory", lambda: 237 * GB)
+    assert pd.headroom_bytes() == -117 * GB
+    pd.note_streamed_tracked_bytes(156 * GB, key=("/models/moe.gguf",))
+    assert pd.headroom_bytes() == 39 * GB
+
+
+def test_streamed_credit_keyless_and_first_wins(monkeypatch):
+    _fresh_streamed(monkeypatch)
+    pd.note_streamed_tracked_bytes(10 * GB)          # keyless: dropped
+    assert pd.streamed_tracked_bytes() == 0
+    key = ("/models/moe.gguf",)
+    pd.note_streamed_tracked_bytes(156 * GB, key=key)
+    pd.note_streamed_tracked_bytes(156 * GB, key=key)  # reload: first wins
+    assert pd.streamed_tracked_bytes() == 156 * GB
+
+
+def test_forget_drops_streamed_credit_with_owner(monkeypatch):
+    # an evicted streaming model must stop crediting headroom, or the
+    # phantom credit overstates free working set for its successors
+    _fresh_streamed(monkeypatch)
+    key = ("/models/moe.gguf",)
+    pd.set_untracked_weights_owner("entry-a")
+    pd.note_untracked_weights(0.0, key=key)  # warm pass: tracked load
+    pd.note_streamed_tracked_bytes(156 * GB, key=key)
+    pd.set_untracked_weights_owner(None)
+    assert pd.streamed_tracked_bytes() == 156 * GB
+    pd.forget_untracked_weights("entry-a")
+    assert pd.streamed_tracked_bytes() == 0
 
 
 # --- arch score profiles -------------------------------------------------

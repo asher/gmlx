@@ -9,6 +9,8 @@ consumed from mlx-vlm by design -- only the round logic is owned here.
 Logic is a faithful copy (acceptance must stay token-identical to the validated
 path); keep it in sync when mlx-vlm's round changes in a way we want to track.
 """
+import logging
+import os
 from dataclasses import dataclass
 from typing import Any
 from collections.abc import Callable
@@ -19,10 +21,29 @@ import mlx.nn as nn
 from mlx_vlm.models import cache
 
 from .cache_compat import cache_types
+from .drafter_protocol import default_block_size, native_block_size
+
+_log = logging.getLogger(__name__)
 
 # Shared generation stream (the drafter model pins no stream of its own, so the
 # round and verify forward run here; cross-stream deps are handled by MLX events).
-generation_stream = mx.new_thread_local_stream(mx.default_device())
+# On a CPU default device the round loop stays on the default stream: a second
+# CPU stream intermittently dies with a bus error in mlx's CPU gather mid
+# _stochastic_walk on loaded hosts (hosted-CI runners), and CPU-only runs gain
+# nothing from the split. GMLX_SPEC_STREAM=new / =default overrides either way.
+
+
+def _generation_stream():
+    mode = os.environ.get("GMLX_SPEC_STREAM", "").lower()
+    dev = mx.default_device()
+    if mode == "new":
+        return mx.new_thread_local_stream(dev)
+    if mode == "default" or dev == mx.Device(mx.cpu):
+        return mx.default_stream(dev)
+    return mx.new_thread_local_stream(dev)
+
+
+generation_stream = _generation_stream()
 
 
 # --- draft/target sampler RNG coupling -------------------------------------
@@ -137,15 +158,38 @@ def _record_speculative_round(
         draft_model.draft_lens.append(int(draft_count))
 
 
-def _dflash_block_total(draft_model: nn.Module, draft_block_size: int | None) -> int:
-    if draft_block_size is not None:
-        return int(draft_block_size)
+def _drafter_block_ceiling(draft_model: nn.Module) -> int | None:
+    if not getattr(draft_model, "cap_at_configured_depth", False):
+        return None
+    declared = native_block_size(draft_model.config)
+    if declared is not None:
+        return declared
+    return int(getattr(draft_model, "_native_block_size",
+                       draft_model.config.block_size))
 
-    configured = int(draft_model.config.block_size)
-    runtime = getattr(draft_model.config, "runtime_block_size", None)
-    if runtime is None:
-        return configured
-    return min(configured, max(1, int(runtime)))
+
+def _warn_block_over_depth(draft_model: nn.Module, requested: int,
+                           ceiling: int) -> None:
+    if getattr(draft_model, "_depth_cap_warned", False):
+        return
+    draft_model._depth_cap_warned = True
+    _log.warning(
+        "draft block %d is deeper than this drafter can produce (%d); "
+        "drafting %d token(s)/round",
+        requested, ceiling, ceiling - 1)
+
+
+def _resolve_block_total(draft_model: nn.Module, draft_block_size: int | None) -> int:
+    """The block total for a run: the caller's depth, else the drafter's own
+    default, clamped to the deepest block the drafter can produce."""
+    requested = (int(draft_block_size) if draft_block_size is not None
+                 else default_block_size(draft_model.config))
+    ceiling = _drafter_block_ceiling(draft_model)
+    if ceiling is None or requested <= ceiling:
+        return requested
+    if draft_block_size is not None:
+        _warn_block_over_depth(draft_model, requested, ceiling)
+    return ceiling
 
 
 def _effective_mtp_block_size(
@@ -189,7 +233,9 @@ def _mtp_next_block_size(
 ) -> int:
     budget = min(requested_block_total, remaining_budget)
     if getattr(draft_model, "cap_at_configured_depth", False):
-        native = getattr(draft_model, "_native_block_size", configured_block_total)
+        native = _drafter_block_ceiling(draft_model) or configured_block_total
+        if requested_block_total > native:
+            _warn_block_over_depth(draft_model, requested_block_total, native)
         return min(budget, native)
     if getattr(draft_model, "prefer_requested_block_size", False):
         return budget

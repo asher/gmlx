@@ -6,11 +6,378 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-08-26
+
+### Added
+
+- `qwen4exp` (Qwen3.8-Flash-Next, llama.cpp PR 27742) loads: the qwen3.5
+  hybrid plus hyper-connections, QSA sparse attention and PLE n-gram hash
+  embeddings (the 320M-row table stays zero-copy, rows gathered per token).
+  Fused GDN decode kernel with the sigmoid output gate; fused MoE gathers
+  at the 640-wide experts.
+- qwen4exp MTP speculative decoding from a companion drafter GGUF (arch
+  `qwen4exp-mtp`, built from the HF `mtp.*` tensors; autodetected next to
+  the target or passed with `--draft-gguf`). Full-prompt teacher-forced
+  seeding; verify rollback rewinds the GDN, PLE and QSA cache state to the
+  accepted prefix.
+- qwen4exp VLM pairing: the Qwen3-VL mmproj (`qwen3vl_merger`) loads onto a
+  vendored wrapper reusing the qwen3.5 vision tower; interleaved mrope
+  position ids thread through the attention and the QSA indexer (block keys
+  roped at their cached positions), text-only turns keep the fast rope path.
+
+## [0.4.2] - 2026-08-25
+
+### Added
+
+- `gmlx serve model.gguf --thinking on|off|adaptive` and `--thinking-budget N`
+  set the reasoning switch and thinking-token cap for a single positional
+  model without a config file (the same `thinking:` / sampling
+  `thinking_budget:` keys a config sets).
+- `/v1/metrics`: live per-request rows, `concurrency` and `rates`
+  sections, waiting depth and in-flight counts.
+- `GET /health?ready=1`: keyless readiness; 503 + `Retry-After` with
+  reason `pressure`, `queue`, or `busy`.
+- `GET /metrics?format=prometheus`: Prometheus rendering of the snapshot.
+- `POST /v1/cache/reset` takes `{"model": "<id>"}`; with no body it clears
+  every resident model's cache.
+- `POST /v1/estimate` (or `"dry_run": true` on chat completions): memory
+  preflight for a prompt without loading or generating.
+- `GET /v1/capacity/plan?width=W&depth=D`: fan-out policy from the
+  capacity table, governor band, and free slots.
+- `/v1/models`: `context_length` and `max_context_at_width_1`; `gmlx
+  launch pi` writes them as pi's `contextWindow` / `maxTokens`.
+
 ### Fixed
 
+- Model loads are gated on the serve ceiling and the kernel floor (a
+  co-load could Metal-OOM); memory still being freed is waited for.
+- A deferred load answers `503 model_load_deferred` + `Retry-After`, not
+  a 500.
+- Speculative decode retires finished rows into the prefix cache at any
+  batch width.
+- Speculative decode at width > 1 on sliding-window models crashed on the
+  first mid-decode admission.
+- `GMLX_QUEUE_DEPTH_CAP` now fires under the residency pool.
+
+### Changed
+
+- `POST /unload` of the preloaded primary succeeds; in-flight streams
+  still 409.
+- Prefix cache key salt no longer hashes the embedding matrix per request;
+  older on-disk prefix caches miss once and are rewritten.
+- Stale runfiles no longer cause a running server refusal, with cleanup support.
+
+## [0.4.1] - 2026-08-24
+
+### Fixed
+
+- Requests using the OpenAI `developer` role failed with a 500 on models
+  whose chat template predates the alias ("Unexpected message role.", #66);
+  the server now rewrites `developer` to `system` before render for
+  templates that do not handle it.
+- A chat template that rejects a conversation (`raise_exception`: misplaced
+  system message, malformed tool call) now answers a clean 400 carrying the
+  template's own message instead of a 500 traceback.
+
+## [0.4.0] - 2026-08-24
+
+### Added
+
+- `/thinking [on|off|adaptive|default]` in chat flips the model's reasoning
+  switch mid-session, in both server and local modes.
+- Server-mode chat now forwards `--thinking` and `--reasoning-effort` (they
+  were silently dropped); the server also accepts plain
+  `thinking: on|off|adaptive` request values and a top-level
+  `reasoning_effort` field.
+- The `thinking` control maps onto Kimi K2.x's bare `thinking` template
+  variable, so `thinking: off` works for Kimi K2.7.
+- The config thinking keys (`thinking_budget`, `thinking_start_token`,
+  `thinking_end_token`) now apply to `run` and `chat`, not just `serve`,
+  with matching `--thinking-start-token`/`--thinking-end-token` flags.
+- Server and assistant chat render the model's chain-of-thought through the
+  standard reasoning display (it used to collapse into a "thinking..."
+  status line); `serve --assistant` streams it as `reasoning` deltas.
+- The server now governs memory pressure at runtime instead of dying on it:
+  under pressure it stops admitting, throttles allocation, shrinks prefill
+  chunks and speculative width, evicts idle caches, and as a last resort
+  retires or fails the largest request with a clear error
+  (`GMLX_GOVERNOR=0` disables; band and shed counters at `/v1/metrics`).
+- A request shed under memory pressure now gets a typed answer instead of a
+  hung stream: a 500 with the numbers before first byte, or a terminal SSE
+  event with `finish_reason: shed` mid-stream.
+- Cancelling one request in a speculative batch now frees its memory right
+  away instead of holding it until the whole batch finishes.
+- The server derives a capacity table at model load (max context by batch
+  width, single-buffer and buffer-count ceilings) and logs it; a model that
+  cannot hold any context refuses at boot with the numbers instead of
+  aborting later (`GMLX_OVERCOMMIT=1` overrides). Decode concurrency is
+  bounded by the derived width; the table shows at `/v1/metrics`.
+- Loading or swapping a model that cannot fit the measured free working
+  set now fails with the numbers instead of taking down the server.
+- Sibling requests that arrive together no longer each prefill the shared
+  prefix cold: the server admits the first one, waits for its stores, and
+  starts the rest warm (`GMLX_APC_FRESH_WAIT_MS`, `0` disables).
+- Requests beyond the queue cap now get an immediate 503 with Retry-After
+  instead of queueing toward the timeout (`GMLX_QUEUE_DEPTH_CAP`).
+- A prompt that cannot fit in memory now gets a 400 with the numbers before
+  the stream opens, instead of dying mid-stream (`GMLX_PREFLIGHT_MEM=0`
+  disables).
+- `seed` is now honored per request inside a batch. Before, only the first
+  request's seed took effect and it colored every row.
+- Short prompts on sliding-window models now cache their block-aligned
+  prefix at retirement instead of nothing, so an immediate follow-up
+  turn starts warm.
+- Decode concurrency is now a control (`GMLX_DECODE_BATCH`, default 8).
+  The server always decoded up to 32 requests together, which slows every
+  stream past the width where total throughput stops growing.
+- DFlash 2 drafters (Inco AI / z-lab) for Qwen3.8-27B and Muse-Glimmer-30B:
+  `--draft-gguf <DFlash2>.gguf`, or `gmlx discover` pairs a drafter with the
+  base model its header declares, across directories. A DFlash 2 pairing
+  replaces a DFlash v1 sibling on Muse Glimmer. Exact-match acceptance, so
+  greedy output stays token-identical; `--stochastic-mtp` applies as well.
+- `--native-mtp` (run/chat/serve) and the per-model `native_mtp` config key
+  draft with the GGUF's own MTP head when a companion drafter is configured;
+  a configured companion otherwise wins over the head.
+
+### Changed
+
+- Muse Glimmer's DFlash drafter runs on gmlx's own DFlash base. Its block
+  attention now applies the reference sliding-window mask over the
+  drafter's committed positions (a full ring trims the oldest keys per block
+  row); output is unchanged until the ring fills.
+
+### Fixed
+
+- Hybrid prompt-cache retirement predicted the next turn with reasoning
+  echoed back and stored a dead chain on keep-mode templates (deepseek4);
+  it now echoes content only unless `preserve_thinking` is set.
+- Exact-tier prompt-cache hits under serve `kv_bits` crashed the batch
+  update path; the warm merge now re-quantizes to the live KV policy.
+- Same-stream snapshots of rotating layers (exact retirement, drafter
+  sidecars) reordered the ring and shifted MoE logits on the resumed turn;
+  they now copy it bitwise.
+- The memory governor read green while the box ran out of free pages (MLX
+  buffer cache counted as free); a 128 GB box froze under a long-context
+  batch. It now goes red below a kernel reclaimable floor
+  (`GMLX_GOV_KERNEL_FLOOR_GB`, default min(8, 10% of RAM)) and block stores
+  stop at it.
+- The governor ceiling was 95% of the Metal working set, leaving the kernel
+  14 GB on a 128 GB box; it is now capped at RAM minus a reserve
+  (`GMLX_GOV_RESERVE_GB`, default max(8, 10% of RAM)).
+- The MLX buffer cache is always bounded now (4-12 GiB); MLX's default let
+  it hold 27-48 GB of freed buffers on an 8B model.
+- Shell completion offered nothing for `gmlx launch <harness> --model`;
+  it now lists the config's model ids and aliases.
+- Served and VLM-local models stopped thinking by default on mlx-vlm 0.6.15,
+  which injects `enable_thinking=false` into every render where the kwarg is
+  absent; absent now means the template's own default again.
+- Text-only served models build mlx-vlm cache classes again, keeping prompt
+  caching engaged (the gmlx.cache crash fix built mlx-lm classes the APC
+  engine's checks ignore).
+- serve: evicting a streamed MoE model left its weights resident, so every
+  later load deferred with a negative free working set until restart.
+- Plain text models (qwen3, llama) failed every request with a missing
+  gmlx.cache import.
+- The exit-segfault guards (process exit and engine-thread park) armed only
+  on mlx 0.32.1 exactly; newer mlx wheels carry the same unfixed upstream bug
+  and ran unguarded. The guards now arm on every mlx from 0.32.1 on.
+- Sampled speculative verify and the server's unfiltered sampler computed
+  logprob math at the activation dtype; float16 rows reached categorical
+  unwidened. Both now widen to float32 first (greedy paths unchanged).
+- MiniMax MSA indexer projections stay F32 under float16 activations; the
+  bfloat16 exact-bit narrowing does not exist at float16.
+- Non-streamed replies lost the leading indentation of their first content
+  line: the reasoning splitters (ATEM/harmony and the think-tag path all
+  served models use) stripped all content whitespace. Verbatim code answers
+  came back misindented on line one. Content now keeps first-line indent
+  and still drops leading blank lines and trailing whitespace.
+- gemma-4 applied the final logit softcap at the activation dtype, rounding
+  every logit by up to ~0.12 nats at bfloat16 and flipping near-tie top-1
+  picks. The softcap now computes in float32 and emits float32 logits, like
+  muse-glimmer. GMLX_G4_SOFTCAP_F32=0 restores the old behavior.
+- `--stochastic-mtp` with a block drafter (Muse Glimmer DFlash) stashed one
+  proposal row per block and misaligned the walk; DFlash 2 records every
+  draft row, and a DFlash v1 drafter (independent rows) keeps exact-match
+  acceptance with a log line instead.
+- serve: two model ids over one GGUF that differ in drafter (a companion
+  `draft_gguf` and a `native_mtp: true` sibling) both loaded whichever was
+  registered last; each build now carries its own drafter.
+- The owned Qwen3.5 forward dispatched its Metal kernels (fused MRoPE,
+  the bf16 verify GEMVs, the fused GDN bodies) whatever the default
+  device; stock MLX raises on the CPU device (`KQUANT_FORCE_CPU=1`). The
+  pure-MLX routes now take over there.
+
+## [0.3.2] - 2026-08-13
+
+### Changed
+
+- `init`, `sync-models`, and `pull` now pair a sibling drafter (gemma4
+  assistant, DSpark, DFlash) into the model it serves as that model's
+  `draft_gguf`, which turns speculative decoding on. `sync-models` also adds
+  the key to a model the config already carries. Before, you added it by hand.
+- Muse-Glimmer DFlash drafts the block its checkpoint was trained for, which
+  is 16 tokens per round on the current one, instead of 2. On a machine with
+  no NAX tile a verify step costs about the same for 16 rows as for 8, so a
+  full block accepts more tokens for the same forward.
+
+### Fixed
+
+- `--draft-block-size N` could only lower the draft depth. Each drafter froze
+  its trained depth to the depth it loaded with, so a deeper request did
+  nothing at all, and said nothing. A drafter now carries its trained depth
+  apart from the depth it drafts by default, a request up to that depth is
+  honored, and a deeper one clamps and warns. `gmlx run`, `gmlx chat` and
+  `gmlx serve` (`--draft-block-size`, `GMLX_DRAFT_BLOCK_SIZE`) all resolve the
+  depth the same way now.
+
+## [0.3.1] - 2026-08-12
+
+### Added
+
+- Moonshot Kimi-K2.5 / K2.7 support and tool parser.
+- Kimi K2.x vision (`--mmproj`, projector `kimik25`). The MoonViT tower and
+  the patch-merge projector remap onto mlx-vlm's `kimi_k25`. llama.cpp's
+  converter writes the vision Q/K in the split 2-D RoPE layout, and the
+  remap puts them back into MoonViT's interleaved layout.
+- You can now use `--stream-experts` with `--mmproj` with the cli run/chat
+  commands. Server support for vision + streaming still to come.
+- The server accepts `stream: experts` on a VLM entry, so you can serve an
+  over-RAM VLM. gmlx puts the placement on the text tower, and the vision
+  tower stays resident. The server refuses `stream: cpu` on a VLM entry.
+  Send only one request at a time to a streamed entry (see streaming.md).
+
+### Changed
+
+- M1 and M2 now run the model graph in float16 instead of bfloat16. Those
+  GPUs have no native bfloat16 arithmetic, so the compiler expanded every
+  bfloat16 operation into a costly software sequence.
+- mlx-kquant floor raised to 0.3.12: IQ4 perf improvements
+- DeepSeek-V4 decodes slightly faster: the compressor emit-path fp8 round-trip
+  runs as one mlx-kquant dispatch instead of a 13-dispatch graph, on
+  every layer that completes a pool window. Bit-identical;
+  GMLX_EMIT_QAT_FUSED=0 restores the graph.
+
+### Fixed
+
+- deepseek2 / glm-dsa yarn scaling. llama.cpp writes
+  `rope.scaling.yarn_log_multiplier` as `0.1 * mscale_all_dim`, and gmlx
+  read it back as `mscale_all_dim` itself. Thus every yarn-scaled GGUF on
+  those arches (DeepSeek-V3/R1, Kimi-K2.x, GLM-5.2) ran with an attention
+  scale approximately 1.85x too flat. Decoding stayed fluent, but it
+  ignored the context and degenerated into repetition. `beta_fast` and
+  `beta_slow` now pass through as well.
+- Streaming decode-feeder token-split corruption. When gmlx staged one
+  split piece, it could overwrite arena slots that an earlier piece's lazy
+  gather still referenced. This garbled short-prompt prefills on
+  low-residency models. Each piece now executes before the next piece
+  stages.
+- `--dtype auto|bfloat16|float16` (env `GMLX_ACTIVATION_DTYPE`, which serve
+  reads too) sets the activation dtype for the model graph.
+- serve: `--dtype` and `server.dtype` set the same knob for every model the
+  server loads. An unrecognized value is a config error rather than a silent
+  fall back to the default.
+- Prompt cache: hybrid-arch models keep an anchor checkpoint at the end
+  of the system prompt, so parallel requests sharing a system prompt and
+  tool schemas (subagent fan-out) start warm instead of re-prefilling
+  the shared prefix after the conversation deepens. GMLX_APC_CKPT_SYS=0
+  disables.
+- Prompt cache: exact-tier models (deepseek-v4-class pooling stacks) get
+  the same system-prompt anchor as a whole-prefix snapshot in its own
+  LRU, so sibling fan-out stays warm there too. GMLX_APC_ANCHOR_ENTRIES
+  and GMLX_APC_ANCHOR_BUDGET_MB bound it; GMLX_APC_CKPT_SYS=0 disables.
+
+## [0.3.0] - 2026-08-09
+
+### Added
+
+- Muse Glimmer support (GGUF arch `muse-glimmer`, Meta Muse Glimmer 30B):
+  a vendored text decoder with sandwich norms at two epsilons, an
+  attention output gate, and NoPE on the full-attention layers with RoPE
+  only on the 2048-window sliding ones. Vision rides the `muse-glimmer`
+  mmproj through a vendored ViT and a GGUF-only image processor. The ATEM
+  reasoning channel and its XML tool calls are wired through chat, serve,
+  thinking budgets, and the muse profile family (reasoning strength
+  low/medium/high/xhigh). `--draft-gguf` loads the DFlash drafter for
+  speculative decoding.
+- serve --speculative: a request arriving while one stream decodes with
+  MTP no longer waits for it to finish; the stream converts to shared
+  batch decode and speculation resumes once the batch drains back under
+  the width cap. GMLX_MTP_PREEMPT / GMLX_MTP_RESUME disable each half.
+- gmlx chat --server: chat against a running server as a plain client,
+  without the assistant's tools and memory (no background requests).
+  Engages automatically when the config's server is already up and
+  serves the requested model; --local pins the in-process load. An
+  explicit GGUF path always loads the file on disk.
+- decode_prefill_ratio accepts "auto" and it is the new default: live
+  streams keep at least half their decode rate while deep prompts admit,
+  and pacing stands down wherever it would not help (simultaneous
+  bursts, cheap chunks, stuck queues). A numeric ratio pins the previous
+  static behavior; GMLX_DECODE_PREFILL_AUTO=0 reverts on a live server.
+- GMLX_SERVE_MEMSTATS=path.jsonl writes a per-tick serve memory trace:
+  MLX counters, free-headroom estimate, and per-owner cache byte
+  attribution with allocation shapes marked on change, for diagnosing
+  serve memory growth under load.
+- Serve admission is gated on projected memory headroom: a request whose
+  measured KV and prefill-transient projection does not fit is kept
+  queued and retried each tick instead of committing memory the box does
+  not have. Requests are never failed by the gate, an idle server always
+  admits, and a request deferred past GMLX_ADMIT_DEFER_MAX_S (default
+  60s) is admitted anyway with a loud log. GMLX_ADMIT_HEADROOM=0
+  disables.
+- /v1/metrics reports residency budget vs resident bytes, live
+  active/cache/headroom memory, and admission deferral counters.
+
+### Changed
+
+- mlx-kquant floor raised to 0.3.11: MoE prefill gather runs 12-28%
+  faster per call at chat-chunk widths, lifting serve prefill 20-43%
+  shallow and 8-14% deep on many-expert models.
+- Bench chart value axes clamp to the data range when a zero anchor
+  would waste the panel height on empty space; nearby engine lines
+  now read as visually distinct.
+- benchmarks.md tracks builds and measured date per model, and merged
+  results carry the newest contributing run date: one model rebenched
+  on newer releases no longer implies the rest was remeasured.
+- DeepSeek-V4-Flash IQ2_XXS rebenched on gmlx 0.2.2 + mlx-kquant
+  0.3.11 vs ds4-server b030961 (2026-08-05): prefill 1.11-1.86x and
+  decode 1.05-1.59x across the full d512-500k ladder.
+- DeepSeek-V4 single-token decode runs its hyper-connection glue as four
+  native mlx-kquant ops instead of about 176 python kernel launches per
+  step. `GMLX_HC_M1_FUSED=0` and `GMLX_HC_KQ=0` restore the previous
+  routes for A/Bs.
+- DeepSeek-V4 hyper-connections at speculative verify widths run as one
+  fused kernel per call.
+- The hc_expand between attention and the ffn hyper-connection fuses into
+  the following collapse kernel, and dense small-N projections (router
+  gate, indexer weights, hyper head) route through mlx-kquant's
+  skinny_matmul at speculative verify widths when available
+  (GMLX_KQ_SKINNY=0 opts out).
+- The server now sizes command buffers per phase, coarse while decoding
+  and fine during deep prefill, rather than one cap for both.
+  `GMLX_CB_PHASE=0` restores the single cap.
+
+### Fixed
+
+- serve --speculative no longer serializes concurrent requests: MTP
+  loads counted the model weights twice in the admission headroom
+  estimate, holding it negative for the server's lifetime.
+- Chat's bottom toolbar no longer clips the live tok/s readout on
+  narrow terminals; sampling knobs are dropped first instead.
+- The serve free-headroom estimate went negative on models whose load
+  materializes weights into MLX-tracked memory (the same bytes counted
+  twice); the loader now registers only the truly untracked mmap
+  remainder, measured against the load's active-memory delta.
+- DeepSeek V4 serves concurrent requests: multi-row prompt batches on
+  pooling-cache models failed before prefill, and admission re-merged
+  already-batched caches, killing every request in flight above c=1.
 - GGUFs that quantize the MoE router gate (some community DeepSeek quants;
   llama.cpp's own quantize leaves it F32) now load: small quantized tensors
   on raw-array modules are dequantized to f32 at load instead of erroring.
+- MTP prefill steps now use fine prefill caps to avoid a transient memory
+  spike that could trigger a Metal OOM.
+- Prompts short enough to skip chunked prefill also use fine prefill caps;
+  they previously ran under decode caps, and a burst of 1-2k-token requests
+  could crash the server with a Metal OOM.
 
 ## [0.2.2] - 2026-08-06
 

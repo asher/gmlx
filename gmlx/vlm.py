@@ -34,10 +34,14 @@ from .gdn_patches import (
 )
 from .gguf_meta import first_nonzero_int, read_int
 from .loader import (
+    _F16_KEEP_BY_MODEL_TYPE,
+    _FP32_KEEP_BY_MODEL_TYPE,
+    _active_now,
     _install_and_load,
     load_gguf_wire_bytes,
     materialize_module_arrays,
     remap_arrays,
+    weights_source_key,
 )
 from .preflight import preflight
 from .transforms import coalesce_split_experts
@@ -64,6 +68,25 @@ def resolve_vlm_model_type(llm_arch: str, mm_meta: dict) -> str:
         # Mistral Pixtral: a plain-float Pixtral ViT (2-D RoPE, RMSNorm, SiLU MLP)
         # + a 2-layer GELU projector onto a Mistral-Nemo (llama-arch) text tower.
         return "pixtral"
+    if proj == "muse-glimmer":
+        # Meta Muse Glimmer: a 50-layer window-attention ViT + a 2-layer GELU
+        # adapter onto the muse-glimmer text tower. Both halves are vendored
+        # (gmlx.muse_glimmer_vlm_model); mlx-vlm ships no class for either.
+        return "muse_glimmer"
+    if proj == "kimik25":
+        # Moonshot Kimi-K2.5/K2.7: a MoonViT tower (SigLIP-so400m shape, 2-D
+        # RoPE + a learned position grid that interpolates to the image) and
+        # a patch-merge GELU projector onto the deepseek2-arch text tower.
+        # GLM-5.2-V has the same encoder and projector on a different text
+        # arch. mlx-vlm has no class for it, so name it rather than load it
+        # incorrectly as Kimi.
+        if llm_arch != "deepseek2":
+            raise UnsupportedVLMError(
+                f"mmproj projector 'kimik25' on LLM arch {llm_arch!r} is not "
+                "supported (only Moonshot Kimi-K2.5/K2.7, which converts to "
+                "'deepseek2'; GLM-5.2-V shares this vision encoder but needs "
+                "its own model class)")
+        return "kimi_k25"
     if proj == "qwen2vl_merger":
         # Resolvable in principle (mlx-vlm has qwen2_vl), but none of the
         # vision remap / config synth / processor synth paths exist for the
@@ -84,6 +107,11 @@ def resolve_vlm_model_type(llm_arch: str, mm_meta: dict) -> str:
         # dense vs MoE; both share one vision encoder (deepstack disabled).
         if llm_arch == "qwen35moe":
             return "qwen3_5_moe"
+        # Qwen3.8-Flash-Next (llama.cpp arch tag qwen4exp) - the qwen4exp
+        # hybrid text model with the same Qwen3-VL vision tower; both text
+        # and wrapper classes are vendored (gmlx.qwen4_exp_vlm_model).
+        if llm_arch == "qwen4exp":
+            return "qwen4_exp"
         return "qwen3_5"
     if llm_arch == "gemma4":
         # gemma-4 ships two omni families: the E-series (E2B/E4B) with CLIP +
@@ -213,6 +241,130 @@ def _pixtral_vision_name(name: str):
     if tgt is None:
         return None
     return f"{_PVM}.transformer.layers.{bid}.{tgt}.{leaf}", False
+
+
+# Muse Glimmer: a LayerNorm/GELU ViT with 2-D RoPE and window attention, onto
+# the vendored gmlx.muse_glimmer_vlm_model tower. Every block tensor carries a
+# bias. Q/K stay un-permuted - the converter already emits the interleaved
+# layout llama.cpp's rope mode 0 (and this port's rope) consumes, the same
+# decision the text tower records in remap.ARCH_ALIAS.
+_MUSE_GLIMMER_BLK_SUBMAP = {
+    "attn_q": "self_attn.q_proj",
+    "attn_k": "self_attn.k_proj",
+    "attn_v": "self_attn.v_proj",
+    "attn_out": "self_attn.o_proj",
+    "ln1": "layer_norm1",
+    "ln2": "layer_norm2",
+    "ffn_up": "mlp.fc1",       # hidden -> intermediate
+    "ffn_down": "mlp.fc2",     # intermediate -> hidden
+}
+_MUSE_GLIMMER_TOP_MAP = {
+    "v.position_embd.weight": "vision_tower.position_embedding",
+    "v.pre_ln.weight": "vision_tower.pre_layernorm.weight",
+    "v.pre_ln.bias": "vision_tower.pre_layernorm.bias",
+    "v.post_ln.weight": "vision_tower.post_layernorm.weight",
+    "v.post_ln.bias": "vision_tower.post_layernorm.bias",
+    "mm.0.weight": "vision_adapter.fc1.weight",
+    "mm.1.weight": "vision_adapter.fc2.weight",
+    # mm.2 is the LLM-side projection into the text residual width; the HF
+    # checkpoint keeps it outside the adapter, and so does this tree.
+    "mm.2.weight": "vision_projection.weight",
+}
+
+
+def _muse_glimmer_vision_name(name: str):
+    """Map an mmproj clip tensor to its vendored muse_glimmer path.
+
+    Returns ``(target_name, is_patch_conv)`` or ``None`` to skip."""
+    hit = _MUSE_GLIMMER_TOP_MAP.get(name)
+    if hit is not None:
+        return hit, False
+    if name == "v.patch_embd.weight":
+        return "vision_tower.patch_embed.weight", True
+    m = _VISION_BLK_RE.match(name)
+    if m is None:
+        return None
+    bid, rest = m.group(1), m.group(2)
+    sub, _, leaf = rest.rpartition(".")  # leaf = weight | bias
+    tgt = _MUSE_GLIMMER_BLK_SUBMAP.get(sub)
+    if tgt is None:
+        return None
+    return f"vision_tower.layers.{bid}.{tgt}.{leaf}", False
+
+
+# Kimi-K2.5/K2.7 MoonViT tower onto mlx_vlm.models.kimi_k25. A SigLIP-so400m
+# shaped ViT (fused qkv, LayerNorms, GELU MLP) with 2-D RoPE over a learned
+# position grid, then a patch-merge projector: pre_norm + Linear/GELU/Linear.
+_KIMI_K25_BLK_SUBMAP = {
+    "attn_qkv": "attn.wqkv",
+    "attn_out": "attn.wo",
+    "ln1": "norm0",            # pre-attention
+    "ln2": "norm1",            # pre-MLP
+    "ffn_up": "mlp.fc0",       # hidden -> intermediate
+    "ffn_down": "mlp.fc1",     # intermediate -> hidden
+}
+_KIMI_K25_TOP_MAP = {
+    "v.patch_embd.bias": "vision_tower.patch_embed.proj.bias",
+    # The learned grid arrives as [H, W, dim], the Learnable2DInterpPosEmb
+    # layout.
+    "v.position_embd.weight": "vision_tower.patch_embed.pos_emb.weight",
+    "v.post_ln.weight": "vision_tower.final_layernorm.weight",
+    "v.post_ln.bias": "vision_tower.final_layernorm.bias",
+    "mm.input_norm.weight": "mm_projector.pre_norm.weight",
+    "mm.input_norm.bias": "mm_projector.pre_norm.bias",
+    "mm.1.weight": "mm_projector.proj.0.weight",
+    "mm.1.bias": "mm_projector.proj.0.bias",
+    "mm.2.weight": "mm_projector.proj.2.weight",   # proj.1 is the GELU
+    "mm.2.bias": "mm_projector.proj.2.bias",
+}
+
+
+def _kimi_k25_vision_name(name: str):
+    """Map an mmproj clip tensor to its mlx-vlm kimi_k25 path.
+
+    Returns ``(target_name, transform)`` or ``None`` to skip. ``transform`` is
+    ``"patchconv"``, ``"qkv"`` (see :func:`_kimi_k25_qkv_split_to_interleaved`)
+    or ``None``."""
+    hit = _KIMI_K25_TOP_MAP.get(name)
+    if hit is not None:
+        return hit, None
+    if name == "v.patch_embd.weight":
+        return "vision_tower.patch_embed.proj.weight", "patchconv"
+    m = _VISION_BLK_RE.match(name)
+    if m is None:
+        return None
+    bid, rest = m.group(1), m.group(2)
+    sub, _, leaf = rest.rpartition(".")  # leaf = weight | bias
+    tgt = _KIMI_K25_BLK_SUBMAP.get(sub)
+    if tgt is None:
+        return None
+    xf = "qkv" if sub == "attn_qkv" else None
+    return f"vision_tower.blocks.{bid}.{tgt}.{leaf}", xf
+
+
+def _kimi_k25_qkv_split_to_interleaved(arr: mx.array, n_head: int) -> mx.array:
+    """Undo the converter's interleaved -> split 2-D RoPE permutation on Q/K.
+
+    MoonViT rotates each head's dims in interleaved pairs, which alternate the
+    x and y axes: ``(freq i, axis, pair)``. llama.cpp's ``build_rope_2d``
+    instead needs all x dims in the first half and all y dims in the second
+    half, thus ``conversion/kimivl.py`` permutes Q/K to ``(axis, freq i,
+    pair)`` at conversion time. mlx-vlm implements the native interleaved
+    form, thus this function removes the permutation again. If it stays, each
+    patch gets the position of a different patch, and the tower gives
+    plausible but wrong features. This function does not change V, and the
+    converter does not change V.
+    """
+    qkv = arr.shape[0] // 3
+    tail = arr.shape[1:]
+
+    def _swap(w):
+        head_dim = qkv // n_head
+        w = w.reshape(n_head, 2, head_dim // 4, 2, *tail)
+        return mx.swapaxes(w, 1, 2).reshape(qkv, *tail)
+
+    return mx.concatenate(
+        [_swap(arr[:qkv]), _swap(arr[qkv:2 * qkv]), arr[2 * qkv:]], axis=0)
 
 
 # gemma-4 (E2B/E4B-it) omni vision tower onto mlx_vlm.models.gemma4. The vision
@@ -559,13 +711,17 @@ _QWEN3OMNI_A_TOP_MAP = {
 
 def remap_vision_arrays(
     arrays: dict[str, mx.array], model_type: str, *, with_audio: bool = False,
-    mm_codecs: dict[str, str] | None = None,
+    mm_codecs: dict[str, str] | None = None, mm_meta: dict | None = None,
 ) -> tuple[dict[str, mx.array], list[str], dict[str, str]]:
     """Remap a float mmproj's tensors onto the mlx-vlm vision tower + projector.
 
     With ``with_audio`` (an omni mmproj carrying an audio encoder), the ``a.*`` /
     ``mm.a.*`` audio tensors are also remapped onto the audio tower + audio
     embedder; otherwise they are skipped.
+
+    ``mm_meta`` (the mmproj's metadata) is required by families whose weight
+    layout depends on a hyperparameter rather than on shape alone - Kimi-K2.5's
+    Q/K RoPE de-permutation needs the vision head count.
 
     Most mmproj GGUFs are pure float (vision/projector weights are never K-quant).
     A few (Qwen3-Omni) ship K-quant (Q8_0) vision/audio matmul weights; pass
@@ -607,6 +763,37 @@ def remap_vision_arrays(
             out[hf] = mx.transpose(arr, (0, 2, 3, 1)) if is_patch else arr
         return out, skipped, vis_kqmeta
 
+    if model_type == "muse_glimmer":
+        for name, arr in arrays.items():
+            if name.endswith(".scales") or name.endswith(".biases"):
+                continue
+            res = _muse_glimmer_vision_name(name)
+            if res is None:
+                skipped.append(name)
+                continue
+            hf, is_patch = res
+            # patch conv: GGUF [out, in, kH, kW] (NCHW) -> nn.Conv2d [out, kH, kW, in].
+            out[hf] = mx.transpose(arr, (0, 2, 3, 1)) if is_patch else arr
+        return out, skipped, vis_kqmeta
+
+    if model_type == "kimi_k25":
+        n_head = _mm_int(mm_meta or {}, "clip.vision.attention.head_count")
+        for name, arr in arrays.items():
+            if name.endswith(".scales") or name.endswith(".biases"):
+                continue
+            res = _kimi_k25_vision_name(name)
+            if res is None:
+                skipped.append(name)
+                continue
+            hf, transform = res
+            if transform == "patchconv":
+                # GGUF [out, in, kH, kW] (NCHW) -> nn.Conv2d [out, kH, kW, in].
+                arr = mx.transpose(arr, (0, 2, 3, 1))
+            elif transform == "qkv":
+                arr = _kimi_k25_qkv_split_to_interleaved(arr, n_head)
+            out[hf] = arr
+        return out, skipped, vis_kqmeta
+
     if model_type == "gemma4":
         for name, arr in arrays.items():
             if name.endswith(".scales") or name.endswith(".biases"):
@@ -646,7 +833,7 @@ def remap_vision_arrays(
             out[tgt] = arr
         return out, skipped, vis_kqmeta
 
-    if model_type in ("qwen3_5", "qwen3_5_moe"):
+    if model_type in ("qwen3_5", "qwen3_5_moe", "qwen4_exp"):
         for name, arr in arrays.items():
             if name.endswith(".scales") or name.endswith(".biases"):
                 continue
@@ -837,10 +1024,13 @@ def _synthesize_qwen35_vlm_config(
     miscomputes image position ids."""
     text_config = dict(text_config)
     text_config["model_type"] = model_type
+    # The qwen4exp pair reuses the qwen3_5 tower class, whose VisionConfig
+    # whitelists its own model_type names.
+    vision_mt = "qwen3_5" if model_type == "qwen4_exp" else model_type
     config = {
         "model_type": model_type,
         "text_config": text_config,
-        "vision_config": _synthesize_qwen35_vision_config(mm_meta, model_type),
+        "vision_config": _synthesize_qwen35_vision_config(mm_meta, vision_mt),
         "vocab_size": int(text_config.get("vocab_size", 248320)),
     }
     for key, tok in (("image_token_id", "<|image_pad|>"),
@@ -989,9 +1179,127 @@ def _synthesize_pixtral_vlm_config(
     return config
 
 
+def _synthesize_kimi_k25_vlm_config(
+    text_config: dict, mm_meta: dict, llm_meta: dict
+) -> dict:
+    """Kimi-K2.5/K2.7 VLM config: the deepseek2 text synth + a MoonViT tower.
+
+    The tower reads from the mmproj's ``clip.vision.*`` metadata, except the
+    learned position grid, which the converter writes as top-level
+    ``vision.pos_emb_{height,width}``. The image placeholder is
+    ``<|media_pad|>``. gmlx resolves its id from the GGUF vocab, because
+    mlx-vlm's default id belongs to a different Kimi release.
+    """
+    hidden = _mm_int(mm_meta, "clip.vision.embedding_length")
+    patch = _mm_int(mm_meta, "clip.vision.patch_size")
+    merge = int(_mm(mm_meta, "clip.vision.projector.scale_factor") or 2)
+    pos_h = int(_mm(mm_meta, "vision.pos_emb_height") or 64)
+    pos_w = int(_mm(mm_meta, "vision.pos_emb_width") or pos_h)
+    vision_config: dict = {
+        "model_type": "moonvit",
+        "depth": _mm_int(mm_meta, "clip.vision.block_count"),
+        "embed_dim": hidden,
+        "hidden_size": hidden,
+        "num_heads": _mm_int(mm_meta, "clip.vision.attention.head_count"),
+        "intermediate_size": _mm_int(mm_meta, "clip.vision.feed_forward_length"),
+        "image_size": _mm_int(mm_meta, "clip.vision.image_size"),
+        "patch_size": patch,
+        "spatial_patch_size": patch,
+        "num_channels": 3,
+        "init_pos_emb_height": pos_h,
+        "init_pos_emb_width": pos_w,
+        "spatial_merge_size": merge,
+        "merge_kernel_size": [merge, merge],
+    }
+    eps = _mm(mm_meta, "clip.vision.attention.layer_norm_epsilon")
+    if eps is not None:
+        vision_config["layer_norm_eps"] = float(eps)
+
+    config: dict = {
+        "model_type": "kimi_k25",
+        "text_config": text_config,
+        "vision_config": vision_config,
+        "scale_factor": merge,
+        "vocab_size": int(text_config.get("vocab_size", 163840)),
+    }
+    pad_id = _gguf_token_id(llm_meta, "<|media_pad|>")
+    if pad_id is not None:
+        config["media_placeholder_token_id"] = pad_id
+        config["image_token_index"] = pad_id
+    return config
+
+
+def _other_dim(shape, known: int) -> int:
+    """The size of a 2-D tensor's other axis, given one axis' length. Reading it
+    this way rather than by position keeps the caller independent of whether the
+    shape arrived in GGUF ne order or numpy order."""
+    total = 1
+    for d in shape:
+        total *= int(d)
+    if known <= 0 or total % known:
+        raise ValueError(f"shape {tuple(shape)} has no axis of size {known}")
+    return total // known
+
+
+def _synthesize_muse_glimmer_vlm_config(
+    text_config: dict, mm_meta: dict, llm_meta: dict, mm_shapes: dict | None = None,
+) -> dict:
+    """Muse Glimmer VLM config: the muse-glimmer text synth plus a vision tower
+    read from ``clip.vision.*``.
+
+    Two values llama.cpp keeps as arch constants rather than GGUF fields are
+    pinned here with their source (clip.cpp ``PROJECTOR_TYPE_MUSE_GLIMMER``):
+    the vision rope base 10000 and the 3-sparse-then-1-global layer period. Two
+    more are read off the mmproj's own tensor shapes, because no metadata key
+    carries them: the learned position grid's length (llama.cpp likewise takes
+    ``sqrt(position_embeddings->ne[1])``) and the adapter's hidden width.
+    """
+    vision_config: dict = {
+        "model_type": "muse_glimmer",
+        "num_hidden_layers": _mm_int(mm_meta, "clip.vision.block_count"),
+        "hidden_size": _mm_int(mm_meta, "clip.vision.embedding_length"),
+        "intermediate_size": _mm_int(mm_meta, "clip.vision.feed_forward_length"),
+        "num_attention_heads": _mm_int(mm_meta, "clip.vision.attention.head_count"),
+        "image_size": _mm_int(mm_meta, "clip.vision.image_size"),
+        "patch_size": _mm_int(mm_meta, "clip.vision.patch_size"),
+        "num_channels": 3,
+        "projection_dim": _mm_int(mm_meta, "clip.vision.projection_dim"),
+        "rope_theta": 10000.0,
+        "sparse_factor": 4,
+    }
+    merge = _mm(mm_meta, "clip.vision.spatial_merge_size")
+    vision_config["spatial_merge_size"] = int(merge) if merge is not None else 2
+    eps = _mm(mm_meta, "clip.vision.attention.layer_norm_epsilon")
+    if eps is not None:
+        vision_config["layer_norm_eps"] = float(eps)
+    # Both dims are read as "the other side" of a known axis rather than by
+    # shape order, since the mmproj's shapes arrive in GGUF ne order.
+    hidden = vision_config["hidden_size"]
+    merged = hidden * vision_config["spatial_merge_size"] ** 2
+    pos = (mm_shapes or {}).get("v.position_embd.weight")
+    if pos:
+        vision_config["num_position_embeddings"] = _other_dim(pos, hidden)
+    adapter = (mm_shapes or {}).get("mm.0.weight")
+    if adapter:
+        vision_config["adapter_hidden_size"] = _other_dim(adapter, merged)
+
+    config: dict = {
+        "model_type": "muse_glimmer",
+        "text_config": text_config,
+        "vision_config": vision_config,
+        "vocab_size": int(text_config.get("vocab_size", 202048)),
+    }
+    img_id = _gguf_token_id(llm_meta, "<|patch|>")
+    if img_id is not None:
+        config["image_token_index"] = img_id
+        config["image_token_id"] = img_id
+    return config
+
+
 def synthesize_vlm_config(
     model_type: str, llm_meta: dict, llm_shapes: dict, mm_meta: dict,
     *, mm_tensor_names: set[str] | None = None,
+    mm_shapes: dict | None = None,
 ) -> dict:
     """Assemble an mlx-vlm config dict from the two GGUFs.
 
@@ -1000,9 +1308,15 @@ def synthesize_vlm_config(
     ``mm_tensor_names`` (the mmproj's tensor key set) lets the config reflect
     optional tensors that carry no metadata flag - e.g. gemma-4 vision
     standardization, present only on the larger (31B) SigLIP encoder.
+    ``mm_shapes`` (the mmproj's tensor->shape map) supplies the dims some
+    families record only in their tensors - e.g. Muse Glimmer's position grid.
     """
     text_config = synthesize_config(llm_meta, llm_shapes)
     names = mm_tensor_names or set()
+
+    if model_type == "muse_glimmer":
+        return _synthesize_muse_glimmer_vlm_config(
+            text_config, mm_meta, llm_meta, mm_shapes)
 
     if model_type == "gemma4":
         standardize = "v.std_scale" in names and "v.std_bias" in names
@@ -1010,13 +1324,15 @@ def synthesize_vlm_config(
             text_config, mm_meta, standardize=standardize)
     if model_type == "gemma4_unified":
         return _synthesize_gemma4_unified_vlm_config(text_config, mm_meta)
-    if model_type in ("qwen3_5", "qwen3_5_moe"):
+    if model_type in ("qwen3_5", "qwen3_5_moe", "qwen4_exp"):
         return _synthesize_qwen35_vlm_config(
             text_config, mm_meta, model_type, llm_meta)
     if model_type == "qwen3_omni_moe":
         return _synthesize_qwen3_omni_config(text_config, mm_meta, llm_meta)
     if model_type == "pixtral":
         return _synthesize_pixtral_vlm_config(text_config, mm_meta, llm_meta)
+    if model_type == "kimi_k25":
+        return _synthesize_kimi_k25_vlm_config(text_config, mm_meta, llm_meta)
     if model_type != "llava":
         raise UnsupportedVLMError(
             f"config synth not implemented for model_type {model_type!r}")
@@ -1205,10 +1521,19 @@ def _synthesize_vlm_processor(model_type: str, tokenizer, mm_meta: dict):
             _synthesize_gemma4_unified_processor(tokenizer, mm_meta), tokenizer)
     if model_type in ("qwen3_5", "qwen3_5_moe"):
         return _synthesize_qwen35_processor(tokenizer, mm_meta)
+    if model_type == "qwen4_exp":
+        import mlx_vlm.prompt_utils as _prompt_utils
+        _prompt_utils.MODEL_CONFIG.setdefault(
+            "qwen4_exp", _prompt_utils.MessageFormat.LIST_WITH_IMAGE_FIRST)
+        return _synthesize_qwen35_processor(tokenizer, mm_meta)
     if model_type == "qwen3_omni_moe":
         return _synthesize_qwen3_omni_processor(tokenizer, mm_meta)
     if model_type == "pixtral":
         return _synthesize_pixtral_processor(tokenizer, mm_meta)
+    if model_type == "muse_glimmer":
+        return _synthesize_muse_glimmer_processor(tokenizer, mm_meta)
+    if model_type == "kimi_k25":
+        return _synthesize_kimi_k25_processor(tokenizer, mm_meta)
     if model_type != "gemma4":
         raise UnsupportedVLMError(
             f"processor synth not implemented for model_type {model_type!r}")
@@ -1313,7 +1638,7 @@ def _synthesize_gemma4_unified_processor(tokenizer, mm_meta: dict):
     1e-6). So mean = std = 0.5 (the SigLIP [-1, 1] convention gemma-4 vision uses)
     and the GGUF's ``clip.vision.image_mean/std`` = [0]/[1] placeholders produce
     the same embedder output to ~1e-6. We keep mean = std = 0.5 to stay faithful
-    to the documented gemma-4 preprocessing; it is not load-bearing for parity.
+    to the documented gemma-4 preprocessing; parity does not depend on it.
     """
     from mlx_vlm.models.gemma4_unified.processing_gemma4_unified import (
         Gemma4UnifiedAudioFeatureExtractor, Gemma4UnifiedImageProcessor,
@@ -1617,6 +1942,267 @@ def _synthesize_pixtral_processor(tokenizer, mm_meta: dict):
     return _attach_streaming_helpers(processor, tokenizer)
 
 
+def _kimi_k25_image_processor(**params):
+    """A ``KimiK25ImageProcessor`` whose outputs are evaluated, not lazy.
+
+    The stock processor resizes and patchifies in MLX, thus its outputs are
+    lazy graphs on the default stream of the thread that runs it. MLX default
+    streams are per-thread, and a thread cannot evaluate a lazy array from a
+    different thread. The server preprocesses a request on a caller thread
+    and evaluates on the engine thread, so the stock outputs fail there with
+    "There is no Stream(gpu, N) in current thread". This subclass evaluates
+    the outputs on the thread that builds them. The other supported families
+    preprocess in numpy, so they do not need this today, but mlx-vlm has many
+    MLX-native processors: give a family like this the same wrapper.
+    """
+    from mlx_vlm.models.kimi_k25.processing_kimi_k25 import (
+        KimiK25ImageProcessor,
+    )
+
+    class _Eager(KimiK25ImageProcessor):
+        def preprocess(self, images, return_tensors=None, **kwargs):
+            out = super().preprocess(
+                images, return_tensors=return_tensors, **kwargs)
+            mx.eval([v for v in out.values() if isinstance(v, mx.array)])
+            return out
+
+    return _Eager(**params)
+
+
+def _synthesize_kimi_k25_processor(tokenizer, mm_meta: dict):
+    """Build the Kimi-K2.5/K2.7 processor from the GGUFs alone - no HF download.
+
+    mlx-vlm's own ``KimiK25Processor`` already does the navit resize/pad/
+    patchify in MLX (no torch), thus this function supplies only its
+    parameters. ``in_token_limit`` comes from ``image_max_pixels``, which the
+    converter writes as ``in_patch_limit * patch_size**2``.
+    ``patch_limit_on_one_side`` is an arch constant, and the GGUF has no field
+    for it. Its value is 512, the bound of MoonViT's 2-D RoPE table.
+    """
+    from mlx_vlm.models.kimi_k25.processing_kimi_k25 import (
+        KimiK25Processor,
+    )
+
+    patch_size = _mm_int(mm_meta, "clip.vision.patch_size")
+    merge = int(_mm(mm_meta, "clip.vision.projector.scale_factor") or 2)
+    image_mean = _mm_floats(mm_meta, "clip.vision.image_mean") or [0.5, 0.5, 0.5]
+    image_std = _mm_floats(mm_meta, "clip.vision.image_std") or [0.5, 0.5, 0.5]
+    max_pixels = _mm(mm_meta, "clip.vision.image_max_pixels")
+    in_token_limit = (int(max_pixels) // (patch_size ** 2)
+                      if max_pixels else 16384)
+
+    image_processor = _kimi_k25_image_processor(
+        patch_size=patch_size,
+        image_mean=tuple(image_mean),
+        image_std=tuple(image_std),
+        in_token_limit=in_token_limit,
+        merge_kernel_size=[merge, merge],
+        patch_limit_on_one_side=512,
+    )
+    processor = KimiK25Processor(
+        image_processor=image_processor,
+        tokenizer=tokenizer,
+        chat_template=getattr(tokenizer, "chat_template", None),
+    )
+    return _attach_streaming_helpers(processor, tokenizer)
+
+
+class _MuseGlimmerGgufImageProcessor(ImageProcessingMixin):
+    """Torch-free Muse Glimmer image preprocessing (numpy + PIL only).
+
+    Ports ``mtmd_image_preprocessor_muse_glimmer`` / ``muse_glimmer_grid_size``
+    (llama.cpp ``tools/mtmd/mtmd-image.cpp``), itself a replica of transformers'
+    ``get_aspect_ratio_preserving_size``: pick the soft-token grid whose aspect
+    ratio is closest to the image's (ties going to the larger grid) under a
+    ``max_image_tokens`` cap, then resize straight to ``grid * cell`` pixels.
+
+    The resize is a plain stretch with no padding, and Lanczos-3 - which PIL's
+    ``Image.LANCZOS`` matches exactly (llama.cpp says so at mtmd-image.cpp:353),
+    unlike the BICUBIC-vs-BILINEAR mismatch that bites the gemma-4 path above.
+
+    Subclasses ``ImageProcessingMixin`` for the same reason the Pixtral one does:
+    ``ProcessorMixin``'s type-check accepts it while mlx-vlm ``prepare_inputs``
+    keeps it out of the single-soft-token branch.
+    """
+
+    model_input_names = ["pixel_values", "image_sizes"]
+
+    def __init__(self, image_mean, image_std, patch_size=14,
+                 spatial_merge_size=2, max_image_tokens=4096):
+        super().__init__()
+        self.image_mean = list(image_mean)
+        self.image_std = list(image_std)
+        self.patch_size = int(patch_size)
+        self.spatial_merge_size = int(spatial_merge_size)
+        self.max_image_tokens = int(max_image_tokens)
+        self.cell = self.patch_size * self.spatial_merge_size
+        self.size = {"height": self.cell, "width": self.cell}
+
+    def soft_tokens(self, height: int, width: int) -> int:
+        """Soft tokens a preprocessed ``height`` x ``width`` image occupies."""
+        return (height // self.cell) * (width // self.cell)
+
+    def _target_hw(self, h: int, w: int) -> tuple[int, int]:
+        import math
+        cell = self.cell
+        cap = self.max_image_tokens
+        i_nph = h / cell
+        i_npw = w / cell
+        ratio = (i_npw / i_nph) if i_nph > 0 else 1.0
+        if i_nph * i_npw > cap:
+            i_nph = math.sqrt(cap / ratio)
+            i_npw = i_nph * ratio
+        target_ar = h / w
+        best = None
+        for nph in (math.floor(i_nph), math.ceil(i_nph)):
+            for npw in (math.floor(i_npw), math.ceil(i_npw)):
+                if nph < 1 or npw < 1 or nph * npw > cap:
+                    continue
+                d = abs(nph / npw - target_ar)
+                if best is None or d < best[0] or (
+                        d == best[0] and nph * npw > best[1] * best[2]):
+                    best = (d, nph, npw)
+        if best is None:  # nothing fit under the cap: round and clamp
+            nph = max(1, math.floor(i_nph + 0.5))
+            npw = max(1, math.floor(i_npw + 0.5))
+        else:
+            _, nph, npw = best
+        return nph * cell, npw * cell
+
+    def _one(self, img):
+        import numpy as np
+        from PIL import Image
+        if not isinstance(img, Image.Image):
+            img = Image.fromarray(np.asarray(img))
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        h_out, w_out = self._target_hw(img.height, img.width)
+        img = img.resize((w_out, h_out), Image.Resampling.LANCZOS)  # PIL: (W, H)
+        arr = np.asarray(img, dtype=np.float32) / 255.0             # [H, W, C]
+        mean = np.array(self.image_mean, dtype=np.float32)
+        std = np.array(self.image_std, dtype=np.float32)
+        arr = (arr - mean) / std
+        return np.transpose(arr, (2, 0, 1)), (h_out, w_out)          # [C, H, W]
+
+    def __call__(self, images, **kwargs):
+        import numpy as np
+        flat = _PixtralGgufImageProcessor._flatten(images)
+        processed, sizes = [], []
+        for img in flat:
+            chw, hw = self._one(img)
+            processed.append(chw)
+            sizes.append(hw)
+        max_h = max(s[0] for s in sizes)
+        max_w = max(s[1] for s in sizes)
+        padded = np.zeros((len(processed), 3, max_h, max_w), dtype=np.float32)
+        for i, (chw, (h, w)) in enumerate(zip(processed, sizes)):
+            padded[i, :, :h, :w] = chw
+        return {"pixel_values": padded, "image_sizes": sizes}
+
+
+def _synthesize_muse_glimmer_processor(tokenizer, mm_meta: dict):
+    """Build the Muse Glimmer processor from the GGUFs alone - no HF download.
+
+    mlx-vlm has no processor for this family either, so the marker expansion
+    lives here: the chat template emits one ``<|patch|>`` per image, and the
+    model wants that placeholder repeated once per soft token and wrapped in
+    ``<|image_start|>`` / ``<|image_end|>`` - the same bracketing llama.cpp's
+    mtmd adds around the image embeddings (mtmd.cpp, MUSE_GLIMMER case).
+
+    The 4096-soft-token cap is a clip.cpp arch constant
+    (``set_limit_image_tokens(1, 4096)``), not GGUF metadata.
+    """
+    from transformers.feature_extraction_utils import BatchFeature
+    from transformers.processing_utils import ProcessorMixin
+
+    from mlx_vlm.models.base import to_mlx
+
+    patch_size = _mm_int(mm_meta, "clip.vision.patch_size")
+    merge = _mm(mm_meta, "clip.vision.spatial_merge_size")
+    image_mean = _mm_floats(mm_meta, "clip.vision.image_mean") or [0.5, 0.5, 0.5]
+    image_std = _mm_floats(mm_meta, "clip.vision.image_std") or [0.5, 0.5, 0.5]
+
+    image_processor = _MuseGlimmerGgufImageProcessor(
+        image_mean=image_mean, image_std=image_std, patch_size=patch_size,
+        spatial_merge_size=int(merge) if merge is not None else 2,
+        max_image_tokens=4096)
+
+    class MuseGlimmerProcessor(ProcessorMixin):
+        attributes = ["image_processor", "tokenizer"]
+        image_processor_class = "AutoImageProcessor"
+        tokenizer_class = "AutoTokenizer"
+
+        image_token = "<|patch|>"
+        image_start_token = "<|image_start|>"
+        image_end_token = "<|image_end|>"
+
+        def __call__(self, images=None, text=None, **kwargs):
+            if text is None and images is None:
+                raise ValueError("You must provide either text or images.")
+            if isinstance(text, str):
+                text = [text]
+
+            image_inputs = {}
+            if images is not None:
+                if not isinstance(images, (list, tuple)):
+                    images = [images]
+                image_inputs = self.image_processor(images)
+                if text is not None:
+                    text = self._expand(text, image_inputs["image_sizes"])
+
+            kwargs.pop("return_tensors", None)
+            data = dict(image_inputs)
+            if text is not None:
+                data = {**self.tokenizer(text, **kwargs), **data}
+            return BatchFeature(data=to_mlx(data))
+
+        def _expand(self, texts, sizes):
+            """Replace each ``<|patch|>`` with its image's full token block. Sizes
+            are consumed in order across the batch, matching how the images were
+            flattened for preprocessing."""
+            out, index = [], 0
+            for sample in texts:
+                parts = sample.split(self.image_token)
+                rebuilt = parts[0]
+                for part in parts[1:]:
+                    if index < len(sizes):
+                        h, w = sizes[index]
+                        n = self.image_processor.soft_tokens(h, w)
+                        rebuilt += (self.image_start_token + self.image_token * n
+                                    + self.image_end_token)
+                        index += 1
+                    else:
+                        rebuilt += self.image_token
+                    rebuilt += part
+                out.append(rebuilt)
+            return out
+
+        def batch_decode(self, *args, **kwargs):
+            return self.tokenizer.batch_decode(*args, **kwargs)
+
+        def decode(self, *args, **kwargs):
+            return self.tokenizer.decode(*args, **kwargs)
+
+        @property
+        def model_input_names(self):
+            return list(dict.fromkeys(
+                list(self.tokenizer.model_input_names)
+                + list(self.image_processor.model_input_names)))
+
+    processor = MuseGlimmerProcessor(
+        image_processor=image_processor, tokenizer=tokenizer,
+        chat_template=getattr(tokenizer, "chat_template", None))
+
+    # mlx-vlm's message formatter is a closed table; without a row
+    # ``chat._vlm_message`` degrades to a plain text dict and the image part
+    # never reaches the template.
+    import mlx_vlm.prompt_utils as _prompt_utils
+    _prompt_utils.MODEL_CONFIG.setdefault(
+        "muse_glimmer", _prompt_utils.MessageFormat.LIST_WITH_IMAGE_FIRST)
+
+    return _attach_streaming_helpers(processor, tokenizer)
+
+
 # Public entry point
 
 @loadlog.seeds
@@ -1646,6 +2232,11 @@ def load_vlm_model(
     """
     _log = loadlog.verbose_print
 
+    # Absent enable_thinking must keep meaning "template default" when
+    # mlx-vlm renders the prompt (chat and run paths both call in here).
+    from .reasoning import install_template_default_thinking
+    install_template_default_thinking()
+
     # 1. LLM GGUF - preflight gates the text arch (llama/gemma4/...) as usual.
     loadlog.stage("reading gguf metadata")
     pf = preflight(gguf_path, arch=arch)
@@ -1654,6 +2245,7 @@ def load_vlm_model(
     loadlog.fact_file_size(pf.shards)
     _log(f"[vlm] llm arch={llm_arch}")
     loadlog.stage("reading tensors")
+    active_before = _active_now()
     arrays, kquant_meta, _arch, llm_meta, llm_shapes = load_gguf_wire_bytes(
         gguf_path, zero_copy=zero_copy, shards=pf.shards)
     arrays, kquant_meta, n_coalesced = coalesce_split_experts(arrays, kquant_meta)
@@ -1669,9 +2261,20 @@ def load_vlm_model(
     #    model_type, which fixes where the text tower nests.
     loadlog.stage("reading mmproj")
     loadlog.fact("mmproj", True)
-    mm_arrays, mm_codecs, _mm_arch, mm_meta, _mm_shapes = load_gguf_wire_bytes(
+    mm_arrays, mm_codecs, _mm_arch, mm_meta, mm_shapes = load_gguf_wire_bytes(
         mmproj_path, zero_copy=zero_copy, expect_quant=False)
     model_type = resolve_vlm_model_type(llm_arch, mm_meta)
+    if model_type == "muse_glimmer":
+        # mlx-vlm ships no muse_glimmer package; graft the vendored model +
+        # tool parser in before get_model_and_args resolves the model_type.
+        from . import muse_glimmer_tools, muse_glimmer_vlm_model
+        muse_glimmer_vlm_model.ensure_registered()
+        muse_glimmer_tools.ensure_registered()
+    elif model_type == "qwen4_exp":
+        # Likewise vendored (text + wrapper; the vision tower is mlx-vlm's
+        # qwen3_5 Qwen3-VL class).
+        from . import qwen4_exp_vlm_model
+        qwen4_exp_vlm_model.ensure_registered()
     with_audio = bool(mm_meta.get("clip.has_audio_encoder"))
     _log(f"[vlm] model_type={model_type} audio={with_audio}")
 
@@ -1688,7 +2291,8 @@ def load_vlm_model(
     #    K-quant (Q8_0) omni mmproj also threads its codecs into hf_kquant_meta so
     #    install_kquant_modules swaps those vision/audio leaves like LLM leaves.
     vis_weights, skipped, vis_kqmeta = remap_vision_arrays(
-        mm_arrays, model_type, with_audio=with_audio, mm_codecs=mm_codecs)
+        mm_arrays, model_type, with_audio=with_audio, mm_codecs=mm_codecs,
+        mm_meta=mm_meta)
     _log(f"[vlm] mmproj: {len(vis_weights)} mapped, {len(skipped)} skipped, "
          f"{len(vis_kqmeta)} kquant")
     hf_weights.update(vis_weights)
@@ -1702,7 +2306,7 @@ def load_vlm_model(
     loadlog.stage("building model")
     config = synthesize_vlm_config(
         model_type, llm_meta, llm_shapes, mm_meta,
-        mm_tensor_names=set(mm_arrays))
+        mm_tensor_names=set(mm_arrays), mm_shapes=mm_shapes)
     text_config = config.get("text_config", {})
     model, config = build_vlm_model(config)
     loadlog.fact("model_type", config.get("model_type"))
@@ -1735,8 +2339,18 @@ def load_vlm_model(
     #    codec and stay native. The remap already produced final mlx-vlm names
     #    (text under [thinker.]language_model.model.*, vision/audio under their
     #    towers), so model.sanitize must not run - it would re-prefix text keys.
-    _install_and_load(model, hf_weights, hf_kquant_meta, log=_log, sanitize=False)
+    _install_and_load(model, hf_weights, hf_kquant_meta, log=_log, sanitize=False,
+                      fp32_keep=_FP32_KEEP_BY_MODEL_TYPE.get(model_type, ()),
+                      f16_keep=_F16_KEEP_BY_MODEL_TYPE.get(model_type, ()),
+                      source_key=weights_source_key(*pf.shards, mmproj_path),
+                      active_before=active_before)
     materialize_module_arrays(model)
+    if model_type == "qwen4_exp":
+        from .qwen4_exp_model import prepare_runtime
+        counts = prepare_runtime(model.language_model)
+        _log(f"[vlm] qwen4_exp: fused GDN decode on {counts['gdn_fused']} "
+             f"layers, verify on {counts['gdn_fused_verify']}, b/a cat on "
+             f"{counts['gdn_ba_cat']}")
 
     # 5. processor (image preprocessing + tokenizer + chat template). Synthesized
     #    from the two GGUFs by default (the LLM GGUF carries the tokenizer + chat

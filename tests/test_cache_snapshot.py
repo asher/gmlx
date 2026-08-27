@@ -168,10 +168,13 @@ def test_row_snapshot_empty_cache_list_input():
     assert row_snapshot([], 0) is None
 
 
-def test_row_snapshot_single_row_rotating_wrapped_canonical():
-    # B=1 rot caches route through _clone_single_row: exact-tier stores
-    # for rot archs outside the ckpt geometry hold the canonical window
-    # (temporal order, min(offset, W) tokens), not the untrimmed ring.
+def test_row_snapshot_single_row_rotating_wrapped_faithful():
+    # B=1 rot caches route through _clone_row_faithful: exact-tier stores
+    # are same-stream resumes (next turn of the same conversation), so
+    # the ring copies bitwise (buffer order and _idx preserved), never
+    # the canonical temporal reorder. Reordering holds the same window
+    # but permutes fp16 summation order, which MoE routing amplifies
+    # into visible logit swings on the restored arm.
     max_size = 8
     c = _rot_row(max_size, 20, 0)
     snap = row_snapshot([c], 0)
@@ -179,20 +182,42 @@ def test_row_snapshot_single_row_rotating_wrapped_canonical():
     s = snap[0]
     assert type(s) is RotatingKVCache
     assert s.offset == 20
-    assert s.keys.shape[2] == max_size
-    got = [float(s.keys[0, 0, j, 0]) for j in range(max_size)]
-    assert got == [7.0 * t for t in range(12, 20)]
+    assert s._idx == c._idx
+    assert s.keys.shape == c.keys.shape
+    assert mx.array_equal(s.keys, c.keys).item()
+    assert mx.array_equal(s.values, c.values).item()
 
 
-def test_row_snapshot_buffered_rotating_declines():
-    # The spec path swaps rot layers to BufferedRotatingKVCache; its
-    # clones drop start_position, so the exact tier must store nothing
-    # for the stack rather than a corrupt row.
+def test_row_snapshot_buffered_rotating_clones_the_window():
+    # The spec path swaps rot layers to BufferedRotatingKVCache, a linear
+    # temporal buffer with rollback slack. Its canonical window is also its
+    # faithful state, so the exact tier stores it as the plain
+    # RotatingKVCache a restore expects (offset kept, trailing window,
+    # ring pointer at the end) instead of declining the whole row.
     Buffered = getattr(_cache, "BufferedRotatingKVCache", None)
     if Buffered is None:
         pytest.skip("no BufferedRotatingKVCache in the runtime cache module")
-    buffered = Buffered.from_cache(_rot_row(8, 20, 0), buffer_size=4)
-    assert row_snapshot([_kv_row(4, 0), buffered], 0) is None
+    src = _rot_row(8, 20, 0)
+    buffered = Buffered.from_cache(src, buffer_size=4)
+    for t in range(20, 23):                       # grow past from_cache
+        k = (mx.arange(H * D).reshape(1, H, 1, D) + t * 7).astype(mx.float32)
+        buffered.update_and_fetch(k, k + 1000.0)
+    snap = row_snapshot([_kv_row(4, 0), buffered], 0)
+    assert snap is not None
+    s = snap[1]
+    assert isinstance(s, RotatingKVCache) and not isinstance(s, Buffered)
+    assert s.offset == buffered.offset == 23
+    assert s._idx == 8 and s.keys.shape[2] == 8
+    idx = buffered._idx
+    assert mx.array_equal(s.keys, buffered.keys[..., idx - 8:idx, :]).item()
+    assert mx.array_equal(s.values, buffered.values[..., idx - 8:idx, :]).item()
+    # the round-trip: an exact store keyed on the row's tokens succeeds
+    mgr = _manager()
+    try:
+        seq = list(range(1, 24))
+        assert retirement_store(mgr, "exact", seq, [_kv_row(23, 0), buffered]) == 23
+    finally:
+        mgr.close()
 
 
 # --------------------------------------------------------------------------
@@ -201,7 +226,11 @@ def test_row_snapshot_buffered_rotating_declines():
 
 def _manager():
     from mlx_vlm.apc import APCManager
-    return APCManager(num_blocks=256, block_size=16)
+    m = APCManager(num_blocks=256, block_size=16)
+    # 0.6.15 declines exact stores under APC_EXACT_MIN_TOKENS (default 16);
+    # these tests use short sequences on purpose.
+    m.exact_cache_min_tokens = 1
+    return m
 
 
 def test_retirement_store_exact_round_trip():
@@ -401,10 +430,13 @@ def test_retire_batch_row_block_mode_harvests():
         mgr.close()
 
 
-def test_retire_batch_row_exact_mode_skips():
-    # Exact-mode retirement is a full row clone: NEVER at B>1 (lane stall);
-    # the drafter-state sidecar is the planned fix.
+def test_retire_batch_row_exact_mode_stores_the_row(monkeypatch):
+    # Exact-mode retirement of a batch row (DeepSeek-V4-class stacks under
+    # a drafter): the round-boundary state (position == len(seq) - 1, the
+    # newest token's KV pending) stores everything but that token; a
+    # position that disagrees with the token count stores nothing.
     from gmlx.speculative import _retire_batch_row
+    monkeypatch.setenv("GMLX_APC_RETIRE_LCP", "0")
     mgr = _manager()
     try:
         full_ids = list(range(1, 20))
@@ -415,13 +447,55 @@ def test_retire_batch_row_exact_mode_skips():
         _retire_batch_row(_fake_model(mgr), cache, 0, ctx, gen_row,
                           len(seq) - 1)
         snap, prefix_len = mgr.lookup_exact_cache(seq)
-        assert prefix_len == 0 and snap is None
-        blocks, matched = mgr.lookup_prefix(seq, extra_hash=0)
+        assert prefix_len == len(seq) - 1 and snap is not None
+        # stale tail: the row's KV covers neither len(seq) nor len(seq) - 1
+        mgr2 = _manager()
         try:
-            assert matched == 0
+            _retire_batch_row(_fake_model(mgr2), [_kv_row(len(seq) - 3, 0)],
+                              0, dict(ctx), gen_row, len(seq) - 3)
+            snap, prefix_len = mgr2.lookup_exact_cache(seq)
+            assert prefix_len == 0 and snap is None
         finally:
-            if blocks:
-                mgr.release(blocks)
+            mgr2.close()
+    finally:
+        mgr.close()
+
+
+def test_row_kv_len_reads_per_row_offsets():
+    from mlx_vlm.models.cache import BatchKVCache
+    from gmlx.cache_snapshot import row_kv_len
+    batch = BatchKVCache.merge([_kv_row(5, 0), _kv_row(3, 1)])
+    assert row_kv_len([batch], 0) == 5
+    assert row_kv_len([batch], 1) == 3
+    assert row_kv_len([_kv_row(7, 0)], 0) == 7
+    assert row_kv_len([], 0) is None
+
+
+def test_retire_batch_row_exact_keys_on_the_row_kv(monkeypatch):
+    # position lags the cache by the verify input: the row holds len(seq)
+    # tokens of KV, so the whole sequence is the key (not seq[:-1]).
+    from gmlx.speculative import _retire_batch_row
+    monkeypatch.setenv("GMLX_APC_RETIRE_LCP", "0")
+    mgr = _manager()
+    try:
+        full_ids = list(range(1, 20))
+        gen_row = [50, 51, 52]
+        seq = full_ids + gen_row
+        ctx = {"full_ids": full_ids, "extra_hash": 0, "mode": "exact"}
+        _retire_batch_row(_fake_model(mgr), [_kv_row(len(seq), 0)], 0, ctx,
+                          gen_row, len(seq) - 1)
+        snap, prefix_len = mgr.lookup_exact_cache(seq + [99])
+        assert prefix_len == len(seq) and snap is not None
+    finally:
+        mgr.close()
+
+
+def test_retirement_store_exact_refuses_a_row_that_does_not_cover_the_key():
+    # The row holds 10 tokens of KV; a 12-token key must not be stored.
+    mgr = _manager()
+    try:
+        assert retirement_store(mgr, "exact", list(range(12)), [_kv_row(10, 0)]) == 0
+        assert retirement_store(mgr, "exact", list(range(10)), [_kv_row(10, 0)]) == 10
     finally:
         mgr.close()
 
@@ -574,6 +648,7 @@ def test_sidecar_disk_restart(tmp_path):
     drafter = _FakeDrafter([_kv_row(24, 0)])
     mgr1 = APCManager(num_blocks=64, block_size=16,
                       disk=DiskBlockStore(tmp_path / "apc", namespace="t"))
+    mgr1.exact_cache_min_tokens = 1
     try:
         assert drafter_sidecar_store(mgr1, drafter, ids, 20)
     finally:
@@ -581,6 +656,7 @@ def test_sidecar_disk_restart(tmp_path):
 
     mgr2 = APCManager(num_blocks=64, block_size=16,
                       disk=DiskBlockStore(tmp_path / "apc", namespace="t"))
+    mgr2.exact_cache_min_tokens = 1
     try:
         probe = ids + [99]
         side = drafter_sidecar_lookup(mgr2, probe, 20)

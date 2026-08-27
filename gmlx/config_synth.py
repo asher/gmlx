@@ -62,6 +62,9 @@ GGUF_ARCH_TO_MODEL_TYPE = {
     "gemma-embedding": "gemma_embedding",
     "qwen35": "qwen3_5",
     "qwen35moe": "qwen3_5_moe",
+    # Qwen3.8-Flash-Next: the qwen35 hybrid + hyper-connections + QSA sparse
+    # attention + PLE n-gram embeddings; vendored gmlx.qwen4_exp_model.
+    "qwen4exp": "qwen4_exp",
     "qwen3": "qwen3",
     "qwen3moe": "qwen3_moe",
     # Qwen3-VL / Qwen3-Omni text tower. Structurally a Qwen3-MoE (identical
@@ -128,6 +131,13 @@ GGUF_ARCH_TO_MODEL_TYPE = {
     # per-head qk-norm, plain rope. Native MTP/NextN block past the trunk.
     # Model class vendored from mlx-lm PR #1485.
     "hy_v3": "hy_v3",
+    # Meta Muse Glimmer 30B: dense sandwich-norm decoder with an attention output
+    # gate, per-head qk-norm absorbing qk_scale_factor, and RoPE on the
+    # sliding-window layers only (full-attention layers are NoPE). Logit scale +
+    # tanh softcap on the head. Model class vendored (no mlx-lm class; afmoe is
+    # the nearest relative). Pairs with the Muse Glimmer mmproj (--mmproj) and
+    # the DFlash drafter (--draft-gguf).
+    "muse-glimmer": "muse_glimmer",
     # Moonshot Kimi-K3 (2.8T-A50B): hybrid KDA (linear, per-channel decay) +
     # nope-only MLA layers from the per-layer head_count_kv schedule, latent
     # 896-expert sigmoid MoE behind down/up projections, situ activation,
@@ -484,7 +494,7 @@ def _synth_diffusion_gemma(meta, shapes, config: dict) -> None:
     # `generation_config.json`, but the llama.cpp GGUF conversion drops them
     # (it carries only `diffusion.canvas_length` + the scalar eos), so each is
     # read from `diffusion.eb_*` when present and otherwise filled from the
-    # canonical DiffusionGemma default below. Baking the defaults is load-bearing
+    # canonical DiffusionGemma default below. Baking the defaults is required
     # for both reported behaviours: without `diffusion_stopping_config` the
     # denoiser never early-stops and runs the full `max_denoising_steps` schedule
     # every canvas (~3-4x slower decode), and without the turn-end token in the
@@ -878,7 +888,7 @@ def _synth_gemma3n(meta, shapes, config: dict) -> None:
     (already on ``config``) plus the gemma-3n-specific knobs into a
     ``text_config`` dict and replaces ``config`` with ``{model_type, text_config}``.
 
-    Two GGUF<->HF conversions are load-bearing:
+    Two GGUF<->HF conversions must be exact:
       - ``sliding_window_pattern`` (1=sliding, 0=full) -> ``layer_types``.
       - ``activation_sparsity_scale`` stores the *precomputed* gelu-topk std
         multiplier m = sqrt(2)*erfinv(2p-1); mlx_lm wants the raw sparsity fraction
@@ -1030,7 +1040,7 @@ def _synth_gemma(meta, shapes, config: dict) -> None:
     extractor produces. Gemma is always tied (no output.weight tensor) and its
     RMSNorm bakes +1 (undone at remap via gemma_norm_minus_one).
 
-    The one load-bearing detail is head_dim: Gemma-1 7B has head_dim=256 while
+    The one detail that must come from the header is head_dim: Gemma-1 7B has head_dim=256 while
     hidden_size // num_attention_heads = 192, so head_dim must come from
     `attention.key_length` (which the universal extractor reads) - never the
     hidden//heads fallback. Guard it explicitly."""
@@ -1639,6 +1649,64 @@ def _synth_hy_v3(meta, shapes, config: dict) -> None:
     config["rope_parameters"] = rope_parameters
 
 
+# muse-glimmer (Meta Muse Glimmer 30B)
+
+def _synth_muse_glimmer(meta, shapes, config: dict) -> None:
+    """Synthesize a muse_glimmer config from a 'muse-glimmer'-arch GGUF.
+
+    The universal fields cover hidden/layers/heads/kv/ffn/ctx/eps/head_dim/
+    rope_theta/tie/vocab. This adds the per-layer sliding/full schedule, the
+    logit scale + softcap, and the second norm epsilon.
+
+    ``post_norm_eps`` (post-attention and post-FFN norms only) is not in the
+    GGUF: llama.cpp hardcodes 1e-8 (muse-glimmer.cpp:68) and the HF
+    text_config carries the same value. Pinned here, in both those terms, so a
+    future variant that changes it is caught by the parity gate rather than
+    silently mis-normed.
+    """
+    arch = "muse-glimmer"
+    n_layers = config["num_hidden_layers"]
+
+    config["sliding_window"] = _require(
+        _read_int(meta, f"{arch}.attention.sliding_window"),
+        arch=arch, gguf_field=f"{arch}.attention.sliding_window")
+
+    # Per-layer schedule: 1 = sliding (and rope'd), 0 = full (and NoPE). The KV
+    # is a per-layer bool array on every known conversion; llama.cpp also
+    # accepts a scalar period (set_swa_pattern: layer is full when
+    # (i + 1) % period == 0), so honour that form too.
+    key = f"{arch}.attention.sliding_window_pattern"
+    if _array_len(meta, key) == 1:
+        period = _require(_read_int(meta, key), arch=arch, gguf_field=key)
+        pattern = [(i + 1) % period != 0 for i in range(n_layers)]
+    else:
+        pattern = _read_bool_array(meta, key)
+        if pattern is None:
+            # llama.cpp's default period when the key is absent entirely.
+            pattern = [(i + 1) % 4 != 0 for i in range(n_layers)]
+        elif len(pattern) != n_layers:
+            raise ValueError(
+                f"muse-glimmer synth: {key} has {len(pattern)} entries for "
+                f"{n_layers} layers")
+    config["layer_types"] = [
+        "sliding_attention" if v else "full_attention" for v in pattern]
+
+    config["output_multiplier"] = _require(
+        _read_float(meta, f"{arch}.logit_scale"),
+        arch=arch, gguf_field=f"{arch}.logit_scale")
+    # llama.cpp reads the softcap as optional and leaves it 0 (disabled) when
+    # absent; the converter always writes 20.0.
+    config["final_logit_softcapping"] = (
+        _read_float(meta, f"{arch}.final_logit_softcapping") or 0.0)
+    config["post_norm_eps"] = 1e-8
+
+    config["rope_parameters"] = {
+        "rope_theta": _require(config.get("rope_theta"),
+                               arch=arch, gguf_field=f"{arch}.rope.freq_base"),
+        "rope_type": "default",
+    }
+
+
 # granitehybrid (IBM Granite 4.x hybrid: H-Micro / H-Tiny / H-Small)
 
 def _synth_granite_hybrid(meta, shapes, config: dict) -> None:
@@ -2199,6 +2267,23 @@ def _synth_nemotron_h_moe(meta, shapes, config: dict) -> None:
         config["num_hidden_layers"] = n_layers
 
 
+# DeepseekV2Model and its subclasses (deepseek2, glm-dsa) write the yarn log
+# multiplier as `0.1 * mscale_all_dim`, not the value itself
+# ([TAG_DEEPSEEK2_YARN_LOG_MUL_FIX] in upstream conversion/deepseek.py). Other
+# converters write the value without change, thus only those arches undo the
+# 0.1 factor.
+_DEEPSEEK_YARN_LOG_MUL_SCALE = 0.1
+
+
+def _deepseek_mscale_all_dim(meta, arch: str) -> float | None:
+    """HF ``rope_scaling.mscale_all_dim`` recovered from a deepseek-family
+    GGUF's ``rope.scaling.yarn_log_multiplier``. ``None`` when absent."""
+    log_mul = _read_float(meta, f"{arch}.rope.scaling.yarn_log_multiplier")
+    if log_mul is None:
+        return None
+    return log_mul / _DEEPSEEK_YARN_LOG_MUL_SCALE
+
+
 # deepseek2 (DeepSeek-V2/V3 + GLM-4.x MLA conversions; MLA + fine-grained MoE)
 
 def _synth_deepseek2(meta, shapes, config: dict) -> None:
@@ -2298,7 +2383,8 @@ def _synth_deepseek2(meta, shapes, config: dict) -> None:
 
     # rope scaling (yarn) passthrough when the GGUF carries it. mlx_lm
     # deepseek_v3 reads `factor` / `mscale_all_dim` off rope_scaling for the
-    # attention-scale correction. Absent on non-yarn conversions.
+    # attention-scale correction, and `beta_fast` / `beta_slow` for the ramp.
+    # Absent on non-yarn conversions.
     scaling_type = _read_string(meta, f"{arch}.rope.scaling.type")
     if scaling_type and scaling_type != "none":
         rp: dict[str, Any] = {"type": scaling_type, "rope_type": scaling_type}
@@ -2308,9 +2394,15 @@ def _synth_deepseek2(meta, shapes, config: dict) -> None:
         orig = _read_int(meta, f"{arch}.rope.scaling.original_context_length")
         if orig is not None:
             rp["original_max_position_embeddings"] = orig
-        ymul = _read_float(meta, f"{arch}.rope.scaling.yarn_log_multiplier")
-        if ymul is not None:
-            rp["mscale_all_dim"] = ymul
+        beta_fast = _read_float(meta, f"{arch}.rope.scaling.yarn_beta_fast")
+        if beta_fast is not None:
+            rp["beta_fast"] = beta_fast
+        beta_slow = _read_float(meta, f"{arch}.rope.scaling.yarn_beta_slow")
+        if beta_slow is not None:
+            rp["beta_slow"] = beta_slow
+        mscale_all_dim = _deepseek_mscale_all_dim(meta, arch)
+        if mscale_all_dim is not None:
+            rp["mscale_all_dim"] = mscale_all_dim
         config["rope_scaling"] = rp
 
 
@@ -2429,9 +2521,9 @@ def _synth_glm_moe_dsa(meta, shapes, config: dict) -> None:
         orig = _read_int(meta, f"{arch}.rope.scaling.original_context_length")
         if orig is not None:
             rope_params["original_max_position_embeddings"] = orig
-        ymul = _read_float(meta, f"{arch}.rope.scaling.yarn_log_multiplier")
-        if ymul is not None:
-            rope_params["mscale_all_dim"] = ymul
+        mscale_all_dim = _deepseek_mscale_all_dim(meta, arch)
+        if mscale_all_dim is not None:
+            rope_params["mscale_all_dim"] = mscale_all_dim
     config["rope_parameters"] = rope_params
 
 
@@ -2862,6 +2954,110 @@ def _print_summary(config: dict, arch: str) -> None:
 # truth for which arches synthesize_config() completes (`_supported()` is its
 # key set). Multi-arch synthesizers bind their arch via lambda so every entry
 # is callable as fn(meta, shapes, config).
+# qwen4exp (Qwen3.8-Flash-Next)
+
+def _synth_qwen4exp(meta, shapes, config: dict) -> None:
+    """The qwen35 hybrid fields, plus hyper-connections, the QSA indexer and
+    the PLE n-gram table. Field names match ``gmlx.qwen4_exp_model.ModelArgs``.
+    The three PLE hash constant arrays are UINT64 in the GGUF; the reader
+    hands them back as numpy uint64, ``int()`` keeps them exact."""
+    arch = "qwen4exp"
+    _synth_qwen35(meta, shapes, config, arch)
+
+    n_layer = config["num_hidden_layers"]
+    head_dim = config.get("head_dim") or (
+        config["hidden_size"] // config["num_attention_heads"])
+    n_rot = _read_int(meta, f"{arch}.rope.dimension_count")
+    if n_rot:
+        config["partial_rotary_factor"] = n_rot / head_dim
+    config["mrope_section"] = config["rope_parameters"]["mrope_section"]
+
+    config["num_experts"] = _require(
+        _read_int(meta, f"{arch}.expert_count"),
+        arch=arch, gguf_field=f"{arch}.expert_count")
+    config["num_experts_per_tok"] = _require(
+        _read_int(meta, f"{arch}.expert_used_count"),
+        arch=arch, gguf_field=f"{arch}.expert_used_count")
+    config["moe_intermediate_size"] = _require(
+        _read_int(meta, f"{arch}.expert_feed_forward_length"),
+        arch=arch, gguf_field=f"{arch}.expert_feed_forward_length")
+    config["shared_expert_intermediate_size"] = (
+        _read_int(meta, f"{arch}.expert_shared_feed_forward_length")
+        or config["moe_intermediate_size"])
+    config["norm_topk_prob"] = True
+
+    config["hc_count"] = _require(
+        _read_int(meta, f"{arch}.hyper_connection.count"),
+        arch=arch, gguf_field=f"{arch}.hyper_connection.count")
+    config["hc_lowrank"] = _require(
+        _read_int(meta, f"{arch}.hyper_connection.low_rank"),
+        arch=arch, gguf_field=f"{arch}.hyper_connection.low_rank")
+
+    # QSA indexer: per-layer compress ratios (0 = dense layer / GDN layer).
+    # A file without the indexer keys loads dense, as llama.cpp does.
+    ratios = _read_int_array(meta, f"{arch}.attention.compress_ratios")
+    if ratios:
+        if len(ratios) < n_layer:
+            raise ValueError(
+                f"qwen4exp synth: attention.compress_ratios has {len(ratios)} "
+                f"entries for {n_layer} layers")
+        config["compress_ratios"] = [int(r) for r in ratios[:n_layer]]
+        config["indexer_n_heads"] = _require(
+            _read_int(meta, f"{arch}.attention.indexer.head_count"),
+            arch=arch, gguf_field=f"{arch}.attention.indexer.head_count")
+        config["indexer_head_dim"] = _require(
+            _read_int(meta, f"{arch}.attention.indexer.key_length"),
+            arch=arch, gguf_field=f"{arch}.attention.indexer.key_length")
+        config["indexer_budget"] = _require(
+            _read_int(meta, f"{arch}.attention.indexer.top_k"),
+            arch=arch, gguf_field=f"{arch}.attention.indexer.top_k")
+    else:
+        config["compress_ratios"] = [0] * n_layer
+
+    # PLE n-gram hash embeddings (layer ids are 0-based in the GGUF).
+    ple_layers = _read_int_array(meta, f"{arch}.ple.layers")
+    if ple_layers:
+        config["ple_layer_ids"] = [int(i) for i in ple_layers]
+        for cfg, key in (("ple_ngram_size", "ngram_size"),
+                         ("ple_heads_per_ngram", "heads_per_ngram"),
+                         ("ple_conv_kernel", "conv_kernel"),
+                         ("ple_eos_token_id", "eos_token_id")):
+            config[cfg] = _require(
+                _read_int(meta, f"{arch}.ple.{key}"),
+                arch=arch, gguf_field=f"{arch}.ple.{key}")
+        config["ple_image_token_id"] = _read_int(meta, f"{arch}.ple.image_token_id")
+        for cfg, key in (("ple_layer_multipliers", "layer_multipliers"),
+                         ("ple_head_offsets", "head_offsets"),
+                         ("ple_head_vocab_sizes", "head_vocab_sizes")):
+            vals = _read_int_array(meta, f"{arch}.ple.{key}")
+            if not vals:
+                raise ValueError(
+                    f"qwen4exp synth: missing {arch}.ple.{key} (needed to "
+                    f"hash n-grams into the PLE table)")
+            config[cfg] = [int(v) for v in vals]
+        n_heads = (config["ple_ngram_size"] - 1) * config["ple_heads_per_ngram"]
+        if (len(config["ple_head_offsets"]) != n_heads
+                or len(config["ple_head_vocab_sizes"]) != n_heads):
+            raise ValueError(
+                f"qwen4exp synth: {n_heads} PLE heads but "
+                f"{len(config['ple_head_offsets'])} offsets / "
+                f"{len(config['ple_head_vocab_sizes'])} vocab sizes")
+        table = shapes.get("per_layer_token_embd.weight")
+        if table is None:
+            raise ValueError(
+                "qwen4exp synth: ple.layers set but per_layer_token_embd.weight "
+                "is missing")
+        config["ple_embed_dim"] = int(table[0])
+        config["ple_table_rows"] = int(table[1])
+        dim_meta = _read_int(meta, f"{arch}.embedding_length_per_layer_input")
+        if dim_meta and dim_meta != config["ple_embed_dim"]:
+            raise ValueError(
+                f"qwen4exp synth: embedding_length_per_layer_input={dim_meta} "
+                f"but the PLE table row is {config['ple_embed_dim']} wide")
+    else:
+        config["ple_layer_ids"] = []
+
+
 _SYNTH = {
     "gemma4": _synth_gemma4,
     "qwen3": _synth_qwen3,
@@ -2875,6 +3071,7 @@ _SYNTH = {
     "glm4": _synth_glm4,
     "qwen35": lambda m, s, c: _synth_qwen35(m, s, c, "qwen35"),
     "qwen35moe": lambda m, s, c: _synth_qwen35(m, s, c, "qwen35moe"),
+    "qwen4exp": _synth_qwen4exp,
     "mistral3": _synth_mistral3,
     "nemotron_h_moe": _synth_nemotron_h_moe,
     "deepseek2": _synth_deepseek2,
@@ -2892,6 +3089,7 @@ _SYNTH = {
     "minimax-m3": _synth_minimax_m3,
     "hunyuan-moe": _synth_hunyuan,
     "hy_v3": _synth_hy_v3,
+    "muse-glimmer": _synth_muse_glimmer,
     "granitehybrid": _synth_granite_hybrid,
     "falcon-h1": _synth_falcon_h1,
     "qwen3next": _synth_qwen3next,

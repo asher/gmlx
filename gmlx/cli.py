@@ -67,6 +67,24 @@ class _CondensedHelpAction(argparse.Action):
         parser.exit()
 
 
+class _DtypeAction(argparse.Action):
+    """Publish --dtype through the environment as soon as it parses.
+
+    The activation dtype has to reach every loader entry point (the text
+    load, the vision/audio towers, the MTP drafter load) and the module
+    installer, which sit behind different call paths. Setting the variable
+    the resolver already reads covers all of them without threading a kwarg
+    through each signature, and keeps serve, which builds its model list
+    from config rather than these flags, on the same mechanism.
+    """
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        from .dtypes import ENV_VAR  # local: keeps mlx off the --help path
+
+        os.environ[ENV_VAR] = values
+        setattr(namespace, self.dest, values)
+
+
 def format_condensed_help(ap: argparse.ArgumentParser, core) -> str:
     """The short help page: usage over just the core actions, the description,
     the core options, and a pointer at --help-all for the rest."""
@@ -243,7 +261,15 @@ def add_speculative_args(ap: argparse.ArgumentParser) -> None:
         type=int,
         default=None,
         metavar="N",
-        help="Override the MTP draft block size.",
+        help="MTP draft tokens per round. Raises or lowers the drafter's own "
+             "default, up to the deepest block it can produce.",
+    )
+    ap.add_argument(
+        "--native-mtp",
+        action="store_true",
+        help="Draft with the GGUF's own MTP head (qwen3.5/3.6/3.8 'nextn') "
+        "even when a --draft-gguf or config draft_gguf companion is set. "
+        "An external drafter otherwise wins. Error if the GGUF has no head.",
     )
     ap.add_argument(
         "--stochastic-mtp",
@@ -327,6 +353,17 @@ def add_load_args(ap: argparse.ArgumentParser) -> None:
         "--no-zero-copy",
         action="store_true",
         help="memcpy tensors out of the mmap instead of viewing.",
+    )
+    ap.add_argument(
+        "--dtype",
+        choices=("auto", "bfloat16", "float16"),
+        default=None,
+        action=_DtypeAction,
+        metavar="DTYPE",
+        help="Activation dtype for the model graph (default: auto). "
+        "'auto' selects float16 on Apple GPUs that have no native bfloat16 "
+        "arithmetic (M1, M2), and bfloat16 on all other devices. Also "
+        "settable as GMLX_ACTIVATION_DTYPE, which serve reads too.",
     )
 
 
@@ -504,6 +541,20 @@ def add_vlm_shared_args(ap: argparse.ArgumentParser) -> None:
         help="Cap thinking tokens: force </think> after ~N reasoning tokens "
         "(text + VLM modes; no-op when thinking is disabled).",
     )
+    ap.add_argument(
+        "--thinking-start-token",
+        default=None,
+        metavar="STR",
+        help="Reasoning open marker, for a model whose spelling is not "
+        "detected from its template (default: detected).",
+    )
+    ap.add_argument(
+        "--thinking-end-token",
+        default=None,
+        metavar="STR",
+        help="Reasoning close marker, the tag --thinking-budget forces "
+        "(default: detected).",
+    )
 
 
 def add_placement_args(ap: argparse.ArgumentParser) -> None:
@@ -663,14 +714,18 @@ def _has_native_mtp_head(gguf_path: str) -> bool:
 def resolve_speculative(args, gguf_path: str) -> tuple[bool, str]:
     """Decide whether run/chat takes the MTP path, plus a note to print.
 
-    Precedence: --no-speculative/--no-mtp (off) > explicit --speculative/--mtp or
-    --draft-gguf (on) > auto. Auto enables MTP iff the GGUF has a native head and no
-    hard-incompatible flag (--mmproj/--adapter/--stream-cpu/--moe-*) is set; sampler
-    flags the MTP walk can't honor are dropped with a warning at generation (--no-mtp
-    honors them via plain decoding), not deferred. The note is empty when the user
-    was explicit."""
+    Precedence: --no-speculative/--no-mtp (off) > --native-mtp (the head; drops a
+    configured draft_gguf) > explicit --speculative/--mtp or --draft-gguf (on) >
+    auto. Auto enables MTP iff the GGUF has a native head and no hard-incompatible
+    flag (--mmproj/--adapter/--stream-cpu/--moe-*) is set; sampler flags the MTP
+    walk can't honor are dropped with a warning at generation (--no-mtp honors
+    them via plain decoding), not deferred. The note is empty when the user was
+    explicit."""
     if getattr(args, "no_speculative", False):
         return False, ""
+    if getattr(args, "native_mtp", False):
+        apply_native_mtp(args, gguf_path)
+        return True, ""
     spec = getattr(args, "speculative", None)
     if spec or getattr(args, "draft_gguf", None):
         return True, ""
@@ -698,10 +753,42 @@ def resolve_speculative(args, gguf_path: str) -> tuple[bool, str]:
             f"({os.path.basename(companion)}) -> speculative decoding on "
             "(--no-mtp to disable)"
         )
-    return True, (
-        "[mtp] native MTP head detected -> speculative decoding on "
-        "(--no-mtp to disable)"
-    )
+    note = ("[mtp] native MTP head detected -> speculative decoding on "
+            "(--no-mtp to disable)")
+    sibling = _sibling_drafter(gguf_path)
+    if sibling:
+        note += (f"; sibling drafter {os.path.basename(sibling)} found, pass "
+                 "--draft-gguf to use it")
+    return True, note
+
+
+def apply_native_mtp(args, gguf_path: str) -> None:
+    """``--native-mtp``: the head drafts; a configured companion is dropped.
+    Exits when the GGUF carries no head, rather than decoding plain."""
+    if not _has_native_mtp_head(gguf_path):
+        print(f"error: --native-mtp: no native MTP head (nextn) in {gguf_path}",
+              file=sys.stderr)
+        raise SystemExit(2)
+    if getattr(args, "draft_gguf", None):
+        print(f"[mtp] --native-mtp: using the head; companion drafter "
+              f"{os.path.basename(args.draft_gguf)} not loaded")
+        args.draft_gguf = None
+    args.speculative = True
+
+
+def _sibling_drafter(gguf_path: str) -> str | None:
+    """A same-directory companion drafter for a native-head target that the
+    user did not configure (auto stays on the head). Header-cache peeks."""
+    try:
+        from . import arch_table, config_synth
+        from .discovery import find_mtp_companion, header_meta
+
+        meta = header_meta(gguf_path)
+        mt = config_synth.GGUF_ARCH_TO_MODEL_TYPE.get((meta or {}).get("arch") or "")
+        arches = arch_table.drafter_arches(mt) if mt else ()
+        return find_mtp_companion(gguf_path, arches) if arches else None
+    except Exception:
+        return None
 
 
 def _deepseek4_mtp_companion(gguf_path: str) -> str | None:
@@ -709,12 +796,14 @@ def _deepseek4_mtp_companion(gguf_path: str) -> str | None:
     it (auto enable; the loader re-resolves the same path when
     draft_gguf_path is not given). Header-cache peeks only."""
     try:
+        from . import arch_table
         from .discovery import find_mtp_companion, header_meta
 
         meta = header_meta(gguf_path)
         if not meta or meta.get("arch") != "deepseek4":
             return None
-        return find_mtp_companion(gguf_path)
+        return find_mtp_companion(gguf_path,
+                                  arch_table.drafter_arches("deepseek_v4"))
     except Exception:
         return None
 
@@ -731,6 +820,9 @@ def _vlm_mtp_drafter_available(args) -> bool:
     the on/off toggle matter."""
     if getattr(args, "no_speculative", False):
         return False
+    if getattr(args, "native_mtp", False):
+        apply_native_mtp(args, args.gguf)
+        return True
     if getattr(args, "speculative", None) is False:
         return False  # explicit config opt-out
     if getattr(args, "draft_gguf", None):
@@ -1190,6 +1282,8 @@ def _run_bench_depths(args) -> int:
     decode_tokens = args.bench_decode_tokens or 128
     # bool(): --speculative defaults to the auto sentinel None, which would
     # otherwise render as "speculative=None" in the banner below.
+    if getattr(args, "native_mtp", False) and not args.no_speculative:
+        apply_native_mtp(args, args.gguf)
     speculative = bool(args.speculative) and not args.no_speculative
 
     from . import loadlog
@@ -1207,6 +1301,10 @@ def _run_bench_depths(args) -> int:
         convs = _load_chat_dataset(ds_id, ds_split)
         print(f"[bench] {len(convs)} conversations loaded")
 
+    from .tool_preflight import check_or_exit
+
+    check_or_exit(args.gguf, ctx_tokens=max(depths) + decode_tokens,
+                  streaming=getattr(args, "stream_experts", False))
     preset_native_fp_wire_env(args)
     drafter = None
     if speculative:
@@ -1403,12 +1501,15 @@ def _run_generate(args) -> int:
     from .chat import fold_thinking_flag, parse_logit_bias, parse_template_config
     from .generation import generate
     from .loader import load_model, preset_native_fp_wire_env
+    from .tool_preflight import check_or_exit
 
     # Parse before the model load so a JSON typo fails fast.
     template_kwargs = fold_thinking_flag(
         args, parse_template_config(args.chat_template_config)
     )
     logit_bias = parse_logit_bias(args.logit_bias)
+    check_or_exit(args.gguf,
+                  streaming=getattr(args, "stream_experts", False))
     preset_native_fp_wire_env(args)
 
     from .thinking_budget import install_finish_thinking_key
@@ -1552,6 +1653,8 @@ def _run_generate(args) -> int:
         kv_tail_tokens=args.kv_tail_tokens,
         prefill_step_size=args.prefill_step_size,
         thinking_budget=args.thinking_budget,
+        thinking_start_token=args.thinking_start_token,
+        thinking_end_token=args.thinking_end_token,
         apply_chat_template=not args.no_chat_template,
         prefill_progress=sys.stdout.isatty() and not args.verbose,
         over_generation=args.over_generation,
@@ -1603,6 +1706,10 @@ def _run_vlm(args) -> int:
             zero_copy=not args.no_zero_copy,
             verbose=args.verbose,
         )
+    # The streaming placement applies only to the text tower. The vision
+    # tower is small, and it stays resident. An over-RAM VLM is over-RAM in
+    # its experts.
+    _apply_placement(args, getattr(model, "language_model", model))
     print_family_note(args)
 
     from mlx_vlm import generate
@@ -1642,6 +1749,12 @@ def _run_vlm(args) -> int:
         extra["resize_shape"] = parse_resize_shape(args.resize_shape)
     if args.thinking_budget is not None:
         extra["thinking_budget"] = args.thinking_budget
+    # mlx-vlm's own criteria enforces the budget here, so it needs the markers
+    # as well; it defaults them to <think> / </think>.
+    if args.thinking_start_token:
+        extra["thinking_start_token"] = args.thinking_start_token
+    if args.thinking_end_token:
+        extra["thinking_end_token"] = args.thinking_end_token
     if getattr(args, "kv_quant_scheme", None) == "kvarn":
         print(
             "warning: --kv-quant-scheme kvarn is not applied on the VLM "
@@ -1673,7 +1786,9 @@ def _run_vlm(args) -> int:
 
     install_finish_thinking_key()
     tbp = make_thinking_budget_processor(
-        think_tokenizer_for(processor), None, interruptible=True
+        think_tokenizer_for(processor), None, interruptible=True,
+        start_token=args.thinking_start_token,
+        end_token=args.thinking_end_token,
     )
     if tbp is not None:
         extra["logits_processors"] = [tbp]
@@ -1741,6 +1856,7 @@ def _run_vlm_mtp(args) -> int:
             zero_copy=not args.no_zero_copy,
             verbose=args.verbose,
         )
+    _apply_placement(args, getattr(model, "language_model", model))
     print_family_note(args)
     print(
         f"[generate] VLM text-only MTP: max_tokens={max_tokens_label(args)} "
@@ -1797,6 +1913,11 @@ _CFG_SAMPLING_TO_ARG = {
     "stop": "stop",
     "xtc_probability": "xtc_probability",
     "xtc_threshold": "xtc_threshold",
+    # Thinking keys: same names as the served sampling keys, so one family
+    # card or model entry caps and delimits reasoning on every verb.
+    "thinking_budget": "thinking_budget",
+    "thinking_start_token": "thinking_start_token",
+    "thinking_end_token": "thinking_end_token",
 }
 _CFG_LOAD_TO_ARG = {
     "kv_bits": "kv_bits",
@@ -2079,13 +2200,16 @@ def maybe_load_from_config(args, parser, argv) -> int | None:
 def _lift_stream_cb_caps(argv: list[str]) -> None:
     """Lift MLX's command-buffer split caps for streaming placements.
 
-    MLX reads the caps once, at Metal device init, which the loader/kq
-    imports inside the verb handlers trigger - so this must run at entry,
-    before any verb dispatch (an env preset after those imports is a
-    no-op). The default caps (10 ops / 40 MB per buffer) shred a streamed
-    decode token into ~1450 command buffers whose turnaround gaps leave
-    the GPU 18% utilized; lifting them measured +40% streamed decode,
-    output bit-identical. setdefault keeps explicit overrides in charge.
+    MLX latches the env caps once, at Metal device init, which the verb
+    imports trigger, so this must run at entry. The defaults (50 ops /
+    50 MB per buffer on the pinned mlx) shred a streamed decode token
+    into ~1450 command buffers whose turnaround gaps leave the GPU 18%
+    utilized; lifting them measured +40% streamed decode, output
+    bit-identical. In-RAM serving does NOT take the lifetime lift: a
+    coarse buffer holds every layer's prefill transients live at once
+    and exhausts GPU memory on deep prompts, so the serve engine flips
+    the caps per phase at runtime instead (cb_phase: coarse decode,
+    fine prefill). setdefault keeps explicit overrides in charge.
     """
     if any(a in ("--stream-experts", "--stream-cpu") for a in argv):
         os.environ.setdefault("MLX_MAX_OPS_PER_BUFFER", "400")
@@ -2125,15 +2249,18 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         )
         return 2
     if args.mmproj:
-        # The VLM path has no bench/report/offload plumbing - refuse rather
-        # than silently dispatch to plain generation.
+        # The VLM path has no bench/report plumbing. Refuse rather than
+        # silently dispatch to plain generation. --stream-experts stays
+        # supported: the placement goes on the text tower after the VLM
+        # load, and the vision tower stays resident. --stream-cpu does not,
+        # because it moves the default device, and it moves the vision tower
+        # to the CPU with it.
         unsupported = [
             flag
             for flag, on in (
                 ("--bench", bool(args.bench)),
                 ("--bench-depths", bool(args.bench_depths)),
                 ("--report-only", args.report_only),
-                ("--stream-experts", args.stream_experts),
                 ("--stream-cpu", args.stream_cpu),
             )
             if on
@@ -2315,6 +2442,11 @@ def _print_umbrella_help(prog: str = "gmlx") -> None:
 
 def umbrella_main(argv: list[str] | None = None) -> int:
     """Dispatch ``gmlx <verb> ...`` to the matching entry point."""
+    from ._exitfix import guarded
+    return guarded(_umbrella_impl, argv)
+
+
+def _umbrella_impl(argv: list[str] | None = None) -> int:
     import warnings
 
     # Validation warnings (unrecognized config keys, ...) are user-facing on
@@ -2489,4 +2621,5 @@ def umbrella_main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    from gmlx._exitfix import guarded
+    sys.exit(guarded(main))

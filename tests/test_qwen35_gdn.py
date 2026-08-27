@@ -71,7 +71,7 @@ def _top():
 def _lm():
     mx.random.seed(11)
     lm = Q35LanguageModel(_cfg(), _top())
-    # Eval mode mirrors production loads and is load-bearing here: in
+    # Eval mode mirrors production loads and is required here: in
     # training mode the stock prefill takes vlm's own chunked ops scan,
     # which the tiled-V patch does not cover, so the arms diverge.
     lm.eval()

@@ -39,7 +39,7 @@ def _restore_mlxvlm():
         "build_gen_args": _APP._build_gen_args,
         "snapshot": _APP._server_runtime_snapshot,
         "get_model_path": _UTILS.get_model_path,
-        "routes": list(fastapi_app.router.routes),
+        "routes": sp_common._snapshot_routes(fastapi_app),
         "handlers": dict(fastapi_app.exception_handlers),
         "deps": getattr(getattr(_APP, "_protocol_deps", None), "build_gen_args", None),
         "pool": getattr(_PKG, "_kq_residency_pool", None),
@@ -59,6 +59,8 @@ def _restore_mlxvlm():
     saved["apc_lone_flag"] = getattr(apc, "_kq_lone_harvest", False)
     gen = importlib.import_module("mlx_vlm.server.generation")
     saved["to_template_kwargs"] = gen.GenerationArguments.to_template_kwargs
+    pu = importlib.import_module("mlx_vlm.prompt_utils")
+    saved["get_chat_template"] = pu.get_chat_template
     saved["make_sampler"] = gen.ResponseGenerator._make_sampler
     schemas = importlib.import_module("mlx_vlm.server.schemas")
     saved["stream_chunk_dump"] = schemas.ChatStreamChunk.model_dump_json
@@ -69,12 +71,13 @@ def _restore_mlxvlm():
     apc.harvest_blocks_from_batch_cache = saved["apc_harvest"]
     apc._kq_lone_harvest = saved["apc_lone_flag"]
     gen.GenerationArguments.to_template_kwargs = saved["to_template_kwargs"]
+    pu.get_chat_template = saved["get_chat_template"]
     gen.ResponseGenerator._make_sampler = saved["make_sampler"]
     schemas.ChatStreamChunk.model_dump_json = saved["stream_chunk_dump"]
     _APP._build_gen_args = saved["build_gen_args"]
     _APP._server_runtime_snapshot = saved["snapshot"]
     _UTILS.get_model_path = saved["get_model_path"]
-    fastapi_app.router.routes[:] = saved["routes"]
+    sp_common._restore_routes(fastapi_app, saved["routes"])
     fastapi_app.exception_handlers.clear()
     fastapi_app.exception_handlers.update(saved["handlers"])
     if getattr(_APP, "_protocol_deps", None) is not None and saved["deps"] is not None:
@@ -326,6 +329,39 @@ def test_nonstream_split_strips_xtml_section_markers():
         r, c = split("x</think>keep <|close|>message<|sep|> text",
                      "<think>", "</think>")
         assert c == "keep <|close|>message<|sep|> text"
+    finally:
+        sp_chat._LAST_RENDERED_PROMPT.reset(tok)
+
+
+def test_nonstream_split_keeps_first_line_code_indent():
+    """The stock splitter .strip()s content, which deletes the first line's
+    leading indent from verbatim-code replies. The seeded splitter trims
+    newlines only, for every marker branch and the no-marker fallthrough."""
+    app_mod = importlib.import_module("mlx_vlm.server.app")
+    rs = importlib.import_module("mlx_vlm.server.responses_state")
+    sp.install_stream_thinking_seed()
+    split = app_mod._split_thinking_text
+    tok = sp_chat._LAST_RENDERED_PROMPT.set(None)
+    try:
+        # open+close pair
+        r, c = split("<think>plan</think>\n\n    if x:\n        y()")
+        assert r == "plan"
+        assert c == "    if x:\n        y()"
+        # close-only (prompt-opened block)
+        r, c = split("plan\n</think>\n\n\tdoc = doc || document;")
+        assert r == "plan"
+        assert c == "\tdoc = doc || document;"
+        # no marker at all
+        assert split("    indented") == (None, "    indented")
+        # whitespace-only content collapses to empty
+        assert split("<think>plan</think>\n  \n") == ("plan", "")
+        # XTML section strip keeps the indent too
+        text = ("plan<|close|>think<|sep|><|open|>response<|sep|>"
+                "    return 4;<|close|>response<|sep|><|end_of_msg|>")
+        r, c = split(text, "<|open|>think<|sep|>", "<|close|>think<|sep|>")
+        assert c == "    return 4;"
+        # the /v1/responses module global got the same splitter
+        assert rs._split_thinking is split
     finally:
         sp_chat._LAST_RENDERED_PROMPT.reset(tok)
 
@@ -787,7 +823,8 @@ def test_stream_chunk_keeps_real_usage_and_timings():
     ``choices: []``) are real values, not ``None`` - they must be preserved."""
     Chunk, _, _, Usage, Timings = _stream_schemas()
     sp.install_vanilla_stream_chunks()
-    timings = Timings(**{f: 0.0 for f in Timings.model_fields})
+    timings = Timings(**{f: 0.0 for f, info in Timings.model_fields.items()
+                         if info.is_required()})
     out = Chunk(model="m", choices=[],
                 usage=Usage(prompt_tokens=3, completion_tokens=2, total_tokens=5),
                 timings=timings).model_dump_json()
@@ -1518,6 +1555,170 @@ def test_install_chat_template_kwargs_idempotent_and_noop_default():
         "enable_thinking": gen.GenerationArguments().enable_thinking}
 
 
+_KIMI_TAIL = (
+    "{%- if thinking is defined and thinking is false -%}<think></think>"
+    "{%- else -%}<think>{%- endif -%}")
+
+
+def test_request_thinking_off_maps_onto_kimi_bare_switch():
+    """A plain --thinking value forwarded by the chat client (or any client's
+    `thinking: "off"`) must reach the template as the model's own switch
+    spelling - Kimi K2.x reads a bare `thinking` variable."""
+    gen = importlib.import_module("mlx_vlm.server.generation")
+    proc = types.SimpleNamespace(chat_template=_KIMI_TAIL)
+    req = types.SimpleNamespace(model_fields_set=set(),
+                                chat_template_kwargs=None, thinking="off")
+    out = sp_chat._stash_template_kwargs(gen.GenerationArguments(), req, proc)
+    assert out._kq_template_kwargs == {"thinking": False}
+    assert out.enable_thinking is False
+    assert out._kq_thinking_explicit is True
+
+    req = types.SimpleNamespace(model_fields_set=set(),
+                                chat_template_kwargs=None, thinking="on")
+    out = sp_chat._stash_template_kwargs(gen.GenerationArguments(), req, proc)
+    assert out._kq_template_kwargs == {"thinking": True}
+    assert out.enable_thinking is True
+
+
+def test_request_reasoning_effort_field_maps_onto_template():
+    gen = importlib.import_module("mlx_vlm.server.generation")
+    proc = types.SimpleNamespace(chat_template="reads reasoning_effort")
+    req = types.SimpleNamespace(model_fields_set=set(),
+                                chat_template_kwargs=None,
+                                reasoning_effort="low")
+    out = sp_chat._stash_template_kwargs(gen.GenerationArguments(), req, proc)
+    assert out._kq_template_kwargs == {"reasoning_effort": "low"}
+    assert out.enable_thinking is True             # effort alone: not a switch
+    assert out._kq_thinking_explicit is False
+
+
+class _RecordingTok:
+    """A tokenizer stand-in whose **kwargs signature makes mlx-vlm's
+    enable_thinking capability probe say yes (the 0.6.15 injection path)."""
+    chat_template = "{{ messages }}"
+
+    def __init__(self):
+        self.kwargs = {}
+
+    def apply_chat_template(self, messages, **kwargs):
+        self.kwargs = kwargs
+        return "rendered"
+
+
+def test_template_default_thinking_blocks_0615_false_injection():
+    """Regression: mlx-vlm >= 0.6.15 get_chat_template injects
+    enable_thinking=False when the kwarg is absent, so served models with
+    default-on reasoning templates rendered the dead think prefill and
+    stopped thinking. The seeded Jinja Undefined must reach the tokenizer
+    instead of False, and an explicit value must pass through verbatim."""
+    import jinja2
+
+    from gmlx import reasoning
+
+    sp.install_chat_template_kwargs()      # installs the render guard too
+    pu = importlib.import_module("mlx_vlm.prompt_utils")
+    assert getattr(pu.get_chat_template, reasoning._TEMPLATE_DEFAULT_FLAG, False)
+
+    tok = _RecordingTok()
+    msgs = [{"role": "user", "content": "hi"}]
+    assert pu.get_chat_template(tok, msgs, True) == "rendered"
+    assert isinstance(tok.kwargs["enable_thinking"], jinja2.Undefined)
+
+    pu.get_chat_template(tok, msgs, True, enable_thinking=False)
+    assert tok.kwargs["enable_thinking"] is False
+    pu.get_chat_template(tok, msgs, True, enable_thinking=True)
+    assert tok.kwargs["enable_thinking"] is True
+
+    # idempotent: a second install keeps the same wrapper
+    fn = pu.get_chat_template
+    reasoning.install_template_default_thinking()
+    assert pu.get_chat_template is fn
+
+
+# The old-style role dispatch from issue #66: no developer alias, else-raise.
+_ROLE_RAISE_TMPL = ("{% if m.role == 'system' %}{% elif m.role == 'user' %}"
+                    "{% else %}{{ raise_exception('Unexpected message role.') }}"
+                    "{% endif %}")
+
+
+def test_normalize_developer_roles():
+    msgs = [{"role": "developer", "content": "terse"},
+            {"role": "user", "content": "hi"}, "not-a-dict"]
+    out = sp_chat._normalize_developer_roles(msgs, _ROLE_RAISE_TMPL)
+    assert out[0] == {"role": "system", "content": "terse"}
+    assert out[1]["role"] == "user" and out[2] == "not-a-dict"
+    assert msgs[0]["role"] == "developer"          # input not mutated
+    # a template that handles developer gets the messages verbatim
+    assert sp_chat._normalize_developer_roles(
+        msgs, "role == 'developer'") is msgs
+    # nothing to rewrite -> same object
+    plain = [{"role": "user", "content": "hi"}]
+    assert sp_chat._normalize_developer_roles(plain, _ROLE_RAISE_TMPL) is plain
+    assert sp_chat._normalize_developer_roles("prompt", _ROLE_RAISE_TMPL) == \
+        "prompt"
+
+
+def test_install_role_normalization_rewrites_before_render():
+    """Issue #66: a developer-role request against a template without the
+    alias must render as system instead of raising in the template."""
+    class _Recorder:
+        chat_template = _ROLE_RAISE_TMPL
+
+        def apply_chat_template(self, messages, **kwargs):
+            self.messages = messages
+            return "rendered"
+
+    sp.install_role_normalization()
+    openai = importlib.import_module("mlx_vlm.server.openai")
+    assert getattr(openai.apply_chat_template,
+                   sp_chat._ROLE_NORM_FLAG, False)
+
+    tok = _Recorder()
+    out = openai.apply_chat_template(
+        tok, {"model_type": "gguf-llama"},
+        [{"role": "developer", "content": "terse"},
+         {"role": "user", "content": "hi"}])
+    assert out == "rendered"
+    assert [m["role"] for m in tok.messages
+            if isinstance(m, dict) and "role" in m][:2] == ["system", "user"]
+
+    # idempotent
+    fn = openai.apply_chat_template
+    sp.install_role_normalization()
+    assert openai.apply_chat_template is fn
+
+
+def test_template_error_becomes_clean_400():
+    """A raise_exception from the chat template answers 400 with the
+    template's message; template bugs (subclasses) stay 500, clean body."""
+    import jinja2
+    from fastapi.testclient import TestClient
+
+    app = _APP.app
+    if not any(getattr(r, "path", None) == "/test/raise-template"
+               for r in app.router.routes):
+        @app.get("/test/raise-template")
+        async def _raise_template():
+            raise jinja2.exceptions.TemplateError("Unexpected message role.")
+
+        @app.get("/test/raise-template-bug")
+        async def _raise_template_bug():
+            raise jinja2.exceptions.TemplateSyntaxError("bad", 1)
+
+    sp.install_resolver_error_handlers()
+    client = TestClient(app, raise_server_exceptions=False)
+    r = client.get("/test/raise-template")
+    assert r.status_code == 400
+    assert r.json()["error"] == {
+        "type": "invalid_request_error",
+        "message": "chat template rejected the conversation: "
+                   "Unexpected message role."}
+    r2 = client.get("/test/raise-template-bug")
+    assert r2.status_code == 500
+    assert r2.json()["error"]["type"] == "server_error"
+    assert "chat template failed to render" in r2.json()["error"]["message"]
+
+
 # 8. OpenAI stop sequences
 def test_request_stop_sequences_normalizes():
     assert sp_chat._request_stop_sequences(types.SimpleNamespace(stop="END")) == ["END"]
@@ -1737,6 +1938,76 @@ def test_install_openai_stop_wraps_routes_idempotent():
     assert len(_APP.app.router.routes) == n
 
 
+# Per-chunk stream timings: exact cumulative output-token counts stamped onto
+# streamed content chunks when the request asks for timings_per_token.
+def test_count_record_chunk_engine_tokens_and_cumulative_results():
+    recorded = []
+    counted = sp_chat._count_record_chunk(lambda self, c: recorded.append(c))
+    cell = {"n": 0}
+    token = sp_chat._stream_count_cell.set(cell)
+    try:
+        counted(None, types.SimpleNamespace(token_count=3))   # MTP verify round
+        counted(None, types.SimpleNamespace())                # plain token
+        assert cell["n"] == 4
+        counted(None, types.SimpleNamespace(generation_tokens=10))  # cumulative
+        assert cell["n"] == 10
+    finally:
+        sp_chat._stream_count_cell.reset(token)
+    assert len(recorded) == 3                                 # original still ran
+
+
+def test_count_record_chunk_noop_without_cell():
+    counted = sp_chat._count_record_chunk(lambda self, c: None)
+    counted(None, types.SimpleNamespace(token_count=5))       # no cell: no error
+
+
+def test_timings_sse_stamps_content_chunks_only():
+    import asyncio
+    import json
+
+    cell = {"n": 0}
+    role = _sse({"id": "c1", "object": "chat.completion.chunk", "created": 1,
+                 "model": "m",
+                 "choices": [{"index": 0, "delta": {"role": "assistant"},
+                              "finish_reason": None}]})
+    usage = _sse({"id": "c1", "choices": [], "usage": {"total_tokens": 9}})
+    feed = [(0, role), (4, _sse(_chunk(content="hi"))),
+            (9, _sse(_chunk(content=" there"))),
+            (9, _sse(_chunk(finish="stop"))), (9, usage),
+            (9, "data: [DONE]\n\n")]
+
+    async def upstream():
+        for n, e in feed:              # the count advances as the stream does
+            cell["n"] = n
+            yield e
+
+    async def collect():
+        return [e async for e in sp_chat._timings_sse(upstream(), cell)]
+
+    out = asyncio.run(collect())
+    assert out[-1] == "data: [DONE]\n\n"
+    objs = [json.loads(e[len("data: "):]) for e in out
+            if e.startswith("data: ") and "[DONE]" not in e]
+    assert [o["timings"]["predicted_n"] for o in objs if "timings" in o] == [4, 9]
+    assert "timings" not in objs[0]                           # role chunk
+    assert "timings" not in objs[3]                           # finish chunk
+    assert "timings" not in objs[4]                           # usage chunk
+
+
+def test_install_stream_timings_wraps_routes_idempotent():
+    sp.install_stream_timings()
+    generation = importlib.import_module("mlx_vlm.server.generation")
+    assert getattr(generation.GenerationMetrics.record_chunk,
+                   sp_chat._STREAM_TIMINGS_FLAG, False)
+    routes = {getattr(r, "path", None): r for r in _APP.app.router.routes}
+    for path in sp_common._CHAT_PATHS:
+        assert getattr(routes[path].endpoint,
+                       sp_chat._STREAM_TIMINGS_FLAG, False)
+    n = len(_APP.app.router.routes)
+    sp.install_stream_timings()                       # idempotent
+    assert len(_APP.app.router.routes) == n
+
+
 def test_openai_stop_endpoint_e2e_with_stub():
     """POST through FastAPI with a stub original handler: proves the signature
     propagation parses the body and the wrapper trims non-stream responses."""
@@ -1946,10 +2217,7 @@ class _RecordingAPC:
 
 def test_lone_harvest_stores_plain_kvcache():
     """After install, a plain KVCache (offset, no _idx) harvests its
-    [0, offset) row. Stock declined it through mlx-vlm 0.6.3 (the gap the
-    patch fills); 0.6.4 absorbed the fallback but not the quantized guard
-    (see test_lone_harvest_skips_unsupported_cache), so the replacement
-    installs on every version and no stock baseline is asserted here."""
+    [0, offset) row (batch_idx omitted = lone request)."""
     import mlx.core as mx
     apc = importlib.import_module("mlx_vlm.apc")
 
@@ -1959,7 +2227,7 @@ def test_lone_harvest_stores_plain_kvcache():
 
     sp.install_apc_lone_harvest()
     mgr2 = _RecordingAPC()
-    out = apc.harvest_blocks_from_batch_cache(mgr2, cache, 0, list(range(40)))
+    out = apc.harvest_blocks_from_batch_cache(mgr2, cache, list(range(40)))
     assert out == ["blk"]
     assert len(mgr2.calls) == 1
     assert mgr2.calls[0]["n_tokens"] == 40
@@ -1978,7 +2246,8 @@ def test_lone_harvest_preserves_batched_path():
     cache = [_FakeBatchKVCache(keys, values, idx=48, left_padding=mx.array([0, 16]))]
     mgr = _RecordingAPC()
     # row 1 has 16 left-pad -> harvested span is 48-16 = 32
-    out = apc.harvest_blocks_from_batch_cache(mgr, cache, 1, list(range(48)))
+    out = apc.harvest_blocks_from_batch_cache(mgr, cache, list(range(48)),
+                                              batch_idx=1)
     assert out == ["blk"]
     assert mgr.calls[0]["layer_shapes"] == [(1, 2, 32, 8)]
 
@@ -1993,12 +2262,30 @@ def test_lone_harvest_skips_unsupported_cache():
 
     # no _idx, no offset
     nocache = [_FakeKVCache(mx.zeros((1, 2, 8, 8)), mx.zeros((1, 2, 8, 8)), None)]
-    assert apc.harvest_blocks_from_batch_cache(mgr, nocache, 0, list(range(8))) == []
+    assert apc.harvest_blocks_from_batch_cache(mgr, nocache, list(range(8))) == []
 
     # quantized: keys is a tuple, not an mx.array
     quant = [_FakeKVCache((mx.zeros((1, 2, 8, 4)),), (mx.zeros((1, 2, 8, 4)),), 8)]
-    assert apc.harvest_blocks_from_batch_cache(mgr, quant, 0, list(range(8))) == []
+    assert apc.harvest_blocks_from_batch_cache(mgr, quant, list(range(8))) == []
     assert mgr.calls == []
+
+
+def test_lone_harvest_matches_stock_signature():
+    """The replacement accepts exactly the stock 0.6.15 calling
+    convention: (manager, caches, full_token_ids) positional with
+    batch_idx keyword-only. A drift here turns every harvest into a
+    warned-and-skipped TypeError, so the signature is pinned."""
+    import inspect
+    apc = importlib.import_module("mlx_vlm.apc")
+    sp.install_apc_lone_harvest()
+    params = inspect.signature(apc.harvest_blocks_from_batch_cache).parameters
+    kinds = {n: p.kind for n, p in params.items()}
+    pos = [n for n, k in kinds.items()
+           if k == inspect.Parameter.POSITIONAL_OR_KEYWORD]
+    assert pos == ["apc_manager", "batch_caches", "full_token_ids"]
+    for kw in ("batch_idx", "extra_hash", "skip_first_n_tokens"):
+        assert kinds[kw] == inspect.Parameter.KEYWORD_ONLY
+    assert params["batch_idx"].default is None
 
 
 def test_lone_harvest_install_idempotent():
@@ -2096,6 +2383,43 @@ def test_chat_load_offload_swallows_warm_error(monkeypatch):
     res = asyncio.run(_chat_endpoint()(_FakeReq(model="m"), object()))
     assert res == {"ok": True}      # handler still ran; warm error swallowed
     assert ran == ["m"]
+
+
+def test_chat_load_offload_deferred_load_is_a_typed_503(monkeypatch):
+    """The gate's retryable refusal never reaches the stock handler (which
+    would 500 with a traceback): the pre-warm answers 503 with the typed
+    body and a Retry-After."""
+    from gmlx.capacity import LoadDeferred
+    import gmlx.server_patches.capacity_routes as cr
+
+    ran = []
+
+    async def fake_handler(request, http_request):
+        ran.append(request.model)
+        return {"ok": True}
+
+    def deferred(model_id, adapter):
+        raise LoadDeferred("model load deferred: m weights 86.7 GB exceed the "
+                           "measured free working set 27.0 GB")
+
+    _register_fake_chat(fake_handler)
+    monkeypatch.setattr(sp_routes, "_warm_and_release", deferred)
+    monkeypatch.setattr(cr, "readiness", lambda: (False, "busy", 7))
+    sp.install_chat_load_offload()
+
+    res = asyncio.run(_chat_endpoint()(_FakeReq(model="m"), object()))
+    assert res.status_code == 503 and res.headers["Retry-After"] == "7"
+    import json as _json
+    body = _json.loads(res.body)
+    assert body["error"]["type"] == "model_load_deferred"
+    assert body["error"]["model"] == "m" and "86.7 GB" in body["error"]["message"]
+    assert body["retry_after_s"] == 7
+    assert ran == []                                        # stock handler never ran
+
+    # idle server: the floor
+    monkeypatch.setattr(cr, "readiness", lambda: (True, "ok", 0))
+    res = asyncio.run(_chat_endpoint()(_FakeReq(model="m"), object()))
+    assert res.status_code == 503 and int(res.headers["Retry-After"]) >= 1
 
 
 def test_chat_load_offload_skips_when_no_model(monkeypatch):
@@ -2204,6 +2528,45 @@ def test_spawn_preload_warm_retains_hold(monkeypatch):
         assert sp_routes._PRELOAD_HOLDS[0].released is False   # retained -> eviction-proof
     finally:
         sp_routes._PRELOAD_HOLDS.clear()
+
+
+def test_spawn_preload_warm_retries_deferred(monkeypatch):
+    # A LoadDeferred at boot is a neighbor-teardown transient, not a
+    # verdict: the preload must retry with backoff, not silently give
+    # up on its first attempt (2026-08-26 stalls: the preload died on
+    # the transient and the server never warmed).
+    from gmlx.capacity import LoadDeferred
+
+    calls = []
+    naps = []
+
+    def fake_load(m, *a, **k):
+        calls.append(m)
+        if len(calls) < 3:
+            raise LoadDeferred("transient")
+        return None
+
+    monkeypatch.setattr(sp_routes, "_load_resident", fake_load)
+    monkeypatch.setattr(sp_routes.time, "sleep", lambda s: naps.append(s))
+    sp.spawn_preload_warm("m").join(timeout=5)
+    assert calls == ["m", "m", "m"]      # deferred twice, then landed
+    assert naps == [10.0, 20.0]          # linear backoff
+
+
+def test_spawn_preload_warm_deferred_gives_up_at_deadline(monkeypatch):
+    from gmlx.capacity import LoadDeferred
+
+    calls = []
+
+    def fake_load(m, *a, **k):
+        calls.append(m)
+        raise LoadDeferred("transient")
+
+    monkeypatch.setattr(sp_routes, "_load_resident", fake_load)
+    monkeypatch.setattr(sp_routes.time, "sleep", lambda s: None)
+    monkeypatch.setenv("GMLX_PRELOAD_RETRY_S", "0")
+    sp.spawn_preload_warm("m").join(timeout=5)
+    assert calls == ["m"]                # zero budget: one attempt, no loop
 
 
 def test_spawn_preload_warm_extras_after_primary(monkeypatch):
@@ -2544,3 +2907,113 @@ def test_faithful_history_aliases_gpt_oss_thinking():
           "reasoning_content": "r"}],
         return_messages=True)
     assert "thinking" not in msgs[0]
+
+
+def test_unload_409_keeps_the_preload_hold(monkeypatch):
+    """A failed /unload must not unpin the preload: the eviction judges
+    busy-ness with the lifetime hold discounted, and the hold is dropped
+    only once the entry is really gone. Before, the hold was released
+    ahead of the evict, so a 409 on a real stream silently left the
+    primary LRU/TTL-evictable for the rest of the process."""
+    from types import SimpleNamespace
+    from fastapi.testclient import TestClient
+    from gmlx.residency import ModelBusyError
+
+    _register({"models": {"qwen": {"path": "/abs/qwen.gguf"}}})
+    monkeypatch.setattr(serving, "resolve_request_model",
+                        lambda mid: ("/abs/qwen.gguf", None))
+    entry = SimpleNamespace(model_path="/abs/qwen.gguf")
+
+    class _Hold:
+        def __init__(self):
+            self._entry, self.released = entry, False
+
+        def release(self):
+            self.released = True
+
+    class _FakePool:
+        busy = 1                       # one real stream
+        calls: list = []
+
+        def evict(self, path, *, ignore_retained=False):
+            self.calls.append(("evict", path, ignore_retained))
+            if self.busy:
+                raise ModelBusyError(path, self.busy)
+            self.resident = False
+            return True
+
+        def clear(self, *, ignore_retained=False):
+            self.calls.append(("clear", ignore_retained))
+            return False
+
+        def busy_paths(self):
+            return ["/abs/qwen.gguf"]
+
+        resident = True
+
+        def entry_resident(self, e):
+            return self.resident and e is entry
+
+        def unmark_retained(self, hold):
+            self.calls.append(("unmark", hold))
+
+    pool = _FakePool()
+    _PKG._kq_residency_pool = pool
+    hold = _Hold()
+    sp_routes._PRELOAD_HOLDS[:] = [hold]
+    try:
+        sp.install_pool_aware_unload()
+        client = TestClient(_APP.app)
+        r = client.post("/unload", json={"model": "qwen"})
+        assert r.status_code == 409 and r.json()["in_flight"] == 1
+        assert pool.calls[0] == ("evict", "/abs/qwen.gguf", True)
+        assert sp_routes._PRELOAD_HOLDS == [hold] and not hold.released
+        # the all-models form skips the busy model and keeps its hold too
+        r = client.post("/unload")
+        assert r.status_code == 200 and r.json()["status"] == "busy"
+        assert sp_routes._PRELOAD_HOLDS == [hold] and not hold.released
+        # the stream ends: the unload succeeds and only then drops the hold
+        pool.busy = 0
+        r = client.post("/unload", json={"model": "qwen"})
+        assert r.status_code == 200 and r.json()["unloaded"] == "qwen"
+        assert sp_routes._PRELOAD_HOLDS == [] and hold.released
+    finally:
+        sp_routes._PRELOAD_HOLDS.clear()
+
+
+def test_spawn_preload_warm_fills_context_length_cache(monkeypatch):
+    """The first /v1/models after boot must not pay the per-GGUF header
+    scans on the event loop: the preload thread warms the cache first."""
+    import gmlx.capacity as cap
+
+    _register({"models": {"qwen": {"path": "/abs/qwen.gguf"},
+                          "glm": {"path": "/abs/glm.gguf"}}})
+    seen = []
+    monkeypatch.setattr(cap, "trained_context_length",
+                        lambda p: seen.append(p) or None)
+    sp.spawn_preload_warm(None).join(timeout=5)
+    assert sorted(seen) == ["/abs/glm.gguf", "/abs/qwen.gguf"]
+
+
+def test_unload_keyword_probe_never_retries_a_failed_eviction():
+    """A TypeError from inside the eviction propagates; only a pool whose
+    ``evict`` lacks the keyword is called the old way."""
+    from types import SimpleNamespace
+
+    calls = []
+
+    def evict_new(path, *, ignore_retained=False):
+        calls.append(("new", path, ignore_retained))
+        raise TypeError("from inside _teardown")
+
+    def evict_old(path):
+        calls.append(("old", path))
+        return True
+
+    with pytest.raises(TypeError, match="_teardown"):
+        sp_routes._evict_ignoring_retained(SimpleNamespace(evict=evict_new), "/p")
+    assert calls == [("new", "/p", True)]              # no second, keywordless call
+    assert sp_routes._evict_ignoring_retained(SimpleNamespace(evict=evict_old), "/p")
+    assert calls[-1] == ("old", "/p")
+    assert sp_routes._clear_ignoring_retained(
+        SimpleNamespace(clear=lambda **kw: kw)) == {"ignore_retained": True}

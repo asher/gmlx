@@ -44,8 +44,8 @@ FAMILIES: dict[str, dict] = {
     # so the base omits it; the instruct point carries the shared 1.5.
     # Covers Qwen3.5 (same thinking/coding points) and Qwen3-Next.
     "qwen3.6": {
-        "label": "Qwen3.5 / Qwen3.6",
-        "arches": ("qwen35", "qwen35moe", "qwen3next"),
+        "label": "Qwen3.5 / 3.6 / 3.8",
+        "arches": ("qwen35", "qwen35moe", "qwen3next", "qwen4exp"),
         "base": {"sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 20,
                               "min_p": 0.0}},
         "intents": {
@@ -171,7 +171,7 @@ FAMILIES: dict[str, dict] = {
     # the server's open-think detection, budget criteria, and stream splitter
     # see the model's real section tags.
     "kimi": {
-        "label": "Kimi",
+        "label": "Kimi K3",
         "arches": ("kimi-k3",),
         "base": {"sampling": {
             "temperature": 1.0,
@@ -183,6 +183,43 @@ FAMILIES: dict[str, dict] = {
             "reasoning-low": {"chat_template_kwargs": {"thinking_effort": "low"}},
             "reasoning-high": {"chat_template_kwargs": {"thinking_effort": "high"}},
             "reasoning-max": {"chat_template_kwargs": {"thinking_effort": "max"}},
+        },
+    },
+    # moonshotai/Kimi-K2.7-Code model card, 2026-08: t=1.0 (Thinking mode),
+    # top_p 0.95. K2.5/K2.7 convert to llama.cpp 'deepseek2', so a
+    # general.name refinement splits them off the DeepSeek card's t=0.6.
+    # Thinking is always on. The template opens a bare '<think>' after the
+    # generation prompt, and the card states that you cannot disable it.
+    # Thus there are no reasoning intents, and the default
+    # '<think>'/'</think>' markers already apply.
+    "kimi-k2": {
+        "label": "Kimi K2",
+        "arches": (),
+        "base": {"sampling": {"temperature": 1.0, "top_p": 0.95}},
+        "intents": {},
+    },
+    # https://huggingface.co/meta-models/Muse-Glimmer-30B "Best Practices",
+    # 2026-08 (generation_config carries no sampling): t=1.0/top_p=0.95/top_k=64.
+    # The chat template's reasoning_strength takes low/medium/high/xhigh and
+    # defaults to high; it interpolates the value into the system prompt without
+    # validating it. The reasoning channel's markers are set so the server's
+    # open-think detection, budget criteria, and stream splitter see the real
+    # header rather than the '<think>' default.
+    "muse": {
+        "label": "Muse Glimmer",
+        "arches": ("muse-glimmer",),
+        "base": {"sampling": {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "top_k": 64,
+            "thinking_start_token": "<|start|>assistant to=self<|message|>",
+            "thinking_end_token": "<|eom|>",
+        }},
+        "intents": {
+            "reasoning-low": {"chat_template_kwargs": {"reasoning_strength": "low"}},
+            "reasoning-medium": {"chat_template_kwargs": {"reasoning_strength": "medium"}},
+            "reasoning-high": {"chat_template_kwargs": {"reasoning_strength": "high"}},
+            "reasoning-xhigh": {"chat_template_kwargs": {"reasoning_strength": "xhigh"}},
         },
     },
     # Llama 3.x generation_config (t=0.6/top_p=0.9); SmolLM3 card matches
@@ -225,10 +262,12 @@ _ARCH_TO_FAMILY: dict[str, str] = {
 }
 
 # Optional general.name refinement for arches that span sampling families.
-# Checked before _ARCH_TO_FAMILY; first hit wins. None currently needed --
-# the hook exists so a future split (e.g. one arch, two cards) is one line.
+# gmlx checks this before _ARCH_TO_FAMILY. The first hit wins.
 _NAME_REFINEMENTS: tuple = (
-    # (arch, compiled-regex-on-general.name, family-key)
+    # (arch, regex-on-general.name, family-key)
+    # Moonshot's K2 line is MLA + fine-grained MoE, so it converts to the same
+    # 'deepseek2' arch as DeepSeek V2/V3 but ships a different card.
+    ("deepseek2", r"(?i)\bkimi", "kimi-k2"),
 )
 
 
@@ -281,13 +320,20 @@ def groups_for(family: str | None, intent: str | None = None) -> dict:
 def describe() -> list[dict]:
     """The full table, one row per family: key, label, covered arches, base
     group, and per-intent resolved groups. Drives ``gmlx profiles``, the docs
-    table, and the docs-drift test."""
+    table, and the docs-drift test.
+
+    A family that only a name refinement can reach lists the arch that it
+    splits off, with the matching name. Without that name, the row would
+    render as the catch-all, and you could not tell it from ``default``."""
+    refined: dict[str, list[str]] = {}
+    for arch, rx, key in _NAME_REFINEMENTS:
+        refined.setdefault(key, []).append(f"{arch} named {rx}")
     rows = []
     for key, fam in FAMILIES.items():
         rows.append({
             "family": key,
             "label": fam["label"],
-            "arches": list(fam["arches"]),
+            "arches": list(fam["arches"]) + refined.get(key, []),
             "base": fam["base"],
             "intents": {name: groups_for(key, name)
                         for name in sorted(BUILTIN_INTENTS)},

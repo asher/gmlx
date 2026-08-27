@@ -208,8 +208,11 @@ def test_turn_boundary_small_prompt_skips_prediction(monkeypatch):
         raise AssertionError("render ctx consulted below the arm floor")
 
     monkeypatch.setattr(retire_key, "lookup_render_ctx", _boom)
-    assert _arm_meta(2048, ("kv", "arr"))["ckpt_p_stable_bounds"] == []
-    assert _arm_meta(400, ("rot:512:0", "kv"))["ckpt_p_stable_bounds"] == []
+    # Floors: turn needs one chunk (arr) or the window (rot-only); the
+    # system anchor floors at GMLX_APC_CKPT_SYS_MIN (256), raised to the
+    # replay byte floor (1024) on arr layouts.
+    assert _arm_meta(1000, ("kv", "arr"))["ckpt_p_stable_bounds"] == []
+    assert _arm_meta(250, ("rot:512:0", "kv"))["ckpt_p_stable_bounds"] == []
     # At the floor the prediction runs again.
     _stub_p_stable(monkeypatch, 550)
     meta = _arm_meta(600, ("rot:512:0", "kv"))
@@ -242,10 +245,10 @@ def _armed_batch(man, ids, first, terminal, interval):
 
 
 def test_cursor_advances_and_latches():
-    man = APCManager(num_blocks=64, block_size=16)
-    ids = list(range(500, 500 + 120))
-    batch, meta = _armed_batch(man, ids, first=32, terminal=96, interval=32)
-    for boundary in (32, 64, 96):
+    man = APCManager(num_blocks=96, block_size=16)
+    ids = list(range(500, 500 + 160))
+    batch, meta = _armed_batch(man, ids, first=32, terminal=128, interval=32)
+    for boundary in (32, 64, 96, 128):
         assert meta["checkpoint_len"] == boundary
         assert not meta.get("checkpoint_done")
         batch.prompt_cache = make_hybrid_cache(boundary, seed=boundary)
@@ -254,13 +257,12 @@ def test_cursor_advances_and_latches():
         se._ckpt_mid_prefill_store(batch)
         assert meta["ckpt_last_stored"] == boundary
     assert meta.get("checkpoint_done") is True
-    # Strip-on-extend keeps the newest two boundaries hittable; the
-    # superseded first boundary is stripped by design.
-    for boundary in (64, 96):
-        warm, got = ckpt_lookup(man, ids[:boundary + 8], extra_hash=7)
-        assert got == boundary
-    warm, got = ckpt_lookup(man, ids[:40], extra_hash=7)
-    assert warm is None and got == 0
+    # Strip-on-extend keeps the newest two boundaries hittable plus the
+    # first one, promoted to the chain's anchor; the interior boundary
+    # is stripped by design.
+    for probe, hit in ((40, 32), (72, 32), (104, 96), (136, 128)):
+        warm, got = ckpt_lookup(man, ids[:probe], extra_hash=7)
+        assert got == hit
 
 
 def test_cursor_off_boundary_chunk_is_a_noop():
@@ -411,3 +413,75 @@ def test_ckpt_formation_serializes_prefill(monkeypatch):
     bg3 = ar.BatchGenerator(SimpleNamespace(), None, draft_model=object(),
                             apc_manager=None, prefill_batch_size=8)
     assert bg3.prefill_batch_size == 8
+
+
+# -- system-prefix anchor boundary --
+
+def _stub_sys(monkeypatch, lcp):
+    from gmlx import retire_key
+    monkeypatch.setattr(retire_key, "lookup_render_ctx",
+                        lambda ids: {"stub": True})
+    monkeypatch.setattr(retire_key, "prompt_stable_lcp",
+                        lambda ctx, ids: None)
+    monkeypatch.setattr(retire_key, "system_prefix_lcp",
+                        lambda ctx, ids: lcp)
+
+
+def test_sys_boundary_block_grid_attention(monkeypatch):
+    # Attention layouts snap the system-prefix stop to the block grid;
+    # the record kind is anchor, exempt from strip-on-extend.
+    _stub_sys(monkeypatch, 2900)
+    meta = _arm_meta(5000, ("rot:512:0", "kv"))
+    assert meta["ckpt_boundaries"] == [
+        (2896, "anchor"), (4096, "boundary"), (4999, "replay")]
+    assert meta["ckpt_sys_bound"] == 2896
+    assert meta["checkpoint_len"] == 2896
+
+
+def test_sys_boundary_chunk_grid_on_arr(monkeypatch):
+    # arr layouts keep the chunk grid (off-grid chunking drifts GDN
+    # state), so the stop lands a full grid point below the offset.
+    _stub_sys(monkeypatch, 2900)
+    meta = _arm_meta(5000, ("kv", "arr"))
+    assert meta["ckpt_boundaries"] == [
+        (2048, "anchor"), (4096, "boundary"), (4999, "replay")]
+    assert meta["ckpt_sys_bound"] == 2048
+
+
+def test_sys_boundary_floors(monkeypatch):
+    # Below GMLX_APC_CKPT_SYS_MIN no anchor lands; arr layouts raise the
+    # floor to the replay byte floor (state clones are size-independent).
+    _stub_sys(monkeypatch, 200)
+    meta = _arm_meta(5000, ("rot:512:0", "kv"))
+    assert "ckpt_sys_bound" not in meta
+    assert all(k != "anchor" for _, k in meta["ckpt_boundaries"])
+    _stub_sys(monkeypatch, 1500)          # grid point 0 on the 2048 grid
+    meta = _arm_meta(5000, ("kv", "arr"))
+    assert "ckpt_sys_bound" not in meta
+
+
+def test_sys_boundary_upgrades_boundary_never_replay(monkeypatch):
+    # Collision with a plain boundary upgrades it to anchor; a replay
+    # arriving at the same position afterwards never downgrades it.
+    _stub_sys(monkeypatch, 4100)
+    meta = _arm_meta(5000, ("rot:512:0", "kv"))
+    assert meta["ckpt_boundaries"] == [(4096, "anchor"), (4999, "replay")]
+    meta = _arm_meta(4097, ("rot:512:0", "kv"))
+    assert meta["ckpt_boundaries"] == [(4096, "anchor")]
+
+
+def test_sys_boundary_kill_switch(monkeypatch):
+    _stub_sys(monkeypatch, 2900)
+    monkeypatch.setenv("GMLX_APC_CKPT_SYS", "0")
+    meta = _arm_meta(5000, ("rot:512:0", "kv"))
+    assert all(k != "anchor" for _, k in meta["ckpt_boundaries"])
+    assert "ckpt_sys_bound" not in meta
+
+
+def test_sys_boundary_skipped_when_restored_past(monkeypatch):
+    # A warm sibling restored at or past the anchor has nothing to
+    # re-store; the hit already refreshed the record's LRU position.
+    _stub_sys(monkeypatch, 2900)
+    meta = _arm_meta(5000, ("rot:512:0", "kv"), restored=3000)
+    assert all(k != "anchor" for _, k in meta["ckpt_boundaries"])
+    assert "ckpt_sys_bound" not in meta

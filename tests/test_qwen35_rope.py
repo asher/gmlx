@@ -173,3 +173,36 @@ def test_owned_memo_is_separate():
     assert len(emb._compiled_apply) == 0, (
         "owned mirror wrote into the stock compiled-apply memo"
     )
+
+
+@_NEEDS_GPU
+def test_fused_route_is_active_on_the_gpu():
+    assert rp.fused_rope_active(_emb())
+
+
+def test_cpu_default_device_takes_the_cos_sin_route(monkeypatch):
+    """The fused apply is a Metal kernel: stock MLX raises when it is
+    dispatched while the default device is the CPU. The mirror routes
+    around it there and lands on the cos/sin apply."""
+    emb = _emb()
+    if not emb.fused_apply:
+        pytest.skip("no Metal device")
+
+    def _no_kernel(*args, **kwargs):
+        raise AssertionError("fused apply dispatched on the CPU device")
+
+    monkeypatch.setattr(rp, "_compiled_mrope_apply", _no_kernel)
+    q, k = _qk(mx.bfloat16)
+    pos = _positions(3)
+    prev = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        assert not rp.fused_rope_active(emb)
+        qo, ko = rp.rope_apply_rotary(emb, q, k, pos)
+        emb.fused_apply = False
+        qs, ks = emb.apply_rotary(q, k, pos)
+        mx.eval(qs, ks, qo, ko)
+    finally:
+        emb.fused_apply = True
+        mx.set_default_device(prev)
+    assert mx.array_equal(qs, qo).item() and mx.array_equal(ks, ko).item()

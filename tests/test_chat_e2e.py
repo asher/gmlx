@@ -882,6 +882,26 @@ def test_ptk_toolbar_reflects_live_state(monkeypatch, tmp_path):
     assert "12.3 tok/s" in text
 
 
+def test_ptk_toolbar_narrow_drops_knobs_keeps_tail(monkeypatch, tmp_path):
+    # On a narrow terminal the sampling knobs are dropped left-to-right so
+    # the tail stats (the live tok/s a small pane is watched for) stay whole;
+    # prompt_toolkit's own clipping would cut the tail instead.
+    from types import SimpleNamespace
+
+    import prompt_toolkit.application as ptk_app
+
+    state = _ptk_state(monkeypatch, tmp_path)
+    with _session(state) as (session, _pipe):
+        toolbar = session.bottom_toolbar
+        state.model_name = "deepseek-v4-demo"
+        state.last_tps = 24.1
+        fake_app = SimpleNamespace(output=SimpleNamespace(
+            get_size=lambda: SimpleNamespace(rows=20, columns=40)))
+        monkeypatch.setattr(ptk_app, "get_app", lambda: fake_app)
+        text = toolbar()
+    assert text == "deepseek-v4-demo · 24.1 tok/s"
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
 

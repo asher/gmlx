@@ -18,9 +18,21 @@ from gmlx.vlm import UnsupportedVLMError, resolve_vlm_model_type
     ("qwen3vlmoe", {"clip.vision.projector_type": "qwen3vl_merger"}, "qwen3_omni_moe"),
     ("gemma4", {"clip.vision.projector_type": "gemma4v"}, "gemma4"),
     ("gemma4", {"clip.vision.projector_type": "gemma4uv"}, "gemma4_unified"),
+    ("muse-glimmer", {"clip.projector_type": "muse-glimmer"}, "muse_glimmer"),
+    ("muse-glimmer", {"clip.vision.projector_type": "muse-glimmer"},
+     "muse_glimmer"),
+    ("deepseek2", {"clip.projector_type": "kimik25"}, "kimi_k25"),
 ])
 def test_supported_families_resolve(llm_arch, mm_meta, expected):
     assert resolve_vlm_model_type(llm_arch, mm_meta) == expected
+
+
+def test_kimik25_on_a_foreign_text_arch_is_refused():
+    """GLM-5.2-V ships the same vision encoder + projector as Kimi-K2.5 under a
+    different text arch. Resolving it to kimi_k25 would build a Kimi text tower
+    for GLM weights, so the pairing has to fail by name."""
+    with pytest.raises(UnsupportedVLMError, match="kimik25.*glm-dsa|GLM-5.2-V"):
+        resolve_vlm_model_type("glm-dsa", {"clip.projector_type": "kimik25"})
 
 
 def test_qwen2vl_fails_early_with_family_named():

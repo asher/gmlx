@@ -34,9 +34,24 @@ How to adapt a new mlx-vlm drafter
 from __future__ import annotations
 
 import inspect
-from typing import Any, Protocol, runtime_checkable
+from dataclasses import dataclass
+from typing import Any, Optional, Protocol, runtime_checkable
 
 import mlx.core as mx
+
+
+@dataclass
+class DraftStash:
+    """Instrument rows a block drafter records for one round, one entry per
+    draft position in draft order (no seed entry: block drafters have no
+    head pick at position 0). ``q``: the full-vocab proposal each token was
+    drawn from (stochastic acceptance). ``pq``: log-domain draft rows for the
+    p/q counterfactual log. ``top2``: the runner-up token per row. A list is
+    present only while its instrument is on."""
+
+    q: list | None = None
+    pq: list | None = None
+    top2: list | None = None
 
 
 # 1. BatchDrafterProtocol -- the contract as typed documentation
@@ -68,7 +83,13 @@ class BatchDrafterProtocol(Protocol):
         draft_eval_state                -- default None -> sampler_state_attrs
         sampler_state_attrs             -- default ("_seed_token",)
         draft_lens                      -- hasattr guard
-        config.runtime_block_size       -- default None
+        config.runtime_block_size       -- default None: the depth drafted per
+                                           round when the caller asks for none,
+                                           overriding config.block_size
+        config.native_block_size        -- default None (unbounded): the deepest
+                                           block this drafter can produce
+                                           correctly, from the checkpoint or the
+                                           architecture
         cap_at_configured_depth         -- default False
         _native_block_size              -- default configured_block_total
         mtp_width_cap                   -- default 0 (uncapped): speculate
@@ -109,14 +130,42 @@ class BatchDrafterProtocol(Protocol):
         sampler: Any,
         token_dtype: Any = mx.int32,
         greedy: bool = False,
+        stash: Optional["DraftStash"] = None,
     ) -> mx.array:
+        """``stash`` is passed only to drafters flagging ``supports_q_stash``:
+        they draw every draft row themselves and record one q / pq / top2
+        entry per draft, in draft order, on the lists the stash carries."""
         ...
 
     def bind(self, target_model: Any) -> "BatchDrafterProtocol":
         ...
 
 
-# 2. DrafterAdapter -- pure delegator, per-instance
+# 2. Block-depth accessors -- the two quantities config carries
+
+def native_block_size(config: Any) -> int | None:
+    """The deepest block the drafter can produce, or None when unbounded.
+
+    A bound comes from the checkpoint (a trained diffusion block) or from the
+    architecture (one draft row per stage). Families without one leave the
+    field unset, and the caller falls back to their configured depth.
+    """
+    declared = getattr(config, "native_block_size", None)
+    if declared is None:
+        return None
+    declared = int(declared)
+    return declared if declared > 0 else None
+
+
+def default_block_size(config: Any) -> int:
+    """The block total to draft when the caller requests no depth."""
+    runtime = getattr(config, "runtime_block_size", None)
+    if runtime is None:
+        return int(config.block_size)
+    return max(1, int(runtime))
+
+
+# 3. DrafterAdapter -- pure delegator, per-instance
 
 def _check_accepts_left_padding(inner: Any) -> bool:
     """True if inner.reset accepts a left_padding kwarg.
@@ -182,7 +231,7 @@ class DrafterAdapter:
         return getattr(inner, name)
 
 
-# 3. validate_drafter -- load-time crash prevention
+# 4. validate_drafter -- load-time crash prevention
 
 def validate_drafter(drafter: Any) -> None:
     """Check required drafter members exist at load time.
@@ -206,9 +255,20 @@ def validate_drafter(drafter: Any) -> None:
         errors.append("missing config")
     else:
         try:
-            int(drafter.config.block_size)
+            block = int(drafter.config.block_size)
         except (AttributeError, TypeError, ValueError):
             errors.append("config.block_size must be int-castable")
+        else:
+            try:
+                ceiling = native_block_size(drafter.config)
+            except (TypeError, ValueError):
+                errors.append("config.native_block_size must be int-castable")
+            else:
+                if ceiling is not None and ceiling < block:
+                    errors.append(
+                        f"config.native_block_size {ceiling} is below "
+                        f"config.block_size {block}"
+                    )
 
     if not hasattr(drafter, "accept_lens"):
         errors.append("missing accept_lens (must be a list)")

@@ -1,6 +1,6 @@
 # Python API
 
-The CLI is the primary interface; this page is for embedding gmlx in your
+The CLI is the primary interface. This page is for embedding gmlx in your
 own Python. The stable surface is exactly what the package root exports
 (`gmlx.__all__`), and all of it is documented here.
 
@@ -87,6 +87,7 @@ Long prompts and thinking models:
 | `prefill_step_size` | model-aware | Prefill chunk width; the default follows the deployed choice per model. |
 | `prefill_progress` | `False` | Show a stderr spinner during a long prefill (TTY only; cleared before the first token). |
 | `thinking_budget` | `None` | Cap reasoning tokens: after roughly N thinking tokens a `</think>` is forced so the model answers. No-op when the model never opens a `<think>` block. |
+| `thinking_start_token` / `thinking_end_token` | `None` | Reasoning markers for a model whose spelling is not detected from its tokenizer or template; the end tag is the one the budget forces. |
 | `verbose` | `False` | Stream text and timing to stdout while generating. |
 
 ## Benchmark
@@ -124,7 +125,7 @@ pf.arch, pf.shards, pf.codec_histogram, pf.n_tensors, pf.n_params
 `preflight(gguf_path, arch=None)` validates a GGUF before committing to a
 load: it discovers shards, histograms the tensor codecs, refuses unsupported
 ones by name, and gates on the architecture. It reads only the GGUF header, so
-it stays cheap on multi-GB files. `load_model` runs it internally; call it
+it stays cheap on multi-GB files. `load_model` runs it internally. Call it
 yourself to vet a file first (the CLI equivalent is `gmlx validate`).
 
 Failures raise one of two exceptions, from `preflight` or `load_model` alike:
@@ -176,7 +177,7 @@ loads through `load_model`; non-GGUF paths fall through untouched, so one
 `mlx_lm.server` process can mix GGUF and ordinary MLX checkpoints. GGUF
 requests are pinned to mlx-lm's validated sequential path (no batching), and
 adapters and draft models are not wired on this route. Use it to add GGUF
-support to an existing `mlx_lm.server` deployment; `gmlx serve` is the
+support to an existing `mlx_lm.server` deployment. `gmlx serve` is the
 full-featured server.
 
 ## Quantized modules

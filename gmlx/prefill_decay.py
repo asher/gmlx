@@ -62,6 +62,7 @@ Knobs:
 from __future__ import annotations
 
 import os
+import threading
 from typing import Callable, NamedTuple, Optional
 
 import mlx.core as mx
@@ -338,29 +339,150 @@ def _tick_step(base: int) -> int | None:
     return step
 
 
-_UNTRACKED_WEIGHTS = 0.0
+# Untracked weight bytes keyed by source (GGUF shard paths). Reloading the
+# same file maps the same pages, so only the first registration per key
+# counts; a drafter reload used to double the count and hold headroom
+# negative, serializing admissions. Keys carry an owner set (the residency
+# entries whose builds registered them): a key's bytes leave the estimate
+# when its last owner is forgotten at teardown, so an evicted model stops
+# taxing headroom while a sibling sharing its shards keeps them counted.
+# Keys registered outside any owner window (single-model CLI runs) live
+# for the process, which is their actual lifetime.
+_UNTRACKED_WEIGHTS: dict[object, float] = {}
+_UNTRACKED_OWNERS: dict[object, set] = {}
+_UNTRACKED_LOCK = threading.Lock()
+_WEIGHTS_OWNER: object | None = None
 _HEADROOM_FRACTION = 0.5
 
 
-def note_untracked_weights(nbytes: float) -> None:
+def set_untracked_weights_owner(owner: object | None) -> None:
+    """Open (or close, with None) the ownership window: registrations
+    attribute their key to ``owner``. A module global rather than a
+    ContextVar: the residency pool opens the window on the request thread
+    while the model builds on the engine's worker thread, and builds are
+    serialized by the pool's build lock, so one window is live at a time."""
+    global _WEIGHTS_OWNER
+    _WEIGHTS_OWNER = owner
+
+
+def note_untracked_weights(nbytes: float, key: object = None) -> None:
     """Loader hook: bytes wired at inference but invisible to
-    mx.get_active_memory (zero-copy mmap weights). Accumulates across loads
-    (target model + drafter)."""
-    global _UNTRACKED_WEIGHTS
-    _UNTRACKED_WEIGHTS += float(nbytes)
+    mx.get_active_memory (zero-copy mmap weights). Same-key registrations
+    keep the first (the walk that read the file; re-walks see pages already
+    counted), distinct keys sum. Every registration attributes ``key`` to
+    the current owner whether or not its bytes were freshly counted, so a
+    shared key (a drafter reloading the target's shards) stays counted
+    until the last owning entry is torn down. ``key=None`` is dropped:
+    unkeyed bytes could never be forgotten, which is the eviction leak in
+    miniature."""
+    if key is None:
+        return
+    with _UNTRACKED_LOCK:
+        _UNTRACKED_WEIGHTS.setdefault(key, float(nbytes))
+        if _WEIGHTS_OWNER is not None:
+            _UNTRACKED_OWNERS.setdefault(key, set()).add(_WEIGHTS_OWNER)
 
 
-def _headroom_bytes() -> float | None:
+def forget_untracked_weights(owner: object) -> None:
+    """Drop ``owner``'s attributions; a key's bytes leave the estimate only
+    at zero owners. Called with exactly the keys that owner's build
+    registered (recorded in the owner sets, never re-derived from paths)
+    by the residency teardown that every eviction and reap funnels
+    through, and by a failed build's unwind."""
+    with _UNTRACKED_LOCK:
+        for key in [k for k, o in _UNTRACKED_OWNERS.items() if owner in o]:
+            owners = _UNTRACKED_OWNERS[key]
+            owners.discard(owner)
+            if not owners:
+                del _UNTRACKED_OWNERS[key]
+                _UNTRACKED_WEIGHTS.pop(key, None)
+                _STREAMED_TRACKED.pop(key, None)
+
+
+def deduct_untracked_weights(nbytes: float, key: object) -> None:
+    """Shrink ``key``'s registration by ``nbytes``, floored at zero:
+    streamed-out expert bytes are page cache, not wired weights, and never
+    belong in the estimate (see install_expert_streaming)."""
+    if key is None or nbytes <= 0:
+        return
+    with _UNTRACKED_LOCK:
+        if key in _UNTRACKED_WEIGHTS:
+            _UNTRACKED_WEIGHTS[key] = max(
+                0.0, _UNTRACKED_WEIGHTS[key] - float(nbytes))
+
+
+def untracked_weight_bytes() -> float:
+    with _UNTRACKED_LOCK:
+        return sum(_UNTRACKED_WEIGHTS.values())
+
+
+def untracked_weight_bytes_for(key: object) -> float:
+    with _UNTRACKED_LOCK:
+        return _UNTRACKED_WEIGHTS.get(key, 0.0)
+
+
+# The untracked registry's mirror image: bytes mx.get_active_memory counts
+# that are not live working set. A streamed model's expert stacks can load
+# as allocator-tracked zero-copy arrays; their pages are file-backed and
+# reclaimed under pressure (decode reads them through the disk arena), so
+# leaving them in the active term holds headroom ~150 GB negative on an
+# over-RAM model and the governor sheds every request from red. Same key,
+# owner, and teardown lifecycle as the untracked registry.
+_STREAMED_TRACKED: dict[object, float] = {}
+
+
+def note_streamed_tracked_bytes(nbytes: float, key: object = None) -> None:
+    if key is None or nbytes <= 0:
+        return
+    with _UNTRACKED_LOCK:
+        _STREAMED_TRACKED.setdefault(key, float(nbytes))
+        if _WEIGHTS_OWNER is not None:
+            _UNTRACKED_OWNERS.setdefault(key, set()).add(_WEIGHTS_OWNER)
+
+
+def streamed_tracked_bytes() -> float:
+    with _UNTRACKED_LOCK:
+        return sum(_STREAMED_TRACKED.values())
+
+
+def headroom_bytes() -> float | None:
     """Estimated live free working set: recommended working set minus
-    zero-copy weights minus MLX-tracked allocations. The buffer cache counts
-    as free (the allocator evicts it under pressure). Sampled fresh per call,
-    never memoized."""
+    zero-copy weights minus MLX-tracked allocations, plus the streamed
+    expert bytes the tracker counts but the pager can reclaim. The buffer
+    cache counts as free (the allocator evicts it under pressure). Sampled
+    fresh per call, never memoized. The one shared accounting: the prefill
+    caps, the serve memory trace, and the admission gate all read this."""
     try:
         ws = float(mx.device_info()["max_recommended_working_set_size"])
         active = float(mx.get_active_memory())
     except Exception:
         return None
-    return ws - _UNTRACKED_WEIGHTS - active
+    return (ws - untracked_weight_bytes() + streamed_tracked_bytes()
+            - active)
+
+
+_headroom_bytes = headroom_bytes
+
+
+def score_transient_bytes(model, prompt_cache, depth: int) -> float:
+    """Projected peak prefill score transient for a request at ``depth``,
+    evaluated at the chunk step the decay policy would actually choose
+    there. Uses the arch's ScoreTransientProfile when one arms (resolved
+    against ``prompt_cache``; a batched cache may disarm the profile, which
+    falls back to the dense model, the conservative side)."""
+    heads = score_heads(model)
+    profile = resolve_score_profile(model, prompt_cache)
+    base = _STOCK_BASE
+    if (profile is not None and profile.base_step
+            and "PREFILL_STEP_SIZE" not in os.environ):
+        base = int(profile.base_step)
+    step = decayed_step(base, depth, heads, profile=profile)
+    if profile is not None:
+        h, bpe, div = (profile.heads, profile.bytes_per_elem,
+                       profile.depth_divisor)
+    else:
+        h, bpe, div = heads, 2, 1
+    return h * step * (depth + step) * bpe / div
 
 
 def _seed_cap_bytes() -> float:

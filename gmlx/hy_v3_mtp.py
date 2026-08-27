@@ -43,6 +43,7 @@ import mlx.nn as nn
 from mlx_lm.models.base import create_attention_mask
 
 from . import hy_v3_model as hy
+from .drafter_protocol import native_block_size
 from .mtp_drafter import QwenMTPDrafter
 
 
@@ -163,7 +164,8 @@ class HyV3MTPDrafter(QwenMTPDrafter):
     def __init__(self, config: HyV3MTPConfig):
         nn.Module.__init__(self)
         self.config = config
-        self._native_block_size = int(config.block_size)
+        self._native_block_size = (
+            native_block_size(config) or int(config.block_size))
         args = config.text_config
 
         hidden_size = args.hidden_size

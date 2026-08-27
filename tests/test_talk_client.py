@@ -210,6 +210,31 @@ def test_stream_chat_yields_deltas_and_markers(monkeypatch):
     assert resp.closed
 
 
+def test_stream_chat_relays_timings_marker(monkeypatch):
+    with_timings = _chunk({"content": "Hel"})
+    with_timings["timings"] = {"predicted_n": 2}
+    final = {"choices": [], "usage": {"total_tokens": 5},
+             "timings": {"predicted_n": 5, "predicted_per_second": 50.0}}
+    resp = _FakeResp(_sse(with_timings, final))
+    monkeypatch.setattr(tc, "_open_stream",
+                        lambda url, payload, api_key, timeout: resp)
+    got = list(tc.stream_chat("http://h:1/v1", model="m", messages=[],
+                              max_tokens=10))
+    assert {"_timings": {"predicted_n": 2}} in got
+    # the final chunk's full timings relay too (rates for the stat line)
+    assert {"_timings": final["timings"]} in got
+    assert {"_usage": {"total_tokens": 5}} in got
+
+
+def test_probe_capabilities_marks_gmlx_server(monkeypatch):
+    payload = _models_payload()
+    monkeypatch.setattr(tc, "_http_get_json",
+                        lambda url, timeout=5.0, api_key=None: payload)
+    assert not tc.probe_capabilities("http://h:1/v1")["gmlx"]
+    payload["data"][0]["owned_by"] = "gmlx"
+    assert tc.probe_capabilities("http://h:1/v1")["gmlx"]
+
+
 def test_stream_chat_close_on_break(monkeypatch):
     resp = _FakeResp(_sse(_chunk({"content": "a"}), _chunk({"content": "b"})))
     monkeypatch.setattr(tc, "_open_stream",
@@ -241,7 +266,8 @@ def test_brain_says_answers_only(monkeypatch):
     events = list(brain.turn("capital of France?"))
     says = "".join(t for k, t in events if k == "say")
     assert says == "Paris is the answer."
-    assert ("status", "thinking") in events
+    thinks = "".join(t for k, t in events if k == "think")
+    assert "let me think" in thinks and "more inline" in thinks
     assert events[-1] == ("done", {"total_tokens": 9})
     # History: system + user + clean assistant answer (no markers/thinking).
     assert brain.messages[0]["role"] == "system"

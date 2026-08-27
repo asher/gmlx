@@ -114,6 +114,72 @@ def test_status_lines_are_transient(monkeypatch, tmp_path, capsys):
     assert "ok" in out
 
 
+def test_think_events_render_as_reasoning(monkeypatch, tmp_path, capsys):
+    """Chain-of-thought streams through the REPL's reasoning display in
+    server/assistant mode (it used to collapse into a status ping)."""
+    brain = _FakeBrain()
+    real_turn = brain.turn
+
+    def thinking_turn(user_text):
+        yield ("think", "weighing the options")
+        yield from real_turn(user_text)
+
+    brain.turn = thinking_turn
+    rc, _s, _b, _e = _run(monkeypatch, tmp_path, ["go"], brain=brain)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "weighing the options" in out      # rendered, not swallowed
+    assert "[assistant] thinking" not in out
+    assert "Hello there" in out
+
+
+def test_thinking_and_effort_forwarded_to_server(monkeypatch, tmp_path):
+    """--thinking / --reasoning-effort ride the request in server mode; the
+    server maps them onto the model's own template spelling (they used to be
+    silently dropped)."""
+    _rc, _s, _b, extra = _run(monkeypatch, tmp_path, ["hi"],
+                              extra_argv=["--thinking", "off",
+                                          "--reasoning-effort", "low"])
+    assert extra["thinking"] == "off"
+    assert extra["reasoning_effort"] == "low"
+
+
+def test_thinking_not_forwarded_when_unset(monkeypatch, tmp_path):
+    _rc, _s, _b, extra = _run(monkeypatch, tmp_path, ["hi"])
+    assert "thinking" not in extra and "reasoning_effort" not in extra
+
+
+def test_slash_thinking_toggles_forwarded_field(monkeypatch, tmp_path, capsys):
+    """/thinking off|default sets and clears the forwarded request field
+    mid-session in server/assistant mode."""
+    _rc, _s, _b, extra = _run(
+        monkeypatch, tmp_path,
+        ["/thinking off", "hi", "/thinking", "/thinking default", "again"])
+    out = capsys.readouterr().out
+    assert "thinking = off (next reply)" in out
+    assert "thinking = off\n" in out               # bare /thinking reports it
+    assert "thinking = default (next reply)" in out
+    assert "thinking" not in extra                 # cleared by default
+
+
+def test_think_events_hidden_when_reasoning_hide(monkeypatch, tmp_path,
+                                                 capsys):
+    brain = _FakeBrain()
+    real_turn = brain.turn
+
+    def thinking_turn(user_text):
+        yield ("think", "weighing the options")
+        yield from real_turn(user_text)
+
+    brain.turn = thinking_turn
+    rc, _s, _b, _e = _run(monkeypatch, tmp_path, ["go"], brain=brain,
+                          extra_argv=("--reasoning", "hide"))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "weighing the options" not in out
+    assert "Hello there" in out
+
+
 def test_system_prompt_reaches_brain(monkeypatch, tmp_path):
     seen = []
     brain = _FakeBrain()
@@ -313,6 +379,117 @@ def test_no_model_no_default_rejected(monkeypatch, capsys):
     assert rc == 2
     assert "no model selected and the server has no default" in (
         capsys.readouterr().err)
+
+
+# ------------------------------ --server ---------------------------------
+
+def test_server_flag_builds_plain_brain(monkeypatch):
+    """--server rides the assistant plumbing with memory and tools off,
+    even though both default on in AssistantCfg."""
+    import argparse
+
+    _fake_server(monkeypatch, ["alpha"], default="alpha")
+    args = argparse.Namespace(
+        gguf=None, server=True, config=None, profile=None,
+        base_url=None, host=None, port=None, api_key=None,
+        no_start=True, start_timeout=1.0)
+    setup = chat._setup_assistant(args)
+    assert not isinstance(setup, int)
+    brain, model_request, _burl, _extra = setup
+    assert model_request == "alpha"
+    assert brain.memory is None
+    assert len(brain.tools) == 0
+
+
+def test_server_flag_file_arg_rejected(monkeypatch, capsys):
+    _fake_server(monkeypatch, ["served-model"])
+    rc = chat.cmd_chat(["model.gguf", "--server"])
+    assert rc == 2
+    assert "--server chats through the server" in capsys.readouterr().err
+
+
+def test_server_and_assistant_mutually_exclusive(capsys):
+    with pytest.raises(SystemExit):
+        chat.cmd_chat(["--assistant", "--server"])
+    assert "mutually exclusive" in capsys.readouterr().err
+
+
+def test_local_excludes_server_modes(capsys):
+    with pytest.raises(SystemExit):
+        chat.cmd_chat(["--local", "--server"])
+    assert "--local" in capsys.readouterr().err
+
+
+# --------------------------- automatic --server ---------------------------
+
+def _auto_env(monkeypatch, *, up=True, served=(), default=None):
+    """Fake a discoverable config server for _auto_server probes."""
+    monkeypatch.setattr("gmlx.lifecycle.auto_target",
+                        lambda host, port: ("127.0.0.1", 8080))
+    monkeypatch.setattr("gmlx.launch._server_ready",
+                        lambda base_url, api_key=None: up)
+    monkeypatch.setattr(
+        "gmlx.talk_client.probe_capabilities",
+        lambda base_url, api_key=None, timeout=5.0: {
+            "chat_ids": list(served), "default": default,
+        })
+
+
+def _auto_args(argv):
+    parser = chat._build_parser("gmlx chat")
+    return parser.parse_args(argv), parser
+
+
+def test_auto_server_bare_connects(monkeypatch):
+    _auto_env(monkeypatch, served=["alpha"], default="alpha")
+    args, parser = _auto_args([])
+    assert chat._auto_server(args, parser) is True
+    assert args.base_url == "http://127.0.0.1:8080/v1"
+
+
+def test_auto_server_served_id_connects(monkeypatch):
+    _auto_env(monkeypatch, served=["alpha", "beta"])
+    args, parser = _auto_args(["alpha"])
+    assert chat._auto_server(args, parser) is True
+
+
+def test_auto_server_unserved_id_stays_local(monkeypatch):
+    _auto_env(monkeypatch, served=["alpha"])
+    args, parser = _auto_args(["gamma"])
+    assert chat._auto_server(args, parser) is False
+
+
+def test_auto_server_down_stays_local(monkeypatch):
+    _auto_env(monkeypatch, up=False)
+    args, parser = _auto_args([])
+    assert chat._auto_server(args, parser) is False
+
+
+def test_auto_server_local_intent_stays_local(monkeypatch):
+    _auto_env(monkeypatch, served=["alpha"], default="alpha")
+    for argv in (["--local"], ["alpha", "--max-kv-size", "4096"],
+                 ["alpha", "--no-start"]):
+        args, parser = _auto_args(argv)
+        assert chat._auto_server(args, parser) is False, argv
+
+
+def test_auto_server_gguf_path_stays_local_with_hint(
+        monkeypatch, tmp_path, capsys):
+    """An explicit file path pins the local load; a served mapping of the
+    same file only earns a pointer at the id."""
+    from types import SimpleNamespace
+
+    gguf = tmp_path / "alpha.gguf"
+    gguf.write_bytes(b"GGUF")
+    _auto_env(monkeypatch, served=["alpha"])
+    cfg = SimpleNamespace(models=[
+        SimpleNamespace(id="alpha", path=str(gguf))])
+    monkeypatch.setattr("gmlx.launch._discover_config",
+                        lambda: (cfg, str(tmp_path / "gmlx.yaml")))
+    args, parser = _auto_args([str(gguf)])
+    assert chat._auto_server(args, parser) is False
+    out = capsys.readouterr().out
+    assert "serves this file as 'alpha'" in out
 
 
 # ------------------------------- /memory ---------------------------------

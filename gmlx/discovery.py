@@ -11,8 +11,9 @@ Classification (header-only):
 - ``general.architecture == "clip"`` (or a ``mmproj*`` filename) -> **mmproj**:
   a VLM companion, not a standalone model.
 - arch is an assistant shape (``gemma4_assistant`` / ``gemma4-assistant`` /
-  ``gemma4_mtp``, or carries a target-backbone field) -> **drafter**: only paired
-  when a model explicitly names it via ``draft_gguf``; never standalone.
+  ``gemma4_mtp``, or carries a target-backbone field) -> **drafter**: a
+  speculative-decoding companion, never a standalone model. A drafter pairs
+  into a sibling model as its ``draft_gguf`` (see :func:`_drafter_targets`).
 - ``<arch>.nextn_predict_layers > 0`` -> a **native-head MTP** model (the drafter
   lives inside the target GGUF; ``speculative: auto`` enables it).
 - otherwise -> a plain text **model**.
@@ -66,8 +67,11 @@ _QUANT_TRAILING = re.compile(
 # (mmproj/assistant/...) plus imatrix provenance (mradermacher `i1`, `imatrix`) -
 # that's quant provenance, not part of the model name, and leaving it in splits
 # one model's quants across two id prefixes (`...instruct.i1-*` vs `...instruct-*`).
-_ID_MARKERS = ("mmproj", "assistant", "draft", "mtp", "gguf",
-               "imatrix", "imat", "i1")
+_ID_MARKERS = ("mmproj", "assistant", "draft", "mtp", "dflash2", "dflash",
+               "gguf", "imatrix", "imat", "i1")
+# A trailing parameter-count token (``-27B``, ``_30B-A3B``, `` 1.9B``): a
+# basename carrying one needs no ``general.size_label`` appended.
+_SIZE_TOKEN_RE = re.compile(r"(?i)[-_ ]\d+(\.\d+)?[bm](-a\d+(\.\d+)?[bm])?$")
 
 
 # Encoder/embedding architectures (not generative decoders). A GGUF on one of
@@ -93,6 +97,15 @@ class ClassifiedGguf:
     quant: str | None    # quant tag from the filename, or None
     loadable: bool          # arch builds a model with no hf override (model kind)
     moe: bool = False       # routed experts present (model kind only)
+    name: str | None = None  # general.name, for family refinement (model kind)
+    # hidden size; on a drafter, its target's (see `_drafter_hidden_size`)
+    n_embd: int | None = None
+    # drafter kind: "dflash2" for a DFlash 2 header, else the arch
+    drafter_kind: str | None = None
+    # base-model ids the header declares (general.basename + size_label,
+    # general.base_model.0.name), slugged like filename ids; `general.name`
+    # is deliberately not one (it names the file, not the base model)
+    declared: tuple = ()
 
 
 # Classification
@@ -104,6 +117,35 @@ def is_drafter_arch(arch: str | None) -> bool:
     return bool(arch) and ("assistant" in arch or "_mtp" in arch)
 
 
+def _declared_base_ids(meta) -> tuple:
+    """The base-model ids a GGUF header declares, as filename-style slugs.
+    ``general.basename`` gets ``general.size_label`` appended when it carries
+    no size token of its own (bartowski's ``Muse-Glimmer`` + ``30B``), so it
+    meets the drafter's ``Muse-Glimmer-30B`` on equal terms."""
+    out: list[str] = []
+    base = read_string(meta, "general.basename")
+    if base:
+        size = read_string(meta, "general.size_label")
+        if size and not _SIZE_TOKEN_RE.search(base):
+            base = f"{base}-{size}"
+        out.append(base)
+    base_model = read_string(meta, "general.base_model.0.name")
+    if base_model:
+        out.append(base_model)
+    ids: list[str] = []
+    for raw in out:
+        slug, _q = derive_id(raw)
+        if slug and slug != "model" and slug not in ids:
+            ids.append(slug)
+    return tuple(ids)
+
+
+def _drafter_kind(meta, arch: str | None) -> str | None:
+    if (read_int(meta, "dflash.selector_top_k") or 0) > 0:
+        return "dflash2"
+    return arch
+
+
 def _looks_like_drafter(meta, arch: str | None) -> bool:
     if is_drafter_arch(arch):
         return True
@@ -112,6 +154,23 @@ def _looks_like_drafter(meta, arch: str | None) -> bool:
             if read_int(meta, f"{arch}.{suf}") is not None:
                 return True
     return False
+
+
+def _hidden_size(meta, arch: str | None) -> int | None:
+    """The hidden size that ``arch`` declares, or ``None`` if it declares none."""
+    return read_int(meta, f"{arch}.embedding_length") if arch else None
+
+
+def _drafter_hidden_size(meta, arch: str | None) -> int | None:
+    """The hidden size of the target model for this drafter: its backbone
+    field, else its own size (a gemma4 assistant declares both, and they
+    differ; a DSpark sidecar declares neither)."""
+    if arch:
+        for suf in _BACKBONE_FIELDS:
+            v = read_int(meta, f"{arch}.{suf}")
+            if v:
+                return v
+    return _hidden_size(meta, arch)
 
 
 def _embedding_kind(meta, basename: str, arch: str | None) -> str | None:
@@ -147,7 +206,10 @@ def _classify_meta(meta, *, basename: str, path: str) -> ClassifiedGguf:
             or read_string(meta, "adapter.type") is not None):
         return ClassifiedGguf(ap, "adapter", arch, False, quant, False)
     if _looks_like_drafter(meta, arch):
-        return ClassifiedGguf(ap, "drafter", arch, False, quant, False)
+        return ClassifiedGguf(ap, "drafter", arch, False, quant, False,
+                              n_embd=_drafter_hidden_size(meta, arch),
+                              drafter_kind=_drafter_kind(meta, arch),
+                              declared=_declared_base_ids(meta))
     emb = _embedding_kind(meta, basename, arch)
     if emb:
         return ClassifiedGguf(ap, emb, arch, False, quant, False)
@@ -157,7 +219,10 @@ def _classify_meta(meta, *, basename: str, path: str) -> ClassifiedGguf:
     experts = read_int(meta, f"{arch}.expert_count") if arch else None
     loadable = bool(arch) and arch in supported_arches()
     return ClassifiedGguf(ap, "model", arch, mtp, quant, loadable,
-                          moe=bool(experts and experts > 0))
+                          moe=bool(experts and experts > 0),
+                          name=read_string(meta, "general.name"),
+                          n_embd=_hidden_size(meta, arch),
+                          declared=_declared_base_ids(meta))
 
 
 def classify_gguf(path: str) -> ClassifiedGguf | None:
@@ -263,8 +328,8 @@ def _read_header(path: str) -> tuple:
 
 
 def header_meta(path: str) -> dict | None:
-    """``{"arch", "name", "kind", "mtp", "sampling"}`` from a GGUF's header, or
-    ``None`` when the file is missing/unreadable. Unlike :func:`classify_gguf`
+    """``{"arch", "name", "kind", "mtp", "sampling", "drafter_kind"}`` from a
+    GGUF's header, or ``None`` when the file is missing/unreadable. Unlike :func:`classify_gguf`
     this is **silent** on failure - registration over a config that references a
     not-yet-pulled file must not spam stderr. A sharded model's configured path
     is its first shard, which carries the full KV block, so a plain read of the
@@ -279,9 +344,10 @@ def header_meta(path: str) -> dict | None:
     disk = _load_header_cache()
     ent = disk.get(ap)
     if (isinstance(ent, dict) and ent.get("mtime") == int(st.st_mtime)
-            and ent.get("size") == st.st_size and "sampling" in ent):
+            and ent.get("size") == st.st_size and "sampling" in ent
+            and "drafter_kind" in ent):
         meta = {k: ent.get(k) for k in ("arch", "name", "kind", "mtp",
-                                        "sampling")}
+                                        "sampling", "drafter_kind")}
         _HEADER_MEMO[ap] = meta
         return meta
     try:
@@ -290,7 +356,7 @@ def header_meta(path: str) -> dict | None:
         _HEADER_MEMO[ap] = None                  # unreadable-as-GGUF is stable
         return None
     meta = {"arch": c.arch, "name": name, "kind": c.kind, "mtp": c.mtp,
-            "sampling": sampling}
+            "sampling": sampling, "drafter_kind": c.drafter_kind}
     _HEADER_MEMO[ap] = meta
     disk[ap] = {"mtime": int(st.st_mtime), "size": st.st_size, **meta}
     _save_header_cache(disk)
@@ -312,14 +378,19 @@ def header_sampling(path) -> dict:
 
 def find_mtp_companion(
     path: str,
-    drafter_arch: str | tuple = ("deepseek4-dspark", "dflash",
-                                 "deepseek4_mtp_support"),
+    drafter_arch: str | tuple | None = None,
 ) -> str | None:
     """Path of an MTP drafter GGUF (arch in ``drafter_arch``) sitting in the
-    same directory as ``path``, or ``None``. Header-only peeks through
+    same directory as ``path``, or ``None``. ``drafter_arch`` defaults to every
+    arch in :data:`arch_table.MTP_DRAFTER_ARCHES`; a caller that knows the
+    target model type passes that row instead (see
+    :func:`arch_table.drafter_arches`). Header-only peeks through
     :func:`header_meta`'s stat-validated cache, so a directory scan costs one
     stat per already-seen sibling. Earlier arches in the tuple win over later
     ones (dspark over legacy nextn); within an arch, lexically first wins."""
+    if drafter_arch is None:
+        drafter_arch = tuple(dict.fromkeys(
+            a for row in _arch_table.MTP_DRAFTER_ARCHES.values() for a in row))
     arches = (drafter_arch,) if isinstance(drafter_arch, str) else tuple(drafter_arch)
     ap = os.path.abspath(os.path.expanduser(path))
     parent = os.path.dirname(ap)
@@ -461,24 +532,34 @@ def scan_dirs(
     *,
     known_ids=frozenset(),
     known_paths=frozenset(),
+    known_models=None,
     progress=False,
     stats=None,
 ) -> list[ModelCfg]:
     """Discover servable models from ``specs`` (each a :class:`config.DiscoverSpec`).
 
     A spec with ``dir=None`` scans ``model_dirs``. Native-head MTP models get
-    ``speculative`` per the spec (``auto``/``True`` -> on for MTP; ``False`` -> off);
-    assistant drafters are reported but never auto-wired (they need an explicit
-    ``draft_gguf``). Sibling mmproj files pair into the model they best match when
+    ``speculative`` per the spec (``auto``/``True`` -> on for MTP; ``False`` -> off).
+    A sibling assistant drafter pairs into the models it can serve as their
+    ``draft_gguf`` (see :func:`_drafter_targets`), which also turns
+    ``speculative`` on. Sibling mmproj files pair into the model they best match when
     ``pair_mmproj``. Every id carries its quant codec (see :func:`_assign_ids`).
     ``known_ids`` /
     ``known_paths`` (from configured ``models:``) are skipped/deduped against, as
     are paths an earlier spec/root in this same call already emitted.
+    ``known_models`` maps a configured model's resolved path to its
+    :class:`config.ModelCfg`. A drafter pairs into one of those too; the model
+    stays out of the return list, and the caller writes the key from
+    ``stats["draft_pairs"]``.
     ``progress`` streams per-file scan feedback to stderr (used by ``init``).
     ``stats``, if given, is a dict that receives ``skipped``: the count of
     .gguf files seen but unreadable as GGUF (so callers can distinguish an
-    empty dir from a dir of truncated downloads)."""
+    empty dir from a dir of truncated downloads); and ``draft_pairs``:
+    ``{configured id: drafter path}``."""
     known_paths = {os.path.abspath(os.path.expanduser(p)) for p in known_paths}
+    configured = {os.path.abspath(os.path.expanduser(p)): mc
+                  for p, mc in (known_models or {}).items()}
+    draft_pairs: dict[str, str] = {}
     used_ids = set(known_ids)
     out: list[ModelCfg] = []
     skipped = 0
@@ -500,9 +581,11 @@ def scan_dirs(
                 paths.append(p)
             classified = [c for c in _classify_each(paths, progress=progress) if c]
             skipped += len(paths) - len(classified)
-            _emit_dir(classified, spec, used_ids, out)
+            _emit_dir(classified, spec, used_ids, out,
+                      configured=configured, draft_pairs=draft_pairs)
     if stats is not None:
         stats["skipped"] = skipped
+        stats["draft_pairs"] = draft_pairs
     return out
 
 
@@ -681,8 +764,15 @@ def _fit_in_memory(mc: ModelCfg, c: ClassifiedGguf) -> None:
               f"on its entry: {c.path}", file=sys.stderr)
 
 
-def _emit_dir(classified, spec, used_ids, out):
-    """Build ModelCfgs for one scan, pairing mmproj/draft per directory."""
+def _emit_dir(classified, spec, used_ids, out, *, configured=None,
+              draft_pairs=None):
+    """Build ModelCfgs for one scan, pairing mmproj/draft per directory.
+
+    A drafter can also pair into a ``configured`` model (resolved path ->
+    :class:`config.ModelCfg`); ``draft_pairs`` collects those as
+    ``{id: drafter path}``."""
+    configured = configured or {}
+    draft_pairs = {} if draft_pairs is None else draft_pairs
     by_dir: dict[str, list[ClassifiedGguf]] = {}
     for c in classified:
         by_dir.setdefault(os.path.dirname(c.path), []).append(c)
@@ -693,15 +783,18 @@ def _emit_dir(classified, spec, used_ids, out):
                   for c in g if c.kind == "model" and c.loadable]
     id_for = _assign_ids(all_models, used_ids)
 
+    all_made: list[tuple[ModelCfg, ClassifiedGguf]] = []
+    all_old: list = []
+    all_old_ids: set = set()
+    drafter_kinds: dict[str, str | None] = {}
+    unpaired: list[ClassifiedGguf] = []
+    cross: list[ClassifiedGguf] = []
     for _dir, group in sorted(by_dir.items()):
         models = [c for c in group if c.kind == "model" and c.loadable]
         for c in group:
             if c.kind == "model" and not c.loadable:
                 print(f"[discover] skip (unsupported arch {c.arch!r}): {c.path}",
                       file=sys.stderr)
-            if c.kind == "drafter":
-                print(f"[discover] assistant drafter (configure via "
-                      f"draft_gguf: on its model): {c.path}", file=sys.stderr)
             if c.kind in ("embedding", "reranker"):
                 wire = ("server.embeddings:" if c.kind == "embedding"
                         else "the /v1/rerank endpoint")
@@ -722,7 +815,7 @@ def _emit_dir(classified, spec, used_ids, out):
                       f"for arch {c.arch!r}; speculative stays off: {c.path}",
                       file=sys.stderr)
                 spec_flag = False
-            fam = _family_profiles.detect_family(c.arch)
+            fam = _family_profiles.detect_family(c.arch, c.name)
             mc = ModelCfg(id=id_for[c.path], path=c.path, speculative=spec_flag,
                           family=fam if fam != "default" else None)
             _fit_in_memory(mc, c)
@@ -734,6 +827,60 @@ def _emit_dir(classified, spec, used_ids, out):
                 tgt = _best_mmproj_target(mm, made)
                 if tgt is not None and tgt.mmproj is None:
                     tgt.mmproj = mm.path
+
+        drafters = [c for c in group if c.kind == "drafter"]
+        # The usual case: the target is configured already, so it is not in
+        # `made` and only this lookup can pair it.
+        old = _configured_in_dir(_dir, configured) if drafters else []
+        old_ids = {mc.id for mc, _c in old}
+        all_made.extend(made)
+        all_old.extend(e for e in old if e[0].id not in all_old_ids)
+        all_old_ids.update(old_ids)
+        for dr in drafters:
+            drafter_kinds[dr.path] = dr.drafter_kind
+            targets = ([] if spec.speculative is False
+                       else _drafter_targets(dr, made + old))
+            for mc in targets:
+                mc.draft_gguf = dr.path
+                mc.speculative = True
+                if mc.id in old_ids:
+                    draft_pairs[mc.id] = dr.path
+            if targets:
+                ids = ", ".join(mc.id for mc in targets)
+                print(f"[discover] drafter paired (speculative on for {ids}): "
+                      f"{dr.path}", file=sys.stderr)
+            else:
+                unpaired.append(dr)
+            if dr.declared and (not targets or dr.drafter_kind == "dflash2"):
+                cross.append(dr)
+
+    # Cross-directory pass: a drafter that declares its base model (a DFlash 2
+    # header does) pairs with that model wherever the scan found it, and a
+    # DFlash 2 drafter takes over a target its same-directory DFlash v1
+    # sibling claimed above. Declared hits only; the filename rule stays
+    # same-directory.
+    if spec.speculative is not False:
+        pool = all_made + all_old
+        for dr in cross:
+            targets = _drafter_targets(dr, pool, declared_only=True,
+                                       drafter_kinds=drafter_kinds)
+            for mc in targets:
+                loser = mc.draft_gguf
+                mc.draft_gguf = dr.path
+                mc.speculative = True
+                if mc.id in all_old_ids:
+                    draft_pairs[mc.id] = dr.path
+                if loser and loser != dr.path:
+                    print(f"[discover] drafter superseded for {mc.id}: "
+                          f"{loser} -> {dr.path}", file=sys.stderr)
+            if targets:
+                ids = ", ".join(mc.id for mc in targets)
+                print(f"[discover] drafter paired (speculative on for {ids}): "
+                      f"{dr.path}", file=sys.stderr)
+                unpaired = [d for d in unpaired if d.path != dr.path]
+    for dr in unpaired:
+        print(f"[discover] assistant drafter (configure via "
+              f"draft_gguf: on its model): {dr.path}", file=sys.stderr)
 
 
 def _assign_ids(models, used_ids: set) -> dict[str, str]:
@@ -813,6 +960,84 @@ def _best_mmproj_target(mm: ClassifiedGguf, made):
     return None
 
 
+def _configured_in_dir(dirpath: str, configured) -> list:
+    """``(ModelCfg, ClassifiedGguf)`` for each configured model in ``dirpath``.
+
+    The scan skips these files, so only this lookup can offer them to a
+    drafter beside them. One cached header read each."""
+    out = []
+    for ap, mc in configured.items():
+        if os.path.dirname(ap) != dirpath:
+            continue
+        c = classify_gguf(ap)
+        if c is not None and c.kind == "model" and c.loadable:
+            out.append((mc, c))
+    return out
+
+
+def _target_ids(c: ClassifiedGguf) -> set:
+    """Ids a target answers to: its declared base ids plus ``general.name``."""
+    ids = set(c.declared)
+    if c.name:
+        slug, _q = derive_id(c.name)
+        if slug and slug != "model":
+            ids.add(slug)
+    return ids
+
+
+def _drafter_targets(dr: ClassifiedGguf, made, *, declared_only: bool = False,
+                     drafter_kinds: dict | None = None) -> list:
+    """The models the drafter ``dr`` can serve; empty leaves it unpaired.
+
+    A candidate must have a wired MTP class, a resident placement (MTP needs a
+    resident base), an arch that :data:`arch_table.MTP_DRAFTER_ARCHES` lists
+    for this drafter, and an equal hidden size where both files declare one.
+    The size is the only test that separates the two ``dflash`` drafters, the
+    DSpark sidecar and the Muse Glimmer one. A paired candidate is off the
+    table unless a DFlash 2 drafter is replacing an incumbent of another kind
+    (``drafter_kinds``: drafter path -> kind).
+
+    Header identity decides first: a hit when the drafter's declared base ids
+    meet the target's; a veto when both declare and disjointly. Otherwise
+    (``declared_only`` off) the filename selects among the candidates, on the
+    :func:`_best_mmproj_target` rule, and a lone candidate pairs without it.
+    Two quants of one target both pair on purpose."""
+    kinds = drafter_kinds or {}
+    supersede = dr.drafter_kind == "dflash2"
+
+    def _open(mc) -> bool:
+        if mc.draft_gguf is None or mc.draft_gguf == dr.path:
+            return True
+        return supersede and kinds.get(mc.draft_gguf) != "dflash2"
+
+    cands = [(mc, c) for mc, c in made
+             if _arch_table.mtp_wired(c.arch) and not mc.stream
+             and _open(mc)
+             and _arch_table.drafter_serves(dr.arch, c.arch) is not False
+             and not (dr.n_embd and c.n_embd and dr.n_embd != c.n_embd)]
+    if not cands:
+        return []
+    if dr.declared:
+        hits = [mc for mc, c in cands if set(dr.declared) & _target_ids(c)]
+        if hits:
+            return hits
+        cands = [(mc, c) for mc, c in cands if not c.declared]
+        if not cands:
+            return []
+    if declared_only:
+        return []
+    cands = [(mc, c) for mc, c in cands if mc.draft_gguf is None]
+    if not cands:
+        return []
+    core, _ = derive_id(os.path.basename(dr.path))   # markers (dflash/draft) stripped
+    hits = [mc for mc, _c in cands
+            if core and core != "model"
+            and _common_prefix_len(core, mc.id) >= max(6, int(0.7 * len(core)))]
+    if hits:
+        return hits
+    return [cands[0][0]] if len(cands) == 1 else []
+
+
 def _common_prefix_len(a: str, b: str) -> int:
     n = 0
     for x, y in zip(a, b):
@@ -843,7 +1068,11 @@ def model_to_entry(mc: ModelCfg, model_dirs) -> dict:
     entry: dict = {"path": _rel(mc.path, model_dirs)}
     if mc.mmproj:
         entry["mmproj"] = _rel(mc.mmproj, model_dirs)
-    if mc.speculative:
+    if mc.draft_gguf:
+        entry["draft_gguf"] = _rel(mc.draft_gguf, model_dirs)
+    # A `draft_gguf` turns speculative decoding on at config load, thus a
+    # second `speculative: true` key adds nothing.
+    if mc.speculative and not mc.draft_gguf:
         entry["speculative"] = True
     if mc.stream:
         entry["stream"] = mc.stream
@@ -1206,7 +1435,11 @@ def _scaffold_models_block(models, dirs) -> list[str]:
             lines.append(f"    profile: {mc.profile}")
         if mc.mmproj:
             lines.append(f"    mmproj: {_rel(mc.mmproj, dirs)}")
-        if mc.speculative:
+        if mc.draft_gguf:
+            lines.append("    # a companion drafter sits next to the model; "
+                         "this key turns speculative decoding on")
+            lines.append(f"    draft_gguf: {_rel(mc.draft_gguf, dirs)}")
+        elif mc.speculative:
             lines.append("    # native-head MTP (drafter inside the "
                          "target GGUF)")
             lines.append("    speculative: true")

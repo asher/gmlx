@@ -31,6 +31,48 @@ def pytest_configure(config):
 
         mx.set_default_device(mx.cpu)
 
+    # mlx 0.32.1 segfaults at interpreter exit when a compiled wrapper is
+    # still referenced at shutdown (see gmlx/_exitfix.py), turning a green
+    # suite into rc 139. Arm here so the guard's atexit registration
+    # precedes any hook a test registers; sessionfinish records the real
+    # exit code and the guard preserves it by skipping finalization.
+    from gmlx._exitfix import arm
+
+    arm()
+
+    # Track every daemon read pool so the autouse fixture below can shut
+    # down the ones a test leaks. Leaked pools park their workers in
+    # queue.get forever; past ~100 live threads faulthandler truncates
+    # fatal-error dumps, cutting off the main thread's stack (the one that
+    # names the crashing test).
+    from gmlx import decode_feeder
+
+    orig_init = decode_feeder._DaemonReadPool.__init__
+
+    def tracking_init(self, *args, **kwargs):
+        orig_init(self, *args, **kwargs)
+        _read_pools.append(self)
+
+    decode_feeder._DaemonReadPool.__init__ = tracking_init
+
+
+_read_pools: list = []
+
+
+@pytest.fixture(autouse=True)
+def _shutdown_read_pools():
+    yield
+    # wait=False: a deliberately wedged worker (feeder wedge tests) never
+    # takes its poison pill; joining it would hang the suite.
+    while _read_pools:
+        _read_pools.pop().shutdown(wait=False)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    from gmlx._exitfix import set_code
+
+    set_code(int(exitstatus))
+
 
 @pytest.fixture(scope="session")
 def gguf_dir() -> Path:
@@ -128,3 +170,13 @@ def _isolated_xdg_data(tmp_path_factory, monkeypatch):
     monkeypatch.setenv(
         "XDG_DATA_HOME", str(tmp_path_factory.mktemp("xdg-data"))
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_live_server(monkeypatch):
+    # chat's automatic --server gate probes the box's managed server; a
+    # live server on the dev machine must not flip test behavior. Tests
+    # that want the probe up re-patch it locally.
+    import gmlx.launch as _launch
+    monkeypatch.setattr(_launch, "_server_ready",
+                        lambda base_url, api_key=None: False)

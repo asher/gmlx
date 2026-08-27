@@ -20,7 +20,7 @@ from typing import Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from .gdn_patches import _F16_HEAD_GEMV, _f16_head_gemv
+from .gdn_patches import _F16_HEAD_GEMV, _f16_head_gemv, gpu_active
 
 __all__ = ["verify_linear", "verify_linears"]
 
@@ -218,11 +218,7 @@ def _target_verify_qlinear_header(bits: int, group_size: int) -> str:
       }
       return scale * accum + sum * bias;
     }
-""".replace(
-        "__BITS__", str(bits)
-    ).replace(
-        "__GS__", str(group_size)
-    )
+""".replace("__BITS__", str(bits)).replace("__GS__", str(group_size))
 
 
 _TARGET_VERIFY_QMV_SOURCE = r"""
@@ -423,25 +419,60 @@ def _target_verify_qargmax_kernel(bits, group_size, dtype, verify_t, k_size, n_s
     )
 
 
-def _can_target_verify_quantized(linear, x: mx.array) -> bool:
+_TARGET_VERIFY_MASKED_QARGMAX_SOURCE = _TARGET_VERIFY_QARGMAX_SOURCE.replace(
+    "if (n < N_SIZE) {",
+    """if (
+          n < N_SIZE &&
+          ((as_type<uint>(mask[
+                (int(b_idx) * VERIFY_T + t) * mask_shape[1] + (n >> 5)]) >>
+            (n & 31)) & 1u) != 0u) {""",
+)
+
+
+@lru_cache(maxsize=None)
+def _target_verify_masked_qargmax_kernel(
+    bits, group_size, dtype, verify_t, k_size, n_size
+):
+    dtype_name = {mx.bfloat16: "bf16", mx.float16: "fp16"}.get(dtype, "unk")
+    return mx.fast.metal_kernel(
+        name=(
+            "qwen3_5_target_verify_masked_qargmax_"
+            f"b{bits}_gs{group_size}_t{verify_t}_k{k_size}_n{n_size}_{dtype_name}"
+        ),
+        input_names=["x", "w", "scales", "biases", "mask"],
+        output_names=["tile_values", "tile_indices"],
+        header=_target_verify_qlinear_header(bits, group_size),
+        source=_TARGET_VERIFY_MASKED_QARGMAX_SOURCE,
+    )
+
+
+def _can_target_verify_quantized_head(linear) -> bool:
     if (
         not isinstance(linear, nn.QuantizedLinear)
-        or x.ndim != 3
-        or x.shape[1] < 1
         or linear.bits not in (4, 5)
         or linear.mode != "affine"
         or linear.biases is None
-        or x.dtype not in (mx.bfloat16, mx.float16)
-        or linear.scales.dtype != x.dtype
-        or linear.biases.dtype != x.dtype
+        or linear.scales.dtype not in (mx.bfloat16, mx.float16)
+        or linear.biases.dtype != linear.scales.dtype
     ):
         return False
 
-    _, _, K = x.shape
+    K = linear.weight.shape[1] * 32 // linear.bits
     N = linear.weight.shape[0]
-    return (
-        K == linear.weight.shape[1] * 32 // linear.bits and K % 512 == 0 and N % 8 == 0
-    )
+    return K % 512 == 0 and N % 8 == 0
+
+
+def _can_target_verify_quantized(linear, x: mx.array) -> bool:
+    if (
+        not _can_target_verify_quantized_head(linear)
+        or x.ndim != 3
+        or x.shape[1] < 1
+        or x.dtype != linear.scales.dtype
+    ):
+        return False
+
+    K = linear.weight.shape[1] * 32 // linear.bits
+    return x.shape[-1] == K
 
 
 def _target_verify_quantized_linear(linear, x: mx.array) -> Optional[mx.array]:
@@ -524,13 +555,17 @@ def _decode_quantized_linears_fused(linears, x: mx.array):
     return tuple(mx.split(output, split_indices, axis=-1))
 
 
-def _target_verify_quantized_argmax(linear, x: mx.array) -> Optional[mx.array]:
+def _target_verify_quantized_argmax(
+    linear, x: mx.array, token_mask: Optional[mx.array] = None
+) -> Optional[mx.array]:
     if not _can_target_verify_quantized(linear, x) or "bias" in linear:
         return None
 
     B, T, K = x.shape
     if T == 1 and 1 < B <= 4:
-        out = _target_verify_quantized_argmax(linear, x.transpose(1, 0, 2))
+        out = _target_verify_quantized_argmax(
+            linear, x.transpose(1, 0, 2), token_mask=token_mask
+        )
         if out is not None:
             return out.transpose(1, 0)
 
@@ -538,11 +573,27 @@ def _target_verify_quantized_argmax(linear, x: mx.array) -> Optional[mx.array]:
     num_tiles = N // 8
 
     x = mx.contiguous(x)
-    kernel = _target_verify_qargmax_kernel(
-        linear.bits, linear.group_size, x.dtype, T, K, N
+    kernel_factory = (
+        _target_verify_masked_qargmax_kernel
+        if token_mask is not None
+        else _target_verify_qargmax_kernel
     )
+    kernel = kernel_factory(linear.bits, linear.group_size, x.dtype, T, K, N)
+    inputs = [x, linear.weight, linear.scales, linear.biases]
+    if token_mask is not None:
+        if token_mask.ndim == 1:
+            token_mask = token_mask[None, :]
+        if (
+            token_mask.dtype != mx.int32
+            or token_mask.shape[0] != B * T
+            or token_mask.shape[1] < (N + 31) // 32
+        ):
+            raise ValueError(
+                "packed token mask must be int32 with one complete row per token"
+            )
+        inputs.append(token_mask)
     tile_values, tile_indices = kernel(
-        inputs=[x, linear.weight, linear.scales, linear.biases],
+        inputs=inputs,
         template=[
             ("T", x.dtype),
             ("VERIFY_T", int(T)),
@@ -633,7 +684,10 @@ def verify_linear(linear, x: mx.array, target_verify: bool):
     M-stationary GEMV-ext claims verify-shaped non-quantized linears
     first (same condition as gdn_patches._patch_bf16_verify_linear),
     everything else lands on the verbatim upstream dispatcher above.
+    Both are Metal kernels: the CPU device takes the plain linear.
     """
+    if not gpu_active():
+        return linear(x)
     if (
         _F16_HEAD_GEMV is not None
         and target_verify

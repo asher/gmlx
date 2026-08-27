@@ -27,9 +27,9 @@ please contact asher_feldman@icloud.com.
 
 File-level exception: files that carry an "SPDX-License-Identifier: MIT"
 header (the DSpark draft-model module and the DSpark sidecar converter, the
-mlx-lm-style model modules for kimi-k3, minimax-m3, and hy-v3, and the
-kimi-k3 tests) are licensed under the MIT license (see LICENSE-MIT), not
-under this License.
+mlx-lm-style model modules for kimi-k3, minimax-m3, hy-v3, and muse-glimmer,
+the mlx-vlm-style vision module for muse-glimmer, and the kimi-k3 tests) are
+licensed under the MIT license (see LICENSE-MIT), not under this License.
 
 Notice
 
@@ -110,8 +110,10 @@ was taken:
 - gmlx/server_patches/apc.py and gmlx/thinking_budget.py carry code
   copied or ported from mlx-vlm (MIT, Copyright © Prince Canuma;
   licenses/mlx-vlm-LICENSE).
-- The pre-tokenizer split regex patterns in gmlx/tokenizer.py come from
-  llama.cpp (MIT; licenses/llama.cpp-LICENSE).
+- The pre-tokenizer split regex patterns in gmlx/tokenizer.py, and the
+  Muse Glimmer vision graph, grid index math, and image preprocessing in
+  gmlx/muse_glimmer_vlm_model.py and gmlx/vlm.py, come from llama.cpp
+  (MIT; licenses/llama.cpp-LICENSE).
 
 The test asset tests/e2e/assets/cats.jpg is reproduced from the mlx-vlm
 repository (MIT License, Copyright © Prince Canuma); see

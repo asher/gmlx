@@ -125,11 +125,16 @@ def latest_for_model(model_path: str) -> str | None:
     return None
 
 
-def split_thinking(text: str, think_open: bool = False) -> tuple[str, str]:
-    """``(reasoning, answer)`` portions of a raw reply (markers dropped)."""
+def split_thinking(text: str, think_open: bool = False,
+                   header_open: bool = False) -> tuple[str, str]:
+    """``(reasoning, answer)`` portions of a raw reply (markers dropped).
+
+    ``think_open`` seeds a prompt-opened ``<think>`` block, ``header_open`` a
+    harmony/ATEM reply whose prompt stopped mid-header."""
     from .reasoning import ReasoningFilter
 
-    rf = ReasoningFilter(start_in_thinking=think_open)
+    rf = ReasoningFilter(start_in_thinking=think_open,
+                         start_in_header=header_open)
     spans = rf.feed(text) + rf.flush()
     reason = "".join(t for t, m in spans if m == "reason").strip()
     answer = "".join(t for t, m in spans if m == "answer").strip()
@@ -165,7 +170,8 @@ def export_markdown(doc: dict, path: str) -> Path:
         canceled = " *(canceled)*" if m.get("canceled") else ""
         lines += [f"## Assistant{ts}{canceled}", ""]
         reason, answer = split_thinking(
-            m.get("content", ""), m.get("think_open", False)
+            m.get("content", ""), m.get("think_open", False),
+            m.get("header_open", False)
         )
         if reason:
             lines += [

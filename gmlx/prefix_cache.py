@@ -13,6 +13,7 @@ KV+GDN sub-caches).
 from __future__ import annotations
 
 import logging
+import weakref
 from collections import OrderedDict
 from typing import Any
 
@@ -20,10 +21,41 @@ import mlx.core as mx
 
 _log = logging.getLogger(__name__)
 
+# Module-wide counters, merged into /v1/cache/stats: spec-path reuse is
+# invisible to the APC manager's counters, and a warm turn served from
+# this cache must not read as a cold miss (one live model per server).
+_HITS = 0
+_HIT_TOKENS = 0
+_STORES = 0
+_LIVE_CACHES: "weakref.WeakSet[SpecPrefixCache]" = weakref.WeakSet()
+
+
+def spec_prefix_stats() -> dict:
+    return {
+        "spec_prefix_hits": _HITS,
+        "spec_prefix_hit_tokens": _HIT_TOKENS,
+        "spec_prefix_stores": _STORES,
+    }
+
+
+def spec_prefix_stats_clear() -> None:
+    global _HITS, _HIT_TOKENS, _STORES
+    _HITS = 0
+    _HIT_TOKENS = 0
+    _STORES = 0
+
+
+def clear_all_spec_prefix_caches() -> None:
+    """Drop every live cache's entries (the /v1/cache/reset memory
+    contract: pinned snapshots run to GBs and must not survive it)."""
+    for cache in list(_LIVE_CACHES):
+        cache.clear()
+
 _CACHELIST_TAG = "_CacheList"
 _ARRAYS_TAG = "_ArraysCache"
 _POOLING_TAG = "_PoolingCache"
 _KVARN_TAG = "_KVarNKVCache"
+_QUANT_TAG = "_QuantizedKV"
 
 
 def _trim_rotating_state(c: Any, keys: mx.array, values: mx.array):
@@ -98,7 +130,16 @@ def _snapshot_entry(c: Any) -> Any:
         state = tuple(mx.contiguous(a) for a in c.state)
         return (_KVARN_TAG, state, c.meta_state)
     state = c.state
-    offset = getattr(c, "offset", state[0].shape[2])
+    if isinstance(state[0], (tuple, list)):
+        # Quantized KV (spec KV_BITS path): a (packed, scales, biases)
+        # triple per side, trimmed to offset by the state property. Group
+        # quantization runs along head_dim, so the seq axis slices freely.
+        keys = tuple(mx.contiguous(a) for a in state[0])
+        values = tuple(mx.contiguous(a) for a in state[1])
+        return (_QUANT_TAG, keys, values, int(c.offset))
+    offset = getattr(c, "offset", None)
+    if offset is None:
+        offset = state[0].shape[2]
     _idx = getattr(c, "_idx", 0)
     if isinstance(c, cache_types("RotatingKVCache")):
         # When no trim/reorder applies, the returned arrays are the live ring
@@ -136,6 +177,11 @@ def _restore_entry(c: Any, snap: Any) -> None:
         # place, and the stored entry may be restored more than once.
         c.state = tuple(mx.contiguous(a) for a in state)
         c.meta_state = meta_state
+    if isinstance(snap, tuple) and snap[0] == _QUANT_TAG:
+        _, keys, values, offset = snap
+        c.keys = tuple(mx.contiguous(a) for a in keys)
+        c.values = tuple(mx.contiguous(a) for a in values)
+        c.offset = offset
         return
     keys, values, offset, _idx = snap
     c.keys, c.values = _owned_pair(keys, values)
@@ -173,6 +219,9 @@ def _collect_snapshot_arrays(snaps: list[Any], out: list[mx.array]) -> None:
                 out.append(left_padding)
             if lengths is not None:
                 out.append(lengths)
+        elif isinstance(snap, tuple) and len(snap) == 4 and snap[0] == _QUANT_TAG:
+            out.extend(snap[1])
+            out.extend(snap[2])
         elif isinstance(snap, tuple) and len(snap) == 4:
             out.extend([snap[0], snap[1]])
 
@@ -238,6 +287,7 @@ class SpecPrefixCache:
         self._min_prefix = min_prefix
         self._max_bytes = max_bytes
         self._total_bytes = 0
+        _LIVE_CACHES.add(self)
 
     def lookup(
         self, token_ids: mx.array
@@ -266,6 +316,9 @@ class SpecPrefixCache:
 
         if best is not None and best_len >= self._min_prefix:
             self._entries.move_to_end(best[1].token_ids)
+            global _HITS, _HIT_TOKENS
+            _HITS += 1
+            _HIT_TOKENS += best_len
             return best
         return None
 
@@ -312,6 +365,8 @@ class SpecPrefixCache:
         self._entries[ids] = entry
         self._entries.move_to_end(ids)
         self._total_bytes += entry.nbytes
+        global _STORES
+        _STORES += 1
 
         while self._entries and (
             len(self._entries) > self._max

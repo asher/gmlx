@@ -99,35 +99,18 @@ def _build_parser(prog: str = "gmlx chat") -> argparse.ArgumentParser:
         add_help=False,
     )
     from .cli import add_condensed_help
-
-    add_condensed_help(
-        ap,
-        (
-            "gguf",
-            "--assistant",
-            "--config",
-            "--profile",
-            "--system-prompt",
-            "--reasoning",
-            "--thinking",
-            "--mmproj",
-            "--max-tokens",
-            "--temp",
-            "--top-p",
-            "--min-p",
-            "--max-kv-size",
-            "--stream-experts",
-            "--resume",
-            "--theme",
-            "--verbose",
-        ),
-    )
+    add_condensed_help(ap, (
+        "gguf", "--assistant", "--server", "--config", "--profile", "--system-prompt",
+        "--reasoning", "--thinking", "--mmproj", "--max-tokens", "--temp",
+        "--top-p", "--min-p", "--max-kv-size", "--stream-experts",
+        "--resume", "--theme", "--verbose",
+    ))
     ap.add_argument(
         "gguf",
         nargs="?",
         default=None,
         help="Path to the GGUF file (sharded ok), or a config model id. "
-        "Optional with --assistant (server default model).",
+        "Optional with --assistant/--server (server default model).",
     )
 
     # Server-backed assistant mode (no local load; mirrors `gmlx talk`).
@@ -137,6 +120,20 @@ def _build_parser(prog: str = "gmlx chat") -> argparse.ArgumentParser:
         help="Chat through the built-in tool-loop assistant on a running "
         "(auto-started) server: MCP tools + long-term memory from the "
         "config's assistant: block. The positional is a served model id.",
+    )
+    ap.add_argument(
+        "--server",
+        action="store_true",
+        help="Plain server client: chat on a running (auto-started) server "
+        "with no assistant extras (no tools, no memory). The positional is "
+        "a served model id. Engages automatically when the config's server "
+        "is already up and serves the requested model.",
+    )
+    ap.add_argument(
+        "--local",
+        action="store_true",
+        help="Load in-process even when the config's server is running "
+        "(skips the automatic --server client mode).",
     )
     ap.add_argument(
         "--base-url",
@@ -427,6 +424,10 @@ class ChatState:
     vlm: bool = False
     system_prompt: str | None = None
     thinking_budget: int | None = None
+    thinking_start_token: str | None = None
+    thinking_end_token: str | None = None
+    template_kwargs: dict | None = None  # live per-turn render kwargs (/thinking)
+    template_text: str = ""              # template source, for switch mapping
     sampling: dict = dataclasses.field(default_factory=dict)
     transcript: list = dataclasses.field(default_factory=list)
     replay_messages: list | None = None  # deferred history prefill (--resume)
@@ -436,6 +437,7 @@ class ChatState:
     last_stats: dict | None = None
     last_tps: float | None = None
     last_think_open: bool = False
+    last_header_open: bool = False
 
     # session bookkeeping
     session_stats: dict | None = None
@@ -738,6 +740,7 @@ def _print_shim_help(state: ChatState) -> None:
         "- '/system [text|off]' show or set the system prompt "
         "(setting restarts the chat)"
     )
+    print("- '/thinking [on|off|default]' the model's reasoning switch")
     print("- '/thinking-budget [N|off]' cap thinking tokens per reply")
     print(
         "- '/reasoning [show|hide|raw]' control how thinking is displayed "
@@ -862,6 +865,10 @@ def _fmt_stat_line(stats: dict, ctx_used, ctx_max) -> str:
         if stats.get("prompt_tps"):
             p += f" @ {stats['prompt_tps']:.0f} tok/s"
         parts.append(p)
+    # Queue wait + prefill, as one number: everything before the first token
+    # arrived. The gen rate beside it is decode-only, so nothing is blended.
+    if stats.get("ttft_s", 0.0) >= 0.1:
+        parts.append(f"ttft {stats['ttft_s']:.1f}s")
     if stats.get("gen_tokens"):
         parts.append(
             f"gen {_fmt_k(stats['gen_tokens'])} tok @ {stats.get('gen_tps', 0.0):.1f} tok/s"
@@ -901,6 +908,7 @@ def _end_turn(state: ChatState, reply: str, canceled: bool, cache=None) -> None:
             "ts": now,
             "canceled": bool(canceled),
             "think_open": state.last_think_open,
+            "header_open": state.last_header_open,
             "stats": stats,
         },
         "cache_before": cp.get("cache_before", 0),
@@ -989,12 +997,22 @@ def _build_model_info(args, config, drafter, vlm_mtp: bool) -> dict:
     if getattr(args, "adapter", None):
         info["adapter"] = args.adapter
     if drafter is not None:
-        kind = "assistant" if args.draft_gguf else "native-head"
+        kind = _drafter_kind_label(drafter, args)
         block = getattr(getattr(drafter, "config", None), "block_size", None)
         info["drafter"] = f"{kind} MTP" + (f" (block {block})" if block else "")
         if vlm_mtp:
             info["drafter"] += ", text-only turns"
     return info
+
+
+_DRAFTER_KIND_LABELS = {"dflash2": "DFlash2", "dflash": "DFlash"}
+
+
+def _drafter_kind_label(drafter, args) -> str:
+    label = _DRAFTER_KIND_LABELS.get(getattr(drafter, "kind_label", None))
+    if label:
+        return label
+    return "assistant" if getattr(args, "draft_gguf", None) else "native-head"
 
 
 def _print_model_info(state: ChatState) -> None:
@@ -1033,11 +1051,12 @@ def _print_model_info(state: ChatState) -> None:
         print(f"  adapter  {info['adapter']}")
 
 
-def _strip_thinking(text: str, start_in_thinking: bool = False) -> str:
+def _strip_thinking(text: str, start_in_thinking: bool = False,
+                    start_in_header: bool = False) -> str:
     """The answer portion of a raw reply (reasoning spans + markers removed)."""
     from .sessions import split_thinking
 
-    return split_thinking(text, start_in_thinking)[1]
+    return split_thinking(text, start_in_thinking, start_in_header)[1]
 
 
 def _session_doc(state: ChatState) -> dict:
@@ -1095,7 +1114,8 @@ def _copy_last_answer(state: ChatState) -> None:
         print("[chat] nothing to copy yet")
         return
     a = transcript[-1]["assistant"]
-    text = _strip_thinking(a.get("content", ""), a.get("think_open", False))
+    text = _strip_thinking(a.get("content", ""), a.get("think_open", False),
+                           a.get("header_open", False))
     if not text:
         print("[chat] the last reply has no answer text to copy")
         return
@@ -1193,6 +1213,54 @@ def _slash_system(cmd, arg, state):
 
 def _slash_memory(cmd, arg, state):
     _chat_memory_cmd(arg, state)
+    return None
+
+
+# Switch variables map_thinking_controls can set; /thinking default clears them.
+_THINKING_SWITCH_KEYS = ("thinking_mode", "enable_thinking", "thinking")
+
+
+def _slash_thinking(cmd, arg, state):
+    """Toggle the model's own reasoning switch per turn. Server mode sets or
+    clears the forwarded ``thinking`` request field (the server maps it onto
+    the template's spelling); local mode maps it here and mutates the live
+    template kwargs."""
+    if arg and arg not in ("on", "off", "adaptive", "default"):
+        print("[chat] /thinking takes on, off, adaptive, or default")
+        return None
+    if state.assistant_brain is not None:
+        extra = state.assistant_extra
+        if not arg:
+            print(f"[chat] thinking = {extra.get('thinking', 'default')}")
+        elif arg == "default":
+            extra.pop("thinking", None)
+            print("[chat] thinking = default (next reply)")
+        else:
+            extra["thinking"] = arg
+            print(f"[chat] thinking = {arg} (next reply)")
+        return None
+    tkw = state.template_kwargs
+    if tkw is None:
+        print("[chat] no chat template on this path - /thinking unavailable")
+        return None
+    if not arg:
+        current = next((f"{k}={tkw[k]}" for k in _THINKING_SWITCH_KEYS
+                        if k in tkw), "default")
+        print(f"[chat] thinking = {current}")
+        return None
+    for k in _THINKING_SWITCH_KEYS:
+        tkw.pop(k, None)
+    if arg == "default":
+        print("[chat] thinking = default (next reply)")
+        return None
+    from .reasoning import map_thinking_controls
+
+    mapped = map_thinking_controls(
+        {}, arg, None, state.template_text,
+        warn=lambda msg: print(f"[thinking] {msg}"))
+    tkw.update(mapped)
+    if mapped:
+        print(f"[chat] thinking = {arg} (next reply)")
     return None
 
 
@@ -1432,6 +1500,7 @@ _SLASH_HANDLERS = {
     "/reset": _slash_reset,
     "/system": _slash_system,
     "/memory": _slash_memory,
+    "/thinking": _slash_thinking,
     "/thinking-budget": _slash_thinking_budget,
     "/copy": _slash_copy,
     "/save": _slash_save,
@@ -1486,6 +1555,9 @@ def _completion_options(buf: str, text: str) -> list[str] | None:
         return [o for o in ("show", "hide", "raw") if o.startswith(text)]
     if buf.startswith("/render "):
         return [o for o in ("plain", "lite", "rich") if o.startswith(text)]
+    if buf.startswith("/thinking "):
+        return [o for o in ("on", "off", "adaptive", "default")
+                if o.startswith(text)]
     if buf.startswith("/thinking-budget "):
         return [o for o in ("off",) if o.startswith(text)]
     if buf.startswith("/load-session "):
@@ -1610,25 +1682,43 @@ def _wire_ptk(state: ChatState) -> bool:
 
     def _toolbar():
         s = state.sampling
+        # (part, droppable) pairs: on a narrow terminal the sampling knobs
+        # go first so the tail stats (ctx, staged, tok/s) survive whole.
+        # prompt_toolkit would otherwise clip the toolbar tail-first, which
+        # cuts exactly the live numbers a small pane is watched for.
         parts = []
         if state.model_name:
-            parts.append(state.model_name)
-        parts += [
-            f"temp={s['temp']:g}",
-            f"top-p={s['top_p']:g}",
-            f"max-tok={s['max_tokens'] or 'off'}",
-        ]
+            parts.append((state.model_name, False))
+        # In server mode the served profile decides sampling, and this client
+        # forwards only the knobs it actually set (see _sync_assistant_extra).
+        # Showing an unforwarded knob would report a value the reply never
+        # used, so those stay off the toolbar until something moves them.
+        for key, label in (("temp", "temp"), ("top_p", "top-p")):
+            if _knob_shown(state, key):
+                parts.append((f"{label}={s[key]:g}", True))
+        parts.append((f"max-tok={s['max_tokens'] or 'off'}", True))
         if state.ctx_used and state.ctx_max:
-            parts.append(f"ctx {_fmt_k(state.ctx_used)}/{_fmt_k(state.ctx_max)}")
+            parts.append(
+                (f"ctx {_fmt_k(state.ctx_used)}/{_fmt_k(state.ctx_max)}",
+                 False))
         if state.staged:
-            parts.append(f"+{len(state.staged)} staged")
+            parts.append((f"+{len(state.staged)} staged", False))
         if state.staged_images:
-            parts.append(f"+{len(state.staged_images)} img")
+            parts.append((f"+{len(state.staged_images)} img", False))
         if state.staged_audio:
-            parts.append(f"+{len(state.staged_audio)} aud")
+            parts.append((f"+{len(state.staged_audio)} aud", False))
         if state.last_tps:
-            parts.append(f"{state.last_tps:.1f} tok/s")
-        return " · ".join(parts)
+            parts.append((f"{state.last_tps:.1f} tok/s", False))
+        try:
+            from prompt_toolkit.application import get_app
+            width = get_app().output.get_size().columns
+        except Exception:  # noqa: BLE001 - no app yet: keep everything
+            width = None
+        if width:
+            while (len(" · ".join(p for p, _ in parts)) > width
+                   and any(d for _, d in parts)):
+                parts.pop(next(i for i, (_, d) in enumerate(parts) if d))
+        return " · ".join(p for p, _ in parts)
 
     state.ptk_session = PromptSession(
         history=_ToggleableFileHistory(hist_file),
@@ -1772,18 +1862,73 @@ class _EscCancel:
             termios.tcsetattr(self.fd, termios.TCSADRAIN, self._saved)
 
 
+class _RateTicker:
+    """Windowed live tok/s for the streaming ticker, from exact cumulative
+    token counts only: local generation chunks carry ``generation_tokens``,
+    and gmlx servers stream the same count per chunk when the client asks
+    for ``timings_per_token`` (adapted into the same field). Chunks without
+    a count are ignored - no estimated rates. Returns a new status string
+    at most a few times a second, else None.
+
+    A server turn can span several requests (the assistant tool loop), each
+    restarting its count at 0; a count below the last one seen rolls the
+    previous request's total into a base offset so the ticker stays
+    cumulative across rounds."""
+
+    WINDOW_S = 2.0
+    PUSH_S = 0.3
+
+    def __init__(self, clock=time.monotonic):
+        self._clock = clock
+        self._window: list[tuple[float, float]] = []
+        self._base = 0
+        self._last_n = 0
+        self._last_push = 0.0
+        self._last_text = None
+
+    def push(self, r) -> str | None:
+        n = int(getattr(r, "generation_tokens", 0) or 0)
+        if not n:
+            return None
+        if n < self._last_n:
+            self._base += self._last_n
+        self._last_n = n
+        total = float(self._base + n)
+        t = self._clock()
+        self._window.append((t, total))
+        while self._window and t - self._window[0][0] > self.WINDOW_S:
+            self._window.pop(0)
+        if t - self._last_push < self.PUSH_S or len(self._window) < 2:
+            return None
+        dt = self._window[-1][0] - self._window[0][0]
+        if dt < 0.5:
+            return None
+        rate = (self._window[-1][1] - self._window[0][1]) / dt
+        text = f"{rate:.0f} tok/s"
+        if text == self._last_text:
+            self._last_push = t
+            return None
+        self._last_push = t
+        self._last_text = text
+        return text
+
+
+
 def _stream_reply(
     chunks,
     state: ChatState,
     stops: list | None = None,
     start_in_thinking: bool = False,
+    start_in_header: bool = False,
     drafter=None,
 ) -> tuple[str, bool]:
     """Print a streaming reply; Esc or Ctrl-C cancels it (the session keeps
     running) and a ``stops`` sequence ends it cleanly (trimmed). Reasoning
     ("thinking") spans are stripped of their control markers and dimmed (or
     hidden) per ``state.reasoning`` - ``start_in_thinking`` seeds the case
-    where the chat template pre-opens ``<think>`` so only the close is streamed.
+    where the chat template pre-opens ``<think>`` so only the close is streamed,
+    and ``start_in_header`` the harmony/ATEM case where the prompt stops
+    mid-header at ``<|start|>assistant``.
     Returns ``(text_so_far, canceled)`` - the *raw* text (markers intact) so
     multi-turn history stays faithful - and records the reply's tok/s for the
     stat line + toolbar when it completes."""
@@ -1792,12 +1937,10 @@ def _stream_reply(
 
     scanner = StopScanner(stops) if stops else None
     state.last_think_open = bool(start_in_thinking)
+    state.last_header_open = bool(start_in_header)
     display = state.reasoning
-    rf = (
-        None
-        if display == "raw"
-        else ReasoningFilter(start_in_thinking=start_in_thinking)
-    )
+    rf = None if display == "raw" else ReasoningFilter(
+        start_in_thinking=start_in_thinking, start_in_header=start_in_header)
     theme = state.theme
     renderer = None
     if state.render in ("lite", "rich") and display != "raw":
@@ -1810,6 +1953,7 @@ def _stream_reply(
         theme=theme,
         answer_sink=renderer.feed if renderer else None,
     )
+    ticker = _RateTicker() if renderer is not None else None
 
     def _toggle() -> None:
         # Ctrl-O: collapse<->expand thinking, live for this reply and persisted as
@@ -1848,6 +1992,10 @@ def _stream_reply(
                     if out:
                         _accept(out)
                 printer.tick()
+                if ticker is not None:
+                    status = ticker.push(r)
+                    if status is not None:
+                        renderer.set_status(status)
                 last = r
                 if stopped or esc.pressed():
                     canceled = not stopped
@@ -1873,6 +2021,9 @@ def _stream_reply(
             "gen_tokens": int(getattr(last, "generation_tokens", 0) or 0),
             "gen_tps": float(getattr(last, "generation_tps", 0.0) or 0.0),
         }
+        ttft = float(getattr(last, "ttft_s", 0.0) or 0.0)
+        if ttft:
+            stats["ttft_s"] = ttft
         accepts = list(getattr(drafter, "accept_lens", None) or [])
         drafts = list(getattr(drafter, "draft_lens", None) or [])
         if drafts:
@@ -1914,6 +2065,24 @@ def _opens_thinking(prompt) -> bool:
     from .thinking_budget import prompt_opens_thinking
 
     return prompt_opens_thinking(prompt)
+
+
+def _vlm_thinking_tokens(state) -> dict:
+    """The configured reasoning markers as mlx-vlm generate kwargs, omitting
+    the ones left unset - mlx-vlm defaults them to ``<think>`` / ``</think>``
+    and encodes whatever it is given, so an explicit None would fail there."""
+    return {k: v for k, v in (
+        ("thinking_start_token", state.thinking_start_token),
+        ("thinking_end_token", state.thinking_end_token),
+    ) if v}
+
+
+def _opens_header(prompt) -> bool:
+    """Whether a rendered ``prompt`` stops inside a harmony/ATEM message header
+    (see ``reasoning.prompt_opens_header``)."""
+    from .reasoning import prompt_opens_header
+
+    return prompt_opens_header(prompt)
 
 
 def _vlm_message(
@@ -1981,6 +2150,7 @@ _ASSISTANT_NOOP = (
     ("speculative", "--speculative"),
     ("no_speculative", "--no-speculative"),
     ("draft_gguf", "--draft-gguf"),
+    ("native_mtp", "--native-mtp"),
     ("stochastic_mtp", "--stochastic-mtp"),
     ("kv_bits", "--kv-bits"),
     ("prefill_step_size", "--prefill-step-size"),
@@ -1998,15 +2168,14 @@ _ASSISTANT_NOOP = (
 
 
 def _assistant_flag_gate(args, parser) -> int | None:
-    """Reject/noop the local-load flags under --assistant. Rejected flags
-    exit 2; server-owned ones print one [chat] note and are ignored."""
+    """Reject/noop the local-load flags under --assistant/--server. Rejected
+    flags exit 2; server-owned ones print one [chat] note and are ignored."""
+    mode = "--server" if getattr(args, "server", False) else "--assistant"
     for attr, flag in _ASSISTANT_REJECT:
         if getattr(args, attr, None) not in (None, False):
-            print(
-                f"error: {flag} is not supported with --assistant "
-                "(the server owns the model and its template)",
-                file=sys.stderr,
-            )
+            print(f"error: {flag} is not supported with {mode} "
+                  "(the server owns the model and its template)",
+                  file=sys.stderr)
             return 2
     noop = [
         flag
@@ -2022,8 +2191,68 @@ def _assistant_flag_gate(args, parser) -> int | None:
         if getattr(args, attr, None) != parser.get_default(attr):
             noop.append(flag)
     if noop:
-        print(f"[chat] server owns {', '.join(noop)} - ignored with --assistant")
+        print(f"[chat] server owns {', '.join(noop)} - ignored with "
+              f"{mode}")
     return None
+
+
+def _auto_server(args, parser) -> bool:
+    """Whether a bare ``gmlx chat`` should become a --server client: the
+    managed/config server already answers and serves the requested id, and no
+    flag states local intent. Never starts anything; any probe failure means
+    the local load proceeds untouched. An explicit GGUF path always loads
+    locally (the file on disk is what was asked for - the server may hold
+    older bytes at the same path); a hint names the served id when the
+    config maps that file to one."""
+    if args.local or args.assistant or args.server:
+        return False
+    if args.base_url or args.host or args.port or args.no_start:
+        return False              # explicit targeting keeps today's contract
+    for attr, _flag in _ASSISTANT_REJECT + _ASSISTANT_NOOP:
+        if getattr(args, attr, None) not in (None, False):
+            return False          # a local-load flag pins the local path
+    for attr in ("kv_group_size", "quantized_kv_start",
+                 "prefill_feeder", "decode_feeder"):
+        if getattr(args, attr, None) != parser.get_default(attr):
+            return False
+    from . import launch as launch_mod
+    from . import lifecycle
+    try:
+        host, port = lifecycle.auto_target(None, None)
+        base = f"http://{host}:{port}/v1"
+        if not launch_mod._server_ready(base, args.api_key):
+            return False
+        if not args.gguf:
+            args.base_url = base  # server default (or its served-ids error)
+            return True
+        from .talk_client import probe_capabilities
+        served = probe_capabilities(base, args.api_key).get("chat_ids") or []
+    except Exception:             # noqa: BLE001 - probe hiccup = stay local
+        return False
+    requested = args.gguf
+    if "@" in requested and not (requested.endswith(".gguf")
+                                 or os.path.exists(os.path.expanduser(requested))):
+        requested = requested.rpartition("@")[0] or requested
+    if requested in served:
+        args.base_url = base
+        return True
+    if requested.endswith(".gguf") or os.path.exists(
+            os.path.expanduser(requested)):
+        real = os.path.realpath(os.path.expanduser(requested))
+        try:
+            from .launch import _discover_config
+            cfg, _path = _discover_config()
+            models = list(getattr(cfg, "models", None) or [])
+        except Exception:         # noqa: BLE001
+            return False
+        for m in models:
+            if (m.id in served and m.path
+                    and os.path.realpath(os.path.expanduser(m.path)) == real):
+                print(f"[chat] note: the running server serves this file as "
+                      f"'{m.id}' - `gmlx chat {m.id}` rides it without a "
+                      "second load")
+                break
+    return False
 
 
 def _setup_assistant(args):
@@ -2078,14 +2307,12 @@ def _setup_assistant(args):
         ):  # an empty head ("@coding") is malformed - leave it to fail the served check
             requested = head
             args.profile = args.profile or tail
-    if requested and (
-        requested.endswith(".gguf") or os.path.exists(os.path.expanduser(requested))
-    ):
-        print(
-            "error: --assistant chats through the server - pass a served "
-            "model id, not a file (add it to your config's models:)",
-            file=sys.stderr,
-        )
+    if requested and (requested.endswith(".gguf")
+                      or os.path.exists(os.path.expanduser(requested))):
+        mode = "--server" if getattr(args, "server", False) else "--assistant"
+        print(f"error: {mode} chats through the server - pass a served "
+              "model id, not a file (add it to your config's models:)",
+              file=sys.stderr)
         return 2
     served = caps.get("chat_ids") or []
     model = (
@@ -2109,33 +2336,37 @@ def _setup_assistant(args):
         return 2
     model_request = f"{model}@{args.profile}" if args.profile else model
 
+    # --server: same plumbing, no assistant extras (config tools and the
+    # memory store stay off even where the config enables them).
+    plain = getattr(args, "server", False)
+
     from .config import AssistantCfg
 
     a = AssistantCfg()
-    try:
-        if args.config:
-            from . import config as cfgmod
-
-            a = cfgmod.load_config(args.config).assistant
-        else:
-            from .launch import _discover_config
-
-            cfg, _path = _discover_config()
-            if cfg is not None:
-                a = cfg.assistant
-    except Exception as e:  # noqa: BLE001 - degrade
-        print(f"[chat] config: {e} - assistant runs tool-less", file=sys.stderr)
+    if not plain:
+        try:
+            if args.config:
+                from . import config as cfgmod
+                a = cfgmod.load_config(args.config).assistant
+            else:
+                from .launch import _discover_config
+                cfg, _path = _discover_config()
+                if cfg is not None:
+                    a = cfg.assistant
+        except Exception as e:                # noqa: BLE001 - degrade
+            print(f"[chat] config: {e} - assistant runs tool-less",
+                  file=sys.stderr)
 
     from .assistant_brain import AssistantBrain
     from .talk_client import stream_chat as _stream_chat
     from .talk_mcp import connect_servers
-
-    mcp_host, registry, warns = connect_servers(a.mcp, call_timeout_s=a.tool_timeout_s)
+    mcp_host, registry, warns = connect_servers(
+        () if plain else a.mcp, call_timeout_s=a.tool_timeout_s)
     for w in warns:
         print(f"[chat] {w}", file=sys.stderr)
 
     memory = None
-    if a.memory.enabled:  # the same store talk uses
+    if a.memory.enabled and not plain:        # the same store talk uses
         from .talk_memory import MemoryStore, make_extractor
 
         extractor = (
@@ -2154,8 +2385,13 @@ def _setup_assistant(args):
         )
 
     # Usage chunks are gated on stream_options server-side; sampling knobs
-    # join this dict per turn (see _sync_assistant_extra).
+    # join this dict per turn (see _sync_assistant_extra). Per-chunk stream
+    # timings feed the live tok/s ticker, but only gmlx servers know the
+    # field (strict OpenAI backends reject unknown body params), so it rides
+    # only when the models probe saw gmlx entries.
     extra: dict = {"stream_options": {"include_usage": True}}
+    if caps.get("gmlx"):
+        extra["timings_per_token"] = True
 
     def seam(
         burl, *, model, messages, max_tokens, api_key=None, tools=None, timeout=600.0
@@ -2193,17 +2429,33 @@ def _setup_assistant(args):
     return brain, model_request, base_url, extra
 
 
+def _knob_forwarded(state, key: str) -> bool:
+    """Whether a sampling knob rides along to the server: the CLI set it, or
+    a /command moved it off the session baseline. Everything else is left for
+    the served profile to resolve."""
+    baseline = state.assistant_baseline
+    touched = state.assistant_touched
+    if baseline is None or touched is None:
+        return False
+    return key in touched or state.sampling[key] != baseline[key]
+
+
+def _knob_shown(state, key: str) -> bool:
+    """Whether the toolbar can name a sampling value. A local session owns
+    every knob; a server-mode session owns only the forwarded ones."""
+    if state.assistant_brain is None:
+        return True
+    return _knob_forwarded(state, key)
+
+
 def _sync_assistant_extra(state) -> None:
     """Refresh the forwarded sampling knobs from the live /command values:
     a knob rides along once the CLI set it or a /command moved it off the
     session baseline; everything else stays server-side."""
     extra = state.assistant_extra
-    s = state.sampling
-    baseline = state.assistant_baseline
-    touched = state.assistant_touched
     for key, payload in _ASSISTANT_SAMPLING.items():
-        if key in touched or s[key] != baseline[key]:
-            extra[payload] = s[key]
+        if _knob_forwarded(state, key):
+            extra[payload] = state.sampling[key]
         else:
             extra.pop(payload, None)
 
@@ -2220,6 +2472,7 @@ def _assistant_reply(brain, user_text: str, state: ChatState) -> tuple[str, bool
 
     status_shown = [False]
     t0 = time.monotonic()
+    t_first = [None]                      # first generated-token event
 
     def _clear_status():
         if status_shown[0]:
@@ -2227,28 +2480,71 @@ def _assistant_reply(brain, user_text: str, state: ChatState) -> tuple[str, bool
             sys.stdout.flush()
             status_shown[0] = False
 
+    def _mark_first():
+        if t_first[0] is None:
+            t_first[0] = time.monotonic()
+
+    open_think = [False]
+
+    def _think_close():
+        if open_think[0]:
+            open_think[0] = False
+            return "</think>"
+        return ""
+
     def chunks():
         try:
             for kind, payload in brain.turn(user_text):
                 if kind == "say":
+                    _mark_first()
                     _clear_status()
+                    yield SimpleNamespace(text=_think_close() + payload)
+                elif kind == "think":
+                    # Chain-of-thought streams through the same reasoning
+                    # renderer as a local turn (state.reasoning, Ctrl-O):
+                    # re-wrap the spans in <think> markers so _stream_reply's
+                    # ReasoningFilter styles them.
+                    _mark_first()
+                    _clear_status()
+                    if not open_think[0]:
+                        open_think[0] = True
+                        payload = "<think>" + payload
                     yield SimpleNamespace(text=payload)
                 elif kind == "status":
+                    _mark_first()         # thinking/tool events ride on tokens
                     _clear_status()
                     sys.stdout.write(f"[assistant] {payload}...")
                     sys.stdout.flush()
                     status_shown[0] = True
+                elif kind == "count":
+                    # Exact cumulative output tokens for this request round
+                    # (gmlx per-chunk stream timings) - feeds the tok/s ticker.
+                    _mark_first()
+                    yield SimpleNamespace(text="", generation_tokens=payload)
                 elif kind == "done":
+                    tail = _think_close()
+                    if tail:
+                        yield SimpleNamespace(text=tail)
                     u = payload or {}
                     n = int(u.get("completion_tokens") or 0)
-                    el = time.monotonic() - t0
+                    end = time.monotonic()
+                    # ttft covers everything before the first token reached
+                    # this client: queue wait plus prefill.
+                    ttft = (t_first[0] - t0) if t_first[0] is not None else 0.0
+                    tm = u.get("timings") or {}
+                    gen_tps = float(tm.get("predicted_per_second") or 0.0)
+                    if not gen_tps:
+                        # No server timings (foreign server): decode-only
+                        # wall-clock rate, so the wait never dilutes it.
+                        dec = end - t0 - ttft
+                        gen_tps = (n / dec) if dec > 0 and n else 0.0
                     yield SimpleNamespace(
                         text="",
                         prompt_tokens=int(u.get("prompt_tokens") or 0),
-                        prompt_tps=0.0,
+                        prompt_tps=float(tm.get("prompt_per_second") or 0.0),
                         generation_tokens=n,
-                        generation_tps=(n / el) if el > 0 and n else 0.0,
-                    )
+                        generation_tps=gen_tps,
+                        ttft_s=ttft)
         except TalkClientError as e:
             _clear_status()
             print(f"\n[chat] server error: {e}", file=sys.stderr)
@@ -2797,6 +3093,10 @@ def _load_chat_backend(
         b = _ChatBackend()
         b.config = {}
         return b
+    from .tool_preflight import check_or_exit
+
+    check_or_exit(args.gguf,
+                  streaming=getattr(args, "stream_experts", False))
     if vlm_mtp:
         return _backend_vlm_mtp(args)
     if args.mmproj is not None:
@@ -2816,6 +3116,20 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         set_stoch_accept(True)
     brain = None  # --assistant: server-backed turn engine
     model_request = None
+    if args.local and (args.assistant or args.server):
+        parser.error("--local loads in-process and cannot combine with "
+                     "--assistant/--server")
+    if args.server and args.assistant:
+        parser.error("--assistant and --server are mutually exclusive "
+                     "(--server is the assistant path minus its extras)")
+    if _auto_server(args, parser):
+        args.server = True
+        args.no_start = True      # the probe saw it up; never start one
+        # The server-mode banner below names the id and url; it carries the
+        # --local hint too when the server was picked up automatically.
+        args.auto_server = True
+    if args.server:
+        args.assistant = True     # same server path; extras off in setup
     if args.assistant:
         rc = _assistant_flag_gate(args, parser)
         if rc is not None:
@@ -2832,6 +3146,12 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         args.gguf = model_request  # session naming/matching key
         if args.seed is not None:
             assistant_extra["seed"] = args.seed
+        # The server owns the template, so it maps these onto the model's
+        # own switch spelling (see reasoning.map_thinking_controls).
+        if args.thinking is not None:
+            assistant_extra["thinking"] = args.thinking
+        if args.reasoning_effort is not None:
+            assistant_extra["reasoning_effort"] = args.reasoning_effort
         if args.stop:
             assistant_extra["stop"] = list(args.stop)
         if logit_bias:
@@ -2841,21 +3161,17 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         speculative = False
         vlm_mtp = False
     else:
-        # The server-targeting flags only apply under --assistant; without it
-        # chat loads the model in-process. Accepting them silently would leave
-        # the user believing they are on the server while a second copy loads.
-        for attr, flag in (
-            ("base_url", "--base-url"),
-            ("host", "--host"),
-            ("port", "--port"),
-            ("api_key", "--api-key"),
-            ("no_start", "--no-start"),
-        ):
+        # The server-targeting flags only apply under --assistant/--server;
+        # without one chat loads the model in-process. Accepting them silently
+        # would leave the user believing they are on the server while a second
+        # copy loads.
+        for attr, flag in (("base_url", "--base-url"), ("host", "--host"),
+                           ("port", "--port"), ("api_key", "--api-key"),
+                           ("no_start", "--no-start")):
             if getattr(args, attr, None) not in (None, False):
-                parser.error(
-                    f"{flag} targets a server and needs --assistant "
-                    f"(without it, chat loads the model in-process)"
-                )
+                parser.error(f"{flag} targets a server and needs --assistant "
+                             f"or --server (without one, chat loads the model "
+                             f"in-process)")
         if not args.gguf:
             # Not parser.error: that leads with the full usage dump, which is
             # exactly the wall of text a first-run user shouldn't wade through.
@@ -3007,6 +3323,9 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
     state = _wire_input(no_history=args.no_history)
     state.vlm = args.mmproj is not None
     state.reasoning = args.reasoning
+    state.template_kwargs = template_kwargs
+    if brain is None:
+        state.template_text = _template_text(args)
     from .reasoning import want_color as _want_color
     from .render import resolve_render_mode
     from .theme import register_user_themes, resolve_theme
@@ -3114,15 +3433,16 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
 
     state.system_prompt = getattr(args, "system_prompt", None)
     state.thinking_budget = getattr(args, "thinking_budget", None)
+    state.thinking_start_token = getattr(args, "thinking_start_token", None)
+    state.thinking_end_token = getattr(args, "thinking_end_token", None)
     if args.assistant:
         # The session key is the served id, not a file path.
         model_key = model_request
         state.ctx_max = None
         state.model_name = model_request[:24]
-        state.model_info = {
-            "path": f"{model_request} (via {base_url})",
-            "model_type": "assistant",
-        }
+        state.model_info = {"path": f"{model_request} (via {base_url})",
+                            "model_type": "server" if args.server
+                            else "assistant"}
     else:
         model_key = os.path.abspath(args.gguf)
         try:
@@ -3195,7 +3515,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             "a file from Finder into the prompt"
         )
     if drafter is not None:
-        kind = "assistant" if args.draft_gguf else "native-head"
+        kind = _drafter_kind_label(drafter, args)
         if vlm_mtp:
             print(
                 f"[chat] MTP speculative decoding on text-only turns "
@@ -3204,16 +3524,16 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         else:
             print(f"[chat] MTP speculative decoding on ({kind} drafter)")
     if brain is not None:
-        tools = ", ".join(brain.tools.names()) or "(none)"
-        mem = (
-            f" - memory: {brain.memory.count()} items"
-            if brain.memory is not None
-            else ""
-        )
-        print(
-            f"[chat] assistant mode: {model_request} via {base_url} - "
-            f"tools: {tools}{mem}"
-        )
+        if args.server:
+            hint = (" (--local loads in-process)"
+                    if getattr(args, "auto_server", False) else "")
+            print(f"[chat] server mode: {model_request} via {base_url}{hint}")
+        else:
+            tools = ", ".join(brain.tools.names()) or "(none)"
+            mem = (f" - memory: {brain.memory.count()} items"
+                   if brain.memory is not None else "")
+            print(f"[chat] assistant mode: {model_request} via {base_url} - "
+                  f"tools: {tools}{mem}")
     first_turn = True
     vlm_msgs: list = []  # rendered messages (media markers pinned per turn)
     vlm_images: list = []  # media paths, in marker order across all turns
@@ -3549,6 +3869,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                     state,
                     stops=args.stop,
                     start_in_thinking=_opens_thinking(prompt_text),
+                    start_in_header=_opens_header(prompt_text),
                     drafter=drafter,
                 )
                 if reply:
@@ -3596,8 +3917,12 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 vtok,
                 None,
                 start_in_thinking=isinstance(prompt, str)
-                and prompt_opens_thinking(prompt, tokenizer=vtok),
+                and prompt_opens_thinking(
+                    prompt, state.thinking_start_token,
+                    state.thinking_end_token, tokenizer=vtok),
                 interruptible=True,
+                start_token=state.thinking_start_token,
+                end_token=state.thinking_end_token,
             )
             set_finish_key_target(tbp)
             try:
@@ -3620,12 +3945,14 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                         logit_bias=logit_bias,
                         resize_shape=resize_shape,
                         thinking_budget=state.thinking_budget,
+                        **_vlm_thinking_tokens(state),
                         logits_processors=[tbp] if tbp is not None else None,
                         **kv_kwargs,
                     ),
                     state,
                     stops=args.stop,
                     start_in_thinking=_opens_thinking(prompt),
+                    start_in_header=_opens_header(prompt),
                 )
             finally:
                 clear_finish_key_target()
@@ -3672,6 +3999,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 state,
                 stops=args.stop,
                 start_in_thinking=_opens_thinking(prompt_text),
+                start_in_header=_opens_header(prompt_text),
                 drafter=drafter,
             )
             _end_turn(state, reply, canceled, cache=cache)
@@ -3711,6 +4039,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 state,
                 stops=args.stop,
                 start_in_thinking=_opens_thinking(prompt_text),
+                start_in_header=_opens_header(prompt_text),
             )
             _end_turn(state, reply, canceled)
             continue
@@ -3780,8 +4109,12 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         tbp = make_thinking_budget_processor(
             tok,
             state.thinking_budget,
-            start_in_thinking=prompt_opens_thinking(prompt_text),
+            start_in_thinking=prompt_opens_thinking(
+                prompt_text, state.thinking_start_token,
+                state.thinking_end_token),
             interruptible=True,
+            start_token=state.thinking_start_token,
+            end_token=state.thinking_end_token,
         )
         if tbp is not None:
             logits_processors = list(logits_processors) + [tbp]
@@ -3802,6 +4135,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 state,
                 stops=args.stop,
                 start_in_thinking=_opens_thinking(prompt_text),
+                start_in_header=_opens_header(prompt_text),
             )
         finally:
             clear_finish_key_target()

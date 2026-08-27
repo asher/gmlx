@@ -47,6 +47,18 @@ Phases against one model:
   churn         distinct mid-size prefixes cycle records through the ckpt
                 LRU, then the original replay must still serve correctly
                 with no exception-declines
+  burst         (block/exact) K siblings sharing a cold user-turn prefix
+                fire at once; on the block tier the fresh gate must hold
+                the followers for the leader's stores so they admit warm,
+                on the exact tier the numbers are noted (user-turn stores
+                land at retirement, past the hold ceiling)
+  queue-cap     (only with --queue-cap) the main servers boot with
+                GMLX_QUEUE_DEPTH_CAP=1; a flood past the decode batch
+                must draw immediate 503s carrying the Retry-After
+                contract while the rest of the flood serves, the
+                rejections counter must move, and a retry after the
+                drain must succeed (Unit 5's wire contract, which unit
+                tests fake)
   session       (only with --session N) an agent-shaped conversation on a
                 dedicated server: N turns of growing history with streamed
                 replies, tool-call/tool-role messages, a mid-stream client
@@ -63,6 +75,10 @@ Phases against one model:
 
 All requests carry a system message unless --no-system (the system-render
 path is part of the shared prefix, so every reuse floor exercises it).
+--system-words N swaps the one-liner for an agent-shaped system prompt of
+N words of tool and policy blocks, the shape the system-prompt anchor
+serves: the shared prefix then ends at the system boundary instead of
+sitting in the user turn, and the divergent request must restore it.
 --speculative adds MTP to every server (spec-path ckpt arming + sidecar).
 `--warm-factor`/`--restart-factor` loosen the wall-clock collapse thresholds
 (ckpt restores clone >100 MB of GDN state; default 0.6x cold). Wall-clock
@@ -135,6 +151,37 @@ SYSTEM_MSG = (
     "You are the flight operations duty assistant. Answer strictly from "
     "the maintenance log you are given."
 )
+
+
+def agent_system(target_words: int) -> str:
+    """Coding-agent-shaped system prompt: identity plus numbered tool and
+    policy blocks, deterministic and non-repetitive (~1.3 tok/word).
+
+    The shape is what the system-prompt anchor keys on. Agent fan-out
+    shares thousands of tokens of system prompt and tool schemas and
+    diverges at the first user message, so the reusable prefix ends at
+    the system boundary. A harness carrying its shared text in the user
+    turn arms no anchor at all.
+    """
+    out = [SYSTEM_MSG, "\n\nTools and policies:\n"]
+    words = len(SYSTEM_MSG.split())
+    i = 0
+    while words < target_words:
+        t = _TOPICS[i % len(_TOPICS)]
+        s = (
+            f"Tool {i} ({t}_probe): reads the {t} channel and returns "
+            f"{(i * 7) % 97} fields; call it at most {i % 4 + 1} times "
+            f"per turn, never before the {_TOPICS[(i + 3) % len(_TOPICS)]} "
+            f"check, and log the result under key K{(i * 31) % 4093}. "
+            f"Policy {i}: when the {t} reading drifts past "
+            f"{(i * 13) % 977}, escalate to the duty engineer and cite "
+            f"entry {max(0, i - 4)}.\n"
+        )
+        out.append(s)
+        words += len(s.split())
+        i += 1
+    return "".join(out)
+
 
 # Session-phase system message: tool output is part of the conversation,
 # so the strict answer-from-the-log framing would invite refusals.
@@ -254,6 +301,43 @@ def http_chat(
             pass
         ptok = int((body.get("usage") or {}).get("prompt_tokens", 0) or 0)
     return st, text, content, ptok, wall
+
+
+def raw_chat(
+    base: str,
+    mid: str,
+    messages: list,
+    *,
+    max_tokens: int = 24,
+    timeout: float = 900.0,
+):
+    """One chat POST that surfaces the raw HTTP contract: (status,
+    headers, parsed JSON body). A rejection returns its error body and
+    headers instead of raising (queue-cap phase reads Retry-After)."""
+    body = {
+        "model": mid,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": 0.0,
+    }
+    req = urllib.request.Request(
+        f"{base}/v1/chat/completions",
+        data=json.dumps(body).encode(),
+        method="POST",
+    )
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = resp.read().decode("utf-8", "replace")
+            return resp.status, resp.headers, json.loads(payload or "{}")
+    except urllib.error.HTTPError as e:
+        try:
+            parsed = json.loads(e.read().decode("utf-8", "replace") or "{}")
+        except json.JSONDecodeError:
+            parsed = {}
+        return e.code, e.headers, parsed
+    except Exception as e:  # noqa: BLE001 - report, don't raise
+        return -1, {}, {"error": {"message": f"{type(e).__name__}: {e}"}}
 
 
 def sse_chat(
@@ -440,9 +524,42 @@ def main() -> int:
         help="omit the system message (for templates that reject the role)",
     )
     ap.add_argument(
+        "--system-words",
+        type=int,
+        default=0,
+        metavar="N",
+        help="agent-shaped system prompt of N words of tool and policy "
+        "blocks (~1.3 tok/word) shared by every request, instead of the "
+        "one-line default; the shape the system-prompt anchor serves",
+    )
+    ap.add_argument(
+        "--queue-cap",
+        action="store_true",
+        help="queue-cap phase: boot the main servers with "
+        "GMLX_QUEUE_DEPTH_CAP=1 and flood past the decode batch; tail "
+        "arrivals must draw an immediate 503 with the Retry-After "
+        "contract and the server must recover",
+    )
+    ap.add_argument(
         "--no-tripwire",
         action="store_true",
         help="skip the missed-adoption tripwire phase (boots a third server)",
+    )
+    ap.add_argument(
+        "--reply-tokens",
+        type=int,
+        default=SESSION_REPLY_TOKENS,
+        help="session-phase reply budget (default 512); reasoning-channel "
+        "models at depth need 2048+ or replies truncate mid-think with "
+        "empty content and the turn chain degenerates",
+    )
+    ap.add_argument(
+        "--system-suffix",
+        default=None,
+        metavar="TEXT",
+        help="text appended to every system message, e.g. 'Reasoning "
+        "strength: low.' for ATEM reasoning models whose default strength "
+        "meanders past any reply budget at depth",
     )
     ap.add_argument(
         "--require-idle",
@@ -550,13 +667,26 @@ def main() -> int:
         f"{f2['reading']} units by {f2['technician']}"
     )
 
-    def mk_msgs(user_content: str) -> list:
-        msgs = [] if a.no_system else [{"role": "system", "content": SYSTEM_MSG}]
+    sfx = ("\n\n" + a.system_suffix) if a.system_suffix else ""
+    system_msg = (agent_system(a.system_words) if a.system_words > 0
+                  else SYSTEM_MSG) + sfx
+
+    def mk_msgs(user_content: str, system: str | None = None) -> list:
+        system = system_msg if system is None else system + sfx
+        msgs = [] if a.no_system else [{"role": "system", "content": system}]
         msgs.append({"role": "user", "content": user_content})
         return msgs
 
     def tick(key: str) -> int:
         return int(stats(base).get(key, 0) or 0)
+
+    def reuse_tick() -> int:
+        # Total reused prefix tokens: APC adoption plus spec prefix-cache
+        # restores. The MTP serve path's first reuse layer never moves the
+        # manager's matched counter, but a warm turn is warm either way.
+        s = stats(base)
+        return int(s.get(K["matched"], 0) or 0) + int(
+            s.get("spec_prefix_hit_tokens", 0) or 0)
 
     def settle(key: str, timeout: float = 15.0) -> int:
         # retirement stores are async; wait for the counter to hold still
@@ -598,6 +728,10 @@ def main() -> int:
         scheme=a.scheme,
         bits=a.bits_a,
     )
+    if a.queue_cap:
+        # cap 1 = one waiter past the decode batch. Unreachable by every
+        # other phase: their concurrency stays far below the batch size.
+        env_a["GMLX_QUEUE_DEPTH_CAP"] = "1"
     t_load0 = time.monotonic()
     with ServerProc(
         serve_args(a.model, a.speculative, a.draft_gguf),
@@ -610,8 +744,13 @@ def main() -> int:
         base = srv.base_url
         mid = model_id_of(base, srv)
         # absorb first-request one-time costs (kernel warmup) so wall-time
-        # comparisons below measure caching, not JIT
-        chat(base, mid, mk_msgs("Say ok."), max_tokens=4)
+        # comparisons below measure caching, not JIT. The warmup stays off
+        # the shared chain: carrying the run's system prompt behind a
+        # two-word user turn would put its own guard-column store at the
+        # system boundary, which then serves every later sibling and hides
+        # whether the anchor works at all.
+        chat(base, mid, [{"role": "user", "content": "Say ok."}],
+             max_tokens=4)
 
         # -- populate ------------------------------------------------------
         st, text, content, ptok, cold_wall = chat(
@@ -712,6 +851,52 @@ def main() -> int:
                 f"{div_wall:.1f}s",
             )
 
+        # -- anchor (only with --system-words) ------------------------------
+        # A shared agent-shaped system prompt makes the divergent request a
+        # sibling: on the ckpt and exact tiers it must restore the system
+        # block from the anchor stored during the cold request; the block
+        # tier serves the same prefix from the block chain with no anchor.
+        # Without --system-words the divergence sits a few tokens in and no
+        # anchor arms at all, which is why this gate is opt-in.
+        if a.system_words > 0 and not a.no_system:
+            st_all = stats(base)
+            # ~1.3 tok/word, less the template scaffolding and the grid or
+            # chunk snap the ckpt tier applies below the boundary.
+            anchor_floor = int(a.system_words * 0.6)
+            rep.check(
+                "anchor.divergent_adopted",
+                dm >= anchor_floor,
+                f"divergent matched +{dm} >= system-anchor floor "
+                f"{anchor_floor} ({a.system_words} system words)",
+            )
+            if a.tier == "block":
+                # Pure-KV models never enter the anchor code: the stock
+                # block tier already serves siblings at block granularity.
+                rep.note(
+                    "anchor.scope",
+                    "block tier serves the system prefix from the block "
+                    "chain; no anchor arms",
+                )
+            else:
+                anchored = int(st_all.get("anchor_stores", 0) or 0) + int(
+                    st_all.get("ckpt_stores", 0) or 0
+                )
+                rep.check(
+                    "anchor.armed",
+                    anchored > 0,
+                    f"anchor_stores={st_all.get('anchor_stores', 0)} "
+                    f"ckpt_stores={st_all.get('ckpt_stores', 0)}",
+                )
+                served = int(st_all.get("anchor_hits", 0) or 0) + int(
+                    st_all.get("ckpt_hits", 0) or 0
+                )
+                rep.check(
+                    "anchor.served",
+                    served > 0,
+                    f"anchor_hits={st_all.get('anchor_hits', 0)} "
+                    f"ckpt_hits={st_all.get('ckpt_hits', 0)}",
+                )
+
         # -- turns ---------------------------------------------------------
         # A real conversation through the real chat template: the
         # production render_ctx path unit tests fake with synthetic ids.
@@ -740,11 +925,11 @@ def main() -> int:
             for uq, at in history:
                 msgs.append({"role": "assistant", "content": at})
                 msgs.append({"role": "user", "content": uq})
-            m0 = tick(K["matched"])
+            m0 = reuse_tick()
             st, turn_text, last_answer, ptok, wall = chat(
                 base, mid, msgs, max_tokens=96
             )
-            dm = tick(K["matched"]) - m0
+            dm = reuse_tick() - m0
             turn_dms.append(dm)
             turns_ok &= st == 200 and len(turn_text) > 0
             turns_clean &= content_clean(last_answer)
@@ -789,7 +974,7 @@ def main() -> int:
             for uq, at in history:
                 msgs.append({"role": "assistant", "content": at})
                 msgs.append({"role": "user", "content": uq})
-            m0 = tick(K["matched"])
+            m0 = reuse_tick()
             st, vtext, vcontent, ptok, wall = chat(
                 base,
                 mid,
@@ -797,7 +982,7 @@ def main() -> int:
                 max_tokens=96,
                 chat_template_kwargs=template_kwargs,
             )
-            dm = tick(K["matched"]) - m0
+            dm = reuse_tick() - m0
             rep.check(
                 "variant.status",
                 st == 200 and len(vtext) > 0,
@@ -807,12 +992,34 @@ def main() -> int:
                 "variant.content_clean", content_clean(vcontent), repr(vcontent[:70])
             )
             if ck:
-                rep.check(
-                    "variant.adopted",
-                    dm >= div_floor,
-                    f"matched +{dm} >= grid floor {div_floor} under "
-                    "changed render kwargs",
-                )
+                if dm >= div_floor:
+                    rep.check(
+                        "variant.adopted",
+                        True,
+                        f"matched +{dm} >= grid floor {div_floor} under "
+                        "changed render kwargs",
+                    )
+                else:
+                    # Kwargs that rewrite the prompt head (gpt-oss
+                    # reasoning_effort edits the system block) leave no
+                    # shared prefix; the identical resend then proves
+                    # adoption under the new render shape instead.
+                    m0 = reuse_tick()
+                    st2, vtext2, _, _, wall2 = chat(
+                        base,
+                        mid,
+                        msgs,
+                        max_tokens=96,
+                        chat_template_kwargs=template_kwargs,
+                    )
+                    dm2 = reuse_tick() - m0
+                    rep.check(
+                        "variant.adopted",
+                        st2 == 200 and dm2 >= div_floor,
+                        f"kwargs change matched +{dm} (head divergence); "
+                        f"resend adopted +{dm2} >= {div_floor}, "
+                        f"{wall2:.1f}s",
+                    )
             else:
                 rep.note("variant.matched", f"+{dm}")
 
@@ -1085,6 +1292,207 @@ def main() -> int:
                     f"replay matched +{dm}",
                 )
 
+        # -- sibling burst -------------------------------------------------
+        # Unit 4 fresh gate: K siblings sharing a cold user-turn prefix
+        # arrive together. On the block tier the followers must end warm
+        # (held for the leader's post-prefill stores). The exact tier
+        # stores user-turn prefixes only at retirement, beyond the hold
+        # ceiling, so its numbers are reported, not gated. Ckpt-tier
+        # models admit one row at a time; no co-admission window exists.
+        if a.tier == "ckpt":
+            rep.note(
+                "burst.scope",
+                "ckpt tier admits B=1; no co-admission window to gate",
+            )
+        else:
+            burst_text, n_burst = deep_prefix(
+                a.prefix_words // 2, header="Sibling-burst variant log.\n"
+            )
+            eb = n_burst // 2
+            fb = entry_facts(eb)
+            plug_text, n_plug = deep_prefix(2000, header="Burst plug log.\n")
+            m0 = tick(K["matched"])
+            fr0 = ((Client(base).metrics()[1] or {}).get("server")
+                   or {}).get("freshness") or {}
+
+            def fire_plug():
+                # unrelated prefill in flight while the siblings land, so
+                # they queue up and co-admit in one formation tick -- the
+                # exact window the fresh gate exists for
+                return chat(
+                    base,
+                    mid,
+                    mk_msgs(plug_text + "Say ok."),
+                    max_tokens=16,
+                )
+
+            def fire_sib(i):
+                return chat(
+                    base,
+                    mid,
+                    mk_msgs(
+                        burst_text
+                        + f"Sibling {i}: how many units did entry {eb} "
+                        "report? Answer with just the number."
+                    ),
+                    max_tokens=64,
+                )
+
+            t0 = time.monotonic()
+            with ThreadPoolExecutor(max_workers=a.concurrency + 1) as ex:
+                fut_plug = ex.submit(fire_plug)
+                time.sleep(0.25)
+                futs = [ex.submit(fire_sib, i) for i in range(a.concurrency)]
+                bres = [f.result() for f in futs]
+                plug_res = fut_plug.result()
+            b_wall = time.monotonic() - t0
+            settle(K["stores"])
+            dm = tick(K["matched"]) - m0
+            fr1 = ((Client(base).metrics()[1] or {}).get("server")
+                   or {}).get("freshness") or {}
+            d_holds = int(fr1.get("holds", 0) or 0) - int(
+                fr0.get("holds", 0) or 0
+            )
+            rep.check(
+                "burst.status",
+                all(st == 200 and text for st, text, _, _, _ in bres)
+                and plug_res[0] == 200,
+                f"{a.concurrency} cold siblings behind a plug prefill, "
+                f"{b_wall:.1f}s wall",
+            )
+            rep.check(
+                "burst.coherent",
+                all(
+                    re.search(rf"\b{fb['reading']}\b", text)
+                    for _, text, _, _, _ in bres
+                ),
+                f"entry {eb} -> {fb['reading']} units in every reply",
+            )
+            floor = int(0.6 * (a.prefix_words // 2)) * (a.concurrency - 1)
+            if a.tier == "block":
+                rep.check(
+                    "burst.gate_held",
+                    d_holds >= 1,
+                    f"fresh holds +{d_holds} (>=1: the siblings "
+                    "co-admitted and a follower was deferred)",
+                )
+                rep.check(
+                    "burst.followers_warm",
+                    dm >= floor,
+                    f"matched +{dm} >= floor {floor} "
+                    f"({a.concurrency - 1} followers), fresh holds "
+                    f"+{d_holds}",
+                )
+            else:
+                rep.note(
+                    "burst.followers",
+                    f"matched +{dm} (floor would be {floor}), fresh "
+                    f"holds +{d_holds}; exact tier stores user-turn "
+                    "prefixes at retirement, past the hold ceiling",
+                )
+            rep.note(
+                "burst.fresh_holds",
+                f"+{d_holds} (last reason "
+                f"{str(fr1.get('last_hold_reason'))[:80]!r})",
+            )
+
+        # -- queue cap -----------------------------------------------------
+        # Unit 5's wire contract. The servers run at cap 1, and depth
+        # counts past the decode slots (completion batch), so the flood
+        # must exceed the batch; tail arrivals then land while the queue
+        # is deep and must be rejected at the socket, never mid-stream.
+        if a.queue_cap:
+            flood = 44
+            q0 = ((Client(base).metrics()[1] or {}).get("server")
+                  or {}).get("queue") or {}
+
+            def fire_q(i):
+                return raw_chat(
+                    base,
+                    mid,
+                    mk_msgs(
+                        f"Flood {i}: what is 2 plus {i % 7}? "
+                        "Answer with just the number.",
+                        system=SYSTEM_MSG,
+                    ),
+                    max_tokens=24,
+                )
+
+            t0 = time.monotonic()
+            with ThreadPoolExecutor(max_workers=flood) as ex:
+                qres = list(ex.map(fire_q, range(flood)))
+            q_wall = time.monotonic() - t0
+            n200 = sum(1 for st, _, _ in qres if st == 200)
+            rejects = [(h, b) for st, h, b in qres if st == 503]
+            q1 = ((Client(base).metrics()[1] or {}).get("server")
+                  or {}).get("queue") or {}
+            d_rej = int(q1.get("rejections", 0) or 0) - int(
+                q0.get("rejections", 0) or 0
+            )
+            rep.check(
+                "queuecap.rejected",
+                len(rejects) >= 1,
+                f"{len(rejects)} of {flood} drew 503 at cap 1, "
+                f"{q_wall:.1f}s wall",
+            )
+            rep.check(
+                "queuecap.no_other_errors",
+                n200 + len(rejects) == flood,
+                f"{n200} served + {len(rejects)} rejected == {flood}",
+            )
+
+            def retry_ok(h) -> bool:
+                try:
+                    return 2 <= int(h.get("Retry-After", "")) <= 60
+                except (TypeError, ValueError):
+                    return False
+
+            first_retry = (
+                rejects[0][0].get("Retry-After") if rejects else None
+            )
+            rep.check(
+                "queuecap.retry_after",
+                bool(rejects) and all(retry_ok(h) for h, _ in rejects),
+                f"every 503 carries Retry-After in [2, 60] "
+                f"(first: {first_retry}s)",
+            )
+            err0 = (rejects[0][1].get("error") or {}) if rejects else {}
+            rep.check(
+                "queuecap.body_contract",
+                bool(rejects)
+                and all(
+                    (b.get("error") or {}).get("type") == "server_overloaded"
+                    and int((b.get("error") or {}).get("queue_cap", 0) or 0)
+                    == 1
+                    and int((b.get("error") or {}).get("queue_depth", 0) or 0)
+                    >= 1
+                    for _, b in rejects
+                ),
+                "type/queue_cap/queue_depth on every 503 "
+                f"(first depth {err0.get('queue_depth')})",
+            )
+            rep.check(
+                "queuecap.metrics_counted",
+                d_rej >= len(rejects),
+                f"queue.rejections +{d_rej} >= {len(rejects)} observed 503s",
+            )
+            st, text, _, _, _ = chat(
+                base,
+                mid,
+                mk_msgs(
+                    "What is 2 plus 2? Answer with just the number.",
+                    system="You are a helpful assistant.",
+                ),
+                max_tokens=8,
+            )
+            # gate recovery on service, not arithmetic: a log-scoped
+            # system prompt makes some models refuse off-log questions
+            rep.check(
+                "queuecap.recovers",
+                st == 200 and len(text.strip()) > 0,
+                f"post-drain retry status {st}: {text[:40]!r}",
+            )
+
     # -- bitrate-b isolation ------------------------------------------------
     # Only meaningful when a second KV width is requested: the namespaces
     # must not cross-adopt. Skipped entirely on the fp16 acceptance shape.
@@ -1186,11 +1594,12 @@ def main() -> int:
             chat(base, mid, mk_msgs("Say ok."), max_tokens=4)
 
             root = (
-                [] if a.no_system else [{"role": "system", "content": SESSION_SYSTEM}]
+                [] if a.no_system
+                else [{"role": "system", "content": SESSION_SYSTEM + sfx}]
             )
             root = root + [{"role": "user", "content": prefix + q}]
             st, text, content, ptok, wall = chat(
-                base, mid, root, max_tokens=SESSION_REPLY_TOKENS
+                base, mid, root, max_tokens=a.reply_tokens
             )
             settle(K["stores"])
             # the session runs under its own system message, so the log
@@ -1240,11 +1649,11 @@ def main() -> int:
                         {"role": "assistant", "content": summary},
                         {"role": "user", "content": q},
                     ]
-                    m0 = tick(K["matched"])
+                    m0 = reuse_tick()
                     st, text, content, ptok_t, wall = chat(
-                        base, mid, msgs, max_tokens=SESSION_REPLY_TOKENS
+                        base, mid, msgs, max_tokens=a.reply_tokens
                     )
-                    dm = tick(K["matched"]) - m0
+                    dm = reuse_tick() - m0
                     turns_ok &= st == 200 and len(text) > 0
                     clean_ok &= content_clean(content)
                     comp_row = (st, sess_facts(text), dm, wall)
@@ -1341,20 +1750,20 @@ def main() -> int:
                         0,
                         ((root_ptok - QUESTION_SLACK) // a.block_size) * a.block_size,
                     )
-                m0 = tick(K["matched"])
+                m0 = reuse_tick()
                 if stream:
                     st, text, content, events, wall = schat(
                         base,
                         mid,
                         msgs,
-                        max_tokens=1024 if is_abort else SESSION_REPLY_TOKENS,
+                        max_tokens=1024 if is_abort else a.reply_tokens,
                         abort_after=24 if is_abort else None,
                         **extra,
                     )
                     ptok_t = 0
                 else:
                     st, text, content, ptok_t, wall = chat(
-                        base, mid, msgs, max_tokens=SESSION_REPLY_TOKENS, **extra
+                        base, mid, msgs, max_tokens=a.reply_tokens, **extra
                     )
                     events = 0
                 if kind == "tool" and tool_state == "untried":
@@ -1367,11 +1776,11 @@ def main() -> int:
                         hist = history
                         block = [{"role": "user", "content": dump + "\n" + q_t}]
                         msgs = root + hist + block
-                        m0 = tick(K["matched"])
+                        m0 = reuse_tick()
                         st, text, content, ptok_t, wall = chat(
-                            base, mid, msgs, max_tokens=SESSION_REPLY_TOKENS
+                            base, mid, msgs, max_tokens=a.reply_tokens
                         )
-                dm = tick(K["matched"]) - m0
+                dm = reuse_tick() - m0
                 if is_abort:
                     abort_ok = st == 200 and events >= 24
                     settle(K["stores"])
@@ -1501,7 +1910,10 @@ def main() -> int:
     # fire. The prompt must tokenize under unit plus guard (no adoptable
     # terminal boundary) yet past the rotating window (windows over ~1300
     # tokens need --no-tripwire). Disk stays off so a retire skeleton
-    # cannot serve the resend.
+    # cannot serve the resend, and the system message stays short even
+    # under --system-words: an agent-shaped system block arms the anchor,
+    # which then serves the resends exactly as designed and leaves this
+    # phase with nothing to refuse.
     if ck and not a.no_tripwire:
         trip_prefix, n_trip = deep_prefix(1050)
         trip_q = (
@@ -1527,7 +1939,9 @@ def main() -> int:
             sts = []
             for _ in range(4):  # populate + 3 refused resends
                 st, _, _, _, _ = chat(
-                    base, mid, mk_msgs(trip_prefix + trip_q), max_tokens=32
+                    base, mid,
+                    mk_msgs(trip_prefix + trip_q, system=SYSTEM_MSG),
+                    max_tokens=32,
                 )
                 sts.append(st)
             settle("ckpt_stores")
@@ -1563,8 +1977,11 @@ def main() -> int:
         "prefix_tokens": prefix_tok,
         "session_turns": a.session or None,
         "session_final_ptok": sess_final_ptok,
+        "reply_tokens": a.reply_tokens,
         "speculative": a.speculative,
         "system_message": not a.no_system,
+        "system_words": a.system_words or None,
+        "system_suffix": a.system_suffix,
         "template_kwargs": template_kwargs,
         "cold_wall_s": round(cold_wall, 1),
         "warm_wall_s": round(warm_wall, 1),

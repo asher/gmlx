@@ -67,14 +67,15 @@ _FAMILY_NOTES = {
     "qwen2":          ("qwen2",    "Qwen2 / Qwen2.5 dense; QKV biases, tied embeddings on 0.5B/1.5B"),
     "qwen2moe":       ("qwen2",    "Qwen1.5-MoE-A2.7B; routed switch_mlp experts + shared expert + sigmoid shared gate; QKV biases; moe_intermediate from ffn_gate_exps shape (GGUF omits the KV key)"),
     "qwen3":          ("qwen3",    "Qwen3 dense (0.6B-32B); per-head qk-norm, NEOX rope (no qk-permute)"),
-    "qwen35":         ("qwen3",    "Qwen3.5 dense hybrid: gated-DeltaNet linear attention with a full-attention layer every full_attention_interval; fused-GDN Metal kernels at runtime (GMLX_FUSED_GDN=0 disables); native-head MTP (nextn) -> --speculative needs no companion GGUF"),
+    "qwen35":         ("qwen3",    "Qwen3.5/3.6/3.8 dense hybrid: gated-DeltaNet linear attention with a full-attention layer every full_attention_interval; fused-GDN Metal kernels at runtime (GMLX_FUSED_GDN=0 disables); native-head MTP (nextn) -> --speculative needs no companion GGUF; a DFlash 2 drafter GGUF (--draft-gguf, z-lab Qwen3.8-27B-DFlash2) wins over the head when configured"),
     "qwen35moe":      ("qwen3",    "Qwen3.5/3.6 MoE (e.g. Qwen3.6-27B): the qwen35 gated-DeltaNet hybrid + fine-grained MoE with shared expert; fused-GDN kernels + native-head MTP as on qwen35"),
     "qwen3moe":       ("qwen3",    "Qwen3-MoE (30B-A3B / 235B-A22B); all-MoE switch_mlp, no shared expert"),
+    "qwen4exp":       ("qwen3",    "Qwen3.8-Flash-Next (llama.cpp PR 27742): the qwen35 gated-DeltaNet hybrid (sigmoid output gate, tiled V heads) + every-layer 512-expert MoE with shared expert, plus hyper-connections (4 residual streams, low-rank sigmoid mixers replacing every norm), QSA sparse attention (4-head indexer over mean-pooled blocks of 4 keys, top 512 blocks + the incomplete tail; dense below 2052 cached tokens) and PLE n-gram hash embeddings on layer 1 (320M-row IQ4_NL table kept as wire bytes, rows gathered per token). Vendored gmlx.qwen4_exp_model; all norms arrive +1 baked (passthrough). The MTP head is not in the GGUF (the converter drops it): --speculative needs the qwen4exp-mtp companion GGUF (autodetected next to the target, or --draft-gguf) built from the HF mtp.* tensors. Pairs with the Qwen3-VL mmproj (--mmproj) via a vendored wrapper on the qwen3_5 vision tower"),
     "qwen3vlmoe":     ("qwen3",    "Qwen3-Omni thinker text tower (MoE, qwen3moe layout); pairs with the Qwen3-Omni mmproj (--mmproj) for vision + audio input"),
     "llama":          ("llama",    "Llama-2/3, Mistral-7B-as-llama, Vicuna; SPM merges reconstructed from scores. Sparse-MoE variants (Mixtral-8x7B/8x22B) ship under this arch with an expert count -> routed to model_type=mixtral (block_sparse_moe + SwitchGLU); legacy per-expert split weights are coalesced to the stacked form on load"),
     "mistral3":       ("llama",    "llama.cpp 'mistral3' = Ministral-3 / Mistral-Small-3.1, Llama layout"),
     "nemotron_h_moe": ("nemotron", "NVIDIA Nemotron-H MoE hybrid: Mamba2 SSM layers + sparse attention layers + MoE MLPs; layer_norm_epsilon (not rms_norm_eps)"),
-    "deepseek2":       ("deepseek", "DeepSeek-V3/R1 + GLM-4.x MLA conversions (GLM-4.7-Flash); MLA attention (absorbed embed_q/unembed_out via KQuantMultiLinear, native Q8_0), fine-grained sigmoid-gated MoE + shared expert + group routing, leading dense block. V2 (softmax gating) not yet supported"),
+    "deepseek2":       ("deepseek", "DeepSeek-V3/R1, Moonshot Kimi-K2.5/K2.7, + GLM-4.x MLA conversions (GLM-4.7-Flash); MLA attention (absorbed embed_q/unembed_out via KQuantMultiLinear, native Q8_0), fine-grained sigmoid-gated MoE + shared expert + group routing, leading dense block. The converter writes rope yarn_log_multiplier as 0.1 * mscale_all_dim, and the synth undoes the 0.1 factor (a raw read flattens attention ~1.85x). Kimi K2.x is ungrouped (384 experts, one group), and gmlx selects its own sampling family (t=1.0) from general.name. Its <|im_user|>/<|im_middle|> chat format leaves <think> open at the generation prompt, and the stock kimi_k2 tool parser reads its tool calls. K2.x pairs with its MoonViT mmproj (--mmproj, projector 'kimik25') for vision. V2 (softmax gating) not yet supported"),
     "deepseek4":      ("deepseek", "DeepSeek V4 Flash (256x8.4B, dwarfstar 'deepseek4' arch, not a llama.cpp conversion; parity reference is the ds4 engine). MLA-lite attention (low-rank q, single shared 512-dim KV latent K=V, grouped low-rank output proj, per-head fp32 sinks, tail-64 NEOX rope with inverse-rope'd output) in three per-layer variants from compress_ratios: sliding-window(128), +compressed pool, +lightning-indexer top-512 sparse. Manifold-constrained hyper-connections (4-stream 4D hidden, Sinkhorn mixing). Every-layer 256-expert MoE, sqrt-softplus gating + selection-only correction bias, first 3 layers hash-routed (tid2eid), shared expert, clamped SwiGLU. QAT round-trips (fp8-E4M3 KV, Hadamard+fp4-E2M1 indexer) reproduced on-path for logit parity. Model class vendored from mlx-lm PR #1192; separate MTP drafter GGUF (--draft-gguf, or autodetected next to the target) for speculative decoding - the DSpark sidecar in either container (gmlx deepseek4-dspark or llama.cpp dflash, e.g. the unsloth dspark release), or the legacy deepseek4_mtp_support nextn file"),
     "glm-dsa":        ("deepseek", "GLM-5.2 (DeepSeek-V3.2): deepseek2 MLA + fine-grained sigmoid-gated MoE plus a per-layer DSA 'lightning indexer' (top-k sparse-attention key selection) + an MTP/nextn layer (dropped on load). Reuses the DEEPSEEK2 remap (indexer.* patterns appended) -> mlx-lm model_type glm_moe_dsa (subclasses deepseek_v32)"),
     "glm4moe":        ("glm",      "GLM-4.5 / 4.6 (incl. GLM-4.5-Air); standard MHA (qk-norm, partial rotary) + DeepSeek-V3-style fine-grained sigmoid-gated MoE (shared expert, group routing, leading dense block). NextN/MTP layer dropped on load"),
@@ -88,6 +89,7 @@ _FAMILY_NOTES = {
     "hunyuan-moe":    ("hunyuan",  "Tencent Hunyuan-A13B; softmax-gated fine-grained MoE + per-layer shared expert, per-head qk-norm (named query/key_layernorm), NTK-alpha rope. NEOX rope (no qk-permute); router -> mlp.gate.wg, shared expert -> mlp.shared_mlp; the GGUF materializes k/v on every layer so use_cla=False; rope alpha defaults to 1.0 (folded into freq_base); top-k router scores renormalized at load (norm_topk_prob - upstream mlx-lm omits it and degenerates)"),
     "hy_v3":          ("hunyuan",  "Tencent Hy3 (299B-A21B, llama.cpp PR #25395); sigmoid-gated fine-grained MoE (192 experts top-8) with selection-only expert bias (exp_probs_b, stored suffix-less) + top-k renorm x expert_weights_scale + one ungated shared expert, single leading dense layer (derived from tensor presence - no KV), per-head qk-norm, plain NEOX rope theta 11.16M (no qk-permute). Native MTP/NextN block past the trunk (stripped from the trunk on load; drafts via HyV3MTPDrafter - single-depth head, block_size 2, GMLX_HY3_MTP_BLOCK raises it). Router gate + expert bias pinned fp32 (llama.cpp routes fp32). HF enable_lm_head_fp32 pinned off (llama.cpp, the parity oracle, also computes the head in compute dtype). Early community GGUFs with arch 'hy-v3' (dash) are not mapped - reconvert. Model class vendored from mlx-lm PR #1485 with the MTP hidden-state wiring fixed to the vLLM-verified post-final-norm form"),
     "kimi-k3":        ("kimi",     "Moonshot Kimi-K3 (2.8T-A50B, llama.cpp PR #26185); hybrid KDA linear attention (per-key-channel-decay delta rule via the fused gated_delta kernels, short conv1d Q/K/V, full-rank sigmoid output gate) + nope-only MLA every attn_res-th-ish layer (per-layer head_count_kv array, 0 = KDA; absorbed embed_q/unembed_out, sigmoid output gate, NO rope anywhere), cross-layer residual attention (softmax-scored convex mix over banked residual checkpoints, restart on bank layers), latent MoE (896 experts top-16 at routed_expert_hidden_size behind routed_down/routed_up, sigmoid gating + correction bias, shared experts at full width), and situ activation replacing SwiGLU everywhere. ssm_a arrives folded (-exp(A_log)) and stays folded. Native MXFP4 experts (gpt-oss codec). XTML chat format (<|open|>tag<|sep|>), tiktoken kimi-k2 pretokenizer, EOS 163586 <|end_of_msg|>. Hybrid cache is non-trimmable -> chat re-prefills on trim. Model class vendored (no upstream mlx-lm class; kimi_linear is the nearest relative)"),
+    "muse-glimmer":   ("muse",     "Meta Muse Glimmer 30B (llama.cpp 'muse-glimmer'); dense 52-layer sandwich-norm decoder - pre/post norms around both attention and FFN, at two epsilons (1e-5 pre/final, 1e-8 post) - with an afmoe-shaped attention output gate (sigmoid(x_norm @ W_gate) applied before o_proj), per-head qk-norm whose weights are synthesized at conversion to absorb qk_scale_factor (q_norm a uniform 3.87, k_norm ones), an unweighted RMSNorm on the token embeddings before layer 0, and a logit scale (output_multiplier 0.196) + gemma-style tanh softcap at 20. Attention runs a 3-of-4 sliding window (2048) with RoPE, and full attention with NoPE on every 4th layer - the inverse of the usual arrangement, and the reason the model card says '131072+': the largest positional offset ever resolved is the 2048 window, so there is no rope extrapolation ceiling and past 131k the only limit is KV memory at ~13 KB/token (just the 13 global layers grow; the 39 sliding ones are pinned by their rotating cache). The four per-layer norms carry a baked +1 that a plain RMSNorm consumes as-is (no gemma unbake). NORM rope with Q/K un-permuted at conversion => traditional=True, no qk_permute. Model class vendored (no upstream mlx-lm class; afmoe is the nearest relative). Pairs with the Muse Glimmer mmproj (--mmproj) for vision and with the DFlash drafter GGUF (--draft-gguf) for speculative decoding"),
     "granitehybrid":  ("granite",  "IBM Granite 4.x hybrid (H-Micro/H-Tiny/H-Small); alternating Mamba2 + attention (layer_types from per-layer head_count_kv==0), softmax MoE + fused-input shared MLP (loader pre-fuses ffn_{gate,up}_shexp -> input_linear), granite runtime multipliers, NoPE via rope.scaling.finetuned=false. NORM rope => qk_permute on attention layers"),
     "falcon-h1":      ("falcon",   "TII Falcon-H1 (0.5B-34B); parallel attention + Mamba2 in every layer (one input_layernorm feeds both, outputs summed), dense gated MLP under feed_forward.*, explicit head_dim from key_length. NEOX rope (no qk-permute). The muP multiplier zoo is folded into the wire weights at convert => synth pins every multiplier neutral; ffn_norm/ssm_a/ssm_d stored with no .weight suffix"),
     "qwen3next":      ("qwen",     "Qwen3-Next-80B-A3B; gated-DeltaNet linear attention (3 of every 4 layers) + gated full attention (gate fused in attn_q), every-layer 512-expert MoE + shared expert. NEOX rope (no qk-permute, not qwen35's packing). Both GDN wire layouts load: legacy fused ssm_in -> in_proj_qkvz; the newer split attn_qkv/attn_gate via a load-time module split (loader swaps in_proj_qkvz for in_proj_qkv/in_proj_z, skipping the runtime de-interleave). V heads HF-grouped => the qwen3.5 tiled-V patch is excluded; +1 norm bake is what mlx-lm expects (passthrough)"),
@@ -127,13 +129,48 @@ class UnsupportedArchError(Exception):
 # fails at build. Extend together with the loader dispatch.
 MTP_WIRED_MODEL_TYPES = frozenset({
     "qwen3_5", "qwen3_5_moe", "gemma4_text", "deepseek_v4", "hy_v3",
+    "muse_glimmer", "qwen4_exp",
 })
+
+
+# model_types whose MTP drafter ships as a companion GGUF, and the arches that
+# companion can carry, best container first. The loader reads a row to find the
+# sidecar of a target; discovery reads it backwards to pair a drafter it found.
+# Extend it together with the loader dispatch.
+MTP_DRAFTER_ARCHES = {
+    # `dflash` is llama.cpp's DSpark container, `deepseek4_mtp_support` the
+    # legacy nextn one.
+    "deepseek_v4": ("deepseek4-dspark", "dflash", "deepseek4_mtp_support"),
+    "muse_glimmer": ("dflash",),
+    # DFlash 2 drafters (z-lab) for Qwen3.5/3.6/3.8 dense targets.
+    "qwen3_5": ("dflash",),
+    "gemma4_text": ("gemma4_assistant", "gemma4-assistant", "gemma4_mtp"),
+    # Qwen3.8-Flash-Next MTP head, extracted from the HF mtp.* tensors into
+    # a companion GGUF (the llama.cpp converter drops the head).
+    "qwen4_exp": ("qwen4exp-mtp",),
+}
 
 
 def mtp_wired(gguf_arch: str | None) -> bool:
     """True iff a native-head MTP GGUF of this arch has a wired target class."""
     model_type = config_synth.GGUF_ARCH_TO_MODEL_TYPE.get(gguf_arch or "")
     return model_type in MTP_WIRED_MODEL_TYPES
+
+
+def drafter_arches(model_type: str) -> tuple:
+    """The companion-GGUF arches that can draft for ``model_type``, best
+    container first. ``()`` if the type has no companion drafter."""
+    return MTP_DRAFTER_ARCHES.get(model_type, ())
+
+
+def drafter_serves(drafter_arch: str | None, gguf_arch: str | None) -> bool | None:
+    """Whether a ``drafter_arch`` drafter can serve a ``gguf_arch`` target.
+    ``None`` when no row lists ``drafter_arch``: the table has no opinion."""
+    rows = [t for t, arches in MTP_DRAFTER_ARCHES.items()
+            if drafter_arch in arches]
+    if not rows:
+        return None
+    return config_synth.GGUF_ARCH_TO_MODEL_TYPE.get(gguf_arch or "") in rows
 
 
 def has_synth(gguf_arch: str) -> bool:
@@ -149,6 +186,9 @@ def has_synth(gguf_arch: str) -> bool:
 _VENDORED_MLX_LM_MODULES = {
     # mlx-lm PR #1401 (MiniMax-M3 text backbone).
     "minimax_m3": "gmlx.minimax_m3_model",
+    # llama.cpp PR #27742 (Qwen3.8-Flash-Next); mlx-vlm main carries a
+    # qwen4_exp package but the pinned release does not, and mlx-lm has none.
+    "qwen4_exp": "gmlx.qwen4_exp_model",
     # mlx-lm PR #1192 (DeepSeek V4 Flash), + vendored hyper_connection and
     # PoolingCache/BatchPoolingCache companions injected by ensure_registered.
     "deepseek_v4": "gmlx.deepseek_v4_model",
@@ -157,6 +197,10 @@ _VENDORED_MLX_LM_MODULES = {
     # llama.cpp PR #26185 (Kimi-K3); no upstream mlx-lm class (kimi_linear is
     # the nearest relative and lacks the five K3-only mechanisms).
     "kimi_k3": "gmlx.kimi_k3_model",
+    # llama.cpp LLM_ARCH_MUSE_GLIMMER; no upstream mlx-lm class (afmoe is the
+    # nearest relative and has neither the NoPE/RoPE inversion nor the second
+    # norm epsilon).
+    "muse_glimmer": "gmlx.muse_glimmer_model",
 }
 
 

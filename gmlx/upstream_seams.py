@@ -56,7 +56,9 @@ SEAMS: tuple[Seam, ...] = (
     # --- batched serve scheduler + ragged decode (batch_sched / ragged_decode) ---
     Seam("mlx_vlm.generate.ar", "BatchGenerator._next",
          "batch_sched.install_decode_priority_sched (decode-first tick, "
-         "prompt-arm structure, _prompt_time_counter contract)",
+         "prompt-arm structure, _prompt_time_counter contract); "
+         "admit_gate.install_admit_headroom_gate (admission-arm gating "
+         "via the pending-list stash); serve_memtrace (tick bracket)",
          critical=True),
     Seam("mlx_vlm.generate.ar", "BatchGenerator.insert",
          "batch_sched arrival-merge (_unprocessed_sequences append/rebind)"),
@@ -184,6 +186,20 @@ SEAMS: tuple[Seam, ...] = (
          "spec_engine.install_full_prompt_mtp_prefill", critical=True),
     Seam("mlx_vlm.generate.ar", "SpeculativeGenerationBatch.next",
          "spec_engine.install_continuous_batch_admission", critical=True),
+    Seam("mlx_vlm.generate.ar", "SpeculativeGenerationBatch.filter",
+         "spec_engine._filter_with_release (per-row release rides the "
+         "mark-finished contract; the rounds generator sheds via "
+         "stop_check)", critical=True),
+    Seam("mlx_vlm.generate.ar", "SpeculativeGenerationBatch.__len__",
+         "spec_engine._len_with_promotion (patched semantics are D-3's "
+         "hazard; decision modules count rows via _orig_len only)",
+         critical=True),
+    Seam("mlx_vlm.generate.ar", "GenerationBatch._eval_pending_state",
+         "governor shed ordering (filter under pressure requires "
+         "eval before the gather)", critical=True),
+    Seam("mlx_vlm.generate.ar", "BatchGenerator.remove",
+         "governor retire rung + tick_guard rebuild (queue pop / "
+         "prompt-batch clear / decode filter semantics)", critical=True),
     Seam("mlx_vlm.generate.ar", "run_speculative_server_rounds",
          "spec_engine.install_owned_spec_engine", critical=True),
     Seam("mlx_vlm.speculative.utils", "make_speculative_prompt_cache",
@@ -202,6 +218,9 @@ SEAMS: tuple[Seam, ...] = (
          "server_bridge_vlm (GGUF model resource loader)", critical=True),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._make_sampler",
          "server_patches.install_fast_sampler"),
+    Seam("mlx_vlm.server.generation", "ResponseGenerator._step",
+         "server_patches.row_failed (permanently failed rows delivered "
+         "to their response queues on the engine thread)", critical=True),
     Seam("mlx_vlm.server.generation", "GenerationArguments.to_template_kwargs",
          "server_patches (chat_template_kwargs transform)"),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._preprocess_request",
@@ -213,8 +232,8 @@ SEAMS: tuple[Seam, ...] = (
          "key-merge wrap)"),
     Seam("mlx_vlm.server.anthropic", "apply_chat_template",
          "server_patches._common._render_target_modules (faithful "
-         "history, retire capture, and thinking seed wrap every "
-         "captured render binding)"),
+         "history, retire capture, thinking seed, and developer-role "
+         "normalization wrap every captured render binding)"),
     Seam("mlx_vlm.server.app", "_protocol_deps",
          "server_patches._common._render_target_modules (deps captures "
          "the openai function object at namespace construction)"),
@@ -224,7 +243,10 @@ SEAMS: tuple[Seam, ...] = (
          "input item; tool passthrough branch)"),
     Seam("mlx_vlm.prompt_utils", "get_chat_template",
          "server_patches.render.install_faithful_history (owned render "
-         "tail mirrors the stock function's)"),
+         "tail mirrors the stock function's) + "
+         "reasoning.install_template_default_thinking (absent "
+         "enable_thinking seeded as Jinja Undefined so the 0.6.15 False "
+         "injection stands down)"),
     Seam("mlx_vlm.server.openai", "_split_thinking",
          "retire_key.build_assistant_message (response-shape mirror)"),
     Seam("mlx_vlm.server.openai", "process_tool_calls",
@@ -252,11 +274,12 @@ SEAMS: tuple[Seam, ...] = (
          "server_patches (HF download gate)", critical=True),
     Seam("mlx_vlm.utils", "StoppingCriteria.__call__",
          "server_patches (ignore-EOS)"),
-    # --- tool-parser registry (hy_v3_tools.ensure_registered) ---
+    # --- tool-parser registry (hy_v3_tools / muse_glimmer_tools) ---
     Seam("mlx_vlm.tool_parsers", "_TEMPLATE_MARKERS",
-         "hy_v3_tools.ensure_registered (Hy3 marker prepend)"),
+         "hy_v3_tools / muse_glimmer_tools ensure_registered (marker prepend)"),
     Seam("mlx_vlm.tool_parsers", "load_tool_module",
-         "hy_v3_tools (sys.modules graft resolves through it)"),
+         "hy_v3_tools / muse_glimmer_tools (sys.modules graft resolves "
+         "through it)"),
     # --- APC internals (lone-harvest patch, gmlx manager subclass, apc_pooling) ---
     Seam("mlx_vlm.apc", "harvest_blocks_from_batch_cache",
          "server_patches.install_apc_lone_harvest", critical=True),
@@ -289,6 +312,14 @@ SEAMS: tuple[Seam, ...] = (
          "apc_pooling (disk-tier zero-width spill)", critical=True),
     Seam("mlx_vlm.apc", "_clone_cache_entry_for_apc",
          "apc_pooling + kvarn_apc", critical=True),
+    Seam("mlx_vlm.generate.ar", "BatchGenerator.__init__",
+         "apc_pooling.install_pooled_prefill_batch_gate (prompt batches "
+         "stay B=1 on pooling-cache models; to_batch_cache has no pooled "
+         "arm)", critical=True),
+    Seam("mlx_vlm.generate.ar", "_extend_cache",
+         "apc_pooling.install_batched_cachelist_admission (promotion test "
+         "looks through CacheList so an already-batched one is not merged "
+         "twice)", critical=True),
     Seam("mlx_vlm.apc", "_safetensors_dtype_info",
          "apc_pooling + kvarn_apc (uint32 codes)", critical=True),
     Seam("mlx_vlm.apc", "model_apc_mode",
@@ -316,6 +347,17 @@ SEAMS: tuple[Seam, ...] = (
          "arrays_cache_fix (prepare wrap)"),
     Seam("mlx_vlm.models.cache", "BatchKVCache",
          "mtp_drafter / cache_snapshot row round-trip"),
+    Seam("mlx_vlm.models.cache", "BatchKVCache.filter",
+         "spec_engine per-row release + governor retire (physical row "
+         "drop through the cache's own filter)", critical=True),
+    Seam("mlx_vlm.models.cache", "BatchKVCache.extract",
+         "governor orange retire (contiguous single-row extract before "
+         "filter)", critical=True),
+    Seam("mlx_vlm.models.cache", "ArraysCache.extract",
+         "governor orange retire (GDN hybrid row extract)"),
+    Seam("mlx_vlm.models.cache", "_BaseCache.nbytes",
+         "governor green sampling + registered-cache bytes() protocol",
+         critical=True),
     Seam("mlx_vlm.models.cache", "BatchRotatingKVCache",
          "cache_compat (rollback attach, safe KV-quant exclusion)"),
     Seam("mlx_vlm.models.cache", "BufferedRotatingKVCache",
@@ -500,6 +542,41 @@ def vendored_upstream_collisions() -> list[str]:
                 f"{mod_name}: upstream mlx-lm now ships this module; the "
                 f"vendored copy shadows it - reconcile and drop the vendor "
                 f"entry (arch_table._VENDORED_MLX_LM_MODULES)")
+    hits += _vendored_vlm_collisions()
+    return hits
+
+
+# gmlx module -> the mlx-vlm namespace its ensure_registered() grafts into.
+# Each is a package directory upstream, so a native arrival shows up as either
+# a <leaf>.py module or a <leaf>/ package.
+VENDORED_MLX_VLM_MODULES = {
+    # muse_glimmer model: shipped upstream in mlx-vlm 0.6.15; the graft is
+    # upstream-first so gmlx.muse_glimmer_vlm_model is dead code under this
+    # pin. Delete the module at the vendoring review.
+    "gmlx.hy_v3_tools": "mlx_vlm.tool_parsers.hy_v3",
+    "gmlx.muse_glimmer_tools": "mlx_vlm.tool_parsers.muse_glimmer",
+    "gmlx.qwen4_exp_vlm_model": "mlx_vlm.models.qwen4_exp",
+}
+
+
+def _vendored_vlm_collisions() -> list[str]:
+    """Same check on the mlx-vlm side: our grafts are upstream-first at import
+    time, but a native module arriving under a name we also register is the
+    signal to drop the vendored copy rather than keep shadowing it."""
+    hits = []
+    for mod_name, target in VENDORED_MLX_VLM_MODULES.items():
+        pkg, _, leaf = target.rpartition(".")
+        try:
+            parent = importlib.import_module(pkg)
+        except ImportError:
+            continue
+        root = os.path.dirname(parent.__file__)
+        if (os.path.exists(os.path.join(root, f"{leaf}.py"))
+                or os.path.isdir(os.path.join(root, leaf))):
+            hits.append(
+                f"{mod_name}: upstream mlx-vlm now ships {target}; the "
+                f"vendored copy is only a fallback - reconcile and drop the "
+                f"vendor entry (upstream_seams.VENDORED_MLX_VLM_MODULES)")
     return hits
 
 

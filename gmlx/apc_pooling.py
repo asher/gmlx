@@ -262,6 +262,27 @@ def install_pooling_apc_support() -> None:
     apc._safetensors_dtype_info = dtype_info
     disk_cls._snapshot_exact_cache_entry = snap_entry
     disk_cls._load_exact_cache_entry = load_entry
+
+    # mlx-vlm >= 0.6.15 dispatches recursive clone/merge through the
+    # apc_adapters registry, bypassing the module functions patched above,
+    # so PoolingCache needs a registry rule as well.
+    try:
+        adapters = importlib.import_module("mlx_vlm.apc_adapters")
+    except ModuleNotFoundError:
+        adapters = None
+    if adapters is not None:
+        class _PoolingCloneAdapter:
+            def clone(self, c, *, min_capacity_tokens, eval_targets):
+                return clone_entry(c, min_capacity_tokens=min_capacity_tokens,
+                                   eval_targets=eval_targets)
+
+            def merge_rows(self, caches, prefix_lens):
+                return BatchPoolingCache.merge(caches)
+
+        rules = adapters._clone_rules()
+        if not any(t is PoolingCache for t, _ in rules):
+            rules.insert(0, (PoolingCache, _PoolingCloneAdapter()))
+
     apc._kq_pooling_apc = True
 
 
@@ -352,6 +373,140 @@ def install_safe_kv_quantization() -> None:
     vlm_common.maybe_quantize_kv_cache = safe_vlm_maybe_quantize
 
 
+def model_has_pools(model) -> bool:
+    """True if the model's cache stack contains a PoolingCache.
+
+    Walks ``make_cache()`` once and memoizes on the model, so the pooled
+    seams can gate without paying a cache build per call.
+    """
+    from .deepseek_v4_cache import PoolingCache
+
+    cached = getattr(model, "_kq_has_pools", None)
+    if cached is not None:
+        return cached
+    make = getattr(model, "make_cache", None)
+    found = False
+    if callable(make):
+        try:
+            stack = list(make() or [])
+        except Exception:
+            stack = []
+        while stack:
+            c = stack.pop()
+            subs = getattr(c, "caches", None)
+            if subs is not None:
+                stack.extend(subs)
+            elif isinstance(c, PoolingCache):
+                found = True
+                break
+    try:
+        model._kq_has_pools = found
+    except Exception:
+        pass
+    return found
+
+
+def install_pooled_prefill_batch_gate() -> None:
+    """Form prompt batches one row at a time on pooling-cache models.
+
+    ``to_batch_cache`` has no PoolingCache arm, so a multi-row prompt batch
+    raises before prefill and every request in it fails. Upstream's
+    single-row fast path sidesteps the conversion entirely (it builds the
+    model's own scalar caches), and the decode side already knows how to
+    join those: ``_extend_cache`` promotes a cache that has ``merge`` and no
+    ``left_padding``, which is exactly PoolingCache, and BatchPoolingCache
+    carries extend/filter/extract. So capping prompt batches at one row
+    yields serial prefill with batched decode, which is where batching pays
+    anyway -- B>1 prefill is not a throughput win at depth (gemma-31b 2x27k
+    measured 130s batched vs 120s serialized).
+
+    Same lever the ckpt tier already pulls in spec_engine, applied for a
+    different reason. Idempotent. Kill switch: GMLX_POOLED_PREFILL_B1=0.
+    """
+    import os
+
+    from mlx_vlm.generate.ar import BatchGenerator
+
+    if getattr(BatchGenerator.__init__, "_kq_pooled_prefill_b1", False):
+        return
+    if os.environ.get("GMLX_POOLED_PREFILL_B1", "1") == "0":
+        return
+
+    _orig_init = BatchGenerator.__init__
+
+    def _gated_init(self, model, processor, **kwargs):
+        _orig_init(self, model, processor, **kwargs)
+        try:
+            if model_has_pools(model) and self.prefill_batch_size != 1:
+                self.prefill_batch_size = 1
+        except Exception:
+            _log.warning("pooled prefill gate failed; continuing",
+                         exc_info=True)
+
+    _gated_init._kq_pooled_prefill_b1 = True
+    BatchGenerator.__init__ = _gated_init
+
+
+def _is_batched_cache(c) -> bool:
+    """True if ``c`` already holds batch rows.
+
+    Batch caches carry ``left_padding``; their scalar counterparts do not.
+    A CacheList carries nothing of its own, so ask its members.
+    """
+    subs = getattr(c, "caches", None)
+    if subs is not None:
+        return any(_is_batched_cache(s) for s in subs)
+    return hasattr(c, "left_padding")
+
+
+def install_batched_cachelist_admission() -> None:
+    """Stop re-merging an already-batched CacheList on admission.
+
+    ``_extend_cache`` lifts a scalar cache into a batch one when it has a
+    ``merge`` and no ``left_padding``. A CacheList defines neither, so a
+    decode batch whose entries are CacheLists (deepseek-v4: rotating window
+    plus two pools per layer) looks scalar on every admission and gets
+    merged a second time. The second merge reaches
+    ``BatchRotatingKVCache.merge``, which calls ``c._temporal_order(c.keys)``
+    -- the scalar signature -- against rows that are already batch caches,
+    and every request in flight dies with a TypeError.
+
+    Replace the promotion test with one that looks through CacheLists.
+    Faithful to the original otherwise: same merge, same in-place extend,
+    same short-circuits. Idempotent. Kill switch:
+    GMLX_BATCHED_CACHELIST_ADMISSION=0.
+    """
+    import os
+
+    from mlx_vlm.generate import ar as _ar
+
+    if getattr(_ar._extend_cache, "_kq_batched_cachelist", False):
+        return
+    if os.environ.get("GMLX_BATCHED_CACHELIST_ADMISSION", "1") == "0":
+        return
+
+    def _promote(c):
+        if _is_batched_cache(c):
+            return c
+        merge = getattr(type(c), "merge", None)
+        return merge([c]) if merge is not None else c
+
+    def _extend_cache(cache_a, cache_b):
+        if not cache_a:
+            return cache_b
+        if not cache_b:
+            return cache_a
+        extended = []
+        for ca, cb in zip(cache_a, cache_b):
+            ca = _promote(ca)
+            ca.extend(_promote(cb))
+            extended.append(ca)
+        return extended
+
+    _extend_cache._kq_batched_cachelist = True
+    _ar._extend_cache = _extend_cache
+
+
 def install_pooled_prompt_kv_quant() -> None:
     """Honor serve kv_bits on pooling-cache models at prompt-batch build.
 
@@ -375,32 +530,7 @@ def install_pooled_prompt_kv_quant() -> None:
     if os.environ.get("GMLX_POOLED_KV_QUANT", "1") == "0":
         return
 
-    from .deepseek_v4_cache import PoolingCache
-
-    def _has_pools(model) -> bool:
-        cached = getattr(model, "_kq_has_pools", None)
-        if cached is not None:
-            return cached
-        make = getattr(model, "make_cache", None)
-        found = False
-        if callable(make):
-            try:
-                stack = list(make() or [])
-            except Exception:
-                stack = []
-            while stack:
-                c = stack.pop()
-                subs = getattr(c, "caches", None)
-                if subs is not None:
-                    stack.extend(subs)
-                elif isinstance(c, PoolingCache):
-                    found = True
-                    break
-        try:
-            model._kq_has_pools = found
-        except Exception:
-            pass
-        return found
+    _has_pools = model_has_pools
 
     _orig_init = ppb.__init__
     _noted = [False]

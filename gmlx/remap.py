@@ -53,6 +53,10 @@ ARCH_ALIAS = {
     "qwen3vlmoe": "QWEN3MOE",
     "qwen35": "QWEN35",
     "qwen35moe": "QWEN35MOE",
+    # Qwen3.8-Flash-Next. gguf-py has no QWEN4EXP enum yet; the shared
+    # qwen35 tensors ride the canonical reverse map, everything new
+    # (hyper-connections, PLE, indexer, MoE targets) is claimed below.
+    "qwen4exp": "QWEN4EXP",
     "llama": "LLAMA",
     # llama.cpp's 'mistral3' arch (Ministral-3 / Mistral-Small-3.1) uses the
     # canonical Llama tensor layout (q/k permuted at convert time, ffn_norm
@@ -164,6 +168,18 @@ ARCH_ALIAS = {
     # HF tensor; the split converter's de-interleave preserves group order), so
     # the qwen3.5 tiled-V patch must not fire - see _needs_tiled_v_patch.
     "qwen3next": "QWEN3NEXT",
+    # Meta Muse Glimmer (llama.cpp 'muse-glimmer'): a dense sandwich-norm decoder
+    # with an attention output gate and per-head qk-norm. Almost everything
+    # resolves canonically; see the MUSE_GLIMMER block for the two names that
+    # can't (the ffn_norm collision and attn_gate, which the canonical map homes
+    # on qwen3.5's linear_attn). llama.cpp tags the arch LLAMA_ROPE_TYPE_NORM and
+    # the converter un-permutes HF's rotate_half Q/K into the interleaved layout,
+    # so Q/K pass through un-permuted and the model runs rope traditional=True -
+    # equivalent to qk_permute + traditional=False, without copying every
+    # attn_q/attn_k off the wire. The four per-layer norms carry a baked +1 that
+    # a plain nn.RMSNorm consumes directly, so the arch stays out of
+    # _GEMMA_NORM_BAKED_ARCHS.
+    "muse-glimmer": "MUSE_GLIMMER",
     # DiffusionGemma (llama.cpp 'diffusion-gemma'): an encoder-decoder block-
     # diffusion model on the Gemma-4 MoE backbone. The decoder backbone uses the
     # exact Gemma-4 GGUF tensor names, but the mlx-vlm Model nests them under
@@ -469,6 +485,18 @@ ARCH_PRIORITY_OVERRIDES: dict[str, list[tuple[re.Pattern, str | None, str]]] = {
          "model.layers.{bid}.self_attn.k_proj.bias", "passthrough"),
         (re.compile(r"^blk\.(\d+)\.attn_v\.bias$"),
          "model.layers.{bid}.self_attn.v_proj.bias", "passthrough"),
+    ],
+    "MUSE_GLIMMER": [
+        # Muse Glimmer keeps a separate pre-FFN norm, so ffn_norm is the
+        # pre_feedforward_layernorm. Pin past the FFN_NORM/FFN_PRE_NORM
+        # collision; post_attention_norm and post_ffw_norm resolve canonically.
+        (re.compile(r"^blk\.(\d+)\.ffn_norm\.weight$"),
+         "model.layers.{bid}.pre_feedforward_layernorm.weight", "passthrough"),
+        # Attention output gate (sigmoid(x_norm @ W_gate) * attn_out, before
+        # o_proj). CANONICAL_HF homes ATTN_GATE on qwen3.5's linear_attn
+        # in_proj_z, so claim it here for the afmoe-shaped self_attn.gate_proj.
+        (re.compile(r"^blk\.(\d+)\.attn_gate\.weight$"),
+         "model.layers.{bid}.self_attn.gate_proj.weight", "passthrough"),
     ],
     "ERNIE4_5_MOE": [
         # Baidu ERNIE-4.5-MoE: shared-expert fine-grained MoE with leading dense
@@ -998,6 +1026,73 @@ ARCH_PRIORITY_OVERRIDES: dict[str, list[tuple[re.Pattern, str | None, str]]] = {
          "model.layers.{bid}.mlp.switch_mlp.down_proj.weight", "passthrough"),
         (re.compile(r"^blk\.(\d+)\.ffn_gate_inp\.weight$"),
          "model.layers.{bid}.mlp.gate.weight", "passthrough"),
+    ],
+    "QWEN4EXP": [
+        # Hyper-connection mixers per sub-layer (norm/down/up/inject) and the
+        # final head mixer that replaces output_norm; PLE table + projections
+        # (the depthwise conv weight is [K, C] on the wire like ssm_conv1d);
+        # QSA indexer (index_qk_proj split at conversion); MoE targets as
+        # QWEN35MOE. The shared qwen35 tensors ride the canonical map.
+        (re.compile(r"^blk\.(\d+)\.hc_attn_norm\.weight$"),
+         "model.layers.{bid}.hc_attn.norm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.hc_attn_down\.weight$"),
+         "model.layers.{bid}.hc_attn.down.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.hc_attn_up\.weight$"),
+         "model.layers.{bid}.hc_attn.up.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.hc_attn_inject\.weight$"),
+         "model.layers.{bid}.hc_attn.inject.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.hc_ffn_norm\.weight$"),
+         "model.layers.{bid}.hc_ffn.norm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.hc_ffn_down\.weight$"),
+         "model.layers.{bid}.hc_ffn.down.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.hc_ffn_up\.weight$"),
+         "model.layers.{bid}.hc_ffn.up.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.hc_ffn_inject\.weight$"),
+         "model.layers.{bid}.hc_ffn.inject.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ple_key\.weight$"),
+         "model.layers.{bid}.ple.key_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ple_value\.weight$"),
+         "model.layers.{bid}.ple.value_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ple_norm_key\.weight$"),
+         "model.layers.{bid}.ple.norm_key.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ple_norm_query\.weight$"),
+         "model.layers.{bid}.ple.norm_query.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ple_norm_conv\.weight$"),
+         "model.layers.{bid}.ple.norm_conv.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ple_conv1d\.weight$"),
+         "model.layers.{bid}.ple.conv1d.weight", "conv1d_unsqueeze"),
+        (re.compile(r"^blk\.(\d+)\.indexer\.q_proj\.weight$"),
+         "model.layers.{bid}.self_attn.indexer.q_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.indexer\.k_proj\.weight$"),
+         "model.layers.{bid}.self_attn.indexer.k_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.indexer\.q_norm\.weight$"),
+         "model.layers.{bid}.self_attn.indexer.q_norm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.indexer\.k_norm\.weight$"),
+         "model.layers.{bid}.self_attn.indexer.k_norm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_gate_exps\.weight$"),
+         "model.layers.{bid}.mlp.switch_mlp.gate_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_up_exps\.weight$"),
+         "model.layers.{bid}.mlp.switch_mlp.up_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_down_exps\.weight$"),
+         "model.layers.{bid}.mlp.switch_mlp.down_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_gate_shexp\.weight$"),
+         "model.layers.{bid}.mlp.shared_expert.gate_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_up_shexp\.weight$"),
+         "model.layers.{bid}.mlp.shared_expert.up_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_down_shexp\.weight$"),
+         "model.layers.{bid}.mlp.shared_expert.down_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_gate_inp_shexp\.weight$"),
+         "model.layers.{bid}.mlp.shared_expert_gate.weight", "gate_1d_unsqueeze"),
+        (re.compile(r"^blk\.(\d+)\.ffn_gate_inp\.weight$"),
+         "model.layers.{bid}.mlp.gate.weight", "passthrough"),
+        (re.compile(r"^output_hc_norm\.weight$"),
+         "model.hc_head.norm.weight", "passthrough"),
+        (re.compile(r"^output_hc_down\.weight$"),
+         "model.hc_head.down.weight", "passthrough"),
+        (re.compile(r"^output_hc_up\.weight$"),
+         "model.hc_head.up.weight", "passthrough"),
+        (re.compile(r"^per_layer_token_embd\.weight$"),
+         "model.ple_embed.weight", "passthrough"),
     ],
     "QWEN35MOE": [
         # Routed experts - GGUF has separate gate/up/down (not fused like gemma-4).

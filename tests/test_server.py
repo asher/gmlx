@@ -75,6 +75,38 @@ def test_single_model_cfg_chat_template_rides_overrides(tmp_path):
     assert resolve_model(mid, cfg).chat_template == "/tmpl/x.jinja"
 
 
+def test_single_model_cfg_thinking_flags_ride_overrides(tmp_path):
+    """--thinking / --thinking-budget land on the same override slots a config
+    sets (`thinking:` and sampling `thinking_budget:`) and resolve onto the
+    ResolvedModel; 0 is a real budget, not "unset"."""
+    from gmlx.config import resolve_model
+    g = tmp_path / "Qwen3-0.6B-Q4_K_M.gguf"
+    g.write_text("x")
+    cfg = srv._single_model_cfg(_ns(model=str(g), thinking="off", thinking_budget=0))
+    (mid, m), = cfg.models.items()
+    assert m.overrides == {"thinking": "off", "sampling": {"thinking_budget": 0}}
+    rm = resolve_model(mid, cfg)
+    assert rm.thinking == "off"
+    assert rm.sampling["thinking_budget"] == 0
+    cfg = srv._single_model_cfg(_ns(model=str(g), thinking_budget=512))
+    (mid, m), = cfg.models.items()
+    assert m.overrides == {"sampling": {"thinking_budget": 512}}
+    assert resolve_model(mid, cfg).thinking is None
+
+
+def test_bg_serve_args_forwards_thinking_flags():
+    """--thinking / --thinking-budget must survive the background re-exec."""
+    import argparse
+    ap = argparse.ArgumentParser()
+    srv._add_serve_args(ap)
+    a = ap.parse_args(["m.gguf", "--thinking", "off", "--thinking-budget", "0"])
+    out = srv._bg_serve_args(a, None)
+    assert out[out.index("--thinking") + 1] == "off"
+    assert out[out.index("--thinking-budget") + 1] == "0"
+    bare = srv._bg_serve_args(ap.parse_args(["m.gguf"]), None)
+    assert "--thinking" not in bare and "--thinking-budget" not in bare
+
+
 def test_single_model_cfg_no_chat_template_has_empty_overrides(tmp_path):
     g = tmp_path / "Qwen3-0.6B-Q4_K_M.gguf"
     g.write_text("x")
@@ -459,6 +491,45 @@ def test_sync_adds_new_and_removes_gone(monkeypatch, tmp_path):
     cfg = load_config(cfg_path)
     assert set(cfg.models) == {"keep", "newbie"}      # gone dropped, newbie added
     assert cfg.models["newbie"].path == "newbie.gguf"  # relative to model_dirs
+
+
+def test_sync_adds_a_drafter_to_an_entry_already_in_the_config(monkeypatch,
+                                                               tmp_path):
+    # The user drops a drafter next to a model the config already carries:
+    # sync adds `draft_gguf` to that entry and leaves the rest of it alone.
+    from gmlx.config import load_config
+    cfg_path, lib = _sync_config(
+        tmp_path,
+        "models:\n  muse:\n    path: muse.gguf\n    pin: true\n")
+    (lib / "muse.gguf").write_bytes(b"x")
+    drafter = str(lib / "dflash-muse.gguf")
+
+    def fake_scan(specs, dirs, **kw):
+        kw["stats"]["draft_pairs"] = {"muse": drafter}
+        return []
+
+    monkeypatch.setattr(srv.discovery, "scan_dirs", fake_scan)
+    assert srv._cmd_sync(["--config", str(cfg_path)]) == 0
+    mc = load_config(cfg_path).models["muse"]
+    assert mc.draft_gguf == "dflash-muse.gguf"    # relative to model_dirs
+    assert mc.pin is True                         # the hand-edit survives
+
+
+def test_sync_dry_run_keeps_a_drafter_pairing_unwritten(monkeypatch, tmp_path,
+                                                        capsys):
+    from gmlx.config import load_config
+    cfg_path, lib = _sync_config(
+        tmp_path, "models:\n  muse:\n    path: muse.gguf\n")
+    (lib / "muse.gguf").write_bytes(b"x")
+
+    def fake_scan(specs, dirs, **kw):
+        kw["stats"]["draft_pairs"] = {"muse": str(lib / "dflash-muse.gguf")}
+        return []
+
+    monkeypatch.setattr(srv.discovery, "scan_dirs", fake_scan)
+    assert srv._cmd_sync(["--config", str(cfg_path), "--dry-run"]) == 0
+    assert "update:  muse" in capsys.readouterr().out
+    assert load_config(cfg_path).models["muse"].draft_gguf is None
 
 
 def test_sync_never_drops_hf_entries_on_unreadable_cache(monkeypatch, tmp_path,

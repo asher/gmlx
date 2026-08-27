@@ -864,6 +864,56 @@ def test_qwen35moe_experts_and_shared_gate():
     assert rs.hf_name == "model.layers.0.mlp.shared_expert_gate.weight"
 
 
+# qwen4exp: qwen35 GDN tensors via the canonical map; hyper-connections, PLE,
+# QSA indexer and MoE targets via the priority overrides
+def test_qwen4exp_hyper_connections_ple_indexer_routing():
+    for w, tr in (("attn_qkv", "passthrough"), ("attn_gate", "passthrough"),
+                  ("ssm_conv1d", "conv1d_unsqueeze")):
+        r = d("qwen4exp", f"blk.0.{w}.weight")
+        assert r.kind == MAP and r.transform == tr, w
+        assert r.hf_name.startswith("model.layers.0.linear_attn.")
+    ra = d("qwen4exp", "blk.0.ssm_a")
+    assert ra.transform == "ssm_a_to_a_log"
+    assert ra.hf_name == "model.layers.0.linear_attn.A_log"
+    assert d("qwen4exp", "blk.0.ssm_dt.bias").hf_name == \
+        "model.layers.0.linear_attn.dt_bias"
+    for hc in ("hc_attn", "hc_ffn"):
+        for leaf in ("norm", "down", "up", "inject"):
+            r = d("qwen4exp", f"blk.2.{hc}_{leaf}.weight")
+            assert r.kind == MAP and r.transform == "passthrough"
+            assert r.hf_name == f"model.layers.2.{hc}.{leaf}.weight"
+    for leaf in ("norm", "down", "up"):
+        r = d("qwen4exp", f"output_hc_{leaf}.weight")
+        assert r.kind == MAP and r.hf_name == f"model.hc_head.{leaf}.weight"
+    # no output_norm: the head mixer carries it; a stray one would be a fail
+    rt = d("qwen4exp", "per_layer_token_embd.weight")
+    assert rt.kind == MAP and rt.hf_name == "model.ple_embed.weight"
+    assert rt.transform == "passthrough"
+    rc = d("qwen4exp", "blk.1.ple_conv1d.weight")
+    assert rc.transform == "conv1d_unsqueeze"
+    assert rc.hf_name == "model.layers.1.ple.conv1d.weight"
+    for w, t in (("ple_key", "key_proj"), ("ple_value", "value_proj"),
+                 ("ple_norm_key", "norm_key"), ("ple_norm_query", "norm_query"),
+                 ("ple_norm_conv", "norm_conv")):
+        assert d("qwen4exp", f"blk.1.{w}.weight").hf_name == \
+            f"model.layers.1.ple.{t}.weight"
+    for w in ("q_proj", "k_proj", "q_norm", "k_norm"):
+        r = d("qwen4exp", f"blk.3.indexer.{w}.weight")
+        assert r.kind == MAP and r.transform == "passthrough"
+        assert r.hf_name == f"model.layers.3.self_attn.indexer.{w}.weight"
+    # gated attention: q_proj carries [q | gate]; plain canonical targets
+    assert d("qwen4exp", "blk.3.attn_q.weight").hf_name == \
+        "model.layers.3.self_attn.q_proj.weight"
+    assert d("qwen4exp", "blk.3.attn_k_norm.weight").hf_name == \
+        "model.layers.3.self_attn.k_norm.weight"
+    rg = d("qwen4exp", "blk.0.ffn_gate_exps.weight")
+    assert rg.hf_name == "model.layers.0.mlp.switch_mlp.gate_proj.weight"
+    rs = d("qwen4exp", "blk.0.ffn_gate_inp_shexp.weight")
+    assert rs.kind == MAP and rs.transform == "gate_1d_unsqueeze"
+    assert rs.hf_name == "model.layers.0.mlp.shared_expert_gate.weight"
+    assert d("qwen4exp", "output.weight").hf_name == "lm_head.weight"
+
+
 # qwen2moe: switch_mlp experts + shared expert + qkv bias + ffn_norm
 def test_qwen2moe_experts_shared_and_qkv_bias():
     rg = d("qwen2moe", "blk.0.ffn_gate_exps.weight")
@@ -1160,7 +1210,7 @@ def test_gpt_oss_norms_and_attention_via_canonical():
 def test_gpt_oss_attention_sinks_no_weight_suffix():
     # Per-head learned sinks are a raw array on the module (self.sinks), NOT a
     # sub-module, so the HF target has no ".weight". No canonical enum carries
-    # the GGUF `attn_sinks` name, so the override is load-bearing.
+    # the GGUF `attn_sinks` name, so mapping requires the override.
     r = d("gpt-oss", "blk.7.attn_sinks.weight")
     assert r.kind == MAP and r.bid == 7 and r.transform == "passthrough"
     assert r.hf_name == "model.layers.7.self_attn.sinks"
@@ -1231,3 +1281,67 @@ def test_unknown_arch_skips_not_fails():
 def test_unknown_tensor_on_known_arch_hard_fails():
     r = d("llama", "blk.0.this_is_not_a_real_tensor.weight")
     assert r.kind == FAIL
+
+
+# muse-glimmer: sandwich norms with the +1 already baked (consumed as-is),
+# an attention output gate, and interleaved Q/K consumed without a permute.
+def test_muse_glimmer_ffn_norm_pins_to_pre_feedforward():
+    # FFN_NORM/FFN_PRE_NORM collide in TENSOR_NAMES; muse-glimmer's ffn_norm
+    # is the PRE-FFN norm, same as gemma2/gemma3.
+    r = d("muse-glimmer", "blk.1.ffn_norm.weight")
+    assert r.kind == MAP
+    assert r.hf_name == "model.layers.1.pre_feedforward_layernorm.weight"
+
+
+def test_muse_glimmer_norms_are_not_unbaked():
+    # The converter folds the +1 into the four per-layer norms and a plain
+    # nn.RMSNorm consumes them directly - no gemma-style unbake.
+    for t in ("attn_norm", "ffn_norm", "post_attention_norm", "post_ffw_norm"):
+        assert d("muse-glimmer", f"blk.0.{t}.weight").transform == "passthrough"
+    assert d("muse-glimmer", "output_norm.weight").transform == "passthrough"
+
+
+def test_muse_glimmer_post_norms_land_on_the_sandwich_slots():
+    assert (d("muse-glimmer", "blk.2.post_attention_norm.weight").hf_name
+            == "model.layers.2.post_attention_layernorm.weight")
+    assert (d("muse-glimmer", "blk.2.post_ffw_norm.weight").hf_name
+            == "model.layers.2.post_feedforward_layernorm.weight")
+
+
+def test_muse_glimmer_attn_gate_claims_the_gate_projection():
+    # CANONICAL_HF["ATTN_GATE"] points at qwen3.5's linear_attn.in_proj_z, so
+    # muse-glimmer has to claim this row first.
+    r = d("muse-glimmer", "blk.0.attn_gate.weight")
+    assert r.kind == MAP
+    assert r.hf_name == "model.layers.0.self_attn.gate_proj.weight"
+    assert "linear_attn" not in r.hf_name
+
+
+def test_muse_glimmer_qk_are_not_permuted():
+    # LLAMA_ROPE_TYPE_NORM: the converter already un-permuted HF's rotate_half
+    # into interleaved, and the model class ropes with traditional=True. A
+    # qk_permute here would double-apply it (and force _own() copies).
+    for t in ("attn_q", "attn_k"):
+        r = d("muse-glimmer", f"blk.3.{t}.weight")
+        assert r.kind == MAP and r.bid == 3
+        assert r.transform == "passthrough"
+
+
+def test_muse_glimmer_qk_norms_and_projections_resolve_canonically():
+    for gguf, hf in (
+        ("blk.0.attn_q_norm.weight", "model.layers.0.self_attn.q_norm.weight"),
+        ("blk.0.attn_k_norm.weight", "model.layers.0.self_attn.k_norm.weight"),
+        ("blk.0.attn_v.weight", "model.layers.0.self_attn.v_proj.weight"),
+        ("blk.0.attn_output.weight", "model.layers.0.self_attn.o_proj.weight"),
+        ("blk.0.ffn_gate.weight", "model.layers.0.mlp.gate_proj.weight"),
+        ("blk.0.ffn_up.weight", "model.layers.0.mlp.up_proj.weight"),
+        ("blk.0.ffn_down.weight", "model.layers.0.mlp.down_proj.weight"),
+    ):
+        r = d("muse-glimmer", gguf)
+        assert r.kind == MAP and r.hf_name == hf, gguf
+
+
+def test_muse_glimmer_globals_resolve():
+    assert d("muse-glimmer", "token_embd.weight").hf_name == "model.embed_tokens.weight"
+    assert d("muse-glimmer", "output_norm.weight").hf_name == "model.norm.weight"
+    assert d("muse-glimmer", "output.weight").hf_name == "lm_head.weight"

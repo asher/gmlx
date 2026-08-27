@@ -57,6 +57,7 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from . import deepseek_v4_model as v4
+from .drafter_protocol import native_block_size
 from .deepseek_v4_hyper_connection import HyperHead
 
 
@@ -71,7 +72,8 @@ def _env_float(name: str, default: float) -> float:
 class DeepseekV4DSparkConfig:
     """``text`` is the target's ModelArgs with ``compress_ratios`` POST-init
     extended by one 0 per stage. ``block_size`` is the engine block TOTAL
-    (drafts + bonus), at most ``draft_len + 1``."""
+    (drafts + bonus), at most ``draft_len + 1``. ``native_block_size`` is the
+    deepest block the stages can produce, also at most ``draft_len + 1``."""
 
     text: Any
     n_stages: int = 3
@@ -80,6 +82,7 @@ class DeepseekV4DSparkConfig:
     target_layer_ids: tuple = (40, 41, 42)
     markov_rank: int = 256
     block_size: int = 6
+    native_block_size: int | None = None
 
 
 class DSparkLocalAttention(v4.LocalAttention):
@@ -180,12 +183,14 @@ class DeepseekV4DSparkDrafter(nn.Module):
                 f"post-init extended with {n_stages} zeros (got "
                 f"{len(args.compress_ratios)} entries, {n} trunk layers)"
             )
-        if config.block_size > config.draft_len + 1:
+        self._native_block_size = (
+            native_block_size(config) or int(config.block_size))
+        if max(int(config.block_size), self._native_block_size) > config.draft_len + 1:
             raise ValueError(
-                f"block_size {config.block_size} exceeds draft_len + 1 "
+                f"block_size {config.block_size} / native_block_size "
+                f"{self._native_block_size} exceeds draft_len + 1 "
                 f"({config.draft_len + 1})"
             )
-        self._native_block_size = int(config.block_size)
         self._draft_len = int(config.draft_len)
         self._noise_token_id = int(config.noise_token_id)
         self._sliding_window = int(args.sliding_window)

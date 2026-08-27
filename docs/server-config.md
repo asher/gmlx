@@ -67,7 +67,7 @@ curl localhost:8080/v1/chat/completions -d '{
 }'
 ```
 
-Sampling defaults come from the model's family card automatically; add
+Sampling defaults come from the model's family card automatically. Add
 `@coding` / `@instruct` / `@creative` / `@reasoning-low|-medium|-high|-max` to any
 id to switch operating point (`"model": "qwen3.6-27b@coding"`).
 `gmlx profiles` prints the table.
@@ -160,7 +160,7 @@ Unknown keys in the structural namespaces (top-level, `server`, `profiles`,
 `models`, `rules`, `discover`) are a hard error: a typo like `pinned:` for
 `pin:` fails the load instead of silently no-op'ing. To see the whole schema
 with every key and its effective default, run `gmlx serve --print-config`
-(optionally with `--config FILE` / `--models-dir DIR` / a positional GGUF); it
+(optionally with `--config FILE` / `--models-dir DIR` / a positional GGUF). It
 resolves the config for that start mode, prints it as YAML, and exits without
 starting the server.
 
@@ -181,12 +181,14 @@ server:
                              #   (null => mlx-vlm's own default, 600; 0 => never)
   prefill_step_size: null    # prefill chunk size in tokens for every model on this server
                              #   (null => the default, 2048; lower caps peak memory on long prompts)
-  decode_prefill_ratio: null # decode GPU-time share per admission prefill chunk under load
+  dtype: null                # activation dtype for every model on this server: auto, bfloat16,
+                             #   float16 (null => the default, auto; auto picks float16 on M1/M2)
+  decode_prefill_ratio: null # admission pacing: auto (default) or a static GPU-time share
                              #   (null => the default, 1.0; 0 => strict alternation; see below)
   prefill_tick_ms: null      # wall-clock budget per prefill chunk while streams decode;
                              #   chunks are halved to fit (null => the default, 500; 0 => full chunks)
-  cache_limit_gb: null       # MLX buffer-cache cap in GiB (null => auto: bounded only when the
-                             #   biggest model leaves little working-set slack; negative => never bound)
+  cache_limit_gb: null       # MLX buffer-cache cap in GiB (null => auto: 4-12 GiB, sized from the
+                             #   working-set slack; negative => never bound)
   family_defaults: true      # built-in per-family model-card sampling + @intents (false turns them off)
   stochastic_mtp: false      # p/q acceptance for sampled MTP requests: same output
                              #   distribution, higher acceptance, NOT token-identical
@@ -217,21 +219,21 @@ server:
 ```
 
 Paths in `model_dirs` expand `~`/`$VAR`. A relative `path`/`mmproj`/`draft_gguf`
-on a model is searched against `model_dirs` in order (first existing wins); a
+on a model is searched against `model_dirs` in order (first existing wins). A
 miss raises, listing the roots searched. One root lets every model entry use a
 bare filename.
 
 `token_queue_timeout_s` bounds how long the request loop waits for the next
 token. On timeout the server cancels the in-flight generation (freeing the GPU
-work) and returns an error to the client; a streaming request gets a final
+work) and returns an error to the client. A streaming request gets a final
 `data: {"error": ...}` event. The failure is recorded as `last_error` in
 `/v1/metrics` and logged as a `[req] ... FAILED ...` line. Unset, gmlx
-defaults it to 1800 seconds (an exported `MLX_VLM_TOKEN_QUEUE_TIMEOUT` wins);
+defaults it to 1800 seconds (an exported `MLX_VLM_TOKEN_QUEUE_TIMEOUT` wins).
 mlx-vlm's own 600-second default is shorter than a deep-context dense prefill.
 The timeout triggers mainly on a very long prefill that hasn't emitted its
-first token yet (a big prompt on a large or over-RAM model); raise it for
+first token yet (a big prompt on a large or over-RAM model). Raise it for
 those, or set `0` to wait indefinitely. The value drives mlx-vlm's
-`MLX_VLM_TOKEN_QUEUE_TIMEOUT`; the config is authoritative for a server it
+`MLX_VLM_TOKEN_QUEUE_TIMEOUT`. The config is authoritative for a server it
 starts.
 
 `prefill_step_size` sets the prefill chunk size, in tokens, for every model
@@ -244,17 +246,39 @@ closed, so it cannot be a per-model `load:` key. Also available as
 `--prefill-step-size` on `serve` (the flag wins over the config) or an exported
 `PREFILL_STEP_SIZE`. Applies to speculative (MTP) serving too.
 
+`dtype` sets the width the model graph runs at for every model this server
+loads: `auto` (the default), `bfloat16`, or `float16`, with `bf16` and `fp16`
+accepted as spellings of the last two. It covers non-quantized parameters, the
+dequantized embedding table, and every value flowing between quantized
+matmuls. The KV cache follows it, since cache blocks are allocated from the
+dtype of the keys and values written into them. Weights are untouched, so this
+is not a requantization and the GGUF on disk is unchanged.
+
+`auto` reads the GPU generation from the Metal architecture string. It gives
+`float16` on Apple GPUs before Apple9, which are the M1 and the M2, and
+`bfloat16` on all other devices. A device whose architecture cannot be read
+also gets `bfloat16`, because an unknown device must keep the incumbent
+numerics.
+
 `decode_prefill_ratio` paces admission prefills against live decode. Stock
 scheduling runs one decode step per prefill chunk, so while any request
 prefills, every decoding stream advances ~1 token per chunk -- at deep context
-that is a multi-second stall per admission. With pacing (default `1.0`), a
-prefill chunk is admitted only after the decode batch has received that
-multiple of the chunk's GPU time: live streams keep ~half throughput during
-admissions, and the incoming request's time-to-first-token stretches up to
-~(1+ratio)x while decode is busy. Raise the ratio to favor decode further,
-lower it toward `0` for TTFT-critical serving, `0` restores stock scheduling.
-Prefill runs at full speed whenever nothing is decoding, so a single-stream
-server is unaffected. Also available as `--decode-prefill-ratio` on `serve`
+that is a multi-second stall per admission. The default `auto` paces only
+when an already-decoding stream admitted before the waiters would otherwise
+fall below half its batched decode rate (the floor;
+`GMLX_DECODE_PREFILL_FLOOR`), and runs stock scheduling for simultaneous
+bursts, cheap chunks, and queued waiters held behind paced admissions
+past a deadline (a prompt already being prefilled is bounded by pacing
+itself, and time blocked by capacity rather than pacing does not age
+toward the deadline). A numeric
+value pins static pacing: a prefill chunk is admitted only after the decode
+batch has received that multiple of the chunk's GPU time. Live streams then
+keep ~half throughput during admissions at `1.0`, while a waiter's
+time-to-first-token stretch compounds with queue depth (each waiter also
+waits out the throttled prefill of everyone ahead of it) and delayed
+admission narrows the decode batch. `0` restores stock scheduling. Prefill
+runs at full speed whenever nothing is decoding, so a single-stream server
+is unaffected. Also available as `--decode-prefill-ratio` on `serve`
 (the flag wins over the config) or an exported `GMLX_DECODE_PREFILL_RATIO`
 (read per scheduler tick, so it can be flipped on a live server). Applies to
 speculative (MTP) serving too. Background and measured effects:
@@ -269,7 +293,7 @@ is halved until its predicted wall time -- the last observed chunk cost
 scaled to the tier -- fits this budget (default 500 ms, floored at
 `GMLX_PREFILL_MIN_STEP` tokens). Smaller chunks lose some weight
 amortization, so total prefill throughput under load drops a few percent per
-halving tier (worst on MoE); set `0` for batch-job serving where per-stream
+halving tier (worst on MoE). Set `0` for batch-job serving where per-stream
 latency does not matter. Inert whenever nothing is decoding, so
 single-stream time-to-first-token is untouched. Also available as
 `--prefill-tick-ms` on `serve` (the flag wins over the config) or an
@@ -278,12 +302,35 @@ live server). Composes with `decode_prefill_ratio`: the ratio sets the duty
 cycle, the tick sets the stall quantum.
 
 `cache_limit_gb` caps MLX's buffer cache (the wired pool of freed GPU buffers
-kept for reuse). Left `null`, the server bounds it automatically only when
-the biggest configured model leaves little GPU working-set slack -- the
-deep-context safety case; see
+kept for reuse). Left `null`, the server always bounds it: 4-12 GiB sized
+from the working-set slack the biggest configured model leaves. MLX's own
+default is the memory limit, and an uncapped cache can hold tens of GB of
+wired buffers the kernel counts against its free pages. See
 [performance.md](performance.md#the-mlx-buffer-cache-at-deep-context) for the
 policy, the `GMLX_CACHE_LIMIT_GB` env override (env wins over this key), and
 the explicit-unlimited escape.
+
+A text request whose prompt alone cannot fit in memory gets an immediate
+HTTP 400 with the estimated need and the available budget in the body,
+instead of dying mid-stream. The estimate prices prompt KV at the model's
+per-token cost (GQA heads, MLA latents, sliding windows, and quantized KV
+all lower it) plus the prefill score transient, against the working set
+with the batch drained. `max_tokens` counts only when the request pins it
+explicitly; default-max requests are never rejected on generation length.
+Media requests are not estimated in v1. `GMLX_PREFLIGHT_MEM=0` disables.
+
+Decode concurrency (how many requests generate tokens together in one batch
+step) defaults to 8; past that width aggregate throughput gains shrink while
+every stream slows. `GMLX_DECODE_BATCH` sets it (`0` restores the upstream
+default of 32).
+
+Requests beyond the waiting-queue cap get an immediate HTTP 503 with a
+`Retry-After` header instead of queueing toward the token-queue timeout. The
+JSON body names the cap and the current depth; the header value is the
+estimated drain time, clamped to 2-60 seconds. Harness SDKs back off on 503
+and retry, which beats holding a silent socket for half an hour.
+`GMLX_QUEUE_DEPTH_CAP` sets the cap (default 2 x the decode concurrency;
+`0` disables the check).
 
 While a streaming request is silent (most notably during that long prefill),
 the server emits an SSE comment line (`: keepalive`) every 15 seconds so
@@ -303,8 +350,8 @@ preflights credential-less by spec, so a browser client holding a key still
 works, and the actual request authenticates as usual.
 
 `server.api_key` is the sole server-side key source. There is no
-`serve --api-key` flag and no `GMLX_API_KEY` server fallback; this is a
-deliberate simplification, one key in one file, which the lifecycle tools and
+`serve --api-key` flag and no `GMLX_API_KEY` server fallback. This is a
+deliberate simplification: one key in one file, which the lifecycle tools and
 the menu bar can also read. The runfile records only whether a key is set,
 never the key.
 
@@ -354,12 +401,12 @@ gmlx ships those recommendations as data: each model's family is detected
 from its GGUF header (`general.architecture`) at registration/scan, its base
 group becomes the lowest sampling layer, and the intents become addressable
 profiles. `gmlx profiles` prints this table live (add a model id to see one
-model fully resolved); values are cited to the primary model cards in
+model fully resolved). Values are cited to the primary model cards in
 `gmlx/profiles.py`:
 
 | family | GGUF arches | base (general use) | family intents |
 |--------|-------------|--------------------|----------------|
-| `qwen3.6` | `qwen35`, `qwen35moe`, `qwen3next` | temperature=1.0 top_p=0.95 top_k=20 min_p=0.0 | `@coding`: temperature=0.6 top_p=0.95 top_k=20 min_p=0.0; `@instruct`: temperature=0.7 top_p=0.8 top_k=20 min_p=0.0 presence_penalty=1.5 enable_thinking=False |
+| `qwen3.6` | `qwen35`, `qwen35moe`, `qwen3next`, `qwen4exp` | temperature=1.0 top_p=0.95 top_k=20 min_p=0.0 | `@coding`: temperature=0.6 top_p=0.95 top_k=20 min_p=0.0; `@instruct`: temperature=0.7 top_p=0.8 top_k=20 min_p=0.0 presence_penalty=1.5 enable_thinking=False |
 | `qwen3` | `qwen3`, `qwen3moe`, `qwen3vlmoe` | temperature=0.6 top_p=0.95 top_k=20 min_p=0.0 | `@instruct`: temperature=0.7 top_p=0.8 top_k=20 min_p=0.0 enable_thinking=False |
 | `qwen2.5` | `qwen2`, `qwen2moe` | temperature=0.7 top_p=0.8 top_k=20 repetition_penalty=1.05 | - |
 | `gemma` | `gemma`, `gemma2`, `gemma3`, `gemma3n`, `gemma4`, `diffusion-gemma` | temperature=1.0 top_p=0.95 top_k=64 | - |
@@ -371,6 +418,8 @@ model fully resolved); values are cited to the primary model cards in
 | `hunyuan` | `hunyuan-moe` | temperature=0.7 top_p=0.8 top_k=20 repetition_penalty=1.05 | - |
 | `hy3` | `hy_v3` | temperature=0.9 thinking_start_token=<think:opensource> thinking_end_token=</think:opensource> | `@reasoning-high`: temperature=0.9 thinking_start_token=<think:opensource> thinking_end_token=</think:opensource> reasoning_effort=high; `@reasoning-low`: temperature=0.9 thinking_start_token=<think:opensource> thinking_end_token=</think:opensource> reasoning_effort=low |
 | `kimi` | `kimi-k3` | temperature=1.0 top_p=0.95 thinking_start_token=<|open|>think<|sep|> thinking_end_token=<|close|>think<|sep|> | `@reasoning-high`: temperature=1.0 top_p=0.95 thinking_start_token=<|open|>think<|sep|> thinking_end_token=<|close|>think<|sep|> thinking_effort=high; `@reasoning-low`: temperature=1.0 top_p=0.95 thinking_start_token=<|open|>think<|sep|> thinking_end_token=<|close|>think<|sep|> thinking_effort=low; `@reasoning-max`: temperature=1.0 top_p=0.95 thinking_start_token=<|open|>think<|sep|> thinking_end_token=<|close|>think<|sep|> thinking_effort=max |
+| `kimi-k2` | `deepseek2 named (?i)\bkimi` | temperature=1.0 top_p=0.95 | - |
+| `muse` | `muse-glimmer` | temperature=1.0 top_p=0.95 top_k=64 thinking_start_token=<|start|>assistant to=self<|message|> thinking_end_token=<|eom|> | `@reasoning-high`: temperature=1.0 top_p=0.95 top_k=64 thinking_start_token=<|start|>assistant to=self<|message|> thinking_end_token=<|eom|> reasoning_strength=high; `@reasoning-low`: temperature=1.0 top_p=0.95 top_k=64 thinking_start_token=<|start|>assistant to=self<|message|> thinking_end_token=<|eom|> reasoning_strength=low; `@reasoning-medium`: temperature=1.0 top_p=0.95 top_k=64 thinking_start_token=<|start|>assistant to=self<|message|> thinking_end_token=<|eom|> reasoning_strength=medium; `@reasoning-xhigh`: temperature=1.0 top_p=0.95 top_k=64 thinking_start_token=<|start|>assistant to=self<|message|> thinking_end_token=<|eom|> reasoning_strength=xhigh |
 | `llama` | `llama`, `smollm3` | temperature=0.6 top_p=0.9 | - |
 | `mistral` | `mistral3` | temperature=0.15 | - |
 | `default` | *(anything else)* | temperature=0.7 top_p=0.95 | `@coding`: temperature=0.3 top_p=0.95; `@creative`: temperature=1.0 top_p=0.95 min_p=0.05; `@instruct`: temperature=0.7 top_p=0.95 |
@@ -398,6 +447,11 @@ Notes on individual families:
   (`<|open|>think<|sep|>` / `<|close|>think<|sep|>`) are set as the family's
   thinking tokens so open-think detection, thinking budgets, and the stream
   splitter track the model's real section tags.
+- muse: the `@reasoning-*` intents set `reasoning_strength`, the Muse Glimmer
+  template's variable name. It takes `low`/`medium`/`high`/`xhigh` and defaults
+  to `high`. Reasoning is a message channel rather than a tag pair, so the
+  thinking markers are the channel's own delimiters
+  (`<|start|>assistant to=self<|message|>` / `<|eom|>`).
 - qwen3.6 / qwen3: `@instruct` also sets `enable_thinking: false` (the card's
   non-thinking operating point).
 - `default`: the fallback for unknown architectures, the historic scaffold
@@ -407,7 +461,7 @@ Sampler semantics (matching unpatched mlx_lm / mlx-vlm): a `top_p` or `min_p`
 of `0` means *disabled* (no filter), not "keep only the argmax" - so `top_p: 0`
 is a no-op, exactly as on the stock server. When only `top_p` is set (no
 `top_k`), the nucleus is bounded to the top 1024 candidates so the sort stays
-batched; on a very flat distribution the tail past rank 1024 is dropped.
+batched. On a very flat distribution the tail past rank 1024 is dropped.
 
 Detection reads only the GGUF header (cached across runs in
 `~/.cache/gmlx/header-meta.json`, keyed by mtime+size). An explicit
@@ -458,7 +512,7 @@ profiles:
 into the tokenizer, so unlike `sampling`/`system` it is load-affecting: two
 ids on the same GGUF under different templates are distinct resident entries.
 The value is an inline Jinja string or a path to a `.jinja`/`.txt` file. It
-applies to text and native-head/assistant MTP models; a VLM keeps its
+applies to text and native-head/assistant MTP models. A VLM keeps its
 mmproj-synthesized processor template.
 
 `chat_template_kwargs` passes extra variables to the template's
@@ -469,7 +523,7 @@ by default in those templates but a must-enable for agent / tool-use loops,
 which depend on the model seeing its own prior reasoning. Unlike
 `chat_template`, it is applied per request (not baked into the tokenizer), so
 it is not load-affecting. A client may also send `chat_template_kwargs` on
-the request body (OpenAI-extension style); request keys win over the
+the request body (OpenAI-extension style). Request keys win over the
 profile's.
 
 ```yaml
@@ -493,9 +547,9 @@ thus the cache hit rate), never the validity of a hit.
 a model's `overrides` / profile tweaks) for the two reasoning controls models
 spell differently. There is no cross-model standard for the template
 variable: MiniMax-M3 reads a three-state `thinking_mode`, Qwen3.x and GLM
-read `enable_thinking`, Hy3 grades a `reasoning_effort` scale that includes
-a `no_think` level, and gpt-oss grades `reasoning_effort` but cannot disable
-reasoning. Unlike a raw `chat_template_kwargs` entry, these keys are mapped
+read `enable_thinking`, Kimi K2.x reads a bare `thinking` variable, Hy3
+grades a `reasoning_effort` scale that includes a `no_think` level, and
+gpt-oss grades `reasoning_effort` but cannot disable reasoning. Unlike a raw `chat_template_kwargs` entry, these keys are mapped
 onto the serving model's own spelling at request time (by inspecting its
 chat template), so one profile applies across models. `thinking` takes
 `on`/`off`/`adaptive` (`adaptive` is MiniMax-only); `reasoning_effort` takes
@@ -539,6 +593,9 @@ models:
   gemma-31b-mtp:                     # assistant-shape MTP (separate drafter GGUF)
     path: google_gemma-4-31B-it-Q6_K_L.gguf
     draft_gguf: gemma-4-31B-it-assistant.Q8_0.gguf       # implies speculative
+    native_mtp: false                # true: the GGUF's own MTP head drafts even
+                                     #   with draft_gguf set (a companion otherwise wins);
+                                     #   a sibling id over the same GGUF may choose differently
     speculative_width_cap: null      # speculate only up to this many live streams
                                      #   (null => the drafter family default;
                                      #    0 => uncapped; see below)
@@ -553,7 +610,7 @@ models:
 ```
 
 Per-model keys: `path` (required), `profile`, `family`, `profiles`, `mmproj`,
-`draft_gguf`, `adapter`, `stream`, `moe_experts`, `moe_expert_mass`,
+`draft_gguf`, `native_mtp`, `adapter`, `stream`, `moe_experts`, `moe_expert_mass`,
 `moe_miss_shed`, `moe_layer_shed`, `moe_prestage`, `prefill_feeder`,
 `decode_feeder`, `speculative`, `speculative_width_cap`, `overrides`
 (`{sampling, load, cache, system, chat_template, chat_template_kwargs,
@@ -577,13 +634,16 @@ speculates only while at most N requests decode together. A drafter that can
 only handle one sequence clamps any larger value, since exceeding it raises
 rather than running slowly.
 
-A batch that grows past the cap finishes in plain decode. The drafter stays
-loaded and untouched, and the next batch to form re-evaluates; there is no
-mid-flight switch back, so a continuously busy batch keeps decoding plain
-until it drains. `GMLX_MTP_WIDTH_CAP` overrides every model at once (set it to
-`0` to measure a model uncapped) and `--speculative-width-cap` does the same
-from the CLI. The measured numbers behind the defaults are in
-[performance.md](performance.md#mtp-speculative-decoding).
+A batch that grows past the cap converts to plain decode with the drafter
+left loaded, and once it drains back to the cap it re-arms and speculates
+again (a capture round rebuilds the drafter state; mechanics in
+[speculative-batching.md](speculative-batching.md)). `GMLX_MTP_WIDTH_CAP`
+overrides every model at once (set it to `0` to measure a model uncapped) and
+`--speculative-width-cap` does the same from the CLI. `GMLX_MTP_PREEMPT=0`
+and `GMLX_MTP_RESUME=0` disable the batching transitions themselves (a lone
+speculating stream then makes arriving requests wait, and a gated batch
+stays plain until it finishes). The measured numbers behind the defaults are
+in [performance.md](performance.md#mtp-speculative-decoding).
 
 An entry whose file is gone from disk does not stop the server: it is skipped
 with a log warning at startup (and on config reload), disappears from
@@ -610,10 +670,15 @@ cache stay on GPU. With the decode feeder (default, below) it matches
 quantized KV cache extends the advantage to long context. `stream: cpu`
 instead runs the whole model on the CPU device: weights stream from the page
 cache, so a MoE bigger than the wired-memory budget stays serveable.
-Load-affecting (part of the residency identity), text-only models; rejected
-on VLM and speculative/MTP entries. A `stream: cpu` entry switches the whole
-process to the CPU device, so it suits a single-model server rather than
-mixing with GPU-resident models. (The old key `cpu_moe: full | hybrid` is a
+Load-affecting (part of the residency identity). `stream: experts` also
+applies to a VLM entry. gmlx puts the placement on the text tower, and the
+vision tower stays on the GPU. The server refuses `stream: cpu` on a VLM
+entry, and it refuses both values on a speculative/MTP entry. A `stream: cpu`
+entry switches the whole process to the CPU device, so it suits a
+single-model server rather than mixing with GPU-resident models. Send only
+one request at a time to a streamed entry. Concurrent requests turn off the
+streaming tier's decode accelerations, which need a one-token step (see
+[streaming.md](streaming.md)). (The old key `cpu_moe: full | hybrid` is a
 deprecated alias for `stream: cpu | experts` and warns at config load.)
 
 `moe_expert_mass: P` (a share in `(0, 1]`) installs the adaptive lossy
@@ -675,15 +740,21 @@ aliases:
   coder: qwen3.6-27b@qwen-coder      # a preset: the 27B with the coder profile baked in
 ```
 
-An alias name must not contain `@` and must not collide with a model id; its
-target id (and profile, if any) must exist. Validated at load.
+An alias name must not contain `@` and must not collide with a model id, and
+its target id (and profile, if any) must exist. Validated at load.
 
 ### `discover`
 
 Opt-in header-only directory scan (architecture + `nextn_predict_layers`
 only, zero tensor I/O). Native-head MTP models auto-enable speculative.
-Sibling `mmproj*.gguf` pairs into the model it best matches. Assistant
-drafters are reported but only wired when a model names one via `draft_gguf`.
+Sibling `mmproj*.gguf` pairs into the model it best matches. A sibling
+assistant drafter (gemma4 assistant, DSpark, DFlash) pairs in as that model's
+`draft_gguf`, which turns speculative on; the arch, the hidden size, and the
+filename must all agree. A drafter whose header names its base model (a
+DFlash 2 drafter does) pairs with that model wherever the scan found it, and a
+DFlash 2 drafter replaces a DFlash v1 sibling already paired on the same
+target; a drafter that names a different base model never pairs. A streamed
+model gets no drafter, and `speculative: false` stops the pairing.
 
 ```yaml
 discover:
@@ -858,7 +929,7 @@ sole model, else 400.
 
 The same addressing works in the CLI: `gmlx run <id-or-path>@coding`,
 `gmlx run <id> --profile coding`, and identically for `chat`. A bare-path
-`run`/`chat` (no config) still gets its family's base defaults; an explicit
+`run`/`chat` (no config) still gets its family's base defaults. An explicit
 sampling flag always wins, and `--no-family-defaults` (or
 `GMLX_NO_FAMILY_DEFAULTS=1`) opts a run out entirely.
 
@@ -868,18 +939,36 @@ sampling flag always wins, and `--no-family-defaults` (or
 
 ### Sampling keys (`sampling:`)
 
-The request fields mlx-vlm already honours; carried verbatim into generation:
+The request fields mlx-vlm already honours, carried verbatim into generation:
 
 `temperature`, `top_p`, `top_k`, `min_p`, `max_tokens`, `seed`,
 `repetition_penalty`, `presence_penalty`, `frequency_penalty`,
 `repetition_context_size`, `enable_thinking`, `thinking_budget`,
 `thinking_start_token`, `thinking_end_token`.
 
+`seed` is honored per request, in-batch: each seeded request draws its
+tokens from its own key stream while unseeded rows in the same batch keep
+the shared stream, byte for byte. Seed guarantees a deterministic sampling
+stream for that request. It does not guarantee bitwise-identical output
+across runs with different batch composition, because batched matmul
+reduction order shifts logits at float tolerance; the same composition
+(for example a solo replay) reproduces exactly. With speculative decoding,
+drafts are greedy and a seeded single-stream request's target draws come
+from the same per-request key stream, so a replay matches only across runs
+with the same speculation setting; seeded rows inside a batched
+speculative decode fall back to the shared stream.
+
 `thinking_start_token` / `thinking_end_token` override the `<think>` /
 `</think>` defaults everywhere the server needs the model's real reasoning
 markers (open-think detection, `thinking_budget`, the streamed
 reasoning/answer splitter). Set on a family card when a model spells them
 differently (the `hy3` card pins `<think:opensource>` / `</think:opensource>`).
+
+All three thinking keys apply to `run` and `chat` as well, through the config
+overlay ([cli.md](cli.md#resolving-a-model-from-a-config)); they map onto
+`--thinking-budget`, `--thinking-start-token`, and `--thinking-end-token`, and
+an explicit flag wins. The REPL's reasoning rendering detects markers on its
+own and is unaffected by the two token keys.
 
 `thinking_budget` is off by default (unset means unlimited thinking). Set it
 on a profile or per model to cap reasoning tokens: once ~N thinking tokens
@@ -924,6 +1013,10 @@ models. Each maps 1:1 to the env var mlx-vlm reads at build:
 > reads it per request, after the per-model load window has closed, so a
 > per-model mapping cannot work. Set `server.prefill_step_size` (see the
 > server key table above).
+>
+> `dtype` is likewise server-level. It could be applied per model, but the
+> reason to leave bfloat16 is that this GPU has no native bfloat16 arithmetic,
+> which is true of every model on the box. Set `server.dtype`.
 
 `kv_quant_scheme: kvarn` converts every eligible layer's batch KV cache to
 KVarN (`kv_bits` picks the width, default 6; `kv_tail_tokens` sizes the
@@ -1098,12 +1191,21 @@ What a warm hit restores:
   per entry grows quadratically over a conversation. The checkpoint tier
   saves these models piecewise instead - near-linear memory, same warm
   TTFT. Along a long prefill it drops a restore point every
-  `GMLX_APC_CKPT_INTERVAL` tokens (default 4096), plus two targeted
+  `GMLX_APC_CKPT_INTERVAL` tokens (default 4096), plus three targeted
   ones: a replay checkpoint one token before the prompt end (recurrent
   state cannot rewind, so an identical resend needs a restore point
-  strictly below it) and a turn checkpoint at the longest prefix the
+  strictly below it), a turn checkpoint at the longest prefix the
   next turn's re-rendered history can actually replay (predicted from
-  the chat template, so thinking-strip divergence lands past it). What
+  the chat template, so thinking-strip divergence lands past it), and
+  an anchor checkpoint at the end of the system prompt. The anchor is
+  the fan-out one: requests that share a system prompt and tool schemas
+  but carry different user turns (parallel agents, subagent bursts) all
+  restore from it instead of re-prefilling the shared prefix, and it is
+  exempt from the pruning that otherwise keeps only the newest restore
+  points as a conversation deepens. Exact-tier models (deepseek-v4-class
+  pooling stacks) get the same anchor as a whole-prefix clone in its own
+  small LRU (`GMLX_APC_ANCHOR_ENTRIES`), where sibling churn through the
+  count-capped exact slots cannot evict it. What
   reuse each family gets from these:
   [performance.md](performance.md#the-prompt-cache). On ckpt-tier
   models prompt prefill runs one request at a time (batched prefill
@@ -1145,11 +1247,17 @@ and store counts surface on the authed `GET /v1/metrics`.
 | `GMLX_APC_CKPT_REPLAY` | `0` disables the replay checkpoint (identical resends prefill cold again). |
 | `GMLX_APC_CKPT_REPLAY_MIN` | Minimum prompt tokens before a replay checkpoint is saved on recurrent (GDN) models (default `1024`; short prompts re-prefill cheaply and are not worth the >100 MB state snapshot). |
 | `GMLX_APC_CKPT_TURN` | `0` disables the turn checkpoint (next-turn reuse falls back to the interval grid). |
+| `GMLX_APC_CKPT_SYS` | `0` disables the system-prompt anchor on both tiers (sibling requests sharing a system prompt prefill the shared prefix cold; on hybrid models they also fall back to the interval grid). |
+| `GMLX_APC_CKPT_SYS_MIN` | Minimum tokens of shared system prefix before an anchor is saved (default `256`; raised to `GMLX_APC_CKPT_REPLAY_MIN` on recurrent models). A shorter shared prefix re-prefills in milliseconds and is not worth a record. |
+| `GMLX_APC_ANCHOR_ENTRIES` | Exact-tier anchor LRU entries (default `4`). Exact-mode models (deepseek-v4-class pooling stacks) keep their system-prompt anchors here as whole-prefix clones, out of reach of the count-capped upstream exact LRU that every request's own store would churn. |
+| `GMLX_APC_ANCHOR_BUDGET_MB` | Byte budget for the exact-tier anchor LRU, in MB (default `4096`). A deep shared prefix on a pooling stack clones to GBs; newest always survives. |
 | `GMLX_APC_CKPT_TRIPWIRE` | Requests before the dead-tier tripwires warn (default `5`; `0` silences both). |
 | `GMLX_APC_CKPT_RECORDS` | Checkpoint-record LRU entries (default `32`). |
 | `GMLX_APC_CKPT_BUDGET_MB` | Byte budget for checkpoint-record payload (recurrent states + KV tails), in MB (default `4096`). A GDN record can carry >100 MB of state and each request saves several checkpoints, so expect resident memory to grow toward this budget on hybrid models under sustained multi-turn traffic; lower it if 4 GB of cache is too much for your machine. Under `KV_QUANT_SCHEME=kvarn` this becomes the governing knob for hybrid models: kvarn records carry the whole attention payload inline (no block chains), so `APC_NUM_BLOCKS` mostly stops mattering and this budget bounds the tier's memory. |
 | `GMLX_APC_DECODE_CKPT` | Decode-time snapshot interval in generated tokens on hybrid models, anchored to the prompt end (default `512`; `0` off; widens automatically with context). |
 | `GMLX_APC_RETIRE_LCP` | `0` keys retirement on the forwarded ids instead of the predicted next-turn render (also disables decode-time snapshots, which key on the prediction). |
+| `GMLX_APC_FRESH_WAIT_MS` | Hold ceiling for the freshness admission gate, in ms (default `500`; `0` disables the gate). Sibling requests that arrive together admit one formation apart instead of together and cold: the first request prefills and stores the shared prefix, and the held siblings then admit warm. A sibling held past the ceiling admits cold. |
+| `GMLX_APC_FRESH_MIN` | Minimum uncovered shared-prefix tokens before the gate holds a sibling (default `256`). Below the floor the duplicate prefill costs less than the wait. |
 | `GMLX_FAITHFUL_HISTORY` | `0` restores mlx-vlm's stock chat-history rebuild, which drops `reasoning_content` from non-tool assistant messages before the template sees it (see `chat_template_kwargs`). |
 
 ---
@@ -1208,15 +1316,17 @@ is enabled. These are the config-server overrides and additions:
 
 | Endpoint | Behaviour |
 |----------|-----------|
-| `GET /v1/models`, `GET /models` | Configured/discovered ids + alias presets, each with `resident` / `pinned` / `speculative` / `vlm` / `profile` / `default` markers. Never the HF cache. |
-| `GET /health` | Liveness only: `{"status": "healthy"}`, no model/adapter paths, no context fields. The one route api-key auth exempts, so it deliberately leaks nothing. |
-| `GET /v1/metrics` | The stock runtime snapshot (under its `server` key) enriched with `resident_models[]` (per-entry ids, pinned, `idle_s`, `ttl_s`, footprint), alongside the context limits / APC detail. Authed like every other endpoint; what `gmlx ps` reads. |
+| `GET /v1/models`, `GET /models` | Configured/discovered ids + alias presets, each with `resident` / `pinned` / `speculative` / `vlm` / `profile` / `default` markers, plus `context_length` (the GGUF's trained context) and `max_context_at_width_1` (what the capacity table says fits at width 1; only for the model the table was derived from, else `null`). `gmlx launch pi` writes the smaller of the two as pi's `contextWindow`. Never the HF cache. |
+| `GET /health` | Liveness only: `{"status": "healthy", "pid": N}`, no model/adapter paths, no context fields. The one route api-key auth exempts, so the liveness body deliberately leaks nothing. `?ready=1` adds a readiness verdict - deliberately a little more than liveness (a coarse busy/not-busy and a throughput-derived wait hint, which is all a keyless caller can learn; the numbers behind it stay on the authed metrics): 200 with `"ready": true`, or 503 with `"ready": false`, a one-word `reason` (`pressure` when the governor is orange/red, `queue` when requests are waiting for a slot, `busy` when every resident model's engine is at its decode width) and a `Retry-After` header from the same drain estimate a queue-cap 503 carries. Still keyless; see [Capacity and live-request metrics](#capacity-and-live-request-metrics). |
+| `GET /v1/metrics`, `GET /metrics` | The stock runtime snapshot (under its `server` key) enriched with `resident_models[]`, the memory governor, the capacity table, `concurrency`, `queue`, and the live `requests[]` view; see [Capacity and live-request metrics](#capacity-and-live-request-metrics). Authed like every other endpoint; what `gmlx ps` reads. `?format=prometheus` (or `Accept: text/plain` / an OpenMetrics `Accept`) renders the same snapshot as Prometheus text (`gmlx_*` gauges and `*_total` counters; lists of models become `model`-labelled series, the capacity tables `width`/`depth`-labelled ones, `governor.band` a `band`-labelled indicator plus `gmlx_governor_band_level` 0-3). |
 | `POST /v1/completions` | Classic OpenAI text completions, no chat template applied. Scope: a single string `prompt`, `n=1`; supports `max_tokens`, `temperature`, `top_p`, `seed`, `stop`, `stream` (SSE with a final `[DONE]`), plus `profile` and the other shared sampling extras. List / token-array prompts, `n > 1`, `echo`, `suffix`, and `best_of > 1` are rejected with a 400. |
 | `POST /v1/messages/count_tokens` | (stock) Anthropic-style token counting: same body shape as `/v1/messages`, returns `{"input_tokens": N}` after applying the chat template. |
 | `GET /v1/cache/stats` | Automatic Prefix Cache statistics, or `{"enabled": false}` when APC is off. On checkpoint-tier models (hybrid/SWA archs) the snapshot carries the `ckpt_*` counter family beside the stock fields; see [Checkpoint-tier counters](#checkpoint-tier-counters). |
-| `POST /v1/cache/reset` | (stock) clears the Automatic Prefix Cache. |
+| `POST /v1/cache/reset` | Clears the Automatic Prefix Cache. With no body, every resident model's (the stock handler reached only the request context's manager); `{"model": "<id>"}` clears one resident model's. Returns `{"enabled", "status": "cleared" \| "no_cache", "models": [ids cleared]}`; 404 `unknown_model` / `not_resident` for a bad id. The disk tier's files are untouched, as before. |
 | `POST /v1/images/generations`, `POST /v1/images/edits` | (stock mlx-vlm routes) not usable with GGUF text models - they require an MLX image-generation checkpoint, which gmlx does not serve; a request against a configured GGUF fails with an error. |
-| `POST /unload` | `{"model": "<id>"}` evicts just that resident entry (also clearing any keep mark); an empty body clears the whole pool. |
+| `POST /unload` | `{"model": "<id>"}` evicts just that resident entry (also clearing any keep mark); an empty body clears the whole pool. An explicit unload outranks the preload's lifetime hold (that hold guards against implicit eviction, not the operator), so the preloaded primary unloads too; a model with in-flight streams still answers 409. A model unloaded this way and later reloaded by request has no lifetime hold - it is TTL/LRU-managed like any other until a `/v1/reload` with `preload` re-pins it. |
+| `POST /v1/estimate` | Dry-run admission: the same body as `/v1/chat/completions`, answered with the numbers instead of a generation (`prompt_tokens`, `warm_tokens`, `need_bytes`, `fits_now`, `fits_drained`, `est_ttft_s`, ...). `"dry_run": true` on `/v1/chat/completions` returns the same estimate (that form goes through the queue cap; this route does not). See [Capacity and live-request metrics](#capacity-and-live-request-metrics). |
+| `GET /v1/capacity/plan?width=W&depth=D` | The fan-out policy: can `W` streams run at `D` tokens each (`ok`, from the capacity table), and may they start now (`admit_now`, from the governor band, the waiting census and the free decode slots), with `reason`. |
 | `POST /v1/keep` | `{"model": "<id>", "warm": true}` keeps a model resident through the idle-TTL reaper (still LRU-evictable; the keep tier above), and by default background-loads it so it is hot before the first request. `gmlx launch --model <id>` fires this once the server is up, and a `gmlx talk` / menu-bar voice session holds its model this way for the session's lifetime. `{"model": "<id>", "keep": false}` releases the hold without evicting; `/unload` releases and evicts. |
 | `POST /v1/reload` | (config mode only) re-reads the config and re-registers models, keeping warm entries whose load signature is unchanged. In non-config modes it returns 200 with `{"status": "unsupported"}`. `SIGHUP` triggers the same reload; see [Reloading the config](#reloading-the-config). |
 | `POST /v1/audio/transcriptions` | (only with `server.stt:` / `--stt`) OpenAI-compatible speech-to-text; see below. |
@@ -1224,6 +1334,85 @@ is enabled. These are the config-server overrides and additions:
 | `POST /v1/audio/speech` | (only with `server.tts:` / `--tts`) OpenAI-compatible text-to-speech; see below. |
 | `POST /v1/embeddings` | (only with `server.embeddings:` / `--embeddings`) OpenAI-compatible text embeddings; see below. |
 | `POST /v1/rerank` | (only with `server.rerank:` / `--rerank`) Cohere/Jina-shaped reranking; see below. Also served at `/rerank`. |
+
+### Capacity and live-request metrics
+
+`GET /v1/metrics` carries, under `server`, everything a load balancer or a
+harness that fans out subagents needs to size its work to the server. All
+of it is read-only and cheap (the poll is on the request log's silent
+list); the keyless `GET /health?ready=1` gives the coarse yes/no without
+the key.
+
+| Section | Fields | Meaning |
+|---|---|---|
+| `concurrency` | `decode_batch`, `queue_cap`, `in_flight`, `waiting` | The effective decode width (`GMLX_DECODE_BATCH`, bounded by the capacity frontier), the waiting-queue cap, streams generating now (each resident entry's `in_flight`: its busy refcount minus the process-lifetime hold the primary preload keeps, so an idle server reads 0), and requests waiting for a slot (every resident engine's server queue plus its unadmitted prompts, summed). Each resident model decodes on its own engine with its own width, so `in_flight` is server-wide while `resident_models[].in_flight` is the per-model number to compare against `decode_batch`. |
+| `queue` | `waiting`, `cap`, `eta_s`, `rejections`, `last_reject_reason` | The waiting census again, the cap it is judged against, and the drain estimate in seconds a client would get as `Retry-After` right now (`0` with nothing waiting; the same formula: waiting x mean tokens per request / aggregate decode rate, clamped 2-60 s). |
+| `requests[]` | `id`, `uid`, `model`, `state`, `position`, `prompt_tokens`, `generated`, `max_tokens`, `elapsed_s`, `ttft_s`, `decode_tok_s`, `cache {tier, warm_tokens}`, `speculative {rounds, accepted, drafted, accept_rate}` | One row per request the serve path knows about, queued rows first in queue order. `state` is `queued` (server queue or engine-side unadmitted; `position` is the place in line), `prefill`, or `decode`. `cache.tier` is the prefix-cache hit the row got (`exact`, `block`, or gmlx's own `ckpt` / `anchor` restores; `miss`; `hit` when only the warm-token count is known) and `warm_tokens` how many prompt tokens it reused. `speculative` is the drafter's acceptance since the row started (exact at batch width 1, shared across the batch otherwise) and `null` without a drafter. Rows come from each engine's tick, refreshed at most four times a second per engine and merged across resident models (`position` is the place in that model's queue); an idle engine contributes nothing. Drafted models (`draft_gguf` / `speculative: true`) report rows like any other; their `speculative` numbers are the drafter's per-generation round tally, which is exact at batch width 1 and shared across a wider speculative batch. |
+| `governor` | `band`, counters | The memory governor's band and shed history; see the `GMLX_GOVERNOR` / `GMLX_GOV_*` rows in [cli.md](cli.md#environment-variables). |
+| `capacity` | `max_ctx` by width, `max_width_at_depth`, byte budgets | The boot capacity table (`GMLX_OVERCOMMIT=1` disables its ceilings); absent for an HF fall-through load. |
+| `rates` | `decode_tok_s`, `decode_streams`, `prefill_tok_s_recent`, `decode_tok_s_recent`, `decode_tok_s_lifetime` | The aggregate decode rate right now (the sum over the rows in `requests[]` that are decoding) and how many streams it is spread over; the mean prefill and per-stream decode rates over the last eight completed requests (what the dry-run's `est_ttft_s` is computed from); the lifetime mean decode rate. |
+
+The sections are independent: a server without a capacity table (an HF
+fall-through load) omits `capacity` and everything else still appears;
+any probe failure inside a section leaves that section's live fields
+`null` rather than failing the snapshot.
+
+**Asking before sending.** Two routes turn the same numbers into
+answers a dispatcher can act on without a refused request:
+
+- `POST /v1/estimate` (or `"dry_run": true` on `/v1/chat/completions`)
+  takes a chat-completions body and returns, for a resident model:
+  `prompt_tokens` (the rendered prompt, tokenized the way the request
+  would be), `warm_tokens` and `cache_tier` (how much of the prefix the
+  prefix cache already holds, and the deepest tier holding it: the block
+  chain, the exact index, or a pinned checkpoint record on `ckpt`-tier
+  models - the request itself restores by the runtime's own precedence; which
+  server holds your prefix, and how much of it, is the routing signal
+  across machines), `need_bytes` (the prompt's KV plus the prefill
+  transient, plus `max_tokens` when the body pins one - exactly what the
+  memory preflight prices), `avail_now_bytes` / `fits_now` (against the
+  live headroom) and `avail_drained_bytes` / `fits_drained` (against the
+  working set with the batch drained: the preflight's own refusal line),
+  `context_ok` against `context_limit` (`context_limit_source` says
+  whether that is the configured `max_kv_size` or, with nothing
+  configured, the GGUF's trained context), and `est_ttft_s`
+  (queue drain plus the cold suffix at the recent prefill rate). A model
+  that is not resident answers `resident: false` with null fits - the
+  dry-run never loads a model. Requests carrying images / audio / video
+  render but are not priced (`media: true`), matching the preflight.
+- A chat request for a model the load gate cannot admit right now (its
+  weights would fit the box, but not next to what is resident and
+  pinned or busy, or not without pushing the kernel under the governor's
+  reclaimable floor while other processes hold the rest) answers `503`
+  with `{"error": {"type": "model_load_deferred", ...}}`, the gate's
+  numbers in the message, and `Retry-After`. The gate judges the load
+  against the serve ceiling (working set less margin and kernel reserve,
+  the same ceiling request admission uses) and against the kernel's own
+  reclaimable count, so a load that would Metal-OOM in the weight warm
+  is refused before it starts. Memory the kernel is still returning (an
+  unload or eviction a moment earlier) is waited for, up to 3 s, before
+  a load is deferred. Explicitly `POST /unload` the resident model, or
+  retry once its streams drain and the pool can evict it.
+- `GET /v1/capacity/plan?width=W&depth=D` evaluates the fan-out policy
+  where the numbers live: `ok` when the capacity table holds `W` streams
+  at `D` tokens each (`max_context_at_width` is read at the smallest
+  tabulated width >= `W`, so it is conservative between rows), and
+  `admit_now` when, on top of that, the governor is not orange/red,
+  nothing is waiting, and at least `W` decode slots are free (one under
+  yellow). `reason` names the first condition that fails. Without a
+  table (an HF fall-through load, or `GMLX_OVERCOMMIT=1`) `ok` is null
+  and only the timing is judged.
+
+The Prometheus rendering (`?format=prometheus`) flattens these to
+`gmlx_concurrency_in_flight`, `gmlx_queue_eta_s`,
+`gmlx_governor_band{band="green"} 1`, `gmlx_capacity_max_ctx{width="8"}`,
+`gmlx_resident_models_busy{model="<id>",profile="default"}` (`model`
+is the configured `id[@profile]` whose request built the entry; the
+`profile` label - adapter basename, model kind and/or a short hash of
+the load signature, `default` for a bare single-model launch - keeps
+two entries backing one GGUF as distinct series; both are fixed for the
+entry's lifetime) and so on; `requests[]` is high-cardinality and contributes only
+`gmlx_requests_count`.
 
 ### Reloading the config
 
@@ -1316,10 +1505,12 @@ is worse than an error. Two guardrails:
   they cannot drift.
 
 The standard sampling parameters (`max_tokens` / `max_output_tokens`,
-`temperature`, `top_p`, `top_k`, `min_p`, `repetition_penalty`,
-`presence_penalty`, `frequency_penalty` and their `*_context_size`
-companions, `enable_thinking`, `thinking_budget`) are honored on all three
-generation dialects. The rest:
+`temperature`, `top_p`, `top_k`, `min_p`, `top_n_sigma`, `p_less`,
+`typical_p`, `repetition_penalty`, `presence_penalty`, `frequency_penalty`
+and their `*_context_size` companions, `enable_thinking`,
+`thinking_budget`, and the OpenAI standard `reasoning` /
+`reasoning_effort` controls) are honored on all three generation
+dialects. The rest:
 
 | Parameter | `/v1/chat/completions` | `/v1/responses` | `/v1/messages` | Notes |
 |-----------|------------------------|-----------------|----------------|-------|
@@ -1334,6 +1525,7 @@ generation dialects. The rest:
 | `presence_penalty` | honored | honored | honored | |
 | `frequency_penalty` | honored | honored | honored | |
 | `stream_options` | honored | ignored | ignored | `include_usage` adds the final usage chunk (chat + `/v1/completions`) |
+| `timings_per_token` | honored | ignored | ignored | streamed chat chunks carry `timings.predicted_n`, the exact cumulative output-token count (llama.cpp convention) |
 | `response_format` | honored | honored | honored | `json_schema` / `json_object`; unknown types are rejected (see below) |
 | `logprobs` | honored | ignored | ignored | chat-only; `/v1/completions` never returns logprobs |
 | `top_logprobs` | honored | ignored | ignored | capped by `TOP_LOGPROBS_K` (below) |
@@ -1805,15 +1997,6 @@ sequenceDiagram
   A->>E: generate(...)
   E-->>C: stream tokens
 ```
-
-In prose, a request flows: (1) the client POSTs a chat completion whose
-`model` is `id@profile`; (2) the mlx-vlm app asks the residency pool for that
-model; (3) the pool has the serving resolver split the id from the profile
-and resolve the file path; (4) a resident model is returned as-is, while a
-cold one is built by the loader (leaves swapped to `kq.*` modules) and cached
-in the pool; (5) the generation arguments are seeded from the active
-profile's sampling; (6) the batch generator decodes and streams tokens back
-to the client.
 
 For the bridge/residency mechanics (how the path-keyed companion registries
 and the context-aware runtime proxy work), see

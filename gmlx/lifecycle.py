@@ -161,13 +161,88 @@ def _config_target() -> tuple | None:
     return None
 
 
+def stale_reason(run: dict | None) -> str | None:
+    """Why a runfile no longer describes a live managed server, or None
+    while it does. launchd-managed runs are never judged here (their pid
+    may be unusable; ``status_info`` probes health for them). The reasons
+    are the two ways a runfile goes stale: the process exited without
+    removing it (a crash, a SIGKILL, a harness that died), or its pid was
+    recycled by an unrelated process."""
+    if not run:
+        return "unreadable runfile"
+    if run.get("managed_by") == "launchd":
+        return None
+    if identity_ok(run):          # the one authority on "still our server"
+        return None
+    pid = run.get("pid")
+    if not pid:
+        return "no pid recorded"
+    if not pid_alive(pid):
+        return f"pid {pid} exited"
+    cmd = _proc_cmdline(int(pid)).split()
+    head = os.path.basename(cmd[0]) if cmd else "another process"
+    return f"pid {pid} is now another process ({head})"
+
+
+def _human_age(started_at) -> str:
+    try:
+        age = time.time() - float(started_at)
+    except (TypeError, ValueError):
+        return "unknown age"
+    if age < 0:
+        return "unknown age"
+    if age < 86400:
+        return f"started {_human_dur(age)} ago"
+    return f"started {int(age // 86400)}d ago"
+
+
+def classify_runs() -> tuple:
+    """``(live, stale)``: every runfile sorted by whether its process is
+    still our server. Stale entries carry ``stale_reason`` and ``age`` so a
+    listing can say why and how old, not just "not running"."""
+    live, stale = [], []
+    for run in list_runs():
+        reason = stale_reason(run)
+        if reason is None:
+            live.append(run)
+        else:
+            run["stale_reason"] = reason
+            run["age"] = _human_age(run.get("started_at"))
+            stale.append(run)
+    return live, stale
+
+
+def prune_stale_runs() -> list:
+    """Remove every stale runfile and return the removed runs. Each removal
+    re-checks under the spawn guard, so a ``serve`` that just rewrote the
+    runfile for that bind is never deleted out from under it. The spawn
+    guard lock files are left alone on purpose (see ``_remove_run``)."""
+    removed = []
+    for run in classify_runs()[1]:
+        host, port = run.get("host") or "127.0.0.1", run.get("port")
+        if port is None:
+            continue
+        with _spawn_guard_lock(host, port):
+            current = read_run(host, port)
+            if current is None or stale_reason(current) is None:
+                continue
+            _remove_run(host, port)
+        removed.append(run)
+    return removed
+
+
 def auto_target(host: str | None, port: int | None) -> tuple:
     """Resolve (host, port) for stop/status/logs/restart/ps/launch. Explicit
-    flags win; else the single managed server; else the default config's
+    flags win; else the single live managed server (stale runfiles never
+    steer a verb away from a running one); else the single runfile even
+    if stale (so a bare ``stop`` clears it); else the default config's
     host/port; else 127.0.0.1:8080. Every consumer of a bare lifecycle verb
     shares this resolution so they all talk about the same server."""
     if host is None and port is None:
         runs = list_runs()
+        if len(runs) > 1:
+            live = classify_runs()[0]
+            runs = live if len(live) == 1 else runs
         if len(runs) == 1:
             r = runs[0]
             return r.get("host") or "127.0.0.1", int(r.get("port") or 8080)
@@ -835,8 +910,10 @@ def status(host: str, port, *, as_json: bool = False) -> int:
         print(json.dumps(info, indent=2))
         return 0 if info["running"] else 3
     if not info["running"]:
-        msg = (f"server {host}:{port}: not running (stale runfile - `gmlx stop` "
-               f"to clear)")
+        run = read_run(host, port) or {}
+        reason = stale_reason(run) or "not answering"
+        msg = (f"server {host}:{port}: not running (stale runfile: {reason}, "
+               f"{_human_age(run.get('started_at'))}; `gmlx stop --stale` clears)")
         if healthy:
             msg += (f"; note: a different process is answering on "
                     f"http://{info['host']}:{info['port']}")

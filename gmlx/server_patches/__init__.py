@@ -74,9 +74,18 @@ from .chat_behavior import (
     install_chat_template_kwargs,
     install_ignore_eos,
     install_openai_stop_sequences,
+    install_role_normalization,
     install_stream_thinking_seed,
+    install_stream_timings,
     install_thinking_budget_fix,
     install_vanilla_stream_chunks,
+)
+from .capacity_routes import (
+    install_capacity_plan,
+    install_estimate,
+    install_health_readiness,
+    install_metrics_prometheus,
+    install_scoped_cache_reset,
 )
 from .completions import install_completions_route
 from .hardening import (
@@ -138,11 +147,13 @@ __all__ = [
     "install_fast_sampler",
     "install_gen_args_profile_injection",
     "install_health_liveness_override",
+    "install_health_readiness",
     "install_hf_download_gate",
     "install_ignore_eos",
     "install_json_content_type_tolerance",
     "install_keep_route",
     "install_loopback_host_guard",
+    "install_metrics_prometheus",
     "install_models_endpoint_override",
     "install_openai_stop_sequences",
     "install_optional_request_model",
@@ -150,12 +161,17 @@ __all__ = [
     "install_reload_route",
     "install_request_profile_capture",
     "install_request_timing_log",
+    "install_role_normalization",
     "install_rerank_route",
+    "install_scoped_cache_reset",
+    "install_capacity_plan",
+    "install_estimate",
     "install_resolver_error_handlers",
     "install_runtime_snapshot_enrichment",
     "install_server_patches",
     "install_sse_keepalive",
     "install_stream_thinking_seed",
+    "install_stream_timings",
     "install_thinking_budget_fix",
     "install_vanilla_stream_chunks",
     "install_xtc_sampling",
@@ -184,6 +200,8 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
         install_step_timing()
     if os.environ.get("GMLX_DISABLE_FAST_SAMPLER") != "1":
         install_fast_sampler()
+    from ..seed_rows import install_per_request_seed
+    install_per_request_seed()
     from .. import spec_engine
     spec_engine.install_full_prompt_mtp_prefill()
     spec_engine.install_owned_spec_engine()
@@ -192,6 +210,8 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     from ..batch_sched import install_decode_priority_sched
     install_decode_priority_sched()
     from ..apc_pooling import (
+        install_batched_cachelist_admission,
+        install_pooled_prefill_batch_gate,
         install_pooled_prompt_kv_quant,
         install_pooling_apc_support,
         install_safe_kv_quantization,
@@ -199,12 +219,26 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_pooling_apc_support()
     install_safe_kv_quantization()
     install_pooled_prompt_kv_quant()
+    install_pooled_prefill_batch_gate()
+    # Before the model loads, so the cascade stamp wrapper (installed at load
+    # time) wraps this and both survive.
+    install_batched_cachelist_admission()
+    # After the pacer above so this wrapper runs outside it: a declined
+    # tick hides the pending list before the pacer looks, the pacer sees
+    # no prefill work, and decode runs unpaced while admission waits.
+    from ..admit_gate import install_admit_headroom_gate
+    install_admit_headroom_gate()
+    # After the headroom gate so a truncated tick still projects memory
+    # for the rows it admits.
+    from ..fresh_gate import install_fresh_admission_gate
+    install_fresh_admission_gate()
     from ..kvarn_serve import install_kvarn_serve
     install_kvarn_serve()
     from ..kvarn_apc import install_kvarn_apc
     install_kvarn_apc()
     install_chat_template_kwargs()
     install_thinking_budget_fix()
+    install_stream_timings()
     install_openai_stop_sequences()
     install_api_contract()
     # Before the load-offload / profile-capture / keepalive wrappers so they
@@ -223,6 +257,13 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_hf_download_gate(bool(getattr(cfg, "hf_cache", False)))
     install_runtime_snapshot_enrichment()
     install_pool_aware_unload()
+    # After the liveness override (replaces its handler) and the residency
+    # pool install (the scoped reset walks the pool's entries).
+    install_health_readiness()
+    install_metrics_prometheus()
+    install_scoped_cache_reset()
+    install_capacity_plan()
+    install_estimate()
     # Render-wrap nesting per target: seed(retire(faithful(orig))).
     # Faithful innermost so the retire capture memoizes it and predictions
     # see the render the server produces. Seed outermost for two reasons:
@@ -234,6 +275,9 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_apc_lone_harvest()
     install_retire_render_capture()
     install_stream_thinking_seed()
+    # Outermost render wrap: the retire capture below it must memoize the
+    # normalized messages, so the next-turn prediction renders identically.
+    install_role_normalization()
     install_keep_route()
     install_reload_route(reload_fn)
     install_audio_transcription_route(getattr(cfg, "stt", None))
@@ -244,6 +288,33 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_rerank_route(getattr(cfg, "rerank", None))
     install_resolver_error_handlers()
     install_request_timing_log()
+    from ..queue_cap import install_queue_depth_cap
+    install_queue_depth_cap()
+    from ..mem_preflight import install_memory_preflight
+    install_memory_preflight()
+    # Late so the trace brackets the full tick including pacing and
+    # admission work.
+    from ..serve_memtrace import install_serve_memtrace
+    install_serve_memtrace()
+    # Outside the trace (band decisions and shed work show up as tick
+    # time, which the trace should attribute) and inside the tick guard
+    # (a memory error a governor action itself trips must be contained
+    # like any other).
+    from ..governor import install_governor
+    install_governor()
+    # The rows the guard or the governor fail permanently must reach
+    # their handlers (typed error + close on the response queue).
+    from .row_failed import install_row_failed_bridge
+    install_row_failed_bridge()
+    # Outside the row-failed bridge (reads ``active`` after the bridge has
+    # popped shed rows, so a shed uid never lingers in the live view).
+    from ..live_requests import install_live_requests
+    install_live_requests()
+    # The true last BatchGenerator._next wrapper (outermost): the tick
+    # guard must see every error the tick can raise, and its recovery
+    # time must not pollute the trace's tick bracket.
+    from ..tick_guard import install_tick_guard
+    install_tick_guard()
     # Last: the assistant chat wrapper must be outermost (alias ids never
     # reach the model resolver) and wrap the models override above.
     from ..assistant_serve import install_assistant_serve

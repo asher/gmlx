@@ -5,7 +5,7 @@ A multimodal model in GGUF is two files:
 1. the LLM GGUF, a normal text architecture, K-quantized as usual; and
 2. a separate `mmproj` GGUF (`general.architecture = "clip"`) holding the
    vision (and/or audio) encoder plus the cross-modal projector. It ships float
-   or Q8_0; a quantized mmproj's encoder matmuls run on the K-quant kernels like
+   or Q8_0. A quantized mmproj's encoder matmuls run on the K-quant kernels like
    the text tower, while float weights stay native.
 
 `gmlx` pairs them with `--mmproj` and loads an [mlx-vlm](https://github.com/Blaizzy/mlx-vlm)
@@ -14,7 +14,7 @@ encoders run in float, and the image processor + chat template (including the
 per-family image/audio marker tokens) are synthesized from the two GGUFs' metadata.
 `--hf-source` overrides only when a file omits something.
 
-Vision and audio support is included in the base install. No extra is needed.
+Vision and audio support is included in the base install, no extra needed.
 
 Where mmproj files come from: llama.cpp-style multimodal GGUF repos ship them
 as `mmproj-*.gguf` siblings of the LLM GGUF in the same Hugging Face repo.
@@ -35,7 +35,7 @@ gmlx serve model.gguf --mmproj mmproj.gguf --port 8080
 ```
 
 `--resize-shape N|WxH` resizes images before encoding, setting the soft-token count
-that dominates prefill cost. Unset, images encode at native resolution; a
+that dominates prefill cost. Unset, images encode at native resolution. A
 square cap like `448` (or an explicit `672x448`) is a typical choice when prefill
 cost matters. Audio input (`--audio`, `/audio`) works where the
 mmproj carries an audio encoder (gemma-4 omni, Qwen3-Omni). Vision-only mmprojs
@@ -55,10 +55,25 @@ families that share one. An unsupported pairing fails loudly at load with both n
 | Qwen3-Omni | `qwen3vl_merger` + `qwen3vlmoe` | Qwen3-Omni (vision + audio) |
 | gemma-4 omni | `gemma4v`/`gemma4a` | gemma-4-E2B / E4B (vision + audio) |
 | gemma-4 unified | `gemma4uv` | gemma-4-12B (encoder-free unified embedder) |
+| Muse Glimmer | `muse-glimmer` + `muse-glimmer` | Muse-Glimmer-30B |
+| Kimi K2.5 / K2.7 | `kimik25` + `deepseek2` | Kimi-K2.5, Kimi-K2.7-Code |
+
+Muse Glimmer's vision tower and image processor are implemented in gmlx. Neither
+mlx-vlm nor the installed transformers ships the family, so the preprocessing
+ports llama.cpp's `mtmd_image_preprocessor_muse_glimmer`. `--hf-source` is not
+needed.
+
+Kimi K2.x pairs its MoonViT mmproj with the `deepseek2` text tower. The
+converter rewrites the vision Q/K into the split 2-D RoPE layout that
+llama.cpp's `build_rope_2d` reads. The remap puts them back into the
+interleaved layout of MoonViT. A mis-decoded mmproj thus gives confidently
+wrong image descriptions, and not a load error. GLM-5.2-V has the same vision
+encoder on a different text arch, and gmlx refuses it by name. K2.x is an
+over-RAM MoE, so it needs the streaming placement in the caveats below.
 
 Qwen2-VL / Qwen2.5-VL mmprojs (`qwen2vl_merger`) are not supported yet. The
 load fails up front with the family named. LLaVA's image processor isn't
-synthesized from the GGUF; pass the checkpoint's HF id (e.g.
+synthesized from the GGUF. Pass the checkpoint's HF id (e.g.
 `--hf-source llava-hf/llava-1.5-7b-hf`) so the processor loads from there. On
 LLaVA the loader reports two unfilled parameters
 (`vision_tower.[...].post_layernorm.{weight,bias}`). This is expected: llama.cpp's
@@ -86,14 +101,21 @@ consumer.
   shows the same degradation on the same file. This is separate from the
   already-merged `image_std` mean/std fix (llama.cpp #13208). Current community
   mmproj files carry that fix. GGUF Pixtral vision quality is capped until a
-  re-converted mmproj appears; the text tower is unaffected.
+  re-converted mmproj appears. The text tower is unaffected.
 
 ## Caveats
 
-- A multimodal request needs the mmproj at load; the bare LLM GGUF still loads and
+- A multimodal request needs the mmproj at load. The bare LLM GGUF still loads and
   runs as a plain text model (the vision side is simply absent).
 - Adapters (`--adapter`) don't combine with `--mmproj` yet -- live GGUF LoRA is
   text-path-only and errors loudly.
+- You can use `--stream-experts` (server key `stream: experts`) with
+  `--mmproj`. Use this combination for an over-RAM multimodal MoE. gmlx puts
+  the placement on the text tower after it loads the model, and the vision
+  tower stays on the GPU. You cannot use `--stream-cpu` (server key
+  `stream: cpu`) with `--mmproj`. That mode moves the process to the CPU
+  device, and it moves the vision tower with it. Send only one request at a
+  time to a server that streams a VLM (see [streaming.md](streaming.md)).
 - Speculative decoding (`--speculative`) *does* combine with `--mmproj` when a drafter
   is available -- a native MTP head (e.g. Qwen3.5/3.6) or `--draft-gguf`. Text-only
   turns speculate; media turns fall back to plain decode. With `--mmproj` but no

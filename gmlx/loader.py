@@ -27,9 +27,14 @@ from mlx.utils import tree_flatten
 import mlx_kquant as kq
 
 from . import loadlog
+from .dtypes import activation_dtype, activation_dtype_name
 from .envflags import env_bool, env_choice, env_float, env_int
 from .attn_hd512 import install_hd512_sdpa
-from .prefill_decay import install_prefill_decay, note_untracked_weights
+from .prefill_decay import (
+    deduct_untracked_weights,
+    install_prefill_decay,
+    note_untracked_weights,
+)
 from . import gpt_oss_prefill  # noqa: F401  (registers gpt_oss score profile)
 from .modules import install_fused_moe_glu, install_hyv3_shexp_fold
 from .occupancy_fuse import install_occupancy_fuse
@@ -39,6 +44,7 @@ from .cascade_sdpa import install_cascade_sdpa, install_cascade_stamp
 from .sparse_sdpa import install_sparse_sdpa
 from .arrays_cache_fix import install_arrays_cache_fix
 from .gemma4_sync import install_gemma4_nosync
+from .softcap_f32 import install_gemma4_softcap_f32
 from .quantized_sdpa_fix import install_quantized_sdpa_mask_fix
 from .rope_batch_fix import install_rope_batch_fix
 from .rotating_cache_fix import install_rotating_cache_fix
@@ -616,6 +622,20 @@ _MTP_TARGET_HOOKS_BY_TYPE = {
         "speculative_argmax_from_hidden",
         "speculative_verify_hidden",
     ),
+    # MuseGlimmerSpecLM (vendored mlx-lm class): same lean set as deepseek_v4.
+    "muse_glimmer": (
+        "rollback_speculative_cache",
+        "speculative_logits_from_hidden",
+        "speculative_argmax_from_hidden",
+        "speculative_verify_hidden",
+    ),
+    # Qwen4ExpSpecLM (vendored mlx-lm class): same lean set as deepseek_v4.
+    "qwen4_exp": (
+        "rollback_speculative_cache",
+        "speculative_logits_from_hidden",
+        "speculative_argmax_from_hidden",
+        "speculative_verify_hidden",
+    ),
 }
 
 
@@ -751,6 +771,27 @@ def _mtp_target_classes(model_type: str):
             return hy_v3_mtp.HyV3SpecLM(ModelArgs.from_dict(config))
 
         return hy_v3_mtp.HyV3SpecLM, build
+    if model_type == "qwen4_exp":
+        from . import qwen4_exp_mtp
+        from .qwen4_exp_model import ModelArgs, ensure_registered
+
+        ensure_registered()
+
+        def build(config):
+            return qwen4_exp_mtp.Qwen4ExpSpecLM(ModelArgs.from_dict(config))
+
+        return qwen4_exp_mtp.Qwen4ExpSpecLM, build
+    if model_type == "muse_glimmer":
+        from . import muse_glimmer_mtp, muse_glimmer_tools
+        from .muse_glimmer_model import ModelArgs, ensure_registered
+
+        ensure_registered()
+        muse_glimmer_tools.ensure_registered()
+
+        def build(config):
+            return muse_glimmer_mtp.MuseGlimmerSpecLM(ModelArgs.from_dict(config))
+
+        return muse_glimmer_mtp.MuseGlimmerSpecLM, build
     from .arch_table import MTP_WIRED_MODEL_TYPES
 
     raise NotImplementedError(
@@ -907,6 +948,22 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         from . import kimi_k3_model
 
         kimi_k3_model.ensure_registered()
+    if mt == "qwen4_exp":
+        # Neither pinned mlx-lm nor mlx-vlm ships qwen4_exp (llama.cpp PR
+        # #27742); same vendored-registration pattern as deepseek_v4, plus
+        # QSAKVCache injection into the cache modules.
+        from . import qwen4_exp_model
+
+        qwen4_exp_model.ensure_registered()
+    if mt == "muse_glimmer":
+        # mlx-lm ships no muse_glimmer module (afmoe is the nearest relative);
+        # same vendored-registration pattern as kimi_k3. The tool parser
+        # registers with the model so a later serve template-inference
+        # resolves it.
+        from . import muse_glimmer_model, muse_glimmer_tools
+
+        muse_glimmer_model.ensure_registered()
+        muse_glimmer_tools.ensure_registered()
     Model, ModelArgs = _get_classes(config)
     model_args = ModelArgs.from_dict(config)
     model = Model(model_args)
@@ -1915,6 +1972,15 @@ def install_expert_streaming(
                                     parts.append(self.__call__(
                                         x[t], indices[t],
                                         *[a[t] for a in orig]))
+                                    # The pieces share one precomputed
+                                    # routing. Thus the stage-time eval of a
+                                    # later piece's indices does not wait for
+                                    # an earlier piece's gather. Staging
+                                    # could overwrite (or resize away) arena
+                                    # slots that the unexecuted gather
+                                    # references. Execute each piece before
+                                    # the next piece stages.
+                                    mx.eval(parts[-1])
                             finally:
                                 object.__setattr__(
                                     self, "_kq_in_split", prev_split)
@@ -2040,6 +2106,31 @@ def install_expert_streaming(
                 m._kq_cpu_only = True
             offloaded += sum(a.nbytes for _, a in tree_flatten(m.parameters()))
             n_wrapped += 1
+    if over_budget and offloaded:
+        # Streamed expert bytes are page cache, never wired, and must not
+        # tax headroom_bytes() or the admission gate and request preflight
+        # starve every request. Which side of the accounting they sit on
+        # depends on how the load materialized them: registered untracked
+        # (zero-copy walk, small tracked delta) they need deducting; but a
+        # load whose arrays landed allocator-tracked (untracked registered
+        # ~0) has them inside mx.get_active_memory instead, and headroom
+        # needs the add-back credit. tracked = total - untracked splits
+        # the two regimes; the credit is clamped to the expert share.
+        # Same 0.9 x working-set budget test as _warm_touch_pass.
+        key = getattr(model, "_kq_weights_key", None)
+        from .prefill_decay import (
+            note_streamed_tracked_bytes,
+            untracked_weight_bytes_for,
+        )
+        tracked = max(0.0, total_bytes - untracked_weight_bytes_for(key))
+        credit = min(float(offloaded), tracked)
+        if credit > 0:
+            note_streamed_tracked_bytes(credit, key)
+            print(
+                f"[stream] headroom credits {credit / 1e9:.1f} GB of "
+                "allocator-tracked expert bytes as reclaimable page cache"
+            )
+        deduct_untracked_weights(offloaded, key)
     if n_cpu_only_codec:
         print(
             f"[stream] {n_cpu_only_codec} expert stacks use a CPU-only codec "
@@ -2567,9 +2658,26 @@ def _warm_touch_threshold_bytes() -> int:
         return cap
 
 
+def _active_now() -> float | None:
+    """MLX-tracked active bytes, None off-device (baseline for the
+    untracked-weights split in _warm_mmap_residency)."""
+    try:
+        return float(mx.get_active_memory())
+    except Exception:
+        return None
+
+
+def weights_source_key(*paths: str) -> tuple | None:
+    """Identity of a load's weight bytes (absolute file paths) for the
+    untracked-headroom registry: reloads of the same file count once (the
+    first registration per key wins; see note_untracked_weights)."""
+    return tuple(os.path.abspath(p) for p in paths) or None
+
+
 def _warm_mmap_residency(
     model, *, log=print, paths: list[str] | None = None,
     batch_bytes: int = 4 << 30, threshold_bytes: int | None = None,
+    active_before: float | None = None, source_key: tuple | None = None,
 ) -> None:
     """Pre-wire GPU residency of mmap-backed weights in small batches.
 
@@ -2592,9 +2700,39 @@ def _warm_mmap_residency(
     """
     arrays = [v for _, v in tree_flatten(model.parameters())]
     total = sum(a.nbytes for a in arrays)
-    # Register before any early return: the MTP seed-cap headroom estimate
-    # needs these bytes counted whether or not the touch pass runs.
-    note_untracked_weights(total)
+    try:
+        _warm_touch_pass(arrays, total, log=log, paths=paths,
+                         batch_bytes=batch_bytes,
+                         threshold_bytes=threshold_bytes)
+    finally:
+        # Register on every exit path: the headroom estimate needs weight
+        # bytes counted whether or not the touch pass ran. Only bytes
+        # invisible to mx.get_active_memory may be registered: weights a
+        # load materializes (owned copies, repacked buffers) are tracked
+        # already, and noting the full total for such a load counts them
+        # twice, driving the headroom estimate negative. The tracked
+        # portion is the active-memory delta across the load; the touch
+        # pass evaluates any still-lazy materialized weights first, so
+        # the delta is settled by this point.
+        tracked = 0.0
+        if active_before is not None:
+            try:
+                tracked = max(0.0, mx.get_active_memory() - active_before)
+            except Exception:
+                tracked = 0.0
+        # Keyed by shard paths so a drafter reloading the target's GGUF
+        # cannot register the same pages twice (first registration wins).
+        key = source_key or (weights_source_key(*paths) if paths else None)
+        if key is not None:
+            # install_expert_streaming reads this to deduct streamed-out
+            # expert bytes from the same registration.
+            object.__setattr__(model, "_kq_weights_key", key)
+        note_untracked_weights(max(0.0, total - min(tracked, total)), key=key)
+
+
+def _warm_touch_pass(
+    arrays, total, *, log, paths, batch_bytes, threshold_bytes,
+) -> None:
     mode = os.environ.get("GMLX_RESIDENCY_WARM", "")
     if mode == "0":
         return
@@ -2645,6 +2783,24 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # computed fp32 (the vendored cast_predicate pins the same set).
     "kimi_k3": (".mlp.gate.weight", ".e_score_correction_bias",
                 ".a_folded", ".dt_bias", "_res_score"),
+    # qwen4_exp: softmax top-10-of-512 routing is fp32 in llama.cpp (F32
+    # wire); the GDN decay params feed the fp32 scan; the per-stream inject
+    # scalars scale the residual streams directly.
+    "qwen4_exp": (".mlp.gate.weight", ".A_log", ".dt_bias", ".inject.weight"),
+}
+
+# Params kept at their native f16 through the bf16 cast (no upcast). MLX
+# promotes an f16-weight matmul against f32 activations to f32, so these read
+# half the bytes of an fp32 pin while computing the same values.
+_F16_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
+    # muse_glimmer's mmproj is native F16 and llama.cpp runs the tower with f32
+    # activations. 50 residual layers with large outliers (features span +-76)
+    # compound bf16 rounding into ~10% relative RMS on the projected embeddings
+    # against an f32 run. The tower entry casts its input to f32, so activations
+    # ride fp32 promotion while the weights stay F16 - the oracle's own layout.
+    # Vision only - the text tower's bf16 holds 16k parity.
+    "muse_glimmer": ("vision_tower.", "vision_adapter.", "vision_projection."),
+    "kimi_k25": ("vision_tower.", "mm_projector."),
 }
 
 
@@ -2746,6 +2902,9 @@ def _install_and_load(
     sanitize: bool = True,
     no_alias: set[str] | None = None,
     fp32_keep: tuple[str, ...] = (),
+    f16_keep: tuple[str, ...] = (),
+    source_key: tuple | None = None,
+    active_before: float | None = None,
 ) -> None:
     """Sanitize -> de-interleave native-fp -> swap kquant leaves -> cast -> load.
 
@@ -2764,9 +2923,17 @@ def _install_and_load(
     the same suffix match used for the kquant meta.
 
     ``fp32_keep``: target-name substrings pinned to float32 through the bf16
-    cast (see ``_FP32_KEEP_BY_MODEL_TYPE``).
+    cast (see ``_FP32_KEEP_BY_MODEL_TYPE``). ``f16_keep``: substrings kept at
+    their native f16 instead (see ``_F16_KEEP_BY_MODEL_TYPE``).
+
+    ``active_before``: active-memory baseline for the untracked-weights split.
+    Callers that read wire bytes before installing must pass the pre-read
+    value; wire reads can grow active memory, and a post-read baseline makes
+    those tracked bytes register as untracked on top of it.
     """
     loadlog.stage("loading weights")
+    if active_before is None:
+        active_before = _active_now()
     # 5. sanitize first - model.sanitize may rename keys; rebuild meta.
     if sanitize and hasattr(model, "sanitize"):
         hf_weights = model.sanitize(hf_weights)
@@ -2825,6 +2992,8 @@ def _install_and_load(
         log("[install] gemma-4 host-sync-free masks/rope offsets active")
     if install_gemma4_batched_sdpa() and _gemma4_target(model):
         log("[install] gemma-4 hd512 batched-decode row route active")
+    if install_gemma4_softcap_f32() and _gemma4_target(model):
+        log("[install] gemma-4 float32 logit softcap active")
     if install_cascade_sdpa() and install_cascade_stamp():
         log("[install] shared-prefix cascade decode route active")
     if install_sparse_sdpa():
@@ -2856,6 +3025,8 @@ def _install_and_load(
             f"(no model slot): {redundant[:3]}..."
         )
 
+    act_dtype = activation_dtype()
+    act_name = activation_dtype_name()
     n_cast = 0
     for k in list(loadable):
         v = loadable[k]
@@ -2864,20 +3035,25 @@ def _install_and_load(
                 if v.dtype != mx.float32:      # e.g. F16 ape tables
                     loadable[k] = v.astype(mx.float32)
                 continue
+            if f16_keep and any(s in k for s in f16_keep):
+                continue
+            if v.dtype == act_dtype:
+                continue                       # already the activation dtype
             if v.dtype == mx.float16:
                 # Same-itemsize f16->bf16 gets buffer-donated into the source
                 # view -- a write through the zero-copy file mapping (dropped
                 # on read-only maps, leaving f16 bits typed as bf16). The f32
                 # hop makes both steps size-changing, so neither can donate.
                 v = v.astype(mx.float32)
-            loadable[k] = v.astype(mx.bfloat16)
+            loadable[k] = v.astype(act_dtype)
             n_cast += 1
     if n_cast:
-        log(f"[dtype] cast {n_cast} float params (norms etc.) to bf16")
+        log(f"[dtype] cast {n_cast} float params (norms etc.) to {act_name}")
 
     model.load_weights(list(loadable.items()), strict=False)
     log(f"[load_weights] loaded {len(loadable)} / {len(model_params)} model parameters")
-    _warm_mmap_residency(model, log=log)
+    _warm_mmap_residency(model, log=log, active_before=active_before,
+                         source_key=source_key)
 
     missing = sorted(model_params - set(loadable.keys()))
     if missing:
@@ -2895,10 +3071,11 @@ def _dequantize_diffusion_embedding(model, log) -> None:
     (``probs @ embed_tokens.weight``) - in both the model's self-conditioning
     path and the engine's soft-embedding step. That needs a dense float table;
     kquant wire bytes feed neither, and the stock fast path only special-cases
-    ``nn.QuantizedEmbedding``. So dequantize the table to a plain bf16
-    ``nn.Embedding`` (a layout the model handles natively), in row chunks to stay
-    under the single-dispatch grid limit. The tied ``as_linear`` logits then run
-    in bf16. Other quantized leaves are untouched.
+    ``nn.QuantizedEmbedding``. So dequantize the table to a plain
+    ``nn.Embedding`` at the activation dtype (a layout the model handles
+    natively), in row chunks to stay under the single-dispatch grid limit. The
+    tied ``as_linear`` logits then run at that dtype too. Other quantized
+    leaves are untouched.
     """
     emb = model.model.decoder.embed_tokens
     if not isinstance(emb, KQuantEmbedding):
@@ -2906,12 +3083,13 @@ def _dequantize_diffusion_embedding(model, log) -> None:
     n, dims, codec = emb.num_embeddings, emb.dims, emb.kquant_type
     packed, scales = emb["weight"], emb["scales"]
     chunk = 16384
+    act_dtype = activation_dtype()
     rows = [
         kq.dequantize(
             packed[i : i + chunk].reshape(-1, packed.shape[-1]), scales, codec
         )
         .reshape(min(chunk, n - i), dims)
-        .astype(mx.bfloat16)
+        .astype(act_dtype)
         for i in range(0, n, chunk)
     ]
     table = mx.concatenate(rows, axis=0) if len(rows) > 1 else rows[0]
@@ -2920,7 +3098,10 @@ def _dequantize_diffusion_embedding(model, log) -> None:
     new_emb.weight = table
     new_emb.freeze()
     model.model.decoder.embed_tokens = new_emb
-    log(f"[diffusion] dequantized embed_tokens {codec}->bf16 ({n}x{dims})")
+    log(
+        f"[diffusion] dequantized embed_tokens {codec}->"
+        f"{activation_dtype_name()} ({n}x{dims})"
+    )
 
 
 # Archs whose sparse-attention indexer tensors may arrive via a companion
@@ -3018,6 +3199,7 @@ def load_model(
     """
 
     _log = loadlog.verbose_print
+    active_before = _active_now()
 
     # 0. preflight - discover shards, classify codecs (IQ / unsupported types
     #    refuse here, naming the codec, before kq.load_gguf's cryptic
@@ -3273,6 +3455,8 @@ def load_model(
         _log("[install] gemma-4 host-sync-free masks/rope offsets active")
     if install_gemma4_batched_sdpa() and _gemma4_target(model):
         _log("[install] gemma-4 hd512 batched-decode row route active")
+    if install_gemma4_softcap_f32() and _gemma4_target(model):
+        _log("[install] gemma-4 float32 logit softcap active")
     if install_cascade_sdpa() and install_cascade_stamp():
         _log("[install] shared-prefix cascade decode route active")
     if install_sparse_sdpa():
@@ -3307,10 +3491,13 @@ def load_model(
 
     # Cast non-quantized float params (norms, SSM weights, and the F16 matrix
     # weights some conversions ship - e.g. gemma-3n's AltUp/LAuReL/per-layer
-    # projections) to bf16 so activations flow bf16, avoiding float32 kernel
-    # promotion (and bf16xf16 dtype mismatches) in quantized/regular matmul.
+    # projections) to the activation dtype so activations flow at one width,
+    # avoiding float32 kernel promotion (and mixed-width dtype mismatches) in
+    # quantized/regular matmul.
     # Model-types in _FP32_KEEP_BY_MODEL_TYPE pin listed params to float32.
     fp32_keep = _FP32_KEEP_BY_MODEL_TYPE.get(config.get("model_type"), ())
+    act_dtype = activation_dtype()
+    act_name = activation_dtype_name()
     n_cast = 0
     for k in list(loadable):
         v = loadable[k]
@@ -3319,22 +3506,25 @@ def load_model(
                 if v.dtype != mx.float32:      # e.g. F16 ape tables
                     loadable[k] = v.astype(mx.float32)
                 continue
+            if v.dtype == act_dtype:
+                continue                       # already the activation dtype
             if v.dtype == mx.float16:
                 # Same-itemsize f16->bf16 gets buffer-donated into the source
                 # view -- a write through the zero-copy file mapping (dropped
                 # on read-only maps, leaving f16 bits typed as bf16). The f32
                 # hop makes both steps size-changing, so neither can donate.
                 v = v.astype(mx.float32)
-            loadable[k] = v.astype(mx.bfloat16)
+            loadable[k] = v.astype(act_dtype)
             n_cast += 1
     if n_cast:
-        _log(f"[dtype] cast {n_cast} float params (norms etc.) to bf16")
+        _log(f"[dtype] cast {n_cast} float params (norms etc.) to {act_name}")
 
     model.load_weights(list(loadable.items()), strict=False)
     _log(
         f"[load_weights] loaded {len(loadable)} / {len(model_params)} model parameters"
     )
-    _warm_mmap_residency(model, log=_log, paths=pf.shards)
+    _warm_mmap_residency(model, log=_log, paths=pf.shards,
+                         active_before=active_before)
 
     # DiffusionGemma's denoiser needs a dense float embedding table for its
     # probability-weighted soft-embedding step; dequantize it post-load.
@@ -3362,6 +3552,14 @@ def load_model(
         "qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"
     ):
         _patch_gated_delta_fused_decode(model)
+
+    if config.get("model_type") == "qwen4_exp":
+        from .qwen4_exp_model import prepare_runtime
+
+        counts = prepare_runtime(model)
+        loadlog.verbose_print(
+            f"[patch] qwen4_exp: fused GDN decode on {counts['gdn_fused']} "
+            f"layers, b/a matvecs concatenated on {counts['gdn_ba_cat']}")
 
     if config.get("model_type") == "deepseek_v4":
         from .deepseek_v4_model import install_gemv_row_fusion, warm_kernel_pipelines

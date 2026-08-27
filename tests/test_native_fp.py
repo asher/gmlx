@@ -183,7 +183,7 @@ def test_lift_stream_cb_caps():
     with mock.patch.dict(os.environ):
         for k in ("MLX_MAX_OPS_PER_BUFFER", "MLX_MAX_MB_PER_BUFFER"):
             os.environ.pop(k, None)
-        # no streaming flag -> untouched
+        # no streaming flag -> untouched (in-RAM serving flips at runtime)
         _lift_stream_cb_caps(["run", "model.gguf"])
         assert "MLX_MAX_OPS_PER_BUFFER" not in os.environ
         _lift_stream_cb_caps(["run", "model.gguf", "--stream-experts"])

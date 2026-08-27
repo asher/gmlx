@@ -48,6 +48,7 @@ from mlx_vlm.models.base import create_attention_mask
 from mlx_vlm.models.cache import BatchKVCache, KVCache
 
 from . import prefill_decay
+from .drafter_protocol import native_block_size
 from .envflags import env_bool, env_int
 from mlx_vlm.models.qwen3_5.language import Qwen3_5DecoderLayer
 from mlx_vlm.models.qwen3_5_moe.language import Qwen3_5MoeDecoderLayer
@@ -86,7 +87,8 @@ class QwenMTPDrafter(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self._native_block_size = int(config.block_size)
+        self._native_block_size = (
+            native_block_size(config) or int(config.block_size))
         text_config = config.text_config
         if text_config is None:
             raise ValueError("MTP drafter config.text_config must be set")

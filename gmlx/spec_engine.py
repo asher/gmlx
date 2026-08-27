@@ -21,7 +21,7 @@ import sys
 import mlx.core as mx
 
 from . import prefill_decay
-from .envflags import env_int
+from .envflags import env_bool, env_int
 
 _log = logging.getLogger(__name__)
 
@@ -137,6 +137,10 @@ def _install_apc_manager_stash() -> None:
     _orig_init = BatchGenerator.__init__
 
     def _init_with_stash(self, model, processor, **kwargs):
+        # upstream server never passes completion_batch_size; inject ours
+        if "completion_batch_size" not in kwargs:
+            from .decode_batch import decode_batch
+            kwargs["completion_batch_size"] = decode_batch()
         # Kill switch (re-read per call): with spec APC off, stock ar.py
         # must not see the manager on the speculative path either -- since
         # mlx-vlm 0.6.4 its own post-prefill exact store handles B=1 MTP
@@ -149,6 +153,32 @@ def _install_apc_manager_stash() -> None:
         except Exception:
             pass
         _orig_init(self, model, processor, **kwargs)
+        # Stock admission forms a prompt batch only when free slots >=
+        # prefill_batch_size. Stock pairs 32/8 (24 slots stay open); the
+        # injected width cap pairs 8/8, where a full prefill group equals
+        # the whole batch and no request can join while any row decodes:
+        # serving degrades to FIFO. Groups of 1 keep insertion live at
+        # every width; B>1 prompt batching is no throughput win (see the
+        # ckpt formation gate below).
+        pbs = getattr(self, "prefill_batch_size", None)
+        cbs = getattr(self, "completion_batch_size", None)
+        if pbs is not None and cbs is not None and pbs >= cbs:
+            self.prefill_batch_size = 1
+        # APC arrived armed but upstream's quantized-KV opt-out dropped it
+        # (ar.py nulls the manager whenever kv_bits is set; no tier serves
+        # quantized caches). The mode probe still reads "block" for these
+        # models, so without this line the server boots silent and every
+        # request prefills cold. Draft-model batches are excluded: upstream
+        # nulls their manager by design and the owned ladder resolves (and
+        # warns) through _resolve_l1.
+        if (kwargs.get("apc_manager") is not None
+                and kwargs.get("kv_bits") is not None
+                and kwargs.get("draft_model") is None
+                and getattr(self, "apc_manager", None) is None):
+            _log.warning(
+                "APC OFF: KV quantization (kv_bits=%s) opts out of the "
+                "block APC tier upstream -- every request prefills cold",
+                kwargs.get("kv_bits"))
         # Ckpt-tier models form prompt batches one request at a time: the
         # owned APC declines B>1 prefill, so a coalesced burst would go
         # all-cold, and B>1 prompt batching is not a throughput win anyway
@@ -292,6 +322,34 @@ def _ckpt_layout_live(batch, block_size: int = 16):
         return tags or _LAYOUT_UNSUPPORTED
     return _ckpt_layout_for(getattr(batch, "model", None), block_size)
 
+def _live_kv_quant_config():
+    """The serve KV quant policy as a warm-merge config, or None.
+
+    Env-sourced (KV_BITS / KV_QUANT_SCHEME / KV_GROUP_SIZE) like the
+    owned B=1 spec path: serve config feeds these vars and the engine
+    reads the same channel, so the merged warm batch matches the live
+    ``_make_cache`` layer types. Key/value split overrides are not
+    exposed in gmlx config and stay None."""
+    raw = os.environ.get("KV_BITS", "")
+    if not raw:
+        return None
+    try:
+        bits = float(raw)
+    except ValueError:
+        return None
+    if bits <= 0:
+        return None
+    try:
+        from mlx_vlm.kv_quant import from_legacy
+        pol = from_legacy(
+            bits, os.environ.get("KV_QUANT_SCHEME") or None,
+            int(os.environ.get("KV_GROUP_SIZE", "64") or 64))
+        return pol.to_config() if pol is not None else None
+    except Exception:
+        _log.warning("KV quant policy resolve failed; warm merge stays "
+                     "float", exc_info=True)
+        return None
+
 
 def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
     """Consult the shared APCManager below L0 and arm the stock post-prefill
@@ -324,6 +382,13 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
         prefix_len = 0
         tier = "exact"
         pick = view._apc_pick_for((0, ids_list, 0, prompt_kwargs, None, None))
+        # Same trivial-pick floor as the admission wrapper: a sub-block
+        # exact restore saves nothing and its nonzero l1_prefix would skip
+        # the L0 hidden store for this request.
+        if (pick is not None and not pick.get("matched_blocks")
+                and 0 < int(pick.get("prefix_len") or 0)
+                < int(manager.block_size)):
+            pick = None
         if pick is not None:
             warm = pick.get("warm_cache")
             blocks = list(pick.get("matched_blocks") or ())
@@ -359,6 +424,36 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
                     manager.release(blocks)
                     blocks = []
                 warm, prefix_len, tier = cw, cp, "ckpt"
+        elif mode == "exact":
+            # Exact-tier anchor: the shared-system-prefix clone in the
+            # gmlx anchor LRU wins only when strictly longer than the
+            # stock exact pick. Media guards mirror the stock probe.
+            from .cache_snapshot import anchor_exact_lookup
+            min_p = max(prefix_len,
+                        view._apc_safe_prefix_lookup_min(ids_list))
+            aw, ap = anchor_exact_lookup(
+                manager, ids_list, extra_hash=extra_hash,
+                min_prefix_tokens=min_p)
+            if (aw is not None and ap > prefix_len
+                    and view._apc_suffix_is_text_only(ids_list, ap)):
+                if blocks:
+                    manager.release(blocks)
+                    blocks = []
+                warm, prefix_len, tier = aw, ap, "anchor"
+        if warm and 0 < prefix_len < len(ids_list) and tier in (
+                "exact", "anchor"):
+            # Same batch-aware merge admission applies to its picks: raw
+            # exact/anchor clones carry single-row leaves (left_padding
+            # None, scalar offsets) and crash the batch cache classes'
+            # update path (mx.depends on a None) when the suffix forwards.
+            # kv_quant_config re-quantizes the float snapshot to the live
+            # _make_cache layer types under serve kv_bits (stored exact
+            # entries stay float; a float row joining a quantized batch
+            # breaks the update path).
+            from mlx_vlm import apc as _apc
+            warm, _ = _apc.make_warm_batch_exact_cache_multi(
+                [warm], prefix_lens=[prefix_len],
+                kv_quant_config=_live_kv_quant_config())
         if warm and 0 < prefix_len < len(ids_list):
             batch.prompt_cache = warm
             # Matched blocks stay acquired until the stock post-prefill
@@ -367,6 +462,10 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
             # materializes).
             held_blocks = blocks
             l1_prefix = prefix_len
+            # Observability only: the live request view reads the
+            # restored prefix from here (meta keeps prefix_len 0 so the
+            # stock machinery does not account it twice).
+            batch._kq_apc_restored = (int(prefix_len), str(tier))
             _log.info(
                 "APC L1 hit: prefix=%d suffix=%d tier=%s",
                 prefix_len,
@@ -415,6 +514,9 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
         batch._kq_ckpt_armed = True
         from .cache_snapshot import ckpt_note_armed
         ckpt_note_armed(manager)
+    elif mode == "exact":
+        _exact_anchor_arm(batch, meta, guard,
+                          max(l0_prefix, l1_prefix))
     return l1_prefix
 
 
@@ -538,19 +640,145 @@ def _ckpt_turn_boundaries(batch, meta, restored: int,
     return out
 
 
-def _sched_insert(bounds: list, pos: int, kind: str) -> None:
+def _ckpt_sys_boundary(batch, meta, restored: int,
+                       block_size: int) -> int | None:
+    """Anchor stop at the end of the shared system prefix.
+
+    Sibling fan-out requests share the system prompt and tool schemas
+    and diverge at the first user message, generally between grid
+    points, so the interval schedule alone wastes up to one interval of
+    sibling recompute, and strip-on-extend removes the early boundary
+    the siblings need as the chain deepens (the anchor exemption in
+    _record_insert keeps this one). arr layouts snap the stop down to
+    the chunk grid (off-grid chunking drifts GDN state) and keep the
+    replay byte floor (recurrent state is prompt-length-independent, so
+    a tiny anchor costs the same >100 MB clone as a deep one);
+    attention layouts snap to the block grid, which also satisfies the
+    rotating store's below-window grid gate. GMLX_APC_CKPT_SYS=0
+    disables; GMLX_APC_CKPT_SYS_MIN floors the position (a sub-floor
+    shared prefix re-prefills in milliseconds and is not worth a
+    record).
+    """
+    if env_int("GMLX_APC_CKPT_SYS", 1) == 0:
+        return None
+    ids = meta.get("full_input_ids") or ()
+    tags = _ckpt_layout_for(getattr(batch, "model", None), block_size) or ()
+    floor_min = max(block_size, env_int("GMLX_APC_CKPT_SYS_MIN", 256))
+    if "arr" in tags:
+        floor_min = max(floor_min,
+                        env_int("GMLX_APC_CKPT_REPLAY_MIN", 1024))
+    # Below the floor no anchor can land; skip the render+tokenize
+    # prediction entirely (same rule as the turn boundaries).
+    if len(ids) - 1 < floor_min:
+        return None
+    from .retire_key import lookup_render_ctx, system_prefix_lcp
+    ctx = lookup_render_ctx(ids)
+    lcp = system_prefix_lcp(ctx, ids) if ctx else None
+    if not lcp:
+        return None
+    unit = _ckpt_unit(batch, block_size) if "arr" in tags else block_size
+    pos = (min(int(lcp), len(ids) - 1) // unit) * unit
+    if pos < floor_min or pos <= max(0, restored):
+        return None
+    meta["ckpt_sys_bound"] = pos
+    return pos
+
+
+def _exact_anchor_boundary(batch, meta, guard: int,
+                           restored: int) -> int | None:
+    """Anchor position for an exact-tier (non-ckpt) model: the sibling
+    divergence point, ungridded (exact clones restore at any position).
+    Clamped to the stock guard column, so the prefill pauses at most
+    twice: once for the anchor, once for the stock guard store.
+    GMLX_APC_CKPT_SYS=0 disables (one switch for both tiers);
+    GMLX_APC_CKPT_SYS_MIN floors the position (a sub-floor shared
+    prefix re-prefills in milliseconds and is not worth a clone).
+    """
+    if env_int("GMLX_APC_CKPT_SYS", 1) == 0:
+        return None
+    ids = meta.get("full_input_ids") or ()
+    floor_min = max(2, env_int("GMLX_APC_CKPT_SYS_MIN", 256))
+    if len(ids) - 1 < floor_min:
+        return None
+    from .retire_key import lookup_render_ctx, system_prefix_lcp
+    ctx = lookup_render_ctx(ids)
+    lcp = system_prefix_lcp(ctx, ids) if ctx else None
+    if not lcp:
+        _log.info("APC anchor declined: no measurable system prefix "
+                  "(render ctx %s)", "present" if ctx else "missing")
+        return None
+    pos = min(int(lcp), len(ids) - 1)
+    if guard > 0:
+        pos = min(pos, guard)
+    if pos < floor_min or pos <= max(0, restored):
+        return None
+    return pos
+
+
+def _exact_anchor_arm(batch, meta, guard: int, restored: int) -> None:
+    """Schedule the anchor pause by mirroring its position into
+    ``checkpoint_len`` (the key the stock column truncation reads).
+    ``_exact_anchor_store`` hands the column back to the stock guard
+    after firing, so the stock store still runs exactly as unarmed."""
+    pos = _exact_anchor_boundary(batch, meta, guard, restored)
+    if pos is None:
+        return
+    meta["anchor_len"] = pos
+    meta["anchor_guard"] = guard
+    if pos != guard:
+        meta["checkpoint_len"] = pos
+    batch._kq_anchor_armed = True
+    _log.info("APC anchor armed: pos=%d guard=%d", pos, guard)
+
+
+def _exact_anchor_store(batch) -> None:
+    """Anchor store for exact-tier models: one whole-prefix clone at the
+    sibling divergence, into the gmlx anchor LRU. Runs from the wrapped
+    stock store immediately before the stock body; after firing it
+    restores ``checkpoint_len`` to the stock guard column without
+    latching ``checkpoint_done``, so the stock guard store (and its
+    latch) fire untouched."""
+    manager = getattr(batch, "_apc_manager", None)
+    meta_list = getattr(batch, "_apc_meta", None) or []
+    if manager is None or not meta_list or meta_list[0] is None:
+        return
+    meta = meta_list[0]
+    pos = int(meta.get("anchor_len") or 0)
+    if pos <= 0 or meta.get("anchor_done"):
+        return
+    if batch._row_real_tokens_processed(0) != pos:
+        return
+    meta["anchor_done"] = True
+    guard = int(meta.get("anchor_guard") or 0)
+    if int(meta.get("checkpoint_len") or 0) == pos and pos != guard:
+        meta["checkpoint_len"] = guard
+    cache = batch._apc_prompt_cache_for_store(0)
+    if cache is None:
+        return
+    from .cache_snapshot import anchor_exact_store
+    anchor_exact_store(manager, meta["full_input_ids"][:pos], cache,
+                       extra_hash=int(meta.get("extra_hash", 0)))
+
+
+def _sched_insert(bounds: list, pos: int, kind: str, *,
+                  upgrade: bool = False) -> None:
     """Insert (pos, kind) keeping order. On collision the existing entry
     keeps its kind: a colliding position is always grid-aligned or an
     exact turn boundary, where a plain boundary record adopts freely --
     identical resend included -- while flipping it to replay would gate
     turn-2 and branch adoption out on recurrent layouts (and satisfy the
-    p=N drop with a record turn 2 cannot use)."""
+    p=N drop with a record turn 2 cannot use). ``upgrade`` lets an
+    anchor replace a plain boundary at the same position (strictly more
+    retention, same free adoption), never a replay."""
     import bisect
 
     pts = [b for b, _ in bounds]
     i = bisect.bisect_left(pts, pos)
-    if i >= len(pts) or pts[i] != pos:
-        bounds.insert(i, (pos, kind))
+    if i < len(pts) and pts[i] == pos:
+        if upgrade and bounds[i][1] == "boundary":
+            bounds[i] = (pos, kind)
+        return
+    bounds.insert(i, (pos, kind))
 
 
 def _ckpt_arm_schedule(batch, meta, guard: int, restored: int,
@@ -567,8 +795,13 @@ def _ckpt_arm_schedule(batch, meta, guard: int, restored: int,
     turn = _ckpt_turn_boundaries(batch, meta, restored, block_size)
     for pos in turn:
         _sched_insert(bounds, pos, "boundary")
+    sysb = _ckpt_sys_boundary(batch, meta, restored, block_size)
+    if sysb is not None:
+        _sched_insert(bounds, sysb, "anchor", upgrade=True)
     replay = _ckpt_replay_boundary(batch, meta, restored, block_size)
     if replay is not None:
+        # Colliding with the anchor keeps the anchor (default no-upgrade):
+        # it adopts identical resends freely, replay semantics add nothing.
         _sched_insert(bounds, replay, "replay")
     meta["ckpt_boundaries"] = bounds
     meta["checkpoint_len"] = int(bounds[0][0]) if bounds else 0
@@ -641,7 +874,8 @@ def _install_ckpt_checkpoint_store() -> None:
     and the stock prompt_step call the stock method, so one wrap covers
     both paths). The cursor's advance of ``checkpoint_len`` is what
     suppresses the stock store -- wrapping makes that ordering
-    structural. Idempotent."""
+    structural. Exact-tier anchor batches ride the same wrap with their
+    own single-stop hook. Idempotent."""
     from mlx_vlm.generate.ar import PromptProcessingBatch
 
     if getattr(
@@ -653,6 +887,8 @@ def _install_ckpt_checkpoint_store() -> None:
     def _store_with_ckpt_cursor(self):
         if getattr(self, "_kq_ckpt_armed", False):
             _ckpt_mid_prefill_store(self)
+        elif getattr(self, "_kq_anchor_armed", False):
+            _exact_anchor_store(self)
         _orig(self)
 
     _store_with_ckpt_cursor.__dict__[_CKPT_STORE_FLAG] = True
@@ -751,7 +987,9 @@ def _plain_ckpt_init(batch) -> None:
         for k in batch._prompt_length_aware_keys:
             batch._prompt_kwargs[k] = batch._prompt_kwargs[k][:, cp:, ...]
         restored = cp
-        _log.info("APC L1 hit: prefix=%d suffix=%d tier=ckpt", cp, len(ids_list) - cp)
+        batch._kq_apc_restored = (int(cp), "ckpt")     # live request view
+        _log.info("APC L1 hit: prefix=%d suffix=%d tier=ckpt",
+                  cp, len(ids_list) - cp)
     guard = int(meta.get("checkpoint_len") or 0)
     _ckpt_arm_schedule(batch, meta, guard, restored, bs)
     batch._apc_harvest_enabled = False
@@ -774,39 +1012,203 @@ def _plain_ckpt_init(batch) -> None:
         }
 
 
+def _plain_anchor_init(batch) -> None:
+    """Arm the exact-tier anchor stop on a stock prompt batch (non-ckpt
+    exact models: DeepSeek-V4-class pooling stacks).
+
+    Restores come from the admission pick (_install_exact_anchor_pick),
+    so this only schedules the store. Warm and right-padded rows are
+    included: a restored prefix is usually far short of the divergence
+    (a bare bos match off some unrelated request), and upstream's
+    checkpoint column and row extraction handle both shapes. Refusing
+    them would skip every row that rides a warm batch, which on a busy
+    server is nearly all of them. The restored prefix becomes the
+    boundary floor, so a row already past the divergence arms nothing.
+    """
+    manager = getattr(batch, "_apc_manager", None)
+    mode = getattr(batch, "_apc_mode", None)
+    meta_list = getattr(batch, "_apc_meta", None) or []
+    if (manager is None or mode != "exact" or len(meta_list) != 1
+            or meta_list[0] is None or len(batch.uids) != 1
+            or batch._inputs_embeds is None):
+        return
+    if _ckpt_active(batch.model, mode, int(manager.block_size)):
+        return                          # ckpt tier owns these models
+    meta = meta_list[0]
+    if len(meta.get("full_input_ids") or ()) < 2:
+        return
+    _exact_anchor_arm(batch, meta, int(meta.get("checkpoint_len") or 0),
+                      int(meta.get("prefix_len") or 0))
+    # Retirement stash, independent of the anchor outcome: exact-tier
+    # rows retire their full post-decode row at filter (the per-turn
+    # store the post-prefill exact store cannot cover), warm rows
+    # included -- the decode cache holds the full sequence either way.
+    if not _SPEC_APC_RETIRE_DISABLED and batch.prompt_cache:
+        from .retire_key import lookup_render_ctx
+        ids_list = [int(t) for t in meta["full_input_ids"]]
+        batch.prompt_cache[0]._kq_apc_retire = {
+            "full_ids": ids_list,
+            "extra_hash": int(meta.get("extra_hash", 0)),
+            "mode": "exact",
+            "manager": manager,
+            "render_ctx": lookup_render_ctx(ids_list),
+            "gen": [],
+        }
+
+
+_ANCHOR_PICK_FLAG = "_kq_exact_anchor_pick"
+
+
+def _install_exact_anchor_pick() -> None:
+    """Consult the anchor LRU inside the stock admission pick.
+
+    The pick is where a warm prefix belongs: admission builds the batch
+    from it (suffix rows, right padding, warm-cache merge) and every
+    downstream path treats an anchor restore exactly like a stock exact
+    one. The anchor wins only when strictly longer than the stock pick,
+    so it never shortens a restore. Idempotent.
+    """
+    from mlx_vlm.generate.ar import BatchGenerator
+    if getattr(BatchGenerator._apc_pick_for, _ANCHOR_PICK_FLAG, False):
+        return
+    _orig = BatchGenerator._apc_pick_for
+
+    def _pick_with_anchor(self, sequence):
+        pick = _orig(self, sequence)
+        try:
+            if _SPEC_APC_DISABLED or getattr(self, "apc_mode", None) != "exact":
+                return pick
+            manager = getattr(self, "apc_manager", None)
+            if manager is None or _ckpt_active(
+                    getattr(self, "model", None), "exact",
+                    int(manager.block_size)):
+                return pick
+            _uid, ids_list, _mt, prompt_kwargs, _lps, _crit = sequence
+            if not ids_list or len(ids_list) < 2:
+                return pick
+            # Floor trivial exact picks: a sub-block restore (a bare-BOS
+            # match off an unrelated request) saves nothing but suffix-
+            # constructs the batch, knocking the spec path's ids out of
+            # render space (anchor + retirement keys). Real warm picks are
+            # thousands of tokens and pass untouched.
+            if (pick is not None and not pick.get("matched_blocks")
+                    and 0 < int(pick.get("prefix_len") or 0)
+                    < int(manager.block_size)):
+                pick = None
+            have = int((pick or {}).get("prefix_len") or 0)
+            extra_hash = self._apc_extra_hash(prompt_kwargs or {})
+            floor = max(have, self._apc_safe_prefix_lookup_min(ids_list))
+            from .cache_snapshot import anchor_exact_lookup
+            warm, ap = anchor_exact_lookup(
+                manager, ids_list, extra_hash=extra_hash,
+                min_prefix_tokens=floor)
+            if warm is None or ap <= have or ap >= len(ids_list):
+                return pick
+            if not self._apc_suffix_is_text_only(ids_list, ap):
+                return pick
+            if pick and pick.get("matched_blocks"):
+                manager.release(pick["matched_blocks"])
+            _log.info("APC L1 hit: prefix=%d suffix=%d tier=anchor",
+                      ap, len(ids_list) - ap)
+            return {
+                "matched_blocks": [],
+                "warm_cache": warm,
+                "prefix_len": ap,
+                "extra_hash": extra_hash,
+                "full_input_ids": list(ids_list),
+            }
+        except Exception:
+            _log.warning("APC anchor pick failed; continuing",
+                         exc_info=True)
+            return pick
+
+    _pick_with_anchor.__dict__[_ANCHOR_PICK_FLAG] = True
+    BatchGenerator._apc_pick_for = _pick_with_anchor
+
+
 _PLAIN_DECODE_FLAG = "_kq_ckpt_plain_decode"
 
 
+def _retire_rows(gb) -> dict:
+    """uid -> retire-stash registry on a generation batch.
+
+    Stashes arm on the B=1 prompt batch's cache object (the only stable
+    home before the decode batch exists); the first decode-side touch
+    lifts them here so they survive ``extend`` rebuilding the cache
+    objects at continuous-batch injection."""
+    reg = getattr(gb, "_kq_apc_retire_rows", None)
+    if reg is None:
+        reg = {}
+        gb._kq_apc_retire_rows = reg
+    return reg
+
+
+def _lift_cache_stash(gb) -> None:
+    if not getattr(gb, "prompt_cache", None) or len(gb.uids) != 1:
+        return
+    stash = getattr(gb.prompt_cache[0], "_kq_apc_retire", None)
+    if stash is not None:
+        gb.prompt_cache[0]._kq_apc_retire = None
+        _retire_rows(gb)[gb.uids[0]] = stash
+
+
 def _plain_step_tick(gb, out) -> None:
-    """Per-token accounting + snapshot tick for a lone stock-path ckpt
-    row. Runs per step, so a deterministic failure disables the hook for
-    the request on first strike instead of emitting a traceback per
-    token; dropping ``gen`` also quiets retirement (its offset check
-    would skip anyway on a broken count)."""
-    stash = None
+    """Per-token accounting + snapshot tick for stock-path retire rows.
+
+    Rows are tracked per uid so accounting survives ``extend`` merges.
+    Runs per step, so a deterministic failure disables the hook for that
+    row on first strike instead of emitting a traceback per token;
+    dropping ``gen`` also quiets retirement (its offset check would skip
+    anyway on a broken count). The decode-time snapshot ring stays B=1
+    (its clones ride the live single-row caches); rows in a B>1 batch
+    retire snapshot-free, under their verbatim key or an LCP cap the
+    tier arm can serve without a ring."""
     try:
-        if len(gb.uids) == 1 and gb.prompt_cache:
-            stash = getattr(gb.prompt_cache[0], "_kq_apc_retire", None)
-            if stash is not None and stash.get("mode") == "ckpt" and "gen" in stash:
-                stash["gen"].append(int(out[0][0]))
+        _lift_cache_stash(gb)
+        reg = getattr(gb, "_kq_apc_retire_rows", None)
+    except Exception:
+        _log.warning("APC plain decode hook failed; continuing",
+                     exc_info=True)
+        return
+    if not reg:
+        return
+    # _step returns (tokens, lps, top_idx, top_lp); slot 0 is the flat
+    # per-row token list.
+    rows = out[0] if isinstance(out, tuple) else out
+    if rows is None:
+        return
+    solo = len(gb.uids) == 1
+    for i, uid in enumerate(gb.uids):
+        stash = reg.get(uid)
+        if stash is None or "gen" not in stash:
+            continue
+        tok = rows[i] if i < len(rows) else None
+        if tok is None:
+            continue                    # no emission for this row this tick
+        try:
+            if isinstance(tok, (list, tuple)):
+                tok = tok[0]
+            stash["gen"].append(int(tok))
+            if solo and stash.get("mode") == "ckpt":
                 from .cache_snapshot import decode_ckpt_tick
 
                 decode_ckpt_tick(stash, gb.prompt_cache, stash["gen"])
-    except Exception:
-        if stash is not None:
+        except Exception:
             stash.pop("gen", None)
             stash["snap_ok"] = False
-        _log.warning(
-            "APC plain decode hook failed; disabled for this request", exc_info=True
-        )
+            _log.warning("APC plain decode hook failed; disabled for "
+                         "this request", exc_info=True)
 
 
 def _plain_retire(stash: dict, prompt_cache: list) -> None:
-    """Retire a finished stock-path B=1 ckpt row.
+    """Retire a finished stock-path row off a single-row cache list.
 
     Offset invariants mirror ``speculative._retire_b1``: the stock step
     loop forwards each token as it emits it, so a clean finish leaves
     ``offset == len(seq)`` (an abort between steps leaves the same).
+    ``stash["mode"]`` picks the tier arm: "ckpt" stores blocks +
+    sidecar, "exact" a whole-row snapshot (DeepSeek-V4-class pooling
+    stacks).
     """
     try:
         manager = stash.get("manager")
@@ -832,16 +1234,14 @@ def _plain_retire(stash: dict, prompt_cache: list) -> None:
 
             lcp = next_turn_lcp(stash.get("render_ctx"), seq, gen)
         max_len = lcp if lcp is not None and lcp < len(seq) else None
+        _log.info("APC retire: seq=%d ctx=%s lcp=%s cap=%s",
+                  len(seq), stash.get("render_ctx") is not None,
+                  lcp, max_len)
         ok = retirement_store(
-            manager,
-            "ckpt",
-            seq,
-            prompt_cache,
+            manager, stash.get("mode") or "ckpt", seq, prompt_cache,
             row=0,
-            extra_hash=int(stash.get("extra_hash", 0)),
-            max_len=max_len,
-            decode_snaps=stash.get("snaps"),
-        )
+            extra_hash=int(stash.get("extra_hash", 0)), max_len=max_len,
+            decode_snaps=stash.get("snaps"))
         if ok:
             _log.info("APC retire store: tokens=%d", ok)
     except Exception:
@@ -849,19 +1249,25 @@ def _plain_retire(stash: dict, prompt_cache: list) -> None:
 
 
 def _install_plain_ckpt_decode() -> None:
-    """Stock-path decode hooks for the checkpoint tier.
+    """Stock-path decode hooks for the retirement store (ckpt + exact).
 
-    Token accounting and decode-time snapshots ride ``_step``; retirement
-    fires from ``filter`` when the lone row leaves (finish or client
-    abort), while its plain single-row caches are still live. B>1
-    batches are untouched: a mid-flight merge rebuilds the cache objects
-    and the stash dies with them (intended v1 scope). Idempotent."""
+    Token accounting rides ``_step``; retirement fires from ``filter``
+    for every leaving row (finish or client abort). A lone row retires
+    off its live single-row caches; a row leaving a B>1 batch is first
+    extracted via ``row_snapshot`` (padding-trimmed clones with row-true
+    offsets), so retirement survives concurrency instead of firing only
+    when the batch happens to drain to one row. Stashes live in a
+    uid-keyed registry lifted across ``extend`` (the seam that rebuilds
+    cache objects at continuous-batch injection).
+    GMLX_APC_RETIRE_BATCH=0 restores the lone-row-only v1 scope.
+    Idempotent."""
     from mlx_vlm.generate.ar import GenerationBatch
 
     if getattr(GenerationBatch._step, _PLAIN_DECODE_FLAG, False):
         return
     _orig_step = GenerationBatch._step
     _orig_filter = GenerationBatch.filter
+    _orig_extend = GenerationBatch.extend
 
     def _step_with_ckpt(self):
         out = _orig_step(self)
@@ -870,19 +1276,52 @@ def _install_plain_ckpt_decode() -> None:
 
     def _filter_with_ckpt(self, keep):
         try:
-            if not keep and len(self.uids) == 1 and self.prompt_cache:
-                stash = getattr(self.prompt_cache[0], "_kq_apc_retire", None)
-                if stash is not None and stash.get("mode") == "ckpt":
-                    self.prompt_cache[0]._kq_apc_retire = None
-                    _plain_retire(stash, self.prompt_cache)
+            _lift_cache_stash(self)
+            reg = getattr(self, "_kq_apc_retire_rows", None)
+            if reg and self.prompt_cache:
+                keep_set = set(keep)
+                solo = len(self.uids) == 1
+                batched_ok = os.environ.get(
+                    "GMLX_APC_RETIRE_BATCH") != "0"
+                for i, uid in enumerate(self.uids):
+                    if i in keep_set:
+                        continue
+                    stash = reg.pop(uid, None)
+                    if stash is None:
+                        continue
+                    if solo:
+                        _plain_retire(stash, self.prompt_cache)
+                    elif batched_ok:
+                        from .cache_snapshot import row_snapshot
+                        rows = row_snapshot(self.prompt_cache, i)
+                        if rows is None:
+                            _log.info("APC retire skipped: row %d "
+                                      "extract unavailable", i)
+                        else:
+                            _plain_retire(stash, rows)
         except Exception:
             _log.warning("APC plain retire hook failed; continuing", exc_info=True)
         _orig_filter(self, keep)
 
+    def _extend_with_ckpt(self, other):
+        try:
+            _lift_cache_stash(self)
+            _lift_cache_stash(other)
+            other_reg = getattr(other, "_kq_apc_retire_rows", None)
+            if other_reg:
+                _retire_rows(self).update(other_reg)
+                other._kq_apc_retire_rows = {}
+        except Exception:
+            _log.warning("APC retire stash carry failed; continuing",
+                         exc_info=True)
+        _orig_extend(self, other)
+
     _step_with_ckpt.__dict__[_PLAIN_DECODE_FLAG] = True
     _filter_with_ckpt.__dict__[_PLAIN_DECODE_FLAG] = True
+    _extend_with_ckpt.__dict__[_PLAIN_DECODE_FLAG] = True
     GenerationBatch._step = _step_with_ckpt
     GenerationBatch.filter = _filter_with_ckpt
+    GenerationBatch.extend = _extend_with_ckpt
 
 
 def _mtp_prefill_init(batch) -> None:
@@ -903,6 +1342,7 @@ def _mtp_prefill_init(batch) -> None:
     batch._mtp_l1_prefix_len = 0
 
     if batch._inputs_embeds is None:
+        _log.info("KQDBG mtp_prefill_init: inputs_embeds None, ladder skipped")
         return
 
     # Gated to B=1 because PromptProcessingBatch prefills one request at a
@@ -921,6 +1361,18 @@ def _mtp_prefill_init(batch) -> None:
                 "(owned-path APC requires single-request prefill)",
                 b,
             )
+        return
+
+    # Upstream admission already restored a prefix and built this batch
+    # suffix-only: the owned ladder's keys (L0 and L1 both) are full-prompt
+    # token ids, so every lookup and store here would run in the wrong
+    # space -- a suffix-keyed L0 entry cross-hits a later turn's suffix and
+    # its restore clobbers the upstream warm cache. Leave these batches to
+    # the stock machinery, which owns their meta and store schedule.
+    up_meta = getattr(batch, "_apc_meta", None) or []
+    if up_meta and isinstance(up_meta[0], dict) \
+            and int(up_meta[0].get("prefix_len") or 0) > 0:
+        batch._mtp_upstream_warm = True
         return
 
     restored = 0
@@ -1045,6 +1497,7 @@ def install_full_prompt_mtp_prefill() -> None:
     _install_apc_manager_stash()
     _install_ckpt_checkpoint_store()
     _install_plain_ckpt_decode()
+    _install_exact_anchor_pick()
 
     if getattr(PromptProcessingBatch, _FULL_PREFILL_FLAG, False):
         return
@@ -1101,6 +1554,7 @@ def install_full_prompt_mtp_prefill() -> None:
                 )
             try:
                 _plain_ckpt_init(self)
+                _plain_anchor_init(self)
             except Exception:
                 _log.warning(
                     "APC plain ckpt init failed; continuing stock", exc_info=True
@@ -1109,6 +1563,14 @@ def install_full_prompt_mtp_prefill() -> None:
     def _mtp_prompt_step(self) -> int:
         if self.draft_kind != "mtp":
             return _orig_prompt_step(self)
+        # cb_phase flips fine prefill caps by wrapping the stock
+        # prompt_step, but this body replaces it for MTP batches, so the
+        # flip must happen here too: a multi-thousand-token chunk under
+        # the coarse decode caps keeps every layer's transients live in
+        # one command buffer and OOMs the GPU on deep prompts.
+        if os.environ.get("GMLX_CB_PHASE", "1") != "0":
+            from .cb_phase import flip
+            flip("prefill")
 
         if not hasattr(self, "_mtp_full_input_ids"):
             if self.prefill_step_size is None:
@@ -1271,7 +1733,9 @@ def install_full_prompt_mtp_prefill() -> None:
         # entries pair full-prompt keys with full-prompt hidden.
         b = int(full_hidden.shape[0]) if full_ids is not None else 0
         spec_cache = (
-            _get_spec_prefix_cache(self.model) if b == 1 and l1_prefix == 0 else None
+            _get_spec_prefix_cache(self.model)
+            if b == 1 and l1_prefix == 0
+            and not getattr(self, "_mtp_upstream_warm", False) else None
         )
         if spec_cache is not None and full_ids is not None:
             spec_cache.store(full_ids, result.prompt_cache, full_hidden)
@@ -1386,12 +1850,69 @@ def install_continuous_batch_admission() -> None:
     def _release_if_finished(self) -> None:
         if _orig_len(self) == 0:
             _release_heavy_state(self)
+            return
+        _shed_finished_attr_rows(self)
+
+    def _shed_finished_attr_rows(self) -> None:
+        """Per-row release of the batch-held start-time snapshots.
+
+        The live rounds generator sheds a finished or filtered row's KV,
+        drafter state, and its own hidden/shared_kv slices at the next
+        round boundary; the batch object's prefill-time copies (hidden,
+        shared_kv_states, prompt_tokens, first_tokens) stayed resident
+        until the whole batch finished. Slice them by the surviving rows
+        instead. Injected rows carry no snapshot here (their state rides
+        the injection queue into the generator), so the snapshot covers
+        the first first_tokens.shape[0] physical rows only. Slices are
+        lazy and ride the tick's eval; nothing here forces a sync.
+
+        Runs only once the rounds generator holds the state: pre-start,
+        _start_rounds still needs the snapshots row-aligned with the
+        caches (finished rows included; the generator stop_checks them
+        out itself), so a first-token finish must not slice here."""
+        if self._rounds_iter is None:
+            return
+        ft = getattr(self, "first_tokens", None)
+        if ft is None or getattr(self, _RELEASED_FLAG, False):
+            return
+        rows = getattr(self, "_kq_attr_rows", None)
+        if rows is None:
+            try:
+                rows = self._kq_attr_rows = list(range(ft.shape[0]))
+            except Exception:
+                return
+        keep = [p for p in rows
+                if p < len(self._finished) and not self._finished[p]]
+        if len(keep) == len(rows):
+            return
+        if not keep:
+            self.hidden = None
+            self.shared_kv_states = None
+            self.prompt_tokens = None
+            self.first_tokens = None
+            self._kq_attr_rows = []
+            return
+        keep_set = set(keep)
+        pos = [i for i, p in enumerate(rows) if p in keep_set]
+        idx = mx.array(pos, dtype=mx.int32)
+        for name in ("hidden", "prompt_tokens", "first_tokens"):
+            arr = getattr(self, name, None)
+            if arr is not None:
+                setattr(self, name, arr[idx])
+        kv = getattr(self, "shared_kv_states", None)
+        if isinstance(kv, dict) and kv:
+            # New dict, new arrays: the generator may still hold (and
+            # slice) the originals; never mutate a possibly shared dict.
+            self.shared_kv_states = {
+                k: (K[idx], V[idx]) for k, (K, V) in kv.items()}
+        self._kq_attr_rows = keep
 
     # 2. Buffer extend() instead of raising
     def _buffered_extend(self, other):
         active = sum(not d for d in self._finished)
         if active == 0:
             pending = getattr(self, "_pending_injections", [])
+            self.__dict__.pop("_kq_attr_rows", None)
             self.__dict__.update(other.__dict__)
             self._pending_injections = pending
             setattr(self, _RELEASED_FLAG, False)
@@ -1400,6 +1921,9 @@ def install_continuous_batch_admission() -> None:
         if not hasattr(self, "_pending_injections"):
             self._pending_injections = []
         self._pending_injections.append(other)
+        _debug_note(f"[mtp] extend buffered: +{len(other._all_uids)} rows "
+                    f"(pending={len(self._pending_injections)}, "
+                    f"active={active})")
 
     SpecBatch.extend = _buffered_extend
 
@@ -1413,6 +1937,7 @@ def install_continuous_batch_admission() -> None:
             if pending:
                 other = pending.pop(0)
                 remaining = pending[:]
+                self.__dict__.pop("_kq_attr_rows", None)
                 self.__dict__.update(other.__dict__)
                 self._pending_injections = remaining
                 setattr(self, _RELEASED_FLAG, False)
@@ -1424,7 +1949,50 @@ def install_continuous_batch_admission() -> None:
 
     _orig_filter = SpecBatch.filter
 
+    def _compact_prestart_rows(self, keep) -> None:
+        """Physically drop rows from a batch whose rounds generator has
+        not started: filter the caches through their own filter (lifting
+        host caches first) and slice snapshots plus bookkeeping to the
+        same keep list. Pre-start, the batch object owns all state, so
+        the drop frees the rows' bytes immediately instead of marking
+        them finished and waiting for a generator that has no round
+        boundary yet."""
+        idx = mx.array(keep, dtype=mx.int32)
+        self.prompt_cache = [_lift_host_cache(c) for c in self.prompt_cache]
+        for c in self.prompt_cache:
+            c.filter(idx)
+        for name in ("hidden", "prompt_tokens", "first_tokens"):
+            arr = getattr(self, name, None)
+            if arr is not None:
+                setattr(self, name, arr[idx])
+        kv = getattr(self, "shared_kv_states", None)
+        if isinstance(kv, dict) and kv:
+            self.shared_kv_states = {
+                k: (K[idx], V[idx]) for k, (K, V) in kv.items()}
+        self._all_uids = [self._all_uids[i] for i in keep]
+        self.uids = list(self._all_uids)
+        self.max_tokens = [self.max_tokens[i] for i in keep]
+        self._num_tokens = [self._num_tokens[i] for i in keep]
+        self._finished = [False] * len(keep)
+        self.__dict__.pop("_kq_attr_rows", None)
+
     def _filter_with_release(self, keep):
+        # Pre-start strict subset (a cancel or a governor retire landing
+        # before the first tick): compact physically. Live or degenerate
+        # cases keep the upstream mark-finished contract; the running
+        # generator sheds the row at its next round boundary and the
+        # snapshot shed below covers the batch-held copies.
+        if (len(keep) < len(self.uids)
+                and keep
+                and self._rounds_iter is None
+                and not getattr(self, _RELEASED_FLAG, False)
+                and getattr(self, "first_tokens", None) is not None
+                and self.uids == self._all_uids
+                and not any(self._finished)
+                and all(hasattr(c, "filter") or hasattr(type(c), "merge")
+                        for c in self.prompt_cache)):
+            _compact_prestart_rows(self, list(keep))
+            return
         _orig_filter(self, keep)
         _release_if_finished(self)
 
@@ -1433,20 +2001,108 @@ def install_continuous_batch_admission() -> None:
     # 4. Process pending injections in next() before advancing the generator
     _orig_next = SpecBatch.next
 
+    def _note_last_tokens(self, responses) -> None:
+        # Last delivered token per uid: the bonus a preempt rebuild restarts
+        # from (its KV is not yet in the cache at a round boundary).
+        stash = getattr(self, "_kq_last_tokens", None)
+        if stash is None:
+            stash = self._kq_last_tokens = {}
+        for r in responses:
+            if r.token is not None:
+                stash[r.uid] = int(r.token)
+
+    def _lift_host_cache(c):
+        """Promote a single-sequence host cache to its batch class so the
+        rebuilt batch generator can extend/filter it (same lift the
+        injection path applies to incoming caches)."""
+        if hasattr(c, "filter") and hasattr(c, "extend"):
+            return c
+        lifted = type(c).merge([c])
+        stamp = getattr(c, "_gmlx_cascade", None)
+        if stamp is not None:
+            lifted._gmlx_cascade = stamp
+        return lifted
+
+    def _preempt_scalar(self) -> bool:
+        """Preempt a live scalar (B=1) spec generation so queued rows can
+        join: close the generator, deliver the closed round's undelivered
+        tail (the scalar path yields one token per next(), so a close
+        usually lands mid-round; those tokens are verified and their KV
+        stays in the cache), lift the caches to batch classes, and mark
+        the batch armless (hidden=None); _start_rounds then rebuilds it on
+        the batch loop, whose first injection drain admits the waiters.
+        The rebuild resumes from the round's bonus token, whose KV is not
+        in the cache. GMLX_MTP_PREEMPT=0 leaves the old drain-wait
+        behavior.
+
+        The rebuilt row carries no APC retirement context (batch-loop rows
+        start with retire_ctxs None), so the preempted request's prefix is
+        not offered back to the prompt cache when it finishes."""
+        if not env_bool("GMLX_MTP_PREEMPT", True):
+            return False
+        if not getattr(self, "_sent_first", False):
+            return False
+        last = getattr(self, "_kq_last_tokens", {}).get(self._all_uids[0])
+        if last is None:
+            return False
+        it = self._rounds_iter
+        captured = []
+        if it is not None:
+            self._rounds_iter = None
+            self.model._kq_preempt_capture = captured
+            try:
+                it.close()
+            finally:
+                try:
+                    del self.model._kq_preempt_capture
+                except AttributeError:
+                    pass
+        responses = []
+        uid = self._all_uids[0]
+        for tok in captured:
+            if self._finished[0]:
+                break
+            tok = int(tok)
+            self._num_tokens[0] += 1
+            finish = self._finish_reason(0, tok)
+            if finish is not None:
+                self._finished[0] = True
+            responses.append(self.Response(
+                uid=uid, token=tok, token_logprob=0.0, finish_reason=finish))
+            last = tok
+        self._kq_preempt_responses = responses
+        if self._finished[0]:
+            # The captured tail finished the row; nothing to rebuild. The
+            # pending injections promote through __len__ once drained.
+            self._refresh_uids()
+            return False
+        self.prompt_cache = [_lift_host_cache(c) for c in self.prompt_cache]
+        self.first_tokens = mx.array([int(last)], dtype=self.token_dtype)
+        self.hidden = None
+        self.shared_kv_states = None
+        self.prompt_tokens = None
+        self.model._kq_rebuild_emitted = [int(self._num_tokens[0])]
+        _debug_note("[mtp] preempt: scalar generation rebuilt for "
+                    "continuous batching")
+        return True
+
     def _next_with_injection(self):
         pending = getattr(self, "_pending_injections", None)
         # Mid-flight adoption works only when the batch rounds generator is
         # running: it drains model._generator_injections at its round
-        # boundaries. The scalar (B=1) generator never does, so merging uids
-        # into a scalar batch strands the entry -- the injected request's
-        # continuation then re-dispatches from the wrong state (the finished
-        # row's cache) and its stream is silently truncated. Leave scalar
-        # injections buffered; _len_with_promotion adopts them wholesale
-        # (their own cache/hidden/first token) once the current request ends.
+        # boundaries. The scalar (B=1) generator never does, so a live
+        # scalar host is preempted first: its generator closes at the round
+        # boundary and the batch is rebuilt armless on the batch loop.
         # `_all_uids` is an mlx-vlm generator internal (stable under the
         # ==0.6.3 pin); re-verify this batch-vs-scalar signal on a pin lift.
-        if pending and len(self._all_uids) > 1:
-            responses = []
+        preempted = False
+        if pending and len(self._all_uids) == 1:
+            preempted = _preempt_scalar(self)
+        # The preempt capture: verified tokens the closed round had not yet
+        # delivered. They precede everything this call returns.
+        pre_responses = self.__dict__.pop("_kq_preempt_responses", None) or []
+        if pending and (len(self._all_uids) > 1 or preempted):
+            responses = list(pre_responses)
             gen_inj = getattr(self.model, "_generator_injections", None)
             if gen_inj is None:
                 self.model._generator_injections = []
@@ -1498,10 +2154,12 @@ def install_continuous_batch_admission() -> None:
 
             more = _orig_next(self)
             responses.extend(more)
+            _note_last_tokens(self, responses)
             _release_if_finished(self)
             return responses
 
-        responses = _orig_next(self)
+        responses = pre_responses + _orig_next(self)
+        _note_last_tokens(self, responses)
         _release_if_finished(self)
         return responses
 
@@ -1556,7 +2214,10 @@ def install_owned_spec_engine() -> None:
     ):
         batch_size = int(first_bonus.shape[0]) if first_bonus.ndim > 0 else 1
         if draft_kind == "mtp":
-            if batch_size == 1:
+            # hidden=None marks a preempted scalar generation rebuilt for
+            # continuous batching: it must run the batch loop (arm-from-
+            # capture entry), never the scalar fast path.
+            if batch_size == 1 and hidden is not None:
                 if not _first_use_b1[0]:
                     _debug_note("[mtp] owned round: B=1 scalar path")
                     _first_use_b1[0] = True

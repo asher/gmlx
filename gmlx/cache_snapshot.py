@@ -15,6 +15,7 @@ generations, off the per-round hot path.
 from __future__ import annotations
 
 import logging
+import os
 from collections import OrderedDict
 from typing import Any
 
@@ -67,22 +68,35 @@ def _buffered_types() -> tuple:
 def _clone_single_row(cache: Any) -> Any | None:
     """Deep-copy an already-single-row cache, preserving its concrete kind.
 
-    Reuses upstream's APC clone so the snapshot matches what
-    ``store_exact_cache`` would produce for the non-speculative path.
-    Rotating layers canonicalize first: min(offset, W) tokens in temporal
-    order instead of the untrimmed ring (max_size + prefill_step - 1
-    columns) -- every consumer (exact store, decode-ring slot, splice)
-    needs only the canonical form, which is the shape the lookup paths
-    already restore to.
+    Rotating layers canonicalize: min(offset, W) tokens in temporal order
+    instead of the untrimmed ring. For CROSS-REQUEST store consumers
+    (ckpt-tier chained blocks and their decode snapshots) that is the
+    required form -- the chain key is content-addressed over the canonical
+    window and a future request can never reproduce this stream's ring
+    phase. Same-stream resumes must use ``_clone_row_faithful`` instead.
     """
+    return _clone_row(cache, rot_canonical=True)
+
+
+def _clone_row_faithful(cache: Any) -> Any | None:
+    """Deep-copy a single-row cache bitwise, rotating rings included.
+
+    For SAME-STREAM consumers (exact retirement, the rung ring, drafter
+    KV sidecars): the restored state must replay bitwise against the live
+    row. The canonical rotating reorder holds the same window but permutes
+    fp16 summation order inside it, which MoE routing amplifies into
+    visible logit swings.
+    """
+    return _clone_row(cache, rot_canonical=False)
+
+
+def _clone_row(cache: Any, *, rot_canonical: bool) -> Any | None:
     from mlx_vlm import apc as _apc
     from .cache_compat import cache_types
 
     if isinstance(cache, _buffered_types()):
-        _log.info("APC clone declined: BufferedRotatingKVCache carries "
-                  "start_position no rotating clone preserves")
-        return None
-    if isinstance(cache, cache_types("RotatingKVCache")):
+        return _clone_buffered_window(cache)
+    if rot_canonical and isinstance(cache, cache_types("RotatingKVCache")):
         return _clone_rot_canonical(cache)
     eval_targets: list[Any] = []
     out = _apc._clone_cache_entry_for_apc(
@@ -127,11 +141,73 @@ def _clone_rot_canonical(cache: Any) -> Any | None:
     return out
 
 
+def _clone_buffered_window(cache: Any) -> Any | None:
+    """Clone of a BufferedRotatingKVCache (the spec-path swap-in) as the
+    plain RotatingKVCache the model's make_cache produces.
+
+    The buffered cache keeps its window as a linear temporal buffer
+    ``[0, _idx)`` plus rollback slack, so the canonical window (the
+    trailing ``min(offset, max_size)`` tokens in temporal order) is also
+    its faithful state: no ring phase to permute, hence one clone serves
+    both consumers. The result is what a stored entry restores into (the
+    spec path re-swaps on its next prefill). ``keep > 0`` never reaches
+    the swap; declined."""
+    import mlx.core as mx
+    from mlx_vlm import apc as _apc
+    from mlx_vlm.models.cache import RotatingKVCache
+
+    keep = int(getattr(cache, "keep", 0) or 0)
+    if keep:
+        _log.info("APC clone declined: BufferedRotatingKVCache with keep=%d",
+                  keep)
+        return None
+    max_size = int(cache.max_size)
+    offset = int(getattr(cache, "offset", 0) or 0)
+    out = RotatingKVCache(max_size=max_size, keep=0)
+    out.offset = offset
+    if cache.keys is None or cache.values is None:
+        out._idx = 0
+        return out
+    idx = int(cache._idx)
+    L = min(offset, max_size)
+    if idx < L or L <= 0:
+        _log.info("APC clone declined: buffered window covers %d of %d "
+                  "tokens", idx, L)
+        return None
+    # The trailing slice is the canonical window only while the buffer's
+    # linear layout holds (``start_position == offset - _idx``, which
+    # from_cache establishes and compact/update preserve). Decline loudly
+    # rather than store a window that starts somewhere else.
+    start = getattr(cache, "start_position", None)
+    if start is not None and int(start) != offset - idx:
+        _log.warning("APC clone declined: buffered window start %s != "
+                     "offset %d - idx %d", start, offset, idx)
+        return None
+    copy = _apc._copy_mlx_array
+    out.keys = copy(cache.keys[..., idx - L:idx, :])
+    out.values = copy(cache.values[..., idx - L:idx, :])
+    out._idx = L
+    mx.eval(out.keys, out.values)
+    return out
+
+
 def _clone_lm_twin(cache: Any, eval_targets: list[Any]) -> Any | None:
     from mlx_vlm import apc as _apc
     from .cache_compat import cache_types
 
     copy = _apc._copy_mlx_array
+    if isinstance(cache, cache_types("RotatingKVCache")):
+        # Faithful ring copy for the mlx_lm twin (the faithful path only;
+        # canonical requests never reach here).
+        out = type(cache)(max_size=int(cache.max_size),
+                          keep=int(getattr(cache, "keep", 0) or 0))
+        out.offset = int(getattr(cache, "offset", 0) or 0)
+        out._idx = int(getattr(cache, "_idx", 0) or 0)
+        if cache.keys is not None and cache.values is not None:
+            out.keys = copy(cache.keys)
+            out.values = copy(cache.values)
+            eval_targets.extend([out.keys, out.values])
+        return out
     if isinstance(cache, cache_types("KVCache")):
         out = type(cache)()
         off = int(getattr(cache, "offset", 0) or 0)
@@ -192,11 +268,11 @@ def row_snapshot(prompt_cache: list[Any], row: int = 0) -> list[Any] | None:
                 # the whole stack; any other row doesn't exist.
                 if row != 0:
                     return None
-                snap = _clone_single_row(cache)
+                snap = _clone_row_faithful(cache)
         else:
             # Already single-row (B=1 without a batch wrapper); clone so the
             # stored copy is decoupled from the live decode cache.
-            snap = _clone_single_row(cache)
+            snap = _clone_row_faithful(cache)
         if snap is None or not _layer_has_content(snap):
             return None
         snaps.append(snap)
@@ -267,7 +343,7 @@ def drafter_sidecar_store(
                     "APC sidecar store skipped: head offset %d < %d",
                     offset, store_len)
                 return False
-            clone = _clone_single_row(c)
+            clone = _clone_row_faithful(c)
             if clone is None:
                 return False
             excess = offset - store_len
@@ -300,7 +376,8 @@ def drafter_sidecar_store(
                 # restore under another.
                 salted = sidecar_extra_hash(extra_hash) ^ int(
                     getattr(manager, "_exact_extra_salt", 0) or 0)
-                khash = _apc._sequence_hash(ids, salted, manager.block_size)
+                khash = _apc._sequence_hash(ids, extra_hash=salted,
+                                            block_size=manager.block_size)
                 disk.save_exact_cache(khash, ids, salted, clones)
                 with manager.lock:
                     manager.stats.disk_writes += 1
@@ -341,7 +418,7 @@ def drafter_sidecar_lookup(
             if entry is not None:
                 idx.move_to_end(key)
         if entry is not None:
-            return [_clone_single_row(c) for c in entry]
+            return [_clone_row_faithful(c) for c in entry]
         disk = getattr(manager, "disk", None)
         if disk is None:
             return None
@@ -370,10 +447,127 @@ def drafter_sidecar_lookup(
             idx.move_to_end(key)
             while len(idx) > _SIDECAR_ENTRIES:
                 idx.popitem(last=False)
-        return [_clone_single_row(c) for c in caches]
+        return [_clone_row_faithful(c) for c in caches]
     except Exception:
         _log.warning("APC sidecar lookup failed; continuing", exc_info=True)
         return None
+
+
+# Exact-tier anchor: one whole-prefix clone per system-prompt chain, held in
+# a gmlx-owned side LRU. The upstream exact LRU is count-capped (2 slots by
+# default) and every request writes its guard-column entry there, so sibling
+# fan-out churns out the early shared-prefix entry the siblings need; this
+# index holds nothing but anchors.
+_ANCHOR_ENTRIES = max(1, env_int("GMLX_APC_ANCHOR_ENTRIES", 4))
+# Whole-prefix clones of pooling/MLA stacks run to GBs at deep prefixes, so
+# the index is byte-bounded too; newest always survives.
+_ANCHOR_BUDGET_BYTES = max(
+    1, env_int("GMLX_APC_ANCHOR_BUDGET_MB", 4096)) << 20
+
+
+def _anchor_index(manager: Any) -> "OrderedDict":
+    with manager.lock:
+        idx = getattr(manager, "_kq_anchor_cache", None)
+        if idx is None:
+            idx = OrderedDict()
+            manager._kq_anchor_cache = idx
+        return idx
+
+
+def anchor_exact_store(
+    manager: Any,
+    token_ids,
+    prompt_cache: list,
+    extra_hash: int = 0,
+) -> bool:
+    """Store a whole-prefix clone of ``prompt_cache`` under the anchor key.
+
+    Cloning goes through the upstream exact-clone path (the pooling arms are
+    installed there), so any stack the exact tier serves anchors identically.
+    A re-store under the same key replaces the entry in place, keeping one
+    anchor per chain. Best-effort; never raises.
+    """
+    if manager is None or not prompt_cache:
+        return False
+    try:
+        ids = tuple(int(t) for t in token_ids)
+        if not ids:
+            return False
+        from mlx_vlm import apc as _apc
+        clones = _apc._clone_prompt_cache_for_apc(prompt_cache)
+        if clones is None:
+            _ckpt_decline(manager, "anchor_clone")
+            return False
+        nbytes = _caches_nbytes(clones)
+        key = (ids, int(extra_hash))
+        idx = _anchor_index(manager)
+        with manager.lock:
+            idx[key] = (clones, nbytes)
+            idx.move_to_end(key)
+            while len(idx) > _ANCHOR_ENTRIES:
+                idx.popitem(last=False)
+            total = sum(n for _, n in idx.values())
+            while total > _ANCHOR_BUDGET_BYTES and len(idx) > 1:
+                _, (_, n) = idx.popitem(last=False)
+                total -= n
+        _ckpt_bump(manager, "anchor_stores")
+        _log.info("APC anchor store: tokens=%d", len(ids))
+        return True
+    except Exception:
+        _log.warning("APC anchor store failed; continuing", exc_info=True)
+        return False
+
+
+def anchor_exact_lookup(
+    manager: Any,
+    token_ids,
+    extra_hash: int = 0,
+    min_prefix_tokens: int = 0,
+) -> tuple:
+    """Longest anchor strictly prefixing ``token_ids`` on the same chain.
+
+    Returns ``(warm_prompt_cache, p)`` or ``(None, 0)``. The warm list is a
+    fresh clone with capacity for the full query, decoupled from the stored
+    entry. Never raises.
+    """
+    if manager is None or token_ids is None:
+        return None, 0
+    try:
+        ids = tuple(int(t) for t in token_ids)
+        n = len(ids)
+        idx = _anchor_index(manager)
+        best_key = None
+        with manager.lock:
+            for key in idx:
+                kids, kh = key
+                p = len(kids)
+                if (kh != int(extra_hash)
+                        or not min_prefix_tokens < p < n
+                        or ids[:p] != kids):
+                    continue
+                if best_key is None or p > len(best_key[0]):
+                    best_key = key
+            if best_key is None:
+                return None, 0
+            clones = idx[best_key][0]
+            idx.move_to_end(best_key)
+        from mlx_vlm import apc as _apc
+        warm = _apc._clone_prompt_cache_for_apc(
+            clones, min_capacity_tokens=n + 1)
+        if warm is None:
+            return None, 0
+        p = len(best_key[0])
+        with manager.lock:
+            # Anchor hits are cache-served tokens the upstream ledger never
+            # sees; bumping both keeps token_hit_rate honest.
+            manager.stats.hits += 1
+            manager.stats.matched_tokens += p
+        _ckpt_bump(manager, "anchor_hits")
+        _log.info("APC anchor hit: prefix=%d", p)
+        return warm, p
+    except Exception:
+        _log.warning("APC anchor lookup failed; continuing", exc_info=True)
+        return None, 0
 
 
 # Rotating (sliding-window) snapshot/restore inverse. A live RotatingKVCache
@@ -525,7 +719,8 @@ _CKPT_SALT = 0x7C_4B_D2_0A_86_E5_93
 _BOUNDED_SALT = 0x3A_91_C7_55_0E_D4_26
 
 _CKPT_RECORD_ENTRIES = max(2, env_int("GMLX_APC_CKPT_RECORDS", 32))
-# Strip-on-extend: newest N restorable checkpoints per chain.
+# Strip-on-extend: newest N restorable checkpoints per chain, plus the
+# chain's anchor (see _record_insert).
 _CKPT_HEAVY_PER_CHAIN = max(1, env_int("GMLX_APC_CKPT_HEAVY", 2))
 # Byte budget for record-owned payload (recurrent states + KV tails; chain
 # blocks are bounded by the manager pool). A GDN record can carry >100 MB
@@ -647,10 +842,12 @@ def _ckpt_block_prefix(p: int, block_size: int) -> int:
 
 
 class _CkptRecord:
-    # kind in {"boundary", "replay", "retire"}: prefill-cursor boundaries,
-    # the N-1 identical-replay record, and retirement stores. Retention
-    # differs only in the strip-on-extend exemption (see _record_insert);
-    # the entries cap and byte budget treat all kinds alike.
+    # kind in {"boundary", "anchor", "replay", "retire"}: prefill-cursor
+    # boundaries, the chain's pinned early boundary (sibling fan-out
+    # reuse), the N-1 identical-replay record, and retirement stores.
+    # Retention differs only in _record_insert's strip-on-extend
+    # exemptions and eviction order; adoption gates only ever test for
+    # "replay".
     __slots__ = ("ids", "extra_hash", "p", "b_full", "layout",
                  "main_blocks", "bounded_blocks", "rot_meta", "states",
                  "tails", "nbytes", "kind")
@@ -679,7 +876,10 @@ def _ckpt_records(manager) -> "OrderedDict":
 _CKPT_STAT_INTS = (
     "ckpt_stores", "ckpt_hits", "ckpt_matched_tokens",
     "ckpt_missed_adoptions", "ckpt_skeleton_writes", "sidecar_writes",
-    "retire_fallback_full", "ckpt_pool_evictions",
+    "retire_fallback_suppressed",
+    "ckpt_pool_evictions", "ckpt_governor_released",
+    "ckpt_evict_own_chain",
+    "ckpt_grid_truncate", "anchor_stores", "anchor_hits",
 )
 
 
@@ -739,6 +939,9 @@ def ckpt_reset(manager) -> None:
         side = getattr(manager, "_kq_sidecar_cache", None)
         if side:
             side.clear()
+        anchors = getattr(manager, "_kq_anchor_cache", None)
+        if anchors:
+            anchors.clear()
         manager._kq_ckpt_stats = None
 
 
@@ -824,22 +1027,86 @@ def _free_block_count(manager) -> int:
     return n
 
 
-def _evict_for_pool(manager, deficit: int) -> int:
-    """Release least-recently-used records until ``deficit`` blocks sit on
-    the pool free list, always at least one when the deficit is
-    reachable (the caller loops on retry, so each call must make
-    progress). Window chains are position-salted (no dedup), so on
-    large-window models pinned records exhaust the pool long before the
-    entry or byte bounds trip; insert-time eviction then never runs
-    again because no store can complete. Blocks a record shares with an
-    in-flight lookup pin or another request's chain do not free on
-    release, so an unreachable deficit is detected upfront and evicts
-    nothing rather than draining the whole index for a store that still
-    declines. Returns the number of records released."""
+def ckpt_governor_release(manager, fraction: float) -> int:
+    """Governor rung: release ``fraction`` of ckpt records LRU-first and
+    return the bytes freed. Records are retention, never correctness --
+    dropping one costs the next lookup a warm start. Releasing unpins
+    the record's blocks, so the manager's pool eviction running in the
+    same governor pass can actually reclaim them; without this the
+    pinned share is invisible to red-band reclaim (the 122B run-3 shed:
+    11.2 GB recovered, shortfall anyway). Plain LRU, anchors included:
+    on red band the cheapest global order is the point; fairness across
+    chains is the pool path's concern, not the emergency one's."""
+    idx = _ckpt_records(manager)
+    if not idx:
+        return 0
+    fraction = min(1.0, max(0.0, float(fraction)))
+    freed = 0
+    released = 0
+    with manager.lock:
+        n = len(idx)
+        take = max(1, round(n * fraction)) if n and fraction > 0 else 0
+        for _ in range(take):
+            if not idx:
+                break
+            _, rec = idx.popitem(last=False)
+            freed += int(getattr(rec, "nbytes", 0) or 0)
+            _release_record(manager, rec)
+            released += 1
+    if released:
+        _ckpt_bump(manager, "ckpt_governor_released", released)
+    return freed
+
+
+def _fatchain_victim(idx, bs: int):
+    """Key of the eviction victim: the deepest non-anchor record of the
+    chain group holding the most blocks, the group's anchor only once
+    nothing else in it is left. Groups are keyed by the first block of
+    ids: turns of one session share it, and shared-system-prefix
+    siblings land together, which matches how their blocks pool."""
+    tally: dict[Any, list] = {}
+    for k, r in idx.items():
+        g = r.ids[:bs]
+        held = len(r.main_blocks or ()) + len(r.bounded_blocks or ())
+        t = tally.setdefault(g, [0, []])
+        t[0] += held
+        t[1].append(k)
+    keys = tally[max(tally, key=lambda g: tally[g][0])][1]
+    non_anchor = [k for k in keys if idx[k].kind != "anchor"]
+    return max(non_anchor or keys, key=lambda k: idx[k].p)
+
+
+def _evict_for_pool(manager, deficit: int, store_ids=None) -> int:
+    """Release records until ``deficit`` blocks sit on the pool free
+    list, always at least one when the deficit is reachable (the caller
+    loops on retry, so each call must make progress). Window chains are
+    position-salted (no dedup), so on large-window models pinned
+    records exhaust the pool long before the entry or byte bounds trip;
+    insert-time eviction then never runs again because no store can
+    complete. Blocks a record shares with an in-flight lookup pin or
+    another request's chain do not free on release, so an unreachable
+    deficit is detected upfront and evicts nothing rather than draining
+    the whole index for a store that still declines.
+
+    Victim order is fattest-chain-deepest-first, not LRU. Under
+    round-robin sessions on a saturated pool, LRU's victim is exactly
+    the session due to run next: every store evicts a record about to
+    be reused, everyone pays the store and nobody collects the hit (the
+    122B run-4 starvation: 1519 stores, 182 hits). Charging the chain
+    group holding the most blocks makes chains equilibrate toward a
+    fair share, and taking its deepest record first degrades that
+    session to a shallower warm start instead of zeroing anyone.
+    Anchors still go last within their group and get no absolute
+    protection, since an anchor pinning window blocks on an exhausted
+    pool would starve every future store. ``store_ids`` marks the
+    storing chain so self-recycled evictions are visible in the stats.
+    Returns the number of records released."""
     if not hasattr(manager, "_free_head"):
         return 0
     idx = _ckpt_records(manager)
-    evicted = 0
+    bs = int(getattr(manager, "block_size", 0) or 1)
+    own_group = tuple(store_ids[:bs]) if store_ids is not None else None
+    evicted = own = 0
     with manager.lock:
         # Census stays inside the call: each retry round's evictions
         # change both the ref counts and the deficit, so a hoisted copy
@@ -859,10 +1126,30 @@ def _evict_for_pool(manager, deficit: int) -> int:
         target = _free_block_count(manager) + deficit
         while idx and (evicted == 0
                        or _free_block_count(manager) < target):
-            _, victim = idx.popitem(last=False)
+            victim = idx.pop(_fatchain_victim(idx, bs))
+            if own_group is not None and victim.ids[:bs] == own_group:
+                own += 1
             _release_record(manager, victim)
             evicted += 1
+    if own:
+        _ckpt_bump(manager, "ckpt_evict_own_chain", own)
     return evicted
+
+
+def _evict_lru_record(manager, idx, keep):
+    """Release and return the eviction victim: the least-recently-used
+    non-anchor record, else the least-recently-used anchor, never the
+    ``keep`` key (the record being inserted always survives). Lookup
+    hits move_to_end, so anchor order is LRU by last hit: an anchor
+    that never serves a sibling ages out, one that does stays hot.
+    Caller holds the lock and guarantees a non-keep record exists."""
+    key = next((k for k, r in idx.items()
+                if r.kind != "anchor" and k != keep), None)
+    if key is None:
+        key = next(k for k in idx if k != keep)
+    victim = idx.pop(key)
+    _release_record(manager, victim)
+    return victim
 
 
 def _record_insert(manager, rec) -> None:
@@ -872,18 +1159,31 @@ def _record_insert(manager, rec) -> None:
     then bound the index by count and payload bytes, releasing refs on
     everything dropped. The newest record always survives.
 
-    Replay records are exempt from the strip only: growth (a longer
-    boundary or retirement insert) is exactly the moment an identical
-    resend still needs the N-1 record, so a longer non-replay insert
-    never releases one; a newer replay on the same chain supersedes it.
-    The count and byte bounds below evict replay records normally -- the
-    exemption pins nothing against real memory pressure."""
+    Two strip exemptions. Replay: growth (a longer boundary or
+    retirement insert) is exactly the moment an identical resend still
+    needs the N-1 record, so a longer non-replay insert never releases
+    one; a newer replay on the same chain supersedes it. Anchor: the
+    chain's early boundary is what sibling fan-out requests (shared
+    system prompt, disjoint user turns) can adopt, and it is exactly
+    the record strip-on-extend removes first as the chain deepens. The
+    schedule tags the system-prefix stop "anchor"; when no tagged stop
+    exists (no render ctx, completions API), the first restorable
+    boundary on a fresh chain is promoted instead. One anchor per
+    chain: an anchor insert supersedes tagged anchors below it.
+
+    Against real memory pressure the exemptions pin little: the count
+    and byte bounds evict anchors after non-anchors (LRU by last hit),
+    and pool-pressure eviction (_evict_for_pool) gives anchors no
+    protection at all: position-salted window chains must never sit
+    pinned on an exhausted pool."""
     idx = _ckpt_records(manager)
     key = (rec.ids, rec.extra_hash)
     rec.nbytes = _rec_nbytes(rec)
     with manager.lock:
         old = idx.pop(key, None)
         if old is not None:
+            if old.kind == "anchor" and rec.kind == "boundary":
+                rec.kind = "anchor"     # a re-store keeps the anchor tag
             _release_record(manager, old)
         # chain = records whose ids are a strict prefix of this one
         chain = [k for k, r in idx.items()
@@ -893,7 +1193,14 @@ def _record_insert(manager, rec) -> None:
             # One replay per chain: the newer one supersedes outright.
             for k in [k for k in chain if idx[k].kind == "replay"]:
                 _release_record(manager, idx.pop(k))
-        chain = [k for k in chain if k in idx and idx[k].kind != "replay"]
+        elif rec.kind == "anchor":
+            for k in [k for k in chain if idx[k].kind == "anchor"]:
+                _release_record(manager, idx.pop(k))
+        elif rec.kind == "boundary" and not any(
+                idx[k].kind != "replay" for k in chain if k in idx):
+            rec.kind = "anchor"         # first restorable boundary
+        chain = [k for k in chain
+                 if k in idx and idx[k].kind not in ("replay", "anchor")]
         # Strip-on-extend frees superseded records' main chains for the
         # pool; sub-prefix adoption survives it because those chains are
         # content-deduped and skeleton re-index re-cuts them. A record
@@ -909,13 +1216,11 @@ def _record_insert(manager, rec) -> None:
         idx[key] = rec
         idx.move_to_end(key)
         while len(idx) > _CKPT_RECORD_ENTRIES:
-            _, victim = idx.popitem(last=False)
-            _release_record(manager, victim)
+            _evict_lru_record(manager, idx, key)
         total = sum(int(getattr(r, "nbytes", 0) or 0) for r in idx.values())
         while total > _CKPT_BUDGET_BYTES and len(idx) > 1:
-            _, victim = idx.popitem(last=False)
+            victim = _evict_lru_record(manager, idx, key)
             total -= int(getattr(victim, "nbytes", 0) or 0)
-            _release_record(manager, victim)
 
 
 def ckpt_store(
@@ -926,7 +1231,8 @@ def ckpt_store(
     extra_hash: int = 0,
     skeleton_disk: bool = True,
     kind: str = "boundary",
-) -> bool:
+    grid_truncate: bool = False,
+) -> int:
     """Store a hybrid checkpoint at ``p = len(token_ids)``.
 
     Single-row cache list, KV/rotating offsets == p. Plain KV rides the
@@ -937,10 +1243,16 @@ def ckpt_store(
     skeleton inlines recurrent state, >100 MB per GDN checkpoint --
     interval boundaries superseded minutes later do not earn that).
     ``kind`` stamps the record's retention class (see _CkptRecord).
-    Never raises.
+    ``grid_truncate`` turns the below-window off-grid rotating decline
+    into a terminal store at the largest block-aligned prefix: pre-wrap
+    the buffer is a temporal prefix, so a slice is a faithful shorter
+    run. Non-recurrent layouts only (state cannot rewind), memory-only
+    (the live cache's offset would stamp a mismatched skeleton).
+    Returns the stored length in tokens, 0 when nothing stored. Never
+    raises.
     """
     if manager is None or token_ids is None:
-        return False
+        return 0
     from .cache_compat import cache_types, runtime_cache_module
     from .kvarn_cache import KVarNKVCache
 
@@ -955,7 +1267,7 @@ def ckpt_store(
         layout = ckpt_layout(prompt_cache, bs)
         if p < 2 or layout is None:
             _ckpt_decline(manager, "layout")
-            return False
+            return 0
         if kind == "replay" and "arr" in layout:
             # The disk path knows no kinds, so a skeleton here would let
             # a restart serve this record past the replay adopt gate --
@@ -980,7 +1292,7 @@ def ckpt_store(
                 "APC ckpt store declined: BufferedRotatingKVCache rows "
                 "cannot snapshot (support deferred)")
             _ckpt_decline(manager, "buffered")
-            return False
+            return 0
         for c in prompt_cache:
             off = getattr(c, "offset", None)
             if off is not None and not isinstance(c, rot_types) \
@@ -988,19 +1300,20 @@ def ckpt_store(
                 _log.info("APC ckpt store skipped: KV offset %d != %d",
                           int(off), p)
                 _ckpt_decline(manager, "offset")
-                return False
+                return 0
             if isinstance(c, rot_types) and int(c.offset) != p:
                 _log.info("APC ckpt store skipped: rot offset %d != %d",
                           int(c.offset), p)
                 _ckpt_decline(manager, "offset")
-                return False
+                return 0
             if type(c) is KVarNKVCache and int(c.offset) != p:
                 _log.info("APC ckpt store skipped: kvarn offset %d != %d",
                           int(c.offset), p)
                 _ckpt_decline(manager, "offset")
-                return False
+                return 0
         has_rot = any(_is_rot(t) for t in layout)
         b_full = _ckpt_block_prefix(p, bs)
+        trunc_from = None
         if has_rot and b_full != p:
             # Off-grid p is storable once the window has wrapped: the
             # canonical window is then exactly W tokens -- whole blocks
@@ -1015,14 +1328,32 @@ def ckpt_store(
                 _log.warning("APC ckpt store declined: rotating geometry "
                              "unavailable at grid gate")
                 _ckpt_decline(manager, "layout")
-                return False
+                return 0
             if p < geom[0]:
+                has_arr = any(not isinstance(c, (kv_types, rot_types))
+                              for c in prompt_cache)
+                if not grid_truncate or has_arr or b_full < 2:
+                    _log.info(
+                        "APC ckpt store declined: off-grid rotating store "
+                        "below the window (p=%d < W=%d, %d %% %d != 0)",
+                        p, geom[0], p, bs)
+                    _ckpt_decline(manager, "grid")
+                    return 0
+                # Terminal grid store: pre-wrap the buffer is a temporal
+                # prefix, so the block-aligned slice is a faithful
+                # shorter run. Memory-only: a skeleton would stamp the
+                # live cache's deeper offset.
+                trunc_from = p
+                p = b_full
+                ids = ids[:p]
+                # No skeleton and no window-chain disk blocks: without
+                # the skeleton nothing re-indexes them after a restart.
+                skeleton_disk = False
+                rot_disk = False
+                _ckpt_bump(manager, "ckpt_grid_truncate")
                 _log.info(
-                    "APC ckpt store declined: off-grid rotating store "
-                    "below the window (p=%d < W=%d, %d %% %d != 0)",
-                    p, geom[0], p, bs)
-                _ckpt_decline(manager, "grid")
-                return False
+                    "APC ckpt store: terminal grid store at %d (prompt "
+                    "%d below window %d)", p, trunc_from, geom[0])
         tail_len = p - b_full
         salted = ckpt_extra_hash(extra_hash)
         kv_caches = [c for c in prompt_cache if isinstance(c, kv_types)
@@ -1063,7 +1394,8 @@ def ckpt_store(
             while len(blocks) < need:
                 got = len(blocks)
                 manager.release(blocks)
-                evicted = _evict_for_pool(manager, need - got)
+                evicted = _evict_for_pool(manager, need - got,
+                                          store_ids=ids)
                 if not evicted:
                     _log.info(
                         "APC ckpt store declined: %s chain short (%d/%d "
@@ -1085,42 +1417,54 @@ def ckpt_store(
             # Evaluate before storing: the shard payload crosses to the
             # disk writer thread, and evaluating arrays that share
             # unevaluated inputs from two threads is undefined in mlx.
-            import mlx.core as mx
-            mx.eval(lk + lv)
+            # Owned survivors: lk/lv slice the live prompt cache, whose
+            # own pending graph rides the same tape; the guard drains
+            # before the store's except path releases and declines.
+            from .eval_guard import guard
+            guard.eval(*(lk + lv), site="ckpt-store-main", owner="owned")
             got_main = _chained(
                 ids[:b_full], lk, lv, extra=salted, disk=True,
                 need=b_full // bs, what="main")
             if got_main is None:
-                return False
+                return 0
             main_blocks = got_main
 
         rot_meta = None
         if rot_caches:
             canon = [rotating_canonical_window(c) for c in rot_caches]
+            if trunc_from is not None:
+                # Slice each canonical window to the terminal grid p and
+                # restamp its meta as the shorter run's canonical form
+                # (pre-wrap: L == offset == p, idx == L).
+                canon = [None if cw is None else
+                         (cw[0][..., :p, :], cw[1][..., :p, :],
+                          (cw[2][0], cw[2][1], p, p))
+                         for cw in canon]
             if any(cw is None for cw in canon):
                 _ckpt_decline(manager, "canon")
                 manager.release(main_blocks)
-                return False
+                return 0
             metas = {cw[2] for cw in canon}
             if len(metas) != 1:
                 _ckpt_decline(manager, "canon")
                 manager.release(main_blocks)
-                return False
+                return 0
             rot_meta = canon[0][2]
             keep, _w, _off, L = rot_meta
             canon_ids = ids[:keep] + ids[p - (L - keep):p]
             bsalt = bounded_extra_hash(extra_hash, p)
             canon_k = [cw[0] for cw in canon]
             canon_v = [cw[1] for cw in canon]
-            # Same writer-thread rule as the main chain above.
-            import mlx.core as mx
-            mx.eval(canon_k + canon_v)
+            # Same writer-thread rule and ownership as the main chain.
+            from .eval_guard import guard
+            guard.eval(*(canon_k + canon_v), site="ckpt-store-window",
+                       owner="owned")
             got_win = _chained(
                 canon_ids, canon_k, canon_v, extra=bsalt, disk=rot_disk,
                 need=L // bs, what="window")
             if got_win is None:
                 manager.release(main_blocks)
-                return False
+                return 0
             bounded_blocks = got_win
 
         states = [_clone_single_row(c) for c in inline_caches]
@@ -1128,7 +1472,7 @@ def ckpt_store(
             _ckpt_decline(manager, "clone")
             manager.release(main_blocks)
             manager.release(bounded_blocks)
-            return False
+            return 0
         tails = None
         if tail_len and kv_caches:
             tails = []
@@ -1141,7 +1485,7 @@ def ckpt_store(
                     _ckpt_decline(manager, "clone")
                     manager.release(main_blocks)
                     manager.release(bounded_blocks)
-                    return False
+                    return 0
                 tails.append(t)
 
         rec = _CkptRecord(
@@ -1162,7 +1506,7 @@ def ckpt_store(
             "rec_mb=%.1f",
             p, len(rec.main_blocks), len(rec.bounded_blocks), tail_len,
             len(states), rec.nbytes / (1 << 20))
-        return True
+        return p
     except Exception:
         try:
             _ckpt_decline(manager, "exception")
@@ -1171,7 +1515,7 @@ def ckpt_store(
         except Exception:
             pass  # best-effort release on the failure path
         _log.warning("APC ckpt store failed; continuing", exc_info=True)
-        return False
+        return 0
 
 
 def _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
@@ -1219,7 +1563,8 @@ def _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
         # miss on every salted (kvarn) boot. One variable salts both.
         salted = int(salted) ^ int(
             getattr(manager, "_exact_extra_salt", 0) or 0)
-        khash = _apc._sequence_hash(tid, salted, manager.block_size)
+        khash = _apc._sequence_hash(tid, extra_hash=salted,
+                                    block_size=manager.block_size)
         disk.save_exact_cache(khash, tid, salted, entries)
         _ckpt_bump(manager, "ckpt_skeleton_writes")
         with manager.lock:
@@ -1305,6 +1650,88 @@ def _assemble_from_record(manager, rec, geometry_check=None):
     return warm
 
 
+def _ckpt_scan(manager, tid: tuple, extra_hash: int, min_prefix_tokens: int,
+               layout) -> tuple:
+    """Candidate records for ``tid`` under the manager lock: the pinned
+    records whose ids are a strict prefix of the query at the same salt
+    and layout, plus the tallies the miss path reports (``gated``,
+    ``refused``, ``salted``, ``diverged``) and the index generation the
+    caller checks its assembly against. Pure: bumps no counters."""
+    n = len(tid)
+    idx = _ckpt_records(manager)
+    with manager.lock:
+        gen = int(getattr(manager, "_kq_ckpt_gen", 0))
+        cands, gated, refused = [], 0, 0
+        salted = diverged = 0
+        bs = int(getattr(manager, "block_size", 0) or 1)
+        for rec in idx.values():
+            # Last-token sentinel before the full slice compare:
+            # unrelated queries reject in O(1), so tallying refused
+            # matches here costs the hot path nothing and the miss
+            # path never rescans the index.
+            if rec.extra_hash != int(extra_hash):
+                if rec.ids and tid[:bs] == rec.ids[:bs]:
+                    salted += 1
+                continue
+            if (not rec.ids or rec.p > n
+                    or tid[rec.p - 1] != rec.ids[-1]
+                    or tid[:rec.p] != rec.ids):
+                # Same-chain records that diverge before their own p
+                # (first block matches, full slice does not) were
+                # invisible: the 9B probe showed adoption dying here
+                # with zero counters moving.
+                if (rec.ids and len(tid) >= bs
+                        and tid[:bs] == rec.ids[:bs]):
+                    diverged += 1
+                    if os.environ.get("GMLX_APC_CKPT_DEBUG"):
+                        m = 0
+                        lim = min(len(tid), rec.p)
+                        while m < lim and tid[m] == rec.ids[m]:
+                            m += 1
+                        _log.info(
+                            "APC ckpt diverged: rec.p=%d kind=%s "
+                            "layout=%s first mismatch at %d "
+                            "(query %r vs rec %r)",
+                            rec.p, rec.kind, rec.layout, m,
+                            tid[m:m + 4], rec.ids[m:m + 4])
+                continue
+            if (not min_prefix_tokens < rec.p < n
+                    or (layout is not None
+                        and tuple(layout) != rec.layout)):
+                refused += 1
+                continue
+            # Recurrent-state replay records serve identical resends
+            # only: at exactly one token past the record, the warm
+            # turn forwards a single token and stays bit-identical to
+            # armed cold. A longer suffix would chunk off the grid
+            # the record was built on and drift. Attention-only
+            # replay records split exactly and adopt freely.
+            if (rec.kind == "replay" and "arr" in (rec.layout or ())
+                    and rec.p != n - 1):
+                gated += 1
+                continue
+            cands.append(rec)
+    return cands, gated, refused, salted, diverged, gen
+
+
+def ckpt_peek(manager, token_ids, *, extra_hash: int = 0,
+              min_prefix_tokens: int = 0, layout=None) -> int:
+    """How deep the checkpoint tier could warm-start ``token_ids``: the
+    deepest pinned record's ``p``, or 0. The dry-run's probe: it neither
+    assembles a cache nor consults the disk skeleton, and moves no
+    counter. Never raises."""
+    if manager is None or token_ids is None:
+        return 0
+    try:
+        tid = tuple(int(t) for t in token_ids)
+        cands = _ckpt_scan(manager, tid, extra_hash, min_prefix_tokens,
+                           layout)[0]
+        return max((int(r.p) for r in cands), default=0)
+    except Exception:
+        _log.debug("APC ckpt peek failed", exc_info=True)
+        return 0
+
+
 def ckpt_lookup(
     manager: Any,
     token_ids,
@@ -1316,9 +1743,11 @@ def ckpt_lookup(
     """Longest checkpoint-tier warm start for ``token_ids``.
 
     Walks pinned records p-descending testing the whole conjunction, then
-    falls back to the disk skeleton (restart repair). ``layout`` rejects
-    records from a different per-layer layout. Returns
-    ``(warm_prompt_cache, p)`` or ``(None, 0)``. Never raises.
+    falls back to the disk skeleton (restart repair). When the deepest
+    pinned candidate is the chain's anchor, the disk tier is consulted
+    first for anything strictly deeper. ``layout`` rejects records from a
+    different per-layer layout. Returns ``(warm_prompt_cache, p)`` or
+    ``(None, 0)``. Never raises.
     """
     if manager is None or token_ids is None:
         return None, 0
@@ -1326,38 +1755,28 @@ def ckpt_lookup(
         ids = [int(t) for t in token_ids]
         tid = tuple(ids)
         idx = _ckpt_records(manager)
-        n = len(ids)
-        with manager.lock:
-            gen = int(getattr(manager, "_kq_ckpt_gen", 0))
-            cands, gated, refused = [], 0, 0
-            for rec in idx.values():
-                # Last-token sentinel before the full slice compare:
-                # unrelated queries reject in O(1), so tallying refused
-                # matches here costs the hot path nothing and the miss
-                # path never rescans the index.
-                if (rec.extra_hash != int(extra_hash) or not rec.ids
-                        or rec.p > n or tid[rec.p - 1] != rec.ids[-1]
-                        or tid[:rec.p] != rec.ids):
-                    continue
-                if (not min_prefix_tokens < rec.p < n
-                        or (layout is not None
-                            and tuple(layout) != rec.layout)):
-                    refused += 1
-                    continue
-                # Recurrent-state replay records serve identical resends
-                # only: at exactly one token past the record, the warm
-                # turn forwards a single token and stays bit-identical to
-                # armed cold. A longer suffix would chunk off the grid
-                # the record was built on and drift. Attention-only
-                # replay records split exactly and adopt freely.
-                if (rec.kind == "replay" and "arr" in (rec.layout or ())
-                        and rec.p != n - 1):
-                    gated += 1
-                    continue
-                cands.append(rec)
+        cands, gated, refused, salted, diverged, gen = _ckpt_scan(
+            manager, tid, extra_hash, min_prefix_tokens, layout)
         if gated:
             _ckpt_decline(manager, "replay_gate")
+        if salted:
+            _ckpt_decline(manager, "salt")
+        if diverged:
+            _ckpt_decline(manager, "ids_diverged")
         cands.sort(key=lambda r: r.p, reverse=True)
+        if cands and cands[0].kind == "anchor":
+            # The anchor is a retention floor, not a depth ceiling. It
+            # sits early on the chain by construction, and the pinned
+            # walk below returns on first success, so without this the
+            # anchor would cap every divergent query at its own p while
+            # a deeper skeleton sits on disk (the position strip-on-
+            # extend drops from memory but the skeleton keeps).
+            warm, p = _ckpt_disk_lookup(
+                manager, ids, extra_hash=extra_hash,
+                min_prefix_tokens=max(min_prefix_tokens, cands[0].p),
+                layout=layout)
+            if warm is not None:
+                return warm, p
         for rec in cands:
             # Assembly runs unlocked (it concatenates and evals block
             # tensors), so the record's chains must be pinned against a
@@ -1592,7 +2011,11 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
                 targets.extend(s for s in c.cache if s is not None)
             else:
                 targets.extend(_iter_arrays(getattr(c, "state", None)))
-        mx.eval(*targets)
+        # Scratch survivors: the warm-cache arrays were built by this
+        # restore from pool blocks; the except path's release-and-decline
+        # is the right exit and now runs post-drain.
+        from .eval_guard import guard
+        guard.eval(*targets, site="ckpt-disk-lookup", owner="scratch")
         manager.release(blocks)
         manager.release(wblocks)
         # ckpt_* only: lookup_exact_cache above already fed the upstream
@@ -1652,6 +2075,35 @@ _DECODE_CKPT_MARGIN = 64
 def _grid_ceil(n: int, g: int) -> int:
     g = max(1, int(g))
     return -(-int(n) // g) * g
+
+
+def row_kv_len(prompt_cache, row: int = 0) -> int | None:
+    """Tokens of KV the cache holds for ``row``: the max per-row offset
+    across layers (batch classes carry one offset per row; single-row
+    classes a scalar; CacheList members are read through). None when no
+    layer reports one. Cheap - no clone - so a store can pick its key
+    from what the row actually covers."""
+    best = None
+    for c in prompt_cache or ():
+        members = getattr(c, "caches", None)
+        if isinstance(members, (tuple, list)):
+            n = row_kv_len(list(members), row)
+        else:
+            off = getattr(c, "offset", None)
+            if off is None:
+                continue
+            try:
+                if hasattr(off, "ndim") and off.ndim >= 1:
+                    if row >= off.shape[0]:
+                        continue
+                    n = int(off[row].item())
+                else:
+                    n = int(off)
+            except (TypeError, ValueError, AttributeError):
+                continue
+        if n is not None and (best is None or n > best):
+            best = n
+    return best
 
 
 def _cache_offset_max(prompt_cache) -> int:
@@ -1778,9 +2230,9 @@ def _snap_assemble(prompt_cache: list[Any], states: list[Any],
 
 def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
                      max_len, decode_snaps) -> int:
-    """Ckpt-mode retirement: the full sequence when it can store whole,
-    else the newest decode-time snapshot at or below the replayable
-    prefix. Never spills to the exact tier -- on ckpt models the exact
+    """Ckpt-mode retirement: the full sequence when it can store whole
+    (a short rotating prompt truncates to the block grid), else the
+    newest decode-time snapshot at or below the replayable prefix. Never spills to the exact tier -- on ckpt models the exact
     tier stays empty, so the stock warm path never bypasses arming.
     Returns the stored length (0 = nothing)."""
     try:
@@ -1791,12 +2243,14 @@ def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
             # The row is already single-row on the B=1 path; ckpt_store
             # slices it directly (its own stores copy internally), so no
             # full-cache clone happens -- the exact tier's whole sin. A
-            # rotating layer declines here below the window (a sub-wrap
-            # store needs the block grid); the ring below holds aligned
-            # clones for exactly that case.
-            if ckpt_store(manager, ids, prompt_cache,
-                          extra_hash=extra_hash, kind="retire"):
-                return len(ids)
+            # rotating layer below the window stores its block-grid
+            # prefix (grid_truncate); the ring below holds aligned
+            # clones for the post-wrap off-grid cases.
+            stored = ckpt_store(manager, ids, prompt_cache,
+                                extra_hash=extra_hash,
+                                grid_truncate=True, kind="retire")
+            if stored:
+                return stored
         for p, states in sorted(decode_snaps or (),
                                 key=lambda s: s[0], reverse=True):
             if not 2 <= p <= cap:
@@ -1810,20 +2264,25 @@ def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
                 _log.info("APC retirement: decode ckpt stored at %d "
                           "(cap %d, full %d)", p, cap, len(ids))
                 return p
-        # No snapshot at or below the replayable prefix: fall back to the
-        # full sequence under its verbatim key rather than storing
-        # nothing. A re-rendered turn will not adopt it, but a raw
-        # continuation client replays prompt+gen exactly and does.
-        # Reason-counted so fallback traffic is distinguishable from
-        # turn reuse. Only when the whole-sequence branch above did not
-        # already try (cap == len means it ran and declined).
-        if cap < len(ids) and len(ids) >= 2 and ckpt_store(
-                manager, ids, prompt_cache, extra_hash=extra_hash,
-                kind="retire"):
-            _ckpt_bump(manager, "retire_fallback_full")
-            _log.info("APC retirement: full-sequence fallback stored at "
-                      "%d (replayable prefix %d)", len(ids), cap)
-            return len(ids)
+        # No snapshot at or below the replayable prefix. cap < len only
+        # when the next-turn render prediction SUCCEEDED: the client came
+        # through the chat template and provably re-renders, so a
+        # full-sequence store under the verbatim key can never match its
+        # next turn -- it only ages in the pool and burns an
+        # ids_diverged decline on every later same-chain lookup (the
+        # gemma-4/gpt-oss cert arms: ~410 declines each, every one a
+        # retire-kind record past the strip boundary). The prefill-side
+        # p_stable turn boundary of this same request covers turn-2, so
+        # storing nothing here loses nothing reachable. Raw-continuation
+        # clients have no render ctx (lcp None -> cap == len) and keep
+        # the whole-sequence branch above. Counter kept for visibility;
+        # the 90-percent-occupancy yield (122B churn spiral) is subsumed.
+        if cap < len(ids) and len(ids) >= 2:
+            _ckpt_bump(manager, "retire_fallback_suppressed")
+            _log.info(
+                "APC retirement: predicted-diverged fallback suppressed "
+                "(replayable prefix %d, full %d)", cap, len(ids))
+            return 0
         _log.info("APC retirement skipped: no decode snapshot at or "
                   "below the replayable prefix %d (full %d)",
                   cap, len(ids))
@@ -1882,6 +2341,14 @@ def retirement_store(
             snap = row_snapshot(prompt_cache, row)
             if snap is None:
                 return 0
+            covered = _cache_offset_max(snap)
+            if covered and covered != len(ids):
+                # An exact entry replays bitwise from its key; a row whose
+                # KV count disagrees with the key (a batch row with a
+                # pending or stale tail) must not be stored under it.
+                _log.warning("APC retirement skipped: row covers %d tokens, "
+                             "key %d", covered, len(ids))
+                return 0
             if max_len is not None and max_len < len(ids):
                 if max_len < 2:
                     return 0
@@ -1897,7 +2364,7 @@ def retirement_store(
             return 0
         from mlx_vlm import apc as _apc
         blocks = _apc.harvest_blocks_from_batch_cache(
-            manager, prompt_cache, row, ids, extra_hash=extra_hash)
+            manager, prompt_cache, ids, batch_idx=row, extra_hash=extra_hash)
         manager.release(blocks)
         if not blocks:
             return 0

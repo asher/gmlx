@@ -418,9 +418,10 @@ def _verbose_emitter(prompt, tokenizer, reasoning):
     echoing the prompt-opened think tag so the bare close marker still reads."""
     open_tag = _echo_think_tag(prompt, tokenizer)
     if reasoning in ("show", "hide"):
-        from .reasoning import StreamRenderer
+        from .reasoning import StreamRenderer, prompt_opens_header
 
-        r = StreamRenderer(reasoning, start_in_thinking=open_tag is not None)
+        r = StreamRenderer(reasoning, start_in_thinking=open_tag is not None,
+                           start_in_header=prompt_opens_header(prompt))
         return r.write, r.close
     if open_tag is not None:
         print(open_tag, flush=True)
@@ -459,6 +460,8 @@ def generate(
     kv_tail_tokens: int = 1024,
     prefill_step_size: int | None = None,
     thinking_budget: int | None = None,
+    thinking_start_token: str | None = None,
+    thinking_end_token: str | None = None,
     apply_chat_template: bool = True,
     prefill_progress: bool = False,
     over_generation: int = 0,
@@ -488,6 +491,9 @@ def generate(
     generated or the tokenizer lacks a ``</think>`` token. With or without a
     budget, ^T (see ``thinking_budget.install_finish_thinking_key``, armed by
     the CLI entry points) force-closes an open thinking block the same way.
+    ``thinking_start_token`` / ``thinking_end_token`` name the reasoning
+    markers for a model whose spelling the tokenizer/template probe does not
+    recognize; unset, the probe decides.
     Returns the generated text. ``prefill_progress`` shows a stderr spinner during a long prefill
     (TTY only; cleared before the first token).
     ``reasoning`` shapes how a *verbose* stream displays a thinking model's
@@ -557,9 +563,13 @@ def generate(
         tbp = make_thinking_budget_processor(
             tokenizer,
             thinking_budget,
-            start_in_thinking=prompt_opens_thinking(prompt, tokenizer=tokenizer),
+            start_in_thinking=prompt_opens_thinking(
+                prompt, thinking_start_token, thinking_end_token,
+                tokenizer=tokenizer),
             verbose=verbose,
             interruptible=True,
+            start_token=thinking_start_token,
+            end_token=thinking_end_token,
         )
         if tbp is not None:
             logits_processors = list(logits_processors) + [tbp]
@@ -685,6 +695,8 @@ def generate(
                 verbose=verbose,
                 # Seam detection needs the model's untouched stop behavior.
                 eos_floor=False,
+                start_token=thinking_start_token,
+                end_token=thinking_end_token,
             )
             if tbp is not None:
                 over_logits_processors = list(logits_processors) + [tbp]
@@ -1133,6 +1145,7 @@ def _generate_speculative(
         )
 
     from mlx_lm.sample_utils import make_sampler
+    from .spec_helpers import _resolve_block_total
     from mlx_vlm.generate.ar import generate_step
 
     if (
@@ -1174,7 +1187,7 @@ def _generate_speculative(
         if temp == 0.0
         else make_sampler(temp=temp, top_p=top_p, top_k=top_k, min_p=min_p)
     )
-    block = draft_block_size or int(getattr(drafter.config, "block_size", 3))
+    block = _resolve_block_total(drafter, draft_block_size)
     eos_ids = set(getattr(tokenizer, "eos_token_ids", None) or [tokenizer.eos_token_id])
 
     detok = tokenizer.detokenizer
@@ -1283,6 +1296,7 @@ def generate_speculative_owned(
     generate_step. This is the bench_tg_depth default (matches serve);
     GMLX_OWNED_ROUND=0 opts back to mlx-vlm's generate_speculative."""
     from mlx_lm.sample_utils import make_sampler
+    from .spec_helpers import _resolve_block_total
     from mlx_vlm.models import cache as _cache
 
     from .speculative import annotate_sampling_params, stream_speculative
@@ -1316,8 +1330,9 @@ def generate_speculative_owned(
         if temp == 0.0
         else make_sampler(temp=temp, top_p=top_p, top_k=top_k, min_p=min_p)
     )
-    annotate_sampling_params(sampler, temp=temp, top_p=top_p, top_k=top_k, min_p=min_p)
-    block = draft_block_size or int(getattr(drafter.config, "block_size", 3))
+    annotate_sampling_params(
+        sampler, temp=temp, top_p=top_p, top_k=top_k, min_p=min_p)
+    block = _resolve_block_total(drafter, draft_block_size)
     eos_ids = set(getattr(tokenizer, "eos_token_ids", None) or [tokenizer.eos_token_id])
 
     lm = model.language_model if hasattr(model, "language_model") else model
@@ -1474,6 +1489,7 @@ def _stream_generate_speculative_owned(
     surface as the stock round, but drives ``stream_speculative`` (which
     does its own chunked prefill through the persistent ``prompt_cache``)."""
     from mlx_lm.sample_utils import make_sampler
+    from .spec_helpers import _resolve_block_total
 
     from .speculative import annotate_sampling_params, stream_speculative
 
@@ -1491,8 +1507,9 @@ def _stream_generate_speculative_owned(
         if temp == 0.0
         else make_sampler(temp=temp, top_p=top_p, top_k=top_k, min_p=min_p)
     )
-    annotate_sampling_params(sampler, temp=temp, top_p=top_p, top_k=top_k, min_p=min_p)
-    block = draft_block_size or int(getattr(drafter.config, "block_size", 2))
+    annotate_sampling_params(
+        sampler, temp=temp, top_p=top_p, top_k=top_k, min_p=min_p)
+    block = _resolve_block_total(drafter, draft_block_size)
     eos_ids = set(getattr(tokenizer, "eos_token_ids", None) or [tokenizer.eos_token_id])
 
     detok = tokenizer.detokenizer
@@ -1608,6 +1625,7 @@ def _stream_generate_speculative(
         return
 
     from mlx_lm.sample_utils import make_sampler
+    from .spec_helpers import _resolve_block_total
     from mlx_vlm.generate.ar import generate_step
 
     if isinstance(prompt, str):
@@ -1627,7 +1645,7 @@ def _stream_generate_speculative(
         if temp == 0.0
         else make_sampler(temp=temp, top_p=top_p, top_k=top_k, min_p=min_p)
     )
-    block = draft_block_size or int(getattr(drafter.config, "block_size", 3))
+    block = _resolve_block_total(drafter, draft_block_size)
     eos_ids = set(getattr(tokenizer, "eos_token_ids", None) or [tokenizer.eos_token_id])
 
     detok = tokenizer.detokenizer

@@ -326,3 +326,137 @@ def test_feed_strips_model_ansi_and_control_chars():
     assert "\x1b" not in text and "\x00" not in text and "\x07" not in text
     assert "\r" not in text
     assert "hi " in text and "red" in text and "ok" in text
+
+
+# -- diff-aware repaint --------------------------------------------------------
+
+
+def test_stream_diff_append_rewrites_only_changed_rows():
+    t = _Term()
+    r = t.renderer()
+    r.feed("```\nalpha\nbravo\n")
+    t.out.clear()
+    r.feed("charlie\n")             # append: alpha/bravo rows are unchanged
+    paint = _strip(t.text())
+    assert "charlie" in paint
+    assert "alpha" not in paint and "bravo" not in paint
+
+
+def test_stream_diff_oversize_append_stays_small():
+    t = _Term(columns=41, lines=8)  # budget 6: block taller than the viewport
+    r = t.renderer()
+    r.feed("```\n")
+    for i in range(8):
+        r.feed(f"line {i}\n")
+    t.out.clear()
+    r.feed("line 8\n")              # slides the live window by one
+    out = t.text()
+    assert "line 8" in _strip(out)
+    # Only the boundary rows repaint; committed rows never rewrite, so the
+    # cursor-up span stays a couple of rows, not the whole window.
+    assert all(int(n) <= 3 for n in re.findall(r"\x1b\[(\d+)A", out))
+    assert "line 5" not in _strip(out)
+
+
+def test_stream_diff_unchanged_finalize_writes_nothing():
+    t = _Term()
+    r = t.renderer()
+    r.feed("steady text\n")
+    t.out.clear()
+    r.finalize()                    # tail render equals the painted screen
+    assert t.text() == ""
+
+
+def test_stream_adaptive_interval_backs_off():
+    ticks = iter([1.0, 2.0, 2.1, 2.2, 2.4, 3.4, 3.45])
+    t = _Term()
+    r = rd.StreamRenderer(
+        "lite", _THEME, write=t.write, size_fn=lambda: t.size,
+        clock=lambda: next(ticks),
+    )
+    r.feed("a")                     # paint start 1.0, end 2.0 -> interval 0.25
+    n = len(t.out)
+    r.feed("b")                     # now=2.1: 0.1 since paint end, skipped
+    assert len(t.out) == n
+    r.feed("c")                     # now=2.2: still inside the interval
+    assert len(t.out) == n
+    r.feed("d")                     # now=2.4: past the interval, paints again
+    assert len(t.out) > n
+
+
+# -- fence live-render trimming -------------------------------------------------
+
+
+def test_stream_fence_trim_bounds_render_input():
+    t = _Term(columns=41, lines=8)   # budget 6: trim kicks in past 28 body lines
+    r = t.renderer()
+    r.feed("```\n")
+    for i in range(40):
+        r.feed(f"row {i}\n")
+    assert r._src_skip > 0
+    live = r._trimmed(r._buf.current)
+    assert len(live.splitlines()) <= 2 * 6 + 16 + 2
+    r.feed("```\n")
+    r.feed("\nafter\n")
+    r.finalize()
+    stripped = _strip(t.text())
+    for i in range(40):
+        assert f"row {i}" in stripped, i
+    assert "after" in stripped
+    assert "```" not in stripped
+
+
+def test_stream_fence_trim_resets_between_blocks():
+    t = _Term(columns=41, lines=8)
+    r = t.renderer()
+    r.feed("```\n")
+    for i in range(40):
+        r.feed(f"row {i}\n")
+    r.feed("```\n")
+    assert r._src_skip == 0              # completion resets the trim
+    r.feed("\nplain paragraph text\n")
+    r.finalize()
+    assert "plain paragraph text" in _strip(t.text())
+
+
+def test_stream_paragraph_never_trims():
+    t = _Term(columns=41, lines=8)
+    r = t.renderer()
+    for i in range(40):
+        r.feed(f"word{i} ")
+    assert r._src_skip == 0
+    r.finalize()
+    assert "word39" in _strip(t.text())
+
+
+# -- live status ticker ----------------------------------------------------------
+
+
+def test_stream_status_paints_on_resting_line():
+    t = _Term()
+    r = t.renderer()
+    r.feed("some streaming text\n")
+    r.set_status("148 tok/s")
+    out = t.text()
+    assert "148 tok/s" in _strip(out)
+    assert out.endswith("\r")        # cursor parked back at line start
+
+
+def test_stream_status_ignored_before_first_paint():
+    t = _Term()
+    r = t.renderer()
+    r.set_status("99 tok/s")
+    assert "99 tok/s" not in t.text()
+
+
+def test_stream_status_cleared_by_block_end_and_finalize():
+    t = _Term()
+    r = t.renderer()
+    r.feed("first block\n")
+    r.set_status("120 tok/s")
+    r.feed("\nsecond block\n")       # separator must clear the ticker line
+    n = t.text().count("\x1b[2K\n")
+    assert n >= 1
+    r.set_status("125 tok/s")
+    r.finalize()
+    assert t.text().rstrip("\n").endswith("\x1b[2K")

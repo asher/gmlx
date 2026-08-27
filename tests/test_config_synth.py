@@ -12,6 +12,8 @@ the integration tests instead.
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 import mlx.core as mx  # noqa: E402
@@ -1222,6 +1224,53 @@ def test_deepseek2_v2_softmax_gating_rejected():
         synthesize_config(m, tensor_shapes=_DEEPSEEK2_SHAPES)
 
 
+def _deepseek2_yarn_meta() -> dict:
+    # Kimi-K2.7's yarn block: 256k context off a 4k-trained base.
+    m = _deepseek2_meta()
+    arch = "deepseek2"
+    m[f"{arch}.rope.scaling.type"] = "yarn"
+    m[f"{arch}.rope.scaling.factor"] = 64.0
+    m[f"{arch}.rope.scaling.original_context_length"] = 4096
+    m[f"{arch}.rope.scaling.yarn_beta_fast"] = 32.0
+    m[f"{arch}.rope.scaling.yarn_beta_slow"] = 1.0
+    m[f"{arch}.rope.scaling.yarn_log_multiplier"] = 0.1   # = 0.1 * 1.0
+    return m
+
+
+def test_deepseek2_yarn_log_mul_decodes_to_mscale_all_dim():
+    # The converter writes `0.1 * mscale_all_dim`, so a card value of 1.0
+    # arrives as 0.1. Reading it raw hands deepseek_v3 a 10x-too-small
+    # mscale_all_dim, which squares into the attention scale.
+    c = synthesize_config(_deepseek2_yarn_meta(),
+                          tensor_shapes=_DEEPSEEK2_SHAPES)
+    rs = c["rope_scaling"]
+    assert rs["mscale_all_dim"] == pytest.approx(1.0)
+    assert rs["factor"] == 64.0
+    assert rs["original_max_position_embeddings"] == 4096
+    assert rs["beta_fast"] == 32.0 and rs["beta_slow"] == 1.0
+    # Guard the consequence, not just the field: deepseek_v3 multiplies the
+    # attention scale by (0.1 * mscale_all_dim * log(factor) + 1) ** 2.
+    s = 0.1 * rs["mscale_all_dim"] * math.log(rs["factor"]) + 1.0
+    assert s * s == pytest.approx(2.0047, abs=1e-3)
+
+
+def test_deepseek2_without_yarn_has_no_rope_scaling():
+    # Non-yarn conversions carry no scaling block; the synth must not invent
+    # one (a bare `mscale_all_dim` would rescale attention on a model that
+    # never asked for it).
+    c = synthesize_config(_deepseek2_meta(), tensor_shapes=_DEEPSEEK2_SHAPES)
+    assert "rope_scaling" not in c
+
+
+def test_glm_dsa_shares_the_deepseek_yarn_log_mul_convention():
+    # glm-dsa's converter subclasses DeepseekV2Model, so it inherits the same
+    # `0.1 *` encoding and must be decoded the same way.
+    from gmlx.config_synth import _deepseek_mscale_all_dim
+    meta = {"glm-dsa.rope.scaling.yarn_log_multiplier": 0.1}
+    assert _deepseek_mscale_all_dim(meta, "glm-dsa") == pytest.approx(1.0)
+    assert _deepseek_mscale_all_dim({}, "glm-dsa") is None
+
+
 def _deepseek4_meta() -> dict:
     arch = "deepseek4"
     m = _base_meta(arch)
@@ -1300,6 +1349,147 @@ def test_deepseek4_synth_instantiates():
     out = model(mx.array([[1, 2, 3]]), cache=cache)
     mx.eval(out)
     assert out.shape[-1] == VOCAB
+
+
+def _qwen4exp_meta(with_indexer: bool = True, with_ple: bool = True) -> dict:
+    arch = "qwen4exp"
+    m = _base_meta(arch)
+    m[f"{arch}.block_count"] = 4
+    m[f"{arch}.attention.head_count"] = 4
+    m[f"{arch}.attention.head_count_kv"] = 2
+    m[f"{arch}.attention.key_length"] = 16
+    m[f"{arch}.attention.value_length"] = 16
+    m[f"{arch}.rope.freq_base"] = 10000000.0
+    m[f"{arch}.rope.dimension_count"] = 8      # partial rotary 8 of 16
+    m[f"{arch}.rope.dimension_sections"] = [3, 3, 2, 0]
+    m[f"{arch}.full_attention_interval"] = 4
+    m[f"{arch}.ssm.conv_kernel"] = 4
+    m[f"{arch}.ssm.state_size"] = 32
+    m[f"{arch}.ssm.group_count"] = 2           # k heads
+    m[f"{arch}.ssm.time_step_rank"] = 4        # v heads
+    m[f"{arch}.ssm.inner_size"] = 128          # 4 v heads x 32
+    m[f"{arch}.expert_count"] = 8
+    m[f"{arch}.expert_used_count"] = 2
+    m[f"{arch}.expert_feed_forward_length"] = 16
+    m[f"{arch}.expert_shared_feed_forward_length"] = 16
+    m[f"{arch}.hyper_connection.count"] = 4
+    m[f"{arch}.hyper_connection.low_rank"] = 8
+    if with_indexer:
+        m[f"{arch}.attention.indexer.head_count"] = 2
+        m[f"{arch}.attention.indexer.key_length"] = 32
+        m[f"{arch}.attention.indexer.top_k"] = 8     # 2 blocks of 4
+        m[f"{arch}.attention.compress_ratios"] = [0, 0, 0, 4]
+    if with_ple:
+        m[f"{arch}.ple.layers"] = [1]
+        m[f"{arch}.ple.ngram_size"] = 3
+        m[f"{arch}.ple.heads_per_ngram"] = 8
+        m[f"{arch}.ple.conv_kernel"] = 4
+        m[f"{arch}.ple.eos_token_id"] = 1
+        m[f"{arch}.ple.image_token_id"] = 2
+        m[f"{arch}.embedding_length_per_layer_input"] = 8
+        # the real 45-bit multipliers: the hash must survive the KV round trip
+        m[f"{arch}.ple.layer_multipliers"] = [
+            23703573157769, 20109073645365, 8052911324071]
+        m[f"{arch}.ple.head_offsets"] = [50 * i for i in range(16)]
+        m[f"{arch}.ple.head_vocab_sizes"] = [50] * 16
+    return m
+
+
+# conv_dim = 2 * (2 k heads x 32) + 128 = 256; shapes in GGUF native order.
+_QWEN4EXP_SHAPES = {
+    "output.weight": [64, VOCAB],
+    "blk.0.ssm_conv1d.weight": [4, 256],
+    "blk.0.ssm_norm.weight": [32],
+    "blk.0.ssm_a": [4],
+    "per_layer_token_embd.weight": [8, 800],
+}
+
+
+def test_qwen4exp_synth_instantiates():
+    # Qwen3.8-Flash-Next: qwen35 GDN hybrid + hyper-connections + QSA sparse
+    # attention + PLE n-gram hash embeddings. A tiny prefill + decode through
+    # all four mechanisms (the 12-token prefill crosses the 2-block sparse
+    # budget) proves config/model agree, and that the cached step matches a
+    # full recompute.
+    from gmlx import qwen4_exp_model
+    qwen4_exp_model.ensure_registered()
+
+    c = synthesize_config(_qwen4exp_meta(), tensor_shapes=_QWEN4EXP_SHAPES)
+    assert c["model_type"] == "qwen4_exp"
+    assert c["linear_num_value_heads"] == 4 and c["linear_num_key_heads"] == 2
+    assert c["linear_key_head_dim"] == 32 and c["linear_value_head_dim"] == 32
+    assert c["kv_head_layout"] == "tiled"
+    assert c["partial_rotary_factor"] == pytest.approx(0.5)
+    assert c["mrope_section"] == [3, 3, 2]
+    assert c["num_experts"] == 8 and c["num_experts_per_tok"] == 2
+    assert c["moe_intermediate_size"] == 16
+    assert c["shared_expert_intermediate_size"] == 16
+    assert c["hc_count"] == 4 and c["hc_lowrank"] == 8
+    assert c["compress_ratios"] == [0, 0, 0, 4]
+    assert c["indexer_n_heads"] == 2 and c["indexer_head_dim"] == 32
+    assert c["indexer_budget"] == 8
+    assert c["ple_layer_ids"] == [1] and c["ple_ngram_size"] == 3
+    assert c["ple_heads_per_ngram"] == 8 and c["ple_conv_kernel"] == 4
+    assert c["ple_eos_token_id"] == 1 and c["ple_image_token_id"] == 2
+    assert c["ple_layer_multipliers"] == [
+        23703573157769, 20109073645365, 8052911324071]
+    assert len(c["ple_head_offsets"]) == 16
+    assert c["ple_embed_dim"] == 8 and c["ple_table_rows"] == 800
+    assert c["tie_word_embeddings"] is False
+    Model, ModelArgs = _get_classes(c)
+    model = Model(ModelArgs.from_dict(c))
+    mx.eval(model.parameters())
+    assert [layer.is_linear for layer in model.layers] == [True, True, True, False]
+    assert "ple" in model.layers[1] and "ple_embed" in model.model
+    cache = model.make_cache()
+    ids = mx.array([[3, 5, 7, 1, 9, 2, 4, 6, 8, 10, 11, 12]])
+    out = model(ids, cache=cache)
+    mx.eval(out)
+    assert out.shape == (1, 12, VOCAB)
+    step = mx.array([[13]])
+    out = model(step, cache=cache)
+    mx.eval(out)
+    full = model(mx.concatenate([ids, step], axis=1))
+    mx.eval(full)
+    # Not 1e-4: on M5 the GPU arm's f32 GEMMs run at TF32 precision while
+    # the decode-step GEMVs are exact, so full-vs-step drifts ~5e-4 across
+    # the 4 layers (CPU passes 1e-4).
+    assert mx.abs(full[0, -1] - out[0, -1]).max().item() < 2e-3
+    assert cache[3].offset == 13 and cache[3].n_blocks == 3
+
+
+def test_qwen4exp_synth_dense_without_indexer_and_ple():
+    # No indexer keys and no ple.layers: every attention layer is dense and no
+    # PLE block is built (llama.cpp builds the same dense graph).
+    from gmlx import qwen4_exp_model
+    qwen4_exp_model.ensure_registered()
+    shapes = {k: v for k, v in _QWEN4EXP_SHAPES.items()
+              if k != "per_layer_token_embd.weight"}
+    c = synthesize_config(_qwen4exp_meta(with_indexer=False, with_ple=False),
+                          tensor_shapes=shapes)
+    assert c["compress_ratios"] == [0, 0, 0, 0] and c["ple_layer_ids"] == []
+    Model, ModelArgs = _get_classes(c)
+    model = Model(ModelArgs.from_dict(c))
+    assert "ple" not in model.layers[1] and "ple_embed" not in model.model
+    assert "indexer" not in model.layers[3].self_attn
+
+
+def test_qwen4exp_requires_hyper_connection_keys():
+    m = _qwen4exp_meta()
+    del m["qwen4exp.hyper_connection.count"]
+    with pytest.raises(ValueError, match="hyper_connection.count"):
+        synthesize_config(m, tensor_shapes=_QWEN4EXP_SHAPES)
+
+
+def test_qwen4exp_ple_needs_table_and_hash_constants():
+    m = _qwen4exp_meta()
+    shapes = {k: v for k, v in _QWEN4EXP_SHAPES.items()
+              if k != "per_layer_token_embd.weight"}
+    with pytest.raises(ValueError, match="per_layer_token_embd"):
+        synthesize_config(m, tensor_shapes=shapes)
+    del m["qwen4exp.ple.layer_multipliers"]
+    with pytest.raises(ValueError, match="layer_multipliers"):
+        synthesize_config(m, tensor_shapes=_QWEN4EXP_SHAPES)
 
 
 def test_deepseek4_layer_count_not_nextn_subtracted():
@@ -1664,3 +1854,93 @@ def test_qwen3_rope_scaling_none_omitted():
     m["qwen3.rope.scaling.type"] = "none"
     c = synthesize_config(m, tensor_shapes={})
     assert "rope_scaling" not in c
+
+
+def _muse_glimmer_meta() -> dict:
+    arch = "muse-glimmer"
+    m = _base_meta(arch)
+    m[f"{arch}.block_count"] = 4
+    m[f"{arch}.attention.sliding_window"] = 512
+    # 3-of-4 sliding, matching the shipped [T,T,T,F] schedule.
+    m[f"{arch}.attention.sliding_window_pattern"] = [True, True, True, False]
+    m[f"{arch}.logit_scale"] = 0.19611613
+    m[f"{arch}.final_logit_softcapping"] = 20.0
+    return m
+
+
+# Untied head, per-head qk-norms, and the attention output gate.
+_MUSE_GLIMMER_SHAPES = {
+    "output.weight": [64, VOCAB],
+    "blk.0.attn_q_norm.weight": [16],
+    "blk.0.attn_k_norm.weight": [16],
+    "blk.0.attn_gate.weight": [64, 64],
+}
+
+
+def test_muse_glimmer_synth_instantiates():
+    from gmlx import muse_glimmer_model
+    muse_glimmer_model.ensure_registered()
+
+    c = synthesize_config(_muse_glimmer_meta(), tensor_shapes=_MUSE_GLIMMER_SHAPES)
+    assert c["model_type"] == "muse_glimmer"
+    assert c["num_hidden_layers"] == 4
+    assert c["sliding_window"] == 512
+    assert c["layer_types"] == [
+        "sliding_attention", "sliding_attention", "sliding_attention",
+        "full_attention"]
+    assert c["output_multiplier"] == pytest.approx(0.19611613)
+    assert c["final_logit_softcapping"] == 20.0
+    # Not a GGUF field: pinned from llama.cpp + the HF text_config.
+    assert c["post_norm_eps"] == 1e-8
+    assert c["rms_norm_eps"] == pytest.approx(1e-6)
+    assert c["rope_parameters"]["rope_type"] == "default"
+    assert not c["tie_word_embeddings"]
+
+    from gmlx.muse_glimmer_model import Model, ModelArgs
+
+    model = Model(ModelArgs.from_dict(c))
+    mx.eval(model.parameters())
+    out = model(mx.array([[1, 2, 3]]))
+    logits = getattr(out, "logits", out)
+    assert logits.shape == (1, 3, VOCAB)
+    # The softcap bounds every logit, which is what makes it observable.
+    assert float(mx.abs(logits).max().item()) <= 20.0
+
+
+def test_muse_glimmer_synth_scalar_pattern_period():
+    """llama.cpp also accepts a scalar period: full every ``period``-th layer."""
+    m = _muse_glimmer_meta()
+    m["muse-glimmer.attention.sliding_window_pattern"] = 4
+    c = synthesize_config(m, tensor_shapes=_MUSE_GLIMMER_SHAPES)
+    assert c["layer_types"] == [
+        "sliding_attention", "sliding_attention", "sliding_attention",
+        "full_attention"]
+
+
+def test_muse_glimmer_synth_absent_pattern_defaults_to_period_4():
+    m = _muse_glimmer_meta()
+    del m["muse-glimmer.attention.sliding_window_pattern"]
+    c = synthesize_config(m, tensor_shapes=_MUSE_GLIMMER_SHAPES)
+    assert c["layer_types"][3] == "full_attention"
+    assert c["layer_types"][:3] == ["sliding_attention"] * 3
+
+
+def test_muse_glimmer_synth_pattern_length_must_match_layers():
+    m = _muse_glimmer_meta()
+    m["muse-glimmer.attention.sliding_window_pattern"] = [True, False]
+    with pytest.raises(ValueError, match="entries for"):
+        synthesize_config(m, tensor_shapes=_MUSE_GLIMMER_SHAPES)
+
+
+def test_muse_glimmer_synth_requires_logit_scale():
+    m = _muse_glimmer_meta()
+    del m["muse-glimmer.logit_scale"]
+    with pytest.raises(Exception):
+        synthesize_config(m, tensor_shapes=_MUSE_GLIMMER_SHAPES)
+
+
+def test_muse_glimmer_synth_softcap_defaults_off_when_absent():
+    m = _muse_glimmer_meta()
+    del m["muse-glimmer.final_logit_softcapping"]
+    c = synthesize_config(m, tensor_shapes=_MUSE_GLIMMER_SHAPES)
+    assert c["final_logit_softcapping"] == 0.0

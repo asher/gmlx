@@ -15,11 +15,14 @@ ids the request forwarded. At retirement, ``next_turn_lcp`` re-renders the
 hypothetical next turn (messages plus this completion, parsed into the
 same assistant-message shape the API response carries) through the same
 template and tokenizer, and returns the longest common prefix with the
-sequence we actually forwarded. Rendering ``messages + [assistant]`` with
-no trailing message models the tool-continuation case: a strip-mode
-template drops the chain's thinking only when a later non-tool user query
-arrives, and that future is unknowable at retirement -- those entries miss
-and age out, which is the documented cost of strip mode, not a defect.
+sequence we actually forwarded. When the request declares tools the
+render appends no trailing message (a tool result may come next, and
+strip-mode templates keep the chain's thinking for tool continuations);
+without tools the next client message can only be a user turn, so the
+render appends a dummy user probe and strip-mode templates apply their
+strip, landing the LCP at the true replay boundary. Non-strip templates
+diverge at the user header either way, so the probe changes nothing for
+them.
 
 Prediction errors are safe by construction: lookup still requires an exact
 token-prefix match, so a wrong LCP costs reuse, never correctness.
@@ -38,8 +41,11 @@ _log = logging.getLogger(__name__)
 _LOCK = threading.Lock()
 _TEXT_MEMO: collections.OrderedDict = collections.OrderedDict()
 _IDS_MEMO: collections.OrderedDict = collections.OrderedDict()
-_TEXT_MEMO_CAP = 16
-_IDS_MEMO_CAP = 16
+# Sized for the soak/prod ceiling: 8 sessions + 4 spike + cancels can
+# hold >16 requests between submit and retire; an evicted ctx silently
+# degrades retirement to a full-depth store.
+_TEXT_MEMO_CAP = 64
+_IDS_MEMO_CAP = 64
 
 # Mirrors the endpoint's control-token scrub of post-tool-call text.
 _CONTROL_TOKEN_RE = re.compile(r"<\|[^>]+\|>|<[^>]+>")
@@ -160,6 +166,30 @@ def truncated_thinking(text, pairs, prompt) -> bool:
     return any(prompt.rfind(sm) > prompt.rfind(em) for sm, em in pairs)
 
 
+_CHANNEL_HINTS = ("<|channel|>", "<|channel>", "<|start|>assistant")
+
+
+def _channel_split(full_text: str):
+    """Segment channel-marker reasoning (harmony analysis channels,
+    gemma-style thought channels) that the tag-pair splitter cannot see.
+    Harmony templates refuse messages whose content carries raw
+    ``<|channel|>`` tags, so an unsplit echo makes every next-turn
+    render prediction fail and retirement stores full-depth unmatchable
+    keys. Returns (reasoning, content), or (None, None) when no channel
+    marker is present or nothing classified as reasoning."""
+    if not any(m in full_text for m in _CHANNEL_HINTS):
+        return None, None
+    from .reasoning import ReasoningFilter
+
+    f = ReasoningFilter()
+    spans = f.feed(full_text) + f.flush()
+    reasoning = "".join(t for t, m in spans if m == "reason").strip()
+    content = "".join(t for t, m in spans if m == "answer").strip()
+    if not reasoning:
+        return None, None
+    return reasoning, content
+
+
 def build_assistant_message(ctx: dict, full_text: str) -> dict:
     """Parse a completion into the assistant message a client echoes back.
 
@@ -175,6 +205,10 @@ def build_assistant_message(ctx: dict, full_text: str) -> dict:
     ts = kw.get("thinking_start_token")
     te = kw.get("thinking_end_token")
     reasoning, content = srv._split_thinking(full_text, ts, te)
+    if reasoning is None:
+        ch_reasoning, ch_content = _channel_split(full_text)
+        if ch_reasoning is not None:
+            reasoning, content = ch_reasoning, ch_content
     if reasoning is None and content and truncated_thinking(
             full_text, _thinking_markers(kw), _gen_prompt_text(ctx)):
         reasoning, content = content, ""
@@ -210,27 +244,25 @@ def build_assistant_message(ctx: dict, full_text: str) -> dict:
     if reasoning:
         msg["reasoning_content"] = reasoning
         msg["reasoning"] = reasoning
+        # Harmony templates read analysis text from this field and raise
+        # on raw channel tags in content; think-tag templates ignore it.
+        msg["thinking"] = reasoning
     if tool_calls:
         msg["tool_calls"] = tool_calls
     return msg
 
 
-def predict_next_ids(ctx: dict, assistant_msg: dict | None) -> list[int] | None:
-    """Render and tokenize the hypothetical next-turn prefix.
-
-    ``assistant_msg=None`` renders the request's own messages with no
-    reply appended -- the render-stable core a next turn extends. One
-    predictor for both questions; a second renderer diverging silently
-    is how the turn-boundary bug stayed invisible."""
+def _render_ids(ctx: dict, msgs: list) -> list[int] | None:
+    """Render ``msgs`` through the request's own template and tokenizer
+    (no generation prompt) and return the token ids. The single render
+    path behind every prefix prediction; a second renderer diverging
+    silently is how the turn-boundary bug stayed invisible."""
     render = ctx.get("render")
     preprocess = ctx.get("preprocess")
     if render is None or preprocess is None:
         return None
     kw = dict(ctx.get("kw") or {})
     kw["add_generation_prompt"] = False
-    msgs = list(ctx["messages"])
-    if assistant_msg is not None:
-        msgs.append(assistant_msg)
     text = render(ctx["processor"], ctx["config"], msgs, **kw)
     if not isinstance(text, str):
         return None
@@ -241,6 +273,71 @@ def predict_next_ids(ctx: dict, assistant_msg: dict | None) -> list[int] | None:
     if ids and isinstance(ids[0], list):
         ids = ids[0]
     return [int(t) for t in ids]
+
+
+def predict_next_ids(ctx: dict, assistant_msg: dict | None) -> list[int] | None:
+    """Render and tokenize the hypothetical next-turn prefix.
+
+    ``assistant_msg=None`` renders the request's own messages with no
+    reply appended -- the render-stable core a next turn extends."""
+    msgs = list(ctx["messages"])
+    if assistant_msg is not None:
+        msgs.append(assistant_msg)
+    return _render_ids(ctx, msgs)
+
+
+def _lcp_len(seq, nxt) -> int:
+    n = min(len(seq), len(nxt))
+    lcp = 0
+    while lcp < n and int(seq[lcp]) == int(nxt[lcp]):
+        lcp += 1
+    return lcp
+
+
+def system_prefix_lcp(ctx: dict, prompt_ids) -> int | None:
+    """Token length of the prefix every sibling request shares: the LCP
+    of two probe renders that differ only in a dummy first user turn.
+
+    Sibling fan-out requests share the system prompt and tool schemas
+    but diverge at the first user message; this is the deepest position
+    one checkpoint can serve all of them. A system-only render cannot
+    measure it on every template (gemma folds the system prompt into
+    the first user turn and renders a lone system message to almost
+    nothing), so the offset comes from a divergence probe instead:
+    render leading-system + user "0" and leading-system + user "1"
+    through the same template, kwargs (tools included), and tokenizer
+    as the live request, and take where they split. A folding template
+    folds both probes identically, so the split lands exactly where
+    real siblings diverge. Clamped by the LCP with the live
+    prompt in case a template leaks user content into the header.
+    Memoized on the ctx; media prompts return None (expanded media ids
+    cannot be re-encoded from text)."""
+    if not ctx or ctx.get("media"):
+        return None
+    memo = ctx.get("_p_system")
+    if memo is not None:
+        return memo if memo >= 0 else None
+    lcp = None
+    try:
+        msgs = list(ctx.get("messages") or ())
+        lead = []
+        for m in msgs:
+            if isinstance(m, dict) and m.get("role") == "system":
+                lead.append(m)
+            else:
+                break
+        # No leading system block, or nothing after it (a system-only
+        # prompt is covered by the terminal checkpoint already).
+        if lead and len(lead) < len(msgs):
+            p1 = _render_ids(ctx, lead + [{"role": "user", "content": "0"}])
+            p2 = _render_ids(ctx, lead + [{"role": "user", "content": "1"}])
+            if p1 and p2:
+                lcp = min(_lcp_len(p1, p2), _lcp_len(p1, prompt_ids))
+    except Exception:
+        _log.debug("system-prefix prediction failed", exc_info=True)
+        lcp = None
+    ctx["_p_system"] = -1 if lcp is None else lcp
+    return lcp
 
 
 # Model types whose prompt-stable prediction already failed once: the
@@ -269,7 +366,17 @@ def prompt_stable_lcp(ctx: dict, prompt_ids) -> int | None:
         return memo if memo >= 0 else None
     lcp = None
     try:
-        nxt = predict_next_ids(ctx, None)
+        if (ctx.get("kw") or {}).get("tools"):
+            nxt = predict_next_ids(ctx, None)
+        else:
+            # Same demotion probe as next_turn_lcp: a toolless next
+            # turn appends a user message, demoting the prompt's last
+            # assistant so the template strips its think block. Without
+            # it p_stable lands past think tokens the next render drops
+            # (the 9B probe: every record diverged at the prior
+            # assistant's think-open, position 358).
+            nxt = _render_ids(ctx, list(ctx["messages"]) + [
+                {"role": "user", "content": "0"}])
         if nxt:
             seq = [int(t) for t in prompt_ids]
             n = min(len(seq), len(nxt))
@@ -313,7 +420,33 @@ def next_turn_lcp(ctx: dict, seq: list[int], generated: list[int],
         if partial:
             full_text = _virtually_finish(ctx, full_text)
         msg = build_assistant_message(ctx, full_text)
-        nxt = predict_next_ids(ctx, msg)
+        if (ctx.get("kw") or {}).get("tools"):
+            nxt = predict_next_ids(ctx, msg)
+        else:
+            # No tools declared: the next message can only be a user
+            # turn, and standard clients never resend reasoning fields
+            # (the DeepSeek API contract; OpenAI-style clients echo
+            # content only), so the probe echoes the message without
+            # them. Strip-mode templates strip demoted think either
+            # way; keep-mode templates (deepseek4 chat) render attached
+            # reasoning verbatim, which would predict a full replay no
+            # client performs. The dummy user probe still makes
+            # strip-mode templates apply their strip, so the LCP lands
+            # where the replay actually diverges.
+            # Exception: a truthy preserve_thinking template kwarg is
+            # the client declaring the keep-reasoning protocol (agent
+            # profiles resend reasoning_content and the template
+            # renders it; the faithful-history server patch exists for
+            # exactly this), so the echo keeps the fields and the
+            # prediction follows the request's own render kwargs.
+            if (ctx.get("kw") or {}).get("preserve_thinking"):
+                echo = dict(msg)
+            else:
+                echo = {k: v for k, v in msg.items()
+                        if k not in ("reasoning_content", "reasoning",
+                                     "thinking")}
+            nxt = _render_ids(ctx, list(ctx["messages"]) + [
+                echo, {"role": "user", "content": "0"}])
         if not nxt:
             return None
         n = min(len(seq), len(nxt))

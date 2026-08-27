@@ -4,10 +4,16 @@ What it takes for a new model family to become a supported architecture, and
 the acceptance gate every family clears before its row appears in the
 [coverage matrix](arch-coverage.md).
 
-Precondition: a GGUF arch is only reachable if the installed mlx-lm defines a
-`class Model` for the corresponding `model_type`. If mlx-lm doesn't implement
-the architecture, support is blocked upstream. gmlx never reimplements
-model math.
+Precondition: a GGUF arch needs a model class for its `model_type`. That class
+normally comes from the installed mlx-lm or mlx-vlm, and gmlx supplies only the
+tensor map and the config.
+
+A few families have no upstream class at all (kimi-k3, muse-glimmer). gmlx
+vendors the model math for those, in its own module, grafted into the upstream
+namespace so a later upstream implementation wins. Vendoring is the exception.
+It is worth the cost only when the family is otherwise unreachable, and it adds
+two obligations: numeric parity against llama.cpp, and a collision check that
+reports the graft once upstream ships its own class.
 
 ## The shape of the work
 
@@ -48,7 +54,7 @@ load cleanly into wrong weights.
 
 ## The acceptance gate (all must pass)
 
-An architecture is not done when it generates fluent text. It's done when:
+An architecture is done when:
 
 - Strict load: `load_model` builds, swaps, and `load_weights` leaves no
   parameter unfilled. The loader's unfilled-params warning must be empty.

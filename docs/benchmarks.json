@@ -4,7 +4,7 @@
     "gmlx": "0.1.0",
     "mlx-kquant": "0.3.5",
     "llama.cpp": "b9967",
-    "ds4-server": "80ebbc3"
+    "ds4-server": "b030961"
   },
   "order": [
     "qwen3.5-122b-a10b-ud-q5km",
@@ -30,6 +30,12 @@
       "mtp_kind": "native",
       "gguf": "Qwen3.5-122B-A10B-UD-Q5_K_M-00001-of-00003.gguf",
       "source": "https://huggingface.co/unsloth/Qwen3.5-122B-A10B-MTP-GGUF",
+      "builds": {
+        "gmlx": "0.1.0",
+        "mlx-kquant": "0.3.5",
+        "llama.cpp": "b9967"
+      },
+      "measured": "2026-07-18",
       "rows": [
         {
           "depth": 512,
@@ -250,6 +256,12 @@
       "mtp_kind": "native",
       "gguf": "Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-Q6_K.gguf",
       "source": "https://huggingface.co/llmfan46/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-GGUF",
+      "builds": {
+        "gmlx": "0.1.0",
+        "mlx-kquant": "0.3.5",
+        "llama.cpp": "b9967"
+      },
+      "measured": "2026-07-18",
       "rows": [
         {
           "depth": 512,
@@ -470,6 +482,12 @@
       "mtp_kind": "native",
       "gguf": "Qwen_Qwen3.6-27B-Q6_K.gguf",
       "source": "https://huggingface.co/bartowski/Qwen_Qwen3.6-27B-GGUF",
+      "builds": {
+        "gmlx": "0.1.0",
+        "mlx-kquant": "0.3.5",
+        "llama.cpp": "b9967"
+      },
+      "measured": "2026-07-18",
       "rows": [
         {
           "depth": 512,
@@ -690,6 +708,12 @@
       "mtp_kind": "native",
       "gguf": "Qwen3.5-9B-Q6_K.gguf",
       "source": "https://huggingface.co/unsloth/Qwen3.5-9B-MTP-GGUF",
+      "builds": {
+        "gmlx": "0.1.0",
+        "mlx-kquant": "0.3.5",
+        "llama.cpp": "b9967"
+      },
+      "measured": "2026-07-18",
       "rows": [
         {
           "depth": 512,
@@ -840,6 +864,12 @@
       "mtp_kind": "drafter",
       "gguf": "gemma-4-31B-it-Q6_K.gguf",
       "source": null,
+      "builds": {
+        "gmlx": "0.1.0",
+        "mlx-kquant": "0.3.5",
+        "llama.cpp": "b9967"
+      },
+      "measured": "2026-07-18",
       "rows": [
         {
           "depth": 512,
@@ -1060,6 +1090,12 @@
       "mtp_kind": "drafter",
       "gguf": "google_gemma-4-26B-A4B-it-Q6_K.gguf",
       "source": "https://huggingface.co/bartowski/google_gemma-4-26B-A4B-it-GGUF",
+      "builds": {
+        "gmlx": "0.1.0",
+        "mlx-kquant": "0.3.5",
+        "llama.cpp": "b9967"
+      },
+      "measured": "2026-07-18",
       "rows": [
         {
           "depth": 512,
@@ -1245,6 +1281,12 @@
       "mtp_kind": "drafter",
       "gguf": "gemma-4-12b-it-Q6_K.gguf",
       "source": null,
+      "builds": {
+        "gmlx": "0.1.0",
+        "mlx-kquant": "0.3.5",
+        "llama.cpp": "b9967"
+      },
+      "measured": "2026-07-18",
       "rows": [
         {
           "depth": 512,
@@ -1430,6 +1472,12 @@
       "mtp_kind": null,
       "gguf": "gemma-4-E4B-it-Q6_K.gguf",
       "source": null,
+      "builds": {
+        "gmlx": "0.1.0",
+        "mlx-kquant": "0.3.5",
+        "llama.cpp": "b9967"
+      },
+      "measured": "2026-07-18",
       "rows": [
         {
           "depth": 512,
@@ -1585,6 +1633,12 @@
       "mtp_kind": null,
       "gguf": "gemma-4-E2B-it-UD-Q6_K_XL.gguf",
       "source": null,
+      "builds": {
+        "gmlx": "0.1.0",
+        "mlx-kquant": "0.3.5",
+        "llama.cpp": "b9967"
+      },
+      "measured": "2026-07-18",
       "rows": [
         {
           "depth": 512,
@@ -1740,6 +1794,12 @@
       "mtp_kind": null,
       "gguf": "gpt-oss-120b-heretic-v2-MXFP4.gguf",
       "source": "https://huggingface.co/llmfan46/gpt-oss-120b-heretic-v2-GGUF",
+      "builds": {
+        "gmlx": "0.1.0",
+        "mlx-kquant": "0.3.5",
+        "llama.cpp": "b9967"
+      },
+      "measured": "2026-07-18",
       "rows": [
         {
           "depth": 512,
@@ -1895,6 +1955,12 @@
       "mtp_kind": null,
       "gguf": "gpt-oss-20b-mxfp4.gguf",
       "source": null,
+      "builds": {
+        "gmlx": "0.1.0",
+        "mlx-kquant": "0.3.5",
+        "llama.cpp": "b9967"
+      },
+      "measured": "2026-07-18",
       "rows": [
         {
           "depth": 512,
@@ -2050,6 +2116,12 @@
       "mtp_kind": null,
       "gguf": "Dolphin3.0-Llama3.1-8B-abliterated.Q6_K.gguf",
       "source": "https://huggingface.co/RavichandranJ/Dolphin3-Cyber-8B-GGUF",
+      "builds": {
+        "gmlx": "0.1.0",
+        "mlx-kquant": "0.3.5",
+        "llama.cpp": "b9967"
+      },
+      "measured": "2026-07-18",
       "rows": [
         {
           "depth": 512,
@@ -2205,6 +2277,12 @@
       "mtp_kind": null,
       "gguf": "DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
       "source": "https://huggingface.co/unsloth/DeepSeek-V4-Flash-GGUF",
+      "builds": {
+        "gmlx": "0.1.0",
+        "mlx-kquant": "0.3.5",
+        "llama.cpp": "b9967"
+      },
+      "measured": "2026-07-13",
       "rows": [
         {
           "depth": 512,
@@ -2404,238 +2482,302 @@
       "comparison": "ds4-server",
       "mtp": false,
       "mtp_kind": null,
-      "gguf": "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf",
+      "gguf": "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf",
       "source": "https://huggingface.co/antirez/deepseek-v4-gguf",
+      "builds": {
+        "gmlx": "0.2.2",
+        "mlx-kquant": "0.3.11",
+        "ds4-server": "b030961"
+      },
+      "measured": "2026-08-09",
       "rows": [
         {
           "depth": 512,
-          "gmlx_decode_base": 35.5,
+          "gmlx_decode_base": 42.6,
           "gmlx_decode_mtp": null,
-          "ds4_decode_base": 33.8,
+          "ds4_decode_base": 40.5,
           "ds4_decode_mtp": null,
-          "gmlx_prefill_base": 417.5,
-          "ds4_prefill_base": 219.5,
+          "gmlx_prefill_base": 541.6,
+          "ds4_prefill_base": 489.7,
           "range": {
             "gmlx_decode_base": [
-              35.3,
-              35.7
+              42.3,
+              43.1
             ],
             "gmlx_decode_mtp": null,
             "ds4_decode_base": [
-              33.6,
-              34.6
+              39.6,
+              40.7
             ],
             "ds4_decode_mtp": null,
             "gmlx_prefill_base": [
-              408.9,
-              422.2
+              541.5,
+              548.3
             ],
             "ds4_prefill_base": [
-              210.2,
-              274.8
+              482.0,
+              492.1
             ]
           }
         },
         {
           "depth": 4300,
-          "gmlx_decode_base": 32.8,
+          "gmlx_decode_base": 38.8,
           "gmlx_decode_mtp": null,
-          "ds4_decode_base": 28.8,
+          "ds4_decode_base": 33.4,
           "ds4_decode_mtp": null,
-          "gmlx_prefill_base": 649.3,
-          "ds4_prefill_base": 369.6,
+          "gmlx_prefill_base": 783.5,
+          "ds4_prefill_base": 609.5,
           "range": {
             "gmlx_decode_base": [
-              32.7,
-              33.0
+              37.9,
+              39.7
             ],
             "gmlx_decode_mtp": null,
             "ds4_decode_base": [
-              28.7,
-              29.7
+              33.4,
+              34.6
             ],
             "ds4_decode_mtp": null,
             "gmlx_prefill_base": [
-              645.6,
-              660.4
+              733.9,
+              803.4
             ],
             "ds4_prefill_base": [
-              362.0,
-              372.6
+              572.3,
+              612.9
             ]
           }
         },
         {
           "depth": 17000,
-          "gmlx_decode_base": 31.7,
+          "gmlx_decode_base": 36.9,
           "gmlx_decode_mtp": null,
-          "ds4_decode_base": 27.8,
+          "ds4_decode_base": 31.4,
           "ds4_decode_mtp": null,
-          "gmlx_prefill_base": 633.0,
-          "ds4_prefill_base": 373.0,
+          "gmlx_prefill_base": 774.3,
+          "ds4_prefill_base": 567.9,
           "range": {
             "gmlx_decode_base": [
-              31.7,
-              31.7
+              34.8,
+              37.4
             ],
             "gmlx_decode_mtp": null,
             "ds4_decode_base": [
-              27.5,
-              28.9
+              30.8,
+              31.8
             ],
             "ds4_decode_mtp": null,
             "gmlx_prefill_base": [
-              632.5,
-              633.5
+              726.3,
+              789.7
             ],
             "ds4_prefill_base": [
-              344.7,
-              380.5
+              524.6,
+              568.4
+            ]
+          }
+        },
+        {
+          "depth": 50000,
+          "gmlx_decode_base": 34.7,
+          "gmlx_decode_mtp": null,
+          "ds4_decode_base": 28.5,
+          "ds4_decode_mtp": null,
+          "gmlx_prefill_base": 765.7,
+          "ds4_prefill_base": 525.7,
+          "range": {
+            "gmlx_decode_base": [
+              34.6,
+              35.2
+            ],
+            "gmlx_decode_mtp": null,
+            "ds4_decode_base": [
+              27.8,
+              28.5
+            ],
+            "ds4_decode_mtp": null,
+            "gmlx_prefill_base": [
+              756.4,
+              767.4
+            ],
+            "ds4_prefill_base": [
+              520.6,
+              525.9
             ]
           }
         },
         {
           "depth": 67000,
-          "gmlx_decode_base": 30.5,
+          "gmlx_decode_base": 33.8,
           "gmlx_decode_mtp": null,
-          "ds4_decode_base": 25.2,
+          "ds4_decode_base": 27.3,
           "ds4_decode_mtp": null,
-          "gmlx_prefill_base": 572.8,
-          "ds4_prefill_base": 326.0,
+          "gmlx_prefill_base": 718.2,
+          "ds4_prefill_base": 490.6,
           "range": {
             "gmlx_decode_base": [
-              30.1,
-              30.8
+              32.2,
+              34.3
             ],
             "gmlx_decode_mtp": null,
             "ds4_decode_base": [
-              24.1,
-              26.4
+              27.2,
+              28.1
             ],
             "ds4_decode_mtp": null,
             "gmlx_prefill_base": [
-              570.2,
-              575.4
+              651.3,
+              725.6
             ],
             "ds4_prefill_base": [
-              303.9,
-              328.3
+              450.2,
+              492.4
             ]
           }
         },
         {
           "depth": 110000,
-          "gmlx_decode_base": 28.6,
+          "gmlx_decode_base": 32.2,
           "gmlx_decode_mtp": null,
-          "ds4_decode_base": 23.6,
+          "ds4_decode_base": 25.1,
           "ds4_decode_mtp": null,
-          "gmlx_prefill_base": 592.9,
-          "ds4_prefill_base": 292.8,
+          "gmlx_prefill_base": 672.0,
+          "ds4_prefill_base": 432.4,
           "range": {
             "gmlx_decode_base": [
-              28.5,
-              29.3
+              31.8,
+              32.9
             ],
             "gmlx_decode_mtp": null,
             "ds4_decode_base": [
-              23.2,
-              23.9
+              24.1,
+              25.7
             ],
             "ds4_decode_mtp": null,
             "gmlx_prefill_base": [
-              588.1,
-              598.3
+              629.1,
+              680.0
             ],
             "ds4_prefill_base": [
-              282.6,
-              294.3
+              411.8,
+              443.4
             ]
           }
         },
         {
           "depth": 200000,
-          "gmlx_decode_base": 27.3,
+          "gmlx_decode_base": 30.1,
           "gmlx_decode_mtp": null,
-          "ds4_decode_base": 19.8,
+          "ds4_decode_base": 21.9,
           "ds4_decode_mtp": null,
-          "gmlx_prefill_base": 545.0,
-          "ds4_prefill_base": 233.2,
+          "gmlx_prefill_base": 602.9,
+          "ds4_prefill_base": 357.1,
           "range": {
             "gmlx_decode_base": [
-              27.2,
-              27.5
+              29.5,
+              30.2
             ],
             "gmlx_decode_mtp": null,
             "ds4_decode_base": [
-              18.9,
-              20.7
+              21.3,
+              21.9
             ],
             "ds4_decode_mtp": null,
             "gmlx_prefill_base": [
-              530.0,
-              549.5
+              583.8,
+              619.1
             ],
             "ds4_prefill_base": [
-              224.2,
-              238.6
+              347.8,
+              365.8
+            ]
+          }
+        },
+        {
+          "depth": 300000,
+          "gmlx_decode_base": 27.6,
+          "gmlx_decode_mtp": null,
+          "ds4_decode_base": 18.0,
+          "ds4_decode_mtp": null,
+          "gmlx_prefill_base": 542.4,
+          "ds4_prefill_base": 315.8,
+          "range": {
+            "gmlx_decode_base": [
+              27.5,
+              27.7
+            ],
+            "gmlx_decode_mtp": null,
+            "ds4_decode_base": [
+              18.0,
+              18.5
+            ],
+            "ds4_decode_mtp": null,
+            "gmlx_prefill_base": [
+              540.8,
+              542.8
+            ],
+            "ds4_prefill_base": [
+              312.4,
+              321.2
             ]
           }
         },
         {
           "depth": 384000,
-          "gmlx_decode_base": 24.0,
+          "gmlx_decode_base": 24.9,
           "gmlx_decode_mtp": null,
-          "ds4_decode_base": 15.7,
+          "ds4_decode_base": 16.2,
           "ds4_decode_mtp": null,
-          "gmlx_prefill_base": 459.7,
-          "ds4_prefill_base": 171.9,
+          "gmlx_prefill_base": 495.4,
+          "ds4_prefill_base": 275.9,
           "range": {
             "gmlx_decode_base": [
-              23.9,
-              24.1
+              24.8,
+              25.0
             ],
             "gmlx_decode_mtp": null,
             "ds4_decode_base": [
-              15.6,
-              15.8
+              16.2,
+              16.2
             ],
             "ds4_decode_mtp": null,
             "gmlx_prefill_base": [
-              456.3,
-              460.6
+              493.8,
+              496.9
             ],
             "ds4_prefill_base": [
-              168.7,
-              172.1
+              275.8,
+              276.1
             ]
           }
         },
         {
           "depth": 500000,
-          "gmlx_decode_base": 20.7,
+          "gmlx_decode_base": 22.6,
           "gmlx_decode_mtp": null,
-          "ds4_decode_base": 13.2,
+          "ds4_decode_base": 14.2,
           "ds4_decode_mtp": null,
-          "gmlx_prefill_base": 402.0,
-          "ds4_prefill_base": 141.1,
+          "gmlx_prefill_base": 440.7,
+          "ds4_prefill_base": 236.9,
           "range": {
             "gmlx_decode_base": [
-              20.5,
-              21.6
+              22.6,
+              22.7
             ],
             "gmlx_decode_mtp": null,
             "ds4_decode_base": [
-              13.1,
-              13.7
+              14.2,
+              14.2
             ],
             "ds4_decode_mtp": null,
             "gmlx_prefill_base": [
-              390.0,
-              404.5
+              438.9,
+              442.5
             ],
             "ds4_prefill_base": [
-              131.4,
-              141.1
+              236.5,
+              237.3
             ]
           }
         }

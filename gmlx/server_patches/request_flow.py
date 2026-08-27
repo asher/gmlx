@@ -8,6 +8,7 @@ import importlib
 
 
 from .. import server_bridge_vlm as serving
+from ..capacity import LoadDeferred
 from ._common import (
     _CHAT_PATHS,
     _wrap_post_routes,
@@ -53,6 +54,30 @@ async def _extract_request_model(values, inherit):
     return None, inherit
 
 
+def _load_deferred_response(model_id, exc):
+    """503 for a gate-deferred load: typed error body carrying the gate's
+    numbers, ``Retry-After`` from the live admission state (the readiness
+    verdict's own backoff when the server is busy, else the floor)."""
+    from fastapi.responses import JSONResponse
+
+    from ..queue_cap import _RETRY_MIN_S
+
+    retry = _RETRY_MIN_S
+    try:
+        from .capacity_routes import readiness
+
+        ready, _reason, r = readiness()
+        if not ready and r:
+            retry = max(int(r), int(_RETRY_MIN_S))
+    except Exception:
+        pass
+    return JSONResponse(status_code=503, content={
+        "error": {"message": str(exc), "type": "model_load_deferred",
+                  "code": "load_deferred", "model": model_id},
+        "retry_after_s": int(retry),
+    }, headers={"Retry-After": str(int(retry))})
+
+
 def install_chat_load_offload() -> None:
     """Wrap the model-serving routes (chat / anthropic / responses) to resolve +
     load the request's model off the event loop before the stock handler runs.
@@ -84,6 +109,16 @@ def install_chat_load_offload() -> None:
             if model_id is not None:
                 try:
                     await asyncio.to_thread(_routes._warm_and_release, model_id, adapter)
+                except LoadDeferred as exc:
+                    # The gate's retryable refusal (resident models pinned
+                    # or busy): a typed 503 + Retry-After, the shape a
+                    # dispatcher keys on, instead of the stock handler
+                    # re-hitting the gate and answering a generic 500.
+                    # Off the loop: readiness() inside settles/scans for
+                    # seconds, which head-of-line-blocked every request
+                    # while a load was being refused.
+                    return await asyncio.to_thread(
+                        _load_deferred_response, model_id, exc)
                 except Exception:
                     pass        # stock handler re-resolves + surfaces errors
             return await original(*args, **kwargs)
@@ -100,13 +135,49 @@ def install_chat_load_offload() -> None:
 _KEEPALIVE_FLAG = "_kq_gguf_sse_keepalive"
 
 
-async def _keepalive_sse(body, interval: float):
+def _upgrade_shed_chunk(item, json_mod):
+    """The upstream stream handlers swallow a mid-stream RowShedError
+    into a plain ``data: {"error": str}`` event; recognize ours by the
+    self-owned marker in the message and upgrade it to the contract's
+    terminal shape (typed error object plus finish_reason "shed").
+    Returns the upgraded SSE string, or None to pass the chunk through."""
+    from .row_failed import SHED_MARKER
+
+    try:
+        text = item.decode() if isinstance(item, bytes) else item
+        if not isinstance(text, str) or not text.startswith("data: {"):
+            return None
+        if SHED_MARKER not in text:
+            return None
+        payload = json_mod.loads(text[len("data: "):].strip())
+    except Exception:
+        return None
+    msg = payload.get("error")
+    if not isinstance(msg, str) or SHED_MARKER not in msg:
+        return None
+    return "data: " + json_mod.dumps({
+        "error": {"message": msg, "type": "server_overloaded_shed",
+                  "code": "row_shed"},
+        "finish_reason": "shed",
+    }) + "\n\n"
+
+
+async def _keepalive_sse(body, interval: float | None):
     """Yield ``body``'s chunks unchanged, inserting a ``: keepalive`` SSE
-    comment whenever the upstream is silent for ``interval`` seconds. A pump
-    task feeds a queue so the timeout never cancels the upstream generator;
-    closing this generator cancels the pump and closes ``body``, preserving
-    the disconnect path (stream finally -> token_iter.close -> batch cancel)."""
+    comment whenever the upstream is silent for ``interval`` seconds
+    (``None`` disables the keepalive but keeps the error translation). A
+    pump task feeds a queue so the timeout never cancels the upstream
+    generator; closing this generator cancels the pump and closes
+    ``body``, preserving the disconnect path (stream finally ->
+    token_iter.close -> batch cancel).
+
+    A ``RowShedError`` surfacing mid-stream becomes a terminal SSE error
+    event with its own finish_reason and a clean close: by then the
+    headers are long gone, and the client must be able to tell a
+    governor shed from both a normal stop and a transport fault (a
+    dropped connection means worker death and has its own retry rule)."""
     import asyncio
+    import json
 
     queue: "asyncio.Queue" = asyncio.Queue()
 
@@ -130,8 +201,30 @@ async def _keepalive_sse(body, interval: float):
                 yield ": keepalive\n\n"
                 continue
             if kind == "chunk":
+                upgraded = _upgrade_shed_chunk(item, json)
+                if upgraded is not None:
+                    yield upgraded
+                    yield "data: [DONE]\n\n"
+                    return
                 yield item
             elif kind == "error":
+                from .row_failed import RowShedError
+
+                if isinstance(item, RowShedError):
+                    payload = {
+                        "error": {
+                            "message": str(item),
+                            "type": "server_overloaded_shed",
+                            "code": "row_shed",
+                            **{k: item.info[k]
+                               for k in ("prompt_len", "delivered")
+                               if item.info.get(k) is not None},
+                        },
+                        "finish_reason": "shed",
+                    }
+                    yield f"data: {json.dumps(payload)}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
                 raise item
             else:
                 return
@@ -165,9 +258,13 @@ def install_sse_keepalive() -> None:
         async def endpoint(*args, **kwargs):
             result = await original(*args, **kwargs)
             interval = env_float("GMLX_SSE_KEEPALIVE_S", 15.0)
-            if interval > 0 and isinstance(result, StreamingResponse):
+            if isinstance(result, StreamingResponse):
+                # interval <= 0 disables the keepalive but keeps the
+                # shed-error translation: a terminal event beats a
+                # dropped connection regardless of keepalive policy.
                 result.body_iterator = _keepalive_sse(
-                    result.body_iterator, interval)
+                    result.body_iterator,
+                    interval if interval > 0 else None)
             return result
         return endpoint
 

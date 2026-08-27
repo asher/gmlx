@@ -11,7 +11,7 @@ them) so cache-type resolution by module attribute keeps working.
 Delete this file once installed mlx-lm ships PoolingCache natively.
 
 The one-update undo log (``trim(n)``, n <= 2, after verify writes that may
-complete pool windows) is load-bearing for MTP draft rejection - see
+complete pool windows) is what makes MTP draft rejection correct - see
 gmlx/deepseek_v4_mtp.py. The rotating-cache undo wrap at the bottom of
 this file is the matching piece for ``RotatingKVCache`` (port of omlx
 patches/mlx_lm_mtp/cache_rollback.py, extended to 3-wide verifies for S=3
@@ -391,6 +391,14 @@ class PoolingCache(_BaseCache):
     def meta_state(self, v):
         self.ratio = v
 
+    @classmethod
+    def from_state(cls, state, meta_state):
+        # APC clone path: the state setter needs ratio (buffer alloc), so
+        # construct before restoring rather than relying on setter order.
+        c = cls(meta_state)
+        c.state = state
+        return c
+
     def is_trimmable(self):
         # Trim-by-1 contract (MTP draft rejection): possible while the last
         # token still sits in the remainder buffer, or via the one-update
@@ -521,6 +529,15 @@ class BatchPoolingCache(_BaseCache):
         self._prev_gate = None
 
     @property
+    def left_padding(self):
+        # Always zero (the constructor rejects anything else), but present:
+        # batch caches are told apart from their scalar counterparts by
+        # carrying this attribute, and the admission path lifts a cache into
+        # a batch one only when it is missing. Derived rather than stored so
+        # it cannot go stale as extend/filter/extract change the row count.
+        return [0] * len(self._pool_lengths)
+
+    @property
     def offset(self):
         return mx.array(self._pool_lengths, dtype=mx.int32)
 
@@ -554,7 +571,9 @@ class BatchPoolingCache(_BaseCache):
         # the stashed objects keep the pre-update contents. The pooled
         # tensor needs no snapshot: update_and_fetch only writes beyond the
         # old _pool_lengths, so restoring the length lists is enough.
-        if L <= 2:
+        # L bound matches the scalar cache: MTP-verify sized updates only
+        # (block-total-B rounds verify B-1+1 wide, dspark up to 6).
+        if L <= 6:
             self._undo = (
                 self.buf_kv,
                 self.buf_gate,
@@ -757,6 +776,13 @@ class BatchPoolingCache(_BaseCache):
     def meta_state(self, v):
         self.ratio, self.remainder, self._pool_lengths, self._processed = v
 
+    @classmethod
+    def from_state(cls, state, meta_state):
+        c = cls(meta_state[0], [0] * len(meta_state[1]))
+        c.meta_state = meta_state
+        c.state = state
+        return c
+
     def is_trimmable(self):
         # Trim-by-1 contract (MTP draft rejection): possible while every
         # row's last token still sits in the remainder buffer, or via the
@@ -765,14 +791,19 @@ class BatchPoolingCache(_BaseCache):
             return True
         return self._can_undo(1)
 
+    def _can_trim(self, n):
+        """n-aware trimmability probe (MTP rollback two-phase check)."""
+        if self.pooled is None or n <= min(self.remainder):
+            return True
+        return self._can_undo(n)
+
     def _can_undo(self, n):
+        # A replay that re-completes windows is a per-row watermark move
+        # (the pooled rows the undone update appended are identical and
+        # sit above the restored watermark), so any n within the stashed
+        # update is undoable.
         undo = self._undo
-        if undo is None:
-            return False
-        k = undo[5].shape[1] - n
-        # The replayed confirmed prefix must stay inside the buffer for
-        # every row (a replay that pools again cannot be reconstructed).
-        return k >= 0 and all(r + k < self.ratio for r in undo[2])
+        return undo is not None and undo[5].shape[1] - n >= 0
 
     def trim(self, n):
         if n <= min(self.remainder):
@@ -798,11 +829,56 @@ class BatchPoolingCache(_BaseCache):
         self.remainder = list(remainder)
         self._pool_lengths = list(pool_lengths)
         self._processed = list(processed)
-        if k > 0:
-            # Replay the confirmed prefix; _can_undo guarantees it stays in
-            # the buffer, so no window is recompressed.
+        if k <= 0:
+            return n
+        if all(r + k < self.ratio for r in self.remainder):
+            # Replay stays inside every row's buffer; no window completes.
             self.accumulate_windows(kv[:, :k], gate[:, :k], 0)
             self._undo = None
+            return n
+        # The confirmed prefix re-completes window(s) for at least one
+        # row. Their pooled rows are exactly the first rows the undone
+        # update appended (identical inputs and lookback) and still sit
+        # above the restored watermark, so the replay is a per-row
+        # watermark move; remainder buffer and lookback rebuild from the
+        # stashed raw inputs -- no recompression.
+        ratio = self.ratio
+        B = kv.shape[0]
+        for i in range(B):
+            r = self.remainder[i]
+            total = r + k
+            w = total // ratio
+            new_rem = total % ratio
+            if r > 0:
+                seq_kv = mx.concatenate(
+                    [self.buf_kv[i : i + 1, :r], kv[i : i + 1, :k]], axis=1)
+                seq_gate = mx.concatenate(
+                    [self.buf_gate[i : i + 1, :r], gate[i : i + 1, :k]],
+                    axis=1)
+            else:
+                seq_kv = kv[i : i + 1, :k]
+                seq_gate = gate[i : i + 1, :k]
+            if w > 0:
+                self._pool_lengths[i] += w
+                if ratio == 4:
+                    if self._prev_kv is None:
+                        # First-ever completion: other rows keep the
+                        # first-window masking (zero kv, -inf gate).
+                        self._prev_kv = mx.zeros(
+                            (B, ratio, kv.shape[2]), dtype=kv.dtype)
+                        self._prev_gate = mx.full(
+                            (B, ratio, gate.shape[2]), -mx.inf,
+                            dtype=gate.dtype)
+                    # The lookback window is the LAST window the replay
+                    # leaves completed.
+                    self._prev_kv[i] = seq_kv[0, (w - 1) * ratio : w * ratio]
+                    self._prev_gate[i] = seq_gate[
+                        0, (w - 1) * ratio : w * ratio]
+            if new_rem > 0:
+                self.buf_kv[i, :new_rem] = seq_kv[0, -new_rem:]
+                self.buf_gate[i, :new_rem] = seq_gate[0, -new_rem:]
+            self.remainder[i] = new_rem
+            self._processed[i] += k
         return n
 
     def size(self):

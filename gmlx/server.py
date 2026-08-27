@@ -59,6 +59,17 @@ from .envflags import env_bool
 _DEFAULT_DISCOVER_DIR = "."          # zero-config bare start scans the cwd
 
 
+def _ratio_flag(raw: str):
+    """--decode-prefill-ratio value: a float or the literal 'auto'."""
+    if raw.strip().lower() == "auto":
+        return "auto"
+    try:
+        return float(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected a number or 'auto', got {raw!r}")
+
+
 def _has_uvloop() -> bool:
     try:
         import uvloop  # noqa: F401
@@ -453,6 +464,7 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
     missing_roots = [d for d in cfg.model_dirs
                      if not os.path.isdir(os.path.expanduser(os.path.expandvars(d)))]
     kept, removed, unverified, known_paths = [], [], [], set()
+    known_models = {}                              # resolved path -> ModelCfg
     for mid, mc in cfg.models.items():
         is_hf = str(mc.path).startswith("hf:")
         try:
@@ -478,6 +490,7 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
         kept.append(mid)
         if rp:
             known_paths.add(rp)
+            known_models[rp] = mc
     if missing_roots:
         print(f"warning: model_dirs root(s) not on disk right now: "
               f"{', '.join(missing_roots)} - their entries are kept unverified",
@@ -487,12 +500,16 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
               "are kept unverified", file=sys.stderr)
 
     # Discover, skipping anything already configured (by id or by resolved path).
-    discovered = []
+    # `draft_pairs`: sibling drafters that pair into an entry already configured.
+    discovered, draft_pairs = [], {}
     if dirs:
         specs = [DiscoverSpec(dir=d, recursive=recursive) for d in dirs]
+        stats = {}
         discovered += discovery.scan_dirs(
             specs, dirs,
-            known_ids=set(cfg.models), known_paths=known_paths, progress=True)
+            known_ids=set(cfg.models), known_paths=known_paths,
+            known_models=known_models, progress=True, stats=stats)
+        draft_pairs = stats.get("draft_pairs") or {}
     if scan_cache:
         known_refs = {mc.path for mc in cfg.models.values()
                       if str(mc.path).startswith("hf:")}
@@ -508,7 +525,9 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
         print(f"  remove:  {mid}  ({cfg.models[mid].path} - gone)")
     for m in discovered:
         print(f"  add:     {m.id}  ({discovery._rel(m.path, dirs)})")
-    if not removed and not discovered:
+    for mid, dpath in draft_pairs.items():
+        print(f"  update:  {mid}  (draft_gguf: {discovery._rel(dpath, dirs)})")
+    if not removed and not discovered and not draft_pairs:
         print("  (already in sync)")
         return 0
     if a.dry_run:
@@ -517,8 +536,11 @@ def _cmd_sync(argv: list, prog: str = "gmlx sync-models") -> int:
 
     new_roots = ([d for d in dirs if d not in cfg.model_dirs]
                  if a.models_dir else [])
-    _apply_sync(path, removed, discovered, dirs, new_roots=new_roots)
-    print(f"\nupdated {path} (+{len(discovered)} / -{len(removed)})")
+    _apply_sync(path, removed, discovered, dirs, new_roots=new_roots,
+                draft_pairs=draft_pairs)
+    changed = (f"\nupdated {path} (+{len(discovered)} / -{len(removed)}"
+               + (f" / ~{len(draft_pairs)}" if draft_pairs else "") + ")")
+    print(changed)
     _reload_running(path, skip=a.no_reload)
     return 0
 
@@ -533,12 +555,15 @@ def _hf_cache_readable() -> bool:
         return False
 
 
-def _apply_sync(path, removed, discovered, dirs, new_roots=()) -> None:
+def _apply_sync(path, removed, discovered, dirs, new_roots=(),
+                draft_pairs=None) -> None:
     """Rewrite ``path``'s ``models:`` block in place, preserving comments and
     hand-edits (ruamel round-trip): delete ``removed`` ids, splice in the newly
     ``discovered`` models. Untouched entries keep their exact formatting.
     ``new_roots`` are --models-dir override roots absent from
-    ``server.model_dirs``; they're appended so the new entries resolve."""
+    ``server.model_dirs``; they're appended so the new entries resolve.
+    ``draft_pairs`` (configured id -> drafter path) adds a ``draft_gguf`` key
+    to that entry; an entry that already has one keeps its value."""
     from ruamel.yaml.comments import CommentedMap
 
     def mutate(doc):
@@ -576,6 +601,10 @@ def _apply_sync(path, removed, discovered, dirs, new_roots=()) -> None:
             if note:
                 models.yaml_set_comment_before_after_key(
                     mc.id, before=note, indent=2)
+        for mid, dpath in (draft_pairs or {}).items():
+            ent = models.get(mid)
+            if isinstance(ent, dict) and not ent.get("draft_gguf"):
+                ent["draft_gguf"] = discovery._rel(dpath, dirs)
         # Cache-resident entries need server.hf_cache to resolve from the cache.
         if any(str(mc.path).startswith("hf:") for mc in discovered):
             srv = doc.get("server")
@@ -593,7 +622,8 @@ def register_downloads(paths: list, config_path=None) -> None:
     ``model_dirs`` root (an explicit ``--to`` elsewhere - the server could
     never discover it), or when the file is already configured. Otherwise the
     same machinery as sync-models end to end: id derivation, mmproj pairing,
-    speculative detection, comment-preserving splice, and a SIGHUP so a
+    drafter pairing, speculative detection, comment-preserving splice, and a
+    SIGHUP so a
     running server serves the new entries immediately. Best-effort by
     contract: the download already succeeded, so a registration problem warns
     and returns instead of failing ``pull``."""
@@ -614,24 +644,36 @@ def register_downloads(paths: list, config_path=None) -> None:
                 wanted.add(ap)
         if not wanted:
             return
-        known_paths = set()
+        known_paths, known_models = set(), {}
         for mc in cfg.models.values():
             try:
-                known_paths.add(resolve_path(mc.path, cfg.model_dirs))
+                rp = resolve_path(mc.path, cfg.model_dirs)
             except ConfigError:
-                pass
+                continue
+            known_paths.add(rp)
+            if rp:
+                known_models[rp] = mc
         # Scan the parent dirs (mmproj pairing needs the siblings), then keep
         # only models whose file is one we just downloaded - a neighbouring
         # file the user left unregistered stays unregistered.
         parents = sorted({os.path.dirname(p) for p in wanted})
         specs = [DiscoverSpec(dir=d, recursive=False) for d in parents]
+        stats = {}
         found = discovery.scan_dirs(specs, cfg.model_dirs,
                                     known_ids=set(cfg.models),
-                                    known_paths=known_paths)
+                                    known_paths=known_paths,
+                                    known_models=known_models, stats=stats)
         newly = [m for m in found if os.path.abspath(m.path) in wanted]
-        if not newly:
+        # Only a drafter from this download may change a configured entry: a
+        # file the user left beside a model stays unregistered.
+        pairs = {mid: dp for mid, dp in (stats.get("draft_pairs") or {}).items()
+                 if os.path.abspath(dp) in wanted}
+        if not newly and not pairs:
             return                     # already configured (a re-pull) - quiet
-        _apply_sync(path, [], newly, cfg.model_dirs)
+        _apply_sync(path, [], newly, cfg.model_dirs, draft_pairs=pairs)
+        for mid, dp in pairs.items():
+            print(f"registered {os.path.basename(dp)} as the drafter of "
+                  f"{mid} in {path}")
         for m in newly:
             extras = [w for w, on in (("vlm", m.mmproj),
                                       ("mtp", m.speculative)) if on]
@@ -675,8 +717,12 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "decoding (native-head qwen3.5/3.6; gemma4 also needs "
                          "--draft-gguf).")
     ap.add_argument("--draft-gguf", default=None,
-                    help="Companion drafter GGUF for assistant-shape MTP (gemma4); "
-                         "implies --speculative.")
+                    help="Companion drafter GGUF for assistant-shape MTP (gemma4, "
+                         "DFlash); implies --speculative.")
+    ap.add_argument("--native-mtp", action="store_true",
+                    help="Draft with the model's own MTP head even when "
+                         "--draft-gguf is set. Same as the per-model config key "
+                         "native_mtp.")
     ap.add_argument("--stochastic-mtp", action="store_true",
                     help="Accept MTP drafts by p/q rejection sampling on sampled "
                          "requests (server-wide): same output distribution as "
@@ -692,12 +738,22 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "streamed installs; GMLX_GPU_KEEPWARM=0 disables.")
     ap.add_argument("--draft-block-size", type=int, default=None, metavar="N",
                     help="MTP draft tokens per round (analogous to llama-server "
-                         "--spec-draft-n-max). Default: the drafter's own block "
-                         "size. Also via GMLX_DRAFT_BLOCK_SIZE.")
+                         "--spec-draft-n-max). Raises or lowers the drafter's own "
+                         "default, up to the deepest block it can produce. Also "
+                         "via GMLX_DRAFT_BLOCK_SIZE.")
     ap.add_argument("--chat-template", default=None, metavar="STR|PATH",
                     help="Inline Jinja template, or a path to a .jinja/.txt file, "
                          "replacing a single positional model's GGUF template "
                          "(config mode: set it per profile/model instead).")
+    ap.add_argument("--thinking", choices=("on", "off", "adaptive"), default=None,
+                    help="Reasoning switch for a single positional model, mapped "
+                         "onto the variable its chat template reads (config mode: "
+                         "the per-profile/model `thinking:` key). Default: the "
+                         "template's own default.")
+    ap.add_argument("--thinking-budget", type=int, default=None, metavar="N",
+                    help="Cap a single positional model's thinking tokens per "
+                         "request; 0 closes thinking at once (config mode: the "
+                         "sampling `thinking_budget:` key; requests may override).")
     ap.add_argument("--adapter", default=None, metavar="PATH",
                     help="GGUF LoRA adapter applied live over a single positional "
                          "model at load - base stays K-quant, no merge (config mode: "
@@ -780,11 +836,20 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "it to cap peak memory on long prompts, at some "
                          "prefill-throughput cost. Also via PREFILL_STEP_SIZE; "
                          "config mode: server.prefill_step_size.")
-    ap.add_argument("--decode-prefill-ratio", type=float, default=None,
-                    metavar="R",
+    ap.add_argument("--dtype", choices=("auto", "bfloat16", "float16"),
+                    default=None, metavar="DTYPE",
+                    help="Activation dtype for every model this server loads "
+                         "(default auto). auto selects float16 on M1 and M2, "
+                         "whose GPUs have no native bfloat16 arithmetic, and "
+                         "bfloat16 on all other devices. Also via "
+                         "GMLX_ACTIVATION_DTYPE; config mode: server.dtype.")
+    ap.add_argument("--decode-prefill-ratio", type=_ratio_flag,
+                    default=None, metavar="R",
                     help="Decode GPU-time share per prefill chunk under load "
-                         "(default 1.0 ~= 50/50; 0 = stock scheduling). Also "
-                         "via GMLX_DECODE_PREFILL_RATIO; config mode: "
+                         "(default auto: paced or stock per tick from "
+                         "measured load; numeric pins a static split, "
+                         "1.0 ~= 50/50, 0 = stock scheduling). Also via "
+                         "GMLX_DECODE_PREFILL_RATIO; config mode: "
                          "server.decode_prefill_ratio.")
     ap.add_argument("--prefill-tick-ms", type=float, default=None,
                     metavar="MS",
@@ -894,6 +959,8 @@ def _bg_serve_args(a, cfg_path) -> list:
         out.append("--speculative")
     if a.draft_gguf:
         out += ["--draft-gguf", _abs(a.draft_gguf)]
+    if getattr(a, "native_mtp", False):
+        out.append("--native-mtp")
     if getattr(a, "draft_block_size", None):
         out += ["--draft-block-size", str(a.draft_block_size)]
     if getattr(a, "chat_template", None):
@@ -902,6 +969,10 @@ def _bg_serve_args(a, cfg_path) -> list:
                 _abs(ct) if os.path.exists(os.path.expanduser(ct)) else ct]
     if a.adapter:
         out += ["--adapter", _abs(a.adapter)]
+    if getattr(a, "thinking", None) is not None:
+        out += ["--thinking", a.thinking]
+    if getattr(a, "thinking_budget", None) is not None:
+        out += ["--thinking-budget", str(a.thinking_budget)]
     if getattr(a, "stream_cpu", False):
         out.append("--stream-cpu")
     if getattr(a, "stream_experts", False):
@@ -993,14 +1064,27 @@ def _add_target_args(ap: argparse.ArgumentParser) -> None:
                     "else 8080).")
 
 
-def _ambiguous_runs(a) -> list | None:
-    """The managed runfiles when a bare lifecycle verb has more than one server
-    to choose from (no --host/--port given), else None."""
+def _ambiguous_runs(a, *, prune: bool = False) -> list | None:
+    """The live managed runfiles when a bare lifecycle verb has more than
+    one server to choose from (no --host/--port given), else None. Stale
+    runfiles (dead or recycled pid) never make a verb ambiguous: with
+    ``prune`` they are cleared here and reported; otherwise they are just
+    left out of the count (``status`` lists them itself)."""
     if a.host is not None or a.port is not None:
         return None
     from . import lifecycle
-    runs = lifecycle.list_runs()
-    return runs if len(runs) > 1 else None
+    live, stale = lifecycle.classify_runs()
+    if prune and stale:
+        removed = lifecycle.prune_stale_runs()
+        if removed:
+            print(_stale_summary(removed, "cleared"), file=sys.stderr)
+    return live if len(live) > 1 else None
+
+
+def _stale_summary(runs: list, verb: str) -> str:
+    what = ", ".join(f"{r.get('host')}:{r.get('port')} ({r.get('stale_reason')}, "
+                     f"{r.get('age')})" for r in runs)
+    return f"{verb} {len(runs)} stale runfile{'s' if len(runs) != 1 else ''}: {what}"
 
 
 def _refuse_ambiguous(prog: str, runs: list) -> int:
@@ -1011,6 +1095,17 @@ def _refuse_ambiguous(prog: str, runs: list) -> int:
     return 2
 
 
+def _cmd_stop_stale(prog: str) -> int:
+    from . import lifecycle
+    _live, stale = lifecycle.classify_runs()
+    if not stale:
+        print("no stale runfiles")
+        return 0
+    removed = lifecycle.prune_stale_runs()
+    print(_stale_summary(removed, "cleared") if removed else "no stale runfiles")
+    return 0
+
+
 def _cmd_stop(argv: list, prog: str = "gmlx stop") -> int:
     ap = argparse.ArgumentParser(
         prog=prog,
@@ -1019,9 +1114,15 @@ def _cmd_stop(argv: list, prog: str = "gmlx stop") -> int:
     ap.add_argument("--timeout", type=float, default=15.0,
                     help="Seconds to wait for graceful shutdown before SIGKILL "
                          "(SIGKILL cuts any in-flight generation). Default 15.")
+    ap.add_argument("--stale", action="store_true",
+                    help="Only clear runfiles whose server is gone (exited or "
+                         "pid recycled); signals nothing. A bare `stop` clears "
+                         "them too, on its way to the live server.")
     a = ap.parse_args(argv)
     from . import lifecycle
-    runs = _ambiguous_runs(a)
+    if a.stale:
+        return _cmd_stop_stale(prog)
+    runs = _ambiguous_runs(a, prune=True)
     if runs:
         return _refuse_ambiguous(prog, runs)
     host, port = lifecycle.auto_target(a.host, a.port)
@@ -1039,7 +1140,7 @@ def _cmd_restart(argv: list, prog: str = "gmlx restart") -> int:
                     help="Readiness wait for the new process (default 40).")
     a = ap.parse_args(argv)
     from . import lifecycle
-    runs = _ambiguous_runs(a)
+    runs = _ambiguous_runs(a, prune=True)
     if runs:
         return _refuse_ambiguous(prog, runs)
     host, port = lifecycle.auto_target(a.host, a.port)
@@ -1056,6 +1157,8 @@ def _cmd_status(argv: list, prog: str = "gmlx status") -> int:
     ap.add_argument("--json", action="store_true", help="Emit JSON.")
     a = ap.parse_args(argv)
     from . import lifecycle
+    stale = [] if (a.host is not None or a.port is not None) \
+        else lifecycle.classify_runs()[1]
     runs = _ambiguous_runs(a)
     if runs:
         # Several managed servers: report on all of them instead of guessing.
@@ -1063,12 +1166,30 @@ def _cmd_status(argv: list, prog: str = "gmlx status") -> int:
             infos = [lifecycle.status_info(r.get("host"), r.get("port"))
                      for r in runs]
             infos = [i for i in infos if i]
-            print(json.dumps(infos, indent=2))
+            print(json.dumps({"servers": infos, "stale": stale}, indent=2))
             return 0 if any(i["running"] for i in infos) else 3
         rcs = [lifecycle.status(r.get("host"), r.get("port")) for r in runs]
+        _print_stale(stale)
         return 0 if 0 in rcs else 3
     host, port = lifecycle.auto_target(a.host, a.port)
-    return lifecycle.status(host, port, as_json=a.json)
+    rc = lifecycle.status(host, port, as_json=a.json)
+    # A bare status on the one live server still owes the user the stale
+    # leftovers (an e2e harness or a crash leaves them; nothing else lists
+    # them), minus the target itself, which status() just described.
+    if not a.json:
+        _print_stale([r for r in stale
+                      if (r.get("host"), r.get("port")) != (host, port)])
+    return rc
+
+
+def _print_stale(stale: list) -> None:
+    if not stale:
+        return
+    for r in stale:
+        print(f"stale runfile {r.get('host')}:{r.get('port')}: "
+              f"{r.get('stale_reason')}, {r.get('age')}")
+    print(f"  {len(stale)} stale runfile{'s' if len(stale) != 1 else ''} - "
+          f"`gmlx stop --stale` clears them")
 
 
 def _cmd_logs(argv: list, prog: str = "gmlx logs") -> int:
@@ -1319,7 +1440,8 @@ def _dump_cfg_yaml(cfg: ServerCfg) -> str:
     server = {k: d.pop(k) for k in
               ("host", "port", "api_key", "no_auth", "model_dirs", "budget_gb",
                "max_models", "hf_cache", "menubar", "token_queue_timeout_s",
-               "prefill_step_size", "decode_prefill_ratio", "prefill_tick_ms",
+               "prefill_step_size", "dtype",
+               "decode_prefill_ratio", "prefill_tick_ms",
                "cache_limit_gb", "family_defaults",
                "stochastic_mtp", "gpu_keepwarm", "stt", "tts", "embeddings",
                "rerank",
@@ -1363,18 +1485,24 @@ def _single_model_cfg(a) -> ServerCfg:
     mp = os.path.abspath(os.path.expanduser(a.model))
     mid, _q = discovery.derive_id(os.path.basename(a.model))
     mid = mid or "model"
-    speculative = bool(a.speculative or a.draft_gguf)
+    native_mtp = bool(getattr(a, "native_mtp", False))
+    speculative = bool(a.speculative or a.draft_gguf or native_mtp)
     # A --chat-template override rides on the model's overrides (the same slot a
     # config `overrides: {chat_template: ...}` uses), so it flows through resolve_model
     # -> the load bridge identically.
     overrides = ({"chat_template": a.chat_template}
                  if getattr(a, "chat_template", None) else {})
+    if getattr(a, "thinking", None) is not None:
+        overrides["thinking"] = a.thinking
+    if getattr(a, "thinking_budget", None) is not None:
+        overrides["sampling"] = {"thinking_budget": a.thinking_budget}
     model = ModelCfg(
         id=mid,
         path=mp,
         mmproj=os.path.abspath(os.path.expanduser(a.mmproj)) if a.mmproj else None,
         draft_gguf=(os.path.abspath(os.path.expanduser(a.draft_gguf))
-                    if a.draft_gguf else None),
+                    if a.draft_gguf and not native_mtp else None),
+        native_mtp=native_mtp,
         adapter=(os.path.abspath(os.path.expanduser(a.adapter))
                  if a.adapter else None),
         speculative=speculative,
@@ -1445,6 +1573,10 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     # (deep-context safety; see server_memory).
     from .server_memory import apply_cache_limit
     apply_cache_limit(cfg)
+    from .cb_phase import COARSE, FINE, install_cb_phase_flips
+    if install_cb_phase_flips():
+        print(f"[server] command buffer caps: per-phase (decode {COARSE}, "
+              f"prefill {FINE})")
     # Single-model --hf-source override (niche): re-register the VLM with the
     # explicit processor source (ModelCfg carries no hf_source field).
     if a.model and a.hf_source and a.mmproj:
@@ -1464,6 +1596,14 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
         set_stoch_accept(True)
         print("[server] stochastic MTP acceptance: on (sampled requests keep "
               "the sampling distribution but are not token-identical)")
+    # Activation dtype: flag > config > exported env. Server-wide because the
+    # reason to leave bfloat16 is a property of the GPU, not of a model. Read
+    # at each model's load, so setting it here covers every model this server
+    # loads, including ones registered by a later config reload.
+    dtype = getattr(a, "dtype", None) or cfg.dtype
+    if dtype is not None:
+        os.environ["GMLX_ACTIVATION_DTYPE"] = str(dtype)
+        print(f"[server] activation dtype: {dtype}")
     if cfg.gpu_keepwarm or getattr(a, "gpu_keepwarm", False):
         # Startup-only. The loader's gate starts the heartbeat when a
         # streamed model with a decode feeder loads; the heartbeat itself
@@ -1510,7 +1650,15 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     if ratio is None:
         ratio = cfg.decode_prefill_ratio
     if ratio is not None:
-        if ratio < 0:
+        if isinstance(ratio, str):
+            from .auto_ratio import (c_threshold, deadline_s, floor_rho,
+                                     paced_ratio)
+            os.environ["GMLX_DECODE_PREFILL_RATIO"] = "auto"
+            print(f"[server] decode-prefill pacing ratio: auto "
+                  f"(floor {floor_rho():.2f} -> paced {paced_ratio():.2f}, "
+                  f"chunk threshold {c_threshold():.1f}, "
+                  f"deadline {deadline_s():.1f}s)")
+        elif ratio < 0:
             print(f"[server] ignoring negative decode-prefill ratio {ratio}")
         else:
             os.environ["GMLX_DECODE_PREFILL_RATIO"] = str(ratio)

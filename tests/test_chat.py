@@ -967,3 +967,110 @@ def test_xtc_rides_along_to_the_assistant_server(state, capsys):
     chat._sync_assistant_extra(state)
     assert state.assistant_extra["xtc_probability"] == 0.5
     assert "xtc_threshold" not in state.assistant_extra
+
+
+# -- _RateTicker -----------------------------------------------------------------
+
+
+def test_rate_ticker_exact_from_generation_tokens():
+    from types import SimpleNamespace
+    from gmlx.chat import _RateTicker
+
+    now = [0.0]
+    tk = _RateTicker(clock=lambda: now[0])
+    status = None
+    for i in range(1, 31):
+        now[0] = i * 0.1
+        s = tk.push(SimpleNamespace(text="x", generation_tokens=i * 15))
+        if s:
+            status = s
+    assert status is not None and status.endswith(" tok/s")
+    assert not status.startswith("~")
+    assert abs(int(status.split()[0]) - 150) <= 2
+
+
+def test_stat_line_shows_ttft_beside_decode_rate():
+    from gmlx.chat import _fmt_stat_line
+
+    line = _fmt_stat_line({"prompt_tokens": 2296, "prompt_tps": 670.0,
+                           "gen_tokens": 607, "gen_tps": 50.3,
+                           "ttft_s": 7.2}, 2900, 0)
+    assert "ttft 7.2s" in line
+    assert "@ 50.3 tok/s" in line
+    # no wait recorded (local pipeline): segment absent
+    line = _fmt_stat_line({"gen_tokens": 607, "gen_tps": 50.3}, 0, 0)
+    assert "ttft" not in line
+
+
+def test_rate_ticker_silent_without_counts():
+    from types import SimpleNamespace
+    from gmlx.chat import _RateTicker
+
+    now = [0.0]
+    tk = _RateTicker(clock=lambda: now[0])
+    for i in range(1, 31):
+        now[0] = i * 0.1
+        assert tk.push(SimpleNamespace(text="abcd" * 14)) is None
+
+
+def test_rate_ticker_accumulates_across_round_restarts():
+    from types import SimpleNamespace
+    from gmlx.chat import _RateTicker
+
+    now = [0.0]
+    tk = _RateTicker(clock=lambda: now[0])
+    status = None
+    for i in range(1, 31):
+        now[0] = i * 0.1
+        # Two server rounds at 150 tok/s: the count restarts at chunk 16
+        # (a new request in the tool loop) but the rate must not glitch.
+        n = i * 15 if i <= 15 else (i - 15) * 15
+        s = tk.push(SimpleNamespace(text="x", generation_tokens=n))
+        if s:
+            status = s
+    assert status is not None
+    assert abs(int(status.split()[0]) - 150) <= 2
+
+
+def test_rate_ticker_throttles_pushes():
+    from types import SimpleNamespace
+    from gmlx.chat import _RateTicker
+
+    now = [0.0]
+    tk = _RateTicker(clock=lambda: now[0])
+    pushes = 0
+    for i in range(1, 101):
+        now[0] = i * 0.05                                    # 20 chunks/s for 5s
+        if tk.push(SimpleNamespace(text="hello world here", generation_tokens=i * 5)):
+            pushes += 1
+    assert 0 < pushes <= 18
+
+
+def test_slash_thinking_local_maps_template_spelling(capsys):
+    from gmlx.chat import ChatState, _slash_thinking
+
+    state = ChatState(template_kwargs={},
+                      template_text="{% if enable_thinking %}{% endif %}")
+    _slash_thinking("/thinking", "off", state)
+    assert state.template_kwargs == {"enable_thinking": False}
+    _slash_thinking("/thinking", "", state)
+    assert "thinking = enable_thinking=False" in capsys.readouterr().out
+    _slash_thinking("/thinking", "default", state)
+    assert state.template_kwargs == {}
+
+    # Kimi K2.x bare-thinking spelling
+    state = ChatState(template_kwargs={},
+                      template_text="thinking is defined and thinking is false")
+    _slash_thinking("/thinking", "off", state)
+    assert state.template_kwargs == {"thinking": False}
+    _slash_thinking("/thinking", "on", state)
+    assert state.template_kwargs == {"thinking": True}
+
+
+def test_slash_thinking_rejects_bad_value(capsys):
+    from gmlx.chat import ChatState, _slash_thinking
+
+    state = ChatState(template_kwargs={"enable_thinking": True})
+    _slash_thinking("/thinking", "sideways", state)
+    assert "on, off, adaptive, or default" in capsys.readouterr().out
+    assert state.template_kwargs == {"enable_thinking": True}  # untouched
