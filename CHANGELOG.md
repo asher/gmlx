@@ -6,11 +6,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Added
+## [0.4.4] - 2026-08-27
 
-- VLM loads (--mmproj) compose with every speculative-decode form the text
-  path supports: companion drafters (DFlash2, qwen4exp-mtp) load against a
-  multimodal target, and companion-only families autodetect their drafter.
+### Added
 
 - `glm5next` (GLM-5.3-Flash 320B-A18B, llama.cpp PR 27754) loads: hybrid
   KDA linear attention + NoPE MLA with a pooled DSA sparse indexer
@@ -27,6 +25,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   projector load onto a vendored tower; images preprocess with the
   align-28 canvas search (16..8000 token budget), soft tokens splice at
   the `<|image|>` placeholders, and text-only requests keep MTP.
+- VLM loads (--mmproj) compose with every speculative-decode form the text
+  path supports: companion drafters (DFlash2, qwen4exp-mtp) load against a
+  multimodal target, and companion-only families autodetect their drafter.
 - nemotron_h_moe (Nemotron-3.5-Lightning) MTP speculative decoding from the
   in-file NextN head (auto-enabled) or the llama.cpp `mtp-*.gguf` sidecar
   (`--draft-gguf`, autodetected next to the target). Greedy decoding stays
