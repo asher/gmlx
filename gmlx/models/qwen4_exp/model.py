@@ -813,12 +813,16 @@ class QSAKVCache(KVCache):
             else:
                 self.ik = new
             if pos is not None:
+                # Width against the TRUNCATED base: growth at a mid-step prev
+                # (verify rollback trims land there) drops pos rows past prev
+                # exactly like ik above; sizing newp against the untruncated
+                # width leaves pos short of ik and later writes clamp.
+                base = None if self.pos is None else (
+                    self.pos[:, :, :prev] if prev % self.step else self.pos)
                 newp = mx.zeros((3, B, self.ik.shape[1] - (
-                    0 if self.pos is None else self.pos.shape[2])), mx.int32)
-                self.pos = (newp if self.pos is None else
-                            mx.concatenate([self.pos[:, :, :prev] if prev %
-                                            self.step else self.pos, newp],
-                                           axis=2))
+                    0 if base is None else base.shape[2])), mx.int32)
+                self.pos = (newp if base is None else
+                            mx.concatenate([base, newp], axis=2))
         self.ik[:, prev:prev + n, :] = ik
         if pos is not None:
             self.pos[:, :, prev:prev + n] = pos.astype(mx.int32)

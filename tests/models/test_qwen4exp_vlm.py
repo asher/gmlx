@@ -193,3 +193,38 @@ def test_verify_positions_follow_the_resolved_mrope():
     lm._rope_deltas = None
     assert float(mx.abs(spec - plain).max()) < 2e-4
     assert sink  # rollback sink recorded
+
+
+def test_qsa_cache_pos_tracks_ik_across_midstep_growth():
+    """pos/ik lockstep when the buffers grow at a mid-step prev.
+
+    Verify rollback trims land the offset mid-step; the next growth event
+    truncates ik to prev before extending, and pos must be sized against
+    the SAME truncated base or it ends up short of ik and later writes
+    clamp ([broadcast_shapes] (3,1,n) vs (3,1,<n) on serve turn 3)."""
+    from gmlx.models.qwen4_exp.model import QSAKVCache
+
+    c = QSAKVCache(ratio=4)
+    step = c.step
+    D, IDX = 4, 8
+
+    def push(n, start):
+        k = mx.zeros((1, 1, n, D))
+        v = mx.zeros((1, 1, n, D))
+        ik = mx.zeros((1, n, IDX))
+        pos = mx.broadcast_to(
+            (start + mx.arange(n, dtype=mx.int32))[None, None], (3, 1, n))
+        c.update_and_fetch_qsa(k, v, ik, pos=pos)
+
+    push(step, 0)              # fills exactly one step block
+    push(4, step)              # grows at prev % step == 0
+    assert c.pos.shape[2] == c.ik.shape[1]
+    c.trim(2)                  # rollback lands mid-step
+    prev = c.offset
+    assert prev % step != 0
+    push(step, prev)           # growth at mid-step prev: truncation path
+    assert c.pos.shape[2] == c.ik.shape[1]
+    # The rows just written carry the pushed positions.
+    got = c.pos[0, 0, prev:prev + step]
+    want = prev + mx.arange(step, dtype=mx.int32)
+    assert bool(mx.all(got == want).item())
