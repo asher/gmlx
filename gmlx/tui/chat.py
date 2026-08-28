@@ -2208,7 +2208,8 @@ def _auto_server(args, parser) -> bool:
         try:
             from gmlx.commands.launch import _discover_config
             cfg, _path = _discover_config()
-            models = list(getattr(cfg, "models", None) or [])
+            # models is {id: ModelCfg}; the values carry id + path.
+            models = list((getattr(cfg, "models", None) or {}).values())
         except Exception:         # noqa: BLE001
             return False
         for m in models:
