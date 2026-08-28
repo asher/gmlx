@@ -51,6 +51,13 @@ def _raw_deep(tag="deep"):
     return types.SimpleNamespace(language_model=lang, model_type="qwen3_5")
 
 
+def _raw_backbone(tag="backbone"):
+    """Mamba-hybrid layout (``Model.backbone.embeddings``: nemotron_h) - a
+    nesting the stock probe never checks."""
+    inner = types.SimpleNamespace(embeddings=_emb(tag))
+    return types.SimpleNamespace(backbone=inner, model_type="nemotron_h")
+
+
 def _wrap(raw):
     """Wrap a raw mlx-lm-shaped model the way ``load_serveable_model`` does."""
     return serving.TextOnlyModel(
@@ -58,7 +65,8 @@ def _wrap(raw):
 
 
 # _find_token_embedding: walks every known nesting
-@pytest.mark.parametrize("raw_fn", [_raw_top, _raw_shallow, _raw_deep])
+@pytest.mark.parametrize(
+    "raw_fn", [_raw_top, _raw_shallow, _raw_deep, _raw_backbone])
 def test_find_token_embedding_walks_known_nestings(raw_fn):
     emb = serving._find_token_embedding(raw_fn("t"))
     assert emb is not None and emb("ids") == ("t", "ids")
@@ -94,6 +102,14 @@ def test_top_level_embedding_left_untouched():
     model = _wrap(raw)
     serving._ensure_text_embedding_probe(model, raw)
     assert model.language_model.input_embeds("ids") == ("top", "ids")
+
+
+def test_backbone_nesting_gets_probe_override():
+    raw = _raw_backbone("backbone")
+    model = _wrap(raw)
+    assert model.language_model._token_embedding() is None
+    serving._ensure_text_embedding_probe(model, raw)
+    assert model.language_model.input_embeds("ids") == ("backbone", "ids")
 
 
 def test_no_embedding_anywhere_fails_fast_at_load():
