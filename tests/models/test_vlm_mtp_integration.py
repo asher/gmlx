@@ -114,16 +114,18 @@ def test_vlm_mtp_target_regime_matches_the_arm(vlm_mtp_load):
     model, drafter, _tok, owned_arm = vlm_mtp_load
     lm = model.language_model
 
+    # mlx-vlm tiled-V rebind reached in both arms: since the plain-load fix
+    # (vendored 0.6.15 gated_delta escapes the mlx-lm patch) every qwen3_5
+    # VLM load rebinds the vendored module, owned or stock. Not an identity
+    # check against gd: a later load can re-close the mlx-lm patch, leaving
+    # vgd on an older (equally tiled) instance.
     vgd = importlib.import_module("mlx_vlm.models.qwen3_5.gated_delta")
+    assert "_tiled_gated_delta_ops" in vgd.gated_delta_ops.__qualname__
+    assert "_tiled_gated_delta_ops" in gd.gated_delta_ops.__qualname__
 
     if owned_arm:
         # Owned by default: same classes as the text MTP target, fused GDN
         # armed in-tree, no stock verify patch needed on the vlm module.
-        # The mlx-vlm tiled-V rebind is deliberately SKIPPED (the owned
-        # forward never reads the mlx-vlm module global), so it stays stock.
-        assert vgd.gated_delta_ops.__module__ == (
-            "mlx_vlm.models.qwen3_5.gated_delta"
-        )
         assert qwen35_owned.is_owned_language_model(model)
         armed = [
             m for m in lm.modules()
@@ -142,9 +144,6 @@ def test_vlm_mtp_target_regime_matches_the_arm(vlm_mtp_load):
             if type(m).__name__.startswith("Owned")
         }
         assert not owned_leak, f"owned classes on the stock path: {owned_leak}"
-        # mlx-vlm tiled-V rebind installed: module global is mlx-lm's
-        # patched implementation.
-        assert vgd.gated_delta_ops is gd.gated_delta_ops
         assert vgd._gated_delta_with_states_ops.__module__.startswith("gmlx")
         assert vgd._gated_delta_with_states_kernel is None
         assert _L._target_verify_linear.__module__.startswith("gmlx")

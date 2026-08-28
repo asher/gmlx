@@ -41,6 +41,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- qwen3.5/3.6/3.8 image turns degraded to repetitive text with an early
+  stop: mlx-vlm 0.6.15 vendored its qwen3_5 gated_delta functions, so plain
+  VLM loads ran the GGUF's tiled V heads through grouped K-to-V kernels.
+  Plain loads now rebind the vendored module like the MTP paths do.
 - qwen4exp ran the whole residual stream in fp32: the router's fp32 scores
   promoted each layer's MoE output and every downstream elementwise chain.
   Prefill is ~35% faster and decode ~20% faster after the dtype returns to
