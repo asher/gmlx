@@ -27,6 +27,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   projector load onto a vendored tower; images preprocess with the
   align-28 canvas search (16..8000 token budget), soft tokens splice at
   the `<|image|>` placeholders, and text-only requests keep MTP.
+- nemotron_h_moe (Nemotron-3.5-Lightning) MTP speculative decoding from the
+  in-file NextN head (auto-enabled) or the llama.cpp `mtp-*.gguf` sidecar
+  (`--draft-gguf`, autodetected next to the target). Greedy decoding stays
+  token-identical to plain decode: the verify walk steps Mamba2, attention
+  and the MoE router gate per position, prefill matches mlx-lm's last-token
+  split, and dense verify matmuls take the bit-exact kquant route
+  (`--stochastic-mtp` keeps the faster non-exact route).
 
 ### Changed
 
@@ -48,6 +55,14 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - qwen4exp VLM conversations could fail with a broadcast_shapes error when
   the cache grew after a trim landed mid-step: the QSA position buffer was
   sized against its untruncated width and fell behind the key stream.
+- `gmlx chat`/`serve` on nemotron_h_moe failed with "exposes no token
+  embedding the batched engine can reach": the embedding probe now reaches
+  the `Model.backbone.embeddings` nesting.
+- Nemotron-3.5-Lightning built its trunk with the NextN/MTP block as a
+  53rd layer, silently degrading all output; the trunk now excludes NextN
+  layers, and their tensors are stripped from the trunk remap.
+- `mtp-*.gguf` sidecars (same arch and metadata as their base model) were
+  discovered as servable models; they now classify as drafters.
 - qwen4exp ran the whole residual stream in fp32: the router's fp32 scores
   promoted each layer's MoE output and every downstream elementwise chain.
   Prefill is ~35% faster and decode ~20% faster after the dtype returns to
