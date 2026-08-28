@@ -635,6 +635,10 @@ class Glm5NextMLAAttention(nn.Module):
             # values) contract without storing anything for V.
             values = mx.zeros(latent.shape[:-1] + (0,), dtype=latent.dtype)
             latent_all, _ = kv_cache.update_and_fetch(latent, values)
+            # Re-root the slot to a fresh constant so the chain stays depth-1.
+            v = kv_cache.values
+            if v is not None and v.shape[-1] == 0:
+                kv_cache.values = mx.zeros(v.shape, dtype=v.dtype)
         else:
             latent_all = latent
 
