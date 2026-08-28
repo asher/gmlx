@@ -539,8 +539,10 @@ def test_moe_gate_selection_matches_reference():
     assert (np.sort(inds_n, -1) == np.sort(ref_inds, -1)).all()
     picked = np.take_along_axis(scores, ref_inds, axis=-1)
     ref_w = picked / picked.sum(-1, keepdims=True) * 2.5
+    # M5 f32 GEMM runs at TF32 precision by default (~1e-4 here); a real
+    # renorm or bias-in-weights bug is O(1).
     np.testing.assert_allclose(np.sort(w_n, -1), np.sort(ref_w, -1),
-                               rtol=1e-4, atol=1e-5)
+                               rtol=2e-3, atol=1e-3)
 
     out = moe(x)
     mx.eval(out)
