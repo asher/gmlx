@@ -151,9 +151,11 @@ def test_yellow_arms_throttle_and_restores(rig, monkeypatch):
     st.obs_delta_ema = 1e9      # measured growth corroborates the claim
     gov._governor_tick(gen)
     assert st.band == gov.YELLOW
-    # armed: tracked budget + untracked weights, cache pool to zero
+    # armed: tracked budget + untracked weights, cache pool clamped to
+    # the small throttle cap (2 GB default; zeroing it turned prefill
+    # transients into fresh Metal allocations and pinned the band red)
     assert rig["mem_limits"] == [int(120e9 * 0.95 + 50e9)]
-    assert rig["cache_limits"] == [0]
+    assert rig["cache_limits"] == [int(2.0 * 1e9)]
     assert gov._STATS["yellow_entries"] == 1
 
     gen._kq_admit_kv_rates["layers.0.k"]["rate"] = 1e6
@@ -162,6 +164,33 @@ def test_yellow_arms_throttle_and_restores(rig, monkeypatch):
     assert st.band == gov.GREEN
     assert rig["mem_limits"][-1] == 0          # restored to saved value
     assert rig["cache_limits"][-1] == 7
+
+
+def test_throttle_cache_env_zero_disables_caching(rig, monkeypatch):
+    # GMLX_GOV_THROTTLE_CACHE_GB=0 keeps the pre-fix behavior available:
+    # the throttle zeroes the cache pool outright.
+    monkeypatch.setenv("GMLX_GOV_MIN_DWELL_S", "0")
+    monkeypatch.setenv("GMLX_GOV_THROTTLE_CACHE_GB", "0")
+    gen = FakeGen(rows=2, rate=1e6)
+    st = gov._state(gen)
+    gen._kq_admit_kv_rates["layers.0.k"]["rate"] = 3.0e9
+    st.obs_delta_ema = 1e9
+    gov._governor_tick(gen)
+    assert st.band == gov.YELLOW
+    assert rig["cache_limits"] == [0]
+
+
+def test_kernel_floor_default_is_4gb(rig, monkeypatch):
+    # Default floor is min(4 GB, 10% of RAM): 24 GB laptops must not
+    # inherit a floor a sixth of their RAM. The rig pins the env to 8;
+    # drop it to see the shipped default at two box sizes.
+    monkeypatch.delenv("GMLX_GOV_KERNEL_FLOOR_GB", raising=False)
+    monkeypatch.setattr(gov.mx, "device_info",
+                        lambda: {"memory_size": 128e9})
+    assert gov._kernel_floor_bytes() == 4e9
+    monkeypatch.setattr(gov.mx, "device_info",
+                        lambda: {"memory_size": 24e9})
+    assert gov._kernel_floor_bytes() == 2.4e9
 
 
 def test_yellow_demand_rungs_on_measured_miss(rig, monkeypatch):

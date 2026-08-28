@@ -1591,3 +1591,186 @@ def _patch_mlxvlm_gated_delta_tiled_v() -> None:
     vgd._gated_delta_state_kernel = None
     vgd._gated_delta_state_kernel_masked = None
     loadlog.verbose_print("[patch] mlx-vlm gated_delta: K->V mapping set to tiled (MTP target)")
+
+
+# Fused blocked-sequential gated-delta prefill scan
+#
+# The stock mlx-lm prefill scan kernel walks T steps with every simdgroup
+# reading its q/k/v/g/beta operands from device memory at each step (one
+# simdgroup per (head, dv) row, so the same q/k row is re-read Dv times per
+# step). This variant blocks the walk: a threadgroup covering SGS dv rows
+# cooperatively stages the next TB timesteps of q, k, v, g, beta (and mask)
+# in threadgroup memory, then runs the same per-step recurrence out of the
+# staged tiles. It also takes q/k untiled (TILED indexing, hk = hv % Hk)
+# so the caller can skip the 3x mx.tile materialisation.
+#
+# The per-step arithmetic matches the stock kernel op for op (fp32 state,
+# same accumulation order, simd_sum reductions), so outputs are bit-exact
+# vs the stock kernel path for the same inputs.
+
+_GDN_PREFILL_TB = 32
+_GDN_PREFILL_SGS = 8
+
+
+def _make_gdn_prefill_kernel(has_mask):
+    if not mx.metal.is_available():
+        return None
+    mask_stage = (
+        "if (flat < (uint)TB) ms[flat] = (t0 + (int)flat < T)"
+        " ? (int)mask[(size_t)b_idx * T + t0 + flat] : 0;"
+        if has_mask else ""
+    )
+    mask_read = "ms[tt]" if has_mask else "true"
+    source = f"""
+        constexpr int n_per_t = Dk / 32;
+        uint lane = thread_position_in_threadgroup.x;
+        uint sg   = thread_position_in_threadgroup.y;
+        uint dv_idx = thread_position_in_grid.y;
+        uint n = thread_position_in_grid.z;
+        uint b_idx = n / Hv;
+        uint hv_idx = n % Hv;
+        uint hk_idx = TILED ? (hv_idx % Hk) : (hv_idx / (Hv / Hk));
+        uint flat = sg * 32 + lane;
+
+        // q, k: [B, T, Hk, Dk] (untiled); v, y: [B, T, Hv, Dv]
+        auto q_ = q + (size_t)b_idx * T * Hk * Dk + hk_idx * Dk;
+        auto k_ = k + (size_t)b_idx * T * Hk * Dk + hk_idx * Dk;
+        auto v_ = v + (size_t)b_idx * T * Hv * Dv + hv_idx * Dv;
+        y += (size_t)b_idx * T * Hv * Dv + hv_idx * Dv + dv_idx;
+        auto g_ = g + (size_t)b_idx * T * Hv + hv_idx;
+        auto beta_ = beta + (size_t)b_idx * T * Hv + hv_idx;
+
+        // state_in, state_out: [B, Hv, Dv, Dk]
+        auto i_state = state_in + ((size_t)n * Dv + dv_idx) * Dk;
+        auto o_state = state_out + ((size_t)n * Dv + dv_idx) * Dk;
+        float state[n_per_t];
+        for (int i = 0; i < n_per_t; ++i)
+          state[i] = static_cast<float>(i_state[n_per_t * lane + i]);
+
+        threadgroup InT qs[TB * Dk];
+        threadgroup InT ks[TB * Dk];
+        threadgroup float vs[TB * SGS];
+        threadgroup float gs[TB];
+        threadgroup float bs[TB];
+        {"threadgroup int ms[TB];" if has_mask else ""}
+        const uint tg0 = dv_idx - sg;  // first dv row of this threadgroup
+
+        for (int t0 = 0; t0 < T; t0 += TB) {{
+          threadgroup_barrier(mem_flags::mem_threadgroup);
+          for (uint e = flat; e < (uint)(TB * Dk); e += SGS * 32) {{
+            int tt = e / Dk, dd = e % Dk;
+            bool live = t0 + tt < T;
+            qs[e] = live ? q_[(size_t)(t0 + tt) * Hk * Dk + dd] : (InT)0;
+            ks[e] = live ? k_[(size_t)(t0 + tt) * Hk * Dk + dd] : (InT)0;
+          }}
+          for (uint e = flat; e < (uint)(TB * SGS); e += SGS * 32) {{
+            int tt = e / SGS, j = e % SGS;
+            vs[e] = (t0 + tt < T)
+              ? (float)v_[(size_t)(t0 + tt) * Hv * Dv + tg0 + j] : 0.0f;
+          }}
+          if (flat < (uint)TB) {{
+            bool live = t0 + (int)flat < T;
+            gs[flat] = live ? g_[(size_t)(t0 + flat) * Hv] : 0.0f;
+            bs[flat] = live ? beta_[(size_t)(t0 + flat) * Hv] : 0.0f;
+          }}
+          {mask_stage}
+          threadgroup_barrier(mem_flags::mem_threadgroup);
+
+          const int tb_end = min(TB, T - t0);
+          for (int tt = 0; tt < tb_end; ++tt) {{
+            if ({mask_read}) {{
+              float g_t = gs[tt];
+              float kv_mem = 0.0f;
+              for (int i = 0; i < n_per_t; ++i) {{
+                int s_idx = n_per_t * lane + i;
+                state[i] = state[i] * g_t;
+                kv_mem += state[i] * (float)ks[tt * Dk + s_idx];
+              }}
+              kv_mem = simd_sum(kv_mem);
+              float delta = (vs[tt * SGS + sg] - kv_mem) * bs[tt];
+              float out = 0.0f;
+              for (int i = 0; i < n_per_t; ++i) {{
+                int s_idx = n_per_t * lane + i;
+                state[i] = state[i] + (float)ks[tt * Dk + s_idx] * delta;
+                out += state[i] * (float)qs[tt * Dk + s_idx];
+              }}
+              out = simd_sum(out);
+              if (lane == 0)
+                y[(size_t)(t0 + tt) * Hv * Dv] = static_cast<InT>(out);
+            }} else if (lane == 0) {{
+              y[(size_t)(t0 + tt) * Hv * Dv] = static_cast<InT>(0);
+            }}
+          }}
+        }}
+        for (int i = 0; i < n_per_t; ++i)
+          o_state[n_per_t * lane + i] = static_cast<StT>(state[i]);
+    """
+    inputs = ["q", "k", "v", "g", "beta", "state_in", "T"]
+    if has_mask:
+        inputs.append("mask")
+    return mx.fast.metal_kernel(
+        name="gmlx_gated_delta_prefill" + ("_mask" if has_mask else ""),
+        input_names=inputs,
+        output_names=["y", "state_out"],
+        source=source,
+    )
+
+
+_gdn_prefill_kernel = _make_gdn_prefill_kernel(False)
+_gdn_prefill_kernel_masked = _make_gdn_prefill_kernel(True)
+
+
+def _gdn_prefill_eligible(self, B, S, q_dtype, mask, state):
+    """Route check for the blocked prefill scan: sequential-width call on
+    the GPU with kernel-tileable head dims and a plain (or absent) [B, T]
+    ssm mask. state may be None (fresh prompt) or the fp32 recurrent
+    cache."""
+    return (
+        _gdn_prefill_kernel is not None
+        and getattr(self, "_gdn_prefill", True)
+        and env_bool("GMLX_GDN_PREFILL_KERNEL", True)
+        and S > 1
+        and q_dtype in (mx.float16, mx.bfloat16)
+        and self.head_k_dim % 32 == 0
+        and self.head_v_dim % _GDN_PREFILL_SGS == 0
+        and (self.num_v_heads % self.num_k_heads) == 0
+        and (mask is None or (isinstance(mask, mx.array) and mask.ndim == 2))
+        and mx.default_device() == mx.Device(mx.gpu)
+    )
+
+
+def _gdn_prefill_update(q, k, v, a, b, A_log, dt_bias, state, mask, tiled):
+    """Blocked-scan counterpart of mlx-lm ``gated_delta_update`` taking
+    UNTILED q/k ([B, T, Hk, Dk]); ``tiled`` picks the GGUF hv % Hk pairing
+    (vs the upstream hv // (Hv/Hk) grouping). beta/g match upstream."""
+    from mlx_lm.models.gated_delta import compute_g
+
+    beta = mx.sigmoid(b)
+    g = compute_g(A_log, a, dt_bias)
+    B, T, Hk, Dk = q.shape
+    Hv, Dv = v.shape[-2:]
+    if state is None:
+        state = mx.zeros((B, Hv, Dv, Dk), dtype=mx.float32)
+    kern = _gdn_prefill_kernel_masked if mask is not None else _gdn_prefill_kernel
+    inputs = [q, k, v, g, beta, state, T]
+    if mask is not None:
+        inputs.append(mask)
+    y, state_out = kern(
+        inputs=inputs,
+        template=[
+            ("InT", q.dtype),
+            ("StT", state.dtype),
+            ("Dk", Dk),
+            ("Dv", Dv),
+            ("Hk", Hk),
+            ("Hv", Hv),
+            ("TILED", int(tiled)),
+            ("TB", _GDN_PREFILL_TB),
+            ("SGS", _GDN_PREFILL_SGS),
+        ],
+        grid=(32, Dv, B * Hv),
+        threadgroup=(32, _GDN_PREFILL_SGS, 1),
+        output_shapes=[(B, T, Hv, Dv), state.shape],
+        output_dtypes=[q.dtype, state.dtype],
+    )
+    return y, state_out

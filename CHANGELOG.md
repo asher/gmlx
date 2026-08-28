@@ -6,6 +6,31 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- qwen4exp prefill rewritten around the sparse boundary: split-regime QSA
+  dispatch (causal prefix, gathered ragged span, block-sparse tail) plus a
+  ragged-length branch so serve one-shot prompts skip the dense token mask.
+- qwen4exp hyper-connection prefill epilogues run as single-pass kernels
+  (norm, mix+inject, combine, inject GEMV); `GMLX_Q4_HC_PREFILL_KERN=0`
+  restores the bit-exact eager path.
+- qwen4exp defaults to an 8192-token prefill chunk when the block-sparse
+  kernels are armed (`GMLX_Q4_PREFILL_STEP` overrides).
+
+### Fixed
+
+- qwen4exp ran the whole residual stream in fp32: the router's fp32 scores
+  promoted each layer's MoE output and every downstream elementwise chain.
+  Prefill is ~35% faster and decode ~20% faster after the dtype returns to
+  the activation width.
+- qwen4exp gate+up expert concat could freeze constructor placeholder zeros
+  when weights were installed after the module was built, corrupting MoE
+  outputs on some load orders.
+- Serve governor: a kernel-floor breach zeroed the Metal cache and kept
+  re-triggering itself, pinning throughput low until restart. The throttle
+  now clamps the cache to a small budget (`GMLX_GOV_THROTTLE_CACHE_GB`) and
+  the floor default drops to 4 GB (min with 10% of RAM) for small machines.
+
 ## [0.4.3] - 2026-08-26
 
 ### Added

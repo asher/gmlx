@@ -34,6 +34,7 @@ plain NEOX rope.
 
 import importlib
 import math
+import os
 import sys
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
@@ -189,15 +190,23 @@ class HyperConnection(nn.Module):
             lo, inj = front(xn, self.down.weight, self.inject.weight,
                             self.norm.weight.dtype)
             return epi(lo, self.up.weight, xn), inj
-        xn = self.norm(h)
+        xn = _hc_norm_kern(h, self.norm.weight, self.norm.eps)
+        if xn is None:
+            xn = self.norm(h)
         xf = xn.reshape(B, T, hc * D)
         lo = nn.silu(self.down(xf) * (1.0 / hc))
-        gate = mx.sigmoid(self.up(lo)).reshape(B, T, hc, D)
-        mixed = (gate * xn).mean(axis=2)
+        up_out = self.up(lo)
         if "inject" not in self:
-            return mixed
-        inj = 2.0 * mx.sigmoid(self.inject(xf) * (1.0 / hc))
-        return mixed, inj
+            return _hc_mix(up_out, xn)
+        inj_out = _hc_inject_kern(xf, self.inject.weight)
+        if inj_out is None:
+            inj_out = self.inject(xf)
+        r = _hc_epi_kern(up_out, xn, inj_out)
+        if r is not None:
+            return r
+        # inj stays eager: compiling this sigmoid shifts its fp32 lsb and
+        # the drift compounds across 96 combines per token
+        return _hc_mix(up_out, xn), 2.0 * mx.sigmoid(inj_out * (1.0 / hc))
 
     def _hclr_ok(self, h_dtype) -> bool:
         """Fused-path eligibility: kq hc_lowrank ops present, q8_0 down/up
@@ -222,8 +231,219 @@ class HyperConnection(nn.Module):
                      or h_dtype == self.norm.weight.dtype))
 
 
-def _hc_combine(h: mx.array, out: mx.array, inject: mx.array) -> mx.array:
+# Prefill-width HC kernels: the compiled epilogues still run the
+# [B, T, hc, D] elementwise chains at ~1/4 of achievable bandwidth (the
+# mean-over-streams and broadcast-combine patterns defeat mx.compile's
+# fusion), and the inject GEMV's [hc, hc*D] fp32 weight forces the
+# stock matmul onto a promoted fp32 path that re-reads x. Four
+# single-pass kernels cover the norm, the mix+inject epilogue, the
+# combine, and the inject GEMV; each falls back to the op path when
+# ineligible. GMLX_Q4_HC_PREFILL_KERN=0 disables all four.
+
+_HC_NORM_SRC = r"""
+    uint lane = thread_position_in_threadgroup.x;
+    uint sg   = thread_position_in_threadgroup.y;
+    uint row  = thread_position_in_grid.z;      // b*T*hc + ...
+    uint s_idx = row % HC;
+    uint flat = sg * 32 + lane;
+    auto x_ = x + (size_t)row * D;
+    auto y_ = y + (size_t)row * D;
+    auto g_ = gamma + (size_t)s_idx * D;
+
+    threadgroup float ssq[SGS];
+    float acc = 0.0f;
+    for (uint d = flat; d < (uint)D; d += SGS * 32) {
+        float xv = (float)x_[d];
+        acc += xv * xv;
+    }
+    acc = simd_sum(acc);
+    if (lane == 0) ssq[sg] = acc;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float tot = 0.0f;
+    for (int s = 0; s < SGS; ++s) tot += ssq[s];
+    float scale = rsqrt(tot / (float)D + eps[0]);
+    // normalized value rounds to InT before the gain multiply, matching
+    // mx.fast.rms_norm's rounding points
+    for (uint d = flat; d < (uint)D; d += SGS * 32)
+        y_[d] = (InT)((float)(InT)((float)x_[d] * scale) * (float)g_[d]);
+"""
+
+_HC_EPI_SRC = r"""
+    uint gid = thread_position_in_grid.x;       // b*T*D + ...
+    uint bt = gid / D;
+    uint d = gid % D;
+    auto u_ = upo + (size_t)bt * HC * D + d;
+    auto x_ = xn + (size_t)bt * HC * D + d;
+    // InT casts mirror the eager op chain's per-op rounding (sigmoid ->
+    // InT gate, gate*xn -> InT product, fp32 mean); without them the
+    // fp32 drift compounds across the 96 combines per token
+    float acc = 0.0f;
+    for (int s = 0; s < HC; ++s) {
+        float uv = (float)u_[(size_t)s * D];
+        float sig = (float)(InT)(1.0f / (1.0f + metal::precise::exp(-uv)));
+        acc += (float)(InT)(sig * (float)x_[(size_t)s * D]);
+    }
+    mixed[gid] = (InT)(acc * (1.0f / (float)HC));
+    if (d < (uint)HC) {
+        float iv = (float)(InT)(injo[(size_t)bt * HC + d]
+                                * (1.0f / (float)HC));
+        inj[(size_t)bt * HC + d] =
+            2.0f * (float)(InT)(1.0f / (1.0f + metal::precise::exp(-iv)));
+    }
+"""
+
+_HC_COMBINE_SRC = r"""
+    uint gid = thread_position_in_grid.x;       // b*T*hc*D + ...
+    uint d = gid % D;
+    uint s_idx = (gid / D) % HC;
+    uint bt = gid / (HC * D);
+    // product rounds to InT before the add, mirroring the eager ops
+    yn[gid] = (InT)((float)h[gid]
+        + (float)(InT)((float)out[(size_t)bt * D + d]
+                       * inj[(size_t)bt * HC + s_idx]));
+"""
+
+_HC_INJECT_SRC = r"""
+    uint lane = thread_position_in_threadgroup.x;
+    uint sg   = thread_position_in_threadgroup.y;
+    uint bt   = thread_position_in_grid.z;      // b*T + ...
+    uint flat = sg * 32 + lane;
+    auto x_ = x + (size_t)bt * N;
+
+    // fp32 accumulation over fp32 weights, matching the stock promoted
+    // matmul; only the reduction order differs (fp32 lsb class, rounded
+    // to InT by the epi kernel before the sigmoid)
+    threadgroup float part[SGS * HC];
+    float acc[HC];
+    for (int s = 0; s < HC; ++s) acc[s] = 0.0f;
+    for (uint i = flat; i < (uint)N; i += SGS * 32) {
+        float xv = (float)x_[i];
+        for (int s = 0; s < HC; ++s)
+            acc[s] += xv * w[(size_t)s * N + i];
+    }
+    for (int s = 0; s < HC; ++s) {
+        float v = simd_sum(acc[s]);
+        if (lane == 0) part[sg * HC + s] = v;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0 && lane < (uint)HC) {
+        float tot = 0.0f;
+        for (int g = 0; g < SGS; ++g) tot += part[g * HC + lane];
+        y[(size_t)bt * HC + lane] = tot;
+    }
+"""
+
+_hc_prefill_kerns = None
+
+
+def _hc_kerns():
+    """The prefill-width HC kernels (norm, epi, combine, inject), or None."""
+    global _hc_prefill_kerns
+    if _hc_prefill_kerns is None:
+        from gmlx.envflags import env_bool
+        if (env_bool("GMLX_Q4_HC_PREFILL_KERN", True)
+                and mx.metal.is_available()
+                and mx.default_device().type == mx.DeviceType.gpu):
+            _hc_prefill_kerns = (
+                mx.fast.metal_kernel(
+                    name="gmlx_hc_norm",
+                    input_names=["x", "gamma", "eps"],
+                    output_names=["y"], source=_HC_NORM_SRC),
+                mx.fast.metal_kernel(
+                    name="gmlx_hc_epi",
+                    input_names=["upo", "xn", "injo"],
+                    output_names=["mixed", "inj"], source=_HC_EPI_SRC),
+                mx.fast.metal_kernel(
+                    name="gmlx_hc_combine",
+                    input_names=["h", "out", "inj"],
+                    output_names=["yn"], source=_HC_COMBINE_SRC),
+                mx.fast.metal_kernel(
+                    name="gmlx_hc_inject",
+                    input_names=["x", "w"],
+                    output_names=["y"], source=_HC_INJECT_SRC),
+            )
+        else:
+            _hc_prefill_kerns = False
+    return _hc_prefill_kerns or None
+
+
+def _hc_norm_kern(x: mx.array, weight: mx.array, eps: float) -> mx.array:
+    B, T, hc, D = x.shape
+    kerns = _hc_kerns()
+    SGS = 8
+    if kerns is None or B * T <= 8 or D % (SGS * 32) or x.dtype not in (
+            mx.float16, mx.bfloat16):
+        return None
+    return kerns[0](
+        inputs=[x, weight.astype(x.dtype), mx.array([eps], dtype=mx.float32)],
+        template=[("InT", x.dtype), ("D", D), ("HC", hc), ("SGS", SGS)],
+        grid=(32, SGS, B * T * hc), threadgroup=(32, SGS, 1),
+        output_shapes=[x.shape], output_dtypes=[x.dtype])[0]
+
+
+def _hc_epi_kern(up_out: mx.array, xn: mx.array, inj_out: mx.array):
+    B, T, hc, D = xn.shape
+    kerns = _hc_kerns()
+    if (kerns is None or B * T <= 8 or D < hc
+            or xn.dtype not in (mx.float16, mx.bfloat16)):
+        return None
+    return kerns[1](
+        inputs=[up_out, xn, inj_out.astype(mx.float32)],
+        template=[("InT", xn.dtype), ("D", D), ("HC", hc)],
+        grid=(B * T * D, 1, 1), threadgroup=(min(256, B * T * D), 1, 1),
+        output_shapes=[(B, T, D), (B, T, hc)],
+        output_dtypes=[xn.dtype, mx.float32])
+
+
+def _hc_inject_kern(xf: mx.array, weight: mx.array):
+    B, T, N = xf.shape
+    kerns = _hc_kerns()
+    SGS = 8
+    if (kerns is None or B * T <= 8 or N % (SGS * 32)
+            or weight.dtype != mx.float32
+            or xf.dtype not in (mx.float16, mx.bfloat16)):
+        return None
+    hc = weight.shape[0]
+    return kerns[3](
+        inputs=[xf, weight],
+        template=[("InT", xf.dtype), ("N", N), ("HC", hc), ("SGS", SGS)],
+        grid=(32, SGS, B * T), threadgroup=(32, SGS, 1),
+        output_shapes=[(B, T, hc)], output_dtypes=[mx.float32])[0]
+
+
+def _hc_combine_kern(h: mx.array, out: mx.array, inject: mx.array):
+    B, T, hc, D = h.shape
+    kerns = _hc_kerns()
+    if (kerns is None or h.dtype not in (mx.float16, mx.bfloat16)
+            or out.dtype != h.dtype or inject.dtype != mx.float32
+            or inject.shape != (B, T, hc)):
+        return None
+    n = B * T * hc * D
+    return kerns[2](
+        inputs=[h, out, inject],
+        template=[("InT", h.dtype), ("D", D), ("HC", hc)],
+        grid=(n, 1, 1), threadgroup=(min(256, n), 1, 1),
+        output_shapes=[h.shape], output_dtypes=[h.dtype])[0]
+
+
+@mx.compile
+def _hc_mix(up_out: mx.array, xn: mx.array) -> mx.array:
+    B, T, hc, D = xn.shape
+    gate = mx.sigmoid(up_out).reshape(B, T, hc, D)
+    return (gate * xn).mean(axis=2)
+
+
+@mx.compile
+def _hc_combine_ops(h: mx.array, out: mx.array, inject: mx.array) -> mx.array:
     return h + out[:, :, None, :] * inject[..., None]
+
+
+def _hc_combine(h: mx.array, out: mx.array, inject: mx.array) -> mx.array:
+    if h.shape[0] * h.shape[1] > 8:
+        y = _hc_combine_kern(h, out, inject)
+        if y is not None:
+            return y
+    return _hc_combine_ops(h, out, inject)
 
 
 # Gated DeltaNet
@@ -899,6 +1119,34 @@ class Attention(nn.Module):
                 mx.array(1 << qi, dtype=mx.uint16), axis=1)
         return bs(q, k, v, self.scale, pages, pm, counts, offset)
 
+    def _split_regime_prefill(self, q, k, v, sel, complete, offset, L,
+                              key_len, bs):
+        """Mixed prefill window spanning the causal/sparse boundary
+        (a query is sparse once its complete-block count exceeds
+        block_topk): split the query axis exactly at the boundary and give
+        each span its native path -- flash-causal SDPA for the causal
+        prefix, the L<=8 gathered path for the (at most ratio-1) ragged
+        queries up to the next 4-aligned window, and the block-sparse FA
+        kernel for the aligned sparse tail. Replaces the dense-masked SDPA
+        fallback that materialized an [L, key_len] token mask for the
+        whole window."""
+        r, topk = self.ratio, self.indexer.block_topk
+        c = min(L, max(0, r * (topk + 1) - 1 - offset))
+        s = min(L, -(-c // r) * r)
+        outs = []
+        if c > 0:
+            outs.append(mx.fast.scaled_dot_product_attention(
+                q[..., :c, :], k[..., :offset + c, :],
+                v[..., :offset + c, :], scale=self.scale, mask="causal"))
+        if s > c:
+            outs.append(self._gathered_attention(
+                q[..., c:s, :], k, v, sel[:, c:s], complete[c:s],
+                offset + c, s - c))
+        if L > s:
+            outs.append(self._block_sparse_prefill(
+                q[..., s:, :], k, v, sel[:, s:], offset + s, key_len, bs))
+        return mx.concatenate(outs, axis=2) if len(outs) > 1 else outs[0]
+
     def _paged_attention(self, q, k, v, sel, key_len, paged):
         """Decode (L=1): kq page-gather sdpa straight over the KV cache
         with the selected 4-row blocks as pages -- no per-token K/V copy.
@@ -977,6 +1225,40 @@ class Attention(nn.Module):
                   and (bs := _kq_bs_prefill()) is not None):
                 out = self._block_sparse_prefill(q, k, v, sel, offset,
                                                  key_len, bs)
+            elif (B == 1 and not all_sparse and L > 8
+                  and not isinstance(mask, mx.array)
+                  and offset % 4 == 0 and L % 4 == 0
+                  and self.ratio == 4 and D == 256 and H == 12 * Hkv
+                  and q.dtype in (mx.bfloat16, mx.float16)
+                  and (bs := _kq_bs_prefill()) is not None):
+                out = self._split_regime_prefill(q, k, v, sel, complete,
+                                                 offset, L, key_len, bs)
+            elif (B == 1 and L > 8 and L % 4 != 0
+                  and not isinstance(mask, mx.array)
+                  and (all_sparse or offset % 4 == 0)
+                  and self.ratio == 4 and D == 256 and H == 12 * Hkv
+                  and q.dtype in (mx.bfloat16, mx.float16)
+                  and (offset + (L - L % 4) + 1) // self.ratio
+                  > self.indexer.block_topk
+                  and (bs := _kq_bs_prefill()) is not None):
+                # Ragged window (serve one-shots whole prompts, so L rarely
+                # lands on a multiple of 4): 4-aligned head through the
+                # kernel paths, the <=3 tail queries through the gathered
+                # path. Without this the whole chunk pays the dense token
+                # mask.
+                Lh = L - L % 4
+                if all_sparse:
+                    head = self._block_sparse_prefill(
+                        q[..., :Lh, :], k, v, sel[:, :Lh], offset,
+                        key_len, bs)
+                else:
+                    head = self._split_regime_prefill(
+                        q[..., :Lh, :], k, v, sel[:, :Lh], complete[:Lh],
+                        offset, Lh, key_len, bs)
+                tail = self._gathered_attention(
+                    q[..., Lh:, :], k, v, sel[:, Lh:], complete[Lh:],
+                    offset + Lh, L - Lh)
+                out = mx.concatenate([head, tail], axis=2)
             else:
                 qsa = _qsa_token_mask(sel, complete, offset, L, key_len,
                                       self.ratio, self.indexer.block_topk)
@@ -1025,6 +1307,10 @@ class SparseMoeBlock(nn.Module):
         scores = mx.take_along_axis(gates, inds, axis=-1)
         if self.norm_topk_prob:
             scores = scores / scores.sum(axis=-1, keepdims=True)
+        # Routing math runs fp32 (kept router weights); the weighted sum
+        # returns to the activation dtype so the fp32 scores do not
+        # promote the residual stream for every downstream layer.
+        scores = scores.astype(x.dtype)
         y = self.switch_mlp(x, inds)
         y = (y * scores[..., None]).sum(axis=-2)
         shared_y = self.shared_expert(x)
@@ -1411,3 +1697,40 @@ class Model(nn.Module):
             else:
                 caches.append(KVCache())
         return caches
+
+
+# Arch-default prefill chunk once the split-regime QSA path is armed (8192
+# measured 913 vs 758 tps at d8192 over the stock 2048 chunk: MoE gather
+# segments grow ~19 -> ~35 TF and the split path keeps QSA out of the dense
+# token-mask quadratic). Without the kq block-sparse prefill kernel the big
+# window falls back to that dense mask and loses, so the profile only arms
+# with the kernel present. Score transient: the indexer's [B, heads, L,
+# depth/ratio] fp32 block scores. GMLX_Q4_PREFILL_STEP overrides in either
+# direction; an explicit PREFILL_STEP_SIZE (flag/config/env) wins over both,
+# and the decode-pressure tick term shrinks live chunks regardless of base.
+_Q4_BASE_STEP: Optional[int] = 8192
+
+
+def _q4_base_step() -> Optional[int]:
+    env = os.environ.get("GMLX_Q4_PREFILL_STEP")
+    if env:
+        try:
+            n = int(env)
+            return n if n > 0 else None
+        except ValueError:
+            return None
+    return _Q4_BASE_STEP
+
+
+_prefill_decay = importlib.import_module("gmlx.gen.prefill_decay")
+
+_prefill_score_profile = _prefill_decay.build_score_profile(
+    profile=lambda: _prefill_decay.ScoreTransientProfile(
+        heads=4, bytes_per_elem=4, depth_divisor=4,
+        base_step=_q4_base_step()),
+    kernels_armed=lambda: _kq_bs_prefill() is not None,
+    require_cache=QSAKVCache,
+)
+
+
+_prefill_decay.register_score_profile("qwen4_exp", _prefill_score_profile)
