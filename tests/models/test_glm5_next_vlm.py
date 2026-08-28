@@ -345,7 +345,9 @@ def test_merger_conv_matches_the_explicit_block_matmul():
         for i in range(2):
             for j in range(2):
                 ref = ref + x[4 * k + 2 * i + j] @ w[:, i, j, :].T
-        assert float(mx.abs(got[k, 0, 0] - ref).max()) < 1e-5
+        # M5 f32 GEMM runs at TF32 precision by default (~5e-4 here); a
+        # wrong weight layout is O(1).
+        assert float(mx.abs(got[k, 0, 0] - ref).max()) < 5e-3
 
 
 def test_merger_rows_depend_only_on_their_own_block():
