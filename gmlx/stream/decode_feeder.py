@@ -1335,6 +1335,14 @@ class DecodeFeeder:
         if getattr(self, "_closed", False):
             return
         self._closed = True
+        if getattr(self, "_gpu_resident", False):
+            import mlx_kquant as kq
+
+            if getattr(kq, "residency_erase", None):
+                for a in self._arena.values():
+                    kq.residency_erase(a[0])
+                kq.residency_commit()
+            self._gpu_resident = False
         if getattr(self, "_routed_log", None):
             lis = np.array([li for li, _ in self._routed_log], np.uint16)
             rows = [ids for _, ids in self._routed_log]

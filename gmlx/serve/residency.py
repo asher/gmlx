@@ -941,6 +941,10 @@ class _ResidencyPool:
         # a feeder<->module reference cycle, so refcounting alone won't
         # reclaim them before the next model sizes its own arena.
         _decode_feeder = getattr(owner, "_kq_decode_feeder", None)
+        _resident_holders = [
+            m for m in (entry.model_cache.get("model"), owner)
+            if getattr(m, "_kq_resident_arrays", None)
+        ]
         scratch = _Scratch()
         scratch.response_generator = entry.response_generator
         scratch.model_cache = entry.model_cache
@@ -989,10 +993,23 @@ class _ResidencyPool:
         # entry still points at the model frees nothing (the closer loop's
         # last bound method alone pins the feeder and, through it, every
         # expert weight): drop every reference first, then collect.
+        for m in _resident_holders:
+            try:
+                import mlx_kquant as kq
+
+                if getattr(kq, "residency_erase", None):
+                    for a in m._kq_resident_arrays:
+                        kq.residency_erase(a)
+                    kq.residency_commit()
+            except Exception:
+                pass
+            m._kq_resident_arrays = None
         entry.model_cache = {}
         entry.response_generator = None
         entry.apc_manager = None
         del scratch, owner, close, _prefetcher, _feeder, _decode_feeder
+        m = None
+        del m, _resident_holders
         import gc
         gc.collect()
 

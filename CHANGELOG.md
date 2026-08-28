@@ -6,6 +6,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Metal buffer leaks: glm5next decode no longer hits the 499k resource limit
+  on long generations, and streamed serve releases arena/weight residency on
+  feeder close and model eviction.
+
 ## [0.4.4] - 2026-08-27
 
 ### Added
