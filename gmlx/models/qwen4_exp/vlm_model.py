@@ -19,7 +19,10 @@ streams. The PLE hash layer sees the raw token ids either way (image
 placeholder positions hash the image token id, as in the reference).
 
 v1 is single-image-turn oriented and B=1-serve aligned like the other
-vendored VLM pairs; MTP + VLM composition is not wired (text-only MTP is).
+vendored VLM pairs. The ``LanguageModel`` carries the same spec hooks as
+the text-only MTP target (``Qwen4ExpSpecHooks``), so ``--mmproj`` and the
+qwen4exp-mtp companion drafter compose on one model; its verify forward
+resolves mrope positions so verify after an image turn matches plain decode.
 """
 
 from __future__ import annotations
@@ -44,6 +47,7 @@ from mlx_vlm.models.qwen3_vl.qwen3_vl import Model as _Qwen3VLModel
 
 from . import model as q4
 from .model import ModelArgs as TextConfig
+from .mtp import Qwen4ExpSpecHooks, _SpecOutput
 
 
 def ensure_registered() -> None:
@@ -78,11 +82,12 @@ class ModelConfig(BaseModelConfig):
             self.video_token_index = self.video_token_id
 
 
-class LanguageModel(nn.Module):
+class LanguageModel(Qwen4ExpSpecHooks, nn.Module):
     """The vendored text tower in mlx-vlm's ``language_model`` shape:
     resolves mrope position ids (prefill from ``get_rope_index`` via
     ``_position_ids``; decode from ``rope_deltas``) and threads them into
-    the qwen4exp backbone."""
+    the qwen4exp backbone. Carries the same spec hooks as the text-only
+    MTP target so ``--mmproj`` and text-only MTP compose on one model."""
 
     # Same interleaved-mrope position derivation as qwen3.5 (the configs
     # share every field it reads).
@@ -133,6 +138,11 @@ class LanguageModel(nn.Module):
             + mx.arange(L, dtype=mx.int32)[None]
         return mx.broadcast_to(pos[None], (3, B, L))
 
+    def _spec_verify_positions(self, verify_input: mx.array, prompt_cache):
+        # Verify runs at the same positions plain decode would: the resolved
+        # mrope block after an image turn, None (scalar-offset rope) before.
+        return self._resolve_positions(verify_input, prompt_cache, None, None)
+
     def __call__(
         self,
         inputs: mx.array,
@@ -141,11 +151,18 @@ class LanguageModel(nn.Module):
         cache=None,
         position_ids: Optional[mx.array] = None,
         rope_deltas: Optional[mx.array] = None,
+        return_hidden: bool = False,
+        return_shared_kv: bool = False,
         **kwargs,
     ):
         del mask, kwargs  # the backbone builds masks from the caches
         positions = self._resolve_positions(
             inputs, cache, position_ids, rope_deltas)
+        if return_hidden or return_shared_kv:
+            out, streams = self.model(
+                inputs, cache, input_embeddings=inputs_embeds,
+                position_ids=positions, return_streams=True)
+            return _SpecOutput(logits=self._head(out), hidden_states=[streams])
         out = self.model(inputs, cache, input_embeddings=inputs_embeds,
                          position_ids=positions)
         return LanguageModelOutput(logits=self._head(out))
