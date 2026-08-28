@@ -1711,7 +1711,7 @@ def _install_gpu_residency(model, moe_modules) -> None:
                 w = getattr(getattr(m, attr, None), "weight", None)
                 if w is not None:
                     skip.add(id(w))
-    n = 0
+    inserted = []
     nbytes = 0
     for _, a in tree_flatten(model.parameters()):
         if id(a) in skip:
@@ -1719,9 +1719,11 @@ def _install_gpu_residency(model, moe_modules) -> None:
         if a.ndim == 3 and a.nbytes > (1 << 30):
             continue  # belt: any GB-scale stack is an expert container
         if kq.residency_insert(a):
-            n += 1
+            inserted.append(a)
             nbytes += a.nbytes
     kq.residency_commit()
+    model._kq_resident_arrays = inserted
+    n = len(inserted)
     print(f"[stream] gpu-resident weights: {n} buffers "
           f"({nbytes / 1e9:.1f} GB) in the Metal residency set "
           "(GMLX_GPU_RESIDENT=0 disables)")
