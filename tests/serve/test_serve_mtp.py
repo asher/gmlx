@@ -762,8 +762,10 @@ def test_load_vlm_mtp_model_applies_chat_template(monkeypatch):
         chat_template = "{{ gguf }}"
 
     class _LM:
+        # The full gemma4_text hook row: the check is per-arch now.
         speculative_logits_from_hidden = object()
         rollback_speculative_cache = object()
+        speculative_draft_hidden = object()
 
     class _Model:
         language_model = _LM()

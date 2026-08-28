@@ -152,6 +152,15 @@ MTP_DRAFTER_ARCHES = {
 }
 
 
+# model_types whose drafter ONLY ever ships as a companion GGUF, so the
+# loaders (and the cli speculative-auto gates) autodetect one next to the
+# target instead of requiring --draft-gguf. Deliberately narrower than
+# MTP_DRAFTER_ARCHES: qwen3_5 has a dflash row there but is excluded here
+# because its native in-GGUF head must win over a sidecar - a DFlash2
+# companion stays explicit --draft-gguf, matching the text path's auto.
+MTP_COMPANION_AUTO_MODEL_TYPES = ("deepseek_v4", "qwen4_exp", "muse_glimmer")
+
+
 def mtp_wired(gguf_arch: str | None) -> bool:
     """True iff a native-head MTP GGUF of this arch has a wired target class."""
     model_type = config_synth.GGUF_ARCH_TO_MODEL_TYPE.get(gguf_arch or "")
