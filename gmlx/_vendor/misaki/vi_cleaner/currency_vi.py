@@ -5,7 +5,7 @@ from pathlib import Path
 import json
 
 _currency_key = {
-    "\$": "đô la",
+    r"\$": "đô la",
     "£": "bảng",
     "€": "ơ rô",
     "₩": "uân",
@@ -37,7 +37,7 @@ def _expand_currency(match):
     if suffix == currency or prefix == currency:
         return match.group(0)
     if currency.lower() == "$":
-        currency = _currency_key["\$"]
+        currency = _currency_key[r"\$"]
     elif currency.lower() in _currency_key.keys():
         currency = _currency_key[currency.lower()]
     return prefix + currency + suffix

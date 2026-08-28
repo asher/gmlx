@@ -108,7 +108,7 @@ def convert_num(string):
     global BOUND_NOUNS
 
     # Bound Nouns
-    tokens = set(re.findall("([\d][\d,]*)( ?[ㄱ-힣]+)?(?:/B)?", string))
+    tokens = set(re.findall(r"([\d][\d,]*)( ?[ㄱ-힣]+)?(?:/B)?", string))
     for token in tokens:
         num, bn = token
         bn_s = bn.lstrip()
