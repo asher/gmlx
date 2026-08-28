@@ -835,6 +835,24 @@ def _degrade_failed_mtp(model_path: str, error: str) -> None:
         pass
 
 
+_FIRST_PARTY_ROOTS = ("gmlx", "mlx_vlm", "mlx_lm", "mlx_kquant")
+
+
+def _raise_if_first_party_import(exc: ModuleNotFoundError) -> None:
+    """A missing *first-party submodule* in a running server almost always
+    means the install changed on disk after startup (a pip upgrade, or a
+    checkout switch under an editable install): the packages themselves
+    imported fine at boot, so a lazily imported submodule can only be
+    missing because the tree moved underneath. Bare, the error reads as a
+    packaging bug ("No module named 'gmlx.x'"); re-raise with the remedy.
+    Anything else (a genuinely missing third-party dep) returns untouched
+    for the caller to re-raise."""
+    if (exc.name or "").split(".", 1)[0] in _FIRST_PARTY_ROOTS:
+        raise RuntimeError(
+            f"{exc} - the gmlx install likely changed on disk after this "
+            "server started; `gmlx restart` loads the new code") from exc
+
+
 def install_gguf_server_bridge() -> None:
     """Route ``*.gguf`` model paths in mlx-vlm's server through gmlx.
 
@@ -858,7 +876,7 @@ def install_gguf_server_bridge() -> None:
 
     original = generation.load_model_resources
 
-    def load_model_resources(model_path, adapter_path=None):
+    def _bridge_load(model_path, adapter_path=None):
         # A prior speculative GGUF build's drafter env must never leak into this
         # load: the engine's load_drafter block fires whenever MLX_VLM_DRAFT_MODEL
         # is set, so a stale value would hand the K-quant MTP drafter to an
@@ -1005,6 +1023,13 @@ def install_gguf_server_bridge() -> None:
                                         adapter_gguf=adapter_gguf,
                                         stream=stream, **feeders)
         return original(model_path, adapter_path)
+
+    def load_model_resources(model_path, adapter_path=None):
+        try:
+            return _bridge_load(model_path, adapter_path)
+        except ModuleNotFoundError as e:
+            _raise_if_first_party_import(e)
+            raise
 
     generation.load_model_resources = load_model_resources
     setattr(generation, _BRIDGE_FLAG, True)

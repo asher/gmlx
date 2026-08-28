@@ -89,3 +89,20 @@ def test_drafter_source_lines(caplog):
     assert any("native MTP head of target.gguf" in ln for ln in lines)
     assert any("autodetected companion" in ln and "/m/found.gguf" in ln
                and "dflash2" in ln for ln in lines)
+
+
+# stale-install import translation: a first-party submodule can only go
+# missing when the install changed on disk under the running server
+def test_first_party_import_error_gets_the_restart_hint():
+    exc = ModuleNotFoundError("No module named 'gmlx.spec.mtp_load'",
+                              name="gmlx.spec.mtp_load")
+    with pytest.raises(RuntimeError, match="gmlx restart") as e:
+        bridge._raise_if_first_party_import(exc)
+    assert e.value.__cause__ is exc
+    assert "gmlx.spec.mtp_load" in str(e.value)
+
+
+def test_third_party_import_error_passes_through():
+    for name in ("numpy.linalg", "misaki", None):
+        exc = ModuleNotFoundError(f"No module named {name!r}", name=name)
+        assert bridge._raise_if_first_party_import(exc) is None

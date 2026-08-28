@@ -1328,3 +1328,82 @@ def test_bare_status_lists_stale_with_reason(monkeypatch, capsys):
     doc = json.loads(capsys.readouterr().out)
     assert [s["port"] for s in doc["servers"]] == [9001, 9003]
     assert [s["port"] for s in doc["stale"]] == [9002]
+
+
+# source stamp: the runfile records the tree the server booted with, so a
+# later `status`/`launch` (running the new code) can flag a stale server
+def _stamp_tree(tmp_path):
+    pkg = tmp_path / "pkg"
+    (pkg / "sub").mkdir(parents=True)
+    (pkg / "__init__.py").write_text("")
+    (pkg / "sub" / "m.py").write_text("")
+    os.utime(pkg / "__init__.py", (1000.0, 1000.0))
+    os.utime(pkg / "sub" / "m.py", (1001.0, 1001.0))
+    return pkg
+
+
+def test_source_stamp_counts_and_newest_mtime(monkeypatch, tmp_path):
+    pkg = _stamp_tree(tmp_path)
+    monkeypatch.setattr(lc, "_source_root", lambda: pkg)
+    assert lc.source_stamp() == {"files": 2, "newest_mtime": 1001.0}
+
+
+def test_source_changed_detects_edit_add_delete(monkeypatch, tmp_path):
+    pkg = _stamp_tree(tmp_path)
+    monkeypatch.setattr(lc, "_source_root", lambda: pkg)
+    run = {"source_stamp": lc.source_stamp()}
+    assert lc.source_changed(run) is False
+
+    os.utime(pkg / "sub" / "m.py", (3000.0, 3000.0))     # in-place edit
+    assert lc.source_changed(run) is True
+    os.utime(pkg / "sub" / "m.py", (1001.0, 1001.0))
+    assert lc.source_changed(run) is False
+
+    extra = pkg / "extra.py"                             # added file, older mtime
+    extra.write_text("")
+    os.utime(extra, (900.0, 900.0))
+    assert lc.source_changed(run) is True
+    extra.unlink()
+    assert lc.source_changed(run) is False
+
+    (pkg / "sub" / "m.py").unlink()                      # deletion
+    assert lc.source_changed(run) is True
+
+
+def test_source_changed_unknown_without_stamp():
+    # Pre-stamp runfiles (older servers) must read unknown, never stale.
+    assert lc.source_changed(None) is None
+    assert lc.source_changed({}) is None
+    assert lc.source_changed({"source_stamp": "bogus"}) is None
+
+
+def test_stamp_run_refreshes_and_noops_without_runfile(monkeypatch, tmp_path):
+    pkg = _stamp_tree(tmp_path)
+    monkeypatch.setattr(lc, "_source_root", lambda: pkg)
+    lc.stamp_run("127.0.0.1", 9001)                      # unmanaged: no runfile
+    assert lc.read_run("127.0.0.1", 9001) is None
+    lc.write_run("127.0.0.1", 9001, {
+        "pid": 11, "source_stamp": {"files": 0, "newest_mtime": 0}})
+    lc.stamp_run("127.0.0.1", 9001)                      # launchd respawn refresh
+    run = lc.read_run("127.0.0.1", 9001)
+    assert run["source_stamp"] == lc.source_stamp()
+    assert lc.source_changed(run) is False
+
+
+def test_status_notes_stale_source(monkeypatch, capsys):
+    lc.write_run("127.0.0.1", 9001, {
+        "pid": 11, "host": "127.0.0.1", "port": 9001, "managed_by": "detach",
+        "source_stamp": {"files": 1, "newest_mtime": 1.0}})
+    monkeypatch.setattr(lc, "identity_ok", lambda run: True)
+    monkeypatch.setattr(lc, "_health_ok", lambda h, p, timeout=1.5: True)
+    monkeypatch.setattr(lc, "_served_model_count", lambda h, p, key=None: 1)
+    monkeypatch.setattr(lc, "source_stamp",
+                        lambda: {"files": 2, "newest_mtime": 2.0})
+    assert lc.status("127.0.0.1", 9001) == 0
+    out = capsys.readouterr().out
+    assert "source changed on disk" in out and "gmlx restart" in out
+
+    monkeypatch.setattr(lc, "source_stamp",
+                        lambda: {"files": 1, "newest_mtime": 1.0})
+    assert lc.status("127.0.0.1", 9001) == 0
+    assert "source changed" not in capsys.readouterr().out
