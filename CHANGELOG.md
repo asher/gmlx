@@ -6,6 +6,24 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `glm5next` (GLM-5.3-Flash 320B-A18B, llama.cpp PR 27754) loads: hybrid
+  KDA linear attention + NoPE MLA with a pooled DSA sparse indexer
+  (top-512 key pools at depth), sigmoid MoE with clamped SwiGLU, 4-stream
+  sinkhorn hyper-connections, and the glm4 BPE pretokenizer with
+  `ignore_merges`. Long prompts stream the absorbed MLA attention in
+  online-softmax tiles and gather the sparse-selected pool union per query
+  block instead of masking the full key set.
+- glm5next MTP speculative decoding from the GGUF's native NextN block:
+  the drafter's DSA layer rides the trunk caches, verify rollback trims
+  the latent-KV/pool caches and replays the KDA recurrent state from the
+  recorded pre-verify sink.
+- glm5next VLM pairing (`--mmproj`): the GLM-OCR ViT + conv-downsample
+  projector load onto a vendored tower; images preprocess with the
+  align-28 canvas search (16..8000 token budget), soft tokens splice at
+  the `<|image|>` placeholders, and text-only requests keep MTP.
+
 ### Changed
 
 - qwen4exp prefill rewritten around the sparse boundary: split-regime QSA

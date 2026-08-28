@@ -81,6 +81,8 @@ _MTP_WIDTH_LIMIT_BY_MODEL_TYPE = {
     "muse_glimmer": 1,
     # Qwen4ExpMTPDrafter.make_cache raises on batched left_padding.
     "qwen4_exp": 1,
+    # Glm5NextMTPDrafter.make_cache raises on batched left_padding.
+    "glm5_next": 1,
 }
 # Unknown arch: cap conservatively rather than opting a new family into the
 # losing regime. Uncapped is earned by measurement, not inherited by default.
@@ -238,6 +240,26 @@ def _load_mtp_drafter(
         )
         log(
             f"[mtp] drafter: HyV3MTPDrafter layer_idx={first_mtp_block} "
+            f"block_size={drafter.config.block_size}"
+        )
+    elif model_type == "glm5_next":
+        from gmlx.models.glm5_next.model import ModelArgs
+        from gmlx.models.glm5_next.mtp import (
+            Glm5NextMTPConfig,
+            Glm5NextMTPDrafter,
+        )
+
+        drafter = Glm5NextMTPDrafter(
+            Glm5NextMTPConfig(
+                text_config=ModelArgs.from_dict(config_dict),
+                # Pinned at 2: < 2 exits the owned decode loop after one
+                # token, and > 2 needs a multi-update PoolingCache undo log
+                # the drafter-side accept trim does not have yet.
+                block_size=2,
+            )
+        )
+        log(
+            f"[mtp] drafter: Glm5NextMTPDrafter layer_idx={first_mtp_block} "
             f"block_size={drafter.config.block_size}"
         )
     else:
@@ -1591,7 +1613,7 @@ def load_mtp_model(
         hf_weights,
         hf_kquant_meta,
         log=_log,
-        sanitize=(_mt in ("deepseek_v4", "hy_v3")),
+        sanitize=(_mt in ("deepseek_v4", "hy_v3", "glm5_next")),
         no_alias=owned_names,
         fp32_keep=_FP32_KEEP_BY_MODEL_TYPE.get(_mt, ()),
         source_key=weights_source_key(*pf.shards),

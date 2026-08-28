@@ -636,6 +636,13 @@ _MTP_TARGET_HOOKS_BY_TYPE = {
         "speculative_argmax_from_hidden",
         "speculative_verify_hidden",
     ),
+    # Glm5NextSpecLM (vendored mlx-lm class): same lean set as deepseek_v4.
+    "glm5_next": (
+        "rollback_speculative_cache",
+        "speculative_logits_from_hidden",
+        "speculative_argmax_from_hidden",
+        "speculative_verify_hidden",
+    ),
 }
 
 
@@ -794,6 +801,16 @@ def _mtp_target_classes(model_type: str):
             return muse_glimmer_mtp.MuseGlimmerSpecLM(ModelArgs.from_dict(config))
 
         return muse_glimmer_mtp.MuseGlimmerSpecLM, build
+    if model_type == "glm5_next":
+        import gmlx.models.glm5_next.mtp as glm5_next_mtp
+        from gmlx.models.glm5_next.model import ModelArgs, ensure_registered
+
+        ensure_registered()
+
+        def build(config):
+            return glm5_next_mtp.Glm5NextSpecLM(ModelArgs.from_dict(config))
+
+        return glm5_next_mtp.Glm5NextSpecLM, build
     from .arch_table import MTP_WIRED_MODEL_TYPES
 
     raise NotImplementedError(
@@ -951,6 +968,13 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         import gmlx.models.kimi_k3 as kimi_k3_model
 
         kimi_k3_model.ensure_registered()
+    if mt == "glm5_next":
+        # mlx-lm ships no glm5_next module (llama.cpp PR #27754 arch); same
+        # vendored-registration pattern as kimi_k3, plus the deepseek_v4
+        # PoolingCache injection its hybrid cache depends on.
+        import gmlx.models.glm5_next.model as glm5_next_model
+
+        glm5_next_model.ensure_registered()
     if mt == "qwen4_exp":
         # Neither pinned mlx-lm nor mlx-vlm ships qwen4_exp (llama.cpp PR
         # #27742); same vendored-registration pattern as deepseek_v4, plus
@@ -2791,6 +2815,12 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # wire); the GDN decay params feed the fp32 scan; the per-stream inject
     # scalars scale the residual streams directly.
     "qwen4_exp": (".mlp.gate.weight", ".A_log", ".dt_bias", ".inject.weight"),
+    # glm5_next: hyper-connection mixers are fp32 like deepseek_v4; sigmoid
+    # top-8-of-288 routing + correction bias is near-tie-heavy; the KDA
+    # decay params feed the fp32 recurrence; the indexer head-weights GEMM
+    # and ape table are fp32 per llama.cpp PR 27754.
+    "glm5_next": ("_hc.", ".mlp.gate.weight", ".e_score_correction_bias",
+                  ".a_folded", ".dt_bias", ".ape", ".weights_proj."),
 }
 
 # Params kept at their native f16 through the bf16 cast (no upcast). MLX
@@ -2939,12 +2969,14 @@ def _install_and_load(
     if active_before is None:
         active_before = _active_now()
     # 5. sanitize first - model.sanitize may rename keys; rebuild meta.
+    # Codec'd tensors can land on non-``.weight`` raw leaves (hc ``fn``),
+    # so only the vestigial wire siblings are excluded from the rematch.
     if sanitize and hasattr(model, "sanitize"):
         hf_weights = model.sanitize(hf_weights)
         new_meta: dict[str, str] = {}
         unmatched_meta = set(hf_kquant_meta)
         for new_k in hf_weights:
-            if not new_k.endswith(".weight"):
+            if new_k.endswith(".scales") or new_k.endswith(".biases"):
                 continue
             for old_k in list(unmatched_meta):
                 if new_k == old_k or new_k.endswith("." + old_k):
@@ -3397,12 +3429,14 @@ def load_model(
         _patch_dsv32_dense_default(model)  # exact default; GMLX_DSV32_SPARSE=1 -> sparse (experimental)
 
     # 5. sanitize first - model.sanitize may rename keys; rebuild meta.
+    # Codec'd tensors can land on non-``.weight`` raw leaves (hc ``fn``),
+    # so only the vestigial wire siblings are excluded from the rematch.
     if hasattr(model, "sanitize"):
         hf_weights = model.sanitize(hf_weights)
         new_meta: dict[str, str] = {}
         unmatched_meta = set(hf_kquant_meta)
         for new_k in hf_weights:
-            if not new_k.endswith(".weight"):
+            if new_k.endswith(".scales") or new_k.endswith(".biases"):
                 continue
             for old_k in list(unmatched_meta):
                 if new_k == old_k or new_k.endswith("." + old_k):

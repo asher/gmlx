@@ -482,14 +482,34 @@ def test_auto_server_gguf_path_stays_local_with_hint(
     gguf = tmp_path / "alpha.gguf"
     gguf.write_bytes(b"GGUF")
     _auto_env(monkeypatch, served=["alpha"])
-    cfg = SimpleNamespace(models=[
-        SimpleNamespace(id="alpha", path=str(gguf))])
+    # The real config's models is {id: ModelCfg}, not a list.
+    cfg = SimpleNamespace(models={
+        "alpha": SimpleNamespace(id="alpha", path=str(gguf))})
     monkeypatch.setattr("gmlx.commands.launch._discover_config",
                         lambda: (cfg, str(tmp_path / "gmlx.yaml")))
     args, parser = _auto_args([str(gguf)])
     assert chat._auto_server(args, parser) is False
     out = capsys.readouterr().out
     assert "serves this file as 'alpha'" in out
+
+
+def test_auto_server_gguf_path_unmapped_config_stays_local(
+        monkeypatch, tmp_path, capsys):
+    """A config whose models dict does not map the requested file must not
+    crash the probe (regression: iterating the dict yielded id strings)."""
+    from types import SimpleNamespace
+
+    gguf = tmp_path / "gamma.gguf"
+    gguf.write_bytes(b"GGUF")
+    _auto_env(monkeypatch, served=["alpha"])
+    cfg = SimpleNamespace(models={
+        "alpha": SimpleNamespace(id="alpha",
+                                 path=str(tmp_path / "alpha.gguf"))})
+    monkeypatch.setattr("gmlx.commands.launch._discover_config",
+                        lambda: (cfg, str(tmp_path / "gmlx.yaml")))
+    args, parser = _auto_args([str(gguf)])
+    assert chat._auto_server(args, parser) is False
+    assert "serves this file" not in capsys.readouterr().out
 
 
 # ------------------------------- /memory ---------------------------------

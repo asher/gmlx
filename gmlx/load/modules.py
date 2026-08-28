@@ -1521,10 +1521,13 @@ def dequantize_unattachable_leaves(model: nn.Module,
 
     Some modules hold their weight as a raw array used inline in the
     forward (deepseek-family MoEGate routers), so there is no leaf to
-    swap a kquant module into. Dequantize those wire bytes to f32 at
-    load and drop the codec entry. Tensors over ``max_bytes`` (f32
-    size) are left alone so ``install_kquant_modules`` fails loud on
-    them instead of silently materializing gigabytes of float.
+    swap a kquant module into. Others hold raw arrays under names other
+    than ``weight`` (hyper-connection ``fn`` matrices, Q8_0 in some
+    GGUFs). Both dequantize to f32 at load and drop the codec entry.
+    The installer never visits raw leaves, so a packed array left in
+    place would load silently into the float slot and poison the
+    forward; a codec'd raw leaf over ``max_bytes`` (f32 size) raises
+    for the same reason - there is no loud downstream failure.
 
     llama.cpp's quantize never codecs router gates, so its GGUFs never
     hit this path; so far only an antirez DeepSeek-V4-Flash dspark
@@ -1546,26 +1549,35 @@ def dequantize_unattachable_leaves(model: nn.Module,
     handled: list[str] = []
 
     def _visit(path: str, module):
-        weight_key = f"{path}.weight"
-        codec = hf_kquant_meta.get(weight_key)
-        if codec is None or isinstance(module, attachable):
+        if isinstance(module, attachable):
             return module
-        target = getattr(module, "weight", None)
-        if not isinstance(target, mx.array) or codec not in known_codecs:
-            return module
-        if target.size * 4 > max_bytes:
-            return module
-        scales_key = f"{path}.scales"
-        scales = hf_weights.get(scales_key)
-        if scales is None:
-            scales = mx.zeros((1,), dtype=mx.uint8)
-        else:
-            del hf_weights[scales_key]
-        deq = kq.dequantize(hf_weights[weight_key], scales, codec, mx.float32)
-        del hf_weights[weight_key]
-        hf_weights[weight_key] = deq.reshape(target.shape)
-        del hf_kquant_meta[weight_key]
-        handled.append(f"{path} ({codec})")
+        for attr, target in list(module.items()):
+            if not isinstance(target, mx.array):
+                continue
+            weight_key = f"{path}.{attr}"
+            codec = hf_kquant_meta.get(weight_key)
+            if codec is None or codec not in known_codecs:
+                continue
+            if target.size * 4 > max_bytes:
+                raise ValueError(
+                    f"quantized wire tensor {weight_key} ({codec}) lands on a "
+                    f"raw array leaf too large to dequantize "
+                    f"({target.size * 4} bytes f32 > {max_bytes})")
+            # Wire scales for ``X.weight`` live at ``X.scales``; for any
+            # other leaf name at ``<key>.scales`` (loader _strip_weight).
+            scales_key = (f"{path}.scales" if attr == "weight"
+                          else f"{weight_key}.scales")
+            scales = hf_weights.get(scales_key)
+            if scales is None:
+                scales = mx.zeros((1,), dtype=mx.uint8)
+            else:
+                del hf_weights[scales_key]
+            deq = kq.dequantize(
+                hf_weights[weight_key], scales, codec, mx.float32)
+            del hf_weights[weight_key]
+            hf_weights[weight_key] = deq.reshape(target.shape)
+            del hf_kquant_meta[weight_key]
+            handled.append(f"{weight_key} ({codec})")
         return module
 
     leaves = model.leaf_modules()

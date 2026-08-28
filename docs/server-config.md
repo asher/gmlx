@@ -411,7 +411,7 @@ model fully resolved). Values are cited to the primary model cards in
 | `qwen2.5` | `qwen2`, `qwen2moe` | temperature=0.7 top_p=0.8 top_k=20 repetition_penalty=1.05 | - |
 | `gemma` | `gemma`, `gemma2`, `gemma3`, `gemma3n`, `gemma4`, `diffusion-gemma` | temperature=1.0 top_p=0.95 top_k=64 | - |
 | `gpt-oss` | `gpt-oss` | temperature=1.0 top_p=1.0 | `@reasoning-high`: temperature=1.0 top_p=1.0 reasoning_effort=high; `@reasoning-low`: temperature=1.0 top_p=1.0 reasoning_effort=low; `@reasoning-medium`: temperature=1.0 top_p=1.0 reasoning_effort=medium |
-| `glm` | `glm4`, `glm4moe`, `glm-dsa` | temperature=1.0 top_p=0.95 | - |
+| `glm` | `glm4`, `glm4moe`, `glm-dsa`, `glm5next` | temperature=1.0 top_p=0.95 | - |
 | `deepseek` | `deepseek2`, `deepseek4` | temperature=0.6 top_p=0.95 | - |
 | `minimax` | `minimax-m2`, `minimax-m3` | temperature=1.0 top_p=0.95 top_k=40 | - |
 | `nemotron` | `nemotron_h_moe` | temperature=1.0 top_p=0.95 | - |

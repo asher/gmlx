@@ -96,6 +96,11 @@ GGUF_ARCH_TO_MODEL_TYPE = {
     # "lightning indexer" + an MTP/nextn layer. mlx-lm's glm_moe_dsa subclasses
     # deepseek_v32 (which adds the Indexer to the deepseek_v3 backbone).
     "glm-dsa": "glm_moe_dsa",
+    # GLM-5.3-Flash (llama.cpp PR 27754 'glm5next'): hybrid 3:1 KDA linear
+    # attention / NoPE MLA with a pooled (kpool-4) lightning indexer,
+    # sigmoid MoE with clamped SwiGLU, 4-stream sinkhorn hyper-connections,
+    # and an in-GGUF MTP/nextn layer. Vendored gmlx.models.glm5_next.
+    "glm5next": "glm5_next",
     # DeepSeek V4 Flash (dwarfstar/antirez GGUF; not a llama.cpp arch): single
     # shared KV latent + grouped low-rank output proj, per-layer local/
     # compressed/sparse-indexed attention (compress_ratios), hyper-connections,
@@ -2796,6 +2801,170 @@ def _synth_deepseek4(meta, shapes, config: dict) -> None:
         config["vocab_size"] = vocab
 
 
+# glm5next (GLM-5.3-Flash 320B-A18B)
+
+def _synth_glm5next(meta, shapes, config: dict) -> None:
+    """Synthesize a glm5_next config from a 'glm5next'-arch GGUF (llama.cpp
+    PR 27754 conversion).
+
+    Hybrid layer schedule from the per-layer head_count_kv array (0 marks a
+    KDA/recurrent layer, 1 an MLA layer). MLA is NoPE-only: rope.dimension_count
+    is written explicitly as 0 and there is no rope anywhere in the text tower.
+    MLA layers carry a pooled lightning indexer (kpool-4 compressor with an
+    additive positional table and a gate projection); its k_norm is a LayerNorm
+    at attention.layer_norm_epsilon (1e-6), distinct from the 1e-5 rms eps.
+    Sigmoid MoE with a selection-only correction bias and clamped SwiGLU;
+    4-stream sinkhorn hyper-connections. block_count (46) includes the
+    MTP/nextn layer; the universal nextn subtraction already yields 45 trunk
+    layers + mtp_num_hidden_layers=1.
+
+    The PR converter hard-refuses conversions that deviate from this shape
+    (nope-only, kpool compression on, tail-select on, uniform layer plan), so
+    the glm5next-specific keys are REQUIRED: a silent default loads cleanly
+    and produces garbage.
+    """
+    arch = "glm5next"
+    config["model_type"] = "glm5_next"
+
+    # The universal default set head_dim to key_length (= kv_lora_rank, 512),
+    # which is not a head dim. Drop it.
+    config.pop("head_dim", None)
+
+    # Layer schedule. A scalar head_count_kv means a mis-converted file - the
+    # KDA/MLA split would be unrecoverable - so fail loud rather than guess.
+    # The array has block_count entries; the tail entry describes the MTP
+    # layer (an MLA layer) and is truncated here.
+    n_layers = config["num_hidden_layers"]
+    kv_arr = _read_int_array(meta, f"{arch}.attention.head_count_kv")
+    if kv_arr is None or len(kv_arr) < n_layers:
+        raise ValueError(
+            f"glm5next synth: {arch}.attention.head_count_kv must be a "
+            f"per-layer array (>= {n_layers} entries; 0 marks a KDA layer); "
+            f"got {kv_arr!r}. Re-convert with the PR-27754 converter.")
+    config["layer_types"] = [
+        "linear_attention" if v == 0 else "full_attention"
+        for v in kv_arr[:n_layers]]
+    # The universal extractor took element 0 of the array, which is 0
+    # whenever layer 0 is KDA - fix to the first MLA layer's value (1, MQA).
+    nonzero = [v for v in kv_arr if v]
+    if not nonzero:
+        raise ValueError("glm5next synth: no full-attention layers in "
+                         f"{arch}.attention.head_count_kv")
+    config["num_key_value_heads"] = nonzero[0]
+
+    # KDA
+    config["kda_head_dim"] = _require(
+        _read_int(meta, f"{arch}.kda.head_dim"),
+        arch=arch, gguf_field=f"{arch}.kda.head_dim")
+    config["ssm_conv_kernel"] = _require(
+        _read_int(meta, f"{arch}.ssm.conv_kernel"),
+        arch=arch, gguf_field=f"{arch}.ssm.conv_kernel")
+    # Required: absent would silently select a different decay form (the
+    # kimi-linear softplus branch), which loads cleanly and degenerates.
+    config["kda_gate_lower_bound"] = _require(
+        _read_float(meta, f"{arch}.kda.gate_lower_bound"),
+        arch=arch, gguf_field=f"{arch}.kda.gate_lower_bound")
+
+    # MLA (NoPE: qk_rope_head_dim must be 0; kept as a read so a future
+    # roped conversion fails the model's own nope assertion loudly).
+    config["q_lora_rank"] = _require(
+        _read_int(meta, f"{arch}.attention.q_lora_rank"),
+        arch=arch, gguf_field=f"{arch}.attention.q_lora_rank")
+    config["kv_lora_rank"] = _require(
+        _read_int(meta, f"{arch}.attention.kv_lora_rank"),
+        arch=arch, gguf_field=f"{arch}.attention.kv_lora_rank")
+    qk_rope = _require(
+        _read_int(meta, f"{arch}.rope.dimension_count"),
+        arch=arch, gguf_field=f"{arch}.rope.dimension_count")
+    config["qk_rope_head_dim"] = qk_rope
+
+    # qk_nope_head_dim / v_head_dim from the per-head MLA tensor shapes -
+    # blk.0 is a KDA layer, so probe the first MLA layer.
+    num_heads = config["num_attention_heads"]
+    mla_layers = [i for i, t in enumerate(config["layer_types"])
+                  if t == "full_attention"]
+    q_b = v_b = None
+    for i in mla_layers:
+        q_b = shapes.get(f"blk.{i}.attn_q_b.weight")
+        v_b = shapes.get(f"blk.{i}.attn_v_b.weight")
+        if q_b is not None and v_b is not None:
+            break
+    if q_b is None or v_b is None:
+        raise ValueError(
+            "glm5next synth: need attn_q_b.weight + attn_v_b.weight on an MLA "
+            f"layer (probed {mla_layers[:4]}...) to derive the MLA head dims.")
+    config["qk_nope_head_dim"] = q_b[1] // num_heads - qk_rope
+    config["v_head_dim"] = v_b[1]
+
+    # Lightning indexer (pooled). k_norm is a LayerNorm with bias at
+    # attention.layer_norm_epsilon - NOT the rms eps.
+    config["index_n_heads"] = _require(
+        _read_int(meta, f"{arch}.attention.indexer.head_count"),
+        arch=arch, gguf_field=f"{arch}.attention.indexer.head_count")
+    config["index_head_dim"] = _require(
+        _read_int(meta, f"{arch}.attention.indexer.key_length"),
+        arch=arch, gguf_field=f"{arch}.attention.indexer.key_length")
+    config["index_topk"] = _require(
+        _read_int(meta, f"{arch}.attention.indexer.top_k"),
+        arch=arch, gguf_field=f"{arch}.attention.indexer.top_k")
+    config["index_kpool"] = _require(
+        _read_int(meta, f"{arch}.attention.indexer.kpool"),
+        arch=arch, gguf_field=f"{arch}.attention.indexer.kpool")
+    knorm_eps = _read_float(meta, f"{arch}.attention.layer_norm_epsilon")
+    config["index_knorm_eps"] = knorm_eps if knorm_eps is not None else 1e-6
+
+    # MoE (sigmoid-gated fine-grained + selection-only correction bias)
+    v3 = _read_v3_moe(meta, shapes, arch)
+    if not v3["sigmoid"]:
+        raise NotImplementedError(
+            "glm5next synth: expert_gating_func != 2 (sigmoid); no such "
+            "conversion exists - re-convert with the PR-27754 converter.")
+    config["scoring_func"] = "sigmoid"
+    config["n_routed_experts"] = v3["n_experts"]
+    config["num_experts_per_tok"] = v3["n_used"]
+    config["moe_intermediate_size"] = v3["moe_ffn"]
+    config["n_shared_experts"] = v3["n_shared"]
+    config["first_k_dense_replace"] = (
+        _read_int(meta, f"{arch}.leading_dense_block_count") or 0)
+    scale = _read_float(meta, f"{arch}.expert_weights_scale")
+    config["routed_scaling_factor"] = scale if scale is not None else 1.0
+    norm = _read_bool(meta, f"{arch}.expert_weights_norm")
+    config["norm_topk_prob"] = True if norm is None else norm
+
+    # Clamped SwiGLU: per-layer arrays (routed + shared, sized for all
+    # block_count layers incl. dense and MTP), uniform on every known
+    # conversion; the model class takes one scalar.
+    clamps = []
+    for key in ("swiglu_clamp_exp", "swiglu_clamp_shexp"):
+        arr = _read_float_array(meta, f"{arch}.{key}")
+        if arr:
+            clamps.extend(arr)
+    if clamps:
+        uniq = set(clamps)
+        if len(uniq) != 1:
+            raise ValueError(
+                f"glm5next synth: non-uniform swiglu clamp {sorted(uniq)} "
+                "- the glm5_next model class supports one global limit.")
+        config["swiglu_limit"] = float(clamps[0])
+
+    # Hyper-connections (4 parallel residual streams, sinkhorn mixing).
+    config["hc_mult"] = _require(
+        _read_int(meta, f"{arch}.hyper_connection.count"),
+        arch=arch, gguf_field=f"{arch}.hyper_connection.count")
+    hc_iters = _read_int(meta, f"{arch}.hyper_connection.sinkhorn_iterations")
+    if hc_iters is not None:
+        config["hc_sinkhorn_iters"] = hc_iters
+    hc_eps = _read_float(meta, f"{arch}.hyper_connection.epsilon")
+    if hc_eps is not None:
+        config["hc_eps"] = hc_eps
+
+    # vocab_size: prefer the explicit GGUF field (the universal read derives
+    # it from the token array, which header-only scans truncate).
+    vocab = _read_int(meta, f"{arch}.vocab_size")
+    if vocab is not None:
+        config["vocab_size"] = vocab
+
+
 # glm4moe (GLM-4.5 / 4.6; MHA + DeepSeek-V3-style fine-grained MoE)
 
 def _synth_glm4moe(meta, shapes, config: dict) -> None:
@@ -3076,6 +3245,7 @@ _SYNTH = {
     "nemotron_h_moe": _synth_nemotron_h_moe,
     "deepseek2": _synth_deepseek2,
     "glm-dsa": _synth_glm_moe_dsa,
+    "glm5next": _synth_glm5next,
     "kimi-k3": _synth_kimi_k3,
     "deepseek4": _synth_deepseek4,
     "glm4moe": _synth_glm4moe,

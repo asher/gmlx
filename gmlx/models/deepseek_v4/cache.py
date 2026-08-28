@@ -42,8 +42,14 @@ class PoolingCache(_BaseCache):
     # per-step dequant traffic (see task #38).
     quantizable = True
 
-    def __init__(self, ratio: int):
+    def __init__(self, ratio: int, lookback: bool = True):
         self.ratio = ratio
+        # Ratio-4 overlap linkage (the ds4 compressor's cross-window shift).
+        # Disjoint-window ratio-4 consumers (glm5_next's pooled indexer)
+        # construct with lookback=False: no predecessor window is prepended,
+        # completed windows return exactly as accumulated, and the
+        # _prev_kv/_prev_gate retention is skipped.
+        self.lookback = bool(lookback) and ratio == 4
 
         self.buf_kv = None
         self.buf_gate = None
@@ -214,7 +220,7 @@ class PoolingCache(_BaseCache):
                 ]
             self.remainder = new_remainder
 
-            if self.ratio == 4 and r_kv.shape[1] > 0:
+            if self.lookback and r_kv.shape[1] > 0:
                 pv_kv, pv_gate = self._lookback_rows(
                     B, D1, D2, kv.dtype, gate.dtype)
                 self._prev_kv = r_kv[:, -self.ratio :]
@@ -235,7 +241,7 @@ class PoolingCache(_BaseCache):
                 r_kv = self.buf_kv
                 r_gate = self.buf_gate
                 r_base = offset - self.ratio + 1
-                if self.ratio == 4:
+                if self.lookback:
                     pv_kv, pv_gate = self._lookback_rows(
                         B, D1, D2, kv.dtype, gate.dtype)
                     # Derived nodes, not the buffer object: the next update's
@@ -348,8 +354,12 @@ class PoolingCache(_BaseCache):
     def make_mask(self, L: int = 1, offset: int = 0):
         """Build a causal validity mask for pooled positions.
 
-        Query at absolute position ``offset + j`` can attend to pooled token
-        ``i`` iff ``i < (offset + j) // ratio``.
+        Query at absolute position ``offset + j`` can attend to pooled
+        window ``i`` iff ``i < (offset + j + 1) // ratio``: a window is
+        visible once its LAST member is causally visible, the query's own
+        just-completed window included (the llama.cpp PR-27754 kpool
+        ``pool_visible`` predicate; the dsa_indexer_score_decode kernel
+        bakes in the same form).
 
         Returns ``(N, P)`` bool mask, or ``None`` when every pooled position
         is visible to every query (common during decode).
@@ -385,17 +395,27 @@ class PoolingCache(_BaseCache):
 
     @property
     def meta_state(self):
-        return self.ratio
+        # Bare ratio while lookback is on (the historical format, so
+        # pre-flag snapshots stay readable); (ratio, lookback) otherwise.
+        return self.ratio if self.lookback else (self.ratio, self.lookback)
 
     @meta_state.setter
     def meta_state(self, v):
-        self.ratio = v
+        if isinstance(v, (tuple, list)):
+            self.ratio, lb = v
+            self.lookback = bool(lb) and self.ratio == 4
+        else:
+            self.ratio = v
+            self.lookback = self.ratio == 4
 
     @classmethod
     def from_state(cls, state, meta_state):
         # APC clone path: the state setter needs ratio (buffer alloc), so
         # construct before restoring rather than relying on setter order.
-        c = cls(meta_state)
+        if isinstance(meta_state, (tuple, list)):
+            c = cls(meta_state[0], lookback=meta_state[1])
+        else:
+            c = cls(meta_state)
         c.state = state
         return c
 
@@ -468,7 +488,7 @@ class PoolingCache(_BaseCache):
             seq_gate = mx.concatenate([buf_gate, gate[:, :k]], axis=1)
         else:
             seq_kv, seq_gate = kv[:, :k], gate[:, :k]
-        if self.ratio == 4:
+        if self.lookback:
             # The lookback window is the LAST window the replay leaves
             # completed, not the one the undone update installed.
             self._prev_kv = seq_kv[:, (w - 1) * self.ratio : w * self.ratio]
@@ -503,8 +523,10 @@ class PoolingCache(_BaseCache):
 class BatchPoolingCache(_BaseCache):
     """Batched pooling cache with per-element variable-length tracking."""
 
-    def __init__(self, ratio: int, left_padding: List[int]):
+    def __init__(self, ratio: int, left_padding: List[int],
+                 lookback: bool = True):
         self.ratio = ratio
+        self.lookback = bool(lookback) and ratio == 4
 
         if not all(p == 0 for p in left_padding):
             raise RuntimeError("BatchPoolingCache does not support left padding")
@@ -664,7 +686,7 @@ class BatchPoolingCache(_BaseCache):
         self.buf_gate = new_buf_gate
         self.remainder = new_remainder
 
-        if ratio == 4:
+        if self.lookback:
             if self._prev_kv is None:
                 pv_kv = mx.zeros((B, ratio, D1), dtype=kv.dtype)
                 pv_gate = mx.full((B, ratio, D2), -mx.inf, dtype=gate.dtype)
@@ -770,11 +792,17 @@ class BatchPoolingCache(_BaseCache):
 
     @property
     def meta_state(self):
-        return (self.ratio, self.remainder, self._pool_lengths, self._processed)
+        base = (self.ratio, self.remainder, self._pool_lengths,
+                self._processed)
+        # 4-tuple while lookback is on (the historical format); the flag
+        # rides as a 5th element only when it deviates.
+        return base if self.lookback else base + (self.lookback,)
 
     @meta_state.setter
     def meta_state(self, v):
-        self.ratio, self.remainder, self._pool_lengths, self._processed = v
+        self.ratio, self.remainder, self._pool_lengths, self._processed = v[:4]
+        lb = v[4] if len(v) > 4 else True
+        self.lookback = bool(lb) and self.ratio == 4
 
     @classmethod
     def from_state(cls, state, meta_state):
@@ -860,7 +888,7 @@ class BatchPoolingCache(_BaseCache):
                 seq_gate = gate[i : i + 1, :k]
             if w > 0:
                 self._pool_lengths[i] += w
-                if ratio == 4:
+                if self.lookback:
                     if self._prev_kv is None:
                         # First-ever completion: other rows keep the
                         # first-window masking (zero kv, -inf gate).
@@ -1012,7 +1040,7 @@ class BatchPoolingCache(_BaseCache):
         self._processed = self._processed + other._processed
 
     def extract(self, idx):
-        cache = PoolingCache(self.ratio)
+        cache = PoolingCache(self.ratio, lookback=self.lookback)
         pl = self._pool_lengths[idx]
         r = self.remainder[idx]
 
@@ -1039,7 +1067,8 @@ class BatchPoolingCache(_BaseCache):
                 "BatchPoolingCache can only merge caches with the same ratio"
             )
         ratio = caches[0].ratio
-        batch_cache = cls(ratio, [0] * B)
+        batch_cache = cls(ratio, [0] * B,
+                          lookback=getattr(caches[0], "lookback", True))
 
         # Check if all caches are empty
         if all(c.empty() for c in caches):
