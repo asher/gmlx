@@ -190,9 +190,13 @@ def _embedding_kind(meta, basename: str, arch: str | None) -> str | None:
     return None
 
 
-def _classify_meta(meta, *, basename: str, path: str) -> ClassifiedGguf:
+def _classify_meta(
+    meta, *, basename: str, path: str, mtp_only: bool = False
+) -> ClassifiedGguf:
     """Classify from already-read metadata (a live ``GGUFReader`` or a plain dict).
-    Split out so the verdict logic is exercised without a real GGUF on disk."""
+    Split out so the verdict logic is exercised without a real GGUF on disk.
+    ``mtp_only``: the caller probed the tensor table and found a NextN/MTP
+    sidecar (nextn blocks without a trunk) - classified as a drafter."""
     arch = read_string(meta, "general.architecture")
     quant = quant_tag(basename)
     ap = os.path.abspath(path)
@@ -205,7 +209,7 @@ def _classify_meta(meta, *, basename: str, path: str) -> ClassifiedGguf:
     if (read_string(meta, "general.type") == "adapter"
             or read_string(meta, "adapter.type") is not None):
         return ClassifiedGguf(ap, "adapter", arch, False, quant, False)
-    if _looks_like_drafter(meta, arch):
+    if _looks_like_drafter(meta, arch) or mtp_only:
         return ClassifiedGguf(ap, "drafter", arch, False, quant, False,
                               n_embd=_drafter_hidden_size(meta, arch),
                               drafter_kind=_drafter_kind(meta, arch),
@@ -225,6 +229,26 @@ def _classify_meta(meta, *, basename: str, path: str) -> ClassifiedGguf:
                           declared=_declared_base_ids(meta))
 
 
+def _probe_mtp_only(path: str, kv) -> bool:
+    """True when ``path`` is a NextN/MTP sidecar (llama.cpp ``mtp-*.gguf``,
+    e.g. nemotron_h_moe): it carries the SAME arch + metadata as its base
+    model, differing only in the tensor table (nextn block, no trunk). Probe
+    blk.0 - the same tell llama.cpp's loader uses - so the sidecar lists as
+    a drafter, not as a phantom servable model. The tensor-table scan runs
+    only on the rare nextn-carrying files; classification stays header-cheap
+    elsewhere."""
+    arch = read_string(kv, "general.architecture")
+    if not arch or (read_int(kv, f"{arch}.nextn_predict_layers") or 0) <= 0:
+        return False
+    from .headerscan import scan_gguf
+    try:
+        names = {t.name for t in scan_gguf(path, include_tensors=True).tensors}
+    except Exception:
+        return False
+    return (any(".nextn." in n for n in names)
+            and not any(n.startswith("blk.0.") for n in names))
+
+
 def classify_gguf(path: str) -> ClassifiedGguf | None:
     """Read ``path``'s header and classify it. ``None`` if it can't be opened/read
     as a GGUF (skipped by the scanner). Cheap on multi-GB files - header only."""
@@ -234,7 +258,8 @@ def classify_gguf(path: str) -> ClassifiedGguf | None:
     except Exception as e:                       # not a GGUF / unreadable
         print(f"[discover] skipping {path}: {e}", file=sys.stderr)
         return None
-    return _classify_meta(kv, basename=os.path.basename(path), path=path)
+    return _classify_meta(kv, basename=os.path.basename(path), path=path,
+                          mtp_only=_probe_mtp_only(path, kv))
 
 
 # Header-meta cache - the cheap serve-time answer to "what is this GGUF?"
@@ -323,7 +348,8 @@ def _read_header(path: str) -> tuple:
     ``(ClassifiedGguf, general.name, sampling)``. Raises when unreadable."""
     from .headerscan import scan_gguf
     kv = scan_gguf(path, include_tensors=False).kv
-    c = _classify_meta(kv, basename=os.path.basename(path), path=path)
+    c = _classify_meta(kv, basename=os.path.basename(path), path=path,
+                       mtp_only=_probe_mtp_only(path, kv))
     return c, read_string(kv, "general.name"), _read_sampling(kv)
 
 
@@ -343,9 +369,11 @@ def header_meta(path: str) -> dict | None:
         return None                              # not memoized: it may appear later
     disk = _load_header_cache()
     ent = disk.get(ap)
+    # v2: NextN/MTP sidecars (same header as their base model) re-classify
+    # as drafters via the tensor-table probe; older cached verdicts predate it.
     if (isinstance(ent, dict) and ent.get("mtime") == int(st.st_mtime)
             and ent.get("size") == st.st_size and "sampling" in ent
-            and "drafter_kind" in ent):
+            and "drafter_kind" in ent and ent.get("v") == 2):
         meta = {k: ent.get(k) for k in ("arch", "name", "kind", "mtp",
                                         "sampling", "drafter_kind")}
         _HEADER_MEMO[ap] = meta
@@ -358,7 +386,7 @@ def header_meta(path: str) -> dict | None:
     meta = {"arch": c.arch, "name": name, "kind": c.kind, "mtp": c.mtp,
             "sampling": sampling, "drafter_kind": c.drafter_kind}
     _HEADER_MEMO[ap] = meta
-    disk[ap] = {"mtime": int(st.st_mtime), "size": st.st_size, **meta}
+    disk[ap] = {"mtime": int(st.st_mtime), "size": st.st_size, "v": 2, **meta}
     _save_header_cache(disk)
     return meta
 

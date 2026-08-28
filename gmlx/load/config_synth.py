@@ -2258,8 +2258,12 @@ def _synth_nemotron_h_moe(meta, shapes, config: dict) -> None:
     # Derive hybrid_override_pattern from per-layer metadata arrays.
     # head_count_kv > 0 -> attention (*); feed_forward_length > 0 and kv==0
     # -> MoE (E) when experts exist, else dense MLP (-); otherwise -> Mamba (M).
+    # The per-layer arrays span block_count INCLUDING any trailing NextN/MTP
+    # block(s) (Nemotron-3.5-Lightning: 53 entries, blk.52 is the MTP layer);
+    # the trunk excludes them (llama.cpp runs n_layer_all - nextn layers), so
+    # truncate to the universal num_hidden_layers = block_count - nextn.
     if kv_array is not None and ff_array is not None:
-        n_layers = len(kv_array)
+        n_layers = min(len(kv_array), int(config["num_hidden_layers"]))
         pattern = []
         for i in range(n_layers):
             if kv_array[i] > 0:

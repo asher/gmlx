@@ -231,6 +231,10 @@ def set_stoch_accept(enabled: bool) -> None:
     _STOCH_ACCEPT = bool(enabled)
 
 
+def stoch_accept_enabled() -> bool:
+    return _STOCH_ACCEPT
+
+
 def use_owned_engine(drafter, temp: float) -> bool:
     """Whether a stock MTP entry point must route to the owned engine: the
     drafter's contract demands it, or stochastic acceptance is on for a
@@ -1055,10 +1059,15 @@ def stream_speculative(
     # uncapped 32k-prompt capture would pin ~1 GB for a 128-token window.
     capture_limit = (getattr(drafter, "hidden_capture_limit", None)
                      if keep_all_hiddens else None)
+    # Recurrent-state targets (nemotron_h) opt into the mlx-lm prefill
+    # split - chunk n-1 tokens, step the last at T=1 - so the state matches
+    # plain decode bit-for-bit (lossless gate).
+    split_last = bool(getattr(lm, "prefill_split_last", False)) and n > 1
+    body = n - 1 if split_last else n
     i = 0
     with mx.stream(generation_stream):
-        while i < n:
-            take = min(prefill_chunk, n - i)
+        while i < body:
+            take = min(prefill_chunk, body - i)
             last = (i + take >= n)
             out = lm(prompt[:, i:i + take], cache=prompt_cache,
                      return_hidden=True, return_shared_kv=last)
@@ -1076,6 +1085,19 @@ def stream_speculative(
             if not last:
                 mx.eval([c.state for c in prompt_cache] + [hiddens[-1]])
                 mx.clear_cache()
+        if split_last:
+            out = lm(prompt[:, n - 1:], cache=prompt_cache,
+                     return_hidden=True, return_shared_kv=True)
+            if keep_all_hiddens:
+                hiddens.append(out.hidden_states[-1])
+                if capture_limit:
+                    total = sum(int(h.shape[1]) for h in hiddens)
+                    if total > capture_limit:
+                        merged = (hiddens[0] if len(hiddens) == 1
+                                  else mx.concatenate(hiddens, axis=1))
+                        hiddens = [merged[:, -capture_limit:]]
+            else:
+                hiddens = [out.hidden_states[-1]]
         first_logits = out.logits[:, -1, :]
         first = (mx.argmax(first_logits, axis=-1) if greedy
                  else sampler(first_logits))

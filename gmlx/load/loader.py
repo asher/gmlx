@@ -375,6 +375,39 @@ def remap_arrays(
     return dict(hf_weights), hf_kquant_meta, stats
 
 
+def strip_nextn_trunk_overflow(
+    hf_weights: dict, hf_kquant_meta: dict, meta, arch: str
+) -> int:
+    """Drop remapped weights of trailing NextN/MTP block(s) from the trunk tree.
+
+    nemotron_h_moe GGUFs carry the MTP layer as ``blk.{block_count - 1}`` with
+    the same tensor names as trunk blocks, so the trunk remap emits
+    ``backbone.layers.{N}.*`` entries for a layer index the trunk model does not
+    have (llama.cpp likewise excludes nextn layers from the trunk graph; the
+    stock nemotron_h ``sanitize`` only strips HF-named ``mtp.*`` keys). The MTP
+    drafter loads that block separately. Returns the number of entries dropped.
+    """
+    if arch != "nemotron_h_moe":
+        return 0
+    nextn = read_int(meta, f"{arch}.nextn_predict_layers") or 0
+    block_count = read_int(meta, f"{arch}.block_count") or 0
+    if nextn <= 0 or block_count <= nextn:
+        return 0
+    trunk = block_count - nextn
+    # backbone.*: the NEMOTRON_H_MOE override table; model.*: MTP-block
+    # tensors the override table does not claim (post_attention_norm) fall
+    # through to the canonical map's model.layers.{N}.* naming.
+    pat = re.compile(r"^(?:backbone|model)\.layers\.(\d+)\.")
+    dropped = 0
+    for name in list(hf_weights):
+        m = pat.match(name)
+        if m and int(m.group(1)) >= trunk:
+            del hf_weights[name]
+            hf_kquant_meta.pop(name, None)
+            dropped += 1
+    return dropped
+
+
 # MTP / "nextn" drafter remap (native-head: the drafter weights live in the
 # GGUF's own MTP block, i.e. block index >= num_hidden_layers)
 
@@ -643,6 +676,13 @@ _MTP_TARGET_HOOKS_BY_TYPE = {
         "speculative_argmax_from_hidden",
         "speculative_verify_hidden",
     ),
+    # NemotronHSpecLM (stock mlx-lm class + hooks): same lean set.
+    "nemotron_h": (
+        "rollback_speculative_cache",
+        "speculative_logits_from_hidden",
+        "speculative_argmax_from_hidden",
+        "speculative_verify_hidden",
+    ),
 }
 
 
@@ -812,6 +852,14 @@ def _mtp_target_classes(model_type: str):
             return glm5_next_mtp.Glm5NextSpecLM(ModelArgs.from_dict(config))
 
         return glm5_next_mtp.Glm5NextSpecLM, build
+    if model_type == "nemotron_h":
+        import gmlx.models.nemotron_h.mtp as nemotron_h_mtp
+        from mlx_lm.models.nemotron_h import ModelArgs
+
+        def build(config):
+            return nemotron_h_mtp.NemotronHSpecLM(ModelArgs.from_dict(config))
+
+        return nemotron_h_mtp.NemotronHSpecLM, build
     from .arch_table import MTP_WIRED_MODEL_TYPES
 
     raise NotImplementedError(
@@ -2511,7 +2559,8 @@ def model_is_moe(model) -> bool:
     """
     for layer in _decoder_layers(model):
         for m in layer.modules():
-            for name in ("gate_proj", "up_proj", "down_proj"):
+            # fc1/fc2: mlx-lm's plain SwitchMLP naming (nemotron_h_moe).
+            for name in ("gate_proj", "up_proj", "down_proj", "fc1", "fc2"):
                 proj = getattr(m, name, None)
                 if proj is None:
                     continue
@@ -3385,6 +3434,9 @@ def load_model(
         n_head_kv=n_head_kv,
         owned_names=owned_names,
     )
+    n_nextn_dropped = strip_nextn_trunk_overflow(hf_weights, hf_kquant_meta, meta, arch)
+    if n_nextn_dropped:
+        _log(f"[gguf] dropped {n_nextn_dropped} NextN/MTP-block trunk entries")
     # hf_weights now holds the only ref to each wire view; drop arrays so the
     # native-fp repack below can free each view as it packs it (caps 120B peak).
     del arrays

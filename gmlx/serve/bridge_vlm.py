@@ -299,13 +299,16 @@ def _find_token_embedding(raw_model):
     ``Model.language_model.model.embed_tokens`` nesting even for its text
     checkpoint (the family has VL variants), one hop deeper than that probe - so
     the batched engine's GPU-embed step (``get_input_embeddings`` ->
-    ``input_embeds`` -> the probe) raises. Walk the known nestings here and
-    return the embedding module, or ``None`` if none is reachable.
+    ``input_embeds`` -> the probe) raises. Mamba-hybrid families (nemotron_h)
+    nest under ``Model.backbone.embeddings`` instead of ``.model``. Walk the
+    known nestings here and return the embedding module, or ``None`` if none is
+    reachable.
     """
     lang = getattr(raw_model, "language_model", None)
     hops = (
         raw_model,
         getattr(raw_model, "model", None),
+        getattr(raw_model, "backbone", None),
         lang,
         getattr(lang, "model", None),
     )
@@ -345,7 +348,8 @@ def _ensure_text_embedding_probe(model, raw_model) -> None:
         raise RuntimeError(
             f"served text model {type(raw_model).__name__!r} exposes no token "
             f"embedding the batched engine can reach (probed {_EMBED_ATTR_NAMES} "
-            f"on self / .model / .language_model / .language_model.model) - wire "
+            f"on self / .model / .backbone / .language_model / "
+            f".language_model.model) - wire "
             f"its layout into gmlx.serve.bridge_vlm._find_token_embedding")
     object.__setattr__(lm, "_token_embedding", lambda: emb)
 

@@ -266,6 +266,64 @@ def _load_mtp_drafter(
             f"[mtp] drafter: Glm5NextMTPDrafter layer_idx={first_mtp_block} "
             f"block_size={drafter.config.block_size}"
         )
+    elif model_type == "nemotron_h":
+        from mlx_lm.models.nemotron_h import ModelArgs
+        from gmlx.models.nemotron_h.mtp import (
+            NemotronHMTPConfig,
+            NemotronHMTPDrafter,
+            remap_nemotron_mtp_arrays,
+        )
+
+        # kquant's mv_ext route (dense matmuls at M 2-12) is not bit-exact
+        # vs the M=1 qmv path and fails the greedy A/B gate. KQ_VERIFY_EXT=0
+        # falls back to verify_qmv / per-row qmv, bit-exact for every codec
+        # at M <= 3, at ~-20% decode. Stochastic acceptance is already
+        # distribution-level (never token-identical), so it keeps the fast
+        # route; that also leaves greedy requests on a stochastic_mtp server
+        # near-lossless rather than bitwise. Read once per process; must
+        # precede the first M>1 dense dispatch.
+        from .speculative import stoch_accept_enabled
+        if not stoch_accept_enabled():
+            os.environ.setdefault("KQ_VERIFY_EXT", "0")
+
+        drafter = NemotronHMTPDrafter(
+            NemotronHMTPConfig(
+                text_config=ModelArgs.from_dict(config_dict),
+                # Block TOTAL (drafts + bonus); < 2 would exit the owned
+                # decode loop after one token. llama.cpp's draft-mtp runs
+                # this head at n_max 2 drafts; the rollouts self-condition,
+                # so depth beyond the default is measurement-gated.
+                block_size=max(2, env_int("GMLX_NEM_MTP_BLOCK", 3)),
+            )
+        )
+        log(
+            f"[mtp] drafter: NemotronHMTPDrafter layer_idx={first_mtp_block} "
+            f"block_size={drafter.config.block_size}"
+        )
+        d_weights, d_meta, d_stats = remap_nemotron_mtp_arrays(
+            arrays, kquant_meta,
+            first_mtp_block=first_mtp_block,
+            n_head=n_head, n_head_kv=n_head_kv,
+        )
+        log(f"[mtp] drafter remap (block {first_mtp_block}): {d_stats}")
+        _install_and_load(
+            drafter,
+            d_weights,
+            d_meta,
+            log=log,
+            sanitize=False,
+            # Sigmoid top-6-of-128 routing: the correction bias is
+            # near-tie-heavy (the stock trunk's cast_predicate pins it too).
+            fp32_keep=(".e_score_correction_bias",),
+            source_key=source_key,
+        )
+        drafter.bind(target)
+        from .drafter_protocol import validate_drafter
+        validate_drafter(drafter)
+        log("[mtp] drafter bound to target embeddings + LM head")
+        _patch_draft_head_quantized(drafter)
+        _stamp_mtp_width_cap(drafter, model_type, target=target, log=log)
+        return drafter
     else:
         cfg_mod = importlib.import_module(
             "mlx_vlm.speculative.drafters.qwen3_5_mtp.config"
@@ -716,6 +774,51 @@ def _load_qwen4exp_mtp_drafter(
     _patch_draft_head_quantized(drafter)
     _stamp_mtp_width_cap(drafter, "qwen4_exp", target=target, log=log)
     return drafter
+
+
+def _load_nemotron_mtp_drafter(
+    draft_gguf_path: str,
+    target,
+    target_config_dict: dict,
+    *,
+    zero_copy: bool = True,
+    log=loadlog.verbose_print,
+):
+    """Build + load + bind the Nemotron MTP drafter from a companion GGUF.
+
+    llama.cpp ships the head as a same-arch sidecar (``mtp-*.gguf``, arch
+    ``nemotron_h_moe``) holding only ``blk.{num_hidden_layers}.*`` plus the
+    shared globals. The tensor set and block index match the in-file head
+    exactly, so this delegates to the native-head loader with the sidecar's
+    arrays; the shared ``token_embd``/``output``/``output_norm`` are skipped
+    by the remap (the drafter binds the target's at reset)."""
+    arrays, kquant_meta, d_arch, d_meta, _shapes = load_gguf_wire_bytes(
+        draft_gguf_path, zero_copy=zero_copy
+    )
+    if d_arch != "nemotron_h_moe":
+        raise ValueError(
+            f"{draft_gguf_path}: expected a nemotron_h_moe MTP sidecar GGUF "
+            f"for a nemotron_h target, got arch {d_arch!r}"
+        )
+    marker = f"blk.{int(target_config_dict['num_hidden_layers'])}.nextn."
+    if not any(n.startswith(marker) for n in arrays):
+        raise ValueError(
+            f"{draft_gguf_path}: no {marker}* tensors - not an MTP sidecar "
+            f"for this target (trunk depth mismatch?)"
+        )
+    log(f"[mtp] drafter gguf ({d_arch} sidecar): {len(arrays)} arrays, "
+        f"{len(kquant_meta)} kquant")
+    return _load_mtp_drafter(
+        arrays,
+        kquant_meta,
+        d_arch,
+        target_config_dict,
+        target,
+        n_head=read_int(d_meta, f"{d_arch}.attention.head_count"),
+        n_head_kv=first_nonzero_int(d_meta, f"{d_arch}.attention.head_count_kv"),
+        log=log,
+        source_key=weights_source_key(draft_gguf_path),
+    )
 
 
 # The closed per-stage tensor set of a deepseek4-dspark GGUF (81 tensors for
@@ -1208,6 +1311,8 @@ def _assistant_kind(model_type: str | None, draft_gguf_path: str) -> str:
         return "deepseek4"
     if model_type == "qwen4_exp":
         return "qwen4exp"
+    if model_type == "nemotron_h":
+        return "nemotron"
     if model_type == "muse_glimmer" or _drafter_header_arch(draft_gguf_path) == "dflash":
         return "dflash"
     return "gemma4"
@@ -1505,6 +1610,10 @@ def _load_assistant_drafter(draft_gguf_path: str, model, text_config_dict: dict,
         return _load_qwen4exp_mtp_drafter(
             draft_gguf_path, model, text_config_dict, zero_copy=zero_copy, log=log
         )
+    if kind == "nemotron":
+        return _load_nemotron_mtp_drafter(
+            draft_gguf_path, model, text_config_dict, zero_copy=zero_copy, log=log
+        )
     if kind == "dflash":
         return _load_dflash_drafter(
             draft_gguf_path, model, text_config_dict, zero_copy=zero_copy, log=log
@@ -1597,6 +1706,11 @@ def load_mtp_model(
         n_head_kv=n_head_kv,
         owned_names=owned_names,
     )
+    from gmlx.load.loader import strip_nextn_trunk_overflow
+
+    n_nextn_dropped = strip_nextn_trunk_overflow(hf_weights, hf_kquant_meta, meta, arch)
+    if n_nextn_dropped:
+        _log(f"[gguf] dropped {n_nextn_dropped} NextN/MTP-block trunk entries")
     from collections import Counter
 
     loadlog.fact("codecs", Counter(hf_kquant_meta.values()))
