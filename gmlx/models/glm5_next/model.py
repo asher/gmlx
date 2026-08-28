@@ -965,8 +965,12 @@ class Glm5NextModel(nn.Module):
         cache: Optional[List[Any]] = None,
         return_raw_hidden: bool = False,
         gdn_sink: Optional[list] = None,
+        input_embeddings: Optional[mx.array] = None,
     ) -> mx.array:
-        h = self.embed_tokens(inputs)
+        if input_embeddings is not None:
+            h = input_embeddings
+        else:
+            h = self.embed_tokens(inputs)
         if cache is None:
             cache = [None] * len(self.layers)
 

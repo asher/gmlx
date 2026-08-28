@@ -82,9 +82,11 @@ def _collect_kv_leaves(prompt_cache: List[Any]) -> List[Any]:
     return leaves
 
 
-class Glm5NextSpecLM(glm5.Model):
-    """Vendored glm5_next ``Model`` + the ``speculative_*`` hooks the owned
-    MTP engine probes on the target's ``language_model``.
+class Glm5NextSpecHooks:
+    """The ``speculative_*`` hooks the owned MTP engine probes on its
+    target. Mixed into both spec targets - the text-only ``Glm5NextSpecLM``
+    and the VLM container's ``LanguageModel`` - which share the attribute
+    layout the hooks read (``self.model`` backbone, ``self.lm_head``).
 
     ``hidden_states`` is the collapsed PRE-final-norm trunk hidden - what
     the drafter's ``hnorm`` consumes; the from-hidden hooks apply the final
@@ -99,28 +101,6 @@ class Glm5NextSpecLM(glm5.Model):
         # The drafter teacher-forces from the retained per-chunk hiddens,
         # so chunked prefill is always safe for this target.
         return True
-
-    def __call__(
-        self,
-        inputs: mx.array,
-        cache: Optional[Any] = None,
-        inputs_embeds: Optional[mx.array] = None,
-        n_to_process: Optional[int] = None,
-        return_hidden: bool = False,
-        return_shared_kv: bool = False,
-        **kwargs,
-    ):
-        # mlx-vlm's chunked prefill calls language_model(inputs=ids, ...) by
-        # keyword; the token ids are authoritative (a GGUF text target has
-        # no vision features) and shared_kv is never used.
-        del inputs_embeds, n_to_process, kwargs
-        normed, raw = self.model(inputs, cache, return_raw_hidden=True)
-        logits = self._head(normed)
-        if not (return_hidden or return_shared_kv):
-            from mlx_vlm.models.base import LanguageModelOutput
-
-            return LanguageModelOutput(logits=logits)
-        return _SpecOutput(logits=logits, hidden_states=[raw])
 
     # --- speculative hooks (owned engine contract) -------------------------
 
@@ -174,6 +154,33 @@ class Glm5NextSpecLM(glm5.Model):
                     f"state is now inconsistent")
         if gdn_states:
             glm5.rollback_verify_sink(gdn_states, accepted + 1)
+
+
+class Glm5NextSpecLM(Glm5NextSpecHooks, glm5.Model):
+    """Vendored glm5_next ``Model`` + the speculative hooks, for the
+    text-only MTP target."""
+
+    def __call__(
+        self,
+        inputs: mx.array,
+        cache: Optional[Any] = None,
+        inputs_embeds: Optional[mx.array] = None,
+        n_to_process: Optional[int] = None,
+        return_hidden: bool = False,
+        return_shared_kv: bool = False,
+        **kwargs,
+    ):
+        # mlx-vlm's chunked prefill calls language_model(inputs=ids, ...) by
+        # keyword; the token ids are authoritative (a GGUF text target has
+        # no vision features) and shared_kv is never used.
+        del inputs_embeds, n_to_process, kwargs
+        normed, raw = self.model(inputs, cache, return_raw_hidden=True)
+        logits = self._head(normed)
+        if not (return_hidden or return_shared_kv):
+            from mlx_vlm.models.base import LanguageModelOutput
+
+            return LanguageModelOutput(logits=logits)
+        return _SpecOutput(logits=logits, hidden_states=[raw])
 
 
 class Glm5NextMTPLayer(nn.Module):
