@@ -231,6 +231,10 @@ def set_stoch_accept(enabled: bool) -> None:
     _STOCH_ACCEPT = bool(enabled)
 
 
+def stoch_accept_enabled() -> bool:
+    return _STOCH_ACCEPT
+
+
 def use_owned_engine(drafter, temp: float) -> bool:
     """Whether a stock MTP entry point must route to the owned engine: the
     drafter's contract demands it, or stochastic acceptance is on for a

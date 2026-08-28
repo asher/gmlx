@@ -277,9 +277,14 @@ def _load_mtp_drafter(
         # kquant's mv_ext route (dense matmuls at M 2-12) is not bit-exact
         # vs the M=1 qmv path and fails the greedy A/B gate. KQ_VERIFY_EXT=0
         # falls back to verify_qmv / per-row qmv, bit-exact for every codec
-        # at M <= 3. Read once per process; must precede the first M>1
-        # dense dispatch.
-        os.environ.setdefault("KQ_VERIFY_EXT", "0")
+        # at M <= 3, at ~-20% decode. Stochastic acceptance is already
+        # distribution-level (never token-identical), so it keeps the fast
+        # route; that also leaves greedy requests on a stochastic_mtp server
+        # near-lossless rather than bitwise. Read once per process; must
+        # precede the first M>1 dense dispatch.
+        from .speculative import stoch_accept_enabled
+        if not stoch_accept_enabled():
+            os.environ.setdefault("KQ_VERIFY_EXT", "0")
 
         drafter = NemotronHMTPDrafter(
             NemotronHMTPConfig(
