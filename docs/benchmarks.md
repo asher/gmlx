@@ -40,7 +40,7 @@ same sampler, and the same chat prompts on both engines.
 | **llama.cpp** | `b9967` |
 | **Build overrides** | models rebenched on newer releases carry their own builds; see Model provenance |
 | **DeepSeek-V4-Flash reference** | ds4-server (dwarfstar) @ `b030961`, ignore-eos patched |
-| **Dates** | 2026-07-05 .. 2026-08-07 |
+| **Dates** | 2026-07-05 .. 2026-08-27 |
 | **Prompt corpus** | HuggingFaceH4/ultrachat_200k:train_sft (chat template applied) |
 | **Sampling** | temperature 0.6, top-p 0.95, top-k 20, seed 1234 (coupled RNG across engines) |
 | **Speculative draft** | MTP @ 3 draft tokens (native/preserved MTP head, or gemma-4's companion drafter) |
@@ -75,6 +75,7 @@ ladders cell by cell).
 | Dolphin3.0-Llama3.1-8B Q6_K | `Dolphin3.0-Llama3.1-8B-abliterated.Q6_K.gguf` | [HF](https://huggingface.co/RavichandranJ/Dolphin3-Cyber-8B-GGUF) | - | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
 | DeepSeek-V4-Flash UD-IQ3_XXS | `DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf` | [HF](https://huggingface.co/unsloth/DeepSeek-V4-Flash-GGUF) | - | gmlx 0.1.0 / kq 0.3.5 | 2026-07-13 |
 | DeepSeek-V4-Flash IQ2_XXS | `DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf` | [HF](https://huggingface.co/antirez/deepseek-v4-gguf) | - | gmlx 0.2.2 / kq 0.3.11 | 2026-08-09 |
+| Qwen3.8-Flash-Next UD-Q3_K_XL | `Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf` | [HF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) | - | gmlx 0.4.4 / kq 0.4.1 | 2026-08-28 |
 
 ## Per-model detail
 
@@ -278,11 +279,27 @@ ladders cell by cell).
 | 200k | 24.9 (24.8-25.1) | - | - | 484.3 (450-493.2) | - | - |
 | 384k | 22.3 (20.7-22.9) | - | - | 411.1 (397.2-431.8) | - | - |
 
+### Qwen3.8-Flash-Next UD-Q3_K_XL
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/perf/per-model/qwen38-flash-next-udq3kxl-panels-dark.svg">
+  <img src="assets/perf/per-model/qwen38-flash-next-udq3kxl-panels.svg" alt="Qwen3.8-Flash-Next UD-Q3_K_XL">
+</picture>
+
+| KV depth | gmlx decode | llama.cpp decode | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill | gmlx/llama.cpp prefill |
+|---|--:|--:|--:|--:|--:|--:|
+| 512 | 50.4 (48.1-50.8) | 35.4 (35.2-35.5) | 1.42x | 743 (637-842.2) | 536.1 (402.5-567.3) | 1.39x |
+| 4.3k | 47.8 (46.2-48.4) | 33.5 (33-33.9) | 1.43x | 1338.6 (1249.5-1392.2) | 688.6 (666.5-710.7) | 1.94x |
+| 17k | 44.9 (44.4-45.9) | 29.8 (28.1-30.4) | 1.51x | 1516.1 (1485.9-1559.4) | 600.3 (573.5-614.6) | 2.53x |
+| 67k | 36.8 (36.4-37.6) | 21.1 (20.5-21.2) | 1.74x | 1447.8 (1408.1-1489.7) | 394.7 (386-412) | 3.67x |
+| 110k | 31.7 (31-32.4) | 16.5 (16.4-16.7) | 1.92x | 1379.9 (1354.6-1461.2) | 288.7 (282.4-292.4) | 4.78x |
+| 200k | 25.3 (25.3-25.6) | 11.9 (11.8-12) | 2.13x | 1250 (1234.9-1275.6) | 210.8 (207-217.1) | 5.93x |
+
 ## DeepSeek-V4-Flash (reference engine: ds4-server)
 
-This model's comparison engine is **ds4-server** (antirez's dwarfstar
-ds4 server, ignore-eos patched). Ratios below are
-gmlx / ds4-server.
+This model's comparison engine is **ds4-server** (dwarfstar's
+DeepSeek-V4 server, ignore-eos patched), not llama.cpp -- llama.cpp
+has no DeepSeek-V4-Flash path. Ratios below are gmlx / ds4-server.
 
 ### DeepSeek-V4-Flash IQ2_XXS
 
