@@ -8,6 +8,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- VLM loads (--mmproj) compose with every speculative-decode form the text
+  path supports: companion drafters (DFlash2, qwen4exp-mtp) load against a
+  multimodal target, and companion-only families autodetect their drafter.
+
 - `glm5next` (GLM-5.3-Flash 320B-A18B, llama.cpp PR 27754) loads: hybrid
   KDA linear attention + NoPE MLA with a pooled DSA sparse indexer
   (top-512 key pools at depth), sigmoid MoE with clamped SwiGLU, 4-stream
