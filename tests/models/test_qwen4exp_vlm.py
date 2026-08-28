@@ -129,3 +129,102 @@ def test_registered_module_and_seam_row():
     assert "mlx_vlm.models.qwen4_exp" in sys.modules
     assert VENDORED_MLX_VLM_MODULES["gmlx.models.qwen4_exp.vlm_model"] == \
         "mlx_vlm.models.qwen4_exp"
+
+
+def test_language_model_carries_the_mtp_spec_hooks():
+    # mtp_load's VLM branch probes these on model.language_model and refuses
+    # text-only MTP if any is missing; the load then fails outright.
+    lm = _tiny_vlm().language_model
+    for hook in ("speculative_logits_from_hidden",
+                 "speculative_argmax_from_hidden",
+                 "speculative_verify_hidden", "rollback_speculative_cache",
+                 "chunked_prefill_policy"):
+        assert callable(getattr(lm, hook)), hook
+
+
+def test_spec_hooks_shared_with_text_speclm():
+    """One mixin, both carriers: the vlm LanguageModel and the text SpecLM
+    must run the same hook code, not parallel copies."""
+    from gmlx.models.qwen4_exp.mtp import Qwen4ExpSpecHooks, Qwen4ExpSpecLM
+    import gmlx.models.qwen4_exp.vlm_model as vm
+
+    assert issubclass(Qwen4ExpSpecLM, Qwen4ExpSpecHooks)
+    assert issubclass(vm.LanguageModel, Qwen4ExpSpecHooks)
+    for hook in ("speculative_logits_from_hidden",
+                 "speculative_argmax_from_hidden",
+                 "speculative_verify_hidden", "rollback_speculative_cache",
+                 "chunked_prefill_policy"):
+        assert getattr(Qwen4ExpSpecLM, hook) is getattr(vm.LanguageModel, hook)
+
+
+def test_return_hidden_yields_the_four_stream_hidden():
+    """return_hidden hands back the pre-mixer [B,S,4,D] streams whose
+    speculative_logits_from_hidden reproduces the plain logits."""
+    model = _tiny_vlm()
+    lm = model.language_model
+    ids = mx.random.randint(0, lm.args.vocab_size, (1, 6))
+    out = lm(ids, cache=lm.make_cache())
+    spec = lm(ids, cache=lm.make_cache(), return_hidden=True)
+    assert float(mx.abs(spec.logits - out.logits).max()) < 1e-5
+    (streams,) = spec.hidden_states
+    assert streams.ndim == 4 and streams.shape[2] == lm.args.hc_count
+    relogits = lm.speculative_logits_from_hidden(streams)
+    assert float(mx.abs(relogits - out.logits).max()) < 1e-5
+
+
+def test_verify_positions_follow_the_resolved_mrope():
+    """After an image turn set _rope_deltas, the verify forward must run at
+    the same positions plain decode does (spec vs plain logits equal)."""
+    model = _tiny_vlm()
+    lm = model.language_model
+    vocab = lm.args.vocab_size
+    ids = mx.random.randint(0, vocab, (1, 9))
+    nxt = mx.random.randint(0, vocab, (1, 2))
+
+    lm._rope_deltas = mx.array([[3]], dtype=mx.int32)
+    c_plain = lm.make_cache()
+    lm(ids, cache=c_plain)
+    plain = lm(nxt, cache=c_plain).logits
+
+    c_spec = lm.make_cache()
+    lm(ids, cache=c_spec)
+    streams, _, sink = lm.speculative_verify_hidden(nxt, c_spec)
+    spec = lm.speculative_logits_from_hidden(streams)
+    lm._rope_deltas = None
+    assert float(mx.abs(spec - plain).max()) < 2e-4
+    assert sink  # rollback sink recorded
+
+
+def test_qsa_cache_pos_tracks_ik_across_midstep_growth():
+    """pos/ik lockstep when the buffers grow at a mid-step prev.
+
+    Verify rollback trims land the offset mid-step; the next growth event
+    truncates ik to prev before extending, and pos must be sized against
+    the SAME truncated base or it ends up short of ik and later writes
+    clamp ([broadcast_shapes] (3,1,n) vs (3,1,<n) on serve turn 3)."""
+    from gmlx.models.qwen4_exp.model import QSAKVCache
+
+    c = QSAKVCache(ratio=4)
+    step = c.step
+    D, IDX = 4, 8
+
+    def push(n, start):
+        k = mx.zeros((1, 1, n, D))
+        v = mx.zeros((1, 1, n, D))
+        ik = mx.zeros((1, n, IDX))
+        pos = mx.broadcast_to(
+            (start + mx.arange(n, dtype=mx.int32))[None, None], (3, 1, n))
+        c.update_and_fetch_qsa(k, v, ik, pos=pos)
+
+    push(step, 0)              # fills exactly one step block
+    push(4, step)              # grows at prev % step == 0
+    assert c.pos.shape[2] == c.ik.shape[1]
+    c.trim(2)                  # rollback lands mid-step
+    prev = c.offset
+    assert prev % step != 0
+    push(step, prev)           # growth at mid-step prev: truncation path
+    assert c.pos.shape[2] == c.ik.shape[1]
+    # The rows just written carry the pushed positions.
+    got = c.pos[0, 0, prev:prev + step]
+    want = prev + mx.arange(step, dtype=mx.int32)
+    assert bool(mx.all(got == want).item())

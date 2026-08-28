@@ -30,6 +30,7 @@ from .config_synth import synthesize_config
 from gmlx.upstream.gdn_patches import (
     _needs_tiled_v_patch,
     _patch_gated_delta_tiled_v,
+    _patch_mlxvlm_gated_delta_tiled_v,
     _tiled_v_patch_applied,
 )
 from .gguf_meta import first_nonzero_int, read_int
@@ -38,6 +39,7 @@ from .loader import (
     _FP32_KEEP_BY_MODEL_TYPE,
     _active_now,
     _install_and_load,
+    _vlm_spec_language_model,
     load_gguf_wire_bytes,
     materialize_module_arrays,
     remap_arrays,
@@ -2537,6 +2539,29 @@ def _synthesize_glm5next_processor(tokenizer, mm_meta: dict):
     return _attach_streaming_helpers(processor, tokenizer)
 
 
+def _swap_spec_language_model(model, model_type: str, *, log) -> None:
+    """Replace ``model.language_model`` with the spec-capable class the text
+    MTP path builds (``_vlm_spec_language_model``), constructed from the
+    VLM's REAL ModelConfig (real vision_config -> get_rope_index mrope stays
+    correct on image turns). Must run before weight install: owned trees are
+    parameter-identical to stock, so the fresh tree loads the same remapped
+    names. Vendored archs (muse_glimmer / glm5_next / qwen4_exp) carry their
+    hook mixins natively and have no row; GMLX_*_OWNED=0 resolves the row to
+    the stock class the tree already is, so the isinstance short-circuits."""
+    row = _vlm_spec_language_model(model_type)
+    if row is None:
+        return
+    cls, build_lm = row
+    if isinstance(model.language_model, cls):
+        return
+    lm = build_lm(model.config)
+    if hasattr(model.language_model, "no_chunked_prefill"):
+        # gemma4_unified stamps this at construction.
+        lm.no_chunked_prefill = model.language_model.no_chunked_prefill
+    model.language_model = lm
+    log(f"[vlm] spec target: language_model -> {cls.__name__}")
+
+
 # Public entry point
 
 @loadlog.seeds
@@ -2549,6 +2574,7 @@ def load_vlm_model(
     zero_copy: bool = True,
     verbose: bool = False,
     return_tokenizer: bool = False,
+    spec_target: bool = False,
 ):
     """Load a K-quant LLM GGUF + a float mmproj GGUF into an mlx-vlm ``Model``.
 
@@ -2563,6 +2589,12 @@ def load_vlm_model(
     the processor wraps, carrying ``_gguf_eos_token_ids``) as a 4th element, so
     the VLMxMTP path can wrap it in a ``TokenizerWrapper`` for the text-only
     speculative walk exactly like the text loader does.
+
+    ``spec_target=True`` (the VLMxMTP loader) replaces ``.language_model``
+    before weights install with the spec-capable class the text MTP path
+    builds (``_vlm_spec_language_model``), constructed from the VLM's real
+    config so mrope on image turns stays correct. Plain loads are
+    byte-identical to before the seam existed.
     """
     _log = loadlog.verbose_print
 
@@ -2617,9 +2649,12 @@ def load_vlm_model(
     with_audio = bool(mm_meta.get("clip.has_audio_encoder"))
     _log(f"[vlm] model_type={model_type} audio={with_audio}")
     if model_type in ("qwen3_5", "qwen3_5_moe"):
-        # Plain VLM builds never install the MTP verify patch set, so the
-        # stock ragged decode (ungated 1024-thread kernels) stays bound on
-        # batched mixed-depth streams; pre-M3 needs the gated dispatch.
+        # Pre-M3 launch-ceiling guard for the stock ragged decode (ungated
+        # 1024-thread kernels) on batched mixed-depth streams. Unconditional:
+        # plain VLM builds and the spec_target stock fallback both run the
+        # stock kernels, the owned tree dispatches in-tree, and the installer
+        # is idempotent (identity check) - the call costs nothing where the
+        # MTP patch set later covers it.
         from gmlx.spec.ragged_decode import install_pre_m3_ragged_guard
         install_pre_m3_ragged_guard()
 
@@ -2628,9 +2663,11 @@ def load_vlm_model(
     lm_prefix = ("thinker.language_model" if model_type == "qwen3_omni_moe"
                  else "language_model")
     loadlog.stage("remapping tensors")
+    owned_names: set[str] = set()
     hf_weights, hf_kquant_meta, _stats = remap_arrays(
         arrays, kquant_meta, llm_arch,
-        target_prefix=lm_prefix, n_head=n_head, n_head_kv=n_head_kv)
+        target_prefix=lm_prefix, n_head=n_head, n_head_kv=n_head_kv,
+        owned_names=owned_names)
 
     # 3. vision/audio remap. Pure-float mmproj weights map straight through; a
     #    K-quant (Q8_0) omni mmproj also threads its codecs into hf_kquant_meta so
@@ -2656,17 +2693,25 @@ def load_vlm_model(
     model, config = build_vlm_model(config)
     loadlog.fact("model_type", config.get("model_type"))
 
+    # 4a. spec-target seam: give the VLM the same hook-bearing language model
+    #     the text MTP path builds. Runs before weight install, so the swap
+    #     needs no weight transfer - and the discarded tower's random init
+    #     arrays are never evaluated.
+    if spec_target:
+        _swap_spec_language_model(model, model_type, log=_log)
+
     # 3a. GGUF V-head tiling fixup for asymmetric linear-attention K/V heads
     #     (hybrid SSM+attn text towers, e.g. Qwen3.5/3.6). convert_hf_to_gguf
     #     stores gated-delta V heads tiled, but the gated_delta kernels assume
-    #     grouped K->V indexing. The mlx-vlm text tower reaches the normal
-    #     generate path through mlx_lm.models.gated_delta's gated_delta_kernel/
-    #     _ops (it imports them), so the same monkey-patch the text loader uses
-    #     fixes prefill and decode here. Without it the recurrent state is built
-    #     against the wrong K heads and decode degenerates to token garbage even
-    #     though the no-cache forward (and dense towers) look fine.
+    #     grouped K->V indexing. Since mlx-vlm 0.6.15 the qwen3_5 text tower
+    #     runs its own vendored copies of the gated_delta functions (0.6.4
+    #     from-imported mlx-lm's, which the mlx-lm patch reached), so both
+    #     modules need the rebind. Without it the recurrent state is built
+    #     against the wrong K heads and decode degrades to repetitive garbage
+    #     even though the no-cache forward (and dense towers) look fine.
     if _needs_tiled_v_patch(text_config):
         _patch_gated_delta_tiled_v()
+        _patch_mlxvlm_gated_delta_tiled_v()
     elif (text_config.get("model_type") == "qwen3_next"
           and _tiled_v_patch_applied()):
         # Same cross-load hazard the text loader guards: once a qwen3.5/3.6
@@ -2685,6 +2730,7 @@ def load_vlm_model(
     #    (text under [thinker.]language_model.model.*, vision/audio under their
     #    towers), so model.sanitize must not run - it would re-prefix text keys.
     _install_and_load(model, hf_weights, hf_kquant_meta, log=_log, sanitize=False,
+                      no_alias=owned_names,
                       fp32_keep=_FP32_KEEP_BY_MODEL_TYPE.get(model_type, ()),
                       f16_keep=_F16_KEEP_BY_MODEL_TYPE.get(model_type, ()),
                       source_key=weights_source_key(*pf.shards, mmproj_path),

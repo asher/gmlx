@@ -8,6 +8,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- VLM loads (--mmproj) compose with every speculative-decode form the text
+  path supports: companion drafters (DFlash2, qwen4exp-mtp) load against a
+  multimodal target, and companion-only families autodetect their drafter.
+
 - `glm5next` (GLM-5.3-Flash 320B-A18B, llama.cpp PR 27754) loads: hybrid
   KDA linear attention + NoPE MLA with a pooled DSA sparse indexer
   (top-512 key pools at depth), sigmoid MoE with clamped SwiGLU, 4-stream
@@ -37,6 +41,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- qwen3.5/3.6/3.8 image turns degraded to repetitive text with an early
+  stop: mlx-vlm 0.6.15 vendored its qwen3_5 gated_delta functions, so plain
+  VLM loads ran the GGUF's tiled V heads through grouped K-to-V kernels.
+  Plain loads now rebind the vendored module like the MTP paths do.
+- qwen4exp VLM conversations could fail with a broadcast_shapes error when
+  the cache grew after a trim landed mid-step: the QSA position buffer was
+  sized against its untruncated width and fell behind the key stream.
 - qwen4exp ran the whole residual stream in fp32: the router's fp32 scores
   promoted each layer's MoE output and every downstream elementwise chain.
   Prefill is ~35% faster and decode ~20% faster after the dtype returns to

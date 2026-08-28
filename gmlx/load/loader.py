@@ -703,7 +703,8 @@ def _mtp_target_classes(model_type: str):
     ``TextConfig``. The stock mlx-lm classes gmlx builds for the plain text
     capability ship none of the ``speculative_*`` hooks, which is why MTP
     escalates to mlx-vlm here. Extend with new rows (deepseek_v4, ...) as drafters
-    land.
+    land, together with ``_vlm_spec_language_model`` when the arch also has a
+    VLM shape (mmproj) so the two paths stay in lockstep.
     """
     import importlib
 
@@ -819,6 +820,69 @@ def _mtp_target_classes(model_type: str):
     )
 
 
+# VLM model_types whose spec-capability row lives under a different text
+# model_type in the tables above (hook sets + target classes).
+_VLM_SPEC_MODEL_TYPE_ALIASES = {
+    "gemma4": "gemma4_text",
+    "gemma4_unified": "gemma4_text",
+}
+
+
+def _spec_hook_key(model_type: str) -> str:
+    """The `_MTP_TARGET_HOOKS_BY_TYPE` / target-class key for a VLM
+    model_type."""
+    return _VLM_SPEC_MODEL_TYPE_ALIASES.get(model_type, model_type)
+
+
+def _vlm_spec_language_model(model_type: str):
+    """Spec-capable ``language_model`` row for a VLM model_type, or None.
+
+    ``build(model_config) -> language_model`` constructs from the VLM's REAL
+    mlx-vlm ModelConfig (real vision_config, so mrope ``get_rope_index`` on
+    image turns stays correct - unlike ``_mtp_target_classes``'s text build,
+    which passes an empty one). None means the built ``.language_model``
+    already carries the hooks (muse_glimmer / glm5_next / qwen4_exp wire
+    their mixins in their own vlm_model), or the arch has no spec support
+    (the per-arch hook check downstream fails loud). The env gates
+    (GMLX_QWEN_OWNED / GMLX_GEMMA_OWNED) are consulted at call time via
+    ``_mtp_target_classes``, so =0 resolves to the stock class and the swap
+    no-ops against the already-stock tree."""
+    if model_type in ("qwen3_5", "qwen3_5_moe"):
+        cls, _ = _mtp_target_classes(model_type)
+
+        def build(model_config):
+            return cls(model_config.text_config, model_config)
+
+        return cls, build
+    if model_type in ("gemma4", "gemma4_unified"):
+        cls, _ = _mtp_target_classes("gemma4_text")
+
+        def build(model_config):
+            return cls(model_config.text_config)
+
+        return cls, build
+    return None
+
+
+def _ensure_argmax_hook(language_model) -> None:
+    """Batched greedy verify walk: under greedy the engine takes the
+    per-position deferred walk (one CPU<->GPU sync per draft position) unless
+    the target exposes speculative_argmax_from_hidden, which lets it argmax
+    all block+1 verify positions in a single op (zero per-position syncs ->
+    _speculative_walk). gemma4's LanguageModel ships only
+    speculative_logits_from_hidden, so synthesize the argmax wrapper from it -
+    lossless (same tokens), just fewer syncs (~+8% decode on a small target
+    whose round is sync-bound). Only ever fires for the gemma4 row; every
+    other type's hook table already lists speculative_argmax_from_hidden."""
+    if not hasattr(language_model, "speculative_argmax_from_hidden") and hasattr(
+        language_model, "speculative_logits_from_hidden"
+    ):
+        _lm = language_model
+        _lm.speculative_argmax_from_hidden = lambda hidden: mx.argmax(
+            _lm.speculative_logits_from_hidden(hidden), axis=-1
+        )
+
+
 def _build_mtp_target(config_dict: dict):
     """Build the MTP target as an mlx-vlm text ``LanguageModel`` (seam 1)."""
     config = dict(config_dict)
@@ -834,20 +898,7 @@ def _build_mtp_target(config_dict: dict):
             f"- version drift; pin mlx-vlm or update the hook set"
         )
     language_model = build(config)
-    # Batched greedy verify walk: under greedy the engine takes the per-position
-    # deferred walk (one CPU<->GPU sync per draft position) unless the target
-    # exposes speculative_argmax_from_hidden, which lets it argmax all block+1
-    # verify positions in a single op (zero per-position syncs -> _speculative_walk).
-    # gemma4's LanguageModel ships only speculative_logits_from_hidden, so
-    # synthesize the argmax wrapper from it - lossless (same tokens), just fewer
-    # syncs (~+8% decode on a small target whose round is sync-bound).
-    if not hasattr(language_model, "speculative_argmax_from_hidden") and hasattr(
-        language_model, "speculative_logits_from_hidden"
-    ):
-        _lm = language_model
-        _lm.speculative_argmax_from_hidden = lambda hidden: mx.argmax(
-            _lm.speculative_logits_from_hidden(hidden), axis=-1
-        )
+    _ensure_argmax_hook(language_model)
     wrapper = MTPTextTarget(language_model, config)
     loadlog.verbose_print(
         f"[build] {model_type} -> {type(language_model).__name__} (MTP target wrapper)"

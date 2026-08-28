@@ -650,6 +650,8 @@ def _gdn_try_cat_ba(gdn) -> bool:
 
     if getattr(gdn, "_gdn_zba_weight", None) is not None:
         return False  # zba merge already owns these rows
+    if getattr(gdn, "_gdn_ba_weight", None) is not None:
+        return False  # already cat: arming may run on both load paths
     mods = [getattr(gdn, "in_proj_b", None), getattr(gdn, "in_proj_a", None)]
     for m in mods:
         if m is None or type(m) is not nn.Linear or "bias" in m:

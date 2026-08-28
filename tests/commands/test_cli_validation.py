@@ -349,7 +349,32 @@ def test_drafter_available_no_mtp_opts_out(gguf, mmproj, monkeypatch):
 
 def test_drafter_available_none_without_head_or_draft(gguf, mmproj, monkeypatch):
     monkeypatch.setattr(cli, "_has_native_mtp_head", lambda *a, **k: False)
+    monkeypatch.setattr(cli, "_vlm_companion_drafter", lambda p: None)
     assert cli._vlm_mtp_drafter_available(_args([gguf, "--mmproj", mmproj])) is False
+
+
+def test_drafter_available_companion_auto(gguf, mmproj, monkeypatch):
+    # A discoverable companion for a companion-only family auto-enables
+    # VLM text-only MTP, same as the text path's auto.
+    monkeypatch.setattr(cli, "_has_native_mtp_head", lambda *a, **k: False)
+    monkeypatch.setattr(cli, "_vlm_companion_drafter",
+                        lambda p: "/x/mtp-companion.gguf")
+    assert cli._vlm_mtp_drafter_available(_args([gguf, "--mmproj", mmproj])) is True
+
+
+def test_vlm_companion_drafter_restricted_to_auto_families(monkeypatch):
+    import gmlx.load.discovery as discovery
+
+    monkeypatch.setattr(discovery, "find_mtp_companion",
+                        lambda gguf, arches: "/x/companion.gguf")
+    arch = {"v": "qwen4exp"}
+    monkeypatch.setattr(discovery, "header_meta",
+                        lambda p: {"arch": arch["v"]})
+    assert cli._vlm_companion_drafter("/x/t.gguf") == "/x/companion.gguf"
+    # qwen35 has a drafter row (dflash2) but its native head wins over a
+    # sidecar: no auto.
+    arch["v"] = "qwen35"
+    assert cli._vlm_companion_drafter("/x/t.gguf") is None
 
 
 def test_speculative_forwards_template_config_and_warns_new_drops(

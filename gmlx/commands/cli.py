@@ -770,16 +770,38 @@ def _deepseek4_mtp_companion(gguf_path: str) -> str | None:
         return None
 
 
+def _vlm_companion_drafter(gguf_path: str) -> str | None:
+    """A same-directory companion drafter for a companion-only family
+    (``MTP_COMPANION_AUTO_MODEL_TYPES``), auto-enabling VLM text-only MTP the
+    way the text path's auto does. Narrower than :func:`_sibling_drafter` on
+    purpose: qwen3_5's native head wins over a sidecar, so a DFlash2
+    companion stays explicit ``--draft-gguf``. Header-cache peeks only."""
+    try:
+        import gmlx.load.arch_table as arch_table
+        import gmlx.load.config_synth as config_synth
+        from gmlx.load.discovery import find_mtp_companion, header_meta
+
+        meta = header_meta(gguf_path)
+        mt = config_synth.GGUF_ARCH_TO_MODEL_TYPE.get((meta or {}).get("arch") or "")
+        if mt not in arch_table.MTP_COMPANION_AUTO_MODEL_TYPES:
+            return None
+        return find_mtp_companion(gguf_path, arch_table.drafter_arches(mt))
+    except Exception:
+        return None
+
+
 def _vlm_mtp_drafter_available(args) -> bool:
     """Whether a ``--mmproj`` (VLM) load should also build an MTP drafter so
     text-only requests take the fast path (image/audio requests stay on plain VLM).
 
-    A drafter is available from a ``--draft-gguf`` assistant (gemma4) or a native
-    MTP head in the LLM GGUF (qwen3.5/3.6 ``nextn``). ``--no-mtp`` / config
-    ``speculative: false`` opts out. Unlike :func:`resolve_speculative`, ``--mmproj``
-    is expected here (it's the VLM path), not a blocker - the adapter/cpu*/offload
-    conflicts are already rejected before dispatch, so only the drafter source and
-    the on/off toggle matter."""
+    A drafter is available from a ``--draft-gguf`` companion (gemma4
+    assistant, DFlash/DFlash2, qwen4exp-mtp), a native MTP head in the LLM
+    GGUF (qwen3.5/3.6 ``nextn``), or an autodetected companion for a
+    companion-only family (same auto domain as the text path). ``--no-mtp`` /
+    config ``speculative: false`` opts out. Unlike :func:`resolve_speculative`,
+    ``--mmproj`` is expected here (it's the VLM path), not a blocker - the
+    adapter/cpu*/offload conflicts are already rejected before dispatch, so
+    only the drafter source and the on/off toggle matter."""
     if getattr(args, "no_speculative", False):
         return False
     if getattr(args, "native_mtp", False):
@@ -788,8 +810,9 @@ def _vlm_mtp_drafter_available(args) -> bool:
     if getattr(args, "speculative", None) is False:
         return False  # explicit config opt-out
     if getattr(args, "draft_gguf", None):
-        return True  # gemma4 assistant companion
-    return _has_native_mtp_head(args.gguf)
+        return True  # companion drafter
+    return (_has_native_mtp_head(args.gguf)
+            or _vlm_companion_drafter(args.gguf) is not None)
 
 
 def _build_parser(prog: str = "gmlx run") -> argparse.ArgumentParser:
@@ -2231,12 +2254,19 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
             return _report_only(args)
         if args.mmproj:
             # A loaded VLM serves text-only requests in place: route a text-only
-            # request through the MTP path when a drafter is available (gemma4
-            # --draft-gguf, or a qwen3.5/3.6 native head), else plain VLM
+            # request through the MTP path when a drafter is available
+            # (--draft-gguf companion, a native head, or an autodetected
+            # companion for a companion-only family), else plain VLM
             # generation. Image/audio -> VLM (the drafter idles that request).
             images = [s for s in (args.image or "").split(",") if s.strip()]
             audios = [s for s in (args.audio or "").split(",") if s.strip()]
             if not images and not audios and _vlm_mtp_drafter_available(args):
+                if (not getattr(args, "draft_gguf", None)
+                        and not _has_native_mtp_head(args.gguf)):
+                    companion = _vlm_companion_drafter(args.gguf)
+                    if companion:
+                        print(f"[mtp] companion MTP drafter detected: "
+                              f"{os.path.basename(companion)}")
                 return _run_vlm_mtp(args)
             return _run_vlm(args)
         if args.bench_depths:

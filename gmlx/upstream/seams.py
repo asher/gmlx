@@ -66,11 +66,11 @@ SEAMS: tuple[Seam, ...] = (
     #     verify_linear) ---
     # The owned qwen3.5 forward surface carries no pins: its copies and
     # mirrors are certified by source-equality, construction-pair, and
-    # identity tests. But ownership lands at construction only on the
-    # text MTP load (loader._mtp_target_classes); load_vlm_mtp_model's
-    # target is built stock by mlx_vlm.utils, so the multimodal path
-    # still installs the patched regime and its symbols stay pinned
-    # below.
+    # identity tests. Ownership lands at construction on the text MTP
+    # load (loader._mtp_target_classes) and, via the spec-target seam
+    # (loader._vlm_spec_language_model), on load_vlm_mtp_model's target
+    # too. The pins below stay for the GMLX_QWEN_OWNED=0 vlm fallback,
+    # which still installs the patched regime.
     Seam("mlx_vlm.models.qwen3_5.gated_delta", "gated_delta_ops",
          "gdn_patches._patch_mlxvlm_gated_delta_tiled_v (stock-built "
          "trees only: vlm MTP targets + the GMLX_QWEN_OWNED=0 text "
