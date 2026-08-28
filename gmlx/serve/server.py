@@ -1871,6 +1871,13 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
         if extras:
             print(f"[server] preload: warming {', '.join(extras)} in background")
 
+    # Record what code this server actually booted with. The launcher stamps
+    # at spawn, but launchd respawns bypass it (login, crash recovery); the
+    # stamp lets status/launch flag a server that predates a source change.
+    from . import lifecycle
+
+    lifecycle.stamp_run(host, port)
+
     loop = "uvloop" if _has_uvloop() else "auto"
     uvicorn.run("mlx_vlm.server:app", host=host, port=port, workers=1,
                 server_header=False, loop=loop,

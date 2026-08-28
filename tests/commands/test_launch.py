@@ -14,6 +14,8 @@ import pytest
 import gmlx.commands.launch as launch  # noqa: E402
 import gmlx.serve.lifecycle as lifecycle  # noqa: E402
 
+_REAL_WARN_IF_STALE = launch._warn_if_stale_server   # before the autouse no-op
+
 
 @pytest.fixture(autouse=True)
 def _fake_home(monkeypatch, tmp_path_factory):
@@ -27,8 +29,10 @@ def _fake_home(monkeypatch, tmp_path_factory):
 def _default_server_up(monkeypatch):
     # start-if-down probes _server_ready before dispatching to a harness. Default it to
     # "up" so harness-flow tests stay deterministic regardless of whether a real server
-    # happens to be live on this box; the down-path tests below override it.
+    # happens to be live on this box; the down-path tests below override it. The
+    # stale-source warn reads real runfiles - silence it the same way.
     monkeypatch.setattr(launch, "_server_ready", lambda base, api_key=None: True)
+    monkeypatch.setattr(launch, "_warn_if_stale_server", lambda host, port: None)
 
 
 def _models():
@@ -196,6 +200,34 @@ def test_server_root_strips_v1():
     assert launch._server_root("http://h:8080/v1") == "http://h:8080"
     assert launch._server_root("http://h:8080/v1/") == "http://h:8080"
     assert launch._server_root("http://h:9000") == "http://h:9000"
+
+
+# stale-source warn (runfile stamp vs the tree now). The autouse fixture
+# no-ops launch._warn_if_stale_server for the harness-flow tests; these two
+# put the real function back to test it.
+def test_warn_if_stale_server_flags_stale(monkeypatch, capsys):
+    monkeypatch.setattr(launch, "_warn_if_stale_server", _REAL_WARN_IF_STALE)
+    monkeypatch.setattr(lifecycle, "read_run",
+                        lambda h, p: {"pid": 1, "source_stamp": {
+                            "files": 1, "newest_mtime": 1.0}})
+    monkeypatch.setattr(lifecycle, "source_stamp",
+                        lambda: {"files": 2, "newest_mtime": 2.0})
+    launch._warn_if_stale_server("127.0.0.1", 8080)
+    err = capsys.readouterr().err
+    assert "changed" in err and "gmlx restart" in err
+
+
+def test_warn_if_stale_server_quiet_when_clean_or_unmanaged(monkeypatch, capsys):
+    # A matching stamp, a pre-stamp runfile, and no runfile at all (a foreign
+    # or unmanaged server) all stay silent: the warn must never add noise to
+    # a healthy connect.
+    monkeypatch.setattr(launch, "_warn_if_stale_server", _REAL_WARN_IF_STALE)
+    stamp = {"files": 1, "newest_mtime": 1.0}
+    monkeypatch.setattr(lifecycle, "source_stamp", lambda: dict(stamp))
+    for run in ({"pid": 1, "source_stamp": dict(stamp)}, {"pid": 1}, None):
+        monkeypatch.setattr(lifecycle, "read_run", lambda h, p, _r=run: _r)
+        launch._warn_if_stale_server("127.0.0.1", 8080)
+    assert capsys.readouterr().err == ""
 
 
 def test_ensure_server_normalizes_explicit_base_url(monkeypatch):

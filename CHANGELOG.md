@@ -6,6 +6,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Managed servers detect when the gmlx install changed on disk after they
+  started (a pip upgrade, or a checkout switch under an editable install):
+  the runfile records a source fingerprint at boot, `gmlx status` and
+  harness connects (`chat`, `launch`) flag the stale server with a
+  `gmlx restart` hint, and a lazy import that fails inside the serve load
+  path reports the condition instead of a bare "No module named" 500.
+
 ### Fixed
 
 - Metal buffer leaks: glm5next decode no longer hits the 499k resource limit

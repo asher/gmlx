@@ -111,6 +111,62 @@ def write_run(host: str, port, data: dict) -> None:
     tmp.replace(p)
 
 
+def _source_root() -> Path:
+    import gmlx
+
+    return Path(gmlx.__file__).parent
+
+
+def source_stamp() -> dict | None:
+    """Fingerprint of the gmlx source tree: ``*.py`` file count + newest
+    mtime. Stamped into the runfile at server start; a later mismatch means
+    the install changed under the running server (a pip upgrade, or a
+    checkout switch under an editable install), so lazy imports may fail
+    until a restart. Count catches deletions, mtime catches edits and
+    additions (pip and git both rewrite mtimes). None when the package
+    tree can't be walked (zipped/frozen installs)."""
+    try:
+        count, newest = 0, 0.0
+        for p in _source_root().rglob("*.py"):
+            try:
+                mtime = p.stat().st_mtime
+            except OSError:      # racing a checkout/upgrade mid-walk
+                continue
+            count += 1
+            newest = max(newest, mtime)
+        return {"files": count, "newest_mtime": round(newest, 3)}
+    except OSError:
+        return None
+
+
+def source_changed(run: dict | None) -> bool | None:
+    """True when the source tree no longer matches the stamp the server
+    recorded at start, None when either side is unknown (a pre-stamp
+    runfile, an unwalkable install)."""
+    stamp = (run or {}).get("source_stamp")
+    if not isinstance(stamp, dict):
+        return None
+    now = source_stamp()
+    return None if now is None else now != stamp
+
+
+def stamp_run(host: str, port) -> None:
+    """Refresh the runfile's source stamp from the running server itself.
+
+    The launcher stamps at spawn/install time, but a launchd agent respawns
+    the server at every login and crash without rewriting the runfile - the
+    booting server calls this so the stamp always describes the code it
+    actually loaded. No-op without a runfile (an unmanaged foreground
+    serve)."""
+    run = read_run(host, port)
+    if run is None:
+        return
+    stamp = source_stamp()
+    if stamp is not None and run.get("source_stamp") != stamp:
+        run["source_stamp"] = stamp
+        write_run(host, port, run)
+
+
 def _remove_run(host: str, port) -> None:
     """Drop the runfile. The spawn-guard lock file is deliberately left behind:
     unlinking it while a `serve` holds flock on that inode lets the next `serve`
@@ -476,6 +532,7 @@ def _spawn_detached(child: list, *, host: str, port: int,
             "config_abspath": config_abspath, "argv": list(child), "log": str(lp),
             "started_at": time.time(), "managed_by": "detach",
             "api_key_set": bool(api_key_set or api_key), "status": "starting",
+            "source_stamp": source_stamp(),
         }
         write_run(host, port, run)
     return proc, lp
@@ -882,6 +939,7 @@ def status_info(host: str, port) -> dict | None:
         "managed_by": managed, "log": run.get("log"),
         "uptime_s": int(time.time() - run.get("started_at", time.time())),
         "api_key_set": bool(run.get("api_key_set")),
+        "stale_source": bool(source_changed(run)),
     }
 
 
@@ -930,6 +988,9 @@ def status(host: str, port, *, as_json: bool = False) -> int:
                 else _served_model_count(info["host"], info["port"]))
     tail = f", {n_models} model{plural_s(n_models)}" if n_models is not None else ""
     print(f"{url}: up ({health}{tail}) - {pid}, {where}")
+    if info.get("stale_source"):
+        print("  source changed on disk since this server started - requests "
+              "may fail with import errors; `gmlx restart` loads the new code")
     if n_models == 0:
         print("  0 models served: requests will 404 - "
               "gmlx init -> gmlx pull <hf:ref> -> gmlx restart")
@@ -1144,6 +1205,7 @@ def service_install(serve_args: list, *, host: str, port: int,
         "argv": list(child), "log": str(lp), "started_at": time.time(),
         "managed_by": "launchd", "label": label, "plist": str(pp),
         "api_key_set": bool(api_key_set),
+        "source_stamp": source_stamp(),
     })
     tgt = "" if (host, port) == ("127.0.0.1", 8080) else f" --port {port}"
     print(f"installed launchd agent {label}")
