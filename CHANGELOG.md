@@ -45,6 +45,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stop: mlx-vlm 0.6.15 vendored its qwen3_5 gated_delta functions, so plain
   VLM loads ran the GGUF's tiled V heads through grouped K-to-V kernels.
   Plain loads now rebind the vendored module like the MTP paths do.
+- qwen4exp VLM conversations could fail with a broadcast_shapes error when
+  the cache grew after a trim landed mid-step: the QSA position buffer was
+  sized against its untruncated width and fell behind the key stream.
 - qwen4exp ran the whole residual stream in fp32: the router's fp32 scores
   promoted each layer's MoE output and every downstream elementwise chain.
   Prefill is ~35% faster and decode ~20% faster after the dtype returns to
