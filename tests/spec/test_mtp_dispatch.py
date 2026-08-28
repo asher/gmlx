@@ -35,7 +35,7 @@ def _stub_loaders(monkeypatch, arches):
     monkeypatch.setattr(mtp_load, "_drafter_header_arch",
                         lambda p: arches.get(p))
     for name in ("_load_deepseek4_mtp_drafter", "_load_qwen4exp_mtp_drafter",
-                 "_load_dflash_drafter"):
+                 "_load_nemotron_mtp_drafter", "_load_dflash_drafter"):
         monkeypatch.setattr(
             mtp_load, name,
             lambda path, model, cfg, *, zero_copy, log, _n=name:
@@ -51,6 +51,7 @@ def _stub_loaders(monkeypatch, arches):
 @pytest.mark.parametrize("model_type,drafter_arch,want", [
     ("deepseek_v4", "deepseek4-dspark", "_load_deepseek4_mtp_drafter"),
     ("qwen4_exp", "qwen4exp-mtp", "_load_qwen4exp_mtp_drafter"),
+    ("nemotron_h", "nemotron_h_moe", "_load_nemotron_mtp_drafter"),
     ("qwen3_5", "dflash", "_load_dflash_drafter"),
     ("muse_glimmer", "dflash", "_load_dflash_drafter"),
     ("gemma4_text", "gemma4_assistant", "_load_gemma4_assistant_drafter"),
