@@ -212,10 +212,6 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     spec_engine.install_owned_spec_engine()
     spec_engine.install_continuous_batch_admission()
     spec_engine.install_spec_kv_quant()
-    # After tbfix + seed (its criteria wrapper must be outermost) and after
-    # the owned MTP prefill (its transport wrap must land outside
-    # _mtp_generate, so the hook stash happens after the APC L0 store).
-    install_mtp_thinking_budget()
     from ..batch_sched import install_decode_priority_sched
     install_decode_priority_sched()
     from gmlx.cache.apc_pooling import (
@@ -296,6 +292,13 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_queue_depth_cap()
     from ..mem_preflight import install_memory_preflight
     install_memory_preflight()
+    # After tbfix + seed (its criteria wrapper must be outermost), after the
+    # owned MTP prefill (its transport wrap must land outside _mtp_generate,
+    # so the hook stash happens after the APC L0 store), and after the
+    # memory preflight (its generate wrap does not carry flags forward, so
+    # the defer wrap must be the outer one for both installs to stay
+    # idempotent).
+    install_mtp_thinking_budget()
     # Late so the trace brackets the full tick including pacing and
     # admission work.
     from gmlx.serve.memtrace import install_serve_memtrace

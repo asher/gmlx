@@ -157,6 +157,99 @@ def test_batch_loop_admission_drops_hook(capsys):
     assert "joined a batched MTP generation" in err
 
 
+class _AcceptEchoDrafter(_EchoDrafter):
+    """Echo drafter that records the accept hook's draft width, so tests can
+    pin the zero-width draft row of a 1-id forced round."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.accept_shapes = []
+
+    def accept_verified_tokens(self, hidden, draft_tokens, accepted,
+                               new_tokens, sampler, dtype, **kw):
+        self.accept_shapes.append(tuple(draft_tokens.shape))
+
+
+class _AcceptArmDrafter(_ArmableDrafter):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.accept_shapes = []
+
+    def accept_verified_tokens_batch(self, hidden, draft_tokens,
+                                     accepted_list, new_tokens_list,
+                                     sampler, dtype, **kw):
+        self.accept_shapes.append(tuple(draft_tokens.shape))
+
+
+def test_scalar_single_id_close_runs_as_width_one_round():
+    # A 1-id total close (no standalone newline id + single-token end marker)
+    # is a width-1 forced round with an empty draft row; the accept hook must
+    # see the (1, 0) draft without raising.
+    hook = _hook([END])
+    d = _AcceptEchoDrafter(cap=0)
+    lm = _VerifyEchoLM()
+    shared = {"full": (mx.zeros((1, 2, 4, 4)), mx.zeros((1, 2, 4, 4)))}
+    gen = spec._owned_decode_rounds(
+        SimpleNamespace(), d, lm, [_FakeCache(width=1)],
+        hidden=mx.zeros((1, 4, 8)), b=5, shared_kv=shared,
+        seed_tokens=None, emitted=1, max_tokens=8, sampler=None,
+        draft_block_size=None, thinking_hook=hook)
+    out = []
+    for tok in gen:
+        out.append(int(tok))
+        if len(out) == 3:
+            hook.request_close()
+    assert out == [6, 7, 8, END,
+                   (END + 1) % VOCAB, (END + 2) % VOCAB, (END + 3) % VOCAB]
+    assert (1, 0) in d.accept_shapes
+    assert not hook.in_thinking
+
+
+def test_batch_loop_single_id_forced_close():
+    hook = _hook([S1, S2, END], budget=1, forced_ids=[END])
+    d = _AcceptArmDrafter(cap=0)
+    gen, _d, _model = _drive_batch(hook, max_tokens=6, drafter=d)
+    out = [t for toks, _ in gen for t in toks if t is not None]
+    assert out == [2, 3, END, (END + 1) % VOCAB, (END + 2) % VOCAB]
+    assert (1, 0) in d.accept_shapes
+    assert hook._spent and not hook.in_thinking
+
+
+def test_owned_server_rounds_forwards_cache_stashed_hook(monkeypatch):
+    captured = {}
+    buffer_seen = {}
+    orig_buffer = spec._buffer_mtp_target_cache
+
+    def probe_buffer(prompt_cache, drafter, draft_block_size):
+        # The pop must precede buffering (entry swaps kill stash attrs).
+        buffer_seen["stash_gone"] = not hasattr(
+            prompt_cache[0], "_kq_mtp_thinking_hook")
+        return orig_buffer(prompt_cache, drafter, draft_block_size)
+
+    def fake_rounds(model, drafter, lm, prompt_cache, **kw):
+        # A real generator: the scalar path calls rounds.close() in a finally.
+        captured.update(kw)
+        return
+        yield
+
+    monkeypatch.setattr(spec, "_buffer_mtp_target_cache", probe_buffer)
+    monkeypatch.setattr(spec, "_owned_decode_rounds", fake_rounds)
+    hook = _hook([S1, S2, END])
+    cache = _FakeCache(width=1)
+    cache._kq_mtp_thinking_hook = hook
+    model = SimpleNamespace(language_model=_VerifyEchoLM())
+    gen = spec.owned_server_rounds(
+        model, _EchoDrafter(cap=0), [cache], mx.zeros((1, 1, 8)),
+        first_bonus=mx.array([5], dtype=mx.int32),
+        max_tokens=4, sampler=None, shared_kv_states=None,
+        prompt_tokens=None, greedy_sampling=True)
+    assert [t for t, _ in gen] == []
+    assert captured["thinking_hook"] is hook
+    assert buffer_seen["stash_gone"] is True
+    assert not hasattr(cache, "_kq_mtp_thinking_hook")
+    assert hook.count == 1     # observed the already-emitted first bonus
+
+
 def test_server_rounds_batch_forwards_cache_stashed_hook(monkeypatch):
     captured = {}
 

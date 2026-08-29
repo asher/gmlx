@@ -19,10 +19,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   through the same forced-close rounds as ^T (the stock MTP round still
   drops it with a notice).
 - The server honors `thinking_budget` on MTP-drafted models (request field
-  or profile/model config key), instead of rejecting those requests. Enforced by the owned round loop for a request decoding
-  alone; requests batched with others drop the budget with a log note. See
-  the behavior matrix in docs/server-config.md. Non-MTP speculative models
-  keep the stock rejection.
+  or profile/model config key), instead of rejecting those requests.
+  Enforced by the owned round loop for a request decoding alone; requests
+  batched with others drop the budget with a log note. See the behavior
+  matrix in docs/server-config.md. Non-MTP speculative models keep the
+  stock rejection.
 - Managed servers detect when the gmlx install changed on disk after they
   started (a pip upgrade, or a checkout switch under an editable install):
   the runfile records a source fingerprint at boot, `gmlx status` and

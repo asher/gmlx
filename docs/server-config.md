@@ -988,7 +988,7 @@ by up to one draft block). What applies when:
 | MTP model, single request decoding alone | applied |
 | MTP model, requests batched together (coalesced arrivals, or a second request joining mid-decode) | dropped for those requests, with a server-log note; under concurrent traffic this is the common case |
 | MTP model, request preempted mid-decode | budget lost from that point |
-| MTP model, request with images/audio | applied; if the model's thinking markers cannot be resolved the budget is ignored with a log note |
+| MTP model, request with images/audio | applied when decoding alone (same as text); if the model's thinking markers cannot be resolved the budget is ignored with a log note |
 | Non-MTP speculative models (draft-model pairs) | rejected by the engine; such a request errors |
 
 Three more keys are honoured by gmlx's own server seams (mlx-vlm has no

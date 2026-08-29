@@ -683,8 +683,10 @@ def _coupled_walk_batch(
 def _next_forced_chunk(hook, queue: list, block_total: int):
     """The next chunk of forced close ids to commit as a fully-accepted
     round, or None. Chunks are capped at the drafter's block width so every
-    verify/accept shape matches a normal round, and a chunk never strands a
-    single trailing id (a width-1 round would carry an empty draft row)."""
+    verify/accept shape matches a normal round, and a multi-id close never
+    strands a single trailing id. A 1-id total close (no standalone newline
+    id and a single-token end marker, or budget 0) still runs as a width-1
+    round with an empty draft row."""
     if not queue:
         forced = hook.take_forced()
         if not forced:
@@ -2287,10 +2289,12 @@ def _owned_decode_rounds_batch(
         # docstring). take_forced consumes a pending ^T request, so it must
         # not be consulted in an ineligible state; a budget trip re-fires at
         # the next boundary on its own, so deferring through a gated or
-        # arm-capture round is safe.
+        # arm-capture round is safe. B_orig == 1 is a tripwire: admission is
+        # the only widening path and it drops the hook first, but a violation
+        # would be a verify shape crash, not a soft degrade.
         forced = None
-        if (thinking_hook is not None and n_active == 1 and not gated
-                and not need_arm and hidden is not None):
+        if (thinking_hook is not None and n_active == 1 and B_orig == 1
+                and not gated and not need_arm and hidden is not None):
             forced = _next_forced_chunk(
                 thinking_hook, forced_queue, block_total)
             if forced is not None:
