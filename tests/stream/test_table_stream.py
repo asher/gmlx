@@ -379,3 +379,43 @@ def test_table_stream_is_dedicated_and_does_not_leak_default():
     out = model.model.ple_embed(mx.array([[0, 1]], dtype=mx.int32))
     mx.eval(out)
     assert mx.default_stream(mx.cpu) == before
+
+
+def _iq4nl_table(rows=8, dims=32, seed=11):
+    """IQ4_NL wire bytes crafted directly (gguf-py cannot encode it):
+    per 32-elem block, fp16 scale 1.0 + 16 random nibble bytes. Parity
+    needs identical bytes through both paths, not a real encoder."""
+    from mlx_kquant.nn import KQuantEmbedding, bytes_per_row
+
+    rng = np.random.default_rng(seed)
+    bpr = bytes_per_row("iq4_nl", dims)
+    blocks = dims // 32
+    wires = np.zeros((rows, bpr), dtype=np.uint8)
+    for b in range(blocks):
+        o = b * 18
+        wires[:, o] = 0x00
+        wires[:, o + 1] = 0x3C  # fp16 1.0, little-endian
+        wires[:, o + 2:o + 18] = rng.integers(
+            0, 256, (rows, 16), dtype=np.uint8)
+    emb = KQuantEmbedding(rows, dims, "iq4_nl")
+    emb.weight = mx.array(wires)
+    mx.eval(emb.parameters())
+    return emb
+
+
+def test_wrapped_table_parity_iq4_nl():
+    # the real PLE table's codec
+    model = _Node()
+    model.model_type = "qwen4_exp"
+    inner = _Node()
+    inner.ple_embed = _iq4nl_table()
+    model.model = inner
+    emb = inner.ple_embed
+    rows = mx.array([[0, 3, 7], [5, 1, 2]], dtype=mx.int32)
+    ref = emb(rows)
+    mx.eval(ref)
+    ts.install_table_streaming(model)
+    out = emb(rows)
+    mx.eval(out)
+    assert out.dtype == ref.dtype
+    assert bool(mx.all(out == ref))
