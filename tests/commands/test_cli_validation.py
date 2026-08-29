@@ -388,9 +388,11 @@ def test_speculative_forwards_template_config_and_warns_new_drops(
     # forwarded, not dropped
     assert spec_stubs["template_kwargs"] == {"enable_thinking": False}
     assert "--chat-template-config" not in err
-    # newly-named drops fire the warning + --no-mtp hint
-    for flag in ("--thinking-budget", "--prefill-step-size"):
-        assert flag in err
+    # the budget rides the owned rounds now: forwarded, not warned
+    assert spec_stubs["thinking_budget"] == 256
+    assert "--thinking-budget" not in err
+    # still-dropped flags fire the warning + --no-mtp hint
+    assert "--prefill-step-size" in err
     assert "not applied on the MTP path" in err
 
 

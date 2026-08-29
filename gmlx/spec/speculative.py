@@ -1209,6 +1209,7 @@ def owned_server_rounds(
     # rotating). A generator local is immune to cache-entry swaps.
     retire_ctx = _pop_retire_ctx(prompt_cache)
     drafter_warm = _pop_drafter_warm(prompt_cache)
+    thinking_hook = _pop_thinking_hook(prompt_cache)
     sidecar_ctx = None
     if retire_ctx is not None:
         sidecar_ctx = {
@@ -1225,6 +1226,10 @@ def owned_server_rounds(
         }
         if retire_ctx.get("mode") == "ckpt":
             _ckpt_post_prefill(model, prompt_cache, retire_ctx)
+    if thinking_hook is not None:
+        # The server emitted the first bonus before these rounds; the hook
+        # still has to see it (it may be a thinking marker).
+        thinking_hook.observe(b)
     _buffer_mtp_target_cache(prompt_cache, drafter, draft_block_size)
     eff_sampler = None if greedy_sampling else sampler
     generated = [b]
@@ -1233,7 +1238,8 @@ def owned_server_rounds(
         hidden=hidden, b=b, shared_kv=shared_kv_states,
         seed_tokens=prompt_tokens, emitted=1, max_tokens=max_tokens,
         sampler=eff_sampler, draft_block_size=draft_block_size,
-        drafter_warm=drafter_warm, sidecar_ctx=sidecar_ctx)
+        drafter_warm=drafter_warm, sidecar_ctx=sidecar_ctx,
+        thinking_hook=thinking_hook)
     try:
         for tok in rounds:
             generated.append(tok)
@@ -1438,6 +1444,26 @@ def _pop_drafter_warm(prompt_cache: list) -> list | None:
         except Exception:
             pass  # slotted/frozen cache forbids ad-hoc attrs
     return warm
+
+
+def _pop_thinking_hook(prompt_cache: list):
+    """Detach the request-scoped thinking-budget hook (MTPFinishThinking)
+    from the prompt cache.
+
+    The serve transport stashes it on the request's first cache entry (same
+    request-scoped discipline as the retirement context; a model-level stash
+    races across request threads). Popped once, before buffering can swap
+    cache entries out from under the attr.
+    """
+    if not prompt_cache:
+        return None
+    hook = getattr(prompt_cache[0], "_kq_mtp_thinking_hook", None)
+    if hook is not None:
+        try:
+            delattr(prompt_cache[0], "_kq_mtp_thinking_hook")
+        except AttributeError:
+            pass
+    return hook
 
 
 def _pop_retire_ctx(prompt_cache: list) -> dict | None:
@@ -1864,6 +1890,7 @@ def _owned_decode_rounds_batch(
     stop_check: Callable[[int, int], bool] | None = None,
     eos_token_ids: set | None = None,
     row_ids: list[int] | None = None,
+    thinking_hook=None,
 ) -> Iterator[tuple[list[int | None], Any]]:
     """Owned batched MTP decode loop (B >= 1 under continuous batching).
 
@@ -1887,6 +1914,12 @@ def _owned_decode_rounds_batch(
     hidden/shared-KV capture on, whose state cold-starts the drafter. The
     same capture round re-arms a width-gated batch that has drained back
     under the cap (resume; GMLX_MTP_RESUME=0 disables).
+
+    ``thinking_hook`` (an MTPFinishThinking) is honored only while the batch
+    is a single armed row: forced close chunks run as fully-accepted verify
+    rounds like the scalar loop's. The hook is dropped (with a note when it
+    carries a budget) the moment rows are admitted; an in-flight forced
+    close defers admission until its chunks have all been emitted.
     """
     token_dtype = mx.int32
     greedy = sampler is None
@@ -2042,6 +2075,19 @@ def _owned_decode_rounds_batch(
             f"trip: B={width} > cap={cap}; batch converts to plain decode "
             f"until drained")
 
+    forced_queue: list[int] = []
+
+    def _drop_thinking_hook(reason: str) -> None:
+        """Stand the ^T/budget hook down (its single-row contract ended)."""
+        nonlocal thinking_hook
+        if thinking_hook is None:
+            return
+        if getattr(thinking_hook, "budget", None) is not None:
+            print(f"[thinking-budget] dropped: {reason}",
+                  file=sys.stderr, flush=True)
+        thinking_hook = None
+        forced_queue.clear()
+
     def _resume_ready() -> bool:
         """A gated batch back under the cap may re-arm and speculate again."""
         if not cap or len(active_idx) > cap:
@@ -2088,6 +2134,11 @@ def _owned_decode_rounds_batch(
         nonlocal hidden, B_orig, _gated_pending, _inject_hold
         gen_inj = getattr(model, "_generator_injections", None)
         if gen_inj:
+            if forced_queue:
+                # An in-flight forced close must land whole (a half-emitted
+                # wrap phrase with no close marker corrupts the stream).
+                # Defer admission; the queue drains within a few rounds.
+                return
             if _gated_pending is not None:
                 # The buffer holds a dispatched step whose input KV is
                 # already in the target cache; it must be consumed, never
@@ -2098,6 +2149,7 @@ def _owned_decode_rounds_batch(
                 # admits with the buffer empty.
                 _inject_hold = True
                 return
+            _drop_thinking_hook("MTP rounds batched")
             n_before = B_orig
             # Trip BEFORE processing: a tripping drain must not pay
             # inject_rows, which teacher-forces the whole injected prompt
@@ -2146,6 +2198,14 @@ def _owned_decode_rounds_batch(
                 inj_ctx = (_pop_retire_ctx(inj["prompt_cache"])
                            if B_new == 1 else None)
                 _pop_drafter_warm(inj["prompt_cache"])
+                # A solo-prefilled injected cache may carry a thinking-budget
+                # stash; batched rows cannot honor it, so pop and drop.
+                inj_hook = _pop_thinking_hook(inj["prompt_cache"])
+                if inj_hook is not None and getattr(
+                        inj_hook, "budget", None) is not None:
+                    print("[thinking-budget] dropped: request joined a "
+                          "batched MTP generation", file=sys.stderr,
+                          flush=True)
 
                 inj_offset = _mtp_cache_offset_max(inj["prompt_cache"])
                 # Entries without per-row budgets (older producers, test
@@ -2223,6 +2283,23 @@ def _owned_decode_rounds_batch(
                 dispatch_next = False
         n_active = len(active_idx)
 
+        # ^T/budget forced close: only for a single armed row (see the
+        # docstring). take_forced consumes a pending ^T request, so it must
+        # not be consulted in an ineligible state; a budget trip re-fires at
+        # the next boundary on its own, so deferring through a gated or
+        # arm-capture round is safe.
+        forced = None
+        if (thinking_hook is not None and n_active == 1 and not gated
+                and not need_arm and hidden is not None):
+            forced = _next_forced_chunk(
+                thinking_hook, forced_queue, block_total)
+            if forced is not None:
+                budget_left = (max_tok[active_idx[0]]
+                               - emitted[active_idx[0]])
+                if budget_left < len(forced):
+                    forced = forced[:max(1, budget_left)]
+                    forced_queue.clear()
+
         if gated:
             # Plain decode round, double-buffered the way stock
             # GenerationBatch._step is: dispatch the NEXT round's forward from
@@ -2272,6 +2349,39 @@ def _owned_decode_rounds_batch(
             accepted_list, new_tokens_list, verify = _arm_capture()
             _td = _tv = time.perf_counter() if _ROUND_PROFILE else _t0
             _t1 = time.perf_counter()
+        elif forced is not None:
+            # Forced close chunk: commit the known ids as one fully accepted
+            # verify round (no draft; see the scalar loop's forced round).
+            # Every seam below (delivery, retire, shared-kv slide) runs
+            # unchanged; rollback is skipped because nothing was rejected.
+            _t0 = time.perf_counter()
+            _gap = (_t0 - _prev_end) * 1e3 if _prev_end else 0.0
+            bs = len(forced)
+            b_arr = mx.array([b[active_idx[0]]], dtype=token_dtype)
+            draft_tokens = mx.array([forced[:-1]], dtype=token_dtype)
+            _td = time.perf_counter() if _ROUND_PROFILE else _t0
+            with mx.stream(generation_stream):
+                verify_input = mx.concatenate(
+                    [b_arr[:, None], draft_tokens], axis=1)
+                verify = _mtp_verify_target(
+                    lm, verify_input, prompt_cache, sampler,
+                    sample_target_tokens=greedy)
+            if _ROUND_PROFILE:
+                mx.eval(verify.hidden)
+            _tv = time.perf_counter() if _ROUND_PROFILE else _t0
+            accepted_list = [bs - 1]
+            new_tokens_list = [list(forced)]
+            max_a = bs - 1
+            _t1 = time.perf_counter()
+            sampler_rng.target_sampled(sync_draft=True)
+            # Forced rounds drafted nothing; recording them would skew
+            # accept stats and the adaptive block sizing.
+            if _has_accept_batch:
+                sampler_rng.draft_call(
+                    _accept_batch_fn, verify.hidden, draft_tokens,
+                    accepted_list, new_tokens_list, draft_sampler, token_dtype,
+                    **draft_kwargs)
+            hidden = _mtp_draft_hidden(lm, verify.hidden[:, -1:, :])
         else:
             remaining = [
                 max(1, max_tok[active_idx[j]] - emitted[active_idx[j]] + 1)
@@ -2343,6 +2453,8 @@ def _owned_decode_rounds_batch(
                 orig = active_idx[j]
                 if pos < len(new_tokens_list[j]) and not finished[orig]:
                     tok = new_tokens_list[j][pos]
+                    if thinking_hook is not None and n_active == 1:
+                        thinking_hook.observe(tok)
                     tokens_out[orig] = tok
                     gen_rows[orig].append(tok)
                     emitted[orig] += 1
@@ -2417,6 +2529,12 @@ def _owned_decode_rounds_batch(
                         K_next, V_next = next_shared_kv[k]
                         next_shared_kv[k] = (K_next[empty], V_next[empty])
                     shared_kv = next_shared_kv
+            # The hook's row is finished: its budget contract is over. Clear
+            # silently (no drop note) so the hook cannot leak onto the
+            # adopted request and a leftover forced queue cannot stall the
+            # admission deferral in _drain_injections.
+            thinking_hook = None
+            forced_queue.clear()
             active_idx = []
             _drain_injections()
             if not active_idx:
@@ -2538,6 +2656,13 @@ def owned_server_rounds_batch(
     # enters the batch loop directly (the residency pool routes every
     # serve row here) retires its row like the scalar path does.
     retire_ctx0 = _pop_retire_ctx(prompt_cache) if B == 1 else None
+    # Pop unconditionally (a stash must never survive into a later request);
+    # honored only for a single-row batch.
+    thinking_hook = _pop_thinking_hook(prompt_cache)
+    if thinking_hook is not None and B != 1:
+        thinking_hook = None
+    elif thinking_hook is not None:
+        thinking_hook.observe(b[0])  # the already-emitted first bonus
     _buffer_mtp_target_cache(prompt_cache, drafter, draft_block_size)
     eff_sampler = None if greedy_sampling else sampler
     # A preempted scalar generation rebuilt into this loop carries its real
@@ -2558,4 +2683,5 @@ def owned_server_rounds_batch(
         emitted=list(emitted), max_tokens=max_tokens,
         sampler=eff_sampler, draft_block_size=draft_block_size,
         stop_check=stop_check, eos_token_ids=eos_token_ids,
-        row_ids=row_ids, retire_ctx0=retire_ctx0)
+        row_ids=row_ids, retire_ctx0=retire_ctx0,
+        thinking_hook=thinking_hook)

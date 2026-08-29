@@ -171,7 +171,10 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.generate.ar", "PromptProcessingBatch.prompt_step",
          "spec_engine.install_full_prompt_mtp_prefill", critical=True),
     Seam("mlx_vlm.generate.ar", "PromptProcessingBatch.generate",
-         "spec_engine.install_full_prompt_mtp_prefill", critical=True),
+         "spec_engine.install_full_prompt_mtp_prefill; "
+         "seed_rows.install_per_request_seed (row-uid publish); "
+         "server_patches.mtp_thinking (thinking-hook transport, outermost)",
+         critical=True),
     Seam("mlx_vlm.generate.ar", "SpeculativeGenerationBatch.next",
          "spec_engine.install_continuous_batch_admission", critical=True),
     Seam("mlx_vlm.generate.ar", "SpeculativeGenerationBatch.filter",
@@ -205,6 +208,16 @@ SEAMS: tuple[Seam, ...] = (
          "server_bridge_vlm (GGUF model resource loader)", critical=True),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._make_sampler",
          "server_patches.install_fast_sampler"),
+    Seam("mlx_vlm.server.generation", "ResponseGenerator.generate",
+         "mem_preflight.install_memory_preflight; "
+         "server_patches.mtp_thinking (thinking_budget deferral)",
+         critical=True),
+    Seam("mlx_vlm.server.generation",
+         "ResponseGenerator._make_thinking_budget_criteria",
+         "chat_behavior.install_thinking_budget_fix (rebind); "
+         "seed_rows.install_per_request_seed; server_patches.mtp_thinking "
+         "(restore + hook attach; runtime chain mtp -> seed -> tbfix)",
+         critical=True),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._step",
          "server_patches.row_failed (permanently failed rows delivered "
          "to their response queues on the engine thread)", critical=True),

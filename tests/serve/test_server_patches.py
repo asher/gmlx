@@ -453,6 +453,216 @@ def test_seed_wrapper_survives_thinking_budget_fix():
         sr._PENDING.clear()
 
 
+# 1c. server thinking_budget on MTP models (mtp_thinking)
+from gmlx.serve.patches import mtp_thinking as sp_mtp  # noqa: E402
+
+
+@pytest.fixture
+def _mtp_seams():
+    """Force the owned-prefill class flag on (install-order precondition) and
+    snapshot the three methods mtp_thinking wraps."""
+    from gmlx.spec.engine import _FULL_PREFILL_FLAG
+    gen = importlib.import_module("mlx_vlm.server.generation")
+    ar = importlib.import_module("mlx_vlm.generate.ar")
+    cls = gen.ResponseGenerator
+    had_flag = getattr(ar.PromptProcessingBatch, _FULL_PREFILL_FLAG, False)
+    setattr(ar.PromptProcessingBatch, _FULL_PREFILL_FLAG, True)
+    saved = (cls.generate, cls._make_thinking_budget_criteria,
+             ar.PromptProcessingBatch.generate)
+    yield gen, ar
+    (cls.generate, cls._make_thinking_budget_criteria,
+     ar.PromptProcessingBatch.generate) = saved
+    if not had_flag:
+        delattr(ar.PromptProcessingBatch, _FULL_PREFILL_FLAG)
+
+
+def _mtp_self():
+    return types.SimpleNamespace(
+        draft_model=object(), draft_kind="mtp",
+        tokenizer=_FakeThinkTok(),
+        _thinking_token_ids=lambda args: (99, 100))
+
+
+def _budget_args(**kw):
+    base = dict(thinking_budget=6, enable_thinking=False, seed=None,
+                temperature=1.0, thinking_start_token=None,
+                thinking_end_token=None)
+    base.update(kw)
+    return types.SimpleNamespace(**base)
+
+
+def test_mtp_thinking_install_refuses_without_owned_prefill():
+    from gmlx.spec.engine import _FULL_PREFILL_FLAG
+    gen = importlib.import_module("mlx_vlm.server.generation")
+    ar = importlib.import_module("mlx_vlm.generate.ar")
+    had_flag = getattr(ar.PromptProcessingBatch, _FULL_PREFILL_FLAG, False)
+    if had_flag:
+        delattr(ar.PromptProcessingBatch, _FULL_PREFILL_FLAG)
+    before = gen.ResponseGenerator.generate
+    try:
+        sp_mtp.install_mtp_thinking_budget()
+        assert gen.ResponseGenerator.generate is before   # refused, unbound
+    finally:
+        if had_flag:
+            setattr(ar.PromptProcessingBatch, _FULL_PREFILL_FLAG, True)
+
+
+def test_mtp_thinking_defers_budget_only_for_mtp(_mtp_seams):
+    gen, _ar = _mtp_seams
+    cls = gen.ResponseGenerator
+    seen = []
+
+    def stub(self, prompt, images=None, audio=None, args=None, videos=None):
+        seen.append(args.thinking_budget if args is not None else None)
+        return "gen"
+
+    cls.generate = stub
+    sp_mtp.install_mtp_thinking_budget()
+    args = _budget_args()
+    assert cls.generate(_mtp_self(), "p", args=args) == "gen"
+    assert seen[-1] is None                              # moved aside
+    assert getattr(args, sp_mtp._DEFERRED_ATTR) == 6
+    # Non-MTP drafter: untouched, so the upstream raise still fires there.
+    eagle = types.SimpleNamespace(draft_model=object(), draft_kind="eagle")
+    args2 = _budget_args()
+    cls.generate(eagle, "p", args=args2)
+    assert seen[-1] == 6 and not hasattr(args2, sp_mtp._DEFERRED_ATTR)
+    # Plain model and args=None: untouched.
+    plain = types.SimpleNamespace(draft_model=None, draft_kind=None)
+    args3 = _budget_args()
+    cls.generate(plain, "p", args=args3)
+    assert seen[-1] == 6
+    cls.generate(_mtp_self(), "p")                       # args=None tolerated
+
+
+def test_mtp_thinking_criteria_restores_even_on_early_out(_mtp_seams):
+    gen, _ar = _mtp_seams
+    cls = gen.ResponseGenerator
+    cls._make_thinking_budget_criteria = lambda self, args, input_ids: None
+    sp_mtp.install_mtp_thinking_budget()
+    make = cls._make_thinking_budget_criteria
+    args = _budget_args(thinking_budget=None)
+    setattr(args, sp_mtp._DEFERRED_ATTR, 6)
+    crit = make(_mtp_self(), args, [1, 2, 3])
+    assert args.thinking_budget == 6                     # restored
+    assert not hasattr(args, sp_mtp._DEFERRED_ATTR)
+    # Delegate returned None: the hook rides a duck-shaped carrier that the
+    # plain batch loop can call without raising.
+    hook = crit._kq_mtp_hook
+    assert hook is not None and hook.budget == 6
+    assert crit(5) is None and crit.pop_forced_token_id() is None
+    # Prompt ending inside an open think block seeds the hook in-thinking.
+    args_open = _budget_args(thinking_budget=None)
+    setattr(args_open, sp_mtp._DEFERRED_ATTR, 6)
+    assert make(_mtp_self(), args_open, [1, 2, 99])._kq_mtp_hook.in_thinking
+
+
+def test_mtp_thinking_criteria_restores_on_raise(_mtp_seams):
+    gen, _ar = _mtp_seams
+    cls = gen.ResponseGenerator
+
+    def boom(self, args, input_ids):
+        raise RuntimeError("delegate failed")
+
+    cls._make_thinking_budget_criteria = boom
+    sp_mtp.install_mtp_thinking_budget()
+    args = _budget_args(thinking_budget=None)
+    setattr(args, sp_mtp._DEFERRED_ATTR, 6)
+    with pytest.raises(RuntimeError):
+        cls._make_thinking_budget_criteria(_mtp_self(), args, [1])
+    assert args.thinking_budget == 6                     # not stranded
+
+
+def test_mtp_thinking_full_chain_with_seed_and_tbfix(_mtp_seams):
+    # Runtime chain mtp -> seed -> tbfix: one call restores the deferred
+    # budget, stashes the seed, builds the armed criteria, and attaches the
+    # rounds hook to it.
+    import gmlx.serve.seed_rows as sr
+    gen, ar = _mtp_seams
+    cls = gen.ResponseGenerator
+    saved_insert = (ar.BatchGenerator.insert, ar.GenerationBatch._step,
+                    ar.SpeculativeGenerationBatch.next)
+    sr._PENDING.clear()
+    try:
+        sp.install_thinking_budget_fix()
+        sr.install_per_request_seed()
+        sp_mtp.install_mtp_thinking_budget()
+        args = _budget_args(thinking_budget=None, seed=11)
+        setattr(args, sp_mtp._DEFERRED_ATTR, 6)
+        crit = cls._make_thinking_budget_criteria(_mtp_self(), args, [1, 2])
+        assert args.thinking_budget == 6
+        assert sr._PENDING == [11]
+        assert crit is not None and crit.in_thinking is False   # tbfix armed
+        assert crit._kq_mtp_hook is not None and crit._kq_mtp_hook.budget == 6
+    finally:
+        (ar.BatchGenerator.insert, ar.GenerationBatch._step,
+         ar.SpeculativeGenerationBatch.next) = saved_insert
+        sr._PENDING.clear()
+
+
+def test_mtp_thinking_transport_stash_and_batch_drop(_mtp_seams):
+    _gen, ar = _mtp_seams
+    ar.PromptProcessingBatch.generate = \
+        lambda self, sampler, *a, **k: self._out
+    sp_mtp.install_mtp_thinking_budget()
+    wrapper = ar.PromptProcessingBatch.generate
+    hook = object()
+    crit = types.SimpleNamespace(_kq_mtp_hook=hook)
+    cache_entry = types.SimpleNamespace()
+    batch = types.SimpleNamespace(prompt_cache=[cache_entry], uids=["u"])
+    me = types.SimpleNamespace(
+        draft_model=object(), draft_kind="mtp",
+        thinking_budget_criteria=[crit], _out=batch)
+    assert wrapper(me, None) is batch
+    assert cache_entry._kq_mtp_thinking_hook is hook     # B==1 stash
+    # B>1: dropped, nothing stashed.
+    c2 = types.SimpleNamespace()
+    batch2 = types.SimpleNamespace(prompt_cache=[c2], uids=["u", "v"])
+    me2 = types.SimpleNamespace(
+        draft_model=object(), draft_kind="mtp",
+        thinking_budget_criteria=[crit, crit], _out=batch2)
+    wrapper(me2, None)
+    assert not hasattr(c2, "_kq_mtp_thinking_hook")
+    # Criteria/rows mismatch: dropped, not indexed blindly.
+    c3 = types.SimpleNamespace()
+    batch3 = types.SimpleNamespace(prompt_cache=[c3], uids=["u"])
+    me3 = types.SimpleNamespace(
+        draft_model=object(), draft_kind="mtp",
+        thinking_budget_criteria=[crit, crit], _out=batch3)
+    wrapper(me3, None)
+    assert not hasattr(c3, "_kq_mtp_thinking_hook")
+    # Non-MTP batch: untouched.
+    c4 = types.SimpleNamespace()
+    batch4 = types.SimpleNamespace(prompt_cache=[c4], uids=["u"])
+    me4 = types.SimpleNamespace(
+        draft_model=None, draft_kind=None,
+        thinking_budget_criteria=[crit], _out=batch4)
+    wrapper(me4, None)
+    assert not hasattr(c4, "_kq_mtp_thinking_hook")
+
+
+def test_mtp_thinking_flags_carry_through_preflight(_mtp_seams):
+    # The defer wrap carries earlier flags forward and stamps its own, so a
+    # later mem_preflight re-install must see its flag and not double-wrap.
+    from gmlx.serve import mem_preflight as mp
+    gen, _ar = _mtp_seams
+    cls = gen.ResponseGenerator
+
+    def stub(self, prompt, images=None, audio=None, args=None, videos=None):
+        return "gen"
+
+    stub.__dict__[mp._INSTALLED_FLAG] = True             # preflight installed
+    cls.generate = stub
+    sp_mtp.install_mtp_thinking_budget()
+    wrapped = cls.generate
+    assert wrapped is not stub
+    assert getattr(wrapped, mp._INSTALLED_FLAG, False)   # carried forward
+    mp.install_memory_preflight()
+    assert cls.generate is wrapped                       # no double wrap
+    sp_mtp._install_defer(cls)
+    assert cls.generate is wrapped                       # own re-install no-ops
+
+
 # 2. gen-args wrapper reference swap
 def test_install_wraps_build_gen_args_and_injects():
     def stub(request, processor=None, tenant_id=None):

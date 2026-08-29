@@ -15,7 +15,8 @@ import mlx.core as mx
 import gmlx.spec.speculative as spec
 from gmlx.gen.thinking_budget import MTPFinishThinking
 
-from test_mtp_preempt_resume import VOCAB, _EchoDrafter, _VerifyEchoLM
+from test_mtp_preempt_resume import (
+    VOCAB, _ArmableDrafter, _EchoDrafter, _VerifyEchoLM)
 from test_mtp_width_cap import _FakeCache
 
 END, S1, S2 = 17, 11, 12  # close marker + wrap-phrase stand-ins (< VOCAB)
@@ -97,3 +98,104 @@ def test_generator_close_mid_forced_round():
     assert int(next(gen)) == S1  # the forced round starts
     gen.close()  # consumer stops mid-close; the finish seam must not raise
     assert out == [6, 7, 8]
+
+
+# -- batch loop (serve): B==1 rows honor the hook, widening drops it -------
+
+
+def _drive_batch(hook, *, B=1, b=None, max_tokens=9, drafter=None,
+                 model=None):
+    d = drafter if drafter is not None else _ArmableDrafter(cap=0)
+    lm = _VerifyEchoLM()
+    model = model if model is not None else SimpleNamespace()
+    gen = spec._owned_decode_rounds_batch(
+        model, d, lm, [_FakeCache(width=B)],
+        hidden=None, b=b if b is not None else [1], shared_kv=None,
+        seed_tokens=None, emitted=[1] * B, max_tokens=max_tokens,
+        sampler=None, draft_block_size=None, thinking_hook=hook)
+    return gen, d, model
+
+
+def test_batch_loop_single_row_budget_close():
+    # Armless B==1 entry (the residency-pool serve shape): the first round is
+    # an arm capture (hook not consulted), zero-draft rounds count thinking
+    # tokens, and the budget close lands whole at a round boundary.
+    hook = _hook([S1, S2, END], budget=2, forced_ids=[14, 15, END])
+    gen, d, _ = _drive_batch(hook, max_tokens=9)
+    out = [t for toks, _ in gen for t in toks if t is not None]
+    assert out == [2, 3, 4, 14, 15, END,
+                   (END + 1) % VOCAB, (END + 2) % VOCAB]
+    assert hook._spent and not hook.in_thinking
+    # The forced round never drafted; every other decode round did.
+    assert d.draft_calls == [1] * (len(out) - 4)
+
+
+def test_batch_loop_admission_drops_hook(capsys):
+    # A second request joining the batch voids the single-row contract: the
+    # live hook is dropped with a note, an injected cache's stale stash is
+    # popped and dropped too, and no forced ids ever reach the stream.
+    hook = _hook([S1, S2, END], budget=1, forced_ids=[14, 15, END])
+    gen, _d, model = _drive_batch(hook, max_tokens=4)
+    first, _ = next(gen)                        # capture round: row 0 -> [2]
+    inj_cache = _FakeCache(width=1, offset=9)
+    inj_cache._kq_mtp_thinking_hook = _hook([S1, S2, END], budget=3)
+    model._generator_injections = [{
+        "uids": ["w"],
+        "prompt_cache": [inj_cache],
+        "hidden": mx.zeros((1, 1, 8)),
+        "prompt_tokens": mx.zeros((1, 4), dtype=mx.int32),
+        "first_tokens": mx.array([7], dtype=mx.int32),
+        "first_tokens_list": [7],
+        "shared_kv_states": None,
+    }]
+    out = [first] + [toks for toks, _ in gen]
+    flat = [t for toks in out for t in toks if t is not None]
+    assert not {14, 15, END} & set(flat)        # budget close never fired
+    assert not hasattr(inj_cache, "_kq_mtp_thinking_hook")
+    err = capsys.readouterr().err
+    assert "[thinking-budget] dropped: MTP rounds batched" in err
+    assert "joined a batched MTP generation" in err
+
+
+def test_server_rounds_batch_forwards_cache_stashed_hook(monkeypatch):
+    captured = {}
+
+    def fake_rounds(model, drafter, lm, prompt_cache, **kw):
+        captured.update(kw)
+        return iter(())
+
+    monkeypatch.setattr(spec, "_owned_decode_rounds_batch", fake_rounds)
+    hook = _hook([S1, S2, END])
+    cache = _FakeCache(width=1)
+    cache._kq_mtp_thinking_hook = hook
+    model = SimpleNamespace(language_model=_VerifyEchoLM())
+    gen = spec.owned_server_rounds_batch(
+        model, _ArmableDrafter(cap=0), [cache], None,
+        first_bonus=mx.array([5], dtype=mx.int32),
+        max_tokens=4, sampler=None, shared_kv_states=None,
+        prompt_tokens=None, greedy_sampling=True)
+    assert list(gen) == []
+    assert captured["thinking_hook"] is hook
+    assert not hasattr(cache, "_kq_mtp_thinking_hook")
+    assert hook.count == 1     # observed the already-emitted first bonus
+
+
+def test_server_rounds_batch_drops_stash_for_multirow(monkeypatch):
+    captured = {}
+
+    def fake_rounds(model, drafter, lm, prompt_cache, **kw):
+        captured.update(kw)
+        return iter(())
+
+    monkeypatch.setattr(spec, "_owned_decode_rounds_batch", fake_rounds)
+    cache = _FakeCache(width=2)
+    cache._kq_mtp_thinking_hook = _hook([S1, S2, END])
+    model = SimpleNamespace(language_model=_VerifyEchoLM())
+    gen = spec.owned_server_rounds_batch(
+        model, _ArmableDrafter(cap=0), [cache], None,
+        first_bonus=mx.array([5, 6], dtype=mx.int32),
+        max_tokens=4, sampler=None, shared_kv_states=None,
+        prompt_tokens=None, greedy_sampling=True)
+    assert list(gen) == []
+    assert captured["thinking_hook"] is None    # popped, not honored at B>1
+    assert not hasattr(cache, "_kq_mtp_thinking_hook")

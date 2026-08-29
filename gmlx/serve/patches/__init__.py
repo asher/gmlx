@@ -95,6 +95,7 @@ from .hardening import (
     install_json_content_type_tolerance,
     install_loopback_host_guard,
 )
+from .mtp_thinking import install_mtp_thinking_budget
 from .observability import install_request_timing_log, uvicorn_log_config
 from .render import install_faithful_history
 from .request_flow import (
@@ -155,6 +156,7 @@ __all__ = [
     "install_loopback_host_guard",
     "install_metrics_prometheus",
     "install_models_endpoint_override",
+    "install_mtp_thinking_budget",
     "install_openai_stop_sequences",
     "install_optional_request_model",
     "install_pool_aware_unload",
@@ -210,6 +212,10 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     spec_engine.install_owned_spec_engine()
     spec_engine.install_continuous_batch_admission()
     spec_engine.install_spec_kv_quant()
+    # After tbfix + seed (its criteria wrapper must be outermost) and after
+    # the owned MTP prefill (its transport wrap must land outside
+    # _mtp_generate, so the hook stash happens after the APC L0 store).
+    install_mtp_thinking_budget()
     from ..batch_sched import install_decode_priority_sched
     install_decode_priority_sched()
     from gmlx.cache.apc_pooling import (
