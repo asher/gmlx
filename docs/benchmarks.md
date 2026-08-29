@@ -40,7 +40,7 @@ same sampler, and the same chat prompts on both engines.
 | **llama.cpp** | `b9967` |
 | **Build overrides** | models rebenched on newer releases carry their own builds; see Model provenance |
 | **DeepSeek-V4-Flash reference** | ds4-server (dwarfstar) @ `b030961`, ignore-eos patched |
-| **Dates** | 2026-07-05 .. 2026-08-27 |
+| **Dates** | 2026-07-05 .. 2026-08-29 |
 | **Prompt corpus** | HuggingFaceH4/ultrachat_200k:train_sft (chat template applied) |
 | **Sampling** | temperature 0.6, top-p 0.95, top-k 20, seed 1234 (coupled RNG across engines) |
 | **Speculative draft** | MTP @ 3 draft tokens (native/preserved MTP head, or gemma-4's companion drafter) |
@@ -75,7 +75,7 @@ ladders cell by cell).
 | Dolphin3.0-Llama3.1-8B Q6_K | `Dolphin3.0-Llama3.1-8B-abliterated.Q6_K.gguf` | [HF](https://huggingface.co/RavichandranJ/Dolphin3-Cyber-8B-GGUF) | - | gmlx 0.1.0 / kq 0.3.5 | 2026-07-18 |
 | DeepSeek-V4-Flash UD-IQ3_XXS | `DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf` | [HF](https://huggingface.co/unsloth/DeepSeek-V4-Flash-GGUF) | - | gmlx 0.1.0 / kq 0.3.5 | 2026-07-13 |
 | DeepSeek-V4-Flash IQ2_XXS | `DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf` | [HF](https://huggingface.co/antirez/deepseek-v4-gguf) | - | gmlx 0.2.2 / kq 0.3.11 | 2026-08-09 |
-| Qwen3.8-Flash-Next UD-Q3_K_XL | `Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf` | [HF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) | - | gmlx 0.4.4 / kq 0.4.1 | 2026-08-28 |
+| Qwen3.8-Flash-Next UD-Q3_K_XL | `Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf` | [HF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) | native | gmlx 0.4.5+#98 / kq 0.4.3 | 2026-08-29 |
 
 ## Per-model detail
 
@@ -86,7 +86,7 @@ ladders cell by cell).
   <img src="assets/perf/per-model/qwen3.5-122b-a10b-ud-q5km-panels.svg" alt="Qwen3.5-122B-A10B UD-Q5_K_M">
 </picture>
 
-| KV depth | gmlx decode (baseline) | gmlx decode (MTP) | MTP lift | llama.cpp decode (MTP) | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill |
+| KV depth | gmlx decode (baseline) | gmlx decode (MTP@3) | MTP lift | llama.cpp decode (MTP@3) | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill |
 |---|--:|--:|--:|--:|--:|--:|--:|
 | 512 | 47.8 (47.4-48) | 59 (55.6-67.3) | 1.23x | 47.8 (42.3-51) | 1.23x | 643.9 (482.2-706.7) | 568.8 (546.6-612.4) |
 | 4.3k | 45.9 (45.7-46.2) | 58.3 (55.6-62.8) | 1.27x | 46.4 (44.7-48) | 1.26x | 950.3 (935.3-956.4) | 555 (496.5-607.6) |
@@ -102,7 +102,7 @@ ladders cell by cell).
   <img src="assets/perf/per-model/qwen3.6-35b-a3b-heretic-q6k-panels.svg" alt="Qwen3.6-35B-A3B Q6_K">
 </picture>
 
-| KV depth | gmlx decode (baseline) | gmlx decode (MTP) | MTP lift | llama.cpp decode (MTP) | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill |
+| KV depth | gmlx decode (baseline) | gmlx decode (MTP@3) | MTP lift | llama.cpp decode (MTP@3) | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill |
 |---|--:|--:|--:|--:|--:|--:|--:|
 | 512 | 128.8 (126.7-130) | 138.1 (131.4-143.1) | 1.07x | 110.1 (99.9-115.3) | 1.25x | 2106.6 (1554.9-2319.9) | 1737.9 (1166.7-1756.3) |
 | 4.3k | 128.1 (127.5-128.7) | 139 (123.1-151.3) | 1.09x | 104 (96.9-111.1) | 1.34x | 2764.5 (2636.6-2849.5) | 1722.3 (1478.8-1823.7) |
@@ -118,7 +118,7 @@ ladders cell by cell).
   <img src="assets/perf/per-model/qwen3.6-27b-q6k-panels.svg" alt="Qwen3.6-27B Q6_K">
 </picture>
 
-| KV depth | gmlx decode (baseline) | gmlx decode (MTP) | MTP lift | llama.cpp decode (MTP) | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill |
+| KV depth | gmlx decode (baseline) | gmlx decode (MTP@3) | MTP lift | llama.cpp decode (MTP@3) | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill |
 |---|--:|--:|--:|--:|--:|--:|--:|
 | 512 | 20.7 (20.7-20.8) | 36.8 (35.1-39.9) | 1.78x | 31.5 (31.1-32.6) | 1.17x | 430.2 (407.4-489.8) | 394.6 (335.7-446.8) |
 | 4.3k | 19.8 (19.7-20.1) | 37.1 (33.9-47) | 1.87x | 28.7 (27.5-56.4) | 1.29x | 600.9 (596-606.2) | 443.9 (412.5-464.4) |
@@ -134,7 +134,7 @@ ladders cell by cell).
   <img src="assets/perf/per-model/qwen3.5-9b-q6k-panels.svg" alt="Qwen3.5-9B Q6_K">
 </picture>
 
-| KV depth | gmlx decode (baseline) | gmlx decode (MTP) | MTP lift | llama.cpp decode (MTP) | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill |
+| KV depth | gmlx decode (baseline) | gmlx decode (MTP@3) | MTP lift | llama.cpp decode (MTP@3) | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill |
 |---|--:|--:|--:|--:|--:|--:|--:|
 | 512 | 70.3 (69.1-72.4) | 111.9 (102.9-126.7) | 1.59x | 75.8 (72.8-80.9) | 1.48x | 1595 (1407.5-2267.2) | 1136.4 (1075.4-1142.4) |
 | 4.3k | 69.1 (69-69.6) | 96.6 (85.7-103) | 1.40x | 76.8 (69.5-86.7) | 1.26x | 1817.4 (1786.1-1916.4) | 1424 (1342-1582) |
@@ -148,7 +148,7 @@ ladders cell by cell).
   <img src="assets/perf/per-model/gemma-4-31b-q6k-panels.svg" alt="gemma-4-31B-it Q6_K">
 </picture>
 
-| KV depth | gmlx decode (baseline) | gmlx decode (MTP) | MTP lift | llama.cpp decode (MTP) | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill |
+| KV depth | gmlx decode (baseline) | gmlx decode (MTP@3) | MTP lift | llama.cpp decode (MTP@3) | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill |
 |---|--:|--:|--:|--:|--:|--:|--:|
 | 512 | 17.8 (17.6-18) | 34.5 (32.5-37.5) | 1.94x | 28.4 (25.1-28.8) | 1.21x | 367.5 (360.3-384.2) | 281.1 (261-283.8) |
 | 4.3k | 16.1 (15.2-17) | 30 (26.5-31.7) | 1.86x | 24.8 (21.5-27.1) | 1.21x | 461.8 (439-490.4) | 341.7 (317.1-354.5) |
@@ -164,7 +164,7 @@ ladders cell by cell).
   <img src="assets/perf/per-model/gemma-4-26b-a4b-q6k-panels.svg" alt="gemma-4-26B-A4B-it Q6_K">
 </picture>
 
-| KV depth | gmlx decode (baseline) | gmlx decode (MTP) | MTP lift | llama.cpp decode (MTP) | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill |
+| KV depth | gmlx decode (baseline) | gmlx decode (MTP@3) | MTP lift | llama.cpp decode (MTP@3) | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill |
 |---|--:|--:|--:|--:|--:|--:|--:|
 | 512 | 97.8 (96.9-98.8) | 113.9 (104.2-127.1) | 1.16x | 93 (90.4-93.5) | 1.22x | 1821.3 (1531.2-2125) | 1268.3 (1104.3-1480.1) |
 | 4.3k | 97.2 (97.1-97.3) | 107.1 (98.1-117.7) | 1.10x | 96.3 (79.2-109.9) | 1.11x | 2610.2 (2514.4-2668.2) | 1549.2 (1400-1650.7) |
@@ -179,7 +179,7 @@ ladders cell by cell).
   <img src="assets/perf/per-model/gemma-4-12b-q6k-panels.svg" alt="gemma-4-12B-it Q6_K">
 </picture>
 
-| KV depth | gmlx decode (baseline) | gmlx decode (MTP) | MTP lift | llama.cpp decode (MTP) | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill |
+| KV depth | gmlx decode (baseline) | gmlx decode (MTP@3) | MTP lift | llama.cpp decode (MTP@3) | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill |
 |---|--:|--:|--:|--:|--:|--:|--:|
 | 512 | 43.9 (43.3-44) | 71.9 (66.3-87.3) | 1.64x | 54 (51.4-55.3) | 1.33x | 854.4 (808.8-965.4) | 726.2 (589.4-773.2) |
 | 4.3k | 42.9 (42.8-43.3) | 67.1 (62.9-76.9) | 1.56x | 57.5 (52.4-65.4) | 1.17x | 1208 (1185.8-1228.8) | 856.8 (772.5-899.7) |
@@ -286,14 +286,14 @@ ladders cell by cell).
   <img src="assets/perf/per-model/qwen38-flash-next-udq3kxl-panels.svg" alt="Qwen3.8-Flash-Next UD-Q3_K_XL">
 </picture>
 
-| KV depth | gmlx decode | llama.cpp decode | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill | gmlx/llama.cpp prefill |
-|---|--:|--:|--:|--:|--:|--:|
-| 512 | 50.4 (48.1-50.8) | 35.4 (35.2-35.5) | 1.42x | 743 (637-842.2) | 536.1 (402.5-567.3) | 1.39x |
-| 4.3k | 47.8 (46.2-48.4) | 33.5 (33-33.9) | 1.43x | 1338.6 (1249.5-1392.2) | 688.6 (666.5-710.7) | 1.94x |
-| 17k | 44.9 (44.4-45.9) | 29.8 (28.1-30.4) | 1.51x | 1516.1 (1485.9-1559.4) | 600.3 (573.5-614.6) | 2.53x |
-| 67k | 36.8 (36.4-37.6) | 21.1 (20.5-21.2) | 1.74x | 1447.8 (1408.1-1489.7) | 394.7 (386-412) | 3.67x |
-| 110k | 31.7 (31-32.4) | 16.5 (16.4-16.7) | 1.92x | 1379.9 (1354.6-1461.2) | 288.7 (282.4-292.4) | 4.78x |
-| 200k | 25.3 (25.3-25.6) | 11.9 (11.8-12) | 2.13x | 1250 (1234.9-1275.6) | 210.8 (207-217.1) | 5.93x |
+| KV depth | gmlx decode (baseline) | gmlx decode (MTP@2) | MTP lift | llama.cpp decode (MTP@2) | gmlx/llama.cpp decode | gmlx prefill | llama.cpp prefill |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| 512 | 50.4 (48.1-50.8) | 61 (51.7-67.5) | 1.21x | - | - | 743 (637-842.2) | 536.1 (402.5-567.3) |
+| 4.3k | 47.8 (46.2-48.4) | 54.3 (47.5-57.5) | 1.14x | - | - | 1338.6 (1249.5-1392.2) | 688.6 (666.5-710.7) |
+| 17k | 44.9 (44.4-45.9) | 54.1 (49.6-58.3) | 1.20x | - | - | 1516.1 (1485.9-1559.4) | 600.3 (573.5-614.6) |
+| 67k | 36.8 (36.4-37.6) | 51.4 (47.7-58.1) | 1.40x | - | - | 1447.8 (1408.1-1489.7) | 394.7 (386-412) |
+| 110k | 31.7 (31-32.4) | 49.8 (46-55.4) | 1.57x | - | - | 1379.9 (1354.6-1461.2) | 288.7 (282.4-292.4) |
+| 200k | 25.3 (25.3-25.6) | 46.8 (44.9-49.7) | 1.85x | - | - | 1250 (1234.9-1275.6) | 210.8 (207-217.1) |
 
 ## DeepSeek-V4-Flash (reference engine: ds4-server)
 

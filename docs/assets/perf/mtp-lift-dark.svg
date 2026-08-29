@@ -35,31 +35,33 @@
 <path d="M113.3,344.7 L313.9,383.2 L443.4,407.1 L572.7,388.8 L619.4,404.6 L675.8,435.2" fill="none" stroke="#9a9a95" stroke-width="1.4" opacity="0.55" stroke-dasharray="6,5" stroke-linejoin="round" stroke-linecap="round"/>
 <path d="M113.3,341.7 L313.9,341.2 L443.4,371.9 L572.7,414.1 L619.4,401.0 L675.8,434.3" fill="none" stroke="#9a9a95" stroke-width="1.4" opacity="0.55" stroke-dasharray="6,5" stroke-linejoin="round" stroke-linecap="round"/>
 <path d="M113.3,376.0 L313.9,375.9 L443.4,407.5 L572.7,472.2 L619.4,473.2" fill="none" stroke="#9a9a95" stroke-width="1.4" opacity="0.55" stroke-dasharray="6,5" stroke-linejoin="round" stroke-linecap="round"/>
-<path d="M113.3,226.8 L313.9,248.7 L443.4,214.1 L572.7,279.8 L619.4,256.2" fill="none" stroke="#56b4e9" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
-<circle cx="113.3" cy="226.8" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
-<circle cx="313.9" cy="248.7" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
-<circle cx="443.4" cy="214.1" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
-<circle cx="572.7" cy="279.8" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
-<circle cx="619.4" cy="256.2" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
-<path d="M113.3,137.8 L313.9,162.5 L443.4,145.7 L572.7,148.0 L619.4,232.6 L675.8,303.3" fill="none" stroke="#e69f00" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
-<circle cx="113.3" cy="137.8" r="3.9" fill="#e69f00" stroke="#1a1a19" stroke-width="2.0"/>
-<circle cx="313.9" cy="162.5" r="3.9" fill="#e69f00" stroke="#1a1a19" stroke-width="2.0"/>
-<circle cx="443.4" cy="145.7" r="3.9" fill="#e69f00" stroke="#1a1a19" stroke-width="2.0"/>
-<circle cx="572.7" cy="148.0" r="3.9" fill="#e69f00" stroke="#1a1a19" stroke-width="2.0"/>
-<circle cx="619.4" cy="232.6" r="3.9" fill="#e69f00" stroke="#1a1a19" stroke-width="2.0"/>
-<circle cx="675.8" cy="303.3" r="3.9" fill="#e69f00" stroke="#1a1a19" stroke-width="2.0"/>
-<path d="M113.3,186.5 L313.9,157.1 L443.4,175.3 L572.7,250.1 L619.4,259.0 L675.8,309.0" fill="none" stroke="#009e73" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
-<circle cx="113.3" cy="186.5" r="3.9" fill="#009e73" stroke="#1a1a19" stroke-width="2.0"/>
-<circle cx="313.9" cy="157.1" r="3.9" fill="#009e73" stroke="#1a1a19" stroke-width="2.0"/>
-<circle cx="443.4" cy="175.3" r="3.9" fill="#009e73" stroke="#1a1a19" stroke-width="2.0"/>
-<circle cx="572.7" cy="250.1" r="3.9" fill="#009e73" stroke="#1a1a19" stroke-width="2.0"/>
-<circle cx="619.4" cy="259.0" r="3.9" fill="#009e73" stroke="#1a1a19" stroke-width="2.0"/>
-<circle cx="675.8" cy="309.0" r="3.9" fill="#009e73" stroke="#1a1a19" stroke-width="2.0"/>
-<path d="M113.3,354.3 L313.9,373.3 L443.4,350.1 L572.7,344.5" fill="none" stroke="#d55e00" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
-<circle cx="113.3" cy="354.3" r="3.9" fill="#d55e00" stroke="#1a1a19" stroke-width="2.0"/>
-<circle cx="313.9" cy="373.3" r="3.9" fill="#d55e00" stroke="#1a1a19" stroke-width="2.0"/>
-<circle cx="443.4" cy="350.1" r="3.9" fill="#d55e00" stroke="#1a1a19" stroke-width="2.0"/>
-<circle cx="572.7" cy="344.5" r="3.9" fill="#d55e00" stroke="#1a1a19" stroke-width="2.0"/>
+<path d="M113.3,351.5 L313.9,373.2 L443.4,352.6 L572.7,297.0 L619.4,246.2 L675.8,165.3" fill="none" stroke="#56b4e9" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="113.3" cy="351.5" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="313.9" cy="373.2" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="443.4" cy="352.6" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="572.7" cy="297.0" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="619.4" cy="246.2" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="675.8" cy="165.3" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
+<path d="M113.3,226.8 L313.9,248.7 L443.4,214.1 L572.7,279.8 L619.4,256.2" fill="none" stroke="#e69f00" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="113.3" cy="226.8" r="3.9" fill="#e69f00" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="313.9" cy="248.7" r="3.9" fill="#e69f00" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="443.4" cy="214.1" r="3.9" fill="#e69f00" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="572.7" cy="279.8" r="3.9" fill="#e69f00" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="619.4" cy="256.2" r="3.9" fill="#e69f00" stroke="#1a1a19" stroke-width="2.0"/>
+<path d="M113.3,137.8 L313.9,162.5 L443.4,145.7 L572.7,148.0 L619.4,232.6 L675.8,303.3" fill="none" stroke="#009e73" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="113.3" cy="137.8" r="3.9" fill="#009e73" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="313.9" cy="162.5" r="3.9" fill="#009e73" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="443.4" cy="145.7" r="3.9" fill="#009e73" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="572.7" cy="148.0" r="3.9" fill="#009e73" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="619.4" cy="232.6" r="3.9" fill="#009e73" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="675.8" cy="303.3" r="3.9" fill="#009e73" stroke="#1a1a19" stroke-width="2.0"/>
+<path d="M113.3,186.5 L313.9,157.1 L443.4,175.3 L572.7,250.1 L619.4,259.0 L675.8,309.0" fill="none" stroke="#d55e00" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="113.3" cy="186.5" r="3.9" fill="#d55e00" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="313.9" cy="157.1" r="3.9" fill="#d55e00" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="443.4" cy="175.3" r="3.9" fill="#d55e00" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="572.7" cy="250.1" r="3.9" fill="#d55e00" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="619.4" cy="259.0" r="3.9" fill="#d55e00" stroke="#1a1a19" stroke-width="2.0"/>
+<circle cx="675.8" cy="309.0" r="3.9" fill="#d55e00" stroke="#1a1a19" stroke-width="2.0"/>
 <path d="M113.3,240.5 L313.9,296.7 L443.4,308.3 L572.7,362.1" fill="none" stroke="#cc79a7" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
 <circle cx="113.3" cy="240.5" r="3.9" fill="#cc79a7" stroke="#1a1a19" stroke-width="2.0"/>
 <circle cx="313.9" cy="296.7" r="3.9" fill="#cc79a7" stroke="#1a1a19" stroke-width="2.0"/>
@@ -86,10 +88,10 @@
 <circle cx="572.7" cy="408.3" r="3.9" fill="#bdbdbd" stroke="#1a1a19" stroke-width="2.0"/>
 <circle cx="619.4" cy="433.2" r="3.9" fill="#bdbdbd" stroke="#1a1a19" stroke-width="2.0"/>
 <text x="30.0" y="305.5" font-size="14.2" fill="#898781" text-anchor="middle" transform="rotate(-90.0 30.0 305.5)">decode lift (MTP / baseline)</text>
-<text x="721.6" y="261.0" font-size="12.3" fill="#56b4e9" font-weight="600">gemma-4-12B-it Q6_K</text>
-<text x="721.6" y="308.1" font-size="12.3" fill="#e69f00" font-weight="600">gemma-4-31B-it Q6_K</text>
-<text x="721.6" y="323.4" font-size="12.3" fill="#009e73" font-weight="600">Qwen3.6-27B Q6_K</text>
-<text x="721.6" y="349.3" font-size="12.3" fill="#d55e00" font-weight="600">Qwen3.8-Flash-Next UD-Q3_K_XL</text>
+<text x="721.6" y="170.1" font-size="12.3" fill="#56b4e9" font-weight="600">Qwen3.8-Flash-Next UD-Q3_K_XL</text>
+<text x="721.6" y="261.0" font-size="12.3" fill="#e69f00" font-weight="600">gemma-4-12B-it Q6_K</text>
+<text x="721.6" y="308.1" font-size="12.3" fill="#009e73" font-weight="600">gemma-4-31B-it Q6_K</text>
+<text x="721.6" y="323.4" font-size="12.3" fill="#d55e00" font-weight="600">Qwen3.6-27B Q6_K</text>
 <text x="721.6" y="366.9" font-size="12.3" fill="#cc79a7" font-weight="600">Qwen3.5-9B Q6_K</text>
 <text x="721.6" y="408.3" font-size="12.3" fill="#0072b2" font-weight="600">Qwen3.6-35B-A3B Q6_K</text>
 <text x="721.6" y="423.6" font-size="12.3" fill="#f0e442" font-weight="600">Qwen3.5-122B-A10B UD-Q5_K_M</text>
