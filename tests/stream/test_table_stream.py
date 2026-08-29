@@ -369,10 +369,8 @@ def test_ple_embedding_parity_batch_rows():
 def test_table_stream_is_dedicated_and_does_not_leak_default():
     s = ts.table_stream()
     assert s is ts.table_stream()  # singleton
-    # The property that matters: a table forward must not rebind the CPU
-    # device default (a ``with mx.stream(...)`` context would - mlx 0.32.1
-    # rebinds it permanently - and the experts' mx.stream(mx.cpu) calls
-    # would then follow onto the dedicated stream).
+    # A table forward must not rebind the CPU device default
+    # (``with mx.stream(...)`` would, permanently - mlx 0.32.1).
     model = _table_model()
     ts.install_table_streaming(model)
     before = mx.default_stream(mx.cpu)
@@ -419,3 +417,45 @@ def test_wrapped_table_parity_iq4_nl():
     mx.eval(out)
     assert out.dtype == ref.dtype
     assert bool(mx.all(out == ref))
+
+
+# --- fallback-state accounting: pin exclusion + arena sizing --------------
+
+
+def test_fallback_excludes_streamable_from_pin(monkeypatch):
+    import gmlx.stream.pin_weights as pw
+
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    monkeypatch.setenv("GMLX_GPU_RESIDENT", "0")
+    seen = {}
+
+    def _capture(gguf_path, exclude_names=frozenset()):
+        seen["exclude"] = set(exclude_names)
+        return None
+
+    monkeypatch.setattr(pw, "maybe_pin_weights", _capture)
+    model, glu = _moe_table_model()
+    _fake_budget(monkeypatch, 10)  # forces experts-stream fallback
+    install_expert_streaming(model, gguf_path="/nonexistent.gguf")
+    assert not ts.table_streaming_active(model)
+    assert seen.get("exclude") == {"per_layer_token_embd.weight"}
+
+
+def test_arena_sizing_excludes_streamable_bytes(monkeypatch):
+    from gmlx.load.loader import _decode_arena_bytes
+    import gmlx.load.loader as loader
+
+    monkeypatch.delenv("GMLX_DECODE_ARENA_GB", raising=False)
+    monkeypatch.setattr(loader, "_available_ram_bytes", lambda *a, **k: None)
+    monkeypatch.setattr(
+        mx, "device_info",
+        lambda: {"memory_size": 137 * 10**9,
+                 "max_recommended_working_set_size": 120 * 10**9})
+    G = 1 << 30
+    offsets = {"s": [(0, 0, 100 * G, 0, "")]}  # 100 GiB of experts
+    total = 160 * G  # + 54 GiB table + 6 GiB genuine every-token
+    base = _decode_arena_bytes(total, offsets, budget=108 * G)
+    fixed = _decode_arena_bytes(total, offsets, budget=108 * G,
+                                streamable_bytes=54 * G)
+    assert fixed - base >= 53 * G
+    assert fixed > 40 * G

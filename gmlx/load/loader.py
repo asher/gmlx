@@ -1290,7 +1290,7 @@ def _ram_floor_bytes(ram: int | None) -> int:
 
 def _decode_arena_bytes(
     total_bytes: int, offsets, budget: int | None, ring_bytes: int = 0,
-    pinned_bytes: int = 0,
+    pinned_bytes: int = 0, streamable_bytes: int = 0,
 ) -> int:
     """Arena budget for the decode feeder, under two hardware-derived
     ceilings: the GPU working-set budget, and a fraction of physical RAM
@@ -1344,7 +1344,9 @@ def _decode_arena_bytes(
     except Exception:
         pass
     expert_bytes = sum(r[2] for ranges in offsets.values() for r in ranges)
-    non_expert_bytes = max(0, total_bytes - expert_bytes)
+    # Streamable components are page-cache citizens like the experts;
+    # charging them as non-expert would zero the arena.
+    non_expert_bytes = max(0, total_bytes - expert_bytes - streamable_bytes)
     reserve = int(
         float(os.environ.get("GMLX_DECODE_KV_RESERVE_GB", "8") or 8) * (1 << 30)
     )
@@ -1857,13 +1859,10 @@ def install_expert_streaming(
         from gmlx.stream.pin_weights import maybe_pin_weights
         from gmlx.stream.table_stream import streamable_tables_for
 
-        # Streamed tables never enter the pin set: in v1 the ladder makes
-        # table streaming and expert streaming mutually exclusive, so this
-        # set is empty here, but the exclusion is structural - compose mode
-        # (both streamed) must not be able to mlock the table by omission.
+        # Declared streamable components never enter the pin set, streamed
+        # or resident: mlocking them starves the expert page cache.
         pin_exclude = frozenset(
-            t.gguf_name for t, m in streamable_tables_for(model)
-            if getattr(m, "_kq_table_streamed", False))
+            t.gguf_name for t, _ in streamable_tables_for(model))
         weights_pin = maybe_pin_weights(gguf_path, exclude_names=pin_exclude)
         if weights_pin is not None:
             object.__setattr__(model, "_kq_weights_pin", weights_pin)
@@ -2396,10 +2395,13 @@ def install_expert_streaming(
         from gmlx.stream.decode_feeder import maybe_make_decode_feeder
 
         pin = getattr(model, "_kq_weights_pin", None)
+        from gmlx.stream.table_stream import table_bytes as _table_bytes
+
         arena = _decode_arena_bytes(
             total_bytes, prefetcher.offsets, budget,
             ring_bytes=2 * feeder.slot_bytes if feeder is not None else 0,
-            pinned_bytes=getattr(pin, "pinned_bytes", 0))
+            pinned_bytes=getattr(pin, "pinned_bytes", 0),
+            streamable_bytes=_table_bytes(model))
         dfeeder = maybe_make_decode_feeder(
             prefetcher.offsets, moe_modules, arena, stats_verbose)
         if dfeeder is not None:
