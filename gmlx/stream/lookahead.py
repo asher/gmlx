@@ -193,15 +193,27 @@ def _softmax_select(mod):
 
 _SIGMOID_BIAS_BLOCKS = (
     "MiniMaxSparseMoeBlock", "MiniMaxM3SparseMoeBlock", "KimiK3MoE")
-_SOFTMAX_BLOCKS = ("Qwen3MoeSparseMoeBlock", "Qwen3NextSparseMoeBlock")
+_SOFTMAX_BLOCKS = (
+    "Qwen3MoeSparseMoeBlock", "Qwen3NextSparseMoeBlock",
+    "SparseMoeBlock",  # gmlx qwen4_exp
+)
 
 
 def _base_block_name(owner) -> str:
-    name = type(owner).__name__
-    for suffix in ("_ExpertCtl",):
-        if name.endswith(suffix):
-            name = name[: -len(suffix)]
-    return name
+    # Fused decode variants subclass the stock block (router glue stays
+    # stock), so walk the MRO for a recognized name.
+    known = set(_SIGMOID_BIAS_BLOCKS) | set(_SOFTMAX_BLOCKS)
+    leaf = None
+    for cls in type(owner).__mro__:
+        name = cls.__name__
+        for suffix in ("_ExpertCtl",):
+            if name.endswith(suffix):
+                name = name[: -len(suffix)]
+        if leaf is None:
+            leaf = name
+        if name in known:
+            return name
+    return leaf
 
 
 def _router_fn_for(owner):
@@ -539,7 +551,8 @@ def install_lookahead(model, layers, *, probe: bool = False,
         atexit.register(gate.report)
     if unsupported:
         print(
-            "[lookahead] no router replica for block(s): "
+            "[lookahead] expert prestage off (no router replica) for: "
             + ", ".join(sorted(unsupported))
+            + " - decode is unaffected"
         )
     return n_pred

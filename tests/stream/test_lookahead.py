@@ -150,6 +150,31 @@ def test_router_fn_for_unknown_block_is_none():
     assert _router_fn_for(_Odd()) is None
 
 
+def test_router_fn_for_fused_subclass_resolves_stock_base():
+    # Fused decode swaps the block class; the stock base in the MRO must
+    # still be recognized (qwen3-next softmax shape).
+    class Qwen3NextSparseMoeBlock(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.gate = nn.Linear(4, 8, bias=False)
+            self.top_k = 2
+
+    class _FusedKQuantMoeBlock(Qwen3NextSparseMoeBlock):
+        pass
+
+    assert _router_fn_for(_FusedKQuantMoeBlock()) is not None
+
+
+def test_router_fn_for_qwen4exp_block():
+    class SparseMoeBlock(nn.Module):  # gmlx qwen4_exp block name
+        def __init__(self):
+            super().__init__()
+            self.gate = nn.Linear(4, 8, bias=False)
+            self.top_k = 2
+
+    assert _router_fn_for(SparseMoeBlock()) is not None
+
+
 def test_probe_recall_math():
     probe = LookaheadProbe()
     probe.note(3, {"raw": np.array([[5, 1, 2, 9]])})
