@@ -193,10 +193,10 @@ def _softmax_select(mod):
 
 _SIGMOID_BIAS_BLOCKS = (
     "MiniMaxSparseMoeBlock", "MiniMaxM3SparseMoeBlock", "KimiK3MoE")
-_SOFTMAX_BLOCKS = (
-    "Qwen3MoeSparseMoeBlock", "Qwen3NextSparseMoeBlock",
-    "SparseMoeBlock",  # gmlx qwen4_exp
-)
+# qwen4_exp's SparseMoeBlock is deliberately absent: its softmax seam fits,
+# but prestage measured 13-16% slower there (expert reads outlast layer
+# compute, so reads never finish ahead of need).
+_SOFTMAX_BLOCKS = ("Qwen3MoeSparseMoeBlock", "Qwen3NextSparseMoeBlock")
 
 
 def _base_block_name(owner) -> str:

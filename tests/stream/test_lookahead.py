@@ -165,14 +165,16 @@ def test_router_fn_for_fused_subclass_resolves_stock_base():
     assert _router_fn_for(_FusedKQuantMoeBlock()) is not None
 
 
-def test_router_fn_for_qwen4exp_block():
-    class SparseMoeBlock(nn.Module):  # gmlx qwen4_exp block name
+def test_router_fn_for_qwen4exp_block_stays_off():
+    # Softmax seam fits but prestage measured slower on qwen4_exp;
+    # the name is deliberately not whitelisted.
+    class SparseMoeBlock(nn.Module):
         def __init__(self):
             super().__init__()
             self.gate = nn.Linear(4, 8, bias=False)
             self.top_k = 2
 
-    assert _router_fn_for(SparseMoeBlock()) is not None
+    assert _router_fn_for(SparseMoeBlock()) is None
 
 
 def test_probe_recall_math():
