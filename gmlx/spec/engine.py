@@ -30,6 +30,10 @@ _OWNED_MTP_ROUND_FLAG = "_kq_gguf_owned_mtp_round"
 _FULL_PREFILL_FLAG = "_kq_gguf_full_prompt_mtp_prefill"
 
 _SPEC_APC_DISABLED = os.environ.get("GMLX_SPEC_APC", "1") == "0"
+# Seed streaming: teacher-force the native MTP head chunk-by-chunk during
+# target prefill. 0 defers seeding to one whole-prompt pass after the
+# first token, which stalls the stream for seconds at depth.
+_SEED_STREAM_DISABLED = os.environ.get("GMLX_MTP_SEED_STREAM", "1") == "0"
 # Retirement store (prompt + generated -> shared APC at request finish) is a
 # beyond-stock multi-turn win; killable on its own or via the global switch.
 _SPEC_APC_RETIRE_DISABLED = (
@@ -1383,6 +1387,63 @@ def _mtp_prefill_init(batch) -> None:
         batch._mtp_apc_prefix_len = restored
 
 
+def _mtp_seed_stream_init(batch) -> None:
+    """Arm per-chunk drafter seeding for this request, if eligible.
+
+    Cold full prefill only (v1): any restored prefix (L0/L1/upstream) or warm
+    drafter sidecar keeps the deferred one-shot seed -- correctness identical,
+    seeding then still runs after the first token. Eligibility here plus the
+    per-chunk B re-check in prompt_step; a mid-request stop keeps the partial
+    seed KV (adopted at its true offset) and defers only the remainder.
+
+    The seed KV is request-scoped (built via drafter.make_cache, ridden on
+    batch state and handed over via a prompt_cache[0] stash exactly like the
+    drafter warm sidecar), never the drafter's own _cache: another request's
+    live decode round owns that object.
+    """
+    if hasattr(batch, "_mtp_seed_ctx"):
+        return
+    batch._mtp_seed_ctx = None
+    drafter = getattr(batch, "draft_model", None)
+    if (
+        _SEED_STREAM_DISABLED
+        or drafter is None
+        or not callable(getattr(drafter, "seed_chunk", None))
+        or getattr(drafter, "hidden_capture_limit", None) is not None
+        or int(batch._input_ids.shape[0]) != 1
+        or getattr(batch, "_mtp_upstream_warm", False)
+        or getattr(batch, "_mtp_chunk_hiddens", None)
+        or int(getattr(batch, "_mtp_l1_prefix_len", 0) or 0) != 0
+        or int(getattr(batch, "_processed_prompt_columns", 0) or 0) != 0
+        or not batch.prompt_cache
+        or getattr(batch.prompt_cache[0], "_kq_apc_drafter_warm", None)
+            is not None
+    ):
+        return
+    lp = getattr(batch.prompt_cache[0], "left_padding", None)
+    if isinstance(lp, mx.array) and lp.size and int(lp.max().item()) > 0:
+        return
+    try:
+        drafter.bind(batch.model)
+        seed_kv = drafter.make_cache()
+    except Exception:
+        _log.warning("seed streaming unavailable for this drafter; "
+                     "deferred seed", exc_info=True)
+        return
+    ctx = {
+        "kv": seed_kv,
+        "len": 0,
+        "active": True,
+        # Retain chunk hiddens alongside streaming whenever an L0 store can
+        # arm: the store needs full-prompt hidden. APC off => no retention
+        # while streaming (the capture-memory win lands in that config).
+        "retain": _get_spec_prefix_cache(batch.model) is not None,
+        "retained_from": 0,
+    }
+    batch._mtp_seed_ctx = ctx
+    batch.prompt_cache[0]._kq_seed_stream = ctx
+
+
 def _zero_pad_rows(arr, rows: int):
     pad = mx.zeros((rows - arr.shape[0],) + tuple(arr.shape[1:]),
                    dtype=arr.dtype)
@@ -1503,6 +1564,7 @@ def install_full_prompt_mtp_prefill() -> None:
                 self.prefill_step_size = _resolve_mtp_prefill_step()
             # APC lookup (L0 then L1) + prefix trim + store arming.
             _mtp_prefill_init(self)
+            _mtp_seed_stream_init(self)
 
         if not self.needs_processing():
             return 0
@@ -1553,28 +1615,64 @@ def install_full_prompt_mtp_prefill() -> None:
                 **prompt_kwargs,
             )
         chunk_hidden = out.hidden_states[-1]
+        # Seed streaming: teacher-force this chunk into the request-scoped
+        # head KV at the head's running offset. The shifted span for
+        # columns [c0, c0+n) is prompt[c0+1 : c0+n+1], always in range
+        # because generate() keeps at least one residual column (the n-1
+        # cap above). A failure or a widened batch stops streaming but
+        # keeps the partial KV: the owned round adopts it at its true
+        # offset and seeds only the remainder.
+        seed_ctx = getattr(self, "_mtp_seed_ctx", None)
+        streamed = False
+        if seed_ctx is not None and seed_ctx["active"]:
+            if int(self._input_ids.shape[0]) != 1:
+                seed_ctx["active"] = False
+            else:
+                c0 = int(self._processed_prompt_columns)
+                try:
+                    self.draft_model.seed_chunk(
+                        self._mtp_full_input_ids[:, c0 + 1:c0 + n + 1],
+                        chunk_hidden, seed_ctx["kv"])
+                    seed_ctx["len"] += n
+                    streamed = True
+                except Exception:
+                    _log.warning("seed streaming failed at column %d; "
+                                 "deferred seed for the remainder", c0,
+                                 exc_info=True)
+                    seed_ctx["active"] = False
         # Teacher-forcing drafters (native MTP heads) seed their KV from the
-        # whole prompt hidden, so every chunk is retained. Shared-KV drafters
-        # (gemma-4 assistant) read only the last position: keeping just the
-        # newest chunk caps capture memory at O(chunk) instead of O(prompt)
-        # -- GBs at deep context.
+        # whole prompt hidden, so every chunk is retained except when the
+        # chunk just streamed and no L0 store is armed (nothing downstream
+        # reads it). Shared-KV drafters (gemma-4 assistant) read only the
+        # last position: keeping just the newest chunk caps capture memory
+        # at O(chunk) instead of O(prompt), GBs at deep context.
         if callable(getattr(self.draft_model, "prefill_from_target_hidden", None)):
-            self._mtp_chunk_hiddens.append(chunk_hidden)
-            # Window-limited heads can't use context beyond the trailing
-            # hidden_capture_limit positions; an uncapped capture pins the
-            # whole prompt's hidden (GBs at deep context). The drafter's
-            # teacher-force self-aligns to the trailing h_len positions.
-            limit = getattr(self.draft_model, "hidden_capture_limit", None)
-            if limit:
-                total = sum(int(h.shape[1]) for h in self._mtp_chunk_hiddens)
-                if total > limit:
-                    merged = (self._mtp_chunk_hiddens[0]
-                              if len(self._mtp_chunk_hiddens) == 1
-                              else mx.concatenate(self._mtp_chunk_hiddens, axis=1))
-                    self._mtp_chunk_hiddens = [merged[:, -limit:]]
+            if streamed and not seed_ctx["retain"]:
+                pass
+            else:
+                if (seed_ctx is not None and not seed_ctx["retain"]
+                        and not self._mtp_chunk_hiddens):
+                    # Streaming stopped mid-request with no retention so
+                    # far: the retained span starts here, not at column 0.
+                    seed_ctx["retained_from"] = int(
+                        self._processed_prompt_columns)
+                self._mtp_chunk_hiddens.append(chunk_hidden)
+                # Window-limited heads can't use context beyond the trailing
+                # hidden_capture_limit positions; an uncapped capture pins the
+                # whole prompt's hidden (GBs at deep context). The drafter's
+                # teacher-force self-aligns to the trailing h_len positions.
+                limit = getattr(self.draft_model, "hidden_capture_limit", None)
+                if limit:
+                    total = sum(int(h.shape[1]) for h in self._mtp_chunk_hiddens)
+                    if total > limit:
+                        merged = (self._mtp_chunk_hiddens[0]
+                                  if len(self._mtp_chunk_hiddens) == 1
+                                  else mx.concatenate(self._mtp_chunk_hiddens, axis=1))
+                        self._mtp_chunk_hiddens = [merged[:, -limit:]]
         else:
             self._mtp_chunk_hiddens = [chunk_hidden]
-        mx.eval([c.state for c in self.prompt_cache] + [chunk_hidden])
+        mx.eval([c.state for c in self.prompt_cache] + [chunk_hidden]
+                + ([c.state for c in seed_ctx["kv"]] if streamed else []))
         self._processed_prompt_columns += n
         # The ckpt cursor rides the wrapped stock store (see
         # _install_ckpt_checkpoint_store).
@@ -1639,15 +1737,32 @@ def install_full_prompt_mtp_prefill() -> None:
             # No captured chunks: the whole (remaining) prompt went through
             # the final generate forward, so stock prompt_tokens/hidden are
             # already an aligned pair (suffix-only on an L1 hit) and
-            # result.hidden needs no rebuild. The L0 store below must still
-            # run: arch prefill profiles can raise the step past typical
-            # prompt lengths (qwen4exp defaults to 8192), so sub-step
-            # prompts land here and still need their warm-start entry.
+            # result.hidden needs no rebuild; with seed streaming and no
+            # retention, result.hidden is already the residual unstreamed
+            # tail (retention accompanies an armed L0 store, so none can
+            # fire here). The L0 store below must still run for the
+            # single-shot case: arch prefill profiles can raise the step
+            # past typical prompt lengths (qwen4exp defaults to 8192), so
+            # sub-step prompts land here and still need their warm-start
+            # entry.
             full_hidden = result.hidden
         else:
             parts = chunk_hiddens + [result.hidden]
             full_hidden = mx.concatenate(parts, axis=1)
-            result.hidden = full_hidden
+        seed_ctx = getattr(self, "_mtp_seed_ctx", None)
+        seed_len = int(seed_ctx["len"]) if seed_ctx else 0
+        if chunk_hiddens:
+            if seed_len > 0:
+                # Columns [0, seed_len) are already teacher-forced into
+                # the streamed head KV; hand the owned round only the
+                # residual hidden so its seed call covers exactly the
+                # unstreamed tail at the adopted offset. full_hidden (the
+                # retained span) still feeds the L0 store below, which
+                # needs the whole prompt.
+                rfrom = int(seed_ctx.get("retained_from") or 0)
+                result.hidden = full_hidden[:, seed_len - rfrom:]
+            else:
+                result.hidden = full_hidden
         if chunk_hiddens and full_ids is not None:
             # On an L1 hit the captured hidden covers only the forwarded
             # suffix, so hand the drafter the matching suffix tokens: the
@@ -1672,9 +1787,17 @@ def install_full_prompt_mtp_prefill() -> None:
         # Skipped on an L1 hit: hidden covers only the suffix, and L0
         # entries pair full-prompt keys with full-prompt hidden.
         b = int(full_hidden.shape[0]) if full_ids is not None else 0
+        # With streaming, full_hidden covers the whole prompt only when
+        # retention ran from column 0: after a mid-request streaming stop
+        # the retained span starts past column 0, and with no retention at
+        # all full_hidden is just the residual tail. Neither must ever be
+        # stored as a full-prompt entry.
+        full_covers_prompt = seed_len == 0 or (
+            bool(chunk_hiddens)
+            and int(seed_ctx.get("retained_from") or 0) == 0)
         spec_cache = (
             _get_spec_prefix_cache(self.model)
-            if b == 1 and l1_prefix == 0
+            if b == 1 and l1_prefix == 0 and full_covers_prompt
             and not getattr(self, "_mtp_upstream_warm", False) else None
         )
         if spec_cache is not None and full_ids is not None:

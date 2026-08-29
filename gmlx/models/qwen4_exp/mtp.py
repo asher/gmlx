@@ -251,9 +251,11 @@ class Qwen4ExpMTPDrafter(QwenMTPDrafter):
         return self.pre_fc_norm_hidden(
             hidden.reshape(B, S, hc * D)).reshape(B, S, hc, D)
 
-    def _forward(self, tokens: mx.array, hidden: mx.array) -> mx.array:
+    def _forward(self, tokens: mx.array, hidden: mx.array,
+                 cache: Optional[List[Any]] = None) -> mx.array:
         """One head forward over (next_token, target pre-mixer streams)
-        pairs; returns the head's PRE-mixer streams ``[B,S,4,D]``."""
+        pairs; returns the head's PRE-mixer streams ``[B,S,4,D]``. cache
+        overrides the head's own list (seed streaming), never swaps it."""
         tokens = tokens.astype(mx.int32)
         if hidden.ndim != 4:
             raise ValueError(
@@ -262,10 +264,10 @@ class Qwen4ExpMTPDrafter(QwenMTPDrafter):
         e = self.fc_embedding(self.pre_fc_norm_embedding(
             self._input_embed(tokens) * self._input_embed_scale))
         x = self.fc_hidden(self._hidden_norm(hidden)) + e[:, :, None, :]
-        cache = self._cache[0]
-        mask = create_attention_mask(x[:, :, 0, :], cache)
-        return self.layers[0](x, tokens, mask=mask, cache=cache,
-                              positions=self._draft_positions(tokens, cache))
+        c = (self._cache if cache is None else cache)[0]
+        mask = create_attention_mask(x[:, :, 0, :], c)
+        return self.layers[0](x, tokens, mask=mask, cache=c,
+                              positions=self._draft_positions(tokens, c))
 
     def _draft_positions(self, tokens: mx.array, cache):
         """None (flat cache-offset rope, the default arm) unless the mrope

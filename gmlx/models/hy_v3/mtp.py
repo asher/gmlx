@@ -197,17 +197,20 @@ class HyV3MTPDrafter(QwenMTPDrafter):
             "HyV3MTPDrafter is B=1 only (v1): no batched-row injection"
         )
 
-    def _forward(self, tokens: mx.array, hidden: mx.array) -> mx.array:
+    def _forward(self, tokens: mx.array, hidden: mx.array,
+                 cache: Optional[List[Any]] = None) -> mx.array:
         """Run the head over (tokens, target post-norm hidden); return the
         PRE-final-norm output. Positions come from the head's own cache
-        offset, so its RoPE frame is its decode-time KV length."""
+        offset, so its RoPE frame is its decode-time KV length. cache
+        overrides the head's own list (seed streaming), never swaps it."""
         embed = self._input_embed(tokens.astype(mx.int32))
         h = mx.concatenate(
             [self.pre_fc_norm_embedding(embed), self.pre_fc_norm_hidden(hidden)],
             axis=-1,
         )
         h = self.fc(h)
-        for layer, layer_cache in zip(self.layers, self._cache):
+        for layer, layer_cache in zip(
+                self.layers, self._cache if cache is None else cache):
             mask = (
                 create_attention_mask(h, layer_cache)
                 if layer_cache is not None

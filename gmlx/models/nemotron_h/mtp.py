@@ -383,10 +383,12 @@ class NemotronHMTPDrafter(QwenMTPDrafter):
         raise NotImplementedError(
             "NemotronHMTPDrafter is B=1 only (v1): no batched-row injection")
 
-    def _forward(self, tokens: mx.array, hidden: mx.array) -> mx.array:
+    def _forward(self, tokens: mx.array, hidden: mx.array,
+                 cache: Optional[List[Any]] = None) -> mx.array:
         """Run the head over (tokens, target post-final-norm hidden); return
         the PRE-shared-head-norm output. NoPE attention: the mask offset
-        comes from the head's own KV length, there is no rope frame."""
+        comes from the head's own KV length, there is no rope frame. cache
+        overrides the head's own list (seed streaming), never swaps it."""
         embed = self._input_embed(tokens.astype(mx.int32))
         h = mx.concatenate(
             [self.pre_fc_norm_embedding(embed),
@@ -394,9 +396,10 @@ class NemotronHMTPDrafter(QwenMTPDrafter):
             axis=-1,
         )
         h = self.fc(h)
-        cache = self._cache[0] if self._cache else None
-        mask = create_attention_mask(h, cache)
-        return self.layers[0](h, mask, cache)
+        caches = self._cache if cache is None else cache
+        c = caches[0] if caches else None
+        mask = create_attention_mask(h, c)
+        return self.layers[0](h, mask, c)
 
 
 # Native-head remap: the closed tensor set of the GGUF MTP block (16
