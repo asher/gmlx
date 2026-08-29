@@ -1578,6 +1578,35 @@ def _retire_b1(model, prompt_cache: list, generated: list[int],
         _log.warning("APC retire failed; continuing", exc_info=True)
 
 
+def _filter_batch_rows_empty(prompt_cache: list) -> None:
+    """Drop every row from each batch cache entry.
+
+    Both cache origins' BatchKVCache.filter min-reduce left_padding after
+    the take to shift out shared padding; that reduce throws on an empty
+    index set, so the all-rows-finished injection adoption could never
+    empty a batch this way. Mirror filter's take for the empty set and
+    skip the shift (nothing left to shift); caches without the
+    keys/left_padding batch layout keep their own filter.
+    """
+    empty = mx.array([], dtype=mx.int32)
+    for c in prompt_cache:
+        for sub in getattr(c, "caches", None) or ():
+            _filter_batch_rows_empty([sub])
+        if getattr(c, "caches", None) is not None:
+            continue
+        lp = getattr(c, "left_padding", None)
+        if lp is None or getattr(c, "keys", "no") == "no":
+            c.filter(empty)
+            continue
+        if c.keys is not None:
+            c.keys = c.keys[empty]
+            c.values = c.values[empty]
+        c.offset = c.offset[empty]
+        c.left_padding = lp[empty]
+        if getattr(c, "_right_padding", None) is not None:
+            c._right_padding = c._right_padding[empty]
+
+
 def _retire_batch_row(model, prompt_cache: list, slot: int,
                       retire: dict, gen_row: list[int],
                       position: int) -> None:
@@ -2544,8 +2573,7 @@ def _owned_decode_rounds_batch(
                     hasattr(c, "filter") for c in prompt_cache):
                 break
             empty = mx.array([], dtype=mx.int32)
-            for c in prompt_cache:
-                c.filter(empty)
+            _filter_batch_rows_empty(prompt_cache)
             _gated_pending = None  # adopted batch re-primes at its own width
             if not gated:
                 _filter_drafter = getattr(drafter, "filter_batch", None)

@@ -260,8 +260,9 @@ def _ckpt_active(model, mode, block_size: int = 16) -> bool:
         flag = tags is not None
         if flag:
             _log.info(
-                "APC tier: ckpt (layers: %d kv / %d rot / %d arr)",
+                "APC tier: ckpt (layers: %d kv / %d qsa / %d rot / %d arr)",
                 tags.count("kv"),
+                sum(1 for t in tags if t.startswith("qsa")),
                 sum(1 for t in tags if t.startswith("rot")),
                 tags.count("arr"))
         try:
@@ -1300,6 +1301,15 @@ def _mtp_prefill_init(batch) -> None:
                 "(owned-path APC requires single-request prefill)", b)
         return
 
+    # Serve wraps make_cache so mlx-lm-origin entries carry the mlx-vlm
+    # runtime's class identities; embedded and test users reach this init
+    # without that wrapper, and the L1 exact tiers dispatch on the vlm
+    # classes (an mlx-lm ArraysCache misses every adapter rule). Rebind
+    # here so both paths see the same identities. No-op when the entries
+    # are already vlm-origin.
+    from gmlx.cache.compat import rebind_to_runtime_origin
+    rebind_to_runtime_origin(batch.prompt_cache)
+
     # Upstream admission already restored a prefix and built this batch
     # suffix-only: the owned ladder's keys (L0 and L1 both) are full-prompt
     # token ids, so every lookup and store here would run in the wrong
@@ -1428,6 +1438,12 @@ def install_full_prompt_mtp_prefill() -> None:
     # L1 plumbing is idempotent on its own flags, so it installs (or
     # repairs) even when the prefill override is already in place.
     _bind_l1_view()
+    # The L1 disk tier serializes through mlx-vlm's DiskBlockStore, which
+    # has no arm for QSAKVCache and refuses the whole exact snapshot.
+    # Installed here as well as in serve patches so embedded/test users of
+    # the spec engine get disk APC.
+    from gmlx.cache.apc_qsa import install_qsa_apc_support
+    install_qsa_apc_support()
     _install_apc_manager_stash()
     _install_ckpt_checkpoint_store()
     _install_plain_ckpt_decode()
@@ -1511,6 +1527,18 @@ def install_full_prompt_mtp_prefill() -> None:
         checkpoint_col = self._next_apc_checkpoint_column()
         if checkpoint_col is not None:
             n = min(n, checkpoint_col - self._processed_prompt_columns)
+        # A final chunk under ~3 simdgroup tiles routes the projections
+        # through the skinny-M kernels, whose accumulation order seeds fp
+        # noise that stacked recurrent (GDN) layers amplify into
+        # first-token divergence. Absorb such a tail into this chunk so
+        # every chunk stays in the wide-GEMM regime. Checkpoint columns
+        # stay exact.
+        min_tail = env_int("GMLX_PREFILL_MIN_TAIL", 48)
+        if checkpoint_col is None and min_tail > 0:
+            rem1 = self._inputs_embeds.shape[1] - 1
+            tail = rem1 - n
+            if 0 < tail < min_tail:
+                n = rem1        # absorb: overshoot bounded by min_tail-1
         if n <= 0:
             return 0
         prompt_kwargs = self._prompt_kwargs_for_step(n)
@@ -1605,17 +1633,22 @@ def install_full_prompt_mtp_prefill() -> None:
                                  "continuing", exc_info=True)
             return result
         chunk_hiddens = getattr(self, "_mtp_chunk_hiddens", None)
+        full_ids = getattr(self, "_mtp_full_input_ids", None)
+        l1_prefix = int(getattr(self, "_mtp_l1_prefix_len", 0) or 0)
         if not chunk_hiddens:
             # No captured chunks: the whole (remaining) prompt went through
             # the final generate forward, so stock prompt_tokens/hidden are
-            # already an aligned pair (suffix-only on an L1 hit).
-            return result
-        parts = chunk_hiddens + [result.hidden]
-        full_hidden = mx.concatenate(parts, axis=1)
-        result.hidden = full_hidden
-        full_ids = getattr(self, "_mtp_full_input_ids", None)
-        l1_prefix = int(getattr(self, "_mtp_l1_prefix_len", 0) or 0)
-        if full_ids is not None:
+            # already an aligned pair (suffix-only on an L1 hit) and
+            # result.hidden needs no rebuild. The L0 store below must still
+            # run: arch prefill profiles can raise the step past typical
+            # prompt lengths (qwen4exp defaults to 8192), so sub-step
+            # prompts land here and still need their warm-start entry.
+            full_hidden = result.hidden
+        else:
+            parts = chunk_hiddens + [result.hidden]
+            full_hidden = mx.concatenate(parts, axis=1)
+            result.hidden = full_hidden
+        if chunk_hiddens and full_ids is not None:
             # On an L1 hit the captured hidden covers only the forwarded
             # suffix, so hand the drafter the matching suffix tokens: the
             # teacher-forcing (token, hidden) pair must stay positionally
@@ -1645,10 +1678,24 @@ def install_full_prompt_mtp_prefill() -> None:
             and not getattr(self, "_mtp_upstream_warm", False) else None
         )
         if spec_cache is not None and full_ids is not None:
-            spec_cache.store(full_ids, result.prompt_cache, full_hidden)
+            # Window-limited heads only use the trailing capture window;
+            # chunked prefill already trimmed, single-shot must match (an
+            # uncapped entry pins the whole prompt's hidden for nothing).
+            limit = getattr(self.draft_model, "hidden_capture_limit", None)
+            store_hidden = (full_hidden if not limit
+                            else full_hidden[:, -int(limit):])
+            spec_cache.store(full_ids, result.prompt_cache, store_hidden)
             _log.info(
                 "APC store: tokens=%d layers=%d",
                 int(full_ids.shape[1]), len(result.prompt_cache),
+            )
+        else:
+            _log.debug(
+                "APC store skipped: b=%d l1_prefix=%d upstream_warm=%s "
+                "full_ids=%s",
+                b, l1_prefix,
+                getattr(self, "_mtp_upstream_warm", False),
+                "set" if full_ids is not None else "None",
             )
 
         return result
