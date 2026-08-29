@@ -81,6 +81,39 @@ def test_iq_codecs_now_pass(tmp_path):
         assert pf.codec_histogram.get(gt.name) == 1
 
 
+def test_stq1_0_passes_via_fallback(tmp_path):
+    """STQ1_0 (type 43, newer than the installed gguf-py) must resolve through
+    headerscan's QUANT_TYPE_FALLBACK and pass preflight. Minted with a sentinel
+    dtype because gguf-py's enum has no member for it."""
+    from gmlx.load.headerscan import QUANT_TYPE_FALLBACK
+
+    (type_id, (name, (wpb, tsize))), = [
+        (k, v) for k, v in QUANT_TYPE_FALLBACK.items() if v[0] == "STQ1_0"
+    ]
+
+    class _Stq:
+        def __int__(self):
+            return type_id
+
+        def __index__(self):
+            return type_id
+
+    _Stq.name, _Stq.value = name, type_id
+    sentinel = _Stq()
+    GGML_QUANT_SIZES[sentinel] = (wpb, tsize)
+    try:
+        p = tmp_path / "stq1_0.gguf"
+        w = GGUFWriter(str(p), "llama")
+        w.add_tensor("blk.0.attn_q.weight",
+                     np.zeros((4, (256 // wpb) * tsize), dtype=np.uint8),
+                     raw_dtype=sentinel)
+        _finish(w)
+    finally:
+        del GGML_QUANT_SIZES[sentinel]
+    pf = preflight(str(p))                          # must not raise
+    assert pf.codec_histogram.get("STQ1_0") == 1
+
+
 def test_supported_codecs_pass(tmp_path):
     p = tmp_path / "ok.gguf"
     _mint_ok(p)

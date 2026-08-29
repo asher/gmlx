@@ -55,9 +55,9 @@ safe to re-run.
 
 Symptom: `validate`, `pull`, or a load fails naming a tensor codec.
 
-The K-quant, legacy, and IQ families all have kernels here, so this is rare: it
-means the file uses an exotic type with none (the ternary `TQ1_0`/`TQ2_0`
-types, for instance). The refusal names the offending codec and what is
+The K-quant, legacy, and IQ families all have kernels here, as does the
+structured-ternary `STQ1_0`, so this is rare: it means the file uses an exotic
+type with none (the plain ternary `TQ1_0`/`TQ2_0` types, for instance). The refusal names the offending codec and what is
 supported. Pick a different quant from the same repo;
 `gmlx validate hf:<org>/<repo>` lists every variant so you can choose without
 downloading. Uniform K-quant files also decode fastest

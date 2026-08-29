@@ -21,6 +21,9 @@ from dataclasses import dataclass
 _MAGIC = b"GGUF"
 _DEFAULT_ALIGNMENT = 32
 
+# GGML type ids newer than the installed gguf-py: id -> (name, (block, type_size)).
+QUANT_TYPE_FALLBACK = {43: ("STQ1_0", (256, 42))}  # llama.cpp PR #22836
+
 # GGUF metadata value types -> struct code (fixed-size scalars only).
 _SCALAR = {
     0: "B", 1: "b", 2: "H", 3: "h", 4: "I", 5: "i",
@@ -156,7 +159,10 @@ def _scan(buf, path, size, include_tensors, limit) -> HeaderScan:
                 block, tsize = GGML_QUANT_SIZES[qt]
                 tname = qt.name
             except (ValueError, KeyError):
-                raise ValueError(f"{path}: unknown ggml tensor type {ttype}")
+                if ttype not in QUANT_TYPE_FALLBACK:
+                    raise ValueError(
+                        f"{path}: unknown ggml tensor type {ttype}")
+                tname, (block, tsize) = QUANT_TYPE_FALLBACK[ttype]
             n_elems = 1
             for d in dims:
                 n_elems *= d

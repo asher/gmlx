@@ -152,7 +152,9 @@ def _type_name(ttype: int) -> str:
         from gguf import GGMLQuantizationType
         return GGMLQuantizationType(ttype).name
     except Exception:
-        return f"TYPE_{ttype}"
+        from gmlx.load.headerscan import QUANT_TYPE_FALLBACK
+        fb = QUANT_TYPE_FALLBACK.get(ttype)
+        return fb[0] if fb else f"TYPE_{ttype}"
 
 
 @dataclass
