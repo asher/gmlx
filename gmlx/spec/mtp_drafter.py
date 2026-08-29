@@ -75,6 +75,18 @@ def _seed_chunk() -> int:
     return max(1, env_int("PREFILL_STEP_SIZE", 2048))
 
 
+def _cache_offset(caches) -> int:
+    """Scalar KV depth of a head cache list. BatchKVCache carries a per-row
+    offset array; the deepest row is the conservative depth for the decay
+    (its only consumer besides the adoption check, which is B=1)."""
+    if not caches:
+        return 0
+    off = getattr(caches[0], "offset", 0)
+    if isinstance(off, mx.array):
+        return int(off.max().item()) if off.size else 0
+    return int(off)
+
+
 class QwenMTPDrafter(nn.Module):
     """Single native MTP head; full-prompt KV (teacher-forced at prefill)."""
 
@@ -197,19 +209,24 @@ class QwenMTPDrafter(nn.Module):
 
     # --- forward primitives -------------------------------------------------
 
-    def _forward(self, tokens: mx.array, hidden: mx.array) -> mx.array:
+    def _forward(self, tokens: mx.array, hidden: mx.array,
+                 cache: list[Any] | None = None) -> mx.array:
         """Run the head over (tokens, hidden); return the PRE-final-norm output.
 
         Positions are derived inside the attention from each layer's own cache
         offset (position_ids=None), so the head's RoPE frame is its decode-time KV
-        length, not the target sequence position.
+        length, not the target sequence position. cache overrides the head's own
+        ``self._cache`` (seed streaming writes a request-scoped cache list); the
+        override is a parameter, never a ``self._cache`` swap, so a concurrent
+        request's live round can never observe another request's seed KV.
         """
         embed = self._input_embed(tokens.astype(mx.int32)) * self._input_embed_scale
         h = mx.concatenate(
             [self.pre_fc_norm_embedding(embed), self.pre_fc_norm_hidden(hidden)], axis=-1
         )
         h = self.fc(h)
-        for layer, layer_cache in zip(self.layers, self._cache):
+        for layer, layer_cache in zip(
+                self.layers, self._cache if cache is None else cache):
             mask = (
                 create_attention_mask(h, layer_cache)
                 if layer_cache is not None
@@ -231,10 +248,41 @@ class QwenMTPDrafter(nn.Module):
         self._seed_token = self._pick(self._logits(h_prenorm), sampler, greedy)
         self._seed_hidden = self._next_hidden(h_prenorm)
 
-    def _seed_profile(self):
-        return prefill_decay.resolve_score_profile(self, self._cache)
+    def _seed_profile(self, cache: list[Any] | None = None):
+        return prefill_decay.resolve_score_profile(
+            self, self._cache if cache is None else cache)
 
-    # --- seeding (decode-time-only) ----------------------------------------
+    # --- seeding ------------------------------------------------------------
+
+    def seed_chunk(self, shifted_tokens: mx.array, hidden: mx.array,
+                   cache: list[Any]) -> None:
+        """Teacher-force one prompt span into ``cache`` at its current offset.
+
+        Streaming half of the seed: the engine calls this per prefill chunk
+        with a request-scoped cache list (never the head's own ``_cache``),
+        pairing hidden rows [c0, c0+m) with the shifted tokens
+        prompt[c0+1 : c0+m+1] -- all known prompt tokens, so no sampler and
+        no seed pick here. The depth decay runs against the absolute head
+        offset (cache offset + intra-span index), never the intra-span index
+        alone, or the wide-query score cap never engages at depth. The caller
+        owns the per-chunk eval barrier; sub-spans keep the interior barrier.
+        """
+        h_len = int(shifted_tokens.shape[1])
+        if h_len == 0 or int(hidden.shape[1]) == 0:
+            return
+        base = _seed_chunk()
+        heads = prefill_decay.score_heads(getattr(self, "config", None))
+        profile = self._seed_profile(cache)
+        off0 = _cache_offset(cache)
+        i = 0
+        while i < h_len:
+            step = prefill_decay.decayed_seed_step(base, off0 + i, heads,
+                                                   profile=profile)
+            j = min(i + step, h_len)
+            self._forward(shifted_tokens[:, i:j], hidden[:, i:j], cache=cache)
+            if j < h_len:
+                mx.eval([c.state for c in cache])
+            i = j
 
     def prefill_from_target_hidden(
         self,
@@ -286,12 +334,15 @@ class QwenMTPDrafter(nn.Module):
         # transient lives in the head's dense layers), never the target's.
         # No shipping drafter registers a profile, so this is a no-op today.
         profile = self._seed_profile()
+        # Absolute head offset: nonzero when a streamed/restored prefix was
+        # adopted and this call seeds only the trailing residual.
+        off0 = _cache_offset(self._cache)
         i = 0
         while i < h_len:
             # Depth-decay against the head's own KV offset: the seed's score
-            # transient grows with i exactly like the target's prefill. The
-            # seed variant honors the kill switch and its own (larger) cap.
-            step = prefill_decay.decayed_seed_step(base, i, heads,
+            # transient grows with depth exactly like the target's prefill.
+            # The seed variant honors the kill switch and its own (larger) cap.
+            step = prefill_decay.decayed_seed_step(base, off0 + i, heads,
                                                    profile=profile)
             j = min(i + step, h_len)
             h = self._forward(shifted[:, i:j], hid[:, i:j, :])

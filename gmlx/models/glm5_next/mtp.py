@@ -273,10 +273,12 @@ class Glm5NextMTPDrafter(QwenMTPDrafter):
         raise NotImplementedError(
             "Glm5NextMTPDrafter is B=1 only (v1): no batched-row injection")
 
-    def _forward(self, tokens: mx.array, hidden: mx.array) -> mx.array:
+    def _forward(self, tokens: mx.array, hidden: mx.array,
+                 cache: Optional[List[Any]] = None) -> mx.array:
         """Run the head over (tokens, target pre-norm collapsed hidden);
         return the PRE-shared-head-norm output. The nope MLA has no rope
-        frame; the mask offset comes from the head's own KV length."""
+        frame; the mask offset comes from the head's own KV length. cache
+        overrides the head's own list (seed streaming), never swaps it."""
         embed = self._input_embed(tokens.astype(mx.int32))
         h = mx.concatenate(
             [self.pre_fc_norm_embedding(embed),
@@ -284,7 +286,8 @@ class Glm5NextMTPDrafter(QwenMTPDrafter):
             axis=-1,
         )
         h = self.fc(h)
-        cache = self._cache[0] if self._cache else None
-        kv = cache[0] if cache is not None else None
+        caches = self._cache if cache is None else cache
+        c = caches[0] if caches else None
+        kv = c[0] if c is not None else None
         mask = create_attention_mask(h, kv, return_array=True)
-        return self.layers[0](h, mask, cache)
+        return self.layers[0](h, mask, c)

@@ -8,6 +8,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- MTP drafter seeding streams into prefill: the long first-token stall on
+  deep prompts is gone (worst inter-token gap at 67k depth drops from
+  ~850ms to ~150ms; decode there gains ~13%). GMLX_MTP_SEED_STREAM=0
+  restores the deferred seeding pass.
 - The ^T finish-thinking key now works on the MTP path in `run` and `chat`:
   the owned round loop commits the forced close sequence as fully-accepted
   verify rounds at the next round boundary, so an open thinking block wraps

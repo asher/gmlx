@@ -717,6 +717,7 @@ def _owned_decode_rounds(
     draft_block_size: int | None,
     drafter_warm: list | None = None,
     sidecar_ctx: dict | None = None,
+    seed_stream: dict | None = None,
     thinking_hook=None,
 ) -> Iterator[int]:
     """Owned MTP decode loop, shared by the CLI prefill+decode path and the
@@ -846,6 +847,25 @@ def _owned_decode_rounds(
     if (drafter_warm and not _SIDECAR_DISABLED
             and getattr(drafter, "supports_kv_sidecar", False)):
         drafter.restore_kv(drafter_warm)
+
+    # Streamed-seed adoption: prefill already teacher-forced columns
+    # [0, seed len) into a request-scoped head KV (engine seed streaming).
+    # Adopt it directly, never through the sidecar branch above: its
+    # supports_kv_sidecar gate is False on qwen4exp/glm5-next/nemotron-h
+    # and must not gate adoption. The seed call below then covers exactly
+    # the residual hidden at the adopted offset. Streaming eligibility
+    # excludes warm sidecars, so the two restores never coexist.
+    _seed_len = int(seed_stream.get("len", 0) or 0) if seed_stream else 0
+    if _seed_len > 0:
+        from .mtp_drafter import _cache_offset
+        _seed_kv = seed_stream.get("kv") or []
+        _off = _cache_offset(_seed_kv) if _seed_kv else -1
+        if _off == _seed_len:
+            drafter.restore_kv(_seed_kv)
+        else:
+            _log.warning(
+                "streamed seed KV offset %d != streamed len %d; dropped "
+                "(cold reseed of the captured residual only)", _off, _seed_len)
 
     # Native MTP head: seed the head's KV from the captured target hidden.
     prefill_draft = getattr(drafter, "prefill_from_target_hidden", None)
@@ -1128,6 +1148,25 @@ def stream_speculative(
     # plain decode bit-for-bit (lossless gate).
     split_last = bool(getattr(lm, "prefill_split_last", False)) and n > 1
     body = n - 1 if split_last else n
+    # Seed streaming (CLI twin of the engine's serve-side streaming):
+    # eligible full-context heads teacher-force each prefill chunk into a
+    # local seed KV as it retires; the shifted tokens for a body chunk are
+    # all known prompt tokens. The final chunk's hidden is always retained
+    # as the residual for the decode-entry seed.
+    seed_kv = None
+    seed_len = 0
+    if (os.environ.get("GMLX_MTP_SEED_STREAM", "1") != "0"
+            and callable(getattr(drafter, "seed_chunk", None))
+            and getattr(drafter, "hidden_capture_limit", None) is None
+            and int(prompt.shape[0]) == 1):
+        try:
+            drafter.bind(model)
+            seed_kv = drafter.make_cache()
+        except Exception:
+            _log.warning("seed streaming unavailable; deferred seed",
+                         exc_info=True)
+            seed_kv = None
+    seed_active = seed_kv is not None
     i = 0
     with mx.stream(generation_stream):
         while i < body:
@@ -1135,19 +1174,34 @@ def stream_speculative(
             last = (i + take >= n)
             out = lm(prompt[:, i:i + take], cache=prompt_cache,
                      return_hidden=True, return_shared_kv=last)
+            ch = out.hidden_states[-1]
+            streamed = False
+            if seed_active and i + take < n:
+                try:
+                    drafter.seed_chunk(prompt[:, i + 1:i + take + 1],
+                                       ch, seed_kv)
+                    seed_len += take
+                    streamed = True
+                except Exception:
+                    _log.warning("seed streaming failed at column %d; "
+                                 "deferred seed for the remainder", i,
+                                 exc_info=True)
+                    seed_active = False
             if keep_all_hiddens:
-                hiddens.append(out.hidden_states[-1])
-                if capture_limit:
-                    total = sum(int(h.shape[1]) for h in hiddens)
-                    if total > capture_limit:
-                        merged = (hiddens[0] if len(hiddens) == 1
-                                  else mx.concatenate(hiddens, axis=1))
-                        hiddens = [merged[:, -capture_limit:]]
+                if not streamed:
+                    hiddens.append(ch)
+                    if capture_limit:
+                        total = sum(int(h.shape[1]) for h in hiddens)
+                        if total > capture_limit:
+                            merged = (hiddens[0] if len(hiddens) == 1
+                                      else mx.concatenate(hiddens, axis=1))
+                            hiddens = [merged[:, -capture_limit:]]
             else:
-                hiddens = [out.hidden_states[-1]]
+                hiddens = [ch]
             i += take
             if not last:
-                mx.eval([c.state for c in prompt_cache] + [hiddens[-1]])
+                mx.eval([c.state for c in prompt_cache] + [ch]
+                        + ([c.state for c in seed_kv] if streamed else []))
                 mx.clear_cache()
         if split_last:
             out = lm(prompt[:, n - 1:], cache=prompt_cache,
@@ -1180,7 +1234,9 @@ def stream_speculative(
         model, drafter, lm, prompt_cache,
         hidden=hidden, b=b, shared_kv=shared_kv, seed_tokens=prompt,
         emitted=1, max_tokens=max_tokens, sampler=sampler,
-        draft_block_size=draft_block_size, thinking_hook=thinking_hook)
+        draft_block_size=draft_block_size,
+        seed_stream=({"kv": seed_kv, "len": seed_len} if seed_len else None),
+        thinking_hook=thinking_hook)
 
 
 def owned_server_rounds(
@@ -1218,6 +1274,7 @@ def owned_server_rounds(
     # rotating). A generator local is immune to cache-entry swaps.
     retire_ctx = _pop_retire_ctx(prompt_cache)
     drafter_warm = _pop_drafter_warm(prompt_cache)
+    seed_stream = _pop_seed_stream(prompt_cache)
     thinking_hook = _pop_thinking_hook(prompt_cache)
     sidecar_ctx = None
     if retire_ctx is not None:
@@ -1248,7 +1305,7 @@ def owned_server_rounds(
         seed_tokens=prompt_tokens, emitted=1, max_tokens=max_tokens,
         sampler=eff_sampler, draft_block_size=draft_block_size,
         drafter_warm=drafter_warm, sidecar_ctx=sidecar_ctx,
-        thinking_hook=thinking_hook)
+        seed_stream=seed_stream, thinking_hook=thinking_hook)
     try:
         for tok in rounds:
             generated.append(tok)
@@ -1453,6 +1510,22 @@ def _pop_drafter_warm(prompt_cache: list) -> list | None:
         except Exception:
             pass  # slotted/frozen cache forbids ad-hoc attrs
     return warm
+
+
+def _pop_seed_stream(prompt_cache: list) -> dict | None:
+    """Detach the streamed-seed context ({"kv", "len", ...}) stashed by the
+    prefill's seed streaming (engine._mtp_seed_stream_init) on the request's
+    first cache entry. Same request-scoped discipline and pop-before-buffer
+    timing as the drafter warm sidecar above."""
+    if not prompt_cache:
+        return None
+    ctx = getattr(prompt_cache[0], "_kq_seed_stream", None)
+    if ctx is not None:
+        try:
+            prompt_cache[0]._kq_seed_stream = None
+        except Exception:
+            pass  # slotted/frozen cache forbids ad-hoc attrs
+    return ctx
 
 
 def _pop_thinking_hook(prompt_cache: list):
