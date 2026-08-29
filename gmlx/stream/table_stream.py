@@ -40,9 +40,8 @@ class StreamableTable(NamedTuple):
     gguf_name: str    # wire tensor name, e.g. "per_layer_token_embd.weight"
 
 
-# model_type -> ordered tiers, cheapest-to-stream first. Only implemented
-# tiers belong here: embed_tokens is the obvious next tier on several archs
-# (same lookup economics) but is not wired yet.
+# model_type -> ordered tiers, cheapest-to-stream first; implemented tiers
+# only (embed_tokens is the next candidate, not wired yet).
 STREAMABLE_TABLES: dict[str, tuple[StreamableTable, ...]] = {
     "qwen4_exp": (
         StreamableTable("model.ple_embed", "per_layer_token_embd.weight"),
@@ -111,10 +110,8 @@ def table_stream() -> mx.Stream:
     stream would park the layer-1 table gather behind expert work."""
     global _TABLE_STREAM
     if _TABLE_STREAM is None:
-        # Materialize the device default first: a new_stream created before
-        # the CPU default exists lands at index 0, which MLX then treats as
-        # the default - the dedicated stream would silently BE the stream
-        # offloaded experts run on, creation-order dependent.
+        # Materialize the device default first: a stream created before it
+        # lands at index 0 and becomes the default (mlx 0.32.1).
         default = mx.default_stream(mx.cpu)
         s = mx.new_stream(mx.cpu)
         if s == default:  # belt against the index-0 surprise
@@ -138,11 +135,8 @@ def _wrapped_class(cls, kquant: bool):
     if sub is not None:
         return sub
 
-    # The gather routes via per-op ``stream=`` kwargs, never ``with
-    # mx.stream(...)``: the context manager permanently rebinds the CPU
-    # device's default stream (mlx 0.32.1), so one context-managed table
-    # gather would silently move the experts' ``mx.stream(mx.cpu)`` calls
-    # onto the dedicated stream and defeat the isolation.
+    # Per-op ``stream=`` only: ``with mx.stream(...)`` permanently rebinds
+    # the CPU device default (mlx 0.32.1).
     if kquant:
 
         class _TableStream(cls):
