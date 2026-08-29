@@ -439,6 +439,37 @@ def think_tokenizer_for(processor):
     return wrapped
 
 
+def _forced_close_ids(tokenizer, budget, end_seq):
+    """``(reclose_ids, forced_ids, skip_ids)`` for a resolved ``end_seq``:
+    the terse newline+close, and the budget/^T variants carrying their wrap
+    phrases when the budget funds any thinking at all (``None`` or > 0)."""
+    nl_id = _last_token_id(tokenizer, "\n")
+    reclose_ids = ([nl_id] if nl_id is not None else []) + list(end_seq)
+    forced_ids = reclose_ids
+    skip_ids = reclose_ids
+    if budget is None or budget > 0:
+        wrap = _encode_ids(tokenizer, _BUDGET_WRAP_PHRASE)
+        if wrap:
+            forced_ids = list(wrap) + list(end_seq)
+        wrap = _encode_ids(tokenizer, _SKIP_WRAP_PHRASE)
+        if wrap:
+            skip_ids = list(wrap) + list(end_seq)
+    return reclose_ids, forced_ids, skip_ids
+
+
+def _announce_budget(tokenizer, budget, end_seq) -> None:
+    # Decode the actual forced ids first: the wrapper's think_end attr can
+    # disagree with the resolved sequence (template-preferred spelling).
+    try:
+        end_str = tokenizer.decode(list(end_seq))
+    except Exception:
+        end_str = getattr(tokenizer, "think_end", None) or "</think>"
+    print(
+        f"[thinking-budget] capping thinking at ~{budget} tokens "
+        f"(force-close {end_str!r})"
+    )
+
+
 def make_thinking_budget_processor(
     tokenizer, budget, *, start_in_thinking=True, verbose=False,
     eos_floor=True, interruptible=False, start_token=None, end_token=None,
@@ -494,28 +525,10 @@ def make_thinking_budget_processor(
                 "ignoring thinking budget"
             )
         return None
-    nl_id = _last_token_id(tokenizer, "\n")
-    reclose_ids = ([nl_id] if nl_id is not None else []) + list(end_seq)
-    forced_ids = reclose_ids
-    skip_ids = reclose_ids
-    if budget is None or budget > 0:
-        wrap = _encode_ids(tokenizer, _BUDGET_WRAP_PHRASE)
-        if wrap:
-            forced_ids = list(wrap) + list(end_seq)
-        wrap = _encode_ids(tokenizer, _SKIP_WRAP_PHRASE)
-        if wrap:
-            skip_ids = list(wrap) + list(end_seq)
+    reclose_ids, forced_ids, skip_ids = _forced_close_ids(
+        tokenizer, budget, end_seq)
     if verbose and budget is not None:
-        # Decode the actual forced ids first: the wrapper's think_end attr can
-        # disagree with the resolved sequence (template-preferred spelling).
-        try:
-            end_str = tokenizer.decode(list(end_seq))
-        except Exception:
-            end_str = getattr(tokenizer, "think_end", None) or "</think>"
-        print(
-            f"[thinking-budget] capping thinking at ~{budget} tokens "
-            f"(force-close {end_str!r})"
-        )
+        _announce_budget(tokenizer, budget, end_seq)
     return ThinkingBudgetProcessor(
         end_seq=end_seq,
         forced_ids=forced_ids,
@@ -529,7 +542,7 @@ def make_thinking_budget_processor(
 
 
 class MTPFinishThinking:
-    """^T finish-thinking hook for the owned MTP round loop.
+    """Thinking-budget + ^T finish-thinking hook for the owned MTP round loop.
 
     The MTP walks verify a whole draft block per target forward, so the
     per-step logits seam :class:`ThinkingBudgetProcessor` forces through does
@@ -537,22 +550,29 @@ class MTPFinishThinking:
     round loop can commit it directly as a fully-accepted verify block. This
     hook carries the state that decision needs: the loop reports every emitted
     token through :meth:`observe` (tracking whether the model is inside a
-    thinking block), and asks :meth:`take_forced` at each round boundary for
-    a close sequence to inject.
+    thinking block, and counting thinking tokens against ``budget``), and asks
+    :meth:`take_forced` at each round boundary for a close sequence to inject.
 
     Duck-typed for :func:`finish_thinking_now` (``done`` + ``request_close``).
-    Post-close behavior mirrors the processor: the first close carries the
-    ^T wrap phrase, a reopen after a forced close is reclosed tersely, and
-    three closes with no answer token in between stand the hook down.
+    Semantics mirror the processor: an exceeded budget forces the close (a
+    round-boundary check, so the cap is ~budget, overshooting by at most one
+    draft block); the first budget close carries the budget wrap phrase and a
+    ^T close the ^T one; a natural close before any forced one disarms the
+    hook; a reopen after a forced close is reclosed tersely; three closes
+    with no answer token in between stand the hook down. ``budget=None``
+    never trips on its own (^T-only).
     """
 
-    def __init__(self, *, end_seq, skip_ids, reclose_ids, start_seq=None,
-                 start_in_thinking=False):
+    def __init__(self, *, end_seq, skip_ids, reclose_ids, forced_ids=None,
+                 budget=None, start_seq=None, start_in_thinking=False):
         self.end_seq = tuple(end_seq)
         self.start_seq = tuple(start_seq) if start_seq else None
         self.skip_ids = list(skip_ids)
         self.reclose_ids = list(reclose_ids)
+        self.forced_ids = list(forced_ids) if forced_ids else self.skip_ids
+        self.budget = None if budget is None else max(0, int(budget))
         self.in_thinking = bool(start_in_thinking)
+        self.count = 0
         self.done = False
         self._close_requested = False
         self._spent = False
@@ -572,20 +592,24 @@ class MTPFinishThinking:
 
     def observe(self, tok) -> None:
         """Track one emitted token (forced ids included: the injected close
-        ends with ``end_seq``, which flips ``in_thinking`` off here)."""
+        ends with ``end_seq``, which flips ``in_thinking`` off here without
+        disarming, because ``_spent`` is already set by take_forced)."""
         self._tail.append(int(tok))
         if len(self._tail) > self._tail_max:
             del self._tail[: len(self._tail) - self._tail_max]
         if self._tail_is(self.end_seq):
             self.in_thinking = False
+            if not self._spent:
+                self.done = True  # natural close - disarm, as on the plain path
         elif self.start_seq is not None and self._tail_is(self.start_seq):
             self.in_thinking = True
+            self.count = 0
             # A reopen after a forced close is reclosed at the next round
             # boundary (budget-0 semantics, as in the processor).
             if self._spent:
                 self._close_requested = True
         elif self.in_thinking:
-            pass
+            self.count += 1
         elif self._answer_pending:
             # A real answer token landed; stop counting closes as strikes.
             self._answer_pending = False
@@ -593,10 +617,13 @@ class MTPFinishThinking:
 
     def take_forced(self):
         """The close sequence to inject at this round boundary, or None.
-        Consumes the pending request either way."""
+        Consumes any pending ^T request either way."""
         requested = self._close_requested
         self._close_requested = False
-        if self.done or not requested or not self.in_thinking:
+        if self.done or not self.in_thinking:
+            return None
+        over = self.budget is not None and self.count > self.budget
+        if not (requested or over):
             return None
         if self._answer_pending:
             # Closed again without any answer in between: the model is
@@ -605,36 +632,51 @@ class MTPFinishThinking:
             if self._strikes >= 3:
                 self.done = True
                 return None
-        seq = self.reclose_ids if self._spent else self.skip_ids
+        if self._spent:
+            seq = self.reclose_ids
+        elif requested:
+            seq = self.skip_ids
+        else:
+            seq = self.forced_ids
         self._spent = True
         self._answer_pending = True
         return list(seq)
 
 
 def make_mtp_finish_hook(
-    tokenizer, *, start_in_thinking=False, start_token=None, end_token=None,
+    tokenizer, *, budget=None, start_in_thinking=False, verbose=False,
+    start_token=None, end_token=None,
 ):
-    """Build the ^T hook for the owned MTP round loop, or ``None`` when the
-    model's thinking delimiters can't be resolved (the key is then a silent
-    no-op, matching the plain path's budget-less behavior). Best-effort by
-    design: a tokenizer the probe can't handle must not break MTP decode."""
+    """Build the thinking-budget/^T hook for the owned MTP round loop, or
+    ``None`` when the model's thinking delimiters can't be resolved (the
+    budget is then ignored - warning when ``verbose`` - and the key is a
+    silent no-op, matching the plain path). ``budget=None`` arms ^T only.
+    Best-effort by design: a tokenizer the probe can't handle must not break
+    MTP decode."""
+    if budget is not None and budget < 0:
+        return None
     try:
         start_seq, end_seq = _thinking_token_seqs(
             tokenizer, start_token, end_token)
     except Exception:  # noqa: BLE001
         return None
     if not end_seq:
+        if verbose and budget is not None:
+            print(
+                "[thinking-budget] no thinking-end token detected; "
+                "ignoring thinking budget"
+            )
         return None
-    nl_id = _last_token_id(tokenizer, "\n")
-    reclose_ids = ([nl_id] if nl_id is not None else []) + list(end_seq)
-    skip_ids = reclose_ids
-    wrap = _encode_ids(tokenizer, _SKIP_WRAP_PHRASE)
-    if wrap:
-        skip_ids = list(wrap) + list(end_seq)
+    reclose_ids, forced_ids, skip_ids = _forced_close_ids(
+        tokenizer, budget, end_seq)
+    if verbose and budget is not None:
+        _announce_budget(tokenizer, budget, end_seq)
     return MTPFinishThinking(
         end_seq=end_seq,
         skip_ids=skip_ids,
         reclose_ids=reclose_ids,
+        forced_ids=forced_ids,
+        budget=budget,
         start_seq=start_seq,
         start_in_thinking=start_in_thinking,
     )

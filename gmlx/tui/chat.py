@@ -3716,6 +3716,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                         top_k=s["top_k"],
                         min_p=s["min_p"],
                         draft_block_size=args.draft_block_size,
+                        thinking_budget=state.thinking_budget,
                         thinking_start_token=state.thinking_start_token,
                         thinking_end_token=state.thinking_end_token,
                         start_in_thinking=_prompt_opens_thinking_cfg(
@@ -3850,6 +3851,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                     top_k=s["top_k"],
                     min_p=s["min_p"],
                     draft_block_size=args.draft_block_size,
+                    thinking_budget=state.thinking_budget,
                     thinking_start_token=state.thinking_start_token,
                     thinking_end_token=state.thinking_end_token,
                     start_in_thinking=_prompt_opens_thinking_cfg(

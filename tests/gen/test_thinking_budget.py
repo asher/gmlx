@@ -798,3 +798,58 @@ def test_make_mtp_finish_hook_factory():
             return [7, 8, 42] if "think" in text else []
 
     assert make_mtp_finish_hook(_NoThinkTok()) is None
+
+
+def test_mtp_hook_budget_trips_on_its_own():
+    h = _mtp_hook(start_in_thinking=True, budget=3, forced_ids=[8, 9, END])
+    for t in (50, 51, 52):
+        h.observe(t)
+    assert h.take_forced() is None  # count == budget: not over yet
+    h.observe(53)
+    assert h.take_forced() == [8, 9, END]  # budget phrase, not the ^T one
+    for t in (8, 9, END):
+        h.observe(t)
+    assert not h.in_thinking and h._spent
+
+
+def test_mtp_hook_natural_close_disarms_budget():
+    h = _mtp_hook(start_in_thinking=True, budget=2)
+    h.observe(50)
+    h.observe(END)
+    assert h.done
+    h.observe(START)  # reopened blocks are free after a natural close
+    for t in (60, 61, 62, 63):
+        h.observe(t)
+    assert h.take_forced() is None
+
+
+def test_mtp_hook_reopen_resets_count():
+    h = _mtp_hook(start_in_thinking=False, budget=3)
+    h.observe(START)
+    for t in (50, 51, 52):
+        h.observe(t)
+    assert h.take_forced() is None  # at budget, not over
+    h.observe(53)
+    assert h.take_forced() is not None  # over
+
+
+def test_make_mtp_finish_hook_budget_variants():
+    class _WrapTok(_FakeTok):
+        def encode(self, text, add_special_tokens=True):
+            ids = super().encode(text, add_special_tokens)
+            if ids:
+                return ids
+            if "thinking budget" in text:
+                return [70]
+            if "asked to wrap" in text:
+                return [71]
+            return []
+
+    h = make_mtp_finish_hook(_WrapTok(), budget=5, start_in_thinking=True)
+    assert h.budget == 5 and h.in_thinking
+    assert h.forced_ids == [70, END]  # budget wrap phrase
+    assert h.skip_ids == [71, END]  # ^T wrap phrase
+    assert h.reclose_ids == [NL, END]
+    h0 = make_mtp_finish_hook(_WrapTok(), budget=0)
+    assert h0.forced_ids == [NL, END] and h0.skip_ids == [NL, END]
+    assert make_mtp_finish_hook(_WrapTok(), budget=-1) is None

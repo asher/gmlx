@@ -609,7 +609,8 @@ def mtp_dropped_run_flags(args) -> list[str]:
         ("--max-kv-size", args.max_kv_size is not None),
         ("--over-generation", args.over_generation != 0),
         ("--inject-critique", args.inject_critique is not None),
-        ("--thinking-budget", args.thinking_budget is not None),
+        # --thinking-budget is honored on the MTP path (owned rounds inject
+        # the forced close at round boundaries), so it is no longer listed.
         ("--prefill-step-size", args.prefill_step_size is not None),
     )
     return [name for name, on in pairs if on]
@@ -629,7 +630,8 @@ def mtp_dropped_chat_flags(args) -> list[str]:
         # mtp_dropped_run_flags).
         ("--quantized-kv-start", args.quantized_kv_start != 0),
         ("--max-kv-size", args.max_kv_size is not None),
-        ("--thinking-budget", getattr(args, "thinking_budget", None) is not None),
+        # --thinking-budget: honored on the MTP path (see
+        # mtp_dropped_run_flags).
     )
     return [name for name, on in pairs if on]
 
@@ -1536,6 +1538,7 @@ def _run_generate(args) -> int:
             reasoning=args.reasoning,
             kv_bits=args.kv_bits,
             kv_group_size=args.kv_group_size,
+            thinking_budget=args.thinking_budget,
             thinking_start_token=args.thinking_start_token,
             thinking_end_token=args.thinking_end_token,
         )
@@ -1833,6 +1836,7 @@ def _run_vlm_mtp(args) -> int:
         reasoning=args.reasoning,
         kv_bits=args.kv_bits,
         kv_group_size=args.kv_group_size,
+        thinking_budget=getattr(args, "thinking_budget", None),
         thinking_start_token=args.thinking_start_token,
         thinking_end_token=args.thinking_end_token,
     )

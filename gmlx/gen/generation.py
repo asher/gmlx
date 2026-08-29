@@ -795,6 +795,7 @@ def _generate_speculative(
     reasoning: str | None = None,
     kv_bits: int | None = None,
     kv_group_size: int = 64,
+    thinking_budget: int | None = None,
     thinking_start_token: str | None = None,
     thinking_end_token: str | None = None,
 ) -> dict:
@@ -825,6 +826,7 @@ def _generate_speculative(
             system_prompt=system_prompt, template_kwargs=template_kwargs,
             verbose=verbose, reasoning=reasoning,
             kv_bits=kv_bits, kv_group_size=kv_group_size,
+            thinking_budget=thinking_budget,
             thinking_start_token=thinking_start_token,
             thinking_end_token=thinking_end_token,
         )
@@ -835,6 +837,12 @@ def _generate_speculative(
         print(
             "warning: --kv-bits not applied on the MTP path "
             "(no quantizable caches)",
+            file=sys.stderr,
+        )
+    if thinking_budget is not None:
+        # The forced-close seam lives in the owned rounds only.
+        print(
+            "warning: --thinking-budget not applied on the stock MTP engine",
             file=sys.stderr,
         )
 
@@ -982,6 +990,7 @@ def generate_speculative_owned(
     reasoning: str | None = None,
     kv_bits: int | None = None,
     kv_group_size: int = 64,
+    thinking_budget: int | None = None,
     thinking_start_token: str | None = None,
     thinking_end_token: str | None = None,
 ) -> dict:
@@ -1061,14 +1070,17 @@ def generate_speculative_owned(
     emit = close_emit = None
     if verbose:
         emit, close_emit = _verbose_emitter(prompt, tokenizer, reasoning)
-    # ^T finish-thinking: the owned rounds honor a forced-close hook; arm it
-    # (a None hook - unresolvable markers - leaves the key a silent no-op,
-    # matching the plain path).
+    # Thinking budget + ^T finish-thinking: the owned rounds honor a
+    # forced-close hook; arm it (a None hook - unresolvable markers - drops
+    # the budget with a note and leaves the key a silent no-op, matching the
+    # plain path).
     hook = make_mtp_finish_hook(
         tokenizer,
+        budget=thinking_budget,
         start_in_thinking=prompt_opens_thinking(
             prompt, thinking_start_token, thinking_end_token,
             tokenizer=tokenizer),
+        verbose=verbose,
         start_token=thinking_start_token,
         end_token=thinking_end_token,
     )
@@ -1191,6 +1203,7 @@ def _stream_generate_speculative_owned(
     top_k: int = 0,
     min_p: float = 0.05,
     draft_block_size: int | None = None,
+    thinking_budget: int | None = None,
     thinking_start_token: str | None = None,
     thinking_end_token: str | None = None,
     start_in_thinking: bool | None = None,
@@ -1245,6 +1258,7 @@ def _stream_generate_speculative_owned(
     prompt_tps = 0.0
     hook = make_mtp_finish_hook(
         tokenizer,
+        budget=thinking_budget,
         start_in_thinking=start_in_thinking,
         start_token=thinking_start_token,
         end_token=thinking_end_token,
@@ -1321,6 +1335,7 @@ def _stream_generate_speculative(
     top_k: int = 0,
     min_p: float = 0.05,
     draft_block_size: int | None = None,
+    thinking_budget: int | None = None,
     thinking_start_token: str | None = None,
     thinking_end_token: str | None = None,
     start_in_thinking: bool | None = None,
@@ -1355,11 +1370,19 @@ def _stream_generate_speculative(
             model, drafter, tokenizer, prompt, prompt_cache=prompt_cache,
             max_tokens=max_tokens, temp=temp, top_p=top_p, top_k=top_k,
             min_p=min_p, draft_block_size=draft_block_size,
+            thinking_budget=thinking_budget,
             thinking_start_token=thinking_start_token,
             thinking_end_token=thinking_end_token,
             start_in_thinking=start_in_thinking,
         )
         return
+
+    if thinking_budget is not None:
+        # The forced-close seam lives in the owned rounds only.
+        print(
+            "warning: thinking budget not applied on the stock MTP engine",
+            file=sys.stderr,
+        )
 
     from mlx_lm.sample_utils import make_sampler
     from gmlx.spec.helpers import _resolve_block_total

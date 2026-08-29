@@ -21,10 +21,10 @@ from test_mtp_width_cap import _FakeCache
 END, S1, S2 = 17, 11, 12  # close marker + wrap-phrase stand-ins (< VOCAB)
 
 
-def _hook(skip_ids, *, start_in_thinking=True):
+def _hook(skip_ids, *, start_in_thinking=True, **kw):
     return MTPFinishThinking(
         end_seq=(END,), skip_ids=list(skip_ids), reclose_ids=[13, END],
-        start_seq=(16,), start_in_thinking=start_in_thinking)
+        start_seq=(16,), start_in_thinking=start_in_thinking, **kw)
 
 
 def _make_gen(hook, *, max_tokens, b=5):
@@ -76,6 +76,17 @@ def test_close_outside_thinking_leaves_stream_untouched():
     out, _d = _drive(hook, press_after=2, max_tokens=10)
     assert out == [6, 7, 8, 9, 10, 11, 12, 13, 14]
     assert not hook._spent
+
+
+def test_budget_trips_at_round_boundary_without_keypress():
+    hook = _hook([S1, S2, END], budget=4, forced_ids=[14, 15, END])
+    out, _d = _drive(hook, press_after=10**9, max_tokens=13)
+    # Rounds emit 3 thinking tokens each; the count passes 4 during round
+    # two, so the budget close (its own phrase) lands at the next boundary
+    # and echo decode resumes after it.
+    assert out == [6, 7, 8, 9, 10, 11, 14, 15, END,
+                   (END + 1) % VOCAB, (END + 2) % VOCAB, (END + 3) % VOCAB]
+    assert hook._spent and not hook.in_thinking
 
 
 def test_generator_close_mid_forced_round():
