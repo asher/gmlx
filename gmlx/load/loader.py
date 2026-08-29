@@ -2559,11 +2559,20 @@ def install_expert_streaming(
             staging = f"prefill calls >={gpu_tokens} tokens routed to GPU"
         else:
             staging = "GPU prefill routing disabled"
-        loadlog.info(
-            f"[stream] routed experts -> CPU stream on {n_wrapped} layers "
-            f"({offloaded / 1e9:.1f} GB stays file-backed; rest of the model "
-            f"+ KV on {base_dev}; {staging})"
-        )
+        if table_offloaded:
+            # Table-only mode: the experts are GPU-resident and wired (the
+            # streamed table made room); "file-backed" would be wrong.
+            loadlog.info(
+                f"[stream] routed experts resident on GPU across "
+                f"{n_wrapped} layers ({offloaded / 1e9:.1f} GB wired; "
+                f"{staging})"
+            )
+        else:
+            loadlog.info(
+                f"[stream] routed experts -> CPU stream on {n_wrapped} "
+                f"layers ({offloaded / 1e9:.1f} GB stays file-backed; rest "
+                f"of the model + KV on {base_dev}; {staging})"
+            )
     return n_wrapped, offloaded
 
 
