@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-08-29
+
 ### Added
 
 - The ^T finish-thinking key now works on the MTP path in `run` and `chat`:
