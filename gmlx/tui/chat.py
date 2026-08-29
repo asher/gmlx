@@ -2120,6 +2120,15 @@ def _opens_thinking(prompt) -> bool:
     return prompt_opens_thinking(prompt)
 
 
+def _prompt_opens_thinking_cfg(state, prompt_text) -> bool:
+    """:func:`_opens_thinking` with the session's configured markers applied
+    (the seed for the MTP path's ^T finish-thinking hook)."""
+    from gmlx.gen.thinking_budget import prompt_opens_thinking
+
+    return prompt_opens_thinking(
+        prompt_text, state.thinking_start_token, state.thinking_end_token)
+
+
 def _vlm_thinking_tokens(state) -> dict:
     """The configured reasoning markers as mlx-vlm generate kwargs, omitting
     the ones left unset - mlx-vlm defaults them to ``<think>`` / ``</think>``
@@ -3783,6 +3792,11 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                         top_k=s["top_k"],
                         min_p=s["min_p"],
                         draft_block_size=args.draft_block_size,
+                        thinking_budget=state.thinking_budget,
+                        thinking_start_token=state.thinking_start_token,
+                        thinking_end_token=state.thinking_end_token,
+                        start_in_thinking=_prompt_opens_thinking_cfg(
+                            state, prompt_text),
                     ),
                     state,
                     stops=args.stop,
@@ -3882,8 +3896,10 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         if drafter is not None:
             # MTP speculative decoding over the persistent cache (the same per-turn
             # templating + cache append as the plain text path below). Sampling is
-            # temp/top-p/top-k/min-p only - mlx-vlm's MTP walk exposes no penalty/
+            # temp/top-p/top-k/min-p only - the MTP walk exposes no penalty/
             # bias/stop hooks, so the REPL's other sampling /commands don't apply.
+            # ^T finish-thinking does work: the owned rounds inject the forced
+            # close directly (see stream_generate_speculative).
             from gmlx.gen.generation import stream_generate_speculative
 
             messages = list(state.take("replay_messages") or [])
@@ -3911,6 +3927,11 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                     top_k=s["top_k"],
                     min_p=s["min_p"],
                     draft_block_size=args.draft_block_size,
+                    thinking_budget=state.thinking_budget,
+                    thinking_start_token=state.thinking_start_token,
+                    thinking_end_token=state.thinking_end_token,
+                    start_in_thinking=_prompt_opens_thinking_cfg(
+                        state, prompt_text),
                 ),
                 state,
                 stops=args.stop,

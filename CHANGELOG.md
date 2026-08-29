@@ -8,6 +8,22 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The ^T finish-thinking key now works on the MTP path in `run` and `chat`:
+  the owned round loop commits the forced close sequence as fully-accepted
+  verify rounds at the next round boundary, so an open thinking block wraps
+  up and the answer starts without leaving speculative decoding. `gmlx run`
+  MTP now routes to the owned engine by default like `chat`, serve, and
+  bench (`GMLX_OWNED_ROUND=0` opts back to the stock round, where ^T still
+  prints its notice).
+- `--thinking-budget` now applies on the MTP path in `run` and `chat`,
+  through the same forced-close rounds as ^T (the stock MTP round still
+  drops it with a notice).
+- The server honors `thinking_budget` on MTP-drafted models (request field
+  or profile/model config key), instead of rejecting those requests.
+  Enforced by the owned round loop for a request decoding alone; requests
+  batched with others drop the budget with a log note. See the behavior
+  matrix in docs/server-config.md. Non-MTP speculative models keep the
+  stock rejection.
 - Model ids on one GGUF that differ only in `adapter:` now share a single
   resident model: base and every adapter load once, requests to any of the
   ids batch together, and each row applies only its own adapter. Single-model
@@ -32,6 +48,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Metal buffer leaks: glm5next decode no longer hits the 499k resource limit
   on long generations, and streamed serve releases arena/weight residency on
   feeder close and model eviction.
+- Per-request `seed` works on the server again: the thinking-budget patch
+  installed after the seed wrapper on the same seam and clobbered it, so
+  request seeds were silently ignored.
 
 ## [0.4.4] - 2026-08-27
 

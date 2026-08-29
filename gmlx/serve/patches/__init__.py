@@ -95,6 +95,7 @@ from .hardening import (
     install_json_content_type_tolerance,
     install_loopback_host_guard,
 )
+from .mtp_thinking import install_mtp_thinking_budget
 from .observability import install_request_timing_log, uvicorn_log_config
 from .render import install_faithful_history
 from .request_flow import (
@@ -155,6 +156,7 @@ __all__ = [
     "install_loopback_host_guard",
     "install_metrics_prometheus",
     "install_models_endpoint_override",
+    "install_mtp_thinking_budget",
     "install_openai_stop_sequences",
     "install_optional_request_model",
     "install_pool_aware_unload",
@@ -200,6 +202,9 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
         install_step_timing()
     if os.environ.get("GMLX_DISABLE_FAST_SAMPLER") != "1":
         install_fast_sampler()
+    # Before the seed install: this rebinds the criteria seam without
+    # delegating, so installed after it would clobber the seed wrapper.
+    install_thinking_budget_fix()
     from ..seed_rows import install_per_request_seed
     install_per_request_seed()
     import gmlx.lora_rows as lora_rows
@@ -240,7 +245,6 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     from gmlx.cache.fresh_gate import install_fresh_admission_gate
     install_fresh_admission_gate()
     install_chat_template_kwargs()
-    install_thinking_budget_fix()
     install_stream_timings()
     install_openai_stop_sequences()
     install_api_contract()
@@ -295,6 +299,13 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_queue_depth_cap()
     from ..mem_preflight import install_memory_preflight
     install_memory_preflight()
+    # After tbfix + seed (its criteria wrapper must be outermost), after the
+    # owned MTP prefill (its transport wrap must land outside _mtp_generate,
+    # so the hook stash happens after the APC L0 store), and after the
+    # memory preflight (its generate wrap does not carry flags forward, so
+    # the defer wrap must be the outer one for both installs to stay
+    # idempotent).
+    install_mtp_thinking_budget()
     # Late so the trace brackets the full tick including pacing and
     # admission work.
     from gmlx.serve.memtrace import install_serve_memtrace
