@@ -122,9 +122,13 @@ has no thinking, so the adapted model thinks "empty" and gets straight to the ar
 gmlx serve Qwen3-0.6B-Q8_0.gguf --adapter pirate-lora.gguf --port 8080
 ```
 
-In config mode, `adapter:` is a per-model key. Because the adapter is part of a
-model's load signature, `base`, `base+adapterA`, and `base+adapterB` are three
-distinct model ids that can be resident side by side:
+In config mode, `adapter:` is a per-model key. Model ids on the same GGUF
+that differ only in `adapter:` share one resident entry: the base weights load
+once, every adapter of the group loads into its own slot, and each request
+turns its id's adapter on (scale 1.0) and the others off (0.0) for its rows.
+`base`, `base+adapterA` and `base+adapterB` are three ids that serve from one
+loaded model and batch together, so switching adapters between requests costs
+nothing and a mixed batch of base and adapted rows is one decode step:
 
 ```yaml
 models:
@@ -133,7 +137,24 @@ models:
   qwen3-0.6b-pirate:
     path: Qwen3-0.6B-Q8_0.gguf
     adapter: pirate-lora.gguf
+  qwen3-0.6b-formal:
+    path: Qwen3-0.6B-Q8_0.gguf
+    adapter: formal-lora.gguf
 ```
+
+The single-model form (`serve model.gguf --adapter x.gguf`) registers the
+bare base as `<id>-base` on the same entry, so both are addressable without
+a config. The sorted adapter set is what enters the load signature: a reload
+that adds an id with a new adapter builds a new entry and the old one ages
+out. Adapted and bare rows never share a prefix cache entry (the APC key is
+salted per adapter set), and an adapted request's outputs equal its solo run
+whatever else is in the batch. Serving base and adapters together needs an
+`mlx-kquant` build with the in-op LoRA epilogue (`HAS_LORA_EPILOGUE`);
+older builds fall back to plain-op deltas with the same results.
+
+Serving one base with several adapters (config grouping, the chat client's
+mid-conversation `/model` switch, batching and speculative-decoding
+behavior) has its own guide: [adapter-serving.md](adapter-serving.md).
 
 The whole loop above is automated as an end-to-end test,
 `python tests/e2e/run_lora_e2e.py`: prep, then train, then serve base and
@@ -155,12 +176,16 @@ scaling semantics (`delta = (alpha / rank) * B * A`). That buys interop both way
 
 - LoRA only: DoRA on a K-quant base is not supported. mlx-lm's DoRA dispatch
   doesn't route through the quantized path.
-- Dense linears only (q/k/v/o, gate/up/down). An adapter targeting MoE expert
-  stacks or embeddings errors loudly rather than being silently skipped.
-- Text path only: `--adapter` doesn't combine with `--mmproj` (VLM) or
-  `--speculative` (MTP) yet.
-- One adapter per resident entry, fixed at load: switching adapters means
-  addressing a different model id (see the config example above), not a
-  per-request parameter.
+- Dense linears (q/k/v/o, gate/up/down) and MoE expert `down_proj` stacks.
+  Gate/up expert stacks and embeddings error loudly rather than being
+  silently skipped, as do expert targets on bases the runtime places under
+  a fused MoE block (gemma, gpt-oss).
+- Text path only: `--adapter` doesn't combine with `--mmproj` (VLM).
+  `--speculative` (native-head MTP) works; see
+  [adapter-serving.md](adapter-serving.md).
+- Each model id's adapter is fixed at load: switching adapters means
+  addressing a different model id (several ids share the one loaded base,
+  see [adapter-serving.md](adapter-serving.md)), not a per-request
+  parameter.
 - The adapter must match the base architecture (checked at load). Matching the
   exact base finetune is your responsibility.

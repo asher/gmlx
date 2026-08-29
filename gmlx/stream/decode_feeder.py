@@ -1328,7 +1328,10 @@ class DecodeFeeder:
         """Swap the layer's expert weights to the arena views for the call."""
         entry = self._layers[li]
         views = {kind: self._views[(li, kind)] for kind in entry}
-        with swapped_weights(entry, views):
+        # The owner table is read at delta time, not here: a shed inside
+        # the swap restages slots, and the delta must follow what ran.
+        with swapped_weights(entry, views,
+                             slot_owner=lambda: self._owner[li]):
             yield
 
     def close(self) -> None:

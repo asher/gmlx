@@ -177,7 +177,8 @@ def serve_and_query(python: str, base: str, adapter: str | None,
         for prompt in PROMPTS:
             status, body = client.chat(
                 model_id, [{"role": "user", "content": prompt}],
-                max_tokens=160, temperature=0.0)
+                max_tokens=160, temperature=0.0,
+                chat_template_kwargs={"enable_thinking": False})
             if status != 200:
                 raise RuntimeError(f"chat failed ({status}): {body}\n"
                                    + proc.log_tail())

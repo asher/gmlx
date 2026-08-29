@@ -198,9 +198,14 @@ def test_resolve_stays_on_with_system_prompt(native_head, gguf):
 
 
 def test_resolve_hard_flag_defers_silently(native_head, gguf):
+    on, note = cli.resolve_speculative(_args([gguf, "--stream-cpu"]), gguf)
+    assert not on and note == ""        # no note: respecting an incompatible request
+
+
+def test_resolve_adapter_composes_with_auto_mtp(native_head, gguf):
     on, note = cli.resolve_speculative(_args([gguf, "--adapter", "/x.gguf"]),
                                        gguf)
-    assert not on and note == ""        # no note: respecting an incompatible request
+    assert on and "native MTP head detected" in note
 
 
 def test_resolve_stream_experts_defers_auto_allows_explicit(native_head, gguf):
