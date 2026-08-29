@@ -63,10 +63,18 @@ def _libc():
     return lc
 
 
-def every_token_ranges(gguf_path: str) -> dict[str, list[tuple[int, int]]]:
+def every_token_ranges(
+    gguf_path: str, exclude_names: frozenset[str] | set[str] = frozenset(),
+) -> dict[str, list[tuple[int, int]]]:
     """``shard_path -> [(offset, nbytes), ...]``: merged, page-aligned byte
     ranges of every non-expert tensor. Headers and metadata are read once
-    at load and stay unpinned."""
+    at load and stay unpinned.
+
+    ``exclude_names``: exact tensor names to leave out of the pin set on
+    top of the expert regex - the declared streamable lookup tables
+    (gmlx.stream.table_stream) when one is streamed alongside expert
+    streaming. A streamed table must stay evictable; mlocking it wires it
+    for good, and no GPU-stream guard can catch an mlock."""
     from gmlx.load.headerscan import scan_gguf
     from gmlx.load.preflight import find_split_shards
 
@@ -76,6 +84,8 @@ def every_token_ranges(gguf_path: str) -> dict[str, list[tuple[int, int]]]:
         raw = []
         for t in scan.tensors:
             if _EXPS_RE.fullmatch(t.name):
+                continue
+            if t.name in exclude_names:
                 continue
             start = scan.data_offset + t.offset
             raw.append((start, start + t.nbytes))
@@ -155,9 +165,14 @@ class WeightsPin:
             pass  # GC-time cleanup must never raise
 
 
-def maybe_pin_weights(gguf_path: str | None) -> WeightsPin | None:
+def maybe_pin_weights(
+    gguf_path: str | None,
+    exclude_names: frozenset[str] | set[str] = frozenset(),
+) -> WeightsPin | None:
     """A WeightsPin over the model's non-expert ranges, or None with a printed
-    reason. Called only for streaming-mode installs."""
+    reason. Called only for streaming-mode installs. ``exclude_names``:
+    streamed lookup-table tensors to keep out of the pin set (see
+    every_token_ranges)."""
     if gguf_path is None:
         return None
     if not env_bool("GMLX_PIN_WEIGHTS", True):
@@ -165,7 +180,7 @@ def maybe_pin_weights(gguf_path: str | None) -> WeightsPin | None:
               "weights stay cache-managed")
         return None
     try:
-        ranges = every_token_ranges(gguf_path)
+        ranges = every_token_ranges(gguf_path, exclude_names=exclude_names)
         total = sum(n for rs in ranges.values() for _, n in rs)
         try:
             ram = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGESIZE")
