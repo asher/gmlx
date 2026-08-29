@@ -722,3 +722,43 @@ def test_gated_stream_matches_a_single_buffered_reference():
         [3, 4, 5],
         [4, 5, 6],
     ]
+
+
+# -- LoRA rows on the gated round -----------------------------------------
+
+class _RowsLM(_FakeLM):
+    """Target that records the LoRA row vector published for each forward,
+    the way the rows-mode wrappers read it (raises when nothing is
+    published)."""
+
+    def __init__(self):
+        super().__init__()
+        self.rows = []
+
+    def __call__(self, x, cache=None, **kw):
+        from gmlx import lora_rows
+        self.rows.append(lora_rows.row_scales(0).tolist())
+        return super().__call__(x, cache=cache, **kw)
+
+
+def test_gated_round_publishes_lora_rows():
+    """Width-capped batches run only the gated (plain) target step; it must
+    publish the batch's LoRA row vector like the verify rounds do, else every
+    concurrent adapter stream fails in rows mode (ds4 + adapters, 2026-08-26).
+    """
+    from gmlx import lora_rows
+
+    lora_rows.configure("rows", 1)
+    try:
+        lora_rows.register_uid("u0", (1.0,))
+        lora_rows.register_uid("u2", (1.0,))
+        model = SimpleNamespace(_kq_row_uids=["u0", "u1", "u2"])
+        lm = _RowsLM()
+        out, _, _ = _drive(_StrictDrafter(cap=2), B=3, max_tokens=3,
+                           model=model, lm=lm)
+        assert out[0][0] == [3, 4, 5]
+        assert lm.rows and all(r == [1.0, 0.0, 1.0] for r in lm.rows)
+        with pytest.raises(lora_rows.LoraRowsError):
+            lora_rows.row_scales(0)   # cleared after every forward
+    finally:
+        lora_rows.configure("static", 1)

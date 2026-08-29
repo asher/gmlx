@@ -511,9 +511,12 @@ class ResolvedModel:
     # template spelling at the gen-args seam. Per-request - not load-affecting.
     thinking: Any = None
     reasoning_effort: str | None = None
-    # resolved GGUF LoRA adapter abspath, applied live over the base at load; two ids
-    # on one GGUF with different adapters are distinct resident entries (load-affecting).
+    # resolved GGUF LoRA adapter abspath, applied live over the base at load. Ids on
+    # one GGUF that differ only in adapter share one resident entry: `adapters` is
+    # the sorted union of their adapters (filled by the serving registry; slot i of
+    # the row channel holds adapters[i]) and is what enters load_signature.
     adapter: str | None = None
+    adapters: tuple = ()
     # Execution placement ("experts" = routed experts stream, rest of the model
     # + KV on GPU; "cpu" = whole model on CPU); load-affecting - it restructures
     # which device/stream the model runs on (and what gets wired).
@@ -537,14 +540,26 @@ class ResolvedModel:
     # Load-affecting - it is stamped onto the drafter at load.
     speculative_width_cap: int | None = None
 
+    def effective_adapters(self) -> tuple:
+        """The adapters the resident entry serving this id carries: the
+        registry-filled union, else this id's own adapter alone."""
+        return tuple(self.adapters) or ((self.adapter,) if self.adapter else ())
+
+    def base_signature(self) -> tuple:
+        """:meth:`load_signature` with the adapter component blanked: ids
+        that agree on it can share one resident entry (their adapters
+        become that entry's slots)."""
+        return self._signature(None)
+
     def load_signature(self) -> tuple:
         """Identity for the residency cache_key: two ids backed by the same GGUF but
         loaded differently (kv bits, mmproj, drafter, speculative, chat template,
-        adapter) are distinct resident entries. ``chat_template`` and ``adapter`` are
-        both load-affecting - the template is baked into the tokenizer and the adapter
-        is wrapped over the model leaves at load, so profiles differing in either need
-        their own resident entry. Sampling/system/ttl do not change the loaded model
-        and are excluded.
+        adapters) are distinct resident entries. ``chat_template`` is load-affecting
+        (baked into the tokenizer). The adapter component is the entry's adapter
+        union (:meth:`effective_adapters`): ids differing only in adapter share
+        the entry and select their slot per request, so a union that changes
+        (a reload adding an id with a new adapter) forks a new entry.
+        Sampling/system/ttl do not change the loaded model and are excluded.
 
         The stream-riding keys enter as their effective values, not their
         config spellings, so an explicitly written default never forks a
@@ -557,6 +572,9 @@ class ResolvedModel:
         loader._resolve_feeder_defaults. The env reads happen in the serving
         process, which is also where the load happens, so signature and load
         always see the same values."""
+        return self._signature(self.effective_adapters())
+
+    def _signature(self, adapters) -> tuple:
         stream = self.stream or None
         prestage = self.moe_prestage if self.moe_prestage == "keepers" else None
         if self.moe_miss_shed is None:
@@ -578,7 +596,7 @@ class ResolvedModel:
             bool(self.speculative),
             str(self.speculative_width_cap),
             self.chat_template,
-            self.adapter,
+            adapters,
             str(stream),
             *levers,
             tuple(sorted((k, str(v)) for k, v in self.load.items())),

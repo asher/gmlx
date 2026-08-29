@@ -142,7 +142,7 @@ def test_apply_reads_head_counts_from_config(monkeypatch, config, expected):
     monkeypatch.setattr(adapter, "load_lora_adapter",
                         lambda path, **kw: _plan({}))
     monkeypatch.setattr("gmlx.load.modules.install_lora_adapter",
-                        lambda model, plan, *, n_head=None, n_head_kv=None:
+                        lambda model, plan, *, n_head=None, n_head_kv=None, slot=0:
                         seen.update(n_head=n_head, n_head_kv=n_head_kv) or 0)
     adapter.apply_gguf_adapter(object(), config, "ignored.gguf")
     assert (seen["n_head"], seen["n_head_kv"]) == expected
@@ -156,7 +156,7 @@ def test_apply_reads_head_counts_from_object_config(monkeypatch):
     seen = {}
     monkeypatch.setattr(adapter, "load_lora_adapter", lambda path, **kw: _plan({}))
     monkeypatch.setattr("gmlx.load.modules.install_lora_adapter",
-                        lambda model, plan, *, n_head=None, n_head_kv=None:
+                        lambda model, plan, *, n_head=None, n_head_kv=None, slot=0:
                         seen.update(n_head=n_head, n_head_kv=n_head_kv) or 0)
     adapter.apply_gguf_adapter(object(), _Cfg(), "ignored.gguf")
     assert (seen["n_head"], seen["n_head_kv"]) == (10, 5)

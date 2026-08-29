@@ -34,6 +34,7 @@ worker, no reload) so the patches hold.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import sys
@@ -1523,6 +1524,14 @@ def _single_model_cfg(a) -> ServerCfg:
         decode_feeder=getattr(a, "decode_feeder", None),
         pin=True,                            # the single model is always pinned
     )
+    models = {mid: model}
+    if model.adapter:
+        # The bare base under `<id>-base` on the same resident entry (the
+        # adapter is a per-request slot, not a second load), so a client or a
+        # bench config can address both without a config file. Ids may not
+        # carry `@` (it addresses profiles), hence the `-base` suffix.
+        models[f"{mid}-base"] = dataclasses.replace(model, id=f"{mid}-base",
+                                                    adapter=None)
     return ServerCfg(
         host=a.host or "127.0.0.1",
         port=a.port or 8080,
@@ -1530,7 +1539,7 @@ def _single_model_cfg(a) -> ServerCfg:
         max_models=a.max_models,
         hf_cache=a.hf_cache,
         defaults=ServerDefaults(model=mid),
-        models={mid: model},
+        models=models,
     )
 
 

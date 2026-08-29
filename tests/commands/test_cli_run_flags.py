@@ -119,7 +119,7 @@ def test_run_codec_refusal_exits_1(gguf, monkeypatch, capsys):
 # --stream-experts is NOT here anymore: streaming composes with MTP
 # (placement after load_mtp_model; see resolve_speculative).
 @pytest.mark.parametrize("extra,named", [
-    (["--adapter", "/x.gguf", "--speculative"], "--speculative"),
+    (["--adapter", "/x.gguf", "--mmproj", "/mm.gguf"], "--mmproj"),
     (["--speculative", "--stream-cpu"], "--stream-cpu"),
 ])
 def test_run_adapter_conflicts_exit_2(gguf, extra, named, capsys):

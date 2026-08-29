@@ -328,7 +328,11 @@ every command. The terminal is upgraded on top:
   has wrapped its window can't rewind; `/reset` then.
 - `/model` and `/stats` print the loaded model's card (arch, params, codecs,
   size, context, drafter, adapter) and the running session totals (turns,
-  tokens, average tok/s, MTP acceptance).
+  tokens, average tok/s, MTP acceptance). In server mode `/model` lists the
+  served ids and `/model <id>` switches the id the next turn is sent to,
+  keeping the transcript: the server re-reads the conversation under the
+  new id, so a base and its adapters (which share one loaded model) can be
+  compared mid-conversation. Tab completes the served ids.
 - `/system [text|off]` shows or sets the system prompt at runtime (setting
   restarts the conversation).
 - `/thinking [on|off|adaptive|default]` flips the model's own reasoning

@@ -20,6 +20,7 @@ import sys
 
 import mlx.core as mx
 
+import gmlx.lora_rows as lora_rows
 import gmlx.gen.prefill_decay as prefill_decay
 from gmlx.envflags import env_bool, env_int
 
@@ -1514,14 +1515,15 @@ def install_full_prompt_mtp_prefill() -> None:
             return 0
         prompt_kwargs = self._prompt_kwargs_for_step(n)
         prompt_kwargs = _widen_prompt_rope_state(self, prompt_kwargs)
-        out = self.model(
-            self._input_ids[:, :n],
-            cache=self.prompt_cache,
-            inputs_embeds=self._inputs_embeds[:, :n],
-            n_to_process=n,
-            return_hidden=True,
-            **prompt_kwargs,
-        )
+        with lora_rows.published(getattr(self, "uids", [])):
+            out = self.model(
+                self._input_ids[:, :n],
+                cache=self.prompt_cache,
+                inputs_embeds=self._inputs_embeds[:, :n],
+                n_to_process=n,
+                return_hidden=True,
+                **prompt_kwargs,
+            )
         chunk_hidden = out.hidden_states[-1]
         # Teacher-forcing drafters (native MTP heads) seed their KV from the
         # whole prompt hidden, so every chunk is retained. Shared-KV drafters
@@ -1991,6 +1993,12 @@ def install_continuous_batch_admission() -> None:
 
     def _next_with_injection(self):
         pending = getattr(self, "_pending_injections", None)
+        # Physical-row uids for the owned rounds loop (it has no batch
+        # object): read once at generator start, injected rows carry theirs.
+        try:
+            self.model._kq_row_uids = list(self._all_uids)
+        except AttributeError:      # attribute-less model stand-ins
+            pass
         # Mid-flight adoption works only when the batch rounds generator is
         # running: it drains model._generator_injections at its round
         # boundaries. The scalar (B=1) generator never does, so a live

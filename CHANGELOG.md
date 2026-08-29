@@ -8,12 +8,24 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Model ids on one GGUF that differ only in `adapter:` now share a single
+  resident model: base and every adapter load once, requests to any of the
+  ids batch together, and each row applies only its own adapter. Single-model
+  `serve --adapter` also registers the bare base as `<id>-base`.
+- GGUF LoRA adapters apply on MoE expert targets, under `--stream-experts`,
+  and with MTP speculative decoding; the delta runs inside the mlx-kquant
+  matmul ops when the build has the LoRA epilogue, so an adapter costs about
+  1-2% of decode.
 - Managed servers detect when the gmlx install changed on disk after they
   started (a pip upgrade, or a checkout switch under an editable install):
   the runfile records a source fingerprint at boot, `gmlx status` and
   harness connects (`chat`, `launch`) flag the stale server with a
   `gmlx restart` hint, and a lazy import that fails inside the serve load
   path reports the condition instead of a bare "No module named" 500.
+- `gmlx chat --server`: `/model <id>` switches the served model mid
+  conversation with the transcript kept (`/model` lists the served ids,
+  tab completes them), so a base and its adapters can be compared in one
+  session.
 
 ### Fixed
 

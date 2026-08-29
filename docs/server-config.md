@@ -120,7 +120,8 @@ target with `init --out FILE`.
 When serving one positional GGUF: `--mmproj FILE` (float mmproj, makes it a
 VLM), `--draft-gguf FILE` (assistant-shape drafter, implies `--speculative`),
 `--speculative` (native-head MTP), `--adapter FILE` (live GGUF LoRA over the
-base; text only), `--chat-template STR|PATH` (replace the GGUF's template),
+base; text only; the bare base is also registered as `<id>-base` on the same
+resident entry), `--chat-template STR|PATH` (replace the GGUF's template),
 `--stream-experts` / `--stream-cpu` (over-RAM MoE execution placement, see `stream:`
 below), the streamed-MoE levers `--moe-expert-mass P` / `--moe-experts K` /
 `--moe-miss-shed P` / `--moe-layer-shed P` / `--moe-prestage MODE` (see the
@@ -610,7 +611,8 @@ models:
 ```
 
 Per-model keys: `path` (required), `profile`, `family`, `profiles`, `mmproj`,
-`draft_gguf`, `native_mtp`, `adapter`, `stream`, `moe_experts`, `moe_expert_mass`,
+`draft_gguf`, `native_mtp`, `adapter` (ids on one `path` that differ only in
+`adapter` share one resident entry; see [adapter-serving.md](adapter-serving.md)), `stream`, `moe_experts`, `moe_expert_mass`,
 `moe_miss_shed`, `moe_layer_shed`, `moe_prestage`, `prefill_feeder`,
 `decode_feeder`, `speculative`, `speculative_width_cap`, `overrides`
 (`{sampling, load, cache, system, chat_template, chat_template_kwargs,
