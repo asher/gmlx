@@ -861,8 +861,42 @@ class QSAKVCache(KVCache):
             self.keys, self.values, self.ik, self.pos = v
         else:
             self.keys, self.values, self.ik = v
+            self.pos = None
         self.offset = self.keys.shape[2]
         self.blocks, self.n_blocks = None, 0
+
+    @classmethod
+    def from_state(cls, state, meta_state):
+        # mlx-vlm's APC clone prefers this over type(c).__new__, which would
+        # skip __init__ and leave ik/pos/blocks attributes unset.
+        c = cls()
+        c.meta_state = meta_state
+        c.state = state
+        return c
+
+    @classmethod
+    def merge(cls, entries, prefix_lens=None):
+        # Two callers share this name. mlx_lm's batch lift calls
+        # merge(caches): delegate to the inherited KVCache.merge; the
+        # resulting BatchKVCache drops ik, so that request decodes dense
+        # (exact math, sparse-attention perf lost). mlx-vlm's APC
+        # merge_cache_entries calls merge(entries, prefix_lens) and
+        # dispatches on the class's own __dict__, so the arm must live
+        # here, not on a parent. Single-request batches only; multi-row
+        # joins decline to the cold path rather than guess at row padding
+        # for the indexer stream.
+        if prefix_lens is None:
+            return super().merge(entries)
+        if len(entries) != 1:
+            return None
+        e, p = entries[0], int(prefix_lens[0])
+        state = e.state
+        if p < e.offset:
+            head = (state[0][..., :p, :], state[1][..., :p, :],
+                    state[2][:, :p])
+            state = head if len(state) == 3 else head + (
+                state[3][:, :, :p],)
+        return cls.from_state(state, e.meta_state)
 
     @property
     def meta_state(self):

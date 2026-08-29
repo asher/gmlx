@@ -111,7 +111,11 @@ def test_vlm_image_turn(vlm_pair):
 
     msgs = [_vlm_message(model_type, "What animals are in this picture?",
                          "user", n_images=1)]
-    prompt = get_chat_template(processor, msgs, add_generation_prompt=True)
+    # enable_thinking=False: a thinking-mode pair (qwen3.6 templates) burns
+    # the whole token budget inside its reasoning preamble and never names
+    # the animals; templates without the knob ignore it.
+    prompt = get_chat_template(processor, msgs, add_generation_prompt=True,
+                               enable_thinking=False)
 
     chunks = []
     for chunk in stream_generate(

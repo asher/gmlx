@@ -55,6 +55,7 @@ _CACHELIST_TAG = "_CacheList"
 _ARRAYS_TAG = "_ArraysCache"
 _POOLING_TAG = "_PoolingCache"
 _QUANT_TAG = "_QuantizedKV"
+_STATE_TAG = "_StateContract"
 
 
 def _trim_rotating_state(c: Any, keys: mx.array, values: mx.array):
@@ -130,6 +131,14 @@ def _snapshot_entry(c: Any) -> Any:
         keys = tuple(mx.contiguous(a) for a in state[0])
         values = tuple(mx.contiguous(a) for a in state[1])
         return (_QUANT_TAG, keys, values, int(c.offset))
+    if len(state) > 2:
+        # Multi-stream state contract (qwen4exp QSAKVCache: k/v/ik[/pos]):
+        # roundtrip the full state/meta_state, not just the k/v tail.
+        # contiguous decouples the lazy state views from the live, mutated
+        # buffers.
+        return (_STATE_TAG,
+                tuple(mx.contiguous(a) for a in state),
+                getattr(c, "meta_state", None))
     offset = getattr(c, "offset", None)
     if offset is None:
         offset = state[0].shape[2]
@@ -170,6 +179,12 @@ def _restore_entry(c: Any, snap: Any) -> None:
         c.values = tuple(mx.contiguous(a) for a in values)
         c.offset = offset
         return
+    if isinstance(snap, tuple) and snap[0] == _STATE_TAG:
+        _, state, meta_state = snap
+        if meta_state:
+            c.meta_state = meta_state  # before state: setters may re-derive
+        c.state = tuple(mx.contiguous(a) for a in state)
+        return
     keys, values, offset, _idx = snap
     c.keys, c.values = _owned_pair(keys, values)
     c.offset = offset
@@ -205,6 +220,8 @@ def _collect_snapshot_arrays(snaps: list[Any], out: list[mx.array]) -> None:
         elif isinstance(snap, tuple) and len(snap) == 4 and snap[0] == _QUANT_TAG:
             out.extend(snap[1])
             out.extend(snap[2])
+        elif isinstance(snap, tuple) and len(snap) == 3 and snap[0] == _STATE_TAG:
+            out.extend(a for a in snap[1] if isinstance(a, mx.array))
         elif isinstance(snap, tuple) and len(snap) == 4:
             out.extend([snap[0], snap[1]])
 

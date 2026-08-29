@@ -229,6 +229,10 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
         install_safe_kv_quantization,
     )
     install_pooling_apc_support()
+    # After the pooling installer: each disk-arm wrapper chains the method
+    # it found at install time.
+    from gmlx.cache.apc_qsa import install_qsa_apc_support
+    install_qsa_apc_support()
     install_safe_kv_quantization()
     install_pooled_prompt_kv_quant()
     install_pooled_prefill_batch_gate()

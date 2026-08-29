@@ -221,16 +221,21 @@ def test_fused_gdn_kill_switch_decode(monkeypatch):
     saved_call = GatedDeltaNet.__call__
     saved_installed = patches._FUSED_DECODE_PATCH.installed
     saved_stock = patches._FUSED_DECODE_PATCH.stock
+    # An earlier real-model load may have installed the patch already, in
+    # which case saved_call is the fused wrapper; reset the seam to true
+    # stock so the kill-switch is exercised from a clean slate.
+    stock_call = saved_stock if saved_stock is not None else saved_call
+    GatedDeltaNet.__call__ = stock_call
     patches._FUSED_DECODE_PATCH.installed = False
     try:
         monkeypatch.setenv("GMLX_FUSED_GDN", "0")
         patches._patch_gated_delta_fused_decode(_NoModules())
         assert patches._FUSED_DECODE_PATCH.installed is False
-        assert GatedDeltaNet.__call__ is saved_call  # unfused branch kept
+        assert GatedDeltaNet.__call__ is stock_call  # unfused branch kept
         monkeypatch.delenv("GMLX_FUSED_GDN")
         patches._patch_gated_delta_fused_decode(_NoModules())
         assert patches._FUSED_DECODE_PATCH.installed is True
-        assert GatedDeltaNet.__call__ is not saved_call
+        assert GatedDeltaNet.__call__ is not stock_call
     finally:
         GatedDeltaNet.__call__ = saved_call
         patches._FUSED_DECODE_PATCH.installed = saved_installed
@@ -246,16 +251,19 @@ def test_fused_gdn_kill_switch_verify(monkeypatch):
     saved_call = Qwen3_5GatedDeltaNet.__call__
     saved_installed = patches._FUSED_VERIFY_PATCH.installed
     saved_stock = patches._FUSED_VERIFY_PATCH.stock
+    # Same clean-slate reset as the decode test above.
+    stock_call = saved_stock if saved_stock is not None else saved_call
+    Qwen3_5GatedDeltaNet.__call__ = stock_call
     patches._FUSED_VERIFY_PATCH.installed = False
     try:
         monkeypatch.setenv("GMLX_FUSED_GDN", "0")
         patches._patch_gated_delta_fused_verify(_NoModules())
         assert patches._FUSED_VERIFY_PATCH.installed is False
-        assert Qwen3_5GatedDeltaNet.__call__ is saved_call
+        assert Qwen3_5GatedDeltaNet.__call__ is stock_call
         monkeypatch.delenv("GMLX_FUSED_GDN")
         patches._patch_gated_delta_fused_verify(_NoModules())
         assert patches._FUSED_VERIFY_PATCH.installed is True
-        assert Qwen3_5GatedDeltaNet.__call__ is not saved_call
+        assert Qwen3_5GatedDeltaNet.__call__ is not stock_call
     finally:
         Qwen3_5GatedDeltaNet.__call__ = saved_call
         patches._FUSED_VERIFY_PATCH.installed = saved_installed

@@ -45,6 +45,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Prompt caching works on qwen4exp (Qwen3.8-Flash-Next): every APC tier now
+  restores the QSA indexer state, and repeated prompts produce identical output.
 - Metal buffer leaks: glm5next decode no longer hits the 499k resource limit
   on long generations, and streamed serve releases arena/weight residency on
   feeder close and model eviction.

@@ -80,6 +80,8 @@ def _drive(model, processor, ids, manager):
     import importlib
 
     ar = importlib.import_module("mlx_vlm.generate.ar")
+    from mlx_vlm import apc as _apc
+
     input_ids = mx.array([ids], dtype=mx.int32)
     emb = model.get_input_embeddings(input_ids=input_ids)
     gen = ar.BatchGenerator(
@@ -90,8 +92,17 @@ def _drive(model, processor, ids, manager):
         "BatchGenerator dropped the apc_manager at construction: "
         f"model_apc_mode resolved {gen.apc_mode!r} -- the 0.6.4 "
         "cache-origin disengagement (make_cache rebind missing?)")
+    # Precompute the APC salt the way serve does (server/generation.py):
+    # tenant/media only, embeddings excluded. The generator's fallback
+    # content-hashes inputs_embeds into the salt, and two prompts sharing
+    # a prefix can then never share blocks.
+    lm = model.language_model if hasattr(model, "language_model") else model
+    salt = _apc.semantic_extra_hash(
+        tenant=None, image_hash=0, media={"audio": None, "video": None},
+        model=lm, processor=processor)
     uids = gen.insert([ids], [N_DECODE],
-                      prompt_kwargs=[{"inputs_embeds": emb.inputs_embeds}])
+                      prompt_kwargs=[{"inputs_embeds": emb.inputs_embeds,
+                                      "_apc_semantic_hash": salt}])
     toks = []
     while gen.has_work:
         _prompt_responses, gen_responses = gen.next()
