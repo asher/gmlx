@@ -200,6 +200,9 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
         install_step_timing()
     if os.environ.get("GMLX_DISABLE_FAST_SAMPLER") != "1":
         install_fast_sampler()
+    # Before the seed install: this rebinds the criteria seam without
+    # delegating, so installed after it would clobber the seed wrapper.
+    install_thinking_budget_fix()
     from ..seed_rows import install_per_request_seed
     install_per_request_seed()
     import gmlx.spec.engine as spec_engine
@@ -233,7 +236,6 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     from gmlx.cache.fresh_gate import install_fresh_admission_gate
     install_fresh_admission_gate()
     install_chat_template_kwargs()
-    install_thinking_budget_fix()
     install_stream_timings()
     install_openai_stop_sequences()
     install_api_contract()

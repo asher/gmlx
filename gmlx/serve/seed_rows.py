@@ -110,6 +110,9 @@ def install_per_request_seed() -> None:
                 sampler._kq_rows = None
         return _orig_next(self)
 
+    # Carry the wrapped method's flags forward so an earlier installer's
+    # idempotency guard still sees its flag through this wrapper.
+    _criteria_with_seed.__dict__.update(getattr(_orig_criteria, "__dict__", {}))
     _criteria_with_seed.__dict__[_INSTALLED_FLAG] = True
     _insert_with_seed.__dict__[_INSTALLED_FLAG] = True
     _step_with_rows.__dict__[_INSTALLED_FLAG] = True

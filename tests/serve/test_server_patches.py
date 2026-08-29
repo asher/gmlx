@@ -415,6 +415,44 @@ def test_make_criteria_honors_budget_when_enable_thinking_false():
         cls._make_thinking_budget_criteria = original
 
 
+def test_seed_wrapper_survives_thinking_budget_fix():
+    # Regression: the install order used to be seed -> tbfix, and tbfix rebinds
+    # the criteria seam without delegating, so it clobbered the seed wrapper and
+    # per-request seeds were dead on the serve path. The order is now tbfix ->
+    # seed: one call must stash the seed AND run tbfix's construction, and a
+    # tbfix re-install must see its flag through the wrapper and no-op.
+    import gmlx.serve.seed_rows as sr
+    gen = importlib.import_module("mlx_vlm.server.generation")
+    ar = importlib.import_module("mlx_vlm.generate.ar")
+    cls = gen.ResponseGenerator
+    saved = (cls._make_thinking_budget_criteria, ar.BatchGenerator.insert,
+             ar.GenerationBatch._step, ar.PromptProcessingBatch.generate,
+             ar.SpeculativeGenerationBatch.next)
+    sr._PENDING.clear()
+    try:
+        sp.install_thinking_budget_fix()
+        sr.install_per_request_seed()
+        crit = cls._make_thinking_budget_criteria
+        assert getattr(crit, sr._INSTALLED_FLAG, False)      # seed outermost
+        assert getattr(crit, sp_chat._TBUDGET_FLAG, False)   # tbfix flag carried
+        sp.install_thinking_budget_fix()
+        assert cls._make_thinking_budget_criteria is crit    # re-install no-ops
+        me = types.SimpleNamespace(
+            tokenizer=_FakeThinkTok(),
+            _thinking_token_ids=lambda args: (99, 100))
+        args = types.SimpleNamespace(
+            seed=7, temperature=1.0, thinking_budget=8, enable_thinking=False,
+            thinking_start_token=None, thinking_end_token=None)
+        out = crit(me, args, [1, 2, 3])
+        assert out is not None and out.in_thinking is False  # tbfix ran
+        assert sr._PENDING == [7]                            # seed stashed
+    finally:
+        (cls._make_thinking_budget_criteria, ar.BatchGenerator.insert,
+         ar.GenerationBatch._step, ar.PromptProcessingBatch.generate,
+         ar.SpeculativeGenerationBatch.next) = saved
+        sr._PENDING.clear()
+
+
 # 2. gen-args wrapper reference swap
 def test_install_wraps_build_gen_args_and_injects():
     def stub(request, processor=None, tenant_id=None):
