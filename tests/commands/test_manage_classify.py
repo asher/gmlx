@@ -62,6 +62,30 @@ def test_classify_local_gguf_type(tmp_path):
     assert _classify_local(str(p)).gguf_type == "adapter"
 
 
+def test_classify_local_multi_shard(tmp_path):
+    """The shard loop accumulates hist/unsup across ALL shards while arch and
+    general.type come from shard 0 only (the i == 0 guard): shard 2 carries a
+    different arch KV and both a supported and an unsupported codec."""
+    p1 = tmp_path / "model-00001-of-00002.gguf"
+    p2 = tmp_path / "model-00002-of-00002.gguf"
+    _mint(p1, gguf_type="adapter")
+    _, q6_tsize = GGML_QUANT_SIZES[GT.Q6_K]
+    _, tq_tsize = GGML_QUANT_SIZES[GT.TQ1_0]
+    w = GGUFWriter(str(p2), "qwen3")  # must NOT win over shard 0's "llama"
+    w.add_tensor("blk.1.ffn_up.weight",
+                 np.zeros((4, q6_tsize), dtype=np.uint8), raw_dtype=GT.Q6_K)
+    w.add_tensor("blk.1.ffn_down.weight",
+                 np.zeros((4, tq_tsize), dtype=np.uint8), raw_dtype=GT.TQ1_0)
+    _finish(w)
+
+    rep = _classify_local(str(p1))
+    assert rep.arch == "llama"
+    assert rep.gguf_type == "adapter"
+    assert rep.histogram == {"F32": 1, "Q4_0": 1, "Q6_K": 1, "TQ1_0": 1}
+    assert rep.unsupported == {"TQ1_0": 1}
+    assert rep.n_tensors == 4
+
+
 def test_classify_local_stq1_0_via_fallback(tmp_path):
     """A type-43 file classifies (the rewrite's reason to exist): gguf-py's
     GGUFReader rejects the id outright, headerscan's fallback names it."""
