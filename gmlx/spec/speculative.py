@@ -680,6 +680,24 @@ def _coupled_walk_batch(
     return acc_list, new_tokens_list
 
 
+def _next_forced_chunk(hook, queue: list, block_total: int):
+    """The next chunk of forced close ids to commit as a fully-accepted
+    round, or None. Chunks are capped at the drafter's block width so every
+    verify/accept shape matches a normal round, and a chunk never strands a
+    single trailing id (a width-1 round would carry an empty draft row)."""
+    if not queue:
+        forced = hook.take_forced()
+        if not forced:
+            return None
+        queue.extend(int(t) for t in forced)
+    take = min(block_total, len(queue))
+    if len(queue) - take == 1 and take > 1:
+        take -= 1
+    chunk = queue[:take]
+    del queue[:take]
+    return chunk
+
+
 def _owned_decode_rounds(
     model,
     drafter,
@@ -696,6 +714,7 @@ def _owned_decode_rounds(
     draft_block_size: int | None,
     drafter_warm: list | None = None,
     sidecar_ctx: dict | None = None,
+    thinking_hook=None,
 ) -> Iterator[int]:
     """Owned MTP decode loop, shared by the CLI prefill+decode path and the
     serve decode-only path.
@@ -706,6 +725,11 @@ def _owned_decode_rounds(
     captured prompt slice on the CLI path, the prompt tokens on the serve path).
     emitted counts tokens the caller already yielded (the first bonus), so the
     loop yields only the tokens it produces. Greedy iff sampler is None.
+
+    thinking_hook (an MTPFinishThinking) arms the ^T finish-thinking key: the
+    loop reports every emitted token through hook.observe and, when a close is
+    requested, commits the hook's forced close sequence as fully-accepted
+    verify rounds instead of drafting (see _next_forced_chunk).
     """
     token_dtype = mx.int32
     greedy = sampler is None
@@ -848,65 +872,92 @@ def _owned_decode_rounds(
     _round_log_session(kv_offset, max_tokens)
     _prev_end = time.perf_counter()
     _last_clear = emitted
+    forced_queue: list[int] = []
     try:
         while emitted < max_tokens:
             _t0 = time.perf_counter()
             _gap = (_t0 - _prev_end) * 1e3 if _prev_end else 0.0
-            if _prefer_fixed_bs:
-                bs = min(block_total, max_tokens - emitted + 1)
+            forced = (_next_forced_chunk(thinking_hook, forced_queue, block_total)
+                      if thinking_hook is not None else None)
+            if forced is not None:
+                # ^T forced close: commit the known close ids as a fully
+                # accepted round (the drafts ARE the forced ids, the bonus is
+                # the last of them). The verify forward puts their KV in the
+                # cache exactly like an all-accepted draft block, so every
+                # seam below (delivery, rollback, accept, shared-kv slide)
+                # runs unchanged.
+                draft_tokens = mx.array([forced[:-1]], dtype=token_dtype)
+                bs = len(forced)
+                _td = time.perf_counter()
+                with mx.stream(generation_stream):
+                    verify_input = mx.concatenate(
+                        [mx.array([[b]], dtype=token_dtype), draft_tokens],
+                        axis=1)
+                    verify = _mtp_verify_target(lm, verify_input, prompt_cache,
+                                                sampler,
+                                                sample_target_tokens=greedy)
+                _tv = time.perf_counter()
+                accepted, new_tokens = bs - 1, list(forced)
             else:
-                bs = _mtp_next_block_size(drafter, block_total, configured_block_total,
-                                          max_tokens - emitted + 1)
-            if bs <= 1:
-                break
-            draft_tokens = sampler_rng.draft_tokens(
-                _draft_block, b, hidden, None, bs, draft_sampler, token_dtype,
-                **draft_kwargs)
-            # The drafter may return fewer drafts than requested (e.g. the
-            # deepseek-v4 confidence-gated rollout); every downstream bs
-            # consumer (rollback width, accept bookkeeping, finish seams)
-            # must see the actual width or rejection math trims valid
-            # tokens from the cache.
-            bs = int(draft_tokens.shape[1]) + 1
+                if _prefer_fixed_bs:
+                    bs = min(block_total, max_tokens - emitted + 1)
+                else:
+                    bs = _mtp_next_block_size(drafter, block_total, configured_block_total,
+                                              max_tokens - emitted + 1)
+                if bs <= 1:
+                    break
+                draft_tokens = sampler_rng.draft_tokens(
+                    _draft_block, b, hidden, None, bs, draft_sampler, token_dtype,
+                    **draft_kwargs)
+                # The drafter may return fewer drafts than requested (e.g. the
+                # deepseek-v4 confidence-gated rollout); every downstream bs
+                # consumer (rollback width, accept bookkeeping, finish seams)
+                # must see the actual width or rejection math trims valid
+                # tokens from the cache.
+                bs = int(draft_tokens.shape[1]) + 1
 
-            if _ROUND_PROFILE:
-                mx.eval(draft_tokens)
-            _td = time.perf_counter()
+                if _ROUND_PROFILE:
+                    mx.eval(draft_tokens)
+                _td = time.perf_counter()
 
-            with mx.stream(generation_stream):
-                verify_input = mx.concatenate(
-                    [mx.array([[b]], dtype=token_dtype), draft_tokens], axis=1)
-                verify = _mtp_verify_target(lm, verify_input, prompt_cache, sampler,
-                                            sample_target_tokens=greedy)
+                with mx.stream(generation_stream):
+                    verify_input = mx.concatenate(
+                        [mx.array([[b]], dtype=token_dtype), draft_tokens], axis=1)
+                    verify = _mtp_verify_target(lm, verify_input, prompt_cache, sampler,
+                                                sample_target_tokens=greedy)
 
-            if _ROUND_PROFILE:
-                mx.eval(verify.hidden)
-            _tv = time.perf_counter()
+                if _ROUND_PROFILE:
+                    mx.eval(verify.hidden)
+                _tv = time.perf_counter()
 
-            if stoch and len(stoch_stash) == draft_tokens.shape[1]:
-                accepted, new_tokens = _stochastic_walk(
-                    lm, verify, draft_tokens, sampler,
-                    max_tokens - emitted, list(stoch_stash))
-            else:
-                # Exact-match walk; also the per-round fallback when a drafter
-                # returns fewer drafts than it sampled (stash misaligned) --
-                # accepting a sampled draft iff it equals the target's own
-                # sample stays lossless, just lower-acceptance.
-                accepted, new_tokens = _coupled_walk(
-                    lm, verify, draft_tokens, _walk_sampler,
-                    max_tokens - emitted,
-                    top2=list(top2_stash) if top2_stash else None,
-                    pq=list(pq_stash) if pq_stash else None,
-                    base_pos=emitted)
+                if stoch and len(stoch_stash) == draft_tokens.shape[1]:
+                    accepted, new_tokens = _stochastic_walk(
+                        lm, verify, draft_tokens, sampler,
+                        max_tokens - emitted, list(stoch_stash))
+                else:
+                    # Exact-match walk; also the per-round fallback when a drafter
+                    # returns fewer drafts than it sampled (stash misaligned) --
+                    # accepting a sampled draft iff it equals the target's own
+                    # sample stays lossless, just lower-acceptance.
+                    accepted, new_tokens = _coupled_walk(
+                        lm, verify, draft_tokens, _walk_sampler,
+                        max_tokens - emitted,
+                        top2=list(top2_stash) if top2_stash else None,
+                        pq=list(pq_stash) if pq_stash else None,
+                        base_pos=emitted)
             stoch_stash.clear()
             if top2_stash is not None:
                 # Consumed; the accept hook below re-seeds entry 0 for the
-                # next round.
+                # next round. (A forced round drops the stale seed the same
+                # way: no walk consumed it, and the accept re-deposits.)
                 top2_stash.clear()
             if pq_stash is not None:
                 pq_stash.clear()
             sampler_rng.target_sampled(sync_draft=True)
-            _record_speculative_round(drafter, accepted, bs - 1)
+            if forced is None:
+                # Forced rounds drafted nothing; recording them would skew
+                # accept stats and the adaptive block sizing.
+                _record_speculative_round(drafter, accepted, bs - 1)
             _t1 = time.perf_counter()
 
             n_new = len(new_tokens)
@@ -918,6 +969,8 @@ def _owned_decode_rounds(
             try:
                 for tok in new_tokens:
                     delivered += 1
+                    if thinking_hook is not None:
+                        thinking_hook.observe(tok)
                     yield tok
             except GeneratorExit:
                 capture = getattr(model, "_kq_preempt_capture", None)
@@ -1021,11 +1074,13 @@ def stream_speculative(
     sampler: Callable[[mx.array], mx.array] | None = None,
     draft_block_size: int | None = None,
     prefill_chunk: int = _PREFILL_CHUNK,
+    thinking_hook=None,
 ) -> Iterator[int]:
     """Yield generated token ids one at a time.
 
     sampler is None for greedy (argmax throughout, no RNG coupling) or a callable
-    logprobs[B, V] -> token[B] for temperature sampling.
+    logprobs[B, V] -> token[B] for temperature sampling. thinking_hook arms the
+    ^T finish-thinking key (see _owned_decode_rounds).
     """
     lm = model.language_model if hasattr(model, "language_model") else model
     if not hasattr(lm, "rollback_speculative_cache"):
@@ -1106,6 +1161,8 @@ def stream_speculative(
     b = int(first.item())
 
     _buffer_mtp_target_cache(prompt_cache, drafter, draft_block_size)
+    if thinking_hook is not None:
+        thinking_hook.observe(b)
     yield b
     if max_tokens <= 1:
         return
@@ -1114,7 +1171,7 @@ def stream_speculative(
         model, drafter, lm, prompt_cache,
         hidden=hidden, b=b, shared_kv=shared_kv, seed_tokens=prompt,
         emitted=1, max_tokens=max_tokens, sampler=sampler,
-        draft_block_size=draft_block_size)
+        draft_block_size=draft_block_size, thinking_hook=thinking_hook)
 
 
 def owned_server_rounds(

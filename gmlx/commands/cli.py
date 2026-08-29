@@ -1536,6 +1536,8 @@ def _run_generate(args) -> int:
             reasoning=args.reasoning,
             kv_bits=args.kv_bits,
             kv_group_size=args.kv_group_size,
+            thinking_start_token=args.thinking_start_token,
+            thinking_end_token=args.thinking_end_token,
         )
         print(
             f"\n[mtp] {stats['tokens']} tok @ {stats['decode_tps']:.1f} tok/s "
@@ -1780,7 +1782,7 @@ def _run_vlm_mtp(args) -> int:
     from gmlx.spec.mtp_load import load_vlm_mtp_model
     from gmlx.gen.thinking_budget import install_finish_thinking_key
 
-    install_finish_thinking_key()  # ^T prints the MTP-path notice here
+    install_finish_thinking_key()  # ^T forced-close on the owned MTP rounds
     if args.seed is not None:
         import mlx.core as mx
 
@@ -1831,6 +1833,8 @@ def _run_vlm_mtp(args) -> int:
         reasoning=args.reasoning,
         kv_bits=args.kv_bits,
         kv_group_size=args.kv_group_size,
+        thinking_start_token=args.thinking_start_token,
+        thinking_end_token=args.thinking_end_token,
     )
     print(
         f"\n[mtp] {stats['tokens']} tok @ {stats['decode_tps']:.1f} tok/s "

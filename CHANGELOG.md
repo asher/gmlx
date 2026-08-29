@@ -8,6 +8,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The ^T finish-thinking key now works on the MTP path in `run` and `chat`:
+  the owned round loop commits the forced close sequence as fully-accepted
+  verify rounds at the next round boundary, so an open thinking block wraps
+  up and the answer starts without leaving speculative decoding. `gmlx run`
+  MTP now routes to the owned engine by default like `chat`, serve, and
+  bench (`GMLX_OWNED_ROUND=0` opts back to the stock round, where ^T still
+  prints its notice).
 - Managed servers detect when the gmlx install changed on disk after they
   started (a pip upgrade, or a checkout switch under an editable install):
   the runfile records a source fingerprint at boot, `gmlx status` and

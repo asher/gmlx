@@ -19,6 +19,10 @@ Ported from mlx-vlm's ``ThinkingBudgetCriteria`` (a stopping-criteria callback
 in mlx-vlm's own loop); reframed as a logits processor because gmlx's text
 path drives generation through ``mlx_lm.generate`` / ``stream_generate``, whose
 extension point is ``logits_processors``.
+
+The MTP path has no per-step logits seam, so the ^T finish-thinking key is
+served there by :class:`MTPFinishThinking` instead: the owned round loop
+commits the forced close sequence directly as fully-accepted verify rounds.
 """
 
 from __future__ import annotations
@@ -524,6 +528,118 @@ def make_thinking_budget_processor(
     )
 
 
+class MTPFinishThinking:
+    """^T finish-thinking hook for the owned MTP round loop.
+
+    The MTP walks verify a whole draft block per target forward, so the
+    per-step logits seam :class:`ThinkingBudgetProcessor` forces through does
+    not exist there. But the forced close is a *known* token sequence, so the
+    round loop can commit it directly as a fully-accepted verify block. This
+    hook carries the state that decision needs: the loop reports every emitted
+    token through :meth:`observe` (tracking whether the model is inside a
+    thinking block), and asks :meth:`take_forced` at each round boundary for
+    a close sequence to inject.
+
+    Duck-typed for :func:`finish_thinking_now` (``done`` + ``request_close``).
+    Post-close behavior mirrors the processor: the first close carries the
+    ^T wrap phrase, a reopen after a forced close is reclosed tersely, and
+    three closes with no answer token in between stand the hook down.
+    """
+
+    def __init__(self, *, end_seq, skip_ids, reclose_ids, start_seq=None,
+                 start_in_thinking=False):
+        self.end_seq = tuple(end_seq)
+        self.start_seq = tuple(start_seq) if start_seq else None
+        self.skip_ids = list(skip_ids)
+        self.reclose_ids = list(reclose_ids)
+        self.in_thinking = bool(start_in_thinking)
+        self.done = False
+        self._close_requested = False
+        self._spent = False
+        self._answer_pending = False
+        self._strikes = 0
+        self._tail: list[int] = []
+        self._tail_max = max(len(self.end_seq), len(self.start_seq or ()), 1)
+
+    def request_close(self):
+        """Finish thinking now (^T). Consumed as a no-op at the next round
+        boundary when the model is not thinking."""
+        self._close_requested = True
+
+    def _tail_is(self, seq) -> bool:
+        k = len(seq)
+        return k > 0 and len(self._tail) >= k and self._tail[-k:] == list(seq)
+
+    def observe(self, tok) -> None:
+        """Track one emitted token (forced ids included: the injected close
+        ends with ``end_seq``, which flips ``in_thinking`` off here)."""
+        self._tail.append(int(tok))
+        if len(self._tail) > self._tail_max:
+            del self._tail[: len(self._tail) - self._tail_max]
+        if self._tail_is(self.end_seq):
+            self.in_thinking = False
+        elif self.start_seq is not None and self._tail_is(self.start_seq):
+            self.in_thinking = True
+            # A reopen after a forced close is reclosed at the next round
+            # boundary (budget-0 semantics, as in the processor).
+            if self._spent:
+                self._close_requested = True
+        elif self.in_thinking:
+            pass
+        elif self._answer_pending:
+            # A real answer token landed; stop counting closes as strikes.
+            self._answer_pending = False
+            self._strikes = 0
+
+    def take_forced(self):
+        """The close sequence to inject at this round boundary, or None.
+        Consumes the pending request either way."""
+        requested = self._close_requested
+        self._close_requested = False
+        if self.done or not requested or not self.in_thinking:
+            return None
+        if self._answer_pending:
+            # Closed again without any answer in between: the model is
+            # cycling open/close - stand down rather than fence with it.
+            self._strikes += 1
+            if self._strikes >= 3:
+                self.done = True
+                return None
+        seq = self.reclose_ids if self._spent else self.skip_ids
+        self._spent = True
+        self._answer_pending = True
+        return list(seq)
+
+
+def make_mtp_finish_hook(
+    tokenizer, *, start_in_thinking=False, start_token=None, end_token=None,
+):
+    """Build the ^T hook for the owned MTP round loop, or ``None`` when the
+    model's thinking delimiters can't be resolved (the key is then a silent
+    no-op, matching the plain path's budget-less behavior). Best-effort by
+    design: a tokenizer the probe can't handle must not break MTP decode."""
+    try:
+        start_seq, end_seq = _thinking_token_seqs(
+            tokenizer, start_token, end_token)
+    except Exception:  # noqa: BLE001
+        return None
+    if not end_seq:
+        return None
+    nl_id = _last_token_id(tokenizer, "\n")
+    reclose_ids = ([nl_id] if nl_id is not None else []) + list(end_seq)
+    skip_ids = reclose_ids
+    wrap = _encode_ids(tokenizer, _SKIP_WRAP_PHRASE)
+    if wrap:
+        skip_ids = list(wrap) + list(end_seq)
+    return MTPFinishThinking(
+        end_seq=end_seq,
+        skip_ids=skip_ids,
+        reclose_ids=reclose_ids,
+        start_seq=start_seq,
+        start_in_thinking=start_in_thinking,
+    )
+
+
 # --- ^T: finish thinking now -------------------------------------------------
 #
 # The chat REPL and `gmlx run` route Ctrl-T here. In a cooked (or cbreak) tty
@@ -550,8 +666,9 @@ def clear_finish_key_target() -> None:
 
 class FinishKeyUnsupported:
     """Armed as the ^T target on generation paths the key can't reach (the
-    MTP walks expose no logits-processor seam): pressing it then explains
-    itself once instead of silently doing nothing."""
+    stock mlx-vlm MTP round exposes no forced-close seam; the owned engine
+    re-arms with a real :class:`MTPFinishThinking`): pressing it then
+    explains itself once instead of silently doing nothing."""
 
     def __init__(self, why: str):
         self.why = why
