@@ -441,6 +441,15 @@ def test_fallback_excludes_streamable_from_pin(monkeypatch):
     assert seen.get("exclude") == {"per_layer_token_embd.weight"}
 
 
+def test_streamed_table_bytes_keys_on_streamed_state(monkeypatch):
+    # Declared-but-resident (fallback) tables stay charged: only actually
+    # streamed tables report bytes for the arena subtraction.
+    model, _ = _moe_table_model()
+    assert ts.streamed_table_bytes(model) == 0
+    ts.install_table_streaming(model)
+    assert ts.streamed_table_bytes(model) == ts.table_bytes(model) > 0
+
+
 def test_arena_sizing_excludes_streamable_bytes(monkeypatch):
     from gmlx.load.loader import _decode_arena_bytes
     import gmlx.load.loader as loader

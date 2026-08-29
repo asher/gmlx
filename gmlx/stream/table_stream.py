@@ -75,6 +75,14 @@ def table_bytes(model) -> int:
     return sum(int(m.weight.nbytes) for _, m in streamable_tables_for(model))
 
 
+def streamed_table_bytes(model) -> int:
+    """Bytes of tables actually streamed. A declared table left resident
+    (fallback) is wired like any other weight and must stay charged in
+    wired-budget accounting."""
+    return sum(int(m.weight.nbytes) for _, m in streamable_tables_for(model)
+               if getattr(m, "_kq_table_streamed", False))
+
+
 def stream_ple_env() -> str:
     return os.environ.get("GMLX_STREAM_PLE", "")
 

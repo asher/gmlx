@@ -1807,20 +1807,45 @@ def install_expert_streaming(
             table_stream_selected,
         )
 
+        compose = False
         if table_stream_selected(model, total_bytes, budget):
             post = total_bytes - table_bytes(model)
             if (stream_ple_env() == "1" and budget is not None
                     and post > budget):
-                print(
-                    "[stream] GMLX_STREAM_PLE=1 ignored: the model is over "
-                    "budget even with the table streamed, and streaming "
-                    "table + experts together (compose) is not supported; "
-                    "falling back to expert streaming with the table "
-                    "resident"
-                )
+                if env_bool("GMLX_STREAM_PLE_COMPOSE", False):
+                    # Experimental: stream table and experts together
+                    # (no hot-row arena; prices the table's exposed
+                    # per-token reads).
+                    compose = True
+                    table_offloaded, table_names = (
+                        install_table_streaming(model))
+                else:
+                    print(
+                        "[stream] GMLX_STREAM_PLE=1 ignored: still over "
+                        "budget with the table streamed; experts stream, "
+                        "table stays resident"
+                    )
             else:
                 table_offloaded, table_names = install_table_streaming(model)
-        if table_offloaded:
+        if table_offloaded and compose:
+            loadlog.info(
+                f"[stream] compose (experimental): streamable table "
+                f"{'+'.join(table_names)} "
+                f"({table_offloaded / 2**30:.1f} GiB) on the CPU stream "
+                "AND experts streamed"
+            )
+            key = getattr(model, "_kq_weights_key", None)
+            from gmlx.gen.prefill_decay import (
+                note_streamed_tracked_bytes,
+                untracked_weight_bytes_for,
+            )
+            tracked = max(
+                0.0, total_bytes - untracked_weight_bytes_for(key))
+            credit = min(float(table_offloaded), tracked)
+            if credit > 0:
+                note_streamed_tracked_bytes(credit, key)
+            deduct_untracked_weights(table_offloaded, key)
+        elif table_offloaded:
             # The selection test admits the table only when the remainder
             # clears the budget (or streaming is forced on a fits model),
             # so experts are resident from here on.
@@ -2395,13 +2420,13 @@ def install_expert_streaming(
         from gmlx.stream.decode_feeder import maybe_make_decode_feeder
 
         pin = getattr(model, "_kq_weights_pin", None)
-        from gmlx.stream.table_stream import table_bytes as _table_bytes
+        from gmlx.stream.table_stream import streamed_table_bytes
 
         arena = _decode_arena_bytes(
             total_bytes, prefetcher.offsets, budget,
             ring_bytes=2 * feeder.slot_bytes if feeder is not None else 0,
             pinned_bytes=getattr(pin, "pinned_bytes", 0),
-            streamable_bytes=_table_bytes(model))
+            streamable_bytes=streamed_table_bytes(model))
         dfeeder = maybe_make_decode_feeder(
             prefetcher.offsets, moe_modules, arena, stats_verbose)
         if dfeeder is not None:
