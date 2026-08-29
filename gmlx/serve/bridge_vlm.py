@@ -401,7 +401,7 @@ def _make_text_processor(tokenizer) -> "_GgufServerProcessor":
 
 def _load_serveable_mtp(
     gguf_path: str, *, draft_gguf_path: str | None = None,
-    chat_template: str | None = None,
+    chat_template: str | None = None, adapter_gguf: str | None = None,
 ) -> tuple[object, object, object]:
     """Load an MTP (speculative) text target + drafter for the batched engine.
 
@@ -423,6 +423,13 @@ def _load_serveable_mtp(
         gguf_path, draft_gguf_path=draft_gguf_path,
         chat_template=chat_template, verbose=False
     )
+    if adapter_gguf is not None:
+        # The trunk (``model.language_model``) carries the HF leaf paths the
+        # adapter remap targets; the drafter has no targets (a target on an
+        # MTP block fails the install as a missing module). Verify runs
+        # against the adapted target, so speculation stays lossless.
+        _apply_gguf_adapter(model.language_model, _config, adapter_gguf,
+                            base_gguf_path=gguf_path)
     # MTPTextTarget.config is a plain dict (the CLI path only reads it
     # dict-style). The server also reads it attribute-style
     # (``self.model.config.model_type`` in the request preprocessor), so promote
@@ -475,10 +482,14 @@ def _load_serveable_vlm_mtp(
     return model, processor, model.config
 
 
-def _apply_gguf_adapter(raw_model, config, adapter_gguf: str,
+def _apply_gguf_adapter(raw_model, config, adapter_gguf,
                         base_gguf_path: str | None = None) -> int:
-    """Wrap the base text model's Linear leaves with a GGUF LoRA adapter - live, no
-    merge (base stays K-quant; the adapter rides alongside in full precision).
+    """Wrap the base text model's Linear leaves with the GGUF LoRA adapter(s) -
+    live, no merge (base stays K-quant; the adapter rides alongside in full
+    precision). ``adapter_gguf`` is one path or the resident entry's adapter
+    list (the sorted union over the ids sharing the entry); adapter i lands in
+    row-channel slot i, and the channel enters ``rows`` mode with that many
+    slots so every request selects its own adapter (or none) per row.
 
     Applies to the *raw* mlx-lm model, whose leaf paths are the HF names the adapter's
     GGUF-base-name remap targets - the same keys :func:`install_kquant_modules` swapped.
@@ -487,14 +498,22 @@ def _apply_gguf_adapter(raw_model, config, adapter_gguf: str,
     ``base_gguf_path`` supplies the base's GGUF arch so an adapter trained for a
     different family fails with the clean arch-mismatch message up front, instead
     of the structural missing-targets raise from :func:`install_lora_adapter`."""
+    import gmlx.lora_rows as lora_rows
     from gmlx.load.adapter import apply_gguf_adapter
 
+    adapters = ((adapter_gguf,) if isinstance(adapter_gguf, str)
+                else tuple(adapter_gguf))
     base_arch = None
     if base_gguf_path:
         from gmlx.load.discovery import header_meta
         base_arch = (header_meta(base_gguf_path) or {}).get("arch")
-    return apply_gguf_adapter(raw_model, config, adapter_gguf,
-                              base_arch=base_arch)
+    n = 0
+    for slot, path in enumerate(adapters):
+        n += apply_gguf_adapter(raw_model, config, path, base_arch=base_arch,
+                                slot=slot)
+        _log.info("[adapter] loaded %s into slot %d", path, slot)
+    lora_rows.ensure_rows(len(adapters))
+    return n
 
 
 def _install_stream_placement(
@@ -612,14 +631,16 @@ def load_serveable_model(
     prestage through the miss-shed policy and additionally needs
     ``moe_miss_shed`` (announced as ignored without it).
     """
-    def _reject_unwired(base_kind: str, *, streamable: bool = False) -> None:
+    def _reject_unwired(base_kind: str, *, streamable: bool = False,
+                        adapter_ok: bool = False) -> None:
         # Raising beats silently dropping the option on bases that don't
         # wire it yet. A streamable base accepts stream: experts, which goes
         # on the text tower. It refuses stream: cpu, because that mode moves
         # the process to the CPU device and moves the vision tower with it.
         # A speculative base refuses both, because the engine loads the
         # drafter after this function, and the drafter gets no placement.
-        if adapter_gguf is not None:
+        # The MTP text base takes the adapter (installed on its trunk).
+        if adapter_gguf is not None and not adapter_ok:
             raise NotImplementedError(
                 f"live GGUF LoRA on a {base_kind} base is not wired yet; "
                 f"adapter={adapter_gguf!r}")
@@ -665,10 +686,10 @@ def load_serveable_model(
         return model, processor, config
 
     if speculative:
-        _reject_unwired("speculative/MTP")
+        _reject_unwired("speculative/MTP", adapter_ok=True)
         return _load_serveable_mtp(
             gguf_path, draft_gguf_path=draft_gguf_path,
-            chat_template=chat_template)
+            chat_template=chat_template, adapter_gguf=adapter_gguf)
 
     raw_model, config, tokenizer = load_model(
         gguf_path, chat_template=chat_template, verbose=False)
@@ -918,7 +939,8 @@ def install_gguf_server_bridge() -> None:
             # load_serveable_model (text path; VLM/MTP+adapter raise there, never a
             # silent drop). Distinct from the stock ``adapter_path`` param above, which
             # is mlx-vlm's HF-PEFT mechanism (unsupported on a GGUF base).
-            adapter_gguf = getattr(spec, "adapter", None)
+            adapter_gguf = (tuple(getattr(spec, "adapters", None) or ())
+                            or getattr(spec, "adapter", None) or None)
             # The stream placement rides the same build-spec channel (config
             # `stream:` / `serve --stream-experts` / `--stream-cpu`): it is
             # applied to the loaded base in load_serveable_model (text path;
@@ -1188,6 +1210,21 @@ def _register_one(mid: str, rm) -> None:
         register_gguf_mtp(rm.path, draft_gguf_path=rm.draft_gguf)
 
 
+def _fill_adapters(rm) -> None:
+    """Set ``rm.adapters`` to the sorted union of ``adapter`` over the
+    registered ids on the same path whose remaining load signature matches
+    (they share one resident entry; slot i of the row channel holds
+    adapters[i]). The union is in the load signature, so a reload or
+    re-resolve that adds an id with a new adapter yields a new signature,
+    hence a new entry; the old one ages out under normal eviction."""
+    base = rm.base_signature()
+    union = {rm.adapter} if rm.adapter else set()
+    for sib in _RESOLVED_MODELS.values():
+        if sib.path == rm.path and sib.adapter and sib.base_signature() == base:
+            union.add(sib.adapter)
+    rm.adapters = tuple(sorted(union))
+
+
 def _register_resolved_models_locked(cfg) -> None:
     from gmlx.config import MissingModelFile, resolve_model
 
@@ -1207,6 +1244,8 @@ def _register_resolved_models_locked(cfg) -> None:
             skipped.append((mid, e))
             continue
         _register_one(mid, rm)
+    for rm in _RESOLVED_MODELS.values():
+        _fill_adapters(rm)
     for mid, e in skipped:
         print(f"[server] skipping model {mid!r}: {e}", file=sys.stderr)
     if skipped:
@@ -1240,6 +1279,9 @@ def reregister_missing_models() -> bool:
         print(f"[server] model {mid!r} is back on disk; re-registered",
               file=sys.stderr)
         healed = True
+    if healed:
+        for rm in _RESOLVED_MODELS.values():
+            _fill_adapters(rm)
     return healed
 
 
@@ -1371,6 +1413,7 @@ def resolve_request_model(model_field: str | None, *,
         rm = resolve_model(model_id, cfg, request_profile=request_profile)
     except MissingModelFile as e:
         raise ModelFileMissing(model_id, str(e)) from None
+    _fill_adapters(rm)
     return rm.path, rm
 
 

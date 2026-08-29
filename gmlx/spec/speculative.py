@@ -30,6 +30,7 @@ from typing import Any
 from collections.abc import Callable, Iterator
 
 import mlx.core as mx
+import gmlx.lora_rows as lora_rows
 from gmlx.envflags import env_bool, env_int
 
 # Speculative round helpers + the draft/target RNG coupler, owned here (see
@@ -734,6 +735,7 @@ def _owned_decode_rounds(
     verify rounds instead of drafting (see _next_forced_chunk).
     """
     token_dtype = mx.int32
+    row_uid = (getattr(model, "_kq_row_uids", None) or [None])[0]
     greedy = sampler is None
     # greedy_draft: draft the head's argmax even under a sampling target (llama
     # parity). The target is still sampled (sampler passed to the walk) unless the
@@ -891,7 +893,11 @@ def _owned_decode_rounds(
                 draft_tokens = mx.array([forced[:-1]], dtype=token_dtype)
                 bs = len(forced)
                 _td = time.perf_counter()
-                with mx.stream(generation_stream):
+                # A forced round is a target forward like any verify: the
+                # per-row LoRA vector must be published for it (rows mode
+                # raises on an unpublished forward).
+                with mx.stream(generation_stream), \
+                        lora_rows.published([row_uid]):
                     verify_input = mx.concatenate(
                         [mx.array([[b]], dtype=token_dtype), draft_tokens],
                         axis=1)
@@ -922,7 +928,8 @@ def _owned_decode_rounds(
                     mx.eval(draft_tokens)
                 _td = time.perf_counter()
 
-                with mx.stream(generation_stream):
+                with mx.stream(generation_stream), \
+                        lora_rows.published([row_uid]):
                     verify_input = mx.concatenate(
                         [mx.array([[b]], dtype=token_dtype), draft_tokens], axis=1)
                     verify = _mtp_verify_target(lm, verify_input, prompt_cache, sampler,
@@ -1927,6 +1934,11 @@ def _owned_decode_rounds_batch(
     greedy = sampler is None
     B_orig = len(b)
     row_ids = list(range(B_orig)) if row_ids is None else list(row_ids)
+    # Physical-row uids (lora_rows publish); the serve batch stamps them on
+    # the model before the generator starts, injected rows append theirs.
+    row_uids = list(getattr(model, "_kq_row_uids", None) or [])
+    if len(row_uids) != B_orig:
+        row_uids = [None] * B_orig
 
     # Per-row budgets: ar.py freezes max_tokens = max() over the rows at
     # generator start; rows injected mid-flight carry their own in the
@@ -2060,7 +2072,11 @@ def _owned_decode_rounds_batch(
         return_hidden/return_shared_kv with no off switch, so shared-KV archs
         would materialize every shared layer per emitted token.
         """
-        with mx.stream(generation_stream):
+        # Same per-row publish as the verify rounds: the gated round is the
+        # only target forward of a width-capped batch, so a missing publish
+        # here fails every concurrent adapter stream (rows mode raises).
+        with mx.stream(generation_stream), \
+                lora_rows.published([row_uids[i] for i in active_idx]):
             out = lm(inputs[:, None], cache=prompt_cache)
             logits = getattr(out, "logits", out)[:, -1, :]
             if greedy:
@@ -2110,7 +2126,8 @@ def _owned_decode_rounds_batch(
         state). Emits one token per row through the shared round tail."""
         nonlocal hidden
         b_arr = mx.array([b[i] for i in active_idx], dtype=token_dtype)
-        with mx.stream(generation_stream):
+        with mx.stream(generation_stream), \
+                lora_rows.published([row_uids[i] for i in active_idx]):
             verify = _mtp_verify_target(
                 lm, b_arr[:, None], prompt_cache, sampler,
                 sample_target_tokens=greedy)
@@ -2213,7 +2230,9 @@ def _owned_decode_rounds_batch(
                 # Entries without per-row budgets (older producers, test
                 # fakes) inherit the host scalar, the pre-existing behavior.
                 inj_max = inj.get("max_tokens") or [max_tokens] * B_new
+                inj_uids = inj.get("uids") or [None] * B_new
                 for row in range(B_new):
+                    row_uids.append(inj_uids[row])
                     b.append(int(inj["first_tokens_list"][row]))
                     positions.append(inj_offset)
                     emitted.append(1)
@@ -2364,7 +2383,11 @@ def _owned_decode_rounds_batch(
             b_arr = mx.array([b[active_idx[0]]], dtype=token_dtype)
             draft_tokens = mx.array([forced[:-1]], dtype=token_dtype)
             _td = time.perf_counter() if _ROUND_PROFILE else _t0
-            with mx.stream(generation_stream):
+            # A forced round is a target forward like any verify: the per-row
+            # LoRA vector must be published for it (rows mode raises on an
+            # unpublished forward).
+            with mx.stream(generation_stream), \
+                    lora_rows.published([row_uids[i] for i in active_idx]):
                 verify_input = mx.concatenate(
                     [b_arr[:, None], draft_tokens], axis=1)
                 verify = _mtp_verify_target(
@@ -2410,7 +2433,8 @@ def _owned_decode_rounds_batch(
                 mx.eval(draft_tokens)
             _td = time.perf_counter()
 
-            with mx.stream(generation_stream):
+            with mx.stream(generation_stream), \
+                    lora_rows.published([row_uids[i] for i in active_idx]):
                 verify_input = mx.concatenate(
                     [b_arr[:, None], draft_tokens], axis=1)
                 verify = _mtp_verify_target(

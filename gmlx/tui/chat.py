@@ -399,6 +399,7 @@ class ChatState:
     history_loaded: bool = False    # history file read once per session
     ptk_session: object = None
     input_fn: object = None      # scripted-input seam for the e2e loop tests
+    adapter_scale: float | None = None   # /adapter: None = on (1.0)
 
     # staged input for the next turn
     staged: list = dataclasses.field(default_factory=list)         # /! blocks
@@ -446,6 +447,7 @@ class ChatState:
     # --assistant mode
     assistant_brain: object = None
     assistant_extra: dict | None = None
+    served_ids: list | None = None       # server mode: chat ids the server lists
     assistant_baseline: dict | None = None
     assistant_touched: set | None = None
 
@@ -733,6 +735,7 @@ def _print_shim_help(state: ChatState) -> None:
     )
     print("- '/thinking [on|off|default]' the model's reasoning switch")
     print("- '/thinking-budget [N|off]' cap thinking tokens per reply")
+    print("- '/adapter [on|off|SCALE]' toggle or scale the --adapter LoRA live")
     print(
         "- '/reasoning [show|hide|raw]' control how thinking is displayed "
         "(Ctrl-O collapses/expands it live during a reply)"
@@ -740,7 +743,7 @@ def _print_shim_help(state: ChatState) -> None:
     print("- Ctrl-T while the model is thinking: wrap up and answer now")
     print("- '/render [plain|lite|rich]' set reply markdown rendering")
     print("- '/theme [NAME] [cb]' set the color theme ('cb' = colorblind accents)")
-    print("- '/model' show the loaded model card - '/stats' session totals")
+    print("- '/model [id]' model card; server mode: switch served id, transcript kept - '/stats' session totals")
     print(
         "- '/retry' regenerate the last reply - '/undo' remove the last "
         "exchange entirely"
@@ -1192,6 +1195,32 @@ def _slash_system(cmd, arg, state):
     return "reset"
 
 
+def _slash_adapter(cmd, arg, state):
+    """Scale the live --adapter LoRA for the next turns without a reload: the
+    single chat row's scale rides the lora_rows channel (static mode). No
+    effect when the model carries no adapter."""
+    import gmlx.lora_rows as lora_rows
+
+    cur = getattr(state, "adapter_scale", None)
+    if not arg:
+        print(f"[chat] adapter scale: {1.0 if cur is None else cur:g}")
+        return None
+    if arg == "on":
+        scale = None
+    elif arg == "off":
+        scale = 0.0
+    else:
+        try:
+            scale = float(arg)
+        except ValueError:
+            print("[chat] usage: /adapter [on|off|SCALE]")
+            return None
+    state.adapter_scale = scale
+    lora_rows.set_rows(None if scale is None else [scale])
+    print(f"[chat] adapter scale: {1.0 if scale is None else scale:g}")
+    return None
+
+
 def _slash_memory(cmd, arg, state):
     _chat_memory_cmd(arg, state)
     return None
@@ -1351,8 +1380,55 @@ def _slash_load_session(cmd, arg, state):
 
 
 def _slash_model(cmd, arg, state):
-    _print_model_info(state)
+    brain = state.assistant_brain
+    if brain is None:
+        if arg:
+            print("[chat] /model <id> switches served models in server mode "
+                  "only (local chat loads one GGUF)")
+        else:
+            _print_model_info(state)
+        return None
+    if not arg:
+        cur = _served_head(brain.model)
+        ids = [f"*{i}" if i == cur else i for i in (state.served_ids or [cur])]
+        print(f"[chat] model: {brain.model} via {brain.base_url}")
+        print(f"  served   {'  '.join(ids)}  (/model <id> switches, transcript kept)")
+        return None
+    # Refresh the served list from the server: a config reload may have
+    # added ids since connect (and the list is the completion source).
+    try:
+        from gmlx.talk.client import probe_capabilities
+
+        state.served_ids = (probe_capabilities(brain.base_url, brain.api_key)
+                            .get("chat_ids") or state.served_ids)
+    except Exception as e:                 # noqa: BLE001 - keep the last list
+        print(f"[chat] could not refresh served ids ({e}); using the last list")
+    head, _, prof = arg.partition("@")
+    served = state.served_ids or []
+    if head not in served:
+        print(f"[chat] {head!r} is not served - served ids: "
+              f"{', '.join(served) or '(none)'}")
+        return None
+    if not prof:                            # keep the current profile spelling
+        _, _, prof = brain.model.partition("@")
+    new = f"{head}@{prof}" if prof else head
+    if new == brain.model:
+        print(f"[chat] model already {new}")
+        return None
+    old = brain.model
+    brain.model = new
+    state.model_name = new[:24]
+    if state.session_meta:
+        state.session_meta["path"] = new
+    kept = len(brain.messages) // 2
+    print(f"[chat] model {old} -> {new} ({kept} turn{'s' if kept != 1 else ''} "
+          "of transcript kept; the next reply re-reads it under the new id)")
     return None
+
+
+def _served_head(model_request: str) -> str:
+    """The served id of a ``id@profile`` request spelling."""
+    return model_request.partition("@")[0]
 
 
 def _slash_stats(cmd, arg, state):
@@ -1476,6 +1552,7 @@ _SLASH_HANDLERS = {
     "/quit": _slash_exit,
     "/reset": _slash_reset,
     "/system": _slash_system,
+    "/adapter": _slash_adapter,
     "/memory": _slash_memory,
     "/thinking": _slash_thinking,
     "/thinking-budget": _slash_thinking_budget,
@@ -1515,7 +1592,8 @@ def _handle_slash(line: str, state: ChatState) -> str | tuple | None:
 _ALL_COMMANDS = sorted([*_SLASH_HANDLERS, "/!", "/help"])
 
 
-def _completion_options(buf: str, text: str) -> list[str] | None:
+def _completion_options(buf: str, text: str,
+                        served: list | None = None) -> list[str] | None:
     """Completion candidates for ``text`` (the word being completed) given the
     full line ``buf`` - shared by the readline and prompt_toolkit backends.
 
@@ -1528,6 +1606,8 @@ def _completion_options(buf: str, text: str) -> list[str] | None:
 
     if buf.startswith("/history "):
         return [o for o in ("on", "off", "clear") if o.startswith(text)]
+    if buf.startswith("/model "):
+        return [o for o in (served or ()) if o.startswith(text)]
     if buf.startswith("/reasoning "):
         return [o for o in ("show", "hide", "raw") if o.startswith(text)]
     if buf.startswith("/render "):
@@ -1562,7 +1642,8 @@ def _make_completer(readline, state: ChatState):
     """A readline completer over :func:`_completion_options`."""
 
     def complete(text: str, index: int):
-        options = _completion_options(readline.get_line_buffer(), text)
+        options = _completion_options(readline.get_line_buffer(), text,
+                                      state.served_ids)
         if options is None:
             return None
         return options[index] if index < len(options) else None
@@ -1653,7 +1734,8 @@ def _wire_ptk(state: ChatState) -> bool:
     class _SlashCompleter(Completer):
         def get_completions(self, document, complete_event):
             text = document.get_word_before_cursor(WORD=True)
-            options = _completion_options(document.text_before_cursor, text)
+            options = _completion_options(document.text_before_cursor, text,
+                                          state.served_ids)
             for o in options or ():
                 yield Completion(o, start_position=-len(text))
 
@@ -2350,6 +2432,7 @@ def _setup_assistant(args):
         system=None, max_tokens=1024, tools=registry,
         max_tool_rounds=a.max_tool_rounds, tool_timeout_s=a.tool_timeout_s,
         memory=memory, stream=seam)
+    brain.served_ids = list(served)       # /model <id> switch + completion
 
     def cleanup():
         brain.close()                         # closes the memory store
@@ -2743,6 +2826,9 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
             verbose=args.verbose,
             wire=not getattr(args, "stream_experts", False),
         )
+    from gmlx.commands.cli import _apply_cli_adapter
+
+    _apply_cli_adapter(args, b.model, b.config)
     # Streaming placement applies to the target trunk only (the drafter
     # stays resident); same composition as the run/bench entry points.
     _apply_placement(args, getattr(b.model, "language_model", b.model))
@@ -2831,8 +2917,9 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
         if not args.no_chat_template:
             _require_chat_template(b.tok, verbatim_hint=True)
 
-        from gmlx.commands.cli import _apply_placement
+        from gmlx.commands.cli import _apply_cli_adapter, _apply_placement
 
+        _apply_cli_adapter(args, b.model, b.config)
         _apply_placement(args, b.model)
         from gmlx.load.loader import _resolve_prefill_step
 
@@ -2876,17 +2963,6 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
                         file=sys.stderr,
                     )
                 kv_kwargs["kv_bits"] = None
-
-        if args.adapter:
-            from gmlx.load.adapter import apply_gguf_adapter
-            from gmlx.load.discovery import header_meta
-
-            adapter = os.path.abspath(os.path.expanduser(args.adapter))
-            base_arch = (getattr(args, "arch", None)
-                         or (header_meta(args.gguf) or {}).get("arch"))
-            n = apply_gguf_adapter(b.model, b.config, adapter,
-                                   base_arch=base_arch)
-            print(f"[adapter] applied {n}-module GGUF LoRA from {adapter}")
 
     # Load in the background while the user types their first message.
     # Interactive tty only: piped stdin already holds its input (and the
@@ -3137,7 +3213,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         # --stream-experts is absent: streaming composes with MTP here the
         # same way as run/bench (placement after load_mtp_model).
         if speculative and not vlm_mtp and (
-            args.mmproj or args.adapter or args.stream_cpu
+            args.mmproj or args.stream_cpu
             or args.moe_experts is not None or args.moe_expert_mass is not None
             or args.moe_expert_probe or args.moe_miss_shed is not None
             or args.moe_layer_shed is not None
@@ -3146,7 +3222,6 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 name
                 for name, on in (
                     ("--mmproj", args.mmproj),
-                    ("--adapter", args.adapter),
                     ("--stream-cpu", args.stream_cpu),
                     ("--moe-experts", args.moe_experts is not None),
                     ("--moe-expert-mass", args.moe_expert_mass is not None),
@@ -3257,6 +3332,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
     if brain is not None:
         state.assistant_brain = brain
         state.assistant_extra = assistant_extra
+        state.served_ids = list(getattr(brain, "served_ids", None) or [])
         state.assistant_baseline = dict(state.sampling)
         state.assistant_touched = {
             k for k in _ASSISTANT_SAMPLING

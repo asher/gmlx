@@ -3,7 +3,7 @@
 mlx-vlm's model-management surface assumes a single HF-resolved model. For a
 GGUF-only, multi-model, config-driven server that surface is wrong in five places;
 this module installs late-bound monkeypatches over each seam (the same no-fork
-pattern as :mod:`gmlx.serve.bridge_vlm` / :mod:`gmlx.serve.residency`):
+pattern as :mod:`server_bridge_vlm` / :mod:`residency`):
 
 * **Sampling-profile injection** - a request's unset sampling fields take their
   values from the resolved profile (``serving.get_active_spec()``), not mlx-vlm's
@@ -207,6 +207,13 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_thinking_budget_fix()
     from ..seed_rows import install_per_request_seed
     install_per_request_seed()
+    import gmlx.lora_rows as lora_rows
+    if os.environ.get("GMLX_LORA_ROWS"):
+        # Arm the strict per-forward publish invariant (a missed publish
+        # site raises instead of serving a stale or absent row vector).
+        lora_rows.configure("rows", 1)
+    lora_rows.install_lora_gen_args()
+    lora_rows.install_row_channel()
     import gmlx.spec.engine as spec_engine
     spec_engine.install_full_prompt_mtp_prefill()
     spec_engine.install_owned_spec_engine()

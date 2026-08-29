@@ -643,11 +643,13 @@ def _mtp_hard_incompatible(args) -> str | None:
     ``--stream-experts`` is NOT here: streaming composes with MTP (the
     decode-feeder arena serves any call <= its token cap, which covers the
     verify widths, and the drafter block stays resident) - the run/bench
-    entry points apply placement after ``load_mtp_model``. ``--stream-cpu``
-    stays blocked: the verify forward on the CPU stream is untested."""
+    entry points apply placement after ``load_mtp_model``. ``--adapter`` is
+    not here either: the live LoRA installs on the MTP target's trunk and
+    verify runs against the adapted target, so speculation stays lossless.
+    ``--stream-cpu`` stays blocked: the verify forward on the CPU stream is
+    untested."""
     for name, on in (
         ("--mmproj", getattr(args, "mmproj", None) is not None),
-        ("--adapter", getattr(args, "adapter", None) is not None),
         ("--stream-cpu", getattr(args, "stream_cpu", False)),
         ("--moe-experts", getattr(args, "moe_experts", None) is not None),
         ("--moe-expert-mass", getattr(args, "moe_expert_mass", None) is not None),
@@ -1293,6 +1295,7 @@ def _run_bench_depths(args) -> int:
                 zero_copy=not args.no_zero_copy,
                 verbose=args.verbose,
             )
+    _apply_cli_adapter(args, model, _config)
     _apply_placement(args, getattr(model, "language_model", model))
     print_family_note(args)
 
@@ -1350,6 +1353,27 @@ def _run_bench_depths(args) -> int:
             r = results[D]
             print(f"{D:>8} {r['prefill_tps']:>12.1f} {r['tg_tps']:>9.1f}")
     return 0
+
+
+def _apply_cli_adapter(args, model, config) -> None:
+    """``--adapter`` on the run/chat/bench trunks: install the live GGUF LoRA
+    on the text trunk (``model.language_model`` on an MTP target, whose leaf
+    paths the adapter remap targets) before placement, so the installer sees
+    the plain SwitchGLU owners (it refuses offload/fusion wrappers in the
+    owner's MRO). The base arch gates the adapter up front: a mismatched
+    family fails with "adapter arch X != base arch Y", not a missing-targets
+    install error."""
+    if not getattr(args, "adapter", None):
+        return
+    from gmlx.load.adapter import apply_gguf_adapter
+    from gmlx.load.discovery import header_meta
+
+    adapter = os.path.abspath(os.path.expanduser(args.adapter))
+    base_arch = (getattr(args, "arch", None)
+                 or (header_meta(args.gguf) or {}).get("arch"))
+    trunk = getattr(model, "language_model", model)
+    n = apply_gguf_adapter(trunk, config, adapter, base_arch=base_arch)
+    print(f"[adapter] applied {n}-module GGUF LoRA from {adapter}")
 
 
 def _apply_placement(args, model) -> None:
@@ -1511,6 +1535,7 @@ def _run_generate(args) -> int:
                 verbose=args.verbose,
                 wire=not args.stream_experts,
             )
+        _apply_cli_adapter(args, model, _config)
         # Streaming placement applies to the target trunk only (the drafter
         # block is small and stays resident); the verify calls ride the
         # decode-feeder arena like any small chunk.
@@ -1564,6 +1589,7 @@ def _run_generate(args) -> int:
             verbose=args.verbose,
         )
     print_family_note(args)
+    _apply_cli_adapter(args, model, config)
     _apply_placement(args, model)
 
     from gmlx.gen.diffusion import is_diffusion_model
@@ -1571,17 +1597,6 @@ def _run_generate(args) -> int:
         # Bounded canvas fallback, shown in the banner; see the constant.
         args.max_tokens = _DIFFUSION_MAX_TOKENS
         args._max_tokens_capped = True
-
-    if args.adapter:
-        from gmlx.load.adapter import apply_gguf_adapter
-        from gmlx.load.discovery import header_meta
-
-        adapter = os.path.abspath(os.path.expanduser(args.adapter))
-        # Base arch gates the adapter up front: a mismatched family fails with
-        # "adapter arch X != base arch Y", not a missing-targets install error.
-        base_arch = args.arch or (header_meta(args.gguf) or {}).get("arch")
-        n = apply_gguf_adapter(model, config, adapter, base_arch=base_arch)
-        print(f"[adapter] applied {n}-module GGUF LoRA from {adapter}")
 
     # Cap-vs-EOS is not reported back on this path (generate returns text), so
     # no cap-hit note here; the MTP/VLM paths and chat print one.
@@ -2158,11 +2173,10 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         from gmlx.spec.speculative import set_stoch_accept
 
         set_stoch_accept(True)
-    if args.adapter and (args.mmproj or args.speculative):
-        which = "--mmproj" if args.mmproj else "--speculative"
+    if args.adapter and args.mmproj:
         print(
-            f"error: --adapter (live GGUF LoRA) on a {which} base is not "
-            f"supported yet.",
+            "error: --adapter (live GGUF LoRA) on a --mmproj base is not "
+            "supported yet.",
             file=sys.stderr,
         )
         return 2
