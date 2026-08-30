@@ -39,7 +39,7 @@ same sampler, and the same chat prompts on both engines.
 | **mlx-kquant** | `0.3.5` (K-quant + perf kernels; fleet default) |
 | **llama.cpp** | `b9967` |
 | **Build overrides** | models rebenched on newer releases carry their own builds; see Model provenance |
-| **DeepSeek-V4-Flash reference** | ds4-server (dwarfstar) @ `b030961`, ignore-eos patched |
+| **DeepSeek-V4-Flash reference** | ds4-server (antirez's dwarfstar) @ `b030961`, ignore-eos patched |
 | **Dates** | 2026-07-05 .. 2026-08-29 |
 | **Prompt corpus** | HuggingFaceH4/ultrachat_200k:train_sft (chat template applied) |
 | **Sampling** | temperature 0.6, top-p 0.95, top-k 20, seed 1234 (coupled RNG across engines) |
@@ -297,9 +297,10 @@ ladders cell by cell).
 
 ## DeepSeek-V4-Flash (reference engine: ds4-server)
 
-This model's comparison engine is **ds4-server** (dwarfstar's
-DeepSeek-V4 server, ignore-eos patched), not llama.cpp -- llama.cpp
-has no DeepSeek-V4-Flash path. Ratios below are gmlx / ds4-server.
+This model's comparison engine is **ds4-server** (antirez's
+dwarfstar DeepSeek-V4 server, ignore-eos patched), not llama.cpp --
+llama.cpp has no DeepSeek-V4-Flash path. Ratios below are
+gmlx / ds4-server.
 
 ### DeepSeek-V4-Flash IQ2_XXS
 
