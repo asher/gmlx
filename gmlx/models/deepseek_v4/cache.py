@@ -124,6 +124,9 @@ class PoolingCache(_BaseCache):
         if self._qbits is not None:
             pk, sc, bi = self._pbuf
             B, P = pk.shape[0], self._plen
+            # The reshape forces a contiguous copy. Required: the Metal
+            # dequantize kernel misreads a strided biases operand (mlx
+            # 0.32.1, kv-bits plan P5).
             return mx.dequantize(
                 pk[:, :P].reshape(B * P, -1),
                 sc[:, :P].reshape(B * P, -1),
