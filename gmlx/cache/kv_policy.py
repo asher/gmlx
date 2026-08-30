@@ -163,7 +163,8 @@ def resolve_kv_quant_policy(stack, *, kv_bits, kv_group_size=64,
                             quantized_kv_start=0, scheme=None,
                             key_bits=None, value_bits=None,
                             mode="single", mtp=False, max_kv_size=None,
-                            head_dim=None) -> KvQuantPolicy:
+                            head_dim=None, can_quantize_kv=True,
+                            no_kv_reason=None) -> KvQuantPolicy:
     """Resolve the KV quantization policy for one constructed cache stack.
 
     ``stack`` must be the real stack the engine will run (same
@@ -174,6 +175,9 @@ def resolve_kv_quant_policy(stack, *, kv_bits, kv_group_size=64,
     rule: quantize growing KV-class layers except the last layer of a
     deep stack (should_quantize_kv_layer); windows, recurrent state, and
     opt-outs stay fp16; pooled caches pack at rest.
+    ``can_quantize_kv=False`` models an engine with no KV converter in
+    its loop (the CLI MTP rounds): only pooled packing engages, and
+    ``no_kv_reason`` names why.
     """
     stack = list(stack or [])
     if kv_bits is None:
@@ -217,14 +221,17 @@ def resolve_kv_quant_policy(stack, *, kv_bits, kv_group_size=64,
             bits, group, mode, stack, kinds)
 
     n = len(kinds)
-    if not any(k in ("kv", "pool") for k in kinds):
+    quantizable = [k for k in kinds
+                   if (k == "kv" and can_quantize_kv) or k == "pool"]
+    if not quantizable:
         if max_kv_size is not None and "window" in kinds:
             return _error(
                 "max_kv_size builds sliding-window caches that cannot "
                 "quantize; drop kv_bits or max_kv_size",
                 bits, group, mode, stack)
         return _dropped(
-            "cache stack has no quantizable layers",
+            no_kv_reason if (not can_quantize_kv and no_kv_reason)
+            else "cache stack has no quantizable layers",
             bits, group, mode, stack, kinds)
 
     from mlx_vlm.models.cache import should_quantize_kv_layer
@@ -232,7 +239,8 @@ def resolve_kv_quant_policy(stack, *, kv_bits, kv_group_size=64,
     packed = packed_bytes_per_element(bits, group)
     per = []
     for i, kind in enumerate(kinds):
-        if kind == "kv" and should_quantize_kv_layer(i, n):
+        if (kind == "kv" and can_quantize_kv
+                and should_quantize_kv_layer(i, n)):
             per.append(KvLayerPlan("kv", True, packed))
         elif kind == "pool":
             per.append(KvLayerPlan("pool", False, packed))
@@ -249,9 +257,52 @@ def resolve_kv_quant_policy(stack, *, kv_bits, kv_group_size=64,
                          start_honored=honored)
 
 
-def kv_line(model_id: str, policy: KvQuantPolicy) -> str:
-    """The canonical engagement line, identical across serve, run, chat."""
-    head = f"[kv] {model_id}: kv_bits={policy.bits}"
+def kv_line(model_id, policy: KvQuantPolicy) -> str:
+    """The canonical engagement line, identical across serve, run, chat.
+    ``model_id`` may be None on single-model CLI paths."""
+    head = f"[kv] {model_id}: " if model_id else "[kv] "
+    head += f"kv_bits={policy.bits}"
     if policy.group_size:
         head += f" group={policy.group_size}"
     return f"{head} -> {policy.summary()}"
+
+
+_HELD_CLASSES: dict = {}
+
+
+def _held_to_quantized(self):
+    raise AttributeError("held fp16 by kv policy")
+
+
+def hold_fp16(c):
+    """Rebind a FRESH cache to a subclass whose to_quantized is hidden,
+    so stock hasattr-gated converters leave the layer fp16 (mlx-lm
+    maybe_quantize_kv_cache and the mlx-vlm equivalents)."""
+    if not hasattr(c, "to_quantized"):
+        return c
+    cls = type(c)
+    held = _HELD_CLASSES.get(cls)
+    if held is None:
+        held = type("Fp16Held" + cls.__name__, (cls,),
+                    {"to_quantized": property(_held_to_quantized)})
+        _HELD_CLASSES[cls] = held
+    out = held.__new__(held)
+    out.__dict__.update(c.__dict__)
+    return out
+
+
+def arm_stack(stack, policy: KvQuantPolicy, hold=True):
+    """Conform a freshly built stack to the policy in place: fp16 layers
+    lose their to_quantized (converters skip them, including rotating
+    windows whose to_quantized raises NYI), pooled layers arm at-rest
+    packing. ``hold=False`` arms pools only, for engines that run no
+    converter. Top-level only; the CLI stacks this serves are flat."""
+    if policy.verdict not in ("full", "partial"):
+        return stack
+    for i, plan in enumerate(policy.per_layer):
+        if plan.kind == "pool":
+            stack[i].quantize_storage(group_size=policy.group_size,
+                                      bits=policy.bits)
+        elif hold and not plan.quantize:
+            stack[i] = hold_fp16(stack[i])
+    return stack

@@ -2852,38 +2852,33 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
     _require_chat_template(b.tok)
 
     # --kv-bits on the MTP path: same pooled-cache packing as the plain
-    # path (rollback/replay are watermark moves, storage-agnostic). For
-    # drafter models with no pooled caches the flag stays dropped, with
-    # an accurate note instead of the generic dropped-flags warning.
-    mtp_quantize_pools = None
+    # path (rollback/replay are watermark moves, storage-agnostic). The
+    # rounds have no KV converter, so only pooled layers engage.
+    mtp_kv_policy = None
     if kv_kwargs.get("kv_bits") is not None:
-        from gmlx.gen.generation import quantize_pooled_caches
+        from gmlx.cache.kv_policy import kv_line, resolve_kv_quant_policy
 
-        bits = kv_kwargs["kv_bits"]
-        group = kv_kwargs.get("kv_group_size", 64)
         probe = _mtp_make_cache(b.model.language_model)
-        if quantize_pooled_caches(probe, bits, group):
-            mtp_quantize_pools = (bits, group)
-            print(
-                f"[kv] {bits}-bit pooled KV cache "
-                "(sliding windows stay fp16)"
-            )
-        else:
-            print(
-                "warning: --kv-bits not applied on the MTP path "
-                "(no quantizable caches)",
-                file=sys.stderr,
-            )
+        policy = resolve_kv_quant_policy(
+            probe, kv_bits=kv_kwargs["kv_bits"],
+            kv_group_size=kv_kwargs.get("kv_group_size", 64),
+            mtp=True, can_quantize_kv=False,
+            no_kv_reason="MTP rounds have no KV quantization hook")
+        print(kv_line(None, policy), file=sys.stderr)
+        if policy.verdict == "error":
+            raise SystemExit(2)
+        if policy.verdict != "dropped":
+            mtp_kv_policy = policy
         kv_kwargs["kv_bits"] = None
 
     def _new_text_cache():
         # Single-stream MTP uses a plain target KV cache the native drafter
         # reads back - one cache, reused across turns (like the text path).
         c = _mtp_make_cache(b.model.language_model)
-        if mtp_quantize_pools is not None:
-            from gmlx.gen.generation import quantize_pooled_caches
+        if mtp_kv_policy is not None:
+            from gmlx.cache.kv_policy import arm_stack
 
-            quantize_pooled_caches(c, *mtp_quantize_pools)
+            arm_stack(c, mtp_kv_policy, hold=False)
         return c
 
     b.new_text_cache = _new_text_cache
@@ -2914,14 +2909,14 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
             verbose=args.verbose,
         )
 
-    quantize_pools = None   # set at the load join (kv-bits pooled packing)
+    kv_policy = None        # set at the load join (kv-bits policy arm)
 
     def _new_text_cache():
         c = make_prompt_cache(b.model, args.max_kv_size)
-        if quantize_pools is not None:
-            from gmlx.gen.generation import quantize_pooled_caches
+        if kv_policy is not None:
+            from gmlx.cache.kv_policy import arm_stack
 
-            quantize_pooled_caches(c, *quantize_pools)
+            arm_stack(c, kv_policy)
         return c
 
     b.new_text_cache = _new_text_cache
@@ -2930,7 +2925,7 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
         # Model-dependent setup, deferred to the load join on the
         # background path. Prints bare, so it must run on the main
         # thread with the tty free.
-        nonlocal quantize_pools
+        nonlocal kv_policy
         if not args.no_chat_template:
             _require_chat_template(b.tok, verbatim_hint=True)
 
@@ -2953,33 +2948,27 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
         if step is not None:
             kv_kwargs["prefill_step_size"] = step
 
-        # The MTP path already warns that --kv-bits is dropped. On plain
-        # decoding, mlx-lm's per-step converter would crash on rotating
-        # caches -- for arches with growing pooled caches (deepseek4) the
-        # flag is honored by packing those at rest instead; the fp16
-        # sliding windows are size-capped either way.
+        # Per-stack policy on the constructed cache: held layers lose
+        # to_quantized so the stock converter skips them (rotating
+        # windows would crash it), pools pack at rest, the rest quantize
+        # per the serve carve-out.
         if kv_kwargs.get("kv_bits") is not None:
-            from gmlx.gen.generation import kv_quantization_unsupported
+            from gmlx.cache.kv_policy import (kv_line,
+                                              resolve_kv_quant_policy)
 
-            reason = kv_quantization_unsupported(b.model)
-            if reason:
-                from gmlx.gen.generation import quantize_pooled_caches
-
-                bits = kv_kwargs["kv_bits"]
-                group = kv_kwargs.get("kv_group_size", 64)
-                probe = make_prompt_cache(b.model, args.max_kv_size)
-                if quantize_pooled_caches(probe, bits, group):
-                    quantize_pools = (bits, group)
-                    print(
-                        f"[kv] {bits}-bit pooled KV cache "
-                        "(sliding windows stay fp16)"
-                    )
-                else:
-                    print(
-                        f"warning: --kv-bits dropped: {reason}",
-                        file=sys.stderr,
-                    )
+            probe = make_prompt_cache(b.model, args.max_kv_size)
+            policy = resolve_kv_quant_policy(
+                probe, kv_bits=kv_kwargs["kv_bits"],
+                kv_group_size=kv_kwargs.get("kv_group_size", 64),
+                quantized_kv_start=kv_kwargs.get("quantized_kv_start", 0),
+                max_kv_size=args.max_kv_size)
+            print(kv_line(None, policy), file=sys.stderr)
+            if policy.verdict == "error":
+                raise SystemExit(2)
+            if policy.verdict == "dropped":
                 kv_kwargs["kv_bits"] = None
+            else:
+                kv_policy = policy
 
     # Load in the background while the user types their first message.
     # Interactive tty only: piped stdin already holds its input (and the

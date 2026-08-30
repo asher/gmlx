@@ -352,25 +352,28 @@ def generate(
 
     prompt_cache = None
     if kv_bits is not None:
-        reason = kv_quantization_unsupported(model)
-        if reason:
-            # mlx-lm's converter would crash on the rotating caches, so the
-            # flag is honored here instead: pack the growing pooled caches
-            # at rest and hand the pre-armed cache to stream_generate.
-            from mlx_lm.models.cache import make_prompt_cache as _mpc
+        # Resolve on the constructed stack (max_kv_size included: probing
+        # a bare make_cache misses the all-rotating stack it builds), then
+        # conform the stack: held layers lose to_quantized so mlx-lm's
+        # converter skips them, pools pack at rest, the rest quantize.
+        from mlx_lm.models.cache import make_prompt_cache as _mpc
 
-            prompt_cache = _mpc(model, max_kv_size=max_kv_size)
-            n_pools = quantize_pooled_caches(prompt_cache, kv_bits, kv_group_size)
-            if n_pools:
-                print(
-                    f"[kv] {kv_bits}-bit pooled KV cache ({n_pools} pools; "
-                    "sliding windows stay fp16)",
-                    file=sys.stderr,
-                )
-            else:
-                prompt_cache = None
-                print(f"warning: --kv-bits dropped: {reason}", file=sys.stderr)
+        from gmlx.cache.kv_policy import (arm_stack, kv_line,
+                                          resolve_kv_quant_policy)
+
+        prompt_cache = _mpc(model, max_kv_size=max_kv_size)
+        policy = resolve_kv_quant_policy(
+            prompt_cache, kv_bits=kv_bits, kv_group_size=kv_group_size,
+            quantized_kv_start=quantized_kv_start,
+            max_kv_size=max_kv_size)
+        print(kv_line(None, policy), file=sys.stderr)
+        if policy.verdict == "error":
+            raise SystemExit(2)
+        if policy.verdict == "dropped":
+            prompt_cache = None
             kv_bits = None
+        else:
+            arm_stack(prompt_cache, policy)
 
     gen_kwargs = {
         "max_tokens": max_tokens,
@@ -834,9 +837,12 @@ def _generate_speculative(
     if kv_bits is not None:
         # The stock mlx-vlm round has no KV-quantization hook and the models
         # routed here (gemma4/qwen3.x drafters) have no pooled caches.
+        from gmlx.cache.kv_policy import dropped_policy, kv_line
+
         print(
-            "warning: --kv-bits not applied on the MTP path "
-            "(no quantizable caches)",
+            kv_line(None, dropped_policy(
+                "stock MTP rounds have no KV quantization hook",
+                kv_bits, kv_group_size, "single")),
             file=sys.stderr,
         )
     if thinking_budget is not None:
@@ -1049,20 +1055,19 @@ def generate_speculative_owned(
     prompt_cache = _cache.make_prompt_cache(lm)
     if kv_bits is not None:
         # Rollback/replay are watermark moves, storage-agnostic, so the
-        # pooled packing composes with the MTP undo machinery.
-        n_pools = quantize_pooled_caches(prompt_cache, kv_bits, kv_group_size)
-        if n_pools:
-            print(
-                f"[kv] {kv_bits}-bit pooled KV cache ({n_pools} pools; "
-                "sliding windows stay fp16)",
-                file=sys.stderr,
-            )
-        else:
-            print(
-                "warning: --kv-bits not applied on the MTP path "
-                "(no quantizable caches)",
-                file=sys.stderr,
-            )
+        # pooled packing composes with the MTP undo machinery. The rounds
+        # have no KV converter, so only pooled layers engage.
+        from gmlx.cache.kv_policy import (arm_stack, kv_line,
+                                          resolve_kv_quant_policy)
+
+        policy = resolve_kv_quant_policy(
+            prompt_cache, kv_bits=kv_bits, kv_group_size=kv_group_size,
+            mtp=True, can_quantize_kv=False,
+            no_kv_reason="MTP rounds have no KV quantization hook")
+        print(kv_line(None, policy), file=sys.stderr)
+        if policy.verdict == "error":
+            raise SystemExit(2)
+        arm_stack(prompt_cache, policy, hold=False)
 
     detok = tokenizer.detokenizer
     detok.reset()
