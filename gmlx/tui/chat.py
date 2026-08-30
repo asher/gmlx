@@ -2036,11 +2036,28 @@ def _stream_reply(
         _show(text)
         return text
 
+    def _spin_until_first(it):
+        # Nothing streams until prefill (and any one-time decode staging)
+        # finishes; animate the wait so it does not look like a hang.
+        it = iter(it)
+        try:
+            if sys.stderr.isatty():
+                from gmlx.spinner import Spinner
+
+                with Spinner("prefill"):
+                    first = next(it)
+            else:
+                first = next(it)
+        except StopIteration:
+            return
+        yield first
+        yield from it
+
     last, canceled, stopped = None, False, False
     pre_canceled = _handoff_esc(state)
     try:
         with _EscCancel(on_toggle=_toggle) as esc:
-            for r in chunks:
+            for r in _spin_until_first(chunks):
                 if pre_canceled:
                     canceled = True
                     break

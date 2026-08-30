@@ -6,6 +6,23 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Qwen3.8-Flash-Next: when only its 27-54 GB n-gram table pushes the model
+  past the wired budget, that table now streams instead of the experts, so
+  the experts run fully on GPU (Q4 build: 45.9 tok/s decode, bit-identical
+  output). `GMLX_STREAM_PLE` overrides; `GMLX_STREAM_PLE_COMPOSE=1`
+  (experimental) streams table and experts together when neither fits.
+- `chat` shows a spinner from send to first token.
+
+### Fixed
+
+- Streaming Qwen3.8-Flash-Next no longer pins the n-gram table or sizes
+  the decode arena around it (Q6 build default decode 3.4 -> 8.5 tok/s,
+  12.6+ with compose).
+- Lookahead prestage reaches fused MoE decode blocks again; it stays off
+  on Qwen3.8-Flash-Next, where it measured slower.
+
 ## [0.4.5] - 2026-08-29
 
 ### Added
