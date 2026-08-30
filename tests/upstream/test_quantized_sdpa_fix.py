@@ -166,6 +166,71 @@ def test_prefill_flash_threshold_and_kill(monkeypatch):
     assert mx.abs(got - ref).max().item() == 0.0
 
 
+def _strided_case(B=1, nq=8, nkv=4, L=16, kv=63, d=64, dtype=mx.float16):
+    """Quantized tuples as the live caches produce them: step-rounded zero
+    buffers fetched as lazy slices, strided when kv is not a step
+    multiple."""
+    mx.random.seed(11)
+    q = mx.random.normal((B, nq, L, d)).astype(dtype)
+    k = mx.random.normal((B, nkv, kv, d)).astype(dtype)
+    v = mx.random.normal((B, nkv, kv, d)).astype(dtype)
+    step = 256
+    alloc = (kv + step - 1) // step * step
+
+    def store(x):
+        w, s, b = mx.quantize(x, group_size=64, bits=8)
+        bufs = tuple(
+            mx.zeros((B, nkv, alloc, t.shape[-1]), dtype=t.dtype)
+            for t in (w, s, b))
+        for buf, t in zip(bufs, (w, s, b)):
+            buf[..., :kv, :] = t
+        return tuple(buf[..., :kv, :] for buf in bufs)
+
+    qk, qv = store(k), store(v)
+    mx.eval(q, *qk, *qv)
+    return q, qk, qv
+
+
+def _contig_ref(q, qk, qv, mask, scale=0.125):
+    kd = mx.dequantize(*(mx.contiguous(t) for t in qk),
+                       group_size=64, bits=8)
+    vd = mx.dequantize(*(mx.contiguous(t) for t in qv),
+                       group_size=64, bits=8)
+    return mx.fast.scaled_dot_product_attention(
+        mx.array(q), kd, vd, scale=scale, mask=mask)
+
+
+def test_prefill_flash_strided_cache_slices():
+    # issue #104: the flash arm must dequantize strided cache slices.
+    assert qf.install_quantized_sdpa_mask_fix()
+    q, qk, qv = _strided_case(L=16, kv=63)
+    got = lm_base.quantized_scaled_dot_product_attention(
+        mx.array(q), qk, qv, 0.125, "causal")
+    ref = _contig_ref(q, qk, qv, "causal")
+    err = mx.abs(got - ref).max().item()
+    assert err == 0.0, f"flash arm on strided cache slices err={err}"
+
+
+def test_prefill_flash_strided_batch_cache_end_to_end():
+    # Same check through BatchQuantizedKVCache.update_and_fetch slices.
+    pytest.importorskip("mlx_vlm.models.cache")
+    from mlx_vlm.models import cache as vcache
+
+    assert qf.install_quantized_sdpa_mask_fix()
+    mx.random.seed(11)
+    c = vcache.BatchQuantizedKVCache([0], group_size=64, bits=8)
+    k = mx.random.normal((1, 4, 63, 64)).astype(mx.float16)
+    v = mx.random.normal((1, 4, 63, 64)).astype(mx.float16)
+    qk, qv = c.update_and_fetch(k, v)
+    assert qk[0].shape[2] == 63  # sliced from the 256-step buffer
+    q = mx.random.normal((1, 8, 16, 64)).astype(mx.float16)
+    got = lm_base.quantized_scaled_dot_product_attention(
+        mx.array(q), qk, qv, 0.125, "causal")
+    ref = _contig_ref(q, qk, qv, "causal")
+    err = mx.abs(got - ref).max().item()
+    assert err == 0.0, f"flash arm on live batch-cache slices err={err}"
+
+
 def test_install_idempotent_and_killable(monkeypatch):
     lm_base.quantized_scaled_dot_product_attention = _orig_lm
     vlm_base.quantized_scaled_dot_product_attention = _orig_vlm

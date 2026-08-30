@@ -664,3 +664,24 @@ def test_remap_covers_every_wire_tensor_onto_real_params():
               "nextn.hnorm.weight", "nextn.shared_head_norm.weight"):
         dec = parse_gguf_name("glm5next", f"blk.{n}.{t}")
         assert dec.kind == RemapDecision.KIND_SKIP, (t, dec.kind)
+
+
+def test_dequantized_fetch_strided_cache_slices():
+    # _dequantized must hold the round trip on strided cache slices.
+    class _QCache:
+        group_size, bits = 64, 8
+
+    mx.random.seed(11)
+    k = mx.random.normal((1, 4, 63, 64)).astype(mx.float16)
+    w, s, b = mx.quantize(k, group_size=64, bits=8)
+    bufs = tuple(
+        mx.zeros((1, 4, 256, t.shape[-1]), dtype=t.dtype)
+        for t in (w, s, b))
+    for buf, t in zip(bufs, (w, s, b)):
+        buf[..., :63, :] = t
+    fetch = tuple(buf[..., :63, :] for buf in bufs)
+    got = glm5_model._dequantized(fetch, _QCache())
+    err = mx.abs(got - k).max().item()
+    assert err < 0.05, f"strided dequantized fetch err={err}"
+    # dense fetches pass through untouched
+    assert glm5_model._dequantized(k, _QCache()) is k

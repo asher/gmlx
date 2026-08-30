@@ -391,7 +391,35 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
             targets=[ReqTarget("recall", "m",
                                prompts=[P.p_long_ctx_needle(f"VIOLET{label.upper()}88"),
                                         P.p_long_gen()])],
-            notes="KV-quant must still recall a planted fact at depth without looping"))
+            notes="KV-quant must still recall a planted fact at depth without "
+                  "looping. gemma-4 is an SWA stack: the engine quantizes only "
+                  "its 2 global-attention layers, so this covers the partial "
+                  "policy; kv_dense_* covers the all-layers path"))
+
+    # kv: dense plain-attention stack, every attn layer quantized (issue
+    # #104 regression). kv8 adds the long generation with floors only; a
+    # 0.6B cannot clear the judge bar. kv4 runs the needle only; 4-bit
+    # long generation on a 0.6B fails quality floors even when correct.
+    for label, load, extra in (
+            ("kv8", {"kv_bits": 8, "kv_group_size": 64,
+                     "quantized_kv_start": 0}, [P.p_long_gen(judge=False)]),
+            ("kv4", {"kv_bits": 4, "kv_group_size": 32,
+                     "quantized_kv_start": 0}, [])):
+        add(Scenario(
+            key=f"kv_dense_{label}", tier="kv", needs=["qwen3_0_6b_q8"],
+            title=f"Quantized KV, dense stack: {label} on qwen3-0.6b "
+                  "(all attn layers quantized) - needle recall",
+            config={
+                "profiles": {"p": {"sampling": {"temperature": 0.0},
+                                   "load": load}},
+                "models": {"m": _model_entry(qwen8 or "", profile="p")},
+            },
+            targets=[ReqTarget("recall", "m",
+                               prompts=[P.p_long_ctx_needle(f"CORAL{label.upper()}55")]
+                               + extra)],
+            notes="issue #104 regression: on-the-fly quantized-cache prefill "
+                  "through the kv8 flash arm; corruption fails the anchor "
+                  "instantly on a fully quantized stack"))
 
     # cache: disabled / memory / disk / diskxkv8 / ckpt
     # Qwen3-0.6B exercises the block tier (plain KVCache prefix reuse); the
