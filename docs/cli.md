@@ -95,7 +95,7 @@ family sets no value.
 | `--logit-bias JSON` | - | Token-id to bias map, e.g. `'{"128001": -100}'`. |
 | `--stop STR` | - | Stop sequence; generation ends (trimmed) when it appears. Repeatable. |
 | `--max-kv-size N` | - | Cap the KV cache (rotating cache above it). |
-| `--kv-bits N` / `--kv-group-size N` / `--quantized-kv-start N` | off / `64` / `0` | Quantize the KV cache (mlx-lm `QuantizedKVCache`): cuts cache memory 2-4x for long contexts. |
+| `--kv-bits N` / `--kv-group-size N` / `--quantized-kv-start N` | off / `64` / `0` | Quantize the KV cache. A per-stack policy decides layer by layer: growing attention KV quantizes (the last layer of a deep stack stays fp16), sliding windows and recurrent state stay fp16, pooled caches pack at rest. One `[kv]` line reports the verdict, e.g. `quantized 27/28 attn layers (1 held fp16)`, or `dropped:` with the reason when nothing can quantize. Cannot combine with `--max-kv-size` (refused at start). |
 | `--prefill-step-size N` | `2048` / `8192` streaming | Prefill chunk size; lower it to cap peak memory on long prompts. Over-RAM streaming `--stream-cpu` / `--stream-experts` models default to `8192`: each chunk re-streams the expert lane from disk, so fewer, bigger chunks prefill faster. Applies to `run`, `--bench`, and `--bench-depths`. |
 
 ### Multimodal (VLM)
@@ -434,7 +434,7 @@ every command. The terminal is upgraded on top:
 | `--repetition-context-size N` | `20` | Penalty lookback window (adjustable in-chat). |
 | `--logit-bias JSON` | - | Token-id to bias map. |
 | `--stop STR` | - | Stop sequence (trimmed; repeatable). |
-| `--kv-bits` / `--kv-group-size` / `--quantized-kv-start` | off / `64` / `0` | KV-cache quantization: cuts cache memory 2-4x for long chats. |
+| `--kv-bits` / `--kv-group-size` / `--quantized-kv-start` | off / `64` / `0` | KV-cache quantization, same per-stack policy and `[kv]` verdict line as `run`; cannot combine with `--max-kv-size`. |
 | `--prefill-step-size N` | `2048` / `8192` streaming | Prefill chunk size (peak-memory cap for `/load`-ed long prompts). Streaming `--stream-cpu` / `--stream-experts` models default to `8192`, same as `run`. |
 | `--stream-cpu` / `--stream-experts` / `--moe-experts` / `--moe-expert-mass` / `--moe-expert-probe` / `--moe-miss-shed` / `--moe-layer-shed` / `--gpu-keepwarm` | - | Execution placement and lossy MoE fan-out, same as [`run`](#loading), including larger-than-RAM streaming `--stream-cpu` chat (text path only). |
 | `--resize-shape N\|WxH` / `--thinking-budget N` | - | Image resolution (soft-token count, VLM mode) / thinking-token cap (text + VLM; adjustable via `/thinking-budget`). |

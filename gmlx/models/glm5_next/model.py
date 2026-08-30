@@ -391,8 +391,12 @@ class Glm5NextIndexer(nn.Module):
 def _dequantized(kv, cache):
     """Materialize a possibly-quantized KV fetch as a dense array."""
     if isinstance(kv, tuple):
+        # Cache fetches are lazy strided slices. mlx < 0.32.2
+        # dequantize corrupts strided biases operands (mlx #4381). The
+        # wraps stay: free when contiguous.
         return mx.dequantize(
-            *kv, group_size=cache.group_size, bits=cache.bits)
+            *(mx.contiguous(t) for t in kv),
+            group_size=cache.group_size, bits=cache.bits)
     return kv
 
 

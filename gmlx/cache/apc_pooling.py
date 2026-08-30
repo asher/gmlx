@@ -548,26 +548,30 @@ def install_pooled_prompt_kv_quant() -> None:
                 "kv_bits on a pooling-cache model: packed pools are B=1 "
                 "baseline only; this batch keeps fp16 pools")
             return
-        try:
-            fbits = float(bits)
-        except (TypeError, ValueError):
-            return
-        if fbits != int(fbits):
-            _skip_note(
-                "kv_bits=%s: pooled storage needs an integer affine width; "
-                "pools stay fp16", bits)
-            return
-        from gmlx.gen.generation import quantize_pooled_caches
+        from gmlx.cache.kv_policy import (arm_stack, kv_line,
+                                          resolve_kv_quant_policy)
 
         group = int(kwargs.get("kv_group_size") or 64)
-        n = quantize_pooled_caches(self.prompt_cache, int(fbits), group)
-        if n and not _noted[0]:
+        # The batch was built with kv_bits stripped, so only pooled
+        # packing engages. Failures degrade to fp16 pools, never a
+        # failed request.
+        try:
+            policy = resolve_kv_quant_policy(
+                self.prompt_cache, kv_bits=bits, kv_group_size=group,
+                quantized_kv_start=0, can_quantize_kv=False,
+                no_kv_reason="pooled path packs pools only; KV stays fp16")
+            if policy.verdict not in ("full", "partial"):
+                _skip_note("kv_bits=%s: %s; pools stay fp16", bits,
+                           policy.reason)
+                return
+            arm_stack(self.prompt_cache, policy, hold=False)
+        except Exception:
+            _log.warning("kv_bits=%s: pooled arming failed; pools stay "
+                         "fp16", bits, exc_info=True)
+            return
+        if not _noted[0]:
             _noted[0] = True
-            print(
-                f"[kv] {int(fbits)}-bit pooled KV cache ({n} pools; "
-                "sliding windows stay fp16)",
-                flush=True,
-            )
+            print(kv_line(None, policy), flush=True)
 
     ppb.__init__ = _pooled_init
     ppb._kq_pooled_prompt_kv = True

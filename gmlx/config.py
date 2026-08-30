@@ -74,6 +74,10 @@ LOAD_ENV = {
 # nothing said about it.
 SERVER_DTYPES = ("auto", "bfloat16", "bf16", "float16", "fp16")
 
+# Accepted `load.kv_quant_scheme` values. Only uniform affine is
+# certified. Other values are refused at parse time.
+KV_QUANT_SCHEMES = ("uniform",)
+
 # APC prompt-cache (+ SSD disk tier) key -> env var (mlx-vlm apc.from_env). The disk
 # sub-block maps to APC_DISK_*; the namespace defaults to the model path downstream.
 CACHE_ENV = {
@@ -925,6 +929,15 @@ def resolve_model(
         thinking = ov["thinking"]
     if ov.get("reasoning_effort") is not None:
         reasoning_effort = ov["reasoning_effort"]
+
+    scheme = load.get("kv_quant_scheme")
+    if (scheme is not None
+            and str(scheme).strip().lower() not in KV_QUANT_SCHEMES):
+        # An unchecked value reaches mlx-vlm and builds caches no
+        # gmlx path can read.
+        raise ConfigError(
+            f"load.kv_quant_scheme must be one of "
+            f"{', '.join(KV_QUANT_SCHEMES)} (got {scheme!r})")
 
     ttl_s = model.ttl_s if model.ttl_s is not None else cfg.defaults.ttl_s
     return ResolvedModel(

@@ -56,7 +56,9 @@ def test_b1_mtp_converts(restorable):
     spec_engine.install_spec_kv_quant()
     caches = _mk()
     assert isinstance(caches[0], QuantizedKVCache)
-    assert isinstance(caches[2], QuantizedKVCache)
+    # The last layer of a deep stack stays fp16. The MTP arm
+    # conforms to the batch-path policy.
+    assert type(caches[2]) is KVCache
     assert isinstance(caches[1], _SSMCache)
     assert caches[0].bits == 4 and caches[0].group_size == 64
     assert caches[0].offset == 0 and caches[0].is_trimmable()
@@ -106,6 +108,68 @@ def test_batch_passthrough(restorable):
     sentinel = ["stock"]
     out = _mk(batch_size=2, make_cache=lambda lm, lp: sentinel)
     assert out is sentinel
+
+
+def test_batch_forces_fp16(restorable):
+    # B>1 MTP swaps stock quantized batch caches for BatchKVCache:
+    # the stock rollback misfiles BatchQuantizedKVCache and never
+    # trims rejected drafts.
+    from mlx_vlm.models.cache import BatchKVCache, BatchQuantizedKVCache
+
+    restorable.setenv("KV_BITS", "8")
+    spec_engine.install_spec_kv_quant()
+    lp = [0, 0]
+    stock = [BatchQuantizedKVCache(lp, group_size=64, bits=8),
+             _SSMCache(),
+             BatchQuantizedKVCache(lp, group_size=64, bits=8)]
+    out = _mk(batch_size=2, make_cache=lambda lm, _: stock)
+    assert type(out[0]) is BatchKVCache
+    assert type(out[2]) is BatchKVCache
+    assert isinstance(out[1], _SSMCache)
+
+
+def test_batch_forces_fp16_nested(restorable):
+    # to_batch_cache's CacheList arm quantizes nested subcaches with the
+    # default quantize=True, so the swap must walk into CacheList entries.
+    from mlx_vlm.models.cache import (BatchKVCache, BatchQuantizedKVCache,
+                                      CacheList)
+
+    restorable.setenv("KV_BITS", "8")
+    spec_engine.install_spec_kv_quant()
+    lp = [0, 0]
+    stock = [CacheList(BatchQuantizedKVCache(lp, group_size=64, bits=8),
+                       _SSMCache()),
+             BatchQuantizedKVCache(lp, group_size=64, bits=8)]
+    out = _mk(batch_size=2, make_cache=lambda lm, _: stock)
+    assert type(out[0]) is CacheList
+    assert type(out[0].caches[0]) is BatchKVCache
+    assert isinstance(out[0].caches[1], _SSMCache)
+    assert type(out[1]) is BatchKVCache
+
+
+def test_dequantize_lift_cache():
+    # B=1 quantized caches lift by dequantize, so the batch rebuild
+    # proceeds instead of a drain-wait.
+    from mlx_vlm.models.cache import BatchKVCache
+
+    mx.random.seed(3)
+    k = mx.random.normal((1, 2, 41, 64)).astype(mx.float16)
+    v = mx.random.normal((1, 2, 41, 64)).astype(mx.float16)
+    q = QuantizedKVCache(group_size=64, bits=8)
+    q.update_and_fetch(k, v)
+    q._gmlx_cascade = "stamp"
+    lifted = spec_engine.dequantize_lift_cache(q)
+    assert type(lifted) is BatchKVCache
+    assert lifted.offset == 41
+    assert lifted._gmlx_cascade == "stamp"
+    assert hasattr(lifted, "filter") and hasattr(lifted, "extend")
+    with mx.stream(mx.cpu):
+        ref = mx.dequantize(*(mx.contiguous(t[..., :41, :])
+                              for t in q.keys),
+                            group_size=64, bits=8)
+    got = lifted.keys[..., :41, :]
+    assert mx.abs(got.astype(mx.float32)
+                  - ref.astype(mx.float32)).max().item() < 1e-2
 
 
 def _fill(c, parts):
@@ -222,3 +286,69 @@ def test_batch_sdpa_tuple_defers():
     out = fn(q + 0, keys, values, cache=qc, scale=64**-0.5, mask=None)
     ref = orig(q + 0, keys, values, cache=qc, scale=64**-0.5, mask=None)
     assert mx.array_equal(out, ref).item()
+
+
+class _GdnFakeLM(_FakeLM):
+    model_type = "qwen3_5"
+
+
+class _GdnConfigFakeLM(_FakeLM):
+    # model_type only on config: the loader wrapper shape
+    class config:
+        model_type = "qwen3_5_moe"
+
+
+@pytest.mark.parametrize("lm_cls", [_GdnFakeLM, _GdnConfigFakeLM])
+def test_owned_off_gdn_declines_quantization(restorable, lm_cls):
+    # The stock fallback cannot verify on quantized KV tuples. The
+    # guard keys on model_type, direct or config fallback.
+    restorable.setenv("KV_BITS", "4")
+    restorable.setenv("GMLX_QWEN_OWNED", "0")
+    spec_engine.install_spec_kv_quant()
+    caches = ar.make_speculative_prompt_cache(
+        lm_cls(), draft_kind="mtp", batch_size=1, left_padding=[0],
+        make_cache=lambda lm, lp: pytest.fail(
+            "B=1 mtp bypass must not call make_cache"),
+    )
+    assert not any(isinstance(c, QuantizedKVCache) for c in caches)
+
+
+def test_owned_on_gdn_still_converts(restorable):
+    restorable.setenv("KV_BITS", "4")
+    restorable.setenv("GMLX_QWEN_OWNED", "1")
+    spec_engine.install_spec_kv_quant()
+    caches = ar.make_speculative_prompt_cache(
+        _GdnFakeLM(), draft_kind="mtp", batch_size=1, left_padding=[0],
+        make_cache=lambda lm, lp: pytest.fail(
+            "B=1 mtp bypass must not call make_cache"),
+    )
+    assert isinstance(caches[0], QuantizedKVCache)
+
+
+class _Stamp:
+    pass
+
+
+def test_warm_merge_config_follows_batched_policy(restorable):
+    # The warm merge follows the batched verdict stamped on the
+    # model, never the environment. MTP models drop kv when batched.
+    from gmlx.cache.kv_policy import dropped_policy, resolve_kv_quant_policy
+    from gmlx.serve.kv_policy import ServeKvPolicy
+
+    restorable.setenv("KV_BITS", "8")   # env says quantize; stamp wins
+
+    model = _Stamp()
+    single = resolve_kv_quant_policy([KVCache()], kv_bits=8,
+                                     kv_group_size=64, mode="single")
+    batched_drop = dropped_policy("mtp fp16 when batched", 8, 64, "batched")
+    model._gmlx_kv_policy = ServeKvPolicy(single, batched_drop)
+    assert spec_engine._live_kv_quant_config(model) is None
+
+    batched_full = resolve_kv_quant_policy([KVCache()], kv_bits=8,
+                                           kv_group_size=64, mode="batched")
+    model._gmlx_kv_policy = ServeKvPolicy(single, batched_full)
+    assert spec_engine._live_kv_quant_config(model) is not None
+
+    # no stamp: fail-safe None, never the environment
+    assert spec_engine._live_kv_quant_config(_Stamp()) is None
+    assert spec_engine._live_kv_quant_config(None) is None

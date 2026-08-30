@@ -103,72 +103,6 @@ def _prefill_progress_ui(stream=None):
     return cb, close
 
 
-def kv_quantization_unsupported(model) -> str | None:
-    """Reason string when --kv-bits cannot apply to this model's cache stack,
-    else None. mlx-lm's maybe_quantize_kv_cache converts every cache exposing
-    ``to_quantized``, but RotatingKVCache's raises NotImplementedError mid
-    generation - any arch with sliding-window layers (deepseek4, gemma) dies
-    on its first quantized step unless the flag is dropped up front."""
-    make = getattr(model, "make_cache", None)
-    if not callable(make):
-        return None
-    try:
-        caches = make()
-    except Exception:
-        return None
-    from gmlx.cache.compat import cache_types
-
-    rotating = (cache_types("RotatingKVCache")
-                + cache_types("BatchRotatingKVCache"))
-    flat, stack = [], list(caches or [])
-    while stack:
-        c = stack.pop()
-        inner = getattr(c, "caches", None)
-        if inner is not None:
-            stack.extend(inner)
-        else:
-            flat.append(c)
-    bad = sorted(
-        {
-            type(c).__name__
-            for c in flat
-            # kv_quant_unsupported: caches whose to_quantized raises by
-            # design (MSAKVCache - quantizing drops the indexer stream).
-            if isinstance(c, rotating)
-            or getattr(c, "kv_quant_unsupported", False)
-        }
-    )
-    if bad:
-        return f"cache stack cannot quantize ({', '.join(bad)})"
-    return None
-
-
-_KV_QUANT_BITS = (2, 3, 4, 6, 8)  # mx.quantize affine widths
-
-
-def quantize_pooled_caches(caches, bits: int, group_size: int = 64) -> int:
-    """Arm quantized at-rest storage on every quantizable PoolingCache
-    (deepseek4 compressor pools -- the only KV that grows with context;
-    sliding windows are size-capped and stay fp16). Returns the number
-    armed. The caches must be fresh: no pooled rows landed yet."""
-    from gmlx.models.deepseek_v4.cache import PoolingCache
-
-    if bits not in _KV_QUANT_BITS:
-        return 0
-    n = 0
-    stack = list(caches or [])
-    while stack:
-        c = stack.pop()
-        inner = getattr(c, "caches", None)
-        if inner is not None:
-            stack.extend(inner)
-            continue
-        if isinstance(c, PoolingCache) and c.quantizable:
-            c.quantize_storage(group_size=group_size, bits=bits)
-            n += 1
-    return n
-
-
 def _echo_think_tag(prompt, tokenizer):
     """The think-open tag to echo before a raw verbose stream, or None. A
     pre-fill chat template ends the rendered prompt inside an open thinking
@@ -352,25 +286,26 @@ def generate(
 
     prompt_cache = None
     if kv_bits is not None:
-        reason = kv_quantization_unsupported(model)
-        if reason:
-            # mlx-lm's converter would crash on the rotating caches, so the
-            # flag is honored here instead: pack the growing pooled caches
-            # at rest and hand the pre-armed cache to stream_generate.
-            from mlx_lm.models.cache import make_prompt_cache as _mpc
+        # Resolve on the constructed stack. A bare make_cache probe
+        # misses what max_kv_size builds.
+        from mlx_lm.models.cache import make_prompt_cache as _mpc
 
-            prompt_cache = _mpc(model, max_kv_size=max_kv_size)
-            n_pools = quantize_pooled_caches(prompt_cache, kv_bits, kv_group_size)
-            if n_pools:
-                print(
-                    f"[kv] {kv_bits}-bit pooled KV cache ({n_pools} pools; "
-                    "sliding windows stay fp16)",
-                    file=sys.stderr,
-                )
-            else:
-                prompt_cache = None
-                print(f"warning: --kv-bits dropped: {reason}", file=sys.stderr)
+        from gmlx.cache.kv_policy import (arm_stack, kv_line,
+                                          resolve_kv_quant_policy)
+
+        prompt_cache = _mpc(model, max_kv_size=max_kv_size)
+        policy = resolve_kv_quant_policy(
+            prompt_cache, kv_bits=kv_bits, kv_group_size=kv_group_size,
+            quantized_kv_start=quantized_kv_start,
+            max_kv_size=max_kv_size)
+        print(kv_line(None, policy), file=sys.stderr)
+        if policy.verdict == "error":
+            raise SystemExit(2)
+        if policy.verdict == "dropped":
+            prompt_cache = None
             kv_bits = None
+        else:
+            arm_stack(prompt_cache, policy)
 
     gen_kwargs = {
         "max_tokens": max_tokens,
@@ -834,9 +769,12 @@ def _generate_speculative(
     if kv_bits is not None:
         # The stock mlx-vlm round has no KV-quantization hook and the models
         # routed here (gemma4/qwen3.x drafters) have no pooled caches.
+        from gmlx.cache.kv_policy import dropped_policy, kv_line
+
         print(
-            "warning: --kv-bits not applied on the MTP path "
-            "(no quantizable caches)",
+            kv_line(None, dropped_policy(
+                "stock MTP rounds have no KV quantization hook",
+                kv_bits, kv_group_size, "single")),
             file=sys.stderr,
         )
     if thinking_budget is not None:
@@ -1048,21 +986,19 @@ def generate_speculative_owned(
     lm = model.language_model if hasattr(model, "language_model") else model
     prompt_cache = _cache.make_prompt_cache(lm)
     if kv_bits is not None:
-        # Rollback/replay are watermark moves, storage-agnostic, so the
-        # pooled packing composes with the MTP undo machinery.
-        n_pools = quantize_pooled_caches(prompt_cache, kv_bits, kv_group_size)
-        if n_pools:
-            print(
-                f"[kv] {kv_bits}-bit pooled KV cache ({n_pools} pools; "
-                "sliding windows stay fp16)",
-                file=sys.stderr,
-            )
-        else:
-            print(
-                "warning: --kv-bits not applied on the MTP path "
-                "(no quantizable caches)",
-                file=sys.stderr,
-            )
+        # The MTP rounds have no KV converter, so only pooled layers
+        # engage. Rollback is a watermark move and composes with packing.
+        from gmlx.cache.kv_policy import (arm_stack, kv_line,
+                                          resolve_kv_quant_policy)
+
+        policy = resolve_kv_quant_policy(
+            prompt_cache, kv_bits=kv_bits, kv_group_size=kv_group_size,
+            mtp=True, can_quantize_kv=False,
+            no_kv_reason="MTP rounds have no KV quantization hook")
+        print(kv_line(None, policy), file=sys.stderr)
+        if policy.verdict == "error":
+            raise SystemExit(2)
+        arm_stack(prompt_cache, policy, hold=False)
 
     detok = tokenizer.detokenizer
     detok.reset()

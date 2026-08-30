@@ -46,6 +46,10 @@ _CANDIDATES = {
     "gpt_oss_20b": [
         "lmstudio-community__gpt-oss-20b-GGUF/gpt-oss-20b-MXFP4.gguf",
     ],
+    # native-MTP hybrid for the MTP x kv-bits scenarios
+    "qwen35_9b_mtp": [
+        "unsloth__Qwen3.5-9B-MTP-GGUF/Qwen3.5-9B-Q6_K.gguf",
+    ],
 }
 
 # Canonical download source per handle: an ``hf:<org>/<repo>/<file>`` ref whose
@@ -64,6 +68,7 @@ _SOURCES = {
     "gemma4_12b": "hf:bartowski/gemma-4-12B-it-GGUF/gemma-4-12B-it-Q6_K.gguf",
     "gemma4_12b_assistant": "hf:unsloth/gemma-4-12b-it-GGUF/mtp-gemma-4-12b-it.gguf",
     "gpt_oss_20b": "hf:lmstudio-community/gpt-oss-20b-GGUF/gpt-oss-20b-MXFP4.gguf",
+    "qwen35_9b_mtp": "hf:unsloth/Qwen3.5-9B-MTP-GGUF/Qwen3.5-9B-Q6_K.gguf",
 }
 
 # Preference order for the default LLM judge (a bigger, coherent model judges

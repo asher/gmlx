@@ -295,28 +295,24 @@ def _ckpt_layout_for(model, block_size: int = 16):
     return tags or None
 
 
-def _live_kv_quant_config():
+def _live_kv_quant_config(model=None):
     """The serve KV quant policy as a warm-merge config, or None.
 
-    Env-sourced (KV_BITS / KV_QUANT_SCHEME / KV_GROUP_SIZE) like the
-    owned B=1 spec path: serve config feeds these vars and the engine
-    reads the same channel, so the merged warm batch matches the live
-    ``_make_cache`` layer types. Key/value split overrides are not
-    exposed in gmlx config and stay None."""
-    raw = os.environ.get("KV_BITS", "")
-    if not raw:
+    The batched verdict stamped on the model rules the warm merge:
+    a warm hit joins a batch and MTP batches run fp16 KV. No stamp
+    means None. The only caller is the MTP prefill init, where fp16
+    is the only correct merge. Key/value split overrides stay None."""
+    stamped = getattr(model, "_gmlx_kv_policy", None)
+    if stamped is None:
         return None
-    try:
-        bits = float(raw)
-    except ValueError:
+    batched = getattr(stamped, "batched", None)
+    if batched is None or batched.verdict not in ("full", "partial"):
         return None
-    if bits <= 0:
-        return None
+    bits = float(batched.bits)
+    group = int(batched.group_size or 64)
     try:
         from mlx_vlm.kv_quant import from_legacy
-        pol = from_legacy(
-            bits, os.environ.get("KV_QUANT_SCHEME") or None,
-            int(os.environ.get("KV_GROUP_SIZE", "64") or 64))
+        pol = from_legacy(bits, None, group)
         return pol.to_config() if pol is not None else None
     except Exception:
         _log.warning("KV quant policy resolve failed; warm merge stays "
@@ -419,7 +415,7 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
             from mlx_vlm import apc as _apc
             warm, _ = _apc.make_warm_batch_exact_cache_multi(
                 [warm], prefix_lens=[prefix_len],
-                kv_quant_config=_live_kv_quant_config())
+                kv_quant_config=_live_kv_quant_config(batch.model))
         if warm and 0 < prefix_len < len(ids_list):
             batch.prompt_cache = warm
             # Matched blocks stay acquired until the stock post-prefill
@@ -1842,6 +1838,32 @@ _RELEASED_FLAG = "_kq_gguf_spec_released"
 _RELEASE_PENDING_FLAG = "_kq_gguf_spec_release_pending"
 
 
+def dequantize_lift_cache(c):
+    """Dequantize a B=1 QuantizedKVCache into a one-row BatchKVCache.
+
+    QuantizedKVCache has no merge, and the B>1 MTP arm runs fp16 KV
+    anyway, so the lift performs the same conversion the batch-build
+    swap does, at preemption or injection time, as a one-off O(depth)
+    copy. Without this every kv-bits MTP preemption declined into a
+    drain-wait and queued rows stalled behind the live generation."""
+    from mlx_vlm.models.cache import BatchKVCache
+
+    lifted = BatchKVCache([0])
+    L = c.offset
+    if L:
+        keys = mx.dequantize(
+            *(mx.contiguous(t[..., :L, :]) for t in c.keys),
+            group_size=c.group_size, bits=c.bits)
+        values = mx.dequantize(
+            *(mx.contiguous(t[..., :L, :]) for t in c.values),
+            group_size=c.group_size, bits=c.bits)
+        lifted.update_and_fetch(keys, values)
+    stamp = getattr(c, "_gmlx_cascade", None)
+    if stamp is not None:
+        lifted._gmlx_cascade = stamp
+    return lifted
+
+
 def install_continuous_batch_admission() -> None:
     """Let new requests prefill and inject during speculative decode.
 
@@ -2092,6 +2114,10 @@ def install_continuous_batch_admission() -> None:
         injection path applies to incoming caches)."""
         if hasattr(c, "filter") and hasattr(c, "extend"):
             return c
+        from gmlx.cache.compat import cache_types
+
+        if isinstance(c, cache_types("QuantizedKVCache")):
+            return dequantize_lift_cache(c)
         lifted = type(c).merge([c])
         stamp = getattr(c, "_gmlx_cascade", None)
         if stamp is not None:
@@ -2119,6 +2145,19 @@ def install_continuous_batch_admission() -> None:
             return False
         last = getattr(self, "_kq_last_tokens", {}).get(self._all_uids[0])
         if last is None:
+            return False
+        # Every cache must be batch-liftable before the generator
+        # closes. A quantized B=1 cache lifts by dequantize. Anything
+        # else unliftable declines into the drain-wait.
+        from gmlx.cache.compat import cache_types
+
+        quant_single = cache_types("QuantizedKVCache")
+        if not all(
+            (hasattr(c, "filter") and hasattr(c, "extend"))
+            or hasattr(type(c), "merge")
+            or isinstance(c, quant_single)
+            for c in self.prompt_cache
+        ):
             return False
         it = self._rounds_iter
         captured = []
@@ -2378,7 +2417,7 @@ _SPEC_KV_QUANT_WIDTHS = (2, 3, 4, 6, 8)  # mx.quantize affine widths
 def _spec_kv_quant_params():
     """(bits, group_size) when serve's KV_BITS asks for an affine width the
     single-stream cache can honor, else None. Fractional widths and
-    non-uniform schemes (turboquant) have no trimmable B=1 cache."""
+    non-uniform schemes have no trimmable B=1 cache."""
     if os.environ.get("GMLX_SPEC_KV_QUANT", "1") == "0":
         return None
     raw = os.environ.get("KV_BITS", "")
@@ -2436,6 +2475,7 @@ def install_spec_kv_quant() -> None:
     _noted = [False]
     _warned_batch = [False]
     _warned_rotating = [False]
+    _warned_stock = [False]
 
     def _quantizing_spec_cache(lm, *, draft_kind, batch_size, left_padding,
                                make_cache):
@@ -2449,12 +2489,37 @@ def install_spec_kv_quant() -> None:
         if draft_kind != "mtp":
             return caches
         if batch_size != 1:
-            if not _warned_batch[0]:
+            # Force fp16 batch KV: the stock rollback misfiles
+            # BatchQuantizedKVCache as an SSM cache and never trims
+            # rejected drafts.
+            # to_batch_cache also quantizes nested subcaches. Walk
+            # into CacheList entries.
+            from mlx_vlm.models.cache import BatchKVCache
+
+            batch_quant = cache_types("BatchQuantizedKVCache")
+
+            def _swap(c):
+                if isinstance(c, batch_quant):
+                    return BatchKVCache(left_padding), 1
+                inner = getattr(c, "caches", None)
+                if inner is None:
+                    return c, 0
+                subs = [_swap(s) for s in inner]
+                n = sum(k for _, k in subs)
+                if n:
+                    c.caches = tuple(s for s, _ in subs)
+                return c, n
+
+            swapped = 0
+            for e, c in enumerate(caches):
+                caches[e], n_sw = _swap(c)
+                swapped += n_sw
+            if swapped and not _warned_batch[0]:
                 _warned_batch[0] = True
                 _log.warning(
                     "KV_BITS with MTP at batch size %d: packed batch "
-                    "rollback is unsupported; batched rows keep the stock "
-                    "cache", batch_size)
+                    "rollback is unsupported; %d layers run fp16 KV",
+                    batch_size, swapped)
             return caches
         if any(isinstance(c, rotating) for c in caches):
             if not _warned_rotating[0]:
@@ -2463,19 +2528,38 @@ def install_spec_kv_quant() -> None:
                     "KV_BITS dropped on the MTP path: sliding-window "
                     "cache stack cannot quantize")
             return caches
+        from gmlx.models.qwen35.gdn import stock_gdn_fallback
+
+        mt = (getattr(lm, "model_type", None)
+              or getattr(getattr(lm, "config", None), "model_type", None))
+        if stock_gdn_fallback(mt):
+            # The bare-stock fallback slices keys as raw arrays and
+            # crashes on quantized tuples.
+            if not _warned_stock[0]:
+                _warned_stock[0] = True
+                _log.warning(
+                    "KV_BITS dropped on the MTP path: the GMLX_QWEN_OWNED=0 "
+                    "stock fallback cannot verify on a quantized KV cache")
+            return caches
+        from mlx_vlm.models.cache import should_quantize_kv_layer
+
         out = []
-        n = 0
-        for c in caches:
-            if type(c) in plain_kv:
+        n = held = 0
+        n_layers = len(caches)
+        for i, c in enumerate(caches):
+            if type(c) in plain_kv and should_quantize_kv_layer(i, n_layers):
                 out.append(c.to_quantized(group_size=group, bits=bits))
                 n += 1
             else:
+                if type(c) in plain_kv:
+                    held += 1
                 out.append(c)
         if n and not _noted[0]:
             _noted[0] = True
+            tail = f" ({held} held fp16)" if held else ""
             print(
-                f"[kv] MTP spec path: {n}-layer target KV quantized "
-                f"({bits}-bit, group {group})",
+                f"[kv] MTP spec path: kv_bits={bits} group={group} -> "
+                f"quantized {n}/{n_layers} attn layers{tail}",
                 flush=True,
             )
         return out

@@ -455,7 +455,9 @@ def test_pooled_prompt_kv_quant_arms_b1(monkeypatch, capsys):
     assert b.init_kv_bits is None  # stripped before the stock init
     assert m.comp.is_quantized and m.comp._qgroup == 32
     assert not m.idx.is_quantized  # indexer pool opted out
-    assert "[kv] 8-bit pooled" in capsys.readouterr().out
+    # canonical policy line, same wording as serve/run/chat
+    out = capsys.readouterr().out
+    assert "[kv] kv_bits=8 group=32" in out and "pooled at rest" in out
 
 
 def test_pooled_prompt_kv_quant_batch_and_mtp_stay_fp16(monkeypatch):
