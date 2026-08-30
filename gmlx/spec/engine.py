@@ -2436,6 +2436,7 @@ def install_spec_kv_quant() -> None:
     _noted = [False]
     _warned_batch = [False]
     _warned_rotating = [False]
+    _warned_stock = [False]
 
     def _quantizing_spec_cache(lm, *, draft_kind, batch_size, left_padding,
                                make_cache):
@@ -2462,6 +2463,17 @@ def install_spec_kv_quant() -> None:
                 _log.warning(
                     "KV_BITS dropped on the MTP path: sliding-window "
                     "cache stack cannot quantize")
+            return caches
+        if ("qwen3_5" in type(lm).__module__
+                and not env_bool("GMLX_QWEN_OWNED", True)):
+            # The bare-stock text fallback has no verify patches; its
+            # verify fallback slices keys as raw arrays and crashes on
+            # quantized tuples (issue #104 second symptom).
+            if not _warned_stock[0]:
+                _warned_stock[0] = True
+                _log.warning(
+                    "KV_BITS dropped on the MTP path: the GMLX_QWEN_OWNED=0 "
+                    "stock fallback cannot verify on a quantized KV cache")
             return caches
         out = []
         n = 0

@@ -396,10 +396,12 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
                   "its 2 global-attention layers, so this covers the partial "
                   "policy; kv_dense_* covers the all-layers path"))
 
-    # kv: dense plain-attention stack, every attn layer quantized (issue
-    # #104 regression). kv8 adds the long generation with floors only; a
-    # 0.6B cannot clear the judge bar. kv4 runs the needle only; 4-bit
-    # long generation on a 0.6B fails quality floors even when correct.
+    # kv: dense plain-attention stack, every attn layer but the last
+    # quantized (should_quantize_kv_layer holds the last one fp16) - the
+    # issue #104 regression scenarios. kv8 adds the long generation with
+    # floors only; a 0.6B cannot clear the judge bar. kv4 runs the needle
+    # only; 4-bit long generation on a 0.6B fails quality floors even
+    # when correct.
     for label, load, extra in (
             ("kv8", {"kv_bits": 8, "kv_group_size": 64,
                      "quantized_kv_start": 0}, [P.p_long_gen(judge=False)]),
@@ -408,7 +410,7 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
         add(Scenario(
             key=f"kv_dense_{label}", tier="kv", needs=["qwen3_0_6b_q8"],
             title=f"Quantized KV, dense stack: {label} on qwen3-0.6b "
-                  "(all attn layers quantized) - needle recall",
+                  "(27 of 28 attn layers quantized) - needle recall",
             config={
                 "profiles": {"p": {"sampling": {"temperature": 0.0},
                                    "load": load}},

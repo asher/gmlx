@@ -166,7 +166,8 @@ def test_prefill_flash_threshold_and_kill(monkeypatch):
     assert mx.abs(got - ref).max().item() == 0.0
 
 
-def _strided_case(B=1, nq=8, nkv=4, L=16, kv=63, d=64, dtype=mx.float16):
+def _strided_case(B=1, nq=8, nkv=4, L=16, kv=63, d=64, dtype=mx.float16,
+                  group=64, bits=8):
     """Quantized tuples as the live caches produce them: step-rounded zero
     buffers fetched as lazy slices, strided when kv is not a step
     multiple."""
@@ -178,7 +179,7 @@ def _strided_case(B=1, nq=8, nkv=4, L=16, kv=63, d=64, dtype=mx.float16):
     alloc = (kv + step - 1) // step * step
 
     def store(x):
-        w, s, b = mx.quantize(x, group_size=64, bits=8)
+        w, s, b = mx.quantize(x, group_size=group, bits=bits)
         bufs = tuple(
             mx.zeros((B, nkv, alloc, t.shape[-1]), dtype=t.dtype)
             for t in (w, s, b))
@@ -191,24 +192,31 @@ def _strided_case(B=1, nq=8, nkv=4, L=16, kv=63, d=64, dtype=mx.float16):
     return q, qk, qv
 
 
-def _contig_ref(q, qk, qv, mask, scale=0.125):
-    kd = mx.dequantize(*(mx.contiguous(t) for t in qk),
-                       group_size=64, bits=8)
-    vd = mx.dequantize(*(mx.contiguous(t) for t in qv),
-                       group_size=64, bits=8)
+def _cpu_dequant(qt, group=64, bits=8):
+    """Ground truth independent of the Metal kernel under test."""
+    with mx.stream(mx.cpu):
+        return mx.dequantize(*qt, group_size=group, bits=bits)
+
+
+def _cpu_ref(q, qk, qv, mask, scale=0.125, group=64, bits=8):
+    kd = _cpu_dequant(qk, group, bits)
+    vd = _cpu_dequant(qv, group, bits)
     return mx.fast.scaled_dot_product_attention(
         mx.array(q), kd, vd, scale=scale, mask=mask)
 
 
-def test_prefill_flash_strided_cache_slices():
+@pytest.mark.parametrize("group,bits", [(64, 8), (32, 8), (64, 4), (32, 4)])
+@pytest.mark.parametrize("kv", [63, 256])
+def test_prefill_flash_strided_cache_slices(group, bits, kv):
     # issue #104: the flash arm must dequantize strided cache slices.
+    # kv=256 is the step-aligned (contiguous) control.
     assert qf.install_quantized_sdpa_mask_fix()
-    q, qk, qv = _strided_case(L=16, kv=63)
+    q, qk, qv = _strided_case(L=16, kv=kv, group=group, bits=bits)
     got = lm_base.quantized_scaled_dot_product_attention(
-        mx.array(q), qk, qv, 0.125, "causal")
-    ref = _contig_ref(q, qk, qv, "causal")
+        mx.array(q), qk, qv, 0.125, "causal", group_size=group, bits=bits)
+    ref = _cpu_ref(q, qk, qv, "causal", group=group, bits=bits)
     err = mx.abs(got - ref).max().item()
-    assert err == 0.0, f"flash arm on strided cache slices err={err}"
+    assert err < 2e-3, f"flash arm vs cpu ref g={group} b={bits} kv={kv} err={err}"
 
 
 def test_prefill_flash_strided_batch_cache_end_to_end():
@@ -226,9 +234,25 @@ def test_prefill_flash_strided_batch_cache_end_to_end():
     q = mx.random.normal((1, 8, 16, 64)).astype(mx.float16)
     got = lm_base.quantized_scaled_dot_product_attention(
         mx.array(q), qk, qv, 0.125, "causal")
-    ref = _contig_ref(q, qk, qv, "causal")
+    ref = _cpu_ref(q, qk, qv, "causal")
     err = mx.abs(got - ref).max().item()
-    assert err == 0.0, f"flash arm on live batch-cache slices err={err}"
+    assert err < 2e-3, f"flash arm on live batch-cache slices err={err}"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="mlx Metal dequantize misreads a strided biases operand "
+           "(0.31.2 correct, 0.32.1 regressed). An XPASS here means "
+           "upstream fixed it: schedule removal of the mx.contiguous "
+           "wraps (kv-bits plan P5).",
+)
+def test_mlx_strided_biases_dequantize_canary():
+    if mx.default_device().type != mx.DeviceType.gpu:
+        pytest.skip("Metal-only regression")
+    _, qk, _ = _strided_case(kv=63)
+    got = mx.dequantize(*qk, group_size=64, bits=8)
+    ref = _cpu_dequant(qk)
+    assert mx.abs(got - ref).max().item() < 1e-6
 
 
 def test_install_idempotent_and_killable(monkeypatch):
