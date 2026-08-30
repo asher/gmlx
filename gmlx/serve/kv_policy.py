@@ -1,9 +1,9 @@
 """Serve-side KV quantization policy: resolved once per model at load.
 
 The residency build calls resolve_for_load inside the per-model env
-window; the result rides on the entry and the ResponseGenerator so the
-memory preflight, /v1/models, and the engagement log all read the same
-object. An error verdict raises, failing residency with the reason.
+window. The result rides on the entry and the ResponseGenerator, so
+the memory preflight, /v1/models, and the engagement log read the same
+object. An error verdict fails residency with the reason.
 """
 
 import logging
@@ -19,7 +19,7 @@ RG_ATTR = "_gmlx_kv_policy"
 
 
 class KvPolicyError(RuntimeError):
-    """kv quantization config cannot run; the model fails residency."""
+    """kv quantization config cannot run. The model fails residency."""
 
 
 @dataclass(frozen=True)
@@ -28,14 +28,12 @@ class ServeKvPolicy:
     batched: KvQuantPolicy
 
     def pricing_vector(self):
-        """Per-layer bytes-per-element for admission: the batched mode,
-        the state a concurrent server actually runs in."""
+        """Per-layer bytes-per-element for admission (batched mode)."""
         return self.batched.bytes_per_element_vector()
 
     def to_json(self) -> dict:
-        """The /v1/models kv_quant field. verdict_batched exists because
-        MTP models quantize at B=1 and run fp16 when batched; a single
-        field would assert a number true only while the server is idle."""
+        """The /v1/models kv_quant field. verdict_batched is separate:
+        MTP models quantize at B=1 and run fp16 when batched."""
         s, b = self.single, self.batched
         out = {
             "bits": s.bits,
@@ -87,9 +85,8 @@ def resolve_for_load(rg, model_id: str):
     try:
         req_val = float(requested) if requested else 0.0
     except ValueError:
-        # Refuse the load instead of raising bare mid-build; upstream
-        # parses the same var, so a live rg.kv_bits never coexists with
-        # an unparseable KV_BITS.
+        # Upstream parses the same var, so a live rg.kv_bits never
+        # coexists with an unparseable KV_BITS.
         raise KvPolicyError(
             f"[kv] {model_id}: KV_BITS={requested!r} is not a number")
     bits = getattr(rg, "kv_bits", None)
@@ -103,9 +100,8 @@ def resolve_for_load(rg, model_id: str):
                 dropped_policy(reason, b, rg.kv_group_size, "single"),
                 dropped_policy(reason, b, rg.kv_group_size, "batched"))
             setattr(rg, RG_ATTR, pol)
-            # Model stamp too: warm APC merges must stay float here even
-            # though KV_BITS sits in the environment (upstream dropped
-            # the flag, so live caches run fp16).
+            # Warm merges read the model stamp and must stay float
+            # here: upstream dropped the flag and live caches run fp16.
             try:
                 setattr(rg.model, RG_ATTR, pol)
             except Exception:
@@ -138,9 +134,8 @@ def resolve_for_load(rg, model_id: str):
         bad = pol.single if pol.single.verdict == "error" else pol.batched
         raise KvPolicyError(kv_line(model_id, bad))
     setattr(rg, RG_ATTR, pol)
-    # Also stamp the model: the batch worker thread reads the policy off
-    # batch.model (residency's context-var proxy does not cross threads,
-    # see engine._install_apc_manager_stash).
+    # The batch worker reads the policy off batch.model. The residency
+    # proxy does not cross threads.
     try:
         setattr(rg.model, RG_ATTR, pol)
     except Exception:
@@ -154,9 +149,8 @@ def resolve_for_load(rg, model_id: str):
 
 
 def pricing_vector(rg, num_layers: int):
-    """The admission bytes-per-element vector for rg, or None to fall
-    back to uniform pricing. Length-checked against the config layer
-    count so a stack/config mismatch never misprices."""
+    """The admission bytes-per-element vector for rg, or None for
+    uniform pricing. Length-checked against the config layer count."""
     pol = getattr(rg, RG_ATTR, None)
     if pol is None:
         return None

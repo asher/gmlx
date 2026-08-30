@@ -552,12 +552,9 @@ def install_pooled_prompt_kv_quant() -> None:
                                           resolve_kv_quant_policy)
 
         group = int(kwargs.get("kv_group_size") or 64)
-        # can_quantize_kv=False: this batch was built with kv_bits
-        # stripped (fp16 KV throughout); only pooled at-rest packing
-        # engages here. The resolver classifies the nested dsv4 stack
-        # and arm_stack gates opted-out pools. Packing is best-effort
-        # inside __init__: a resolver surprise degrades to fp16 pools,
-        # never a failed request.
+        # The batch was built with kv_bits stripped, so only pooled
+        # packing engages. Failures degrade to fp16 pools, never a
+        # failed request.
         try:
             policy = resolve_kv_quant_policy(
                 self.prompt_cache, kv_bits=bits, kv_group_size=group,

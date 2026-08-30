@@ -56,9 +56,8 @@ def test_b1_mtp_converts(restorable):
     spec_engine.install_spec_kv_quant()
     caches = _mk()
     assert isinstance(caches[0], QuantizedKVCache)
-    # Serve carve-out: the last layer of a deep stack stays fp16
-    # (should_quantize_kv_layer); the MTP arm conforms to the same
-    # policy as the batch path.
+    # The last layer of a deep stack stays fp16. The MTP arm
+    # conforms to the batch-path policy.
     assert type(caches[2]) is KVCache
     assert isinstance(caches[1], _SSMCache)
     assert caches[0].bits == 4 and caches[0].group_size == 64
@@ -112,10 +111,9 @@ def test_batch_passthrough(restorable):
 
 
 def test_batch_forces_fp16(restorable):
-    # B>1 MTP: quantized batch caches from the stock builder are swapped
-    # for BatchKVCache. The stock rollback misfiles BatchQuantizedKVCache
-    # as an SSM cache (not trimmable, no zero_row_tail): rejected drafts
-    # are never trimmed and the state pairing shifts.
+    # B>1 MTP swaps stock quantized batch caches for BatchKVCache:
+    # the stock rollback misfiles BatchQuantizedKVCache and never
+    # trims rejected drafts.
     from mlx_vlm.models.cache import BatchKVCache, BatchQuantizedKVCache
 
     restorable.setenv("KV_BITS", "8")
@@ -150,9 +148,8 @@ def test_batch_forces_fp16_nested(restorable):
 
 
 def test_dequantize_lift_cache():
-    # Preempt/injection lift for B=1 quantized caches: same fp16
-    # conversion the B>1 swap performs, so the batch rebuild proceeds
-    # instead of declining into a drain-wait.
+    # B=1 quantized caches lift by dequantize, so the batch rebuild
+    # proceeds instead of a drain-wait.
     from mlx_vlm.models.cache import BatchKVCache
 
     mx.random.seed(3)
@@ -303,9 +300,8 @@ class _GdnConfigFakeLM(_FakeLM):
 
 @pytest.mark.parametrize("lm_cls", [_GdnFakeLM, _GdnConfigFakeLM])
 def test_owned_off_gdn_declines_quantization(restorable, lm_cls):
-    # GMLX_QWEN_OWNED=0 stock fallback cannot verify on quantized KV
-    # tuples (issue #104 second symptom); the guard keys on model_type
-    # (direct or config fallback), not the module name.
+    # The stock fallback cannot verify on quantized KV tuples. The
+    # guard keys on model_type, direct or config fallback.
     restorable.setenv("KV_BITS", "4")
     restorable.setenv("GMLX_QWEN_OWNED", "0")
     spec_engine.install_spec_kv_quant()
@@ -334,10 +330,8 @@ class _Stamp:
 
 
 def test_warm_merge_config_follows_batched_policy(restorable):
-    # The APC warm path joins a batch: its merge config must follow the
-    # BATCHED policy verdict stamped on the model, not the environment.
-    # MTP models drop kv when batched; a quantized warm merge would
-    # rebuild the misfiled-SSM rollback crash.
+    # The warm merge follows the batched verdict stamped on the
+    # model, never the environment. MTP models drop kv when batched.
     from gmlx.cache.kv_policy import dropped_policy, resolve_kv_quant_policy
     from gmlx.serve.kv_policy import ServeKvPolicy
 
@@ -355,8 +349,6 @@ def test_warm_merge_config_follows_batched_policy(restorable):
     model._gmlx_kv_policy = ServeKvPolicy(single, batched_full)
     assert spec_engine._live_kv_quant_config(model) is not None
 
-    # no stamp: fail-safe None. The sole caller is the MTP prefill
-    # init, where fp16 is the only correct merge; an env fallback here
-    # would quantize exactly the merge the policy exists to protect.
+    # no stamp: fail-safe None, never the environment
     assert spec_engine._live_kv_quant_config(_Stamp()) is None
     assert spec_engine._live_kv_quant_config(None) is None

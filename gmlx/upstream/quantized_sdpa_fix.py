@@ -143,11 +143,9 @@ def _make_fixed(orig, kq_fn):
             queries.shape[-2] >= env_int("GMLX_KV8_PREFILL_FLASH_MIN_L", 8)
             and env_bool("GMLX_KV8_PREFILL_FLASH", True)
         ):
-            # Cache fetches are lazy step-buffer slices. mlx < 0.32.2
-            # encoded a strided biases operand's contiguity copy after
-            # binding w and scales, so dequantize read the copy kernel's
-            # buffers (mlx #4381). The wraps are permanent: free when
-            # already contiguous, and they hold if the defect returns.
+            # Cache fetches are lazy strided slices. mlx < 0.32.2
+            # dequantize corrupts strided biases operands (mlx #4381).
+            # The wraps stay: free when contiguous.
             keys = mx.dequantize(*(mx.contiguous(t) for t in q_keys),
                                  group_size=group_size, bits=bits)
             values = mx.dequantize(*(mx.contiguous(t) for t in q_values),

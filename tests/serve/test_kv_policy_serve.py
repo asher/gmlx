@@ -61,8 +61,7 @@ def test_error_verdict_raises(monkeypatch):
 
 
 def test_qat_drop_surfaces(monkeypatch):
-    # Upstream get_quantized_kv_bits silently eats KV_BITS for qat ids;
-    # the policy reports the drop instead of showing nothing.
+    # Upstream drops KV_BITS for qat ids. The policy reports the drop.
     monkeypatch.setenv("KV_BITS", "8")
     pol = skv.resolve_for_load(_rg(kv_bits=None), "m-qat")
     assert pol.single.verdict == "dropped"

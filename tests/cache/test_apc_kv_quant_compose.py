@@ -29,8 +29,7 @@ def _stamped_model(bits=8, group=32):
 
 
 def test_live_kv_quant_config_off_without_stamp(monkeypatch):
-    # env alone never decides the warm merge: the sole caller is the
-    # MTP prefill init, where fp16 is the only correct unstamped answer
+    # env alone never decides the warm merge
     monkeypatch.setenv("KV_BITS", "8")
     assert spec_engine._live_kv_quant_config() is None
     assert spec_engine._live_kv_quant_config(object()) is None

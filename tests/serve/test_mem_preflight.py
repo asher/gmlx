@@ -173,8 +173,8 @@ def _stamp_policy(rg, layers=4, mtp=False):
 
 
 def test_kv_policy_shrinks_the_estimate(tight):
-    # 75k DENSE tokens: fp16 needs 0.61 GB (rejected), the resolved
-    # 8-bit policy prices 3 packed + 1 held layers at 0.40 GB (admitted).
+    # 75k dense tokens: fp16 pricing rejects, the resolved 8-bit
+    # policy admits.
     rg = _rg(DENSE, kv_bits=8.0, tokens=75_000)
     with pytest.raises(PromptTooLongError):
         mp.preflight_prompt_memory(rg, "x" * 200_000)
@@ -182,7 +182,7 @@ def test_kv_policy_shrinks_the_estimate(tight):
 
 
 def test_kv_bits_without_policy_prices_fp16():
-    # rg.kv_bits is a float upstream; without a resolved policy the
+    # rg.kv_bits is a float upstream. Without a resolved policy the
     # pricing must not guess a packed rate.
     costs = mp._policy_costs(_rg(DENSE, kv_bits=8.0), DENSE)
     assert costs == [(None, 2048.0)] * 4

@@ -35,11 +35,9 @@ def _models_payload() -> dict:
     serving.reregister_missing_models()   # a restored file re-appears here
     models = serving.resolved_models()
     resident, pinned = set(), set()
-    # kv_quant keys on the loaded id (exact id@profile first, bare id as
-    # a looser match), not the GGUF path: two ids can share one file
-    # (spec + base over the same GGUF), and two profiles of one id can
-    # load different kv_bits. Path map is the last-resort fallback for
-    # entries with no recorded loaded_as.
+    # Key on the loaded id, not the path. Two ids can share one GGUF
+    # and two profiles of one id can load different kv_bits. The path
+    # map is the last resort.
     kv_by_loaded, kv_by_id, kv_by_path = {}, {}, {}
     pool = _get_pool()
     if pool is not None:
@@ -72,8 +70,7 @@ def _models_payload() -> dict:
             "created": _mtime(rm.path),
             "owned_by": "gmlx",
             "resident": rm.path in resident,
-            # Resolved KV quantization policy (resident models only:
-            # the policy is resolved on the constructed stack at load).
+            # Resident models only: the policy resolves at load.
             "kv_quant": _kv_for(mid, rm, alias_of, profile),
             "pinned": bool(rm.pin) or rm.path in pinned,
             "speculative": bool(rm.speculative),
@@ -277,9 +274,8 @@ def install_runtime_snapshot_enrichment() -> None:
                     if k in st}
             except Exception:
                 pass
-            # Upstream's apc.enabled only sees its own loaded model; gmlx
-            # wires APC per residency entry, so /health said false while
-            # pool APC was live. Any resident manager counts as enabled.
+            # gmlx wires APC per residency entry. Any resident manager
+            # counts as enabled.
             try:
                 if pool.apc_managers() and isinstance(base.get("apc"), dict):
                     base["apc"]["enabled"] = True

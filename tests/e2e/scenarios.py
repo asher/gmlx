@@ -102,11 +102,9 @@ def pc_models_exactly(expected_ids: set) -> Callable:
 
 def pc_apc_enabled(expected: bool) -> Callable:
     def _check(client):
-        # /health is liveness-only by design (the hardening patch trims it);
-        # the explicit enabled marker lives on /v1/cache/stats, which answers
-        # {"enabled": false} when no APC manager is wired. Comparing the raw
-        # value (not bool(missing)) keeps the False case from passing
-        # vacuously if the field ever moves again.
+        # /health is liveness-only. The enabled marker lives on
+        # /v1/cache/stats and answers false when no manager is wired.
+        # Compare the raw value so a missing field fails.
         st, body = client.cache_stats()
         got = body.get("enabled") if isinstance(body, dict) else None
         ok = (st == 200 and got == expected)
@@ -461,12 +459,10 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
                   "its 2 global-attention layers, so this covers the partial "
                   "policy; kv_dense_* covers the all-layers path"))
 
-    # kv: dense plain-attention stack, every attn layer but the last
-    # quantized (should_quantize_kv_layer holds the last one fp16) - the
-    # issue #104 regression scenarios. kv8 adds the long generation with
-    # floors only; a 0.6B cannot clear the judge bar. kv4 runs the needle
-    # only; 4-bit long generation on a 0.6B fails quality floors even
-    # when correct.
+    # kv: the issue #104 regression scenarios on a dense stack, every
+    # attn layer but the last quantized. kv8 adds the long generation
+    # with floors only. kv4 runs the needle only: 4-bit long generation
+    # on a 0.6B fails quality floors even when correct.
     for label, load, extra in (
             ("kv8", {"kv_bits": 8, "kv_group_size": 64,
                      "quantized_kv_start": 0}, [P.p_long_gen(judge=False)]),
@@ -553,8 +549,8 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
                            prompts=[P.p_long_ctx_needle("TEALKV8RUN")])],
         post=[pc_cache_reuse("m", P.p_long_ctx_needle("CACHEDNEEDLE9"),
                              require_exercised=False,
-                             # qwen3 thinks through the whole haystack and
-                             # the token budget; compare real content
+                             # qwen3 spends the budget thinking, so
+                             # compare real content
                              chat_kwargs={"chat_template_kwargs":
                                           {"enable_thinking": False}}),
               pc_disk_cache_created(disk_dir_kv)],
@@ -688,11 +684,9 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
             post=[_pc_mtp_lossless("spec", "base")],
             notes="greedy spec vs greedy base, token-for-token; mismatch is a finding"))
 
-    # mtp x kv-bits: native-MTP hybrid under a quantized target KV. The
-    # spec path quantizes at B=1 (spec-cache to_quantized) while the base
-    # id runs the batch-built quantized cache; greedy equality crosses the
-    # two packing paths. Engagement asserts the batch axis: partial when
-    # idle, dropped when batched (MTP rollback cannot trim packed KV).
+    # mtp x kv-bits: native-MTP hybrid under quantized target KV.
+    # Greedy equality crosses the B=1 spec packing and the batch-built
+    # cache. Engagement asserts partial when idle, dropped when batched.
     q35 = reg.find("qwen35_9b_mtp")
     if reg.have("qwen35_9b_mtp"):
         add(Scenario(
@@ -709,9 +703,8 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
                                prompts=[P.p_long_ctx_needle("MAROONMTP88")])],
             post=[_pc_mtp_lossless(
                       "spec", "base",
-                      # qwen3.5 is a thinking model: with thinking on, content
-                      # is empty (reasoning_content only) and the lossless
-                      # compare would pass vacuously on two empty strings.
+                      # thinking on returns empty content and the
+                      # compare would pass vacuously
                       chat_kwargs={"chat_template_kwargs":
                                    {"enable_thinking": False}}),
                   pc_kv_engagement("spec", verdict="partial",
@@ -755,13 +748,9 @@ def _pc_mtp_lossless(spec_id: str, base_id: str, *, chat_kwargs=None) -> Callabl
                                    "identical" if t_spec == t_base
                                    else f"DIVERGED spec={str(t_spec)[:60]!r} "
                                         f"base={str(t_base)[:60]!r}"))
-        # Anti-vacuous guard: the comparison is only meaningful if `base` loaded
-        # NON-speculatively. One GGUF backs both ids; if the path-keyed MTP registry
-        # leaked the drafter into base's build (the worker-thread bug class), base
-        # would also be MTP and spec==base would pass for the wrong reason. The
-        # "[mtp] drafter:" INFO line logs exactly once per speculative build
-        # (serve loads run quiet, so verbose_print lines never reach the log),
-        # so the log must carry exactly one - proving base is the bare base.
+        # The compare is meaningful only if base loaded without a
+        # drafter. The "[mtp] drafter:" INFO line logs once per
+        # speculative build, so the log must carry exactly one.
         n_mtp = _count_in_log(getattr(client, "log_path", None),
                               "[mtp] drafter:")
         out.append(CheckResult(

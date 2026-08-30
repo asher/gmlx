@@ -298,15 +298,10 @@ def _ckpt_layout_for(model, block_size: int = 16):
 def _live_kv_quant_config(model=None):
     """The serve KV quant policy as a warm-merge config, or None.
 
-    Policy-first: serve stamps the resolved ServeKvPolicy on the model
-    (gmlx.serve.kv_policy.resolve_for_load) and the BATCHED verdict
-    rules the warm merge - a warm hit joins a batch, and under MTP the
-    batch runs fp16 KV (rollback cannot trim packed KV), so quantizing
-    the merge would rebuild the misfiled-SSM crash the policy prevents.
-    No stamp means None: the only caller is the MTP prefill init, where
-    fp16 is the only correct merge, so the environment never quantizes
-    a merge the policy could not see. Key/value split overrides are not
-    exposed in gmlx config and stay None."""
+    The batched verdict stamped on the model rules the warm merge:
+    a warm hit joins a batch and MTP batches run fp16 KV. No stamp
+    means None. The only caller is the MTP prefill init, where fp16
+    is the only correct merge. Key/value split overrides stay None."""
     stamped = getattr(model, "_gmlx_kv_policy", None)
     if stamped is None:
         return None
@@ -2151,10 +2146,9 @@ def install_continuous_batch_admission() -> None:
         last = getattr(self, "_kq_last_tokens", {}).get(self._all_uids[0])
         if last is None:
             return False
-        # Every cache must be batch-liftable before the generator closes.
-        # A quantized single-stream cache (KV_BITS MTP arm) has no merge
-        # but dequantize-lifts (the B>1 arm runs fp16 anyway); anything
-        # else unliftable (turbo) declines into the drain-wait behavior.
+        # Every cache must be batch-liftable before the generator
+        # closes. A quantized B=1 cache lifts by dequantize. Anything
+        # else unliftable declines into the drain-wait.
         from gmlx.cache.compat import cache_types
 
         quant_single = cache_types("QuantizedKVCache")
@@ -2495,12 +2489,11 @@ def install_spec_kv_quant() -> None:
         if draft_kind != "mtp":
             return caches
         if batch_size != 1:
-            # Force fp16 batch KV. Under KV_BITS the stock builder returns
-            # BatchQuantizedKVCache, which the stock rollback misfiles as
-            # an SSM cache (not trimmable, no zero_row_tail): rejected
-            # draft tokens are never trimmed and the state pairing shifts.
-            # Walk into CacheList entries: to_batch_cache's recursive arm
-            # quantizes nested subcaches too (and without the layer gate).
+            # Force fp16 batch KV: the stock rollback misfiles
+            # BatchQuantizedKVCache as an SSM cache and never trims
+            # rejected drafts.
+            # to_batch_cache also quantizes nested subcaches. Walk
+            # into CacheList entries.
             from mlx_vlm.models.cache import BatchKVCache
 
             batch_quant = cache_types("BatchQuantizedKVCache")
@@ -2540,9 +2533,8 @@ def install_spec_kv_quant() -> None:
         mt = (getattr(lm, "model_type", None)
               or getattr(getattr(lm, "config", None), "model_type", None))
         if stock_gdn_fallback(mt):
-            # The bare-stock text fallback has no verify patches; its
-            # verify fallback slices keys as raw arrays and crashes on
-            # quantized tuples (issue #104 second symptom).
+            # The bare-stock fallback slices keys as raw arrays and
+            # crashes on quantized tuples.
             if not _warned_stock[0]:
                 _warned_stock[0] = True
                 _log.warning(

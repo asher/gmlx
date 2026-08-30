@@ -286,10 +286,8 @@ def generate(
 
     prompt_cache = None
     if kv_bits is not None:
-        # Resolve on the constructed stack (max_kv_size included: probing
-        # a bare make_cache misses the all-rotating stack it builds), then
-        # conform the stack: held layers lose to_quantized so mlx-lm's
-        # converter skips them, pools pack at rest, the rest quantize.
+        # Resolve on the constructed stack. A bare make_cache probe
+        # misses what max_kv_size builds.
         from mlx_lm.models.cache import make_prompt_cache as _mpc
 
         from gmlx.cache.kv_policy import (arm_stack, kv_line,
@@ -988,9 +986,8 @@ def generate_speculative_owned(
     lm = model.language_model if hasattr(model, "language_model") else model
     prompt_cache = _cache.make_prompt_cache(lm)
     if kv_bits is not None:
-        # Rollback/replay are watermark moves, storage-agnostic, so the
-        # pooled packing composes with the MTP undo machinery. The rounds
-        # have no KV converter, so only pooled layers engage.
+        # The MTP rounds have no KV converter, so only pooled layers
+        # engage. Rollback is a watermark move and composes with packing.
         from gmlx.cache.kv_policy import (arm_stack, kv_line,
                                           resolve_kv_quant_policy)
 

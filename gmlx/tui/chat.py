@@ -2851,9 +2851,8 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
     _apply_placement(args, getattr(b.model, "language_model", b.model))
     _require_chat_template(b.tok)
 
-    # --kv-bits on the MTP path: same pooled-cache packing as the plain
-    # path (rollback/replay are watermark moves, storage-agnostic). The
-    # rounds have no KV converter, so only pooled layers engage.
+    # The MTP rounds have no KV converter, so only pooled layers
+    # engage.
     mtp_kv_policy = None
     if kv_kwargs.get("kv_bits") is not None:
         from gmlx.cache.kv_policy import kv_line, resolve_kv_quant_policy

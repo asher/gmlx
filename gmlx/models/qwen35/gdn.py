@@ -38,8 +38,8 @@ def owned_gdn_active(model_type) -> bool:
 
 def stock_gdn_fallback(model_type) -> bool:
     """True when a GDN-family model runs the bare-stock text fallback
-    (GMLX_QWEN_OWNED=0): none of the owned verify patches are present,
-    so the MTP spec path must not hand it quantized KV tuples."""
+    (GMLX_QWEN_OWNED=0). The fallback has no verify patches and must
+    not receive quantized KV tuples."""
     return (model_type in _QWEN_GDN_FAMILY
             and not env_bool("GMLX_QWEN_OWNED", True))
 

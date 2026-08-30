@@ -46,7 +46,7 @@ _CANDIDATES = {
     "gpt_oss_20b": [
         "lmstudio-community__gpt-oss-20b-GGUF/gpt-oss-20b-MXFP4.gguf",
     ],
-    # native-MTP hybrid (GDN + attn) - the MTP x kv-bits scenarios
+    # native-MTP hybrid for the MTP x kv-bits scenarios
     "qwen35_9b_mtp": [
         "unsloth__Qwen3.5-9B-MTP-GGUF/Qwen3.5-9B-Q6_K.gguf",
     ],

@@ -2000,8 +2000,8 @@ def test_kv_quant_scheme_uniform_accepted():
 
 
 def test_kv_quant_scheme_turbo_refused():
-    # The value would flow to mlx-vlm through the env window and build
-    # caches no gmlx SDPA path can read; refused at parse like dtype.
+    # An unchecked value reaches mlx-vlm and builds caches no gmlx
+    # path can read.
     doc = _doc()
     doc["models"]["m-bare"]["overrides"] = {
         "load": {"kv_bits": 8, "kv_quant_scheme": "turboquant"}}

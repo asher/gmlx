@@ -36,8 +36,8 @@ def test_hybrid_partial():
 
 
 def test_window_layers_stay_fp16():
-    # gemma shape: the carve-out is by index, so a KV layer in the last
-    # slot is held even when windows sit between (2-of-3 globals census).
+    # gemma shape: the carve-out is by index, so a kv layer in the
+    # last slot is held even with windows between.
     stack = [RotatingKVCache(512), KVCache(), RotatingKVCache(512), KVCache()]
     p = _resolve(stack)
     assert p.verdict == "partial"
@@ -51,7 +51,7 @@ def test_rotating_only_natural_drops():
 
 
 def test_rotating_under_max_kv_size_errors():
-    # Defect 4: --kv-bits + --max-kv-size on a no-make_cache model.
+    # --kv-bits + --max-kv-size on a model without make_cache.
     p = _resolve([RotatingKVCache(512)] * 4, max_kv_size=512)
     assert p.verdict == "error"
     assert "max_kv_size" in p.reason

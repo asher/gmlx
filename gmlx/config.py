@@ -75,8 +75,7 @@ LOAD_ENV = {
 SERVER_DTYPES = ("auto", "bfloat16", "bf16", "float16", "fp16")
 
 # Accepted `load.kv_quant_scheme` values. Only uniform affine is
-# certified for the owned SDPA paths; anything else is refused at parse
-# time instead of failing at request time.
+# certified. Other values are refused at parse time.
 KV_QUANT_SCHEMES = ("uniform",)
 
 # APC prompt-cache (+ SSD disk tier) key -> env var (mlx-vlm apc.from_env). The disk
@@ -934,8 +933,8 @@ def resolve_model(
     scheme = load.get("kv_quant_scheme")
     if (scheme is not None
             and str(scheme).strip().lower() not in KV_QUANT_SCHEMES):
-        # A bad value would pass through the env window and build caches
-        # no gmlx path can read; refuse at parse like server.dtype.
+        # An unchecked value reaches mlx-vlm and builds caches no
+        # gmlx path can read.
         raise ConfigError(
             f"load.kv_quant_scheme must be one of "
             f"{', '.join(KV_QUANT_SCHEMES)} (got {scheme!r})")

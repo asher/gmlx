@@ -105,11 +105,9 @@ def test_quantized_pool_trim_replay(pre_count, n_trim):
 
 
 def test_policy_arms_nested_compressor_pools():
-    # The real dsv4 stack shape: CacheList(Rotating, compressor pool,
-    # opted-out indexer pool) beside a bare window. Pins the regression
-    # where _classify fell through to "state" on the nested list (a
-    # dropped verdict, pools never armed) and arm_stack neither recursed
-    # nor honored PoolingCache.quantizable.
+    # The real dsv4 shape: CacheList(window, compressor pool,
+    # opted-out indexer pool) beside a bare window. Pins nested-pool
+    # classification and arming.
     from mlx_lm.models.cache import CacheList, RotatingKVCache
 
     from gmlx.cache.kv_policy import arm_stack, resolve_kv_quant_policy

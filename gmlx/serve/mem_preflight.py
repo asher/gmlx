@@ -115,10 +115,8 @@ def kv_layer_costs(model, bytes_per_elem: float = 2.0, per_layer_bpe=None):
 
 
 def _policy_costs(rg, model):
-    """kv_layer_costs priced from rg's resolved KV policy (batched mode,
-    the state a concurrent server runs in). Falls back to uniform fp16:
-    rg.kv_bits is a float upstream, so the old int-gated bits/8 branch
-    never fired and everything priced at 2.0 regardless of kv_bits."""
+    """kv_layer_costs priced from rg's resolved KV policy (batched
+    mode). Without a policy, pricing stays uniform fp16."""
     c = _lm_config(model)
     layers = _get(c, "num_hidden_layers")
     vec = None

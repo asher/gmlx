@@ -239,9 +239,9 @@ def test_prefill_flash_strided_batch_cache_end_to_end():
     assert err < 2e-3, f"flash arm on live batch-cache slices err={err}"
 
 
-# mlx #4381 (commit a9eed5a840) fixed the encode-order bug; released in
-# 0.32.2. The canaries below are a version bump gate: fail-closed in
-# both directions, never delete on failure.
+# mlx #4381 fixed the encode-order bug in 0.32.2. The canaries are a
+# version bump gate: fail-closed in both directions, never delete on
+# failure.
 _MLX_STRIDED_FIX = (0, 32, 2)
 
 
@@ -272,16 +272,11 @@ def _operand_buffers(kv=63, alloc=256, group=64, bits=8):
      if (w, s, b) != (0, 0, 0)],
     ids=lambda t: "w%ds%db%d" % t)
 def test_mlx_strided_operand_dequantize_canary(strided):
-    # Upstream encode-order bug (host side, quantize_impl): when the
-    # biases operand needed a contiguity copy, the copy was encoded
-    # after set_input_array bound w (slot 0) and scales (slot 1); the
-    # copy kernel rebound those slots and dequantize read its buffers.
-    # Corruption tracks the biases operand exactly (measured on 0.32.1:
-    # every biases-strided combo corrupt, every other combo clean; the
-    # w/scales copies encode before any binding). Pre-fix versions must
-    # reproduce it and fixed versions must not: this bug reached users
-    # through a version bump with no strided-operand interrogation, so
-    # a failure here means re-check the pin, never delete the test.
+    # Encode-order bug: the biases contiguity copy was encoded after
+    # w and scales were bound, so dequantize read the copy's buffers.
+    # Corruption tracks the biases operand exactly. Pre-fix versions
+    # must reproduce it and fixed versions must not. On failure
+    # re-check the pin; never delete the test.
     # GPU vs CPU dequantize differ ~2e-3 in fp16, so clean is < 1e-2
     # and corrupt is > 1.
     if mx.default_device().type != mx.DeviceType.gpu:
@@ -307,9 +302,8 @@ def test_mlx_strided_operand_dequantize_canary(strided):
 
 
 def test_mlx_strided_input_quantize_canary():
-    # mx.quantize was never affected (bit-identical on 0.32.1; the
-    # quantize-branch reorder in #4381 is defensive). Pinned on both
-    # sides of the fix so KVCache.to_quantized stays certified.
+    # mx.quantize was never affected. Pinned on both sides of the
+    # fix so KVCache.to_quantized stays certified.
     if mx.default_device().type != mx.DeviceType.gpu:
         pytest.skip("Metal-only regression")
     mx.random.seed(11)

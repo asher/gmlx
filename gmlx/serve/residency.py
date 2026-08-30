@@ -880,9 +880,8 @@ class _ResidencyPool:
                     manager.autosize(getattr(rg, "model", None))
                 except Exception:
                     _log.warning("APC pool autosize skipped", exc_info=True)
-            # KV quantization policy: one resolve per load, inside the env
-            # window (KV_BITS here distinguishes off from the qat drop).
-            # An error verdict raises and the model fails residency.
+            # One policy resolve per load, inside the env window. An
+            # error verdict fails residency.
             from .kv_policy import KvPolicyError, resolve_for_load
 
             rg = scratch.response_generator

@@ -86,8 +86,7 @@ class KvQuantPolicy:
             parts.append(f"({', '.join(held)})")
         out = " ".join(parts)
         if self.n_pool:
-            # pool packing is the engagement on pool-bearing stacks; a
-            # quantized-0/N headline would read as a no-op
+            # pools lead: quantized 0/N alone reads as a no-op
             out = f"{self.n_pool} pooled at rest; " + out
         if self.quantized_kv_start and not self.start_honored:
             out += (f"; quantized_kv_start={self.quantized_kv_start} "
@@ -101,8 +100,7 @@ def _error(reason, bits, group, mode, stack):
 
 
 def dropped_policy(reason, bits, group, mode) -> KvQuantPolicy:
-    """A bare dropped verdict for paths where no stack was constructed
-    (upstream ate the flag before a stack could exist)."""
+    """A dropped verdict for paths where no stack was constructed."""
     return KvQuantPolicy("dropped", reason, bits, group, mode, ())
 
 
@@ -115,9 +113,8 @@ def _dropped(reason, bits, group, mode, stack, kinds=None):
 
 def _classify(c, types):
     if hasattr(c, "quantize_storage"):
-        # An opted-out pool (dsv4 indexer: the score kernel reads it in
-        # full every step) rides fp16 as plain state, so a list holding
-        # only opted-out pools never claims a pool verdict.
+        # An opted-out pool classifies as state, so a list of only
+        # opted-out pools gets no pool verdict.
         return "pool" if getattr(c, "quantizable", True) else "state"
     if getattr(c, "kv_quant_unsupported", False):
         return "optout"
@@ -130,11 +127,8 @@ def _classify(c, types):
     inner = getattr(c, "caches", None)
     if inner is not None:
         subs = {_classify(s, types) for s in inner}
-        # A list with any quantizable KV counts as kv; the side caches
-        # ride along fp16 (their cost is in the kv estimate's noise).
-        # A pool member (dsv4: CacheList(Rotating, PoolingCache, ...))
-        # makes the layer poolable; arming walks back in and packs only
-        # the quantizable pools.
+        # A kv member rules a mixed list. A pool member marks the layer
+        # poolable. Side caches stay fp16 and are not priced.
         if "optout" in subs:
             return "optout"
         if "kv" in subs:
@@ -177,17 +171,13 @@ def resolve_kv_quant_policy(stack, *, kv_bits, kv_group_size=64,
                             no_kv_reason=None) -> KvQuantPolicy:
     """Resolve the KV quantization policy for one constructed cache stack.
 
-    ``stack`` must be the real stack the engine will run (same
-    construction args, max_kv_size included): probing a bare make_cache()
-    misses stacks the args reshape. ``mode`` is the batch axis: MTP
-    quantizes at B=1 and runs fp16 KV when batched, so engagement and
-    memory pricing differ per mode. Reference layer policy is the serve
-    rule: quantize growing KV-class layers except the last layer of a
-    deep stack (should_quantize_kv_layer); windows, recurrent state, and
-    opt-outs stay fp16; pooled caches pack at rest.
-    ``can_quantize_kv=False`` models an engine with no KV converter in
-    its loop (the CLI MTP rounds): only pooled packing engages, and
-    ``no_kv_reason`` names why.
+    stack must be the stack the engine will run, built with the same
+    args. A bare make_cache() probe misses what max_kv_size builds.
+    mode is the batch axis: MTP quantizes at B=1 and runs fp16 KV when
+    batched. Layer rule: quantize growing KV layers except the last
+    layer of a deep stack. Windows, recurrent state, and opt-outs stay
+    fp16. Pools pack at rest. can_quantize_kv=False limits engagement
+    to pooled packing and no_kv_reason names why.
     """
     stack = list(stack or [])
     if kv_bits is None:
@@ -259,8 +249,8 @@ def resolve_kv_quant_policy(stack, *, kv_bits, kv_group_size=64,
 
     hetero = any(k in ("window", "state", "optout", "other") for k in kinds)
     verdict = "partial" if hetero else "full"
-    # Batch caches quantize at construction; a nonzero start is only
-    # honored by the single-stream converter.
+    # Batch caches quantize at construction. Only the single-stream
+    # converter honors a nonzero start.
     honored = mode == "single" or not quantized_kv_start
     return KvQuantPolicy(verdict, None, bits, group, mode, tuple(per),
                          quantized_kv_start=int(quantized_kv_start or 0),
@@ -285,15 +275,10 @@ def _held_to_quantized(self):
 
 
 def hold_fp16(c):
-    """Rebind a FRESH cache to a subclass whose to_quantized is hidden,
-    so stock hasattr-gated converters leave the layer fp16 (mlx-lm
-    maybe_quantize_kv_cache and the mlx-vlm equivalents).
-
-    Held subclasses live in this module, so compat's
-    rebind_to_runtime_origin (gated on mlx-lm-origin class identity)
-    passes them through unswapped. Accepted: arm_stack serves CLI paths
-    whose stacks never cross the serve APC rebind; a held layer reaching
-    that seam would quietly skip APC for its stack."""
+    """Rebind a fresh cache to a subclass that hides to_quantized, so
+    hasattr-gated converters leave the layer fp16. Held layers must not
+    cross the serve APC rebind: rebind_to_runtime_origin passes them
+    through and APC silently skips the stack."""
     if not hasattr(c, "to_quantized"):
         return c
     cls = type(c)
@@ -308,9 +293,8 @@ def hold_fp16(c):
 
 
 def _arm_pools(c, bits, group) -> int:
-    """Arm at-rest packing on every quantizable pool under ``c``,
-    recursing into CacheList (dsv4 nests pools beside a window). The
-    quantizable gate keeps opted-out pools (dsv4 indexer) fp16."""
+    """Pack every quantizable pool under c, recursing into cache
+    lists. Opted-out pools stay fp16."""
     inner = getattr(c, "caches", None)
     if inner is not None:
         return sum(_arm_pools(s, bits, group) for s in inner)
@@ -321,14 +305,10 @@ def _arm_pools(c, bits, group) -> int:
 
 
 def arm_stack(stack, policy: KvQuantPolicy, hold=True):
-    """Conform a freshly built stack to the policy in place: fp16 layers
-    lose their to_quantized (converters skip them, including rotating
-    windows whose to_quantized raises NYI), pooled layers arm at-rest
-    packing (recursing into CacheList for dsv4-shaped layers).
-    ``hold=False`` arms pools only, for engines that run no converter.
-    Holds stay top-level: mlx-lm's converter iterates only the top of
-    the stack and CacheList exposes no to_quantized, so nested members
-    never meet a converter."""
+    """Conform a freshly built stack to the policy in place. Held fp16
+    layers lose to_quantized so converters skip them. Pool layers arm
+    at-rest packing. hold=False arms pools only. Holds stay top-level:
+    converters iterate only the top of the stack."""
     if policy.verdict not in ("full", "partial"):
         return stack
     for i, plan in enumerate(policy.per_layer):
