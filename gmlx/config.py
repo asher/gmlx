@@ -74,10 +74,9 @@ LOAD_ENV = {
 # nothing said about it.
 SERVER_DTYPES = ("auto", "bfloat16", "bf16", "float16", "fp16")
 
-# Accepted `load.kv_quant_scheme` values. Only the uniform affine scheme
-# is certified; mlx-vlm also accepts "turboquant", whose caches the
-# owned SDPA paths cannot read, so the value is refused at parse time
-# rather than passed through to fail (or corrupt) at request time.
+# Accepted `load.kv_quant_scheme` values. Only uniform affine is
+# certified for the owned SDPA paths; anything else is refused at parse
+# time instead of failing at request time.
 KV_QUANT_SCHEMES = ("uniform",)
 
 # APC prompt-cache (+ SSD disk tier) key -> env var (mlx-vlm apc.from_env). The disk

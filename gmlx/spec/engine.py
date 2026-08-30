@@ -2423,7 +2423,7 @@ _SPEC_KV_QUANT_WIDTHS = (2, 3, 4, 6, 8)  # mx.quantize affine widths
 def _spec_kv_quant_params():
     """(bits, group_size) when serve's KV_BITS asks for an affine width the
     single-stream cache can honor, else None. Fractional widths and
-    non-uniform schemes (turboquant) have no trimmable B=1 cache."""
+    non-uniform schemes have no trimmable B=1 cache."""
     if os.environ.get("GMLX_SPEC_KV_QUANT", "1") == "0":
         return None
     raw = os.environ.get("KV_BITS", "")
