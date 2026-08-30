@@ -271,18 +271,25 @@ def streamed_expert_bytes(gguf_path: str) -> int:
     """A-priori bytes of the routed-expert stacks (the tensors
     ``stream: experts`` serves from disk instead of wiring), summed from
     the GGUF header's tensor records without touching data. 0 when the
-    header cannot be read; the caller then gates on the full size."""
-    try:
-        from gguf import GGUFReader
+    header cannot be read; the caller then gates on the full size.
 
+    Read through ``headerscan``, not gguf-py's ``GGUFReader``: the latter
+    raises on any ggml type newer than the installed gguf-py (STQ1_0 is
+    type 43), so this returned 0 and the preload gate judged a streaming
+    serve against the model's full on-disk size - refusing exactly the
+    over-RAM serving the mode exists for. The name test is
+    ``prefetch._EXPS_RE``, the expression the streaming tier itself
+    selects on, so the two cannot drift."""
+    try:
+        from gmlx.load.headerscan import scan_gguf
         from gmlx.load.preflight import find_split_shards
+        from gmlx.stream.prefetch import _EXPS_RE
 
         total = 0
         for shard in find_split_shards(gguf_path):
-            for t in GGUFReader(shard).tensors:
-                name = str(t.name)
-                if "_exps." in name or name.endswith("_exps"):
-                    total += int(t.n_bytes)
+            for t in scan_gguf(shard).tensors:
+                if _EXPS_RE.match(t.name):
+                    total += int(t.nbytes)
         return total
     except Exception:
         return 0
