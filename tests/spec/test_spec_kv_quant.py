@@ -355,6 +355,8 @@ def test_warm_merge_config_follows_batched_policy(restorable):
     model._gmlx_kv_policy = ServeKvPolicy(single, batched_full)
     assert spec_engine._live_kv_quant_config(model) is not None
 
-    # no stamp: env fallback still applies (stock paths)
-    assert spec_engine._live_kv_quant_config(_Stamp()) is not None
-    assert spec_engine._live_kv_quant_config(None) is not None
+    # no stamp: fail-safe None. The sole caller is the MTP prefill
+    # init, where fp16 is the only correct merge; an env fallback here
+    # would quantize exactly the merge the policy exists to protect.
+    assert spec_engine._live_kv_quant_config(_Stamp()) is None
+    assert spec_engine._live_kv_quant_config(None) is None

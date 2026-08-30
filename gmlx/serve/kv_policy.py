@@ -109,7 +109,9 @@ def resolve_for_load(rg, model_id: str):
             try:
                 setattr(rg.model, RG_ATTR, pol)
             except Exception:
-                pass
+                _log.warning("[kv] %s: model stamp failed; warm merges "
+                             "see no policy (stay fp16)", model_id,
+                             exc_info=True)
             _log.warning(kv_line(model_id, pol.single))
             return pol
         return None
@@ -142,7 +144,8 @@ def resolve_for_load(rg, model_id: str):
     try:
         setattr(rg.model, RG_ATTR, pol)
     except Exception:
-        pass
+        _log.warning("[kv] %s: model stamp failed; warm merges see no "
+                     "policy (stay fp16)", model_id, exc_info=True)
     _log.info(kv_line(model_id, pol.single))
     if pol.batched.verdict != pol.single.verdict:
         _log.info(kv_line(model_id, pol.batched)

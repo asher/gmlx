@@ -124,6 +124,8 @@ def test_policy_arms_nested_compressor_pools():
     policy = resolve_kv_quant_policy(caches, kv_bits=8, kv_group_size=32)
     assert policy.verdict == "partial"
     assert [p.kind for p in policy.per_layer] == ["window", "pool"]
+    # pool-bearing summaries lead with the packing, not a 0/N headline
+    assert policy.summary().startswith("1 pooled at rest; ")
     arm_stack(caches, policy)
     assert comp_pool.is_quantized
     assert not idx_pool.is_quantized

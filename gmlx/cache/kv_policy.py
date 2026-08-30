@@ -82,11 +82,13 @@ class KvQuantPolicy:
             held.append(f"{self.n_window} sliding-window fp16")
         if self.n_state:
             held.append(f"{self.n_state} recurrent-state fp16")
-        if self.n_pool:
-            held.append(f"{self.n_pool} pooled at rest")
         if held:
             parts.append(f"({', '.join(held)})")
         out = " ".join(parts)
+        if self.n_pool:
+            # pool packing is the engagement on pool-bearing stacks; a
+            # quantized-0/N headline would read as a no-op
+            out = f"{self.n_pool} pooled at rest; " + out
         if self.quantized_kv_start and not self.start_honored:
             out += (f"; quantized_kv_start={self.quantized_kv_start} "
                     "not honored (batch caches quantize from token 0)")

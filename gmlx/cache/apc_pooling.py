@@ -555,16 +555,23 @@ def install_pooled_prompt_kv_quant() -> None:
         # can_quantize_kv=False: this batch was built with kv_bits
         # stripped (fp16 KV throughout); only pooled at-rest packing
         # engages here. The resolver classifies the nested dsv4 stack
-        # and arm_stack gates opted-out pools.
-        policy = resolve_kv_quant_policy(
-            self.prompt_cache, kv_bits=bits, kv_group_size=group,
-            quantized_kv_start=0, can_quantize_kv=False,
-            no_kv_reason="pooled path packs pools only; KV stays fp16")
-        if policy.verdict not in ("full", "partial"):
-            _skip_note("kv_bits=%s: %s; pools stay fp16", bits,
-                       policy.reason)
+        # and arm_stack gates opted-out pools. Packing is best-effort
+        # inside __init__: a resolver surprise degrades to fp16 pools,
+        # never a failed request.
+        try:
+            policy = resolve_kv_quant_policy(
+                self.prompt_cache, kv_bits=bits, kv_group_size=group,
+                quantized_kv_start=0, can_quantize_kv=False,
+                no_kv_reason="pooled path packs pools only; KV stays fp16")
+            if policy.verdict not in ("full", "partial"):
+                _skip_note("kv_bits=%s: %s; pools stay fp16", bits,
+                           policy.reason)
+                return
+            arm_stack(self.prompt_cache, policy, hold=False)
+        except Exception:
+            _log.warning("kv_bits=%s: pooled arming failed; pools stay "
+                         "fp16", bits, exc_info=True)
             return
-        arm_stack(self.prompt_cache, policy, hold=False)
         if not _noted[0]:
             _noted[0] = True
             print(kv_line(None, policy), flush=True)

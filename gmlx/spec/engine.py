@@ -303,32 +303,21 @@ def _live_kv_quant_config(model=None):
     rules the warm merge - a warm hit joins a batch, and under MTP the
     batch runs fp16 KV (rollback cannot trim packed KV), so quantizing
     the merge would rebuild the misfiled-SSM crash the policy prevents.
-    Env (KV_BITS / KV_QUANT_SCHEME / KV_GROUP_SIZE) is the fallback for
-    stock paths with no stamp. Key/value split overrides are not
+    No stamp means None: the only caller is the MTP prefill init, where
+    fp16 is the only correct merge, so the environment never quantizes
+    a merge the policy could not see. Key/value split overrides are not
     exposed in gmlx config and stay None."""
     stamped = getattr(model, "_gmlx_kv_policy", None)
-    if stamped is not None:
-        batched = getattr(stamped, "batched", None)
-        if batched is None or batched.verdict not in ("full", "partial"):
-            return None
-        bits = float(batched.bits)
-        group = int(batched.group_size or 64)
-        scheme = None
-    else:
-        raw = os.environ.get("KV_BITS", "")
-        if not raw:
-            return None
-        try:
-            bits = float(raw)
-        except ValueError:
-            return None
-        if bits <= 0:
-            return None
-        group = int(os.environ.get("KV_GROUP_SIZE", "64") or 64)
-        scheme = os.environ.get("KV_QUANT_SCHEME") or None
+    if stamped is None:
+        return None
+    batched = getattr(stamped, "batched", None)
+    if batched is None or batched.verdict not in ("full", "partial"):
+        return None
+    bits = float(batched.bits)
+    group = int(batched.group_size or 64)
     try:
         from mlx_vlm.kv_quant import from_legacy
-        pol = from_legacy(bits, scheme, group)
+        pol = from_legacy(bits, None, group)
         return pol.to_config() if pol is not None else None
     except Exception:
         _log.warning("KV quant policy resolve failed; warm merge stays "
