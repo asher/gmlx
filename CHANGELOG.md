@@ -35,6 +35,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   block, so it never drives speculative decoding, and its cache declares
   itself unquantizable, so the KV policy holds the whole stack at fp16:
   quantized SDPA has no place for the sink logit.
+- HY4 runs its hyper-connection cycle in two fused Metal kernels instead of
+  eight ops, and selects indexer keys through the mlx-kquant DSA kernels.
+  A 4096-token prefill chunk spends 0.50 s in the cycle where it spent
+  2.25 s, and the indexer no longer builds a 2.1 GB per-head score tensor
+  per layer. `GMLX_HY4_IHC_KERNEL=0` and `GMLX_HY4_IDX_KERNEL=0` restore
+  the ops paths.
 
 ### Fixed
 

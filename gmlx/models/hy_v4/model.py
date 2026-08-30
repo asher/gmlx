@@ -59,6 +59,7 @@ from gmlx.models.deepseek_v4.model import (
 from gmlx.models.deepseek_v4.model import (
     ensure_registered as _ds4_ensure_registered,
 )
+from gmlx.models.hy_v4 import idx_kernels, ihc_kernels
 
 
 def ensure_registered() -> None:
@@ -179,6 +180,16 @@ class IndependentHyperConnection(nn.Module):
         self.base = mx.zeros((2 * hc,), dtype=mx.float32)
         self.scale = mx.ones((2,), dtype=mx.float32)
 
+    def _fn_transposed(self):
+        # fn is frozen, so materialize the transpose the kernel reads once
+        # instead of adding a transpose node per sublayer per step.
+        fn_t = getattr(self, "_fn_t", None)
+        if fn_t is None:
+            fn_t = mx.contiguous(self.fn.T)
+            mx.eval(fn_t)
+            self._fn_t = fn_t
+        return fn_t
+
     def pre(self, x: mx.array):
         """``x`` [B, L, hc, D] -> (collapsed [B, L, D], post [B, L, hc])."""
         hc = self.hc_mult
@@ -192,8 +203,20 @@ class IndependentHyperConnection(nn.Module):
         collapsed = (pre[..., None] * y).sum(axis=-2)
         return collapsed.astype(x.dtype), post
 
+    def pre_norm(self, x: mx.array, norm: nn.RMSNorm):
+        """``pre`` with the sublayer norm folded in, one dispatch when the
+        fused kernel applies. The collapse feeds nothing but that norm."""
+        if ihc_kernels.eligible(x, self.hc_mult):
+            return ihc_kernels.front_collapse(
+                x, self._fn_transposed(), self.scale, self.base, norm.weight,
+                self.hc_eps, self.norm_eps, self.magnitude)
+        collapsed, post = self.pre(x)
+        return norm(collapsed), post
+
     def expand(self, y: mx.array, residual: mx.array, post: mx.array):
         """``y`` [B, L, D] scaled by ``post`` into each residual stream."""
+        if ihc_kernels.eligible(residual, self.hc_mult):
+            return ihc_kernels.expand(y, residual, post)
         out = (residual.astype(mx.float32)
                + post[..., None] * y.astype(mx.float32)[..., None, :])
         return out.astype(residual.dtype)
@@ -257,9 +280,14 @@ class HyV4Indexer(nn.Module):
         if k.shape[2] <= self.index_topk:
             return None
 
+        weights = self.weights_proj(x) * self.weight_scale
+        sel = idx_kernels.select(
+            q, k, weights, self.index_topk, offset, mask)
+        if sel is not None:
+            return sel
+
         scores = q @ k.swapaxes(-1, -2)
         scores = mx.maximum(scores, 0)
-        weights = self.weights_proj(x) * self.weight_scale
         scores = scores * weights.swapaxes(-1, -2)[..., None]
         scores = scores.sum(axis=1, keepdims=True)
         if mask is not None:
@@ -623,13 +651,12 @@ class HyV4DecoderLayer(nn.Module):
         cache: Optional[Any] = None,
         top_k: Optional[mx.array] = None,
     ):
-        x, post = self.attn_hc.pre(h)
-        x, top_k = self.self_attn(
-            self.input_layernorm(x), mask=mask, cache=cache, top_k=top_k)
+        x, post = self.attn_hc.pre_norm(h, self.input_layernorm)
+        x, top_k = self.self_attn(x, mask=mask, cache=cache, top_k=top_k)
         h = self.attn_hc.expand(x, h, post)
 
-        x, post = self.ffn_hc.pre(h)
-        x = self.mlp(self.post_attention_layernorm(x))
+        x, post = self.ffn_hc.pre_norm(h, self.post_attention_layernorm)
+        x = self.mlp(x)
         return self.ffn_hc.expand(x, h, post), top_k
 
 
