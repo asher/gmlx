@@ -162,6 +162,31 @@ FAMILIES: dict[str, dict] = {
             "reasoning-high": {"chat_template_kwargs": {"reasoning_effort": "high"}},
         },
     },
+    # AngelSlim/Hy4-preview: the GGUF's own general.sampling.* (t=0.9,
+    # top_p 1.0, top_k off), which discovery reads directly - repeated here
+    # so the family stands on its own. The chat template's reasoning_effort
+    # takes no_think/low/high (defaults to high; other values raise
+    # in-template). No reasoning-none intent: the template carries both
+    # `no_think` and `reasoning_effort`, the dialect `--thinking off`
+    # already maps onto, so a family-specific intent would duplicate a
+    # control that works today. The thinking tokens carry HY4's ':6124c78e'
+    # tag suffix so the server's open-think detection, budget criteria, and
+    # stream splitter see the model's real markers instead of the '<think>'
+    # default.
+    "hy4": {
+        "label": "HY4",
+        "arches": ("hyv4",),
+        "base": {"sampling": {
+            "temperature": 0.9,
+            "top_p": 1.0,
+            "thinking_start_token": "<think:6124c78e>",
+            "thinking_end_token": "</think:6124c78e>",
+        }},
+        "intents": {
+            "reasoning-low": {"chat_template_kwargs": {"reasoning_effort": "low"}},
+            "reasoning-high": {"chat_template_kwargs": {"reasoning_effort": "high"}},
+        },
+    },
     # moonshotai/Kimi-K3 model card, 2026-07 (generation_config carries no
     # sampling): t=1.0; top_p 0.95 single-step, 1.0 agentic - ship the
     # conservative one. The
