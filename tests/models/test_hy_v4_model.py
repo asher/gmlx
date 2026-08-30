@@ -20,7 +20,7 @@ import pytest
 import mlx.core as mx
 
 import gmlx.models.hy_v4.model as hy_v4_model
-from gmlx.gen.generation import kv_quantization_unsupported
+from gmlx.cache.kv_policy import FP16_BPE, resolve_kv_quant_policy
 from gmlx.models.hy_v4.model import HyV4KVCache, Model, ModelArgs
 
 DIM = 16
@@ -141,9 +141,17 @@ def test_cache_declares_kv_quantization_unsupported():
     assert HyV4KVCache.kv_quant_unsupported is True
 
 
-def test_kv_quantization_unsupported_names_the_cache():
-    reason = kv_quantization_unsupported(_model())
-    assert reason and "HyV4KVCache" in reason
+def test_kv_policy_drops_the_whole_stack():
+    # The declaration has to reach the resolver every entry point shares,
+    # not just sit on the class. A full layer's entry is a CacheList whose
+    # second slot is a plain KVCache, so this also pins that one opted-out
+    # member rules the layer - classify the layer on the quantizable slot
+    # and the indexer keys would pack behind the model's back.
+    policy = resolve_kv_quant_policy(_model().make_cache(), kv_bits=4)
+    assert policy.verdict == "dropped"
+    assert policy.reason
+    assert policy.n_quant == 0
+    assert {p.kind for p in policy.per_layer} == {"optout"}
 
 
 def test_make_cache_carries_an_indexer_slot_only_on_full_layers():
@@ -202,88 +210,27 @@ def test_split_cache_handles_every_entry_shape():
     assert hy_v4_model.split_cache(CacheList(a)) == (a, None)
 
 
-def test_serve_admission_drops_kv_bits_for_this_model(caplog):
-    # Serve prices the cache at kv_bits/8 in estimate.py and mem_preflight.py
-    # while safe_maybe_quantize skips a CacheList wholesale - so a served
-    # kv_bits would under-provision. The admission path must clear it, and
-    # say so: the config key stays as the operator wrote it, so without the
-    # warning a `kv_bits: 4` entry looks honoured forever.
-    import logging
-
-    from gmlx.serve.residency import _drop_unsupported_kv_bits
-
-    class _RG:
-        kv_bits = 4
-
-    rg = _RG()
-    rg.model = _model()
-    with caplog.at_level(logging.WARNING, logger="gmlx.serve.residency"):
-        _drop_unsupported_kv_bits(rg, "/models/hy4-preview.gguf")
-    assert rg.kv_bits is None
-
-    (record,) = [r for r in caplog.records if r.levelno >= logging.WARNING]
-    msg = record.getMessage()
-    assert "kv_bits=4" in msg                      # what was asked for
-    assert "/models/hy4-preview.gguf" in msg       # which model
-    assert "HyV4KVCache" in msg                    # why
-    assert "fp16" in msg and "4x" in msg           # what it costs instead
+def test_admission_prices_every_layer_at_fp16():
+    # The reason the verdict has to be honest: serve admission prices from
+    # this vector. A dropped stack priced at kv_bits/8 would be admitted
+    # against a KV budget four times too small - an under-provision, wrong
+    # in the unsafe direction, where the CLI's version of the same mismatch
+    # is only a silent no-op.
+    policy = resolve_kv_quant_policy(_model().make_cache(), kv_bits=4)
+    vec = policy.bytes_per_element_vector()
+    assert vec == [FP16_BPE] * _args().num_hidden_layers
+    assert sum(vec) == pytest.approx(4 * 0.5 * len(vec))
 
 
-def test_serve_prices_the_cache_at_fp16_after_the_drop():
-    # The point of clearing the field: serve/estimate.py and
-    # serve/mem_preflight.py both read rg.kv_bits and fall back to 2 bytes
-    # per element when it is None. Before the drop they priced HY4's fp16
-    # cache at 0.5 - a four-fold under-provision at admission.
-    #
-    # Serve holds the model inside the text_only wrapper, which is what
-    # carries the .config the pricing reads; the bare mlx-lm class has only
-    # .args. Use the wrapper so this exercises the real shape.
-    from gmlx.models.vlm_text_only import Model as TextOnlyModel
-    from gmlx.serve.mem_preflight import kv_layer_costs
-    from gmlx.serve.residency import _drop_unsupported_kv_bits
-
-    def _bpe(rg):
-        bits = getattr(rg, "kv_bits", None)
-        return bits / 8.0 if isinstance(bits, int) and bits > 0 else 2.0
-
-    args = _args()
-
-    class _RG:
-        kv_bits = 4
-
-    rg = _RG()
-    rg.model = TextOnlyModel(Model(args), vars(args))
-
-    assert _bpe(rg) == 0.5
-    under = kv_layer_costs(rg.model, _bpe(rg))
-    _drop_unsupported_kv_bits(rg)
-    assert _bpe(rg) == 2.0
-    priced = kv_layer_costs(rg.model, _bpe(rg))
-
-    # MLA: one entry per layer, priced on the compressed latent + rope half.
-    assert under and priced
-    assert priced == [(None, (args.kv_lora_rank + args.qk_rope_head_dim) * 2.0)
-                      ] * args.num_hidden_layers
-    assert sum(b for _, b in priced) == pytest.approx(
-        4 * sum(b for _, b in under))
-
-
-def test_serve_admission_leaves_kv_bits_alone_for_a_quantizable_model():
+def test_a_quantizable_stack_still_quantizes():
+    # The control. Without it the test above passes on a resolver that
+    # dropped everything.
     from mlx_lm.models.cache import KVCache
 
-    from gmlx.serve.residency import _drop_unsupported_kv_bits
-
-    class _Plain:
-        def make_cache(self):
-            return [KVCache() for _ in range(2)]
-
-    class _RG:
-        kv_bits = 4
-
-    rg = _RG()
-    rg.model = _Plain()
-    _drop_unsupported_kv_bits(rg)
-    assert rg.kv_bits == 4
+    policy = resolve_kv_quant_policy([KVCache() for _ in range(4)],
+                                     kv_bits=4)
+    assert policy.verdict in ("full", "partial")
+    assert policy.n_quant > 0
 
 
 # --- no speculative decoding -------------------------------------------------
