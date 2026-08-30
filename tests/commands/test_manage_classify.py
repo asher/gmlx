@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
-"""_classify_local: the local-GGUF half of `gmlx validate` / `gmlx manage`.
-
-It was rewritten from gguf-py's GGUFReader onto headerscan (so type ids newer
-than the installed gguf-py still classify); these tests pin the report shape
-the old path produced, plus the STQ1_0 case the rewrite exists for.
+"""_classify_local was rewritten from gguf-py's GGUFReader onto headerscan;
+these tests pin the old report shape plus the STQ1_0 case the rewrite is for.
 """
 
 from __future__ import annotations
@@ -63,9 +60,8 @@ def test_classify_local_gguf_type(tmp_path):
 
 
 def test_classify_local_multi_shard(tmp_path):
-    """The shard loop accumulates hist/unsup across ALL shards while arch and
-    general.type come from shard 0 only (the i == 0 guard): shard 2 carries a
-    different arch KV and both a supported and an unsupported codec."""
+    """Histograms accumulate across shards; arch and general.type come from
+    shard 0 only."""
     p1 = tmp_path / "model-00001-of-00002.gguf"
     p2 = tmp_path / "model-00002-of-00002.gguf"
     _mint(p1, gguf_type="adapter")
@@ -87,8 +83,8 @@ def test_classify_local_multi_shard(tmp_path):
 
 
 def test_classify_local_stq1_0_via_fallback(tmp_path):
-    """A type-43 file classifies (the rewrite's reason to exist): gguf-py's
-    GGUFReader rejects the id outright, headerscan's fallback names it."""
+    """A type-43 file classifies: GGUFReader rejects the id, headerscan's
+    fallback names it."""
     (type_id, (name, (wpb, tsize))), = [
         (k, v) for k, v in QUANT_TYPE_FALLBACK.items() if v[0] == "STQ1_0"
     ]
