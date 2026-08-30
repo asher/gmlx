@@ -72,3 +72,17 @@ def test_qat_drop_surfaces(monkeypatch):
 def test_kv_off_returns_none(monkeypatch):
     monkeypatch.delenv("KV_BITS", raising=False)
     assert skv.resolve_for_load(_rg(kv_bits=None), "m") is None
+
+
+def test_to_json_shapes(monkeypatch):
+    monkeypatch.setenv("KV_BITS", "8")
+    monkeypatch.delenv("MLX_VLM_GGUF_SPECULATIVE", raising=False)
+    j = skv.resolve_for_load(_rg(), "m").to_json()
+    assert j == {"bits": 8, "group_size": 64, "layers_quantized": 3,
+                 "layers_fp16": 1, "verdict": "full",
+                 "verdict_batched": "full"}
+    monkeypatch.setenv("MLX_VLM_GGUF_SPECULATIVE", "1")
+    j = skv.resolve_for_load(_rg(), "m").to_json()
+    assert j["verdict"] == "full"
+    assert j["verdict_batched"] == "dropped"
+    assert "batched_reason" in j

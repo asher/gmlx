@@ -32,6 +32,25 @@ class ServeKvPolicy:
         the state a concurrent server actually runs in."""
         return self.batched.bytes_per_element_vector()
 
+    def to_json(self) -> dict:
+        """The /v1/models kv_quant field. verdict_batched exists because
+        MTP models quantize at B=1 and run fp16 when batched; a single
+        field would assert a number true only while the server is idle."""
+        s, b = self.single, self.batched
+        out = {
+            "bits": s.bits,
+            "group_size": s.group_size,
+            "layers_quantized": s.n_quant,
+            "layers_fp16": len(s.per_layer) - s.n_quant,
+            "verdict": s.verdict,
+            "verdict_batched": b.verdict,
+        }
+        if s.reason:
+            out["reason"] = s.reason
+        if b.verdict != s.verdict and b.reason:
+            out["batched_reason"] = b.reason
+        return out
+
 
 def _probe_stack(model):
     lm = getattr(model, "language_model", None) or model

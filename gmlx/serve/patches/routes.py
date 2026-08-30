@@ -34,13 +34,15 @@ def _models_payload() -> dict:
     ``default`` markers. Never the HF cache."""
     serving.reregister_missing_models()   # a restored file re-appears here
     models = serving.resolved_models()
-    resident, pinned = set(), set()
+    resident, pinned, kv_quant = set(), set(), {}
     pool = _get_pool()
     if pool is not None:
         for e in pool.stats()["resident"]:
             resident.add(e["model_path"])
             if e["pinned"]:
                 pinned.add(e["model_path"])
+            if e.get("kv_quant") is not None:
+                kv_quant[e["model_path"]] = e["kv_quant"]
     default_id = serving.default_model_id()
 
     def _entry(mid, rm, *, alias_of=None, profile=None):
@@ -50,6 +52,9 @@ def _models_payload() -> dict:
             "created": _mtime(rm.path),
             "owned_by": "gmlx",
             "resident": rm.path in resident,
+            # Resolved KV quantization policy (resident models only:
+            # the policy is resolved on the constructed stack at load).
+            "kv_quant": kv_quant.get(rm.path),
             "pinned": bool(rm.pin) or rm.path in pinned,
             "speculative": bool(rm.speculative),
             "vlm": rm.mmproj is not None,
@@ -92,7 +97,8 @@ def _service_entry(sid: str, marker: str, value) -> dict:
     consumers can index any of them) plus its capability marker."""
     return {
         "id": sid, "object": "model", "created": 0, "owned_by": "gmlx",
-        "resident": False, "pinned": False, "speculative": False, "vlm": False,
+        "resident": False, "kv_quant": None, "pinned": False,
+        "speculative": False, "vlm": False,
         "profile": None, "family": None, "default": False,
         marker: True, "alias_of": _service_display(value),
     }
@@ -225,6 +231,7 @@ def _resident_models_view() -> list:
             "footprint_bytes": e["footprint_bytes"],
             "idle_s": round(e.get("idle_s", 0.0), 1),
             "ttl_s": e.get("ttl_s"),
+            "kv_quant": e.get("kv_quant"),
         })
     return out
 

@@ -1029,6 +1029,21 @@ models. Each maps 1:1 to the env var mlx-vlm reads at build:
 > reason to leave bfloat16 is that this GPU has no native bfloat16 arithmetic,
 > which is true of every model on the box. Set `server.dtype`.
 
+With `kv_bits` set, engagement is resolved per model at load on the real
+cache stack and logged as one `[kv]` line. The policy is layer by layer:
+growing attention KV quantizes except the last layer of a deep stack,
+sliding windows and recurrent state stay fp16, pooled caches pack at
+rest. `/v1/models` reports the result per resident model as `kv_quant`
+(`bits`, `group_size`, `layers_quantized`, `layers_fp16`, `verdict`,
+`verdict_batched`); `/health` carries the same field per resident entry.
+Verdicts: `full` (policy fully applied), `partial` (hybrid stack, the
+fp16 layers are counted), `dropped` (the model runs fp16 KV, reason
+logged), `error` (the model fails to load, e.g. `kv_bits` outside
+2/3/4/6/8 or split key/value bits). Speculative (MTP) models quantize at
+batch size 1 and run fp16 KV while requests are batched; `verdict_batched`
+reports that mode, and admission prices memory from it. `kv_quant_scheme`
+accepts only `uniform` (validated at parse).
+
 ### Cache keys (`cache:`)
 
 mlx-vlm's APC prompt cache and its optional SSD disk tier. Server-level,

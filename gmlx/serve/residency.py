@@ -700,6 +700,8 @@ class _ResidencyPool:
                         "footprint_bytes": e.footprint,
                         "ttl_s": e.ttl,
                         "idle_s": max(0.0, now - e.last_access),
+                        "kv_quant": (e.kv_policy.to_json()
+                                     if e.kv_policy is not None else None),
                     }
                     for e in self._entries.values()
                 ],
