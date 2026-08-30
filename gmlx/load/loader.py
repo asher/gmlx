@@ -1093,6 +1093,16 @@ def build_model(config_dict: dict, *, mtp: bool = False):
 
         muse_glimmer_model.ensure_registered()
         muse_glimmer_tools.ensure_registered()
+    if mt == "hy_v4":
+        # mlx-lm ships no hy_v4 module (llama.cpp LLM_ARCH_HYV4); same
+        # vendored-registration pattern as glm5_next. The tool parser
+        # registers with the model so a later serve template-inference
+        # resolves it.
+        import gmlx.models.hy_v4.model as hy_v4_model
+        import gmlx.models.hy_v4.tools as hy_v4_tools
+
+        hy_v4_model.ensure_registered()
+        hy_v4_tools.ensure_registered()
     Model, ModelArgs = _get_classes(config)
     model_args = ModelArgs.from_dict(config)
     model = Model(model_args)
@@ -2639,6 +2649,17 @@ def install_expert_streaming(
 # (see the _PREFILL_CHUNK note: the two prefill engines tune differently).
 _STREAMING_PREFILL_STEP = 8192
 
+# Streaming models whose per-chunk activation footprint argues for a
+# narrower default than _STREAMING_PREFILL_STEP.
+#   hy_v4 - iHC carries hc_mult (4) parallel residual streams and the
+#   reference computes the collapse in fp32, so one [1, step, 4, 6144]
+#   fp32 transient is 805 MB at 8192 and the front builds several per
+#   layer across 78 layers. Half the step halves every one of them. Raise
+#   it back with --prefill-step-size on a large-RAM box.
+_STREAMING_PREFILL_STEP_BY_MODEL_TYPE: dict[str, int] = {
+    "hy_v4": 4096,
+}
+
 
 def moe_streaming_active(model) -> bool:
     """True when ``install_expert_streaming`` put this model in streaming mode
@@ -2653,11 +2674,15 @@ def moe_streaming_active(model) -> bool:
 
 def _resolve_prefill_step(model, requested: int | None) -> tuple[int | None, bool]:
     """Pick the prefill chunk width: an explicit request always wins; a
-    streaming-mode model defaults to ``_STREAMING_PREFILL_STEP``; everything
-    else keeps mlx-lm's own default. Returns ``(step_or_none, defaulted)``."""
+    streaming-mode model defaults to ``_STREAMING_PREFILL_STEP``, or to its
+    model_type's narrower entry; everything else keeps mlx-lm's own
+    default. Returns ``(step_or_none, defaulted)``."""
     if requested is not None or not moe_streaming_active(model):
         return requested, False
-    return _STREAMING_PREFILL_STEP, True
+    mt = getattr(model, "model_type", None) or getattr(
+        getattr(model, "args", None), "model_type", None)
+    return _STREAMING_PREFILL_STEP_BY_MODEL_TYPE.get(
+        mt, _STREAMING_PREFILL_STEP), True
 
 
 def _switch_num_experts(glu) -> int:
@@ -3079,6 +3104,14 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # and ape table are fp32 per llama.cpp PR 27754.
     "glm5_next": ("_hc.", ".mlp.gate.weight", ".e_score_correction_bias",
                   ".a_folded", ".dt_bias", ".ape", ".weights_proj."),
+    # hy_v4: the iHC mixers and the collapse head are fp32 in the reference
+    # and accumulate over 78 layers x 2 sublayers; the per-head sinks join
+    # the softmax normalizer; sigmoid top-8-of-256 routing with a correction
+    # bias is near-tie-heavy; the indexer head weights decide near-tied key
+    # rankings. Kept in step with the model class's cast_predicate, which
+    # tests/models/test_hy_v4_model.py cross-checks against this row.
+    "hy_v4": ("_hc.", "hc_head.", ".sinks", ".e_score_correction_bias",
+              ".mlp.gate.weight", ".weights_proj."),
 }
 
 # Params kept at their native f16 through the bf16 cast (no upcast). MLX
