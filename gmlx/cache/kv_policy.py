@@ -304,6 +304,30 @@ def _arm_pools(c, bits, group) -> int:
     return 0
 
 
+def quantize_kv_members(c, bits, group):
+    """Convert the growing KV caches under ``c``. Returns ``(cache, n)``.
+
+    For callers that convert eagerly instead of leaving the work to a
+    downstream ``hasattr(to_quantized)`` converter. ``CacheList`` has no
+    ``to_quantized``, and its other members are the windows, state and
+    opt-outs that must stay fp16, so the descent converts member by
+    member.
+    """
+    types = _cache_kind_types()
+    if _classify(c, types) != "kv":
+        return c, 0
+    inner = getattr(c, "caches", None)
+    if inner is None:
+        return c.to_quantized(group_size=group, bits=bits), 1
+    subs, n = [], 0
+    for s in inner:
+        sub, k = quantize_kv_members(s, bits, group)
+        subs.append(sub)
+        n += k
+    c.caches = tuple(subs)
+    return c, n
+
+
 def arm_stack(stack, policy: KvQuantPolicy, hold=True):
     """Conform a freshly built stack to the policy in place. Held fp16
     layers lose to_quantized so converters skip them. Pool layers arm

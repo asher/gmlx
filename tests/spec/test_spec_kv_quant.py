@@ -352,3 +352,84 @@ def test_warm_merge_config_follows_batched_policy(restorable):
     # no stamp: fail-safe None, never the environment
     assert spec_engine._live_kv_quant_config(_Stamp()) is None
     assert spec_engine._live_kv_quant_config(None) is None
+
+
+# The B=1 arm matched layers by exact type, so what a hybrid arch builds -
+# a CacheList around the KV, an opted-out subclass, a nested window - stayed
+# fp16 while the policy serve prices admission from said it quantized.
+
+
+class _OptOutKVCache(KVCache):
+    kv_quant_unsupported = True
+
+
+def _cache_list(*inner):
+    from mlx_vlm.models.cache import CacheList
+
+    return CacheList(*inner)
+
+
+class _ListFakeLM:
+    """glm5_next's shape: CacheList(KVCache, opted-out pool) per layer."""
+
+    def __init__(self, n=3):
+        self.n = n
+
+    def make_cache(self):
+        return [_cache_list(KVCache(), _SSMCache()) for _ in range(self.n)]
+
+
+def test_b1_mtp_quantizes_the_kv_member_of_a_cache_list(restorable):
+    restorable.setenv("KV_BITS", "8")
+    spec_engine.install_spec_kv_quant()
+    caches = ar.make_speculative_prompt_cache(
+        _ListFakeLM(), draft_kind="mtp", batch_size=1, left_padding=[0],
+        make_cache=lambda lm, lp: pytest.fail("B=1 mtp bypass"),
+    )
+    # Layers 0..n-2 quantize; the last layer of a deep stack stays fp16,
+    # the same rule the policy applies everywhere else.
+    inner = caches[0].caches[0]
+    assert isinstance(inner, QuantizedKVCache), (
+        "the KV member of a CacheList layer stayed fp16 while the shared "
+        "policy reports the layer as quantized")
+    assert inner.bits == 8
+    assert isinstance(caches[0].caches[1], _SSMCache)
+
+
+class _OptOutFakeLM:
+    def make_cache(self):
+        return [_OptOutKVCache(), KVCache(), KVCache()]
+
+
+def test_b1_mtp_honors_kv_quant_unsupported(restorable):
+    restorable.setenv("KV_BITS", "8")
+    spec_engine.install_spec_kv_quant()
+    caches = ar.make_speculative_prompt_cache(
+        _OptOutFakeLM(), draft_kind="mtp", batch_size=1, left_padding=[0],
+        make_cache=lambda lm, lp: pytest.fail("B=1 mtp bypass"),
+    )
+    assert not isinstance(caches[0], QuantizedKVCache), (
+        "a cache declaring kv_quant_unsupported must never be converted")
+    assert isinstance(caches[1], QuantizedKVCache)
+
+
+class _NestedWindowFakeLM:
+    def make_cache(self):
+        from mlx_lm.models.cache import RotatingKVCache
+
+        return [_cache_list(RotatingKVCache(max_size=16), _SSMCache())
+                for _ in range(3)]
+
+
+def test_b1_mtp_sees_a_window_nested_in_a_cache_list(restorable):
+    # The rotating carve-out tested only top-level entries, so a windowed
+    # cache inside a CacheList slipped past it. Nothing may be converted.
+    restorable.setenv("KV_BITS", "8")
+    spec_engine.install_spec_kv_quant()
+    caches = ar.make_speculative_prompt_cache(
+        _NestedWindowFakeLM(), draft_kind="mtp", batch_size=1,
+        left_padding=[0],
+        make_cache=lambda lm, lp: pytest.fail("B=1 mtp bypass"),
+    )
+    for c in caches:
+        assert not isinstance(c.caches[0], QuantizedKVCache)
