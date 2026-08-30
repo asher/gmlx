@@ -471,13 +471,11 @@ def _estimate_bound(body, out, t0, path, pkg, rg, model, processor, config,
 
     # memory, exactly as the preflight prices it
     try:
-        from .mem_preflight import (_need_bytes, available_drained_bytes,
-                                    kv_layer_costs)
+        from .mem_preflight import (_need_bytes, _policy_costs,
+                                    available_drained_bytes)
         from gmlx.gen.prefill_decay import headroom_bytes
 
-        bits = getattr(rg, "kv_bits", None)
-        bpe = bits / 8.0 if isinstance(bits, int) and bits > 0 else 2.0
-        costs = kv_layer_costs(model, bpe)
+        costs = _policy_costs(rg, model)
         if costs and tokens > 0:
             need_prompt = _need_bytes(model, costs, tokens)
             need = _need_bytes(model, costs, tokens, pinned) if pinned else need_prompt

@@ -207,6 +207,7 @@ class _Entry:
     busy: int = 0               # in-flight refcount; busy entries are never LRU-evicted
     retained: int = 0           # of ``busy``: process-lifetime holds (preload), not requests
     loaded_as: str | None = None  # the configured ``id[@profile]`` whose request built it
+    kv_policy: object = None    # ServeKvPolicy (None when kv-bits is off)
 
 
 class _BusyHold:
@@ -877,6 +878,22 @@ class _ResidencyPool:
                     manager.autosize(getattr(rg, "model", None))
                 except Exception:
                     _log.warning("APC pool autosize skipped", exc_info=True)
+            # KV quantization policy: one resolve per load, inside the env
+            # window (KV_BITS here distinguishes off from the qat drop).
+            # An error verdict raises and the model fails residency.
+            from .kv_policy import KvPolicyError, resolve_for_load
+
+            rg = scratch.response_generator
+            if rg is not None and getattr(rg, "model", None) is not None:
+                try:
+                    kv_policy = resolve_for_load(rg, model_path)
+                except KvPolicyError:
+                    raise
+                except Exception:
+                    kv_policy = None
+                    _log.warning("kv policy resolve skipped", exc_info=True)
+            else:
+                kv_policy = None
         except BaseException:
             # A failed build never reaches _teardown: drop its partial
             # registrations here or they tax headroom forever.
@@ -899,6 +916,7 @@ class _ResidencyPool:
             footprint=footprint,
             ttl=ttl,
             last_access=self._time_fn(),
+            kv_policy=kv_policy,
         )
 
     @staticmethod

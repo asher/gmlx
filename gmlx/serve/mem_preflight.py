@@ -65,19 +65,27 @@ def _lm_config(model):
     return text if text is not None else cfg
 
 
-def kv_layer_costs(model, bytes_per_elem: float = 2.0):
+def kv_layer_costs(model, bytes_per_elem: float = 2.0, per_layer_bpe=None):
     """Per-layer ``(window_or_None, bytes_per_token)`` for the KV cache,
     or None when the geometry cannot be read. Admit-side throughout: MLA
     prices the compressed latent, a configured sliding window caps every
-    layer it could apply to."""
+    layer it could apply to. ``per_layer_bpe`` (from the KV policy)
+    prices each layer's storage exactly; it must match the layer count
+    or it is ignored."""
     c = _lm_config(model)
     layers = _get(c, "num_hidden_layers")
     if not isinstance(layers, int) or layers <= 0:
         return None
+    if per_layer_bpe is not None and len(per_layer_bpe) != layers:
+        per_layer_bpe = None
+
+    def bpe(i):
+        return per_layer_bpe[i] if per_layer_bpe is not None else bytes_per_elem
+
     lora = _get(c, "kv_lora_rank")
     if isinstance(lora, int) and lora > 0:
         rope = _get(c, "qk_rope_head_dim", 0) or 0
-        return [(None, (lora + rope) * bytes_per_elem)] * layers
+        return [(None, (lora + rope) * bpe(i)) for i in range(layers)]
     heads = _get(c, "num_attention_heads")
     n_kv = _get(c, "num_key_value_heads") or heads
     head_dim = _get(c, "head_dim")
@@ -87,20 +95,38 @@ def kv_layer_costs(model, bytes_per_elem: float = 2.0):
     if not (isinstance(n_kv, int) and n_kv > 0
             and isinstance(head_dim, int) and head_dim > 0):
         return None
-    per_tok = 2 * n_kv * head_dim * bytes_per_elem
+
+    def per_tok(i):
+        return 2 * n_kv * head_dim * bpe(i)
+
     window = _get(c, "sliding_window")
     window = window if isinstance(window, int) and window > 0 else None
     if window is None:
-        return [(None, per_tok)] * layers
+        return [(None, per_tok(i)) for i in range(layers)]
     types = _get(c, "layer_types")
     if isinstance(types, (list, tuple)) and len(types) == layers:
-        return [(window if "sliding" in str(t) else None, per_tok)
-                for t in types]
+        return [(window if "sliding" in str(t) else None, per_tok(i))
+                for i, t in enumerate(types)]
     pattern = _get(c, "sliding_window_pattern")
     if isinstance(pattern, int) and pattern > 0:
-        return [(None if (i + 1) % pattern == 0 else window, per_tok)
+        return [(None if (i + 1) % pattern == 0 else window, per_tok(i))
                 for i in range(layers)]
-    return [(window, per_tok)] * layers
+    return [(window, per_tok(i)) for i in range(layers)]
+
+
+def _policy_costs(rg, model):
+    """kv_layer_costs priced from rg's resolved KV policy (batched mode,
+    the state a concurrent server runs in). Falls back to uniform fp16:
+    rg.kv_bits is a float upstream, so the old int-gated bits/8 branch
+    never fired and everything priced at 2.0 regardless of kv_bits."""
+    c = _lm_config(model)
+    layers = _get(c, "num_hidden_layers")
+    vec = None
+    if isinstance(layers, int) and layers > 0:
+        from .kv_policy import pricing_vector
+
+        vec = pricing_vector(rg, layers)
+    return kv_layer_costs(model, 2.0, per_layer_bpe=vec)
 
 
 def prompt_kv_bytes(costs, tokens: int) -> float:
@@ -145,9 +171,7 @@ def preflight_prompt_memory(rg, prompt, images=None, audio=None,
         model = getattr(rg, "model", None)
         if model is None or not isinstance(prompt, str):
             return
-        bits = getattr(rg, "kv_bits", None)
-        bpe = bits / 8.0 if isinstance(bits, int) and bits > 0 else 2.0
-        costs = kv_layer_costs(model, bpe)
+        costs = _policy_costs(rg, model)
         if not costs:
             return
         avail = available_drained_bytes()

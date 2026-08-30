@@ -157,10 +157,54 @@ def test_probe_failure_admits(tight, monkeypatch):
     mp.preflight_prompt_memory(rg, "x" * 200_000)
 
 
-def test_kv_bits_shrink_the_estimate(tight):
-    # 8-bit KV halves the need: 100k tokens fit where fp16 does not
-    rg = _rg(DENSE, kv_bits=8, tokens=55_000)
-    mp.preflight_prompt_memory(rg, "x" * 200_000)
+def _stamp_policy(rg, layers=4, mtp=False):
+    from mlx_vlm.models.cache import KVCache
+
+    from gmlx.cache.kv_policy import resolve_kv_quant_policy
+    from gmlx.serve.kv_policy import RG_ATTR, ServeKvPolicy
+
+    kw = dict(kv_bits=8, kv_group_size=64, mtp=mtp)
+    setattr(rg, RG_ATTR, ServeKvPolicy(
+        resolve_kv_quant_policy(
+            [KVCache() for _ in range(layers)], mode="single", **kw),
+        resolve_kv_quant_policy(
+            [KVCache() for _ in range(layers)], mode="batched", **kw)))
+    return rg
+
+
+def test_kv_policy_shrinks_the_estimate(tight):
+    # 75k DENSE tokens: fp16 needs 0.61 GB (rejected), the resolved
+    # 8-bit policy prices 3 packed + 1 held layers at 0.40 GB (admitted).
+    rg = _rg(DENSE, kv_bits=8.0, tokens=75_000)
+    with pytest.raises(PromptTooLongError):
+        mp.preflight_prompt_memory(rg, "x" * 200_000)
+    mp.preflight_prompt_memory(_stamp_policy(rg), "x" * 200_000)
+
+
+def test_kv_bits_without_policy_prices_fp16():
+    # rg.kv_bits is a float upstream; without a resolved policy the
+    # pricing must not guess a packed rate.
+    costs = mp._policy_costs(_rg(DENSE, kv_bits=8.0), DENSE)
+    assert costs == [(None, 2048.0)] * 4
+
+
+def test_policy_costs_price_per_layer():
+    rg = _stamp_policy(_rg(DENSE, kv_bits=8.0))
+    costs = mp._policy_costs(rg, DENSE)
+    packed = 2 * 8 * 64 * 1.0625
+    assert costs == [(None, packed)] * 3 + [(None, 2048.0)]
+
+
+def test_mtp_policy_batched_prices_fp16():
+    # Engagement is batch-dependent: MTP quantizes at B=1 and swaps to
+    # fp16 when batched, so admission prices the batched mode.
+    rg = _stamp_policy(_rg(DENSE, kv_bits=8.0), mtp=True)
+    assert mp._policy_costs(rg, DENSE) == [(None, 2048.0)] * 4
+
+
+def test_policy_layer_count_mismatch_falls_back():
+    rg = _stamp_policy(_rg(DENSE, kv_bits=8.0), layers=6)
+    assert mp._policy_costs(rg, DENSE) == [(None, 2048.0)] * 4
 
 
 def test_install_wraps_both_and_is_idempotent(monkeypatch):
