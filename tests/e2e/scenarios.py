@@ -148,6 +148,21 @@ def pc_kv_engagement(model: str, *, verdict: str,
     return _check
 
 
+def pc_kv_absent(model: str) -> Callable:
+    """Without kv_bits there is no policy: kv_quant must be null (a
+    phantom verdict would be as misleading as a missing one)."""
+    def _check(client):
+        st, body = client.models()
+        row = next((m for m in (body or {}).get("data", [])
+                    if m.get("id") == model), None) if st == 200 else None
+        if row is None:
+            return [CheckResult("kv_absent", False, f"no row (status={st})")]
+        ok = row.get("kv_quant") is None
+        return [CheckResult("kv_absent", ok,
+                            f"kv_quant={row.get('kv_quant')!r}")]
+    return _check
+
+
 def _resident(client) -> list:
     st, body = client.metrics()
     if st != 200 or not isinstance(body, dict):
@@ -431,7 +446,8 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
                                prompts=[P.p_long_ctx_needle(f"VIOLET{label.upper()}88"),
                                         P.p_long_gen()])],
             post=[pc_kv_engagement("m", verdict="partial",
-                                   layers_quantized=2)],
+                                   layers_quantized=2)
+                  if load else pc_kv_absent("m")],
             notes="KV-quant must still recall a planted fact at depth without "
                   "looping. gemma-4 is an SWA stack: the engine quantizes only "
                   "its 2 global-attention layers, so this covers the partial "
