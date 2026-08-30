@@ -19,6 +19,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and single-stream keeps the quantized cache.
 - `--kv-bits` with `--max-kv-size` is refused at start instead of
   crashing mid-generation with "RotatingKVCache Quantization NYI".
+- `/v1/metrics` server snapshot reports `apc.enabled` true whenever the
+  residency pool holds a live APC manager; it said false until a request
+  had touched the entry (the proxy resolves per request context).
 
 ### Changed
 

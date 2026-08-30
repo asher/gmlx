@@ -102,8 +102,13 @@ def pc_models_exactly(expected_ids: set) -> Callable:
 
 def pc_apc_enabled(expected: bool) -> Callable:
     def _check(client):
-        st, body = client.health()
-        got = bool(body.get("apc_enabled")) if isinstance(body, dict) else None
+        # /health is liveness-only by design (the hardening patch trims it);
+        # the explicit enabled marker lives on /v1/cache/stats, which answers
+        # {"enabled": false} when no APC manager is wired. Comparing the raw
+        # value (not bool(missing)) keeps the False case from passing
+        # vacuously if the field ever moves again.
+        st, body = client.cache_stats()
+        got = body.get("enabled") if isinstance(body, dict) else None
         ok = (st == 200 and got == expected)
         return [CheckResult("apc_enabled", ok, f"expected={expected} got={got}")]
     return _check
@@ -171,7 +176,8 @@ def _resident(client) -> list:
 
 
 def pc_cache_reuse(model: str, prompt: P.PromptInstance,
-                   *, require_exercised: bool = True) -> Callable:
+                   *, require_exercised: bool = True,
+                   chat_kwargs=None) -> Callable:
     """Send the same greedy prompt twice; the second must be byte-identical (cache
     must not corrupt output) and a cache counter should advance (cache exercised).
 
@@ -180,12 +186,14 @@ def pc_cache_reuse(model: str, prompt: P.PromptInstance,
     {block,exact}_apc`` admit only ``KVCache`` & friends, never ``QuantizedKVCache``),
     so no counter moves - the model just recomputes, uncorrupted. We still assert the
     real invariant (no corruption / no crash) and surface the counters for inspection."""
+    extra = dict(chat_kwargs or {})
+
     def _check(client):
         before = client.cache_stats()[1]
         st1, b1 = client.chat(model, prompt.messages, max_tokens=prompt.max_tokens,
-                              temperature=0.0)
+                              temperature=0.0, **extra)
         st2, b2 = client.chat(model, prompt.messages, max_tokens=prompt.max_tokens,
-                              temperature=0.0)
+                              temperature=0.0, **extra)
         after = client.cache_stats()[1]
         t1 = checks.extract_chat_text(b1) if isinstance(b1, dict) else None
         t2 = checks.extract_chat_text(b2) if isinstance(b2, dict) else None
@@ -496,7 +504,7 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
                 "models": {"m": _model_entry(qwen4 or "")}},
         targets=[ReqTarget("plain", "m", prompts=[P.p_capital()])],
         post=[pc_apc_enabled(False)],
-        notes="apc off path still serves; /health reports apc_enabled=false"))
+        notes="apc off path still serves; /v1/cache/stats reports enabled=false"))
 
     add(Scenario(
         key="cache_memory", tier="cache", needs=["qwen3_0_6b_q4"],
@@ -544,7 +552,11 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
         targets=[ReqTarget("warm_recall", "m",
                            prompts=[P.p_long_ctx_needle("TEALKV8RUN")])],
         post=[pc_cache_reuse("m", P.p_long_ctx_needle("CACHEDNEEDLE9"),
-                             require_exercised=False),
+                             require_exercised=False,
+                             # qwen3 thinks through the whole haystack and
+                             # the token budget; compare real content
+                             chat_kwargs={"chat_template_kwargs":
+                                          {"enable_thinking": False}}),
               pc_disk_cache_created(disk_dir_kv)],
         notes="quantized-KV + disk-cache co-enabled: mlx-vlm bypasses APC under a "
               "QuantizedKVCache, so this asserts graceful degradation (no crash, no "

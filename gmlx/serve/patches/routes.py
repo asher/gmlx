@@ -264,6 +264,14 @@ def install_runtime_snapshot_enrichment() -> None:
                     if k in st}
             except Exception:
                 pass
+            # Upstream's apc.enabled only sees its own loaded model; gmlx
+            # wires APC per residency entry, so /health said false while
+            # pool APC was live. Any resident manager counts as enabled.
+            try:
+                if pool.apc_managers() and isinstance(base.get("apc"), dict):
+                    base["apc"]["enabled"] = True
+            except Exception:
+                pass
         try:
             import mlx.core as mx
 
