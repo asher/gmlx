@@ -6,6 +6,29 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Serve output with `kv_bits` set no longer corrupts into repeating
+  garbage on long prompts (issue #104): a host-side mlx 0.32.1 bug made
+  dequantize read the wrong buffers for strided cache slices; gmlx now
+  hands it contiguous operands (fixed upstream in mlx 0.32.2).
+- `GMLX_QWEN_OWNED=0` with `--kv-bits` and MTP no longer crashes every
+  request; the spec path declines quantization on the stock fallback.
+- Concurrent MTP requests with `kv_bits` no longer fail at batch
+  formation; batched MTP runs fp16 KV (rollback cannot trim packed KV)
+  and single-stream keeps the quantized cache.
+- `--kv-bits` with `--max-kv-size` is refused at start instead of
+  crashing mid-generation with "RotatingKVCache Quantization NYI".
+
+### Changed
+
+- KV quantization now resolves one per-stack policy everywhere (serve,
+  `run`, `chat`, MTP): growing attention KV quantizes except the last
+  layer of a deep stack, windows and recurrent state stay fp16, pooled
+  caches pack at rest. One `[kv]` line reports the verdict per model;
+  `/v1/models` and `/health` expose it as `kv_quant`, and server
+  admission prices memory from the same policy.
+
 ## [0.4.6] - 2026-08-29
 
 ### Added
