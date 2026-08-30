@@ -239,22 +239,91 @@ def test_prefill_flash_strided_batch_cache_end_to_end():
     assert err < 2e-3, f"flash arm on live batch-cache slices err={err}"
 
 
-def test_mlx_strided_biases_dequantize_canary():
-    # Asserts the mlx bug still reproduces (0.31.2 correct, 0.32.1
-    # regressed). A FAILURE here means upstream fixed Metal dequantize of
-    # strided biases, or this harness rotted: either way, act - remove
-    # the mx.contiguous wraps per the kv-bits plan P5 flag day, or repair
-    # the harness. Plain assert, not xfail: xfail(strict) files any
-    # exception as the expected failure and the tripwire rusts silently.
+# mlx #4381 (commit a9eed5a840) fixed the encode-order bug; released in
+# 0.32.2. The canaries below are a version bump gate: fail-closed in
+# both directions, never delete on failure.
+_MLX_STRIDED_FIX = (0, 32, 2)
+
+
+def _mlx_version_tuple():
+    parts = []
+    for tok in mx.__version__.split(".")[:3]:
+        num = "".join(ch for ch in tok if ch.isdigit())
+        parts.append(int(num or 0))
+    return tuple(parts)
+
+
+def _operand_buffers(kv=63, alloc=256, group=64, bits=8):
+    mx.random.seed(11)
+    k = mx.random.normal((1, 4, kv, 64)).astype(mx.float16)
+    w, s, b = mx.quantize(k, group_size=group, bits=bits)
+    bufs = []
+    for t in (w, s, b):
+        buf = mx.zeros((1, 4, alloc, t.shape[-1]), dtype=t.dtype)
+        buf[..., :kv, :] = t
+        bufs.append(buf)
+    mx.eval(*bufs)
+    return bufs, kv
+
+
+@pytest.mark.parametrize(
+    "strided",
+    [(w, s, b) for w in (0, 1) for s in (0, 1) for b in (0, 1)
+     if (w, s, b) != (0, 0, 0)],
+    ids=lambda t: "w%ds%db%d" % t)
+def test_mlx_strided_operand_dequantize_canary(strided):
+    # Upstream encode-order bug (host side, quantize_impl): when the
+    # biases operand needed a contiguity copy, the copy was encoded
+    # after set_input_array bound w (slot 0) and scales (slot 1); the
+    # copy kernel rebound those slots and dequantize read its buffers.
+    # Corruption tracks the biases operand exactly (measured on 0.32.1:
+    # every biases-strided combo corrupt, every other combo clean; the
+    # w/scales copies encode before any binding). Pre-fix versions must
+    # reproduce it and fixed versions must not: this bug reached users
+    # through a version bump with no strided-operand interrogation, so
+    # a failure here means re-check the pin, never delete the test.
+    # GPU vs CPU dequantize differ ~2e-3 in fp16, so clean is < 1e-2
+    # and corrupt is > 1.
     if mx.default_device().type != mx.DeviceType.gpu:
         pytest.skip("Metal-only regression")
-    _, qk, _ = _strided_case(kv=63)
-    got = mx.dequantize(*qk, group_size=64, bits=8)
-    ref = _cpu_dequant(qk)
-    err = mx.abs(got - ref).max().item()
-    assert not (err < 1e-2), (
-        f"strided-biases dequantize now correct (err={err}): upstream fix "
-        "landed - schedule removal of the contiguous wraps (plan P5)")
+    bufs, kv = _operand_buffers()
+    ops = [buf[..., :kv, :] if st else mx.contiguous(buf[..., :kv, :])
+           for buf, st in zip(bufs, strided)]
+    got = mx.dequantize(*ops, group_size=64, bits=8)
+    ref = _cpu_dequant(tuple(mx.contiguous(buf[..., :kv, :])
+                             for buf in bufs))
+    err = mx.abs(got.astype(mx.float32)
+                 - ref.astype(mx.float32)).max().item()
+    broken = _mlx_version_tuple() < _MLX_STRIDED_FIX
+    if broken and strided[2]:
+        assert err > 1.0, (
+            f"strided-biases dequantize correct on mlx {mx.__version__} "
+            f"(err={err}): upstream fix backported? re-gate the canary "
+            "and re-check the pin")
+    else:
+        assert err < 1e-2, (
+            f"strided-operand dequantize corrupt on mlx {mx.__version__} "
+            f"(strided w/s/b={strided}, err={err}): upstream regression")
+
+
+def test_mlx_strided_input_quantize_canary():
+    # mx.quantize was never affected (bit-identical on 0.32.1; the
+    # quantize-branch reorder in #4381 is defensive). Pinned on both
+    # sides of the fix so KVCache.to_quantized stays certified.
+    if mx.default_device().type != mx.DeviceType.gpu:
+        pytest.skip("Metal-only regression")
+    mx.random.seed(11)
+    kv = 63
+    k = mx.random.normal((1, 4, kv, 64)).astype(mx.float16)
+    buf = mx.zeros((1, 4, 256, 64), dtype=mx.float16)
+    buf[..., :kv, :] = k
+    mx.eval(buf)
+    sl = buf[..., :kv, :]
+    got = mx.quantize(sl, group_size=64, bits=8)
+    ref = mx.quantize(mx.contiguous(sl), group_size=64, bits=8)
+    for g, r in zip(got, ref):
+        assert mx.array_equal(g, r).item(), (
+            f"quantize of a strided input diverged on mlx {mx.__version__}")
 
 
 def test_install_idempotent_and_killable(monkeypatch):
