@@ -210,8 +210,11 @@ streaming install first reclaims any install whose model is gone - a
 released model does not free its arena at the drop, because the decode
 feeder and the MoE modules reference each other and the tree waits for a
 generational collection - and then charges whatever is still held against
-its own pin and arena. A second model on a full box degrades to the
-page-cache path with a printed reason instead of wiring the machine solid.
+its own weight pin, which sizes against total RAM. The decode arena needs
+no such charge: it sizes against reclaimable RAM, and mlock moves a pinned
+page out of that count and into wired one for one. A second model on a
+full box degrades to the page-cache path with a printed reason instead of
+wiring the machine solid.
 Release a model explicitly with `gmlx.stream.installs.release(model)` to
 give the next one the full budget; the server does this at eviction.
 

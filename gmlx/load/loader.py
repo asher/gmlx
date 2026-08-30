@@ -1305,7 +1305,6 @@ def _ram_floor_bytes(ram: int | None) -> int:
 def _decode_arena_bytes(
     total_bytes: int, offsets, budget: int | None, ring_bytes: int = 0,
     pinned_bytes: int = 0, streamable_bytes: int = 0,
-    reserved_bytes: int = 0,
 ) -> int:
     """Arena budget for the decode feeder, under two hardware-derived
     ceilings: the GPU working-set budget, and a fraction of physical RAM
@@ -1324,12 +1323,15 @@ def _decode_arena_bytes(
     that starves the page cache every buffered read path depends on
     (``GMLX_DECODE_ARENA_FORCE=1`` restores the unclamped behavior).
 
-    ``reserved_bytes`` is what another live streaming install in this
-    process already committed (``gmlx.stream.installs``). The reclaimable
-    snapshot below does not see it: a weight pin mlocks file-backed pages,
-    which stay file-backed and so still count as available to ``vm_stat``,
-    and an arena allocated but not yet wired has no page cost at all. Both
-    are gone the moment the other model decodes, so charge them here."""
+    A second live streaming install needs no term here, though its pin and
+    arena are real wired memory (``gmlx.stream.installs``). The reclaimable
+    snapshot already excludes both: measured on macOS 26, mlock moves a
+    file-backed page out of ``vm_stat``'s File-backed count and into wired
+    one for one, and an arena is anonymous, so neither lands in free,
+    purgeable, or file-backed. Charging them again halves the second
+    model's arena for nothing. The weight pin is the place that does need
+    the charge, because it sizes against total RAM rather than against
+    this snapshot."""
     env = os.environ.get("GMLX_DECODE_ARENA_GB")
     if env:
         want = int(float(env) * (1 << 30))
@@ -1342,7 +1344,7 @@ def _decode_arena_bytes(
             ram = int(mx.device_info()["memory_size"])
         except Exception:
             ram = avail
-        cap = max(0, avail - _ram_floor_bytes(ram) - reserved_bytes)
+        cap = max(0, avail - _ram_floor_bytes(ram))
         if want > cap:
             print(
                 f"[stream] GMLX_DECODE_ARENA_GB={env} exceeds reclaimable"
@@ -1393,8 +1395,7 @@ def _decode_arena_bytes(
         unpinned = max(0, non_expert_bytes - pinned_bytes)
         arena = min(
             arena,
-            avail - _ram_floor_bytes(ram or avail) - reserve - unpinned
-            - reserved_bytes,
+            avail - _ram_floor_bytes(ram or avail) - reserve - unpinned,
         )
     return min(max(0, arena), expert_bytes)
 
@@ -1902,11 +1903,13 @@ def install_expert_streaming(
         # wired bytes. Reclaim the ones whose model is gone (the feeder and
         # the MoE modules reference each other, so a dropped model waits
         # for a collection to unwire its arena), then charge whatever is
-        # still genuinely held against this install's pin and arena. mlock
-        # has no backpressure and wired pages are invisible to jetsam, so
-        # two installs that each size against a whole machine wire it
-        # solid, and a machine with nothing reclaimable does not report
-        # memory pressure - it stops.
+        # still genuinely held against this install's weight pin. mlock has
+        # no backpressure and wired pages are invisible to jetsam, so two
+        # pins that each size against a whole machine wire it solid, and a
+        # machine with nothing reclaimable does not report memory pressure
+        # - it stops. The decode arena needs no such charge: it sizes
+        # against reclaimable RAM, which already excludes both the other
+        # install's pin and its arena (see _decode_arena_bytes).
         from gmlx.stream import installs as _installs
 
         freed = _installs.reclaim_dead()
@@ -1918,9 +1921,9 @@ def install_expert_streaming(
         if held_wired:
             print(
                 f"[stream] another live streaming install holds "
-                f"{held_wired / 1e9:.1f} GB wired; this model sizes its pin "
-                "and arena against what is left (release the other model "
-                "first for the full budget)")
+                f"{held_wired / 1e9:.1f} GB wired; this model sizes against "
+                "what is left (release the other model first for the full "
+                "budget)")
         from gmlx.stream.prefetch import maybe_make_prefetcher
 
         prefetcher = maybe_make_prefetcher(gguf_path)
@@ -2476,8 +2479,7 @@ def install_expert_streaming(
             total_bytes, prefetcher.offsets, budget,
             ring_bytes=2 * feeder.slot_bytes if feeder is not None else 0,
             pinned_bytes=getattr(pin, "pinned_bytes", 0),
-            streamable_bytes=streamed_table_bytes(model),
-            reserved_bytes=held_wired)
+            streamable_bytes=streamed_table_bytes(model))
         dfeeder = maybe_make_decode_feeder(
             prefetcher.offsets, moe_modules, arena, stats_verbose)
         if dfeeder is not None:

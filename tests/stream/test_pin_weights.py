@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import re
+import subprocess
+import sys
+
 import numpy as np
+import pytest
 
 import gmlx.stream.pin_weights as pin_weights
 
@@ -66,6 +71,52 @@ def test_maybe_pin_weights_env_off(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("GMLX_PIN_WEIGHTS", "0")
     assert pin_weights.maybe_pin_weights(str(p)) is None
     assert "weight pin off" in capsys.readouterr().out
+
+
+def _vm_stat():
+    out = subprocess.run(["vm_stat"], capture_output=True, text=True).stdout
+    page = int(re.search(r"page size of (\d+)", out).group(1))
+    return {
+        k: int(re.search(rf"{k}:\s+(\d+)\.", out).group(1)) * page
+        for k in ("File-backed pages", "Pages wired down")
+    }
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="vm_stat is macOS only")
+def test_a_pinned_page_leaves_the_reclaimable_snapshot(tmp_path):
+    """mlock must move a file-backed page out of the File-backed count.
+
+    ``_available_ram_bytes`` offers free + purgeable + file-backed, and
+    ``_decode_arena_bytes`` charges only the *unpinned* share of the
+    non-expert weights against that offer, on the grounds that a live pin
+    is already out of the snapshot. Measured on macOS 26 the move is one
+    for one. If a future release ever left mlocked pages counted as
+    file-backed, that offer would overstate by the whole pin and every
+    streaming arena would size past the machine, so this is a canary
+    rather than a test of our own code.
+    """
+    p = tmp_path / "big.bin"
+    n = 32 << 20
+    p.write_bytes(b"\0" * n)
+
+    before = _vm_stat()
+    pin = pin_weights.WeightsPin({str(p): [(0, n)]})
+    try:
+        if pin.pinned_bytes < n:
+            pytest.skip("mlock refused; wire limit reached")
+        after = _vm_stat()
+    finally:
+        pin.close()
+
+    # Other activity moves these counters, so assert the direction and
+    # allow generous slack rather than an exact delta.
+    wired = after["Pages wired down"] - before["Pages wired down"]
+    filed = after["File-backed pages"] - before["File-backed pages"]
+    assert wired >= 0.5 * n, f"pin did not wire: {wired} of {n}"
+    assert filed <= 0.5 * n, (
+        "mlocked pages still count as file-backed; _available_ram_bytes now "
+        "overstates the offer by the whole weight pin and _decode_arena_bytes "
+        f"must charge it (file-backed moved {filed:+d} for a {n} pin)")
 
 
 def test_reserved_bytes_from_another_install_block_the_pin(
