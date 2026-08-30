@@ -271,6 +271,17 @@ def test_ladder_falls_back_to_experts_when_table_insufficient(monkeypatch):
     assert getattr(glu, "_kq_cpu_only", False)
 
 
+def test_ladder_compose_env_streams_both(monkeypatch):
+    monkeypatch.setenv("GMLX_STREAM_PLE", "1")
+    monkeypatch.setenv("GMLX_STREAM_PLE_COMPOSE", "1")
+    monkeypatch.setenv("GMLX_GPU_RESIDENT", "0")
+    model, glu = _moe_table_model()
+    _fake_budget(monkeypatch, 10)  # over budget even post-table
+    install_expert_streaming(model)
+    assert ts.table_streaming_active(model)
+    assert getattr(glu, "_kq_cpu_only", False)  # experts stream too
+
+
 def test_ladder_env_disable(monkeypatch):
     monkeypatch.setenv("GMLX_STREAM_PLE", "0")
     monkeypatch.setenv("GMLX_GPU_RESIDENT", "0")

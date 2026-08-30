@@ -114,6 +114,34 @@ warms (measured below), and keeps the large KV cache on GPU at depth.
 `stream: cpu` switches the whole process to the CPU device, so it suits
 a single-model setup rather than mixing with GPU-resident models.
 
+## Streamable lookup tables (table-before-experts)
+
+Some architectures carry a large lookup table that every token reads only a
+few rows of. Qwen4-Exp's per-layer n-gram embedding table is the shipped
+case: 27-54 GB on disk depending on the build, with each decode step
+gathering 16 rows (about 1.4 KB). Wiring such a table costs tens of GB to
+serve kilobytes per token, so on an over-budget model `--stream-experts`
+tries the table first:
+
+- If streaming the table alone brings the resident set under the wired
+  budget, the table stays file-backed and its row gathers run on a dedicated
+  CPU stream; the experts stay fully resident on GPU. This is the fastest
+  over-budget placement: expert reads disappear entirely.
+- Otherwise the table stays resident and the experts stream as usual.
+
+The selection is automatic and per-architecture (models with no declared
+table are untouched). `GMLX_STREAM_PLE=1` forces the table onto the CPU
+stream on a model that fits (for overhead measurement); `GMLX_STREAM_PLE=0`
+disables the tier. Streamed table output is bit-identical to resident - the
+same bytes are gathered and dequantized either way.
+
+`GMLX_STREAM_PLE_COMPOSE=1` (with `GMLX_STREAM_PLE=1`) additionally streams
+the table when the experts must stream too, instead of leaving it resident.
+Experimental: it removes the table from the wired set (measured on a 169 GB
+Qwen4-Exp Q6 build: decode 8.4 to 12.6-13.4 tok/s, wired peak 106 to
+54 GB), but cold prefill pays page-granular table faults until the table
+shares the prefetch pool.
+
 ## The feeder paths
 
 Streaming models engage two feeder paths by default:
