@@ -127,6 +127,25 @@ def test_batch_forces_fp16(restorable):
     assert isinstance(out[1], _SSMCache)
 
 
+def test_batch_forces_fp16_nested(restorable):
+    # to_batch_cache's CacheList arm quantizes nested subcaches with the
+    # default quantize=True, so the swap must walk into CacheList entries.
+    from mlx_vlm.models.cache import (BatchKVCache, BatchQuantizedKVCache,
+                                      CacheList)
+
+    restorable.setenv("KV_BITS", "8")
+    spec_engine.install_spec_kv_quant()
+    lp = [0, 0]
+    stock = [CacheList(BatchQuantizedKVCache(lp, group_size=64, bits=8),
+                       _SSMCache()),
+             BatchQuantizedKVCache(lp, group_size=64, bits=8)]
+    out = _mk(batch_size=2, make_cache=lambda lm, _: stock)
+    assert type(out[0]) is CacheList
+    assert type(out[0].caches[0]) is BatchKVCache
+    assert isinstance(out[0].caches[1], _SSMCache)
+    assert type(out[1]) is BatchKVCache
+
+
 def _fill(c, parts):
     for p in parts:
         c.update_and_fetch(p, p)

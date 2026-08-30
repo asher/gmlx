@@ -2464,14 +2464,28 @@ def install_spec_kv_quant() -> None:
             # BatchQuantizedKVCache, which the stock rollback misfiles as
             # an SSM cache (not trimmable, no zero_row_tail): rejected
             # draft tokens are never trimmed and the state pairing shifts.
+            # Walk into CacheList entries: to_batch_cache's recursive arm
+            # quantizes nested subcaches too (and without the layer gate).
             from mlx_vlm.models.cache import BatchKVCache
 
             batch_quant = cache_types("BatchQuantizedKVCache")
+
+            def _swap(c):
+                if isinstance(c, batch_quant):
+                    return BatchKVCache(left_padding), 1
+                inner = getattr(c, "caches", None)
+                if inner is None:
+                    return c, 0
+                subs = [_swap(s) for s in inner]
+                n = sum(k for _, k in subs)
+                if n:
+                    c.caches = tuple(s for s, _ in subs)
+                return c, n
+
             swapped = 0
             for e, c in enumerate(caches):
-                if isinstance(c, batch_quant):
-                    caches[e] = BatchKVCache(left_padding)
-                    swapped += 1
+                caches[e], n_sw = _swap(c)
+                swapped += n_sw
             if swapped and not _warned_batch[0]:
                 _warned_batch[0] = True
                 _log.warning(
