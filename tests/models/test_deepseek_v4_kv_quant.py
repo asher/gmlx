@@ -129,6 +129,24 @@ def test_policy_arms_nested_compressor_pools():
     assert not idx_pool.is_quantized
 
 
+def test_policy_arms_pool_beside_kv_member():
+    # The glm5_next shape: CacheList(KVCache, PoolingCache) per layer.
+    # The kv member rules the list, so arming must not key off the
+    # layer kind.
+    from mlx_lm.models.cache import CacheList, KVCache
+
+    from gmlx.cache.kv_policy import arm_stack, resolve_kv_quant_policy
+
+    pools = [PoolingCache(4) for _ in range(3)]
+    caches = [CacheList(KVCache(), p) for p in pools]
+    policy = resolve_kv_quant_policy(caches, kv_bits=8, kv_group_size=32)
+    assert policy.verdict == "full"
+    assert [p.kind for p in policy.per_layer] == ["kv", "kv", "kv"]
+    arm_stack(caches, policy)
+    for p in pools:
+        assert p.is_quantized
+
+
 def test_policy_top_level_optout_pool_stays_fp16():
     from gmlx.cache.kv_policy import arm_stack, resolve_kv_quant_policy
 

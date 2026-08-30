@@ -305,14 +305,9 @@ def _arm_pools(c, bits, group) -> int:
 
 
 def quantize_kv_members(c, bits, group):
-    """Convert the growing KV caches under ``c``. Returns ``(cache, n)``.
-
-    For callers that convert eagerly instead of leaving the work to a
-    downstream ``hasattr(to_quantized)`` converter. ``CacheList`` has no
-    ``to_quantized``, and its other members are the windows, state and
-    opt-outs that must stay fp16, so the descent converts member by
-    member.
-    """
+    """Convert the growing KV caches under c, descending into cache
+    lists. Returns (cache, n). Window, state, and opt-out members stay
+    fp16."""
     types = _cache_kind_types()
     if _classify(c, types) != "kv":
         return c, 0
@@ -330,14 +325,15 @@ def quantize_kv_members(c, bits, group):
 
 def arm_stack(stack, policy: KvQuantPolicy, hold=True):
     """Conform a freshly built stack to the policy in place. Held fp16
-    layers lose to_quantized so converters skip them. Pool layers arm
-    at-rest packing. hold=False arms pools only. Holds stay top-level:
-    converters iterate only the top of the stack."""
+    layers lose to_quantized so converters skip them. Quantizable pools
+    arm at-rest packing on every layer, not only pool-kind ones: a kv
+    member rules a mixed list, so its pools would otherwise stay fp16.
+    hold=False arms pools only. Holds stay top-level: converters iterate
+    only the top of the stack."""
     if policy.verdict not in ("full", "partial"):
         return stack
     for i, plan in enumerate(policy.per_layer):
-        if plan.kind == "pool":
-            _arm_pools(stack[i], policy.bits, policy.group_size)
+        _arm_pools(stack[i], policy.bits, policy.group_size)
         if hold and not plan.quantize:
             stack[i] = hold_fp16(stack[i])
     return stack
