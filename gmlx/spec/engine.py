@@ -2120,6 +2120,16 @@ def install_continuous_batch_admission() -> None:
         last = getattr(self, "_kq_last_tokens", {}).get(self._all_uids[0])
         if last is None:
             return False
+        # Every cache must be batch-liftable before the generator closes.
+        # A quantized single-stream cache (KV_BITS MTP arm) has no merge;
+        # decline and keep the drain-wait behavior, so the B>1 rebuild
+        # goes through make_speculative_prompt_cache and its fp16 swap.
+        if not all(
+            (hasattr(c, "filter") and hasattr(c, "extend"))
+            or hasattr(type(c), "merge")
+            for c in self.prompt_cache
+        ):
+            return False
         it = self._rounds_iter
         captured = []
         if it is not None:
@@ -2450,12 +2460,24 @@ def install_spec_kv_quant() -> None:
         if draft_kind != "mtp":
             return caches
         if batch_size != 1:
-            if not _warned_batch[0]:
+            # Force fp16 batch KV. Under KV_BITS the stock builder returns
+            # BatchQuantizedKVCache, which the stock rollback misfiles as
+            # an SSM cache (not trimmable, no zero_row_tail): rejected
+            # draft tokens are never trimmed and the state pairing shifts.
+            from mlx_vlm.models.cache import BatchKVCache
+
+            batch_quant = cache_types("BatchQuantizedKVCache")
+            swapped = 0
+            for e, c in enumerate(caches):
+                if isinstance(c, batch_quant):
+                    caches[e] = BatchKVCache(left_padding)
+                    swapped += 1
+            if swapped and not _warned_batch[0]:
                 _warned_batch[0] = True
                 _log.warning(
                     "KV_BITS with MTP at batch size %d: packed batch "
-                    "rollback is unsupported; batched rows keep the stock "
-                    "cache", batch_size)
+                    "rollback is unsupported; %d layers run fp16 KV",
+                    batch_size, swapped)
             return caches
         if any(isinstance(c, rotating) for c in caches):
             if not _warned_rotating[0]:

@@ -239,20 +239,22 @@ def test_prefill_flash_strided_batch_cache_end_to_end():
     assert err < 2e-3, f"flash arm on live batch-cache slices err={err}"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="mlx Metal dequantize misreads a strided biases operand "
-           "(0.31.2 correct, 0.32.1 regressed). An XPASS here means "
-           "upstream fixed it: schedule removal of the mx.contiguous "
-           "wraps (kv-bits plan P5).",
-)
 def test_mlx_strided_biases_dequantize_canary():
+    # Asserts the mlx bug still reproduces (0.31.2 correct, 0.32.1
+    # regressed). A FAILURE here means upstream fixed Metal dequantize of
+    # strided biases, or this harness rotted: either way, act - remove
+    # the mx.contiguous wraps per the kv-bits plan P5 flag day, or repair
+    # the harness. Plain assert, not xfail: xfail(strict) files any
+    # exception as the expected failure and the tripwire rusts silently.
     if mx.default_device().type != mx.DeviceType.gpu:
         pytest.skip("Metal-only regression")
     _, qk, _ = _strided_case(kv=63)
     got = mx.dequantize(*qk, group_size=64, bits=8)
     ref = _cpu_dequant(qk)
-    assert mx.abs(got - ref).max().item() < 1e-6
+    err = mx.abs(got - ref).max().item()
+    assert not (err < 1e-2), (
+        f"strided-biases dequantize now correct (err={err}): upstream fix "
+        "landed - schedule removal of the contiguous wraps (plan P5)")
 
 
 def test_install_idempotent_and_killable(monkeypatch):

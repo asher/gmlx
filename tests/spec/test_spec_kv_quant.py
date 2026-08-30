@@ -108,6 +108,25 @@ def test_batch_passthrough(restorable):
     assert out is sentinel
 
 
+def test_batch_forces_fp16(restorable):
+    # B>1 MTP: quantized batch caches from the stock builder are swapped
+    # for BatchKVCache. The stock rollback misfiles BatchQuantizedKVCache
+    # as an SSM cache (not trimmable, no zero_row_tail): rejected drafts
+    # are never trimmed and the state pairing shifts.
+    from mlx_vlm.models.cache import BatchKVCache, BatchQuantizedKVCache
+
+    restorable.setenv("KV_BITS", "8")
+    spec_engine.install_spec_kv_quant()
+    lp = [0, 0]
+    stock = [BatchQuantizedKVCache(lp, group_size=64, bits=8),
+             _SSMCache(),
+             BatchQuantizedKVCache(lp, group_size=64, bits=8)]
+    out = _mk(batch_size=2, make_cache=lambda lm, _: stock)
+    assert type(out[0]) is BatchKVCache
+    assert type(out[2]) is BatchKVCache
+    assert isinstance(out[1], _SSMCache)
+
+
 def _fill(c, parts):
     for p in parts:
         c.update_and_fetch(p, p)
