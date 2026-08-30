@@ -66,3 +66,32 @@ def test_maybe_pin_weights_env_off(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("GMLX_PIN_WEIGHTS", "0")
     assert pin_weights.maybe_pin_weights(str(p)) is None
     assert "weight pin off" in capsys.readouterr().out
+
+
+def test_reserved_bytes_from_another_install_block_the_pin(
+        tmp_path, monkeypatch, capsys):
+    # mlock has no backpressure and wired pages are invisible to jetsam, so
+    # a second pin that ignores what a live install already holds wires the
+    # two together past the machine. The RAM fraction has to see both.
+    p = tmp_path / "m.gguf"
+    _write_model(p)
+    ranges = pin_weights.every_token_ranges(str(p))
+    total = sum(n for rs in ranges.values() for _, n in rs)
+    # Pretend the box has 2x the pin: alone it clears the 60% fraction,
+    # together with a 0.9x install it does not.
+    real, page = pin_weights.os.sysconf, pin_weights._PAGE
+    monkeypatch.setattr(
+        pin_weights.os, "sysconf",
+        lambda k: 2 * total // page + 1 if k == "SC_PHYS_PAGES" else real(k))
+
+    # Alone it fits: the whole pin is well under the fraction of "RAM".
+    pin = pin_weights.maybe_pin_weights(str(p))
+    assert pin is not None
+    pin.close()
+
+    # Charged against another install holding most of the box, it does not.
+    assert pin_weights.maybe_pin_weights(
+        str(p), reserved_bytes=int(0.9 * total)) is None
+    out = capsys.readouterr().out
+    assert "weight pin skipped" in out
+    assert "another live streaming install already holds" in out

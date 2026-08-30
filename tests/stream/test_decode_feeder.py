@@ -335,6 +335,15 @@ def test_arena_budget_math(monkeypatch):
     got = _decode_arena_bytes(
         100 << 30, offsets, budget=90 << 30, pinned_bytes=20 << 30)
     assert got == (40 << 30) - floor - (8 << 30)
+    # Another live streaming install's wired bytes come off the top. The
+    # avail snapshot cannot see them: its weight pin mlocks file-backed
+    # pages, which stay file-backed and still count as available, and its
+    # arena may not have wired yet. Both are gone the moment that model
+    # decodes, so an install that ignores them wires the box solid.
+    got = _decode_arena_bytes(
+        100 << 30, offsets, budget=90 << 30, pinned_bytes=20 << 30,
+        reserved_bytes=15 << 30)
+    assert got == (40 << 30) - floor - (8 << 30) - (15 << 30)
     monkeypatch.setenv("GMLX_DECODE_PAGECACHE_GB", "0")
     got = _decode_arena_bytes(100 << 30, offsets, budget=90 << 30)
     assert got == (40 << 30) - (5 << 30) - (20 << 30) - (8 << 30)
@@ -345,6 +354,10 @@ def test_arena_budget_math(monkeypatch):
     # An oversized override is clamped to reclaimable minus the floor...
     monkeypatch.setenv("GMLX_DECODE_ARENA_GB", "200")
     assert _decode_arena_bytes(60 << 30, offsets, budget=None) == (40 << 30) - floor
+    # ...and the clamp pays the other install too.
+    assert _decode_arena_bytes(
+        60 << 30, offsets, budget=None,
+        reserved_bytes=10 << 30) == (40 << 30) - floor - (10 << 30)
     # ...unless forced, and passes through when reclaimable is unknown.
     monkeypatch.setenv("GMLX_DECODE_ARENA_FORCE", "1")
     assert _decode_arena_bytes(60 << 30, offsets, budget=None) == 200 << 30
