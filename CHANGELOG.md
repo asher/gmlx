@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-08-30
+
 ### Fixed
 
 - Serve output with `kv_bits` set no longer corrupts into repeating
