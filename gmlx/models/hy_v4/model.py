@@ -15,7 +15,7 @@ mlx-lm has no hy_v4 class. The runtime follows the llama.cpp reference
   3. A sigmoid output gate on the decompressed attention result, applied
      before ``o_proj``.
   4. A DSA lightning indexer on the layers marked "full", selecting the
-     top ``index_topk`` keys. Rope covers the LAST ``qk_rope_head_dim``
+     top ``index_topk`` keys. Rope covers the last ``qk_rope_head_dim``
      dims of the 128-wide indexer head, the reverse of mlx-lm's
      deepseek_v32. Layers marked "shared" reuse the most recent preceding
      full layer's selection and carry no indexer weights. Below
@@ -28,7 +28,7 @@ mlx-lm has no hy_v4 class. The runtime follows the llama.cpp reference
      hyper-connections; the final collapse is deepseek_v4's learned
      ``HyperHead``.
   6. Sigmoid MoE (256 experts top-8, selection-only correction bias,
-     renormalized then scaled) with clamped SwiGLU on the ROUTED experts
+     renormalized then scaled) with clamped SwiGLU on the routed experts
      only. The leading dense layer and the shared expert are unclamped.
 
 The model has no MTP block: the converter drops the nextn layers, so this
@@ -356,7 +356,7 @@ class HyV4Attention(nn.Module):
     The rope half never enters the SDPA call: its scores are computed
     separately and passed as the float ``mask`` argument, the same trick
     mlx-lm's deepseek_v32 uses. The top-k selection is naturally a bool
-    mask, and folding it into those float scores is a REQUIREMENT here,
+    mask, and folding it into those float scores is a requirement here,
     not an accident of the shape: mx.fast SDPA deviates measurably when a
     bool mask and a sinks term meet in the same call.
     """
@@ -442,7 +442,7 @@ class HyV4Attention(nn.Module):
         if self.indexer is not None:
             top_k = self.indexer(x, qr, mask, cache=idx_cache)
         if _sparse_disabled():
-            # Drop the selection, but only AFTER the indexer has written its
+            # Drop the selection, but only after the indexer has written its
             # cache: skipping the call would leave the slot unwritten, and
             # CacheList.state reads keys.shape on every entry it holds. The
             # two paths then differ in the selection alone, which is the

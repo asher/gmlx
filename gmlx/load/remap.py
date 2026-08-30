@@ -1603,7 +1603,7 @@ ARCH_PRIORITY_OVERRIDES: dict[str, list[tuple[re.Pattern, str | None, str]]] = {
         # unchanged. Claimed explicitly rather than aliased to DEEPSEEK2
         # because the HY4-only rows (attention gate, per-head sinks, iHC)
         # have no canonical enum and the block must stay a closed set. All
-        # passthrough: rope acts on the qk_rope split AFTER q_b/kv_a, so
+        # passthrough: rope acts on the qk_rope split after q_b/kv_a, so
         # there is no llama-style Q/K permute to undo.
         #
         # MLA attention (absorbed layout).

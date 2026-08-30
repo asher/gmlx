@@ -3,7 +3,7 @@
 Two things here differ from mlx-lm's deepseek_v32 indexer and are the reason
 this file exists:
 
-  1. Rope covers the LAST ``qk_rope_head_dim`` dims of each indexer head, not
+  1. Rope covers the last ``qk_rope_head_dim`` dims of each indexer head, not
      the first. The reverse convention loads clean and selects the wrong keys.
   2. Only the layers marked "full" own indexer weights. A "shared" layer
      reuses the most recent preceding full layer's selection, so the chain has
@@ -103,7 +103,7 @@ def _ref_top_k(idx, x, qr, mask=None, offset=0):
 
 
 def _assert_top_k_agrees(got, scores, k):
-    """The selected SCORE multiset must match the reference's.
+    """The selected score multiset must match the reference's.
 
     relu clamps many scores to exactly 0, so which of the tied keys a
     partition returns is arbitrary and the index sets legitimately differ.

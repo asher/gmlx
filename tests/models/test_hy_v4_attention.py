@@ -197,7 +197,7 @@ def test_sparse_selection_matches_fp64_reference(keys, topk):
 
 
 def test_decode_step_gather_matches_fp64_reference():
-    # L == 1 takes the other branch: it GATHERS the selected latent rows
+    # L == 1 takes the other branch: it gathers the selected latent rows
     # instead of folding a mask, so the two selection paths need separate
     # checks. Run a prefill into the cache, then one decode step.
     from mlx_lm.models.cache import CacheList, KVCache

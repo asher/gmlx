@@ -3078,7 +3078,7 @@ def _synth_hyv4(meta, shapes, config: dict) -> None:
     norm = _read_bool(meta, f"{arch}.expert_weights_norm")
     config["norm_topk_prob"] = True if norm is None else norm
 
-    # Clamped SwiGLU on the ROUTED experts only: the converter leaves
+    # Clamped SwiGLU on the routed experts only: the converter leaves
     # swiglu_clamp_shexp unwritten, so the shared and dense MLPs are plain.
     clamp = _read_swiglu_clamp(
         meta, arch, block_count=config["num_hidden_layers"])
