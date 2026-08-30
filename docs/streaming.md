@@ -202,21 +202,18 @@ skipped with a printed reason when the every-token set would exceed 60%
 of RAM.
 
 Two streaming installs in one process share nothing. The weight pin and the
-decode arena are both mlocked, and mlocked pages are the one kind the system
-cannot take back: they are never compressed, swapped or evicted, so they
-raise no memory pressure and jetsam never selects a process to kill. A
-machine with nothing reclaimable therefore stops rather than recovers. So a
-streaming install first reclaims any install whose model is gone - a
-released model does not free its arena at the drop, because the decode
-feeder and the MoE modules reference each other and the tree waits for a
-generational collection - and then charges whatever is still held against
-its own weight pin, which sizes against total RAM. The decode arena needs
-no such charge: it sizes against reclaimable RAM, and mlock moves a pinned
-page out of that count and into wired one for one. A second model on a
-full box degrades to the page-cache path with a printed reason instead of
-wiring the machine solid.
-Release a model explicitly with `gmlx.stream.installs.release(model)` to
-give the next one the full budget; the server does this at eviction.
+decode arena are both mlocked, and mlocked pages are never compressed,
+swapped or evicted, so they raise no memory pressure and jetsam never
+selects a process to kill. A machine with nothing reclaimable stops rather
+than recovers. A streaming install therefore reclaims any install whose
+model is gone (a released model keeps its arena until a collection breaks
+the feeder/module cycle), then charges what is still held against its own
+weight pin, which sizes against total RAM. The decode arena needs no such
+charge: it sizes against reclaimable RAM, and a pinned page leaves that
+count. A second model on a full box degrades to the page-cache path with a
+printed reason instead of wiring the machine solid. Release a model with
+`gmlx.stream.installs.release(model)` to give the next one the full
+budget; the server does this at eviction.
 
 In server configs the placement is the per-model `stream: experts | cpu`
 key and the feeder opt-outs are `prefill_feeder: false` /

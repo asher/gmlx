@@ -162,17 +162,12 @@ FAMILIES: dict[str, dict] = {
             "reasoning-high": {"chat_template_kwargs": {"reasoning_effort": "high"}},
         },
     },
-    # AngelSlim/Hy4-preview: the GGUF's own general.sampling.* (t=0.9,
-    # top_p 1.0, top_k off), which discovery reads directly - repeated here
-    # so the family stands on its own. The chat template's reasoning_effort
-    # takes no_think/low/high (defaults to high; other values raise
-    # in-template). No reasoning-none intent: the template carries both
-    # `no_think` and `reasoning_effort`, the dialect `--thinking off`
-    # already maps onto, so a family-specific intent would duplicate a
-    # control that works today. The thinking tokens carry HY4's ':6124c78e'
-    # tag suffix so the server's open-think detection, budget criteria, and
-    # stream splitter see the model's real markers instead of the '<think>'
-    # default.
+    # AngelSlim/Hy4-preview: the sampling values are the GGUF's own
+    # general.sampling.*. reasoning_effort takes no_think/low/high; there is
+    # no reasoning-none intent because the dialect `--thinking off` already
+    # maps onto the template's no_think. The thinking tokens carry HY4's
+    # ':6124c78e' tag suffix, which the open-think detection, the budget
+    # criteria and the stream splitter all read.
     "hy4": {
         "label": "HY4",
         "arches": ("hyv4",),

@@ -1,29 +1,21 @@
 #!/usr/bin/env python3
 """HY4 long-context gates that need no llama.cpp reference.
 
-The shared sweep in ``test_long_context.py`` covers HY4 too, but its parity
-test needs an oracle and HY4's oracle is expensive and shallow: patch 0002
-implements STQ1_0 for CPU and CUDA only, so llama.cpp has to run ``-dev none
---no-op-offload`` and prefills the 229 GB file at ~2.25 tok/s. That puts a 16k
-reference out of reach and makes even a 4k one a half-hour run.
+STQ1_0 has no Metal kernel in llama.cpp, so a HY4 oracle prefills the
+229 GB file on CPU at ~2.25 tok/s and cannot reach the depths that
+exercise the DSA key-selection chain. These gates validate that chain
+against the model itself instead:
 
-So the DSA key-selection chain - the part a shallow oracle cannot reach - is
-validated against the model itself instead, three ways:
-
-  * Below ``index_topk`` cached keys the selection covers every key, so the
-    sparse path and ``GMLX_HY4_SPARSE_DISABLE=1`` must produce IDENTICAL
-    tokens. This isolates a gather/mask defect from real sparsity.
-  * Above the boundary the two paths legitimately differ, but both must still
-    retrieve a fact planted ~100 tokens into the prompt. A corrupted selection
-    chain (a shared layer that lost the preceding layer's pick, an off-by-one
-    in the top-k gather) drops the needle while staying fluent.
-  * The tiled online-softmax prefill and the direct path must agree token for
-    token on the same prompt.
+  * Below ``index_topk`` cached keys the selection covers every key, so
+    the sparse path and ``GMLX_HY4_SPARSE_DISABLE=1`` must agree token for
+    token. This separates a gather or mask defect from real sparsity.
+  * Above the boundary the paths legitimately differ, but both must still
+    recall a fact planted ~100 tokens in. A broken selection chain drops
+    the needle while staying fluent.
+  * The tiled online-softmax prefill must agree with the direct path.
 
 All three are ``integration`` + ``slow`` and skip without a HY4 GGUF under
-``KQUANT_TEST_GGUF_DIR``. On a 128 GB box the model runs on the expert-
-streaming tier, so each of these is minutes, not seconds, and the whole file
-shares one load (see ``hy4_model``).
+``KQUANT_TEST_GGUF_DIR``. The whole file shares one load (``hy4_model``).
 """
 
 from __future__ import annotations
@@ -74,20 +66,12 @@ def _greedy_text(model, tok, ids, n):
 def hy4_model(gguf_index):
     """One HY4 load for the whole file, released at teardown.
 
-    Every gate here is a property of one model, so loading per test buys
-    nothing and costs a great deal. On the streaming tier a load mlocks an
-    every-token weight pin and a decode arena, and a dropped model does not
-    give them back at the drop: the decode feeder holds every MoE module
-    and every MoE module holds the feeder, so the tree waits for a
-    generational collection. Two wired installs at once is how a 128 GB box
-    earns a watchdog panic - wired pages are the one kind memory pressure
-    and jetsam cannot take back, so the machine deadlocks rather than
-    killing anything.
-
-    Sharing the load is safe because the flags these tests move are read
-    per call: ``GMLX_HY4_SPARSE_DISABLE`` in ``_sparse_disabled`` and the
-    tiling thresholds through ``monkeypatch``, which undoes itself.
-    """
+    A streaming load mlocks a weight pin and a decode arena, and dropping
+    the model gives neither back until a collection breaks the
+    feeder/module cycle, so a per-test load wires two installs at once.
+    Sharing is safe because the flags these tests move are read per call:
+    ``GMLX_HY4_SPARSE_DISABLE`` in ``_sparse_disabled`` and the tiling
+    thresholds through ``monkeypatch``."""
     path = _require(gguf_index, ARCH)
     model, config, tok = _load(path)
     yield path, model, config, tok

@@ -268,16 +268,14 @@ class HyV4Indexer(nn.Module):
             ..., -self.index_topk:]
 
 
-# MLX's fused attention kernel caps at head dim 128, so every L>1 MLA
-# forward here runs composite and materializes the whole [B, 64, L, S]
-# score tensor - and, because the rope half rides in as a float additive
-# mask, a SECOND one of the same size. At an 8192-token prefill chunk
-# against 8192 keys that pair is ~17 GB on top of a streaming model. Past
-# the thresholds below, prefill switches to an exact online softmax over
-# [_STREAM_Q x _STREAM_BLOCK] tiles: peak is a few score tiles at any
-# depth, and the sink term is folded in by seeding the running maximum
-# with it, which needs no extra pass and stays finite even for a query row
-# that the top-k selection leaves with no visible key.
+# The fused attention kernel caps at head dim 128, so an L>1 MLA forward
+# runs composite and materializes a [B, 64, L, S] score tensor, plus a
+# second one for the float additive mask the rope half rides in on: ~17 GB
+# at an 8192-token chunk against 8192 keys. Past the thresholds below,
+# prefill switches to an exact online softmax over [_STREAM_Q x
+# _STREAM_BLOCK] tiles. Seeding the running maximum with the sink term
+# folds it in without an extra pass, and keeps a query row finite when the
+# selection leaves it no visible key.
 _STREAM_MIN_KEYS = 4096
 _STREAM_BLOCK = 2048
 _STREAM_Q = 512

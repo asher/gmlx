@@ -1,15 +1,7 @@
 #!/usr/bin/env python3
-"""The live-streaming-install registry.
-
-The registry exists because two expert-streaming installs in one process do
-not share memory, they add to it: both mlock, mlock has no backpressure,
-and mlocked pages are invisible to memory pressure and to jetsam. A machine
-with nothing reclaimable does not report pressure and does not kill
-anything - it deadlocks, and the hardware watchdog reboots it. So the two
-behaviours below are the ones that matter: a released install must give its
-bytes back before the next install sizes itself, and one that is still held
-must be charged against the next.
-"""
+"""The live-streaming-install registry: a released install gives its wired
+bytes back before the next one sizes itself, and one still held is charged
+against the next."""
 
 from __future__ import annotations
 
@@ -61,11 +53,9 @@ def test_a_held_install_is_still_charged():
 
 
 def test_reclaim_dead_collects_a_cycle_refcounting_cannot():
-    # The shape that caused the panic: the feeder holds the modules and the
-    # modules hold the feeder, so dropping the model leaves the arena wired
-    # until a generational collection runs. A weakref cannot see this - it
-    # still resolves while the object is unreachable but unfinalized - which
-    # is why reclaim_dead collects first and counts after.
+    # The feeder holds the modules and the modules hold the feeder, so a
+    # dropped model keeps its arena wired until a collection runs, and its
+    # weakref resolves the whole time.
     m = _Holder()
     feeder = _Helper()
     feeder.owner = m           # feeder -> model

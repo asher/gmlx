@@ -87,14 +87,10 @@ def test_a_pinned_page_leaves_the_reclaimable_snapshot(tmp_path):
     """mlock must move a file-backed page out of the File-backed count.
 
     ``_available_ram_bytes`` offers free + purgeable + file-backed, and
-    ``_decode_arena_bytes`` charges only the *unpinned* share of the
-    non-expert weights against that offer, on the grounds that a live pin
-    is already out of the snapshot. Measured on macOS 26 the move is one
-    for one. If a future release ever left mlocked pages counted as
-    file-backed, that offer would overstate by the whole pin and every
-    streaming arena would size past the machine, so this is a canary
-    rather than a test of our own code.
-    """
+    ``_decode_arena_bytes`` charges only the unpinned share of the
+    non-expert weights against it. If a release ever left mlocked pages
+    counted as file-backed, that offer would overstate by the whole pin.
+    A canary on the platform, not a test of our own code."""
     p = tmp_path / "big.bin"
     n = 32 << 20
     p.write_bytes(b"\0" * n)
@@ -121,9 +117,8 @@ def test_a_pinned_page_leaves_the_reclaimable_snapshot(tmp_path):
 
 def test_reserved_bytes_from_another_install_block_the_pin(
         tmp_path, monkeypatch, capsys):
-    # mlock has no backpressure and wired pages are invisible to jetsam, so
-    # a second pin that ignores what a live install already holds wires the
-    # two together past the machine. The RAM fraction has to see both.
+    # Wired pages are invisible to jetsam, so a second pin that ignores what
+    # a live install holds wires the two together past the machine.
     p = tmp_path / "m.gguf"
     _write_model(p)
     ranges = pin_weights.every_token_ranges(str(p))

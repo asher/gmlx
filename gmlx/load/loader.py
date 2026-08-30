@@ -1323,15 +1323,9 @@ def _decode_arena_bytes(
     that starves the page cache every buffered read path depends on
     (``GMLX_DECODE_ARENA_FORCE=1`` restores the unclamped behavior).
 
-    A second live streaming install needs no term here, though its pin and
-    arena are real wired memory (``gmlx.stream.installs``). The reclaimable
-    snapshot already excludes both: measured on macOS 26, mlock moves a
-    file-backed page out of ``vm_stat``'s File-backed count and into wired
-    one for one, and an arena is anonymous, so neither lands in free,
-    purgeable, or file-backed. Charging them again halves the second
-    model's arena for nothing. The weight pin is the place that does need
-    the charge, because it sizes against total RAM rather than against
-    this snapshot."""
+    A second live streaming install needs no term here: mlock moves a page
+    out of the file-backed count and an arena is anonymous, so the
+    reclaimable snapshot already excludes both."""
     env = os.environ.get("GMLX_DECODE_ARENA_GB")
     if env:
         want = int(float(env) * (1 << 30))
@@ -1899,17 +1893,12 @@ def install_expert_streaming(
     held_wired = 0
     if streaming:
         _neutralize_wired_limit_sweep()
-        # An earlier streaming model in this process may still hold its
-        # wired bytes. Reclaim the ones whose model is gone (the feeder and
-        # the MoE modules reference each other, so a dropped model waits
-        # for a collection to unwire its arena), then charge whatever is
-        # still genuinely held against this install's weight pin. mlock has
-        # no backpressure and wired pages are invisible to jetsam, so two
-        # pins that each size against a whole machine wire it solid, and a
-        # machine with nothing reclaimable does not report memory pressure
-        # - it stops. The decode arena needs no such charge: it sizes
-        # against reclaimable RAM, which already excludes both the other
-        # install's pin and its arena (see _decode_arena_bytes).
+        # Reclaim the wired bytes of released streaming models (feeder and
+        # MoE modules reference each other, so unwiring waits for a
+        # collection), then charge what is still held against this weight
+        # pin. Wired pages are invisible to jetsam, so two pins that each
+        # size against the whole machine wire it solid. The arena needs no
+        # charge; see _decode_arena_bytes.
         from gmlx.stream import installs as _installs
 
         freed = _installs.reclaim_dead()
