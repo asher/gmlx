@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-08-29
+
 ### Added
 
 - Qwen3.8-Flash-Next: when only its 27-54 GB n-gram table pushes the model
