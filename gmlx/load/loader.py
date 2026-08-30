@@ -1305,6 +1305,7 @@ def _ram_floor_bytes(ram: int | None) -> int:
 def _decode_arena_bytes(
     total_bytes: int, offsets, budget: int | None, ring_bytes: int = 0,
     pinned_bytes: int = 0, streamable_bytes: int = 0,
+    reserved_bytes: int = 0,
 ) -> int:
     """Arena budget for the decode feeder, under two hardware-derived
     ceilings: the GPU working-set budget, and a fraction of physical RAM
@@ -1321,7 +1322,14 @@ def _decode_arena_bytes(
     resident. ``GMLX_DECODE_ARENA_GB`` overrides the ceilings but is still
     clamped to what is reclaimable minus the floor - an arena wired past
     that starves the page cache every buffered read path depends on
-    (``GMLX_DECODE_ARENA_FORCE=1`` restores the unclamped behavior)."""
+    (``GMLX_DECODE_ARENA_FORCE=1`` restores the unclamped behavior).
+
+    ``reserved_bytes`` is what another live streaming install in this
+    process already committed (``gmlx.stream.installs``). The reclaimable
+    snapshot below does not see it: a weight pin mlocks file-backed pages,
+    which stay file-backed and so still count as available to ``vm_stat``,
+    and an arena allocated but not yet wired has no page cost at all. Both
+    are gone the moment the other model decodes, so charge them here."""
     env = os.environ.get("GMLX_DECODE_ARENA_GB")
     if env:
         want = int(float(env) * (1 << 30))
@@ -1334,7 +1342,7 @@ def _decode_arena_bytes(
             ram = int(mx.device_info()["memory_size"])
         except Exception:
             ram = avail
-        cap = max(0, avail - _ram_floor_bytes(ram))
+        cap = max(0, avail - _ram_floor_bytes(ram) - reserved_bytes)
         if want > cap:
             print(
                 f"[stream] GMLX_DECODE_ARENA_GB={env} exceeds reclaimable"
@@ -1385,7 +1393,8 @@ def _decode_arena_bytes(
         unpinned = max(0, non_expert_bytes - pinned_bytes)
         arena = min(
             arena,
-            avail - _ram_floor_bytes(ram or avail) - reserve - unpinned,
+            avail - _ram_floor_bytes(ram or avail) - reserve - unpinned
+            - reserved_bytes,
         )
     return min(max(0, arena), expert_bytes)
 
@@ -1886,8 +1895,32 @@ def install_expert_streaming(
 
     streaming = force_stream or over_budget
     prefetcher = None
+    held_wired = 0
     if streaming:
         _neutralize_wired_limit_sweep()
+        # An earlier streaming model in this process may still hold its
+        # wired bytes. Reclaim the ones whose model is gone (the feeder and
+        # the MoE modules reference each other, so a dropped model waits
+        # for a collection to unwire its arena), then charge whatever is
+        # still genuinely held against this install's pin and arena. mlock
+        # has no backpressure and wired pages are invisible to jetsam, so
+        # two installs that each size against a whole machine wire it
+        # solid, and a machine with nothing reclaimable does not report
+        # memory pressure - it stops.
+        from gmlx.stream import installs as _installs
+
+        freed = _installs.reclaim_dead()
+        held_wired = _installs.live_wired_bytes()
+        if freed:
+            loadlog.info(
+                f"[stream] reclaimed {freed / 1e9:.1f} GB wired from a "
+                "released streaming model")
+        if held_wired:
+            print(
+                f"[stream] another live streaming install holds "
+                f"{held_wired / 1e9:.1f} GB wired; this model sizes its pin "
+                "and arena against what is left (release the other model "
+                "first for the full budget)")
         from gmlx.stream.prefetch import maybe_make_prefetcher
 
         prefetcher = maybe_make_prefetcher(gguf_path)
@@ -1902,9 +1935,11 @@ def install_expert_streaming(
         # or resident: mlocking them starves the expert page cache.
         pin_exclude = frozenset(
             t.gguf_name for t, _ in streamable_tables_for(model))
-        weights_pin = maybe_pin_weights(gguf_path, exclude_names=pin_exclude)
+        weights_pin = maybe_pin_weights(
+            gguf_path, exclude_names=pin_exclude, reserved_bytes=held_wired)
         if weights_pin is not None:
             object.__setattr__(model, "_kq_weights_pin", weights_pin)
+            _installs.record(model, weights_pin.pinned_bytes)
 
     def _wrapped_class(cls):
         sub = _CPU_OFFLOAD_CLASS_CACHE.get(cls)
@@ -2441,7 +2476,8 @@ def install_expert_streaming(
             total_bytes, prefetcher.offsets, budget,
             ring_bytes=2 * feeder.slot_bytes if feeder is not None else 0,
             pinned_bytes=getattr(pin, "pinned_bytes", 0),
-            streamable_bytes=streamed_table_bytes(model))
+            streamable_bytes=streamed_table_bytes(model),
+            reserved_bytes=held_wired)
         dfeeder = maybe_make_decode_feeder(
             prefetcher.offsets, moe_modules, arena, stats_verbose)
         if dfeeder is not None:
@@ -2451,6 +2487,11 @@ def install_expert_streaming(
                     for m in mods:
                         object.__setattr__(m, "_kq_decode_feeder", dfeeder)
             object.__setattr__(model, "_kq_decode_feeder", dfeeder)
+            # Committed from here, not from the first decode: the arena
+            # wires itself the moment this model decodes, and a second
+            # install that sized against the unwired window would find the
+            # memory gone before it ever ran.
+            _installs.record(model, dfeeder.arena_bytes)
             if feeder is not None:
                 # First decode call swaps the wired budget: prefill ring
                 # freed, arena wired (DecodeFeeder.ensure_wired). A later

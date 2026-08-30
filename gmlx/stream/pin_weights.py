@@ -168,11 +168,16 @@ class WeightsPin:
 def maybe_pin_weights(
     gguf_path: str | None,
     exclude_names: frozenset[str] | set[str] = frozenset(),
+    reserved_bytes: int = 0,
 ) -> WeightsPin | None:
     """A WeightsPin over the model's non-expert ranges, or None with a printed
     reason. Called only for streaming-mode installs. ``exclude_names``:
     streamed lookup-table tensors to keep out of the pin set (see
-    every_token_ranges)."""
+    every_token_ranges). ``reserved_bytes``: wired bytes another live
+    streaming install already holds (``gmlx.stream.installs``), charged
+    against the RAM fraction below - mlock has no backpressure, so a second
+    pin that ignores the first wires the two together past what the machine
+    has, and wired pages are the one kind jetsam cannot take back."""
     if gguf_path is None:
         return None
     if not env_bool("GMLX_PIN_WEIGHTS", True):
@@ -186,11 +191,16 @@ def maybe_pin_weights(
             ram = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGESIZE")
         except (ValueError, OSError):
             ram = 0
-        if ram and total > _MAX_FRACTION * ram:
+        if ram and total + reserved_bytes > _MAX_FRACTION * ram:
+            held = (
+                "" if not reserved_bytes else
+                f" on top of {reserved_bytes / 1e9:.1f} GB another live "
+                "streaming install already holds")
             print(
                 f"[stream] weight pin skipped: every-token weights "
-                f"({total / 1e9:.1f} GB) exceed {int(_MAX_FRACTION * 100)}% "
-                f"of RAM ({ram / 1e9:.0f} GB); staying cache-managed")
+                f"({total / 1e9:.1f} GB){held} exceed "
+                f"{int(_MAX_FRACTION * 100)}% of RAM ({ram / 1e9:.0f} GB); "
+                "staying cache-managed")
             return None
         pin = WeightsPin(ranges)
         if pin._refused:
