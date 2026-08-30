@@ -178,6 +178,19 @@ def test_quant_tag_none_when_absent():
     assert disc.quant_tag("some-model.gguf") is None
 
 
+def test_quant_tag_stq1_0():
+    # STQ needs its own regex alternative: Q\d+ requires a separator right
+    # before the Q and finds a T there instead.
+    assert disc.quant_tag("Hy-MT1.5-1.8B-STQ1_0.gguf") == "STQ1_0"
+    assert disc.quant_tag("model-UD-STQ1_0.gguf") == "STQ1_0"
+
+
+def test_stq1_0_tag_collapses_to_same_id():
+    a, _ = disc.derive_id("Foo-Bar-STQ1_0.gguf")
+    b, _ = disc.derive_id("Foo-Bar-Q6_K.gguf")
+    assert a == b
+
+
 def test_sharded_name_collapses_to_one_id():
     a, _ = disc.derive_id("BigModel-Q6_K-00001-of-00005.gguf")
     b, _ = disc.derive_id("BigModel-Q6_K.gguf")

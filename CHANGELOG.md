@@ -16,6 +16,21 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   106 -> 54 GB). `GMLX_STREAM_PLE` overrides; `GMLX_STREAM_PLE_COMPOSE=0`
   keeps the table resident when the experts stream.
 - `chat` shows a spinner from send to first token.
+- STQ1_0 GGUFs (llama.cpp PR #22836, GGML type 43 -- unmerged upstream, the
+  id may shift) load end-to-end. Headerscan carries a fallback table for
+  type ids newer than the installed gguf-py, preflight accepts the codec,
+  discovery tags `-STQ1_0` filenames, and remote and local classification
+  agree on it. Requires mlx-kquant >= 0.4.4, the release carrying the
+  stq1_0 kernels.
+- STQ1_0 GGUFs (llama.cpp PR #22836, GGML type 43; unmerged, the id may
+  shift) load end-to-end. Requires mlx-kquant >= 0.4.4.
+
+### Changed
+
+- `gmlx validate` and the manage verbs classify local GGUFs via headerscan
+  instead of gguf-py's `GGUFReader`, so a type id newer than the installed
+  gguf-py gets a verdict instead of "cannot read as GGUF". The refusal
+  message now also names mxfp4/nvfp4.
 
 ### Fixed
 
