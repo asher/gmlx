@@ -695,7 +695,13 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
                     "base": _model_entry(q35, profile="p")}},
             targets=[ReqTarget("recall", "spec",
                                prompts=[P.p_long_ctx_needle("MAROONMTP88")])],
-            post=[_pc_mtp_lossless("spec", "base"),
+            post=[_pc_mtp_lossless(
+                      "spec", "base",
+                      # qwen3.5 is a thinking model: with thinking on, content
+                      # is empty (reasoning_content only) and the lossless
+                      # compare would pass vacuously on two empty strings.
+                      chat_kwargs={"chat_template_kwargs":
+                                   {"enable_thinking": False}}),
                   pc_kv_engagement("spec", verdict="partial",
                                    verdict_batched="dropped")],
             notes="issue #104 follow-on: the MTP arm's kv path was the "
@@ -721,14 +727,16 @@ def _pc_two_resident_entries_same_path(path: str) -> Callable:
     return _check
 
 
-def _pc_mtp_lossless(spec_id: str, base_id: str) -> Callable:
+def _pc_mtp_lossless(spec_id: str, base_id: str, *, chat_kwargs=None) -> Callable:
+    extra = dict(chat_kwargs or {})
+
     def _check(client):
         out = []
         for pr in (P.p_capital(), P.p_instruct(), P.p_count()):
             _, b_spec = client.chat(spec_id, pr.messages, max_tokens=pr.max_tokens,
-                                    temperature=0.0)
+                                    temperature=0.0, **extra)
             _, b_base = client.chat(base_id, pr.messages, max_tokens=pr.max_tokens,
-                                    temperature=0.0)
+                                    temperature=0.0, **extra)
             t_spec = checks.extract_chat_text(b_spec) if isinstance(b_spec, dict) else None
             t_base = checks.extract_chat_text(b_base) if isinstance(b_base, dict) else None
             out.append(CheckResult(f"lossless[{pr.key}]", bool(t_base) and t_spec == t_base,
@@ -738,11 +746,12 @@ def _pc_mtp_lossless(spec_id: str, base_id: str) -> Callable:
         # Anti-vacuous guard: the comparison is only meaningful if `base` loaded
         # NON-speculatively. One GGUF backs both ids; if the path-keyed MTP registry
         # leaked the drafter into base's build (the worker-thread bug class), base
-        # would also be MTP and spec==base would pass for the wrong reason. The MTP
-        # target wrapper logs exactly once per speculative build, so the log must
-        # carry exactly one - proving base is the bare base.
+        # would also be MTP and spec==base would pass for the wrong reason. The
+        # "[mtp] drafter:" INFO line logs exactly once per speculative build
+        # (serve loads run quiet, so verbose_print lines never reach the log),
+        # so the log must carry exactly one - proving base is the bare base.
         n_mtp = _count_in_log(getattr(client, "log_path", None),
-                              "(MTP target wrapper)")
+                              "[mtp] drafter:")
         out.append(CheckResult(
             "provenance:base_is_non_spec", n_mtp == 1,
             f"{n_mtp} MTP target build(s) (expect 1: only {spec_id!r}, not {base_id!r})"))

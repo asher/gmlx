@@ -34,7 +34,11 @@ def _models_payload() -> dict:
     ``default`` markers. Never the HF cache."""
     serving.reregister_missing_models()   # a restored file re-appears here
     models = serving.resolved_models()
-    resident, pinned, kv_quant = set(), set(), {}
+    resident, pinned = set(), set()
+    # kv_quant keys on the loaded id, not the GGUF path: two ids can share one
+    # file (spec + base over the same GGUF) and resolve different policies.
+    # Path map is the fallback for entries with no recorded loaded_as.
+    kv_by_id, kv_by_path = {}, {}
     pool = _get_pool()
     if pool is not None:
         for e in pool.stats()["resident"]:
@@ -42,7 +46,10 @@ def _models_payload() -> dict:
             if e["pinned"]:
                 pinned.add(e["model_path"])
             if e.get("kv_quant") is not None:
-                kv_quant[e["model_path"]] = e["kv_quant"]
+                loaded_as = e.get("loaded_as")
+                if loaded_as:
+                    kv_by_id[loaded_as.split("@", 1)[0]] = e["kv_quant"]
+                kv_by_path.setdefault(e["model_path"], e["kv_quant"])
     default_id = serving.default_model_id()
 
     def _entry(mid, rm, *, alias_of=None, profile=None):
@@ -54,7 +61,7 @@ def _models_payload() -> dict:
             "resident": rm.path in resident,
             # Resolved KV quantization policy (resident models only:
             # the policy is resolved on the constructed stack at load).
-            "kv_quant": kv_quant.get(rm.path),
+            "kv_quant": kv_by_id.get(alias_of or mid, kv_by_path.get(rm.path)),
             "pinned": bool(rm.pin) or rm.path in pinned,
             "speculative": bool(rm.speculative),
             "vlm": rm.mmproj is not None,
