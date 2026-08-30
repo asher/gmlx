@@ -328,14 +328,16 @@ Coverage runs across the major open-weight families: Llama and Mistral;
 Qwen 2 through 3.8, dense and MoE, including the gated-DeltaNet hybrids and
 Qwen3-Next; Gemma 1 through 4 plus DiffusionGemma; DeepSeek V3/R1 and
 V4-Flash; GLM 4 through 5.2; gpt-oss; Kimi-K3; MiniMax M2 and M3; Hunyuan
-A13B and Hy3; Muse Glimmer; Granite, including the 4.x hybrids; Nemotron-H;
-Falcon-H1; ERNIE-4.5; Phi-3; Seed-OSS; and SmolLM3. New architectures land regularly,
-and a family is listed in the generated
+A13B, Hy3 and HY4-preview; Muse Glimmer; Granite, including the 4.x hybrids;
+Nemotron-H; Falcon-H1; ERNIE-4.5; Phi-3; Seed-OSS; and SmolLM3. New
+architectures land regularly, and a family is listed in the generated
 [architecture coverage matrix](https://github.com/asher/gmlx/blob/main/docs/arch-coverage.md)
 only after token-parity certification against llama.cpp at 16k context; the
 matrix carries per-arch notes, including the rare exceptions (DiffusionGemma
-has no llama.cpp oracle and is validated by output coherence; gemma-3n is
-code-complete but gate-disabled until a correctly converted GGUF exists).
+has no llama.cpp oracle and is validated by output coherence; HY4-preview's
+oracle is CPU-only, so its parity window is 4k and its sparse-attention path
+is certified against its own dense forward; gemma-3n is code-complete but
+gate-disabled until a correctly converted GGUF exists).
 
 A GGUF is loadable when its `general.architecture` is an architecture gmlx
 recognizes and can synthesize a config for, or you supply `hf_source`.

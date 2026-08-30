@@ -16,6 +16,26 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `GMLX_DECODE_PRESTAGE_EVICT`, `GMLX_DECODE_SETTLE` and
   `GMLX_DECODE_DECAY_EVERY` select the individual prefetch policies.
 
+### Changed
+
+- The decode arena sizes to 0.7 of physical RAM rather than 0.6, which on a
+  128 GB machine is 90.7 GB rather than 78.6 and is worth 12% of decode.
+  The live reclaimable ceiling and the system floor are unchanged, and
+  `GMLX_DECODE_ARENA_RAM_FRAC` still overrides.
+- Tencent HY4-preview (`hyv4`, 256x29B) loads and runs end to end. Absorbed
+  MLA with per-head attention sinks, a sigmoid gate on the attention output,
+  and a per-token DSA lightning indexer that selects 2048 keys on 21 of the
+  78 layers; the other layers reuse the preceding selection. Four-stream
+  independent hyper-connections (no sinkhorn term) run in fp32. The 256
+  routed experts use a clamped SwiGLU and stream from disk on boxes below
+  the model's resident size, and prefill switches to an exact tiled online
+  softmax at depth. Chat, thinking (`<think:6124c78e>`) and the
+  `:6124c78e` tool-call format are wired, with `@reasoning-low` and
+  `@reasoning-high` intents in the new `hy4` sampling family. HY4 has no MTP
+  block, so it never drives speculative decoding, and its cache declares
+  itself unquantizable, so the KV policy holds the whole stack at fp16:
+  quantized SDPA has no place for the sink logit.
+
 ### Fixed
 
 - gpt-oss GGUFs (harmony) answer again: `run` and `serve` stopped on
@@ -27,13 +47,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lift as a typed `--stream-experts`, so streamed decode no longer runs 40%
   slower from the config than from the bare GGUF path (10.3 vs 7.2 tok/s on
   GLM-5.3-Flash UD-Q4_K_XL). `serve` was never affected.
-
-### Changed
-
-- The decode arena sizes to 0.7 of physical RAM rather than 0.6, which on a
-  128 GB machine is 90.7 GB rather than 78.6 and is worth 12% of decode.
-  The live reclaimable ceiling and the system floor are unchanged, and
-  `GMLX_DECODE_ARENA_RAM_FRAC` still overrides.
 
 ## [0.4.7] - 2026-08-30
 
@@ -59,6 +72,20 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `/v1/metrics` server snapshot reports `apc.enabled` true whenever the
   residency pool holds a live APC manager; it said false until a request
   had touched the entry (the proxy resolves per request context).
+- `serve` with `stream: experts` no longer refuses a model whose codec is
+  newer than the installed gguf-py. The streamed-expert size is now read
+  through headerscan, which carries the fallback type table, instead of
+  through a reader that raises and reports zero streamable bytes.
+- Loading a second expert-streaming model into one process no longer wires
+  the machine solid. A released model did not give its wired bytes back at
+  the drop, because the decode feeder and the MoE modules reference each
+  other and the tree waits for a generational collection; the next load then
+  mlocked a fresh weight pin and arena on top of the old ones. Both are
+  mlocked, and mlocked pages are invisible to memory pressure and to jetsam,
+  so the machine deadlocked instead of reporting pressure or killing
+  anything. A streaming install now reclaims a released one before it wires
+  anything, and charges whatever is still held against its own pin and
+  arena.
 
 ### Changed
 
