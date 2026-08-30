@@ -152,11 +152,12 @@ def test_digit_clause_selected_by_pre():
 
 def test_deepseek3_pre_is_multi_regex_sequence():
     # llama.cpp's DEEPSEEK3_LLM case applies THREE regexes sequentially (the
-    # same case covers pre='deepseek-v3', 'joyai-llm' [DeepSeek V4 Flash], and
-    # 'hunyuan-dense'). The selector must return the tuple, and the builder
-    # must chain one Split per pattern (mirroring sequential splitting).
+    # same case covers pre='deepseek-v3', 'joyai-llm' [DeepSeek V4 Flash],
+    # 'hunyuan-dense' and 'hyv4' [HY4-preview]). The selector must return the
+    # tuple, and the builder must chain one Split per pattern (mirroring
+    # sequential splitting).
     from gmlx.load.tokenizer import _DEEPSEEK3_PATTERNS, _bytelevel_split_patterns
-    for pre in ("deepseek-v3", "joyai-llm", "hunyuan-dense"):
+    for pre in ("deepseek-v3", "joyai-llm", "hunyuan-dense", "hyv4"):
         assert _bytelevel_split_patterns(pre) == _DEEPSEEK3_PATTERNS
     assert len(_DEEPSEEK3_PATTERNS) == 3
     # Verified against ds4 --dump-tokens on the real V4 Flash GGUF (exact-id
