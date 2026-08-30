@@ -3,8 +3,9 @@
 
 The three chart grammars behind gmlx's docs/benchmarks.md figures. One
 encoding grammar across the set: ENGINE owns color (gmlx = accent, reference
-engine = neutral gray), ARM owns line style (solid = speculative/best-
-available, dashed = baseline), log-scaled x so "widening with depth" is
+engine = neutral gray), ARM owns line style (solid =
+baseline, dashed = speculative, so baselines compare like-for-like across
+engines), log-scaled x so "widening with depth" is
 geometrically honest.
 
   panels       per-model: prefill panel over decode panel, shared log-x
@@ -463,7 +464,7 @@ def log_x(depths, x0, x1, pad_frac=0.06):
 
 
 def _lines_panel(fig, rect, series, ylabel, depths, fx, draw_x=True,
-                 ratio=False, refline=None, zero=True, label_last_solid=False,
+                 ratio=False, refline=None, zero=True, label_best_gmlx=False,
                  valfmt=None):
     """Draw one line panel into rect=(px0,py0,px1,py1). series entries:
     {pts:{depth:(val,cv)}, color, dash(bool), shape?}."""
@@ -498,7 +499,7 @@ def _lines_panel(fig, rect, series, ylabel, depths, fx, draw_x=True,
     fnum = valfmt or (fmt_ratio if ratio else fmt_num)
     # direct-label the final point of the strongest gmlx series in this panel
     lbl_s = None
-    if label_last_solid:
+    if label_best_gmlx:
         gm = [s for s in series if s.get("_gmlx") and s["pts"]]
         if gm:
             lbl_s = max(gm, key=lambda s: s["pts"][max(s["pts"])][0])
@@ -564,8 +565,9 @@ def chart_panels(args):
     model = models[0]
     ref_rt = "ds4" if any(c["runtime"] == "ds4" for c in cells) else "llama"
     t = THEMES[args.theme]
-    # arm owns style GLOBALLY: dashed = baseline whenever the model has a
-    # speculative arm for that engine (consistent across both panels).
+    # arm owns style GLOBALLY: solid = baseline, dashed = speculative, on
+    # every engine -- baselines compare like-for-like across engines even
+    # when the reference has no speculative arm.
     spec_rt = {rt: any(c["runtime"] == rt and c["arm"] != "baseline"
                        for c in cells) for rt in ("gmlx", ref_rt)}
 
@@ -580,13 +582,10 @@ def chart_panels(args):
                 c[metric], c[metric + "_cv"])
         out = []
         for (rt, arm), pts in by.items():
-            # PER-PANEL style: dashed only when THIS panel also shows a
-            # speculative arm for this engine; a lone-baseline panel is solid.
-            panel_spec = any(a != "baseline" for (r, a) in by if r == rt)
             out.append({"rt": rt, "arm": arm, "pts": pts,
                         "color": gmlx_accent(t) if rt == "gmlx"
                         else ref_gray(t), "_gmlx": rt == "gmlx",
-                        "dash": arm == "baseline" and panel_spec})
+                        "dash": arm != "baseline"})
         return out
 
     pre = build("prefill_tps", arms={"baseline"})   # prefill: base-vs-base
@@ -596,7 +595,7 @@ def chart_panels(args):
         die("no data for %s" % model)
     # legend: one entry per (engine, arm) drawn. An engine with no speculative
     # arm reads as best-available -> bare engine name; engines with both show
-    # "<eng> speculative (MTP)" (solid) and "<eng> baseline" (dashed).
+    # "<eng> baseline" (solid) and "<eng> speculative (MTP)" (dashed).
     seen, items = set(), []
     for s in dec + pre:
         key = (s["rt"], s["arm"])
@@ -617,13 +616,12 @@ def chart_panels(args):
     pleft, top, pright, pbottom = fig.layout(items, left=fig.fs * 3.6)
     fx = log_x(depths, pleft, pright)
     r_top, r_bot, xlab_y = _panel_split(fig, top, pbottom, pleft, pright)
-    # "(baseline)" on the prefill axis: prefill is base-vs-base, so its solid
-    # lines are baselines -- the qualifier stops a reader mapping them to the
-    # shared legend's "speculative (MTP)" entry.
+    # "(baseline)" on the prefill axis: prefill is base-vs-base only; the
+    # qualifier says the panel has no speculative arm to look for.
     _lines_panel(fig, r_top, pre, "prefill tok/s (baseline)", depths, fx,
-                 draw_x=False, label_last_solid=True)
+                 draw_x=False, label_best_gmlx=True)
     _lines_panel(fig, r_bot, dec, "decode tok/s", depths, fx, draw_x=True,
-                 label_last_solid=True)
+                 label_best_gmlx=True)
     fig.svg.text((pleft + pright) / 2, xlab_y, "KV depth (tokens, log scale)",
                  fig.fs * 0.95, fig.t["muted"], anchor="middle")
     fig.save()
