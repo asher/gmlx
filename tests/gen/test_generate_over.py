@@ -203,8 +203,10 @@ def test_seam_text_filled_from_decode_when_blank(monkeypatch, tmp_path):
 
 
 def test_over_generation_with_prompt_cache_kwarg(monkeypatch):
-    """--kv-bits on a rotating-cache model puts prompt_cache into gen_kwargs;
-    the over-generation branch must not re-pass it to stream_generate."""
+    """--kv-bits puts the policy-armed prompt_cache into gen_kwargs; the
+    over-generation branch must not re-pass it to stream_generate."""
+    import mlx_lm.models.cache as mlx_cache
+
     import gmlx.gen.generation as generation
 
     _patch_stream(
@@ -212,8 +214,11 @@ def test_over_generation_with_prompt_cache_kwarg(monkeypatch):
         phase1=[(11, "a"), (2, "<|user|>")],
         phase2=[(20, "b")],
     )
-    monkeypatch.setattr(generation, "kv_quantization_unsupported", lambda m: "rotating")
-    monkeypatch.setattr(generation, "quantize_pooled_caches", lambda c, b, g: 1)
+    # generate() resolves the kv policy on the constructed stack; hand it a
+    # one-layer plain-KV stack so the real resolver quantizes (shallow: no
+    # carve-out) without needing a real model.
+    monkeypatch.setattr(mlx_cache, "make_prompt_cache",
+                        lambda model, max_kv_size=None: [mlx_cache.KVCache()])
     text = generation.generate(
         object(), _Tok(), "PROMPT", kv_bits=8, over_generation=2,
         apply_chat_template=False,
