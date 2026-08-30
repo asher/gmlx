@@ -11,25 +11,38 @@ import mlx.core as mx
 import gmlx.spec.engine as spec_engine
 
 
-def test_live_kv_quant_config_off_without_env(monkeypatch):
-    monkeypatch.delenv("KV_BITS", raising=False)
-    assert spec_engine._live_kv_quant_config() is None
-    monkeypatch.setenv("KV_BITS", "not-a-number")
-    assert spec_engine._live_kv_quant_config() is None
-    monkeypatch.setenv("KV_BITS", "0")
-    assert spec_engine._live_kv_quant_config() is None
+def _stamped_model(bits=8, group=32):
+    from types import SimpleNamespace
+
+    from mlx_lm.models.cache import KVCache
+
+    from gmlx.cache.kv_policy import resolve_kv_quant_policy
+    from gmlx.serve.kv_policy import ServeKvPolicy
+
+    single = resolve_kv_quant_policy([KVCache()], kv_bits=bits,
+                                     kv_group_size=group, mode="single")
+    batched = resolve_kv_quant_policy([KVCache()], kv_bits=bits,
+                                      kv_group_size=group, mode="batched")
+    m = SimpleNamespace()
+    m._gmlx_kv_policy = ServeKvPolicy(single, batched)
+    return m
 
 
-def test_live_kv_quant_config_reads_serve_env(monkeypatch):
+def test_live_kv_quant_config_off_without_stamp(monkeypatch):
+    # env alone never decides the warm merge: the sole caller is the
+    # MTP prefill init, where fp16 is the only correct unstamped answer
     monkeypatch.setenv("KV_BITS", "8")
-    monkeypatch.setenv("KV_GROUP_SIZE", "32")
-    monkeypatch.delenv("KV_QUANT_SCHEME", raising=False)
-    cfg = spec_engine._live_kv_quant_config()
+    assert spec_engine._live_kv_quant_config() is None
+    assert spec_engine._live_kv_quant_config(object()) is None
+
+
+def test_live_kv_quant_config_reads_stamped_policy():
+    cfg = spec_engine._live_kv_quant_config(_stamped_model(8, 32))
     assert cfg is not None
     assert float(cfg["bits"]) == 8.0 and int(cfg["group_size"]) == 32
 
 
-def test_warm_merge_requantizes_float_row(monkeypatch):
+def test_warm_merge_requantizes_float_row():
     # mlx_vlm cache classes: the serve path's batch merge dispatches on
     # their merge() signature (mlx_lm KVCache has an incompatible one
     # and never reaches this seam).
@@ -42,9 +55,7 @@ def test_warm_merge_requantizes_float_row(monkeypatch):
         k = mx.random.normal((1, 2, 64, 64))
         c.update_and_fetch(k, k)
         row.append(c)
-    monkeypatch.setenv("KV_BITS", "8")
-    monkeypatch.setenv("KV_GROUP_SIZE", "32")
-    cfg = spec_engine._live_kv_quant_config()
+    cfg = spec_engine._live_kv_quant_config(_stamped_model(8, 32))
     warm, n = apc.make_warm_batch_exact_cache_multi(
         [row], prefix_lens=[64], kv_quant_config=cfg)
     assert warm is not None and n == 64

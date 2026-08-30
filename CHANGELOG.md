@@ -25,15 +25,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- KV quantization now resolves one per-stack policy everywhere (serve,
-  `run`, `chat`, MTP): growing attention KV quantizes except the last
-  layer of a deep stack, windows and recurrent state stay fp16, pooled
-  caches pack at rest. One `[kv]` line reports the verdict per model;
-  `/v1/models` and `/health` expose it as `kv_quant`, and server
-  admission prices memory from the same policy. The deepseek-v4 pooled
-  path (nested compressor pools) rides the same policy and line, and
-  APC warm merges follow the batched verdict instead of the raw
-  environment (fp16 under MTP).
+- KV quantization resolves one per-stack policy everywhere (serve,
+  `run`, `chat`, MTP): attention KV quantizes (minus the last layer of
+  a deep stack); windows and recurrent state stay fp16; pooled caches
+  pack at rest. One `[kv]` line and `/v1/models` `kv_quant` report the
+  verdict; admission pricing, the deepseek-v4 pooled path, and APC
+  warm merges all follow the same policy (fp16 under MTP).
 
 ## [0.4.6] - 2026-08-29
 
