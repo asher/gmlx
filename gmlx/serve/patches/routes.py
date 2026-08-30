@@ -35,10 +35,12 @@ def _models_payload() -> dict:
     serving.reregister_missing_models()   # a restored file re-appears here
     models = serving.resolved_models()
     resident, pinned = set(), set()
-    # kv_quant keys on the loaded id, not the GGUF path: two ids can share one
-    # file (spec + base over the same GGUF) and resolve different policies.
-    # Path map is the fallback for entries with no recorded loaded_as.
-    kv_by_id, kv_by_path = {}, {}
+    # kv_quant keys on the loaded id (exact id@profile first, bare id as
+    # a looser match), not the GGUF path: two ids can share one file
+    # (spec + base over the same GGUF), and two profiles of one id can
+    # load different kv_bits. Path map is the last-resort fallback for
+    # entries with no recorded loaded_as.
+    kv_by_loaded, kv_by_id, kv_by_path = {}, {}, {}
     pool = _get_pool()
     if pool is not None:
         for e in pool.stats()["resident"]:
@@ -48,9 +50,20 @@ def _models_payload() -> dict:
             if e.get("kv_quant") is not None:
                 loaded_as = e.get("loaded_as")
                 if loaded_as:
-                    kv_by_id[loaded_as.split("@", 1)[0]] = e["kv_quant"]
+                    kv_by_loaded[loaded_as] = e["kv_quant"]
+                    kv_by_id.setdefault(loaded_as.split("@", 1)[0],
+                                        e["kv_quant"])
                 kv_by_path.setdefault(e["model_path"], e["kv_quant"])
     default_id = serving.default_model_id()
+
+    def _kv_for(mid, rm, alias_of, profile):
+        base = alias_of or mid
+        prof = profile if alias_of else rm.profile_name
+        if prof and f"{base}@{prof}" in kv_by_loaded:
+            return kv_by_loaded[f"{base}@{prof}"]
+        if base in kv_by_loaded:
+            return kv_by_loaded[base]
+        return kv_by_id.get(base, kv_by_path.get(rm.path))
 
     def _entry(mid, rm, *, alias_of=None, profile=None):
         return {
@@ -61,7 +74,7 @@ def _models_payload() -> dict:
             "resident": rm.path in resident,
             # Resolved KV quantization policy (resident models only:
             # the policy is resolved on the constructed stack at load).
-            "kv_quant": kv_by_id.get(alias_of or mid, kv_by_path.get(rm.path)),
+            "kv_quant": _kv_for(mid, rm, alias_of, profile),
             "pinned": bool(rm.pin) or rm.path in pinned,
             "speculative": bool(rm.speculative),
             "vlm": rm.mmproj is not None,

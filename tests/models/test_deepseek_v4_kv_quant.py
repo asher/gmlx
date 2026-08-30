@@ -12,7 +12,6 @@ import mlx.core as mx
 import pytest
 
 from gmlx.models.deepseek_v4.cache import PoolingCache
-from gmlx.gen.generation import quantize_pooled_caches
 
 D = 64  # pooled row width; mx.quantize needs group >= 32 dividing D
 
@@ -105,8 +104,15 @@ def test_quantized_pool_trim_replay(pre_count, n_trim):
         assert test_cache.pooled is None
 
 
-def test_quantize_pooled_caches_selects_compressor_pools():
+def test_policy_arms_nested_compressor_pools():
+    # The real dsv4 stack shape: CacheList(Rotating, compressor pool,
+    # opted-out indexer pool) beside a bare window. Pins the regression
+    # where _classify fell through to "state" on the nested list (a
+    # dropped verdict, pools never armed) and arm_stack neither recursed
+    # nor honored PoolingCache.quantizable.
     from mlx_lm.models.cache import CacheList, RotatingKVCache
+
+    from gmlx.cache.kv_policy import arm_stack, resolve_kv_quant_policy
 
     idx_pool = PoolingCache(4)
     idx_pool.quantizable = False
@@ -115,13 +121,33 @@ def test_quantize_pooled_caches_selects_compressor_pools():
         RotatingKVCache(max_size=8),
         CacheList(RotatingKVCache(max_size=8), comp_pool, idx_pool),
     ]
-    assert quantize_pooled_caches(caches, 8, 32) == 1
+    policy = resolve_kv_quant_policy(caches, kv_bits=8, kv_group_size=32)
+    assert policy.verdict == "partial"
+    assert [p.kind for p in policy.per_layer] == ["window", "pool"]
+    arm_stack(caches, policy)
     assert comp_pool.is_quantized
     assert not idx_pool.is_quantized
 
 
-def test_quantize_pooled_caches_rejects_unknown_bits():
-    assert quantize_pooled_caches([PoolingCache(4)], 16, 32) == 0
+def test_policy_top_level_optout_pool_stays_fp16():
+    from gmlx.cache.kv_policy import arm_stack, resolve_kv_quant_policy
+
+    opted = PoolingCache(4)
+    opted.quantizable = False
+    comp = PoolingCache(4)
+    caches = [comp, opted]
+    policy = resolve_kv_quant_policy(caches, kv_bits=8, kv_group_size=32)
+    arm_stack(caches, policy)
+    assert comp.is_quantized
+    assert not opted.is_quantized
+
+
+def test_policy_rejects_unknown_bits():
+    from gmlx.cache.kv_policy import resolve_kv_quant_policy
+
+    policy = resolve_kv_quant_policy(
+        [PoolingCache(4)], kv_bits=16, kv_group_size=32)
+    assert policy.verdict == "error"
 
 
 def test_incompatible_row_width_disarms(capsys):

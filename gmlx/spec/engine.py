@@ -295,28 +295,40 @@ def _ckpt_layout_for(model, block_size: int = 16):
     return tags or None
 
 
-def _live_kv_quant_config():
+def _live_kv_quant_config(model=None):
     """The serve KV quant policy as a warm-merge config, or None.
 
-    Env-sourced (KV_BITS / KV_QUANT_SCHEME / KV_GROUP_SIZE) like the
-    owned B=1 spec path: serve config feeds these vars and the engine
-    reads the same channel, so the merged warm batch matches the live
-    ``_make_cache`` layer types. Key/value split overrides are not
+    Policy-first: serve stamps the resolved ServeKvPolicy on the model
+    (gmlx.serve.kv_policy.resolve_for_load) and the BATCHED verdict
+    rules the warm merge - a warm hit joins a batch, and under MTP the
+    batch runs fp16 KV (rollback cannot trim packed KV), so quantizing
+    the merge would rebuild the misfiled-SSM crash the policy prevents.
+    Env (KV_BITS / KV_QUANT_SCHEME / KV_GROUP_SIZE) is the fallback for
+    stock paths with no stamp. Key/value split overrides are not
     exposed in gmlx config and stay None."""
-    raw = os.environ.get("KV_BITS", "")
-    if not raw:
-        return None
-    try:
-        bits = float(raw)
-    except ValueError:
-        return None
-    if bits <= 0:
-        return None
+    stamped = getattr(model, "_gmlx_kv_policy", None)
+    if stamped is not None:
+        batched = getattr(stamped, "batched", None)
+        if batched is None or batched.verdict not in ("full", "partial"):
+            return None
+        bits = float(batched.bits)
+        group = int(batched.group_size or 64)
+        scheme = None
+    else:
+        raw = os.environ.get("KV_BITS", "")
+        if not raw:
+            return None
+        try:
+            bits = float(raw)
+        except ValueError:
+            return None
+        if bits <= 0:
+            return None
+        group = int(os.environ.get("KV_GROUP_SIZE", "64") or 64)
+        scheme = os.environ.get("KV_QUANT_SCHEME") or None
     try:
         from mlx_vlm.kv_quant import from_legacy
-        pol = from_legacy(
-            bits, os.environ.get("KV_QUANT_SCHEME") or None,
-            int(os.environ.get("KV_GROUP_SIZE", "64") or 64))
+        pol = from_legacy(bits, scheme, group)
         return pol.to_config() if pol is not None else None
     except Exception:
         _log.warning("KV quant policy resolve failed; warm merge stays "
@@ -419,7 +431,7 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
             from mlx_vlm import apc as _apc
             warm, _ = _apc.make_warm_batch_exact_cache_multi(
                 [warm], prefix_lens=[prefix_len],
-                kv_quant_config=_live_kv_quant_config())
+                kv_quant_config=_live_kv_quant_config(batch.model))
         if warm and 0 < prefix_len < len(ids_list):
             batch.prompt_cache = warm
             # Matched blocks stay acquired until the stock post-prefill
@@ -2534,11 +2546,11 @@ def install_spec_kv_quant() -> None:
                     "KV_BITS dropped on the MTP path: sliding-window "
                     "cache stack cannot quantize")
             return caches
-        from gmlx.models.qwen35.gdn import _QWEN_GDN_FAMILY
+        from gmlx.models.qwen35.gdn import stock_gdn_fallback
 
         mt = (getattr(lm, "model_type", None)
               or getattr(getattr(lm, "config", None), "model_type", None))
-        if mt in _QWEN_GDN_FAMILY and not env_bool("GMLX_QWEN_OWNED", True):
+        if stock_gdn_fallback(mt):
             # The bare-stock text fallback has no verify patches; its
             # verify fallback slices keys as raw arrays and crashes on
             # quantized tuples (issue #104 second symptom).

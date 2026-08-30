@@ -289,3 +289,72 @@ def test_batch_sdpa_tuple_defers():
     out = fn(q + 0, keys, values, cache=qc, scale=64**-0.5, mask=None)
     ref = orig(q + 0, keys, values, cache=qc, scale=64**-0.5, mask=None)
     assert mx.array_equal(out, ref).item()
+
+
+class _GdnFakeLM(_FakeLM):
+    model_type = "qwen3_5"
+
+
+class _GdnConfigFakeLM(_FakeLM):
+    # model_type only on config: the loader wrapper shape
+    class config:
+        model_type = "qwen3_5_moe"
+
+
+@pytest.mark.parametrize("lm_cls", [_GdnFakeLM, _GdnConfigFakeLM])
+def test_owned_off_gdn_declines_quantization(restorable, lm_cls):
+    # GMLX_QWEN_OWNED=0 stock fallback cannot verify on quantized KV
+    # tuples (issue #104 second symptom); the guard keys on model_type
+    # (direct or config fallback), not the module name.
+    restorable.setenv("KV_BITS", "4")
+    restorable.setenv("GMLX_QWEN_OWNED", "0")
+    spec_engine.install_spec_kv_quant()
+    caches = ar.make_speculative_prompt_cache(
+        lm_cls(), draft_kind="mtp", batch_size=1, left_padding=[0],
+        make_cache=lambda lm, lp: pytest.fail(
+            "B=1 mtp bypass must not call make_cache"),
+    )
+    assert not any(isinstance(c, QuantizedKVCache) for c in caches)
+
+
+def test_owned_on_gdn_still_converts(restorable):
+    restorable.setenv("KV_BITS", "4")
+    restorable.setenv("GMLX_QWEN_OWNED", "1")
+    spec_engine.install_spec_kv_quant()
+    caches = ar.make_speculative_prompt_cache(
+        _GdnFakeLM(), draft_kind="mtp", batch_size=1, left_padding=[0],
+        make_cache=lambda lm, lp: pytest.fail(
+            "B=1 mtp bypass must not call make_cache"),
+    )
+    assert isinstance(caches[0], QuantizedKVCache)
+
+
+class _Stamp:
+    pass
+
+
+def test_warm_merge_config_follows_batched_policy(restorable):
+    # The APC warm path joins a batch: its merge config must follow the
+    # BATCHED policy verdict stamped on the model, not the environment.
+    # MTP models drop kv when batched; a quantized warm merge would
+    # rebuild the misfiled-SSM rollback crash.
+    from gmlx.cache.kv_policy import dropped_policy, resolve_kv_quant_policy
+    from gmlx.serve.kv_policy import ServeKvPolicy
+
+    restorable.setenv("KV_BITS", "8")   # env says quantize; stamp wins
+
+    model = _Stamp()
+    single = resolve_kv_quant_policy([KVCache()], kv_bits=8,
+                                     kv_group_size=64, mode="single")
+    batched_drop = dropped_policy("mtp fp16 when batched", 8, 64, "batched")
+    model._gmlx_kv_policy = ServeKvPolicy(single, batched_drop)
+    assert spec_engine._live_kv_quant_config(model) is None
+
+    batched_full = resolve_kv_quant_policy([KVCache()], kv_bits=8,
+                                           kv_group_size=64, mode="batched")
+    model._gmlx_kv_policy = ServeKvPolicy(single, batched_full)
+    assert spec_engine._live_kv_quant_config(model) is not None
+
+    # no stamp: env fallback still applies (stock paths)
+    assert spec_engine._live_kv_quant_config(_Stamp()) is not None
+    assert spec_engine._live_kv_quant_config(None) is not None

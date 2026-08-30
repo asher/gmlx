@@ -36,6 +36,14 @@ def owned_gdn_active(model_type) -> bool:
     return model_type in _QWEN_GDN_FAMILY and env_bool("GMLX_QWEN_OWNED", True)
 
 
+def stock_gdn_fallback(model_type) -> bool:
+    """True when a GDN-family model runs the bare-stock text fallback
+    (GMLX_QWEN_OWNED=0): none of the owned verify patches are present,
+    so the MTP spec path must not hand it quantized KV tuples."""
+    return (model_type in _QWEN_GDN_FAMILY
+            and not env_bool("GMLX_QWEN_OWNED", True))
+
+
 def _gdn_update_with_states_tiled(q, k, v, a, b, A_log, dt_bias, state, mask):
     """Sink-shaped scan, calling the tiled state-capturing ops directly
     (what upstream's ``gated_delta_update_with_states`` resolves to

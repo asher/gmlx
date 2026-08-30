@@ -113,7 +113,10 @@ def _dropped(reason, bits, group, mode, stack, kinds=None):
 
 def _classify(c, types):
     if hasattr(c, "quantize_storage"):
-        return "pool"
+        # An opted-out pool (dsv4 indexer: the score kernel reads it in
+        # full every step) rides fp16 as plain state, so a list holding
+        # only opted-out pools never claims a pool verdict.
+        return "pool" if getattr(c, "quantizable", True) else "state"
     if getattr(c, "kv_quant_unsupported", False):
         return "optout"
     if isinstance(c, types["window"]):
@@ -127,10 +130,15 @@ def _classify(c, types):
         subs = {_classify(s, types) for s in inner}
         # A list with any quantizable KV counts as kv; the side caches
         # ride along fp16 (their cost is in the kv estimate's noise).
+        # A pool member (dsv4: CacheList(Rotating, PoolingCache, ...))
+        # makes the layer poolable; arming walks back in and packs only
+        # the quantizable pools.
         if "optout" in subs:
             return "optout"
         if "kv" in subs:
             return "kv"
+        if "pool" in subs:
+            return "pool"
         if subs <= {"window"}:
             return "window"
         return "state"
@@ -277,7 +285,13 @@ def _held_to_quantized(self):
 def hold_fp16(c):
     """Rebind a FRESH cache to a subclass whose to_quantized is hidden,
     so stock hasattr-gated converters leave the layer fp16 (mlx-lm
-    maybe_quantize_kv_cache and the mlx-vlm equivalents)."""
+    maybe_quantize_kv_cache and the mlx-vlm equivalents).
+
+    Held subclasses live in this module, so compat's
+    rebind_to_runtime_origin (gated on mlx-lm-origin class identity)
+    passes them through unswapped. Accepted: arm_stack serves CLI paths
+    whose stacks never cross the serve APC rebind; a held layer reaching
+    that seam would quietly skip APC for its stack."""
     if not hasattr(c, "to_quantized"):
         return c
     cls = type(c)
@@ -291,18 +305,33 @@ def hold_fp16(c):
     return out
 
 
+def _arm_pools(c, bits, group) -> int:
+    """Arm at-rest packing on every quantizable pool under ``c``,
+    recursing into CacheList (dsv4 nests pools beside a window). The
+    quantizable gate keeps opted-out pools (dsv4 indexer) fp16."""
+    inner = getattr(c, "caches", None)
+    if inner is not None:
+        return sum(_arm_pools(s, bits, group) for s in inner)
+    if hasattr(c, "quantize_storage") and getattr(c, "quantizable", True):
+        c.quantize_storage(group_size=group, bits=bits)
+        return 1
+    return 0
+
+
 def arm_stack(stack, policy: KvQuantPolicy, hold=True):
     """Conform a freshly built stack to the policy in place: fp16 layers
     lose their to_quantized (converters skip them, including rotating
     windows whose to_quantized raises NYI), pooled layers arm at-rest
-    packing. ``hold=False`` arms pools only, for engines that run no
-    converter. Top-level only; the CLI stacks this serves are flat."""
+    packing (recursing into CacheList for dsv4-shaped layers).
+    ``hold=False`` arms pools only, for engines that run no converter.
+    Holds stay top-level: mlx-lm's converter iterates only the top of
+    the stack and CacheList exposes no to_quantized, so nested members
+    never meet a converter."""
     if policy.verdict not in ("full", "partial"):
         return stack
     for i, plan in enumerate(policy.per_layer):
         if plan.kind == "pool":
-            stack[i].quantize_storage(group_size=policy.group_size,
-                                      bits=policy.bits)
-        elif hold and not plan.quantize:
+            _arm_pools(stack[i], policy.bits, policy.group_size)
+        if hold and not plan.quantize:
             stack[i] = hold_fp16(stack[i])
     return stack

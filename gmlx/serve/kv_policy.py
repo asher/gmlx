@@ -84,17 +84,32 @@ def resolve_for_load(rg, model_id: str):
     os.environ distinguishes off from upstream's silent qat drop.
     """
     requested = os.environ.get("KV_BITS")
+    try:
+        req_val = float(requested) if requested else 0.0
+    except ValueError:
+        # Refuse the load instead of raising bare mid-build; upstream
+        # parses the same var, so a live rg.kv_bits never coexists with
+        # an unparseable KV_BITS.
+        raise KvPolicyError(
+            f"[kv] {model_id}: KV_BITS={requested!r} is not a number")
     bits = getattr(rg, "kv_bits", None)
     if bits is None:
-        if requested and float(requested):
+        if req_val:
             # get_quantized_kv_bits drops the flag for "qat" model ids.
             reason = ("model id marked quantization-aware (qat); "
                       "upstream drops KV quantization")
-            b = int(float(requested))
+            b = int(req_val)
             pol = ServeKvPolicy(
                 dropped_policy(reason, b, rg.kv_group_size, "single"),
                 dropped_policy(reason, b, rg.kv_group_size, "batched"))
             setattr(rg, RG_ATTR, pol)
+            # Model stamp too: warm APC merges must stay float here even
+            # though KV_BITS sits in the environment (upstream dropped
+            # the flag, so live caches run fp16).
+            try:
+                setattr(rg.model, RG_ATTR, pol)
+            except Exception:
+                pass
             _log.warning(kv_line(model_id, pol.single))
             return pol
         return None
@@ -121,6 +136,13 @@ def resolve_for_load(rg, model_id: str):
         bad = pol.single if pol.single.verdict == "error" else pol.batched
         raise KvPolicyError(kv_line(model_id, bad))
     setattr(rg, RG_ATTR, pol)
+    # Also stamp the model: the batch worker thread reads the policy off
+    # batch.model (residency's context-var proxy does not cross threads,
+    # see engine._install_apc_manager_stash).
+    try:
+        setattr(rg.model, RG_ATTR, pol)
+    except Exception:
+        pass
     _log.info(kv_line(model_id, pol.single))
     if pol.batched.verdict != pol.single.verdict:
         _log.info(kv_line(model_id, pol.batched)
