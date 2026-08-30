@@ -109,6 +109,45 @@ def pc_apc_enabled(expected: bool) -> Callable:
     return _check
 
 
+def pc_kv_engagement(model: str, *, verdict: str,
+                     layers_quantized: Optional[int] = None,
+                     verdict_batched: Optional[str] = None) -> Callable:
+    """/v1/models must carry a non-null kv_quant with the expected verdict
+    on a row whose resident flag is true. Both legs are load-bearing: a
+    missing field on a non-resident row is exactly the engagement blind
+    spot that let the kv tier run fp16 for months."""
+    def _check(client):
+        st, body = client.models()
+        row = None
+        if st == 200 and isinstance(body, dict):
+            row = next((m for m in body.get("data", [])
+                        if m.get("id") == model), None)
+        if row is None:
+            return [CheckResult("kv_engagement", False,
+                                f"no /v1/models row for {model} (status={st})")]
+        if not row.get("resident"):
+            return [CheckResult("kv_engagement", False,
+                                "model not resident: engagement unprovable")]
+        kq = row.get("kv_quant")
+        if not isinstance(kq, dict):
+            return [CheckResult("kv_engagement", False,
+                                f"kv_quant={kq!r} on a resident row")]
+        problems = []
+        if kq.get("verdict") != verdict:
+            problems.append(f"verdict={kq.get('verdict')} want {verdict}")
+        if (layers_quantized is not None
+                and kq.get("layers_quantized") != layers_quantized):
+            problems.append(f"layers_quantized={kq.get('layers_quantized')} "
+                            f"want {layers_quantized}")
+        if (verdict_batched is not None
+                and kq.get("verdict_batched") != verdict_batched):
+            problems.append(f"verdict_batched={kq.get('verdict_batched')} "
+                            f"want {verdict_batched}")
+        return [CheckResult("kv_engagement", not problems,
+                            "; ".join(problems) if problems else str(kq))]
+    return _check
+
+
 def _resident(client) -> list:
     st, body = client.metrics()
     if st != 200 or not isinstance(body, dict):
@@ -391,6 +430,8 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
             targets=[ReqTarget("recall", "m",
                                prompts=[P.p_long_ctx_needle(f"VIOLET{label.upper()}88"),
                                         P.p_long_gen()])],
+            post=[pc_kv_engagement("m", verdict="partial",
+                                   layers_quantized=2)],
             notes="KV-quant must still recall a planted fact at depth without "
                   "looping. gemma-4 is an SWA stack: the engine quantizes only "
                   "its 2 global-attention layers, so this covers the partial "
@@ -419,6 +460,9 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
             targets=[ReqTarget("recall", "m",
                                prompts=[P.p_long_ctx_needle(f"CORAL{label.upper()}55")]
                                + extra)],
+            post=[pc_kv_engagement("m", verdict="full",
+                                   layers_quantized=27,
+                                   verdict_batched="full")],
             notes="issue #104 regression: on-the-fly quantized-cache prefill "
                   "through the kv8 flash arm; corruption fails the anchor "
                   "instantly on a fully quantized stack"))
@@ -615,6 +659,32 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
             targets=[],     # the comparison is the post-check
             post=[_pc_mtp_lossless("spec", "base")],
             notes="greedy spec vs greedy base, token-for-token; mismatch is a finding"))
+
+    # mtp x kv-bits: native-MTP hybrid under a quantized target KV. The
+    # spec path quantizes at B=1 (spec-cache to_quantized) while the base
+    # id runs the batch-built quantized cache; greedy equality crosses the
+    # two packing paths. Engagement asserts the batch axis: partial when
+    # idle, dropped when batched (MTP rollback cannot trim packed KV).
+    q35 = reg.find("qwen35_9b_mtp")
+    if reg.have("qwen35_9b_mtp"):
+        add(Scenario(
+            key="mtp_kv8", tier="mtp", needs=["qwen35_9b_mtp"],
+            title="MTP x kv8: qwen3.5-9B native MTP, quantized target KV",
+            config={
+                "profiles": {"p": {"sampling": {"temperature": 0.0},
+                                   "load": {"kv_bits": 8,
+                                            "kv_group_size": 64}}},
+                "models": {
+                    "spec": _model_entry(q35, native_mtp=True, profile="p"),
+                    "base": _model_entry(q35, profile="p")}},
+            targets=[ReqTarget("recall", "spec",
+                               prompts=[P.p_long_ctx_needle("MAROONMTP88")])],
+            post=[_pc_mtp_lossless("spec", "base"),
+                  pc_kv_engagement("spec", verdict="partial",
+                                   verdict_batched="dropped")],
+            notes="issue #104 follow-on: the MTP arm's kv path was the "
+                  "reporter's second symptom; the needle exercises the "
+                  "flash arm through the spec prefill"))
 
     return out
 
