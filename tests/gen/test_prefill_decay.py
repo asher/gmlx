@@ -275,6 +275,7 @@ def test_deduct_shrinks_registration_floored_at_zero(monkeypatch):
 def _fresh_streamed(monkeypatch):
     _fresh_registry(monkeypatch)
     monkeypatch.setattr(pd, "_STREAMED_TRACKED", {})
+    monkeypatch.setattr(pd, "_STREAMED_CAP", {})
 
 
 def test_streamed_credit_raises_headroom(monkeypatch):
@@ -300,6 +301,31 @@ def test_streamed_credit_keyless_and_first_wins(monkeypatch):
     pd.note_streamed_tracked_bytes(156 * GB, key=key)
     pd.note_streamed_tracked_bytes(156 * GB, key=key)  # reload: first wins
     assert pd.streamed_tracked_bytes() == 156 * GB
+
+
+def test_streamed_credit_sources_sum_under_union_cap(monkeypatch):
+    # compose streams table and experts: the two sites' credits sum, each
+    # idempotent per source, and the union never exceeds the tracked cap
+    _fresh_streamed(monkeypatch)
+    key = ("/models/moe.gguf",)
+    pd.note_streamed_tracked_bytes(54 * GB, key=key, source="table",
+                                   cap=170 * GB)
+    pd.note_streamed_tracked_bytes(109 * GB, key=key, source="experts",
+                                   cap=170 * GB)
+    assert pd.streamed_tracked_bytes() == 163 * GB
+    pd.note_streamed_tracked_bytes(109 * GB, key=key, source="experts",
+                                   cap=170 * GB)  # reload: no double-credit
+    assert pd.streamed_tracked_bytes() == 163 * GB
+
+
+def test_streamed_credit_union_cap_clamps(monkeypatch):
+    _fresh_streamed(monkeypatch)
+    key = ("/models/moe.gguf",)
+    pd.note_streamed_tracked_bytes(90 * GB, key=key, source="table",
+                                   cap=100 * GB)
+    pd.note_streamed_tracked_bytes(90 * GB, key=key, source="experts",
+                                   cap=100 * GB)
+    assert pd.streamed_tracked_bytes() == 100 * GB
 
 
 def test_forget_drops_streamed_credit_with_owner(monkeypatch):

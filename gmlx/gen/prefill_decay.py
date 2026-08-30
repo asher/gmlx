@@ -397,6 +397,7 @@ def forget_untracked_weights(owner: object) -> None:
                 del _UNTRACKED_OWNERS[key]
                 _UNTRACKED_WEIGHTS.pop(key, None)
                 _STREAMED_TRACKED.pop(key, None)
+                _STREAMED_CAP.pop(key, None)
 
 
 def deduct_untracked_weights(nbytes: float, key: object) -> None:
@@ -428,21 +429,36 @@ def untracked_weight_bytes_for(key: object) -> float:
 # leaving them in the active term holds headroom ~150 GB negative on an
 # over-RAM model and the governor sheds every request from red. Same key,
 # owner, and teardown lifecycle as the untracked registry.
-_STREAMED_TRACKED: dict[object, float] = {}
+_STREAMED_TRACKED: dict[object, dict[str, float]] = {}
+_STREAMED_CAP: dict[object, float] = {}
 
 
-def note_streamed_tracked_bytes(nbytes: float, key: object = None) -> None:
+def note_streamed_tracked_bytes(nbytes: float, key: object = None,
+                                source: str = "experts",
+                                cap: float | None = None) -> None:
+    """Credit ``source``'s streamed bytes for ``key``. Idempotent per
+    (key, source) so re-installs never double-credit; sources sum (compose
+    streams table and experts), clamped at ``cap`` (the key's tracked
+    bytes) so the union can never credit more than was tracked."""
     if key is None or nbytes <= 0:
         return
     with _UNTRACKED_LOCK:
-        _STREAMED_TRACKED.setdefault(key, float(nbytes))
+        _STREAMED_TRACKED.setdefault(key, {}).setdefault(
+            source, float(nbytes))
+        if cap is not None:
+            _STREAMED_CAP[key] = max(_STREAMED_CAP.get(key, 0.0), float(cap))
         if _WEIGHTS_OWNER is not None:
             _UNTRACKED_OWNERS.setdefault(key, set()).add(_WEIGHTS_OWNER)
 
 
 def streamed_tracked_bytes() -> float:
     with _UNTRACKED_LOCK:
-        return sum(_STREAMED_TRACKED.values())
+        total = 0.0
+        for key, sources in _STREAMED_TRACKED.items():
+            s = sum(sources.values())
+            cap = _STREAMED_CAP.get(key)
+            total += s if cap is None else min(s, cap)
+        return total
 
 
 def headroom_bytes() -> float | None:

@@ -74,8 +74,11 @@ def test_selection_streams_table_only_when_it_clears_budget(monkeypatch):
     monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
     # over budget, table alone clears it -> stream
     assert ts.table_stream_selected(model, tbytes + 100, 150)
-    # over budget, remainder still over -> fall back (no table stream)
+    # over budget, remainder still over -> compose (default on)
+    assert ts.table_stream_selected(model, tbytes + 100, 50)
+    monkeypatch.setenv("GMLX_STREAM_PLE_COMPOSE", "0")
     assert not ts.table_stream_selected(model, tbytes + 100, 50)
+    monkeypatch.delenv("GMLX_STREAM_PLE_COMPOSE")
     # fits -> no streaming
     assert not ts.table_stream_selected(model, tbytes + 100, tbytes + 200)
     # unknown budget -> conservative no
@@ -259,15 +262,25 @@ def test_ladder_streams_table_and_keeps_experts_resident(monkeypatch):
     assert deducted == [tbytes]
 
 
-def test_ladder_falls_back_to_experts_when_table_insufficient(monkeypatch):
+def test_ladder_composes_when_table_insufficient(monkeypatch):
     monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
     monkeypatch.setenv("GMLX_GPU_RESIDENT", "0")
     model, glu = _moe_table_model()
-    # over budget even without the table: v1 has no compose - table stays
-    # resident, experts stream (today's behavior)
+    # over budget even post-table: compose by default - both stream
     _fake_budget(monkeypatch, 10)
     install_expert_streaming(model)
-    assert not ts.table_streaming_active(model)
+    assert ts.table_streaming_active(model)
+    assert getattr(glu, "_kq_cpu_only", False)
+
+
+def test_ladder_compose_kill_switch(monkeypatch):
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    monkeypatch.setenv("GMLX_STREAM_PLE_COMPOSE", "0")
+    monkeypatch.setenv("GMLX_GPU_RESIDENT", "0")
+    model, glu = _moe_table_model()
+    _fake_budget(monkeypatch, 10)
+    install_expert_streaming(model)
+    assert not ts.table_streaming_active(model)  # table stays resident
     assert getattr(glu, "_kq_cpu_only", False)
 
 
@@ -437,6 +450,7 @@ def test_fallback_excludes_streamable_from_pin(monkeypatch):
     import gmlx.stream.pin_weights as pw
 
     monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    monkeypatch.setenv("GMLX_STREAM_PLE_COMPOSE", "0")  # resident-table state
     monkeypatch.setenv("GMLX_GPU_RESIDENT", "0")
     seen = {}
 

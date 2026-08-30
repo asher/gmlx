@@ -90,11 +90,12 @@ def stream_ple_env() -> str:
 def table_stream_selected(model, total_bytes: int, budget: int | None) -> bool:
     """The selection ladder's step-1 test, shared by the loader and the
     load-time warm touch so both see the same decision: stream the
-    declared tables iff forced (``GMLX_STREAM_PLE=1``), or the model is
-    over budget and the tables alone bring it back under. When the
-    post-table estimate is still over budget the ladder falls back to
-    expert streaming with the table resident (v1 has no compose mode),
-    so this returns False there."""
+    declared tables iff forced (``GMLX_STREAM_PLE=1``) or the model is
+    over budget. When the tables alone bring it back under, the experts
+    go resident (table-only); otherwise the experts stream too (compose;
+    ``GMLX_STREAM_PLE_COMPOSE=0`` keeps the table resident instead)."""
+    from gmlx.envflags import env_bool
+
     env = stream_ple_env()
     if env == "0":
         return False
@@ -102,11 +103,12 @@ def table_stream_selected(model, total_bytes: int, budget: int | None) -> bool:
     if not tbytes:
         return False
     if env == "1":
-        # Forced: still refuse compose (see install_table_streaming).
         return True
-    if budget is None:
+    if budget is None or total_bytes <= budget:
         return False
-    return total_bytes > budget and (total_bytes - tbytes) <= budget
+    if (total_bytes - tbytes) <= budget:
+        return True
+    return env_bool("GMLX_STREAM_PLE_COMPOSE", True)
 
 
 _TABLE_STREAM = None

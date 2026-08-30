@@ -1802,7 +1802,6 @@ def install_expert_streaming(
     if not force_stream:
         from gmlx.stream.table_stream import (
             install_table_streaming,
-            stream_ple_env,
             table_bytes,
             table_stream_selected,
         )
@@ -1810,26 +1809,25 @@ def install_expert_streaming(
         compose = False
         if table_stream_selected(model, total_bytes, budget):
             post = total_bytes - table_bytes(model)
-            if (stream_ple_env() == "1" and budget is not None
-                    and post > budget):
-                if env_bool("GMLX_STREAM_PLE_COMPOSE", False):
-                    # Experimental: stream table and experts together
-                    # (no hot-row arena; prices the table's exposed
-                    # per-token reads).
+            # Step 2 default: over budget even post-table streams both
+            # (compose). GMLX_STREAM_PLE_COMPOSE=0 keeps the table
+            # resident; the selection test already honors it in auto
+            # mode, so this only fires under GMLX_STREAM_PLE=1.
+            if budget is not None and post > budget:
+                if env_bool("GMLX_STREAM_PLE_COMPOSE", True):
                     compose = True
                     table_offloaded, table_names = (
                         install_table_streaming(model))
                 else:
                     print(
-                        "[stream] GMLX_STREAM_PLE=1 ignored: still over "
-                        "budget with the table streamed; experts stream, "
-                        "table stays resident"
+                        "[stream] table stays resident "
+                        "(GMLX_STREAM_PLE_COMPOSE=0); experts stream"
                     )
             else:
                 table_offloaded, table_names = install_table_streaming(model)
         if table_offloaded and compose:
             loadlog.info(
-                f"[stream] compose (experimental): streamable table "
+                f"[stream] compose: streamable table "
                 f"{'+'.join(table_names)} "
                 f"({table_offloaded / 2**30:.1f} GiB) on the CPU stream "
                 "AND experts streamed"
@@ -1843,7 +1841,8 @@ def install_expert_streaming(
                 0.0, total_bytes - untracked_weight_bytes_for(key))
             credit = min(float(table_offloaded), tracked)
             if credit > 0:
-                note_streamed_tracked_bytes(credit, key)
+                note_streamed_tracked_bytes(
+                    credit, key, source="table", cap=tracked)
             deduct_untracked_weights(table_offloaded, key)
         elif table_offloaded:
             # The selection test admits the table only when the remainder
@@ -1867,7 +1866,8 @@ def install_expert_streaming(
                 0.0, total_bytes - untracked_weight_bytes_for(key))
             credit = min(float(table_offloaded), tracked)
             if credit > 0:
-                note_streamed_tracked_bytes(credit, key)
+                note_streamed_tracked_bytes(
+                    credit, key, source="table", cap=tracked)
             deduct_untracked_weights(table_offloaded, key)
 
     streaming = force_stream or over_budget
@@ -2353,7 +2353,8 @@ def install_expert_streaming(
         tracked = max(0.0, total_bytes - untracked_weight_bytes_for(key))
         credit = min(float(offloaded), tracked)
         if credit > 0:
-            note_streamed_tracked_bytes(credit, key)
+            note_streamed_tracked_bytes(
+                credit, key, source="experts", cap=tracked)
             print(
                 f"[stream] headroom credits {credit / 1e9:.1f} GB of "
                 "allocator-tracked expert bytes as reclaimable page cache"
