@@ -1987,3 +1987,24 @@ def test_resolve_header_sampling_off_with_family_defaults(monkeypatch):
     cfg = build_config(doc)
     r = resolve_model("m", cfg)
     assert "temperature" not in r.sampling
+
+
+# kv_quant_scheme parse-time validation
+def test_kv_quant_scheme_uniform_accepted():
+    doc = _doc()
+    doc["models"]["m-bare"]["overrides"] = {
+        "load": {"kv_bits": 8, "kv_quant_scheme": "uniform"}}
+    cfg = build_config(doc)
+    r = resolve_model("m-bare", cfg)
+    assert r.load["kv_quant_scheme"] == "uniform"
+
+
+def test_kv_quant_scheme_turbo_refused():
+    # The value would flow to mlx-vlm through the env window and build
+    # caches no gmlx SDPA path can read; refused at parse like dtype.
+    doc = _doc()
+    doc["models"]["m-bare"]["overrides"] = {
+        "load": {"kv_bits": 8, "kv_quant_scheme": "turboquant"}}
+    cfg = build_config(doc)
+    with pytest.raises(ConfigError, match="kv_quant_scheme"):
+        resolve_model("m-bare", cfg)

@@ -56,7 +56,10 @@ def test_b1_mtp_converts(restorable):
     spec_engine.install_spec_kv_quant()
     caches = _mk()
     assert isinstance(caches[0], QuantizedKVCache)
-    assert isinstance(caches[2], QuantizedKVCache)
+    # Serve carve-out: the last layer of a deep stack stays fp16
+    # (should_quantize_kv_layer); the MTP arm conforms to the same
+    # policy as the batch path.
+    assert type(caches[2]) is KVCache
     assert isinstance(caches[1], _SSMCache)
     assert caches[0].bits == 4 and caches[0].group_size == 64
     assert caches[0].offset == 0 and caches[0].is_trimmable()
@@ -144,6 +147,32 @@ def test_batch_forces_fp16_nested(restorable):
     assert type(out[0].caches[0]) is BatchKVCache
     assert isinstance(out[0].caches[1], _SSMCache)
     assert type(out[1]) is BatchKVCache
+
+
+def test_dequantize_lift_cache():
+    # Preempt/injection lift for B=1 quantized caches: same fp16
+    # conversion the B>1 swap performs, so the batch rebuild proceeds
+    # instead of declining into a drain-wait.
+    from mlx_vlm.models.cache import BatchKVCache
+
+    mx.random.seed(3)
+    k = mx.random.normal((1, 2, 41, 64)).astype(mx.float16)
+    v = mx.random.normal((1, 2, 41, 64)).astype(mx.float16)
+    q = QuantizedKVCache(group_size=64, bits=8)
+    q.update_and_fetch(k, v)
+    q._gmlx_cascade = "stamp"
+    lifted = spec_engine.dequantize_lift_cache(q)
+    assert type(lifted) is BatchKVCache
+    assert lifted.offset == 41
+    assert lifted._gmlx_cascade == "stamp"
+    assert hasattr(lifted, "filter") and hasattr(lifted, "extend")
+    with mx.stream(mx.cpu):
+        ref = mx.dequantize(*(mx.contiguous(t[..., :41, :])
+                              for t in q.keys),
+                            group_size=64, bits=8)
+    got = lifted.keys[..., :41, :]
+    assert mx.abs(got.astype(mx.float32)
+                  - ref.astype(mx.float32)).max().item() < 1e-2
 
 
 def _fill(c, parts):

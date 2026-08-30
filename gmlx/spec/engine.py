@@ -1842,6 +1842,32 @@ _RELEASED_FLAG = "_kq_gguf_spec_released"
 _RELEASE_PENDING_FLAG = "_kq_gguf_spec_release_pending"
 
 
+def dequantize_lift_cache(c):
+    """Dequantize a B=1 QuantizedKVCache into a one-row BatchKVCache.
+
+    QuantizedKVCache has no merge, and the B>1 MTP arm runs fp16 KV
+    anyway, so the lift performs the same conversion the batch-build
+    swap does, at preemption or injection time, as a one-off O(depth)
+    copy. Without this every kv-bits MTP preemption declined into a
+    drain-wait and queued rows stalled behind the live generation."""
+    from mlx_vlm.models.cache import BatchKVCache
+
+    lifted = BatchKVCache([0])
+    L = c.offset
+    if L:
+        keys = mx.dequantize(
+            *(mx.contiguous(t[..., :L, :]) for t in c.keys),
+            group_size=c.group_size, bits=c.bits)
+        values = mx.dequantize(
+            *(mx.contiguous(t[..., :L, :]) for t in c.values),
+            group_size=c.group_size, bits=c.bits)
+        lifted.update_and_fetch(keys, values)
+    stamp = getattr(c, "_gmlx_cascade", None)
+    if stamp is not None:
+        lifted._gmlx_cascade = stamp
+    return lifted
+
+
 def install_continuous_batch_admission() -> None:
     """Let new requests prefill and inject during speculative decode.
 
@@ -2092,6 +2118,10 @@ def install_continuous_batch_admission() -> None:
         injection path applies to incoming caches)."""
         if hasattr(c, "filter") and hasattr(c, "extend"):
             return c
+        from gmlx.cache.compat import cache_types
+
+        if isinstance(c, cache_types("QuantizedKVCache")):
+            return dequantize_lift_cache(c)
         lifted = type(c).merge([c])
         stamp = getattr(c, "_gmlx_cascade", None)
         if stamp is not None:
@@ -2121,12 +2151,16 @@ def install_continuous_batch_admission() -> None:
         if last is None:
             return False
         # Every cache must be batch-liftable before the generator closes.
-        # A quantized single-stream cache (KV_BITS MTP arm) has no merge;
-        # decline and keep the drain-wait behavior, so the B>1 rebuild
-        # goes through make_speculative_prompt_cache and its fp16 swap.
+        # A quantized single-stream cache (KV_BITS MTP arm) has no merge
+        # but dequantize-lifts (the B>1 arm runs fp16 anyway); anything
+        # else unliftable (turbo) declines into the drain-wait behavior.
+        from gmlx.cache.compat import cache_types
+
+        quant_single = cache_types("QuantizedKVCache")
         if not all(
             (hasattr(c, "filter") and hasattr(c, "extend"))
             or hasattr(type(c), "merge")
+            or isinstance(c, quant_single)
             for c in self.prompt_cache
         ):
             return False
@@ -2500,8 +2534,11 @@ def install_spec_kv_quant() -> None:
                     "KV_BITS dropped on the MTP path: sliding-window "
                     "cache stack cannot quantize")
             return caches
-        if ("qwen3_5" in type(lm).__module__
-                and not env_bool("GMLX_QWEN_OWNED", True)):
+        from gmlx.models.qwen35.gdn import _QWEN_GDN_FAMILY
+
+        mt = (getattr(lm, "model_type", None)
+              or getattr(getattr(lm, "config", None), "model_type", None))
+        if mt in _QWEN_GDN_FAMILY and not env_bool("GMLX_QWEN_OWNED", True):
             # The bare-stock text fallback has no verify patches; its
             # verify fallback slices keys as raw arrays and crashes on
             # quantized tuples (issue #104 second symptom).
@@ -2511,19 +2548,25 @@ def install_spec_kv_quant() -> None:
                     "KV_BITS dropped on the MTP path: the GMLX_QWEN_OWNED=0 "
                     "stock fallback cannot verify on a quantized KV cache")
             return caches
+        from mlx_vlm.models.cache import should_quantize_kv_layer
+
         out = []
-        n = 0
-        for c in caches:
-            if type(c) in plain_kv:
+        n = held = 0
+        n_layers = len(caches)
+        for i, c in enumerate(caches):
+            if type(c) in plain_kv and should_quantize_kv_layer(i, n_layers):
                 out.append(c.to_quantized(group_size=group, bits=bits))
                 n += 1
             else:
+                if type(c) in plain_kv:
+                    held += 1
                 out.append(c)
         if n and not _noted[0]:
             _noted[0] = True
+            tail = f" ({held} held fp16)" if held else ""
             print(
-                f"[kv] MTP spec path: {n}-layer target KV quantized "
-                f"({bits}-bit, group {group})",
+                f"[kv] MTP spec path: kv_bits={bits} group={group} -> "
+                f"quantized {n}/{n_layers} attn layers{tail}",
                 flush=True,
             )
         return out
