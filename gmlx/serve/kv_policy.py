@@ -97,6 +97,31 @@ def _serve_tail_tokens(rg) -> int:
         return 1024
 
 
+def _load_window_scheme(rg) -> str:
+    """The scheme this model loads under, and rg agrees with it on return.
+
+    Upstream freezes runtime.config.kv_quant_scheme from the process env
+    at server start, and app.py's ``cfg.kv_quant_scheme or
+    get_kv_quant_scheme()`` cannot fall through it -- the default is the
+    non-empty string "uniform". So a per-model ``load:`` key never
+    reaches the generator on its own. The env window is the per-model
+    truth, exactly as it is for KV_BITS; rg is corrected here because
+    upstream's batch construction gates ``_make_cache`` on the attribute,
+    not on the policy.
+    """
+    scheme = (os.environ.get("KV_QUANT_SCHEME")
+              or getattr(rg, "kv_quant_scheme", None)
+              or "uniform").strip().lower()
+    if getattr(rg, "kv_quant_scheme", None) != scheme:
+        try:
+            rg.kv_quant_scheme = scheme
+        except Exception:
+            _log.warning("[kv] cannot set kv_quant_scheme on the generator; "
+                         "batch caches will build %r",
+                         getattr(rg, "kv_quant_scheme", None), exc_info=True)
+    return scheme
+
+
 def resolve_for_load(rg, model_id: str):
     """Resolve both batch modes for a freshly built ResponseGenerator.
 
@@ -139,7 +164,7 @@ def resolve_for_load(rg, model_id: str):
     mtp = bool(getattr(rg, "draft_model_path", None)
                or os.environ.get("MLX_VLM_GGUF_SPECULATIVE") == "1")
     stack = _probe_stack(rg.model)
-    scheme = (getattr(rg, "kv_quant_scheme", None) or "uniform").lower()
+    scheme = _load_window_scheme(rg)
     kw = dict(
         kv_bits=bits,
         kv_group_size=getattr(rg, "kv_group_size", 64),

@@ -132,3 +132,33 @@ def test_to_json_shapes(monkeypatch):
     assert j["verdict"] == "full"
     assert j["verdict_batched"] == "dropped"
     assert "batched_reason" in j
+
+
+def test_load_window_scheme_wins_over_the_frozen_generator(monkeypatch):
+    """Upstream freezes the scheme from the process env at server start,
+    so a per-model load: key reaches only the env window. Reading it here
+    is what makes kv_quant_scheme work per model -- and rg must be
+    corrected, since upstream's batch build gates on the attribute."""
+    from gmlx.cache import kvarn_sdpa
+
+    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
+    monkeypatch.delenv("GMLX_KVARN", raising=False)
+    monkeypatch.setenv("KV_BITS", "6")
+    monkeypatch.setenv("KV_QUANT_SCHEME", "kvarn")
+    monkeypatch.delenv("MLX_VLM_GGUF_SPECULATIVE", raising=False)
+    model = _model()
+    model.config.head_dim = 128
+    rg = _rg(model=model, kv_bits=6.0, kv_quant_scheme="uniform")
+    pol = skv.resolve_for_load(rg, "m")
+    assert pol.single.scheme == "kvarn"
+    assert rg.kv_quant_scheme == "kvarn"
+    assert pol.to_json()["scheme"] == "kvarn"
+
+
+def test_generator_scheme_is_kept_without_an_env_window(monkeypatch):
+    monkeypatch.delenv("KV_QUANT_SCHEME", raising=False)
+    monkeypatch.setenv("KV_BITS", "8")
+    monkeypatch.delenv("MLX_VLM_GGUF_SPECULATIVE", raising=False)
+    rg = _rg()
+    assert skv.resolve_for_load(rg, "m").single.scheme == "uniform"
+    assert rg.kv_quant_scheme == "uniform"

@@ -114,7 +114,8 @@ def pc_apc_enabled(expected: bool) -> Callable:
 
 def pc_kv_engagement(model: str, *, verdict: str,
                      layers_quantized: Optional[int] = None,
-                     verdict_batched: Optional[str] = None) -> Callable:
+                     verdict_batched: Optional[str] = None,
+                     scheme: Optional[str] = None) -> Callable:
     """/v1/models must carry a non-null kv_quant with the expected verdict
     on a row whose resident flag is true. Both legs are load-bearing: a
     missing field on a non-resident row is exactly the engagement blind
@@ -146,6 +147,8 @@ def pc_kv_engagement(model: str, *, verdict: str,
                 and kq.get("verdict_batched") != verdict_batched):
             problems.append(f"verdict_batched={kq.get('verdict_batched')} "
                             f"want {verdict_batched}")
+        if scheme is not None and kq.get("scheme") != scheme:
+            problems.append(f"scheme={kq.get('scheme')} want {scheme}")
         return [CheckResult("kv_engagement", not problems,
                             "; ".join(problems) if problems else str(kq))]
     return _check
@@ -486,6 +489,46 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
             notes="issue #104 regression: on-the-fly quantized-cache prefill "
                   "through the kv8 flash arm; corruption fails the anchor "
                   "instantly on a fully quantized stack"))
+
+    # kv: bits 6 on a dense stack. Upstream sized the first code buffer
+    # dim//(32//bits) while mx.quantize packs dim*bits//32, so every
+    # empty-built quantized cache -- which is what serve builds -- raised
+    # on its first append at bits 3 and 6. Only serve reaches it.
+    add(Scenario(
+        key="kv_dense_kv6", tier="kv", needs=["qwen3_0_6b_q8"],
+        title="Quantized KV, dense stack: 6-bit on qwen3-0.6b "
+              "(pack-width regression, serve-only)",
+        config={
+            "profiles": {"p": {"sampling": {"temperature": 0.0},
+                               "load": {"kv_bits": 6, "kv_group_size": 64,
+                                        "quantized_kv_start": 0}}},
+            "models": {"m": _model_entry(qwen8 or "", profile="p")},
+        },
+        targets=[ReqTarget("recall", "m",
+                           prompts=[P.p_long_ctx_needle("VIOLETKV655")])],
+        post=[pc_kv_engagement("m", verdict="full", layers_quantized=27,
+                               verdict_batched="full", scheme="uniform")],
+        notes="a width whose el_per_int truncates; the batch cache is "
+              "built empty, so this is the only path that catches it"))
+
+    # kv: kvarn, the second scheme. Same policy, same verdict line, so
+    # the engagement check also pins that /v1/models carries the scheme.
+    add(Scenario(
+        key="kv_dense_kvarn6", tier="kv", needs=["qwen3_0_6b_q8"],
+        title="KVarN KV cache: 6-bit on qwen3-0.6b - needle recall",
+        config={
+            "profiles": {"p": {"sampling": {"temperature": 0.0},
+                               "load": {"kv_quant_scheme": "kvarn",
+                                        "kv_bits": 6,
+                                        "kv_tail_tokens": 1024}}},
+            "models": {"m": _model_entry(qwen8 or "", profile="p")},
+        },
+        targets=[ReqTarget("recall", "m",
+                           prompts=[P.p_long_ctx_needle("VIOLETKVARN77")])],
+        post=[pc_kv_engagement("m", verdict="full", layers_quantized=27,
+                               verdict_batched="full", scheme="kvarn")],
+        notes="variance-normalized records on the serve batch path; the "
+              "planted fact must survive the rotation and the fp16 tail"))
 
     # cache: disabled / memory / disk / diskxkv8 / ckpt
     # Qwen3-0.6B exercises the block tier (plain KVCache prefix reuse); the
