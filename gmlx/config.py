@@ -42,6 +42,7 @@ from typing import Any
 import yaml
 
 import gmlx.gen.profiles as _family_profiles
+from .cache.kv_policy import SCHEMES as KV_QUANT_SCHEMES
 from .envflags import env_bool
 
 # Canonical key sets / env mappings
@@ -75,9 +76,10 @@ LOAD_ENV = {
 # nothing said about it.
 SERVER_DTYPES = ("auto", "bfloat16", "bf16", "float16", "fp16")
 
-# Accepted `load.kv_quant_scheme` values. Only uniform affine is
-# certified. Other values are refused at parse time.
-KV_QUANT_SCHEMES = ("uniform",)
+# Accepted `load.kv_quant_scheme` values come from the policy resolver
+# that implements them (KV_QUANT_SCHEMES, imported above). Other values
+# are refused at parse time: an unchecked one reaches mlx-vlm and builds
+# caches no gmlx path can read.
 
 # APC prompt-cache (+ SSD disk tier) key -> env var (mlx-vlm apc.from_env). The disk
 # sub-block maps to APC_DISK_*; the namespace defaults to the model path downstream.

@@ -299,3 +299,40 @@ def test_filled_kvarn_roundtrip_content_equal(p):
     assert warm[0].n_sealed == (p - warm[0].sink_cap) // 128
     for got_m, want in zip(warm[0].materialize(), ref, strict=True):
         assert np.array_equal(np.array(got_m), want)
+
+
+# -- mixed rotating stacks (the carve-out makes them heterogeneous) -----------
+
+
+def test_mixed_rotating_kvarn_stack_declines_ckpt():
+    """--max-kv-size under kvarn now yields N-1 KVarNRotatingKVCache beside
+    one bare RotatingKVCache (the shared carve-out). The ckpt tier tags the
+    plain kvarn class only, so the mixed stack must decline outright rather
+    than tag the rotating layers as if they carried no window."""
+    stack = [KVarNRotatingKVCache(4096, tail_tokens=1024),
+             RotatingKVCache(max_size=4096)]
+    assert ckpt_layout(stack) is None
+    # ... and a rotating kvarn layer beside a state layer declines too.
+    assert ckpt_layout([KVarNRotatingKVCache(4096, tail_tokens=1024),
+                        ArraysCache(size=2)]) is None
+
+
+def test_rotating_kvarn_declines_the_disk_snapshot():
+    """The disk arm rebuilds through KVarNKVCache.from_state, whose meta
+    arity the rotating subclass does not match: it must never be written
+    under the plain kvarn kind."""
+    from gmlx.cache.kvarn_apc import install_kvarn_apc
+
+    install_kvarn_apc()
+    import mlx_vlm.apc as apc
+
+    rot = KVarNRotatingKVCache(4096, tail_tokens=1024)
+    arrays, metadata = {}, {}
+    apc.DiskBlockStore._snapshot_exact_cache_entry(
+        None, rot, "l0", arrays, metadata)
+    assert metadata.get("l0_kind") != "kq_kvarn"
+    plain = KVarNKVCache(tail_tokens=1024)
+    arrays, metadata = {}, {}
+    assert apc.DiskBlockStore._snapshot_exact_cache_entry(
+        None, plain, "l0", arrays, metadata)
+    assert metadata["l0_kind"] == "kq_kvarn"

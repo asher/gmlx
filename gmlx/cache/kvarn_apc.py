@@ -70,20 +70,22 @@ def kvarn_model_converts(model) -> bool:
         return bool(cached)
     val = False
     try:
-        from gmlx.cache.kvarn_cache import kvarn_unsupported
+        lm = getattr(model, "language_model", None) or model
+        make = getattr(lm, "make_cache", None)
+        if make is None:
+            # No make_cache: upstream builds plain KV for every layer.
+            from gmlx.cache.kvarn_cache import kvarn_unsupported
 
-        if kvarn_unsupported(model) is None:
-            lm = getattr(model, "language_model", None) or model
-            make = getattr(lm, "make_cache", None)
-            if make is None:
-                # No make_cache: upstream builds plain KV for every
-                # layer, and serve converts all of them.
-                val = True
-            else:
-                from .kvarn_cache import convertible_kv_types
+            val = kvarn_unsupported(model) is None
+        else:
+            # The policy answers "converts" exactly, carve-out included,
+            # so the stamp and salt never disagree with the cache build.
+            from .kvarn_serve import _serve_widths_and_tail, kvarn_batch_policy
 
-                conv = convertible_kv_types()
-                val = any(type(c) in conv for c in make())
+            k_bits, v_bits, tail = _serve_widths_and_tail()
+            policy = kvarn_batch_policy(model, make(), k_bits, v_bits, tail,
+                                        mode="single")
+            val = policy.n_quant > 0
     except Exception:
         val = False
     try:
@@ -213,7 +215,11 @@ def install_kvarn_apc() -> None:
         return stock_mode(language_model)
 
     def snap_entry(self, c, prefix, arrays, metadata):
-        if not isinstance(c, KVarNKVCache):
+        # Exact class, not isinstance: load_entry rebuilds through
+        # KVarNKVCache.from_state, whose meta arity the rotating subclass
+        # does not match. Writing one would cost a disk record that can
+        # only ever miss.
+        if type(c) is not KVarNKVCache:
             return stock_snap(self, c, prefix, arrays, metadata)
         metadata[f"{prefix}_kind"] = "kq_kvarn"
         metadata[f"{prefix}_meta"] = ",".join(c.meta_state)

@@ -349,16 +349,19 @@ def resolve_kv_quant_policy(stack, *, kv_bits, kv_group_size=64,
                          start_honored=honored, pool_bits=bits)
 
 
-def _kvarn_owns(c, kind, rotating_window):
-    """True when the kvarn converter would take this layer. Rotating
-    layers convert only for the window the caller built them at: a
-    model's own SWA stack keeps its windows fp16, while a --max-kv-size
-    stack on a make_cache-less model converts throughout."""
+def _kvarn_owns(c, kind, rotating_window, batched=False):
+    """True when kvarn takes this layer. Rotating layers convert only for
+    the window the caller built them at: a model's own SWA stack keeps its
+    windows fp16, while a --max-kv-size stack on a make_cache-less model
+    converts throughout. In batched mode any growing KV layer counts --
+    serve's batch seam constructs BatchKVarNKVCache itself, so the class
+    on the probe stack says nothing about what it will build."""
     from gmlx.cache.compat import cache_types
     from gmlx.cache.kvarn_cache import convertible_kv_types
 
     if kind == "kv":
-        return (type(c) in convertible_kv_types()
+        return (batched
+                or type(c) in convertible_kv_types()
                 or getattr(c, "kv_quant_scheme", None) == "kvarn")
     if kind != "window" or not rotating_window:
         return False
@@ -419,7 +422,8 @@ def _resolve_kvarn(stack, *, kv_bits, value_bits, mode, mtp, head_dim,
 
     n = len(kinds)
     owns = [can_quantize_kv and _kvarn_owns(stack[i], kinds[i],
-                                            rotating_window)
+                                            rotating_window,
+                                            mode == "batched")
             for i in range(n)]
     # kvarn packs records, not pool storage; a pool arms only when the
     # requested width is also a valid affine width.
@@ -448,7 +452,9 @@ def _resolve_kvarn(stack, *, kv_bits, value_bits, mode, mtp, head_dim,
         else:
             per.append(KvLayerPlan(kind, False, FP16_BPE, pools))
 
-    hetero = any(not p.quantize for p in per)
+    # Same reading as the affine arm: the carve-out alone is still a full
+    # application. Only a layer the scheme cannot take makes it partial.
+    hetero = any(not owns[i] and kinds[i] != "pool" for i in range(n))
     honored = mode == "single" or not quantized_kv_start
     return KvQuantPolicy("partial" if hetero else "full", None, k_bits,
                          None, mode, tuple(per),

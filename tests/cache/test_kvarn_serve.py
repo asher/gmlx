@@ -87,8 +87,10 @@ def test_make_cache_builds_kvarn(restorable, _ops_ok, capsys):
     restorable.setenv("KV_TAIL_TOKENS", "256")
     caches = ar._make_cache(_LayersLM(), [0, 4], kv_bits=None, kv_quant_scheme="kvarn")
     assert len(caches) == 3
-    assert all(type(c) is BatchKVarNKVCache for c in caches)
-    assert all(c.tail_cap == 256 and c.k_bits == 6 for c in caches)
+    # The shared carve-out holds the last layer of a deep stack fp16.
+    assert all(type(c) is BatchKVarNKVCache for c in caches[:-1])
+    assert type(caches[-1]) is BatchKVCache
+    assert all(c.tail_cap == 256 and c.k_bits == 6 for c in caches[:-1])
     assert np.array_equal(np.array(caches[0].left_padding), [0, 4])
     assert "[kv] serve batch:" in capsys.readouterr().out
     assert gen._make_cache is ar._make_cache
@@ -98,7 +100,7 @@ def test_make_cache_env_bits(restorable, _ops_ok):
     _install(restorable)
     restorable.setenv("KV_BITS", "4")
     caches = ar._make_cache(_LayersLM(), [0], kv_bits=4.0, kv_quant_scheme="kvarn")
-    assert all(c.k_bits == 4 for c in caches)
+    assert all(c.k_bits == 4 for c in caches[:-1])
 
 
 def test_make_cache_declines_to_fp16(restorable, _ops_ok):
@@ -137,8 +139,8 @@ def test_ppb_fastpath_rebuilds_kvarn(restorable, _ops_ok):
     _install(restorable)
     restorable.setenv("KV_TAIL_TOKENS", "256")
     batch = _make_ppb(_LayersLM(), kv_bits=None, kv_quant_scheme="kvarn")
-    assert all(type(c) is BatchKVarNKVCache for c in batch.prompt_cache)
-    assert all(c.tail_cap == 256 for c in batch.prompt_cache)
+    assert all(type(c) is BatchKVarNKVCache for c in batch.prompt_cache[:-1])
+    assert all(c.tail_cap == 256 for c in batch.prompt_cache[:-1])
 
 
 def test_ppb_fastpath_leaves_ineligible(restorable, _ops_ok):
@@ -153,7 +155,7 @@ def test_spec_build_suspends_kvarn(restorable, _ops_ok):
         caches = ar._make_cache(_LayersLM(), [0], kv_bits=None, kv_quant_scheme="kvarn")
     assert all(type(c) is BatchKVCache for c in caches)
     caches = ar._make_cache(_LayersLM(), [0], kv_bits=None, kv_quant_scheme="kvarn")
-    assert all(type(c) is BatchKVarNKVCache for c in caches)
+    assert all(type(c) is BatchKVarNKVCache for c in caches[:-1])
 
 
 def test_apc_gate(restorable, _ops_ok):

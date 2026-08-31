@@ -82,6 +82,25 @@ def _serve_widths_and_tail():
     return k_bits, v_bits, tail
 
 
+def kvarn_batch_policy(model, caches, k_bits, v_bits, tail, mode="batched"):
+    """The kvarn policy for one serve cache stack. Serve never builds a
+    rotating stack (max_kv_size is not a serve key), so rotating_window
+    stays None; a model's own sliding-window layers keep fp16."""
+    from gmlx.cache.kv_policy import resolve_kv_quant_policy
+
+    from .kvarn_cache import kvarn_unsupported
+
+    return resolve_kv_quant_policy(
+        caches,
+        kv_bits=k_bits,
+        value_bits=v_bits,
+        scheme="kvarn",
+        tail_tokens=tail,
+        mode=mode,
+        scheme_reason=kvarn_unsupported(model),
+    )
+
+
 _PPB_DECLINE_NOTED: set = set()
 
 
@@ -129,16 +148,10 @@ def _ppb_rebuild_declined(batch, kwargs):
         return "populated"
     if int(getattr(batch, "_processed_prompt_columns", 0) or 0):
         return "trimmed"
-    from gmlx.cache.kvarn_cache import kvarn_unsupported
-    from .kvarn_cache import KVARN_BITS
-
-    reason = kvarn_unsupported(batch.model)
-    if reason is None:
-        k_bits, v_bits, tail = _serve_widths_and_tail()
-        if not (k_bits in KVARN_BITS and v_bits in KVARN_BITS):
-            reason = f"kvarn bits must be one of {KVARN_BITS}"
-        elif tail < 0 or tail % 128:
-            reason = "KV_TAIL_TOKENS must be a multiple of 128 (0 disables)"
+    k_bits, v_bits, tail = _serve_widths_and_tail()
+    policy = kvarn_batch_policy(batch.model, batch.prompt_cache,
+                                k_bits, v_bits, tail, mode="single")
+    reason = None if policy.verdict in ("full", "partial") else policy.reason
     if reason is not None:
         key = type(batch.model).__name__
         if key not in _PPB_DECLINE_NOTED:
@@ -173,29 +186,23 @@ def ensure_ppb_kvarn(batch, kwargs, *, ckpt_active: bool) -> bool:
         return False
     if _ppb_rebuild_declined(batch, kwargs) is not None:
         return False
-    from .kvarn_cache import convert_prompt_cache, ensure_registered
+    from gmlx.cache.kv_policy import kv_line
+    from gmlx.gen.generation import apply_kvarn_policy
+
+    from .kvarn_cache import ensure_registered
 
     ensure_registered()
     k_bits, v_bits, tail = _serve_widths_and_tail()
-    n = convert_prompt_cache(
-        batch.prompt_cache, k_bits=k_bits, v_bits=v_bits, tail_tokens=tail
-    )
+    policy = kvarn_batch_policy(batch.model, batch.prompt_cache,
+                                k_bits, v_bits, tail, mode="single")
+    if policy.verdict not in ("full", "partial"):
+        return False
+    n = apply_kvarn_policy(batch.prompt_cache, policy)
     if not n:
         return False
-    from .kvarn_sdpa import install_kvarn_sdpa
-
-    install_kvarn_sdpa()
     if not _CKPT_NOTED[0]:
         _CKPT_NOTED[0] = True
-        width = (
-            f"kvarn{k_bits}" if k_bits == v_bits else f"kvarn k{k_bits} v{v_bits}"
-        )
-        regions = "sink+tail fp16" if tail else "sink fp16, tail off"
-        print(
-            f"[kv] serve ckpt: {n}/{len(batch.prompt_cache)}-layer "
-            f"{width} KV ({regions})",
-            flush=True,
-        )
+        print(kv_line("serve ckpt", policy), flush=True)
     return True
 
 
@@ -238,37 +245,30 @@ def _install_make_cache(_ar, _gen):
                 **kwargs,
             )
         from .compat import cache_types
-        from gmlx.cache.kvarn_cache import kvarn_unsupported
-        from .kvarn_cache import (
-            KVARN_BITS,
-            BatchKVarNKVCache,
-            ensure_registered,
-        )
+        from .kvarn_cache import BatchKVarNKVCache, ensure_registered
 
         k_bits, v_bits, tail = _serve_widths_and_tail()
-        reason = kvarn_unsupported(model)
-        if reason is None and not (k_bits in KVARN_BITS and v_bits in KVARN_BITS):
-            reason = f"kvarn bits must be one of {KVARN_BITS}"
-        if reason is None and (tail < 0 or tail % 128):
-            reason = "KV_TAIL_TOKENS must be a multiple of 128 (0 disables)"
         # The scheme owns the width request either way: a declined model
         # serves fp16, never the affine quantized batch cache.
         caches = _orig(model, left_padding, kv_bits=None, **kwargs)
-        if reason is not None:
+        policy = kvarn_batch_policy(model, caches, k_bits, v_bits, tail)
+        if policy.verdict not in ("full", "partial"):
             key = type(model).__name__
             if key not in _declined:
                 _declined.add(key)
                 _log.warning(
                     "KV_QUANT_SCHEME=kvarn dropped for %s: %s; KV stays fp16",
                     key,
-                    reason,
+                    policy.reason,
                 )
             return caches
         ensure_registered()
         batch_kv = cache_types("BatchKVCache")
         n = 0
-        for i, c in enumerate(caches):
-            if type(c) in batch_kv:
+        # The policy picks the layers, so serve admission prices exactly
+        # what gets built (the last layer of a deep stack stays fp16).
+        for i, plan in enumerate(policy.per_layer):
+            if plan.quantize and type(caches[i]) in batch_kv:
                 caches[i] = BatchKVarNKVCache(
                     left_padding,
                     k_bits=k_bits,
@@ -277,21 +277,14 @@ def _install_make_cache(_ar, _gen):
                 )
                 n += 1
         if n:
+            from gmlx.cache.kv_policy import kv_line
+
             from .kvarn_sdpa import install_kvarn_sdpa
 
             install_kvarn_sdpa()
             if not _noted[0]:
                 _noted[0] = True
-                width = (
-                    f"kvarn{k_bits}"
-                    if k_bits == v_bits
-                    else f"kvarn k{k_bits} v{v_bits}"
-                )
-                regions = "sink+tail fp16" if tail else "sink fp16, tail off"
-                print(
-                    f"[kv] serve batch: {n}/{len(caches)}-layer {width} KV ({regions})",
-                    flush=True,
-                )
+                print(kv_line("serve batch", policy), flush=True)
         return caches
 
     _kvarn_make_cache.__dict__[_MAKE_CACHE_FLAG] = True

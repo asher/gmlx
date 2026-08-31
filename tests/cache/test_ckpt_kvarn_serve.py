@@ -285,3 +285,51 @@ print("CHAIN-OK")
                        text=True, env=dict(os.environ), timeout=300)
     assert r.returncode == 0, r.stderr
     assert "CHAIN-OK" in r.stdout
+
+
+def test_production_disk_arm_chain_order():
+    """The APC disk arms chain, they do not replace each other. Install
+    order restated from install_server_patches: pooling, then QSA, then
+    kvarn. kvarn must be outermost and a non-kvarn record must still reach
+    the QSA arm underneath it."""
+    pytest.importorskip("mlx_vlm.apc")
+    script = r"""
+import importlib
+apc = importlib.import_module("mlx_vlm.apc")
+from gmlx.cache.apc_pooling import install_pooling_apc_support
+from gmlx.cache.apc_qsa import install_qsa_apc_support
+from gmlx.cache.kvarn_apc import install_kvarn_apc
+
+NAMES = ("_snapshot_exact_cache_entry", "_load_exact_cache_entry")
+
+def arms():
+    return tuple(getattr(apc.DiskBlockStore, n) for n in NAMES)
+
+install_pooling_apc_support()
+pooled = arms()
+install_qsa_apc_support()
+qsa = arms()
+install_kvarn_apc()
+kvarn = arms()
+
+def chained(fn):
+    out = []
+    for cell in fn.__closure__ or ():
+        try:
+            out.append(cell.cell_contents)
+        except ValueError:
+            pass
+    return out
+
+for i, name in enumerate(NAMES):
+    assert kvarn[i] is not qsa[i], name       # kvarn installed its arm
+    assert qsa[i] is not pooled[i], name      # QSA installed its own
+    # kvarn chains the arm it found -- QSA's -- not the bare upstream.
+    assert any(c is qsa[i] for c in chained(kvarn[i])), name
+    assert any(c is pooled[i] for c in chained(qsa[i])), name
+print("DISK-CHAIN-OK")
+"""
+    r = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                       text=True, env=dict(os.environ), timeout=300)
+    assert r.returncode == 0, r.stderr
+    assert "DISK-CHAIN-OK" in r.stdout

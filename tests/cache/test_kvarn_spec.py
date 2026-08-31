@@ -17,6 +17,8 @@ from mlx_vlm.generate import ar  # noqa: E402
 from mlx_vlm.server import generation as gen  # noqa: E402
 from mlx_vlm.speculative import utils as su  # noqa: E402
 
+import mlx_kquant as kq  # noqa: E402
+
 import gmlx.spec.engine as spec_engine  # noqa: E402
 from gmlx.cache.kvarn_cache import KVarNKVCache  # noqa: E402
 
@@ -411,3 +413,70 @@ def test_mtp_reject_cycles_straddle_seals():
     )
     for x, y in zip(a.materialize(), ref.materialize(), strict=True):
         assert np.array_equal(np.array(x), np.array(y))
+
+
+# -- preemption lift ---------------------------------------------------------
+
+
+def _skip_without_ops():
+    """Loud skip, never a vacuous pass: this row and the logits row below
+    both run kq.kvarn_rotate, so a device-only guard would green out on
+    CPU and in CI, where the ops are absent outright."""
+    from gmlx.cache.kvarn_sdpa import kvarn_ops_missing
+
+    reason = kvarn_ops_missing()
+    if reason:
+        pytest.skip(f"kvarn ops unavailable: {reason}")
+
+
+def test_kvarn_lift_cache_recovers_original_domain():
+    """MTP preemption lifts a B=1 kvarn cache into a one-row BatchKVCache.
+    materialize() returns ROTATED K/V; feeding that to stock SDPA attends
+    rotated keys with an un-rotated query -- no crash, just wrong logits.
+    The lift must use the original-domain accessor."""
+    _skip_without_ops()
+    from mlx_vlm.models.cache import BatchKVCache
+
+    k, v = _tokens(300, seed=7)
+    c = KVarNKVCache(tail_tokens=256)
+    c.update_and_fetch(k, v)
+    c._gmlx_cascade = "stamp"
+
+    lifted = spec_engine.kvarn_lift_cache(c)
+    assert type(lifted) is BatchKVCache
+    assert lifted.offset == 300
+    assert lifted._gmlx_cascade == "stamp"
+    assert hasattr(lifted, "filter") and hasattr(lifted, "extend")
+
+    got_k = lifted.keys[..., :300, :].astype(mx.float32)
+    # Original domain, not the rotated one the SDPA route reads.
+    err = mx.abs(got_k - k.astype(mx.float32)).max().item()
+    assert err < 0.2, err
+    rot = kq.kvarn_rotate(k).astype(mx.float32)
+    rot_err = mx.abs(got_k - rot).max().item()
+    assert rot_err > err, (err, rot_err)
+    # The verbatim tail rows survive the round trip exactly.
+    tail = mx.abs(got_k[:, :, -256:] - k[:, :, -256:].astype(mx.float32))
+    assert tail.max().item() == 0.0
+
+
+def test_kvarn_lift_matches_stock_attention():
+    """The decisive check: one attention step over the lifted cache must
+    agree with the same step over the un-preempted fp16 history."""
+    _skip_without_ops()
+    k, v = _tokens(260, seed=11)
+    c = KVarNKVCache(tail_tokens=256)
+    c.update_and_fetch(k, v)
+    lifted = spec_engine.kvarn_lift_cache(c)
+
+    q = mx.random.normal((1, H, 1, D)).astype(mx.float16)
+    scale = D ** -0.5
+
+    def attend(keys, values):
+        s = (q.astype(mx.float32) @ keys.astype(mx.float32).transpose(
+            0, 1, 3, 2)) * scale
+        return mx.softmax(s, axis=-1) @ values.astype(mx.float32)
+
+    ref = attend(k, v)
+    got = attend(lifted.keys[..., :260, :], lifted.values[..., :260, :])
+    assert mx.abs(got - ref).max().item() < 5e-3
