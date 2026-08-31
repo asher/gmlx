@@ -45,6 +45,8 @@ from gmlx.upstream.sparse_sdpa import install_sparse_sdpa
 from gmlx.upstream.arrays_cache_fix import install_arrays_cache_fix
 from gmlx.models.gemma4.sync import install_gemma4_nosync
 from gmlx.upstream.softcap_f32 import install_gemma4_softcap_f32
+from gmlx.upstream.quantized_cache_pack_fix import (
+    install_quantized_cache_pack_fix)
 from gmlx.upstream.quantized_sdpa_fix import install_quantized_sdpa_mask_fix
 from gmlx.upstream.rope_batch_fix import install_rope_batch_fix
 from gmlx.upstream.rotating_cache_fix import install_rotating_cache_fix
@@ -3255,6 +3257,8 @@ def _install_and_load(
         log("[install] head_dim-512 fused SDPA active")
     if install_quantized_sdpa_mask_fix():
         log("[install] quantized-KV SDPA batch-mask fix active")
+    if install_quantized_cache_pack_fix():
+        log("[install] quantized-KV pack-width fix active")
     if install_rope_batch_fix():
         log("[install] rope int-offset batch fix active")
     if install_prefill_decay():
@@ -3723,6 +3727,8 @@ def load_model(
         _log("[install] head_dim-512 fused SDPA active")
     if install_quantized_sdpa_mask_fix():
         _log("[install] quantized-KV SDPA batch-mask fix active")
+    if install_quantized_cache_pack_fix():
+        _log("[install] quantized-KV pack-width fix active")
     if install_rope_batch_fix():
         _log("[install] rope int-offset batch fix active")
     if install_prefill_decay():

@@ -6,7 +6,7 @@ legs: the prefill leg (chunked prefill logits, exercising the quantized
 prefill/materialize paths) and the decode leg (token-by-token from full
 prefill depth, exercising the fused decode kernels).
 
-Arms: fp16 (baseline), kv8 (affine QuantizedKVCache, group 64), kvarnN
+Arms: fp16 (baseline), kvN (affine QuantizedKVCache, group 64), kvarnN
 (KVarNKVCache at N bits; kvarn6 and kvarn4 by default; kvarnk6v5-style
 names select mixed K/V widths). Primary metric is median KLD per leg;
 same_top is the argmax agreement rate. The routine gate is
@@ -78,12 +78,18 @@ def build_arm(name: str, model, tail_tokens: int, carve_out: bool = True):
             raise SystemExit(f"{name} arm converted {n}/{want} layers")
         return pc
 
-    if name == "kv8":
+    import re
+
+    m = re.fullmatch(r"kv(\d+)", name)
+    if m:
         from gmlx.cache.kv_policy import resolve_kv_quant_policy
 
-        return apply(resolve_kv_quant_policy(pc, kv_bits=8, kv_group_size=64))
+        policy = resolve_kv_quant_policy(
+            pc, kv_bits=int(m.group(1)), kv_group_size=64)
+        if policy.verdict in ("dropped", "error"):
+            raise SystemExit(f"{name} arm {policy.verdict}: {policy.reason}")
+        return apply(policy)
     if name.startswith("kvarn"):
-        import re
 
         from gmlx.cache.kvarn_sdpa import install_kvarn_sdpa, kvarn_ops_missing
         from gmlx.gen.generation import resolve_kvarn_policy
