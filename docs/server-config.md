@@ -1035,26 +1035,33 @@ cache stack and logged as one `[kv]` line. The policy is layer by layer:
 growing attention KV quantizes except the last layer of a deep stack,
 sliding windows and recurrent state stay fp16, pooled caches pack at
 rest. `/v1/models` reports the result per resident model as `kv_quant`
-(`bits`, `group_size`, `layers_quantized`, `layers_fp16`, `verdict`,
-`verdict_batched`); `/health` carries the same field per resident entry.
+(`scheme`, `bits`, `group_size`, `layers_quantized`, `layers_fp16`,
+`verdict`, `verdict_batched`, plus `value_bits` and `tail_tokens` under a
+non-uniform scheme); `/health` carries the same field per resident entry.
 Verdicts: `full` (policy fully applied), `partial` (hybrid stack, the
 fp16 layers are counted), `dropped` (the model runs fp16 KV, reason
-logged), `error` (the model fails to load, e.g. `kv_bits` outside
-2/3/4/6/8 or split key/value bits). Speculative (MTP) models quantize at
-batch size 1 and run fp16 KV while requests are batched; `verdict_batched`
-reports that mode, and admission prices memory from it.
+logged), `error` (the model fails to load, e.g. `kv_bits` outside the
+scheme's widths, or split key/value bits under `uniform`). Speculative
+(MTP) models quantize at batch size 1 and run fp16 KV while requests are
+batched; `verdict_batched` reports that mode, and admission prices memory
+from it.
 
-`kv_quant_scheme: kvarn` converts every eligible layer's batch KV cache to
-KVarN (`kv_bits` picks the width, default 6; `kv_tail_tokens` sizes the
-fp16 precision tail, default 1024). Eligibility is a rule, not a model
-list: attention layers with head_dim 128, 256 or 512 convert (qwen3.5/3.6
-and gemma-4 global layers are the common cases); recurrent, sliding-window
-and head_dim-64 layers (gpt-oss, falcon-h1) stay fp16, and MLA archs whose
-K and V share latent storage (deepseek4, kimi-k3) never convert at all.
-Archs that derive head_dim from hidden/heads (nemotron-h, jamba, lfm2,
-granitemoehybrid) are eligible per checkpoint -- check the config. A model
-where no layer converts keeps fp16 KV with a one-shot log reason, never a
-silent affine fallback.
+`kv_quant_scheme: kvarn` runs the same policy over the same stack, so the
+layer rules above hold unchanged: `kv_bits` picks the width (default 6,
+accepts 2/3/4/5/6/8) and `kv_tail_tokens` sizes the fp16 precision tail
+(default 1024). Kvarn narrows the eligible layers once more, by cache
+shape rather than by model name: an attention layer converts only when
+its head_dim is 128, 256 or 512 (qwen3.5/3.6 and gemma-4 global layers
+are the common cases). head_dim-64 layers (gpt-oss, falcon-h1) stay fp16,
+and MLA archs whose K and V share latent storage (deepseek4, kimi-k3)
+never convert at all. Archs that derive head_dim from hidden/heads
+(nemotron-h, jamba, lfm2, granitemoehybrid) are eligible per checkpoint
+-- check the config. A model where no layer converts keeps fp16 KV with a
+one-shot log reason, never a silent affine fallback. `max_kv_size` only
+caps the request context budget on the server, so the rotating-window
+composition kvarn supports on `run` and `chat` has no server equivalent.
+Admission prices a kvarn layer at its record width plus the fp16 sink,
+horizon and tail buffers, which are resident from the first token.
 
 APC under kvarn keeps the same tier routing as fp16. Dense models run the
 exact-entry tier (memory and disk; the 16-token block tier cannot split

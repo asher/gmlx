@@ -153,8 +153,8 @@ def resolve_for_load(rg, model_id: str):
     if scheme == "kvarn":
         # kvarn owns its own widths (bits is the key width, and
         # GMLX_KVARN_BITS may split them) and declines by model shape.
-        # Serve never builds a rotating stack: max_kv_size is not a
-        # serve key, so rotating_window stays None here.
+        # rotating_window stays None: serve's MAX_KV_SIZE only caps the
+        # request context budget, it never builds a rotating stack.
         from gmlx.cache.kvarn_cache import kvarn_unsupported, kvarn_widths
 
         k_bits, v_bits = kvarn_widths(int(bits) if bits else None)

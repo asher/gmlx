@@ -472,9 +472,12 @@ Levers, cheapest first:
   and shows no difference): pick kvarn for memory and fidelity, plain
   `--kv-bits` for peak decode speed. Other widths (2-8, and mixed via
   `GMLX_KVARN_BITS=k6v5`) trade fidelity for memory at roughly the same speed.
-  Covers head_dim-128, -256 and -512 attention layers: the qwen3.5/3.6 family
-  and gemma-4 global layers (SWA layers stay fp16, so the gemma-4 saving is
-  modest); anything else declines loudly and stays fp16. Server-side, the
+  Coverage follows the cache shape, not the model name: growing attention KV
+  with head_dim 128, 256 or 512, minus the last layer of a deep stack, which
+  the shared policy holds fp16 under either scheme. That takes the qwen3.5/3.6
+  family and gemma-4 global layers (SWA layers stay fp16, so the gemma-4
+  saving is modest). head_dim-64 layers, and MLA archs whose K and V share one
+  latent store, decline loudly and stay fp16. Server-side, the
   prompt cache survives the scheme: hybrid and sliding-window models keep
   full checkpoint-tier reuse on a kvarn boot (records store the quantized
   cache, and stock and kvarn boots never adopt each other's entries).
@@ -485,7 +488,8 @@ Levers, cheapest first:
   sink + `--kv-tail-tokens` + 128, so 1280 at the default tail); below the
   floor the scheme drops loudly and the window stays fp16. Plain `--kv-bits`
   cannot quantize a rotating window and drops loudly with the same fp16
-  fallback.
+  fallback. This composition is a `run` and `chat` one: the server's
+  `max_kv_size` caps the request context budget and builds no rotating cache.
 - Long prompts prefill in chunks automatically (2048 tokens), which bounds
   prefill's working memory on top of the cache itself. `--prefill-step-size`
   (on `serve`, `run`, and `chat`; server config `server.prefill_step_size`, or

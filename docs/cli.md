@@ -96,7 +96,7 @@ family sets no value.
 | `--stop STR` | - | Stop sequence; generation ends (trimmed) when it appears. Repeatable. |
 | `--max-kv-size N` | - | Cap the KV cache (rotating cache above it). Composes with `--kv-quant-scheme kvarn` (the window quantizes; N must clear the kvarn floor of sink 128 + `--kv-tail-tokens` + 128), but not with plain `--kv-bits`. |
 | `--kv-bits N` / `--kv-group-size N` / `--quantized-kv-start N` | off / `64` / `0` | Quantize the KV cache. A per-stack policy decides layer by layer: growing attention KV quantizes (the last layer of a deep stack stays fp16), sliding windows and recurrent state stay fp16, pooled caches pack at rest. One `[kv]` line reports the verdict, e.g. `quantized 27/28 attn layers (1 held fp16)`, or `dropped:` with the reason when nothing can quantize. Cannot combine with `--max-kv-size` (refused at start). |
-| `--kv-quant-scheme STR` / `--kv-tail-tokens N` | `uniform` / `1024` | KV quantization scheme. `kvarn` is variance-normalized quantization (kv8-class quality at 6 bits; `--kv-bits` defaults to 6, accepts 2/3/4/5/6/8); the sink and the last `--kv-tail-tokens` tokens stay fp16. Covers head_dim-128, -256 and -512 attention layers: the qwen3.5/3.6 family (hybrid archs convert those, recurrent layers keep their own state) and gemma-4 global layers (SWA layers stay fp16); anything else declines with a printed reason. |
+| `--kv-quant-scheme STR` / `--kv-tail-tokens N` | `uniform` / `1024` | KV quantization scheme. `kvarn` is variance-normalized quantization (kv8-class quality at 6 bits; `--kv-bits` defaults to 6, accepts 2/3/4/5/6/8); the sink and the last `--kv-tail-tokens` tokens stay fp16. It runs the same per-stack policy as `--kv-bits`, on the same layers: growing attention KV whose head_dim is 128, 256 or 512, minus the last layer of a deep stack. Recurrent state and sliding windows stay fp16 unless `--max-kv-size` built the window; MLA archs, whose K and V share one latent store, decline outright, as does the VLM path. A declined model prints the reason and runs fp16. |
 | `--prefill-step-size N` | `2048` / `8192` streaming | Prefill chunk size; lower it to cap peak memory on long prompts. Over-RAM streaming `--stream-cpu` / `--stream-experts` models default to `8192`: each chunk re-streams the expert lane from disk, so fewer, bigger chunks prefill faster. Applies to `run`, `--bench`, and `--bench-depths`. |
 
 ### Multimodal (VLM)
@@ -158,7 +158,8 @@ apply one of those flags, pass `--no-mtp` to decode on the plain path, which
 honours it exactly. `--kv-bits` (pooled packing where the arch has pools) and
 `--kv-quant-scheme kvarn` (where the arch is eligible and the drafter does not
 read the target KV back) apply on the MTP path itself, with an accurate note
-where they can't. Only hard-incompatible flags (`--mmproj`, `--adapter`, `--stream-cpu`,
+where they can't. Kvarn also declines a sliding-window stack under MTP, where
+plain `--kv-bits` quantizes the growing layers around the windows. Only hard-incompatible flags (`--mmproj`, `--adapter`, `--stream-cpu`,
 and the lossy `--moe-*` levers) make auto-enable step aside to plain
 decoding; an explicit `--speculative` with one of these errors out.
 `--stream-experts` is the exception: streaming composes with MTP, but
