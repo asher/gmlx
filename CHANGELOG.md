@@ -56,6 +56,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - STQ1_0 expert stacks now reach the fused MoE decode kernels instead of the
   stock SwitchGLU. HY4-preview holds 29 of its 77 routed layers in that
   codec and decodes 7% faster.
+- Streaming no longer wires the GGUF bytes of a tensor the loader converts,
+  such as an F32 lm head held as bf16. Those bytes have no view left to
+  read, and the decode arena gets them instead: HY4-preview reads 3.5% less
+  from disk per token. `GMLX_PIN_CAST_EXCLUDE=0` restores the old pin.
 
 ## [0.4.7] - 2026-08-30
 

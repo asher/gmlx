@@ -201,6 +201,16 @@ arena hit rate. Measured on Kimi-K3 UD-IQ2_XXS (662 GB, 62 GB every-token set, M
 skipped with a printed reason when the every-token set would exceed 60%
 of RAM.
 
+A tensor the loader converts is left out of the pin, and the arena is
+charged what the copy weighs rather than what the wire does. The pin works
+because the runtime views the mlocked GGUF bytes in place; a converted
+tensor has its own array instead, so wiring its wire range holds memory
+nothing reads again. The match is on element count and dtype width, not on
+tensor names, so it covers a head under any name, tied or not.
+HY4-preview holds an F32 `output.weight` (2.97 GB) as a 1.49 GB bf16 array:
+the pin drops to 19.7 GB from 22.6 GB and the arena reads 3.5% less from
+disk per token. `GMLX_PIN_CAST_EXCLUDE=0` pins the wire bytes as before.
+
 Two streaming installs in one process share nothing. The weight pin and the
 decode arena are both mlocked, and mlocked pages are never compressed,
 swapped or evicted, so they raise no memory pressure and jetsam never
