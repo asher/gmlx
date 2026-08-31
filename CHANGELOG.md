@@ -53,6 +53,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lift as a typed `--stream-experts`, so streamed decode no longer runs 40%
   slower from the config than from the bare GGUF path (10.3 vs 7.2 tok/s on
   GLM-5.3-Flash UD-Q4_K_XL). `serve` was never affected.
+- STQ1_0 expert stacks now reach the fused MoE decode kernels instead of the
+  stock SwitchGLU. HY4-preview holds 29 of its 77 routed layers in that
+  codec and decodes 7% faster.
 
 ## [0.4.7] - 2026-08-30
 
