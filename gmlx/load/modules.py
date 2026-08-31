@@ -23,6 +23,7 @@ import os
 
 import mlx.core as mx
 import mlx.nn as nn
+import numpy as np
 from mlx.utils import tree_map_with_path
 
 from mlx_lm.models.switch_layers import SwitchLinear
@@ -40,8 +41,9 @@ from mlx_kquant.nn import (
 )
 
 from .native_fp import NATIVE_FP_CODECS, NATIVE_FP_GEOMETRY
+import gmlx.lora_rows as lora_rows
 from .dtypes import activation_dtype
-from gmlx.envflags import env_int
+from gmlx.envflags import env_bool, env_int
 from .transforms import qk_permute_wire
 
 _SWITCH_TYPES = None
@@ -131,6 +133,16 @@ _FUSED_MOE_ROUTER_ENABLED = True
 # gemma-4 layer body) on top of _FUSED_MOE_ENABLED; separate for A/B
 # attribution.
 _FUSED_MOE_GLUE_ENABLED = True
+
+# Prefill gate+up concat: sorted-prefill expert calls run one gather on the
+# concatenated [E, 2*inter] gate+up wire bytes instead of two, halving the
+# gather launches (and tile-map builds on the seg path) per MoE layer. Costs
+# one extra resident copy of the gate+up expert bytes, so the install caps
+# the model-wide copy at GMLX_MOE_GATEUP_CONCAT_MAX_MB (expert-heavy MoE
+# models would double most of their weight bytes and blow the wired limit).
+# GMLX_MOE_GATEUP_CONCAT=0 disables (skips the install-time concat too).
+_GATEUP_CONCAT_ENABLED = env_bool("GMLX_MOE_GATEUP_CONCAT", True)
+_GATEUP_CONCAT_MAX_MB = env_int("GMLX_MOE_GATEUP_CONCAT_MAX_MB", 2048)
 
 
 def _kq_fused_device_ok(*mods) -> bool:
@@ -537,72 +549,135 @@ def _make_fused_kquant(base_cls, caps):
 
         _kq_mix_scores = _has_mix_ns
 
-        def __call__(self, x, indices, scores=None):
-            if (
+        def _fused_ok(self, x, indices) -> bool:
+            """The fused-vs-stock gate, one source of truth for this class
+            and any subclass that owns its own forward (the LoRA wrap)."""
+            return (
                 _FUSED_MOE_ENABLED
                 and indices.size < 64
                 and x.dtype in (mx.bfloat16, mx.float16)
                 and not self.training
                 and _kq_fused_device_ok(self)
-            ):
-                d_in = x.shape[-1]
-                t = x.size // d_in
+            )
+
+        def _fused_h(self, x, idx, scores=None):
+            """The gate/up gather: ``[t, k, I]`` activated hidden (``k + 1``
+            slots per token when the shexp fold rides along with scores).
+            ``idx`` is ``(t, k)``."""
+            t, k = idx.shape
+            d_in = x.shape[-1]
+            gate, up = self.gate_proj, self.up_proj
+            act = getattr(self, "_kq_glu_act", "silu")
+            # extra kwargs only where the act needs them so silu/gelu
+            # calls stay byte-identical against older kq builds.
+            akw = {"act": act}
+            if act == "silu_limit":
+                akw["limit"] = self._kq_glu_limit
+            elif act == "swiglu_clamp":
+                akw["limit"] = self._kq_glu_limit
+                akw["alpha"] = self._kq_glu_alpha
+                akw["gate_bias"] = self._kq_gb32
+                akw["up_bias"] = self._kq_ub32
+            se = (getattr(self, "_kq_shexp_mod", None)
+                  if scores is not None else None)
+            if se is not None:
+                skw = ({"shexp_kquant_type": se.gate_proj.kquant_type}
+                       if se.gate_proj.kquant_type != gate.kquant_type
+                       else {})
+                return kq.moe_glu_gather_shexp_kq(
+                    x.reshape(t, d_in), gate.weight, up.weight,
+                    se.gate_proj.weight, se.up_proj.weight,
+                    gate.kquant_type, idx, **akw, **skw)
+            return kq.moe_glu_gather_kq(
+                x.reshape(t, d_in),
+                gate.weight, up.weight,
+                gate.kquant_type, idx, **akw)
+
+        def _fused_down(self, h, idx, scores=None, lora=None):
+            """The down gather, three exits, all flat: shexp fold (mixed,
+            shexp slot weight 1) and score mix in the kernel (mixed) return
+            ``(t, N)``; the plain gather returns unmixed ``(t, k, N)``. The
+            caller tells them apart by rank and reshapes to the batched
+            layout, where the epilogue's ``y.ndim == scores.ndim + 1`` is
+            the same unmixed test. ``lora`` (the kq ``lora_*`` kwargs) rides
+            the mix and plain exits' in-op epilogue."""
+            t, k = idx.shape
+            down = self.down_proj
+            se = (getattr(self, "_kq_shexp_mod", None)
+                  if scores is not None else None)
+            lkw = lora or {}
+            if se is not None:
+                if lkw:
+                    raise NotImplementedError(
+                        "LoRA epilogue on the shared-expert fold exit")
+                sc = scores.reshape(t, k)
+                sc = mx.concatenate(
+                    [sc, mx.ones((t, 1), dtype=sc.dtype)], axis=-1)
+                skw = ({"shexp_kquant_type": se.down_proj.kquant_type}
+                       if se.down_proj.kquant_type != down.kquant_type
+                       else {})
+                y = kq.gather_qmv_mix_kq(
+                    h, down.weight, se.down_proj.weight,
+                    down.kquant_type, idx, sc, **skw)
+                return y.reshape(t, y.shape[-1])
+            if (scores is not None and _has_mix_ns
+                    and "bias" not in down):
+                y = kq.gather_qmv_mix_ns_kq(
+                    h, down.weight, down.kquant_type, idx,
+                    scores.reshape(t, k), **lkw)
+                return y.reshape(t, y.shape[-1])
+            dkw = {"bias": self._kq_db32} if "bias" in down else {}
+            y = kq.gather_qmv_kq(
+                h, down.weight, down.kquant_type, idx, **dkw, **lkw)
+            return y.reshape(t, k, y.shape[-1])
+
+        def __call__(self, x, indices, scores=None):
+            if self._fused_ok(x, indices):
                 k = indices.shape[-1]
-                gate, up, down = (
-                    self.gate_proj, self.up_proj, self.down_proj)
-                idx = indices.reshape(t, k)
-                act = getattr(self, "_kq_glu_act", "silu")
-                # extra kwargs only where the act needs them so silu/gelu
-                # calls stay byte-identical against older kq builds.
-                akw = {"act": act}
-                if act == "silu_limit":
-                    akw["limit"] = self._kq_glu_limit
-                elif act == "swiglu_clamp":
-                    akw["limit"] = self._kq_glu_limit
-                    akw["alpha"] = self._kq_glu_alpha
-                    akw["gate_bias"] = self._kq_gb32
-                    akw["up_bias"] = self._kq_ub32
-                se = (getattr(self, "_kq_shexp_mod", None)
-                      if scores is not None else None)
-                if se is not None:
-                    skw = ({"shexp_kquant_type": se.gate_proj.kquant_type}
-                           if se.gate_proj.kquant_type != gate.kquant_type
-                           else {})
-                    h = kq.moe_glu_gather_shexp_kq(
-                        x.reshape(t, d_in), gate.weight, up.weight,
-                        se.gate_proj.weight, se.up_proj.weight,
-                        gate.kquant_type, idx, **akw, **skw)
-                    sc = scores.reshape(t, k)
-                    sc = mx.concatenate(
-                        [sc, mx.ones((t, 1), dtype=sc.dtype)], axis=-1)
-                    skw = ({"shexp_kquant_type": se.down_proj.kquant_type}
-                           if se.down_proj.kquant_type != down.kquant_type
-                           else {})
-                    y = kq.gather_qmv_mix_kq(
-                        h, down.weight, se.down_proj.weight,
-                        down.kquant_type, idx, sc, **skw)
+                idx = indices.reshape(indices.size // k, k)
+                y = self._fused_down(self._fused_h(x, idx, scores), idx, scores)
+                if y.ndim == 2:      # mixed in the kernel: (t, N)
                     return y.reshape(*indices.shape[:-1], y.shape[-1])
-                h = kq.moe_glu_gather_kq(
-                    x.reshape(t, d_in),
-                    gate.weight, up.weight,
-                    gate.kquant_type, idx, **akw)
-                if (scores is not None and _has_mix_ns
-                        and "bias" not in down):
-                    y = kq.gather_qmv_mix_ns_kq(
-                        h, down.weight, down.kquant_type, idx,
-                        scores.reshape(t, k))
-                    return y.reshape(*indices.shape[:-1], y.shape[-1])
-                dkw = {"bias": self._kq_db32} if "bias" in down else {}
-                y = kq.gather_qmv_kq(
-                    h, down.weight, down.kquant_type, idx, **dkw)
                 y = y.reshape(*indices.shape, y.shape[-1])
             else:
-                y = super().__call__(x, indices)
+                y = self._kq_prefill_gate_up(x, indices)
+                if y is None:
+                    y = super().__call__(x, indices)
             if scores is not None and y.ndim == scores.ndim + 1:
                 if getattr(self, "_kq_shexp_mod", None) is not None:
                     return y  # unmixed: caller mixes + adds its shexp
                 y = (y * scores[..., None].astype(y.dtype)).sum(-2)
             return y
+
+        def _kq_prefill_gate_up(self, x, indices):
+            """Sorted-prefill widths: one gather over the concatenated
+            gate+up wire bytes (built here on the first eligible call,
+            from the pending stamp _install_gateup_concat left), then the
+            stock activation + down gather. Mirrors mlx-lm
+            SwitchGLU.__call__ exactly apart from the single fused
+            projection; returns None when ineligible so the caller falls
+            back to the stock two-gather path."""
+            if (not _GATEUP_CONCAT_ENABLED or indices.size < 64
+                    or self.training):
+                return None
+            gu = getattr(self, "_kq_gate_up", None)
+            if gu is None:
+                if not getattr(self, "_kq_gate_up_pending", False):
+                    return None
+                gu = _build_gateup_concat(self)
+                object.__setattr__(self, "_kq_gate_up", gu)
+                object.__setattr__(self, "_kq_gate_up_pending", False)
+            from mlx_lm.models.switch_layers import (
+                _gather_sort, _scatter_unsort)
+            x = mx.expand_dims(x, (-2, -3))
+            x, idx, inv_order = _gather_sort(x, indices)
+            h = gu(x, idx, sorted_indices=True)
+            half = h.shape[-1] // 2
+            x_gate, x_up = h[..., :half], h[..., half:]
+            y = self.down_proj(
+                self.activation(x_up, x_gate), idx, sorted_indices=True)
+            y = _scatter_unsort(y, inv_order, indices.shape)
+            return y.squeeze(-2)
 
     _FusedKQuantSwitchGLU.__name__ = "_FusedKQuantSwitchGLU"
     return _FusedKQuantSwitchGLU
@@ -611,6 +686,7 @@ def _make_fused_kquant(base_cls, caps):
 def _install_kquant_glu_fusion(model, caps) -> int:
     classes: dict = {}
     n = 0
+    budget = _GATEUP_CONCAT_MAX_MB * (1 << 20)
     for _, m in model.named_modules():
         if not _eligible_kquant_glu(m, caps):
             continue
@@ -633,8 +709,51 @@ def _install_kquant_glu_fusion(model, caps) -> int:
                     m, attr, proj.bias.astype(mx.float32))
             mx.eval(m._kq_gb32, m._kq_ub32, m._kq_db32)
         _swap_class(m, classes, _make_fused_kquant, caps)
+        if _GATEUP_CONCAT_ENABLED:
+            budget = _install_gateup_concat(m, budget)
         n += 1
     return n
+
+
+def _install_gateup_concat(m, budget_bytes) -> int:
+    """Stamp ``_kq_gate_up_pending``: the module builds its concatenated
+    gate+up KQuantSwitchLinear on the first sorted-prefill call
+    (_kq_prefill_gate_up). Install time only decides eligibility and the
+    model-wide byte budget -- the wire-byte SHAPES are final at install,
+    but the VALUES are not: module install runs before the load pipeline
+    writes the real weights, so an install-time concat freezes the ctor
+    placeholders (live bug: the fused path multiplied against zeros).
+    Eligibility beyond _eligible_kquant_glu: gate/up must be
+    shape-identical (same codec is already guaranteed) and the copy must
+    fit the remaining budget (returned decremented) -- expert-heavy
+    models would otherwise double most of their resident weight bytes."""
+    gate, up = m.gate_proj, m.up_proj
+    if gate.weight.shape != up.weight.shape:
+        return budget_bytes
+    cost = gate.weight.nbytes + up.weight.nbytes
+    if cost > budget_bytes:
+        return budget_bytes
+    object.__setattr__(m, "_kq_gate_up_pending", True)
+    return budget_bytes - cost
+
+
+def _build_gateup_concat(m):
+    """The concatenated [E, 2*inter] gate+up KQuantSwitchLinear ([gate; up]
+    row order, matching the ``h[..., :half]`` split in
+    _kq_prefill_gate_up), built from the live wire bytes. The originals
+    stay live for the fused decode kernels, so this holds a second
+    resident copy of those bytes."""
+    gate, up = m.gate_proj, m.up_proj
+    e, out, _ = gate.weight.shape
+    gu = KQuantSwitchLinear(
+        e, 2 * out, 256, bias="bias" in gate, codec=gate.kquant_type)
+    gu.weight = mx.concatenate([gate.weight, up.weight], axis=1)
+    if "bias" in gate:
+        gu.bias = mx.concatenate([gate.bias, up.bias], axis=1)
+        mx.eval(gu.weight, gu.bias)
+    else:
+        mx.eval(gu.weight)
+    return gu
 
 
 # Regime 3: qwen3-next-shaped MoE block (router + SwitchGLU + shared expert)
@@ -1346,31 +1465,458 @@ class LoRAKQuantLinear(nn.Module):
     weight is left untouched (no merge, no requantization): the served model is the
     base's existing K-quant error plus the adapter's *exact* full-precision delta.
 
-    The delta is computed in the adapter's (float) precision for accuracy, then
-    cast back to the base output dtype so the residual stream dtype is unchanged.
+    The delta is computed at the activation dtype: the factors are cast once
+    to ``x.dtype`` (cached per dtype, the PEFT scale folded into ``B``) so the
+    two matmuls and the residual add (``mx.addmm``) are three plain ops with
+    no casts and nothing promoted to f32. On a ds4-flash decode step the cost
+    is dispatch count, not bytes: every extra op per target is ~1% of the
+    step across 60 targets.
+
+    Under batching the delta is scaled per row by the vector ``lora_rows``
+    publishes for the forward in flight (``slot`` picks this adapter's column);
+    with nothing published the static ``scale`` applies to every row.
     """
 
-    def __init__(self, base: nn.Module, a: mx.array, b: mx.array, scale: float):
+    def __init__(self, base: nn.Module, a: mx.array, b: mx.array, scale: float,
+                 slot: int = 0):
         super().__init__()
         self.base = base
         self.lora_a = a            # (rank, in)
         self.lora_b = b            # (out, rank)
         self.scale = float(scale)
+        self.slot = int(slot)
+        # (in, r) / (r, out) tables per activation dtype, scale folded into
+        # B; outside the parameter tree (the wrapper never retrains them).
+        object.__setattr__(self, "_kq_tables", {})
+        # Further adapters on the same target (one resident base serving
+        # several adapted ids): (a, b, scale, slot) each, applied with plain
+        # ops after the first; each row's factor for the slot picks it.
+        object.__setattr__(self, "_kq_extra", [])
         self.freeze()
 
+    def add_slot(self, a: mx.array, b: mx.array, scale: float, slot: int) -> None:
+        """Install another adapter (``a (rank, in)``, ``b (out, rank)``) on
+        this target under row-channel ``slot``."""
+        if slot == self.slot or any(e[3] == slot for e in self._kq_extra):
+            raise ValueError(f"LoRA slot {slot} already installed on this target")
+        a_c, b_c = mx.contiguous(a), mx.contiguous(b)
+        mx.eval(a_c, b_c)
+        self._kq_extra.append((a_c, b_c, float(scale), int(slot)))
+
+    @property
+    def slots(self) -> tuple:
+        return (self.slot,) + tuple(e[3] for e in self._kq_extra)
+
+    def _tables(self, dtype):
+        t = self._kq_tables.get(dtype)
+        if t is None:
+            a_t = mx.contiguous(self["lora_a"].T).astype(dtype)
+            b_t = (mx.contiguous(self["lora_b"].T) * self.scale).astype(dtype)
+            mx.eval(a_t, b_t)
+            t = self._kq_tables[dtype] = (a_t, b_t)
+        return t
+
+    def _extra_tables(self, i, dtype):
+        key = (i, dtype)
+        t = self._kq_tables.get(key)
+        if t is None:
+            a, b, scale, _slot = self._kq_extra[i]
+            a_t = mx.contiguous(a.T).astype(dtype)
+            b_t = (mx.contiguous(b.T) * scale).astype(dtype)
+            mx.eval(a_t, b_t)
+            t = self._kq_tables[key] = (a_t, b_t)
+        return t
+
+    def _add_extra(self, x, y):
+        for i, (_a, _b, _scale, slot) in enumerate(self._kq_extra):
+            a_t, b_t = self._extra_tables(i, x.dtype)
+            z = x @ a_t
+            f = lora_rows.row_factor(slot, z.dtype,
+                                     (z.shape[0],) + (1,) * (z.ndim - 1))
+            if f is not None:
+                z = z * f
+            if y.dtype == b_t.dtype:
+                y = mx.addmm(y, z, b_t)
+            else:
+                y = y + (z @ b_t).astype(y.dtype)
+        return y
+
     def __call__(self, x, *args, **kwargs):
+        if (_KQ_LORA_EPILOGUE and not args and not kwargs
+                and x.dtype in (mx.float16, mx.bfloat16)
+                and isinstance(self.base, KQuantLinear)):
+            # In-op epilogue: the delta rides the base matmul's primitive
+            # (zero extra graph ops); the row factor goes in as f32 rows.
+            a_t, b_t = self._tables(x.dtype)
+            rows = lora_rows.dense_rows(self.slot, x.size // x.shape[-1])
+            y = self.base(x, lora=(a_t, b_t, rows))
+            return self._add_extra(x, y) if self._kq_extra else y
         y = self.base(x, *args, **kwargs)
-        z = (x @ self["lora_a"].T) @ self["lora_b"].T
-        return y + (self.scale * z).astype(y.dtype)
+        a_t, b_t = self._tables(x.dtype)
+        z = x @ a_t                                   # (..., r)
+        # The published row factor rides the rank-r intermediate, cast to
+        # its dtype (an f32 factor would promote the delta to f32); the
+        # cast/reshaped vector is cached per publish.
+        f = lora_rows.row_factor(self.slot, z.dtype,
+                                 (z.shape[0],) + (1,) * (z.ndim - 1))
+        if f is not None:
+            z = z * f
+        if y.dtype == b_t.dtype:
+            y = mx.addmm(y, z, b_t)
+        else:
+            y = y + (z @ b_t).astype(y.dtype)
+        return self._add_extra(x, y) if self._kq_extra else y
 
     def _extra_repr(self):
         rank = self.lora_b.shape[-1]
-        return f"rank={rank}, scale={self.scale:g}, base={type(self.base).__name__}"
+        r = f"rank={rank}, scale={self.scale:g}, base={type(self.base).__name__}"
+        if self._kq_extra:
+            r += f", slots={self.slots}"
+        return r
+
+
+class ExpertLoRA:
+    """Stamped on an expert-stack leaf (``object.__setattr__``, outside the
+    parameter tree): the per-expert factors in gather_mm orientation,
+    ``a_t (E, in, r)`` / ``b_t (E, r, out)`` at the adapter's wire dtype, the
+    PEFT scale and the adapter slot; :meth:`tables` hands out the per
+    activation-dtype copies the delta computes with (scale folded into
+    ``b``), cached. ``owner`` (set by the decode feeder
+    under ``swapped_weights``) is a callable returning the arena's slot ->
+    expert table for the call in flight: the container then receives slot
+    ids and :func:`lora_expert_ids` maps them back to expert ids (full
+    tables, identical precision to the in-RAM path) and masks the rows of
+    empty or zeroed slots."""
+
+    __slots__ = ("a_t", "b_t", "scale", "slot", "owner", "_tables")
+
+    def __init__(self, a_t, b_t, scale, slot=0):
+        self.a_t, self.b_t = a_t, b_t
+        self.scale, self.slot = float(scale), int(slot)
+        self.owner = None
+        self._tables = {}
+
+    def tables(self, dtype):
+        t = self._tables.get(dtype)
+        if t is None:
+            t = (self.a_t.astype(dtype), (self.b_t * self.scale).astype(dtype))
+            mx.eval(t)
+            self._tables[dtype] = t
+        return t
+
+    @property
+    def nbytes(self) -> int:
+        return self.a_t.nbytes + self.b_t.nbytes
+
+
+try:
+    import mlx_kquant as _kq_mod
+    _KQ_LORA_EPILOGUE = bool(getattr(_kq_mod, "HAS_LORA_EPILOGUE", False))
+except ImportError:                          # pragma: no cover
+    _KQ_LORA_EPILOGUE = False
+
+
+def _lora_epilogue_kwargs(lo, idx, dtype):
+    """The kq ``lora_*`` kwargs for an expert target's fused down exit, or
+    ``None`` when the in-op epilogue cannot take this call (older kq build,
+    CPU device, or a rank x k intermediate past the kernel's bound), in
+    which case the caller computes the delta with plain ops."""
+    if not _KQ_LORA_EPILOGUE or _lora_on_cpu():
+        return None
+    t, k = idx.shape
+    a_t, b_t = lo.tables(dtype)
+    if a_t.shape[-1] * k > 512:
+        return None
+    kw = {"lora_a": a_t, "lora_b": b_t}
+    if lo.owner is not None:
+        # Arena slot ids -> adapter expert ids inside the kernel; negative
+        # owners (dead slots) skip the row.
+        kw["lora_table"] = mx.array(np.asarray(lo.owner(), dtype=np.int32))
+    rows = lora_rows.flat_rows(lo.slot, t, k)
+    if rows is not None:
+        kw["lora_rows"] = rows
+    return kw
+
+
+def _lora_on_cpu() -> bool:
+    return "cpu" in str(mx.default_device()).lower()
+
+
+def lora_expert_ids(lo: ExpertLoRA, ids):
+    """The expert ids behind ``ids`` and a per-row float32 mask. In-RAM the
+    ids are expert ids already (mask ``None``). Under a streaming swap
+    (``lo.owner`` set) they are arena slot ids: map each through the owner
+    table, and mask the rows whose slot is empty or zeroed (negative owner:
+    the slot's weights are zeros, so its delta must be too)."""
+    if lo.owner is None:
+        return ids, None
+    own = np.asarray(lo.owner())
+    valid = own >= 0
+    table = mx.array(np.where(valid, own, 0).astype(np.uint32))
+    mask = mx.array(valid.astype(np.float32))
+    return table[ids], mask[ids]
+
+
+def _mask_rows(s_rows, mask):
+    if mask is None:
+        return s_rows
+    mask = mask.reshape(-1, 1, 1)
+    return mask if s_rows is None else s_rows * mask
+
+
+def expert_delta(lo: ExpertLoRA, h_rows, idx_flat, s_rows=None):
+    """The routed LoRA delta on flat rows: ``h_rows (R, 1, in)`` against the
+    expert each row routed to (``idx_flat (R,)``, expert ids), scaled per
+    row by ``lo.scale`` (folded into the tables) times ``s_rows`` (a ``(R,)``
+    float32 vector, or ``None`` for 1.0). Returns ``(R, 1, out)`` at the
+    activation dtype. ``gather_mm`` never materialises ``a_t[idx]``; the
+    factor rides the rank-r intermediate, cast to its dtype, so nothing
+    promotes to f32. The CPU GatherMM is float32-only (``--stream-cpu``
+    placement, CI): that device computes at f32."""
+    dt = mx.float32 if mx.default_device() == mx.cpu else h_rows.dtype
+    a_t, b_t = lo.tables(dt)
+    r = h_rows.shape[0]
+    lhs = _rows_arange(r)
+    idx = idx_flat if idx_flat.dtype == mx.uint32 else idx_flat.astype(mx.uint32)
+    if h_rows.dtype != dt:
+        h_rows = h_rows.astype(dt)
+    z = mx.gather_mm(h_rows, a_t, lhs, idx)                 # (R, 1, r)
+    if s_rows is not None:
+        if s_rows.dtype != dt:
+            s_rows = s_rows.astype(dt)
+        z = z * s_rows.reshape(r, 1, 1)
+    return mx.gather_mm(z, b_t, lhs, idx)                   # (R, 1, out)
+
+
+def _extra_expert_delta(extra, h_rows, idx, indices, dtype, order=None):
+    """The summed plain-op delta of the further adapters stamped on an
+    expert leaf (``_kq_lora_extra``), each under its own row-channel slot
+    and owner table; ``None`` when there are none."""
+    d = None
+    for lo2 in extra:
+        ef, mask = lora_expert_ids(lo2, idx.reshape(-1))
+        s_rows = _mask_rows(
+            _lora_flat_row_scales(lo2.slot, indices, dtype, order), mask)
+        d2 = expert_delta(lo2, h_rows, ef, s_rows)
+        d = d2 if d is None else d + d2
+    return d
+
+
+def _lora_flat_row_scales(slot: int, indices, dtype, order=None):
+    """Per-flat-row factor ``(R, 1, 1)`` for ``indices (B, ..., k)``: the
+    published (B,) row vector expanded over the token axis and ``k``
+    (``order`` from the sorted stock path permutes it the way
+    ``_gather_sort`` permuted the rows), cast to ``dtype``. ``None`` when
+    nothing is published (static mode: scale 1.0)."""
+    if lora_rows.row_scales(slot) is None:
+        return None
+    lora_rows.check_rows(indices.shape[0])
+    k = indices.shape[-1]
+    return lora_rows.flat_row_factor(slot, indices.size // k, k, dtype, order)
+
+
+_ARANGE_CACHE: dict = {}
+
+
+def _rows_arange(n: int) -> mx.array:
+    a = _ARANGE_CACHE.get(n)
+    if a is None:
+        a = _ARANGE_CACHE[n] = mx.arange(n, dtype=mx.uint32)
+        mx.eval(a)
+    return a
+
+
+def _lora_gather_sort(x, indices):
+    """Vendored mlx-lm ``_gather_sort``, returning ``order`` too so the row
+    scale can follow the permutation."""
+    *_, m = indices.shape
+    indices = indices.flatten()
+    order = mx.argsort(indices)
+    inv_order = mx.argsort(order)
+    return x.flatten(0, -3)[order // m], indices[order], inv_order, order
+
+
+def _lora_scatter_unsort(x, inv_order, shape=None):
+    x = x[inv_order]
+    if shape is not None:
+        x = mx.unflatten(x, 0, shape)
+    return x
+
+
+def _make_lora_switch_glu(base_cls, caps=None):
+    class _LoRASwitchGLU(base_cls):
+        """A SwitchGLU (stock, or the fused K-quant subclass) whose
+        ``down_proj`` carries an ``ExpertLoRA`` stamp. Owns the whole
+        forward: the fused branch adds the delta on the materialised ``h``;
+        the stock branch is inlined (with the sort) so the delta and the
+        per-row scale see the same rows the down gather saw. Never
+        delegates to the base ``__call__``."""
+
+        def __call__(self, x, indices, scores=None):
+            lo = getattr(self.down_proj, "_kq_lora", None)
+            if lo is None:      # stamp removed: plain base behaviour
+                return super().__call__(x, indices, scores) \
+                    if scores is not None and hasattr(self, "_fused_ok") \
+                    else super().__call__(x, indices)
+            k = indices.shape[-1]
+            extra = getattr(self.down_proj, "_kq_lora_extra", None) or ()
+            fused = hasattr(self, "_fused_ok") and self._fused_ok(x, indices)
+            if fused:
+                idx = indices.reshape(indices.size // k, k)
+                t = idx.shape[0]
+                h = self._fused_h(x, idx, scores)              # (t, k, I)
+                h_rows = h.reshape(t * k, 1, h.shape[-1])
+                lkw = _lora_epilogue_kwargs(lo, idx, h.dtype)
+                if lkw is not None:
+                    # In-op epilogue: the mix/plain down exits add the
+                    # delta inside the kq primitive (zero extra graph
+                    # ops); owner table and row factor ride as operands.
+                    y = self._fused_down(h, idx, scores, lora=lkw)
+                    d = _extra_expert_delta(extra, h_rows, idx, indices, h.dtype)
+                    if d is None:
+                        N = y.shape[-1]
+                        if y.ndim == 2:
+                            return y.reshape(*indices.shape[:-1], N)
+                        y = y.reshape(*indices.shape, N)
+                        if scores is not None and y.ndim == scores.ndim + 1:
+                            y = (y * scores[..., None].astype(y.dtype)).sum(-2)
+                        return y
+                else:
+                    y = self._fused_down(h, idx, scores)
+                    ef, mask = lora_expert_ids(lo, idx.reshape(-1))
+                    s_rows = _mask_rows(
+                        _lora_flat_row_scales(lo.slot, indices, h.dtype), mask)
+                    d = expert_delta(lo, h_rows, ef, s_rows)
+                    d2 = _extra_expert_delta(extra, h_rows, idx, indices, h.dtype)
+                    if d2 is not None:
+                        d = d + d2
+                N = d.shape[-1]
+                d = d.reshape(t, k, N)
+                if y.ndim == 2:      # mixed in the kernel: mix the delta too
+                    sc = scores.reshape(t, 1, k)
+                    if y.dtype == d.dtype and sc.dtype == d.dtype:
+                        # one op: y + scores @ d (mix, sum over k, add)
+                        y = mx.addmm(y.reshape(t, 1, N), sc, d).reshape(t, N)
+                    else:
+                        y = y + (sc.astype(d.dtype) @ d).reshape(t, N).astype(y.dtype)
+                    return y.reshape(*indices.shape[:-1], N)
+                y = (y + d.astype(y.dtype)).reshape(*indices.shape, N)
+            else:
+                xe = mx.expand_dims(x, (-2, -3))
+                do_sort = indices.size >= 64
+                idx, inv_order, order = indices, None, None
+                if do_sort:
+                    xe, idx, inv_order, order = _lora_gather_sort(xe, indices)
+                x_up = self.up_proj(xe, idx, sorted_indices=do_sort)
+                x_gate = self.gate_proj(xe, idx, sorted_indices=do_sort)
+                h = self.activation(x_up, x_gate)
+                y = self.down_proj(h, idx, sorted_indices=do_sort)
+                rr = idx.size
+                h_rows = h.reshape(rr, 1, h.shape[-1])
+                ef, mask = lora_expert_ids(lo, idx.reshape(-1))
+                s_rows = _mask_rows(
+                    _lora_flat_row_scales(lo.slot, indices, h.dtype, order), mask)
+                d = expert_delta(lo, h_rows, ef, s_rows)
+                d2 = _extra_expert_delta(extra, h_rows, idx, indices, h.dtype, order)
+                if d2 is not None:
+                    d = d + d2
+                y = y + d.reshape(y.shape).astype(y.dtype)
+                if do_sort:
+                    y = _lora_scatter_unsort(y, inv_order, indices.shape)
+                y = y.squeeze(-2)
+            if scores is not None and y.ndim == scores.ndim + 1:
+                y = (y * scores[..., None].astype(y.dtype)).sum(-2)
+            return y
+
+    _LoRASwitchGLU.__name__ = "_LoRASwitchGLU"
+    return _LoRASwitchGLU
+
+
+_LORA_BLOCKED_CONTAINER_NAMES = (
+    "_CPUOffload", "_FusedKQuantMoeBlock", "_FusedKQuantGemmaExperts",
+    "_FusedGptOss", "_FusedNativeFPSwitchGLU",
+)
+
+
+def _lora_container_blocked(*mods) -> str | None:
+    for m in mods:
+        for cls in type(m).__mro__:
+            for name in _LORA_BLOCKED_CONTAINER_NAMES:
+                if name in cls.__name__:
+                    return cls.__name__
+    return None
+
+
+def _install_expert_lora(model: nn.Module, targets: dict, *, slot: int) -> int:
+    """Stamp each expert-stack ``down_proj`` target with its ``ExpertLoRA``
+    and swap the owning SwitchGLU onto ``_LoRASwitchGLU``. The leaf keeps its
+    class, ``.weight`` and place in the tree (the feeders and fusion checks
+    key on those). Loud on every shape this program does not cover."""
+    lin_types, glu_types = switch_layer_types()
+    by_path = dict(model.named_modules())
+    classes: dict = {}
+    for path, lm in targets.items():
+        leaf = by_path.get(path)
+        if leaf is None:
+            raise ValueError(
+                f"LoRA adapter target {path!r} has no matching module in the "
+                f"loaded model - adapter/base mismatch (never silently skipped)")
+        if not isinstance(leaf, lin_types + (KQuantSwitchLinear, NativeFPSwitchLinear)):
+            raise NotImplementedError(
+                f"expert LoRA target {path!r} is a {type(leaf).__name__}, not "
+                f"an expert-stack SwitchLinear")
+        cpath, _, proj = path.rpartition(".")
+        if proj != "down_proj":
+            raise NotImplementedError(
+                f"expert LoRA target {path!r}: only down_proj expert targets "
+                f"are supported (the fused kernel consumes the gate/up input)")
+        container = by_path.get(cpath)
+        if container is None or not isinstance(container, glu_types):
+            raise NotImplementedError(
+                f"expert LoRA target {path!r}: owner {type(container).__name__} "
+                f"is not a SwitchGLU")
+        parent = by_path.get(cpath.rpartition(".")[0])
+        blocked = _lora_container_blocked(container, parent) if parent is not None \
+            else _lora_container_blocked(container)
+        if blocked:
+            raise NotImplementedError(
+                f"expert LoRA target {path!r}: owner path runs through "
+                f"{blocked}, which bypasses the SwitchGLU forward (apply the "
+                f"adapter before placement; block/gemma/gpt-oss fusions are "
+                f"not supported)")
+        if getattr(container, "_kq_shexp_mod", None) is not None:
+            raise NotImplementedError(
+                f"expert LoRA target {path!r}: shared-expert fold stamp on the "
+                f"owner is not supported")
+        if lm.transform != "passthrough":
+            raise NotImplementedError(
+                f"expert LoRA target {path!r} has unsupported transform "
+                f"{lm.transform!r}")
+        a_t = mx.contiguous(mx.swapaxes(lm.a, 1, 2))     # (E, in, r)
+        b_t = mx.contiguous(mx.swapaxes(lm.b, 1, 2))     # (E, r, out)
+        mx.eval(a_t, b_t)
+        lo = ExpertLoRA(a_t, b_t, lm.scale, slot)
+        first = getattr(leaf, "_kq_lora", None)
+        if first is None:
+            object.__setattr__(leaf, "_kq_lora", lo)
+            object.__setattr__(leaf, "_kq_lora_extra", [])
+        else:
+            # A further adapter on an adapted leaf: rides the plain-op
+            # delta after the first, under its own row-channel slot.
+            if slot in [first.slot] + [e.slot for e in leaf._kq_lora_extra]:
+                raise ValueError(
+                    f"expert LoRA target {path!r}: slot {slot} already installed")
+            leaf._kq_lora_extra.append(lo)
+        if not isinstance(container, tuple(classes.values())) \
+                and type(container).__name__ != "_LoRASwitchGLU":
+            _swap_class(container, classes, _make_lora_switch_glu, None)
+    return len(targets)
 
 
 def install_lora_adapter(model: nn.Module, plan,
                          *, n_head: int | None = None,
-                         n_head_kv: int | None = None) -> int:
+                         n_head_kv: int | None = None,
+                         slot: int = 0) -> int:
     """Wrap each Linear named by a LoRA ``plan`` with its live adapter delta.
 
     A second leaf-swap pass (mirrors :func:`install_kquant_modules`): walks
@@ -1389,15 +1935,44 @@ def install_lora_adapter(model: nn.Module, plan,
     """
     targets = dict(plan.modules)   # module_path -> LoraModule
     wrapped: set[str] = set()
+    expert_targets = {p: lm for p, lm in targets.items() if lm.experts}
+    if expert_targets:
+        _install_expert_lora(model, expert_targets, slot=slot)
+        wrapped.update(expert_targets)
+
+    # Targets already wrapped by an earlier adapter take this one as a
+    # further slot (they are no longer leaves: the wrapper owns the leaf).
+    by_path = dict(model.named_modules())
+    for path, lm in list(targets.items()):
+        if lm.experts:
+            continue
+        existing = by_path.get(path)
+        if isinstance(existing, LoRAKQuantLinear):
+            if lm.transform == "qk_permute":
+                nh = n_head_kv if path.endswith("k_proj") else n_head
+                if nh is None:
+                    raise ValueError(
+                        f"LoRA target {path!r} needs a qk_permute but the base "
+                        f"head counts (n_head / n_head_kv) were not provided")
+                b = qk_permute_wire(lm.b, nh)
+            elif lm.transform == "passthrough":
+                b = lm.b
+            else:
+                raise NotImplementedError(
+                    f"LoRA target {path!r} has unsupported transform "
+                    f"{lm.transform!r}")
+            existing.add_slot(lm.a, b, lm.scale, slot)
+            wrapped.add(path)
+            del targets[path]
 
     def _wrap(path: str, module):
         lm = targets.get(path)
-        if lm is None:
+        if lm is None or lm.experts:
             return module
         if not isinstance(module, (KQuantLinear, nn.Linear)):
             raise NotImplementedError(
                 f"LoRA target {path!r} is a {type(module).__name__}, not a "
-                f"wrappable Linear (MoE-expert / embedding LoRA is deferred)")
+                f"wrappable Linear (embedding LoRA is deferred)")
         b = lm.b
         if lm.transform == "qk_permute":
             nh = n_head_kv if path.endswith("k_proj") else n_head
@@ -1413,7 +1988,7 @@ def install_lora_adapter(model: nn.Module, plan,
                 f"LoRA target {path!r} has unsupported transform "
                 f"{lm.transform!r}")
         wrapped.add(path)
-        return LoRAKQuantLinear(module, lm.a, b, lm.scale)
+        return LoRAKQuantLinear(module, lm.a, b, lm.scale, slot=slot)
 
     leaves = model.leaf_modules()
     leaves = tree_map_with_path(_wrap, leaves, is_leaf=nn.Module.is_module)
@@ -1435,10 +2010,13 @@ def dequantize_unattachable_leaves(model: nn.Module,
 
     Some modules hold their weight as a raw array used inline in the
     forward (deepseek-family MoEGate routers), so there is no leaf to
-    swap a kquant module into. Dequantize those wire bytes to f32 at
-    load and drop the codec entry. Tensors over ``max_bytes`` (f32
-    size) are left alone so ``install_kquant_modules`` fails loud on
-    them instead of silently materializing gigabytes of float.
+    swap a kquant module into. Others hold raw arrays under names other
+    than ``weight`` (hyper-connection ``fn`` matrices, Q8_0 in some
+    GGUFs). Both dequantize to f32 at load and drop the codec entry.
+    The installer never visits raw leaves, so a packed array left in
+    place would load silently into the float slot and poison the
+    forward; a codec'd raw leaf over ``max_bytes`` (f32 size) raises
+    for the same reason - there is no loud downstream failure.
 
     llama.cpp's quantize never codecs router gates, so its GGUFs never
     hit this path; so far only an antirez DeepSeek-V4-Flash dspark
@@ -1460,26 +2038,35 @@ def dequantize_unattachable_leaves(model: nn.Module,
     handled: list[str] = []
 
     def _visit(path: str, module):
-        weight_key = f"{path}.weight"
-        codec = hf_kquant_meta.get(weight_key)
-        if codec is None or isinstance(module, attachable):
+        if isinstance(module, attachable):
             return module
-        target = getattr(module, "weight", None)
-        if not isinstance(target, mx.array) or codec not in known_codecs:
-            return module
-        if target.size * 4 > max_bytes:
-            return module
-        scales_key = f"{path}.scales"
-        scales = hf_weights.get(scales_key)
-        if scales is None:
-            scales = mx.zeros((1,), dtype=mx.uint8)
-        else:
-            del hf_weights[scales_key]
-        deq = kq.dequantize(hf_weights[weight_key], scales, codec, mx.float32)
-        del hf_weights[weight_key]
-        hf_weights[weight_key] = deq.reshape(target.shape)
-        del hf_kquant_meta[weight_key]
-        handled.append(f"{path} ({codec})")
+        for attr, target in list(module.items()):
+            if not isinstance(target, mx.array):
+                continue
+            weight_key = f"{path}.{attr}"
+            codec = hf_kquant_meta.get(weight_key)
+            if codec is None or codec not in known_codecs:
+                continue
+            if target.size * 4 > max_bytes:
+                raise ValueError(
+                    f"quantized wire tensor {weight_key} ({codec}) lands on a "
+                    f"raw array leaf too large to dequantize "
+                    f"({target.size * 4} bytes f32 > {max_bytes})")
+            # Wire scales for ``X.weight`` live at ``X.scales``; for any
+            # other leaf name at ``<key>.scales`` (loader _strip_weight).
+            scales_key = (f"{path}.scales" if attr == "weight"
+                          else f"{weight_key}.scales")
+            scales = hf_weights.get(scales_key)
+            if scales is None:
+                scales = mx.zeros((1,), dtype=mx.uint8)
+            else:
+                del hf_weights[scales_key]
+            deq = kq.dequantize(
+                hf_weights[weight_key], scales, codec, mx.float32)
+            del hf_weights[weight_key]
+            hf_weights[weight_key] = deq.reshape(target.shape)
+            del hf_kquant_meta[weight_key]
+            handled.append(f"{weight_key} ({codec})")
         return module
 
     leaves = model.leaf_modules()

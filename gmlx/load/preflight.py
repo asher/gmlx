@@ -19,13 +19,13 @@ from dataclasses import dataclass
 from .arch_table import ArchEntry
 from .arch_table import gate as _gate_arch
 
-# The 21 codecs the kq.* kernels implement (GGML type names).
+# The 22 codecs the kq.* kernels implement (GGML type names).
 SUPPORTED_QUANT_TYPES = frozenset({
     "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K",
     "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0",
     "IQ4_NL", "IQ4_XS", "IQ3_S", "IQ3_XXS",
     "IQ2_XXS", "IQ2_XS", "IQ2_S",
-    "IQ1_S", "IQ1_M",
+    "IQ1_S", "IQ1_M", "STQ1_0",
     "MXFP4", "NVFP4",
 })
 # Micro-scaling float codecs that additionally have MLX-native packed kernels.
@@ -113,9 +113,9 @@ class UnsupportedCodecError(Exception):
         super().__init__(
             f"GGUF (arch={arch!r}) uses codecs this build can't load - "
             f"unsupported tensor types: {listing} ({n} tensors). "
-            "Supported codecs: q2_k-q6_k, q4_0/q4_1/q5_0/q5_1/q8_0, and the "
-            "iq1/iq2/iq3/iq4 families. Re-quantize to a supported codec "
-            "(e.g. Q4_K_M / Q5_K_M / Q6_K).")
+            "Supported codecs: q2_k-q6_k, q4_0/q4_1/q5_0/q5_1/q8_0, the "
+            "iq1/iq2/iq3/iq4 families, stq1_0, and mxfp4/nvfp4. Re-quantize "
+            "to a supported codec (e.g. Q4_K_M / Q5_K_M / Q6_K).")
 
 
 @dataclass(frozen=True)

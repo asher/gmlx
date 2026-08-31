@@ -48,22 +48,27 @@ from gmlx.load.preflight import (
 # Classification (local) + verdict shared by both verbs
 def _classify_local(path: str, *, arch: str | None = None) -> remote.HeaderReport:
     """Build the same :class:`remote.HeaderReport` from a local GGUF (all shards),
-    reusing preflight's codec sets so a local verdict matches the remote one."""
-    from gguf import GGUFReader
-
-    from gmlx.load.gguf_meta import read_string
-    from gmlx.load.remap import detect_arch
+    reusing preflight's codec sets so a local verdict matches the remote one.
+    Scans via headerscan (not gguf-py's ``GGUFReader``) so type ids newer than
+    the installed gguf-py still classify (QUANT_TYPE_FALLBACK)."""
+    from gmlx.load.headerscan import scan_gguf
 
     shards = find_split_shards(path)
-    reader0 = GGUFReader(shards[0], "r")
-    detected = arch or detect_arch(reader0)
-    gguf_type = read_string(reader0, "general.type")
+    detected = arch
+    gguf_type = None
     hist: dict[str, int] = {}
     unsup: dict[str, int] = {}
     for i, shard in enumerate(shards):
-        reader = reader0 if i == 0 else GGUFReader(shard, "r")
-        for t in reader.tensors:
-            tn = t.tensor_type.name
+        hs = scan_gguf(shard, include_tensors=True)
+        if i == 0:
+            detected = arch or hs.kv.get("general.architecture")
+            if detected is None:
+                raise ValueError("GGUF missing 'general.architecture' KV field "
+                                 "- can't detect arch")
+            v = hs.kv.get("general.type")
+            gguf_type = v if v is None or isinstance(v, str) else str(v)
+        for t in hs.tensors:
+            tn = t.type_name
             hist[tn] = hist.get(tn, 0) + 1
             if (tn not in SUPPORTED_QUANT_TYPES and tn not in NATIVE_TYPES
                     and tn not in NATIVE_FP_TYPES):

@@ -20,7 +20,8 @@
     "gpt-oss-20b-mxfp4",
     "dolphin3-llama3.1-8b-q6k",
     "deepseek-v4-flash-unsloth-udiq3xxs",
-    "deepseek-v4-flash-antirez-iq2xxs"
+    "deepseek-v4-flash-antirez-iq2xxs",
+    "qwen38-flash-next-udq3kxl"
   ],
   "models": {
     "qwen3.5-122b-a10b-ud-q5km": {
@@ -2473,6 +2474,214 @@
               431.8
             ],
             "llama_prefill_base": null
+          }
+        }
+      ]
+    },
+    "qwen38-flash-next-udq3kxl": {
+      "label": "Qwen3.8-Flash-Next UD-Q3_K_XL",
+      "comparison": "llama.cpp",
+      "mtp": true,
+      "mtp_kind": "native",
+      "gguf": "Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf",
+      "source": "https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF",
+      "builds": {
+        "gmlx": "0.4.5+#98",
+        "mlx-kquant": "0.4.3",
+        "llama.cpp": "b10636+pr27742"
+      },
+      "measured": "2026-08-29",
+      "rows": [
+        {
+          "depth": 512,
+          "gmlx_decode_base": 50.4,
+          "gmlx_decode_mtp": 61.0,
+          "llama_decode_base": 35.4,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 743.0,
+          "llama_prefill_base": 536.1,
+          "range": {
+            "gmlx_decode_base": [
+              48.1,
+              50.8
+            ],
+            "gmlx_decode_mtp": [
+              51.7,
+              67.5
+            ],
+            "llama_decode_base": [
+              35.2,
+              35.5
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              637.0,
+              842.2
+            ],
+            "llama_prefill_base": [
+              402.5,
+              567.3
+            ]
+          }
+        },
+        {
+          "depth": 4300,
+          "gmlx_decode_base": 47.8,
+          "gmlx_decode_mtp": 54.3,
+          "llama_decode_base": 33.5,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 1338.6,
+          "llama_prefill_base": 688.6,
+          "range": {
+            "gmlx_decode_base": [
+              46.2,
+              48.4
+            ],
+            "gmlx_decode_mtp": [
+              47.5,
+              57.5
+            ],
+            "llama_decode_base": [
+              33.0,
+              33.9
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              1249.5,
+              1392.2
+            ],
+            "llama_prefill_base": [
+              666.5,
+              710.7
+            ]
+          }
+        },
+        {
+          "depth": 17000,
+          "gmlx_decode_base": 44.9,
+          "gmlx_decode_mtp": 54.1,
+          "llama_decode_base": 29.8,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 1516.1,
+          "llama_prefill_base": 600.3,
+          "range": {
+            "gmlx_decode_base": [
+              44.4,
+              45.9
+            ],
+            "gmlx_decode_mtp": [
+              49.6,
+              58.3
+            ],
+            "llama_decode_base": [
+              28.1,
+              30.4
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              1485.9,
+              1559.4
+            ],
+            "llama_prefill_base": [
+              573.5,
+              614.6
+            ]
+          }
+        },
+        {
+          "depth": 67000,
+          "gmlx_decode_base": 36.8,
+          "gmlx_decode_mtp": 51.4,
+          "llama_decode_base": 21.1,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 1447.8,
+          "llama_prefill_base": 394.7,
+          "range": {
+            "gmlx_decode_base": [
+              36.4,
+              37.6
+            ],
+            "gmlx_decode_mtp": [
+              47.7,
+              58.1
+            ],
+            "llama_decode_base": [
+              20.5,
+              21.2
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              1408.1,
+              1489.7
+            ],
+            "llama_prefill_base": [
+              386.0,
+              412.0
+            ]
+          }
+        },
+        {
+          "depth": 110000,
+          "gmlx_decode_base": 31.7,
+          "gmlx_decode_mtp": 49.8,
+          "llama_decode_base": 16.5,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 1379.9,
+          "llama_prefill_base": 288.7,
+          "range": {
+            "gmlx_decode_base": [
+              31.0,
+              32.4
+            ],
+            "gmlx_decode_mtp": [
+              46.0,
+              55.4
+            ],
+            "llama_decode_base": [
+              16.4,
+              16.7
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              1354.6,
+              1461.2
+            ],
+            "llama_prefill_base": [
+              282.4,
+              292.4
+            ]
+          }
+        },
+        {
+          "depth": 200000,
+          "gmlx_decode_base": 25.3,
+          "gmlx_decode_mtp": 46.8,
+          "llama_decode_base": 11.9,
+          "llama_decode_mtp": null,
+          "gmlx_prefill_base": 1250.0,
+          "llama_prefill_base": 210.8,
+          "range": {
+            "gmlx_decode_base": [
+              25.3,
+              25.6
+            ],
+            "gmlx_decode_mtp": [
+              44.9,
+              49.7
+            ],
+            "llama_decode_base": [
+              11.8,
+              12.0
+            ],
+            "llama_decode_mtp": null,
+            "gmlx_prefill_base": [
+              1234.9,
+              1275.6
+            ],
+            "llama_prefill_base": [
+              207.0,
+              217.1
+            ]
           }
         }
       ]

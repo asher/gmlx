@@ -3,7 +3,7 @@
 mlx-vlm's model-management surface assumes a single HF-resolved model. For a
 GGUF-only, multi-model, config-driven server that surface is wrong in five places;
 this module installs late-bound monkeypatches over each seam (the same no-fork
-pattern as :mod:`gmlx.serve.bridge_vlm` / :mod:`gmlx.serve.residency`):
+pattern as :mod:`server_bridge_vlm` / :mod:`residency`):
 
 * **Sampling-profile injection** - a request's unset sampling fields take their
   values from the resolved profile (``serving.get_active_spec()``), not mlx-vlm's
@@ -95,6 +95,7 @@ from .hardening import (
     install_json_content_type_tolerance,
     install_loopback_host_guard,
 )
+from .mtp_thinking import install_mtp_thinking_budget
 from .observability import install_request_timing_log, uvicorn_log_config
 from .render import install_faithful_history
 from .request_flow import (
@@ -155,6 +156,7 @@ __all__ = [
     "install_loopback_host_guard",
     "install_metrics_prometheus",
     "install_models_endpoint_override",
+    "install_mtp_thinking_budget",
     "install_openai_stop_sequences",
     "install_optional_request_model",
     "install_pool_aware_unload",
@@ -200,8 +202,18 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
         install_step_timing()
     if os.environ.get("GMLX_DISABLE_FAST_SAMPLER") != "1":
         install_fast_sampler()
+    # Before the seed install: this rebinds the criteria seam without
+    # delegating, so installed after it would clobber the seed wrapper.
+    install_thinking_budget_fix()
     from ..seed_rows import install_per_request_seed
     install_per_request_seed()
+    import gmlx.lora_rows as lora_rows
+    if os.environ.get("GMLX_LORA_ROWS"):
+        # Arm the strict per-forward publish invariant (a missed publish
+        # site raises instead of serving a stale or absent row vector).
+        lora_rows.configure("rows", 1)
+    lora_rows.install_lora_gen_args()
+    lora_rows.install_row_channel()
     import gmlx.spec.engine as spec_engine
     spec_engine.install_full_prompt_mtp_prefill()
     spec_engine.install_owned_spec_engine()
@@ -217,6 +229,10 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
         install_safe_kv_quantization,
     )
     install_pooling_apc_support()
+    # After the pooling installer: each disk-arm wrapper chains the method
+    # it found at install time.
+    from gmlx.cache.apc_qsa import install_qsa_apc_support
+    install_qsa_apc_support()
     install_safe_kv_quantization()
     install_pooled_prompt_kv_quant()
     install_pooled_prefill_batch_gate()
@@ -237,7 +253,6 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     from gmlx.cache.kvarn_apc import install_kvarn_apc
     install_kvarn_apc()
     install_chat_template_kwargs()
-    install_thinking_budget_fix()
     install_stream_timings()
     install_openai_stop_sequences()
     install_api_contract()
@@ -292,6 +307,13 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_queue_depth_cap()
     from ..mem_preflight import install_memory_preflight
     install_memory_preflight()
+    # After tbfix + seed (its criteria wrapper must be outermost), after the
+    # owned MTP prefill (its transport wrap must land outside _mtp_generate,
+    # so the hook stash happens after the APC L0 store), and after the
+    # memory preflight (its generate wrap does not carry flags forward, so
+    # the defer wrap must be the outer one for both installs to stay
+    # idempotent).
+    install_mtp_thinking_budget()
     # Late so the trace brackets the full tick including pacing and
     # admission work.
     from gmlx.serve.memtrace import install_serve_memtrace

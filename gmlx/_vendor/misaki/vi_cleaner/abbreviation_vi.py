@@ -7,7 +7,7 @@ _url_re = re.compile(r"([a-zA-Z])\.(com|gov|org|vn|com.vn|edu.vn)")
 
 
 _abbreviations_vi = {
-    "v\.v": " vân vân. ",
+    r"v\.v": " vân vân. ",
     "v/v": "về việc",
     "đ/c": "địa chỉ",
     "k/g": "kính gửi",
@@ -32,7 +32,7 @@ def _expand_urls_vi(m):
 
 def _expand_abbreviations_vi(m):
     key = m.group(0)
-    key = key.replace(".", "\.").lower()
+    key = key.replace(".", r"\.").lower()
     return _abbreviations_vi[key]
 
 
@@ -47,6 +47,6 @@ def normalize_speacial_symbol_vi(text):
     text = re.sub(_percent_re, _expand_percent_vi, text)
     text = re.sub("&", " và ", text)
     text = re.sub("@", " a còng ", text)
-    text = re.sub("\+", " cộng ", text)
+    text = re.sub(r"\+", " cộng ", text)
     text = re.sub("//", " xuyệt ", text)
     return text

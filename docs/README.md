@@ -20,6 +20,7 @@ right document for the task at hand.
 | Build a local RAG pipeline (embeddings + rerank) | [rag.md](rag.md) |
 | Run a vision or audio-input model | [vlm.md](vlm.md) |
 | Fine-tune with LoRA on a quantized base | [lora.md](lora.md) |
+| Serve one base with several LoRA adapters | [adapter-serving.md](adapter-serving.md) |
 | Make it faster | [performance.md](performance.md) |
 | See the numbers behind the performance claims | [benchmarks.md](benchmarks.md) |
 | Run a MoE model bigger than RAM | [streaming.md](streaming.md) |
@@ -69,7 +70,9 @@ what.
 
 [lora.md](lora.md) trains a LoRA adapter directly on a quantized GGUF base with
 `gmlx train`, saves it as a GGUF adapter, and applies it live at load; adapters
-interoperate with llama.cpp.
+interoperate with llama.cpp. [adapter-serving.md](adapter-serving.md) serves one
+base with several adapters as separate model ids on a single loaded model, with
+mid-conversation switching in the chat client.
 
 [performance.md](performance.md) explains what actually determines speed on Apple
 Silicon and what each lever buys: quant choice (uniform K-quant files decode

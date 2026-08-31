@@ -94,8 +94,8 @@ family sets no value.
 | `--repetition-context-size N` | `20` | How many recent tokens the repetition penalty considers. |
 | `--logit-bias JSON` | - | Token-id to bias map, e.g. `'{"128001": -100}'`. |
 | `--stop STR` | - | Stop sequence; generation ends (trimmed) when it appears. Repeatable. |
-| `--max-kv-size N` | - | Cap the KV cache (rotating cache above it). Composes with `--kv-quant-scheme kvarn` (the window quantizes; N must clear the kvarn floor of sink 128 + `--kv-tail-tokens` + 128); plain `--kv-bits` cannot quantize a rotating window and is dropped loudly. |
-| `--kv-bits N` / `--kv-group-size N` / `--quantized-kv-start N` | off / `64` / `0` | Quantize the KV cache (mlx-lm `QuantizedKVCache`): cuts cache memory 2-4x for long contexts. |
+| `--max-kv-size N` | - | Cap the KV cache (rotating cache above it). Composes with `--kv-quant-scheme kvarn` (the window quantizes; N must clear the kvarn floor of sink 128 + `--kv-tail-tokens` + 128), but not with plain `--kv-bits`. |
+| `--kv-bits N` / `--kv-group-size N` / `--quantized-kv-start N` | off / `64` / `0` | Quantize the KV cache. A per-stack policy decides layer by layer: growing attention KV quantizes (the last layer of a deep stack stays fp16), sliding windows and recurrent state stay fp16, pooled caches pack at rest. One `[kv]` line reports the verdict, e.g. `quantized 27/28 attn layers (1 held fp16)`, or `dropped:` with the reason when nothing can quantize. Cannot combine with `--max-kv-size` (refused at start). |
 | `--kv-quant-scheme STR` / `--kv-tail-tokens N` | `uniform` / `1024` | KV quantization scheme. `kvarn` is variance-normalized quantization (kv8-class quality at 6 bits; `--kv-bits` defaults to 6, accepts 2/3/4/5/6/8); the sink and the last `--kv-tail-tokens` tokens stay fp16. Covers head_dim-128, -256 and -512 attention layers: the qwen3.5/3.6 family (hybrid archs convert those, recurrent layers keep their own state) and gemma-4 global layers (SWA layers stay fp16); anything else declines with a printed reason. |
 | `--prefill-step-size N` | `2048` / `8192` streaming | Prefill chunk size; lower it to cap peak memory on long prompts. Over-RAM streaming `--stream-cpu` / `--stream-experts` models default to `8192`: each chunk re-streams the expert lane from disk, so fewer, bigger chunks prefill faster. Applies to `run`, `--bench`, and `--bench-depths`. |
 
@@ -335,7 +335,11 @@ every command. The terminal is upgraded on top:
   message re-prefills (or `/reset`).
 - `/model` and `/stats` print the loaded model's card (arch, params, codecs,
   size, context, drafter, adapter) and the running session totals (turns,
-  tokens, average tok/s, MTP acceptance).
+  tokens, average tok/s, MTP acceptance). In server mode `/model` lists the
+  served ids and `/model <id>` switches the id the next turn is sent to,
+  keeping the transcript: the server re-reads the conversation under the
+  new id, so a base and its adapters (which share one loaded model) can be
+  compared mid-conversation. Tab completes the served ids.
 - `/system [text|off]` shows or sets the system prompt at runtime (setting
   restarts the conversation).
 - `/thinking [on|off|adaptive|default]` flips the model's own reasoning
@@ -437,7 +441,7 @@ every command. The terminal is upgraded on top:
 | `--repetition-context-size N` | `20` | Penalty lookback window (adjustable in-chat). |
 | `--logit-bias JSON` | - | Token-id to bias map. |
 | `--stop STR` | - | Stop sequence (trimmed; repeatable). |
-| `--kv-bits` / `--kv-group-size` / `--quantized-kv-start` | off / `64` / `0` | KV-cache quantization: cuts cache memory 2-4x for long chats. |
+| `--kv-bits` / `--kv-group-size` / `--quantized-kv-start` | off / `64` / `0` | KV-cache quantization, same per-stack policy and `[kv]` verdict line as `run`; cannot combine with `--max-kv-size`. |
 | `--kv-quant-scheme` / `--kv-tail-tokens` | `uniform` / `1024` | KV quantization scheme (`kvarn` = variance-normalized, 6-bit default, fp16 sink + tail), same as [`run`](#generation--sampling). |
 | `--prefill-step-size N` | `2048` / `8192` streaming | Prefill chunk size (peak-memory cap for `/load`-ed long prompts). Streaming `--stream-cpu` / `--stream-experts` models default to `8192`, same as `run`. |
 | `--stream-cpu` / `--stream-experts` / `--moe-experts` / `--moe-expert-mass` / `--moe-expert-probe` / `--moe-miss-shed` / `--moe-layer-shed` / `--gpu-keepwarm` | - | Execution placement and lossy MoE fan-out, same as [`run`](#loading), including larger-than-RAM streaming `--stream-cpu` chat (text path only). |

@@ -231,6 +231,14 @@ def test_classify_header_unsupported(tmp_path):
     assert rep.loadable_codecs is False
 
 
+def test_type_name_fallback():
+    # gguf-py names what it knows; QUANT_TYPE_FALLBACK covers newer ids
+    # (STQ1_0=43); anything else keeps the labeled-unknown form.
+    assert remote._type_name(int(GT.Q4_0)) == "Q4_0"
+    assert remote._type_name(43) == "STQ1_0"
+    assert remote._type_name(9999) == "TYPE_9999"
+
+
 def test_bad_magic_raises():
     with pytest.raises(remote.RemoteError):
         remote.classify_header(b"NOTAGGUF" + b"\x00" * 64)

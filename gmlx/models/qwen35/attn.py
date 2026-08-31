@@ -300,6 +300,17 @@ def _qwen3_5_device_arch_suffix() -> str:
     return str(info.get("architecture", ""))[-1:]
 
 
+@lru_cache(maxsize=1)
+def _wide_threadgroups_ok() -> bool:
+    """Whether this GPU's compiled pipelines take the 1024-thread launches."""
+    if env_bool("GMLX_FORCE_RAGGED_SDPA", False):
+        return True
+    from gmlx.load.dtypes import gpu_arch_gen
+
+    gen = gpu_arch_gen()
+    return gen == 0 or gen >= 15
+
+
 def _qwen3_5_sdpa_vector_blocks(seq_len: int, gqa_factor: int) -> int:
     devc = _qwen3_5_device_arch_suffix()
     n_simds = gqa_factor
@@ -408,6 +419,15 @@ def ragged_decode_attention(queries, keys, values, pads, scale):
     the strict per-row-bucket bail.
     """
     if not mx.metal.is_available():
+        return None
+    # The one-pass and two-pass-reduce launches are 1024-thread groups,
+    # and the two-pass scan reaches (32, gqa_factor) - 512 at 16x GQA;
+    # metal_kernel emits no max_total_threads_per_threadgroup bound, so a
+    # pre-M3 pipeline can compile with a lower ceiling (measured 640 on an
+    # M1 Max) and the launch throws at eval. All three launches sit below
+    # this gate. None routes the caller to its per-pad-group mx.fast SDPA
+    # fallback. GMLX_FORCE_RAGGED_SDPA=1 overrides for A/B.
+    if not _wide_threadgroups_ok():
         return None
     if (
         queries.ndim != 4

@@ -106,9 +106,7 @@ def _build_parser(prog: str = "gmlx chat") -> argparse.ArgumentParser:
         "--resume", "--theme", "--verbose",
     ))
     ap.add_argument(
-        "gguf",
-        nargs="?",
-        default=None,
+        "gguf", nargs="?", default=None,
         help="Path to the GGUF file (sharded ok), or a config model id. "
         "Optional with --assistant/--server (server default model).",
     )
@@ -327,8 +325,7 @@ def _template_text(args) -> str:
         from gmlx.load.headerscan import scan_gguf
 
         t = scan_gguf(os.path.expanduser(str(path)), include_tensors=False).kv.get(
-            "tokenizer.chat_template"
-        )
+            "tokenizer.chat_template")
     except Exception:
         return ""
     if t is None:
@@ -349,12 +346,8 @@ def fold_thinking_flag(args, tkw: dict) -> dict:
     from .reasoning import map_thinking_controls
 
     return map_thinking_controls(
-        tkw,
-        t,
-        effort,
-        _template_text(args),
-        warn=lambda msg: print(f"[thinking] {msg}", file=sys.stderr),
-    )
+        tkw, t, effort, _template_text(args),
+        warn=lambda msg: print(f"[thinking] {msg}", file=sys.stderr))
 
 
 def parse_logit_bias(raw: str | None) -> dict | None:
@@ -402,17 +395,18 @@ class ChatState:
 
     # line editor wiring (_wire_input / _wire_history / _wire_ptk)
     readline: object = None
-    history_enabled: bool = False  # /history on|off (persistence at exit)
-    history_loaded: bool = False  # history file read once per session
+    history_enabled: bool = False   # /history on|off (persistence at exit)
+    history_loaded: bool = False    # history file read once per session
     ptk_session: object = None
-    input_fn: object = None  # scripted-input seam for the e2e loop tests
+    input_fn: object = None      # scripted-input seam for the e2e loop tests
+    adapter_scale: float | None = None   # /adapter: None = on (1.0)
 
     # staged input for the next turn
-    staged: list = dataclasses.field(default_factory=list)  # /! blocks
+    staged: list = dataclasses.field(default_factory=list)         # /! blocks
     staged_images: list = dataclasses.field(default_factory=list)
     staged_audio: list = dataclasses.field(default_factory=list)
-    pending_send: str | None = None  # /retry auto-resend
-    pending_insert: str | None = None  # /load prompt prefill
+    pending_send: str | None = None      # /retry auto-resend
+    pending_insert: str | None = None    # /load prompt prefill
 
     # presentation
     theme: object = None
@@ -453,6 +447,7 @@ class ChatState:
     # --assistant mode
     assistant_brain: object = None
     assistant_extra: dict | None = None
+    served_ids: list | None = None       # server mode: chat ids the server lists
     assistant_baseline: dict | None = None
     assistant_touched: set | None = None
 
@@ -726,10 +721,8 @@ def _print_shim_help(state: ChatState) -> None:
     status = "on" if state.history_enabled else "off"
     print("[chat] commands:")
     print(f"- '/history [on|off|clear]' control prompt-history saving ({status})")
-    print(
-        "- '/temp /top-p /top-k /min-p /max-tokens <value>' adjust sampling "
-        "(max-tokens 0 = no cap)"
-    )
+    print("- '/temp /top-p /top-k /min-p /max-tokens <value>' adjust sampling "
+          "(max-tokens 0 = no cap)")
     print("- '/xtc-probability /xtc-threshold <value>' adjust XTC sampling")
     print(
         "- '/repetition-penalty /presence-penalty /frequency-penalty "
@@ -742,6 +735,7 @@ def _print_shim_help(state: ChatState) -> None:
     )
     print("- '/thinking [on|off|default]' the model's reasoning switch")
     print("- '/thinking-budget [N|off]' cap thinking tokens per reply")
+    print("- '/adapter [on|off|SCALE]' toggle or scale the --adapter LoRA live")
     print(
         "- '/reasoning [show|hide|raw]' control how thinking is displayed "
         "(Ctrl-O collapses/expands it live during a reply)"
@@ -749,7 +743,7 @@ def _print_shim_help(state: ChatState) -> None:
     print("- Ctrl-T while the model is thinking: wrap up and answer now")
     print("- '/render [plain|lite|rich]' set reply markdown rendering")
     print("- '/theme [NAME] [cb]' set the color theme ('cb' = colorblind accents)")
-    print("- '/model' show the loaded model card - '/stats' session totals")
+    print("- '/model [id]' model card; server mode: switch served id, transcript kept - '/stats' session totals")
     print(
         "- '/retry' regenerate the last reply - '/undo' remove the last "
         "exchange entirely"
@@ -841,9 +835,7 @@ def _trim_to(cache, checkpoint: int, lm=None) -> bool:
     return True
 
 
-def _begin_turn(
-    state: ChatState, *, cache, first_turn: bool, vlm_lens=(0, 0, 0)
-) -> None:
+def _begin_turn(state: ChatState, *, cache, first_turn: bool, vlm_lens=(0, 0, 0)) -> None:
     """Checkpoint the pre-turn session shape (for the transcript, /retry, /undo).
     ``_compose_user_content`` fills in the composed user text; staged media are
     captured here, before the generation paths pop them."""
@@ -915,7 +907,7 @@ def _end_turn(state: ChatState, reply: str, canceled: bool, cache=None) -> None:
         "first_turn_before": cp.get("first_turn_before", True),
         "vlm_lens": cp.get("vlm_lens", (0, 0, 0)),
     }
-    if "brain_before" in cp:  # assistant turns rewind by brain checkpoint
+    if "brain_before" in cp:      # assistant turns rewind by brain checkpoint
         entry["brain_before"] = cp["brain_before"]
     state.transcript.append(entry)
     ss = state.session_stats
@@ -979,7 +971,9 @@ def _build_model_info(args, config, drafter, vlm_mtp: bool) -> dict:
             arch=pf.arch,
             n_tensors=pf.n_tensors,
             n_params=pf.n_params,
-            codecs=dict(sorted(pf.codec_histogram.items(), key=lambda kv: -kv[1])),
+            codecs=dict(
+                sorted(pf.codec_histogram.items(), key=lambda kv: -kv[1])
+            ),
             size_bytes=sum(os.stat(s).st_size for s in pf.shards),
             n_shards=len(pf.shards),
         )
@@ -989,9 +983,7 @@ def _build_model_info(args, config, drafter, vlm_mtp: bool) -> dict:
     if args.mmproj:
         info["mmproj"] = os.path.abspath(args.mmproj)
         try:
-            info["size_bytes"] = (
-                info.get("size_bytes", 0) + os.stat(args.mmproj).st_size
-            )
+            info["size_bytes"] = info.get("size_bytes", 0) + os.stat(args.mmproj).st_size
         except OSError:
             pass
     if getattr(args, "adapter", None):
@@ -1138,7 +1130,8 @@ def _slash_drop(cmd, arg, state):
 
 def _slash_media(cmd, arg, state):
     if state.assistant_brain is not None:
-        print(f"[chat] {cmd[1:]} attachments are not available with --assistant")
+        print(f"[chat] {cmd[1:]} attachments are not available with "
+              "--assistant")
         return None
     _handle_media_command(cmd, arg, state)
     return None
@@ -1161,12 +1154,14 @@ def _slash_sampling_knob(cmd, arg, state):
     except ValueError:
         print(f"[chat] {cmd} needs a {cast.__name__}, got {arg!r}")
         return None
-    if state.assistant_brain is not None and key in _ASSISTANT_SAMPLING:
+    if (state.assistant_brain is not None
+            and key in _ASSISTANT_SAMPLING):
         # An explicit /command rides along even when it lands back on
         # the session baseline; otherwise the knob silently drops out
         # of the forwarded payload and the server default applies.
         state.assistant_touched.add(key)
-    print(f"[chat] {cmd[1:]} = {_knob_display(key, state.sampling[key])} (next reply)")
+    print(f"[chat] {cmd[1:]} = {_knob_display(key, state.sampling[key])} "
+          f"(next reply)")
     return None
 
 
@@ -1203,12 +1198,39 @@ def _slash_reset(cmd, arg, state):
 def _slash_system(cmd, arg, state):
     if not arg:
         cur = state.system_prompt
-        print(f"[chat] system prompt: {cur}" if cur else "[chat] no system prompt set")
+        print(f"[chat] system prompt: {cur}" if cur
+              else "[chat] no system prompt set")
         return None
     state.system_prompt = None if arg == "off" else arg
     what = "cleared" if arg == "off" else "set"
     print(f"[chat] system prompt {what} (conversation reset)")
     return "reset"
+
+
+def _slash_adapter(cmd, arg, state):
+    """Scale the live --adapter LoRA for the next turns without a reload: the
+    single chat row's scale rides the lora_rows channel (static mode). No
+    effect when the model carries no adapter."""
+    import gmlx.lora_rows as lora_rows
+
+    cur = getattr(state, "adapter_scale", None)
+    if not arg:
+        print(f"[chat] adapter scale: {1.0 if cur is None else cur:g}")
+        return None
+    if arg == "on":
+        scale = None
+    elif arg == "off":
+        scale = 0.0
+    else:
+        try:
+            scale = float(arg)
+        except ValueError:
+            print("[chat] usage: /adapter [on|off|SCALE]")
+            return None
+    state.adapter_scale = scale
+    lora_rows.set_rows(None if scale is None else [scale])
+    print(f"[chat] adapter scale: {1.0 if scale is None else scale:g}")
+    return None
 
 
 def _slash_memory(cmd, arg, state):
@@ -1266,9 +1288,8 @@ def _slash_thinking(cmd, arg, state):
 
 def _slash_thinking_budget(cmd, arg, state):
     if state.assistant_brain is not None:
-        print(
-            "[chat] the server owns thinking budgets - not available with --assistant"
-        )
+        print("[chat] the server owns thinking budgets - not available "
+              "with --assistant")
         return None
     if arg and arg != "off":
         try:
@@ -1303,10 +1324,8 @@ def _slash_save(cmd, arg, state):
     if not state.transcript:
         print("[chat] nothing to save yet")
         return None
-    name = (
-        arg
-        or state.session_name
-        or sessions.default_session_name((state.session_meta or {}).get("path", "chat"))
+    name = arg or state.session_name or sessions.default_session_name(
+        (state.session_meta or {}).get("path", "chat")
     )
     try:
         path = sessions.save_session(_session_doc(state), name)
@@ -1373,8 +1392,55 @@ def _slash_load_session(cmd, arg, state):
 
 
 def _slash_model(cmd, arg, state):
-    _print_model_info(state)
+    brain = state.assistant_brain
+    if brain is None:
+        if arg:
+            print("[chat] /model <id> switches served models in server mode "
+                  "only (local chat loads one GGUF)")
+        else:
+            _print_model_info(state)
+        return None
+    if not arg:
+        cur = _served_head(brain.model)
+        ids = [f"*{i}" if i == cur else i for i in (state.served_ids or [cur])]
+        print(f"[chat] model: {brain.model} via {brain.base_url}")
+        print(f"  served   {'  '.join(ids)}  (/model <id> switches, transcript kept)")
+        return None
+    # Refresh the served list from the server: a config reload may have
+    # added ids since connect (and the list is the completion source).
+    try:
+        from gmlx.talk.client import probe_capabilities
+
+        state.served_ids = (probe_capabilities(brain.base_url, brain.api_key)
+                            .get("chat_ids") or state.served_ids)
+    except Exception as e:                 # noqa: BLE001 - keep the last list
+        print(f"[chat] could not refresh served ids ({e}); using the last list")
+    head, _, prof = arg.partition("@")
+    served = state.served_ids or []
+    if head not in served:
+        print(f"[chat] {head!r} is not served - served ids: "
+              f"{', '.join(served) or '(none)'}")
+        return None
+    if not prof:                            # keep the current profile spelling
+        _, _, prof = brain.model.partition("@")
+    new = f"{head}@{prof}" if prof else head
+    if new == brain.model:
+        print(f"[chat] model already {new}")
+        return None
+    old = brain.model
+    brain.model = new
+    state.model_name = new[:24]
+    if state.session_meta:
+        state.session_meta["path"] = new
+    kept = len(brain.messages) // 2
+    print(f"[chat] model {old} -> {new} ({kept} turn{'s' if kept != 1 else ''} "
+          "of transcript kept; the next reply re-reads it under the new id)")
     return None
+
+
+def _served_head(model_request: str) -> str:
+    """The served id of a ``id@profile`` request spelling."""
+    return model_request.partition("@")[0]
 
 
 def _slash_stats(cmd, arg, state):
@@ -1498,6 +1564,7 @@ _SLASH_HANDLERS = {
     "/quit": _slash_exit,
     "/reset": _slash_reset,
     "/system": _slash_system,
+    "/adapter": _slash_adapter,
     "/memory": _slash_memory,
     "/thinking": _slash_thinking,
     "/thinking-budget": _slash_thinking_budget,
@@ -1537,7 +1604,8 @@ def _handle_slash(line: str, state: ChatState) -> str | tuple | None:
 _ALL_COMMANDS = sorted([*_SLASH_HANDLERS, "/!", "/help"])
 
 
-def _completion_options(buf: str, text: str) -> list[str] | None:
+def _completion_options(buf: str, text: str,
+                        served: list | None = None) -> list[str] | None:
     """Completion candidates for ``text`` (the word being completed) given the
     full line ``buf`` - shared by the readline and prompt_toolkit backends.
 
@@ -1550,6 +1618,8 @@ def _completion_options(buf: str, text: str) -> list[str] | None:
 
     if buf.startswith("/history "):
         return [o for o in ("on", "off", "clear") if o.startswith(text)]
+    if buf.startswith("/model "):
+        return [o for o in (served or ()) if o.startswith(text)]
     if buf.startswith("/reasoning "):
         return [o for o in ("show", "hide", "raw") if o.startswith(text)]
     if buf.startswith("/render "):
@@ -1584,7 +1654,8 @@ def _make_completer(readline, state: ChatState):
     """A readline completer over :func:`_completion_options`."""
 
     def complete(text: str, index: int):
-        options = _completion_options(readline.get_line_buffer(), text)
+        options = _completion_options(readline.get_line_buffer(), text,
+                                      state.served_ids)
         if options is None:
             return None
         return options[index] if index < len(options) else None
@@ -1675,7 +1746,8 @@ def _wire_ptk(state: ChatState) -> bool:
     class _SlashCompleter(Completer):
         def get_completions(self, document, complete_event):
             text = document.get_word_before_cursor(WORD=True)
-            options = _completion_options(document.text_before_cursor, text)
+            options = _completion_options(document.text_before_cursor, text,
+                                          state.served_ids)
             for o in options or ():
                 yield Completion(o, start_position=-len(text))
 
@@ -1976,11 +2048,28 @@ def _stream_reply(
         _show(text)
         return text
 
+    def _spin_until_first(it):
+        # Nothing streams until prefill (and any one-time decode staging)
+        # finishes; animate the wait so it does not look like a hang.
+        it = iter(it)
+        try:
+            if sys.stderr.isatty():
+                from gmlx.spinner import Spinner
+
+                with Spinner("prefill"):
+                    first = next(it)
+            else:
+                first = next(it)
+        except StopIteration:
+            return
+        yield first
+        yield from it
+
     last, canceled, stopped = None, False, False
     pre_canceled = _handoff_esc(state)
     try:
         with _EscCancel(on_toggle=_toggle) as esc:
-            for r in chunks:
+            for r in _spin_until_first(chunks):
                 if pre_canceled:
                     canceled = True
                     break
@@ -2042,18 +2131,12 @@ def _stream_reply(
         # hit); the token-count heuristic only backstops chunk shapes without
         # it, so an EOS landing exactly on the cap-th token stays silent.
         finish = getattr(last, "finish_reason", None)
-        cap_hit = (
-            finish == "length"
-            if finish is not None
-            else stats.get("gen_tokens", 0) >= cap
-        )
+        cap_hit = (finish == "length" if finish is not None
+                   else stats.get("gen_tokens", 0) >= cap)
         if cap and not stopped and cap_hit:
-            print(
-                f"[chat] note: reply stopped at the max-tokens cap ({cap}) - "
-                "raise it, or `/max-tokens 0` to generate until the model "
-                "stops",
-                file=sys.stderr,
-            )
+            print(f"[chat] note: reply stopped at the max-tokens cap ({cap}) - "
+                  "raise it, or `/max-tokens 0` to generate until the model "
+                  "stops", file=sys.stderr)
     return "".join(reply), canceled
 
 
@@ -2064,6 +2147,15 @@ def _opens_thinking(prompt) -> bool:
     from gmlx.gen.thinking_budget import prompt_opens_thinking
 
     return prompt_opens_thinking(prompt)
+
+
+def _prompt_opens_thinking_cfg(state, prompt_text) -> bool:
+    """:func:`_opens_thinking` with the session's configured markers applied
+    (the seed for the MTP path's ^T finish-thinking hook)."""
+    from gmlx.gen.thinking_budget import prompt_opens_thinking
+
+    return prompt_opens_thinking(
+        prompt_text, state.thinking_start_token, state.thinking_end_token)
 
 
 def _vlm_thinking_tokens(state) -> dict:
@@ -2162,7 +2254,7 @@ _ASSISTANT_NOOP = (
     ("moe_layer_shed", "--moe-layer-shed"),
     ("moe_prestage", "--moe-prestage"),
     ("thinking_budget", "--thinking-budget"),
-    ("resize_shape", "--resize-shape"),  # only meaningful with --mmproj (rejected)
+    ("resize_shape", "--resize-shape"),   # only meaningful with --mmproj (rejected)
 )
 
 
@@ -2176,17 +2268,12 @@ def _assistant_flag_gate(args, parser) -> int | None:
                   "(the server owns the model and its template)",
                   file=sys.stderr)
             return 2
-    noop = [
-        flag
-        for attr, flag in _ASSISTANT_NOOP
-        if getattr(args, attr, None) not in (None, False)
-    ]
-    for attr, flag in (
-        ("kv_group_size", "--kv-group-size"),
-        ("quantized_kv_start", "--quantized-kv-start"),
-        ("prefill_feeder", "--prefill-feeder"),
-        ("decode_feeder", "--decode-feeder"),
-    ):
+    noop = [flag for attr, flag in _ASSISTANT_NOOP
+            if getattr(args, attr, None) not in (None, False)]
+    for attr, flag in (("kv_group_size", "--kv-group-size"),
+                       ("quantized_kv_start", "--quantized-kv-start"),
+                       ("prefill_feeder", "--prefill-feeder"),
+                       ("decode_feeder", "--decode-feeder")):
         if getattr(args, attr, None) != parser.get_default(attr):
             noop.append(flag)
     if noop:
@@ -2241,7 +2328,8 @@ def _auto_server(args, parser) -> bool:
         try:
             from gmlx.commands.launch import _discover_config
             cfg, _path = _discover_config()
-            models = list(getattr(cfg, "models", None) or [])
+            # models is {id: ModelCfg}; the values carry id + path.
+            models = list((getattr(cfg, "models", None) or {}).values())
         except Exception:         # noqa: BLE001
             return False
         for m in models:
@@ -2265,16 +2353,10 @@ def _setup_assistant(args):
     import gmlx.commands.launch as launch_mod
 
     ns = argparse.Namespace(
-        harness=None,
-        rerun_label="chat",
-        base_url=args.base_url,
-        host=args.host,
-        port=args.port,
-        api_key=args.api_key,
-        no_start=args.no_start,
-        start_timeout=args.start_timeout,
-        config_only=False,
-    )
+        harness=None, rerun_label="chat", base_url=args.base_url,
+        host=args.host, port=args.port, api_key=args.api_key,
+        no_start=args.no_start, start_timeout=args.start_timeout,
+        config_only=False)
     rc = launch_mod._ensure_server(ns)
     if rc is not None:
         return rc
@@ -2292,17 +2374,11 @@ def _setup_assistant(args):
     # (config validation rejects it), so split the head off for the
     # served-membership check and route the tail through --profile (mirrors
     # launch._pick_default; profile validity is the server's call -> 400).
-    if (
-        requested
-        and "@" in requested
-        and not (
-            requested.endswith(".gguf") or os.path.exists(os.path.expanduser(requested))
-        )
-    ):
-        head, _, tail = requested.rpartition("@")  # last '@', per config.split_address
-        if (
-            head
-        ):  # an empty head ("@coding") is malformed - leave it to fail the served check
+    if requested and "@" in requested and not (
+            requested.endswith(".gguf")
+            or os.path.exists(os.path.expanduser(requested))):
+        head, _, tail = requested.rpartition("@")   # last '@', per config.split_address
+        if head:   # an empty head ("@coding") is malformed - leave it to fail the served check
             requested = head
             args.profile = args.profile or tail
     if requested and (requested.endswith(".gguf")
@@ -2313,24 +2389,17 @@ def _setup_assistant(args):
               file=sys.stderr)
         return 2
     served = caps.get("chat_ids") or []
-    model = (
-        requested or caps.get("default") or (served[0] if len(served) == 1 else None)
-    )
+    model = requested or caps.get("default") or (
+        served[0] if len(served) == 1 else None)
     if not model:
         ids = ", ".join(served) or "(none)"
-        print(
-            f"error: no model selected and the server has no default - "
-            f"pass one of: {ids}",
-            file=sys.stderr,
-        )
+        print(f"error: no model selected and the server has no default - "
+              f"pass one of: {ids}", file=sys.stderr)
         return 2
     if requested and requested not in served:
         ids = ", ".join(served) or "(none)"
-        print(
-            f"error: {requested!r} is not served - served ids: {ids} "
-            "(add it to your config)",
-            file=sys.stderr,
-        )
+        print(f"error: {requested!r} is not served - served ids: {ids} "
+              "(add it to your config)", file=sys.stderr)
         return 2
     model_request = f"{model}@{args.profile}" if args.profile else model
 
@@ -2381,35 +2450,21 @@ def _setup_assistant(args):
     if caps.get("gmlx"):
         extra["timings_per_token"] = True
 
-    def seam(
-        burl, *, model, messages, max_tokens, api_key=None, tools=None, timeout=600.0
-    ):
-        return _stream_chat(
-            burl,
-            model=model,
-            messages=messages,
-            max_tokens=max_tokens,
-            api_key=api_key,
-            tools=tools,
-            timeout=timeout,
-            extra=dict(extra),
-        )
+    def seam(burl, *, model, messages, max_tokens, api_key=None, tools=None,
+             timeout=600.0):
+        return _stream_chat(burl, model=model, messages=messages,
+                            max_tokens=max_tokens, api_key=api_key,
+                            tools=tools, timeout=timeout, extra=dict(extra))
 
     brain = AssistantBrain(
-        base_url=base_url,
-        model=model_request,
-        api_key=api_key,
-        system=None,
-        max_tokens=1024,
-        tools=registry,
-        max_tool_rounds=a.max_tool_rounds,
-        tool_timeout_s=a.tool_timeout_s,
-        memory=memory,
-        stream=seam,
-    )
+        base_url=base_url, model=model_request, api_key=api_key,
+        system=None, max_tokens=1024, tools=registry,
+        max_tool_rounds=a.max_tool_rounds, tool_timeout_s=a.tool_timeout_s,
+        memory=memory, stream=seam)
+    brain.served_ids = list(served)       # /model <id> switch + completion
 
     def cleanup():
-        brain.close()  # closes the memory store
+        brain.close()                         # closes the memory store
         if mcp_host is not None:
             mcp_host.close()
 
@@ -2547,7 +2602,8 @@ def _chat_memory_cmd(arg: str, state: ChatState) -> None:
     brain = state.assistant_brain
     mem = getattr(brain, "memory", None) if brain is not None else None
     if mem is None:
-        print("[chat] no memory store (--assistant with assistant.memory enabled only)")
+        print("[chat] no memory store (--assistant with assistant.memory "
+              "enabled only)")
         return
     words = arg.split()
     if not words:
@@ -2566,14 +2622,11 @@ def _chat_memory_cmd(arg: str, state: ChatState) -> None:
             if len(text) > 60:
                 text = text[:57] + "..."
             age_s = now - r["created"]
-            age = (
-                f"{age_s / 86400:.0f}d"
-                if age_s >= 86400
-                else f"{age_s / 3600:.0f}h"
-                if age_s >= 3600
-                else f"{age_s / 60:.0f}m"
-            )
-            lines.append(f"  #{r['id']:<5} {age:>4}  x{r['recalled']:<3} {text}")
+            age = (f"{age_s / 86400:.0f}d" if age_s >= 86400
+                   else f"{age_s / 3600:.0f}h" if age_s >= 3600
+                   else f"{age_s / 60:.0f}m")
+            lines.append(f"  #{r['id']:<5} {age:>4}  x{r['recalled']:<3} "
+                         f"{text}")
         print("\n".join(lines))
     elif words[0] == "forget" and len(words) == 2:
         try:
@@ -2581,19 +2634,14 @@ def _chat_memory_cmd(arg: str, state: ChatState) -> None:
         except ValueError:
             print("[chat] usage: /memory forget ID")
             return
-        print(
-            f"[chat] forgot #{mem_id}"
-            if mem.delete(mem_id)
-            else f"[chat] no memory #{mem_id}"
-        )
+        print(f"[chat] forgot #{mem_id}" if mem.delete(mem_id)
+              else f"[chat] no memory #{mem_id}")
     elif words[0] == "clear":
         if words[1:] == ["yes"]:
             print(f"[chat] cleared {mem.clear()} memories")
         else:
-            print(
-                f"[chat] this deletes {mem.count()} memories - confirm "
-                "with: /memory clear yes"
-            )
+            print(f"[chat] this deletes {mem.count()} memories - confirm "
+                  "with: /memory clear yes")
     else:
         print("[chat] usage: /memory | /memory forget ID | /memory clear")
 
@@ -2648,18 +2696,16 @@ def _session_parse_messages(doc: dict, system_prompt) -> tuple[list, list, int]:
             entry["assistant"] = dict(m)
             n_tok += int((m.get("stats") or {}).get("gen_tokens", 0) or 0)
             transcript.append(entry)
-            replay.append({"role": "assistant", "content": m.get("content", "")})
+            replay.append(
+                {"role": "assistant", "content": m.get("content", "")}
+            )
             entry = None
     return replay, transcript, n_tok
 
 
 def _session_rebuild_vlm_history(
-    transcript,
-    state: ChatState,
-    model_type: str,
-    vlm_msgs: list,
-    vlm_images: list,
-    vlm_audios: list,
+    transcript, state: ChatState, model_type: str,
+    vlm_msgs: list, vlm_images: list, vlm_audios: list,
 ) -> None:
     """Rebuild the VLM conversation lists from a restored transcript, mutating
     ``vlm_msgs``/``vlm_images``/``vlm_audios`` in place. VLM turns re-prefill
@@ -2668,7 +2714,9 @@ def _session_rebuild_vlm_history(
     about and skipped."""
     missing = []
     if state.system_prompt:
-        vlm_msgs.append({"role": "system", "content": state.system_prompt})
+        vlm_msgs.append(
+            {"role": "system", "content": state.system_prompt}
+        )
     for e in transcript:
         u = e["user"]
         imgs = list(u.get("images") or [])
@@ -2676,11 +2724,8 @@ def _session_rebuild_vlm_history(
         missing += [f for f in imgs + auds if not os.path.isfile(f)]
         vlm_msgs.append(
             _vlm_message(
-                model_type,
-                u.get("content", ""),
-                "user",
-                len(imgs),
-                len(auds),
+                model_type, u.get("content", ""), "user",
+                len(imgs), len(auds),
             )
         )
         vlm_images.extend(imgs)
@@ -2688,8 +2733,7 @@ def _session_rebuild_vlm_history(
         if e["assistant"]:
             vlm_msgs.append(
                 _vlm_message(
-                    model_type,
-                    e["assistant"].get("content", ""),
+                    model_type, e["assistant"].get("content", ""),
                     "assistant",
                 )
             )
@@ -2716,7 +2760,7 @@ class _ChatBackend:
         self.model_type = ""
         self.load_pending = False
         self.new_text_cache = lambda: None
-        self._join = None  # set on the background text path
+        self._join = None            # set on the background text path
 
     def join(self) -> bool:
         """Join the background text load; returns True when it ran (the
@@ -2732,7 +2776,8 @@ class _ChatBackend:
 def _require_chat_template(tok, *, verbatim_hint: bool = False) -> None:
     if tok.chat_template is not None:
         return
-    extra = ", or --no-chat-template to send turns verbatim" if verbatim_hint else ""
+    extra = (", or --no-chat-template to send turns verbatim"
+             if verbatim_hint else "")
     print(
         "error: this GGUF carries no chat template (base model?) - "
         f"pass one with --chat-template{extra}",
@@ -2810,6 +2855,9 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
             verbose=args.verbose,
             wire=not getattr(args, "stream_experts", False),
         )
+    from gmlx.commands.cli import _apply_cli_adapter
+
+    _apply_cli_adapter(args, b.model, b.config)
     # Streaming placement applies to the target trunk only (the drafter
     # stays resident); same composition as the run/bench entry points.
     _apply_placement(args, getattr(b.model, "language_model", b.model))
@@ -2836,36 +2884,33 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
         # a silent fall-through to the pooled packing.
         kv_kwargs["kv_bits"] = None
 
-    # --kv-bits on the MTP path: same pooled-cache packing as the plain
-    # path (rollback/replay are watermark moves, storage-agnostic). For
-    # drafter models with no pooled caches the flag stays dropped, with
-    # an accurate note instead of the generic dropped-flags warning.
-    mtp_quantize_pools = None
+    # The MTP rounds have no KV converter, so only pooled layers
+    # engage.
+    mtp_kv_policy = None
     if kv_kwargs.get("kv_bits") is not None:
-        from gmlx.gen.generation import quantize_pooled_caches
+        from gmlx.cache.kv_policy import kv_line, resolve_kv_quant_policy
 
-        bits = kv_kwargs["kv_bits"]
-        group = kv_kwargs.get("kv_group_size", 64)
         probe = _mtp_make_cache(b.model.language_model)
-        if quantize_pooled_caches(probe, bits, group):
-            mtp_quantize_pools = (bits, group)
-            print(f"[kv] {bits}-bit pooled KV cache (sliding windows stay fp16)")
-        else:
-            print(
-                "warning: --kv-bits not applied on the MTP path "
-                "(no quantizable caches)",
-                file=sys.stderr,
-            )
+        policy = resolve_kv_quant_policy(
+            probe, kv_bits=kv_kwargs["kv_bits"],
+            kv_group_size=kv_kwargs.get("kv_group_size", 64),
+            mtp=True, can_quantize_kv=False,
+            no_kv_reason="MTP rounds have no KV quantization hook")
+        print(kv_line(None, policy), file=sys.stderr)
+        if policy.verdict == "error":
+            raise SystemExit(2)
+        if policy.verdict != "dropped":
+            mtp_kv_policy = policy
         kv_kwargs["kv_bits"] = None
 
     def _new_text_cache():
         # Single-stream MTP uses a plain target KV cache the native drafter
         # reads back - one cache, reused across turns (like the text path).
         c = _mtp_make_cache(b.model.language_model)
-        if mtp_quantize_pools is not None:
-            from gmlx.gen.generation import quantize_pooled_caches
+        if mtp_kv_policy is not None:
+            from gmlx.cache.kv_policy import arm_stack
 
-            quantize_pooled_caches(c, *mtp_quantize_pools)
+            arm_stack(c, mtp_kv_policy, hold=False)
         if mtp_kvarn_cfg is not None:
             from gmlx.cache.kvarn_cache import convert_prompt_cache
 
@@ -2900,15 +2945,15 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
             verbose=args.verbose,
         )
 
-    quantize_pools = None  # set at the load join (kv-bits pooled packing)
-    kvarn_cfg = None  # set at the load join (kvarn scheme accepted)
+    kv_policy = None        # set at the load join (kv-bits policy arm)
+    kvarn_cfg = None        # set at the load join (kvarn scheme accepted)
 
     def _new_text_cache():
         c = make_prompt_cache(b.model, args.max_kv_size)
-        if quantize_pools is not None:
-            from gmlx.gen.generation import quantize_pooled_caches
+        if kv_policy is not None:
+            from gmlx.cache.kv_policy import arm_stack
 
-            quantize_pooled_caches(c, *quantize_pools)
+            arm_stack(c, kv_policy)
         if kvarn_cfg is not None:
             from gmlx.cache.kvarn_cache import convert_prompt_cache
 
@@ -2921,12 +2966,13 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
         # Model-dependent setup, deferred to the load join on the
         # background path. Prints bare, so it must run on the main
         # thread with the tty free.
-        nonlocal quantize_pools, kvarn_cfg
+        nonlocal kv_policy, kvarn_cfg
         if not args.no_chat_template:
             _require_chat_template(b.tok, verbatim_hint=True)
 
-        from gmlx.commands.cli import _apply_placement
+        from gmlx.commands.cli import _apply_cli_adapter, _apply_placement
 
+        _apply_cli_adapter(args, b.model, b.config)
         _apply_placement(args, b.model)
         from gmlx.load.loader import _resolve_prefill_step
 
@@ -2944,11 +2990,8 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
             kv_kwargs["prefill_step_size"] = step
 
         if (getattr(args, "kv_quant_scheme", None) or "uniform") == "kvarn":
-            from gmlx.gen.generation import (
-                _kvarn_rotating_window,
-                _kvarn_widths,
-                setup_kvarn_cache,
-            )
+            from gmlx.gen.generation import (_kvarn_rotating_window,
+                                             _kvarn_widths, setup_kvarn_cache)
 
             tail = int(getattr(args, "kv_tail_tokens", 1024) or 0)
             probe = setup_kvarn_cache(
@@ -2970,43 +3013,27 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
                 }
             kv_kwargs["kv_bits"] = None
 
-        # The MTP path already warns that --kv-bits is dropped. On plain
-        # decoding, mlx-lm's per-step converter would crash on rotating
-        # caches -- for arches with growing pooled caches (deepseek4) the
-        # flag is honored by packing those at rest instead; the fp16
-        # sliding windows are size-capped either way.
+        # Per-stack policy on the constructed cache: held layers lose
+        # to_quantized so the stock converter skips them (rotating
+        # windows would crash it), pools pack at rest, the rest quantize
+        # per the serve carve-out.
         if kv_kwargs.get("kv_bits") is not None:
-            from gmlx.gen.generation import kv_quantization_unsupported
+            from gmlx.cache.kv_policy import (kv_line,
+                                              resolve_kv_quant_policy)
 
-            reason = kv_quantization_unsupported(b.model, max_kv_size=args.max_kv_size)
-            if reason:
-                from gmlx.gen.generation import quantize_pooled_caches
-
-                bits = kv_kwargs["kv_bits"]
-                group = kv_kwargs.get("kv_group_size", 64)
-                probe = make_prompt_cache(b.model, args.max_kv_size)
-                if quantize_pooled_caches(probe, bits, group):
-                    quantize_pools = (bits, group)
-                    print(
-                        f"[kv] {bits}-bit pooled KV cache (sliding windows stay fp16)"
-                    )
-                else:
-                    print(
-                        f"warning: --kv-bits dropped: {reason}",
-                        file=sys.stderr,
-                    )
+            probe = make_prompt_cache(b.model, args.max_kv_size)
+            policy = resolve_kv_quant_policy(
+                probe, kv_bits=kv_kwargs["kv_bits"],
+                kv_group_size=kv_kwargs.get("kv_group_size", 64),
+                quantized_kv_start=kv_kwargs.get("quantized_kv_start", 0),
+                max_kv_size=args.max_kv_size)
+            print(kv_line(None, policy), file=sys.stderr)
+            if policy.verdict == "error":
+                raise SystemExit(2)
+            if policy.verdict == "dropped":
                 kv_kwargs["kv_bits"] = None
-
-        if args.adapter:
-            from gmlx.load.adapter import apply_gguf_adapter
-            from gmlx.load.discovery import header_meta
-
-            adapter = os.path.abspath(os.path.expanduser(args.adapter))
-            base_arch = getattr(args, "arch", None) or (
-                header_meta(args.gguf) or {}
-            ).get("arch")
-            n = apply_gguf_adapter(b.model, b.config, adapter, base_arch=base_arch)
-            print(f"[adapter] applied {n}-module GGUF LoRA from {adapter}")
+            else:
+                kv_policy = policy
 
     # Load in the background while the user types their first message.
     # Interactive tty only: piped stdin already holds its input (and the
@@ -3014,7 +3041,9 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
     # inline diagnostics. GMLX_CHAT_BG_LOAD=0 restores the
     # synchronous load.
     b.load_pending = (
-        env_bool("GMLX_CHAT_BG_LOAD", True) and sys.stdin.isatty() and not args.verbose
+        env_bool("GMLX_CHAT_BG_LOAD", True)
+        and sys.stdin.isatty()
+        and not args.verbose
     )
     if not b.load_pending:
         with loadlog.load_ui(args.verbose, args.gguf):
@@ -3034,9 +3063,11 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
                 result = _load_text_model()
             load_box.append(("ok", cap, result))
         except BaseException as e:
-            load_box.append(("err", cap_holder[0] if cap_holder else None, e))
+            load_box.append(
+                ("err", cap_holder[0] if cap_holder else None, e))
 
-    load_thread = threading.Thread(target=_bg_load, name="gmlx-chat-load", daemon=True)
+    load_thread = threading.Thread(
+        target=_bg_load, name="gmlx-chat-load", daemon=True)
     load_thread.start()
 
     def _join():
@@ -3071,9 +3102,8 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
     return b
 
 
-def _load_chat_backend(
-    args, kv_kwargs, *, speculative: bool, vlm_mtp: bool
-) -> _ChatBackend:
+def _load_chat_backend(args, kv_kwargs, *, speculative: bool,
+                       vlm_mtp: bool) -> _ChatBackend:
     """Load the model stack for the chat mode the flags resolved to.
     Raises _ChatExit for user-facing load errors (missing chat template)."""
     if args.assistant:
@@ -3102,7 +3132,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         from gmlx.spec.speculative import set_stoch_accept
 
         set_stoch_accept(True)
-    brain = None  # --assistant: server-backed turn engine
+    brain = None                  # --assistant: server-backed turn engine
     model_request = None
     if args.local and (args.assistant or args.server):
         parser.error("--local loads in-process and cannot combine with "
@@ -3125,13 +3155,13 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         if args.gguf:
             from gmlx.commands.cli import split_path_intent
 
-            split_path_intent(args)  # id@profile -> id + --profile
+            split_path_intent(args)      # id@profile -> id + --profile
         logit_bias = parse_logit_bias(args.logit_bias)
         setup = _setup_assistant(args)
         if isinstance(setup, int):
             return setup
         brain, model_request, base_url, assistant_extra = setup
-        args.gguf = model_request  # session naming/matching key
+        args.gguf = model_request        # session naming/matching key
         if args.seed is not None:
             assistant_extra["seed"] = args.seed
         # The server owns the template, so it maps these onto the model's
@@ -3171,9 +3201,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 "(gmlx list shows ids)\n"
                 "  gmlx pull hf:org/repo/file.gguf        download one first\n"
                 "  gmlx chat --assistant NAME             talk to a running "
-                "server instead",
-                file=sys.stderr,
-            )
+                "server instead", file=sys.stderr)
             raise SystemExit(2)
         # By-name config fallback (same rules as `gmlx run`): a positional that isn't
         # an on-disk file is resolved against the server config by id/alias, applying that
@@ -3255,25 +3283,16 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         vlm_mtp = bool(args.mmproj and _vlm_mtp_drafter_available(args))
         # --stream-experts is absent: streaming composes with MTP here the
         # same way as run/bench (placement after load_mtp_model).
-        if (
-            speculative
-            and not vlm_mtp
-            and (
-                args.mmproj
-                or args.adapter
-                or args.stream_cpu
-                or args.moe_experts is not None
-                or args.moe_expert_mass is not None
-                or args.moe_expert_probe
-                or args.moe_miss_shed is not None
-                or args.moe_layer_shed is not None
-            )
+        if speculative and not vlm_mtp and (
+            args.mmproj or args.stream_cpu
+            or args.moe_experts is not None or args.moe_expert_mass is not None
+            or args.moe_expert_probe or args.moe_miss_shed is not None
+            or args.moe_layer_shed is not None
         ):
             which = next(
                 name
                 for name, on in (
                     ("--mmproj", args.mmproj),
-                    ("--adapter", args.adapter),
                     ("--stream-cpu", args.stream_cpu),
                     ("--moe-experts", args.moe_experts is not None),
                     ("--moe-expert-mass", args.moe_expert_mass is not None),
@@ -3302,8 +3321,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                     file=sys.stderr,
                 )
         template_kwargs = fold_thinking_flag(
-            args, parse_template_config(args.chat_template_config)
-        )
+            args, parse_template_config(args.chat_template_config))
         logit_bias = parse_logit_bias(args.logit_bias)
         resize_shape = parse_resize_shape(args.resize_shape)
 
@@ -3335,7 +3353,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
     _color = _want_color()
     try:
         state.theme = resolve_theme(
-            args.theme or cfg_theme or "dark", colorblind=args.colorblind, color=_color
+            args.theme or cfg_theme or "dark",
+            colorblind=args.colorblind, color=_color
         )
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
@@ -3384,9 +3403,11 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
     if brain is not None:
         state.assistant_brain = brain
         state.assistant_extra = assistant_extra
+        state.served_ids = list(getattr(brain, "served_ids", None) or [])
         state.assistant_baseline = dict(state.sampling)
         state.assistant_touched = {
-            k for k in _ASSISTANT_SAMPLING if getattr(args, k) != parser.get_default(k)
+            k for k in _ASSISTANT_SAMPLING
+            if getattr(args, k) != parser.get_default(k)
         }
     elif args.seed is not None:
         import mlx.core as mx
@@ -3395,8 +3416,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
 
     try:
         backend = _load_chat_backend(
-            args, kv_kwargs, speculative=speculative, vlm_mtp=vlm_mtp
-        )
+            args, kv_kwargs, speculative=speculative, vlm_mtp=vlm_mtp)
     except _ChatExit as e:
         return e.code
     model, tok, config = backend.model, backend.tok, backend.config
@@ -3407,10 +3427,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         cache = backend.new_text_cache()
 
     def _cfg_get(key):
-        for c in (
-            config,
-            (config.get("text_config") if isinstance(config, dict) else None),
-        ):
+        for c in (config, (config.get("text_config") if isinstance(config, dict) else None)):
             if c is None:
                 continue
             v = c.get(key) if isinstance(c, dict) else getattr(c, key, None)
@@ -3444,9 +3461,11 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         # background text path (the assistant branch bound its own above).
         if args.assistant:
             return
-        state.ctx_max = args.max_kv_size or _cfg_get("max_position_embeddings")
+        state.ctx_max = args.max_kv_size or _cfg_get(
+            "max_position_embeddings")
         state.model_info = _build_model_info(args, config, drafter, vlm_mtp)
-        state.session_meta["arch"] = state.model_info.get("arch") or args.arch
+        state.session_meta["arch"] = (
+            state.model_info.get("arch") or args.arch)
 
     state.session_meta = {
         "path": model_key,
@@ -3489,7 +3508,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
     editor = (
         "prompt_toolkit"
         if state.ptk_session is not None
-        else f"readline ({install_hint('chat')} for menu completion + suggestions)"
+        else f"readline ({install_hint('chat')} for menu completion "
+             "+ suggestions)"
     )
     print(
         f"[chat] '/help' lists commands - '/exit' or Ctrl-D quits - "
@@ -3571,18 +3591,12 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             bb = entry.get("brain_before")
             if bb is not None:
                 del brain.messages[bb:]
-            else:  # restored session: rebuild history
+            else:                        # restored session: rebuild history
                 brain.messages = [
-                    m2
-                    for e in transcript[:-1]
-                    for m2 in (
+                    m2 for e in transcript[:-1] for m2 in (
                         {"role": "user", "content": e["user"].get("content", "")},
-                        {
-                            "role": "assistant",
-                            "content": e["assistant"].get("content", ""),
-                        },
-                    )
-                ]
+                        {"role": "assistant",
+                         "content": e["assistant"].get("content", "")})]
         first_turn = entry.get("first_turn_before", first_turn)
         transcript.pop()
         state.ctx_used = (cp or None) if not rebuilt else None
@@ -3595,7 +3609,9 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             if transcript:
                 replay = []
                 if state.system_prompt:
-                    replay.append({"role": "system", "content": state.system_prompt})
+                    replay.append(
+                        {"role": "system", "content": state.system_prompt}
+                    )
                 for e in transcript:
                     replay.append(
                         {"role": "user", "content": e["user"].get("content", "")}
@@ -3627,27 +3643,20 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         nonlocal first_turn
         _reset_conversation()
         _session_restore_settings(state, doc, name)
-        replay, transcript, n_tok = _session_parse_messages(doc, state.system_prompt)
+        replay, transcript, n_tok = _session_parse_messages(
+            doc, state.system_prompt)
         state.transcript = transcript
         if state.vlm:
             _session_rebuild_vlm_history(
-                transcript,
-                state,
-                model_type,
-                vlm_msgs,
-                vlm_images,
-                vlm_audios,
+                transcript, state, model_type,
+                vlm_msgs, vlm_images, vlm_audios,
             )
         if brain is not None:
             # The brain holds the history itself; nothing prefills locally.
-            brain.messages = [
-                m
-                for e in transcript
-                for m in (
-                    {"role": "user", "content": e["user"].get("content", "")},
-                    {"role": "assistant", "content": e["assistant"].get("content", "")},
-                )
-            ]
+            brain.messages = [m for e in transcript for m in (
+                {"role": "user", "content": e["user"].get("content", "")},
+                {"role": "assistant",
+                 "content": e["assistant"].get("content", "")})]
         if transcript:
             first_turn = False
             if (not state.vlm or vlm_mtp) and brain is None:
@@ -3656,11 +3665,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         print(
             f"[chat] resumed '{name}': {n} turn{'s' if n != 1 else ''}"
             + (f", {_fmt_k(n_tok)} gen tok" if n_tok else "")
-            + (
-                " - the history prefills with your next message"
-                if brain is None
-                else ""
-            )
+            + (" - the history prefills with your next message"
+               if brain is None else "")
         )
 
     if args.resume is not None:
@@ -3737,7 +3743,11 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 if _pop_last_turn("undo") is not None:
                     print("[chat] last exchange removed")
             elif verb == "retry":
-                if state.staged or state.staged_images or state.staged_audio:
+                if (
+                    state.staged
+                    or state.staged_images
+                    or state.staged_audio
+                ):
                     print(
                         "[chat] staged items pending - send them or /drop "
                         "first, then /retry"
@@ -3769,11 +3779,15 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                     else:
                         _apply_session(doc, spath.stem)
             continue
-        if not word and not (state.staged or state.staged_images or state.staged_audio):
+        if not word and not (
+            state.staged
+            or state.staged_images
+            or state.staged_audio
+        ):
             continue
 
         try:
-            _finish_load()  # taking a turn: join the background load
+            _finish_load()          # taking a turn: join the background load
         except _ChatExit as e:
             return e.code
         _begin_turn(
@@ -3832,9 +3846,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 vlm_msgs.append(_vlm_message(model_type, user_text, "user", 0, 0))
                 first_turn = False
                 prompt_text = tok.apply_chat_template(
-                    messages,
-                    tokenize=False,
-                    add_generation_prompt=True,
+                    messages, tokenize=False, add_generation_prompt=True,
                     **template_kwargs,
                 )
                 prompt = tok.encode(prompt_text, add_special_tokens=False)
@@ -3851,6 +3863,11 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                         top_k=s["top_k"],
                         min_p=s["min_p"],
                         draft_block_size=args.draft_block_size,
+                        thinking_budget=state.thinking_budget,
+                        thinking_start_token=state.thinking_start_token,
+                        thinking_end_token=state.thinking_end_token,
+                        start_in_thinking=_prompt_opens_thinking_cfg(
+                            state, prompt_text),
                     ),
                     state,
                     stops=args.stop,
@@ -3950,8 +3967,10 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         if drafter is not None:
             # MTP speculative decoding over the persistent cache (the same per-turn
             # templating + cache append as the plain text path below). Sampling is
-            # temp/top-p/top-k/min-p only - mlx-vlm's MTP walk exposes no penalty/
+            # temp/top-p/top-k/min-p only - the MTP walk exposes no penalty/
             # bias/stop hooks, so the REPL's other sampling /commands don't apply.
+            # ^T finish-thinking does work: the owned rounds inject the forced
+            # close directly (see stream_generate_speculative).
             from gmlx.gen.generation import stream_generate_speculative
 
             messages = list(state.take("replay_messages") or [])
@@ -3961,9 +3980,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 {"role": "user", "content": _compose_user_content(state, line)}
             )
             prompt_text = tok.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
+                messages, tokenize=False, add_generation_prompt=True,
                 **template_kwargs,
             )
             prompt = tok.encode(prompt_text, add_special_tokens=False)
@@ -3981,6 +3998,11 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                     top_k=s["top_k"],
                     min_p=s["min_p"],
                     draft_block_size=args.draft_block_size,
+                    thinking_budget=state.thinking_budget,
+                    thinking_start_token=state.thinking_start_token,
+                    thinking_end_token=state.thinking_end_token,
+                    start_in_thinking=_prompt_opens_thinking_cfg(
+                        state, prompt_text),
                 ),
                 state,
                 stops=args.stop,
@@ -4005,9 +4027,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 {"role": "user", "content": _compose_user_content(state, line)}
             )
             prompt_text = tok.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
+                messages, tokenize=False, add_generation_prompt=True,
                 **template_kwargs,
             )
             prompt = tok.encode(prompt_text, add_special_tokens=False)
@@ -4016,12 +4036,9 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 # Bounded canvas fallback shared with `gmlx run` - the
                 # denoising canvas is allocated at max_tokens, so "until the
                 # model stops" has no meaning here.
-                diffusion_stream(
-                    model,
-                    tok,
-                    prompt,
-                    max_tokens=s["max_tokens"] or _DIFFUSION_MAX_TOKENS,
-                ),
+                diffusion_stream(model, tok, prompt,
+                                 max_tokens=s["max_tokens"]
+                                 or _DIFFUSION_MAX_TOKENS),
                 state,
                 stops=args.stop,
                 start_in_thinking=_opens_thinking(prompt_text),
@@ -4049,9 +4066,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             # internally), and the string is reused for thinking-budget seeding
             # + reasoning detection.
             prompt_text = tok.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
+                messages, tokenize=False, add_generation_prompt=True,
                 **template_kwargs,
             )
             prompt = tok.encode(prompt_text, add_special_tokens=False)

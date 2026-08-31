@@ -681,10 +681,45 @@ def test_vlm_plus_adapter_raises_not_silently_dropped():
                                      adapter_gguf="/m/ad.lora.gguf")
 
 
-def test_speculative_plus_adapter_raises_not_silently_dropped():
-    with pytest.raises(NotImplementedError, match="speculative/MTP base"):
-        serving.load_serveable_model("/m/t.gguf", speculative=True,
-                                     adapter_gguf="/m/ad.lora.gguf")
+def test_speculative_plus_adapter_installs_on_the_mtp_trunk(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        serving, "_load_serveable_mtp",
+        lambda path, **kw: calls.append((path, kw)) or ("M", "P", "C"))
+    out = serving.load_serveable_model("/m/t.gguf", speculative=True,
+                                       adapter_gguf="/m/ad.lora.gguf")
+    assert out == ("M", "P", "C")
+    assert calls == [("/m/t.gguf", {"draft_gguf_path": None,
+                                    "chat_template": None,
+                                    "adapter_gguf": "/m/ad.lora.gguf"})]
+
+
+def test_serveable_mtp_applies_adapter_to_language_model(monkeypatch):
+    class _LM:
+        def make_cache(self):
+            return []
+
+    class _Target:
+        def __init__(self):
+            self.language_model = _LM()
+            self.config = {"model_type": "deepseek_v4"}
+
+    target = _Target()
+    monkeypatch.setattr(
+        "gmlx.spec.mtp_load.load_mtp_model",
+        lambda path, **kw: (target, "DRAFTER", {"model_type": "deepseek_v4"},
+                            object()))
+    applied = []
+    monkeypatch.setattr(
+        serving, "_apply_gguf_adapter",
+        lambda r, cfg, ad, base_gguf_path=None:
+        applied.append((r, ad, base_gguf_path)))
+    monkeypatch.setattr(serving, "_ensure_inner_config", lambda m, c: None)
+    monkeypatch.setattr("gmlx.cache.compat.ensure_runtime_origin_make_cache",
+                        lambda m: None)
+    monkeypatch.setattr(serving, "_make_text_processor", lambda tok: "PROC")
+    serving._load_serveable_mtp("/m/t.gguf", adapter_gguf="/m/ad.lora.gguf")
+    assert applied == [(target.language_model, "/m/ad.lora.gguf", "/m/t.gguf")]
 
 
 def test_prompt_step_caps_mtp_hidden_capture():
@@ -762,8 +797,10 @@ def test_load_vlm_mtp_model_applies_chat_template(monkeypatch):
         chat_template = "{{ gguf }}"
 
     class _LM:
+        # The full gemma4_text hook row: the check is per-arch now.
         speculative_logits_from_hidden = object()
         rollback_speculative_cache = object()
+        speculative_draft_hidden = object()
 
     class _Model:
         language_model = _LM()

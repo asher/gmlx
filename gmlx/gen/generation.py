@@ -103,46 +103,35 @@ def _prefill_progress_ui(stream=None):
     return cb, close
 
 
-def kv_quantization_unsupported(model, max_kv_size=None) -> str | None:
-    """Reason string when --kv-bits cannot apply to this model's cache stack,
-    else None. mlx-lm's maybe_quantize_kv_cache converts every cache exposing
-    ``to_quantized``, but RotatingKVCache's raises NotImplementedError mid
-    generation - any arch with sliding-window layers (deepseek4, gemma) dies
-    on its first quantized step unless the flag is dropped up front. The same
-    applies to the rotating stack --max-kv-size manufactures for models
-    without their own make_cache."""
-    make = getattr(model, "make_cache", None)
-    if not callable(make):
-        if max_kv_size is not None:
-            return "rotating KV cache (--max-kv-size) cannot quantize"
-        return None
-    try:
-        caches = make()
-    except Exception:
-        return None
-    from gmlx.cache.compat import cache_types
+def _echo_think_tag(prompt, tokenizer):
+    """The think-open tag to echo before a raw verbose stream, or None. A
+    pre-fill chat template ends the rendered prompt inside an open thinking
+    block, so the generated stream carries only the close tag; chat's renderer
+    seeds this state, the raw printers here echo the tag instead."""
+    from .thinking_budget import prompt_open_think_tag
 
-    rotating = cache_types("RotatingKVCache") + cache_types("BatchRotatingKVCache")
-    flat, stack = [], list(caches or [])
-    while stack:
-        c = stack.pop()
-        inner = getattr(c, "caches", None)
-        if inner is not None:
-            stack.extend(inner)
-        else:
-            flat.append(c)
-    bad = sorted(
-        {
-            type(c).__name__
-            for c in flat
-            # kv_quant_unsupported: caches whose to_quantized raises by
-            # design (MSAKVCache - quantizing drops the indexer stream).
-            if isinstance(c, rotating) or getattr(c, "kv_quant_unsupported", False)
-        }
-    )
-    if bad:
-        return f"cache stack cannot quantize ({', '.join(bad)})"
-    return None
+    return prompt_open_think_tag(prompt, tokenizer=tokenizer)
+
+
+def _verbose_emitter(prompt, tokenizer, reasoning):
+    """``(write, close)`` for a verbose stream. ``reasoning`` show/hide styles
+    a thinking model's chain-of-thought through :class:`~gmlx.tui.reasoning.
+    StreamRenderer` (the chat REPL's rendering); anything else prints raw,
+    echoing the prompt-opened think tag so the bare close marker still reads."""
+    open_tag = _echo_think_tag(prompt, tokenizer)
+    if reasoning in ("show", "hide"):
+        from gmlx.tui.reasoning import StreamRenderer, prompt_opens_header
+
+        r = StreamRenderer(reasoning, start_in_thinking=open_tag is not None,
+                           start_in_header=prompt_opens_header(prompt))
+        return r.write, r.close
+    if open_tag is not None:
+        print(open_tag, flush=True)
+
+    def write(s):
+        print(s, end="", flush=True)
+
+    return write, (lambda: None)
 
 
 def _kvarn_head_dims(model):
@@ -375,63 +364,6 @@ def harden_mtp_rollback(obj) -> None:
     obj.rollback_speculative_cache = _guarded
 
 
-_KV_QUANT_BITS = (2, 3, 4, 6, 8)  # mx.quantize affine widths
-
-
-def quantize_pooled_caches(caches, bits: int, group_size: int = 64) -> int:
-    """Arm quantized at-rest storage on every quantizable PoolingCache
-    (deepseek4 compressor pools -- the only KV that grows with context;
-    sliding windows are size-capped and stay fp16). Returns the number
-    armed. The caches must be fresh: no pooled rows landed yet."""
-    from gmlx.models.deepseek_v4.cache import PoolingCache
-
-    if bits not in _KV_QUANT_BITS:
-        return 0
-    n = 0
-    stack = list(caches or [])
-    while stack:
-        c = stack.pop()
-        inner = getattr(c, "caches", None)
-        if inner is not None:
-            stack.extend(inner)
-            continue
-        if isinstance(c, PoolingCache) and c.quantizable:
-            c.quantize_storage(group_size=group_size, bits=bits)
-            n += 1
-    return n
-
-
-def _echo_think_tag(prompt, tokenizer):
-    """The think-open tag to echo before a raw verbose stream, or None. A
-    pre-fill chat template ends the rendered prompt inside an open thinking
-    block, so the generated stream carries only the close tag; chat's renderer
-    seeds this state, the raw printers here echo the tag instead."""
-    from .thinking_budget import prompt_open_think_tag
-
-    return prompt_open_think_tag(prompt, tokenizer=tokenizer)
-
-
-def _verbose_emitter(prompt, tokenizer, reasoning):
-    """``(write, close)`` for a verbose stream. ``reasoning`` show/hide styles
-    a thinking model's chain-of-thought through :class:`~gmlx.tui.reasoning.
-    StreamRenderer` (the chat REPL's rendering); anything else prints raw,
-    echoing the prompt-opened think tag so the bare close marker still reads."""
-    open_tag = _echo_think_tag(prompt, tokenizer)
-    if reasoning in ("show", "hide"):
-        from gmlx.tui.reasoning import StreamRenderer, prompt_opens_header
-
-        r = StreamRenderer(reasoning, start_in_thinking=open_tag is not None,
-                           start_in_header=prompt_opens_header(prompt))
-        return r.write, r.close
-    if open_tag is not None:
-        print(open_tag, flush=True)
-
-    def write(s):
-        print(s, end="", flush=True)
-
-    return write, (lambda: None)
-
-
 def generate(
     model,
     tokenizer,
@@ -598,29 +530,30 @@ def generate(
             prompt_cache = setup_kvarn_cache(
                 model, kv_bits, kv_tail_tokens, max_kv_size
             )
-        # Handled here whatever the outcome: mlx-lm's per-step affine
-        # converter must never touch a kvarn stack.
+        # Handled here whatever the outcome: the affine policy path must
+        # never touch a kvarn stack.
         kv_bits = None
     elif kv_bits is not None:
-        reason = kv_quantization_unsupported(model, max_kv_size=max_kv_size)
-        if reason:
-            # mlx-lm's converter would crash on the rotating caches, so the
-            # flag is honored here instead: pack the growing pooled caches
-            # at rest and hand the pre-armed cache to stream_generate.
-            from mlx_lm.models.cache import make_prompt_cache as _mpc
+        # Resolve on the constructed stack. A bare make_cache probe
+        # misses what max_kv_size builds.
+        from mlx_lm.models.cache import make_prompt_cache as _mpc
 
-            prompt_cache = _mpc(model, max_kv_size=max_kv_size)
-            n_pools = quantize_pooled_caches(prompt_cache, kv_bits, kv_group_size)
-            if n_pools:
-                print(
-                    f"[kv] {kv_bits}-bit pooled KV cache ({n_pools} pools; "
-                    "sliding windows stay fp16)",
-                    file=sys.stderr,
-                )
-            else:
-                prompt_cache = None
-                print(f"warning: --kv-bits dropped: {reason}", file=sys.stderr)
+        from gmlx.cache.kv_policy import (arm_stack, kv_line,
+                                          resolve_kv_quant_policy)
+
+        prompt_cache = _mpc(model, max_kv_size=max_kv_size)
+        policy = resolve_kv_quant_policy(
+            prompt_cache, kv_bits=kv_bits, kv_group_size=kv_group_size,
+            quantized_kv_start=quantized_kv_start,
+            max_kv_size=max_kv_size)
+        print(kv_line(None, policy), file=sys.stderr)
+        if policy.verdict == "error":
+            raise SystemExit(2)
+        if policy.verdict == "dropped":
+            prompt_cache = None
             kv_bits = None
+        else:
+            arm_stack(prompt_cache, policy)
 
     gen_kwargs = {
         "max_tokens": max_tokens,
@@ -654,26 +587,14 @@ def generate(
         base_kwargs = {
             k: v
             for k, v in gen_kwargs.items()
-            if k
-            not in (
-                "max_tokens",
-                "sampler",
-                "logits_processors",
-                "max_kv_size",
-                "prompt_cache",
-            )
+            if k not in ("max_tokens", "sampler", "logits_processors",
+                         "max_kv_size", "prompt_cache")
         }
         params = {
-            "max_tokens": max_tokens,
-            "temp": temp,
-            "top_p": top_p,
-            "top_k": top_k,
-            "min_p": min_p,
-            "over_generation": over_generation,
-            "over_temp": over_temp,
-            "over_top_p": over_top_p,
-            "over_top_k": over_top_k,
-            "over_min_p": over_min_p,
+            "max_tokens": max_tokens, "temp": temp, "top_p": top_p,
+            "top_k": top_k, "min_p": min_p, "over_generation": over_generation,
+            "over_temp": over_temp, "over_top_p": over_top_p,
+            "over_top_k": over_top_k, "over_min_p": over_min_p,
             "inject_no_thinking": inject_no_thinking,
         }
         # The injected critique can disable thinking independently of the main
@@ -688,10 +609,7 @@ def generate(
             from .thinking_budget import make_thinking_budget_processor
 
             tbp = make_thinking_budget_processor(
-                tokenizer,
-                0,
-                start_in_thinking=False,
-                verbose=verbose,
+                tokenizer, 0, start_in_thinking=False, verbose=verbose,
                 # Seam detection needs the model's untouched stop behavior.
                 eos_floor=False,
                 start_token=thinking_start_token,
@@ -700,25 +618,16 @@ def generate(
             if tbp is not None:
                 over_logits_processors = list(logits_processors) + [tbp]
         return _generate_over(
-            model,
-            tokenizer,
-            prompt,
-            main_sampler=sampler,
-            over_sampler=over_sampler,
+            model, tokenizer, prompt,
+            main_sampler=sampler, over_sampler=over_sampler,
             logits_processors=logits_processors,
             over_logits_processors=over_logits_processors,
             base_kwargs=base_kwargs,
-            max_kv_size=max_kv_size,
-            max_tokens=max_tokens,
-            window=over_generation,
-            inject_critique=inject_critique,
-            template_kwargs=critique_tk,
-            log_path=over_generation_log,
-            orig_prompt=_over_prompt,
-            label=over_label,
-            params=params,
-            verbose=verbose,
-            reasoning=reasoning,
+            max_kv_size=max_kv_size, max_tokens=max_tokens,
+            window=over_generation, inject_critique=inject_critique,
+            template_kwargs=critique_tk, log_path=over_generation_log,
+            orig_prompt=_over_prompt, label=over_label,
+            params=params, verbose=verbose, reasoning=reasoning,
         )
 
     close_progress = None
@@ -734,7 +643,8 @@ def generate(
         stop = [s for s in (stop or []) if s]
         styled = verbose and reasoning in ("show", "hide")
         if not stop:
-            if verbose and (styled or _echo_think_tag(prompt, tokenizer) is not None):
+            if verbose and (styled
+                            or _echo_think_tag(prompt, tokenizer) is not None):
                 # Own the loop (same verbose format as mlx_lm.generate) when
                 # the stream needs shaping: reasoning show/hide styling, or a
                 # pre-fill template that ended the prompt inside an open
@@ -746,7 +656,8 @@ def generate(
                 print("=" * 10)
                 emit, close_emit = _verbose_emitter(prompt, tokenizer, reasoning)
                 text, last = "", None
-                for last in stream_generate(model, tokenizer, prompt, **gen_kwargs):
+                for last in stream_generate(model, tokenizer, prompt,
+                                            **gen_kwargs):
                     emit(last.text)
                     text += last.text
                 close_emit()
@@ -766,8 +677,7 @@ def generate(
                     print(f"Peak memory: {last.peak_memory:.3f} GB")
                 return text
             return mlx_lm.generate(
-                model, tokenizer, prompt, verbose=verbose, **gen_kwargs
-            )
+                model, tokenizer, prompt, verbose=verbose, **gen_kwargs)
 
         # Stop sequences need the streamed text: scan with a held-back tail so
         # a stop string split across segments still matches, then end the
@@ -876,14 +786,9 @@ def _generate_over(
         emit, close_emit = _verbose_emitter(prompt, tokenizer, reasoning)
     with suppressed_eos(tokenizer):
         for r in stream_generate(
-            model,
-            tokenizer,
-            prompt,
-            max_tokens=max_tokens,
-            sampler=main_sampler,
-            logits_processors=logits_processors,
-            prompt_cache=cache,
-            **base_kwargs,
+            model, tokenizer, prompt, max_tokens=max_tokens,
+            sampler=main_sampler, logits_processors=logits_processors,
+            prompt_cache=cache, **base_kwargs,
         ):
             last = r
             if int(r.token) in real_eos:
@@ -925,13 +830,8 @@ def _generate_over(
         )
         cap = window if window and window > 0 else max_tokens
         for r in stream_generate(
-            model,
-            tokenizer,
-            bridge,
-            max_tokens=cap,
-            sampler=over_sampler,
-            logits_processors=over_logits_processors,
-            prompt_cache=cache,
+            model, tokenizer, bridge, max_tokens=cap, sampler=over_sampler,
+            logits_processors=over_logits_processors, prompt_cache=cache,
             **base_kwargs,
         ):
             over_parts.append(r.text)
@@ -950,14 +850,9 @@ def _generate_over(
         run = 0
         with suppressed_eos(tokenizer):
             for r in stream_generate(
-                model,
-                tokenizer,
-                [seam["token_id"]],
-                max_tokens=window,
-                sampler=over_sampler,
-                logits_processors=over_logits_processors,
-                prompt_cache=cache,
-                **base_kwargs,
+                model, tokenizer, [seam["token_id"]], max_tokens=window,
+                sampler=over_sampler, logits_processors=over_logits_processors,
+                prompt_cache=cache, **base_kwargs,
             ):
                 over_parts.append(r.text)
                 over_tokens.append(int(r.token))
@@ -994,24 +889,21 @@ def _generate_over(
         )
 
     if log_path:
-        append_log(
-            log_path,
-            {
-                "mode": mode,
-                "label": label,
-                "prompt": orig_prompt,
-                "seam": seam,
-                "inject_critique": inject_critique,
-                "pre_text": pre_text,
-                "over_text": over_text,
-                "interim_stops": interim,
-                "phase1_tokens": p1_tok,
-                "over_tokens": p2_tok,
-                "total_tokens": total_tok,
-                "early_stop": early_stop,
-                "params": params,
-            },
-        )
+        append_log(log_path, {
+            "mode": mode,
+            "label": label,
+            "prompt": orig_prompt,
+            "seam": seam,
+            "inject_critique": inject_critique,
+            "pre_text": pre_text,
+            "over_text": over_text,
+            "interim_stops": interim,
+            "phase1_tokens": p1_tok,
+            "over_tokens": p2_tok,
+            "total_tokens": total_tok,
+            "early_stop": early_stop,
+            "params": params,
+        })
 
     return pre_text + over_text
 
@@ -1039,13 +931,15 @@ def _chunked_prefill_cache(lm, input_ids, chunk, cache=None):
     return c
 
 
-_MTP_FINISH_WHY = "on the MTP path (run with --no-mtp to use it)"
+_MTP_FINISH_WHY = "on the stock MTP engine (run with --no-mtp to use it)"
 
 
 def _with_mtp_finish_key_notice(fn, *args, **kwargs):
     """Run ``fn`` with the ^T finish-thinking target armed as "unsupported":
-    the MTP walks expose no forced-close seam, so the key explains itself
-    instead of silently doing nothing."""
+    mlx-vlm's stock MTP round exposes no forced-close seam, so the key
+    explains itself instead of silently doing nothing. The owned engine
+    (the default; see the routing in ``_generate_speculative`` and
+    ``_stream_generate_speculative``) re-arms with a real hook."""
     from .thinking_budget import (
         FinishKeyUnsupported,
         clear_finish_key_target,
@@ -1087,6 +981,9 @@ def _generate_speculative(
     kv_group_size: int = 64,
     kv_quant_scheme: str | None = None,
     kv_tail_tokens: int = 1024,
+    thinking_budget: int | None = None,
+    thinking_start_token: str | None = None,
+    thinking_end_token: str | None = None,
 ) -> dict:
     """Single-stream MTP speculative generation via mlx-vlm's engine.
 
@@ -1098,31 +995,28 @@ def _generate_speculative(
     ``reasoning`` shapes the *verbose* stream like :func:`generate`'s; the
     returned ``text`` is always raw.
     """
-    # Drafters whose hooks only the owned engine understands (deepseek_v4:
-    # 4D hidden + rotating-undo rollback) must not run mlx-vlm's stock round;
-    # stochastic acceptance also lives only in the owned walk.
+    # The owned engine is the default (as it already is for the REPL, serve,
+    # and bench): it rolls the cache back cleanly on early stops and carries
+    # the ^T finish-thinking seam. GMLX_OWNED_ROUND=0 opts back to mlx-vlm's
+    # stock round, except for drafters whose contract demands the owned
+    # engine (deepseek_v4: 4D hidden + rotating-undo rollback; stochastic
+    # acceptance also lives only in the owned walk).
     from gmlx.spec.speculative import use_owned_engine
-    if use_owned_engine(drafter, temp):
+    if (os.environ.get("GMLX_OWNED_ROUND") != "0"
+            or use_owned_engine(drafter, temp)):
         return generate_speculative_owned(
-            model,
-            drafter,
-            tokenizer,
-            prompt,
-            max_tokens=max_tokens,
-            temp=temp,
-            top_p=top_p,
-            top_k=top_k,
-            min_p=min_p,
-            draft_block_size=draft_block_size,
+            model, drafter, tokenizer, prompt,
+            max_tokens=max_tokens, temp=temp, top_p=top_p, top_k=top_k,
+            min_p=min_p, draft_block_size=draft_block_size,
             apply_chat_template=apply_chat_template,
-            system_prompt=system_prompt,
-            template_kwargs=template_kwargs,
-            verbose=verbose,
-            reasoning=reasoning,
-            kv_bits=kv_bits,
-            kv_group_size=kv_group_size,
+            system_prompt=system_prompt, template_kwargs=template_kwargs,
+            verbose=verbose, reasoning=reasoning,
+            kv_bits=kv_bits, kv_group_size=kv_group_size,
             kv_quant_scheme=kv_quant_scheme,
             kv_tail_tokens=kv_tail_tokens,
+            thinking_budget=thinking_budget,
+            thinking_start_token=thinking_start_token,
+            thinking_end_token=thinking_end_token,
         )
 
     kvarn_cache = None
@@ -1137,8 +1031,18 @@ def _generate_speculative(
     if kv_bits is not None:
         # The stock mlx-vlm round has no KV-quantization hook and the models
         # routed here (gemma4/qwen3.x drafters) have no pooled caches.
+        from gmlx.cache.kv_policy import dropped_policy, kv_line
+
         print(
-            "warning: --kv-bits not applied on the MTP path (no quantizable caches)",
+            kv_line(None, dropped_policy(
+                "stock MTP rounds have no KV quantization hook",
+                kv_bits, kv_group_size, "single")),
+            file=sys.stderr,
+        )
+    if thinking_budget is not None:
+        # The forced-close seam lives in the owned rounds only.
+        print(
+            "warning: --thinking-budget not applied on the stock MTP engine",
             file=sys.stderr,
         )
 
@@ -1288,6 +1192,9 @@ def generate_speculative_owned(
     kv_group_size: int = 64,
     kv_quant_scheme: str | None = None,
     kv_tail_tokens: int = 1024,
+    thinking_budget: int | None = None,
+    thinking_start_token: str | None = None,
+    thinking_end_token: str | None = None,
 ) -> dict:
     """Same contract as generate_speculative but drives the owned
     stream_speculative engine (engine/speculative.py) instead of mlx-vlm's
@@ -1298,6 +1205,13 @@ def generate_speculative_owned(
     from mlx_vlm.models import cache as _cache
 
     from gmlx.spec.speculative import annotate_sampling_params, stream_speculative
+
+    from .thinking_budget import (
+        clear_finish_key_target,
+        make_mtp_finish_hook,
+        prompt_opens_thinking,
+        set_finish_key_target,
+    )
 
     if (
         isinstance(prompt, str)
@@ -1345,21 +1259,19 @@ def generate_speculative_owned(
     if prompt_cache is None:
         prompt_cache = _cache.make_prompt_cache(lm)
     if kv_bits is not None:
-        # Rollback/replay are watermark moves, storage-agnostic, so the
-        # pooled packing composes with the MTP undo machinery.
-        n_pools = quantize_pooled_caches(prompt_cache, kv_bits, kv_group_size)
-        if n_pools:
-            print(
-                f"[kv] {kv_bits}-bit pooled KV cache ({n_pools} pools; "
-                "sliding windows stay fp16)",
-                file=sys.stderr,
-            )
-        else:
-            print(
-                "warning: --kv-bits not applied on the MTP path "
-                "(no quantizable caches)",
-                file=sys.stderr,
-            )
+        # The MTP rounds have no KV converter, so only pooled layers
+        # engage. Rollback is a watermark move and composes with packing.
+        from gmlx.cache.kv_policy import (arm_stack, kv_line,
+                                          resolve_kv_quant_policy)
+
+        policy = resolve_kv_quant_policy(
+            prompt_cache, kv_bits=kv_bits, kv_group_size=kv_group_size,
+            mtp=True, can_quantize_kv=False,
+            no_kv_reason="MTP rounds have no KV quantization hook")
+        print(kv_line(None, policy), file=sys.stderr)
+        if policy.verdict == "error":
+            raise SystemExit(2)
+        arm_stack(prompt_cache, policy, hold=False)
 
     detok = tokenizer.detokenizer
     detok.reset()
@@ -1367,31 +1279,50 @@ def generate_speculative_owned(
     emit = close_emit = None
     if verbose:
         emit, close_emit = _verbose_emitter(prompt, tokenizer, reasoning)
+    # Thinking budget + ^T finish-thinking: the owned rounds honor a
+    # forced-close hook; arm it (a None hook - unresolvable markers - drops
+    # the budget with a note and leaves the key a silent no-op, matching the
+    # plain path).
+    hook = make_mtp_finish_hook(
+        tokenizer,
+        budget=thinking_budget,
+        start_in_thinking=prompt_opens_thinking(
+            prompt, thinking_start_token, thinking_end_token,
+            tokenizer=tokenizer),
+        verbose=verbose,
+        start_token=thinking_start_token,
+        end_token=thinking_end_token,
+    )
+    set_finish_key_target(hook)
     tic = time.perf_counter()
     prefill_s = None
-    for tok in stream_speculative(
-        model,
-        drafter,
-        input_ids,
-        prompt_cache=prompt_cache,
-        max_tokens=max_tokens,
-        sampler=sampler,
-        draft_block_size=block,
-    ):
-        if prefill_s is None:
-            prefill_s = time.perf_counter() - tic
-            tic = time.perf_counter()
-        tok = int(tok)
-        if tok in eos_ids:
-            break
-        detok.add_token(tok)
-        n += 1
-        if emit is not None:
-            seg = detok.last_segment
-            if seg:
-                emit(seg)
-        if n >= max_tokens:
-            break
+    try:
+        for tok in stream_speculative(
+            model,
+            drafter,
+            input_ids,
+            prompt_cache=prompt_cache,
+            max_tokens=max_tokens,
+            sampler=sampler,
+            draft_block_size=block,
+            thinking_hook=hook,
+        ):
+            if prefill_s is None:
+                prefill_s = time.perf_counter() - tic
+                tic = time.perf_counter()
+            tok = int(tok)
+            if tok in eos_ids:
+                break
+            detok.add_token(tok)
+            n += 1
+            if emit is not None:
+                seg = detok.last_segment
+                if seg:
+                    emit(seg)
+            if n >= max_tokens:
+                break
+    finally:
+        clear_finish_key_target()
     detok.finalize()
     decode_s = time.perf_counter() - tic
     if prefill_s is None:
@@ -1481,16 +1412,35 @@ def _stream_generate_speculative_owned(
     top_k: int = 0,
     min_p: float = 0.05,
     draft_block_size: int | None = None,
+    thinking_budget: int | None = None,
+    thinking_start_token: str | None = None,
+    thinking_end_token: str | None = None,
+    start_in_thinking: bool | None = None,
 ):
     """Owned-engine body of :func:`stream_generate_speculative` (the REPL
     default; see the routing note there). Same ``_MTPStreamResponse``
     surface as the stock round, but drives ``stream_speculative`` (which
-    does its own chunked prefill through the persistent ``prompt_cache``)."""
+    does its own chunked prefill through the persistent ``prompt_cache``).
+
+    ``start_in_thinking`` seeds the ^T finish-thinking hook for a prompt that
+    pre-opens a thinking block; None computes it from ``prompt`` when that is
+    a string (chat passes token ids plus the explicit flag)."""
     from mlx_lm.sample_utils import make_sampler
     from gmlx.spec.helpers import _resolve_block_total
 
     from gmlx.spec.speculative import annotate_sampling_params, stream_speculative
 
+    from .thinking_budget import (
+        clear_finish_key_target,
+        make_mtp_finish_hook,
+        prompt_opens_thinking,
+        set_finish_key_target,
+    )
+
+    if start_in_thinking is None:
+        start_in_thinking = prompt_opens_thinking(
+            prompt, thinking_start_token, thinking_end_token,
+            tokenizer=tokenizer)
     if isinstance(prompt, str):
         add_special = tokenizer.bos_token is None or not prompt.startswith(
             tokenizer.bos_token
@@ -1515,35 +1465,47 @@ def _stream_generate_speculative_owned(
     n = 0
     n_prompt = input_ids.shape[1]
     prompt_tps = 0.0
+    hook = make_mtp_finish_hook(
+        tokenizer,
+        budget=thinking_budget,
+        start_in_thinking=start_in_thinking,
+        start_token=thinking_start_token,
+        end_token=thinking_end_token,
+    )
+    set_finish_key_target(hook)
     tic = time.perf_counter()
     prefill_done = False
-    for tok in stream_speculative(
-        model,
-        drafter,
-        input_ids,
-        prompt_cache=prompt_cache,
-        max_tokens=max_tokens,
-        sampler=sampler,
-        draft_block_size=block,
-    ):
-        if not prefill_done:
-            prefill_done = True
-            prefill_s = time.perf_counter() - tic
-            prompt_tps = n_prompt / prefill_s if prefill_s > 0 else 0.0
-            tic = time.perf_counter()
-        tok = int(tok)
-        if tok in eos_ids:
-            break
-        detok.add_token(tok)
-        n += 1
-        seg = detok.last_segment
-        if seg:
-            elapsed = time.perf_counter() - tic
-            yield _MTPStreamResponse(
-                seg, n, n / elapsed if elapsed > 0 else 0.0, n_prompt, prompt_tps
-            )
-        if n >= max_tokens:
-            break
+    try:
+        for tok in stream_speculative(
+            model,
+            drafter,
+            input_ids,
+            prompt_cache=prompt_cache,
+            max_tokens=max_tokens,
+            sampler=sampler,
+            draft_block_size=block,
+            thinking_hook=hook,
+        ):
+            if not prefill_done:
+                prefill_done = True
+                prefill_s = time.perf_counter() - tic
+                prompt_tps = n_prompt / prefill_s if prefill_s > 0 else 0.0
+                tic = time.perf_counter()
+            tok = int(tok)
+            if tok in eos_ids:
+                break
+            detok.add_token(tok)
+            n += 1
+            seg = detok.last_segment
+            if seg:
+                elapsed = time.perf_counter() - tic
+                yield _MTPStreamResponse(
+                    seg, n, n / elapsed if elapsed > 0 else 0.0, n_prompt, prompt_tps
+                )
+            if n >= max_tokens:
+                break
+    finally:
+        clear_finish_key_target()
     detok.finalize()
     tail = detok.last_segment
     elapsed = time.perf_counter() - tic
@@ -1582,6 +1544,10 @@ def _stream_generate_speculative(
     top_k: int = 0,
     min_p: float = 0.05,
     draft_block_size: int | None = None,
+    thinking_budget: int | None = None,
+    thinking_start_token: str | None = None,
+    thinking_end_token: str | None = None,
+    start_in_thinking: bool | None = None,
 ):
     """Streaming MTP speculative generation over a persistent prompt cache - the
     interactive-REPL sibling of :func:`generate_speculative`. Yields
@@ -1594,9 +1560,11 @@ def _stream_generate_speculative(
     target KV cache the native drafter reads back, so cross-turn reuse is identical
     to the text path). Greedy output matches the non-speculative path token-for-token.
 
-    Sampling is temp/top-p/top-k/min-p only - mlx-vlm's MTP verify walk exposes no
-    stop/penalty/bias hooks (same surface as :func:`generate_speculative`); the REPL's
-    other ``/`` sampling controls don't reach this path.
+    Sampling is temp/top-p/top-k/min-p only - the MTP verify walk exposes no
+    stop/penalty/bias hooks (same surface as :func:`generate_speculative`); the
+    REPL's other ``/`` sampling controls don't reach this path. The ^T
+    finish-thinking key does work on the owned engine, through the round loop's
+    forced-close seam rather than a logits processor.
     """
     # The owned walk is the default for the REPL (as it already is for serve
     # and bench): unlike mlx-vlm's stock round it rolls the cache back to
@@ -1608,19 +1576,22 @@ def _stream_generate_speculative(
     if (os.environ.get("GMLX_OWNED_ROUND") != "0"
             or use_owned_engine(drafter, temp)):
         yield from _stream_generate_speculative_owned(
-            model,
-            drafter,
-            tokenizer,
-            prompt,
-            prompt_cache=prompt_cache,
-            max_tokens=max_tokens,
-            temp=temp,
-            top_p=top_p,
-            top_k=top_k,
-            min_p=min_p,
-            draft_block_size=draft_block_size,
+            model, drafter, tokenizer, prompt, prompt_cache=prompt_cache,
+            max_tokens=max_tokens, temp=temp, top_p=top_p, top_k=top_k,
+            min_p=min_p, draft_block_size=draft_block_size,
+            thinking_budget=thinking_budget,
+            thinking_start_token=thinking_start_token,
+            thinking_end_token=thinking_end_token,
+            start_in_thinking=start_in_thinking,
         )
         return
+
+    if thinking_budget is not None:
+        # The forced-close seam lives in the owned rounds only.
+        print(
+            "warning: thinking budget not applied on the stock MTP engine",
+            file=sys.stderr,
+        )
 
     from mlx_lm.sample_utils import make_sampler
     from gmlx.spec.helpers import _resolve_block_total
@@ -1707,3 +1678,4 @@ def _stream_generate_speculative(
     yield _MTPStreamResponse(
         tail or "", n, n / elapsed if elapsed > 0 else 0.0, n_prompt, prompt_tps
     )
+

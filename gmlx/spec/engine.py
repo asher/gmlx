@@ -20,6 +20,7 @@ import sys
 
 import mlx.core as mx
 
+import gmlx.lora_rows as lora_rows
 import gmlx.gen.prefill_decay as prefill_decay
 from gmlx.envflags import env_bool, env_int
 
@@ -29,6 +30,10 @@ _OWNED_MTP_ROUND_FLAG = "_kq_gguf_owned_mtp_round"
 _FULL_PREFILL_FLAG = "_kq_gguf_full_prompt_mtp_prefill"
 
 _SPEC_APC_DISABLED = os.environ.get("GMLX_SPEC_APC", "1") == "0"
+# Seed streaming: teacher-force the native MTP head chunk-by-chunk during
+# target prefill. 0 defers seeding to one whole-prompt pass after the
+# first token, which stalls the stream for seconds at depth.
+_SEED_STREAM_DISABLED = os.environ.get("GMLX_MTP_SEED_STREAM", "1") == "0"
 # Retirement store (prompt + generated -> shared APC at request finish) is a
 # beyond-stock multi-turn win; killable on its own or via the global switch.
 _SPEC_APC_RETIRE_DISABLED = (
@@ -261,9 +266,10 @@ def _ckpt_active(model, mode, block_size: int = 16) -> bool:
         flag = tags is not None
         if flag:
             _log.info(
-                "APC tier: ckpt (layers: %d kv / %d rot / %d arr / "
-                "%d kvarn)",
+                "APC tier: ckpt (layers: %d kv / %d qsa / %d rot / "
+                "%d arr / %d kvarn)",
                 tags.count("kv"),
+                sum(1 for t in tags if t.startswith("qsa")),
                 sum(1 for t in tags if t.startswith("rot")),
                 tags.count("arr"),
                 sum(1 for t in tags if t.startswith("kvarn")))
@@ -320,28 +326,25 @@ def _ckpt_layout_live(batch, block_size: int = 16):
         return tags or _LAYOUT_UNSUPPORTED
     return _ckpt_layout_for(getattr(batch, "model", None), block_size)
 
-def _live_kv_quant_config():
+
+def _live_kv_quant_config(model=None):
     """The serve KV quant policy as a warm-merge config, or None.
 
-    Env-sourced (KV_BITS / KV_QUANT_SCHEME / KV_GROUP_SIZE) like the
-    owned B=1 spec path: serve config feeds these vars and the engine
-    reads the same channel, so the merged warm batch matches the live
-    ``_make_cache`` layer types. Key/value split overrides are not
-    exposed in gmlx config and stay None."""
-    raw = os.environ.get("KV_BITS", "")
-    if not raw:
+    The batched verdict stamped on the model rules the warm merge:
+    a warm hit joins a batch and MTP batches run fp16 KV. No stamp
+    means None. The only caller is the MTP prefill init, where fp16
+    is the only correct merge. Key/value split overrides stay None."""
+    stamped = getattr(model, "_gmlx_kv_policy", None)
+    if stamped is None:
         return None
-    try:
-        bits = float(raw)
-    except ValueError:
+    batched = getattr(stamped, "batched", None)
+    if batched is None or batched.verdict not in ("full", "partial"):
         return None
-    if bits <= 0:
-        return None
+    bits = float(batched.bits)
+    group = int(batched.group_size or 64)
     try:
         from mlx_vlm.kv_quant import from_legacy
-        pol = from_legacy(
-            bits, os.environ.get("KV_QUANT_SCHEME") or None,
-            int(os.environ.get("KV_GROUP_SIZE", "64") or 64))
+        pol = from_legacy(bits, None, group)
         return pol.to_config() if pol is not None else None
     except Exception:
         _log.warning("KV quant policy resolve failed; warm merge stays "
@@ -451,7 +454,7 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
             from mlx_vlm import apc as _apc
             warm, _ = _apc.make_warm_batch_exact_cache_multi(
                 [warm], prefix_lens=[prefix_len],
-                kv_quant_config=_live_kv_quant_config())
+                kv_quant_config=_live_kv_quant_config(batch.model))
         if warm and 0 < prefix_len < len(ids_list):
             batch.prompt_cache = warm
             # Matched blocks stay acquired until the stock post-prefill
@@ -1355,6 +1358,15 @@ def _mtp_prefill_init(batch) -> None:
             )
         return
 
+    # Serve wraps make_cache so mlx-lm-origin entries carry the mlx-vlm
+    # runtime's class identities; embedded and test users reach this init
+    # without that wrapper, and the L1 exact tiers dispatch on the vlm
+    # classes (an mlx-lm ArraysCache misses every adapter rule). Rebind
+    # here so both paths see the same identities. No-op when the entries
+    # are already vlm-origin.
+    from gmlx.cache.compat import rebind_to_runtime_origin
+    rebind_to_runtime_origin(batch.prompt_cache)
+
     # Upstream admission already restored a prefix and built this batch
     # suffix-only: the owned ladder's keys (L0 and L1 both) are full-prompt
     # token ids, so every lookup and store here would run in the wrong
@@ -1431,6 +1443,63 @@ def _mtp_prefill_init(batch) -> None:
         batch._mtp_apc_prefix_len = restored
 
 
+def _mtp_seed_stream_init(batch) -> None:
+    """Arm per-chunk drafter seeding for this request, if eligible.
+
+    Cold full prefill only (v1): any restored prefix (L0/L1/upstream) or warm
+    drafter sidecar keeps the deferred one-shot seed -- correctness identical,
+    seeding then still runs after the first token. Eligibility here plus the
+    per-chunk B re-check in prompt_step; a mid-request stop keeps the partial
+    seed KV (adopted at its true offset) and defers only the remainder.
+
+    The seed KV is request-scoped (built via drafter.make_cache, ridden on
+    batch state and handed over via a prompt_cache[0] stash exactly like the
+    drafter warm sidecar), never the drafter's own _cache: another request's
+    live decode round owns that object.
+    """
+    if hasattr(batch, "_mtp_seed_ctx"):
+        return
+    batch._mtp_seed_ctx = None
+    drafter = getattr(batch, "draft_model", None)
+    if (
+        _SEED_STREAM_DISABLED
+        or drafter is None
+        or not callable(getattr(drafter, "seed_chunk", None))
+        or getattr(drafter, "hidden_capture_limit", None) is not None
+        or int(batch._input_ids.shape[0]) != 1
+        or getattr(batch, "_mtp_upstream_warm", False)
+        or getattr(batch, "_mtp_chunk_hiddens", None)
+        or int(getattr(batch, "_mtp_l1_prefix_len", 0) or 0) != 0
+        or int(getattr(batch, "_processed_prompt_columns", 0) or 0) != 0
+        or not batch.prompt_cache
+        or getattr(batch.prompt_cache[0], "_kq_apc_drafter_warm", None)
+            is not None
+    ):
+        return
+    lp = getattr(batch.prompt_cache[0], "left_padding", None)
+    if isinstance(lp, mx.array) and lp.size and int(lp.max().item()) > 0:
+        return
+    try:
+        drafter.bind(batch.model)
+        seed_kv = drafter.make_cache()
+    except Exception:
+        _log.warning("seed streaming unavailable for this drafter; "
+                     "deferred seed", exc_info=True)
+        return
+    ctx = {
+        "kv": seed_kv,
+        "len": 0,
+        "active": True,
+        # Retain chunk hiddens alongside streaming whenever an L0 store can
+        # arm: the store needs full-prompt hidden. APC off => no retention
+        # while streaming (the capture-memory win lands in that config).
+        "retain": _get_spec_prefix_cache(batch.model) is not None,
+        "retained_from": 0,
+    }
+    batch._mtp_seed_ctx = ctx
+    batch.prompt_cache[0]._kq_seed_stream = ctx
+
+
 def _zero_pad_rows(arr, rows: int):
     pad = mx.zeros((rows - arr.shape[0],) + tuple(arr.shape[1:]), dtype=arr.dtype)
     return mx.concatenate([arr, pad], axis=0)
@@ -1485,6 +1554,12 @@ def install_full_prompt_mtp_prefill() -> None:
     # L1 plumbing is idempotent on its own flags, so it installs (or
     # repairs) even when the prefill override is already in place.
     _bind_l1_view()
+    # The L1 disk tier serializes through mlx-vlm's DiskBlockStore, which
+    # has no arm for QSAKVCache and refuses the whole exact snapshot.
+    # Installed here as well as in serve patches so embedded/test users of
+    # the spec engine get disk APC.
+    from gmlx.cache.apc_qsa import install_qsa_apc_support
+    install_qsa_apc_support()
     _install_apc_manager_stash()
     _install_ckpt_checkpoint_store()
     _install_plain_ckpt_decode()
@@ -1568,6 +1643,7 @@ def install_full_prompt_mtp_prefill() -> None:
                 self.prefill_step_size = _resolve_mtp_prefill_step()
             # APC lookup (L0 then L1) + prefix trim + store arming.
             _mtp_prefill_init(self)
+            _mtp_seed_stream_init(self)
 
         if not self.needs_processing():
             return 0
@@ -1591,43 +1667,90 @@ def install_full_prompt_mtp_prefill() -> None:
         checkpoint_col = self._next_apc_checkpoint_column()
         if checkpoint_col is not None:
             n = min(n, checkpoint_col - self._processed_prompt_columns)
+        # A final chunk under ~3 simdgroup tiles routes the projections
+        # through the skinny-M kernels, whose accumulation order seeds fp
+        # noise that stacked recurrent (GDN) layers amplify into
+        # first-token divergence. Absorb such a tail into this chunk so
+        # every chunk stays in the wide-GEMM regime. Checkpoint columns
+        # stay exact.
+        min_tail = env_int("GMLX_PREFILL_MIN_TAIL", 48)
+        if checkpoint_col is None and min_tail > 0:
+            rem1 = self._inputs_embeds.shape[1] - 1
+            tail = rem1 - n
+            if 0 < tail < min_tail:
+                n = rem1        # absorb: overshoot bounded by min_tail-1
         if n <= 0:
             return 0
         prompt_kwargs = self._prompt_kwargs_for_step(n)
         prompt_kwargs = _widen_prompt_rope_state(self, prompt_kwargs)
-        out = self.model(
-            self._input_ids[:, :n],
-            cache=self.prompt_cache,
-            inputs_embeds=self._inputs_embeds[:, :n],
-            n_to_process=n,
-            return_hidden=True,
-            **prompt_kwargs,
-        )
+        with lora_rows.published(getattr(self, "uids", [])):
+            out = self.model(
+                self._input_ids[:, :n],
+                cache=self.prompt_cache,
+                inputs_embeds=self._inputs_embeds[:, :n],
+                n_to_process=n,
+                return_hidden=True,
+                **prompt_kwargs,
+            )
         chunk_hidden = out.hidden_states[-1]
+        # Seed streaming: teacher-force this chunk into the request-scoped
+        # head KV at the head's running offset. The shifted span for
+        # columns [c0, c0+n) is prompt[c0+1 : c0+n+1], always in range
+        # because generate() keeps at least one residual column (the n-1
+        # cap above). A failure or a widened batch stops streaming but
+        # keeps the partial KV: the owned round adopts it at its true
+        # offset and seeds only the remainder.
+        seed_ctx = getattr(self, "_mtp_seed_ctx", None)
+        streamed = False
+        if seed_ctx is not None and seed_ctx["active"]:
+            if int(self._input_ids.shape[0]) != 1:
+                seed_ctx["active"] = False
+            else:
+                c0 = int(self._processed_prompt_columns)
+                try:
+                    self.draft_model.seed_chunk(
+                        self._mtp_full_input_ids[:, c0 + 1:c0 + n + 1],
+                        chunk_hidden, seed_ctx["kv"])
+                    seed_ctx["len"] += n
+                    streamed = True
+                except Exception:
+                    _log.warning("seed streaming failed at column %d; "
+                                 "deferred seed for the remainder", c0,
+                                 exc_info=True)
+                    seed_ctx["active"] = False
         # Teacher-forcing drafters (native MTP heads) seed their KV from the
-        # whole prompt hidden, so every chunk is retained. Shared-KV drafters
-        # (gemma-4 assistant) read only the last position: keeping just the
-        # newest chunk caps capture memory at O(chunk) instead of O(prompt)
-        # -- GBs at deep context.
+        # whole prompt hidden, so every chunk is retained except when the
+        # chunk just streamed and no L0 store is armed (nothing downstream
+        # reads it). Shared-KV drafters (gemma-4 assistant) read only the
+        # last position: keeping just the newest chunk caps capture memory
+        # at O(chunk) instead of O(prompt), GBs at deep context.
         if callable(getattr(self.draft_model, "prefill_from_target_hidden", None)):
-            self._mtp_chunk_hiddens.append(chunk_hidden)
-            # Window-limited heads can't use context beyond the trailing
-            # hidden_capture_limit positions; an uncapped capture pins the
-            # whole prompt's hidden (GBs at deep context). The drafter's
-            # teacher-force self-aligns to the trailing h_len positions.
-            limit = getattr(self.draft_model, "hidden_capture_limit", None)
-            if limit:
-                total = sum(int(h.shape[1]) for h in self._mtp_chunk_hiddens)
-                if total > limit:
-                    merged = (
-                        self._mtp_chunk_hiddens[0]
-                        if len(self._mtp_chunk_hiddens) == 1
-                        else mx.concatenate(self._mtp_chunk_hiddens, axis=1)
-                    )
-                    self._mtp_chunk_hiddens = [merged[:, -limit:]]
+            if streamed and not seed_ctx["retain"]:
+                pass
+            else:
+                if (seed_ctx is not None and not seed_ctx["retain"]
+                        and not self._mtp_chunk_hiddens):
+                    # Streaming stopped mid-request with no retention so
+                    # far: the retained span starts here, not at column 0.
+                    seed_ctx["retained_from"] = int(
+                        self._processed_prompt_columns)
+                self._mtp_chunk_hiddens.append(chunk_hidden)
+                # Window-limited heads can't use context beyond the trailing
+                # hidden_capture_limit positions; an uncapped capture pins the
+                # whole prompt's hidden (GBs at deep context). The drafter's
+                # teacher-force self-aligns to the trailing h_len positions.
+                limit = getattr(self.draft_model, "hidden_capture_limit", None)
+                if limit:
+                    total = sum(int(h.shape[1]) for h in self._mtp_chunk_hiddens)
+                    if total > limit:
+                        merged = (self._mtp_chunk_hiddens[0]
+                                  if len(self._mtp_chunk_hiddens) == 1
+                                  else mx.concatenate(self._mtp_chunk_hiddens, axis=1))
+                        self._mtp_chunk_hiddens = [merged[:, -limit:]]
         else:
             self._mtp_chunk_hiddens = [chunk_hidden]
-        mx.eval([c.state for c in self.prompt_cache] + [chunk_hidden])
+        mx.eval([c.state for c in self.prompt_cache] + [chunk_hidden]
+                + ([c.state for c in seed_ctx["kv"]] if streamed else []))
         self._processed_prompt_columns += n
         # The ckpt cursor rides the wrapped stock store (see
         # _install_ckpt_checkpoint_store).
@@ -1691,17 +1814,39 @@ def install_full_prompt_mtp_prefill() -> None:
                     )
             return result
         chunk_hiddens = getattr(self, "_mtp_chunk_hiddens", None)
+        full_ids = getattr(self, "_mtp_full_input_ids", None)
+        l1_prefix = int(getattr(self, "_mtp_l1_prefix_len", 0) or 0)
         if not chunk_hiddens:
             # No captured chunks: the whole (remaining) prompt went through
             # the final generate forward, so stock prompt_tokens/hidden are
-            # already an aligned pair (suffix-only on an L1 hit).
-            return result
-        parts = chunk_hiddens + [result.hidden]
-        full_hidden = mx.concatenate(parts, axis=1)
-        result.hidden = full_hidden
-        full_ids = getattr(self, "_mtp_full_input_ids", None)
-        l1_prefix = int(getattr(self, "_mtp_l1_prefix_len", 0) or 0)
-        if full_ids is not None:
+            # already an aligned pair (suffix-only on an L1 hit) and
+            # result.hidden needs no rebuild; with seed streaming and no
+            # retention, result.hidden is already the residual unstreamed
+            # tail (retention accompanies an armed L0 store, so none can
+            # fire here). The L0 store below must still run for the
+            # single-shot case: arch prefill profiles can raise the step
+            # past typical prompt lengths (qwen4exp defaults to 8192), so
+            # sub-step prompts land here and still need their warm-start
+            # entry.
+            full_hidden = result.hidden
+        else:
+            parts = chunk_hiddens + [result.hidden]
+            full_hidden = mx.concatenate(parts, axis=1)
+        seed_ctx = getattr(self, "_mtp_seed_ctx", None)
+        seed_len = int(seed_ctx["len"]) if seed_ctx else 0
+        if chunk_hiddens:
+            if seed_len > 0:
+                # Columns [0, seed_len) are already teacher-forced into
+                # the streamed head KV; hand the owned round only the
+                # residual hidden so its seed call covers exactly the
+                # unstreamed tail at the adopted offset. full_hidden (the
+                # retained span) still feeds the L0 store below, which
+                # needs the whole prompt.
+                rfrom = int(seed_ctx.get("retained_from") or 0)
+                result.hidden = full_hidden[:, seed_len - rfrom:]
+            else:
+                result.hidden = full_hidden
+        if chunk_hiddens and full_ids is not None:
             # On an L1 hit the captured hidden covers only the forwarded
             # suffix, so hand the drafter the matching suffix tokens: the
             # teacher-forcing (token, hidden) pair must stay positionally
@@ -1725,17 +1870,39 @@ def install_full_prompt_mtp_prefill() -> None:
         # Skipped on an L1 hit: hidden covers only the suffix, and L0
         # entries pair full-prompt keys with full-prompt hidden.
         b = int(full_hidden.shape[0]) if full_ids is not None else 0
+        # With streaming, full_hidden covers the whole prompt only when
+        # retention ran from column 0: after a mid-request streaming stop
+        # the retained span starts past column 0, and with no retention at
+        # all full_hidden is just the residual tail. Neither must ever be
+        # stored as a full-prompt entry.
+        full_covers_prompt = seed_len == 0 or (
+            bool(chunk_hiddens)
+            and int(seed_ctx.get("retained_from") or 0) == 0)
         spec_cache = (
             _get_spec_prefix_cache(self.model)
-            if b == 1 and l1_prefix == 0
+            if b == 1 and l1_prefix == 0 and full_covers_prompt
             and not getattr(self, "_mtp_upstream_warm", False) else None
         )
         if spec_cache is not None and full_ids is not None:
-            spec_cache.store(full_ids, result.prompt_cache, full_hidden)
+            # Window-limited heads only use the trailing capture window;
+            # chunked prefill already trimmed, single-shot must match (an
+            # uncapped entry pins the whole prompt's hidden for nothing).
+            limit = getattr(self.draft_model, "hidden_capture_limit", None)
+            store_hidden = (full_hidden if not limit
+                            else full_hidden[:, -int(limit):])
+            spec_cache.store(full_ids, result.prompt_cache, store_hidden)
             _log.info(
                 "APC store: tokens=%d layers=%d",
                 int(full_ids.shape[1]),
                 len(result.prompt_cache),
+            )
+        else:
+            _log.debug(
+                "APC store skipped: b=%d l1_prefix=%d upstream_warm=%s "
+                "full_ids=%s",
+                b, l1_prefix,
+                getattr(self, "_mtp_upstream_warm", False),
+                "set" if full_ids is not None else "None",
             )
 
         return result
@@ -1758,6 +1925,32 @@ def install_full_prompt_mtp_prefill() -> None:
 _CONTINUOUS_BATCH_FLAG = "_kq_gguf_continuous_batch"
 _RELEASED_FLAG = "_kq_gguf_spec_released"
 _RELEASE_PENDING_FLAG = "_kq_gguf_spec_release_pending"
+
+
+def dequantize_lift_cache(c):
+    """Dequantize a B=1 QuantizedKVCache into a one-row BatchKVCache.
+
+    QuantizedKVCache has no merge, and the B>1 MTP arm runs fp16 KV
+    anyway, so the lift performs the same conversion the batch-build
+    swap does, at preemption or injection time, as a one-off O(depth)
+    copy. Without this every kv-bits MTP preemption declined into a
+    drain-wait and queued rows stalled behind the live generation."""
+    from mlx_vlm.models.cache import BatchKVCache
+
+    lifted = BatchKVCache([0])
+    L = c.offset
+    if L:
+        keys = mx.dequantize(
+            *(mx.contiguous(t[..., :L, :]) for t in c.keys),
+            group_size=c.group_size, bits=c.bits)
+        values = mx.dequantize(
+            *(mx.contiguous(t[..., :L, :]) for t in c.values),
+            group_size=c.group_size, bits=c.bits)
+        lifted.update_and_fetch(keys, values)
+    stamp = getattr(c, "_gmlx_cascade", None)
+    if stamp is not None:
+        lifted._gmlx_cascade = stamp
+    return lifted
 
 
 def install_continuous_batch_admission() -> None:
@@ -2010,6 +2203,10 @@ def install_continuous_batch_admission() -> None:
         injection path applies to incoming caches)."""
         if hasattr(c, "filter") and hasattr(c, "extend"):
             return c
+        from gmlx.cache.compat import cache_types
+
+        if isinstance(c, cache_types("QuantizedKVCache")):
+            return dequantize_lift_cache(c)
         lifted = type(c).merge([c])
         stamp = getattr(c, "_gmlx_cascade", None)
         if stamp is not None:
@@ -2037,6 +2234,19 @@ def install_continuous_batch_admission() -> None:
             return False
         last = getattr(self, "_kq_last_tokens", {}).get(self._all_uids[0])
         if last is None:
+            return False
+        # Every cache must be batch-liftable before the generator
+        # closes. A quantized B=1 cache lifts by dequantize. Anything
+        # else unliftable declines into the drain-wait.
+        from gmlx.cache.compat import cache_types
+
+        quant_single = cache_types("QuantizedKVCache")
+        if not all(
+            (hasattr(c, "filter") and hasattr(c, "extend"))
+            or hasattr(type(c), "merge")
+            or isinstance(c, quant_single)
+            for c in self.prompt_cache
+        ):
             return False
         it = self._rounds_iter
         captured = []
@@ -2081,6 +2291,12 @@ def install_continuous_batch_admission() -> None:
 
     def _next_with_injection(self):
         pending = getattr(self, "_pending_injections", None)
+        # Physical-row uids for the owned rounds loop (it has no batch
+        # object): read once at generator start, injected rows carry theirs.
+        try:
+            self.model._kq_row_uids = list(self._all_uids)
+        except AttributeError:      # attribute-less model stand-ins
+            pass
         # Mid-flight adoption works only when the batch rounds generator is
         # running: it drains model._generator_injections at its round
         # boundaries. The scalar (B=1) generator never does, so a live
@@ -2361,15 +2577,16 @@ def install_spec_kv_quant() -> None:
     trim the target. The single-stream ``QuantizedKVCache`` can trim --
     packing is per-token along head_dim, so trim is an offset move -- and
     the model rollback already goes through ``is_trimmable()``/``trim()``.
-    ``KV_QUANT_SCHEME=kvarn`` converts the same B=1 caches to
-    ``KVarNKVCache`` instead (rollback rides the stage/horizon regions),
-    declining targets whose verify path reads shared K/V back from cache
-    state. Each plain KVCache converts at construction (empty, so
-    conversion is free); SSM / linear-attention / pooled caches pass
-    through untouched. Sliding-window stacks drop the flag (parity with
-    the plain path, which cannot quantize rotating caches). B>1 MTP keeps
-    stock behavior with a one-shot warning (ragged rollback on packed rows
-    is unsupported). No-op unless KV_BITS or scheme kvarn is set at server
+    The shared KV policy picks the layers: growing KV converts at
+    construction (empty, so conversion is free), quantizable pools pack
+    at rest, and windows, recurrent state, and opt-outs stay fp16 at any
+    nesting depth. ``KV_QUANT_SCHEME=kvarn`` converts the same B=1 caches
+    to ``KVarNKVCache`` instead (rollback rides the stage/horizon
+    regions), declining targets whose verify path reads shared K/V back
+    from cache state; its converter is still the flat exact-type scan, so
+    it reaches neither nested KV members nor pools. B>1 MTP keeps stock
+    behavior with a one-shot warning (ragged rollback on packed rows is
+    unsupported). No-op unless KV_BITS or scheme kvarn is set at server
     boot. Kill switch: GMLX_SPEC_KV_QUANT=0."""
     from mlx_vlm.generate import ar as _ar
     from mlx_vlm.server import generation as _gen
@@ -2384,12 +2601,11 @@ def install_spec_kv_quant() -> None:
 
     from gmlx.cache.compat import cache_types
 
-    plain_kv = cache_types("KVCache")
-    rotating = cache_types("RotatingKVCache") + cache_types("BatchRotatingKVCache")
     _orig = _su.make_speculative_prompt_cache
     _noted = [False]
     _warned_batch = [False]
-    _warned_rotating = [False]
+    _warned_dropped = [False]
+    _warned_stock = [False]
     _warned_kvarn = [False]
 
     def _decline_kvarn(reason: str):
@@ -2456,26 +2672,53 @@ def install_spec_kv_quant() -> None:
         if draft_kind != "mtp":
             return caches
         if batch_size != 1:
-            if not _warned_batch[0]:
+            # Force fp16 batch KV: the stock rollback misfiles
+            # BatchQuantizedKVCache as an SSM cache and never trims
+            # rejected drafts.
+            # to_batch_cache also quantizes nested subcaches. Walk
+            # into CacheList entries.
+            from mlx_vlm.models.cache import BatchKVCache
+
+            batch_quant = cache_types("BatchQuantizedKVCache")
+
+            def _swap(c):
+                if isinstance(c, batch_quant):
+                    return BatchKVCache(left_padding), 1
+                inner = getattr(c, "caches", None)
+                if inner is None:
+                    return c, 0
+                subs = [_swap(s) for s in inner]
+                n = sum(k for _, k in subs)
+                if n:
+                    c.caches = tuple(s for s, _ in subs)
+                return c, n
+
+            swapped = 0
+            for e, c in enumerate(caches):
+                caches[e], n_sw = _swap(c)
+                swapped += n_sw
+            if swapped and not _warned_batch[0]:
                 _warned_batch[0] = True
                 _log.warning(
                     "KV quantization with MTP at batch size %d: packed "
-                    "batch rollback is unsupported; batched rows keep the "
-                    "stock cache",
-                    batch_size,
-                )
+                    "batch rollback is unsupported; %d layers run fp16 KV",
+                    batch_size, swapped)
             return caches
-        if any(isinstance(c, rotating) for c in caches):
-            if not _warned_rotating[0]:
-                _warned_rotating[0] = True
+        from gmlx.models.qwen35.gdn import stock_gdn_fallback
+
+        mt = (getattr(lm, "model_type", None)
+              or getattr(getattr(lm, "config", None), "model_type", None))
+        if stock_gdn_fallback(mt):
+            # The bare-stock fallback slices keys as raw arrays and
+            # crashes on quantized tuples.
+            if not _warned_stock[0]:
+                _warned_stock[0] = True
                 _log.warning(
-                    "KV quantization dropped on the MTP path: "
-                    "sliding-window cache stack cannot quantize"
-                )
+                    "KV quantization dropped on the MTP path: the "
+                    "GMLX_QWEN_OWNED=0 stock fallback cannot verify on a "
+                    "quantized KV cache")
             return caches
         if kind == "kvarn":
-            from gmlx.cache.compat import cache_types
-
             if any(type(c) in cache_types("BatchKVCache") for c in caches):
                 _decline_kvarn(
                     "serve spec prefill keeps the stock batch cache "
@@ -2484,22 +2727,32 @@ def install_spec_kv_quant() -> None:
                 return caches
             return _kvarn_spec_convert(lm, caches)
         bits, group = params[1], params[2]
-        out = []
+        # The shared policy owns layer selection: nested KV members,
+        # pools, windows, and opt-outs at any depth.
+        from gmlx.cache.kv_policy import (arm_stack, kv_line,
+                                          quantize_kv_members,
+                                          resolve_kv_quant_policy)
+
+        policy = resolve_kv_quant_policy(
+            caches, kv_bits=bits, kv_group_size=group, mode="single")
+        if policy.verdict not in ("full", "partial"):
+            if not _warned_dropped[0]:
+                _warned_dropped[0] = True
+                _log.warning("%s", kv_line("MTP spec path", policy))
+            return caches
+
+        # hold=False: this path converts below, so fp16 holds are inert.
+        armed = arm_stack(caches, policy, hold=False)
         n = 0
-        for c in caches:
-            if type(c) in plain_kv:
-                out.append(c.to_quantized(group_size=group, bits=bits))
-                n += 1
-            else:
-                out.append(c)
-        if n and not _noted[0]:
+        for i, plan in enumerate(policy.per_layer):
+            if plan.quantize:
+                caches[i], k = quantize_kv_members(
+                    caches[i], policy.bits, policy.group_size)
+                n += k
+        if (n or armed) and not _noted[0]:
             _noted[0] = True
-            print(
-                f"[kv] MTP spec path: {n}-layer target KV quantized "
-                f"({bits}-bit, group {group})",
-                flush=True,
-            )
-        return out
+            print(kv_line("MTP spec path", policy), flush=True)
+        return caches
 
     _quantizing_spec_cache.__dict__[_SPEC_KV_QUANT_FLAG] = True
     _su.make_speculative_prompt_cache = _quantizing_spec_cache

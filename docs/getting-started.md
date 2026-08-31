@@ -171,10 +171,10 @@ are multi-gigabyte downloads - minutes to an hour depending on your connection -
 with progress, rate, and resume built in.
 
 `validate` accepts a repo, a folder, a pasted browser link, or an exact file. Given
-a repo it lists every quant variant as a ready-to-paste ref. K-quant, legacy, and
-IQ files all load. In the rare case a file uses a codec with no kernel (the
-ternary TQ types, for instance), the verdict names it so you can pick another
-variant. Uniform K-quant files also decode faster than heavily mixed ones.
+a repo it lists every quant variant as a ready-to-paste ref. K-quant, legacy,
+IQ, and structured-ternary (STQ1_0) files all load. In the rare case a file uses
+a codec with no kernel (the plain ternary TQ types, for instance), the verdict
+names it so you can pick another variant. Uniform K-quant files also decode faster than heavily mixed ones.
 
 Set `HF_TOKEN` for gated or private repos. If you already have a model library
 from LM Studio, it serves as-is (the files are plain GGUFs):

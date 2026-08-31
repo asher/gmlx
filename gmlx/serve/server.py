@@ -34,6 +34,7 @@ worker, no reload) so the patches hold.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import sys
@@ -1523,6 +1524,14 @@ def _single_model_cfg(a) -> ServerCfg:
         decode_feeder=getattr(a, "decode_feeder", None),
         pin=True,                            # the single model is always pinned
     )
+    models = {mid: model}
+    if model.adapter:
+        # The bare base under `<id>-base` on the same resident entry (the
+        # adapter is a per-request slot, not a second load), so a client or a
+        # bench config can address both without a config file. Ids may not
+        # carry `@` (it addresses profiles), hence the `-base` suffix.
+        models[f"{mid}-base"] = dataclasses.replace(model, id=f"{mid}-base",
+                                                    adapter=None)
     return ServerCfg(
         host=a.host or "127.0.0.1",
         port=a.port or 8080,
@@ -1530,7 +1539,7 @@ def _single_model_cfg(a) -> ServerCfg:
         max_models=a.max_models,
         hf_cache=a.hf_cache,
         defaults=ServerDefaults(model=mid),
-        models={mid: model},
+        models=models,
     )
 
 
@@ -1581,6 +1590,10 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     if install_cb_phase_flips():
         print(f"[server] command buffer caps: per-phase (decode {COARSE}, "
               f"prefill {FINE})")
+    else:
+        print("[server] command buffer caps: not installed "
+              "(GMLX_CB_PHASE=0 or mlx-kquant lacks set_cb_caps); streamed "
+              "models run uncapped")
     # Single-model --hf-source override (niche): re-register the VLM with the
     # explicit processor source (ModelCfg carries no hf_source field).
     if a.model and a.hf_source and a.mmproj:
@@ -1866,6 +1879,13 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
         server_patches.spawn_preload_warm(preload, extras)
         if extras:
             print(f"[server] preload: warming {', '.join(extras)} in background")
+
+    # Record what code this server actually booted with. The launcher stamps
+    # at spawn, but launchd respawns bypass it (login, crash recovery); the
+    # stamp lets status/launch flag a server that predates a source change.
+    from . import lifecycle
+
+    lifecycle.stamp_run(host, port)
 
     loop = "uvloop" if _has_uvloop() else "auto"
     uvicorn.run("mlx_vlm.server:app", host=host, port=port, workers=1,

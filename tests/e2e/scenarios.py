@@ -102,10 +102,67 @@ def pc_models_exactly(expected_ids: set) -> Callable:
 
 def pc_apc_enabled(expected: bool) -> Callable:
     def _check(client):
-        st, body = client.health()
-        got = bool(body.get("apc_enabled")) if isinstance(body, dict) else None
+        # /health is liveness-only. The enabled marker lives on
+        # /v1/cache/stats and answers false when no manager is wired.
+        # Compare the raw value so a missing field fails.
+        st, body = client.cache_stats()
+        got = body.get("enabled") if isinstance(body, dict) else None
         ok = (st == 200 and got == expected)
         return [CheckResult("apc_enabled", ok, f"expected={expected} got={got}")]
+    return _check
+
+
+def pc_kv_engagement(model: str, *, verdict: str,
+                     layers_quantized: Optional[int] = None,
+                     verdict_batched: Optional[str] = None) -> Callable:
+    """/v1/models must carry a non-null kv_quant with the expected verdict
+    on a row whose resident flag is true. Both legs are load-bearing: a
+    missing field on a non-resident row is exactly the engagement blind
+    spot that let the kv tier run fp16 for months."""
+    def _check(client):
+        st, body = client.models()
+        row = None
+        if st == 200 and isinstance(body, dict):
+            row = next((m for m in body.get("data", [])
+                        if m.get("id") == model), None)
+        if row is None:
+            return [CheckResult("kv_engagement", False,
+                                f"no /v1/models row for {model} (status={st})")]
+        if not row.get("resident"):
+            return [CheckResult("kv_engagement", False,
+                                "model not resident: engagement unprovable")]
+        kq = row.get("kv_quant")
+        if not isinstance(kq, dict):
+            return [CheckResult("kv_engagement", False,
+                                f"kv_quant={kq!r} on a resident row")]
+        problems = []
+        if kq.get("verdict") != verdict:
+            problems.append(f"verdict={kq.get('verdict')} want {verdict}")
+        if (layers_quantized is not None
+                and kq.get("layers_quantized") != layers_quantized):
+            problems.append(f"layers_quantized={kq.get('layers_quantized')} "
+                            f"want {layers_quantized}")
+        if (verdict_batched is not None
+                and kq.get("verdict_batched") != verdict_batched):
+            problems.append(f"verdict_batched={kq.get('verdict_batched')} "
+                            f"want {verdict_batched}")
+        return [CheckResult("kv_engagement", not problems,
+                            "; ".join(problems) if problems else str(kq))]
+    return _check
+
+
+def pc_kv_absent(model: str) -> Callable:
+    """Without kv_bits there is no policy: kv_quant must be null (a
+    phantom verdict would be as misleading as a missing one)."""
+    def _check(client):
+        st, body = client.models()
+        row = next((m for m in (body or {}).get("data", [])
+                    if m.get("id") == model), None) if st == 200 else None
+        if row is None:
+            return [CheckResult("kv_absent", False, f"no row (status={st})")]
+        ok = row.get("kv_quant") is None
+        return [CheckResult("kv_absent", ok,
+                            f"kv_quant={row.get('kv_quant')!r}")]
     return _check
 
 
@@ -117,7 +174,8 @@ def _resident(client) -> list:
 
 
 def pc_cache_reuse(model: str, prompt: P.PromptInstance,
-                   *, require_exercised: bool = True) -> Callable:
+                   *, require_exercised: bool = True,
+                   chat_kwargs=None) -> Callable:
     """Send the same greedy prompt twice; the second must be byte-identical (cache
     must not corrupt output) and a cache counter should advance (cache exercised).
 
@@ -126,12 +184,14 @@ def pc_cache_reuse(model: str, prompt: P.PromptInstance,
     {block,exact}_apc`` admit only ``KVCache`` & friends, never ``QuantizedKVCache``),
     so no counter moves - the model just recomputes, uncorrupted. We still assert the
     real invariant (no corruption / no crash) and surface the counters for inspection."""
+    extra = dict(chat_kwargs or {})
+
     def _check(client):
         before = client.cache_stats()[1]
         st1, b1 = client.chat(model, prompt.messages, max_tokens=prompt.max_tokens,
-                              temperature=0.0)
+                              temperature=0.0, **extra)
         st2, b2 = client.chat(model, prompt.messages, max_tokens=prompt.max_tokens,
-                              temperature=0.0)
+                              temperature=0.0, **extra)
         after = client.cache_stats()[1]
         t1 = checks.extract_chat_text(b1) if isinstance(b1, dict) else None
         t2 = checks.extract_chat_text(b2) if isinstance(b2, dict) else None
@@ -391,7 +451,41 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
             targets=[ReqTarget("recall", "m",
                                prompts=[P.p_long_ctx_needle(f"VIOLET{label.upper()}88"),
                                         P.p_long_gen()])],
-            notes="KV-quant must still recall a planted fact at depth without looping"))
+            post=[pc_kv_engagement("m", verdict="partial",
+                                   layers_quantized=2)
+                  if load else pc_kv_absent("m")],
+            notes="KV-quant must still recall a planted fact at depth without "
+                  "looping. gemma-4 is an SWA stack: the engine quantizes only "
+                  "its 2 global-attention layers, so this covers the partial "
+                  "policy; kv_dense_* covers the all-layers path"))
+
+    # kv: the issue #104 regression scenarios on a dense stack, every
+    # attn layer but the last quantized. kv8 adds the long generation
+    # with floors only. kv4 runs the needle only: 4-bit long generation
+    # on a 0.6B fails quality floors even when correct.
+    for label, load, extra in (
+            ("kv8", {"kv_bits": 8, "kv_group_size": 64,
+                     "quantized_kv_start": 0}, [P.p_long_gen(judge=False)]),
+            ("kv4", {"kv_bits": 4, "kv_group_size": 32,
+                     "quantized_kv_start": 0}, [])):
+        add(Scenario(
+            key=f"kv_dense_{label}", tier="kv", needs=["qwen3_0_6b_q8"],
+            title=f"Quantized KV, dense stack: {label} on qwen3-0.6b "
+                  "(27 of 28 attn layers quantized) - needle recall",
+            config={
+                "profiles": {"p": {"sampling": {"temperature": 0.0},
+                                   "load": load}},
+                "models": {"m": _model_entry(qwen8 or "", profile="p")},
+            },
+            targets=[ReqTarget("recall", "m",
+                               prompts=[P.p_long_ctx_needle(f"CORAL{label.upper()}55")]
+                               + extra)],
+            post=[pc_kv_engagement("m", verdict="full",
+                                   layers_quantized=27,
+                                   verdict_batched="full")],
+            notes="issue #104 regression: on-the-fly quantized-cache prefill "
+                  "through the kv8 flash arm; corruption fails the anchor "
+                  "instantly on a fully quantized stack"))
 
     # cache: disabled / memory / disk / diskxkv8 / ckpt
     # Qwen3-0.6B exercises the block tier (plain KVCache prefix reuse); the
@@ -406,7 +500,7 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
                 "models": {"m": _model_entry(qwen4 or "")}},
         targets=[ReqTarget("plain", "m", prompts=[P.p_capital()])],
         post=[pc_apc_enabled(False)],
-        notes="apc off path still serves; /health reports apc_enabled=false"))
+        notes="apc off path still serves; /v1/cache/stats reports enabled=false"))
 
     add(Scenario(
         key="cache_memory", tier="cache", needs=["qwen3_0_6b_q4"],
@@ -454,7 +548,11 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
         targets=[ReqTarget("warm_recall", "m",
                            prompts=[P.p_long_ctx_needle("TEALKV8RUN")])],
         post=[pc_cache_reuse("m", P.p_long_ctx_needle("CACHEDNEEDLE9"),
-                             require_exercised=False),
+                             require_exercised=False,
+                             # qwen3 spends the budget thinking, so
+                             # compare real content
+                             chat_kwargs={"chat_template_kwargs":
+                                          {"enable_thinking": False}}),
               pc_disk_cache_created(disk_dir_kv)],
         notes="quantized-KV + disk-cache co-enabled: mlx-vlm bypasses APC under a "
               "QuantizedKVCache, so this asserts graceful degradation (no crash, no "
@@ -586,6 +684,35 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
             post=[_pc_mtp_lossless("spec", "base")],
             notes="greedy spec vs greedy base, token-for-token; mismatch is a finding"))
 
+    # mtp x kv-bits: native-MTP hybrid under quantized target KV.
+    # Greedy equality crosses the B=1 spec packing and the batch-built
+    # cache. Engagement asserts partial when idle, dropped when batched.
+    q35 = reg.find("qwen35_9b_mtp")
+    if reg.have("qwen35_9b_mtp"):
+        add(Scenario(
+            key="mtp_kv8", tier="mtp", needs=["qwen35_9b_mtp"],
+            title="MTP x kv8: qwen3.5-9B native MTP, quantized target KV",
+            config={
+                "profiles": {"p": {"sampling": {"temperature": 0.0},
+                                   "load": {"kv_bits": 8,
+                                            "kv_group_size": 64}}},
+                "models": {
+                    "spec": _model_entry(q35, native_mtp=True, profile="p"),
+                    "base": _model_entry(q35, profile="p")}},
+            targets=[ReqTarget("recall", "spec",
+                               prompts=[P.p_long_ctx_needle("MAROONMTP88")])],
+            post=[_pc_mtp_lossless(
+                      "spec", "base",
+                      # thinking on returns empty content and the
+                      # compare would pass vacuously
+                      chat_kwargs={"chat_template_kwargs":
+                                   {"enable_thinking": False}}),
+                  pc_kv_engagement("spec", verdict="partial",
+                                   verdict_batched="dropped")],
+            notes="issue #104 follow-on: the MTP arm's kv path was the "
+                  "reporter's second symptom; the needle exercises the "
+                  "flash arm through the spec prefill"))
+
     return out
 
 
@@ -605,28 +732,27 @@ def _pc_two_resident_entries_same_path(path: str) -> Callable:
     return _check
 
 
-def _pc_mtp_lossless(spec_id: str, base_id: str) -> Callable:
+def _pc_mtp_lossless(spec_id: str, base_id: str, *, chat_kwargs=None) -> Callable:
+    extra = dict(chat_kwargs or {})
+
     def _check(client):
         out = []
         for pr in (P.p_capital(), P.p_instruct(), P.p_count()):
             _, b_spec = client.chat(spec_id, pr.messages, max_tokens=pr.max_tokens,
-                                    temperature=0.0)
+                                    temperature=0.0, **extra)
             _, b_base = client.chat(base_id, pr.messages, max_tokens=pr.max_tokens,
-                                    temperature=0.0)
+                                    temperature=0.0, **extra)
             t_spec = checks.extract_chat_text(b_spec) if isinstance(b_spec, dict) else None
             t_base = checks.extract_chat_text(b_base) if isinstance(b_base, dict) else None
             out.append(CheckResult(f"lossless[{pr.key}]", bool(t_base) and t_spec == t_base,
                                    "identical" if t_spec == t_base
                                    else f"DIVERGED spec={str(t_spec)[:60]!r} "
                                         f"base={str(t_base)[:60]!r}"))
-        # Anti-vacuous guard: the comparison is only meaningful if `base` loaded
-        # NON-speculatively. One GGUF backs both ids; if the path-keyed MTP registry
-        # leaked the drafter into base's build (the worker-thread bug class), base
-        # would also be MTP and spec==base would pass for the wrong reason. The MTP
-        # target wrapper logs exactly once per speculative build, so the log must
-        # carry exactly one - proving base is the bare base.
+        # The compare is meaningful only if base loaded without a
+        # drafter. The "[mtp] drafter:" INFO line logs once per
+        # speculative build, so the log must carry exactly one.
         n_mtp = _count_in_log(getattr(client, "log_path", None),
-                              "(MTP target wrapper)")
+                              "[mtp] drafter:")
         out.append(CheckResult(
             "provenance:base_is_non_spec", n_mtp == 1,
             f"{n_mtp} MTP target build(s) (expect 1: only {spec_id!r}, not {base_id!r})"))

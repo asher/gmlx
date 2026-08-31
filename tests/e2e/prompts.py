@@ -105,13 +105,14 @@ def p_count() -> PromptInstance:
         anchors={"substrs": ["1", "20", "40"], "mode": "all"})
 
 
-def p_long_gen() -> PromptInstance:
+def p_long_gen(*, judge: bool = True) -> PromptInstance:
+    # judge=False keeps the structural floors but skips coherence judging.
     return PromptInstance(
         "long_gen",
         [_u("Write a clear, well-structured 6-paragraph explanation of how a "
             "four-stroke internal combustion engine works, covering intake, "
             "compression, power, and exhaust strokes, plus valves and ignition.")],
-        max_tokens=900, kind="long_gen",
+        max_tokens=900, kind="long_gen", judge=judge,
         judge_request="write a detailed 6-paragraph explanation of a four-stroke engine")
 
 

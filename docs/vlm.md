@@ -117,9 +117,12 @@ consumer.
   device, and it moves the vision tower with it. Send only one request at a
   time to a server that streams a VLM (see [streaming.md](streaming.md)).
 - Speculative decoding (`--speculative`) *does* combine with `--mmproj` when a drafter
-  is available -- a native MTP head (e.g. Qwen3.5/3.6) or `--draft-gguf`. Text-only
-  turns speculate; media turns fall back to plain decode. With `--mmproj` but no
-  drafter source, `--speculative` still errors loudly (it suggests `--draft-gguf`).
+  is available -- a native MTP head (e.g. Qwen3.5/3.6), a `--draft-gguf` companion
+  (gemma4 assistant, DFlash/DFlash2, qwen4exp-mtp), or an autodetected companion
+  for a companion-only family (Qwen3.8-Flash-Next, Muse Glimmer). Text-only turns
+  speculate; media turns fall back to plain decode. Every drafter shape the text
+  path supports works on the VLM path. With `--mmproj` but no drafter source,
+  `--speculative` still errors loudly (it suggests `--draft-gguf`).
 - Qwen3-Omni multimodal generation rides mlx-vlm's `qwen3_omni_moe` path, which we
   have found unreliable in stock mlx-vlm. Treat vision/audio input on Omni as
   experimental. Text generation on the Omni thinker tower is solid.

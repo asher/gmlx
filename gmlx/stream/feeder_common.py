@@ -83,18 +83,38 @@ def slot_view(arr, nbytes: int, shape):
     return mx.view(wide, mx.uint8)
 
 
+def _expert_loras(proj):
+    """Every expert LoRA stamped on a projection: the first adapter and any
+    further slots (one resident base serving several adapted ids)."""
+    lo = getattr(proj, "_kq_lora", None)
+    if lo is None:
+        return ()
+    return (lo,) + tuple(getattr(proj, "_kq_lora_extra", None) or ())
+
+
 @contextmanager
-def swapped_weights(entry: dict, views: dict):
+def swapped_weights(entry: dict, views: dict, slot_owner=None):
     """Swap each module's expert weight to ``views[kind]`` for the call body,
     restoring the originals on exit. ``entry`` is a layer's
-    ``{kind: (module, ...)}`` mapping."""
+    ``{kind: (module, ...)}`` mapping.
+
+    ``slot_owner`` (a callable returning the slot -> expert id table of the
+    swapped views, negative for empty / zeroed slots) rides along on a
+    projection carrying a live expert LoRA (``_kq_lora``): under the swap
+    the container receives slot ids, and the delta maps them back to the
+    expert whose weights the slot holds. ``None`` (the prefill ring stages
+    the whole stack in expert order) leaves the ids as they are."""
     saved = []
     try:
         for kind, (mod, *_) in entry.items():
             proj = getattr(mod, ATTRS[kind])
             saved.append((proj, proj.weight))
             proj.weight = views[kind]
+            for lo in _expert_loras(proj):
+                lo.owner = slot_owner
         yield
     finally:
         for proj, w in saved:
             proj.weight = w
+            for lo in _expert_loras(proj):
+                lo.owner = None

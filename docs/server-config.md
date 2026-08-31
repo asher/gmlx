@@ -120,7 +120,8 @@ target with `init --out FILE`.
 When serving one positional GGUF: `--mmproj FILE` (float mmproj, makes it a
 VLM), `--draft-gguf FILE` (assistant-shape drafter, implies `--speculative`),
 `--speculative` (native-head MTP), `--adapter FILE` (live GGUF LoRA over the
-base; text only), `--chat-template STR|PATH` (replace the GGUF's template),
+base; text only; the bare base is also registered as `<id>-base` on the same
+resident entry), `--chat-template STR|PATH` (replace the GGUF's template),
 `--stream-experts` / `--stream-cpu` (over-RAM MoE execution placement, see `stream:`
 below), the streamed-MoE levers `--moe-expert-mass P` / `--moe-experts K` /
 `--moe-miss-shed P` / `--moe-layer-shed P` / `--moe-prestage MODE` (see the
@@ -411,7 +412,7 @@ model fully resolved). Values are cited to the primary model cards in
 | `qwen2.5` | `qwen2`, `qwen2moe` | temperature=0.7 top_p=0.8 top_k=20 repetition_penalty=1.05 | - |
 | `gemma` | `gemma`, `gemma2`, `gemma3`, `gemma3n`, `gemma4`, `diffusion-gemma` | temperature=1.0 top_p=0.95 top_k=64 | - |
 | `gpt-oss` | `gpt-oss` | temperature=1.0 top_p=1.0 | `@reasoning-high`: temperature=1.0 top_p=1.0 reasoning_effort=high; `@reasoning-low`: temperature=1.0 top_p=1.0 reasoning_effort=low; `@reasoning-medium`: temperature=1.0 top_p=1.0 reasoning_effort=medium |
-| `glm` | `glm4`, `glm4moe`, `glm-dsa` | temperature=1.0 top_p=0.95 | - |
+| `glm` | `glm4`, `glm4moe`, `glm-dsa`, `glm5next` | temperature=1.0 top_p=0.95 | - |
 | `deepseek` | `deepseek2`, `deepseek4` | temperature=0.6 top_p=0.95 | - |
 | `minimax` | `minimax-m2`, `minimax-m3` | temperature=1.0 top_p=0.95 top_k=40 | - |
 | `nemotron` | `nemotron_h_moe` | temperature=1.0 top_p=0.95 | - |
@@ -610,7 +611,8 @@ models:
 ```
 
 Per-model keys: `path` (required), `profile`, `family`, `profiles`, `mmproj`,
-`draft_gguf`, `native_mtp`, `adapter`, `stream`, `moe_experts`, `moe_expert_mass`,
+`draft_gguf`, `native_mtp`, `adapter` (ids on one `path` that differ only in
+`adapter` share one resident entry; see [adapter-serving.md](adapter-serving.md)), `stream`, `moe_experts`, `moe_expert_mass`,
 `moe_miss_shed`, `moe_layer_shed`, `moe_prestage`, `prefill_feeder`,
 `decode_feeder`, `speculative`, `speculative_width_cap`, `overrides`
 (`{sampling, load, cache, system, chat_template, chat_template_kwargs,
@@ -977,9 +979,19 @@ are produced the engine forces `</think>` so the model answers. A per-request
 it is set, regardless of `enable_thinking`: it acts once the model actually
 opens a `<think>` block, and a response that never thinks is never
 force-closed. Works whether the template pre-fills `<think>` (e.g. GLM-5.2)
-or the model generates it (e.g. Qwen3). Not compatible with
-speculative-decoding models; the engine rejects it there, so such a request
-errors.
+or the model generates it (e.g. Qwen3).
+
+On MTP-drafted models the budget is enforced by the speculative round loop
+itself (the close lands whole at a round boundary, so the cap can overshoot
+by up to one draft block). What applies when:
+
+| Serve situation | thinking_budget outcome |
+|---|---|
+| MTP model, single request decoding alone | applied |
+| MTP model, requests batched together (coalesced arrivals, or a second request joining mid-decode) | dropped for those requests, with a server-log note; under concurrent traffic this is the common case |
+| MTP model, request preempted mid-decode | budget lost from that point |
+| MTP model, request with images/audio | applied when decoding alone (same as text); if the model's thinking markers cannot be resolved the budget is ignored with a log note |
+| Non-MTP speculative models (draft-model pairs) | rejected by the engine; such a request errors |
 
 Three more keys are honoured by gmlx's own server seams (mlx-vlm has no
 native support; a per-request field still wins over the profile):
@@ -1017,6 +1029,20 @@ models. Each maps 1:1 to the env var mlx-vlm reads at build:
 > `dtype` is likewise server-level. It could be applied per model, but the
 > reason to leave bfloat16 is that this GPU has no native bfloat16 arithmetic,
 > which is true of every model on the box. Set `server.dtype`.
+
+With `kv_bits` set, engagement is resolved per model at load on the real
+cache stack and logged as one `[kv]` line. The policy is layer by layer:
+growing attention KV quantizes except the last layer of a deep stack,
+sliding windows and recurrent state stay fp16, pooled caches pack at
+rest. `/v1/models` reports the result per resident model as `kv_quant`
+(`bits`, `group_size`, `layers_quantized`, `layers_fp16`, `verdict`,
+`verdict_batched`); `/health` carries the same field per resident entry.
+Verdicts: `full` (policy fully applied), `partial` (hybrid stack, the
+fp16 layers are counted), `dropped` (the model runs fp16 KV, reason
+logged), `error` (the model fails to load, e.g. `kv_bits` outside
+2/3/4/6/8 or split key/value bits). Speculative (MTP) models quantize at
+batch size 1 and run fp16 KV while requests are batched; `verdict_batched`
+reports that mode, and admission prices memory from it.
 
 `kv_quant_scheme: kvarn` converts every eligible layer's batch KV cache to
 KVarN (`kv_bits` picks the width, default 6; `kv_tail_tokens` sizes the

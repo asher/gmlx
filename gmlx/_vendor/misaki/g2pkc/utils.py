@@ -6,7 +6,7 @@ import os
 def adjust(arpabets):
     '''Modify arpabets so that it fits our processes'''
     string = " " + " ".join(arpabets) + " $"
-    string = re.sub("\d", "", string)
+    string = re.sub(r"\d", "", string)
     string = string.replace(" T S ", " TS ")
     string = string.replace(" D Z ", " DZ ")
     string = string.replace(" AW ER ", " AWER ")
@@ -245,7 +245,7 @@ def _get_examples():
     examples = []
     for line in text:
         if line.startswith("->"):
-            examples.extend(re.findall("([ㄱ-힣][ ㄱ-힣]*)\[([ㄱ-힣][ ㄱ-힣]*)]", line))
+            examples.extend(re.findall(r"([ㄱ-힣][ ㄱ-힣]*)\[([ㄱ-힣][ ㄱ-힣]*)]", line))
     _examples = []
     for inp, gt in examples:
         for each in gt.split("/"):

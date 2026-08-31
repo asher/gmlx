@@ -36,6 +36,14 @@ def owned_gdn_active(model_type) -> bool:
     return model_type in _QWEN_GDN_FAMILY and env_bool("GMLX_QWEN_OWNED", True)
 
 
+def stock_gdn_fallback(model_type) -> bool:
+    """True when a GDN-family model runs the bare-stock text fallback
+    (GMLX_QWEN_OWNED=0). The fallback has no verify patches and must
+    not receive quantized KV tuples."""
+    return (model_type in _QWEN_GDN_FAMILY
+            and not env_bool("GMLX_QWEN_OWNED", True))
+
+
 def _gdn_update_with_states_tiled(q, k, v, a, b, A_log, dt_bias, state, mask):
     """Sink-shaped scan, calling the tiled state-capturing ops directly
     (what upstream's ``gated_delta_update_with_states`` resolves to
@@ -204,7 +212,7 @@ class OwnedQwen3_5GatedDeltaNet(_L.Qwen3_5GatedDeltaNet):
             and (mask is None or not isinstance(mask, mx.array))
             and cache is not None
             and cache[1] is not None
-            and Dv % (16 if B == 1 else 32) == 0
+            and Dv % _gp.gdn_sg(B) == 0
             and self.head_k_dim % 32 == 0
         ):
             return _gp._gdn_fused_decode_body(
@@ -216,7 +224,7 @@ class OwnedQwen3_5GatedDeltaNet(_L.Qwen3_5GatedDeltaNet):
             and gdn_sink is not None
             and S > 1
             and _gp._gdn_fused_verify_kernel is not None
-            and Dv % 16 == 0
+            and Dv % _gp.gdn_sg(B) == 0
             and self.head_k_dim % 32 == 0
         ):
             return _gp._gdn_fused_verify_body(

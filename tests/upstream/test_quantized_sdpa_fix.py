@@ -166,6 +166,160 @@ def test_prefill_flash_threshold_and_kill(monkeypatch):
     assert mx.abs(got - ref).max().item() == 0.0
 
 
+def _strided_case(B=1, nq=8, nkv=4, L=16, kv=63, d=64, dtype=mx.float16,
+                  group=64, bits=8):
+    """Quantized tuples as the live caches produce them: step-rounded zero
+    buffers fetched as lazy slices, strided when kv is not a step
+    multiple."""
+    mx.random.seed(11)
+    q = mx.random.normal((B, nq, L, d)).astype(dtype)
+    k = mx.random.normal((B, nkv, kv, d)).astype(dtype)
+    v = mx.random.normal((B, nkv, kv, d)).astype(dtype)
+    step = 256
+    alloc = (kv + step - 1) // step * step
+
+    def store(x):
+        w, s, b = mx.quantize(x, group_size=group, bits=bits)
+        bufs = tuple(
+            mx.zeros((B, nkv, alloc, t.shape[-1]), dtype=t.dtype)
+            for t in (w, s, b))
+        for buf, t in zip(bufs, (w, s, b)):
+            buf[..., :kv, :] = t
+        return tuple(buf[..., :kv, :] for buf in bufs)
+
+    qk, qv = store(k), store(v)
+    mx.eval(q, *qk, *qv)
+    return q, qk, qv
+
+
+def _cpu_dequant(qt, group=64, bits=8):
+    """Ground truth independent of the Metal kernel under test."""
+    with mx.stream(mx.cpu):
+        return mx.dequantize(*qt, group_size=group, bits=bits)
+
+
+def _cpu_ref(q, qk, qv, mask, scale=0.125, group=64, bits=8):
+    kd = _cpu_dequant(qk, group, bits)
+    vd = _cpu_dequant(qv, group, bits)
+    return mx.fast.scaled_dot_product_attention(
+        mx.array(q), kd, vd, scale=scale, mask=mask)
+
+
+@pytest.mark.parametrize("group,bits", [(64, 8), (32, 8), (64, 4), (32, 4)])
+@pytest.mark.parametrize("kv", [63, 256])
+def test_prefill_flash_strided_cache_slices(group, bits, kv):
+    # issue #104: the flash arm must dequantize strided cache slices.
+    # kv=256 is the step-aligned (contiguous) control.
+    assert qf.install_quantized_sdpa_mask_fix()
+    q, qk, qv = _strided_case(L=16, kv=kv, group=group, bits=bits)
+    got = lm_base.quantized_scaled_dot_product_attention(
+        mx.array(q), qk, qv, 0.125, "causal", group_size=group, bits=bits)
+    ref = _cpu_ref(q, qk, qv, "causal", group=group, bits=bits)
+    err = mx.abs(got - ref).max().item()
+    assert err < 2e-3, f"flash arm vs cpu ref g={group} b={bits} kv={kv} err={err}"
+
+
+def test_prefill_flash_strided_batch_cache_end_to_end():
+    # Same check through BatchQuantizedKVCache.update_and_fetch slices.
+    pytest.importorskip("mlx_vlm.models.cache")
+    from mlx_vlm.models import cache as vcache
+
+    assert qf.install_quantized_sdpa_mask_fix()
+    mx.random.seed(11)
+    c = vcache.BatchQuantizedKVCache([0], group_size=64, bits=8)
+    k = mx.random.normal((1, 4, 63, 64)).astype(mx.float16)
+    v = mx.random.normal((1, 4, 63, 64)).astype(mx.float16)
+    qk, qv = c.update_and_fetch(k, v)
+    assert qk[0].shape[2] == 63  # sliced from the 256-step buffer
+    q = mx.random.normal((1, 8, 16, 64)).astype(mx.float16)
+    got = lm_base.quantized_scaled_dot_product_attention(
+        mx.array(q), qk, qv, 0.125, "causal")
+    ref = _cpu_ref(q, qk, qv, "causal")
+    err = mx.abs(got - ref).max().item()
+    assert err < 2e-3, f"flash arm on live batch-cache slices err={err}"
+
+
+# mlx #4381 fixed the encode-order bug in 0.32.2. The canaries are a
+# version bump gate: fail-closed in both directions, never delete on
+# failure.
+_MLX_STRIDED_FIX = (0, 32, 2)
+
+
+def _mlx_version_tuple():
+    parts = []
+    for tok in mx.__version__.split(".")[:3]:
+        num = "".join(ch for ch in tok if ch.isdigit())
+        parts.append(int(num or 0))
+    return tuple(parts)
+
+
+def _operand_buffers(kv=63, alloc=256, group=64, bits=8):
+    mx.random.seed(11)
+    k = mx.random.normal((1, 4, kv, 64)).astype(mx.float16)
+    w, s, b = mx.quantize(k, group_size=group, bits=bits)
+    bufs = []
+    for t in (w, s, b):
+        buf = mx.zeros((1, 4, alloc, t.shape[-1]), dtype=t.dtype)
+        buf[..., :kv, :] = t
+        bufs.append(buf)
+    mx.eval(*bufs)
+    return bufs, kv
+
+
+@pytest.mark.parametrize(
+    "strided",
+    [(w, s, b) for w in (0, 1) for s in (0, 1) for b in (0, 1)
+     if (w, s, b) != (0, 0, 0)],
+    ids=lambda t: "w%ds%db%d" % t)
+def test_mlx_strided_operand_dequantize_canary(strided):
+    # Encode-order bug: the biases contiguity copy was encoded after
+    # w and scales were bound, so dequantize read the copy's buffers.
+    # Corruption tracks the biases operand exactly. Pre-fix versions
+    # must reproduce it and fixed versions must not. On failure
+    # re-check the pin; never delete the test.
+    # GPU vs CPU dequantize differ ~2e-3 in fp16, so clean is < 1e-2
+    # and corrupt is > 1.
+    if mx.default_device().type != mx.DeviceType.gpu:
+        pytest.skip("Metal-only regression")
+    bufs, kv = _operand_buffers()
+    ops = [buf[..., :kv, :] if st else mx.contiguous(buf[..., :kv, :])
+           for buf, st in zip(bufs, strided)]
+    got = mx.dequantize(*ops, group_size=64, bits=8)
+    ref = _cpu_dequant(tuple(mx.contiguous(buf[..., :kv, :])
+                             for buf in bufs))
+    err = mx.abs(got.astype(mx.float32)
+                 - ref.astype(mx.float32)).max().item()
+    broken = _mlx_version_tuple() < _MLX_STRIDED_FIX
+    if broken and strided[2]:
+        assert err > 1.0, (
+            f"strided-biases dequantize correct on mlx {mx.__version__} "
+            f"(err={err}): upstream fix backported? re-gate the canary "
+            "and re-check the pin")
+    else:
+        assert err < 1e-2, (
+            f"strided-operand dequantize corrupt on mlx {mx.__version__} "
+            f"(strided w/s/b={strided}, err={err}): upstream regression")
+
+
+def test_mlx_strided_input_quantize_canary():
+    # mx.quantize was never affected. Pinned on both sides of the
+    # fix so KVCache.to_quantized stays certified.
+    if mx.default_device().type != mx.DeviceType.gpu:
+        pytest.skip("Metal-only regression")
+    mx.random.seed(11)
+    kv = 63
+    k = mx.random.normal((1, 4, kv, 64)).astype(mx.float16)
+    buf = mx.zeros((1, 4, 256, 64), dtype=mx.float16)
+    buf[..., :kv, :] = k
+    mx.eval(buf)
+    sl = buf[..., :kv, :]
+    got = mx.quantize(sl, group_size=64, bits=8)
+    ref = mx.quantize(mx.contiguous(sl), group_size=64, bits=8)
+    for g, r in zip(got, ref):
+        assert mx.array_equal(g, r).item(), (
+            f"quantize of a strided input diverged on mlx {mx.__version__}")
+
+
 def test_install_idempotent_and_killable(monkeypatch):
     lm_base.quantized_scaled_dot_product_attention = _orig_lm
     vlm_base.quantized_scaled_dot_product_attention = _orig_vlm

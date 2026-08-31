@@ -1,16 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="960" height="720" viewBox="0 0 960 720" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
 <rect x="0" y="0" width="960" height="720" fill="#1a1a19"/>
 <text x="21.0" y="40.5" font-size="21.8" fill="#ffffff" font-weight="600">Qwen3.6-35B-A3B Q6_K: prefill &amp; decode vs KV depth</text>
-<line x1="21.0" y1="68.9" x2="47.3" y2="68.9" stroke="#9a9a95" stroke-width="2.5" stroke-dasharray="5,4"/>
+<line x1="21.0" y1="68.9" x2="47.3" y2="68.9" stroke="#9a9a95" stroke-width="2.5"/>
 <circle cx="34.2" cy="68.9" r="4.5" fill="#9a9a95" stroke="#1a1a19" stroke-width="1.5"/>
 <text x="55.4" y="75.0" font-size="20.2" fill="#c3c2b7">llama.cpp baseline</text>
-<line x1="301.3" y1="68.9" x2="327.6" y2="68.9" stroke="#9a9a95" stroke-width="2.5"/>
+<line x1="301.3" y1="68.9" x2="327.6" y2="68.9" stroke="#9a9a95" stroke-width="2.5" stroke-dasharray="5,4"/>
 <circle cx="314.4" cy="68.9" r="4.5" fill="#9a9a95" stroke="#1a1a19" stroke-width="1.5"/>
 <text x="335.7" y="75.0" font-size="20.2" fill="#c3c2b7">llama.cpp speculative (MTP)</text>
-<line x1="687.2" y1="68.9" x2="713.5" y2="68.9" stroke="#56b4e9" stroke-width="2.5" stroke-dasharray="5,4"/>
+<line x1="687.2" y1="68.9" x2="713.5" y2="68.9" stroke="#56b4e9" stroke-width="2.5"/>
 <circle cx="700.4" cy="68.9" r="4.5" fill="#56b4e9" stroke="#1a1a19" stroke-width="1.5"/>
 <text x="721.6" y="75.0" font-size="20.2" fill="#c3c2b7">gmlx baseline</text>
-<line x1="21.0" y1="103.3" x2="47.3" y2="103.3" stroke="#56b4e9" stroke-width="2.5"/>
+<line x1="21.0" y1="103.3" x2="47.3" y2="103.3" stroke="#56b4e9" stroke-width="2.5" stroke-dasharray="5,4"/>
 <circle cx="34.2" cy="103.3" r="4.5" fill="#56b4e9" stroke="#1a1a19" stroke-width="1.5"/>
 <text x="55.4" y="109.4" font-size="20.2" fill="#c3c2b7">gmlx speculative (MTP)</text>
 <line x1="75.0" y1="360.7" x2="939.0" y2="360.7" stroke="#2c2c2a" stroke-width="1.0"/>
@@ -65,28 +65,28 @@
 <text x="811.0" y="642.0" font-size="12.8" fill="#898781" text-anchor="middle" style="font-variant-numeric: tabular-nums">110k</text>
 <line x1="887.2" y1="621.0" x2="887.2" y2="626.2" stroke="#383835" stroke-width="1.0"/>
 <text x="887.2" y="642.0" font-size="12.8" fill="#898781" text-anchor="middle" style="font-variant-numeric: tabular-nums">200k</text>
-<path d="M126.8,506.1 L398.0,497.4 L573.1,512.4 L747.8,559.4 L811.0,578.5 L887.2,601.7" fill="none" stroke="#9a9a95" stroke-width="2.4" stroke-dasharray="6,5" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M126.8,506.1 L398.0,497.4 L573.1,512.4 L747.8,559.4 L811.0,578.5 L887.2,601.7" fill="none" stroke="#9a9a95" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
 <circle cx="126.8" cy="506.1" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
 <circle cx="398.0" cy="497.4" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
 <circle cx="573.1" cy="512.4" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
 <circle cx="747.8" cy="559.4" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
 <circle cx="811.0" cy="578.5" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
 <circle cx="887.2" cy="601.7" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
-<path d="M126.8,470.2 L398.0,480.9 L573.1,509.5 L747.8,551.2 L811.0,576.2 L887.2,606.1" fill="none" stroke="#9a9a95" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M126.8,470.2 L398.0,480.9 L573.1,509.5 L747.8,551.2 L811.0,576.2 L887.2,606.1" fill="none" stroke="#9a9a95" stroke-width="2.4" stroke-dasharray="6,5" stroke-linejoin="round" stroke-linecap="round"/>
 <circle cx="126.8" cy="470.2" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
 <circle cx="398.0" cy="480.9" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
 <circle cx="573.1" cy="509.5" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
 <circle cx="747.8" cy="551.2" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
 <circle cx="811.0" cy="576.2" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
 <circle cx="887.2" cy="606.1" r="3.9" fill="#9a9a95" stroke="#1a1a19" stroke-width="2.0"/>
-<path d="M126.8,438.1 L398.0,439.3 L573.1,463.1 L747.8,516.3 L811.0,542.0 L887.2,579.4" fill="none" stroke="#56b4e9" stroke-width="2.4" stroke-dasharray="6,5" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M126.8,438.1 L398.0,439.3 L573.1,463.1 L747.8,516.3 L811.0,542.0 L887.2,579.4" fill="none" stroke="#56b4e9" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
 <circle cx="126.8" cy="438.1" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
 <circle cx="398.0" cy="439.3" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
 <circle cx="573.1" cy="463.1" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
 <circle cx="747.8" cy="516.3" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
 <circle cx="811.0" cy="542.0" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
 <circle cx="887.2" cy="579.4" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
-<path d="M126.8,422.0 L398.0,420.5 L573.1,455.3 L747.8,513.6 L811.0,534.9 L887.2,576.8" fill="none" stroke="#56b4e9" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M126.8,422.0 L398.0,420.5 L573.1,455.3 L747.8,513.6 L811.0,534.9 L887.2,576.8" fill="none" stroke="#56b4e9" stroke-width="2.4" stroke-dasharray="6,5" stroke-linejoin="round" stroke-linecap="round"/>
 <circle cx="126.8" cy="422.0" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
 <circle cx="398.0" cy="420.5" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>
 <circle cx="573.1" cy="455.3" r="3.9" fill="#56b4e9" stroke="#1a1a19" stroke-width="2.0"/>

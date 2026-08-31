@@ -842,6 +842,155 @@ def test_kimi_k3_optional_gate_lower_bound():
     assert "kda_gate_lower_bound" not in c
 
 
+def _glm5next_meta() -> dict:
+    arch = "glm5next"
+    m = _base_meta(arch)
+    # 5 GGUF blocks = 4 trunk + 1 MTP tail (the universal nextn subtraction).
+    m[f"{arch}.block_count"] = 5
+    m[f"{arch}.nextn_predict_layers"] = 1
+    # Per-layer schedule incl. the MTP tail entry (an MLA layer, truncated).
+    m[f"{arch}.attention.head_count_kv"] = [0, 1, 0, 1, 1]
+    m[f"{arch}.attention.key_length"] = 32           # kv_lora (not a head dim)
+    # KDA
+    m[f"{arch}.kda.head_dim"] = 16
+    m[f"{arch}.kda.gate_lower_bound"] = -5.0
+    m[f"{arch}.ssm.conv_kernel"] = 4
+    # MLA (nope-only: rope.dimension_count written explicitly as 0)
+    m[f"{arch}.attention.q_lora_rank"] = 32
+    m[f"{arch}.attention.kv_lora_rank"] = 32
+    m[f"{arch}.rope.dimension_count"] = 0
+    # Pooled lightning indexer
+    m[f"{arch}.attention.indexer.head_count"] = 2
+    m[f"{arch}.attention.indexer.key_length"] = 8
+    m[f"{arch}.attention.indexer.top_k"] = 8
+    m[f"{arch}.attention.indexer.kpool"] = 4
+    m[f"{arch}.attention.layer_norm_epsilon"] = 1e-6
+    # MoE (sigmoid + selection-only correction bias)
+    m[f"{arch}.expert_count"] = 4
+    m[f"{arch}.expert_used_count"] = 2
+    m[f"{arch}.expert_feed_forward_length"] = 24
+    m[f"{arch}.expert_shared_count"] = 1
+    m[f"{arch}.expert_weights_scale"] = 2.5
+    m[f"{arch}.expert_weights_norm"] = True
+    m[f"{arch}.expert_gating_func"] = 2
+    m[f"{arch}.leading_dense_block_count"] = 1
+    # Clamped SwiGLU arrays (sized for all blocks incl. dense and MTP)
+    m[f"{arch}.swiglu_clamp_exp"] = [10.0] * 5
+    m[f"{arch}.swiglu_clamp_shexp"] = [10.0] * 5
+    # Hyper-connections (float32(1e-6) as the wire stores it)
+    m[f"{arch}.hyper_connection.count"] = 4
+    m[f"{arch}.hyper_connection.sinkhorn_iterations"] = 20
+    m[f"{arch}.hyper_connection.epsilon"] = 9.9999999747e-07
+    m[f"{arch}.vocab_size"] = VOCAB
+    return m
+
+
+# MLA head-dim shapes live on the first MLA layer (blk.1) - blk.0 is KDA.
+# GGUF-native order: attn_q_b [q_lora, heads*q_head_dim] (q_head_dim = nope
+# 16 + rope 0), attn_v_b [kv_lora, v_head_dim, heads].
+_GLM5NEXT_SHAPES = {
+    "output.weight": [64, VOCAB],
+    "blk.1.attn_q_b.weight": [32, 64],
+    "blk.1.attn_v_b.weight": [32, 16, 4],
+}
+
+
+def test_glm5next_synth_fields():
+    c = synthesize_config(_glm5next_meta(), tensor_shapes=_GLM5NEXT_SHAPES)
+    assert c["model_type"] == "glm5_next"
+    assert c["num_hidden_layers"] == 4            # nextn tail subtracted
+    assert c["mtp_num_hidden_layers"] == 1
+    assert c["layer_types"] == ["linear_attention", "full_attention",
+                                "linear_attention", "full_attention"]
+    assert c["num_key_value_heads"] == 1          # first MLA layer, not arr[0]
+    assert "head_dim" not in c                    # key_length is not a head dim
+    assert c["kda_head_dim"] == 16
+    assert c["ssm_conv_kernel"] == 4
+    assert c["kda_gate_lower_bound"] == -5.0
+    assert c["q_lora_rank"] == 32
+    assert c["kv_lora_rank"] == 32
+    assert c["qk_rope_head_dim"] == 0
+    assert c["qk_nope_head_dim"] == 16            # from blk.1 shapes
+    assert c["v_head_dim"] == 16
+    assert c["index_n_heads"] == 2
+    assert c["index_head_dim"] == 8
+    assert c["index_topk"] == 8
+    assert c["index_kpool"] == 4
+    assert c["index_knorm_eps"] == 1e-6
+    assert c["scoring_func"] == "sigmoid"
+    assert c["n_routed_experts"] == 4 and c["num_experts_per_tok"] == 2
+    assert c["moe_intermediate_size"] == 24
+    assert c["n_shared_experts"] == 1
+    assert c["first_k_dense_replace"] == 1
+    assert c["routed_scaling_factor"] == 2.5
+    assert c["norm_topk_prob"] is True
+    assert c["swiglu_limit"] == 10.0
+    assert c["hc_mult"] == 4
+    assert c["hc_sinkhorn_iters"] == 20
+    assert abs(c["hc_eps"] - 1e-6) < 1e-12        # float32(1e-6), never 1e-7
+    assert c["vocab_size"] == VOCAB
+    assert "rope_scaling" not in c                # nope-only: no rope block
+
+
+@pytest.mark.parametrize("key", [
+    "glm5next.kda.head_dim",
+    "glm5next.kda.gate_lower_bound",
+    "glm5next.ssm.conv_kernel",
+    "glm5next.attention.q_lora_rank",
+    "glm5next.attention.kv_lora_rank",
+    "glm5next.rope.dimension_count",
+    "glm5next.attention.indexer.head_count",
+    "glm5next.attention.indexer.key_length",
+    "glm5next.attention.indexer.top_k",
+    "glm5next.attention.indexer.kpool",
+    "glm5next.hyper_connection.count",
+])
+def test_glm5next_required_keys_fail_loud(key):
+    # A silent default here loads cleanly and generates garbage (wrong decay
+    # form, wrong indexer widths, wrong stream count) - all required.
+    m = _glm5next_meta()
+    del m[key]
+    with pytest.raises(ValueError, match=key.rsplit(".", 1)[-1]):
+        synthesize_config(m, tensor_shapes=_GLM5NEXT_SHAPES)
+
+
+def test_glm5next_scalar_head_count_kv_rejected():
+    # A scalar head_count_kv loses the KDA/MLA schedule - mis-converted file.
+    m = _glm5next_meta()
+    m["glm5next.attention.head_count_kv"] = 1
+    with pytest.raises(ValueError, match="per-layer array"):
+        synthesize_config(m, tensor_shapes=_GLM5NEXT_SHAPES)
+
+
+def test_glm5next_nonuniform_swiglu_clamp_rejected():
+    m = _glm5next_meta()
+    m["glm5next.swiglu_clamp_exp"] = [10.0, 10.0, 8.0, 10.0, 10.0]
+    with pytest.raises(ValueError, match="non-uniform"):
+        synthesize_config(m, tensor_shapes=_GLM5NEXT_SHAPES)
+
+
+def test_glm5next_softmax_gating_rejected():
+    m = _glm5next_meta()
+    m["glm5next.expert_gating_func"] = 1
+    with pytest.raises(NotImplementedError, match="sigmoid"):
+        synthesize_config(m, tensor_shapes=_GLM5NEXT_SHAPES)
+
+
+def test_glm5next_mla_shapes_probe_walks_past_kda_layers():
+    # Shapes only on blk.3 (the other MLA layer): the probe must find them.
+    shapes = {
+        "output.weight": [64, VOCAB],
+        "blk.3.attn_q_b.weight": [32, 64],
+        "blk.3.attn_v_b.weight": [32, 16, 4],
+    }
+    c = synthesize_config(_glm5next_meta(), tensor_shapes=shapes)
+    assert c["qk_nope_head_dim"] == 16 and c["v_head_dim"] == 16
+    # No MLA-layer shapes at all -> actionable error, not a KeyError.
+    with pytest.raises(ValueError, match="MLA"):
+        synthesize_config(_glm5next_meta(),
+                          tensor_shapes={"output.weight": [64, VOCAB]})
+
+
 def _granitehybrid_meta() -> dict:
     arch = "granitehybrid"
     m = _base_meta(arch)

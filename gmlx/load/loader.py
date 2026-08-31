@@ -375,6 +375,39 @@ def remap_arrays(
     return dict(hf_weights), hf_kquant_meta, stats
 
 
+def strip_nextn_trunk_overflow(
+    hf_weights: dict, hf_kquant_meta: dict, meta, arch: str
+) -> int:
+    """Drop remapped weights of trailing NextN/MTP block(s) from the trunk tree.
+
+    nemotron_h_moe GGUFs carry the MTP layer as ``blk.{block_count - 1}`` with
+    the same tensor names as trunk blocks, so the trunk remap emits
+    ``backbone.layers.{N}.*`` entries for a layer index the trunk model does not
+    have (llama.cpp likewise excludes nextn layers from the trunk graph; the
+    stock nemotron_h ``sanitize`` only strips HF-named ``mtp.*`` keys). The MTP
+    drafter loads that block separately. Returns the number of entries dropped.
+    """
+    if arch != "nemotron_h_moe":
+        return 0
+    nextn = read_int(meta, f"{arch}.nextn_predict_layers") or 0
+    block_count = read_int(meta, f"{arch}.block_count") or 0
+    if nextn <= 0 or block_count <= nextn:
+        return 0
+    trunk = block_count - nextn
+    # backbone.*: the NEMOTRON_H_MOE override table; model.*: MTP-block
+    # tensors the override table does not claim (post_attention_norm) fall
+    # through to the canonical map's model.layers.{N}.* naming.
+    pat = re.compile(r"^(?:backbone|model)\.layers\.(\d+)\.")
+    dropped = 0
+    for name in list(hf_weights):
+        m = pat.match(name)
+        if m and int(m.group(1)) >= trunk:
+            del hf_weights[name]
+            hf_kquant_meta.pop(name, None)
+            dropped += 1
+    return dropped
+
+
 # MTP / "nextn" drafter remap (native-head: the drafter weights live in the
 # GGUF's own MTP block, i.e. block index >= num_hidden_layers)
 
@@ -636,6 +669,20 @@ _MTP_TARGET_HOOKS_BY_TYPE = {
         "speculative_argmax_from_hidden",
         "speculative_verify_hidden",
     ),
+    # Glm5NextSpecLM (vendored mlx-lm class): same lean set as deepseek_v4.
+    "glm5_next": (
+        "rollback_speculative_cache",
+        "speculative_logits_from_hidden",
+        "speculative_argmax_from_hidden",
+        "speculative_verify_hidden",
+    ),
+    # NemotronHSpecLM (stock mlx-lm class + hooks): same lean set.
+    "nemotron_h": (
+        "rollback_speculative_cache",
+        "speculative_logits_from_hidden",
+        "speculative_argmax_from_hidden",
+        "speculative_verify_hidden",
+    ),
 }
 
 
@@ -696,7 +743,8 @@ def _mtp_target_classes(model_type: str):
     ``TextConfig``. The stock mlx-lm classes gmlx builds for the plain text
     capability ship none of the ``speculative_*`` hooks, which is why MTP
     escalates to mlx-vlm here. Extend with new rows (deepseek_v4, ...) as drafters
-    land.
+    land, together with ``_vlm_spec_language_model`` when the arch also has a
+    VLM shape (mmproj) so the two paths stay in lockstep.
     """
     import importlib
 
@@ -794,12 +842,93 @@ def _mtp_target_classes(model_type: str):
             return muse_glimmer_mtp.MuseGlimmerSpecLM(ModelArgs.from_dict(config))
 
         return muse_glimmer_mtp.MuseGlimmerSpecLM, build
+    if model_type == "glm5_next":
+        import gmlx.models.glm5_next.mtp as glm5_next_mtp
+        from gmlx.models.glm5_next.model import ModelArgs, ensure_registered
+
+        ensure_registered()
+
+        def build(config):
+            return glm5_next_mtp.Glm5NextSpecLM(ModelArgs.from_dict(config))
+
+        return glm5_next_mtp.Glm5NextSpecLM, build
+    if model_type == "nemotron_h":
+        import gmlx.models.nemotron_h.mtp as nemotron_h_mtp
+        from mlx_lm.models.nemotron_h import ModelArgs
+
+        def build(config):
+            return nemotron_h_mtp.NemotronHSpecLM(ModelArgs.from_dict(config))
+
+        return nemotron_h_mtp.NemotronHSpecLM, build
     from .arch_table import MTP_WIRED_MODEL_TYPES
 
     raise NotImplementedError(
         f"MTP target class for model_type {model_type!r} not wired "
         f"(supported: {' / '.join(sorted(MTP_WIRED_MODEL_TYPES))})"
     )
+
+
+# VLM model_types whose spec-capability row lives under a different text
+# model_type in the tables above (hook sets + target classes).
+_VLM_SPEC_MODEL_TYPE_ALIASES = {
+    "gemma4": "gemma4_text",
+    "gemma4_unified": "gemma4_text",
+}
+
+
+def _spec_hook_key(model_type: str) -> str:
+    """The `_MTP_TARGET_HOOKS_BY_TYPE` / target-class key for a VLM
+    model_type."""
+    return _VLM_SPEC_MODEL_TYPE_ALIASES.get(model_type, model_type)
+
+
+def _vlm_spec_language_model(model_type: str):
+    """Spec-capable ``language_model`` row for a VLM model_type, or None.
+
+    ``build(model_config) -> language_model`` constructs from the VLM's REAL
+    mlx-vlm ModelConfig (real vision_config, so mrope ``get_rope_index`` on
+    image turns stays correct - unlike ``_mtp_target_classes``'s text build,
+    which passes an empty one). None means the built ``.language_model``
+    already carries the hooks (muse_glimmer / glm5_next / qwen4_exp wire
+    their mixins in their own vlm_model), or the arch has no spec support
+    (the per-arch hook check downstream fails loud). The env gates
+    (GMLX_QWEN_OWNED / GMLX_GEMMA_OWNED) are consulted at call time via
+    ``_mtp_target_classes``, so =0 resolves to the stock class and the swap
+    no-ops against the already-stock tree."""
+    if model_type in ("qwen3_5", "qwen3_5_moe"):
+        cls, _ = _mtp_target_classes(model_type)
+
+        def build(model_config):
+            return cls(model_config.text_config, model_config)
+
+        return cls, build
+    if model_type in ("gemma4", "gemma4_unified"):
+        cls, _ = _mtp_target_classes("gemma4_text")
+
+        def build(model_config):
+            return cls(model_config.text_config)
+
+        return cls, build
+    return None
+
+
+def _ensure_argmax_hook(language_model) -> None:
+    """Batched greedy verify walk: under greedy the engine takes the
+    per-position deferred walk (one CPU<->GPU sync per draft position) unless
+    the target exposes speculative_argmax_from_hidden, which lets it argmax
+    all block+1 verify positions in a single op (zero per-position syncs ->
+    _speculative_walk). gemma4's LanguageModel ships only
+    speculative_logits_from_hidden, so synthesize the argmax wrapper from it -
+    lossless (same tokens), just fewer syncs (~+8% decode on a small target
+    whose round is sync-bound). Only ever fires for the gemma4 row; every
+    other type's hook table already lists speculative_argmax_from_hidden."""
+    if not hasattr(language_model, "speculative_argmax_from_hidden") and hasattr(
+        language_model, "speculative_logits_from_hidden"
+    ):
+        _lm = language_model
+        _lm.speculative_argmax_from_hidden = lambda hidden: mx.argmax(
+            _lm.speculative_logits_from_hidden(hidden), axis=-1
+        )
 
 
 def _build_mtp_target(config_dict: dict):
@@ -817,20 +946,7 @@ def _build_mtp_target(config_dict: dict):
             f"- version drift; pin mlx-vlm or update the hook set"
         )
     language_model = build(config)
-    # Batched greedy verify walk: under greedy the engine takes the per-position
-    # deferred walk (one CPU<->GPU sync per draft position) unless the target
-    # exposes speculative_argmax_from_hidden, which lets it argmax all block+1
-    # verify positions in a single op (zero per-position syncs -> _speculative_walk).
-    # gemma4's LanguageModel ships only speculative_logits_from_hidden, so
-    # synthesize the argmax wrapper from it - lossless (same tokens), just fewer
-    # syncs (~+8% decode on a small target whose round is sync-bound).
-    if not hasattr(language_model, "speculative_argmax_from_hidden") and hasattr(
-        language_model, "speculative_logits_from_hidden"
-    ):
-        _lm = language_model
-        _lm.speculative_argmax_from_hidden = lambda hidden: mx.argmax(
-            _lm.speculative_logits_from_hidden(hidden), axis=-1
-        )
+    _ensure_argmax_hook(language_model)
     wrapper = MTPTextTarget(language_model, config)
     loadlog.verbose_print(
         f"[build] {model_type} -> {type(language_model).__name__} (MTP target wrapper)"
@@ -951,6 +1067,13 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         import gmlx.models.kimi_k3 as kimi_k3_model
 
         kimi_k3_model.ensure_registered()
+    if mt == "glm5_next":
+        # mlx-lm ships no glm5_next module (llama.cpp PR #27754 arch); same
+        # vendored-registration pattern as kimi_k3, plus the deepseek_v4
+        # PoolingCache injection its hybrid cache depends on.
+        import gmlx.models.glm5_next.model as glm5_next_model
+
+        glm5_next_model.ensure_registered()
     if mt == "qwen4_exp":
         # Neither pinned mlx-lm nor mlx-vlm ships qwen4_exp (llama.cpp PR
         # #27742); same vendored-registration pattern as deepseek_v4, plus
@@ -1167,7 +1290,7 @@ def _ram_floor_bytes(ram: int | None) -> int:
 
 def _decode_arena_bytes(
     total_bytes: int, offsets, budget: int | None, ring_bytes: int = 0,
-    pinned_bytes: int = 0,
+    pinned_bytes: int = 0, streamable_bytes: int = 0,
 ) -> int:
     """Arena budget for the decode feeder, under two hardware-derived
     ceilings: the GPU working-set budget, and a fraction of physical RAM
@@ -1221,7 +1344,9 @@ def _decode_arena_bytes(
     except Exception:
         pass
     expert_bytes = sum(r[2] for ranges in offsets.values() for r in ranges)
-    non_expert_bytes = max(0, total_bytes - expert_bytes)
+    # Streamable components are page-cache citizens like the experts;
+    # charging them as non-expert would zero the arena.
+    non_expert_bytes = max(0, total_bytes - expert_bytes - streamable_bytes)
     reserve = int(
         float(os.environ.get("GMLX_DECODE_KV_RESERVE_GB", "8") or 8) * (1 << 30)
     )
@@ -1569,36 +1694,47 @@ def _lookahead_default(model) -> bool:
         model, "model_type", None) not in _LA_DEFAULT_OFF_FAMILIES
 
 
-def _install_gpu_residency(model, moe_modules) -> None:
+def _install_gpu_residency(model, moe_modules, *,
+                           skip_ids=frozenset(),
+                           include_expert_stacks: bool = False) -> None:
     """Wire every non-expert weight buffer into the Metal residency set,
     so command buffers stop re-wiring the every-token weights' pages on
     every use (the
     per-use wiring is what an unswept streaming install pays instead of
-    the neutralized wire-everything sweep)."""
+    the neutralized wire-everything sweep).
+
+    ``skip_ids``: arrays that must NOT be inserted - streamed lookup
+    tables (a residency insert wires the buffer as surely as a GPU op).
+    ``include_expert_stacks``: table-only streaming keeps the experts
+    resident, so the GB-scale-stack belt is lifted and they are wired
+    with everything else."""
     import mlx_kquant as kq
 
     if not getattr(kq, "residency_insert", None):
         print("[stream] gpu-resident weights unavailable "
               "(mlx-kquant lacks residency ops)")
         return
-    skip = set()
+    skip = set(skip_ids)
     for mods in moe_modules.values():
         for m in mods:
             for attr in ("gate_proj", "up_proj", "down_proj"):
                 w = getattr(getattr(m, attr, None), "weight", None)
                 if w is not None:
                     skip.add(id(w))
-    n = 0
+    inserted = []
     nbytes = 0
     for _, a in tree_flatten(model.parameters()):
         if id(a) in skip:
             continue
-        if a.ndim == 3 and a.nbytes > (1 << 30):
+        if (not include_expert_stacks
+                and a.ndim == 3 and a.nbytes > (1 << 30)):
             continue  # belt: any GB-scale stack is an expert container
         if kq.residency_insert(a):
-            n += 1
+            inserted.append(a)
             nbytes += a.nbytes
     kq.residency_commit()
+    model._kq_resident_arrays = inserted
+    n = len(inserted)
     print(f"[stream] gpu-resident weights: {n} buffers "
           f"({nbytes / 1e9:.1f} GB) in the Metal residency set "
           "(GMLX_GPU_RESIDENT=0 disables)")
@@ -1651,6 +1787,89 @@ def install_expert_streaming(
     except Exception:
         budget = None
     over_budget = budget is not None and total_bytes > budget
+
+    # Selection ladder step 1 (docs/streaming.md): archs with a
+    # declared streamable lookup table (e.g. qwen4exp's 26.8 GiB PLE
+    # n-gram table) stream it instead of the experts when it alone brings
+    # the resident set under budget - table gathers touch ~1.4 KB/token
+    # against the experts' every-MoE-layer surcharge. The table wrap runs
+    # its row gather on a dedicated CPU stream so the buffer is never a
+    # GPU-stream input (a single GPU reference would wire all of it).
+    # When the post-table estimate is still over budget, v1 falls back to
+    # expert streaming with the table resident: streaming both at once
+    # (compose) needs the hot-row arena and is not shipped.
+    table_offloaded = 0
+    if not force_stream:
+        from gmlx.stream.table_stream import (
+            install_table_streaming,
+            table_bytes,
+            table_stream_selected,
+        )
+
+        compose = False
+        if table_stream_selected(model, total_bytes, budget):
+            post = total_bytes - table_bytes(model)
+            # Step 2 default: over budget even post-table streams both
+            # (compose). GMLX_STREAM_PLE_COMPOSE=0 keeps the table
+            # resident; the selection test already honors it in auto
+            # mode, so this only fires under GMLX_STREAM_PLE=1.
+            if budget is not None and post > budget:
+                if env_bool("GMLX_STREAM_PLE_COMPOSE", True):
+                    compose = True
+                    table_offloaded, table_names = (
+                        install_table_streaming(model))
+                else:
+                    print(
+                        "[stream] table stays resident "
+                        "(GMLX_STREAM_PLE_COMPOSE=0); experts stream"
+                    )
+            else:
+                table_offloaded, table_names = install_table_streaming(model)
+        if table_offloaded and compose:
+            loadlog.info(
+                f"[stream] compose: streamable table "
+                f"{'+'.join(table_names)} "
+                f"({table_offloaded / 2**30:.1f} GiB) on the CPU stream "
+                "AND experts streamed"
+            )
+            key = getattr(model, "_kq_weights_key", None)
+            from gmlx.gen.prefill_decay import (
+                note_streamed_tracked_bytes,
+                untracked_weight_bytes_for,
+            )
+            tracked = max(
+                0.0, total_bytes - untracked_weight_bytes_for(key))
+            credit = min(float(table_offloaded), tracked)
+            if credit > 0:
+                note_streamed_tracked_bytes(
+                    credit, key, source="table", cap=tracked)
+            deduct_untracked_weights(table_offloaded, key)
+        elif table_offloaded:
+            # The selection test admits the table only when the remainder
+            # clears the budget (or streaming is forced on a fits model),
+            # so experts are resident from here on.
+            over_budget = False
+            base = ("" if budget is None
+                    else f" of {budget / 2**30:.1f} GiB budget")
+            loadlog.info(
+                f"[stream] streamable table {'+'.join(table_names)} "
+                f"({table_offloaded / 2**30:.1f} GiB) stays file-backed on "
+                "the CPU stream; experts resident (post-deduction "
+                f"{(total_bytes - table_offloaded) / 2**30:.1f} GiB{base})"
+            )
+            key = getattr(model, "_kq_weights_key", None)
+            from gmlx.gen.prefill_decay import (
+                note_streamed_tracked_bytes,
+                untracked_weight_bytes_for,
+            )
+            tracked = max(
+                0.0, total_bytes - untracked_weight_bytes_for(key))
+            credit = min(float(table_offloaded), tracked)
+            if credit > 0:
+                note_streamed_tracked_bytes(
+                    credit, key, source="table", cap=tracked)
+            deduct_untracked_weights(table_offloaded, key)
+
     streaming = force_stream or over_budget
     prefetcher = None
     if streaming:
@@ -1663,8 +1882,13 @@ def install_expert_streaming(
         # Wire the every-token weights before the decode feeder sizes its
         # arena: pinned every-token pages come out of the same wired budget.
         from gmlx.stream.pin_weights import maybe_pin_weights
+        from gmlx.stream.table_stream import streamable_tables_for
 
-        weights_pin = maybe_pin_weights(gguf_path)
+        # Declared streamable components never enter the pin set, streamed
+        # or resident: mlocking them starves the expert page cache.
+        pin_exclude = frozenset(
+            t.gguf_name for t, _ in streamable_tables_for(model))
+        weights_pin = maybe_pin_weights(gguf_path, exclude_names=pin_exclude)
         if weights_pin is not None:
             object.__setattr__(model, "_kq_weights_pin", weights_pin)
 
@@ -2129,7 +2353,8 @@ def install_expert_streaming(
         tracked = max(0.0, total_bytes - untracked_weight_bytes_for(key))
         credit = min(float(offloaded), tracked)
         if credit > 0:
-            note_streamed_tracked_bytes(credit, key)
+            note_streamed_tracked_bytes(
+                credit, key, source="experts", cap=tracked)
             print(
                 f"[stream] headroom credits {credit / 1e9:.1f} GB of "
                 "allocator-tracked expert bytes as reclaimable page cache"
@@ -2196,10 +2421,13 @@ def install_expert_streaming(
         from gmlx.stream.decode_feeder import maybe_make_decode_feeder
 
         pin = getattr(model, "_kq_weights_pin", None)
+        from gmlx.stream.table_stream import streamed_table_bytes
+
         arena = _decode_arena_bytes(
             total_bytes, prefetcher.offsets, budget,
             ring_bytes=2 * feeder.slot_bytes if feeder is not None else 0,
-            pinned_bytes=getattr(pin, "pinned_bytes", 0))
+            pinned_bytes=getattr(pin, "pinned_bytes", 0),
+            streamable_bytes=streamed_table_bytes(model))
         dfeeder = maybe_make_decode_feeder(
             prefetcher.offsets, moe_modules, arena, stats_verbose)
         if dfeeder is not None:
@@ -2230,8 +2458,15 @@ def install_expert_streaming(
                 f"popularity-managed expert arena ({wired}){cov} "
                 "(--no-decode-feeder disables, GMLX_DECODE_ARENA_GB sizes)"
             )
-    if streaming and env_bool("GMLX_GPU_RESIDENT", True):
-        _install_gpu_residency(model, moe_modules)
+    if (streaming or table_offloaded) and env_bool("GMLX_GPU_RESIDENT", True):
+        tskip = frozenset()
+        if table_offloaded:
+            from gmlx.stream.table_stream import streamed_table_array_ids
+
+            tskip = streamed_table_array_ids(model)
+        _install_gpu_residency(
+            model, moe_modules, skip_ids=tskip,
+            include_expert_stacks=bool(table_offloaded) and not streaming)
     if streaming and dfeeder is not None:
         import gmlx.stream.gpu_token as gpu_token
 
@@ -2352,11 +2587,20 @@ def install_expert_streaming(
             staging = f"prefill calls >={gpu_tokens} tokens routed to GPU"
         else:
             staging = "GPU prefill routing disabled"
-        loadlog.info(
-            f"[stream] routed experts -> CPU stream on {n_wrapped} layers "
-            f"({offloaded / 1e9:.1f} GB stays file-backed; rest of the model "
-            f"+ KV on {base_dev}; {staging})"
-        )
+        if table_offloaded:
+            # Table-only mode: the experts are GPU-resident and wired (the
+            # streamed table made room); "file-backed" would be wrong.
+            loadlog.info(
+                f"[stream] routed experts resident on GPU across "
+                f"{n_wrapped} layers ({offloaded / 1e9:.1f} GB wired; "
+                f"{staging})"
+            )
+        else:
+            loadlog.info(
+                f"[stream] routed experts -> CPU stream on {n_wrapped} "
+                f"layers ({offloaded / 1e9:.1f} GB stays file-backed; rest "
+                f"of the model + KV on {base_dev}; {staging})"
+            )
     return n_wrapped, offloaded
 
 
@@ -2436,7 +2680,8 @@ def model_is_moe(model) -> bool:
     """
     for layer in _decoder_layers(model):
         for m in layer.modules():
-            for name in ("gate_proj", "up_proj", "down_proj"):
+            # fc1/fc2: mlx-lm's plain SwitchMLP naming (nemotron_h_moe).
+            for name in ("gate_proj", "up_proj", "down_proj", "fc1", "fc2"):
                 proj = getattr(m, name, None)
                 if proj is None:
                     continue
@@ -2702,8 +2947,22 @@ def _warm_mmap_residency(
     the page-cache populate runs. GMLX_RESIDENCY_WARM=0 disables
     everything, =1 forces the GPU touch regardless of size.
     """
-    arrays = [v for _, v in tree_flatten(model.parameters())]
-    total = sum(a.nbytes for a in arrays)
+    pairs = tree_flatten(model.parameters())
+    total = sum(a.nbytes for _, a in pairs)
+    # Streamable-table exclusion: a table the selection ladder will stream
+    # must not be GPU-touched here - the touch would wire the whole buffer
+    # before install_expert_streaming ever runs. Only the touch skips it;
+    # ``total`` keeps the full sum so the untracked-weights registration
+    # below stays whole-model.
+    try:
+        _tbudget = int(
+            0.9 * mx.device_info()["max_recommended_working_set_size"])
+    except Exception:
+        _tbudget = None
+    from gmlx.stream.table_stream import warm_touch_exclusions
+
+    _tskip = warm_touch_exclusions(model, total, _tbudget)
+    arrays = [v for _, v in pairs if id(v) not in _tskip]
     try:
         _warm_touch_pass(arrays, total, log=log, paths=paths,
                          batch_bytes=batch_bytes,
@@ -2791,6 +3050,12 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # wire); the GDN decay params feed the fp32 scan; the per-stream inject
     # scalars scale the residual streams directly.
     "qwen4_exp": (".mlp.gate.weight", ".A_log", ".dt_bias", ".inject.weight"),
+    # glm5_next: hyper-connection mixers are fp32 like deepseek_v4; sigmoid
+    # top-8-of-288 routing + correction bias is near-tie-heavy; the KDA
+    # decay params feed the fp32 recurrence; the indexer head-weights GEMM
+    # and ape table are fp32 per llama.cpp PR 27754.
+    "glm5_next": ("_hc.", ".mlp.gate.weight", ".e_score_correction_bias",
+                  ".a_folded", ".dt_bias", ".ape", ".weights_proj."),
 }
 
 # Params kept at their native f16 through the bf16 cast (no upcast). MLX
@@ -2939,12 +3204,14 @@ def _install_and_load(
     if active_before is None:
         active_before = _active_now()
     # 5. sanitize first - model.sanitize may rename keys; rebuild meta.
+    # Codec'd tensors can land on non-``.weight`` raw leaves (hc ``fn``),
+    # so only the vestigial wire siblings are excluded from the rematch.
     if sanitize and hasattr(model, "sanitize"):
         hf_weights = model.sanitize(hf_weights)
         new_meta: dict[str, str] = {}
         unmatched_meta = set(hf_kquant_meta)
         for new_k in hf_weights:
-            if not new_k.endswith(".weight"):
+            if new_k.endswith(".scales") or new_k.endswith(".biases"):
                 continue
             for old_k in list(unmatched_meta):
                 if new_k == old_k or new_k.endswith("." + old_k):
@@ -3302,6 +3569,9 @@ def load_model(
         n_head_kv=n_head_kv,
         owned_names=owned_names,
     )
+    n_nextn_dropped = strip_nextn_trunk_overflow(hf_weights, hf_kquant_meta, meta, arch)
+    if n_nextn_dropped:
+        _log(f"[gguf] dropped {n_nextn_dropped} NextN/MTP-block trunk entries")
     # hf_weights now holds the only ref to each wire view; drop arrays so the
     # native-fp repack below can free each view as it packs it (caps 120B peak).
     del arrays
@@ -3397,12 +3667,14 @@ def load_model(
         _patch_dsv32_dense_default(model)  # exact default; GMLX_DSV32_SPARSE=1 -> sparse (experimental)
 
     # 5. sanitize first - model.sanitize may rename keys; rebuild meta.
+    # Codec'd tensors can land on non-``.weight`` raw leaves (hc ``fn``),
+    # so only the vestigial wire siblings are excluded from the rematch.
     if hasattr(model, "sanitize"):
         hf_weights = model.sanitize(hf_weights)
         new_meta: dict[str, str] = {}
         unmatched_meta = set(hf_kquant_meta)
         for new_k in hf_weights:
-            if not new_k.endswith(".weight"):
+            if new_k.endswith(".scales") or new_k.endswith(".biases"):
                 continue
             for old_k in list(unmatched_meta):
                 if new_k == old_k or new_k.endswith("." + old_k):

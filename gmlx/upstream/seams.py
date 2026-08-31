@@ -66,11 +66,11 @@ SEAMS: tuple[Seam, ...] = (
     #     verify_linear) ---
     # The owned qwen3.5 forward surface carries no pins: its copies and
     # mirrors are certified by source-equality, construction-pair, and
-    # identity tests. But ownership lands at construction only on the
-    # text MTP load (loader._mtp_target_classes); load_vlm_mtp_model's
-    # target is built stock by mlx_vlm.utils, so the multimodal path
-    # still installs the patched regime and its symbols stay pinned
-    # below.
+    # identity tests. Ownership lands at construction on the text MTP
+    # load (loader._mtp_target_classes) and, via the spec-target seam
+    # (loader._vlm_spec_language_model), on load_vlm_mtp_model's target
+    # too. The pins below stay for the GMLX_QWEN_OWNED=0 vlm fallback,
+    # which still installs the patched regime.
     Seam("mlx_vlm.models.qwen3_5.gated_delta", "gated_delta_ops",
          "gdn_patches._patch_mlxvlm_gated_delta_tiled_v (stock-built "
          "trees only: vlm MTP targets + the GMLX_QWEN_OWNED=0 text "
@@ -183,7 +183,10 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.generate.ar", "PromptProcessingBatch.prompt_step",
          "spec_engine.install_full_prompt_mtp_prefill", critical=True),
     Seam("mlx_vlm.generate.ar", "PromptProcessingBatch.generate",
-         "spec_engine.install_full_prompt_mtp_prefill", critical=True),
+         "spec_engine.install_full_prompt_mtp_prefill; "
+         "seed_rows.install_per_request_seed (row-uid publish); "
+         "server_patches.mtp_thinking (thinking-hook transport, outermost)",
+         critical=True),
     Seam("mlx_vlm.generate.ar", "SpeculativeGenerationBatch.next",
          "spec_engine.install_continuous_batch_admission", critical=True),
     Seam("mlx_vlm.generate.ar", "SpeculativeGenerationBatch.filter",
@@ -218,6 +221,16 @@ SEAMS: tuple[Seam, ...] = (
          "server_bridge_vlm (GGUF model resource loader)", critical=True),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._make_sampler",
          "server_patches.install_fast_sampler"),
+    Seam("mlx_vlm.server.generation", "ResponseGenerator.generate",
+         "mem_preflight.install_memory_preflight; "
+         "server_patches.mtp_thinking (thinking_budget deferral)",
+         critical=True),
+    Seam("mlx_vlm.server.generation",
+         "ResponseGenerator._make_thinking_budget_criteria",
+         "chat_behavior.install_thinking_budget_fix (rebind); "
+         "seed_rows.install_per_request_seed; server_patches.mtp_thinking "
+         "(restore + hook attach; runtime chain mtp -> seed -> tbfix)",
+         critical=True),
     Seam("mlx_vlm.server.generation", "ResponseGenerator._step",
          "server_patches.row_failed (permanently failed rows delivered "
          "to their response queues on the engine thread)", critical=True),

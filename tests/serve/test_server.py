@@ -138,7 +138,11 @@ def test_single_model_cfg_adapter_passthrough(tmp_path):
     g.write_text("x")
     ad.write_text("x")
     cfg = srv._single_model_cfg(_ns(model=str(g), adapter=str(ad)))
-    (mid, m), = cfg.models.items()
+    # The adapter id plus its `<id>-base` sibling share one resident entry.
+    ids = sorted(cfg.models)
+    assert len(ids) == 2 and ids[1] == ids[0] + "-base"
+    mid, m = ids[0], cfg.models[ids[0]]
+    assert cfg.models[ids[1]].adapter is None
     assert m.adapter == str(ad.resolve()) or m.adapter == str(ad)
     assert resolve_model(mid, cfg).adapter == m.adapter
 

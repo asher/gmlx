@@ -70,44 +70,23 @@ class _SpecOutput:
     gdn_states: Optional[list] = None
 
 
-class Qwen4ExpSpecLM(q4.Model):
-    """Vendored qwen4exp ``Model`` + the ``speculative_*`` hooks the owned
-    MTP engine probes on the target's ``language_model``."""
-
-    def _head(self, out: mx.array) -> mx.array:
-        if self.args.tie_word_embeddings:
-            return self.model.embed_tokens.as_linear(out)
-        return self.lm_head(out)
+class Qwen4ExpSpecHooks:
+    """The ``speculative_*`` hooks the owned MTP engine probes on the
+    target's ``language_model``, shared by the text ``Qwen4ExpSpecLM`` and
+    the VLM wrapper's ``LanguageModel`` (vlm_model.py) so ``--mmproj`` and
+    MTP compose on one model. Contract: the carrier exposes ``self.model``
+    (a ``Qwen4ExpModel``) and ``self._head``."""
 
     def chunked_prefill_policy(self, **kwargs):
         # The drafter teacher-forces from the retained per-chunk hiddens, so
         # chunked prefill is always safe for this target.
         return True
 
-    def __call__(
-        self,
-        inputs: mx.array,
-        cache: Optional[Any] = None,
-        inputs_embeds: Optional[mx.array] = None,
-        n_to_process: Optional[int] = None,
-        return_hidden: bool = False,
-        return_shared_kv: bool = False,
-        **kwargs,
-    ):
-        # mlx-vlm's chunked prefill calls language_model(inputs=ids, ...) by
-        # keyword; shared_kv is never used (the drafter owns its KV).
-        del n_to_process, kwargs
-        want_hidden = return_hidden or return_shared_kv
-        out, streams = self.model(
-            inputs, cache, input_embeddings=inputs_embeds, return_streams=True)
-        logits = self._head(out)
-        if not want_hidden:
-            from mlx_vlm.models.base import LanguageModelOutput
-
-            return LanguageModelOutput(logits=logits)
-        return _SpecOutput(logits=logits, hidden_states=[streams])
-
-    # --- speculative hooks (owned engine contract) -------------------------
+    def _spec_verify_positions(self, verify_input: mx.array, prompt_cache):
+        # Verify-forward position seam. None keeps the scalar-offset fast
+        # rope (text targets); the VLM wrapper overrides with its resolved
+        # mrope block so verify after an image turn matches plain decode.
+        return None
 
     def speculative_logits_from_hidden(self, hidden: mx.array) -> mx.array:
         """(B,S,4,D) pre-mixer streams -> (B,S,V)."""
@@ -121,7 +100,8 @@ class Qwen4ExpSpecLM(q4.Model):
         plus the rollback sink in the ``gdn_states`` slot."""
         sink: list = []
         _, streams = self.model(
-            verify_input, prompt_cache, return_streams=True, gdn_sink=sink)
+            verify_input, prompt_cache, return_streams=True, gdn_sink=sink,
+            position_ids=self._spec_verify_positions(verify_input, prompt_cache))
         return streams, {}, sink
 
     def rollback_speculative_cache(
@@ -146,6 +126,38 @@ class Qwen4ExpSpecLM(q4.Model):
                 )
         if gdn_states:
             q4.rollback_verify_sink(gdn_states, accepted + 1)
+
+
+class Qwen4ExpSpecLM(Qwen4ExpSpecHooks, q4.Model):
+    """Vendored qwen4exp ``Model`` + the shared spec hooks."""
+
+    def _head(self, out: mx.array) -> mx.array:
+        if self.args.tie_word_embeddings:
+            return self.model.embed_tokens.as_linear(out)
+        return self.lm_head(out)
+
+    def __call__(
+        self,
+        inputs: mx.array,
+        cache: Optional[Any] = None,
+        inputs_embeds: Optional[mx.array] = None,
+        n_to_process: Optional[int] = None,
+        return_hidden: bool = False,
+        return_shared_kv: bool = False,
+        **kwargs,
+    ):
+        # mlx-vlm's chunked prefill calls language_model(inputs=ids, ...) by
+        # keyword; shared_kv is never used (the drafter owns its KV).
+        del n_to_process, kwargs
+        want_hidden = return_hidden or return_shared_kv
+        out, streams = self.model(
+            inputs, cache, input_embeddings=inputs_embeds, return_streams=True)
+        logits = self._head(out)
+        if not want_hidden:
+            from mlx_vlm.models.base import LanguageModelOutput
+
+            return LanguageModelOutput(logits=logits)
+        return _SpecOutput(logits=logits, hidden_states=[streams])
 
 
 class Qwen4ExpMTPDrafter(QwenMTPDrafter):
@@ -196,6 +208,7 @@ class Qwen4ExpMTPDrafter(QwenMTPDrafter):
         self._input_embed = None
         self._input_embed_scale = 1.0
         self._lm_head_fn = None
+        self._rope_delta_source = None
         self._cache: list = []
         self._seed_token = None
         self._seed_hidden = None
@@ -204,6 +217,20 @@ class Qwen4ExpMTPDrafter(QwenMTPDrafter):
         self.draft_lens: list = []
 
     # --- lifecycle ---------------------------------------------------------
+
+    def bind(self, target_model) -> "Qwen4ExpMTPDrafter":
+        super().bind(target_model)
+        # A/B seam (GMLX_Q4_MTP_MROPE_DRAFT=1): draft at the target's
+        # resolved mrope offset instead of the head's flat cache offset on
+        # image conversations. The head is a separate model; which positions
+        # it was trained against is an upstream question, so both arms stay
+        # runnable and acceptance decides. Default flat (today's behavior).
+        self._rope_delta_source = None
+        if env_bool("GMLX_Q4_MTP_MROPE_DRAFT", False):
+            lm = getattr(target_model, "language_model", target_model)
+            if hasattr(lm, "_rope_deltas"):
+                self._rope_delta_source = lambda: lm._rope_deltas
+        return self
 
     def make_cache(self, left_padding: Optional[List[int]] = None) -> List[Any]:
         if left_padding is not None and (
@@ -224,9 +251,11 @@ class Qwen4ExpMTPDrafter(QwenMTPDrafter):
         return self.pre_fc_norm_hidden(
             hidden.reshape(B, S, hc * D)).reshape(B, S, hc, D)
 
-    def _forward(self, tokens: mx.array, hidden: mx.array) -> mx.array:
+    def _forward(self, tokens: mx.array, hidden: mx.array,
+                 cache: Optional[List[Any]] = None) -> mx.array:
         """One head forward over (next_token, target pre-mixer streams)
-        pairs; returns the head's PRE-mixer streams ``[B,S,4,D]``."""
+        pairs; returns the head's PRE-mixer streams ``[B,S,4,D]``. cache
+        overrides the head's own list (seed streaming), never swaps it."""
         tokens = tokens.astype(mx.int32)
         if hidden.ndim != 4:
             raise ValueError(
@@ -235,9 +264,23 @@ class Qwen4ExpMTPDrafter(QwenMTPDrafter):
         e = self.fc_embedding(self.pre_fc_norm_embedding(
             self._input_embed(tokens) * self._input_embed_scale))
         x = self.fc_hidden(self._hidden_norm(hidden)) + e[:, :, None, :]
-        cache = self._cache[0]
-        mask = create_attention_mask(x[:, :, 0, :], cache)
-        return self.layers[0](x, tokens, mask=mask, cache=cache)
+        c = (self._cache if cache is None else cache)[0]
+        mask = create_attention_mask(x[:, :, 0, :], c)
+        return self.layers[0](x, tokens, mask=mask, cache=c,
+                              positions=self._draft_positions(tokens, c))
+
+    def _draft_positions(self, tokens: mx.array, cache):
+        """None (flat cache-offset rope, the default arm) unless the mrope
+        A/B arm is bound and the target resolved a rope delta this request."""
+        if self._rope_delta_source is None:
+            return None
+        delta = self._rope_delta_source()
+        if delta is None:
+            return None
+        B, S = tokens.shape
+        pos = cache.offset + delta.astype(mx.int32).reshape(B, 1) \
+            + mx.arange(S, dtype=mx.int32)[None]
+        return mx.broadcast_to(pos[None], (3, B, S))
 
     def _logits(self, h: mx.array) -> mx.array:
         return self._lm_head_fn(self.hyper_connection_mixer(h))

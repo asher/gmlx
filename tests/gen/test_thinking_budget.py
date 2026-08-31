@@ -10,8 +10,10 @@ that mimic mlx-lm's contract: ``tokens`` is the full accumulated sequence
 import mlx.core as mx
 
 from gmlx.gen.thinking_budget import (
+    MTPFinishThinking,
     ThinkingBudgetProcessor,
     _thinking_token_seqs,
+    make_mtp_finish_hook,
     make_thinking_budget_processor,
     prompt_opens_thinking,
 )
@@ -679,3 +681,175 @@ def test_muse_glimmer_closed_reasoning_message_is_not_open():
 
     prompt = "<|start|>assistant to=self<|message|>done<|eom|>"
     assert not prompt_opens_thinking(prompt, tokenizer=_MuseTok())
+
+
+# --- MTPFinishThinking (^T on the owned MTP rounds) --------------------------
+
+def _mtp_hook(**kw):
+    kw.setdefault("end_seq", (END,))
+    kw.setdefault("skip_ids", [7, 8, END])
+    kw.setdefault("reclose_ids", [NL, END])
+    kw.setdefault("start_seq", (START,))
+    return MTPFinishThinking(**kw)
+
+
+def test_mtp_hook_close_while_thinking():
+    h = _mtp_hook(start_in_thinking=True)
+    for t in (50, 51):
+        h.observe(t)
+    assert h.take_forced() is None  # nothing requested
+    h.request_close()
+    assert h.take_forced() == [7, 8, END]  # skip phrase on the first close
+    for t in (7, 8, END):  # the round loop emits the forced ids
+        h.observe(t)
+    assert not h.in_thinking and h._spent
+
+
+def test_mtp_hook_close_outside_thinking_is_noop():
+    h = _mtp_hook(start_in_thinking=False)
+    h.observe(50)
+    h.request_close()
+    assert h.take_forced() is None
+    # The stale request must not close a block opened later.
+    h.observe(START)
+    assert h.in_thinking
+    assert h.take_forced() is None
+
+
+def test_mtp_hook_natural_close_then_request_is_noop():
+    h = _mtp_hook(start_in_thinking=True)
+    h.observe(50)
+    h.observe(END)  # the model closed on its own
+    h.request_close()
+    assert h.take_forced() is None and not h._spent
+
+
+def test_mtp_hook_reopen_recloses_tersely():
+    h = _mtp_hook(start_in_thinking=True)
+    h.request_close()
+    assert h.take_forced() == [7, 8, END]
+    for t in (7, 8, END):
+        h.observe(t)
+    h.observe(60)  # an answer token lands
+    h.observe(START)  # the model reopens thinking
+    assert h.take_forced() == [NL, END]  # terse reclose, no phrase
+    for t in (NL, END):
+        h.observe(t)
+    assert not h.in_thinking
+
+
+def test_mtp_hook_three_answerless_closes_stand_down():
+    h = _mtp_hook(start_in_thinking=True)
+    h.request_close()
+    assert h.take_forced() == [7, 8, END]
+    for t in (7, 8, END):
+        h.observe(t)
+    closes = 0
+    for _ in range(4):  # open/close cycling with no answer between
+        h.observe(START)
+        forced = h.take_forced()
+        if forced is None:
+            break
+        closes += 1
+        for t in forced:
+            h.observe(t)
+    assert closes == 2 and h.done
+    h.request_close()
+    assert h.take_forced() is None
+
+
+def test_mtp_hook_multi_token_end_seq_spans_rounds():
+    h = MTPFinishThinking(
+        end_seq=(98, END), skip_ids=[7, 98, END], reclose_ids=[98, END],
+        start_seq=(START,), start_in_thinking=True)
+    h.observe(50)
+    h.observe(98)  # first half of the close marker (round boundary here)
+    assert h.in_thinking
+    h.observe(END)  # completed by the next round
+    assert not h.in_thinking
+
+
+def test_finish_key_targets_mtp_hook():
+    from gmlx.gen.thinking_budget import (
+        clear_finish_key_target,
+        finish_thinking_now,
+        set_finish_key_target,
+    )
+
+    h = _mtp_hook(start_in_thinking=True)
+    set_finish_key_target(h)
+    try:
+        assert finish_thinking_now() is True
+        assert h._close_requested
+        h.done = True
+        assert finish_thinking_now() is False
+    finally:
+        clear_finish_key_target()
+
+
+def test_make_mtp_finish_hook_factory():
+    h = make_mtp_finish_hook(_FakeTok(), start_in_thinking=True)
+    assert h is not None and h.in_thinking
+    assert h.end_seq == (END,)
+    assert h.skip_ids[-1] == END and h.reclose_ids == [NL, END]
+
+    class _NoThinkTok:
+        def encode(self, text, add_special_tokens=True):
+            return [7, 8, 42] if "think" in text else []
+
+    assert make_mtp_finish_hook(_NoThinkTok()) is None
+
+
+def test_mtp_hook_budget_trips_on_its_own():
+    h = _mtp_hook(start_in_thinking=True, budget=3, forced_ids=[8, 9, END])
+    for t in (50, 51, 52):
+        h.observe(t)
+    assert h.take_forced() is None  # count == budget: not over yet
+    h.observe(53)
+    assert h.take_forced() == [8, 9, END]  # budget phrase, not the ^T one
+    for t in (8, 9, END):
+        h.observe(t)
+    assert not h.in_thinking and h._spent
+
+
+def test_mtp_hook_natural_close_disarms_budget():
+    h = _mtp_hook(start_in_thinking=True, budget=2)
+    h.observe(50)
+    h.observe(END)
+    assert h.done
+    h.observe(START)  # reopened blocks are free after a natural close
+    for t in (60, 61, 62, 63):
+        h.observe(t)
+    assert h.take_forced() is None
+
+
+def test_mtp_hook_reopen_resets_count():
+    h = _mtp_hook(start_in_thinking=False, budget=3)
+    h.observe(START)
+    for t in (50, 51, 52):
+        h.observe(t)
+    assert h.take_forced() is None  # at budget, not over
+    h.observe(53)
+    assert h.take_forced() is not None  # over
+
+
+def test_make_mtp_finish_hook_budget_variants():
+    class _WrapTok(_FakeTok):
+        def encode(self, text, add_special_tokens=True):
+            ids = super().encode(text, add_special_tokens)
+            if ids:
+                return ids
+            if "thinking budget" in text:
+                return [70]
+            if "asked to wrap" in text:
+                return [71]
+            return []
+
+    h = make_mtp_finish_hook(_WrapTok(), budget=5, start_in_thinking=True)
+    assert h.budget == 5 and h.in_thinking
+    assert h.forced_ids == [70, END]  # budget wrap phrase
+    assert h.skip_ids == [71, END]  # ^T wrap phrase
+    assert h.reclose_ids == [NL, END]
+    h0 = make_mtp_finish_hook(_WrapTok(), budget=0)
+    assert h0.forced_ids == [NL, END] and h0.skip_ids == [NL, END]
+    assert make_mtp_finish_hook(_WrapTok(), budget=-1) is None

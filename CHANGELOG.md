@@ -6,6 +6,203 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-08-30
+
+### Fixed
+
+- MTP with `kv_bits` no longer runs an fp16 cache on architectures whose
+  layers are cache lists (glm5_next): nested KV members now convert, as
+  `/v1/models` and admission already reported, and pooled members pack
+  at rest as well. The `[kv]` line counts every pool packed.
+- Hybrid sliding-window models no longer drop `kv_bits` on the MTP path:
+  windows stay fp16 and full-attention layers quantize.
+- Serve output with `kv_bits` set no longer corrupts into repeating
+  garbage on long prompts (issue #104): a host-side mlx 0.32.1 bug made
+  dequantize read the wrong buffers for strided cache slices; gmlx now
+  hands it contiguous operands (fixed upstream in mlx 0.32.2).
+- `GMLX_QWEN_OWNED=0` with `--kv-bits` and MTP no longer crashes every
+  request; the spec path declines quantization on the stock fallback.
+- Concurrent MTP requests with `kv_bits` no longer fail at batch
+  formation; batched MTP runs fp16 KV (rollback cannot trim packed KV)
+  and single-stream keeps the quantized cache.
+- `--kv-bits` with `--max-kv-size` is refused at start instead of
+  crashing mid-generation with "RotatingKVCache Quantization NYI".
+- `/v1/metrics` server snapshot reports `apc.enabled` true whenever the
+  residency pool holds a live APC manager; it said false until a request
+  had touched the entry (the proxy resolves per request context).
+
+### Changed
+
+- KV quantization resolves one per-stack policy everywhere (serve,
+  `run`, `chat`, MTP): attention KV quantizes (minus the last layer of
+  a deep stack); windows and recurrent state stay fp16; pooled caches
+  pack at rest. One `[kv]` line and `/v1/models` `kv_quant` report the
+  verdict; admission pricing, the deepseek-v4 pooled path, and APC
+  warm merges all follow the same policy (fp16 under MTP).
+
+## [0.4.6] - 2026-08-29
+
+### Added
+
+- Qwen3.8-Flash-Next: when only its 27-54 GB n-gram table pushes the model
+  past the wired budget, that table now streams instead of the experts, so
+  the experts run fully on GPU (Q4 build: 45.9 tok/s decode, bit-identical
+  output). Models too big even post-table stream table and experts together
+  (Q6 build: short-context decode 8.4 -> 12.6-13.4 tok/s, wired peak
+  106 -> 54 GB). `GMLX_STREAM_PLE` overrides; `GMLX_STREAM_PLE_COMPOSE=0`
+  keeps the table resident when the experts stream.
+- `chat` shows a spinner from send to first token.
+- STQ1_0 GGUFs (llama.cpp PR #22836, GGML type 43 -- unmerged upstream, the
+  id may shift) load end-to-end. Headerscan carries a fallback table for
+  type ids newer than the installed gguf-py, preflight accepts the codec,
+  discovery tags `-STQ1_0` filenames, and remote and local classification
+  agree on it. Requires mlx-kquant >= 0.4.4, the release carrying the
+  stq1_0 kernels.
+- STQ1_0 GGUFs (llama.cpp PR #22836, GGML type 43; unmerged, the id may
+  shift) load end-to-end. Requires mlx-kquant >= 0.4.4.
+
+### Changed
+
+- `gmlx validate` and the manage verbs classify local GGUFs via headerscan
+  instead of gguf-py's `GGUFReader`, so a type id newer than the installed
+  gguf-py gets a verdict instead of "cannot read as GGUF". The refusal
+  message now also names mxfp4/nvfp4.
+
+### Fixed
+
+- Streaming Qwen3.8-Flash-Next no longer pins the n-gram table or sizes
+  the decode arena around it (Q6 build default decode 3.4 -> 8.5 tok/s
+  with the table resident).
+- Streaming both the table and the experts credits both against tracked
+  memory (the second credit was silently dropped), so serve headroom no
+  longer understates free memory in that placement.
+- Lookahead prestage reaches fused MoE decode blocks again; it stays off
+  on Qwen3.8-Flash-Next, where it measured slower.
+
+## [0.4.5] - 2026-08-29
+
+### Added
+
+- MTP drafter seeding streams into prefill: the long first-token stall on
+  deep prompts is gone (worst inter-token gap at 67k depth drops from
+  ~850ms to ~150ms; decode there gains ~13%). GMLX_MTP_SEED_STREAM=0
+  restores the deferred seeding pass.
+- The ^T finish-thinking key now works on the MTP path in `run` and `chat`:
+  the owned round loop commits the forced close sequence as fully-accepted
+  verify rounds at the next round boundary, so an open thinking block wraps
+  up and the answer starts without leaving speculative decoding. `gmlx run`
+  MTP now routes to the owned engine by default like `chat`, serve, and
+  bench (`GMLX_OWNED_ROUND=0` opts back to the stock round, where ^T still
+  prints its notice).
+- `--thinking-budget` now applies on the MTP path in `run` and `chat`,
+  through the same forced-close rounds as ^T (the stock MTP round still
+  drops it with a notice).
+- The server honors `thinking_budget` on MTP-drafted models (request field
+  or profile/model config key), instead of rejecting those requests.
+  Enforced by the owned round loop for a request decoding alone; requests
+  batched with others drop the budget with a log note. See the behavior
+  matrix in docs/server-config.md. Non-MTP speculative models keep the
+  stock rejection.
+- Model ids on one GGUF that differ only in `adapter:` now share a single
+  resident model: base and every adapter load once, requests to any of the
+  ids batch together, and each row applies only its own adapter. Single-model
+  `serve --adapter` also registers the bare base as `<id>-base`.
+- GGUF LoRA adapters apply on MoE expert targets, under `--stream-experts`,
+  and with MTP speculative decoding; the delta runs inside the mlx-kquant
+  matmul ops when the build has the LoRA epilogue, so an adapter costs about
+  1-2% of decode.
+- Managed servers detect when the gmlx install changed on disk after they
+  started (a pip upgrade, or a checkout switch under an editable install):
+  the runfile records a source fingerprint at boot, `gmlx status` and
+  harness connects (`chat`, `launch`) flag the stale server with a
+  `gmlx restart` hint, and a lazy import that fails inside the serve load
+  path reports the condition instead of a bare "No module named" 500.
+- `gmlx chat --server`: `/model <id>` switches the served model mid
+  conversation with the transcript kept (`/model` lists the served ids,
+  tab completes them), so a base and its adapters can be compared in one
+  session.
+
+### Fixed
+
+- Prompt caching works on qwen4exp (Qwen3.8-Flash-Next): every APC tier now
+  restores the QSA indexer state, and repeated prompts produce identical output.
+- Metal buffer leaks: glm5next decode no longer hits the 499k resource limit
+  on long generations, and streamed serve releases arena/weight residency on
+  feeder close and model eviction.
+- Per-request `seed` works on the server again: the thinking-budget patch
+  installed after the seed wrapper on the same seam and clobbered it, so
+  request seeds were silently ignored.
+
+## [0.4.4] - 2026-08-27
+
+### Added
+
+- `glm5next` (GLM-5.3-Flash 320B-A18B, llama.cpp PR 27754) loads: hybrid
+  KDA linear attention + NoPE MLA with a pooled DSA sparse indexer
+  (top-512 key pools at depth), sigmoid MoE with clamped SwiGLU, 4-stream
+  sinkhorn hyper-connections, and the glm4 BPE pretokenizer with
+  `ignore_merges`. Long prompts stream the absorbed MLA attention in
+  online-softmax tiles and gather the sparse-selected pool union per query
+  block instead of masking the full key set.
+- glm5next MTP speculative decoding from the GGUF's native NextN block:
+  the drafter's DSA layer rides the trunk caches, verify rollback trims
+  the latent-KV/pool caches and replays the KDA recurrent state from the
+  recorded pre-verify sink.
+- glm5next VLM pairing (`--mmproj`): the GLM-OCR ViT + conv-downsample
+  projector load onto a vendored tower; images preprocess with the
+  align-28 canvas search (16..8000 token budget), soft tokens splice at
+  the `<|image|>` placeholders, and text-only requests keep MTP.
+- VLM loads (--mmproj) compose with every speculative-decode form the text
+  path supports: companion drafters (DFlash2, qwen4exp-mtp) load against a
+  multimodal target, and companion-only families autodetect their drafter.
+- nemotron_h_moe (Nemotron-3.5-Lightning) MTP speculative decoding from the
+  in-file NextN head (auto-enabled) or the llama.cpp `mtp-*.gguf` sidecar
+  (`--draft-gguf`, autodetected next to the target). Greedy decoding stays
+  token-identical to plain decode: the verify walk steps Mamba2, attention
+  and the MoE router gate per position, prefill matches mlx-lm's last-token
+  split, and dense verify matmuls take the bit-exact kquant route
+  (`--stochastic-mtp` keeps the faster non-exact route).
+
+### Changed
+
+- qwen4exp prefill rewritten around the sparse boundary: split-regime QSA
+  dispatch (causal prefix, gathered ragged span, block-sparse tail) plus a
+  ragged-length branch so serve one-shot prompts skip the dense token mask.
+- qwen4exp hyper-connection prefill epilogues run as single-pass kernels
+  (norm, mix+inject, combine, inject GEMV); `GMLX_Q4_HC_PREFILL_KERN=0`
+  restores the bit-exact eager path.
+- qwen4exp defaults to an 8192-token prefill chunk when the block-sparse
+  kernels are armed (`GMLX_Q4_PREFILL_STEP` overrides).
+
+### Fixed
+
+- qwen3.5/3.6/3.8 image turns degraded to repetitive text with an early
+  stop: mlx-vlm 0.6.15 vendored its qwen3_5 gated_delta functions, so plain
+  VLM loads ran the GGUF's tiled V heads through grouped K-to-V kernels.
+  Plain loads now rebind the vendored module like the MTP paths do.
+- qwen4exp VLM conversations could fail with a broadcast_shapes error when
+  the cache grew after a trim landed mid-step: the QSA position buffer was
+  sized against its untruncated width and fell behind the key stream.
+- `gmlx chat`/`serve` on nemotron_h_moe failed with "exposes no token
+  embedding the batched engine can reach": the embedding probe now reaches
+  the `Model.backbone.embeddings` nesting.
+- Nemotron-3.5-Lightning built its trunk with the NextN/MTP block as a
+  53rd layer, silently degrading all output; the trunk now excludes NextN
+  layers, and their tensors are stripped from the trunk remap.
+- `mtp-*.gguf` sidecars (same arch and metadata as their base model) were
+  discovered as servable models; they now classify as drafters.
+- qwen4exp ran the whole residual stream in fp32: the router's fp32 scores
+  promoted each layer's MoE output and every downstream elementwise chain.
+  Prefill is ~35% faster and decode ~20% faster after the dtype returns to
+  the activation width.
+- qwen4exp gate+up expert concat could freeze constructor placeholder zeros
+  when weights were installed after the module was built, corrupting MoE
+  outputs on some load orders.
+- Serve governor: a kernel-floor breach zeroed the Metal cache and kept
+  re-triggering itself, pinning throughput low until restart. The throttle
+  now clamps the cache to a small budget (`GMLX_GOV_THROTTLE_CACHE_GB`) and
+  the floor default drops to 4 GB (min with 10% of RAM) for small machines.
+
 ## [0.4.3] - 2026-08-26
 
 ### Added

@@ -108,7 +108,7 @@ FAMILIES: dict[str, dict] = {
     # https://huggingface.co/zai-org/GLM-5.2 (+ GLM-4.x cards), 2026-07.
     "glm": {
         "label": "GLM",
-        "arches": ("glm4", "glm4moe", "glm-dsa"),
+        "arches": ("glm4", "glm4moe", "glm-dsa", "glm5next"),
         "base": {"sampling": {"temperature": 1.0, "top_p": 0.95}},
         "intents": {},
     },

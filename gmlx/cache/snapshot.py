@@ -747,7 +747,10 @@ def _caches_nbytes(caches) -> int:
 
 
 def _rec_nbytes(rec) -> int:
-    return _caches_nbytes(rec.states) + _caches_nbytes(rec.tails)
+    total = _caches_nbytes(rec.states) + _caches_nbytes(rec.tails)
+    for a in _iter_arrays(getattr(rec, "qsa", None)):
+        total += int(a.nbytes)
+    return total
 
 
 def ckpt_extra_hash(extra_hash: int) -> int:
@@ -773,6 +776,30 @@ def _is_rot(tag: str) -> bool:
     return tag.startswith("rot")
 
 
+def _is_qsa(tag: str) -> bool:
+    return tag.startswith("qsa")
+
+
+def _is_chain(tag: str) -> bool:
+    """Chain-backed attention layer: k/v ride the shared block pool. Kvarn
+    records are blockless, so a kvarn tag is never chain-backed."""
+    return tag == "kv" or _is_qsa(tag)
+
+
+def _qsa_tag(cache) -> str | None:
+    """QSA layers (KVCache plus the indexer key stream) get their own tag:
+    treating them as plain "kv" restores a cache without ``ik``, which the
+    model silently serves with dense attention from then on."""
+    if hasattr(cache, "update_and_fetch_qsa"):
+        return f"qsa:{int(cache.ratio)}"
+    return None
+
+
+def _qsa_cache_cls():
+    from gmlx.models.qwen4_exp.model import QSAKVCache
+    return QSAKVCache
+
+
 def _kvarn_tag(cache) -> str:
     """Kvarn layout tag carries the wire config: a record restored into a
     different width/tail (or a stock boot) must miss, never adopt."""
@@ -785,14 +812,14 @@ def _is_kvarn(tag: str) -> bool:
 
 
 def ckpt_layout(prompt_cache, block_size: int = 16):
-    """Per-layer tags ("kv" | "rot:W:keep" | "arr" | "kvarn:k:v:tail") for
-    a supported hybrid cache list, else None. Supported: every layer one of
-    the four classes, at least one non-plain-KV layer (pure-KV and pure-
-    kvarn models belong to the block/exact tiers), and rotating layers
-    passing the block-grid geometry gate. Kvarn matches the concrete
-    single-stream class only: the rotating subclass loses window geometry
-    under the plain tag, and batch classes belong to the batch engine --
-    both decline until dedicated support lands."""
+    """Per-layer tags ("kv" | "qsa:R" | "rot:W:keep" | "arr" |
+    "kvarn:k:v:tail") for a supported hybrid cache list, else None.
+    Supported: every layer one of the classes, at least one non-plain-KV
+    layer (pure-KV and pure-kvarn models belong to the block/exact tiers),
+    and rotating layers passing the block-grid geometry gate. Kvarn matches
+    the concrete single-stream class only: the rotating subclass loses
+    window geometry under the plain tag, and batch classes belong to the
+    batch engine -- both decline until dedicated support lands."""
     from .compat import cache_types
     from .kvarn_cache import KVarNKVCache
 
@@ -803,8 +830,11 @@ def ckpt_layout(prompt_cache, block_size: int = 16):
     arr_types = cache_types("ArraysCache")
     tags = []
     for c in prompt_cache:
+        qsa = _qsa_tag(c)
         if isinstance(c, rot_types):
             tags.append(_rot_tag(c))
+        elif qsa is not None:
+            tags.append(qsa)
         elif isinstance(c, kv_types):
             tags.append("kv")
         elif isinstance(c, arr_types):
@@ -817,11 +847,11 @@ def ckpt_layout(prompt_cache, block_size: int = 16):
     has_kvarn = any(_is_kvarn(t) for t in tags)
     if not has_rot and "arr" not in tags:
         return None       # pure-KV/pure-kvarn: block/exact tier
-    if "kv" not in tags and not has_rot and not has_kvarn:
-        # Pure-arr: exact tier. A chainless kvarn+arr record still earns
-        # the ckpt tier -- B=1 direct-assign adoption (the exact tier's
-        # merge machinery returns None on mixed stacks), the checkpoint
-        # boundary schedule, and disk skeletons.
+    if not any(_is_chain(t) for t in tags) and not has_rot and not has_kvarn:
+        # No chain-backed layer: exact tier. A chainless kvarn+arr record
+        # still earns the ckpt tier -- B=1 direct-assign adoption (the
+        # exact tier's merge machinery returns None on mixed stacks), the
+        # checkpoint boundary schedule, and disk skeletons.
         return None
     if has_rot and rotating_geometry(prompt_cache, block_size) is None:
         return None
@@ -850,7 +880,7 @@ class _CkptRecord:
     # "replay".
     __slots__ = ("ids", "extra_hash", "p", "b_full", "layout",
                  "main_blocks", "bounded_blocks", "rot_meta", "states",
-                 "tails", "nbytes", "kind")
+                 "tails", "qsa", "nbytes", "kind")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -1473,6 +1503,32 @@ def ckpt_store(
             manager.release(main_blocks)
             manager.release(bounded_blocks)
             return 0
+        # QSA layers: the chain carries only k/v, so the indexer key
+        # stream (and mrope positions) ride the record whole. ik is one
+        # raw key per token; a 3k-token 12-layer store runs ~10 MB.
+        qsa_streams = None
+        if any(hasattr(c, "update_and_fetch_qsa") for c in kv_caches):
+            import mlx.core as mx
+            qsa_streams = []
+            for c in kv_caches:
+                if not hasattr(c, "update_and_fetch_qsa"):
+                    continue
+                if c.ik is None or c.ik.shape[1] < p:
+                    qsa_streams = None
+                    break
+                ik = mx.contiguous(c.ik[:, :p])
+                qpos = None if c.pos is None else mx.contiguous(
+                    c.pos[:, :, :p])
+                qsa_streams.append((ik, qpos, int(c.ratio)))
+            if qsa_streams is None:
+                _ckpt_decline(manager, "clone")
+                manager.release(main_blocks)
+                manager.release(bounded_blocks)
+                return 0
+            from gmlx.eval_guard import guard
+            guard.eval(*[a for t in qsa_streams for a in t[:2]
+                         if a is not None],
+                       site="ckpt-store-qsa", owner="owned")
         tails = None
         if tail_len and kv_caches:
             tails = []
@@ -1492,14 +1548,15 @@ def ckpt_store(
             ids=tuple(ids), extra_hash=int(extra_hash), p=p, b_full=b_full,
             layout=tuple(layout), main_blocks=main_blocks,
             bounded_blocks=bounded_blocks, rot_meta=rot_meta,
-            states=states, tails=tails, kind=str(kind))
+            states=states, tails=tails, qsa=qsa_streams, kind=str(kind))
         _record_insert(manager, rec)
         # Ownership moved to the record; the except path must not release.
         main_blocks = bounded_blocks = []
 
         if skeleton_disk:
             _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
-                             tail_len, states, tails, salted)
+                             tail_len, states, tails, salted,
+                             qsa_streams=qsa_streams)
         _ckpt_bump(manager, "ckpt_stores")
         _log.info(
             "APC ckpt store: tokens=%d main=%d window=%d tail=%d states=%d "
@@ -1519,9 +1576,13 @@ def ckpt_store(
 
 
 def _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
-                     tail_len, states, tails, salted) -> None:
+                     tail_len, states, tails, salted,
+                     qsa_streams=None) -> None:
     """Best-effort disk skeleton: placeholders for chain-backed layers
-    (offset stamped, rotating meta native), real tails/states inline."""
+    (offset stamped, rotating meta native), real tails/states inline.
+    ``qsa_streams`` are the record's already-evaluated (ik, pos, ratio)
+    clones: the shard writer thread cannot evaluate GPU-stream graphs,
+    so the skeleton must only carry materialized arrays."""
     disk = getattr(manager, "disk", None)
     if disk is None:
         return
@@ -1529,9 +1590,30 @@ def _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
     try:
         rcm = runtime_cache_module()
         entries: list[Any] = []
-        kv_i = arr_i = 0
+        kv_i = arr_i = qsa_i = 0
         for tag, c in zip(layout, prompt_cache):
-            if tag == "kv":
+            if _is_qsa(tag):
+                # QSA skeleton: k/v are chain-backed like "kv" (tail-only
+                # payload, offset stamped), but the full indexer stream
+                # rides the entry so a restart can rebuild the real cache.
+                if not qsa_streams or qsa_i >= len(qsa_streams):
+                    return
+                ik, qpos, ratio = qsa_streams[qsa_i]
+                sk = _qsa_cache_cls()(ratio)
+                sk.ik = ik
+                sk.pos = qpos
+                if tail_len:
+                    # Evaluated clone arrays, handed over whole: the
+                    # writer thread cannot evaluate main-thread slices,
+                    # and the serializer trims to stored width itself.
+                    t = tails[kv_i]
+                    sk.keys = t.keys
+                    sk.values = t.values
+                sk.offset = p
+                entries.append(sk)
+                kv_i += 1
+                qsa_i += 1
+            elif tag == "kv":
                 if tail_len:
                     entries.append(tails[kv_i])
                 else:
@@ -1579,8 +1661,10 @@ def _assemble_from_record(manager, rec, geometry_check=None):
     from .compat import runtime_cache_module
 
     rcm = runtime_cache_module()
-    n_kv = sum(1 for t in rec.layout if t == "kv")
+    n_kv = sum(1 for t in rec.layout if _is_chain(t))
     n_rot = sum(1 for t in rec.layout if _is_rot(t))
+    if any(_is_qsa(t) for t in rec.layout) and not rec.qsa:
+        return None
     if rec.b_full > 0 and n_kv and not rec.main_blocks:
         return None
     if n_rot and not rec.bounded_blocks:
@@ -1624,13 +1708,23 @@ def _assemble_from_record(manager, rec, geometry_check=None):
                 return None
             layer_rot.append(rc)
     warm: list[Any] = []
-    kv_i = rot_i = arr_i = 0
+    kv_i = rot_i = arr_i = qsa_i = 0
     for tag in rec.layout:
         if tag == "kv":
             kc = rcm.KVCache()
             kc.state = layer_kv[kv_i]
             warm.append(kc)
             kv_i += 1
+        elif _is_qsa(tag):
+            ik, qpos, ratio = rec.qsa[qsa_i]
+            st = layer_kv[kv_i] + ((ik,) if qpos is None else (ik, qpos))
+            qc = _qsa_cache_cls()(ratio)
+            qc.state = st
+            if qc.offset != rec.p:
+                return None
+            warm.append(qc)
+            kv_i += 1
+            qsa_i += 1
         elif _is_rot(tag):
             warm.append(layer_rot[rot_i])
             rot_i += 1
@@ -1646,6 +1740,8 @@ def _assemble_from_record(manager, rec, geometry_check=None):
             targets.extend([c.keys, c.values])
         elif hasattr(c, "cache"):
             targets.extend(s for s in c.cache if s is not None)
+        if getattr(c, "ik", None) is not None:
+            targets.append(c.ik)
     mx.eval(*targets)
     return warm
 
@@ -1867,8 +1963,11 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
     from .kvarn_cache import KVarNKVCache
     tags = []
     for e in entries:
+        qsa = _qsa_tag(e)
         if isinstance(e, rot_types):
             tags.append(_rot_tag(e))
+        elif qsa is not None:
+            tags.append(qsa)
         elif isinstance(e, kv_types):
             tags.append("kv")
         elif type(e) is KVarNKVCache:
@@ -1881,7 +1980,7 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
         return None, 0
     bs = int(manager.block_size)
     b_full = _ckpt_block_prefix(p, bs)
-    n_kv = tags.count("kv")
+    n_kv = sum(1 for t in tags if _is_chain(t))
     blocks = []
     wblocks = []
     try:
@@ -1955,23 +2054,46 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
         warm: list[Any] = []
         kv_i = rot_i = 0
         for tag, e in zip(tags, entries):
-            if tag == "kv":
-                has_tail = getattr(e, "keys", None) is not None
-                t_len = int(e.offset) if has_tail else 0
-                kc = runtime_cache_module().KVCache()
+            if _is_chain(tag):
+                qsa_c = _is_qsa(tag)
+                if qsa_c:
+                    # QSA skeleton entries stamp offset=p and carry only
+                    # the unaligned tail in keys; the tail length is the
+                    # stored width, not the offset.
+                    ek = getattr(e, "keys", None)
+                    t_len = int(ek.shape[2]) if ek is not None else 0
+                else:
+                    has_tail = getattr(e, "keys", None) is not None
+                    t_len = int(e.offset) if has_tail else 0
                 base = layer_kv[kv_i] if layer_kv is not None else None
                 if t_len:
                     tk = e.keys[..., :t_len, :]
                     tv = e.values[..., :t_len, :]
                     if base is not None:
-                        kc.state = (mx.concatenate([base[0], tk], axis=2),
-                                    mx.concatenate([base[1], tv], axis=2))
+                        kv_state = (
+                            mx.concatenate([base[0], tk], axis=2),
+                            mx.concatenate([base[1], tv], axis=2))
                     else:
-                        kc.state = (tk, tv)
+                        kv_state = (tk, tv)
                 elif base is not None:
-                    kc.state = base
+                    kv_state = base
                 else:
                     return None, 0
+                if qsa_c:
+                    ik = getattr(e, "ik", None)
+                    if ik is None or ik.shape[1] < p:
+                        _log.info(
+                            "APC ckpt disk miss: qsa ik %d != %d",
+                            0 if ik is None else int(ik.shape[1]), p)
+                        return None, 0
+                    st = kv_state + (ik[:, :p],)
+                    if getattr(e, "pos", None) is not None:
+                        st = st + (e.pos[:, :, :p],)
+                    kc = _qsa_cache_cls()(int(tag.split(":")[1]))
+                else:
+                    kc = runtime_cache_module().KVCache()
+                    st = kv_state
+                kc.state = st
                 if kc.offset != p:
                     _log.info("APC ckpt disk miss: kv assembled %d != %d",
                               kc.offset, p)
@@ -2011,6 +2133,8 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
                 targets.extend(s for s in c.cache if s is not None)
             else:
                 targets.extend(_iter_arrays(getattr(c, "state", None)))
+            if getattr(c, "ik", None) is not None:
+                targets.append(c.ik)
         # Scratch survivors: the warm-cache arrays were built by this
         # restore from pool blocks; the except path's release-and-decline
         # is the right exit and now runs post-drain.

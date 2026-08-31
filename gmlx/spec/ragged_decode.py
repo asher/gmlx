@@ -31,12 +31,21 @@ _log = logging.getLogger(__name__)
 
 
 def install_unified_ragged_plan() -> None:
-    """Rebind qwen3_5 ragged decode with plan-unify fallback. Idempotent."""
-    if os.environ.get("GMLX_RAGGED_UNIFIED_PLAN", "1") == "0":
+    """Rebind qwen3_5 ragged decode with plan-unify fallback. Idempotent.
+
+    Pre-M3 rebinds even when ``GMLX_RAGGED_UNIFIED_PLAN=0``: upstream's own
+    ragged kernels launch 1024-thread groups with no ceiling gate, and the
+    owned dispatch (which steps aside there) is what keeps that launch off
+    the device. The dispatch still honors the flag for the plan choice."""
+    from gmlx.models.qwen35.attn import (
+        _wide_threadgroups_ok,
+        ragged_decode_attention,
+    )
+
+    if (os.environ.get("GMLX_RAGGED_UNIFIED_PLAN", "1") == "0"
+            and _wide_threadgroups_ok()):
         return
     from mlx_vlm.models.qwen3_5 import language as _lang
-
-    from gmlx.models.qwen35.attn import ragged_decode_attention
 
     # Identity check instead of a latch: no attribute stamped onto the
     # owned function, and a test that restores the upstream global gets
@@ -46,3 +55,16 @@ def install_unified_ragged_plan() -> None:
 
     _lang._qwen3_5_ragged_decode_attention = ragged_decode_attention
     _log.info("unified ragged-plan decode installed (qwen3_5 family)")
+
+
+def install_pre_m3_ragged_guard() -> None:
+    """Rebind the stock ragged decode on pre-M3 GPUs purely for the owned
+    dispatch's threadgroup gate. Covers the loads that never install the
+    MTP verify patch set: plain VLM builds, stock-fallback text builds
+    (``GMLX_QWEN_OWNED=0``). No-op on M3+, where the stock kernels fit and
+    plain loads keep stock behavior."""
+    from gmlx.models.qwen35.attn import _wide_threadgroups_ok
+
+    if _wide_threadgroups_ok():
+        return
+    install_unified_ragged_plan()

@@ -30,6 +30,7 @@ from .config_synth import synthesize_config
 from gmlx.upstream.gdn_patches import (
     _needs_tiled_v_patch,
     _patch_gated_delta_tiled_v,
+    _patch_mlxvlm_gated_delta_tiled_v,
     _tiled_v_patch_applied,
 )
 from .gguf_meta import first_nonzero_int, read_int
@@ -38,6 +39,7 @@ from .loader import (
     _FP32_KEEP_BY_MODEL_TYPE,
     _active_now,
     _install_and_load,
+    _vlm_spec_language_model,
     load_gguf_wire_bytes,
     materialize_module_arrays,
     remap_arrays,
@@ -73,6 +75,12 @@ def resolve_vlm_model_type(llm_arch: str, mm_meta: dict) -> str:
         # adapter onto the muse-glimmer text tower. Both halves are vendored
         # (gmlx.models.muse_glimmer.vlm_model); mlx-vlm ships no class for either.
         return "muse_glimmer"
+    if proj == "glm5next":
+        # GLM-5.3-Flash: the GLM-OCR ViT (qwen2vl-style dynamic patches, 2-D
+        # rope, per-head qk-norm, clamped-swiglu FFN) + a conv-downsample
+        # projector onto the glm5next hybrid text tower. Both halves are
+        # vendored (gmlx.models.glm5_next.vlm_model); mlx-vlm has no class.
+        return "glm5_next"
     if proj == "kimik25":
         # Moonshot Kimi-K2.5/K2.7: a MoonViT tower (SigLIP-so400m shape, 2-D
         # RoPE + a learned position grid that interpolates to the image) and
@@ -671,6 +679,34 @@ _QWEN35V_TOP_MAP = {
 }
 
 
+# GLM-5.3-Flash (glm5next): the GLM-OCR ViT + conv-downsample projector,
+# mapped onto the vendored gmlx.models.glm5_next.vision tower. The patch
+# embed reuses the qwen35 dual-conv -> Conv3d fuse; the projector's
+# patch_merger is a stride-2 Conv2d stored [out, in, kH, kW].
+_GLM5NEXTV_BLK_SUBMAP = {
+    "attn_qkv": "attn.qkv",
+    "attn_out": "attn.proj",
+    "attn_q_norm": "attn.q_norm",
+    "attn_k_norm": "attn.k_norm",
+    "ln1": "norm1",
+    "ln2": "norm2",
+    "ffn_gate": "mlp.gate_proj",
+    "ffn_up": "mlp.up_proj",
+    "ffn_down": "mlp.down_proj",
+}
+_GLM5NEXTV_TOP_MAP = {
+    "v.patch_embd.bias": "vision_tower.patch_embed.proj.bias",
+    "v.post_ln.weight": "vision_tower.post_layernorm.weight",
+    "mm.patch_merger.bias": "vision_tower.merger.patch_merger.bias",
+    "mm.model.fc.weight": "vision_tower.merger.fc.weight",
+    "mm.post_norm.weight": "vision_tower.merger.post_norm.weight",
+    "mm.post_norm.bias": "vision_tower.merger.post_norm.bias",
+    "mm.gate.weight": "vision_tower.merger.mlp.gate_proj.weight",
+    "mm.up.weight": "vision_tower.merger.mlp.up_proj.weight",
+    "mm.down.weight": "vision_tower.merger.mlp.down_proj.weight",
+}
+
+
 def _qwen35_patch_embed_conv3d(w0: mx.array, w1: mx.array) -> mx.array:
     """Two temporal patch-conv slices -> one MLX Conv3d weight.
 
@@ -831,6 +867,39 @@ def remap_vision_arrays(
             elif transform == "patchchw":  # [C, h, w] -> [h, w, C]
                 arr = _patchdim_chw_to_hwc(arr)
             out[tgt] = arr
+        return out, skipped, vis_kqmeta
+
+    if model_type == "glm5_next":
+        for name, arr in arrays.items():
+            if name.endswith(".scales") or name.endswith(".biases"):
+                continue
+            if name == "v.patch_embd.weight.1":
+                continue  # consumed with v.patch_embd.weight below
+            if name == "v.patch_embd.weight":
+                out["vision_tower.patch_embed.proj.weight"] = (
+                    _qwen35_patch_embed_conv3d(
+                        arr, arrays["v.patch_embd.weight.1"]))
+                continue
+            if name == "mm.patch_merger.weight":
+                # Stride-2 Conv2d [out, in, kH, kW] -> MLX [out, kH, kW, in].
+                out["vision_tower.merger.patch_merger.weight"] = (
+                    mx.transpose(arr, (0, 2, 3, 1)))
+                continue
+            hit = _GLM5NEXTV_TOP_MAP.get(name)
+            if hit is not None:
+                out[hit] = arr
+                continue
+            m = _VISION_BLK_RE.match(name)
+            if m is None:
+                skipped.append(name)
+                continue
+            bid, rest = m.group(1), m.group(2)
+            sub, _, leaf = rest.rpartition(".")  # leaf = weight | bias
+            tgt = _GLM5NEXTV_BLK_SUBMAP.get(sub)
+            if tgt is None:
+                skipped.append(name)
+                continue
+            out[f"vision_tower.blocks.{bid}.{tgt}.{leaf}"] = arr
         return out, skipped, vis_kqmeta
 
     if model_type in ("qwen3_5", "qwen3_5_moe", "qwen4_exp"):
@@ -1296,6 +1365,56 @@ def _synthesize_muse_glimmer_vlm_config(
     return config
 
 
+def _synthesize_glm5next_vlm_config(
+    text_config: dict, mm_meta: dict, llm_meta: dict,
+    mm_shapes: dict | None = None,
+) -> dict:
+    """GLM-5.3-Flash VLM config: the glm5next text synth plus the GLM-OCR
+    vision tower read from ``clip.vision.*``.
+
+    Constants pinned with their source (llama.cpp PR 27754 clip.cpp,
+    ``PROJECTOR_TYPE_GLM5NEXT``): rope theta 10000 and the dual-conv temporal
+    patch (2). The projector MLP width has no metadata key, so it is read off
+    ``mm.up.weight``'s non-4096 axis."""
+    vision_config: dict = {
+        "model_type": "glm5_next",
+        "depth": _mm_int(mm_meta, "clip.vision.block_count"),
+        "hidden_size": _mm_int(mm_meta, "clip.vision.embedding_length"),
+        "intermediate_size": _mm_int(mm_meta, "clip.vision.feed_forward_length"),
+        "num_heads": _mm_int(mm_meta, "clip.vision.attention.head_count"),
+        "patch_size": _mm_int(mm_meta, "clip.vision.patch_size"),
+        "temporal_patch_size": 2,
+        "in_channels": 3,
+        "out_hidden_size": _mm_int(mm_meta, "clip.vision.projection_dim"),
+        "rope_theta": 10000.0,
+    }
+    merge = _mm(mm_meta, "clip.vision.spatial_merge_size")
+    vision_config["spatial_merge_size"] = int(merge) if merge is not None else 2
+    eps = _mm(mm_meta, "clip.vision.attention.layer_norm_epsilon")
+    if eps is not None:
+        vision_config["rms_norm_eps"] = float(eps)
+    limit = _mm(mm_meta, "clip.vision.swiglu_limit")
+    if limit is not None:
+        vision_config["swiglu_limit"] = float(limit)
+    up = (mm_shapes or {}).get("mm.up.weight")
+    if up:
+        vision_config["proj_intermediate_size"] = _other_dim(
+            up, vision_config["out_hidden_size"])
+
+    config: dict = {
+        "model_type": "glm5_next",
+        "text_config": text_config,
+        "vision_config": vision_config,
+        "vocab_size": int(text_config.get("vocab_size", 154880)),
+    }
+    # <|image|>, the per-soft-token placeholder (llama.cpp mtmd's media
+    # marker for this family).
+    img_id = _gguf_token_id(llm_meta, "<|image|>")
+    config["image_token_id"] = 154854 if img_id is None else img_id
+    config["image_token_index"] = config["image_token_id"]
+    return config
+
+
 def synthesize_vlm_config(
     model_type: str, llm_meta: dict, llm_shapes: dict, mm_meta: dict,
     *, mm_tensor_names: set[str] | None = None,
@@ -1316,6 +1435,10 @@ def synthesize_vlm_config(
 
     if model_type == "muse_glimmer":
         return _synthesize_muse_glimmer_vlm_config(
+            text_config, mm_meta, llm_meta, mm_shapes)
+
+    if model_type == "glm5_next":
+        return _synthesize_glm5next_vlm_config(
             text_config, mm_meta, llm_meta, mm_shapes)
 
     if model_type == "gemma4":
@@ -1532,6 +1655,8 @@ def _synthesize_vlm_processor(model_type: str, tokenizer, mm_meta: dict):
         return _synthesize_pixtral_processor(tokenizer, mm_meta)
     if model_type == "muse_glimmer":
         return _synthesize_muse_glimmer_processor(tokenizer, mm_meta)
+    if model_type == "glm5_next":
+        return _synthesize_glm5next_processor(tokenizer, mm_meta)
     if model_type == "kimi_k25":
         return _synthesize_kimi_k25_processor(tokenizer, mm_meta)
     if model_type != "gemma4":
@@ -2203,6 +2328,240 @@ def _synthesize_muse_glimmer_processor(tokenizer, mm_meta: dict):
     return _attach_streaming_helpers(processor, tokenizer)
 
 
+class _Glm5NextGgufImageProcessor(ImageProcessingMixin):
+    """Torch-free GLM-5.3-Flash image preprocessing (numpy + PIL only).
+
+    Ports ``mtmd_image_preprocessor_glm5next`` (llama.cpp PR 27754,
+    ``tools/mtmd/mtmd-image.cpp``): align both edges UP to ``factor`` (28),
+    upscale a below-minimum image by the sqrt area ratio, binary-search the
+    tallest content height whose aligned canvas fits the token budget (the
+    reference divides in float64 before flooring - kept bit-identical), then
+    resize the content BICUBIC, composite it top-left on a black canvas, and
+    never upscale an image already spending the minimum budget to fill the
+    canvas. The 16/8000 token limits are clip.cpp arch constants
+    (``set_limit_image_tokens(16, 8000)``), not GGUF metadata.
+
+    The canvas patchifies with the qwen2vl conventions: the still frame
+    duplicates along the temporal axis and the h//2,2,w//2,2 shuffle makes
+    every consecutive 4 patch vectors a spatial 2x2 block - the order the
+    tower's rope ids and the merger's stride-2 conv assume.
+    """
+
+    model_input_names = ["pixel_values", "image_grid_thw"]
+
+    def __init__(self, image_mean, image_std, patch_size=14,
+                 spatial_merge_size=2, temporal_patch_size=2,
+                 min_image_tokens=16, max_image_tokens=8000):
+        super().__init__()
+        self.image_mean = list(image_mean)
+        self.image_std = list(image_std)
+        self.patch_size = int(patch_size)
+        self.spatial_merge_size = int(spatial_merge_size)
+        self.temporal_patch_size = int(temporal_patch_size)
+        self.factor = self.patch_size * self.spatial_merge_size
+        self.min_pixels = int(min_image_tokens) * self.factor * self.factor
+        self.max_pixels = int(max_image_tokens) * self.factor * self.factor
+
+    def soft_tokens(self, grid) -> int:
+        t, gh, gw = (int(v) for v in grid)
+        m = self.spatial_merge_size
+        return t * (gh // m) * (gw // m)
+
+    def _smart_resize(self, height: int, width: int) -> tuple[int, int]:
+        import math
+        f = self.factor
+
+        def align(v):
+            return ((v + f - 1) // f) * f
+
+        ah, aw = align(height), align(width)
+        if ah * aw < self.min_pixels:
+            scale = math.sqrt(self.min_pixels / (height * width))
+            ah = align(max(1, math.ceil(height * scale)))
+            aw = align(max(1, math.ceil(width * scale)))
+        if ah * aw > self.max_pixels:
+            low, high = 1, height
+            ah = aw = f
+            while low <= high:
+                ch = (low + high) // 2
+                cw = max(1, math.floor(float(width) * ch / float(height)))
+                cand_h, cand_w = align(ch), align(cw)
+                if cand_h * cand_w <= self.max_pixels:
+                    ah, aw = cand_h, cand_w
+                    low = ch + 1
+                else:
+                    high = ch - 1
+        return ah, aw
+
+    def _geometry(self, height: int, width: int):
+        import math
+        ch, cw = self._smart_resize(height, width)
+        scale = min(ch / height, cw / width)
+        if height * width >= self.min_pixels:
+            scale = min(1.0, scale)
+        content_w = max(1, min(cw, math.floor(width * scale)))
+        content_h = max(1, min(ch, math.floor(height * scale)))
+        return (ch, cw), (content_h, content_w)
+
+    def _one(self, img):
+        import numpy as np
+        from PIL import Image
+        if not isinstance(img, Image.Image):
+            img = Image.fromarray(np.asarray(img))
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        (ch, cw), (content_h, content_w) = self._geometry(
+            img.height, img.width)
+        content = img.resize((content_w, content_h), Image.Resampling.BICUBIC)
+        canvas = Image.new("RGB", (cw, ch), (0, 0, 0))
+        canvas.paste(content, (0, 0))
+
+        arr = np.asarray(canvas, dtype=np.float32) / 255.0     # [H, W, C]
+        mean = np.array(self.image_mean, dtype=np.float32)
+        std = np.array(self.image_std, dtype=np.float32)
+        arr = np.transpose((arr - mean) / std, (2, 0, 1))       # [C, H, W]
+
+        ps, tps, ms = self.patch_size, self.temporal_patch_size, \
+            self.spatial_merge_size
+        c = arr.shape[0]
+        grid_h, grid_w = ch // ps, cw // ps
+        patches = np.repeat(arr[None, None, ...], tps, axis=1)
+        patches = patches.reshape(
+            1, 1, tps, c, grid_h // ms, ms, ps, grid_w // ms, ms, ps)
+        patches = patches.transpose(0, 1, 4, 7, 5, 8, 3, 2, 6, 9)
+        flatten = patches.reshape(grid_h * grid_w, c * tps * ps * ps)
+        return flatten, (1, grid_h, grid_w)
+
+    def __call__(self, images, **kwargs):
+        import numpy as np
+        flat = _PixtralGgufImageProcessor._flatten(images)
+        vecs, grids = [], []
+        for img in flat:
+            v, g = self._one(img)
+            vecs.append(v)
+            grids.append(g)
+        return {
+            "pixel_values": np.concatenate(vecs, axis=0),
+            "image_grid_thw": np.array(grids, dtype=np.int64),
+        }
+
+
+def _synthesize_glm5next_processor(tokenizer, mm_meta: dict):
+    """Build the GLM-5.3-Flash processor from the GGUFs alone.
+
+    The chat template's ``emit_image()`` macro already writes
+    ``<|begin_of_image|><|image|><|end_of_image|>`` per image item, so the
+    processor only repeats the ``<|image|>`` placeholder once per soft token
+    (grid_h * grid_w / 4 for that image) - the same stream llama.cpp's mtmd
+    builds around the embeddings."""
+    from transformers.feature_extraction_utils import BatchFeature
+    from transformers.processing_utils import ProcessorMixin
+
+    from mlx_vlm.models.base import to_mlx
+
+    patch_size = _mm_int(mm_meta, "clip.vision.patch_size")
+    merge = _mm(mm_meta, "clip.vision.spatial_merge_size")
+    image_mean = _mm_floats(mm_meta, "clip.vision.image_mean") or [0.5, 0.5, 0.5]
+    image_std = _mm_floats(mm_meta, "clip.vision.image_std") or [0.5, 0.5, 0.5]
+
+    image_processor = _Glm5NextGgufImageProcessor(
+        image_mean=image_mean, image_std=image_std, patch_size=patch_size,
+        spatial_merge_size=int(merge) if merge is not None else 2)
+
+    class Glm5NextProcessor(ProcessorMixin):
+        attributes = ["image_processor", "tokenizer"]
+        image_processor_class = "AutoImageProcessor"
+        tokenizer_class = "AutoTokenizer"
+
+        image_token = "<|image|>"
+
+        def __call__(self, images=None, text=None, **kwargs):
+            if text is None and images is None:
+                raise ValueError("You must provide either text or images.")
+            if isinstance(text, str):
+                text = [text]
+
+            image_inputs = {}
+            if images is not None:
+                if not isinstance(images, (list, tuple)):
+                    images = [images]
+                image_inputs = self.image_processor(images)
+                if text is not None:
+                    text = self._expand(text, image_inputs["image_grid_thw"])
+
+            kwargs.pop("return_tensors", None)
+            data = dict(image_inputs)
+            if text is not None:
+                data = {**self.tokenizer(text, **kwargs), **data}
+            return BatchFeature(data=to_mlx(data))
+
+        def _expand(self, texts, grids):
+            """Repeat each ``<|image|>`` once per soft token of its image.
+            Grids are consumed in order across the batch, matching how the
+            images were flattened for preprocessing."""
+            out, index = [], 0
+            for sample in texts:
+                parts = sample.split(self.image_token)
+                rebuilt = parts[0]
+                for part in parts[1:]:
+                    if index < len(grids):
+                        n = self.image_processor.soft_tokens(grids[index])
+                        rebuilt += self.image_token * n
+                        index += 1
+                    else:
+                        rebuilt += self.image_token
+                    rebuilt += part
+                out.append(rebuilt)
+            return out
+
+        def batch_decode(self, *args, **kwargs):
+            return self.tokenizer.batch_decode(*args, **kwargs)
+
+        def decode(self, *args, **kwargs):
+            return self.tokenizer.decode(*args, **kwargs)
+
+        @property
+        def model_input_names(self):
+            return list(dict.fromkeys(
+                list(self.tokenizer.model_input_names)
+                + list(self.image_processor.model_input_names)))
+
+    processor = Glm5NextProcessor(
+        image_processor=image_processor, tokenizer=tokenizer,
+        chat_template=getattr(tokenizer, "chat_template", None))
+
+    # mlx-vlm's message formatter is a closed table; without a row the image
+    # part never reaches the template's emit_image() macro.
+    import mlx_vlm.prompt_utils as _prompt_utils
+    _prompt_utils.MODEL_CONFIG.setdefault(
+        "glm5_next", _prompt_utils.MessageFormat.LIST_WITH_IMAGE_FIRST)
+
+    return _attach_streaming_helpers(processor, tokenizer)
+
+
+def _swap_spec_language_model(model, model_type: str, *, log) -> None:
+    """Replace ``model.language_model`` with the spec-capable class the text
+    MTP path builds (``_vlm_spec_language_model``), constructed from the
+    VLM's REAL ModelConfig (real vision_config -> get_rope_index mrope stays
+    correct on image turns). Must run before weight install: owned trees are
+    parameter-identical to stock, so the fresh tree loads the same remapped
+    names. Vendored archs (muse_glimmer / glm5_next / qwen4_exp) carry their
+    hook mixins natively and have no row; GMLX_*_OWNED=0 resolves the row to
+    the stock class the tree already is, so the isinstance short-circuits."""
+    row = _vlm_spec_language_model(model_type)
+    if row is None:
+        return
+    cls, build_lm = row
+    if isinstance(model.language_model, cls):
+        return
+    lm = build_lm(model.config)
+    if hasattr(model.language_model, "no_chunked_prefill"):
+        # gemma4_unified stamps this at construction.
+        lm.no_chunked_prefill = model.language_model.no_chunked_prefill
+    model.language_model = lm
+    log(f"[vlm] spec target: language_model -> {cls.__name__}")
+
+
 # Public entry point
 
 @loadlog.seeds
@@ -2215,6 +2574,7 @@ def load_vlm_model(
     zero_copy: bool = True,
     verbose: bool = False,
     return_tokenizer: bool = False,
+    spec_target: bool = False,
 ):
     """Load a K-quant LLM GGUF + a float mmproj GGUF into an mlx-vlm ``Model``.
 
@@ -2229,6 +2589,12 @@ def load_vlm_model(
     the processor wraps, carrying ``_gguf_eos_token_ids``) as a 4th element, so
     the VLMxMTP path can wrap it in a ``TokenizerWrapper`` for the text-only
     speculative walk exactly like the text loader does.
+
+    ``spec_target=True`` (the VLMxMTP loader) replaces ``.language_model``
+    before weights install with the spec-capable class the text MTP path
+    builds (``_vlm_spec_language_model``), constructed from the VLM's real
+    config so mrope on image turns stays correct. Plain loads are
+    byte-identical to before the seam existed.
     """
     _log = loadlog.verbose_print
 
@@ -2276,17 +2642,32 @@ def load_vlm_model(
         # qwen3_5 Qwen3-VL class).
         import gmlx.models.qwen4_exp.vlm_model as qwen4_exp_vlm_model
         qwen4_exp_vlm_model.ensure_registered()
+    elif model_type == "glm5_next":
+        # Likewise vendored (text tower, ViT and wrapper all in-repo).
+        import gmlx.models.glm5_next.vlm_model as glm5_next_vlm_model
+        glm5_next_vlm_model.ensure_registered()
     with_audio = bool(mm_meta.get("clip.has_audio_encoder"))
     _log(f"[vlm] model_type={model_type} audio={with_audio}")
+    if model_type in ("qwen3_5", "qwen3_5_moe"):
+        # Pre-M3 launch-ceiling guard for the stock ragged decode (ungated
+        # 1024-thread kernels) on batched mixed-depth streams. Unconditional:
+        # plain VLM builds and the spec_target stock fallback both run the
+        # stock kernels, the owned tree dispatches in-tree, and the installer
+        # is idempotent (identity check) - the call costs nothing where the
+        # MTP patch set later covers it.
+        from gmlx.spec.ragged_decode import install_pre_m3_ragged_guard
+        install_pre_m3_ragged_guard()
 
     # The text tower nests under `language_model.` for most VLMs, but under
     # `thinker.language_model.` for the omni family (vision+audio+text Thinker).
     lm_prefix = ("thinker.language_model" if model_type == "qwen3_omni_moe"
                  else "language_model")
     loadlog.stage("remapping tensors")
+    owned_names: set[str] = set()
     hf_weights, hf_kquant_meta, _stats = remap_arrays(
         arrays, kquant_meta, llm_arch,
-        target_prefix=lm_prefix, n_head=n_head, n_head_kv=n_head_kv)
+        target_prefix=lm_prefix, n_head=n_head, n_head_kv=n_head_kv,
+        owned_names=owned_names)
 
     # 3. vision/audio remap. Pure-float mmproj weights map straight through; a
     #    K-quant (Q8_0) omni mmproj also threads its codecs into hf_kquant_meta so
@@ -2312,17 +2693,25 @@ def load_vlm_model(
     model, config = build_vlm_model(config)
     loadlog.fact("model_type", config.get("model_type"))
 
+    # 4a. spec-target seam: give the VLM the same hook-bearing language model
+    #     the text MTP path builds. Runs before weight install, so the swap
+    #     needs no weight transfer - and the discarded tower's random init
+    #     arrays are never evaluated.
+    if spec_target:
+        _swap_spec_language_model(model, model_type, log=_log)
+
     # 3a. GGUF V-head tiling fixup for asymmetric linear-attention K/V heads
     #     (hybrid SSM+attn text towers, e.g. Qwen3.5/3.6). convert_hf_to_gguf
     #     stores gated-delta V heads tiled, but the gated_delta kernels assume
-    #     grouped K->V indexing. The mlx-vlm text tower reaches the normal
-    #     generate path through mlx_lm.models.gated_delta's gated_delta_kernel/
-    #     _ops (it imports them), so the same monkey-patch the text loader uses
-    #     fixes prefill and decode here. Without it the recurrent state is built
-    #     against the wrong K heads and decode degenerates to token garbage even
-    #     though the no-cache forward (and dense towers) look fine.
+    #     grouped K->V indexing. Since mlx-vlm 0.6.15 the qwen3_5 text tower
+    #     runs its own vendored copies of the gated_delta functions (0.6.4
+    #     from-imported mlx-lm's, which the mlx-lm patch reached), so both
+    #     modules need the rebind. Without it the recurrent state is built
+    #     against the wrong K heads and decode degrades to repetitive garbage
+    #     even though the no-cache forward (and dense towers) look fine.
     if _needs_tiled_v_patch(text_config):
         _patch_gated_delta_tiled_v()
+        _patch_mlxvlm_gated_delta_tiled_v()
     elif (text_config.get("model_type") == "qwen3_next"
           and _tiled_v_patch_applied()):
         # Same cross-load hazard the text loader guards: once a qwen3.5/3.6
@@ -2341,6 +2730,7 @@ def load_vlm_model(
     #    (text under [thinker.]language_model.model.*, vision/audio under their
     #    towers), so model.sanitize must not run - it would re-prefix text keys.
     _install_and_load(model, hf_weights, hf_kquant_meta, log=_log, sanitize=False,
+                      no_alias=owned_names,
                       fp32_keep=_FP32_KEEP_BY_MODEL_TYPE.get(model_type, ()),
                       f16_keep=_F16_KEEP_BY_MODEL_TYPE.get(model_type, ()),
                       source_key=weights_source_key(*pf.shards, mmproj_path),

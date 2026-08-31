@@ -1328,13 +1328,24 @@ class DecodeFeeder:
         """Swap the layer's expert weights to the arena views for the call."""
         entry = self._layers[li]
         views = {kind: self._views[(li, kind)] for kind in entry}
-        with swapped_weights(entry, views):
+        # The owner table is read at delta time, not here: a shed inside
+        # the swap restages slots, and the delta must follow what ran.
+        with swapped_weights(entry, views,
+                             slot_owner=lambda: self._owner[li]):
             yield
 
     def close(self) -> None:
         if getattr(self, "_closed", False):
             return
         self._closed = True
+        if getattr(self, "_gpu_resident", False):
+            import mlx_kquant as kq
+
+            if getattr(kq, "residency_erase", None):
+                for a in self._arena.values():
+                    kq.residency_erase(a[0])
+                kq.residency_commit()
+            self._gpu_resident = False
         if getattr(self, "_routed_log", None):
             lis = np.array([li for li, _ in self._routed_log], np.uint16)
             rows = [ids for _, ids in self._routed_log]

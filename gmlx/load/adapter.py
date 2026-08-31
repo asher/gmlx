@@ -36,6 +36,7 @@ class LoraModule:
     rank: int
     scale: float              # alpha / rank (PEFT scaling)
     transform: str = "passthrough"   # remap hint: passthrough | qk_permute | ...
+    experts: bool = False     # 3-D pair: a (E, rank, in), b (E, out, rank)
 
 
 @dataclass
@@ -116,10 +117,22 @@ def build_adapter_plan(meta: dict, arrays: dict,
         module_path = dec.hf_name
         if module_path.endswith(".weight"):
             module_path = module_path[: -len(".weight")]
-        rank = _infer_rank(module_path, a, b)
+        experts = a.ndim == 3 or b.ndim == 3
+        if experts:
+            # Per-expert stack: GGUF ne order reversed gives a (E, rank, in),
+            # b (E, out, rank). Rank is positional here; the shared-dim
+            # heuristic would pick from {rank, E}.
+            if a.ndim != 3 or b.ndim != 3 or a.shape[0] != b.shape[0] \
+                    or a.shape[1] != b.shape[2]:
+                raise ValueError(
+                    f"{module_path}: expert lora pair lora_a {tuple(a.shape)} / "
+                    f"lora_b {tuple(b.shape)} is not (E, r, in) / (E, out, r)")
+            rank = int(a.shape[1])
+        else:
+            rank = _infer_rank(module_path, a, b)
         modules[module_path] = LoraModule(
             module_path=module_path, a=a, b=b, rank=rank,
-            scale=alpha / rank, transform=dec.transform)
+            scale=alpha / rank, transform=dec.transform, experts=experts)
 
     if not modules:
         raise ValueError("adapter GGUF contains no lora_a/lora_b tensor pairs")
@@ -154,7 +167,7 @@ def _config_as_dict(config) -> dict:
 
 
 def apply_gguf_adapter(raw_model, config, adapter_gguf: str,
-                       *, base_arch: str | None = None) -> int:
+                       *, base_arch: str | None = None, slot: int = 0) -> int:
     """Apply a GGUF LoRA adapter live over a loaded base text model - no merge (the
     base stays K-quant; the adapter rides alongside in full precision). Returns the
     number of modules installed.
@@ -166,7 +179,9 @@ def apply_gguf_adapter(raw_model, config, adapter_gguf: str,
     qk_permute target without them raises in the installer. The adapter GGUF's own
     ``general.architecture`` drives the name remap, so a base/adapter mismatch surfaces
     structurally - a target path with no matching module makes
-    :func:`modules.install_lora_adapter` raise, never a silent no-op."""
+    :func:`modules.install_lora_adapter` raise, never a silent no-op. ``slot`` is
+    the adapter's column in the row channel; a second adapter on an already
+    adapted model installs alongside the first (see the installer)."""
     from .modules import install_lora_adapter
 
     cfg = _config_as_dict(config)
@@ -175,7 +190,8 @@ def apply_gguf_adapter(raw_model, config, adapter_gguf: str,
     n_head_kv = cfg.get("num_key_value_heads",
                         text_cfg.get("num_key_value_heads", n_head))
     plan = load_lora_adapter(adapter_gguf, base_arch=base_arch)
-    return install_lora_adapter(raw_model, plan, n_head=n_head, n_head_kv=n_head_kv)
+    return install_lora_adapter(raw_model, plan, n_head=n_head, n_head_kv=n_head_kv,
+                                slot=slot)
 
 
 def save_lora_adapter(path: str, modules, *, alpha: float, base_arch: str,

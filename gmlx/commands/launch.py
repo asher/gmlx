@@ -1008,6 +1008,21 @@ def _server_ready(base_url: str, api_key: str | None = None) -> bool:
     return bool(isinstance(payload, dict) and payload.get("data"))
 
 
+def _warn_if_stale_server(host: str, port) -> None:
+    """A reused managed server that predates a source change on disk will
+    fail lazy imports mid-request with an opaque 500; say so at connect
+    time instead. Compares the runfile's boot-time source stamp against
+    the tree now - only managed servers carry one, so a foreign server (or
+    a pre-stamp runfile) stays silent."""
+    import gmlx.serve.lifecycle as lifecycle
+
+    if lifecycle.source_changed(lifecycle.read_run(host, port)):
+        print(f"[launch] the server at http://{host}:{port} started before "
+              "the gmlx source on disk changed - requests may fail with "
+              "import errors; `gmlx restart` loads the new code.",
+              file=sys.stderr)
+
+
 def _discover_config():
     """The first existing default-location config, loaded. Returns ``(cfg, cfg_path)``:
     ``(None, None)`` if none exists; ``(None, path)`` if it exists but won't load
@@ -1187,6 +1202,7 @@ def _ensure_server(a) -> int | None:
         host0, port0 = lifecycle.auto_target(None, None)
     base0 = a.base_url or f"http://{host0}:{port0}/v1"
     if _server_ready(base0, a.api_key):              # up: fast path, no engine import
+        _warn_if_stale_server(host0, port0)
         a.base_url, a.host, a.port = base0, host0, port0
         return None
 
@@ -1209,6 +1225,7 @@ def _ensure_server(a) -> int | None:
     base = f"http://{host}:{port}/v1"
     a.base_url, a.host, a.port, a.api_key = base, host, port, key
     if _server_ready(base, key):                     # configured server already up (e.g. non-8080)
+        _warn_if_stale_server(host, port)
         return None
 
     if a.no_start:

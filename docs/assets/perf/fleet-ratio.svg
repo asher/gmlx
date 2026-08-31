@@ -46,6 +46,7 @@
 <path d="M112.5,233.3 L308.6,220.4 L435.2,213.8 L561.6,207.7 L607.3,206.3 L662.4,207.1" fill="none" stroke="#898781" stroke-width="1.3" opacity="0.32" stroke-linejoin="round" stroke-linecap="round"/>
 <path d="M112.5,234.2 L308.6,228.4 L435.2,226.9 L561.6,218.4 L607.3,211.3 L662.4,203.2" fill="none" stroke="#898781" stroke-width="1.3" opacity="0.32" stroke-linejoin="round" stroke-linecap="round"/>
 <path d="M112.5,231.5 L308.6,222.8 L435.2,216.2 L561.6,203.1 L607.3,202.0 L662.4,202.7" fill="none" stroke="#898781" stroke-width="1.3" opacity="0.32" stroke-linejoin="round" stroke-linecap="round"/>
+<path d="M112.5,227.6 L308.6,215.2 L435.2,202.3 L561.6,176.9 L607.3,152.2 L662.4,126.6" fill="none" stroke="#898781" stroke-width="1.3" opacity="0.32" stroke-linejoin="round" stroke-linecap="round"/>
 <text x="30.0" y="159.5" font-size="14.2" fill="#898781" text-anchor="middle" transform="rotate(-90.0 30.0 159.5)">prefill speedup</text>
 <text x="707.3" y="87.6" font-size="12.3" fill="#e69f00" font-weight="600">gemma-4-E2B-it UD-Q6_K_XL 7.90x</text>
 <text x="707.3" y="194.3" font-size="12.3" fill="#009e73" font-weight="600">gemma-4-26B-A4B-it Q6_K 3.10x</text>
@@ -100,5 +101,5 @@
 <text x="707.3" y="439.6" font-size="12.3" fill="#d55e00" font-weight="600">Qwen3.5-9B Q6_K 1.18x</text>
 <text x="387.4" y="510.5" font-size="14.2" fill="#898781" text-anchor="middle">KV depth (tokens, log scale)</text>
 <text x="75.0" y="531.5" font-size="11.7" fill="#898781">Each ghosted line is one model; fastest / median / slowest are highlighted and labeled. Every line stays above 1.0x.</text>
-<text x="75.0" y="549.5" font-size="11.7" fill="#898781">Prefill: baseline, 13 models. Decode: speculative (MTP), 7 models (gpt-oss / gemma-4-E4B / DeepSeek have no MTP arm on both engines).</text>
+<text x="75.0" y="549.5" font-size="11.7" fill="#898781">Prefill: baseline, 14 models. Decode: speculative (MTP), 7 models (gpt-oss / gemma-4-E4B / DeepSeek have no MTP arm on both engines).</text>
 </svg>

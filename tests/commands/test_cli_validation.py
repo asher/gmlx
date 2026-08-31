@@ -198,9 +198,14 @@ def test_resolve_stays_on_with_system_prompt(native_head, gguf):
 
 
 def test_resolve_hard_flag_defers_silently(native_head, gguf):
+    on, note = cli.resolve_speculative(_args([gguf, "--stream-cpu"]), gguf)
+    assert not on and note == ""        # no note: respecting an incompatible request
+
+
+def test_resolve_adapter_composes_with_auto_mtp(native_head, gguf):
     on, note = cli.resolve_speculative(_args([gguf, "--adapter", "/x.gguf"]),
                                        gguf)
-    assert not on and note == ""        # no note: respecting an incompatible request
+    assert on and "native MTP head detected" in note
 
 
 def test_resolve_stream_experts_defers_auto_allows_explicit(native_head, gguf):
@@ -349,7 +354,32 @@ def test_drafter_available_no_mtp_opts_out(gguf, mmproj, monkeypatch):
 
 def test_drafter_available_none_without_head_or_draft(gguf, mmproj, monkeypatch):
     monkeypatch.setattr(cli, "_has_native_mtp_head", lambda *a, **k: False)
+    monkeypatch.setattr(cli, "_vlm_companion_drafter", lambda p: None)
     assert cli._vlm_mtp_drafter_available(_args([gguf, "--mmproj", mmproj])) is False
+
+
+def test_drafter_available_companion_auto(gguf, mmproj, monkeypatch):
+    # A discoverable companion for a companion-only family auto-enables
+    # VLM text-only MTP, same as the text path's auto.
+    monkeypatch.setattr(cli, "_has_native_mtp_head", lambda *a, **k: False)
+    monkeypatch.setattr(cli, "_vlm_companion_drafter",
+                        lambda p: "/x/mtp-companion.gguf")
+    assert cli._vlm_mtp_drafter_available(_args([gguf, "--mmproj", mmproj])) is True
+
+
+def test_vlm_companion_drafter_restricted_to_auto_families(monkeypatch):
+    import gmlx.load.discovery as discovery
+
+    monkeypatch.setattr(discovery, "find_mtp_companion",
+                        lambda gguf, arches: "/x/companion.gguf")
+    arch = {"v": "qwen4exp"}
+    monkeypatch.setattr(discovery, "header_meta",
+                        lambda p: {"arch": arch["v"]})
+    assert cli._vlm_companion_drafter("/x/t.gguf") == "/x/companion.gguf"
+    # qwen35 has a drafter row (dflash2) but its native head wins over a
+    # sidecar: no auto.
+    arch["v"] = "qwen35"
+    assert cli._vlm_companion_drafter("/x/t.gguf") is None
 
 
 def test_speculative_forwards_template_config_and_warns_new_drops(
@@ -363,9 +393,11 @@ def test_speculative_forwards_template_config_and_warns_new_drops(
     # forwarded, not dropped
     assert spec_stubs["template_kwargs"] == {"enable_thinking": False}
     assert "--chat-template-config" not in err
-    # newly-named drops fire the warning + --no-mtp hint
-    for flag in ("--thinking-budget", "--prefill-step-size"):
-        assert flag in err
+    # the budget rides the owned rounds now: forwarded, not warned
+    assert spec_stubs["thinking_budget"] == 256
+    assert "--thinking-budget" not in err
+    # still-dropped flags fire the warning + --no-mtp hint
+    assert "--prefill-step-size" in err
     assert "not applied on the MTP path" in err
 
 

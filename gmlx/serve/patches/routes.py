@@ -35,13 +35,33 @@ def _models_payload() -> dict:
     serving.reregister_missing_models()   # a restored file re-appears here
     models = serving.resolved_models()
     resident, pinned = set(), set()
+    # Key on the loaded id, not the path. Two ids can share one GGUF
+    # and two profiles of one id can load different kv_bits. The path
+    # map is the last resort.
+    kv_by_loaded, kv_by_id, kv_by_path = {}, {}, {}
     pool = _get_pool()
     if pool is not None:
         for e in pool.stats()["resident"]:
             resident.add(e["model_path"])
             if e["pinned"]:
                 pinned.add(e["model_path"])
+            if e.get("kv_quant") is not None:
+                loaded_as = e.get("loaded_as")
+                if loaded_as:
+                    kv_by_loaded[loaded_as] = e["kv_quant"]
+                    kv_by_id.setdefault(loaded_as.split("@", 1)[0],
+                                        e["kv_quant"])
+                kv_by_path.setdefault(e["model_path"], e["kv_quant"])
     default_id = serving.default_model_id()
+
+    def _kv_for(mid, rm, alias_of, profile):
+        base = alias_of or mid
+        prof = profile if alias_of else rm.profile_name
+        if prof and f"{base}@{prof}" in kv_by_loaded:
+            return kv_by_loaded[f"{base}@{prof}"]
+        if base in kv_by_loaded:
+            return kv_by_loaded[base]
+        return kv_by_id.get(base, kv_by_path.get(rm.path))
 
     def _entry(mid, rm, *, alias_of=None, profile=None):
         return {
@@ -50,6 +70,8 @@ def _models_payload() -> dict:
             "created": _mtime(rm.path),
             "owned_by": "gmlx",
             "resident": rm.path in resident,
+            # Resident models only: the policy resolves at load.
+            "kv_quant": _kv_for(mid, rm, alias_of, profile),
             "pinned": bool(rm.pin) or rm.path in pinned,
             "speculative": bool(rm.speculative),
             "vlm": rm.mmproj is not None,
@@ -92,7 +114,8 @@ def _service_entry(sid: str, marker: str, value) -> dict:
     consumers can index any of them) plus its capability marker."""
     return {
         "id": sid, "object": "model", "created": 0, "owned_by": "gmlx",
-        "resident": False, "pinned": False, "speculative": False, "vlm": False,
+        "resident": False, "kv_quant": None, "pinned": False,
+        "speculative": False, "vlm": False,
         "profile": None, "family": None, "default": False,
         marker: True, "alias_of": _service_display(value),
     }
@@ -225,6 +248,7 @@ def _resident_models_view() -> list:
             "footprint_bytes": e["footprint_bytes"],
             "idle_s": round(e.get("idle_s", 0.0), 1),
             "ttl_s": e.get("ttl_s"),
+            "kv_quant": e.get("kv_quant"),
         })
     return out
 
@@ -248,6 +272,13 @@ def install_runtime_snapshot_enrichment() -> None:
                 base["residency"] = {
                     k: st[k] for k in ("budget_bytes", "resident_bytes")
                     if k in st}
+            except Exception:
+                pass
+            # gmlx wires APC per residency entry. Any resident manager
+            # counts as enabled.
+            try:
+                if pool.apc_managers() and isinstance(base.get("apc"), dict):
+                    base["apc"]["enabled"] = True
             except Exception:
                 pass
         try:

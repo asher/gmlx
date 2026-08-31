@@ -67,7 +67,7 @@ def test_quantized_pool_keeps_profile(armed):
 
 
 def test_quantized_comp_pool_fp16_indexer_pool_arms(armed):
-    # the real quantize_pooled_caches outcome: comp pool packed, indexer pool
+    # the real arm_stack outcome: comp pool packed, indexer pool
     # (quantizable=False) and local window fp16
     comp = PoolingCache(4)
     comp.quantize_storage(64, 8)

@@ -482,14 +482,34 @@ def test_auto_server_gguf_path_stays_local_with_hint(
     gguf = tmp_path / "alpha.gguf"
     gguf.write_bytes(b"GGUF")
     _auto_env(monkeypatch, served=["alpha"])
-    cfg = SimpleNamespace(models=[
-        SimpleNamespace(id="alpha", path=str(gguf))])
+    # The real config's models is {id: ModelCfg}, not a list.
+    cfg = SimpleNamespace(models={
+        "alpha": SimpleNamespace(id="alpha", path=str(gguf))})
     monkeypatch.setattr("gmlx.commands.launch._discover_config",
                         lambda: (cfg, str(tmp_path / "gmlx.yaml")))
     args, parser = _auto_args([str(gguf)])
     assert chat._auto_server(args, parser) is False
     out = capsys.readouterr().out
     assert "serves this file as 'alpha'" in out
+
+
+def test_auto_server_gguf_path_unmapped_config_stays_local(
+        monkeypatch, tmp_path, capsys):
+    """A config whose models dict does not map the requested file must not
+    crash the probe (regression: iterating the dict yielded id strings)."""
+    from types import SimpleNamespace
+
+    gguf = tmp_path / "gamma.gguf"
+    gguf.write_bytes(b"GGUF")
+    _auto_env(monkeypatch, served=["alpha"])
+    cfg = SimpleNamespace(models={
+        "alpha": SimpleNamespace(id="alpha",
+                                 path=str(tmp_path / "alpha.gguf"))})
+    monkeypatch.setattr("gmlx.commands.launch._discover_config",
+                        lambda: (cfg, str(tmp_path / "gmlx.yaml")))
+    args, parser = _auto_args([str(gguf)])
+    assert chat._auto_server(args, parser) is False
+    assert "serves this file" not in capsys.readouterr().out
 
 
 # ------------------------------- /memory ---------------------------------
@@ -545,3 +565,49 @@ def test_memory_cmd_without_store(monkeypatch, tmp_path, capsys):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+# ------------------------------ /model switch ------------------------------
+
+def test_slash_model_switches_served_id_and_keeps_transcript(monkeypatch, tmp_path, capsys):
+    brain = _FakeBrain(replies=("one", "two"))
+    brain.model = "served-model"
+    brain.base_url = "http://127.0.0.1:8080/v1"
+    brain.api_key = None
+    brain.served_ids = ["served-model", "served-model-lora"]
+    import gmlx.talk.client as talk_client
+    monkeypatch.setattr(talk_client, "probe_capabilities",
+                        lambda base, key=None, timeout=5.0:
+                        {"chat_ids": ["served-model", "served-model-lora"]})
+    rc, _s, brain, _e = _run(
+        monkeypatch, tmp_path,
+        ["hi", "/model", "/model nope", "/model served-model-lora", "again"],
+        brain=brain)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "served   *served-model  served-model-lora" in out
+    assert "'nope' is not served" in out
+    assert "model served-model -> served-model-lora (1 turn of transcript kept" in out
+    assert brain.model == "served-model-lora"
+    assert brain.turns == ["hi", "again"]          # transcript continued
+
+
+def test_slash_model_keeps_profile_tail(monkeypatch, tmp_path, capsys):
+    brain = _FakeBrain()
+    brain.model = "served-model@coding"
+    brain.base_url = "http://127.0.0.1:8080/v1"
+    brain.api_key = None
+    brain.served_ids = ["served-model", "other"]
+    import gmlx.talk.client as talk_client
+    monkeypatch.setattr(talk_client, "probe_capabilities",
+                        lambda base, key=None, timeout=5.0:
+                        {"chat_ids": ["served-model", "other"]})
+    rc, _s, brain, _e = _run(monkeypatch, tmp_path, ["/model other"], brain=brain,
+                             model="served-model@coding")
+    assert rc == 0
+    assert brain.model == "other@coding"
+
+
+def test_completion_offers_served_ids():
+    assert chat._completion_options("/model se", "se", ["served-a", "other"]) == ["served-a"]
+    assert chat._completion_options("/model ", "", None) == []

@@ -79,12 +79,18 @@ Knobs (all calib values are U5's to tighten):
                              + speculative + file-backed pages, read
                              from host_statistics64 every tick): below
                              it the band is red at once, whatever the
-                             MLX-side rate math says (default 8; 0
-                             disables). This is the counter that
+                             MLX-side rate math says (default: lower
+                             of 4 and 10% of RAM; 0 disables). This is
+                             the counter that
                              predicts the free-page livelock panic;
                              MLX cannot see it because its buffer
                              cache reads as free inside the process
                              and wired to the kernel
+    GMLX_GOV_THROTTLE_CACHE_GB
+                             MLX cache limit while a throttle band
+                             (yellow and up) is armed (default 2; 0 =
+                             disable caching entirely, the pre-fix
+                             behavior)
     GMLX_GOV_KY              yellow entry ttc in ticks (default 16)
     GMLX_GOV_DY              green dwell ticks to de-escalate
                              (default 8)
@@ -310,16 +316,18 @@ def _kernel_reclaimable():
 
 def _kernel_floor_bytes() -> float:
     """Kernel reclaimable floor in bytes. Env override, else the lower
-    of 8 GB and 10% of physical RAM so a small box is not always below
-    it."""
+    of 4 GB and 10% of physical RAM so a small box is not always below
+    it. Collapse signatures key off fractions of the floor (quarter and
+    half), which at 4 GB still sit well above the 2026-08-24 freeze
+    reading (0.5 GB)."""
     raw = os.environ.get("GMLX_GOV_KERNEL_FLOOR_GB")
     if raw not in (None, ""):
-        return _env_f("GMLX_GOV_KERNEL_FLOOR_GB", 8.0) * 1e9
+        return _env_f("GMLX_GOV_KERNEL_FLOOR_GB", 4.0) * 1e9
     try:
         mem = float(mx.device_info()["memory_size"])
     except Exception:
-        return 8e9
-    return min(8e9, 0.10 * mem)
+        return 4e9
+    return min(4e9, 0.10 * mem)
 
 
 # Floor armed by install_governor after the kernel sampler self-check;
@@ -403,8 +411,14 @@ def _arm_throttle(gen, st: _GovState, ws: float, margin: float) -> None:
             st.saved_mem_limit = None
             _log.warning("[governor] set_memory_limit failed", exc_info=True)
     if st.saved_cache_limit is None:
+        # Zero here turns every prefill transient into a fresh Metal
+        # allocation; the uncached traffic re-dips the kernel floor each
+        # tick and pins the band red at large prefill cost. A small cap
+        # keeps same-shape layer buffers reusable while overgrowth is
+        # still shed (floor breaches clear the cache directly).
+        cap = int(_env_f("GMLX_GOV_THROTTLE_CACHE_GB", 2.0) * 1e9)
         try:
-            st.saved_cache_limit = mx.set_cache_limit(0)
+            st.saved_cache_limit = mx.set_cache_limit(cap)
         except Exception:
             st.saved_cache_limit = None
 
