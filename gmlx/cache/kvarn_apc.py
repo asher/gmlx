@@ -82,7 +82,7 @@ def kvarn_model_converts(model) -> bool:
             # so the stamp and salt never disagree with the cache build.
             from .kvarn_serve import _serve_widths_and_tail, kvarn_batch_policy
 
-            k_bits, v_bits, tail = _serve_widths_and_tail()
+            k_bits, v_bits, tail = _serve_widths_and_tail(model)
             policy = kvarn_batch_policy(model, make(), k_bits, v_bits, tail,
                                         mode="single")
             val = policy.n_quant > 0
@@ -104,22 +104,24 @@ def apply_kvarn_salt(manager, model) -> None:
     try:
         if manager is None or model is None:
             return
-        salt = kvarn_entry_salt()
+        salt = kvarn_entry_salt(model)
         if salt and kvarn_model_converts(model):
             manager._exact_extra_salt = salt
     except Exception:
         pass
 
 
-def kvarn_entry_salt() -> int:
-    """Exact-tier extra-hash salt for the current env window's kvarn wire
-    config, 0 outside a kvarn window (XOR identity)."""
+def kvarn_entry_salt(model=None) -> int:
+    """Exact-tier extra-hash salt for this model's kvarn wire config, 0
+    outside a kvarn window (XOR identity). The model resolves the widths
+    from its stamped policy, so entries are salted with the config the
+    caches were actually built at."""
     if os.environ.get("KV_QUANT_SCHEME", "") != "kvarn":
         return 0
     from .kvarn_cache import KVarNKVCache
     from .kvarn_serve import _serve_widths_and_tail
 
-    k_bits, v_bits, tail = _serve_widths_and_tail()
+    k_bits, v_bits, tail = _serve_widths_and_tail(model)
     key = f"kvarn:{KVarNKVCache.kvarn_layout_version}:{k_bits}:{v_bits}:{tail}"
     return int.from_bytes(hashlib.sha256(key.encode()).digest()[:8], "little")
 

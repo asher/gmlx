@@ -167,9 +167,13 @@ def resolve_for_load(rg, model_id: str):
         raise KvPolicyError(kv_line(model_id, bad))
     setattr(rg, RG_ATTR, pol)
     # The batch worker reads the policy off batch.model. The residency
-    # proxy does not cross threads.
+    # proxy does not cross threads. Both objects carry it: the cache
+    # builders disagree on which one they are handed.
     try:
         setattr(rg.model, RG_ATTR, pol)
+        lm = getattr(rg.model, "language_model", None)
+        if lm is not None:
+            setattr(lm, RG_ATTR, pol)
     except Exception:
         _log.warning("[kv] %s: model stamp failed; warm merges see no "
                      "policy (stay fp16)", model_id, exc_info=True)

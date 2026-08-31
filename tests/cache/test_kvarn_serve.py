@@ -103,6 +103,26 @@ def test_make_cache_env_bits(restorable, _ops_ok):
     assert all(c.k_bits == 4 for c in caches[:-1])
 
 
+def test_make_cache_widths_come_from_the_model_stamp(restorable, _ops_ok):
+    """Per-model load windows are closed by request time, so an ambient
+    env read would build model B's caches at model A's width. The policy
+    stamped at load wins over whatever env the request happens to see."""
+    from gmlx.cache.kv_policy import resolve_kv_quant_policy
+    from gmlx.serve.kv_policy import ServeKvPolicy
+
+    _install(restorable)
+    restorable.setenv("KV_BITS", "8")          # another model's window
+    restorable.setenv("KV_TAIL_TOKENS", "128")
+    lm = _LayersLM()
+    single = resolve_kv_quant_policy(
+        lm.make_cache(), kv_bits=4, value_bits=4, scheme="kvarn",
+        tail_tokens=256)
+    lm._gmlx_kv_policy = ServeKvPolicy(single, single)
+
+    caches = ar._make_cache(lm, [0], kv_bits=None, kv_quant_scheme="kvarn")
+    assert all(c.k_bits == 4 and c.tail_cap == 256 for c in caches[:-1])
+
+
 def test_make_cache_declines_to_fp16(restorable, _ops_ok):
     _install(restorable)
     caches = ar._make_cache(

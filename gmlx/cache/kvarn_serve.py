@@ -4,11 +4,10 @@ install_kvarn_serve() arms three seams when the boot environment selects
 KV_QUANT_SCHEME=kvarn:
 
 - ``_make_cache`` (mlx_vlm.generate.ar + the server.generation from-import)
-  builds BatchKVarNKVCache for every plain-KV layer of an eligible model.
-  Deliberate divergence from upstream: the stock quantized builder skips
-  the last layer ("sensitive to quantization"); kvarn6 measures at or
-  above kv8 fidelity on the KLD harness, so all eligible layers convert
-  and the memory story stays uniform. Ineligible models keep fp16 batch
+  builds BatchKVarNKVCache for the plain-KV layers the shared policy
+  takes, so serve admission prices exactly what gets built. Layer
+  selection is the policy's, upstream's carve-out included: the last
+  layer of a deep stack stays fp16. Ineligible models keep fp16 batch
   caches with a one-shot reason (never a silent affine fallback).
 - ``BatchGenerator.__init__`` routes kvarn-eligible models onto the APC
   exact tier: stamps the model so model_apc_mode resolves "exact" (the
@@ -66,9 +65,29 @@ def spec_cache_build():
         _spec_build[0] = False
 
 
-def _serve_widths_and_tail():
+def _serve_widths_and_tail(model=None):
+    """kvarn K/V widths and precision tail for this model.
+
+    The policy stamped at load rules when the model carries one: per-model
+    env windows are closed by request time, so an ambient env read would
+    serve model B's requests at model A's width. The env is the fallback
+    for paths that run inside the load window (residency probes) and for
+    the CLI-shaped tests.
+    """
     from gmlx.cache.kvarn_cache import kvarn_widths
 
+    # Check-down: call sites disagree on whether they hand over the
+    # top-level model or its language model.
+    single = None
+    for obj in (model, getattr(model, "language_model", None)):
+        stamped = getattr(obj, "_gmlx_kv_policy", None) if obj else None
+        single = getattr(stamped, "single", None)
+        if single is not None:
+            break
+    if (single is not None and getattr(single, "scheme", None) == "kvarn"
+            and single.bits):
+        v = single.value_bits or single.bits
+        return int(single.bits), int(v), int(single.tail_tokens or 0)
     raw = os.environ.get("KV_BITS", "")
     try:
         bits = int(raw) if raw else None
@@ -148,7 +167,7 @@ def _ppb_rebuild_declined(batch, kwargs):
         return "populated"
     if int(getattr(batch, "_processed_prompt_columns", 0) or 0):
         return "trimmed"
-    k_bits, v_bits, tail = _serve_widths_and_tail()
+    k_bits, v_bits, tail = _serve_widths_and_tail(batch.model)
     policy = kvarn_batch_policy(batch.model, batch.prompt_cache,
                                 k_bits, v_bits, tail, mode="single")
     reason = None if policy.verdict in ("full", "partial") else policy.reason
@@ -192,7 +211,7 @@ def ensure_ppb_kvarn(batch, kwargs, *, ckpt_active: bool) -> bool:
     from .kvarn_cache import ensure_registered
 
     ensure_registered()
-    k_bits, v_bits, tail = _serve_widths_and_tail()
+    k_bits, v_bits, tail = _serve_widths_and_tail(batch.model)
     policy = kvarn_batch_policy(batch.model, batch.prompt_cache,
                                 k_bits, v_bits, tail, mode="single")
     if policy.verdict not in ("full", "partial"):
@@ -247,7 +266,7 @@ def _install_make_cache(_ar, _gen):
         from .compat import cache_types
         from .kvarn_cache import BatchKVarNKVCache, ensure_registered
 
-        k_bits, v_bits, tail = _serve_widths_and_tail()
+        k_bits, v_bits, tail = _serve_widths_and_tail(model)
         # The scheme owns the width request either way: a declined model
         # serves fp16, never the affine quantized batch cache.
         caches = _orig(model, left_padding, kv_bits=None, **kwargs)
