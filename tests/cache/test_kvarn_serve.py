@@ -258,3 +258,28 @@ def test_cascade_declines_kvarn():
         is None
     )
     assert not cascade_sdpa._stamp_caches([_KvarnCache()], [b"ab", b"ab"])
+
+
+@_NEEDS_GPU
+def test_scalar_kvarn_promotes_on_generation_batch_extend(_ops_ok):
+    """The ckpt tier installs a single-stream KVarNKVCache into a B=1
+    batch. Kvarn keeps merge on the batch class, so the stock promotion
+    probe (type(c).merge) missed it and admission reached extend on a
+    scalar cache, killing every row in flight."""
+    import importlib
+
+    from gmlx.cache.apc_pooling import install_batched_cachelist_admission
+    from gmlx.cache.kvarn_cache import KVarNKVCache
+
+    install_batched_cachelist_admission()
+    _ar = importlib.import_module("mlx_vlm.generate.ar")
+
+    def _filled(rows):
+        c = KVarNKVCache(k_bits=6, v_bits=6, tail_tokens=256)
+        k = mx.random.normal((1, 2, rows, 128)).astype(mx.float16)
+        c.update_and_fetch(k, k)
+        return c
+
+    out = _ar._extend_cache([_filled(8)], [_filled(8)])
+    assert type(out[0]) is BatchKVarNKVCache
+    assert out[0].left_padding.shape[0] == 2

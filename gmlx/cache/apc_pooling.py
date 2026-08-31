@@ -459,6 +459,22 @@ def _is_batched_cache(c) -> bool:
     return hasattr(c, "left_padding")
 
 
+def _kvarn_batch_merge(c):
+    """The batch merge for a single-stream kvarn cache, or None.
+
+    Kvarn keeps merge on the batch class alone, so a scalar
+    KVarNKVCache -- which the ckpt tier installs into a B=1 batch --
+    answers no to the ``type(c).merge`` probe and reaches ``extend``
+    unlifted. A second concurrent request then kills every row in
+    flight with AttributeError.
+    """
+    try:
+        from .kvarn_cache import BatchKVarNKVCache, KVarNKVCache
+    except Exception:
+        return None
+    return BatchKVarNKVCache.merge if isinstance(c, KVarNKVCache) else None
+
+
 def install_batched_cachelist_admission() -> None:
     """Stop re-merging an already-batched CacheList on admission.
 
@@ -488,7 +504,7 @@ def install_batched_cachelist_admission() -> None:
     def _promote(c):
         if _is_batched_cache(c):
             return c
-        merge = getattr(type(c), "merge", None)
+        merge = getattr(type(c), "merge", None) or _kvarn_batch_merge(c)
         return merge([c]) if merge is not None else c
 
     def _extend_cache(cache_a, cache_b):
