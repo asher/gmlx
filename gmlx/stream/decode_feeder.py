@@ -49,7 +49,7 @@ import numpy as np
 
 from . import keepwarm
 import gmlx.load.loadlog as loadlog
-from gmlx.envflags import env_bool, env_int
+from gmlx.envflags import env_bool, env_choice, env_float, env_int
 from .feeder_common import ATTRS, KINDS, read_range, swapped_weights, verify_zero_copy
 
 # Miss-pull parallelism: per layer, up to top_k experts x 3 stacks of
@@ -67,6 +67,38 @@ _READ_WORKERS = 12
 # starve demand misses of workers or buffers.
 _LA_WORKERS = 6
 _LA_K = 6
+
+# Prestage eviction when the arena is full (GMLX_DECODE_PRESTAGE_EVICT).
+# "guard" displaces only a resident no more popular than the prediction,
+# which stops prefetch in steady state: every resident was routed once.
+# "popular" evicts the least-popular resident, already rank-gated by
+# GMLX_DECODE_LOOKAHEAD_MIN_P. Routing is untouched either way.
+_EVICT_POLICIES = ("auto", "guard", "popular")
+_EVICT_DEFAULT = "auto"
+
+# Barrier width (GMLX_DECODE_SETTLE). "routed" joins only the entries this
+# call needs; leaving the rest outstanding is safe because a pending slot's
+# owner is -4, invisible to the empty scan, victim scan and resize keep-set,
+# so it never reaches the returned slot map. "all" joins every pending
+# prestage: free at a few reads per token, 28s of a 123s run under
+# "popular".
+_SETTLE_POLICIES = ("auto", "all", "routed")
+_SETTLE_DEFAULT = "auto"
+
+# Fast-disk recipe (GMLX_DECODE_FAST_DISK=auto|on|off). Both policies above
+# and the lookahead pool's disk priority turn on one question: does
+# speculation steal bandwidth demand misses wanted? M3 Max class, yes;
+# M5 Max reads 14 GB/s against a 6-8 GB/s workload, no. "auto" probes at
+# load, takes the fast recipe above _FAST_DISK_GBPS, and demotes for good
+# after _FAST_DISK_DEMOTE_WINDOWS saturated duty windows. Pool threads keep
+# their start priority: Darwin sets disk policy per thread at thread start.
+_FAST_DISK_GBPS = 9.0
+_FAST_DISK_PROBE_READS = 32
+_FAST_DISK_PROBE_DEPTH = 4
+_FAST_DISK_PROBE_TIMEOUT_S = 5.0
+_FAST_DISK_RECHECK = 4096
+_FAST_DISK_DUTY = 0.9
+_FAST_DISK_DEMOTE_WINDOWS = 2
 
 # Aligned miss reads. The kernel treats an F_NOCACHE read whose file
 # offset is not page-aligned as misaligned and services the WHOLE request
@@ -94,14 +126,16 @@ _MAX_WEDGES = 3
 
 # Popularity decay: halve every N stage calls (a single global counter across all
 # covered layers, not per layer), so residency tracks the recent window instead of
-# fossilizing the first prompt's routing.
+# fossilizing the first prompt's routing. N is in stage calls, so the half-life in
+# tokens is N / covered-MoE-layers - 4096 is ~98 tokens on a 42-layer model and
+# ~128 on a 32-layer one. GMLX_DECODE_DECAY_EVERY overrides.
 _DECAY_EVERY = 4096
 
-# Deliberately absent: a background seeder that pre-fills empty slots. The
-# SSD is saturated by demand misses during exactly the window seeding would
-# help, and a demand miss is a perfectly targeted read while a seed is a
-# popularity guess - measured net-negative (seeding cost more decode
-# throughput than its hit-rate gain returned). Organic fill is the seeder.
+# Deliberately absent: a background seeder that pre-fills empty slots.
+# Rejected on a saturated drive (a seed read is a guess spending bandwidth a
+# targeted read wanted), then rebuilt and measured on a fast one: 1295 slots
+# seeded over 1000 tokens, 0.1 tok/s lost. Prestage claims the empty slots
+# first, on router evidence rather than a popularity guess.
 
 # System memory pressure: the arena is wired, so the kernel can never
 # reclaim it - pressure arriving after load (another model, a build) must
@@ -364,6 +398,8 @@ class DecodeFeeder:
         self._counts = {
             li: np.zeros(n_experts[li], dtype=np.float64) for li in self._layers
         }
+        self._decay_every = max(
+            1, env_int("GMLX_DECODE_DECAY_EVERY", _DECAY_EVERY))
         self._calls = 0
         self._hits = 0
         self._lookups = 0
@@ -384,6 +420,17 @@ class DecodeFeeder:
         self._la_k = env_int("GMLX_DECODE_LOOKAHEAD_K", _LA_K)
         self._la_cancel = (
             os.environ.get("GMLX_DECODE_LOOKAHEAD_CANCEL", "1") != "0")
+        self._fast_disk = self._resolve_fast_disk()
+        self._evict = env_choice(
+            "GMLX_DECODE_PRESTAGE_EVICT", _EVICT_DEFAULT, _EVICT_POLICIES)
+        if self._evict == "auto":
+            self._evict = "popular" if self._fast_disk else "guard"
+        self._settle = env_choice(
+            "GMLX_DECODE_SETTLE", _SETTLE_DEFAULT, _SETTLE_POLICIES)
+        if self._settle == "auto":
+            self._settle = "routed" if self._fast_disk else "all"
+        self._duty_saturated = 0
+        self._duty_marks = (0, 0.0)
         self._la_submitted = 0
         self._la_adopted = 0
         self._la_waited = 0
@@ -691,9 +738,11 @@ class DecodeFeeder:
                     self._verify_slot(li, pe, ps, "prev-routed")
         counts[uniq] += 1.0
         self._calls += 1
-        if self._calls % _DECAY_EVERY == 0:
+        if self._calls % self._decay_every == 0:
             for c in self._counts.values():
                 c *= 0.5
+        if self._fast_disk and self._calls % _FAST_DISK_RECHECK == 0:
+            self._recheck_fast_disk()
         missing = uniq[slot_of[uniq] < 0]
         self._lookups += len(uniq)
         self._hits += len(uniq) - len(missing)
@@ -784,14 +833,120 @@ class DecodeFeeder:
 
     # lookahead prestage
 
+    def _probe_read_rate(self) -> float:
+        """Bytes per second the drive delivers at this feeder's own access
+        shape: page-aligned F_NOCACHE reads of one expert stride each,
+        scattered across the shard set at a demand wave's depth. Rate is the
+        25th-percentile read's own rate times the depth, not total bytes over
+        total time: F_NOCACHE still serves from pages an earlier run left
+        resident, and those reads swamp an aggregate (28.3 GB/s measured on a
+        14 GB/s drive). Measured against a deliberately warmed cache, p25
+        holds to 12.8-14.9 GB/s up to half the sample cached, where the
+        aggregate reads 26 and the median 48. 0.0 on any failure or on a
+        probe that outlives _FAST_DISK_PROBE_TIMEOUT_S, which reads as "not a
+        fast disk" and keeps the conservative recipe. Daemon workers and that
+        timeout are what keep a wedge-prone path from hanging the load here,
+        before any of the read-timeout machinery is armed."""
+        try:
+            picks = []
+            rng = np.random.default_rng(0)
+            entries = [(li, e) for li, e in self._layers.items()]
+            for i in range(_FAST_DISK_PROBE_READS):
+                li, entry = entries[i % len(entries)]
+                _, path, off, stride, shape = entry[KINDS[i % len(KINDS)]]
+                e = int(rng.integers(0, max(1, shape[0])))
+                picks.append((path, off + e * stride, stride))
+            if not picks:
+                return 0.0
+
+            tls = threading.local()
+            # Sized here rather than from the bounce pool: the probe runs
+            # under GMLX_DECODE_ALIGNED_READS=0 too, where there is none.
+            nbuf = max(s for _, _, s in picks) + 2 * _PAGE
+
+            def one(job):
+                path, off, stride = job
+                buf = getattr(tls, "buf", None)
+                if buf is None:
+                    buf = tls.buf = mmap.mmap(-1, nbuf)
+                a = off & ~(_PAGE - 1)
+                b = min((off + stride + _PAGE - 1) & ~(_PAGE - 1),
+                        self._sizes[path])
+                t = time.monotonic()
+                read_range(self._fds[path], memoryview(buf)[: b - a], a)
+                return (b - a), time.monotonic() - t
+
+            pool = _DaemonReadPool(_FAST_DISK_PROBE_DEPTH)
+            try:
+                futs = [pool.submit(one, job) for job in picks]
+                _, pending = futures_wait(
+                    futs, timeout=_FAST_DISK_PROBE_TIMEOUT_S)
+                if pending:
+                    return 0.0
+                rates = [n / dt for n, dt in (f.result() for f in futs)
+                         if dt > 0]
+            finally:
+                pool.shutdown(wait=False)
+            if not rates:
+                return 0.0
+            return float(
+                np.percentile(rates, 25)) * _FAST_DISK_PROBE_DEPTH
+        except Exception:
+            return 0.0
+
+    def _resolve_fast_disk(self) -> bool:
+        """Whether this drive has bandwidth to spare for speculation (see
+        _FAST_DISK_GBPS)."""
+        mode = env_choice(
+            "GMLX_DECODE_FAST_DISK", "auto", ("auto", "on", "off"))
+        self._probe_bps = 0.0
+        if mode != "auto":
+            return mode == "on"
+        self._probe_bps = self._probe_read_rate()
+        thr = env_float("GMLX_DECODE_FAST_DISK_GBPS", _FAST_DISK_GBPS) * 1e9
+        return self._probe_bps >= thr
+
+    def _recheck_fast_disk(self) -> None:
+        """Demote the fast recipe if the drive turns out to be saturated
+        after all. Duty is bytes this feeder actually read over the window,
+        against what the probe said the drive can deliver in that wall time.
+        One-way: a drive that saturated once is not worth re-probing mid-run,
+        and flapping the policies churns residency."""
+        calls, (mark_bytes, mark_t) = self._calls, self._duty_marks
+        now = time.monotonic()
+        got, self._duty_marks = self._bytes_read, (self._bytes_read, now)
+        if not mark_t or self._probe_bps <= 0:
+            return
+        window = now - mark_t
+        if window <= 0:
+            return
+        duty = (got - mark_bytes) / (window * self._probe_bps)
+        if duty < _FAST_DISK_DUTY:
+            self._duty_saturated = 0
+            return
+        self._duty_saturated += 1
+        if self._duty_saturated < _FAST_DISK_DEMOTE_WINDOWS:
+            return
+        self._fast_disk = False
+        self._evict, self._settle = "guard", "all"
+        print(
+            f"[stream] decode feeder: drive saturated ({duty:.0%} of "
+            f"{self._probe_bps / 1e9:.1f} GB/s over {calls} stage calls) - "
+            "prestage back to guess-grade eviction and the wide barrier"
+        )
+
     def _la_state(self) -> _DaemonReadPool:
         if self._la_pool is None:
             import mlx_kquant as kq
 
             n = env_int("GMLX_DECODE_LOOKAHEAD_WORKERS", _LA_WORKERS)
+            # Utility priority keeps speculation behind demand misses,
+            # which is only worth its latency where the two compete.
+            default = "0" if self._fast_disk else "1"
             on_start = (
                 _iopol_utility
-                if os.environ.get("GMLX_DECODE_LOOKAHEAD_IOPOL", "1") != "0"
+                if os.environ.get(
+                    "GMLX_DECODE_LOOKAHEAD_IOPOL", default) != "0"
                 else None)
             self._la_pool = _DaemonReadPool(n, on_start=on_start)
             if self._aligned:
@@ -950,10 +1105,15 @@ class DecodeFeeder:
                 if not len(cand):
                     break
                 v = int(np.argmin(counts[owner[cand]]))
-                if not hard and counts[owner[cand]][v] > counts[e]:
+                if (
+                    not hard
+                    and self._evict == "guard"
+                    and counts[owner[cand]][v] > counts[e]
+                ):
                     # Guess-grade guard: a wrong prediction may only cost
                     # a cold slot, never a hot one. Demand and keeper
-                    # modes evict least-popular outright, like stage().
+                    # modes evict least-popular outright, like stage(), and
+                    # so does the "popular" policy (see _EVICT_POLICIES).
                     continue
                 s = int(cand[v])
                 old = int(owner[s])
@@ -1039,13 +1199,25 @@ class DecodeFeeder:
                         f.cancel()
         timeout = self._read_timeout if self._read_timeout > 0 else None
         t0 = time.monotonic()
+        # A resize reallocates the buffers the outstanding writes target, and
+        # stage() skips it while anything is pending - so a layer the
+        # pressure ladder wants resized takes the wide barrier and drains.
+        narrow = (
+            self._settle == "routed"
+            and self._target_slots(li) == self._slots[li]
+        )
         futures_wait(
-            [f for _, futs, _ in pending.values() for f in futs],
+            [f for e, (_, futs, _) in pending.items() for f in futs
+             if not narrow or e in routed],
             timeout=timeout)
         self._t_settle += time.monotonic() - t0
         owner = self._owner[li]
         slot_of = self._slot_of[li]
         for e, (s, futs, _) in list(pending.items()):
+            if narrow and e not in routed and not all(f.done() for f in futs):
+                # Still in flight and nothing here reads it: leave it
+                # pending, to publish at whichever later call finds it done.
+                continue
             del pending[e]
             pend = sum(not f.done() for f in futs)
             if pend:
@@ -1503,7 +1675,7 @@ def maybe_make_decode_feeder(
         # server's explicit unload close makes this a no-op.
         _register_exit_close(feeder)
         return feeder
-    except Exception as e:
+    except (RuntimeError, OSError, ImportError, MemoryError) as e:
         print(f"[stream] decode feeder unavailable ({e}); "
               "decode stays on the CPU page-cache path")
         return None

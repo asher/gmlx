@@ -405,3 +405,55 @@ def test_explicit_thinking_budget_beats_config(tmp_path):
     cfg = _thinking_config(tmp_path)
     _, args = _resolve(["m", "--config", cfg, "--thinking-budget", "8"])
     assert args.thinking_budget == 8
+
+
+def _stream_config(tmp_path):
+    gguf = tmp_path / "s.gguf"
+    gguf.write_bytes(b"GGUF")
+    cfg = tmp_path / "stream.yaml"
+    cfg.write_text(
+        f"server:\n  model_dirs: [{tmp_path}]\n"
+        "models:\n"
+        "  s: {path: s.gguf, stream: experts}\n")
+    return str(cfg)
+
+
+def test_config_stream_lifts_cb_caps(tmp_path, monkeypatch):
+    """A config `stream: experts` must get the same command-buffer lift as a
+    typed --stream-experts. The argv lift cannot see it (the overlay runs
+    later and MLX latches the env at device init), so the caps are written to
+    the live device instead; without this the alias decoded 40% slower."""
+    calls = []
+    kq = __import__("mlx_kquant")
+    monkeypatch.setattr(kq, "set_cb_caps",
+                        lambda *a: calls.append(a), raising=False)
+    monkeypatch.delenv("MLX_MAX_OPS_PER_BUFFER", raising=False)
+    _, args = _resolve(["s", "--config", _stream_config(tmp_path)])
+    assert args.stream_experts is True
+    cli._ensure_stream_cb_caps(args)
+    from gmlx.serve.cb_phase import COARSE
+    assert calls == [COARSE]
+
+
+def test_typed_stream_flag_does_not_rewrite_live_caps(tmp_path, monkeypatch):
+    """The argv path already latched the env before device init; rewriting the
+    live fields there would also stomp a user's own pinned caps."""
+    calls = []
+    kq = __import__("mlx_kquant")
+    monkeypatch.setattr(kq, "set_cb_caps",
+                        lambda *a: calls.append(a), raising=False)
+    monkeypatch.setenv("MLX_MAX_OPS_PER_BUFFER", "400")
+    _, args = _resolve(["s", "--config", _stream_config(tmp_path)])
+    cli._ensure_stream_cb_caps(args)
+    assert calls == []
+
+
+def test_no_stream_no_cap_change(tmp_path, monkeypatch):
+    calls = []
+    kq = __import__("mlx_kquant")
+    monkeypatch.setattr(kq, "set_cb_caps",
+                        lambda *a: calls.append(a), raising=False)
+    monkeypatch.delenv("MLX_MAX_OPS_PER_BUFFER", raising=False)
+    _, args = _resolve(["m", "--config", _config(tmp_path)[0]])
+    cli._ensure_stream_cb_caps(args)
+    assert calls == []

@@ -6,6 +6,30 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Streamed-expert decode probes the drive at load and takes a faster
+  prefetch recipe when it has bandwidth to spare. With the wider arena
+  below, GLM-5.3-Flash UD-Q4_K_XL decode goes 7.93 to 10.42 tok/s on an
+  M5 Max with no configuration. `--stream-fast-disk`, the
+  `stream_fast_disk` config key or `GMLX_DECODE_FAST_DISK` force the choice.
+- `GMLX_DECODE_PRESTAGE_EVICT`, `GMLX_DECODE_SETTLE` and
+  `GMLX_DECODE_DECAY_EVERY` select the individual prefetch policies.
+
+### Fixed
+
+- A model addressed by config id or alias now gets the same command-buffer
+  lift as a typed `--stream-experts`, so streamed decode no longer runs 40%
+  slower from the config than from the bare GGUF path (10.3 vs 7.2 tok/s on
+  GLM-5.3-Flash UD-Q4_K_XL). `serve` was never affected.
+
+### Changed
+
+- The decode arena sizes to 0.7 of physical RAM rather than 0.6, which on a
+  128 GB machine is 90.7 GB rather than 78.6 and is worth 12% of decode.
+  The live reclaimable ceiling and the system floor are unchanged, and
+  `GMLX_DECODE_ARENA_RAM_FRAC` still overrides.
+
 ## [0.4.7] - 2026-08-30
 
 ### Fixed
