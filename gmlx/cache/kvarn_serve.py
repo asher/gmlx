@@ -196,7 +196,7 @@ def ensure_ppb_kvarn(batch, kwargs, *, ckpt_active: bool) -> bool:
     rot geometry, and clone paths all understand -- and the outer batch
     rebuild would replace them with batch classes the tier is blind to.
     Converts plain KV layers only (rot/arr layers stay stock, matching
-    the CLI's make_prompt_cache + convert_prompt_cache path); zero
+    the CLI's make_prompt_cache + policy conversion path); zero
     conversions (recurrent_gemma-shaped stacks, or a batch-class list the
     fast path never built) leave the caches untouched. Returns True when
     at least one layer converted.

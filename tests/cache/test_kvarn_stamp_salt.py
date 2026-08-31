@@ -4,10 +4,10 @@ CPU-only. The bug class pinned here: a kvarn-window boot of a
 zero-conversion arch (deepseek4's rot+CacheList stack, recurrent_gemma's
 arr+rot stack) used to get stamped and its manager salted from the env
 alone -- fp16 caches running under the exact tier's kvarn salt, so every
-cross-boot lookup cold-missed. The probe counts the classes
-convert_prompt_cache actually converts (plain KVCache and ChunkedKVCache
--- the latter so CLI and serve agree on llama4-shaped stacks), and both
-the residency salt site and the serve gate read the one stashed answer.
+cross-boot lookup cold-missed. The probe now resolves the shared policy,
+so it counts exactly the layers the cache build converts (plain KVCache
+and ChunkedKVCache, carve-out applied), and both the residency salt site
+and the serve gate read the one stashed answer.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from gmlx.cache.kvarn_apc import (
     kvarn_model_converts,
     stamp_model,
 )
-from gmlx.cache.kvarn_cache import KVarNKVCache, convert_prompt_cache
+from gmlx.cache.kvarn_cache import KVarNKVCache
 
 _cache = runtime_cache_module()
 ArraysCache = _cache.ArraysCache
@@ -104,14 +104,20 @@ def test_probe_stashes_on_model(_ops_ok):
     assert kvarn_model_converts(model)
 
 
-def test_convert_prompt_cache_converts_chunked(_ops_ok):
+def test_policy_converts_chunked(_ops_ok):
+    """ChunkedKVCache (llama4) is kvarn-convertible: serve maps it to
+    BatchKVCache and converts that, so the CLI path must agree."""
     from mlx_lm.models.cache import ChunkedKVCache as LmChunked
     from mlx_vlm.models.cache import ChunkedKVCache as VlmChunked
 
+    from gmlx.gen.generation import convert_kvarn_cache
+
     caches = [LmChunked(chunk_size=8192), VlmChunked(chunk_size=8192),
               KVCache(), ArraysCache(size=2)]
-    n = convert_prompt_cache(caches, k_bits=6, v_bits=6, tail_tokens=1024)
-    assert n == 3
+    policy = convert_kvarn_cache(_DenseNoMakeCache(), caches, 6, 1024)
+    assert policy.verdict == "partial"       # the state layer holds fp16
+    # The carve-out is by stack index and the last slot here is the state
+    # layer, so all three KV layers convert.
     assert all(type(c) is KVarNKVCache for c in caches[:3])
     assert type(caches[3]) is ArraysCache
 

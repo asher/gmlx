@@ -1301,54 +1301,10 @@ def ensure_registered():
 
 
 def convertible_kv_types():
-    """Cache classes ``convert_prompt_cache`` maps to KVarNKVCache.
+    """Cache classes the kvarn policy converts to KVarNKVCache.
     ChunkedKVCache is included deliberately: serve's batch build maps it
     to BatchKVCache and converts that, so converting it here keeps the
-    CLI and serve paths (and the stamp/salt conversion probe) agreeing
-    on llama4-shaped stacks."""
+    CLI and serve paths agreeing on llama4-shaped stacks."""
     from .compat import cache_types
 
     return cache_types("KVCache") + cache_types("ChunkedKVCache")
-
-
-def convert_prompt_cache(
-    prompt_cache,
-    k_bits=6,
-    v_bits=6,
-    tail_tokens=1024,
-    sink_tokens=GROUP,
-    rotating_window=None,
-):
-    """Replace every plain KVCache or ChunkedKVCache entry with a
-    KVarNKVCache (converting any existing history). With rotating_window
-    set, RotatingKVCache entries built for that window become
-    KVarNRotatingKVCache too. Returns the number of layers converted;
-    other cache kinds are left untouched."""
-    from .compat import cache_types
-
-    ensure_registered()
-    kv_types = convertible_kv_types()
-    rot_types = cache_types("RotatingKVCache") if rotating_window else ()
-    n = 0
-    for i, c in enumerate(prompt_cache):
-        if type(c) in kv_types:
-            prompt_cache[i] = KVarNKVCache.from_cache(
-                c,
-                k_bits=k_bits,
-                v_bits=v_bits,
-                tail_tokens=tail_tokens,
-                sink_tokens=sink_tokens,
-            )
-            n += 1
-        elif type(c) in rot_types and int(getattr(c, "max_size", 0) or 0) == int(
-            rotating_window
-        ):
-            prompt_cache[i] = KVarNRotatingKVCache.from_cache(
-                c,
-                k_bits=k_bits,
-                v_bits=v_bits,
-                tail_tokens=tail_tokens,
-                sink_tokens=sink_tokens,
-            )
-            n += 1
-    return n

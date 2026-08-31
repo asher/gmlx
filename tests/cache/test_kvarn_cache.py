@@ -8,7 +8,7 @@ import pytest
 
 import mlx.core as mx
 
-from gmlx.cache.kvarn_cache import GROUP, KVarNKVCache, KVarNView, convert_prompt_cache
+from gmlx.cache.kvarn_cache import GROUP, KVarNKVCache, KVarNView
 
 _NEEDS_GPU = pytest.mark.skipif(
     mx.default_device() != mx.gpu,
@@ -204,15 +204,28 @@ def test_from_cache_conversion():
 
 
 @_NEEDS_GPU
-def test_convert_prompt_cache_targets_plain_kv_only():
+def test_conversion_targets_plain_kv_only():
     from mlx_lm.models.cache import ArraysCache, KVCache, RotatingKVCache
 
+    from gmlx.cache.kv_policy import quantize_kv_members
+    from gmlx.gen.generation import resolve_kvarn_policy
+
+    class _M:
+        class args:
+            model_type = "llama"
+            head_dim = 128
+
     pc = [KVCache(), RotatingKVCache(max_size=64), ArraysCache(size=1), KVCache()]
-    n = convert_prompt_cache(pc, tail_tokens=256)
-    assert n == 2
-    assert type(pc[0]) is KVarNKVCache and type(pc[3]) is KVarNKVCache
+    policy = resolve_kvarn_policy(_M(), None, 256, None, pc)
+    assert policy.verdict == "partial"
+    for i, plan in enumerate(policy.per_layer):
+        if plan.quantize:
+            pc[i], _ = quantize_kv_members(pc[i], policy)
+    # index 3 is the last slot: the carve-out holds it fp16.
+    assert type(pc[0]) is KVarNKVCache
     assert type(pc[1]).__name__ == "RotatingKVCache"
     assert type(pc[2]).__name__ == "ArraysCache"
+    assert type(pc[3]).__name__ == "KVCache"
 
 
 @_NEEDS_GPU

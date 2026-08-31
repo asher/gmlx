@@ -13,7 +13,6 @@ from gmlx.cache.kvarn_cache import (
     GROUP,
     KVarNKVCache,
     KVarNRotatingKVCache,
-    convert_prompt_cache,
 )
 
 _NEEDS_GPU = pytest.mark.skipif(
@@ -391,19 +390,27 @@ def test_from_cache_wrapped_refuses():
 
 
 @_NEEDS_GPU
-def test_convert_prompt_cache_rotating_arm():
+def test_policy_converts_the_rotating_arm(_ops_ok):
     from mlx_lm.models.cache import KVCache, RotatingKVCache
 
-    pc = [KVCache(), RotatingKVCache(max_size=WIN, keep=4)]
+    from gmlx.gen.generation import convert_kvarn_cache
+
+    model = _MakeCacheLess()
     # without the window the rotating entry stays untouched
-    assert convert_prompt_cache(list(pc), tail_tokens=TAIL) == 1
-    n = convert_prompt_cache(pc, tail_tokens=TAIL, rotating_window=WIN)
-    assert n == 2
+    plain = [KVCache(), RotatingKVCache(max_size=WIN, keep=4)]
+    convert_kvarn_cache(model, plain, None, TAIL)
+    assert type(plain[0]) is KVarNKVCache
+    assert type(plain[1]) is RotatingKVCache
+
+    pc = [KVCache(), RotatingKVCache(max_size=WIN, keep=4)]
+    policy = convert_kvarn_cache(model, pc, None, TAIL, rotating_window=WIN)
+    assert policy.verdict == "full" and policy.n_quant == 2
     assert type(pc[0]) is KVarNKVCache
     assert type(pc[1]) is KVarNRotatingKVCache
     # a rotating cache built for some other window is not ours to convert
     other = [RotatingKVCache(max_size=WIN * 2, keep=4)]
-    assert convert_prompt_cache(other, tail_tokens=TAIL, rotating_window=WIN) == 0
+    assert convert_kvarn_cache(
+        model, other, None, TAIL, rotating_window=WIN).verdict == "dropped"
 
 
 # -- setup plumbing ----------------------------------------------------------
