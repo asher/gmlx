@@ -559,11 +559,13 @@ def install_pooled_prompt_kv_quant() -> None:
         group = int(kwargs.get("kv_group_size") or 64)
         # The batch was built with kv_bits stripped, so only pooled
         # packing engages. Failures degrade to fp16 pools, never a
-        # failed request.
+        # failed request. The scheme rides along so a kvarn boot reports
+        # its own width and never prints an affine engagement line.
         try:
             policy = resolve_kv_quant_policy(
                 self.prompt_cache, kv_bits=bits, kv_group_size=group,
                 quantized_kv_start=0, can_quantize_kv=False,
+                scheme=kwargs.get("kv_quant_scheme"),
                 no_kv_reason="pooled path packs pools only; KV stays fp16")
             if policy.verdict not in ("full", "partial"):
                 _skip_note("kv_bits=%s: %s; pools stay fp16", bits,

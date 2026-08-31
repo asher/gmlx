@@ -12,6 +12,17 @@ VALID_BITS = (2, 3, 4, 6, 8)
 VALID_GROUPS = (32, 64, 128)
 FP16_BPE = 2.0
 
+# Schemes: uniform = affine per-group scale/bias, kvarn =
+# variance-normalized plus Hadamard rotation (gmlx/cache/kvarn_cache.py).
+SCHEMES = ("uniform", "kvarn")
+
+# kvarn record geometry. Mirrors the cache module's constants, which stay
+# authoritative; kv_policy keeps them local so the resolver imports no
+# kernel-backed module until a kvarn boot actually needs one.
+KVARN_GROUP = 128
+KVARN_SINK = 128
+KVARN_WIDTHS = (2, 3, 4, 5, 6, 8)
+
 # Layer kinds: kv = growing attention KV (quantizable), window =
 # size-capped sliding window, state = recurrent state, pool = packs at
 # rest via quantize_storage, optout = declares kv_quant_unsupported,
@@ -25,12 +36,38 @@ def packed_bytes_per_element(bits: int, group_size: int) -> float:
     return bits / 8.0 + 4.0 / group_size
 
 
+def kvarn_bytes_per_element(bits: int, value_bits=None) -> float:
+    """kvarn record cost: codes at the mean K/V width plus one fp16
+    Sinkhorn axes triplet per 128-token group. 6-bit = 0.796875.
+
+    The fp16 sink, horizon and tail are fixed-size regions, not a
+    per-token cost; kvarn_fixed_tokens prices them separately.
+    """
+    v = bits if value_bits is None else value_bits
+    return (bits + v) / 16.0 + 3.0 * FP16_BPE / KVARN_GROUP
+
+
+def kvarn_fixed_tokens(tail_tokens) -> int:
+    """fp16 rows a kvarn layer holds whatever the context length: the sink
+    stage with its spare group, the horizon group, and the tail buffer with
+    its slack. Priced as a windowed region, so a short context pays for
+    what it actually allocates."""
+    from gmlx.cache.kvarn_cache import GROUP, KVarNKVCache
+
+    tail = int(tail_tokens or 0)
+    rows = KVARN_SINK + GROUP + GROUP
+    return rows + (tail + KVarNKVCache.tail_slack if tail else 1)
+
+
 @dataclass(frozen=True)
 class KvLayerPlan:
     kind: str
     quantize: bool
     bytes_per_element: float
     pools: int = 0              # quantizable pools under the layer, any kind
+    # Resident regions beyond the per-token cost, as (tokens, bpe) pairs
+    # charged over the first `tokens` tokens. kvarn's fp16 buffers.
+    regions: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -43,6 +80,11 @@ class KvQuantPolicy:
     per_layer: tuple = ()
     quantized_kv_start: int = 0
     start_honored: bool = True
+    scheme: str = "uniform"
+    value_bits: int | None = None   # kvarn value width; None = same as bits
+    tail_tokens: int | None = None  # kvarn fp16 precision tail
+    rotating_window: int | None = None
+    pool_bits: int | None = None    # affine width pools pack at, None = none
 
     @property
     def n_quant(self):
@@ -67,6 +109,27 @@ class KvQuantPolicy:
 
     def bytes_per_element_vector(self) -> list:
         return [p.bytes_per_element for p in self.per_layer]
+
+    def regions_vector(self) -> list:
+        return [p.regions for p in self.per_layer]
+
+    @property
+    def width_label(self) -> str:
+        """The width clause of the [kv] line. Affine wording is pinned by
+        tests and the e2e checks; kvarn renders its own."""
+        if self.scheme != "uniform":
+            v = self.bits if self.value_bits is None else self.value_bits
+            width = (f"{self.scheme}{self.bits}" if v == self.bits
+                     else f"{self.scheme} k{self.bits} v{v}")
+            if self.tail_tokens is not None:
+                width += f" tail={self.tail_tokens}"
+            if self.rotating_window:
+                width += f" window={self.rotating_window}"
+            return width
+        head = f"kv_bits={self.bits}"
+        if self.group_size:
+            head += f" group={self.group_size}"
+        return head
 
     def summary(self) -> str:
         """The clause after the arrow in the canonical [kv] line."""
@@ -95,21 +158,21 @@ class KvQuantPolicy:
         return out
 
 
-def _error(reason, bits, group, mode, stack):
+def _error(reason, bits, group, mode, stack, **kw):
     per = tuple(KvLayerPlan("other", False, FP16_BPE) for _ in stack)
-    return KvQuantPolicy("error", reason, bits, group, mode, per)
+    return KvQuantPolicy("error", reason, bits, group, mode, per, **kw)
 
 
-def dropped_policy(reason, bits, group, mode) -> KvQuantPolicy:
+def dropped_policy(reason, bits, group, mode, **kw) -> KvQuantPolicy:
     """A dropped verdict for paths where no stack was constructed."""
-    return KvQuantPolicy("dropped", reason, bits, group, mode, ())
+    return KvQuantPolicy("dropped", reason, bits, group, mode, (), **kw)
 
 
-def _dropped(reason, bits, group, mode, stack, kinds=None):
+def _dropped(reason, bits, group, mode, stack, kinds=None, **kw):
     per = tuple(
         KvLayerPlan(kinds[i] if kinds else "other", False, FP16_BPE)
         for i in range(len(stack)))
-    return KvQuantPolicy("dropped", reason, bits, group, mode, per)
+    return KvQuantPolicy("dropped", reason, bits, group, mode, per, **kw)
 
 
 def _classify(c, types):
@@ -119,6 +182,13 @@ def _classify(c, types):
         return "pool" if getattr(c, "quantizable", True) else "state"
     if getattr(c, "kv_quant_unsupported", False):
         return "optout"
+    if getattr(c, "kv_quant_scheme", None) == "kvarn":
+        # An already-converted kvarn layer, rotating subclass included.
+        # No live path re-resolves over one today (every call site
+        # resolves a freshly built stack); without this arm a future one
+        # would report "no quantizable layers", since the kvarn classes
+        # derive from the base cache, not KVCache.
+        return "kv"
     if isinstance(c, types["window"]):
         return "window"
     if isinstance(c, types["kv"]):
@@ -169,21 +239,46 @@ def resolve_kv_quant_policy(stack, *, kv_bits, kv_group_size=64,
                             key_bits=None, value_bits=None,
                             mode="single", mtp=False, max_kv_size=None,
                             head_dim=None, can_quantize_kv=True,
-                            no_kv_reason=None) -> KvQuantPolicy:
+                            no_kv_reason=None, tail_tokens=None,
+                            rotating_window=None,
+                            scheme_reason=None) -> KvQuantPolicy:
     """Resolve the KV quantization policy for one constructed cache stack.
 
     stack must be the stack the engine will run, built with the same
     args. A bare make_cache() probe misses what max_kv_size builds.
     mode is the batch axis: MTP quantizes at B=1 and runs fp16 KV when
     batched. Layer rule: quantize growing KV layers except the last
-    layer of a deep stack. Windows, recurrent state, and opt-outs stay
-    fp16. Pools pack at rest. can_quantize_kv=False limits engagement
-    to pooled packing and no_kv_reason names why.
+    layer of a deep stack. Recurrent state and opt-outs stay fp16, and
+    so do windows unless the scheme owns them. Pools pack at rest.
+    can_quantize_kv=False limits engagement to pooled packing and
+    no_kv_reason names why.
+
+    scheme picks the packing: "uniform" is affine (bits/group_size),
+    "kvarn" is variance-normalized plus rotation (bits/value_bits split
+    widths, tail_tokens, and rotating_window for the windows it owns).
+    scheme_reason carries a model-shaped decline the caller resolved.
     """
     stack = list(stack or [])
     if kv_bits is None:
         raise ValueError("resolve_kv_quant_policy needs kv_bits set")
     group = kv_group_size
+    scheme = (scheme or "uniform").lower()
+    if scheme not in SCHEMES:
+        return _error(
+            f"kv_quant_scheme {scheme!r} unsupported (choose from "
+            f"{', '.join(SCHEMES)})",
+            None, group, mode, stack)
+    if key_bits is not None:
+        return _error("split key/value KV bits are unsupported",
+                      None, group, mode, stack)
+    if scheme == "kvarn":
+        return _resolve_kvarn(
+            stack, kv_bits=kv_bits, value_bits=value_bits, mode=mode,
+            mtp=mtp, head_dim=head_dim, tail_tokens=tail_tokens,
+            rotating_window=rotating_window, group=group,
+            quantized_kv_start=quantized_kv_start,
+            can_quantize_kv=can_quantize_kv, no_kv_reason=no_kv_reason,
+            scheme_reason=scheme_reason)
 
     fb = float(kv_bits)
     if fb != int(fb) or int(fb) not in VALID_BITS:
@@ -201,12 +296,7 @@ def resolve_kv_quant_policy(stack, *, kv_bits, kv_group_size=64,
         return _error(
             f"head_dim {head_dim} not divisible by kv_group_size {group}",
             bits, group, mode, stack)
-    if scheme not in (None, "uniform"):
-        return _error(
-            f"kv_quant_scheme {scheme!r} unsupported (only 'uniform' "
-            "affine is certified)",
-            bits, group, mode, stack)
-    if key_bits is not None or value_bits is not None:
+    if value_bits is not None:
         return _error(
             "split key/value KV bits are unsupported",
             bits, group, mode, stack)
@@ -256,17 +346,122 @@ def resolve_kv_quant_policy(stack, *, kv_bits, kv_group_size=64,
     honored = mode == "single" or not quantized_kv_start
     return KvQuantPolicy(verdict, None, bits, group, mode, tuple(per),
                          quantized_kv_start=int(quantized_kv_start or 0),
-                         start_honored=honored)
+                         start_honored=honored, pool_bits=bits)
+
+
+def _kvarn_owns(c, kind, rotating_window):
+    """True when the kvarn converter would take this layer. Rotating
+    layers convert only for the window the caller built them at: a
+    model's own SWA stack keeps its windows fp16, while a --max-kv-size
+    stack on a make_cache-less model converts throughout."""
+    from gmlx.cache.compat import cache_types
+    from gmlx.cache.kvarn_cache import convertible_kv_types
+
+    if kind == "kv":
+        return (type(c) in convertible_kv_types()
+                or getattr(c, "kv_quant_scheme", None) == "kvarn")
+    if kind != "window" or not rotating_window:
+        return False
+    return (type(c) in cache_types("RotatingKVCache")
+            and int(getattr(c, "max_size", 0) or 0) == int(rotating_window))
+
+
+def _resolve_kvarn(stack, *, kv_bits, value_bits, mode, mtp, head_dim,
+                   tail_tokens, rotating_window, group,
+                   quantized_kv_start, can_quantize_kv, no_kv_reason,
+                   scheme_reason) -> KvQuantPolicy:
+    """The kvarn arm of resolve_kv_quant_policy."""
+    from gmlx.cache.kvarn_cache import HEAD_DIMS, ensure_registered
+
+    k_bits = int(kv_bits) if kv_bits is not None else 6
+    v_bits = k_bits if value_bits is None else int(value_bits)
+    tail = 1024 if tail_tokens is None else int(tail_tokens)
+    extra = dict(scheme="kvarn", value_bits=v_bits, tail_tokens=tail,
+                 rotating_window=rotating_window)
+
+    def err(reason):
+        return _error(reason, k_bits, None, mode, stack, **extra)
+
+    if k_bits not in KVARN_WIDTHS or v_bits not in KVARN_WIDTHS:
+        return err("kvarn bits must be one of "
+                   f"{', '.join(map(str, KVARN_WIDTHS))}")
+    if tail < 0 or tail % KVARN_GROUP:
+        return err(f"kv_tail_tokens must be a multiple of {KVARN_GROUP} "
+                   "(0 disables)")
+    if rotating_window is not None:
+        floor = KVARN_GROUP + max(tail, KVARN_GROUP) + KVARN_GROUP
+        if int(rotating_window) < floor:
+            return err(
+                f"max_kv_size {rotating_window} is below the kvarn window "
+                f"floor ({floor} = sink {KVARN_GROUP} + tail "
+                f"{max(tail, KVARN_GROUP)} + {KVARN_GROUP}); raise it or "
+                "lower kv_tail_tokens")
+    if not stack:
+        return err("empty cache stack")
+
+    def drop(reason, kinds=None):
+        return _dropped(reason, k_bits, None, mode, stack, kinds, **extra)
+
+    if scheme_reason:
+        return drop(scheme_reason)
+    if head_dim is not None and int(head_dim) not in HEAD_DIMS:
+        return drop(f"head_dim {head_dim} (kvarn supports "
+                    f"{'/'.join(map(str, HEAD_DIMS))})")
+
+    ensure_registered()
+    types = _cache_kind_types()
+    kinds = [_classify(c, types) for c in stack]
+
+    if mtp and mode == "batched":
+        return drop(
+            "MTP batch rollback cannot trim packed KV; fp16 when batched",
+            kinds)
+
+    n = len(kinds)
+    owns = [can_quantize_kv and _kvarn_owns(stack[i], kinds[i],
+                                            rotating_window)
+            for i in range(n)]
+    # kvarn packs records, not pool storage; a pool arms only when the
+    # requested width is also a valid affine width.
+    pool_bits = k_bits if k_bits in VALID_BITS else None
+    if not any(owns) and not (pool_bits and "pool" in kinds):
+        return drop(
+            no_kv_reason if (not can_quantize_kv and no_kv_reason)
+            else "cache stack has no kvarn-convertible layers", kinds)
+
+    from mlx_vlm.models.cache import should_quantize_kv_layer
+
+    record = kvarn_bytes_per_element(k_bits, v_bits)
+    regions = ((kvarn_fixed_tokens(tail), FP16_BPE),)
+    per = []
+    for i, kind in enumerate(kinds):
+        pools = (sum(1 for _ in _quantizable_pools(stack[i]))
+                 if pool_bits else 0)
+        if owns[i] and should_quantize_kv_layer(i, n):
+            # A converted window is a kvarn record like any other; the
+            # summary counts it as quantized, not as held fp16.
+            per.append(KvLayerPlan("kv", True, record, pools, regions))
+        elif kind == "pool":
+            per.append(KvLayerPlan("pool", False,
+                                   packed_bytes_per_element(k_bits, group)
+                                   if pool_bits else FP16_BPE, pools))
+        else:
+            per.append(KvLayerPlan(kind, False, FP16_BPE, pools))
+
+    hetero = any(not p.quantize for p in per)
+    honored = mode == "single" or not quantized_kv_start
+    return KvQuantPolicy("partial" if hetero else "full", None, k_bits,
+                         None, mode, tuple(per),
+                         quantized_kv_start=int(quantized_kv_start or 0),
+                         start_honored=honored, pool_bits=pool_bits,
+                         **extra)
 
 
 def kv_line(model_id, policy: KvQuantPolicy) -> str:
     """The canonical engagement line, identical across serve, run, chat.
     ``model_id`` may be None on single-model CLI paths."""
     head = f"[kv] {model_id}: " if model_id else "[kv] "
-    head += f"kv_bits={policy.bits}"
-    if policy.group_size:
-        head += f" group={policy.group_size}"
-    return f"{head} -> {policy.summary()}"
+    return f"{head}{policy.width_label} -> {policy.summary()}"
 
 
 _HELD_CLASSES: dict = {}
@@ -313,19 +508,39 @@ def _arm_pools(c, bits, group) -> int:
     return n
 
 
-def quantize_kv_members(c, bits, group):
-    """Convert the growing KV caches under c, descending into cache
-    lists. Returns (cache, n). Window, state, and opt-out members stay
-    fp16."""
+def _convert_leaf(c, kind, policy: KvQuantPolicy):
+    if policy.scheme != "kvarn":
+        return c.to_quantized(group_size=policy.group_size,
+                              bits=policy.bits)
+    from gmlx.cache.kvarn_cache import KVarNKVCache, KVarNRotatingKVCache
+
+    v = policy.bits if policy.value_bits is None else policy.value_bits
+    cls = KVarNRotatingKVCache if kind == "window" else KVarNKVCache
+    return cls.from_cache(c, k_bits=policy.bits, v_bits=v,
+                          tail_tokens=policy.tail_tokens or 0)
+
+
+def quantize_kv_members(c, policy: KvQuantPolicy):
+    """Convert the growing KV caches under c per the policy's scheme,
+    descending into cache lists. Returns (cache, n). State and opt-out
+    members stay fp16, and so do windows the scheme does not own."""
     types = _cache_kind_types()
-    if _classify(c, types) != "kv":
+    kind = _classify(c, types)
+    if kind not in ("kv", "window"):
         return c, 0
     inner = getattr(c, "caches", None)
     if inner is None:
-        return c.to_quantized(group_size=group, bits=bits), 1
+        if getattr(c, "kv_quant_scheme", None) is not None:
+            return c, 0        # already converted
+        if policy.scheme == "kvarn":
+            if not _kvarn_owns(c, kind, policy.rotating_window):
+                return c, 0
+        elif kind != "kv":
+            return c, 0
+        return _convert_leaf(c, kind, policy), 1
     subs, n = [], 0
     for s in inner:
-        sub, k = quantize_kv_members(s, bits, group)
+        sub, k = quantize_kv_members(s, policy)
         subs.append(sub)
         n += k
     c.caches = tuple(subs)
@@ -339,12 +554,16 @@ def arm_stack(stack, policy: KvQuantPolicy, hold=True) -> int:
     layer, not only pool-kind ones: a kv member rules a mixed list, so
     its pools would otherwise stay fp16. hold=False arms pools only.
     Holds stay top-level: converters iterate only the top of the
-    stack."""
+    stack. Under a non-affine scheme nothing duck-types to_quantized, so
+    holds are skipped: rebinding the class there would only hide the
+    layer from the scheme's own converter."""
     if policy.verdict not in ("full", "partial"):
         return 0
     armed = 0
     for i, plan in enumerate(policy.per_layer):
-        armed += _arm_pools(stack[i], policy.bits, policy.group_size)
-        if hold and not plan.quantize:
+        if policy.pool_bits:
+            armed += _arm_pools(stack[i], policy.pool_bits,
+                                policy.group_size or 64)
+        if hold and policy.scheme == "uniform" and not plan.quantize:
             stack[i] = hold_fp16(stack[i])
     return armed

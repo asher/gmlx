@@ -9,7 +9,8 @@ import pytest
 
 import mlx.core as mx
 
-from gmlx.gen.generation import _kvarn_widths, kvarn_unsupported, setup_kvarn_cache
+from gmlx.cache.kvarn_cache import kvarn_unsupported, kvarn_widths
+from gmlx.gen.generation import setup_kvarn_cache
 
 _NEEDS_GPU = pytest.mark.skipif(
     mx.default_device() != mx.gpu,
@@ -81,12 +82,12 @@ def test_config_keys_registered():
 
 def test_kvarn_widths(monkeypatch):
     monkeypatch.delenv("GMLX_KVARN_BITS", raising=False)
-    assert _kvarn_widths(None) == (6, 6)
-    assert _kvarn_widths(4) == (4, 4)
+    assert kvarn_widths(None) == (6, 6)
+    assert kvarn_widths(4) == (4, 4)
     monkeypatch.setenv("GMLX_KVARN_BITS", "k6v5")
-    assert _kvarn_widths(None) == (6, 5)
+    assert kvarn_widths(None) == (6, 5)
     monkeypatch.setenv("GMLX_KVARN_BITS", "bogus")
-    assert _kvarn_widths(8) == (8, 8)
+    assert kvarn_widths(8) == (8, 8)
 
 
 # -- eligibility -------------------------------------------------------------
@@ -143,7 +144,7 @@ def test_setup_rejects_bad_bits_and_tail(_ops_ok, monkeypatch, capsys):
     assert setup_kvarn_cache(_FakeModel(), 7, 1024, None) is None
     assert "kvarn bits" in capsys.readouterr().err
     assert setup_kvarn_cache(_FakeModel(), 6, 100, None) is None
-    assert "kv-tail-tokens" in capsys.readouterr().err
+    assert "kv_tail_tokens" in capsys.readouterr().err
 
 
 @_NEEDS_GPU
@@ -153,7 +154,7 @@ def test_setup_builds_cache_and_banner(monkeypatch, capsys):
     assert pc is not None and len(pc) == 2
     assert all(type(c).__name__ == "KVarNKVCache" for c in pc)
     err = capsys.readouterr().err
-    assert "[kv] kvarn6 KV cache (2/2 layers; sink+tail fp16)" in err
+    assert "[kv] kvarn6 tail=1024 -> quantized 2/2 attn layers" in err
 
 
 @_NEEDS_GPU
@@ -170,7 +171,7 @@ def test_setup_declines_rotating_stack(monkeypatch, capsys):
 
     model.make_cache = rotating_cache
     assert setup_kvarn_cache(model, None, 1024, 64) is None
-    assert "no plain KV-cache layers" in capsys.readouterr().err
+    assert "no kvarn-convertible layers" in capsys.readouterr().err
 
 
 # -- chat n-aware trim -------------------------------------------------------

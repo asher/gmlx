@@ -77,7 +77,8 @@ def test_to_json_shapes(monkeypatch):
     monkeypatch.setenv("KV_BITS", "8")
     monkeypatch.delenv("MLX_VLM_GGUF_SPECULATIVE", raising=False)
     j = skv.resolve_for_load(_rg(), "m").to_json()
-    assert j == {"bits": 8, "group_size": 64, "layers_quantized": 3,
+    assert j == {"scheme": "uniform", "bits": 8, "group_size": 64,
+                 "layers_quantized": 3,
                  "layers_fp16": 1, "verdict": "full",
                  "verdict_batched": "full"}
     monkeypatch.setenv("MLX_VLM_GGUF_SPECULATIVE", "1")

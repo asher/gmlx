@@ -340,6 +340,14 @@ def _live_kv_quant_config(model=None):
     batched = getattr(stamped, "batched", None)
     if batched is None or batched.verdict not in ("full", "partial"):
         return None
+    if getattr(batched, "scheme", "uniform") != "uniform":
+        # Only affine has a merge config upstream understands. kvarn
+        # serves warm prefixes from the fp16 exact tier, so a float merge
+        # is the correct one -- but say so rather than describing kvarn
+        # records with an affine config.
+        _log.debug("warm merge stays float: %s KV has no affine config",
+                   batched.scheme)
+        return None
     bits = float(batched.bits)
     group = int(batched.group_size or 64)
     try:
@@ -1953,6 +1961,27 @@ def dequantize_lift_cache(c):
     return lifted
 
 
+def kvarn_lift_cache(c):
+    """Recover a B=1 KVarNKVCache into a one-row BatchKVCache.
+
+    The kvarn twin of dequantize_lift_cache: KVarNKVCache has no merge,
+    BatchKVarNKVCache.merge would hand the MTP path a packed batch cache
+    the batched arm forbids, and materialize() returns ROTATED-domain
+    K/V, which stock SDPA would attend with an un-rotated query -- no
+    crash, just wrong logits on every preempted row. _raw_single is the
+    original-domain accessor."""
+    from mlx_vlm.models.cache import BatchKVCache
+
+    lifted = BatchKVCache([0])
+    if c.offset:
+        keys, values = c._raw_single()
+        lifted.update_and_fetch(keys, values)
+    stamp = getattr(c, "_gmlx_cascade", None)
+    if stamp is not None:
+        lifted._gmlx_cascade = stamp
+    return lifted
+
+
 def install_continuous_batch_admission() -> None:
     """Let new requests prefill and inject during speculative decode.
 
@@ -2207,6 +2236,8 @@ def install_continuous_batch_admission() -> None:
 
         if isinstance(c, cache_types("QuantizedKVCache")):
             return dequantize_lift_cache(c)
+        if getattr(c, "kv_quant_scheme", None) == "kvarn":
+            return kvarn_lift_cache(c)
         lifted = type(c).merge([c])
         stamp = getattr(c, "_gmlx_cascade", None)
         if stamp is not None:
@@ -2513,15 +2544,17 @@ _SPEC_KV_QUANT_WIDTHS = (2, 3, 4, 6, 8)  # mx.quantize affine widths
 
 
 def _spec_kv_quant_params():
-    """("affine", bits, group) or ("kvarn", kv_bits, tail) when serve's KV
-    env asks for a scheme the trimmable B=1 single-stream cache can honor,
-    else None. Fractional widths and turboquant have no such cache; kvarn
+    """resolve_kv_quant_policy kwargs for the KV quantization serve's env
+    asks the trimmable B=1 single-stream cache to honor, else None.
+    Fractional widths and unknown schemes have no such cache; kvarn
     engages on the scheme alone (widths default like the CLI's)."""
     if os.environ.get("GMLX_SPEC_KV_QUANT", "1") == "0":
         return None
     scheme = os.environ.get("KV_QUANT_SCHEME", "uniform")
     raw = os.environ.get("KV_BITS", "")
     if scheme == "kvarn":
+        from gmlx.cache.kvarn_cache import kvarn_widths
+
         try:
             bits = int(raw) if raw else None
             tail = int(os.environ.get("KV_TAIL_TOKENS", "") or 1024)
@@ -2531,7 +2564,9 @@ def _spec_kv_quant_params():
                 "B=1 MTP target KV stays fp16"
             )
             return None
-        return "kvarn", bits, tail
+        k_bits, v_bits = kvarn_widths(bits)
+        return dict(scheme="kvarn", kv_bits=k_bits, value_bits=v_bits,
+                    tail_tokens=tail)
     if not raw:
         return None
     try:
@@ -2552,7 +2587,8 @@ def _spec_kv_quant_params():
             scheme,
         )
         return None
-    return "affine", int(bits), int(os.environ.get("KV_GROUP_SIZE", "64"))
+    return dict(scheme="uniform", kv_bits=int(bits),
+                kv_group_size=int(os.environ.get("KV_GROUP_SIZE", "64")))
 
 
 def _mtp_reads_kv_back(lm) -> bool:
@@ -2597,7 +2633,7 @@ def install_spec_kv_quant() -> None:
     params = _spec_kv_quant_params()
     if params is None:
         return
-    kind = params[0]
+    kind = params["scheme"]
 
     from gmlx.cache.compat import cache_types
 
@@ -2615,45 +2651,18 @@ def install_spec_kv_quant() -> None:
                 "KV_QUANT_SCHEME=kvarn dropped on the B=1 MTP path: %s", reason
             )
 
-    def _kvarn_spec_convert(lm, caches):
-        from gmlx.gen.generation import _kvarn_widths, kvarn_unsupported
-        from gmlx.cache.kvarn_cache import KVARN_BITS, convert_prompt_cache
-        from gmlx.cache.kvarn_sdpa import install_kvarn_sdpa
+    def _kvarn_spec_reason(lm):
+        """The kvarn declines the shared policy cannot see: the target's
+        own verify contract."""
+        from gmlx.cache.kvarn_cache import kvarn_unsupported
 
-        _, env_bits, tail = params
         reason = kvarn_unsupported(lm)
-        k_bits, v_bits = _kvarn_widths(env_bits)
-        if reason is None and not (k_bits in KVARN_BITS and v_bits in KVARN_BITS):
-            reason = f"kvarn bits must be one of {KVARN_BITS}"
-        if reason is None and (tail < 0 or tail % 128):
-            reason = "KV_TAIL_TOKENS must be a multiple of 128 (0 disables)"
         if reason is None and _mtp_reads_kv_back(lm):
             reason = (
                 "the target's verify path reads shared K/V back "
                 "from the cache (kvarn records are not raw K/V)"
             )
-        if reason is not None:
-            _decline_kvarn(reason)
-            return caches
-        n = convert_prompt_cache(caches, k_bits=k_bits, v_bits=v_bits, tail_tokens=tail)
-        if not n:
-            _decline_kvarn("no plain KV-cache layers in this arch's stack")
-            return caches
-        install_kvarn_sdpa()
-        from gmlx.gen.generation import harden_mtp_rollback
-
-        harden_mtp_rollback(lm)
-        if not _noted[0]:
-            _noted[0] = True
-            width = (
-                f"kvarn{k_bits}" if k_bits == v_bits else f"kvarn k{k_bits} v{v_bits}"
-            )
-            regions = "sink+tail fp16" if tail else "sink fp16, tail off"
-            print(
-                f"[kv] MTP spec path: {n}-layer target KV {width} ({regions})",
-                flush=True,
-            )
-        return caches
+        return reason
 
     def _quantizing_spec_cache(lm, *, draft_kind, batch_size, left_padding, make_cache):
         from gmlx.cache.kvarn_serve import spec_cache_build
@@ -2718,6 +2727,7 @@ def install_spec_kv_quant() -> None:
                     "GMLX_QWEN_OWNED=0 stock fallback cannot verify on a "
                     "quantized KV cache")
             return caches
+        scheme_reason = None
         if kind == "kvarn":
             if any(type(c) in cache_types("BatchKVCache") for c in caches):
                 _decline_kvarn(
@@ -2728,12 +2738,17 @@ def install_spec_kv_quant() -> None:
             rotating = (cache_types("RotatingKVCache")
                         + cache_types("BatchRotatingKVCache"))
             if any(isinstance(c, rotating) for c in caches):
-                # Main's per-layer policy replaced the blanket window
-                # decline for affine; kvarn keeps it until the fold.
+                # The policy would keep the window layers fp16 and convert
+                # the rest, but a mixed kvarn/rotating stack has never been
+                # validated through MTP rollback, and no eligible SWA+MTP
+                # checkpoint exists to validate it on. Declining is the
+                # certified behaviour.
                 _decline_kvarn("sliding-window cache stack cannot quantize")
                 return caches
-            return _kvarn_spec_convert(lm, caches)
-        bits, group = params[1], params[2]
+            scheme_reason = _kvarn_spec_reason(lm)
+            if scheme_reason is not None:
+                _decline_kvarn(scheme_reason)
+                return caches
         # The shared policy owns layer selection: nested KV members,
         # pools, windows, and opt-outs at any depth.
         from gmlx.cache.kv_policy import (arm_stack, kv_line,
@@ -2741,9 +2756,11 @@ def install_spec_kv_quant() -> None:
                                           resolve_kv_quant_policy)
 
         policy = resolve_kv_quant_policy(
-            caches, kv_bits=bits, kv_group_size=group, mode="single")
+            caches, mode="single", scheme_reason=scheme_reason, **params)
         if policy.verdict not in ("full", "partial"):
-            if not _warned_dropped[0]:
+            if kind == "kvarn":
+                _decline_kvarn(policy.reason)
+            elif not _warned_dropped[0]:
                 _warned_dropped[0] = True
                 _log.warning("%s", kv_line("MTP spec path", policy))
             return caches
@@ -2753,9 +2770,17 @@ def install_spec_kv_quant() -> None:
         n = 0
         for i, plan in enumerate(policy.per_layer):
             if plan.quantize:
-                caches[i], k = quantize_kv_members(
-                    caches[i], policy.bits, policy.group_size)
+                caches[i], k = quantize_kv_members(caches[i], policy)
                 n += k
+        if kind == "kvarn":
+            if not n:
+                _decline_kvarn("no plain KV-cache layers in this arch's stack")
+                return caches
+            from gmlx.cache.kvarn_sdpa import install_kvarn_sdpa
+            from gmlx.gen.generation import harden_mtp_rollback
+
+            install_kvarn_sdpa()
+            harden_mtp_rollback(lm)
         if (n or armed) and not _noted[0]:
             _noted[0] = True
             print(kv_line("MTP spec path", policy), flush=True)

@@ -67,7 +67,7 @@ def spec_cache_build():
 
 
 def _serve_widths_and_tail():
-    from gmlx.gen.generation import _kvarn_widths
+    from gmlx.cache.kvarn_cache import kvarn_widths
 
     raw = os.environ.get("KV_BITS", "")
     try:
@@ -78,7 +78,7 @@ def _serve_widths_and_tail():
         tail = int(os.environ.get("KV_TAIL_TOKENS", "") or 1024)
     except ValueError:
         tail = 1024
-    k_bits, v_bits = _kvarn_widths(bits)
+    k_bits, v_bits = kvarn_widths(bits)
     return k_bits, v_bits, tail
 
 
@@ -129,7 +129,7 @@ def _ppb_rebuild_declined(batch, kwargs):
         return "populated"
     if int(getattr(batch, "_processed_prompt_columns", 0) or 0):
         return "trimmed"
-    from gmlx.gen.generation import kvarn_unsupported
+    from gmlx.cache.kvarn_cache import kvarn_unsupported
     from .kvarn_cache import KVARN_BITS
 
     reason = kvarn_unsupported(batch.model)
@@ -238,7 +238,7 @@ def _install_make_cache(_ar, _gen):
                 **kwargs,
             )
         from .compat import cache_types
-        from gmlx.gen.generation import kvarn_unsupported
+        from gmlx.cache.kvarn_cache import kvarn_unsupported
         from .kvarn_cache import (
             KVARN_BITS,
             BatchKVarNKVCache,

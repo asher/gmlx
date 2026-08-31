@@ -54,6 +54,91 @@ _META_ARITY_MSG = (
 )
 
 
+def kvarn_head_dims(model):
+    """Candidate attention head dims, {-1} for MLA latents, empty when
+    unknown. Mixed-dim archs (gemma-4: sliding head_dim + global
+    global_head_dim) contribute every dim; any supported one suffices since
+    conversion is per-layer and update_and_fetch validates per instance."""
+    for holder in (model, getattr(model, "language_model", None)):
+        args = getattr(holder, "args", None) or getattr(holder, "config", None)
+        if args is None:
+            continue
+        if getattr(args, "kv_lora_rank", None):
+            return {-1}
+        dims = set()
+        for key in ("head_dim", "global_head_dim"):
+            hd = getattr(args, key, None)
+            if hd:
+                dims.add(int(hd))
+        if dims:
+            return dims
+        hs = getattr(args, "hidden_size", None)
+        nh = getattr(args, "num_attention_heads", None)
+        if hs and nh:
+            return {int(hs) // int(nh)}
+    return set()
+
+
+def kvarn_unsupported(model) -> str | None:
+    """Reason string when the kvarn scheme cannot serve this model, else
+    None. Coverage is partial by design (sliding windows and recurrent
+    layers stay fp16); the reason fires only when zero layers are
+    eligible. Model shape only -- the policy resolver owns the width,
+    tail and window checks."""
+    from gmlx.envflags import env_bool
+
+    if not env_bool("GMLX_KVARN", True):
+        return "disabled (GMLX_KVARN=0)"
+    from gmlx.cache.kvarn_sdpa import kvarn_ops_missing
+
+    reason = kvarn_ops_missing()
+    if reason:
+        return reason
+    dims = kvarn_head_dims(model)
+    if dims == {-1}:
+        return "MLA latent KV cache (K and V share storage)"
+    if not dims & set(HEAD_DIMS):
+        shown = "/".join(str(d) for d in sorted(dims)) or "unknown"
+        return f"head_dim {shown} (kvarn supports 128/256/512)"
+    from gmlx.models.gemma4.owned import is_owned_language_model
+
+    if is_owned_language_model(model):
+        # The owned tree's attention calls an import-time sdpa alias the
+        # kvarn sweep never rebinds; unreachable today (the shared-KV
+        # drafter gate declines first), declined here so a future drafter
+        # change fails informatively at setup, not mid-forward.
+        return "gemma-4 owned (MTP) tree"
+    return None
+
+
+def kvarn_widths(kv_bits):
+    """K/V bit widths for kvarn: kv_bits (default 6) for both sides, or a
+    GMLX_KVARN_BITS=k6v5 style pair."""
+    import os
+    import re
+
+    env = os.environ.get("GMLX_KVARN_BITS", "").strip().lower()
+    if env:
+        m = re.fullmatch(r"k(\d+)v(\d+)", env)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+        print(
+            f"warning: GMLX_KVARN_BITS={env!r} is not of the form k6v5; ignored",
+            file=sys.stderr,
+        )
+    bits = int(kv_bits) if kv_bits is not None else 6
+    return bits, bits
+
+
+def kvarn_rotating_window(model, max_kv_size):
+    """The rotating window kvarn must honor, or None. --max-kv-size only
+    manufactures RotatingKVCache stacks for models without their own
+    make_cache; models with one ignore the flag."""
+    if max_kv_size is None or callable(getattr(model, "make_cache", None)):
+        return None
+    return int(max_kv_size)
+
+
 def _quantize_head(x, bits, side):
     """Quantize rotated [B, H, T, D] groups into the flat slice-minor wire:
     codes [B, H, G, (D/128) * 512 * bits], axes [B, H, G, 3 * (D/128), 128]."""

@@ -444,7 +444,7 @@ def test_setup_converts_rotating_stack(_ops_ok, capsys):
     assert all(type(c).__name__ == "KVarNRotatingKVCache" for c in pc)
     assert all(c.max_size == 4096 for c in pc)
     err = capsys.readouterr().err
-    assert "[kv] kvarn6 KV cache (2/2 layers; sink+tail fp16; window ~4096)" in err
+    assert "[kv] kvarn6 tail=1024 window=4096 -> quantized 2/2 attn layers" in err
 
 
 def test_setup_declines_below_floor(_ops_ok, capsys):
@@ -452,7 +452,7 @@ def test_setup_declines_below_floor(_ops_ok, capsys):
 
     assert setup_kvarn_cache(_MakeCacheLess(), None, 1024, 512) is None
     err = capsys.readouterr().err
-    assert "window floor" in err and "--kv-tail-tokens" in err
+    assert "window floor" in err and "kv_tail_tokens" in err
 
 
 @_NEEDS_GPU

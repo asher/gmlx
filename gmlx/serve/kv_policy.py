@@ -36,6 +36,7 @@ class ServeKvPolicy:
         MTP models quantize at B=1 and run fp16 when batched."""
         s, b = self.single, self.batched
         out = {
+            "scheme": s.scheme,
             "bits": s.bits,
             "group_size": s.group_size,
             "layers_quantized": s.n_quant,
@@ -43,6 +44,12 @@ class ServeKvPolicy:
             "verdict": s.verdict,
             "verdict_batched": b.verdict,
         }
+        if s.scheme != "uniform":
+            # bits is the key width under a split-width scheme, so the
+            # value width is always reported beside it.
+            out["value_bits"] = (s.bits if s.value_bits is None
+                                 else s.value_bits)
+            out["tail_tokens"] = s.tail_tokens
         if s.reason:
             out["reason"] = s.reason
         if b.verdict != s.verdict and b.reason:
@@ -71,6 +78,19 @@ def _config_head_dim(model):
         if heads and hidden:
             head_dim = hidden // heads
     return head_dim if isinstance(head_dim, int) and head_dim > 0 else None
+
+
+def _serve_tail_tokens(rg) -> int:
+    """The kvarn precision tail this model was loaded with. The per-model
+    load window sets KV_TAIL_TOKENS; the rg attribute wins when upstream
+    carries one."""
+    val = getattr(rg, "kv_tail_tokens", None)
+    if val is None:
+        val = os.environ.get("KV_TAIL_TOKENS")
+    try:
+        return 1024 if val in (None, "") else int(val)
+    except (TypeError, ValueError):
+        return 1024
 
 
 def resolve_for_load(rg, model_id: str):
@@ -115,16 +135,28 @@ def resolve_for_load(rg, model_id: str):
     mtp = bool(getattr(rg, "draft_model_path", None)
                or os.environ.get("MLX_VLM_GGUF_SPECULATIVE") == "1")
     stack = _probe_stack(rg.model)
+    scheme = (getattr(rg, "kv_quant_scheme", None) or "uniform").lower()
     kw = dict(
         kv_bits=bits,
         kv_group_size=getattr(rg, "kv_group_size", 64),
         quantized_kv_start=getattr(rg, "quantized_kv_start", 0),
-        scheme=getattr(rg, "kv_quant_scheme", None),
+        scheme=scheme,
         key_bits=getattr(rg, "kv_key_bits", None),
         value_bits=getattr(rg, "kv_value_bits", None),
         mtp=mtp,
         head_dim=_config_head_dim(rg.model),
     )
+    if scheme == "kvarn":
+        # kvarn owns its own widths (bits is the key width, and
+        # GMLX_KVARN_BITS may split them) and declines by model shape.
+        # Serve never builds a rotating stack: max_kv_size is not a
+        # serve key, so rotating_window stays None here.
+        from gmlx.cache.kvarn_cache import kvarn_unsupported, kvarn_widths
+
+        k_bits, v_bits = kvarn_widths(int(bits) if bits else None)
+        kw.update(kv_bits=k_bits, value_bits=v_bits, key_bits=None,
+                  tail_tokens=_serve_tail_tokens(rg),
+                  scheme_reason=kvarn_unsupported(rg.model))
     pol = ServeKvPolicy(
         resolve_kv_quant_policy(stack, mode="single", **kw),
         resolve_kv_quant_policy(_probe_stack(rg.model), mode="batched",

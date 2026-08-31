@@ -2865,7 +2865,7 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
 
     mtp_kvarn_cfg = None
     if (getattr(args, "kv_quant_scheme", None) or "uniform") == "kvarn":
-        from gmlx.gen.generation import _kvarn_widths, setup_kvarn_mtp_cache
+        from gmlx.gen.generation import setup_kvarn_mtp_cache
 
         tail = int(getattr(args, "kv_tail_tokens", 1024) or 0)
         block = args.draft_block_size or int(getattr(b.drafter.config, "block_size", 3))
@@ -2878,8 +2878,10 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
             out=sys.stdout,
         )
         if probe is not None:
-            kb, vb = _kvarn_widths(kv_kwargs.get("kv_bits"))
-            mtp_kvarn_cfg = {"k_bits": kb, "v_bits": vb, "tail_tokens": tail}
+            mtp_kvarn_cfg = {
+                "kv_bits": kv_kwargs.get("kv_bits"),
+                "kv_tail_tokens": tail,
+            }
         # kvarn owns the width request; a declined scheme means fp16, not
         # a silent fall-through to the pooled packing.
         kv_kwargs["kv_bits"] = None
@@ -2895,6 +2897,7 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
             probe, kv_bits=kv_kwargs["kv_bits"],
             kv_group_size=kv_kwargs.get("kv_group_size", 64),
             mtp=True, can_quantize_kv=False,
+            scheme=getattr(args, "kv_quant_scheme", None),
             no_kv_reason="MTP rounds have no KV quantization hook")
         print(kv_line(None, policy), file=sys.stderr)
         if policy.verdict == "error":
@@ -2912,9 +2915,9 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
 
             arm_stack(c, mtp_kv_policy, hold=False)
         if mtp_kvarn_cfg is not None:
-            from gmlx.cache.kvarn_cache import convert_prompt_cache
+            from gmlx.gen.generation import convert_kvarn_cache
 
-            convert_prompt_cache(c, **mtp_kvarn_cfg)
+            convert_kvarn_cache(b.model, c, **mtp_kvarn_cfg)
         return c
 
     b.new_text_cache = _new_text_cache
@@ -2955,9 +2958,9 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
 
             arm_stack(c, kv_policy)
         if kvarn_cfg is not None:
-            from gmlx.cache.kvarn_cache import convert_prompt_cache
+            from gmlx.gen.generation import convert_kvarn_cache
 
-            convert_prompt_cache(c, **kvarn_cfg)
+            convert_kvarn_cache(b.model, c, **kvarn_cfg)
         return c
 
     b.new_text_cache = _new_text_cache
@@ -2990,8 +2993,8 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
             kv_kwargs["prefill_step_size"] = step
 
         if (getattr(args, "kv_quant_scheme", None) or "uniform") == "kvarn":
-            from gmlx.gen.generation import (_kvarn_rotating_window,
-                                             _kvarn_widths, setup_kvarn_cache)
+            from gmlx.cache.kvarn_cache import kvarn_rotating_window
+            from gmlx.gen.generation import setup_kvarn_cache
 
             tail = int(getattr(args, "kv_tail_tokens", 1024) or 0)
             probe = setup_kvarn_cache(
@@ -3002,12 +3005,10 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
                 out=sys.stdout,
             )
             if probe is not None:
-                kb, vb = _kvarn_widths(kv_kwargs.get("kv_bits"))
                 kvarn_cfg = {
-                    "k_bits": kb,
-                    "v_bits": vb,
-                    "tail_tokens": tail,
-                    "rotating_window": _kvarn_rotating_window(
+                    "kv_bits": kv_kwargs.get("kv_bits"),
+                    "kv_tail_tokens": tail,
+                    "rotating_window": kvarn_rotating_window(
                         b.model, args.max_kv_size
                     ),
                 }
@@ -3026,6 +3027,7 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
                 probe, kv_bits=kv_kwargs["kv_bits"],
                 kv_group_size=kv_kwargs.get("kv_group_size", 64),
                 quantized_kv_start=kv_kwargs.get("quantized_kv_start", 0),
+                scheme=getattr(args, "kv_quant_scheme", None),
                 max_kv_size=args.max_kv_size)
             print(kv_line(None, policy), file=sys.stderr)
             if policy.verdict == "error":

@@ -115,14 +115,16 @@ def _mk(lm=None, batch_size=1, make_cache=None):
 
 def test_params_kvarn_scheme_alone(restorable):
     restorable.setenv("KV_QUANT_SCHEME", "kvarn")
-    assert spec_engine._spec_kv_quant_params() == ("kvarn", None, 1024)
+    assert spec_engine._spec_kv_quant_params() == dict(
+        scheme="kvarn", kv_bits=6, value_bits=6, tail_tokens=1024)
 
 
 def test_params_kvarn_bits_and_tail(restorable):
     restorable.setenv("KV_QUANT_SCHEME", "kvarn")
     restorable.setenv("KV_BITS", "4")
     restorable.setenv("KV_TAIL_TOKENS", "256")
-    assert spec_engine._spec_kv_quant_params() == ("kvarn", 4, 256)
+    assert spec_engine._spec_kv_quant_params() == dict(
+        scheme="kvarn", kv_bits=4, value_bits=4, tail_tokens=256)
 
 
 def test_params_kvarn_malformed(restorable):
@@ -139,7 +141,8 @@ def test_params_kvarn_kill_switch(restorable):
 
 def test_params_affine_unchanged(restorable):
     restorable.setenv("KV_BITS", "8")
-    assert spec_engine._spec_kv_quant_params() == ("affine", 8, 64)
+    assert spec_engine._spec_kv_quant_params() == dict(
+        scheme="uniform", kv_bits=8, kv_group_size=64)
     restorable.setenv("KV_QUANT_SCHEME", "turboquant")
     assert spec_engine._spec_kv_quant_params() is None
 
@@ -152,8 +155,9 @@ def test_b1_mtp_kvarn_converts(restorable, _ops_ok, capsys):
     restorable.setenv("KV_QUANT_SCHEME", "kvarn")
     spec_engine.install_spec_kv_quant()
     caches = _mk()
+    # The shared carve-out holds the last layer of a deep stack fp16.
     assert type(caches[0]) is KVarNKVCache
-    assert type(caches[2]) is KVarNKVCache
+    assert type(caches[2]) is KVCache
     assert isinstance(caches[1], _SSMCache)
     assert caches[0].k_bits == 6 and caches[0].tail_cap == 1024
     assert not hasattr(caches[0], "bits")
@@ -185,7 +189,7 @@ def test_qwen35_arch_converts(restorable, _ops_ok):
     restorable.setenv("KV_QUANT_SCHEME", "kvarn")
     spec_engine.install_spec_kv_quant()
     caches = _mk(lm=_FakeLM(model_type="qwen3_5"))
-    assert sum(type(c) is KVarNKVCache for c in caches) == 2
+    assert sum(type(c) is KVarNKVCache for c in caches) == 1
     assert type(caches[1]) is _SSMCache
 
 
@@ -278,9 +282,9 @@ def test_mtp_setup_builds_and_warns_wide_block(_ops_ok, capsys):
 
     pc = setup_kvarn_mtp_cache(_FakeLM(), _Drafter(), None, 1024, 6)
     assert pc is not None
-    assert sum(type(c) is KVarNKVCache for c in pc) == 2
+    assert sum(type(c) is KVarNKVCache for c in pc) == 1
     err = capsys.readouterr().err
-    assert "[kv] kvarn6 KV cache" in err
+    assert "[kv] kvarn6 tail=1024 -> quantized 1/3 attn layers" in err
     assert "verify width 6 exceeds the fused kvarn route" in err
 
 

@@ -134,154 +134,88 @@ def _verbose_emitter(prompt, tokenizer, reasoning):
     return write, (lambda: None)
 
 
-def _kvarn_head_dims(model):
-    """Candidate attention head dims, {-1} for MLA latents, empty when
-    unknown. Mixed-dim archs (gemma-4: sliding head_dim + global
-    global_head_dim) contribute every dim; any supported one suffices since
-    conversion is per-layer and update_and_fetch validates per instance."""
-    for holder in (model, getattr(model, "language_model", None)):
-        args = getattr(holder, "args", None) or getattr(holder, "config", None)
-        if args is None:
-            continue
-        if getattr(args, "kv_lora_rank", None):
-            return {-1}
-        dims = set()
-        for key in ("head_dim", "global_head_dim"):
-            hd = getattr(args, key, None)
-            if hd:
-                dims.add(int(hd))
-        if dims:
-            return dims
-        hs = getattr(args, "hidden_size", None)
-        nh = getattr(args, "num_attention_heads", None)
-        if hs and nh:
-            return {int(hs) // int(nh)}
-    return set()
+def resolve_kvarn_policy(model, kv_bits, kv_tail_tokens, rotating_window,
+                         stack, *, mode="single", mtp=False):
+    """The kvarn policy for one built stack, with the model-shape decline
+    resolved. The single entry point CLI, chat and the MTP paths share."""
+    from gmlx.cache.kv_policy import resolve_kv_quant_policy
+    from gmlx.cache.kvarn_cache import kvarn_unsupported, kvarn_widths
+
+    k_bits, v_bits = kvarn_widths(kv_bits)
+    return resolve_kv_quant_policy(
+        stack,
+        kv_bits=k_bits,
+        value_bits=v_bits,
+        scheme="kvarn",
+        tail_tokens=int(kv_tail_tokens or 0),
+        rotating_window=rotating_window,
+        mode=mode,
+        mtp=mtp,
+        scheme_reason=kvarn_unsupported(model),
+    )
 
 
-def kvarn_unsupported(model) -> str | None:
-    """Reason string when --kv-quant-scheme kvarn cannot serve this model,
-    else None. Coverage is partial by design (sliding windows and recurrent
-    layers stay fp16); the reason fires only when zero layers are eligible."""
-    from gmlx.envflags import env_bool
+def apply_kvarn_policy(prompt_cache, policy) -> int:
+    """Convert in place the layers the policy takes. Returns the number of
+    layers converted."""
+    from gmlx.cache.kv_policy import arm_stack, quantize_kv_members
 
-    if not env_bool("GMLX_KVARN", True):
-        return "disabled (GMLX_KVARN=0)"
-    from gmlx.cache.kvarn_sdpa import kvarn_ops_missing
+    arm_stack(prompt_cache, policy, hold=False)
+    n = 0
+    for i, plan in enumerate(policy.per_layer):
+        if plan.quantize:
+            prompt_cache[i], k = quantize_kv_members(prompt_cache[i], policy)
+            n += k
+    if n:
+        from gmlx.cache.kvarn_sdpa import install_kvarn_sdpa
 
-    reason = kvarn_ops_missing()
-    if reason:
-        return reason
-    dims = _kvarn_head_dims(model)
-    if dims == {-1}:
-        return "MLA latent KV cache (K and V share storage)"
-    from gmlx.cache.kvarn_cache import HEAD_DIMS
-
-    if not dims & set(HEAD_DIMS):
-        shown = "/".join(str(d) for d in sorted(dims)) or "unknown"
-        return f"head_dim {shown} (kvarn supports 128/256/512)"
-    from gmlx.models.gemma4.owned import is_owned_language_model
-
-    if is_owned_language_model(model):
-        # The owned tree's attention calls an import-time sdpa alias the
-        # kvarn sweep never rebinds; unreachable today (the shared-KV
-        # drafter gate declines first), declined here so a future drafter
-        # change fails informatively at setup, not mid-forward.
-        return "gemma-4 owned (MTP) tree"
-    return None
+        install_kvarn_sdpa()
+    return n
 
 
-def _kvarn_widths(kv_bits):
-    """K/V bit widths for kvarn: --kv-bits (default 6) for both sides, or
-    a GMLX_KVARN_BITS=k6v5 style pair."""
-    import re
-
-    env = os.environ.get("GMLX_KVARN_BITS", "").strip().lower()
-    if env:
-        m = re.fullmatch(r"k(\d+)v(\d+)", env)
-        if m:
-            return int(m.group(1)), int(m.group(2))
-        print(
-            f"warning: GMLX_KVARN_BITS={env!r} is not of the form k6v5; ignored",
-            file=sys.stderr,
-        )
-    bits = int(kv_bits) if kv_bits is not None else 6
-    return bits, bits
-
-
-def _kvarn_rotating_window(model, max_kv_size):
-    """The rotating window kvarn must honor, or None. --max-kv-size only
-    manufactures RotatingKVCache stacks for models without their own
-    make_cache; models with one ignore the flag."""
-    if max_kv_size is None or callable(getattr(model, "make_cache", None)):
-        return None
-    return int(max_kv_size)
+def convert_kvarn_cache(model, prompt_cache, kv_bits, kv_tail_tokens,
+                        rotating_window=None):
+    """Resolve the kvarn policy for one freshly built stack and apply it.
+    Returns the policy; its verdict tells the caller what happened. The
+    chat REPL rebuilds a cache per turn and re-resolves here, so every
+    turn gets the same layer selection as the load-time banner."""
+    policy = resolve_kvarn_policy(
+        model, kv_bits, kv_tail_tokens, rotating_window, prompt_cache
+    )
+    if policy.verdict in ("full", "partial"):
+        apply_kvarn_policy(prompt_cache, policy)
+    return policy
 
 
 def setup_kvarn_cache(
     model, kv_bits, kv_tail_tokens, max_kv_size, out=None, make_cache=None
 ):
-    """Build the model's prompt cache with kvarn KV on every eligible layer,
-    printing the [kv] banner. Returns the cache list, or None (with a
-    warning) when the scheme cannot apply. ``make_cache`` overrides the
-    stock cache builder (the MTP paths build via mlx-vlm's)."""
-    from gmlx.cache.kvarn_cache import KVARN_BITS
+    """Build the model's prompt cache with kvarn KV on every layer the
+    policy takes, printing the [kv] banner. Returns the cache list, or
+    None (with a warning) when the scheme cannot apply. ``make_cache``
+    overrides the stock cache builder (the MTP paths build via
+    mlx-vlm's)."""
+    from gmlx.cache.kv_policy import kv_line
+    from gmlx.cache.kvarn_cache import kvarn_rotating_window
 
     out = out if out is not None else sys.stderr
-    k_bits, v_bits = _kvarn_widths(kv_bits)
-    reason = kvarn_unsupported(model)
-    if reason is None and not (k_bits in KVARN_BITS and v_bits in KVARN_BITS):
-        reason = f"kvarn bits must be one of {KVARN_BITS}"
-    tail = int(kv_tail_tokens or 0)
-    if reason is None and (tail < 0 or tail % 128):
-        reason = "--kv-tail-tokens must be a multiple of 128 (0 disables)"
     window = (
-        None if make_cache is not None else _kvarn_rotating_window(model, max_kv_size)
+        None if make_cache is not None else kvarn_rotating_window(model, max_kv_size)
     )
-    if reason is None and window is not None:
-        floor = 128 + max(tail, 128) + 128
-        if window < floor:
-            reason = (
-                f"--max-kv-size {window} is below the kvarn window floor "
-                f"({floor} = sink 128 + tail {max(tail, 128)} + 128); raise "
-                "it or lower --kv-tail-tokens"
-            )
-    prompt_cache = None
-    if reason is None:
+    if make_cache is not None:
+        prompt_cache = make_cache()
+    else:
         from mlx_lm.models.cache import make_prompt_cache as _mpc
 
-        from gmlx.cache.kvarn_cache import convert_prompt_cache
-        from gmlx.cache.kvarn_sdpa import install_kvarn_sdpa
-
-        if make_cache is not None:
-            prompt_cache = make_cache()
-        else:
-            prompt_cache = _mpc(model, max_kv_size=max_kv_size)
-        n = convert_prompt_cache(
-            prompt_cache,
-            k_bits=k_bits,
-            v_bits=v_bits,
-            tail_tokens=tail,
-            rotating_window=window,
-        )
-        if n:
-            install_kvarn_sdpa()
-            width = (
-                f"kvarn{k_bits}" if k_bits == v_bits else f"kvarn k{k_bits} v{v_bits}"
-            )
-            regions = "sink+tail fp16" if tail else "sink fp16, tail off"
-            if window is not None:
-                # Resident window: sink + g_max whole groups.
-                regions += f"; window ~{128 + (window - 128) // 128 * 128}"
-            print(
-                f"[kv] {width} KV cache ({n}/{len(prompt_cache)} layers; {regions})",
-                file=out,
-            )
-        else:
-            prompt_cache = None
-            reason = "no plain KV-cache layers in this arch's stack"
-    if prompt_cache is None:
-        print(f"warning: --kv-quant-scheme kvarn dropped: {reason}", file=out)
+        prompt_cache = _mpc(model, max_kv_size=max_kv_size)
+    policy = convert_kvarn_cache(
+        model, prompt_cache, kv_bits, kv_tail_tokens, window
+    )
+    if policy.verdict not in ("full", "partial"):
+        print(f"warning: --kv-quant-scheme kvarn dropped: {policy.reason}",
+              file=out)
+        return None
+    print(kv_line(None, policy), file=out)
     return prompt_cache
 
 
@@ -544,7 +478,7 @@ def generate(
         prompt_cache = _mpc(model, max_kv_size=max_kv_size)
         policy = resolve_kv_quant_policy(
             prompt_cache, kv_bits=kv_bits, kv_group_size=kv_group_size,
-            quantized_kv_start=quantized_kv_start,
+            quantized_kv_start=quantized_kv_start, scheme=kv_quant_scheme,
             max_kv_size=max_kv_size)
         print(kv_line(None, policy), file=sys.stderr)
         if policy.verdict == "error":
@@ -1266,7 +1200,7 @@ def generate_speculative_owned(
 
         policy = resolve_kv_quant_policy(
             prompt_cache, kv_bits=kv_bits, kv_group_size=kv_group_size,
-            mtp=True, can_quantize_kv=False,
+            mtp=True, can_quantize_kv=False, scheme=kv_quant_scheme,
             no_kv_reason="MTP rounds have no KV quantization hook")
         print(kv_line(None, policy), file=sys.stderr)
         if policy.verdict == "error":

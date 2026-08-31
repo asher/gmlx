@@ -70,7 +70,7 @@ def kvarn_model_converts(model) -> bool:
         return bool(cached)
     val = False
     try:
-        from gmlx.gen.generation import kvarn_unsupported
+        from gmlx.cache.kvarn_cache import kvarn_unsupported
 
         if kvarn_unsupported(model) is None:
             lm = getattr(model, "language_model", None) or model
