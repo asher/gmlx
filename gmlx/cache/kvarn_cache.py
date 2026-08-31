@@ -1136,18 +1136,22 @@ class BatchKVarNKVCache(_base_cache()):
         """Batch single-stream KVarNKVCache rows, right-justified (the
         BatchKVCache.merge model). One filled row adopts copies of its
         region buffers bit-exactly; multi-row merges rebuild from recovered
-        raw K/V (one re-quantization pass per row)."""
+        raw K/V (one re-quantization pass per row).
+
+        The rotating subclass is refused by exact type: its offset counts
+        evicted tokens the buffers no longer hold, so a merge would set
+        _idx too high and attend the sink twice."""
         if not caches:
             raise ValueError("[kvarn] merge requires at least one cache.")
         first = caches[0]
         params = (
             (first.k_bits, first.v_bits, first.sink_cap, first.tail_cap)
-            if isinstance(first, KVarNKVCache)
+            if type(first) is KVarNKVCache
             else None
         )
         for c in caches:
             if (
-                not isinstance(c, KVarNKVCache)
+                type(c) is not KVarNKVCache
                 or (c.k_bits, c.v_bits, c.sink_cap, c.tail_cap) != params
             ):
                 raise ValueError(

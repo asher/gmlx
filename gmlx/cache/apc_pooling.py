@@ -466,13 +466,14 @@ def _kvarn_batch_merge(c):
     KVarNKVCache -- which the ckpt tier installs into a B=1 batch --
     answers no to the ``type(c).merge`` probe and reaches ``extend``
     unlifted. A second concurrent request then kills every row in
-    flight with AttributeError.
+    flight with AttributeError. The rotating subclass is excluded by
+    exact type, as the merge itself is.
     """
     try:
         from .kvarn_cache import BatchKVarNKVCache, KVarNKVCache
     except Exception:
         return None
-    return BatchKVarNKVCache.merge if isinstance(c, KVarNKVCache) else None
+    return BatchKVarNKVCache.merge if type(c) is KVarNKVCache else None
 
 
 def install_batched_cachelist_admission() -> None:

@@ -480,3 +480,19 @@ def test_kvarn_lift_matches_stock_attention():
     ref = attend(k, v)
     got = attend(lifted.keys[..., :260, :], lifted.values[..., :260, :])
     assert mx.abs(got - ref).max().item() < 5e-3
+
+
+def test_preemption_gate_admits_what_the_lift_handles():
+    """The gate and the lift must agree. A kvarn cache the lift knows how
+    to promote but the gate refuses makes MTP preemption dead code: the
+    queued request waits for the live generation instead of joining it."""
+    from mlx_vlm.models.cache import KVCache, QuantizedKVCache
+
+    assert spec_engine.batch_liftable(KVarNKVCache(tail_tokens=256))
+    assert spec_engine.batch_liftable(KVCache())
+    assert spec_engine.batch_liftable(QuantizedKVCache(group_size=64, bits=8))
+
+    class _Opaque:
+        pass
+
+    assert not spec_engine.batch_liftable(_Opaque())

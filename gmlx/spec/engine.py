@@ -1982,6 +1982,23 @@ def kvarn_lift_cache(c):
     return lifted
 
 
+def batch_liftable(c) -> bool:
+    """Whether _lift_host_cache can promote this cache to a batch class.
+
+    The preemption and pre-start-compaction gates must agree with it: a
+    scheme it can lift but they refuse declines into the drain-wait, and
+    one they admit but it cannot lift raises mid-rebuild.
+    """
+    if hasattr(c, "filter") and hasattr(c, "extend"):
+        return True
+    if getattr(c, "kv_quant_scheme", None) == "kvarn":
+        return True
+    from gmlx.cache.compat import cache_types
+
+    return (isinstance(c, cache_types("QuantizedKVCache"))
+            or hasattr(type(c), "merge"))
+
+
 def install_continuous_batch_admission() -> None:
     """Let new requests prefill and inject during speculative decode.
 
@@ -2204,8 +2221,7 @@ def install_continuous_batch_admission() -> None:
                 and getattr(self, "first_tokens", None) is not None
                 and self.uids == self._all_uids
                 and not any(self._finished)
-                and all(hasattr(c, "filter") or hasattr(type(c), "merge")
-                        for c in self.prompt_cache)):
+                and all(batch_liftable(c) for c in self.prompt_cache)):
             _compact_prestart_rows(self, list(keep))
             return
         _orig_filter(self, keep)
@@ -2267,17 +2283,9 @@ def install_continuous_batch_admission() -> None:
         if last is None:
             return False
         # Every cache must be batch-liftable before the generator
-        # closes. A quantized B=1 cache lifts by dequantize. Anything
+        # closes. A quantized or kvarn B=1 cache lifts to fp16. Anything
         # else unliftable declines into the drain-wait.
-        from gmlx.cache.compat import cache_types
-
-        quant_single = cache_types("QuantizedKVCache")
-        if not all(
-            (hasattr(c, "filter") and hasattr(c, "extend"))
-            or hasattr(type(c), "merge")
-            or isinstance(c, quant_single)
-            for c in self.prompt_cache
-        ):
+        if not all(batch_liftable(c) for c in self.prompt_cache):
             return False
         it = self._rounds_iter
         captured = []
