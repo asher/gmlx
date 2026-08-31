@@ -2725,6 +2725,13 @@ def install_spec_kv_quant() -> None:
                     "(kvarn spec serve lands later)"
                 )
                 return caches
+            rotating = (cache_types("RotatingKVCache")
+                        + cache_types("BatchRotatingKVCache"))
+            if any(isinstance(c, rotating) for c in caches):
+                # Main's per-layer policy replaced the blanket window
+                # decline for affine; kvarn keeps it until the fold.
+                _decline_kvarn("sliding-window cache stack cannot quantize")
+                return caches
             return _kvarn_spec_convert(lm, caches)
         bits, group = params[1], params[2]
         # The shared policy owns layer selection: nested KV members,
