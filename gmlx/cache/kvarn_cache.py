@@ -985,6 +985,22 @@ class BatchKVarNKVCache(_base_cache()):
             if a is not None:
                 setattr(self, f, a[batch_indices])
         self.left_padding = self.left_padding[batch_indices]
+        # Shift left to reduce padding, as BatchKVCache.filter does. The
+        # whole stack shares one mask, built from whichever layer the arch
+        # picks; a kvarn layer that keeps padding an fp16 layer dropped
+        # makes that mask wider than the fp16 layer's keys.
+        m = int(self.left_padding.min().item()) if self._idx else 0
+        if m > 0:
+            self._adopt(self._realigned(self._idx - m))
+
+    def _adopt(self, other):
+        """Take over another cache's buffers in place."""
+        for f in self._ARRAY_FIELDS:
+            setattr(self, f, getattr(other, f))
+        self.left_padding = other.left_padding
+        self._idx = other._idx
+        self.n_sealed = other.n_sealed
+        self.tail_start, self.tail_end = other.tail_start, other.tail_end
 
     def _normalize_tail(self):
         """Move the tail ring window to [0, tail_len) so two caches at the
@@ -1015,7 +1031,9 @@ class BatchKVarNKVCache(_base_cache()):
 
     def _realigned(self, new_idx):
         """A fresh cache holding the same rows right-justified to new_idx
-        (rows re-quantize once at the new group alignment)."""
+        (rows re-quantize once at the new group alignment). A negative
+        delta drops that many leading columns, which every row must hold
+        as padding."""
         delta = new_idx - self._idx
         out = BatchKVarNKVCache(
             self.left_padding + delta,
@@ -1025,13 +1043,15 @@ class BatchKVarNKVCache(_base_cache()):
             sink_tokens=self.sink_cap,
         )
         rk, rv = self._raw_rows()
-        b, h, d = rk.shape[0], rk.shape[1], rk.shape[3]
-        pad_k = mx.zeros((b, h, delta, d), mx.float16)
-        pad_v = mx.zeros((b, h, delta, d), mx.float16)
-        out.update_and_fetch(
-            mx.concatenate([pad_k, rk], axis=2),
-            mx.concatenate([pad_v, rv], axis=2),
-        )
+        if delta < 0:
+            rk, rv = rk[:, :, -delta:], rv[:, :, -delta:]
+        elif delta > 0:
+            b, h, d = rk.shape[0], rk.shape[1], rk.shape[3]
+            pad_k = mx.zeros((b, h, delta, d), mx.float16)
+            pad_v = mx.zeros((b, h, delta, d), mx.float16)
+            rk = mx.concatenate([pad_k, rk], axis=2)
+            rv = mx.concatenate([pad_v, rv], axis=2)
+        out.update_and_fetch(rk, rv)
         return out
 
     def _compatible(self, other):

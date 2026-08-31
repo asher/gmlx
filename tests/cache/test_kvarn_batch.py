@@ -235,14 +235,38 @@ def test_qwen35_arm_uses_cache_pads(d):
 
 
 @_NEEDS_GPU
-def test_filter_selects_rows_without_compaction():
+def test_filter_selects_rows_bit_exactly_when_a_row_keeps_no_padding():
     c = _filled(300, [0, 64, 128])
     before_k = np.array(c.materialize()[0])
     c.filter(mx.array([2, 0]))
-    assert c._idx == 300  # no left-pad compaction: records never re-index
+    assert c._idx == 300  # a zero-pad row survives: nothing to compact
     assert np.array_equal(np.array(c.left_padding), [128, 0])
     after_k = np.array(c.materialize()[0])
     assert np.array_equal(after_k, before_k[[2, 0]])
+
+
+@_NEEDS_GPU
+def test_filter_compacts_shared_padding_like_batch_kv_cache():
+    """The stack shares one mask. BatchKVCache.filter shifts left by the
+    minimum padding, so a kvarn layer that kept it would leave the mask
+    wider than an fp16 layer's keys."""
+    from mlx_vlm.models.cache import BatchKVCache
+
+    pads = [0, 64, 128]
+    c = _filled(300, pads)
+    ref = BatchKVCache(pads)
+    ref.update_and_fetch(*_slab(300))
+    keep = mx.array([1, 2])
+    c.filter(keep)
+    ref.filter(keep)
+    assert c._idx == ref._idx == 236
+    assert np.array_equal(np.array(c.left_padding), np.array(ref.left_padding))
+    assert np.array_equal(np.array(c.offset), np.array(ref.offset))
+    # Live content survives the re-alignment (one extra quantization pass).
+    q = _make_q(b=2)
+    mask = c.make_mask(1, window_size=None)
+    out = kvarn_attention(q, c, SCALE, mask)
+    _assert_close(out, _ref_batch_decode(q, c, [0, 64]))
 
 
 @_NEEDS_GPU
