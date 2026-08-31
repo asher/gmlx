@@ -200,6 +200,22 @@ def test_kvarn_optout_layer_stays_fp16(_kvarn_ops):
     assert p.per_layer[1].kind == "optout"
 
 
+@pytest.mark.parametrize("mod,name", [
+    ("gmlx.models.qwen4_exp.model", "QSAKVCache"),
+    ("gmlx.models.minimax_m3", "MSAKVCache"),
+])
+def test_kvarn_opts_out_the_real_index_caches(_kvarn_ops, mod, name):
+    """Both carry an index stream beside K/V that quantizing would drop.
+    Their kv_quant_unsupported flag has to reach kvarn, not just affine."""
+    import importlib
+
+    cls = getattr(importlib.import_module(mod), name)
+    stack = [KVCache(), cls.__new__(cls), KVCache(), KVCache()]
+    p = _kvarn(stack)
+    assert p.per_layer[1].kind == "optout" and not p.per_layer[1].quantize
+    assert p.verdict == "partial"
+
+
 def test_kvarn_windows_need_the_matching_window(_kvarn_ops):
     # A model's own SWA stack keeps its windows fp16 ...
     stack = [KVCache(), RotatingKVCache(max_size=512)]

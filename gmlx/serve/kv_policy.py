@@ -31,6 +31,10 @@ class ServeKvPolicy:
         """Per-layer bytes-per-element for admission (batched mode)."""
         return self.batched.bytes_per_element_vector()
 
+    def region_vector(self):
+        """Per-layer fixed resident regions for admission (batched mode)."""
+        return self.batched.regions_vector()
+
     def to_json(self) -> dict:
         """The /v1/models kv_quant field. verdict_batched is separate:
         MTP models quantize at B=1 and run fp16 when batched."""
@@ -192,3 +196,15 @@ def pricing_vector(rg, num_layers: int):
         return None
     vec = pol.pricing_vector()
     return vec if len(vec) == num_layers else None
+
+
+def region_vector(rg, num_layers: int):
+    """The admission fixed-region vector for rg, or None when the scheme
+    holds no fixed buffers. Length-checked like pricing_vector."""
+    pol = getattr(rg, RG_ATTR, None)
+    if pol is None:
+        return None
+    vec = pol.region_vector()
+    if len(vec) != num_layers or not any(vec):
+        return None
+    return vec

@@ -65,19 +65,42 @@ def _lm_config(model):
     return text if text is not None else cfg
 
 
-def kv_layer_costs(model, bytes_per_elem: float = 2.0, per_layer_bpe=None):
+def _layer_windows(c, layers):
+    """Per-layer sliding window from the config, None where a layer keeps
+    full attention."""
+    window = _get(c, "sliding_window")
+    window = window if isinstance(window, int) and window > 0 else None
+    if window is None:
+        return [None] * layers
+    types = _get(c, "layer_types")
+    if isinstance(types, (list, tuple)) and len(types) == layers:
+        return [window if "sliding" in str(t) else None for t in types]
+    pattern = _get(c, "sliding_window_pattern")
+    if isinstance(pattern, int) and pattern > 0:
+        return [None if (i + 1) % pattern == 0 else window
+                for i in range(layers)]
+    return [window] * layers
+
+
+def kv_layer_costs(model, bytes_per_elem: float = 2.0, per_layer_bpe=None,
+                   per_layer_regions=None):
     """Per-layer ``(window_or_None, bytes_per_token)`` for the KV cache,
     or None when the geometry cannot be read. Admit-side throughout: MLA
     prices the compressed latent, a configured sliding window caps every
     layer it could apply to. ``per_layer_bpe`` (from the KV policy)
-    prices each layer's storage exactly; it must match the layer count
-    or it is ignored."""
+    prices each layer's storage exactly, and ``per_layer_regions`` adds
+    the fixed-size buffers a scheme holds beside the per-token record --
+    kvarn's fp16 sink, horizon and tail -- each as its own windowed
+    entry, so the list runs longer than the layer count. Both must match
+    the layer count or they are ignored."""
     c = _lm_config(model)
     layers = _get(c, "num_hidden_layers")
     if not isinstance(layers, int) or layers <= 0:
         return None
     if per_layer_bpe is not None and len(per_layer_bpe) != layers:
         per_layer_bpe = None
+    if per_layer_regions is not None and len(per_layer_regions) != layers:
+        per_layer_regions = None
 
     def bpe(i):
         return per_layer_bpe[i] if per_layer_bpe is not None else bytes_per_elem
@@ -85,33 +108,27 @@ def kv_layer_costs(model, bytes_per_elem: float = 2.0, per_layer_bpe=None):
     lora = _get(c, "kv_lora_rank")
     if isinstance(lora, int) and lora > 0:
         rope = _get(c, "qk_rope_head_dim", 0) or 0
-        return [(None, (lora + rope) * bpe(i)) for i in range(layers)]
-    heads = _get(c, "num_attention_heads")
-    n_kv = _get(c, "num_key_value_heads") or heads
-    head_dim = _get(c, "head_dim")
-    hidden = _get(c, "hidden_size")
-    if not head_dim and heads and hidden:
-        head_dim = hidden // heads
-    if not (isinstance(n_kv, int) and n_kv > 0
-            and isinstance(head_dim, int) and head_dim > 0):
-        return None
+        elems = (lora + rope)
+        windows = [None] * layers
+    else:
+        heads = _get(c, "num_attention_heads")
+        n_kv = _get(c, "num_key_value_heads") or heads
+        head_dim = _get(c, "head_dim")
+        hidden = _get(c, "hidden_size")
+        if not head_dim and heads and hidden:
+            head_dim = hidden // heads
+        if not (isinstance(n_kv, int) and n_kv > 0
+                and isinstance(head_dim, int) and head_dim > 0):
+            return None
+        elems = 2 * n_kv * head_dim
+        windows = _layer_windows(c, layers)
 
-    def per_tok(i):
-        return 2 * n_kv * head_dim * bpe(i)
-
-    window = _get(c, "sliding_window")
-    window = window if isinstance(window, int) and window > 0 else None
-    if window is None:
-        return [(None, per_tok(i)) for i in range(layers)]
-    types = _get(c, "layer_types")
-    if isinstance(types, (list, tuple)) and len(types) == layers:
-        return [(window if "sliding" in str(t) else None, per_tok(i))
-                for i, t in enumerate(types)]
-    pattern = _get(c, "sliding_window_pattern")
-    if isinstance(pattern, int) and pattern > 0:
-        return [(None if (i + 1) % pattern == 0 else window, per_tok(i))
-                for i in range(layers)]
-    return [(window, per_tok(i)) for i in range(layers)]
+    costs = [(windows[i], elems * bpe(i)) for i in range(layers)]
+    for i, regions in enumerate(per_layer_regions or ()):
+        for rows, region_bpe in regions:
+            w = rows if windows[i] is None else min(rows, windows[i])
+            costs.append((w, elems * region_bpe))
+    return costs
 
 
 def _policy_costs(rg, model):
@@ -119,12 +136,14 @@ def _policy_costs(rg, model):
     mode). Without a policy, pricing stays uniform fp16."""
     c = _lm_config(model)
     layers = _get(c, "num_hidden_layers")
-    vec = None
+    vec = regions = None
     if isinstance(layers, int) and layers > 0:
-        from .kv_policy import pricing_vector
+        from .kv_policy import pricing_vector, region_vector
 
         vec = pricing_vector(rg, layers)
-    return kv_layer_costs(model, 2.0, per_layer_bpe=vec)
+        regions = region_vector(rg, layers)
+    return kv_layer_costs(model, 2.0, per_layer_bpe=vec,
+                          per_layer_regions=regions)
 
 
 def prompt_kv_bytes(costs, tokens: int) -> float:

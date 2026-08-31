@@ -42,6 +42,52 @@ def test_resolve_stamps_both_modes(monkeypatch):
     assert pol.pricing_vector() == [1.0625] * 3 + [2.0]
 
 
+def test_kvarn_resolve_prices_record_and_regions(monkeypatch):
+    from gmlx.cache import kvarn_sdpa
+    from gmlx.cache.kv_policy import kvarn_fixed_tokens
+
+    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
+    monkeypatch.delenv("GMLX_KVARN", raising=False)
+    monkeypatch.setenv("KV_BITS", "6")
+    monkeypatch.setenv("KV_TAIL_TOKENS", "1024")
+    monkeypatch.delenv("MLX_VLM_GGUF_SPECULATIVE", raising=False)
+    model = _model()
+    model.config.head_dim = 128
+    pol = skv.resolve_for_load(_rg(model=model, kv_bits=6.0,
+                                   kv_quant_scheme="kvarn"), "m")
+    assert pol.single.verdict == "full"
+    assert pol.pricing_vector() == [0.796875] * 3 + [2.0]
+    rows = kvarn_fixed_tokens(1024)
+    assert pol.region_vector() == [((rows, 2.0),)] * 3 + [()]
+    j = pol.to_json()
+    assert j["scheme"] == "kvarn" and j["value_bits"] == 6
+    assert j["tail_tokens"] == 1024
+
+
+def test_kvarn_admission_charges_the_fp16_buffers(monkeypatch):
+    """The record bpe alone underprices a kvarn layer: the fp16 sink,
+    horizon and tail are resident from the first token."""
+    import gmlx.serve.mem_preflight as mp
+    from gmlx.cache import kvarn_sdpa
+    from gmlx.cache.kv_policy import kvarn_fixed_tokens
+
+    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
+    monkeypatch.delenv("GMLX_KVARN", raising=False)
+    monkeypatch.setenv("KV_BITS", "6")
+    monkeypatch.setenv("KV_TAIL_TOKENS", "1024")
+    monkeypatch.delenv("MLX_VLM_GGUF_SPECULATIVE", raising=False)
+    model = _model()
+    model.config.head_dim = 128
+    rg = _rg(model=model, kv_bits=6.0, kv_quant_scheme="kvarn")
+    skv.resolve_for_load(rg, "m")
+    costs = mp._policy_costs(rg, model)
+    elems = 2 * 8 * 128
+    rows = kvarn_fixed_tokens(1024)
+    assert costs[:4] == [(None, elems * 0.796875)] * 3 + [(None, elems * 2.0)]
+    assert costs[4:] == [(rows, elems * 2.0)] * 3
+    assert mp.prompt_kv_bytes(costs, 8192) > mp.prompt_kv_bytes(costs[:4], 8192)
+
+
 def test_mtp_batched_dropped(monkeypatch):
     monkeypatch.setenv("KV_BITS", "8")
     monkeypatch.setenv("MLX_VLM_GGUF_SPECULATIVE", "1")
