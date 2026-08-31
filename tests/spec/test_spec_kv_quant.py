@@ -441,7 +441,7 @@ class _Glm5ShapeFakeLM:
         return [_cache_list(KVCache(), PoolingCache(4)) for _ in range(3)]
 
 
-def test_b1_mtp_arms_the_pool_beside_the_kv_member(restorable):
+def test_b1_mtp_arms_the_pool_beside_the_kv_member(restorable, capsys):
     # A kv member rules the list, so pool arming must not key off the
     # layer kind. Every layer's pool packs, the held last layer included.
     restorable.setenv("KV_BITS", "8")
@@ -456,6 +456,33 @@ def test_b1_mtp_arms_the_pool_beside_the_kv_member(restorable):
     for c in caches:
         assert c.caches[1].is_quantized, (
             "the pool member of a kv-ruled CacheList stayed fp16")
+    out = capsys.readouterr().out
+    assert ("[kv] MTP spec path: kv_bits=8 group=64 -> 3 pooled at rest; "
+            "quantized 2/3 attn layers (1 held fp16)") in out
+
+
+class _PoolOnlyFakeLM:
+    """No growing KV at all: CacheList(state, PoolingCache) per layer."""
+
+    def make_cache(self):
+        from gmlx.models.deepseek_v4.cache import PoolingCache
+
+        return [_cache_list(_SSMCache(), PoolingCache(4)) for _ in range(2)]
+
+
+def test_b1_mtp_notes_a_pool_only_engagement(restorable, capsys):
+    # Nothing converts, so the note must key off the pools armed.
+    restorable.setenv("KV_BITS", "8")
+    spec_engine.install_spec_kv_quant()
+    caches = ar.make_speculative_prompt_cache(
+        _PoolOnlyFakeLM(), draft_kind="mtp", batch_size=1,
+        left_padding=[0],
+        make_cache=lambda lm, lp: pytest.fail("B=1 mtp bypass"),
+    )
+    for c in caches:
+        assert c.caches[1].is_quantized
+    assert "2 pooled at rest; quantized 0/2 attn layers" in (
+        capsys.readouterr().out)
 
 
 class _HybridFakeLM:

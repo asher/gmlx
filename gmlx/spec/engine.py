@@ -2546,14 +2546,14 @@ def install_spec_kv_quant() -> None:
             return caches
 
         # hold=False: this path converts below, so fp16 holds are inert.
-        arm_stack(caches, policy, hold=False)
+        armed = arm_stack(caches, policy, hold=False)
         n = 0
         for i, plan in enumerate(policy.per_layer):
             if plan.quantize:
                 caches[i], k = quantize_kv_members(
                     caches[i], policy.bits, policy.group_size)
                 n += k
-        if (n or policy.n_pool) and not _noted[0]:
+        if (n or armed) and not _noted[0]:
             _noted[0] = True
             print(kv_line("MTP spec path", policy), flush=True)
         return caches

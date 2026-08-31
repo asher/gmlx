@@ -142,7 +142,10 @@ def test_policy_arms_pool_beside_kv_member():
     policy = resolve_kv_quant_policy(caches, kv_bits=8, kv_group_size=32)
     assert policy.verdict == "full"
     assert [p.kind for p in policy.per_layer] == ["kv", "kv", "kv"]
-    arm_stack(caches, policy)
+    # pools count under kv-ruled layers too, so the line reports them
+    assert policy.n_pool == 3
+    assert policy.summary().startswith("3 pooled at rest; quantized 2/3")
+    assert arm_stack(caches, policy) == 3
     for p in pools:
         assert p.is_quantized
 

@@ -9,9 +9,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - MTP with `kv_bits` no longer runs an fp16 cache on architectures whose
-  layers are cache lists (glm5_next): nested KV members now convert and
-  pooled members pack at rest, matching what `/v1/models` and admission
-  report.
+  layers are cache lists (glm5_next): nested KV members now convert, as
+  `/v1/models` and admission already reported, and pooled members pack
+  at rest as well. The `[kv]` line counts every pool packed.
 - Hybrid sliding-window models no longer drop `kv_bits` on the MTP path:
   windows stay fp16 and full-attention layers quantize.
 - Serve output with `kv_bits` set no longer corrupts into repeating
