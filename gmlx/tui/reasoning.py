@@ -81,6 +81,10 @@ _MARKERS: tuple[tuple[str, str], ...] = (
     # only the close (seed with start_in_thinking, like <think>).
     ("<think:opensource>", _REASON),
     ("</think:opensource>", _ANSWER),
+    # HY4-preview: the same shape under a ':6124c78e' suffix, and its
+    # template pre-fills the open tag on every generation prompt.
+    ("<think:6124c78e>", _REASON),
+    ("</think:6124c78e>", _ANSWER),
     # MiniMax-M3: the model emits the opener itself (legacy '<think>' tokens
     # exist in its vocab but the template only ever uses the mm spelling).
     ("<mm:think>", _REASON),

@@ -60,6 +60,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   such as an F32 lm head held as bf16. Those bytes have no view left to
   read, and the decode arena gets them instead: HY4-preview reads 3.5% less
   from disk per token. `GMLX_PIN_CAST_EXCLUDE=0` restores the old pin.
+- HY4 chat splits thinking from the answer. Its close tag carries the
+  `:6124c78e` suffix, which the stream splitter did not know, so the tag
+  printed as literal text and the whole reply rendered as thinking.
 
 ## [0.4.7] - 2026-08-30
 

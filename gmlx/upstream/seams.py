@@ -559,8 +559,20 @@ VENDORED_MLX_VLM_MODULES = {
     # upstream-first so gmlx.models.muse_glimmer.vlm_model is dead code under this
     # pin. Delete the module at the vendoring review.
     "gmlx.models.hy_v3.tools": "mlx_vlm.tool_parsers.hy_v3",
+    "gmlx.models.hy_v4.tools": "mlx_vlm.tool_parsers.hy_v4",
     "gmlx.models.muse_glimmer.tools": "mlx_vlm.tool_parsers.muse_glimmer",
     "gmlx.models.qwen4_exp.vlm_model": "mlx_vlm.models.qwen4_exp",
+    "gmlx.models.glm5_next.vlm_model": "mlx_vlm.models.glm5_next",
+}
+
+# Grafts deliberately left out of the registry above, with the reason. Only
+# the vendoring review clears an entry from here.
+UNREGISTERED_GRAFTS = {
+    # Upstream ships mlx_vlm.models.muse_glimmer as of 0.6.15, so registering
+    # this would report a collision that is already known and already
+    # answered: the graft is upstream-first, the vendored copy is dead under
+    # this pin, and it goes at the vendoring review with the module.
+    "gmlx.models.muse_glimmer.vlm_model",
 }
 
 
