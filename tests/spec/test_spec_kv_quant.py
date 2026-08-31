@@ -352,3 +352,159 @@ def test_warm_merge_config_follows_batched_policy(restorable):
     # no stamp: fail-safe None, never the environment
     assert spec_engine._live_kv_quant_config(_Stamp()) is None
     assert spec_engine._live_kv_quant_config(None) is None
+
+
+# Hybrid arch shapes on the B=1 arm. CacheList members, opt-outs, nested
+# windows, and top-level windows must all follow the shared policy.
+
+
+class _OptOutKVCache(KVCache):
+    kv_quant_unsupported = True
+
+
+def _cache_list(*inner):
+    from mlx_vlm.models.cache import CacheList
+
+    return CacheList(*inner)
+
+
+class _ListFakeLM:
+    """glm5_next's shape: CacheList(KVCache, opted-out pool) per layer."""
+
+    def __init__(self, n=3):
+        self.n = n
+
+    def make_cache(self):
+        return [_cache_list(KVCache(), _SSMCache()) for _ in range(self.n)]
+
+
+def test_b1_mtp_quantizes_the_kv_member_of_a_cache_list(restorable):
+    restorable.setenv("KV_BITS", "8")
+    spec_engine.install_spec_kv_quant()
+    caches = ar.make_speculative_prompt_cache(
+        _ListFakeLM(), draft_kind="mtp", batch_size=1, left_padding=[0],
+        make_cache=lambda lm, lp: pytest.fail("B=1 mtp bypass"),
+    )
+    # The last layer of a deep stack stays fp16, as everywhere else.
+    inner = caches[0].caches[0]
+    assert isinstance(inner, QuantizedKVCache), (
+        "the KV member of a CacheList layer stayed fp16 while the shared "
+        "policy reports the layer as quantized")
+    assert inner.bits == 8
+    assert isinstance(caches[0].caches[1], _SSMCache)
+
+
+class _OptOutFakeLM:
+    def make_cache(self):
+        return [_OptOutKVCache(), KVCache(), KVCache()]
+
+
+def test_b1_mtp_honors_kv_quant_unsupported(restorable):
+    restorable.setenv("KV_BITS", "8")
+    spec_engine.install_spec_kv_quant()
+    caches = ar.make_speculative_prompt_cache(
+        _OptOutFakeLM(), draft_kind="mtp", batch_size=1, left_padding=[0],
+        make_cache=lambda lm, lp: pytest.fail("B=1 mtp bypass"),
+    )
+    assert not isinstance(caches[0], QuantizedKVCache), (
+        "a cache declaring kv_quant_unsupported must never be converted")
+    assert isinstance(caches[1], QuantizedKVCache)
+
+
+class _NestedWindowFakeLM:
+    def make_cache(self):
+        from mlx_lm.models.cache import RotatingKVCache
+
+        return [_cache_list(RotatingKVCache(max_size=16), _SSMCache())
+                for _ in range(3)]
+
+
+def test_b1_mtp_sees_a_window_nested_in_a_cache_list(restorable):
+    # A window-plus-state list classifies as state. Nothing converts.
+    restorable.setenv("KV_BITS", "8")
+    spec_engine.install_spec_kv_quant()
+    caches = ar.make_speculative_prompt_cache(
+        _NestedWindowFakeLM(), draft_kind="mtp", batch_size=1,
+        left_padding=[0],
+        make_cache=lambda lm, lp: pytest.fail("B=1 mtp bypass"),
+    )
+    for c in caches:
+        assert not isinstance(c.caches[0], QuantizedKVCache)
+
+
+class _Glm5ShapeFakeLM:
+    """glm5_next's real shape: CacheList(KVCache, PoolingCache) per layer."""
+
+    def make_cache(self):
+        from gmlx.models.deepseek_v4.cache import PoolingCache
+
+        return [_cache_list(KVCache(), PoolingCache(4)) for _ in range(3)]
+
+
+def test_b1_mtp_arms_the_pool_beside_the_kv_member(restorable, capsys):
+    # A kv member rules the list, so pool arming must not key off the
+    # layer kind. Every layer's pool packs, the held last layer included.
+    restorable.setenv("KV_BITS", "8")
+    spec_engine.install_spec_kv_quant()
+    caches = ar.make_speculative_prompt_cache(
+        _Glm5ShapeFakeLM(), draft_kind="mtp", batch_size=1,
+        left_padding=[0],
+        make_cache=lambda lm, lp: pytest.fail("B=1 mtp bypass"),
+    )
+    assert isinstance(caches[0].caches[0], QuantizedKVCache)
+    assert type(caches[2].caches[0]) is KVCache
+    for c in caches:
+        assert c.caches[1].is_quantized, (
+            "the pool member of a kv-ruled CacheList stayed fp16")
+    out = capsys.readouterr().out
+    assert ("[kv] MTP spec path: kv_bits=8 group=64 -> 3 pooled at rest; "
+            "quantized 2/3 attn layers (1 held fp16)") in out
+
+
+class _PoolOnlyFakeLM:
+    """No growing KV at all: CacheList(state, PoolingCache) per layer."""
+
+    def make_cache(self):
+        from gmlx.models.deepseek_v4.cache import PoolingCache
+
+        return [_cache_list(_SSMCache(), PoolingCache(4)) for _ in range(2)]
+
+
+def test_b1_mtp_notes_a_pool_only_engagement(restorable, capsys):
+    # Nothing converts, so the note must key off the pools armed.
+    restorable.setenv("KV_BITS", "8")
+    spec_engine.install_spec_kv_quant()
+    caches = ar.make_speculative_prompt_cache(
+        _PoolOnlyFakeLM(), draft_kind="mtp", batch_size=1,
+        left_padding=[0],
+        make_cache=lambda lm, lp: pytest.fail("B=1 mtp bypass"),
+    )
+    for c in caches:
+        assert c.caches[1].is_quantized
+    assert "2 pooled at rest; quantized 0/2 attn layers" in (
+        capsys.readouterr().out)
+
+
+class _HybridFakeLM:
+    def make_cache(self):
+        from mlx_lm.models.cache import RotatingKVCache
+
+        return [RotatingKVCache(max_size=16), KVCache(),
+                RotatingKVCache(max_size=16), KVCache()]
+
+
+def test_b1_mtp_hybrid_stack_quantizes_full_attn_layers(restorable):
+    # Top-level windows must not drop the whole stack: the verdict is
+    # partial, windows stay fp16, full-attention layers convert.
+    restorable.setenv("KV_BITS", "8")
+    spec_engine.install_spec_kv_quant()
+    caches = ar.make_speculative_prompt_cache(
+        _HybridFakeLM(), draft_kind="mtp", batch_size=1, left_padding=[0],
+        make_cache=lambda lm, lp: pytest.fail("B=1 mtp bypass"),
+    )
+    assert isinstance(caches[1], QuantizedKVCache)
+    assert caches[1].bits == 8
+    for i in (0, 2):
+        assert not isinstance(caches[i], QuantizedKVCache)
+    # the last layer of a deep stack stays fp16
+    assert type(caches[3]) is KVCache

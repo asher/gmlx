@@ -2448,11 +2448,11 @@ def install_spec_kv_quant() -> None:
     trim the target. The single-stream ``QuantizedKVCache`` can trim --
     packing is per-token along head_dim, so trim is an offset move -- and
     the model rollback already goes through ``is_trimmable()``/``trim()``.
-    Each plain KVCache converts at construction (empty, so conversion is
-    free); SSM / linear-attention / pooled caches pass through untouched.
-    Sliding-window stacks drop the flag (parity with the plain path, which
-    cannot quantize rotating caches). B>1 MTP keeps stock behavior with a
-    one-shot warning (ragged rollback on packed rows is unsupported).
+    The shared KV policy picks the layers: growing KV converts at
+    construction (empty, so conversion is free), quantizable pools pack
+    at rest, and windows, recurrent state, and opt-outs stay fp16 at any
+    nesting depth. B>1 MTP keeps stock behavior with a one-shot warning
+    (ragged rollback on packed rows is unsupported).
     No-op unless KV_BITS is set at server boot.
     Kill switch: GMLX_SPEC_KV_QUANT=0."""
     from mlx_vlm.generate import ar as _ar
@@ -2468,13 +2468,10 @@ def install_spec_kv_quant() -> None:
 
     from gmlx.cache.compat import cache_types
 
-    plain_kv = cache_types("KVCache")
-    rotating = (cache_types("RotatingKVCache")
-                + cache_types("BatchRotatingKVCache"))
     _orig = _su.make_speculative_prompt_cache
     _noted = [False]
     _warned_batch = [False]
-    _warned_rotating = [False]
+    _warned_dropped = [False]
     _warned_stock = [False]
 
     def _quantizing_spec_cache(lm, *, draft_kind, batch_size, left_padding,
@@ -2521,13 +2518,6 @@ def install_spec_kv_quant() -> None:
                     "rollback is unsupported; %d layers run fp16 KV",
                     batch_size, swapped)
             return caches
-        if any(isinstance(c, rotating) for c in caches):
-            if not _warned_rotating[0]:
-                _warned_rotating[0] = True
-                _log.warning(
-                    "KV_BITS dropped on the MTP path: sliding-window "
-                    "cache stack cannot quantize")
-            return caches
         from gmlx.models.qwen35.gdn import stock_gdn_fallback
 
         mt = (getattr(lm, "model_type", None)
@@ -2541,28 +2531,32 @@ def install_spec_kv_quant() -> None:
                     "KV_BITS dropped on the MTP path: the GMLX_QWEN_OWNED=0 "
                     "stock fallback cannot verify on a quantized KV cache")
             return caches
-        from mlx_vlm.models.cache import should_quantize_kv_layer
+        # The shared policy owns layer selection: nested KV members,
+        # pools, windows, and opt-outs at any depth.
+        from gmlx.cache.kv_policy import (arm_stack, kv_line,
+                                          quantize_kv_members,
+                                          resolve_kv_quant_policy)
 
-        out = []
-        n = held = 0
-        n_layers = len(caches)
-        for i, c in enumerate(caches):
-            if type(c) in plain_kv and should_quantize_kv_layer(i, n_layers):
-                out.append(c.to_quantized(group_size=group, bits=bits))
-                n += 1
-            else:
-                if type(c) in plain_kv:
-                    held += 1
-                out.append(c)
-        if n and not _noted[0]:
+        policy = resolve_kv_quant_policy(
+            caches, kv_bits=bits, kv_group_size=group, mode="single")
+        if policy.verdict not in ("full", "partial"):
+            if not _warned_dropped[0]:
+                _warned_dropped[0] = True
+                _log.warning("%s", kv_line("MTP spec path", policy))
+            return caches
+
+        # hold=False: this path converts below, so fp16 holds are inert.
+        armed = arm_stack(caches, policy, hold=False)
+        n = 0
+        for i, plan in enumerate(policy.per_layer):
+            if plan.quantize:
+                caches[i], k = quantize_kv_members(
+                    caches[i], policy.bits, policy.group_size)
+                n += k
+        if (n or armed) and not _noted[0]:
             _noted[0] = True
-            tail = f" ({held} held fp16)" if held else ""
-            print(
-                f"[kv] MTP spec path: kv_bits={bits} group={group} -> "
-                f"quantized {n}/{n_layers} attn layers{tail}",
-                flush=True,
-            )
-        return out
+            print(kv_line("MTP spec path", policy), flush=True)
+        return caches
 
     _quantizing_spec_cache.__dict__[_SPEC_KV_QUANT_FLAG] = True
     _su.make_speculative_prompt_cache = _quantizing_spec_cache

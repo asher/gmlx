@@ -30,6 +30,7 @@ class KvLayerPlan:
     kind: str
     quantize: bool
     bytes_per_element: float
+    pools: int = 0              # quantizable pools under the layer, any kind
 
 
 @dataclass(frozen=True)
@@ -62,7 +63,7 @@ class KvQuantPolicy:
 
     @property
     def n_pool(self):
-        return sum(1 for p in self.per_layer if p.kind == "pool")
+        return sum(p.pools for p in self.per_layer)
 
     def bytes_per_element_vector(self) -> list:
         return [p.bytes_per_element for p in self.per_layer]
@@ -239,13 +240,14 @@ def resolve_kv_quant_policy(stack, *, kv_bits, kv_group_size=64,
     packed = packed_bytes_per_element(bits, group)
     per = []
     for i, kind in enumerate(kinds):
+        pools = sum(1 for _ in _quantizable_pools(stack[i]))
         if (kind == "kv" and can_quantize_kv
                 and should_quantize_kv_layer(i, n)):
-            per.append(KvLayerPlan("kv", True, packed))
+            per.append(KvLayerPlan("kv", True, packed, pools))
         elif kind == "pool":
-            per.append(KvLayerPlan("pool", False, packed))
+            per.append(KvLayerPlan("pool", False, packed, pools))
         else:
-            per.append(KvLayerPlan(kind, False, FP16_BPE))
+            per.append(KvLayerPlan(kind, False, FP16_BPE, pools))
 
     hetero = any(k in ("window", "state", "optout", "other") for k in kinds)
     verdict = "partial" if hetero else "full"
@@ -292,28 +294,57 @@ def hold_fp16(c):
     return out
 
 
-def _arm_pools(c, bits, group) -> int:
-    """Pack every quantizable pool under c, recursing into cache
-    lists. Opted-out pools stay fp16."""
+def _quantizable_pools(c):
+    """Yield the quantizable pools under c, recursing into cache lists.
+    Opted-out pools are skipped."""
     inner = getattr(c, "caches", None)
     if inner is not None:
-        return sum(_arm_pools(s, bits, group) for s in inner)
-    if hasattr(c, "quantize_storage") and getattr(c, "quantizable", True):
-        c.quantize_storage(group_size=group, bits=bits)
-        return 1
-    return 0
+        for s in inner:
+            yield from _quantizable_pools(s)
+    elif hasattr(c, "quantize_storage") and getattr(c, "quantizable", True):
+        yield c
 
 
-def arm_stack(stack, policy: KvQuantPolicy, hold=True):
-    """Conform a freshly built stack to the policy in place. Held fp16
-    layers lose to_quantized so converters skip them. Pool layers arm
-    at-rest packing. hold=False arms pools only. Holds stay top-level:
-    converters iterate only the top of the stack."""
+def _arm_pools(c, bits, group) -> int:
+    n = 0
+    for p in _quantizable_pools(c):
+        p.quantize_storage(group_size=group, bits=bits)
+        n += 1
+    return n
+
+
+def quantize_kv_members(c, bits, group):
+    """Convert the growing KV caches under c, descending into cache
+    lists. Returns (cache, n). Window, state, and opt-out members stay
+    fp16."""
+    types = _cache_kind_types()
+    if _classify(c, types) != "kv":
+        return c, 0
+    inner = getattr(c, "caches", None)
+    if inner is None:
+        return c.to_quantized(group_size=group, bits=bits), 1
+    subs, n = [], 0
+    for s in inner:
+        sub, k = quantize_kv_members(s, bits, group)
+        subs.append(sub)
+        n += k
+    c.caches = tuple(subs)
+    return c, n
+
+
+def arm_stack(stack, policy: KvQuantPolicy, hold=True) -> int:
+    """Conform a freshly built stack to the policy in place. Returns the
+    number of pools armed. Held fp16 layers lose to_quantized so
+    converters skip them. Quantizable pools arm at-rest packing on every
+    layer, not only pool-kind ones: a kv member rules a mixed list, so
+    its pools would otherwise stay fp16. hold=False arms pools only.
+    Holds stay top-level: converters iterate only the top of the
+    stack."""
     if policy.verdict not in ("full", "partial"):
-        return stack
+        return 0
+    armed = 0
     for i, plan in enumerate(policy.per_layer):
-        if plan.kind == "pool":
-            _arm_pools(stack[i], policy.bits, policy.group_size)
+        armed += _arm_pools(stack[i], policy.bits, policy.group_size)
         if hold and not plan.quantize:
             stack[i] = hold_fp16(stack[i])
-    return stack
+    return armed
