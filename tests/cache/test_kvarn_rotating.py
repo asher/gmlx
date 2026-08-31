@@ -466,12 +466,22 @@ def test_setup_without_window_stays_plain(_ops_ok, capsys):
 
 
 def test_kv_bits_rotating_reason():
-    from gmlx.gen.generation import kv_quantization_unsupported
+    """Affine's counterpart to the kvarn rotating path: --max-kv-size on a
+    make_cache-less model builds an all-window stack the shared policy
+    refuses, while the same model without it quantizes."""
+    from mlx_lm.models.cache import KVCache, RotatingKVCache
 
-    m = _MakeCacheLess()
-    assert kv_quantization_unsupported(m) is None
-    reason = kv_quantization_unsupported(m, max_kv_size=4096)
-    assert "max-kv-size" in reason and "quantize" in reason
+    from gmlx.cache.kv_policy import resolve_kv_quant_policy
+
+    plain = resolve_kv_quant_policy([KVCache(), KVCache()], kv_bits=8)
+    assert plain.verdict == "full"
+    rot = resolve_kv_quant_policy(
+        [RotatingKVCache(max_size=4096), RotatingKVCache(max_size=4096)],
+        kv_bits=8,
+        max_kv_size=4096,
+    )
+    assert rot.verdict == "error"
+    assert "max_kv_size" in rot.reason and "quantize" in rot.reason
 
 
 # -- decode parity -----------------------------------------------------------
