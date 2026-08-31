@@ -990,7 +990,13 @@ class BatchKVarNKVCache(_base_cache()):
         # picks; a kvarn layer that keeps padding an fp16 layer dropped
         # makes that mask wider than the fp16 layer's keys.
         m = int(self.left_padding.min().item()) if self._idx else 0
-        if m > 0:
+        if m >= self._idx > 0:
+            # Every surviving row is pure padding: back to the empty state.
+            self._adopt(BatchKVarNKVCache(
+                [0] * self.left_padding.shape[0], k_bits=self.k_bits,
+                v_bits=self.v_bits, tail_tokens=self.tail_cap,
+                sink_tokens=self.sink_cap))
+        elif m > 0:
             self._adopt(self._realigned(self._idx - m))
 
     def _adopt(self, other):

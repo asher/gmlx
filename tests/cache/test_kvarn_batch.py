@@ -270,6 +270,15 @@ def test_filter_compacts_shared_padding_like_batch_kv_cache():
 
 
 @_NEEDS_GPU
+def test_filter_to_all_padding_rows_empties_the_cache():
+    c = _filled(128, [0, 128])
+    c.filter(mx.array([1]))
+    assert c._idx == 0
+    assert np.array_equal(np.array(c.left_padding), [0])
+    assert c.stage_k is None
+
+
+@_NEEDS_GPU
 def test_extend_equal_idx_is_bit_exact():
     a = _filled(300, [0, 32], seed=0)
     b = _filled(300, [16], seed=5)
