@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 import mlx.core as mx
@@ -49,43 +50,66 @@ def load_corpus_ids(tokenizer, n_tokens: int) -> list[int]:
     return ids[:n_tokens]
 
 
-def build_arm(name: str, model, tail_tokens: int):
-    """Hybrid archs quantize/convert their plain-KV layers and leave
-    recurrent state untouched, matching the runtime's partial coverage."""
+def build_arm(name: str, model, tail_tokens: int, carve_out: bool = True):
+    """Both quantized arms run the shared per-stack policy, so hybrid
+    archs convert their plain-KV layers, leave recurrent state untouched,
+    and hold the last layer of a deep stack fp16 -- the runtime's own
+    coverage. ``carve_out=False`` takes every eligible layer instead, to
+    measure what the held layer is worth."""
     from mlx_lm.models.cache import KVCache, make_prompt_cache
+
+    from gmlx.cache.kv_policy import quantize_kv_members
 
     pc = make_prompt_cache(model)
     eligible = sum(1 for c in pc if type(c) is KVCache)
     if name == "fp16":
         return pc
+    if not eligible:
+        raise SystemExit(f"{name} arm: no plain KV layers to quantize")
+
+    def apply(policy):
+        n = 0
+        for i, plan in enumerate(policy.per_layer):
+            if plan.quantize or (carve_out is False and type(pc[i]) is KVCache):
+                pc[i], k = quantize_kv_members(pc[i], policy)
+                n += k
+        want = eligible if not carve_out else policy.n_quant
+        if n == 0 or n != want:
+            raise SystemExit(f"{name} arm converted {n}/{want} layers")
+        return pc
+
     if name == "kv8":
-        if not eligible:
-            raise SystemExit("kv8 arm: no plain KV layers to quantize")
-        return [
-            c.to_quantized(group_size=64, bits=8) if type(c) is KVCache else c
-            for c in pc
-        ]
+        from gmlx.cache.kv_policy import resolve_kv_quant_policy
+
+        return apply(resolve_kv_quant_policy(pc, kv_bits=8, kv_group_size=64))
     if name.startswith("kvarn"):
         import re
 
-        from gmlx.cache.kvarn_cache import convert_prompt_cache
         from gmlx.cache.kvarn_sdpa import install_kvarn_sdpa, kvarn_ops_missing
+        from gmlx.gen.generation import resolve_kvarn_policy
 
         reason = kvarn_ops_missing()
         if reason:
             raise SystemExit(f"kvarn arm unavailable: {reason}")
         spec = name[len("kvarn") :]
         m = re.fullmatch(r"k(\d)v(\d)", spec)
-        k_bits, v_bits = (
-            (int(m.group(1)), int(m.group(2))) if m else (int(spec), int(spec))
-        )
-        n = convert_prompt_cache(
-            pc, k_bits=k_bits, v_bits=v_bits, tail_tokens=tail_tokens
-        )
-        if n == 0 or n != eligible:
-            raise SystemExit(f"kvarn arm converted {n}/{eligible} eligible layers")
+        # kvarn_widths reads the split pair off the env, so the policy
+        # validates both widths rather than being patched after the fact.
+        env = os.environ.get("GMLX_KVARN_BITS")
+        if m:
+            os.environ["GMLX_KVARN_BITS"] = spec
+        try:
+            policy = resolve_kvarn_policy(
+                model, None if m else int(spec), tail_tokens, None, pc)
+        finally:
+            os.environ.pop("GMLX_KVARN_BITS", None)
+            if env is not None:
+                os.environ["GMLX_KVARN_BITS"] = env
+        if policy.verdict in ("dropped", "error"):
+            raise SystemExit(f"kvarn arm {policy.verdict}: {policy.reason}")
+        out = apply(policy)
         install_kvarn_sdpa()
-        return pc
+        return out
     raise SystemExit(f"unknown arm {name!r}")
 
 
@@ -132,6 +156,13 @@ def main():
         "region every arm serves fp16; default 512).",
     )
     ap.add_argument("--kv-tail-tokens", type=int, default=1024)
+    ap.add_argument(
+        "--no-carve-out",
+        action="store_true",
+        help="Quantize every eligible layer, including the last layer of "
+        "a deep stack that the runtime holds fp16. Measures what the "
+        "held layer buys.",
+    )
     ap.add_argument("--json", default=None)
     args = ap.parse_args()
 
@@ -151,7 +182,8 @@ def main():
     arm_names = [a.strip() for a in args.arms.split(",") if a.strip()]
     if arm_names[0] != "fp16":
         raise SystemExit("the first arm must be fp16 (the baseline)")
-    caches = {a: build_arm(a, model, args.kv_tail_tokens) for a in arm_names}
+    caches = {a: build_arm(a, model, args.kv_tail_tokens, not args.no_carve_out)
+              for a in arm_names}
     stats = {a: {"prefill": ([], []), "decode": ([], [])} for a in arm_names[1:]}
 
     def run_span(a, b, leg):
