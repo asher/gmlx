@@ -462,14 +462,15 @@ Levers, cheapest first:
   see the interaction note in the speculation section above.
 - `--kv-quant-scheme kvarn` (with `--kv-bits`, default 6) is the higher-fidelity
   alternative: variance-normalized KV beats the affine cache on logit KLD at
-  every matched width, and the margin is widest where the affine cache is
-  weakest. On Qwen3.5-9B at 16k, 4-bit kvarn holds 1.6x the prefill fidelity
+  matched width, and the margin is widest where the affine cache is weakest.
+  On Qwen3.5-9B at 16k, 4-bit kvarn holds 1.6x the prefill fidelity
   and 3.0x the generation-position fidelity of `--kv-bits 4` in a smaller
   record; by 8 bits the two converge, because kvarn's fixed costs do not shrink
-  with the width while the error it shapes does. 6-bit kvarn measures at or
-  above the affine 8-bit cache on generation-position KLD (ahead from 32k
-  context on Qwen3.6-27B; teacher-forced full-context logits on that hybrid run
-  ~1.2x the 8-bit cache's, both a few 1e-4) while holding ~46% of the fp16
+  with the width while the error it shapes does. 6-bit kvarn tracks the affine
+  8-bit cache on generation-position KLD at three quarters of its width
+  (Qwen3.6-27B: 3% ahead at 32k, 3% behind at 64k; teacher-forced full-context
+  logits on that hybrid run ~1.2x the 8-bit cache's) while holding
+  ~46% of the fp16
   cache at 16k and ~43% at 32k (vs ~53% for `--kv-bits 8` at any depth); the
   sink and the last `--kv-tail-tokens` (default 1024) stay fp16, which is what
   the remaining depth-dependence is. Decode runs at
