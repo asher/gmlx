@@ -1221,7 +1221,9 @@ def _arena_split_max_tokens() -> int:
     return env_int("GMLX_ARENA_SPLIT_MAX_TOKENS", 256)
 
 
-_DECODE_ARENA_RAM_FRAC_DEFAULT = 0.6
+# Above 0.7 the live reclaimable ceiling binds instead and the arena
+# stops growing, so a larger fraction only gives away static headroom.
+_DECODE_ARENA_RAM_FRAC_DEFAULT = 0.7
 
 
 def _available_ram_bytes(include_inactive: bool = True) -> int | None:
@@ -2458,6 +2460,25 @@ def install_expert_streaming(
                 f"popularity-managed expert arena ({wired}){cov} "
                 "(--no-decode-feeder disables, GMLX_DECODE_ARENA_GB sizes)"
             )
+            rate = getattr(dfeeder, "_probe_bps", 0.0)
+            measured = (
+                f"drive reads {rate / 1e9:.1f} GB/s"
+                if rate else "fast-disk recipe forced")
+            if dfeeder._fast_disk:
+                loadlog.info(
+                    f"[stream] decode feeder: {measured} - prefetch takes the"
+                    " bandwidth (predictions evict by popularity, the barrier"
+                    " joins only what the call routes to, prestage reads at"
+                    " normal disk priority; --stream-fast-disk off restores"
+                    " the conservative recipe)"
+                )
+            elif rate:
+                loadlog.info(
+                    f"[stream] decode feeder: {measured} - demand misses have"
+                    " the bandwidth, prefetch stays out of their way"
+                    " (--stream-fast-disk on overrides,"
+                    " GMLX_DECODE_FAST_DISK_GBPS sets the bar)"
+                )
     if (streaming or table_offloaded) and env_bool("GMLX_GPU_RESIDENT", True):
         tskip = frozenset()
         if table_offloaded:
