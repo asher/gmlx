@@ -473,11 +473,15 @@ Levers, cheapest first:
   ~46% of the fp16
   cache at 16k and ~43% at 32k (vs ~53% for `--kv-bits 8` at any depth); the
   sink and the last `--kv-tail-tokens` (default 1024) stay fp16, which is what
-  the remaining depth-dependence is. Decode runs at
-  fp16 parity on M3-class machines but behind `--kv-bits 8` at depth on dense
-  models (~0.9x at 16k, ~0.75x at 32k; hybrid qwen3.5/3.6 decode is KV-light
-  and shows no difference): pick kvarn for memory and fidelity, plain
-  `--kv-bits` for peak decode speed. Other widths (2-8, and mixed via
+  the remaining depth-dependence is. Decode cost tracks how much of the step
+  the KV read is: on GDN hybrids (qwen3.5/3.6) and on gemma-4's sliding-window
+  stack all three arms sit within run-to-run spread at 16k and 32k, while on a
+  KV-bound dense stack (Qwen3-0.6B Q8, 27 of 28 layers quantized) kvarn6
+  decode runs 0.81x fp16 and 0.69x `--kv-bits 8` at 16k, and 0.98x fp16 and
+  0.75x kv8 at 32k. Prefill is within 10% of both arms everywhere measured.
+  Pick kvarn for memory and fidelity, plain
+  `--kv-bits` for peak decode speed on a KV-bound dense model.
+  Other widths (2-8, and mixed via
   `GMLX_KVARN_BITS=k6v5`) trade fidelity for memory at roughly the same speed.
   Coverage follows the cache shape, not the model name: growing attention KV
   with head_dim 128, 256 or 512, minus the last layer of a deep stack, which
