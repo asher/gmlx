@@ -9,6 +9,7 @@ HuggingFace chat dataset so accept rates are content-comparable across runs.
 from __future__ import annotations
 
 import os
+import sys
 import time
 
 import mlx.core as mx
@@ -181,9 +182,13 @@ class _ChatPromptSource:
 
 def _bench_kv_arm(model, kv_bits, kv_group_size, kv_quant_scheme, kv_tail_tokens):
     """KV-cache config for the bench decode calls: (stream_generate kwargs,
-    fresh-cache factory or None). The kvarn factory prints its banner or
-    decline once and rebuilds a fresh cache per timed call; the affine arm
-    rides mlx-lm's own kv kwargs with quantization from token 0."""
+    fresh-cache factory or None). Both arms build the stack and resolve the
+    shared policy, then rebuild a fresh cache per timed call, so the bench
+    quantizes the layers `gmlx run` quantizes. Handing mlx-lm the bare kv
+    kwargs instead would arm every layer, and a sliding-window layer raises
+    on `to_quantized`."""
+    if kv_bits is None:
+        return {}, None
     if kv_quant_scheme == "kvarn":
         import io
 
@@ -199,13 +204,32 @@ def _bench_kv_arm(model, kv_bits, kv_group_size, kv_quant_scheme, kv_tail_tokens
         if factory() is None:  # declined: warned once, bench runs fp16
             return {}, None
         return {}, factory
-    if kv_bits is not None:
-        return {
-            "kv_bits": int(kv_bits),
-            "kv_group_size": int(kv_group_size),
-            "quantized_kv_start": 0,
-        }, None
-    return {}, None
+
+    from mlx_lm.models.cache import make_prompt_cache as _mpc
+
+    from gmlx.cache.kv_policy import (arm_stack, kv_line,
+                                      resolve_kv_quant_policy)
+
+    policy = resolve_kv_quant_policy(
+        _mpc(model), kv_bits=kv_bits, kv_group_size=kv_group_size,
+        quantized_kv_start=0, scheme=kv_quant_scheme)
+    print(kv_line(None, policy), file=sys.stderr)
+    if policy.verdict == "error":
+        raise SystemExit(2)
+    if policy.verdict == "dropped":
+        return {}, None
+    kwargs = {
+        "kv_bits": int(kv_bits),
+        "kv_group_size": int(kv_group_size),
+        "quantized_kv_start": 0,
+    }
+
+    def factory():
+        c = _mpc(model)
+        arm_stack(c, policy)
+        return c
+
+    return kwargs, factory
 
 
 def bench(
