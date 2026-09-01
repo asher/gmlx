@@ -508,3 +508,21 @@ def test_b1_mtp_hybrid_stack_quantizes_full_attn_layers(restorable):
         assert not isinstance(caches[i], QuantizedKVCache)
     # the last layer of a deep stack stays fp16
     assert type(caches[3]) is KVCache
+
+
+def test_mtp_kv_decline_is_shared_by_serve_run_and_chat(restorable):
+    """serve, run and chat resolve the same predicate. The CLI dropped
+    kv_bits under MTP while serve quantized the same stack; the two
+    stock verify walks are the only real declines."""
+    restorable.setenv("GMLX_QWEN_OWNED", "1")
+    assert spec_engine.mtp_kv_decline(_FakeLM()) is None
+    assert spec_engine.mtp_kv_decline(_GdnFakeLM()) is None
+
+    restorable.setenv("GMLX_QWEN_OWNED", "0")
+    assert "stock fallback" in spec_engine.mtp_kv_decline(_GdnFakeLM())
+    assert "stock fallback" in spec_engine.mtp_kv_decline(_GdnConfigFakeLM())
+    assert spec_engine.mtp_kv_decline(_FakeLM()) is None
+
+    restorable.setenv("GMLX_QWEN_OWNED", "1")
+    reason = spec_engine.mtp_kv_decline(_FakeLM(), owned_round=False)
+    assert "GMLX_OWNED_ROUND=0" in reason

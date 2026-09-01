@@ -2886,19 +2886,24 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
         # a silent fall-through to the pooled packing.
         kv_kwargs["kv_bits"] = None
 
-    # The MTP rounds have no KV converter, so only pooled layers
-    # engage.
+    # The owned rounds quantize the layers serve quantizes; the two stock
+    # verify walks cannot read packed tuples back. The cache is built once
+    # per session, before a turn picks its engine, so the opt-out decides
+    # here.
     mtp_kv_policy = None
     if kv_kwargs.get("kv_bits") is not None:
         from gmlx.cache.kv_policy import kv_line, resolve_kv_quant_policy
+        from gmlx.spec.engine import mtp_kv_decline
 
-        probe = _mtp_make_cache(b.model.language_model)
+        lm = b.model.language_model
+        decline = mtp_kv_decline(
+            lm, owned_round=os.environ.get("GMLX_OWNED_ROUND") != "0")
+        probe = _mtp_make_cache(lm)
         policy = resolve_kv_quant_policy(
             probe, kv_bits=kv_kwargs["kv_bits"],
             kv_group_size=kv_kwargs.get("kv_group_size", 64),
-            mtp=True, can_quantize_kv=False,
-            scheme=getattr(args, "kv_quant_scheme", None),
-            no_kv_reason="MTP rounds have no KV quantization hook")
+            mtp=True, scheme=getattr(args, "kv_quant_scheme", None),
+            can_quantize_kv=decline is None, no_kv_reason=decline)
         print(kv_line(None, policy), file=sys.stderr)
         if policy.verdict == "error":
             raise SystemExit(2)

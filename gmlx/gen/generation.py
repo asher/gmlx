@@ -1193,15 +1193,20 @@ def generate_speculative_owned(
     if prompt_cache is None:
         prompt_cache = _cache.make_prompt_cache(lm)
     if kv_bits is not None:
-        # The MTP rounds have no KV converter, so only pooled layers
-        # engage. Rollback is a watermark move and composes with packing.
+        # These are the rounds serve quantizes on, so the CLI quantizes
+        # the same layers: rollback trims, and affine packing is
+        # per-token along head_dim, so a trim is an offset move. The
+        # bare-stock GDN fallback is the one target that cannot verify
+        # on packed tuples.
         from gmlx.cache.kv_policy import (arm_stack, kv_line,
                                           resolve_kv_quant_policy)
+        from gmlx.spec.engine import mtp_kv_decline
 
+        decline = mtp_kv_decline(lm)
         policy = resolve_kv_quant_policy(
             prompt_cache, kv_bits=kv_bits, kv_group_size=kv_group_size,
-            mtp=True, can_quantize_kv=False, scheme=kv_quant_scheme,
-            no_kv_reason="MTP rounds have no KV quantization hook")
+            mtp=True, scheme=kv_quant_scheme,
+            can_quantize_kv=decline is None, no_kv_reason=decline)
         print(kv_line(None, policy), file=sys.stderr)
         if policy.verdict == "error":
             raise SystemExit(2)
