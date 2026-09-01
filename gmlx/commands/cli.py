@@ -589,6 +589,19 @@ def add_placement_args(ap: argparse.ArgumentParser) -> None:
         "GMLX_DECODE_ARENA_GB caps the arena size.",
     )
     grp.add_argument(
+        "--stream-fast-disk",
+        choices=("auto", "on", "off"),
+        default=None,
+        help="Streamed-decode prefetch recipe (--stream-experts only). "
+        "Speculative expert reads are worth their bandwidth only where "
+        "demand misses leave some: 'auto' (default) measures the drive at "
+        "load and takes the aggressive recipe above "
+        "GMLX_DECODE_FAST_DISK_GBPS (predictions evict by popularity, the "
+        "serve-time barrier joins only what the call routes to, prestage "
+        "reads at normal disk priority), demoting itself if the drive turns "
+        "out saturated. 'on' / 'off' pin it.",
+    )
+    grp.add_argument(
         "--gpu-keepwarm",
         action="store_true",
         help="Hold GPU clocks up during streamed decode with a tiny "
@@ -1447,6 +1460,9 @@ def _apply_placement(args, model) -> None:
     gguf_path = getattr(args, "gguf", None)
     if getattr(args, "gpu_keepwarm", False):
         os.environ["GMLX_GPU_KEEPWARM"] = "1"
+    fast_disk = getattr(args, "stream_fast_disk", None)
+    if fast_disk:
+        os.environ["GMLX_DECODE_FAST_DISK"] = fast_disk
     feeders = dict(
         feeder_prefill=getattr(args, "prefill_feeder", None),
         feeder_decode=getattr(args, "decode_feeder", None),
@@ -2049,7 +2065,8 @@ def _apply_resolved_to_args(args, rm, explicit: set) -> list[str]:
     for dest, label in (("moe_experts", "moe-experts"),
                         ("moe_miss_shed", "moe-miss-shed"),
                         ("moe_layer_shed", "moe-layer-shed"),
-                        ("moe_prestage", "moe-prestage")):
+                        ("moe_prestage", "moe-prestage"),
+                        ("stream_fast_disk", "stream-fast-disk")):
         if (getattr(rm, dest, None) is not None and dest not in explicit
                 and hasattr(args, dest)):
             setattr(args, dest, getattr(rm, dest))
@@ -2199,6 +2216,27 @@ def _lift_stream_cb_caps(argv: list[str]) -> None:
         os.environ.setdefault("MLX_MAX_MB_PER_BUFFER", "100000")
 
 
+def _ensure_stream_cb_caps(args) -> None:
+    """Same lift for a placement that came from config, not argv. The env is
+    latched by the time the overlay runs, so write the live device fields
+    instead (what the serve engine flips). A config model id decoded 40%
+    slower than the identical bare path without this."""
+    if not (getattr(args, "stream_experts", False)
+            or getattr(args, "stream_cpu", False)):
+        return
+    if os.environ.get("MLX_MAX_OPS_PER_BUFFER"):
+        return                       # argv path already latched it, or the
+                                     # user pinned their own caps
+    try:
+        import mlx_kquant as kq
+
+        from gmlx.serve.cb_phase import COARSE
+
+        kq.set_cb_caps(*COARSE)
+    except (ImportError, AttributeError):
+        pass
+
+
 def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     argv = sys.argv[1:] if argv is None else list(argv)
     _lift_stream_cb_caps(argv)
@@ -2208,6 +2246,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     rc = maybe_load_from_config(args, parser, argv)
     if rc is not None:
         return rc
+    _ensure_stream_cb_caps(args)
     if args.draft_gguf:
         args.speculative = True  # same implication as `serve`
     if args.stochastic_mtp:

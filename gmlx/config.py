@@ -11,7 +11,7 @@ Shape (see ``docs/server-config.md`` for the full reference)::
     server:    {host, port, api_key, no_auth, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, rerank, menubar, token_queue_timeout_s, prefill_step_size, dtype, decode_prefill_ratio, prefill_tick_ms, cache_limit_gb, family_defaults, stochastic_mtp, gpu_keepwarm, assistants, assistant_allow_remote}
     profiles:  {<name>: {extends, sampling, load, cache, system}}
     rules:     [{match: <glob>, profile: <name>}]
-    models:    {<id>: {path, profile, family, profiles, mmproj, draft_gguf, adapter, stream, moe_experts, moe_expert_mass, moe_miss_shed, moe_layer_shed, moe_prestage, speculative, speculative_width_cap, overrides, pin, ttl_s}}
+    models:    {<id>: {path, profile, family, profiles, mmproj, draft_gguf, adapter, stream, moe_experts, moe_expert_mass, moe_miss_shed, moe_layer_shed, moe_prestage, stream_fast_disk, speculative, speculative_width_cap, overrides, pin, ttl_s}}
     aliases:   {<name>: <id> | <id>@<profile>}    # friendly name / profile preset
     discover:  [{dir, recursive, pair_mmproj, speculative}]
     talk:      {model, voice, speed, system, language, max_tokens, mode, wake_word, wake_threshold, vad, input_device, output_device, chime, brain, push_to_talk_modifier}
@@ -134,7 +134,8 @@ _MODEL_KEYS = frozenset({"path", "profile", "family", "profiles", "mmproj",
                          "cpu_moe",  # deprecated alias for `stream:`
                          "moe_experts", "moe_expert_mass",
                          "moe_miss_shed", "moe_layer_shed", "moe_prestage",
-                         "prefill_feeder", "decode_feeder", "speculative",
+                         "prefill_feeder", "decode_feeder",
+                         "stream_fast_disk", "speculative",
                          "speculative_width_cap",
                          "overrides", "pin", "ttl_s"})
 _RULE_KEYS = frozenset({"match", "profile"})
@@ -258,6 +259,8 @@ class ModelCfg:
     # prefill feeder on, decode feeder on under `stream: experts`).
     prefill_feeder: bool | None = None
     decode_feeder: bool | None = None
+    # Streamed-decode prefetch recipe: auto (probe the drive), on, off.
+    stream_fast_disk: str | None = None
     speculative: bool = False
     # Batch-width cap for speculative decode: MTP runs only while the live
     # decode batch is this wide, wider batches decode plain (drafter stays
@@ -539,6 +542,7 @@ class ResolvedModel:
     # affecting - they decide the ring slots / wired arena built at load.
     prefill_feeder: bool | None = None
     decode_feeder: bool | None = None
+    stream_fast_disk: str | None = None
     # Sampling family (profiles.py key) the spec resolved under; informational
     # (surfaced by /v1/models and `gmlx profiles`), not load-affecting.
     family: str | None = None
@@ -593,9 +597,10 @@ class ResolvedModel:
                   else env_bool("GMLX_FEEDER_DECODE", stream == "experts"))
             levers = (str(self.moe_experts), str(self.moe_expert_mass),
                       str(self.moe_miss_shed), str(self.moe_layer_shed),
-                      str(prestage), str(pf), str(df))
+                      str(prestage), str(pf), str(df),
+                      str(self.stream_fast_disk))
         else:
-            levers = (str(None),) * 7
+            levers = (str(None),) * 8
         return (
             self.path,
             self.mmproj,
@@ -968,6 +973,7 @@ def resolve_model(
         moe_prestage=model.moe_prestage,
         prefill_feeder=model.prefill_feeder,
         decode_feeder=model.decode_feeder,
+        stream_fast_disk=model.stream_fast_disk,
         pin=bool(model.pin),
         ttl_s=ttl_s,
         profile_name=effective,
@@ -1239,6 +1245,18 @@ def _normalize_moe_prestage(value, where: str = "model"):
     return mode
 
 
+def _normalize_fast_disk(value, where: str = "model"):
+    """Validate a ``stream_fast_disk`` recipe: "auto", "on" or "off"."""
+    if value is None:
+        return None
+    mode = str(value).strip().lower()
+    if mode not in ("auto", "on", "off"):
+        raise ConfigError(
+            f"{where}.stream_fast_disk: expected 'auto', 'on' or 'off', "
+            f"got {value!r}")
+    return mode
+
+
 def _normalize_stream(value, where: str = "model", legacy=None):
     """Normalize a ``stream:`` value to one of None / "experts" / "cpu".
 
@@ -1476,6 +1494,8 @@ def _parse_model(model_id: str, raw: dict) -> ModelCfg:
             raw.get("prefill_feeder"), "prefill_feeder", f"model {model_id!r}"),
         decode_feeder=_normalize_optional_bool(
             raw.get("decode_feeder"), "decode_feeder", f"model {model_id!r}"),
+        stream_fast_disk=_normalize_fast_disk(
+            raw.get("stream_fast_disk"), f"model {model_id!r}"),
         speculative=bool(raw.get("speculative", False)),
         speculative_width_cap=_normalize_speculative_width_cap(
             raw.get("speculative_width_cap"), f"model {model_id!r}"),

@@ -75,11 +75,16 @@ def _fake_arena_alloc(shape):
 
 
 def _make_feeder(monkeypatch, tmp_path, slots_per_layer=2, n_layers=2,
-                 pressure=False):
+                 pressure=False, fast_disk="off"):
     import mlx_kquant as kq
     from gmlx.stream.decode_feeder import DecodeFeeder
 
     monkeypatch.setattr(kq, "arena_alloc", _fake_arena_alloc, raising=False)
+    # The drive probe reads through read_range, so on "auto" its reads land
+    # in whatever accounting a test has patched in, and the rate a tmp_path
+    # fixture measures is meaningless anyway. Tests that want the fast
+    # recipe ask for it by name.
+    monkeypatch.setenv("GMLX_DECODE_FAST_DISK", fast_disk)
     # Residency defaults on for streamed runs; the fake numpy arena has no
     # Metal buffer to insert, so keep it off here.
     monkeypatch.setenv("GMLX_GPU_RESIDENT", "0")
@@ -307,7 +312,8 @@ def test_arena_budget_math(monkeypatch):
         mx, "device_info", lambda: {"memory_size": 100 << 30}
     )
     got = _decode_arena_bytes(100 << 30, offsets, budget=90 << 30)
-    assert got == int(0.6 * (100 << 30)) - (20 << 30) - (8 << 30)
+    frac = gmlx.load.loader._DECODE_ARENA_RAM_FRAC_DEFAULT
+    assert got == int(frac * (100 << 30)) - (20 << 30) - (8 << 30)
     monkeypatch.setenv("GMLX_DECODE_ARENA_RAM_FRAC", "0.8")
     got = _decode_arena_bytes(100 << 30, offsets, budget=90 << 30)
     assert got == int(0.8 * (100 << 30)) - (20 << 30) - (8 << 30)
@@ -1003,6 +1009,72 @@ def test_prestage_never_evicts_hotter(monkeypatch, tmp_path):
     _wait_published(feeder, 0)
     assert feeder._slot_of[0][2] >= 0
     assert feeder._slot_of[0][0] >= 0  # hotter resident untouched
+
+
+def test_prestage_popular_evicts_coldest_resident(monkeypatch, tmp_path):
+    """Under the fast-disk recipe a rank-gated prediction displaces the
+    least-popular resident outright, where the guard policy refuses and
+    stops prefetching for the rest of the run."""
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, fast_disk="on")
+    assert (feeder._evict, feeder._settle) == ("popular", "routed")
+    feeder.stage(0, np.array([[0, 1]]))
+    feeder.stage(0, np.array([[0]]))  # counts: e0=2, e1=1
+    feeder.prestage(0, np.array([[2]]))  # counts[2]=0, colder than both
+    assert feeder._la_submitted == 1
+    assert feeder._slot_of[0][1] == -1  # coldest resident yielded its slot
+    _wait_published(feeder, 0)
+    assert feeder._slot_of[0][2] >= 0
+    assert feeder._slot_of[0][0] >= 0  # hottest resident untouched
+
+
+def test_settle_routed_leaves_unrouted_pending(monkeypatch, tmp_path):
+    """The narrow barrier joins only what the call routes to. An unrouted
+    prestage stays in flight, and its slot stays reserved (owner -4), so it
+    is invisible to the empty scan, the victim scan and the resize keep-set
+    and can never reach the slot map this call returns."""
+    import threading
+
+    import gmlx.stream.decode_feeder as dfm
+
+    monkeypatch.setattr(dfm, "_PAGE", 16)
+    monkeypatch.setenv("GMLX_DECODE_READ_TIMEOUT", "5")
+    monkeypatch.setenv("GMLX_DECODE_LOOKAHEAD_CANCEL", "0")
+    release = threading.Event()
+    real = dfm.read_range
+    blocked = {64, 320, 560}  # expert 1: gate/up/down slices
+
+    def gated(fd, mv, off):
+        if off in blocked:
+            release.wait(5)
+        real(fd, mv, off)
+
+    monkeypatch.setattr(dfm, "read_range", gated)
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, fast_disk="on")
+    feeder.prestage(0, np.array([[1]]))
+    pending_slot = feeder._pending[0][1][0]
+    slots = feeder.stage(0, np.array([[0]]))
+    assert 1 in feeder._pending[0]  # not joined: this call never routed to it
+    assert feeder._owner[0][pending_slot] == -4
+    assert pending_slot not in set(slots.reshape(-1).tolist())
+    release.set()
+    _wait_published(feeder, 0)
+
+
+def test_probe_timeout_is_not_a_fast_disk(monkeypatch, tmp_path):
+    """A drive whose reads hang must not hang the load. The probe gives up
+    and reads as a slow disk, which is the conservative recipe."""
+    import threading
+
+    import gmlx.stream.decode_feeder as dfm
+
+    monkeypatch.setattr(dfm, "_PAGE", 16)
+    monkeypatch.setattr(dfm, "_FAST_DISK_PROBE_TIMEOUT_S", 0.2)
+    never = threading.Event()
+    monkeypatch.setattr(dfm, "read_range", lambda fd, mv, off: never.wait())
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, fast_disk="auto")
+    assert feeder._fast_disk is False and feeder._probe_bps == 0.0
+    assert (feeder._evict, feeder._settle) == ("guard", "all")
+    never.set()
 
 
 def test_prestage_wedge_quarantines(monkeypatch, tmp_path):

@@ -3214,6 +3214,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         # an on-disk file is resolved against the server config by id/alias, applying that
         # model's path + sampling/template/load settings.
         from gmlx.commands.cli import (
+            _ensure_stream_cb_caps,
             apply_family_defaults,
             maybe_load_from_config,
             split_path_intent,
@@ -3223,6 +3224,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         rc = maybe_load_from_config(args, parser, argv)
         if rc is not None:
             return rc
+        _ensure_stream_cb_caps(args)
         gguf = os.path.expanduser(args.gguf)
         if not os.path.exists(gguf):
             if args.gguf.startswith(("hf:", "http://", "https://")):
