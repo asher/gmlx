@@ -29,8 +29,8 @@ walks a scripted session:
   6. **resume** - a second launch with ``--resume`` prints the recap and streams
      a post-resume turn (the deferred full-history prefill).
 
-An optional **multimodal** arm runs when a VLM GGUF + projector are present
-(``gemma4_e2b`` + ``gemma4_e2b_mmproj``): it stages the bundled ``assets/cats.jpg``
+An optional **multimodal** arm runs when the registry's ``vlm`` role resolves to a
+VLM GGUF + projector: it stages the bundled ``assets/cats.jpg``
 with ``/image`` and generates a reply about it (the picture-says-"cat" check is
 reported, not gated - it depends on the model).
 
@@ -328,7 +328,8 @@ def main() -> int:
 
     reg = ModelRegistry(root=a.models_root)
     if a.print_pull:
-        reg.print_bootstrap([a.handle, "gemma4_e2b", "gemma4_e2b_mmproj"])
+        reg.print_bootstrap([a.handle, *(reg.role("vlm") or ("gemma4_e2b",
+                                                             "gemma4_e2b_mmproj"))])
         return 0
 
     try:
@@ -359,14 +360,15 @@ def main() -> int:
         _run_resume_arm(cli, gguf, os.path.join(tmp, "chat-resume.log"),
                         checks, xdg=xdg)
 
-        vlm, mmproj = reg.find("gemma4_e2b"), reg.find("gemma4_e2b_mmproj")
+        vlm_paths = reg.role_paths("vlm")
         if a.no_vlm:
             print("[vlm]  skipped (--no-vlm)")
-        elif vlm and mmproj:
+        elif vlm_paths:
             print("=" * 64 + "\nMULTIMODAL ARM\n" + "=" * 64)
-            _run_vlm_arm(cli, vlm, mmproj, os.path.join(tmp, "chat-vlm.log"), checks)
+            _run_vlm_arm(cli, vlm_paths[0], vlm_paths[1],
+                         os.path.join(tmp, "chat-vlm.log"), checks)
         else:
-            print("[vlm]  skipped (no gemma4_e2b + mmproj on disk)")
+            print("[vlm]  skipped (no vision model + mmproj on disk)")
 
         rc = _report(checks, Path(tmp))
     finally:
