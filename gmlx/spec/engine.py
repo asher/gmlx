@@ -1864,6 +1864,27 @@ def dequantize_lift_cache(c):
     return lifted
 
 
+def mtp_kv_decline(lm, *, owned_round: bool = True) -> str | None:
+    """Why this MTP verify walk cannot run on packed KV, or None.
+
+    The owned rounds roll back with trim, and affine packing is
+    per-token along head_dim, so a trim is an offset move: they take the
+    same layers serve takes. The two stock walks slice keys as raw
+    arrays and cannot read a packed tuple back. Shared by serve, run and
+    chat so the three cannot drift.
+    """
+    if not owned_round:
+        return "GMLX_OWNED_ROUND=0 stock rounds have no KV quantization hook"
+    from gmlx.models.qwen35.gdn import stock_gdn_fallback
+
+    mt = (getattr(lm, "model_type", None)
+          or getattr(getattr(lm, "config", None), "model_type", None))
+    if stock_gdn_fallback(mt):
+        return ("the GMLX_QWEN_OWNED=0 stock fallback cannot verify on a "
+                "quantized KV cache")
+    return None
+
+
 def install_continuous_batch_admission() -> None:
     """Let new requests prefill and inject during speculative decode.
 
@@ -2518,18 +2539,11 @@ def install_spec_kv_quant() -> None:
                     "rollback is unsupported; %d layers run fp16 KV",
                     batch_size, swapped)
             return caches
-        from gmlx.models.qwen35.gdn import stock_gdn_fallback
-
-        mt = (getattr(lm, "model_type", None)
-              or getattr(getattr(lm, "config", None), "model_type", None))
-        if stock_gdn_fallback(mt):
-            # The bare-stock fallback slices keys as raw arrays and
-            # crashes on quantized tuples.
+        decline = mtp_kv_decline(lm)
+        if decline is not None:
             if not _warned_stock[0]:
                 _warned_stock[0] = True
-                _log.warning(
-                    "KV_BITS dropped on the MTP path: the GMLX_QWEN_OWNED=0 "
-                    "stock fallback cannot verify on a quantized KV cache")
+                _log.warning("KV_BITS dropped on the MTP path: %s", decline)
             return caches
         # The shared policy owns layer selection: nested KV members,
         # pools, windows, and opt-outs at any depth.

@@ -986,15 +986,16 @@ def generate_speculative_owned(
     lm = model.language_model if hasattr(model, "language_model") else model
     prompt_cache = _cache.make_prompt_cache(lm)
     if kv_bits is not None:
-        # The MTP rounds have no KV converter, so only pooled layers
-        # engage. Rollback is a watermark move and composes with packing.
+        # Owned rounds take the layers serve takes; the stock walks
+        # decline (mtp_kv_decline).
         from gmlx.cache.kv_policy import (arm_stack, kv_line,
                                           resolve_kv_quant_policy)
+        from gmlx.spec.engine import mtp_kv_decline
 
+        decline = mtp_kv_decline(lm)
         policy = resolve_kv_quant_policy(
             prompt_cache, kv_bits=kv_bits, kv_group_size=kv_group_size,
-            mtp=True, can_quantize_kv=False,
-            no_kv_reason="MTP rounds have no KV quantization hook")
+            mtp=True, can_quantize_kv=decline is None, no_kv_reason=decline)
         print(kv_line(None, policy), file=sys.stderr)
         if policy.verdict == "error":
             raise SystemExit(2)
