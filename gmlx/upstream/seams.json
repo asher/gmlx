@@ -4,6 +4,7 @@
   "mlx_lm.models.base:create_causal_mask": "e99d5e475b029fdf6fe2d71a4d45e66d9ccf4304199e42e99c5c92da08f41524",
   "mlx_lm.models.base:quantized_scaled_dot_product_attention": "d7c6813bb1ee072de5d2c069c68d8a88488ba50d13d8576dbc8c6509ee8c77c1",
   "mlx_lm.models.cache:ArraysCache": "44bf19bcfcbe2cca94608365febf370ba9b21c6d76e77ba66ffe35ffebd79ac9",
+  "mlx_lm.models.cache:QuantizedKVCache.update_and_fetch": "86ae7aa9c38b42aa1e01cb29197f905bf5dfd8dfc35a607e501f66c7e3e17b20",
   "mlx_lm.models.cache:RotatingKVCache": "9cc40e8f790ac1ed12cdf02d71f3e1c16c3c8429f6bc7dbdc46aefb169a5351d",
   "mlx_lm.models.deepseek_v32:MoEGate": "7a56431102868369d3a6d0d1790af448a1cf7a3a2f3a26749de6e247b3287996",
   "mlx_lm.models.gated_delta:gated_delta_kernel": "87dd535eba98a52b22f44ca642f8e8fbbf496446790a8a790ee626fef74a9483",
