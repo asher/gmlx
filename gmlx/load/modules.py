@@ -186,11 +186,12 @@ class _FusedMoeCaps:
             "iq4_nl", "iq4_xs", "iq3_s", "iq3_xxs",
             "iq2_xxs", "iq2_xs", "iq2_s", "iq1_s", "iq1_m",
         )
-        # Native-fp wire codecs joined the fused family with the capability
-        # query itself; sniff it so older kq builds keep them unfused.
+        # Codecs that joined the fused family after the capability query
+        # itself; sniff it so older kq builds keep them unfused.
         kq_has_glu = getattr(kq, "codec_has_moe_glu", None)
         if kq_has_glu is not None:
-            codecs += tuple(c for c in ("mxfp4", "nvfp4") if kq_has_glu(c))
+            codecs += tuple(
+                c for c in ("mxfp4", "nvfp4", "stq1_0") if kq_has_glu(c))
         self.kq_fused_codecs = codecs
         # Shared-expert codecs allowed to differ from the expert stacks (the
         # only mixed combos with kernels); needs the shexp_kquant_type-aware
@@ -263,7 +264,18 @@ def _kq_wire_k(w, codec):
     """Logical K of a wire-byte tensor's last dim under `codec`
     (-1 when the byte width is not a whole number of blocks)."""
     from gguf.constants import GGML_QUANT_SIZES, GGMLQuantizationType
-    wpb, bpb = GGML_QUANT_SIZES[GGMLQuantizationType[codec.upper()]]
+
+    name = codec.upper()
+    try:
+        wpb, bpb = GGML_QUANT_SIZES[GGMLQuantizationType[name]]
+    except KeyError:
+        # Codecs newer than the installed gguf-py; headerscan owns the table.
+        from .headerscan import QUANT_TYPE_FALLBACK
+
+        sizes = dict(QUANT_TYPE_FALLBACK.values())
+        if name not in sizes:
+            return -1
+        wpb, bpb = sizes[name]
     return (w.shape[-1] // bpb) * wpb if w.shape[-1] % bpb == 0 else -1
 
 

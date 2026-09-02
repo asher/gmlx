@@ -29,6 +29,7 @@ from __future__ import annotations
 import ctypes
 import os
 from concurrent.futures import ThreadPoolExecutor
+from typing import NamedTuple
 
 from gmlx.envflags import env_bool
 
@@ -48,6 +49,89 @@ _WORKERS = 8
 # Refuse a pin that would leave the box no working room: wired
 # every-token weights + decode arena + KV + anon must fit under RAM with margin.
 _MAX_FRACTION = 0.6
+
+
+# Wire types the load pipeline may convert. Quantized tensors keep their
+# wire bytes, so the runtime views them in place and the pin is right.
+_FLOAT_WIRE = {"F64": 8, "F32": 4, "F16": 2, "BF16": 2}
+_MIN_CAST_BYTES = 64 << 20
+
+
+def _held_float_arrays(model):
+    """``element count -> total bytes`` over the model's float parameters."""
+    import mlx.core as mx
+
+    def walk(node):
+        if isinstance(node, dict):
+            for v in node.values():
+                yield from walk(v)
+        elif isinstance(node, (list, tuple)):
+            for v in node:
+                yield from walk(v)
+        elif isinstance(node, mx.array):
+            yield node
+
+    out: dict[int, int] = {}
+    for arr in walk(model.parameters()):
+        if not mx.issubdtype(arr.dtype, mx.floating):
+            continue
+        out[arr.size] = out.get(arr.size, 0) + arr.nbytes
+    return out
+
+
+class CastCopies(NamedTuple):
+    """``names``: wire tensors the runtime replaced with converted arrays.
+    ``dead_bytes``: wire bytes they hold over what the copies weigh."""
+
+    names: frozenset[str]
+    dead_bytes: int
+
+
+def cast_copies(model, gguf_path: str | None) -> CastCopies:
+    """Non-expert tensors the runtime reads from a converted copy.
+
+    The pin wires wire bytes so the runtime's zero-copy views hit wired
+    pages. A tensor the load pipeline converts has no such view: an F32 lm
+    head becomes its own bf16 array, and wiring the F32 range holds bytes
+    nothing reads again - on a streaming model, at the arena's expense.
+
+    Matched on element count and width rather than tensor names, so it
+    holds for any architecture and for a head under any name, tied or not:
+    a float wire tensor whose same-sized float parameters weigh less in
+    total than the wire does was converted on the way in.
+    """
+    none = CastCopies(frozenset(), 0)
+    if model is None or gguf_path is None:
+        return none
+    if not env_bool("GMLX_PIN_CAST_EXCLUDE", True):
+        return none
+    try:
+        from gmlx.load.headerscan import scan_gguf
+
+        tensors = scan_gguf(gguf_path).tensors
+        held = _held_float_arrays(model)
+    except Exception:
+        return none
+    wire: dict[int, int] = {}
+    cand: dict[int, list] = {}
+    for t in tensors:
+        width = _FLOAT_WIRE.get(getattr(t, "type_name", None))
+        if width is None or _EXPS_RE.fullmatch(t.name):
+            continue
+        n = t.nbytes // width
+        wire[n] = wire.get(n, 0) + t.nbytes
+        cand.setdefault(n, []).append(t)
+    out, dead = set(), 0
+    for n, tot in wire.items():
+        if n not in held or held[n] >= tot:
+            continue
+        # Tiny tensors are not worth the risk of a size collision.
+        hit = [t for t in cand[n] if t.nbytes >= _MIN_CAST_BYTES]
+        if not hit:
+            continue
+        out.update(t.name for t in hit)
+        dead += max(0, sum(t.nbytes for t in hit) - held[n])
+    return CastCopies(frozenset(out), dead)
 
 
 def _libc():
@@ -168,11 +252,16 @@ class WeightsPin:
 def maybe_pin_weights(
     gguf_path: str | None,
     exclude_names: frozenset[str] | set[str] = frozenset(),
+    reserved_bytes: int = 0,
 ) -> WeightsPin | None:
     """A WeightsPin over the model's non-expert ranges, or None with a printed
     reason. Called only for streaming-mode installs. ``exclude_names``:
     streamed lookup-table tensors to keep out of the pin set (see
-    every_token_ranges)."""
+    every_token_ranges). ``reserved_bytes``: wired bytes another live
+    streaming install already holds (``gmlx.stream.installs``), charged
+    against the RAM fraction below - mlock has no backpressure, so a second
+    pin that ignores the first wires the two together past what the machine
+    has, and wired pages are the one kind jetsam cannot take back."""
     if gguf_path is None:
         return None
     if not env_bool("GMLX_PIN_WEIGHTS", True):
@@ -186,11 +275,16 @@ def maybe_pin_weights(
             ram = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGESIZE")
         except (ValueError, OSError):
             ram = 0
-        if ram and total > _MAX_FRACTION * ram:
+        if ram and total + reserved_bytes > _MAX_FRACTION * ram:
+            held = (
+                "" if not reserved_bytes else
+                f" on top of {reserved_bytes / 1e9:.1f} GB another live "
+                "streaming install already holds")
             print(
                 f"[stream] weight pin skipped: every-token weights "
-                f"({total / 1e9:.1f} GB) exceed {int(_MAX_FRACTION * 100)}% "
-                f"of RAM ({ram / 1e9:.0f} GB); staying cache-managed")
+                f"({total / 1e9:.1f} GB){held} exceed "
+                f"{int(_MAX_FRACTION * 100)}% of RAM ({ram / 1e9:.0f} GB); "
+                "staying cache-managed")
             return None
         pin = WeightsPin(ranges)
         if pin._refused:

@@ -991,6 +991,160 @@ def test_glm5next_mla_shapes_probe_walks_past_kda_layers():
                           tensor_shapes={"output.weight": [64, VOCAB]})
 
 
+def _hyv4_meta() -> dict:
+    arch = "hyv4"
+    m = _base_meta(arch)
+    m[f"{arch}.block_count"] = 4
+    # Absorbed MLA: one latent "head" on the wire.
+    m[f"{arch}.attention.head_count_kv"] = 1
+    m[f"{arch}.attention.key_length"] = 40        # kv_lora 32 + rope 8
+    m[f"{arch}.attention.q_lora_rank"] = 32
+    m[f"{arch}.attention.kv_lora_rank"] = 32
+    m[f"{arch}.attention.key_length_mla"] = 24    # nope 16 + rope 8
+    m[f"{arch}.attention.value_length_mla"] = 24
+    m[f"{arch}.rope.dimension_count"] = 8
+    m[f"{arch}.rope.freq_base"] = 1e7
+    # Per-token DSA lightning indexer. is_full: layer 2 shares layer 1's pick.
+    m[f"{arch}.attention.indexer.head_count"] = 2
+    m[f"{arch}.attention.indexer.key_length"] = 16
+    m[f"{arch}.attention.indexer.top_k"] = 8
+    m[f"{arch}.attention.indexer.is_full"] = [1, 1, 0, 1]
+    # MoE (sigmoid + selection-only correction bias)
+    m[f"{arch}.expert_count"] = 4
+    m[f"{arch}.expert_used_count"] = 2
+    m[f"{arch}.expert_feed_forward_length"] = 24
+    m[f"{arch}.expert_shared_count"] = 1
+    m[f"{arch}.expert_weights_scale"] = 2.827
+    m[f"{arch}.expert_weights_norm"] = True
+    m[f"{arch}.expert_gating_func"] = 2
+    m[f"{arch}.leading_dense_block_count"] = 1
+    # Routed experts only: the converter leaves swiglu_clamp_shexp unwritten.
+    m[f"{arch}.swiglu_clamp_exp"] = [10.0] * 4
+    # iHC: 4 streams, no sinkhorn term (float32(1e-6) as the wire stores it).
+    m[f"{arch}.hyper_connection.count"] = 4
+    m[f"{arch}.hyper_connection.epsilon"] = 9.9999999747e-07
+    m[f"{arch}.hyper_connection.magnitude"] = 2.0
+    m[f"{arch}.vocab_size"] = VOCAB
+    return m
+
+
+# GGUF-native order: attn_q_b [q_lora, heads*q_head_dim] (q_head_dim = nope
+# 16 + rope 8), attn_v_b [kv_lora, v_head_dim, heads].
+_HYV4_SHAPES = {
+    "output.weight": [64, VOCAB],
+    "blk.0.attn_q_b.weight": [32, 96],
+    "blk.0.attn_v_b.weight": [32, 24, 4],
+    "blk.0.ffn_gate_exps.weight": [64, 24, 4],
+}
+
+
+def test_hyv4_synth_fields():
+    c = synthesize_config(_hyv4_meta(), tensor_shapes=_HYV4_SHAPES)
+    assert c["model_type"] == "hy_v4"
+    assert c["num_hidden_layers"] == 4             # no nextn tail: HY4 has none
+    assert "head_dim" not in c                     # key_length is the latent
+    assert c["q_lora_rank"] == 32
+    assert c["kv_lora_rank"] == 32
+    assert c["qk_rope_head_dim"] == 8
+    assert c["qk_nope_head_dim"] == 16             # 96 // 4 - 8
+    assert c["v_head_dim"] == 24
+    assert c["index_n_heads"] == 2
+    assert c["index_head_dim"] == 16
+    assert c["index_topk"] == 8
+    assert c["index_is_full"] == [1, 1, 0, 1]
+    assert c["scoring_func"] == "sigmoid"
+    assert c["n_routed_experts"] == 4 and c["num_experts_per_tok"] == 2
+    assert c["moe_intermediate_size"] == 24
+    assert c["n_shared_experts"] == 1
+    assert c["first_k_dense_replace"] == 1
+    assert c["routed_scaling_factor"] == 2.827
+    assert c["norm_topk_prob"] is True
+    assert c["swiglu_limit"] == 10.0
+    assert c["hc_mult"] == 4
+    assert abs(c["hc_eps"] - 1e-6) < 1e-12         # float32(1e-6), never 1e-7
+    assert c["hc_magnitude"] == 2.0
+    assert c["rope_theta"] == 1e7
+    assert c["vocab_size"] == VOCAB
+    assert "hc_sinkhorn_iters" not in c            # iHC has no comb term
+
+
+def test_hyv4_synth_instantiates():
+    # The model class is gmlx-vendored, registered into mlx_lm.models exactly
+    # as the loader does it.
+    import gmlx.models.hy_v4.model as hy_v4_model
+    hy_v4_model.ensure_registered()
+
+    c = synthesize_config(_hyv4_meta(), tensor_shapes=_HYV4_SHAPES)
+    Model, ModelArgs = _get_classes(c)
+    model = Model(ModelArgs.from_dict(c))
+    mx.eval(model.parameters())
+    out = model(mx.array([[1, 2, 3, 4]]))
+    mx.eval(out)
+    assert out.shape == (1, 4, VOCAB)
+    assert bool(mx.all(mx.isfinite(out)))
+    # Layer 0 dense MLP, layer 1 MoE (gate + switch_mlp + shared expert).
+    assert hasattr(model.model.layers[0].mlp, "gate_proj")
+    assert hasattr(model.model.layers[1].mlp, "switch_mlp")
+    assert hasattr(model.model.layers[1].mlp, "gate")
+    assert model.model.layers[1].mlp.shared_experts is not None
+
+
+@pytest.mark.parametrize("key", [
+    "hyv4.attention.q_lora_rank",
+    "hyv4.attention.kv_lora_rank",
+    "hyv4.rope.dimension_count",
+    "hyv4.attention.indexer.head_count",
+    "hyv4.attention.indexer.key_length",
+    "hyv4.hyper_connection.count",
+    "hyv4.hyper_connection.epsilon",
+    "hyv4.hyper_connection.magnitude",
+])
+def test_hyv4_required_keys_fail_loud(key):
+    # A silent default here loads cleanly and generates garbage (wrong rope
+    # split, wrong indexer widths, wrong stream count) - all required.
+    m = _hyv4_meta()
+    del m[key]
+    with pytest.raises(ValueError, match=key.rsplit(".", 1)[-1]):
+        synthesize_config(m, tensor_shapes=_HYV4_SHAPES)
+
+
+def test_hyv4_softmax_gating_rejected():
+    m = _hyv4_meta()
+    m["hyv4.expert_gating_func"] = 1
+    with pytest.raises(NotImplementedError, match="sigmoid"):
+        synthesize_config(m, tensor_shapes=_HYV4_SHAPES)
+
+
+def test_hyv4_nonuniform_swiglu_clamp_rejected():
+    m = _hyv4_meta()
+    m["hyv4.swiglu_clamp_exp"] = [10.0, 10.0, 8.0, 10.0]
+    with pytest.raises(ValueError, match="non-uniform"):
+        synthesize_config(m, tensor_shapes=_HYV4_SHAPES)
+
+
+def test_hyv4_shared_first_layer_rejected():
+    # Layer 0 has no preceding layer to share a top-k selection from.
+    m = _hyv4_meta()
+    m["hyv4.attention.indexer.is_full"] = [0, 1, 0, 1]
+    with pytest.raises(ValueError, match="layer 0"):
+        synthesize_config(m, tensor_shapes=_HYV4_SHAPES)
+
+
+def test_hyv4_short_is_full_rejected():
+    # A truncated schedule would silently make the tail layers dense.
+    m = _hyv4_meta()
+    m["hyv4.attention.indexer.is_full"] = [1, 1, 0]
+    with pytest.raises(ValueError, match="is_full"):
+        synthesize_config(m, tensor_shapes=_HYV4_SHAPES)
+
+
+def test_hyv4_missing_mla_shapes_rejected():
+    # The nope/value widths come from the tensor shapes, not the metadata.
+    with pytest.raises(ValueError, match="MLA head dims"):
+        synthesize_config(_hyv4_meta(),
+                          tensor_shapes={"output.weight": [64, VOCAB]})
+
+
 def _granitehybrid_meta() -> dict:
     arch = "granitehybrid"
     m = _base_meta(arch)

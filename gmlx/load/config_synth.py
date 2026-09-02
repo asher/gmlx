@@ -101,6 +101,11 @@ GGUF_ARCH_TO_MODEL_TYPE = {
     # sigmoid MoE with clamped SwiGLU, 4-stream sinkhorn hyper-connections,
     # and an in-GGUF MTP/nextn layer. Vendored gmlx.models.glm5_next.
     "glm5next": "glm5_next",
+    # HY4-preview (llama.cpp arch 'hyv4'): absorbed MLA with per-head sinks
+    # and a sigmoid output gate, a per-token DSA lightning indexer on 21 of
+    # 78 layers, sigmoid MoE with clamped routed experts, and 4-stream
+    # independent hyper-connections. Vendored gmlx.models.hy_v4.
+    "hyv4": "hy_v4",
     # DeepSeek V4 Flash (dwarfstar/antirez GGUF; not a llama.cpp arch): single
     # shared KV latent + grouped low-rank output proj, per-layer local/
     # compressed/sparse-indexed attention (compress_ratios), hyper-connections,
@@ -287,6 +292,34 @@ def _require(value, *, arch: str, gguf_field: str):
         raise ValueError(
             f"config synth: missing GGUF field {gguf_field!r} for arch {arch!r}")
     return value
+
+
+def _read_swiglu_clamp(meta, arch: str, *, block_count: int | None = None,
+                       extra_keys: tuple[str, ...] = ()) -> float | None:
+    """One global SwiGLU clamp limit from the per-layer GGUF arrays.
+
+    ``swiglu_clamp_exp`` is written per layer (sized for every block, MTP
+    and dense layers included), but every known conversion is uniform and
+    the model classes take one scalar. ``extra_keys`` names the sibling
+    arrays an arch also clamps, e.g. ``swiglu_clamp_shexp`` for the shared
+    expert. ``block_count`` limits the read to the trunk. Returns None when
+    no array is present; raises when the values disagree, because a
+    non-uniform array would silently mis-clamp every layer but the first.
+    """
+    keys = ("swiglu_clamp_exp", *extra_keys)
+    clamps: list[float] = []
+    for key in keys:
+        arr = _read_float_array(meta, f"{arch}.{key}")
+        if arr:
+            clamps.extend(arr[:block_count] if block_count else arr)
+    if not clamps:
+        return None
+    uniq = set(clamps)
+    if len(uniq) != 1:
+        raise ValueError(
+            f"{arch} synth: non-uniform {'/'.join(keys)} {sorted(uniq)} - "
+            f"the {arch} model class supports one global limit.")
+    return float(clamps[0])
 
 
 def _first_or_scalar(meta, key: str) -> int | None:
@@ -2785,14 +2818,9 @@ def _synth_deepseek4(meta, shapes, config: dict) -> None:
 
     # Clipped SwiGLU: per-layer array in the GGUF, uniform on every known
     # V4 conversion; the model class takes one scalar.
-    clamps = _read_float_array(meta, f"{arch}.swiglu_clamp_exp")
-    if clamps:
-        uniq = set(clamps[:block_count])
-        if len(uniq) != 1:
-            raise ValueError(
-                f"deepseek4 synth: non-uniform swiglu_clamp_exp {sorted(uniq)} "
-                "- the deepseek_v4 model class supports one global limit.")
-        config["swiglu_limit"] = float(clamps[0])
+    clamp = _read_swiglu_clamp(meta, arch, block_count=block_count)
+    if clamp is not None:
+        config["swiglu_limit"] = clamp
 
     nextn = _read_int(meta, f"{arch}.nextn_predict_layers")
     if nextn is not None:
@@ -2938,18 +2966,10 @@ def _synth_glm5next(meta, shapes, config: dict) -> None:
     # Clamped SwiGLU: per-layer arrays (routed + shared, sized for all
     # block_count layers incl. dense and MTP), uniform on every known
     # conversion; the model class takes one scalar.
-    clamps = []
-    for key in ("swiglu_clamp_exp", "swiglu_clamp_shexp"):
-        arr = _read_float_array(meta, f"{arch}.{key}")
-        if arr:
-            clamps.extend(arr)
-    if clamps:
-        uniq = set(clamps)
-        if len(uniq) != 1:
-            raise ValueError(
-                f"glm5next synth: non-uniform swiglu clamp {sorted(uniq)} "
-                "- the glm5_next model class supports one global limit.")
-        config["swiglu_limit"] = float(clamps[0])
+    clamp = _read_swiglu_clamp(
+        meta, arch, extra_keys=("swiglu_clamp_shexp",))
+    if clamp is not None:
+        config["swiglu_limit"] = clamp
 
     # Hyper-connections (4 parallel residual streams, sinkhorn mixing).
     config["hc_mult"] = _require(
@@ -2961,6 +2981,120 @@ def _synth_glm5next(meta, shapes, config: dict) -> None:
     hc_eps = _read_float(meta, f"{arch}.hyper_connection.epsilon")
     if hc_eps is not None:
         config["hc_eps"] = hc_eps
+
+    # vocab_size: prefer the explicit GGUF field (the universal read derives
+    # it from the token array, which header-only scans truncate).
+    vocab = _read_int(meta, f"{arch}.vocab_size")
+    if vocab is not None:
+        config["vocab_size"] = vocab
+
+
+# hyv4 (HY4-preview 256x29B)
+
+def _synth_hyv4(meta, shapes, config: dict) -> None:
+    """Synthesize a hy_v4 config from a 'hyv4'-arch GGUF.
+
+    Absorbed MLA in the DeepSeek-V3.2 shape (q_a/q_b, a kv_lora latent plus
+    a rope half, per-head k_b/v_b) with a per-token DSA lightning indexer,
+    sigmoid MoE behind a leading dense block, and 4-stream independent
+    hyper-connections. Universal fields cover hidden/layers/heads/eps/
+    rope_theta/ctx/vocab and intermediate_size (the dense block's MLP
+    width); this adds the MLA decomposition, the indexer, the MoE block and
+    the iHC parameters.
+    """
+    arch = "hyv4"
+
+    # The universal default set head_dim from key_length (= kv_lora +
+    # qk_rope), which is the latent width, not a head dim.
+    config.pop("head_dim", None)
+
+    num_heads = config["num_attention_heads"]
+
+    # MLA head-dim decomposition
+    config["q_lora_rank"] = _require(
+        _read_int(meta, f"{arch}.attention.q_lora_rank"),
+        arch=arch, gguf_field=f"{arch}.attention.q_lora_rank")
+    config["kv_lora_rank"] = _require(
+        _read_int(meta, f"{arch}.attention.kv_lora_rank"),
+        arch=arch, gguf_field=f"{arch}.attention.kv_lora_rank")
+    qk_rope = _require(
+        _read_int(meta, f"{arch}.rope.dimension_count"),
+        arch=arch, gguf_field=f"{arch}.rope.dimension_count")
+    config["qk_rope_head_dim"] = qk_rope
+
+    # nope / value widths from the per-head tensor shapes, which hold across
+    # llama.cpp metadata-key variations. GGUF-native order:
+    #   attn_q_b: [q_lora, num_heads * q_head_dim]  (q_head_dim = nope + rope)
+    #   attn_v_b: [kv_lora, v_head_dim, num_heads]
+    q_b = shapes.get("blk.0.attn_q_b.weight")
+    v_b = shapes.get("blk.0.attn_v_b.weight")
+    if q_b is None or v_b is None:
+        raise ValueError(
+            "hyv4 synth: need blk.0.attn_q_b.weight + blk.0.attn_v_b.weight "
+            "to derive the MLA head dims. Pass hf_source.")
+    config["qk_nope_head_dim"] = q_b[1] // num_heads - qk_rope
+    config["v_head_dim"] = v_b[1]
+
+    # DSA lightning indexer. is_full is written explicitly by the converter -
+    # never inferred from tensor presence - and layer 0 must own one because
+    # nothing precedes it to share a selection from.
+    top_k = _read_int(meta, f"{arch}.attention.indexer.top_k")
+    if top_k:
+        config["index_topk"] = top_k
+        config["index_n_heads"] = _require(
+            _read_int(meta, f"{arch}.attention.indexer.head_count"),
+            arch=arch, gguf_field=f"{arch}.attention.indexer.head_count")
+        config["index_head_dim"] = _require(
+            _read_int(meta, f"{arch}.attention.indexer.key_length"),
+            arch=arch, gguf_field=f"{arch}.attention.indexer.key_length")
+        is_full = _read_int_array(meta, f"{arch}.attention.indexer.is_full")
+        n_layer = config["num_hidden_layers"]
+        if not is_full or len(is_full) < n_layer:
+            raise ValueError(
+                f"hyv4 synth: {arch}.attention.indexer.is_full has "
+                f"{len(is_full or [])} entries, need {n_layer}.")
+        is_full = [int(v) for v in is_full[:n_layer]]
+        if not is_full[0]:
+            raise ValueError(
+                "hyv4 synth: layer 0 must own an indexer; nothing precedes "
+                "it to share a selection from.")
+        config["index_is_full"] = is_full
+
+    # MoE (sigmoid-gated fine-grained + selection-only correction bias)
+    moe = _read_v3_moe(meta, shapes, arch)
+    if not moe["sigmoid"]:
+        raise NotImplementedError(
+            "hyv4 synth: expert_gating_func != 2 (sigmoid). HY4 routes "
+            "sigmoid-only; re-convert with the hyv4 converter.")
+    config["scoring_func"] = "sigmoid"
+    config["n_routed_experts"] = moe["n_experts"]
+    config["num_experts_per_tok"] = moe["n_used"]
+    config["moe_intermediate_size"] = moe["moe_ffn"]
+    config["n_shared_experts"] = moe["n_shared"]
+    config["first_k_dense_replace"] = (
+        _read_int(meta, f"{arch}.leading_dense_block_count") or 0)
+    scale = _read_float(meta, f"{arch}.expert_weights_scale")
+    config["routed_scaling_factor"] = scale if scale is not None else 1.0
+    norm = _read_bool(meta, f"{arch}.expert_weights_norm")
+    config["norm_topk_prob"] = True if norm is None else norm
+
+    # Clamped SwiGLU on the routed experts only: the converter leaves
+    # swiglu_clamp_shexp unwritten, so the shared and dense MLPs are plain.
+    clamp = _read_swiglu_clamp(
+        meta, arch, block_count=config["num_hidden_layers"])
+    if clamp is not None:
+        config["swiglu_limit"] = clamp
+
+    # iHC: 4 parallel residual streams, no sinkhorn term.
+    config["hc_mult"] = _require(
+        _read_int(meta, f"{arch}.hyper_connection.count"),
+        arch=arch, gguf_field=f"{arch}.hyper_connection.count")
+    config["hc_eps"] = _require(
+        _read_float(meta, f"{arch}.hyper_connection.epsilon"),
+        arch=arch, gguf_field=f"{arch}.hyper_connection.epsilon")
+    config["hc_magnitude"] = _require(
+        _read_float(meta, f"{arch}.hyper_connection.magnitude"),
+        arch=arch, gguf_field=f"{arch}.hyper_connection.magnitude")
 
     # vocab_size: prefer the explicit GGUF field (the universal read derives
     # it from the token array, which header-only scans truncate).
@@ -3250,6 +3384,7 @@ _SYNTH = {
     "deepseek2": _synth_deepseek2,
     "glm-dsa": _synth_glm_moe_dsa,
     "glm5next": _synth_glm5next,
+    "hyv4": _synth_hyv4,
     "kimi-k3": _synth_kimi_k3,
     "deepseek4": _synth_deepseek4,
     "glm4moe": _synth_glm4moe,

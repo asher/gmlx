@@ -454,7 +454,7 @@ def test_fallback_excludes_streamable_from_pin(monkeypatch):
     monkeypatch.setenv("GMLX_GPU_RESIDENT", "0")
     seen = {}
 
-    def _capture(gguf_path, exclude_names=frozenset()):
+    def _capture(gguf_path, exclude_names=frozenset(), reserved_bytes=0):
         seen["exclude"] = set(exclude_names)
         return None
 

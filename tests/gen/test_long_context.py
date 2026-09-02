@@ -45,14 +45,19 @@ CANDIDATE_ARCHES = [
     "nemotron_h_moe", "deepseek2", "mixtral", "glm4moe", "gpt-oss",
     "seed_oss", "smollm3", "granite", "ernie4_5-moe", "minimax-m2", "minimax-m3",
     "hunyuan-moe", "granitehybrid", "falcon-h1", "qwen3next", "hy_v3",
-    "kimi-k3", "muse-glimmer", "qwen4exp", "glm5next",
+    "kimi-k3", "muse-glimmer", "qwen4exp", "glm5next", "hyv4",
 ]
 
 # Per-arch extra flags for the llama.cpp reference run.
 #   glm5next - the flash-attention path casts the NoPE MLA latents to f16
 #   and corrupts; llama.cpp PR 27754 is verified with -fa off.
+#   hyv4 - the STQ1_0 patch implements CPU and CUDA only. llama.cpp's
+#   op-offload sends host tensor ops to Metal even at -ngl 0, and the
+#   batched expert matmul then aborts on a missing pipeline
+#   (kernel_mul_mm_id_stq1_0_f32), so every prefill segfaults without these.
 PARITY_EXTRA_ARGS: dict[str, list[str]] = {
     "glm5next": ["-fa", "off"],
+    "hyv4": ["-dev", "none", "--no-op-offload"],
 }
 
 TARGET = int(os.environ.get("KQUANT_LONGCTX_TOKENS", "16384"))
@@ -67,7 +72,12 @@ ACTIVATION_DTYPES = ("bfloat16", "float16")
 #   only up to the 4096 window and diverges (coherently) above it. Upstream
 #   mlx-lm limitation, not a loader defect - cap the parity comparison so the
 #   test stays meaningful instead of asserting a gap we don't own.
-PARITY_WINDOW = {"gemma2": 4096}
+#   hyv4 - the reference is CPU-only (see PARITY_EXTRA_ARGS), and measured on
+#   an M3 Max it prefills the 229 GB STQ1_0 file at 2.25 tok/s. 4096 tokens is
+#   ~30 minutes of reference time and still crosses the DSA indexer's top_k of
+#   2048, which is the property this gate exists to check; 16k would be five
+#   hours. Raise KQUANT_LLAMACPP_TIMEOUT past its 1200 s default to run it.
+PARITY_WINDOW = {"gemma2": 4096, "hyv4": 4096}
 
 # Arches where greedy TEXT parity vs llama.cpp carries no loader signal:
 #   gpt-oss - harmony-format model; a raw completion prompt is out-of-
@@ -112,9 +122,35 @@ def _require(gguf_index, arch):
     return paths[0]
 
 
+def _over_wired_budget(model) -> bool:
+    """True when the weights cannot fit the GPU working set."""
+    from mlx.utils import tree_flatten
+
+    try:
+        budget = 0.9 * mx.device_info()["max_recommended_working_set_size"]
+    except Exception:
+        return False
+    return sum(a.nbytes for _, a in tree_flatten(model.parameters())) > budget
+
+
 def _load(path):
+    """Load, engaging expert streaming when the weights cannot be wired.
+
+    A model past the GPU working set (HY4-preview: 213 GB of weights on a
+    115 GB box) dies in its first forward with a Metal out-of-memory - the
+    generation-time residency sweep tries to wire the whole model, which is
+    what ``--stream-experts`` neutralizes on the CLI. The call is gated on
+    the same budget test ``install_expert_streaming`` uses internally, so
+    arches that fit keep the sweep's existing behaviour untouched.
+    """
     from gmlx import load_model
-    return load_model(path, verbose=False)
+
+    model, config, tok = load_model(path, verbose=False)
+    if _over_wired_budget(model):
+        from gmlx.load.loader import install_expert_streaming
+
+        install_expert_streaming(model, gguf_path=path)
+    return model, config, tok
 
 
 def _ctx(config) -> int:

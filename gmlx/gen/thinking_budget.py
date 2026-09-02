@@ -42,6 +42,7 @@ import mlx.core as mx
 # disjoint and scanning all of them is safe.
 _THINK_PAIRS = (("<think>", "</think>"),
                 ("<think:opensource>", "</think:opensource>"),
+                ("<think:6124c78e>", "</think:6124c78e>"),
                 ("<mm:think>", "</mm:think>"),
                 # Kimi-K3 XTML sections (multi-token markers; the prompt
                 # pre-opens the think section).

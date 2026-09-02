@@ -55,7 +55,8 @@ def touch() -> None:
 
 
 def _run(stop: threading.Event, wake: threading.Event, idle_s: float):
-    with mx.stream(mx.gpu):
+    # run on a dedicated stream
+    with mx.stream(mx.new_stream(mx.gpu)):
         a = mx.random.normal((_DIM, _DIM))
         mx.eval(a)
         while not stop.is_set():

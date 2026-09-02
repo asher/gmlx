@@ -163,6 +163,9 @@ _PATTERN_BY_PRE = {
     "deepseek-v3": _DEEPSEEK3_PATTERNS,
     "joyai-llm": _DEEPSEEK3_PATTERNS,
     "hunyuan-dense": _DEEPSEEK3_PATTERNS,
+    # HY4-preview ships pre='hyv4'; llama.cpp puts LLAMA_VOCAB_PRE_TYPE_HYV4
+    # in the same 3-regex group as deepseek3-llm and hunyuan-dense.
+    "hyv4": _DEEPSEEK3_PATTERNS,
     # Kimi K2 and K3 GGUFs both ship pre='kimi-k2' (tiktoken vocab; the
     # converter synthesizes merges from the rank order). Before this entry the
     # pre fell back to the single-digit clause - over-splitting numbers and
