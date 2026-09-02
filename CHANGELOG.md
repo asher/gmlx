@@ -70,6 +70,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - HY4 chat splits thinking from the answer. Its close tag carries the
   `:6124c78e` suffix, which the stream splitter did not know, so the tag
   printed as literal text and the whole reply rendered as thinking.
+- The Hunyuan 3 shared-expert fold accepts a q5_k shared expert over any
+  expert codec and passes its mix weights without a per-layer ones-column
+  concat on mlx-kquant builds whose mix gather takes the shared slot at an
+  implicit weight of 1.
 
 ## [0.4.7] - 2026-08-30
 
