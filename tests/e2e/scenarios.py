@@ -483,17 +483,18 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
     # attn layer but the last quantized. kv8 adds the long generation
     # with floors only. kv4 runs the needle only: 4-bit long generation
     # on a 0.6B fails quality floors even when correct.
-    # kv4 drops the needle anchor: at 4 bits a 0.6B loses single characters
-    # to quantization, not corruption. Floors and engagement still gate it.
-    for label, load, extra, anchored in (
+    # kv4 anchors on either passcode half: at 4 bits a 0.6B loses single
+    # characters to quantization; a wrong passcode still fails.
+    for label, load, extra, anchors in (
             ("kv8", {"kv_bits": 8, "kv_group_size": 64,
                      "quantized_kv_start": 0}, [P.p_long_gen(judge=False)],
-             True),
+             None),
             ("kv4", {"kv_bits": 4, "kv_group_size": 32,
-                     "quantized_kv_start": 0}, [], False)):
+                     "quantized_kv_start": 0}, [],
+             {"substrs": ["CORAL", "KV455"], "mode": "any"})):
         needle = P.p_long_ctx_needle(f"CORAL{label.upper()}55")
-        if not anchored:
-            needle = replace(needle, anchors={})
+        if anchors is not None:
+            needle = replace(needle, anchors=anchors)
         add(Scenario(
             key=f"kv_dense_{label}", tier="kv", needs=["qwen3_0_6b_q8"],
             title=f"Quantized KV, dense stack: {label} on qwen3-0.6b "
