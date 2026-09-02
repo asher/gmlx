@@ -401,15 +401,15 @@ def bench_tg_depth(
         plain_lm = _RawLogitsLM(model.language_model)
 
     # Both arms must run the same KV config or the speedup is a biased
-    # A/B. The assistant-drafter arms run through mlx-vlm's engine (no KV
+    # A/B. The non-owned plain arm runs through mlx-vlm's engine (no KV
     # quantization hook): drop kv on both, with the reason on the line.
     if drafter is not None and not owned:
         if kv_bits is not None:
             from gmlx.cache.kv_policy import dropped_policy, kv_line
 
             print(kv_line(None, dropped_policy(
-                "assistant-drafter bench arms have no KV quantization "
-                "hook; both arms run fp16 KV",
+                "the plain A/B arm (mlx-vlm engine) has no KV "
+                "quantization hook; both arms run fp16 KV",
                 kv_bits, kv_group_size, "single")), file=sys.stderr)
         kv_bits = None
         kv_kwargs, kv_cache = {}, None
