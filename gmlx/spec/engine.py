@@ -1864,6 +1864,27 @@ def dequantize_lift_cache(c):
     return lifted
 
 
+def mtp_kv_decline(lm, *, owned_round: bool = True) -> str | None:
+    """Why this MTP verify walk cannot run on packed KV, or None.
+
+    The owned rounds roll back with trim, and affine packing is
+    per-token along head_dim, so a trim is an offset move: they take the
+    same layers serve takes. The two stock walks slice keys as raw
+    arrays and cannot read a packed tuple back. Shared by serve, run and
+    chat so the three cannot drift.
+    """
+    if not owned_round:
+        return "GMLX_OWNED_ROUND=0 stock rounds have no KV quantization hook"
+    from gmlx.models.qwen35.gdn import stock_gdn_fallback
+
+    mt = (getattr(lm, "model_type", None)
+          or getattr(getattr(lm, "config", None), "model_type", None))
+    if stock_gdn_fallback(mt):
+        return ("the GMLX_QWEN_OWNED=0 stock fallback cannot verify on a "
+                "quantized KV cache")
+    return None
+
+
 def install_continuous_batch_admission() -> None:
     """Let new requests prefill and inject during speculative decode.
 
@@ -2518,23 +2539,15 @@ def install_spec_kv_quant() -> None:
                     "rollback is unsupported; %d layers run fp16 KV",
                     batch_size, swapped)
             return caches
-        from gmlx.models.qwen35.gdn import stock_gdn_fallback
-
-        mt = (getattr(lm, "model_type", None)
-              or getattr(getattr(lm, "config", None), "model_type", None))
-        if stock_gdn_fallback(mt):
-            # The bare-stock fallback slices keys as raw arrays and
-            # crashes on quantized tuples.
+        decline = mtp_kv_decline(lm)
+        if decline is not None:
             if not _warned_stock[0]:
                 _warned_stock[0] = True
-                _log.warning(
-                    "KV_BITS dropped on the MTP path: the GMLX_QWEN_OWNED=0 "
-                    "stock fallback cannot verify on a quantized KV cache")
+                _log.warning("KV_BITS dropped on the MTP path: %s", decline)
             return caches
         # The shared policy owns layer selection: nested KV members,
         # pools, windows, and opt-outs at any depth.
-        from gmlx.cache.kv_policy import (arm_stack, kv_line,
-                                          quantize_kv_members,
+        from gmlx.cache.kv_policy import (kv_line, quantize_stack,
                                           resolve_kv_quant_policy)
 
         policy = resolve_kv_quant_policy(
@@ -2545,14 +2558,7 @@ def install_spec_kv_quant() -> None:
                 _log.warning("%s", kv_line("MTP spec path", policy))
             return caches
 
-        # hold=False: this path converts below, so fp16 holds are inert.
-        armed = arm_stack(caches, policy, hold=False)
-        n = 0
-        for i, plan in enumerate(policy.per_layer):
-            if plan.quantize:
-                caches[i], k = quantize_kv_members(
-                    caches[i], policy.bits, policy.group_size)
-                n += k
+        armed, n = quantize_stack(caches, policy)
         if (n or armed) and not _noted[0]:
             _noted[0] = True
             print(kv_line("MTP spec path", policy), flush=True)

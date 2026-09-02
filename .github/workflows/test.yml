@@ -33,7 +33,9 @@ jobs:
       - name: Install
         run: |
           pip install "mlx==0.32.1"
-          pip install "mlx-kquant==0.4.0"
+          # Wheel, not sdist. Must satisfy the pyproject floor or the
+          # editable install upgrades it; tests/test_ci_pins.py gates that.
+          pip install "mlx-kquant==0.4.4"
           # `assistant` pulls the MCP SDK: without it the stdio tool-server
           # tests (env isolation especially) importorskip themselves away.
           pip install -e ".[vlm,chat,assistant]" pytest httpx build

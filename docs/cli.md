@@ -151,11 +151,13 @@ baked `--system-prompt`; mlx-vlm's verify walk has no stop/bias/penalty/KV
 hooks. A native head is sticky: MTP auto-enables and stays on. Flags the verify
 walk can't honour (`--stop`, `--logit-bias`, the
 repetition/presence/frequency penalties, `--xtc-probability`, `--max-kv-size`,
-the `--kv-*` flags) are dropped, each named in a warning, never silently. To
+`--quantized-kv-start`) are dropped, each named in a warning, never silently. To
 apply one of those flags, pass `--no-mtp` to decode on the plain path, which
-honours it exactly. Only hard-incompatible flags (`--mmproj`, `--adapter`, `--stream-cpu`,
-and the lossy `--moe-*` levers) make auto-enable step aside to plain
-decoding; an explicit `--speculative` with one of these errors out.
+honours it exactly. `--kv-bits` applies on the MTP path and quantizes the same
+layers `serve` quantizes; the two stock verify walks cannot, and the `[kv]`
+line gives the reason. Only hard-incompatible flags (`--mmproj`, `--adapter`,
+`--stream-cpu`, and the lossy `--moe-*` levers) make auto-enable step aside to
+plain decoding; an explicit `--speculative` with one of these errors out.
 `--stream-experts` is the exception: streaming composes with MTP, but
 auto-MTP defers under it - pass `--speculative` to opt in
 ([streaming.md](streaming.md)). `chat` also keeps `--stop` via a post-hoc stream filter.

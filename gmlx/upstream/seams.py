@@ -131,6 +131,15 @@ SEAMS: tuple[Seam, ...] = (
          "quantized_sdpa_fix (5D grouped scores vs 4D batch mask)"),
     Seam("mlx_vlm.models.base", "quantized_scaled_dot_product_attention",
          "quantized_sdpa_fix (same body as the mlx_lm copy)"),
+    # --- quantized-KV first-allocation pack width (bits 3 and 6) ---
+    Seam("mlx_vlm.models.cache", "QuantizedKVCache.update_and_fetch",
+         "quantized_cache_pack_fix (init_quant sizes dim//(32//bits), "
+         "mx.quantize packs dim*bits//32)"),
+    Seam("mlx_vlm.models.cache", "BatchQuantizedKVCache.update_and_fetch",
+         "quantized_cache_pack_fix (same formula in _init)"),
+    Seam("mlx_lm.models.cache", "QuantizedKVCache.update_and_fetch",
+         "quantized_cache_pack_fix (distinct class from the vlm copy; "
+         "patched when the two do not resolve to the same object)"),
     Seam("mlx_vlm.models.cache", "BatchQuantizedKVCache.make_mask",
          "quantized_sdpa_fix._patch_make_mask (starts registration for "
          "the fused decode route; left_padding attr contract)"),
