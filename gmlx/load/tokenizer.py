@@ -401,9 +401,9 @@ def load_tokenizer_from_gguf(
     template_eos = _infer_turn_end_eos(fast, eos_id, tokens, token_types)
     meta_eos = _metadata_stop_ids(meta, len(tokens))
     name_eos = _named_eog_ids(tokens, token_types, pre_id)
-    all_eos = _dedup_ids(
+    all_eos = _drop_message_end_eog(_dedup_ids(
         ([eos_id] if eos_id is not None else [])
-        + template_eos + meta_eos + name_eos)
+        + template_eos + meta_eos + name_eos), tokens)
     fast._gguf_eos_token_ids = all_eos
 
     extra_eos = [tid for tid in all_eos if tid != eos_id]
@@ -715,6 +715,28 @@ def _named_eog_ids(tokens: list[str], token_types: list[int] | None,
         elif pre_id == "kimi-k2" and name in ("[EOT]", "[EOS]"):
             out.append(tid)
     return out
+
+
+# Harmony (gpt-oss) and solar-open end each message with <|end|> and the turn
+# with <|return|> (or <|call|> for a tool call). The assistant emits
+# "analysis ... <|end|>" and then opens the final channel, so stopping on
+# <|end|> returns the reasoning and no answer. Both the name table above and
+# the chat-template heuristic (a stored assistant turn is suffixed <|end|>)
+# pull it in; mirror llama.cpp (llama-vocab.cpp) and drop it when the stop set
+# also spells the turn-end pair. phi-3 has <|end|> and neither pair, so it
+# keeps stopping on <|end|>.
+def _drop_message_end_eog(ids: list[int], tokens: list[str]) -> list[int]:
+    names = {tokens[t] for t in ids if 0 <= t < len(tokens)}
+    if "<|end|>" not in names:
+        return ids
+    has_call = "<|call|>" in names or "<|calls|>" in names
+    if not (has_call and ("<|return|>" in names or "<|flush|>" in names)):
+        return ids
+    loadlog.verbose_print(
+        "[tokenizer] <|end|> closes a message, not the turn: dropped from "
+        "the stop set (harmony/solar-open)")
+    return [t for t in ids
+            if not (0 <= t < len(tokens)) or tokens[t] != "<|end|>"]
 
 
 def _dedup_ids(ids: list[int]) -> list[int]:

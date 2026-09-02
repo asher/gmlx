@@ -571,14 +571,19 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
               pc_disk_cache_created(disk_dir)],
         notes="disk tier created + reused without corrupting output"))
 
+    # gpt-oss reasons in the analysis channel before it answers, so the short
+    # budgets end inside the reasoning (finish_reason=length, empty content).
+    harmony_budget = 512
     add(Scenario(
         key="cache_ckpt", tier="cache", needs=["gpt_oss_20b"],
         title="APC checkpoint tier on an SWA MoE (gpt-oss): resend adopts",
         config={"server": {"cache": {"enabled": True}},
                 "models": {"m": _model_entry(reg.find("gpt_oss_20b") or "")}},
-        targets=[ReqTarget("warm", "m", prompts=[P.p_capital()])],
+        targets=[ReqTarget("warm", "m", prompts=[
+            replace(P.p_capital(), max_tokens=harmony_budget)])],
         post=[pc_apc_enabled(True),
-              pc_ckpt_reuse("m", P.p_long_ctx_needle("CKPTNEEDLE7"))],
+              pc_ckpt_reuse("m", replace(P.p_long_ctx_needle("CKPTNEEDLE7"),
+                                         max_tokens=harmony_budget))],
         notes="hybrid/SWA archs route to the gmlx ckpt tier; its own counters "
               "must move (the 2026-08 audit found the tier never engaged)"))
 

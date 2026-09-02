@@ -18,6 +18,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- gpt-oss GGUFs (harmony) answer again: `run` and `serve` stopped on
+  `<|end|>` after the analysis channel, so the CLI printed only the
+  thinking block and `serve` returned `content: null`. The message-end
+  token leaves the stop set when the vocab also spells `<|return|>` and
+  `<|call|>`, as in llama.cpp; phi-3 still stops on `<|end|>`.
 - A model addressed by config id or alias now gets the same command-buffer
   lift as a typed `--stream-experts`, so streamed decode no longer runs 40%
   slower from the config than from the bare GGUF path (10.3 vs 7.2 tok/s on
