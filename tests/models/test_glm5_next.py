@@ -685,3 +685,30 @@ def test_dequantized_fetch_strided_cache_slices():
     assert err < 0.05, f"strided dequantized fetch err={err}"
     # dense fetches pass through untouched
     assert glm5_model._dequantized(k, _QCache()) is k
+
+
+def test_moe_gate_kq_router_matches_compiled_select(monkeypatch):
+    import gmlx.models.glm5_next.model as glm
+    if not mx.metal.is_available() or not glm._kq_router_available():
+        pytest.skip("kq router sigmoid arm unavailable")
+    args = _tiny_args()
+    model = _random_model(args, seed=7)
+    gate = next(ly.mlp.gate for ly in model.layers
+                if hasattr(ly.mlp, "gate"))
+    gate.e_score_correction_bias = mx.random.normal(gate.e_score_correction_bias.shape)
+    x = mx.random.normal((1, 3, args.hidden_size)).astype(mx.bfloat16)
+    monkeypatch.setattr(glm, "_KQ_ROUTER_ENABLED", True)
+    inds_kq, w_kq = gate(x)
+    monkeypatch.setattr(glm, "_KQ_ROUTER_ENABLED", False)
+    inds_ref, w_ref = gate(x)
+    mx.eval(inds_kq, w_kq, inds_ref, w_ref)
+    assert inds_kq.shape == inds_ref.shape and w_kq.shape == w_ref.shape
+    ik, ir = np.array(inds_kq).reshape(-1, gate.top_k), np.array(inds_ref).reshape(-1, gate.top_k)
+    wk, wr = np.array(w_kq).reshape(-1, gate.top_k), np.array(w_ref).reshape(-1, gate.top_k)
+    for t in range(ik.shape[0]):
+        assert set(ik[t]) == set(ir[t]), t
+        ok = np.argsort(ik[t])
+        orr = np.argsort(ir[t])
+        np.testing.assert_allclose(wk[t][ok], wr[t][orr], rtol=1e-5, atol=1e-6)
+
+

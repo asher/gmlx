@@ -172,6 +172,30 @@ class Glm5NextMLP(nn.Module):
             _limited_swiglu(self.gate_proj(x), self.up_proj(x), self._limit))
 
 
+_KQ_ROUTER_STATE = {"ok": None}
+# Debug/A-B seam: False routes every gate through the compiled select.
+_KQ_ROUTER_ENABLED = True
+def _kq_router_available() -> bool:
+    """One-time probe for the mlx-kquant router kernel's sigmoid arm
+    (docstring-sniffed so older kquant builds keep the compiled select).
+    GMLX_GLM5_KQ_ROUTER=0 disables."""
+    if not _KQ_ROUTER_ENABLED:
+        return False
+    ok = _KQ_ROUTER_STATE["ok"]
+    if ok is None:
+        ok = os.environ.get("GMLX_GLM5_KQ_ROUTER", "1") != "0"
+        if ok:
+            try:
+                import mlx_kquant as kq
+
+                ok = mx.metal.is_available() and "sigmoid" in (
+                    getattr(kq.moe_router_topk, "__doc__", "") or "")
+            except Exception:  # noqa: BLE001 - optional dependency
+                ok = False
+        _KQ_ROUTER_STATE["ok"] = ok
+    return ok
+
+
 class Glm5NextMoEGate(nn.Module):
     """Sigmoid noaux-tc router: the correction bias steers selection only,
     weights are the unbiased sigmoid scores, renormalized then x2.5.
@@ -194,6 +218,27 @@ class Glm5NextMoEGate(nn.Module):
 
     def __call__(self, x: mx.array):
         logits = x.astype(mx.float32) @ self.weight.T
+        t = logits.size // self.n_routed_experts
+        if t * self.top_k < 64 and _kq_router_available():
+            # Decode-scale: sigmoid + bias-steered top-k + renorm + scale in
+            # one kq dispatch instead of the compiled select's kernel chain.
+            # Ties at the selection boundary break by min index here and by
+            # argpartition order in the eager path; f32 scores make exact
+            # ties rare.
+            import mlx_kquant as kq
+
+            inds, weights = kq.moe_router_topk(
+                logits.reshape(t, self.n_routed_experts),
+                self.top_k,
+                self.norm_topk_prob,
+                shared_gate=False,
+                bias=self.e_score_correction_bias,
+                scoring="sigmoid",
+                scale=self.routed_scaling_factor,
+            )
+            shp = logits.shape[:-1]
+            return (inds.reshape(*shp, self.top_k),
+                    weights.reshape(*shp, self.top_k))
         return _expert_select(
             logits,
             self.e_score_correction_bias,
@@ -790,6 +835,7 @@ class Glm5NextDeltaAttention(nn.Module):
         self.g_b_proj = nn.Linear(self.head_dim, self.projection_dim, bias=False)
         self.o_norm = nn.RMSNorm(self.head_dim, eps=args.rms_norm_eps)
         self.o_proj = nn.Linear(self.projection_dim, hidden, bias=False)
+
 
         # The metal kernel needs Dk % 32 == 0; fall back to ops otherwise.
         self._can_kernel = (self.head_dim % 32 == 0) and mx.metal.is_available()
