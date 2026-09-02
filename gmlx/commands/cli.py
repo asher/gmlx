@@ -1233,6 +1233,8 @@ def _run_bench(args) -> int:
         decode_tokens=decode_tokens,
         runs=args.bench_runs,
         prefill_step_size=args.prefill_step_size,
+        kv_bits=args.kv_bits,
+        kv_group_size=args.kv_group_size,
     )
     print(f"\n{'prompt_len':>10} {'prefill_tps':>12} {'decode_tps':>11}")
     for L in lengths:
@@ -1340,6 +1342,8 @@ def _run_bench_depths(args) -> int:
         prefill_step_size=args.prefill_step_size,
         temp=args.bench_temp,
         prompt_source=prompt_source,
+        kv_bits=args.kv_bits,
+        kv_group_size=args.kv_group_size,
     )
 
     if speculative:
