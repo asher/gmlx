@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-09-02
+
 ### Added
 
 - Streamed-expert decode probes the drive at load and takes a faster
