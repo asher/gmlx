@@ -281,6 +281,13 @@ def print_plan(reg, scenarios, *, tiers, image_path) -> None:
     print("inventory:")
     for h, p in inv.items():
         print(f"  {'[x]' if p else '[ ]'} {h}: {p or '(missing)'}")
+    print("roles:")
+    for role, (handles, preferred) in reg.role_inventory().items():
+        if not handles:
+            print(f"  {role}: (unfilled - tier skips)")
+        else:
+            print(f"  {role}: {', '.join(handles)}"
+                  f"{'' if preferred else '   <- stand-in'}")
     print(f"image: {image_path or '(none - vlm-image scenarios skip)'}")
     print(f"tiers selected: {', '.join(tiers)}")
     print(f"scenarios constructed: {len(scenarios)}")

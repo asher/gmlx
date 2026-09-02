@@ -7,6 +7,9 @@ cache-tier scenario on this machine for months). First existing candidate
 wins; a missing handle resolves to ``None`` so a tier whose models aren't
 present is *skipped*, not failed. Nothing here loads a model - it's pure
 path resolution, so it runs on any machine for ``--dry-run``.
+
+Scenarios address a *role* (see ``_ROLES``) rather than a handle, so a
+machine without the preferred model runs the tier on a stand-in.
 """
 
 from __future__ import annotations
@@ -24,6 +27,9 @@ _CANDIDATES = {
     "qwen3_0_6b_q4": ["qwen3-0.6b/Qwen3-0.6B-Q4_K_M.gguf"],
     "qwen3_0_6b_q8": ["qwen3-0.6b/Qwen3-0.6B-Q8_0.gguf"],
     "gemma3_1b": ["gemma-3-1b-it-GGUF/gemma-3-1b-it-Q4_K_M.gguf"],
+    "falcon_h1_0_5b": [
+        "tiiuae__Falcon-H1-0.5B-Instruct-GGUF/Falcon-H1-0.5B-Instruct-Q8_0.gguf",
+    ],
     # gemma-4 E2B text (tied embeds) - UD variants
     "gemma4_e2b": [
         "gemma-4-E2B-it-UD-Q6_K_XL/gemma-4-E2B-it-UD-Q6_K_XL.gguf",
@@ -50,6 +56,15 @@ _CANDIDATES = {
     "qwen35_9b_mtp": [
         "unsloth__Qwen3.5-9B-MTP-GGUF/Qwen3.5-9B-Q6_K.gguf",
     ],
+    # vision fallback pair for the vlm role
+    "qwen36_27b": [
+        "Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved-GGUF/"
+        "Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved-Q6_K.gguf",
+    ],
+    "qwen36_27b_mmproj": [
+        "Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved-GGUF/"
+        "Qwen3.6-27B-mmproj-BF16.gguf",
+    ],
 }
 
 # Canonical download source per handle: an ``hf:<org>/<repo>/<file>`` ref whose
@@ -62,6 +77,8 @@ _SOURCES = {
     "qwen3_0_6b_q4": "hf:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q4_K_M.gguf",
     "qwen3_0_6b_q8": "hf:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf",
     "gemma3_1b": "hf:ggml-org/gemma-3-1b-it-GGUF/gemma-3-1b-it-Q4_K_M.gguf",
+    "falcon_h1_0_5b": "hf:tiiuae/Falcon-H1-0.5B-Instruct-GGUF/"
+    "Falcon-H1-0.5B-Instruct-Q8_0.gguf",
     "gemma4_e2b": None,
     "gemma4_e2b_mmproj": None,
     "gemma4_e2b_assistant": None,
@@ -69,11 +86,29 @@ _SOURCES = {
     "gemma4_12b_assistant": "hf:unsloth/gemma-4-12b-it-GGUF/mtp-gemma-4-12b-it.gguf",
     "gpt_oss_20b": "hf:lmstudio-community/gpt-oss-20b-GGUF/gpt-oss-20b-MXFP4.gguf",
     "qwen35_9b_mtp": "hf:unsloth/Qwen3.5-9B-MTP-GGUF/Qwen3.5-9B-Q6_K.gguf",
+    "qwen36_27b": None,
+    "qwen36_27b_mmproj": None,
 }
 
 # Preference order for the default LLM judge (a bigger, coherent model judges
 # better; fall back to the small ones so the harness still runs on a lean box).
 _JUDGE_PREFERENCE = ["gemma4_12b", "gemma4_e2b", "qwen3_0_6b_q8", "qwen3_0_6b_q4"]
+
+# role -> ordered groups of handles; the first group fully present wins.
+# Scenarios ask for a role so an absent model substitutes instead of
+# skipping the tier. A judged 0.6B sits last: the judge fails it on
+# baseline weakness, which masks the regression the tier looks for.
+_ROLES = {
+    "judged": [("gemma4_e2b",), ("gemma4_12b",), ("qwen3_0_6b_q8",)],
+    "vlm": [("gemma4_e2b", "gemma4_e2b_mmproj"), ("qwen36_27b", "qwen36_27b_mmproj")],
+    "mtp_pair": [
+        ("gemma4_e2b", "gemma4_e2b_assistant"),
+        ("gemma4_12b", "gemma4_12b_assistant"),
+    ],
+    "mtp_native": [("qwen35_9b_mtp",), ("qwen36_27b",)],
+    # A third small model, distinct from the two qwen3-0.6b quants.
+    "lru_small": [("gemma3_1b",), ("falcon_h1_0_5b",)],
+}
 
 
 @dataclass
@@ -113,6 +148,26 @@ class ModelRegistry:
 
     def missing(self, *handles: str) -> list:
         return [h for h in handles if self.find(h) is None]
+
+    def role(self, name: str) -> tuple:
+        """Handles of the first complete group, or (). Feeds both ``needs=``
+        and path lookup."""
+        for group in _ROLES.get(name, []):
+            if self.have(*group):
+                return tuple(group)
+        return ()
+
+    def role_paths(self, name: str) -> tuple:
+        return tuple(self.require(h) for h in self.role(name))
+
+    def role_is_preferred(self, name: str) -> bool:
+        """False when the role fell back to a stand-in."""
+        got = self.role(name)
+        groups = _ROLES.get(name, [])
+        return bool(got) and tuple(groups[0]) == got
+
+    def role_inventory(self) -> dict:
+        return {r: (self.role(r), self.role_is_preferred(r)) for r in _ROLES}
 
     def default_judge(self) -> Optional[str]:
         for h in _JUDGE_PREFERENCE:

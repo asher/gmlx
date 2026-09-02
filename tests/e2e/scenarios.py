@@ -12,27 +12,32 @@ covers the config surface and its high-value combinations:
   endpoints  /v1/models, /v1/metrics, /unload (one + all), /v1/reload, cache reset
   negative   unknown id -> 404, unknown profile -> 400, HF-gate refuses a stray id
   discovery  --models-dir header-only scan serves derived ids
-  vlm        gemma-4-E2B + mmproj image description
-  mtp        gemma-4-E2B + assistant drafter speculative; lossless-greedy vs base
+  vlm        vision model + mmproj image description
+  mtp        assistant drafter speculative; lossless-greedy vs base
 
-The coherence-judged tiers (core/kv/template/endpoints) run on gemma-4-E2B: a 0.6B model
-is too weak to follow strict-format prompts, so the judge correctly fails it on baseline
-weakness and that noise masks real config regressions. E2B gives a clean baseline where a
-config-induced degradation actually stands out. The structural tiers (residency/discovery
-/negative) keep the tiny models - they need distinct small sizes for LRU eviction and only
-fire the easy `capital` prompt. The cache tier runs Qwen3-0.6B for the block tier AND
-gpt-oss-20b for the gmlx checkpoint tier: hybrid/SWA archs (RotatingKVCache and friends)
-are served by the ckpt tier with its own counters, and asserting only the dense model was
-how zero engagement on every hybrid stayed invisible.
+Model-dependent tiers ask the registry for a *role* (`judged`, `vlm`, `mtp_pair`,
+`mtp_native`, `lru_small`) rather than a fixed handle, so a machine that lacks the
+preferred model runs the tier on a stand-in instead of skipping it.
 
-A scenario whose required model handles are missing is skipped (not failed).
+The coherence-judged tiers (core/kv/template/endpoints) take the `judged` role: a 0.6B
+model is too weak to follow strict-format prompts, so the judge correctly fails it on
+baseline weakness and that noise masks real config regressions. gemma-4 gives a clean
+baseline where a config-induced degradation actually stands out. The structural tiers
+(residency/discovery/negative) keep the tiny models - they need distinct small sizes for
+LRU eviction and only fire the easy `capital` prompt. The cache tier runs Qwen3-0.6B for
+the block tier AND gpt-oss-20b for the gmlx checkpoint tier: hybrid/SWA archs
+(RotatingKVCache and friends) are served by the ckpt tier with its own counters, and
+asserting only the dense model was how zero engagement on every hybrid stayed invisible.
+
+A scenario whose role is unfilled, or whose required model handles are missing, is
+skipped (not failed).
 Pure construction - no model loads here, so the whole matrix builds under --dry-run.
 """
 from __future__ import annotations
 
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Optional
 
 import checks
@@ -374,27 +379,42 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
     suite = P.quick_suite if quick else P.core_suite
 
     def add(s: Scenario):
-        if s.tier in tiers and not reg.missing(*s.needs):
+        # Empty needs means an unfilled role, not "needs nothing".
+        if s.tier in tiers and s.needs and not reg.missing(*s.needs):
             out.append(s)
 
     qwen4 = reg.find("qwen3_0_6b_q4")
     qwen8 = reg.find("qwen3_0_6b_q8")
-    g1b = reg.find("gemma3_1b")
-    e2b = reg.find("gemma4_e2b")
-    mmproj = reg.find("gemma4_e2b_mmproj")
-    assistant = reg.find("gemma4_e2b_assistant")
+    judged_h = (reg.role("judged") or ("",))[0]
+    judged_needs = list(reg.role("judged"))
+    judged = reg.find(judged_h) or ""
+    vlm_needs = list(reg.role("vlm"))
+    vlm_paths = reg.role_paths("vlm")
+    mtp_needs = list(reg.role("mtp_pair"))
+    mtp_paths = reg.role_paths("mtp_pair")
+    native_needs = list(reg.role("mtp_native"))
+    native_mtp = (reg.role_paths("mtp_native") or ("",))[0]
+    lru_needs = list(reg.role("lru_small"))
+    lru_small = (reg.role_paths("lru_small") or ("",))[0]
+
+    # gemma-4 is an SWA stack: only its global-attention layers quantize.
+    # The exact count is E2B's; a stand-in only has to engage.
+    judged_swa = judged_h.startswith("gemma4")
+    judged_kv_verdict = "partial" if judged_swa else "full"
+    judged_kv_layers = 2 if judged_h == "gemma4_e2b" else None
 
     # core: single positional
-    # The coherence-judged tiers run on gemma-4-E2B: a 0.6B model is too weak to
-    # follow strict-format prompts, so the judge correctly fails it on baseline
-    # weakness, drowning out real config regressions. E2B gives a clean baseline
-    # where a config-induced degradation actually stands out. The structural tiers
-    # (residency/discovery/hf_gate) keep the tiny models - they need distinct small
-    # sizes for eviction and only fire the easy `capital` prompt.
+    # The coherence-judged tiers run on the `judged` role: a 0.6B model is too
+    # weak to follow strict-format prompts, so the judge correctly fails it on
+    # baseline weakness, drowning out real config regressions. gemma-4 gives a
+    # clean baseline where a config-induced degradation actually stands out. The
+    # structural tiers (residency/discovery/hf_gate) keep the tiny models - they
+    # need distinct small sizes for eviction and only fire the easy `capital`
+    # prompt.
     add(Scenario(
-        key="single_positional", tier="core", needs=["gemma4_e2b"],
+        key="single_positional", tier="core", needs=judged_needs,
         title="Single positional GGUF (no config)",
-        serve_args=[e2b or ""],
+        serve_args=[judged],
         targets=[ReqTarget("default", "", prompts=suite())],
         post=[pc_health_ready(), pc_metrics_resident_shape()],
         notes="baseline: the untouched single-model path still serves coherently"))
@@ -410,11 +430,11 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
                       "system": "Always answer in a single short sentence."},
         },
         "rules": [{"match": "*coder*", "profile": "terse"}],
-        "models": {"m": _model_entry(e2b or "", profile="base")},
+        "models": {"m": _model_entry(judged, profile="base")},
         "aliases": {"fast": "m@creative"},
     }
     add(Scenario(
-        key="config_profiles", tier="core", needs=["gemma4_e2b"],
+        key="config_profiles", tier="core", needs=judged_needs,
         title="Config: profiles, extends, @profile, system, aliases, negatives",
         config=cfg_prof,
         targets=[
@@ -442,32 +462,38 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
         cfg_kv = {
             "profiles": {"p": {"sampling": {"temperature": 0.0},
                               **({"load": load} if load else {})}},
-            "models": {"m": _model_entry(e2b or "", profile="p")},
+            "models": {"m": _model_entry(judged, profile="p")},
         }
         add(Scenario(
-            key=f"kv_{label}", tier="kv", needs=["gemma4_e2b"],
+            key=f"kv_{label}", tier="kv", needs=judged_needs,
             title=f"Quantized KV cache: {label} - deep needle recall + long gen",
             config=cfg_kv,
             targets=[ReqTarget("recall", "m",
                                prompts=[P.p_long_ctx_needle(f"VIOLET{label.upper()}88"),
                                         P.p_long_gen()])],
-            post=[pc_kv_engagement("m", verdict="partial",
-                                   layers_quantized=2)
+            post=[pc_kv_engagement("m", verdict=judged_kv_verdict,
+                                   layers_quantized=judged_kv_layers)
                   if load else pc_kv_absent("m")],
             notes="KV-quant must still recall a planted fact at depth without "
-                  "looping. gemma-4 is an SWA stack: the engine quantizes only "
-                  "its 2 global-attention layers, so this covers the partial "
+                  "looping. On a gemma-4 SWA stack the engine quantizes only "
+                  "the global-attention layers, so this covers the partial "
                   "policy; kv_dense_* covers the all-layers path"))
 
     # kv: the issue #104 regression scenarios on a dense stack, every
     # attn layer but the last quantized. kv8 adds the long generation
     # with floors only. kv4 runs the needle only: 4-bit long generation
     # on a 0.6B fails quality floors even when correct.
-    for label, load, extra in (
+    # kv4 drops the needle anchor: at 4 bits a 0.6B loses single characters
+    # to quantization, not corruption. Floors and engagement still gate it.
+    for label, load, extra, anchored in (
             ("kv8", {"kv_bits": 8, "kv_group_size": 64,
-                     "quantized_kv_start": 0}, [P.p_long_gen(judge=False)]),
+                     "quantized_kv_start": 0}, [P.p_long_gen(judge=False)],
+             True),
             ("kv4", {"kv_bits": 4, "kv_group_size": 32,
-                     "quantized_kv_start": 0}, [])):
+                     "quantized_kv_start": 0}, [], False)):
+        needle = P.p_long_ctx_needle(f"CORAL{label.upper()}55")
+        if not anchored:
+            needle = replace(needle, anchors={})
         add(Scenario(
             key=f"kv_dense_{label}", tier="kv", needs=["qwen3_0_6b_q8"],
             title=f"Quantized KV, dense stack: {label} on qwen3-0.6b "
@@ -477,15 +503,34 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
                                    "load": load}},
                 "models": {"m": _model_entry(qwen8 or "", profile="p")},
             },
-            targets=[ReqTarget("recall", "m",
-                               prompts=[P.p_long_ctx_needle(f"CORAL{label.upper()}55")]
-                               + extra)],
+            targets=[ReqTarget("recall", "m", prompts=[needle] + extra)],
             post=[pc_kv_engagement("m", verdict="full",
                                    layers_quantized=27,
                                    verdict_batched="full")],
             notes="issue #104 regression: on-the-fly quantized-cache prefill "
                   "through the kv8 flash arm; corruption fails the anchor "
                   "instantly on a fully quantized stack"))
+
+    # kv: bits 6 on a dense stack. Upstream sized the first code buffer
+    # dim//(32//bits) while mx.quantize packs dim*bits//32, so every
+    # empty-built quantized cache -- which is what serve builds -- raised
+    # on its first append at bits 3 and 6. Only serve reaches it.
+    add(Scenario(
+        key="kv_dense_kv6", tier="kv", needs=["qwen3_0_6b_q8"],
+        title="Quantized KV, dense stack: 6-bit on qwen3-0.6b "
+              "(pack-width regression, serve-only)",
+        config={
+            "profiles": {"p": {"sampling": {"temperature": 0.0},
+                               "load": {"kv_bits": 6, "kv_group_size": 64,
+                                        "quantized_kv_start": 0}}},
+            "models": {"m": _model_entry(qwen8 or "", profile="p")},
+        },
+        targets=[ReqTarget("recall", "m",
+                           prompts=[P.p_long_ctx_needle("VIOLETKV655")])],
+        post=[pc_kv_engagement("m", verdict="full", layers_quantized=27,
+                               verdict_batched="full")],
+        notes="a width whose el_per_int truncates; the batch cache is "
+              "built empty, so this is the only path that catches it"))
 
     # cache: disabled / memory / disk / diskxkv8 / ckpt
     # Qwen3-0.6B exercises the block tier (plain KVCache prefix reuse); the
@@ -559,37 +604,35 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
               "corruption, disk tier created), not cache reuse"))
 
     # residency: LRU eviction + idle TTL
-    if reg.have("qwen3_0_6b_q4", "qwen3_0_6b_q8", "gemma3_1b"):
+    if qwen4 and qwen8 and lru_small:
         # budget so exactly the two smallest fit -> the third forces an eviction
-        sizes = {"q4": os.path.getsize(qwen4), "q8": os.path.getsize(qwen8),
-                 "g1b": os.path.getsize(g1b)}
-        two_smallest = sorted(sizes.values())[:2]
-        budget_gb = round((sum(two_smallest) + 64 * 1024**2) / 1024**3, 3)
+        sizes = [os.path.getsize(p) for p in (qwen4, qwen8, lru_small)]
+        budget_gb = round((sum(sorted(sizes)[:2]) + 64 * 1024**2) / 1024**3, 3)
         add(Scenario(
             key="residency_lru", tier="residency",
-            needs=["qwen3_0_6b_q4", "qwen3_0_6b_q8", "gemma3_1b"],
+            needs=["qwen3_0_6b_q4", "qwen3_0_6b_q8"] + lru_needs,
             title="Multi-model LRU eviction under a tight weight-byte budget",
             serve_args=["--budget-gb", str(budget_gb)],
             config={"models": {
                 "q8": _model_entry(qwen8, pin=True),
                 "q4": _model_entry(qwen4),
-                "g1b": _model_entry(g1b)}},
+                "third": _model_entry(lru_small)}},
             targets=[ReqTarget("touch_q8", "q8", prompts=[P.p_capital()]),
                      ReqTarget("touch_q4", "q4", prompts=[P.p_capital()]),
-                     ReqTarget("touch_g1b", "g1b", prompts=[P.p_capital()])],
+                     ReqTarget("touch_third", "third", prompts=[P.p_capital()])],
             post=[pc_residency_budget("q8", max_resident=2),
-                  pc_models_exactly({"q8", "q4", "g1b"})],
+                  pc_models_exactly({"q8", "q4", "third"})],
             notes="pinned q8 stays resident; budget forces LRU eviction of a third"))
 
-    if reg.have("qwen3_0_6b_q4", "gemma3_1b"):
+    if qwen4 and lru_small:
         add(Scenario(
             key="residency_ttl", tier="residency",
-            needs=["qwen3_0_6b_q4", "gemma3_1b"],
+            needs=["qwen3_0_6b_q4"] + lru_needs,
             title="Idle-TTL reaper unloads a non-pinned model, keeps the pinned one",
             env={"MLX_VLM_RESIDENT_TTL_TICK": "1"},
             config={"server": {"defaults": {"ttl_s": 4}},
                     "models": {"keep": _model_entry(qwen4, pin=True),
-                              "drop": _model_entry(g1b)}},
+                              "drop": _model_entry(lru_small)}},
             targets=[ReqTarget("touch_keep", "keep", prompts=[P.p_capital()])],
             post=[pc_ttl_reaped("drop", "keep", "drop", ttl_s=4, wait_s=20)],
             notes="fast clock (ttl=4s, tick=1s): non-pinned idle model is reaped"))
@@ -597,30 +640,30 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
     # template: chat_template override
     tmpl_path = os.path.join(tmpdir, "custom_template.jinja")
     add(Scenario(
-        key="chat_template_config", tier="template", needs=["gemma4_e2b"],
+        key="chat_template_config", tier="template", needs=judged_needs,
         title="Config chat_template override + distinct-template resident fork",
         config={
             "profiles": {"tmpl": {"chat_template": _SIMPLE_TEMPLATE}},
-            "models": {"plain": _model_entry(e2b or ""),
-                      "templated": _model_entry(e2b or "", profile="tmpl")}},
+            "models": {"plain": _model_entry(judged),
+                      "templated": _model_entry(judged, profile="tmpl")}},
         targets=[ReqTarget("plain", "plain", prompts=[P.p_capital()]),
                  ReqTarget("templated", "templated", prompts=[P.p_capital()])],
-        post=[_pc_two_resident_entries_same_path(e2b or "")],
+        post=[_pc_two_resident_entries_same_path(judged)],
         notes="same GGUF under two templates => two resident entries; both coherent"))
 
     add(Scenario(
-        key="chat_template_cli", tier="template", needs=["gemma4_e2b"],
+        key="chat_template_cli", tier="template", needs=judged_needs,
         title="Single-model --chat-template flag",
-        serve_args=[e2b or "", "--chat-template", _make_template_file(tmpl_path)],
+        serve_args=[judged, "--chat-template", _make_template_file(tmpl_path)],
         targets=[ReqTarget("default", "", prompts=[P.p_capital(), P.p_instruct()])],
         notes="the CLI override rides the same overrides slot and stays coherent"))
 
     # endpoints: unload / reload / metrics / cache reset
     add(Scenario(
-        key="endpoints", tier="endpoints", needs=["gemma4_e2b"],
+        key="endpoints", tier="endpoints", needs=judged_needs,
         title="Operational endpoints: unload(one+all), reload, metrics, cache reset",
         config={"server": {"cache": {"enabled": True}},
-                "models": {"m": _model_entry(e2b or "")}},
+                "models": {"m": _model_entry(judged)}},
         targets=[ReqTarget("warm", "m", prompts=[P.p_capital()], stream=True)],
         post=[pc_metrics_resident_shape(),
               pc_cache_reset(),
@@ -640,12 +683,12 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
         notes="no network; an unconfigured repo id is refused, never downloaded"))
 
     # discovery: --models-dir header scan
-    if reg.have("qwen3_0_6b_q4", "gemma3_1b"):
+    if qwen4 and lru_small:
         disc_dir = _make_discovery_dir(os.path.join(tmpdir, "discover"),
-                                       [qwen4, g1b])
+                                       [qwen4, lru_small])
         add(Scenario(
             key="discovery", tier="discovery",
-            needs=["qwen3_0_6b_q4", "gemma3_1b"],
+            needs=["qwen3_0_6b_q4"] + lru_needs,
             title="Discovery mode (--models-dir) serves header-derived ids",
             serve_args=["--models-dir", disc_dir, "--recursive"],
             targets=[ReqTarget("first", "__first__", prompts=[P.p_capital()])],
@@ -653,33 +696,33 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
             notes="a curated dir is scanned; the first derived id serves coherently"))
 
     # vlm: image description
-    if reg.have("gemma4_e2b", "gemma4_e2b_mmproj") and image_path:
+    if vlm_paths and image_path:
         add(Scenario(
-            key="vlm_image", tier="vlm", needs=["gemma4_e2b", "gemma4_e2b_mmproj"],
-            title="VLM: gemma-4-E2B + mmproj describes an image",
-            serve_args=[e2b, "--mmproj", mmproj],
+            key="vlm_image", tier="vlm", needs=vlm_needs,
+            title=f"VLM: {vlm_needs[0]} + mmproj describes an image",
+            serve_args=[vlm_paths[0], "--mmproj", vlm_paths[1]],
             targets=[ReqTarget("describe", "", prompts=[P.p_vlm_describe()],
                                image_handle=image_path)],
             notes="vision load/serve path under the harness; judge rates the caption"))
 
     # mtp: speculative + lossless-greedy vs base
-    if reg.have("gemma4_e2b", "gemma4_e2b_assistant"):
+    if mtp_paths:
+        target, assistant = mtp_paths
         add(Scenario(
-            key="mtp_speculative", tier="mtp",
-            needs=["gemma4_e2b", "gemma4_e2b_assistant"],
-            title="MTP: gemma-4-E2B + assistant drafter (speculative) stays coherent",
+            key="mtp_speculative", tier="mtp", needs=mtp_needs,
+            title=f"MTP: {mtp_needs[0]} + assistant drafter (speculative) "
+                  "stays coherent",
             config={"models": {"spec": _model_entry(
-                e2b, draft_gguf=assistant, speculative=True)}},
+                target, draft_gguf=assistant, speculative=True)}},
             targets=[ReqTarget("spec", "spec",
                                prompts=[P.p_capital(), P.p_instruct(), P.p_long_gen()])],
-            notes="E2B assistant-shape MTP may be untested - surface any surprise"))
+            notes="assistant-shape MTP may be untested - surface any surprise"))
         add(Scenario(
-            key="mtp_lossless", tier="mtp",
-            needs=["gemma4_e2b", "gemma4_e2b_assistant"],
+            key="mtp_lossless", tier="mtp", needs=mtp_needs,
             title="MTP lossless-greedy: speculative output == base output",
             config={"models": {
-                "spec": _model_entry(e2b, draft_gguf=assistant, speculative=True),
-                "base": _model_entry(e2b)}},
+                "spec": _model_entry(target, draft_gguf=assistant, speculative=True),
+                "base": _model_entry(target)}},
             targets=[],     # the comparison is the post-check
             post=[_pc_mtp_lossless("spec", "base")],
             notes="greedy spec vs greedy base, token-for-token; mismatch is a finding"))
@@ -687,18 +730,17 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
     # mtp x kv-bits: native-MTP hybrid under quantized target KV.
     # Greedy equality crosses the B=1 spec packing and the batch-built
     # cache. Engagement asserts partial when idle, dropped when batched.
-    q35 = reg.find("qwen35_9b_mtp")
-    if reg.have("qwen35_9b_mtp"):
+    if native_mtp:
         add(Scenario(
-            key="mtp_kv8", tier="mtp", needs=["qwen35_9b_mtp"],
-            title="MTP x kv8: qwen3.5-9B native MTP, quantized target KV",
+            key="mtp_kv8", tier="mtp", needs=native_needs,
+            title=f"MTP x kv8: {native_needs[0]} native MTP, quantized target KV",
             config={
                 "profiles": {"p": {"sampling": {"temperature": 0.0},
                                    "load": {"kv_bits": 8,
                                             "kv_group_size": 64}}},
                 "models": {
-                    "spec": _model_entry(q35, native_mtp=True, profile="p"),
-                    "base": _model_entry(q35, profile="p")}},
+                    "spec": _model_entry(native_mtp, native_mtp=True, profile="p"),
+                    "base": _model_entry(native_mtp, profile="p")}},
             targets=[ReqTarget("recall", "spec",
                                prompts=[P.p_long_ctx_needle("MAROONMTP88")])],
             post=[_pc_mtp_lossless(
