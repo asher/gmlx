@@ -105,6 +105,7 @@ def test_fused_branch_rides_shexp_kernels(monkeypatch):
 
     blk = _kq_moe()
     _installed(blk)
+    implicit = modules._FusedMoeCaps().mix_implicit  # before the fakes
     monkeypatch.setattr(modules, "_kq_fused_device_ok", lambda *m: True)
 
     seen = {}
@@ -136,8 +137,11 @@ def test_fused_branch_rides_shexp_kernels(monkeypatch):
     assert seen["mix"]["kw"].get("shexp_kquant_type") == "q8_0"
     assert seen["mix"]["sdw"] == tuple(blk.shared_mlp.down_proj.weight.shape)
     sc = seen["mix"]["sc"]
-    assert sc.shape == (1, 3)  # top_k routed slots + shexp slot
-    assert sc[0, -1] == 1.0  # constant shexp mix weight rides last
+    if implicit:
+        assert sc.shape == (1, 2)  # shexp slot weight implicit in-kernel
+    else:
+        assert sc.shape == (1, 3)  # top_k routed slots + shexp slot
+        assert sc[0, -1] == 1.0  # constant shexp mix weight rides last
     # routed slots: renormed scores * routed_scaling_factor (1.5)
     assert abs(sc[0, :2].sum() - 1.5) < 2e-2
 

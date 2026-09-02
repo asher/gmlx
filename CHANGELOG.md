@@ -18,6 +18,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- GLM-5.3-Flash decode is faster on M5: the KDA sublayer runs its conv,
+  norms, decay, delta rule, out-norm and gate as one dispatch per layer
+  (`GMLX_KDA_FUSED=0` restores the op chain), the MoE gate uses the
+  mlx-kquant sigmoid router kernel (`GMLX_GLM5_KQ_ROUTER=0` restores the
+  compiled select). With the matching mlx-kquant gather work, UD-Q2_K_XL
+  decode on an M5 Max goes 40.3 to 42.5 tok/s at d0 and 36.0 to 37.2 at
+  d4096.
 - The decode arena sizes to 0.7 of physical RAM rather than 0.6, which on a
   128 GB machine is 90.7 GB rather than 78.6 and is worth 12% of decode.
   The live reclaimable ceiling and the system floor are unchanged, and
@@ -63,6 +70,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - HY4 chat splits thinking from the answer. Its close tag carries the
   `:6124c78e` suffix, which the stream splitter did not know, so the tag
   printed as literal text and the whole reply rendered as thinking.
+- The Hunyuan 3 shared-expert fold accepts a q5_k shared expert over any
+  expert codec and passes its mix weights without a per-layer ones-column
+  concat on mlx-kquant builds whose mix gather takes the shared slot at an
+  implicit weight of 1.
 
 ## [0.4.7] - 2026-08-30
 

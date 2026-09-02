@@ -74,6 +74,7 @@ from gmlx.models.deepseek_v4.model import (
 from gmlx.models.deepseek_v4.model import (
     ensure_registered as _ds4_ensure_registered,
 )
+from gmlx.models import kda_fused
 from gmlx.models.kimi_k3 import ShortConv1d, _kda_decay_lb
 
 _MOE_MIX_SCORES = os.environ.get("GMLX_GLM5_MOE_MIX", "1") != "0"
@@ -171,6 +172,32 @@ class Glm5NextMLP(nn.Module):
             _limited_swiglu(self.gate_proj(x), self.up_proj(x), self._limit))
 
 
+_KQ_ROUTER_STATE = {"ok": None}
+# Debug/A-B seam: False routes every gate through the compiled select.
+_KQ_ROUTER_ENABLED = True
+def _kq_router_available() -> bool:
+    """One-time probe for the mlx-kquant router kernel's sigmoid arm
+    (docstring-sniffed so older kquant builds keep the compiled select).
+    GMLX_GLM5_KQ_ROUTER=0 disables. The kernel is Metal-only, so a CPU
+    default device (KQUANT_FORCE_CPU, mx.stream(mx.cpu)) keeps the
+    compiled select regardless of the probe."""
+    if not _KQ_ROUTER_ENABLED or mx.default_device() != mx.gpu:
+        return False
+    ok = _KQ_ROUTER_STATE["ok"]
+    if ok is None:
+        ok = os.environ.get("GMLX_GLM5_KQ_ROUTER", "1") != "0"
+        if ok:
+            try:
+                import mlx_kquant as kq
+
+                ok = mx.metal.is_available() and "sigmoid" in (
+                    getattr(kq.moe_router_topk, "__doc__", "") or "")
+            except Exception:  # noqa: BLE001 - optional dependency
+                ok = False
+        _KQ_ROUTER_STATE["ok"] = ok
+    return ok
+
+
 class Glm5NextMoEGate(nn.Module):
     """Sigmoid noaux-tc router: the correction bias steers selection only,
     weights are the unbiased sigmoid scores, renormalized then x2.5.
@@ -193,6 +220,27 @@ class Glm5NextMoEGate(nn.Module):
 
     def __call__(self, x: mx.array):
         logits = x.astype(mx.float32) @ self.weight.T
+        t = logits.size // self.n_routed_experts
+        if t * self.top_k < 64 and _kq_router_available():
+            # Decode-scale: sigmoid + bias-steered top-k + renorm + scale in
+            # one kq dispatch instead of the compiled select's kernel chain.
+            # Ties at the selection boundary break by min index here and by
+            # argpartition order in the eager path; f32 scores make exact
+            # ties rare.
+            import mlx_kquant as kq
+
+            inds, weights = kq.moe_router_topk(
+                logits.reshape(t, self.n_routed_experts),
+                self.top_k,
+                self.norm_topk_prob,
+                shared_gate=False,
+                bias=self.e_score_correction_bias,
+                scoring="sigmoid",
+                scale=self.routed_scaling_factor,
+            )
+            shp = logits.shape[:-1]
+            return (inds.reshape(*shp, self.top_k),
+                    weights.reshape(*shp, self.top_k))
         return _expert_select(
             logits,
             self.e_score_correction_bias,
@@ -820,6 +868,28 @@ class Glm5NextDeltaAttention(nn.Module):
                 "pre": (q_state, k_state, v_state, ssm_state),
                 "inputs": x, "mask": mask,
             })
+
+        if (self._can_kernel and gdn_sink is None
+                and kda_fused.fused_ok(x, mask, cache)):
+            # Plain decode step: one dispatch from the projections to the
+            # gated output (conv, norms, decay, delta rule, out-norm).
+            y, q_state, k_state, v_state, ssm_state = kda_fused.kda_decode_fused(
+                self.q_proj(x), self.k_proj(x), self.v_proj(x),
+                q_state, k_state, v_state,
+                self.q_conv.conv.weight, self.k_conv.conv.weight,
+                self.v_conv.conv.weight,
+                self.f_b_proj(self.f_a_proj(x)), self.dt_bias, self.a_folded,
+                self.b_proj(x), self.g_b_proj(self.g_a_proj(x)),
+                ssm_state, self.o_norm.weight,
+                lb=self.gate_lower_bound, scale=self.scale, l2_eps=1e-6,
+                norm_eps=self.o_norm.eps, num_heads=self.num_heads,
+                head_dim=self.head_dim, conv_kernel=self.conv_kernel)
+            cache[0] = q_state
+            cache[1] = k_state
+            cache[2] = v_state
+            cache[3] = ssm_state
+            cache.advance(T)
+            return self.o_proj(y.astype(dtype))
 
         q_conv, q_state = self.q_conv(self.q_proj(x), q_state, mask, lengths)
         k_conv, k_state = self.k_conv(self.k_proj(x), k_state, mask, lengths)

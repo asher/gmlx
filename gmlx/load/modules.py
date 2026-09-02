@@ -200,6 +200,12 @@ class _FusedMoeCaps:
             getattr(kq, "gather_qmv_mix_kq", None), "__doc__", "") or ""
         self.shexp_upcast = (
             ("q6_k", "q8_0") if "shexp_kquant_type" in mix_doc else ())
+        # q5_k shared experts (UD builds) joined later; same docstring sniff.
+        if "q5_k" in mix_doc:
+            self.shexp_upcast += ("q5_k",)
+        # [T, S - 1] scores with the shared slot at an implicit weight of 1
+        # (saves the per-layer ones-column concat on the fold).
+        self.mix_implicit = "implicit weight" in mix_doc
         # Same-release proxy for the K % 256 dispatch fallback (kq routes
         # tuned q8_0 with K % 256 != 0 to the generic q8_0_ext kernels);
         # older kq builds need the strict 256 geometry.
@@ -538,6 +544,7 @@ def _eligible_kquant_glu(m, caps):
 def _make_fused_kquant(base_cls, caps):
     kq = caps.kq
     _has_mix_ns = caps.has_mix_ns
+    _mix_implicit = caps.mix_implicit
 
     class _FusedKQuantSwitchGLU(base_cls):
         """K-quant fused decode path: act(gate) * up SwitchGLU whose
@@ -623,8 +630,9 @@ def _make_fused_kquant(base_cls, caps):
                     raise NotImplementedError(
                         "LoRA epilogue on the shared-expert fold exit")
                 sc = scores.reshape(t, k)
-                sc = mx.concatenate(
-                    [sc, mx.ones((t, 1), dtype=sc.dtype)], axis=-1)
+                if not _mix_implicit:
+                    sc = mx.concatenate(
+                        [sc, mx.ones((t, 1), dtype=sc.dtype)], axis=-1)
                 skw = ({"shexp_kquant_type": se.down_proj.kquant_type}
                        if se.down_proj.kquant_type != down.kquant_type
                        else {})
