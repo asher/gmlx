@@ -74,6 +74,7 @@ from gmlx.models.deepseek_v4.model import (
 from gmlx.models.deepseek_v4.model import (
     ensure_registered as _ds4_ensure_registered,
 )
+from gmlx.models import kda_fused
 from gmlx.models.kimi_k3 import ShortConv1d, _kda_decay_lb
 
 _MOE_MIX_SCORES = os.environ.get("GMLX_GLM5_MOE_MIX", "1") != "0"
@@ -820,6 +821,28 @@ class Glm5NextDeltaAttention(nn.Module):
                 "pre": (q_state, k_state, v_state, ssm_state),
                 "inputs": x, "mask": mask,
             })
+
+        if (self._can_kernel and gdn_sink is None
+                and kda_fused.fused_ok(x, mask, cache)):
+            # Plain decode step: one dispatch from the projections to the
+            # gated output (conv, norms, decay, delta rule, out-norm).
+            y, q_state, k_state, v_state, ssm_state = kda_fused.kda_decode_fused(
+                self.q_proj(x), self.k_proj(x), self.v_proj(x),
+                q_state, k_state, v_state,
+                self.q_conv.conv.weight, self.k_conv.conv.weight,
+                self.v_conv.conv.weight,
+                self.f_b_proj(self.f_a_proj(x)), self.dt_bias, self.a_folded,
+                self.b_proj(x), self.g_b_proj(self.g_a_proj(x)),
+                ssm_state, self.o_norm.weight,
+                lb=self.gate_lower_bound, scale=self.scale, l2_eps=1e-6,
+                norm_eps=self.o_norm.eps, num_heads=self.num_heads,
+                head_dim=self.head_dim, conv_kernel=self.conv_kernel)
+            cache[0] = q_state
+            cache[1] = k_state
+            cache[2] = v_state
+            cache[3] = ssm_state
+            cache.advance(T)
+            return self.o_proj(y.astype(dtype))
 
         q_conv, q_state = self.q_conv(self.q_proj(x), q_state, mask, lengths)
         k_conv, k_state = self.k_conv(self.k_proj(x), k_state, mask, lengths)
