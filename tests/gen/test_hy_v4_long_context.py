@@ -28,7 +28,7 @@ import pytest
 
 import mlx.core as mx  # noqa: E402
 
-from tests.gen.test_long_context import (  # noqa: E402
+from test_long_context import (  # noqa: E402
     _NEEDLE,
     _build_prompt,
     _load,
