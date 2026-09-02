@@ -712,3 +712,19 @@ def test_moe_gate_kq_router_matches_compiled_select(monkeypatch):
         np.testing.assert_allclose(wk[t][ok], wr[t][orr], rtol=1e-5, atol=1e-6)
 
 
+def test_moe_gate_cpu_device_keeps_compiled_select():
+    # The kq router kernel is Metal-only: with a CPU default device
+    # (KQUANT_FORCE_CPU on hosted CI, mx.stream(mx.cpu)) the gate must
+    # take the compiled select, not enqueue an op with no CPU path.
+    import gmlx.models.glm5_next.model as glm
+    args = _tiny_args()
+    model = _random_model(args, seed=7)
+    gate = next(ly.mlp.gate for ly in model.layers
+                if hasattr(ly.mlp, "gate"))
+    x = mx.random.normal((1, 3, args.hidden_size)).astype(mx.bfloat16)
+    with mx.stream(mx.cpu):
+        assert not glm._kq_router_available()
+        inds, w = gate(x)
+        mx.eval(inds, w)
+    assert inds.shape == (1, 3, gate.top_k)
+    assert bool(mx.isfinite(w).all())

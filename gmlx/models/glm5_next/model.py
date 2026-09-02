@@ -178,8 +178,10 @@ _KQ_ROUTER_ENABLED = True
 def _kq_router_available() -> bool:
     """One-time probe for the mlx-kquant router kernel's sigmoid arm
     (docstring-sniffed so older kquant builds keep the compiled select).
-    GMLX_GLM5_KQ_ROUTER=0 disables."""
-    if not _KQ_ROUTER_ENABLED:
+    GMLX_GLM5_KQ_ROUTER=0 disables. The kernel is Metal-only, so a CPU
+    default device (KQUANT_FORCE_CPU, mx.stream(mx.cpu)) keeps the
+    compiled select regardless of the probe."""
+    if not _KQ_ROUTER_ENABLED or mx.default_device() != mx.gpu:
         return False
     ok = _KQ_ROUTER_STATE["ok"]
     if ok is None:
@@ -835,7 +837,6 @@ class Glm5NextDeltaAttention(nn.Module):
         self.g_b_proj = nn.Linear(self.head_dim, self.projection_dim, bias=False)
         self.o_norm = nn.RMSNorm(self.head_dim, eps=args.rms_norm_eps)
         self.o_proj = nn.Linear(self.projection_dim, hidden, bias=False)
-
 
         # The metal kernel needs Dk % 32 == 0; fall back to ops otherwise.
         self._can_kernel = (self.head_dim % 32 == 0) and mx.metal.is_available()

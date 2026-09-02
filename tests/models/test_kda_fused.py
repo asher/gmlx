@@ -123,7 +123,12 @@ def test_route_gating():
     cache = model.make_cache()
     x = mx.zeros((1, 1, args.hidden_size))
     kda_cache = cache[model.model.ssm_idx]
-    assert kda_fused.fused_ok(x, None, kda_cache)
+    # Metal-only: a CPU default device (KQUANT_FORCE_CPU on hosted CI)
+    # routes the plain decode step through the ops path too.
+    assert kda_fused.fused_ok(x, None, kda_cache) == (
+        mx.default_device() == mx.gpu)
+    with mx.stream(mx.cpu):
+        assert not kda_fused.fused_ok(x, None, kda_cache)
     assert not kda_fused.fused_ok(mx.zeros((1, 2, args.hidden_size)), None, kda_cache)
     assert not kda_fused.fused_ok(x, mx.ones((1, 1), dtype=mx.bool_), kda_cache)
     assert not kda_fused.fused_ok(x, None, None)
