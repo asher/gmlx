@@ -164,7 +164,7 @@ class _ChatPromptSource:
         return ids
 
 
-def _bench_kv_arm(model, kv_bits, kv_group_size):
+def _bench_kv_arm(model, kv_bits, kv_group_size, quantized_kv_start=0):
     """KV-cache config for the bench decode calls: (stream_generate kwargs,
     fresh-cache factory or None). The arm resolves the shared policy and
     rebuilds a fresh cache per timed call, so the bench quantizes the
@@ -175,21 +175,17 @@ def _bench_kv_arm(model, kv_bits, kv_group_size):
         return {}, None
     from mlx_lm.models.cache import make_prompt_cache as _mpc
 
-    from gmlx.cache.kv_policy import (arm_stack, kv_line,
-                                      resolve_kv_quant_policy)
+    from gmlx.cache.kv_policy import arm_stack, resolve_and_report
 
-    policy = resolve_kv_quant_policy(
+    policy = resolve_and_report(
         _mpc(model), kv_bits=kv_bits, kv_group_size=kv_group_size,
-        quantized_kv_start=0)
-    print(kv_line(None, policy), file=sys.stderr)
-    if policy.verdict == "error":
-        raise SystemExit(2)
+        quantized_kv_start=quantized_kv_start)
     if policy.verdict == "dropped":
         return {}, None
     kwargs = {
         "kv_bits": int(kv_bits),
         "kv_group_size": int(kv_group_size),
-        "quantized_kv_start": 0,
+        "quantized_kv_start": int(quantized_kv_start),
     }
 
     def factory():
@@ -211,6 +207,7 @@ def bench(
     prefill_step_size: int | None = None,
     kv_bits=None,
     kv_group_size: int = 64,
+    quantized_kv_start: int = 0,
 ) -> dict[int, dict[str, float]]:
     """Measure prefill and decode throughput (tokens/sec) per prompt length.
 
@@ -231,7 +228,8 @@ def bench(
     if defaulted:
         print(f"[bench] streaming model: prefill chunk size defaults to {step}")
     pf_kwargs = {} if step is None else {"prefill_step_size": step}
-    kv_kwargs, kv_cache = _bench_kv_arm(model, kv_bits, kv_group_size)
+    kv_kwargs, kv_cache = _bench_kv_arm(
+        model, kv_bits, kv_group_size, quantized_kv_start)
     pf_kwargs.update(kv_kwargs)
 
     def _cache_kwargs():
@@ -356,6 +354,7 @@ def bench_tg_depth(
     prompt_source: "_ChatPromptSource | None" = None,
     kv_bits=None,
     kv_group_size: int = 64,
+    quantized_kv_start: int = 0,
 ) -> dict[int, dict[str, float]]:
     """Token-generation throughput measured at each context depth.
 
@@ -401,9 +400,22 @@ def bench_tg_depth(
     if owned and hasattr(model, "language_model"):
         plain_lm = _RawLogitsLM(model.language_model)
 
-    # KV applies to the plain-decode arm only; the speculative arm keeps the
-    # MTP path's own handling. Build from plain_lm, the model this arm drives.
-    kv_kwargs, kv_cache = _bench_kv_arm(plain_lm, kv_bits, kv_group_size)
+    # Both arms must run the same KV config or the speedup is a biased
+    # A/B. The assistant-drafter arms run through mlx-vlm's engine (no KV
+    # quantization hook): drop kv on both, with the reason on the line.
+    if drafter is not None and not owned:
+        if kv_bits is not None:
+            from gmlx.cache.kv_policy import dropped_policy, kv_line
+
+            print(kv_line(None, dropped_policy(
+                "assistant-drafter bench arms have no KV quantization "
+                "hook; both arms run fp16 KV",
+                kv_bits, kv_group_size, "single")), file=sys.stderr)
+        kv_bits = None
+        kv_kwargs, kv_cache = {}, None
+    else:
+        kv_kwargs, kv_cache = _bench_kv_arm(
+            plain_lm, kv_bits, kv_group_size, quantized_kv_start)
     pf_kwargs.update(kv_kwargs)
 
     def _cache_kwargs():
@@ -480,6 +492,8 @@ def bench_tg_depth(
                     draft_block_size=draft_block_size,
                     apply_chat_template=False,
                     verbose=False,
+                    kv_bits=kv_bits,
+                    kv_group_size=kv_group_size,
                 )
                 if best is None or stats["decode_tps"] > best["decode_tps"]:
                     best = stats

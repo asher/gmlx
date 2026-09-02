@@ -1235,6 +1235,7 @@ def _run_bench(args) -> int:
         prefill_step_size=args.prefill_step_size,
         kv_bits=args.kv_bits,
         kv_group_size=args.kv_group_size,
+        quantized_kv_start=args.quantized_kv_start,
     )
     print(f"\n{'prompt_len':>10} {'prefill_tps':>12} {'decode_tps':>11}")
     for L in lengths:
@@ -1344,6 +1345,7 @@ def _run_bench_depths(args) -> int:
         prompt_source=prompt_source,
         kv_bits=args.kv_bits,
         kv_group_size=args.kv_group_size,
+        quantized_kv_start=args.quantized_kv_start,
     )
 
     if speculative:
