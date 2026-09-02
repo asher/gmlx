@@ -290,17 +290,13 @@ def generate(
         # misses what max_kv_size builds.
         from mlx_lm.models.cache import make_prompt_cache as _mpc
 
-        from gmlx.cache.kv_policy import (arm_stack, kv_line,
-                                          resolve_kv_quant_policy)
+        from gmlx.cache.kv_policy import arm_stack, resolve_and_report
 
         prompt_cache = _mpc(model, max_kv_size=max_kv_size)
-        policy = resolve_kv_quant_policy(
+        policy = resolve_and_report(
             prompt_cache, kv_bits=kv_bits, kv_group_size=kv_group_size,
             quantized_kv_start=quantized_kv_start,
             max_kv_size=max_kv_size)
-        print(kv_line(None, policy), file=sys.stderr)
-        if policy.verdict == "error":
-            raise SystemExit(2)
         if policy.verdict == "dropped":
             prompt_cache = None
             kv_bits = None
@@ -987,19 +983,15 @@ def generate_speculative_owned(
     prompt_cache = _cache.make_prompt_cache(lm)
     if kv_bits is not None:
         # Owned rounds take the layers serve takes; the stock walks
-        # decline (mtp_kv_decline).
-        from gmlx.cache.kv_policy import (arm_stack, kv_line,
-                                          resolve_kv_quant_policy)
+        # decline. No later converter runs here, so convert now.
+        from gmlx.cache.kv_policy import quantize_stack, resolve_and_report
         from gmlx.spec.engine import mtp_kv_decline
 
         decline = mtp_kv_decline(lm)
-        policy = resolve_kv_quant_policy(
+        policy = resolve_and_report(
             prompt_cache, kv_bits=kv_bits, kv_group_size=kv_group_size,
             mtp=True, can_quantize_kv=decline is None, no_kv_reason=decline)
-        print(kv_line(None, policy), file=sys.stderr)
-        if policy.verdict == "error":
-            raise SystemExit(2)
-        arm_stack(prompt_cache, policy, hold=False)
+        quantize_stack(prompt_cache, policy)
 
     detok = tokenizer.detokenizer
     detok.reset()

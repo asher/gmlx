@@ -1,7 +1,8 @@
-from mlx_vlm.models.cache import ArraysCache, KVCache, RotatingKVCache
+from mlx_vlm.models.cache import (ArraysCache, KVCache, QuantizedKVCache,
+                                  RotatingKVCache)
 
 from gmlx.cache.kv_policy import (kv_line, packed_bytes_per_element,
-                                  resolve_kv_quant_policy)
+                                  quantize_stack, resolve_kv_quant_policy)
 
 
 def _dense(n):
@@ -110,6 +111,22 @@ def test_start_not_honored_batched():
 def test_packed_bpe_values():
     assert packed_bytes_per_element(8, 64) == 1.0625
     assert packed_bytes_per_element(4, 32) == 0.625
+
+
+def test_quantize_stack_converts_planned_layers():
+    stack = _dense(28)
+    p = _resolve(stack)
+    armed, n = quantize_stack(stack, p)
+    assert (armed, n) == (0, 27)
+    assert all(isinstance(c, QuantizedKVCache) for c in stack[:-1])
+    assert type(stack[-1]) is KVCache
+
+
+def test_quantize_stack_noop_on_dropped():
+    stack = _dense(4)
+    p = _resolve(stack, mtp=True, mode="batched")
+    assert quantize_stack(stack, p) == (0, 0)
+    assert all(type(c) is KVCache for c in stack)
 
 
 def test_kv_line_shape():

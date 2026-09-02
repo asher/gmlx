@@ -2855,20 +2855,21 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
     # so the decline decides here.
     mtp_kv_policy = None
     if kv_kwargs.get("kv_bits") is not None:
-        from gmlx.cache.kv_policy import kv_line, resolve_kv_quant_policy
+        from gmlx.cache.kv_policy import resolve_and_report
         from gmlx.spec.engine import mtp_kv_decline
+        from gmlx.spec.speculative import use_owned_engine
 
         lm = b.model.language_model
-        decline = mtp_kv_decline(
-            lm, owned_round=os.environ.get("GMLX_OWNED_ROUND") != "0")
+        # temp=0.0: the session cache must serve every turn, including a
+        # greedy one that routes to the stock round.
+        owned = (os.environ.get("GMLX_OWNED_ROUND") != "0"
+                 or use_owned_engine(b.drafter, 0.0))
+        decline = mtp_kv_decline(lm, owned_round=owned)
         probe = _mtp_make_cache(lm)
-        policy = resolve_kv_quant_policy(
+        policy = resolve_and_report(
             probe, kv_bits=kv_kwargs["kv_bits"],
             kv_group_size=kv_kwargs.get("kv_group_size", 64),
             mtp=True, can_quantize_kv=decline is None, no_kv_reason=decline)
-        print(kv_line(None, policy), file=sys.stderr)
-        if policy.verdict == "error":
-            raise SystemExit(2)
         if policy.verdict != "dropped":
             mtp_kv_policy = policy
         kv_kwargs["kv_bits"] = None
@@ -2876,11 +2877,12 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
     def _new_text_cache():
         # Single-stream MTP uses a plain target KV cache the native drafter
         # reads back - one cache, reused across turns (like the text path).
+        # No later converter runs here, so convert now.
         c = _mtp_make_cache(b.model.language_model)
         if mtp_kv_policy is not None:
-            from gmlx.cache.kv_policy import arm_stack
+            from gmlx.cache.kv_policy import quantize_stack
 
-            arm_stack(c, mtp_kv_policy, hold=False)
+            quantize_stack(c, mtp_kv_policy)
         return c
 
     b.new_text_cache = _new_text_cache
@@ -2955,18 +2957,14 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
         # windows would crash it), pools pack at rest, the rest quantize
         # per the serve carve-out.
         if kv_kwargs.get("kv_bits") is not None:
-            from gmlx.cache.kv_policy import (kv_line,
-                                              resolve_kv_quant_policy)
+            from gmlx.cache.kv_policy import resolve_and_report
 
             probe = make_prompt_cache(b.model, args.max_kv_size)
-            policy = resolve_kv_quant_policy(
+            policy = resolve_and_report(
                 probe, kv_bits=kv_kwargs["kv_bits"],
                 kv_group_size=kv_kwargs.get("kv_group_size", 64),
                 quantized_kv_start=kv_kwargs.get("quantized_kv_start", 0),
                 max_kv_size=args.max_kv_size)
-            print(kv_line(None, policy), file=sys.stderr)
-            if policy.verdict == "error":
-                raise SystemExit(2)
             if policy.verdict == "dropped":
                 kv_kwargs["kv_bits"] = None
             else:
