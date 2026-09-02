@@ -108,8 +108,14 @@ def test_dead_bytes_are_the_wire_minus_the_copy():
     assert got.dead_bytes == HEAD_N * 4 - HEAD_N * 2
 
 
-def test_the_arena_gains_what_the_dead_wire_gave_up():
+def test_the_arena_gains_what_the_dead_wire_gave_up(monkeypatch):
     """Without this the sizer re-charges every byte the pin released."""
+    import gmlx.load.loader as loader
+
+    monkeypatch.delenv("GMLX_DECODE_ARENA_GB", raising=False)
+    monkeypatch.setattr(loader, "_available_ram_bytes", lambda *a, **k: None)
+    monkeypatch.setattr(mx, "device_info",
+                        lambda: {"memory_size": 137 * 10**9})
     offsets = {0: [(0, 0, 200 << 30)]}
     kw = dict(total_bytes=229 << 30, offsets=offsets, budget=96 << 30,
               pinned_bytes=20 << 30)
