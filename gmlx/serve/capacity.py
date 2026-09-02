@@ -142,11 +142,40 @@ def _transient_bytes(heads: int | None, depth: int) -> float:
     return heads * step * (depth + step) * 2.0
 
 
-def derive_table(gguf_path: str, weight_bytes: float | None = None
-                 ) -> dict | None:
+def _kv_priced_costs(costs, env, model_id):
+    """Reprice quantizable layers per the model's env window - the same
+    batched-mode carve-out request admission prices with. Uniform fp16
+    when kv quantization is off or declined (MTP batched, max_kv_size,
+    a qat-marked id, malformed values)."""
+    e = {**os.environ, **(env or {})}
+    raw = e.get("KV_BITS")
+    if (not raw or e.get("MLX_VLM_GGUF_SPECULATIVE") == "1"
+            or e.get("MAX_KV_SIZE") or "qat" in str(model_id)):
+        return costs
+    try:
+        fb = float(raw)
+        group = int(e.get("KV_GROUP_SIZE") or 64)
+        from mlx_vlm.models.cache import should_quantize_kv_layer
+
+        from gmlx.cache.kv_policy import (FP16_BPE, VALID_BITS, VALID_GROUPS,
+                                          packed_bytes_per_element)
+    except Exception:
+        return costs
+    if fb != int(fb) or int(fb) not in VALID_BITS or group not in VALID_GROUPS:
+        return costs
+    scale = packed_bytes_per_element(int(fb), group) / FP16_BPE
+    n = len(costs)
+    return [(w, bpt * scale if w is None and should_quantize_kv_layer(i, n)
+             else bpt)
+            for i, (w, bpt) in enumerate(costs)]
+
+
+def derive_table(gguf_path: str, weight_bytes: float | None = None,
+                 env: dict | None = None) -> dict | None:
     """The capacity table for serving ``gguf_path`` on this box, or None
     when the header or the device cannot be read (callers keep stock
-    behavior then)."""
+    behavior then). ``env`` is the model's residency env window; its kv
+    params reprice the quantized layers."""
     import mlx.core as mx
 
     from .memory import admit_reserve_bytes
@@ -161,6 +190,7 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None
         ws = working_set_bytes()
         if not (cfg and costs and ws):
             return None
+        costs = _kv_priced_costs(costs, env, gguf_path)
         info = mx.device_info()
         max_buffer = float(info.get("max_buffer_length", 0) or 0)
         resource_limit = int(info.get("resource_limit", 0) or 0)
@@ -427,12 +457,12 @@ def _resident_shard_bytes(model_id) -> float:
 
 
 def install_boot_table(gguf_path: str, weight_bytes: float | None,
-                       model_id: str) -> dict | None:
+                       model_id: str, env: dict | None = None) -> dict | None:
     """Derive, log, install, and gate the capacity table after a build.
     Raises with the numbers when the configuration cannot fit at width
     1 (unless GMLX_OVERCOMMIT=1, which logs that it is armed)."""
     global _TABLE
-    t = derive_table(gguf_path, weight_bytes)
+    t = derive_table(gguf_path, weight_bytes, env=env)
     if t is None:
         _log.info("[capacity] no table for %s (header or device "
                   "unreadable); stock behavior kept", model_id)
