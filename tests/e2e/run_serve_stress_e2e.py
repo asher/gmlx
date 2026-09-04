@@ -35,6 +35,7 @@ from run_apc_depth_e2e import (  # noqa: E402
     model_id_of,
     serve_args,
 )
+from run_apc_disk_e2e import kv_engaged, kv_engagement  # noqa: E402
 from server_proc import ServerProc  # noqa: E402
 
 LOG_BAD = re.compile(
@@ -299,12 +300,17 @@ def main() -> int:
     ap.add_argument("--request-timeout", type=float, default=420.0)
     ap.add_argument("--out", required=True)
     ap.add_argument("--python", default=sys.executable)
+    ap.add_argument("--scheme", default=None,
+                    help="KV_QUANT_SCHEME for the server (default fp16 KV)")
+    ap.add_argument("--bits", default=None,
+                    help="KV width: KV_BITS, or k6v5-style GMLX_KVARN_BITS")
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
     label = os.path.basename(args.out.rstrip("/"))
     log_path = os.path.join(args.out, "server.log")
-    env = depth_env(os.path.join(args.out, "apc-disk"), 16, 2048, 16)
+    env = depth_env(os.path.join(args.out, "apc-disk"), 16, 2048, 16,
+                    scheme=args.scheme, bits=args.bits)
 
     print(f"== {label}: building prefixes ==", flush=True)
     prefixes = build_prefixes()
@@ -321,6 +327,19 @@ def main() -> int:
         srv.wait_ready(timeout=900)
         base = srv.base_url
         mid = model_id_of(base, srv)
+        # One request before the workers: the server reports kv_quant
+        # once the model is resident, and a scheme that fell back to fp16
+        # would make the whole run measure the wrong cache.
+        plain_chat(base, {"model": mid, "max_tokens": 4, "temperature": 0.0,
+                          "messages": [{"role": "user", "content": "Say ok."}]},
+                   args.request_timeout)
+        kq = kv_engagement(base, mid)
+        if not kv_engaged(kq, args.scheme, args.bits):
+            # skip the chaos loop; the report still carries the finding
+            stats.finding({"kv_not_engaged": kq})
+            print(f"== {label}: KV scheme did not engage: {kq} ==", flush=True)
+            args.minutes = 0.0
+        print(f"== {label}: kv_quant {kq or 'fp16'} ==", flush=True)
         print(f"== {label}: chaos start, {args.clients} clients x "
               f"{args.minutes:.0f} min, seed {args.seed} ==", flush=True)
         stop_at = time.monotonic() + args.minutes * 60
@@ -364,6 +383,7 @@ def main() -> int:
         "minutes": args.minutes,
         "clients": args.clients,
         "seed": args.seed,
+        "kv_quant": kq,
         "requests": total,
         "actions": stats.actions,
         "findings": stats.findings,

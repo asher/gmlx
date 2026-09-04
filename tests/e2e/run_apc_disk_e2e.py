@@ -108,16 +108,33 @@ def model_id_of(base_url: str, proc: ServerProc) -> str:
     return body["data"][0]["id"]
 
 
+def kv_engagement(base_url: str, model_id: str = None) -> dict:
+    """The kv_quant block /v1/models reports for ``model_id`` (the first
+    row when None). Read from the server, not the env: the server decides
+    the scheme per model and reports it once the model is resident, so
+    call this after a request has completed."""
+    status, body = Client(base_url).models()
+    rows = (body or {}).get("data", []) if status == 200 else []
+    for row in rows:
+        if model_id is None or row.get("id") == model_id:
+            return row.get("kv_quant") or {}
+    return {}
+
+
+def kv_engaged(kq: dict, scheme: str = None, bits=None) -> bool:
+    """Whether the requested KV scheme engaged: a full or partial verdict at
+    that scheme. No request means fp16 KV, which needs no check."""
+    if not scheme and not bits:
+        return True
+    want = scheme or "uniform"
+    return kq.get("scheme") == want and kq.get("verdict") in ("full", "partial")
+
+
 def served_tier(base_url: str) -> str:
     """The APC tier this server runs for its first model. A kvarn boot that
     converts layers serves the exact tier, so stores and index counts move
-    on the exact-tier counters. Read from /v1/models, not the env: the
-    server decides the scheme per model, and reports it once the model is
-    resident, so call this after a request has completed."""
-    status, body = Client(base_url).models()
-    rows = (body or {}).get("data", []) if status == 200 else []
-    kq = (rows[0].get("kv_quant") or {}) if rows else {}
-    if kq.get("scheme") == "kvarn" and kq.get("verdict") in ("full", "partial"):
+    on the exact-tier counters. Same timing rule as kv_engagement."""
+    if kv_engaged(kv_engagement(base_url), "kvarn"):
         return "exact"
     return "block"
 
