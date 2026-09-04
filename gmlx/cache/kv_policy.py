@@ -72,7 +72,7 @@ class KvLayerPlan:
 
 @dataclass(frozen=True)
 class KvQuantPolicy:
-    verdict: str                # full | partial | dropped | error
+    verdict: str                # full | partial | dropped | error | off
     reason: str | None
     bits: int | None
     group_size: int | None
@@ -137,6 +137,8 @@ class KvQuantPolicy:
             return f"error: {self.reason}"
         if self.verdict == "dropped":
             return f"dropped: {self.reason}"
+        if self.verdict == "off":
+            return "off"
         n = len(self.per_layer)
         parts = [f"quantized {self.n_quant}/{n} attn layers"]
         held = []
@@ -166,6 +168,12 @@ def _error(reason, bits, group, mode, stack, **kw):
 def dropped_policy(reason, bits, group, mode, **kw) -> KvQuantPolicy:
     """A dropped verdict for paths where no stack was constructed."""
     return KvQuantPolicy("dropped", reason, bits, group, mode, (), **kw)
+
+
+def off_policy(mode) -> KvQuantPolicy:
+    """The verdict stamped on a model loaded without KV quantization, so
+    request-time readers can tell "off" from "never resolved"."""
+    return KvQuantPolicy("off", "not requested", None, None, mode, ())
 
 
 def _dropped(reason, bits, group, mode, stack, kinds=None, **kw):

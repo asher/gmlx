@@ -2620,6 +2620,31 @@ def _spec_kv_quant_params():
                 kv_group_size=int(os.environ.get("KV_GROUP_SIZE", "64")))
 
 
+def _stamped_spec_params(lm):
+    """resolve_kv_quant_policy kwargs from the KV policy residency stamped
+    on this model at load, None when nothing is stamped. Per-model env
+    windows are closed by request time, so the stamp rules the boot env;
+    a stamp that quantizes nothing yields {} (stay fp16)."""
+    from gmlx.cache.kvarn_serve import stamped_single_policy
+
+    single = stamped_single_policy(lm)
+    if single is None:
+        return None
+    bits = getattr(single, "bits", None)
+    if not bits:
+        return {}
+    if getattr(single, "scheme", None) == "kvarn":
+        from gmlx.cache.kvarn_cache import KVARN_DEFAULT_TAIL
+
+        return dict(scheme="kvarn", kv_bits=int(bits),
+                    value_bits=int(single.value_bits or bits),
+                    tail_tokens=int(single.tail_tokens or KVARN_DEFAULT_TAIL))
+    if int(bits) != bits or int(bits) not in _SPEC_KV_QUANT_WIDTHS:
+        return {}
+    return dict(scheme="uniform", kv_bits=int(bits),
+                kv_group_size=int(single.group_size))
+
+
 def _mtp_reads_kv_back(lm) -> bool:
     """True when the target's verify route re-reads K/V from the prompt
     cache (spec_helpers._mtp_shared_kv_from_prompt_cache): it computes
@@ -2645,24 +2670,22 @@ def install_spec_kv_quant() -> None:
     The shared KV policy picks the layers: growing KV converts at
     construction (empty, so conversion is free), quantizable pools pack
     at rest, and windows, recurrent state, and opt-outs stay fp16 at any
-    nesting depth. ``KV_QUANT_SCHEME=kvarn`` converts the same B=1 caches
-    to ``KVarNKVCache`` instead (rollback rides the stage/horizon
-    regions), declining targets whose verify path reads shared K/V back
-    from cache state; its converter is still the flat exact-type scan, so
-    it reaches neither nested KV members nor pools. B>1 MTP keeps stock
-    behavior with a one-shot warning (ragged rollback on packed rows is
-    unsupported). No-op unless KV_BITS or scheme kvarn is set at server
-    boot. Kill switch: GMLX_SPEC_KV_QUANT=0."""
+    nesting depth. Scheme kvarn converts the same B=1 caches to
+    ``KVarNKVCache`` instead (rollback rides the stage/horizon regions),
+    declining targets whose verify path reads shared K/V back from cache
+    state. B>1 MTP keeps stock behavior with a one-shot warning (ragged
+    rollback on packed rows is unsupported). Scheme and widths come from
+    the policy stamped on the model at load; the boot env is the fallback
+    for unstamped models. Kill switch: GMLX_SPEC_KV_QUANT=0."""
     from mlx_vlm.generate import ar as _ar
     from mlx_vlm.server import generation as _gen
     from mlx_vlm.speculative import utils as _su
 
     if getattr(_su.make_speculative_prompt_cache, _SPEC_KV_QUANT_FLAG, False):
         return
-    params = _spec_kv_quant_params()
-    if params is None:
+    if os.environ.get("GMLX_SPEC_KV_QUANT", "1") == "0":
         return
-    kind = params["scheme"]
+    boot_params = _spec_kv_quant_params()
 
     from gmlx.cache.compat import cache_types
 
@@ -2742,6 +2765,12 @@ def install_spec_kv_quant() -> None:
                     "batch rollback is unsupported; %d layers run fp16 KV",
                     batch_size, swapped)
             return caches
+        params = _stamped_spec_params(lm)
+        if params is None:
+            params = boot_params
+        if not params:
+            return caches
+        kind = params["scheme"]
         decline = mtp_kv_decline(lm)
         if decline is not None:
             if not _warned_stock[0]:
@@ -2803,4 +2832,4 @@ def install_spec_kv_quant() -> None:
     _su.make_speculative_prompt_cache = _quantizing_spec_cache
     _ar.make_speculative_prompt_cache = _quantizing_spec_cache
     _gen.make_speculative_prompt_cache = _quantizing_spec_cache
-    _debug_note(f"[mtp] spec cache: {params} armed (B=1)")
+    _debug_note(f"[mtp] spec cache wrap armed (B=1); boot env {boot_params}")

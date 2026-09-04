@@ -9,6 +9,7 @@ pytest.importorskip("mlx_vlm")
 from mlx_vlm.models.cache import KVCache  # noqa: E402
 
 import gmlx.serve.kv_policy as skv  # noqa: E402
+from gmlx.cache.kv_policy import kv_line  # noqa: E402
 
 
 def _model(layers=4):
@@ -116,7 +117,15 @@ def test_qat_drop_surfaces(monkeypatch):
 
 def test_kv_off_returns_none(monkeypatch):
     monkeypatch.delenv("KV_BITS", raising=False)
-    assert skv.resolve_for_load(_rg(kv_bits=None), "m") is None
+    rg = _rg(kv_bits=None)
+    assert skv.resolve_for_load(rg, "m") is None
+    # /v1/models reports no policy, but the model carries an explicit
+    # off stamp so request-time readers never inherit another model's
+    # boot env.
+    assert not hasattr(rg, skv.RG_ATTR)
+    stamped = getattr(rg.model, skv.RG_ATTR)
+    assert stamped.single.verdict == "off" and stamped.single.bits is None
+    assert "-> off" in kv_line("m", stamped.single)
 
 
 def test_to_json_shapes(monkeypatch):

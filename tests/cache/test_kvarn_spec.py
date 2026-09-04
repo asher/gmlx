@@ -149,6 +149,32 @@ def test_params_affine_unchanged(restorable):
     assert spec_engine._spec_kv_quant_params() is None
 
 
+def _stamp(lm, **single):
+    from types import SimpleNamespace
+
+    lm._gmlx_kv_policy = SimpleNamespace(single=SimpleNamespace(**single))
+    return lm
+
+
+def test_stamped_params_rule_the_boot_env(restorable):
+    # No stamp: None, so the boot env decides. A stamp: its scheme and
+    # widths, {} when it quantizes nothing.
+    assert spec_engine._stamped_spec_params(_FakeLM()) is None
+    kv = _stamp(_FakeLM(), scheme="kvarn", bits=4, value_bits=None,
+                tail_tokens=256)
+    assert spec_engine._stamped_spec_params(kv) == dict(
+        scheme="kvarn", kv_bits=4, value_bits=4, tail_tokens=256)
+    kv = _stamp(_FakeLM(), scheme="kvarn", bits=6, value_bits=5,
+                tail_tokens=None)
+    assert spec_engine._stamped_spec_params(kv) == dict(
+        scheme="kvarn", kv_bits=6, value_bits=5, tail_tokens=1024)
+    off = _stamp(_FakeLM(), scheme="uniform", bits=None, group_size=64)
+    assert spec_engine._stamped_spec_params(off) == {}
+    aff = _stamp(_FakeLM(), scheme="uniform", bits=8, group_size=32)
+    assert spec_engine._stamped_spec_params(aff) == dict(
+        scheme="uniform", kv_bits=8, kv_group_size=32)
+
+
 # -- serve B=1 conversion ----------------------------------------------------
 
 
@@ -175,6 +201,22 @@ def test_b1_mtp_kvarn_env_widths(restorable, _ops_ok):
     caches = _mk()
     assert caches[0].k_bits == 4 and caches[0].v_bits == 4
     assert caches[0].tail_cap == 256
+
+
+@_NEEDS_GPU
+def test_b1_mtp_kvarn_from_the_stamp(restorable, _ops_ok):
+    # Boot env says fp16; this model was loaded at kvarn k4 tail 256.
+    restorable.delenv("KV_QUANT_SCHEME", raising=False)
+    spec_engine.install_spec_kv_quant()
+    lm = _stamp(_FakeLM(), scheme="kvarn", bits=4, value_bits=None,
+                tail_tokens=256)
+    caches = _mk(lm=lm)
+    assert type(caches[0]) is KVarNKVCache
+    assert caches[0].k_bits == 4 and caches[0].tail_cap == 256
+    # and the reverse: boot env kvarn, stamp says fp16
+    restorable.setenv("KV_QUANT_SCHEME", "kvarn")
+    off = _stamp(_FakeLM(), scheme="uniform", bits=None, group_size=64)
+    assert all(type(c) is not KVarNKVCache for c in _mk(lm=off))
 
 
 def test_readback_target_declines(restorable, _ops_ok):

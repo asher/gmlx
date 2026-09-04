@@ -11,7 +11,7 @@ import os
 from dataclasses import dataclass
 
 from gmlx.cache.kv_policy import (KvQuantPolicy, dropped_policy, kv_line,
-                                  resolve_kv_quant_policy)
+                                  off_policy, resolve_kv_quant_policy)
 
 _log = logging.getLogger(__name__)
 
@@ -154,14 +154,13 @@ def resolve_for_load(rg, model_id: str):
             setattr(rg, RG_ATTR, pol)
             # Warm merges read the model stamp and must stay float
             # here: upstream dropped the flag and live caches run fp16.
-            try:
-                setattr(rg.model, RG_ATTR, pol)
-            except Exception:
-                _log.warning("[kv] %s: model stamp failed; warm merges "
-                             "see no policy (stay fp16)", model_id,
-                             exc_info=True)
+            _stamp_model(rg, pol, model_id)
             _log.warning(kv_line(model_id, pol.single))
             return pol
+        # Off is stamped too: request-time readers (the B=1 MTP spec
+        # cache) must not fall back to another model's boot env.
+        _stamp_model(rg, ServeKvPolicy(off_policy("single"),
+                                       off_policy("batched")), model_id)
         return None
 
     mtp = bool(getattr(rg, "draft_model_path", None)
@@ -198,9 +197,18 @@ def resolve_for_load(rg, model_id: str):
         bad = pol.single if pol.single.verdict == "error" else pol.batched
         raise KvPolicyError(kv_line(model_id, bad))
     setattr(rg, RG_ATTR, pol)
-    # The batch worker reads the policy off batch.model. The residency
-    # proxy does not cross threads. Both objects carry it: the cache
-    # builders disagree on which one they are handed.
+    _stamp_model(rg, pol, model_id)
+    _log.info(kv_line(model_id, pol.single))
+    if pol.batched.verdict != pol.single.verdict:
+        _log.info(kv_line(model_id, pol.batched)
+                  + " (when batched)")
+    return pol
+
+
+def _stamp_model(rg, pol, model_id):
+    """The batch worker reads the policy off batch.model. The residency
+    proxy does not cross threads. Model and language model both carry
+    it: the cache builders disagree on which one they are handed."""
     try:
         setattr(rg.model, RG_ATTR, pol)
         lm = getattr(rg.model, "language_model", None)
@@ -209,11 +217,6 @@ def resolve_for_load(rg, model_id: str):
     except Exception:
         _log.warning("[kv] %s: model stamp failed; warm merges see no "
                      "policy (stay fp16)", model_id, exc_info=True)
-    _log.info(kv_line(model_id, pol.single))
-    if pol.batched.verdict != pol.single.verdict:
-        _log.info(kv_line(model_id, pol.batched)
-                  + " (when batched)")
-    return pol
 
 
 def pricing_vector(rg, num_layers: int):

@@ -40,9 +40,9 @@ def restorable(monkeypatch):
     return monkeypatch
 
 
-def _mk(batch_size=1, make_cache=None):
+def _mk(batch_size=1, make_cache=None, lm=None):
     return ar.make_speculative_prompt_cache(
-        _FakeLM(),
+        lm or _FakeLM(),
         draft_kind="mtp",
         batch_size=batch_size,
         left_padding=[0] * batch_size,
@@ -76,11 +76,39 @@ def test_group_size_env(restorable):
     assert caches[0].bits == 8 and caches[0].group_size == 32
 
 
-def test_no_env_no_patch(restorable):
+def test_no_env_installs_and_stays_fp16(restorable):
+    # The wrap installs regardless: a later-loaded model may carry a
+    # stamped policy even when the boot env asked for nothing.
     restorable.delenv("KV_BITS", raising=False)
     before = su.make_speculative_prompt_cache
     spec_engine.install_spec_kv_quant()
-    assert su.make_speculative_prompt_cache is before
+    assert su.make_speculative_prompt_cache is not before
+    assert all(type(c) in (KVCache, _SSMCache) for c in _mk())
+
+
+def _stamp(lm, single):
+    from gmlx.serve.kv_policy import ServeKvPolicy
+
+    lm._gmlx_kv_policy = ServeKvPolicy(single, single)
+    return lm
+
+
+def test_stamped_policy_rules_the_boot_env(restorable):
+    # Serve's per-model env window is closed by request time; the stamp
+    # left by resolve_for_load is what this model was loaded at.
+    from gmlx.cache.kv_policy import off_policy, resolve_kv_quant_policy
+
+    restorable.setenv("KV_BITS", "8")
+    spec_engine.install_spec_kv_quant()
+    fp16 = _stamp(_FakeLM(), off_policy("single"))
+    assert all(type(c) in (KVCache, _SSMCache) for c in _mk(lm=fp16))
+    narrow = _stamp(_FakeLM(), resolve_kv_quant_policy(
+        [KVCache()], kv_bits=4, kv_group_size=32, mode="single"))
+    caches = _mk(lm=narrow)
+    assert isinstance(caches[0], QuantizedKVCache)
+    assert caches[0].bits == 4 and caches[0].group_size == 32
+    # unstamped: the boot env still applies
+    assert _mk().__getitem__(0).bits == 8
 
 
 def test_kill_switch(restorable):
@@ -97,9 +125,8 @@ def test_kill_switch(restorable):
 def test_non_affine_stays_fp16(restorable, bits, scheme):
     restorable.setenv("KV_BITS", bits)
     restorable.setenv("KV_QUANT_SCHEME", scheme)
-    before = su.make_speculative_prompt_cache
     spec_engine.install_spec_kv_quant()
-    assert su.make_speculative_prompt_cache is before
+    assert all(type(c) in (KVCache, _SSMCache) for c in _mk())
 
 
 def test_batch_passthrough(restorable):
