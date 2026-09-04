@@ -452,10 +452,12 @@ def test_setup_converts_rotating_stack(kvarn_ops_ok, capsys):
     assert "[kv] kvarn6 tail=1024 window=4096 -> quantized 2/2 attn layers" in err
 
 
-def test_setup_declines_below_floor(kvarn_ops_ok, capsys):
+def test_setup_rejects_below_floor(kvarn_ops_ok, capsys):
     from gmlx.gen.generation import setup_kvarn_cache
 
-    assert setup_kvarn_cache(_MakeCacheLess(), None, 1024, 512) is None
+    with pytest.raises(SystemExit) as exc:
+        setup_kvarn_cache(_MakeCacheLess(), None, 1024, 512)
+    assert exc.value.code == 2
     err = capsys.readouterr().err
     assert "window floor" in err and "kv_tail_tokens" in err
 
