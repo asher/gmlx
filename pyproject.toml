@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gmlx"
-version = "0.4.7"
+version = "0.4.8"
 description = "A local inference platform for Apple Silicon: run, chat with, serve, and fine-tune the GGUF ecosystem's quantized models natively on MLX, straight off the file."
 readme = "README.md"
 requires-python = ">=3.11"  # 3.10 EOLs 2026-10; mlx-kquant's lower floor is a library floor
@@ -31,7 +31,7 @@ classifiers = [
 # mlx / mlx-lm / mlx-vlm move in lockstep with the exact mlx-vlm pin; bump them
 # together per docs/upstream-upgrades.md.
 dependencies = [
-    "mlx-kquant>=0.4.4,<0.5",  # 0.4.4: stq1_0 codec
+    "mlx-kquant>=0.4.5,<0.5",  # 0.4.5: sigmoid router arm, q5_k shexp codec
     "mlx-lm>=0.31",
     # Direct imports of both throughout (mx.*, np.*); declared explicitly
     # rather than inherited through mlx-lm.
@@ -41,7 +41,7 @@ dependencies = [
     # gmlx/upstream/seams.py); point releases move them (0.6.4 vendored
     # switch_layers and rewrote the cache module - see
     # gmlx/cache/compat.py for the dual-origin cache-class rules).
-    # 0.6.15 requires mlx>=0.32.0; mlx-kquant 0.4.0 (PyPI) carries the
+    # 0.6.15 requires mlx>=0.32.0; mlx-kquant 0.4.4 (PyPI) carries the
     # matching mlx 0.32.1 pin; <0.5 guards the next kquant breaking change.
     "mlx-vlm==0.6.15",
     # Encoder embedders (the EmbeddingGemma GGUF path + the safetensors BERT /

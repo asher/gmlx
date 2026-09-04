@@ -155,17 +155,13 @@ walk can't honour (`--stop`, `--logit-bias`, the
 repetition/presence/frequency penalties, `--xtc-probability`, `--max-kv-size`,
 `--quantized-kv-start`) are dropped, each named in a warning, never silently. To
 apply one of those flags, pass `--no-mtp` to decode on the plain path, which
-honours it exactly. `--kv-bits` and `--kv-quant-scheme kvarn` apply on the MTP
-path itself, with an accurate note where they can't. `--kv-bits` quantizes the
-same layers `serve` quantizes, because the verify walk is the same owned engine
-in both: rollback trims, and affine packing is per-token along head_dim, so a
-trim is only an offset move. The two stock verify walks read keys back as raw
-arrays and decline instead (`GMLX_OWNED_ROUND=0`, and the `GMLX_QWEN_OWNED=0`
-GDN fallback). Kvarn additionally needs an eligible arch whose drafter does not
-read the target KV back, and declines a sliding-window stack under MTP, where
-plain `--kv-bits` quantizes the growing layers around the windows. Only hard-incompatible flags (`--mmproj`, `--adapter`, `--stream-cpu`,
-and the lossy `--moe-*` levers) make auto-enable step aside to plain
-decoding; an explicit `--speculative` with one of these errors out.
+honours it exactly. `--kv-bits` applies on the MTP path and quantizes the same
+layers `serve` quantizes; the two stock verify walks cannot, and the `[kv]`
+line gives the reason. `--kv-quant-scheme kvarn` follows the same rule, and
+also declines a sliding-window stack under MTP and an arch whose drafter
+reads the target KV back. Only hard-incompatible flags (`--mmproj`, `--adapter`,
+`--stream-cpu`, and the lossy `--moe-*` levers) make auto-enable step aside to
+plain decoding; an explicit `--speculative` with one of these errors out.
 `--stream-experts` is the exception: streaming composes with MTP, but
 auto-MTP defers under it - pass `--speculative` to opt in
 ([streaming.md](streaming.md)). `chat` also keeps `--stop` via a post-hoc stream filter.

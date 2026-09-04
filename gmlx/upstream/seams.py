@@ -143,6 +143,9 @@ SEAMS: tuple[Seam, ...] = (
          "queries/keys/values/cache/scale/mask/sinks)"),
     Seam("mlx_vlm.models.base", "scaled_dot_product_attention",
          "kvarn_sdpa.install_kvarn_sdpa (same claim at the vlm seam)"),
+    Seam("mlx_lm.models.cache", "QuantizedKVCache.update_and_fetch",
+         "quantized_cache_pack_fix (distinct class from the vlm copy; "
+         "patched when the two do not resolve to the same object)"),
     Seam("mlx_vlm.models.cache", "BatchQuantizedKVCache.make_mask",
          "quantized_sdpa_fix._patch_make_mask (starts registration for "
          "the fused decode route; left_padding attr contract)"),
@@ -573,8 +576,20 @@ VENDORED_MLX_VLM_MODULES = {
     # upstream-first so gmlx.models.muse_glimmer.vlm_model is dead code under this
     # pin. Delete the module at the vendoring review.
     "gmlx.models.hy_v3.tools": "mlx_vlm.tool_parsers.hy_v3",
+    "gmlx.models.hy_v4.tools": "mlx_vlm.tool_parsers.hy_v4",
     "gmlx.models.muse_glimmer.tools": "mlx_vlm.tool_parsers.muse_glimmer",
     "gmlx.models.qwen4_exp.vlm_model": "mlx_vlm.models.qwen4_exp",
+    "gmlx.models.glm5_next.vlm_model": "mlx_vlm.models.glm5_next",
+}
+
+# Grafts deliberately left out of the registry above, with the reason. Only
+# the vendoring review clears an entry from here.
+UNREGISTERED_GRAFTS = {
+    # Upstream ships mlx_vlm.models.muse_glimmer as of 0.6.15, so registering
+    # this would report a collision that is already known and already
+    # answered: the graft is upstream-first, the vendored copy is dead under
+    # this pin, and it goes at the vendoring review with the module.
+    "gmlx.models.muse_glimmer.vlm_model",
 }
 
 

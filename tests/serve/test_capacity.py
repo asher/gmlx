@@ -85,6 +85,26 @@ def test_max_buffer_ceiling_binds(rig):
     assert t["max_ctx"][1] == 1767
 
 
+def test_kv_env_prices_the_table(rig, monkeypatch):
+    # The table must price kv-quantized layers like request admission
+    # does, or the saved bytes never widen the ceilings.
+    monkeypatch.delenv("KV_BITS", raising=False)
+    path = rig(weights_gb=10.0, ws_gb=20.0)
+    base = cap.derive_table(path)
+    kv8 = cap.derive_table(path, env={"KV_BITS": "8"})
+    assert kv8["max_ctx"][1] > base["max_ctx"][1]
+    # admission prices batched mode: MTP runs fp16 KV when batched
+    mtp = cap.derive_table(
+        path, env={"KV_BITS": "8", "MLX_VLM_GGUF_SPECULATIVE": "1"})
+    assert mtp["max_ctx"] == base["max_ctx"]
+    # upstream drops kv quantization for qat-marked ids
+    qat = cap.derive_table(path + "-qat", env={"KV_BITS": "8"})
+    assert qat["max_ctx"] == base["max_ctx"]
+    # malformed widths keep fp16 pricing
+    bad = cap.derive_table(path, env={"KV_BITS": "5"})
+    assert bad["max_ctx"] == base["max_ctx"]
+
+
 def test_boot_refusal_with_numbers(rig):
     path = rig(weights_gb=19.0, ws_gb=20.0)  # width 1 fits nothing
     with pytest.raises(RuntimeError, match="cannot fit at width 1"):

@@ -2773,8 +2773,7 @@ def install_spec_kv_quant() -> None:
                 return caches
         # The shared policy owns layer selection: nested KV members,
         # pools, windows, and opt-outs at any depth.
-        from gmlx.cache.kv_policy import (arm_stack, kv_line,
-                                          quantize_kv_members,
+        from gmlx.cache.kv_policy import (kv_line, quantize_stack,
                                           resolve_kv_quant_policy)
 
         policy = resolve_kv_quant_policy(
@@ -2787,21 +2786,13 @@ def install_spec_kv_quant() -> None:
                 _log.warning("%s", kv_line("MTP spec path", policy))
             return caches
 
-        # hold=False: this path converts below, so fp16 holds are inert.
-        armed = arm_stack(caches, policy, hold=False)
-        n = 0
-        for i, plan in enumerate(policy.per_layer):
-            if plan.quantize:
-                caches[i], k = quantize_kv_members(caches[i], policy)
-                n += k
+        armed, n = quantize_stack(caches, policy)
         if kind == "kvarn":
             if not n:
                 _decline_kvarn("no plain KV-cache layers in this arch's stack")
                 return caches
-            from gmlx.cache.kvarn_sdpa import install_kvarn_sdpa
             from gmlx.gen.generation import harden_mtp_rollback
 
-            install_kvarn_sdpa()
             harden_mtp_rollback(lm)
         if (n or armed) and not _noted[0]:
             _noted[0] = True

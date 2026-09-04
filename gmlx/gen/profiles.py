@@ -162,6 +162,26 @@ FAMILIES: dict[str, dict] = {
             "reasoning-high": {"chat_template_kwargs": {"reasoning_effort": "high"}},
         },
     },
+    # AngelSlim/Hy4-preview: the sampling values are the GGUF's own
+    # general.sampling.*. reasoning_effort takes no_think/low/high; there is
+    # no reasoning-none intent because the dialect `--thinking off` already
+    # maps onto the template's no_think. The thinking tokens carry HY4's
+    # ':6124c78e' tag suffix, which the open-think detection, the budget
+    # criteria and the stream splitter all read.
+    "hy4": {
+        "label": "HY4",
+        "arches": ("hyv4",),
+        "base": {"sampling": {
+            "temperature": 0.9,
+            "top_p": 1.0,
+            "thinking_start_token": "<think:6124c78e>",
+            "thinking_end_token": "</think:6124c78e>",
+        }},
+        "intents": {
+            "reasoning-low": {"chat_template_kwargs": {"reasoning_effort": "low"}},
+            "reasoning-high": {"chat_template_kwargs": {"reasoning_effort": "high"}},
+        },
+    },
     # moonshotai/Kimi-K3 model card, 2026-07 (generation_config carries no
     # sampling): t=1.0; top_p 0.95 single-step, 1.0 agentic - ship the
     # conservative one. The

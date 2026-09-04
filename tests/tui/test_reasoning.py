@@ -700,3 +700,54 @@ def test_thinking_switch_flag_coercions():
     assert thinking_switch_flag(False) is False
     assert thinking_switch_flag("adaptive") is None
     assert thinking_switch_flag(["x"]) is None
+
+
+def _assert_pair_routes(start, end):
+    """The splitter must route both halves of a think pair.
+
+    Either as literal markers, or - for the ATEM shape - through the message
+    header, where the opener is a header prefix and the recipient decides the
+    mode in _close_header.
+    """
+    from gmlx.tui.reasoning import (
+        _ANSWER, _HEADER_PREFIXES, _MARKERS, _REASON,
+    )
+
+    m = dict(_MARKERS)
+    if not start.startswith(_HEADER_PREFIXES):
+        assert m.get(start) == _REASON, f"{start!r} is not a reason marker"
+    assert m.get(end) == _ANSWER, f"{end!r} is not an answer marker"
+
+
+def test_marker_table_covers_every_scanned_think_pair():
+    """One fact, three tables. The think pair a family declares must also be
+    a marker the stream splitter matches, or the close tag prints as literal
+    text and the whole reply renders as thinking - which is how HY4 shipped:
+    the pair reached profiles.py and _THINK_PAIRS, never _MARKERS."""
+    from gmlx.gen.thinking_budget import _THINK_PAIRS
+
+    for start, end in _THINK_PAIRS:
+        _assert_pair_routes(start, end)
+
+
+def test_every_family_think_pair_is_a_known_marker():
+    from gmlx.gen.profiles import FAMILIES
+
+    for name, fam in FAMILIES.items():
+        s = (fam.get("base") or {}).get("sampling") or {}
+        start, end = (s.get("thinking_start_token"),
+                      s.get("thinking_end_token"))
+        if not start and not end:
+            continue
+        assert start and end, f"{name}: declared half a think pair"
+        _assert_pair_routes(start, end)
+
+
+def test_hy4_reply_splits_at_its_suffixed_close_tag():
+    """The template pre-opens the tag, so generation streams only the close."""
+    from gmlx.tui.sessions import split_thinking
+
+    reason, answer = split_thinking(
+        "weighing it up</think:6124c78e>Hello!", think_open=True)
+    assert reason == "weighing it up"
+    assert answer == "Hello!"

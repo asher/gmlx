@@ -205,8 +205,7 @@ def ensure_ppb_kvarn(batch, kwargs, *, ckpt_active: bool) -> bool:
         return False
     if _ppb_rebuild_declined(batch, kwargs) is not None:
         return False
-    from gmlx.cache.kv_policy import kv_line
-    from gmlx.gen.generation import apply_kvarn_policy
+    from gmlx.cache.kv_policy import kv_line, quantize_stack
 
     from .kvarn_cache import ensure_registered
 
@@ -216,7 +215,7 @@ def ensure_ppb_kvarn(batch, kwargs, *, ckpt_active: bool) -> bool:
                                 k_bits, v_bits, tail, mode="single")
     if policy.verdict not in ("full", "partial"):
         return False
-    n = apply_kvarn_policy(batch.prompt_cache, policy)
+    _, n = quantize_stack(batch.prompt_cache, policy)
     if not n:
         return False
     if not _CKPT_NOTED[0]:

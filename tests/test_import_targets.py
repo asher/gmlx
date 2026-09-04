@@ -49,3 +49,44 @@ def test_relative_import_targets_exist():
                     bad.append(f"{py.relative_to(_ROOT.parent)}:{node.lineno}"
                                f" -> package {base} has no __init__.py")
     assert not bad, "unresolvable relative imports:\n" + "\n".join(bad)
+
+
+def test_every_upstream_graft_is_a_registered_vendored_module():
+    """A module that grafts itself into an upstream namespace must be in the
+    matching registry in gmlx.upstream.seams.
+
+    The registries drive the collision check that says when upstream has
+    shipped its own version and the vendored copy can go. A graft missing
+    from one is invisible to that check, so the copy shadows upstream for
+    good. Scanned on the filesystem, so a graft inside a function counts.
+    """
+    import re
+
+    from gmlx.load.arch_table import _VENDORED_MLX_LM_MODULES
+    from gmlx.upstream.seams import (
+        UNREGISTERED_GRAFTS, VENDORED_MLX_VLM_MODULES,
+    )
+
+    lm_modules = set(_VENDORED_MLX_LM_MODULES.values())
+
+    graft = re.compile(
+        r'sys\.modules\[\s*"(mlx_(?:vlm|lm)\.[^"]+)"\s*\]\s*=\s*'
+        r'sys\.modules\[__name__\]')
+    missing = []
+    for py in sorted(_ROOT.rglob("*.py")):
+        for target in graft.findall(py.read_text()):
+            mod = "gmlx." + str(
+                py.relative_to(_ROOT).with_suffix("")).replace("/", ".")
+            mod = mod.removesuffix(".__init__")
+            # The two registries key differently: mlx-vlm maps the gmlx
+            # module to its upstream target, mlx-lm maps a model_type to the
+            # gmlx module. Both answer "is this graft declared".
+            if mod in UNREGISTERED_GRAFTS:
+                continue
+            declared = (VENDORED_MLX_VLM_MODULES.get(mod) == target
+                        if target.startswith("mlx_vlm")
+                        else mod in lm_modules)
+            if not declared:
+                missing.append(f"{mod} -> {target}")
+    assert not missing, "grafts absent from the vendored registries: " + \
+        ", ".join(missing)

@@ -1093,6 +1093,16 @@ def build_model(config_dict: dict, *, mtp: bool = False):
 
         muse_glimmer_model.ensure_registered()
         muse_glimmer_tools.ensure_registered()
+    if mt == "hy_v4":
+        # mlx-lm ships no hy_v4 module (llama.cpp LLM_ARCH_HYV4); same
+        # vendored-registration pattern as glm5_next. The tool parser
+        # registers with the model so a later serve template-inference
+        # resolves it.
+        import gmlx.models.hy_v4.model as hy_v4_model
+        import gmlx.models.hy_v4.tools as hy_v4_tools
+
+        hy_v4_model.ensure_registered()
+        hy_v4_tools.ensure_registered()
     Model, ModelArgs = _get_classes(config)
     model_args = ModelArgs.from_dict(config)
     model = Model(model_args)
@@ -1295,6 +1305,7 @@ def _ram_floor_bytes(ram: int | None) -> int:
 def _decode_arena_bytes(
     total_bytes: int, offsets, budget: int | None, ring_bytes: int = 0,
     pinned_bytes: int = 0, streamable_bytes: int = 0,
+    cast_dead_bytes: int = 0,
 ) -> int:
     """Arena budget for the decode feeder, under two hardware-derived
     ceilings: the GPU working-set budget, and a fraction of physical RAM
@@ -1311,7 +1322,11 @@ def _decode_arena_bytes(
     resident. ``GMLX_DECODE_ARENA_GB`` overrides the ceilings but is still
     clamped to what is reclaimable minus the floor - an arena wired past
     that starves the page cache every buffered read path depends on
-    (``GMLX_DECODE_ARENA_FORCE=1`` restores the unclamped behavior)."""
+    (``GMLX_DECODE_ARENA_FORCE=1`` restores the unclamped behavior).
+
+    A second live streaming install needs no term here: mlock moves a page
+    out of the file-backed count and an arena is anonymous, so the
+    reclaimable snapshot already excludes both."""
     env = os.environ.get("GMLX_DECODE_ARENA_GB")
     if env:
         want = int(float(env) * (1 << 30))
@@ -1349,8 +1364,12 @@ def _decode_arena_bytes(
         pass
     expert_bytes = sum(r[2] for ranges in offsets.values() for r in ranges)
     # Streamable components are page-cache citizens like the experts;
-    # charging them as non-expert would zero the arena.
-    non_expert_bytes = max(0, total_bytes - expert_bytes - streamable_bytes)
+    # charging them as non-expert would zero the arena. Cast tensors cost
+    # what their converted copy weighs, not what the wire does: the wire
+    # range is unpinned and never read again (gmlx.stream.pin_weights
+    # .cast_copies), so charging it would cancel the pin it just freed.
+    non_expert_bytes = max(
+        0, total_bytes - expert_bytes - streamable_bytes - cast_dead_bytes)
     reserve = int(
         float(os.environ.get("GMLX_DECODE_KV_RESERVE_GB", "8") or 8) * (1 << 30)
     )
@@ -1876,8 +1895,30 @@ def install_expert_streaming(
 
     streaming = force_stream or over_budget
     prefetcher = None
+    cast_dead_bytes = 0
+    held_wired = 0
     if streaming:
         _neutralize_wired_limit_sweep()
+        # Reclaim the wired bytes of released streaming models (feeder and
+        # MoE modules reference each other, so unwiring waits for a
+        # collection), then charge what is still held against this weight
+        # pin. Wired pages are invisible to jetsam, so two pins that each
+        # size against the whole machine wire it solid. The arena needs no
+        # charge; see _decode_arena_bytes.
+        from gmlx.stream import installs as _installs
+
+        freed = _installs.reclaim_dead()
+        held_wired = _installs.live_wired_bytes()
+        if freed:
+            loadlog.info(
+                f"[stream] reclaimed {freed / 1e9:.1f} GB wired from a "
+                "released streaming model")
+        if held_wired:
+            print(
+                f"[stream] another live streaming install holds "
+                f"{held_wired / 1e9:.1f} GB wired; this model sizes against "
+                "what is left (release the other model first for the full "
+                "budget)")
         from gmlx.stream.prefetch import maybe_make_prefetcher
 
         prefetcher = maybe_make_prefetcher(gguf_path)
@@ -1885,16 +1926,22 @@ def install_expert_streaming(
             object.__setattr__(model, "_kq_prefetcher", prefetcher)
         # Wire the every-token weights before the decode feeder sizes its
         # arena: pinned every-token pages come out of the same wired budget.
-        from gmlx.stream.pin_weights import maybe_pin_weights
+        from gmlx.stream.pin_weights import cast_copies, maybe_pin_weights
         from gmlx.stream.table_stream import streamable_tables_for
 
         # Declared streamable components never enter the pin set, streamed
-        # or resident: mlocking them starves the expert page cache.
+        # or resident: mlocking them starves the expert page cache. Cast
+        # tensors go too - their wire bytes have no view left to keep.
+        casts = cast_copies(model, gguf_path)
+        cast_dead_bytes = casts.dead_bytes
         pin_exclude = frozenset(
-            t.gguf_name for t, _ in streamable_tables_for(model))
-        weights_pin = maybe_pin_weights(gguf_path, exclude_names=pin_exclude)
+            t.gguf_name for t, _ in streamable_tables_for(model)
+        ) | casts.names
+        weights_pin = maybe_pin_weights(
+            gguf_path, exclude_names=pin_exclude, reserved_bytes=held_wired)
         if weights_pin is not None:
             object.__setattr__(model, "_kq_weights_pin", weights_pin)
+            _installs.record(model, weights_pin.pinned_bytes)
 
     def _wrapped_class(cls):
         sub = _CPU_OFFLOAD_CLASS_CACHE.get(cls)
@@ -2431,7 +2478,8 @@ def install_expert_streaming(
             total_bytes, prefetcher.offsets, budget,
             ring_bytes=2 * feeder.slot_bytes if feeder is not None else 0,
             pinned_bytes=getattr(pin, "pinned_bytes", 0),
-            streamable_bytes=streamed_table_bytes(model))
+            streamable_bytes=streamed_table_bytes(model),
+            cast_dead_bytes=cast_dead_bytes)
         dfeeder = maybe_make_decode_feeder(
             prefetcher.offsets, moe_modules, arena, stats_verbose)
         if dfeeder is not None:
@@ -2441,6 +2489,11 @@ def install_expert_streaming(
                     for m in mods:
                         object.__setattr__(m, "_kq_decode_feeder", dfeeder)
             object.__setattr__(model, "_kq_decode_feeder", dfeeder)
+            # Committed from here, not from the first decode: the arena
+            # wires itself the moment this model decodes, and a second
+            # install that sized against the unwired window would find the
+            # memory gone before it ever ran.
+            _installs.record(model, dfeeder.arena_bytes)
             if feeder is not None:
                 # First decode call swaps the wired budget: prefill ring
                 # freed, arena wired (DecodeFeeder.ensure_wired). A later
@@ -2639,6 +2692,17 @@ def install_expert_streaming(
 # (see the _PREFILL_CHUNK note: the two prefill engines tune differently).
 _STREAMING_PREFILL_STEP = 8192
 
+# Streaming models whose per-chunk activation footprint argues for a
+# narrower default than _STREAMING_PREFILL_STEP.
+#   hy_v4 - iHC carries hc_mult (4) parallel residual streams and the
+#   reference computes the collapse in fp32, so one [1, step, 4, 6144]
+#   fp32 transient is 805 MB at 8192 and the front builds several per
+#   layer across 78 layers. Half the step halves every one of them. Raise
+#   it back with --prefill-step-size on a large-RAM box.
+_STREAMING_PREFILL_STEP_BY_MODEL_TYPE: dict[str, int] = {
+    "hy_v4": 4096,
+}
+
 
 def moe_streaming_active(model) -> bool:
     """True when ``install_expert_streaming`` put this model in streaming mode
@@ -2653,11 +2717,15 @@ def moe_streaming_active(model) -> bool:
 
 def _resolve_prefill_step(model, requested: int | None) -> tuple[int | None, bool]:
     """Pick the prefill chunk width: an explicit request always wins; a
-    streaming-mode model defaults to ``_STREAMING_PREFILL_STEP``; everything
-    else keeps mlx-lm's own default. Returns ``(step_or_none, defaulted)``."""
+    streaming-mode model defaults to ``_STREAMING_PREFILL_STEP``, or to its
+    model_type's narrower entry; everything else keeps mlx-lm's own
+    default. Returns ``(step_or_none, defaulted)``."""
     if requested is not None or not moe_streaming_active(model):
         return requested, False
-    return _STREAMING_PREFILL_STEP, True
+    mt = getattr(model, "model_type", None) or getattr(
+        getattr(model, "args", None), "model_type", None)
+    return _STREAMING_PREFILL_STEP_BY_MODEL_TYPE.get(
+        mt, _STREAMING_PREFILL_STEP), True
 
 
 def _switch_num_experts(glu) -> int:
@@ -3079,6 +3147,14 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # and ape table are fp32 per llama.cpp PR 27754.
     "glm5_next": ("_hc.", ".mlp.gate.weight", ".e_score_correction_bias",
                   ".a_folded", ".dt_bias", ".ape", ".weights_proj."),
+    # hy_v4: the iHC mixers and the collapse head are fp32 in the reference
+    # and accumulate over 78 layers x 2 sublayers; the per-head sinks join
+    # the softmax normalizer; sigmoid top-8-of-256 routing with a correction
+    # bias is near-tie-heavy; the indexer head weights decide near-tied key
+    # rankings. Kept in step with the model class's cast_predicate, which
+    # tests/models/test_hy_v4_model.py cross-checks against this row.
+    "hy_v4": ("_hc.", "hc_head.", ".sinks", ".e_score_correction_bias",
+              ".mlp.gate.weight", ".weights_proj."),
 }
 
 # Params kept at their native f16 through the bf16 cast (no upcast). MLX

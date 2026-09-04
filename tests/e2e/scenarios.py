@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Optional
 
 import checks
@@ -486,11 +486,18 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
     # attn layer but the last quantized. kv8 adds the long generation
     # with floors only. kv4 runs the needle only: 4-bit long generation
     # on a 0.6B fails quality floors even when correct.
-    for label, load, extra in (
+    # kv4 anchors on either passcode half: at 4 bits a 0.6B loses single
+    # characters to quantization; a wrong passcode still fails.
+    for label, load, extra, anchors in (
             ("kv8", {"kv_bits": 8, "kv_group_size": 64,
-                     "quantized_kv_start": 0}, [P.p_long_gen(judge=False)]),
+                     "quantized_kv_start": 0}, [P.p_long_gen(judge=False)],
+             None),
             ("kv4", {"kv_bits": 4, "kv_group_size": 32,
-                     "quantized_kv_start": 0}, [])):
+                     "quantized_kv_start": 0}, [],
+             {"substrs": ["CORAL", "KV455"], "mode": "any"})):
+        needle = P.p_long_ctx_needle(f"CORAL{label.upper()}55")
+        if anchors is not None:
+            needle = replace(needle, anchors=anchors)
         add(Scenario(
             key=f"kv_dense_{label}", tier="kv", needs=["qwen3_0_6b_q8"],
             title=f"Quantized KV, dense stack: {label} on qwen3-0.6b "
@@ -500,9 +507,7 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
                                    "load": load}},
                 "models": {"m": _model_entry(qwen8 or "", profile="p")},
             },
-            targets=[ReqTarget("recall", "m",
-                               prompts=[P.p_long_ctx_needle(f"CORAL{label.upper()}55")]
-                               + extra)],
+            targets=[ReqTarget("recall", "m", prompts=[needle] + extra)],
             post=[pc_kv_engagement("m", verdict="full",
                                    layers_quantized=27,
                                    verdict_batched="full")],
@@ -588,14 +593,19 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
               pc_disk_cache_created(disk_dir)],
         notes="disk tier created + reused without corrupting output"))
 
+    # gpt-oss reasons in the analysis channel before it answers, so the short
+    # budgets end inside the reasoning (finish_reason=length, empty content).
+    harmony_budget = 512
     add(Scenario(
         key="cache_ckpt", tier="cache", needs=["gpt_oss_20b"],
         title="APC checkpoint tier on an SWA MoE (gpt-oss): resend adopts",
         config={"server": {"cache": {"enabled": True}},
                 "models": {"m": _model_entry(reg.find("gpt_oss_20b") or "")}},
-        targets=[ReqTarget("warm", "m", prompts=[P.p_capital()])],
+        targets=[ReqTarget("warm", "m", prompts=[
+            replace(P.p_capital(), max_tokens=harmony_budget)])],
         post=[pc_apc_enabled(True),
-              pc_ckpt_reuse("m", P.p_long_ctx_needle("CKPTNEEDLE7"))],
+              pc_ckpt_reuse("m", replace(P.p_long_ctx_needle("CKPTNEEDLE7"),
+                                         max_tokens=harmony_budget))],
         notes="hybrid/SWA archs route to the gmlx ckpt tier; its own counters "
               "must move (the 2026-08 audit found the tier never engaged)"))
 

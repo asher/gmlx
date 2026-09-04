@@ -470,6 +470,18 @@ def kv_line(model_id, policy: KvQuantPolicy) -> str:
     return f"{head}{policy.width_label} -> {policy.summary()}"
 
 
+def resolve_and_report(stack, *, model_id=None, **kwargs) -> KvQuantPolicy:
+    """Resolve, print the canonical [kv] line to stderr, exit 2 on error.
+    The caller handles a dropped verdict."""
+    import sys
+
+    policy = resolve_kv_quant_policy(stack, **kwargs)
+    print(kv_line(model_id, policy), file=sys.stderr)
+    if policy.verdict == "error":
+        raise SystemExit(2)
+    return policy
+
+
 _HELD_CLASSES: dict = {}
 
 
@@ -520,10 +532,14 @@ def _convert_leaf(c, kind, policy: KvQuantPolicy):
                               bits=policy.bits)
     from gmlx.cache.kvarn_cache import KVarNKVCache, KVarNRotatingKVCache
 
+    from gmlx.cache.kvarn_sdpa import install_kvarn_sdpa
+
     v = policy.bits if policy.value_bits is None else policy.value_bits
     cls = KVarNRotatingKVCache if kind == "window" else KVarNKVCache
-    return cls.from_cache(c, k_bits=policy.bits, v_bits=v,
-                          tail_tokens=policy.tail_tokens or 0)
+    out = cls.from_cache(c, k_bits=policy.bits, v_bits=v,
+                         tail_tokens=policy.tail_tokens or 0)
+    install_kvarn_sdpa()
+    return out
 
 
 def quantize_kv_members(c, policy: KvQuantPolicy):
@@ -573,3 +589,18 @@ def arm_stack(stack, policy: KvQuantPolicy, hold=True) -> int:
         if hold and policy.scheme == "uniform" and not plan.quantize:
             stack[i] = hold_fp16(stack[i])
     return armed
+
+
+def quantize_stack(stack, policy: KvQuantPolicy) -> tuple:
+    """Arm pools and convert the planned layers now, in place. Returns
+    (pools armed, caches converted). Paths with a later kv-kwargs
+    converter use arm_stack with holds instead."""
+    if policy.verdict not in ("full", "partial"):
+        return 0, 0
+    armed = arm_stack(stack, policy, hold=False)
+    n = 0
+    for i, plan in enumerate(policy.per_layer):
+        if plan.quantize:
+            stack[i], k = quantize_kv_members(stack[i], policy)
+            n += k
+    return armed, n

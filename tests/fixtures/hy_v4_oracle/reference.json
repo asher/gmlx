@@ -1,0 +1,44 @@
+{
+  "_comment": [
+    "llama.cpp greedy references for HY4-preview, recorded once because the",
+    "oracle is expensive: patch 0002 implements STQ1_0 for CPU and CUDA only,",
+    "so llama.cpp must run '-dev none --no-op-offload' and prefills the 229 GB",
+    "file at ~2.28 tok/s. The 2831-token run below took 22 minutes.",
+    "",
+    "Reproduce with, from a llama.cpp worktree at 0cea36222 carrying",
+    "0001-hyv4-architecture.patch and 0002-stq1_0-quant-and-cuda.patch:",
+    "  llama-completion -m <gguf> -f <prompt> -no-cnv --temp 0 -ngl 0",
+    "    -dev none --no-op-offload -n <n_predict> -c <ctx> --no-warmup",
+    "    --no-display-prompt --simple-io -s 0",
+    "",
+    "Each run's 'prompt' names the sibling file holding the exact",
+    "raw-completion text. llama.cpp prepends BOS, and 'prompt_tokens' is its",
+    "own reported count INCLUDING that BOS.",
+    "",
+    "'continuation' is the full greedy output for sub_boundary, and truncated",
+    "at a sentence boundary for readability where the reference free-wheels."
+  ],
+  "model": "AngelSlim/Hy4-preview-GGUF Hy4-preview-STQ1_0.gguf",
+  "llama_cpp_commit": "0cea36222",
+  "needle": "QZ-4812",
+  "runs": [
+    {
+      "name": "cross_boundary",
+      "prompt": "prompt_cross_boundary.txt",
+      "prompt_tokens": 2831,
+      "n_predict": 32,
+      "crosses_index_topk": true,
+      "note": "2831 tokens is above the DSA indexer's top_k of 2048, so the key selection is live for most of the prompt and the needle at ~100 tokens can only be reached through it. The reference emits the needle first, then free-wheels onto an unrelated question - past the answer the distribution flattens, which is why only the needle-bearing prefix is compared.",
+      "continuation": " QZ-4812. What is the three-word name of the mountain range that contains the tallest peak in the contiguous US?\n\nWe need answer question"
+    },
+    {
+      "name": "sub_boundary",
+      "prompt": "prompt_sub_boundary.txt",
+      "prompt_tokens": 1376,
+      "n_predict": 200,
+      "crosses_index_topk": false,
+      "note": "Below top_k the selection is the identity and attention is dense, so this run isolates iHC, MLA, rope, sinks and the MoE from the indexer.",
+      "continuation": " QZ-4812. Section 44. The history of science is a long and winding story, full of false starts, lucky accidents, and the slow accumulation of careful measurement. Section 45. The history of science is a long and winding story, full of false starts, lucky accidents, and the slow accumulation of careful measurement."
+    }
+  ]
+}

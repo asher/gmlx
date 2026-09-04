@@ -186,11 +186,12 @@ class _FusedMoeCaps:
             "iq4_nl", "iq4_xs", "iq3_s", "iq3_xxs",
             "iq2_xxs", "iq2_xs", "iq2_s", "iq1_s", "iq1_m",
         )
-        # Native-fp wire codecs joined the fused family with the capability
-        # query itself; sniff it so older kq builds keep them unfused.
+        # Codecs that joined the fused family after the capability query
+        # itself; sniff it so older kq builds keep them unfused.
         kq_has_glu = getattr(kq, "codec_has_moe_glu", None)
         if kq_has_glu is not None:
-            codecs += tuple(c for c in ("mxfp4", "nvfp4") if kq_has_glu(c))
+            codecs += tuple(
+                c for c in ("mxfp4", "nvfp4", "stq1_0") if kq_has_glu(c))
         self.kq_fused_codecs = codecs
         # Shared-expert codecs allowed to differ from the expert stacks (the
         # only mixed combos with kernels); needs the shexp_kquant_type-aware
@@ -199,6 +200,12 @@ class _FusedMoeCaps:
             getattr(kq, "gather_qmv_mix_kq", None), "__doc__", "") or ""
         self.shexp_upcast = (
             ("q6_k", "q8_0") if "shexp_kquant_type" in mix_doc else ())
+        # q5_k shared experts (UD builds) joined later; same docstring sniff.
+        if "q5_k" in mix_doc:
+            self.shexp_upcast += ("q5_k",)
+        # [T, S - 1] scores with the shared slot at an implicit weight of 1
+        # (saves the per-layer ones-column concat on the fold).
+        self.mix_implicit = "implicit weight" in mix_doc
         # Same-release proxy for the K % 256 dispatch fallback (kq routes
         # tuned q8_0 with K % 256 != 0 to the generic q8_0_ext kernels);
         # older kq builds need the strict 256 geometry.
@@ -263,7 +270,18 @@ def _kq_wire_k(w, codec):
     """Logical K of a wire-byte tensor's last dim under `codec`
     (-1 when the byte width is not a whole number of blocks)."""
     from gguf.constants import GGML_QUANT_SIZES, GGMLQuantizationType
-    wpb, bpb = GGML_QUANT_SIZES[GGMLQuantizationType[codec.upper()]]
+
+    name = codec.upper()
+    try:
+        wpb, bpb = GGML_QUANT_SIZES[GGMLQuantizationType[name]]
+    except KeyError:
+        # Codecs newer than the installed gguf-py; headerscan owns the table.
+        from .headerscan import QUANT_TYPE_FALLBACK
+
+        sizes = dict(QUANT_TYPE_FALLBACK.values())
+        if name not in sizes:
+            return -1
+        wpb, bpb = sizes[name]
     return (w.shape[-1] // bpb) * wpb if w.shape[-1] % bpb == 0 else -1
 
 
@@ -526,6 +544,7 @@ def _eligible_kquant_glu(m, caps):
 def _make_fused_kquant(base_cls, caps):
     kq = caps.kq
     _has_mix_ns = caps.has_mix_ns
+    _mix_implicit = caps.mix_implicit
 
     class _FusedKQuantSwitchGLU(base_cls):
         """K-quant fused decode path: act(gate) * up SwitchGLU whose
@@ -611,8 +630,9 @@ def _make_fused_kquant(base_cls, caps):
                     raise NotImplementedError(
                         "LoRA epilogue on the shared-expert fold exit")
                 sc = scores.reshape(t, k)
-                sc = mx.concatenate(
-                    [sc, mx.ones((t, 1), dtype=sc.dtype)], axis=-1)
+                if not _mix_implicit:
+                    sc = mx.concatenate(
+                        [sc, mx.ones((t, 1), dtype=sc.dtype)], axis=-1)
                 skw = ({"shexp_kquant_type": se.down_proj.kquant_type}
                        if se.down_proj.kquant_type != down.kquant_type
                        else {})

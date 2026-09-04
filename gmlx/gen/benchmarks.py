@@ -180,13 +180,14 @@ class _ChatPromptSource:
         return ids
 
 
-def _bench_kv_arm(model, kv_bits, kv_group_size, kv_quant_scheme, kv_tail_tokens):
+def _bench_kv_arm(model, kv_bits, kv_group_size, quantized_kv_start=0,
+                  kv_quant_scheme=None, kv_tail_tokens=1024):
     """KV-cache config for the bench decode calls: (stream_generate kwargs,
-    fresh-cache factory or None). Both arms build the stack and resolve the
-    shared policy, then rebuild a fresh cache per timed call, so the bench
-    quantizes the layers `gmlx run` quantizes. Handing mlx-lm the bare kv
-    kwargs instead would arm every layer, and a sliding-window layer raises
-    on `to_quantized`."""
+    fresh-cache factory or None). The arm resolves the shared policy and
+    rebuilds a fresh cache per timed call, so the bench quantizes the
+    layers `gmlx run` quantizes. Handing mlx-lm the bare kv kwargs instead
+    would arm every layer, and a sliding-window layer raises on
+    `to_quantized`."""
     if kv_bits is None:
         return {}, None
     if kv_quant_scheme == "kvarn":
@@ -207,21 +208,17 @@ def _bench_kv_arm(model, kv_bits, kv_group_size, kv_quant_scheme, kv_tail_tokens
 
     from mlx_lm.models.cache import make_prompt_cache as _mpc
 
-    from gmlx.cache.kv_policy import (arm_stack, kv_line,
-                                      resolve_kv_quant_policy)
+    from gmlx.cache.kv_policy import arm_stack, resolve_and_report
 
-    policy = resolve_kv_quant_policy(
+    policy = resolve_and_report(
         _mpc(model), kv_bits=kv_bits, kv_group_size=kv_group_size,
-        quantized_kv_start=0, scheme=kv_quant_scheme)
-    print(kv_line(None, policy), file=sys.stderr)
-    if policy.verdict == "error":
-        raise SystemExit(2)
+        quantized_kv_start=quantized_kv_start)
     if policy.verdict == "dropped":
         return {}, None
     kwargs = {
         "kv_bits": int(kv_bits),
         "kv_group_size": int(kv_group_size),
-        "quantized_kv_start": 0,
+        "quantized_kv_start": int(quantized_kv_start),
     }
 
     def factory():
@@ -243,6 +240,7 @@ def bench(
     prefill_step_size: int | None = None,
     kv_bits=None,
     kv_group_size: int = 64,
+    quantized_kv_start: int = 0,
     kv_quant_scheme=None,
     kv_tail_tokens: int = 1024,
 ) -> dict[int, dict[str, float]]:
@@ -266,8 +264,8 @@ def bench(
         print(f"[bench] streaming model: prefill chunk size defaults to {step}")
     pf_kwargs = {} if step is None else {"prefill_step_size": step}
     kv_kwargs, kv_cache = _bench_kv_arm(
-        model, kv_bits, kv_group_size, kv_quant_scheme, kv_tail_tokens
-    )
+        model, kv_bits, kv_group_size, quantized_kv_start,
+        kv_quant_scheme, kv_tail_tokens)
     pf_kwargs.update(kv_kwargs)
 
     def _cache_kwargs():
@@ -276,12 +274,8 @@ def bench(
     if warmup:
         wn = min(max(lengths), 256)
         for _ in mlx_lm.stream_generate(
-            model,
-            tokenizer,
-            _synth_prompt_ids(tokenizer, wn),
-            max_tokens=4,
-            **kv_kwargs,
-            **_cache_kwargs(),
+            model, tokenizer, _synth_prompt_ids(tokenizer, wn), max_tokens=4,
+            **kv_kwargs, **_cache_kwargs()
         ):
             pass
 
@@ -293,12 +287,8 @@ def bench(
             prompt = _synth_prompt_ids(tokenizer, L)
             final = None
             for resp in mlx_lm.stream_generate(
-                model,
-                tokenizer,
-                prompt,
-                max_tokens=decode_tokens,
-                **pf_kwargs,
-                **_cache_kwargs(),
+                model, tokenizer, prompt, max_tokens=decode_tokens,
+                **pf_kwargs, **_cache_kwargs()
             ):
                 final = resp
             prefill_tps.append(final.prompt_tps)
@@ -402,6 +392,7 @@ def bench_tg_depth(
     prompt_source: "_ChatPromptSource | None" = None,
     kv_bits=None,
     kv_group_size: int = 64,
+    quantized_kv_start: int = 0,
     kv_quant_scheme=None,
     kv_tail_tokens: int = 1024,
 ) -> dict[int, dict[str, float]]:
@@ -432,15 +423,6 @@ def bench_tg_depth(
     if defaulted:
         print(f"[bench] streaming model: prefill chunk size defaults to {step}")
     pf_kwargs = {} if step is None else {"prefill_step_size": step}
-    # KV config applies to the plain-decode arm (the tg/prefill columns);
-    # the speculative arm keeps the MTP path's own KV handling.
-    kv_kwargs, kv_cache = _bench_kv_arm(
-        model, kv_bits, kv_group_size, kv_quant_scheme, kv_tail_tokens
-    )
-    pf_kwargs.update(kv_kwargs)
-
-    def _cache_kwargs():
-        return {} if kv_cache is None else {"prompt_cache": kv_cache()}
 
     def _get_ids(n: int) -> list[int]:
         if prompt_source is not None:
@@ -456,6 +438,28 @@ def bench_tg_depth(
     if owned and hasattr(model, "language_model"):
         plain_lm = _RawLogitsLM(model.language_model)
 
+    # Both arms must run the same KV config or the speedup is a biased
+    # A/B. The non-owned plain arm runs through mlx-vlm's engine (no KV
+    # quantization hook): drop kv on both, with the reason on the line.
+    if drafter is not None and not owned:
+        if kv_bits is not None:
+            from gmlx.cache.kv_policy import dropped_policy, kv_line
+
+            print(kv_line(None, dropped_policy(
+                "the plain A/B arm (mlx-vlm engine) has no KV "
+                "quantization hook; both arms run fp16 KV",
+                kv_bits, kv_group_size, "single")), file=sys.stderr)
+        kv_bits = None
+        kv_kwargs, kv_cache = {}, None
+    else:
+        kv_kwargs, kv_cache = _bench_kv_arm(
+            plain_lm, kv_bits, kv_group_size, quantized_kv_start,
+            kv_quant_scheme, kv_tail_tokens)
+    pf_kwargs.update(kv_kwargs)
+
+    def _cache_kwargs():
+        return {} if kv_cache is None else {"prompt_cache": kv_cache()}
+
     if warmup:
         if drafter is not None and not owned:
             _bench_ar_tps(
@@ -463,12 +467,8 @@ def bench_tg_depth(
             )
         else:
             for _ in mlx_lm.stream_generate(
-                plain_lm,
-                tokenizer,
-                _synth_prompt_ids(tokenizer, 64),
-                max_tokens=4,
-                **kv_kwargs,
-                **_cache_kwargs(),
+                plain_lm, tokenizer, _synth_prompt_ids(tokenizer, 64),
+                max_tokens=4, **kv_kwargs, **_cache_kwargs()
             ):
                 pass
 
@@ -499,12 +499,8 @@ def bench_tg_depth(
             else:
                 final = None
                 for resp in mlx_lm.stream_generate(
-                    plain_lm,
-                    tokenizer,
-                    seed_ids,
-                    max_tokens=decode_tokens,
-                    **pf_kwargs,
-                    **_cache_kwargs(),
+                    plain_lm, tokenizer, seed_ids, max_tokens=decode_tokens,
+                    **pf_kwargs, **_cache_kwargs()
                 ):
                     final = resp
                 p_tps, d_tps = final.prompt_tps, final.generation_tps
@@ -538,6 +534,8 @@ def bench_tg_depth(
                     draft_block_size=draft_block_size,
                     apply_chat_template=False,
                     verbose=False,
+                    kv_bits=kv_bits,
+                    kv_group_size=kv_group_size,
                 )
                 if best is None or stats["decode_tps"] > best["decode_tps"]:
                     best = stats

@@ -46,6 +46,10 @@ from dataclasses import dataclass
 import gmlx.load.loadlog as loadlog
 from .capacity import LoadDeferred
 from gmlx.envflags import env_float
+# The descent to the module the loader hung the streaming helpers on. Shared
+# with the loader, which reads the same helper set to charge a live install's
+# wired bytes against the next one.
+from gmlx.stream.installs import streaming_owner as _streaming_owner
 
 _log = logging.getLogger(__name__)
 
@@ -823,7 +827,8 @@ class _ResidencyPool:
         # The boot table feeds request admission (width/ctx budgets), so a
         # streaming model's table must also price only the resident share:
         # the expert stacks decode through the disk arena, not the KV budget.
-        install_boot_table(str(model_path), gate_bytes, str(model_path))
+        install_boot_table(str(model_path), gate_bytes, str(model_path),
+                           env=env)
         scratch = _Scratch()
         token = _build_scratch.set(scratch)
         # Per-model load-param + APC/SSD-KV env window: set this model's vars
@@ -971,6 +976,11 @@ class _ResidencyPool:
         # a feeder<->module reference cycle, so refcounting alone won't
         # reclaim them before the next model sizes its own arena.
         _decode_feeder = getattr(owner, "_kq_decode_feeder", None)
+        # And the every-token weight pin: mlocked file-backed ranges, which
+        # stay file-backed and so still read as reclaimable to vm_stat. The
+        # next model's arena sizes against that snapshot, so an unreleased
+        # pin is budget the next load believes it has.
+        _weights_pin = getattr(owner, "_kq_weights_pin", None)
         _resident_holders = [
             m for m in (entry.model_cache.get("model"), owner)
             if getattr(m, "_kq_resident_arrays", None)
@@ -990,7 +1000,8 @@ class _ResidencyPool:
         # them) - a later reload of this model warm-restores from them.
         # Best-effort: teardown runs every closer to completion; one failing
         # close must not leak the others' fds/arenas.
-        for owner in (entry.apc_manager, _prefetcher, _feeder, _decode_feeder):
+        for owner in (entry.apc_manager, _prefetcher, _feeder, _decode_feeder,
+                      _weights_pin):
             close = getattr(owner, "close", None)
             if not callable(close):
                 continue
@@ -1038,34 +1049,13 @@ class _ResidencyPool:
         entry.response_generator = None
         entry.apc_manager = None
         del scratch, owner, close, _prefetcher, _feeder, _decode_feeder
+        del _weights_pin
         m = None
         del m, _resident_holders
         import gc
         gc.collect()
 
 
-_STREAMING_ATTRS = ("_kq_prefetcher", "_kq_feeder", "_kq_decode_feeder")
-
-
-def _streaming_owner(model):
-    """The module the loader hung the streaming helpers on. The served
-    object is usually a wrapper (the text-only vlm adapter, whose
-    ``language_model._model`` is the stock model) that forwards no
-    attributes, so reading the helpers off the wrapper finds nothing and
-    the feeders' worker threads outlive the model, pinning every expert
-    weight through their frames. Descend the wrapper chain to the first
-    module that carries a helper; the original object when none does."""
-    seen = set()
-    cur = model
-    while cur is not None and id(cur) not in seen:
-        if any(getattr(cur, a, None) is not None for a in _STREAMING_ATTRS):
-            return cur
-        seen.add(id(cur))
-        nxt = getattr(cur, "language_model", None)
-        if nxt is None:
-            nxt = getattr(cur, "_model", None)
-        cur = nxt
-    return model
 
 
 def _pinned_from_env(preload_path):

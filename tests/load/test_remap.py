@@ -334,6 +334,166 @@ def test_deepseek4_block_norms_and_everything_passthrough():
     assert d("deepseek4", "output.weight").hf_name == "lm_head.weight"
 
 
+# hyv4 (HY4-preview): complete override block, everything passthrough. The MLA
+# and MoE rows follow mlx_lm's deepseek_v32 naming so KQuantMultiLinear
+# engages; the HY4-only rows (gate, sinks, iHC) have no canonical enum.
+def test_hyv4_absorbed_mla_routing():
+    assert d("hyv4", "blk.2.attn_q_a.weight").hf_name == \
+        "model.layers.2.self_attn.q_a_proj.weight"
+    assert d("hyv4", "blk.2.attn_q_a_norm.weight").hf_name == \
+        "model.layers.2.self_attn.q_a_layernorm.weight"
+    assert d("hyv4", "blk.2.attn_q_b.weight").hf_name == \
+        "model.layers.2.self_attn.q_b_proj.weight"
+    assert d("hyv4", "blk.2.attn_kv_a_mqa.weight").hf_name == \
+        "model.layers.2.self_attn.kv_a_proj_with_mqa.weight"
+    assert d("hyv4", "blk.2.attn_kv_a_norm.weight").hf_name == \
+        "model.layers.2.self_attn.kv_a_layernorm.weight"
+    # k_b/v_b are absorbed into the MultiLinear pair the loader swaps to
+    # KQuantMultiLinear - the names must be exactly embed_q/unembed_out.
+    assert d("hyv4", "blk.2.attn_k_b.weight").hf_name == \
+        "model.layers.2.self_attn.embed_q.weight"
+    assert d("hyv4", "blk.2.attn_v_b.weight").hf_name == \
+        "model.layers.2.self_attn.unembed_out.weight"
+    assert d("hyv4", "blk.2.attn_output.weight").hf_name == \
+        "model.layers.2.self_attn.o_proj.weight"
+
+
+def test_hyv4_attention_gate_and_sinks_routing():
+    # The sigmoid gate on the decompressed attention output.
+    assert d("hyv4", "blk.2.attn_gate.weight").hf_name == \
+        "model.layers.2.self_attn.attn_gate.weight"
+    # Per-head fp32 sinks: a raw array target, no `.weight` (gpt-oss spelling).
+    assert d("hyv4", "blk.2.attn_sinks.weight").hf_name == \
+        "model.layers.2.self_attn.sinks"
+
+
+def test_hyv4_indexer_routing_includes_k_norm_bias():
+    # k_norm is a LayerNorm here (weight AND bias), unlike the RMSNorm the
+    # other DSA arches carry - dropping the bias loads clean and mis-selects.
+    assert d("hyv4", "blk.5.indexer.attn_q_b.weight").hf_name == \
+        "model.layers.5.self_attn.indexer.wq_b.weight"
+    assert d("hyv4", "blk.5.indexer.attn_k.weight").hf_name == \
+        "model.layers.5.self_attn.indexer.wk.weight"
+    assert d("hyv4", "blk.5.indexer.k_norm.weight").hf_name == \
+        "model.layers.5.self_attn.indexer.k_norm.weight"
+    assert d("hyv4", "blk.5.indexer.k_norm.bias").hf_name == \
+        "model.layers.5.self_attn.indexer.k_norm.bias"
+    assert d("hyv4", "blk.5.indexer.proj.weight").hf_name == \
+        "model.layers.5.self_attn.indexer.weights_proj.weight"
+
+
+def test_hyv4_hyper_connection_routing():
+    # iHC params are raw fp32 arrays (fn/base/scale, no `.weight`), one pair
+    # per block plus the final-collapse head.
+    assert d("hyv4", "blk.1.hc_attn_fn.weight").hf_name == \
+        "model.layers.1.attn_hc.fn"
+    assert d("hyv4", "blk.1.hc_attn_base.weight").hf_name == \
+        "model.layers.1.attn_hc.base"
+    assert d("hyv4", "blk.1.hc_attn_scale.weight").hf_name == \
+        "model.layers.1.attn_hc.scale"
+    assert d("hyv4", "blk.1.hc_ffn_fn.weight").hf_name == \
+        "model.layers.1.ffn_hc.fn"
+    assert d("hyv4", "blk.1.hc_ffn_base.weight").hf_name == \
+        "model.layers.1.ffn_hc.base"
+    assert d("hyv4", "blk.1.hc_ffn_scale.weight").hf_name == \
+        "model.layers.1.ffn_hc.scale"
+    assert d("hyv4", "output_hc_fn.weight").hf_name == "model.hc_head.fn"
+    assert d("hyv4", "output_hc_base.weight").hf_name == "model.hc_head.base"
+    assert d("hyv4", "output_hc_scale.weight").hf_name == "model.hc_head.scale"
+
+
+def test_hyv4_moe_and_dense_mlp_routing():
+    # MoE under the canonical mlp.* (unlike deepseek4's ffn.*).
+    assert d("hyv4", "blk.1.ffn_gate_inp.weight").hf_name == \
+        "model.layers.1.mlp.gate.weight"
+    assert d("hyv4", "blk.1.exp_probs_b.bias").hf_name == \
+        "model.layers.1.mlp.gate.e_score_correction_bias"
+    assert d("hyv4", "blk.1.ffn_gate_exps.weight").hf_name == \
+        "model.layers.1.mlp.switch_mlp.gate_proj.weight"
+    assert d("hyv4", "blk.1.ffn_up_exps.weight").hf_name == \
+        "model.layers.1.mlp.switch_mlp.up_proj.weight"
+    assert d("hyv4", "blk.1.ffn_down_exps.weight").hf_name == \
+        "model.layers.1.mlp.switch_mlp.down_proj.weight"
+    assert d("hyv4", "blk.1.ffn_gate_shexp.weight").hf_name == \
+        "model.layers.1.mlp.shared_experts.gate_proj.weight"
+    assert d("hyv4", "blk.1.ffn_down_shexp.weight").hf_name == \
+        "model.layers.1.mlp.shared_experts.down_proj.weight"
+    # The leading dense block keeps the plain MLP names.
+    assert d("hyv4", "blk.0.ffn_gate.weight").hf_name == \
+        "model.layers.0.mlp.gate_proj.weight"
+    assert d("hyv4", "blk.0.ffn_up.weight").hf_name == \
+        "model.layers.0.mlp.up_proj.weight"
+    assert d("hyv4", "blk.0.ffn_down.weight").hf_name == \
+        "model.layers.0.mlp.down_proj.weight"
+
+
+# Every distinct tensor-name template in
+# AngelSlim__Hy4-preview-GGUF/Hy4-preview-STQ1_0.gguf (2134 tensors), with the
+# block index folded to {bid}. A closed-set pin: a new spelling on the wire, or
+# a row deleted from the override block, breaks this rather than the 229 GB
+# load.
+_HYV4_WIRE_TEMPLATES = (
+    "blk.{bid}.attn_gate.weight",
+    "blk.{bid}.attn_k_b.weight",
+    "blk.{bid}.attn_kv_a_mqa.weight",
+    "blk.{bid}.attn_kv_a_norm.weight",
+    "blk.{bid}.attn_norm.weight",
+    "blk.{bid}.attn_output.weight",
+    "blk.{bid}.attn_q_a.weight",
+    "blk.{bid}.attn_q_a_norm.weight",
+    "blk.{bid}.attn_q_b.weight",
+    "blk.{bid}.attn_sinks.weight",
+    "blk.{bid}.attn_v_b.weight",
+    "blk.{bid}.exp_probs_b.bias",
+    "blk.{bid}.ffn_down.weight",
+    "blk.{bid}.ffn_down_exps.weight",
+    "blk.{bid}.ffn_down_shexp.weight",
+    "blk.{bid}.ffn_gate.weight",
+    "blk.{bid}.ffn_gate_exps.weight",
+    "blk.{bid}.ffn_gate_inp.weight",
+    "blk.{bid}.ffn_gate_shexp.weight",
+    "blk.{bid}.ffn_norm.weight",
+    "blk.{bid}.ffn_up.weight",
+    "blk.{bid}.ffn_up_exps.weight",
+    "blk.{bid}.ffn_up_shexp.weight",
+    "blk.{bid}.hc_attn_base.weight",
+    "blk.{bid}.hc_attn_fn.weight",
+    "blk.{bid}.hc_attn_scale.weight",
+    "blk.{bid}.hc_ffn_base.weight",
+    "blk.{bid}.hc_ffn_fn.weight",
+    "blk.{bid}.hc_ffn_scale.weight",
+    "blk.{bid}.indexer.attn_k.weight",
+    "blk.{bid}.indexer.attn_q_b.weight",
+    "blk.{bid}.indexer.k_norm.bias",
+    "blk.{bid}.indexer.k_norm.weight",
+    "blk.{bid}.indexer.proj.weight",
+    "output.weight",
+    "output_hc_base.weight",
+    "output_hc_fn.weight",
+    "output_hc_scale.weight",
+    "output_norm.weight",
+    "token_embd.weight",
+)
+
+
+def test_hyv4_every_wire_tensor_maps_to_a_unique_target():
+    targets = {}
+    for tpl in _HYV4_WIRE_TEMPLATES:
+        name = tpl.format(bid=7)
+        r = d("hyv4", name)
+        assert r.kind == MAP, name
+        assert r.transform == "passthrough", name
+        assert r.hf_name not in targets, (name, targets.get(r.hf_name))
+        targets[r.hf_name] = name
+    assert len(targets) == len(_HYV4_WIRE_TEMPLATES)
+
+
+def test_hyv4_global_tensors():
+    assert d("hyv4", "token_embd.weight").hf_name == "model.embed_tokens.weight"
+    assert d("hyv4", "output_norm.weight").hf_name == "model.norm.weight"
+    assert d("hyv4", "output.weight").hf_name == "lm_head.weight"
+
+
 # hunyuan-moe: NEOX, per-head qk-norm (query/key_layernorm), shared expert
 def test_hunyuan_attn_passthrough_and_per_head_qk_norm_naming():
     # NEOX rope => Q/K passthrough; per-head qk-norms map to mlx-lm's

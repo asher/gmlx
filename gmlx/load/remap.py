@@ -110,6 +110,14 @@ ARCH_ALIAS = {
     # tensors land on model.layers.45.* and glm5_next.sanitize drops them
     # (the MTP drafter loads them separately).
     "glm5next": "GLM5NEXT",
+    # HY4-preview (llama.cpp 'hyv4'): absorbed MLA in the DeepSeek-V3.2 shape
+    # plus a sigmoid attention gate, per-head sinks, a per-token lightning
+    # indexer on selected layers, and 4-stream independent hyper-connections
+    # (deepseek4-style hc_* tensors, but no comb/sinkhorn term). The MLA and
+    # MoE rows match DEEPSEEK2; the rest is HY4-only, so it gets a complete
+    # override block. Targets follow gmlx.models.hy_v4. The converter drops
+    # the nextn layers, so there are no MTP tensors to skip.
+    "hyv4": "HYV4",
     "glm4moe": "GLM4MOE",
     # OpenAI gpt-oss (llama.cpp arch 'gpt-oss' / LLM_ARCH_OPENAI_MOE): MoE with
     # attention sinks, sliding/full alternating attention, and MXFP4 experts.
@@ -1586,6 +1594,112 @@ ARCH_PRIORITY_OVERRIDES: dict[str, list[tuple[re.Pattern, str | None, str]]] = {
         (re.compile(r"^blk\.(\d+)\.ffn_down_shexp\.weight$"),
          "model.layers.{bid}.mlp.shared_experts.down_proj.weight",
          "passthrough"),
+    ],
+    "HYV4": [
+        # HY4-preview (llama.cpp 'hyv4'). The MLA and MoE rows are the
+        # DEEPSEEK2 layout verbatim (absorbed k_b/v_b -> embed_q/unembed_out,
+        # stacked routed experts, sigmoid correction bias), so the targets
+        # follow mlx_lm's deepseek_v32 naming and KQuantMultiLinear engages
+        # unchanged. Claimed explicitly rather than aliased to DEEPSEEK2
+        # because the HY4-only rows (attention gate, per-head sinks, iHC)
+        # have no canonical enum and the block must stay a closed set. All
+        # passthrough: rope acts on the qk_rope split after q_b/kv_a, so
+        # there is no llama-style Q/K permute to undo.
+        #
+        # MLA attention (absorbed layout).
+        (re.compile(r"^blk\.(\d+)\.attn_q_a\.weight$"),
+         "model.layers.{bid}.self_attn.q_a_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_q_a_norm\.weight$"),
+         "model.layers.{bid}.self_attn.q_a_layernorm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_q_b\.weight$"),
+         "model.layers.{bid}.self_attn.q_b_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_kv_a_mqa\.weight$"),
+         "model.layers.{bid}.self_attn.kv_a_proj_with_mqa.weight",
+         "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_kv_a_norm\.weight$"),
+         "model.layers.{bid}.self_attn.kv_a_layernorm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_k_b\.weight$"),
+         "model.layers.{bid}.self_attn.embed_q.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_v_b\.weight$"),
+         "model.layers.{bid}.self_attn.unembed_out.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_output\.weight$"),
+         "model.layers.{bid}.self_attn.o_proj.weight", "passthrough"),
+        # Gated MLA: a sigmoid gate on the decompressed attention output,
+        # applied before o_proj. [hidden, n_head * v_head_dim].
+        (re.compile(r"^blk\.(\d+)\.attn_gate\.weight$"),
+         "model.layers.{bid}.self_attn.attn_gate.weight", "passthrough"),
+        # Per-head fp32 attention sinks - a raw array, so no `.weight` on the
+        # target (gpt-oss `self_attn.sinks` precedent).
+        (re.compile(r"^blk\.(\d+)\.attn_sinks\.weight$"),
+         "model.layers.{bid}.self_attn.sinks", "passthrough"),
+        # Per-layer norms (standard 2-norm transformer block).
+        (re.compile(r"^blk\.(\d+)\.attn_norm\.weight$"),
+         "model.layers.{bid}.input_layernorm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_norm\.weight$"),
+         "model.layers.{bid}.post_attention_layernorm.weight", "passthrough"),
+        # DSA lightning indexer - only the "full" layers carry these.
+        # k_norm is a LayerNorm (weight + bias).
+        (re.compile(r"^blk\.(\d+)\.indexer\.attn_q_b\.weight$"),
+         "model.layers.{bid}.self_attn.indexer.wq_b.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.indexer\.attn_k\.weight$"),
+         "model.layers.{bid}.self_attn.indexer.wk.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.indexer\.k_norm\.weight$"),
+         "model.layers.{bid}.self_attn.indexer.k_norm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.indexer\.k_norm\.bias$"),
+         "model.layers.{bid}.self_attn.indexer.k_norm.bias", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.indexer\.proj\.weight$"),
+         "model.layers.{bid}.self_attn.indexer.weights_proj.weight",
+         "passthrough"),
+        # iHC: raw fp32 arrays on IndependentHyperConnection (fn/base/scale,
+        # no `.weight`). One pair per block, attention then FFN.
+        (re.compile(r"^blk\.(\d+)\.hc_attn_fn\.weight$"),
+         "model.layers.{bid}.attn_hc.fn", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.hc_attn_base\.weight$"),
+         "model.layers.{bid}.attn_hc.base", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.hc_attn_scale\.weight$"),
+         "model.layers.{bid}.attn_hc.scale", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.hc_ffn_fn\.weight$"),
+         "model.layers.{bid}.ffn_hc.fn", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.hc_ffn_base\.weight$"),
+         "model.layers.{bid}.ffn_hc.base", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.hc_ffn_scale\.weight$"),
+         "model.layers.{bid}.ffn_hc.scale", "passthrough"),
+        # Dense MLP (the leading first_k_dense_replace layers).
+        (re.compile(r"^blk\.(\d+)\.ffn_gate\.weight$"),
+         "model.layers.{bid}.mlp.gate_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_up\.weight$"),
+         "model.layers.{bid}.mlp.up_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_down\.weight$"),
+         "model.layers.{bid}.mlp.down_proj.weight", "passthrough"),
+        # MoE router + selection-only correction bias.
+        (re.compile(r"^blk\.(\d+)\.ffn_gate_inp\.weight$"),
+         "model.layers.{bid}.mlp.gate.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.exp_probs_b\.bias$"),
+         "model.layers.{bid}.mlp.gate.e_score_correction_bias", "passthrough"),
+        # Routed experts (pre-stacked [n_experts, ...]) + shared expert.
+        (re.compile(r"^blk\.(\d+)\.ffn_gate_exps\.weight$"),
+         "model.layers.{bid}.mlp.switch_mlp.gate_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_up_exps\.weight$"),
+         "model.layers.{bid}.mlp.switch_mlp.up_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_down_exps\.weight$"),
+         "model.layers.{bid}.mlp.switch_mlp.down_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_gate_shexp\.weight$"),
+         "model.layers.{bid}.mlp.shared_experts.gate_proj.weight",
+         "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_up_shexp\.weight$"),
+         "model.layers.{bid}.mlp.shared_experts.up_proj.weight",
+         "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_down_shexp\.weight$"),
+         "model.layers.{bid}.mlp.shared_experts.down_proj.weight",
+         "passthrough"),
+        # Final-collapse HyperHead (non-blk; no capture group -> target used
+        # as-is). token_embd/output_norm/output resolve via the canonical map.
+        (re.compile(r"^output_hc_fn\.weight$"),
+         "model.hc_head.fn", "passthrough"),
+        (re.compile(r"^output_hc_base\.weight$"),
+         "model.hc_head.base", "passthrough"),
+        (re.compile(r"^output_hc_scale\.weight$"),
+         "model.hc_head.scale", "passthrough"),
     ],
     "DEEPSEEK4": [
         # DeepSeek V4 Flash (dwarfstar 'deepseek4', not a llama.cpp arch).

@@ -155,24 +155,6 @@ def resolve_kvarn_policy(model, kv_bits, kv_tail_tokens, rotating_window,
     )
 
 
-def apply_kvarn_policy(prompt_cache, policy) -> int:
-    """Convert in place the layers the policy takes. Returns the number of
-    layers converted."""
-    from gmlx.cache.kv_policy import arm_stack, quantize_kv_members
-
-    arm_stack(prompt_cache, policy, hold=False)
-    n = 0
-    for i, plan in enumerate(policy.per_layer):
-        if plan.quantize:
-            prompt_cache[i], k = quantize_kv_members(prompt_cache[i], policy)
-            n += k
-    if n:
-        from gmlx.cache.kvarn_sdpa import install_kvarn_sdpa
-
-        install_kvarn_sdpa()
-    return n
-
-
 def convert_kvarn_cache(model, prompt_cache, kv_bits, kv_tail_tokens,
                         rotating_window=None):
     """Resolve the kvarn policy for one freshly built stack and apply it.
@@ -182,8 +164,9 @@ def convert_kvarn_cache(model, prompt_cache, kv_bits, kv_tail_tokens,
     policy = resolve_kvarn_policy(
         model, kv_bits, kv_tail_tokens, rotating_window, prompt_cache
     )
-    if policy.verdict in ("full", "partial"):
-        apply_kvarn_policy(prompt_cache, policy)
+    from gmlx.cache.kv_policy import quantize_stack
+
+    quantize_stack(prompt_cache, policy)
     return policy
 
 
@@ -472,17 +455,13 @@ def generate(
         # misses what max_kv_size builds.
         from mlx_lm.models.cache import make_prompt_cache as _mpc
 
-        from gmlx.cache.kv_policy import (arm_stack, kv_line,
-                                          resolve_kv_quant_policy)
+        from gmlx.cache.kv_policy import arm_stack, resolve_and_report
 
         prompt_cache = _mpc(model, max_kv_size=max_kv_size)
-        policy = resolve_kv_quant_policy(
+        policy = resolve_and_report(
             prompt_cache, kv_bits=kv_bits, kv_group_size=kv_group_size,
             quantized_kv_start=quantized_kv_start, scheme=kv_quant_scheme,
             max_kv_size=max_kv_size)
-        print(kv_line(None, policy), file=sys.stderr)
-        if policy.verdict == "error":
-            raise SystemExit(2)
         if policy.verdict == "dropped":
             prompt_cache = None
             kv_bits = None
@@ -1193,24 +1172,17 @@ def generate_speculative_owned(
     if prompt_cache is None:
         prompt_cache = _cache.make_prompt_cache(lm)
     if kv_bits is not None:
-        # These are the rounds serve quantizes on, so the CLI quantizes
-        # the same layers: rollback trims, and affine packing is
-        # per-token along head_dim, so a trim is an offset move. The
-        # bare-stock GDN fallback is the one target that cannot verify
-        # on packed tuples.
-        from gmlx.cache.kv_policy import (arm_stack, kv_line,
-                                          resolve_kv_quant_policy)
+        # Owned rounds take the layers serve takes; the stock walks
+        # decline. No later converter runs here, so convert now.
+        from gmlx.cache.kv_policy import quantize_stack, resolve_and_report
         from gmlx.spec.engine import mtp_kv_decline
 
         decline = mtp_kv_decline(lm)
-        policy = resolve_kv_quant_policy(
+        policy = resolve_and_report(
             prompt_cache, kv_bits=kv_bits, kv_group_size=kv_group_size,
             mtp=True, scheme=kv_quant_scheme,
             can_quantize_kv=decline is None, no_kv_reason=decline)
-        print(kv_line(None, policy), file=sys.stderr)
-        if policy.verdict == "error":
-            raise SystemExit(2)
-        arm_stack(prompt_cache, policy, hold=False)
+        quantize_stack(prompt_cache, policy)
 
     detok = tokenizer.detokenizer
     detok.reset()

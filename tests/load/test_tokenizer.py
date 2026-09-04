@@ -152,11 +152,12 @@ def test_digit_clause_selected_by_pre():
 
 def test_deepseek3_pre_is_multi_regex_sequence():
     # llama.cpp's DEEPSEEK3_LLM case applies THREE regexes sequentially (the
-    # same case covers pre='deepseek-v3', 'joyai-llm' [DeepSeek V4 Flash], and
-    # 'hunyuan-dense'). The selector must return the tuple, and the builder
-    # must chain one Split per pattern (mirroring sequential splitting).
+    # same case covers pre='deepseek-v3', 'joyai-llm' [DeepSeek V4 Flash],
+    # 'hunyuan-dense' and 'hyv4' [HY4-preview]). The selector must return the
+    # tuple, and the builder must chain one Split per pattern (mirroring
+    # sequential splitting).
     from gmlx.load.tokenizer import _DEEPSEEK3_PATTERNS, _bytelevel_split_patterns
-    for pre in ("deepseek-v3", "joyai-llm", "hunyuan-dense"):
+    for pre in ("deepseek-v3", "joyai-llm", "hunyuan-dense", "hyv4"):
         assert _bytelevel_split_patterns(pre) == _DEEPSEEK3_PATTERNS
     assert len(_DEEPSEEK3_PATTERNS) == 3
     # Verified against ds4 --dump-tokens on the real V4 Flash GGUF (exact-id
@@ -586,3 +587,87 @@ def test_out_of_range_suppress_tokens_ignored():
     assert 3 in merged                      # in-range kept
     assert -1 not in merged                 # -1 must not bias the LAST token
     assert len(tok) + 5 not in merged
+
+
+# Harmony (gpt-oss): <|end|> closes a message, <|return|> the turn. The
+# assistant writes "analysis ... <|end|>" and then opens the final channel, so
+# a stop set carrying <|end|> returns reasoning and no answer. Both routes pull
+# it in: the stop-name table and the template heuristic (a stored assistant
+# turn is suffixed <|end|>). phi-3 has <|end|> as its real turn end and no
+# <|return|>/<|call|>, so the drop must not reach it.
+_HARMONY_SPECIALS = ["<|startoftext|>", "<|return|>", "<|pad|>", "<|end|>",
+                     "<|call|>", "<|endoftext|>", "<|start|>", "<|channel|>",
+                     "<|message|>"]
+_H_RETURN, _H_END, _H_CALL, _H_EOT = 1, 3, 4, 5
+_HARMONY_TEMPLATE = (
+    "{%- for m in messages -%}"
+    "{{- '<|start|>' + m['role'] + '<|message|>' + m['content'] + '<|end|>' -}}"
+    "{%- endfor -%}"
+    "{%- if add_generation_prompt -%}{{- '<|start|>assistant' -}}{%- endif -%}"
+)
+
+_PHI3_SPECIALS = ["<s>", "<|endoftext|>", "<pad>", "<|end|>", "<|user|>",
+                  "<|assistant|>"]
+_P_EOT, _P_END = 1, 3
+_PHI3_TEMPLATE = (
+    "{%- for m in messages -%}"
+    "{{- '<|' + m['role'] + '|>\\n' + m['content'] + '<|end|>\\n' -}}"
+    "{%- endfor -%}"
+    "{%- if add_generation_prompt -%}{{- '<|assistant|>\\n' -}}{%- endif -%}"
+)
+
+
+def _control_meta(specials, eos_id, template, arch) -> dict:
+    toks = specials + _ALPHABET + _MERGED
+    return {
+        "general.architecture": arch,
+        "tokenizer.ggml.model": "gpt2",
+        "tokenizer.ggml.pre": "gpt-4o",
+        "tokenizer.ggml.tokens": toks,
+        "tokenizer.ggml.merges": _MERGES,
+        "tokenizer.ggml.token_type":
+            [3] * len(specials) + [1] * (len(toks) - len(specials)),
+        "tokenizer.ggml.bos_token_id": 0,
+        "tokenizer.ggml.eos_token_id": eos_id,
+        "tokenizer.ggml.padding_token_id": 2,
+        "tokenizer.chat_template": template,
+    }
+
+
+def test_harmony_stop_set_drops_message_end():
+    meta = _control_meta(_HARMONY_SPECIALS, _H_RETURN, _HARMONY_TEMPLATE,
+                         "gpt-oss")
+    tok = load_tokenizer_from_gguf(meta, "gpt-oss")
+    ids = tok._gguf_eos_token_ids
+    assert ids[0] == _H_RETURN
+    assert _H_CALL in ids and _H_EOT in ids
+    assert _H_END not in ids
+
+
+def test_harmony_drop_is_independent_of_route():
+    from gmlx.load.tokenizer import _drop_message_end_eog
+
+    toks = _HARMONY_SPECIALS + _ALPHABET
+    # Both routes land <|end|> in the set; the guard sees the merged set.
+    assert _drop_message_end_eog(
+        [_H_RETURN, _H_END, _H_CALL, _H_EOT], toks) == [_H_RETURN, _H_CALL,
+                                                        _H_EOT]
+    # One half of the turn-end pair is not enough (llama.cpp parity).
+    assert _drop_message_end_eog([_H_RETURN, _H_END], toks) == [_H_RETURN,
+                                                                _H_END]
+    assert _drop_message_end_eog([_H_CALL, _H_END], toks) == [_H_CALL, _H_END]
+
+
+def test_phi3_stop_set_keeps_end():
+    meta = _control_meta(_PHI3_SPECIALS, _P_EOT, _PHI3_TEMPLATE, "phi3")
+    tok = load_tokenizer_from_gguf(meta, "phi3")
+    ids = tok._gguf_eos_token_ids
+    assert ids[0] == _P_EOT
+    assert _P_END in ids
+
+
+def test_solar_open_stop_set_drops_message_end():
+    from gmlx.load.tokenizer import _drop_message_end_eog
+
+    toks = ["<|end|>", "<|calls|>", "<|flush|>", "<|endoftext|>"] + _ALPHABET
+    assert _drop_message_end_eog([3, 0, 1, 2], toks) == [3, 1, 2]
