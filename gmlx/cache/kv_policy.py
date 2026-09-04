@@ -360,7 +360,10 @@ def _kvarn_owns(c, kind, rotating_window, batched=False):
     from gmlx.cache.kvarn_cache import convertible_kv_types
 
     if kind == "kv":
-        return (batched
+        # A CacheList layer classifies "kv" through its members, but the
+        # batch seam has no kvarn container for it.
+        leaf = getattr(c, "caches", None) is None
+        return ((batched and leaf)
                 or type(c) in convertible_kv_types()
                 or getattr(c, "kv_quant_scheme", None) == "kvarn")
     if kind != "window" or not rotating_window:

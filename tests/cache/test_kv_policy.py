@@ -1,6 +1,6 @@
 import pytest
-from mlx_vlm.models.cache import (ArraysCache, KVCache, QuantizedKVCache,
-                                  RotatingKVCache)
+from mlx_vlm.models.cache import (ArraysCache, CacheList, KVCache,
+                                  QuantizedKVCache, RotatingKVCache)
 
 from gmlx.cache.kv_policy import (kv_line, kvarn_bytes_per_element,
                                   kvarn_fixed_tokens,
@@ -262,3 +262,15 @@ def test_kvarn_batched_verdicts(_kvarn_ops):
     mtp_batched = _kvarn(_dense(4), mode="batched", mtp=True)
     assert mtp_batched.verdict == "dropped"
     assert all(b == 2.0 for b in mtp_batched.bytes_per_element_vector())
+
+
+def test_kvarn_batched_leaves_cache_list_fp16(_kvarn_ops):
+    """A CacheList layer classifies kv through its members, but the batch
+    seam builds BatchKVarNKVCache only for leaf layers. Batched pricing
+    must not claim it."""
+    stack = [KVCache(), CacheList(KVCache(), KVCache()), KVCache(), KVCache()]
+    for mode in ("single", "batched"):
+        p = _kvarn(stack, mode=mode)
+        assert p.verdict == "partial", mode
+        assert [x.quantize for x in p.per_layer] == [True, False, True, False]
+        assert p.bytes_per_element_vector()[1] == 2.0
