@@ -623,6 +623,24 @@ quarters of the 8-bit record: at 32k its decode median can trail affine 8
 by a few percent while its p99 and top-1 stay ahead, so the two split the
 typical position and the outliers between them. Widths 2 and 3 are for
 experiments. The decode leg is the one a long generation accumulates.
+
+Choosing by these numbers. Top-1 is the measure closest to what a greedy
+or low-temperature user sees: it is the share of tokens that come out
+identical. Median KLD measures how far the whole next-token distribution
+moved, which is what sampling at temperature draws from, and it keeps
+scoring positions whose argmax never flipped. The p99 is the outlier
+budget: one badly wrong position can turn a reasoning chain or a tool call,
+and a long generation feeds its own errors back in, so a cache with a lower
+p99 drifts less over a thousand tokens even when its median is not the
+lowest. When two caches disagree by a few percent on one measure, take the
+one with the lower p99 and the higher top-1; when a width buys a large
+median gain (2x or more), that gain shows up in every measure. Note that
+the ranking does not follow width across schemes: kvarn at 2 bits lands
+within a point of affine at 3 on decode top-1 (ahead on the 9B, behind on
+Qwen3.8-27B) at a quarter of its median KLD, and kvarn at 4 halves affine
+4's decode median while matching it on top-1. The corpus is wikitext under
+teacher forcing, so the tables rank caches against each other; they do not
+predict a task score.
 TurboQuant is mlx-vlm's scheme (see Origins); gmlx does not enable it, and
 it appears here for comparison only.
 
