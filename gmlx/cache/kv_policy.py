@@ -484,8 +484,9 @@ def _resolve_kvarn(stack, *, kv_bits, value_bits, mode, mtp, head_dim,
     # application. Only a layer the scheme cannot take makes it partial.
     hetero = any(not owns[i] and kinds[i] != "pool" for i in range(n))
     honored = not quantized_kv_start
+    # Pools pack affine, so the group rides along only when they arm.
     return KvQuantPolicy("partial" if hetero else "full", None, k_bits,
-                         None, mode, tuple(per),
+                         group if pool_bits else None, mode, tuple(per),
                          quantized_kv_start=int(quantized_kv_start or 0),
                          start_honored=honored, pool_bits=pool_bits,
                          **extra)
