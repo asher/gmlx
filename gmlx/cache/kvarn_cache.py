@@ -727,17 +727,6 @@ class KVarNRotatingKVCache(KVarNKVCache):
         self._compact()
         return super().update_and_fetch(keys, values)
 
-    def _seal(self, rk_block, rv_block):
-        # A single bulk block wider than the window: quantize only the
-        # last g_max groups, account the rest straight into evicted.
-        # Only the terminal bulk branch of _append_rotated can hit this.
-        skip = rk_block.shape[2] // GROUP - self.g_max
-        if skip > 0:
-            self.evicted += skip * GROUP
-            rk_block = rk_block[:, :, skip * GROUP :]
-            rv_block = rv_block[:, :, skip * GROUP :]
-        super()._seal(rk_block, rv_block)
-
     def make_mask(self, N, return_array=False, window_size=None, **kwargs):
         if return_array or window_size is not None:
             # No correct array is producible: masks are built before layer

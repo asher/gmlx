@@ -147,7 +147,7 @@ def test_incremental_matches_bulk_common_window(d):
     bulk = _rot()
     bulk.update_and_fetch(k, v)
     _assert_invariants(inc)
-    _assert_invariants(bulk)
+    _assert_invariants(bulk, chunk=2000)
     _assert_common_window_equal(inc, bulk)
 
 
@@ -181,15 +181,43 @@ def test_wrap_boundary_group_edges(delta):
 
 
 @_NEEDS_GPU
-def test_bulk_overflow_skips_doomed_groups():
-    # A single prefill 3x the window: only the last g_max groups are ever
-    # quantized (record capacity never grows past the initial clamp).
+def test_bulk_overflow_seals_the_whole_chunk_then_compacts():
+    # A single prefill 3x the window seals every group it carries, so the
+    # chunk attends its own leading rows; the next entry compacts to the
+    # window.
     c = _rot()
     k, v = _tokens(3 * WIN)
     c.update_and_fetch(k, v)
+    _assert_invariants(c, chunk=3 * WIN)
+    assert c.n_sealed == (3 * WIN - c.sink_cap) // GROUP
+    assert c.evicted == 0
+    k1, v1 = _tokens(1, seed=1)
+    c.update_and_fetch(k1, v1)
     _assert_invariants(c)
     assert c.n_sealed == c.g_max
-    assert c.codes_k.shape[2] == c._initial_gcap()
+    assert c.evicted == (3 * WIN - c.sink_cap) // GROUP * GROUP - c.g_max * GROUP
+
+
+@_NEEDS_GPU
+def test_bulk_overflow_chunk_attends_its_own_rows():
+    # Every query of a chunk wider than the window sees its true causal
+    # key set. The tolerance covers 6-bit record noise, not a misaligned
+    # key set.
+    from gmlx.cache.kvarn_sdpa import kvarn_attention
+
+    c = _rot()
+    n = 3 * WIN
+    k, v = _tokens(n)
+    c.update_and_fetch(k, v)
+    rng = np.random.default_rng(3)
+    q = mx.array(rng.standard_normal((1, HQ, n, D)).astype(np.float16))
+    out = kvarn_attention(q, c, D**-0.5, "causal")
+    ref = mx.fast.scaled_dot_product_attention(
+        q.astype(mx.float32), k.astype(mx.float32), v.astype(mx.float32),
+        scale=D**-0.5, mask="causal")
+    err = mx.abs(out.astype(mx.float32) - ref).max(axis=(0, 1, 3))
+    mx.eval(err)
+    assert float(err.max()) < 0.1, np.array(err)
 
 
 # -- compaction timing -------------------------------------------------------
