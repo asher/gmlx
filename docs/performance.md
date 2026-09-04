@@ -552,36 +552,52 @@ Qwen3.5-9B Q4_K_M, 16k context (head_dim 256, 7 of 32 layers quantized):
 
 | cache | prefill KLD | decode KLD | decode top-1 |
 |---|---|---|---|
-| affine 2 | 2.78e-02 | 2.75e-02 | 89.0% |
-| kvarn 2 | 1.50e-02 | 6.12e-03 | 94.7% |
-| affine 3 | 6.48e-03 | 6.06e-03 | 94.3% |
-| kvarn 3 | 2.91e-03 | 1.39e-03 | 97.4% |
-| affine 4 | 1.90e-03 | 1.83e-03 | 96.9% |
-| kvarn 4 | 1.17e-03 | 6.00e-04 | 98.3% |
-| kvarn 5 | 5.55e-04 | 2.92e-04 | 98.2% |
-| affine 6 | 4.59e-04 | 3.83e-04 | 98.7% |
-| kvarn 6 | 3.64e-04 | 2.70e-04 | 98.7% |
-| kvarn k6 v5 | 4.64e-04 | 2.76e-04 | 98.6% |
-| affine 8 | 2.85e-04 | 1.97e-04 | 98.7% |
-| kvarn 8 | 2.65e-04 | 2.01e-04 | 99.2% |
+| affine 2 | 0.02778 | 0.02745 | 89.0% |
+| kvarn 2 | 0.01503 | 0.00612 | 94.7% |
+| affine 3 | 0.00648 | 0.00606 | 94.3% |
+| kvarn 3 | 0.00291 | 0.00139 | 97.4% |
+| affine 4 | 0.00190 | 0.00183 | 96.9% |
+| kvarn 4 | 0.00117 | 0.00060 | 98.3% |
+| kvarn 5 | 0.00055 | 0.00029 | 98.2% |
+| affine 6 | 0.00046 | 0.00038 | 98.7% |
+| kvarn 6 | 0.00036 | 0.00027 | 98.7% |
+| kvarn k6 v5 | 0.00046 | 0.00028 | 98.6% |
+| affine 8 | 0.00029 | 0.00020 | 98.7% |
+| kvarn 8 | 0.00027 | 0.00020 | 99.2% |
+
+Qwen3.8-27B Q6_K_XL, 16k context (head_dim 256, 15 of 65 layers quantized):
+
+| cache | prefill KLD | decode KLD | decode top-1 |
+|---|---|---|---|
+| affine 2 | 0.01975 | 0.02314 | 90.3% |
+| kvarn 2 | 0.01009 | 0.00491 | 95.1% |
+| affine 3 | 0.00383 | 0.00419 | 96.1% |
+| kvarn 3 | 0.00212 | 0.00113 | 97.3% |
+| affine 4 | 0.00138 | 0.00136 | 97.5% |
+| kvarn 4 | 0.00084 | 0.00045 | 97.4% |
+| kvarn 5 | 0.00041 | 0.00025 | 98.4% |
+| affine 6 | 0.00033 | 0.00030 | 98.7% |
+| kvarn 6 | 0.00027 | 0.00019 | 98.8% |
+| affine 8 | 0.00023 | 0.00019 | 98.7% |
+| kvarn 8 | 0.00021 | 0.00015 | 98.9% |
 
 Qwen3.6-27B Q4_K_S, 32k context (head_dim 256, 15 of 64 layers quantized):
 
 | cache | prefill KLD | decode KLD | decode top-1 |
 |---|---|---|---|
-| kvarn 4 | 1.01e-03 | 8.14e-04 | 98.5% |
-| kvarn 6 | 3.26e-04 | 3.25e-04 | 98.5% |
-| affine 8 | 2.77e-04 | 3.36e-04 | 99.2% |
-| kvarn 8 | 2.65e-04 | 3.14e-04 | 98.9% |
+| kvarn 4 | 0.00101 | 0.00081 | 98.5% |
+| kvarn 6 | 0.00033 | 0.00032 | 98.5% |
+| affine 8 | 0.00028 | 0.00034 | 99.2% |
+| kvarn 8 | 0.00027 | 0.00031 | 98.9% |
 
 Nemotron-3.5-Lightning-30B-A3B, 16k context (Mamba2 hybrid, head_dim 128):
 
 | cache | prefill KLD | decode KLD | decode top-1 |
 |---|---|---|---|
-| kvarn 4 | 2.70e-03 | 1.63e-03 | 98.1% |
-| kvarn 6 | 1.25e-03 | 1.03e-03 | 98.8% |
-| affine 8 | 1.23e-03 | 9.44e-04 | 98.2% |
-| kvarn 8 | 1.11e-03 | 9.51e-04 | 98.6% |
+| kvarn 4 | 0.00270 | 0.00163 | 98.1% |
+| kvarn 6 | 0.00125 | 0.00103 | 98.8% |
+| affine 8 | 0.00123 | 0.00094 | 98.2% |
+| kvarn 8 | 0.00111 | 0.00095 | 98.6% |
 <!-- /kld-tables -->
 
 Reading the tables: at a matched width kvarn beats the affine cache on both
