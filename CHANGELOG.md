@@ -6,6 +6,16 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Capacity planning priced every layer of a hybrid model as growing fp16
+  KV. The boot table, `/v1/estimate`, the memory preflight and the APC
+  pool budget now price recurrent layers (gated DeltaNet, Mamba2, KDA) as
+  their fixed per-sequence state and grow only the attention layers, and
+  read a nemotron_h cache list as the model builds it (MLP-only blocks own
+  no cache). Qwen3.6-27B at 32k: 8.4 GB estimated, 2.1 GB priced now. The
+  same fix reads a nested `text_config` (gemma-4) for the score transient.
+
 ## [0.4.8] - 2026-09-02
 
 ### Added

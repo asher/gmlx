@@ -110,3 +110,4 @@ def test_guard_run_passes_through_other_errors():
         tp.guard_run(lambda: (_ for _ in ()).throw(
             RuntimeError("unrelated failure")))
     assert tp.guard_run(lambda: 41 + 1) == 42
+

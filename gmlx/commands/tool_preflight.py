@@ -99,7 +99,10 @@ def estimate(gguf_path: str, ctx_tokens: int | None = None) -> dict | None:
         ws = working_set_bytes()
         if not (cfg and costs and ws):
             return None
-        heads = cfg.get("num_attention_heads")
+        from gmlx.serve.mem_preflight import _get, _lm_config
+
+        heads = _get(_lm_config(SimpleNamespace(config=cfg)),
+                     "num_attention_heads")
         heads = heads if isinstance(heads, int) and heads > 0 else None
         if ctx_tokens:
             ctx = int(ctx_tokens)

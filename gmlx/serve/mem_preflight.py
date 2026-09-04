@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 
 _log = logging.getLogger(__name__)
 
@@ -65,18 +66,189 @@ def _lm_config(model):
     return text if text is not None else cfg
 
 
-def kv_layer_costs(model, bytes_per_elem: float = 2.0, per_layer_bpe=None):
-    """Per-layer ``(window_or_None, bytes_per_token)`` for the KV cache,
-    or None when the geometry cannot be read. Admit-side throughout: MLA
-    prices the compressed latent, a configured sliding window caps every
-    layer it could apply to. ``per_layer_bpe`` (from the KV policy)
-    prices each layer's storage exactly; it must match the layer count
-    or it is ignored."""
-    c = _lm_config(model)
+def _layer_windows(c, layers):
+    """Per-layer sliding window from the config, None where a layer keeps
+    full attention."""
+    window = _get(c, "sliding_window")
+    window = window if isinstance(window, int) and window > 0 else None
+    if window is None:
+        return [None] * layers
+    types = _get(c, "layer_types")
+    if isinstance(types, (list, tuple)) and len(types) == layers:
+        return [window if "sliding" in str(t) else None for t in types]
+    pattern = _get(c, "sliding_window_pattern")
+    if isinstance(pattern, int) and pattern > 0:
+        return [None if (i + 1) % pattern == 0 else window
+                for i in range(layers)]
+    return [window] * layers
+
+
+class FixedRows(int):
+    """Cost-entry window for a buffer allocated in full at the first
+    token (a recurrent layer's state): every row is charged however
+    short the context."""
+
+
+def span_tokens(window, tokens: int) -> int:
+    """Rows a cost entry charges at ``tokens`` of context."""
+    if tokens <= 0:
+        return 0
+    if window is None:
+        return tokens
+    if isinstance(window, FixedRows):
+        return int(window)
+    return min(tokens, int(window))
+
+
+def per_token_bytes(costs) -> float:
+    """Bytes of KV per token of context; fixed buffers excluded."""
+    return sum(bpt for w, bpt in costs if not isinstance(w, FixedRows))
+
+
+_STATE_BYTES = 4    # recurrent state is held fp32
+_CONV_BYTES = 2     # conv tails are held in the activation dtype
+_STATE_WORDS = ("linear", "mamba", "recurrent", "ssm", "conv")
+
+
+def recurrent_state_bytes(c) -> float | None:
+    """Fixed bytes one recurrent layer holds per sequence row (the fp32
+    recurrent state plus the conv tails), or None when the config carries
+    no recurrent geometry this can read. Families: gated DeltaNet
+    (qwen3_5, qwen3_next, qwen4_exp), Mamba2 (nemotron_h, falcon_h1,
+    granitemoehybrid), KDA (kimi_k3, glm5_next)."""
+    nv = _get(c, "linear_num_value_heads")
+    if nv:
+        nk = _get(c, "linear_num_key_heads") or nv
+        dk = _get(c, "linear_key_head_dim")
+        dv = _get(c, "linear_value_head_dim")
+        k = _get(c, "linear_conv_kernel_dim") or 4
+        if not (dk and dv):
+            return None
+        conv_dim = 2 * nk * dk + nv * dv
+        return float((k - 1) * conv_dim * _CONV_BYTES
+                     + nv * dk * dv * _STATE_BYTES)
+    kda = _get(c, "kda_head_dim")
+    if kda:
+        heads = _get(c, "num_attention_heads")
+        k = _get(c, "ssm_conv_kernel") or 4
+        if not heads:
+            return None
+        return float(3 * (k - 1) * heads * kda * _CONV_BYTES
+                     + heads * kda * kda * _STATE_BYTES)
+    heads = _get(c, "mamba_num_heads") or _get(c, "mamba_n_heads")
+    head_dim = _get(c, "mamba_head_dim") or _get(c, "mamba_d_head")
+    state = _get(c, "ssm_state_size") or _get(c, "mamba_d_state")
+    if heads and head_dim and state:
+        k = _get(c, "conv_kernel") or _get(c, "mamba_d_conv") or 4
+        groups = _get(c, "n_groups") or _get(c, "mamba_n_groups") or 1
+        inner = heads * head_dim
+        conv_dim = inner + 2 * groups * state
+        return float((k - 1) * conv_dim * _CONV_BYTES
+                     + inner * state * _STATE_BYTES)
+    return None
+
+
+@dataclass(frozen=True)
+class LayerGeometry:
+    """One cache-stack entry: a growing KV region (capped at ``window``
+    rows when it rotates) and/or a fixed recurrent state."""
+    attn: bool = True
+    window: int | None = None
+    state: float = 0.0
+
+
+def _config_kinds(c, layers):
+    """Per config layer: ``kv``, ``state``, ``both``, or None for a block
+    that owns no cache. Read from the family's layout key; a layer type
+    this cannot name counts as growing KV."""
+    types = _get(c, "layer_types")
+    if isinstance(types, (list, tuple)) and len(types) == layers:
+        return ["state" if any(w in str(t) for w in _STATE_WORDS) else "kv"
+                for t in types]
+    pattern = _get(c, "hybrid_override_pattern")
+    if isinstance(pattern, (list, tuple, str)) and len(pattern) == layers:
+        return [{"M": "state", "*": "kv"}.get(str(p)) for p in pattern]
+    interval = _get(c, "full_attention_interval")
+    if (isinstance(interval, int) and interval > 0
+            and _get(c, "linear_num_value_heads")):
+        return ["kv" if (i + 1) % interval == 0 else "state"
+                for i in range(layers)]
+    if _get(c, "model_type") == "falcon_h1":
+        return ["both"] * layers
+    return ["kv"] * layers
+
+
+def config_geometry(c):
+    """The cache-stack geometry a model of this config builds, one entry
+    per cache the stack owns, or None when the layer count is unreadable.
+    A recurrent family whose state this cannot size is priced as growing
+    KV (admit-side)."""
     layers = _get(c, "num_hidden_layers")
     if not isinstance(layers, int) or layers <= 0:
         return None
-    if per_layer_bpe is not None and len(per_layer_bpe) != layers:
+    kinds = _config_kinds(c, layers)
+    windows = _layer_windows(c, layers)
+    state = recurrent_state_bytes(c)
+    geo = []
+    for i, kind in enumerate(kinds):
+        if kind is None:
+            continue
+        if kind == "kv" or state is None:
+            geo.append(LayerGeometry(True, windows[i]))
+        elif kind == "state":
+            geo.append(LayerGeometry(False, None, state))
+        else:
+            geo.append(LayerGeometry(True, windows[i], state))
+    return geo
+
+
+def stack_geometry(model, stack):
+    """Geometry read off a constructed cache stack: kinds from the cache
+    classes, rotating windows from the caches, state bytes from the
+    config. A recurrent cache whose state the config cannot size is
+    priced as growing KV."""
+    from gmlx.cache.kv_policy import _cache_kind_types, _classify
+
+    types = _cache_kind_types()
+    state = recurrent_state_bytes(_lm_config(model))
+    geo = []
+    for c in stack:
+        kind = _classify(c, types)
+        members = getattr(c, "caches", None)
+        members = list(members) if members is not None else [c]
+        has_state = (state is not None
+                     and any(isinstance(m, types["state"]) for m in members))
+        window = None
+        if kind == "window":
+            for m in members:
+                if isinstance(m, types["window"]):
+                    window = getattr(m, "max_size", None)
+                    break
+            window = window if isinstance(window, int) and window > 0 else None
+        if kind == "state" and has_state:
+            geo.append(LayerGeometry(False, None, state))
+        else:
+            geo.append(LayerGeometry(True, window, state if has_state else 0.0))
+    return geo
+
+
+def kv_layer_costs(model, bytes_per_elem: float = 2.0, per_layer_bpe=None,
+                   geometry=None):
+    """Cost entries ``(window_or_None, bytes_per_token)`` for the model's
+    cache stack, or None when the geometry cannot be read: one entry per
+    growing KV region (a rotating window caps it) and one FixedRows(1)
+    entry per recurrent state. Admit-side throughout: MLA prices the
+    compressed latent, a configured sliding window caps every layer it
+    could apply to. ``geometry`` (from stack_geometry) replaces the
+    config's layer pattern; ``per_layer_bpe`` (from the KV policy) prices
+    each entry's storage exactly and must match the geometry length or it
+    is ignored."""
+    c = _lm_config(model)
+    if geometry is None:
+        geometry = config_geometry(c)
+    if not geometry:
+        return None
+    if per_layer_bpe is not None and len(per_layer_bpe) != len(geometry):
         per_layer_bpe = None
 
     def bpe(i):
@@ -84,52 +256,51 @@ def kv_layer_costs(model, bytes_per_elem: float = 2.0, per_layer_bpe=None):
 
     lora = _get(c, "kv_lora_rank")
     if isinstance(lora, int) and lora > 0:
-        rope = _get(c, "qk_rope_head_dim", 0) or 0
-        return [(None, (lora + rope) * bpe(i)) for i in range(layers)]
-    heads = _get(c, "num_attention_heads")
-    n_kv = _get(c, "num_key_value_heads") or heads
-    head_dim = _get(c, "head_dim")
-    hidden = _get(c, "hidden_size")
-    if not head_dim and heads and hidden:
-        head_dim = hidden // heads
-    if not (isinstance(n_kv, int) and n_kv > 0
-            and isinstance(head_dim, int) and head_dim > 0):
-        return None
+        elems = lora + (_get(c, "qk_rope_head_dim", 0) or 0)
+    else:
+        heads = _get(c, "num_attention_heads")
+        n_kv = _get(c, "num_key_value_heads") or heads
+        head_dim = _get(c, "head_dim")
+        hidden = _get(c, "hidden_size")
+        if not head_dim and heads and hidden:
+            head_dim = hidden // heads
+        if not (isinstance(n_kv, int) and n_kv > 0
+                and isinstance(head_dim, int) and head_dim > 0):
+            return None
+        elems = 2 * n_kv * head_dim
 
-    def per_tok(i):
-        return 2 * n_kv * head_dim * bpe(i)
-
-    window = _get(c, "sliding_window")
-    window = window if isinstance(window, int) and window > 0 else None
-    if window is None:
-        return [(None, per_tok(i)) for i in range(layers)]
-    types = _get(c, "layer_types")
-    if isinstance(types, (list, tuple)) and len(types) == layers:
-        return [(window if "sliding" in str(t) else None, per_tok(i))
-                for i, t in enumerate(types)]
-    pattern = _get(c, "sliding_window_pattern")
-    if isinstance(pattern, int) and pattern > 0:
-        return [(None if (i + 1) % pattern == 0 else window, per_tok(i))
-                for i in range(layers)]
-    return [(window, per_tok(i)) for i in range(layers)]
+    costs = []
+    for i, g in enumerate(geometry):
+        if g.attn:
+            costs.append((g.window, elems * bpe(i)))
+        if g.state:
+            costs.append((FixedRows(1), float(g.state)))
+    return costs
 
 
 def _policy_costs(rg, model):
-    """kv_layer_costs priced from rg's resolved KV policy (batched
-    mode). Without a policy, pricing stays uniform fp16."""
-    c = _lm_config(model)
-    layers = _get(c, "num_hidden_layers")
-    vec = None
-    if isinstance(layers, int) and layers > 0:
-        from .kv_policy import pricing_vector
+    """kv_layer_costs priced from rg's resolved KV policy (batched mode)
+    over the stack the policy was resolved on. Without a policy, or when
+    the stack cannot be probed, pricing stays uniform fp16 over the
+    config's geometry."""
+    from .kv_policy import _probe_stack, pricing_vector
 
-        vec = pricing_vector(rg, layers)
-    return kv_layer_costs(model, 2.0, per_layer_bpe=vec)
+    geometry = None
+    try:
+        geometry = stack_geometry(model, _probe_stack(model))
+    except Exception:
+        _log.debug("cache stack probe failed; pricing from the config",
+                   exc_info=True)
+    if not geometry:
+        geometry = config_geometry(_lm_config(model))
+    if not geometry:
+        return None
+    return kv_layer_costs(model, 2.0, per_layer_bpe=pricing_vector(
+        rg, len(geometry)), geometry=geometry)
 
 
 def prompt_kv_bytes(costs, tokens: int) -> float:
-    return sum(bpt * (tokens if w is None else min(tokens, w))
-               for w, bpt in costs)
+    return sum(bpt * span_tokens(w, tokens) for w, bpt in costs)
 
 
 def available_drained_bytes():
