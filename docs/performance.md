@@ -600,17 +600,6 @@ Qwen3.8-27B Q6_K_XL, 32k context:
 | affine 8 | 0.00027 | 0.00030 | 0.0038 | 98.8% |
 | kvarn 8 | 0.00026 | 0.00028 | 0.0026 | 99.0% |
 
-Qwen3.6-27B Q4_K_S, 32k context (head_dim 256, 15 of 64 layers quantized):
-
-| cache | prefill median | decode median | decode p99 | decode top-1 |
-|---|---|---|---|---|
-| affine 4 | 0.00158 | 0.00203 | 0.0235 | 97.6% |
-| kvarn 4 | 0.00101 | 0.00081 | 0.0095 | 98.5% |
-| affine 6 | 0.00041 | 0.00059 | 0.0072 | 98.7% |
-| kvarn 6 | 0.00033 | 0.00032 | 0.0038 | 98.5% |
-| affine 8 | 0.00028 | 0.00034 | 0.0033 | 99.2% |
-| kvarn 8 | 0.00027 | 0.00031 | 0.0047 | 98.9% |
-
 Nemotron-3.5-Lightning-30B-A3B, 16k context (Mamba2 hybrid, head_dim 128):
 
 | cache | prefill median | decode median | decode p99 | decode top-1 |
@@ -624,7 +613,7 @@ Nemotron-3.5-Lightning-30B-A3B, 16k context (Mamba2 hybrid, head_dim 128):
 Reading the tables: at a matched width kvarn beats the affine cache on both
 legs at every width below 8, by 2 to 4x on the decode-leg median at 2 to 4
 bits, and the two converge at 8. 6-bit kvarn sits between the affine 6-
-and 8-bit caches on the 9B and level with affine 8 on the 27Bs, in three
+and 8-bit caches on the 9B and level with affine 8 on the 27B, in three
 quarters of the 8-bit record: at 32k its decode median can trail affine 8
 by a few percent while its p99 and top-1 stay ahead, so the two split the
 typical position and the outliers between them. Widths 2 and 3 are for
