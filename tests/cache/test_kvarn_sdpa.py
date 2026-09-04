@@ -144,9 +144,23 @@ def test_sinks_raise_loudly():
         kvarn_attention(q, cache, SCALE, None, sinks=mx.zeros((HQ,)))
 
 
-def test_install_sweeps_and_passes_through():
+def test_install_sweeps_and_passes_through(monkeypatch):
+    import sys
+
+    from gmlx.cache import kvarn_sdpa as ks
+
     llama = importlib.import_module("mlx_lm.models.llama")
     base = importlib.import_module("mlx_lm.models.base")
+    # Pin every module the sweep may rebind: the wrap must not outlive
+    # this test.
+    for name, mod in list(sys.modules.items()):
+        if mod is None or not (
+            name in ks._BASE_MODULES or name.startswith(ks._MODEL_PREFIXES)
+        ):
+            continue
+        fn = getattr(mod, "scaled_dot_product_attention", None)
+        if callable(fn):
+            monkeypatch.setattr(mod, "scaled_dot_product_attention", fn)
     n = install_kvarn_sdpa()
     assert n >= 2
     for mod in (llama, base):

@@ -43,11 +43,9 @@ def test_resolve_stamps_both_modes(monkeypatch):
     assert pol.pricing_vector() == [1.0625] * 3 + [2.0]
 
 
-def test_kvarn_resolve_prices_record_and_regions(monkeypatch):
-    from gmlx.cache import kvarn_sdpa
+def test_kvarn_resolve_prices_record_and_regions(kvarn_ops_ok, monkeypatch):
     from gmlx.cache.kv_policy import kvarn_fixed_tokens
 
-    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
     monkeypatch.delenv("GMLX_KVARN", raising=False)
     monkeypatch.setenv("KV_BITS", "6")
     monkeypatch.setenv("KV_TAIL_TOKENS", "1024")
@@ -66,11 +64,9 @@ def test_kvarn_resolve_prices_record_and_regions(monkeypatch):
     assert j["tail_tokens"] == 1024
 
 
-def test_kvarn_notes_only_an_explicit_start_offset(monkeypatch):
-    from gmlx.cache import kvarn_sdpa
+def test_kvarn_notes_only_an_explicit_start_offset(kvarn_ops_ok, monkeypatch):
     from gmlx.cache.kv_policy import kv_line
 
-    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
     monkeypatch.delenv("GMLX_KVARN", raising=False)
     monkeypatch.delenv("QUANTIZED_KV_START", raising=False)
     monkeypatch.setenv("KV_BITS", "6")
@@ -91,10 +87,8 @@ def test_kvarn_notes_only_an_explicit_start_offset(monkeypatch):
     assert "quantized_kv_start=512 not honored" in kv_line("m", pol.single)
 
 
-def test_malformed_tail_fails_the_boot(monkeypatch):
-    from gmlx.cache import kvarn_sdpa
+def test_malformed_tail_fails_the_boot(kvarn_ops_ok, monkeypatch):
 
-    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
     monkeypatch.delenv("GMLX_KVARN", raising=False)
     monkeypatch.setenv("KV_BITS", "6")
     monkeypatch.setenv("KV_TAIL_TOKENS", "lots")
@@ -120,10 +114,8 @@ def test_affine_start_reads_the_load_window(monkeypatch):
         skv.resolve_for_load(_rg(), "m")
 
 
-def test_kvarn_split_widths_follow_the_key_value_config(monkeypatch):
-    from gmlx.cache import kvarn_sdpa
+def test_kvarn_split_widths_follow_the_key_value_config(kvarn_ops_ok, monkeypatch):
 
-    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
     monkeypatch.delenv("GMLX_KVARN", raising=False)
     monkeypatch.delenv("MLX_VLM_GGUF_SPECULATIVE", raising=False)
     monkeypatch.setenv("KV_BITS", "6")
@@ -137,14 +129,12 @@ def test_kvarn_split_widths_follow_the_key_value_config(monkeypatch):
     assert "kvarn k8 v5" in skv.kv_line("m", pol.single)
 
 
-def test_kvarn_admission_charges_the_fp16_buffers(monkeypatch):
+def test_kvarn_admission_charges_the_fp16_buffers(kvarn_ops_ok, monkeypatch):
     """The record bpe alone underprices a kvarn layer: the fp16 sink,
     horizon and tail are resident from the first token."""
     import gmlx.serve.mem_preflight as mp
-    from gmlx.cache import kvarn_sdpa
     from gmlx.cache.kv_policy import kvarn_fixed_tokens
 
-    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
     monkeypatch.delenv("GMLX_KVARN", raising=False)
     monkeypatch.setenv("KV_BITS", "6")
     monkeypatch.setenv("KV_TAIL_TOKENS", "1024")
@@ -220,14 +210,12 @@ def test_to_json_shapes(monkeypatch):
     assert "batched_reason" in j
 
 
-def test_load_window_scheme_wins_over_the_frozen_generator(monkeypatch):
+def test_load_window_scheme_wins_over_the_frozen_generator(kvarn_ops_ok, monkeypatch):
     """Upstream freezes the scheme from the process env at server start,
     so a per-model load: key reaches only the env window. Reading it here
     is what makes kv_quant_scheme work per model -- and rg must be
     corrected, since upstream's batch build gates on the attribute."""
-    from gmlx.cache import kvarn_sdpa
 
-    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
     monkeypatch.delenv("GMLX_KVARN", raising=False)
     monkeypatch.setenv("KV_BITS", "6")
     monkeypatch.setenv("KV_QUANT_SCHEME", "kvarn")
@@ -241,12 +229,10 @@ def test_load_window_scheme_wins_over_the_frozen_generator(monkeypatch):
     assert pol.to_json()["scheme"] == "kvarn"
 
 
-def test_kvarn_engages_without_kv_bits(monkeypatch):
+def test_kvarn_engages_without_kv_bits(kvarn_ops_ok, monkeypatch):
     # The scheme alone requests kvarn at its default width; upstream's
     # kv_bits parse (and its qat drop) does not gate it.
-    from gmlx.cache import kvarn_sdpa
 
-    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
     monkeypatch.delenv("GMLX_KVARN", raising=False)
     monkeypatch.delenv("KV_BITS", raising=False)
     monkeypatch.setenv("KV_QUANT_SCHEME", "kvarn")

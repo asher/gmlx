@@ -19,29 +19,18 @@ from gmlx.cache.compat import runtime_cache_module
 from gmlx.cache.kvarn_apc import (
     _MODE_STAMP,
     apply_kvarn_salt,
-    install_kvarn_apc,
     kvarn_entry_salt,
     kvarn_model_converts,
     stamp_model,
 )
 from gmlx.cache.kvarn_cache import KVarNKVCache
-from kvarn_testlib import Args
+from kvarn_testlib import Args, FakeLM
 
 _cache = runtime_cache_module()
 ArraysCache = _cache.ArraysCache
 CacheList = _cache.CacheList
 KVCache = _cache.KVCache
 RotatingKVCache = _cache.RotatingKVCache
-
-
-class _LM:
-    def __init__(self, stack, head_dim=128):
-        self.args = Args(head_dim=head_dim)
-        self.layers = [object()] * len(stack)
-        self._stack = stack
-
-    def make_cache(self):
-        return [f() for f in self._stack]
 
 
 class _DenseNoMakeCache:
@@ -53,24 +42,24 @@ class _DenseNoMakeCache:
 
 
 def _hybrid(head_dim=128):
-    return _LM([KVCache, lambda: ArraysCache(size=2)], head_dim)
+    return FakeLM(stack=[KVCache, lambda: ArraysCache(size=2)], head_dim=head_dim)
 
 
 def _rec_gemma():
     # ckpt-shaped but zero-conversion: no plain KV at all.
-    return _LM([lambda: ArraysCache(size=2),
-                lambda: RotatingKVCache(max_size=32)])
+    return FakeLM(stack=[lambda: ArraysCache(size=2),
+                         lambda: RotatingKVCache(max_size=32)])
 
 
 def _ds4():
-    return _LM([lambda: RotatingKVCache(max_size=32),
-                lambda: CacheList(ArraysCache(size=2))], head_dim=512)
+    return FakeLM(stack=[lambda: RotatingKVCache(max_size=32),
+                         lambda: CacheList(ArraysCache(size=2))], head_dim=512)
 
 
 def _llama4():
     from mlx_lm.models.cache import ChunkedKVCache
 
-    return _LM([lambda: ChunkedKVCache(chunk_size=8192), KVCache])
+    return FakeLM(stack=[lambda: ChunkedKVCache(chunk_size=8192), KVCache])
 
 
 def test_probe_counts_convertible_layers(kvarn_ops_ok):
@@ -107,8 +96,7 @@ def test_policy_converts_chunked(kvarn_ops_ok):
     assert type(caches[3]) is ArraysCache
 
 
-def test_stamp_covers_wrapper_and_language_model(kvarn_ops_ok):
-    install_kvarn_apc()
+def test_stamp_covers_wrapper_and_language_model(kvarn_ops_ok, kvarn_apc_arms):
     from mlx_vlm import apc
 
     wrapper = SimpleNamespace(language_model=_hybrid())
@@ -125,21 +113,20 @@ def test_stamp_covers_wrapper_and_language_model(kvarn_ops_ok):
     assert apc.model_apc_mode(lm_only) == "exact"
 
 
-def test_salt_gated_on_conversion(kvarn_ops_ok, monkeypatch):
-    monkeypatch.setenv("KV_QUANT_SCHEME", "kvarn")
-    salt = kvarn_entry_salt()
+def test_salt_gated_on_conversion(kvarn_ops_ok):
+    salt = kvarn_entry_salt(_stamped(_hybrid(), "kvarn"))
     assert salt != 0
     man = SimpleNamespace(_exact_extra_salt=0)
-    apply_kvarn_salt(man, _hybrid())
+    apply_kvarn_salt(man, _stamped(_hybrid(), "kvarn"))
     assert man._exact_extra_salt == salt
     for model in (_rec_gemma(), _ds4()):
         man = SimpleNamespace(_exact_extra_salt=0)
-        apply_kvarn_salt(man, model)
+        apply_kvarn_salt(man, _stamped(model, "kvarn"))
         assert man._exact_extra_salt == 0, type(model).__name__
 
 
-def test_salt_zero_outside_kvarn_window(kvarn_ops_ok, monkeypatch):
-    monkeypatch.delenv("KV_QUANT_SCHEME", raising=False)
+def test_salt_zero_without_a_kvarn_stamp(kvarn_ops_ok, monkeypatch):
+    monkeypatch.setenv("KV_QUANT_SCHEME", "kvarn")  # the env is not read
     man = SimpleNamespace(_exact_extra_salt=0)
     apply_kvarn_salt(man, _hybrid())
     assert man._exact_extra_salt == 0
@@ -153,20 +140,14 @@ def _stamped(model, scheme, bits=6, tail=1024):
 
 def test_salt_reads_the_stamped_scheme(kvarn_ops_ok, monkeypatch):
     # Residency stamps the policy before it salts; by request time the
-    # per-model env window is closed, so the stamp rules the env.
-    monkeypatch.delenv("KV_QUANT_SCHEME", raising=False)
+    # per-model env window is closed, so only the stamp is read.
     salt = kvarn_entry_salt(_stamped(_hybrid(), "kvarn"))
     assert salt != 0
     monkeypatch.setenv("KV_QUANT_SCHEME", "kvarn")
     monkeypatch.setenv("KV_BITS", "6")
     monkeypatch.setenv("KV_TAIL_TOKENS", "1024")
-    assert kvarn_entry_salt(_hybrid()) == salt
+    assert kvarn_entry_salt(_hybrid()) == 0
     assert kvarn_entry_salt(_stamped(_hybrid(), "uniform")) == 0
-
-
-def test_salt_env_scheme_is_normalized(kvarn_ops_ok, monkeypatch):
-    monkeypatch.setenv("KV_QUANT_SCHEME", " KVarN ")
-    assert kvarn_entry_salt(_hybrid()) != 0
 
 
 def test_build_apc_manager_never_salts(kvarn_ops_ok, monkeypatch):
@@ -191,13 +172,12 @@ def _fake_ar():
     return SimpleNamespace(BatchGenerator=FakeBG)
 
 
-def test_gated_init_zero_conversion_keeps_stock_path(kvarn_ops_ok):
+def test_gated_init_zero_conversion_keeps_stock_path(kvarn_apc_arms, kvarn_ops_ok):
     # recurrent_gemma-shaped: ckpt-shaped but kvarn converts nothing --
     # no stamp, kv_bits and the manager untouched, so fp16 ckpt records
     # keep storing exactly as on a stock boot.
     from gmlx.cache.kvarn_serve import _install_apc_gate
 
-    install_kvarn_apc()
     ar = _fake_ar()
     _install_apc_gate(ar)
     model = _rec_gemma()
@@ -209,10 +189,9 @@ def test_gated_init_zero_conversion_keeps_stock_path(kvarn_ops_ok):
     assert bg.init_kwargs["apc_manager"] is manager
 
 
-def test_gated_init_converting_model_stamps(kvarn_ops_ok):
+def test_gated_init_converting_model_stamps(kvarn_apc_arms, kvarn_ops_ok):
     from gmlx.cache.kvarn_serve import _install_apc_gate
 
-    install_kvarn_apc()
     ar = _fake_ar()
     _install_apc_gate(ar)
     model = _hybrid()

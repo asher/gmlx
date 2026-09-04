@@ -252,12 +252,21 @@ def test_disk_round_trip_and_version_fail_closed(restorable, tmp_path):
 
 
 def test_entry_salt(restorable):
-    assert kvarn_apc.kvarn_entry_salt() == 0
+    from types import SimpleNamespace
+
+    def stamped(scheme, bits=6):
+        m = SimpleNamespace()
+        m._gmlx_kv_policy = SimpleNamespace(single=SimpleNamespace(
+            scheme=scheme, bits=bits, value_bits=None, tail_tokens=1024))
+        return m
+
+    # The stamp rules: an unstamped model salts nothing, whatever the env.
     restorable.setenv("KV_QUANT_SCHEME", "kvarn")
-    salt = kvarn_apc.kvarn_entry_salt()
+    assert kvarn_apc.kvarn_entry_salt() == 0
+    assert kvarn_apc.kvarn_entry_salt(stamped("uniform")) == 0
+    salt = kvarn_apc.kvarn_entry_salt(stamped("kvarn"))
     assert salt != 0
-    restorable.setenv("KV_BITS", "4")
-    assert kvarn_apc.kvarn_entry_salt() not in (0, salt)
+    assert kvarn_apc.kvarn_entry_salt(stamped("kvarn", bits=4)) not in (0, salt)
 
 
 def test_manager_salts_exact_hashes(restorable):

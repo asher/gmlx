@@ -200,16 +200,13 @@ def test_wire_config_mismatch_refuses():
     assert warm is None and got == 0
 
 
-def test_kvarn_disk_restart_roundtrip(tmp_path):
+def test_kvarn_disk_restart_roundtrip(kvarn_apc_arms, tmp_path):
     # Skeleton write -> process restart -> repair from disk. Exercises
     # the kvarn tag re-derivation on the loaded entries (without it a
     # restored KVarNKVCache classifies as "arr" and the layout check
     # permanently misses).
     from mlx_vlm.apc import DiskBlockStore
 
-    from gmlx.cache.kvarn_apc import install_kvarn_apc
-
-    install_kvarn_apc()  # the kq_kvarn disk kind (serve installs at boot)
     p = 48
     disk = DiskBlockStore(root=tmp_path, namespace="m")
     man = GmlxAPCManager(num_blocks=8, block_size=16, disk=disk)
@@ -231,16 +228,13 @@ def test_kvarn_disk_restart_roundtrip(tmp_path):
         disk2.close()
 
 
-def test_kvarn_rot_disk_restart_roundtrip(tmp_path):
+def test_kvarn_rot_disk_restart_roundtrip(kvarn_apc_arms, tmp_path):
     # kvarn+rot: boundary/turn-kind skeletons are the only restart-
     # restorable records (replay skeletons are heavy-suppressed), so the
     # rot window chain must persist alongside them -- without it the
     # skeleton loads and then dies at the window-chain lookup.
     from mlx_vlm.apc import DiskBlockStore
 
-    from gmlx.cache.kvarn_apc import install_kvarn_apc
-
-    install_kvarn_apc()
     p = 48
     w = 32
     rot = RotatingKVCache(max_size=w)
@@ -266,16 +260,13 @@ def test_kvarn_rot_disk_restart_roundtrip(tmp_path):
         disk2.close()
 
 
-def test_kvarn_disk_write_mirrors_wire_salt(tmp_path):
+def test_kvarn_disk_write_mirrors_wire_salt(kvarn_apc_arms, tmp_path):
     # The skeleton writer bypasses the manager's exact-cache wrapper, so
     # it must fold _exact_extra_salt into the hash AND the persisted
     # extra itself; the salted lookup side then matches after a restart
     # on the same wire config and misses across configs.
     from mlx_vlm.apc import DiskBlockStore
 
-    from gmlx.cache.kvarn_apc import install_kvarn_apc
-
-    install_kvarn_apc()
     p = 32
     disk = DiskBlockStore(root=tmp_path, namespace="m")
     man = GmlxAPCManager(num_blocks=8, block_size=16, disk=disk)
@@ -340,13 +331,11 @@ def test_mixed_rotating_kvarn_stack_declines_ckpt():
                         ArraysCache(size=2)]) is None
 
 
-def test_rotating_kvarn_declines_the_disk_snapshot():
+def test_rotating_kvarn_declines_the_disk_snapshot(kvarn_apc_arms):
     """The disk arm rebuilds through KVarNKVCache.from_state, whose meta
     arity the rotating subclass does not match: it must never be written
     under the plain kvarn kind."""
-    from gmlx.cache.kvarn_apc import install_kvarn_apc
 
-    install_kvarn_apc()
     import mlx_vlm.apc as apc
 
     rot = KVarNRotatingKVCache(4096, tail_tokens=1024)

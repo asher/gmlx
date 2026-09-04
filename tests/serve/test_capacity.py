@@ -105,10 +105,9 @@ def test_kv_env_prices_the_table(rig, monkeypatch):
     assert bad["max_ctx"] == base["max_ctx"]
 
 
-def test_kvarn_env_prices_the_table(rig, monkeypatch):
+def test_kvarn_env_prices_the_table(kvarn_ops_ok, rig, monkeypatch):
     from gmlx.cache import kvarn_sdpa
 
-    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
     for k in ("GMLX_KVARN", "GMLX_KVARN_BITS", "KV_BITS", "KV_QUANT_SCHEME",
               "KV_TAIL_TOKENS"):
         monkeypatch.delenv(k, raising=False)
@@ -145,7 +144,6 @@ def test_kvarn_env_prices_the_table(rig, monkeypatch):
     monkeypatch.setattr(kvarn_sdpa, "_probe_result", ("no ops",))
     assert cap.derive_table(path, env={"KV_QUANT_SCHEME": "kvarn"})[
         "max_ctx"] == base["max_ctx"]
-    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
     # shapes kvarn declines keep fp16 pricing: head_dim 64, MLA latents
     path64 = rig(weights_gb=10.0, ws_gb=20.0, cfg=CFG)
     base64 = cap.derive_table(path64)
@@ -157,15 +155,13 @@ def test_kvarn_env_prices_the_table(rig, monkeypatch):
         "max_ctx"] == cap.derive_table(pmla)["max_ctx"]
 
 
-def test_kvarn_mtp_table_charges_the_b1_residue(rig, monkeypatch):
+def test_kvarn_mtp_table_charges_the_b1_residue(kvarn_ops_ok, rig, monkeypatch):
     # Batched MTP rows run fp16, but the B=1 stack still holds the fixed
     # fp16 rows and one code slab per taken layer: the table charges them
     # on top of fp16 growth, so it reads below the fp16 table.
-    from gmlx.cache import kvarn_sdpa
     import gmlx.serve.mem_preflight as mp
     from gmlx.cache.kv_policy import kvarn_fixed_tokens
 
-    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
     for k in ("GMLX_KVARN", "GMLX_KVARN_BITS", "KV_BITS", "KV_QUANT_SCHEME",
               "KV_TAIL_TOKENS", "MLX_VLM_GGUF_SPECULATIVE"):
         monkeypatch.delenv(k, raising=False)
@@ -185,10 +181,8 @@ def test_kvarn_mtp_table_charges_the_b1_residue(rig, monkeypatch):
     assert all(isinstance(w, mp.FixedRows) for w, _ in priced[4:])
 
 
-def test_kvarn_table_reads_a_nested_text_config(rig, monkeypatch):
-    from gmlx.cache import kvarn_sdpa
+def test_kvarn_table_reads_a_nested_text_config(kvarn_ops_ok, rig, monkeypatch):
 
-    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
     for k in ("GMLX_KVARN", "GMLX_KVARN_BITS", "KV_BITS", "KV_QUANT_SCHEME",
               "KV_TAIL_TOKENS"):
         monkeypatch.delenv(k, raising=False)

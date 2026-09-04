@@ -24,10 +24,6 @@ from gmlx.cache.kvarn_cache import KVarNKVCache  # noqa: E402
 from kvarn_testlib import Args, D, H, filled, needs_kvarn_ops, tokens  # noqa: E402
 
 
-def _filled(n, tail=256, seed=0):
-    return filled(n, tail=tail, seed=seed)
-
-
 class _SSMCache:
     """ArraysCache stand-in: not a KVCache, no to_quantized."""
 
@@ -366,7 +362,7 @@ def test_mtp_setup_declines_a_window_stack(kvarn_ops_ok, capsys):
 def test_hy3_rollback_with_kvarn_leaves():
     from gmlx.models.hy_v3.mtp import HyV3SpecLM
 
-    caches = [_filled(130, seed=s) for s in (0, 1)]
+    caches = [filled(130, tail=256, seed=s) for s in (0, 1)]
     HyV3SpecLM.rollback_speculative_cache(None, caches, None, 1, 4)
     assert all(c.offset == 128 for c in caches)
 
@@ -385,7 +381,7 @@ def test_hy3_rollback_consults_probe_before_mutating():
         def trim(self, n):
             pytest.fail("refused probe must block the mutation phase")
 
-    live = _filled(130)
+    live = filled(130, tail=256)
     with pytest.raises(RuntimeError, match="untrimmable"):
         HyV3SpecLM.rollback_speculative_cache(None, [live, _ProbeStuck()], None, 1, 4)
     assert live.offset == 130  # two-phase: nothing mutated
@@ -487,23 +483,12 @@ def test_mtp_reject_cycles_straddle_seals():
 # -- preemption lift ---------------------------------------------------------
 
 
-def _skip_without_ops():
-    """Loud skip, never a vacuous pass: this row and the logits row below
-    both run kq.kvarn_rotate, so a device-only guard would green out on
-    CPU and in CI, where the ops are absent outright."""
-    from gmlx.cache.kvarn_sdpa import kvarn_ops_missing
-
-    reason = kvarn_ops_missing()
-    if reason:
-        pytest.skip(f"kvarn ops unavailable: {reason}")
-
-
+@needs_kvarn_ops
 def test_kvarn_lift_cache_recovers_original_domain():
     """MTP preemption lifts a B=1 kvarn cache into a one-row BatchKVCache.
-    materialize() returns ROTATED K/V; feeding that to stock SDPA attends
+    materialize() returns rotated K/V; feeding that to stock SDPA attends
     rotated keys with an un-rotated query -- no crash, just wrong logits.
     The lift must use the original-domain accessor."""
-    _skip_without_ops()
     from mlx_vlm.models.cache import BatchKVCache
 
     k, v = tokens(300, seed=7)
@@ -529,10 +514,10 @@ def test_kvarn_lift_cache_recovers_original_domain():
     assert tail.max().item() == 0.0
 
 
+@needs_kvarn_ops
 def test_kvarn_lift_matches_stock_attention():
     """The decisive check: one attention step over the lifted cache must
     agree with the same step over the un-preempted fp16 history."""
-    _skip_without_ops()
     k, v = tokens(260, seed=11)
     c = KVarNKVCache(tail_tokens=256)
     c.update_and_fetch(k, v)

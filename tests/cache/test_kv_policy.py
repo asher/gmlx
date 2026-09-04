@@ -133,7 +133,7 @@ def test_quantize_stack_noop_on_dropped():
     assert all(type(c) is KVCache for c in stack)
 
 
-def test_kv_line_shape():
+def test_kv_line_shape(kvarn_ops_ok):
     line = kv_line("qwen3-0.6b", _resolve(_dense(28)))
     assert line.startswith("[kv] qwen3-0.6b: kv_bits=8 group=64 -> ")
     assert "quantized 27/28 attn layers (1 held fp16)" in line
@@ -148,9 +148,7 @@ def test_kv_line_shape():
 def _kvarn_ops(monkeypatch):
     """kvarn eligibility without the Metal kernels: the resolver reads the
     ops probe, and every row below is pure policy arithmetic."""
-    from gmlx.cache import kvarn_sdpa
 
-    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
     for k in ("GMLX_KVARN", "GMLX_KVARN_BITS"):
         monkeypatch.delenv(k, raising=False)
 

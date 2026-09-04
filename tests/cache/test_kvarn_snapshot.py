@@ -17,10 +17,6 @@ from gmlx.cache.prefix_cache import (
 from kvarn_testlib import filled, needs_kvarn_ops, tokens
 
 
-def _filled(n, seed=0):
-    return filled(n, tail=256, seed=seed)
-
-
 def _assert_same_content(a, b):
     assert (a.offset, a.n_sealed, a.tail_len) == (b.offset, b.n_sealed, b.tail_len)
     for x, y in zip(a.materialize(), b.materialize(), strict=True):
@@ -29,7 +25,7 @@ def _assert_same_content(a, b):
 
 @needs_kvarn_ops
 def test_prefix_snapshot_round_trip():
-    live = _filled(300)
+    live = filled(300, tail=256)
     snap = _snapshot_entry(live)
     assert snap[0] == _KVARN_TAG and len(snap) == 3
     _eval_snapshot([snap])
@@ -47,7 +43,7 @@ def test_prefix_snapshot_round_trip():
 
 @needs_kvarn_ops
 def test_prefix_restore_does_not_alias_stored_entry():
-    live = _filled(300)
+    live = filled(300, tail=256)
     snap = _snapshot_entry(live)
     _eval_snapshot([snap])
     a = KVarNKVCache(tail_tokens=256)
@@ -56,21 +52,21 @@ def test_prefix_restore_does_not_alias_stored_entry():
     b = KVarNKVCache(tail_tokens=256)
     _restore_entry(b, snap)
     assert b.offset == 300
-    _assert_same_content(b, _filled(300))
+    _assert_same_content(b, filled(300, tail=256))
 
 
 @needs_kvarn_ops
 def test_clone_lm_twin_arm():
     from gmlx.cache.snapshot import _clone_lm_twin
 
-    live = _filled(300)
+    live = filled(300, tail=256)
     targets = []
     twin = _clone_lm_twin(live, targets)
     assert type(twin) is KVarNKVCache
     assert targets
     mx.eval(targets)
     live.update_and_fetch(*tokens(50, seed=9))
-    _assert_same_content(twin, _filled(300))
+    _assert_same_content(twin, filled(300, tail=256))
 
 
 @needs_kvarn_ops
@@ -79,5 +75,5 @@ def test_ckpt_layout_tags_filled_kvarn():
 
     from mlx_lm.models.cache import RotatingKVCache
 
-    assert ckpt_layout([_filled(140), RotatingKVCache(max_size=64)]) == \
+    assert ckpt_layout([filled(140, tail=256), RotatingKVCache(max_size=64)]) == \
         ["kvarn:6:6:256", "rot:64:0"]

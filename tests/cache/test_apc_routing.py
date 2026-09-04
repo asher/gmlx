@@ -135,13 +135,11 @@ KVARN_FAMILIES = [
 @pytest.mark.parametrize(
     "family,factory,ckpt,tags",
     KVARN_FAMILIES, ids=[f[0] for f in KVARN_FAMILIES])
-def test_kvarn_family_routing_pinned(family, factory, ckpt, tags):
+def test_kvarn_family_routing_pinned(kvarn_apc_arms, family, factory, ckpt, tags):
     # Production truth needs the kvarn arms installed (serve installs
     # them at boot): the model_apc_mode wrap resolves kvarn stacks to
     # "exact"; bare upstream would say None.
-    from gmlx.cache.kvarn_apc import install_kvarn_apc
 
-    install_kvarn_apc()
     from mlx_vlm import apc
 
     model = SimpleNamespace(make_cache=factory)

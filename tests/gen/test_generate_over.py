@@ -1,6 +1,5 @@
 """Orchestration tests for generation._generate_over with stream_generate and the
 prompt cache mocked, so the two-phase seam logic runs without a model."""
-
 import importlib
 import json
 import types
@@ -42,17 +41,8 @@ def _patch_stream(monkeypatch, phase1, phase2):
     """phase1/phase2 are [(token_id, text)]; phase is chosen by prompt type
     (str = phase 1 templated prompt, list = phase 2 bridge)."""
 
-    def fake(
-        model,
-        tokenizer,
-        prompt,
-        *,
-        max_tokens,
-        sampler,
-        logits_processors,
-        prompt_cache,
-        **base,
-    ):
+    def fake(model, tokenizer, prompt, *, max_tokens, sampler,
+             logits_processors, prompt_cache, **base):
         seq = phase1 if isinstance(prompt, str) else phase2
         for i, (tid, txt) in enumerate(seq):
             if i >= max_tokens:
@@ -65,18 +55,10 @@ def _patch_stream(monkeypatch, phase1, phase2):
 
 def _call(**kw):
     base = dict(
-        main_sampler=None,
-        over_sampler=None,
-        logits_processors=[],
-        base_kwargs={},
-        max_kv_size=None,
-        max_tokens=64,
-        window=0,
-        inject_critique=None,
-        template_kwargs=None,
-        log_path=None,
-        params={},
-        verbose=False,
+        main_sampler=None, over_sampler=None, logits_processors=[],
+        base_kwargs={}, max_kv_size=None, max_tokens=64, window=0,
+        inject_critique=None, template_kwargs=None, log_path=None,
+        params={}, verbose=False,
     )
     base.update(kw)
     return _generate_over(object(), _Tok(), "PROMPT", **base)
@@ -146,22 +128,15 @@ def test_free_mode_cuts_short_on_special_token_run(monkeypatch, tmp_path):
     _patch_stream(
         monkeypatch,
         phase1=[(11, "code"), (2, "<|user|>")],
-        phase2=[
-            (20, "a"),
-            (7, "x"),
-            (7, "x"),
-            (7, "x"),
-            (7, "x"),
-            (7, "x"),
-            (30, "never"),
-        ],
+        phase2=[(20, "a"), (7, "x"), (7, "x"), (7, "x"), (7, "x"), (7, "x"),
+                (30, "never")],
     )
     log = tmp_path / "probe.jsonl"
     _call(window=50, log_path=str(log))
     rec = json.loads(log.read_text().strip())
     assert rec["early_stop"] is True
-    assert "never" not in rec["over_text"]  # cut before the post-collapse token
-    assert rec["over_tokens"] == 6  # "a" + 5 special tokens, then stop
+    assert "never" not in rec["over_text"]   # cut before the post-collapse token
+    assert rec["over_tokens"] == 6           # "a" + 5 special tokens, then stop
 
 
 def test_inject_mode_builds_bridge_and_answers(monkeypatch, tmp_path):
@@ -244,11 +219,7 @@ def test_over_generation_with_prompt_cache_kwarg(monkeypatch):
     monkeypatch.setattr(mlx_cache, "make_prompt_cache",
                         lambda model, max_kv_size=None: [mlx_cache.KVCache()])
     text = generation.generate(
-        object(),
-        _Tok(),
-        "PROMPT",
-        kv_bits=8,
-        over_generation=2,
+        object(), _Tok(), "PROMPT", kv_bits=8, over_generation=2,
         apply_chat_template=False,
     )
     assert text == "ab"

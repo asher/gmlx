@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import hashlib
 import importlib
-import os
 
 _FLAG = "_gmlx_kvarn_apc"
 _MODE_STAMP = "_gmlx_kvarn_apc_exact"
@@ -113,16 +112,14 @@ def apply_kvarn_salt(manager, model) -> None:
 
 def kvarn_entry_salt(model=None) -> int:
     """Exact-tier extra-hash salt for this model's kvarn wire config, 0
-    outside a kvarn window (XOR identity). The model resolves the widths
-    from its stamped policy, so entries are salted with the config the
-    caches were actually built at."""
+    (XOR identity) for an unstamped model or a non-kvarn stamp. Residency
+    stamps the policy before it salts, so entries are salted with the
+    config the caches were actually built at."""
     from .kvarn_cache import KVarNKVCache
     from .kvarn_serve import _serve_widths_and_tail, stamped_single_policy
 
     single = stamped_single_policy(model)
-    scheme = (getattr(single, "scheme", None) if single is not None
-              else os.environ.get("KV_QUANT_SCHEME", "").strip().lower())
-    if scheme != "kvarn":
+    if single is None or getattr(single, "scheme", None) != "kvarn":
         return 0
 
     k_bits, v_bits, tail = _serve_widths_and_tail(model)
