@@ -15,6 +15,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   read a nemotron_h cache list as the model builds it (MLP-only blocks own
   no cache). Qwen3.6-27B at 32k: 8.4 GB estimated, 2.1 GB priced now. The
   same fix reads a nested `text_config` (gemma-4) for the score transient.
+- The boot capacity table was absent for sharded MLA models (GLM-5.3-Flash,
+  Kimi-K2.7): the header synth read tensor shapes from the first shard only
+  and could not derive the MLA head dims. It now reads every shard.
 
 ## [0.4.8] - 2026-09-02
 

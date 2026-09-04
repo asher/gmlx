@@ -53,12 +53,20 @@ def _shards(gguf_path: str) -> list[str]:
 
 
 def _synth_config(gguf_path: str) -> dict | None:
+    """The config synthesized from the header: metadata from the first
+    shard, tensor shapes from every shard (a synth that derives MLA head
+    dims from a projection tensor must see the shard that holds it)."""
     from gmlx.load.config_synth import synthesize_config
     from gmlx.load.headerscan import scan_gguf
 
-    scan = scan_gguf(gguf_path, include_tensors=True)
-    shapes = {t.name: list(t.shape) for t in scan.tensors}
-    return synthesize_config(scan.kv, shapes)
+    kv = None
+    shapes = {}
+    for p in _shards(gguf_path):
+        scan = scan_gguf(p, include_tensors=True)
+        if kv is None:
+            kv = scan.kv
+        shapes.update({t.name: list(t.shape) for t in scan.tensors})
+    return synthesize_config(kv, shapes)
 
 
 def working_set_bytes() -> float | None:
