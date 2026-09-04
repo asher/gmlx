@@ -158,6 +158,8 @@ def test_clone_arm(restorable):
     clones = apc._clone_prompt_cache_for_apc([c])
     assert clones is not None and type(clones[0]) is KVarNKVCache
     assert clones[0] is not c and _equal_content(clones[0], c)
+    # Stored clones carry content, not the live cache's growth slack.
+    assert clones[0].nbytes < c.nbytes / 3
     # Stored clones must be decoupled from the live cache.
     c.update_and_fetch(*_slab(1, seed=9))
     assert clones[0].offset == 300

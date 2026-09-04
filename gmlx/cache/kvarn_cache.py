@@ -345,6 +345,29 @@ class _KVarNStorage(_base_cache()):
         self.codes_k, self.codes_v = grow(self.codes_k), grow(self.codes_v)
         self.axes_k, self.axes_v = grow(self.axes_k), grow(self.axes_v)
 
+    def _ensure_tail_rows(self):
+        rows = self.tail_cap + self.tail_slack
+        have = self.tail_k.shape[2]
+        if have >= rows:
+            return
+        pad = self.tail_k.shape[:2] + (rows - have,) + self.tail_k.shape[3:]
+        self.tail_k = mx.concatenate([self.tail_k, mx.zeros(pad, mx.float16)], 2)
+        self.tail_v = mx.concatenate([self.tail_v, mx.zeros(pad, mx.float16)], 2)
+
+    def _content(self, f):
+        """Field ``f`` cut to what a restore needs: the sealed groups, the
+        tail ring through tail_end, a valid horizon. Growth slack is not
+        carried; the writers regrow it. The stage keeps its rows (the
+        fused kernel reads sink_cap from its shape)."""
+        a = getattr(self, f)
+        if f.startswith(("codes", "axes")):
+            return a[:, :, : max(1, self.n_sealed)]
+        if f.startswith("tail"):
+            return a[:, :, : max(1, self.tail_end)]
+        if f.startswith("horizon") and not getattr(self, "horizon_valid", False):
+            return a[:, :, :1]
+        return a
+
     def _ingest(self, keys, values):
         """Write the tail, rotate, and append; the caller advances its
         own position counter."""
@@ -359,6 +382,7 @@ class _KVarNStorage(_base_cache()):
     def _write_tail(self, keys, values):
         if not self.tail_cap:
             return
+        self._ensure_tail_rows()
         n = keys.shape[2]
         if n >= self.tail_cap:
             self.tail_k[:, :, : self.tail_cap] = keys[:, :, -self.tail_cap :]
@@ -609,6 +633,8 @@ class KVarNKVCache(_KVarNStorage):
 
     @property
     def state(self):
+        """Content only (see _content): a clone or disk record carries no
+        growth slack, and a restored cache regrows on its first write."""
         if not self._allocated():
             # Fixed-arity placeholder so an empty cache still round-trips
             # (safetensors rejects zero-size arrays). meta_state's
@@ -616,7 +642,7 @@ class KVarNKVCache(_KVarNStorage):
             z16 = mx.zeros((1, 1, 1, 1), mx.float16)
             z32 = mx.zeros((1, 1, 1, 1), mx.uint32)
             return (z32, z16, z32, z16, z16, z16, z16, z16, z16, z16)
-        return tuple(getattr(self, f) for f in self._STATE_FIELDS)
+        return tuple(self._content(f) for f in self._STATE_FIELDS)
 
     @state.setter
     def state(self, v):
@@ -1057,9 +1083,9 @@ class BatchKVarNKVCache(_KVarNStorage):
         if pad == 0:
             h, d = self.stage_k.shape[1], self.stage_k.shape[-1]
             for f in self._ARRAY_FIELDS:
-                setattr(out, f, mx.contiguous(getattr(self, f)[idx : idx + 1]))
-            out.horizon_k = mx.zeros((1, h, GROUP, d), mx.float16)
-            out.horizon_v = mx.zeros((1, h, GROUP, d), mx.float16)
+                setattr(out, f, mx.contiguous(self._content(f)[idx : idx + 1]))
+            out.horizon_k = mx.zeros((1, h, 1, d), mx.float16)
+            out.horizon_v = mx.zeros((1, h, 1, d), mx.float16)
             out.offset = self._idx
             out.n_sealed = self.n_sealed
             out.tail_start, out.tail_end = self.tail_start, self.tail_end
@@ -1112,7 +1138,7 @@ class BatchKVarNKVCache(_KVarNStorage):
             return out
         if len(caches) == 1:
             for f in cls._ARRAY_FIELDS:
-                setattr(out, f, mx.contiguous(getattr(first, f)))
+                setattr(out, f, mx.contiguous(first._content(f)))
             out._idx = first.offset
             out.n_sealed = first.n_sealed
             out.tail_start, out.tail_end = first.tail_start, first.tail_end
@@ -1182,7 +1208,7 @@ class BatchKVarNKVCache(_KVarNStorage):
             z16 = mx.zeros((1, 1, 1, 1), mx.float16)
             z32 = mx.zeros((1, 1, 1, 1), mx.uint32)
             return (z32, z16, z32, z16, z16, z16, z16, z16, self.left_padding)
-        return tuple(getattr(self, f) for f in self._ARRAY_FIELDS) + (
+        return tuple(self._content(f) for f in self._ARRAY_FIELDS) + (
             self.left_padding,
         )
 

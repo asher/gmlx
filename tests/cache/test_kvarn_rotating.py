@@ -329,6 +329,14 @@ def test_state_meta_round_trip():
     _assert_common_window_equal(r, c)
     r.update_and_fetch(*tokens(5, seed=9))
     _assert_invariants(r)
+    # A content-sized restore evicts and regrows like the live cache.
+    assert sum(a.nbytes for a in c.state) <= c.nbytes
+    c.update_and_fetch(*tokens(5, seed=9))
+    k2, v2 = tokens(1500, seed=11)
+    _feed(r, k2, v2, 128)
+    _feed(c, k2, v2, 128)
+    _assert_invariants(r)
+    _assert_common_window_equal(r, c)
 
 
 @needs_kvarn_ops

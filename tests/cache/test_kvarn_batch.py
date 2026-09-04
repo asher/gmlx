@@ -329,6 +329,23 @@ def test_state_round_trip():
         assert np.array_equal(np.array(x), np.array(y))
 
 
+@needs_kvarn_ops
+def test_extract_and_merge_carry_content_only():
+    c = _filled(200, [0])
+    row = c.extract(0)
+    assert row.nbytes < c.nbytes / 3
+    back = BatchKVarNKVCache.merge([row])
+    assert back.nbytes <= row.nbytes
+    k, v = _slab(700, b=1, seed=5)
+    back.update_and_fetch(k, v)
+    c.update_and_fetch(k, v)
+    for x, y in zip(back.materialize(), c.materialize(), strict=True):
+        assert np.array_equal(np.array(x), np.array(y))
+    assert back.tail_len == c.tail_len
+    for x, y in zip(back.tail_slices(back.tail_len), c.tail_slices(c.tail_len)):
+        assert np.array_equal(np.array(x), np.array(y))
+
+
 def test_finalize_declines_right_padding():
     c = BatchKVarNKVCache([0, 0])
     c.prepare(right_padding=[0, 4])

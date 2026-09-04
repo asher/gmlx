@@ -139,6 +139,31 @@ def test_state_meta_round_trip(d):
 
 
 @needs_kvarn_ops
+def test_state_is_content_sized_and_regrows():
+    # 200 tokens seal nothing: the state carries one placeholder group,
+    # the tail through tail_end and a one-row horizon, not the slabs.
+    ref = filled(200)
+    state_bytes = sum(a.nbytes for a in ref.state)
+    assert state_bytes < ref.nbytes / 3
+    r = KVarNKVCache.from_state(
+        tuple(mx.contiguous(a) for a in ref.state), ref.meta_state
+    )
+    assert r.nbytes == state_bytes
+    _assert_same_content(r, ref)
+    # The first write regrows the tail ring and the record slabs.
+    for c in (r, ref):
+        c.update_and_fetch(*tokens(700, seed=3))
+    _assert_same_content(r, ref)
+    assert r.trim(130) == ref.trim(130) == 130
+    _assert_same_content(r, ref)
+    assert r.tail_len == ref.tail_len
+    for x, y in zip(r.tail_slices(r.tail_len), ref.tail_slices(ref.tail_len)):
+        assert np.array_equal(np.array(x), np.array(y))
+    deep = filled(3000)
+    assert sum(a.nbytes for a in deep.state) < deep.nbytes
+
+
+@needs_kvarn_ops
 def test_empty_cache_round_trip():
     c = KVarNKVCache(tail_tokens=256)
     r = KVarNKVCache.from_state(c.state, c.meta_state)

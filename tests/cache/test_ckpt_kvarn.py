@@ -157,6 +157,16 @@ def test_blockless_records_release_under_byte_budget(monkeypatch):
     assert {r.p for r in cs._ckpt_records(man).values()} == {64}
 
 
+@needs_kvarn_ops
+def test_record_bytes_count_content():
+    from gmlx.cache.snapshot import _caches_nbytes, _clone_row_faithful
+
+    c = KVarNKVCache(tail_tokens=256)
+    c.update_and_fetch(*tokens(200))
+    clone = _clone_row_faithful(c)
+    assert _caches_nbytes([clone]) == clone.nbytes < c.nbytes / 3
+
+
 def test_offset_gate_declines_stale_kvarn():
     man = GmlxAPCManager(num_blocks=8, block_size=16)
     assert not ckpt_store(man, _ids(32), [_hollow_kvarn(31), _arr()],
