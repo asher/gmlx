@@ -9,7 +9,8 @@ prefill depth, exercising the fused decode kernels).
 
 Arms: fp16 (baseline), kvN (affine QuantizedKVCache, group 64), kvarnN
 (KVarNKVCache at N bits; kvarn6 and kvarn4 by default; kvarnk6v5-style
-names select mixed K/V widths). Primary metric is median KLD per leg;
+names select mixed K/V widths), turboN (mlx-vlm's TurboQuant cache at N
+bits, N integer or .5, measured here although gmlx does not offer it). Primary metric is median KLD per leg;
 same_top is the argmax agreement rate. The routine gate is
 median_KLD(kvarn6) <= median_KLD(kv8) on both legs.
 
@@ -109,7 +110,82 @@ def build_arm(name: str, model, tail_tokens: int, carve_out: bool = True):
         out = apply(policy)
         install_kvarn_sdpa()
         return out
+    m = re.fullmatch(r"turbo(\d+(?:\.5)?)", name)
+    if m:
+        # mlx-vlm's TurboQuant cache on the layers the affine policy would
+        # quantize (gmlx does not offer the scheme; this arm exists to
+        # measure it beside the others).
+        from mlx_vlm.turboquant import TurboQuantKVCache
+
+        from gmlx.cache.kv_policy import resolve_kv_quant_policy
+
+        policy = resolve_kv_quant_policy(pc, kv_bits=8, kv_group_size=64)
+        if policy.verdict in ("dropped", "error"):
+            raise SystemExit(f"{name} arm {policy.verdict}: {policy.reason}")
+        n = 0
+        for i, plan in enumerate(policy.per_layer):
+            if plan.quantize or (carve_out is False and type(pc[i]) in plain):
+                pc[i] = TurboQuantKVCache(bits=float(m.group(1)))
+                n += 1
+        want = eligible if not carve_out else policy.n_quant
+        if n == 0 or n != want:
+            raise SystemExit(f"{name} arm converted {n}/{want} layers")
+        install_turbo_sdpa()
+        return pc
     raise SystemExit(f"unknown arm {name!r}")
+
+
+def install_turbo_sdpa() -> int:
+    """Route TurboQuant caches to mlx-vlm's own attention dispatch: the
+    module-level SDPA symbols the kvarn install sweeps, plus the owned
+    qwen3.5 dispatch tail, which refuses these caches in the runtime."""
+    import importlib
+
+    from mlx_vlm.models import base as vlm_base
+    from mlx_vlm.turboquant import TurboQuantKVCache
+
+    from gmlx.cache.kvarn_sdpa import _BASE_MODULES, _MODEL_PREFIXES
+
+    def wrap(orig, cache_pos):
+        def sdpa(*args, **kwargs):
+            cache = kwargs.get("cache", args[cache_pos] if len(args) > cache_pos else None)
+            if isinstance(cache, TurboQuantKVCache):
+                q, k, v = args[:3]
+                scale = kwargs.get("scale", args[4] if len(args) > 4 else None)
+                mask = kwargs.get("mask", args[5] if len(args) > 5 else None)
+                sinks = kwargs.get("sinks", args[6] if len(args) > 6 else None)
+                return vlm_base.scaled_dot_product_attention(
+                    q, k, v, cache, scale, mask, sinks=sinks)
+            return orig(*args, **kwargs)
+
+        sdpa._gmlx_turbo = True
+        return sdpa
+
+    n = 0
+    for name in _BASE_MODULES:
+        try:
+            importlib.import_module(name)
+        except ImportError:
+            pass
+    for name, mod in list(sys.modules.items()):
+        if mod is None or not (name in _BASE_MODULES or name.startswith(_MODEL_PREFIXES)):
+            continue
+        cur = getattr(mod, "scaled_dot_product_attention", None)
+        if cur is None or not callable(cur) or getattr(cur, "_gmlx_turbo", False):
+            continue
+        if mod is vlm_base:
+            continue
+        mod.scaled_dot_product_attention = wrap(cur, 3)
+        n += 1
+    try:
+        attn = importlib.import_module("gmlx.models.qwen35.attn")
+    except ImportError:
+        return n
+    cur = attn._sdpa_dispatch
+    if not getattr(cur, "_gmlx_turbo", False):
+        attn._sdpa_dispatch = wrap(cur, 3)
+        n += 1
+    return n
 
 
 def kld_and_top(ref_logits, arm_logits):
