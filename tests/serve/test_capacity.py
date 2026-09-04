@@ -105,6 +105,43 @@ def test_kv_env_prices_the_table(rig, monkeypatch):
     assert bad["max_ctx"] == base["max_ctx"]
 
 
+def test_kvarn_env_prices_the_table(rig, monkeypatch):
+    from gmlx.cache import kvarn_sdpa
+
+    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
+    for k in ("GMLX_KVARN", "GMLX_KVARN_BITS", "KV_BITS", "KV_QUANT_SCHEME",
+              "KV_TAIL_TOKENS"):
+        monkeypatch.delenv(k, raising=False)
+    cfg = dict(CFG, head_dim=128)
+    path = rig(weights_gb=10.0, ws_gb=20.0, cfg=cfg)
+    base = cap.derive_table(path)
+    # the scheme alone engages at the default width, qat ids included
+    kvarn = cap.derive_table(path + "-qat", env={"KV_QUANT_SCHEME": "kvarn"})
+    assert kvarn["max_ctx"][1] > base["max_ctx"][1]
+    # a width affine rejects is a kvarn width
+    kvarn5 = cap.derive_table(
+        path, env={"KV_QUANT_SCHEME": "kvarn", "KV_BITS": "5"})
+    assert base["max_ctx"][1] < kvarn5["max_ctx"][1]
+    assert kvarn["max_ctx"][1] < kvarn5["max_ctx"][1]
+    # the fixed fp16 rows cost context against affine at the same width
+    affine6 = cap.derive_table(path, env={"KV_BITS": "6"})
+    assert kvarn["max_ctx"][8] != affine6["max_ctx"][8]
+    # absent ops price fp16
+    monkeypatch.setattr(kvarn_sdpa, "_probe_result", ("no ops",))
+    assert cap.derive_table(path, env={"KV_QUANT_SCHEME": "kvarn"})[
+        "max_ctx"] == base["max_ctx"]
+    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
+    # shapes kvarn declines keep fp16 pricing: head_dim 64, MLA latents
+    path64 = rig(weights_gb=10.0, ws_gb=20.0, cfg=CFG)
+    base64 = cap.derive_table(path64)
+    assert cap.derive_table(path64, env={"KV_QUANT_SCHEME": "kvarn"})[
+        "max_ctx"] == base64["max_ctx"]
+    mla = dict(cfg, kv_lora_rank=512, qk_rope_head_dim=64)
+    pmla = rig(weights_gb=10.0, ws_gb=20.0, cfg=mla)
+    assert cap.derive_table(pmla, env={"KV_QUANT_SCHEME": "kvarn"})[
+        "max_ctx"] == cap.derive_table(pmla)["max_ctx"]
+
+
 def test_boot_refusal_with_numbers(rig):
     path = rig(weights_gb=19.0, ws_gb=20.0)  # width 1 fits nothing
     with pytest.raises(RuntimeError, match="cannot fit at width 1"):

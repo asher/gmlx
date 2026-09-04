@@ -47,6 +47,7 @@ except ImportError:  # pragma: no cover - mlx_kquant always present in practice
 GROUP = 128
 HEAD_DIMS = (128, 256, 512)
 KVARN_BITS = (2, 3, 4, 5, 6, 8)
+KVARN_DEFAULT_TAIL = 1024
 
 _META_ARITY_MSG = (
     "[kvarn] cache metadata arity does not match this cache class; the "

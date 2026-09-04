@@ -88,13 +88,15 @@ def _serve_tail_tokens(rg) -> int:
     """The kvarn precision tail this model was loaded with. The per-model
     load window sets KV_TAIL_TOKENS; the rg attribute wins when upstream
     carries one."""
+    from gmlx.cache.kvarn_cache import KVARN_DEFAULT_TAIL
+
     val = getattr(rg, "kv_tail_tokens", None)
     if val is None:
         val = os.environ.get("KV_TAIL_TOKENS")
     try:
-        return 1024 if val in (None, "") else int(val)
+        return KVARN_DEFAULT_TAIL if val in (None, "") else int(val)
     except (TypeError, ValueError):
-        return 1024
+        return KVARN_DEFAULT_TAIL
 
 
 def _load_window_scheme(rg) -> str:

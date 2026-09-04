@@ -142,15 +142,58 @@ def _transient_bytes(heads: int | None, depth: int) -> float:
     return heads * step * (depth + step) * 2.0
 
 
-def _kv_priced_costs(costs, env, model_id):
+def _kvarn_priced_costs(costs, e, raw, cfg):
+    """kvarn arm of _kv_priced_costs: record cost on the layers the
+    carve-out takes plus each one's fixed fp16 rows, priced as admission
+    prices them. fp16 when the ops are absent, the widths are malformed,
+    or the header shape is one kvarn declines (MLA, head_dim outside
+    128/256/512)."""
+    from types import SimpleNamespace
+
+    try:
+        from mlx_vlm.models.cache import should_quantize_kv_layer
+
+        from gmlx.cache.kv_policy import (FP16_BPE, kvarn_bytes_per_element,
+                                          kvarn_fixed_tokens)
+        from gmlx.cache.kvarn_cache import (KVARN_BITS, KVARN_DEFAULT_TAIL,
+                                            kvarn_unsupported, kvarn_widths)
+
+        shim = SimpleNamespace(args=SimpleNamespace(**(cfg or {})))
+        if kvarn_unsupported(shim):
+            return costs
+        k, v = kvarn_widths(int(float(raw)) if raw else None)
+        tail = int(e.get("KV_TAIL_TOKENS") or KVARN_DEFAULT_TAIL)
+    except Exception:
+        return costs
+    if k not in KVARN_BITS or v not in KVARN_BITS or tail < 0:
+        return costs
+    scale = kvarn_bytes_per_element(k, v) / FP16_BPE
+    rows = kvarn_fixed_tokens(tail)
+    n = len(costs)
+    out, regions = [], []
+    for i, (w, bpt) in enumerate(costs):
+        if w is None and should_quantize_kv_layer(i, n):
+            out.append((w, bpt * scale))
+            regions.append((rows, bpt))
+        else:
+            out.append((w, bpt))
+    return out + regions
+
+
+def _kv_priced_costs(costs, env, model_id, cfg=None):
     """Reprice quantizable layers per the model's env window - the same
     batched-mode carve-out request admission prices with. Uniform fp16
     when kv quantization is off or declined (MTP batched, max_kv_size,
-    a qat-marked id, malformed values)."""
+    a qat-marked id under affine, malformed values, a shape kvarn cannot
+    take)."""
     e = {**os.environ, **(env or {})}
+    if e.get("MLX_VLM_GGUF_SPECULATIVE") == "1" or e.get("MAX_KV_SIZE"):
+        return costs
     raw = e.get("KV_BITS")
-    if (not raw or e.get("MLX_VLM_GGUF_SPECULATIVE") == "1"
-            or e.get("MAX_KV_SIZE") or "qat" in str(model_id)):
+    scheme = (e.get("KV_QUANT_SCHEME") or "uniform").strip().lower()
+    if scheme == "kvarn":
+        return _kvarn_priced_costs(costs, e, raw, cfg)
+    if not raw or "qat" in str(model_id):
         return costs
     try:
         fb = float(raw)
@@ -190,7 +233,7 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None,
         ws = working_set_bytes()
         if not (cfg and costs and ws):
             return None
-        costs = _kv_priced_costs(costs, env, gguf_path)
+        costs = _kv_priced_costs(costs, env, gguf_path, cfg)
         info = mx.device_info()
         max_buffer = float(info.get("max_buffer_length", 0) or 0)
         resource_limit = int(info.get("resource_limit", 0) or 0)
