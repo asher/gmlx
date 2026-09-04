@@ -22,6 +22,7 @@ SCHEMES = ("uniform", "kvarn")
 KVARN_GROUP = 128
 KVARN_SINK = 128
 KVARN_WIDTHS = (2, 3, 4, 5, 6, 8)
+KVARN_TAIL = 1024
 
 # Layer kinds: kv = growing attention KV (quantizable), window =
 # size-capped sliding window, state = recurrent state, pool = packs at
@@ -402,7 +403,7 @@ def _resolve_kvarn(stack, *, kv_bits, value_bits, mode, mtp, head_dim,
 
     k_bits = int(kv_bits) if kv_bits is not None else 6
     v_bits = k_bits if value_bits is None else int(value_bits)
-    tail = 1024 if tail_tokens is None else int(tail_tokens)
+    tail = KVARN_TAIL if tail_tokens is None else int(tail_tokens)
     extra = dict(scheme="kvarn", value_bits=v_bits, tail_tokens=tail,
                  rotating_window=rotating_window)
 

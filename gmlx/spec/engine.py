@@ -2582,11 +2582,11 @@ def _spec_kv_quant_params():
     scheme = os.environ.get("KV_QUANT_SCHEME", "uniform")
     raw = os.environ.get("KV_BITS", "")
     if scheme == "kvarn":
-        from gmlx.cache.kvarn_cache import kvarn_widths
+        from gmlx.cache.kvarn_cache import KVARN_DEFAULT_TAIL, kvarn_widths
 
         try:
             bits = int(raw) if raw else None
-            tail = int(os.environ.get("KV_TAIL_TOKENS", "") or 1024)
+            tail = int(os.environ.get("KV_TAIL_TOKENS", "") or KVARN_DEFAULT_TAIL)
         except ValueError:
             _log.warning(
                 "KV_BITS/KV_TAIL_TOKENS malformed under scheme kvarn; "

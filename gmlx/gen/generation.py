@@ -135,24 +135,16 @@ def _verbose_emitter(prompt, tokenizer, reasoning):
 
 
 def resolve_kvarn_policy(model, kv_bits, kv_tail_tokens, rotating_window,
-                         stack, *, mode="single", mtp=False):
+                         stack, *, mode="single", mtp=False, value_bits=None):
     """The kvarn policy for one built stack, with the model-shape decline
     resolved. The single entry point CLI, chat and the MTP paths share."""
     from gmlx.cache.kv_policy import resolve_kv_quant_policy
-    from gmlx.cache.kvarn_cache import kvarn_unsupported, kvarn_widths
+    from gmlx.cache.kvarn_cache import kvarn_resolve_kwargs
 
-    k_bits, v_bits = kvarn_widths(kv_bits)
     return resolve_kv_quant_policy(
-        stack,
-        kv_bits=k_bits,
-        value_bits=v_bits,
-        scheme="kvarn",
-        tail_tokens=int(kv_tail_tokens or 0),
-        rotating_window=rotating_window,
-        mode=mode,
-        mtp=mtp,
-        scheme_reason=kvarn_unsupported(model),
-    )
+        stack, mode=mode, mtp=mtp,
+        **kvarn_resolve_kwargs(model, kv_bits, value_bits, kv_tail_tokens,
+                               rotating_window))
 
 
 def convert_kvarn_cache(model, prompt_cache, kv_bits, kv_tail_tokens,

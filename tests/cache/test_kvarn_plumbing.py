@@ -241,3 +241,20 @@ def test_head_dims_flag_every_mla_arch(monkeypatch):
     plain = SimpleNamespace(args=SimpleNamespace(head_dim=512))
     assert kvarn_head_dims(plain) == {512}
     assert kvarn_unsupported(plain) is None
+
+
+def test_resolve_kwargs_is_the_one_assembly_point(kvarn_ops_ok, monkeypatch):
+    from gmlx.cache.kvarn_cache import kvarn_resolve_kwargs
+
+    kw = kvarn_resolve_kwargs(FakeLM())
+    assert kw == dict(scheme="kvarn", kv_bits=6, value_bits=6, tail_tokens=1024,
+                      rotating_window=None, scheme_reason=None)
+    kw = kvarn_resolve_kwargs(FakeLM(), 4, 3, 256, 4096)
+    assert (kw["kv_bits"], kw["value_bits"], kw["tail_tokens"],
+            kw["rotating_window"]) == (4, 3, 256, 4096)
+    assert kvarn_resolve_kwargs(FakeLM(), 4, None, 0)["tail_tokens"] == 0
+    # the env split applies only when no value width is given
+    monkeypatch.setenv("GMLX_KVARN_BITS", "k6v5")
+    assert kvarn_resolve_kwargs(FakeLM())["value_bits"] == 5
+    assert kvarn_resolve_kwargs(FakeLM(), value_bits=4)["value_bits"] == 4
+    assert "MLA" in kvarn_resolve_kwargs(FakeLM(kv_lora_rank=8))["scheme_reason"]

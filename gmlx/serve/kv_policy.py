@@ -88,15 +88,12 @@ def _config_head_dim(model):
     return head_dim if isinstance(head_dim, int) and head_dim > 0 else None
 
 
-def _serve_tail_tokens(rg) -> int:
-    """The kvarn precision tail this model was loaded with. The per-model
-    load window sets KV_TAIL_TOKENS; the rg attribute wins when upstream
-    carries one."""
+def _serve_tail_tokens() -> int:
+    """The kvarn precision tail from the per-model load window
+    (KV_TAIL_TOKENS); upstream carries no attribute for it."""
     from gmlx.cache.kvarn_cache import KVARN_DEFAULT_TAIL
 
-    val = getattr(rg, "kv_tail_tokens", None)
-    if val is None:
-        val = os.environ.get("KV_TAIL_TOKENS")
+    val = os.environ.get("KV_TAIL_TOKENS")
     try:
         return KVARN_DEFAULT_TAIL if val in (None, "") else int(val)
     except (TypeError, ValueError):
@@ -183,15 +180,15 @@ def resolve_for_load(rg, model_id: str):
     if scheme == "kvarn":
         # kvarn owns its widths: KV_BITS from the window (default 6),
         # independent of upstream's kv_bits parse and its qat drop;
-        # GMLX_KVARN_BITS may split them. Declines by model shape.
-        # rotating_window stays None: serve's MAX_KV_SIZE only caps the
-        # request context budget, it never builds a rotating stack.
-        from gmlx.cache.kvarn_cache import kvarn_unsupported, kvarn_widths
+        # GMLX_KVARN_BITS may split them. rotating_window stays None:
+        # serve's MAX_KV_SIZE only caps the request context budget, it
+        # never builds a rotating stack.
+        from gmlx.cache.kvarn_cache import kvarn_resolve_kwargs
 
-        k_bits, v_bits = kvarn_widths(int(req_val) if req_val else None)
-        kw.update(kv_bits=k_bits, value_bits=v_bits, key_bits=None,
-                  tail_tokens=_serve_tail_tokens(rg),
-                  scheme_reason=kvarn_unsupported(rg.model))
+        kw["key_bits"] = None
+        kw.update(kvarn_resolve_kwargs(
+            rg.model, int(req_val) if req_val else None,
+            tail_tokens=_serve_tail_tokens()))
     pol = ServeKvPolicy(
         resolve_kv_quant_policy(stack, mode="single", **kw),
         resolve_kv_quant_policy(_probe_stack(rg.model), mode="batched",

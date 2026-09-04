@@ -180,6 +180,17 @@ def test_kvarn_record_bpe_beats_kv8():
     assert kvarn_bytes_per_element(6) < packed_bytes_per_element(8, 64)
 
 
+def test_kvarn_constants_mirror_the_cache_module():
+    # kv_policy keeps local copies so the resolver imports no kernel-backed
+    # module; they must track kvarn_cache.
+    from gmlx.cache import kv_policy as kp
+    from gmlx.cache import kvarn_cache as kc
+
+    assert kp.KVARN_GROUP == kc.GROUP
+    assert kp.KVARN_WIDTHS == kc.KVARN_BITS
+    assert kp.KVARN_TAIL == kc.KVARN_DEFAULT_TAIL
+
+
 def test_kvarn_fixed_region_geometry():
     # sink stage (128 + one spare group) + horizon group + tail + slack.
     assert kvarn_fixed_tokens(1024) == 128 + 128 + 128 + 1024 + 256

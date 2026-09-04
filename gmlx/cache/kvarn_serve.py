@@ -86,7 +86,7 @@ def _serve_widths_and_tail(model=None):
     for paths that run inside the load window (residency probes) and for
     the CLI-shaped tests.
     """
-    from gmlx.cache.kvarn_cache import kvarn_widths
+    from gmlx.cache.kvarn_cache import KVARN_DEFAULT_TAIL, kvarn_widths
 
     single = stamped_single_policy(model)
     if (single is not None and getattr(single, "scheme", None) == "kvarn"
@@ -99,9 +99,9 @@ def _serve_widths_and_tail(model=None):
     except ValueError:
         bits = None
     try:
-        tail = int(os.environ.get("KV_TAIL_TOKENS", "") or 1024)
+        tail = int(os.environ.get("KV_TAIL_TOKENS", "") or KVARN_DEFAULT_TAIL)
     except ValueError:
-        tail = 1024
+        tail = KVARN_DEFAULT_TAIL
     k_bits, v_bits = kvarn_widths(bits)
     return k_bits, v_bits, tail
 
@@ -112,16 +112,11 @@ def kvarn_batch_policy(model, caches, k_bits, v_bits, tail, mode="batched"):
     stays None; a model's own sliding-window layers keep fp16."""
     from gmlx.cache.kv_policy import resolve_kv_quant_policy
 
-    from .kvarn_cache import kvarn_unsupported
+    from .kvarn_cache import kvarn_resolve_kwargs
 
     return resolve_kv_quant_policy(
-        caches,
-        kv_bits=k_bits,
-        value_bits=v_bits,
-        scheme="kvarn",
-        tail_tokens=tail,
-        mode=mode,
-        scheme_reason=kvarn_unsupported(model),
+        caches, mode=mode,
+        **kvarn_resolve_kwargs(model, k_bits, v_bits, tail),
     )
 
 
@@ -129,7 +124,13 @@ _PPB_DECLINE_NOTED: set = set()
 
 
 def _ppb_rebuild_declined(batch, kwargs):
-    """Reason a kvarn cache rebuild must not touch this batch, or None.
+    """Reason a kvarn cache rebuild must not touch this batch, or None."""
+    return _ppb_kvarn_policy(batch, kwargs)[0]
+
+
+def _ppb_kvarn_policy(batch, kwargs):
+    """(decline reason or None, the resolved policy or None) for a kvarn
+    cache rebuild of this batch.
 
     The single decline predicate for BOTH rebuild sites -- the ckpt-tier
     in-place conversion (ensure_ppb_kvarn, runs first inside the init
@@ -143,22 +144,22 @@ def _ppb_rebuild_declined(batch, kwargs):
     the ckpt/exact tiers already serve, not to fp16 batch classes.
     """
     if kwargs.get("kv_quant_scheme") != "kvarn":
-        return "scheme"
+        return "scheme", None
     if kwargs.get("kv_bits") is not None:
-        return "kv_bits"
+        return "kv_bits", None
     if kwargs.get("warm_cache") is not None:
-        return "warm_cache"
+        return "warm_cache", None
     if kwargs.get("draft_model") is not None:
-        return "draft"
+        return "draft", None
     if kwargs.get("right_pad_per_row") is not None:
-        return "right_pad"
+        return "right_pad", None
     if len(batch.uids) != 1:
-        return "batch"
+        return "batch", None
     if any(
         getattr(c, "kv_quant_scheme", None) == "kvarn"
         for c in batch.prompt_cache
     ):
-        return "converted"
+        return "converted", None
     # A populated or trimmed batch means a warm cache was adopted after
     # construction; replacing it would discard the restored prefix while
     # the input trim stands -- silent prefix loss. Unreadable offsets
@@ -167,26 +168,25 @@ def _ppb_rebuild_declined(batch, kwargs):
         if any(
             int(getattr(c, "offset", 0) or 0) for c in batch.prompt_cache
         ):
-            return "populated"
+            return "populated", None
     except Exception:
-        return "populated"
+        return "populated", None
     if int(getattr(batch, "_processed_prompt_columns", 0) or 0):
-        return "trimmed"
+        return "trimmed", None
     k_bits, v_bits, tail = _serve_widths_and_tail(batch.model)
     policy = kvarn_batch_policy(batch.model, batch.prompt_cache,
                                 k_bits, v_bits, tail, mode="single")
-    reason = None if policy.verdict in ("full", "partial") else policy.reason
-    if reason is not None:
+    if policy.verdict not in ("full", "partial"):
         key = type(batch.model).__name__
         if key not in _PPB_DECLINE_NOTED:
             _PPB_DECLINE_NOTED.add(key)
             _log.warning(
                 "KV_QUANT_SCHEME=kvarn dropped for %s: %s; KV stays fp16",
                 key,
-                reason,
+                policy.reason,
             )
-        return "unsupported"
-    return None
+        return "unsupported", policy
+    return None, policy
 
 
 _CKPT_NOTED = [False]
@@ -208,18 +208,14 @@ def ensure_ppb_kvarn(batch, kwargs, *, ckpt_active: bool) -> bool:
     """
     if not ckpt_active:
         return False
-    if _ppb_rebuild_declined(batch, kwargs) is not None:
+    reason, policy = _ppb_kvarn_policy(batch, kwargs)
+    if reason is not None:
         return False
     from gmlx.cache.kv_policy import kv_line, quantize_stack
 
     from .kvarn_cache import ensure_registered
 
     ensure_registered()
-    k_bits, v_bits, tail = _serve_widths_and_tail(batch.model)
-    policy = kvarn_batch_policy(batch.model, batch.prompt_cache,
-                                k_bits, v_bits, tail, mode="single")
-    if policy.verdict not in ("full", "partial"):
-        return False
     _, n = quantize_stack(batch.prompt_cache, policy)
     if not n:
         return False

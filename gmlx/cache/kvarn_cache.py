@@ -86,6 +86,26 @@ def kvarn_head_dims(model):
     return set()
 
 
+def kvarn_resolve_kwargs(model, kv_bits=None, value_bits=None, tail_tokens=None,
+                         rotating_window=None):
+    """resolve_kv_quant_policy kwargs for the kvarn scheme on ``model``.
+    The one place widths, tail, window and the model-shape decline are
+    assembled: CLI, chat, serve load, the serve batch seam and the MTP
+    spec path all resolve through it. ``value_bits`` None takes the
+    GMLX_KVARN_BITS split when set, else the key width."""
+    k_bits, v_bits = kvarn_widths(kv_bits)
+    if value_bits is not None:
+        v_bits = int(value_bits)
+    return dict(
+        scheme="kvarn",
+        kv_bits=k_bits,
+        value_bits=v_bits,
+        tail_tokens=KVARN_DEFAULT_TAIL if tail_tokens is None else int(tail_tokens),
+        rotating_window=rotating_window,
+        scheme_reason=kvarn_unsupported(model),
+    )
+
+
 def kvarn_unsupported(model) -> str | None:
     """Reason string when the kvarn scheme cannot serve this model, else
     None. Coverage is partial by design (sliding windows and recurrent
