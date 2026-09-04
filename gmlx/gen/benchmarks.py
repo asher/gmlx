@@ -188,9 +188,8 @@ def _bench_kv_arm(model, kv_bits, kv_group_size, quantized_kv_start=0,
     layers `gmlx run` quantizes. Handing mlx-lm the bare kv kwargs instead
     would arm every layer, and a sliding-window layer raises on
     `to_quantized`."""
-    if kv_bits is None:
-        return {}, None
     if kv_quant_scheme == "kvarn":
+        # kvarn engages on the scheme alone (default width 6).
         import io
 
         from .generation import setup_kvarn_cache
@@ -207,6 +206,8 @@ def _bench_kv_arm(model, kv_bits, kv_group_size, quantized_kv_start=0,
         if factory() is None:  # declined: warned once, bench runs fp16
             return {}, None
         return {}, factory
+    if kv_bits is None:
+        return {}, None
 
     from mlx_lm.models.cache import make_prompt_cache as _mpc
 
@@ -538,6 +539,8 @@ def bench_tg_depth(
                     verbose=False,
                     kv_bits=kv_bits,
                     kv_group_size=kv_group_size,
+                    kv_quant_scheme=kv_quant_scheme,
+                    kv_tail_tokens=kv_tail_tokens,
                 )
                 if best is None or stats["decode_tps"] > best["decode_tps"]:
                     best = stats

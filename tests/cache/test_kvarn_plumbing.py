@@ -113,11 +113,19 @@ def test_unsupported_gemma4_owned_tree(kvarn_ops_ok, monkeypatch):
 
 
 def test_setup_rejects_bad_bits_and_tail(kvarn_ops_ok, monkeypatch, capsys):
+    # a width or tail the scheme rejects exits 2, like affine's
+    # resolve_and_report; only a model-shape decline runs fp16
     monkeypatch.delenv("GMLX_KVARN", raising=False)
-    assert setup_kvarn_cache(FakeLM(), 7, 1024, None) is None
-    assert "kvarn bits" in capsys.readouterr().err
-    assert setup_kvarn_cache(FakeLM(), 6, 100, None) is None
+    with pytest.raises(SystemExit) as e:
+        setup_kvarn_cache(FakeLM(), 7, 1024, None)
+    assert e.value.code == 2
+    assert "error: kvarn bits" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as e:
+        setup_kvarn_cache(FakeLM(), 6, 100, None)
+    assert e.value.code == 2
     assert "kv_tail_tokens" in capsys.readouterr().err
+    assert setup_kvarn_cache(FakeLM(head_dim=64), 6, 1024, None) is None
+    assert "dropped" in capsys.readouterr().err
 
 
 @needs_kvarn_ops

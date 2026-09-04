@@ -170,9 +170,10 @@ def setup_kvarn_cache(
 ):
     """Build the model's prompt cache with kvarn KV on every layer the
     policy takes, printing the [kv] banner. Returns the cache list, or
-    None (with a warning) when the scheme cannot apply. ``make_cache``
-    overrides the stock cache builder (the MTP paths build via
-    mlx-vlm's)."""
+    None (with a warning) when the scheme cannot apply to this model;
+    a width, tail or window the scheme rejects exits 2 like the affine
+    path. ``make_cache`` overrides the stock cache builder (the MTP
+    paths build via mlx-vlm's)."""
     from gmlx.cache.kv_policy import kv_line
     from gmlx.cache.kvarn_cache import kvarn_rotating_window
 
@@ -190,6 +191,9 @@ def setup_kvarn_cache(
         model, prompt_cache, kv_bits, kv_tail_tokens, window,
         quantized_kv_start=quantized_kv_start,
     )
+    if policy.verdict == "error":
+        print(kv_line(None, policy), file=out)
+        raise SystemExit(2)
     if policy.verdict not in ("full", "partial"):
         print(f"warning: --kv-quant-scheme kvarn dropped: {policy.reason}",
               file=out)
