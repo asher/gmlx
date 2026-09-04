@@ -195,3 +195,20 @@ def test_installed_wrapper_routes_views():
         q, kv, vv, cache=cache, scale=SCALE, mask=None
     )
     _assert_close(out, _ref_attention(q, cache, 1))
+
+
+@_NEEDS_GPU
+def test_probe_pins_the_record_layout_version(monkeypatch):
+    # gmlx and mlx-kquant each carry the wire layout version; a mismatch
+    # declines the scheme before any record is written.
+    import mlx_kquant as kq
+
+    from gmlx.cache import kvarn_sdpa
+    from gmlx.cache.kvarn_cache import KVarNKVCache
+
+    assert kq.KVARN_RECORD_VERSION == KVarNKVCache.kvarn_layout_version
+    assert kvarn_sdpa._probe() is None
+    monkeypatch.setattr(kq, "KVARN_RECORD_VERSION", 99)
+    assert "record layout 99" in kvarn_sdpa._probe()
+    monkeypatch.delattr(kq, "KVARN_RECORD_VERSION")
+    assert "record layout None" in kvarn_sdpa._probe()

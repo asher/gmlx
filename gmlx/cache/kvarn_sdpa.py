@@ -29,7 +29,7 @@ import sys
 import mlx.core as mx
 
 from gmlx.envflags import env_bool
-from .kvarn_cache import BatchKVarNKVCache, KVarNView
+from .kvarn_cache import BatchKVarNKVCache, KVarNKVCache, KVarNView
 
 _MODEL_PREFIXES = ("mlx_lm.models.", "mlx_vlm.models.", "gmlx.")
 _BASE_MODULES = ("mlx_lm.models.base", "mlx_vlm.models.base")
@@ -64,9 +64,11 @@ def _probe():
     ]
     if missing:
         return "mlx-kquant build lacks " + ", ".join(missing)
-    doc = getattr(kq.sdpa_decode_gqa_kvarn, "__doc__", "") or ""
-    if "n_attend" not in doc:
-        return "mlx-kquant build predates kvarn precision-tail support"
+    have = getattr(kq, "KVARN_RECORD_VERSION", None)
+    want = KVarNKVCache.kvarn_layout_version
+    if have != want:
+        return (f"mlx-kquant kvarn record layout {have} does not match "
+                f"gmlx layout {want}")
     return None
 
 
