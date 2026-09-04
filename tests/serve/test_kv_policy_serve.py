@@ -66,6 +66,31 @@ def test_kvarn_resolve_prices_record_and_regions(monkeypatch):
     assert j["tail_tokens"] == 1024
 
 
+def test_kvarn_notes_only_an_explicit_start_offset(monkeypatch):
+    from gmlx.cache import kvarn_sdpa
+    from gmlx.cache.kv_policy import kv_line
+
+    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
+    monkeypatch.delenv("GMLX_KVARN", raising=False)
+    monkeypatch.delenv("QUANTIZED_KV_START", raising=False)
+    monkeypatch.setenv("KV_BITS", "6")
+    monkeypatch.delenv("MLX_VLM_GGUF_SPECULATIVE", raising=False)
+    model = _model()
+    model.config.head_dim = 128
+    # upstream's default rides on rg whether or not anyone asked
+    rg = _rg(model=model, kv_bits=None, kv_quant_scheme="kvarn",
+             quantized_kv_start=5000)
+    pol = skv.resolve_for_load(rg, "m")
+    assert pol.single.verdict == "full" and pol.single.start_honored
+    assert "not honored" not in kv_line("m", pol.single)
+    monkeypatch.setenv("QUANTIZED_KV_START", "512")
+    pol = skv.resolve_for_load(_rg(model=model, kv_bits=None,
+                                   kv_quant_scheme="kvarn",
+                                   quantized_kv_start=512), "m")
+    assert not pol.single.start_honored
+    assert "quantized_kv_start=512 not honored" in kv_line("m", pol.single)
+
+
 def test_kvarn_admission_charges_the_fp16_buffers(monkeypatch):
     """The record bpe alone underprices a kvarn layer: the fp16 sink,
     horizon and tail are resident from the first token."""

@@ -112,7 +112,8 @@ def served_tier(base_url: str) -> str:
     """The APC tier this server runs for its first model. A kvarn boot that
     converts layers serves the exact tier, so stores and index counts move
     on the exact-tier counters. Read from /v1/models, not the env: the
-    server decides the scheme per model."""
+    server decides the scheme per model, and reports it once the model is
+    resident, so call this after a request has completed."""
     status, body = Client(base_url).models()
     rows = (body or {}).get("data", []) if status == 200 else []
     kq = (rows[0].get("kv_quant") or {}) if rows else {}
@@ -201,8 +202,6 @@ def phase_sequential(python, model_path, disk_root, log_dir, block_size,
                     python=python) as proc:
         proc.wait_ready()
         base, mid = proc.base_url, model_id_of(proc.base_url, proc)
-        stores_key = tier_keys(served_tier(base))["stores"]
-        out["stores_key"] = stores_key
         _ms, m_body = Client(base).metrics()
         srv = (m_body or {}).get("server") if isinstance(m_body, dict) else {}
         out["continuous_batching_enabled"] = bool((srv or {}).get(
@@ -211,6 +210,9 @@ def phase_sequential(python, model_path, disk_root, log_dir, block_size,
         # prefix to memory AND write through to the SSD tier.
         s1, _ = chat(base, mid, turn1)
         out["turn1_status"] = s1
+        # resident now, so /v1/models carries the policy the tier follows
+        stores_key = tier_keys(served_tier(base))["stores"]
+        out["stores_key"] = stores_key
         drained = wait_disk_drained(base, min_files=1)
         out["turn1_stores"] = int(drained.get(stores_key, 0))
         out["turn1_disk_writes"] = int(drained.get("disk_writes", 0))
@@ -259,8 +261,6 @@ def phase_populate_warm_batch(python, model_path, disk_root, log_dir, block_size
                     python=python) as proc:
         proc.wait_ready()
         base, mid = proc.base_url, model_id_of(proc.base_url, proc)
-        keys = tier_keys(served_tier(base))
-        out["stores_key"], out["indexed_key"] = keys["stores"], keys["indexed"]
 
         # continuous batching must be on for the batching claim to mean anything
         _ms, m_body = Client(base).metrics()
@@ -274,6 +274,8 @@ def phase_populate_warm_batch(python, model_path, disk_root, log_dir, block_size
         s, _ = chat(base, mid, PREFIX + FIXED_Q)
         out["cold_status"] = s
         out["cold"] = stats(base)
+        keys = tier_keys(served_tier(base))
+        out["stores_key"], out["indexed_key"] = keys["stores"], keys["indexed"]
         if not out["continuous_batching_enabled"]:
             # The flag means "response_generator bound"; the background
             # preload races the boot-time read, a completed request forces it.
@@ -322,11 +324,11 @@ def phase_restart_and_reset(python, model_path, disk_root, log_dir, block_size,
                     python=python) as proc:
         proc.wait_ready()
         base, mid = proc.base_url, model_id_of(proc.base_url, proc)
-        indexed_key = tier_keys(served_tier(base))["indexed"]
 
         # replay the exact cold prompt -> should restore from disk
         s, _ = chat(base, mid, PREFIX + FIXED_Q)
         out["replay_status"] = s
+        indexed_key = tier_keys(served_tier(base))["indexed"]
         after = stats(base)
         out["after_restart"] = after
         out["disk_hits_after_restart"] = int(after.get("disk_hits", 0))

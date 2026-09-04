@@ -189,6 +189,11 @@ def resolve_for_load(rg, model_id: str):
         kw.update(kvarn_resolve_kwargs(
             rg.model, int(req_val) if req_val else None,
             tail_tokens=_serve_tail_tokens()))
+        # rg carries upstream's 5000 default, which affine honors and
+        # kvarn never can; only an explicit request is worth a "not
+        # honored" note on the line.
+        kw["quantized_kv_start"] = int(
+            os.environ.get("QUANTIZED_KV_START") or 0)
     pol = ServeKvPolicy(
         resolve_kv_quant_policy(stack, mode="single", **kw),
         resolve_kv_quant_policy(_probe_stack(rg.model), mode="batched",
