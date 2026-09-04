@@ -60,6 +60,7 @@ def test_kvarn_resolve_prices_record_and_regions(monkeypatch):
     assert pol.pricing_vector() == [0.796875] * 3 + [2.0]
     rows = kvarn_fixed_tokens(1024)
     assert pol.region_vector() == [((rows, 2.0),)] * 3 + [()]
+    assert pol.step_vector() == [4096] * 3 + [0]
     j = pol.to_json()
     assert j["scheme"] == "kvarn" and j["value_bits"] == 6
     assert j["tail_tokens"] == 1024
@@ -84,8 +85,13 @@ def test_kvarn_admission_charges_the_fp16_buffers(monkeypatch):
     costs = mp._policy_costs(rg, model)
     elems = 2 * 8 * 128
     rows = kvarn_fixed_tokens(1024)
-    assert costs[:4] == [(None, elems * 0.796875)] * 3 + [(None, elems * 2.0)]
+    assert costs[:4] == [(4096, elems * 0.796875)] * 3 + [(None, elems * 2.0)]
+    assert all(isinstance(w, mp.StepTokens) for w, _ in costs[:3])
     assert costs[4:] == [(rows, elems * 2.0)] * 3
+    assert all(isinstance(w, mp.FixedRows) for w, _ in costs[4:])
+    # One token allocates a full code slab per layer plus the fp16 rows.
+    assert mp.prompt_kv_bytes(costs, 1) == (
+        3 * elems * 0.796875 * 4096 + elems * 2.0 + 3 * elems * 2.0 * rows)
     assert mp.prompt_kv_bytes(costs, 8192) > mp.prompt_kv_bytes(costs[:4], 8192)
 
 

@@ -50,13 +50,21 @@ def kvarn_bytes_per_element(bits: int, value_bits=None) -> float:
 def kvarn_fixed_tokens(tail_tokens) -> int:
     """fp16 rows a kvarn layer holds whatever the context length: the sink
     stage with its spare group, the horizon group, and the tail buffer with
-    its slack. Priced as a windowed region, so a short context pays for
-    what it actually allocates."""
+    its slack. All allocated at the first token, so admission charges
+    them in full."""
     from gmlx.cache.kvarn_cache import GROUP, KVarNKVCache
 
     tail = int(tail_tokens or 0)
     rows = KVARN_SINK + GROUP + GROUP
     return rows + (tail + KVarNKVCache.tail_slack if tail else 1)
+
+
+def kvarn_step_tokens() -> int:
+    """Tokens of record storage one kvarn code slab holds: slabs are
+    allocated at the first token and grow by whole steps."""
+    from gmlx.cache.kvarn_cache import GROUP, KVarNKVCache
+
+    return KVarNKVCache.gcap_step * GROUP
 
 
 @dataclass(frozen=True)
@@ -65,9 +73,11 @@ class KvLayerPlan:
     quantize: bool
     bytes_per_element: float
     pools: int = 0              # quantizable pools under the layer, any kind
-    # Resident regions beyond the per-token cost, as (tokens, bpe) pairs
-    # charged over the first `tokens` tokens. kvarn's fp16 buffers.
+    # Buffers allocated in full at the first token, as (rows, bpe) pairs.
+    # kvarn's fp16 sink, horizon and tail.
     regions: tuple = ()
+    # Per-token storage grows in slabs of this many tokens (0 = per token).
+    step_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -112,6 +122,9 @@ class KvQuantPolicy:
 
     def regions_vector(self) -> list:
         return [p.regions for p in self.per_layer]
+
+    def steps_vector(self) -> list:
+        return [p.step_tokens for p in self.per_layer]
 
     @property
     def width_label(self) -> str:
@@ -448,6 +461,7 @@ def _resolve_kvarn(stack, *, kv_bits, value_bits, mode, mtp, head_dim,
 
     record = kvarn_bytes_per_element(k_bits, v_bits)
     regions = ((kvarn_fixed_tokens(tail), FP16_BPE),)
+    step = kvarn_step_tokens()
     per = []
     for i, kind in enumerate(kinds):
         pools = (sum(1 for _ in _quantizable_pools(stack[i]))
@@ -455,7 +469,7 @@ def _resolve_kvarn(stack, *, kv_bits, value_bits, mode, mtp, head_dim,
         if owns[i] and should_quantize_kv_layer(i, n):
             # A converted window is a kvarn record like any other; the
             # summary counts it as quantized, not as held fp16.
-            per.append(KvLayerPlan("kv", True, record, pools, regions))
+            per.append(KvLayerPlan("kv", True, record, pools, regions, step))
         elif kind == "pool":
             per.append(KvLayerPlan("pool", False,
                                    packed_bytes_per_element(k_bits, group)

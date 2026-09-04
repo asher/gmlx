@@ -154,9 +154,11 @@ def _kvarn_priced_costs(costs, e, raw, cfg):
         from mlx_vlm.models.cache import should_quantize_kv_layer
 
         from gmlx.cache.kv_policy import (FP16_BPE, kvarn_bytes_per_element,
-                                          kvarn_fixed_tokens)
+                                          kvarn_fixed_tokens,
+                                          kvarn_step_tokens)
         from gmlx.cache.kvarn_cache import (KVARN_BITS, KVARN_DEFAULT_TAIL,
                                             kvarn_unsupported, kvarn_widths)
+        from .mem_preflight import FixedRows, StepTokens
 
         shim = SimpleNamespace(args=SimpleNamespace(**(cfg or {})))
         if kvarn_unsupported(shim):
@@ -168,12 +170,13 @@ def _kvarn_priced_costs(costs, e, raw, cfg):
     if k not in KVARN_BITS or v not in KVARN_BITS or tail < 0:
         return costs
     scale = kvarn_bytes_per_element(k, v) / FP16_BPE
-    rows = kvarn_fixed_tokens(tail)
+    rows = FixedRows(kvarn_fixed_tokens(tail))
+    step = StepTokens(kvarn_step_tokens())
     n = len(costs)
     out, regions = [], []
     for i, (w, bpt) in enumerate(costs):
         if w is None and should_quantize_kv_layer(i, n):
-            out.append((w, bpt * scale))
+            out.append((step, bpt * scale))
             regions.append((rows, bpt))
         else:
             out.append((w, bpt))
@@ -246,7 +249,7 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None,
     budget = ceiling_bytes(ws)
     reserve = admit_reserve_bytes(ws)
 
-    from .mem_preflight import prompt_kv_bytes
+    from .mem_preflight import prompt_kv_bytes, span_tokens
 
     def fits(w: int, d: int) -> bool:
         kv = prompt_kv_bytes(costs, d)
@@ -257,7 +260,7 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None,
             if tr > max_buffer:
                 return False
             for window, bpt in costs:
-                span = d if window is None else min(d, int(window))
+                span = span_tokens(window, d)
                 if w * bpt * span > max_buffer:
                     return False
         return True

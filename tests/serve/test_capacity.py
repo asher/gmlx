@@ -126,6 +126,21 @@ def test_kvarn_env_prices_the_table(rig, monkeypatch):
     # the fixed fp16 rows cost context against affine at the same width
     affine6 = cap.derive_table(path, env={"KV_BITS": "6"})
     assert kvarn["max_ctx"][8] != affine6["max_ctx"][8]
+    # the arm prices a short request the way admission does: a full code
+    # slab per taken layer plus the fp16 rows, so one token costs more
+    # than fp16 and 32k tokens cost less
+    import gmlx.serve.mem_preflight as mp
+    from gmlx.cache.kv_policy import kvarn_fixed_tokens
+
+    fp16 = [(None, 2048.0)] * 4
+    priced = cap._kvarn_priced_costs(fp16, {"KV_QUANT_SCHEME": "kvarn"},
+                                     None, cfg)
+    assert priced[:4] == [(4096, 2048.0 * 0.796875 / 2.0)] * 3 + [(None, 2048.0)]
+    assert all(isinstance(w, mp.StepTokens) for w, _ in priced[:3])
+    assert priced[4:] == [(kvarn_fixed_tokens(1024), 2048.0)] * 3
+    assert all(isinstance(w, mp.FixedRows) for w, _ in priced[4:])
+    assert mp.prompt_kv_bytes(priced, 1) > mp.prompt_kv_bytes(fp16, 1)
+    assert mp.prompt_kv_bytes(priced, 32768) < mp.prompt_kv_bytes(fp16, 32768)
     # absent ops price fp16
     monkeypatch.setattr(kvarn_sdpa, "_probe_result", ("no ops",))
     assert cap.derive_table(path, env={"KV_QUANT_SCHEME": "kvarn"})[

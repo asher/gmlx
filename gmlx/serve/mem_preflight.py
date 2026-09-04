@@ -82,17 +82,48 @@ def _layer_windows(c, layers):
     return [window] * layers
 
 
+class FixedRows(int):
+    """Cost-entry window for a buffer allocated in full at the first
+    token (kvarn's fp16 sink, horizon and tail): every row is charged
+    however short the context."""
+
+
+class StepTokens(int):
+    """Cost-entry window for storage allocated in slabs of this many
+    tokens (kvarn record codes): charged at the slab ceiling."""
+
+
+def span_tokens(window, tokens: int) -> int:
+    """Rows a cost entry charges at ``tokens`` of context."""
+    if tokens <= 0:
+        return 0
+    if window is None:
+        return tokens
+    if isinstance(window, FixedRows):
+        return int(window)
+    if isinstance(window, StepTokens):
+        step = int(window)
+        return -(-tokens // step) * step
+    return min(tokens, int(window))
+
+
+def per_token_bytes(costs) -> float:
+    """Bytes of KV per token of context; fixed buffers excluded."""
+    return sum(bpt for w, bpt in costs if not isinstance(w, FixedRows))
+
+
 def kv_layer_costs(model, bytes_per_elem: float = 2.0, per_layer_bpe=None,
-                   per_layer_regions=None):
+                   per_layer_regions=None, per_layer_steps=None):
     """Per-layer ``(window_or_None, bytes_per_token)`` for the KV cache,
     or None when the geometry cannot be read. Admit-side throughout: MLA
     prices the compressed latent, a configured sliding window caps every
     layer it could apply to. ``per_layer_bpe`` (from the KV policy)
-    prices each layer's storage exactly, and ``per_layer_regions`` adds
-    the fixed-size buffers a scheme holds beside the per-token record --
-    kvarn's fp16 sink, horizon and tail -- each as its own windowed
-    entry, so the list runs longer than the layer count. Both must match
-    the layer count or they are ignored."""
+    prices each layer's storage exactly; ``per_layer_steps`` marks layers
+    whose storage grows in slabs (StepTokens windows); and
+    ``per_layer_regions`` appends the fixed-size buffers a scheme holds
+    beside the per-token record -- kvarn's fp16 sink, horizon and tail
+    -- each as a FixedRows entry, so the list runs longer than the layer
+    count. All three must match the layer count or they are ignored."""
     c = _lm_config(model)
     layers = _get(c, "num_hidden_layers")
     if not isinstance(layers, int) or layers <= 0:
@@ -101,6 +132,8 @@ def kv_layer_costs(model, bytes_per_elem: float = 2.0, per_layer_bpe=None,
         per_layer_bpe = None
     if per_layer_regions is not None and len(per_layer_regions) != layers:
         per_layer_regions = None
+    if per_layer_steps is not None and len(per_layer_steps) != layers:
+        per_layer_steps = None
 
     def bpe(i):
         return per_layer_bpe[i] if per_layer_bpe is not None else bytes_per_elem
@@ -123,11 +156,16 @@ def kv_layer_costs(model, bytes_per_elem: float = 2.0, per_layer_bpe=None,
         elems = 2 * n_kv * head_dim
         windows = _layer_windows(c, layers)
 
-    costs = [(windows[i], elems * bpe(i)) for i in range(layers)]
-    for i, regions in enumerate(per_layer_regions or ()):
+    costs = []
+    for i in range(layers):
+        w = windows[i]
+        step = per_layer_steps[i] if per_layer_steps is not None else 0
+        if w is None and step:
+            w = StepTokens(step)
+        costs.append((w, elems * bpe(i)))
+    for regions in per_layer_regions or ():
         for rows, region_bpe in regions:
-            w = rows if windows[i] is None else min(rows, windows[i])
-            costs.append((w, elems * region_bpe))
+            costs.append((FixedRows(rows), elems * region_bpe))
     return costs
 
 
@@ -136,19 +174,19 @@ def _policy_costs(rg, model):
     mode). Without a policy, pricing stays uniform fp16."""
     c = _lm_config(model)
     layers = _get(c, "num_hidden_layers")
-    vec = regions = None
+    vec = regions = steps = None
     if isinstance(layers, int) and layers > 0:
-        from .kv_policy import pricing_vector, region_vector
+        from .kv_policy import pricing_vector, region_vector, step_vector
 
         vec = pricing_vector(rg, layers)
         regions = region_vector(rg, layers)
+        steps = step_vector(rg, layers)
     return kv_layer_costs(model, 2.0, per_layer_bpe=vec,
-                          per_layer_regions=regions)
+                          per_layer_regions=regions, per_layer_steps=steps)
 
 
 def prompt_kv_bytes(costs, tokens: int) -> float:
-    return sum(bpt * (tokens if w is None else min(tokens, w))
-               for w, bpt in costs)
+    return sum(bpt * span_tokens(w, tokens) for w, bpt in costs)
 
 
 def available_drained_bytes():

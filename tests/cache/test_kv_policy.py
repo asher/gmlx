@@ -170,6 +170,8 @@ def test_kvarn_dense_carveout(_kvarn_ops):
     # not folded into the per-token cost.
     assert p.per_layer[0].regions == ((kvarn_fixed_tokens(1024), 2.0),)
     assert p.per_layer[-1].regions == ()
+    # Records grow in code slabs of gcap_step groups.
+    assert p.steps_vector() == [4096] * 27 + [0]
 
 
 def test_kvarn_record_bpe_beats_kv8():

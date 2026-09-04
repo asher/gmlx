@@ -35,6 +35,10 @@ class ServeKvPolicy:
         """Per-layer fixed resident regions for admission (batched mode)."""
         return self.batched.regions_vector()
 
+    def step_vector(self):
+        """Per-layer record slab sizes for admission (batched mode)."""
+        return self.batched.steps_vector()
+
     def to_json(self) -> dict:
         """The /v1/models kv_quant field. verdict_batched is separate:
         MTP models quantize at B=1 and run fp16 when batched."""
@@ -236,6 +240,18 @@ def region_vector(rg, num_layers: int):
     if pol is None:
         return None
     vec = pol.region_vector()
+    if len(vec) != num_layers or not any(vec):
+        return None
+    return vec
+
+
+def step_vector(rg, num_layers: int):
+    """The admission slab-step vector for rg, or None when the scheme
+    grows per token. Length-checked like pricing_vector."""
+    pol = getattr(rg, RG_ATTR, None)
+    if pol is None:
+        return None
+    vec = pol.step_vector()
     if len(vec) != num_layers or not any(vec):
         return None
     return vec
