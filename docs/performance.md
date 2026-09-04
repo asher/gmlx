@@ -556,16 +556,22 @@ Qwen3.5-9B Q4_K_M, 16k context (head_dim 256, 7 of 32 layers quantized):
 |---|---|---|---|---|
 | affine 2 | 0.02778 | 0.02745 | 0.5596 | 89.0% |
 | kvarn 2 | 0.01503 | 0.00612 | 0.2301 | 94.7% |
+| turboquant 2 | 0.01901 | 0.02094 | 0.4071 | 91.2% |
 | affine 3 | 0.00648 | 0.00606 | 0.1057 | 94.3% |
 | kvarn 3 | 0.00291 | 0.00139 | 0.0313 | 97.4% |
+| turboquant 3 | 0.00464 | 0.00440 | 0.0926 | 96.0% |
+| turboquant 3.5 | 0.00340 | 0.00351 | 0.0801 | 96.3% |
 | affine 4 | 0.00190 | 0.00183 | 0.0276 | 96.9% |
 | kvarn 4 | 0.00117 | 0.00060 | 0.0071 | 98.3% |
+| turboquant 4 | 0.00175 | 0.00163 | 0.0265 | 97.8% |
 | kvarn 5 | 0.00055 | 0.00029 | 0.0042 | 98.2% |
 | kvarn k6 v5 | 0.00046 | 0.00028 | 0.0039 | 98.6% |
 | affine 6 | 0.00046 | 0.00038 | 0.0045 | 98.7% |
 | kvarn 6 | 0.00036 | 0.00027 | 0.0036 | 98.7% |
+| turboquant 6 | 0.00058 | 0.00058 | 0.0060 | 98.7% |
 | affine 8 | 0.00029 | 0.00020 | 0.0027 | 98.7% |
 | kvarn 8 | 0.00027 | 0.00020 | 0.0030 | 99.2% |
+| turboquant 8 | 0.00032 | 0.00024 | 0.0038 | 98.7% |
 
 Qwen3.8-27B Q6_K_XL, 16k context (head_dim 256, 15 of 65 layers quantized):
 
@@ -637,8 +643,8 @@ one with the lower p99 and the higher top-1; when a width buys a large
 median gain (2x or more), that gain shows up in every measure. Note that
 the ranking does not follow width across schemes: kvarn at 2 bits lands
 within a point of affine at 3 on decode top-1 (ahead on the 9B, behind on
-Qwen3.8-27B) at a quarter of its median KLD, and kvarn at 4 halves affine
-4's decode median while matching it on top-1. The corpus is wikitext under
+Qwen3.8-27B) at a quarter of its median KLD, and kvarn at 4 cuts affine
+4's decode median to a third while matching or beating it on top-1. The corpus is wikitext under
 teacher forcing, so the tables rank caches against each other; they do not
 predict a task score.
 TurboQuant is mlx-vlm's scheme (see Origins); gmlx does not enable it, and
