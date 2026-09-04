@@ -648,7 +648,11 @@ Qwen3.8-27B) at a quarter of its median KLD, and kvarn at 4 cuts affine
 teacher forcing, so the tables rank caches against each other; they do not
 predict a task score.
 TurboQuant is mlx-vlm's scheme (see Origins); gmlx does not enable it, and
-it appears here for comparison only.
+it appears here for comparison only. It sits between the other two: ahead of
+affine below 6 bits, behind it at 6 and 8, and behind kvarn at every width.
+mlx-vlm's recommended 3.5-bit setting (3-bit keys, 4-bit values) is beaten
+on every measure by kvarn at 3 bits, and kvarn at 4 has a quarter of its
+decode median.
 
 **What it costs in speed.** Decode cost tracks how much of the step the KV
 read is: on GDN hybrids and gemma-4 all three arms sit within run-to-run
