@@ -2780,12 +2780,6 @@ def install_spec_kv_quant() -> None:
             return caches
         scheme_reason = None
         if kind == "kvarn":
-            if any(type(c) in cache_types("BatchKVCache") for c in caches):
-                _decline_kvarn(
-                    "serve spec prefill keeps the stock batch cache "
-                    "(kvarn spec serve lands later)"
-                )
-                return caches
             rotating = (cache_types("RotatingKVCache")
                         + cache_types("BatchRotatingKVCache"))
             if any(isinstance(c, rotating) for c in caches):

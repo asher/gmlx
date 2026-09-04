@@ -169,8 +169,10 @@ class KvQuantPolicy:
             # pools lead: quantized 0/N alone reads as a no-op
             out = f"{self.n_pool} pooled at rest; " + out
         if self.quantized_kv_start and not self.start_honored:
+            who = ("kvarn records" if self.scheme == "kvarn"
+                   else "batch caches")
             out += (f"; quantized_kv_start={self.quantized_kv_start} "
-                    "not honored (batch caches quantize from token 0)")
+                    f"not honored ({who} quantize from token 0)")
         return out
 
 
@@ -289,7 +291,7 @@ def resolve_kv_quant_policy(stack, *, kv_bits, kv_group_size=64,
         return _error(
             f"kv_quant_scheme {scheme!r} unsupported (choose from "
             f"{', '.join(SCHEMES)})",
-            None, group, mode, stack)
+            kv_bits, group, mode, stack)
     if key_bits is not None:
         return _error("split key/value KV bits are unsupported",
                       None, group, mode, stack)
@@ -481,7 +483,7 @@ def _resolve_kvarn(stack, *, kv_bits, value_bits, mode, mtp, head_dim,
     # Same reading as the affine arm: the carve-out alone is still a full
     # application. Only a layer the scheme cannot take makes it partial.
     hetero = any(not owns[i] and kinds[i] != "pool" for i in range(n))
-    honored = mode == "single" or not quantized_kv_start
+    honored = not quantized_kv_start
     return KvQuantPolicy("partial" if hetero else "full", None, k_bits,
                          None, mode, tuple(per),
                          quantized_kv_start=int(quantized_kv_start or 0),

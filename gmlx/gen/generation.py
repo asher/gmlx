@@ -135,26 +135,28 @@ def _verbose_emitter(prompt, tokenizer, reasoning):
 
 
 def resolve_kvarn_policy(model, kv_bits, kv_tail_tokens, rotating_window,
-                         stack, *, mode="single", mtp=False, value_bits=None):
+                         stack, *, mode="single", mtp=False, value_bits=None,
+                         quantized_kv_start=0):
     """The kvarn policy for one built stack, with the model-shape decline
     resolved. The single entry point CLI, chat and the MTP paths share."""
     from gmlx.cache.kv_policy import resolve_kv_quant_policy
     from gmlx.cache.kvarn_cache import kvarn_resolve_kwargs
 
     return resolve_kv_quant_policy(
-        stack, mode=mode, mtp=mtp,
+        stack, mode=mode, mtp=mtp, quantized_kv_start=quantized_kv_start,
         **kvarn_resolve_kwargs(model, kv_bits, value_bits, kv_tail_tokens,
                                rotating_window))
 
 
 def convert_kvarn_cache(model, prompt_cache, kv_bits, kv_tail_tokens,
-                        rotating_window=None):
+                        rotating_window=None, quantized_kv_start=0):
     """Resolve the kvarn policy for one freshly built stack and apply it.
     Returns the policy; its verdict tells the caller what happened. The
     chat REPL rebuilds a cache per turn and re-resolves here, so every
     turn gets the same layer selection as the load-time banner."""
     policy = resolve_kvarn_policy(
-        model, kv_bits, kv_tail_tokens, rotating_window, prompt_cache
+        model, kv_bits, kv_tail_tokens, rotating_window, prompt_cache,
+        quantized_kv_start=quantized_kv_start,
     )
     from gmlx.cache.kv_policy import quantize_stack
 
@@ -163,7 +165,8 @@ def convert_kvarn_cache(model, prompt_cache, kv_bits, kv_tail_tokens,
 
 
 def setup_kvarn_cache(
-    model, kv_bits, kv_tail_tokens, max_kv_size, out=None, make_cache=None
+    model, kv_bits, kv_tail_tokens, max_kv_size, out=None, make_cache=None,
+    quantized_kv_start=0,
 ):
     """Build the model's prompt cache with kvarn KV on every layer the
     policy takes, printing the [kv] banner. Returns the cache list, or
@@ -184,7 +187,8 @@ def setup_kvarn_cache(
 
         prompt_cache = _mpc(model, max_kv_size=max_kv_size)
     policy = convert_kvarn_cache(
-        model, prompt_cache, kv_bits, kv_tail_tokens, window
+        model, prompt_cache, kv_bits, kv_tail_tokens, window,
+        quantized_kv_start=quantized_kv_start,
     )
     if policy.verdict not in ("full", "partial"):
         print(f"warning: --kv-quant-scheme kvarn dropped: {policy.reason}",
@@ -437,7 +441,8 @@ def generate(
             )
         else:
             prompt_cache = setup_kvarn_cache(
-                model, kv_bits, kv_tail_tokens, max_kv_size
+                model, kv_bits, kv_tail_tokens, max_kv_size,
+                quantized_kv_start=quantized_kv_start,
             )
         # Handled here whatever the outcome: the affine policy path must
         # never touch a kvarn stack.

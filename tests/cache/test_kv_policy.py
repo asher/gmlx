@@ -96,6 +96,7 @@ def test_head_dim_group_mismatch_error():
 def test_turbo_scheme_error():
     p = _resolve(_dense(4), scheme="turboquant")
     assert p.verdict == "error" and "turboquant" in p.reason
+    assert p.bits == 8
     assert _resolve(_dense(4), scheme="uniform").verdict == "full"
 
 
@@ -201,6 +202,13 @@ def test_kvarn_split_widths(_kvarn_ops):
     p = _kvarn(_dense(2), kv_bits=6, value_bits=5)
     assert p.verdict == "full" and p.value_bits == 5
     assert kv_line("m", p).startswith("[kv] m: kvarn k6 v5 tail=1024 -> ")
+
+
+def test_kvarn_never_honors_a_start_offset(_kvarn_ops):
+    p = _kvarn(_dense(2), quantized_kv_start=512)
+    assert p.verdict == "full" and not p.start_honored
+    assert "kvarn records quantize from token 0" in p.summary()
+    assert _kvarn(_dense(2)).start_honored
 
 
 def test_kvarn_width_and_tail_errors(_kvarn_ops):

@@ -3001,12 +3001,14 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
             from gmlx.gen.generation import setup_kvarn_cache
 
             tail = int(getattr(args, "kv_tail_tokens", 1024) or 0)
+            start = kv_kwargs.get("quantized_kv_start", 0)
             probe = setup_kvarn_cache(
                 b.model,
                 kv_kwargs.get("kv_bits"),
                 tail,
                 args.max_kv_size,
                 out=sys.stderr,
+                quantized_kv_start=start,
             )
             if probe is not None:
                 kvarn_cfg = {
@@ -3015,6 +3017,7 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
                     "rotating_window": kvarn_rotating_window(
                         b.model, args.max_kv_size
                     ),
+                    "quantized_kv_start": start,
                 }
             kv_kwargs["kv_bits"] = None
 

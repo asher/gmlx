@@ -200,7 +200,9 @@ def _bench_kv_arm(model, kv_bits, kv_group_size, quantized_kv_start=0,
         def factory():
             out = None if first[0] else io.StringIO()
             first[0] = False
-            return setup_kvarn_cache(model, kv_bits, kv_tail_tokens, None, out=out)
+            return setup_kvarn_cache(
+                model, kv_bits, kv_tail_tokens, None, out=out,
+                quantized_kv_start=quantized_kv_start)
 
         if factory() is None:  # declined: warned once, bench runs fp16
             return {}, None
