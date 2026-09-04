@@ -142,12 +142,14 @@ def _transient_bytes(heads: int | None, depth: int) -> float:
     return heads * step * (depth + step) * 2.0
 
 
-def _kvarn_priced_costs(costs, e, raw, cfg):
+def _kvarn_priced_costs(costs, e, raw, cfg, mtp=False):
     """kvarn arm of _kv_priced_costs: record cost on the layers the
     carve-out takes plus each one's fixed fp16 rows, priced as admission
-    prices them. fp16 when the ops are absent, the widths are malformed,
-    or the header shape is one kvarn declines (MLA, head_dim outside
-    128/256/512)."""
+    prices them. Under MTP the batched rows run fp16, so the per-token
+    price stays fp16 and the B=1 stack's rows and one slab per taken
+    layer ride on top. fp16 when the ops are absent, the widths are
+    malformed, or the header shape is one kvarn declines (MLA, head_dim
+    outside 128/256/512)."""
     from types import SimpleNamespace
 
     try:
@@ -160,7 +162,8 @@ def _kvarn_priced_costs(costs, e, raw, cfg):
                                             kvarn_unsupported, kvarn_widths)
         from .mem_preflight import FixedRows, StepTokens
 
-        shim = SimpleNamespace(args=SimpleNamespace(**(cfg or {})))
+        text = (cfg or {}).get("text_config") or cfg or {}
+        shim = SimpleNamespace(args=SimpleNamespace(**text))
         if kvarn_unsupported(shim):
             return costs
         k, v = kvarn_widths(int(float(raw)) if raw else None)
@@ -176,7 +179,11 @@ def _kvarn_priced_costs(costs, e, raw, cfg):
     out, regions = [], []
     for i, (w, bpt) in enumerate(costs):
         if w is None and should_quantize_kv_layer(i, n):
-            out.append((step, bpt * scale))
+            if mtp:
+                out.append((w, bpt))
+                regions.append((FixedRows(int(step)), bpt * scale))
+            else:
+                out.append((step, bpt * scale))
             regions.append((rows, bpt))
         else:
             out.append((w, bpt))
@@ -190,13 +197,14 @@ def _kv_priced_costs(costs, env, model_id, cfg=None):
     a qat-marked id under affine, malformed values, a shape kvarn cannot
     take)."""
     e = {**os.environ, **(env or {})}
-    if e.get("MLX_VLM_GGUF_SPECULATIVE") == "1" or e.get("MAX_KV_SIZE"):
+    if e.get("MAX_KV_SIZE"):
         return costs
+    mtp = e.get("MLX_VLM_GGUF_SPECULATIVE") == "1"
     raw = e.get("KV_BITS")
     scheme = (e.get("KV_QUANT_SCHEME") or "uniform").strip().lower()
     if scheme == "kvarn":
-        return _kvarn_priced_costs(costs, e, raw, cfg)
-    if not raw or "qat" in str(model_id):
+        return _kvarn_priced_costs(costs, e, raw, cfg, mtp)
+    if mtp or not raw or "qat" in str(model_id):
         return costs
     try:
         fb = float(raw)

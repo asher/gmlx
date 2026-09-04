@@ -157,6 +157,48 @@ def test_kvarn_env_prices_the_table(rig, monkeypatch):
         "max_ctx"] == cap.derive_table(pmla)["max_ctx"]
 
 
+def test_kvarn_mtp_table_charges_the_b1_residue(rig, monkeypatch):
+    # Batched MTP rows run fp16, but the B=1 stack still holds the fixed
+    # fp16 rows and one code slab per taken layer: the table charges them
+    # on top of fp16 growth, so it reads below the fp16 table.
+    from gmlx.cache import kvarn_sdpa
+    import gmlx.serve.mem_preflight as mp
+    from gmlx.cache.kv_policy import kvarn_fixed_tokens
+
+    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
+    for k in ("GMLX_KVARN", "GMLX_KVARN_BITS", "KV_BITS", "KV_QUANT_SCHEME",
+              "KV_TAIL_TOKENS", "MLX_VLM_GGUF_SPECULATIVE"):
+        monkeypatch.delenv(k, raising=False)
+    cfg = dict(CFG, head_dim=128)
+    path = rig(weights_gb=10.0, ws_gb=20.0, cfg=cfg)
+    base = cap.derive_table(path)
+    mtp = cap.derive_table(path, env={"KV_QUANT_SCHEME": "kvarn",
+                                      "MLX_VLM_GGUF_SPECULATIVE": "1"})
+    assert mtp["max_ctx"][1] < base["max_ctx"][1]
+    fp16 = [(None, 2048.0)] * 4
+    priced = cap._kvarn_priced_costs(fp16, {"KV_QUANT_SCHEME": "kvarn"},
+                                     None, cfg, True)
+    assert priced[:4] == fp16
+    slab = (4096, 2048.0 * 0.796875 / 2.0)
+    rows = (kvarn_fixed_tokens(1024), 2048.0)
+    assert priced[4:] == [slab, rows] * 3
+    assert all(isinstance(w, mp.FixedRows) for w, _ in priced[4:])
+
+
+def test_kvarn_table_reads_a_nested_text_config(rig, monkeypatch):
+    from gmlx.cache import kvarn_sdpa
+
+    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
+    for k in ("GMLX_KVARN", "GMLX_KVARN_BITS", "KV_BITS", "KV_QUANT_SCHEME",
+              "KV_TAIL_TOKENS"):
+        monkeypatch.delenv(k, raising=False)
+    nested = {"text_config": dict(CFG, head_dim=128), "model_type": "gemma4"}
+    path = rig(weights_gb=10.0, ws_gb=20.0, cfg=nested)
+    base = cap.derive_table(path)
+    kvarn = cap.derive_table(path, env={"KV_QUANT_SCHEME": "kvarn"})
+    assert kvarn["max_ctx"][1] > base["max_ctx"][1]
+
+
 def test_boot_refusal_with_numbers(rig):
     path = rig(weights_gb=19.0, ws_gb=20.0)  # width 1 fits nothing
     with pytest.raises(RuntimeError, match="cannot fit at width 1"):

@@ -244,6 +244,37 @@ def test_mtp_policy_batched_prices_fp16():
     assert mp._policy_costs(rg, DENSE) == [(None, 2048.0)] * 4
 
 
+def test_mtp_kvarn_policy_charges_the_b1_residue():
+    # Batching drops kvarn under MTP, so growth prices fp16; the B=1
+    # stack still holds each converted layer's fp16 rows and one code
+    # slab from the first token.
+    from mlx_vlm.models.cache import KVCache
+
+    from gmlx.cache.kv_policy import (kvarn_bytes_per_element,
+                                      kvarn_fixed_tokens,
+                                      resolve_kv_quant_policy)
+    from gmlx.serve.kv_policy import RG_ATTR, ServeKvPolicy
+
+    model = _model(num_hidden_layers=4, num_attention_heads=8,
+                   num_key_value_heads=8, head_dim=128)
+    rg = _rg(model, kv_bits=6.0)
+    kw = dict(scheme="kvarn", kv_bits=6, mtp=True, head_dim=128)
+    pol = ServeKvPolicy(
+        resolve_kv_quant_policy([KVCache() for _ in range(4)],
+                                mode="single", **kw),
+        resolve_kv_quant_policy([KVCache() for _ in range(4)],
+                                mode="batched", **kw))
+    assert pol.single.verdict == "full" and pol.batched.verdict == "dropped"
+    setattr(rg, RG_ATTR, pol)
+    costs = mp._policy_costs(rg, model)
+    elems = 2 * 8 * 128
+    assert costs[:4] == [(None, elems * 2.0)] * 4
+    rows = (kvarn_fixed_tokens(1024), elems * 2.0)
+    slab = (4096, elems * kvarn_bytes_per_element(6))
+    assert costs[4:] == [rows, slab] * 3
+    assert all(isinstance(w, mp.FixedRows) for w, _ in costs[4:])
+
+
 def test_policy_layer_count_mismatch_falls_back():
     rg = _stamp_policy(_rg(DENSE, kv_bits=8.0), layers=6)
     assert mp._policy_costs(rg, DENSE) == [(None, 2048.0)] * 4

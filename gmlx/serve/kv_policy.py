@@ -32,8 +32,20 @@ class ServeKvPolicy:
         return self.batched.bytes_per_element_vector()
 
     def region_vector(self):
-        """Per-layer fixed resident regions for admission (batched mode)."""
-        return self.batched.regions_vector()
+        """Per-layer fixed resident regions for admission: batched mode,
+        or, when batching dropped the scheme (MTP), the single-stream
+        policy's rows plus one record slab per converted layer. A B=1
+        kvarn stack holds those from the first token, beside the fp16
+        growth the batched price already charges."""
+        vec = self.batched.regions_vector()
+        s = self.single
+        if (any(vec) or self.batched.verdict in ("full", "partial")
+                or s.verdict not in ("full", "partial")
+                or s.scheme == "uniform"):
+            return vec
+        return [p.regions + ((p.step_tokens, p.bytes_per_element),)
+                if p.quantize and p.step_tokens else p.regions
+                for p in s.per_layer]
 
     def step_vector(self):
         """Per-layer record slab sizes for admission (batched mode)."""
