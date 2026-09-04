@@ -247,3 +247,29 @@ def test_kvarn_caches_dodge_affine_probes(monkeypatch):
     assert pc is not None
     assert all(not hasattr(c, "bits") for c in pc)
     assert all(not hasattr(c, "to_quantized") for c in pc)
+
+
+def test_head_dims_flag_every_mla_arch(monkeypatch):
+    """MLA stacks store one latent per layer; kvarn declines them by shape.
+    deepseek_v4 has no kv_lora_rank field, so its compress_ratios must
+    carry the marker, or its head_dim 512 latent would pass as supported."""
+    from types import SimpleNamespace
+
+    from gmlx.cache import kvarn_sdpa
+    from gmlx.cache.kvarn_cache import kvarn_head_dims
+    from gmlx.models.deepseek_v4.model import ModelArgs as Ds4Args
+    from gmlx.models.glm5_next.model import ModelArgs as GlmArgs
+
+    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
+    monkeypatch.delenv("GMLX_KVARN", raising=False)
+    ds4 = SimpleNamespace(args=Ds4Args())
+    glm = SimpleNamespace(args=GlmArgs(
+        model_type="glm5_next", vocab_size=8, hidden_size=64,
+        num_hidden_layers=2, num_attention_heads=2, num_key_value_heads=1,
+        intermediate_size=64, rms_norm_eps=1e-5))
+    for lm in (ds4, glm):
+        assert kvarn_head_dims(lm) == {-1}
+        assert "MLA" in kvarn_unsupported(lm)
+    plain = SimpleNamespace(args=SimpleNamespace(head_dim=512))
+    assert kvarn_head_dims(plain) == {512}
+    assert kvarn_unsupported(plain) is None

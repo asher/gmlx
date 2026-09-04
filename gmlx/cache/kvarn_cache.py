@@ -64,7 +64,10 @@ def kvarn_head_dims(model):
         args = getattr(holder, "args", None) or getattr(holder, "config", None)
         if args is None:
             continue
-        if getattr(args, "kv_lora_rank", None):
+        if (getattr(args, "kv_lora_rank", None)
+                or getattr(args, "compress_ratios", None)):
+            # deepseek_v4 stores a compressed latent per layer and has no
+            # kv_lora_rank field.
             return {-1}
         dims = set()
         for key in ("head_dim", "global_head_dim"):
