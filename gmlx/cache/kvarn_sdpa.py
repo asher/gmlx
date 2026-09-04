@@ -5,13 +5,18 @@ loaded mlx_lm.models.* / mlx_vlm.models.* module (and both base modules,
 so later imports inherit the wrapper). The wrapper only claims calls whose
 keys are KVarNView handles; everything else passes through untouched.
 
-Decode/verify (qL <= 4, plain causal masking) runs fused: the query is
-WHT-rotated, kq.sdpa_decode_gqa_kvarn walks sink rows + sealed records +
-live rows in one dispatch, and the output is un-rotated. When the cache
-carries a precision tail, the body walk stops at the tail boundary
-(n_attend, causal clamp lifted) and a second plain-fp16 attention over the
-original-domain tail rows merges in through the log-sum-exp weights, so no
-token is counted twice and the freshest context stays full fidelity.
+Decode (qL 1, plain causal masking) runs fused on the vector kernel: the
+query is WHT-rotated, kq.sdpa_decode_gqa_kvarn walks sink rows + sealed
+records + live rows in one dispatch, and the output is un-rotated. Verify
+width (qL 2 to 8) runs the same walk on the matrix-unit FA kernels
+(kq.sdpa_fa_verify_kvarn over the kv-major GQA fold; a fold wider than the
+tile splits the group into at most four chunks): the vector kernel's
+per-query cost climbs steeply past two queries, the matrix tile prices
+extra rows at nearly zero. When the cache carries a precision tail, the
+body walk stops at the tail boundary (n_attend, causal clamp lifted) and a
+second plain-fp16 attention over the original-domain tail rows merges in
+through the log-sum-exp weights, so no token is counted twice and the
+freshest context stays full fidelity.
 
 Prefill (wider queries or array masks) materializes the rotated cache once
 per call and runs stock mx.fast attention on it with the rotated query,
@@ -19,7 +24,8 @@ composing with the attn_hd512 wrapper's chunked-prefill routes.
 
 Kill switches: GMLX_KVARN=0 drops the scheme when the policy resolves at
 cache build (kvarn_cache.py); GMLX_KVARN_SDPA=0 forces the materialize
-path for decode as well (correct, slower), read at call time.
+path for decode as well (correct, slower); GMLX_KVARN_FA=0 keeps verify
+width on the vector kernel (an A/B). Both read at call time.
 """
 
 from __future__ import annotations
@@ -110,7 +116,7 @@ def _probe_tg_limit(d: int, ql: int) -> int:
         if gqa * ((ql + 1) // 2) > 32:
             continue
         try:
-            mx.eval(_decode(mx.zeros((1, gqa, ql, d), mx.float16), c, 1.0))
+            mx.eval(_decode_vector(mx.zeros((1, gqa, ql, d), mx.float16), c, 1.0))
         except Exception:
             continue
         return _tg_threads(gqa, ql)
@@ -122,16 +128,50 @@ def _tg_threads(gqa: int, qL: int) -> int:
     return 32 * gqa * ((qL + 1) // 2)
 
 
+def _fa_available() -> bool:
+    import mlx_kquant as kq
+
+    return hasattr(kq, "sdpa_fa_verify_kvarn") and env_bool("GMLX_KVARN_FA", True)
+
+
+def _fa_row_cap(d: int) -> int:
+    """Query rows one FA verify tile holds (the hd512 d-split kernel is
+    fixed at 32)."""
+    return 32 if d == 512 else 64
+
+
+def _fa_chunks(gqa: int, qL: int, cap: int):
+    """Smallest kv-major split of the GQA group whose fold fits the tile,
+    or None. Each chunk re-sweeps the keys, so the split stops at 4."""
+    for n in (1, 2, 4):
+        if gqa % n == 0 and (gqa // n) * qL <= cap:
+            return n
+    return None
+
+
+def _fa_route(q, cache) -> bool:
+    """Verify width (qL >= 2) runs on the matrix-unit FA kernels: B=1, the
+    op present, and the GQA fold splitting into at most four tiles."""
+    if q.shape[2] < 2 or q.shape[0] != 1 or not _fa_available():
+        return False
+    gqa = q.shape[1] // cache.stage_k.shape[1]
+    return _fa_chunks(gqa, q.shape[2], _fa_row_cap(q.shape[-1])) is not None
+
+
 def _fused_ok(q, cache) -> bool:
     kvh = cache.stage_k.shape[1]
     gqa = q.shape[1] // kvh
-    return (
+    qL = q.shape[2]
+    if not (
         q.dtype in (mx.float16, mx.bfloat16)
         and 1 <= gqa <= 16
         and q.shape[1] % kvh == 0
         and _route_enabled()
-        and _tg_threads(gqa, q.shape[2]) <= _tg_limit(q.shape[-1], q.shape[2] > 1)
-    )
+    ):
+        return False
+    if _fa_route(q, cache):
+        return True
+    return qL <= 4 and _tg_threads(gqa, qL) <= _tg_limit(q.shape[-1], qL > 1)
 
 
 def _legs(n: int, tail_len: int, qL: int) -> tuple[int, int]:
@@ -160,6 +200,68 @@ def _lse_merge(out_a, lse_a, out_b, lse_b):
 
 
 def _decode(q, cache, scale):
+    if _fa_route(q, cache):
+        return _decode_fa(q, cache, scale)
+    return _decode_vector(q, cache, scale)
+
+
+def _decode_fa(q, cache, scale):
+    """Verify width on the FA kernels over the kv-major GQA fold: the body
+    reads records through sdpa_fa_verify_kvarn (clamp lifted at a tail
+    boundary), the tail runs sdpa_fa_verify over the fp16 rows with exact
+    offset causality, and the two merge through their LSEs. A fold wider
+    than the tile splits the GQA group; every chunk re-sweeps the keys."""
+    import mlx_kquant as kq
+
+    _, hq, qL, d = q.shape
+    kvh = cache.stage_k.shape[1]
+    gqa = hq // kvh
+    n = cache.visible
+    n_body, t = _legs(n, cache.tail_len, qL)
+    g = gqa // _fa_chunks(gqa, qL, _fa_row_cap(d))
+    rows = g * qL
+    q5 = q.reshape(1, kvh, gqa, qL, d)
+    q_rot5 = kq.kvarn_rotate(q).reshape(1, kvh, gqa, qL, d) if n_body else None
+    if t:
+        tk, tv = cache.tail_slices(t)
+        tk, tv = tk.astype(q.dtype), tv.astype(q.dtype)
+    outs = []
+    for g0 in range(0, gqa, g):
+        qf = mx.contiguous(q5[:, :, g0 : g0 + g]).reshape(1, kvh, rows, d)
+        if n_body == 0:
+            outs.append(kq.sdpa_fa_verify(qf, tk, tv, scale, qL))
+            continue
+        qf_rot = mx.contiguous(q_rot5[:, :, g0 : g0 + g]).reshape(1, kvh, rows, d)
+        body_args = (
+            qf_rot,
+            cache.codes_k,
+            cache.axes_k,
+            cache.codes_v,
+            cache.axes_v,
+            cache.stage_k,
+            cache.stage_v,
+            n,
+            scale,
+            cache.k_bits,
+            cache.v_bits,
+            qL,
+        )
+        if t == 0:
+            outs.append(kq.kvarn_rotate(kq.sdpa_fa_verify_kvarn(*body_args)))
+            continue
+        body, lse_b = kq.sdpa_fa_verify_kvarn(
+            *body_args, n_attend=n_body, full_visibility=True, return_lse=True
+        )
+        tail, lse_t = kq.sdpa_fa_verify(qf, tk, tv, scale, qL, return_lse=True)
+        merged = _lse_merge(kq.kvarn_rotate(body), lse_b, tail, lse_t)
+        outs.append(merged.astype(q.dtype))
+    if len(outs) == 1:
+        return outs[0].reshape(1, hq, qL, d)
+    out = mx.concatenate([o.reshape(1, kvh, g, qL, d) for o in outs], axis=2)
+    return out.reshape(1, hq, qL, d)
+
+
+def _decode_vector(q, cache, scale):
     import mlx_kquant as kq
 
     n = cache.visible
@@ -301,7 +403,7 @@ def kvarn_attention(q, cache, scale, mask, sinks=None, starts=None):
         return _prefill(q, cache, float(scale), mask)
     plain_mask = mask is None or (isinstance(mask, str) and mask == "causal")
     if (
-        1 <= q.shape[2] <= 4
+        1 <= q.shape[2] <= 8
         and plain_mask
         and q.shape[0] == 1
         and _fused_ok(q, cache)

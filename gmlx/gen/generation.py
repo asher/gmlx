@@ -202,9 +202,9 @@ def setup_kvarn_cache(
     return prompt_cache
 
 
-# The fused kvarn decode kernel walks verify blocks up to this query width;
-# wider blocks fall back to a full materialize per round.
-_KVARN_VERIFY_QL = 4
+# The fused kvarn verify route (matrix-unit FA kernels) covers blocks up to
+# this query width; wider blocks fall back to a full materialize per round.
+_KVARN_VERIFY_QL = 8
 
 
 def setup_kvarn_mtp_cache(model, drafter, kv_bits, kv_tail_tokens, block, out=None):

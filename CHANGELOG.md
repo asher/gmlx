@@ -15,8 +15,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   line and `/v1/models` `kv_quant` report as `--kv-bits`; widths 2/3/4/5/6/8,
   split key/value pairs via `GMLX_KVARN_BITS=k6v5`. Composes with
   `--max-kv-size` on `run` and `chat` (the rotating window quantizes),
-  with native MTP at batch size 1, and with the prompt cache (exact and
-  checkpoint tiers store kvarn records). Needs an mlx-kquant build that
+  with native MTP at batch size 1 (verify rounds up to width 8 attend the
+  records on the matrix-unit kernels), and with the prompt cache (exact
+  and checkpoint tiers store kvarn records). Needs an mlx-kquant build that
   carries the kvarn ops; without one the scheme drops loudly and the
   model runs fp16 KV. `GMLX_KVARN=0` and `GMLX_KVARN_SDPA=0` are the
   kill switches.

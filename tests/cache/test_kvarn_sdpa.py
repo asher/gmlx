@@ -44,13 +44,14 @@ def _ref_attention(q, cache, qL):
         parts_v.append(kq.kvarn_rotate(tv))
     k = mx.concatenate(parts_k, axis=2).astype(mx.float32)
     v = mx.concatenate(parts_v, axis=2).astype(mx.float32)
+    hq = q.shape[1]
     qr = kq.kvarn_rotate(q.astype(mx.float16)).astype(mx.float32)
-    qg = qr.reshape(1, H, HQ // H, qL, d)
+    qg = qr.reshape(1, H, hq // H, qL, d)
     s = (qg @ k[:, :, None].transpose(0, 1, 2, 4, 3)) * (d**-0.5)
     kpos = mx.arange(n)[None, None, None, None, :]
     qpos = (n - qL + mx.arange(qL))[None, None, None, :, None]
     s = mx.where(kpos <= qpos, s, mx.array(-np.inf, mx.float32))
-    o = (mx.softmax(s, axis=-1) @ v[:, :, None]).reshape(1, HQ, qL, d)
+    o = (mx.softmax(s, axis=-1) @ v[:, :, None]).reshape(1, hq, qL, d)
     return kq.kvarn_rotate(o.astype(mx.float16)).astype(mx.float32)
 
 
@@ -61,7 +62,7 @@ def _assert_close(out, ref, atol=5e-3):
 
 @needs_kvarn_ops
 @pytest.mark.parametrize("d", [128, 256, 512])
-@pytest.mark.parametrize("ql", [1, 2, 4])
+@pytest.mark.parametrize("ql", [1, 2, 3, 4, 6, 8])
 def test_decode_with_tail_matches_reference(ql, d):
     cache = filled(700, d=d)
     q = _make_q(ql, d=d)
@@ -219,6 +220,8 @@ def test_threadgroup_cap_gates_the_fused_route(monkeypatch):
     # eval, so the route consults the probed cap and materializes instead.
     from gmlx.cache import kvarn_sdpa
 
+    # Without the FA op, verify width takes the vector kernel and its cap.
+    monkeypatch.setattr(kvarn_sdpa, "_fa_available", lambda: False)
     cache = filled(700)
     q = _make_q(4)
     calls = []
@@ -289,3 +292,81 @@ def test_narrow_legs_stay_fused_and_exact(monkeypatch, fill, trim, extra):
     out = kvarn_attention(q, c, SCALE, "causal")
     assert seen[-1] is c
     _assert_close(out, _ref_attention(q, c, 4))
+
+
+@needs_kvarn_ops
+@pytest.mark.parametrize("ql", [1, 2, 5, 8])
+def test_verify_width_routes_to_the_fa_kernels(monkeypatch, ql):
+    # qL 1 stays on the vector decode kernel; wider queries take the
+    # matrix-unit route, whose result matches the reference over the same
+    # body and tail values.
+    from gmlx.cache import kvarn_sdpa
+
+    cache = filled(700)
+    seen = []
+    real = kvarn_sdpa._decode_fa
+    monkeypatch.setattr(
+        kvarn_sdpa, "_decode_fa", lambda *a: seen.append(a[0].shape[2]) or real(*a)
+    )
+    q = _make_q(ql)
+    out = kvarn_attention(q, cache, SCALE, "causal")
+    assert seen == ([] if ql == 1 else [ql])
+    _assert_close(out, _ref_attention(q, cache, ql))
+
+
+@needs_kvarn_ops
+@pytest.mark.parametrize("d,hq,ql,chunks", [(128, 32, 8, 2), (512, 32, 4, 2), (256, 32, 4, 1)])
+def test_wide_folds_chunk_the_gqa_group(monkeypatch, d, hq, ql, chunks):
+    # gqa16 x qL8 = 128 rows (two 64-row tiles); the hd512 d-split tile
+    # holds 32 rows, so gqa16 x qL4 splits in two (gemma-4 globals fold the
+    # same way on one kv head); at hd256 the same fold fits one tile.
+    import mlx_kquant as kq
+
+    from gmlx.cache import kvarn_sdpa
+
+    cache = filled(700, d=d)
+    assert kvarn_sdpa._fa_chunks(hq // H, ql, kvarn_sdpa._fa_row_cap(d)) == chunks
+    calls = []
+    real = kq.sdpa_fa_verify_kvarn
+    monkeypatch.setattr(
+        kq, "sdpa_fa_verify_kvarn", lambda *a, **k: calls.append(a[0].shape) or real(*a, **k)
+    )
+    rng = np.random.default_rng(3)
+    q = mx.array(rng.standard_normal((1, hq, ql, d)).astype(np.float16))
+    out = kvarn_attention(q, cache, d**-0.5, "causal")
+    assert len(calls) == chunks
+    assert all(shape == (1, H, (hq // H // chunks) * ql, d) for shape in calls)
+    _assert_close(out, _ref_attention(q, cache, ql))
+
+
+def test_fa_chunk_table():
+    from gmlx.cache.kvarn_sdpa import _fa_chunks
+
+    assert _fa_chunks(4, 4, 64) == 1
+    assert _fa_chunks(16, 4, 64) == 1
+    assert _fa_chunks(16, 8, 64) == 2
+    assert _fa_chunks(16, 4, 32) == 2
+    assert _fa_chunks(16, 8, 32) == 4
+    assert _fa_chunks(12, 8, 64) == 2
+    assert _fa_chunks(6, 8, 32) == 2
+    assert _fa_chunks(7, 8, 32) is None
+
+
+@needs_kvarn_ops
+def test_fa_kill_switch_keeps_the_vector_kernel(monkeypatch):
+    from gmlx.cache import kvarn_sdpa
+
+    monkeypatch.setenv("GMLX_KVARN_FA", "0")
+    cache = filled(700)
+    seen = []
+    real = kvarn_sdpa._decode_vector
+    monkeypatch.setattr(kvarn_sdpa, "_decode_vector", lambda *a: seen.append(1) or real(*a))
+    q = _make_q(4)
+    out = kvarn_attention(q, cache, SCALE, "causal")
+    assert seen == [1]
+    _assert_close(out, _ref_attention(q, cache, 4))
+    # widths past the vector kernel materialize under the switch
+    q8 = _make_q(8)
+    out8 = kvarn_attention(q8, cache, SCALE, "causal")
+    assert seen == [1]
+    assert np.array_equal(np.array(out8), np.array(kvarn_sdpa._prefill(q8, cache, SCALE, "causal")))

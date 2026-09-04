@@ -335,12 +335,12 @@ def test_mtp_setup_declines_shared_kv_drafter(kvarn_ops_ok, capsys):
 def test_mtp_setup_builds_and_warns_wide_block(kvarn_ops_ok, capsys):
     from gmlx.gen.generation import setup_kvarn_mtp_cache
 
-    pc = setup_kvarn_mtp_cache(_FakeLM(), _Drafter(), None, 1024, 6)
+    pc = setup_kvarn_mtp_cache(_FakeLM(), _Drafter(), None, 1024, 8)
     assert pc is not None
     assert sum(type(c) is KVarNKVCache for c in pc) == 1
     err = capsys.readouterr().err
     assert "[kv] kvarn6 tail=1024 -> quantized 1/3 attn layers" in err
-    assert "verify width 7 (block 6 + 1) exceeds the fused kvarn route" in err
+    assert "verify width 9 (block 8 + 1) exceeds the fused kvarn route" in err
 
 
 def test_mtp_setup_declines_a_window_stack(kvarn_ops_ok, capsys):
