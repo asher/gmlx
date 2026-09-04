@@ -14,27 +14,14 @@ from gmlx.cache.kvarn_cache import (
     KVarNKVCache,
     KVarNRotatingKVCache,
 )
+from kvarn_testlib import Args, D, H, needs_kvarn_ops, tokens
 
-_NEEDS_GPU = pytest.mark.skipif(
-    mx.default_device() != mx.gpu,
-    reason="kvarn kernels are Metal-only; needs the GPU device",
-)
-
-H = 2
 HQ = 8
-D = 128
 
 # Small window for fast wraps: sink 128 + 4 record groups; tail 384 keeps
 # the floor at exactly 640.
 WIN = 640
 TAIL = 384
-
-
-def _tokens(n, seed=0, d=D):
-    rng = np.random.default_rng(seed)
-    k = mx.array(rng.standard_normal((1, H, n, d)).astype(np.float16))
-    v = mx.array(rng.standard_normal((1, H, n, d)).astype(np.float16))
-    return k, v
 
 
 def _rot(max_size=WIN, tail=TAIL, **kw):
@@ -111,11 +98,11 @@ def test_window_geometry():
 # -- eviction ----------------------------------------------------------------
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 @pytest.mark.parametrize("chunk", [13, 128, 700])
 def test_eviction_watermarks(chunk):
     c = _rot()
-    k, v = _tokens(2000)
+    k, v = tokens(2000)
     seen = 0
     for i in range(0, 2000, chunk):
         c.update_and_fetch(k[:, :, i : i + chunk], v[:, :, i : i + chunk])
@@ -125,10 +112,10 @@ def test_eviction_watermarks(chunk):
     assert c.evicted > 0
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_nbytes_plateau():
     c = _rot()
-    k, v = _tokens(4000)
+    k, v = tokens(4000)
     _feed(c, k[:, :, :2000], v[:, :, :2000], 128)
     mid = c.nbytes
     _feed(c, k[:, :, 2000:], v[:, :, 2000:], 128)
@@ -138,10 +125,10 @@ def test_nbytes_plateau():
     assert c.nbytes < unbounded.nbytes
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 @pytest.mark.parametrize("d", [128, 256])
 def test_incremental_matches_bulk_common_window(d):
-    k, v = _tokens(2000, d=d)
+    k, v = tokens(2000, d=d)
     inc = _rot()
     _feed(inc, k, v, 13)
     bulk = _rot()
@@ -151,9 +138,9 @@ def test_incremental_matches_bulk_common_window(d):
     _assert_common_window_equal(inc, bulk)
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_rotating_matches_truncated_plain():
-    k, v = _tokens(2000)
+    k, v = tokens(2000)
     rot = _rot()
     _feed(rot, k, v, 128)
     plain = KVarNKVCache(tail_tokens=TAIL)
@@ -165,14 +152,14 @@ def test_rotating_matches_truncated_plain():
         assert np.array_equal(x, y), f
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 @pytest.mark.parametrize("delta", [-1, 0, 1])
 def test_wrap_boundary_group_edges(delta):
     # Land the stream right at the compaction trigger and one token either
     # side of it: sink + (g_max + slack + 1) full groups.
     edge = 128 + (4 + 4 + 1) * GROUP + delta
     c = _rot()
-    k, v = _tokens(edge + 300)
+    k, v = tokens(edge + 300)
     _feed(c, k[:, :, :edge], v[:, :, :edge], 128)
     _assert_invariants(c)
     _feed(c, k[:, :, edge:], v[:, :, edge:], 1)
@@ -180,25 +167,25 @@ def test_wrap_boundary_group_edges(delta):
     assert c.evicted > 0
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_bulk_overflow_seals_the_whole_chunk_then_compacts():
     # A single prefill 3x the window seals every group it carries, so the
     # chunk attends its own leading rows; the next entry compacts to the
     # window.
     c = _rot()
-    k, v = _tokens(3 * WIN)
+    k, v = tokens(3 * WIN)
     c.update_and_fetch(k, v)
     _assert_invariants(c, chunk=3 * WIN)
     assert c.n_sealed == (3 * WIN - c.sink_cap) // GROUP
     assert c.evicted == 0
-    k1, v1 = _tokens(1, seed=1)
+    k1, v1 = tokens(1, seed=1)
     c.update_and_fetch(k1, v1)
     _assert_invariants(c)
     assert c.n_sealed == c.g_max
     assert c.evicted == (3 * WIN - c.sink_cap) // GROUP * GROUP - c.g_max * GROUP
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_bulk_overflow_chunk_attends_its_own_rows():
     # Every query of a chunk wider than the window sees its true causal
     # key set. The tolerance covers 6-bit record noise, not a misaligned
@@ -207,7 +194,7 @@ def test_bulk_overflow_chunk_attends_its_own_rows():
 
     c = _rot()
     n = 3 * WIN
-    k, v = _tokens(n)
+    k, v = tokens(n)
     c.update_and_fetch(k, v)
     rng = np.random.default_rng(3)
     q = mx.array(rng.standard_normal((1, HQ, n, D)).astype(np.float16))
@@ -223,7 +210,7 @@ def test_bulk_overflow_chunk_attends_its_own_rows():
 # -- compaction timing -------------------------------------------------------
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_compaction_fires_at_entry_only(monkeypatch):
     c = _rot()
     events = []
@@ -232,7 +219,7 @@ def test_compaction_fires_at_entry_only(monkeypatch):
     monkeypatch.setattr(
         c, "_seal", lambda rk, rv: (events.append("seal"), seal(rk, rv))[1]
     )
-    k, v = _tokens(2000)
+    k, v = tokens(2000)
     for i in range(0, 2000, 128):
         events.clear()
         c.update_and_fetch(k[:, :, i : i + 128], v[:, :, i : i + 128])
@@ -241,13 +228,13 @@ def test_compaction_fires_at_entry_only(monkeypatch):
         assert "compact" not in events[1:]
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_context_floor_across_wrap():
     # Every incoming row must see >= the resident window (sink + g_max
     # groups): compaction is sized by the pre-append frontier, so visibility
     # only grows between entry and attention.
     c = _rot()
-    k, v = _tokens(3000)
+    k, v = tokens(3000)
     floor = c.sink_cap + c.g_max * GROUP
     for i in range(0, 3000, 97):
         n = k[:, :, i : i + 97].shape[2]
@@ -270,10 +257,10 @@ def test_make_mask_strings_only():
         c.make_mask(8, window_size=256)
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_materialize_width_is_visible():
     c = _rot()
-    k, v = _tokens(2000)
+    k, v = tokens(2000)
     _feed(c, k, v, 128)
     mk, mv = c.materialize()
     assert mk.shape[2] == mv.shape[2] == c.visible
@@ -282,10 +269,10 @@ def test_materialize_width_is_visible():
 # -- trim --------------------------------------------------------------------
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_trim_truth_table_post_wrap():
     c = _rot()
-    k, v = _tokens(2000)
+    k, v = tokens(2000)
     _feed(c, k, v, 128)
     live = c.live_len
     assert c._can_trim(live)  # inside live rows
@@ -301,9 +288,9 @@ def test_trim_truth_table_post_wrap():
     assert (c.offset, c.evicted, c.n_sealed) == (64, 0, 0)
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_trim_replay_common_window():
-    k, v = _tokens(2000)
+    k, v = tokens(2000)
     ref = _rot()
     _feed(ref, k, v, 128)
     c = _rot()
@@ -314,11 +301,11 @@ def test_trim_replay_common_window():
     _assert_common_window_equal(c, ref)
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_mtp_verify_trim_post_wrap():
     # verify rejections trim <= 3 tokens off the frontier, never the
     # evicted region; replaying them lands bit-identically
-    k, v = _tokens(1500)
+    k, v = tokens(1500)
     ref = _rot()
     _feed(ref, k, v, 1)
     c = _rot()
@@ -332,22 +319,22 @@ def test_mtp_verify_trim_post_wrap():
 # -- serialization -----------------------------------------------------------
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_state_meta_round_trip():
     c = _rot()
-    k, v = _tokens(2000)
+    k, v = tokens(2000)
     _feed(c, k, v, 128)
     r = KVarNRotatingKVCache.from_state(c.state, c.meta_state)
     assert (r.max_size, r.evicted, r.offset) == (c.max_size, c.evicted, c.offset)
     _assert_common_window_equal(r, c)
-    r.update_and_fetch(*_tokens(5, seed=9))
+    r.update_and_fetch(*tokens(5, seed=9))
     _assert_invariants(r)
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_meta_arity_fail_closed_both_directions():
     c = _rot()
-    k, v = _tokens(300)
+    k, v = tokens(300)
     c.update_and_fetch(k, v)
     plain = KVarNKVCache(tail_tokens=TAIL)
     plain.update_and_fetch(k, v)
@@ -357,7 +344,7 @@ def test_meta_arity_fail_closed_both_directions():
         KVarNRotatingKVCache.from_state(plain.state, plain.meta_state)  # 11 into 13
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_save_load_prompt_cache_file(tmp_path):
     from mlx_lm.models.cache import load_prompt_cache, save_prompt_cache
 
@@ -365,7 +352,7 @@ def test_save_load_prompt_cache_file(tmp_path):
 
     ensure_registered()
     c = _rot()
-    k, v = _tokens(2000)
+    k, v = tokens(2000)
     _feed(c, k, v, 128)
     path = str(tmp_path / "kvarn-rot.safetensors")
     save_prompt_cache(path, [c])
@@ -375,12 +362,12 @@ def test_save_load_prompt_cache_file(tmp_path):
     _assert_common_window_equal(r, c)
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_clone_lm_twin():
     from gmlx.cache.snapshot import _clone_lm_twin
 
     c = _rot()
-    k, v = _tokens(2000)
+    k, v = tokens(2000)
     _feed(c, k, v, 128)
     targets = []
     r = _clone_lm_twin(c, targets)
@@ -393,11 +380,11 @@ def test_clone_lm_twin():
 # -- conversion --------------------------------------------------------------
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_from_cache_pre_wrap():
     from mlx_lm.models.cache import RotatingKVCache
 
-    k, v = _tokens(500)
+    k, v = tokens(500)
     src = RotatingKVCache(max_size=WIN, keep=4)
     src.update_and_fetch(k, v)
     conv = KVarNRotatingKVCache.from_cache(src, tail_tokens=TAIL)
@@ -411,14 +398,14 @@ def test_from_cache_wrapped_refuses():
     from mlx_lm.models.cache import RotatingKVCache
 
     src = RotatingKVCache(max_size=256, keep=4)
-    k, v = _tokens(300)
+    k, v = tokens(300)
     src.update_and_fetch(k, v)
     with pytest.raises(ValueError, match="wrapped rotating cache"):
         KVarNRotatingKVCache.from_cache(src, tail_tokens=0)
 
 
-@_NEEDS_GPU
-def test_policy_converts_the_rotating_arm(_ops_ok):
+@needs_kvarn_ops
+def test_policy_converts_the_rotating_arm(kvarn_ops_ok):
     from mlx_lm.models.cache import KVCache, RotatingKVCache
 
     from gmlx.gen.generation import convert_kvarn_cache
@@ -444,34 +431,17 @@ def test_policy_converts_the_rotating_arm(_ops_ok):
 # -- setup plumbing ----------------------------------------------------------
 
 
-class _Args:
-    def __init__(self, **kw):
-        self.model_type = kw.pop("model_type", "llama")
-        self.head_dim = kw.pop("head_dim", 128)
-        for k, v in kw.items():
-            setattr(self, k, v)
-
-
 class _MakeCacheLess:
     """llama-class shape: no make_cache, so --max-kv-size manufactures a
     rotating stack via mlx-lm's make_prompt_cache."""
 
     def __init__(self, n_layers=2, **kw):
-        self.args = _Args(**kw)
+        self.args = Args(**kw)
         self.layers = [None] * n_layers
 
 
-@pytest.fixture
-def _ops_ok(monkeypatch):
-    from gmlx.cache import kvarn_sdpa
-
-    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
-    monkeypatch.delenv("GMLX_KVARN", raising=False)
-    monkeypatch.delenv("GMLX_KVARN_BITS", raising=False)
-
-
-@_NEEDS_GPU
-def test_setup_converts_rotating_stack(_ops_ok, capsys):
+@needs_kvarn_ops
+def test_setup_converts_rotating_stack(kvarn_ops_ok, capsys):
     from gmlx.gen.generation import setup_kvarn_cache
 
     pc = setup_kvarn_cache(_MakeCacheLess(), None, 1024, 4096)
@@ -482,7 +452,7 @@ def test_setup_converts_rotating_stack(_ops_ok, capsys):
     assert "[kv] kvarn6 tail=1024 window=4096 -> quantized 2/2 attn layers" in err
 
 
-def test_setup_declines_below_floor(_ops_ok, capsys):
+def test_setup_declines_below_floor(kvarn_ops_ok, capsys):
     from gmlx.gen.generation import setup_kvarn_cache
 
     assert setup_kvarn_cache(_MakeCacheLess(), None, 1024, 512) is None
@@ -490,8 +460,8 @@ def test_setup_declines_below_floor(_ops_ok, capsys):
     assert "window floor" in err and "kv_tail_tokens" in err
 
 
-@_NEEDS_GPU
-def test_setup_without_window_stays_plain(_ops_ok, capsys):
+@needs_kvarn_ops
+def test_setup_without_window_stays_plain(kvarn_ops_ok, capsys):
     from gmlx.gen.generation import setup_kvarn_cache
 
     pc = setup_kvarn_cache(_MakeCacheLess(), None, 1024, None)
@@ -550,13 +520,13 @@ def _ref_attention(q, cache, qL):
     return kq.kvarn_rotate(o.astype(mx.float16)).astype(mx.float32)
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 @pytest.mark.parametrize("ql", [1, 2, 4])
 def test_post_wrap_decode_matches_reference(ql):
     from gmlx.cache.kvarn_sdpa import kvarn_attention
 
     c = _rot()
-    k, v = _tokens(2000)
+    k, v = tokens(2000)
     _feed(c, k, v, 128)
     assert c.evicted > 0
     rng = np.random.default_rng(1)
@@ -567,14 +537,14 @@ def test_post_wrap_decode_matches_reference(ql):
     assert d < 5e-3, f"max|d|={d}"
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_pre_wrap_tail_saturated_split():
     # Small fill where the precision tail covers nearly everything: the
     # decode split widens the body to qL (base-cache behavior preserved).
     from gmlx.cache.kvarn_sdpa import kvarn_attention
 
     c = _rot()
-    k, v = _tokens(WIN - 255)
+    k, v = tokens(WIN - 255)
     c.update_and_fetch(k, v)
     assert c.evicted == 0 and 0 < c.visible - c.tail_len < 4
     rng = np.random.default_rng(1)

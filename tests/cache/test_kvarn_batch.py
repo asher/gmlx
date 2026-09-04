@@ -11,16 +11,10 @@ import mlx.core as mx
 
 from gmlx.cache.kvarn_cache import BatchKVarNKVCache, KVarNKVCache, KVarNView
 from gmlx.cache.kvarn_sdpa import kvarn_attention
-
-_NEEDS_GPU = pytest.mark.skipif(
-    mx.default_device() != mx.gpu,
-    reason="kvarn kernels are Metal-only; needs the GPU device",
-)
+from kvarn_testlib import D, H, needs_kvarn_ops
 
 B = 3
-H = 2
 HQ = 8
-D = 128
 SCALE = D**-0.5
 
 
@@ -77,7 +71,7 @@ def _assert_close(out, ref, atol=5e-3):
 # -- construction ------------------------------------------------------------
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_batch_rows_match_single_stream():
     k, v = _slab(600)
     batch = BatchKVarNKVCache([0, 64, 200], tail_tokens=256)
@@ -91,7 +85,7 @@ def test_batch_rows_match_single_stream():
         assert np.array_equal(np.array(bv[b : b + 1]), np.array(sv))
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_views_and_offsets():
     c = _filled(300, [0, 10, 20])
     kv, vv = c.update_and_fetch(*_slab(1, seed=9))
@@ -116,7 +110,7 @@ def _decode_setup(n, pads, tail=256, seed=0, d=D):
     return c, mask
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 @pytest.mark.parametrize("d", [128, 256, 512])
 def test_batch_decode_matches_reference(d):
     # Row starts hit every region: records (150), and past the body/tail
@@ -129,7 +123,7 @@ def test_batch_decode_matches_reference(d):
     _assert_close(out, _ref_batch_decode(q, c, pads))
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_batch_decode_d512_gqa16_shipped_shape():
     # gemma-4 global layers on serve: 1 kv head, 16 q heads; gqa sits on
     # _decode_batch's <= 16 limit.
@@ -146,7 +140,7 @@ def test_batch_decode_d512_gqa16_shipped_shape():
     _assert_close(out, _ref_batch_decode(q, c, pads))
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_batch_decode_no_tail():
     pads = [0, 150, 296]
     c, mask = _decode_setup(600, pads, tail=0)
@@ -155,7 +149,7 @@ def test_batch_decode_no_tail():
     _assert_close(out, _ref_batch_decode(q, c, pads))
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_batch_decode_all_tail():
     pads = [0, 50, 150]
     c, mask = _decode_setup(200, pads, tail=256)
@@ -164,7 +158,7 @@ def test_batch_decode_all_tail():
     _assert_close(out, _ref_batch_decode(q, c, pads))
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_unregistered_mask_falls_back():
     # A foreign array mask (no provenance) must still be correct via the
     # materialize path: same values, mask applied by mx.fast.
@@ -190,7 +184,7 @@ def test_make_mask_registers_starts():
     assert _registered_starts(windowed) is None
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 @pytest.mark.parametrize("d", [128, 256, 512])
 def test_explicit_starts_match_registered_mask(d):
     # Owned dispatches (qwen3.5) pass cache.left_padding directly; the
@@ -203,7 +197,7 @@ def test_explicit_starts_match_registered_mask(d):
     assert np.array_equal(np.array(via_starts), np.array(via_mask))
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_explicit_starts_masked_fallback(monkeypatch):
     # Declined fused decode with explicit starts must mask pad rows on
     # the materialize path, not attend them.
@@ -215,7 +209,7 @@ def test_explicit_starts_masked_fallback(monkeypatch):
     _assert_close(out, _ref_batch_decode(q, c, pads), atol=2e-2)
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 @pytest.mark.parametrize("d", [128, 256, 512])
 def test_qwen35_arm_uses_cache_pads(d):
     # The qwen3.5 decode protocol strips the mask to None and carries the
@@ -234,7 +228,7 @@ def test_qwen35_arm_uses_cache_pads(d):
 # -- batch ops ---------------------------------------------------------------
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_filter_selects_rows_bit_exactly_when_a_row_keeps_no_padding():
     c = _filled(300, [0, 64, 128])
     before_k = np.array(c.materialize()[0])
@@ -245,7 +239,7 @@ def test_filter_selects_rows_bit_exactly_when_a_row_keeps_no_padding():
     assert np.array_equal(after_k, before_k[[2, 0]])
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_filter_compacts_shared_padding_like_batch_kv_cache():
     """The stack shares one mask. BatchKVCache.filter shifts left by the
     minimum padding, so a kvarn layer that kept it would leave the mask
@@ -269,7 +263,7 @@ def test_filter_compacts_shared_padding_like_batch_kv_cache():
     _assert_close(out, _ref_batch_decode(q, c, [0, 64]))
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_filter_to_all_padding_rows_empties_the_cache():
     c = _filled(128, [0, 128])
     c.filter(mx.array([1]))
@@ -278,7 +272,7 @@ def test_filter_to_all_padding_rows_empties_the_cache():
     assert c.stage_k is None
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_extend_equal_idx_is_bit_exact():
     a = _filled(300, [0, 32], seed=0)
     b = _filled(300, [16], seed=5)
@@ -291,7 +285,7 @@ def test_extend_equal_idx_is_bit_exact():
     assert np.array_equal(mk[2:], bk)
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_extend_realigns_shorter_side():
     a = _filled(640, [0, 32], seed=0)
     b = _filled(400, [8], seed=5)
@@ -315,7 +309,7 @@ def test_extend_realigns_shorter_side():
     _assert_close(out, _ref_batch_decode(q, a, [0, 32, 248]))
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_extend_mismatches_raise():
     a = _filled(300, [0])
     with pytest.raises(ValueError, match="mismatched"):
@@ -324,7 +318,7 @@ def test_extend_mismatches_raise():
         a.extend(BatchKVarNKVCache([0], tail_tokens=256))
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_state_round_trip():
     c = _filled(300, [0, 64, 128])
     fresh = BatchKVarNKVCache([0])

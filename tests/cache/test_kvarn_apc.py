@@ -18,14 +18,8 @@ from mlx_vlm.models.cache import KVCache  # noqa: E402
 
 from gmlx.cache import kvarn_apc  # noqa: E402
 from gmlx.cache.kvarn_cache import BatchKVarNKVCache, KVarNKVCache  # noqa: E402
+from kvarn_testlib import D, H, needs_kvarn_ops  # noqa: E402
 
-_NEEDS_GPU = pytest.mark.skipif(
-    mx.default_device() != mx.gpu,
-    reason="kvarn kernels are Metal-only; needs the GPU device",
-)
-
-H = 2
-D = 128
 
 _ARM_NAMES = (
     "_cache_entry_supports_exact_apc",
@@ -80,7 +74,7 @@ def _equal_content(a, b):
 # -- extract / merge ---------------------------------------------------------
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_extract_padfree_row_is_bit_exact():
     k, v = _slab(600, b=2)
     batch = BatchKVarNKVCache([0, 150], tail_tokens=256)
@@ -94,7 +88,7 @@ def test_extract_padfree_row_is_bit_exact():
     assert np.array_equal(np.array(rv), np.array(bv[0:1]))
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_extract_padded_row_rebuilds():
     k, v = _slab(600, b=2)
     batch = BatchKVarNKVCache([0, 150], tail_tokens=256)
@@ -107,7 +101,7 @@ def test_extract_padded_row_rebuilds():
     assert np.abs(np.array(rk.astype(mx.float32)) - want).max() < 0.35
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_merge_single_row_round_trip():
     c = _single(600)
     merged = BatchKVarNKVCache.merge([c])
@@ -119,7 +113,7 @@ def test_merge_single_row_round_trip():
     assert _equal_content(back, c)
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_merge_multi_row_realigns():
     a, b = _single(600, seed=0), _single(400, seed=5)
     merged = BatchKVarNKVCache.merge([a, b])
@@ -157,7 +151,7 @@ def test_finalize_allows_zero_right_padding():
 # -- arms --------------------------------------------------------------------
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_clone_arm(restorable):
     kvarn_apc.install_kvarn_apc()
     c = _single(300)
@@ -169,7 +163,7 @@ def test_clone_arm(restorable):
     assert clones[0].offset == 300
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_clone_arm_normalizes_lone_batch(restorable):
     kvarn_apc.install_kvarn_apc()
     k, v = _slab(300)
@@ -183,7 +177,7 @@ def test_clone_arm_normalizes_lone_batch(restorable):
     assert apc._clone_prompt_cache_for_apc([wide]) is None
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_merge_arm(restorable):
     kvarn_apc.install_kvarn_apc()
     c = _single(300)
@@ -220,7 +214,7 @@ def _wait_for_exact_file(disk, timeout=10.0):
     return False
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_disk_round_trip_and_version_fail_closed(restorable, tmp_path):
     kvarn_apc.install_kvarn_apc()
     tokens = list(range(40))
@@ -296,7 +290,7 @@ def test_layer_has_content_kvarn_arm():
     assert not _layer_has_content(KVarNKVCache())
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_layer_has_content_and_row_snapshot(restorable):
     kvarn_apc.install_kvarn_apc()
     from gmlx.cache.snapshot import _layer_has_content, row_snapshot

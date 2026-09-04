@@ -21,27 +21,11 @@ import mlx_kquant as kq  # noqa: E402
 
 import gmlx.spec.engine as spec_engine  # noqa: E402
 from gmlx.cache.kvarn_cache import KVarNKVCache  # noqa: E402
-
-_NEEDS_GPU = pytest.mark.skipif(
-    mx.default_device() != mx.gpu,
-    reason="kvarn quantize/rotate dispatch Metal kernels; needs the GPU device",
-)
-
-H = 2
-D = 128
-
-
-def _tokens(n, seed=0):
-    rng = np.random.default_rng(seed)
-    k = mx.array(rng.standard_normal((1, H, n, D)).astype(np.float16))
-    v = mx.array(rng.standard_normal((1, H, n, D)).astype(np.float16))
-    return k, v
+from kvarn_testlib import Args, D, H, filled, needs_kvarn_ops, tokens  # noqa: E402
 
 
 def _filled(n, tail=256, seed=0):
-    c = KVarNKVCache(tail_tokens=tail)
-    c.update_and_fetch(*_tokens(n, seed))
-    return c
+    return filled(n, tail=tail, seed=seed)
 
 
 class _SSMCache:
@@ -51,17 +35,9 @@ class _SSMCache:
         return False
 
 
-class _Args:
-    def __init__(self, **kw):
-        self.model_type = kw.pop("model_type", "llama")
-        self.head_dim = kw.pop("head_dim", 128)
-        for k, v in kw.items():
-            setattr(self, k, v)
-
-
 class _FakeLM:
     def __init__(self, **kw):
-        self.args = _Args(**kw)
+        self.args = Args(**kw)
 
     def make_cache(self):
         return [KVCache(), _SSMCache(), KVCache()]
@@ -77,15 +53,6 @@ class _Drafter:
 
     class config:
         block_size = 2
-
-
-@pytest.fixture
-def _ops_ok(monkeypatch):
-    from gmlx.cache import kvarn_sdpa
-
-    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
-    monkeypatch.delenv("GMLX_KVARN", raising=False)
-    monkeypatch.delenv("GMLX_KVARN_BITS", raising=False)
 
 
 @pytest.fixture
@@ -178,8 +145,8 @@ def test_stamped_params_rule_the_boot_env(restorable):
 # -- serve B=1 conversion ----------------------------------------------------
 
 
-@_NEEDS_GPU
-def test_b1_mtp_kvarn_converts(restorable, _ops_ok, capsys):
+@needs_kvarn_ops
+def test_b1_mtp_kvarn_converts(restorable, kvarn_ops_ok, capsys):
     restorable.setenv("KV_QUANT_SCHEME", "kvarn")
     spec_engine.install_spec_kv_quant()
     caches = _mk()
@@ -192,8 +159,8 @@ def test_b1_mtp_kvarn_converts(restorable, _ops_ok, capsys):
     assert "[kv] MTP spec path" in capsys.readouterr().out
 
 
-@_NEEDS_GPU
-def test_b1_mtp_kvarn_env_widths(restorable, _ops_ok):
+@needs_kvarn_ops
+def test_b1_mtp_kvarn_env_widths(restorable, kvarn_ops_ok):
     restorable.setenv("KV_QUANT_SCHEME", "kvarn")
     restorable.setenv("KV_BITS", "4")
     restorable.setenv("KV_TAIL_TOKENS", "256")
@@ -203,8 +170,8 @@ def test_b1_mtp_kvarn_env_widths(restorable, _ops_ok):
     assert caches[0].tail_cap == 256
 
 
-@_NEEDS_GPU
-def test_b1_mtp_kvarn_from_the_stamp(restorable, _ops_ok):
+@needs_kvarn_ops
+def test_b1_mtp_kvarn_from_the_stamp(restorable, kvarn_ops_ok):
     # Boot env says fp16; this model was loaded at kvarn k4 tail 256.
     restorable.delenv("KV_QUANT_SCHEME", raising=False)
     spec_engine.install_spec_kv_quant()
@@ -219,15 +186,15 @@ def test_b1_mtp_kvarn_from_the_stamp(restorable, _ops_ok):
     assert all(type(c) is not KVarNKVCache for c in _mk(lm=off))
 
 
-def test_readback_target_declines(restorable, _ops_ok):
+def test_readback_target_declines(restorable, kvarn_ops_ok):
     restorable.setenv("KV_QUANT_SCHEME", "kvarn")
     spec_engine.install_spec_kv_quant()
     caches = _mk(lm=_ReadbackLM())
     assert all(type(c) is not KVarNKVCache for c in caches)
 
 
-@_NEEDS_GPU
-def test_qwen35_arch_converts(restorable, _ops_ok):
+@needs_kvarn_ops
+def test_qwen35_arch_converts(restorable, kvarn_ops_ok):
     # The dispatch arm lifted the qwen3.5 bypass: the arch converts like
     # any other 128-dim stack (recurrent layers stay untouched).
     restorable.setenv("KV_QUANT_SCHEME", "kvarn")
@@ -237,7 +204,7 @@ def test_qwen35_arch_converts(restorable, _ops_ok):
     assert type(caches[1]) is _SSMCache
 
 
-def test_batch_passthrough(restorable, _ops_ok):
+def test_batch_passthrough(restorable, kvarn_ops_ok):
     restorable.setenv("KV_QUANT_SCHEME", "kvarn")
     spec_engine.install_spec_kv_quant()
     sentinel = ["stock"]
@@ -245,7 +212,7 @@ def test_batch_passthrough(restorable, _ops_ok):
     assert out is sentinel
 
 
-def test_rotating_stack_declines(restorable, _ops_ok):
+def test_rotating_stack_declines(restorable, kvarn_ops_ok):
     restorable.setenv("KV_QUANT_SCHEME", "kvarn")
     spec_engine.install_spec_kv_quant()
 
@@ -310,7 +277,7 @@ def test_mtp_run_flags_keep_kvarn():
     assert mtp_dropped_run_flags(ns) == []
 
 
-def test_mtp_setup_declines_shared_kv_drafter(_ops_ok, capsys):
+def test_mtp_setup_declines_shared_kv_drafter(kvarn_ops_ok, capsys):
     from gmlx.gen.generation import setup_kvarn_mtp_cache
 
     class _SharedDrafter:
@@ -320,8 +287,8 @@ def test_mtp_setup_declines_shared_kv_drafter(_ops_ok, capsys):
     assert "reads the target KV back" in capsys.readouterr().err
 
 
-@_NEEDS_GPU
-def test_mtp_setup_builds_and_warns_wide_block(_ops_ok, capsys):
+@needs_kvarn_ops
+def test_mtp_setup_builds_and_warns_wide_block(kvarn_ops_ok, capsys):
     from gmlx.gen.generation import setup_kvarn_mtp_cache
 
     pc = setup_kvarn_mtp_cache(_FakeLM(), _Drafter(), None, 1024, 6)
@@ -335,7 +302,7 @@ def test_mtp_setup_builds_and_warns_wide_block(_ops_ok, capsys):
 # -- rollback contracts ------------------------------------------------------
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_hy3_rollback_with_kvarn_leaves():
     from gmlx.models.hy_v3.mtp import HyV3SpecLM
 
@@ -344,7 +311,7 @@ def test_hy3_rollback_with_kvarn_leaves():
     assert all(c.offset == 128 for c in caches)
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_hy3_rollback_consults_probe_before_mutating():
     from gmlx.models.hy_v3.mtp import HyV3SpecLM
 
@@ -404,8 +371,8 @@ def test_rollback_guard_pre_checks_trim():
     assert len(calls) == 2
 
 
-@_NEEDS_GPU
-def test_rollback_guard_installed_by_mtp_setup(_ops_ok):
+@needs_kvarn_ops
+def test_rollback_guard_installed_by_mtp_setup(kvarn_ops_ok):
     from gmlx.gen.generation import setup_kvarn_mtp_cache
 
     class _RollbackLM(_FakeLM):
@@ -421,7 +388,7 @@ def test_rollback_guard_installed_by_mtp_setup(_ops_ok):
 # -- R1: reject cycles straddling seal boundaries ----------------------------
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_mtp_reject_cycles_straddle_seals():
     # The R1 invariant: rejected draft KV must leave zero trace even when a
     # draft block straddles a 128-token seal boundary (eager seal quantizes
@@ -429,7 +396,7 @@ def test_mtp_reject_cycles_straddle_seals():
     # Every rejection count 1..3 crosses boundaries at every phase over the
     # walk, and each round's trim must report exactly what was asked.
     rng = np.random.default_rng(11)
-    true_k, true_v = _tokens(700, seed=11)
+    true_k, true_v = tokens(700, seed=11)
     a = KVarNKVCache(tail_tokens=256)
     pos = 0
     rounds = 0
@@ -479,7 +446,7 @@ def test_kvarn_lift_cache_recovers_original_domain():
     _skip_without_ops()
     from mlx_vlm.models.cache import BatchKVCache
 
-    k, v = _tokens(300, seed=7)
+    k, v = tokens(300, seed=7)
     c = KVarNKVCache(tail_tokens=256)
     c.update_and_fetch(k, v)
     c._gmlx_cascade = "stamp"
@@ -506,7 +473,7 @@ def test_kvarn_lift_matches_stock_attention():
     """The decisive check: one attention step over the lifted cache must
     agree with the same step over the un-preempted fp16 history."""
     _skip_without_ops()
-    k, v = _tokens(260, seed=11)
+    k, v = tokens(260, seed=11)
     c = KVarNKVCache(tail_tokens=256)
     c.update_and_fetch(k, v)
     lifted = spec_engine.kvarn_lift_cache(c)

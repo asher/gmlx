@@ -7,35 +7,10 @@ import argparse
 
 import pytest
 
-import mlx.core as mx
 
 from gmlx.cache.kvarn_cache import kvarn_unsupported, kvarn_widths
 from gmlx.gen.generation import setup_kvarn_cache
-
-_NEEDS_GPU = pytest.mark.skipif(
-    mx.default_device() != mx.gpu,
-    reason="kvarn kernels are Metal-only; needs the GPU device",
-)
-
-
-class _Args:
-    def __init__(self, **kw):
-        self.model_type = kw.pop("model_type", "llama")
-        self.head_dim = kw.pop("head_dim", 128)
-        for k, v in kw.items():
-            setattr(self, k, v)
-
-
-class _FakeModel:
-    def __init__(self, n_layers=2, **kw):
-        self.args = _Args(**kw)
-        self._n = n_layers
-
-    def make_cache(self):
-        from mlx_lm.models.cache import KVCache
-
-        return [KVCache() for _ in range(self._n)]
-
+from kvarn_testlib import FakeLM, needs_kvarn_ops
 
 # -- CLI ---------------------------------------------------------------------
 
@@ -93,76 +68,69 @@ def test_kvarn_widths(monkeypatch):
 # -- eligibility -------------------------------------------------------------
 
 
-@pytest.fixture
-def _ops_ok(monkeypatch):
-    from gmlx.cache import kvarn_sdpa
-
-    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
-
-
 def test_unsupported_kill_switch(monkeypatch):
     monkeypatch.setenv("GMLX_KVARN", "0")
-    assert "GMLX_KVARN=0" in kvarn_unsupported(_FakeModel())
+    assert "GMLX_KVARN=0" in kvarn_unsupported(FakeLM())
 
 
-def test_unsupported_reasons(_ops_ok, monkeypatch):
+def test_unsupported_reasons(kvarn_ops_ok, monkeypatch):
     monkeypatch.delenv("GMLX_KVARN", raising=False)
-    assert kvarn_unsupported(_FakeModel()) is None
-    assert kvarn_unsupported(_FakeModel(head_dim=256)) is None
-    assert kvarn_unsupported(_FakeModel(head_dim=512)) is None
-    assert "head_dim 64" in kvarn_unsupported(_FakeModel(head_dim=64))
-    assert "MLA" in kvarn_unsupported(_FakeModel(kv_lora_rank=512))
+    assert kvarn_unsupported(FakeLM()) is None
+    assert kvarn_unsupported(FakeLM(head_dim=256)) is None
+    assert kvarn_unsupported(FakeLM(head_dim=512)) is None
+    assert "head_dim 64" in kvarn_unsupported(FakeLM(head_dim=64))
+    assert "MLA" in kvarn_unsupported(FakeLM(kv_lora_rank=512))
     # qwen3.5 lost its bypass entry when the owned dispatch gained the arm
-    assert kvarn_unsupported(_FakeModel(model_type="qwen3_5")) is None
+    assert kvarn_unsupported(FakeLM(model_type="qwen3_5")) is None
 
 
-def test_unsupported_mixed_dims(_ops_ok, monkeypatch):
+def test_unsupported_mixed_dims(kvarn_ops_ok, monkeypatch):
     monkeypatch.delenv("GMLX_KVARN", raising=False)
     # gemma-4 shape: sliding head_dim 256 + global_head_dim 512 on the
     # convertible layers; any supported dim passes the gate.
-    m = _FakeModel(head_dim=256)
+    m = FakeLM(head_dim=256)
     m.args.global_head_dim = 512
     assert kvarn_unsupported(m) is None
-    m64 = _FakeModel(head_dim=64)
+    m64 = FakeLM(head_dim=64)
     m64.args.global_head_dim = 96
     reason = kvarn_unsupported(m64)
     assert "head_dim 64/96" in reason and "128/256/512" in reason
 
 
-def test_unsupported_gemma4_owned_tree(_ops_ok, monkeypatch):
+def test_unsupported_gemma4_owned_tree(kvarn_ops_ok, monkeypatch):
     monkeypatch.delenv("GMLX_KVARN", raising=False)
     import gmlx.models.gemma4.owned as gemma4_owned
 
-    owned = _FakeModel(head_dim=256)
+    owned = FakeLM(head_dim=256)
     monkeypatch.setattr(gemma4_owned, "is_owned_language_model", lambda m: m is owned)
     assert "owned (MTP) tree" in kvarn_unsupported(owned)
-    assert kvarn_unsupported(_FakeModel(head_dim=256)) is None
+    assert kvarn_unsupported(FakeLM(head_dim=256)) is None
 
 
-def test_setup_rejects_bad_bits_and_tail(_ops_ok, monkeypatch, capsys):
+def test_setup_rejects_bad_bits_and_tail(kvarn_ops_ok, monkeypatch, capsys):
     monkeypatch.delenv("GMLX_KVARN", raising=False)
-    assert setup_kvarn_cache(_FakeModel(), 7, 1024, None) is None
+    assert setup_kvarn_cache(FakeLM(), 7, 1024, None) is None
     assert "kvarn bits" in capsys.readouterr().err
-    assert setup_kvarn_cache(_FakeModel(), 6, 100, None) is None
+    assert setup_kvarn_cache(FakeLM(), 6, 100, None) is None
     assert "kv_tail_tokens" in capsys.readouterr().err
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_setup_builds_cache_and_banner(monkeypatch, capsys):
     monkeypatch.delenv("GMLX_KVARN", raising=False)
-    pc = setup_kvarn_cache(_FakeModel(), None, 1024, None)
+    pc = setup_kvarn_cache(FakeLM(), None, 1024, None)
     assert pc is not None and len(pc) == 2
     assert all(type(c).__name__ == "KVarNKVCache" for c in pc)
     err = capsys.readouterr().err
     assert "[kv] kvarn6 tail=1024 -> quantized 2/2 attn layers" in err
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_setup_declines_rotating_stack(monkeypatch, capsys):
     monkeypatch.delenv("GMLX_KVARN", raising=False)
     # max_kv_size forces rotating caches; kvarn leaves them fp16 and the
     # scheme drops loudly rather than silently.
-    model = _FakeModel()
+    model = FakeLM()
 
     def rotating_cache():
         from mlx_lm.models.cache import RotatingKVCache
@@ -237,13 +205,13 @@ def test_chat_trim_to_respects_probe():
 # -- affine-path hygiene -----------------------------------------------------
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_kvarn_caches_dodge_affine_probes(monkeypatch):
     # No ``bits`` attr (would route hasattr-based quantized SDPA) and no
     # ``to_quantized`` (would let maybe_quantize_kv_cache convert mid
     # stream); the kvarn arm nulls kv_bits so neither probe ever matters.
     monkeypatch.delenv("GMLX_KVARN", raising=False)
-    pc = setup_kvarn_cache(_FakeModel(), None, 1024, None)
+    pc = setup_kvarn_cache(FakeLM(), None, 1024, None)
     assert pc is not None
     assert all(not hasattr(c, "bits") for c in pc)
     assert all(not hasattr(c, "to_quantized") for c in pc)

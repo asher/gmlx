@@ -20,37 +20,15 @@ from mlx_vlm.server import generation as gen  # noqa: E402
 
 from gmlx.cache import kvarn_serve  # noqa: E402
 from gmlx.cache.kvarn_cache import BatchKVarNKVCache  # noqa: E402
-
-_NEEDS_GPU = pytest.mark.skipif(
-    mx.default_device() != mx.gpu,
-    reason="kvarn kernels are Metal-only; needs the GPU device",
-)
-
-
-class _Args:
-    def __init__(self, **kw):
-        self.model_type = kw.pop("model_type", "llama")
-        self.head_dim = kw.pop("head_dim", 128)
-        for k, v in kw.items():
-            setattr(self, k, v)
-
+from kvarn_testlib import Args, needs_kvarn_ops  # noqa: E402
 
 class _LayersLM:
     def __init__(self, n=3, **kw):
-        self.args = _Args(**kw)
+        self.args = Args(**kw)
         self.layers = [object()] * n
 
     def make_cache(self):
         return [KVCache() for _ in self.layers]
-
-
-@pytest.fixture
-def _ops_ok(monkeypatch):
-    from gmlx.cache import kvarn_sdpa
-
-    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
-    monkeypatch.delenv("GMLX_KVARN", raising=False)
-    monkeypatch.delenv("GMLX_KVARN_BITS", raising=False)
 
 
 @pytest.fixture
@@ -82,7 +60,7 @@ def test_install_idempotent(restorable):
     assert ar.PromptProcessingBatch.__init__ is wrapped_init
 
 
-def test_make_cache_builds_kvarn(restorable, _ops_ok, capsys):
+def test_make_cache_builds_kvarn(restorable, kvarn_ops_ok, capsys):
     _install(restorable)
     restorable.setenv("KV_TAIL_TOKENS", "256")
     caches = ar._make_cache(_LayersLM(), [0, 4], kv_bits=None, kv_quant_scheme="kvarn")
@@ -96,14 +74,14 @@ def test_make_cache_builds_kvarn(restorable, _ops_ok, capsys):
     assert gen._make_cache is ar._make_cache
 
 
-def test_make_cache_env_bits(restorable, _ops_ok):
+def test_make_cache_env_bits(restorable, kvarn_ops_ok):
     _install(restorable)
     restorable.setenv("KV_BITS", "4")
     caches = ar._make_cache(_LayersLM(), [0], kv_bits=4.0, kv_quant_scheme="kvarn")
     assert all(c.k_bits == 4 for c in caches[:-1])
 
 
-def test_make_cache_widths_come_from_the_model_stamp(restorable, _ops_ok):
+def test_make_cache_widths_come_from_the_model_stamp(restorable, kvarn_ops_ok):
     """Per-model load windows are closed by request time, so an ambient
     env read would build model B's caches at model A's width. The policy
     stamped at load wins over whatever env the request happens to see."""
@@ -123,7 +101,7 @@ def test_make_cache_widths_come_from_the_model_stamp(restorable, _ops_ok):
     assert all(c.k_bits == 4 and c.tail_cap == 256 for c in caches[:-1])
 
 
-def test_make_cache_declines_to_fp16(restorable, _ops_ok):
+def test_make_cache_declines_to_fp16(restorable, kvarn_ops_ok):
     _install(restorable)
     caches = ar._make_cache(
         _LayersLM(head_dim=64), [0], kv_bits=6.0, kv_quant_scheme="kvarn"
@@ -132,7 +110,7 @@ def test_make_cache_declines_to_fp16(restorable, _ops_ok):
     assert all(type(c) is BatchKVCache for c in caches)
 
 
-def test_make_cache_stock_paths_untouched(restorable, _ops_ok):
+def test_make_cache_stock_paths_untouched(restorable, kvarn_ops_ok):
     _install(restorable)
     affine = ar._make_cache(_LayersLM(), [0], kv_bits=8, kv_quant_scheme="uniform")
     assert all(type(c) is BatchQuantizedKVCache for c in affine[:-1])
@@ -153,7 +131,7 @@ def _make_ppb(model, **kw):
     )
 
 
-def test_ppb_fastpath_rebuilds_kvarn(restorable, _ops_ok):
+def test_ppb_fastpath_rebuilds_kvarn(restorable, kvarn_ops_ok):
     # Stock init's B=1 fast path skips _make_cache when kv_bits is None;
     # the wrap must land kvarn caches there too.
     _install(restorable)
@@ -163,13 +141,13 @@ def test_ppb_fastpath_rebuilds_kvarn(restorable, _ops_ok):
     assert all(c.tail_cap == 256 for c in batch.prompt_cache[:-1])
 
 
-def test_ppb_fastpath_leaves_ineligible(restorable, _ops_ok):
+def test_ppb_fastpath_leaves_ineligible(restorable, kvarn_ops_ok):
     _install(restorable)
     batch = _make_ppb(_LayersLM(head_dim=64), kv_bits=None, kv_quant_scheme="kvarn")
     assert all(type(c) is KVCache for c in batch.prompt_cache)
 
 
-def test_spec_build_suspends_kvarn(restorable, _ops_ok):
+def test_spec_build_suspends_kvarn(restorable, kvarn_ops_ok):
     _install(restorable)
     with kvarn_serve.spec_cache_build():
         caches = ar._make_cache(_LayersLM(), [0], kv_bits=None, kv_quant_scheme="kvarn")
@@ -178,7 +156,7 @@ def test_spec_build_suspends_kvarn(restorable, _ops_ok):
     assert all(type(c) is BatchKVarNKVCache for c in caches[:-1])
 
 
-def test_apc_gate(restorable, _ops_ok):
+def test_apc_gate(restorable, kvarn_ops_ok):
     from mlx_vlm import apc
 
     from gmlx.cache import kvarn_apc
@@ -216,7 +194,7 @@ def test_apc_gate(restorable, _ops_ok):
     assert bg.apc_manager is None
 
 
-def test_safe_quant_kvarn_arm(restorable, _ops_ok):
+def test_safe_quant_kvarn_arm(restorable, kvarn_ops_ok):
     import importlib
 
     from gmlx.cache.apc_pooling import install_safe_kv_quantization
@@ -260,8 +238,8 @@ def test_cascade_declines_kvarn():
     assert not cascade_sdpa._stamp_caches([_KvarnCache()], [b"ab", b"ab"])
 
 
-@_NEEDS_GPU
-def test_scalar_kvarn_promotes_on_generation_batch_extend(_ops_ok):
+@needs_kvarn_ops
+def test_scalar_kvarn_promotes_on_generation_batch_extend(kvarn_ops_ok):
     """The ckpt tier installs a single-stream KVarNKVCache into a B=1
     batch. Kvarn keeps merge on the batch class, so the stock promotion
     probe (type(c).merge) missed it and admission reached extend on a

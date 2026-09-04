@@ -23,16 +23,12 @@ from gmlx.cache.kvarn_cache import (
 )
 
 from test_ckpt_tier import D, H, make_hybrid_cache
+from kvarn_testlib import needs_kvarn_ops, tokens
 
 _cache = runtime_cache_module()
 ArraysCache = _cache.ArraysCache
 KVCache = _cache.KVCache
 RotatingKVCache = _cache.RotatingKVCache
-
-_NEEDS_GPU = pytest.mark.skipif(
-    mx.default_device() != mx.gpu,
-    reason="kvarn kernels are Metal-only; needs the GPU device",
-)
 
 KVARN_TAG = "kvarn:6:6:1024"
 
@@ -297,25 +293,18 @@ def test_kvarn_disk_write_mirrors_wire_salt(tmp_path):
         disk3.close()
 
 
-def _tokens(n, seed=0):
-    rng = np.random.default_rng(seed)
-    k = mx.array(rng.standard_normal((1, H, n, 128)).astype(np.float16))
-    v = mx.array(rng.standard_normal((1, H, n, 128)).astype(np.float16))
-    return k, v
-
-
-@_NEEDS_GPU
+@needs_kvarn_ops
 @pytest.mark.parametrize("p", [200, 300])
 def test_filled_kvarn_roundtrip_content_equal(p):
     man = GmlxAPCManager(num_blocks=8, block_size=16)
     kv = KVarNKVCache(tail_tokens=256)
-    kv.update_and_fetch(*_tokens(p, seed=p))
+    kv.update_and_fetch(*tokens(p, seed=p))
     tag = "kvarn:6:6:256"
     cache = [kv, _arr(seed=p)]
     assert ckpt_store(man, _ids(p), cache, extra_hash=3)
     ref = [np.array(m) for m in kv.materialize()]
     # The live cache keeps decoding after the store.
-    kv.update_and_fetch(*_tokens(40, seed=p + 1))
+    kv.update_and_fetch(*tokens(40, seed=p + 1))
     warm, got = ckpt_lookup(man, _ids(p) + [999, 998], extra_hash=3,
                             layout=(tag, "arr"))
     assert got == p

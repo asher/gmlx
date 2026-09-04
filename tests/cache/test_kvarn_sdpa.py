@@ -13,25 +13,10 @@ import mlx.core as mx
 
 from gmlx.cache.kvarn_cache import KVarNKVCache
 from gmlx.cache.kvarn_sdpa import install_kvarn_sdpa, kvarn_attention
+from kvarn_testlib import D, H, filled, needs_kvarn_ops
 
-_NEEDS_GPU = pytest.mark.skipif(
-    mx.default_device() != mx.gpu,
-    reason="kvarn kernels are Metal-only; needs the GPU device",
-)
-
-H = 2
 HQ = 8
-D = 128
 SCALE = D**-0.5
-
-
-def _filled(n, tail=384, seed=0, d=D):
-    rng = np.random.default_rng(seed)
-    k = mx.array(rng.standard_normal((1, H, n, d)).astype(np.float16))
-    v = mx.array(rng.standard_normal((1, H, n, d)).astype(np.float16))
-    c = KVarNKVCache(tail_tokens=tail)
-    c.update_and_fetch(k, v)
-    return c
 
 
 def _make_q(qL, seed=1, dtype=mx.float16, d=D):
@@ -74,50 +59,50 @@ def _assert_close(out, ref, atol=5e-3):
     assert d < atol, f"max|d|={d}"
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 @pytest.mark.parametrize("d", [128, 256, 512])
 @pytest.mark.parametrize("ql", [1, 2, 4])
 def test_decode_with_tail_matches_reference(ql, d):
-    cache = _filled(700, d=d)
+    cache = filled(700, d=d)
     q = _make_q(ql, d=d)
     out = kvarn_attention(q, cache, d**-0.5, "causal" if ql > 1 else None)
     _assert_close(out, _ref_attention(q, cache, ql))
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 @pytest.mark.parametrize("d", [128, 256, 512])
 @pytest.mark.parametrize("n", [130, 300, 700])
 def test_decode_no_tail_matches_reference(n, d):
-    cache = _filled(n, tail=0, d=d)
+    cache = filled(n, tail=0, d=d)
     q = _make_q(1, d=d)
     out = kvarn_attention(q, cache, d**-0.5, None)
     _assert_close(out, _ref_attention(q, cache, 1))
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 @pytest.mark.parametrize("d", [128, 256, 512])
 def test_decode_all_tail_matches_reference(d):
     # Shallow cache: the tail covers every token, no body call.
-    cache = _filled(200, tail=384, d=d)
+    cache = filled(200, tail=384, d=d)
     q = _make_q(1, d=d)
     out = kvarn_attention(q, cache, d**-0.5, None)
     _assert_close(out, _ref_attention(q, cache, 1))
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 @pytest.mark.parametrize("d", [128, 256, 512])
 def test_bfloat16_query(d):
-    cache = _filled(700, d=d)
+    cache = filled(700, d=d)
     q = _make_q(1, dtype=mx.bfloat16, d=d)
     out = kvarn_attention(q, cache, d**-0.5, None)
     assert out.dtype == mx.bfloat16
     _assert_close(out, _ref_attention(q, cache, 1), atol=2e-2)
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 @pytest.mark.parametrize("d", [128, 256, 512])
 def test_prefill_matches_reference(d):
-    cache = _filled(700, d=d)
+    cache = filled(700, d=d)
     q = _make_q(16, d=d)
     scale = d**-0.5
     out = kvarn_attention(q, cache, scale, "causal")
@@ -138,9 +123,9 @@ def test_prefill_matches_reference(d):
     _assert_close(out, ref)
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_kill_switch_forces_materialize(monkeypatch):
-    cache = _filled(700)
+    cache = filled(700)
     q = _make_q(1)
     monkeypatch.setenv("GMLX_KVARN_SDPA", "0")
     from gmlx.cache import kvarn_sdpa
@@ -150,9 +135,9 @@ def test_kill_switch_forces_materialize(monkeypatch):
     assert np.array_equal(np.array(off), np.array(ref))
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_sinks_raise_loudly():
-    cache = _filled(300)
+    cache = filled(300)
     q = _make_q(1)
     with pytest.raises(RuntimeError, match="sinks"):
         kvarn_attention(q, cache, SCALE, None, sinks=mx.zeros((HQ,)))
@@ -182,11 +167,11 @@ def test_install_sweeps_and_passes_through():
     assert np.array_equal(np.array(wrapped), np.array(orig))
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_installed_wrapper_routes_views():
     install_kvarn_sdpa()
     base = importlib.import_module("mlx_lm.models.base")
-    cache = _filled(300)
+    cache = filled(300)
     kv, vv = cache.update_and_fetch(
         mx.zeros((1, H, 1, D), mx.float16), mx.zeros((1, H, 1, D), mx.float16)
     )
@@ -197,14 +182,13 @@ def test_installed_wrapper_routes_views():
     _assert_close(out, _ref_attention(q, cache, 1))
 
 
-@_NEEDS_GPU
+@needs_kvarn_ops
 def test_probe_pins_the_record_layout_version(monkeypatch):
     # gmlx and mlx-kquant each carry the wire layout version; a mismatch
     # declines the scheme before any record is written.
     import mlx_kquant as kq
 
     from gmlx.cache import kvarn_sdpa
-    from gmlx.cache.kvarn_cache import KVarNKVCache
 
     assert kq.KVARN_RECORD_VERSION == KVarNKVCache.kvarn_layout_version
     assert kvarn_sdpa._probe() is None

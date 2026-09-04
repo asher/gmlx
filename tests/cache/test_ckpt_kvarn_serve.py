@@ -27,6 +27,7 @@ from gmlx.cache.kvarn_cache import BatchKVarNKVCache, KVarNKVCache
 from gmlx.cache.kvarn_serve import _ppb_rebuild_declined, ensure_ppb_kvarn
 
 from test_ckpt_kvarn import KVARN_TAG, _arr, _hollow_kvarn
+from kvarn_testlib import Args
 
 _cache = runtime_cache_module()
 ArraysCache = _cache.ArraysCache
@@ -36,28 +37,13 @@ RotatingKVCache = _cache.RotatingKVCache
 KW = {"kv_quant_scheme": "kvarn"}
 
 
-class _Args:
-    def __init__(self, head_dim=128):
-        self.model_type = "llama"
-        self.head_dim = head_dim
-
-
 class _HybridLM:
     def __init__(self, head_dim=128):
-        self.args = _Args(head_dim)
+        self.args = Args(head_dim=head_dim)
         self.layers = [object()] * 2
 
     def make_cache(self):
         return [KVCache(), ArraysCache(size=2)]
-
-
-@pytest.fixture
-def _ops_ok(monkeypatch):
-    from gmlx.cache import kvarn_sdpa
-
-    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
-    for k in ("GMLX_KVARN", "GMLX_KVARN_BITS", "KV_BITS", "KV_TAIL_TOKENS"):
-        monkeypatch.delenv(k, raising=False)
 
 
 def _batch(model=None, caches=None, uids=(0,), cols=0):
@@ -70,11 +56,11 @@ def _batch(model=None, caches=None, uids=(0,), cols=0):
     )
 
 
-def test_predicate_clean_batch_allows(_ops_ok):
+def test_predicate_clean_batch_allows(kvarn_ops_ok):
     assert _ppb_rebuild_declined(_batch(), dict(KW)) is None
 
 
-def test_predicate_kwarg_declines(_ops_ok):
+def test_predicate_kwarg_declines(kvarn_ops_ok):
     for kw, reason in [
         ({}, "scheme"),
         ({**KW, "kv_bits": 6}, "kv_bits"),
@@ -86,7 +72,7 @@ def test_predicate_kwarg_declines(_ops_ok):
     assert _ppb_rebuild_declined(_batch(uids=(0, 1)), dict(KW)) == "batch"
 
 
-def test_predicate_converted_and_warm_decline(_ops_ok):
+def test_predicate_converted_and_warm_decline(kvarn_ops_ok):
     b = _batch(caches=[KVarNKVCache(), ArraysCache(size=2)])
     assert _ppb_rebuild_declined(b, dict(KW)) == "converted"
     b = _batch(caches=[BatchKVarNKVCache(left_padding=[0]),
@@ -101,7 +87,7 @@ def test_predicate_converted_and_warm_decline(_ops_ok):
     assert _ppb_rebuild_declined(_batch(cols=3), dict(KW)) == "trimmed"
 
 
-def test_predicate_config_declines(_ops_ok, monkeypatch):
+def test_predicate_config_declines(kvarn_ops_ok, monkeypatch):
     # Config problems decline at the predicate, so B=1 keeps the stock
     # single-stream caches (fp16 tiers keep working) instead of being
     # rebuilt into fp16 batch classes.
@@ -114,7 +100,7 @@ def test_predicate_config_declines(_ops_ok, monkeypatch):
     assert _ppb_rebuild_declined(_batch(), dict(KW)) == "unsupported"
 
 
-def test_ensure_converts_in_place(_ops_ok, monkeypatch, capsys):
+def test_ensure_converts_in_place(kvarn_ops_ok, monkeypatch, capsys):
     from gmlx.cache import kvarn_serve
 
     monkeypatch.setattr(kvarn_serve, "_CKPT_NOTED", [False])
@@ -131,7 +117,7 @@ def test_ensure_converts_in_place(_ops_ok, monkeypatch, capsys):
     assert _ppb_rebuild_declined(b, dict(KW)) == "converted"
 
 
-def test_ensure_gates(_ops_ok):
+def test_ensure_gates(kvarn_ops_ok):
     b = _batch()
     kv = b.prompt_cache[0]
     assert ensure_ppb_kvarn(b, dict(KW), ckpt_active=False) is False
@@ -140,7 +126,7 @@ def test_ensure_gates(_ops_ok):
     assert b.prompt_cache[0] is kv
 
 
-def test_ensure_zero_conversion_leaves_stock(_ops_ok):
+def test_ensure_zero_conversion_leaves_stock(kvarn_ops_ok):
     # recurrent_gemma-shaped stack: no plain KV layer anywhere, so the
     # conversion is a no-op and the stock fp16 ckpt tier keeps working.
     caches = [ArraysCache(size=2), RotatingKVCache(max_size=32)]

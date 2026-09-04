@@ -156,6 +156,7 @@ testpaths = ["tests"]
 markers = [
     "integration: end-to-end test needing a real GGUF (and, for parity, a llama.cpp binary); skipped unless KQUANT_TEST_GGUF_DIR is set",
     "slow: long-running (large prompts / long generation)",
+    "needs_kvarn_ops: dispatches kvarn Metal kernels; skipped when the mlx-kquant ops probe fails (CPU device, op-less wheel)",
 ]
 
 [tool.ruff]
