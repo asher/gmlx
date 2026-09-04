@@ -544,79 +544,85 @@ advance ([server-config.md](server-config.md)).
 **Which width.** The measure is teacher-forced logit KLD against an fp16
 cache on wikitext, from `scripts/kld_harness.py`, on two legs: prefill
 (chunked prefill logits) and decode (token by token from full prefill
-depth). Medians in nats, lower is better; decode top-1 is the share of
-generated positions whose argmax matches the fp16 cache.
+depth). KLD in nats, lower is better. The median is the typical position;
+the decode p99 is the worst hundredth, where a quantizer's outliers show;
+decode top-1 is the share of generated positions whose argmax matches the
+fp16 cache.
 
 <!-- kld-tables -->
 Qwen3.5-9B Q4_K_M, 16k context (head_dim 256, 7 of 32 layers quantized):
 
-| cache | prefill KLD | decode KLD | decode top-1 |
-|---|---|---|---|
-| affine 2 | 0.02778 | 0.02745 | 89.0% |
-| kvarn 2 | 0.01503 | 0.00612 | 94.7% |
-| affine 3 | 0.00648 | 0.00606 | 94.3% |
-| kvarn 3 | 0.00291 | 0.00139 | 97.4% |
-| affine 4 | 0.00190 | 0.00183 | 96.9% |
-| kvarn 4 | 0.00117 | 0.00060 | 98.3% |
-| kvarn 5 | 0.00055 | 0.00029 | 98.2% |
-| kvarn k6 v5 | 0.00046 | 0.00028 | 98.6% |
-| affine 6 | 0.00046 | 0.00038 | 98.7% |
-| kvarn 6 | 0.00036 | 0.00027 | 98.7% |
-| affine 8 | 0.00029 | 0.00020 | 98.7% |
-| kvarn 8 | 0.00027 | 0.00020 | 99.2% |
+| cache | prefill median | decode median | decode p99 | decode top-1 |
+|---|---|---|---|---|
+| affine 2 | 0.02778 | 0.02745 | 0.5596 | 89.0% |
+| kvarn 2 | 0.01503 | 0.00612 | 0.2301 | 94.7% |
+| affine 3 | 0.00648 | 0.00606 | 0.1057 | 94.3% |
+| kvarn 3 | 0.00291 | 0.00139 | 0.0313 | 97.4% |
+| affine 4 | 0.00190 | 0.00183 | 0.0276 | 96.9% |
+| kvarn 4 | 0.00117 | 0.00060 | 0.0071 | 98.3% |
+| kvarn 5 | 0.00055 | 0.00029 | 0.0042 | 98.2% |
+| kvarn k6 v5 | 0.00046 | 0.00028 | 0.0039 | 98.6% |
+| affine 6 | 0.00046 | 0.00038 | 0.0045 | 98.7% |
+| kvarn 6 | 0.00036 | 0.00027 | 0.0036 | 98.7% |
+| affine 8 | 0.00029 | 0.00020 | 0.0027 | 98.7% |
+| kvarn 8 | 0.00027 | 0.00020 | 0.0030 | 99.2% |
 
 Qwen3.8-27B Q6_K_XL, 16k context (head_dim 256, 15 of 65 layers quantized):
 
-| cache | prefill KLD | decode KLD | decode top-1 |
-|---|---|---|---|
-| affine 2 | 0.01975 | 0.02314 | 90.3% |
-| kvarn 2 | 0.01009 | 0.00491 | 95.1% |
-| affine 3 | 0.00383 | 0.00419 | 96.1% |
-| kvarn 3 | 0.00212 | 0.00113 | 97.3% |
-| affine 4 | 0.00138 | 0.00136 | 97.5% |
-| kvarn 4 | 0.00084 | 0.00045 | 97.4% |
-| kvarn 5 | 0.00041 | 0.00025 | 98.4% |
-| affine 6 | 0.00033 | 0.00030 | 98.7% |
-| kvarn 6 | 0.00027 | 0.00019 | 98.8% |
-| affine 8 | 0.00023 | 0.00019 | 98.7% |
-| kvarn 8 | 0.00021 | 0.00015 | 98.9% |
+| cache | prefill median | decode median | decode p99 | decode top-1 |
+|---|---|---|---|---|
+| affine 2 | 0.01975 | 0.02314 | 0.4697 | 90.3% |
+| kvarn 2 | 0.01009 | 0.00491 | 0.1280 | 95.1% |
+| affine 3 | 0.00383 | 0.00419 | 0.1034 | 96.1% |
+| kvarn 3 | 0.00212 | 0.00113 | 0.0318 | 97.3% |
+| affine 4 | 0.00138 | 0.00136 | 0.0268 | 97.5% |
+| kvarn 4 | 0.00084 | 0.00045 | 0.0078 | 97.4% |
+| kvarn 5 | 0.00041 | 0.00025 | 0.0039 | 98.4% |
+| affine 6 | 0.00033 | 0.00030 | 0.0055 | 98.7% |
+| kvarn 6 | 0.00027 | 0.00019 | 0.0030 | 98.8% |
+| affine 8 | 0.00023 | 0.00019 | 0.0032 | 98.7% |
+| kvarn 8 | 0.00021 | 0.00015 | 0.0037 | 98.9% |
 
 Qwen3.8-27B Q6_K_XL, 32k context:
 
-| cache | prefill KLD | decode KLD | decode top-1 |
-|---|---|---|---|
-| affine 4 | 0.00162 | 0.00205 | 97.6% |
-| kvarn 4 | 0.00104 | 0.00070 | 98.1% |
-| affine 6 | 0.00039 | 0.00049 | 98.5% |
-| kvarn 6 | 0.00033 | 0.00032 | 99.4% |
-| affine 8 | 0.00027 | 0.00030 | 98.8% |
-| kvarn 8 | 0.00026 | 0.00028 | 99.0% |
+| cache | prefill median | decode median | decode p99 | decode top-1 |
+|---|---|---|---|---|
+| affine 4 | 0.00162 | 0.00205 | 0.0176 | 97.6% |
+| kvarn 4 | 0.00104 | 0.00070 | 0.0068 | 98.1% |
+| affine 6 | 0.00039 | 0.00049 | 0.0037 | 98.5% |
+| kvarn 6 | 0.00033 | 0.00032 | 0.0027 | 99.4% |
+| affine 8 | 0.00027 | 0.00030 | 0.0038 | 98.8% |
+| kvarn 8 | 0.00026 | 0.00028 | 0.0026 | 99.0% |
 
 Qwen3.6-27B Q4_K_S, 32k context (head_dim 256, 15 of 64 layers quantized):
 
-| cache | prefill KLD | decode KLD | decode top-1 |
-|---|---|---|---|
-| kvarn 4 | 0.00101 | 0.00081 | 98.5% |
-| kvarn 6 | 0.00033 | 0.00032 | 98.5% |
-| affine 8 | 0.00028 | 0.00034 | 99.2% |
-| kvarn 8 | 0.00027 | 0.00031 | 98.9% |
+| cache | prefill median | decode median | decode p99 | decode top-1 |
+|---|---|---|---|---|
+| affine 4 | 0.00158 | 0.00203 | 0.0235 | 97.6% |
+| kvarn 4 | 0.00101 | 0.00081 | 0.0095 | 98.5% |
+| affine 6 | 0.00041 | 0.00059 | 0.0072 | 98.7% |
+| kvarn 6 | 0.00033 | 0.00032 | 0.0038 | 98.5% |
+| affine 8 | 0.00028 | 0.00034 | 0.0033 | 99.2% |
+| kvarn 8 | 0.00027 | 0.00031 | 0.0047 | 98.9% |
 
 Nemotron-3.5-Lightning-30B-A3B, 16k context (Mamba2 hybrid, head_dim 128):
 
-| cache | prefill KLD | decode KLD | decode top-1 |
-|---|---|---|---|
-| kvarn 4 | 0.00270 | 0.00163 | 98.1% |
-| kvarn 6 | 0.00125 | 0.00103 | 98.8% |
-| affine 8 | 0.00123 | 0.00094 | 98.2% |
-| kvarn 8 | 0.00111 | 0.00095 | 98.6% |
+| cache | prefill median | decode median | decode p99 | decode top-1 |
+|---|---|---|---|---|
+| kvarn 4 | 0.00270 | 0.00163 | 0.0508 | 98.1% |
+| kvarn 6 | 0.00125 | 0.00103 | 0.0266 | 98.8% |
+| affine 8 | 0.00123 | 0.00094 | 0.0335 | 98.2% |
+| kvarn 8 | 0.00111 | 0.00095 | 0.0298 | 98.6% |
 <!-- /kld-tables -->
 
 Reading the tables: at a matched width kvarn beats the affine cache on both
-legs at every width below 8, by 2 to 4x on the decode leg at 2 to 4 bits,
-and the two converge at 8. 6-bit kvarn sits between the affine 6- and
-8-bit caches on the 9B and level with affine 8 on the 27B, in three
-quarters of the 8-bit record. Widths 2 and 3 are for experiments. The
-decode leg is the one a long generation accumulates.
+legs at every width below 8, by 2 to 4x on the decode-leg median at 2 to 4
+bits, and the two converge at 8. 6-bit kvarn sits between the affine 6-
+and 8-bit caches on the 9B and level with affine 8 on the 27Bs, in three
+quarters of the 8-bit record: at 32k its decode median can trail affine 8
+by a few percent while its p99 and top-1 stay ahead, so the two split the
+typical position and the outliers between them. Widths 2 and 3 are for
+experiments. The decode leg is the one a long generation accumulates.
 TurboQuant is mlx-vlm's scheme (see Origins); gmlx does not enable it, and
 it appears here for comparison only.
 
