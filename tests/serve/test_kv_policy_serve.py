@@ -155,6 +155,28 @@ def test_load_window_scheme_wins_over_the_frozen_generator(monkeypatch):
     assert pol.to_json()["scheme"] == "kvarn"
 
 
+def test_kvarn_engages_without_kv_bits(monkeypatch):
+    # The scheme alone requests kvarn at its default width; upstream's
+    # kv_bits parse (and its qat drop) does not gate it.
+    from gmlx.cache import kvarn_sdpa
+
+    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
+    monkeypatch.delenv("GMLX_KVARN", raising=False)
+    monkeypatch.delenv("KV_BITS", raising=False)
+    monkeypatch.setenv("KV_QUANT_SCHEME", "kvarn")
+    monkeypatch.delenv("MLX_VLM_GGUF_SPECULATIVE", raising=False)
+    model = _model()
+    model.config.head_dim = 128
+    rg = _rg(model=model, kv_bits=None, kv_quant_scheme="kvarn")
+    pol = skv.resolve_for_load(rg, "m-qat")
+    assert pol is not None and getattr(rg, skv.RG_ATTR) is pol
+    assert pol.single.scheme == "kvarn" and pol.single.bits == 6
+    assert pol.single.verdict in ("full", "partial")
+    # affine keeps the off-when-unset contract
+    monkeypatch.delenv("KV_QUANT_SCHEME")
+    assert skv.resolve_for_load(_rg(kv_bits=None), "m") is None
+
+
 def test_generator_scheme_is_kept_without_an_env_window(monkeypatch):
     monkeypatch.delenv("KV_QUANT_SCHEME", raising=False)
     monkeypatch.setenv("KV_BITS", "8")

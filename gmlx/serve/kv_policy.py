@@ -139,7 +139,8 @@ def resolve_for_load(rg, model_id: str):
         raise KvPolicyError(
             f"[kv] {model_id}: KV_BITS={requested!r} is not a number")
     bits = getattr(rg, "kv_bits", None)
-    if bits is None:
+    scheme = _load_window_scheme(rg)
+    if bits is None and scheme != "kvarn":
         if req_val:
             # get_quantized_kv_bits drops the flag for "qat" model ids.
             reason = ("model id marked quantization-aware (qat); "
@@ -164,7 +165,6 @@ def resolve_for_load(rg, model_id: str):
     mtp = bool(getattr(rg, "draft_model_path", None)
                or os.environ.get("MLX_VLM_GGUF_SPECULATIVE") == "1")
     stack = _probe_stack(rg.model)
-    scheme = _load_window_scheme(rg)
     kw = dict(
         kv_bits=bits,
         kv_group_size=getattr(rg, "kv_group_size", 64),
@@ -176,13 +176,14 @@ def resolve_for_load(rg, model_id: str):
         head_dim=_config_head_dim(rg.model),
     )
     if scheme == "kvarn":
-        # kvarn owns its own widths (bits is the key width, and
-        # GMLX_KVARN_BITS may split them) and declines by model shape.
+        # kvarn owns its widths: KV_BITS from the window (default 6),
+        # independent of upstream's kv_bits parse and its qat drop;
+        # GMLX_KVARN_BITS may split them. Declines by model shape.
         # rotating_window stays None: serve's MAX_KV_SIZE only caps the
         # request context budget, it never builds a rotating stack.
         from gmlx.cache.kvarn_cache import kvarn_unsupported, kvarn_widths
 
-        k_bits, v_bits = kvarn_widths(int(bits) if bits else None)
+        k_bits, v_bits = kvarn_widths(int(req_val) if req_val else None)
         kw.update(kv_bits=k_bits, value_bits=v_bits, key_bits=None,
                   tail_tokens=_serve_tail_tokens(rg),
                   scheme_reason=kvarn_unsupported(rg.model))
