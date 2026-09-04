@@ -118,10 +118,11 @@ def test_params_affine_unchanged(restorable):
     assert spec_engine._spec_kv_quant_params() is None
 
 
-def _stamp(lm, **single):
+def _stamp(lm, verdict="full", **single):
     from types import SimpleNamespace
 
-    lm._gmlx_kv_policy = SimpleNamespace(single=SimpleNamespace(**single))
+    lm._gmlx_kv_policy = SimpleNamespace(
+        single=SimpleNamespace(verdict=verdict, **single))
     return lm
 
 
@@ -142,6 +143,27 @@ def test_stamped_params_rule_the_boot_env(restorable):
     aff = _stamp(_FakeLM(), scheme="uniform", bits=8, group_size=32)
     assert spec_engine._stamped_spec_params(aff) == dict(
         scheme="uniform", kv_bits=8, kv_group_size=32)
+
+
+def test_stamped_params_keep_a_declined_stamp_fp16():
+    # A dropped stamp still carries its requested width (a qat id under
+    # affine, an MLA model under kvarn); the B=1 spec cache must not
+    # re-arm what the load declined.
+    for scheme in ("uniform", "kvarn"):
+        dropped = _stamp(_FakeLM(), verdict="dropped", scheme=scheme, bits=8,
+                         group_size=64, value_bits=None, tail_tokens=None)
+        assert spec_engine._stamped_spec_params(dropped) == {}
+    err = _stamp(_FakeLM(), verdict="error", scheme="uniform", bits=8,
+                 group_size=64)
+    assert spec_engine._stamped_spec_params(err) == {}
+
+
+def test_stamped_params_honor_a_zero_tail():
+    # tail 0 disables the fp16 tail; it is not the default's absence.
+    kv = _stamp(_FakeLM(), scheme="kvarn", bits=6, value_bits=None,
+                tail_tokens=0)
+    assert spec_engine._stamped_spec_params(kv) == dict(
+        scheme="kvarn", kv_bits=6, value_bits=6, tail_tokens=0)
 
 
 # -- serve B=1 conversion ----------------------------------------------------

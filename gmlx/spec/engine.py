@@ -2624,21 +2624,24 @@ def _stamped_spec_params(lm):
     """resolve_kv_quant_policy kwargs from the KV policy residency stamped
     on this model at load, None when nothing is stamped. Per-model env
     windows are closed by request time, so the stamp rules the boot env;
-    a stamp that quantizes nothing yields {} (stay fp16)."""
+    a stamp that quantizes nothing (off, dropped, error) yields {} (stay
+    fp16)."""
     from gmlx.cache.kvarn_serve import stamped_single_policy
 
     single = stamped_single_policy(lm)
     if single is None:
         return None
     bits = getattr(single, "bits", None)
-    if not bits:
+    if not bits or getattr(single, "verdict", None) not in ("full", "partial"):
         return {}
     if getattr(single, "scheme", None) == "kvarn":
         from gmlx.cache.kvarn_cache import KVARN_DEFAULT_TAIL
 
+        tail = single.tail_tokens
         return dict(scheme="kvarn", kv_bits=int(bits),
                     value_bits=int(single.value_bits or bits),
-                    tail_tokens=int(single.tail_tokens or KVARN_DEFAULT_TAIL))
+                    tail_tokens=(KVARN_DEFAULT_TAIL if tail is None
+                                 else int(tail)))
     if int(bits) != bits or int(bits) not in _SPEC_KV_QUANT_WIDTHS:
         return {}
     return dict(scheme="uniform", kv_bits=int(bits),
