@@ -210,9 +210,11 @@ _KVARN_VERIFY_QL = 4
 def setup_kvarn_mtp_cache(model, drafter, kv_bits, kv_tail_tokens, block, out=None):
     """setup_kvarn_cache for the MTP target. Declines drafters that read the
     target KV back (kvarn records are not raw K/V; ``uses_shared_kv`` defaults
-    True so unknown drafters decline conservatively), warns when the verify
-    width exceeds the fused route, and builds via mlx-vlm's cache maker so
-    the arch's own make_cache hook applies. Returns the cache list or None."""
+    True so unknown drafters decline conservatively) and sliding-window
+    target stacks (serve's rule), warns when the verify width (block plus
+    the bonus row) exceeds the fused route, and builds via mlx-vlm's cache
+    maker so the arch's own make_cache hook applies. Returns the cache list
+    or None."""
     out = out if out is not None else sys.stderr
     if getattr(drafter, "uses_shared_kv", True):
         print(
@@ -223,20 +225,24 @@ def setup_kvarn_mtp_cache(model, drafter, kv_bits, kv_tail_tokens, block, out=No
         return None
     from mlx_vlm.models import cache as _cache
 
+    from gmlx.cache.kvarn_cache import kvarn_mtp_window_decline
+    from gmlx.spec.helpers import _resolve_block_total
+
     lm = model.language_model if hasattr(model, "language_model") else model
+    built = _cache.make_prompt_cache(lm)
+    decline = kvarn_mtp_window_decline(built)
+    if decline is not None:
+        print(f"warning: --kv-quant-scheme kvarn dropped: {decline}", file=out)
+        return None
     prompt_cache = setup_kvarn_cache(
-        model,
-        kv_bits,
-        kv_tail_tokens,
-        None,
-        out=out,
-        make_cache=lambda: _cache.make_prompt_cache(lm),
+        model, kv_bits, kv_tail_tokens, None, out=out, make_cache=lambda: built
     )
-    if prompt_cache is not None and block and block > _KVARN_VERIFY_QL:
+    width = _resolve_block_total(drafter, block) + 1
+    if prompt_cache is not None and width > _KVARN_VERIFY_QL:
         print(
-            f"warning: verify width {block} exceeds the fused kvarn route "
-            f"({_KVARN_VERIFY_QL}); verify rounds fall back to materialized "
-            "attention",
+            f"warning: verify width {width} (block {width - 1} + 1) exceeds "
+            f"the fused kvarn route ({_KVARN_VERIFY_QL}); verify rounds fall "
+            "back to materialized attention",
             file=out,
         )
     if prompt_cache is not None:

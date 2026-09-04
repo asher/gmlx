@@ -2019,7 +2019,11 @@ def batch_liftable(c) -> bool:
     if hasattr(c, "filter") and hasattr(c, "extend"):
         return True
     if getattr(c, "kv_quant_scheme", None) == "kvarn":
-        return True
+        from gmlx.cache.kvarn_cache import KVarNRotatingKVCache
+
+        # The rotating subclass counts evicted tokens in offset that its
+        # buffers no longer hold: kvarn_lift_cache would misplace rows.
+        return not isinstance(c, KVarNRotatingKVCache)
     from gmlx.cache.compat import cache_types
 
     return (isinstance(c, cache_types("QuantizedKVCache"))
@@ -2715,16 +2719,12 @@ def install_spec_kv_quant() -> None:
 
     from gmlx.cache.compat import cache_types
 
-    _orig = _su.make_speculative_prompt_cache
-    _noted = [False]
-    _warned_batch = [False]
-    _warned_dropped = [False]
-    _warned_stock = [False]
-    _warned_kvarn = [False]
+    from gmlx.cache.kv_policy import note_once
 
-    def _decline_kvarn(reason: str):
-        if not _warned_kvarn[0]:
-            _warned_kvarn[0] = True
+    _orig = _su.make_speculative_prompt_cache
+
+    def _decline_kvarn(lm, reason: str):
+        if note_once(lm, "spec-kv-kvarn"):
             _log.warning(
                 "KV_QUANT_SCHEME=kvarn dropped on the B=1 MTP path: %s", reason
             )
@@ -2784,8 +2784,7 @@ def install_spec_kv_quant() -> None:
             for e, c in enumerate(caches):
                 caches[e], n_sw = _swap(c)
                 swapped += n_sw
-            if swapped and not _warned_batch[0]:
-                _warned_batch[0] = True
+            if swapped and note_once(lm, "spec-kv-batch"):
                 _log.warning(
                     "KV quantization with MTP at batch size %d: packed "
                     "batch rollback is unsupported; %d layers run fp16 KV",
@@ -2799,26 +2798,18 @@ def install_spec_kv_quant() -> None:
         kind = params["scheme"]
         decline = mtp_kv_decline(lm)
         if decline is not None:
-            if not _warned_stock[0]:
-                _warned_stock[0] = True
+            if note_once(lm, "spec-kv-stock"):
                 _log.warning(
                     "KV quantization dropped on the MTP path: %s", decline)
             return caches
         scheme_reason = None
         if kind == "kvarn":
-            rotating = (cache_types("RotatingKVCache")
-                        + cache_types("BatchRotatingKVCache"))
-            if any(isinstance(c, rotating) for c in caches):
-                # The policy would keep the window layers fp16 and convert
-                # the rest, but a mixed kvarn/rotating stack has never been
-                # validated through MTP rollback, and no eligible SWA+MTP
-                # checkpoint exists to validate it on. Declining is the
-                # certified behaviour.
-                _decline_kvarn("sliding-window cache stack cannot quantize")
-                return caches
-            scheme_reason = _kvarn_spec_reason(lm)
+            from gmlx.cache.kvarn_cache import kvarn_mtp_window_decline
+
+            scheme_reason = (kvarn_mtp_window_decline(caches)
+                             or _kvarn_spec_reason(lm))
             if scheme_reason is not None:
-                _decline_kvarn(scheme_reason)
+                _decline_kvarn(lm, scheme_reason)
                 return caches
         # The shared policy owns layer selection: nested KV members,
         # pools, windows, and opt-outs at any depth.
@@ -2829,21 +2820,19 @@ def install_spec_kv_quant() -> None:
             caches, mode="single", scheme_reason=scheme_reason, **params)
         if policy.verdict not in ("full", "partial"):
             if kind == "kvarn":
-                _decline_kvarn(policy.reason)
-            elif not _warned_dropped[0]:
-                _warned_dropped[0] = True
+                _decline_kvarn(lm, policy.reason)
+            elif note_once(lm, "spec-kv-dropped"):
                 _log.warning("%s", kv_line("MTP spec path", policy))
             return caches
 
         armed, n = quantize_stack(caches, policy)
         if kind == "kvarn":
             if not n:
-                _decline_kvarn("no plain KV-cache layers in this arch's stack")
+                _decline_kvarn(lm, "no plain KV-cache layers in this arch's stack")
                 return caches
             _harden_spec_target(lm)
-        if (n or armed) and not _noted[0]:
-            _noted[0] = True
-            print(kv_line("MTP spec path", policy), flush=True)
+        if (n or armed) and note_once(lm, "spec-kv"):
+            _log.info("%s", kv_line("MTP spec path", policy))
         return caches
 
     _quantizing_spec_cache.__dict__[_SPEC_KV_QUANT_FLAG] = True

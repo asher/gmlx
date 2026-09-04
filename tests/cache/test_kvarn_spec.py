@@ -170,7 +170,10 @@ def test_stamped_params_honor_a_zero_tail():
 
 
 @needs_kvarn_ops
-def test_b1_mtp_kvarn_converts(restorable, kvarn_ops_ok, capsys):
+def test_b1_mtp_kvarn_converts(restorable, kvarn_ops_ok, caplog):
+    import logging
+
+    caplog.set_level(logging.INFO, logger="gmlx.spec.engine")
     restorable.setenv("KV_QUANT_SCHEME", "kvarn")
     spec_engine.install_spec_kv_quant()
     caches = _mk()
@@ -180,7 +183,7 @@ def test_b1_mtp_kvarn_converts(restorable, kvarn_ops_ok, capsys):
     assert isinstance(caches[1], _SSMCache)
     assert caches[0].k_bits == 6 and caches[0].tail_cap == 1024
     assert not hasattr(caches[0], "bits")
-    assert "[kv] MTP spec path" in capsys.readouterr().out
+    assert "[kv] MTP spec path" in caplog.text
 
 
 @needs_kvarn_ops
@@ -341,7 +344,19 @@ def test_mtp_setup_builds_and_warns_wide_block(kvarn_ops_ok, capsys):
     assert sum(type(c) is KVarNKVCache for c in pc) == 1
     err = capsys.readouterr().err
     assert "[kv] kvarn6 tail=1024 -> quantized 1/3 attn layers" in err
-    assert "verify width 6 exceeds the fused kvarn route" in err
+    assert "verify width 7 (block 6 + 1) exceeds the fused kvarn route" in err
+
+
+def test_mtp_setup_declines_a_window_stack(kvarn_ops_ok, capsys):
+    # serve's rule: a sliding-window layer declines the whole MTP stack.
+    from gmlx.gen.generation import setup_kvarn_mtp_cache
+
+    class _WindowLM(_FakeLM):
+        def make_cache(self):
+            return [RotatingKVCache(max_size=64), KVCache()]
+
+    assert setup_kvarn_mtp_cache(_WindowLM(), _Drafter(), None, 1024, 2) is None
+    assert "sliding-window cache stack cannot quantize" in capsys.readouterr().err
 
 
 # -- rollback contracts ------------------------------------------------------
@@ -542,7 +557,11 @@ def test_preemption_gate_admits_what_the_lift_handles():
     queued request waits for the live generation instead of joining it."""
     from mlx_vlm.models.cache import KVCache, QuantizedKVCache
 
+    from gmlx.cache.kvarn_cache import KVarNRotatingKVCache
+
     assert spec_engine.batch_liftable(KVarNKVCache(tail_tokens=256))
+    # offset counts evicted tokens the rotating buffers no longer hold
+    assert not spec_engine.batch_liftable(KVarNRotatingKVCache(2048, tail_tokens=256))
     assert spec_engine.batch_liftable(KVCache())
     assert spec_engine.batch_liftable(QuantizedKVCache(group_size=64, bits=8))
 

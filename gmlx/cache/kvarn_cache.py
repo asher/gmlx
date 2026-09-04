@@ -161,6 +161,20 @@ def kvarn_widths(kv_bits):
     return bits, bits
 
 
+def kvarn_mtp_window_decline(caches) -> str | None:
+    """Why kvarn declines this MTP target stack, or None. A mixed
+    kvarn/rotating stack has never been validated through MTP rollback
+    (no eligible SWA+MTP checkpoint exists to validate it on), so a
+    sliding-window layer declines the whole stack. Serve, run and chat
+    share the rule."""
+    from gmlx.cache.compat import cache_types
+
+    rotating = cache_types("RotatingKVCache") + cache_types("BatchRotatingKVCache")
+    if any(isinstance(c, rotating) for c in caches):
+        return "sliding-window cache stack cannot quantize"
+    return None
+
+
 def parse_tail_tokens(raw) -> int:
     """KV_TAIL_TOKENS text as the tail width; empty means the default.
     Malformed text raises ValueError (the resolver checks the value)."""
