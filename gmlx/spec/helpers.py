@@ -369,13 +369,8 @@ def _mtp_shared_kv_from_prompt_cache(lm: nn.Module, prompt_cache: list[Any]) -> 
         # here means a gap in that gate -- degrade to no shared KV.
         if not _WARNED_KVARN_READBACK[0]:
             _WARNED_KVARN_READBACK[0] = True
-            import sys
-
-            print(
-                "warning: [mtp] shared-KV readback skipped: kvarn cache "
-                "records are not raw K/V",
-                file=sys.stderr, flush=True,
-            )
+            _log.warning("[mtp] shared-KV readback skipped: kvarn cache "
+                         "records are not raw K/V")
         return {}
 
     shared_kv_states = {}

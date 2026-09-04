@@ -1966,7 +1966,7 @@ def kvarn_lift_cache(c):
 
     The kvarn twin of dequantize_lift_cache: KVarNKVCache has no merge,
     BatchKVarNKVCache.merge would hand the MTP path a packed batch cache
-    the batched arm forbids, and materialize() returns ROTATED-domain
+    the batched arm forbids, and materialize() returns rotated-domain
     K/V, which stock SDPA would attend with an un-rotated query -- no
     crash, just wrong logits on every preempted row. _raw_single is the
     original-domain accessor."""

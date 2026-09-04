@@ -38,6 +38,7 @@ by compacting the oldest sealed groups away at update entry.
 
 from __future__ import annotations
 
+import logging
 import sys
 
 import mlx.core as mx
@@ -51,6 +52,8 @@ GROUP = 128
 HEAD_DIMS = (128, 256, 512)
 KVARN_BITS = (2, 3, 4, 5, 6, 8)
 KVARN_DEFAULT_TAIL = 1024
+
+_log = logging.getLogger(__name__)
 
 _META_ARITY_MSG = (
     "[kvarn] cache metadata arity does not match this cache class; the "
@@ -153,10 +156,7 @@ def kvarn_widths(kv_bits):
         m = re.fullmatch(r"k(\d+)v(\d+)", env)
         if m:
             return int(m.group(1)), int(m.group(2))
-        print(
-            f"warning: GMLX_KVARN_BITS={env!r} is not of the form k6v5; ignored",
-            file=sys.stderr,
-        )
+        _log.warning("GMLX_KVARN_BITS=%r is not of the form k6v5; ignored", env)
     bits = int(kv_bits) if kv_bits is not None else 6
     return bits, bits
 

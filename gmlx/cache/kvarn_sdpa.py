@@ -17,9 +17,9 @@ Prefill (wider queries or array masks) materializes the rotated cache once
 per call and runs stock mx.fast attention on it with the rotated query,
 composing with the attn_hd512 wrapper's chunked-prefill routes.
 
-Kill switches: GMLX_KVARN=0 disables the scheme at cache build time
-(generation.py); GMLX_KVARN_SDPA=0 forces the materialize path for decode
-as well (correct, slower). Both read at call time.
+Kill switches: GMLX_KVARN=0 drops the scheme when the policy resolves at
+cache build (kvarn_cache.py); GMLX_KVARN_SDPA=0 forces the materialize
+path for decode as well (correct, slower), read at call time.
 """
 
 from __future__ import annotations

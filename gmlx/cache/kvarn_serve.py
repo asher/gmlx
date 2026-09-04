@@ -1,7 +1,7 @@
 """kvarn KV on the serve batch path.
 
-install_kvarn_serve() arms three seams when the boot environment selects
-KV_QUANT_SCHEME=kvarn:
+install_kvarn_serve() arms three seams that engage on a model loaded
+with ``kv_quant_scheme: kvarn``:
 
 - ``_make_cache`` (mlx_vlm.generate.ar + the server.generation from-import)
   builds BatchKVarNKVCache for the plain-KV layers the shared policy
@@ -31,10 +31,10 @@ speculative-cache construction so the ``_make_cache`` wrap declines inside
 it (the spec engine owns rollback, and the batch kvarn cache cannot trim).
 
 All three wraps install unconditionally at server boot and engage per
-call: ``_make_cache`` on its ``kv_quant_scheme`` kwarg (the BatchGenerator
-lambdas pass the per-model env value, applied through the residency pool's
-transient load windows), the APC gate on the same env read at generator
-construction, which happens inside that window.
+call on the ``kv_quant_scheme`` kwarg, which the ResponseGenerator
+captured from its per-model load window. Widths and tail come from the
+policy stamped on the model at load; the ambient env is read only by
+paths that run inside the load window (residency probes).
 
 Kill switch: GMLX_KVARN=0 (same as the CLI paths).
 """
@@ -128,14 +128,14 @@ def _ppb_kvarn_policy(batch, kwargs):
     """(decline reason or None, the resolved policy or None) for a kvarn
     cache rebuild of this batch.
 
-    The single decline predicate for BOTH rebuild sites -- the ckpt-tier
+    The single decline predicate for both rebuild sites -- the ckpt-tier
     in-place conversion (ensure_ppb_kvarn, runs first inside the init
     chain) and the outer batch rebuild (_kvarn_ppb_init) -- so they can
     never disagree about a batch: drift between two copies is what would
     let the outer wrap clobber the inner conversion. The scheme comes
     from the per-request kwarg, never the ambient env (per-model load
     windows are closed by request time). Config problems (ineligible
-    model, bad widths/tail) decline HERE, leaving the stock single-stream
+    model, bad widths/tail) decline here, leaving the stock single-stream
     caches -- so a misconfigured kvarn boot degrades to the fp16 paths
     the ckpt/exact tiers already serve, not to fp16 batch classes.
     """

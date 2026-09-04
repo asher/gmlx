@@ -1,13 +1,11 @@
 """Stamp/salt scoping: both are gated on an actual-conversion probe.
 
-CPU-only. The bug class pinned here: a kvarn-window boot of a
-zero-conversion arch (deepseek4's rot+CacheList stack, recurrent_gemma's
-arr+rot stack) used to get stamped and its manager salted from the env
-alone -- fp16 caches running under the exact tier's kvarn salt, so every
-cross-boot lookup cold-missed. The probe now resolves the shared policy,
-so it counts exactly the layers the cache build converts (plain KVCache
-and ChunkedKVCache, carve-out applied), and both the residency salt site
-and the serve gate read the one stashed answer.
+CPU-only. A kvarn-window boot of a zero-conversion arch (deepseek4's
+rot+CacheList stack, recurrent_gemma's arr+rot stack) runs fp16 caches,
+so it must keep the stock tier and unsalted keys: the probe resolves the
+shared policy and counts exactly the layers the cache build converts
+(plain KVCache and ChunkedKVCache, carve-out applied), and the residency
+salt site and the serve gate read that one stashed answer.
 """
 
 from __future__ import annotations

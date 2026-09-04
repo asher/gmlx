@@ -12,7 +12,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   second KV-cache quantization scheme. Variance-normalized records in
   rotated 128-token groups, with an fp16 sink and precision tail
   (`--kv-tail-tokens`, `kv_tail_tokens`). Same per-stack policy, `[kv]`
-  line and `/v1/models` `kv_quant` report as `--kv-bits`; widths 2 to 8,
+  line and `/v1/models` `kv_quant` report as `--kv-bits`; widths 2/3/4/5/6/8,
   split key/value pairs via `GMLX_KVARN_BITS=k6v5`. Composes with
   `--max-kv-size` on `run` and `chat` (the rotating window quantizes),
   with native MTP at batch size 1, and with the prompt cache (exact and
@@ -25,6 +25,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A model loaded without KV quantization carries an explicit `off`
   policy, so request-time readers (B=1 MTP cache conversion, the prompt
   cache salt) never inherit another model's boot env.
+
+### Fixed
+
+- `quantized_kv_start` as a per-model server load key is applied to that
+  model; upstream read it once from the process environment at server
+  start.
 
 ## [0.4.8] - 2026-09-02
 

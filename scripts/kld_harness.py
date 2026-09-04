@@ -59,12 +59,13 @@ def build_arm(name: str, model, tail_tokens: int, carve_out: bool = True):
     and hold the last layer of a deep stack fp16 -- the runtime's own
     coverage. ``carve_out=False`` takes every eligible layer instead, to
     measure what the held layer is worth."""
-    from mlx_lm.models.cache import KVCache, make_prompt_cache
+    from mlx_lm.models.cache import ChunkedKVCache, KVCache, make_prompt_cache
 
     from gmlx.cache.kv_policy import quantize_kv_members
 
     pc = make_prompt_cache(model)
-    eligible = sum(1 for c in pc if type(c) is KVCache)
+    plain = (KVCache, ChunkedKVCache)
+    eligible = sum(1 for c in pc if type(c) in plain)
     if name == "fp16":
         return pc
     if not eligible:
@@ -73,7 +74,7 @@ def build_arm(name: str, model, tail_tokens: int, carve_out: bool = True):
     def apply(policy):
         n = 0
         for i, plan in enumerate(policy.per_layer):
-            if plan.quantize or (carve_out is False and type(pc[i]) is KVCache):
+            if plan.quantize or (carve_out is False and type(pc[i]) in plain):
                 pc[i], k = quantize_kv_members(pc[i], policy)
                 n += k
         want = eligible if not carve_out else policy.n_quant
@@ -150,8 +151,9 @@ def main():
         "--skip-head",
         type=int,
         default=512,
-        help="Prefill positions excluded from the stats (the "
-        "region every arm serves fp16; default 512).",
+        help="Prefill positions excluded from the stats (default 512): the "
+        "prompt head, where the kvarn sink is fp16 and the arms are not "
+        "comparable.",
     )
     ap.add_argument("--kv-tail-tokens", type=int, default=1024)
     ap.add_argument(

@@ -467,7 +467,8 @@ Levers, cheapest first:
   generation-position fidelity of `--kv-bits 4` in a smaller record; by 8
   bits the two converge. 6-bit kvarn tracks the affine 8-bit cache on
   generation-position KLD (Qwen3.6-27B: 3% ahead at 32k, 3% behind at 64k)
-  while holding ~46% of the fp16 cache at 16k and ~43% at 32k, against ~53%
+  while holding about 47% of the fp16 cache at 16k and 44% at 32k (admission
+  prices 50% and 45%: the code slab grows in 4096-token steps), against 53%
   for `--kv-bits 8`; the sink and the last `--kv-tail-tokens` (default 1024)
   stay fp16, which is the remaining depth-dependence. Decode cost tracks how
   much of the step the KV read is: on GDN hybrids and gemma-4 all three arms

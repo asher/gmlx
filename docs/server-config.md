@@ -1028,6 +1028,10 @@ gmlx's own; mlx-vlm reads the rest):
 > per-model mapping cannot work. Set `server.prefill_step_size` (see the
 > server key table above).
 >
+> `quantized_kv_start` is applied per model from its load window; upstream
+> captures its own copy once at server start, so gmlx re-applies the key at
+> each load.
+>
 > `dtype` is likewise server-level. It could be applied per model, but the
 > reason to leave bfloat16 is that this GPU has no native bfloat16 arithmetic,
 > which is true of every model on the box. Set `server.dtype`.
@@ -1051,7 +1055,10 @@ from it.
 `kv_quant_scheme: kvarn` runs the same policy over the same stack, so the
 layer rules above hold unchanged: `kv_bits` picks the width (default 6,
 accepts 2/3/4/5/6/8) and `kv_tail_tokens` sizes the fp16 precision tail
-(default 1024). Kvarn narrows the eligible layers once more, by cache
+(default 1024). Split widths come from `KV_KEY_BITS`/`KV_VALUE_BITS` in
+the server's own environment (server-wide, not a load key), else
+`GMLX_KVARN_BITS=k6v5`, else `kv_bits` for both sides. A malformed
+`kv_tail_tokens` fails the load like a width outside the list. Kvarn narrows the eligible layers once more, by cache
 shape rather than by model name: an attention layer converts only when
 its head_dim is 128, 256 or 512 (qwen3.5/3.6 and gemma-4 global layers
 are the common cases; llama-4's chunked-attention layers convert like

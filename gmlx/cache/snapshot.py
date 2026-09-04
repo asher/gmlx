@@ -1643,7 +1643,7 @@ def _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
         tid = tuple(ids)
         # Mirror the manager's wire salt: the read side goes through
         # lookup_exact_cache, which XORs _exact_extra_salt into the value
-        # that feeds BOTH the sequence hash and the persisted-metadata
+        # that feeds both the sequence hash and the persisted-metadata
         # check -- a write missing either half is a permanent restart
         # miss on every salted (kvarn) boot. One variable salts both.
         salted = int(salted) ^ int(
