@@ -126,6 +126,22 @@ def test_nbytes_plateau():
 
 
 @needs_kvarn_ops
+def test_compaction_restores_the_steady_capacity():
+    # One wide chunk grows the slabs to 22 groups; the next entry's
+    # compaction drops the evicted groups and the overshoot together.
+    c = _rot()
+    k, v = tokens(3300)
+    c.update_and_fetch(k[:, :, :3000], v[:, :, :3000])
+    assert c.codes_k.shape[2] == c.n_sealed == 22
+    _feed(c, k[:, :, 3000:], v[:, :, 3000:], 128)
+    assert c.codes_k.shape[2] == c.g_max + c.evict_slack + 1
+    _assert_invariants(c)
+    twin = _rot()
+    _feed(twin, k, v, 128)
+    _assert_common_window_equal(c, twin)
+
+
+@needs_kvarn_ops
 @pytest.mark.parametrize("d", [128, 256])
 def test_incremental_matches_bulk_common_window(d):
     k, v = tokens(2000, d=d)

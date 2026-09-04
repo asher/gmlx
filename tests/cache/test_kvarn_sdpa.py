@@ -13,7 +13,7 @@ import mlx.core as mx
 
 from gmlx.cache.kvarn_cache import KVarNKVCache
 from gmlx.cache.kvarn_sdpa import install_kvarn_sdpa, kvarn_attention
-from kvarn_testlib import D, H, filled, needs_kvarn_ops
+from kvarn_testlib import D, H, filled, needs_kvarn_ops, tokens
 
 HQ = 8
 SCALE = D**-0.5
@@ -211,11 +211,67 @@ def test_threadgroup_cap_gates_the_fused_route(monkeypatch):
     real = kvarn_sdpa._decode
     monkeypatch.setattr(kvarn_sdpa, "_decode", lambda *a: calls.append(1) or real(*a))
     assert kvarn_sdpa._tg_threads(16, 4) == 1024
-    assert kvarn_sdpa._tg_threads(HQ // H, 4) <= kvarn_sdpa._tg_limit()
+    assert kvarn_sdpa._tg_threads(HQ // H, 4) <= kvarn_sdpa._tg_limit(D, True)
     kvarn_attention(q, cache, SCALE, "causal")
     assert calls == [1]
-    monkeypatch.setattr(kvarn_sdpa, "_tg_limit_cache", 32)
+    monkeypatch.setattr(kvarn_sdpa, "_tg_limits", {(D, True): 32})
     capped = kvarn_attention(q, cache, SCALE, "causal")
     ref = kvarn_sdpa._prefill(q, cache, SCALE, "causal")
     assert calls == [1]
     assert np.array_equal(np.array(capped), np.array(ref))
+
+
+def test_threadgroup_cap_is_probed_per_kernel_variant(monkeypatch):
+    # The cap belongs to the (head_dim, qL > 1) kernel variant: a D=128
+    # qL=1 probe says nothing about the register-heavier D=256 verify
+    # variant, so each variant probes once with its own geometry.
+    from gmlx.cache import kvarn_sdpa
+
+    probes = []
+    monkeypatch.setattr(kvarn_sdpa, "_tg_limits", {})
+    monkeypatch.setattr(
+        kvarn_sdpa, "_probe_tg_limit", lambda d, ql: probes.append((d, ql)) or 512
+    )
+    for _ in range(2):
+        assert kvarn_sdpa._tg_limit(128, False) == 512
+        assert kvarn_sdpa._tg_limit(128, True) == 512
+        assert kvarn_sdpa._tg_limit(256, True) == 512
+    assert probes == [(128, 1), (128, 4), (256, 4)]
+
+
+def test_leg_split_truth_table():
+    from gmlx.cache.kvarn_sdpa import _legs
+
+    # (n, tail_len, qL) -> (body keys, tail keys)
+    assert _legs(200, 0, 4) == (200, 0)
+    assert _legs(200, 100, 4) == (100, 100)
+    assert _legs(200, 200, 4) == (0, 200)
+    assert _legs(6, 6, 1) == (0, 6)
+    # body sliver: widen when the tail can spare qL keys, else body-only
+    assert _legs(8, 6, 4) == (4, 4)
+    assert _legs(7, 5, 4) == (7, 0)
+    assert _legs(6, 4, 4) == (6, 0)
+    # a trimmed-down tail narrower than the block: body-only
+    assert _legs(75, 3, 4) == (75, 0)
+
+
+@needs_kvarn_ops
+@pytest.mark.parametrize("fill,trim,extra", [(200, 198, 4), (200, 198, 6), (200, 126, 1)])
+def test_narrow_legs_stay_fused_and_exact(monkeypatch, fill, trim, extra):
+    # tail 128: trimming to a stub and appending a few tokens leaves a
+    # body or tail narrower than the verify block. Every arm decodes
+    # fused and matches the reference over the same values.
+    from gmlx.cache import kvarn_sdpa
+
+    c = filled(fill, tail=128)
+    assert c.trim(trim) == trim
+    c.update_and_fetch(*tokens(extra, seed=7))
+    seen = []
+    real = kvarn_sdpa._decode
+    monkeypatch.setattr(
+        kvarn_sdpa, "_decode", lambda q, c, s: seen.append(c) or real(q, c, s)
+    )
+    q = _make_q(4)
+    out = kvarn_attention(q, c, SCALE, "causal")
+    assert seen[-1] is c
+    _assert_close(out, _ref_attention(q, c, 4))

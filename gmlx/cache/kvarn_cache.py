@@ -796,8 +796,8 @@ class KVarNRotatingKVCache(KVarNKVCache):
     def _ensure_gcap(self, groups):
         # Grow to exactly what the call needs: the window re-compacts to
         # g_max, so step-chunk growth would durably overshoot small
-        # windows. Wide prefill chunks can still push past the initial
-        # capacity transiently; the next entry compacts.
+        # windows. Wide prefill chunks push past the steady capacity
+        # transiently; the next compaction restores it.
         gcap = self.codes_k.shape[2]
         if groups <= gcap:
             return
@@ -814,14 +814,22 @@ class KVarNRotatingKVCache(KVarNKVCache):
         d = self.n_sealed - self.g_max
         if d <= self.evict_slack:
             return
-        for f in ("codes_k", "axes_k", "codes_v", "axes_v"):
+        # Steady capacity: g_max resident plus the slack and the one seal
+        # an append adds past the trigger. A wide prefill's overshoot
+        # goes here.
+        cap = self.g_max + self.evict_slack + 1
+        fields = ("codes_k", "axes_k", "codes_v", "axes_v")
+        slabs = []
+        for f in fields:
             x = getattr(self, f)
-            pad = mx.zeros(x.shape[:2] + (d,) + x.shape[3:], x.dtype)
-            slab = mx.concatenate([x[:, :, d:], pad], axis=2)
-            # eval per slab: one slab copy in flight at a time
-            mx.eval(slab)
+            pad = mx.zeros(x.shape[:2] + (cap - self.g_max,) + x.shape[3:], x.dtype)
+            slabs.append(mx.concatenate([x[:, :, d : self.n_sealed], pad], axis=2))
+        # One eval: the compaction's transient is these four copies, not
+        # the whole pending forward graph four times over.
+        mx.eval(*slabs)
+        for f, slab in zip(fields, slabs):
             setattr(self, f, slab)
-        self.n_sealed -= d
+        self.n_sealed = self.g_max
         self.evicted += d * GROUP
 
     def update_and_fetch(self, keys, values):

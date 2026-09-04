@@ -83,30 +83,34 @@ def _route_enabled() -> bool:
     return _sdpa_env
 
 
-_tg_limit_cache = None
+_tg_limits: dict[tuple[int, bool], int] = {}
 
 
-def _tg_limit() -> int:
-    """Largest fused-decode threadgroup this GPU runs, probed once. The
-    kernel's pipeline cap differs by GPU and an oversized dispatch raises
-    at eval time, past any call site that could catch it."""
-    global _tg_limit_cache
-    if _tg_limit_cache is None:
-        _tg_limit_cache = _probe_tg_limit()
-    return _tg_limit_cache
+def _tg_limit(d: int, multi: bool) -> int:
+    """Largest fused-decode threadgroup this GPU runs for the kernel
+    variant (head_dim, qL > 1), probed once per variant. The pipeline cap
+    depends on the variant's register use as well as the GPU, and an
+    oversized dispatch raises at eval time, past any call site that could
+    catch it."""
+    key = (d, multi)
+    if key not in _tg_limits:
+        _tg_limits[key] = _probe_tg_limit(d, 4 if multi else 1)
+    return _tg_limits[key]
 
 
-def _probe_tg_limit() -> int:
+def _probe_tg_limit(d: int, ql: int) -> int:
     if kvarn_ops_missing():
         return 0
     from .kvarn_cache import GROUP
 
     c = KVarNKVCache(tail_tokens=0)
-    kv = mx.zeros((1, 1, GROUP + 2, 128), mx.float16)
+    kv = mx.zeros((1, 1, GROUP + 2 * ql, d), mx.float16)
     c.update_and_fetch(kv, kv)
-    for gqa, ql in ((16, 4), (16, 1), (8, 1), (4, 1), (1, 1)):
+    for gqa in (16, 8, 4, 2, 1):
+        if gqa * ((ql + 1) // 2) > 32:
+            continue
         try:
-            mx.eval(_decode(mx.zeros((1, gqa, ql, 128), mx.float16), c, 1.0))
+            mx.eval(_decode(mx.zeros((1, gqa, ql, d), mx.float16), c, 1.0))
         except Exception:
             continue
         return _tg_threads(gqa, ql)
@@ -126,8 +130,23 @@ def _fused_ok(q, cache) -> bool:
         and 1 <= gqa <= 16
         and q.shape[1] % kvh == 0
         and _route_enabled()
-        and _tg_threads(gqa, q.shape[2]) <= _tg_limit()
+        and _tg_threads(gqa, q.shape[2]) <= _tg_limit(q.shape[-1], q.shape[2] > 1)
     )
+
+
+def _legs(n: int, tail_len: int, qL: int) -> tuple[int, int]:
+    """Body/tail key split for the fused decode. Each leg the merge runs
+    needs qL keys (the body's full-visibility clamp and the tail kernel
+    both require it). A body sliver widens into the tail when the tail
+    can spare qL keys; otherwise the body takes the whole stream, whose
+    stage rows are the same values the tail holds."""
+    t = min(tail_len, n)
+    n_body = n - t
+    if 0 < n_body < qL and n >= 2 * qL:
+        return qL, n - qL
+    if 0 < t < qL or 0 < n_body < qL:
+        return n, 0
+    return n_body, t
 
 
 def _lse_merge(out_a, lse_a, out_b, lse_b):
@@ -144,14 +163,7 @@ def _decode(q, cache, scale):
     import mlx_kquant as kq
 
     n = cache.visible
-    qL = q.shape[2]
-    t = min(cache.tail_len, n)
-    n_body = n - t
-    if 0 < n_body < qL:
-        # A saturated tail can leave a sliver of body narrower than the
-        # query block; widen the body to qL so the clamp lift stays valid.
-        n_body = qL
-        t = n - qL
+    n_body, t = _legs(n, cache.tail_len, q.shape[2])
     if n_body == 0:
         tk, tv = cache.tail_slices(t)
         return kq.sdpa_decode_gqa(q, tk.astype(q.dtype), tv.astype(q.dtype), scale)
