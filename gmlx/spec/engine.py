@@ -2823,6 +2823,7 @@ def install_spec_kv_quant() -> None:
         return caches
 
     _quantizing_spec_cache.__dict__[_SPEC_KV_QUANT_FLAG] = True
+    _quantizing_spec_cache.__dict__["_gmlx_orig"] = _orig
     _su.make_speculative_prompt_cache = _quantizing_spec_cache
     _ar.make_speculative_prompt_cache = _quantizing_spec_cache
     _gen.make_speculative_prompt_cache = _quantizing_spec_cache

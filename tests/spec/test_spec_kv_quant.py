@@ -31,12 +31,13 @@ class _FakeLM:
 
 @pytest.fixture
 def restorable(monkeypatch):
-    # Identity-setattr records the current attrs so the install's direct
-    # module assignment is undone at teardown.
+    # Start from the stock function even when an earlier module installed
+    # the wrap (it is once per process, with the boot env it saw), and
+    # undo this test's install at teardown.
     for mod in (su, ar, gen):
-        monkeypatch.setattr(
-            mod, "make_speculative_prompt_cache",
-            mod.make_speculative_prompt_cache)
+        fn = mod.make_speculative_prompt_cache
+        monkeypatch.setattr(mod, "make_speculative_prompt_cache",
+                            getattr(fn, "_gmlx_orig", fn))
     return monkeypatch
 
 
