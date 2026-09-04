@@ -6,6 +6,26 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `--kv-quant-scheme kvarn` (`kv_quant_scheme: kvarn` on the server): a
+  second KV-cache quantization scheme. Variance-normalized records in
+  rotated 128-token groups, with an fp16 sink and precision tail
+  (`--kv-tail-tokens`, `kv_tail_tokens`). Same per-stack policy, `[kv]`
+  line and `/v1/models` `kv_quant` report as `--kv-bits`; widths 2 to 8,
+  split key/value pairs via `GMLX_KVARN_BITS=k6v5`. Composes with
+  `--max-kv-size` on `run` and `chat` (the rotating window quantizes),
+  with native MTP at batch size 1, and with the prompt cache (exact and
+  checkpoint tiers store kvarn records). Needs an mlx-kquant build that
+  carries the kvarn ops; without one the scheme drops loudly and the
+  model runs fp16 KV. `GMLX_KVARN=0` and `GMLX_KVARN_SDPA=0` are the
+  kill switches.
+- `scripts/kld_harness.py`: the teacher-forced KLD harness behind the
+  kvarn fidelity figures in docs/performance.md.
+- A model loaded without KV quantization carries an explicit `off`
+  policy, so request-time readers (B=1 MTP cache conversion, the prompt
+  cache salt) never inherit another model's boot env.
+
 ## [0.4.8] - 2026-09-02
 
 ### Added

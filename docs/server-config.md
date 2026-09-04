@@ -1011,7 +1011,8 @@ native support; a per-request field still wins over the profile):
 
 Applied at model-build time through a transient env window in the residency
 pool, so each model loads with its own params without leaking to co-resident
-models. Each maps 1:1 to the env var mlx-vlm reads at build:
+models. Each maps 1:1 to an env var read at build (`KV_TAIL_TOKENS` is
+gmlx's own; mlx-vlm reads the rest):
 
 | key | env var |
 |-----|---------|
@@ -1053,16 +1054,24 @@ accepts 2/3/4/5/6/8) and `kv_tail_tokens` sizes the fp16 precision tail
 (default 1024). Kvarn narrows the eligible layers once more, by cache
 shape rather than by model name: an attention layer converts only when
 its head_dim is 128, 256 or 512 (qwen3.5/3.6 and gemma-4 global layers
-are the common cases). head_dim-64 layers (gpt-oss, falcon-h1) stay fp16,
-and MLA archs whose K and V share latent storage (deepseek4, kimi-k3)
+are the common cases; llama-4's chunked-attention layers convert like
+plain KV). head_dim-64 layers (gpt-oss, falcon-h1) stay fp16, and MLA
+archs whose K and V share latent storage (deepseek4, glm5next, kimi-k3)
 never convert at all. Archs that derive head_dim from hidden/heads
 (nemotron-h, jamba, lfm2, granitemoehybrid) are eligible per checkpoint
--- check the config. A model where no layer converts keeps fp16 KV with a
-one-shot log reason, never a silent affine fallback. `max_kv_size` only
-caps the request context budget on the server, so the rotating-window
-composition kvarn supports on `run` and `chat` has no server equivalent.
-Admission prices a kvarn layer at its record width plus the fp16 sink,
-horizon and tail buffers, which are resident from the first token.
+-- check the config. Sliding-window layers stay fp16 beside converted
+global layers (gemma-4); a native-MTP drafter declines that mixed stack
+whole at batch size 1, as on `run`. A model where no layer converts keeps
+fp16 KV with a one-shot log reason, never a silent affine fallback.
+`quantized_kv_start` is not honored under kvarn (records quantize from
+token 0; the `[kv]` line says so). `max_kv_size` only caps the request
+context budget on the server, so the rotating-window composition kvarn
+supports on `run` and `chat` has no server equivalent. Admission prices a
+kvarn layer at its record width, rounded up to the 4096-token code slab
+the cache grows in, plus the fp16 sink, horizon and tail buffers, which
+are resident from the first token. Speculative rollback into a sealed
+group reopens it from its records (one lossy round trip); rows still in
+the fp16 tail roll back exactly.
 
 APC under kvarn keeps the same tier routing as fp16. Dense models run the
 exact-entry tier (memory and disk; the 16-token block tier cannot split

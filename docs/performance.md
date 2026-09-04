@@ -462,44 +462,39 @@ Levers, cheapest first:
   see the interaction note in the speculation section above.
 - `--kv-quant-scheme kvarn` (with `--kv-bits`, default 6) is the higher-fidelity
   alternative: variance-normalized KV beats the affine cache on logit KLD at
-  matched width, and the margin is widest where the affine cache is weakest.
-  On Qwen3.5-9B at 16k, 4-bit kvarn holds 1.6x the prefill fidelity
-  and 3.0x the generation-position fidelity of `--kv-bits 4` in a smaller
-  record; by 8 bits the two converge, because kvarn's fixed costs do not shrink
-  with the width while the error it shapes does. 6-bit kvarn tracks the affine
-  8-bit cache on generation-position KLD at three quarters of its width
-  (Qwen3.6-27B: 3% ahead at 32k, 3% behind at 64k; teacher-forced full-context
-  logits on that hybrid run ~1.2x the 8-bit cache's) while holding
-  ~46% of the fp16
-  cache at 16k and ~43% at 32k (vs ~53% for `--kv-bits 8` at any depth); the
-  sink and the last `--kv-tail-tokens` (default 1024) stay fp16, which is what
-  the remaining depth-dependence is. Decode cost tracks how much of the step
-  the KV read is: on GDN hybrids (qwen3.5/3.6) and on gemma-4's sliding-window
-  stack all three arms sit within run-to-run spread at 16k and 32k, while on a
-  KV-bound dense stack (Qwen3-0.6B Q8, 27 of 28 layers quantized) kvarn6
-  decode runs 0.81x fp16 and 0.69x `--kv-bits 8` at 16k, and 0.98x fp16 and
-  0.75x kv8 at 32k. Prefill is within 10% of both arms everywhere measured.
-  Pick kvarn for memory and fidelity, plain
-  `--kv-bits` for peak decode speed on a KV-bound dense model.
-  Other widths (2-8, and mixed via
-  `GMLX_KVARN_BITS=k6v5`) trade fidelity for memory at roughly the same speed.
-  Coverage follows the cache shape, not the model name: growing attention KV
-  with head_dim 128, 256 or 512, minus the last layer of a deep stack, which
-  the shared policy holds fp16 under either scheme. That takes the qwen3.5/3.6
-  family and gemma-4 global layers (SWA layers stay fp16, so the gemma-4
-  saving is modest). head_dim-64 layers, and MLA archs whose K and V share one
-  latent store, decline loudly and stay fp16. Server-side, the
-  prompt cache survives the scheme: hybrid and sliding-window models keep
-  full checkpoint-tier reuse on a kvarn boot (records store the quantized
-  cache, and stock and kvarn boots never adopt each other's entries).
+  matched width, widest where the affine cache is weakest. On Qwen3.5-9B at
+  16k, 4-bit kvarn holds 1.6x the prefill fidelity and 3.0x the
+  generation-position fidelity of `--kv-bits 4` in a smaller record; by 8
+  bits the two converge. 6-bit kvarn tracks the affine 8-bit cache on
+  generation-position KLD (Qwen3.6-27B: 3% ahead at 32k, 3% behind at 64k)
+  while holding ~46% of the fp16 cache at 16k and ~43% at 32k, against ~53%
+  for `--kv-bits 8`; the sink and the last `--kv-tail-tokens` (default 1024)
+  stay fp16, which is the remaining depth-dependence. Decode cost tracks how
+  much of the step the KV read is: on GDN hybrids and gemma-4 all three arms
+  sit within run-to-run spread, while on a KV-bound dense stack (Qwen3-0.6B
+  Q8, 27 of 28 layers) kvarn6 decode runs 0.81x fp16 and 0.69x kv8 at 16k,
+  0.98x and 0.75x at 32k. Prefill is within 10% of both arms. Pick kvarn for
+  memory and fidelity, plain `--kv-bits` for peak decode speed on a KV-bound
+  dense model. Other widths (2-8, mixed via `GMLX_KVARN_BITS=k6v5`) trade
+  fidelity for memory at about the same speed. The fidelity figures come from
+  `scripts/kld_harness.py`. Coverage follows the cache shape, not the model
+  name: growing attention KV with head_dim 128, 256 or 512, minus the last
+  layer of a deep stack, which the shared policy holds fp16 under either
+  scheme. That takes the qwen3.5/3.6 family and gemma-4 global layers (SWA
+  layers stay fp16, so the gemma-4 saving is modest). head_dim-64 layers and
+  MLA archs whose K and V share one latent store decline loudly and stay
+  fp16. Server-side, the prompt cache survives the scheme: hybrid and
+  sliding-window models keep full checkpoint-tier reuse on a kvarn boot
+  (records store the quantized cache, and stock and kvarn boots never adopt
+  each other's entries).
 - `--max-kv-size` caps the cache as a rolling window, trading away the oldest
   context. With `--kv-quant-scheme kvarn` on models the flag applies to (those
   without an arch-specific cache), the window quantizes too: the cap rounds
   down to whole 128-token groups and must clear the kvarn floor (128-token
   sink + `--kv-tail-tokens` + 128, so 1280 at the default tail); below the
   floor the scheme drops loudly and the window stays fp16. Plain `--kv-bits`
-  cannot quantize a rotating window and drops loudly with the same fp16
-  fallback. This composition is a `run` and `chat` one: the server's
+  cannot quantize a rotating window and is refused at start (exit 2). This
+  composition is a `run` and `chat` one: the server's
   `max_kv_size` caps the request context budget and builds no rotating cache.
 - Long prompts prefill in chunks automatically (2048 tokens), which bounds
   prefill's working memory on top of the cache itself. `--prefill-step-size`
