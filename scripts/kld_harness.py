@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Teacher-forced KLD harness for KV-cache quantization schemes.
 
 Runs the same corpus through the same model once per cache arm and
@@ -12,21 +13,23 @@ names select mixed K/V widths). Primary metric is median KLD per leg;
 same_top is the argmax agreement rate. The routine gate is
 median_KLD(kvarn6) <= median_KLD(kv8) on both legs.
 
-Corpus: wikitext test split (local HF cache), tokenized to ctx +
-decode-tokens ids. Protocol: idle machine, one model, arms interleaved
-per chunk so drift hits all arms equally.
+Corpus: wikitext test split, tokenized to ctx + decode-tokens ids. Needs
+the `datasets` package (not a gmlx dependency) and a Hugging Face cache
+that holds Salesforce/wikitext, or network access to fetch it. The kvarn
+arms need an mlx-kquant build with the kvarn ops. Protocol: idle machine,
+one model, arms interleaved per chunk so drift hits all arms equally.
+The kvarn figures in docs/performance.md come from this harness.
 
 Example:
-  PYTHONPATH=~/src/mlx-kquant-kvarn python scripts/kld_harness.py \\
-      ~/models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf --ctx 16384 \\
-      --decode-tokens 1024 --json /tmp/kld.json
+  python scripts/kld_harness.py path/to/model.gguf --ctx 16384 \\
+      --decode-tokens 1024 --json kld.json
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
+import re
 import sys
 
 import mlx.core as mx
@@ -78,8 +81,6 @@ def build_arm(name: str, model, tail_tokens: int, carve_out: bool = True):
             raise SystemExit(f"{name} arm converted {n}/{want} layers")
         return pc
 
-    import re
-
     m = re.fullmatch(r"kv(\d+)", name)
     if m:
         from gmlx.cache.kv_policy import resolve_kv_quant_policy
@@ -99,18 +100,9 @@ def build_arm(name: str, model, tail_tokens: int, carve_out: bool = True):
             raise SystemExit(f"kvarn arm unavailable: {reason}")
         spec = name[len("kvarn") :]
         m = re.fullmatch(r"k(\d)v(\d)", spec)
-        # kvarn_widths reads the split pair off the env, so the policy
-        # validates both widths rather than being patched after the fact.
-        env = os.environ.get("GMLX_KVARN_BITS")
-        if m:
-            os.environ["GMLX_KVARN_BITS"] = spec
-        try:
-            policy = resolve_kvarn_policy(
-                model, None if m else int(spec), tail_tokens, None, pc)
-        finally:
-            os.environ.pop("GMLX_KVARN_BITS", None)
-            if env is not None:
-                os.environ["GMLX_KVARN_BITS"] = env
+        k_bits, v_bits = (int(m[1]), int(m[2])) if m else (int(spec), None)
+        policy = resolve_kvarn_policy(
+            model, k_bits, tail_tokens, None, pc, value_bits=v_bits)
         if policy.verdict in ("dropped", "error"):
             raise SystemExit(f"kvarn arm {policy.verdict}: {policy.reason}")
         out = apply(policy)
