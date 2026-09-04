@@ -939,13 +939,15 @@ def resolve_model(
         reasoning_effort = ov["reasoning_effort"]
 
     scheme = load.get("kv_quant_scheme")
-    if (scheme is not None
-            and str(scheme).strip().lower() not in KV_QUANT_SCHEMES):
-        # An unchecked value reaches mlx-vlm and builds caches no
-        # gmlx path can read.
-        raise ConfigError(
-            f"load.kv_quant_scheme must be one of "
-            f"{', '.join(KV_QUANT_SCHEMES)} (got {scheme!r})")
+    if scheme is not None:
+        norm = str(scheme).strip().lower()
+        if norm not in KV_QUANT_SCHEMES:
+            # An unchecked value reaches mlx-vlm and builds caches no
+            # gmlx path can read.
+            raise ConfigError(
+                f"load.kv_quant_scheme must be one of "
+                f"{', '.join(KV_QUANT_SCHEMES)} (got {scheme!r})")
+        load["kv_quant_scheme"] = norm
 
     ttl_s = model.ttl_s if model.ttl_s is not None else cfg.defaults.ttl_s
     return ResolvedModel(

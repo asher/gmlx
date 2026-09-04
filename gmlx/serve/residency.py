@@ -866,6 +866,22 @@ class _ResidencyPool:
         set_untracked_weights_owner(cache_key)
         try:
             self._stock_get(model_path, adapter_path, model_kind=model_kind)
+            # One policy resolve per load, inside the env window. An
+            # error verdict fails residency. Runs before the APC salt
+            # below, which reads the stamp it leaves on the model.
+            from .kv_policy import KvPolicyError, resolve_for_load
+
+            rg = scratch.response_generator
+            if rg is not None and getattr(rg, "model", None) is not None:
+                try:
+                    kv_policy = resolve_for_load(rg, model_path)
+                except KvPolicyError:
+                    raise
+                except Exception:
+                    kv_policy = None
+                    _log.warning("kv policy resolve skipped", exc_info=True)
+            else:
+                kv_policy = None
             # Wire the bridge-built manager everywhere the stock load would
             # have put a from_env one: the scratch (captured by the _Entry
             # below and served by the runtime proxy), the registry cache dict
@@ -875,10 +891,10 @@ class _ResidencyPool:
             manager = _serving.pop_built_apc_manager()
             if manager is not None:
                 # The kvarn wire salt could not be set at manager build
-                # (pre-load, nothing to probe); set it here, inside the
-                # still-open env window, gated on the loaded model
-                # actually converting. Every manager passes through this
-                # block: GMLX_APC_ENABLED is set only above, and
+                # (pre-load, nothing to probe); set it here from the
+                # stamped policy, gated on the loaded model actually
+                # converting. Every manager passes through this block:
+                # GMLX_APC_ENABLED is set only above, and
                 # build_apc_manager returns None without it.
                 from gmlx.cache.kvarn_apc import apply_kvarn_salt
                 mc = scratch.model_cache
@@ -896,21 +912,6 @@ class _ResidencyPool:
                     manager.autosize(getattr(rg, "model", None))
                 except Exception:
                     _log.warning("APC pool autosize skipped", exc_info=True)
-            # One policy resolve per load, inside the env window. An
-            # error verdict fails residency.
-            from .kv_policy import KvPolicyError, resolve_for_load
-
-            rg = scratch.response_generator
-            if rg is not None and getattr(rg, "model", None) is not None:
-                try:
-                    kv_policy = resolve_for_load(rg, model_path)
-                except KvPolicyError:
-                    raise
-                except Exception:
-                    kv_policy = None
-                    _log.warning("kv policy resolve skipped", exc_info=True)
-            else:
-                kv_policy = None
         except BaseException:
             # A failed build never reaches _teardown: drop its partial
             # registrations here or they tax headroom forever.

@@ -160,6 +160,30 @@ def test_salt_zero_outside_kvarn_window(_ops_ok, monkeypatch):
     assert man._exact_extra_salt == 0
 
 
+def _stamped(model, scheme, bits=6, tail=1024):
+    model._gmlx_kv_policy = SimpleNamespace(single=SimpleNamespace(
+        scheme=scheme, bits=bits, value_bits=None, tail_tokens=tail))
+    return model
+
+
+def test_salt_reads_the_stamped_scheme(_ops_ok, monkeypatch):
+    # Residency stamps the policy before it salts; by request time the
+    # per-model env window is closed, so the stamp rules the env.
+    monkeypatch.delenv("KV_QUANT_SCHEME", raising=False)
+    salt = kvarn_entry_salt(_stamped(_hybrid(), "kvarn"))
+    assert salt != 0
+    monkeypatch.setenv("KV_QUANT_SCHEME", "kvarn")
+    monkeypatch.setenv("KV_BITS", "6")
+    monkeypatch.setenv("KV_TAIL_TOKENS", "1024")
+    assert kvarn_entry_salt(_hybrid()) == salt
+    assert kvarn_entry_salt(_stamped(_hybrid(), "uniform")) == 0
+
+
+def test_salt_env_scheme_is_normalized(_ops_ok, monkeypatch):
+    monkeypatch.setenv("KV_QUANT_SCHEME", " KVarN ")
+    assert kvarn_entry_salt(_hybrid()) != 0
+
+
 def test_build_apc_manager_never_salts(_ops_ok, monkeypatch):
     # The build runs pre-load with nothing to probe; the salt belongs to
     # residency's post-load pairing only.

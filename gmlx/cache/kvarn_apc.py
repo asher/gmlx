@@ -116,10 +116,14 @@ def kvarn_entry_salt(model=None) -> int:
     outside a kvarn window (XOR identity). The model resolves the widths
     from its stamped policy, so entries are salted with the config the
     caches were actually built at."""
-    if os.environ.get("KV_QUANT_SCHEME", "") != "kvarn":
-        return 0
     from .kvarn_cache import KVarNKVCache
-    from .kvarn_serve import _serve_widths_and_tail
+    from .kvarn_serve import _serve_widths_and_tail, stamped_single_policy
+
+    single = stamped_single_policy(model)
+    scheme = (getattr(single, "scheme", None) if single is not None
+              else os.environ.get("KV_QUANT_SCHEME", "").strip().lower())
+    if scheme != "kvarn":
+        return 0
 
     k_bits, v_bits, tail = _serve_widths_and_tail(model)
     key = f"kvarn:{KVarNKVCache.kvarn_layout_version}:{k_bits}:{v_bits}:{tail}"

@@ -65,6 +65,18 @@ def spec_cache_build():
         _spec_build[0] = False
 
 
+def stamped_single_policy(model):
+    """The single-stream KvQuantPolicy stamped on the model at load, or
+    None. Check-down: call sites disagree on whether they hand over the
+    top-level model or its language model."""
+    for obj in (model, getattr(model, "language_model", None)):
+        stamped = getattr(obj, "_gmlx_kv_policy", None) if obj else None
+        single = getattr(stamped, "single", None)
+        if single is not None:
+            return single
+    return None
+
+
 def _serve_widths_and_tail(model=None):
     """kvarn K/V widths and precision tail for this model.
 
@@ -76,14 +88,7 @@ def _serve_widths_and_tail(model=None):
     """
     from gmlx.cache.kvarn_cache import kvarn_widths
 
-    # Check-down: call sites disagree on whether they hand over the
-    # top-level model or its language model.
-    single = None
-    for obj in (model, getattr(model, "language_model", None)):
-        stamped = getattr(obj, "_gmlx_kv_policy", None) if obj else None
-        single = getattr(stamped, "single", None)
-        if single is not None:
-            break
+    single = stamped_single_policy(model)
     if (single is not None and getattr(single, "scheme", None) == "kvarn"
             and single.bits):
         v = single.value_bits or single.bits
