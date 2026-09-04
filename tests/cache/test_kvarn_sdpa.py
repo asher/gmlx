@@ -130,6 +130,7 @@ def test_kill_switch_forces_materialize(monkeypatch):
     monkeypatch.setenv("GMLX_KVARN_SDPA", "0")
     from gmlx.cache import kvarn_sdpa
 
+    monkeypatch.setattr(kvarn_sdpa, "_sdpa_env", None)
     off = kvarn_attention(q, cache, SCALE, None)
     ref = kvarn_sdpa._prefill(q, cache, SCALE, None)
     assert np.array_equal(np.array(off), np.array(ref))
@@ -196,3 +197,25 @@ def test_probe_pins_the_record_layout_version(monkeypatch):
     assert "record layout 99" in kvarn_sdpa._probe()
     monkeypatch.delattr(kq, "KVARN_RECORD_VERSION")
     assert "record layout None" in kvarn_sdpa._probe()
+
+
+@needs_kvarn_ops
+def test_threadgroup_cap_gates_the_fused_route(monkeypatch):
+    # A GPU whose pipeline cap is below the dispatch width would raise at
+    # eval, so the route consults the probed cap and materializes instead.
+    from gmlx.cache import kvarn_sdpa
+
+    cache = filled(700)
+    q = _make_q(4)
+    calls = []
+    real = kvarn_sdpa._decode
+    monkeypatch.setattr(kvarn_sdpa, "_decode", lambda *a: calls.append(1) or real(*a))
+    assert kvarn_sdpa._tg_threads(16, 4) == 1024
+    assert kvarn_sdpa._tg_threads(HQ // H, 4) <= kvarn_sdpa._tg_limit()
+    kvarn_attention(q, cache, SCALE, "causal")
+    assert calls == [1]
+    monkeypatch.setattr(kvarn_sdpa, "_tg_limit_cache", 32)
+    capped = kvarn_attention(q, cache, SCALE, "causal")
+    ref = kvarn_sdpa._prefill(q, cache, SCALE, "causal")
+    assert calls == [1]
+    assert np.array_equal(np.array(capped), np.array(ref))

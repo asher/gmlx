@@ -44,12 +44,16 @@ fp16/bf16 only today.
 """
 from __future__ import annotations
 
+import logging
+
 import mlx.core as mx
 
 from gmlx.envflags import env_bool, env_int
 
 _installed_route = False
 _installed_stamp = False
+_log = logging.getLogger(__name__)
+
 _CLAIMS = [0]
 _STAMPS = [0]
 _SEEN_B = set()
@@ -423,10 +427,7 @@ def _stamp_caches(caches, rows):
     if any(getattr(c, "kv_quant_scheme", None) == "kvarn" for c in caches):
         if not _KVARN_STAMP_NOTED[0]:
             _KVARN_STAMP_NOTED[0] = True
-            import sys
-
-            print("[serve] cascade decode inactive under kvarn KV",
-                  file=sys.stderr, flush=True)
+            _log.info("cascade decode inactive under kvarn KV")
         return False
     P = _lcp_rows(rows)
     if P <= 0:

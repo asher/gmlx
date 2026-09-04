@@ -72,6 +72,64 @@ def _probe():
     return None
 
 
+_sdpa_env = None
+
+
+def _route_enabled() -> bool:
+    """GMLX_KVARN_SDPA, read once: 0 forces the materialize path."""
+    global _sdpa_env
+    if _sdpa_env is None:
+        _sdpa_env = env_bool("GMLX_KVARN_SDPA", True)
+    return _sdpa_env
+
+
+_tg_limit_cache = None
+
+
+def _tg_limit() -> int:
+    """Largest fused-decode threadgroup this GPU runs, probed once. The
+    kernel's pipeline cap differs by GPU and an oversized dispatch raises
+    at eval time, past any call site that could catch it."""
+    global _tg_limit_cache
+    if _tg_limit_cache is None:
+        _tg_limit_cache = _probe_tg_limit()
+    return _tg_limit_cache
+
+
+def _probe_tg_limit() -> int:
+    if kvarn_ops_missing():
+        return 0
+    from .kvarn_cache import GROUP
+
+    c = KVarNKVCache(tail_tokens=0)
+    kv = mx.zeros((1, 1, GROUP + 2, 128), mx.float16)
+    c.update_and_fetch(kv, kv)
+    for gqa, ql in ((16, 4), (16, 1), (8, 1), (4, 1), (1, 1)):
+        try:
+            mx.eval(_decode(mx.zeros((1, gqa, ql, 128), mx.float16), c, 1.0))
+        except Exception:
+            continue
+        return _tg_threads(gqa, ql)
+    return 0
+
+
+def _tg_threads(gqa: int, qL: int) -> int:
+    """Threadgroup width of one fused decode dispatch (kq_sdpa geometry)."""
+    return 32 * gqa * ((qL + 1) // 2)
+
+
+def _fused_ok(q, cache) -> bool:
+    kvh = cache.stage_k.shape[1]
+    gqa = q.shape[1] // kvh
+    return (
+        q.dtype in (mx.float16, mx.bfloat16)
+        and 1 <= gqa <= 16
+        and q.shape[1] % kvh == 0
+        and _route_enabled()
+        and _tg_threads(gqa, q.shape[2]) <= _tg_limit()
+    )
+
+
 def _lse_merge(out_a, lse_a, out_b, lse_b):
     """Numerically stable two-segment softmax merge in fp32."""
     a = out_a.astype(mx.float32)
@@ -219,10 +277,7 @@ def kvarn_attention(q, cache, scale, mask, sinks=None, starts=None):
         if (
             q.shape[2] == 1
             and q.shape[0] == cache.stage_k.shape[0]
-            and q.dtype in (mx.float16, mx.bfloat16)
-            and 1 <= q.shape[1] // cache.stage_k.shape[1] <= 16
-            and q.shape[1] % cache.stage_k.shape[1] == 0
-            and env_bool("GMLX_KVARN_SDPA", True)
+            and _fused_ok(q, cache)
         ):
             s = starts if starts is not None else _batch_starts(cache, mask)
             if s is not None:
@@ -237,10 +292,7 @@ def kvarn_attention(q, cache, scale, mask, sinks=None, starts=None):
         1 <= q.shape[2] <= 4
         and plain_mask
         and q.shape[0] == 1
-        and q.dtype in (mx.float16, mx.bfloat16)
-        and 1 <= q.shape[1] // cache.stage_k.shape[1] <= 16
-        and q.shape[1] % cache.stage_k.shape[1] == 0
-        and env_bool("GMLX_KVARN_SDPA", True)
+        and _fused_ok(q, cache)
     ):
         return _decode(q, cache, float(scale))
     return _prefill(q, cache, float(scale), mask)

@@ -2875,7 +2875,7 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
             kv_kwargs.get("kv_bits"),
             tail,
             block,
-            out=sys.stdout,
+            out=sys.stderr,
         )
         if probe is not None:
             mtp_kvarn_cfg = {
@@ -3006,7 +3006,7 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
                 kv_kwargs.get("kv_bits"),
                 tail,
                 args.max_kv_size,
-                out=sys.stdout,
+                out=sys.stderr,
             )
             if probe is not None:
                 kvarn_cfg = {

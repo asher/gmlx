@@ -60,7 +60,10 @@ def test_install_idempotent(restorable):
     assert ar.PromptProcessingBatch.__init__ is wrapped_init
 
 
-def test_make_cache_builds_kvarn(restorable, kvarn_ops_ok, capsys):
+def test_make_cache_builds_kvarn(restorable, kvarn_ops_ok, caplog):
+    import logging
+
+    caplog.set_level(logging.INFO, logger="gmlx.cache.kvarn_serve")
     _install(restorable)
     restorable.setenv("KV_TAIL_TOKENS", "256")
     caches = ar._make_cache(_LayersLM(), [0, 4], kv_bits=None, kv_quant_scheme="kvarn")
@@ -70,7 +73,7 @@ def test_make_cache_builds_kvarn(restorable, kvarn_ops_ok, capsys):
     assert type(caches[-1]) is BatchKVCache
     assert all(c.tail_cap == 256 and c.k_bits == 6 for c in caches[:-1])
     assert np.array_equal(np.array(caches[0].left_padding), [0, 4])
-    assert "[kv] serve batch:" in capsys.readouterr().out
+    assert "[kv] serve batch:" in caplog.text
     assert gen._make_cache is ar._make_cache
 
 

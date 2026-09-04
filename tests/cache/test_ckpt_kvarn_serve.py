@@ -100,9 +100,12 @@ def test_predicate_config_declines(kvarn_ops_ok, monkeypatch):
     assert _ppb_rebuild_declined(_batch(), dict(KW)) == "unsupported"
 
 
-def test_ensure_converts_in_place(kvarn_ops_ok, monkeypatch, capsys):
+def test_ensure_converts_in_place(kvarn_ops_ok, monkeypatch, caplog):
+    import logging
+
     from gmlx.cache import kvarn_serve
 
+    caplog.set_level(logging.INFO, logger="gmlx.cache.kvarn_serve")
     monkeypatch.setattr(kvarn_serve, "_CKPT_NOTED", [False])
     monkeypatch.setenv("KV_TAIL_TOKENS", "256")
     b = _batch()
@@ -111,7 +114,7 @@ def test_ensure_converts_in_place(kvarn_ops_ok, monkeypatch, capsys):
     assert type(b.prompt_cache[0]) is KVarNKVCache
     assert b.prompt_cache[0].tail_cap == 256
     assert b.prompt_cache[1] is arr
-    assert "[kv] serve ckpt:" in capsys.readouterr().out
+    assert "[kv] serve ckpt:" in caplog.text
     # The outer batch rebuild now declines: the conversion cannot be
     # clobbered by the later wrap in the init chain.
     assert _ppb_rebuild_declined(b, dict(KW)) == "converted"

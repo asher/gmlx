@@ -221,7 +221,7 @@ def ensure_ppb_kvarn(batch, kwargs, *, ckpt_active: bool) -> bool:
         return False
     if not _CKPT_NOTED[0]:
         _CKPT_NOTED[0] = True
-        print(kv_line("serve ckpt", policy), flush=True)
+        _log.info(kv_line("serve ckpt", policy))
     return True
 
 
@@ -303,7 +303,7 @@ def _install_make_cache(_ar, _gen):
             install_kvarn_sdpa()
             if not _noted[0]:
                 _noted[0] = True
-                print(kv_line("serve batch", policy), flush=True)
+                _log.info(kv_line("serve batch", policy))
         return caches
 
     _kvarn_make_cache.__dict__[_MAKE_CACHE_FLAG] = True
