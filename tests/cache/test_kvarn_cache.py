@@ -97,11 +97,12 @@ def test_trim_truth_table():
     assert c._can_trim(60)  # inside live
     assert c._can_trim(160)  # horizon reopen (g=3)
     assert c._can_trim(250)  # tail rebuild (g=2, group start 384 >= 316)
-    assert not c._can_trim(450)  # frontier group starts before tail coverage
+    # frontier group starts before tail coverage: records dequantize
+    assert c._trim_plan(450) == ("records", 0, 122)
     assert c._can_trim(600)  # into sink rows (always valid)
     assert c._can_trim(700)  # full reset
-    assert c.trim(450) == 0  # refusal is a no-op
-    assert c.offset == 700
+    for n in (60, 160, 250):
+        assert c._trim_plan(n)[0] != "records"
 
 
 @_NEEDS_GPU
@@ -124,8 +125,8 @@ def test_horizon_single_use():
     assert c.trim(160) == 160  # consumes the horizon (g=3)
     # A second trim crossing the new frontier group has no horizon and no
     # tail coverage for group 2 (tail 384 covers [316, 700), group 2 starts
-    # at 384 but the tail shrank with the trim).
-    assert not c._can_trim(160)
+    # at 384 but the tail shrank with the trim): only the records remain.
+    assert c._trim_plan(160)[0] == "records"
 
 
 @_NEEDS_GPU
@@ -143,7 +144,7 @@ def test_tail_disabled():
     assert c.tail_len == 0
     assert c._can_trim(60)
     assert c._can_trim(160)
-    assert not c._can_trim(250)  # no tail to rebuild from
+    assert c._trim_plan(250)[0] == "records"  # no tail to rebuild from
 
 
 @_NEEDS_GPU
@@ -277,3 +278,52 @@ def test_update_rejects_malformed():
     with pytest.raises(ValueError, match="single-stream"):
         bad = mx.array(rng.standard_normal((2, H, 4, D)).astype(np.float16))
         c.update_and_fetch(bad, bad)
+
+
+def test_trim_plan_records_is_the_fallback():
+    # Plan arithmetic only: no arrays. sink 128, three sealed groups, five
+    # live rows.
+    c = KVarNKVCache(tail_tokens=0)
+    c.offset, c.n_sealed, c.horizon_valid = 128 + 3 * GROUP + 5, 3, False
+    assert c._trim_plan(5) == ("live",)
+    assert c._trim_plan(10) == ("records", 2, 123)
+    assert c._trim_plan(5 + 2 * GROUP) == ("records", 1, 0)
+    assert c._trim_plan(5 + 3 * GROUP) == ("sink",)
+    c.horizon_valid = True
+    assert c._trim_plan(10) == ("horizon", 123)
+    assert c._trim_plan(10 + GROUP) == ("records", 1, 123)
+
+
+@_NEEDS_GPU
+def test_trim_records_dequantizes_the_frontier_group():
+    from gmlx.cache.kvarn_cache import _dequant_head
+
+    k, v = _tokens(700)
+    c = KVarNKVCache(tail_tokens=0)
+    c.update_and_fetch(k, v)
+    # sealed 4 (tokens 128..640), live 60. Trim 250: frontier 450 lands
+    # in group 2 with 66 live rows; no horizon, no tail.
+    exp = [
+        _dequant_head(cd[:, :, 2:3], ax[:, :, 2:3], 6, side, D, mx.float16)[:, :, :66]
+        for side, cd, ax in (("k", c.codes_k, c.axes_k), ("v", c.codes_v, c.axes_v))
+    ]
+    assert c._trim_plan(250) == ("records", 2, 66)
+    assert c.trim(250) == 250
+    assert (c.offset, c.n_sealed, c.live_len, c.horizon_valid) == (450, 2, 66, False)
+    for stage, e in zip((c.stage_k, c.stage_v), exp, strict=True):
+        assert np.array_equal(np.array(stage[:, :, 128:194]), np.array(e))
+    # Replay continues from the reopened frontier. Groups 0-1, group 3 and
+    # the live rows match a bulk build exactly; group 2 re-seals over 66
+    # reopened rows, so its axes and codes carry one extra quantization
+    # round trip.
+    c.update_and_fetch(k[:, :, 450:], v[:, :, 450:])
+    ref = KVarNKVCache(tail_tokens=0)
+    ref.update_and_fetch(k, v)
+    assert (c.offset, c.n_sealed, c.live_len) == (700, ref.n_sealed, ref.live_len)
+    for a, b in zip(c.materialize(), ref.materialize(), strict=True):
+        a, b = np.array(a).astype(np.float32), np.array(b).astype(np.float32)
+        assert np.array_equal(a[:, :, :384], b[:, :, :384])
+        assert np.array_equal(a[:, :, 512:], b[:, :, 512:])
+        seg_a, seg_b = a[:, :, 384:512], b[:, :, 384:512]
+        rel = np.sqrt(np.mean((seg_a - seg_b) ** 2)) / np.sqrt(np.mean(seg_b**2))
+        assert 0 < rel < 0.1

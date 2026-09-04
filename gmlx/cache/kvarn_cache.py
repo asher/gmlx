@@ -20,10 +20,13 @@ that tries to use the views as arrays fails loudly instead of silently
 attending to garbage. The class deliberately exposes neither ``bits`` nor
 ``to_quantized`` so no affine quantized-KV path ever claims it.
 
-Trim never dequantizes: n tokens off the end succeed when the new
-frontier lands in the live stage, in the horizon group, or inside tail
-coverage (tail rows re-rotate to rebuild the live group bit-identically);
-anything deeper returns 0 and the caller falls back to its rebuild path.
+Trim dequantizes only as a last resort: n tokens off the end are exact
+when the new frontier lands in the live stage, in the horizon group, or
+inside tail coverage (tail rows re-rotate to rebuild the live group
+bit-identically). Deeper than that, the frontier group's records
+dequantize into the live stage, one extra quantization round trip on
+those rows. A rotating window returns 0 when the frontier falls in
+evicted history, and the caller falls back to its rebuild path.
 
 Head dim 128, 256 or 512, single stream (B=1), group size 128. Heads
 wider than 128 quantize as D/128 independent 128-dim slices per group,
@@ -461,8 +464,9 @@ class KVarNKVCache(_base_cache()):
         return True
 
     def _trim_plan(self, n):
-        """How to serve a trim of n tokens, or None when it would need
-        dequantizing history that only exists as records."""
+        """How to serve a trim of n tokens, or None when the frontier
+        falls in evicted history. Exact plans first; the records plan
+        dequantizes the frontier group's rows and is the fallback."""
         new_off = self.offset - n
         if new_off <= self.sink_cap:
             return ("sink",)
@@ -479,7 +483,7 @@ class KVarNKVCache(_base_cache()):
         cover0 = self.offset - self.tail_len
         if self.sink_cap + self.evicted + g * GROUP >= cover0:
             return ("tail", g, live, cover0)
-        return None
+        return ("records", g, live)
 
     def _can_trim(self, n):
         n = min(int(n), self.offset)
@@ -515,6 +519,20 @@ class KVarNKVCache(_base_cache()):
                 s0 = self.sink_cap
                 self.stage_k[:, :, s0 : s0 + live] = kq.kvarn_rotate(tk)
                 self.stage_v[:, :, s0 : s0 + live] = kq.kvarn_rotate(tv)
+            self.n_sealed = g
+            self.horizon_valid = False
+        elif kind == "records":
+            g, live = plan[1:]
+            if live:
+                d = self.head_dim
+                s0 = self.sink_cap
+                for side, codes, axes, bits, stage in (
+                    ("k", self.codes_k, self.axes_k, self.k_bits, self.stage_k),
+                    ("v", self.codes_v, self.axes_v, self.v_bits, self.stage_v),
+                ):
+                    rows = _dequant_head(codes[:, :, g : g + 1], axes[:, :, g : g + 1],
+                                         bits, side, d, stage.dtype)
+                    stage[:, :, s0 : s0 + live] = rows[:, :, :live]
             self.n_sealed = g
             self.horizon_valid = False
         self.tail_end = max(self.tail_start, self.tail_end - n)
