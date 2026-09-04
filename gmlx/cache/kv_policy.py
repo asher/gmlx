@@ -37,6 +37,23 @@ def packed_bytes_per_element(bits: int, group_size: int) -> float:
     return bits / 8.0 + 4.0 / group_size
 
 
+def note_once(model, key: str) -> bool:
+    """True the first time ``key`` is noted on this model object. One-shot
+    log lines key on the model, not the process: a second resident model
+    gets its own line."""
+    seen = getattr(model, "_gmlx_kv_noted", None)
+    if not isinstance(seen, set):
+        seen = set()
+        try:
+            model._gmlx_kv_noted = seen
+        except Exception:
+            return True
+    if key in seen:
+        return False
+    seen.add(key)
+    return True
+
+
 def kvarn_bytes_per_element(bits: int, value_bits=None) -> float:
     """kvarn record cost: codes at the mean K/V width plus one fp16
     Sinkhorn axes triplet per 128-token group. 6-bit = 0.796875.
@@ -403,7 +420,7 @@ def _resolve_kvarn(stack, *, kv_bits, value_bits, mode, mtp, head_dim,
     """The kvarn arm of resolve_kv_quant_policy."""
     from gmlx.cache.kvarn_cache import HEAD_DIMS, ensure_registered
 
-    k_bits = int(kv_bits) if kv_bits is not None else 6
+    k_bits = int(kv_bits)
     v_bits = k_bits if value_bits is None else int(value_bits)
     tail = KVARN_TAIL if tail_tokens is None else int(tail_tokens)
     extra = dict(scheme="kvarn", value_bits=v_bits, tail_tokens=tail,

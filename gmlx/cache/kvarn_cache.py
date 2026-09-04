@@ -87,13 +87,16 @@ def kvarn_head_dims(model):
 
 
 def kvarn_resolve_kwargs(model, kv_bits=None, value_bits=None, tail_tokens=None,
-                         rotating_window=None):
+                         rotating_window=None, key_bits=None):
     """resolve_kv_quant_policy kwargs for the kvarn scheme on ``model``.
     The one place widths, tail, window and the model-shape decline are
     assembled: CLI, chat, serve load, the serve batch seam and the MTP
-    spec path all resolve through it. ``value_bits`` None takes the
-    GMLX_KVARN_BITS split when set, else the key width."""
+    spec path all resolve through it. ``key_bits``/``value_bits`` (serve's
+    KV_KEY_BITS/KV_VALUE_BITS) win over the GMLX_KVARN_BITS split, which
+    wins over ``kv_bits`` for both sides."""
     k_bits, v_bits = kvarn_widths(kv_bits)
+    if key_bits is not None:
+        k_bits = int(key_bits)
     if value_bits is not None:
         v_bits = int(value_bits)
     return dict(
@@ -156,6 +159,18 @@ def kvarn_widths(kv_bits):
         )
     bits = int(kv_bits) if kv_bits is not None else 6
     return bits, bits
+
+
+def parse_tail_tokens(raw) -> int:
+    """KV_TAIL_TOKENS text as the tail width; empty means the default.
+    Malformed text raises ValueError (the resolver checks the value)."""
+    text = "" if raw is None else str(raw).strip()
+    if not text:
+        return KVARN_DEFAULT_TAIL
+    try:
+        return int(text)
+    except ValueError:
+        raise ValueError(f"KV_TAIL_TOKENS={text!r} is not an integer") from None
 
 
 def kvarn_rotating_window(model, max_kv_size):

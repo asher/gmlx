@@ -91,6 +91,52 @@ def test_kvarn_notes_only_an_explicit_start_offset(monkeypatch):
     assert "quantized_kv_start=512 not honored" in kv_line("m", pol.single)
 
 
+def test_malformed_tail_fails_the_boot(monkeypatch):
+    from gmlx.cache import kvarn_sdpa
+
+    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
+    monkeypatch.delenv("GMLX_KVARN", raising=False)
+    monkeypatch.setenv("KV_BITS", "6")
+    monkeypatch.setenv("KV_TAIL_TOKENS", "lots")
+    model = _model()
+    model.config.head_dim = 128
+    rg = _rg(model=model, kv_bits=None, kv_quant_scheme="kvarn")
+    with pytest.raises(skv.KvPolicyError, match="KV_TAIL_TOKENS='lots'"):
+        skv.resolve_for_load(rg, "m")
+
+
+def test_affine_start_reads_the_load_window(monkeypatch):
+    # upstream froze rg.quantized_kv_start from the process env at server
+    # start; the per-model window must reach the generator.
+    monkeypatch.setenv("KV_BITS", "8")
+    monkeypatch.setenv("QUANTIZED_KV_START", "512")
+    monkeypatch.delenv("MLX_VLM_GGUF_SPECULATIVE", raising=False)
+    rg = _rg(quantized_kv_start=5000)
+    pol = skv.resolve_for_load(rg, "m")
+    assert rg.quantized_kv_start == 512
+    assert pol.single.quantized_kv_start == 512
+    monkeypatch.setenv("QUANTIZED_KV_START", "soon")
+    with pytest.raises(skv.KvPolicyError, match="QUANTIZED_KV_START"):
+        skv.resolve_for_load(_rg(), "m")
+
+
+def test_kvarn_split_widths_follow_the_key_value_config(monkeypatch):
+    from gmlx.cache import kvarn_sdpa
+
+    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
+    monkeypatch.delenv("GMLX_KVARN", raising=False)
+    monkeypatch.delenv("MLX_VLM_GGUF_SPECULATIVE", raising=False)
+    monkeypatch.setenv("KV_BITS", "6")
+    monkeypatch.setenv("GMLX_KVARN_BITS", "k4v4")
+    model = _model()
+    model.config.head_dim = 128
+    rg = _rg(model=model, kv_bits=None, kv_quant_scheme="kvarn",
+             kv_key_bits=8.0, kv_value_bits=5.0)
+    pol = skv.resolve_for_load(rg, "m")
+    assert (pol.single.bits, pol.single.value_bits) == (8, 5)
+    assert "kvarn k8 v5" in skv.kv_line("m", pol.single)
+
+
 def test_kvarn_admission_charges_the_fp16_buffers(monkeypatch):
     """The record bpe alone underprices a kvarn layer: the fp16 sink,
     horizon and tail are resident from the first token."""

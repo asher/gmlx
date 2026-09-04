@@ -77,6 +77,24 @@ def test_make_cache_builds_kvarn(restorable, kvarn_ops_ok, caplog):
     assert gen._make_cache is ar._make_cache
 
 
+def test_make_cache_notes_once_per_model(restorable, kvarn_ops_ok, caplog):
+    import logging
+
+    caplog.set_level(logging.INFO, logger="gmlx.cache.kvarn_serve")
+    _install(restorable)
+    a, b = _LayersLM(), _LayersLM()
+    for lm in (a, a, b):
+        ar._make_cache(lm, [0], kv_bits=None, kv_quant_scheme="kvarn")
+    assert caplog.text.count("[kv] serve batch:") == 2
+
+
+def test_make_cache_rejects_a_malformed_tail(restorable, kvarn_ops_ok):
+    _install(restorable)
+    restorable.setenv("KV_TAIL_TOKENS", "lots")
+    with pytest.raises(ValueError, match="KV_TAIL_TOKENS"):
+        ar._make_cache(_LayersLM(), [0], kv_bits=None, kv_quant_scheme="kvarn")
+
+
 def test_make_cache_env_bits(restorable, kvarn_ops_ok):
     _install(restorable)
     restorable.setenv("KV_BITS", "4")

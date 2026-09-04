@@ -165,6 +165,26 @@ def test_warm_tokens_probes_and_releases():
     assert est._warm_tokens(None, [1, 2, 3], 0) == (0, None)
 
 
+def test_warm_tokens_salts_the_exact_probe():
+    seen = []
+
+    class _Mgr:
+        _exact_extra_salt = 5
+
+        def lookup_prefix(self, ids, extra_hash=0):
+            return [], 0
+
+        def release(self, blocks):
+            pass
+
+        def find_exact_prefix(self, ids, extra_hash=0):
+            seen.append(extra_hash)
+            return (0xabc, 700) if extra_hash == 3 ^ 5 else None
+
+    assert est._warm_tokens(_Mgr(), list(range(1000)), 3) == (700, "exact")
+    assert seen == [3 ^ 5]
+
+
 def test_estimate_validation_and_non_resident():
     serving.register_resolved_models(build_config(
         {"models": {"q": {"path": "/abs/q.gguf"}}}))

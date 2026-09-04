@@ -100,16 +100,16 @@ def _config_head_dim(model):
     return head_dim if isinstance(head_dim, int) and head_dim > 0 else None
 
 
-def _serve_tail_tokens() -> int:
+def _serve_tail_tokens(model_id: str = "") -> int:
     """The kvarn precision tail from the per-model load window
-    (KV_TAIL_TOKENS); upstream carries no attribute for it."""
-    from gmlx.cache.kvarn_cache import KVARN_DEFAULT_TAIL
+    (KV_TAIL_TOKENS); upstream carries no attribute for it. Malformed
+    text fails the boot like a malformed KV_BITS."""
+    from gmlx.cache.kvarn_cache import parse_tail_tokens
 
-    val = os.environ.get("KV_TAIL_TOKENS")
     try:
-        return KVARN_DEFAULT_TAIL if val in (None, "") else int(val)
-    except (TypeError, ValueError):
-        return KVARN_DEFAULT_TAIL
+        return parse_tail_tokens(os.environ.get("KV_TAIL_TOKENS"))
+    except ValueError as e:
+        raise KvPolicyError(f"[kv] {model_id}: {e}") from None
 
 
 def _load_window_scheme(rg) -> str:
@@ -176,6 +176,21 @@ def resolve_for_load(rg, model_id: str):
                                        off_policy("batched")), model_id)
         return None
 
+    start_env = os.environ.get("QUANTIZED_KV_START")
+    if start_env not in (None, ""):
+        # Per-model load key: upstream froze rg.quantized_kv_start from
+        # the process env at server start, so the window is the truth.
+        try:
+            start = int(start_env)
+        except ValueError:
+            raise KvPolicyError(
+                f"[kv] {model_id}: QUANTIZED_KV_START={start_env!r} is not "
+                "an integer")
+        try:
+            rg.quantized_kv_start = start
+        except Exception:
+            _log.warning("[kv] cannot set quantized_kv_start on the "
+                         "generator", exc_info=True)
     mtp = bool(getattr(rg, "draft_model_path", None)
                or os.environ.get("MLX_VLM_GGUF_SPECULATIVE") == "1")
     stack = _probe_stack(rg.model)
@@ -190,17 +205,19 @@ def resolve_for_load(rg, model_id: str):
         head_dim=_config_head_dim(rg.model),
     )
     if scheme == "kvarn":
-        # kvarn owns its widths: KV_BITS from the window (default 6),
-        # independent of upstream's kv_bits parse and its qat drop;
-        # GMLX_KVARN_BITS may split them. rotating_window stays None:
-        # serve's MAX_KV_SIZE only caps the request context budget, it
-        # never builds a rotating stack.
+        # kvarn owns its widths: KV_KEY_BITS/KV_VALUE_BITS when set, else
+        # the GMLX_KVARN_BITS split, else KV_BITS from the window (default
+        # 6), independent of upstream's kv_bits parse and its qat drop.
+        # rotating_window stays None: serve's MAX_KV_SIZE only caps the
+        # request context budget, it never builds a rotating stack.
         from gmlx.cache.kvarn_cache import kvarn_resolve_kwargs
 
         kw["key_bits"] = None
         kw.update(kvarn_resolve_kwargs(
             rg.model, int(req_val) if req_val else None,
-            tail_tokens=_serve_tail_tokens()))
+            key_bits=getattr(rg, "kv_key_bits", None),
+            value_bits=getattr(rg, "kv_value_bits", None),
+            tail_tokens=_serve_tail_tokens(model_id)))
         # rg carries upstream's 5000 default, which affine honors and
         # kvarn never can; only an explicit request is worth a "not
         # honored" note on the line.

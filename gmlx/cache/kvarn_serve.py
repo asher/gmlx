@@ -86,7 +86,7 @@ def _serve_widths_and_tail(model=None):
     for paths that run inside the load window (residency probes) and for
     the CLI-shaped tests.
     """
-    from gmlx.cache.kvarn_cache import KVARN_DEFAULT_TAIL, kvarn_widths
+    from gmlx.cache.kvarn_cache import kvarn_widths, parse_tail_tokens
 
     single = stamped_single_policy(model)
     if (single is not None and getattr(single, "scheme", None) == "kvarn"
@@ -98,12 +98,8 @@ def _serve_widths_and_tail(model=None):
         bits = int(raw) if raw else None
     except ValueError:
         bits = None
-    try:
-        tail = int(os.environ.get("KV_TAIL_TOKENS", "") or KVARN_DEFAULT_TAIL)
-    except ValueError:
-        tail = KVARN_DEFAULT_TAIL
     k_bits, v_bits = kvarn_widths(bits)
-    return k_bits, v_bits, tail
+    return k_bits, v_bits, parse_tail_tokens(os.environ.get("KV_TAIL_TOKENS"))
 
 
 def kvarn_batch_policy(model, caches, k_bits, v_bits, tail, mode="batched"):
@@ -239,8 +235,6 @@ def _install_make_cache(_ar, _gen):
     if getattr(_ar._make_cache, _MAKE_CACHE_FLAG, False):
         return
     _orig = _ar._make_cache
-    _noted = [False]
-    _declined: set = set()
 
     def _kvarn_make_cache(
         model,
@@ -263,6 +257,8 @@ def _install_make_cache(_ar, _gen):
                 ),
                 **kwargs,
             )
+        from gmlx.cache.kv_policy import note_once
+
         from .compat import cache_types
         from .kvarn_cache import BatchKVarNKVCache, ensure_registered
 
@@ -272,12 +268,10 @@ def _install_make_cache(_ar, _gen):
         caches = _orig(model, left_padding, kv_bits=None, **kwargs)
         policy = kvarn_batch_policy(model, caches, k_bits, v_bits, tail)
         if policy.verdict not in ("full", "partial"):
-            key = type(model).__name__
-            if key not in _declined:
-                _declined.add(key)
+            if note_once(model, "serve-batch-declined"):
                 _log.warning(
                     "KV_QUANT_SCHEME=kvarn dropped for %s: %s; KV stays fp16",
-                    key,
+                    type(model).__name__,
                     policy.reason,
                 )
             return caches
@@ -301,8 +295,7 @@ def _install_make_cache(_ar, _gen):
             from .kvarn_sdpa import install_kvarn_sdpa
 
             install_kvarn_sdpa()
-            if not _noted[0]:
-                _noted[0] = True
+            if note_once(model, "serve-batch"):
                 _log.info(kv_line("serve batch", policy))
         return caches
 
@@ -344,7 +337,6 @@ def _install_apc_gate(_ar):
     if getattr(_ar.BatchGenerator.__init__, _APC_GATE_FLAG, False):
         return
     _orig_init = _ar.BatchGenerator.__init__
-    _noted = [False]
 
     def _gated_init(self, model, *args, **kwargs):
         # Scheme comes from the kwarg (the ResponseGenerator's env-window
@@ -354,6 +346,8 @@ def _install_apc_gate(_ar):
             kwargs.get("apc_manager") is not None
             and kwargs.get("kv_quant_scheme") == "kvarn"
         ):
+            from gmlx.cache.kv_policy import note_once
+
             from .kvarn_apc import (
                 kvarn_apc_installed,
                 kvarn_model_converts,
@@ -367,18 +361,16 @@ def _install_apc_gate(_ar):
             if kvarn_model_converts(model):
                 if kvarn_apc_installed():
                     # Exact tier only: stamp the model so model_apc_mode
-                    # resolves "exact", and drop kv_bits (the scheme owns
-                    # the width via env) so upstream's kv-quant opt-out
-                    # does not null the manager.
+                    # resolves "exact", and drop kv_bits (the stamped
+                    # policy owns the width) so upstream's kv-quant
+                    # opt-out does not null the manager.
                     stamp_model(model)
                     kwargs["kv_bits"] = None
-                    if not _noted[0]:
-                        _noted[0] = True
+                    if note_once(model, "apc-gate"):
                         _log.info("[serve] APC exact tier active under kvarn KV")
                 else:
                     kwargs["apc_manager"] = None
-                    if not _noted[0]:
-                        _noted[0] = True
+                    if note_once(model, "apc-gate"):
                         _log.info(
                             "[serve] APC inactive under kvarn KV "
                             "(kvarn APC arms not installed)"
