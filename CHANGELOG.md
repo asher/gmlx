@@ -20,7 +20,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and checkpoint tiers store kvarn records). Needs an mlx-kquant build that
   carries the kvarn ops; without one the scheme drops loudly and the
   model runs fp16 KV. `GMLX_KVARN=0` and `GMLX_KVARN_SDPA=0` are the
-  kill switches.
+  kill switches. The method is Huawei's KVarN (arXiv:2606.03458); the
+  record format follows beellama.cpp (MIT, see THIRD_PARTY_NOTICES.md).
 - `scripts/kld_harness.py`: the teacher-forced KLD harness behind the
   kvarn fidelity figures in docs/performance.md.
 - A model loaded without KV quantization carries an explicit `off`

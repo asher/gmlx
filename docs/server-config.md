@@ -1052,33 +1052,27 @@ scheme's widths, or split key/value bits under `uniform`). Speculative
 batched; `verdict_batched` reports that mode, and admission prices memory
 from it.
 
-`kv_quant_scheme: kvarn` runs the same policy over the same stack, so the
-layer rules above hold unchanged: `kv_bits` picks the width (default 6,
-accepts 2/3/4/5/6/8) and `kv_tail_tokens` sizes the fp16 precision tail
-(default 1024). Split widths come from `KV_KEY_BITS`/`KV_VALUE_BITS` in
-the server's own environment (server-wide, not a load key), else
-`GMLX_KVARN_BITS=k6v5`, else `kv_bits` for both sides. A malformed
-`kv_tail_tokens` fails the load like a width outside the list. Kvarn narrows the eligible layers once more, by cache
-shape rather than by model name: an attention layer converts only when
-its head_dim is 128, 256 or 512 (qwen3.5/3.6 and gemma-4 global layers
-are the common cases; llama-4's chunked-attention layers convert like
-plain KV). head_dim-64 layers (gpt-oss, falcon-h1) stay fp16, and MLA
-archs whose K and V share latent storage (deepseek4, glm5next, kimi-k3)
-never convert at all. Archs that derive head_dim from hidden/heads
-(nemotron-h, jamba, lfm2, granitemoehybrid) are eligible per checkpoint
--- check the config. Sliding-window layers stay fp16 beside converted
-global layers (gemma-4); a native-MTP drafter declines that mixed stack
-whole at batch size 1, as on `run`. A model where no layer converts keeps
-fp16 KV with a one-shot log reason, never a silent affine fallback.
-`quantized_kv_start` is not honored under kvarn (records quantize from
-token 0; the `[kv]` line says so). `max_kv_size` only caps the request
-context budget on the server, so the rotating-window composition kvarn
-supports on `run` and `chat` has no server equivalent. Admission prices a
-kvarn layer at its record width, rounded up to the 4096-token code slab
-the cache grows in, plus the fp16 sink, horizon and tail buffers, which
-are resident from the first token. Speculative rollback into a sealed
-group reopens it from its records (one lossy round trip); rows still in
-the fp16 tail roll back exactly.
+`kv_quant_scheme: kvarn` runs the same policy over the same stack.
+`kv_bits` picks the width (default 6; 2/3/4/5/6/8) and `kv_tail_tokens` the
+fp16 precision tail (default 1024). Split widths come from `KV_KEY_BITS` /
+`KV_VALUE_BITS` in the server's own environment (server-wide, not a load
+key), else `GMLX_KVARN_BITS=k6v5`, else `kv_bits` for both sides. A
+malformed `kv_tail_tokens` fails the load like a width outside the list.
+Which layers convert and which archs decline is the shared rule in
+[performance.md](performance.md#kv-cache-quantization); a model where no
+layer converts runs fp16 KV with a one-shot log reason, never a silent
+affine fallback.
+
+Server-specific points. `quantized_kv_start` is not honored under kvarn
+(records quantize from token 0; the `[kv]` line says so). `max_kv_size`
+only caps the request context budget, so the rotating-window composition
+`run` and `chat` support has no server equivalent. A native-MTP drafter
+declines a mixed window-plus-kvarn stack whole at batch size 1, as on
+`run`. Admission prices a kvarn layer at its record width, rounded up to
+the 4096-token code slab the cache grows in, plus the fp16 sink, horizon
+and tail buffers, which are resident from the first token. Speculative
+rollback into a sealed record reopens it from its codes (one lossy round
+trip); rows still in the fp16 tail roll back exactly.
 
 APC under kvarn keeps the same tier routing as fp16. Dense models run the
 exact-entry tier (memory and disk; the 16-token block tier cannot split

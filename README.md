@@ -87,7 +87,10 @@ terminal. `pip install "gmlx[all]"` into a venv you manage works too; the
 command then exists only while that venv is active.
 
 A model typically needs roughly its file size in memory, plus the KV cache
-(the per-conversation state, which grows with context length). The exception
+(the per-conversation state, which grows with context length). `--kv-bits`
+and `--kv-quant-scheme kvarn` shrink that cache two to four times; the
+[performance guide](https://github.com/asher/gmlx/blob/main/docs/performance.md#kv-cache-quantization)
+says which models gain from it. The exception
 is MoE models, which can run [bigger than memory](#bigger-than-memory). If
 anything misbehaves, `gmlx doctor` checks the runtime, config, model paths,
 and services in one pass.
