@@ -1234,12 +1234,15 @@ def _record_insert(manager, rec) -> None:
         # Strip-on-extend frees superseded records' main chains for the
         # pool; sub-prefix adoption survives it because those chains are
         # content-deduped and skeleton re-index re-cuts them. A record
-        # with no main chain (kvarn: inline codes, at most a bounded
-        # window chain) is the only carrier of its boundary -- stripping
-        # it kills divergent-suffix and turn adoption outright -- and
-        # pins no chain the pool could reuse, so it is governed by the
-        # count and byte bounds below instead.
-        chain = [k for k in chain if idx[k].main_blocks]
+        # that carries a kvarn layer, or no main chain at all, is the only
+        # carrier of its boundary (inline codes; the fp16 carve-out layer
+        # beside them has a chain but cannot restore the kvarn rows), so
+        # stripping it kills divergent-suffix and turn adoption outright.
+        # The count and byte bounds below govern those records, and
+        # _evict_for_pool reclaims the blocks they pin.
+        chain = [k for k in chain
+                 if idx[k].main_blocks
+                 and not any(_is_kvarn(t) for t in idx[k].layout)]
         chain.sort(key=lambda k: idx[k].p, reverse=True)
         for k in chain[_CKPT_HEAVY_PER_CHAIN - 1:]:
             _release_record(manager, idx.pop(k))

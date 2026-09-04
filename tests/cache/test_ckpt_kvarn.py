@@ -55,6 +55,12 @@ def _hollow_kvarn(p, **kw):
     return c
 
 
+def _kv(p):
+    c = KVCache()
+    c.update_and_fetch(mx.zeros((1, H, p, D)), mx.zeros((1, H, p, D)))
+    return c
+
+
 def test_layout_truth_table():
     kvarn = KVarNKVCache()
     assert ckpt_layout([kvarn, ArraysCache(size=2)]) == [KVARN_TAG, "arr"]
@@ -118,6 +124,24 @@ def test_blockless_records_exempt_from_strip_on_extend():
     warm, got = ckpt_lookup(man, _ids(80) + [999], extra_hash=7,
                             layout=(KVARN_TAG, "arr"))
     assert got == 80 and type(warm[0]) is KVarNKVCache
+
+
+def test_carve_out_stack_records_exempt_from_strip_on_extend():
+    # The production shape: the fp16-held last layer beside the kvarn
+    # layers gives the record a main chain, but that chain cannot restore
+    # the kvarn rows, so the record stays exempt.
+    man = GmlxAPCManager(num_blocks=16, block_size=16)
+    layout = (KVARN_TAG, "kv", "arr")
+    for p in (32, 48, 64, 80):
+        cache = [_hollow_kvarn(p), _kv(p), _arr(seed=p)]
+        assert ckpt_layout(cache) == list(layout)
+        assert ckpt_store(man, _ids(p), cache, extra_hash=7)
+    from gmlx.cache.snapshot import _ckpt_records
+    assert sorted(r.p for r in _ckpt_records(man).values()) == [32, 48, 64, 80]
+    warm, got = ckpt_lookup(man, _ids(56) + [777] * 8, extra_hash=7,
+                            layout=layout)
+    assert got == 48 and type(warm[0]) is KVarNKVCache
+    assert warm[1].offset == 48
 
 
 def test_blockless_records_release_under_byte_budget(monkeypatch):
