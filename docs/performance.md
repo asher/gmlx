@@ -474,7 +474,13 @@ Levers, cheapest first:
   much of the step the KV read is: on GDN hybrids and gemma-4 all three arms
   sit within run-to-run spread, while on a KV-bound dense stack (Qwen3-0.6B
   Q8, 27 of 28 layers) kvarn6 decode runs 0.81x fp16 and 0.69x kv8 at 16k,
-  0.98x and 0.75x at 32k. Prefill is within 10% of both arms. Pick kvarn for
+  0.98x and 0.75x at 32k. Prefill is within 10% of both arms. Native MTP
+  composes at batch size 1: verify rounds (query width block + 1, up to 8)
+  attend the records on the matrix-unit verify kernels at about a decode
+  step's cost (D=256, 8 queries per KV head, 16k: 1.0 ms per layer and round
+  against 0.9 for decode), so kvarn under MTP pays what it pays under plain
+  decode; `GMLX_KVARN_FA=0` keeps verify on the vector decode kernel for an
+  A/B. Pick kvarn for
   memory and fidelity, plain `--kv-bits` for peak decode speed on a KV-bound
   dense model. Other widths (2-8, mixed via `GMLX_KVARN_BITS=k6v5`) trade
   fidelity for memory at about the same speed. The fidelity figures come from
