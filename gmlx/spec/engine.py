@@ -1995,8 +1995,14 @@ def mtp_kv_decline(lm, *, owned_round: bool = True) -> str | None:
         return "GMLX_OWNED_ROUND=0 stock rounds have no KV quantization hook"
     from gmlx.models.qwen35.gdn import stock_gdn_fallback
 
-    mt = (getattr(lm, "model_type", None)
-          or getattr(getattr(lm, "config", None), "model_type", None))
+    mt = None
+    for h in _spec_target_holders(lm):
+        cfg = getattr(h, "config", None)
+        mt = (getattr(h, "model_type", None)
+              or (cfg.get("model_type") if isinstance(cfg, dict)
+                  else getattr(cfg, "model_type", None)))
+        if mt:
+            break
     if stock_gdn_fallback(mt):
         return ("the GMLX_QWEN_OWNED=0 stock fallback cannot verify on a "
                 "quantized KV cache")
@@ -2648,17 +2654,34 @@ def _stamped_spec_params(lm):
                 kv_group_size=int(single.group_size))
 
 
+def _spec_target_holders(lm) -> tuple:
+    """The spec target and the language model it may wrap: serve hands
+    the cache builder an MTPTextTarget, the CLI the bare model. Every
+    probe on the target reads both."""
+    inner = getattr(lm, "language_model", None)
+    return (lm,) if inner is None or inner is lm else (lm, inner)
+
+
 def _mtp_reads_kv_back(lm) -> bool:
     """True when the target's verify route re-reads K/V from the prompt
     cache (spec_helpers._mtp_shared_kv_from_prompt_cache): it computes
     logits from hidden but owns no verify hook, so the walk rebuilds the
     drafter's shared K/V from cache state -- raw arrays kvarn records
     cannot supply."""
-    return (
-        callable(getattr(lm, "speculative_logits_from_hidden", None))
-        and not callable(getattr(lm, "speculative_verify_hidden", None))
-        and not callable(getattr(lm, "speculative_verify_logits", None))
+    return any(
+        callable(getattr(h, "speculative_logits_from_hidden", None))
+        and not callable(getattr(h, "speculative_verify_hidden", None))
+        and not callable(getattr(h, "speculative_verify_logits", None))
+        for h in _spec_target_holders(lm)
     )
+
+
+def _harden_spec_target(lm) -> None:
+    """harden_mtp_rollback on every holder of the target's rollback."""
+    from gmlx.gen.generation import harden_mtp_rollback
+
+    for h in _spec_target_holders(lm):
+        harden_mtp_rollback(h)
 
 
 def install_spec_kv_quant() -> None:
@@ -2817,9 +2840,7 @@ def install_spec_kv_quant() -> None:
             if not n:
                 _decline_kvarn("no plain KV-cache layers in this arch's stack")
                 return caches
-            from gmlx.gen.generation import harden_mtp_rollback
-
-            harden_mtp_rollback(lm)
+            _harden_spec_target(lm)
         if (n or armed) and not _noted[0]:
             _noted[0] = True
             print(kv_line("MTP spec path", policy), flush=True)

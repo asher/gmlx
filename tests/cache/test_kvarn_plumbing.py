@@ -105,6 +105,11 @@ def test_unsupported_gemma4_owned_tree(kvarn_ops_ok, monkeypatch):
     monkeypatch.setattr(gemma4_owned, "is_owned_language_model", lambda m: m is owned)
     assert "owned (MTP) tree" in kvarn_unsupported(owned)
     assert kvarn_unsupported(FakeLM(head_dim=256)) is None
+    # serve wraps the target; the owned tree is the language model inside
+    from types import SimpleNamespace
+
+    wrapper = SimpleNamespace(language_model=owned, config={})
+    assert "owned (MTP) tree" in kvarn_unsupported(wrapper)
 
 
 def test_setup_rejects_bad_bits_and_tail(kvarn_ops_ok, monkeypatch, capsys):

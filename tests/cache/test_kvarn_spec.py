@@ -258,6 +258,27 @@ def test_reads_kv_back_detection():
     assert not spec_engine._mtp_reads_kv_back(_FakeLM())
 
 
+def test_spec_probes_read_through_the_serve_wrapper(monkeypatch):
+    # serve hands the spec cache builder an MTPTextTarget; the hooks and
+    # the rollback live on the language model it wraps
+    from types import SimpleNamespace
+
+    class _LM(_ReadbackLM):
+        def rollback_speculative_cache(self, caches, gdn_states, accepted,
+                                       block_size):
+            return accepted
+
+    inner = _LM()
+    wrapper = SimpleNamespace(language_model=inner,
+                              config={"model_type": "qwen3_5"})
+    assert spec_engine._mtp_reads_kv_back(wrapper)
+    spec_engine._harden_spec_target(wrapper)
+    assert getattr(inner.rollback_speculative_cache, "_gmlx_kvarn_guard",
+                   False)
+    monkeypatch.setenv("GMLX_QWEN_OWNED", "0")
+    assert "stock fallback" in spec_engine.mtp_kv_decline(wrapper)
+
+
 # -- shared-KV readback guard ------------------------------------------------
 
 

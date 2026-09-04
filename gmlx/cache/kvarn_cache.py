@@ -129,7 +129,8 @@ def kvarn_unsupported(model) -> str | None:
         return f"head_dim {shown} (kvarn supports 128/256/512)"
     from gmlx.models.gemma4.owned import is_owned_language_model
 
-    if is_owned_language_model(model):
+    holders = (model, getattr(model, "language_model", None))
+    if any(is_owned_language_model(h) for h in holders if h is not None):
         # The owned tree's attention calls an import-time sdpa alias the
         # kvarn sweep never rebinds; unreachable today (the shared-KV
         # drafter gate declines first), declined here so a future drafter
