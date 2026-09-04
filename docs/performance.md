@@ -581,6 +581,17 @@ Qwen3.8-27B Q6_K_XL, 16k context (head_dim 256, 15 of 65 layers quantized):
 | affine 8 | 0.00023 | 0.00019 | 98.7% |
 | kvarn 8 | 0.00021 | 0.00015 | 98.9% |
 
+Qwen3.8-27B Q6_K_XL, 32k context:
+
+| cache | prefill KLD | decode KLD | decode top-1 |
+|---|---|---|---|
+| affine 4 | 0.00162 | 0.00205 | 97.6% |
+| kvarn 4 | 0.00104 | 0.00070 | 98.1% |
+| affine 6 | 0.00039 | 0.00049 | 98.5% |
+| kvarn 6 | 0.00033 | 0.00032 | 99.4% |
+| affine 8 | 0.00027 | 0.00030 | 98.8% |
+| kvarn 8 | 0.00026 | 0.00028 | 99.0% |
+
 Qwen3.6-27B Q4_K_S, 32k context (head_dim 256, 15 of 64 layers quantized):
 
 | cache | prefill KLD | decode KLD | decode top-1 |
