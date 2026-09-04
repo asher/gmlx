@@ -782,6 +782,32 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
             notes="issue #104 follow-on: the MTP arm's kv path was the "
                   "reporter's second symptom; the needle exercises the "
                   "flash arm through the spec prefill"))
+        # The same crossing under kvarn: B=1 spec rounds trim kvarn
+        # records (frontier groups reopen from their codes) while the
+        # batched arm keeps fp16. The runner sends one request at a time,
+        # so mid-generation admission is not covered here; the serve
+        # stress runner under a kvarn boot is the place for that.
+        add(Scenario(
+            key="mtp_kvarn6", tier="mtp", needs=native_needs,
+            title=f"MTP x kvarn6: {native_needs[0]} native MTP, kvarn target KV",
+            config={
+                "profiles": {"p": {"sampling": {"temperature": 0.0},
+                                   "load": {"kv_quant_scheme": "kvarn",
+                                            "kv_bits": 6,
+                                            "kv_tail_tokens": 1024}}},
+                "models": {
+                    "spec": _model_entry(native_mtp, native_mtp=True, profile="p"),
+                    "base": _model_entry(native_mtp, profile="p")}},
+            targets=[ReqTarget("recall", "spec",
+                               prompts=[P.p_long_ctx_needle("CORALKVARN61")])],
+            post=[_pc_mtp_lossless(
+                      "spec", "base",
+                      chat_kwargs={"chat_template_kwargs":
+                                   {"enable_thinking": False}}),
+                  pc_kv_engagement("spec", verdict="partial",
+                                   verdict_batched="dropped", scheme="kvarn")],
+            notes="greedy spec vs greedy base under kvarn records; the "
+                  "rollback path trims records instead of raw K/V"))
 
     return out
 
