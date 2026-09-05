@@ -800,11 +800,14 @@ def _qsa_cache_cls():
     return QSAKVCache
 
 
-def _kvarn_tag(cache) -> str:
+def kvarn_layout_tag(k_bits: int, v_bits: int, tail: int) -> str:
     """Kvarn layout tag carries the wire config: a record restored into a
     different width/tail (or a stock boot) must miss, never adopt."""
-    return (f"kvarn:{int(cache.k_bits)}:{int(cache.v_bits)}:"
-            f"{int(cache.tail_cap)}")
+    return f"kvarn:{int(k_bits)}:{int(v_bits)}:{int(tail)}"
+
+
+def _kvarn_tag(cache) -> str:
+    return kvarn_layout_tag(cache.k_bits, cache.v_bits, cache.tail_cap)
 
 
 def _is_kvarn(tag: str) -> bool:

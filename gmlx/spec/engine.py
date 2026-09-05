@@ -299,6 +299,37 @@ def _ckpt_layout_for(model, block_size: int = 16):
     return tags or None
 
 
+def _ckpt_layout_expected(model, block_size: int = 16):
+    """The signature a live request on ``model`` signs with, for probes
+    that hold no cache stack (the estimate dry-run). The stock probe,
+    with the layers the stamped single-stream kvarn policy converts
+    retagged at its wire config; a stock or affine boot is the stock
+    probe unchanged (affine caches tag ``kv`` either way)."""
+    tags = _ckpt_layout_for(model, block_size)
+    if not tags:
+        return tags
+    try:
+        from gmlx.cache.kvarn_serve import (
+            _serve_widths_and_tail,
+            stamped_single_policy,
+        )
+        from gmlx.cache.snapshot import kvarn_layout_tag
+
+        single = stamped_single_policy(model)
+        if (single is None or getattr(single, "scheme", None) != "kvarn"
+                or single.verdict not in ("full", "partial")
+                or len(single.per_layer) != len(tags)):
+            return tags
+        k_bits, v_bits, tail = _serve_widths_and_tail(model)
+        tag = kvarn_layout_tag(k_bits, v_bits, tail)
+        return tuple(
+            tag if t == "kv" and plan.quantize else t
+            for t, plan in zip(tags, single.per_layer)
+        )
+    except Exception:
+        return tags
+
+
 # Signature for a live stack the layout probe rejects: refuses every
 # record instead of skipping the check (None) or borrowing the stock
 # probe's answer, either of which could adopt a record the live caches

@@ -238,10 +238,11 @@ def _warm_tokens(manager, ids: list, extra_hash: int, model=None) -> tuple:
     if model is not None:
         try:
             from gmlx.cache.snapshot import ckpt_peek
-            from gmlx.spec.engine import _ckpt_layout_for
+            from gmlx.spec.engine import _ckpt_layout_expected
 
             n = ckpt_peek(manager, ids, extra_hash=extra_hash,
-                          layout=_ckpt_layout_for(model, int(manager.block_size)))
+                          layout=_ckpt_layout_expected(
+                              model, int(manager.block_size)))
             if n > best:
                 best, tier = int(n), "ckpt"
         except Exception:
