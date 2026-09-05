@@ -37,6 +37,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The boot capacity table was absent for sharded MLA models (GLM-5.3-Flash,
   Kimi-K2.7): the header synth read tensor shapes from the first shard only
   and could not derive the MLA head dims. It now reads every shard.
+- A request admitted into a live MTP batch under `--kv-bits` failed with
+  `type object 'QuantizedKVCache' has no attribute 'merge'`: the injected
+  row's B=1 packed cache lifted through a class merge it does not have. It
+  now recovers to fp16 rows, the lift preemption already used.
 
 ## [0.4.8] - 2026-09-02
 
