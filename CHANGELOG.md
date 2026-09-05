@@ -8,25 +8,19 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- `--kv-quant-scheme kvarn` (`kv_quant_scheme: kvarn` on the server): a
-  second KV-cache quantization scheme. Variance-normalized records in
-  rotated 128-token groups, with an fp16 sink and precision tail
-  (`--kv-tail-tokens`, `kv_tail_tokens`). Same per-stack policy, `[kv]`
-  line and `/v1/models` `kv_quant` report as `--kv-bits`; widths 2/3/4/5/6/8,
-  split key/value pairs via `GMLX_KVARN_BITS=k6v5`. Composes with
-  `--max-kv-size` on `run` and `chat` (the rotating window quantizes),
-  with native MTP at batch size 1 (verify rounds up to width 8 attend the
-  records on the matrix-unit kernels), and with the prompt cache (exact
-  and checkpoint tiers store kvarn records). Needs an mlx-kquant build that
-  carries the kvarn ops; without one the scheme drops loudly and the
-  model runs fp16 KV. `GMLX_KVARN=0` and `GMLX_KVARN_SDPA=0` are the
-  kill switches. The method is Huawei's KVarN (arXiv:2606.03458); the
-  record format follows beellama.cpp (MIT, see THIRD_PARTY_NOTICES.md).
-- `scripts/kld_harness.py`: the teacher-forced KLD harness behind the
-  kvarn fidelity figures in docs/performance.md.
-- A model loaded without KV quantization carries an explicit `off`
-  policy, so request-time readers (B=1 MTP cache conversion, the prompt
-  cache salt) never inherit another model's boot env.
+- `--kv-quant-scheme kvarn` (server `kv_quant_scheme: kvarn`): a second
+  KV-cache quantization scheme, Huawei's KVarN (arXiv:2606.03458) in the
+  beellama.cpp record format (MIT, see THIRD_PARTY_NOTICES.md). Widths
+  2/3/4/5/6/8 via `--kv-bits`, split pairs via `GMLX_KVARN_BITS=k6v5`, an
+  fp16 precision tail via `--kv-tail-tokens`. Same policy, `[kv]` line and
+  `/v1/models` report as the affine scheme; composes with `--max-kv-size`
+  on `run` and `chat`, native MTP at batch size 1, and the prompt cache.
+  Requires mlx-kquant 0.4.6; `GMLX_KVARN=0` disables. Fidelity tables in
+  docs/performance.md.
+- `scripts/kld_harness.py`: the teacher-forced KLD harness behind those
+  tables.
+- A model loaded without KV quantization carries an explicit `off` policy,
+  so request-time readers never inherit another model's boot env.
 
 ### Fixed
 

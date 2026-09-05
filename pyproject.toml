@@ -31,7 +31,7 @@ classifiers = [
 # mlx / mlx-lm / mlx-vlm move in lockstep with the exact mlx-vlm pin; bump them
 # together per docs/upstream-upgrades.md.
 dependencies = [
-    "mlx-kquant>=0.4.6,<0.5",  # 0.4.5: sigmoid router arm, q5_k shexp codec
+    "mlx-kquant>=0.4.6,<0.5",  # 0.4.6: kvarn KV-cache ops and kernels
     "mlx-lm>=0.31",
     # Direct imports of both throughout (mx.*, np.*); declared explicitly
     # rather than inherited through mlx-lm.

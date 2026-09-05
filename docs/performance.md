@@ -519,9 +519,9 @@ tokens (the attention sink) and the newest `--kv-tail-tokens` (default
 1024) stay fp16, and a record seals once the tail has moved past it. Decode
 and MTP verify read the records in the mlx-kquant kernels and merge the
 fp16 tail through one softmax; the prompt cache stores records on its
-exact and checkpoint tiers. The scheme needs an mlx-kquant build with the
-kvarn ops; without one it drops with a printed reason and the model runs
-fp16 KV.
+exact and checkpoint tiers. The scheme needs mlx-kquant 0.4.6 or later
+(the kvarn ops); on an older build it drops with a printed reason and the
+model runs fp16 KV.
 
 **Which layers.** The rule is by cache shape, not model name. Growing
 attention KV quantizes, minus the last layer of a deep stack, which stays
