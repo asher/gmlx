@@ -108,6 +108,37 @@ def model_id_of(base_url: str, proc: ServerProc) -> str:
     return body["data"][0]["id"]
 
 
+def kv_engagement(base_url: str, model_id: str = None) -> dict:
+    """The kv_quant block /v1/models reports for ``model_id`` (the first
+    row when None). Read from the server, not the env: the server decides
+    the scheme per model and reports it once the model is resident, so
+    call this after a request has completed."""
+    status, body = Client(base_url).models()
+    rows = (body or {}).get("data", []) if status == 200 else []
+    for row in rows:
+        if model_id is None or row.get("id") == model_id:
+            return row.get("kv_quant") or {}
+    return {}
+
+
+def kv_engaged(kq: dict, scheme: str = None, bits=None) -> bool:
+    """Whether the requested KV scheme engaged: a full or partial verdict at
+    that scheme. No request means fp16 KV, which needs no check."""
+    if not scheme and not bits:
+        return True
+    want = scheme or "uniform"
+    return kq.get("scheme") == want and kq.get("verdict") in ("full", "partial")
+
+
+def served_tier(base_url: str) -> str:
+    """The APC tier this server runs for its first model. A kvarn boot that
+    converts layers serves the exact tier, so stores and index counts move
+    on the exact-tier counters. Same timing rule as kv_engagement."""
+    if kv_engaged(kv_engagement(base_url), "kvarn"):
+        return "exact"
+    return "block"
+
+
 def shard_files(disk_root: str) -> list:
     return sorted(str(p) for p in Path(disk_root).rglob("*.safetensors"))
 
@@ -196,8 +227,11 @@ def phase_sequential(python, model_path, disk_root, log_dir, block_size,
         # prefix to memory AND write through to the SSD tier.
         s1, _ = chat(base, mid, turn1)
         out["turn1_status"] = s1
+        # resident now, so /v1/models carries the policy the tier follows
+        stores_key = tier_keys(served_tier(base))["stores"]
+        out["stores_key"] = stores_key
         drained = wait_disk_drained(base, min_files=1)
-        out["turn1_stores"] = int(drained.get("stores", 0))
+        out["turn1_stores"] = int(drained.get(stores_key, 0))
         out["turn1_disk_writes"] = int(drained.get("disk_writes", 0))
         out["turn1_disk_files"] = int(drained.get("disk_files", 0))
         # turn 2 - a later lone request that shares turn 1's prefix -> reuse it
@@ -257,6 +291,8 @@ def phase_populate_warm_batch(python, model_path, disk_root, log_dir, block_size
         s, _ = chat(base, mid, PREFIX + FIXED_Q)
         out["cold_status"] = s
         out["cold"] = stats(base)
+        keys = tier_keys(served_tier(base))
+        out["stores_key"], out["indexed_key"] = keys["stores"], keys["indexed"]
         if not out["continuous_batching_enabled"]:
             # The flag means "response_generator bound"; the background
             # preload races the boot-time read, a completed request forces it.
@@ -309,10 +345,11 @@ def phase_restart_and_reset(python, model_path, disk_root, log_dir, block_size,
         # replay the exact cold prompt -> should restore from disk
         s, _ = chat(base, mid, PREFIX + FIXED_Q)
         out["replay_status"] = s
+        indexed_key = tier_keys(served_tier(base))["indexed"]
         after = stats(base)
         out["after_restart"] = after
         out["disk_hits_after_restart"] = int(after.get("disk_hits", 0))
-        out["disk_blocks_indexed"] = int(after.get("disk_blocks_indexed", 0))
+        out["disk_blocks_indexed"] = int(after.get(indexed_key, 0))
         out["matched_tokens_after_restart"] = int(after.get("matched_tokens", 0))
 
         # in-memory reset, then replay again: disk tier must persist through it
@@ -379,11 +416,13 @@ def grade(seq, pop, restart, iso, out_dir: Path) -> int:
     checks["continuous batching enabled"] = bool(pop.get("continuous_batching_enabled"))
     checks["all concurrent clients 200"] = bool(pop.get("batch_all_ok"))
     pb = pop.get("post_batch", {})
-    checks["batch populates the cache (stores>0)"] = int(pb.get("stores", 0)) > 0
+    checks["batch populates the cache (stores>0)"] = int(
+        pb.get(pop.get("stores_key", "stores"), 0)) > 0
     checks["batch writes through to disk (disk_writes>0)"] = int(
         pb.get("disk_writes", 0)) > 0
     checks["disk files present (disk_files>0)"] = int(pb.get("disk_files", 0)) > 0
-    checks["disk blocks indexed (>0)"] = int(pb.get("disk_blocks_indexed", 0)) > 0
+    checks["disk blocks indexed (>0)"] = int(
+        pb.get(pop.get("indexed_key", "disk_blocks_indexed"), 0)) > 0
     checks["shards on FS (live)"] = pop.get("shards_on_fs_live", 0) > 0
     # within-session prefix reuse, after the batch populated it
     checks["within-session prefix reuse (matched up)"] = (

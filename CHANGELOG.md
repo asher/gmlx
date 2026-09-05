@@ -6,8 +6,27 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `--kv-quant-scheme kvarn` (server `kv_quant_scheme: kvarn`): a second
+  KV-cache quantization scheme, Huawei's KVarN (arXiv:2606.03458) in the
+  beellama.cpp record format (MIT, see THIRD_PARTY_NOTICES.md). Widths
+  2/3/4/5/6/8 via `--kv-bits`, split pairs via `GMLX_KVARN_BITS=k6v5`, an
+  fp16 precision tail via `--kv-tail-tokens`. Same policy, `[kv]` line and
+  `/v1/models` report as the affine scheme; composes with `--max-kv-size`
+  on `run` and `chat`, native MTP at batch size 1, and the prompt cache.
+  Requires mlx-kquant 0.4.6; `GMLX_KVARN=0` disables. Fidelity tables in
+  docs/performance.md.
+- `scripts/kld_harness.py`: the teacher-forced KLD harness behind those
+  tables.
+- A model loaded without KV quantization carries an explicit `off` policy,
+  so request-time readers never inherit another model's boot env.
+
 ### Fixed
 
+- `quantized_kv_start` as a per-model server load key is applied to that
+  model; upstream read it once from the process environment at server
+  start.
 - Capacity planning priced every layer of a hybrid model as growing fp16
   KV. The boot table, `/v1/estimate`, the memory preflight and the APC
   pool budget now price recurrent layers (gated DeltaNet, Mamba2, KDA) as
@@ -18,6 +37,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The boot capacity table was absent for sharded MLA models (GLM-5.3-Flash,
   Kimi-K2.7): the header synth read tensor shapes from the first shard only
   and could not derive the MLA head dims. It now reads every shard.
+- A request admitted into a live MTP batch under `--kv-bits` failed with
+  `type object 'QuantizedKVCache' has no attribute 'merge'`: the injected
+  row's B=1 packed cache lifted through a class merge it does not have. It
+  now recovers to fp16 rows, the lift preemption already used.
 
 ## [0.4.8] - 2026-09-02
 

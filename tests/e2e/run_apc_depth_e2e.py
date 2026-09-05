@@ -111,6 +111,8 @@ from client import Client  # noqa: E402
 from server_proc import ServerProc  # noqa: E402
 from run_apc_disk_e2e import (  # noqa: E402
     apc_env,
+    kv_engaged,
+    kv_engagement,
     model_id_of,
     shard_files,
     stats,
@@ -414,6 +416,18 @@ class Report:
     def note(self, name: str, detail: str):
         self.rows.append({"note": name, "detail": detail})
         print(f"  note  {name}  {detail}")
+
+
+def check_kv_engaged(rep: Report, name: str, base: str, mid: str,
+                     scheme: str, bits) -> dict:
+    """Gate on /v1/models after the first request: a run whose KV scheme
+    silently fell back to fp16 measures nothing about that scheme."""
+    if not scheme and not bits:
+        rep.note(name, "fp16 KV, no scheme requested")
+        return {}
+    kq = kv_engagement(base, mid)
+    rep.check(name, kv_engaged(kq, scheme, bits), json.dumps(kq, sort_keys=True))
+    return kq
 
 
 def depth_env(
@@ -751,6 +765,7 @@ def main() -> int:
         # whether the anchor works at all.
         chat(base, mid, [{"role": "user", "content": "Say ok."}],
              max_tokens=4)
+        check_kv_engaged(rep, "kv.engaged", base, mid, a.scheme, a.bits_a)
 
         # -- populate ------------------------------------------------------
         st, text, content, ptok, cold_wall = chat(
@@ -1139,6 +1154,7 @@ def main() -> int:
         base = srv.base_url
         mid = model_id_of(base, srv)
         chat(base, mid, mk_msgs("Say ok."), max_tokens=4)
+        check_kv_engaged(rep, "restart.kv.engaged", base, mid, a.scheme, a.bits_a)
         st, text, r_content, ptok, disk_wall = chat(
             base, mid, mk_msgs(prefix + q), max_tokens=256
         )
@@ -1515,6 +1531,8 @@ def main() -> int:
             base = srv.base_url
             mid = model_id_of(base, srv)
             chat(base, mid, mk_msgs("Say ok."), max_tokens=4)
+            check_kv_engaged(rep, "bitrate_b.kv.engaged", base, mid,
+                             a.scheme, a.bits_b)
             st, text, _, ptok, wall = chat(
                 base, mid, mk_msgs(prefix + q), max_tokens=256
             )
@@ -1592,6 +1610,8 @@ def main() -> int:
             base = srv.base_url
             mid = model_id_of(base, srv)
             chat(base, mid, mk_msgs("Say ok."), max_tokens=4)
+            check_kv_engaged(rep, "session.kv.engaged", base, mid,
+                             a.scheme, a.bits_a)
 
             root = (
                 [] if a.no_system

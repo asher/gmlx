@@ -38,6 +38,8 @@ def _layer_has_content(snap: Any) -> bool:
     if hasattr(snap, "accumulate_windows"):  # PoolingCache: no `keys`;
         # content lives in pooled rows and/or the staging remainder
         return snap.size() > 0 or getattr(snap, "remainder", 0) > 0
+    if getattr(snap, "kv_quant_scheme", None) == "kvarn":  # no `keys` either
+        return snap.size() > 0
     off = getattr(snap, "offset", None)
     if isinstance(off, int):
         return off > 0 and getattr(snap, "keys", None) is not None
@@ -232,6 +234,12 @@ def _clone_lm_twin(cache: Any, eval_targets: list[Any]) -> Any | None:
                 setattr(out, attr, copied)
                 eval_targets.append(copied)
         return out
+    from .kvarn_cache import KVarNKVCache
+    if isinstance(cache, KVarNKVCache):
+        state = tuple(copy(a) for a in cache.state)
+        out = type(cache).from_state(state, cache.meta_state)
+        eval_targets.extend(state)
+        return out
     return None
 
 
@@ -338,7 +346,14 @@ def drafter_sidecar_store(
             clone = _clone_row_faithful(c)
             if clone is None:
                 return False
-            clone.trim(offset - store_len)
+            excess = offset - store_len
+            if excess and int(clone.trim(excess) or 0) != excess:
+                # kvarn trim returns 0 on refusal without raising; an
+                # untrimmed clone must not be stored under a shorter key.
+                _log.info(
+                    "APC sidecar store skipped: trim refused %d rows",
+                    excess)
+                return False
             clones.append(clone)
         ids = tuple(int(t) for t in token_ids)[:store_len]
         idx = _sidecar_index(manager)
@@ -355,7 +370,12 @@ def drafter_sidecar_store(
         if disk is not None:
             try:
                 from mlx_vlm import apc as _apc
-                salted = sidecar_extra_hash(extra_hash)
+                # Both sidecar sides bypass the manager wrappers, so the
+                # wire salt is mixed here and in the lookup twin -- a
+                # drafter cache written under one KV wire config must not
+                # restore under another.
+                salted = sidecar_extra_hash(extra_hash) ^ int(
+                    getattr(manager, "_exact_extra_salt", 0) or 0)
                 khash = _apc._sequence_hash(ids, extra_hash=salted,
                                             block_size=manager.block_size)
                 disk.save_exact_cache(khash, ids, salted, clones)
@@ -402,7 +422,8 @@ def drafter_sidecar_lookup(
         disk = getattr(manager, "disk", None)
         if disk is None:
             return None
-        salted = sidecar_extra_hash(extra_hash)
+        salted = sidecar_extra_hash(extra_hash) ^ int(
+            getattr(manager, "_exact_extra_salt", 0) or 0)
         match = disk.find_exact_prefix(
             ids, extra_hash=salted,
             max_prefix_tokens=prefix_len,
@@ -760,7 +781,8 @@ def _is_qsa(tag: str) -> bool:
 
 
 def _is_chain(tag: str) -> bool:
-    """Chain-backed attention layer: k/v ride the shared block pool."""
+    """Chain-backed attention layer: k/v ride the shared block pool. Kvarn
+    records are blockless, so a kvarn tag is never chain-backed."""
     return tag == "kv" or _is_qsa(tag)
 
 
@@ -778,13 +800,31 @@ def _qsa_cache_cls():
     return QSAKVCache
 
 
+def kvarn_layout_tag(k_bits: int, v_bits: int, tail: int) -> str:
+    """Kvarn layout tag carries the wire config: a record restored into a
+    different width/tail (or a stock boot) must miss, never adopt."""
+    return f"kvarn:{int(k_bits)}:{int(v_bits)}:{int(tail)}"
+
+
+def _kvarn_tag(cache) -> str:
+    return kvarn_layout_tag(cache.k_bits, cache.v_bits, cache.tail_cap)
+
+
+def _is_kvarn(tag: str) -> bool:
+    return tag.startswith("kvarn")
+
+
 def ckpt_layout(prompt_cache, block_size: int = 16):
-    """Per-layer tags ("kv" | "qsa:R" | "rot:W:keep" | "arr") for a
-    supported hybrid cache list, else None. Supported: every layer one of
-    the classes, at least one non-plain-KV layer (pure-KV models belong to
-    the stock block tier), and rotating layers passing the block-grid
-    geometry gate."""
+    """Per-layer tags ("kv" | "qsa:R" | "rot:W:keep" | "arr" |
+    "kvarn:k:v:tail") for a supported hybrid cache list, else None.
+    Supported: every layer one of the classes, at least one non-plain-KV
+    layer (pure-KV and pure-kvarn models belong to the block/exact tiers),
+    and rotating layers passing the block-grid geometry gate. Kvarn matches
+    the concrete single-stream class only: the rotating subclass loses
+    window geometry under the plain tag, and batch classes belong to the
+    batch engine -- both decline until dedicated support lands."""
     from .compat import cache_types
+    from .kvarn_cache import KVarNKVCache
 
     if not prompt_cache:
         return None
@@ -802,13 +842,20 @@ def ckpt_layout(prompt_cache, block_size: int = 16):
             tags.append("kv")
         elif isinstance(c, arr_types):
             tags.append("arr")
+        elif type(c) is KVarNKVCache:
+            tags.append(_kvarn_tag(c))
         else:
             return None
     has_rot = any(_is_rot(t) for t in tags)
+    has_kvarn = any(_is_kvarn(t) for t in tags)
     if not has_rot and "arr" not in tags:
-        return None                       # pure-KV: stock block tier
-    if not any(_is_chain(t) for t in tags) and not has_rot:
-        return None                       # no chain-backed layer: exact tier
+        return None       # pure-KV/pure-kvarn: block/exact tier
+    if not any(_is_chain(t) for t in tags) and not has_rot and not has_kvarn:
+        # No chain-backed layer: exact tier. A chainless kvarn+arr record
+        # still earns the ckpt tier -- B=1 direct-assign adoption (the
+        # exact tier's merge machinery returns None on mixed stacks), the
+        # checkpoint boundary schedule, and disk skeletons.
+        return None
     if has_rot and rotating_geometry(prompt_cache, block_size) is None:
         return None
     return tags
@@ -1187,6 +1234,18 @@ def _record_insert(manager, rec) -> None:
             rec.kind = "anchor"         # first restorable boundary
         chain = [k for k in chain
                  if k in idx and idx[k].kind not in ("replay", "anchor")]
+        # Strip-on-extend frees superseded records' main chains for the
+        # pool; sub-prefix adoption survives it because those chains are
+        # content-deduped and skeleton re-index re-cuts them. A record
+        # that carries a kvarn layer, or no main chain at all, is the only
+        # carrier of its boundary (inline codes; the fp16 carve-out layer
+        # beside them has a chain but cannot restore the kvarn rows), so
+        # stripping it kills divergent-suffix and turn adoption outright.
+        # The count and byte bounds below govern those records, and
+        # _evict_for_pool reclaims the blocks they pin.
+        chain = [k for k in chain
+                 if idx[k].main_blocks
+                 and not any(_is_kvarn(t) for t in idx[k].layout)]
         chain.sort(key=lambda k: idx[k].p, reverse=True)
         for k in chain[_CKPT_HEAVY_PER_CHAIN - 1:]:
             _release_record(manager, idx.pop(k))
@@ -1231,6 +1290,7 @@ def ckpt_store(
     if manager is None or token_ids is None:
         return 0
     from .compat import cache_types, runtime_cache_module
+    from .kvarn_cache import KVarNKVCache
 
     kv_types = cache_types("KVCache")
     rot_types = cache_types("RotatingKVCache")
@@ -1255,8 +1315,14 @@ def ckpt_store(
         # memory-only, but their skeletons still land -- within the
         # process a skeleton re-indexes a record whose blocks survived
         # strip-on-extend (the divergent-suffix recovery path); across a
-        # restart it misses on the window chain, loudly.
-        rot_disk = skeleton_disk and kind in ("replay", "retire")
+        # restart it misses on the window chain, loudly. Kvarn layouts
+        # widen the set: their replay skeletons are heavy-suppressed
+        # upstream, so the terminal boundary/turn skeleton is the only
+        # restart-restorable record -- its window chain (bounded by W,
+        # not p) must persist with it or the skeleton is dead weight.
+        rot_disk = skeleton_disk and (
+            kind in ("replay", "retire")
+            or any(_is_kvarn(str(t)) for t in layout))
         if any(isinstance(c, _buffered_types()) for c in prompt_cache):
             _log.info(
                 "APC ckpt store declined: BufferedRotatingKVCache rows "
@@ -1273,6 +1339,11 @@ def ckpt_store(
                 return 0
             if isinstance(c, rot_types) and int(c.offset) != p:
                 _log.info("APC ckpt store skipped: rot offset %d != %d",
+                          int(c.offset), p)
+                _ckpt_decline(manager, "offset")
+                return 0
+            if type(c) is KVarNKVCache and int(c.offset) != p:
+                _log.info("APC ckpt store skipped: kvarn offset %d != %d",
                           int(c.offset), p)
                 _ckpt_decline(manager, "offset")
                 return 0
@@ -1324,8 +1395,10 @@ def ckpt_store(
         kv_caches = [c for c in prompt_cache if isinstance(c, kv_types)
                      and not isinstance(c, rot_types)]
         rot_caches = [c for c in prompt_cache if isinstance(c, rot_types)]
-        arr_caches = [c for c in prompt_cache
-                      if not isinstance(c, (kv_types, rot_types))]
+        # Inline-state layers (arr and kvarn), in prompt order: the record
+        # stores full clones, and assembly pulls them positionally by tag.
+        inline_caches = [c for c in prompt_cache
+                         if not isinstance(c, (kv_types, rot_types))]
 
         store_blocks = getattr(manager, "store_ckpt_blocks", None)
 
@@ -1430,7 +1503,7 @@ def ckpt_store(
                 return 0
             bounded_blocks = got_win
 
-        states = [_clone_single_row(c) for c in arr_caches]
+        states = [_clone_single_row(c) for c in inline_caches]
         if any(s is None for s in states):
             _ckpt_decline(manager, "clone")
             manager.release(main_blocks)
@@ -1492,9 +1565,10 @@ def ckpt_store(
                              qsa_streams=qsa_streams)
         _ckpt_bump(manager, "ckpt_stores")
         _log.info(
-            "APC ckpt store: tokens=%d main=%d window=%d tail=%d states=%d",
+            "APC ckpt store: tokens=%d main=%d window=%d tail=%d states=%d "
+            "rec_mb=%.1f",
             p, len(rec.main_blocks), len(rec.bounded_blocks), tail_len,
-            len(states))
+            len(states), rec.nbytes / (1 << 20))
         return p
     except Exception:
         try:
@@ -1570,6 +1644,13 @@ def _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
         entries.append(sent)
         from mlx_vlm import apc as _apc
         tid = tuple(ids)
+        # Mirror the manager's wire salt: the read side goes through
+        # lookup_exact_cache, which XORs _exact_extra_salt into the value
+        # that feeds both the sequence hash and the persisted-metadata
+        # check -- a write missing either half is a permanent restart
+        # miss on every salted (kvarn) boot. One variable salts both.
+        salted = int(salted) ^ int(
+            getattr(manager, "_exact_extra_salt", 0) or 0)
         khash = _apc._sequence_hash(tid, extra_hash=salted,
                                     block_size=manager.block_size)
         disk.save_exact_cache(khash, tid, salted, entries)
@@ -1885,6 +1966,7 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
                 and last.cache[0] is not None
                 and getattr(last.cache[0], "size", 0) == 1):
             entries = entries[:-1]
+    from .kvarn_cache import KVarNKVCache
     tags = []
     for e in entries:
         qsa = _qsa_tag(e)
@@ -1894,6 +1976,8 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
             tags.append(qsa)
         elif isinstance(e, kv_types):
             tags.append("kv")
+        elif type(e) is KVarNKVCache:
+            tags.append(_kvarn_tag(e))
         else:
             tags.append("arr")
     if layout is not None and tuple(layout) != tuple(tags):
@@ -2025,14 +2109,36 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
             elif _is_rot(tag):
                 warm.append(layer_rot[rot_i])
                 rot_i += 1
+            elif _is_kvarn(tag):
+                if int(getattr(e, "offset", -1)) != p:
+                    _log.info(
+                        "APC ckpt disk miss: kvarn offset %d != %d",
+                        int(getattr(e, "offset", -1)), p)
+                    return None, 0
+                # Clone like the record path: the exact tier may serve
+                # this entry list again, and adopted kvarn buffers
+                # mutate in place.
+                clone = _clone_single_row(e)
+                if clone is None:
+                    return None, 0
+                warm.append(clone)
             else:
                 warm.append(e)
+        if any(_is_kvarn(t) for t in tags):
+            # Guard only: ensure_ppb_kvarn armed the sdpa route before
+            # this lookup could run; kept so a future entry path cannot
+            # restore kvarn caches into an unarmed process.
+            from .kvarn_sdpa import install_kvarn_sdpa
+
+            install_kvarn_sdpa()
         targets = []
         for c in warm:
             if getattr(c, "keys", None) is not None:
                 targets.extend([c.keys, c.values])
             elif hasattr(c, "cache"):
                 targets.extend(s for s in c.cache if s is not None)
+            else:
+                targets.extend(_iter_arrays(getattr(c, "state", None)))
             if getattr(c, "ik", None) is not None:
                 targets.append(c.ik)
         # Scratch survivors: the warm-cache arrays were built by this

@@ -31,18 +31,19 @@ class _FakeLM:
 
 @pytest.fixture
 def restorable(monkeypatch):
-    # Identity-setattr records the current attrs so the install's direct
-    # module assignment is undone at teardown.
+    # Start from the stock function even when an earlier module installed
+    # the wrap (it is once per process, with the boot env it saw), and
+    # undo this test's install at teardown.
     for mod in (su, ar, gen):
-        monkeypatch.setattr(
-            mod, "make_speculative_prompt_cache",
-            mod.make_speculative_prompt_cache)
+        fn = mod.make_speculative_prompt_cache
+        monkeypatch.setattr(mod, "make_speculative_prompt_cache",
+                            getattr(fn, "_gmlx_orig", fn))
     return monkeypatch
 
 
-def _mk(batch_size=1, make_cache=None):
+def _mk(batch_size=1, make_cache=None, lm=None):
     return ar.make_speculative_prompt_cache(
-        _FakeLM(),
+        lm or _FakeLM(),
         draft_kind="mtp",
         batch_size=batch_size,
         left_padding=[0] * batch_size,
@@ -76,11 +77,39 @@ def test_group_size_env(restorable):
     assert caches[0].bits == 8 and caches[0].group_size == 32
 
 
-def test_no_env_no_patch(restorable):
+def test_no_env_installs_and_stays_fp16(restorable):
+    # The wrap installs regardless: a later-loaded model may carry a
+    # stamped policy even when the boot env asked for nothing.
     restorable.delenv("KV_BITS", raising=False)
     before = su.make_speculative_prompt_cache
     spec_engine.install_spec_kv_quant()
-    assert su.make_speculative_prompt_cache is before
+    assert su.make_speculative_prompt_cache is not before
+    assert all(type(c) in (KVCache, _SSMCache) for c in _mk())
+
+
+def _stamp(lm, single):
+    from gmlx.serve.kv_policy import ServeKvPolicy
+
+    lm._gmlx_kv_policy = ServeKvPolicy(single, single)
+    return lm
+
+
+def test_stamped_policy_rules_the_boot_env(restorable):
+    # Serve's per-model env window is closed by request time; the stamp
+    # left by resolve_for_load is what this model was loaded at.
+    from gmlx.cache.kv_policy import off_policy, resolve_kv_quant_policy
+
+    restorable.setenv("KV_BITS", "8")
+    spec_engine.install_spec_kv_quant()
+    fp16 = _stamp(_FakeLM(), off_policy("single"))
+    assert all(type(c) in (KVCache, _SSMCache) for c in _mk(lm=fp16))
+    narrow = _stamp(_FakeLM(), resolve_kv_quant_policy(
+        [KVCache()], kv_bits=4, kv_group_size=32, mode="single"))
+    caches = _mk(lm=narrow)
+    assert isinstance(caches[0], QuantizedKVCache)
+    assert caches[0].bits == 4 and caches[0].group_size == 32
+    # unstamped: the boot env still applies
+    assert _mk().__getitem__(0).bits == 8
 
 
 def test_kill_switch(restorable):
@@ -97,9 +126,8 @@ def test_kill_switch(restorable):
 def test_non_affine_stays_fp16(restorable, bits, scheme):
     restorable.setenv("KV_BITS", bits)
     restorable.setenv("KV_QUANT_SCHEME", scheme)
-    before = su.make_speculative_prompt_cache
     spec_engine.install_spec_kv_quant()
-    assert su.make_speculative_prompt_cache is before
+    assert all(type(c) in (KVCache, _SSMCache) for c in _mk())
 
 
 def test_batch_passthrough(restorable):
@@ -441,9 +469,12 @@ class _Glm5ShapeFakeLM:
         return [_cache_list(KVCache(), PoolingCache(4)) for _ in range(3)]
 
 
-def test_b1_mtp_arms_the_pool_beside_the_kv_member(restorable, capsys):
+def test_b1_mtp_arms_the_pool_beside_the_kv_member(restorable, caplog):
     # A kv member rules the list, so pool arming must not key off the
     # layer kind. Every layer's pool packs, the held last layer included.
+    import logging
+
+    caplog.set_level(logging.INFO, logger="gmlx.spec.engine")
     restorable.setenv("KV_BITS", "8")
     spec_engine.install_spec_kv_quant()
     caches = ar.make_speculative_prompt_cache(
@@ -456,9 +487,8 @@ def test_b1_mtp_arms_the_pool_beside_the_kv_member(restorable, capsys):
     for c in caches:
         assert c.caches[1].is_quantized, (
             "the pool member of a kv-ruled CacheList stayed fp16")
-    out = capsys.readouterr().out
     assert ("[kv] MTP spec path: kv_bits=8 group=64 -> 3 pooled at rest; "
-            "quantized 2/3 attn layers (1 held fp16)") in out
+            "quantized 2/3 attn layers (1 held fp16)") in caplog.text
 
 
 class _PoolOnlyFakeLM:
@@ -470,8 +500,11 @@ class _PoolOnlyFakeLM:
         return [_cache_list(_SSMCache(), PoolingCache(4)) for _ in range(2)]
 
 
-def test_b1_mtp_notes_a_pool_only_engagement(restorable, capsys):
+def test_b1_mtp_notes_a_pool_only_engagement(restorable, caplog):
     # Nothing converts, so the note must key off the pools armed.
+    import logging
+
+    caplog.set_level(logging.INFO, logger="gmlx.spec.engine")
     restorable.setenv("KV_BITS", "8")
     spec_engine.install_spec_kv_quant()
     caches = ar.make_speculative_prompt_cache(
@@ -481,8 +514,7 @@ def test_b1_mtp_notes_a_pool_only_engagement(restorable, capsys):
     )
     for c in caches:
         assert c.caches[1].is_quantized
-    assert "2 pooled at rest; quantized 0/2 attn layers" in (
-        capsys.readouterr().out)
+    assert "2 pooled at rest; quantized 0/2 attn layers" in caplog.text
 
 
 class _HybridFakeLM:
@@ -526,3 +558,33 @@ def test_mtp_kv_decline_is_shared_by_serve_run_and_chat(restorable):
     restorable.setenv("GMLX_QWEN_OWNED", "1")
     reason = spec_engine.mtp_kv_decline(_FakeLM(), owned_round=False)
     assert "GMLX_OWNED_ROUND=0" in reason
+
+
+def test_injected_quantized_row_lifts_to_fp16_batch():
+    """A B=1 affine row admitted into a live MTP batch lifts by
+    dequantize; QuantizedKVCache has no merge, so the class-merge lift
+    raised on every concurrent admission under kv-bits."""
+    from mlx_vlm.models.cache import BatchKVCache
+
+    from gmlx.spec.speculative import _lift_injected_cache, _lift_live_cache
+
+    mx.random.seed(5)
+    k = mx.random.normal((1, 2, 40, 64)).astype(mx.float16)
+    live = BatchKVCache.merge([_filled_kv(k)])
+    q = QuantizedKVCache(group_size=64, bits=8)
+    q.update_and_fetch(k, k)
+    lifted = _lift_injected_cache(live, q)
+    assert type(lifted) is BatchKVCache
+    live.extend(lifted)
+    assert live.keys.shape[0] == 2
+    assert live.offset.tolist() == [40, 40]
+    # the live side too: a batch formed from one packed row
+    q2 = QuantizedKVCache(group_size=64, bits=8)
+    q2.update_and_fetch(k, k)
+    assert type(_lift_live_cache(q2)) is BatchKVCache
+
+
+def _filled_kv(k):
+    c = KVCache()
+    c.update_and_fetch(k, k)
+    return c

@@ -1798,6 +1798,10 @@ def _lift_injected_cache(cache, other):
         other.caches = tuple(_lift_injected_cache(c, o)
                              for c, o in zip(members, others))
         return other
+    if _packed_single(other):
+        from gmlx.spec.engine import lift_single_cache
+
+        return lift_single_cache(other)
     if ((hasattr(cache, "_idx") and not hasattr(other, "_idx"))
             or (hasattr(cache, "rotated") and not hasattr(other, "rotated"))
             # classes without the batch API at all (DeepSeek V4's
@@ -1811,6 +1815,18 @@ def _lift_injected_cache(cache, other):
             lifted._gmlx_cascade = stamp
         return lifted
     return other
+
+
+def _packed_single(cache) -> bool:
+    """A B=1 affine or kvarn KV cache: no merge of its own, and the
+    batched MTP arm runs fp16, so it lifts by recovering fp16 rows."""
+    if _batch_capable(cache):
+        return False
+    if getattr(cache, "kv_quant_scheme", None) == "kvarn":
+        return True
+    from gmlx.cache.compat import cache_types
+
+    return isinstance(cache, cache_types("QuantizedKVCache"))
 
 
 def _batch_capable(cache) -> bool:
@@ -1833,6 +1849,10 @@ def _lift_live_cache(cache):
         if not all(_batch_capable(m) for m in members):
             cache.caches = tuple(_lift_live_cache(m) for m in members)
         return cache
+    if _packed_single(cache):
+        from gmlx.spec.engine import lift_single_cache
+
+        return lift_single_cache(cache)
     if _batch_capable(cache) or not callable(getattr(type(cache), "merge", None)):
         return cache
     lifted = type(cache).merge([cache])

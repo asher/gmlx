@@ -40,12 +40,10 @@ _SPEC_APC_RETIRE_DISABLED = (
     _SPEC_APC_DISABLED or os.environ.get("GMLX_SPEC_APC_RETIRE", "1") == "0"
 )
 _SPEC_APC_SIDECAR_DISABLED = (
-    _SPEC_APC_DISABLED
-    or os.environ.get("GMLX_SPEC_APC_SIDECAR", "1") == "0"
+    _SPEC_APC_DISABLED or os.environ.get("GMLX_SPEC_APC_SIDECAR", "1") == "0"
 )
 _SPEC_APC_CKPT_DISABLED = (
-    _SPEC_APC_DISABLED
-    or os.environ.get("GMLX_SPEC_APC_CKPT", "1") == "0"
+    _SPEC_APC_DISABLED or os.environ.get("GMLX_SPEC_APC_CKPT", "1") == "0"
 )
 _MTP_DEBUG = os.environ.get("GMLX_MTP_DEBUG", "0") not in ("", "0")
 
@@ -57,7 +55,6 @@ def _debug_note(msg: str) -> None:
         print(msg, file=sys.stderr, flush=True)
 
 
-
 def _get_spec_prefix_cache(model):
     """Lazy-create a SpecPrefixCache on the model, or return None if disabled."""
     if _SPEC_APC_DISABLED:
@@ -67,14 +64,14 @@ def _get_spec_prefix_cache(model):
         from gmlx.cache.prefix_cache import SpecPrefixCache
         max_entries = env_int("GMLX_SPEC_APC_ENTRIES", 4)
         budget_mb = env_int("GMLX_SPEC_APC_BUDGET_MB", 8192)
-        cache = SpecPrefixCache(max_entries=max_entries,
-                                max_bytes=budget_mb << 20)
+        cache = SpecPrefixCache(max_entries=max_entries, max_bytes=budget_mb << 20)
         model._spec_prefix_cache = cache
     return cache
 
 
 # L1: the shared APCManager (same block pool / exact LRU / disk namespace the
 # stock non-speculative path uses)
+
 
 class _L1View:
     """Minimal duck-typed receiver for BatchGenerator's APC lookup helpers.
@@ -110,6 +107,7 @@ def _bind_l1_view() -> None:
     if _L1_BOUND[0]:
         return
     from mlx_vlm.generate.ar import BatchGenerator
+
     try:
         for name in _L1_VIEW_METHODS:
             setattr(_L1View, name, getattr(BatchGenerator, name))
@@ -137,6 +135,7 @@ def _install_apc_manager_stash() -> None:
     inheriting one. Idempotent.
     """
     from mlx_vlm.generate.ar import BatchGenerator
+
     if getattr(BatchGenerator.__init__, _APC_STASH_FLAG, False):
         return
     _orig_init = BatchGenerator.__init__
@@ -193,11 +192,13 @@ def _install_apc_manager_stash() -> None:
             try:
                 manager, mode = _resolve_l1(model)
                 if manager is not None and _ckpt_active(
-                        model, mode, int(manager.block_size)):
+                    model, mode, int(manager.block_size)
+                ):
                     self.prefill_batch_size = 1
             except Exception:
-                _log.warning("APC ckpt formation gate failed; continuing",
-                             exc_info=True)
+                _log.warning(
+                    "APC ckpt formation gate failed; continuing", exc_info=True
+                )
 
     _init_with_stash.__dict__[_APC_STASH_FLAG] = True
     BatchGenerator.__init__ = _init_with_stash
@@ -213,6 +214,7 @@ def _resolve_l1(model):
     mode = getattr(model, "_kq_apc_mode", _L1_MODE_UNSET)
     if mode is _L1_MODE_UNSET:
         from mlx_vlm import apc as _apc
+
         # Probe the bare language model: model_apc_mode falls back to
         # "block" when make_cache is missing, which would misclassify a
         # hybrid reached through a wrapper without make_cache.
@@ -264,11 +266,13 @@ def _ckpt_active(model, mode, block_size: int = 16) -> bool:
         flag = tags is not None
         if flag:
             _log.info(
-                "APC tier: ckpt (layers: %d kv / %d qsa / %d rot / %d arr)",
+                "APC tier: ckpt (layers: %d kv / %d qsa / %d rot / "
+                "%d arr / %d kvarn)",
                 tags.count("kv"),
                 sum(1 for t in tags if t.startswith("qsa")),
                 sum(1 for t in tags if t.startswith("rot")),
-                tags.count("arr"))
+                tags.count("arr"),
+                sum(1 for t in tags if t.startswith("kvarn")))
         try:
             model._kq_apc_ckpt = flag
         except Exception:
@@ -277,9 +281,9 @@ def _ckpt_active(model, mode, block_size: int = 16) -> bool:
 
 
 def _ckpt_layout_for(model, block_size: int = 16):
-    """The live model's per-layer tags for the lookup-side signature check
-    (compared against the freshly constructed model, never a stored
-    entry). Cached on the model object."""
+    """The model's stock per-layer tags (make_cache probe), cached on the
+    model object. Fallback signature source only -- live batches sign via
+    _ckpt_layout_live, which sees per-request cache conversion."""
     tags = getattr(model, "_kq_apc_ckpt_layout", None)
     if tags is None:
         from gmlx.cache.snapshot import ckpt_layout
@@ -295,6 +299,65 @@ def _ckpt_layout_for(model, block_size: int = 16):
     return tags or None
 
 
+def _ckpt_layout_expected(model, block_size: int = 16):
+    """The signature a live request on ``model`` signs with, for probes
+    that hold no cache stack (the estimate dry-run). The stock probe,
+    with the layers the stamped single-stream kvarn policy converts
+    retagged at its wire config; a stock or affine boot is the stock
+    probe unchanged (affine caches tag ``kv`` either way)."""
+    tags = _ckpt_layout_for(model, block_size)
+    if not tags:
+        return tags
+    try:
+        from gmlx.cache.kvarn_serve import (
+            _serve_widths_and_tail,
+            stamped_single_policy,
+        )
+        from gmlx.cache.snapshot import kvarn_layout_tag
+
+        single = stamped_single_policy(model)
+        if (single is None or getattr(single, "scheme", None) != "kvarn"
+                or single.verdict not in ("full", "partial")
+                or len(single.per_layer) != len(tags)):
+            return tags
+        k_bits, v_bits, tail = _serve_widths_and_tail(model)
+        tag = kvarn_layout_tag(k_bits, v_bits, tail)
+        return tuple(
+            tag if t == "kv" and plan.quantize else t
+            for t, plan in zip(tags, single.per_layer)
+        )
+    except Exception:
+        return tags
+
+
+# Signature for a live stack the layout probe rejects: refuses every
+# record instead of skipping the check (None) or borrowing the stock
+# probe's answer, either of which could adopt a record the live caches
+# cannot carry.
+_LAYOUT_UNSUPPORTED = ("unsupported",)
+
+
+def _ckpt_layout_live(batch, block_size: int = 16):
+    """Per-batch layout signature from the LIVE prompt cache.
+
+    Cache conversion is per-request (kvarn declines on the MTP path for
+    reasons a model-level probe cannot see, and the stock path converts
+    between batch construction and arming), so a model-cached signature
+    from one request would key every later one wrongly. One pass over the
+    cache list, no memoization; the stock make_cache probe serves only
+    batches that carry no caches yet."""
+    caches = getattr(batch, "prompt_cache", None)
+    if caches:
+        from gmlx.cache.snapshot import ckpt_layout
+
+        try:
+            tags = tuple(ckpt_layout(caches, block_size) or ())
+        except Exception:
+            tags = ()
+        return tags or _LAYOUT_UNSUPPORTED
+    return _ckpt_layout_for(getattr(batch, "model", None), block_size)
+
+
 def _live_kv_quant_config(model=None):
     """The serve KV quant policy as a warm-merge config, or None.
 
@@ -307,6 +370,14 @@ def _live_kv_quant_config(model=None):
         return None
     batched = getattr(stamped, "batched", None)
     if batched is None or batched.verdict not in ("full", "partial"):
+        return None
+    if getattr(batched, "scheme", "uniform") != "uniform":
+        # Only affine has a merge config upstream understands. kvarn
+        # serves warm prefixes from the fp16 exact tier, so a float merge
+        # is the correct one -- but say so rather than describing kvarn
+        # records with an affine config.
+        _log.debug("warm merge stays float: %s KV has no affine config",
+                   batched.scheme)
         return None
     bits = float(batched.bits)
     group = int(batched.group_size or 64)
@@ -365,8 +436,10 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
             extra_hash = int(pick.get("extra_hash", extra_hash))
             if warm is None and blocks:
                 from mlx_vlm import apc as _apc
+
                 warm = _apc.make_warm_kv_cache(
-                    blocks, min_capacity_tokens=len(ids_list) + 1)
+                    blocks, min_capacity_tokens=len(ids_list) + 1
+                )
                 tier = "block"
         if ckpt:
             # Checkpoint tier: the longest salted sidecar + block chain
@@ -376,12 +449,17 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
             min_p = max(prefix_len,
                         view._apc_safe_prefix_lookup_min(ids_list))
             cw, cp = ckpt_lookup(
-                manager, ids_list, extra_hash=extra_hash,
+                manager,
+                ids_list,
+                extra_hash=extra_hash,
                 min_prefix_tokens=min_p,
-                layout=_ckpt_layout_for(batch.model,
-                                        int(manager.block_size)))
-            if (cw is not None and cp > prefix_len
-                    and view._apc_suffix_is_text_only(ids_list, cp)):
+                layout=_ckpt_layout_live(batch, int(manager.block_size)),
+            )
+            if (
+                cw is not None
+                and cp > prefix_len
+                and view._apc_suffix_is_text_only(ids_list, cp)
+            ):
                 if blocks:
                     manager.release(blocks)
                     blocks = []
@@ -430,7 +508,9 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
             batch._kq_apc_restored = (int(prefix_len), str(tier))
             _log.info(
                 "APC L1 hit: prefix=%d suffix=%d tier=%s",
-                prefix_len, len(ids_list) - prefix_len, tier,
+                prefix_len,
+                len(ids_list) - prefix_len,
+                tier,
             )
             # Drafter-KV sidecar: a plain L1 hit restores target KV but
             # not hidden, so the drafter would re-seed from suffix-only
@@ -444,8 +524,7 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
                     manager, ids_list, prefix_len, extra_hash)
                 if side:
                     batch.prompt_cache[0]._kq_apc_drafter_warm = side
-                    _log.info(
-                        "APC sidecar hit: prefix=%d", prefix_len)
+                    _log.info("APC sidecar hit: prefix=%d", prefix_len)
         elif blocks:
             manager.release(blocks)
     batch._mtp_l1_prefix_len = l1_prefix
@@ -548,7 +627,7 @@ def _ckpt_replay_boundary(batch, meta, restored: int,
     replay = n - 1
     if replay < 2 or replay <= max(0, restored):
         return None
-    tags = _ckpt_layout_for(getattr(batch, "model", None), block_size) or ()
+    tags = _ckpt_layout_live(batch, block_size) or ()
     if "arr" in tags and n < env_int("GMLX_APC_CKPT_REPLAY_MIN", 1024):
         return None
     for t in tags:
@@ -574,7 +653,7 @@ def _ckpt_turn_boundaries(batch, meta, restored: int,
         return []
     ids = meta.get("full_input_ids") or ()
     unit = _ckpt_unit(batch, block_size)
-    tags = _ckpt_layout_for(getattr(batch, "model", None), block_size) or ()
+    tags = _ckpt_layout_live(batch, block_size) or ()
     ws = [int(t.split(":")[1]) for t in tags if t.startswith("rot")]
     # Cheapest boundary this layout could arm: the grid needs one unit
     # of stable prefix; rot-only layouts can also pause exactly at
@@ -803,15 +882,17 @@ def _ckpt_mid_prefill_store(batch) -> None:
     kind = "boundary"
     if bounds and int(bounds[0][0]) == checkpoint_len:
         kind = str(bounds.pop(0)[1])
-    # GDN skeletons inline >100 MB of state; boundaries superseded within
-    # the same prefill do not earn disk, only the terminal does -- and a
-    # replay skeleton would buy restart-repair of an identical resend
-    # only, which does not earn it either.
-    layout = _ckpt_layout_for(getattr(batch, "model", None),
-                              int(manager.block_size)) or ()
-    skel = "arr" not in layout or (kind != "replay"
-                                   and checkpoint_len >= terminal)
+    # Inline-heavy skeletons (GDN state >100 MB; kvarn state scales with p
+    # across every attention layer) earn disk only at the terminal --
+    # boundaries superseded within the same prefill do not, and a replay
+    # skeleton would buy restart-repair of an identical resend only,
+    # which does not earn it either.
+    layout = _ckpt_layout_live(batch, int(manager.block_size)) or ()
+    heavy = "arr" in layout or any(t.startswith("kvarn") for t in layout)
+    skel = not heavy or (kind != "replay"
+                         and checkpoint_len >= terminal)
     from gmlx.cache.snapshot import ckpt_store
+
     if ckpt_store(
             manager, meta["full_input_ids"][:checkpoint_len],
             batch.prompt_cache, extra_hash=int(meta.get("extra_hash", 0)),
@@ -836,8 +917,10 @@ def _install_ckpt_checkpoint_store() -> None:
     structural. Exact-tier anchor batches ride the same wrap with their
     own single-stop hook. Idempotent."""
     from mlx_vlm.generate.ar import PromptProcessingBatch
-    if getattr(PromptProcessingBatch._store_apc_exact_checkpoints,
-               _CKPT_STORE_FLAG, False):
+
+    if getattr(
+        PromptProcessingBatch._store_apc_exact_checkpoints, _CKPT_STORE_FLAG, False
+    ):
         return
     _orig = PromptProcessingBatch._store_apc_exact_checkpoints
 
@@ -849,8 +932,7 @@ def _install_ckpt_checkpoint_store() -> None:
         _orig(self)
 
     _store_with_ckpt_cursor.__dict__[_CKPT_STORE_FLAG] = True
-    PromptProcessingBatch._store_apc_exact_checkpoints = \
-        _store_with_ckpt_cursor
+    PromptProcessingBatch._store_apc_exact_checkpoints = _store_with_ckpt_cursor
 
 
 def _snap_fields(batch, manager) -> dict:
@@ -869,7 +951,7 @@ def _snap_fields(batch, manager) -> dict:
     import math
     from gmlx.cache.snapshot import _DECODE_CKPT_DEFAULT
     bs = int(manager.block_size)
-    tags = _ckpt_layout_for(batch.model, bs) or ()
+    tags = _ckpt_layout_live(batch, bs) or ()
     step = int(getattr(batch, "prefill_step_size", 0) or 0)
     grid = math.lcm(step, bs) if step > 0 else bs
     if grid > env_int("GMLX_APC_DECODE_CKPT", _DECODE_CKPT_DEFAULT):
@@ -901,17 +983,22 @@ def _plain_ckpt_init(batch) -> None:
     manager = getattr(batch, "_apc_manager", None)
     mode = getattr(batch, "_apc_mode", None)
     meta_list = getattr(batch, "_apc_meta", None) or []
-    if (manager is None or mode != "exact" or len(meta_list) != 1
-            or meta_list[0] is None or len(batch.uids) != 1
-            or batch._right_pad_per_row is not None
-            or batch._inputs_embeds is None):
+    if (
+        manager is None
+        or mode != "exact"
+        or len(meta_list) != 1
+        or meta_list[0] is None
+        or len(batch.uids) != 1
+        or batch._right_pad_per_row is not None
+        or batch._inputs_embeds is None
+    ):
         return
     bs = int(manager.block_size)
     if not _ckpt_active(batch.model, mode, bs):
         return
     meta = meta_list[0]
     if int(meta.get("prefix_len") or 0):
-        return                          # stock warm row: leave it stock
+        return  # stock warm row: leave it stock
     ids_list = [int(t) for t in meta["full_input_ids"]]
     if len(ids_list) < 2:
         return
@@ -920,11 +1007,17 @@ def _plain_ckpt_init(batch) -> None:
     restored = 0
     from gmlx.cache.snapshot import ckpt_lookup
     warm, cp = ckpt_lookup(
-        manager, ids_list, extra_hash=extra_hash,
+        manager,
+        ids_list,
+        extra_hash=extra_hash,
         min_prefix_tokens=view._apc_safe_prefix_lookup_min(ids_list),
-        layout=_ckpt_layout_for(batch.model, bs))
-    if (warm is not None and 0 < cp < len(ids_list)
-            and view._apc_suffix_is_text_only(ids_list, cp)):
+        layout=_ckpt_layout_live(batch, bs),
+    )
+    if (
+        warm is not None
+        and 0 < cp < len(ids_list)
+        and view._apc_suffix_is_text_only(ids_list, cp)
+    ):
         batch.prompt_cache = warm
         batch._input_ids = batch._input_ids[:, cp:]
         batch._inputs_embeds = batch._inputs_embeds[:, cp:]
@@ -1166,8 +1259,9 @@ def _plain_retire(stash: dict, prompt_cache: list) -> None:
         if offset == len(seq) - 1:
             seq = seq[:-1]
         elif offset != len(seq):
-            _log.info("APC retire skipped: cache offset %d != tokens %d",
-                      offset, len(seq))
+            _log.info(
+                "APC retire skipped: cache offset %d != tokens %d", offset, len(seq)
+            )
             return
         lcp = None
         if os.environ.get("GMLX_APC_RETIRE_LCP") != "0":
@@ -1202,6 +1296,7 @@ def _install_plain_ckpt_decode() -> None:
     GMLX_APC_RETIRE_BATCH=0 restores the lone-row-only v1 scope.
     Idempotent."""
     from mlx_vlm.generate.ar import GenerationBatch
+
     if getattr(GenerationBatch._step, _PLAIN_DECODE_FLAG, False):
         return
     _orig_step = GenerationBatch._step
@@ -1239,8 +1334,7 @@ def _install_plain_ckpt_decode() -> None:
                         else:
                             _plain_retire(stash, rows)
         except Exception:
-            _log.warning("APC plain retire hook failed; continuing",
-                         exc_info=True)
+            _log.warning("APC plain retire hook failed; continuing", exc_info=True)
         _orig_filter(self, keep)
 
     def _extend_with_ckpt(self, other):
@@ -1298,7 +1392,9 @@ def _mtp_prefill_init(batch) -> None:
         if not _SPEC_APC_DISABLED:
             _log.warning(
                 "APC skipped: prefill batch B=%d > 1 "
-                "(owned-path APC requires single-request prefill)", b)
+                "(owned-path APC requires single-request prefill)",
+                b,
+            )
         return
 
     # Serve wraps make_cache so mlx-lm-origin entries carry the mlx-vlm
@@ -1332,7 +1428,8 @@ def _mtp_prefill_init(batch) -> None:
             batch._mtp_chunk_hiddens = [entry.hidden]
             _log.info(
                 "APC hit: prefix=%d suffix=%d",
-                restored, int(batch._input_ids.shape[1]) - restored,
+                restored,
+                int(batch._input_ids.shape[1]) - restored,
             )
 
     manager, mode = _resolve_l1(batch.model)
@@ -1354,16 +1451,18 @@ def _mtp_prefill_init(batch) -> None:
     # hit replaces batch.prompt_cache wholesale. B=1 only (this init is gated
     # to B=1); B>1 retirement is handled per-row at the batch decode's
     # finish seam.
-    if (manager is not None and not _SPEC_APC_RETIRE_DISABLED
-            and batch.prompt_cache):
+    if manager is not None and not _SPEC_APC_RETIRE_DISABLED and batch.prompt_cache:
         meta = (batch._apc_meta or [{}])[0] or {}
         full_ids = [int(t) for t in batch._mtp_full_input_ids[0].tolist()]
         from gmlx.cache.retire_key import lookup_render_ctx
         batch.prompt_cache[0]._kq_apc_retire = {
             "full_ids": full_ids,
             "extra_hash": int(meta.get("extra_hash", 0)),
-            "mode": ("ckpt" if _ckpt_active(
-                batch.model, mode, int(manager.block_size)) else mode),
+            "mode": (
+                "ckpt"
+                if _ckpt_active(batch.model, mode, int(manager.block_size))
+                else mode
+            ),
             "checkpoint_len": int(meta.get("checkpoint_len", 0) or 0),
             # Live reference: the sidecar keys on ckpt_last_stored, not
             # the cursor value frozen above.
@@ -1441,8 +1540,7 @@ def _mtp_seed_stream_init(batch) -> None:
 
 
 def _zero_pad_rows(arr, rows: int):
-    pad = mx.zeros((rows - arr.shape[0],) + tuple(arr.shape[1:]),
-                   dtype=arr.dtype)
+    pad = mx.zeros((rows - arr.shape[0],) + tuple(arr.shape[1:]), dtype=arr.dtype)
     return mx.concatenate([arr, pad], axis=0)
 
 
@@ -1518,8 +1616,8 @@ def install_full_prompt_mtp_prefill() -> None:
         # (mlx_vlm.server.generation.get_prefill_step_size) so MTP prefill
         # can be chunked smaller to cap peak memory.
         from mlx_vlm.generate.ar import DEFAULT_PREFILL_STEP_SIZE
-        return int(os.environ.get(
-            "PREFILL_STEP_SIZE", DEFAULT_PREFILL_STEP_SIZE))
+
+        return int(os.environ.get("PREFILL_STEP_SIZE", DEFAULT_PREFILL_STEP_SIZE))
 
     def _mtp_init(self, *args, **kwargs) -> None:
         _orig_init(self, *args, **kwargs)
@@ -1529,19 +1627,43 @@ def install_full_prompt_mtp_prefill() -> None:
         # Restoring at construction (not first prompt_step) matters: the
         # scheduler consults needs_processing() first, and with a None step
         # an APC-less deep prompt would one-shot the whole prefill.
-        if (getattr(self, "draft_kind", None) == "mtp"
-                and self.prefill_step_size is None):
+        if (
+            getattr(self, "draft_kind", None) == "mtp"
+            and self.prefill_step_size is None
+        ):
             self.prefill_step_size = _resolve_mtp_prefill_step()
         # Stock (non-speculative) batches get the checkpoint tier here:
         # lookup, prefix trim, cursor arming, retirement stash.
-        if getattr(self, "draft_kind", None) is None \
-                and not _SPEC_APC_DISABLED:
+        if getattr(self, "draft_kind", None) is None and not _SPEC_APC_DISABLED:
+            try:
+                # Ckpt-active hybrids under kvarn convert their stock B=1
+                # single-stream caches in place before arming, so the
+                # layout signature, lookup, and every store see the same
+                # kvarn classes. Must run here: the outer batch rebuild
+                # (kvarn_serve) would install batch classes the tier is
+                # blind to; after conversion its shared decline predicate
+                # trips instead. kwargs is load-bearing -- stock init
+                # consumes and drops the scheme/bits constructor params.
+                manager, mode = _resolve_l1(self.model)
+                if manager is not None:
+                    from gmlx.cache.kvarn_serve import ensure_ppb_kvarn
+
+                    ensure_ppb_kvarn(
+                        self, kwargs,
+                        ckpt_active=_ckpt_active(
+                            self.model, mode, int(manager.block_size)))
+            except Exception:
+                _log.warning(
+                    "kvarn ckpt cache conversion failed; continuing stock",
+                    exc_info=True,
+                )
             try:
                 _plain_ckpt_init(self)
                 _plain_anchor_init(self)
             except Exception:
-                _log.warning("APC plain ckpt init failed; continuing "
-                             "stock", exc_info=True)
+                _log.warning(
+                    "APC plain ckpt init failed; continuing stock", exc_info=True
+                )
 
     def _mtp_prompt_step(self) -> int:
         if self.draft_kind != "mtp":
@@ -1568,8 +1690,7 @@ def install_full_prompt_mtp_prefill() -> None:
         # Depth-decayed step: shrink only when this chunk's score transient
         # would exceed the cap (see prefill_decay; keeps MoE weight
         # amortization at shallow depth instead of a global small step).
-        step = (prefill_decay.decayed_for_batch(self)
-                or self._inputs_embeds.shape[1])
+        step = prefill_decay.decayed_for_batch(self) or self._inputs_embeds.shape[1]
         n = min(step, self._inputs_embeds.shape[1] - 1)
 
         if not hasattr(self, "_mtp_padding_widened"):
@@ -1680,31 +1801,35 @@ def install_full_prompt_mtp_prefill() -> None:
         mx.clear_cache()
         return n
 
-    def _mtp_generate(self, sampler, stop_criteria,
-                      compute_logprobs=True, top_logprobs_k=0):
+    def _mtp_generate(
+        self, sampler, stop_criteria, compute_logprobs=True, top_logprobs_k=0
+    ):
         if self.draft_kind == "mtp":
             # Short prompts never enter prompt_step (chunked prefill is not
             # needed), so the APC lookup/store arming runs here instead.
             _mtp_prefill_init(self)
         result = _orig_generate(
-            self, sampler, stop_criteria,
+            self,
+            sampler,
+            stop_criteria,
             compute_logprobs=compute_logprobs,
             top_logprobs_k=top_logprobs_k,
         )
         from mlx_vlm.generate.ar import SpeculativeGenerationBatch
-        if (
-            self.draft_kind != "mtp"
-            or not isinstance(result, SpeculativeGenerationBatch)
+
+        if self.draft_kind != "mtp" or not isinstance(
+            result, SpeculativeGenerationBatch
         ):
             # Stock-path ckpt batches store the full prompt here, the
             # moment the MTP path stores it at rounds entry: prefill just
             # finished, the first token is out, its KV not yet appended.
-            if getattr(self, "_kq_ckpt_armed", False) \
-                    and getattr(self, "draft_kind", None) is None:
+            if (
+                getattr(self, "_kq_ckpt_armed", False)
+                and getattr(self, "draft_kind", None) is None
+            ):
                 try:
                     cache = getattr(result, "prompt_cache", None) or []
-                    stash = getattr(cache[0], "_kq_apc_retire", None) \
-                        if cache else None
+                    stash = getattr(cache[0], "_kq_apc_retire", None) if cache else None
                     if stash is not None and stash.get("mode") == "ckpt":
                         from gmlx.cache.snapshot import (
                             ckpt_full_store_redundant,
@@ -1723,8 +1848,9 @@ def install_full_prompt_mtp_prefill() -> None:
                                     "ckpt_stored_boundaries", []
                                 ).append(len(stash["full_ids"]))
                 except Exception:
-                    _log.warning("APC plain post-prefill store failed; "
-                                 "continuing", exc_info=True)
+                    _log.warning(
+                        "APC plain post-prefill store failed; continuing", exc_info=True
+                    )
             return result
         chunk_hiddens = getattr(self, "_mtp_chunk_hiddens", None)
         full_ids = getattr(self, "_mtp_full_input_ids", None)
@@ -1806,7 +1932,8 @@ def install_full_prompt_mtp_prefill() -> None:
             spec_cache.store(full_ids, result.prompt_cache, store_hidden)
             _log.info(
                 "APC store: tokens=%d layers=%d",
-                int(full_ids.shape[1]), len(result.prompt_cache),
+                int(full_ids.shape[1]),
+                len(result.prompt_cache),
             )
         else:
             _log.debug(
@@ -1829,8 +1956,9 @@ def install_full_prompt_mtp_prefill() -> None:
         apc_status = "on: L0+L1"
     else:
         apc_status = "on: L0 only"
-    _debug_note(f"[mtp] serve prefill: full-prompt hidden capture installed "
-                f"(APC {apc_status})")
+    _debug_note(
+        f"[mtp] serve prefill: full-prompt hidden capture installed (APC {apc_status})"
+    )
 
 
 _CONTINUOUS_BATCH_FLAG = "_kq_gguf_continuous_batch"
@@ -1864,6 +1992,27 @@ def dequantize_lift_cache(c):
     return lifted
 
 
+def kvarn_lift_cache(c):
+    """Recover a B=1 KVarNKVCache into a one-row BatchKVCache.
+
+    The kvarn twin of dequantize_lift_cache: KVarNKVCache has no merge,
+    BatchKVarNKVCache.merge would hand the MTP path a packed batch cache
+    the batched arm forbids, and materialize() returns rotated-domain
+    K/V, which stock SDPA would attend with an un-rotated query -- no
+    crash, just wrong logits on every preempted row. _raw_single is the
+    original-domain accessor."""
+    from mlx_vlm.models.cache import BatchKVCache
+
+    lifted = BatchKVCache([0])
+    if c.offset:
+        keys, values = c._raw_single()
+        lifted.update_and_fetch(keys, values)
+    stamp = getattr(c, "_gmlx_cascade", None)
+    if stamp is not None:
+        lifted._gmlx_cascade = stamp
+    return lifted
+
+
 def mtp_kv_decline(lm, *, owned_round: bool = True) -> str | None:
     """Why this MTP verify walk cannot run on packed KV, or None.
 
@@ -1877,12 +2026,58 @@ def mtp_kv_decline(lm, *, owned_round: bool = True) -> str | None:
         return "GMLX_OWNED_ROUND=0 stock rounds have no KV quantization hook"
     from gmlx.models.qwen35.gdn import stock_gdn_fallback
 
-    mt = (getattr(lm, "model_type", None)
-          or getattr(getattr(lm, "config", None), "model_type", None))
+    mt = None
+    for h in _spec_target_holders(lm):
+        cfg = getattr(h, "config", None)
+        mt = (getattr(h, "model_type", None)
+              or (cfg.get("model_type") if isinstance(cfg, dict)
+                  else getattr(cfg, "model_type", None)))
+        if mt:
+            break
     if stock_gdn_fallback(mt):
         return ("the GMLX_QWEN_OWNED=0 stock fallback cannot verify on a "
                 "quantized KV cache")
     return None
+
+
+def lift_single_cache(c):
+    """Promote a single-sequence cache to its batch class. Affine and
+    kvarn B=1 caches recover to a one-row fp16 BatchKVCache (the batched
+    MTP arm runs fp16 KV); everything else lifts through its class's
+    merge. The cascade stamp rides along. One lift for the preempted
+    host row and the injected rows, so the two cannot drift."""
+    from gmlx.cache.compat import cache_types
+
+    if isinstance(c, cache_types("QuantizedKVCache")):
+        return dequantize_lift_cache(c)
+    if getattr(c, "kv_quant_scheme", None) == "kvarn" and batch_liftable(c):
+        return kvarn_lift_cache(c)
+    lifted = type(c).merge([c])
+    stamp = getattr(c, "_gmlx_cascade", None)
+    if stamp is not None:
+        lifted._gmlx_cascade = stamp
+    return lifted
+
+
+def batch_liftable(c) -> bool:
+    """Whether _lift_host_cache can promote this cache to a batch class.
+
+    The preemption and pre-start-compaction gates must agree with it: a
+    scheme it can lift but they refuse declines into the drain-wait, and
+    one they admit but it cannot lift raises mid-rebuild.
+    """
+    if hasattr(c, "filter") and hasattr(c, "extend"):
+        return True
+    if getattr(c, "kv_quant_scheme", None) == "kvarn":
+        from gmlx.cache.kvarn_cache import KVarNRotatingKVCache
+
+        # The rotating subclass counts evicted tokens in offset that its
+        # buffers no longer hold: kvarn_lift_cache would misplace rows.
+        return not isinstance(c, KVarNRotatingKVCache)
+    from gmlx.cache.compat import cache_types
+
+    return (isinstance(c, cache_types("QuantizedKVCache"))
+            or hasattr(type(c), "merge"))
 
 
 def install_continuous_batch_admission() -> None:
@@ -1943,8 +2138,7 @@ def install_continuous_batch_admission() -> None:
                 setattr(self, _RELEASE_PENDING_FLAG, True)
                 return False
             except Exception:
-                _log.warning("spec batch release: rounds close failed",
-                             exc_info=True)
+                _log.warning("spec batch release: rounds close failed", exc_info=True)
         self._rounds_iter = None
         self.prompt_cache = []
         self.hidden = None
@@ -1958,8 +2152,9 @@ def install_continuous_batch_admission() -> None:
                 try:
                     drafter.reset(model)  # drops the head's request KV
                 except Exception:
-                    _log.warning("spec batch release: drafter reset failed",
-                                 exc_info=True)
+                    _log.warning(
+                        "spec batch release: drafter reset failed", exc_info=True
+                    )
         setattr(self, _RELEASED_FLAG, True)
         setattr(self, _RELEASE_PENDING_FLAG, False)
         mx.clear_cache()
@@ -2107,8 +2302,7 @@ def install_continuous_batch_admission() -> None:
                 and getattr(self, "first_tokens", None) is not None
                 and self.uids == self._all_uids
                 and not any(self._finished)
-                and all(hasattr(c, "filter") or hasattr(type(c), "merge")
-                        for c in self.prompt_cache)):
+                and all(batch_liftable(c) for c in self.prompt_cache)):
             _compact_prestart_rows(self, list(keep))
             return
         _orig_filter(self, keep)
@@ -2135,15 +2329,7 @@ def install_continuous_batch_admission() -> None:
         injection path applies to incoming caches)."""
         if hasattr(c, "filter") and hasattr(c, "extend"):
             return c
-        from gmlx.cache.compat import cache_types
-
-        if isinstance(c, cache_types("QuantizedKVCache")):
-            return dequantize_lift_cache(c)
-        lifted = type(c).merge([c])
-        stamp = getattr(c, "_gmlx_cascade", None)
-        if stamp is not None:
-            lifted._gmlx_cascade = stamp
-        return lifted
+        return lift_single_cache(c)
 
     def _preempt_scalar(self) -> bool:
         """Preempt a live scalar (B=1) spec generation so queued rows can
@@ -2168,17 +2354,9 @@ def install_continuous_batch_admission() -> None:
         if last is None:
             return False
         # Every cache must be batch-liftable before the generator
-        # closes. A quantized B=1 cache lifts by dequantize. Anything
+        # closes. A quantized or kvarn B=1 cache lifts to fp16. Anything
         # else unliftable declines into the drain-wait.
-        from gmlx.cache.compat import cache_types
-
-        quant_single = cache_types("QuantizedKVCache")
-        if not all(
-            (hasattr(c, "filter") and hasattr(c, "extend"))
-            or hasattr(type(c), "merge")
-            or isinstance(c, quant_single)
-            for c in self.prompt_cache
-        ):
+        if not all(batch_liftable(c) for c in self.prompt_cache):
             return False
         it = self._rounds_iter
         captured = []
@@ -2266,22 +2444,29 @@ def install_continuous_batch_admission() -> None:
                     finish = self._finish_reason(abs_row, tok)
                     if finish is not None:
                         self._finished[abs_row] = True
-                    responses.append(self.Response(
-                        uid=other._all_uids[row], token=tok,
-                        token_logprob=0.0, finish_reason=finish))
+                    responses.append(
+                        self.Response(
+                            uid=other._all_uids[row],
+                            token=tok,
+                            token_logprob=0.0,
+                            finish_reason=finish,
+                        )
+                    )
 
-                gen_inj.append({
-                    "uids": list(other._all_uids),
-                    "prompt_cache": other.prompt_cache,
-                    "hidden": other.hidden,
-                    "shared_kv_states": other.shared_kv_states,
-                    "prompt_tokens": other.prompt_tokens,
-                    "first_tokens": other.first_tokens,
-                    "first_tokens_list": first_list,
-                    # The running generator froze max(max_tokens) at
-                    # start; injected rows carry their own budgets.
-                    "max_tokens": list(other.max_tokens),
-                })
+                gen_inj.append(
+                    {
+                        "uids": list(other._all_uids),
+                        "prompt_cache": other.prompt_cache,
+                        "hidden": other.hidden,
+                        "shared_kv_states": other.shared_kv_states,
+                        "prompt_tokens": other.prompt_tokens,
+                        "first_tokens": other.first_tokens,
+                        "first_tokens_list": first_list,
+                        # The running generator froze max(max_tokens) at
+                        # start; injected rows carry their own budgets.
+                        "max_tokens": list(other.max_tokens),
+                    }
+                )
 
             pending.clear()
             self._refresh_uids()
@@ -2299,8 +2484,9 @@ def install_continuous_batch_admission() -> None:
 
     SpecBatch.next = _next_with_injection
     setattr(SpecBatch, _CONTINUOUS_BATCH_FLAG, True)
-    _debug_note("[mtp] continuous batch: admission gate removed, mid-flight "
-                "injection enabled")
+    _debug_note(
+        "[mtp] continuous batch: admission gate removed, mid-flight injection enabled"
+    )
 
 
 def install_owned_spec_engine() -> None:
@@ -2427,6 +2613,7 @@ def install_owned_spec_engine() -> None:
     _owned_server_rounds.__dict__[_OWNED_MTP_ROUND_FLAG] = True
     _ar.run_speculative_server_rounds = _owned_server_rounds
     from mlx_vlm.server import generation as _gen
+
     _gen.run_speculative_server_rounds = _owned_server_rounds
     _debug_note("[mtp] serve round: owned engine installed (B=1 + B>1)")
 
@@ -2436,12 +2623,29 @@ _SPEC_KV_QUANT_WIDTHS = (2, 3, 4, 6, 8)  # mx.quantize affine widths
 
 
 def _spec_kv_quant_params():
-    """(bits, group_size) when serve's KV_BITS asks for an affine width the
-    single-stream cache can honor, else None. Fractional widths and
-    non-uniform schemes have no trimmable B=1 cache."""
+    """resolve_kv_quant_policy kwargs for the KV quantization serve's env
+    asks the trimmable B=1 single-stream cache to honor, else None.
+    Fractional widths and unknown schemes have no such cache; kvarn
+    engages on the scheme alone (widths default like the CLI's)."""
     if os.environ.get("GMLX_SPEC_KV_QUANT", "1") == "0":
         return None
+    scheme = os.environ.get("KV_QUANT_SCHEME", "uniform")
     raw = os.environ.get("KV_BITS", "")
+    if scheme == "kvarn":
+        from gmlx.cache.kvarn_cache import kvarn_widths, parse_tail_tokens
+
+        try:
+            bits = int(raw) if raw else None
+            tail = parse_tail_tokens(os.environ.get("KV_TAIL_TOKENS"))
+        except ValueError:
+            _log.warning(
+                "KV_BITS/KV_TAIL_TOKENS malformed under scheme kvarn; "
+                "B=1 MTP target KV stays fp16"
+            )
+            return None
+        k_bits, v_bits = kvarn_widths(bits)
+        return dict(scheme="kvarn", kv_bits=k_bits, value_bits=v_bits,
+                    tail_tokens=tail)
     if not raw:
         return None
     try:
@@ -2450,14 +2654,78 @@ def _spec_kv_quant_params():
         return None
     if bits <= 0:
         return None
-    scheme = os.environ.get("KV_QUANT_SCHEME", "uniform")
-    if (scheme != "uniform" or bits != int(bits)
-            or int(bits) not in _SPEC_KV_QUANT_WIDTHS):
+    if (
+        scheme != "uniform"
+        or bits != int(bits)
+        or int(bits) not in _SPEC_KV_QUANT_WIDTHS
+    ):
         _log.warning(
             "KV_BITS=%s scheme=%s: no trimmable single-stream cache; "
-            "B=1 MTP target KV stays fp16", raw, scheme)
+            "B=1 MTP target KV stays fp16",
+            raw,
+            scheme,
+        )
         return None
-    return int(bits), int(os.environ.get("KV_GROUP_SIZE", "64"))
+    return dict(scheme="uniform", kv_bits=int(bits),
+                kv_group_size=int(os.environ.get("KV_GROUP_SIZE", "64")))
+
+
+def _stamped_spec_params(lm):
+    """resolve_kv_quant_policy kwargs from the KV policy residency stamped
+    on this model at load, None when nothing is stamped. Per-model env
+    windows are closed by request time, so the stamp rules the boot env;
+    a stamp that quantizes nothing (off, dropped, error) yields {} (stay
+    fp16)."""
+    from gmlx.cache.kvarn_serve import stamped_single_policy
+
+    single = stamped_single_policy(lm)
+    if single is None:
+        return None
+    bits = getattr(single, "bits", None)
+    if not bits or getattr(single, "verdict", None) not in ("full", "partial"):
+        return {}
+    if getattr(single, "scheme", None) == "kvarn":
+        from gmlx.cache.kvarn_cache import KVARN_DEFAULT_TAIL
+
+        tail = single.tail_tokens
+        return dict(scheme="kvarn", kv_bits=int(bits),
+                    value_bits=int(single.value_bits or bits),
+                    tail_tokens=(KVARN_DEFAULT_TAIL if tail is None
+                                 else int(tail)))
+    if int(bits) != bits or int(bits) not in _SPEC_KV_QUANT_WIDTHS:
+        return {}
+    return dict(scheme="uniform", kv_bits=int(bits),
+                kv_group_size=int(single.group_size))
+
+
+def _spec_target_holders(lm) -> tuple:
+    """The spec target and the language model it may wrap: serve hands
+    the cache builder an MTPTextTarget, the CLI the bare model. Every
+    probe on the target reads both."""
+    inner = getattr(lm, "language_model", None)
+    return (lm,) if inner is None or inner is lm else (lm, inner)
+
+
+def _mtp_reads_kv_back(lm) -> bool:
+    """True when the target's verify route re-reads K/V from the prompt
+    cache (spec_helpers._mtp_shared_kv_from_prompt_cache): it computes
+    logits from hidden but owns no verify hook, so the walk rebuilds the
+    drafter's shared K/V from cache state -- raw arrays kvarn records
+    cannot supply."""
+    return any(
+        callable(getattr(h, "speculative_logits_from_hidden", None))
+        and not callable(getattr(h, "speculative_verify_hidden", None))
+        and not callable(getattr(h, "speculative_verify_logits", None))
+        for h in _spec_target_holders(lm)
+    )
+
+
+def _harden_spec_target(lm) -> None:
+    """harden_mtp_rollback on every holder of the target's rollback."""
+    from gmlx.gen.generation import harden_mtp_rollback
+
+    for h in _spec_target_holders(lm):
+        harden_mtp_rollback(h)
 
 
 def install_spec_kv_quant() -> None:
@@ -2472,38 +2740,62 @@ def install_spec_kv_quant() -> None:
     The shared KV policy picks the layers: growing KV converts at
     construction (empty, so conversion is free), quantizable pools pack
     at rest, and windows, recurrent state, and opt-outs stay fp16 at any
-    nesting depth. B>1 MTP keeps stock behavior with a one-shot warning
-    (ragged rollback on packed rows is unsupported).
-    No-op unless KV_BITS is set at server boot.
-    Kill switch: GMLX_SPEC_KV_QUANT=0."""
+    nesting depth. Scheme kvarn converts the same B=1 caches to
+    ``KVarNKVCache`` instead (rollback rides the stage/horizon regions),
+    declining targets whose verify path reads shared K/V back from cache
+    state. B>1 MTP keeps stock behavior with a one-shot warning (ragged
+    rollback on packed rows is unsupported). Scheme and widths come from
+    the policy stamped on the model at load; the boot env is the fallback
+    for unstamped models. Kill switch: GMLX_SPEC_KV_QUANT=0."""
     from mlx_vlm.generate import ar as _ar
     from mlx_vlm.server import generation as _gen
     from mlx_vlm.speculative import utils as _su
 
     if getattr(_su.make_speculative_prompt_cache, _SPEC_KV_QUANT_FLAG, False):
         return
-    params = _spec_kv_quant_params()
-    if params is None:
+    if os.environ.get("GMLX_SPEC_KV_QUANT", "1") == "0":
         return
-    bits, group = params
+    boot_params = _spec_kv_quant_params()
 
     from gmlx.cache.compat import cache_types
 
-    _orig = _su.make_speculative_prompt_cache
-    _noted = [False]
-    _warned_batch = [False]
-    _warned_dropped = [False]
-    _warned_stock = [False]
+    from gmlx.cache.kv_policy import note_once
 
-    def _quantizing_spec_cache(lm, *, draft_kind, batch_size, left_padding,
-                               make_cache):
-        caches = _orig(
-            lm,
-            draft_kind=draft_kind,
-            batch_size=batch_size,
-            left_padding=left_padding,
-            make_cache=make_cache,
-        )
+    _orig = _su.make_speculative_prompt_cache
+
+    def _decline_kvarn(lm, reason: str):
+        if note_once(lm, "spec-kv-kvarn"):
+            _log.warning(
+                "KV_QUANT_SCHEME=kvarn dropped on the B=1 MTP path: %s", reason
+            )
+
+    def _kvarn_spec_reason(lm):
+        """The kvarn declines the shared policy cannot see: the target's
+        own verify contract."""
+        from gmlx.cache.kvarn_cache import kvarn_unsupported
+
+        reason = kvarn_unsupported(lm)
+        if reason is None and _mtp_reads_kv_back(lm):
+            reason = (
+                "the target's verify path reads shared K/V back "
+                "from the cache (kvarn records are not raw K/V)"
+            )
+        return reason
+
+    def _quantizing_spec_cache(lm, *, draft_kind, batch_size, left_padding, make_cache):
+        from gmlx.cache.kvarn_serve import spec_cache_build
+
+        # The stock make_cache closure passes the boot scheme through;
+        # suspend the serve wrap so spec targets never get a batch kvarn
+        # cache (the verify walk needs trim, which it does not support).
+        with spec_cache_build():
+            caches = _orig(
+                lm,
+                draft_kind=draft_kind,
+                batch_size=batch_size,
+                left_padding=left_padding,
+                make_cache=make_cache,
+            )
         if draft_kind != "mtp":
             return caches
         if batch_size != 1:
@@ -2532,40 +2824,60 @@ def install_spec_kv_quant() -> None:
             for e, c in enumerate(caches):
                 caches[e], n_sw = _swap(c)
                 swapped += n_sw
-            if swapped and not _warned_batch[0]:
-                _warned_batch[0] = True
+            if swapped and note_once(lm, "spec-kv-batch"):
                 _log.warning(
-                    "KV_BITS with MTP at batch size %d: packed batch "
-                    "rollback is unsupported; %d layers run fp16 KV",
+                    "KV quantization with MTP at batch size %d: packed "
+                    "batch rollback is unsupported; %d layers run fp16 KV",
                     batch_size, swapped)
             return caches
+        params = _stamped_spec_params(lm)
+        if params is None:
+            params = boot_params
+        if not params:
+            return caches
+        kind = params["scheme"]
         decline = mtp_kv_decline(lm)
         if decline is not None:
-            if not _warned_stock[0]:
-                _warned_stock[0] = True
-                _log.warning("KV_BITS dropped on the MTP path: %s", decline)
+            if note_once(lm, "spec-kv-stock"):
+                _log.warning(
+                    "KV quantization dropped on the MTP path: %s", decline)
             return caches
+        scheme_reason = None
+        if kind == "kvarn":
+            from gmlx.cache.kvarn_cache import kvarn_mtp_window_decline
+
+            scheme_reason = (kvarn_mtp_window_decline(caches)
+                             or _kvarn_spec_reason(lm))
+            if scheme_reason is not None:
+                _decline_kvarn(lm, scheme_reason)
+                return caches
         # The shared policy owns layer selection: nested KV members,
         # pools, windows, and opt-outs at any depth.
         from gmlx.cache.kv_policy import (kv_line, quantize_stack,
                                           resolve_kv_quant_policy)
 
         policy = resolve_kv_quant_policy(
-            caches, kv_bits=bits, kv_group_size=group, mode="single")
+            caches, mode="single", scheme_reason=scheme_reason, **params)
         if policy.verdict not in ("full", "partial"):
-            if not _warned_dropped[0]:
-                _warned_dropped[0] = True
+            if kind == "kvarn":
+                _decline_kvarn(lm, policy.reason)
+            elif note_once(lm, "spec-kv-dropped"):
                 _log.warning("%s", kv_line("MTP spec path", policy))
             return caches
 
         armed, n = quantize_stack(caches, policy)
-        if (n or armed) and not _noted[0]:
-            _noted[0] = True
-            print(kv_line("MTP spec path", policy), flush=True)
+        if kind == "kvarn":
+            if not n:
+                _decline_kvarn(lm, "no plain KV-cache layers in this arch's stack")
+                return caches
+            _harden_spec_target(lm)
+        if (n or armed) and note_once(lm, "spec-kv"):
+            _log.info("%s", kv_line("MTP spec path", policy))
         return caches
 
     _quantizing_spec_cache.__dict__[_SPEC_KV_QUANT_FLAG] = True
+    _quantizing_spec_cache.__dict__["_gmlx_orig"] = _orig
     _su.make_speculative_prompt_cache = _quantizing_spec_cache
     _ar.make_speculative_prompt_cache = _quantizing_spec_cache
     _gen.make_speculative_prompt_cache = _quantizing_spec_cache
-    _debug_note(f"[mtp] spec cache: KV_BITS={bits} group={group} armed (B=1)")
+    _debug_note(f"[mtp] spec cache wrap armed (B=1); boot env {boot_params}")

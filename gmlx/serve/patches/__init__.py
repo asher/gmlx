@@ -248,6 +248,10 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     # for the rows it admits.
     from gmlx.cache.fresh_gate import install_fresh_admission_gate
     install_fresh_admission_gate()
+    from gmlx.cache.kvarn_serve import install_kvarn_serve
+    install_kvarn_serve()
+    from gmlx.cache.kvarn_apc import install_kvarn_apc
+    install_kvarn_apc()
     install_chat_template_kwargs()
     install_stream_timings()
     install_openai_stop_sequences()

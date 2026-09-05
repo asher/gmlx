@@ -137,6 +137,12 @@ SEAMS: tuple[Seam, ...] = (
          "mx.quantize packs dim*bits//32)"),
     Seam("mlx_vlm.models.cache", "BatchQuantizedKVCache.update_and_fetch",
          "quantized_cache_pack_fix (same formula in _init)"),
+    # --- KVarN KV-cache SDPA route (sweep-rebound over model modules) ---
+    Seam("mlx_lm.models.base", "scaled_dot_product_attention",
+         "kvarn_sdpa.install_kvarn_sdpa (KVarNView claim; signature order "
+         "queries/keys/values/cache/scale/mask/sinks)"),
+    Seam("mlx_vlm.models.base", "scaled_dot_product_attention",
+         "kvarn_sdpa.install_kvarn_sdpa (same claim at the vlm seam)"),
     Seam("mlx_lm.models.cache", "QuantizedKVCache.update_and_fetch",
          "quantized_cache_pack_fix (distinct class from the vlm copy; "
          "patched when the two do not resolve to the same object)"),
@@ -156,14 +162,20 @@ SEAMS: tuple[Seam, ...] = (
          "cascade_sdpa (stamped shared-prefix batched decode)"),
     Seam("mlx_vlm.generate.ar", "PromptProcessingBatch.__init__",
          "cascade_sdpa.install_cascade_stamp (token-prefix stamp at batch "
-         "formation; rows + caches coexist in matching order here)",
+         "formation; rows + caches coexist in matching order here) + "
+         "kvarn_serve._install_ppb_fastpath (B=1 fast path skips "
+         "_make_cache; kvarn rebuilds the empty cache)",
          critical=True),
     Seam("mlx_vlm.generate.ar", "_extend_cache",
          "cascade_sdpa.install_cascade_stamp (stamp carry across the "
          "B=1-to-batch merge lift on admission)", critical=True),
     # --- speculative / AR batch engine (spec_engine owns these methods) ---
     Seam("mlx_vlm.generate.ar", "BatchGenerator.__init__",
-         "spec_engine._install_apc_manager_stash", critical=True),
+         "spec_engine._install_apc_manager_stash + kvarn_serve APC gate",
+         critical=True),
+    Seam("mlx_vlm.generate.ar", "_make_cache",
+         "kvarn_serve._install_make_cache (batch kvarn KV construction)",
+         critical=True),
     Seam("mlx_vlm.generate.ar",
          "PromptProcessingBatch._store_apc_exact_checkpoints",
          "spec_engine._install_ckpt_checkpoint_store (ckpt cursor rides "
@@ -203,7 +215,8 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.generate.ar", "run_speculative_server_rounds",
          "spec_engine.install_owned_spec_engine", critical=True),
     Seam("mlx_vlm.speculative.utils", "make_speculative_prompt_cache",
-         "spec_engine.install_spec_kv_quant (B=1 KV_BITS)", critical=True),
+         "spec_engine.install_spec_kv_quant (B=1 KV_BITS/kvarn)",
+         critical=True),
     Seam("mlx_vlm.generate.ar", "BatchGenerator._apc_pick_for",
          "spec_engine._bind_l1_view (L1 APC helpers)"),
     Seam("mlx_vlm.generate.ar", "BatchGenerator._apc_exact_checkpoint_len",
@@ -313,13 +326,14 @@ SEAMS: tuple[Seam, ...] = (
     Seam("mlx_vlm.apc", "DiskBlockStore",
          "apc_manager.build_apc_manager (from_env mirror)", critical=True),
     Seam("mlx_vlm.apc", "_cache_entry_supports_exact_apc",
-         "apc_pooling (PoolingCache exact-APC predicate)", critical=True),
+         "apc_pooling (PoolingCache exact-APC predicate) + kvarn_apc",
+         critical=True),
     Seam("mlx_vlm.apc", "_merge_exact_cache_entries",
-         "apc_pooling (PoolingCache merge arm)", critical=True),
+         "apc_pooling (PoolingCache merge arm) + kvarn_apc", critical=True),
     Seam("mlx_vlm.apc", "_read_safetensors_tensor",
          "apc_pooling (disk-tier zero-width spill)", critical=True),
     Seam("mlx_vlm.apc", "_clone_cache_entry_for_apc",
-         "apc_pooling", critical=True),
+         "apc_pooling + kvarn_apc", critical=True),
     Seam("mlx_vlm.generate.ar", "BatchGenerator.__init__",
          "apc_pooling.install_pooled_prefill_batch_gate (prompt batches "
          "stay B=1 on pooling-cache models; to_batch_cache has no pooled "
@@ -329,7 +343,10 @@ SEAMS: tuple[Seam, ...] = (
          "looks through CacheList so an already-batched one is not merged "
          "twice)", critical=True),
     Seam("mlx_vlm.apc", "_safetensors_dtype_info",
-         "apc_pooling", critical=True),
+         "apc_pooling + kvarn_apc (uint32 codes)", critical=True),
+    Seam("mlx_vlm.apc", "model_apc_mode",
+         "kvarn_apc (stamped kvarn models resolve exact; the stock probe "
+         "sees pre-conversion fp16 caches)", critical=True),
     # <= 0.6.3 the wrapper delegates to this mlx-lm alias; 0.6.4 inlined it.
     Seam("mlx_vlm.generate.common", "mlx_maybe_quantize_kv_cache",
          "apc_pooling (rotating-safe KV-quant replacement, <=0.6.3 arm)",

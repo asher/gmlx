@@ -94,8 +94,9 @@ family sets no value.
 | `--repetition-context-size N` | `20` | How many recent tokens the repetition penalty considers. |
 | `--logit-bias JSON` | - | Token-id to bias map, e.g. `'{"128001": -100}'`. |
 | `--stop STR` | - | Stop sequence; generation ends (trimmed) when it appears. Repeatable. |
-| `--max-kv-size N` | - | Cap the KV cache (rotating cache above it). |
-| `--kv-bits N` / `--kv-group-size N` / `--quantized-kv-start N` | off / `64` / `0` | Quantize the KV cache. A per-stack policy decides layer by layer: growing attention KV quantizes (the last layer of a deep stack stays fp16), sliding windows and recurrent state stay fp16, pooled caches pack at rest. One `[kv]` line reports the verdict, e.g. `quantized 27/28 attn layers (1 held fp16)`, or `dropped:` with the reason when nothing can quantize. Cannot combine with `--max-kv-size` (refused at start). |
+| `--max-kv-size N` | - | Cap the KV cache (rotating cache above it). Composes with `--kv-quant-scheme kvarn` (the window quantizes; N must clear the kvarn floor of sink 128 + max(`--kv-tail-tokens`, 128) + 128, so 384 at tail 0 and 1280 at the default tail; below it `run` exits 2), but not with plain `--kv-bits`. |
+| `--kv-bits N` / `--kv-group-size N` / `--quantized-kv-start N` | off / `64` / `0` | Affine KV-cache quantization (widths 2/3/4/6/8). One per-stack policy picks the layers and prints one `[kv]` line with the verdict (`quantized 27/28 attn layers (1 held fp16)`, or `dropped:` with the reason). Cannot combine with `--max-kv-size` (refused at start, exit 2). What it does, which models gain, and the fidelity data: [performance.md](performance.md#kv-cache-quantization). |
+| `--kv-quant-scheme STR` / `--kv-tail-tokens N` | `uniform` / `1024` | `kvarn` selects variance-normalized quantization: `--kv-bits` then defaults to 6 and accepts 2/3/4/5/6/8, and the sink plus the newest `--kv-tail-tokens` tokens stay fp16. Same policy and `[kv]` line as `--kv-bits`. A declined model prints the reason and runs fp16; a width outside the list exits 2; `--quantized-kv-start` is not honored (records quantize from token 0). The VLM media path keeps fp16. Details: [performance.md](performance.md#kv-cache-quantization). |
 | `--prefill-step-size N` | `2048` / `8192` streaming | Prefill chunk size; lower it to cap peak memory on long prompts. Over-RAM streaming `--stream-cpu` / `--stream-experts` models default to `8192`: each chunk re-streams the expert lane from disk, so fewer, bigger chunks prefill faster. Applies to `run`, `--bench`, and `--bench-depths`. |
 
 ### Multimodal (VLM)
@@ -147,7 +148,8 @@ with a warning); `--no-speculative`/`--no-mtp` forces it off.
 | `--draft-block-size N` | MTP draft tokens per round. Raises or lowers the drafter's own default, up to the deepest block it can produce. |
 
 Speculative generation takes only `--temp`/`--top-p`/`--top-k`/`--min-p` plus a
-baked `--system-prompt`; mlx-vlm's verify walk has no stop/bias/penalty/KV
+baked `--system-prompt`; the MTP verify walk (gmlx's owned engine, or mlx-vlm's
+stock round for qwen3.5-native/gemma4 drafters) has no stop/bias/penalty
 hooks. A native head is sticky: MTP auto-enables and stays on. Flags the verify
 walk can't honour (`--stop`, `--logit-bias`, the
 repetition/presence/frequency penalties, `--xtc-probability`, `--max-kv-size`,
@@ -155,7 +157,9 @@ repetition/presence/frequency penalties, `--xtc-probability`, `--max-kv-size`,
 apply one of those flags, pass `--no-mtp` to decode on the plain path, which
 honours it exactly. `--kv-bits` applies on the MTP path and quantizes the same
 layers `serve` quantizes; the two stock verify walks cannot, and the `[kv]`
-line gives the reason. Only hard-incompatible flags (`--mmproj`, `--adapter`,
+line gives the reason. `--kv-quant-scheme kvarn` follows the same rule, and
+also declines a sliding-window stack under MTP and an arch whose drafter
+reads the target KV back. Only hard-incompatible flags (`--mmproj`, `--adapter`,
 `--stream-cpu`, and the lossy `--moe-*` levers) make auto-enable step aside to
 plain decoding; an explicit `--speculative` with one of these errors out.
 `--stream-experts` is the exception: streaming composes with MTP, but
@@ -205,7 +209,8 @@ model id or alias in your server config, the same `models:`/`aliases:` blocks
 match, the model's resolved path and its merged profile/override settings are
 overlaid onto the run: sampling (`temp`, `top-p`, `top-k`, `min-p`, penalties,
 `max-tokens`, `stop`, `seed`, XTC), KV-cache
-(`kv-bits`/`kv-group-size`/`max-kv-size`/`quantized-kv-start`), `system`,
+(`kv-bits`/`kv-group-size`/`kv-quant-scheme`/`kv-tail-tokens`/`max-kv-size`/
+`quantized-kv-start`), `system`,
 `chat_template`, `enable_thinking`, the thinking keys (`thinking_budget`,
 `thinking_start_token`, `thinking_end_token`), `mmproj`, `adapter`,
 speculative/draft, and
@@ -327,7 +332,8 @@ every command. The terminal is upgraded on top:
   entirely. Both rewind the persistent KV cache to the turn's checkpoint (no
   re-prefill), restore the pre-turn state (system prompt, media markers), and
   work after an Esc-canceled reply. A rotating cache (`--max-kv-size`) that
-  has wrapped its window can't rewind; `/reset` then.
+  has wrapped its window can't rewind past the evicted boundary; the next
+  message re-prefills (or `/reset`).
 - `/model` and `/stats` print the loaded model's card (arch, params, codecs,
   size, context, drafter, adapter) and the running session totals (turns,
   tokens, average tok/s, MTP acceptance). In server mode `/model` lists the
@@ -437,6 +443,7 @@ every command. The terminal is upgraded on top:
 | `--logit-bias JSON` | - | Token-id to bias map. |
 | `--stop STR` | - | Stop sequence (trimmed; repeatable). |
 | `--kv-bits` / `--kv-group-size` / `--quantized-kv-start` | off / `64` / `0` | KV-cache quantization, same per-stack policy and `[kv]` verdict line as `run`; cannot combine with `--max-kv-size`. |
+| `--kv-quant-scheme` / `--kv-tail-tokens` | `uniform` / `1024` | KV quantization scheme (`kvarn` = variance-normalized, 6-bit default, fp16 sink + tail), same as [`run`](#generation--sampling). |
 | `--prefill-step-size N` | `2048` / `8192` streaming | Prefill chunk size (peak-memory cap for `/load`-ed long prompts). Streaming `--stream-cpu` / `--stream-experts` models default to `8192`, same as `run`. |
 | `--stream-cpu` / `--stream-experts` / `--moe-experts` / `--moe-expert-mass` / `--moe-expert-probe` / `--moe-miss-shed` / `--moe-layer-shed` / `--gpu-keepwarm` | - | Execution placement and lossy MoE fan-out, same as [`run`](#loading), including larger-than-RAM streaming `--stream-cpu` chat (text path only). |
 | `--resize-shape N\|WxH` / `--thinking-budget N` | - | Image resolution (soft-token count, VLM mode) / thinking-token cap (text + VLM; adjustable via `/thinking-budget`). |
@@ -450,7 +457,7 @@ every command. The terminal is upgraded on top:
 | `--system-prompt STR` | - | System message, sent on the first turn (and after each reset; adjustable via `/system`). |
 | `--chat-template-config JSON` | - | Extra chat-template kwargs, e.g. `'{"enable_thinking": false}'`. |
 | `--thinking` / `--reasoning-effort` | - | Reasoning switch and depth, mapped onto this model's own template spelling, same as [`run`](#generation). |
-| `--max-kv-size N` | - | Cap the KV cache (rotating cache above it). |
+| `--max-kv-size N` | - | Cap the KV cache (rotating cache above it). Composes with `--kv-quant-scheme kvarn` the same as [`run`](#generation); `/undo` across an evicted boundary rebuilds the cache on the next message. |
 | `--no-history` | - | Don't read or write the prompt-history file. |
 | `--no-autosave` | - | Don't autosave the session after each turn. |
 | `--resume [NAME]` | - | Resume a saved session (default: this model's latest). |
@@ -1267,6 +1274,10 @@ This is the supported set:
 | `GMLX_SPARSE_K` | Sparse-attention kept-token budget (default `2048`). |
 | `GMLX_SPARSE_MIN_S` | Depth in tokens where sparse attention engages (default `8192`). |
 | `GMLX_SPARSE_ARCHS` | Extra architecture modules the sparse route may claim, comma-separated (for running a quality gate on a new arch). Default: only quality-gated archs (llama-family) are ever claimed. |
+| `GMLX_KVARN=0` | Disable `--kv-quant-scheme kvarn` at cache build: the scheme drops with that reason and the model runs fp16 KV. A debugging A/B. |
+| `GMLX_KVARN_SDPA=0` | Route kvarn decode through the materialize path instead of the fused record-reading kernels. Numerics-affecting only at the fp16 rounding level; set `0` first when debugging a kvarn model. |
+| `GMLX_KVARN_FA=0` | Keep kvarn verify rounds (MTP, query width 2 to 8) on the vector decode kernel instead of the matrix-unit verify kernel. A performance A/B; the two agree to fp16 rounding. Widths above 4 then materialize. |
+| `GMLX_KVARN_BITS` | Split key/value widths for `--kv-quant-scheme kvarn`, `k6v5` style; when set it overrides the width `--kv-bits` gives both. A value not of that form is ignored with a warning. On the server, `KV_KEY_BITS`/`KV_VALUE_BITS` in the process environment win over it. |
 | `GMLX_FUSED_GDN=0` | Disable the fused gated-delta Metal kernels used by the Qwen3.5/3.6 hybrid architectures. The fusion is a numerics-affecting runtime patch; set `0` first when debugging those archs to rule it out. |
 | `GMLX_QWEN_OWNED=0` | Build qwen3.5/3.6 text MTP targets on genuinely stock mlx-vlm classes instead of the owned forwards. The only install the fallback keeps is the tiled-V rebind (GGUF weight-order correctness); it loses every performance patch (fused GDN kernels, ragged decode kernels, verify fold, batched-verify SDPA, bf16 verify GEMV) and the two stock defects the owned path fixes come back: left-padded single-row batches attend their pad tokens, and an empty-sequence row in batched serve crashes (the old guard patch no longer installs). Multimodal MTP targets (LLM GGUF + mmproj) never take this flag's path: their trees are always built stock by mlx-vlm construction and always run the full patched regime. Read at load; a debugging A/B, not a tuning knob. |
 | `GMLX_GEMMA_OWNED=0` | Build gemma4 text MTP targets on the stock mlx-vlm classes instead of the owned mask builder and attention. The fallback keeps the full patch regime (nosync mask/offset bodies, hd512 batched row route), so numerics are unchanged either way; the owned classes carry the same semantics natively. Multimodal targets (LLM GGUF + mmproj) are always built stock by mlx-vlm construction and always run the patched regime. Read at load; a debugging A/B, not a tuning knob. |

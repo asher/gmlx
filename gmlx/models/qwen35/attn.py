@@ -12,6 +12,10 @@ The owned ``__call__`` composes three formerly patch-installed routes:
   per-row "causal" fold for deep batched verify widths;
 - the stock per-pad-group loop as the fallback.
 
+Kvarn KV bypasses all three: a single claim after the cache update
+routes view-typed keys onto the kvarn SDPA path (fused decode with
+per-row starts, materialized prefill/verify).
+
 The ragged kernel sources, plan/block tables, and cached-array helpers
 are verbatim in-tree copies, equality-tested against the pinned
 mlx-vlm release. Projections go through ``qwen35_verify_linear``, the
@@ -36,6 +40,7 @@ from mlx_vlm.models.qwen3_5 import language as _L
 
 import gmlx.load.loadlog as loadlog
 from gmlx.envflags import env_bool
+from gmlx.cache.kvarn_cache import KVarNView
 from .gdn import owned_gdn_active as owned_attn_active  # one switch
 from .owned import _qwen3_5_left_padding_info
 from .rope import apply_multimodal_rotary_pos_emb as _apply_mrope
@@ -716,6 +721,35 @@ def _folded_or_group_attention(queries, keys, values, *, cache, scale, mask):
     )
 
 
+def _kvarn_attention(queries, *, cache, scale, mask):
+    """Kvarn arm of the owned dispatch: one claim right after the cache
+    update covers every route below (the resolvers introspect keys, which
+    kvarn serves as views). Batched decode takes per-row starts from the
+    cache's own pad state -- the left_padded_decode protocol carries the
+    pads on a cache attr, not in the mask."""
+    from gmlx.cache.kvarn_sdpa import kvarn_attention
+
+    starts = None
+    if queries.shape[2] == 1 and getattr(cache, "left_padding", None) is not None:
+        starts = cache.left_padding
+    qL = queries.shape[2]
+    if (
+        isinstance(mask, mx.array)
+        and queries.shape[0] == 1
+        and 1 <= qL <= 4
+        and getattr(cache, "left_padding", None) is None
+        and mask.shape[-2] == qL
+        and mask.shape[-1] == cache.offset
+    ):
+        # Masks on the owned tree are cache-derived, so a B=1 array mask
+        # at decode/verify width is end-aligned causal by construction --
+        # the fused route's causal clamp, not the materialize fallback.
+        # Routing it fused keeps MTP verify on the same arithmetic as
+        # plain decode (greedy byte-identity) and skips a materialize.
+        mask = "causal"
+    return kvarn_attention(queries, cache, scale, mask, starts=starts)
+
+
 def _verify_attention(queries, keys, values, *, cache, scale, mask):
     """Composed verify/left-padded-decode attention resolver.
 
@@ -866,7 +900,9 @@ class OwnedQwen3_5Attention(_L.Qwen3_5Attention):
         if left_padded_decode:
             mask = None
 
-        if (target_verify and L > 1) or left_padded_decode:
+        if isinstance(keys, KVarNView):
+            output = _kvarn_attention(queries, cache=cache, scale=self.scale, mask=mask)
+        elif (target_verify and L > 1) or left_padded_decode:
             output = _verify_attention(
                 queries, keys, values, cache=cache, scale=self.scale, mask=mask
             )

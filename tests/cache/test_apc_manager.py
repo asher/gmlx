@@ -371,3 +371,42 @@ def test_store_stops_at_kernel_floor(monkeypatch):
     man2.release(blocks)
     assert len(blocks) == 6
     assert "kernel_floor" not in man2.stats.rejects_by_reason
+
+
+def test_kvarn_salt_applied_from_the_stamped_model(monkeypatch):
+    """The wire salt is read off the response generator's model, the
+    object the load-time policy stamps. The runtime's model cache is a
+    registry, not a dict, so it cannot be the only route to the model."""
+    monkeypatch.delenv("APC_ENABLED", raising=False)
+    monkeypatch.delenv("GMLX_APC_ENABLED", raising=False)
+    import gmlx.cache.kvarn_apc as kvarn_apc
+    import gmlx.serve.kv_policy as skv
+    from gmlx.cache.kvarn_apc import kvarn_entry_salt
+
+    class Registry:  # mlx-vlm's ModelCacheRegistry shape: get(), no dict
+        def __init__(self, d):
+            self._d = d
+
+        def get(self, key, default=None, *, kind=None):
+            return self._d.get(key, default)
+
+    pol = SimpleNamespace(single=SimpleNamespace(
+        scheme="kvarn", bits=6, value_bits=None, tail_tokens=1024))
+    model = SimpleNamespace(_gmlx_kv_policy=pol, _kq_apc_mode="exact")
+    manager = SimpleNamespace(_exact_extra_salt=0, autosize=lambda m: None)
+    proxy = _RuntimeProxy(SimpleNamespace(metrics=None))
+
+    def fake_stock_get(model_path, adapter_path, *, model_kind="auto"):
+        proxy.model_cache = Registry({"model": model})
+        proxy.response_generator = SimpleNamespace(apc_manager=None, model=model)
+        proxy.apc_manager = None
+        serving.publish_built_apc_manager(manager)
+
+    monkeypatch.setattr(skv, "resolve_for_load", lambda rg, mid: pol)
+    monkeypatch.setattr(kvarn_apc, "kvarn_model_converts", lambda m: True)
+    pool = _ResidencyPool(
+        proxy, fake_stock_get, lambda: True, 200 * GB, (),
+        footprint_fn=lambda p: GB, in_flight_fn=lambda: 0)
+    e = _acq(pool, "/m/a.gguf", env={"APC_ENABLED": "1"})
+    assert e.apc_manager is manager
+    assert manager._exact_extra_salt == kvarn_entry_salt(model) != 0

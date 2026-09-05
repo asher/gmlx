@@ -168,15 +168,6 @@ class GmlxAPCManager(_apc.APCManager):
             # separate budgeted, evictable retention from real residue.
             self.stats.exact_bytes = int(total)
 
-    def lookup_exact_cache(self, *args, **kwargs):
-        self._trim_exact_to_budget()
-        return super().lookup_exact_cache(*args, **kwargs)
-
-    def store_exact_cache(self, *args, **kwargs):
-        out = super().store_exact_cache(*args, **kwargs)
-        self._trim_exact_to_budget()
-        return out
-
     def stats_snapshot(self) -> dict:
         """Stock snapshot plus the gmlx ckpt-tier side counters (pure
         wrap: super() + merge). Visible at /v1/cache/stats -- a ckpt
@@ -283,6 +274,27 @@ class GmlxAPCManager(_apc.APCManager):
                     freed += nb
                     evicted += 1
         return freed
+
+    # Exact-tier entry salt: nonzero only for kvarn boots, where it keys
+    # entries to the wire config (scheme/widths/tail/layout version) so a
+    # scheme change never warm-adopts a stale-format entry -- the disk
+    # namespace is the model path and carries no scheme.
+    _exact_extra_salt = 0
+
+    def lookup_exact_cache(self, token_ids, extra_hash=0,
+                           max_prefix_tokens=None, min_prefix_tokens=0):
+        self._trim_exact_to_budget()
+        return super().lookup_exact_cache(
+            token_ids, extra_hash ^ self._exact_extra_salt,
+            max_prefix_tokens=max_prefix_tokens,
+            min_prefix_tokens=min_prefix_tokens)
+
+    def store_exact_cache(self, token_ids, prompt_cache, *, extra_hash=0):
+        out = super().store_exact_cache(
+            token_ids, prompt_cache,
+            extra_hash=extra_hash ^ self._exact_extra_salt)
+        self._trim_exact_to_budget()
+        return out
 
     def store_ckpt_blocks(self, token_ids, layer_keys, layer_values,
                           *, extra_hash=0, disk=True):
@@ -609,5 +621,9 @@ def build_apc_manager(model_namespace=None):
         "APC enabled (block_size=%d, num_blocks=%d, disk=%s, gmlx manager)",
         block_size, num_blocks, bool(disk),
     )
+    # The kvarn wire salt is applied later, at residency's post-load
+    # manager pairing (kvarn_apc.apply_kvarn_salt): it is gated on an
+    # actual-conversion probe, and this build runs before the model
+    # loads, so there is nothing to probe yet.
     return GmlxAPCManager(
         num_blocks=num_blocks, block_size=block_size, disk=disk)

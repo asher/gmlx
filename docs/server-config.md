@@ -1011,13 +1011,15 @@ native support; a per-request field still wins over the profile):
 
 Applied at model-build time through a transient env window in the residency
 pool, so each model loads with its own params without leaking to co-resident
-models. Each maps 1:1 to the env var mlx-vlm reads at build:
+models. Each maps 1:1 to an env var read at build (`KV_TAIL_TOKENS` is
+gmlx's own; mlx-vlm reads the rest):
 
 | key | env var |
 |-----|---------|
 | `kv_bits` | `KV_BITS` |
 | `kv_group_size` | `KV_GROUP_SIZE` |
 | `kv_quant_scheme` | `KV_QUANT_SCHEME` |
+| `kv_tail_tokens` | `KV_TAIL_TOKENS` |
 | `max_kv_size` | `MAX_KV_SIZE` |
 | `quantized_kv_start` | `QUANTIZED_KV_START` |
 
@@ -1025,6 +1027,10 @@ models. Each maps 1:1 to the env var mlx-vlm reads at build:
 > reads it per request, after the per-model load window has closed, so a
 > per-model mapping cannot work. Set `server.prefill_step_size` (see the
 > server key table above).
+>
+> `quantized_kv_start` is applied per model from its load window; upstream
+> captures its own copy once at server start, so gmlx re-applies the key at
+> each load.
 >
 > `dtype` is likewise server-level. It could be applied per model, but the
 > reason to leave bfloat16 is that this GPU has no native bfloat16 arithmetic,
@@ -1035,15 +1041,51 @@ cache stack and logged as one `[kv]` line. The policy is layer by layer:
 growing attention KV quantizes except the last layer of a deep stack,
 sliding windows and recurrent state stay fp16, pooled caches pack at
 rest. `/v1/models` reports the result per resident model as `kv_quant`
-(`bits`, `group_size`, `layers_quantized`, `layers_fp16`, `verdict`,
-`verdict_batched`); `/health` carries the same field per resident entry.
+(`scheme`, `bits`, `group_size`, `layers_quantized`, `layers_fp16`,
+`verdict`, `verdict_batched`, plus `value_bits` and `tail_tokens` under a
+non-uniform scheme); `/health` carries the same field per resident entry.
 Verdicts: `full` (policy fully applied), `partial` (hybrid stack, the
 fp16 layers are counted), `dropped` (the model runs fp16 KV, reason
-logged), `error` (the model fails to load, e.g. `kv_bits` outside
-2/3/4/6/8 or split key/value bits). Speculative (MTP) models quantize at
-batch size 1 and run fp16 KV while requests are batched; `verdict_batched`
-reports that mode, and admission prices memory from it. `kv_quant_scheme`
-accepts only `uniform` (validated at parse).
+logged), `error` (the model fails to load, e.g. `kv_bits` outside the
+scheme's widths, or split key/value bits under `uniform`). Speculative
+(MTP) models quantize at batch size 1 and run fp16 KV while requests are
+batched; `verdict_batched` reports that mode, and admission prices memory
+from it.
+
+`kv_quant_scheme: kvarn` runs the same policy over the same stack.
+`kv_bits` picks the width (default 6; 2/3/4/5/6/8) and `kv_tail_tokens` the
+fp16 precision tail (default 1024). Split widths come from `KV_KEY_BITS` /
+`KV_VALUE_BITS` in the server's own environment (server-wide, not a load
+key), else `GMLX_KVARN_BITS=k6v5`, else `kv_bits` for both sides. A
+malformed `kv_tail_tokens` fails the load like a width outside the list.
+Which layers convert and which archs decline is the shared rule in
+[performance.md](performance.md#kv-cache-quantization); a model where no
+layer converts runs fp16 KV with a one-shot log reason, never a silent
+affine fallback.
+
+Server-specific points. `quantized_kv_start` is not honored under kvarn
+(records quantize from token 0; the `[kv]` line says so). `max_kv_size`
+only caps the request context budget, so the rotating-window composition
+`run` and `chat` support has no server equivalent. A native-MTP drafter
+declines a mixed window-plus-kvarn stack whole at batch size 1, as on
+`run`. Admission prices a kvarn layer at its record width, rounded up to
+the 4096-token code slab the cache grows in, plus the fp16 sink, horizon
+and tail buffers, which are resident from the first token. Speculative
+rollback into a sealed record reopens it from its codes (one lossy round
+trip); rows still in the fp16 tail roll back exactly.
+
+APC under kvarn keeps the same tier routing as fp16. Dense models run the
+exact-entry tier (memory and disk; the 16-token block tier cannot split
+kvarn's 128-token records). Checkpoint-shaped stacks -- every hybrid-GDN
+and SWA row of the tier table whose attention head_dim is 128/256/512 --
+keep full checkpoint-tier reuse, storing kvarn records: the attention
+payload lives inline in the record rather than in pool blocks, so
+`GMLX_APC_CKPT_BUDGET_MB` becomes the governing memory knob (see the env
+table note). Entries and disk skeletons are keyed to the kvarn width/tail
+config so a config change or a stock-vs-kvarn boot cold-misses instead of
+adopting a stale format. Cascade shared-prefix decode is inactive under
+kvarn (it announces itself once); speculative targets keep their stock
+spec-engine KV handling.
 
 ### Cache keys (`cache:`)
 
@@ -1255,7 +1297,7 @@ and store counts surface on the authed `GET /v1/metrics`.
 | `GMLX_APC_ANCHOR_BUDGET_MB` | Byte budget for the exact-tier anchor LRU, in MB (default `4096`). A deep shared prefix on a pooling stack clones to GBs; newest always survives. |
 | `GMLX_APC_CKPT_TRIPWIRE` | Requests before the dead-tier tripwires warn (default `5`; `0` silences both). |
 | `GMLX_APC_CKPT_RECORDS` | Checkpoint-record LRU entries (default `32`). |
-| `GMLX_APC_CKPT_BUDGET_MB` | Byte budget for checkpoint-record payload (recurrent states + KV tails), in MB (default `4096`). A GDN record can carry >100 MB of state and each request saves several checkpoints, so expect resident memory to grow toward this budget on hybrid models under sustained multi-turn traffic; lower it if 4 GB of cache is too much for your machine. |
+| `GMLX_APC_CKPT_BUDGET_MB` | Byte budget for checkpoint-record payload (recurrent states + KV tails), in MB (default `4096`). A GDN record can carry >100 MB of state and each request saves several checkpoints, so expect resident memory to grow toward this budget on hybrid models under sustained multi-turn traffic; lower it if 4 GB of cache is too much for your machine. Under `KV_QUANT_SCHEME=kvarn` this becomes the governing knob for hybrid models: kvarn records carry the whole attention payload inline (no block chains), so `APC_NUM_BLOCKS` mostly stops mattering and this budget bounds the tier's memory. |
 | `GMLX_APC_DECODE_CKPT` | Decode-time snapshot interval in generated tokens on hybrid models, anchored to the prompt end (default `512`; `0` off; widens automatically with context). |
 | `GMLX_APC_RETIRE_LCP` | `0` keys retirement on the forwarded ids instead of the predicted next-turn render (also disables decode-time snapshots, which key on the prediction). |
 | `GMLX_APC_FRESH_WAIT_MS` | Hold ceiling for the freshness admission gate, in ms (default `500`; `0` disables the gate). Sibling requests that arrive together admit one formation apart instead of together and cold: the first request prefills and stores the shared prefix, and the held siblings then admit warm. A sibling held past the ceiling admits cold. |

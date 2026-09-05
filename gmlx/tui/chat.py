@@ -798,12 +798,20 @@ def _fmt_k(n) -> str:
     return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
 
 
-def _can_trim(cache) -> bool:
-    """True when every layer cache supports trim() (a rotating cache that has
-    wrapped its window does not)."""
+def _can_trim(cache, n: int | None = None) -> bool:
+    """True when every layer cache can rewind (a rotating cache that has
+    wrapped its window cannot). Caches with a depth-aware ``_can_trim(n)``
+    probe (kvarn, pooling) are asked about this specific depth."""
     if not cache:
         return False
-    return all(bool(getattr(c, "is_trimmable", lambda: False)()) for c in cache)
+    for c in cache:
+        probe = getattr(c, "_can_trim", None)
+        if n is not None and callable(probe):
+            if not probe(n):
+                return False
+        elif not bool(getattr(c, "is_trimmable", lambda: False)()):
+            return False
+    return True
 
 
 def _trim_to(cache, checkpoint: int, lm=None) -> bool:
@@ -812,10 +820,14 @@ def _trim_to(cache, checkpoint: int, lm=None) -> bool:
     n = _cache_tokens(cache) - int(checkpoint)
     if n <= 0:
         return True
-    if not _can_trim(cache):
+    if not _can_trim(cache, n):
         return False
     for c in cache:
-        c.trim(n)
+        got = c.trim(n)
+        # A layer refusing after its probe passed: report failure so the
+        # caller rebuilds (the partially trimmed cache is discarded).
+        if got is not None and not isinstance(got, bool) and int(got) != n:
+            return False
     if lm is not None:
         for attr in ("_position_ids", "_rope_deltas"):
             if hasattr(lm, attr):
@@ -2851,6 +2863,29 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
     _apply_placement(args, getattr(b.model, "language_model", b.model))
     _require_chat_template(b.tok)
 
+    mtp_kvarn_cfg = None
+    if (getattr(args, "kv_quant_scheme", None) or "uniform") == "kvarn":
+        from gmlx.gen.generation import setup_kvarn_mtp_cache
+
+        tail = int(getattr(args, "kv_tail_tokens", 1024) or 0)
+        block = args.draft_block_size or int(getattr(b.drafter.config, "block_size", 3))
+        probe = setup_kvarn_mtp_cache(
+            b.model,
+            b.drafter,
+            kv_kwargs.get("kv_bits"),
+            tail,
+            block,
+            out=sys.stderr,
+        )
+        if probe is not None:
+            mtp_kvarn_cfg = {
+                "kv_bits": kv_kwargs.get("kv_bits"),
+                "kv_tail_tokens": tail,
+            }
+        # kvarn owns the width request; a declined scheme means fp16, not
+        # a silent fall-through to the pooled packing.
+        kv_kwargs["kv_bits"] = None
+
     # The cache is built once per session, before a turn picks its engine,
     # so the decline decides here.
     mtp_kv_policy = None
@@ -2883,6 +2918,10 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
             from gmlx.cache.kv_policy import quantize_stack
 
             quantize_stack(c, mtp_kv_policy)
+        if mtp_kvarn_cfg is not None:
+            from gmlx.gen.generation import convert_kvarn_cache
+
+            convert_kvarn_cache(b.model, c, **mtp_kvarn_cfg)
         return c
 
     b.new_text_cache = _new_text_cache
@@ -2914,6 +2953,7 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
         )
 
     kv_policy = None        # set at the load join (kv-bits policy arm)
+    kvarn_cfg = None        # set at the load join (kvarn scheme accepted)
 
     def _new_text_cache():
         c = make_prompt_cache(b.model, args.max_kv_size)
@@ -2921,6 +2961,10 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
             from gmlx.cache.kv_policy import arm_stack
 
             arm_stack(c, kv_policy)
+        if kvarn_cfg is not None:
+            from gmlx.gen.generation import convert_kvarn_cache
+
+            convert_kvarn_cache(b.model, c, **kvarn_cfg)
         return c
 
     b.new_text_cache = _new_text_cache
@@ -2929,7 +2973,7 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
         # Model-dependent setup, deferred to the load join on the
         # background path. Prints bare, so it must run on the main
         # thread with the tty free.
-        nonlocal kv_policy
+        nonlocal kv_policy, kvarn_cfg
         if not args.no_chat_template:
             _require_chat_template(b.tok, verbatim_hint=True)
 
@@ -2952,6 +2996,31 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
         if step is not None:
             kv_kwargs["prefill_step_size"] = step
 
+        if (getattr(args, "kv_quant_scheme", None) or "uniform") == "kvarn":
+            from gmlx.cache.kvarn_cache import kvarn_rotating_window
+            from gmlx.gen.generation import setup_kvarn_cache
+
+            tail = int(getattr(args, "kv_tail_tokens", 1024) or 0)
+            start = kv_kwargs.get("quantized_kv_start", 0)
+            probe = setup_kvarn_cache(
+                b.model,
+                kv_kwargs.get("kv_bits"),
+                tail,
+                args.max_kv_size,
+                out=sys.stderr,
+                quantized_kv_start=start,
+            )
+            if probe is not None:
+                kvarn_cfg = {
+                    "kv_bits": kv_kwargs.get("kv_bits"),
+                    "kv_tail_tokens": tail,
+                    "rotating_window": kvarn_rotating_window(
+                        b.model, args.max_kv_size
+                    ),
+                    "quantized_kv_start": start,
+                }
+            kv_kwargs["kv_bits"] = None
+
         # Per-stack policy on the constructed cache: held layers lose
         # to_quantized so the stock converter skips them (rotating
         # windows would crash it), pools pack at rest, the rest quantize
@@ -2964,6 +3033,7 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
                 probe, kv_bits=kv_kwargs["kv_bits"],
                 kv_group_size=kv_kwargs.get("kv_group_size", 64),
                 quantized_kv_start=kv_kwargs.get("quantized_kv_start", 0),
+                scheme=getattr(args, "kv_quant_scheme", None),
                 max_kv_size=args.max_kv_size)
             if policy.verdict == "dropped":
                 kv_kwargs["kv_bits"] = None

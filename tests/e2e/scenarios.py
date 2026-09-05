@@ -119,7 +119,8 @@ def pc_apc_enabled(expected: bool) -> Callable:
 
 def pc_kv_engagement(model: str, *, verdict: str,
                      layers_quantized: Optional[int] = None,
-                     verdict_batched: Optional[str] = None) -> Callable:
+                     verdict_batched: Optional[str] = None,
+                     scheme: Optional[str] = None) -> Callable:
     """/v1/models must carry a non-null kv_quant with the expected verdict
     on a row whose resident flag is true. Both legs are load-bearing: a
     missing field on a non-resident row is exactly the engagement blind
@@ -151,6 +152,8 @@ def pc_kv_engagement(model: str, *, verdict: str,
                 and kq.get("verdict_batched") != verdict_batched):
             problems.append(f"verdict_batched={kq.get('verdict_batched')} "
                             f"want {verdict_batched}")
+        if scheme is not None and kq.get("scheme") != scheme:
+            problems.append(f"scheme={kq.get('scheme')} want {scheme}")
         return [CheckResult("kv_engagement", not problems,
                             "; ".join(problems) if problems else str(kq))]
     return _check
@@ -529,9 +532,28 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
         targets=[ReqTarget("recall", "m",
                            prompts=[P.p_long_ctx_needle("VIOLETKV655")])],
         post=[pc_kv_engagement("m", verdict="full", layers_quantized=27,
-                               verdict_batched="full")],
+                               verdict_batched="full", scheme="uniform")],
         notes="a width whose el_per_int truncates; the batch cache is "
               "built empty, so this is the only path that catches it"))
+
+    # kv: kvarn, the second scheme. Same policy, same verdict line, so
+    # the engagement check also pins that /v1/models carries the scheme.
+    add(Scenario(
+        key="kv_dense_kvarn6", tier="kv", needs=["qwen3_0_6b_q8"],
+        title="KVarN KV cache: 6-bit on qwen3-0.6b - needle recall",
+        config={
+            "profiles": {"p": {"sampling": {"temperature": 0.0},
+                               "load": {"kv_quant_scheme": "kvarn",
+                                        "kv_bits": 6,
+                                        "kv_tail_tokens": 1024}}},
+            "models": {"m": _model_entry(qwen8 or "", profile="p")},
+        },
+        targets=[ReqTarget("recall", "m",
+                           prompts=[P.p_long_ctx_needle("VIOLETKVARN77")])],
+        post=[pc_kv_engagement("m", verdict="full", layers_quantized=27,
+                               verdict_batched="full", scheme="kvarn")],
+        notes="variance-normalized records on the serve batch path; the "
+              "planted fact must survive the rotation and the fp16 tail"))
 
     # cache: disabled / memory / disk / diskxkv8 / ckpt
     # Qwen3-0.6B exercises the block tier (plain KVCache prefix reuse); the
@@ -760,6 +782,32 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
             notes="issue #104 follow-on: the MTP arm's kv path was the "
                   "reporter's second symptom; the needle exercises the "
                   "flash arm through the spec prefill"))
+        # The same crossing under kvarn: B=1 spec rounds trim kvarn
+        # records (frontier groups reopen from their codes) while the
+        # batched arm keeps fp16. The runner sends one request at a time,
+        # so mid-generation admission is not covered here; the serve
+        # stress runner under a kvarn boot is the place for that.
+        add(Scenario(
+            key="mtp_kvarn6", tier="mtp", needs=native_needs,
+            title=f"MTP x kvarn6: {native_needs[0]} native MTP, kvarn target KV",
+            config={
+                "profiles": {"p": {"sampling": {"temperature": 0.0},
+                                   "load": {"kv_quant_scheme": "kvarn",
+                                            "kv_bits": 6,
+                                            "kv_tail_tokens": 1024}}},
+                "models": {
+                    "spec": _model_entry(native_mtp, native_mtp=True, profile="p"),
+                    "base": _model_entry(native_mtp, profile="p")}},
+            targets=[ReqTarget("recall", "spec",
+                               prompts=[P.p_long_ctx_needle("CORALKVARN61")])],
+            post=[_pc_mtp_lossless(
+                      "spec", "base",
+                      chat_kwargs={"chat_template_kwargs":
+                                   {"enable_thinking": False}}),
+                  pc_kv_engagement("spec", verdict="partial",
+                                   verdict_batched="dropped", scheme="kvarn")],
+            notes="greedy spec vs greedy base under kvarn records; the "
+                  "rollback path trims records instead of raw K/V"))
 
     return out
 

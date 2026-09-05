@@ -238,10 +238,11 @@ def _warm_tokens(manager, ids: list, extra_hash: int, model=None) -> tuple:
     if model is not None:
         try:
             from gmlx.cache.snapshot import ckpt_peek
-            from gmlx.spec.engine import _ckpt_layout_for
+            from gmlx.spec.engine import _ckpt_layout_expected
 
             n = ckpt_peek(manager, ids, extra_hash=extra_hash,
-                          layout=_ckpt_layout_for(model, int(manager.block_size)))
+                          layout=_ckpt_layout_expected(
+                              model, int(manager.block_size)))
             if n > best:
                 best, tier = int(n), "ckpt"
         except Exception:
@@ -256,15 +257,18 @@ def _warm_tokens(manager, ids: list, extra_hash: int, model=None) -> tuple:
                 manager.release(blocks)
     except Exception:
         pass
+    # Exact-tier entries carry the manager's wire salt (kvarn widths);
+    # the block and ckpt tiers key on the caller's hash.
+    exact_hash = extra_hash ^ int(getattr(manager, "_exact_extra_salt", 0) or 0)
     try:
-        hit = manager.find_exact_prefix(ids, extra_hash=extra_hash)
+        hit = manager.find_exact_prefix(ids, extra_hash=exact_hash)
         if hit:                                  # (cache_hash, prefix_len): disk shards
             n = int(hit[1]) if isinstance(hit, (tuple, list)) else int(hit)
             if n > best:
                 best, tier = n, "exact"
     except Exception:
         pass
-    n = _exact_peek(manager, ids, extra_hash)
+    n = _exact_peek(manager, ids, exact_hash)
     if n > best:
         best, tier = n, "exact"
     return best, tier

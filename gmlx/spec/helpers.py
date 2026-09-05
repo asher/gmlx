@@ -354,9 +354,23 @@ def _mtp_draft_hidden(lm: nn.Module, hidden: mx.array) -> mx.array:
     return prepare(hidden) if callable(prepare) else hidden
 
 
+_WARNED_KVARN_READBACK = [False]
+
+
 def _mtp_shared_kv_from_prompt_cache(lm: nn.Module, prompt_cache: list[Any]) -> dict:
     layers = getattr(getattr(lm, "model", None), "layers", [])
     if len(prompt_cache) != len(layers):
+        return {}
+    if any(
+        getattr(c, "kv_quant_scheme", None) == "kvarn" for c in prompt_cache
+    ):
+        # state[:2] on a kvarn cache is (codes, axes), not (K, V); the
+        # install paths decline kvarn for readback targets, so reaching
+        # here means a gap in that gate -- degrade to no shared KV.
+        if not _WARNED_KVARN_READBACK[0]:
+            _WARNED_KVARN_READBACK[0] = True
+            _log.warning("[mtp] shared-KV readback skipped: kvarn cache "
+                         "records are not raw K/V")
         return {}
 
     shared_kv_states = {}

@@ -143,18 +143,78 @@ def _transient_bytes(heads: int | None, depth: int) -> float:
     return heads * step * (depth + step) * 2.0
 
 
-def _boot_bpe_vector(geometry, env, model_id):
-    """Per-entry bytes-per-element for the boot table under the model's
-    env window: the batched-mode carve-out request admission prices with
-    (growing KV entries pack except the last of a deep stack; windows and
-    state stay fp16). None means uniform fp16: kv quantization off or
-    declined (MTP batched, max_kv_size, a qat-marked id, malformed
-    values)."""
-    e = {**os.environ, **(env or {})}
-    raw = e.get("KV_BITS")
-    if (not raw or e.get("MLX_VLM_GGUF_SPECULATIVE") == "1"
-            or e.get("MAX_KV_SIZE") or "qat" in str(model_id)):
+def _kvarn_boot_pricing(geometry, e, raw, cfg, mtp):
+    """kvarn arm of _boot_pricing: record cost on the growing KV entries
+    the carve-out takes plus each one's fixed fp16 rows, priced as
+    admission prices them. Under MTP the batched rows run fp16, so the
+    per-entry price stays fp16 and the B=1 stack's rows and one slab per
+    taken entry ride on top. None (fp16) when the ops are absent, the
+    widths are malformed, or the header shape is one kvarn declines (MLA,
+    head_dim outside 128/256/512)."""
+    from types import SimpleNamespace
+
+    try:
+        from mlx_vlm.models.cache import should_quantize_kv_layer
+
+        from gmlx.cache.kv_policy import (FP16_BPE, kvarn_bytes_per_element,
+                                          kvarn_fixed_tokens,
+                                          kvarn_step_tokens)
+        from gmlx.cache.kvarn_cache import (KVARN_BITS, KVARN_DEFAULT_TAIL,
+                                            kvarn_unsupported, kvarn_widths)
+
+        text = (cfg or {}).get("text_config") or cfg or {}
+        shim = SimpleNamespace(args=SimpleNamespace(**text))
+        if kvarn_unsupported(shim):
+            return None
+        k, v = kvarn_widths(int(float(raw)) if raw else None)
+        tail = int(e.get("KV_TAIL_TOKENS") or KVARN_DEFAULT_TAIL)
+    except Exception:
         return None
+    if k not in KVARN_BITS or v not in KVARN_BITS or tail < 0:
+        return None
+    record = kvarn_bytes_per_element(k, v)
+    rows = kvarn_fixed_tokens(tail)
+    step = kvarn_step_tokens()
+    n = len(geometry)
+    bpe, regions, steps = [], [], []
+    for i, g in enumerate(geometry):
+        if not (g.attn and g.window is None and should_quantize_kv_layer(i, n)):
+            bpe.append(FP16_BPE)
+            regions.append(())
+            steps.append(0)
+        elif mtp:
+            bpe.append(FP16_BPE)
+            regions.append(((step, record), (rows, FP16_BPE)))
+            steps.append(0)
+        else:
+            bpe.append(record)
+            regions.append(((rows, FP16_BPE),))
+            steps.append(step)
+    return bpe, regions, steps
+
+
+def _boot_pricing(geometry, env, model_id, cfg=None):
+    """``(bpe, regions, steps)`` vectors for the boot table, one entry per
+    geometry entry, under the model's env window: the batched-mode
+    carve-out request admission prices with (growing KV entries pack
+    except the last of a deep stack; windows and state stay fp16). All
+    None means uniform fp16: kv quantization off or declined (MTP
+    batched, max_kv_size, a qat-marked id under affine, malformed values,
+    a shape kvarn cannot take)."""
+    e = {**os.environ, **(env or {})}
+    if e.get("MAX_KV_SIZE"):
+        return None, None, None
+    raw = e.get("KV_BITS")
+    mtp = e.get("MLX_VLM_GGUF_SPECULATIVE") == "1"
+    scheme = (e.get("KV_QUANT_SCHEME") or "uniform").strip().lower()
+    if scheme == "kvarn":
+        return _kvarn_boot_pricing(geometry, e, raw, cfg, mtp) or (None,) * 3
+    if mtp or not raw or "qat" in str(model_id):
+        return None, None, None
+    return _affine_bpe_vector(geometry, e, raw), None, None
+
+
+def _affine_bpe_vector(geometry, e, raw):
     try:
         fb = float(raw)
         group = int(e.get("KV_GROUP_SIZE") or 64)
@@ -182,7 +242,7 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None,
     import mlx.core as mx
 
     from .mem_preflight import (_get, _lm_config, config_geometry,
-                                kv_layer_costs, prompt_kv_bytes)
+                                kv_layer_costs, prompt_kv_bytes, span_tokens)
     from .memory import admit_reserve_bytes
     from gmlx.commands.tool_preflight import _shards, _synth_config
 
@@ -193,9 +253,12 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None,
         cfg = _synth_config(shards[0])
         model = SimpleNamespace(config=cfg)
         geometry = config_geometry(_lm_config(model)) if cfg else None
-        costs = kv_layer_costs(
-            model, per_layer_bpe=_boot_bpe_vector(geometry, env, gguf_path),
-            geometry=geometry) if geometry else None
+        costs = None
+        if geometry:
+            bpe, regions, steps = _boot_pricing(geometry, env, gguf_path, cfg)
+            costs = kv_layer_costs(
+                model, per_layer_bpe=bpe, per_layer_regions=regions,
+                per_layer_steps=steps, geometry=geometry)
         ws = working_set_bytes()
         if not (cfg and costs and ws):
             return None
@@ -220,7 +283,7 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None,
             if tr > max_buffer:
                 return False
             for window, bpt in costs:
-                span = d if window is None else min(d, int(window))
+                span = span_tokens(window, d)
                 if w * bpt * span > max_buffer:
                     return False
         return True

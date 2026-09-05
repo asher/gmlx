@@ -34,23 +34,26 @@ pytestmark = [pytest.mark.integration, pytest.mark.slow]
 GREEDY = lambda x: mx.argmax(x, axis=-1)  # noqa: E731
 N_DECODE = 8
 
-# (family id, general.architecture key, tier, prompt tokens, big?)
+# (family id, general.architecture key, tier, prompt tokens, big?, scheme)
 # Arch keys verified against the GGUF headers on disk (conftest's index
 # derives them from general.architecture, not directory names). ckpt rows
 # use identical-resend reuse (the N-1 replay record; prompts must clear
 # GMLX_APC_CKPT_REPLAY_MIN=1024), block/exact rows use shared-prefix
-# reuse (their tiers serve partial prefixes).
+# reuse (their tiers serve partial prefixes). The kvarn row re-runs the
+# gdn family under KV_QUANT_SCHEME=kvarn: the ckpt tier engaging only on
+# dense/fp16 is the exact coverage hole this bug class hid in.
 FAMILIES = [
-    ("dense-block", "qwen3", "block", 200, False),
-    ("swa-moe-ckpt", "gpt-oss", "ckpt", 1200, True),
-    ("gdn-ckpt", "qwen35", "ckpt", 1200, True),
-    ("cachelist-exact", "falcon-h1", "exact", 200, False),
+    ("dense-block", "qwen3", "block", 200, False, None),
+    ("swa-moe-ckpt", "gpt-oss", "ckpt", 1200, True, None),
+    ("gdn-ckpt", "qwen35", "ckpt", 1200, True, None),
+    ("gdn-ckpt-kvarn", "qwen35", "ckpt", 1200, True, "kvarn"),
+    ("cachelist-exact", "falcon-h1", "exact", 200, False, None),
 ]
 
 
 @pytest.fixture(scope="module", params=FAMILIES, ids=[f[0] for f in FAMILIES])
 def family(request, gguf_index):
-    fam, arch, tier, prompt_tokens, big = request.param
+    fam, arch, tier, prompt_tokens, big, scheme = request.param
     if big and os.environ.get("GMLX_TEST_BIG_GGUFS") != "1":
         pytest.skip(f"{fam}: multi-GB GGUF row; set GMLX_TEST_BIG_GGUFS=1 "
                     "(pre-release checklist)")
@@ -62,8 +65,14 @@ def family(request, gguf_index):
     import gmlx.spec.engine as spec_engine
 
     spec_engine.install_full_prompt_mtp_prefill()   # the serve installs
+    if scheme == "kvarn":
+        from gmlx.cache.kvarn_apc import install_kvarn_apc
+        from gmlx.cache.kvarn_serve import install_kvarn_serve
+
+        install_kvarn_serve()
+        install_kvarn_apc()
     model, processor, _config = serving.load_serveable_model(paths[0])
-    return fam, tier, prompt_tokens, model, processor
+    return fam, tier, prompt_tokens, model, processor, scheme
 
 
 def _build_ids(tokenizer, n_tokens, suffix):
@@ -75,7 +84,7 @@ def _build_ids(tokenizer, n_tokens, suffix):
     return list(prefix_ids) + list(tokenizer.encode(suffix))
 
 
-def _drive(model, processor, ids, manager):
+def _drive(model, processor, ids, manager, scheme=None):
     """One request through the stock engine, exactly as serve builds it."""
     import importlib
 
@@ -84,9 +93,10 @@ def _drive(model, processor, ids, manager):
 
     input_ids = mx.array([ids], dtype=mx.int32)
     emb = model.get_input_embeddings(input_ids=input_ids)
+    extra = {"kv_quant_scheme": scheme} if scheme else {}
     gen = ar.BatchGenerator(
         model, processor, sampler=GREEDY, max_tokens=N_DECODE,
-        apc_manager=manager,
+        apc_manager=manager, **extra,
     )
     assert gen.apc_manager is manager, (
         "BatchGenerator dropped the apc_manager at construction: "
@@ -119,7 +129,7 @@ def test_family_tier_engages(family):
     from gmlx.cache.apc_manager import GmlxAPCManager
     from gmlx.cache.snapshot import ckpt_supported
 
-    fam, tier, prompt_tokens, model, processor = family
+    fam, tier, prompt_tokens, model, processor, scheme = family
     tokenizer = processor.tokenizer
     lm = model.language_model if hasattr(model, "language_model") else model
 
@@ -132,7 +142,7 @@ def test_family_tier_engages(family):
 
     manager = GmlxAPCManager(num_blocks=512, block_size=16)
     ids = _build_ids(tokenizer, prompt_tokens, " It began to rain.")
-    toks = _drive(model, processor, ids, manager)
+    toks = _drive(model, processor, ids, manager, scheme)
     assert toks, f"{fam}: no tokens generated on the first request"
     s1 = manager.stats_snapshot()
 
@@ -146,7 +156,7 @@ def test_family_tier_engages(family):
             f"{fam}: first request stored nothing via {key} (stats: {s1})")
         ids2 = _build_ids(tokenizer, prompt_tokens, " The sun came out.")
 
-    toks = _drive(model, processor, ids2, manager)
+    toks = _drive(model, processor, ids2, manager, scheme)
     assert toks, f"{fam}: no tokens generated on the second request"
     s2 = manager.stats_snapshot()
     hit_key = {"block": "lookups_hit", "exact": "exact_hits",

@@ -105,6 +105,109 @@ def test_kv_env_prices_the_table(rig, monkeypatch):
     assert bad["max_ctx"] == base["max_ctx"]
 
 
+def _boot_costs(cfg, env, layers=4):
+    """(fp16 costs, priced costs) for a dense stack of ``layers`` growing
+    KV entries under ``env``, through the boot pricing derive_table uses."""
+    from types import SimpleNamespace
+
+    import gmlx.serve.mem_preflight as mp
+
+    geo = [mp.LayerGeometry(True, None, 0.0)] * layers
+    model = SimpleNamespace(config=cfg)
+    bpe, regions, steps = cap._boot_pricing(geo, env, "m", cfg)
+    return (mp.kv_layer_costs(model, geometry=geo),
+            mp.kv_layer_costs(model, per_layer_bpe=bpe,
+                              per_layer_regions=regions,
+                              per_layer_steps=steps, geometry=geo))
+
+
+def test_kvarn_env_prices_the_table(kvarn_ops_ok, rig, monkeypatch):
+    from gmlx.cache import kvarn_sdpa
+
+    for k in ("GMLX_KVARN", "GMLX_KVARN_BITS", "KV_BITS", "KV_QUANT_SCHEME",
+              "KV_TAIL_TOKENS"):
+        monkeypatch.delenv(k, raising=False)
+    cfg = dict(CFG, head_dim=128)
+    path = rig(weights_gb=10.0, ws_gb=20.0, cfg=cfg)
+    base = cap.derive_table(path)
+    # the scheme alone engages at the default width, qat ids included
+    kvarn = cap.derive_table(path + "-qat", env={"KV_QUANT_SCHEME": "kvarn"})
+    assert kvarn["max_ctx"][1] > base["max_ctx"][1]
+    # a width affine rejects is a kvarn width
+    kvarn5 = cap.derive_table(
+        path, env={"KV_QUANT_SCHEME": "kvarn", "KV_BITS": "5"})
+    assert base["max_ctx"][1] < kvarn5["max_ctx"][1]
+    assert kvarn["max_ctx"][1] < kvarn5["max_ctx"][1]
+    # the fixed fp16 rows cost context against affine at the same width
+    affine6 = cap.derive_table(path, env={"KV_BITS": "6"})
+    assert kvarn["max_ctx"][8] != affine6["max_ctx"][8]
+    # the arm prices a short request the way admission does: a full code
+    # slab per taken layer plus the fp16 rows, so one token costs more
+    # than fp16 and 32k tokens cost less
+    import gmlx.serve.mem_preflight as mp
+    from gmlx.cache.kv_policy import kvarn_fixed_tokens
+
+    fp16, priced = _boot_costs(cfg, {"KV_QUANT_SCHEME": "kvarn"})
+    bpt = fp16[0][1]
+    assert priced[:4] == [(4096, bpt * 0.796875 / 2.0)] * 3 + [(None, bpt)]
+    assert all(isinstance(w, mp.StepTokens) for w, _ in priced[:3])
+    assert priced[4:] == [(kvarn_fixed_tokens(1024), bpt)] * 3
+    assert all(isinstance(w, mp.FixedRows) for w, _ in priced[4:])
+    assert mp.prompt_kv_bytes(priced, 1) > mp.prompt_kv_bytes(fp16, 1)
+    assert mp.prompt_kv_bytes(priced, 32768) < mp.prompt_kv_bytes(fp16, 32768)
+    # absent ops price fp16
+    monkeypatch.setattr(kvarn_sdpa, "_probe_result", ("no ops",))
+    assert cap.derive_table(path, env={"KV_QUANT_SCHEME": "kvarn"})[
+        "max_ctx"] == base["max_ctx"]
+    # shapes kvarn declines keep fp16 pricing: head_dim 64, MLA latents
+    path64 = rig(weights_gb=10.0, ws_gb=20.0, cfg=CFG)
+    base64 = cap.derive_table(path64)
+    assert cap.derive_table(path64, env={"KV_QUANT_SCHEME": "kvarn"})[
+        "max_ctx"] == base64["max_ctx"]
+    mla = dict(cfg, kv_lora_rank=512, qk_rope_head_dim=64)
+    pmla = rig(weights_gb=10.0, ws_gb=20.0, cfg=mla)
+    assert cap.derive_table(pmla, env={"KV_QUANT_SCHEME": "kvarn"})[
+        "max_ctx"] == cap.derive_table(pmla)["max_ctx"]
+
+
+def test_kvarn_mtp_table_charges_the_b1_residue(kvarn_ops_ok, rig, monkeypatch):
+    # Batched MTP rows run fp16, but the B=1 stack still holds the fixed
+    # fp16 rows and one code slab per taken layer: the table charges them
+    # on top of fp16 growth, so it reads below the fp16 table.
+    import gmlx.serve.mem_preflight as mp
+    from gmlx.cache.kv_policy import kvarn_fixed_tokens
+
+    for k in ("GMLX_KVARN", "GMLX_KVARN_BITS", "KV_BITS", "KV_QUANT_SCHEME",
+              "KV_TAIL_TOKENS", "MLX_VLM_GGUF_SPECULATIVE"):
+        monkeypatch.delenv(k, raising=False)
+    cfg = dict(CFG, head_dim=128)
+    path = rig(weights_gb=10.0, ws_gb=20.0, cfg=cfg)
+    base = cap.derive_table(path)
+    mtp = cap.derive_table(path, env={"KV_QUANT_SCHEME": "kvarn",
+                                      "MLX_VLM_GGUF_SPECULATIVE": "1"})
+    assert mtp["max_ctx"][1] < base["max_ctx"][1]
+    fp16, priced = _boot_costs(
+        cfg, {"KV_QUANT_SCHEME": "kvarn", "MLX_VLM_GGUF_SPECULATIVE": "1"})
+    assert priced[:4] == fp16
+    bpt = fp16[0][1]
+    slab = (4096, bpt * 0.796875 / 2.0)
+    rows = (kvarn_fixed_tokens(1024), bpt)
+    assert priced[4:] == [slab, rows] * 3
+    assert all(isinstance(w, mp.FixedRows) for w, _ in priced[4:])
+
+
+def test_kvarn_table_reads_a_nested_text_config(kvarn_ops_ok, rig, monkeypatch):
+
+    for k in ("GMLX_KVARN", "GMLX_KVARN_BITS", "KV_BITS", "KV_QUANT_SCHEME",
+              "KV_TAIL_TOKENS"):
+        monkeypatch.delenv(k, raising=False)
+    nested = {"text_config": dict(CFG, head_dim=128), "model_type": "gemma4"}
+    path = rig(weights_gb=10.0, ws_gb=20.0, cfg=nested)
+    base = cap.derive_table(path)
+    kvarn = cap.derive_table(path, env={"KV_QUANT_SCHEME": "kvarn"})
+    assert kvarn["max_ctx"][1] > base["max_ctx"][1]
+
+
 def test_boot_refusal_with_numbers(rig):
     path = rig(weights_gb=19.0, ws_gb=20.0)  # width 1 fits nothing
     with pytest.raises(RuntimeError, match="cannot fit at width 1"):
@@ -303,3 +406,58 @@ def test_nested_text_config_prices_like_flat(rig):
     nested = cap.derive_table(rig(weights_gb=10.0, ws_gb=20.0, cfg={
         "text_config": dict(CFG), "model_type": "gemma4"}))
     assert nested["max_ctx"] == flat["max_ctx"]
+
+
+def _kvarn_cache_bytes(c):
+    import mlx.core as mx
+
+    arrays = {id(a): a for a in vars(c).values() if isinstance(a, mx.array)}
+    mx.eval(list(arrays.values()))
+    return sum(a.nbytes for a in arrays.values())
+
+
+@pytest.mark.needs_kvarn_ops
+@pytest.mark.parametrize("width,bits,tail", [(1, 6, 1024), (1, 4, 0), (2, 6, 1024)])
+def test_kvarn_pricing_matches_a_real_cache(monkeypatch, width, bits, tail):
+    """The boot price of one kvarn layer against the bytes a filled cache
+    holds: exact for a single stream at slab multiples, at most one slab
+    over just past a boundary (the planner charges the next slab before
+    the sink and horizon offsets make the cache grow it), and never below
+    the allocation when batched (rows carry no horizon buffers, so the
+    planner over-charges them by one fp16 group)."""
+    from types import SimpleNamespace
+
+    import mlx.core as mx
+
+    import gmlx.serve.mem_preflight as mp
+    from gmlx.cache.kvarn_cache import BatchKVarNKVCache, KVarNKVCache
+
+    monkeypatch.delenv("GMLX_KVARN_BITS", raising=False)
+    h, d = 2, 128
+    cfg = {"num_attention_heads": h, "num_key_value_heads": h,
+           "head_dim": d, "hidden_size": h * d}
+    env = {"KV_QUANT_SCHEME": "kvarn", "KV_BITS": str(bits),
+           "KV_TAIL_TOKENS": str(tail)}
+    geo = [mp.LayerGeometry(True, None, 0.0)]
+    bpe, regions, steps = cap._boot_pricing(geo, env, "m", cfg)
+    costs = mp.kv_layer_costs(SimpleNamespace(config=cfg), per_layer_bpe=bpe,
+                              per_layer_regions=regions,
+                              per_layer_steps=steps, geometry=geo)
+    cache = (KVarNKVCache(bits, bits, tail) if width == 1
+             else BatchKVarNKVCache([0] * width, bits, bits, tail))
+    pos = 0
+    slack = 0 if width == 1 else width * 2 * h * 128 * d * 2
+    slab = width * 4096 * sum(b for w, b in costs if isinstance(w, mp.StepTokens))
+    for t in (1, 1664, 4096, 4224, 8192, 8320, 16384):
+        while pos < t:
+            n = min(1024, t - pos)
+            k = mx.random.normal((width, h, n, d)).astype(mx.float16)
+            cache.update_and_fetch(k, k)
+            pos += n
+        actual = _kvarn_cache_bytes(cache)
+        planned = width * mp.prompt_kv_bytes(costs, t)
+        assert planned >= actual, (t, planned, actual)
+        # just past a slab boundary the planner charges the next slab
+        # before the sink and horizon offsets make the cache grow it
+        band = slab if t % 4096 else 0
+        assert planned - actual <= slack + band, (t, planned, actual)
