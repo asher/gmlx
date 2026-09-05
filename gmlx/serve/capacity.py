@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import logging
 import os
+from types import SimpleNamespace
 
 _log = logging.getLogger(__name__)
 
@@ -142,14 +143,14 @@ def _transient_bytes(heads: int | None, depth: int) -> float:
     return heads * step * (depth + step) * 2.0
 
 
-def _kvarn_priced_costs(costs, e, raw, cfg, mtp=False):
-    """kvarn arm of _kv_priced_costs: record cost on the layers the
-    carve-out takes plus each one's fixed fp16 rows, priced as admission
-    prices them. Under MTP the batched rows run fp16, so the per-token
-    price stays fp16 and the B=1 stack's rows and one slab per taken
-    layer ride on top. fp16 when the ops are absent, the widths are
-    malformed, or the header shape is one kvarn declines (MLA, head_dim
-    outside 128/256/512)."""
+def _kvarn_boot_pricing(geometry, e, raw, cfg, mtp):
+    """kvarn arm of _boot_pricing: record cost on the growing KV entries
+    the carve-out takes plus each one's fixed fp16 rows, priced as
+    admission prices them. Under MTP the batched rows run fp16, so the
+    per-entry price stays fp16 and the B=1 stack's rows and one slab per
+    taken entry ride on top. None (fp16) when the ops are absent, the
+    widths are malformed, or the header shape is one kvarn declines (MLA,
+    head_dim outside 128/256/512)."""
     from types import SimpleNamespace
 
     try:
@@ -160,52 +161,60 @@ def _kvarn_priced_costs(costs, e, raw, cfg, mtp=False):
                                           kvarn_step_tokens)
         from gmlx.cache.kvarn_cache import (KVARN_BITS, KVARN_DEFAULT_TAIL,
                                             kvarn_unsupported, kvarn_widths)
-        from .mem_preflight import FixedRows, StepTokens
 
         text = (cfg or {}).get("text_config") or cfg or {}
         shim = SimpleNamespace(args=SimpleNamespace(**text))
         if kvarn_unsupported(shim):
-            return costs
+            return None
         k, v = kvarn_widths(int(float(raw)) if raw else None)
         tail = int(e.get("KV_TAIL_TOKENS") or KVARN_DEFAULT_TAIL)
     except Exception:
-        return costs
+        return None
     if k not in KVARN_BITS or v not in KVARN_BITS or tail < 0:
-        return costs
-    scale = kvarn_bytes_per_element(k, v) / FP16_BPE
-    rows = FixedRows(kvarn_fixed_tokens(tail))
-    step = StepTokens(kvarn_step_tokens())
-    n = len(costs)
-    out, regions = [], []
-    for i, (w, bpt) in enumerate(costs):
-        if w is None and should_quantize_kv_layer(i, n):
-            if mtp:
-                out.append((w, bpt))
-                regions.append((FixedRows(int(step)), bpt * scale))
-            else:
-                out.append((step, bpt * scale))
-            regions.append((rows, bpt))
+        return None
+    record = kvarn_bytes_per_element(k, v)
+    rows = kvarn_fixed_tokens(tail)
+    step = kvarn_step_tokens()
+    n = len(geometry)
+    bpe, regions, steps = [], [], []
+    for i, g in enumerate(geometry):
+        if not (g.attn and g.window is None and should_quantize_kv_layer(i, n)):
+            bpe.append(FP16_BPE)
+            regions.append(())
+            steps.append(0)
+        elif mtp:
+            bpe.append(FP16_BPE)
+            regions.append(((step, record), (rows, FP16_BPE)))
+            steps.append(0)
         else:
-            out.append((w, bpt))
-    return out + regions
+            bpe.append(record)
+            regions.append(((rows, FP16_BPE),))
+            steps.append(step)
+    return bpe, regions, steps
 
 
-def _kv_priced_costs(costs, env, model_id, cfg=None):
-    """Reprice quantizable layers per the model's env window - the same
-    batched-mode carve-out request admission prices with. Uniform fp16
-    when kv quantization is off or declined (MTP batched, max_kv_size,
-    a qat-marked id under affine, malformed values, a shape kvarn cannot
-    take)."""
+def _boot_pricing(geometry, env, model_id, cfg=None):
+    """``(bpe, regions, steps)`` vectors for the boot table, one entry per
+    geometry entry, under the model's env window: the batched-mode
+    carve-out request admission prices with (growing KV entries pack
+    except the last of a deep stack; windows and state stay fp16). All
+    None means uniform fp16: kv quantization off or declined (MTP
+    batched, max_kv_size, a qat-marked id under affine, malformed values,
+    a shape kvarn cannot take)."""
     e = {**os.environ, **(env or {})}
     if e.get("MAX_KV_SIZE"):
-        return costs
-    mtp = e.get("MLX_VLM_GGUF_SPECULATIVE") == "1"
+        return None, None, None
     raw = e.get("KV_BITS")
+    mtp = e.get("MLX_VLM_GGUF_SPECULATIVE") == "1"
     scheme = (e.get("KV_QUANT_SCHEME") or "uniform").strip().lower()
     if scheme == "kvarn":
-        return _kvarn_priced_costs(costs, e, raw, cfg, mtp)
+        return _kvarn_boot_pricing(geometry, e, raw, cfg, mtp) or (None,) * 3
     if mtp or not raw or "qat" in str(model_id):
-        return costs
+        return None, None, None
+    return _affine_bpe_vector(geometry, e, raw), None, None
+
+
+def _affine_bpe_vector(geometry, e, raw):
     try:
         fb = float(raw)
         group = int(e.get("KV_GROUP_SIZE") or 64)
@@ -214,14 +223,14 @@ def _kv_priced_costs(costs, env, model_id, cfg=None):
         from gmlx.cache.kv_policy import (FP16_BPE, VALID_BITS, VALID_GROUPS,
                                           packed_bytes_per_element)
     except Exception:
-        return costs
+        return None
     if fb != int(fb) or int(fb) not in VALID_BITS or group not in VALID_GROUPS:
-        return costs
-    scale = packed_bytes_per_element(int(fb), group) / FP16_BPE
-    n = len(costs)
-    return [(w, bpt * scale if w is None and should_quantize_kv_layer(i, n)
-             else bpt)
-            for i, (w, bpt) in enumerate(costs)]
+        return None
+    packed = packed_bytes_per_element(int(fb), group)
+    n = len(geometry)
+    return [packed if g.attn and g.window is None
+            and should_quantize_kv_layer(i, n) else FP16_BPE
+            for i, g in enumerate(geometry)]
 
 
 def derive_table(gguf_path: str, weight_bytes: float | None = None,
@@ -232,19 +241,27 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None,
     params reprice the quantized layers."""
     import mlx.core as mx
 
+    from .mem_preflight import (_get, _lm_config, config_geometry,
+                                kv_layer_costs, prompt_kv_bytes, span_tokens)
     from .memory import admit_reserve_bytes
-    from gmlx.commands.tool_preflight import _kv_costs, _shards, _synth_config
+    from gmlx.commands.tool_preflight import _shards, _synth_config
 
     try:
         shards = _shards(gguf_path)
         weights = (float(weight_bytes) if weight_bytes else
                    float(sum(os.path.getsize(p) for p in shards)))
         cfg = _synth_config(shards[0])
-        costs = _kv_costs(cfg) if cfg else None
+        model = SimpleNamespace(config=cfg)
+        geometry = config_geometry(_lm_config(model)) if cfg else None
+        costs = None
+        if geometry:
+            bpe, regions, steps = _boot_pricing(geometry, env, gguf_path, cfg)
+            costs = kv_layer_costs(
+                model, per_layer_bpe=bpe, per_layer_regions=regions,
+                per_layer_steps=steps, geometry=geometry)
         ws = working_set_bytes()
         if not (cfg and costs and ws):
             return None
-        costs = _kv_priced_costs(costs, env, gguf_path, cfg)
         info = mx.device_info()
         max_buffer = float(info.get("max_buffer_length", 0) or 0)
         resource_limit = int(info.get("resource_limit", 0) or 0)
@@ -252,12 +269,10 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None,
         _log.debug("capacity derivation skipped", exc_info=True)
         return None
 
-    heads = cfg.get("num_attention_heads")
+    heads = _get(_lm_config(model), "num_attention_heads")
     heads = heads if isinstance(heads, int) and heads > 0 else None
     budget = ceiling_bytes(ws)
     reserve = admit_reserve_bytes(ws)
-
-    from .mem_preflight import prompt_kv_bytes, span_tokens
 
     def fits(w: int, d: int) -> bool:
         kv = prompt_kv_bytes(costs, d)

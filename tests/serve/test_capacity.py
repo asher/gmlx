@@ -105,6 +105,22 @@ def test_kv_env_prices_the_table(rig, monkeypatch):
     assert bad["max_ctx"] == base["max_ctx"]
 
 
+def _boot_costs(cfg, env, layers=4):
+    """(fp16 costs, priced costs) for a dense stack of ``layers`` growing
+    KV entries under ``env``, through the boot pricing derive_table uses."""
+    from types import SimpleNamespace
+
+    import gmlx.serve.mem_preflight as mp
+
+    geo = [mp.LayerGeometry(True, None, 0.0)] * layers
+    model = SimpleNamespace(config=cfg)
+    bpe, regions, steps = cap._boot_pricing(geo, env, "m", cfg)
+    return (mp.kv_layer_costs(model, geometry=geo),
+            mp.kv_layer_costs(model, per_layer_bpe=bpe,
+                              per_layer_regions=regions,
+                              per_layer_steps=steps, geometry=geo))
+
+
 def test_kvarn_env_prices_the_table(kvarn_ops_ok, rig, monkeypatch):
     from gmlx.cache import kvarn_sdpa
 
@@ -131,12 +147,11 @@ def test_kvarn_env_prices_the_table(kvarn_ops_ok, rig, monkeypatch):
     import gmlx.serve.mem_preflight as mp
     from gmlx.cache.kv_policy import kvarn_fixed_tokens
 
-    fp16 = [(None, 2048.0)] * 4
-    priced = cap._kvarn_priced_costs(fp16, {"KV_QUANT_SCHEME": "kvarn"},
-                                     None, cfg)
-    assert priced[:4] == [(4096, 2048.0 * 0.796875 / 2.0)] * 3 + [(None, 2048.0)]
+    fp16, priced = _boot_costs(cfg, {"KV_QUANT_SCHEME": "kvarn"})
+    bpt = fp16[0][1]
+    assert priced[:4] == [(4096, bpt * 0.796875 / 2.0)] * 3 + [(None, bpt)]
     assert all(isinstance(w, mp.StepTokens) for w, _ in priced[:3])
-    assert priced[4:] == [(kvarn_fixed_tokens(1024), 2048.0)] * 3
+    assert priced[4:] == [(kvarn_fixed_tokens(1024), bpt)] * 3
     assert all(isinstance(w, mp.FixedRows) for w, _ in priced[4:])
     assert mp.prompt_kv_bytes(priced, 1) > mp.prompt_kv_bytes(fp16, 1)
     assert mp.prompt_kv_bytes(priced, 32768) < mp.prompt_kv_bytes(fp16, 32768)
@@ -171,12 +186,12 @@ def test_kvarn_mtp_table_charges_the_b1_residue(kvarn_ops_ok, rig, monkeypatch):
     mtp = cap.derive_table(path, env={"KV_QUANT_SCHEME": "kvarn",
                                       "MLX_VLM_GGUF_SPECULATIVE": "1"})
     assert mtp["max_ctx"][1] < base["max_ctx"][1]
-    fp16 = [(None, 2048.0)] * 4
-    priced = cap._kvarn_priced_costs(fp16, {"KV_QUANT_SCHEME": "kvarn"},
-                                     None, cfg, True)
+    fp16, priced = _boot_costs(
+        cfg, {"KV_QUANT_SCHEME": "kvarn", "MLX_VLM_GGUF_SPECULATIVE": "1"})
     assert priced[:4] == fp16
-    slab = (4096, 2048.0 * 0.796875 / 2.0)
-    rows = (kvarn_fixed_tokens(1024), 2048.0)
+    bpt = fp16[0][1]
+    slab = (4096, bpt * 0.796875 / 2.0)
+    rows = (kvarn_fixed_tokens(1024), bpt)
     assert priced[4:] == [slab, rows] * 3
     assert all(isinstance(w, mp.FixedRows) for w, _ in priced[4:])
 
@@ -352,3 +367,42 @@ def test_kernel_gate_waits_for_memory_still_being_freed(rig, monkeypatch):
     with pytest.raises(cap.LoadDeferred):
         cap.preload_gate(104.0 * GB, "creeping")
     assert 0 < len(slept) <= 4
+
+
+HYBRID = {
+    "num_hidden_layers": 32,
+    "num_attention_heads": 16,
+    "num_key_value_heads": 4,
+    "head_dim": 256,
+    "full_attention_interval": 4,
+    "linear_num_value_heads": 32,
+    "linear_num_key_heads": 16,
+    "linear_key_head_dim": 128,
+    "linear_value_head_dim": 128,
+    "linear_conv_kernel_dim": 4,
+    "max_position_embeddings": 262144,
+}
+DENSE_TWIN = {k: v for k, v in HYBRID.items() if not k.startswith(
+    ("full_attention", "linear_"))}
+
+
+def test_hybrid_table_prices_state_not_growth(rig, monkeypatch):
+    monkeypatch.delenv("KV_BITS", raising=False)
+    dense = cap.derive_table(rig(weights_gb=10.0, ws_gb=20.0,
+                                 cfg=DENSE_TWIN))
+    hybrid = cap.derive_table(rig(weights_gb=10.0, ws_gb=20.0, cfg=HYBRID))
+    # 8 of 32 layers grow; the 24 recurrent layers hold 51 MB in total.
+    # The score transient (heads x 2048 x depth) bounds both tables, so
+    # the 4x KV saving lands as about 2x context at width 1.
+    assert hybrid["max_ctx"][1] > 1.8 * dense["max_ctx"][1]
+    assert hybrid["max_width_at_depth"][65536] > dense["max_width_at_depth"][65536]
+    kv8 = cap.derive_table(rig(weights_gb=10.0, ws_gb=20.0, cfg=HYBRID),
+                           env={"KV_BITS": "8"})
+    assert kv8["max_ctx"][1] > hybrid["max_ctx"][1]
+
+
+def test_nested_text_config_prices_like_flat(rig):
+    flat = cap.derive_table(rig(weights_gb=10.0, ws_gb=20.0))
+    nested = cap.derive_table(rig(weights_gb=10.0, ws_gb=20.0, cfg={
+        "text_config": dict(CFG), "model_type": "gemma4"}))
+    assert nested["max_ctx"] == flat["max_ctx"]

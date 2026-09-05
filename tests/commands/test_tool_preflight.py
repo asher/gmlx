@@ -110,3 +110,31 @@ def test_guard_run_passes_through_other_errors():
         tp.guard_run(lambda: (_ for _ in ()).throw(
             RuntimeError("unrelated failure")))
     assert tp.guard_run(lambda: 41 + 1) == 42
+
+
+def test_synth_config_merges_shard_tensor_shapes(monkeypatch):
+    # An MLA synth derives head dims from a projection tensor that a
+    # later shard may hold; metadata comes from the first shard.
+    from types import SimpleNamespace
+
+    import gmlx.commands.tool_preflight as tp
+    import gmlx.load.config_synth as cs
+    import gmlx.load.headerscan as hs
+
+    shards = {"a-00001-of-00002.gguf": [("blk.0.attn_q.weight", [4, 4])],
+              "a-00002-of-00002.gguf": [("blk.0.attn_q_b.weight", [8, 2])]}
+    monkeypatch.setattr(tp, "_shards", lambda p: list(shards))
+    monkeypatch.setattr(hs, "scan_gguf", lambda p, include_tensors=True: SimpleNamespace(
+        kv={"shard": p},
+        tensors=[SimpleNamespace(name=n, shape=s) for n, s in shards[p]]))
+    seen = {}
+
+    def synth(kv, shapes):
+        seen.update(kv=kv, shapes=shapes)
+        return {"ok": 1}
+
+    monkeypatch.setattr(cs, "synthesize_config", synth)
+    assert tp._synth_config("a-00001-of-00002.gguf") == {"ok": 1}
+    assert seen["kv"] == {"shard": "a-00001-of-00002.gguf"}
+    assert seen["shapes"] == {"blk.0.attn_q.weight": [4, 4],
+                              "blk.0.attn_q_b.weight": [8, 2]}

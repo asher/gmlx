@@ -549,7 +549,7 @@ def _auto_block_size(model_path):
         return None
     try:
         from gmlx.serve.capacity import working_budget_bytes
-        from gmlx.serve.mem_preflight import per_token_bytes
+        from gmlx.serve.mem_preflight import FixedRows, per_token_bytes
         from gmlx.commands.tool_preflight import _kv_costs, _shards, _synth_config
 
         shards = _shards(str(model_path))
@@ -565,7 +565,8 @@ def _auto_block_size(model_path):
         budget_tokens = (max(0.0, budget - weights)
                          * _POOL_BUDGET_FRACTION / per_tok)
         max_tensors = int(os.environ.get("APC_MAX_POOL_TENSORS", "450000"))
-        need = 2 * len(costs) * budget_tokens / max(1, max_tensors)
+        growing = sum(1 for w, _b in costs if not isinstance(w, FixedRows))
+        need = 2 * growing * budget_tokens / max(1, max_tensors)
         for bs in _BLOCK_SIZES:
             if bs >= need:
                 return bs if bs > _apc.DEFAULT_BLOCK_SIZE else None
