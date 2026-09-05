@@ -406,3 +406,58 @@ def test_nested_text_config_prices_like_flat(rig):
     nested = cap.derive_table(rig(weights_gb=10.0, ws_gb=20.0, cfg={
         "text_config": dict(CFG), "model_type": "gemma4"}))
     assert nested["max_ctx"] == flat["max_ctx"]
+
+
+def _kvarn_cache_bytes(c):
+    import mlx.core as mx
+
+    arrays = {id(a): a for a in vars(c).values() if isinstance(a, mx.array)}
+    mx.eval(list(arrays.values()))
+    return sum(a.nbytes for a in arrays.values())
+
+
+@pytest.mark.needs_kvarn_ops
+@pytest.mark.parametrize("width,bits,tail", [(1, 6, 1024), (1, 4, 0), (2, 6, 1024)])
+def test_kvarn_pricing_matches_a_real_cache(monkeypatch, width, bits, tail):
+    """The boot price of one kvarn layer against the bytes a filled cache
+    holds: exact for a single stream at slab multiples, at most one slab
+    over just past a boundary (the planner charges the next slab before
+    the sink and horizon offsets make the cache grow it), and never below
+    the allocation when batched (rows carry no horizon buffers, so the
+    planner over-charges them by one fp16 group)."""
+    from types import SimpleNamespace
+
+    import mlx.core as mx
+
+    import gmlx.serve.mem_preflight as mp
+    from gmlx.cache.kvarn_cache import BatchKVarNKVCache, KVarNKVCache
+
+    monkeypatch.delenv("GMLX_KVARN_BITS", raising=False)
+    h, d = 2, 128
+    cfg = {"num_attention_heads": h, "num_key_value_heads": h,
+           "head_dim": d, "hidden_size": h * d}
+    env = {"KV_QUANT_SCHEME": "kvarn", "KV_BITS": str(bits),
+           "KV_TAIL_TOKENS": str(tail)}
+    geo = [mp.LayerGeometry(True, None, 0.0)]
+    bpe, regions, steps = cap._boot_pricing(geo, env, "m", cfg)
+    costs = mp.kv_layer_costs(SimpleNamespace(config=cfg), per_layer_bpe=bpe,
+                              per_layer_regions=regions,
+                              per_layer_steps=steps, geometry=geo)
+    cache = (KVarNKVCache(bits, bits, tail) if width == 1
+             else BatchKVarNKVCache([0] * width, bits, bits, tail))
+    pos = 0
+    slack = 0 if width == 1 else width * 2 * h * 128 * d * 2
+    slab = width * 4096 * sum(b for w, b in costs if isinstance(w, mp.StepTokens))
+    for t in (1, 1664, 4096, 4224, 8192, 8320, 16384):
+        while pos < t:
+            n = min(1024, t - pos)
+            k = mx.random.normal((width, h, n, d)).astype(mx.float16)
+            cache.update_and_fetch(k, k)
+            pos += n
+        actual = _kvarn_cache_bytes(cache)
+        planned = width * mp.prompt_kv_bytes(costs, t)
+        assert planned >= actual, (t, planned, actual)
+        # just past a slab boundary the planner charges the next slab
+        # before the sink and horizon offsets make the cache grow it
+        band = slab if t % 4096 else 0
+        assert planned - actual <= slack + band, (t, planned, actual)
