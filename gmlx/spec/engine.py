@@ -2040,6 +2040,25 @@ def mtp_kv_decline(lm, *, owned_round: bool = True) -> str | None:
     return None
 
 
+def lift_single_cache(c):
+    """Promote a single-sequence cache to its batch class. Affine and
+    kvarn B=1 caches recover to a one-row fp16 BatchKVCache (the batched
+    MTP arm runs fp16 KV); everything else lifts through its class's
+    merge. The cascade stamp rides along. One lift for the preempted
+    host row and the injected rows, so the two cannot drift."""
+    from gmlx.cache.compat import cache_types
+
+    if isinstance(c, cache_types("QuantizedKVCache")):
+        return dequantize_lift_cache(c)
+    if getattr(c, "kv_quant_scheme", None) == "kvarn" and batch_liftable(c):
+        return kvarn_lift_cache(c)
+    lifted = type(c).merge([c])
+    stamp = getattr(c, "_gmlx_cascade", None)
+    if stamp is not None:
+        lifted._gmlx_cascade = stamp
+    return lifted
+
+
 def batch_liftable(c) -> bool:
     """Whether _lift_host_cache can promote this cache to a batch class.
 
@@ -2310,17 +2329,7 @@ def install_continuous_batch_admission() -> None:
         injection path applies to incoming caches)."""
         if hasattr(c, "filter") and hasattr(c, "extend"):
             return c
-        from gmlx.cache.compat import cache_types
-
-        if isinstance(c, cache_types("QuantizedKVCache")):
-            return dequantize_lift_cache(c)
-        if getattr(c, "kv_quant_scheme", None) == "kvarn":
-            return kvarn_lift_cache(c)
-        lifted = type(c).merge([c])
-        stamp = getattr(c, "_gmlx_cascade", None)
-        if stamp is not None:
-            lifted._gmlx_cascade = stamp
-        return lifted
+        return lift_single_cache(c)
 
     def _preempt_scalar(self) -> bool:
         """Preempt a live scalar (B=1) spec generation so queued rows can

@@ -558,3 +558,33 @@ def test_mtp_kv_decline_is_shared_by_serve_run_and_chat(restorable):
     restorable.setenv("GMLX_QWEN_OWNED", "1")
     reason = spec_engine.mtp_kv_decline(_FakeLM(), owned_round=False)
     assert "GMLX_OWNED_ROUND=0" in reason
+
+
+def test_injected_quantized_row_lifts_to_fp16_batch():
+    """A B=1 affine row admitted into a live MTP batch lifts by
+    dequantize; QuantizedKVCache has no merge, so the class-merge lift
+    raised on every concurrent admission under kv-bits."""
+    from mlx_vlm.models.cache import BatchKVCache
+
+    from gmlx.spec.speculative import _lift_injected_cache, _lift_live_cache
+
+    mx.random.seed(5)
+    k = mx.random.normal((1, 2, 40, 64)).astype(mx.float16)
+    live = BatchKVCache.merge([_filled_kv(k)])
+    q = QuantizedKVCache(group_size=64, bits=8)
+    q.update_and_fetch(k, k)
+    lifted = _lift_injected_cache(live, q)
+    assert type(lifted) is BatchKVCache
+    live.extend(lifted)
+    assert live.keys.shape[0] == 2
+    assert live.offset.tolist() == [40, 40]
+    # the live side too: a batch formed from one packed row
+    q2 = QuantizedKVCache(group_size=64, bits=8)
+    q2.update_and_fetch(k, k)
+    assert type(_lift_live_cache(q2)) is BatchKVCache
+
+
+def _filled_kv(k):
+    c = KVCache()
+    c.update_and_fetch(k, k)
+    return c

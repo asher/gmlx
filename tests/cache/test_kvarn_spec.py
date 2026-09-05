@@ -554,3 +554,28 @@ def test_preemption_gate_admits_what_the_lift_handles():
         pass
 
     assert not spec_engine.batch_liftable(_Opaque())
+
+
+@needs_kvarn_ops
+def test_injected_kvarn_row_lifts_to_fp16_batch():
+    """A B=1 kvarn row admitted into a live MTP batch lifts through the
+    original-domain recovery, not the class merge KVarNKVCache lacks
+    (27B speculative stress: every concurrent admission raised)."""
+    from mlx_vlm.models.cache import BatchKVCache
+
+    from gmlx.spec.speculative import _lift_injected_cache, _lift_live_cache
+
+    k, v = tokens(300, seed=3)
+    base = KVCache()
+    base.update_and_fetch(k, v)
+    live = BatchKVCache.merge([base])
+    c = filled(300, tail=256, seed=9)
+    lifted = _lift_injected_cache(live, c)
+    assert type(lifted) is BatchKVCache
+    live.extend(lifted)
+    assert live.keys.shape[0] == 2
+    assert live.offset.tolist() == [300, 300]
+    k9, _ = tokens(300, seed=9)
+    got = live.keys[1:, :, :300, :].astype(mx.float32)
+    assert mx.abs(got - k9.astype(mx.float32)).max().item() < 0.2
+    assert type(_lift_live_cache(filled(64, tail=256))) is BatchKVCache
