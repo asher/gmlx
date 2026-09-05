@@ -264,3 +264,42 @@ def test_kernel_gate_waits_for_memory_still_being_freed(rig, monkeypatch):
     with pytest.raises(cap.LoadDeferred):
         cap.preload_gate(104.0 * GB, "creeping")
     assert 0 < len(slept) <= 4
+
+
+HYBRID = {
+    "num_hidden_layers": 32,
+    "num_attention_heads": 16,
+    "num_key_value_heads": 4,
+    "head_dim": 256,
+    "full_attention_interval": 4,
+    "linear_num_value_heads": 32,
+    "linear_num_key_heads": 16,
+    "linear_key_head_dim": 128,
+    "linear_value_head_dim": 128,
+    "linear_conv_kernel_dim": 4,
+    "max_position_embeddings": 262144,
+}
+DENSE_TWIN = {k: v for k, v in HYBRID.items() if not k.startswith(
+    ("full_attention", "linear_"))}
+
+
+def test_hybrid_table_prices_state_not_growth(rig, monkeypatch):
+    monkeypatch.delenv("KV_BITS", raising=False)
+    dense = cap.derive_table(rig(weights_gb=10.0, ws_gb=20.0,
+                                 cfg=DENSE_TWIN))
+    hybrid = cap.derive_table(rig(weights_gb=10.0, ws_gb=20.0, cfg=HYBRID))
+    # 8 of 32 layers grow; the 24 recurrent layers hold 51 MB in total.
+    # The score transient (heads x 2048 x depth) bounds both tables, so
+    # the 4x KV saving lands as about 2x context at width 1.
+    assert hybrid["max_ctx"][1] > 1.8 * dense["max_ctx"][1]
+    assert hybrid["max_width_at_depth"][65536] > dense["max_width_at_depth"][65536]
+    kv8 = cap.derive_table(rig(weights_gb=10.0, ws_gb=20.0, cfg=HYBRID),
+                           env={"KV_BITS": "8"})
+    assert kv8["max_ctx"][1] > hybrid["max_ctx"][1]
+
+
+def test_nested_text_config_prices_like_flat(rig):
+    flat = cap.derive_table(rig(weights_gb=10.0, ws_gb=20.0))
+    nested = cap.derive_table(rig(weights_gb=10.0, ws_gb=20.0, cfg={
+        "text_config": dict(CFG), "model_type": "gemma4"}))
+    assert nested["max_ctx"] == flat["max_ctx"]

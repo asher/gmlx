@@ -452,6 +452,13 @@ An 8B-class model (32 layers, 8 KV heads, head dim 128) pays 128 KB per token: 4
 for a 32k-token session. A 32B-class dense model (64 layers) pays 256 KB per token:
 8 GB at 32k. Long-context agent work can make the cache rival the weights.
 
+Hybrid models (gated DeltaNet, Mamba2, KDA) grow the cache only on their
+attention layers. Each recurrent layer holds a fixed state per sequence
+(about 2 MB on the current families) that does not grow with context. The
+capacity planner prices both parts: Qwen3.6-27B (16 attention layers of 64)
+pays 64 KB per token plus 100 MB of state, 2.1 GB at 32k rather than the
+8.4 GB a dense 64-layer model would.
+
 Levers, cheapest first:
 
 - `--kv-bits 8` roughly halves the cache at nearly no quality cost; `--kv-bits 4`

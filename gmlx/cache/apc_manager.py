@@ -96,14 +96,14 @@ class GmlxAPCManager(_apc.APCManager):
         import mlx.core as mx
 
         from gmlx.serve.capacity import working_budget_bytes
-        from gmlx.serve.mem_preflight import kv_layer_costs
+        from gmlx.serve.mem_preflight import kv_layer_costs, per_token_bytes
         from gmlx.gen.prefill_decay import untracked_weight_bytes
 
         costs = kv_layer_costs(model)
         budget = working_budget_bytes()
         if not costs or not budget:
             return
-        per_tok = sum(bpt for _w, bpt in costs)
+        per_tok = per_token_bytes(costs)
         if per_tok <= 0:
             return
         # Stashed for stats: lets /metrics report committed pool bytes so
@@ -537,6 +537,7 @@ def _auto_block_size(model_path):
         return None
     try:
         from gmlx.serve.capacity import working_budget_bytes
+        from gmlx.serve.mem_preflight import FixedRows, per_token_bytes
         from gmlx.commands.tool_preflight import _kv_costs, _shards, _synth_config
 
         shards = _shards(str(model_path))
@@ -545,14 +546,15 @@ def _auto_block_size(model_path):
         budget = working_budget_bytes()
         if not (costs and budget):
             return None
-        per_tok = sum(bpt for _w, bpt in costs)
+        per_tok = per_token_bytes(costs)
         if per_tok <= 0:
             return None
         weights = float(sum(os.path.getsize(p) for p in shards))
         budget_tokens = (max(0.0, budget - weights)
                          * _POOL_BUDGET_FRACTION / per_tok)
         max_tensors = int(os.environ.get("APC_MAX_POOL_TENSORS", "450000"))
-        need = 2 * len(costs) * budget_tokens / max(1, max_tensors)
+        growing = sum(1 for w, _b in costs if not isinstance(w, FixedRows))
+        need = 2 * growing * budget_tokens / max(1, max_tensors)
         for bs in _BLOCK_SIZES:
             if bs >= need:
                 return bs if bs > _apc.DEFAULT_BLOCK_SIZE else None

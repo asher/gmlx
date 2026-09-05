@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import logging
 import os
+from types import SimpleNamespace
 
 _log = logging.getLogger(__name__)
 
@@ -142,16 +143,18 @@ def _transient_bytes(heads: int | None, depth: int) -> float:
     return heads * step * (depth + step) * 2.0
 
 
-def _kv_priced_costs(costs, env, model_id):
-    """Reprice quantizable layers per the model's env window - the same
-    batched-mode carve-out request admission prices with. Uniform fp16
-    when kv quantization is off or declined (MTP batched, max_kv_size,
-    a qat-marked id, malformed values)."""
+def _boot_bpe_vector(geometry, env, model_id):
+    """Per-entry bytes-per-element for the boot table under the model's
+    env window: the batched-mode carve-out request admission prices with
+    (growing KV entries pack except the last of a deep stack; windows and
+    state stay fp16). None means uniform fp16: kv quantization off or
+    declined (MTP batched, max_kv_size, a qat-marked id, malformed
+    values)."""
     e = {**os.environ, **(env or {})}
     raw = e.get("KV_BITS")
     if (not raw or e.get("MLX_VLM_GGUF_SPECULATIVE") == "1"
             or e.get("MAX_KV_SIZE") or "qat" in str(model_id)):
-        return costs
+        return None
     try:
         fb = float(raw)
         group = int(e.get("KV_GROUP_SIZE") or 64)
@@ -160,14 +163,14 @@ def _kv_priced_costs(costs, env, model_id):
         from gmlx.cache.kv_policy import (FP16_BPE, VALID_BITS, VALID_GROUPS,
                                           packed_bytes_per_element)
     except Exception:
-        return costs
+        return None
     if fb != int(fb) or int(fb) not in VALID_BITS or group not in VALID_GROUPS:
-        return costs
-    scale = packed_bytes_per_element(int(fb), group) / FP16_BPE
-    n = len(costs)
-    return [(w, bpt * scale if w is None and should_quantize_kv_layer(i, n)
-             else bpt)
-            for i, (w, bpt) in enumerate(costs)]
+        return None
+    packed = packed_bytes_per_element(int(fb), group)
+    n = len(geometry)
+    return [packed if g.attn and g.window is None
+            and should_quantize_kv_layer(i, n) else FP16_BPE
+            for i, g in enumerate(geometry)]
 
 
 def derive_table(gguf_path: str, weight_bytes: float | None = None,
@@ -178,19 +181,24 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None,
     params reprice the quantized layers."""
     import mlx.core as mx
 
+    from .mem_preflight import (_get, _lm_config, config_geometry,
+                                kv_layer_costs, prompt_kv_bytes)
     from .memory import admit_reserve_bytes
-    from gmlx.commands.tool_preflight import _kv_costs, _shards, _synth_config
+    from gmlx.commands.tool_preflight import _shards, _synth_config
 
     try:
         shards = _shards(gguf_path)
         weights = (float(weight_bytes) if weight_bytes else
                    float(sum(os.path.getsize(p) for p in shards)))
         cfg = _synth_config(shards[0])
-        costs = _kv_costs(cfg) if cfg else None
+        model = SimpleNamespace(config=cfg)
+        geometry = config_geometry(_lm_config(model)) if cfg else None
+        costs = kv_layer_costs(
+            model, per_layer_bpe=_boot_bpe_vector(geometry, env, gguf_path),
+            geometry=geometry) if geometry else None
         ws = working_set_bytes()
         if not (cfg and costs and ws):
             return None
-        costs = _kv_priced_costs(costs, env, gguf_path)
         info = mx.device_info()
         max_buffer = float(info.get("max_buffer_length", 0) or 0)
         resource_limit = int(info.get("resource_limit", 0) or 0)
@@ -198,12 +206,10 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None,
         _log.debug("capacity derivation skipped", exc_info=True)
         return None
 
-    heads = cfg.get("num_attention_heads")
+    heads = _get(_lm_config(model), "num_attention_heads")
     heads = heads if isinstance(heads, int) and heads > 0 else None
     budget = ceiling_bytes(ws)
     reserve = admit_reserve_bytes(ws)
-
-    from .mem_preflight import prompt_kv_bytes
 
     def fits(w: int, d: int) -> bool:
         kv = prompt_kv_bytes(costs, d)

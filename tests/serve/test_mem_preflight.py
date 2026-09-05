@@ -219,3 +219,129 @@ def test_install_wraps_both_and_is_idempotent(monkeypatch):
         assert RG.generate is g1 and RG.validate_context_budget is v1
     finally:
         RG.generate, RG.validate_context_budget = saved_gen, saved_val
+
+
+# Recurrent-state geometry. The three byte figures are the cache arrays
+# measured on the loaded models (fp32 state, bf16 conv tails).
+GDN_CFG = dict(model_type="qwen3_5", num_hidden_layers=32,
+               num_attention_heads=16, num_key_value_heads=4, head_dim=256,
+               full_attention_interval=4, linear_num_value_heads=32,
+               linear_num_key_heads=16, linear_key_head_dim=128,
+               linear_value_head_dim=128, linear_conv_kernel_dim=4)
+GDN_STATE = 2097152 + 49152          # Qwen3.5-9B
+FALCON_CFG = dict(model_type="falcon_h1", num_hidden_layers=36,
+                  num_attention_heads=8, num_key_value_heads=2, head_dim=64,
+                  mamba_n_heads=24, mamba_d_head=64, mamba_d_state=128,
+                  mamba_d_conv=4, mamba_n_groups=1)
+FALCON_STATE = 786432 + 10752        # Falcon-H1-0.5B
+NEMO_PATTERN = list("MEME*EMEM*EE")
+NEMO_CFG = dict(model_type="nemotron_h", num_hidden_layers=12,
+                num_attention_heads=32, num_key_value_heads=2, head_dim=128,
+                mamba_num_heads=64, mamba_head_dim=64, ssm_state_size=128,
+                conv_kernel=4, n_groups=8, hybrid_override_pattern=NEMO_PATTERN)
+NEMO_STATE = 2097152 + 36864         # Nemotron-3.5-Lightning
+KDA_CFG = dict(model_type="kimi_k3", num_hidden_layers=4,
+               num_attention_heads=4, kv_lora_rank=512, qk_rope_head_dim=64,
+               kda_head_dim=128, ssm_conv_kernel=4,
+               layer_types=["linear_attention", "linear_attention",
+                            "linear_attention", "full_attention"])
+KDA_STATE = 3 * 3 * 512 * 2 + 4 * 128 * 128 * 4
+
+
+def test_fixed_rows_charge_once():
+    assert mp.span_tokens(mp.FixedRows(1), 0) == 0
+    assert mp.span_tokens(mp.FixedRows(1), 1) == 1
+    assert mp.span_tokens(mp.FixedRows(1), 100_000) == 1
+    costs = [(None, 8.0), (mp.FixedRows(1), 1e6), (128, 2.0)]
+    assert mp.per_token_bytes(costs) == 10.0
+    assert mp.prompt_kv_bytes(costs, 1000) == 8000.0 + 1e6 + 256.0
+
+
+def test_recurrent_state_bytes_per_family():
+    assert mp.recurrent_state_bytes(SimpleNamespace(**GDN_CFG)) == GDN_STATE
+    assert mp.recurrent_state_bytes(SimpleNamespace(**FALCON_CFG)) == FALCON_STATE
+    assert mp.recurrent_state_bytes(SimpleNamespace(**NEMO_CFG)) == NEMO_STATE
+    assert mp.recurrent_state_bytes(SimpleNamespace(**KDA_CFG)) == KDA_STATE
+    assert mp.recurrent_state_bytes(DENSE.config) is None
+
+
+def test_gdn_layers_hold_state_and_only_attention_grows():
+    costs = mp.kv_layer_costs(_model(**GDN_CFG))
+    attn = [c for c in costs if c[0] is None]
+    state = [c for c in costs if isinstance(c[0], mp.FixedRows)]
+    assert len(attn) == 8 and attn[0] == (None, 2 * 4 * 256 * 2.0)
+    assert len(state) == 24 and state[0] == (mp.FixedRows(1), GDN_STATE)
+    # 32k of context: 1.05 GiB, where uniform growth said 4 GiB
+    assert mp.prompt_kv_bytes(costs, 32768) == (
+        8 * 4096 * 32768 + 24 * GDN_STATE)
+    assert mp.per_token_bytes(costs) == 8 * 4096
+
+
+def test_nemotron_pattern_skips_mlp_blocks():
+    geo = mp.config_geometry(SimpleNamespace(**NEMO_CFG))
+    # M and * blocks own a cache; E blocks own none
+    assert len(geo) == 6
+    assert [g.attn for g in geo] == [False, False, True, False, False, True]
+    assert all(g.state == NEMO_STATE for g in geo if not g.attn)
+    costs = mp.kv_layer_costs(_model(**NEMO_CFG))
+    assert mp.per_token_bytes(costs) == 2 * (2 * 2 * 128 * 2.0)
+
+
+def test_falcon_layers_grow_and_hold_state():
+    costs = mp.kv_layer_costs(_model(**FALCON_CFG))
+    assert len(costs) == 72
+    assert costs[0] == (None, 2 * 2 * 64 * 2.0)
+    assert costs[1] == (mp.FixedRows(1), FALCON_STATE)
+
+
+def test_kda_layer_types_with_mla_latent():
+    costs = mp.kv_layer_costs(_model(**KDA_CFG))
+    assert costs == [(mp.FixedRows(1), KDA_STATE)] * 3 + [(None, 576 * 2.0)]
+
+
+def test_unsized_recurrent_family_prices_growth():
+    # layer_types names recurrent blocks but no family key sizes them
+    m = _model(num_hidden_layers=2, num_attention_heads=8,
+               num_key_value_heads=2, head_dim=64,
+               layer_types=["mamba", "attention"])
+    assert mp.kv_layer_costs(m) == [(None, 512.0)] * 2
+
+
+def test_stack_geometry_reads_the_caches():
+    from mlx_vlm.models.cache import (ArraysCache, CacheList, KVCache,
+                                      RotatingKVCache)
+
+    stack = [ArraysCache(size=2), KVCache(), RotatingKVCache(max_size=128),
+             CacheList(ArraysCache(size=2), KVCache())]
+    geo = mp.stack_geometry(_model(**GDN_CFG), stack)
+    assert geo == [mp.LayerGeometry(False, None, GDN_STATE),
+                   mp.LayerGeometry(True, None, 0.0),
+                   mp.LayerGeometry(True, 128, 0.0),
+                   mp.LayerGeometry(True, None, GDN_STATE)]
+
+
+def test_policy_costs_follow_the_stack_not_the_config():
+    # nemotron_h: 12 config layers, a 4-entry stack. The policy's
+    # per-layer vector is stack-indexed and must price by stack index.
+    from mlx_vlm.models.cache import ArraysCache, KVCache
+
+    from gmlx.cache.kv_policy import resolve_kv_quant_policy
+    from gmlx.serve.kv_policy import RG_ATTR, ServeKvPolicy
+
+    def make():
+        return [ArraysCache(size=2), KVCache(), KVCache(), KVCache()]
+
+    model = SimpleNamespace(config=SimpleNamespace(**NEMO_CFG), make_cache=make)
+    rg = _rg(model, kv_bits=8.0)
+    kw = dict(kv_bits=8, kv_group_size=64)
+    setattr(rg, RG_ATTR, ServeKvPolicy(
+        resolve_kv_quant_policy(make(), mode="single", **kw),
+        resolve_kv_quant_policy(make(), mode="batched", **kw)))
+    costs = mp._policy_costs(rg, model)
+    per_tok = 2 * 2 * 128
+    assert costs == [(mp.FixedRows(1), NEMO_STATE),
+                     (None, per_tok * 1.0625), (None, per_tok * 1.0625),
+                     (None, per_tok * 2.0)]
+    # no policy: the stack still decides what grows
+    assert mp._policy_costs(_rg(model), model) == [
+        (mp.FixedRows(1), NEMO_STATE)] + [(None, per_tok * 2.0)] * 3
