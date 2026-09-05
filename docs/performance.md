@@ -556,22 +556,16 @@ Qwen3.5-9B Q4_K_M, 16k context (head_dim 256, 7 of 32 layers quantized):
 |---|---|---|---|---|
 | affine 2 | 0.02778 | 0.02745 | 0.5596 | 89.0% |
 | kvarn 2 | 0.01503 | 0.00612 | 0.2301 | 94.7% |
-| turboquant 2 | 0.01901 | 0.02094 | 0.4071 | 91.2% |
 | affine 3 | 0.00648 | 0.00606 | 0.1057 | 94.3% |
 | kvarn 3 | 0.00291 | 0.00139 | 0.0313 | 97.4% |
-| turboquant 3 | 0.00464 | 0.00440 | 0.0926 | 96.0% |
-| turboquant 3.5 | 0.00340 | 0.00351 | 0.0801 | 96.3% |
 | affine 4 | 0.00190 | 0.00183 | 0.0276 | 96.9% |
 | kvarn 4 | 0.00117 | 0.00060 | 0.0071 | 98.3% |
-| turboquant 4 | 0.00175 | 0.00163 | 0.0265 | 97.8% |
 | kvarn 5 | 0.00055 | 0.00029 | 0.0042 | 98.2% |
 | kvarn k6 v5 | 0.00046 | 0.00028 | 0.0039 | 98.6% |
 | affine 6 | 0.00046 | 0.00038 | 0.0045 | 98.7% |
 | kvarn 6 | 0.00036 | 0.00027 | 0.0036 | 98.7% |
-| turboquant 6 | 0.00058 | 0.00058 | 0.0060 | 98.7% |
 | affine 8 | 0.00029 | 0.00020 | 0.0027 | 98.7% |
 | kvarn 8 | 0.00027 | 0.00020 | 0.0030 | 99.2% |
-| turboquant 8 | 0.00032 | 0.00024 | 0.0038 | 98.7% |
 
 Qwen3.8-27B Q6_K_XL, 16k context (head_dim 256, 15 of 65 layers quantized):
 
@@ -579,21 +573,16 @@ Qwen3.8-27B Q6_K_XL, 16k context (head_dim 256, 15 of 65 layers quantized):
 |---|---|---|---|---|
 | affine 2 | 0.01975 | 0.02314 | 0.4697 | 90.3% |
 | kvarn 2 | 0.01009 | 0.00491 | 0.1280 | 95.1% |
-| turboquant 2 | 0.01919 | 0.01911 | 0.4277 | 91.1% |
 | affine 3 | 0.00383 | 0.00419 | 0.1034 | 96.1% |
 | kvarn 3 | 0.00212 | 0.00113 | 0.0318 | 97.3% |
-| turboquant 3 | 0.00337 | 0.00382 | 0.0948 | 96.1% |
 | affine 4 | 0.00138 | 0.00136 | 0.0268 | 97.5% |
 | kvarn 4 | 0.00084 | 0.00045 | 0.0078 | 97.4% |
-| turboquant 4 | 0.00131 | 0.00131 | 0.0324 | 97.2% |
 | kvarn 5 | 0.00041 | 0.00025 | 0.0039 | 98.4% |
 | kvarn k6 v5 | 0.00034 | 0.00019 | 0.0039 | 98.5% |
 | affine 6 | 0.00033 | 0.00030 | 0.0055 | 98.7% |
 | kvarn 6 | 0.00027 | 0.00019 | 0.0030 | 98.8% |
-| turboquant 6 | 0.00040 | 0.00041 | 0.0061 | 98.0% |
 | affine 8 | 0.00023 | 0.00019 | 0.0032 | 98.7% |
 | kvarn 8 | 0.00021 | 0.00015 | 0.0037 | 98.9% |
-| turboquant 8 | 0.00025 | 0.00023 | 0.0048 | 98.7% |
 
 Qwen3.8-27B Q6_K_XL, 32k context:
 
@@ -645,13 +634,13 @@ decode median to a third while matching or beating it on top-1. The corpus
 is wikitext under teacher forcing, so the tables rank caches against each
 other; they do not predict a task score.
 
-TurboQuant is mlx-vlm's scheme (see Origins); gmlx does not enable it, and
-it appears here for comparison only. It sits between the other two: ahead
-of affine at 2 and 3 bits, level with it at 4 (ahead on the 9B, behind on
-p99 and top-1 on the 27B), behind it at 6 and 8, and behind kvarn at every
-width. mlx-vlm's recommended 3.5-bit setting (3-bit keys, 4-bit values),
-measured on the 9B, is beaten on every measure by kvarn at 3 bits, and
-kvarn at 4 has a sixth of its decode median.
+TurboQuant, mlx-vlm's scheme (see Origins), is not offered. Measured on
+the same subjects and legs (the harness has a `turboN` arm), it sits
+between the other two: ahead of affine at 2 and 3 bits, level at 4, behind
+at 6 and 8, and behind kvarn at every width without leading it on any
+measure. At mlx-vlm's recommended 3.5-bit setting its decode median is 2.5x
+kvarn 3's; at 4 bits about 3x kvarn 4's; at 6 bits 2x kvarn 6's; top-1 is
+equal or lower at each.
 
 **What it costs in speed.** Decode cost tracks how much of the step the KV
 read is: on GDN hybrids and gemma-4 all three arms sit within run-to-run
