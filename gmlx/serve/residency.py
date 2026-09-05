@@ -897,14 +897,15 @@ class _ResidencyPool:
                 # GMLX_APC_ENABLED is set only above, and
                 # build_apc_manager returns None without it.
                 from gmlx.cache.kvarn_apc import apply_kvarn_salt
-                mc = scratch.model_cache
-                apply_kvarn_salt(
-                    manager,
-                    mc.get("model") if isinstance(mc, dict) else None)
+                rg = scratch.response_generator
+                model = getattr(rg, "model", None)
+                if model is None:
+                    mc = scratch.model_cache
+                    model = mc.get("model") if hasattr(mc, "get") else None
+                apply_kvarn_salt(manager, model)
                 scratch.apc_manager = manager
                 if isinstance(scratch.model_cache, dict):
                     scratch.model_cache["apc_manager"] = manager
-                rg = scratch.response_generator
                 if rg is not None:
                     rg.apc_manager = manager
                     _stamp_apc_mode(rg)
