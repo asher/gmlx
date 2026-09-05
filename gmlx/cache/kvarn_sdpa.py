@@ -109,14 +109,19 @@ def _probe_tg_limit(d: int, ql: int) -> int:
         return 0
     from .kvarn_cache import GROUP
 
+    import mlx_kquant as kq
+
     c = KVarNKVCache(tail_tokens=0)
     kv = mx.zeros((1, 1, GROUP + 2 * ql, d), mx.float16)
     c.update_and_fetch(kv, kv)
     for gqa in (16, 8, 4, 2, 1):
         if gqa * ((ql + 1) // 2) > 32:
             continue
+        q = mx.zeros((1, gqa, ql, d), mx.float16)
         try:
-            mx.eval(_decode_vector(mx.zeros((1, gqa, ql, d), mx.float16), c, 1.0))
+            # Both kernels of the split: records, then the fp16 tail twin.
+            mx.eval(_decode_vector_one(q, c, 1.0))
+            mx.eval(kq.sdpa_decode_gqa(q, kv, kv, 1.0))
         except Exception:
             continue
         return _tg_threads(gqa, ql)
@@ -128,10 +133,65 @@ def _tg_threads(gqa: int, qL: int) -> int:
     return 32 * gqa * ((qL + 1) // 2)
 
 
+def _vector_chunks(gqa: int, qL: int, d: int):
+    """Head chunks per kv head for the vector kernel: the smallest split of
+    the GQA group whose threadgroup fits the probed cap, or None when a
+    single head does not. Each chunk re-sweeps the keys; a GPU that caps
+    the pipeline below the fold (M1-class at gqa 16) keeps the fused route
+    at the cost of the extra sweeps."""
+    limit = _tg_limit(d, qL > 1)
+    for n in (1, 2, 4, 8, 16):
+        if gqa % n == 0 and _tg_threads(gqa // n, qL) <= limit:
+            return n
+    return None
+
+
+def _split_heads(q, kvh: int, n: int):
+    """The q head axis split into n contiguous GQA sub-groups per kv head."""
+    b, hq, qL, d = q.shape
+    g = hq // kvh // n
+    q5 = q.reshape(b, kvh, n, g, qL, d)
+    return [mx.contiguous(q5[:, :, i]).reshape(b, kvh * g, qL, d) for i in range(n)]
+
+
+def _join_heads(outs, kvh: int, hq: int):
+    b, _, qL, d = outs[0].shape
+    n = len(outs)
+    out = mx.concatenate([o.reshape(b, kvh, 1, hq // kvh // n, qL, d) for o in outs], axis=2)
+    return out.reshape(b, hq, qL, d)
+
+
 def _fa_available() -> bool:
     import mlx_kquant as kq
 
     return hasattr(kq, "sdpa_fa_verify_kvarn") and env_bool("GMLX_KVARN_FA", True)
+
+
+_fa_ok: dict[int, bool] = {}
+
+
+def _fa_runs(d: int) -> bool:
+    """Whether this GPU runs the verify kernels at head_dim d, probed once
+    per head_dim on a two-query fold; a pipeline that caps below the tile
+    raises at eval, and the verify width then takes the vector route."""
+    if d not in _fa_ok:
+        _fa_ok[d] = _probe_fa(d)
+    return _fa_ok[d]
+
+
+def _probe_fa(d: int) -> bool:
+    if kvarn_ops_missing():
+        return False
+    from .kvarn_cache import GROUP
+
+    c = KVarNKVCache(tail_tokens=0)
+    kv = mx.zeros((1, 1, GROUP + 4, d), mx.float16)
+    c.update_and_fetch(kv, kv)
+    try:
+        mx.eval(_decode_fa(mx.zeros((1, 1, 2, d), mx.float16), c, 1.0))
+    except Exception:
+        return False
+    return True
 
 
 def _fa_row_cap(d: int) -> int:
@@ -155,7 +215,10 @@ def _fa_route(q, cache) -> bool:
     if q.shape[2] < 2 or q.shape[0] != 1 or not _fa_available():
         return False
     gqa = q.shape[1] // cache.stage_k.shape[1]
-    return _fa_chunks(gqa, q.shape[2], _fa_row_cap(q.shape[-1])) is not None
+    return (
+        _fa_chunks(gqa, q.shape[2], _fa_row_cap(q.shape[-1])) is not None
+        and _fa_runs(q.shape[-1])
+    )
 
 
 def _fused_ok(q, cache) -> bool:
@@ -171,7 +234,7 @@ def _fused_ok(q, cache) -> bool:
         return False
     if _fa_route(q, cache):
         return True
-    return qL <= 4 and _tg_threads(gqa, qL) <= _tg_limit(q.shape[-1], qL > 1)
+    return qL <= 4 and _vector_chunks(gqa, qL, q.shape[-1]) is not None
 
 
 def _legs(n: int, tail_len: int, qL: int) -> tuple[int, int]:
@@ -262,6 +325,15 @@ def _decode_fa(q, cache, scale):
 
 
 def _decode_vector(q, cache, scale):
+    kvh = cache.stage_k.shape[1]
+    n = _vector_chunks(q.shape[1] // kvh, q.shape[2], q.shape[-1]) or 1
+    if n == 1:
+        return _decode_vector_one(q, cache, scale)
+    outs = [_decode_vector_one(qc, cache, scale) for qc in _split_heads(q, kvh, n)]
+    return _join_heads(outs, kvh, q.shape[1])
+
+
+def _decode_vector_one(q, cache, scale):
     import mlx_kquant as kq
 
     n = cache.visible
@@ -297,6 +369,15 @@ def _decode_vector(q, cache, scale):
 
 
 def _decode_batch(q, cache, scale, starts):
+    kvh = cache.stage_k.shape[1]
+    n = _vector_chunks(q.shape[1] // kvh, 1, q.shape[-1]) or 1
+    if n == 1:
+        return _decode_batch_one(q, cache, scale, starts)
+    outs = [_decode_batch_one(qc, cache, scale, starts) for qc in _split_heads(q, kvh, n)]
+    return _join_heads(outs, kvh, q.shape[1])
+
+
+def _decode_batch_one(q, cache, scale, starts):
     """qL=1 batched decode: same body/tail split as _decode with per-row
     key starts (left padding). A row admitted deep into an older batch can
     start inside the tail window; its body leg then attends zero keys and

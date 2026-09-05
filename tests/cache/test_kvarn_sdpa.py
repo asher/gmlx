@@ -238,6 +238,54 @@ def test_threadgroup_cap_gates_the_fused_route(monkeypatch):
     assert np.array_equal(np.array(capped), np.array(ref))
 
 
+@needs_kvarn_ops
+def test_threadgroup_cap_splits_the_fold(monkeypatch):
+    # A cap below the fold but not below one head keeps the fused route and
+    # splits the GQA group into sub-folds that fit (M1-class GPUs at gqa 16).
+    from gmlx.cache import kvarn_sdpa
+
+    monkeypatch.setattr(kvarn_sdpa, "_fa_available", lambda: False)
+    cache = filled(700)
+    gqa = HQ // H
+    calls = []
+    one = kvarn_sdpa._decode_vector_one
+    monkeypatch.setattr(
+        kvarn_sdpa, "_decode_vector_one",
+        lambda *a: calls.append(a[0].shape) or one(*a),
+    )
+    for qL, key in ((1, (D, False)), (4, (D, True))):
+        q = _make_q(qL)
+        full = kvarn_attention(q, cache, SCALE, "causal")
+        mx.eval(full)
+        monkeypatch.setattr(
+            kvarn_sdpa, "_tg_limits", {key: kvarn_sdpa._tg_threads(gqa // 2, qL)}
+        )
+        assert kvarn_sdpa._vector_chunks(gqa, qL, D) == 2
+        calls.clear()
+        split = kvarn_attention(q, cache, SCALE, "causal")
+        assert calls == [(1, HQ // 2, qL, D)] * 2, calls
+        _assert_close(split, _ref_attention(q, cache, qL))
+        _assert_close(split, full, atol=1e-3)
+
+
+@needs_kvarn_ops
+def test_fa_probe_failure_takes_the_vector_route(monkeypatch):
+    from gmlx.cache import kvarn_sdpa
+
+    cache = filled(700)
+    q = _make_q(2)
+    routes = []
+    monkeypatch.setattr(kvarn_sdpa, "_decode_fa", lambda *a: routes.append("fa"))
+    monkeypatch.setattr(kvarn_sdpa, "_decode_vector", lambda *a: routes.append("vec"))
+    monkeypatch.setattr(kvarn_sdpa, "_fa_ok", {D: False})
+    kvarn_attention(q, cache, SCALE, "causal")
+    monkeypatch.setattr(kvarn_sdpa, "_fa_ok", {D: True})
+    kvarn_attention(q, cache, SCALE, "causal")
+    assert routes == ["vec", "fa"]
+    monkeypatch.setattr(kvarn_sdpa, "_fa_ok", {})
+    assert kvarn_sdpa._fa_runs(D) is True
+
+
 def test_threadgroup_cap_is_probed_per_kernel_variant(monkeypatch):
     # The cap belongs to the (head_dim, qL > 1) kernel variant: a D=128
     # qL=1 probe says nothing about the register-heavier D=256 verify
