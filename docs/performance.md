@@ -579,15 +579,21 @@ Qwen3.8-27B Q6_K_XL, 16k context (head_dim 256, 15 of 65 layers quantized):
 |---|---|---|---|---|
 | affine 2 | 0.01975 | 0.02314 | 0.4697 | 90.3% |
 | kvarn 2 | 0.01009 | 0.00491 | 0.1280 | 95.1% |
+| turboquant 2 | 0.01919 | 0.01911 | 0.4277 | 91.1% |
 | affine 3 | 0.00383 | 0.00419 | 0.1034 | 96.1% |
 | kvarn 3 | 0.00212 | 0.00113 | 0.0318 | 97.3% |
+| turboquant 3 | 0.00337 | 0.00382 | 0.0948 | 96.1% |
 | affine 4 | 0.00138 | 0.00136 | 0.0268 | 97.5% |
 | kvarn 4 | 0.00084 | 0.00045 | 0.0078 | 97.4% |
+| turboquant 4 | 0.00131 | 0.00131 | 0.0324 | 97.2% |
 | kvarn 5 | 0.00041 | 0.00025 | 0.0039 | 98.4% |
+| kvarn k6 v5 | 0.00034 | 0.00019 | 0.0039 | 98.5% |
 | affine 6 | 0.00033 | 0.00030 | 0.0055 | 98.7% |
 | kvarn 6 | 0.00027 | 0.00019 | 0.0030 | 98.8% |
+| turboquant 6 | 0.00040 | 0.00041 | 0.0061 | 98.0% |
 | affine 8 | 0.00023 | 0.00019 | 0.0032 | 98.7% |
 | kvarn 8 | 0.00021 | 0.00015 | 0.0037 | 98.9% |
+| turboquant 8 | 0.00025 | 0.00023 | 0.0048 | 98.7% |
 
 Qwen3.8-27B Q6_K_XL, 32k context:
 
@@ -611,13 +617,15 @@ Nemotron-3.5-Lightning-30B-A3B, 16k context (Mamba2 hybrid, head_dim 128):
 <!-- /kld-tables -->
 
 Reading the tables: at a matched width kvarn beats the affine cache on both
-legs at every width below 8, by 2 to 4x on the decode-leg median at 2 to 4
+legs at every width below 8, by 3 to 5x on the decode-leg median at 2 to 4
 bits, and the two converge at 8. 6-bit kvarn sits between the affine 6-
 and 8-bit caches on the 9B and level with affine 8 on the 27B, in three
 quarters of the 8-bit record: at 32k its decode median can trail affine 8
 by a few percent while its p99 and top-1 stay ahead, so the two split the
-typical position and the outliers between them. Widths 2 and 3 are for
-experiments. The decode leg is the one a long generation accumulates.
+typical position and the outliers between them. The split width k6 v5
+keeps kvarn 6's median with kvarn 5's p99 and top-1, for the bytes in
+between. Widths 2 and 3 are for experiments. The decode leg is the one a
+long generation accumulates.
 
 Choosing by these numbers. Top-1 is the measure closest to what a greedy
 or low-temperature user sees: it is the share of tokens that come out
@@ -631,17 +639,19 @@ lowest. When two caches disagree by a few percent on one measure, take the
 one with the lower p99 and the higher top-1; when a width buys a large
 median gain (2x or more), that gain shows up in every measure. Note that
 the ranking does not follow width across schemes: kvarn at 2 bits lands
-within a point of affine at 3 on decode top-1 (ahead on the 9B, behind on
-Qwen3.8-27B) at a quarter of its median KLD, and kvarn at 4 cuts affine
-4's decode median to a third while matching or beating it on top-1. The corpus is wikitext under
-teacher forcing, so the tables rank caches against each other; they do not
-predict a task score.
+level with affine at 3 on decode median and within a point of it on top-1
+(ahead on the 9B, behind on Qwen3.8-27B), and kvarn at 4 cuts affine 4's
+decode median to a third while matching or beating it on top-1. The corpus
+is wikitext under teacher forcing, so the tables rank caches against each
+other; they do not predict a task score.
+
 TurboQuant is mlx-vlm's scheme (see Origins); gmlx does not enable it, and
-it appears here for comparison only. It sits between the other two: ahead of
-affine below 6 bits, behind it at 6 and 8, and behind kvarn at every width.
-mlx-vlm's recommended 3.5-bit setting (3-bit keys, 4-bit values) is beaten
-on every measure by kvarn at 3 bits, and kvarn at 4 has a quarter of its
-decode median.
+it appears here for comparison only. It sits between the other two: ahead
+of affine at 2 and 3 bits, level with it at 4 (ahead on the 9B, behind on
+p99 and top-1 on the 27B), behind it at 6 and 8, and behind kvarn at every
+width. mlx-vlm's recommended 3.5-bit setting (3-bit keys, 4-bit values),
+measured on the 9B, is beaten on every measure by kvarn at 3 bits, and
+kvarn at 4 has a sixth of its decode median.
 
 **What it costs in speed.** Decode cost tracks how much of the step the KV
 read is: on GDN hybrids and gemma-4 all three arms sit within run-to-run
