@@ -2832,6 +2832,13 @@ def _synth_deepseek4(meta, shapes, config: dict) -> None:
     if vocab is not None:
         config["vocab_size"] = vocab
 
+    # Vision-Exp conversions ship a per-layer image-token router bias
+    # (blk.N.exp_probs_b_vl.bias); its presence is the flag. Text-only
+    # conversions never carry it and load with the flag off.
+    config["vision_router_bias"] = any(
+        k.startswith("blk.") and k.endswith(".exp_probs_b_vl.bias")
+        for k in (shapes or {}))
+
 
 # glm5next (GLM-5.3-Flash 320B-A18B)
 

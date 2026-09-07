@@ -875,6 +875,9 @@ def _mtp_target_classes(model_type: str):
 _VLM_SPEC_MODEL_TYPE_ALIASES = {
     "gemma4": "gemma4_text",
     "gemma4_unified": "gemma4_text",
+    # The Vision-Exp container's language model carries the deepseek_v4
+    # text hooks (DeepseekV4SpecHooks).
+    "deepseek_v4_vl": "deepseek_v4",
 }
 
 
@@ -3210,6 +3213,11 @@ def _warm_touch_pass(
 _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     "deepseek_v4": ("_hc.", "hc_head.", ".attn_sink", ".ape",
                     ".e_score_correction_bias", ".gate.weight"),
+    # deepseek_v4_vl: the Vision-Exp container; the text tower's set applies
+    # under language_model.*, the ViT and aligner cast normally (the tower
+    # keeps its norms and rope tables fp32 internally).
+    "deepseek_v4_vl": ("_hc.", "hc_head.", ".attn_sink", ".ape",
+                       ".e_score_correction_bias", ".gate.weight"),
     # hy_v3 routing is semantically fp32 (F32 wire; llama.cpp routes in fp32,
     # and the vendored class's cast_predicate exempts expert_bias): sigmoid
     # gate + selection bias decide top-8 of 192, where bf16 rounding flips
@@ -3441,6 +3449,9 @@ def _install_and_load(
         log("[install] quantized-KV pack-width fix active")
     if install_rope_batch_fix():
         log("[install] rope int-offset batch fix active")
+    # Inside the decay wrap (installed first): media blocks stay whole.
+    from gmlx.gen.media_spans import install_span_aware_prompt_step
+    install_span_aware_prompt_step()
     if install_prefill_decay():
         log("[install] depth-decay prefill chunking active")
     if install_gemma4_nosync() and _gemma4_target(model):
@@ -3911,6 +3922,9 @@ def load_model(
         _log("[install] quantized-KV pack-width fix active")
     if install_rope_batch_fix():
         _log("[install] rope int-offset batch fix active")
+    # Inside the decay wrap (installed first): media blocks stay whole.
+    from gmlx.gen.media_spans import install_span_aware_prompt_step
+    install_span_aware_prompt_step()
     if install_prefill_decay():
         _log("[install] depth-decay prefill chunking active")
     if install_gemma4_nosync() and _gemma4_target(model):
@@ -4023,13 +4037,14 @@ def load_model(
             f"[patch] qwen4_exp: fused GDN decode on {counts['gdn_fused']} "
             f"layers, b/a matvecs concatenated on {counts['gdn_ba_cat']}")
 
-    if config.get("model_type") == "deepseek_v4":
+    if config.get("model_type") in ("deepseek_v4", "deepseek_v4_vl"):
         from gmlx.models.deepseek_v4.model import (
             install_gemv_row_fusion,
             warm_kernel_pipelines,
         )
 
-        n_fused_gemv = install_gemv_row_fusion(model)
+        n_fused_gemv = install_gemv_row_fusion(
+            getattr(model, "language_model", model))
         if n_fused_gemv:
             _log(f"[install] gemv row fusion on {n_fused_gemv} projection pairs")
         t_warm = time.perf_counter()

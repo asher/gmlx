@@ -1585,6 +1585,10 @@ def install_full_prompt_mtp_prefill() -> None:
         checkpoint_col = self._next_apc_checkpoint_column()
         if checkpoint_col is not None:
             n = min(n, checkpoint_col - self._processed_prompt_columns)
+        # Media requests ride this body too: keep image blocks whole (a
+        # boundary inside a block moves to its edge, see media_spans).
+        from gmlx.gen.media_spans import span_aware_prompt_n
+        n = span_aware_prompt_n(self, n)
         # A final chunk under ~3 simdgroup tiles routes the projections
         # through the skinny-M kernels, whose accumulation order seeds fp
         # noise that stacked recurrent (GDN) layers amplify into

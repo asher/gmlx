@@ -36,6 +36,7 @@
   "mlx_vlm.apc:_safetensors_dtype_info": "f2d094d0b1ac7fa757bfe67ae7152a44d1351f717c98ed62082c2f3b4fb7fc63",
   "mlx_vlm.apc:_sequence_hash": "fd3c2cde19f0140e8c00d03618b5f26675d49a31aa7be834f8aedc63f5d7868e",
   "mlx_vlm.apc:harvest_blocks_from_batch_cache": "90ffae03efc603b07605490aa69aca8df969131b45c814c0ef311526c19211ba",
+  "mlx_vlm.apc:multimodal_token_ids_from_config": "1714e1247cabf0a32d8e02361ecb41f4d89c6101751a63a8adecc3a24c041dfd",
   "mlx_vlm.generate.ar:BatchGenerator.__init__": "92d2de43ca109cf29cf1bc313d71ba478df0037aee9d293760ca070eac54b392",
   "mlx_vlm.generate.ar:BatchGenerator._apc_exact_checkpoint_len": "7b8db66df3f10d232e9691e72f2a75b7ffa3d865e29f9eaff28df978dd795691",
   "mlx_vlm.generate.ar:BatchGenerator._apc_extra_hash": "01af1606d2be083fbe8c3fd9d5b7a53d7849e3cd14a69984b80fb4debd345c4f",

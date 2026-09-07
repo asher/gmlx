@@ -22,6 +22,7 @@ from gmlx.load.vlm import UnsupportedVLMError, resolve_vlm_model_type
     ("muse-glimmer", {"clip.vision.projector_type": "muse-glimmer"},
      "muse_glimmer"),
     ("deepseek2", {"clip.projector_type": "kimik25"}, "kimi_k25"),
+    ("deepseek4", {"clip.projector_type": "deepseek4v"}, "deepseek_v4_vl"),
 ])
 def test_supported_families_resolve(llm_arch, mm_meta, expected):
     assert resolve_vlm_model_type(llm_arch, mm_meta) == expected
@@ -45,3 +46,10 @@ def test_qwen2vl_fails_early_with_family_named():
 def test_unknown_pairing_raises_with_both_names():
     with pytest.raises(UnsupportedVLMError, match="mystery.*whatproj|whatproj"):
         resolve_vlm_model_type("mystery", {"clip.projector_type": "whatproj"})
+
+
+def test_deepseek4v_on_a_foreign_text_arch_is_refused():
+    """The deepseek4v aligner feeds a text tower that expands image blocks
+    and routes them with its own bias; only the deepseek4 arch has that."""
+    with pytest.raises(UnsupportedVLMError, match="deepseek4v.*deepseek2"):
+        resolve_vlm_model_type("deepseek2", {"clip.projector_type": "deepseek4v"})

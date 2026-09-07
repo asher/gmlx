@@ -74,6 +74,16 @@ _CANDIDATES = {
         "unsloth__GLM-5.3-Flash-GGUF/UD-Q2_K_XL/"
         "GLM-5.3-Flash-UD-Q2_K_XL-00001-of-00004.gguf",
     ],
+    # DeepSeek-V4-Flash-Vision-Exp pair (103 GB, single-row image turns):
+    # the block-expansion VLM path. Last vlm fallback, and the target of the
+    # dsv4-vision scenarios when present.
+    "dsv4_vision": [
+        "unsloth__DeepSeek-V4-Flash-Vision-Exp-GGUF/UD-IQ3_XXS/"
+        "DeepSeek-V4-Flash-Vision-Exp-UD-IQ3_XXS-00001-of-00004.gguf",
+    ],
+    "dsv4_vision_mmproj": [
+        "unsloth__DeepSeek-V4-Flash-Vision-Exp-GGUF/mmproj-BF16.gguf",
+    ],
 }
 
 # Canonical download source per handle: an ``hf:<org>/<repo>/<file>`` ref whose
@@ -113,7 +123,9 @@ _JUDGE_PREFERENCE = ["gemma4_12b", "gemma4_e2b", "qwen3_0_6b_q8", "qwen3_0_6b_q4
 # baseline weakness, which masks the regression the tier looks for.
 _ROLES = {
     "judged": [("gemma4_e2b",), ("gemma4_12b",), ("qwen3_0_6b_q8",)],
-    "vlm": [("gemma4_e2b", "gemma4_e2b_mmproj"), ("qwen36_27b", "qwen36_27b_mmproj")],
+    "vlm": [("gemma4_e2b", "gemma4_e2b_mmproj"), ("qwen36_27b", "qwen36_27b_mmproj"),
+            ("dsv4_vision", "dsv4_vision_mmproj")],
+    "vlm_dsv4": [("dsv4_vision", "dsv4_vision_mmproj")],
     "mtp_pair": [
         ("gemma4_e2b", "gemma4_e2b_assistant"),
         ("gemma4_12b", "gemma4_12b_assistant"),

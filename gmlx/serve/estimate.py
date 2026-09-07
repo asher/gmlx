@@ -383,6 +383,13 @@ def estimate_request(body: dict, *, tenant_id=None) -> tuple:
                 pass
 
 
+# Upper bound on the prompt tokens one image expands to, for families whose
+# processor emits a bounded block. deepseek_v4_vl: the block (lead pads,
+# START, grid rows, pads, END) is at most 384 tokens by construction; the
+# reference's safe_resize reserves the 3 lead pads inside that cap.
+_MEDIA_TOKENS_PER_IMAGE = {"deepseek_v4_vl": 384}
+
+
 def _estimate_bound(body, out, t0, path, pkg, rg, model, processor, config,
                     entry, msgs, media, tenant_id):
     """The resident half of :func:`estimate_request`, run with the request
@@ -411,6 +418,11 @@ def _estimate_bound(body, out, t0, path, pkg, rg, model, processor, config,
     out["max_tokens"] = pinned or None
 
     if media:
+        mt = (config.get("model_type") if isinstance(config, dict)
+              else getattr(config, "model_type", None))
+        per_image = _MEDIA_TOKENS_PER_IMAGE.get(str(mt))
+        if per_image:
+            out["media_tokens_max"] = int(media) * per_image
         out["hint"] = "media requests are not estimated (text prompt only)"
         out["estimate_ms"] = round((time.perf_counter() - t0) * 1000, 1)
         return 200, out
