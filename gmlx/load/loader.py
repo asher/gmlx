@@ -1233,9 +1233,9 @@ def _arena_split_max_tokens() -> int:
     return env_int("GMLX_ARENA_SPLIT_MAX_TOKENS", 256)
 
 
-# Above 0.7 the live reclaimable ceiling binds instead and the arena
-# stops growing, so a larger fraction only gives away static headroom.
-_DECODE_ARENA_RAM_FRAC_DEFAULT = 0.7
+# 0.7 left the serve governor no headroom on a stock 128 GB working
+# set (issue #49); the arena is MLX-tracked and counts against it.
+_DECODE_ARENA_RAM_FRAC_DEFAULT = 0.6
 
 
 def _available_ram_bytes(include_inactive: bool = True) -> int | None:
