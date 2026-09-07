@@ -39,6 +39,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   capacity table and the memory preflight charge the arena.
   `/v1/metrics` reports `memory.arena_bytes`, `arena_nominal_bytes` and
   `kv_room_bytes`. The load log prints the budget.
+  Requires mlx-kquant >= 0.4.7, whose arena maps its buffers with
+  mmap: a release returns the pages to the kernel, so an unload
+  leaves no resident residue and the next load sizes its full arena.
 - The governor's kernel floor took the whole decode arena for a 50 MB
   dip. A first sub-floor sample now reclaims the deficit plus half a
   floor from the registered caches. A collapse still reclaims all.
