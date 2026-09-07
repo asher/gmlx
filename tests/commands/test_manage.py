@@ -1420,3 +1420,99 @@ def test_validate_no_ram_probe_omits_fit(tmp_path, monkeypatch, capsys):
     assert rc == 0
     assert "size:" in out                   # size still shown
     assert "RAM" not in out                 # fit note omitted
+
+
+# streaming plan block (MoE files)
+def _mint_moe_bytes(path, *, experts=8) -> bytes:
+    w = GGUFWriter(str(path), "llama")
+    w.add_uint32("llama.block_count", 1)
+    w.add_uint32("llama.expert_count", experts)
+    w.add_uint32("llama.expert_used_count", 2)
+    w.add_tensor("token_embd.weight", np.zeros((32, 64), dtype=np.float16))
+    w.add_tensor("blk.0.attn_q.weight", np.zeros((64, 64), dtype=np.float16))
+    for kind in ("gate", "up", "down"):
+        w.add_tensor(f"blk.0.ffn_{kind}_exps.weight",
+                     np.zeros((experts, 64, 64), dtype=np.float16))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def test_validate_local_moe_prints_streaming_plan(tmp_path, capsys):
+    p = tmp_path / "moe.gguf"
+    _mint_moe_bytes(p)
+    rc = manage.cmd_validate([str(p)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "  streaming: every-token weights 0.0 GB, routed experts 0.0 GB (1 layers, 8 experts, 2 per token)" in out
+    assert "    every-token by group: " in out
+    assert "    this Mac: " in out
+    assert "    => " in out
+
+
+def test_validate_local_moe_json_carries_plan(tmp_path, capsys):
+    p = tmp_path / "moe.gguf"
+    _mint_moe_bytes(p)
+    manage.cmd_validate([str(p), "--json"])
+    v = json.loads(capsys.readouterr().out)
+    plan = v["stream"]
+    assert plan["expert_bytes"] == 3 * 8 * 64 * 64 * 2
+    assert plan["every_token_bytes"] == (32 * 64 + 64 * 64) * 2
+    assert plan["moe_layers"] == 1 and plan["n_experts"] == 8
+    assert plan["ring_bytes"] == 2 * plan["expert_bytes"]
+    assert plan["box"] is None or plan["box"]["verdict"] in (
+        "resident", "streams", "page_cache", "too_big")
+    assert plan["lines"][0].startswith("every-token weights")
+
+
+def test_validate_dense_has_no_plan(tmp_path, capsys):
+    p = tmp_path / "ok.gguf"
+    _mint(p, arch="llama", codec=GT.Q4_0)
+    manage.cmd_validate([str(p), "--json"])
+    v = json.loads(capsys.readouterr().out)
+    assert v["stream"] is None
+    assert "streaming:" not in json.dumps(v)
+
+
+def test_validate_remote_split_moe_plans_from_range_reads(tmp_path, monkeypatch, capsys):
+    # The experts live in shard 2; the plan sums both shards' headers with
+    # no request beyond the codec check's own range reads.
+    s1 = _mint(tmp_path / "s1.gguf", arch="llama", codec=GT.Q4_0)
+    s2 = _mint_moe_bytes(tmp_path / "s2.gguf")
+    _serve_shards(monkeypatch, {"00001-of-00002": s1, "00002-of-00002": s2})
+    rc = manage.cmd_validate(["hf:org/repo/model-00001-of-00002.gguf", "--json"])
+    v = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert v["stream"]["expert_bytes"] == 3 * 8 * 64 * 64 * 2
+    assert v["stream"]["moe_layers"] == 1
+
+
+def test_validate_remote_plan_absent_when_scan_fails(tmp_path, monkeypatch, capsys):
+    import gmlx.load.headerscan as hs
+    payload = _mint_moe_bytes(tmp_path / "moe.gguf")
+    _serve(monkeypatch, payload)
+
+    def boom(*a, **k):
+        raise ValueError("no scan")
+    monkeypatch.setattr(hs, "scan_bytes", boom)
+    rc = manage.cmd_validate(["hf:org/repo/moe.gguf", "--json"])
+    v = json.loads(capsys.readouterr().out)
+    assert rc == 0 and v["loadable"]
+    assert v["stream"] is None
+
+
+def test_repo_listing_hints_streaming_for_over_ram_models(monkeypatch, capsys):
+    import gmlx.load.memfit as memfit
+    monkeypatch.setattr(memfit, "total_ram_bytes", lambda: 16 * 1024**3)
+    _list(monkeypatch, [
+        ("A-Q4.gguf", "file", 100 * 1024**3),
+        ("B-Q2.gguf", "file", 4 * 1024**3),
+    ])
+    rc = manage.cmd_validate(["hf:org/repo"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "over RAM" in out
+    assert "A MoE model over RAM can stream its experts." in out
