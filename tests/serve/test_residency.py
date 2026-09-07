@@ -795,8 +795,8 @@ def test_build_stamps_boot_kv_costs_where_the_generator_reads(monkeypatch):
 def test_load_gate_keeps_the_resident_streams_ring_and_kv_room(monkeypatch):
     # With a streamed model resident, the second load's headroom check
     # takes off the ring room (when the ring is released) and the KV room
-    # the stream keeps. Qwen (16 GB) loaded into Kimi's 29 GB of rooms
-    # on a 128 GB box before this, under the weight budget.
+    # the stream keeps. A dense model loaded into those rooms before
+    # this, under the weight budget.
     from types import SimpleNamespace
 
     import gmlx.serve.capacity as cap

@@ -108,8 +108,8 @@ def reclaimable_bytes() -> int | None:
 def available_bytes() -> int | None:
     """free + inactive, what mlx-vlm's ``_free_ram_bytes`` parses out of
     ``vm_stat``, read in process. A fork beside a Metal-mapped buffer
-    copies the buffer before the exec (a 60 GB decode arena at 16 GB/s
-    on an M3 Max), so the serve process never shells out for this."""
+    copies the buffer before the exec, so the serve process never shells
+    out for this."""
     s = snapshot()
     if s is None:
         return None

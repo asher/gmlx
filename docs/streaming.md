@@ -138,10 +138,10 @@ RAM, whichever is larger. Three things share the ceiling:
    prefill transient and an admission reserve. Each of those two is 2 GB
    or 5% of the working set, whichever is larger.
 3. The host floor. The ceiling is a share of the Metal working set.
-   The rest of the box is not in it: the page cache, other processes,
-   an overnight maintenance job. The floor keeps that share of RAM
-   free. It is 5% of RAM, at least 4 GB, plus a 2.5 GB page-cache
-   reserve (`GMLX_DECODE_RAM_FLOOR_GB`, `GMLX_DECODE_PAGECACHE_GB`).
+   The rest of the machine is not in it: the page cache and other
+   processes. The floor keeps that share of RAM free. It is 5% of RAM,
+   at least 4 GB, plus a 2.5 GB page-cache reserve
+   (`GMLX_DECODE_RAM_FLOOR_GB`, `GMLX_DECODE_PAGECACHE_GB`).
    Without it a wired arena pushes the rest of the box into swap, and
    a swap storm under wired memory is a watchdog panic.
 4. The decode arena. It gets everything the first three leave. The
@@ -354,10 +354,9 @@ Streaming models engage two feeder paths by default:
   right default for chat and serve.
 
 - No fork beside the arena. A fork of the serve process copies every
-  Metal-mapped buffer before the exec, the wired arena included
-  (measured on an M3 Max: 16 GB/s, so a 60 GB arena is four seconds
-  and 60 GB of fresh anonymous memory, which is the swap storm). The
-  arena, the ring and the pinned weights are marked `VM_INHERIT_NONE`
+  Metal-mapped buffer before the exec, the wired arena included, and a
+  copy of the arena is a swap storm. The arena, the ring and the pinned
+  weights are marked `VM_INHERIT_NONE`
   at allocation, so a child maps none of them and a fork copies none.
   The serve process reads kernel counters in process
   (`gmlx.serve.kernel_vm`), and the stock APC exact-restore gate is

@@ -81,9 +81,8 @@ def lock_pages(mv) -> tuple[int, int] | None:
 def unshare_on_fork(mv) -> bool:
     """minherit(VM_INHERIT_NONE) on the whole pages inside ``mv``: a
     forked child does not map them, so a spawn copies nothing. Without
-    it a fork copies every Metal-mapped buffer before the exec (16 GB/s
-    on an M3 Max; a 60 GB arena is the swap storm). Only pages fully
-    inside the buffer: a page shared with other data would vanish from
+    it a fork copies every Metal-mapped buffer before the exec, the
+    arena included. Only pages fully inside the buffer: a page shared with other data would vanish from
     the child too, and it dies before the exec. False when the platform
     refuses or no whole page fits."""
     import ctypes

@@ -1372,8 +1372,8 @@ def _decode_arena_bytes(
         0, total_bytes - expert_bytes - streamable_bytes - cast_dead_bytes)
     room = int(room_bytes) if room_bytes is not None else legacy_room_bytes()
     # The floor on both measures: the ceiling is a share of the Metal
-    # working set, and the OS side of the box (the page cache, other
-    # processes, an overnight maintenance job) is not in it.
+    # working set, and the OS side (the page cache, other processes) is
+    # not in it.
     arena = (ceiling - non_expert_bytes - room - int(ring_bytes)
              - _ram_floor_bytes(ram))
     # Second ceiling: what is reclaimable right now. The governor ceiling
@@ -1445,8 +1445,8 @@ def _neutralize_wired_limit_sweep():
     # A generator that started before this call left the limit raised, and
     # its exit restore is a no-op from here on. Lower it now: with it up,
     # the next streaming load's walk wires the file's resident pages as it
-    # creates the views (measured 21 -> 117 GB in two seconds), and every
-    # command buffer in the process fails with a Metal out-of-memory error.
+    # creates the views, and every command buffer in the process fails
+    # with a Metal out-of-memory error.
     try:
         prev = mx.set_wired_limit(0)
     except Exception:

@@ -263,8 +263,8 @@ def test_ring_slots_are_wired_for_the_pass(monkeypatch, tmp_path):
 
 def test_unshare_on_fork_marks_only_the_whole_pages_inside():
     # A page shared with other data (a heap buffer) must stay inherited:
-    # marking it made every later fork child in the process die before
-    # its exec (the full suite's spawn tests, 2026-09-07).
+    # marking it makes every later fork child in the process die before
+    # its exec.
     import mmap
     import subprocess
 

@@ -116,8 +116,7 @@ To see what the server was doing when the guard fired, start it with a
 SIGUSR1 (`faulthandler.register(signal.SIGUSR1, file=..., all_threads=True)`)
 and send the signal from a sampler when free RAM drops. `py-spy` needs
 root on macOS and `sample` reads nothing from a process in a fork; the
-in-process dump caught the 2026-09-07 storm inside
-`subprocess._execute_child`.
+in-process dump names the frame, a fork included.
 
 ## Output
 

@@ -1,9 +1,8 @@
 """Kill the e2e servers before the box swaps itself into a watchdog panic.
 
 A streaming server wires most of RAM. When the rest of the box then goes
-to swap, the kernel has nothing left to reclaim and the watchdog panics
-(2026-09-07, a matrix stream tier beside the overnight photo analysis
-jobs). Run this beside a live e2e run:
+to swap, the kernel has nothing left to reclaim and the watchdog panics.
+Run this beside a live e2e run:
 
     python tests/e2e/memguard.py --verbose --log ~/.cache/gmlx/e2e/memguard.log
 
