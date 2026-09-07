@@ -486,3 +486,56 @@ def test_memory_row_skips_without_ram_probe(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "SKIP  memory" in out and "could not read machine RAM" in out
+
+
+# memory row: streaming plan for stream: experts entries
+def _mint_moe(path):
+    w = GGUFWriter(str(path), "llama")
+    w.add_uint32("llama.block_count", 1)
+    w.add_uint32("llama.expert_count", 8)
+    w.add_uint32("llama.expert_used_count", 2)
+    w.add_tensor("token_embd.weight", np.zeros((32, 64), dtype=np.float16))
+    w.add_tensor("blk.0.attn_q.weight", np.zeros((64, 64), dtype=np.float16))
+    for kind in ("gate", "up", "down"):
+        w.add_tensor(f"blk.0.ffn_{kind}_exps.weight",
+                     np.zeros((8, 64, 64), dtype=np.float16))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+
+
+def test_memory_row_reports_streaming_plan(tmp_path, monkeypatch, capsys):
+    body = _BASE + "    stream: experts\n"
+    cfg, lib = _cfg(tmp_path, body)
+    _mint_moe(lib / "m.gguf")
+    _ram(monkeypatch, 64 * 1024**3)
+    rc = doctor.cmd_doctor(["--config", str(cfg)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "PASS  memory" in out
+    assert "configured models fit; streaming: m: fits in RAM, streaming is optional" in out
+
+
+def test_memory_row_warns_when_every_token_weights_exceed_ceiling(
+        tmp_path, monkeypatch, capsys):
+    from gmlx.stream import plan as sp
+    from gmlx.stream.budget import KvRoom
+    body = _BASE + "    stream: experts\n"
+    cfg, lib = _cfg(tmp_path, body)
+    _mint_moe(lib / "m.gguf")
+    _ram(monkeypatch, 64 * 1024**3)
+
+    def too_big(model, **kw):
+        return sp.BoxPlan(
+            ram_bytes=64 * 1024**3, working_set_bytes=48e9, ceiling_bytes=45e9,
+            room=KvRoom(4e9, 32768, 1, 0, 0, 0, priced=False), arena_bytes=0,
+            expert_bytes=model.expert_bytes, ring_fits=False, short_bytes=9e9,
+            verdict=sp.VERDICT_TOO_BIG)
+    monkeypatch.setattr(sp, "box_plan", too_big)
+    rc = doctor.cmd_doctor(["--config", str(cfg)])
+    out = capsys.readouterr().out
+    assert rc == 0                          # advisory
+    assert "WARN  memory" in out
+    assert "cannot stream: m: every-token weights 0.0 GB + KV room 4.0 GB exceed the 45.0 GB ceiling by 9.0 GB" in out
+    assert "every-token weights must fit under the memory ceiling" in out
