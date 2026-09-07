@@ -75,7 +75,9 @@ def p_instruct() -> PromptInstance:
         "instruct",
         [_u("List exactly three primary colors, one per line, no other text.")],
         max_tokens=64, kind="instruct",
-        anchors={"substrs": ["red", "blue", "yellow"], "mode": "all"})
+        # Red and blue sit in both primary triads; the third is yellow or
+        # green by model (Kimi answers either), so it is not anchored.
+        anchors={"substrs": ["red", "blue"], "mode": "all"})
 
 
 def p_system_uppercase() -> PromptInstance:
