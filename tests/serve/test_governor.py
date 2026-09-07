@@ -616,6 +616,8 @@ def test_kernel_floor_stable_breach_holds_no_shed(rig, monkeypatch):
     gen = FakeGen(rows=1, rate=1e6, live=8e9)
     tg_st = tg._state(gen)
     tg_st.ledger[0] = tg._Row([1] * 8, 64, {}, None, None)
+    evicted = []
+    gov.register_cache("apc", lambda: 0, lambda f: (evicted.append(f), 0)[1])
     for kernel in (7.9e9, 7.5e9, 7.2e9, 7.4e9):   # oscillating, stable
         rig["kernel"] = kernel
         gov._governor_tick(gen)
@@ -624,6 +626,10 @@ def test_kernel_floor_stable_breach_holds_no_shed(rig, monkeypatch):
     assert st.band != gov.RED
     assert gov._STATS["last_action"] == "kernel floor stable; no shed"
     assert gov._STATS["kernel_floor_reds"] == 4
+    # Registered caches (the decode arena among them) are evicted on the
+    # first sub-floor sample only; a stable breach holds without
+    # walking the arena down every tick.
+    assert evicted == [1.0]
 
 
 def test_kernel_floor_collapse_trend_sheds(rig, monkeypatch):
@@ -849,9 +855,27 @@ def test_demand_rate_seeds_from_boot_table(rig, monkeypatch):
     gen = FakeGen(rows=2)
     gen._kq_admit_kv_rates = {}
     st = gov._state(gen)
-    monkeypatch.setattr(cap, "_TABLE",
-                        {"kv_costs": [(None, 1000.0), (4096, 500.0)]})
+    gen.model = types.SimpleNamespace(
+        _kq_boot_kv_costs=[(None, 1000.0), (4096, 500.0)])
     rate, _ = gov._demand_bytes(gen, st)
     assert rate == 1500.0 * 2 * max(st.tok_ema, 1.0)
-    monkeypatch.setattr(cap, "_TABLE", None)
+    # The costs are per model, not the last table installed.
+    monkeypatch.setattr(cap, "_TABLE", {"weight_bytes": 1})
+    gen.model = types.SimpleNamespace()
     assert gov._demand_bytes(gen, st)[0] == 0.0
+
+
+def test_dead_arena_entry_is_replaced(rig, monkeypatch):
+    # A feeder freed without unregister_arena leaves a dead entry; a new
+    # feeder at the same address must still register.
+    gen = FakeGen(rows=2)
+    arena = _FakeArena(rig, 50e9)
+    gen.model = types.SimpleNamespace(_kq_decode_feeder=arena)
+    monkeypatch.setattr(gov, "_arena_name", lambda f: "arena:fixed")
+    gov.register_cache("arena:fixed", lambda: 0, lambda f: 0)
+    gov._ARENA_REFS.pop("arena:fixed", None)     # no live ref: dead entry
+    gov._maybe_register_arena(gen)
+    assert gov._REG["arena:fixed"][0]() == arena.governor_bytes()
+    assert gov._ARENA_REFS["arena:fixed"]() is arena
+    gov.unregister_arena(arena)
+    assert "arena:fixed" not in gov._REG and "arena:fixed" not in gov._ARENA_REFS

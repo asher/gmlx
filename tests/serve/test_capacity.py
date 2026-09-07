@@ -307,18 +307,33 @@ def test_nested_text_config_prices_like_flat(rig):
 
 def test_boot_costs_and_seeded_rates(rig):
     path = rig(weights_gb=10.0, ws_gb=20.0)
+    from types import SimpleNamespace
+
     cfg, costs, heads = cap.boot_costs(path)
     assert heads == 8 and cfg["num_hidden_layers"] == 10
     assert sum(bpt for _, bpt in costs) == BPT
-    assert cap.boot_kv_rates() == {}
+    assert cap.boot_kv_rates(None) == {}
     t = cap.derive_table(path)
     assert all(w is None for w, _ in t["kv_costs"])
     assert sum(b for _, b in t["kv_costs"]) == BPT
     cap.install_boot_table(path, 10.0 * GB, "m")
-    assert cap.boot_kv_rates() == {
+    assert "kv_costs" not in cap.get_table()        # not in the metrics dump
+    model = SimpleNamespace(_kq_boot_kv_costs=cap.boot_kv_costs(path))
+    assert cap.boot_kv_rates(model) == {
         "_boot:None": {"rate": float(BPT), "window": None}}
+    assert cap.boot_kv_rates(SimpleNamespace()) == {}
     cap.clear_table()
-    assert cap.boot_kv_rates() == {}
+    assert cap.boot_kv_costs(path) == []
+
+
+def test_refused_table_leaves_the_previous_one_installed(rig, monkeypatch):
+    path = rig(weights_gb=10.0, ws_gb=20.0)
+    monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
+    good = cap.install_boot_table(path, 10.0 * GB, "m")
+    assert cap.get_table() is good
+    with pytest.raises(RuntimeError, match="cannot fit at width 1"):
+        cap.install_boot_table(path, 19.9 * GB, "m")
+    assert cap.get_table() is good
 
 
 def test_preload_gate_names_every_token_weights_when_streaming(rig, monkeypatch):

@@ -50,6 +50,9 @@ _DEPTHS = (4096, 16384, 65536)
 _FRONTIER_MIN_CTX = 4096
 
 _TABLE: dict | None = None
+# GGUF path -> per-layer KV cost entries of the boot table, kept out of
+# the table /v1/metrics dumps; stamped on the model at build.
+_BOOT_KV_COSTS: dict = {}
 
 
 def overcommit() -> bool:
@@ -287,16 +290,25 @@ def boot_costs(gguf_path: str | None, env: dict | None = None, *,
     return cfg, costs, heads
 
 
-def boot_kv_rates() -> dict:
+def boot_kv_costs(gguf_path: str) -> list:
+    """The per-layer KV cost entries the boot table priced for a path."""
+    return list(_BOOT_KV_COSTS.get(gguf_path) or [])
+
+
+def boot_kv_rates(model) -> dict:
     """Admission rates for a model with no measured batch yet, one
-    synthetic kind per KV window, from the installed table. Empty when no
-    table is installed; live measurements replace them at the first
-    ``update_kv_rates``."""
-    t = _TABLE
-    if not t or not t.get("kv_costs"):
+    synthetic kind per KV window, from the costs residency stamped on
+    the model at build (``_kq_boot_kv_costs``). Empty when unstamped;
+    live measurements replace them at the first ``update_kv_rates``."""
+    costs = getattr(model, "_kq_boot_kv_costs", None)
+    if not costs and model is not None:
+        from gmlx.stream.installs import streaming_owner
+
+        costs = getattr(streaming_owner(model), "_kq_boot_kv_costs", None)
+    if not costs:
         return {}
     out: dict = {}
-    for window, bpt in t["kv_costs"]:
+    for window, bpt in costs:
         k = out.setdefault(f"_boot:{window}", {"rate": 0.0, "window": window})
         k["rate"] += float(bpt)
     return out
@@ -335,7 +347,7 @@ def streamed_expert_bytes(gguf_path: str) -> int:
         total = 0
         for shard in find_split_shards(gguf_path):
             for t in scan_gguf(shard).tensors:
-                if _EXPS_RE.match(t.name):
+                if _EXPS_RE.fullmatch(t.name):
                     total += int(t.nbytes)
         return total
     except Exception:
@@ -529,13 +541,16 @@ def install_boot_table(gguf_path: str, weight_bytes: float | None,
         _log.info("[capacity] no table for %s (header or device "
                   "unreadable); stock behavior kept", model_id)
         return None
-    _TABLE = t
+    _BOOT_KV_COSTS[gguf_path] = list(t.pop("kv_costs", None) or [])
     _log_table(t)
     if t["overcommit"]:
+        _TABLE = t
         _log.warning("[capacity] GMLX_OVERCOMMIT=1 armed: boot refusal "
                      "and derived ceilings disabled")
         return t
     if t["max_ctx"].get(1, 0) <= 0:
+        # The previous table stays installed: a refused table would
+        # price admission at zero context.
         raise RuntimeError(
             f"model cannot fit at width 1: {model_id} weights "
             f"{t['weight_bytes'] / GB:.1f} GB + reserve "
@@ -544,12 +559,14 @@ def install_boot_table(gguf_path: str, weight_bytes: float | None,
             f"(working set {t['working_set_bytes'] / GB:.1f} GB, margin "
             f"{t['margin']:.2f}). GMLX_OVERCOMMIT=1 overrides; for MoE "
             f"models --stream-experts serves the experts from disk.")
+    _TABLE = t
     return t
 
 
 def clear_table() -> None:
     global _TABLE
     _TABLE = None
+    _BOOT_KV_COSTS.clear()
 
 
 # GGUF path -> (mtime, trained context) for /v1/models; a header scan per

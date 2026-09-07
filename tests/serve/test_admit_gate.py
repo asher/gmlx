@@ -510,7 +510,8 @@ def test_fresh_model_projects_from_boot_rates(monkeypatch):
     monkeypatch.setattr(pd, "headroom_bytes", lambda: 10e9)
     monkeypatch.setattr(cap, "_TABLE", None)
     assert sm.project_admission(g, [_pending(2, 300, 200)]) is None
-    monkeypatch.setattr(cap, "_TABLE", {"kv_costs": [(None, 1000.0)]})
+    monkeypatch.setattr(g.model, "_kq_boot_kv_costs", [(None, 1000.0)],
+                        raising=False)
     out = sm.project_admission(g, [_pending(2, 300, 200)])
     assert out is not None
     projected, head, parts = out

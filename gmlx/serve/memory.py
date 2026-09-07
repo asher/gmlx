@@ -315,7 +315,7 @@ def project_admission(gen, candidates):
     if not rates:
         from .capacity import boot_kv_rates
 
-        rates = boot_kv_rates()
+        rates = boot_kv_rates(getattr(gen, "model", None))
     if not rates:
         return None
     head = headroom_bytes()

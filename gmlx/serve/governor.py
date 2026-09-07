@@ -299,16 +299,23 @@ def _ceiling_bytes(ws: float, margin: float) -> float:
 def _headroom_and_ws(margin: float):
     from gmlx.gen.prefill_decay import headroom_bytes
 
+    from .capacity import working_set_bytes
+
     head = headroom_bytes()
     if head is None:
         return None, 0.0
-    try:
-        ws = float(mx.device_info()["max_recommended_working_set_size"])
-    except Exception:
+    ws = working_set_bytes()
+    if ws is None:
         return None, 0.0
     # headroom_bytes is measured against the full WS; shift it down to
     # the governed ceiling
     return head - (ws - _ceiling_bytes(ws, margin)), ws
+
+
+def _floor_collapsing(cur: float, prev, floor: float) -> bool:
+    return bool(cur < 0.25 * floor
+                or (prev is not None
+                    and (cur < 0.5 * floor or prev - cur > 1e9)))
 
 
 def _kernel_reclaimable():
@@ -370,7 +377,7 @@ def _demand_bytes(gen, st: _GovState) -> tuple:
     if not rates:
         from .capacity import boot_kv_rates
 
-        rates = boot_kv_rates()
+        rates = boot_kv_rates(getattr(gen, "model", None))
     rate_sum = sum(k.get("rate", 0.0) for k in rates.values())
     rows = batch_rows(gen)
     rate = rate_sum * rows * max(st.tok_ema, 1.0)
@@ -698,9 +705,17 @@ def _governor_tick(gen) -> None:
         None if recl is None else int(recl))
     if recl is not None and recl < floor:
         _STATS["kernel_floor_reds"] += 1
-        freed = _evict_registered(1.0)
-        mx.clear_cache()
-        recl2 = _kernel_reclaimable()
+        # Reclaim on the first sub-floor sample and while collapsing. A
+        # stable breach holds; evicting every tick would only walk the
+        # decode arena to its floor for nothing.
+        prev = st.floor_recl_prev
+        if prev is None or _floor_collapsing(recl, prev, floor):
+            freed = _evict_registered(1.0)
+            mx.clear_cache()
+            recl2 = _kernel_reclaimable()
+        else:
+            freed = 0.0
+            recl2 = recl
         if recl2 is not None and recl2 >= floor:
             _enter(gen, st, RED, ws, margin)
             _log.warning("[governor] kernel floor: reclaimable %.2f GB < "
@@ -724,12 +739,8 @@ def _governor_tick(gen) -> None:
         # 84 GB exit). Quarter-floor is last-pages territory and reds
         # immediately (2026-08-24 freeze read 0.5 GB).
         cur = (recl2 or 0)
-        prev = st.floor_recl_prev
         st.floor_recl_prev = cur
-        collapsing = (cur < 0.25 * floor
-                      or (prev is not None
-                          and (cur < 0.5 * floor or prev - cur > 1e9)))
-        if not collapsing:
+        if not _floor_collapsing(cur, prev, floor):
             now = time.perf_counter()
             if now - st.floor_warned_at >= 30.0:
                 st.floor_warned_at = now
@@ -873,6 +884,9 @@ def _maybe_register_apc(gen) -> None:
     _APC_REGISTERED = True
 
 
+_ARENA_REFS: dict = {}     # registry name -> weakref of the feeder
+
+
 def _arena_name(feeder) -> str:
     return f"arena:{id(feeder)}"
 
@@ -895,8 +909,12 @@ def _maybe_register_arena(gen) -> None:
         return
     name = _arena_name(feeder)
     if name in _REG:
-        return
+        live = _ARENA_REFS.get(name)
+        if live is not None and live() is feeder:
+            return
+        unregister_cache(name)          # a dead feeder at the same address
     ref = weakref.ref(feeder)
+    _ARENA_REFS[name] = ref
 
     def _bytes():
         f = ref()
@@ -910,7 +928,9 @@ def _maybe_register_arena(gen) -> None:
 
 
 def unregister_arena(feeder) -> None:
-    unregister_cache(_arena_name(feeder))
+    name = _arena_name(feeder)
+    unregister_cache(name)
+    _ARENA_REFS.pop(name, None)
 
 
 def install_governor() -> bool:
