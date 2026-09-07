@@ -226,17 +226,45 @@ def test_pressure_critical_steps_twice_and_floors(monkeypatch, tmp_path):
     assert feeder._slot_of[0][0] >= 0
 
 
+def test_regrow_leaves_both_floors_behind(monkeypatch, tmp_path):
+    """A step regrows only when reclaimable RAM covers the step plus the
+    loader floor plus the governor kernel floor; a step that would land
+    on the floor that shrank the arena waits."""
+    level = {"v": 2}
+    _pressure_setup(monkeypatch, level, regrow_polls=1)
+    import gmlx.stream.budget as budget
+
+    monkeypatch.setattr(gmlx.load.loader, "_ram_floor_bytes", lambda ram: 10 << 30)
+    monkeypatch.setattr(budget, "kernel_floor_bytes", lambda: float(4 << 30))
+    avail = {"v": 0}
+    monkeypatch.setattr(budget, "reclaimable_ram_bytes", lambda: avail["v"])
+    feeder, _ = _make_feeder(
+        monkeypatch, tmp_path, slots_per_layer=4, pressure=True)
+    feeder.ensure_wired()
+    feeder.stage(0, np.array([0, 1]))
+    assert feeder._pressure_steps == 1
+    need = feeder._arena_bytes_at(0) - feeder.arena_bytes
+    level["v"] = 1
+    avail["v"] = need + (10 << 30) + (4 << 30) - 1
+    feeder.stage(0, np.array([0, 1]))
+    assert feeder._pressure_steps == 1  # one byte short of both floors
+    avail["v"] += 1
+    feeder.stage(0, np.array([0, 1]))
+    assert feeder._pressure_steps == 0
+
+
 def test_pressure_regrow_after_sustained_normal(monkeypatch, tmp_path):
     level = {"v": 2}
     _pressure_setup(monkeypatch, level, regrow_polls=2)
     avail = {"v": 0}  # no reclaimable RAM: regrow must wait
-    seen_kwargs = []
+    import gmlx.stream.budget as budget
 
-    def _fake_avail(include_inactive=True):
-        seen_kwargs.append(include_inactive)
-        return avail["v"]
-
-    monkeypatch.setattr(gmlx.load.loader, "_available_ram_bytes", _fake_avail)
+    # The regrow reads the governor's reclaimable measure (file-backed
+    # pages included), never the free-pages-only set.
+    monkeypatch.setattr(gmlx.load.loader, "_available_ram_bytes",
+                        lambda include_inactive=True: 0)
+    monkeypatch.setattr(budget, "reclaimable_ram_bytes", lambda: avail["v"])
+    monkeypatch.setattr(budget, "kernel_floor_bytes", lambda: 4e9)
     feeder, _ = _make_feeder(
         monkeypatch, tmp_path, slots_per_layer=4, pressure=True)
     feeder.ensure_wired()
@@ -251,8 +279,6 @@ def test_pressure_regrow_after_sustained_normal(monkeypatch, tmp_path):
     feeder.stage(0, np.array([0, 1]))  # headroom back: regrow a step
     assert feeder._pressure_steps == 0
     assert feeder._slots[0] == 4
-    # Regrow asked for the strict no-victims set (inactive excluded).
-    assert seen_kwargs and all(k is False for k in seen_kwargs)
     for e in (0, 1):  # residents survived shrink and regrow copies
         s = int(feeder._slot_of[0][e])
         for kind in _KINDS:

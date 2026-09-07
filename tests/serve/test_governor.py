@@ -729,6 +729,39 @@ def test_kernel_floor_reclaim_alone_can_clear(rig, monkeypatch):
     assert "kernel floor reclaim" in gov._STATS["last_action"]
 
 
+def test_kernel_floor_first_dip_reclaims_the_deficit(rig, monkeypatch):
+    # 50 MB under the floor must not walk a registered arena to its
+    # floor: the first sub-floor sample reclaims the deficit plus half
+    # a floor, as a share of what is registered (rig floor 8 GB).
+    evicted = []
+    gov.register_cache("arena", lambda: 60e9,
+                       lambda f: (evicted.append(f), f * 60e9)[1])
+    samples = iter([7.95e9, 20e9])
+    monkeypatch.setattr(gov, "_kernel_reclaimable", lambda: next(samples))
+    gen = FakeGen(rows=2)
+    gov._governor_tick(gen)
+    assert len(evicted) == 1
+    assert abs(evicted[0] - (0.05e9 + 4e9) / 60e9) < 1e-9
+    assert "kernel floor reclaim" in gov._STATS["last_action"]
+
+
+def test_kernel_floor_quarter_floor_reclaims_everything(rig, monkeypatch):
+    # Under a quarter of the floor is the freeze signature: every
+    # registered byte goes on the first sample.
+    evicted = []
+    gov.register_cache("arena", lambda: 60e9,
+                       lambda f: (evicted.append(f), f * 60e9)[1])
+    samples = iter([1.5e9, 20e9])
+    monkeypatch.setattr(gov, "_kernel_reclaimable", lambda: next(samples))
+    gov._governor_tick(FakeGen(rows=2))
+    assert evicted == [1.0]
+
+
+def test_floor_evict_fraction_without_registrants_is_full():
+    gov._REG.clear()
+    assert gov._floor_evict_fraction(3.9e9, 4e9) == 1.0
+
+
 def test_kernel_floor_off_never_samples(rig, monkeypatch):
     monkeypatch.setenv("GMLX_GOV_KERNEL_FLOOR_GB", "0")
     calls = []

@@ -507,6 +507,29 @@ def _shed_allowed(st: _GovState) -> bool:
     return True
 
 
+def _registered_bytes() -> float:
+    total = 0.0
+    for name in list(_REG):
+        bytes_fn, _ = _REG[name]
+        try:
+            total += float(bytes_fn() or 0)
+        except Exception:
+            pass
+    return total
+
+
+def _floor_evict_fraction(recl: float, floor: float) -> float:
+    """Share of the registered caches a first sub-floor sample reclaims:
+    the deficit plus half a floor of margin, over what is registered. A
+    decode arena is tens of GB; taking all of it for a 50 MB dip costs
+    every later token."""
+    have = _registered_bytes()
+    if have <= 0:
+        return 1.0
+    want = (floor - recl) + 0.5 * floor
+    return min(1.0, max(0.0, want / have))
+
+
 def _evict_registered(fraction: float) -> float:
     freed = 0.0
     for name in list(_REG):
@@ -710,7 +733,10 @@ def _governor_tick(gen) -> None:
         # decode arena to its floor for nothing.
         prev = st.floor_recl_prev
         if prev is None or _floor_collapsing(recl, prev, floor):
-            freed = _evict_registered(1.0)
+            # A collapse takes everything; a first dip takes the deficit.
+            frac = (1.0 if _floor_collapsing(recl, prev, floor)
+                    else _floor_evict_fraction(recl, floor))
+            freed = _evict_registered(frac)
             mx.clear_cache()
             recl2 = _kernel_reclaimable()
         else:

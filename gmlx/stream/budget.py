@@ -45,6 +45,31 @@ def ceiling_bytes() -> float | None:
     return None if ws is None else _ceiling(ws)
 
 
+def reclaimable_ram_bytes() -> int | None:
+    """RAM the kernel can hand back without swapping anyone: free,
+    purgeable, speculative and file-backed pages. The governor's floor
+    measure; the loader's vm_stat sum when the mach counters are
+    unavailable."""
+    try:
+        from gmlx.serve.kernel_vm import reclaimable_bytes
+
+        v = reclaimable_bytes()
+    except Exception:
+        v = None
+    if v is not None:
+        return int(v)
+    from gmlx.load.loader import _available_ram_bytes
+
+    return _available_ram_bytes()
+
+
+def kernel_floor_bytes() -> float:
+    """The governor's kernel reclaimable floor."""
+    from gmlx.serve.governor import _kernel_floor_bytes
+
+    return float(_kernel_floor_bytes())
+
+
 def governor_headroom_bytes() -> float | None:
     """What the governor reads at its tick: ``prefill_decay.headroom_bytes``
     shifted from the full working set down to the governor ceiling."""

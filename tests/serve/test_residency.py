@@ -661,3 +661,57 @@ def test_build_stamps_boot_kv_costs_where_the_generator_reads(monkeypatch):
     import gmlx.serve.residency as residency
     residency._stamp_boot_kv_costs(SimpleNamespace(model=dense), "a")
     assert cap.boot_kv_rates(dense_lm) == want
+
+
+def test_streaming_entry_is_priced_at_every_token_plus_arena(monkeypatch):
+    # A stream: experts entry holds its every-token weights and its decode
+    # arena, not the file. Admission prices the arena from the planner (or
+    # GMLX_DECODE_ARENA_GB); the built entry carries the feeder's nominal
+    # arena. Pricing the file evicted every other model for 330 GB of
+    # experts that never leave the disk.
+    from types import SimpleNamespace
+
+    import gmlx.serve.capacity as cap
+    import gmlx.serve.residency as residency
+    import gmlx.stream.plan as plan
+
+    monkeypatch.delenv("GMLX_DECODE_ARENA_GB", raising=False)
+    monkeypatch.setattr(cap, "streamed_expert_bytes", lambda p: 330 * GB)
+    monkeypatch.setattr(plan, "plan_path",
+                        lambda p: (None, SimpleNamespace(arena_bytes=80 * GB)))
+    monkeypatch.setattr(cap, "install_boot_table",
+                        lambda path, b, label, env=None: None)
+    monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: None)
+    proxy = _RuntimeProxy(_FakeOriginal())
+    feeder = SimpleNamespace(nominal_bytes=70 * GB)
+    stock = SimpleNamespace(_kq_decode_feeder=feeder)
+    wrapper = SimpleNamespace(language_model=SimpleNamespace(_model=stock))
+
+    def fake_stock_get(model_path, adapter_path, *, model_kind="auto"):
+        proxy.response_generator = SimpleNamespace(model=wrapper)
+        proxy.model_cache = {
+            "cache_key": (model_path, adapter_path, model_kind),
+            "model_path": model_path,
+            "model": "M",
+        }
+
+    pool = _ResidencyPool(
+        proxy, fake_stock_get, lambda: True, int(100 * GB), (),
+        footprint_fn=lambda p: int(340 * GB))
+    asked = []
+    monkeypatch.setattr(pool, "_evict_for_room", lambda incoming: asked.append(incoming))
+    entry = pool.acquire("a", None, "auto", build_spec=SimpleNamespace(stream="experts"))
+    pool.release(entry)
+    assert asked == [10 * GB + 80 * GB]
+    assert entry.footprint == 10 * GB + 70 * GB
+    assert pool.stats()["resident_bytes"] == 80 * GB
+    # The env cap is the arena the loader will size.
+    monkeypatch.setenv("GMLX_DECODE_ARENA_GB", "60")
+    assert residency._streaming_footprint("a", 340 * GB) == 10 * GB + 60 * GB
+    assert residency._streaming_footprint("a", 340 * GB, {"GMLX_DECODE_ARENA_GB": "50"}) \
+        == 10 * GB + 50 * GB
+    # A dense entry (no feeder) is still its file.
+    stock._kq_decode_feeder = None
+    dense = pool.acquire("b", None, "auto")
+    pool.release(dense)
+    assert dense.footprint == 340 * GB

@@ -217,6 +217,13 @@ does not fit under the ceiling of any box below 192 GB.
   cache part of the room.
 - SSD bandwidth sets the speed of cold reads. It does not change the
   fit.
+- Other resident models. On `gmlx serve` a streamed entry counts its
+  every-token weights plus its arena against `server.budget_gb`. The
+  auto arena fills the budget. Cap it with `GMLX_DECODE_ARENA_GB` to
+  keep a second model resident beside it.
+- Other processes. The arena is sized from the RAM that is reclaimable
+  at load. When the box later dips under the governor's kernel floor,
+  the arena steps down by a quarter and regrows when the RAM returns.
 
 ### Ask gmlx
 

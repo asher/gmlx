@@ -1271,7 +1271,11 @@ and store counts surface on the authed `GET /v1/metrics`.
 Several models stay resident at once: pinned models plus an LRU pool bounded
 by the weight-byte budget (`server.budget_gb`, default 0.8x the GPU
 recommended working set). Each entry's footprint is its on-disk GGUF size
-(zero-copy resident weight bytes).
+(zero-copy resident weight bytes). A `stream: experts` entry is priced at its
+every-token weights plus its decode arena. The routed experts stay on disk.
+The arena fills what the ceiling leaves, so a streamed model alone can use
+the whole budget. To keep a second model resident beside it, cap the arena
+with `GMLX_DECODE_ARENA_GB` so both fit `budget_gb`.
 
 - Idle TTL: `server.defaults.ttl_s` (overridable per model) idle-unloads a
   non-pinned model after it goes unused that long. The reaper only tears

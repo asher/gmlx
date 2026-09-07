@@ -1245,11 +1245,8 @@ def _available_ram_bytes(include_inactive: bool = True) -> int | None:
     ``vm_stat`` without the ``File-backed pages`` line falls back to
     inactive + speculative.
 
-    ``include_inactive=False`` is the stricter no-victims set (free +
-    purgeable + speculative only): used when the decode feeder regrows its
-    wired arena into a *running* system, where even evicting the page cache
-    other reads depend on is a real cost - measured, the optimistic set
-    there pushed double-digit GB of anon to swap."""
+    ``include_inactive=False`` is the stricter set (free + purgeable +
+    speculative only) for a caller that must not take the page cache."""
     import subprocess
 
     try:

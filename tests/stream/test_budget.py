@@ -124,3 +124,19 @@ def test_transient_bytes_follows_the_decay_cap(monkeypatch):
     assert transient_bytes(10e9) == 2e9
     monkeypatch.setenv("GMLX_PREFILL_SCORE_CAP_GB", "3")
     assert transient_bytes(100e9) == 3e9
+
+
+def test_reclaimable_ram_bytes_prefers_the_kernel_counters(monkeypatch):
+    import gmlx.serve.kernel_vm as kv
+    import gmlx.load.loader as loader
+
+    monkeypatch.setattr(kv, "reclaimable_bytes", lambda: 12.5e9)
+    monkeypatch.setattr(loader, "_available_ram_bytes", lambda include_inactive=True: 3)
+    assert budget.reclaimable_ram_bytes() == int(12.5e9)
+    monkeypatch.setattr(kv, "reclaimable_bytes", lambda: None)
+    assert budget.reclaimable_ram_bytes() == 3
+
+
+def test_kernel_floor_bytes_is_the_governor_floor(monkeypatch):
+    monkeypatch.setenv("GMLX_GOV_KERNEL_FLOOR_GB", "2")
+    assert budget.kernel_floor_bytes() == 2e9

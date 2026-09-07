@@ -205,7 +205,8 @@ class _Entry:
     apc_manager: object
     pinned: bool = False
     seq: int = 0
-    footprint: int = 0          # resident weight bytes (on-disk GGUF size)
+    footprint: int = 0          # resident weight bytes (file size; a streaming
+                                # entry: every-token weights + decode arena)
     ttl: float | None = None  # idle auto-unload seconds (None/0 => never)
     last_access: float = 0.0    # monotonic time of the last acquire/touch
     busy: int = 0               # in-flight refcount; busy entries are never LRU-evicted
@@ -473,7 +474,12 @@ class _ResidencyPool:
                 entry.busy += 1
                 return entry
         # Cold path: one build at a time (bounds peak memory).
-        incoming = self._footprint_fn(model_path)
+        file_bytes = self._footprint_fn(model_path)
+        incoming = file_bytes
+        if getattr(build_spec, "stream", None) == "experts":
+            incoming = _streaming_footprint(model_path, file_bytes, env)
+            _log.info("streaming entry priced at %.1f GB resident of a %.1f GB file",
+                      incoming / 1e9, file_bytes / 1e9)
         # Refuse an unloadable GGUF *before* evicting healthy residents for
         # room - a corrupt/unsupported file would otherwise cost every LRU
         # victim a full cold reload for a build that was never going to work.
@@ -493,7 +499,7 @@ class _ResidencyPool:
                     return entry
                 self._evict_for_room(incoming)
             entry = self._build(cache_key, model_path, adapter_path, model_kind,
-                                incoming, ttl=ttl, env=env, build_spec=build_spec)
+                                file_bytes, ttl=ttl, env=env, build_spec=build_spec)
             # The id that built the entry names it for the process lifetime
             # (a metrics label wants a name fixed per entry; aliases sharing
             # the signature reuse this entry and keep the first name).
@@ -825,6 +831,9 @@ class _ResidencyPool:
                     streamed / 1e9, gate_bytes / 1e9)
         preload_gate(gate_bytes, str(model_path),
                      streaming=getattr(build_spec, "stream", None) == "experts")
+        # What the entry holds resident. A streaming build adds its decode
+        # arena below, once the loader has sized it.
+        resident_bytes = gate_bytes
         # The boot table feeds request admission (width/ctx budgets), so a
         # streaming model's table must also price only the resident share:
         # the expert stacks decode through the disk arena, not the KV budget.
@@ -908,10 +917,10 @@ class _ResidencyPool:
             # see the KV room that is really left.
             feeder = _decode_feeder_of(rg)
             if feeder is not None and getattr(feeder, "nominal_bytes", 0):
+                resident_bytes = gate_bytes + int(feeder.nominal_bytes)
                 try:
                     install_boot_table(
-                        str(model_path),
-                        gate_bytes + int(feeder.nominal_bytes),
+                        str(model_path), resident_bytes,
                         str(model_path), env=env)
                 except RuntimeError as e:
                     _log.warning("[capacity] the decode arena leaves no "
@@ -936,7 +945,7 @@ class _ResidencyPool:
             response_generator=scratch.response_generator,
             apc_manager=scratch.apc_manager,
             pinned=model_path in self._pinned_paths,
-            footprint=footprint,
+            footprint=resident_bytes,
             ttl=ttl,
             last_access=self._time_fn(),
             kv_policy=kv_policy,
@@ -1087,6 +1096,38 @@ def _stamp_boot_kv_costs(rg, gguf_path: str) -> None:
             object.__setattr__(target, "_kq_boot_kv_costs", costs)
         except Exception:                                  # noqa: BLE001
             pass
+
+
+def _streaming_footprint(model_path, file_bytes: int, env=None) -> int:
+    """Resident bytes a ``stream: experts`` entry will hold: the every-token
+    weights plus the decode arena the loader sizes at install (the env
+    override when set, else the fit planner's arena). The routed experts
+    stay on disk, so the file size overstates the entry by their bytes and
+    would evict every other model for room they never take."""
+    from .capacity import preload_gate_bytes, streamed_expert_bytes
+
+    try:
+        every = preload_gate_bytes(
+            file_bytes, "experts", streamed_expert_bytes(str(model_path)))
+    except Exception:
+        every = int(file_bytes)
+    raw = ((env or {}).get("GMLX_DECODE_ARENA_GB")
+           or os.environ.get("GMLX_DECODE_ARENA_GB"))
+    arena = None
+    if raw:
+        try:
+            arena = int(float(raw) * (1 << 30))
+        except (ValueError, OverflowError):
+            arena = None
+    if arena is None:
+        try:
+            from gmlx.stream.plan import plan_path
+
+            _model, box = plan_path(str(model_path))
+            arena = int(box.arena_bytes) if box is not None else 0
+        except Exception:
+            arena = 0
+    return every + max(0, arena)
 
 
 def _decode_feeder_of(rg):

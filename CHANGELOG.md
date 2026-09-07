@@ -35,6 +35,16 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   capacity table and the memory preflight charge the arena.
   `/v1/metrics` reports `memory.arena_bytes`, `arena_nominal_bytes` and
   `kv_room_bytes`. The load log prints the budget.
+- The governor's kernel floor took the whole decode arena for a 50 MB
+  dip. A first sub-floor sample now reclaims the deficit plus half a
+  floor from the registered caches. A collapse still reclaims all.
+- A shrunk decode arena never regrew on a streaming model. The regrow
+  gate read free pages only, and expert reads keep those near zero. It
+  now reads the governor's reclaimable measure and leaves both floors
+  behind the step.
+- Residency priced a `stream: experts` entry at its file size, so any
+  second model evicted it and the two reloaded in turn. The entry now
+  counts its every-token weights plus its decode arena.
   `GMLX_DECODE_ARENA_RAM_FRAC` has no default now and caps the ceiling
   when set. `GMLX_DECODE_KV_RESERVE_GB` replaces the priced room with a
   flat value. A prefill ring larger than the arena budget is no longer

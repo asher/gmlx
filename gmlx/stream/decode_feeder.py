@@ -1464,15 +1464,19 @@ class DecodeFeeder:
             )
 
     def _regrow_headroom_ok(self) -> bool:
-        """Only regrow into RAM nobody has to swap for (free + speculative
-        + purgeable; not inactive, which includes other processes' anon
-        memory): pressure subsiding means the system recovered, not that
-        the memory is ours to take back."""
+        """Regrow only into RAM the kernel hands back without swapping
+        anyone: free, purgeable, speculative and file-backed pages, the
+        governor's own floor measure. The arena's expert reads fill the
+        file-backed queue, so a free-pages-only test never passes on a
+        streaming model and a shrink would be permanent. The step must
+        leave the loader's floor and the governor's kernel floor behind
+        it, so a regrow cannot trip the floor that shrank the arena."""
         need = self._arena_bytes_at(self._pressure_steps - 1) - self.arena_bytes
         try:
-            from gmlx.load.loader import _available_ram_bytes, _ram_floor_bytes
+            from gmlx.load.loader import _ram_floor_bytes
+            from gmlx.stream.budget import kernel_floor_bytes, reclaimable_ram_bytes
 
-            avail = _available_ram_bytes(include_inactive=False)
+            avail = reclaimable_ram_bytes()
         except Exception:
             return True
         if avail is None:
@@ -1484,7 +1488,7 @@ class DecodeFeeder:
             ram = int(mx.device_info()["memory_size"])
         except Exception:
             pass
-        if avail < need + _ram_floor_bytes(ram or avail):
+        if avail < need + _ram_floor_bytes(ram or avail) + kernel_floor_bytes():
             return False
         return self._governor_room_ok(need)
 
