@@ -757,6 +757,17 @@ def test_kernel_floor_quarter_floor_reclaims_everything(rig, monkeypatch):
     assert evicted == [1.0]
 
 
+def test_governor_stats_samples_the_kernel_live(monkeypatch):
+    # /v1/metrics at idle must not show the last decode tick's sample.
+    monkeypatch.setitem(gov._STATS, "kernel_reclaimable_bytes", int(2e9))
+    monkeypatch.setattr(gov, "_ARMED_FLOOR", 4e9)
+    monkeypatch.setattr(gov, "_kernel_reclaimable", lambda: 31e9)
+    assert gov.governor_stats()["kernel_reclaimable_bytes"] == int(31e9)
+    assert gov._STATS["kernel_reclaimable_bytes"] == int(2e9)
+    monkeypatch.setattr(gov, "_ARMED_FLOOR", 0.0)
+    assert gov.governor_stats()["kernel_reclaimable_bytes"] == int(2e9)
+
+
 def test_floor_evict_fraction_without_registrants_is_full():
     gov._REG.clear()
     assert gov._floor_evict_fraction(3.9e9, 4e9) == 1.0

@@ -302,6 +302,10 @@ def install_runtime_snapshot_enrichment() -> None:
                     for f in arenas)
                 mem["kv_room_bytes"] = sum(
                     int(getattr(f, "_room_bytes", 0)) for f in arenas)
+                mem["arena_hits"] = sum(
+                    int(getattr(f, "_hits", 0)) for f in arenas)
+                mem["arena_lookups"] = sum(
+                    int(getattr(f, "_lookups", 0)) for f in arenas)
             base["memory"] = mem
         except Exception:
             pass
@@ -978,7 +982,9 @@ def spawn_preload_warm(model_id: str | None, extras=()):
                     print(f"[server] preload: deferred, retry {attempt} in "
                           f"{wait:.0f}s ({exc})")
                     time.sleep(wait)
-                except Exception:
+                except Exception as exc:
+                    print(f"[server] preload: {model_id} failed, loads lazily "
+                          f"on first request ({type(exc).__name__}: {exc})")
                     break
         for mid in extras:
             if _preload_extra_over_budget(mid):

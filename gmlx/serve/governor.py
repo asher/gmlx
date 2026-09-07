@@ -213,7 +213,17 @@ def unregister_cache(name: str) -> None:
 
 def governor_stats() -> dict:
     # enabled distinguishes guards-off from guards-quiet in metrics
-    return dict(_STATS, enabled=governor_enabled())
+    out = dict(_STATS, enabled=governor_enabled())
+    # The tick samples the kernel only while a batch decodes. A read at
+    # idle gets a live sample, not the last tick's.
+    if _ARMED_FLOOR > 0:
+        try:
+            recl = _kernel_reclaimable()
+        except Exception:
+            recl = None
+        if recl is not None:
+            out["kernel_reclaimable_bytes"] = int(recl)
+    return out
 
 
 class _GovState:

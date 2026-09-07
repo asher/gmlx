@@ -109,3 +109,27 @@ def test_never_overwrites_marked_variants(restore_wired_limit):
     _gen.wired_limit = _no_sweep
     _install_wired_limit_warn_once()
     assert _gen.wired_limit is _no_sweep
+
+
+def test_neutralize_lowers_a_raised_wired_limit(monkeypatch, capsys):
+    # A generator that started before the streaming install left the limit
+    # raised. Its exit restore is a no-op from here on, so the neutralization
+    # lowers the real limit itself, or the next walk wires the file's pages.
+    import mlx.core as mx
+
+    from gmlx.load.loader import _neutralize_wired_limit_sweep
+
+    calls = []
+
+    def fake_set(limit):
+        calls.append(limit)
+        return 100 * 10**9
+
+    monkeypatch.setattr(mx, "set_wired_limit", fake_set)
+    _neutralize_wired_limit_sweep()
+    assert calls == [0]
+    assert getattr(mx.set_wired_limit, "_kq_no_sweep", False)
+    assert mx.set_wired_limit(10**12) == 0
+    assert "wired limit lowered from 100.0 GB to 0" in capsys.readouterr().out
+    _neutralize_wired_limit_sweep()          # idempotent: no second lowering
+    assert calls == [0]
