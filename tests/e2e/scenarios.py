@@ -444,6 +444,8 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
     judged = reg.find(judged_h) or ""
     vlm_needs = list(reg.role("vlm"))
     vlm_paths = reg.role_paths("vlm")
+    dsv4_needs = list(reg.role("vlm_dsv4"))
+    dsv4_paths = reg.role_paths("vlm_dsv4")
     mtp_needs = list(reg.role("mtp_pair"))
     mtp_paths = reg.role_paths("mtp_pair")
     native_needs = list(reg.role("mtp_native"))
@@ -764,6 +766,18 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
             targets=[ReqTarget("describe", "", prompts=[P.p_vlm_describe()],
                                image_handle=image_path)],
             notes="vision load/serve path under the harness; judge rates the caption"))
+
+    # vlm: DeepSeek-V4-Flash-Vision-Exp image blocks (single-row, whole-block
+    # prefill, media ids past the vocab) through the served OpenAI images API
+    if dsv4_paths and image_path:
+        add(Scenario(
+            key="vlm_image_dsv4", tier="vlm", needs=dsv4_needs,
+            title=f"VLM: {dsv4_needs[0]} + deepseek4v mmproj describes an image",
+            serve_args=[dsv4_paths[0], "--mmproj", dsv4_paths[1]],
+            targets=[ReqTarget("describe", "", prompts=[P.p_vlm_describe()],
+                               image_handle=image_path)],
+            notes="expanded image block ids and the span-aware chunker under "
+                  "the harness; judge rates the caption"))
 
     # mtp: speculative + lossless-greedy vs base
     if mtp_paths:
