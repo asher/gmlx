@@ -119,3 +119,30 @@ def test_streaming_owner_descends_the_wrapper_chain():
 def test_streaming_owner_returns_the_original_when_nothing_streams():
     m = _Holder()
     assert installs.streaming_owner(m) is m
+
+
+class _Arena:
+    def __init__(self, nbytes):
+        self.arena_bytes = nbytes
+
+
+def test_record_arena_prunes_dead():
+    installs._ARENAS.clear()
+    a, b = _Arena(10), _Arena(25)
+    installs.record_arena(a)
+    installs.record_arena(b)
+    assert installs.live_arena_bytes() == 35
+    del a
+    gc.collect()
+    assert installs.live_arenas() == [b]
+    assert installs.live_arena_bytes() == 25
+    installs._ARENAS.clear()
+
+
+def test_closed_arena_drops_out():
+    installs._ARENAS.clear()
+    a = _Arena(10)
+    installs.record_arena(a)
+    assert installs.live_arena_bytes() == 10
+    a._closed = True
+    assert installs.live_arenas() == [] and installs._ARENAS == []

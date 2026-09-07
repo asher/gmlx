@@ -6,6 +6,25 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Streaming models on `gmlx serve` shed the first request at `governor
+  red` with negative headroom on a stock 128 GB working set (#49). The
+  decode arena and the prefill ring are MLX-tracked and were sized from a
+  RAM fraction the governor never saw. The arena is now sized to what the
+  governor's ceiling leaves after the every-token weights and a KV room
+  priced from the header (`GMLX_STREAM_KV_CTX` tokens, default 32768, plus
+  the prefill transient and the admission reserve), the prefill ring is
+  lent out of the arena instead of stacked on it, and the arena registers
+  with the governor, which shrinks it before it sheds a request and lets
+  it regrow only while the room holds. Admission on a fresh model prices
+  from the boot table instead of admitting blind, the capacity table and
+  the memory preflight charge the arena, and `/v1/metrics` reports
+  `memory.arena_bytes`, `arena_nominal_bytes` and `kv_room_bytes`. The
+  load log prints the budget. `GMLX_DECODE_ARENA_RAM_FRAC` has no default
+  now and caps the ceiling when set; `GMLX_DECODE_KV_RESERVE_GB` replaces
+  the priced room with a flat value.
+
 ## [0.4.9] - 2026-09-06
 
 ### Fixed

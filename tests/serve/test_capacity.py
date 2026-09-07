@@ -303,3 +303,19 @@ def test_nested_text_config_prices_like_flat(rig):
     nested = cap.derive_table(rig(weights_gb=10.0, ws_gb=20.0, cfg={
         "text_config": dict(CFG), "model_type": "gemma4"}))
     assert nested["max_ctx"] == flat["max_ctx"]
+
+
+def test_boot_costs_and_seeded_rates(rig):
+    path = rig(weights_gb=10.0, ws_gb=20.0)
+    cfg, costs, heads = cap.boot_costs(path)
+    assert heads == 8 and cfg["num_hidden_layers"] == 10
+    assert sum(bpt for _, bpt in costs) == BPT
+    assert cap.boot_kv_rates() == {}
+    t = cap.derive_table(path)
+    assert all(w is None for w, _ in t["kv_costs"])
+    assert sum(b for _, b in t["kv_costs"]) == BPT
+    cap.install_boot_table(path, 10.0 * GB, "m")
+    assert cap.boot_kv_rates() == {
+        "_boot:None": {"rate": float(BPT), "window": None}}
+    cap.clear_table()
+    assert cap.boot_kv_rates() == {}

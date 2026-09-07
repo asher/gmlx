@@ -797,3 +797,61 @@ def test_arm_throttle_limit_uses_ceiling(rig, monkeypatch):
     gov._arm_throttle(gen, st, 120e9, 0.05)
     # 97 GB ceiling + 50 GB untracked weights
     assert rig["mem_limits"] == [int(97e9 + 50e9)]
+
+
+class _FakeArena:
+    """A decode feeder as the governor sees it: bytes above the ladder
+    floor, and an evict that hands the box its headroom back."""
+
+    def __init__(self, box, nbytes):
+        self.box = box
+        self.nbytes = nbytes
+        self.evicts = []
+
+    def governor_bytes(self):
+        return self.nbytes
+
+    def governor_evict(self, fraction):
+        freed = int(self.nbytes * fraction)
+        self.evicts.append(fraction)
+        self.nbytes -= freed
+        self.box["head"] += freed
+        return freed
+
+
+def test_static_red_shrinks_the_arena_before_a_shed(rig, monkeypatch):
+    failed = []
+    monkeypatch.setattr(tg, "_row_failed_callbacks",
+                        [lambda uid, info: failed.append((uid, info))])
+    gen = FakeGen(rows=2, rate=60e9, live=30e9)  # demand > headroom
+    arena = _FakeArena(rig, 50e9)
+    gen.model = types.SimpleNamespace(_kq_decode_feeder=arena)
+    st = gov._state(gen)
+    st.obs_delta_ema = 20e9
+    tg_st = tg._state(gen)
+    tg_st.ledger[0] = tg._Row([1] * 8, 64, {}, None, None)
+    tg_st.ledger[1] = tg._Row([1] * 4, 64, {}, None, None)
+    gov._governor_tick(gen)
+    name = f"arena:{id(arena)}"
+    assert name in gov._REG
+    assert arena.evicts == [1.0]
+    assert failed == [] and gen.removed == []
+    assert gov._STATS["last_action"].startswith("red reclaim")
+    gov._governor_tick(gen)
+    assert sum(k.startswith("arena:") for k in gov._REG) == 1
+    gov.unregister_arena(arena)
+    assert name not in gov._REG
+
+
+def test_demand_rate_seeds_from_boot_table(rig, monkeypatch):
+    import gmlx.serve.capacity as cap
+
+    gen = FakeGen(rows=2)
+    gen._kq_admit_kv_rates = {}
+    st = gov._state(gen)
+    monkeypatch.setattr(cap, "_TABLE",
+                        {"kv_costs": [(None, 1000.0), (4096, 500.0)]})
+    rate, _ = gov._demand_bytes(gen, st)
+    assert rate == 1500.0 * 2 * max(st.tok_ema, 1.0)
+    monkeypatch.setattr(cap, "_TABLE", None)
+    assert gov._demand_bytes(gen, st)[0] == 0.0

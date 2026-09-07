@@ -900,6 +900,21 @@ class _ResidencyPool:
                     _log.warning("kv policy resolve skipped", exc_info=True)
             else:
                 kv_policy = None
+            # The decode arena is MLX-tracked and sized at install, after
+            # the pre-load table priced the resident weights alone. Price
+            # it in now so admission, /v1/estimate and the boot refusal
+            # see the KV room that is really left.
+            feeder = _decode_feeder_of(rg)
+            if feeder is not None and getattr(feeder, "nominal_bytes", 0):
+                try:
+                    install_boot_table(
+                        str(model_path),
+                        gate_bytes + int(feeder.nominal_bytes),
+                        str(model_path), env=env)
+                except RuntimeError as e:
+                    _log.warning("[capacity] the decode arena leaves no "
+                                 "context at width 1 (GMLX_DECODE_ARENA_GB "
+                                 "lowers it): %s", e)
         except BaseException:
             # A failed build never reaches _teardown: drop its partial
             # registrations here or they tax headroom forever.
@@ -965,6 +980,10 @@ class _ResidencyPool:
         # a feeder<->module reference cycle, so refcounting alone won't
         # reclaim them before the next model sizes its own arena.
         _decode_feeder = getattr(owner, "_kq_decode_feeder", None)
+        if _decode_feeder is not None:
+            from .governor import unregister_arena
+
+            unregister_arena(_decode_feeder)
         # And the every-token weight pin: mlocked file-backed ranges, which
         # stay file-backed and so still read as reclaimable to vm_stat. The
         # next model's arena sizes against that snapshot, so an unreleased
@@ -1045,6 +1064,14 @@ class _ResidencyPool:
         gc.collect()
 
 
+
+
+def _decode_feeder_of(rg):
+    """The decode feeder behind a response generator's model, or None."""
+    model = getattr(rg, "model", None)
+    if model is None:
+        return None
+    return getattr(_streaming_owner(model), "_kq_decode_feeder", None)
 
 
 def _pinned_from_env(preload_path):

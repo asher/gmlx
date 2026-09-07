@@ -36,6 +36,7 @@ constants below.
 from __future__ import annotations
 
 import fcntl
+import math
 import mmap
 import os
 import queue
@@ -267,6 +268,7 @@ class DecodeFeeder:
         modules: dict[int, list],
         arena_bytes: int,
         stats_verbose: bool | None = None,
+        lend_bytes: int = 0,
     ):
         import mlx_kquant as kq
 
@@ -325,6 +327,23 @@ class DecodeFeeder:
         if not self._layers:
             raise RuntimeError(
                 f"arena budget ({arena_bytes / 1e9:.1f} GB) fits no experts")
+
+        # Sized capacity. ``_slots`` tracks the live per-layer size: it
+        # starts below capacity while the prefill ring borrows from the
+        # arena (``lend_bytes``, see lend_for_ring) and returns to it at
+        # the first decode.
+        self._orig_slots = dict(self._slots)
+        self._per_expert = {li: per_expert[li] for li in self._layers}
+        self.nominal_bytes = sum(
+            self._orig_slots[li] * self._per_expert[li] for li in self._layers)
+        self._pressure_steps = 0
+        self._lend_frac = 1.0
+        if lend_bytes > 0 and self.nominal_bytes:
+            self._lend_frac = max(0.0, 1.0 - lend_bytes / self.nominal_bytes)
+            self._slots = {li: self._target_slots(li) for li in self._layers}
+        # Priced KV room outside the arena (set by the loader); regrow keeps
+        # the governor's headroom above half of it.
+        self._room_bytes = 0
 
         # Miss reads bypass the page cache (F_NOCACHE): each byte is read
         # exactly once into the arena, and letting those reads populate the
@@ -483,20 +502,11 @@ class DecodeFeeder:
         self._wedges = 0
         self._staging_disabled = False
 
-        # Pressure adaptation state (constants above). ``_slots`` tracks the
-        # live per-layer size; ``_orig_slots`` is the sized capacity targets
-        # are computed against.
-        self._per_expert = {li: per_expert[li] for li in self._layers}
-        self._orig_slots = dict(self._slots)
+        # Pressure adaptation state (constants above).
         self._pressure_on = os.environ.get("GMLX_DECODE_PRESSURE", "1") != "0"
-        self._pressure_steps = 0
         self._pressure_polls = 0
         self._last_step_poll = -_PRESSURE_COOLDOWN_POLLS
         self._normal_polls = 0
-        # Ring lend state: fraction of the arena kept while the prefill
-        # ring borrows wired budget for a post-decode prefill pass (see
-        # lend_for_ring). 1.0 = nothing lent.
-        self._lend_frac = 1.0
 
     def _mlock_arena(self) -> None:
         """Wire the arena. The residency policy only works if the slots
@@ -635,6 +645,9 @@ class DecodeFeeder:
                 # the arena wires into pages the OS actually has back.
                 self._clear_mlx_cache()
             self._mlock_arena()
+            # The ring is gone: layers regrow to capacity at their own
+            # stage() calls.
+            self._lend_frac = 1.0
             if env_bool("GMLX_GPU_RESIDENT", True):
                 import mlx_kquant as kq
 
@@ -671,6 +684,17 @@ class DecodeFeeder:
         if frac >= self._lend_frac:
             return
         self._lend_frac = frac
+        freed = self._shrink_now()
+        print(
+            f"[stream] decode arena lends {freed / 1e9:.1f} GB to the "
+            f"prefill ring (kept {self.arena_bytes / 1e9:.1f} GB); "
+            "restored at next decode"
+        )
+
+    def _shrink_now(self) -> int:
+        """Resize every layer down to its current target now. Eager,
+        unlike the lazy per-layer resize at stage(): the caller needs the
+        bytes before its next allocation. Returns the bytes freed."""
         try:
             import mlx.core as mx
 
@@ -685,11 +709,39 @@ class DecodeFeeder:
             if target < self._slots[li]:
                 freed += (self._slots[li] - target) * self._per_expert[li]
                 self._resize_layer(li, target)
+        return freed
+
+    # governor protocol (gmlx.serve.governor.register_cache)
+
+    def governor_bytes(self) -> int:
+        """Bytes the governor may reclaim: the arena above the pressure
+        ladder's floor."""
+        return max(
+            0, self.arena_bytes - self._arena_bytes_at(_PRESSURE_MAX_STEPS))
+
+    def governor_evict(self, fraction: float) -> int:
+        """Shrink the arena by ``fraction`` of the ladder toward its floor,
+        keeping each layer's most popular residents. Returns the bytes
+        freed. Regrow is the pressure ladder's, gated on the governor's
+        headroom (see _regrow_headroom_ok), so a shrink the governor asked
+        for does not bounce back into the pressure that caused it."""
+        if fraction <= 0 or not self._layers:
+            return 0
+        steps = min(_PRESSURE_MAX_STEPS,
+                    max(self._pressure_steps,
+                        int(math.ceil(fraction * _PRESSURE_MAX_STEPS))))
+        if steps <= self._pressure_steps:
+            return 0
+        self._pressure_steps = steps
+        self._last_step_poll = self._pressure_polls
+        self._normal_polls = 0
+        freed = self._shrink_now()
         print(
-            f"[stream] decode arena lends {freed / 1e9:.1f} GB to the "
-            f"prefill ring (kept {self.arena_bytes / 1e9:.1f} GB); "
-            "restored at next decode"
+            f"[stream] decode arena shrinks {freed / 1e9:.1f} GB for the "
+            f"memory governor (kept {self.arena_bytes / 1e9:.1f} GB); "
+            "regrows when headroom returns"
         )
+        return freed
 
     def stage(self, li: int, ids: np.ndarray) -> np.ndarray | None:
         """Map router expert ids to arena slots, pulling misses from the GGUF
@@ -704,7 +756,8 @@ class DecodeFeeder:
         in-flight gather references this layer's arena (see module docstring).
         """
         keepwarm.touch()
-        if self._pressure_on and self._calls % _PRESSURE_POLL_EVERY == 0:
+        if ((self._pressure_on or self._pressure_steps)
+                and self._calls % _PRESSURE_POLL_EVERY == 0):
             self._poll_pressure()
         uniq = np.unique(ids.reshape(-1))
         if self._routed_log is not None and ids.size <= 64:
@@ -1374,7 +1427,9 @@ class DecodeFeeder:
         )
 
     def _poll_pressure(self) -> None:
-        level = _pressure_level()
+        # With pressure polling off only a governor shrink reaches here,
+        # and it regrows on the same clock; the kernel level is not read.
+        level = _pressure_level() if self._pressure_on else 0
         self._pressure_polls += 1
         if level >= 2:
             self._normal_polls = 0
@@ -1429,7 +1484,23 @@ class DecodeFeeder:
             ram = int(mx.device_info()["memory_size"])
         except Exception:
             pass
-        return avail >= need + _ram_floor_bytes(ram or avail)
+        if avail < need + _ram_floor_bytes(ram or avail):
+            return False
+        return self._governor_room_ok(need)
+
+    def _governor_room_ok(self, need: int) -> bool:
+        """Regrow only while the governor keeps half the KV room after
+        it; MLX counts the arena, so a regrow into headroom the batch is
+        about to use would be shed straight back."""
+        try:
+            from gmlx.stream.budget import governor_headroom_bytes
+
+            head = governor_headroom_bytes()
+        except Exception:
+            return True
+        if head is None:
+            return True
+        return head - need >= 0.5 * self._room_bytes
 
     def _clear_mlx_cache(self) -> None:
         """The arena's own buffers bypass MLX's allocator, but its cache of
@@ -1484,7 +1555,8 @@ class DecodeFeeder:
             self._arena[key] = a
             self._views[key] = a[0].reshape((new_s,) + shape[1:])
             self.arena_bytes += (new_s - old_s) * stride
-            self._mlock_buf(key)
+            if not self._mlock_deferred:
+                self._mlock_buf(key)
         if resident:
             kq.residency_commit()
         self._owner[li] = new_owner
@@ -1648,7 +1720,8 @@ def _register_exit_close(feeder) -> None:
 
 
 def maybe_make_decode_feeder(
-    offsets, modules, arena_bytes: int, stats_verbose: bool | None = None
+    offsets, modules, arena_bytes: int, stats_verbose: bool | None = None,
+    lend_bytes: int = 0,
 ) -> DecodeFeeder | None:
     """A DecodeFeeder over the coverable layers, or None with a printed
     reason (opt-in feature: silence would read as 'enabled')."""
@@ -1668,7 +1741,8 @@ def maybe_make_decode_feeder(
         if arena_bytes < (1 << 30):
             raise RuntimeError(
                 f"arena budget too small ({arena_bytes / 1e9:.1f} GB)")
-        feeder = DecodeFeeder(offsets, modules, arena_bytes, stats_verbose)
+        feeder = DecodeFeeder(
+            offsets, modules, arena_bytes, stats_verbose, lend_bytes=lend_bytes)
         # CLI runs never tear the feeder down explicitly and __del__ is
         # not reliable at interpreter exit, so the hit-rate/prestage stats
         # lines would silently vanish; close() is idempotent, so the

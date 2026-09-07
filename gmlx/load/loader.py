@@ -1233,11 +1233,6 @@ def _arena_split_max_tokens() -> int:
     return env_int("GMLX_ARENA_SPLIT_MAX_TOKENS", 256)
 
 
-# 0.7 left the serve governor no headroom on a stock 128 GB working
-# set (issue #49); the arena is MLX-tracked and counts against it.
-_DECODE_ARENA_RAM_FRAC_DEFAULT = 0.6
-
-
 def _available_ram_bytes(include_inactive: bool = True) -> int | None:
     """RAM this process can take without swapping anyone's anonymous memory:
     free + purgeable + the file-backed page cache (macOS ``vm_stat``). A
@@ -1303,30 +1298,32 @@ def _ram_floor_bytes(ram: int | None) -> int:
 
 
 def _decode_arena_bytes(
-    total_bytes: int, offsets, budget: int | None, ring_bytes: int = 0,
+    total_bytes: int, offsets, budget: int | None, room_bytes: int | None = None,
     pinned_bytes: int = 0, streamable_bytes: int = 0,
     cast_dead_bytes: int = 0,
 ) -> int:
-    """Arena budget for the decode feeder, under two hardware-derived
-    ceilings: the GPU working-set budget, and a fraction of physical RAM
-    (``GMLX_DECODE_ARENA_RAM_FRAC``). The second exists because the arena is
-    host anonymous memory - under pressure the kernel pages its cold slots
-    out to swap rather than shrink other demand, and an arena hit that
-    faults from swap is slower than reading the GGUF; the fraction leaves
-    room for the non-expert weights' mmap, KV, the page cache and the rest
-    of the system on any RAM size. Both ceilings then pay for the
-    non-expert weights (everything that is not a routed-expert stack, which
-    GPU work wires on its own) and a KV/runtime reserve, and the result is
-    capped at the
-    expert bytes themselves - a model whose experts fit goes fully
-    resident. ``GMLX_DECODE_ARENA_GB`` overrides the ceilings but is still
-    clamped to what is reclaimable minus the floor - an arena wired past
-    that starves the page cache every buffered read path depends on
-    (``GMLX_DECODE_ARENA_FORCE=1`` restores the unclamped behavior).
+    """Arena budget for the decode feeder: what the memory ceiling leaves
+    after the non-expert weights and the KV room, clamped to the RAM
+    reclaimable right now, and capped at the expert bytes themselves (a
+    model whose experts fit goes fully resident).
+
+    The ceiling is the serve governor's (``gmlx.stream.budget``), so the
+    arena, the prefill ring it lends to and the KV cache share one budget:
+    at decode the governor's headroom is the room minus live KV, whatever
+    the box's working-set ratio or the quant's ring size. ``room_bytes``
+    is the priced KV room (``budget.kv_room_bytes``); None keeps the flat
+    legacy reserve. ``GMLX_DECODE_ARENA_RAM_FRAC`` caps the ceiling at a
+    fraction of physical RAM when set. ``GMLX_DECODE_ARENA_GB`` overrides
+    the ceilings but is still clamped to what is reclaimable minus the
+    floor - an arena wired past that starves the page cache every buffered
+    read path depends on (``GMLX_DECODE_ARENA_FORCE=1`` restores the
+    unclamped behavior).
 
     A second live streaming install needs no term here: mlock moves a page
     out of the file-backed count and an arena is anonymous, so the
     reclaimable snapshot already excludes both."""
+    from gmlx.stream.budget import ceiling_bytes, legacy_room_bytes
+
     env = os.environ.get("GMLX_DECODE_ARENA_GB")
     if env:
         want = int(float(env) * (1 << 30))
@@ -1351,17 +1348,15 @@ def _decode_arena_bytes(
         return want
     if budget is None:
         return 0
-    ceiling = budget
+    ceiling = int(ceiling_bytes() or budget)
     ram = None
     try:
         ram = int(mx.device_info()["memory_size"])
-        frac = float(
-            os.environ.get("GMLX_DECODE_ARENA_RAM_FRAC", "")
-            or _DECODE_ARENA_RAM_FRAC_DEFAULT
-        )
-        ceiling = min(ceiling, int(frac * ram))
     except Exception:
         pass
+    frac = os.environ.get("GMLX_DECODE_ARENA_RAM_FRAC", "")
+    if frac and ram:
+        ceiling = min(ceiling, int(float(frac) * ram))
     expert_bytes = sum(r[2] for ranges in offsets.values() for r in ranges)
     # Streamable components are page-cache citizens like the experts;
     # charging them as non-expert would zero the arena. Cast tensors cost
@@ -1370,31 +1365,22 @@ def _decode_arena_bytes(
     # .cast_copies), so charging it would cancel the pin it just freed.
     non_expert_bytes = max(
         0, total_bytes - expert_bytes - streamable_bytes - cast_dead_bytes)
-    reserve = int(
-        float(os.environ.get("GMLX_DECODE_KV_RESERVE_GB", "8") or 8) * (1 << 30)
-    )
-    # The prefill ring's wired budget is time-shared with the arena, not
-    # spent: the first decode releases the ring and wires the arena, and a
-    # later prefill borrows it back through the lend (DecodeFeeder
-    # .lend_for_ring). Crediting it against the static ceilings is what
-    # keeps a large pinned model from sizing its arena to zero and
-    # decoding on the page-cache path with most of RAM wired.
-    arena = ceiling + ring_bytes - non_expert_bytes - reserve
-    # Third ceiling: what is reclaimable right now. The fraction assumes an
-    # otherwise idle machine; co-resident workloads shrink the offer, and a
-    # wired arena sized past it would evict them to swap. The floor keeps a
-    # breathing margin for the system. This is a live post-pin snapshot:
-    # already-wired weights are out of it, so only the still-unwired share
-    # of the non-expert set is charged (charging all of it double-counted
-    # the pin and zeroed the arena on exactly the models that need it).
-    # No ring credit either - the untouched ring has no physical cost yet,
-    # and once it wires, the first decode's handoff keeps the sum constant.
+    room = int(room_bytes) if room_bytes is not None else legacy_room_bytes()
+    arena = ceiling - non_expert_bytes - room
+    # Second ceiling: what is reclaimable right now. The governor ceiling
+    # assumes an otherwise idle machine; co-resident workloads shrink the
+    # offer, and a wired arena sized past it would evict them to swap. The
+    # floor keeps a breathing margin for the system. This is a live
+    # post-pin snapshot: already-wired weights are out of it, so only the
+    # still-unwired share of the non-expert set is charged (charging all
+    # of it double-counted the pin and zeroed the arena on exactly the
+    # models that need it).
     avail = _available_ram_bytes()
     if avail is not None:
         unpinned = max(0, non_expert_bytes - pinned_bytes)
         arena = min(
             arena,
-            avail - _ram_floor_bytes(ram or avail) - reserve - unpinned,
+            avail - _ram_floor_bytes(ram or avail) - room - unpinned,
         )
     return min(max(0, arena), expert_bytes)
 
@@ -2472,17 +2458,25 @@ def install_expert_streaming(
         from gmlx.stream.decode_feeder import maybe_make_decode_feeder
 
         pin = getattr(model, "_kq_weights_pin", None)
+        from gmlx.stream.budget import ceiling_bytes, kv_room_bytes
         from gmlx.stream.table_stream import streamed_table_bytes
 
+        room = kv_room_bytes(gguf_path)
         arena = _decode_arena_bytes(
             total_bytes, prefetcher.offsets, budget,
-            ring_bytes=2 * feeder.slot_bytes if feeder is not None else 0,
+            room_bytes=room.bytes,
             pinned_bytes=getattr(pin, "pinned_bytes", 0),
             streamable_bytes=streamed_table_bytes(model),
             cast_dead_bytes=cast_dead_bytes)
+        # The prefill ring borrows its bytes from the arena from the start
+        # (DecodeFeeder lend), so the two never sum past the budget while
+        # the ring is live; the first decode releases the ring and the
+        # arena regrows to its sized capacity.
         dfeeder = maybe_make_decode_feeder(
-            prefetcher.offsets, moe_modules, arena, stats_verbose)
+            prefetcher.offsets, moe_modules, arena, stats_verbose,
+            lend_bytes=2 * feeder.slot_bytes if feeder is not None else 0)
         if dfeeder is not None:
+            dfeeder._room_bytes = room.bytes
             n_cov = sum(dfeeder.covers(li) for li in moe_modules)
             for li, mods in moe_modules.items():
                 if dfeeder.covers(li):
@@ -2493,7 +2487,8 @@ def install_expert_streaming(
             # wires itself the moment this model decodes, and a second
             # install that sized against the unwired window would find the
             # memory gone before it ever ran.
-            _installs.record(model, dfeeder.arena_bytes)
+            _installs.record(model, dfeeder.nominal_bytes)
+            _installs.record_arena(dfeeder)
             if feeder is not None:
                 # First decode call swaps the wired budget: prefill ring
                 # freed, arena wired (DecodeFeeder.ensure_wired). A later
@@ -2511,9 +2506,27 @@ def install_expert_streaming(
                 else f" on {n_cov}/{len(moe_modules)} layers"
             )
             loadlog.info(
-                f"[stream] decode feeder: {dfeeder.arena_bytes / 1e9:.1f} GB "
+                f"[stream] decode feeder: {dfeeder.nominal_bytes / 1e9:.1f} GB "
                 f"popularity-managed expert arena ({wired}){cov} "
                 "(--no-decode-feeder disables, GMLX_DECODE_ARENA_GB sizes)"
+            )
+            ceiling = ceiling_bytes() or budget
+            expert_bytes = sum(
+                r[2] for rs in prefetcher.offsets.values() for r in rs)
+            room_how = (
+                f"{room.depth} tokens x {room.width}: kv "
+                f"{room.kv_bytes / 1e9:.1f} + prefill "
+                f"{room.transient_bytes / 1e9:.1f} + reserve "
+                f"{room.reserve_bytes / 1e9:.1f}"
+                if room.priced else "flat GMLX_DECODE_KV_RESERVE_GB")
+            # Always visible, like the pin line: the one line a memory
+            # report needs.
+            print(
+                f"[stream] memory budget: ceiling {ceiling / 1e9:.1f} GB = "
+                f"every-token {(total_bytes - expert_bytes) / 1e9:.1f} + "
+                f"arena {dfeeder.nominal_bytes / 1e9:.1f} + kv room "
+                f"{room.bytes / 1e9:.1f} ({room_how}); GMLX_STREAM_KV_CTX "
+                "sizes the room"
             )
             rate = getattr(dfeeder, "_probe_bps", 0.0)
             measured = (

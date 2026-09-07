@@ -75,7 +75,7 @@ def _fake_arena_alloc(shape):
 
 
 def _make_feeder(monkeypatch, tmp_path, slots_per_layer=2, n_layers=2,
-                 pressure=False, fast_disk="off"):
+                 pressure=False, fast_disk="off", lend_bytes=0):
     import mlx_kquant as kq
     from gmlx.stream.decode_feeder import DecodeFeeder
 
@@ -95,7 +95,8 @@ def _make_feeder(monkeypatch, tmp_path, slots_per_layer=2, n_layers=2,
     offsets, modules = _make_fixture(tmp_path, n_layers)
     per_expert = sum(_STRIDE.values())
     return DecodeFeeder(
-        offsets, modules, arena_bytes=slots_per_layer * per_expert * n_layers
+        offsets, modules, arena_bytes=slots_per_layer * per_expert * n_layers,
+        lend_bytes=lend_bytes,
     ), modules
 
 
@@ -298,22 +299,18 @@ def test_arena_budget_math(monkeypatch):
     assert got == (80 << 30) - (20 << 30) - (8 << 30)
     assert _decode_arena_bytes(85 << 30, offsets, budget=200 << 30) == 80 << 30
     assert _decode_arena_bytes(60 << 30, offsets, budget=None) == 0
-    # The prefill ring's bytes are credited: its wired budget is
-    # time-shared with the arena (released at first decode, lent back on
-    # later prefill passes), so a pinned model whose ceiling barely covers
-    # the non-expert bytes still gets an arena instead of zero.
+    # The KV room replaces the flat reserve when the caller prices it.
     got = _decode_arena_bytes(
-        100 << 30, offsets, budget=30 << 30, ring_bytes=10 << 30)
-    assert got == (40 << 30) - (20 << 30) - (8 << 30)
+        100 << 30, offsets, budget=40 << 30, room_bytes=10 << 30)
+    assert got == (40 << 30) - (20 << 30) - (10 << 30)
     assert _decode_arena_bytes(
-        100 << 30, offsets, budget=25 << 30, ring_bytes=2 << 30) == 0
-    # RAM-fraction ceiling binds when physical RAM is the scarce resource.
+        100 << 30, offsets, budget=25 << 30, room_bytes=6 << 30) == 0
+    # A RAM fraction caps the ceiling only when the user asks for one.
     monkeypatch.setattr(
         mx, "device_info", lambda: {"memory_size": 100 << 30}
     )
     got = _decode_arena_bytes(100 << 30, offsets, budget=90 << 30)
-    frac = gmlx.load.loader._DECODE_ARENA_RAM_FRAC_DEFAULT
-    assert got == int(frac * (100 << 30)) - (20 << 30) - (8 << 30)
+    assert got == (90 << 30) - (20 << 30) - (8 << 30)
     monkeypatch.setenv("GMLX_DECODE_ARENA_RAM_FRAC", "0.8")
     got = _decode_arena_bytes(100 << 30, offsets, budget=90 << 30)
     assert got == int(0.8 * (100 << 30)) - (20 << 30) - (8 << 30)
@@ -1630,3 +1627,82 @@ def test_lend_skips_wedged_layers(monkeypatch, tmp_path):
     feeder._wedged_layers.add(0)
     feeder.lend_for_ring(feeder.arena_bytes // 2)
     assert feeder._slots[0] == 4 and feeder._slots[1] == 2
+
+
+def test_ring_lent_at_birth_repaid_at_first_decode(monkeypatch, tmp_path):
+    """The prefill ring is born out of the arena's budget: slots start at
+    the lent target and regrow only once ensure_wired drops the ring."""
+    per_expert = sum(_STRIDE.values())
+    feeder, _ = _make_feeder(
+        monkeypatch, tmp_path, slots_per_layer=4, lend_bytes=2 * per_expert)
+    assert feeder.nominal_bytes == 8 * per_expert
+    assert feeder._slots == {0: 3, 1: 3}
+    assert feeder.arena_bytes == 6 * per_expert
+    feeder.stage(0, np.array([0, 1]))
+    assert feeder._slots[0] == 3
+    feeder.ensure_wired()
+    feeder.stage(0, np.array([0, 1]))
+    assert feeder._slots == {0: 4, 1: 3}
+    assert feeder.arena_bytes == 7 * per_expert
+
+
+def test_governor_evict_walks_the_ladder(monkeypatch, tmp_path):
+    per_expert = sum(_STRIDE.values())
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4)
+    for e in (0, 1, 2, 0):
+        feeder.stage(0, np.array([e]))
+    floor = 2 * per_expert  # one slot per layer
+    assert feeder.governor_bytes() == feeder.arena_bytes - floor
+    assert feeder.governor_evict(0.5) == 4 * per_expert  # two steps
+    assert feeder._slots == {0: 2, 1: 2}
+    assert feeder.governor_evict(0.4) == 0  # never steps back up
+    assert feeder.governor_evict(1.0) == 2 * per_expert
+    assert feeder.arena_bytes == floor and feeder.governor_bytes() == 0
+    assert feeder.governor_evict(1.0) == 0
+    assert feeder.locked_bytes == 0  # not wired yet: resize must not mlock
+    s = int(feeder._slot_of[0][0])  # the hottest expert survives
+    assert s >= 0
+    for kind in _KINDS:
+        assert _arena_slot(feeder, 0, kind, s) == _expert_bytes(0, kind, 0)
+
+
+def test_regrow_waits_for_governor_room(monkeypatch, tmp_path):
+    import gmlx.stream.budget as budget
+
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4)
+    monkeypatch.setattr(
+        gmlx.load.loader, "_available_ram_bytes",
+        lambda include_inactive=True: 1 << 40)
+    feeder.governor_evict(1 / 3)
+    assert feeder._pressure_steps == 1
+    need = feeder._arena_bytes_at(0) - feeder.arena_bytes
+    feeder._room_bytes = 10 << 30
+    head = {"v": need + (5 << 30) - 1}
+    monkeypatch.setattr(budget, "governor_headroom_bytes", lambda: head["v"])
+    assert not feeder._regrow_headroom_ok()
+    head["v"] = need + (5 << 30)
+    assert feeder._regrow_headroom_ok()
+    head["v"] = None
+    assert feeder._regrow_headroom_ok()
+
+
+def test_governor_shrink_regrows_with_pressure_polling_off(monkeypatch, tmp_path):
+    import gmlx.stream.budget as budget
+
+    level = {"v": 4}  # would shrink further if the level were read
+    _pressure_setup(monkeypatch, level, regrow_polls=2)
+    monkeypatch.setattr(
+        gmlx.load.loader, "_available_ram_bytes",
+        lambda include_inactive=True: 1 << 40)
+    monkeypatch.setattr(budget, "governor_headroom_bytes", lambda: None)
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4)
+    assert not feeder._pressure_on
+    feeder.governor_evict(1 / 3)
+    assert feeder._pressure_steps == 1 and feeder._slots[0] == 3
+    feeder.stage(0, np.array([0]))
+    feeder.stage(0, np.array([0]))
+    assert feeder._pressure_steps == 0
+    feeder.stage(0, np.array([0]))
+    assert feeder._slots[0] == 4
+    feeder.stage(0, np.array([0]))
+    assert feeder._pressure_steps == 0  # the level stays unread

@@ -287,11 +287,22 @@ def install_runtime_snapshot_enrichment() -> None:
             from gmlx.gen.prefill_decay import headroom_bytes
 
             head = headroom_bytes()
-            base["memory"] = {
+            mem = {
                 "active_bytes": int(mx.get_active_memory()),
                 "cache_bytes": int(mx.get_cache_memory()),
                 "headroom_bytes": None if head is None else int(head),
             }
+            from gmlx.stream.installs import live_arenas
+
+            arenas = live_arenas()
+            if arenas:
+                mem["arena_bytes"] = sum(int(f.arena_bytes) for f in arenas)
+                mem["arena_nominal_bytes"] = sum(
+                    int(getattr(f, "nominal_bytes", f.arena_bytes))
+                    for f in arenas)
+                mem["kv_room_bytes"] = sum(
+                    int(getattr(f, "_room_bytes", 0)) for f in arenas)
+            base["memory"] = mem
         except Exception:
             pass
         try:

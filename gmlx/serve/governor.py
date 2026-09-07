@@ -58,10 +58,13 @@ Registered-cache protocol: anything holding resident GPU bytes
 registers ``bytes()`` (backed by the _BaseCache.nbytes contract) and
 ``evict(fraction) -> freed bytes``. The governor trusts neither
 beyond the counters. The serve APC manager self-registers at first
-governed tick. Registered bytes are sampled on a slow cadence
-(every 16 ticks and at band transitions); the per-tick trajectory
-rides the free counters and the admission-path rate stash, never a
-vars() walk.
+governed tick, and so does a streaming model's decode arena
+(DecodeFeeder.governor_evict shrinks it toward its pressure floor;
+it regrows only into headroom the governor is not using), so orange
+and red reclaim decode speed before they fail a row. Registered
+bytes are sampled on a slow cadence (every 16 ticks and at band
+transitions); the per-tick trajectory rides the free counters and
+the admission-path rate stash, never a vars() walk.
 
 Threading: everything here runs on the engine thread inside the
 ``_next`` wrapper; remove() is engine-stream-scoped by upstream and
@@ -363,7 +366,11 @@ def _demand_bytes(gen, st: _GovState) -> tuple:
     transient) is charged against headroom once; multiplying it into
     the rate math turns a deep pending prompt batch into a false
     collision."""
-    rates = getattr(gen, "_kq_admit_kv_rates", None) or {}
+    rates = getattr(gen, "_kq_admit_kv_rates", None)
+    if not rates:
+        from .capacity import boot_kv_rates
+
+        rates = boot_kv_rates()
     rate_sum = sum(k.get("rate", 0.0) for k in rates.values())
     rows = batch_rows(gen)
     rate = rate_sum * rows * max(st.tok_ema, 1.0)
@@ -619,6 +626,7 @@ def _governor_tick(gen) -> None:
     min_dwell = _env_f("GMLX_GOV_MIN_DWELL_S", 2.0)
 
     _maybe_register_apc(gen)
+    _maybe_register_arena(gen)
     head, ws = _headroom_and_ws(margin)
     if head is None:
         return
@@ -863,6 +871,46 @@ def _maybe_register_apc(gen) -> None:
 
     register_cache("apc", _bytes, _evict)
     _APC_REGISTERED = True
+
+
+def _arena_name(feeder) -> str:
+    return f"arena:{id(feeder)}"
+
+
+def _maybe_register_arena(gen) -> None:
+    """Self-register a streaming model's decode arena the first time a
+    governed tick sees it. The arena is MLX-tracked and the largest
+    reclaimable block on an over-RAM model; shrinking it costs decode
+    speed, where a shed costs a request."""
+    model = getattr(gen, "model", None)
+    if model is None:
+        return
+    try:
+        from gmlx.stream.installs import streaming_owner
+
+        feeder = getattr(streaming_owner(model), "_kq_decode_feeder", None)
+    except Exception:
+        return
+    if feeder is None or not hasattr(feeder, "governor_evict"):
+        return
+    name = _arena_name(feeder)
+    if name in _REG:
+        return
+    ref = weakref.ref(feeder)
+
+    def _bytes():
+        f = ref()
+        return f.governor_bytes() if f is not None else 0
+
+    def _evict(fraction):
+        f = ref()
+        return f.governor_evict(fraction) if f is not None else 0
+
+    register_cache(name, _bytes, _evict)
+
+
+def unregister_arena(feeder) -> None:
+    unregister_cache(_arena_name(feeder))
 
 
 def install_governor() -> bool:

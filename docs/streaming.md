@@ -154,13 +154,21 @@ Streaming models engage two feeder paths by default:
   53-token prompt's time-to-first-token dropped from 19.4 s to 11.4 s).
 - The decode feeder (`--stream-experts` only; `--no-decode-feeder`
   disables) keeps the most-routed experts of every layer in a wired,
-  popularity-managed GPU arena sized to the machine (`GMLX_DECODE_ARENA_GB`
-  overrides) and reads only the misses from the GGUF, at SSD queue depth. The
-  arena starts empty and converges within a few dozen tokens. The arena is
-  wired, so it also polices itself. Under system memory pressure (another
-  model, a build) it shrinks, keeping its most popular experts, and regrows
-  once pressure clears, so a long-running model coexists with a machine
-  that is doing other work (`GMLX_DECODE_PRESSURE=0` pins it instead).
+  popularity-managed GPU arena and reads only the misses from the GGUF, at
+  SSD queue depth. The arena is sized to what the serve memory governor's
+  ceiling leaves after the every-token weights and a KV room priced from
+  the header (`GMLX_STREAM_KV_CTX` tokens, default 32768, plus the prefill
+  transient and the admission reserve), then clamped to the RAM reclaimable
+  at load; `GMLX_DECODE_ARENA_GB` overrides it outright. The prefill ring
+  is lent out of the same bytes, so ring and arena together never exceed
+  the ceiling. The arena starts empty and converges within a few dozen
+  tokens. The arena is wired, so it also polices itself. Under system
+  memory pressure (another model, a build) it shrinks, keeping its most
+  popular experts, and regrows once pressure clears and the governor has
+  its room back, so a long-running model coexists with a machine that is
+  doing other work (`GMLX_DECODE_PRESSURE=0` pins it instead). Under
+  `gmlx serve` the governor shrinks it the same way before it sheds a
+  request.
   Same model and box as the prefill measurement above: decode went from 2.4
   tok/s on the page-cache path to 4.0 tok/s averaged over a 512-token
   generation (~4.7 steady, ~90% arena hits), against 3.0 tok/s for

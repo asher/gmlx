@@ -181,24 +181,19 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None,
     params reprice the quantized layers."""
     import mlx.core as mx
 
-    from .mem_preflight import (_get, _lm_config, config_geometry,
-                                kv_layer_costs, prompt_kv_bytes)
+    from .mem_preflight import prompt_kv_bytes
     from .memory import admit_reserve_bytes
-    from gmlx.commands.tool_preflight import _shards, _synth_config
+    from gmlx.commands.tool_preflight import _shards
 
     try:
         shards = _shards(gguf_path)
         weights = (float(weight_bytes) if weight_bytes else
                    float(sum(os.path.getsize(p) for p in shards)))
-        cfg = _synth_config(shards[0])
-        model = SimpleNamespace(config=cfg)
-        geometry = config_geometry(_lm_config(model)) if cfg else None
-        costs = kv_layer_costs(
-            model, per_layer_bpe=_boot_bpe_vector(geometry, env, gguf_path),
-            geometry=geometry) if geometry else None
+        priced = boot_costs(gguf_path, env)
         ws = working_set_bytes()
-        if not (cfg and costs and ws):
+        if not (priced and ws):
             return None
+        cfg, costs, heads = priced
         info = mx.device_info()
         max_buffer = float(info.get("max_buffer_length", 0) or 0)
         resource_limit = int(info.get("resource_limit", 0) or 0)
@@ -206,8 +201,6 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None,
         _log.debug("capacity derivation skipped", exc_info=True)
         return None
 
-    heads = _get(_lm_config(model), "num_attention_heads")
-    heads = heads if isinstance(heads, int) and heads > 0 else None
     budget = ceiling_bytes(ws)
     reserve = admit_reserve_bytes(ws)
 
@@ -257,8 +250,49 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None,
         "trained_ctx": trained if isinstance(trained, int) else None,
         "max_ctx": ctx_by_width,
         "max_width_at_depth": width_at_depth,
+        "kv_costs": [(w, float(bpt)) for w, bpt in costs],
         "overcommit": overcommit(),
     }
+
+
+def boot_costs(gguf_path: str, env: dict | None = None):
+    """``(config, kv_layer_costs, attention heads)`` priced from the GGUF
+    header under the model's env window, or None when the header cannot
+    be read. The one cost model the boot table, the streaming KV room and
+    the seeded admission rates share."""
+    from .mem_preflight import (_get, _lm_config, config_geometry,
+                                kv_layer_costs)
+    from gmlx.commands.tool_preflight import _shards, _synth_config
+
+    try:
+        cfg = _synth_config(_shards(gguf_path)[0])
+        model = SimpleNamespace(config=cfg)
+        geometry = config_geometry(_lm_config(model)) if cfg else None
+        costs = kv_layer_costs(
+            model, per_layer_bpe=_boot_bpe_vector(geometry, env, gguf_path),
+            geometry=geometry) if geometry else None
+    except Exception:
+        return None
+    if not (cfg and costs):
+        return None
+    heads = _get(_lm_config(model), "num_attention_heads")
+    heads = heads if isinstance(heads, int) and heads > 0 else None
+    return cfg, costs, heads
+
+
+def boot_kv_rates() -> dict:
+    """Admission rates for a model with no measured batch yet, one
+    synthetic kind per KV window, from the installed table. Empty when no
+    table is installed; live measurements replace them at the first
+    ``update_kv_rates``."""
+    t = _TABLE
+    if not t or not t.get("kv_costs"):
+        return {}
+    out: dict = {}
+    for window, bpt in t["kv_costs"]:
+        k = out.setdefault(f"_boot:{window}", {"rate": 0.0, "window": window})
+        k["rate"] += float(bpt)
+    return out
 
 
 def _log_table(t: dict) -> None:

@@ -29,6 +29,10 @@ STREAM_ATTRS = (
 # (weakref to the owner module, committed wired bytes).
 _LIVE: list[tuple[weakref.ref, int]] = []
 
+# Weakrefs to the live decode feeders: their arenas are MLX-tracked and
+# the admission preflight and /v1/metrics read them live.
+_ARENAS: list[weakref.ref] = []
+
 
 def streaming_owner(model):
     """The module the loader hung the streaming helpers on. The served
@@ -93,6 +97,28 @@ def live_wired_bytes() -> int:
     return sum(n for _, n in _sweep())
 
 
+def record_arena(feeder) -> None:
+    try:
+        _ARENAS.append(weakref.ref(feeder))
+    except TypeError:
+        return
+
+
+def _open(f) -> bool:
+    return f is not None and not getattr(f, "_closed", False)
+
+
+def live_arenas() -> list:
+    """The decode feeders still open, dead and closed refs pruned."""
+    _ARENAS[:] = [r for r in _ARENAS if _open(r())]
+    return [f for f in (r() for r in _ARENAS) if f is not None]
+
+
+def live_arena_bytes() -> int:
+    """MLX-tracked bytes the live decode arenas hold right now."""
+    return sum(int(getattr(f, "arena_bytes", 0) or 0) for f in live_arenas())
+
+
 def release(model) -> None:
     """Tear one model's streaming install down now: close the prefetcher
     and the feeders (shard fds, staging pools, the mlocked arena) and
@@ -118,5 +144,6 @@ def release(model) -> None:
         except Exception:
             pass
     _LIVE[:] = [(r, n) for r, n in _LIVE if r() is not model]
+    _ARENAS[:] = [r for r in _ARENAS if _open(r())]
     del owner, model
     gc.collect()

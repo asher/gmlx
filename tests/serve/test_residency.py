@@ -592,3 +592,31 @@ def test_stats_in_flight_excludes_retained_holds():
     row = pool.stats()["resident"][0]
     assert (row["busy"], row["in_flight"]) == (2, 1)
     pool.mark_retained(SimpleNamespace(_entry=None))   # tolerated
+
+
+def test_build_prices_the_decode_arena_into_the_table(monkeypatch):
+    from types import SimpleNamespace
+
+    import gmlx.serve.capacity as cap
+
+    calls = []
+    monkeypatch.setattr(
+        cap, "install_boot_table",
+        lambda path, b, label, env=None: calls.append(int(b)))
+    proxy = _RuntimeProxy(_FakeOriginal())
+    feeder = SimpleNamespace(nominal_bytes=int(5 * GB))
+
+    def fake_stock_get(model_path, adapter_path, *, model_kind="auto"):
+        proxy.response_generator = SimpleNamespace(
+            model=SimpleNamespace(_kq_decode_feeder=feeder))
+        proxy.model_cache = {
+            "cache_key": (model_path, adapter_path, model_kind),
+            "model_path": model_path,
+            "model": "M",
+        }
+
+    pool = _ResidencyPool(
+        proxy, fake_stock_get, lambda: True, int(100 * GB), (),
+        footprint_fn=lambda p: int(20 * GB))
+    acquire(pool, "a")
+    assert calls == [int(20 * GB), int(25 * GB)]
