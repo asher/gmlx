@@ -63,32 +63,49 @@ def legacy_room_bytes() -> int:
     return int(float(raw or _LEGACY_RESERVE_GB) * (1 << 30))
 
 
-def kv_room_bytes(gguf_path: str | None, env: dict | None = None) -> KvRoom:
-    """The KV room to leave outside the arena. A flat legacy reserve when
-    the header cannot be priced or ``GMLX_DECODE_KV_RESERVE_GB`` is set."""
+def transient_bytes(ws: float) -> float:
+    """The prefill score transient the decay policy allows on a box with
+    working set ``ws``: the env cap when set, else 2 GB or 5 percent."""
+    from gmlx.gen.prefill_decay import _env_cap_bytes
+
+    env = _env_cap_bytes()
+    return env if env is not None else max(2e9, 0.05 * float(ws))
+
+
+def price_room(costs, trained_ctx, ws: float, transient: float) -> KvRoom:
+    """The KV room from priced per-layer costs. A flat legacy reserve
+    when ``costs`` is None or ``GMLX_DECODE_KV_RESERVE_GB`` is set."""
+    from gmlx.serve.mem_preflight import prompt_kv_bytes
+    from gmlx.serve.memory import admit_reserve_bytes
+
     depth = max(1, env_int("GMLX_STREAM_KV_CTX", _DEFAULT_CTX))
     width = max(1, env_int("GMLX_STREAM_KV_WIDTH", 1))
     flat = KvRoom(legacy_room_bytes(), depth, width, 0, 0, 0, priced=False)
-    if os.environ.get("GMLX_DECODE_KV_RESERVE_GB", "") or not gguf_path:
+    if os.environ.get("GMLX_DECODE_KV_RESERVE_GB", "") or not costs or not ws:
         return flat
+    if isinstance(trained_ctx, int) and trained_ctx > 0:
+        depth = min(depth, trained_ctx)
+    kv = int(prompt_kv_bytes(costs, depth) * width)
+    reserve = int(admit_reserve_bytes(ws))
+    return KvRoom(kv + int(transient) + reserve, depth, width, kv,
+                  int(transient), reserve, priced=True)
+
+
+def kv_room_bytes(gguf_path: str | None, env: dict | None = None) -> KvRoom:
+    """The KV room to leave outside the arena. A flat legacy reserve when
+    the header cannot be priced or ``GMLX_DECODE_KV_RESERVE_GB`` is set."""
+    if os.environ.get("GMLX_DECODE_KV_RESERVE_GB", "") or not gguf_path:
+        return price_room(None, None, 0, 0)
     try:
         from gmlx.gen.prefill_decay import _cap_bytes
         from gmlx.serve.capacity import boot_costs, working_set_bytes
-        from gmlx.serve.mem_preflight import prompt_kv_bytes
-        from gmlx.serve.memory import admit_reserve_bytes
 
         priced = boot_costs(gguf_path, env)
         ws = working_set_bytes()
         if priced is None or not ws:
-            return flat
+            return price_room(None, None, 0, 0)
         cfg, costs, _ = priced
-        trained = cfg.get("max_position_embeddings")
-        if isinstance(trained, int) and trained > 0:
-            depth = min(depth, trained)
-        kv = int(prompt_kv_bytes(costs, depth) * width)
-        transient = int(_cap_bytes())
-        reserve = int(admit_reserve_bytes(ws))
+        return price_room(costs, cfg.get("max_position_embeddings"), ws,
+                          _cap_bytes())
     except Exception:
-        return flat
-    return KvRoom(kv + transient + reserve, depth, width, kv, transient,
-                  reserve, priced=True)
+        return price_room(None, None, 0, 0)

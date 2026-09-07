@@ -255,17 +255,24 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None,
     }
 
 
-def boot_costs(gguf_path: str, env: dict | None = None):
+def boot_costs(gguf_path: str | None, env: dict | None = None, *,
+               scans=None):
     """``(config, kv_layer_costs, attention heads)`` priced from the GGUF
     header under the model's env window, or None when the header cannot
-    be read. The one cost model the boot table, the streaming KV room and
-    the seeded admission rates share."""
+    be read. The one cost model the boot table, the streaming KV room,
+    the seeded admission rates and the streaming planner share. ``scans``
+    supplies the header scans (a remote header) in place of the path."""
     from .mem_preflight import (_get, _lm_config, config_geometry,
                                 kv_layer_costs)
-    from gmlx.commands.tool_preflight import _shards, _synth_config
+    from gmlx.commands.tool_preflight import (_shards, _synth_config,
+                                              synth_config_from_scans)
 
     try:
-        cfg = _synth_config(_shards(gguf_path)[0])
+        if scans is not None:
+            cfg = synth_config_from_scans(scans)
+            gguf_path = gguf_path or scans[0].path
+        else:
+            cfg = _synth_config(_shards(gguf_path)[0])
         model = SimpleNamespace(config=cfg)
         geometry = config_geometry(_lm_config(model)) if cfg else None
         costs = kv_layer_costs(
