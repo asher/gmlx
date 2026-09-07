@@ -14,9 +14,11 @@ covers the config surface and its high-value combinations:
   discovery  --models-dir header-only scan serves derived ids
   vlm        vision model + mmproj image description
   mtp        assistant drafter speculative; lossless-greedy vs base
+  stream     over-RAM MoE served with `stream: experts`: short prompts, the
+             arena and KV room in /v1/metrics, a green governor, no shed
 
 Model-dependent tiers ask the registry for a *role* (`judged`, `vlm`, `mtp_pair`,
-`mtp_native`, `lru_small`) rather than a fixed handle, so a machine that lacks the
+`mtp_native`, `lru_small`, `streaming`) rather than a fixed handle, so a machine that lacks the
 preferred model runs the tier on a stand-in instead of skipping it.
 
 The coherence-judged tiers (core/kv/template/endpoints) take the `judged` role: a 0.6B
@@ -71,6 +73,7 @@ class Scenario:
     targets: list = field(default_factory=list)
     post: list = field(default_factory=list)         # [fn(client) -> list[CheckResult]]
     notes: str = ""
+    request_timeout: float = 600.0                   # per request; a big load waits here
 
 
 # post-check helpers (closures capture expected values at build time)
@@ -335,6 +338,57 @@ def pc_hf_gate(stray_id: str) -> Callable:
         # must be refused (any non-200) and not silently served
         return [CheckResult("hf_gate_refuses", st != 200,
                             f"stray id status={st} body={str(body)[:120]}")]
+    return _check
+
+
+def _gb(v) -> str:
+    return f"{v / 1e9:.1f} GB" if isinstance(v, int) else "n/a"
+
+
+def pc_stream_engaged(model_id: str) -> Callable:
+    """The entry is resident and a decode arena is live: ``/v1/metrics``
+    ``memory`` carries ``arena_bytes`` > 0 under its nominal size and a
+    priced ``kv_room_bytes``. A missing field fails: a streaming entry
+    that loaded resident is the engagement blind spot."""
+    def _check(client):
+        st, body = client.metrics()
+        srv = (body.get("server") or {}) if isinstance(body, dict) else {}
+        res = [e for e in srv.get("resident_models") or [] if model_id in (e.get("ids") or [])]
+        mem = srv.get("memory") or {}
+        arena = mem.get("arena_bytes")
+        nominal = mem.get("arena_nominal_bytes")
+        room = mem.get("kv_room_bytes")
+        out = [CheckResult("stream_resident", st == 200 and bool(res),
+                           f"status={st} resident={[e.get('ids') for e in srv.get('resident_models') or []]}")]
+        ok = (isinstance(arena, int) and arena > 0 and isinstance(nominal, int)
+              and 0 < arena <= nominal and isinstance(room, int) and room > 0)
+        out.append(CheckResult("stream_arena_live", ok,
+                               f"arena {_gb(arena)} of {_gb(nominal)} nominal, kv room {_gb(room)}"))
+        # After the prompts: at most one pressure step down, ring lent or not.
+        held = ok and arena >= 0.5 * nominal
+        out.append(CheckResult("stream_arena_holds", held,
+                               f"arena {_gb(arena)} of {_gb(nominal)} nominal after the prompts"))
+        return out
+    return _check
+
+
+def pc_governor_calm() -> Callable:
+    """After the prompts ran: the governor band is not red and no row was
+    shed. Both counters must be present."""
+    def _check(client):
+        st, body = client.metrics()
+        gov = ((body.get("server") or {}).get("governor") or {}) if isinstance(body, dict) else {}
+        band, red = gov.get("band"), gov.get("red_failures")
+        ok = st == 200 and band in ("green", "yellow", "orange") and red == 0
+        return [CheckResult("governor_calm", ok, f"band={band} red_failures={red}")]
+    return _check
+
+
+def pc_log_count(needle: str, expect: int, name: str) -> Callable:
+    """The live server log carries ``needle`` exactly ``expect`` times."""
+    def _check(client):
+        n = _count_in_log(getattr(client, "log_path", None), needle)
+        return [CheckResult(name, n == expect, f"{n} occurrence(s) of {needle!r}, expect {expect}")]
     return _check
 
 
@@ -761,7 +815,52 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
                   "reporter's second symptom; the needle exercises the "
                   "flash arm through the spec prefill"))
 
+    # stream: an over-RAM MoE with `stream: experts`
+    stream_h, stream_path, _why = streaming_pick(reg)
+    if stream_path:
+        add(Scenario(
+            key="stream_experts", tier="stream", needs=[stream_h],
+            title=f"Streaming experts: {stream_h} over RAM, arena under the ceiling",
+            config={"server": {"cache": {"enabled": True}},
+                    "models": {"m": _model_entry(stream_path, stream="experts",
+                                                 overrides={"thinking": False})}},
+            request_timeout=1800.0,
+            targets=[ReqTarget("sse", "m", prompts=[P.p_capital(), P.p_math(),
+                                                    P.p_multiturn()], stream=True),
+                     ReqTarget("plain", "m", prompts=[P.p_instruct(), P.p_count()])],
+            post=[pc_stream_engaged("m"),
+                  pc_governor_calm(),
+                  pc_log_count("[stream] memory budget:", 1, "stream_budget_logged"),
+                  pc_log_count("RowShedError", 0, "no_row_shed"),
+                  pc_log_count("shed under memory pressure", 0, "no_pressure_shed")],
+            notes="short prompts on a streamed MoE; the arena, KV room and governor "
+                  "band are read from /v1/metrics after the prompts; issue #49"))
+
     return out
+
+
+def streaming_pick(reg) -> tuple:
+    """``(handle, path, note)``: the first `streaming` role model on disk that
+    the fit planner says streams on this box. An unreadable working set (no
+    Metal) counts as unknown and keeps the model. ``note`` says why the pick
+    is empty."""
+    notes = []
+    for group in reg.role_groups("streaming"):
+        handle = group[0]
+        path = reg.find(handle)
+        if not path:
+            continue
+        try:
+            from gmlx.stream import plan
+            _model, box = plan.plan_path(path)
+        except Exception as e:                  # noqa: BLE001
+            notes.append(f"{handle}: plan failed ({type(e).__name__}: {e})")
+            continue
+        verdict = getattr(box, "verdict", None)
+        if verdict in ("streams", None):
+            return handle, path, ""
+        notes.append(f"{handle}: verdict {verdict} on this box")
+    return "", "", "; ".join(notes) or "no streaming-role model on disk"
 
 
 # scenario-specific post-checks that need two requests
@@ -847,4 +946,4 @@ def _make_discovery_dir(path: str, ggufs: list) -> str:
 
 
 ALL_TIERS = ("core", "kv", "cache", "residency", "template", "endpoints",
-             "negative", "discovery", "vlm", "mtp")
+             "negative", "discovery", "vlm", "mtp", "stream")

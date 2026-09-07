@@ -26,6 +26,7 @@ live server. Scenarios are grouped into tiers:
 | `discovery` | `--models-dir` header-only scan serves derived ids |
 | `vlm` | gemma-4-E2B + mmproj describes an image |
 | `mtp` | gemma-4-E2B + assistant drafter (speculative) stays coherent; lossless-greedy spec == base |
+| `stream` | an over-RAM MoE served with `stream: experts`: five short prompts, then the decode arena and KV room in `/v1/metrics`, a green governor, no shed |
 
 A scenario whose required models aren't present under the models root is **skipped**,
 not failed.
@@ -78,6 +79,9 @@ python tests/e2e/run_server_e2e.py --tiers core,kv,cache --out ./e2e-out
 # Skip the LLM judge (floor checks only — faster, fully deterministic).
 python tests/e2e/run_server_e2e.py --no-judge
 
+# The streamed-MoE tier alone. One server, one over-RAM model, short prompts.
+python tests/e2e/run_server_e2e.py --tiers stream --no-judge
+
 # Re-grade a prior run's responses with the judge, without re-launching servers.
 python tests/e2e/run_server_e2e.py --judge-only ./e2e-out/report.json
 ```
@@ -116,6 +120,10 @@ the assistant drafter GGUF). The small dense models (Qwen3-0.6B Q4/Q8, gemma-3-1
 only the structural tiers (residency LRU/TTL, discovery, the HF-gate negative) — they
 need distinct small sizes for eviction. The judge prefers a larger coherent model
 (gemma-4-12B) and falls back to the small ones.
+
+The `stream` tier takes the `streaming` role (Kimi-K2.7 UD-Q2, else GLM-5.3-Flash UD-Q2).
+The fit planner reads the headers first. A model that fits in RAM on this box does not
+stream, so the tier skips it and `--list` says why.
 
 A scenario whose models aren't present is **skipped**, so the harness runs on a partial
 library — the structural + small-model tiers light up as soon as the public models are on

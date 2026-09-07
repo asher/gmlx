@@ -20,6 +20,7 @@ Run with the project interpreter::
   python tests/e2e/run_server_e2e.py --dry-run            # CPU, validate the matrix
   python tests/e2e/run_server_e2e.py --tiers core,kv      # GPU, a subset
   python tests/e2e/run_server_e2e.py --judge-only OUT/report.json   # re-grade only
+  python tests/e2e/run_server_e2e.py --tiers stream --no-judge     # streamed MoE, short
 
 This file is intentionally *not* ``test_``-prefixed so pytest does not collect it (it
 drives real servers + GPU). The sibling modules import each other by bare name, so we
@@ -210,7 +211,7 @@ def run_scenario(s, *, out_dir, image_path, python) -> R.ScenarioResult:
         proc.start()
         proc.wait_ready()
         res.launched = True
-        client = Client(proc.base_url)
+        client = Client(proc.base_url, timeout=s.request_timeout)
         for tgt in s.targets:
             model_field = _resolve_model_field(client, tgt)
             for pr in tgt.prompts:
@@ -300,6 +301,8 @@ def print_plan(reg, scenarios, *, tiers, image_path) -> None:
     empty = [t for t in tiers if t not in by_tier]
     if empty:
         print(f"tiers with no runnable scenario (models missing): {', '.join(empty)}")
+    if "stream" in empty:
+        print(f"  stream: {SC.streaming_pick(reg)[2]}")
 
 
 # main
