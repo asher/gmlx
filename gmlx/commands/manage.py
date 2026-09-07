@@ -201,6 +201,8 @@ def _stream_plan(scans: list | None) -> dict | None:
     lines = [sp.model_line(model), sp.group_line(model)]
     if box is not None:
         lines += sp.box_lines(model, box)
+    else:
+        lines.append("this Mac: working set not readable, no fit verdict")
     out["lines"] = lines
     return out
 

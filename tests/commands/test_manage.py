@@ -1441,7 +1441,17 @@ def _mint_moe_bytes(path, *, experts=8) -> bytes:
         return f.read()
 
 
-def test_validate_local_moe_prints_streaming_plan(tmp_path, capsys):
+def _box(monkeypatch, *, ram_gb=64, ws_gb=48):
+    """Pin the machine the plan fits on: the CPU default device (CI) has
+    no working set to read."""
+    import gmlx.load.memfit as memfit
+    import gmlx.serve.capacity as cap
+    monkeypatch.setattr(memfit, "total_ram_bytes", lambda: ram_gb * 1024**3)
+    monkeypatch.setattr(cap, "working_set_bytes", lambda: ws_gb * 1e9)
+
+
+def test_validate_local_moe_prints_streaming_plan(tmp_path, monkeypatch, capsys):
+    _box(monkeypatch)
     p = tmp_path / "moe.gguf"
     _mint_moe_bytes(p)
     rc = manage.cmd_validate([str(p)])
@@ -1449,8 +1459,19 @@ def test_validate_local_moe_prints_streaming_plan(tmp_path, capsys):
     assert rc == 0
     assert "  streaming: every-token weights 0.0 GB, routed experts 0.0 GB (1 layers, 8 experts, 2 per token)" in out
     assert "    every-token by group: " in out
-    assert "    this Mac: " in out
-    assert "    => " in out
+    assert "    this Mac: 64 GB RAM, ceiling 45.6 GB, KV room " in out
+    assert "    => the whole file fits in RAM; streaming is optional" in out
+
+
+def test_validate_local_moe_without_a_readable_box(tmp_path, monkeypatch, capsys):
+    import gmlx.serve.capacity as cap
+    monkeypatch.setattr(cap, "working_set_bytes", lambda: None)
+    p = tmp_path / "moe.gguf"
+    _mint_moe_bytes(p)
+    manage.cmd_validate([str(p)])
+    out = capsys.readouterr().out
+    assert "  streaming: every-token weights" in out
+    assert "    this Mac: working set not readable, no fit verdict" in out
 
 
 def test_validate_local_moe_json_carries_plan(tmp_path, capsys):

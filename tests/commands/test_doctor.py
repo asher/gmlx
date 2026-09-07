@@ -505,11 +505,18 @@ def _mint_moe(path):
     w.close()
 
 
+def _ws(monkeypatch, n_bytes):
+    """Pin the working set: the CPU default device (CI) has none to read."""
+    import gmlx.serve.capacity as cap
+    monkeypatch.setattr(cap, "working_set_bytes", lambda: n_bytes)
+
+
 def test_memory_row_reports_streaming_plan(tmp_path, monkeypatch, capsys):
     body = _BASE + "    stream: experts\n"
     cfg, lib = _cfg(tmp_path, body)
     _mint_moe(lib / "m.gguf")
     _ram(monkeypatch, 64 * 1024**3)
+    _ws(monkeypatch, 48e9)
     rc = doctor.cmd_doctor(["--config", str(cfg)])
     out = capsys.readouterr().out
     assert rc == 0
@@ -525,6 +532,7 @@ def test_memory_row_warns_when_every_token_weights_exceed_ceiling(
     cfg, lib = _cfg(tmp_path, body)
     _mint_moe(lib / "m.gguf")
     _ram(monkeypatch, 64 * 1024**3)
+    _ws(monkeypatch, 48e9)
 
     def too_big(model, **kw):
         return sp.BoxPlan(
