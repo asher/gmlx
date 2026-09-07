@@ -7,9 +7,11 @@ object. An error verdict fails residency with the reason.
 """
 
 import logging
+import math
 import os
 from dataclasses import dataclass
 
+from gmlx.serve.mem_preflight import _get, _lm_config
 from gmlx.cache.kv_policy import (KvQuantPolicy, dropped_policy, kv_line,
                                   resolve_kv_quant_policy)
 
@@ -61,16 +63,35 @@ def _probe_stack(model):
 
 
 def _config_head_dim(model):
-    from .mem_preflight import _get, _lm_config
-
     c = _lm_config(model)
     head_dim = _get(c, "head_dim")
+    if not head_dim:
+        # MLA: the cache holds keys at nope + rope and values at v_head_dim;
+        # a group must divide both. hidden // heads is neither.
+        nope, rope, v = (_get(c, k) for k in
+                         ("qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim"))
+        if nope and rope and v:
+            head_dim = math.gcd(int(nope) + int(rope), int(v))
     if not head_dim:
         heads = _get(c, "num_attention_heads")
         hidden = _get(c, "hidden_size")
         if heads and hidden:
             head_dim = hidden // heads
     return head_dim if isinstance(head_dim, int) and head_dim > 0 else None
+
+
+def _mla_decline(model) -> str | None:
+    """Why this model's attention cannot read a quantized cache: the
+    mlx-lm MLA attention (DeepSeek-V2/V3, Kimi-K2) scores the latent
+    cache by matmul, straight off what update_and_fetch returns."""
+    lm = model.language_model if hasattr(model, "language_model") else model
+    layers = getattr(lm, "layers", None) or []
+    attn = getattr(layers[0], "self_attn", None) if layers else None
+    if attn is not None and hasattr(attn, "kv_a_proj_with_mqa"):
+        c = _lm_config(model)
+        return (f"{_get(c, 'model_type') or 'MLA'} attention reads the "
+                "latent cache directly; KV stays fp16")
+    return None
 
 
 def resolve_for_load(rg, model_id: str):
@@ -125,6 +146,9 @@ def resolve_for_load(rg, model_id: str):
         mtp=mtp,
         head_dim=_config_head_dim(rg.model),
     )
+    decline = _mla_decline(rg.model)
+    if decline is not None:
+        kw.update(can_quantize_kv=False, no_kv_reason=decline)
     pol = ServeKvPolicy(
         resolve_kv_quant_policy(stack, mode="single", **kw),
         resolve_kv_quant_policy(_probe_stack(rg.model), mode="batched",

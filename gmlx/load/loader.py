@@ -28,7 +28,7 @@ import mlx_kquant as kq
 
 from . import loadlog
 from .dtypes import activation_dtype, activation_dtype_name
-from gmlx.envflags import env_bool, env_choice, env_float, env_int
+from gmlx.envflags import env_bool, env_choice, env_int
 from gmlx.upstream.attn_hd512 import install_hd512_sdpa
 from gmlx.gen.prefill_decay import (
     deduct_untracked_weights,
@@ -1247,11 +1247,20 @@ def _available_ram_bytes(include_inactive: bool = True) -> int | None:
 
     ``include_inactive=False`` is the stricter set (free + purgeable +
     speculative only) for a caller that must not take the page cache."""
+    from gmlx.serve import kernel_vm
+
+    s = kernel_vm.snapshot()
+    if s is not None:
+        return s["free"] + s["purgeable"] + (
+            s["filebacked"] if include_inactive else s["speculative"])
     import subprocess
 
     try:
+        # posix_spawn (absolute path, close_fds=False): a fork beside a
+        # Metal-mapped buffer copies the buffer first.
         out = subprocess.run(
-            ["vm_stat"], capture_output=True, text=True, timeout=5
+            ["/usr/bin/vm_stat"], capture_output=True, text=True, timeout=5,
+            close_fds=False,
         ).stdout
     except Exception:
         return None
@@ -1279,40 +1288,36 @@ def _available_ram_bytes(include_inactive: bool = True) -> int | None:
 
 
 def _ram_floor_bytes(ram: int | None) -> int:
-    """Breathing margin left to the system whenever the arena takes
-    reclaimable RAM - at sizing time and again on every pressure-driven
-    regrow (``GMLX_DECODE_RAM_FLOOR_GB`` overrides). On top of the base
-    margin, ``GMLX_DECODE_PAGECACHE_GB`` reserves room for the page cache
-    specifically: the prefill feeder and the CPU-mmap fallback read
-    through it, and starving it collapses buffered pread throughput far
-    below the SSD's sequential rate."""
-    gb = float(
-        os.environ.get("GMLX_DECODE_RAM_FLOOR_GB", "")
-        or max(4.0, 0.05 * (ram or 0) / (1 << 30))
-    )
-    gb += env_float("GMLX_DECODE_PAGECACHE_GB", 2.5)
-    return int(gb * (1 << 30))
+    """``gmlx.stream.budget.host_floor_bytes``."""
+    from gmlx.stream.budget import host_floor_bytes
+
+    return host_floor_bytes(ram)
 
 
 def _decode_arena_bytes(
     total_bytes: int, offsets, budget: int | None, room_bytes: int | None = None,
     pinned_bytes: int = 0, streamable_bytes: int = 0,
-    cast_dead_bytes: int = 0,
+    cast_dead_bytes: int = 0, ring_bytes: int = 0,
 ) -> int:
     """Arena budget for the decode feeder: what the memory ceiling leaves
-    after the non-expert weights and the KV room, clamped to the RAM
-    reclaimable right now, and capped at the expert bytes themselves (a
-    model whose experts fit goes fully resident).
+    after the non-expert weights, the KV room, the prefill ring and the
+    host floor, clamped to the RAM reclaimable right now, and capped at
+    the expert bytes themselves (a model whose experts fit goes fully
+    resident).
 
     The ceiling is the serve governor's (``gmlx.stream.budget``), so the
-    arena, the prefill ring it lends to and the KV cache share one budget:
-    at decode the governor's headroom is the room minus live KV, whatever
-    the box's working-set ratio or the quant's ring size. ``room_bytes``
-    is the priced KV room (``budget.kv_room_bytes``); None keeps the flat
-    legacy reserve. ``GMLX_DECODE_ARENA_RAM_FRAC`` caps the ceiling at a
-    fraction of physical RAM when set. ``GMLX_DECODE_ARENA_GB`` overrides
-    the ceilings but is still clamped to what is reclaimable minus the
-    floor - an arena wired past that starves the page cache every buffered
+    arena, the prefill ring and the KV cache share one budget: at decode
+    the governor's headroom is the room minus live KV, whatever the box's
+    working-set ratio or the quant's ring size. ``ring_bytes`` keeps the
+    ring's room out of the arena for good: a ring rebuilt on top of a
+    full wired arena, or lent out of it with a copy of every layer, is a
+    transient the kernel has to swap for on a box the arena has already
+    filled. ``room_bytes`` is the priced KV room
+    (``budget.kv_room_bytes``); None keeps the flat legacy reserve.
+    ``GMLX_DECODE_ARENA_RAM_FRAC`` caps the ceiling at a fraction of
+    physical RAM when set. ``GMLX_DECODE_ARENA_GB`` overrides the
+    ceilings but is still clamped to what is reclaimable minus the floor
+    - an arena wired past that starves the page cache every buffered
     read path depends on (``GMLX_DECODE_ARENA_FORCE=1`` restores the
     unclamped behavior).
 
@@ -1366,7 +1371,11 @@ def _decode_arena_bytes(
     non_expert_bytes = max(
         0, total_bytes - expert_bytes - streamable_bytes - cast_dead_bytes)
     room = int(room_bytes) if room_bytes is not None else legacy_room_bytes()
-    arena = ceiling - non_expert_bytes - room
+    # The floor on both measures: the ceiling is a share of the Metal
+    # working set, and the OS side of the box (the page cache, other
+    # processes, an overnight maintenance job) is not in it.
+    arena = (ceiling - non_expert_bytes - room - int(ring_bytes)
+             - _ram_floor_bytes(ram))
     # Second ceiling: what is reclaimable right now. The governor ceiling
     # assumes an otherwise idle machine; co-resident workloads shrink the
     # offer, and a wired arena sized past it would evict them to swap. The
@@ -1380,27 +1389,28 @@ def _decode_arena_bytes(
         unpinned = max(0, non_expert_bytes - pinned_bytes)
         arena = min(
             arena,
-            avail - _ram_floor_bytes(ram or avail) - room - unpinned,
+            avail - _ram_floor_bytes(ram or avail) - room - unpinned
+            - int(ring_bytes),
         )
     return min(max(0, arena), expert_bytes)
 
 
-def _prefill_ring_reason(offsets, arena: int | None) -> str | None:
+def _prefill_ring_reason(offsets, left: int | None) -> str | None:
     """Why the prefill ring must not be built, or None. The ring (two
-    slots of the largest layer's expert stacks, sized by the model) is
-    lent out of the decode arena's budget; a ring larger than that budget
-    would sit on top of the every-token weights and the KV room and take
-    the memory ceiling with it at the first prefill. An explicit
-    GMLX_DECODE_ARENA_GB is the user's budget and the ring is not judged
-    against it."""
-    if arena is None or os.environ.get("GMLX_DECODE_ARENA_GB"):
+    slots of the largest layer's expert stacks, sized by the model) takes
+    its room under the memory ceiling before the decode arena; ``left``
+    is what the ceiling leaves after the every-token weights and the KV
+    room. A ring larger than that would sit on top of them and take the
+    ceiling with it at the first prefill. An explicit GMLX_DECODE_ARENA_GB
+    is the user's budget and the ring is not judged against it."""
+    if left is None or os.environ.get("GMLX_DECODE_ARENA_GB"):
         return None
     from gmlx.stream.prefill_feeder import ring_bytes
 
     ring = ring_bytes(offsets)
-    if ring <= arena:
+    if ring <= left:
         return None
-    return (f"ring 2 x {ring / 2e9:.1f} GB exceeds the {arena / 1e9:.1f} GB "
+    return (f"ring 2 x {ring / 2e9:.1f} GB exceeds the {left / 1e9:.1f} GB "
             "left under the memory ceiling after the every-token weights "
             "and the KV room")
 
@@ -1432,6 +1442,18 @@ def _neutralize_wired_limit_sweep():
     """
     if getattr(mx.set_wired_limit, "_kq_no_sweep", False):
         return
+    # A generator that started before this call left the limit raised, and
+    # its exit restore is a no-op from here on. Lower it now: with it up,
+    # the next streaming load's walk wires the file's resident pages as it
+    # creates the views (measured 21 -> 117 GB in two seconds), and every
+    # command buffer in the process fails with a Metal out-of-memory error.
+    try:
+        prev = mx.set_wired_limit(0)
+    except Exception:
+        prev = 0
+    if prev:
+        print(f"[stream] wired limit lowered from {prev / 1e9:.1f} GB to 0: "
+              "a raised limit wires every live buffer, zero-copy views included")
 
     def _no_sweep(*_a, **_k):
         return 0
@@ -2451,19 +2473,24 @@ def install_expert_streaming(
 
         pin = getattr(model, "_kq_weights_pin", None)
         room = kv_room_bytes(gguf_path)
-        arena = _decode_arena_bytes(
-            total_bytes, prefetcher.offsets, budget,
+        arena_kw = dict(
             room_bytes=room.bytes,
             pinned_bytes=getattr(pin, "pinned_bytes", 0),
             streamable_bytes=streamed_table_bytes(model),
             cast_dead_bytes=cast_dead_bytes)
+        arena = _decode_arena_bytes(
+            total_bytes, prefetcher.offsets, budget, **arena_kw)
+    ring = 0
     if (
         streaming
         and prefetcher is not None
         and moe_modules
         and feeder_prefill
     ):
-        from gmlx.stream.prefill_feeder import maybe_make_prefill_feeder
+        from gmlx.stream.prefill_feeder import (
+            maybe_make_prefill_feeder,
+            ring_bytes,
+        )
 
         # No working-set budget (the CPU device): the ring is not judged.
         reason = _prefill_ring_reason(
@@ -2474,6 +2501,13 @@ def install_expert_streaming(
         else:
             feeder = maybe_make_prefill_feeder(
                 prefetcher.offsets, moe_modules)
+        if feeder is not None and arena is not None:
+            # The ring keeps its room for the process lifetime: a later
+            # prefill rebuilds it there, with no lend out of the arena.
+            ring = ring_bytes(prefetcher.offsets)
+            arena = _decode_arena_bytes(
+                total_bytes, prefetcher.offsets, budget, ring_bytes=ring,
+                **arena_kw)
         if feeder is not None:
             n_cov = sum(feeder.covers(li) for li in moe_modules)
             for li, mods in moe_modules.items():
@@ -2500,13 +2534,12 @@ def install_expert_streaming(
 
         from gmlx.stream.budget import ceiling_bytes
 
-        # The prefill ring borrows its bytes from the arena from the start
-        # (DecodeFeeder lend), so the two never sum past the budget while
-        # the ring is live; the first decode releases the ring and the
-        # arena regrows to its sized capacity.
+        # The ring's room is out of the arena's budget already, so the
+        # two never sum past the ceiling; the lend (DecodeFeeder
+        # .lend_for_ring) stays as the fallback for a box whose free RAM
+        # is gone when a later prefill rebuilds the ring.
         dfeeder = maybe_make_decode_feeder(
-            prefetcher.offsets, moe_modules, arena, stats_verbose,
-            lend_bytes=2 * feeder.slot_bytes if feeder is not None else 0)
+            prefetcher.offsets, moe_modules, arena, stats_verbose)
         if dfeeder is not None:
             dfeeder._room_bytes = room.bytes
             n_cov = sum(dfeeder.covers(li) for li in moe_modules)
@@ -2522,10 +2555,10 @@ def install_expert_streaming(
             _installs.record(model, dfeeder.nominal_bytes)
             _installs.record_arena(dfeeder)
             if feeder is not None:
-                # First decode call swaps the wired budget: prefill ring
-                # freed, arena wired (DecodeFeeder.ensure_wired). A later
-                # prefill pass borrows it back: the ring rebuild asks the
-                # arena to lend its footprint before allocating.
+                # The first decode call frees the ring (DecodeFeeder
+                # .ensure_wired). A later prefill pass rebuilds it in its
+                # own room; the rebuild asks the arena to lend only when
+                # the box has lost that room.
                 dfeeder._release_ring = feeder.release_slots
                 feeder._lend_hook = dfeeder.lend_for_ring
             wired = (
@@ -2553,12 +2586,17 @@ def install_expert_streaming(
                 if room.priced else "flat GMLX_DECODE_KV_RESERVE_GB")
             # Always visible, like the pin line: the one line a memory
             # report needs.
+            try:
+                floor = _ram_floor_bytes(int(mx.device_info()["memory_size"]))
+            except Exception:
+                floor = _ram_floor_bytes(None)
             print(
                 f"[stream] memory budget: ceiling {ceiling / 1e9:.1f} GB = "
                 f"every-token {(total_bytes - expert_bytes) / 1e9:.1f} + "
-                f"arena {dfeeder.nominal_bytes / 1e9:.1f} + kv room "
-                f"{room.bytes / 1e9:.1f} ({room_how}); GMLX_STREAM_KV_CTX "
-                "sizes the room"
+                f"arena {dfeeder.nominal_bytes / 1e9:.1f} + ring "
+                f"{ring / 1e9:.1f} + kv room {room.bytes / 1e9:.1f} "
+                f"({room_how}) + floor {floor / 1e9:.1f}; "
+                "GMLX_STREAM_KV_CTX sizes the room"
             )
             rate = getattr(dfeeder, "_probe_bps", 0.0)
             measured = (

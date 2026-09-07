@@ -70,6 +70,26 @@ def kernel_floor_bytes() -> float:
     return float(_kernel_floor_bytes())
 
 
+def host_floor_bytes(ram: int | None) -> int:
+    """Breathing margin left to the system whenever the arena takes RAM:
+    under the ceiling at sizing, against reclaimable RAM at sizing and on
+    every pressure-driven regrow (``GMLX_DECODE_RAM_FLOOR_GB`` overrides).
+    On top of the base margin, ``GMLX_DECODE_PAGECACHE_GB`` reserves room
+    for the page cache specifically: the prefill feeder and the CPU-mmap
+    fallback read through it, and starving it collapses buffered pread
+    throughput far below the SSD's sequential rate. The margin is what
+    keeps the rest of the box out of swap while the arena is wired; a
+    swap storm under a wired arena is a watchdog panic."""
+    from gmlx.envflags import env_float
+
+    gb = float(
+        os.environ.get("GMLX_DECODE_RAM_FLOOR_GB", "")
+        or max(4.0, 0.05 * (ram or 0) / (1 << 30))
+    )
+    gb += env_float("GMLX_DECODE_PAGECACHE_GB", 2.5)
+    return int(gb * (1 << 30))
+
+
 def governor_headroom_bytes() -> float | None:
     """What the governor reads at its tick: ``prefill_decay.headroom_bytes``
     shifted from the full working set down to the governor ceiling."""

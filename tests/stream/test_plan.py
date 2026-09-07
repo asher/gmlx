@@ -139,12 +139,15 @@ def flat_room(monkeypatch):
     monkeypatch.setenv("GMLX_DECODE_KV_RESERVE_GB", "1")
     monkeypatch.delenv("GMLX_GOV_MARGIN", raising=False)
     monkeypatch.delenv("GMLX_GOV_RESERVE_GB", raising=False)
+    monkeypatch.delenv("GMLX_DECODE_RAM_FLOOR_GB", raising=False)
+    monkeypatch.delenv("GMLX_DECODE_PAGECACHE_GB", raising=False)
 
 
 def test_box_plan_verdicts(flat_room):
     ram, ws = 60e9, 45e9
     ceiling = 45e9 * 0.95
     room = 1 * GiB
+    floor = 6.5 * GiB          # 4 GiB base on a small box + 2.5 GiB page cache
     b = sp.box_plan(_model(total=10e9, expert=8e9), ram_bytes=ram, ws_bytes=ws)
     assert b.verdict == sp.VERDICT_RESIDENT
     assert b.room == KvRoom(room, 32768, 1, 0, 0, 0, priced=False)
@@ -152,23 +155,28 @@ def test_box_plan_verdicts(flat_room):
     assert b.verdict == sp.VERDICT_TOO_BIG
     assert b.short_bytes == pytest.approx(50e9 + room - ceiling, abs=2)
     assert b.arena_bytes == 0
-    b = sp.box_plan(_model(total=241.5e9, expert=200e9), ram_bytes=ram, ws_bytes=ws)
+    b = sp.box_plan(_model(total=234.5e9, expert=200e9), ram_bytes=ram, ws_bytes=ws)
     assert b.verdict == sp.VERDICT_PAGE_CACHE
     assert 0 < b.arena_bytes < GiB
     b = sp.box_plan(_model(total=220e9, expert=200e9, ring=5e9),
                     ram_bytes=ram, ws_bytes=ws)
     assert b.verdict == sp.VERDICT_STREAMS
-    assert b.arena_bytes == pytest.approx(ceiling - 20e9 - room, abs=2)
+    # The ring and the host floor keep their room out of the arena.
+    assert b.arena_bytes == pytest.approx(ceiling - 20e9 - room - floor - 5e9, abs=2)
     assert b.arena_share == pytest.approx(b.arena_bytes / 200e9)
     assert b.ring_fits
     b = sp.box_plan(_model(total=220e9, expert=200e9, ring=30e9),
                     ram_bytes=ram, ws_bytes=ws)
     assert b.verdict == sp.VERDICT_STREAMS and not b.ring_fits
+    # A ring that does not fit is not built, so it takes nothing.
+    assert b.arena_bytes == pytest.approx(ceiling - 20e9 - room - floor, abs=2)
 
 
 def test_box_plan_arena_capped_at_experts(flat_room, monkeypatch):
     # A MoE file over RAM whose experts still fit under the ceiling.
     monkeypatch.setenv("GMLX_GOV_RESERVE_GB", "1")
+    monkeypatch.setenv("GMLX_DECODE_RAM_FLOOR_GB", "1")
+    monkeypatch.setenv("GMLX_DECODE_PAGECACHE_GB", "0")
     b = sp.box_plan(_model(total=52e9, expert=20e9), ram_bytes=60e9, ws_bytes=60e9)
     assert b.verdict == sp.VERDICT_STREAMS
     assert b.arena_bytes == 20e9 and b.arena_share == 1.0

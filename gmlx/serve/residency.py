@@ -44,7 +44,7 @@ from dataclasses import dataclass
 
 
 import gmlx.load.loadlog as loadlog
-from .capacity import LoadDeferred
+from .capacity import LoadDeferred, _defer
 from gmlx.envflags import env_float
 # The descent to the module the loader hung the streaming helpers on. Shared
 # with the loader, which reads the same helper set to charge a live install's
@@ -497,9 +497,18 @@ class _ResidencyPool:
                     self._touch(entry)
                     entry.busy += 1
                     return entry
-                self._evict_for_room(incoming)
-            entry = self._build(cache_key, model_path, adapter_path, model_kind,
-                                file_bytes, ttl=ttl, env=env, build_spec=build_spec)
+                self._evict_for_room(
+                    incoming, model_path=model_path,
+                    streaming=getattr(build_spec, "stream", None) == "experts")
+            try:
+                entry = self._build(cache_key, model_path, adapter_path,
+                                    model_kind, file_bytes, ttl=ttl, env=env,
+                                    build_spec=build_spec)
+            except BaseException:
+                # Free the failed build before the lock drops: a waiting
+                # acquire gates on live memory next.
+                _collect_failed_build()
+                raise
             # The id that built the entry names it for the process lifetime
             # (a metrics label wants a name fixed per entry; aliases sharing
             # the signature reuse this entry and keep the first name).
@@ -768,6 +777,23 @@ class _ResidencyPool:
     def _resident_bytes(self) -> int:
         return sum(e.footprint for e in self._entries.values())
 
+    def _reserved_room_bytes(self) -> int:
+        """Room the resident streamed models keep but have not filled: a
+        released prefill ring and the priced KV room. The headroom measure
+        reads both as free; a load into them sheds the stream's arena at
+        its next prefill."""
+        total = 0
+        for e in self._entries.values():
+            rg = e.response_generator
+            feeder = _decode_feeder_of(rg)
+            if feeder is None:
+                continue
+            total += int(getattr(feeder, "_room_bytes", 0) or 0)
+            ring = _prefill_feeder_of(rg)
+            if ring is not None and not getattr(ring, "_slots", None):
+                total += 2 * int(getattr(ring, "slot_bytes", 0) or 0)
+        return total
+
     def _over_capacity(self, incoming: int) -> bool:
         """True if admitting ``incoming`` more weight bytes would exceed the
         byte budget or the optional count cap."""
@@ -777,11 +803,15 @@ class _ResidencyPool:
             return True
         return False
 
-    def _evict_for_room(self, incoming: int):
+    def _evict_for_room(self, incoming: int, *, model_path=None,
+                        streaming: bool = False):
         # Evict LRU-unpinned models until the incoming one fits the budget (and
         # the optional count cap). Never evict a pinned or busy (in-flight
         # generation) model; if only those remain, exceed the budget rather than
-        # refuse the request or kill a live generation.
+        # refuse the request or kill a live generation. A streaming model is
+        # the exception: its arena is sized to the ceiling, so an overcommit
+        # takes the room the live generation's KV needs and the governor
+        # sheds it. That one defers with the typed 503 instead.
         while self._entries and self._over_capacity(incoming):
             victim = min(
                 (e for e in self._entries.values() if not e.pinned and e.busy == 0),
@@ -789,6 +819,17 @@ class _ResidencyPool:
                 default=None,
             )
             if victim is None:
+                held = self._resident_bytes()
+                if (streaming and self._budget
+                        and held + incoming > self._budget):
+                    _defer(
+                        f"model load deferred: {model_path} priced at "
+                        f"{incoming / 1e9:.1f} GB resident (every-token weights "
+                        f"plus decode arena and prefill ring) does not fit the "
+                        f"{self._budget / 1e9:.1f} GB budget beside "
+                        f"{held / 1e9:.1f} GB of pinned or busy models. Retry "
+                        "when a slot frees, or cap the arena with "
+                        "GMLX_DECODE_ARENA_GB.")
                 _log.warning(
                     "all %d resident models pinned or busy (%.1f GB); incoming "
                     "%.1f GB will exceed the %.1f GB budget",
@@ -821,6 +862,7 @@ class _ResidencyPool:
             streamed_expert_bytes,
         )
         gate_bytes = footprint
+        streamed = 0
         if getattr(build_spec, "stream", None) == "experts":
             streamed = streamed_expert_bytes(str(model_path))
             gate_bytes = preload_gate_bytes(footprint, "experts", streamed)
@@ -830,7 +872,8 @@ class _ResidencyPool:
                     "routed-expert bytes (gating on %.1f GB resident)",
                     streamed / 1e9, gate_bytes / 1e9)
         preload_gate(gate_bytes, str(model_path),
-                     streaming=getattr(build_spec, "stream", None) == "experts")
+                     streaming=getattr(build_spec, "stream", None) == "experts",
+                     reserved_bytes=self._reserved_room_bytes())
         # What the entry holds resident. A streaming build adds its decode
         # arena below, once the loader has sized it.
         resident_bytes = gate_bytes
@@ -871,9 +914,23 @@ class _ResidencyPool:
         # global pattern as set_build_spec, serialized by the build lock.
         from gmlx.gen.prefill_decay import (
             forget_untracked_weights,
+            note_build_credit,
             set_untracked_weights_owner,
         )
         set_untracked_weights_owner(cache_key)
+        if streamed > 0:
+            # Before the walk, not at the install after it: a resident
+            # model's generator left the wired limit raised, and the walk
+            # under it wires the file's pages (see the loader).
+            from gmlx.load.loader import _neutralize_wired_limit_sweep
+            _neutralize_wired_limit_sweep()
+            # The walk wraps the routed experts as tracked MLX views. They
+            # are page cache, but the install credits them only at the
+            # first request. A governor tick in between reads the file as
+            # live memory and sheds another model's rows. Credit what the
+            # load adds, up to the streamed bytes, until the install's own
+            # credit or deduction takes over.
+            note_build_credit(cache_key, streamed)
         try:
             self._stock_get(model_path, adapter_path, model_kind=model_kind)
             # Wire the bridge-built manager everywhere the stock load would
@@ -917,7 +974,8 @@ class _ResidencyPool:
             # see the KV room that is really left.
             feeder = _decode_feeder_of(rg)
             if feeder is not None and getattr(feeder, "nominal_bytes", 0):
-                resident_bytes = gate_bytes + int(feeder.nominal_bytes)
+                resident_bytes = (gate_bytes + int(feeder.nominal_bytes)
+                                  + _prefill_ring_of(rg))
                 try:
                     install_boot_table(
                         str(model_path), resident_bytes,
@@ -926,11 +984,18 @@ class _ResidencyPool:
                     _log.warning("[capacity] the decode arena leaves no "
                                  "context at width 1 (GMLX_DECODE_ARENA_GB "
                                  "lowers it): %s", e)
-        except BaseException:
+        except BaseException as e:
             # A failed build never reaches _teardown: drop its partial
             # registrations here or they tax headroom forever.
             forget_untracked_weights(cache_key)
-            raise
+            _log.warning("model build failed: %s", model_path, exc_info=True)
+            self._discard_failed_build(cache_key, model_path, scratch)
+            rg = feeder = None
+            # The frames below hold the half-built model and its views.
+            # The next build's gate reads them as live memory until they
+            # go; detach them so acquire's collect frees them first.
+            e.__traceback__ = None
+            raise e
         finally:
             set_untracked_weights_owner(None)
             _serving.set_build_spec(None)
@@ -950,6 +1015,26 @@ class _ResidencyPool:
             last_access=self._time_fn(),
             kv_policy=kv_policy,
         )
+
+    def _discard_failed_build(self, cache_key, model_path, scratch) -> None:
+        """Tear down what a failed build left in its scratch: the stock
+        cache entry, the feeders, the pin. A build that fails after the
+        stock load (a kv policy refusal) otherwise leaves a whole model
+        resident behind the exception. Best-effort."""
+        mc = scratch.model_cache
+        if not isinstance(mc, dict) or mc.get("model") is None:
+            return
+        entry = _Entry(cache_key=cache_key, model_path=model_path,
+                       model_cache=scratch.model_cache,
+                       response_generator=scratch.response_generator,
+                       apc_manager=scratch.apc_manager)
+        scratch.model_cache = {}
+        scratch.response_generator = None
+        scratch.apc_manager = None
+        try:
+            self._teardown(entry)
+        except Exception:
+            _log.warning("failed build teardown skipped", exc_info=True)
 
     @staticmethod
     def _apply_env(env):
@@ -1077,6 +1162,18 @@ class _ResidencyPool:
 
 
 
+def _collect_failed_build() -> None:
+    import gc
+
+    gc.collect()
+    try:
+        import mlx.core as mx
+
+        (getattr(mx, "clear_cache", None) or mx.metal.clear_cache)()
+    except Exception:
+        pass
+
+
 def _stamp_boot_kv_costs(rg, gguf_path: str) -> None:
     """Hang the boot table's KV costs on the served model, so a fresh
     model's admission and governor demand price this model, not the
@@ -1100,8 +1197,9 @@ def _stamp_boot_kv_costs(rg, gguf_path: str) -> None:
 
 def _streaming_footprint(model_path, file_bytes: int, env=None) -> int:
     """Resident bytes a ``stream: experts`` entry will hold: the every-token
-    weights plus the decode arena the loader sizes at install (the env
-    override when set, else the fit planner's arena). The routed experts
+    weights, the decode arena the loader sizes at install (the env override
+    when set, else the fit planner's arena) and the prefill ring's room,
+    which the budget keeps for the process lifetime. The routed experts
     stay on disk, so the file size overstates the entry by their bytes and
     would evict every other model for room they never take."""
     from .capacity import preload_gate_bytes, streamed_expert_bytes
@@ -1119,15 +1217,34 @@ def _streaming_footprint(model_path, file_bytes: int, env=None) -> int:
             arena = int(float(raw) * (1 << 30))
         except (ValueError, OverflowError):
             arena = None
-    if arena is None:
-        try:
-            from gmlx.stream.plan import plan_path
+    ring = 0
+    try:
+        from gmlx.stream.plan import plan_path
 
-            _model, box = plan_path(str(model_path))
-            arena = int(box.arena_bytes) if box is not None else 0
-        except Exception:
-            arena = 0
-    return every + max(0, arena)
+        model, box = plan_path(str(model_path))
+        if box is not None:
+            if arena is None:
+                arena = int(box.arena_bytes)
+            if box.ring_fits:
+                ring = int(model.ring_bytes)
+    except Exception:
+        pass
+    return every + max(0, arena or 0) + ring
+
+
+def _prefill_feeder_of(rg):
+    """The prefill ring behind a response generator's model, or None."""
+    model = getattr(rg, "model", None)
+    if model is None:
+        return None
+    return getattr(_streaming_owner(model), "_kq_feeder", None)
+
+
+def _prefill_ring_of(rg) -> int:
+    """Bytes of the prefill ring's room behind a response generator's
+    model: both slots, kept for the process lifetime. 0 without a ring."""
+    feeder = _prefill_feeder_of(rg)
+    return 2 * int(getattr(feeder, "slot_bytes", 0) or 0)
 
 
 def _decode_feeder_of(rg):

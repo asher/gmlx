@@ -32,6 +32,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import NamedTuple
 
 from gmlx.envflags import env_bool
+from gmlx.stream.feeder_common import inner_pages
 
 # Every-token set = everything the expert prefetcher does not stream
 # (keep the two definitions in lockstep via the shared regex).
@@ -229,6 +230,13 @@ class WeightsPin:
         if self._refused:  # first refusal stops the rest (wire limit hit)
             return False
         addr, n = task
+        # A fork copies Metal-mapped pages before the exec; the child
+        # never needs the weights. Whole pages only: a page shared with
+        # other data would vanish from the child before its exec.
+        start, end = inner_pages(addr, n)
+        if end > start:
+            self._libc.minherit(
+                ctypes.c_void_p(start), ctypes.c_size_t(end - start), 2)
         return self._libc.mlock(ctypes.c_void_p(addr), n) == 0
 
     def close(self) -> None:

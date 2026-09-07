@@ -140,3 +140,23 @@ def test_reclaimable_ram_bytes_prefers_the_kernel_counters(monkeypatch):
 def test_kernel_floor_bytes_is_the_governor_floor(monkeypatch):
     monkeypatch.setenv("GMLX_GOV_KERNEL_FLOOR_GB", "2")
     assert budget.kernel_floor_bytes() == 2e9
+
+
+def test_available_ram_reads_the_mach_counters_without_a_spawn(monkeypatch):
+    """The loader's reclaimable snapshot comes from host_statistics64; the
+    vm_stat spawn is the fallback only. A fork beside a Metal-mapped
+    arena copies the arena, so the serve process must not fork here."""
+    import subprocess
+
+    from gmlx.load.loader import _available_ram_bytes
+    from gmlx.serve import kernel_vm
+
+    if kernel_vm.snapshot() is None:
+        pytest.skip("mach counters unavailable")
+
+    def boom(*a, **k):
+        raise AssertionError("spawned")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    loose, strict = _available_ram_bytes(), _available_ram_bytes(include_inactive=False)
+    assert loose > 0 and strict > 0 and loose >= strict

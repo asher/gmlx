@@ -49,6 +49,22 @@ def test_build_defaults_match_stock(monkeypatch):
     assert len(m.pool) == apc.DEFAULT_NUM_BLOCKS
 
 
+def test_build_rebinds_the_free_ram_read_in_process(monkeypatch):
+    """The stock exact disk-restore gate shells out to vm_stat, and a
+    fork beside a Metal-mapped arena copies the arena. The build rebinds
+    it to the mach counters."""
+    from gmlx.serve import kernel_vm
+
+    if kernel_vm.snapshot() is None:
+        pytest.skip("mach counters unavailable")
+    monkeypatch.setenv("GMLX_APC_ENABLED", "1")
+    for k in ("APC_BLOCK_SIZE", "APC_NUM_BLOCKS", "APC_DISK_PATH"):
+        monkeypatch.delenv(k, raising=False)
+    build_apc_manager()
+    assert apc._free_ram_bytes is kernel_vm.available_bytes
+    assert kernel_vm.available_bytes() > 0
+
+
 def test_from_env_is_dead_under_the_pin(monkeypatch):
     monkeypatch.setenv("APC_ENABLED", "0")
     assert apc.from_env(model_namespace="/m/a.gguf") is None

@@ -538,7 +538,8 @@ def test_memory_row_warns_when_every_token_weights_exceed_ceiling(
         return sp.BoxPlan(
             ram_bytes=64 * 1024**3, working_set_bytes=48e9, ceiling_bytes=45e9,
             room=KvRoom(4e9, 32768, 1, 0, 0, 0, priced=False), arena_bytes=0,
-            expert_bytes=model.expert_bytes, ring_fits=False, short_bytes=9e9,
+            expert_bytes=model.expert_bytes, ring_fits=False, floor_bytes=0,
+            short_bytes=9e9,
             verdict=sp.VERDICT_TOO_BIG)
     monkeypatch.setattr(sp, "box_plan", too_big)
     rc = doctor.cmd_doctor(["--config", str(cfg)])

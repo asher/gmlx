@@ -167,6 +167,21 @@ def test_preload_gate_judges_the_serve_ceiling(rig, monkeypatch):
         cap.preload_gate(3.5 * GB, "edge")
 
 
+def test_preload_gate_keeps_a_streamed_residents_room(rig, monkeypatch):
+    # A resident streamed model's released ring and priced KV room read
+    # as free working set. A load into them sheds the stream's arena at
+    # its next prefill, so the gate takes them off the measure.
+    rig(weights_gb=10.0, ws_gb=20.0)
+    import gmlx.gen.prefill_decay as pd
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 5.0 * GB)
+    monkeypatch.setattr(cap, "working_budget_bytes", lambda: 20.0 * GB)
+    monkeypatch.setattr(cap, "_kernel_gate", lambda w, m: None)
+    cap.preload_gate(4.0 * GB, "fits")
+    with pytest.raises(cap.LoadDeferred, match="working set 2.0 GB less the 3.0 GB"):
+        cap.preload_gate(4.0 * GB, "room-taker", reserved_bytes=3.0 * GB)
+    cap.preload_gate(2.0 * GB, "fits-beside", reserved_bytes=3.0 * GB)
+
+
 def test_preload_gate_kernel_floor(rig, monkeypatch):
     # The kernel's view: other processes' pages are invisible to MLX
     # accounting, so a load must also leave the governor's reclaimable

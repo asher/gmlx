@@ -137,19 +137,30 @@ RAM, whichever is larger. Three things share the ceiling:
    (default 32768, capped at the trained context). It also holds a
    prefill transient and an admission reserve. Each of those two is 2 GB
    or 5% of the working set, whichever is larger.
-3. The decode arena. It gets everything the first two leave. The arena
-   holds the hot experts. A larger arena gives a higher hit rate. A
-   higher hit rate gives faster decode.
+3. The host floor. The ceiling is a share of the Metal working set.
+   The rest of the box is not in it: the page cache, other processes,
+   an overnight maintenance job. The floor keeps that share of RAM
+   free. It is 5% of RAM, at least 4 GB, plus a 2.5 GB page-cache
+   reserve (`GMLX_DECODE_RAM_FLOOR_GB`, `GMLX_DECODE_PAGECACHE_GB`).
+   Without it a wired arena pushes the rest of the box into swap, and
+   a swap storm under wired memory is a watchdog panic.
+4. The decode arena. It gets everything the first three leave. The
+   arena holds the hot experts. A larger arena gives a higher hit rate.
+   A higher hit rate gives faster decode.
 
 The rule: a box streams a model when the every-token weights plus the
-KV room fit under the ceiling. The arena is what remains. The arena must
-be at least 1 GB. Below that the decode feeder does not start, and
+KV room fit under the ceiling. The arena is what remains after the
+host floor. The arena must be at least 1 GB. Below that the decode feeder does not start, and
 decode runs from the page cache.
 
 The prefill ring is a second check. The ring holds two copies of the
 largest layer's expert stacks. Its size comes from the model, not the
-box. When the ring does not fit in the arena, prefill falls back to
-page-cache prefetch. The load prints the reason. Decode is not affected.
+box. The ring takes its room under the ceiling before the arena, and
+keeps it for the process lifetime. The arena is what remains after
+the ring and the floor. When the ring does not fit in what the ceiling leaves after
+the every-token weights and the KV room, prefill falls back to
+page-cache prefetch. The load prints the reason. Decode is not
+affected, and the arena gets the whole remainder.
 
 ### The ceiling by machine size
 
@@ -193,10 +204,11 @@ token reads 16 of them. With a cold arena a token reads about 14 GB of
 experts from disk. A warm arena serves the hot share from memory.
 
 On a stock 128 GB box the ceiling is 97.9 GB and the KV room is
-11.7 GB. The arena is 24 GB, or 3% of the experts. The model streams.
-On a 96 GB box the arena is 2 GB and the ring does not fit. Decode has
-almost no hit rate there. On a 512 GB box the arena is 287 GB, or 36%
-of the experts.
+11.7 GB. That leaves 24 GB. The 22.7 GB ring fits, and the 9.6 GB
+host floor takes the rest. There is no arena. The model streams, and
+decode reads every expert through the page cache. On a 96 GB box the
+ring does not fit, and the floor takes what is left. On a 512 GB box
+the arena is 234 GB, or 29% of the experts.
 
 The quant of the experts does not change the fit. UD-Q4_K_XL is a
 1.5 TB file. Its every-token weights are the same 62.2 GB, because that
@@ -218,11 +230,15 @@ does not fit under the ceiling of any box below 192 GB.
 - SSD bandwidth sets the speed of cold reads. It does not change the
   fit.
 - Other resident models. On `gmlx serve` a streamed entry counts its
-  every-token weights plus its arena against `server.budget_gb`. The
-  auto arena fills the budget. Cap it with `GMLX_DECODE_ARENA_GB` to
-  keep a second model resident beside it.
+  every-token weights, its arena and its ring against `server.budget_gb`.
+  The load gate also keeps the ring and KV room a resident streamed
+  model has not filled: a second model must fit beside them. The auto
+  arena fills the budget. Cap it with `GMLX_DECODE_ARENA_GB` to keep a
+  second model resident beside it. The streamed load lowers the
+  MLX wired limit for the rest of the process. A resident dense model
+  runs unwired from then on.
 - Other processes. The arena is sized from the RAM that is reclaimable
-  at load. When the box later dips under the governor's kernel floor,
+  at load, less the host floor. When the box later dips under the governor's kernel floor,
   the arena steps down by a quarter and regrows when the RAM returns.
 
 ### Ask gmlx
@@ -234,9 +250,8 @@ per shard, a few MB each. The block reads:
 ```text
   streaming: every-token weights 62.2 GB, routed experts 799.1 GB (92 layers, 896 experts, 16 per token), prefill ring 22.7 GB
     every-token by group: attention 31.8 GB, shared experts 12.9 GB, dense ffn and routers 8.2 GB, ...
-    this Mac: 128 GB RAM, ceiling 97.9 GB, KV room 11.7 GB at 32768 tokens
-    decode arena 24.1 GB (3% of the experts); a cold token reads about 14.3 GB of experts
-    => streams with --stream-experts (server: stream: experts)
+    this Mac: 128 GB RAM, ceiling 97.9 GB, KV room 11.7 GB at 32768 tokens, host floor 9.6 GB
+    => streams, but no decode arena (0.0 GB left after the ring and the host floor), decode runs from the page cache; expect slow decode
 ```
 
 `gmlx validate --json` carries the same numbers under `stream`.
@@ -284,20 +299,29 @@ Streaming models engage two feeder paths by default:
   instead of whole layers (measured on an M3 Max, 162 GB MiniMax-M2 Q5_K_M: a
   53-token prompt's time-to-first-token dropped from 19.4 s to 11.4 s).
   The two ring slots hold the largest layer's expert stacks. Their size
-  comes from the model, not the box. When they do not fit in the arena
-  budget below (a 340 GB model on a 32 GB machine), the load says so.
-  Prefill then falls back to page-cache prefetch by itself.
+  comes from the model, not the box. When they do not fit under the
+  memory ceiling after the every-token weights and the KV room (a 340
+  GB model on a 32 GB machine), the load says so. Prefill then falls
+  back to page-cache prefetch by itself. The ring reads bypass the page
+  cache (`GMLX_PREFILL_NOCACHE=0` restores buffered reads): a pass reads
+  every routed expert once, and through the cache it evicts the rest of
+  the box for pages it never reads again. The slots are wired for the
+  pass, like the arena, in the room the budget keeps for them: a filled
+  slot left unwired is what the kernel compresses first when free RAM
+  is gone, and the GPU then decompresses it on every use.
 - The decode feeder (`--stream-experts` only; `--no-decode-feeder`
   disables) keeps the most-routed experts of every layer in a wired,
   popularity-managed GPU arena and reads only the misses from the GGUF, at
   SSD queue depth. The arena gets what the memory ceiling leaves after
-  the every-token weights and the KV room (see
+  the every-token weights, the KV room, the prefill ring and the host
+  floor (see
   [How big a model can this box stream](#how-big-a-model-can-this-box-stream)).
-  The load then clamps it to the RAM reclaimable at that moment.
+  The load then clamps it to the RAM reclaimable at that moment, less
+  the same floor.
   `GMLX_DECODE_ARENA_GB` overrides the size outright. The prefill ring
-  is lent out of the same bytes, so ring and arena together stay under
-  the ceiling. The arena starts empty and converges within a few dozen
-  tokens. The arena is wired, so it also polices itself. Under system
+  keeps its own room under the same ceiling, so ring and arena together
+  stay under it. The arena starts empty and converges within a few
+  dozen tokens. Each layer wires when it first fills. Under system
   memory pressure (another model, a build) it shrinks and keeps its most
   popular experts. It regrows once pressure clears and the governor has
   its room back. A long-running model therefore coexists with a machine
@@ -321,13 +345,26 @@ Streaming models engage two feeder paths by default:
   post-turn decode dip disappeared as well, because the reads stay on the
   arena's read pool and its popularity accounting.
 - Follow-up turns longer than the split cap go back through the prefill
-  feeder's ring, which was released at first decode so the arena could take
-  its wired budget. Rebuilding the ring on top of a full wired arena would
-  breach the wired cap, so the arena lends the ring its footprint first:
-  every layer shrinks eagerly, keeping its most popular experts, and the
-  next decode releases the ring and regrows the arena layer by layer. Both
-  feeders on is therefore the right default for chat and serve. The lend
-  makes long follow-ups safe without giving up warm decode resumes.
+  feeder's ring, which was released at first decode. The ring rebuilds
+  in its own room, so the arena keeps its residents and the decode
+  resume starts warm. Only on a box whose free RAM is gone does the
+  arena lend the ring its footprint: every layer shrinks eagerly,
+  keeping its most popular experts, and the next decode releases the
+  ring and regrows the arena layer by layer. Both feeders on is the
+  right default for chat and serve.
+
+- No fork beside the arena. A fork of the serve process copies every
+  Metal-mapped buffer before the exec, the wired arena included
+  (measured on an M3 Max: 16 GB/s, so a 60 GB arena is four seconds
+  and 60 GB of fresh anonymous memory, which is the swap storm). The
+  arena, the ring and the pinned weights are marked `VM_INHERIT_NONE`
+  at allocation, so a child maps none of them and a fork copies none.
+  The serve process reads kernel counters in process
+  (`gmlx.serve.kernel_vm`), and the stock APC exact-restore gate is
+  rebound to the same read. MLX's own buffers (KV cache, activations)
+  still copy, so spawn nothing from a streaming server. Where a spawn is
+  unavoidable, `posix_spawn` (Python `subprocess` with an absolute path
+  and `close_fds=False`) copies nothing.
 
 Streaming installs also pin the every-token weights (`GMLX_PIN_WEIGHTS=0`
 disables): every

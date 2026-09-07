@@ -100,6 +100,7 @@ class BoxPlan:
     arena_bytes: int
     expert_bytes: int
     ring_fits: bool
+    floor_bytes: int
     short_bytes: int
     verdict: str
 
@@ -174,7 +175,7 @@ def box_plan(model: ModelPlan, *, ram_bytes: int | None = None,
     for another one. None when the machine cannot be read."""
     from gmlx.load.memfit import total_ram_bytes
     from gmlx.serve.capacity import classify_weight_share, working_set_bytes
-    from gmlx.stream.budget import price_room, transient_bytes
+    from gmlx.stream.budget import host_floor_bytes, price_room, transient_bytes
 
     if ws_bytes is None:
         ws_bytes = working_set_bytes()
@@ -187,7 +188,10 @@ def box_plan(model: ModelPlan, *, ram_bytes: int | None = None,
                       transient_bytes(ws_bytes))
     every = model.every_token_bytes
     left = int(ceiling - every - room.bytes)
-    arena = min(max(0, left), model.expert_bytes)
+    ring_fits = model.ring_bytes <= left
+    floor = host_floor_bytes(int(ram_bytes))
+    arena = min(max(0, left - (model.ring_bytes if ring_fits else 0) - floor),
+                model.expert_bytes)
     if classify_weight_share(model.total_bytes, ram_bytes) != "over":
         verdict = VERDICT_RESIDENT
     elif left < 0:
@@ -199,7 +203,8 @@ def box_plan(model: ModelPlan, *, ram_bytes: int | None = None,
     return BoxPlan(
         ram_bytes=int(ram_bytes), working_set_bytes=float(ws_bytes),
         ceiling_bytes=ceiling, room=room, arena_bytes=arena,
-        expert_bytes=model.expert_bytes, ring_fits=model.ring_bytes <= arena,
+        expert_bytes=model.expert_bytes, ring_fits=ring_fits,
+        floor_bytes=floor,
         short_bytes=max(0, -left), verdict=verdict)
 
 
@@ -254,8 +259,8 @@ def box_summary(m: ModelPlan, b: BoxPlan) -> str:
                 f"{gb(b.room.bytes)} exceed the {gb(b.ceiling_bytes)} ceiling "
                 f"by {gb(b.short_bytes)}")
     if b.verdict == VERDICT_PAGE_CACHE:
-        return (f"no decode arena ({gb(b.arena_bytes)} left under the "
-                "ceiling), decode runs from the page cache")
+        return (f"no decode arena ({gb(b.arena_bytes)} left after the "
+                "ring and the host floor), decode runs from the page cache")
     return f"decode arena {gb(b.arena_bytes)}{share_text(b.arena_share)}"
 
 
@@ -275,7 +280,7 @@ def box_lines(m: ModelPlan, b: BoxPlan) -> list[str]:
     room += (f" at {b.room.depth} tokens" if b.room.priced
              else " (flat, header not priced)")
     lines = [f"this Mac: {human_gb(b.ram_bytes, 0)} RAM, ceiling "
-             f"{gb(b.ceiling_bytes)}, {room}"]
+             f"{gb(b.ceiling_bytes)}, {room}, host floor {gb(b.floor_bytes)}"]
     if b.verdict == VERDICT_RESIDENT:
         lines.append("=> the whole file fits in RAM; streaming is optional "
                      f"({box_summary(m, b)} if streamed)")

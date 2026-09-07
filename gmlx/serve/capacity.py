@@ -383,14 +383,16 @@ class LoadDeferred(RuntimeError):
 
 
 def preload_gate(weight_bytes: float, model_id: str, *,
-                 streaming: bool = False) -> None:
+                 streaming: bool = False, reserved_bytes: float = 0.0) -> None:
     """The same headroom check a request takes, at model load and swap:
     a build whose weights cannot fit the measured free working set (the
     pool has already evicted what it may) refuses with numbers instead
     of aborting the box's biggest allocation. GMLX_OVERCOMMIT=1 skips.
     ``streaming`` names the bytes as the every-token weights: the routed
     experts are already discounted, so a smaller quant of the rest is
-    the fix, not streaming."""
+    the fix, not streaming. ``reserved_bytes`` is room a resident
+    streamed model keeps but has not filled (its prefill ring, its KV
+    room); the measure reads it as free, the load may not take it."""
     if overcommit() or weight_bytes <= 0:
         return
     what = "every-token weights" if streaming else "weights"
@@ -411,6 +413,10 @@ def preload_gate(weight_bytes: float, model_id: str, *,
         # an 86.7 GB load next to a pinned 31.5 GB resident (118 GB on a
         # 112 GB wire limit) and Metal OOM'd in the mmap warm (2026-08-25).
         head -= max(0.0, ws - budget)
+    if head is not None and reserved_bytes > 0:
+        head -= reserved_bytes
+    kept = (f" less the {reserved_bytes / GB:.1f} GB ring and KV room a "
+            "resident streamed model keeps" if reserved_bytes > 0 else "")
     if budget is not None and weight_bytes > budget:
         raise RuntimeError(
             f"model does not fit: {model_id} {what} "
@@ -421,7 +427,7 @@ def preload_gate(weight_bytes: float, model_id: str, *,
         _defer(
             f"model load deferred: {model_id} {what} "
             f"{weight_bytes / GB:.1f} GB exceed the measured free "
-            f"working set {head / GB:.1f} GB (resident models are "
+            f"working set {head / GB:.1f} GB{kept} (resident models are "
             f"pinned or busy). Retry when a slot frees, or "
             f"GMLX_OVERCOMMIT=1 overrides.")
     _kernel_gate(weight_bytes, model_id)

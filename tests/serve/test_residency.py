@@ -5,6 +5,7 @@ GPU, no model files, no mlx_vlm.server mutation."""
 from __future__ import annotations
 
 from contextvars import copy_context
+from types import SimpleNamespace
 
 from gmlx.serve.residency import (  # noqa: E402
     _BusyHold,
@@ -243,6 +244,134 @@ def test_all_busy_exceeds_budget_with_warning(caplog):
     assert resident(pool) == {"A", "B"}
     assert pool.stats()["resident_bytes"] == 20 * GB
     assert "pinned or busy" in caplog.text and "exceed" in caplog.text
+
+
+def test_streaming_incoming_defers_over_budget_beside_a_busy_resident():
+    # Over the budget with only pinned or busy residents, a streaming load
+    # is refused with the typed 503, not admitted. Its arena fills the
+    # ceiling, so the overcommit takes the room the other model's KV needs
+    # and the governor sheds it. A dense incoming keeps warn-and-admit.
+    import pytest
+
+    from gmlx.serve.capacity import LoadDeferred
+
+    proxy, pool, teardowns = make_pool(100, {"A": 16, "B": 96, "C": 10})
+    pool.acquire("A", None, "auto")        # hold kept: in-flight
+    spec = SimpleNamespace(stream="experts")
+    with pytest.raises(LoadDeferred) as info:
+        pool.acquire("B", None, "auto", build_spec=spec)
+    msg = str(info.value)
+    assert "model load deferred: B" in msg
+    assert "GB resident" in msg and "GB budget beside" in msg
+    assert "GB of pinned or busy" in msg and "GMLX_DECODE_ARENA_GB" in msg
+    assert teardowns == [] and resident(pool) == {"A"}
+    # Room again once A's hold is released.
+    pool.release(next(iter(pool._entries.values())))
+    entry = pool.acquire("B", None, "auto", build_spec=spec)
+    pool.release(entry)
+    assert teardowns == ["A"] and resident(pool) == {"B"}
+
+
+def test_streaming_incoming_under_budget_loads_beside_a_busy_resident():
+    proxy, pool, teardowns = make_pool(200, {"A": 16, "B": 60})
+    pool.acquire("A", None, "auto")        # hold kept: in-flight
+    entry = pool.acquire("B", None, "auto",
+                         build_spec=SimpleNamespace(stream="experts"))
+    pool.release(entry)
+    assert teardowns == [] and resident(pool) == {"A", "B"}
+
+
+def test_streaming_incoming_defers_over_budget_beside_a_pinned_resident():
+    import pytest
+
+    from gmlx.serve.capacity import LoadDeferred
+
+    proxy, pool, teardowns = make_pool(100, {"A": 16, "B": 96}, pinned=("A",))
+    acquire(pool, "A")
+    with pytest.raises(LoadDeferred):
+        pool.acquire("B", None, "auto", build_spec=SimpleNamespace(stream="experts"))
+    assert teardowns == [] and resident(pool) == {"A"}
+
+
+def test_streaming_incoming_over_the_count_cap_keeps_the_admit_policy(caplog):
+    # Only the byte budget defers a streaming load. Over the count cap with
+    # room in bytes, the warn-and-admit policy stands.
+    proxy, pool, teardowns = make_pool(200, {"A": 16, "B": 96}, pinned=("A",),
+                                       max_models=1)
+    acquire(pool, "A")
+    with caplog.at_level("WARNING", logger="gmlx.serve.residency"):
+        entry = pool.acquire("B", None, "auto",
+                             build_spec=SimpleNamespace(stream="experts"))
+    pool.release(entry)
+    assert resident(pool) == {"A", "B"}
+    assert "pinned or busy" in caplog.text
+
+
+def test_streaming_build_lowers_the_wired_limit_and_credits_the_walk(monkeypatch):
+    # The walk wraps the routed experts as tracked views long before the
+    # install credits them at the first request. The build credit covers
+    # what the load adds to active memory, up to the streamed bytes, from
+    # the build until the install's credit, and a failed build drops it.
+    # The wired-limit neutralization runs before the walk.
+    import pytest
+
+    import gmlx.gen.prefill_decay as pd
+    import gmlx.load.loader as loader
+    import gmlx.serve.capacity as cap
+
+    monkeypatch.setattr(pd, "_STREAMED_TRACKED", {})
+    monkeypatch.setattr(pd, "_STREAMED_CAP", {})
+    monkeypatch.setattr(pd, "_UNTRACKED_OWNERS", {})
+    monkeypatch.setattr(pd, "_UNTRACKED_WEIGHTS", {})
+    monkeypatch.setattr(pd, "_BUILD_CREDIT", {})
+    box = {"active": 10 * GB}
+    monkeypatch.setattr(pd.mx, "get_active_memory", lambda: box["active"])
+    monkeypatch.setattr(cap, "streamed_expert_bytes", lambda p: 330 * GB)
+    monkeypatch.setattr(cap, "install_boot_table",
+                        lambda path, b, label, env=None: None)
+    monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: None)
+    monkeypatch.setenv("GMLX_DECODE_ARENA_GB", "60")
+    seen = []
+    monkeypatch.setattr(loader, "_neutralize_wired_limit_sweep",
+                        lambda: seen.append("neutralized"))
+    proxy = _RuntimeProxy(_FakeOriginal())
+
+    def fake_stock_get(model_path, adapter_path, *, model_kind="auto"):
+        box["active"] = 349 * GB
+        pd.note_untracked_weights(0.0, key=("/w",))   # the warm pass registers
+        seen.append(pd.build_credit_bytes())
+        proxy.response_generator = SimpleNamespace(model=None)
+        proxy.model_cache = {
+            "cache_key": (model_path, adapter_path, model_kind),
+            "model_path": model_path,
+            "model": "M",
+        }
+
+    pool = _ResidencyPool(
+        proxy, fake_stock_get, lambda: True, int(100 * GB), (),
+        footprint_fn=lambda p: int(340 * GB))
+    spec = SimpleNamespace(stream="experts")
+    entry = pool.acquire("a", None, "auto", build_spec=spec)
+    pool.release(entry)
+    assert seen == ["neutralized", 330 * GB]
+    assert pd.build_credit_bytes() == 330 * GB      # still there after the build
+    pd.note_streamed_tracked_bytes(300 * GB, key=("/w",), source="experts")
+    assert pd.build_credit_bytes() == 0            # the install took over
+    # A dense build neither neutralizes nor credits.
+    seen.clear()
+    dense = pool.acquire("b", None, "auto")
+    pool.release(dense)
+    assert seen == [0]
+
+    def failing_get(model_path, adapter_path, *, model_kind="auto"):
+        raise RuntimeError("boom")
+
+    pool2 = _ResidencyPool(
+        proxy, failing_get, lambda: True, int(100 * GB), (),
+        footprint_fn=lambda p: int(340 * GB))
+    with pytest.raises(RuntimeError):
+        pool2.acquire("c", None, "auto", build_spec=spec)
+    assert not pd._BUILD_CREDIT
 
 
 def test_release_returns_refcount_to_zero_and_entry_evictable():
@@ -663,12 +792,61 @@ def test_build_stamps_boot_kv_costs_where_the_generator_reads(monkeypatch):
     assert cap.boot_kv_rates(dense_lm) == want
 
 
+def test_load_gate_keeps_the_resident_streams_ring_and_kv_room(monkeypatch):
+    # With a streamed model resident, the second load's headroom check
+    # takes off the ring room (when the ring is released) and the KV room
+    # the stream keeps. Qwen (16 GB) loaded into Kimi's 29 GB of rooms
+    # on a 128 GB box before this, under the weight budget.
+    from types import SimpleNamespace
+
+    import gmlx.serve.capacity as cap
+
+    seen = []
+    monkeypatch.setattr(
+        cap, "preload_gate",
+        lambda w, m, streaming=False, reserved_bytes=0.0:
+            seen.append(int(reserved_bytes)))
+    monkeypatch.setattr(cap, "install_boot_table",
+                        lambda path, b, label, env=None: None)
+    proxy = _RuntimeProxy(_FakeOriginal())
+    ring = SimpleNamespace(slot_bytes=2 * GB, _slots=[])
+    stock = SimpleNamespace(_kq_decode_feeder=SimpleNamespace(
+                                nominal_bytes=50 * GB, _room_bytes=10 * GB),
+                            _kq_feeder=ring)
+    wrapper = SimpleNamespace(language_model=SimpleNamespace(_model=stock))
+    dense = SimpleNamespace(language_model=SimpleNamespace(
+        _model=SimpleNamespace()))
+
+    def fake_stock_get(model_path, adapter_path, *, model_kind="auto"):
+        proxy.response_generator = SimpleNamespace(
+            model=wrapper if model_path == "stream" else dense)
+        proxy.model_cache = {
+            "cache_key": (model_path, adapter_path, model_kind),
+            "model_path": model_path,
+            "model": "M",
+        }
+
+    pool = _ResidencyPool(
+        proxy, fake_stock_get, lambda: True, int(200 * GB), (),
+        footprint_fn=lambda p: int(20 * GB))
+    held = acquire(pool, "stream")
+    assert seen == [0]                       # nothing resident yet
+    acquire(pool, "dense")
+    assert seen[-1] == 14 * GB               # 10 room + 2 x 2 ring
+    ring._slots = [object()]                 # ring filled: its room is live
+    acquire(pool, "dense2")
+    assert seen[-1] == 10 * GB
+    assert held.busy == 0
+
+
 def test_streaming_entry_is_priced_at_every_token_plus_arena(monkeypatch):
-    # A stream: experts entry holds its every-token weights and its decode
-    # arena, not the file. Admission prices the arena from the planner (or
-    # GMLX_DECODE_ARENA_GB); the built entry carries the feeder's nominal
-    # arena. Pricing the file evicted every other model for 330 GB of
-    # experts that never leave the disk.
+    # A stream: experts entry holds its every-token weights, its decode
+    # arena and its prefill ring's room, not the file. Admission prices the
+    # arena from the planner (or GMLX_DECODE_ARENA_GB) and the ring from
+    # the planner; the built entry carries the feeder's nominal arena and
+    # the ring it allocated. Pricing the file evicted every other model
+    # for 330 GB of experts that never leave the disk; pricing without the
+    # ring loaded a dense model into the ring's room beside a busy stream.
     from types import SimpleNamespace
 
     import gmlx.serve.capacity as cap
@@ -678,13 +856,16 @@ def test_streaming_entry_is_priced_at_every_token_plus_arena(monkeypatch):
     monkeypatch.delenv("GMLX_DECODE_ARENA_GB", raising=False)
     monkeypatch.setattr(cap, "streamed_expert_bytes", lambda p: 330 * GB)
     monkeypatch.setattr(plan, "plan_path",
-                        lambda p: (None, SimpleNamespace(arena_bytes=80 * GB)))
+                        lambda p: (SimpleNamespace(ring_bytes=6 * GB),
+                                   SimpleNamespace(arena_bytes=80 * GB,
+                                                   ring_fits=True)))
     monkeypatch.setattr(cap, "install_boot_table",
                         lambda path, b, label, env=None: None)
     monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: None)
     proxy = _RuntimeProxy(_FakeOriginal())
     feeder = SimpleNamespace(nominal_bytes=70 * GB)
-    stock = SimpleNamespace(_kq_decode_feeder=feeder)
+    stock = SimpleNamespace(_kq_decode_feeder=feeder,
+                            _kq_feeder=SimpleNamespace(slot_bytes=2 * GB))
     wrapper = SimpleNamespace(language_model=SimpleNamespace(_model=stock))
 
     def fake_stock_get(model_path, adapter_path, *, model_kind="auto"):
@@ -699,19 +880,58 @@ def test_streaming_entry_is_priced_at_every_token_plus_arena(monkeypatch):
         proxy, fake_stock_get, lambda: True, int(100 * GB), (),
         footprint_fn=lambda p: int(340 * GB))
     asked = []
-    monkeypatch.setattr(pool, "_evict_for_room", lambda incoming: asked.append(incoming))
+    monkeypatch.setattr(pool, "_evict_for_room",
+                        lambda incoming, **k: asked.append(incoming))
     entry = pool.acquire("a", None, "auto", build_spec=SimpleNamespace(stream="experts"))
     pool.release(entry)
-    assert asked == [10 * GB + 80 * GB]
-    assert entry.footprint == 10 * GB + 70 * GB
-    assert pool.stats()["resident_bytes"] == 80 * GB
-    # The env cap is the arena the loader will size.
+    assert asked == [10 * GB + 80 * GB + 6 * GB]
+    assert entry.footprint == 10 * GB + 70 * GB + 4 * GB
+    assert pool.stats()["resident_bytes"] == 84 * GB
+    # The env cap is the arena the loader will size; the ring stays priced.
     monkeypatch.setenv("GMLX_DECODE_ARENA_GB", "60")
-    assert residency._streaming_footprint("a", 340 * GB) == 10 * GB + 60 * GB
+    assert residency._streaming_footprint("a", 340 * GB) == 10 * GB + 66 * GB
     assert residency._streaming_footprint("a", 340 * GB, {"GMLX_DECODE_ARENA_GB": "50"}) \
-        == 10 * GB + 50 * GB
+        == 10 * GB + 56 * GB
+    # A ring the box cannot hold is not priced.
+    monkeypatch.setattr(plan, "plan_path",
+                        lambda p: (SimpleNamespace(ring_bytes=6 * GB),
+                                   SimpleNamespace(arena_bytes=0,
+                                                   ring_fits=False)))
+    assert residency._streaming_footprint("a", 340 * GB) == 10 * GB + 60 * GB
     # A dense entry (no feeder) is still its file.
     stock._kq_decode_feeder = None
     dense = pool.acquire("b", None, "auto")
     pool.release(dense)
     assert dense.footprint == 340 * GB
+
+
+def test_failed_build_is_torn_down_before_the_lock_drops(monkeypatch):
+    """A build that fails after the stock load (a kv policy refusal)
+    tears its model down and collects it before the next acquire gates on
+    live memory, and the exception keeps its type and message."""
+    import pytest
+
+    from gmlx.serve import residency as R
+
+    proxy, pool, teardowns = make_pool(100, {"/m.gguf": 10})
+    stock_get = pool._stock_get
+
+    def failing_stock_get(model_path, adapter_path, *, model_kind="auto"):
+        stock_get(model_path, adapter_path, model_kind=model_kind)
+        raise RuntimeError("kv refused")
+
+    pool._stock_get = failing_stock_get
+    collected = []
+    monkeypatch.setattr(R, "_collect_failed_build", lambda: collected.append(1))
+    with pytest.raises(RuntimeError, match="kv refused") as info:
+        acquire(pool, "/m.gguf")
+    assert teardowns == ["/m.gguf"]
+    assert collected == [1]
+    assert not pool._entries
+    # The frames of the failed build are detached from the exception.
+    tb = info.value.__traceback__
+    names = []
+    while tb is not None:
+        names.append(tb.tb_frame.f_code.co_name)
+        tb = tb.tb_next
+    assert "failing_stock_get" not in names

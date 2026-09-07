@@ -312,6 +312,9 @@ SEAMS: tuple[Seam, ...] = (
          "apc_manager.build_apc_manager (from_env mirror)", critical=True),
     Seam("mlx_vlm.apc", "DiskBlockStore",
          "apc_manager.build_apc_manager (from_env mirror)", critical=True),
+    Seam("mlx_vlm.apc", "_free_ram_bytes",
+         "apc_manager._install_fork_free_free_ram (exact disk-restore gate "
+         "rebound to the in-process mach read; stock forks vm_stat)"),
     Seam("mlx_vlm.apc", "_cache_entry_supports_exact_apc",
          "apc_pooling (PoolingCache exact-APC predicate)", critical=True),
     Seam("mlx_vlm.apc", "_merge_exact_cache_entries",

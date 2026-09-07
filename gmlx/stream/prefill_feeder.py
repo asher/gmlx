@@ -26,6 +26,7 @@ disables the feeder rather than corrupting compute).
 
 from __future__ import annotations
 
+import fcntl
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -34,10 +35,14 @@ from contextlib import contextmanager
 from .feeder_common import (
     ATTRS,
     KINDS,
+    lock_pages,
     read_range,
+    read_range_aligned,
     slot_itemsize,
     slot_view,
     swapped_weights,
+    unlock_pages,
+    unshare_on_fork,
     verify_zero_copy,
 )
 
@@ -102,11 +107,22 @@ class PrefillFeeder:
             self._slot_isz[kind] = w
 
         self._fds: dict[str, int] = {}
+        # A ring pass reads every routed expert once, more than any box
+        # can cache; through the buffer cache it evicts the rest of the
+        # box for pages it never reads again (GMLX_PREFILL_NOCACHE=0
+        # restores buffered reads).
+        self._nocache = (os.environ.get("GMLX_PREFILL_NOCACHE", "1") != "0"
+                         and hasattr(fcntl, "F_NOCACHE"))
+        self._sizes: dict[str, int] = {}
         try:
             for entry in self._layers.values():
                 for _, path, _, _ in entry.values():
                     if path not in self._fds:
-                        self._fds[path] = os.open(path, os.O_RDONLY)
+                        fd = os.open(path, os.O_RDONLY)
+                        self._fds[path] = fd
+                        self._sizes[path] = os.fstat(fd).st_size
+                        if self._nocache:
+                            fcntl.fcntl(fd, fcntl.F_NOCACHE, 1)
             self._verify_zero_copy()
         except BaseException:
             self.close()
@@ -149,6 +165,17 @@ class PrefillFeeder:
             for _ in (0, 1)
         ]
         self._views: dict[tuple[int, int], dict] = {}  # (li, parity) -> kind -> view
+        # Wired like the arena, in the room the budget keeps for it. A
+        # filled slot left unwired is what the kernel compresses first
+        # when free RAM is gone, and the GPU decompresses it on every use.
+        for slot in self._slots:
+            for _, mv in slot.values():
+                unshare_on_fork(mv)
+        self._locked: list[tuple[int, int]] = []
+        if os.environ.get("GMLX_DECODE_ARENA_MLOCK", "1") != "0":
+            self._locked = [
+                e for slot in self._slots for _, mv in slot.values()
+                if (e := lock_pages(mv)) is not None]
 
     def release_slots(self) -> None:
         """Drop the ring (its physical pages with it) once decode starts;
@@ -161,6 +188,9 @@ class PrefillFeeder:
         self._ready.clear()
         self._error = None
         self._last_li = None
+        for e in self._locked:
+            unlock_pages(e)
+        self._locked = []
         self._slots = []
         self._views = {}
 
@@ -185,14 +215,20 @@ class PrefillFeeder:
                 mv = slot[kind][1]
                 for start in range(0, nbytes, _READ_CHUNK):
                     end = min(start + _READ_CHUNK, nbytes)
-                    futs.append(self._read_pool.submit(
-                        read_range, fd, mv[start:end], off + start))
+                    futs.append(self._submit_read(
+                        path, fd, mv[start:end], off + start))
             for f in futs:
                 f.result()
         except BaseException as e:  # surfaced on the caller's next wait
             self._error = e
         finally:
             self._ready[li].set()
+
+    def _submit_read(self, path: str, fd: int, dest, off: int):
+        if self._nocache:
+            return self._read_pool.submit(
+                read_range_aligned, fd, dest, off, self._sizes[path])
+        return self._read_pool.submit(read_range, fd, dest, off)
 
     def _kick(self, li: int) -> None:
         if li in self._layers and li not in self._ready:
@@ -271,9 +307,9 @@ class PrefillFeeder:
             fd = self._fds[path]
             for e in ids:
                 if 0 <= e < n_exp:
-                    futs.append(self._read_pool.submit(
-                        read_range, fd,
-                        mv[e * stride:(e + 1) * stride], off + e * stride))
+                    futs.append(self._submit_read(
+                        path, fd, mv[e * stride:(e + 1) * stride],
+                        off + e * stride))
         for f in futs:
             f.result()
         with self._swapped(li):

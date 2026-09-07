@@ -51,7 +51,16 @@ import numpy as np
 from . import keepwarm
 import gmlx.load.loadlog as loadlog
 from gmlx.envflags import env_bool, env_choice, env_float, env_int
-from .feeder_common import ATTRS, KINDS, read_range, swapped_weights, verify_zero_copy
+from .feeder_common import (
+    ATTRS,
+    KINDS,
+    lock_pages,
+    read_range,
+    swapped_weights,
+    unlock_pages,
+    unshare_on_fork,
+    verify_zero_copy,
+)
 
 # Miss-pull parallelism: per layer, up to top_k experts x 3 stacks of
 # MB-scale slices; enough in-flight preads for SSD sequential bandwidth.
@@ -376,17 +385,20 @@ class DecodeFeeder:
             s = self._slots[li]
             for kind, (_, _, _, stride, shape) in entry.items():
                 a = kq.arena_alloc([s * stride])
+                unshare_on_fork(a[1])
                 self._arena[(li, kind)] = a
                 self._views[(li, kind)] = a[0].reshape((s,) + shape[1:])
                 self.arena_bytes += s * stride
         self._locked: dict[tuple[int, str], tuple[int, int]] = {}
         self.locked_bytes = 0
-        # Wiring waits for ensure_wired (the wrapper's first decode call):
-        # at install time the prefill feeder's ring is live, and an
-        # over-RAM box cannot hold a wired ring and a wired arena at once.
-        # Untouched arena pages have no physical cost until then. The
-        # loader points _release_ring at the prefill feeder's slot release
-        # so the handoff happens in one place.
+        # The one-time wiring pass waits for ensure_wired (the wrapper's
+        # first decode call), after the prefill ring is released. Until
+        # then a layer wires at its first stage() call, before its slots
+        # fill: untouched arena pages have no physical cost, and filled
+        # pages left unwired are what the kernel swaps under pressure and
+        # the wiring pass then drags back. The loader points _release_ring
+        # at the prefill feeder's slot release so the handoff happens in
+        # one place.
         self._mlock_deferred = True
         self._release_ring = None
 
@@ -532,33 +544,20 @@ class DecodeFeeder:
     def _mlock_buf(self, key: tuple[int, str]) -> bool:
         if os.environ.get("GMLX_DECODE_ARENA_MLOCK", "1") == "0":
             return False
-        import ctypes
-
-        libc = _libc()
-        if libc is None:
+        if key in self._locked:
+            return True
+        entry = lock_pages(self._arena[key][1])
+        if entry is None:
             return False
-        mv = self._arena[key][1]
-        n = len(mv)
-        try:
-            addr = ctypes.addressof(ctypes.c_char.from_buffer(mv))
-        except (TypeError, ValueError):
-            return False
-        if libc.mlock(ctypes.c_void_p(addr), ctypes.c_size_t(n)) != 0:
-            return False
-        self._locked[key] = (addr, n)
-        self.locked_bytes += n
+        self._locked[key] = entry
+        self.locked_bytes += entry[1]
         return True
 
     def _munlock_buf(self, key: tuple[int, str]) -> None:
         entry = self._locked.pop(key, None)
         if entry is None:
             return
-        import ctypes
-
-        libc = _libc()
-        if libc is not None:
-            addr, n = entry
-            libc.munlock(ctypes.c_void_p(addr), ctypes.c_size_t(n))
+        unlock_pages(entry)
         self.locked_bytes -= entry[1]
 
     def _verify_zero_copy(self) -> None:
@@ -667,9 +666,9 @@ class DecodeFeeder:
         """Shrink the wired arena by ~``nbytes`` so the prefill ring can
         re-allocate without breaching the wired cap. The prefill feeder
         calls this before rebuilding its slots on a post-decode prefill
-        pass (chat follow-up turns): decode handed the ring's wired budget
-        to the arena in ensure_wired, and a second wired ring on top of a
-        full wired arena is what the cap cannot hold.
+        pass (chat follow-up turns). The budget keeps the ring's room out
+        of the arena, so the lend is a no-op while the kernel still has
+        that room; it fires only on a box whose free RAM is gone.
 
         Shrinking is eager (every layer now): the ring path never calls
         stage(), so the lazy per-layer resize would not fire during the
@@ -679,6 +678,8 @@ class DecodeFeeder:
         if self._mlock_deferred:
             return  # arena never wired; ring + cold arena already coexist
         if not self.arena_bytes:
+            return
+        if self._kernel_has_room(nbytes):
             return
         frac = max(0.0, 1.0 - nbytes / self.arena_bytes) * self._lend_frac
         if frac >= self._lend_frac:
@@ -690,6 +691,23 @@ class DecodeFeeder:
             f"prefill ring (kept {self.arena_bytes / 1e9:.1f} GB); "
             "restored at next decode"
         )
+
+    @staticmethod
+    def _kernel_has_room(nbytes: int) -> bool:
+        """Whether the kernel can hand out ``nbytes`` above its floor
+        without swapping anyone. Unknown counts as no room."""
+        try:
+            from gmlx.stream.budget import (
+                kernel_floor_bytes,
+                reclaimable_ram_bytes,
+            )
+
+            avail = reclaimable_ram_bytes()
+            if avail is None:
+                return False
+            return avail - kernel_floor_bytes() >= nbytes
+        except Exception:
+            return False
 
     def _shrink_now(self) -> int:
         """Resize every layer down to its current target now. Eager,
@@ -720,19 +738,19 @@ class DecodeFeeder:
             0, self.arena_bytes - self._arena_bytes_at(_PRESSURE_MAX_STEPS))
 
     def governor_evict(self, fraction: float) -> int:
-        """Shrink the arena by ``fraction`` of the ladder toward its floor,
-        keeping each layer's most popular residents. Returns the bytes
-        freed. Regrow is the pressure ladder's, gated on the governor's
-        headroom (see _regrow_headroom_ok), so a shrink the governor asked
-        for does not bounce back into the pressure that caused it."""
+        """Shrink the arena by ``fraction`` of what is left above the
+        ladder's floor, at least one step, keeping each layer's most
+        popular residents. Returns the bytes freed. Regrow is the pressure
+        ladder's, gated on the governor's headroom (see
+        _regrow_headroom_ok), so a shrink the governor asked for does not
+        bounce back into the pressure that caused it."""
         if fraction <= 0 or not self._layers:
             return 0
-        steps = min(_PRESSURE_MAX_STEPS,
-                    max(self._pressure_steps,
-                        int(math.ceil(fraction * _PRESSURE_MAX_STEPS))))
-        if steps <= self._pressure_steps:
+        remaining = _PRESSURE_MAX_STEPS - self._pressure_steps
+        if remaining <= 0:
             return 0
-        self._pressure_steps = steps
+        take = max(1, min(remaining, int(math.ceil(fraction * remaining))))
+        self._pressure_steps += take
         self._last_step_poll = self._pressure_polls
         self._normal_polls = 0
         freed = self._shrink_now()
@@ -782,6 +800,9 @@ class DecodeFeeder:
             # buffer the zombie read may still write into. (The pending
             # guard is belt-and-braces: settle just drained the layer.)
             self._resize_layer(li, target)
+        if self._mlock_deferred and self._lend_frac >= 1.0:
+            for kind in self._layers[li]:
+                self._mlock_buf((li, kind))
         slot_of = self._slot_of[li]
         counts = self._counts[li]
         if self._verify:
@@ -1547,6 +1568,7 @@ class DecodeFeeder:
         for kind, (_, _, _, stride, shape) in entry.items():
             key = (li, kind)
             a = kq.arena_alloc([new_s * stride])
+            unshare_on_fork(a[1])
             mv_new, mv_old = a[1], self._arena[key][1]
             for ns, os_ in enumerate(keep):
                 mv_new[ns * stride:(ns + 1) * stride] = \
