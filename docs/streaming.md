@@ -183,8 +183,7 @@ transient plus the admission reserve, with no KV cache in it yet.
 | 512 | 412.3 | 391.7 | 41.2 | 350.5 |
 
 `sudo sysctl iogpu.wired_limit_mb=<MB>` raises the working set. The
-reserve still holds 8 GB or 10% back. On a 128 GB box the ceiling then
-tops out near 110 GB.
+reserve still holds 8 GB or 10% back.
 
 ### Kimi-K3 as the worked example
 

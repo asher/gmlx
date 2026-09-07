@@ -1,11 +1,12 @@
 """One memory budget for a streaming install.
 
-The decode arena, the prefill ring it lends to and the KV cache are all
+The decode arena, the prefill ring beside it and the KV cache are all
 MLX-tracked, and the serve governor enforces one ceiling over them
 (``gmlx.serve.capacity.ceiling_bytes``). The arena is sized as what that
-ceiling leaves after the every-token weights and a priced KV room, so at
-decode the governor's headroom is the room minus live KV on any box and
-any quant, not the gap between two unrelated estimates.
+ceiling leaves after the every-token weights, a priced KV room, the ring's
+own room and the host floor, so at decode the governor's headroom is the
+room minus live KV on any box and any quant, not the gap between two
+unrelated estimates.
 
 The room prices ``GMLX_STREAM_KV_CTX`` tokens (default 32768, clamped to
 the trained context) at ``GMLX_STREAM_KV_WIDTH`` rows (default 1) with

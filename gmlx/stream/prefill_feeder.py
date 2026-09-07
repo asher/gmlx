@@ -148,7 +148,8 @@ class PrefillFeeder:
         self._error: BaseException | None = None
         # Set by the loader to DecodeFeeder.lend_for_ring when a decode
         # arena coexists with this ring: called before a post-decode slot
-        # rebuild so the wired arena shrinks by the ring's footprint first.
+        # rebuild; it shrinks the arena only when the kernel has lost the
+        # ring's room.
         self._lend_hook = None
 
     def _alloc_slots(self) -> None:
@@ -179,8 +180,8 @@ class PrefillFeeder:
 
     def release_slots(self) -> None:
         """Drop the ring (its physical pages with it) once decode starts;
-        the next prefill pass re-allocates lazily. Decode holds the wired
-        budget the ring was using - see DecodeFeeder.ensure_wired."""
+        the ring's room stays reserved under the ceiling and the next
+        prefill pass re-allocates into it."""
         if not self._slots:
             return
         for ev in self._ready.values():  # a worker may still write a slot

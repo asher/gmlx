@@ -22,10 +22,11 @@ policy (least-popular first, never a slot the current call routes to) is the
 popularity-based residency manager from the feeder design; the arena starts
 empty and self-organizes toward the workload's hot set.
 
-Enable with ``GMLX_FEEDER_DECODE=1`` (``--stream-experts`` models only - the
-every-token layers must be on the GPU). Arena size defaults to what the wired
-budget leaves after the non-expert weights and a KV reserve;
-``GMLX_DECODE_ARENA_GB`` overrides. The
+On by default for ``--stream-experts`` models (``--no-decode-feeder`` or
+``GMLX_FEEDER_DECODE=0`` disables; the every-token layers must be on the
+GPU). Arena size defaults to what the memory ceiling leaves after the
+every-token weights, the priced KV room, the prefill ring and the host
+floor; ``GMLX_DECODE_ARENA_GB`` overrides. The
 arena also answers system memory pressure arriving after load by shrinking
 (and later regrowing) itself - see the pressure constants below. Miss reads
 are joined with a timeout: a read wedged in the kernel is contained (slot
@@ -337,10 +338,9 @@ class DecodeFeeder:
             raise RuntimeError(
                 f"arena budget ({arena_bytes / 1e9:.1f} GB) fits no experts")
 
-        # Sized capacity. ``_slots`` tracks the live per-layer size: it
-        # starts below capacity while the prefill ring borrows from the
-        # arena (``lend_bytes``, see lend_for_ring) and returns to it at
-        # the first decode.
+        # Sized capacity. ``_slots`` tracks the live per-layer size: a
+        # governor shed or a ring lend (``lend_bytes``, see lend_for_ring)
+        # takes it below capacity, and regrow returns it.
         self._orig_slots = dict(self._slots)
         self._per_expert = {li: per_expert[li] for li in self._layers}
         self.nominal_bytes = sum(
