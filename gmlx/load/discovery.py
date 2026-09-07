@@ -150,7 +150,10 @@ def _drafter_kind(meta, arch: str | None) -> str | None:
 def _looks_like_drafter(meta, arch: str | None) -> bool:
     if is_drafter_arch(arch):
         return True
-    if arch:
+    # A supported main-model arch is never a drafter, whatever backbone-style
+    # fields it declares (deepseek4 carries ``embedding_length_out`` for the
+    # hyper-connection width since the Vision-Exp conversions).
+    if arch and arch not in supported_arches():
         for suf in _BACKBONE_FIELDS:
             if read_int(meta, f"{arch}.{suf}") is not None:
                 return True

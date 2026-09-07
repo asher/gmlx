@@ -159,7 +159,7 @@ def test_gemma4_swap_and_no_chunked_prefill_copy():
 def test_no_row_for_vendored_and_unwired_model_types():
     # Vendored archs carry their hook mixins in their own vlm_model;
     # unwired archs fail loud at the per-arch hook check downstream.
-    for mt in ("muse_glimmer", "glm5_next", "qwen4_exp",
+    for mt in ("muse_glimmer", "glm5_next", "qwen4_exp", "deepseek_v4_vl",
                "pixtral", "llava", "qwen3_omni_moe", "kimi_k25"):
         assert _vlm_spec_language_model(mt) is None, mt
 
@@ -170,3 +170,5 @@ def test_spec_hook_key_aliases():
     for mt in ("qwen3_5", "qwen3_5_moe", "muse_glimmer", "glm5_next",
                "qwen4_exp"):
         assert _spec_hook_key(mt) == mt
+    # the Vision-Exp container carries the deepseek_v4 text hooks
+    assert _spec_hook_key("deepseek_v4_vl") == "deepseek_v4"

@@ -38,7 +38,7 @@ def _stub_loaders(monkeypatch, arches):
                  "_load_nemotron_mtp_drafter", "_load_dflash_drafter"):
         monkeypatch.setattr(
             mtp_load, name,
-            lambda path, model, cfg, *, zero_copy, log, _n=name:
+            lambda path, model, cfg, *, zero_copy, log, _n=name, **kw:
                 calls.append((_n, path)) or _n)
     monkeypatch.setattr(
         mtp_load, "_load_gemma4_assistant_drafter",

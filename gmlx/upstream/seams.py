@@ -323,6 +323,9 @@ SEAMS: tuple[Seam, ...] = (
          "apc_pooling (disk-tier zero-width spill)", critical=True),
     Seam("mlx_vlm.apc", "_clone_cache_entry_for_apc",
          "apc_pooling", critical=True),
+    Seam("mlx_vlm.apc", "multimodal_token_ids_from_config",
+         "apc_media.install_media_token_ids (config media_token_ids fold "
+         "for expanded image blocks)", critical=True),
     Seam("mlx_vlm.generate.ar", "BatchGenerator.__init__",
          "apc_pooling.install_pooled_prefill_batch_gate (prompt batches "
          "stay B=1 on pooling-cache models; to_batch_cache has no pooled "

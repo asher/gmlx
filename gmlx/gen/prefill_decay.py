@@ -606,6 +606,12 @@ _STOCK_BASE = 2048
 def decayed_for_batch(batch) -> int | None:
     """Depth-decayed prefill step for a PromptProcessingBatch-shaped object
     (None passes through: caller falls back to one-shot)."""
+    # A pinned step wins outright: the media-block chunker pins the one
+    # chunk it widens to a whole image block (<= 384 tokens on DeepSeek-V4),
+    # which decay would otherwise re-cut mid-block from inside its wrap.
+    pinned = getattr(batch, "_gmlx_pinned_step", None)
+    if pinned:
+        return int(pinned)
     base = batch.prefill_step_size
     if not base or not _enabled():
         return base

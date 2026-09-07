@@ -6,6 +6,16 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- DeepSeek-V4-Flash-Vision-Exp loads with its `deepseek4v` mmproj: image
+  turns on `run`, `chat` and `serve`; text turns unchanged.
+
+### Fixed
+
+- `gmlx discover` listed a DeepSeek-V4 GGUF carrying `embedding_length_out`
+  as an assistant drafter.
+
 ## [0.4.10] - 2026-09-07
 
 ### Added

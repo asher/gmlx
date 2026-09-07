@@ -376,6 +376,13 @@ class ModelArgs(BaseModelArgs):
     index_topk: int = 512
     num_nextn_predict_layers: int = 1
     tie_word_embeddings: bool = False
+    # Vision-Exp checkpoints: a second router correction bias applied to
+    # image-block tokens (exp_probs_b_vl). Off = no extra params, no path.
+    vision_router_bias: bool = False
+    # Image-block ids (vocab_size + block type) for the APC media guard.
+    # The VLM container fills it; the serve engine reads the config off the
+    # language model, so it has to live here. Text-only loads leave it empty.
+    media_token_ids: List[int] = field(default_factory=list)
 
     def __post_init__(self):
         if not self.compress_ratios:
@@ -741,6 +748,64 @@ def _hash_expert_select(
 
 
 @mx.compile
+def _expert_select_vl(
+    logits: mx.array,
+    e_score_correction_bias: mx.array,
+    e_score_correction_bias_vl: mx.array,
+    image_mask: mx.array,
+    top_k: int,
+    routed_scaling_factor: float,
+    norm_topk_prob: bool,
+    scoring_func: str,
+) -> Tuple[mx.array, mx.array]:
+    """``_expert_select`` on a chunk holding image-block tokens: those rows
+    select with the image bias, text rows with the text bias; the gathered
+    weights are the unbiased scores either way."""
+    logits = logits.astype(mx.float32)
+    scores = _score_func(logits, scoring_func)
+    bias = mx.where(
+        image_mask[..., None], e_score_correction_bias_vl, e_score_correction_bias
+    )
+    biased = scores + bias
+    inds = mx.argpartition(-biased, kth=top_k - 1, axis=-1)[..., :top_k]
+    weights = mx.take_along_axis(scores, inds, axis=-1)
+    if scoring_func != "softmax" and norm_topk_prob:
+        weights = weights / (weights.sum(axis=-1, keepdims=True) + 1e-20)
+    weights = weights * routed_scaling_factor
+    return inds, weights
+
+
+@mx.compile
+def _hash_expert_select_vl(
+    input_ids: mx.array,
+    logits: mx.array,
+    tid2eid: mx.array,
+    e_score_correction_bias_vl: mx.array,
+    image_mask: mx.array,
+    top_k: int,
+    routed_scaling_factor: float,
+    norm_topk_prob: bool,
+    scoring_func: str,
+) -> Tuple[mx.array, mx.array]:
+    """Hash-routed layer on a chunk holding image-block tokens: text rows
+    keep the token-hash experts, image rows take a score top-k under the
+    image bias (``input_ids`` arrive with image slots clamped to 0, so the
+    hash gather never reads past the table)."""
+    logits = logits.astype(mx.float32)
+    scores = _score_func(logits, scoring_func)
+    text_inds = tid2eid[input_ids]
+    image_inds = mx.argpartition(
+        -(scores + e_score_correction_bias_vl), kth=top_k - 1, axis=-1
+    )[..., :top_k].astype(text_inds.dtype)
+    inds = mx.where(image_mask[..., None], image_inds, text_inds)
+    weights = mx.take_along_axis(scores, inds, axis=-1)
+    if scoring_func != "softmax" and norm_topk_prob:
+        weights = weights / (weights.sum(axis=-1, keepdims=True) + 1e-20)
+    weights = weights * routed_scaling_factor
+    return inds, weights
+
+
+@mx.compile
 def _limited_swiglu(gate: mx.array, up: mx.array, limit: float) -> mx.array:
     if limit and limit > 0:
         gate = mx.minimum(gate, limit)
@@ -1022,6 +1087,120 @@ _COMPILE_DENSE = os.environ.get("GMLX_COMPILE_DENSE", "1") != "0"
 _MOE_MIX_SCORES = os.environ.get("GMLX_V4_MOE_MIX", "1") != "0"
 
 
+# Vision-Exp image chunks. The processor expands each image into a block of
+# sentinel ids (lead PADs, START, rows of IMAGE/NEWLINE, PADs, END) and
+# hands the model their absolute [start, end) offsets (``image_spans``, a
+# host-side list). Per chunk the model derives, without touching the
+# device: which blocks it holds (``image_chunk_blocks``), the image-token
+# mask for the router, and the query rows whose sliding-window attention
+# widens. Reference (ds4 ``get_window_topk_idxs_visible``): a query inside
+# [START..END] sees its causal window PLUS every later key up to END; lead
+# PADs and text keep the plain window. That extension only ADDS visibility,
+# so the window kernels' result stays correct for every other row and the
+# widened rows are recomputed through the masked fallback and spliced in
+# (``_patch_span_rows``), keeping the dense transient at
+# [heads, span rows, S] rather than [heads, L, S].
+_SPAN_FULL_FALLBACK = os.environ.get("GMLX_DSV4_SPAN_FULL_FALLBACK", "0") == "1"
+
+
+def _lead_pads(start: int) -> int:
+    """Lead PAD count of a block that begins at absolute position ``start``
+    (reference ``build_image_block``: aligns START to a multiple of 4)."""
+    return 3 - start % 4
+
+
+def image_chunk_blocks(image_spans, offset: int, L: int):
+    """Blocks of ``image_spans`` (absolute [start, end) pairs, lead pads
+    included) that touch the chunk [offset, offset + L), as chunk-relative
+    ``(a, b, lead)`` triples. A block that straddles the chunk edge is a
+    caller bug (the chunkers keep blocks whole): raise rather than route
+    half a block."""
+    if not image_spans:
+        return []
+    out = []
+    lo, hi = int(offset), int(offset) + int(L)
+    for span in image_spans:
+        s, e = int(span[0]), int(span[1])
+        if e <= lo or s >= hi:
+            continue
+        if s < lo or e > hi:
+            raise ValueError(
+                f"DeepSeek-V4 image block [{s}, {e}) is cut by the prefill "
+                f"chunk [{lo}, {hi}); image blocks must be prefilled whole")
+        out.append((s - lo, e - lo, _lead_pads(s)))
+    return out
+
+
+def _image_chunk_masks(mask, blocks, B: int, L: int):
+    """(attention mask with the same-span visibility OR'd in, image-token
+    mask [B, L], widened query rows [(a, b), ...]) for one image chunk.
+
+    Reference ``get_window_topk_idxs_visible``: a query inside [START, END]
+    sees keys [min(i - (window - 1), START), END], its causal window
+    united with the whole span (``left_add`` walks the window start back
+    to START once the query sits deeper than the window into the block;
+    ``right`` reaches END). Lead pads sit before START and keep the plain
+    window. The union only adds visibility, so rows outside the spans are
+    untouched and a kernel's plain-window result stays correct for them."""
+    import numpy as np
+
+    if mask is None or getattr(mask, "ndim", 0) != 2 or mask.shape[0] != L:
+        raise ValueError(
+            "DeepSeek-V4 image chunk needs the 2-D [L, S] window mask "
+            f"(got {None if mask is None else getattr(mask, 'shape', mask)})")
+    S = mask.shape[1]
+    if S < L:
+        raise ValueError(f"window mask width {S} shorter than the chunk {L}")
+    idx = np.arange(L)
+    ext = np.zeros((L, L), dtype=bool)
+    img = np.zeros((L,), dtype=bool)
+    rows = []
+    for a, b, lead in blocks:
+        img[a:b] = True
+        p = a + lead  # START
+        inside = (idx >= p) & (idx < b)
+        ext |= inside[:, None] & inside[None, :]
+        rows.append((p, b))  # START..END: every in-span query row
+    full = np.zeros((L, S), dtype=bool)
+    full[:, S - L:] = ext  # the chunk's own keys are the last L columns
+    merged = mask | mx.array(full)
+    image_mask = mx.broadcast_to(mx.array(img)[None], (B, L))
+    return merged, image_mask, rows
+
+
+def _mask_rows(m, a: int, b: int):
+    """Query rows [a, b) of a mask of any rank (rows on axis -2)."""
+    if m is None:
+        return None
+    if m.ndim == 2:
+        return m[a:b]
+    if m.ndim == 3:
+        return m[:, a:b]
+    return m[..., a:b, :]
+
+
+def _patch_span_rows(out, image_rows, recompute):
+    """Splice recomputed query rows into a kernel's [B, H, L, D] output.
+    ``recompute(a, b)`` returns rows [a, b) under the widened mask."""
+    for a, b in image_rows:
+        patch = recompute(a, b)
+        parts = []
+        if a > 0:
+            parts.append(out[:, :, :a])
+        parts.append(patch)
+        if b < out.shape[2]:
+            parts.append(out[:, :, b:])
+        out = parts[0] if len(parts) == 1 else mx.concatenate(parts, axis=2)
+    return out
+
+
+def _kernels_allowed(image_rows) -> bool:
+    """Debug switch: GMLX_DSV4_SPAN_FULL_FALLBACK=1 routes image chunks
+    through the masked fallback for the whole chunk (the reference side of
+    the row-patch equivalence test)."""
+    return not (image_rows and _SPAN_FULL_FALLBACK)
+
+
 def _kernel_window_attention(module, q, kv, pooled, sinks, offset, ratio):
     """Sliding-window (+ causally visible pooled) attention via the DSA
     sparse kernel (mlx-kquant), replacing masked-dense SDPA that pays full
@@ -1154,9 +1333,52 @@ class MoEGate(nn.Module):
             self.e_score_correction_bias = mx.zeros(
                 (self.num_experts,), dtype=mx.float32
             )
+        # Trunk layers only: the MTP head block never sees image tokens.
+        self.vision_router_bias = bool(
+            getattr(config, "vision_router_bias", False)
+        ) and layer_idx < config.num_hidden_layers
+        if self.vision_router_bias:
+            self.e_score_correction_bias_vl = mx.zeros(
+                (self.num_experts,), dtype=mx.float32
+            )
 
-    def __call__(self, x: mx.array, input_ids: Optional[mx.array] = None):
+    def __call__(
+        self,
+        x: mx.array,
+        input_ids: Optional[mx.array] = None,
+        image_mask: Optional[mx.array] = None,
+    ):
         logits = _skinny_or_matmul(x, self.weight)
+
+        if image_mask is not None:
+            if not self.vision_router_bias:
+                raise ValueError(
+                    "DeepSeek-V4 image tokens need the vision router bias "
+                    "(exp_probs_b_vl); this checkpoint carries none")
+            if self.hash:
+                if input_ids is None:
+                    raise ValueError("DeepSeek-V4 hash routing requires input_ids.")
+                return _hash_expert_select_vl(
+                    input_ids,
+                    logits,
+                    self.tid2eid,
+                    self.e_score_correction_bias_vl,
+                    image_mask,
+                    self.top_k,
+                    self.routed_scaling_factor,
+                    self.norm_topk_prob,
+                    self.scoring_func,
+                )
+            return _expert_select_vl(
+                logits,
+                self.e_score_correction_bias,
+                self.e_score_correction_bias_vl,
+                image_mask,
+                self.top_k,
+                self.routed_scaling_factor,
+                self.norm_topk_prob,
+                self.scoring_func,
+            )
 
         if self.hash:
             if input_ids is None:
@@ -1244,11 +1466,16 @@ class DeepseekV4MoE(nn.Module):
         )
         self.sharding_group = None
 
-    def __call__(self, x: mx.array, input_ids: mx.array) -> mx.array:
+    def __call__(
+        self,
+        x: mx.array,
+        input_ids: mx.array,
+        image_mask: Optional[mx.array] = None,
+    ) -> mx.array:
         if self.sharding_group is not None:
             x = sum_gradients(self.sharding_group)(x)
 
-        inds, scores = self.gate(x, input_ids)
+        inds, scores = self.gate(x, input_ids, image_mask)
         if _MOE_MIX_SCORES and getattr(self.switch_mlp, "_kq_mix_scores", False):
             # Fused arm folds the score-weighted sum into the down gather
             # (one dispatch, no [..., k, H] intermediate); the wrapper
@@ -1621,6 +1848,7 @@ class LocalAttention(nn.Module):
         x: mx.array,
         mask: Optional[mx.array] = None,
         cache: Optional[Any] = None,
+        image_rows=None,
     ) -> mx.array:
         B, L, _ = x.shape
         offset = cache.offset if cache is not None else 0
@@ -1644,8 +1872,14 @@ class LocalAttention(nn.Module):
 
         sinks = self.attn_sink.astype(q.dtype)
         out = None
-        if _dsa_probe("window") and isinstance(offset, int):
+        from_kernel = False
+        if (
+            _dsa_probe("window")
+            and isinstance(offset, int)
+            and _kernels_allowed(image_rows)
+        ):
             out = _kernel_window_attention(self, q, kv, None, sinks, offset, 0)
+            from_kernel = out is not None
         if out is None and _COMPILE_DENSE and L <= 4:
             if mask is None and kv.shape[2] == self.config.sliding_window:
                 out = _dense_sinks_attention_c(q, kv, sinks, self.scale)
@@ -1666,6 +1900,21 @@ class LocalAttention(nn.Module):
                 scale=self.scale,
                 mask=mask,
                 sinks=sinks,
+            )
+        if from_kernel and image_rows:
+            # The kernel saw the plain window; widen the in-block rows.
+            out = _patch_span_rows(
+                out,
+                image_rows,
+                lambda a, b: scaled_dot_product_attention(
+                    q[:, :, a:b],
+                    kv,
+                    kv,
+                    cache=cache,
+                    scale=self.scale,
+                    mask=_mask_rows(mask, a, b),
+                    sinks=sinks,
+                ),
             )
         out = self.rope(out, offset, inverse=True)
         out = out.reshape(B, self.o_groups, -1, L, self.head_dim)
@@ -1732,6 +1981,7 @@ class CompressedAttention(nn.Module):
         x: mx.array,
         mask: Optional[mx.array] = None,
         cache: Optional[Any] = None,
+        image_rows=None,
     ) -> mx.array:
         B, L, _ = x.shape
         local_cache = cache[0] if cache is not None else None
@@ -1760,7 +2010,12 @@ class CompressedAttention(nn.Module):
         sinks = self.attn_sink.astype(q.dtype)
 
         out = None
-        if _dsa_probe("window") and isinstance(offset, int):
+        from_kernel = False
+        if (
+            _dsa_probe("window")
+            and isinstance(offset, int)
+            and _kernels_allowed(image_rows)
+        ):
             out = _kernel_window_attention(
                 self,
                 q,
@@ -1770,6 +2025,7 @@ class CompressedAttention(nn.Module):
                 offset,
                 self.compress_ratio,
             )
+            from_kernel = out is not None
         if out is None and _COMPILE_DENSE and L <= 4:
             if mask is None and kv.shape[2] == self.config.sliding_window:
                 # mask None means the pooled visibility mask is dead
@@ -1825,6 +2081,34 @@ class CompressedAttention(nn.Module):
                 mask=mask,
                 sinks=sinks,
             )
+        if from_kernel and image_rows:
+            pooled_mask = None
+            full_kv = kv
+            if pooled.shape[1] > 0:
+                pooled_mask = (
+                    pool_cache.make_mask(L, offset)
+                    if pool_cache is not None
+                    else None
+                )
+                full_kv = mx.concatenate([kv, pooled[:, None]], axis=2)
+
+            def _widened(a, b):
+                m = _extend_mask(
+                    _mask_rows(mask, a, b),
+                    _mask_rows(pooled_mask, a, b),
+                    full_kv.shape[2],
+                )
+                return scaled_dot_product_attention(
+                    q[:, :, a:b],
+                    full_kv,
+                    full_kv,
+                    cache=local_cache,
+                    scale=self.scale,
+                    mask=m,
+                    sinks=sinks,
+                )
+
+            out = _patch_span_rows(out, image_rows, _widened)
         out = self.rope(out, offset, inverse=True)
         out = out.reshape(B, self.o_groups, -1, L, self.head_dim)
         out = out.transpose(0, 1, 3, 2, 4).flatten(-2)
@@ -1890,6 +2174,7 @@ class SparseCompressedAttention(nn.Module):
         x: mx.array,
         mask: Optional[mx.array] = None,
         cache: Optional[Any] = None,
+        image_rows=None,
     ) -> mx.array:
         B, L, _ = x.shape
         local_cache = cache[0] if cache is not None else None
@@ -1930,13 +2215,16 @@ class SparseCompressedAttention(nn.Module):
         topk = self.indexer(x, q_residual, self.rope, idx_cache, offset)
         sinks = self.attn_sink.astype(q.dtype)
 
+        kernels_ok = _kernels_allowed(image_rows)
+        from_kernel = False
         # Local attention
         if plen == 0:
             out = None
-            if _dsa_probe("window") and isinstance(offset, int):
+            if _dsa_probe("window") and isinstance(offset, int) and kernels_ok:
                 out = _kernel_window_attention(
                     self, q, kv, None, sinks, offset, 0
                 )
+                from_kernel = out is not None
             if out is None:
                 out = scaled_dot_product_attention(
                     q,
@@ -1947,16 +2235,31 @@ class SparseCompressedAttention(nn.Module):
                     mask=mask,
                     sinks=sinks,
                 )
+            if from_kernel and image_rows:
+                out = _patch_span_rows(
+                    out,
+                    image_rows,
+                    lambda a, b: scaled_dot_product_attention(
+                        q[:, :, a:b],
+                        kv,
+                        kv,
+                        cache=local_cache,
+                        scale=self.scale,
+                        mask=_mask_rows(mask, a, b),
+                        sinks=sinks,
+                    ),
+                )
 
         # Compressed attention
         elif plen <= self.indexer.index_topk:
             if not fetch:
                 pooled = comp_cache.pooled
             out = None
-            if _dsa_probe("window") and isinstance(offset, int):
+            if _dsa_probe("window") and isinstance(offset, int) and kernels_ok:
                 out = _kernel_window_attention(
                     self, q, kv, pooled, sinks, offset, self.compress_ratio
                 )
+                from_kernel = out is not None
             if out is None:
                 full_kv = mx.concatenate([kv, pooled[:, None]], axis=2)
                 mask = _extend_mask(mask, pmask, full_kv.shape[2])
@@ -1969,14 +2272,62 @@ class SparseCompressedAttention(nn.Module):
                     mask=mask,
                     sinks=sinks,
                 )
+            if from_kernel and image_rows:
+                full_kv = mx.concatenate([kv, pooled[:, None]], axis=2)
+
+                def _widened(a, b):
+                    m = _extend_mask(
+                        _mask_rows(mask, a, b),
+                        _mask_rows(pmask, a, b),
+                        full_kv.shape[2],
+                    )
+                    return scaled_dot_product_attention(
+                        q[:, :, a:b],
+                        full_kv,
+                        full_kv,
+                        cache=local_cache,
+                        scale=self.scale,
+                        mask=m,
+                        sinks=sinks,
+                    )
+
+                out = _patch_span_rows(out, image_rows, _widened)
 
         # Sparse compressed attention
         else:
             out = None
-            if fetch and _dsa_probe("sparse") and isinstance(offset, int):
+            if (
+                fetch
+                and _dsa_probe("sparse")
+                and isinstance(offset, int)
+                and kernels_ok
+            ):
                 out = self._kernel_sparse_attention(
                     q, kv, pooled, topk, sinks, offset
                 )
+                from_kernel = out is not None
+            if from_kernel and image_rows:
+                sparse_mask = None
+                if pmask is not None:
+                    sparse_mask = mx.take_along_axis(
+                        pmask[None] if pmask.ndim == 2 else pmask,
+                        topk,
+                        axis=2,
+                    )[:, None]
+
+                def _widened_sparse(a, b):
+                    return _sparse_pooled_attention(
+                        q[:, :, a:b],
+                        kv,
+                        pooled,
+                        topk[:, a:b],
+                        _mask_rows(mask, a, b),
+                        _mask_rows(sparse_mask, a, b),
+                        self.scale,
+                        sinks,
+                    )
+
+                out = _patch_span_rows(out, image_rows, _widened_sparse)
             if out is None:
                 sparse_mask = None
                 if pmask is not None:
@@ -2100,7 +2451,12 @@ class DeepseekV4Block(nn.Module):
         input_ids: mx.array,
         carry: Optional[tuple] = None,
         carry_mode: bool = False,
+        image_mask: Optional[mx.array] = None,
+        image_rows=None,
     ):
+        # span rows travel only on image chunks: attention classes swapped
+        # in for text-only drafters (DSpark) keep the plain signature
+        span = {"image_rows": image_rows} if image_rows else {}
         if self.attn_hc.m1_fused_ok(h):
             # attn front; a pending expand from the caller folds into it
             if carry is not None:
@@ -2110,14 +2466,14 @@ class DeepseekV4Block(nn.Module):
             else:
                 front = self.attn_hc.fused_m1(h, self.attn_norm.weight)
             x, post, comb = front
-            x = self.attn(x, mask=mask, cache=cache)
+            x = self.attn(x, mask=mask, cache=cache, **span)
 
             # ffn front always consumes the attn expand inline
             h, front = self.ffn_hc.fused_m1_expand(
                 (x, h, post, comb), self.ffn_norm.weight
             )
             x, post, comb = front
-            x = self.ffn(x, input_ids)
+            x = self.ffn(x, input_ids, image_mask)
             if carry_mode:
                 return h, (x, h, post, comb)
             return hc_expand_m1(x, h, post, comb)
@@ -2126,11 +2482,11 @@ class DeepseekV4Block(nn.Module):
             h = hc_expand_m1(*carry)
         residual = h
         x, post, comb = self.attn_hc(h)
-        x = self.attn(self.attn_norm(x), mask=mask, cache=cache)
+        x = self.attn(self.attn_norm(x), mask=mask, cache=cache, **span)
         residual, x, post, comb = hc_expand_collapse(
             self.ffn_hc, x, residual, post, comb
         )
-        x = self.ffn(self.ffn_norm(x), input_ids)
+        x = self.ffn(self.ffn_norm(x), input_ids, image_mask)
         out = hc_expand(x, residual, post, comb)
         if carry_mode:
             return out, None
@@ -2155,14 +2511,14 @@ class DeepseekV4Model(PipelineMixin, nn.Module):
         cache: Optional[Any] = None,
         return_raw_hidden: bool = False,
         capture_layers: Optional[tuple] = None,
+        input_embeddings: Optional[mx.array] = None,
+        image_spans=None,
     ) -> mx.array:
-        h = self.embed_tokens(inputs)
-        h = mx.broadcast_to(
-            h[:, :, None, :],
-            (h.shape[0], h.shape[1], self.args.hc_mult, h.shape[2]),
-        )
-        h = mx.contiguous(h)
-
+        # ``input_embeddings`` (the VLM container's spliced image features)
+        # replaces the token embedding only; ``inputs`` (the ids) are still
+        # needed for hash routing. ``image_spans`` is the host-side list of
+        # image-block offsets (see image_chunk_blocks); text chunks and
+        # decode pass None and run the unchanged paths.
         pipeline_rank = self.pipeline_rank
         pipeline_size = self.pipeline_size
 
@@ -2177,12 +2533,46 @@ class DeepseekV4Model(PipelineMixin, nn.Module):
             first_cache[0] if isinstance(first_cache, cache_list_types)
             else first_cache
         )
+
+        image_mask = image_rows = blocks = None
+        if image_spans:
+            offset = mask_cache.offset if mask_cache is not None else 0
+            if isinstance(offset, mx.array):
+                if offset.size != 1:
+                    raise ValueError(
+                        "DeepSeek-V4 image chunks run single-row (B=1)")
+                offset = int(offset.item())
+            blocks = image_chunk_blocks(image_spans, offset, inputs.shape[1])
+            if blocks:
+                import numpy as np
+
+                img = np.zeros((inputs.shape[1],), dtype=bool)
+                for a, b, _lead in blocks:
+                    img[a:b] = True
+                image_mask = mx.broadcast_to(
+                    mx.array(img)[None], (inputs.shape[0], inputs.shape[1]))
+                # Image ids sit past the vocab: clamp before ANY gather
+                # (embedding, hash routing); the image rows take the biased
+                # top-k, not the hash, and the container supplies their
+                # embeddings. An out-of-range gather reads garbage.
+                inputs = mx.where(image_mask, mx.zeros_like(inputs), inputs)
+
+        h = self.embed_tokens(inputs) if input_embeddings is None else input_embeddings
+        h = mx.broadcast_to(
+            h[:, :, None, :],
+            (h.shape[0], h.shape[1], self.args.hc_mult, h.shape[2]),
+        )
+        h = mx.contiguous(h)
+
         mask = create_attention_mask(
             h[:, :, 0, :],
             mask_cache,
             window_size=self.args.sliding_window,
             return_array=True,
         )
+        if blocks:
+            mask, _image_mask, image_rows = _image_chunk_masks(
+                mask, blocks, inputs.shape[0], inputs.shape[1])
 
         if pipeline_rank < pipeline_size - 1:
             h = mx.distributed.recv_like(h, (pipeline_rank + 1))
@@ -2194,7 +2584,8 @@ class DeepseekV4Model(PipelineMixin, nn.Module):
             zip(self.pipeline_layers, cache)
         ):
             h, carry = layer(
-                h, mask, layer_cache, inputs, carry=carry, carry_mode=True
+                h, mask, layer_cache, inputs, carry=carry, carry_mode=True,
+                image_mask=image_mask, image_rows=image_rows,
             )
             if idx in cap_set:
                 # DSpark capture: uniform mean over the hc streams of the
@@ -2239,8 +2630,19 @@ class Model(nn.Module):
         self.model = DeepseekV4Model(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
-    def __call__(self, inputs: mx.array, cache: Optional[Any] = None):
-        return self.lm_head(self.model(inputs, cache))
+    def __call__(
+        self,
+        inputs: mx.array,
+        cache: Optional[Any] = None,
+        input_embeddings: Optional[mx.array] = None,
+        image_spans=None,
+    ):
+        return self.lm_head(
+            self.model(
+                inputs, cache, input_embeddings=input_embeddings,
+                image_spans=image_spans,
+            )
+        )
 
     @property
     def layers(self):
