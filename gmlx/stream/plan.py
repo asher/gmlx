@@ -10,14 +10,12 @@ share of the experts sets the decode speed. ``gmlx validate`` and
 
 from __future__ import annotations
 
-import re
 from dataclasses import asdict, dataclass
 
 from gmlx.stream.budget import KvRoom
 
 GiB = 1 << 30
 _MIN_ARENA = GiB           # decode_feeder refuses a smaller arena
-_LAYER_RE = re.compile(r"blk\.(\d+)\.")
 
 VERDICT_RESIDENT = "resident"
 VERDICT_STREAMS = "streams"
@@ -40,7 +38,7 @@ def group_of(name: str) -> str | None:
     stack (the tensors ``stream: experts`` serves from disk)."""
     from gmlx.stream.prefetch import _EXPS_RE
 
-    if _EXPS_RE.match(name):
+    if _EXPS_RE.fullmatch(name):
         return None
     if "shexp" in name:
         return "shared_experts"
@@ -121,21 +119,25 @@ def model_plan(scans, env: dict | None = None) -> ModelPlan:
     shard first)."""
     kv = scans[0].kv
     arch = kv.get("general.architecture")
+    from gmlx.stream.prefetch import _EXPS_RE
+    from gmlx.stream.prefill_feeder import ring_bytes
+
     groups: dict[str, int] = {}
-    per_layer: dict[int, int] = {}
+    # layer -> offsets-shaped entries, so the ring is the runtime's formula
+    stacks: dict[int, list] = {}
     total = expert = 0
     exps_shape = None
     for hs in scans:
         for t in hs.tensors:
             total += t.nbytes
-            g = group_of(t.name)
-            if g is None:
+            m = _EXPS_RE.fullmatch(t.name)
+            if m is not None:
                 expert += t.nbytes
-                m = _LAYER_RE.match(t.name)
-                layer = int(m.group(1)) if m else -1
-                per_layer[layer] = per_layer.get(layer, 0) + t.nbytes
+                stacks.setdefault(int(m.group(1)), []).append(
+                    (hs.path, 0, t.nbytes, 0, m.group(2)))
                 exps_shape = exps_shape or t.shape
             else:
+                g = group_of(t.name)
                 groups[g] = groups.get(g, 0) + t.nbytes
     n_experts = _int(kv.get(f"{arch}.expert_count"))
     if n_experts is None and exps_shape and len(exps_shape) == 3:
@@ -153,9 +155,9 @@ def model_plan(scans, env: dict | None = None) -> ModelPlan:
             trained = _int(cfg.get("max_position_embeddings"))
     return ModelPlan(
         arch=arch, total_bytes=total, expert_bytes=expert, groups=groups,
-        moe_layers=len(per_layer), n_experts=n_experts,
+        moe_layers=len(stacks), n_experts=n_experts,
         experts_per_token=_int(kv.get(f"{arch}.expert_used_count")),
-        ring_bytes=2 * max(per_layer.values(), default=0),
+        ring_bytes=ring_bytes(stacks),
         kv_costs=costs, trained_ctx=trained)
 
 
@@ -315,7 +317,6 @@ def to_dict(m: ModelPlan, b: BoxPlan | None) -> dict:
     }
     if b is not None:
         box = asdict(b)
-        box["room"] = asdict(b.room)
         box["arena_share"] = b.arena_share
         out["box"] = box
     return out

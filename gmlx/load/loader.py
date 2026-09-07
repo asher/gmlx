@@ -1356,7 +1356,10 @@ def _decode_arena_bytes(
         pass
     frac = os.environ.get("GMLX_DECODE_ARENA_RAM_FRAC", "")
     if frac and ram:
-        ceiling = min(ceiling, int(float(frac) * ram))
+        try:
+            ceiling = min(ceiling, int(float(frac) * ram))
+        except ValueError:
+            pass
     expert_bytes = sum(r[2] for ranges in offsets.values() for r in ranges)
     # Streamable components are page-cache citizens like the experts;
     # charging them as non-expert would zero the arena. Cast tensors cost
@@ -2465,7 +2468,9 @@ def install_expert_streaming(
     ):
         from gmlx.stream.prefill_feeder import maybe_make_prefill_feeder
 
-        reason = _prefill_ring_reason(prefetcher.offsets, arena)
+        # No working-set budget (the CPU device): the ring is not judged.
+        reason = _prefill_ring_reason(
+            prefetcher.offsets, arena if budget is not None else None)
         if reason:
             print(f"[stream] feeder prefill unavailable ({reason}); "
                   "falling back to page-cache prefetch")

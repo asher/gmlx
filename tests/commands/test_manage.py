@@ -1537,3 +1537,17 @@ def test_repo_listing_hints_streaming_for_over_ram_models(monkeypatch, capsys):
     assert rc == 0
     assert "over RAM" in out
     assert "A MoE model over RAM can stream its experts." in out
+
+
+def test_validate_plan_rendering_failure_degrades(tmp_path, monkeypatch, capsys):
+    from gmlx.stream import plan as sp
+    _box(monkeypatch)
+    p = tmp_path / "moe.gguf"
+    _mint_moe_bytes(p)
+
+    def boom(*a, **k):
+        raise RuntimeError("render")
+    monkeypatch.setattr(sp, "box_lines", boom)
+    rc = manage.cmd_validate([str(p), "--json"])
+    v = json.loads(capsys.readouterr().out)
+    assert rc == 0 and v["loadable"] and v["stream"] is None

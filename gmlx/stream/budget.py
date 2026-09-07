@@ -46,30 +46,29 @@ def ceiling_bytes() -> float | None:
 
 
 def governor_headroom_bytes() -> float | None:
-    """``prefill_decay.headroom_bytes`` shifted from the full working set
-    down to the governor ceiling: what the governor reads at its tick."""
-    from gmlx.gen.prefill_decay import headroom_bytes
-    from gmlx.serve.capacity import ceiling_bytes as _ceiling, working_set_bytes
+    """What the governor reads at its tick: ``prefill_decay.headroom_bytes``
+    shifted from the full working set down to the governor ceiling."""
+    from gmlx.serve.capacity import margin
+    from gmlx.serve.governor import _headroom_and_ws
 
-    head = headroom_bytes()
-    ws = working_set_bytes()
-    if head is None or ws is None:
-        return None
-    return head - (ws - _ceiling(ws))
+    return _headroom_and_ws(margin())[0]
 
 
 def legacy_room_bytes() -> int:
     raw = os.environ.get("GMLX_DECODE_KV_RESERVE_GB", "")
-    return int(float(raw or _LEGACY_RESERVE_GB) * (1 << 30))
+    try:
+        gb = float(raw or _LEGACY_RESERVE_GB)
+    except ValueError:
+        gb = _LEGACY_RESERVE_GB
+    return int(gb * (1 << 30))
 
 
 def transient_bytes(ws: float) -> float:
     """The prefill score transient the decay policy allows on a box with
-    working set ``ws``: the env cap when set, else 2 GB or 5 percent."""
-    from gmlx.gen.prefill_decay import _env_cap_bytes
+    working set ``ws``."""
+    from gmlx.gen.prefill_decay import cap_bytes_for
 
-    env = _env_cap_bytes()
-    return env if env is not None else max(2e9, 0.05 * float(ws))
+    return cap_bytes_for(ws)
 
 
 def price_room(costs, trained_ctx, ws: float, transient: float) -> KvRoom:

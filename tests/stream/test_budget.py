@@ -104,3 +104,22 @@ def test_kv_room_dataclass_is_frozen():
     with pytest.raises(Exception):
         room.bytes = 7
     assert isinstance(SimpleNamespace(**room.__dict__).bytes, int)
+
+
+def test_legacy_room_ignores_a_malformed_reserve(monkeypatch):
+    from gmlx.stream.budget import legacy_room_bytes
+
+    monkeypatch.setenv("GMLX_DECODE_KV_RESERVE_GB", "abc")
+    assert legacy_room_bytes() == 8 << 30
+    monkeypatch.setenv("GMLX_DECODE_KV_RESERVE_GB", "2")
+    assert legacy_room_bytes() == 2 << 30
+
+
+def test_transient_bytes_follows_the_decay_cap(monkeypatch):
+    from gmlx.stream.budget import transient_bytes
+
+    monkeypatch.delenv("GMLX_PREFILL_SCORE_CAP_GB", raising=False)
+    assert transient_bytes(100e9) == 5e9
+    assert transient_bytes(10e9) == 2e9
+    monkeypatch.setenv("GMLX_PREFILL_SCORE_CAP_GB", "3")
+    assert transient_bytes(100e9) == 3e9

@@ -196,6 +196,13 @@ def _env_cap_bytes() -> float | None:
     return None
 
 
+def cap_bytes_for(ws: float) -> float:
+    """The score transient cap on a box with working set ``ws``: the env
+    cap when set, else 2 GB or 5 percent of the working set."""
+    env = _env_cap_bytes()
+    return env if env is not None else max(2e9, 0.05 * float(ws))
+
+
 def _cap_bytes() -> float:
     # Explicit env wins; the device-derived default is probed once.
     env = _env_cap_bytes()
@@ -205,7 +212,7 @@ def _cap_bytes() -> float:
     if _WS_CAP_BYTES is None:
         try:
             ws = mx.device_info()["max_recommended_working_set_size"]
-            _WS_CAP_BYTES = max(2e9, 0.05 * float(ws))
+            _WS_CAP_BYTES = cap_bytes_for(ws)
         except Exception:
             _WS_CAP_BYTES = 4e9
     return _WS_CAP_BYTES

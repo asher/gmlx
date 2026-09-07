@@ -69,6 +69,8 @@ def _mint_dense(path):
 def test_group_of_names_every_token_groups():
     assert sp.group_of("blk.3.ffn_gate_exps.weight") is None
     assert sp.group_of("blk.3.ffn_gate_up_exps.weight") is None
+    # The tier selects with fullmatch; a longer name stays resident.
+    assert sp.group_of("blk.3.ffn_gate_exps.weight.scale") == "ffn"
     assert sp.group_of("blk.3.ffn_up_shexp.weight") == "shared_experts"
     assert sp.group_of("blk.3.attn_kv_a_mqa.weight") == "attention"
     assert sp.group_of("blk.3.ssm_conv1d_q.weight") == "recurrent"
@@ -203,3 +205,27 @@ def test_lines_and_dict(flat_room):
     assert d["every_token_bytes"] == 20e9 and d["box"]["verdict"] == "streams"
     assert d["box"]["room"]["priced"] is False
     assert sp.to_dict(m, None)["box"] is None
+
+
+def _scan(path, tensors, kv=None):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        path=path, kv=kv or {"general.architecture": "llama"},
+        tensors=[SimpleNamespace(name=n, nbytes=b, shape=(1, 1, 8))
+                 for n, b in tensors])
+
+
+def test_ring_is_the_runtime_formula():
+    # Per-kind maxima across layers, over layers with all three kinds:
+    # the same rule prefill_feeder.ring_bytes applies to the offsets.
+    m = sp.model_plan([_scan("a", [
+        ("blk.0.ffn_gate_exps.weight", 10), ("blk.0.ffn_up_exps.weight", 10),
+        ("blk.0.ffn_down_exps.weight", 50),
+        ("blk.1.ffn_gate_exps.weight", 40), ("blk.1.ffn_up_exps.weight", 40),
+        ("blk.1.ffn_down_exps.weight", 10),
+        ("blk.2.ffn_gate_exps.weight", 90),            # incomplete layer
+        ("blk.0.attn_q.weight", 7)])])
+    assert m.ring_bytes == 2 * (40 + 40 + 50)
+    assert m.moe_layers == 3 and m.expert_bytes == 250
+    assert m.every_token_bytes == 7 and m.n_experts == 8
