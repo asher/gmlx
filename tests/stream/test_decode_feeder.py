@@ -1760,9 +1760,10 @@ def test_regrow_waits_for_governor_room(monkeypatch, tmp_path):
     import gmlx.stream.budget as budget
 
     feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4)
-    monkeypatch.setattr(
-        gmlx.load.loader, "_available_ram_bytes",
-        lambda include_inactive=True: 1 << 40)
+    # The regrow gate reads the mach counters first; the loader's vm_stat
+    # sum is only the fallback. Patch the read the gate takes, or the test
+    # follows the runner's free RAM.
+    monkeypatch.setattr(budget, "reclaimable_ram_bytes", lambda: 1 << 40)
     feeder.governor_evict(1 / 3)
     assert feeder._pressure_steps == 1
     need = feeder._arena_bytes_at(0) - feeder.arena_bytes
@@ -1781,9 +1782,7 @@ def test_governor_shrink_regrows_with_pressure_polling_off(monkeypatch, tmp_path
 
     level = {"v": 4}  # would shrink further if the level were read
     _pressure_setup(monkeypatch, level, regrow_polls=2)
-    monkeypatch.setattr(
-        gmlx.load.loader, "_available_ram_bytes",
-        lambda include_inactive=True: 1 << 40)
+    monkeypatch.setattr(budget, "reclaimable_ram_bytes", lambda: 1 << 40)
     monkeypatch.setattr(budget, "governor_headroom_bytes", lambda: None)
     feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4)
     assert not feeder._pressure_on
