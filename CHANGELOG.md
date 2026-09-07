@@ -8,6 +8,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Streaming models size the decode arena to 0.6 of physical RAM again.
 - Capacity planning priced every layer of a hybrid model as growing fp16
   KV. The boot table, `/v1/estimate`, the memory preflight and the APC
   pool budget now price recurrent layers (gated DeltaNet, Mamba2, KDA) as
