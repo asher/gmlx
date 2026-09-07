@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.10] - 2026-09-07
+
 ### Added
 
 - A streaming fit planner. `gmlx validate` prints a `streaming:` block for
