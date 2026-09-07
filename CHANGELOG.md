@@ -6,26 +6,40 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- A streaming fit planner. `gmlx validate` prints a `streaming:` block
+  for a MoE file: the every-token weights by group, the routed experts,
+  the prefill ring, and this Mac's ceiling, KV room, decode arena and
+  verdict. A remote ref is priced from the shard headers the codec check
+  already reads. `--json` carries the numbers under `stream`. `gmlx
+  doctor` reports the plan for each `stream: experts` entry and warns
+  when the every-token weights exceed the ceiling. The serve preload
+  refusal for a streaming model names the every-token weights.
+  docs/streaming.md explains the rule, the ceiling by machine size, and
+  the levers.
+
 ### Fixed
 
-- Streaming models on `gmlx serve` shed the first request at `governor
-  red` with negative headroom on a stock 128 GB working set (#49). The
-  decode arena and the prefill ring are MLX-tracked and were sized from a
-  RAM fraction the governor never saw. The arena is now sized to what the
-  governor's ceiling leaves after the every-token weights and a KV room
-  priced from the header (`GMLX_STREAM_KV_CTX` tokens, default 32768, plus
-  the prefill transient and the admission reserve), the prefill ring is
-  lent out of the arena instead of stacked on it, and the arena registers
-  with the governor, which shrinks it before it sheds a request and lets
-  it regrow only while the room holds. Admission on a fresh model prices
-  from the boot table instead of admitting blind, the capacity table and
-  the memory preflight charge the arena, and `/v1/metrics` reports
-  `memory.arena_bytes`, `arena_nominal_bytes` and `kv_room_bytes`. The
-  load log prints the budget. `GMLX_DECODE_ARENA_RAM_FRAC` has no default
-  now and caps the ceiling when set; `GMLX_DECODE_KV_RESERVE_GB` replaces
-  the priced room with a flat value. A prefill ring larger than the arena
-  budget (a 340 GB model on a 32 GB machine) is no longer built on top of
-  it: the load prints why and prefill uses page-cache prefetch.
+- Streaming models on `gmlx serve` shed the first request with `governor
+  red` on a stock 128 GB working set (#49). The decode arena and the
+  prefill ring are MLX-tracked. They were sized from a RAM fraction the
+  governor never saw. The arena is now sized under the governor's
+  ceiling. It gets what the ceiling leaves after the every-token weights
+  and a KV room. The room is priced from the header for
+  `GMLX_STREAM_KV_CTX` tokens (default 32768), plus the prefill transient
+  and the admission reserve. The prefill ring is lent out of the arena,
+  not stacked on it. The arena registers with the governor. The governor
+  shrinks it before it sheds a request, and lets it regrow while the
+  room holds. Admission on a fresh model prices from the boot table. The
+  capacity table and the memory preflight charge the arena.
+  `/v1/metrics` reports `memory.arena_bytes`, `arena_nominal_bytes` and
+  `kv_room_bytes`. The load log prints the budget.
+  `GMLX_DECODE_ARENA_RAM_FRAC` has no default now and caps the ceiling
+  when set. `GMLX_DECODE_KV_RESERVE_GB` replaces the priced room with a
+  flat value. A prefill ring larger than the arena budget is no longer
+  built on top of it. The load prints why, and prefill uses page-cache
+  prefetch.
 
 ## [0.4.9] - 2026-09-06
 

@@ -66,10 +66,11 @@ also refuses `stream` on a speculative entry. On the CLI, MTP composes with
 `--stream-experts` (not `--stream-cpu`) but defers by default: auto-MTP
 stays off and an explicit `--speculative` opts in. The lossy `--moe-*`
 levers below are hard-incompatible with MTP and force plain decoding.
-What stays resident (the every-token layers plus the KV cache) follows
-the normal fit arithmetic in
-[getting-started.md](getting-started.md#will-it-fit). A quantized
-KV cache (`--kv-bits 8`) is the usual companion at long context.
+The every-token layers and the KV cache stay resident. They must fit
+under the memory ceiling. The rule and the numbers are in
+[How big a model can this box stream](#how-big-a-model-can-this-box-stream).
+`gmlx validate <file>` prints the verdict for this Mac. A quantized KV
+cache (`--kv-bits 8`) is the usual companion at long context.
 
 ## What the over-budget case produces
 
@@ -114,6 +115,129 @@ warms (measured below), and keeps the large KV cache on GPU at depth.
 `stream: cpu` switches the whole process to the CPU device, so it suits
 a single-model setup rather than mixing with GPU-resident models.
 
+## How big a model can this box stream
+
+The file size does not set the limit. The every-token weights set it.
+
+A MoE GGUF has two kinds of tensors:
+
+- The routed experts. Each token reads a few of them. They stream from
+  disk. Their size sets the decode speed. It does not set the fit.
+- The every-token weights. Every token reads all of them. They stay
+  resident. They are the attention layers, the shared experts, the dense
+  layers, the routers, the norms, the embeddings and the output head.
+
+The serve memory governor enforces one ceiling on tracked memory. The
+ceiling is Metal's recommended working set less 5%. It never comes
+closer to physical RAM than the reserve. The reserve is 8 GB or 10% of
+RAM, whichever is larger. Three things share the ceiling:
+
+1. The every-token weights.
+2. The KV room. It holds the KV cache for `GMLX_STREAM_KV_CTX` tokens
+   (default 32768, capped at the trained context). It also holds a
+   prefill transient and an admission reserve. Each of those two is 2 GB
+   or 5% of the working set, whichever is larger.
+3. The decode arena. It gets everything the first two leave. The arena
+   holds the hot experts. A larger arena gives a higher hit rate. A
+   higher hit rate gives faster decode.
+
+The rule: a box streams a model when the every-token weights plus the
+KV room fit under the ceiling. The arena is what remains. The arena must
+be at least 1 GB. Below that the decode feeder does not start, and
+decode runs from the page cache.
+
+The prefill ring is a second check. The ring holds two copies of the
+largest layer's expert stacks. Its size comes from the model, not the
+box. When the ring does not fit in the arena, prefill falls back to
+page-cache prefetch. The load prints the reason. Decode is not affected.
+
+### The ceiling by machine size
+
+These are the stock working sets: two thirds of RAM below 36 GB, three
+quarters from 36 GB up. Sizes are decimal GB. The KV room floor is the
+transient plus the admission reserve, with no KV cache in it yet.
+
+| RAM | working set | ceiling | KV room floor | left for weights and KV cache |
+|---|---|---|---|---|
+| 16 | 11.5 | 9.2 | 4.0 | 5.2 |
+| 24 | 17.2 | 16.3 | 4.0 | 12.3 |
+| 32 | 22.9 | 21.8 | 4.0 | 17.8 |
+| 36 | 29.0 | 27.5 | 4.0 | 23.5 |
+| 48 | 38.7 | 36.7 | 4.0 | 32.7 |
+| 64 | 51.5 | 49.0 | 5.2 | 43.8 |
+| 96 | 77.3 | 73.4 | 7.7 | 65.7 |
+| 128 | 103.1 | 97.9 | 10.3 | 87.6 |
+| 192 | 154.6 | 146.9 | 15.5 | 131.4 |
+| 256 | 206.2 | 195.9 | 20.6 | 175.2 |
+| 512 | 412.3 | 391.7 | 41.2 | 350.5 |
+
+`sudo sysctl iogpu.wired_limit_mb=<MB>` raises the working set. The
+reserve still holds 8 GB or 10% back. On a 128 GB box the ceiling then
+tops out near 110 GB.
+
+### Kimi-K3 as the worked example
+
+Kimi-K3 UD-Q2_K_XL is an 861 GB file. Its every-token weights are
+62.2 GB:
+
+| group | GB |
+|---|---|
+| attention (MLA) | 31.8 |
+| shared experts (2 per layer) | 12.9 |
+| dense ffn and routers | 8.2 |
+| recurrent (KDA) layers | 6.9 |
+| embeddings and output head | 2.4 |
+
+The routed experts are 799 GB: 896 experts in each of 92 layers. Each
+token reads 16 of them. With a cold arena a token reads about 14 GB of
+experts from disk. A warm arena serves the hot share from memory.
+
+On a stock 128 GB box the ceiling is 97.9 GB and the KV room is
+11.7 GB. The arena is 24 GB, or 3% of the experts. The model streams.
+On a 96 GB box the arena is 2 GB and the ring does not fit. Decode has
+almost no hit rate there. On a 512 GB box the arena is 287 GB, or 36%
+of the experts.
+
+The quant of the experts does not change the fit. UD-Q4_K_XL is a
+1.5 TB file. Its every-token weights are the same 62.2 GB, because that
+quant keeps the non-expert tensors at the same bits. It streams on the
+same boxes. Its arena holds a smaller share of a larger expert set, so
+it decodes slower. UD-Q8_K_XL has 114.7 GB of every-token weights. It
+does not fit under the ceiling of any box below 192 GB.
+
+### What moves the limit
+
+- The bits of the every-token tensors. A quant that keeps attention and
+  the shared experts at Q8 doubles the resident set. Pick a quant with
+  smaller non-expert tensors before you pick a smaller expert quant.
+- The working set. `iogpu.wired_limit_mb` raises it. The reserve still
+  applies.
+- The KV room. `GMLX_STREAM_KV_CTX` sizes it. A smaller room gives a
+  larger arena and a shorter safe context. `--kv-bits 8` halves the KV
+  cache part of the room.
+- SSD bandwidth sets the speed of cold reads. It does not change the
+  fit.
+
+### Ask gmlx
+
+`gmlx validate <ref>` prints the plan for a MoE file. It works on a
+local file and on a Hugging Face ref. A remote ref costs one header read
+per shard, a few MB each. The block reads:
+
+```text
+  streaming: every-token weights 62.2 GB, routed experts 799.1 GB (92 layers, 896 experts, 16 per token), prefill ring 22.7 GB
+    every-token by group: attention 31.8 GB, shared experts 12.9 GB, dense ffn and routers 8.2 GB, ...
+    this Mac: 128 GB RAM, ceiling 97.9 GB, KV room 11.7 GB at 32768 tokens
+    decode arena 24.1 GB (3% of the experts); a cold token reads about 14.3 GB of experts
+    => streams with --stream-experts (server: stream: experts)
+```
+
+`gmlx validate --json` carries the same numbers under `stream`.
+`gmlx doctor` adds one clause per `stream: experts` entry to its memory
+row. A load prints the live budget as `[stream] memory budget:`. That
+line includes the reclaimable-RAM clamp, so its arena can be smaller
+than the plan's.
+
 ## Streamable lookup tables (table-before-experts)
 
 Some architectures carry a large lookup table that every token reads only a
@@ -152,27 +276,27 @@ Streaming models engage two feeder paths by default:
   definition. Short prompts stage only the experts the router actually chose
   instead of whole layers (measured on an M3 Max, 162 GB MiniMax-M2 Q5_K_M: a
   53-token prompt's time-to-first-token dropped from 19.4 s to 11.4 s).
-  The two ring slots hold the largest layer's expert stacks, so their size
-  is the model's, not the box's; when they do not fit in the arena budget
-  below (a 340 GB model on a 32 GB machine), the load says so and prefill
-  falls back to page-cache prefetch by itself.
+  The two ring slots hold the largest layer's expert stacks. Their size
+  comes from the model, not the box. When they do not fit in the arena
+  budget below (a 340 GB model on a 32 GB machine), the load says so.
+  Prefill then falls back to page-cache prefetch by itself.
 - The decode feeder (`--stream-experts` only; `--no-decode-feeder`
   disables) keeps the most-routed experts of every layer in a wired,
   popularity-managed GPU arena and reads only the misses from the GGUF, at
-  SSD queue depth. The arena is sized to what the serve memory governor's
-  ceiling leaves after the every-token weights and a KV room priced from
-  the header (`GMLX_STREAM_KV_CTX` tokens, default 32768, plus the prefill
-  transient and the admission reserve), then clamped to the RAM reclaimable
-  at load; `GMLX_DECODE_ARENA_GB` overrides it outright. The prefill ring
-  is lent out of the same bytes, so ring and arena together never exceed
+  SSD queue depth. The arena gets what the memory ceiling leaves after
+  the every-token weights and the KV room (see
+  [How big a model can this box stream](#how-big-a-model-can-this-box-stream)).
+  The load then clamps it to the RAM reclaimable at that moment.
+  `GMLX_DECODE_ARENA_GB` overrides the size outright. The prefill ring
+  is lent out of the same bytes, so ring and arena together stay under
   the ceiling. The arena starts empty and converges within a few dozen
   tokens. The arena is wired, so it also polices itself. Under system
-  memory pressure (another model, a build) it shrinks, keeping its most
-  popular experts, and regrows once pressure clears and the governor has
-  its room back, so a long-running model coexists with a machine that is
-  doing other work (`GMLX_DECODE_PRESSURE=0` pins it instead). Under
-  `gmlx serve` the governor shrinks it the same way before it sheds a
-  request.
+  memory pressure (another model, a build) it shrinks and keeps its most
+  popular experts. It regrows once pressure clears and the governor has
+  its room back. A long-running model therefore coexists with a machine
+  that is doing other work. `GMLX_DECODE_PRESSURE=0` pins it instead.
+  Under `gmlx serve` the governor shrinks it the same way before it
+  sheds a request.
   Same model and box as the prefill measurement above: decode went from 2.4
   tok/s on the page-cache path to 4.0 tok/s averaged over a 512-token
   generation (~4.7 steady, ~90% arena hits), against 3.0 tok/s for
@@ -520,7 +644,7 @@ routing width or gating changes.
 
 The deepest measured point runs the scale sample from the top of this
 guide with the levers on: Kimi-K3 UD-Q2_K_XL (861 GB on the same
-128 GB machine, 384 experts routed 16 per token, 91 streamed expert
+128 GB machine, 896 experts routed 16 per token, 91 streamed expert
 layers). This far over budget, the arena holds a sliver of the expert
 set, the lossless hit rate settles near 50%, and demand stalls are
 about two thirds of decode wall. The miss-targeted lever therefore

@@ -190,7 +190,7 @@ gmlx run model.gguf --adapter pirate-lora.gguf --prompt "What's the weather like
 | `--moe-experts K` | Lossy: cap the router at K experts per token on the streamed MoE layers (`--stream-experts` / `--stream-cpu`). Scoring and weight renormalization run unchanged at the new k, but outputs differ from the trained model by design. Composes with `--moe-expert-mass`. |
 | `--moe-expert-mass P` | Lossy, adaptive: per token, keep only the smallest set of routed experts covering share P (0 < P <= 1) of the router's gate mass - confident tokens read fewer expert bytes, uncertain tokens keep the full fan-out. Choosing P: [streaming.md](streaming.md). |
 | `--moe-expert-probe` | Lossless companion to `--moe-expert-mass`: run at the trained fan-out while recording how many experts each token needed at candidate P values; prints decode and prefill tables (experts/token, expert-read fraction, dropped mass per P) at exit - size P from the decode table. |
-| `--[no-]prefill-feeder` | Streaming models (`--stream-cpu` / `--stream-experts` past the wired budget): stage each prefill layer's expert stacks straight from the GGUF into GPU-visible ring slots instead of through the page cache - one trip per byte, and short prompts stage only the experts the router chose. Default on; `--no-prefill-feeder` falls back to page-cache prefetch, as does a load whose two ring slots (the largest layer's expert stacks) exceed the decode arena budget. Details: [streaming.md](streaming.md). |
+| `--[no-]prefill-feeder` | Streaming models (`--stream-cpu` / `--stream-experts` past the wired budget): stage each prefill layer's expert stacks straight from the GGUF into GPU-visible ring slots, not through the page cache. One trip per byte. Short prompts stage only the experts the router chose. Default on. `--no-prefill-feeder` falls back to page-cache prefetch. A load whose two ring slots (the largest layer's expert stacks) exceed the decode arena budget falls back the same way. Details: [streaming.md](streaming.md). |
 | `--[no-]decode-feeder` | Streaming `--stream-experts` models: serve decode from a wired, popularity-managed GPU expert arena; misses read from the GGUF at SSD queue depth. Default on for `--stream-experts` (needs the every-token layers on GPU, so never under `--stream-cpu`); `GMLX_DECODE_ARENA_GB` caps the arena size. Details: [streaming.md](streaming.md). |
 | `--moe-miss-shed P` | Lossy: at decode, drop routed experts that would demand-miss the expert arena, lowest scores first, keeping at least share P (0 < P <= 1) of each token's gate mass - the budget is spent only where a disk stall is otherwise certain, and an arena-resident or prestage-inflight expert is never dropped. Needs the decode feeder. Composes with `--moe-expert-mass`. Choosing P: [streaming.md](streaming.md). |
 | `--moe-layer-shed P` | Lossy: at decode, skip a streamed MoE layer's routed experts entirely with probability P (0 < P < 1) per token; the layer's shared expert still runs. The only lever that also cuts the fixed per-layer overhead. Details: [streaming.md](streaming.md). |
@@ -901,7 +901,9 @@ kernels, the config (parse errors and warnings), every configured model's
 paths (all shards, mmproj/draft/adapter companions), any background server
 (including stale run files), machine RAM vs each configured model's file size
 (a larger-than-RAM model that isn't set to `stream: experts` gets a WARN
-naming it), free disk space, and the HF token. Rows for
+naming it; a `stream: experts` entry gets its streaming plan, and a WARN
+when its every-token weights do not fit under the memory ceiling), free
+disk space, and the HF token. Rows for
 optional features (installed launchd agents and their load state, extras
 installed, ffmpeg, MCP tool binaries, served assistants exposed beyond
 loopback) appear only when your setup uses them.
@@ -939,6 +941,14 @@ model can still run with `--stream-experts`, see
 [docs/streaming.md](streaming.md)). A repo/folder listing gets the same
 treatment: each variant is shown with its size and a fits/tight/over-RAM
 column, so you can pick a quant that fits before downloading anything.
+
+For a MoE file the report adds a `streaming:` block. It prices the
+every-token weights and the routed experts from the header. It then
+fits them on this Mac: the ceiling, the KV room, the decode arena and a
+verdict. A remote ref gets the same block from the shard headers the
+codec check already reads. `--json` carries the numbers under `stream`.
+The rule is in
+[streaming.md](streaming.md#how-big-a-model-can-this-box-stream).
 
 An mmproj file (`general.architecture = "clip"`, a VLM's vision/audio
 projector) is recognized as a companion, not judged as a standalone model: the
@@ -1245,8 +1255,8 @@ This is the supported set:
 |----------|---------|
 | `GMLX_STREAM_GPU_TOKENS` | `--stream-experts` prefill staging threshold: offloaded expert calls with at least this many tokens run on the GPU stream (same zero-copy buffers; prefill is a GEMM workload the CPU loses badly). Default `32`; `0` keeps every expert call on CPU (conservative for models far larger than RAM). |
 | `GMLX_STREAM_PREFETCH=0` | Disable sequential expert prefetch for streaming-mode (over-wired-budget) `--stream-cpu` / `--stream-experts` models. Default on: prefill-sized expert calls advise the kernel (`F_RDADVISE`) two layers ahead and pace the lazy graph per layer, reading expert stacks at sequential bandwidth instead of demand-faulting. |
-| `GMLX_DECODE_ARENA_GB` | Decode-feeder arena size override in GB (see `--decode-feeder`). Default: what the serve memory governor's ceiling (Metal's recommended working set less the margin, never closer to physical RAM than `GMLX_GOV_RESERVE_GB`) leaves after the every-token weights and the KV room (`GMLX_STREAM_KV_CTX`), clamped to the memory reclaimable at load. The prefill ring is lent out of the arena, so ring and arena together never exceed the ceiling. `GMLX_DECODE_ARENA_RAM_FRAC` caps the ceiling at a fraction of physical RAM when set (no default). |
-| `GMLX_STREAM_KV_CTX` | Tokens of KV cache the decode arena leaves room for, priced with the model's own per-token cost from the GGUF header (default `32768`, clamped to the trained context). The room also holds the prefill score transient and the admission reserve, and is the serve governor's headroom at decode. Raise it for deep prompts, or `GMLX_STREAM_KV_WIDTH` (default `1`) for concurrent streams, at the cost of arena slots. The load log prints the budget as `[stream] memory budget:`. |
+| `GMLX_DECODE_ARENA_GB` | Decode-feeder arena size override in GB (see `--decode-feeder`). Default: what the memory ceiling leaves after the every-token weights and the KV room, clamped to the memory reclaimable at load. The ceiling is the serve governor's: Metal's recommended working set less the margin, never closer to physical RAM than `GMLX_GOV_RESERVE_GB` (see [streaming.md](streaming.md#how-big-a-model-can-this-box-stream)). The prefill ring is lent out of the arena, so ring and arena together stay under the ceiling. `GMLX_DECODE_ARENA_RAM_FRAC` caps the ceiling at a fraction of physical RAM when set. It has no default. |
+| `GMLX_STREAM_KV_CTX` | Tokens of KV cache the decode arena leaves room for (default `32768`, capped at the trained context). The cost per token comes from the GGUF header. The room also holds the prefill score transient and the admission reserve. At decode it is the serve governor's headroom. Raise it for deep prompts. Raise `GMLX_STREAM_KV_WIDTH` (default `1`) for concurrent streams. Both cost arena slots. The load log prints the budget as `[stream] memory budget:`. |
 | `GMLX_DECODE_KV_RESERVE_GB` | Replace the priced KV room with a flat reserve in GB. Also the fallback (`8`) when the header cannot be priced. |
 | `GMLX_ARENA_STAGE_MAX_TOKENS` | Largest expert call served router-aware (decode-feeder arena or partial ring staging) instead of whole-layer staging. Default `64`; above it a chunk routes to nearly every expert anyway. |
 | `GMLX_ARENA_SPLIT_MAX_TOKENS` | Largest expert call the decode arena serves by token-splitting when its routed union exceeds the arena's slots (a chat-turn prefill after decode, or a wide speculative verify batch). Halves recurse until each piece fits, keeping reads on the arena's read pool instead of the CPU page-cache gather. Default `256`; `0` disables. |
