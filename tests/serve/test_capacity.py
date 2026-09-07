@@ -319,3 +319,21 @@ def test_boot_costs_and_seeded_rates(rig):
         "_boot:None": {"rate": float(BPT), "window": None}}
     cap.clear_table()
     assert cap.boot_kv_rates() == {}
+
+
+def test_preload_gate_names_every_token_weights_when_streaming(rig, monkeypatch):
+    rig(weights_gb=10.0, ws_gb=20.0)
+    import gmlx.gen.prefill_decay as pd
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 5.0 * GB)
+    monkeypatch.setattr(cap, "working_budget_bytes", lambda: 20.0 * GB)
+    monkeypatch.setattr(cap, "_kernel_gate", lambda w, m: None)
+    with pytest.raises(RuntimeError) as e:
+        cap.preload_gate(25.0 * GB, "huge", streaming=True)
+    msg = str(e.value)
+    assert "huge every-token weights 25.0 GB exceed" in msg
+    assert "smaller every-token tensors" in msg
+    assert "--stream-experts" not in msg
+    with pytest.raises(RuntimeError, match="huge weights 25.0 GB exceed"):
+        cap.preload_gate(25.0 * GB, "huge")
+    with pytest.raises(cap.LoadDeferred, match="busybox every-token weights"):
+        cap.preload_gate(10.0 * GB, "busybox", streaming=True)

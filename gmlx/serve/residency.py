@@ -823,7 +823,8 @@ class _ResidencyPool:
                     "preload gate: stream=experts discounts %.1f GB of "
                     "routed-expert bytes (gating on %.1f GB resident)",
                     streamed / 1e9, gate_bytes / 1e9)
-        preload_gate(gate_bytes, str(model_path))
+        preload_gate(gate_bytes, str(model_path),
+                     streaming=getattr(build_spec, "stream", None) == "experts")
         # The boot table feeds request admission (width/ctx budgets), so a
         # streaming model's table must also price only the resident share:
         # the expert stacks decode through the disk arena, not the KV budget.

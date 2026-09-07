@@ -360,13 +360,22 @@ class LoadDeferred(RuntimeError):
     the chat pre-warm turns it into a typed 503 with ``Retry-After``."""
 
 
-def preload_gate(weight_bytes: float, model_id: str) -> None:
+def preload_gate(weight_bytes: float, model_id: str, *,
+                 streaming: bool = False) -> None:
     """The same headroom check a request takes, at model load and swap:
     a build whose weights cannot fit the measured free working set (the
     pool has already evicted what it may) refuses with numbers instead
-    of aborting the box's biggest allocation. GMLX_OVERCOMMIT=1 skips."""
+    of aborting the box's biggest allocation. GMLX_OVERCOMMIT=1 skips.
+    ``streaming`` names the bytes as the every-token weights: the routed
+    experts are already discounted, so a smaller quant of the rest is
+    the fix, not streaming."""
     if overcommit() or weight_bytes <= 0:
         return
+    what = "every-token weights" if streaming else "weights"
+    fix = ("The routed experts already stream from disk; pick a quant "
+           "with smaller every-token tensors (docs/streaming.md)."
+           if streaming else
+           "for MoE models --stream-experts serves the experts from disk.")
     from gmlx.gen.prefill_decay import headroom_bytes
 
     head = headroom_bytes()
@@ -382,14 +391,13 @@ def preload_gate(weight_bytes: float, model_id: str) -> None:
         head -= max(0.0, ws - budget)
     if budget is not None and weight_bytes > budget:
         raise RuntimeError(
-            f"model does not fit: {model_id} weights "
+            f"model does not fit: {model_id} {what} "
             f"{weight_bytes / GB:.1f} GB exceed this box's working "
             f"budget {budget / GB:.1f} GB (working set x "
-            f"{1 - margin():.2f}). GMLX_OVERCOMMIT=1 overrides; for MoE "
-            f"models --stream-experts serves the experts from disk.")
+            f"{1 - margin():.2f}). GMLX_OVERCOMMIT=1 overrides; {fix}")
     if head is not None and weight_bytes > head:
         _defer(
-            f"model load deferred: {model_id} weights "
+            f"model load deferred: {model_id} {what} "
             f"{weight_bytes / GB:.1f} GB exceed the measured free "
             f"working set {head / GB:.1f} GB (resident models are "
             f"pinned or busy). Retry when a slot frees, or "
