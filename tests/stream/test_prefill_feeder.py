@@ -237,3 +237,15 @@ def test_release_slots_and_lazy_realloc(monkeypatch, tmp_path):
         for kind in _KINDS:
             assert _slot_expert(feeder, 0, kind, 1) == _expert_bytes(0, kind, 1)
     assert feeder._error is None
+
+
+def test_ring_bytes_is_twice_the_largest_layer(tmp_path):
+    from gmlx.stream.prefill_feeder import ring_bytes
+
+    offsets, _ = _make_fixture(tmp_path, 3)
+    layer = sum(r[2] for r in offsets[0])
+    assert ring_bytes(offsets) == 2 * layer
+    # A layer with a missing kind is not covered and does not size the ring.
+    offsets[1] = [r for r in offsets[1] if r[4] != "down"]
+    offsets[2] = [(p, o, n * 3, e, k) for p, o, n, e, k in offsets[2]]
+    assert ring_bytes(offsets) == 2 * 3 * layer

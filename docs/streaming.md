@@ -152,6 +152,10 @@ Streaming models engage two feeder paths by default:
   definition. Short prompts stage only the experts the router actually chose
   instead of whole layers (measured on an M3 Max, 162 GB MiniMax-M2 Q5_K_M: a
   53-token prompt's time-to-first-token dropped from 19.4 s to 11.4 s).
+  The two ring slots hold the largest layer's expert stacks, so their size
+  is the model's, not the box's; when they do not fit in the arena budget
+  below (a 340 GB model on a 32 GB machine), the load says so and prefill
+  falls back to page-cache prefetch by itself.
 - The decode feeder (`--stream-experts` only; `--no-decode-feeder`
   disables) keeps the most-routed experts of every layer in a wired,
   popularity-managed GPU arena and reads only the misses from the GGUF, at

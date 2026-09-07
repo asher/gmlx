@@ -1706,3 +1706,19 @@ def test_governor_shrink_regrows_with_pressure_polling_off(monkeypatch, tmp_path
     assert feeder._slots[0] == 4
     feeder.stage(0, np.array([0]))
     assert feeder._pressure_steps == 0  # the level stays unread
+
+
+def test_prefill_ring_reason(monkeypatch, tmp_path):
+    from gmlx.load.loader import _prefill_ring_reason
+    from gmlx.stream.prefill_feeder import ring_bytes
+
+    monkeypatch.delenv("GMLX_DECODE_ARENA_GB", raising=False)
+    offsets, _ = _make_fixture(tmp_path, 2)
+    ring = ring_bytes(offsets)
+    assert _prefill_ring_reason(offsets, ring) is None
+    reason = _prefill_ring_reason(offsets, ring - 1)
+    assert reason and "exceeds" in reason
+    assert _prefill_ring_reason(offsets, 0)
+    assert _prefill_ring_reason(offsets, None) is None
+    monkeypatch.setenv("GMLX_DECODE_ARENA_GB", "1")
+    assert _prefill_ring_reason(offsets, 0) is None

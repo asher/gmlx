@@ -1385,6 +1385,26 @@ def _decode_arena_bytes(
     return min(max(0, arena), expert_bytes)
 
 
+def _prefill_ring_reason(offsets, arena: int | None) -> str | None:
+    """Why the prefill ring must not be built, or None. The ring (two
+    slots of the largest layer's expert stacks, sized by the model) is
+    lent out of the decode arena's budget; a ring larger than that budget
+    would sit on top of the every-token weights and the KV room and take
+    the memory ceiling with it at the first prefill. An explicit
+    GMLX_DECODE_ARENA_GB is the user's budget and the ring is not judged
+    against it."""
+    if arena is None or os.environ.get("GMLX_DECODE_ARENA_GB"):
+        return None
+    from gmlx.stream.prefill_feeder import ring_bytes
+
+    ring = ring_bytes(offsets)
+    if ring <= arena:
+        return None
+    return (f"ring 2 x {ring / 2e9:.1f} GB exceeds the {arena / 1e9:.1f} GB "
+            "left under the memory ceiling after the every-token weights "
+            "and the KV room")
+
+
 def _neutralize_wired_limit_sweep():
     """Pin the MLX wired limit at its default for the rest of the process.
 
@@ -2424,6 +2444,19 @@ def install_expert_streaming(
     )
     feeder = None
     dfeeder = None
+    room = arena = None
+    if streaming and prefetcher is not None and moe_modules:
+        from gmlx.stream.budget import kv_room_bytes
+        from gmlx.stream.table_stream import streamed_table_bytes
+
+        pin = getattr(model, "_kq_weights_pin", None)
+        room = kv_room_bytes(gguf_path)
+        arena = _decode_arena_bytes(
+            total_bytes, prefetcher.offsets, budget,
+            room_bytes=room.bytes,
+            pinned_bytes=getattr(pin, "pinned_bytes", 0),
+            streamable_bytes=streamed_table_bytes(model),
+            cast_dead_bytes=cast_dead_bytes)
     if (
         streaming
         and prefetcher is not None
@@ -2432,7 +2465,13 @@ def install_expert_streaming(
     ):
         from gmlx.stream.prefill_feeder import maybe_make_prefill_feeder
 
-        feeder = maybe_make_prefill_feeder(prefetcher.offsets, moe_modules)
+        reason = _prefill_ring_reason(prefetcher.offsets, arena)
+        if reason:
+            print(f"[stream] feeder prefill unavailable ({reason}); "
+                  "falling back to page-cache prefetch")
+        else:
+            feeder = maybe_make_prefill_feeder(
+                prefetcher.offsets, moe_modules)
         if feeder is not None:
             n_cov = sum(feeder.covers(li) for li in moe_modules)
             for li, mods in moe_modules.items():
@@ -2457,17 +2496,8 @@ def install_expert_streaming(
     ):
         from gmlx.stream.decode_feeder import maybe_make_decode_feeder
 
-        pin = getattr(model, "_kq_weights_pin", None)
-        from gmlx.stream.budget import ceiling_bytes, kv_room_bytes
-        from gmlx.stream.table_stream import streamed_table_bytes
+        from gmlx.stream.budget import ceiling_bytes
 
-        room = kv_room_bytes(gguf_path)
-        arena = _decode_arena_bytes(
-            total_bytes, prefetcher.offsets, budget,
-            room_bytes=room.bytes,
-            pinned_bytes=getattr(pin, "pinned_bytes", 0),
-            streamable_bytes=streamed_table_bytes(model),
-            cast_dead_bytes=cast_dead_bytes)
         # The prefill ring borrows its bytes from the arena from the start
         # (DecodeFeeder lend), so the two never sum past the budget while
         # the ring is live; the first decode releases the ring and the

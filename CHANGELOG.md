@@ -23,7 +23,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `memory.arena_bytes`, `arena_nominal_bytes` and `kv_room_bytes`. The
   load log prints the budget. `GMLX_DECODE_ARENA_RAM_FRAC` has no default
   now and caps the ceiling when set; `GMLX_DECODE_KV_RESERVE_GB` replaces
-  the priced room with a flat value.
+  the priced room with a flat value. A prefill ring larger than the arena
+  budget (a 340 GB model on a 32 GB machine) is no longer built on top of
+  it: the load prints why and prefill uses page-cache prefetch.
 
 ## [0.4.9] - 2026-09-06
 

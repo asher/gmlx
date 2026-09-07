@@ -300,6 +300,19 @@ class PrefillFeeder:
             pass  # GC-time cleanup must never raise
 
 
+def ring_bytes(offsets) -> int:
+    """A-priori size of the two ring slots: twice the largest layer's
+    expert stacks, per kind, over the layers the feeder would cover."""
+    largest: dict[str, int] = {}
+    for ranges in offsets.values():
+        kinds = {r[4] for r in ranges}
+        if kinds != set(KINDS) or len(ranges) != len(KINDS):
+            continue
+        for _, _, nbytes, _, kind in ranges:
+            largest[kind] = max(largest.get(kind, 0), nbytes)
+    return 2 * sum(largest.values())
+
+
 def maybe_make_prefill_feeder(offsets, modules) -> PrefillFeeder | None:
     """A PrefillFeeder over the coverable layers, or None with a printed
     reason (opt-in feature: silence would read as 'enabled')."""
