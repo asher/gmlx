@@ -419,7 +419,14 @@ def check_memory(cfg) -> dict:
         return _check("memory", "PASS", detail)
     from .manage import _model_size_bytes
     flagged: list[str] = []
+    streamed: list[str] = []
+    bad_stream: list[str] = []
     for mid, m in cfg.models.items():
+        if getattr(m, "stream", None) == "experts":
+            summary, ok = _stream_summary(m.path, cfg.model_dirs, ram)
+            if summary:
+                (streamed if ok else bad_stream).append(f"{mid}: {summary}")
+            continue
         if getattr(m, "stream", None):
             continue                     # streamed on purpose: over-RAM is fine
         size = _model_size_bytes(m.path, cfg.model_dirs)
@@ -432,7 +439,32 @@ def check_memory(cfg) -> dict:
             f"{detail}; larger than RAM: " + ", ".join(flagged[:3]) + more
             + " - a MoE model can set `stream: experts` "
               "(docs/streaming.md); a dense model needs a smaller quant")
-    return _check("memory", "PASS", f"{detail}; configured models fit")
+    if bad_stream:
+        return _check(
+            "memory", "WARN",
+            f"{detail}; cannot stream: " + "; ".join(bad_stream[:3])
+            + " - the every-token weights must fit under the memory "
+              "ceiling (docs/streaming.md)")
+    tail = f"; streaming: {'; '.join(streamed[:3])}" if streamed else ""
+    return _check("memory", "PASS", f"{detail}; configured models fit{tail}")
+
+
+def _stream_summary(path: str, model_dirs: list[str], ram: int
+                    ) -> tuple[str | None, bool]:
+    """One clause on a ``stream: experts`` entry's plan on this Mac, and
+    whether it streams. None for a dense file or an unreadable header."""
+    import gmlx.config as cfgmod
+    from gmlx.stream import plan as sp
+    try:
+        model = sp.model_plan(sp.scan_path(cfgmod.resolve_path(path, model_dirs)))
+        if not model.streamable:
+            return None, True
+        box = sp.box_plan(model, ram_bytes=ram)
+    except Exception:                                  # noqa: BLE001 - advisory
+        return None, True
+    if box is None:
+        return None, True
+    return sp.box_summary(model, box), box.verdict != sp.VERDICT_TOO_BIG
 
 
 def check_disk(cfg) -> dict:

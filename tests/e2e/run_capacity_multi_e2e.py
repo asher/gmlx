@@ -22,7 +22,8 @@ Asserts the multi-engine invariants the single-model check cannot:
 
 Usage: python tests/e2e/run_capacity_multi_e2e.py [--rounds N]
            [--streams N] [--max-tokens N] [--width N] [--cap N]
-           [--models ID=PATH[:spec|:draft=PATH] ...]
+           [--models ID=PATH[:spec|:draft=PATH|:stream] ...]
+``:stream`` serves that entry with ``stream: experts`` (an over-RAM MoE).
 Exit 0 on pass, 1 on any failed check, 2 when a model file is missing.
 """
 from __future__ import annotations
@@ -49,6 +50,9 @@ DEFAULT_MODELS = [
 ]
 
 _results: list = []
+# every cache tier a decode row may carry (miss, the block store, the
+# exact store, the checkpoint tiers)
+TIERS = ("miss", "exact", "block", "ckpt", "anchor", "hit")
 
 
 def check(name: str, ok: bool, detail: str = "") -> bool:
@@ -163,12 +167,15 @@ def parse_models(specs: list) -> list:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--models", nargs="*", help="ID=PATH[:spec|:draft=PATH]")
+    ap.add_argument("--models", nargs="*", help="ID=PATH[:spec|:draft=PATH|:stream]")
     ap.add_argument("--rounds", type=int, default=3)
     ap.add_argument("--streams", type=int, default=8, help="concurrent streams per round")
     ap.add_argument("--max-tokens", type=int, default=400)
     ap.add_argument("--width", type=int, default=4)
     ap.add_argument("--cap", type=int, default=6)
+    ap.add_argument("--arena-gb", type=float, default=None,
+                    help="GMLX_DECODE_ARENA_GB for the server: cap a streamed model's "
+                         "arena so it fits the residency budget beside the others")
     ap.add_argument("--log", default="/tmp/gmlx-capacity-multi-e2e.log")
     a = ap.parse_args()
     models = parse_models(a.models) if a.models else DEFAULT_MODELS
@@ -191,7 +198,11 @@ def main() -> int:
                 f.write("    speculative: true\n")
             elif extra.startswith("draft="):
                 f.write(f"    draft_gguf: {os.path.expanduser(extra[6:])}\n")
+            elif extra == "stream":
+                f.write("    stream: experts\n")
     env = {"GMLX_DECODE_BATCH": str(a.width), "GMLX_QUEUE_DEPTH_CAP": str(a.cap)}
+    if a.arena_gb:
+        env["GMLX_DECODE_ARENA_GB"] = str(a.arena_gb)
     t_start = time.monotonic()
     with ServerProc(["--config", cfg_path], env_extra=env, log_path=a.log) as srv:
         srv.wait_ready(timeout=600)
@@ -298,9 +309,9 @@ def main() -> int:
               bool(dec) and all(r["generated"] >= 0 and r["max_tokens"] == a.max_tokens for r in dec)
               and any(r.get("decode_tok_s") for r in dec))
         check("cache tier set on every decode row",
-              all(r["cache"]["tier"] in ("exact", "block", "miss") for r in dec),
+              all(r["cache"]["tier"] in TIERS for r in dec),
               str({(r["model"], r["cache"]["tier"]) for r in dec}))
-        spec_ids = [m[0] for m in models if m[2]]
+        spec_ids = [m[0] for m in models if m[2] == "spec" or m[2].startswith("draft=")]
         spec_rows = [r for r in dec if r["model"] in spec_ids and r.get("speculative")]
         check("speculative stats on rows of speculative models",
               not spec_ids or bool(spec_rows) and any((r["speculative"].get("rounds") or 0) > 0 for r in spec_rows),
@@ -336,7 +347,7 @@ def main() -> int:
         check("first long prompt: miss tier, 200", tiers[0][2] == 200 and tiers[0][0] <= {"miss"},
               str(tiers[0]))
         check("repeat long prompt: warm tier with warm_tokens > 0",
-              tiers[1][2] == 200 and tiers[1][0] and tiers[1][0] <= {"exact", "block", "ckpt", "anchor", "hit"}
+              tiers[1][2] == 200 and tiers[1][0] and tiers[1][0] <= set(TIERS) - {"miss"}
               and tiers[1][1] > 0,
               str(tiers[1]))
 

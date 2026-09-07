@@ -30,7 +30,7 @@ survives. Sheds are tallied, not failed: they are the governor's verdict
 on the box, reported so the operator can judge the configuration.
 
 Usage: python tests/e2e/run_capacity_soak_e2e.py \\
-           --models ID=PATH[:spec|:draft=PATH] [ID2=PATH...] \\
+           --models ID=PATH[:spec|:draft=PATH|:stream] [ID2=PATH...] \\
            --cycles 4 --cycle-minutes 5 --clients 6 --out DIR
 Exit 0 on pass, 1 on findings, 2 when a model file is missing.
 """
@@ -611,7 +611,7 @@ def parse_model(spec: str):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--models", nargs="+", required=True, help="ID=PATH[:spec|:draft=PATH]")
+    ap.add_argument("--models", nargs="+", required=True, help="ID=PATH[:spec|:draft=PATH|:stream]")
     ap.add_argument("--cycles", type=int, default=4)
     ap.add_argument("--cycle-minutes", type=float, default=5.0)
     ap.add_argument("--clients", type=int, default=6)
@@ -644,6 +644,8 @@ def main() -> int:
                 f.write("    speculative: true\n")
             elif extra.startswith("draft="):
                 f.write(f"    draft_gguf: {os.path.expanduser(extra[6:])}\n")
+            elif extra == "stream":
+                f.write("    stream: experts\n")
     env = {"GMLX_DECODE_BATCH": str(a.width), "GMLX_QUEUE_DEPTH_CAP": str(a.cap)}
 
     print(f"== {label}: building prefixes ==", flush=True)

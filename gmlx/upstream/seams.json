@@ -29,6 +29,7 @@
   "mlx_vlm.apc:_clone_cache_entry_for_apc": "c8baee4f6265b141e15062ca11acef3cddaa8dbb6ddfa9defebc80cde5fb65c6",
   "mlx_vlm.apc:_clone_layer_major_kv_cache_for_apc": "0fa009469939eff333ead824969c7f07fda131e82fcdfaf700c420dddcf546e1",
   "mlx_vlm.apc:_copy_mlx_array": "de16ec2f873fec8698116cafaad530828858a5cdb2fce608461475f97701a84c",
+  "mlx_vlm.apc:_free_ram_bytes": "da3b7685e710d777915347a13dcaa41052c73da473c2f2a385f74e961ef9c932",
   "mlx_vlm.apc:_hash_tokens": "a3fd0c11d76376db37275f4072b7abc32b9d002b11a540cb8978b62ee3676c4c",
   "mlx_vlm.apc:_merge_exact_cache_entries": "e4575a1b60d6a50fd7fa921b25bb11084dbf56fe7617cdcc7f460476f5b45fef",
   "mlx_vlm.apc:_read_safetensors_tensor": "abff2eae7a077ca5776fa9fec8d9b80b6b3b7a563f0b81dc349b2af7f525c450",

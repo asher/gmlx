@@ -499,3 +499,24 @@ def test_one_row_next_restore_semantics():
 
     assert ag._one_row_next(g, untouched, {}) == "r2"
     assert [s[0] for s in pending] == [2, 3, 9]  # unconsumed head kept
+
+
+def test_fresh_model_projects_from_boot_rates(monkeypatch):
+    import gmlx.gen.prefill_decay as pd
+    import gmlx.serve.capacity as cap
+
+    monkeypatch.setenv("GMLX_ADMIT_RESERVE_GB", "2")
+    g = FakeGen(rows=0)
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 10e9)
+    monkeypatch.setattr(cap, "_TABLE", None)
+    assert sm.project_admission(g, [_pending(2, 300, 200)]) is None
+    monkeypatch.setattr(g.model, "_kq_boot_kv_costs", [(None, 1000.0)],
+                        raising=False)
+    out = sm.project_admission(g, [_pending(2, 300, 200)])
+    assert out is not None
+    projected, head, parts = out
+    assert head == 10e9
+    assert projected == pytest.approx(
+        1000.0 * 512 + pd.score_transient_bytes(g.model, None, 500)
+        + sm.admit_reserve_bytes(0), rel=0.05)
+    assert "kv" in parts

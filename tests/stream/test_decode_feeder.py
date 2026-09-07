@@ -15,6 +15,7 @@ import mlx.core as mx
 from mlx_lm.models.switch_layers import SwitchGLU
 
 import gmlx.load.loader
+import gmlx.serve.kernel_vm
 from gmlx.load.loader import (
     _decode_arena_bytes,
     _resolve_feeder_defaults,
@@ -75,7 +76,7 @@ def _fake_arena_alloc(shape):
 
 
 def _make_feeder(monkeypatch, tmp_path, slots_per_layer=2, n_layers=2,
-                 pressure=False, fast_disk="off"):
+                 pressure=False, fast_disk="off", lend_bytes=0):
     import mlx_kquant as kq
     from gmlx.stream.decode_feeder import DecodeFeeder
 
@@ -95,7 +96,8 @@ def _make_feeder(monkeypatch, tmp_path, slots_per_layer=2, n_layers=2,
     offsets, modules = _make_fixture(tmp_path, n_layers)
     per_expert = sum(_STRIDE.values())
     return DecodeFeeder(
-        offsets, modules, arena_bytes=slots_per_layer * per_expert * n_layers
+        offsets, modules, arena_bytes=slots_per_layer * per_expert * n_layers,
+        lend_bytes=lend_bytes,
     ), modules
 
 
@@ -225,17 +227,45 @@ def test_pressure_critical_steps_twice_and_floors(monkeypatch, tmp_path):
     assert feeder._slot_of[0][0] >= 0
 
 
+def test_regrow_leaves_both_floors_behind(monkeypatch, tmp_path):
+    """A step regrows only when reclaimable RAM covers the step plus the
+    loader floor plus the governor kernel floor; a step that would land
+    on the floor that shrank the arena waits."""
+    level = {"v": 2}
+    _pressure_setup(monkeypatch, level, regrow_polls=1)
+    import gmlx.stream.budget as budget
+
+    monkeypatch.setattr(gmlx.load.loader, "_ram_floor_bytes", lambda ram: 10 << 30)
+    monkeypatch.setattr(budget, "kernel_floor_bytes", lambda: float(4 << 30))
+    avail = {"v": 0}
+    monkeypatch.setattr(budget, "reclaimable_ram_bytes", lambda: avail["v"])
+    feeder, _ = _make_feeder(
+        monkeypatch, tmp_path, slots_per_layer=4, pressure=True)
+    feeder.ensure_wired()
+    feeder.stage(0, np.array([0, 1]))
+    assert feeder._pressure_steps == 1
+    need = feeder._arena_bytes_at(0) - feeder.arena_bytes
+    level["v"] = 1
+    avail["v"] = need + (10 << 30) + (4 << 30) - 1
+    feeder.stage(0, np.array([0, 1]))
+    assert feeder._pressure_steps == 1  # one byte short of both floors
+    avail["v"] += 1
+    feeder.stage(0, np.array([0, 1]))
+    assert feeder._pressure_steps == 0
+
+
 def test_pressure_regrow_after_sustained_normal(monkeypatch, tmp_path):
     level = {"v": 2}
     _pressure_setup(monkeypatch, level, regrow_polls=2)
     avail = {"v": 0}  # no reclaimable RAM: regrow must wait
-    seen_kwargs = []
+    import gmlx.stream.budget as budget
 
-    def _fake_avail(include_inactive=True):
-        seen_kwargs.append(include_inactive)
-        return avail["v"]
-
-    monkeypatch.setattr(gmlx.load.loader, "_available_ram_bytes", _fake_avail)
+    # The regrow reads the governor's reclaimable measure (file-backed
+    # pages included), never the free-pages-only set.
+    monkeypatch.setattr(gmlx.load.loader, "_available_ram_bytes",
+                        lambda include_inactive=True: 0)
+    monkeypatch.setattr(budget, "reclaimable_ram_bytes", lambda: avail["v"])
+    monkeypatch.setattr(budget, "kernel_floor_bytes", lambda: 4e9)
     feeder, _ = _make_feeder(
         monkeypatch, tmp_path, slots_per_layer=4, pressure=True)
     feeder.ensure_wired()
@@ -250,8 +280,6 @@ def test_pressure_regrow_after_sustained_normal(monkeypatch, tmp_path):
     feeder.stage(0, np.array([0, 1]))  # headroom back: regrow a step
     assert feeder._pressure_steps == 0
     assert feeder._slots[0] == 4
-    # Regrow asked for the strict no-victims set (inactive excluded).
-    assert seen_kwargs and all(k is False for k in seen_kwargs)
     for e in (0, 1):  # residents survived shrink and regrow copies
         s = int(feeder._slot_of[0][e])
         for kind in _KINDS:
@@ -292,28 +320,36 @@ def test_arena_budget_math(monkeypatch):
     monkeypatch.setattr(
         mx, "device_info", lambda: {"memory_size": 1000 << 30}
     )  # RAM cap far above the working-set budget: budget binds
+    monkeypatch.setenv("GMLX_DECODE_RAM_FLOOR_GB", "0")
+    monkeypatch.setenv("GMLX_DECODE_PAGECACHE_GB", "0")  # host floor too
     # budget - non-expert bytes (total - experts) - 8 GB reserve, capped at
     # expert bytes
     got = _decode_arena_bytes(100 << 30, offsets, budget=80 << 30)
     assert got == (80 << 30) - (20 << 30) - (8 << 30)
     assert _decode_arena_bytes(85 << 30, offsets, budget=200 << 30) == 80 << 30
     assert _decode_arena_bytes(60 << 30, offsets, budget=None) == 0
-    # The prefill ring's bytes are credited: its wired budget is
-    # time-shared with the arena (released at first decode, lent back on
-    # later prefill passes), so a pinned model whose ceiling barely covers
-    # the non-expert bytes still gets an arena instead of zero.
+    # The KV room replaces the flat reserve when the caller prices it.
     got = _decode_arena_bytes(
-        100 << 30, offsets, budget=30 << 30, ring_bytes=10 << 30)
-    assert got == (40 << 30) - (20 << 30) - (8 << 30)
+        100 << 30, offsets, budget=40 << 30, room_bytes=10 << 30)
+    assert got == (40 << 30) - (20 << 30) - (10 << 30)
     assert _decode_arena_bytes(
-        100 << 30, offsets, budget=25 << 30, ring_bytes=2 << 30) == 0
-    # RAM-fraction ceiling binds when physical RAM is the scarce resource.
+        100 << 30, offsets, budget=25 << 30, room_bytes=6 << 30) == 0
+    # The host floor and the prefill ring come off the ceiling too.
+    monkeypatch.setenv("GMLX_DECODE_RAM_FLOOR_GB", "5")
+    got = _decode_arena_bytes(
+        100 << 30, offsets, budget=80 << 30, ring_bytes=4 << 30)
+    assert got == (80 << 30) - (20 << 30) - (8 << 30) - (5 << 30) - (4 << 30)
+    monkeypatch.setenv("GMLX_DECODE_RAM_FLOOR_GB", "0")
+    # A RAM fraction caps the ceiling only when the user asks for one.
     monkeypatch.setattr(
         mx, "device_info", lambda: {"memory_size": 100 << 30}
     )
+    for bad in ("abc", "1e999", "nan"):                    # ignored
+        monkeypatch.setenv("GMLX_DECODE_ARENA_RAM_FRAC", bad)
+        _decode_arena_bytes(100 << 30, offsets, budget=90 << 30)
+    monkeypatch.delenv("GMLX_DECODE_ARENA_RAM_FRAC")
     got = _decode_arena_bytes(100 << 30, offsets, budget=90 << 30)
-    frac = gmlx.load.loader._DECODE_ARENA_RAM_FRAC_DEFAULT
-    assert got == int(frac * (100 << 30)) - (20 << 30) - (8 << 30)
+    assert got == (90 << 30) - (20 << 30) - (8 << 30)
     monkeypatch.setenv("GMLX_DECODE_ARENA_RAM_FRAC", "0.8")
     got = _decode_arena_bytes(100 << 30, offsets, budget=90 << 30)
     assert got == int(0.8 * (100 << 30)) - (20 << 30) - (8 << 30)
@@ -323,6 +359,7 @@ def test_arena_budget_math(monkeypatch):
         gmlx.load.loader, "_available_ram_bytes", lambda: 40 << 30
     )
     monkeypatch.setenv("GMLX_DECODE_RAM_FLOOR_GB", "5")
+    monkeypatch.delenv("GMLX_DECODE_PAGECACHE_GB", raising=False)
     # The floor is the base margin plus the page-cache reserve (2.5 GB
     # default): buffered read paths need cache room even when the user
     # pins the base floor.
@@ -1537,6 +1574,7 @@ def test_available_ram_counts_active_file_cache(monkeypatch):
         stdout = out
 
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: _R())
+    monkeypatch.setattr(gmlx.serve.kernel_vm, "snapshot", lambda: None)  # vm_stat fallback
     page = 16384
     assert gmlx.load.loader._available_ram_bytes() == (1000 + 500 + 700000) * page
     # Strict no-victims set: free + purgeable + speculative only.
@@ -1558,6 +1596,7 @@ def test_available_ram_fallback_without_file_backed_line(monkeypatch):
         stdout = out
 
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: _R())
+    monkeypatch.setattr(gmlx.serve.kernel_vm, "snapshot", lambda: None)  # vm_stat fallback
     assert gmlx.load.loader._available_ram_bytes() == \
         (1000 + 500 + 5000 + 200000) * 16384
 
@@ -1576,9 +1615,10 @@ def test_ensure_wired_releases_ring_once(monkeypatch, tmp_path):
 
 
 def test_lend_for_ring_shrinks_then_decode_restores(monkeypatch, tmp_path):
-    """A post-decode prefill pass borrows wired budget: lend_for_ring
-    eagerly shrinks every layer (keeping hot residents), and the next
-    decode-sized call releases the ring again and regrows lazily."""
+    """A post-decode prefill pass on a box whose free RAM is gone borrows
+    wired budget: lend_for_ring eagerly shrinks every layer (keeping hot
+    residents), and the next decode-sized call releases the ring again
+    and regrows lazily."""
     feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4)
     feeder.stage(0, np.array([0, 1, 2, 3]))
     feeder.stage(0, np.array([0, 1]))  # 0 and 1 hotter than 2 and 3
@@ -1588,6 +1628,7 @@ def test_lend_for_ring_shrinks_then_decode_restores(monkeypatch, tmp_path):
     feeder.ensure_wired()  # first decode: ring freed, arena wired
     assert released == [1]
     before = feeder.arena_bytes
+    feeder._kernel_has_room = lambda n: False
 
     feeder.lend_for_ring(before // 2)
     assert feeder._lend_frac < 1.0
@@ -1610,6 +1651,35 @@ def test_lend_for_ring_shrinks_then_decode_restores(monkeypatch, tmp_path):
     assert feeder.arena_bytes == before // 2 + 2 * feeder._per_expert[0]
 
 
+def test_lend_is_noop_while_the_kernel_has_the_room(monkeypatch, tmp_path):
+    """The budget keeps the ring's room out of the arena, so a rebuild on
+    a box that still has that room borrows nothing."""
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4)
+    feeder.stage(0, np.array([0, 1, 2, 3]))
+    feeder._release_ring = lambda: None
+    feeder.ensure_wired()
+    before = feeder.arena_bytes
+    asked = []
+    feeder._kernel_has_room = lambda n: asked.append(n) or True
+    feeder.lend_for_ring(before // 2)
+    assert asked == [before // 2]
+    assert feeder._lend_frac == 1.0 and feeder.arena_bytes == before
+
+
+def test_layer_wires_at_its_first_stage_call(monkeypatch, tmp_path):
+    """Before the one-time wiring pass, a layer wires when it first
+    stages, so its filled slots are never left for the kernel to swap."""
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4)
+    assert feeder._mlock_deferred and not feeder._locked
+    feeder.stage(0, np.array([0, 1]))
+    assert set(feeder._locked) == {(0, k) for k in feeder._layers[0]}
+    wired = feeder.locked_bytes
+    feeder.stage(0, np.array([2]))  # once per layer, not per call
+    assert feeder.locked_bytes == wired
+    feeder.ensure_wired()  # the wiring pass takes the rest, once
+    assert set(feeder._locked) == set(feeder._arena)
+
+
 def test_lend_before_first_decode_is_noop(monkeypatch, tmp_path):
     """Before the first decode the ring and the cold (unwired) arena
     already coexist; there is nothing to lend."""
@@ -1628,5 +1698,116 @@ def test_lend_skips_wedged_layers(monkeypatch, tmp_path):
     feeder._release_ring = lambda: None
     feeder.ensure_wired()
     feeder._wedged_layers.add(0)
+    feeder._kernel_has_room = lambda n: False
     feeder.lend_for_ring(feeder.arena_bytes // 2)
     assert feeder._slots[0] == 4 and feeder._slots[1] == 2
+
+
+def test_ring_lent_at_birth_repaid_at_first_decode(monkeypatch, tmp_path):
+    """The prefill ring is born out of the arena's budget: slots start at
+    the lent target and regrow only once ensure_wired drops the ring."""
+    per_expert = sum(_STRIDE.values())
+    feeder, _ = _make_feeder(
+        monkeypatch, tmp_path, slots_per_layer=4, lend_bytes=2 * per_expert)
+    assert feeder.nominal_bytes == 8 * per_expert
+    assert feeder._slots == {0: 3, 1: 3}
+    assert feeder.arena_bytes == 6 * per_expert
+    feeder.stage(0, np.array([0, 1]))
+    assert feeder._slots[0] == 3
+    feeder.ensure_wired()
+    feeder.stage(0, np.array([0, 1]))
+    assert feeder._slots == {0: 4, 1: 3}
+    assert feeder.arena_bytes == 7 * per_expert
+
+
+def test_governor_evict_maps_the_fraction_onto_the_remaining_ladder(
+        monkeypatch, tmp_path):
+    """Sitting one step down, a first-dip fraction that rounds to one
+    step of the whole ladder must still take the next step; the old
+    absolute mapping returned 0 and the governor freed nothing."""
+    per_expert = sum(_STRIDE.values())
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4)
+    for e in (0, 1, 2, 0):
+        feeder.stage(0, np.array([e]))
+    assert feeder.governor_evict(0.3) == 2 * per_expert  # one step
+    assert feeder._pressure_steps == 1
+    assert feeder.governor_evict(0.08) == 2 * per_expert  # the next step
+    assert feeder._pressure_steps == 2
+
+
+def test_governor_evict_walks_the_ladder(monkeypatch, tmp_path):
+    per_expert = sum(_STRIDE.values())
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4)
+    for e in (0, 1, 2, 0):
+        feeder.stage(0, np.array([e]))
+    floor = 2 * per_expert  # one slot per layer
+    assert feeder.governor_bytes() == feeder.arena_bytes - floor
+    assert feeder.governor_evict(0.5) == 4 * per_expert  # two steps
+    assert feeder._slots == {0: 2, 1: 2}
+    # a small fraction of what is left still takes the last step
+    assert feeder.governor_evict(0.1) == 2 * per_expert
+    assert feeder.arena_bytes == floor and feeder.governor_bytes() == 0
+    assert feeder.governor_evict(1.0) == 0
+    assert feeder.governor_evict(0.4) == 0  # never steps back up
+    assert feeder.locked_bytes == 0  # not wired yet: resize must not mlock
+    s = int(feeder._slot_of[0][0])  # the hottest expert survives
+    assert s >= 0
+    for kind in _KINDS:
+        assert _arena_slot(feeder, 0, kind, s) == _expert_bytes(0, kind, 0)
+
+
+def test_regrow_waits_for_governor_room(monkeypatch, tmp_path):
+    import gmlx.stream.budget as budget
+
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4)
+    # The regrow gate reads the mach counters first; the loader's vm_stat
+    # sum is only the fallback. Patch the read the gate takes, or the test
+    # follows the runner's free RAM.
+    monkeypatch.setattr(budget, "reclaimable_ram_bytes", lambda: 1 << 40)
+    feeder.governor_evict(1 / 3)
+    assert feeder._pressure_steps == 1
+    need = feeder._arena_bytes_at(0) - feeder.arena_bytes
+    feeder._room_bytes = 10 << 30
+    head = {"v": need + (5 << 30) - 1}
+    monkeypatch.setattr(budget, "governor_headroom_bytes", lambda: head["v"])
+    assert not feeder._regrow_headroom_ok()
+    head["v"] = need + (5 << 30)
+    assert feeder._regrow_headroom_ok()
+    head["v"] = None
+    assert feeder._regrow_headroom_ok()
+
+
+def test_governor_shrink_regrows_with_pressure_polling_off(monkeypatch, tmp_path):
+    import gmlx.stream.budget as budget
+
+    level = {"v": 4}  # would shrink further if the level were read
+    _pressure_setup(monkeypatch, level, regrow_polls=2)
+    monkeypatch.setattr(budget, "reclaimable_ram_bytes", lambda: 1 << 40)
+    monkeypatch.setattr(budget, "governor_headroom_bytes", lambda: None)
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=4)
+    assert not feeder._pressure_on
+    feeder.governor_evict(1 / 3)
+    assert feeder._pressure_steps == 1 and feeder._slots[0] == 3
+    feeder.stage(0, np.array([0]))
+    feeder.stage(0, np.array([0]))
+    assert feeder._pressure_steps == 0
+    feeder.stage(0, np.array([0]))
+    assert feeder._slots[0] == 4
+    feeder.stage(0, np.array([0]))
+    assert feeder._pressure_steps == 0  # the level stays unread
+
+
+def test_prefill_ring_reason(monkeypatch, tmp_path):
+    from gmlx.load.loader import _prefill_ring_reason
+    from gmlx.stream.prefill_feeder import ring_bytes
+
+    monkeypatch.delenv("GMLX_DECODE_ARENA_GB", raising=False)
+    offsets, _ = _make_fixture(tmp_path, 2)
+    ring = ring_bytes(offsets)
+    assert _prefill_ring_reason(offsets, ring) is None
+    reason = _prefill_ring_reason(offsets, ring - 1)
+    assert reason and "exceeds" in reason
+    assert _prefill_ring_reason(offsets, 0)
+    assert _prefill_ring_reason(offsets, None) is None
+    monkeypatch.setenv("GMLX_DECODE_ARENA_GB", "1")
+    assert _prefill_ring_reason(offsets, 0) is None

@@ -200,6 +200,14 @@ hybrid linear-attention, MLA) are much cheaper than the formula suggests.
 More worked numbers, the cheaper families, and the rest of the levers:
 [performance.md](performance.md#memory-and-the-kv-cache).
 
+A MoE model larger than RAM can still run. `--stream-experts` keeps the
+every-token weights resident and streams the routed experts from disk.
+The fit rule for that mode is different: the every-token weights and the
+KV room must fit under the memory ceiling, and the file size does not
+matter. See
+[streaming.md](streaming.md#how-big-a-model-can-this-box-stream).
+`gmlx validate <file>` prints the verdict for this Mac.
+
 ## Set up the server
 
 `gmlx init` scaffolds the config. Run bare in a terminal, it opens a guided wizard

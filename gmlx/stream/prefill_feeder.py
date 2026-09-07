@@ -26,6 +26,7 @@ disables the feeder rather than corrupting compute).
 
 from __future__ import annotations
 
+import fcntl
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -34,10 +35,14 @@ from contextlib import contextmanager
 from .feeder_common import (
     ATTRS,
     KINDS,
+    lock_pages,
     read_range,
+    read_range_aligned,
     slot_itemsize,
     slot_view,
     swapped_weights,
+    unlock_pages,
+    unshare_on_fork,
     verify_zero_copy,
 )
 
@@ -102,11 +107,22 @@ class PrefillFeeder:
             self._slot_isz[kind] = w
 
         self._fds: dict[str, int] = {}
+        # A ring pass reads every routed expert once, more than any box
+        # can cache; through the buffer cache it evicts the rest of the
+        # box for pages it never reads again (GMLX_PREFILL_NOCACHE=0
+        # restores buffered reads).
+        self._nocache = (os.environ.get("GMLX_PREFILL_NOCACHE", "1") != "0"
+                         and hasattr(fcntl, "F_NOCACHE"))
+        self._sizes: dict[str, int] = {}
         try:
             for entry in self._layers.values():
                 for _, path, _, _ in entry.values():
                     if path not in self._fds:
-                        self._fds[path] = os.open(path, os.O_RDONLY)
+                        fd = os.open(path, os.O_RDONLY)
+                        self._fds[path] = fd
+                        self._sizes[path] = os.fstat(fd).st_size
+                        if self._nocache:
+                            fcntl.fcntl(fd, fcntl.F_NOCACHE, 1)
             self._verify_zero_copy()
         except BaseException:
             self.close()
@@ -132,7 +148,8 @@ class PrefillFeeder:
         self._error: BaseException | None = None
         # Set by the loader to DecodeFeeder.lend_for_ring when a decode
         # arena coexists with this ring: called before a post-decode slot
-        # rebuild so the wired arena shrinks by the ring's footprint first.
+        # rebuild; it shrinks the arena only when the kernel has lost the
+        # ring's room.
         self._lend_hook = None
 
     def _alloc_slots(self) -> None:
@@ -149,11 +166,22 @@ class PrefillFeeder:
             for _ in (0, 1)
         ]
         self._views: dict[tuple[int, int], dict] = {}  # (li, parity) -> kind -> view
+        # Wired like the arena, in the room the budget keeps for it. A
+        # filled slot left unwired is what the kernel compresses first
+        # when free RAM is gone, and the GPU decompresses it on every use.
+        for slot in self._slots:
+            for _, mv in slot.values():
+                unshare_on_fork(mv)
+        self._locked: list[tuple[int, int]] = []
+        if os.environ.get("GMLX_DECODE_ARENA_MLOCK", "1") != "0":
+            self._locked = [
+                e for slot in self._slots for _, mv in slot.values()
+                if (e := lock_pages(mv)) is not None]
 
     def release_slots(self) -> None:
         """Drop the ring (its physical pages with it) once decode starts;
-        the next prefill pass re-allocates lazily. Decode holds the wired
-        budget the ring was using - see DecodeFeeder.ensure_wired."""
+        the ring's room stays reserved under the ceiling and the next
+        prefill pass re-allocates into it."""
         if not self._slots:
             return
         for ev in self._ready.values():  # a worker may still write a slot
@@ -161,6 +189,9 @@ class PrefillFeeder:
         self._ready.clear()
         self._error = None
         self._last_li = None
+        for e in self._locked:
+            unlock_pages(e)
+        self._locked = []
         self._slots = []
         self._views = {}
 
@@ -185,14 +216,20 @@ class PrefillFeeder:
                 mv = slot[kind][1]
                 for start in range(0, nbytes, _READ_CHUNK):
                     end = min(start + _READ_CHUNK, nbytes)
-                    futs.append(self._read_pool.submit(
-                        read_range, fd, mv[start:end], off + start))
+                    futs.append(self._submit_read(
+                        path, fd, mv[start:end], off + start))
             for f in futs:
                 f.result()
         except BaseException as e:  # surfaced on the caller's next wait
             self._error = e
         finally:
             self._ready[li].set()
+
+    def _submit_read(self, path: str, fd: int, dest, off: int):
+        if self._nocache:
+            return self._read_pool.submit(
+                read_range_aligned, fd, dest, off, self._sizes[path])
+        return self._read_pool.submit(read_range, fd, dest, off)
 
     def _kick(self, li: int) -> None:
         if li in self._layers and li not in self._ready:
@@ -271,9 +308,9 @@ class PrefillFeeder:
             fd = self._fds[path]
             for e in ids:
                 if 0 <= e < n_exp:
-                    futs.append(self._read_pool.submit(
-                        read_range, fd,
-                        mv[e * stride:(e + 1) * stride], off + e * stride))
+                    futs.append(self._submit_read(
+                        path, fd, mv[e * stride:(e + 1) * stride],
+                        off + e * stride))
         for f in futs:
             f.result()
         with self._swapped(li):
@@ -298,6 +335,19 @@ class PrefillFeeder:
             self.close()
         except Exception:
             pass  # GC-time cleanup must never raise
+
+
+def ring_bytes(offsets) -> int:
+    """A-priori size of the two ring slots: twice the largest layer's
+    expert stacks, per kind, over the layers the feeder would cover."""
+    largest: dict[str, int] = {}
+    for ranges in offsets.values():
+        kinds = {r[4] for r in ranges}
+        if kinds != set(KINDS) or len(ranges) != len(KINDS):
+            continue
+        for _, _, nbytes, _, kind in ranges:
+            largest[kind] = max(largest.get(kind, 0), nbytes)
+    return 2 * sum(largest.values())
 
 
 def maybe_make_prefill_feeder(offsets, modules) -> PrefillFeeder | None:

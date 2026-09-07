@@ -345,3 +345,26 @@ def test_policy_costs_follow_the_stack_not_the_config():
     # no policy: the stack still decides what grows
     assert mp._policy_costs(_rg(model), model) == [
         (mp.FixedRows(1), NEMO_STATE)] + [(None, per_tok * 2.0)] * 3
+
+
+class _Arena:
+    def __init__(self, nbytes):
+        self.arena_bytes = nbytes
+
+
+def test_available_drained_charges_live_arena(monkeypatch):
+    import mlx.core as mx
+
+    import gmlx.gen.prefill_decay as pd
+    import gmlx.serve.memory as sm
+    from gmlx.stream import installs
+
+    monkeypatch.setattr(mx, "device_info", lambda: {
+        "max_recommended_working_set_size": 100e9})
+    monkeypatch.setattr(pd, "untracked_weight_bytes", lambda: 10e9)
+    monkeypatch.setattr(sm, "admit_reserve_bytes", lambda ws, gen=None: 2e9)
+    monkeypatch.setattr(installs, "_ARENAS", [])
+    assert mp.available_drained_bytes() == pytest.approx(88e9)
+    arena = _Arena(30e9)
+    installs.record_arena(arena)
+    assert mp.available_drained_bytes() == pytest.approx(58e9)

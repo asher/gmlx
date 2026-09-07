@@ -616,6 +616,8 @@ def test_kernel_floor_stable_breach_holds_no_shed(rig, monkeypatch):
     gen = FakeGen(rows=1, rate=1e6, live=8e9)
     tg_st = tg._state(gen)
     tg_st.ledger[0] = tg._Row([1] * 8, 64, {}, None, None)
+    evicted = []
+    gov.register_cache("apc", lambda: 0, lambda f: (evicted.append(f), 0)[1])
     for kernel in (7.9e9, 7.5e9, 7.2e9, 7.4e9):   # oscillating, stable
         rig["kernel"] = kernel
         gov._governor_tick(gen)
@@ -624,6 +626,10 @@ def test_kernel_floor_stable_breach_holds_no_shed(rig, monkeypatch):
     assert st.band != gov.RED
     assert gov._STATS["last_action"] == "kernel floor stable; no shed"
     assert gov._STATS["kernel_floor_reds"] == 4
+    # Registered caches (the decode arena among them) are evicted on the
+    # first sub-floor sample only; a stable breach holds without
+    # walking the arena down every tick.
+    assert evicted == [1.0]
 
 
 def test_kernel_floor_collapse_trend_sheds(rig, monkeypatch):
@@ -723,6 +729,50 @@ def test_kernel_floor_reclaim_alone_can_clear(rig, monkeypatch):
     assert "kernel floor reclaim" in gov._STATS["last_action"]
 
 
+def test_kernel_floor_first_dip_reclaims_the_deficit(rig, monkeypatch):
+    # 50 MB under the floor must not walk a registered arena to its
+    # floor: the first sub-floor sample reclaims the deficit plus half
+    # a floor, as a share of what is registered (rig floor 8 GB).
+    evicted = []
+    gov.register_cache("arena", lambda: 60e9,
+                       lambda f: (evicted.append(f), f * 60e9)[1])
+    samples = iter([7.95e9, 20e9])
+    monkeypatch.setattr(gov, "_kernel_reclaimable", lambda: next(samples))
+    gen = FakeGen(rows=2)
+    gov._governor_tick(gen)
+    assert len(evicted) == 1
+    assert abs(evicted[0] - (0.05e9 + 4e9) / 60e9) < 1e-9
+    assert "kernel floor reclaim" in gov._STATS["last_action"]
+
+
+def test_kernel_floor_quarter_floor_reclaims_everything(rig, monkeypatch):
+    # Under a quarter of the floor is the freeze signature: every
+    # registered byte goes on the first sample.
+    evicted = []
+    gov.register_cache("arena", lambda: 60e9,
+                       lambda f: (evicted.append(f), f * 60e9)[1])
+    samples = iter([1.5e9, 20e9])
+    monkeypatch.setattr(gov, "_kernel_reclaimable", lambda: next(samples))
+    gov._governor_tick(FakeGen(rows=2))
+    assert evicted == [1.0]
+
+
+def test_governor_stats_samples_the_kernel_live(monkeypatch):
+    # /v1/metrics at idle must not show the last decode tick's sample.
+    monkeypatch.setitem(gov._STATS, "kernel_reclaimable_bytes", int(2e9))
+    monkeypatch.setattr(gov, "_ARMED_FLOOR", 4e9)
+    monkeypatch.setattr(gov, "_kernel_reclaimable", lambda: 31e9)
+    assert gov.governor_stats()["kernel_reclaimable_bytes"] == int(31e9)
+    assert gov._STATS["kernel_reclaimable_bytes"] == int(2e9)
+    monkeypatch.setattr(gov, "_ARMED_FLOOR", 0.0)
+    assert gov.governor_stats()["kernel_reclaimable_bytes"] == int(2e9)
+
+
+def test_floor_evict_fraction_without_registrants_is_full():
+    gov._REG.clear()
+    assert gov._floor_evict_fraction(3.9e9, 4e9) == 1.0
+
+
 def test_kernel_floor_off_never_samples(rig, monkeypatch):
     monkeypatch.setenv("GMLX_GOV_KERNEL_FLOOR_GB", "0")
     calls = []
@@ -797,3 +847,79 @@ def test_arm_throttle_limit_uses_ceiling(rig, monkeypatch):
     gov._arm_throttle(gen, st, 120e9, 0.05)
     # 97 GB ceiling + 50 GB untracked weights
     assert rig["mem_limits"] == [int(97e9 + 50e9)]
+
+
+class _FakeArena:
+    """A decode feeder as the governor sees it: bytes above the ladder
+    floor, and an evict that hands the box its headroom back."""
+
+    def __init__(self, box, nbytes):
+        self.box = box
+        self.nbytes = nbytes
+        self.evicts = []
+
+    def governor_bytes(self):
+        return self.nbytes
+
+    def governor_evict(self, fraction):
+        freed = int(self.nbytes * fraction)
+        self.evicts.append(fraction)
+        self.nbytes -= freed
+        self.box["head"] += freed
+        return freed
+
+
+def test_static_red_shrinks_the_arena_before_a_shed(rig, monkeypatch):
+    failed = []
+    monkeypatch.setattr(tg, "_row_failed_callbacks",
+                        [lambda uid, info: failed.append((uid, info))])
+    gen = FakeGen(rows=2, rate=60e9, live=30e9)  # demand > headroom
+    arena = _FakeArena(rig, 50e9)
+    gen.model = types.SimpleNamespace(_kq_decode_feeder=arena)
+    st = gov._state(gen)
+    st.obs_delta_ema = 20e9
+    tg_st = tg._state(gen)
+    tg_st.ledger[0] = tg._Row([1] * 8, 64, {}, None, None)
+    tg_st.ledger[1] = tg._Row([1] * 4, 64, {}, None, None)
+    gov._governor_tick(gen)
+    name = f"arena:{id(arena)}"
+    assert name in gov._REG
+    assert arena.evicts == [1.0]
+    assert failed == [] and gen.removed == []
+    assert gov._STATS["last_action"].startswith("red reclaim")
+    gov._governor_tick(gen)
+    assert sum(k.startswith("arena:") for k in gov._REG) == 1
+    gov.unregister_arena(arena)
+    assert name not in gov._REG
+
+
+def test_demand_rate_seeds_from_boot_table(rig, monkeypatch):
+    import gmlx.serve.capacity as cap
+
+    gen = FakeGen(rows=2)
+    gen._kq_admit_kv_rates = {}
+    st = gov._state(gen)
+    gen.model = types.SimpleNamespace(
+        _kq_boot_kv_costs=[(None, 1000.0), (4096, 500.0)])
+    rate, _ = gov._demand_bytes(gen, st)
+    assert rate == 1500.0 * 2 * max(st.tok_ema, 1.0)
+    # The costs are per model, not the last table installed.
+    monkeypatch.setattr(cap, "_TABLE", {"weight_bytes": 1})
+    gen.model = types.SimpleNamespace()
+    assert gov._demand_bytes(gen, st)[0] == 0.0
+
+
+def test_dead_arena_entry_is_replaced(rig, monkeypatch):
+    # A feeder freed without unregister_arena leaves a dead entry; a new
+    # feeder at the same address must still register.
+    gen = FakeGen(rows=2)
+    arena = _FakeArena(rig, 50e9)
+    gen.model = types.SimpleNamespace(_kq_decode_feeder=arena)
+    monkeypatch.setattr(gov, "_arena_name", lambda f: "arena:fixed")
+    gov.register_cache("arena:fixed", lambda: 0, lambda f: 0)
+    gov._ARENA_REFS.pop("arena:fixed", None)     # no live ref: dead entry
+    gov._maybe_register_arena(gen)
+    assert gov._REG["arena:fixed"][0]() == arena.governor_bytes()
+    assert gov._ARENA_REFS["arena:fixed"]() is arena
+    gov.unregister_arena(arena)
+    assert "arena:fixed" not in gov._REG and "arena:fixed" not in gov._ARENA_REFS

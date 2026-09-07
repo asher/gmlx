@@ -564,6 +564,18 @@ def _auto_block_size(model_path):
         return None
 
 
+def _install_fork_free_free_ram() -> None:
+    """Rebind ``apc._free_ram_bytes`` (the exact disk-restore gate) to
+    the in-process mach read. Stock shells out to ``vm_stat`` without
+    psutil, and a fork beside a Metal-mapped decode arena copies the
+    arena before the exec."""
+    from gmlx.serve import kernel_vm
+
+    if kernel_vm.snapshot() is None or not hasattr(_apc, "_free_ram_bytes"):
+        return
+    _apc._free_ram_bytes = kernel_vm.available_bytes
+
+
 def build_apc_manager(model_namespace=None):
     """Build the gmlx APC manager from the env vars ``from_env`` reads.
 
@@ -609,5 +621,6 @@ def build_apc_manager(model_namespace=None):
         "APC enabled (block_size=%d, num_blocks=%d, disk=%s, gmlx manager)",
         block_size, num_blocks, bool(disk),
     )
+    _install_fork_free_free_ram()
     return GmlxAPCManager(
         num_blocks=num_blocks, block_size=block_size, disk=disk)

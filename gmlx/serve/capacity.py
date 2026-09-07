@@ -50,6 +50,10 @@ _DEPTHS = (4096, 16384, 65536)
 _FRONTIER_MIN_CTX = 4096
 
 _TABLE: dict | None = None
+# GGUF path -> per-layer KV cost entries of the boot table, kept out of
+# the table /v1/metrics dumps; stamped on the model at build.
+_BOOT_KV_COSTS: dict = {}
+_UNSTAMPED_WARNED: set = set()
 
 
 def overcommit() -> bool:
@@ -181,24 +185,19 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None,
     params reprice the quantized layers."""
     import mlx.core as mx
 
-    from .mem_preflight import (_get, _lm_config, config_geometry,
-                                kv_layer_costs, prompt_kv_bytes)
+    from .mem_preflight import prompt_kv_bytes
     from .memory import admit_reserve_bytes
-    from gmlx.commands.tool_preflight import _shards, _synth_config
+    from gmlx.commands.tool_preflight import _shards
 
     try:
         shards = _shards(gguf_path)
         weights = (float(weight_bytes) if weight_bytes else
                    float(sum(os.path.getsize(p) for p in shards)))
-        cfg = _synth_config(shards[0])
-        model = SimpleNamespace(config=cfg)
-        geometry = config_geometry(_lm_config(model)) if cfg else None
-        costs = kv_layer_costs(
-            model, per_layer_bpe=_boot_bpe_vector(geometry, env, gguf_path),
-            geometry=geometry) if geometry else None
+        priced = boot_costs(gguf_path, env)
         ws = working_set_bytes()
-        if not (cfg and costs and ws):
+        if not (priced and ws):
             return None
+        cfg, costs, heads = priced
         info = mx.device_info()
         max_buffer = float(info.get("max_buffer_length", 0) or 0)
         resource_limit = int(info.get("resource_limit", 0) or 0)
@@ -206,8 +205,6 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None,
         _log.debug("capacity derivation skipped", exc_info=True)
         return None
 
-    heads = _get(_lm_config(model), "num_attention_heads")
-    heads = heads if isinstance(heads, int) and heads > 0 else None
     budget = ceiling_bytes(ws)
     reserve = admit_reserve_bytes(ws)
 
@@ -257,8 +254,74 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None,
         "trained_ctx": trained if isinstance(trained, int) else None,
         "max_ctx": ctx_by_width,
         "max_width_at_depth": width_at_depth,
+        "kv_costs": [(w, float(bpt)) for w, bpt in costs],
         "overcommit": overcommit(),
     }
+
+
+def boot_costs(gguf_path: str | None, env: dict | None = None, *,
+               scans=None):
+    """``(config, kv_layer_costs, attention heads)`` priced from the GGUF
+    header under the model's env window, or None when the header cannot
+    be read. The one cost model the boot table, the streaming KV room,
+    the seeded admission rates and the streaming planner share. ``scans``
+    supplies the header scans (a remote header) in place of the path."""
+    from .mem_preflight import (_get, _lm_config, config_geometry,
+                                kv_layer_costs)
+    from gmlx.commands.tool_preflight import (_shards, _synth_config,
+                                              synth_config_from_scans)
+
+    try:
+        if scans is not None:
+            cfg = synth_config_from_scans(scans)
+            gguf_path = gguf_path or scans[0].path
+        else:
+            cfg = _synth_config(_shards(gguf_path)[0])
+        model = SimpleNamespace(config=cfg)
+        geometry = config_geometry(_lm_config(model)) if cfg else None
+        costs = kv_layer_costs(
+            model, per_layer_bpe=_boot_bpe_vector(geometry, env, gguf_path),
+            geometry=geometry) if geometry else None
+    except Exception:
+        return None
+    if not (cfg and costs):
+        return None
+    heads = _get(_lm_config(model), "num_attention_heads")
+    heads = heads if isinstance(heads, int) and heads > 0 else None
+    return cfg, costs, heads
+
+
+def boot_kv_costs(gguf_path: str) -> list:
+    """The per-layer KV cost entries the boot table priced for a path."""
+    return list(_BOOT_KV_COSTS.get(gguf_path) or [])
+
+
+def boot_kv_rates(model) -> dict:
+    """Admission rates for a model with no measured batch yet, one
+    synthetic kind per KV window, from the costs residency stamped on
+    the model at build (``_kq_boot_kv_costs``). Empty when unstamped;
+    live measurements replace them at the first ``update_kv_rates``."""
+    if model is None:
+        return {}
+    from gmlx.stream.installs import wrapper_chain
+
+    costs = None
+    for cur in wrapper_chain(model):
+        costs = getattr(cur, "_kq_boot_kv_costs", None)
+        if costs:
+            break
+    if not costs:
+        if id(model) not in _UNSTAMPED_WARNED:
+            _UNSTAMPED_WARNED.add(id(model))
+            _log.warning("[capacity] no boot KV costs stamped on %s; "
+                         "admission projects only after the first batch",
+                         type(model).__name__)
+        return {}
+    out: dict = {}
+    for window, bpt in costs:
+        k = out.setdefault(f"_boot:{window}", {"rate": 0.0, "window": window})
+        k["rate"] += float(bpt)
+    return out
 
 
 def _log_table(t: dict) -> None:
@@ -294,7 +357,7 @@ def streamed_expert_bytes(gguf_path: str) -> int:
         total = 0
         for shard in find_split_shards(gguf_path):
             for t in scan_gguf(shard).tensors:
-                if _EXPS_RE.match(t.name):
+                if _EXPS_RE.fullmatch(t.name):
                     total += int(t.nbytes)
         return total
     except Exception:
@@ -319,13 +382,24 @@ class LoadDeferred(RuntimeError):
     the chat pre-warm turns it into a typed 503 with ``Retry-After``."""
 
 
-def preload_gate(weight_bytes: float, model_id: str) -> None:
+def preload_gate(weight_bytes: float, model_id: str, *,
+                 streaming: bool = False, reserved_bytes: float = 0.0) -> None:
     """The same headroom check a request takes, at model load and swap:
     a build whose weights cannot fit the measured free working set (the
     pool has already evicted what it may) refuses with numbers instead
-    of aborting the box's biggest allocation. GMLX_OVERCOMMIT=1 skips."""
+    of aborting the box's biggest allocation. GMLX_OVERCOMMIT=1 skips.
+    ``streaming`` names the bytes as the every-token weights: the routed
+    experts are already discounted, so a smaller quant of the rest is
+    the fix, not streaming. ``reserved_bytes`` is room a resident
+    streamed model keeps but has not filled (its prefill ring, its KV
+    room); the measure reads it as free, the load may not take it."""
     if overcommit() or weight_bytes <= 0:
         return
+    what = "every-token weights" if streaming else "weights"
+    fix = ("The routed experts already stream from disk; pick a quant "
+           "with smaller every-token tensors (docs/streaming.md)."
+           if streaming else
+           "for MoE models --stream-experts serves the experts from disk.")
     from gmlx.gen.prefill_decay import headroom_bytes
 
     head = headroom_bytes()
@@ -339,18 +413,21 @@ def preload_gate(weight_bytes: float, model_id: str) -> None:
         # an 86.7 GB load next to a pinned 31.5 GB resident (118 GB on a
         # 112 GB wire limit) and Metal OOM'd in the mmap warm (2026-08-25).
         head -= max(0.0, ws - budget)
+    if head is not None and reserved_bytes > 0:
+        head -= reserved_bytes
+    kept = (f" less the {reserved_bytes / GB:.1f} GB ring and KV room a "
+            "resident streamed model keeps" if reserved_bytes > 0 else "")
     if budget is not None and weight_bytes > budget:
         raise RuntimeError(
-            f"model does not fit: {model_id} weights "
+            f"model does not fit: {model_id} {what} "
             f"{weight_bytes / GB:.1f} GB exceed this box's working "
             f"budget {budget / GB:.1f} GB (working set x "
-            f"{1 - margin():.2f}). GMLX_OVERCOMMIT=1 overrides; for MoE "
-            f"models --stream-experts serves the experts from disk.")
+            f"{1 - margin():.2f}). GMLX_OVERCOMMIT=1 overrides; {fix}")
     if head is not None and weight_bytes > head:
         _defer(
-            f"model load deferred: {model_id} weights "
+            f"model load deferred: {model_id} {what} "
             f"{weight_bytes / GB:.1f} GB exceed the measured free "
-            f"working set {head / GB:.1f} GB (resident models are "
+            f"working set {head / GB:.1f} GB{kept} (resident models are "
             f"pinned or busy). Retry when a slot frees, or "
             f"GMLX_OVERCOMMIT=1 overrides.")
     _kernel_gate(weight_bytes, model_id)
@@ -480,13 +557,16 @@ def install_boot_table(gguf_path: str, weight_bytes: float | None,
         _log.info("[capacity] no table for %s (header or device "
                   "unreadable); stock behavior kept", model_id)
         return None
-    _TABLE = t
+    _BOOT_KV_COSTS[gguf_path] = list(t.pop("kv_costs", None) or [])
     _log_table(t)
     if t["overcommit"]:
+        _TABLE = t
         _log.warning("[capacity] GMLX_OVERCOMMIT=1 armed: boot refusal "
                      "and derived ceilings disabled")
         return t
     if t["max_ctx"].get(1, 0) <= 0:
+        # The previous table stays installed: a refused table would
+        # price admission at zero context.
         raise RuntimeError(
             f"model cannot fit at width 1: {model_id} weights "
             f"{t['weight_bytes'] / GB:.1f} GB + reserve "
@@ -495,12 +575,15 @@ def install_boot_table(gguf_path: str, weight_bytes: float | None,
             f"(working set {t['working_set_bytes'] / GB:.1f} GB, margin "
             f"{t['margin']:.2f}). GMLX_OVERCOMMIT=1 overrides; for MoE "
             f"models --stream-experts serves the experts from disk.")
+    _TABLE = t
     return t
 
 
 def clear_table() -> None:
     global _TABLE
     _TABLE = None
+    _BOOT_KV_COSTS.clear()
+    _UNSTAMPED_WARNED.clear()
 
 
 # GGUF path -> (mtime, trained context) for /v1/models; a header scan per

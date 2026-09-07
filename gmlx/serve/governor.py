@@ -58,10 +58,13 @@ Registered-cache protocol: anything holding resident GPU bytes
 registers ``bytes()`` (backed by the _BaseCache.nbytes contract) and
 ``evict(fraction) -> freed bytes``. The governor trusts neither
 beyond the counters. The serve APC manager self-registers at first
-governed tick. Registered bytes are sampled on a slow cadence
-(every 16 ticks and at band transitions); the per-tick trajectory
-rides the free counters and the admission-path rate stash, never a
-vars() walk.
+governed tick, and so does a streaming model's decode arena
+(DecodeFeeder.governor_evict shrinks it toward its pressure floor;
+it regrows only into headroom the governor is not using), so orange
+and red reclaim decode speed before they fail a row. Registered
+bytes are sampled on a slow cadence (every 16 ticks and at band
+transitions); the per-tick trajectory rides the free counters and
+the admission-path rate stash, never a vars() walk.
 
 Threading: everything here runs on the engine thread inside the
 ``_next`` wrapper; remove() is engine-stream-scoped by upstream and
@@ -210,7 +213,17 @@ def unregister_cache(name: str) -> None:
 
 def governor_stats() -> dict:
     # enabled distinguishes guards-off from guards-quiet in metrics
-    return dict(_STATS, enabled=governor_enabled())
+    out = dict(_STATS, enabled=governor_enabled())
+    # The tick samples the kernel only while a batch decodes. A read at
+    # idle gets a live sample, not the last tick's.
+    if _ARMED_FLOOR > 0:
+        try:
+            recl = _kernel_reclaimable()
+        except Exception:
+            recl = None
+        if recl is not None:
+            out["kernel_reclaimable_bytes"] = int(recl)
+    return out
 
 
 class _GovState:
@@ -296,16 +309,23 @@ def _ceiling_bytes(ws: float, margin: float) -> float:
 def _headroom_and_ws(margin: float):
     from gmlx.gen.prefill_decay import headroom_bytes
 
+    from .capacity import working_set_bytes
+
     head = headroom_bytes()
     if head is None:
         return None, 0.0
-    try:
-        ws = float(mx.device_info()["max_recommended_working_set_size"])
-    except Exception:
+    ws = working_set_bytes()
+    if ws is None:
         return None, 0.0
     # headroom_bytes is measured against the full WS; shift it down to
     # the governed ceiling
     return head - (ws - _ceiling_bytes(ws, margin)), ws
+
+
+def _floor_collapsing(cur: float, prev, floor: float) -> bool:
+    return bool(cur < 0.25 * floor
+                or (prev is not None
+                    and (cur < 0.5 * floor or prev - cur > 1e9)))
 
 
 def _kernel_reclaimable():
@@ -363,7 +383,11 @@ def _demand_bytes(gen, st: _GovState) -> tuple:
     transient) is charged against headroom once; multiplying it into
     the rate math turns a deep pending prompt batch into a false
     collision."""
-    rates = getattr(gen, "_kq_admit_kv_rates", None) or {}
+    rates = getattr(gen, "_kq_admit_kv_rates", None)
+    if not rates:
+        from .capacity import boot_kv_rates
+
+        rates = boot_kv_rates(getattr(gen, "model", None))
     rate_sum = sum(k.get("rate", 0.0) for k in rates.values())
     rows = batch_rows(gen)
     rate = rate_sum * rows * max(st.tok_ema, 1.0)
@@ -493,6 +517,29 @@ def _shed_allowed(st: _GovState) -> bool:
     return True
 
 
+def _registered_bytes() -> float:
+    total = 0.0
+    for name in list(_REG):
+        bytes_fn, _ = _REG[name]
+        try:
+            total += float(bytes_fn() or 0)
+        except Exception:
+            pass
+    return total
+
+
+def _floor_evict_fraction(recl: float, floor: float) -> float:
+    """Share of the registered caches a first sub-floor sample reclaims:
+    the deficit plus half a floor of margin, over what is registered. A
+    decode arena is tens of GB; taking all of it for a 50 MB dip costs
+    every later token."""
+    have = _registered_bytes()
+    if have <= 0:
+        return 1.0
+    want = (floor - recl) + 0.5 * floor
+    return min(1.0, max(0.0, want / have))
+
+
 def _evict_registered(fraction: float) -> float:
     freed = 0.0
     for name in list(_REG):
@@ -619,6 +666,7 @@ def _governor_tick(gen) -> None:
     min_dwell = _env_f("GMLX_GOV_MIN_DWELL_S", 2.0)
 
     _maybe_register_apc(gen)
+    _maybe_register_arena(gen)
     head, ws = _headroom_and_ws(margin)
     if head is None:
         return
@@ -690,9 +738,20 @@ def _governor_tick(gen) -> None:
         None if recl is None else int(recl))
     if recl is not None and recl < floor:
         _STATS["kernel_floor_reds"] += 1
-        freed = _evict_registered(1.0)
-        mx.clear_cache()
-        recl2 = _kernel_reclaimable()
+        # Reclaim on the first sub-floor sample and while collapsing. A
+        # stable breach holds; evicting every tick would only walk the
+        # decode arena to its floor for nothing.
+        prev = st.floor_recl_prev
+        if prev is None or _floor_collapsing(recl, prev, floor):
+            # A collapse takes everything; a first dip takes the deficit.
+            frac = (1.0 if _floor_collapsing(recl, prev, floor)
+                    else _floor_evict_fraction(recl, floor))
+            freed = _evict_registered(frac)
+            mx.clear_cache()
+            recl2 = _kernel_reclaimable()
+        else:
+            freed = 0.0
+            recl2 = recl
         if recl2 is not None and recl2 >= floor:
             _enter(gen, st, RED, ws, margin)
             _log.warning("[governor] kernel floor: reclaimable %.2f GB < "
@@ -716,12 +775,8 @@ def _governor_tick(gen) -> None:
         # 84 GB exit). Quarter-floor is last-pages territory and reds
         # immediately (2026-08-24 freeze read 0.5 GB).
         cur = (recl2 or 0)
-        prev = st.floor_recl_prev
         st.floor_recl_prev = cur
-        collapsing = (cur < 0.25 * floor
-                      or (prev is not None
-                          and (cur < 0.5 * floor or prev - cur > 1e9)))
-        if not collapsing:
+        if not _floor_collapsing(cur, prev, floor):
             now = time.perf_counter()
             if now - st.floor_warned_at >= 30.0:
                 st.floor_warned_at = now
@@ -863,6 +918,55 @@ def _maybe_register_apc(gen) -> None:
 
     register_cache("apc", _bytes, _evict)
     _APC_REGISTERED = True
+
+
+_ARENA_REFS: dict = {}     # registry name -> weakref of the feeder
+
+
+def _arena_name(feeder) -> str:
+    return f"arena:{id(feeder)}"
+
+
+def _maybe_register_arena(gen) -> None:
+    """Self-register a streaming model's decode arena the first time a
+    governed tick sees it. The arena is MLX-tracked and the largest
+    reclaimable block on an over-RAM model; shrinking it costs decode
+    speed, where a shed costs a request."""
+    model = getattr(gen, "model", None)
+    if model is None:
+        return
+    try:
+        from gmlx.stream.installs import streaming_owner
+
+        feeder = getattr(streaming_owner(model), "_kq_decode_feeder", None)
+    except Exception:
+        return
+    if feeder is None or not hasattr(feeder, "governor_evict"):
+        return
+    name = _arena_name(feeder)
+    if name in _REG:
+        live = _ARENA_REFS.get(name)
+        if live is not None and live() is feeder:
+            return
+        unregister_cache(name)          # a dead feeder at the same address
+    ref = weakref.ref(feeder)
+    _ARENA_REFS[name] = ref
+
+    def _bytes():
+        f = ref()
+        return f.governor_bytes() if f is not None else 0
+
+    def _evict(fraction):
+        f = ref()
+        return f.governor_evict(fraction) if f is not None else 0
+
+    register_cache(name, _bytes, _evict)
+
+
+def unregister_arena(feeder) -> None:
+    name = _arena_name(feeder)
+    unregister_cache(name)
+    _ARENA_REFS.pop(name, None)
 
 
 def install_governor() -> bool:

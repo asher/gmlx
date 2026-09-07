@@ -122,6 +122,15 @@ def scan_gguf(path: str, *, include_tensors: bool = True,
             buf.close()
 
 
+def scan_bytes(buf: bytes, path: str, size: int, *,
+               array_limit: int = 2048) -> HeaderScan:
+    """Parse a header prefix already in memory (a remote range read).
+    ``size`` is the whole file's size when known, else 0. Raises
+    ``ValueError`` on a malformed header and ``struct.error`` or
+    ``IndexError`` when the prefix ends before the tensor table does."""
+    return _scan(buf, path, size, True, array_limit)
+
+
 def _scan(buf, path, size, include_tensors, limit) -> HeaderScan:
     if buf[:4] != _MAGIC:
         raise ValueError(f"{path}: not a GGUF (bad magic)")

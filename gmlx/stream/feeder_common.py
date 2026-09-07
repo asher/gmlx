@@ -6,6 +6,7 @@ arena); only the pieces below are common."""
 
 from __future__ import annotations
 
+import mmap
 import os
 from contextlib import contextmanager
 
@@ -23,6 +24,102 @@ def read_range(fd, mv, off: int) -> None:
         if r <= 0:
             raise OSError(f"short read at offset {off + done}")
         done += r
+
+
+def read_range_aligned(fd, mv, off: int, file_size: int) -> None:
+    """``read_range`` with every pread page-aligned. The kernel services
+    an F_NOCACHE read at an unaligned offset through the page cache, and
+    that path can wedge under pressure (see decode_feeder). The aligned
+    middle lands in ``mv`` directly; the head and tail partial pages go
+    through a scratch page."""
+    n = len(mv)
+    if n == 0:
+        return
+    page = mmap.PAGESIZE
+    end = off + n
+    a = off & ~(page - 1)
+    b = min((end + page - 1) & ~(page - 1), file_size)
+    if a == off and b == end:
+        read_range(fd, mv, off)
+        return
+    head = off - a
+    a_in = a + page if head else a
+    if a_in >= end:
+        buf = bytearray(b - a)
+        read_range(fd, memoryview(buf), a)
+        mv[:] = buf[head:head + n]
+        return
+    if head:
+        buf = bytearray(page)
+        read_range(fd, memoryview(buf), a)
+        mv[:a_in - off] = buf[head:]
+    b_in = end & ~(page - 1)
+    if b_in > a_in:
+        read_range(fd, mv[a_in - off:b_in - off], a_in)
+    if b_in < end:
+        buf = bytearray(b - b_in)
+        read_range(fd, memoryview(buf), b_in)
+        mv[b_in - off:] = buf[:end - b_in]
+
+
+def lock_pages(mv) -> tuple[int, int] | None:
+    """mlock the pages behind ``mv``. The (address, length) entry for
+    ``unlock_pages``, or None when the platform or the kernel refuses."""
+    import ctypes
+
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        addr = ctypes.addressof(ctypes.c_char.from_buffer(mv))
+    except (OSError, TypeError, ValueError):
+        return None
+    n = len(mv)
+    if libc.mlock(ctypes.c_void_p(addr), ctypes.c_size_t(n)) != 0:
+        return None
+    return addr, n
+
+
+def unshare_on_fork(mv) -> bool:
+    """minherit(VM_INHERIT_NONE) on the whole pages inside ``mv``: a
+    forked child does not map them, so a spawn copies nothing. Without
+    it a fork copies every Metal-mapped buffer before the exec, the
+    arena included. Only pages fully inside the buffer: a page shared with other data would vanish from
+    the child too, and it dies before the exec. False when the platform
+    refuses or no whole page fits."""
+    import ctypes
+
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        addr = ctypes.addressof(ctypes.c_char.from_buffer(mv))
+        minherit = libc.minherit
+    except (OSError, TypeError, ValueError, AttributeError):
+        return False
+    start, end = inner_pages(addr, len(mv))
+    if end <= start:
+        return False
+    return minherit(ctypes.c_void_p(start), ctypes.c_size_t(end - start),
+                    _VM_INHERIT_NONE) == 0
+
+
+def inner_pages(addr: int, n: int) -> tuple[int, int]:
+    """The page-aligned range fully inside ``[addr, addr + n)``."""
+    page = mmap.PAGESIZE
+    start = (addr + page - 1) & ~(page - 1)
+    end = (addr + n) & ~(page - 1)
+    return start, end
+
+
+_VM_INHERIT_NONE = 2
+
+
+def unlock_pages(entry: tuple[int, int]) -> None:
+    import ctypes
+
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+    except OSError:
+        return
+    addr, n = entry
+    libc.munlock(ctypes.c_void_p(addr), ctypes.c_size_t(n))
 
 
 def verify_zero_copy(li: int, entries, fds: dict[str, int]) -> None:

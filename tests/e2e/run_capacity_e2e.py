@@ -19,7 +19,9 @@ new endpoints report while the batch is full and after it drains:
 * ``/v1/models`` carries ``context_length``; ``POST /unload`` of the
   preloaded primary succeeds (200) and the next request reloads it.
 
-Usage: python tests/e2e/run_capacity_e2e.py [--model PATH] [--streams N]
+Usage: python tests/e2e/run_capacity_e2e.py [--model PATH] [--streams N] [--stream]
+``--stream`` serves the model with ``stream: experts`` (an over-RAM MoE) and
+waits for the load before the idle checks.
 Exit 0 on pass, 1 on any failed check, 2 when the model is missing.
 """
 from __future__ import annotations
@@ -64,8 +66,8 @@ def get_raw(url: str, headers: dict | None = None):
         return e.code, dict(e.headers), e.read().decode()
 
 
-def stream_one(base: str, model: str, idx: int, out: list) -> None:
-    body = {"model": model, "stream": True, "max_tokens": 160,
+def stream_one(base: str, model: str, idx: int, out: list, max_tokens: int = 160) -> None:
+    body = {"model": model, "stream": True, "max_tokens": max_tokens,
             "temperature": 0.7, "seed": idx,
             "messages": [{"role": "user",
                           "content": f"Write a numbered list of {12 + idx} "
@@ -94,6 +96,11 @@ def main() -> int:
     ap.add_argument("--streams", type=int, default=6)
     ap.add_argument("--draft-gguf", default=None, help="draft_gguf for the config entry")
     ap.add_argument("--speculative", action="store_true", help="speculative: true on the entry")
+    ap.add_argument("--stream", action="store_true", help="stream: experts on the entry")
+    ap.add_argument("--max-tokens", type=int, default=None,
+                    help="per stream (default 160; 48 with --stream)")
+    ap.add_argument("--load-window", type=float, default=None,
+                    help="seconds the load phase may run (default 300; 1800 with --stream)")
     ap.add_argument("--log", default="/tmp/gmlx-capacity-e2e.log")
     a = ap.parse_args()
     model_path = os.path.expanduser(a.model)
@@ -112,6 +119,12 @@ def main() -> int:
             f.write(f"    draft_gguf: {os.path.expanduser(a.draft_gguf)}\n")
         if a.speculative:
             f.write("    speculative: true\n")
+        if a.stream:
+            f.write("    stream: experts\n")
+    load_timeout = 1800 if a.stream else 300
+    max_tokens = a.max_tokens or (48 if a.stream else 160)
+    load_window = a.load_window or (1800 if a.stream else 300)
+    drain_s = 120 if a.stream else 15
     with ServerProc(["--config", cfg_path], env_extra=env, log_path=a.log) as srv:
         srv.wait_ready()
         base = srv.base_url
@@ -119,6 +132,13 @@ def main() -> int:
         st, models = c.get("/v1/models")
         mid = models["data"][0]["id"]
         print(f"server {base} model {mid}")
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < load_timeout:
+            st, m = c.get("/v1/metrics", timeout=5)
+            if st == 200 and m["server"].get("resident_models"):
+                break
+            time.sleep(1.0)
+        print(f"  resident after {time.monotonic() - t0:.0f}s")
 
         # idle
         print("idle:")
@@ -138,16 +158,16 @@ def main() -> int:
         check("requests[] empty idle", s.get("requests") == [], json.dumps(s.get("requests"))[:200])
 
         # load
-        print(f"load: {a.streams} concurrent streams")
+        print(f"load: {a.streams} concurrent streams, {max_tokens} tokens each")
         results: list = []
-        threads = [threading.Thread(target=stream_one, args=(base, mid, i, results), daemon=True)
+        threads = [threading.Thread(target=stream_one, args=(base, mid, i, results, max_tokens), daemon=True)
                    for i in range(a.streams)]
         for t in threads:
             t.start()
         samples: list = []
         not_ready = None
         t0 = time.monotonic()
-        while any(t.is_alive() for t in threads) and time.monotonic() - t0 < 300:
+        while any(t.is_alive() for t in threads) and time.monotonic() - t0 < load_window:
             st, m = c.get("/v1/metrics", timeout=5)
             if st == 200:
                 samples.append(m["server"])
@@ -180,9 +200,10 @@ def main() -> int:
         dec = [r for r in rows_seen if r["state"] == "decode"]
         check("decode rows carry generated>0 and tok/s", any(r["generated"] > 0 and r.get("decode_tok_s") for r in dec))
         check("rows carry model id, prompt_tokens, max_tokens",
-              all(r["model"] == mid and isinstance(r["prompt_tokens"], int) and r["max_tokens"] == 160
+              all(r["model"] == mid and isinstance(r["prompt_tokens"], int) and r["max_tokens"] == max_tokens
                   for r in dec), json.dumps(dec[:1])[:300])
-        check("cache tier reported on decode rows", all(r["cache"]["tier"] in ("exact", "block", "miss") for r in dec),
+        check("cache tier reported on decode rows",
+              all(r["cache"]["tier"] in ("miss", "exact", "block", "ckpt", "anchor", "hit") for r in dec),
               str({r["cache"]["tier"] for r in dec}))
         check("in_flight observed >= width", max_inflight >= WIDTH, f"max in_flight {max_inflight}")
         etas = [smp.get("queue", {}).get("eta_s") for smp in samples if (smp.get("queue", {}).get("waiting") or 0) > 0]
@@ -206,7 +227,7 @@ def main() -> int:
         check("JSON default unchanged", st == 200 and "server" in m)
 
         # drain
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + drain_s
         drained = None
         while time.monotonic() < deadline:
             st, m = c.get("/v1/metrics")
@@ -325,7 +346,7 @@ def main() -> int:
               json.dumps(est)[:160])
         st, body = c.post("/v1/chat/completions",
                           {"model": mid, "messages": [{"role": "user", "content": "Say hi."}],
-                           "max_tokens": 8}, timeout=300)
+                           "max_tokens": 8}, timeout=load_timeout)
         check("request after unload reloads and answers", st == 200, json.dumps(body)[:160])
         st, models_r = c.get("/v1/models")
         check("primary resident again", any(x.get("resident") for x in models_r["data"]),

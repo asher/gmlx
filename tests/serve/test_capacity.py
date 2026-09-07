@@ -167,6 +167,21 @@ def test_preload_gate_judges_the_serve_ceiling(rig, monkeypatch):
         cap.preload_gate(3.5 * GB, "edge")
 
 
+def test_preload_gate_keeps_a_streamed_residents_room(rig, monkeypatch):
+    # A resident streamed model's released ring and priced KV room read
+    # as free working set. A load into them sheds the stream's arena at
+    # its next prefill, so the gate takes them off the measure.
+    rig(weights_gb=10.0, ws_gb=20.0)
+    import gmlx.gen.prefill_decay as pd
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 5.0 * GB)
+    monkeypatch.setattr(cap, "working_budget_bytes", lambda: 20.0 * GB)
+    monkeypatch.setattr(cap, "_kernel_gate", lambda w, m: None)
+    cap.preload_gate(4.0 * GB, "fits")
+    with pytest.raises(cap.LoadDeferred, match="working set 2.0 GB less the 3.0 GB"):
+        cap.preload_gate(4.0 * GB, "room-taker", reserved_bytes=3.0 * GB)
+    cap.preload_gate(2.0 * GB, "fits-beside", reserved_bytes=3.0 * GB)
+
+
 def test_preload_gate_kernel_floor(rig, monkeypatch):
     # The kernel's view: other processes' pages are invisible to MLX
     # accounting, so a load must also leave the governor's reclaimable
@@ -303,3 +318,64 @@ def test_nested_text_config_prices_like_flat(rig):
     nested = cap.derive_table(rig(weights_gb=10.0, ws_gb=20.0, cfg={
         "text_config": dict(CFG), "model_type": "gemma4"}))
     assert nested["max_ctx"] == flat["max_ctx"]
+
+
+def test_boot_costs_and_seeded_rates(rig):
+    path = rig(weights_gb=10.0, ws_gb=20.0)
+    from types import SimpleNamespace
+
+    cfg, costs, heads = cap.boot_costs(path)
+    assert heads == 8 and cfg["num_hidden_layers"] == 10
+    assert sum(bpt for _, bpt in costs) == BPT
+    assert cap.boot_kv_rates(None) == {}
+    t = cap.derive_table(path)
+    assert all(w is None for w, _ in t["kv_costs"])
+    assert sum(b for _, b in t["kv_costs"]) == BPT
+    cap.install_boot_table(path, 10.0 * GB, "m")
+    assert "kv_costs" not in cap.get_table()        # not in the metrics dump
+    model = SimpleNamespace(_kq_boot_kv_costs=cap.boot_kv_costs(path))
+    assert cap.boot_kv_rates(model) == {
+        "_boot:None": {"rate": float(BPT), "window": None}}
+    cap.clear_table()
+    assert cap.boot_kv_costs(path) == []
+
+
+def test_unstamped_model_warns_once(caplog):
+    from types import SimpleNamespace
+
+    cap.clear_table()
+    model = SimpleNamespace(language_model=SimpleNamespace())
+    with caplog.at_level("WARNING", logger="gmlx.serve.capacity"):
+        assert cap.boot_kv_rates(model) == {}
+        assert cap.boot_kv_rates(model) == {}
+    assert sum("no boot KV costs stamped" in r.message
+               for r in caplog.records) == 1
+    assert cap.boot_kv_rates(None) == {}
+
+
+def test_refused_table_leaves_the_previous_one_installed(rig, monkeypatch):
+    path = rig(weights_gb=10.0, ws_gb=20.0)
+    monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
+    good = cap.install_boot_table(path, 10.0 * GB, "m")
+    assert cap.get_table() is good
+    with pytest.raises(RuntimeError, match="cannot fit at width 1"):
+        cap.install_boot_table(path, 19.9 * GB, "m")
+    assert cap.get_table() is good
+
+
+def test_preload_gate_names_every_token_weights_when_streaming(rig, monkeypatch):
+    rig(weights_gb=10.0, ws_gb=20.0)
+    import gmlx.gen.prefill_decay as pd
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 5.0 * GB)
+    monkeypatch.setattr(cap, "working_budget_bytes", lambda: 20.0 * GB)
+    monkeypatch.setattr(cap, "_kernel_gate", lambda w, m: None)
+    with pytest.raises(RuntimeError) as e:
+        cap.preload_gate(25.0 * GB, "huge", streaming=True)
+    msg = str(e.value)
+    assert "huge every-token weights 25.0 GB exceed" in msg
+    assert "smaller every-token tensors" in msg
+    assert "--stream-experts" not in msg
+    with pytest.raises(RuntimeError, match="huge weights 25.0 GB exceed"):
+        cap.preload_gate(25.0 * GB, "huge")
+    with pytest.raises(cap.LoadDeferred, match="busybox every-token weights"):
+        cap.preload_gate(10.0 * GB, "busybox", streaming=True)

@@ -46,20 +46,28 @@ from gmlx.load.preflight import (
 
 
 # Classification (local) + verdict shared by both verbs
+def _scan_local(path: str) -> list:
+    """Header scans of every shard of a local GGUF, the metadata shard first."""
+    from gmlx.load.headerscan import scan_gguf
+
+    return [scan_gguf(shard, include_tensors=True)
+            for shard in find_split_shards(path)]
+
+
 def _classify_local(path: str, *, arch: str | None = None) -> remote.HeaderReport:
     """Build the same :class:`remote.HeaderReport` from a local GGUF (all shards),
     reusing preflight's codec sets so a local verdict matches the remote one.
     Scans via headerscan (not gguf-py's ``GGUFReader``) so type ids newer than
     the installed gguf-py still classify (QUANT_TYPE_FALLBACK)."""
-    from gmlx.load.headerscan import scan_gguf
+    return _report_from_scans(_scan_local(path), arch=arch)
 
-    shards = find_split_shards(path)
+
+def _report_from_scans(scans: list, *, arch: str | None = None) -> remote.HeaderReport:
     detected = arch
     gguf_type = None
     hist: dict[str, int] = {}
     unsup: dict[str, int] = {}
-    for i, shard in enumerate(shards):
-        hs = scan_gguf(shard, include_tensors=True)
+    for i, hs in enumerate(scans):
         if i == 0:
             detected = arch or hs.kv.get("general.architecture")
             if detected is None:
@@ -91,18 +99,22 @@ def _arch_status(arch: str | None, *, hf_source: str | None = None):
 
 
 def _build_report(ref: remote.Ref, *, arch: str | None = None,
-                  max_mb: int | None = None) -> tuple[remote.HeaderReport, int]:
+                  max_mb: int | None = None
+                  ) -> tuple[remote.HeaderReport, int, list | None]:
     """Classify a GGUF, **across all shards** of a split file, and return
-    ``(report, n_shards)``. Local reads every on-disk shard; remote range-reads
-    each shard's header and unions them - so a codec used by a single tensor in
-    any shard can't slip through."""
+    ``(report, n_shards, scans)``. Local reads every on-disk shard; remote
+    range-reads each shard's header and unions them - so a codec used by a
+    single tensor in any shard can't slip through. ``scans`` are the
+    per-shard header scans the streaming plan prices from, or None when
+    a remote header does not parse as one (the report still stands)."""
     if ref.kind == "local":
         if not os.path.exists(ref.raw):
             raise remote.RemoteError(
                 f"no such file: {ref.raw} (validate takes a local path, "
                 "hf:<org>/<repo>/<file.gguf>, or an http(s):// URL)")
         try:
-            return _classify_local(ref.raw, arch=arch), len(find_split_shards(ref.raw))
+            scans = _scan_local(ref.raw)
+            return _report_from_scans(scans, arch=arch), len(scans), scans
         except FileNotFoundError as e:
             # An incomplete split set - surface it as a clean verdict, not a traceback.
             raise remote.RemoteError(str(e)) from e
@@ -123,11 +135,23 @@ def _build_report(ref: remote.Ref, *, arch: str | None = None,
         kwargs["max_bytes"] = max_mb * 1024 * 1024
         kwargs["initial"] = min(4 * 1024 * 1024, max_mb * 1024 * 1024)
     urls = _remote_shard_urls(ref)
-    reports = [remote.fetch_header(u, **kwargs) for u in urls]
+    reports = []
+    scans: list | None = []
+    for u in urls:
+        buf, total = remote.fetch_header_bytes(u, **kwargs)
+        r = remote.classify_header(buf)
+        r.total_bytes = total
+        reports.append(r)
+        if scans is not None:
+            try:
+                from gmlx.load.headerscan import scan_bytes
+                scans.append(scan_bytes(buf, u, total or 0))
+            except Exception:                              # noqa: BLE001
+                scans = None
     report = remote.aggregate_reports(reports)
     if arch:
         report.arch = arch
-    return report, len(urls)
+    return report, len(urls), scans
 
 
 def _repo_file_sizes(ref: remote.Ref, listing_cache: dict) -> dict | None:
@@ -160,9 +184,32 @@ def _ref_size_bytes(ref: remote.Ref, report: remote.HeaderReport) -> int | None:
         return None
 
 
+def _stream_plan(scans: list | None) -> dict | None:
+    """The streaming plan of a MoE file on this Mac as a JSON-ready dict
+    with its report lines, or None (dense file, or unreadable scans)."""
+    if not scans:
+        return None
+    from gmlx.stream import plan as sp
+    try:
+        model = sp.model_plan(scans)
+        if not model.streamable:
+            return None
+        box = sp.box_plan(model)
+        out = sp.to_dict(model, box)
+        lines = [sp.model_line(model), sp.group_line(model)]
+        if box is not None:
+            lines += sp.box_lines(model, box)
+        else:
+            lines.append("this Mac: working set not readable, no fit verdict")
+    except Exception:                                      # noqa: BLE001
+        return None
+    out["lines"] = lines
+    return out
+
+
 def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
              hf_source: str | None = None, n_shards: int = 1,
-             size_bytes: int | None = None) -> dict:
+             size_bytes: int | None = None, scans: list | None = None) -> dict:
     # An mmproj (vision/audio projector) carries general.architecture="clip".
     # It is not a standalone model, so the arch gate doesn't apply - but it's a
     # perfectly valid file for its purpose (pair it with the LLM GGUF).
@@ -202,6 +249,10 @@ def _verdict(ref: remote.Ref, report: remote.HeaderReport, *,
         "codecs": dict(sorted(report.histogram.items())),
         "unsupported_codecs": dict(sorted(report.unsupported.items())),
         "codecs_loadable": report.loadable_codecs,
+        # The streaming plan (every-token weights, experts, this Mac's
+        # arena and verdict) for a MoE file; None for a dense one.
+        "stream": (_stream_plan(scans)
+                   if not (mmproj or adapter or drafter) else None),
         "loadable": report.loadable_codecs and arch_ok,
         # loadable = runs standalone; usable also admits a healthy companion
         # (mmproj / LoRA adapter).
@@ -238,6 +289,12 @@ def _print_report(v: dict) -> None:
         if note:
             sline += f"  - {note}"
         print(sline)
+    stream = v.get("stream")
+    if stream and stream.get("lines"):
+        lines = stream["lines"]
+        print(f"  streaming: {lines[0]}")
+        for line in lines[1:]:
+            print(f"    {line}")
     tline = f"  tensors: {v['n_tensors']}"
     if v.get("n_shards", 1) > 1:
         tline += f"   (across {v['n_shards']} shards)"
@@ -296,6 +353,10 @@ def _print_repo_listing(e: remote.AmbiguousRepo) -> None:
         print(f"  {r:<{wid}}  {size:>8}  {fit}".rstrip())
     if len(e.refs) > 40:
         print(f"  ...and {len(e.refs) - 40} more")
+    if have_sizes and ram and any(
+            isinstance(s, int) and classify_fit(s, ram) == "over" for s in sizes):
+        print("  A MoE model over RAM can stream its experts. Validate one "
+              "ref for the streaming plan.")
 
 
 # validate
@@ -319,7 +380,8 @@ def cmd_validate(argv: list | None = None, prog: str = "gmlx validate") -> int:
 
     try:
         ref = _resolve_to_file(remote.parse_ref(a.ref))
-        report, n_shards = _build_report(ref, arch=a.arch, max_mb=a.max_mb)
+        report, n_shards, scans = _build_report(ref, arch=a.arch,
+                                                max_mb=a.max_mb)
     except remote.AmbiguousRepo as e:
         # A repo with several models is a listing, not a failure: print the
         # ready-to-paste refs and succeed (the README promises exactly this).
@@ -335,7 +397,7 @@ def cmd_validate(argv: list | None = None, prog: str = "gmlx validate") -> int:
 
     size_bytes = _ref_size_bytes(ref, report)
     v = _verdict(ref, report, hf_source=a.hf_source, n_shards=n_shards,
-                 size_bytes=size_bytes)
+                 size_bytes=size_bytes, scans=scans)
     if a.json:
         print(json.dumps(v, indent=2))
     else:
@@ -841,14 +903,14 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
     for raw_ref in refs:
         try:
             ref = _resolve_to_file(raw_ref)
-            report, n_shards = _build_report(ref, max_mb=a.max_mb)
+            report, n_shards, scans = _build_report(ref, max_mb=a.max_mb)
         except remote.RemoteError as e:
             print(f"error: {e}", file=sys.stderr)
             all_ok = False
             continue
 
         v = _verdict(ref, report, hf_source=a.hf_source, n_shards=n_shards,
-                     size_bytes=_ref_size_bytes(ref, report))
+                     size_bytes=_ref_size_bytes(ref, report), scans=scans)
         if a.json:
             print(json.dumps(v, indent=2))
         else:

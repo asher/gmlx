@@ -196,6 +196,13 @@ def _env_cap_bytes() -> float | None:
     return None
 
 
+def cap_bytes_for(ws: float) -> float:
+    """The score transient cap on a box with working set ``ws``: the env
+    cap when set, else 2 GB or 5 percent of the working set."""
+    env = _env_cap_bytes()
+    return env if env is not None else max(2e9, 0.05 * float(ws))
+
+
 def _cap_bytes() -> float:
     # Explicit env wins; the device-derived default is probed once.
     env = _env_cap_bytes()
@@ -205,7 +212,7 @@ def _cap_bytes() -> float:
     if _WS_CAP_BYTES is None:
         try:
             ws = mx.device_info()["max_recommended_working_set_size"]
-            _WS_CAP_BYTES = max(2e9, 0.05 * float(ws))
+            _WS_CAP_BYTES = cap_bytes_for(ws)
         except Exception:
             _WS_CAP_BYTES = 4e9
     return _WS_CAP_BYTES
@@ -390,6 +397,7 @@ def forget_untracked_weights(owner: object) -> None:
     by the residency teardown that every eviction and reap funnels
     through, and by a failed build's unwind."""
     with _UNTRACKED_LOCK:
+        _BUILD_CREDIT.pop(owner, None)
         for key in [k for k, o in _UNTRACKED_OWNERS.items() if owner in o]:
             owners = _UNTRACKED_OWNERS[key]
             owners.discard(owner)
@@ -410,6 +418,7 @@ def deduct_untracked_weights(nbytes: float, key: object) -> None:
         if key in _UNTRACKED_WEIGHTS:
             _UNTRACKED_WEIGHTS[key] = max(
                 0.0, _UNTRACKED_WEIGHTS[key] - float(nbytes))
+        _end_build_credit_locked(key)
 
 
 def untracked_weight_bytes() -> float:
@@ -449,6 +458,54 @@ def note_streamed_tracked_bytes(nbytes: float, key: object = None,
             _STREAMED_CAP[key] = max(_STREAMED_CAP.get(key, 0.0), float(cap))
         if _WEIGHTS_OWNER is not None:
             _UNTRACKED_OWNERS.setdefault(key, set()).add(_WEIGHTS_OWNER)
+        if source == "experts":
+            _end_build_credit_locked(key)
+
+
+# A streaming build's window: the walk wraps the routed experts as
+# tracked views (or the warm pass registers them untracked) long before
+# the install credits or deducts them at the first request. Until then the
+# estimate reads the whole file as live. owner -> (active bytes at the
+# build's start, streamed bytes). The credit is what the load has added so
+# far, up to the streamed bytes. The install's experts credit or untracked
+# deduction for the same key ends it, as does the owner's teardown.
+_BUILD_CREDIT: dict[object, tuple[float, float]] = {}
+
+
+def note_build_credit(owner: object, streamed_bytes: float) -> None:
+    if owner is None or streamed_bytes <= 0:
+        return
+    try:
+        active = float(mx.get_active_memory())
+    except Exception:
+        return
+    with _UNTRACKED_LOCK:
+        _BUILD_CREDIT[owner] = (active, float(streamed_bytes))
+
+
+def _end_build_credit_locked(key: object) -> None:
+    for owner in _UNTRACKED_OWNERS.get(key, ()):
+        _BUILD_CREDIT.pop(owner, None)
+    if _WEIGHTS_OWNER is not None:
+        _BUILD_CREDIT.pop(_WEIGHTS_OWNER, None)
+
+
+def _build_credit_locked(active: float) -> float:
+    total = 0.0
+    for owner, (active0, cap) in _BUILD_CREDIT.items():
+        untracked = sum(_UNTRACKED_WEIGHTS.get(k, 0.0)
+                        for k, o in _UNTRACKED_OWNERS.items() if owner in o)
+        total += min(cap, max(0.0, active - active0) + untracked)
+    return total
+
+
+def build_credit_bytes() -> float:
+    try:
+        active = float(mx.get_active_memory())
+    except Exception:
+        return 0.0
+    with _UNTRACKED_LOCK:
+        return _build_credit_locked(active)
 
 
 def streamed_tracked_bytes() -> float:
@@ -473,8 +530,10 @@ def headroom_bytes() -> float | None:
         active = float(mx.get_active_memory())
     except Exception:
         return None
+    with _UNTRACKED_LOCK:
+        build = _build_credit_locked(active)
     return (ws - untracked_weight_bytes() + streamed_tracked_bytes()
-            - active)
+            + build - active)
 
 
 _headroom_bytes = headroom_bytes

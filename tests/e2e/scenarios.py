@@ -14,9 +14,11 @@ covers the config surface and its high-value combinations:
   discovery  --models-dir header-only scan serves derived ids
   vlm        vision model + mmproj image description
   mtp        assistant drafter speculative; lossless-greedy vs base
+  stream     over-RAM MoE served with `stream: experts`: short prompts, the
+             arena and KV room in /v1/metrics, a green governor, no shed
 
 Model-dependent tiers ask the registry for a *role* (`judged`, `vlm`, `mtp_pair`,
-`mtp_native`, `lru_small`) rather than a fixed handle, so a machine that lacks the
+`mtp_native`, `lru_small`, `streaming`) rather than a fixed handle, so a machine that lacks the
 preferred model runs the tier on a stand-in instead of skipping it.
 
 The coherence-judged tiers (core/kv/template/endpoints) take the `judged` role: a 0.6B
@@ -71,6 +73,7 @@ class Scenario:
     targets: list = field(default_factory=list)
     post: list = field(default_factory=list)         # [fn(client) -> list[CheckResult]]
     notes: str = ""
+    request_timeout: float = 600.0                   # per request; a big load waits here
 
 
 # post-check helpers (closures capture expected values at build time)
@@ -335,6 +338,57 @@ def pc_hf_gate(stray_id: str) -> Callable:
         # must be refused (any non-200) and not silently served
         return [CheckResult("hf_gate_refuses", st != 200,
                             f"stray id status={st} body={str(body)[:120]}")]
+    return _check
+
+
+def _gb(v) -> str:
+    return f"{v / 1e9:.1f} GB" if isinstance(v, int) else "n/a"
+
+
+def pc_stream_engaged(model_id: str) -> Callable:
+    """The entry is resident and a decode arena is live: ``/v1/metrics``
+    ``memory`` carries ``arena_bytes`` > 0 under its nominal size and a
+    priced ``kv_room_bytes``. A missing field fails: a streaming entry
+    that loaded resident is the engagement blind spot."""
+    def _check(client):
+        st, body = client.metrics()
+        srv = (body.get("server") or {}) if isinstance(body, dict) else {}
+        res = [e for e in srv.get("resident_models") or [] if model_id in (e.get("ids") or [])]
+        mem = srv.get("memory") or {}
+        arena = mem.get("arena_bytes")
+        nominal = mem.get("arena_nominal_bytes")
+        room = mem.get("kv_room_bytes")
+        out = [CheckResult("stream_resident", st == 200 and bool(res),
+                           f"status={st} resident={[e.get('ids') for e in srv.get('resident_models') or []]}")]
+        ok = (isinstance(arena, int) and arena > 0 and isinstance(nominal, int)
+              and 0 < arena <= nominal and isinstance(room, int) and room > 0)
+        out.append(CheckResult("stream_arena_live", ok,
+                               f"arena {_gb(arena)} of {_gb(nominal)} nominal, kv room {_gb(room)}"))
+        # After the prompts: at most one pressure step down, ring lent or not.
+        held = ok and arena >= 0.5 * nominal
+        out.append(CheckResult("stream_arena_holds", held,
+                               f"arena {_gb(arena)} of {_gb(nominal)} nominal after the prompts"))
+        return out
+    return _check
+
+
+def pc_governor_calm() -> Callable:
+    """After the prompts ran: the governor band is not red and no row was
+    shed. Both counters must be present."""
+    def _check(client):
+        st, body = client.metrics()
+        gov = ((body.get("server") or {}).get("governor") or {}) if isinstance(body, dict) else {}
+        band, red = gov.get("band"), gov.get("red_failures")
+        ok = st == 200 and band in ("green", "yellow", "orange") and red == 0
+        return [CheckResult("governor_calm", ok, f"band={band} red_failures={red}")]
+    return _check
+
+
+def pc_log_count(needle: str, expect: int, name: str) -> Callable:
+    """The live server log carries ``needle`` exactly ``expect`` times."""
+    def _check(client):
+        n = _count_in_log(getattr(client, "log_path", None), needle)
+        return [CheckResult(name, n == expect, f"{n} occurrence(s) of {needle!r}, expect {expect}")]
     return _check
 
 
@@ -761,7 +815,156 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
                   "reporter's second symptom; the needle exercises the "
                   "flash arm through the spec prefill"))
 
+    # stream: an over-RAM MoE with `stream: experts`
+    stream_h, stream_path, _why = streaming_pick(reg)
+    if stream_path:
+        add(Scenario(
+            key="stream_experts", tier="stream", needs=[stream_h],
+            title=f"Streaming experts: {stream_h} over RAM, arena under the ceiling",
+            config={"server": {"cache": {"enabled": True}},
+                    "models": {"m": _model_entry(stream_path, stream="experts",
+                                                 overrides={"thinking": False})}},
+            request_timeout=1800.0,
+            targets=[ReqTarget("sse", "m", prompts=[P.p_capital(), P.p_math(),
+                                                    P.p_multiturn()], stream=True),
+                     ReqTarget("plain", "m", prompts=[P.p_instruct(), P.p_count()])],
+            post=[pc_stream_engaged("m"),
+                  pc_governor_calm(),
+                  pc_log_count("[stream] memory budget:", 1, "stream_budget_logged"),
+                  pc_log_count("RowShedError", 0, "no_row_shed"),
+                  pc_log_count("shed under memory pressure", 0, "no_pressure_shed")],
+            notes="short prompts on a streamed MoE; the arena, KV room and governor "
+                  "band are read from /v1/metrics after the prompts; issue #49"))
+
+        # stream x kv8: a quantized KV cache under the streamed expert path
+        kv_note = streaming_kv_quant_note(stream_path)
+        if not kv_note:
+            add(Scenario(
+                key="stream_kv8", tier="stream", needs=[stream_h],
+                title=f"Streaming x kv8: {stream_h} with a quantized KV cache - needle recall",
+                config={"profiles": {"p": {"sampling": {"temperature": 0.0},
+                                           "load": {"kv_bits": 8, "kv_group_size": 64,
+                                                    "quantized_kv_start": 0}}},
+                        "models": {"m": _model_entry(stream_path, stream="experts", profile="p",
+                                                     overrides={"thinking": False})}},
+                request_timeout=1800.0,
+                targets=[ReqTarget("recall", "m", prompts=[
+                    P.p_long_ctx_needle("CORALSTREAM55", filler_paras=6)])],
+                post=[pc_stream_engaged("m"),
+                      pc_kv_engagement("m", verdict="full"),
+                      pc_governor_calm(),
+                      pc_log_count("RowShedError", 0, "no_row_shed")],
+                notes="the kv8 arm on a streamed model; the anchor fails on corruption"))
+
+        # stream x APC disk tier: a resend adopts the cache on a streamed model
+        stream_disk = os.path.join(tmpdir, "stream_apc_disk")
+        add(Scenario(
+            key="stream_apc_disk", tier="stream", needs=[stream_h],
+            title=f"Streaming x APC disk tier: {stream_h} resends a prompt through the cache",
+            config={"server": {"cache": {"enabled": True,
+                                         "disk": {"path": stream_disk, "max_gb": 4}}},
+                    "models": {"m": _model_entry(stream_path, stream="experts",
+                                                 overrides={"thinking": False})}},
+            request_timeout=1800.0,
+            targets=[ReqTarget("warm", "m", prompts=[P.p_capital()])],
+            post=[pc_apc_enabled(True),
+                  pc_cache_reuse("m", replace(
+                      P.p_long_ctx_needle("AMBERSTREAM21", filler_paras=6), max_tokens=16)),
+                  pc_disk_cache_created(stream_disk),
+                  pc_stream_engaged("m"),
+                  pc_governor_calm()],
+            notes="the second send must adopt the cache and stay byte-identical"))
+
+    # stream x speculative: a streaming model with an MTP head or a sibling drafter
+    spec_h, spec_path, spec_draft, _why = streaming_mtp_pick(reg)
+    if spec_path:
+        entry = _model_entry(spec_path, stream="experts", speculative=True,
+                             overrides={"thinking": False})
+        if spec_draft:
+            entry["draft_gguf"] = spec_draft
+        add(Scenario(
+            key="stream_spec", tier="stream", needs=[spec_h],
+            title=f"Streaming x speculative: {spec_h} with "
+                  f"{'a sibling drafter' if spec_draft else 'its MTP head'}",
+            config={"server": {"cache": {"enabled": True}}, "models": {"m": entry}},
+            request_timeout=1800.0,
+            targets=[ReqTarget("spec", "m", prompts=[P.p_capital(), P.p_instruct()])],
+            post=[pc_stream_engaged("m"),
+                  pc_log_count("[mtp] drafter:", 1, "mtp_drafter_built"),
+                  pc_governor_calm(),
+                  pc_log_count("RowShedError", 0, "no_row_shed")],
+            notes="verify rows read experts through the arena; the drafter must build once"))
+
     return out
+
+
+def streaming_pick(reg) -> tuple:
+    """``(handle, path, note)``: the first `streaming` role model on disk that
+    the fit planner says streams on this box. An unreadable working set (no
+    Metal) counts as unknown and keeps the model. ``note`` says why the pick
+    is empty."""
+    notes = []
+    for group in reg.role_groups("streaming"):
+        handle = group[0]
+        path = reg.find(handle)
+        if not path:
+            continue
+        try:
+            from gmlx.stream import plan
+            _model, box = plan.plan_path(path)
+        except Exception as e:                  # noqa: BLE001
+            notes.append(f"{handle}: plan failed ({type(e).__name__}: {e})")
+            continue
+        verdict = getattr(box, "verdict", None)
+        if verdict in ("streams", None):
+            return handle, path, ""
+        notes.append(f"{handle}: verdict {verdict} on this box")
+    return "", "", "; ".join(notes) or "no streaming-role model on disk"
+
+
+def streaming_kv_quant_note(path: str) -> str:
+    """Why a `kv_bits` profile cannot engage on this streaming model, or
+    empty. The mlx-lm MLA attention (GGUF arch deepseek2: DeepSeek-V3,
+    Kimi-K2) reads the latent cache by matmul; the serve kv policy drops
+    such a profile to fp16, so the kv8 arm has nothing to verify."""
+    try:
+        from gmlx.stream import plan
+
+        arch = plan.model_plan(plan.scan_path(path)).arch
+    except Exception as e:  # noqa: BLE001
+        return f"header not readable: {e}"
+    if arch == "deepseek2":
+        return "MLA attention reads the latent cache directly; kv_bits drops to fp16"
+    return ""
+
+
+def streaming_mtp_pick(reg) -> tuple:
+    """``(handle, path, draft_gguf, note)``: the first `streaming` role model
+    that streams on this box and carries an MTP head or a sibling drafter.
+    ``draft_gguf`` is empty for a native head."""
+    notes = []
+    for group in reg.role_groups("streaming"):
+        handle = group[0]
+        path = reg.find(handle)
+        if not path:
+            continue
+        try:
+            from gmlx.load.discovery import find_mtp_companion, header_meta
+            from gmlx.stream import plan
+            _model, box = plan.plan_path(path)
+            verdict = getattr(box, "verdict", None)
+            if verdict not in ("streams", None):
+                notes.append(f"{handle}: verdict {verdict} on this box")
+                continue
+            if (header_meta(path) or {}).get("mtp"):
+                return handle, path, "", ""
+            drafter = find_mtp_companion(path)
+            if drafter:
+                return handle, path, drafter, ""
+            notes.append(f"{handle}: no MTP head and no sibling drafter")
+        except Exception as e:                  # noqa: BLE001
+            notes.append(f"{handle}: {type(e).__name__}: {e}")
+    return "", "", "", "; ".join(notes) or "no streaming-role model on disk"
 
 
 # scenario-specific post-checks that need two requests
@@ -847,4 +1050,4 @@ def _make_discovery_dir(path: str, ggufs: list) -> str:
 
 
 ALL_TIERS = ("core", "kv", "cache", "residency", "template", "endpoints",
-             "negative", "discovery", "vlm", "mtp")
+             "negative", "discovery", "vlm", "mtp", "stream")

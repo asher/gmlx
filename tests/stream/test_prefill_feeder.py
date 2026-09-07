@@ -237,3 +237,97 @@ def test_release_slots_and_lazy_realloc(monkeypatch, tmp_path):
         for kind in _KINDS:
             assert _slot_expert(feeder, 0, kind, 1) == _expert_bytes(0, kind, 1)
     assert feeder._error is None
+
+
+def test_ring_slots_are_wired_for_the_pass(monkeypatch, tmp_path):
+    """The ring wires at allocation, like the arena, and unwires before
+    its buffers drop."""
+    import gmlx.stream.prefill_feeder as pfm
+
+    locked, unlocked = [], []
+    monkeypatch.setattr(
+        pfm, "lock_pages",
+        lambda mv: locked.append(len(mv)) or (id(mv), len(mv)))
+    monkeypatch.setattr(pfm, "unlock_pages", lambda e: unlocked.append(e))
+    monkeypatch.delenv("GMLX_DECODE_ARENA_MLOCK", raising=False)
+    feeder, modules = _make_prefill_feeder(monkeypatch, tmp_path)
+    assert len(locked) == 2 * len(_KINDS)
+    assert sum(locked) >= 2 * feeder.slot_bytes
+    assert len(feeder._locked) == len(locked)
+    feeder.release_slots()
+    assert len(unlocked) == len(locked) and feeder._locked == []
+    with feeder.prefill_call(modules[0][0], 0):  # the rebuild wires again
+        pass
+    assert len(locked) == 4 * len(_KINDS)
+
+
+def test_unshare_on_fork_marks_only_the_whole_pages_inside():
+    # A page shared with other data (a heap buffer) must stay inherited:
+    # marking it makes every later fork child in the process die before
+    # its exec.
+    import mmap
+    import subprocess
+
+    from gmlx.stream.feeder_common import inner_pages, unshare_on_fork
+
+    page = mmap.PAGESIZE
+    assert inner_pages(page, 3 * page) == (page, 4 * page)
+    assert inner_pages(page + 1, 3 * page) == (2 * page, 4 * page)
+    assert inner_pages(page + 1, page) == (2 * page, 2 * page)     # none
+    m = mmap.mmap(-1, 4 * page)
+    assert unshare_on_fork(memoryview(m)) is True
+    assert unshare_on_fork(memoryview(m)[100:5000]) is False     # no whole page
+    del m
+    assert unshare_on_fork(memoryview(bytearray(64))) is False
+    assert unshare_on_fork(memoryview(bytearray(3 * page))) in (True, False)
+    assert subprocess.run(["/usr/bin/true"]).returncode == 0
+
+
+def test_ring_bytes_is_twice_the_largest_layer(tmp_path):
+    from gmlx.stream.prefill_feeder import ring_bytes
+
+    offsets, _ = _make_fixture(tmp_path, 3)
+    layer = sum(r[2] for r in offsets[0])
+    assert ring_bytes(offsets) == 2 * layer
+    # A layer with a missing kind is not covered and does not size the ring.
+    offsets[1] = [r for r in offsets[1] if r[4] != "down"]
+    offsets[2] = [(p, o, n * 3, e, k) for p, o, n, e, k in offsets[2]]
+    assert ring_bytes(offsets) == 2 * 3 * layer
+
+
+def test_read_range_aligned_matches_plain_reads(tmp_path, monkeypatch):
+    """Every pread lands page-aligned; the bytes match a plain read for
+    ranges that start, end, or sit inside a page, and at the file tail."""
+    import mmap
+    import os
+
+    from gmlx.stream.feeder_common import read_range, read_range_aligned
+
+    page = mmap.PAGESIZE
+    data = os.urandom(5 * page + 123)
+    path = tmp_path / "f.bin"
+    path.write_bytes(data)
+    fd = os.open(path, os.O_RDONLY)
+    seen = []
+    real = os.preadv
+
+    def spy(fd_, bufs, off):
+        seen.append((off, sum(len(b) for b in bufs)))
+        return real(fd_, bufs, off)
+
+    monkeypatch.setattr(os, "preadv", spy)
+    try:
+        for off, n in [(0, page), (7, 100), (page - 5, 10), (page + 3, 2 * page + 9),
+                       (0, len(data)), (len(data) - 50, 50), (page, page),
+                       (3, 0), (4 * page + 100, page + 23)]:
+            want = bytearray(n)
+            read_range(fd, memoryview(want), off)
+            seen.clear()
+            got = bytearray(n)
+            read_range_aligned(fd, memoryview(got), off, len(data))
+            assert got == want == data[off:off + n]
+            for o, ln in seen:
+                assert o % page == 0
+                assert ln % page == 0 or o + ln == len(data)
+    finally:
+        os.close(fd)
