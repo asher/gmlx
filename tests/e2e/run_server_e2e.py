@@ -31,7 +31,6 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-import tempfile
 import time
 import traceback
 
@@ -303,6 +302,12 @@ def print_plan(reg, scenarios, *, tiers, image_path) -> None:
         print(f"tiers with no runnable scenario (models missing): {', '.join(empty)}")
     if "stream" in empty:
         print(f"  stream: {SC.streaming_pick(reg)[2]}")
+    if "stream" in tiers and "stream_spec" not in sum(by_tier.values(), []):
+        print(f"  stream_spec skipped: {SC.streaming_mtp_pick(reg)[3]}")
+    if "stream" in tiers and "stream_kv8" not in sum(by_tier.values(), []):
+        _h, path, _note = SC.streaming_pick(reg)
+        if path:
+            print(f"  stream_kv8 skipped: {SC.streaming_kv_quant_note(path)}")
 
 
 # main
@@ -333,7 +338,7 @@ def main(argv=None) -> int:
                          "to $GMLX_E2E_IMAGE, then a bundled asset, then a weak "
                          "synthesized PNG.")
     ap.add_argument("--out", default=None,
-                    help="Output directory (default: a fresh temp dir).")
+                    help="Output directory (default: ~/.cache/gmlx/e2e/<stamp>).")
     ap.add_argument("--python", default=sys.executable,
                     help="Interpreter to launch the server subprocess (default: this one).")
     ap.add_argument("--dry-run", action="store_true",
@@ -364,8 +369,10 @@ def main(argv=None) -> int:
     if unknown:
         ap.error(f"unknown tier(s): {', '.join(unknown)}; known: {', '.join(SC.ALL_TIERS)}")
 
-    out_dir = a.out or tempfile.mkdtemp(prefix=f"gmlx-e2e-{_stamp()}-")
+    # Not a temp dir: a run that panics the box must leave its logs.
+    out_dir = a.out or os.path.expanduser(f"~/.cache/gmlx/e2e/{_stamp()}")
     os.makedirs(out_dir, exist_ok=True)
+    print(f"[out] {out_dir}", flush=True)
     os.makedirs(os.path.join(out_dir, "configs"), exist_ok=True)
     md_path = os.path.join(out_dir, "report.md")
     json_path = os.path.join(out_dir, "report.json")

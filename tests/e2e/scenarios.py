@@ -836,6 +836,65 @@ def build_scenarios(reg, *, tiers, tmpdir: str, image_path: Optional[str],
             notes="short prompts on a streamed MoE; the arena, KV room and governor "
                   "band are read from /v1/metrics after the prompts; issue #49"))
 
+        # stream x kv8: a quantized KV cache under the streamed expert path
+        kv_note = streaming_kv_quant_note(stream_path)
+        if not kv_note:
+            add(Scenario(
+                key="stream_kv8", tier="stream", needs=[stream_h],
+                title=f"Streaming x kv8: {stream_h} with a quantized KV cache - needle recall",
+                config={"profiles": {"p": {"sampling": {"temperature": 0.0},
+                                           "load": {"kv_bits": 8, "kv_group_size": 64,
+                                                    "quantized_kv_start": 0}}},
+                        "models": {"m": _model_entry(stream_path, stream="experts", profile="p",
+                                                     overrides={"thinking": False})}},
+                request_timeout=1800.0,
+                targets=[ReqTarget("recall", "m", prompts=[
+                    P.p_long_ctx_needle("CORALSTREAM55", filler_paras=6)])],
+                post=[pc_stream_engaged("m"),
+                      pc_kv_engagement("m", verdict="full"),
+                      pc_governor_calm(),
+                      pc_log_count("RowShedError", 0, "no_row_shed")],
+                notes="the kv8 arm on a streamed model; the anchor fails on corruption"))
+
+        # stream x APC disk tier: a resend adopts the cache on a streamed model
+        stream_disk = os.path.join(tmpdir, "stream_apc_disk")
+        add(Scenario(
+            key="stream_apc_disk", tier="stream", needs=[stream_h],
+            title=f"Streaming x APC disk tier: {stream_h} resends a prompt through the cache",
+            config={"server": {"cache": {"enabled": True,
+                                         "disk": {"path": stream_disk, "max_gb": 4}}},
+                    "models": {"m": _model_entry(stream_path, stream="experts",
+                                                 overrides={"thinking": False})}},
+            request_timeout=1800.0,
+            targets=[ReqTarget("warm", "m", prompts=[P.p_capital()])],
+            post=[pc_apc_enabled(True),
+                  pc_cache_reuse("m", replace(
+                      P.p_long_ctx_needle("AMBERSTREAM21", filler_paras=6), max_tokens=16)),
+                  pc_disk_cache_created(stream_disk),
+                  pc_stream_engaged("m"),
+                  pc_governor_calm()],
+            notes="the second send must adopt the cache and stay byte-identical"))
+
+    # stream x speculative: a streaming model with an MTP head or a sibling drafter
+    spec_h, spec_path, spec_draft, _why = streaming_mtp_pick(reg)
+    if spec_path:
+        entry = _model_entry(spec_path, stream="experts", speculative=True,
+                             overrides={"thinking": False})
+        if spec_draft:
+            entry["draft_gguf"] = spec_draft
+        add(Scenario(
+            key="stream_spec", tier="stream", needs=[spec_h],
+            title=f"Streaming x speculative: {spec_h} with "
+                  f"{'a sibling drafter' if spec_draft else 'its MTP head'}",
+            config={"server": {"cache": {"enabled": True}}, "models": {"m": entry}},
+            request_timeout=1800.0,
+            targets=[ReqTarget("spec", "m", prompts=[P.p_capital(), P.p_instruct()])],
+            post=[pc_stream_engaged("m"),
+                  pc_log_count("[mtp] drafter:", 1, "mtp_drafter_built"),
+                  pc_governor_calm(),
+                  pc_log_count("RowShedError", 0, "no_row_shed")],
+            notes="verify rows read experts through the arena; the drafter must build once"))
+
     return out
 
 
@@ -861,6 +920,51 @@ def streaming_pick(reg) -> tuple:
             return handle, path, ""
         notes.append(f"{handle}: verdict {verdict} on this box")
     return "", "", "; ".join(notes) or "no streaming-role model on disk"
+
+
+def streaming_kv_quant_note(path: str) -> str:
+    """Why a `kv_bits` profile cannot engage on this streaming model, or
+    empty. The mlx-lm MLA attention (GGUF arch deepseek2: DeepSeek-V3,
+    Kimi-K2) reads the latent cache by matmul; the serve kv policy drops
+    such a profile to fp16, so the kv8 arm has nothing to verify."""
+    try:
+        from gmlx.stream import plan
+
+        arch = plan.model_plan(plan.scan_path(path)).arch
+    except Exception as e:  # noqa: BLE001
+        return f"header not readable: {e}"
+    if arch == "deepseek2":
+        return "MLA attention reads the latent cache directly; kv_bits drops to fp16"
+    return ""
+
+
+def streaming_mtp_pick(reg) -> tuple:
+    """``(handle, path, draft_gguf, note)``: the first `streaming` role model
+    that streams on this box and carries an MTP head or a sibling drafter.
+    ``draft_gguf`` is empty for a native head."""
+    notes = []
+    for group in reg.role_groups("streaming"):
+        handle = group[0]
+        path = reg.find(handle)
+        if not path:
+            continue
+        try:
+            from gmlx.load.discovery import find_mtp_companion, header_meta
+            from gmlx.stream import plan
+            _model, box = plan.plan_path(path)
+            verdict = getattr(box, "verdict", None)
+            if verdict not in ("streams", None):
+                notes.append(f"{handle}: verdict {verdict} on this box")
+                continue
+            if (header_meta(path) or {}).get("mtp"):
+                return handle, path, "", ""
+            drafter = find_mtp_companion(path)
+            if drafter:
+                return handle, path, drafter, ""
+            notes.append(f"{handle}: no MTP head and no sibling drafter")
+        except Exception as e:                  # noqa: BLE001
+            notes.append(f"{handle}: {type(e).__name__}: {e}")
+    return "", "", "", "; ".join(notes) or "no streaming-role model on disk"
 
 
 # scenario-specific post-checks that need two requests
