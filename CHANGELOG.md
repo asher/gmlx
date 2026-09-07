@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.9] - 2026-09-06
+
 ### Fixed
 
 - Streaming models size the decode arena to 0.6 of physical RAM again.
