@@ -146,3 +146,18 @@ def test_closed_arena_drops_out():
     assert installs.live_arena_bytes() == 10
     a._closed = True
     assert installs.live_arenas() == [] and installs._ARENAS == []
+
+
+def test_wrapper_chain_walks_language_model_then_model():
+    from types import SimpleNamespace
+
+    from gmlx.stream.installs import streaming_owner, wrapper_chain
+
+    stock = SimpleNamespace(_kq_decode_feeder=object())
+    lm = SimpleNamespace(_model=stock)
+    wrapper = SimpleNamespace(language_model=lm)
+    assert list(wrapper_chain(wrapper)) == [wrapper, lm, stock]
+    assert streaming_owner(wrapper) is stock
+    dense = SimpleNamespace(language_model=SimpleNamespace())
+    assert list(wrapper_chain(dense)) == [dense, dense.language_model]
+    assert streaming_owner(dense) is dense

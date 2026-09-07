@@ -57,10 +57,9 @@ def governor_headroom_bytes() -> float | None:
 def legacy_room_bytes() -> int:
     raw = os.environ.get("GMLX_DECODE_KV_RESERVE_GB", "")
     try:
-        gb = float(raw or _LEGACY_RESERVE_GB)
-    except ValueError:
-        gb = _LEGACY_RESERVE_GB
-    return int(gb * (1 << 30))
+        return int(float(raw or _LEGACY_RESERVE_GB) * (1 << 30))
+    except (ValueError, OverflowError):
+        return int(_LEGACY_RESERVE_GB * (1 << 30))
 
 
 def transient_bytes(ws: float) -> float:

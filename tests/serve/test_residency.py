@@ -620,3 +620,44 @@ def test_build_prices_the_decode_arena_into_the_table(monkeypatch):
         footprint_fn=lambda p: int(20 * GB))
     acquire(pool, "a")
     assert calls == [int(20 * GB), int(25 * GB)]
+
+
+def test_build_stamps_boot_kv_costs_where_the_generator_reads(monkeypatch):
+    # The batch generator is built on rg.model.language_model (mlx-vlm
+    # batch_generate), and a streaming model's helpers hang deeper still.
+    # boot_kv_rates must find the stamp from any of those objects.
+    from types import SimpleNamespace
+
+    import gmlx.serve.capacity as cap
+
+    monkeypatch.setattr(cap, "install_boot_table",
+                        lambda path, b, label, env=None: None)
+    monkeypatch.setitem(cap._BOOT_KV_COSTS, "a", [(None, 1000.0), (4096, 500.0)])
+    proxy = _RuntimeProxy(_FakeOriginal())
+    stock = SimpleNamespace(_kq_decode_feeder=None)
+    lm = SimpleNamespace(_model=stock)
+    wrapper = SimpleNamespace(language_model=lm)
+
+    def fake_stock_get(model_path, adapter_path, *, model_kind="auto"):
+        proxy.response_generator = SimpleNamespace(model=wrapper)
+        proxy.model_cache = {
+            "cache_key": (model_path, adapter_path, model_kind),
+            "model_path": model_path,
+            "model": "M",
+        }
+
+    pool = _ResidencyPool(
+        proxy, fake_stock_get, lambda: True, int(100 * GB), (),
+        footprint_fn=lambda p: int(20 * GB))
+    acquire(pool, "a")
+    want = {"_boot:None": {"rate": 1000.0, "window": None},
+            "_boot:4096": {"rate": 500.0, "window": 4096}}
+    assert cap.boot_kv_rates(lm) == want            # what the generator holds
+    assert cap.boot_kv_rates(wrapper) == want
+    assert cap.boot_kv_rates(stock) == want
+    # A dense chain (no streaming helper anywhere) resolves the same way.
+    dense_lm = SimpleNamespace()
+    dense = SimpleNamespace(language_model=dense_lm)
+    import gmlx.serve.residency as residency
+    residency._stamp_boot_kv_costs(SimpleNamespace(model=dense), "a")
+    assert cap.boot_kv_rates(dense_lm) == want

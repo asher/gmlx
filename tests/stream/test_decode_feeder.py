@@ -309,8 +309,9 @@ def test_arena_budget_math(monkeypatch):
     monkeypatch.setattr(
         mx, "device_info", lambda: {"memory_size": 100 << 30}
     )
-    monkeypatch.setenv("GMLX_DECODE_ARENA_RAM_FRAC", "abc")   # ignored
-    _decode_arena_bytes(100 << 30, offsets, budget=90 << 30)
+    for bad in ("abc", "1e999", "nan"):                    # ignored
+        monkeypatch.setenv("GMLX_DECODE_ARENA_RAM_FRAC", bad)
+        _decode_arena_bytes(100 << 30, offsets, budget=90 << 30)
     monkeypatch.delenv("GMLX_DECODE_ARENA_RAM_FRAC")
     got = _decode_arena_bytes(100 << 30, offsets, budget=90 << 30)
     assert got == (90 << 30) - (20 << 30) - (8 << 30)

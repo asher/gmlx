@@ -42,17 +42,24 @@ def streaming_owner(model):
     the feeders' worker threads outlive the model, pinning every expert
     weight through their frames. Descend the wrapper chain to the first
     module that carries a helper; the original object when none does."""
+    for cur in wrapper_chain(model):
+        if any(getattr(cur, a, None) is not None for a in STREAM_ATTRS):
+            return cur
+    return model
+
+
+def wrapper_chain(model):
+    """``model`` and each module under it along the wrapper descent
+    (``language_model``, then ``_model``), outermost first."""
     seen = set()
     cur = model
     while cur is not None and id(cur) not in seen:
-        if any(getattr(cur, a, None) is not None for a in STREAM_ATTRS):
-            return cur
+        yield cur
         seen.add(id(cur))
         nxt = getattr(cur, "language_model", None)
         if nxt is None:
             nxt = getattr(cur, "_model", None)
         cur = nxt
-    return model
 
 
 def record(model, wired_bytes: int) -> None:

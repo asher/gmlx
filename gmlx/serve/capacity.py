@@ -53,6 +53,7 @@ _TABLE: dict | None = None
 # GGUF path -> per-layer KV cost entries of the boot table, kept out of
 # the table /v1/metrics dumps; stamped on the model at build.
 _BOOT_KV_COSTS: dict = {}
+_UNSTAMPED_WARNED: set = set()
 
 
 def overcommit() -> bool:
@@ -300,12 +301,21 @@ def boot_kv_rates(model) -> dict:
     synthetic kind per KV window, from the costs residency stamped on
     the model at build (``_kq_boot_kv_costs``). Empty when unstamped;
     live measurements replace them at the first ``update_kv_rates``."""
-    costs = getattr(model, "_kq_boot_kv_costs", None)
-    if not costs and model is not None:
-        from gmlx.stream.installs import streaming_owner
+    if model is None:
+        return {}
+    from gmlx.stream.installs import wrapper_chain
 
-        costs = getattr(streaming_owner(model), "_kq_boot_kv_costs", None)
+    costs = None
+    for cur in wrapper_chain(model):
+        costs = getattr(cur, "_kq_boot_kv_costs", None)
+        if costs:
+            break
     if not costs:
+        if id(model) not in _UNSTAMPED_WARNED:
+            _UNSTAMPED_WARNED.add(id(model))
+            _log.warning("[capacity] no boot KV costs stamped on %s; "
+                         "admission projects only after the first batch",
+                         type(model).__name__)
         return {}
     out: dict = {}
     for window, bpt in costs:
@@ -567,6 +577,7 @@ def clear_table() -> None:
     global _TABLE
     _TABLE = None
     _BOOT_KV_COSTS.clear()
+    _UNSTAMPED_WARNED.clear()
 
 
 # GGUF path -> (mtime, trained context) for /v1/models; a header scan per

@@ -1358,7 +1358,7 @@ def _decode_arena_bytes(
     if frac and ram:
         try:
             ceiling = min(ceiling, int(float(frac) * ram))
-        except ValueError:
+        except (ValueError, OverflowError):
             pass
     expert_bytes = sum(r[2] for ranges in offsets.values() for r in ranges)
     # Streamable components are page-cache citizens like the experts;

@@ -321,9 +321,21 @@ def test_boot_costs_and_seeded_rates(rig):
     model = SimpleNamespace(_kq_boot_kv_costs=cap.boot_kv_costs(path))
     assert cap.boot_kv_rates(model) == {
         "_boot:None": {"rate": float(BPT), "window": None}}
-    assert cap.boot_kv_rates(SimpleNamespace()) == {}
     cap.clear_table()
     assert cap.boot_kv_costs(path) == []
+
+
+def test_unstamped_model_warns_once(caplog):
+    from types import SimpleNamespace
+
+    cap.clear_table()
+    model = SimpleNamespace(language_model=SimpleNamespace())
+    with caplog.at_level("WARNING", logger="gmlx.serve.capacity"):
+        assert cap.boot_kv_rates(model) == {}
+        assert cap.boot_kv_rates(model) == {}
+    assert sum("no boot KV costs stamped" in r.message
+               for r in caplog.records) == 1
+    assert cap.boot_kv_rates(None) == {}
 
 
 def test_refused_table_leaves_the_previous_one_installed(rig, monkeypatch):

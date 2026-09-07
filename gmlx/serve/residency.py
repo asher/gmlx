@@ -1072,14 +1072,17 @@ def _stamp_boot_kv_costs(rg, gguf_path: str) -> None:
     """Hang the boot table's KV costs on the served model, so a fresh
     model's admission and governor demand price this model, not the
     table installed last."""
+    from gmlx.stream.installs import wrapper_chain
+
     from .capacity import boot_kv_costs
 
     model = getattr(rg, "model", None)
     if model is None:
         return
     costs = boot_kv_costs(gguf_path)
-    for target in {id(model): model,
-                   id(_streaming_owner(model)): _streaming_owner(model)}.values():
+    # Every module of the wrapper descent: the batch generator reads the
+    # stamp off whichever of them it was built on (the text tower).
+    for target in wrapper_chain(model):
         try:
             object.__setattr__(target, "_kq_boot_kv_costs", costs)
         except Exception:                                  # noqa: BLE001
