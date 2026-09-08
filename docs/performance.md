@@ -287,7 +287,7 @@ decode batch. Two settings cover the two symptoms:
 
 | Symptom | Setting | Default | Effect |
 |---------|---------|---------|--------|
-| a starved decode batch | `server.decode_prefill_ratio` | `auto` | paces admissions only when a stream admitted before the waiters would otherwise fall below half its batched rate; a number pins the static ratio, `0` restores strict alternation |
+| a starved decode batch | `server.decode_prefill_ratio` | `auto` | paces admissions only when an already-decoding stream would otherwise fall below half its batched rate; a number pins the ratio, `0` restores strict alternation |
 | a stuttering stream | `server.prefill_tick_ms` | `500` | halves each chunk until its predicted wall time fits the budget; `0` for batch jobs that only care about aggregate throughput |
 
 Paced admission bounds every waiter's time-to-first-token at twice its

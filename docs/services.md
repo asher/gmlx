@@ -234,7 +234,7 @@ server:
   # rerank: ~/models/Qwen3-Reranker-4B.Q6_K.gguf   # a local GGUF
 ```
 
-The value is a `qwen3-rerank-*` alias (`0.6b`/`4b`/`8b`, default rung
+Its value is a `qwen3-rerank-*` alias (`0.6b`/`4b`/`8b`, default rung
 `Q8_0`), a `*.gguf` path, or an `hf:<org>/<repo>/<file>.gguf` ref. The
 reranker is independent of the embedder, but `gmlx init` defaults its quant
 to the embedder's chosen rung. The request is the Cohere/Jina shape (`query`,

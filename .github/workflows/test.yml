@@ -106,3 +106,4 @@ jobs:
       # Pinned: a new ruff's new default rules shouldn't fail an untouched repo.
       - run: pip install ruff==0.15.20
       - run: ruff check .
+      - run: python scripts/check-docs.py

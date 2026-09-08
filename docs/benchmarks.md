@@ -55,7 +55,7 @@ round on both engines; the baseline column is the same server with it off.
 ## Model provenance
 
 Chart labels are sanitized (abliterated community builds render as the
-base model); this table is the honest weight mapping for reproduction.
+base model); this table is the weight mapping for reproduction.
 Builds is what each model's rows were measured on: models are
 rebenched independently, so a newer build on one row says nothing
 about the others. Measured is the date of the newest run still

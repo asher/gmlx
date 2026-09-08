@@ -27,7 +27,7 @@ shard's path.
 | Kwarg | Default | Meaning |
 |---|---|---|
 | `arch` | detected | Override `general.architecture` detection. |
-| `hf_source` | `None` | Load the config from this local dir's `config.json` or HF repo id instead of synthesizing it; unlocks arches without a synthesizer and fixes variants whose synthesized constants differ. |
+| `hf_source` | `None` | Load the config from this local dir or HF repo id instead of synthesizing it, for arches without a synthesizer or variants whose constants differ. |
 | `chat_template` | from GGUF | Inline Jinja string, or a path to a `.jinja`/`.txt` file, replacing the GGUF's chat template. |
 | `no_remap` | `False` | Skip the GGUF-to-HF tensor-name remap; for inspection, not inference. |
 | `zero_copy` | `True` | Load tensors as no-copy mmap views; `False` copies into fresh buffers. |
@@ -153,7 +153,7 @@ tokenizer = load_tokenizer_from_gguf(reader, arch)
 
 `load_tokenizer_from_gguf(meta, arch, *, chat_template_override=None)` builds
 an HF fast tokenizer purely from the GGUF's embedded vocab/merges/scores
-metadata - the same synthesis `load_model` runs internally - without paying
+metadata, the same synthesis `load_model` runs internally, without paying
 the model load. `detect_arch(reader)` reads `general.architecture` from the
 header. Both read only GGUF metadata, so they stay cheap on multi-GB files.
 
@@ -184,10 +184,10 @@ full-featured server.
 
 The swapped leaves are `KQuantLinear`, `KQuantEmbedding`, `KQuantSwitchLinear`,
 and `KQuantMultiLinear` (canonical classes in `mlx_kquant.nn`, re-exported
-here). Each stores the GGUF wire bytes directly as a `uint8` `weight` and
+here). Each stores the GGUF file bytes directly as a `uint8` `weight` and
 dispatches through the `mlx_kquant` Metal kernels on a stock `mlx` wheel, so
 dequantization happens inside the kernel, never as a separate materialized
-pass. `install_kquant_modules(model, hf_kquant_meta)` is the swap seam itself:
+pass. `install_kquant_modules(model, hf_kquant_meta)` is the swap step itself:
 it walks a constructed model's leaf modules and replaces each one whose weight
 carries a codec. It is arch-generic, driven entirely by codec strings, and
 exported for building custom loaders on top.
@@ -197,5 +197,5 @@ exported for building custom loaders on top.
 Deeper modules are importable but internal: the VLM loader, embeddings and
 rerank, the CPU-offload paths, the server. Their signatures change without
 notice, and `generate` additionally accepts experimental parameters that are
-deliberately undocumented here. If you need an internal piece as a public API,
+left undocumented here on purpose. If you need an internal piece as a public API,
 open an issue.

@@ -87,7 +87,7 @@ for K-quant modules. A VLM adds a second file carrying the vision or audio
 tower. The output is a model, config and tokenizer triple with no safetensors
 round-trip.
 
-The adapter wraps a text model in mlx-vlm's text-only model class, which
+An adapter wraps a text model in mlx-vlm's text-only model class, which
 exposes the embedding and language-model interface the engine expects, and
 attaches stopping criteria to the tokenizer. VLM models are wrapped in their
 mlx-vlm class instead. Wrapped models live in a residency pool of pinned and
@@ -100,7 +100,7 @@ the prompt cache manager, which picks a tier per architecture
 verify round, which keeps the prompt cache available under a drafter
 ([speculative-batching.md](speculative-batching.md)).
 
-The HTTP layer is mlx-vlm's FastAPI app: OpenAI chat completions, OpenAI
+Above the engine sits mlx-vlm's FastAPI app: OpenAI chat completions, OpenAI
 Responses and Anthropic Messages, each with streaming. Tool calls are
 extracted from the raw token stream by mlx-lm's tool parsers, selected from
 the model's chat template, and re-emitted in each protocol's shape. Each
@@ -128,7 +128,7 @@ sequenceDiagram
   C->>A: POST /v1/chat (model "id@profile")
   A->>R: get_cached_model(id)   [patched]
   R->>S: resolve_request_model(id@profile)
-  S-->>R: abspath + ResolvedModel; set _active_spec
+  S-->>R: abspath + ResolvedModel, sets _active_spec
   alt resident (cache key includes the load parameters)
     R-->>A: model, processor, config
   else cold build

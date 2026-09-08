@@ -111,6 +111,9 @@ KQUANT_TEST_GGUF_DIR=~/models KQUANT_LLAMACPP_BIN=/path/to/llama-completion \
 python scripts/check-coverage.py --check --strict
 ```
 
+The tiers these tests run in, and how to select a GGUF-gated tier, are in
+[testing.md](testing.md).
+
 ## Requesting or contributing a family
 
 Missing a family you care about? Open an issue with a link to the GGUF (or its

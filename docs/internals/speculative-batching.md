@@ -36,7 +36,7 @@ stateDiagram-v2
     Gated --> [*]: last row finishes
 ```
 
-## Preempt: joining a scalar generation
+## Preempting a scalar generation
 
 The scalar loop has no injection boundary; its speed comes from not being a
 batch. Making a prefilled request wait for the incumbent to finish is wrong
@@ -58,11 +58,11 @@ preempts it:
    does under a cap of 1; otherwise the batch arms itself with a capture
    round and keeps speculating at the new width.
 
-The incumbent's stream continues without a gap. Its rate steps down from
+Meanwhile the incumbent's stream continues without a gap. Its rate steps down from
 solo speculative to shared plain while the batch is wide, and total tokens
 per second across streams goes up.
 
-## Resume: re-arming a drained batch
+## Re-arming a drained batch
 
 A batch gated to plain decode re-arms when finishing rows bring it back under
 the cap. Re-arming needs fresh hidden state and shared KV for every surviving

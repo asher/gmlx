@@ -110,7 +110,7 @@ that ceiling, in this order:
    faster decode. Below 1 GB the decode feeder does not start and decode runs
    from the page cache.
 
-The rule: a box streams a model when the every-token weights plus the KV room
+So a box streams a model when the every-token weights plus the KV room
 fit under the ceiling. Everything else only changes the speed.
 
 ### The ceiling by machine size

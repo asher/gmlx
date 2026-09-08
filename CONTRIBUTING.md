@@ -55,7 +55,7 @@ pre-commit install   # optional: runs the same check on each commit
   carries a guard or version tripwire that fails loudly.
   Keep that property: a new patch must be idempotent and must raise (not silently
   no-op) when the upstream surface it expects has changed. The `mlx-vlm` upper
-  bound in `pyproject.toml` is bumped deliberately, after re-running the server
+  bound in `pyproject.toml` is bumped on purpose, after re-running the server
   tests against the new version.
 - One module per concern: tensor-name remap lives in `gmlx/load/remap.py`,
   config synthesis in `gmlx/load/config_synth.py`, arch metadata in
