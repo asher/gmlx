@@ -77,7 +77,7 @@ def test_family_table_in_sync_with_profiles_py():
     doc = _DOC.read_text()
     for row in fp.describe():
         fam = row["family"]
-        arches = ", ".join(f"`{a}`" for a in row["arches"]) or "*(anything else)*"
+        arches = ", ".join(f"`{a}`" for a in row["arches"]) or "(anything else)"
         base = _render_group(row["base"])
         own = fp.FAMILIES[fam]["intents"]
         ints = "; ".join(f"`@{n}`: {_render_group(fp.groups_for(fam, n))}"
