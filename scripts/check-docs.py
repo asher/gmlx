@@ -5,7 +5,8 @@ Checks (each a failure):
   - bold/italic emphasis outside code fences
   - dash asides (" - " or " -- ") in prose
   - "&" in a heading
-  - a table cell over 160 characters (the generated family table is exempt)
+  - a table cell over 160 characters (the generated family table and
+    raw-HTML image gallery cells are exempt)
   - a relative link, image, or in-repo GitHub link whose file or #anchor
     does not resolve (GitHub slug rules)
   - a ```yaml fence opener with trailing text (the docs tests would skip it)
@@ -137,7 +138,7 @@ def check_file(path: Path, anchor_cache: dict) -> list:
         if line.lstrip().startswith("|") and not _is_family_row(line):
             cells = [c.strip() for c in line.strip().strip("|").split("|")]
             for c in cells:
-                if len(c) > _CELL_MAX and not re.match(r"^:?-+:?$", c):
+                if len(c) > _CELL_MAX and not re.match(r"^:?-+:?$", c) and "<img " not in c:
                     problems.append(f"{rel}:{n}: table cell {len(c)} chars")
                     break
 

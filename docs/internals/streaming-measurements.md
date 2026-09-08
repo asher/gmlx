@@ -7,10 +7,14 @@ Contributor evidence, not an operator guide.
 
 ## What the over-budget case produces
 
-Two single samples from Kimi-K3, a 2.8T-parameter MoE, generated on the
-128 GB laptop above with `--stream-experts` at streaming defaults, on
+The case studies that follow are the evidence behind the lossy levers table
+in [streaming.md](../streaming.md#the-lossy-levers). Each measured point
+moves one variable.
+
+Two single samples from Kimi-K3, a 2.8T-parameter MoE, generated on
+an M5 Max MacBook Pro with 128 GB with `--stream-experts` at streaming defaults, on
 the lossless path. The prompt is the same one-shot canvas-animation
-prompt used for the lossy-lever comparisons later in this guide.
+prompt used for the lossy-lever comparisons below.
 Each screenshot links to the generated page, committed beside it in
 `docs/assets/perf/` (GitHub shows the page source; download one to
 watch the animation).
@@ -21,13 +25,13 @@ watch the animation).
 
 Both pages ran as generated. The larger quant also added scroll and
 drag controls for the cruising pace that the prompt never asked for.
-The point of the samples is scale: a model five to seven times the
+What the samples show is scale: a model five to seven times the
 machine's RAM, sustaining a coherent 30k-token single-file program at
 the single-digit rates set out above.
 
-### Hy3: flat router, high hit rate
+## Hy3: flat router, high hit rate
 
-One measured point, from the flat-router end of that space: Hy3, a
+The flat-router end of the space: Hy3, a
 299B-A21B MoE (159 GB IQ4_XS streaming on a 128 GB machine, decode arena at a ~92%
 hit rate; decode-only tok/s from alternated A/B rounds of 512-token
 generations; quality scored at temperature 0.6 / top-p 0.95 on a 12-task
@@ -42,8 +46,8 @@ multi-step arithmetic, and length control, plus a repetition check):
 | the pair softened to 0.07 / 0.93 | +2-4% | clean |
 | `moe_expert_mass: 0.90` | ~0%, alone or stacked | clean |
 
-Those are sustained-regime medians. Per the cool-box transient note
-under [Measuring](../performance.md#measuring), a rested 14-inch machine ran the same arms 15-25%
+Those are sustained-regime medians. Per the cool-box note under
+[Measuring](../performance.md#measuring), a rested 14-inch machine ran the same arms 15-25%
 faster for its first twenty minutes, baseline at 5.0 tok/s and the pair
 at 5.6 or better. Note also that softening the pair keeps its quality
 margin but not its speed. Miss-shed's payoff falls steeply as P rises
@@ -62,12 +66,12 @@ rare enough that the per-layer overhead was the standing cost, so
 layer-shed led and the shed pair composed (+8% and +4% multiply to
 roughly the observed +13% because they cut disjoint costs). On a
 concentrated-router model with a healthy hit rate the probe will show
-the inversion - most reads removed for a few percent of mass - before
+the inversion, most reads removed for a few percent of mass, before
 any lossy run needs to be made.
 
-### MiniMax-M3: low hit rate
+## MiniMax-M3: low hit rate
 
-A second measured point, from the low-hit-rate end of the space:
+The low-hit-rate end of the space:
 MiniMax-M3, a 4-of-128-expert MoE (264 GB Q4_K_M streaming on the same
 128 GB machine, decode arena at an ~87% hit rate; same alternated A/B
 method, decode-only medians over 512-token generations). A layer
@@ -95,13 +99,13 @@ producing complete working artifacts with no stray tokens. The probe
 sizes expert-mass, but it cannot see residency. When the exit stats
 show a low hit rate, reach for miss-shed first.
 
-### GLM-5.2: wider routing
+## GLM-5.2: wider routing
 
-A third measured point moves one variable: routing width. GLM-5.2
+This point moves routing width. GLM-5.2
 (282 GB UD-IQ3_XXS, 256 experts top-8, sigmoid gating) streams on the
 same machine at a per-expert hit rate near 88%, healthier than M3's,
 yet stalls more. A layer stalls when any of eight routed experts miss,
-not four: at hit rate h the stall odds are 1 - h^k, so k = 8 roughly
+not four: at hit rate h the stall odds are `1 - h^k`, so k = 8 roughly
 doubles them at the same h. That amplification works in both
 directions, since every point of hit rate miss-shed buys back is worth
 about twice as much. That is why the same lever measured stronger here
@@ -110,7 +114,7 @@ even-round alternated 512-token medians), and why arena size, flat on
 M3, mattered too (each arena GB bought ~0.2pt of hit rate).
 
 Wider routing also concentrates more meaning per expert, and that
-moved the quality cliff. P=0.80, clean on M3, broke GLM-5.2 - and
+moved the quality cliff. P=0.80, clean on M3, broke GLM-5.2, and
 broke it in a way character scans cannot see. A 12k-token
 one-page-app generation completed with no stray tokens, valid markup,
 and working code, but the page it drew was missing its subject: a sky
@@ -123,16 +127,16 @@ sampling settings, against a lossless twin at the same seed.
 Miss-shed's safe range is per-architecture: re-gate it whenever
 routing width or gating changes.
 
-### Kimi-K3: far over budget
+## Kimi-K3: far over budget
 
-The deepest measured point runs the scale sample from the top of this
-guide with the levers on: Kimi-K3 UD-Q2_K_XL (861 GB on the same
+The deepest point runs the scale sample from the top of this page with
+the levers on: Kimi-K3 UD-Q2_K_XL (861 GB on the same
 128 GB machine, 896 experts routed 16 per token, 91 streamed expert
 layers). This far over budget, the arena holds a sliver of the expert
 set, the lossless hit rate settles near 50%, and demand stalls are
 about two thirds of decode wall. The miss-targeted lever therefore
 leads by a wide margin, and each shed arm pairs it with keeper
-prestage (`--moe-prestage keepers`, described earlier). One long generation
+prestage (`--moe-prestage keepers`). One long generation
 per setting on the same one-shot prompt as the samples above,
 temperature 1.0, 23-30k tokens each with thinking included. These are
 whole-run averages, not alternated A/Bs:
@@ -149,46 +153,48 @@ sized the wired arena differently across them (29 to 33 GB), so read
 the mechanism columns as a trend rather than a controlled sweep. Two
 things still stand out. Shedding raised the hit rate it left behind:
 the arena stops churning through experts that would be dropped
-anyway, the same self-reinforcement noted under miss-shed above. And
+anyway, the same self-reinforcement miss-shed relies on. And
 the return curve bends the same way as on the other models: the step
 from lossless to 0.80 bought little in this sample, while 0.70 and
 0.65 returned +16% and +21%.
 
 All three shed levels produced complete working pages on this
 long-form prompt. What separates them is content drift, compared
-side by side in the Kimi-K3 screenshot table later in this guide.
+side by side in the Kimi-K3 screenshot table below.
 One step further down broke form, not just content: at 0.60 a code
 generation on this model produced a nonfunctional program in one try.
 The working band on this model at this quant is 0.65 to 0.80, sized
 inside it by how much content fidelity the workload can spend.
 
-### Certifying a setting
+## Certifying a setting
 
-Back on Hy3, quality degraded in a consistent order as the levers
-hardened: multi-step arithmetic broke first, well before coherence,
-formatting, or code. `moe_layer_shed: 0.20` alone dropped arithmetic
-tasks, and so did
-`moe_layer_shed: 0.10` combined with `moe_miss_shed: 0.75` even though
-each setting is clean alone. Stacked levers compound onto the same
-cliff, so leave margin on both. On the same battery `moe_miss_shed`
-alone stayed clean down to 0.75 and `moe_expert_mass` down to 0.70. If a
-workload leans on chained arithmetic, put that in the test set before
-sizing any of these.
+Quality degrades in a consistent order as the levers harden. On Hy3,
+multi-step arithmetic broke first, well before coherence, formatting or
+code: `moe_layer_shed: 0.20` alone dropped arithmetic tasks, and so did
+`moe_layer_shed: 0.10` with `moe_miss_shed: 0.75` even though each is clean
+alone. On the same battery miss shed alone stayed clean down to 0.75 and
+expert mass down to 0.70. Past the edge, long generations add a second
+signature: stray token substitutions such as wrong-script digits or a bullet
+character inside code.
 
-Past the edge, long generations add a second signature: stray token
-substitutions such as wrong-script digits or a bullet character inside
-code. The
-levers widen the low-probability tail that sampling can reach, so their
-safe range depends on the sampling regime. Untruncated sampling (top-p
-1.0, which some model cards recommend) exposes the whole perturbed tail
-that nucleus truncation would mask. Certify at the temperature and top-p
-you deploy with; a check run at a lower temperature does not cover a
-hotter one. And a short check certifies short answers. A per-token slip
-rate too small for it to see still accumulates over a 10k-token
-generation, so size levers softer for long-form code than short-form
-checks suggest.
+The procedure, repeatable on any model:
 
-### One prompt, four settings
+1. Run the lossless twin and the candidate setting on the same prompt at the
+   same seed, at the temperature and top-p you deploy with. A check at a
+   lower temperature does not cover a hotter one, and untruncated sampling
+   exposes the whole perturbed tail that nucleus truncation masks.
+2. Score a short goal battery: JSON extraction, constrained format, code with
+   asserts, multi-step arithmetic, length control, and a repetition check.
+   Put chained arithmetic in first if the workload leans on it.
+3. Generate something long, 10k tokens or more, and scan it for stray tokens.
+   A per-token slip rate too small for a short check still accumulates.
+4. Render the artifact and compare it with the lossless twin. Dropped gate
+   mass degrades content before form, so a page can be valid and complete
+   with its subject missing.
+5. Leave margin on every stacked lever, since they compound onto the same
+   cliff, and re-gate whenever routing width or gating changes.
+
+## One prompt, four settings
 
 The cost is easier to see than to score. The same one-shot prompt (a
 single-file HTML canvas animation of a car driving through parallax
@@ -231,9 +237,8 @@ shows the sampling interaction from above. Its page was generated clean
 at top-p 0.95, while the same setting sampled untruncated put one
 wrong-script token into an 11k-token run. The tok/s figures are
 whole-run averages of these single generations at different lengths,
-not controlled A/B numbers. The table above is the measured comparison.
-Each screenshot links to its generated page, as with the samples earlier
-in this guide.
+not controlled A/B numbers. The Hy3 table above is the measured comparison.
+Each screenshot links to its generated page.
 
 The sampling interaction also has a constructive reading. The full pair
 was rerun once on the same prompt and build with cooled sampling, at
@@ -248,10 +253,10 @@ practical recipe on this model: keep the full pair and its entire +13%,
 and cool the sampling slightly, rather than giving up most of the speed
 win by softening the levers at the card's temperature.
 
-### One prompt, four shed levels: Kimi-K3
+## One prompt, four shed levels: Kimi-K3
 
 The same comparison at the deep end of the space. The four Kimi-K3
-settings measured earlier in this guide each ran the same prompt once
+settings measured above each ran the same prompt once
 to completion at temperature 1.0; screenshots link to the generated
 pages as before:
 

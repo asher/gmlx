@@ -7,13 +7,17 @@ debugging. User-facing variables are in [../env-vars.md](../env-vars.md).
 
 | Variable | Meaning |
 |----------|---------|
-| `GMLX_DECODE_LOOKAHEAD_PROBE` | Lossless recall probe for the lookahead predictor: records predicted-vs-actual routing per layer (plus a previous-token baseline) and prints a table at exit, issuing no reads. Worth a run on a new model family to see whether the prestage pays there. |
-| `GMLX_ROPE_FACTORS=0` | Expert escape hatch for rope scaling: disables the `rope_freqs` factors patch that rebuilds Llama-3.1-style per-dim rope scaling from GGUF metadata. Set `0` only to rule the patch out when debugging long-context degradation. |
-| `GMLX_SPARSE_ARCHS` | Extra architecture modules the sparse route may claim, comma-separated (for running a quality gate on a new arch). Default: only quality-gated archs (llama-family) are ever claimed. |
-| `GMLX_FUSED_GDN=0` | Disable the fused gated-delta Metal kernels used by the Qwen3.5/3.6 hybrid architectures. The fusion is a numerics-affecting runtime patch; set `0` first when debugging those archs to rule it out. |
-| `GMLX_QWEN_OWNED=0` | Build qwen3.5/3.6 text MTP targets on genuinely stock mlx-vlm classes instead of the owned forwards. The only install the fallback keeps is the tiled-V rebind (GGUF weight-order correctness); it loses every performance patch (fused GDN kernels, ragged decode kernels, verify fold, batched-verify SDPA, bf16 verify GEMV) and the two stock defects the owned path fixes come back: left-padded single-row batches attend their pad tokens, and an empty-sequence row in batched serve crashes (the old guard patch no longer installs). Multimodal MTP targets (LLM GGUF + mmproj) never take this flag's path: their trees are always built stock by mlx-vlm construction and always run the full patched regime. Read at load; a debugging A/B, not a tuning knob. |
-| `GMLX_GEMMA_OWNED=0` | Build gemma4 text MTP targets on the stock mlx-vlm classes instead of the owned mask builder and attention. The fallback keeps the full patch regime (nosync mask/offset bodies, hd512 batched row route), so numerics are unchanged either way; the owned classes carry the same semantics natively. Multimodal targets (LLM GGUF + mmproj) are always built stock by mlx-vlm construction and always run the patched regime. Read at load; a debugging A/B, not a tuning knob. |
+| `GMLX_DECODE_LOOKAHEAD_PROBE=1` | Record predicted versus actual expert routing per layer and print the recall table at exit, issuing no reads. Run it on a new model family. |
+| `GMLX_ROPE_FACTORS=0` | Disable the patch that rebuilds Llama-3.1-style per-dimension rope scaling from GGUF metadata. Set only to rule it out when debugging long context. |
+| `GMLX_SPARSE_ARCHS` | Extra architecture modules the sparse attention route may claim, comma separated, for a quality gate on a new arch. Default: the llama family only. |
+| `GMLX_FUSED_GDN=0` | Disable the fused gated-delta Metal kernels the Qwen3.5 and 3.6 hybrids use. The fusion affects numerics, so set this first when debugging those archs. |
+| `GMLX_QWEN_OWNED=0` | Build Qwen3.5 and 3.6 text MTP targets on stock mlx-vlm classes. Loses every performance patch and brings back two stock defects. Multimodal targets ignore it. |
+| `GMLX_GEMMA_OWNED=0` | Build gemma-4 text MTP targets on stock mlx-vlm classes. Numerics are unchanged either way. Multimodal targets ignore it. |
 | `GMLX_SDPA_DEBUG=1` | Log which attention route each layer took, so a wrong route on a new architecture shows in the log. |
-| `GMLX_ROUTE_LOG=1` | Log kernel route decisions per call. |
-| `GMLX_MTP_DEBUG=1` | Log the MTP verify branch per round (`[mtp] verify branch: ...`). |
-| `GMLX_ROUND_PROFILE=1` | Profile each speculative round; `GMLX_ROUND_LOG=/path.tsv` writes the rounds to a TSV file. |
+| `GMLX_ROUTE_LOG=1` | Print per-route attention call counts at process exit. |
+| `GMLX_MTP_DEBUG=1` | Log the MTP verify branch per round. |
+| `GMLX_ROUND_PROFILE=1` | Profile each speculative round; `GMLX_ROUND_LOG=/path.tsv` writes the rounds to a TSV file. Works in the server process. |
+| `GMLX_DECODE_PHASE_STATS=1` | Print a streamed decode's per-token split between disk stalls and the eval and sync bucket at exit. Clock sag shows as a large sync bucket. |
+| `GMLX_PIN_CAST_EXCLUDE=0` | Pin the file bytes of every every-token tensor on a streamed model, including tensors the loader converts at load. Default on: converted tensors are left out. |
+| `GMLX_STREAM_PLE_COMPOSE=0` | Keep a streamable lookup table resident when the experts also stream, instead of streaming both. |
+| `GMLX_RELEASE_PAGECACHE=0` | Keep a released over-RAM model's pages in the page cache at exit or unload instead of invalidating them. |

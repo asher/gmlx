@@ -1,266 +1,108 @@
 # Testing
 
-The test suite has three layers, ordered by what they need to run:
+The test suite has three tiers, ordered by what they need to run. Use the
+interpreter that has gmlx and mlx-kquant installed for all of them.
 
-| layer | needs | command |
-| --- | --- | --- |
-| **CPU logic** (default) | nothing, pure Python | `pytest` |
-| **GGUF-gated integration** | real GGUF(s) on disk | `KQUANT_TEST_GGUF_DIR=<dir> pytest` |
-| **Server end-to-end** | GGUF(s) + GPU | `python tests/e2e/run_server_e2e.py` |
+| Tier | Needs | Command |
+|------|-------|---------|
+| CPU logic | nothing, pure Python | `pytest` |
+| GGUF-gated integration | real GGUFs on disk | `KQUANT_TEST_GGUF_DIR=<dir> pytest` |
+| server end-to-end | GGUFs and the GPU | the harnesses under `tests/e2e/` |
 
-Use the interpreter that has `gmlx` + `mlx_kquant` installed for all of them.
+## CPU logic tests
 
-## 1. CPU logic tests (no models)
-
-The CPU tier runs everything on synthetic inputs: no model is loaded and no GPU
-kernel is dispatched, so it runs anywhere, including CI. It covers the remap
-tables, config/tokenizer synthesis, the arch gate, weight transforms, preflight,
-the config loader, the family sampling profiles, discovery, the serving id-layer,
-residency, the server patches, and the `chat` REPL, where `tests/tui/test_chat_e2e.py`
-drives the real multi-turn loop with the model layer faked, plus the live
-prompt_toolkit session over a pipe:
+The CPU tier runs everything on synthetic inputs: no model is loaded and no
+GPU kernel is dispatched, so it runs anywhere, including CI. It covers the
+remap tables, config and tokenizer synthesis, the arch gate, weight
+transforms, preflight, the config loader, the family sampling profiles,
+discovery, the serving id layer, residency, the server patches and the chat
+client, where `tests/tui/test_chat_e2e.py` drives the real multi-turn loop
+with the model layer faked.
 
 ```sh
-pytest                       # whole suite; GGUF-gated tests auto-skip (see below)
+pytest                       # whole suite; GGUF-gated tests skip
 pytest tests/test_config.py  # one module
 ```
 
-Set `KQUANT_FORCE_CPU=1` on a box with no usable Metal GPU to keep the few tests that
-touch `mx` array ops off the GPU path.
+Set `KQUANT_FORCE_CPU=1` on a box with no usable Metal GPU to keep the few
+tests that touch array ops off the GPU path. The doc tests
+(`tests/test_docs_*.py`) and `scripts/check-docs.py` are part of this tier.
 
-## 2. GGUF-gated integration tests (need a model)
+## GGUF-gated integration tests
 
-Three modules assert numerical correctness against real weights and stay skipped until
-you point the suite at a GGUF library:
+These assert numerical correctness against real weights and stay skipped
+until `KQUANT_TEST_GGUF_DIR` points at a GGUF library. The directory is
+searched recursively, each test selects a model by architecture from the
+GGUF header, and any arch you do not have skips, so one small model is
+enough to exercise a path.
 
-| module | gate | what it checks |
-| --- | --- | --- |
-| `tests/gen/test_batch_parity.py` | `KQUANT_TEST_GGUF_DIR` | batched decode is faithful to single-stream (b=1 token-exact, uniform-batch determinism, ragged divergence only at logit ties) |
-| `tests/gen/test_long_context.py` | `KQUANT_TEST_GGUF_DIR` | long-decode integrity at >=16k (in-range, finite logprobs, no single-token collapse); attention bugs only surface at depth |
-| `tests/spec/test_mtp.py` (one case) | `KQUANT_TEST_GGUF_DIR` | a native-head MTP GGUF's drafter has full remap coverage (the rest of the module is CPU-only) |
-| `tests/gen/test_long_context.py::test_long_prefill_parity` | also `KQUANT_LLAMACPP_BIN` | long-prefill greedy output agrees with llama.cpp |
-| `tests/serve/test_serve_apc_engagement.py` | `KQUANT_TEST_GGUF_DIR` (+ `GMLX_TEST_BIG_GGUFS=1` for the multi-GB rows) | the APC engagement gate: one model per cache-shape family (dense/block, SWA-MoE/ckpt, GDN/ckpt, CacheList/exact) served end-to-end, asserting that family's own tier counters move - a tier silently dead for an arch class fails by name |
-
-`KQUANT_TEST_GGUF_DIR` is searched recursively for `*.gguf`. Each test selects a model
-by architecture (read from the GGUF header), so it auto-skips any arch you don't have.
-You don't need a full zoo: one small model is enough to exercise a path.
-The env var alone enables these tests; `KQUANT_TEST_GGUF_DIR=<dir> pytest` is the
-canonical invocation. Adding `-m integration` restricts the run to the
-marker-carrying parity modules.
-
-### One-liner: get a model, then run
+| Module | Extra gate | What it checks |
+|--------|------------|----------------|
+| `tests/gen/test_batch_parity.py` | | batched decode is faithful to single-stream |
+| `tests/gen/test_long_context.py` | | long-decode integrity at 16k or more: in-range ids, finite logprobs, no single-token collapse |
+| `tests/gen/test_long_context.py::test_long_prefill_parity` | `KQUANT_LLAMACPP_BIN` | long-prefill greedy output agrees with llama.cpp |
+| `tests/spec/test_mtp.py` (one case) | | a native-head MTP GGUF's drafter has full remap coverage |
+| `tests/serve/test_serve_apc_engagement.py` | `GMLX_TEST_BIG_GGUFS=1` for the multi-GB rows | one model per cache-shape family served end to end, asserting that family's own tier counters move |
 
 ```sh
-# fetch a tiny public model (header-checked first, then downloaded, not into the HF cache)
 gmlx pull hf:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q4_K_M.gguf --to ~/models/qwen3-0.6b
-
-# run the batched-decode parity suite against just that arch
 KQUANT_TEST_GGUF_DIR=~/models pytest tests/gen/test_batch_parity.py -k qwen3
-```
 
-For the long-context layer, a small SWA model exercises it (Qwen3 isn't in its arch sweep):
-
-```sh
+# the long-context layer on a small sliding-window model, shortened for a smoke
 gmlx pull hf:ggml-org/gemma-3-1b-it-GGUF/gemma-3-1b-it-Q4_K_M.gguf --to ~/models/gemma-3-1b-it-GGUF
-
-# quick pass: shorten the 16k default so a small model finishes in seconds
 KQUANT_TEST_GGUF_DIR=~/models KQUANT_LONGCTX_TOKENS=4096 \
   pytest tests/gen/test_long_context.py::test_long_decode_integrity -k gemma3
 ```
 
-Knobs:
+| Knob | Effect |
+|------|--------|
+| `-k <arch>` | restrict to one architecture; without it the suite sweeps every arch present |
+| `KQUANT_LONGCTX_TOKENS=4096` | shrink the long-context length from the 16384 default |
+| `KQUANT_LLAMACPP_BIN=/path/to/llama-completion` | enable the llama.cpp parity tests; `llama-cli` is interactive-only on new builds and hangs the helper |
+| `-m integration` | only the marker-carrying parity modules |
 
-- `-k <arch>`: restrict to one architecture (`qwen2`, `qwen3`, `gemma3`, `gemma4`,
-  `qwen35moe`, `llama`, ...). Without it the suite sweeps every arch present and can take
-  minutes on large models.
-- `KQUANT_LONGCTX_TOKENS=4096`: shrink the long-context length for a fast smoke (default
-  16384, capped per model's context window).
-- `KQUANT_LLAMACPP_BIN=/path/to/llama-completion`: enables the llama.cpp parity tests
-  (`test_long_prefill_parity`). Without it they skip and only the self-contained integrity
-  checks run. On newer llama.cpp builds the binary is `llama-completion`; `llama-cli`
-  there is interactive-only and will hang the parity helper.
-
-Point `KQUANT_TEST_GGUF_DIR` at a whole library (e.g. `~/models`) to sweep every arch you
-have in one run; drop `-k` to do so.
-
-## 3. Server end-to-end harness
-
-`tests/e2e/` launches the real `gmlx.serve.server` across a matrix of start modes and
-config features, fires a prompt suite at each live server, and grades every response (floor
-checks + an LLM-as-judge). It loads models and needs the GPU, so it is not part of the
-pytest suite. Its own guide (tiers, grading, model bootstrap, output format) lives in
-[`tests/e2e/README.md`](../../tests/e2e/README.md). Quick start:
-
-```sh
-# no models on disk yet? print copy-paste pull commands for the harness's models
-python tests/e2e/run_server_e2e.py --print-pull
-
-# CPU-only: build + validate the whole config matrix (loads no model); run this first
-python tests/e2e/run_server_e2e.py --dry-run
-
-# full run (GPU); writes report.md + report.json
-python tests/e2e/run_server_e2e.py
-```
-
-`tests/e2e/run_capacity_e2e.py` drives the capacity-facing surface against a
-live server on a tiny GGUF (decode width 2, queue cap 3, six concurrent
-streams; `--stream` serves an over-RAM MoE with `stream: experts`): `/health?ready=1` flipping to 503 under load, `/v1/metrics`
-`concurrency` / `queue` / `requests[]` agreeing with the batch, the Prometheus
-rendering, the scoped `/v1/cache/reset`, the dry-run estimate and the
-capacity plan, and an explicit unload of the preloaded model. Exit 0 on
-pass; no judge.
-
-`tests/e2e/run_residency_switch_e2e.py --primary ID=PATH[:spec|:stream]
---second ID=PATH[:spec|:draft=PATH|:stream]`: two models that cannot both be resident in
-one server. Asserts the load gate's typed 503 while the preloaded primary
-is held, the explicit unload that frees it, load-by-request, a burst on
-the second model with the first refused while it is busy, and the LRU
-switch in both directions once idle, with `/v1/estimate` and
-`/v1/capacity/plan` tracking the resident model throughout. The burst
-must outlast the 20 s sampling window, so a fast second model needs
-`--max-tokens 600` or more. A `:stream` primary beside a dense second
-model walks the same surface with the streamed model's priced footprint.
-
-`tests/e2e/run_capacity_soak_e2e.py --models ID=PATH[:spec|:draft=PATH|:stream]...
---cycles N --cycle-minutes M --clients K --out DIR`: seeded chaos for N
-cycles against one server - cold / warm / sibling prompts, growing
-sessions (answers appended verbatim, compaction rewrites), aborted
-streams, tiny budgets, sampler and thinking variety, dry-run estimates
-(including past-context prompts and answered-session continuations,
-which exact-tier models should report warm), plan and readiness probes,
-staggered bursts past the queue cap (a run whose bursts never draw a
-typed 503 is a finding), cross-model requests on multi-model configs -
-with `/v1/metrics` sampled every second and checked for invariants
-(including no stale waiting census at idle), and
-operator ops (cache resets, idle unloads, a Prometheus render) fired
-during load. Typed refusals and governor sheds are tallied; anything
-else non-200, any metrics invariant break, and any unexpected server-log
-exception is a finding. `report.json` and a per-request journal land in
-`--out`.
-
-`tests/e2e/run_capacity_multi_e2e.py` is the longer, multi-model version: a
-config with three models (by default a 27B Q8 with a DFlash drafter, a 30B
-Q4 with its own drafter, and a 0.6B), warmed one by one, then rounds of
-mixed-model concurrent streams (`--rounds`, `--streams`, `--max-tokens`,
-`--width`, `--cap`) while sampling `/v1/metrics`. It asserts the
-multi-engine invariants: rows labelled with the model they run on and rows
-from several models in one sample, `resident_models[].in_flight` summing to
-`concurrency.in_flight`, decode rows per model within the width, speculative
-stats on the drafted models' rows, the warm cache tier on a repeated prompt,
-a scoped reset that leaves another model's streams alone, unload plus
-reload-by-request of a secondary model, Prometheus labels for every model,
-and a green governor throughout. About three minutes; exit 0 on pass.
-A `:stream` entry serves that model with `stream: experts`. Kimi-K2.7 UD-Q2
-beside a 0.6B, with `--rounds 1 --streams 5 --width 2 --max-tokens 200`, is
-the issue #49 check: the arena stays under the governor ceiling while a
-second model loads and streams beside it.
-
-Run `tests/e2e/memguard.py` beside any streaming e2e run. It samples
-memory twice a second and kills the servers before the box swaps under
-a wired arena, which is a watchdog panic, and its log is the timeline.
-
-`tests/e2e/run_stream_e2e.py` runs a streamed model beside the rest of
-the box, one server per phase (`--phases cycles warmth occupied
-coresident coload`). `cycles` loads, unloads and reloads the model three times:
-wired memory returns near its pre-load value, the arena and the priced
-footprint come back at the same size, the server process holds no more
-after each unload, and the first `[stream] memory budget:` line matches
-the fit planner. `warmth` sends a series of requests and reads
-`memory.arena_hits` over `arena_lookups`: the hit rate rises as the
-arena fills. Then `memhog.py` wires memory from another process while a
-stream decodes: reclaimable falls under the kernel floor, the arena
-steps down by about one step and never collapses, no row is shed, and
-the arena regrows on the next decode when the box has room for a step.
-`occupied` wires memory before the server boots: the arena sizes down
-by about that amount and the floor does not trip. `coresident` serves
-the streamed model beside a dense one with `--arena-gb`: alternating
-requests evict neither and `resident_bytes` is the sum of the priced
-footprints. `coload` loads the streamed model while the dense model
-decodes a long stream, requests the dense model while the streamed
-model decodes, and again during a streamed reload. Every stream
-completes with no shed and no Metal out-of-memory error, and the log
-shows the load lowered the wired limit the dense generator raised. The
-dense stream must outlast the streamed load (`--coload-tokens`). Each
-phase costs 5 to 15 minutes on Kimi-K2.7 UD-Q2. Exit 0 on pass.
-
-`tests/e2e/run_apc_disk_e2e.py` exercises disk-backed APC prefix reuse across
-server restarts the same way: real server, real GGUF, standalone.
-`tests/e2e/run_apc_depth_e2e.py` is its deep twin: multi-thousand-token
-prefixes on a large model, `--tier {block,exact,ckpt}` selecting which
-counters must move, with cold-calibrated fact witnesses proving every
-cache-served reply is uncorrupted. Reuse depth is asserted against the
-ckpt cursor's own boundary arithmetic, the concurrent burst includes a
-short unrelated client (ragged mixed warm/cold batch), decline and
-missed-adoption counters are bounded, the missed-adoption tripwire is
-fired live, and a churn phase cycles records through the LRU.
-`--template-kwargs` adds a render-variant turn; `--draft-gguf` covers
-assistant-shape MTP targets; wall-clock gates assume an idle machine
-(`--require-idle` enforces it). `--session N` appends an agent-shaped
-conversation on a dedicated server - N turns of growing history with
-streamed replies, tool-call/tool-role messages, a mid-stream client
-abort, sampled turns, and a compaction rewrite - where every turn must
-keep adopting near the previous prompt's grid floor while retirement
-clones churn the record LRU. `tests/test_e2e_harness_smoke.py` pins
-every harness's imports and argparse tree in CI.
-
-### Pre-release: the APC engagement gate
-
-CI has no GGUFs, so it can prove routing and store/lookup schedules but
-never that a real served model engages its cache tier. Before a release,
-run the engagement gate with the big rows enabled - this is a named
-checklist step precisely because no automated environment runs it:
+Before a release, run the engagement gate with the big rows enabled. CI has
+no GGUFs, so this is the one check that proves a real served model engages
+its cache tier:
 
 ```sh
 KQUANT_TEST_GGUF_DIR=~/llm/gguf-test GMLX_TEST_BIG_GGUFS=1 \
   pytest tests/serve/test_serve_apc_engagement.py -v
 ```
 
-Every family with a staged GGUF must pass; a family skipping for a
-missing model prints its inventory so the skip is a visible choice, not
-a silent hole.
+## Server end-to-end harnesses
 
-### LoRA-on-GGUF end-to-end
+`tests/e2e/` holds standalone scripts that launch the real server, load
+models on the GPU, and grade the results. They are not part of the pytest
+suite, though `tests/test_e2e_harness_smoke.py` pins every harness's imports
+and argument tree in CI. Each harness is described, with its tiers, grading
+and model bootstrap, in [tests/e2e/README.md](../../tests/e2e/README.md).
 
-`tests/e2e/run_lora_e2e.py` exercises the whole GGUF LoRA loop as a user runs it, from
-creation through serving: prep a tiny finetune set, `gmlx train` a LoRA on a small
-K-quant GGUF base (emitting a GGUF adapter), then `gmlx serve --adapter` the base and
-assert the served output shifted. The pirate finetune is graded by a deterministic marker
-check with greedy decoding. Both verbs run as real subprocesses; it needs a base GGUF + the
-GPU, so it's standalone, not pytest. The adapter writer + train-driver fidelity are
-CPU-tested in `tests/load/test_adapter_save.py` / `tests/commands/test_train.py`.
-
-```sh
-python tests/e2e/run_lora_e2e.py                     # prep -> train -> serve -> assert
-python tests/e2e/run_lora_e2e.py --reuse-adapter A.gguf   # skip training, serve only
-```
-
-### Chat TUI (pty) end-to-end
-
-`tests/e2e/run_chat_pty_e2e.py` drives the interactive `gmlx chat` UI in a real
-pseudo-terminal (stdlib `pty`, no `pexpect`). It is the only tier that exercises
-the tty-only surface: the live prompt_toolkit session, the streaming reply, and
-the termios Esc-cancel. It walks a scripted session: load + banner, then two turns over one
-KV cache, then a live `/temp` + `/sampling` slash command, then Esc-cancel of a long reply,
-then `q` quits clean. An optional multimodal arm (stage `assets/cats.jpg` with `/image`,
-generate about it) runs when a VLM GGUF + projector are on disk. It loads a model and needs the GPU, so it's standalone, not
-pytest. A missing model is a SKIP. The deterministic loop + session coverage is CPU-tested,
-no tty, in `tests/tui/test_chat_e2e.py`.
+| Harness | Exercises |
+|---------|-----------|
+| `run_server_e2e.py` | the start-mode and config matrix with a graded prompt suite |
+| `run_capacity_e2e.py`, `run_capacity_soak_e2e.py`, `run_capacity_multi_e2e.py` | metrics, queue and governor invariants under load, single and multi model |
+| `run_residency_switch_e2e.py` | two models that cannot both be resident |
+| `run_stream_e2e.py` | a streamed model through load cycles, memory pressure and coresidency; run `memguard.py` beside it |
+| `run_apc_disk_e2e.py`, `run_apc_depth_e2e.py` | prompt-cache reuse across restarts and at depth, per tier |
+| `run_lora_e2e.py` | prep, train, serve base and adapter, assert the voice took |
+| `run_chat_pty_e2e.py` | the chat client in a real pseudo-terminal |
 
 ```sh
-python tests/e2e/run_chat_pty_e2e.py                 # text arm (+ vlm if present)
-python tests/e2e/run_chat_pty_e2e.py --no-vlm        # text arm only
-python tests/e2e/run_chat_pty_e2e.py --print-pull    # how to fetch the model
+python tests/e2e/run_server_e2e.py --print-pull   # pull commands for the harness models
+python tests/e2e/run_server_e2e.py --dry-run      # CPU-only: validate the config matrix
+python tests/e2e/run_server_e2e.py                # full run; writes report.md and report.json
 ```
 
-### Voice loop manual pass
+## Voice loop manual pass
 
-A manual checklist after touching the `gmlx talk` loop. Nothing here is covered by
-unit tests, which fake audio and HTTP:
+A manual checklist after touching the `gmlx talk` loop. Nothing here is
+covered by unit tests, which fake audio and HTTP:
 
 1. Server down, `gmlx talk`: autostarts, capability check passes, prompt appears.
 2. Wake phrase, question, spoken reply; stopwatch end-of-speech to first audio.
 3. Space mid-reply stops speech quickly; the next wake still works.
-4. `/voice` switch (a Kokoro preset and, if configured, a qwen3-tts speaker).
+4. `/voice` switch, to a Kokoro preset and, if configured, a qwen3-tts speaker.
 5. A long multi-sentence answer plays without gaps or underruns.
 6. 60 s of silence and of background noise: no ghost turns.
 7. `--once` exits after one exchange; `--mode text` speaks typed input's replies.
