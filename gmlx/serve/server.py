@@ -906,8 +906,8 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "embedder (alias qwen3-embed-0.6b/-4b/-8b, *.gguf, or "
                          "hf:<org>/<repo>/<file>.gguf; no extra) or an "
                          "mlx-embeddings encoder (alias embeddinggemma/arctic-l/"
-                         "nomic-embed/bge-m3, HF repo, or local dir; needs the "
-                         "embeddings extra). Bare flag picks qwen3-embed-0.6b; "
+                         "nomic-embed/bge-m3, HF repo, or local dir; no extra "
+                         "needed). Bare flag picks qwen3-embed-0.6b; "
                          "overrides config server.embeddings:.")
     ap.add_argument("--rerank", nargs="?", const="default", default=None,
                     metavar="MODEL",

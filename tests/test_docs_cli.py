@@ -16,23 +16,7 @@ _DOC = Path(__file__).resolve().parent.parent / "docs" / "cli.md"
 # Gaps the doc has today. Phase 3 of the docs overhaul empties both sets; a
 # flag or heading listed here that the doc later covers fails below so the
 # entry gets removed.
-_KNOWN_GAPS = {
-    "missing_headings": {"stop", "restart", "status", "logs", "service",
-                         "init", "sync-models", "launch"},
-    "serve": {"--decode-feeder", "--no-decode-feeder", "--decode-prefill-ratio",
-              "--dtype", "--moe-experts", "--moe-prestage", "--prefill-feeder",
-              "--no-prefill-feeder", "--prefill-step-size", "--prefill-tick-ms",
-              "--speculative-width-cap", "--stochastic-mtp"},
-    "run": {"--decode-feeder", "--no-decode-feeder", "--dtype", "--moe-prestage",
-            "--prefill-feeder", "--stochastic-mtp", "--stream-fast-disk"},
-    "chat": {"--decode-feeder", "--no-decode-feeder", "--dtype", "--moe-prestage",
-             "--prefill-feeder", "--no-prefill-feeder", "--stochastic-mtp",
-             "--stream-fast-disk"},
-    "launch": {"--foreground", "--interval", "--url"},
-    "service": {"--keepalive"},
-    "rm": {"--no-reload"},
-    "list": {"--paths"},
-}
+_KNOWN_GAPS: dict = {"missing_headings": set()}
 
 # Experimental flag families the reference deliberately leaves out.
 _UNDOCUMENTED = re.compile(r"^--(over-|inject-|bench-chat-seed$)")

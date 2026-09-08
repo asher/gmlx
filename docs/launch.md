@@ -14,7 +14,7 @@ gmlx launch open-webui                        # browser chat app on :3000
 
 launch never installs the tool itself. If the binary is not on PATH, it prints an
 install hint and exits. The full flag table and exit codes are in the
-[CLI reference](cli.md#launch-connect-a-coding-agent-or-chat-app).
+[CLI reference](cli.md#gmlx-launch).
 
 ## How a launch works
 

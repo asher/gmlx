@@ -1,1127 +1,819 @@
-# gmlx CLI reference
+# CLI reference
 
-`gmlx` is an umbrella command with one verb per task:
+Every verb of the `gmlx` command with its flags, defaults and exit codes. It
+is the place to look up what a flag does; the guides linked from each section
+explain when to use it.
 
-| Command | Purpose |
-|---------|---------|
-| [`gmlx run`](#gmlx-run) | Generate text from, benchmark, or inspect a single GGUF. |
-| [`gmlx chat`](#gmlx-chat) | Interactive chat REPL on a GGUF: multi-turn, KV-cached. |
-| [`gmlx talk`](#gmlx-talk) | Voice chat with a served model: wake word, whisper STT, spoken streamed replies. |
-| [`gmlx serve`](#gmlx-serve) | Run the batched, multi-model OpenAI/Anthropic server. |
-| [`gmlx train`](#gmlx-train) | LoRA-finetune a GGUF base; emit a GGUF adapter. |
-| [`gmlx init`](#init-scaffold-a-config) | Scaffold a starter server config. |
-| [`gmlx sync-models`](#sync-models-reconcile-a-config-with-whats-on-disk) | Reconcile a config's models with disk or the hf cache. |
-| [`gmlx launch`](#launch-connect-a-coding-agent-or-chat-app) | Point a coding harness or agent (hermes / goose), chat TUI (aichat / elia), or web app (open-webui) at a server, starting one if it is down. `launch menubar` raises the macOS status-bar monitor. |
-| [`gmlx stop` / `restart` / `status` / `logs`](#background-mode--server-lifecycle) | Manage a backgrounded server (`serve` detaches by default). |
-| [`gmlx service`](#service-run-at-login-launchd-macos) | Install/uninstall a launchd LaunchAgent (start at login, macOS). |
-| [`gmlx doctor`](#gmlx-doctor) | Check the runtime, config, model paths, and services in one pass. |
-| [`gmlx validate`](#gmlx-validate) | Check a local or remote GGUF will load, without a full download. |
-| [`gmlx pull`](#gmlx-pull) | Validate a remote GGUF, then download it into your model dir. |
-| [`gmlx rm`](#gmlx-rm) | Delete a model's GGUF files and its config entry. |
-| [`gmlx list`](#gmlx-list) (`ls`) | List the models your server config defines (ids, paths, aliases, default). |
-| [`gmlx ps`](#gmlx-ps) | Show the models resident in a running server. |
-| [`gmlx profiles`](#gmlx-profiles) | Show per-family sampling defaults and `@intents`; resolve one model's sampling. |
-| [`gmlx completion`](#gmlx-completion) | Print a shell completion script (zsh, bash, fish). |
+| Verb | Does |
+|------|------|
+| [`gmlx init`](#gmlx-init) | write a starter server config from the GGUFs on disk |
+| [`gmlx serve`](#gmlx-serve) | run the OpenAI and Anthropic compatible server |
+| [`gmlx stop`](#gmlx-stop) | stop a background server |
+| [`gmlx status`](#gmlx-status) | show a background server's pid, uptime and URL |
+| [`gmlx restart`](#gmlx-restart) | stop and relaunch a background server |
+| [`gmlx logs`](#gmlx-logs) | print or follow a background server's log |
+| [`gmlx service`](#gmlx-service) | install the server and menu bar as a login item |
+| [`gmlx list`](#gmlx-list) | list the models a config defines |
+| [`gmlx run`](#gmlx-run) | generate from, benchmark or inspect one GGUF |
+| [`gmlx chat`](#gmlx-chat) | chat with a model in the terminal |
+| [`gmlx launch`](#gmlx-launch) | point a coding agent or chat app at the server |
+| [`gmlx pull`](#gmlx-pull) | check a remote GGUF and download it |
+| [`gmlx validate`](#gmlx-validate) | check that a local or remote GGUF will load |
+| [`gmlx rm`](#gmlx-rm) | delete a model's files and config entry |
+| [`gmlx sync-models`](#gmlx-sync-models) | reconcile a config with the files on disk |
+| [`gmlx ps`](#gmlx-ps) | show the models resident in a running server |
+| [`gmlx profiles`](#gmlx-profiles) | show the family sampling defaults and intents |
+| [`gmlx talk`](#gmlx-talk) | voice chat with a served model |
+| [`gmlx train`](#gmlx-train) | train a LoRA adapter on a GGUF base |
+| [`gmlx doctor`](#gmlx-doctor) | check the runtime, config, models and services |
+| [`gmlx completion`](#gmlx-completion) | print a shell completion script |
 
-Every verb operates on the GGUF file itself: the file on disk is the model.
-Every flag is also visible via `--help`.
+`gmlx --version` prints the version. `gmlx help <verb>` and `gmlx <verb>
+--help` print a verb's options, and `run` and `chat` also take `--help-all`
+for their full flag set. `gmlx ls` is an alias for `gmlx list`.
 
-```sh
-gmlx --help              # list the verbs
-gmlx <verb> --help       # a verb's options
-```
+Settings that exist as a flag, a config key and an environment variable are
+resolved flag first, then config key, then environment. The config keys are
+in [server-config.md](server-config.md) and the variables in
+[env-vars.md](env-vars.md). Sampling flags you leave unset take the model's
+family defaults, listed in
+[server-config.md](server-config.md#family-defaults).
 
----
+## gmlx init
 
-## `gmlx run`
-
-Load a GGUF and either generate a completion, run a benchmark, or print a
-load inventory.
-
-```sh
-gmlx run GGUF [options]
-```
-
-`run` and `chat` carry 70+ flags, so `--help` shows just the everyday subset;
-`--help-all` prints the full reference (everything documented in the tables
-below).
-
-```sh
-# generate
-gmlx run model.gguf --prompt "Explain entropy." --max-tokens 128
-
-# a bare path seeds the family's model-card sampling; explicit flags always win
-gmlx run model.gguf --prompt "Write a haiku." --temp 0.8 --top-p 0.95
-
-# prefill/decode throughput sweep at several prompt lengths
-gmlx run model.gguf --bench 512,4096,16384 --bench-runs 3
-
-# decode tok/s at increasing context depths
-gmlx run model.gguf --bench-depths 0,4096,16384,32768
-
-# inspect the load plan (arch, codecs, remap, rendered prompt) without running
-gmlx run model.gguf --report-only
-```
-
-### Generation
-
-Sampling flags you don't pass are seeded from the model's family model-card
-defaults (see [Family defaults](#family-defaults-intent-and---profile)); the
-table's defaults apply as-is only with `--no-family-defaults`, or where the
-family sets no value.
-
-| Flag | Default | Meaning |
-|------|---------|---------|
-| `gguf` (positional) | - | Path to the GGUF (sharded ok). |
-| `--prompt STR` | `Hello, world!` | Generation prompt. |
-| `--prompt-file PATH` | - | Read the prompt from a file (mutually exclusive with `--prompt`). Applies in every mode: generate, VLM, bench, `--report-only`. |
-| `--max-tokens N` | until EOS | Decode-token cap; unset, generation runs until the model stops (diffusion models fall back to a bounded 2048-token canvas). Pass N to cap the reply; the MTP and VLM paths note on stderr when the cap - not the model - ended it (the plain text path cannot tell the two apart). |
-| `--temp F` | `0.0` | Sampling temperature; `0.0` = greedy. Unset, the family default applies instead. |
-| `--top-p F` | `0.95` | Nucleus sampling. |
-| `--top-k N` | `0` | Top-k (`0` = off). |
-| `--min-p F` | `0.05` | Min-p sampling. |
-| `--repetition-penalty F` | `0.0` | Repetition penalty (`0.0` = off). |
-| `--presence-penalty F` | `0.0` | Presence penalty (`0.0` = off). |
-| `--frequency-penalty F` | `0.0` | Frequency penalty (`0.0` = off). |
-| `--seed N` | - | PRNG seed for reproducible sampling. |
-| `-v` / `--verbose` | off | Full load diagnostics instead of the progress spinner. |
-| `--system-prompt STR` | - | System message for the chat template. |
-| `--reasoning {show,hide,raw}` | `show` | How a thinking model's reasoning is displayed, same as chat: `show` styles it under a `thinking` label and strips the control markers, `hide` collapses it to the elapsed/token payoff line, `raw` streams everything verbatim. Display-only: image/audio requests print raw. |
-| `--chat-template-config JSON` | - | Extra chat-template kwargs, e.g. `'{"enable_thinking": false}'`. |
-| `--thinking {on,off,adaptive}` | - | Reasoning switch, mapped onto whatever variable this model's chat template reads (`enable_thinking`, Kimi K2.x `thinking`, MiniMax `thinking_mode`, Hy3 `reasoning_effort: no_think`). `adaptive` is MiniMax-only. |
-| `--reasoning-effort LEVEL` | - | Reasoning depth for models that grade it (gpt-oss/GLM `low`/`medium`/`high`, Hy3 `no_think`/`low`/`high`, DeepSeek-V4 `high`/`max`); the model's template validates the level. |
-| `--xtc-probability F` / `--xtc-threshold F` | `0.0` | XTC sampling (text path). |
-| `--repetition-context-size N` | `20` | How many recent tokens the repetition penalty considers. |
-| `--logit-bias JSON` | - | Token-id to bias map, e.g. `'{"128001": -100}'`. |
-| `--stop STR` | - | Stop sequence; generation ends (trimmed) when it appears. Repeatable. |
-| `--max-kv-size N` | - | Cap the KV cache (rotating cache above it). |
-| `--kv-bits N` / `--kv-group-size N` / `--quantized-kv-start N` | off / `64` / `0` | Quantize the KV cache. A per-stack policy decides layer by layer: growing attention KV quantizes (the last layer of a deep stack stays fp16), sliding windows and recurrent state stay fp16, pooled caches pack at rest. One `[kv]` line reports the verdict, e.g. `quantized 27/28 attn layers (1 held fp16)`, or `dropped:` with the reason when nothing can quantize. Cannot combine with `--max-kv-size` (refused at start). |
-| `--prefill-step-size N` | `2048` / `8192` streaming | Prefill chunk size; lower it to cap peak memory on long prompts. Over-RAM streaming `--stream-cpu` / `--stream-experts` models default to `8192`: each chunk re-streams the expert lane from disk, so fewer, bigger chunks prefill faster. Applies to `run`, `--bench`, and `--bench-depths`. |
-
-### Multimodal (VLM)
-
-Supported families, usage, and caveats: [docs/vlm.md](vlm.md).
-
-| Flag | Meaning |
-|------|---------|
-| `--mmproj PATH` | Float vision/audio projector GGUF (`general.architecture=clip`); pairs with the K-quant LLM GGUF to load a VLM. The image processor and chat template are synthesized from the GGUFs. |
-| `--image PATH\|URL` | Image(s) to prepend to the prompt (comma-separated for several). |
-| `--audio PATH\|URL` | Audio to prepend (comma-separated for several). Requires an omni mmproj with an audio tower. |
-| `--resize-shape N\|WxH` | Resize images before encoding (e.g. `448` or `672x448`). Controls the soft-token count, a big prefill-cost lever. |
-| `--thinking-budget N` | Cap thinking tokens (VLM generate path). |
-| `--thinking-start-token STR` / `--thinking-end-token STR` | Reasoning markers, when the model's spelling is not detected from its template. The end tag is what the budget forces. |
-
-`run --mmproj` honours the full sampling surface from the table above
-(`--top-p`/`--top-k`/`--min-p`, the repetition/presence/frequency penalties,
-`--logit-bias`, `--seed`, `--system-prompt`, `--chat-template-config`) plus the
-KV-cache and prefill flags. `--stop` and `--xtc-*` remain text-path-only, since
-mlx-vlm's generate path has no seam for them; passing them with `--mmproj`
-prints a one-line `ignored in VLM mode (text-only)` warning. Flags with no VLM
-plumbing at all (`--bench`, `--bench-depths`, `--report-only`, `--stream-cpu`,
-`--stream-experts`) error with `--mmproj` (exit `2`) instead of silently
-falling back to plain text generation.
-
-A text-only request under `--mmproj` runs through the MTP speculative path
-whenever a drafter is available: a `--draft-gguf` assistant (gemma4,
-muse-glimmer, a DFlash 2 drafter) or a native `nextn` head in the LLM GGUF
-(qwen3.5/3.6/3.8, no companion needed). The verify walk only touches the language model, so a
-resident VLM gets the decode speedup on text turns, token-identical to the same
-model's text-only MTP. An image or audio request uses the plain VLM path; the
-drafter is idle that turn.
-
-### Speculative / MTP
-
-Native-head GGUFs (qwen3.5/3.6 `nextn`) auto-enable MTP speculative decoding,
-no flag needed, and you'll see `[mtp] native MTP head detected -> speculative
-decoding on`. Auto only engages when it changes nothing you asked for: if you
-set a flag the verify walk can't honour (below), it defers to plain decoding
-and says so. `--speculative`/`--mtp` forces the path on (dropping those flags
-with a warning); `--no-speculative`/`--no-mtp` forces it off.
-
-| Flag | Meaning |
-|------|---------|
-| `--speculative` / `--mtp` | Force MTP speculative decoding on. Native-head models (qwen3.5/3.6/3.8 `nextn`) need no companion; gemma4 and muse-glimmer need `--draft-gguf`. Native heads are auto-enabled without this. Use it to force the path when a sampler flag would otherwise defer. |
-| `--native-mtp` | Draft with the GGUF's own `nextn` head even when a `--draft-gguf` or config `draft_gguf` companion is set (a configured companion otherwise wins). Exit `2` if the GGUF has no head. |
-| `--no-speculative` / `--no-mtp` | Disable MTP. Overrides the native-head auto-enable and config `speculative: true`. |
-| `--draft-gguf PATH` | Separate assistant-drafter GGUF (gemma4 two-GGUF MTP shape, a muse-glimmer DFlash drafter, a DFlash 2 drafter for qwen3.8 or muse-glimmer, a deepseek4 DSpark/MTP sidecar - gmlx `deepseek4-dspark`, llama.cpp `dflash`, or legacy `deepseek4_mtp_support` - or a `qwen4exp-mtp` head for Qwen3.8-Flash-Next); implies `--speculative` (same as `serve`). A deepseek4, muse-glimmer, or qwen4exp sidecar in the target's directory is autodetected without the flag; a native-head target stays on its head and names a sibling drafter it found. |
-| `--draft-block-size N` | MTP draft tokens per round. Raises or lowers the drafter's own default, up to the deepest block it can produce. |
-
-Speculative generation takes only `--temp`/`--top-p`/`--top-k`/`--min-p` plus a
-baked `--system-prompt`; mlx-vlm's verify walk has no stop/bias/penalty/KV
-hooks. A native head is sticky: MTP auto-enables and stays on. Flags the verify
-walk can't honour (`--stop`, `--logit-bias`, the
-repetition/presence/frequency penalties, `--xtc-probability`, `--max-kv-size`,
-`--quantized-kv-start`) are dropped, each named in a warning, never silently. To
-apply one of those flags, pass `--no-mtp` to decode on the plain path, which
-honours it exactly. `--kv-bits` applies on the MTP path and quantizes the same
-layers `serve` quantizes; the two stock verify walks cannot, and the `[kv]`
-line gives the reason. Only hard-incompatible flags (`--mmproj`, `--adapter`,
-`--stream-cpu`, and the lossy `--moe-*` levers) make auto-enable step aside to
-plain decoding; an explicit `--speculative` with one of these errors out.
-`--stream-experts` is the exception: streaming composes with MTP, but
-auto-MTP defers under it - pass `--speculative` to opt in
-([streaming.md](streaming.md)). `chat` also keeps `--stop` via a post-hoc stream filter.
-
-### Adapter (LoRA)
-
-| Flag | Meaning |
-|------|---------|
-| `--adapter PATH` | Apply a GGUF LoRA adapter live over the base at load; the base stays K-quant, no merge, no requant. Text path only (not `--mmproj` / `--speculative`). Train one with [`gmlx train`](#gmlx-train). |
+Scans your model directories and writes a starter config. Run bare on a
+terminal it opens a wizard that lets you rename models, set a default and
+aliases, and enable the prompt cache and the speech, embedding and rerank
+services. With flags it writes the file without asking.
 
 ```sh
-gmlx run model.gguf --adapter pirate-lora.gguf --prompt "What's the weather like today?"
-```
-
-### Loading
-
-| Flag | Meaning |
-|------|---------|
-| `--arch NAME` | Override architecture detection. |
-| `--config FILE` | Server config to resolve the positional against when it isn't a file on disk (default: the first existing default config). See [Resolving a model from a config](#resolving-a-model-from-a-config). |
-| `--profile NAME` | Apply a built-in intent (`coding`, `instruct`, `creative`, `reasoning-low\|-medium\|-high`) or, on the config path, any user profile. Same as a `@NAME` suffix on the positional. See [Family defaults](#family-defaults-intent-and---profile). |
-| `--no-family-defaults` | Don't seed the family's model-card sampling on a bare-path run (env: `GMLX_NO_FAMILY_DEFAULTS=1`). |
-| `--hf-source ID\|DIR` | Load config (and, with `--mmproj`, the image processor and chat template) from this HF id / local dir instead of synthesizing from GGUF metadata. |
-| `--chat-template STR\|PATH` | Inline Jinja template, or a path to a `.jinja`/`.txt` file, replacing the GGUF's. |
-| `--no-chat-template` | Pass the prompt verbatim (base / non-instruct models). |
-| `--no-remap` | Skip the GGUF-to-HF name remap (raw GGUF names). |
-| `--no-zero-copy` | `memcpy` tensors out of the mmap instead of viewing them. |
-| `--stream-cpu` | Run the whole model on the CPU device: the over-RAM MoE path kept entirely on one device. Weights stay mmap-backed so the page cache streams them from disk; past the GPU wired budget the runtime adds sequential expert prefetch (`GMLX_STREAM_PREFETCH=0` disables) and a wider default prefill chunk (8192). When and why: [streaming.md](streaming.md). |
-| `--stream-experts` | Routed-expert stacks stream from disk while the every-token layers (attention, norms, routers, shared experts) and the KV cache stay on GPU. With the decode feeder (default) it matches `--stream-cpu` on short generations and pulls ahead as the arena warms; a quantized KV cache (`--kv-bits`) extends the win to long context. Mutually exclusive with `--stream-cpu`. Details: [streaming.md](streaming.md). |
-| `--moe-experts K` | Lossy: cap the router at K experts per token on the streamed MoE layers (`--stream-experts` / `--stream-cpu`). Scoring and weight renormalization run unchanged at the new k, but outputs differ from the trained model by design. Composes with `--moe-expert-mass`. |
-| `--moe-expert-mass P` | Lossy, adaptive: per token, keep only the smallest set of routed experts covering share P (0 < P <= 1) of the router's gate mass - confident tokens read fewer expert bytes, uncertain tokens keep the full fan-out. Choosing P: [streaming.md](streaming.md). |
-| `--moe-expert-probe` | Lossless companion to `--moe-expert-mass`: run at the trained fan-out while recording how many experts each token needed at candidate P values; prints decode and prefill tables (experts/token, expert-read fraction, dropped mass per P) at exit - size P from the decode table. |
-| `--[no-]prefill-feeder` | Streaming models (`--stream-cpu` / `--stream-experts` past the wired budget): stage each prefill layer's expert stacks straight from the GGUF into GPU-visible ring slots, not through the page cache. One trip per byte. Short prompts stage only the experts the router chose. Default on. `--no-prefill-feeder` falls back to page-cache prefetch. A load whose two ring slots (the largest layer's expert stacks) exceed the decode arena budget falls back the same way. Details: [streaming.md](streaming.md). |
-| `--[no-]decode-feeder` | Streaming `--stream-experts` models: serve decode from a wired, popularity-managed GPU expert arena; misses read from the GGUF at SSD queue depth. Default on for `--stream-experts` (needs the every-token layers on GPU, so never under `--stream-cpu`); `GMLX_DECODE_ARENA_GB` caps the arena size. Details: [streaming.md](streaming.md). |
-| `--moe-miss-shed P` | Lossy: at decode, drop routed experts that would demand-miss the expert arena, lowest scores first, keeping at least share P (0 < P <= 1) of each token's gate mass - the budget is spent only where a disk stall is otherwise certain, and an arena-resident or prestage-inflight expert is never dropped. Needs the decode feeder. Composes with `--moe-expert-mass`. Choosing P: [streaming.md](streaming.md). |
-| `--moe-layer-shed P` | Lossy: at decode, skip a streamed MoE layer's routed experts entirely with probability P (0 < P < 1) per token; the layer's shared expert still runs. The only lever that also cuts the fixed per-layer overhead. Details: [streaming.md](streaming.md). |
-| `--gpu-keepwarm` | Hold GPU clocks up during streamed decode with a tiny background heartbeat kernel: streamed decode idles the GPU between per-layer bursts and each burst pays the clock ramp back; the heartbeat removes that. Lossless; costs a few watts while decoding; parks after `GMLX_KEEPWARM_IDLE_S` seconds without decode (default 1). Default on for streamed installs; `GMLX_GPU_KEEPWARM=0` disables. Details: [streaming.md](streaming.md). |
-
-### Resolving a model from a config
-
-The `gguf` positional is normally a path. When it isn't a file on disk (a bare
-name, no `/`, no `.gguf`, not an `hf:`/`http(s):` ref), it's looked up as a
-model id or alias in your server config, the same `models:`/`aliases:` blocks
-[`serve`](#gmlx-serve) uses (see [server-config.md](server-config.md)). On a
-match, the model's resolved path and its merged profile/override settings are
-overlaid onto the run: sampling (`temp`, `top-p`, `top-k`, `min-p`, penalties,
-`max-tokens`, `stop`, `seed`, XTC), KV-cache
-(`kv-bits`/`kv-group-size`/`max-kv-size`/`quantized-kv-start`), `system`,
-`chat_template`, `enable_thinking`, the thinking keys (`thinking_budget`,
-`thinking_start_token`, `thinking_end_token`), `mmproj`, `adapter`,
-speculative/draft, and
-`stream` placement. Flags you pass explicitly always win; the config only
-fills what you left at its default. Models defined as `hf:` paths resolve to
-their local Hugging Face cache file (offline; `gmlx pull` them first). The
-config is the first existing default location unless `--config FILE` points
-elsewhere.
-
-```sh
-# 'coder' is a model id (or alias) in your config; its path + sampling/template apply
-gmlx run coder --prompt "Refactor this loop."
-
-# explicit --temp overrides the profile's; everything else still comes from the config
-gmlx run coder --prompt "Be creative." --temp 1.0
-```
-
-A name that matches nothing falls through to the normal file-miss error, so a
-typo'd path never silently reads a config. A config `name@profile` with an
-unknown profile fails listing the available ones. On a bare path only the
-built-in intents are recognized after `@`; anything else is treated as part of
-the filename.
-
-#### Family defaults, `@intent`, and `--profile`
-
-Sampling is model-aware even with no config at all: a bare-path run reads the
-GGUF header, detects the model's family, and seeds its model-card recommended
-defaults. Qwen3.6, Gemma, and gpt-oss each publish different numbers. The
-applied values print on one `[family]` line, and explicit flags always win.
-The built-in intents (`coding`, `instruct`, `creative`,
-`reasoning-low|-medium|-high`) are addressable on paths and config ids alike,
-via an `@intent` suffix or `--profile NAME`, which also takes any user profile
-on the config path. `gmlx profiles` prints the full table; see
-[server-config.md](server-config.md#profiles).
-
-```sh
-gmlx run model.gguf -p "..."                    # family base defaults applied
-gmlx run model.gguf@creative -p "..."           # the family's creative point
-gmlx chat model.gguf --profile reasoning-high   # gpt-oss reasoning effort
-gmlx launch pi --model qwen3.6-27b@coding       # a coding harness on the coding point
-gmlx run model.gguf --temp 0 -p "..."           # explicit flag wins (greedy)
-gmlx run model.gguf --no-family-defaults -p "..."   # opt out (or GMLX_NO_FAMILY_DEFAULTS=1)
-```
-
-### Inspect & benchmark
-
-| Flag | Default | Meaning |
-|------|---------|---------|
-| `--report-only` | - | Load and print the inventory (and rendered prompt); skip the model build. |
-| `--bench LIST` | - | Comma-separated prompt lengths (e.g. `512,4096,16384`); prints a prefill/decode tok/s table. |
-| `--bench-depths LIST` | - | Comma-separated context depths; prints decode tok/s at each depth (with `--speculative`, also accept rate and speedup). |
-| `--bench-runs N` | `2` | Timed runs per length; best (max tok/s) reported. |
-| `--bench-decode-tokens N` | `32`/`128` | Decode tokens per bench run (`--bench` default 32, `--bench-depths` default 128). |
-| `--bench-temp T` | `0.0` | Sampling temperature for speculative bench runs (`0.0` = greedy). |
-| `--bench-chat-dataset DATASET` | - | HF chat dataset for bench prompts (`id` or `id:split`); chat-templated prompts give representative MTP acceptance on instruct models. Default: synthetic prompts. |
-
-Exit code `0` = success, `1` = load refusal (unsupported codec/arch), `2` =
-usage/file errors (bad flag combination, missing file), `130` = interrupted.
-
----
-
-## `gmlx chat`
-
-Interactive chat REPL on a GGUF. The model loads once (same loader path as
-`run`) and the conversation runs over a persistent prompt cache, so each turn
-prefills only the new message. Each reply ends with a one-line stat: prompt and
-decode tok/s, MTP acceptance when speculating, and context fill
-(`ctx 4.1k/32k`).
-
-```sh
-gmlx chat model.gguf --temp 0.7 --system-prompt "You are terse."
-gmlx chat --assistant                 # the tool-loop assistant on the managed server
-gmlx chat --server                    # plain server client, no assistant extras
-```
-
-With `--assistant` the REPL loads nothing locally: turns run through the
-built-in tool-loop assistant on the managed (auto-started) server, with MCP
-tools and long-term memory from the config's `assistant:` block. The
-positional becomes a served model id (or is omitted for the server default).
-`/memory` lists and edits the stored facts. The terminal experience is
-unchanged; local-load flags do not apply. Full contract:
-[assistant.md](assistant.md#text-chat-gmlx-chat---assistant).
-
-`--server` is the same server-backed REPL minus the assistant extras: no
-tools, no memory store, no config `assistant:` block, just plain streamed
-turns against the served model. Use it when the terminal should be a thin
-client and every server request should come from the conversation itself.
-
-When the config's server is already running, a bare `gmlx chat` (or one
-naming a served model id) becomes a `--server` client automatically
-instead of loading a second copy in-process; `--local` forces the local
-load, and any local-load flag does the same. An explicit GGUF path always
-loads the file on disk - if the running server serves that same file, a
-note points at the served id. Chat never auto-starts a server this way.
-
-The REPL's slash commands, sessions and rendering are described in
-[chat.md](chat.md).
-
-| Flag | Default | Meaning |
-|------|---------|---------|
-| `gguf` (positional) | - | Path to the GGUF (sharded ok) or a config model id; with `--assistant`/`--server`, a served model id (optional: server default). |
-| `--assistant` | - | Chat through the built-in tool-loop assistant on the managed server: MCP tools + long-term memory from the `assistant:` block ([assistant.md](assistant.md)). Local-load flags don't apply. |
-| `--server` | - | Plain server client: the `--assistant` REPL minus tools, memory, and the config `assistant:` block. Automatic when the config's server is up and serves the request. |
-| `--local` | - | Load in-process even when the config's server is running (skips the automatic `--server` mode). |
-| `--base-url URL` / `--host` / `--port` / `--api-key` | managed server | Server modes: target server (as in [`talk`](#gmlx-talk)). |
-| `--no-start` / `--start-timeout S` | - / `180` | Server modes: never auto-start the server / auto-start wait. |
-| `--max-tokens N` | until EOS | Per-reply decode-token cap; default `0` = each reply runs until the model stops (diffusion models fall back to a bounded 2048-token canvas; in `--assistant` mode `0` defers to the server's own default). Pass N to cap (adjustable via `/max-tokens`; `0` removes the cap, and a note says when the cap ended a reply). |
-| `--temp` / `--top-p` / `--top-k` / `--min-p` | family default | Sampling; unset flags seed from the model's [family defaults](#family-defaults-intent-and---profile) (`0.0`/`0.95`/`0`/`0.05` under `--no-family-defaults`). All adjustable in-chat. |
-| `--xtc-probability` / `--xtc-threshold` | `0.0` | XTC sampling (text path, adjustable in-chat). |
-| `--repetition-penalty` / `--presence-penalty` / `--frequency-penalty` | `0.0` | Penalties (`0` = off, adjustable in-chat). |
-| `--repetition-context-size N` | `20` | Penalty lookback window (adjustable in-chat). |
-| `--logit-bias JSON` | - | Token-id to bias map. |
-| `--stop STR` | - | Stop sequence (trimmed; repeatable). |
-| `--kv-bits` / `--kv-group-size` / `--quantized-kv-start` | off / `64` / `0` | KV-cache quantization, same per-stack policy and `[kv]` verdict line as `run`; cannot combine with `--max-kv-size`. |
-| `--prefill-step-size N` | `2048` / `8192` streaming | Prefill chunk size (peak-memory cap for `/load`-ed long prompts). Streaming `--stream-cpu` / `--stream-experts` models default to `8192`, same as `run`. |
-| `--stream-cpu` / `--stream-experts` / `--moe-experts` / `--moe-expert-mass` / `--moe-expert-probe` / `--moe-miss-shed` / `--moe-layer-shed` / `--gpu-keepwarm` | - | Execution placement and lossy MoE fan-out, same as [`run`](#loading), including larger-than-RAM streaming `--stream-cpu` chat (text path only). |
-| `--resize-shape N\|WxH` / `--thinking-budget N` | - | Image resolution (soft-token count, VLM mode) / thinking-token cap (text + VLM; adjustable via `/thinking-budget`). |
-| `--thinking-start-token STR` / `--thinking-end-token STR` | detected | Reasoning markers, for a model whose spelling the template probe misses. |
-| `--reasoning {show,hide,raw}` | `show` | How a thinking model's reasoning is displayed: gutter-framed with payoff, collapsed spinner, or verbatim. Live toggle: Ctrl-O or `/reasoning`. |
-| `--render {auto,plain,lite,rich}` | `auto` | Reply markdown rendering (`auto`: rich when installed on a color TTY). Switch live with `/render`. |
-| `--theme NAME` | `dark` | Color theme (`dark`, `light`, `dark-hc`, `nord`, `dracula`, `solarized-dark`, `gruvbox`). Switch live with `/theme`. |
-| `--colorblind` | - | Colorblind-friendly accents (Okabe-Ito) for any theme. |
-| `--seed N` | - | PRNG seed for reproducible sampling. |
-| `-v` / `--verbose` | off | Full load diagnostics instead of the progress spinner. |
-| `--system-prompt STR` | - | System message, sent on the first turn (and after each reset; adjustable via `/system`). |
-| `--chat-template-config JSON` | - | Extra chat-template kwargs, e.g. `'{"enable_thinking": false}'`. |
-| `--thinking` / `--reasoning-effort` | - | Reasoning switch and depth, mapped onto this model's own template spelling, same as [`run`](#generation). |
-| `--max-kv-size N` | - | Cap the KV cache (rotating cache above it). |
-| `--no-history` | - | Don't read or write the prompt-history file. |
-| `--no-autosave` | - | Don't autosave the session after each turn. |
-| `--resume [NAME]` | - | Resume a saved session (default: this model's latest). |
-| `--adapter PATH` | - | GGUF LoRA adapter applied live over the base (text path only). |
-| `--speculative`/`--mtp` / `--draft-gguf PATH` / `--native-mtp` / `--draft-block-size N` / `--no-speculative`/`--no-mtp` | - | MTP speculative decoding, same surface as [`run`](#speculative--mtp): native-head qwen3.5/3.6/3.8 needs no companion, gemma4 needs `--draft-gguf`. With `--mmproj` (a VLM with a drafter), text-only turns take the MTP path and media turns fall back to VLM. Not combinable with `--adapter`/`--stream-*`. |
-| `--mmproj PATH` | - | Vision/audio projector GGUF; enables multimodal chat (`/image`, `/audio`, drag-and-drop). |
-| `--arch` / `--hf-source` / `--chat-template` / `--no-remap` / `--no-zero-copy` | - | Loading flags, same as [`run`](#loading). |
-| `--no-chat-template` | - | Send each turn verbatim, applying no chat template (base / non-instruct GGUFs that carry no template). Plain-text models only. |
-| `--config FILE` | - | Resolve the positional against a server config when it isn't a file; same id/alias lookup and settings overlay as [`run`](#resolving-a-model-from-a-config). |
-| `--profile NAME` / `--no-family-defaults` | - | Intent/profile selection and family-defaults opt-out, same as [`run`](#family-defaults-intent-and---profile). |
-
-A base GGUF with no chat template refuses to start; pass one with
-`--chat-template`, or `--no-chat-template` to send turns verbatim.
-
-`gmlx chat coder` works the same as `run`: a bare name that isn't a file is
-resolved from the config, and that model's sampling / `system` /
-`chat_template` settings seed the session (still adjustable in-chat). See
-[Resolving a model from a config](#resolving-a-model-from-a-config).
-
----
-
-## `gmlx talk`
-
-Voice chat with a served model: say the wake phrase, speak, and the reply
-streams back as speech. It is a client of the server's existing endpoints
-(STT + chat + TTS), so it needs `stt:` and `tts:` in the server config and
-`pip install 'gmlx[talk]'`; it starts the background server when it's
-down. The full guide, covering setup, the `talk:` config block, latency
-tuning, and the in-session keys and `/commands`, is [talk.md](talk.md).
-
-```sh
-gmlx talk                                     # wake mode: listens for "hey assistant"
-gmlx talk qwen3                               # talk to a specific served model
-gmlx talk --wake-word "okay computer" --voice bf_emma
-gmlx talk --mode vad                          # open mic: any speech starts a turn
-gmlx talk --once                              # one exchange, then exit
+gmlx init                                  # the wizard
+gmlx init --models-dir ~/models            # flag-driven, writes ~/.config/gmlx/gmlx.yaml
+gmlx init --models-dir ~/models -r --out ./gmlx.yaml
+gmlx init --from-hf-cache                  # models already in the Hugging Face cache
 ```
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `model` (positional) | `talk.model`, else server default | Served model id[@profile] to talk to. |
-| `--voice NAME` / `--list-voices` | server default | TTS voice / list the server's voices. |
-| `--speed X` | `1.0` | Speech speed (0.25-4). |
-| `--mode {wake,vad,ptt,text}` | `wake` | Listening mode (`--once` skips the wake gate: speak immediately, one exchange). |
-| `--wake-word PHRASE` / `--wake-threshold X` | `hey assistant` / `0.5` | Any text phrase, no training; higher threshold = fewer false fires. |
-| `--vad-threshold` / `--vad-silence-ms` / `--min-speech-ms` | `0.6` / `550` / `300` | Endpointing knobs. |
-| `--input-device` / `--output-device` / `--list-devices` | system default | Audio devices (name substring or index). |
-| `--system TEXT` / `--language L` / `--max-tokens N` | - / - / until EOS | Spoken persona / whisper hint / reply cap (unset: replies run until the model stops). |
-| `--no-chime` | - | Disable the wake/idle earcons. |
-| `--brain {chat,assistant}` | config `talk.brain`, else `chat` | Turn engine: plain chat, or the built-in assistant with MCP tools and long-term memory ([assistant.md](assistant.md); tools need `pip install 'gmlx[assistant]'`). |
-| `--base-url URL` / `--host` / `--port` / `--api-key` | managed server | Target server (a remote `--base-url` runs STT/TTS there). |
-| `--no-start` / `--start-timeout S` | - / `180` | Don't autostart the server / autostart wait. |
-| `--config PATH` | default locations | YAML with the `talk:` block (flags override it). |
+| `--models-dir DIR` | required unless `--from-hf-cache` | directory to scan, repeatable |
+| `--from-hf-cache`, `--hf-cache` | off | also scan the local Hugging Face cache and write portable `hf:` entries |
+| `-r`, `--recursive`, `--no-recursive` | shallow | descend into subdirectories |
+| `--out FILE` | `~/.config/gmlx/gmlx.yaml` | where to write |
+| `--force` | off | overwrite an existing file |
+| `-i`, `--interactive` | on a terminal | run the wizard even with flags, which pre-seed its answers |
+| `--no-interactive` | off | never run the wizard |
+| `--disk-cache [GB]` | off | enable the on-disk prompt cache, capped per model; bare is 50 GB |
+| `--with-stt [MODEL]` | off | configure speech-to-text; bare is `whisper-turbo` |
+| `--with-tts [MODEL]` | off | configure text-to-speech; bare is `kokoro` |
+| `--with-embeddings [MODEL]` | off | configure embeddings; bare is `qwen3-embed-0.6b` |
+| `--with-rerank [MODEL]` | off | configure reranking; bare is `qwen3-rerank-0.6b` |
+| `--install`, `--no-install` | ask | install the extras the chosen services need, or never offer to |
+| `--default-model ID` | none | the model used when a request omits one |
+| `--port N` | `8080` | the port to write |
+| `--idle-ttl SECONDS` | `900` | idle seconds before a model unloads; `none` keeps models resident |
+| `--request-timeout DURATION` | `30m` in the written file | give up when no token arrives for this long, such as `10m` or `1h`; `none` waits forever |
+| `--no-reload` | off | do not signal a running server to re-read the file |
 
----
+Auto-named ids carry the quant in compact form, such as `qwen3-0.6b-q4`,
+and fall back to the full codec when two quants would collide. An empty
+directory is fine; the result is a valid config with no models. When a
+server is already running the config you rewrote, `init` signals it to
+reload. See [getting-started.md](getting-started.md#set-up-the-server) for
+the walkthrough and [server-config.md](server-config.md) for the file it
+writes.
 
-## `gmlx serve`
+## gmlx serve
 
-The platform's server: continuously batched, multi-model, OpenAI/Anthropic-
-compatible (text + VLM + MTP), serving a config of named models and profiles. Every model's sampling starts from its family's
-model-card defaults, and a request can address `id@intent`; see
-[server-config.md profiles](server-config.md#profiles).
-Config-defined assistant ids (`server.assistants:`) answer through the
-built-in server-side tool loop ([assistant.md](assistant.md#served-assistants)).
-The full config surface and the start-mode semantics live in
-[server-config.md](server-config.md); this is the command-line summary.
+Runs the server. It detaches by default and returns at once, so the same
+shell can go on to `gmlx launch`; pass `--foreground` to stay attached. A
+background server keeps a runfile and a log under `~/.cache/gmlx/` and, on a
+macOS desktop session, raises the [menu bar app](menubar.md).
 
 ```sh
-gmlx serve       [model.gguf] [options]
-gmlx init                                   # guided wizard (bare, on a terminal)
-gmlx init        (--models-dir DIR | --from-hf-cache) [--port N] [--disk-cache [GB]] [--with-stt|--with-tts|--with-embeddings [MODEL]|--with-rerank [MODEL]] [--idle-ttl T] [--request-timeout T] [--out FILE] [-r] [--force]
-gmlx sync-models [--config FILE] [--models-dir DIR] [--from-hf-cache] [--no-recursive] [--dry-run]
-gmlx launch      <harness> [options]
-```
-
-```sh
-# single model (pinned, id derived from the filename)
-gmlx serve model-Q4_K_M.gguf
-
-# a config of named models + profiles
-gmlx serve --config ~/.config/gmlx/gmlx.yaml
-
-# discovery-scan a directory, no config file
+gmlx serve                                  # the config in the default location
+gmlx serve --config ./gmlx.yaml
 gmlx serve --models-dir ~/models --recursive
-
-# a single VLM (LLM GGUF + float mmproj)
-gmlx serve gemma-4-E4B-it-Q6_K.gguf --mmproj mmproj-gemma-4-E4B-it-bf16.gguf
-
-# a single native-head MTP model
-gmlx serve Qwen3.6-27B-Q4_K_S.gguf --speculative
+gmlx serve model-Q4_K_M.gguf                # one model, id from the filename
+gmlx serve model.gguf --mmproj mmproj.gguf  # one vision model
 ```
 
-### Serve flags
+The flags that end in "single model" apply to a positional GGUF only. In
+config mode the same setting is a per-model key in
+[server-config.md](server-config.md#models).
 
-| Flag | Meaning |
-|------|---------|
-| `model` (positional) | A single GGUF to serve (sharded ok). Mutually exclusive with `--config`/`--models-dir`. |
-| `--config FILE` | Serve a YAML config (named models + profiles). Enables `POST /v1/reload`. |
-| `--print-config` | Resolve the effective config for the chosen start mode (config / discovery / single model), print it as YAML with every key and default filled in, and exit without serving. Use it to introspect the schema or sanity-check a config. |
-| `--models-dir DIR` | Serve a header-only discovery scan of a directory (repeatable). |
-| `-r`, `--recursive` / `--no-recursive` | Recurse into subdirectories when discovering (default: shallow). |
-| `--hf-cache` (alias `--from-hf-cache`) | Resolve named hf repo ids from the local hf cache only (never the network). Off means no HF access at all. |
-| `--mmproj PATH` | Float mmproj GGUF; makes a single positional model a VLM. |
-| `--hf-source REPO` | Processor/config override for a single VLM model (rarely needed). |
-| `--speculative` | Serve a single positional model with MTP (native-head qwen3.5/3.6/3.8; gemma4 also needs `--draft-gguf`). |
-| `--draft-gguf PATH` | Companion drafter GGUF for assistant-shape MTP (gemma4, DFlash, DFlash 2); implies `--speculative`. |
-| `--native-mtp` | Draft with the model's own head even when `--draft-gguf` is set; same as the per-model `native_mtp` config key. |
-| `--draft-block-size N` | MTP draft tokens per round (analogous to llama-server `--spec-draft-n-max`). Raises or lowers the drafter's own default, up to the deepest block it can produce (a deeper request clamps, with a warning). Also via `GMLX_DRAFT_BLOCK_SIZE`. |
-| `--adapter PATH` | GGUF LoRA adapter applied live over a single positional model at load (text only, not `--mmproj`/`--speculative`). In config mode set `adapter:` per model instead. |
-| `--stream-cpu` | Run a single positional model entirely on the CPU device: the over-RAM MoE path, same semantics as [`run --stream-cpu`](#loading). In config mode set `stream: cpu` per model instead; see [server-config.md](server-config.md#models). |
-| `--stream-experts` | Routed-expert stacks stream from disk while the every-token layers and KV cache stay on GPU; the decode feeder (default) serves decode from a wired expert arena and makes this the faster placement once warm. Config mode: `stream: experts`. Mutually exclusive with `--stream-cpu`. |
-| `--moe-expert-mass P` | Lossy, adaptive experts-per-token for a single positional model on the streamed MoE layers (`--stream-experts` / `--stream-cpu`), same semantics as [`run --moe-expert-mass`](#loading). Size P with a `gmlx run --moe-expert-probe` pass first. Config mode: `moe_expert_mass: P` per model; see [server-config.md](server-config.md#models). |
-| `--moe-miss-shed P` | Lossy decode-side miss shed for a single positional model, same semantics as [`run --moe-miss-shed`](#loading). Config mode: `moe_miss_shed: P` per model; see [server-config.md](server-config.md#models). |
-| `--moe-layer-shed P` | Lossy per-token layer skip for a single positional model, same semantics as [`run --moe-layer-shed`](#loading). Config mode: `moe_layer_shed: P` per model. |
-| `--gpu-keepwarm` | Hold GPU clocks up while a streamed model decodes, same semantics as [`run --gpu-keepwarm`](#loading). Default on for streamed installs; `GMLX_GPU_KEEPWARM=0` disables (the flag and config `server.gpu_keepwarm` remain as explicit enables). |
-| `--chat-template STR\|PATH` | Inline Jinja, or a `.jinja`/`.txt` path, replacing a single positional model's GGUF template. In config mode set it per profile/model (`chat_template:` / `overrides: {chat_template: ...}`) instead; see [server-config.md](server-config.md). |
-| `--thinking {on,off,adaptive}` | Reasoning switch for a single positional model, mapped onto whatever variable its chat template reads (same mapping as [`run --thinking`](#generation)). Default: the template's own default. In config mode set `thinking:` per profile/model instead. |
-| `--thinking-budget N` | Cap a single positional model's thinking tokens per request; `0` closes thinking at once. A request's own `thinking_budget` still wins. In config mode set `thinking_budget:` in the profile/model `sampling:` block instead. |
-| `--host ADDR` | Bind address (default from config or `127.0.0.1`). A non-loopback host refuses to start without `server.api_key` unless `--no-auth` opts out. |
-| `--port N` | Port (default from config or `8080`). |
-| `-f`, `--foreground` | Run the server attached to this terminal (blocking) instead of the default detached background start. The background start returns at once (so `gmlx launch` works in the same shell), lands a runfile and log under `~/.cache/gmlx/`, and on a macOS GUI session also raises the [menu-bar monitor](#launch-menubar). Manage it with [`stop`/`restart`/`status`/`logs`](#background-mode--server-lifecycle). |
-| `--no-menubar` | Don't auto-start the macOS menu-bar monitor with a background server (same effect as `server.menubar: false`). |
-| `--log FILE` | Log file for a background server (default `~/.cache/gmlx/server-<host>-<port>.log`). Each background start rotates the previous run's log to `<file>.1`; a launchd agent's append-mode log is rotated at each `gmlx service install` once it passes 10 MB (launchd holds the file open between installs). |
-| `--log-level LEVEL` | Server log verbosity: `critical`, `error`, `warning`, `info` (default), `debug`, or `trace`. `debug`/`trace` add uvicorn's connection-level detail; survives background/launchd relaunches. |
-| `--start-timeout S` | How long a background start waits for the child to become ready before returning with a "still starting" note (default `40`). |
-| `--budget-gb F` | Resident weight-byte budget across all models (default 0.8x the GPU recommended working set). |
-| `--max-models N` | Optional secondary cap on resident model count. |
-| `--pin ID_OR_PATH` | Pin a model so it is never evicted (repeatable). |
-| `--max-tokens N` | Server default max completion tokens. |
-| `--ignore-eos` | Never stop on EOS; decode every request to `max_tokens` (forced-length throughput benchmarking; mirrors llama-server `--ignore-eos`). Also via `GMLX_IGNORE_EOS=1`. |
-| `--no-auth` | Serve a non-loopback bind without an API key: an explicit opt-out (config: `server.no_auth: true`) for setups that authenticate in front (mTLS, reverse proxy). Loopback binds never need it. |
-| `--stt [MODEL]` | Speech-to-text: serve `POST /v1/audio/transcriptions` via mlx-whisper (`pip install 'gmlx[stt]'`, ffmpeg on PATH). MODEL = an alias (`whisper-turbo`, `whisper-turbo-q4`, `whisper-large/medium/small/base/tiny`), any MLX-whisper HF repo, or a local dir. Bare `--stt` uses `whisper-turbo`. Overrides config `server.stt:`; see [server-config.md](services.md#speech-to-text-stt). |
-| `--tts [MODEL]` | Text-to-speech: serve `POST /v1/audio/speech` via mlx-audio (`pip install 'gmlx[tts]'`, ffmpeg on PATH for non-wav). MODEL = an alias (`kokoro`, `kokoro-8bit/4bit`, `qwen3-tts`), any MLX-audio HF repo, or a local dir. Bare `--tts` uses `kokoro`. Overrides config `server.tts:`; see [server-config.md](services.md#text-to-speech-tts). |
-| `--embeddings [MODEL]` | Text embeddings: serve `POST /v1/embeddings` (no extra needed; mlx-embeddings is a core dependency). Bare `--embeddings` uses `qwen3-embed-0.6b`; the MODEL forms are listed below the table. This is the local RAG embedder `gmlx launch open-webui` points at. Overrides config `server.embeddings:`; see [server-config.md](services.md#text-embeddings-embeddings). |
-| `--rerank [MODEL]` | Reranking: serve `POST /v1/rerank` (Cohere/Jina shape) from a Qwen3-Reranker GGUF (no extra needed). MODEL = an alias (`qwen3-rerank-0.6b`/`-4b`/`-8b`), a `*.gguf`, or `hf:.../*.gguf`. Bare `--rerank` uses `qwen3-rerank-0.6b`. This is the RAG second stage `gmlx launch open-webui` points at. Overrides config `server.rerank:`; see [server-config.md](services.md#reranking-rerank). |
+Where the models come from:
 
-For `--embeddings MODEL`, MODEL is either a GGUF embedder (decoder-LM alias
-`qwen3-embed-0.6b`/`-4b`/`-8b`, encoder alias `embeddinggemma-gguf`, a
-`*.gguf`, or `hf:.../*.gguf`) or an mlx-embeddings safetensors encoder (alias
-`embeddinggemma`/`arctic-l`/`nomic-embed`/`bge-m3`, any MLX-embeddings HF
-repo, or a local dir).
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `model` (positional) | none | one GGUF to serve, pinned, with the id derived from the filename |
+| `--config FILE` | the first default location | serve a YAML config |
+| `--models-dir DIR` | none | serve a scan of a directory, repeatable |
+| `-r`, `--recursive`, `--no-recursive` | shallow | descend when scanning |
+| `--hf-cache`, `--from-hf-cache` | off | let Hugging Face ids resolve from the local cache; never the network |
+| `--print-config` | off | print the resolved config as YAML and exit |
 
-VLM and MTP coexist: a resident VLM serves text-only requests through the MTP
-speculative path and image/audio requests through the plain VLM forward
-(gemma4 needs `--draft-gguf`; qwen3.5/3.6 use the native `nextn` head, no
-companion). In a config this is a model with both `mmproj:` and
-`speculative: true`; discovery (`speculative: auto`) turns it on automatically
-for a paired-mmproj model whose GGUF has a native head. `/v1/models` flags
-such a model `[mtp, vlm]`. `--adapter` on a VLM is still unsupported.
+Process and lifecycle:
 
-The API key is config-only: the server reads its key from `server.api_key` in
-the config, and nowhere else. There is no `serve --api-key` flag and no
-server-side `GMLX_API_KEY` fallback. That is a deliberate simplification:
-one key, in one file, readable by the lifecycle tools and the menu bar, never
-stored in a runfile. Loopback binds need no key; a non-loopback bind refuses
-to start without `server.api_key` unless `--no-auth`. Clients (`ps`, `status`,
-`launch`, `menubar`) still take `--api-key` to present a key. See
-[server-config.md](server-config.md).
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--host ADDR` | config or `127.0.0.1` | bind address; a non-loopback bind needs `server.api_key` or `--no-auth` |
+| `--port N` | config or `8080` | bind port |
+| `--no-auth` | off | allow a non-loopback bind with no key, for auth handled in front |
+| `-f`, `--foreground` | off | stay attached to the terminal |
+| `--no-menubar` | off | do not raise the menu bar app |
+| `--log FILE` | `~/.cache/gmlx/server-<host>-<port>.log` | the background log; each start rotates the last one to `.1` |
+| `--log-level LEVEL` | `info` | `critical`, `error`, `warning`, `info`, `debug` or `trace` |
+| `--start-timeout S` | `40` | seconds a background start waits for readiness before returning |
 
-### Background mode & server lifecycle
+Memory and scheduling, each also a `server` key:
 
-`serve` detaches by default and returns at once, so there is no second shell
-to run [`launch`](#launch-connect-a-coding-agent-or-chat-app) in; pass `-f` /
-`--foreground` to stay attached. State (a runfile and a log) lives under
-`~/.cache/gmlx/`, keyed by host and port, so several binds coexist. On a
-macOS GUI session the background start also raises the
-[menu-bar monitor](#launch-menubar) (disable with `--no-menubar` or
-`server.menubar: false`). With one managed server, the verbs below need no
-`--host/--port`; with several, pass them.
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--budget-gb F` | 0.8x the GPU working set | resident weight budget across all models |
+| `--max-models N` | none | cap on resident models |
+| `--pin ID_OR_PATH` | none | never evict this model, repeatable |
+| `--max-tokens N` | none | default completion cap |
+| `--prefill-step-size N` | `2048` | prefill chunk size in tokens; lower caps peak memory |
+| `--dtype {auto,bfloat16,float16}` | `auto` | activation width; `auto` is float16 on M1 and M2 |
+| `--decode-prefill-ratio R` | `auto` | GPU-time share prefill gets while streams decode; `0` is stock scheduling |
+| `--prefill-tick-ms MS` | `500` | wall-clock budget per prefill chunk while streams decode; `0` never halves |
+| `--ignore-eos` | off | decode every request to `max_tokens`, for throughput benchmarks |
 
-```sh
-gmlx serve --config ~/.config/gmlx/gmlx.yaml   # detaches + returns (add -f to stay attached)
-gmlx launch claude-code          # same shell (and starts the server if it isn't up)
-gmlx status                      # pid, uptime, url (no API key needed; uses /health)
-gmlx ps                          # resident models (needs the key on a key-protected server)
-gmlx logs -n 40 -f               # tail the server log; -f follows
-gmlx restart                     # relaunch with the original arguments
-gmlx stop                        # SIGTERM the process group, then SIGKILL after --timeout
-```
+Single-model settings, each also a per-model key:
 
-| Command | Meaning |
-|---------|---------|
-| `gmlx stop [--host H --port P] [--timeout S]` | Stop a backgrounded server: SIGTERM the whole process group, then SIGKILL after `--timeout` (default `15`, cutting any in-flight generation). Verifies the pid is ours before signalling; a stale runfile is just cleared. A bare `stop` also clears every other stale runfile it finds (dead or recycled pid) on its way to the live server, and reports them; `--stale` clears only those and signals nothing. |
-| `gmlx restart [...] [--start-timeout S]` | Stop, then relaunch with the runfile's recorded arguments (absolute `--config`, so it relaunches faithfully from any directory). |
-| `gmlx status [--json]` | Process-layer status: pid, uptime, url, log, how it's managed. No API key (uses the auth-exempt `/health`). Resident-model detail lives in `ps`. Stale runfiles are listed as such, with the reason (`pid N exited`, `pid N is now another process`) and age, and never make a bare verb ambiguous; `--json` puts them under `stale`. |
-| `gmlx logs [-n N] [-f] [--clear]` | Print the last `N` lines of the server log (`-n`/`--lines`). `-f`/`--follow` follows (`tail -f`); `--clear` truncates the file (keeps it). |
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--mmproj PATH` | none | the projector GGUF that makes the model multimodal |
+| `--hf-source REPO` | none | processor and config override for a vision model, rarely needed |
+| `--adapter PATH` | none | a GGUF LoRA adapter applied at load; text only |
+| `--chat-template STR_OR_PATH` | the GGUF's | inline Jinja or a `.jinja` or `.txt` file |
+| `--thinking {on,off,adaptive}` | template default | the reasoning switch, mapped to the model's template variable |
+| `--thinking-budget N` | unlimited | cap reasoning tokens per request; `0` closes thinking at once |
 
-Each completed generation request logs one timestamped line with the endpoint,
-model, token counts, and timing (`ttft`, `prefill`/`decode` tok/s, `total`):
+Speculative decoding:
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--speculative` | auto | speculate with the model's own MTP head or `--draft-gguf` |
+| `--draft-gguf PATH` | none | a separate drafter GGUF; implies `--speculative` |
+| `--native-mtp` | off | prefer the model's own head when `--draft-gguf` is also set |
+| `--draft-block-size N` | drafter default | draft tokens per round |
+| `--speculative-width-cap N` | per drafter | speculate only while at most N requests decode together; `0` uncapped |
+| `--stochastic-mtp` | off | accept sampled drafts by rejection sampling; more accepted, not token-identical |
+
+Streaming a model bigger than memory, explained in
+[streaming.md](streaming.md):
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--stream-experts` | off | stream the routed experts from disk; attention and KV cache stay on GPU |
+| `--stream-cpu` | off | run the whole model on the CPU device from the page cache |
+| `--prefill-feeder`, `--no-prefill-feeder` | on | stage expert prefill straight from the GGUF |
+| `--decode-feeder`, `--no-decode-feeder` | on under `--stream-experts` | decode from a wired, popularity-managed expert arena |
+| `--gpu-keepwarm` | on for streamed loads | hold GPU clocks up while a streamed model decodes |
+| `--moe-experts K` | trained | cap the router at K experts per token, lossy |
+| `--moe-expert-mass P` | off | keep the smallest expert set covering share P of gate mass, lossy |
+| `--moe-miss-shed P` | off | drop experts that would miss the arena down to share P, lossy |
+| `--moe-layer-shed P` | off | skip a streamed layer's experts with probability P, lossy |
+| `--moe-prestage {ranked,keepers}` | `ranked` | `keepers` filters prestage predictions through the miss-shed policy |
+
+Services, each also a `server` key and described in
+[services.md](services.md):
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--stt [MODEL]` | off | speech-to-text at `POST /v1/audio/transcriptions`; bare is `whisper-turbo` |
+| `--tts [MODEL]` | off | text-to-speech at `POST /v1/audio/speech`; bare is `kokoro` |
+| `--embeddings [MODEL]` | off | embeddings at `POST /v1/embeddings`; bare is `qwen3-embed-0.6b`, no extra needed |
+| `--rerank [MODEL]` | off | reranking at `POST /v1/rerank`; bare is `qwen3-rerank-0.6b`, no extra needed |
+
+The API key is read from `server.api_key` in the config and nowhere else, so
+the lifecycle tools and the menu bar can read the same file. Each completed
+request logs one line with the endpoint, model, token counts and timing:
 
 ```text
 [req] 2026-06-15 16:07:42 /chat/completions qwen3-0.6b prompt=19 gen=3 ttft=0.47s prefill=45t/s decode=172.6t/s total=0.51s
 ```
 
-Other endpoints keep a standard, timestamped access line. The menu bar's
-once-a-second `/health` and `/v1/metrics` polls are filtered out, so the log
-stays readable. The timing is read from mlx-vlm's own per-request metrics (the
-same numbers `/v1/metrics` aggregates), so this adds no measurement overhead.
+## gmlx stop
 
-#### `service`: run at login (launchd, macOS)
-
-`gmlx service install` registers a launchd LaunchAgent for the *menu bar*:
-it comes up at every login, and (unless `--no-autostart`) starts the server
-too when one isn't already up. It takes the same options as `serve`; the
-server it starts now is the one it will bring back at each login. macOS-only.
-
-```sh
-gmlx service install --config ~/.config/gmlx/gmlx.yaml   # start now + at login
-gmlx service status                                            # launchd state
-gmlx service uninstall                                         # unload + remove (idempotent)
-```
-
-Running the menu bar under launchd (rather than from a terminal) also makes
-macOS attribute its permission prompts - microphone for voice chat,
-Accessibility for the tap-to-talk hotkey, notifications - to "gmlx" instead
-of your terminal app. The entry in System Settings' Login Items likewise
-shows gmlx (the agent launches through a small script inside gmlx.app,
-never a bare `python`).
-
-The server itself stays an ordinary background process: if it crashes, the
-menu bar posts a notification and offers one-click Start (it does not
-supervise). Autostart runs once per login - a server you deliberately stop
-stays stopped until the next login. Stop the server with `gmlx stop` as
-usual; quit the menu bar from its own menu (`service uninstall` removes the
-login item).
-
-`--headless` installs the pre-menubar shape instead: a per-port agent that
-runs `serve` directly, restarts it on crash (`--no-keepalive` opts out), and
-needs no GUI session - for SSH-only boxes. A headless-managed server is
-stopped with `service uninstall` (not `stop`). The two modes refuse to share
-a host:port.
-
-## `init`: scaffold a config
-
-Run bare on a terminal, `gmlx init` opens a guided wizard: it scans your
-model directories, lets you rename or drop the auto-named models and set a
-default and aliases, then walks through the on-disk prompt cache, the optional
-speech-to-text / text-to-speech / embeddings services (offering to
-`pip`-install a missing extra), and the residency limits. It previews the YAML
-before it writes. `-i` forces the wizard even alongside flags;
-`--no-interactive` (or `--help`) takes the flag-driven path.
-
-Auto-named ids carry the quant codec in compact form (`qwen3-0.6b-q4`,
-`llama-3.2-1b-instruct-iq3`); when two quants of one model share that compact
-form (e.g. `Q4_K_S` and `Q4_K_M` both give `q4`), the full codec is used on
-both (`...-q4-k-s` / `...-q4-k-m`) so the id is never ambiguous. Rename any of
-them in the wizard or edit `models:` afterward.
-
-Flag-driven, `init` discovers the GGUFs under `--models-dir` (repeatable)
-and/or the local Hugging Face cache (`--from-hf-cache`) and writes a starter
-YAML; it is the only mode that writes a file. It streams per-file scan
-progress to stderr, writes to `~/.config/gmlx/gmlx.yaml` by default
-(override with `--out`), and refuses to overwrite without `--force`. Every
-wizard choice except the voice-chat step has a flag below, so a script does
-the same without the prompts (a `talk:` block is edited in by hand).
-
-```sh
-gmlx init                                    # guided wizard (on a terminal)
-gmlx init --models-dir ~/models            # -> ~/.config/gmlx/gmlx.yaml
-gmlx init --models-dir ~/models -r --out ./gmlx.yaml   # project-local instead
-gmlx init --from-hf-cache                    # models you already have in the hf cache
-gmlx init --models-dir ~/models --with-stt --with-embeddings --with-rerank   # wire services
-```
-
-| Flag | Meaning |
-|------|---------|
-| `--models-dir DIR` | Directory of GGUFs to scan (repeatable). Required unless `--from-hf-cache`. |
-| `--from-hf-cache` (alias `--hf-cache`) | Also scan the local hf cache; add cache GGUFs as portable `hf:<org>/<repo>/<file>` entries and set `server.hf_cache`. Resolved from the cache, never downloaded. |
-| `--disk-cache [GB]` | Enable the on-disk prompt cache in the generated config: a shared prompt prefix is reused across requests and restarts (persisted under `~/.cache/gmlx/apc`), skipping the prefill recompute on a hit. Without the flag the same block is written commented out, ready to flip on. Bare `--disk-cache` caps the store at 50 GB per model; pass a size to override (`--disk-cache 100`). The wizard asks the size as a follow-up. |
-| `-i`, `--interactive` | Run the wizard even with flags present (they pre-seed the answers). |
-| `--no-interactive` | Never run the wizard; scaffold from the flags as given. |
-| `--with-stt [MODEL]` | Configure speech-to-text (`server.stt`). Bare uses the default alias (`whisper-turbo`); a value sets the model (alias / HF repo id / local path). |
-| `--with-tts [MODEL]` | Configure text-to-speech (`server.tts`). Bare uses `kokoro`. |
-| `--with-embeddings [MODEL]` | Configure text embeddings (`server.embeddings`). Bare uses `qwen3-embed-0.6b`; takes a `qwen3-embed-*` / `embeddinggemma-gguf` alias, a `*.gguf` / `hf:.../*.gguf` ref, or an mlx-embeddings encoder alias (`embeddinggemma` and friends) / repo / dir. No extra needed (mlx-embeddings is core). The wizard adds a quant follow-up and auto-pickup of an embedder GGUF already on disk. |
-| `--with-rerank [MODEL]` | Configure reranking (`server.rerank`). Bare uses `qwen3-rerank-0.6b`; a `qwen3-rerank-*` alias / `*.gguf` / `hf:.../*.gguf` (a Qwen3-Reranker GGUF, no extra needed). In the wizard the quant defaults to the embedder's chosen rung. |
-| `--install` / `--no-install` | After writing, `pip`-install the missing extras for the chosen `--with-*` services / don't offer to install extras in the wizard. |
-| `--default-model ID` | Set `server.defaults.model` (used when a request omits `model`). |
-| `--port N` | Set `server.port` (default 8080). |
-| `--idle-ttl SECONDS\|none` | Set `server.defaults.ttl_s`: idle auto-unload. `none` keeps models resident (evict manually or under LRU pressure). |
-| `--request-timeout DURATION\|none` | Set `server.token_queue_timeout_s`: give up if no new token arrives for this long (e.g. `10m`, `1h`). `none` waits forever. |
-| `--out FILE` | Where to write the config (default `~/.config/gmlx/gmlx.yaml`). |
-| `-r`, `--recursive` / `--no-recursive` | Recurse into subdirectories when scanning `--models-dir` (default: shallow). |
-| `--force` | Overwrite an existing config. |
-| `--no-reload` | Don't `SIGHUP` a server already running this config to pick up the change. |
-
-Pointing `init` at an empty directory is fine: it writes a valid zero-model
-config and tells you to `pull` GGUFs in (or drop them) and run `sync-models`
-to add them.
-
-If a `--config` server is already running the config you just (re)wrote,
-`init` SIGHUPs it so it re-reads the file and re-registers its models without
-a restart (resident models stay warm); pass `--no-reload` to skip that. See
-[Reloading the config](server-config.md#reloading-the-config).
-
-## `sync-models`: reconcile a config with what's on disk
-
-Re-scans the config's model dirs and updates the `models:` block to match
-disk: configured models that still exist are left untouched (comments and
-hand-edits preserved), models whose file is gone are dropped, and
-newly-discovered GGUFs are added. Use it after dropping or `pull`-ing files
-into your model dir; it's the incremental counterpart to `init`. Operates on
-the first existing default config unless `--config` is given. Scanning
-recurses by default, because `pull` nests downloads under
-`<dir>/<org>__<repo>/`.
-
-A sibling drafter GGUF pairs into the model it serves as that model's
-`draft_gguf`, reported as `update:`. This works on entries the config already
-carries; an entry with its own `draft_gguf` keeps it. See
-[`discover`](server-config.md#discover) for the rules.
-
-With `--from-hf-cache` (or a config already carrying `server.hf_cache: true`)
-it also reconciles cache-resident GGUFs, adding new `hf:` entries and dropping
-ones that are no longer cached, and flips `server.hf_cache` on for them.
-
-Removal only happens when the entry could actually be checked: if the hf cache
-is unreadable, or a whole `model_dirs` root is missing (an unmounted disk, a
-different shell environment), the entries it covers are kept and reported as
-`keep: (unverified - ...)` with a warning, never dropped. Absolute-path
-entries whose file is gone are dropped like any other.
-
-```sh
-gmlx pull hf:unsloth/Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_S.gguf  # into your model dir
-gmlx sync-models                              # adds the just-pulled model to the config
-gmlx sync-models --from-hf-cache              # also pick up models in the hf cache
-gmlx sync-models --config ~/.config/gmlx/gmlx.yaml --dry-run    # preview only
-```
-
-| Flag | Meaning |
-|------|---------|
-| `--config FILE` | Config to sync (default: the first existing default location). |
-| `--models-dir DIR` | Dirs to scan, overriding the config's `server.model_dirs` (repeatable). |
-| `--from-hf-cache` (alias `--hf-cache`) | Also reconcile cache-resident GGUFs (implied when the config has `hf_cache: true`). |
-| `-r`, `--recursive` / `--no-recursive` | Recurse into subdirectories (default: deep, since `pull` nests under `<dir>/<org>__<repo>/`). |
-| `--dry-run` | Show the add/remove plan without writing the config. |
-| `--no-reload` | Don't `SIGHUP` a server already running this config to pick up the change. |
-
-When `sync-models` actually rewrites the config (not a `--dry-run`, and
-something changed), a `--config` server already running that file is SIGHUP'd
-so it re-reads it and re-registers its models without a restart; resident
-models stay warm. Pass `--no-reload` to skip it. See
-[Reloading the config](server-config.md#reloading-the-config).
-
-## `launch`: connect a coding agent or chat app
-
-Configures and execs an external tool against a gmlx server: a coding
-harness (claude-code, opencode, pi, omp), an agent runtime (hermes, goose), a
-terminal chat client (aichat, elia), or the Open WebUI browser app. It writes
-the tool's native config without touching your dotfiles, auto-starts a server
-in the background if none is reachable, and never installs the tool itself.
-Behavior, per-client details, and troubleshooting: [launch.md](launch.md).
-
-```sh
-gmlx launch opencode                         # uses the server's default-marked model
-gmlx launch pi --model qwen3.6-27b@coding    # a served id, on the family's coding sampling
-gmlx launch claude-code --model qwen3.6-27b  # Anthropic surface (/v1/messages)
-gmlx launch open-webui                       # browser chat app on :3000
-gmlx launch omp --config-only                # write the config, print the run command
-```
-
-| Flag | Meaning |
-|------|---------|
-| `--model ID[@profile]` | Served model (and optional profile) the tool uses; also kept resident through the idle-TTL reaper. Default: the server's default-marked model. |
-| `--base-url URL` | Target an explicit server (never auto-started). |
-| `--host H` / `--port P` | Managed-server target (default: the single managed server if there's one, else the config's, else `127.0.0.1:8080`). |
-| `--api-key KEY` | Key for a key-protected server, placed in the tool's native slot. |
-| `--provider-id NAME` | Provider id written into the tool's config. |
-| `--config-path PATH` | Where the tool config is written (default under `~/.config/gmlx`; open-webui: its `DATA_DIR`). |
-| `--config-only` | Write the config and print the run command; do not exec. |
-| `--no-start` | Never auto-start a server; error if it is down. |
-| `--start-timeout S` | Cap the auto-start readiness wait (default `0` = unbounded). |
-| `--no-keep` | Do not keep `--model` resident. |
-
-Exit codes: `0` tool launched or server ready; `1` server down (with
-`--no-start` / `--base-url`), launchd server mid-restart, or the auto-started
-process died; `2` no config or a malformed config; `130` Ctrl-C during the
-start wait.
-
-### `launch menubar`
-
-`gmlx launch menubar` puts a small status-bar item up for a backgrounded
-server: up/down/busy state, resident models (size, default/pinned markers,
-eviction countdown; click to unload), reload-config, restart, stop, copy-URL,
-and open-logs, plus a notification if the server dies. "Edit config" opens the
-server's YAML in a floating editor that validates with the server's own parser
-and can save-and-reload in one step. A background `serve`
-raises it automatically on a macOS GUI session (disable with `--no-menubar` or
-`server.menubar: false`); `gmlx launch menubar --stop` quits a detached
-monitor from the CLI.
-Flags, targeting, and details:
-[launch.md](menubar.md).
-
----
-
-## `gmlx train`
-
-LoRA-finetune a K-quant GGUF base and write the adapter as a GGUF: GGUF in,
-GGUF out, no safetensors, no merge. gmlx runs the training on mlx-lm's LoRA
-tuner; the adapter's gradient flows through the frozen quant matmul via the kquant op's
-`vjp`, so the base carries no float copy and no optimizer state (you can
-finetune a model you couldn't hold in fp16). The emitted adapter round-trips
-straight back into [`run --adapter`](#adapter-lora) /
-[`serve --adapter`](#serve-flags). Full walkthrough with a worked example:
-[docs/lora.md](lora.md). LoRA only: mlx-lm's DoRA dispatch doesn't consult the
-kquant base.
-
-```sh
-# finetune the top 8 layers, 150 iters, write a GGUF adapter
-gmlx train base-Q8_0.gguf --data ./my-data --adapter-out my-lora.gguf
-
-# then serve (or run) the base with the adapter attached at load, no merge
-gmlx serve base-Q8_0.gguf --adapter my-lora.gguf
-gmlx run   base-Q8_0.gguf --adapter my-lora.gguf --prompt "..."
-```
-
-`--data` is a directory of `train.jsonl` / `valid.jsonl` (or an HF dataset id)
-in any format mlx-lm's LoRA trainer accepts: chat (`{"messages": [...]}`),
-prompt/completion, or plain text. The adapter targets the attention and MLP
-projections of the top `--num-layers` transformer blocks.
+Stops a background server: SIGTERM to the process group, then SIGKILL after
+the timeout. The pid is checked to be ours before signalling, and stale
+runfiles found on the way are cleared and reported.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `model` (positional) | - | Path to the base GGUF (sharded ok), or a server-config model id/alias when `--config` is set (or a default config exists); same id resolution as [`run`](#resolving-a-model-from-a-config). |
-| `--config FILE` | - | Server config to resolve the base model name against when it isn't a file on disk (default: the first existing default config). |
-| `--data PATH\|ID` | - | Dataset dir (`train.jsonl`/`valid.jsonl`) or HF dataset id. Required. |
-| `--adapter-out PATH` | - | Output path for the trained `.gguf` adapter. Required. |
-| `--iters N` | `150` | Training iterations. |
-| `--batch-size N` | `4` | Batch size. |
-| `--num-layers N` | `8` | Number of top transformer layers to adapt. |
-| `--rank N` | `8` | LoRA rank. |
-| `--scale F` | `20.0` | LoRA scale (`alpha = scale x rank`, recovered on load). |
-| `--dropout F` | `0.0` | LoRA dropout. |
-| `--learning-rate F` | `1e-4` | Adam learning rate. |
-| `--max-seq-length N` | `2048` | Max training sequence length. |
-| `--val-batches N` | `25` | Validation batches per eval. |
-| `--steps-per-report N` | `10` | Train-loss report interval. |
-| `--steps-per-eval N` | `200` | Validation interval. |
-| `--seed N` | `0` | RNG seed. |
-| `--hf-source ID` | - | HF repo id for tokenizer/config fallback (rarely needed; the GGUF synthesizes both). |
+| `--host H` | the managed server | which server, when several are backgrounded |
+| `--port P` | the managed server | which server |
+| `--timeout S` | `15` | seconds before SIGKILL, which cuts any in-flight generation |
+| `--stale` | off | clear runfiles whose server is gone and signal nothing |
 
----
+## gmlx status
 
-## `gmlx doctor`
+Prints a background server's pid, uptime, URL, log path and how it is
+managed. It uses `/health`, so it needs no API key. Stale runfiles are listed
+with the reason and their age.
 
-One pass over everything a working setup needs, with a PASS/WARN/FAIL line
-per check and the fix named for anything that fails. It checks: the runtime
-(mlx, mlx-kquant, mlx-lm importable, Metal available, versions), the compiled
-kernels, the config (parse errors and warnings), every configured model's
-paths (all shards, mmproj/draft/adapter companions), any background server
-(including stale run files), machine RAM vs each configured model's file size
-(a larger-than-RAM model that isn't set to `stream: experts` gets a WARN
-naming it; a `stream: experts` entry gets its streaming plan, and a WARN
-when its every-token weights do not fit under the memory ceiling), free
-disk space, and the HF token. Rows for
-optional features (installed launchd agents and their load state, extras
-installed, ffmpeg, MCP tool binaries, served assistants exposed beyond
-loopback) appear only when your setup uses them.
-It never touches the network and finishes in about a second.
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--host H` | the managed server | which server |
+| `--port P` | the managed server | which server |
+| `--json` | off | emit JSON |
+
+## gmlx restart
+
+Stops the server and relaunches it with the arguments recorded in its
+runfile, from any directory.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--host H` | the managed server | which server |
+| `--port P` | the managed server | which server |
+| `--timeout S` | `15` | seconds before SIGKILL during the stop |
+| `--start-timeout S` | `40` | readiness wait for the new process |
+
+## gmlx logs
+
+Prints the tail of a background server's log. The menu bar's health polls
+are filtered out of it.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--host H` | the managed server | which server |
+| `--port P` | the managed server | which server |
+| `-n`, `--lines N` | `40` | lines to print |
+| `-f`, `--follow` | off | keep printing as the log grows |
+| `--clear` | off | truncate the log and exit |
+
+## gmlx service
+
+Installs a launchd login item on macOS. By default the item is the menu bar
+app, which starts the server at login unless told not to, and which makes
+macOS attribute permission prompts to gmlx rather than to your terminal.
+`install` takes every `serve` flag, and the server it starts now is the one
+it brings back at each login.
 
 ```sh
-gmlx doctor                          # check the default config
-gmlx doctor --deep                   # also header-read every configured GGUF
-gmlx doctor --json
+gmlx service install --config ~/.config/gmlx/gmlx.yaml
+gmlx service status
+gmlx service uninstall
 ```
 
-| Flag | Meaning |
-|------|---------|
-| `--config FILE` | Config to check (default: the bare-start search path). |
-| `--deep` | Also read each configured model's GGUF header (catches codec/arch problems before a load). |
-| `--json` | Emit `{version, checks, ok}` as JSON. |
+| Subcommand | Flags | Meaning |
+|------------|-------|---------|
+| `install` | the `serve` flags plus the table below | register the login item and start now |
+| `status` | `--host H`, `--port P` | print the launchd state |
+| `uninstall` | `--host H`, `--port P` | unload and remove the item |
 
-Exit codes: `0` when nothing failed (warnings are fine), `1` when any check
-failed, `2` usage error.
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--no-autostart` | off | install the menu bar item without starting the server at login |
+| `--headless` | off | install a server-only agent with no menu bar, for machines without a desktop session |
+| `--keepalive`, `--no-keepalive` | on | with `--headless`, restart the server when it crashes |
 
-## `gmlx validate`
+The server stays an ordinary background process, so a server you stop stays
+stopped until the next login. A headless server is stopped with `service
+uninstall` rather than `stop`, and the two modes refuse to share a host and
+port. The menu bar side is described in [menubar.md](menubar.md).
 
-Check that a GGUF will load before you commit to a multi-GB download. A local
-file is classified by reading its header; a remote ref is checked by
-range-reading just the GGUF header (a few MB), never the weights. Both report
-the architecture (and whether the installed `mlx-lm` implements it) plus the
-per-tensor codec histogram, and agree because they reuse the same codec gate
-as the loader. Exit code `0` = loadable, `1` = not, `2` = couldn't resolve or
-read the ref (no such file, an ambiguous folder ref, an unreadable header).
+## gmlx list
 
-The report also states the model's total size (every shard of a split file)
-and whether it fits this Mac's RAM: comfortable, tight (little room left for
-the KV cache; consider `--kv-bits 8` or a smaller quant), or over (a MoE
-model can still run with `--stream-experts`, see
-[docs/streaming.md](streaming.md)). A repo/folder listing gets the same
-treatment: each variant is shown with its size and a fits/tight/over-RAM
-column, so you can pick a quant that fits before downloading anything.
+Lists the models a config defines, which is the set of ids a request can
+address, not the files on disk. Discovered models are tagged, aliases follow,
+and the default model is marked with `*`.
 
-For a MoE file the report adds a `streaming:` block. It prices the
-every-token weights and the routed experts from the header. It then
-fits them on this Mac: the ceiling, the KV room, the decode arena and a
-verdict. A remote ref gets the same block from the shard headers the
-codec check already reads. `--json` carries the numbers under `stream`.
-The rule is in
-[streaming.md](streaming.md#how-big-a-model-can-this-box-stream).
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--config FILE` | the first default location | which config |
+| `-v`, `--paths` | off | also show each model's GGUF path |
+| `--json` | off | emit JSON |
 
-An mmproj file (`general.architecture = "clip"`, a VLM's vision/audio
-projector) is recognized as a companion, not judged as a standalone model: the
-verdict says to pair it with its LLM GGUF via `--mmproj`, the exit code is
-`0`, and `pull` downloads it without `--force`.
+Exit code 2 means no config was found; the message points at `gmlx init`.
+
+## gmlx run
+
+Loads one GGUF and generates a completion, runs a benchmark, or prints the
+load plan. `--help` shows the everyday flags and `--help-all` every flag in
+the tables below.
 
 ```sh
-# a local file (all shards)
-gmlx validate ~/models/Qwen3.6-27B-Q4_K_S.gguf
-
-# a remote file on Hugging Face: hf:<org>/<repo>/<path/to/file.gguf>[@revision]
-gmlx validate hf:unsloth/Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_S.gguf
-
-# a folder: one GGUF model inside auto-resolves; several are listed to pick from
-gmlx validate hf:unsloth/NVIDIA-Nemotron-3-Super-120B-A12B-GGUF/UD-Q5_K_M
-
-# a bare repo: lists every quant variant as a ready-to-paste ref
-gmlx validate hf:unsloth/NVIDIA-Nemotron-3-Super-120B-A12B-GGUF
-
-# paste a Hugging Face web link straight from the browser (blob / tree / resolve)
-gmlx validate https://huggingface.co/unsloth/Qwen3.6-27B-GGUF/blob/main/Qwen3.6-27B-Q4_K_S.gguf
-
-# any direct URL, or a machine-readable verdict
-gmlx validate https://example.com/models/model-Q6_K.gguf
-gmlx validate hf:org/repo/model.gguf --json
+gmlx run model.gguf --prompt "Explain entropy." --max-tokens 128
+gmlx run model.gguf --bench 512,4096,16384 --bench-runs 3
+gmlx run model.gguf --bench-depths 0,4096,16384,32768
+gmlx run model.gguf --report-only
+gmlx run coder --prompt "Refactor this loop."    # a config id, with its settings
 ```
 
-A ref can be:
+The positional is a path, or a model id or alias from your server config
+when it is not a file. A config id brings its path, sampling, system prompt,
+template, adapter, drafter and streaming placement with it; flags you pass
+still win. An id with an unknown profile fails listing the valid ones.
 
-| Form | Example |
-|------|---------|
-| local path | `~/models/model.gguf` |
-| `hf:` file | `hf:org/repo/path/to/file.gguf` (optionally `@<revision>`, default `main`) |
-| `hf:` folder | `hf:org/repo/UD-Q5_K_M`: lists the GGUFs inside; one model auto-resolves |
-| `hf:` repo | `hf:org/repo`: lists every quant variant as a pickable ref |
-| HF web URL | `https://huggingface.co/org/repo/blob/main/file.gguf` (or `/tree/...`, `/resolve/...`), normalized to the raw file or folder |
-| direct URL | `https://host/path/file.gguf` |
+Generation:
 
-A folder or repo ref is resolved by listing it: a single GGUF model (one file
-or one split set) is validated automatically (a `[resolved]` line is printed);
-several models produce a clean error listing each as an `hf:` ref you can
-copy. A pasted huggingface.co page link (`/blob/...`, `/tree/...`) is
-rewritten to the underlying file or folder, so you don't have to hunt for the
-`/resolve/...` raw link.
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `gguf` (positional) | required | the GGUF, sharded is fine, or a config id |
+| `--prompt STR` | `Hello, world!` | the prompt |
+| `--prompt-file PATH` | none | read the prompt from a file |
+| `--system-prompt STR` | none | a system message for the chat template |
+| `--max-tokens N` | until the model stops | generation cap |
+| `--temp F` | family default | temperature; `0` is greedy |
+| `--top-p F` | family default | nucleus probability |
+| `--top-k N` | family default | candidate count; `0` disables |
+| `--min-p F` | family default | minimum probability relative to the best token |
+| `--repetition-penalty F` | `0` | repetition penalty; `0` disables |
+| `--repetition-context-size N` | `20` | tokens the repetition penalty looks back over |
+| `--presence-penalty F` | `0` | presence penalty |
+| `--frequency-penalty F` | `0` | frequency penalty |
+| `--xtc-probability F`, `--xtc-threshold F` | `0` | XTC sampling, text path only |
+| `--logit-bias JSON` | none | token id to bias map |
+| `--stop STR` | none | a stop sequence, repeatable |
+| `--seed N` | none | sampling seed |
+| `--reasoning {show,hide,raw}` | `show` | `show` styles the thinking and strips its markers, `hide` prints only the answer, `raw` passes everything through |
+| `--thinking {on,off,adaptive}` | template default | the reasoning switch, mapped to the model's template variable |
+| `--reasoning-effort LEVEL` | template default | reasoning depth on models that grade it |
+| `--thinking-budget N` | unlimited | cap reasoning tokens |
+| `--thinking-start-token STR`, `--thinking-end-token STR` | detected | the model's reasoning markers when detection misses |
+| `--chat-template-config JSON` | none | extra template variables, such as `'{"enable_thinking": false}'` |
+| `-v`, `--verbose` | off | full load diagnostics instead of the spinner |
 
-| Flag | Meaning |
-|------|---------|
-| `ref` (positional) | Local path, `hf:<org>/<repo>/<file.gguf>[@rev]`, or an `http(s)://` URL. |
-| `--arch NAME` | Override architecture detection. |
-| `--hf-source ID` | Treat the arch as loadable with this config override (matches `run --hf-source`). |
-| `--max-mb N` | Cap the remote header range-read (MB; default 128). |
-| `--json` | Emit the verdict as JSON instead of the report. |
+Profiles and family defaults:
 
-The verdict names the offending codec when a file won't load. A ternary
-BitNet GGUF, for example, reports `=> NOT LOADABLE: unsupported codecs
-(TQ1_0 x160)` so you can pick a supported quant instead. The K-quant, legacy,
-and IQ families all load.
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--profile NAME` | none | a built-in intent or, with a config, a user profile; same as `@NAME` on the positional |
+| `--no-family-defaults` | off | do not seed the family's sampling on a bare path |
+| `--config FILE` | the first default location | the config an id is resolved against |
 
-Split GGUFs (`...-00001-of-000NN.gguf`) are handled as one model: point
-`validate` at any shard and it range-reads every shard's header and unions the
-result (the report notes the shard count). This is necessary, not just
-convenient. A split file keeps its architecture in the first (often
-tensor-free) shard and spreads its tensors across the rest, so a codec used by
-even a single tensor can hide in a later shard; checking only the first shard
-would wrongly report it loadable.
+Memory:
 
-## `gmlx pull`
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--max-kv-size N` | none | cap the KV cache; a rotating cache takes over above it |
+| `--kv-bits N` | off | quantize the KV cache to 2, 3, 4, 6 or 8 bits; not with `--max-kv-size` |
+| `--kv-group-size N` | `64` | quantization group size |
+| `--quantized-kv-start N` | `0` | tokens kept unquantized at the start of the cache |
+| `--prefill-step-size N` | `2048`, `8192` when streaming | prefill chunk size |
+| `--dtype {auto,bfloat16,float16}` | `auto` | activation width; `auto` is float16 on M1 and M2 |
 
-Run the same remote header check and, only if it passes, download the GGUF
-(all shards of a split file) into your model library. It writes a plain file,
-not the Hugging Face blob cache, so you get a model you can point `run` /
-`serve` at directly. A file that lands under a `model_dirs` root is also
-registered in your config on the spot, with the same id derivation and mmproj
-pairing as `sync-models`, comments preserved. A running server picks it up
-immediately, so a pull is requestable as soon as it lands. `--no-register` opts out;
-`gmlx sync-models` remains the bulk reconcile.
+Loading:
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--arch NAME` | detected | override architecture detection |
+| `--hf-source ID_OR_DIR` | none | take the config, processor and template from this repo or directory |
+| `--chat-template STR_OR_PATH` | the GGUF's | inline Jinja or a `.jinja` or `.txt` file |
+| `--no-chat-template` | off | pass the prompt verbatim, for base models |
+| `--no-remap` | off | keep raw GGUF tensor names |
+| `--no-zero-copy` | off | copy tensors out of the mmap instead of viewing them |
+| `--adapter PATH` | none | a GGUF LoRA adapter applied at load; text only |
+
+Multimodal, described in [vlm.md](vlm.md):
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--mmproj PATH` | none | the projector GGUF |
+| `--image PATH_OR_URL` | none | images to prepend, comma separated |
+| `--audio PATH_OR_URL` | none | audio to prepend, comma separated; needs an audio tower |
+| `--resize-shape N_OR_WxH` | model default | resize images before encoding |
+
+`--stop` and the XTC flags are ignored with `--mmproj`, with a warning. The
+bench, report and streaming flags error with it.
+
+Speculative decoding, described in
+[performance.md](performance.md#mtp-speculative-decoding):
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--speculative`, `--mtp` | auto for models with an MTP head | force speculation on |
+| `--no-speculative`, `--no-mtp` | off | force it off |
+| `--draft-gguf PATH` | detected sibling | a separate drafter GGUF; implies `--speculative` |
+| `--native-mtp` | off | prefer the model's own head when a drafter is also present |
+| `--draft-block-size N` | drafter default | draft tokens per round |
+| `--stochastic-mtp` | off | accept sampled drafts by rejection sampling; more accepted, not token-identical |
+
+Speculation honors `--temp`, `--top-p`, `--top-k`, `--min-p` and
+`--system-prompt`. A flag it cannot honor, such as `--stop`, a penalty,
+`--logit-bias` or `--max-kv-size`, is dropped with a warning; pass
+`--no-mtp` to decode on the plain path, which honors every flag.
+
+Streaming a model bigger than memory, described in
+[streaming.md](streaming.md):
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--stream-experts` | off | stream the routed experts from disk; attention and KV cache stay on GPU |
+| `--stream-cpu` | off | run the whole model on the CPU device from the page cache |
+| `--stream-fast-disk {auto,on,off}` | `auto` | the prefetch recipe; `auto` measures the drive at load |
+| `--prefill-feeder`, `--no-prefill-feeder` | on | stage expert prefill straight from the GGUF |
+| `--decode-feeder`, `--no-decode-feeder` | on under `--stream-experts` | decode from a wired, popularity-managed expert arena |
+| `--gpu-keepwarm` | on for streamed loads | hold GPU clocks up while decoding |
+| `--moe-experts K` | trained | cap the router at K experts per token, lossy |
+| `--moe-expert-mass P` | off | keep the smallest expert set covering share P of gate mass, lossy |
+| `--moe-expert-probe` | off | run lossless and print how many experts each token needed at candidate P values |
+| `--moe-miss-shed P` | off | drop experts that would miss the arena down to share P, lossy |
+| `--moe-layer-shed P` | off | skip a streamed layer's experts with probability P, lossy |
+| `--moe-prestage {ranked,keepers}` | `ranked` | `keepers` filters prestage predictions through the miss-shed policy |
+
+Inspecting and benchmarking:
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--report-only` | off | print the load plan and the rendered prompt without building the model |
+| `--bench LIST` | none | prompt lengths to time, comma separated; prints prefill and decode tok/s |
+| `--bench-depths LIST` | none | context depths to time decode at |
+| `--bench-runs N` | `2` | timed runs per length; the best is reported |
+| `--bench-decode-tokens N` | `32`, `128` for depths | decode tokens per run |
+| `--bench-temp T` | `0` | temperature for speculative bench runs |
+| `--bench-chat-dataset DATASET` | synthetic | a Hugging Face chat dataset for bench prompts, `id` or `id:split` |
+
+Exit codes: 0 success, 1 the file cannot load, 2 a usage or file error,
+130 interrupted.
+
+## gmlx chat
+
+An interactive chat in the terminal. Locally the model loads once and each
+turn prefills only the new message. When the config's server is running, a
+bare `gmlx chat` or one naming a served id becomes a server client instead
+of loading a second copy. The commands, sessions, rendering and themes are
+in [chat.md](chat.md).
 
 ```sh
-# download into your model dir, under <model-dir>/unsloth__Qwen3.6-27B-GGUF/
+gmlx chat model.gguf --temp 0.7 --system-prompt "You are terse."
+gmlx chat                          # the running server's default model
+gmlx chat --assistant              # the tool-loop assistant on the server
+```
+
+Where the model runs:
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `gguf` (positional) | server default | a GGUF, a config id, or a served id |
+| `--server` | auto when the server is up | a plain client of the server |
+| `--assistant` | off | chat through the server's tool-loop assistant, with MCP tools and memory |
+| `--local` | off | load in-process even when the server is running |
+| `--base-url URL` | the managed server | an explicit server |
+| `--host H`, `--port P`, `--api-key KEY` | the managed server | the server to target and its key |
+| `--no-start` | off | never start the server |
+| `--start-timeout S` | `180` | how long an auto-start may take |
+| `--config FILE` | the first default location | the config an id is resolved against |
+| `--profile NAME` | none | a built-in intent or user profile |
+| `--no-family-defaults` | off | do not seed the family's sampling on a bare path |
+
+Generation, all adjustable during the chat:
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--system-prompt STR` | none | the system message, sent on the first turn and after each reset |
+| `--max-tokens N` | until the model stops | per-reply cap |
+| `--temp F`, `--top-p F`, `--top-k N`, `--min-p F` | family default | sampling |
+| `--repetition-penalty F`, `--presence-penalty F`, `--frequency-penalty F` | `0` | penalties |
+| `--repetition-context-size N` | `20` | tokens the repetition penalty looks back over |
+| `--xtc-probability F`, `--xtc-threshold F` | `0` | XTC sampling |
+| `--logit-bias JSON` | none | token id to bias map |
+| `--stop STR` | none | a stop sequence, repeatable |
+| `--seed N` | none | sampling seed |
+| `--reasoning {show,hide,raw}` | `show` | `show` styles the thinking and strips its markers, `hide` prints only the answer, `raw` passes everything through |
+| `--thinking {on,off,adaptive}`, `--reasoning-effort LEVEL` | template default | the reasoning switch and depth |
+| `--thinking-budget N` | unlimited | cap reasoning tokens |
+| `--thinking-start-token STR`, `--thinking-end-token STR` | detected | the model's reasoning markers when detection misses |
+| `--chat-template-config JSON` | none | extra template variables |
+
+Display and sessions:
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--render {auto,plain,lite,rich}` | `auto` | markdown rendering of replies |
+| `--theme NAME` | `dark` | color theme |
+| `--colorblind` | off | colorblind-friendly accents on any theme |
+| `--no-history` | off | do not read or write the prompt history file |
+| `--no-autosave` | off | do not save the session after each turn |
+| `--resume [NAME]` | off | resume a saved session; bare is this model's latest |
+| `-v`, `--verbose` | off | full load diagnostics |
+
+Loading, memory, multimodal, speculation and streaming take the same flags
+as [`gmlx run`](#gmlx-run): `--arch`, `--hf-source`, `--chat-template`,
+`--no-chat-template`, `--no-remap`, `--no-zero-copy`, `--adapter`,
+`--max-kv-size`, `--kv-bits`, `--kv-group-size`, `--quantized-kv-start`,
+`--prefill-step-size`, `--dtype`, `--mmproj`, `--resize-shape`,
+`--speculative`, `--mtp`, `--no-speculative`, `--no-mtp`, `--draft-gguf`,
+`--native-mtp`, `--draft-block-size`, `--stochastic-mtp`, `--stream-experts`,
+`--stream-cpu`, `--stream-fast-disk`, `--prefill-feeder`,
+`--no-prefill-feeder`, `--decode-feeder`, `--no-decode-feeder`,
+`--gpu-keepwarm`, `--moe-experts`, `--moe-expert-mass`, `--moe-expert-probe`,
+`--moe-miss-shed`, `--moe-layer-shed` and `--moe-prestage`. Local-load flags
+do not apply in the server modes. A base model with no chat template refuses
+to start; pass one with `--chat-template` or send turns verbatim with
+`--no-chat-template`.
+
+## gmlx launch
+
+Writes an external tool's native config to point at a gmlx server, starts
+the server if none is reachable, and runs the tool. It never touches your
+dotfiles and never installs the tool. The clients and their quirks are in
+[launch.md](launch.md).
+
+```sh
+gmlx launch opencode
+gmlx launch pi --model qwen3.6-27b@coding
+gmlx launch claude-code --model qwen3.6-27b
+gmlx launch open-webui
+gmlx launch omp --config-only
+```
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `client` (positional) | required | `claude-code`, `opencode`, `pi`, `omp`, `hermes`, `goose`, `aichat`, `elia`, `open-webui` or `menubar` |
+| `--model ID[@profile]` | the server's default | the served model the tool uses, kept resident while it runs |
+| `--base-url URL` | none | an explicit server, never auto-started |
+| `--host H`, `--port P` | the managed server | the server to target |
+| `--api-key KEY` | none | the key, placed in the tool's native slot |
+| `--provider-id NAME` | `gmlx` | the provider id written into the tool's config |
+| `--config-path PATH` | under `~/.config/gmlx` | where the tool config is written |
+| `--config-only` | off | write the config and print the run command without running it |
+| `--no-start` | off | never start a server |
+| `--start-timeout S` | unbounded | cap the auto-start wait |
+| `--no-keep` | off | do not keep `--model` resident |
+
+Exit codes: 0 the tool ran or the server is ready, 1 the server is down or
+died, 2 no config or a malformed one, 130 interrupted during the start wait.
+
+### launch menubar
+
+`gmlx launch menubar` runs the macOS menu bar app by hand; a background
+`serve` raises it for you. What it shows is in [menubar.md](menubar.md).
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `-f`, `--foreground` | off | run the event loop in this process |
+| `--stop` | off | quit a detached menu bar app |
+| `--url URL` | the managed server | the server to track |
+| `--host H`, `--port P` | the managed server | the server to track |
+| `--api-key KEY` | the managed server's | the key for a keyed server the app cannot read the config of |
+| `--interval S` | `4` | poll interval in seconds |
+
+## gmlx pull
+
+Checks a remote GGUF's header and, when it will load, downloads every shard
+into your model library as plain files. A file that lands under a
+`model_dirs` root is registered in the config on the spot, and a running
+server picks it up.
+
+```sh
 gmlx pull hf:unsloth/Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_S.gguf
-
-# download into an explicit directory instead (no <org>__<repo> nesting)
 gmlx pull hf:org/repo/model.gguf --to ~/models
-
-# a sharded model downloads every shard automatically
-gmlx pull hf:org/repo/model-00001-of-00005.gguf
-
-# fetch several files from one repo at once: a model plus its mmproj, or two quants.
-# the first ref names the repo; bare filenames after it resolve in that same repo.
 gmlx pull hf:org/gemma-3-27b-GGUF/gemma-3-27b-Q4_K_M.gguf mmproj-F16.gguf
 ```
 
-By default `pull` lands files in the first `model_dirs` root from your server
-config (searched in the
-[standard locations](server-config.md#default-config-locations), or pass
-`--config FILE`), nesting hf downloads under `<dir>/<org>__<repo>/` so
-siblings stay grouped and `sync-models` / recursive discovery find them. With
-no config, `pull` errors and tells you to run `init` (or pass `--to DIR`).
-`--to DIR` overrides this and writes straight into `DIR`, with no
-`<org>__<repo>` subdir.
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `refs` (positional) | required | `hf:<org>/<repo>/<file.gguf>[@rev]` or a URL; later bare filenames resolve in the first ref's repo |
+| `--to DIR`, `--out DIR` | the first `model_dirs` root | download here, without the `<org>__<repo>` nesting |
+| `--config FILE` | the first default location | the config to read `model_dirs` from |
+| `--force` | off | download even when the header check or the disk-space check fails |
+| `--no-register` | off | do not add the file to the config |
+| `--hf-source ID` | none | treat the architecture as loadable with this config override |
+| `--max-mb N` | `128` | cap the header range read |
+| `--json` | off | emit each verdict as JSON before downloading |
 
-Pass several refs to fetch them in one run. Multipart (split) GGUFs always
-expand to every shard automatically. To grab extra files from the same repo
-(an mmproj companion, a second quant), name them after the first ref as bare
-filenames; they resolve in that ref's repo (and subfolder).
+Downloads nest under `<dir>/<org>__<repo>/` so a model's siblings stay
+together. An interrupted download resumes from its `.part` file. Before
+starting, `pull` checks that the volume has room for every shard. Set
+`HF_TOKEN` for gated repositories. A model that will not fit this Mac's RAM
+still downloads, with a note.
 
-Interrupted downloads resume rather than restart: each file streams to a
-sibling `.part` and is renamed into place only on completion, so re-running
-`pull` continues where it left off (and skips files already finished).
+## gmlx validate
 
-If the header check says a file won't load, `pull` refuses it unless you pass
-`--force`. Set `HF_TOKEN` (or `HUGGING_FACE_HUB_TOKEN`) for gated/private
-repos.
+Reports whether a GGUF will load, from the header alone. A remote reference
+is range-read, so the check costs a few megabytes rather than the download.
+The report names the architecture, the quant codecs, the total size across
+shards, whether it fits this Mac's RAM, and for a MoE model the streaming
+plan.
 
-Before downloading, `pull` also checks that the destination volume has room
-for every shard (bytes already landed in `.part` resume files count toward
-the total). If it does not, the pull is refused with both numbers; use
-`--to DIR` to target another volume, or `--force` to try anyway.
+```sh
+gmlx validate ~/models/Qwen3.6-27B-Q4_K_S.gguf
+gmlx validate hf:unsloth/Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_S.gguf
+gmlx validate hf:unsloth/NVIDIA-Nemotron-3-Super-120B-A12B-GGUF     # lists every quant
+gmlx validate https://huggingface.co/unsloth/Qwen3.6-27B-GGUF/blob/main/Qwen3.6-27B-Q4_K_S.gguf
+```
 
-The pre-download report also states the model's size and whether it fits this
-Mac's RAM (same verdict as `validate`). A tight or over-RAM model gets a
-stderr note but still downloads - the file may be destined for another
-machine or a [streaming](streaming.md) setup.
+| Ref form | Example |
+|----------|---------|
+| local path | `~/models/model.gguf` |
+| `hf:` file | `hf:org/repo/path/file.gguf`, optionally `@<revision>` |
+| `hf:` folder | `hf:org/repo/UD-Q5_K_M`; one model inside resolves, several are listed |
+| `hf:` repo | `hf:org/repo`; every quant listed as a ready-to-paste ref |
+| Hugging Face page | a `blob`, `tree` or `resolve` link, rewritten to the file or folder |
+| direct URL | `https://host/path/file.gguf` |
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `refs` (positional, 1+) | - | `hf:<org>/<repo>/<file.gguf>[@rev]` or an `http(s)://` URL (a local path is rejected; it's already on disk). Extra bare filenames resolve in the first ref's repo. |
-| `--to DIR` (alias `--out`) | model dir | Download into `DIR` exactly (no `<org>__<repo>` nesting). Default: the config's first `model_dirs` root, nesting hf files under `<dir>/<org>__<repo>/`. |
-| `--config FILE` | - | Config to read `model_dirs` from for the default destination (default: search the standard locations). |
-| `--force` | - | Download even if the header check says it won't load or the disk-space check fails. |
-| `--hf-source ID` | - | Treat the arch as loadable with this config override. |
-| `--max-mb N` | `128` | Cap the remote header range-read (MB). |
-| `--json` | - | Emit each verdict as JSON before downloading. |
-| `--no-register` | - | Don't add the downloaded file(s) to the server config's models. |
+| `ref` (positional) | required | the file, folder, repo or URL |
+| `--arch NAME` | detected | override architecture detection |
+| `--hf-source ID` | none | treat the architecture as loadable with this config override |
+| `--max-mb N` | `128` | cap the header range read |
+| `--json` | off | emit the verdict as JSON |
 
-## `gmlx rm`
+A split model is checked across every shard, because a codec used by one
+tensor can hide in a later shard. A projector GGUF is recognized as a
+companion rather than judged as a model. Exit codes: 0 loadable, 1 not, 2
+the reference could not be resolved or read.
 
-The inverse of `pull`: delete a model's GGUF file(s) from disk and remove its
-entry from the server config in one step. All shards of a split file go, along
-with any `.part` resume leftovers and the model's mmproj/draft/adapter
-companions, unless another configured (or discovered) model still references
-the same file, in which case that file is kept and a note says so. Aliases
-pointing at the removed id are dropped, and `server.defaults.model` is cleared
-if it named it. The config edit is a round-trip rewrite: comments and
-hand-edits elsewhere in the file survive.
+## gmlx rm
 
-```sh
-gmlx rm old-model                    # shows the plan, then asks
-gmlx rm old-model --yes              # no prompt
-gmlx rm old-model --keep-files       # drop the config entry, keep the files
-```
-
-Before deleting anything, `rm` prints every file with its size and what will
-happen to the config, then asks for confirmation (`--yes` skips this; without
-a terminal, `--yes` is required). A model that only appears via a `discover:`
-scan has no config entry; its files are deleted and it disappears from
-`gmlx list` on its own. Models whose `path` is an `hf:` cache ref lose only
-the config entry; the Hugging Face cache manages its own blobs.
-
-| Flag | Meaning |
-|------|---------|
-| `ID` (positional) | Model id (or alias) from the config, or a discovered model's id (see `gmlx list`). |
-| `--config FILE` | Config to read (default: the bare-start search path). |
-| `--keep-files` | Remove only the config entry; leave files on disk. |
-| `--yes` | Skip the confirmation prompt. |
-| `--json` | Emit the removal result as JSON (requires `--yes`). |
-
-Exit codes: `0` removed, `1` declined at the prompt or a file could not be
-deleted, `2` usage error / unknown id / no config.
-
-## `gmlx list`
-
-Aliased as `gmlx ls`. List the models your server config defines: the ids
-you can actually address in a request, not a directory of files. It reads the
-config (the bare-start search path, or `--config FILE`) and prints each model
-with its source path, flags (`vlm`, `mtp`, `lora`, `stream-cpu`/`stream-experts`,
-`pinned`), and profile. The default model is marked `*`. Both the explicit
-`models:` entries and anything a `discover:` scan would add are shown
-(discovered ones tagged `[discovered]`), followed by the `aliases:` table and
-the default model: the same set `serve` exposes at `/v1/models`, viewable
-offline. To list GGUF files on disk, use your shell; `gmlx init` /
-`sync-models` fold them into a config.
+Deletes a model's GGUF files, its resume leftovers and its companions, and
+removes its entry from the config. A file another model still references is
+kept. Aliases to the removed id are dropped and the default model is cleared
+when it named it. The plan is printed and confirmed before anything is
+deleted.
 
 ```sh
-gmlx list                            # the bare-start config (e.g. ~/.config/gmlx/gmlx.yaml)
-gmlx list --config ./gmlx.yaml
-gmlx list --json
+gmlx rm old-model
+gmlx rm old-model --yes
+gmlx rm old-model --keep-files
 ```
 
-| Flag | Meaning |
-|------|---------|
-| `--config FILE` | Config to read (default: the bare-start search path). |
-| `--json` | Emit `{config, models, aliases, default_model}` as JSON instead of the table. |
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `ID` (positional) | required | a model id, alias, or discovered model's id |
+| `--config FILE` | the first default location | which config |
+| `--keep-files` | off | remove only the config entry |
+| `--yes` | off | skip the confirmation; required without a terminal |
+| `--json` | off | emit the result as JSON; needs `--yes` |
+| `--no-reload` | off | do not signal a running server to re-read the file |
 
-Exit code `2` if no config is found (or an explicit `--config` path is
-missing); the message points you at `gmlx init`.
+Exit codes: 0 removed, 1 declined or a file could not be deleted, 2 an
+unknown id or no config.
 
-## `gmlx ps`
+## gmlx sync-models
 
-Show the models resident in a running gmlx server: it reads the server's
-`GET /v1/metrics` snapshot and tables each
-resident entry (ids, footprint, idle time, TTL, pinned) with the model path
-on a second line. The target defaults like `status`/`stop`: the single
-managed server if there's one, else the config's host/port, else
-`http://127.0.0.1:8080`; the output names the server it probed. `/v1/metrics` requires the API key when the server runs
-with one; pass the same key via `--api-key` (or the `GMLX_API_KEY` env
-var). On a `401`, `ps` prints exactly that hint. Exit code `1` if no server
-is reachable.
+Rescans the model directories and updates the `models` block to match disk:
+existing entries keep their comments and edits, entries whose file is gone
+are dropped, and new files are added. A sibling drafter pairs into the model
+it serves. Run it after dropping files into the directory or pulling them.
 
 ```sh
-gmlx ps
-gmlx ps --url http://192.168.4.20:8080 --api-key sk-local-...
-gmlx ps --json
+gmlx sync-models
+gmlx sync-models --from-hf-cache
+gmlx sync-models --dry-run
 ```
 
-| Flag | Meaning |
-|------|---------|
-| `--url URL` | Server base URL (default: resolved as above; a trailing `/v1` is stripped). |
-| `--host H` / `--port P` | Managed-server target (alternative to `--url`). |
-| `--api-key KEY` | API key for a key-protected server (default: the `GMLX_API_KEY` env var). |
-| `--json` | Emit the resident-model list as JSON instead of the table. |
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--config FILE` | the first default location | which config |
+| `--models-dir DIR` | the config's `model_dirs` | directories to scan, repeatable |
+| `--from-hf-cache`, `--hf-cache` | the config's `hf_cache` | also reconcile the Hugging Face cache |
+| `-r`, `--recursive`, `--no-recursive` | deep | descend into subdirectories; deep because `pull` nests |
+| `--dry-run` | off | print the plan without writing |
+| `--no-reload` | off | do not signal a running server to re-read the file |
 
-## `gmlx profiles`
+An entry that could not be checked, because its root is unmounted or the
+cache is unreadable, is kept and reported rather than dropped.
 
-Show the built-in per-family sampling table (each family's model-card
-defaults plus its addressable `@intents`), followed by your config's user
-profiles (flagging any that shadow a built-in) and each configured model's
-detected or declared family. With a model id (or alias), print that model's
-fully resolved sampling for its base and every addressable profile, along
-with the config layers that shaped the merge (rule, model profile, per-model
-tweaks, overrides). Read-only. The table form works with no config at all.
-See
-[server-config.md](server-config.md#profiles).
+## gmlx ps
+
+Shows the models resident in a running server from its `/v1/metrics`
+snapshot: id, footprint, idle time, TTL, pinned, and the path. A keyed server
+needs the key.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--url URL` | the managed server | the server's base URL |
+| `--host H`, `--port P` | the managed server | the server to target |
+| `--api-key KEY` | `GMLX_API_KEY` | the key for a keyed server |
+| `--json` | off | emit JSON |
+
+Exit code 1 means no server was reachable.
+
+## gmlx profiles
+
+Prints the family sampling table with its intents, then the config's user
+profiles and each model's family. With a model id it prints that model's
+resolved sampling for its base and every intent, and the layers that shaped
+it. It works with no config at all.
 
 ```sh
-gmlx profiles                        # the family table + user profiles + model families
-gmlx profiles qwen3.6-27b            # one model, resolved per intent
-gmlx profiles qwen3.6-27b --json
+gmlx profiles
+gmlx profiles qwen3.6-27b
 ```
 
-| Flag | Meaning |
-|------|---------|
-| `--config FILE` | Config to read (default: the bare-start search path). |
-| `--json` | Emit the table / resolution as JSON instead of text. |
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `id` (positional) | none | a model id or alias to resolve |
+| `--config FILE` | the first default location | which config |
+| `--json` | off | emit JSON |
 
----
+## gmlx talk
 
-## `gmlx completion`
-
-Print a shell completion script for `zsh`, `bash`, or `fish`.
+Voice chat with a served model: say the wake phrase, speak, and the reply
+streams back as speech. It is a client of the server's speech and chat
+endpoints, so the server needs `stt` and `tts` configured. Setup, the
+config block and the in-session keys are in [talk.md](talk.md).
 
 ```sh
-# zsh: eval at shell start (add to ~/.zshrc):
-eval "$(gmlx completion zsh)"
-# ...or drop a function file onto your fpath:
-mkdir -p ~/.zfunc && gmlx completion zsh > ~/.zfunc/_gmlx
-# then, before `compinit` in ~/.zshrc:  fpath+=(~/.zfunc)
-
-# bash: eval at shell start (add to ~/.bashrc):
-eval "$(gmlx completion bash)"
-# ...or, with the bash-completion package installed:
-gmlx completion bash > ~/.local/share/bash-completion/completions/gmlx
-
-# fish: source at shell start (add to ~/.config/fish/config.fish):
-gmlx completion fish | source
-# ...or drop it where fish autoloads completions:
-gmlx completion fish > ~/.config/fish/completions/gmlx.fish
+gmlx talk
+gmlx talk qwen3 --voice bf_emma
+gmlx talk --mode vad
+gmlx talk --once
 ```
 
-Completion is live, not baked: the emitted script is a thin shim that calls a
-hidden `gmlx __complete` on every TAB, so candidates always match the
-installed version and your config. It completes:
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `model` (positional) | `talk.model`, else the server default | the served model, with an optional `@profile` |
+| `--mode {wake,vad,ptt,text}` | `wake` | how a turn starts |
+| `--once` | off | one exchange without the wake gate, then exit |
+| `--wake-word PHRASE` | `hey assistant` | any phrase, no training |
+| `--wake-threshold X` | `0.3` | higher means fewer false wakes |
+| `--vad-threshold X` | `0.6` | speech probability above which a frame is speech |
+| `--vad-silence-ms MS` | `550` | trailing silence that ends an utterance |
+| `--min-speech-ms MS` | `300` | shorter utterances are discarded |
+| `--voice NAME` | server default | the TTS voice |
+| `--list-voices` | off | list the server's voices and exit |
+| `--speed X` | `1.0` | speech speed, 0.25 to 4 |
+| `--no-chime` | off | disable the wake and idle sounds |
+| `--input-device D`, `--output-device D` | system default | audio devices by name substring or index |
+| `--list-devices` | off | list audio devices and exit |
+| `--system TEXT` | the talk default | the spoken persona |
+| `--language L` | detected | a Whisper language hint |
+| `--max-tokens N` | until the model stops | reply cap |
+| `--brain {chat,assistant}` | `talk.brain`, else `chat` | plain chat, or the assistant with tools and memory |
+| `--base-url URL` | the managed server | an explicit server, which also runs the speech services |
+| `--host H`, `--port P`, `--api-key KEY` | the managed server | the server to target and its key |
+| `--no-start` | off | never start the server |
+| `--start-timeout S` | `180` | how long an auto-start may take |
+| `--config PATH` | the first default location | the YAML with the `talk` block |
 
-- verbs (`run`, `serve`, `launch`, ...) and the `ls` alias.
-- flags for the verb being typed (read from that verb's own `--help`).
-- model ids and aliases from your server config for `run` / `chat` / `serve`
-  (the `--config FILE` already on the line is honoured, else the default
-  config).
-- harness names (plus `menubar`) for `launch`, and `install` / `uninstall` /
-  `status` for `service`.
-- live host / port / URL for `--host` / `--port` / `--url` / `--base-url`,
-  read from the servers you've backgrounded, so completing `stop --port
-  <TAB>` offers the port of the running server.
-- file paths (via the shell's own path completion) for path-valued flags and
-  positionals.
+## gmlx train
 
-No regeneration is needed after an upgrade; re-running the script only
-matters if you move where it's installed.
+Trains a LoRA adapter on a quantized GGUF base and writes it as a GGUF
+adapter. The base stays quantized throughout, so a model you could not hold
+in fp16 can still be fine-tuned. The walkthrough is in [lora.md](lora.md).
 
+```sh
+gmlx train base-Q8_0.gguf --data ./my-data --adapter-out my-lora.gguf
+gmlx run base-Q8_0.gguf --adapter my-lora.gguf --prompt "..."
+```
 
----
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `model` (positional) | required | the base GGUF, or a config id |
+| `--data PATH_OR_ID` | required | a directory with `train.jsonl` and `valid.jsonl`, or a Hugging Face dataset id |
+| `--adapter-out PATH` | required | where to write the adapter |
+| `--config FILE` | the first default location | the config an id is resolved against |
+| `--iters N` | `150` | training iterations |
+| `--batch-size N` | `4` | batch size |
+| `--num-layers N` | `8` | top transformer layers to adapt |
+| `--rank N` | `8` | LoRA rank |
+| `--scale F` | `20.0` | LoRA scale; alpha is scale times rank |
+| `--dropout F` | `0.0` | LoRA dropout |
+| `--learning-rate F` | `1e-4` | Adam learning rate |
+| `--max-seq-length N` | `2048` | longest training sequence |
+| `--val-batches N` | `25` | validation batches per evaluation |
+| `--steps-per-report N` | `10` | training-loss report interval |
+| `--steps-per-eval N` | `200` | validation interval |
+| `--seed N` | `0` | RNG seed |
+| `--hf-source ID` | none | tokenizer and config fallback, rarely needed |
 
-Environment variables are listed in [env-vars.md](env-vars.md).
+The data can be chat messages, prompt and completion pairs, or plain text,
+in the formats mlx-lm's trainer accepts.
+
+## gmlx doctor
+
+Checks everything a working setup needs and prints one PASS, WARN or FAIL
+line per check with the fix named. It covers the runtime and kernels, the
+config, every configured model's files, background servers, RAM against each
+model's size, disk space and the Hugging Face token. It never touches the
+network.
+
+```sh
+gmlx doctor
+gmlx doctor --deep
+```
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--config FILE` | the first default location | which config |
+| `--deep` | off | also read every configured model's header |
+| `--json` | off | emit JSON |
+
+Exit codes: 0 nothing failed, 1 a check failed, 2 a usage error.
+
+## gmlx completion
+
+Prints a completion script for zsh, bash or fish. The script is a shim that
+asks the installed `gmlx` for candidates on every tab, so it completes verbs,
+each verb's flags, model ids from your config, client names for `launch`,
+and the host, port and URL of servers you have backgrounded.
+
+```sh
+eval "$(gmlx completion zsh)"      # ~/.zshrc
+eval "$(gmlx completion bash)"     # ~/.bashrc
+gmlx completion fish | source      # ~/.config/fish/config.fish
+```
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `shell` (positional) | required | `zsh`, `bash` or `fish` |
+
+No regeneration is needed after an upgrade.
