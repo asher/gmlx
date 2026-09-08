@@ -571,6 +571,10 @@ The per-model case studies, their sample galleries and the certification
 method are in
 [internals/streaming-measurements.md](internals/streaming-measurements.md).
 
+## Residency of a streamed model
+
+A `stream: experts` entry is priced at its every-token weights plus its decode arena and its prefill ring. The routed experts stay on disk. The arena fills what the ceiling leaves after the ring, the KV room and the host floor, so a streamed model alone can use the whole budget. The load gate keeps the ring and KV room a resident streamed model has not filled, so a second model must fit beside them. To keep a second model resident beside it, cap the arena with `GMLX_DECODE_ARENA_GB` so both fit `budget_gb`. The streamed load lowers the MLX wired limit for the rest of the process, so a resident dense model runs unwired from then on. A raised limit wires every live buffer, the streamed model's file views included.
+
 ## Native-fp experts (MXFP4/NVFP4)
 
 Models with MXFP4/NVFP4 expert tensors (gpt-oss, DeepSeek-V4-Flash Q4_K_XL

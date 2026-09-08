@@ -111,7 +111,7 @@ flowchart TD
    attention. Speculative decoding (draft model / MTP) is optional and runs
    gmlx's own verify round, which keeps APC available (upstream disables
    it under a draft model). See
-   [server-config.md](../server-config.md#speculative-decoding--the-prompt-cache).
+   [server-config.md](../performance.md#what-a-warm-hit-restores).
 
 4. HTTP layer (`mlx-vlm` FastAPI app): exposes OpenAI Chat Completions
    (`/v1/chat/completions`), OpenAI Responses (`/v1/responses`), and Anthropic

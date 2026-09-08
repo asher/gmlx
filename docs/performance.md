@@ -265,7 +265,7 @@ checkpoint records; pure-recurrent and CacheList archs reuse verbatim
 snapshots.
 
 What reuse to expect, per family (tier routing:
-[server-config.md](internals/prompt-cache.md#which-tier-serves-which-architecture)):
+[internals/prompt-cache.md](internals/prompt-cache.md#which-tier-serves-which-architecture)):
 
 - **Dense / plain-KV MoE** (block tier): any shared prefix reuses at
   16-token block granularity - identical resends, shared system prompts,
@@ -304,13 +304,86 @@ large, mostly stable system prompt every turn, and multi-turn chat resends the w
 history. The optional SSD tier (`gmlx init --disk-cache`, or the `cache:` block in
 the config) persists entries across restarts and holds more than RAM comfortably
 would. Entries are evicted by size budget. Configuration keys:
-[server-config.md](server-config.md#cache-keys-cache).
+[server-config.md](server-config.md#cache-keys).
 
 The cache composes with MTP, and a finished request stores its generated
 tokens too. Turn N+1 of a conversation warm-starts past the whole of turn N
 instead of re-prefilling the previous reply, and a warm hit restores the
 draft head's state along with the base model's. Details and switches:
-[server-config.md](server-config.md#speculative-decoding--the-prompt-cache).
+[server-config.md](#what-a-warm-hit-restores).
+
+### What a warm hit restores
+
+MTP and the prompt cache compose. A speculative request uses the same pools
+the plain path uses, plus speculative-only layers on top. All of it is on by
+default; an in-memory prefix layer always runs, and the shared pools join in
+whenever `cache.enabled` is set, sized and evicted by the `cache:` keys
+in [server-config.md](server-config.md#cache-keys). The switches at the end exist for A/B and triage, not tuning.
+
+What a warm hit restores:
+
+- Prefix layer: an in-memory LRU of post-prefill target KV + hidden state.
+  A request sharing a token prefix with an earlier one (system prompt,
+  conversation history) skips re-prefill of the shared part, even with
+  `cache:` off.
+- Shared pools: with `cache.enabled`, the standard lookup ladder (exact ->
+  block -> disk) fills the prompt cache before prefill, exactly as on the
+  non-speculative path, including warm restarts from the SSD tier.
+- Retirement store: at request finish the whole sequence (prompt plus
+  generated tokens) is stored back, not just the prompt. Turn N+1 of a
+  conversation warm-starts past all of turn N instead of re-prefilling the
+  previous reply. Single requests store every tier; batched rows store
+  through the block pool only.
+- Drafter-KV sidecar: a native MTP head (Qwen3.5/3.6 `nextn`) keeps its
+  own KV, and a warm target with a cold drafter decodes at degraded
+  acceptance until the head catches up. A small sidecar entry saves the
+  drafter's KV next to the target's, so a warm hit restores both. It
+  rides its own small LRU and never competes for the exact-entry slots.
+- Checkpoint tier: hybrid archs (recurrent or sliding-window layers)
+  cannot use the block cache alone, and cloning the whole prompt cache
+  per entry grows quadratically over a conversation. The checkpoint tier
+  saves these models piecewise instead - near-linear memory, same warm
+  TTFT. Along a long prefill it drops a restore point every
+  `GMLX_APC_CKPT_INTERVAL` tokens (default 4096), plus three targeted
+  ones: a replay checkpoint one token before the prompt end (recurrent
+  state cannot rewind, so an identical resend needs a restore point
+  strictly below it), a turn checkpoint at the longest prefix the
+  next turn's re-rendered history can actually replay (predicted from
+  the chat template, so thinking-strip divergence lands past it), and
+  an anchor checkpoint at the end of the system prompt. The anchor is
+  the fan-out one: requests that share a system prompt and tool schemas
+  but carry different user turns (parallel agents, subagent bursts) all
+  restore from it instead of re-prefilling the shared prefix, and it is
+  exempt from the pruning that otherwise keeps only the newest restore
+  points as a conversation deepens. Exact-tier models (deepseek-v4-class
+  pooling stacks) get the same anchor as a whole-prefix clone in its own
+  small LRU (`GMLX_APC_ANCHOR_ENTRIES`), where sibling churn through the
+  count-capped exact slots cannot evict it. What
+  reuse each family gets from these:
+  [the table above](#the-prompt-cache). On ckpt-tier
+  models prompt prefill runs one request at a time (batched prefill
+  measured no win on these shapes).
+- Decode-time checkpoints: the same models also drop restore points
+  while generating, every `GMLX_APC_DECODE_CKPT` generated tokens
+  (default 512). When the next turn's re-rendered history diverges from
+  what was generated (thinking strip, tool-call re-serialization), the
+  finish-time save falls back to the newest point below the divergence
+  instead of dropping the reply entirely. Replies shorter than one
+  interval save through the prompt-end point alone.
+
+Eviction rides the pools the entries live in: the block LRU (`num_blocks`),
+the exact-prefix LRU (`exact_entries`), the disk cap (`disk.max_gb`). Hit
+and store counts surface on the authed `GET /v1/metrics`.
+
+> Thinking templates that strip prior-turn `<think>` blocks from the
+> re-rendered history (the Qwen3 family) diverge right after the
+> assistant header, so a full-length retirement entry can never match.
+> Retirement keys on the predicted next-turn render instead, and on
+> hybrid models the decode-time snapshots retain whatever prefix of the
+> reply the next turn can actually replay. What is structurally
+> unretainable -- content past the divergence point -- costs
+> re-prefilling, which is what every server pays there. A template
+> property, not a gmlx one.
 
 ## Serving concurrent requests
 
@@ -463,7 +536,7 @@ Levers, cheapest first:
 
 - `--kv-bits 8` roughly halves the cache at nearly no quality cost; `--kv-bits 4`
   roughly quarters it with a small cost at long range. Server-side these are the
-  `kv_bits` and friends load keys ([server-config.md](server-config.md#load-keys-load)).
+  `kv_bits` and friends load keys ([server-config.md](server-config.md#load-keys)).
   `--quantized-kv-start` keeps the first stretch of context in full precision.
   With speculative decoding on, quantized KV also costs draft acceptance --
   see the interaction note in the speculation section above.

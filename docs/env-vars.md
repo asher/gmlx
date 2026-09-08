@@ -53,6 +53,27 @@ size; prefer `--prefill-step-size` or `server.prefill_step_size`.
 | `MLX_VLM_RESIDENT_TTL_TICK` | Reaper wake-up interval in seconds (default `30`). |
 | `MLX_VLM_TOKEN_QUEUE_TIMEOUT` | Seconds a queued request waits for a decode slot before the server returns 503. `server.token_queue_timeout_s` sets the same limit from the config. |
 
+## Server
+
+These change how `gmlx serve` schedules and admits requests. Each has a
+config key or flag that is the normal way to set it; the variable exists so
+a live server can be re-gated for an A/B without a restart.
+
+| Variable | Meaning |
+|----------|---------|
+| `GMLX_DECODE_PREFILL_RATIO` | The `server.decode_prefill_ratio` value, read per scheduler tick. |
+| `GMLX_DECODE_PREFILL_FLOOR` | The decode-rate floor `auto` pacing protects, as a share of a stream's batched rate (default `0.5`). |
+| `GMLX_PREFILL_TICK_MS` | The `server.prefill_tick_ms` value, read per chunk. |
+| `GMLX_PREFILL_MIN_STEP` | Smallest chunk the tick budget may halve down to, in tokens. |
+| `GMLX_DECODE_BATCH` | Requests that decode together in one step (default `8`; `0` restores the upstream 32). |
+| `GMLX_QUEUE_DEPTH_CAP` | Waiting requests admitted before the server answers 503 (default 2x the decode batch; `0` disables). |
+| `GMLX_SSE_KEEPALIVE_S` | Seconds between SSE keepalive comments while a stream is silent (default `15`; `0` disables). |
+| `GMLX_PREFLIGHT_MEM=0` | Disable the memory preflight that answers 400 when a prompt cannot fit. |
+| `GMLX_FAITHFUL_HISTORY=0` | Restore mlx-vlm's stock chat-history rebuild, which drops `reasoning_content` from plain assistant turns. |
+| `GMLX_MTP_PREEMPT=0` | Keep a speculating stream from converting to plain decode when a batch grows past the width cap. |
+| `GMLX_MTP_RESUME=0` | Keep a gated batch plain instead of re-arming speculation when it drains. |
+| `GMLX_DECODE_FAST_DISK` | The `stream_fast_disk` recipe: `auto`, `on` or `off` (same as `--stream-fast-disk`). |
+
 ## Runtime
 
 | Variable | Meaning |

@@ -236,7 +236,7 @@ dialects. The rest:
 | `stop` | honored | ignored | ignored | chat + `/v1/completions`; Anthropic uses `stop_sequences` |
 | `stop_sequences` | ignored | ignored | honored | the Anthropic-native spelling |
 | `chat_template_kwargs` | honored | honored | honored | extra template variables, request wins over profile |
-| `profile` | honored | honored | honored | sampling/system profile by name ([profiles](server-config.md#profiles-sampling-profiles-and-built-in-intents)) |
+| `profile` | honored | honored | honored | sampling/system profile by name ([profiles](server-config.md#profiles)) |
 | `xtc_probability` | honored | honored | honored | XTC sampling (with `xtc_threshold`) |
 
 `echo`, `suffix`, `best_of > 1`, and list / token-array prompts on
@@ -307,3 +307,44 @@ curl localhost:8080/v1/chat/completions -d '{
 ```
 
 ---
+
+## Limits and back-pressure
+
+A text request whose prompt alone cannot fit in memory gets an immediate
+HTTP 400 with the estimated need and the available budget in the body,
+instead of dying mid-stream. The estimate prices prompt KV at the model's
+per-token cost (GQA heads, MLA latents, sliding windows, and quantized KV
+all lower it) plus the prefill score transient, against the working set
+with the batch drained. `max_tokens` counts only when the request pins it
+explicitly; default-max requests are never rejected on generation length.
+Media requests are not estimated in v1. `GMLX_PREFLIGHT_MEM=0` disables.
+
+Decode concurrency (how many requests generate tokens together in one batch
+step) defaults to 8; past that width aggregate throughput gains shrink while
+every stream slows. `GMLX_DECODE_BATCH` sets it (`0` restores the upstream
+default of 32).
+
+Requests beyond the waiting-queue cap get an immediate HTTP 503 with a
+`Retry-After` header instead of queueing toward the token-queue timeout. The
+JSON body names the cap and the current depth; the header value is the
+estimated drain time, clamped to 2-60 seconds. Harness SDKs back off on 503
+and retry, which beats holding a silent socket for half an hour.
+`GMLX_QUEUE_DEPTH_CAP` sets the cap (default 2 x the decode concurrency;
+`0` disables the check).
+
+While a streaming request is silent (most notably during that long prefill),
+the server emits an SSE comment line (`: keepalive`) every 15 seconds so
+clients with a between-bytes read timeout don't drop the connection before
+the first token. Comments are part of the SSE spec and invisible to event
+parsers. `GMLX_SSE_KEEPALIVE_S` changes the interval (seconds, `0`
+disables).
+
+## Hugging Face policy
+
+By default the server makes no Hugging Face access. A request `model` that
+isn't a local GGUF and isn't a configured id is refused (403
+`hf_access_disabled`) rather than triggering a download. With
+`server.hf_cache: true`, `HF_HUB_OFFLINE` is set and a named hf repo id
+resolves from the local cache only, still never the network. The HF cache is
+never enumerated into `/v1/models`: cached hf models are addressable only
+when you name them in `models:`.

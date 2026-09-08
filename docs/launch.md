@@ -114,7 +114,7 @@ Claude Code on local models is prefill-heavy: it sends a very long system prompt
 context compaction and tool-result injection. KV-prefix reuse across requests is
 therefore limited, and turn latency is dominated by prompt processing. Serve with the prompt
 cache enabled (`cache:` in the config, see
-[server-config.md](server-config.md#cache-keys-cache)) to soften repeated prefixes,
+[server-config.md](server-config.md#cache-keys)) to soften repeated prefixes,
 and prefer a model and machine with strong prefill throughput.
 
 ### opencode

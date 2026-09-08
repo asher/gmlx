@@ -239,7 +239,7 @@ The built-in intents (`coding`, `instruct`, `creative`,
 `reasoning-low|-medium|-high`) are addressable on paths and config ids alike,
 via an `@intent` suffix or `--profile NAME`, which also takes any user profile
 on the config path. `gmlx profiles` prints the full table; see
-[server-config.md](server-config.md#profiles-sampling-profiles-and-built-in-intents).
+[server-config.md](server-config.md#profiles).
 
 ```sh
 gmlx run model.gguf -p "..."                    # family base defaults applied
@@ -395,7 +395,7 @@ gmlx talk --once                              # one exchange, then exit
 The platform's server: continuously batched, multi-model, OpenAI/Anthropic-
 compatible (text + VLM + MTP), serving a config of named models and profiles. Every model's sampling starts from its family's
 model-card defaults, and a request can address `id@intent`; see
-[server-config.md profiles](server-config.md#profiles-sampling-profiles-and-built-in-intents).
+[server-config.md profiles](server-config.md#profiles).
 Config-defined assistant ids (`server.assistants:`) answer through the
 built-in server-side tool loop ([assistant.md](assistant.md#served-assistants)).
 The full config surface and the start-mode semantics live in
@@ -1064,7 +1064,7 @@ fully resolved sampling for its base and every addressable profile, along
 with the config layers that shaped the merge (rule, model profile, per-model
 tweaks, overrides). Read-only. The table form works with no config at all.
 See
-[server-config.md](server-config.md#profiles-sampling-profiles-and-built-in-intents).
+[server-config.md](server-config.md#profiles).
 
 ```sh
 gmlx profiles                        # the family table + user profiles + model families
