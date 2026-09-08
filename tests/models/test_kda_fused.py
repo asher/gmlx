@@ -111,8 +111,13 @@ def test_glm5_decode_route_matches_eager(monkeypatch):
         assert a.argmax() == b.argmax(), f"argmax diverged at step {t}"
     for a, b in zip(ssm_on, ssm_off):
         np.testing.assert_allclose(np.array(a), np.array(b), rtol=1e-3, atol=1e-4)
-    for a, b in zip(conv_on, conv_off):
-        assert mx.array_equal(a, b)
+    # The kernel copies its inputs into the tails, so the first linear
+    # layer's tails are exact. Later layers' inputs pass through the fused
+    # route, which agrees with eager to rounding (one f32 ulp on an M3
+    # Max), not bit-exactly.
+    assert mx.array_equal(conv_on[0], conv_off[0])
+    for a, b in zip(conv_on[1:], conv_off[1:]):
+        np.testing.assert_allclose(np.array(a), np.array(b), rtol=1e-5, atol=1e-7)
 
 
 def test_route_gating():

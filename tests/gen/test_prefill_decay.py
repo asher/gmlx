@@ -276,6 +276,7 @@ def _fresh_streamed(monkeypatch):
     _fresh_registry(monkeypatch)
     monkeypatch.setattr(pd, "_STREAMED_TRACKED", {})
     monkeypatch.setattr(pd, "_STREAMED_CAP", {})
+    monkeypatch.setattr(pd, "_BUILD_CREDIT", {})
 
 
 def test_streamed_credit_raises_headroom(monkeypatch):
@@ -316,6 +317,70 @@ def test_streamed_credit_sources_sum_under_union_cap(monkeypatch):
     pd.note_streamed_tracked_bytes(109 * GB, key=key, source="experts",
                                    cap=170 * GB)  # reload: no double-credit
     assert pd.streamed_tracked_bytes() == 163 * GB
+
+
+def _active(monkeypatch, ws_gb=120):
+    box = {"active": 10 * GB}
+    monkeypatch.setattr(
+        pd.mx, "device_info",
+        lambda: {"max_recommended_working_set_size": ws_gb * GB})
+    monkeypatch.setattr(pd.mx, "get_active_memory", lambda: box["active"])
+    return box
+
+
+def test_build_credit_follows_active_growth_up_to_the_cap(monkeypatch):
+    # Tracked regime: the walk grows active memory by the file before the
+    # install credits it. The build credit covers the growth, capped at the
+    # streamed bytes, so the every-token weights still count as live.
+    _fresh_streamed(monkeypatch)
+    box = _active(monkeypatch)
+    pd.note_build_credit("owner", 330 * GB)
+    assert pd.headroom_bytes() == 110 * GB
+    box["active"] = 349 * GB
+    assert pd.build_credit_bytes() == 330 * GB
+    assert pd.headroom_bytes() == 120 * GB - 349 * GB + 330 * GB
+    box["active"] = 30 * GB                 # untracked regime: views not in active
+    assert pd.build_credit_bytes() == 20 * GB
+    pd.forget_untracked_weights("owner")
+    assert pd.headroom_bytes() == 90 * GB
+
+
+def test_build_credit_ends_at_the_install_credit_or_deduction(monkeypatch):
+    # The install credits tracked experts (or deducts untracked ones) at
+    # the first request, after the build. Either ends the build credit for
+    # the key's owners, so the two never overlap. A table credit, or
+    # another model's credit, does not end it.
+    _fresh_streamed(monkeypatch)
+    box = _active(monkeypatch)
+    key = ("/models/moe.gguf",)
+    pd.set_untracked_weights_owner("owner")
+    try:
+        pd.note_build_credit("owner", 330 * GB)
+        pd.note_untracked_weights(0.0, key=key)     # the warm pass, tracked regime
+    finally:
+        pd.set_untracked_weights_owner(None)
+    box["active"] = 349 * GB
+    pd.note_streamed_tracked_bytes(54 * GB, key=key, source="table", cap=339 * GB)
+    assert pd.build_credit_bytes() == 330 * GB
+    pd.note_streamed_tracked_bytes(2 * GB, key=("/models/other.gguf",), source="experts")
+    assert pd.build_credit_bytes() == 330 * GB
+    pd.note_streamed_tracked_bytes(276 * GB, key=key, source="experts", cap=339 * GB)
+    assert pd.build_credit_bytes() == 0
+    assert pd.headroom_bytes() == 120 * GB - 349 * GB + 332 * GB
+    # Untracked regime: the warm pass registers the file, the install
+    # deducts the streamed share.
+    _fresh_streamed(monkeypatch)
+    box = _active(monkeypatch)
+    pd.set_untracked_weights_owner("owner")
+    try:
+        pd.note_build_credit("owner", 330 * GB)
+        pd.note_untracked_weights(339 * GB, key=key)
+    finally:
+        pd.set_untracked_weights_owner(None)
+    assert pd.headroom_bytes() == 120 * GB - 10 * GB - 339 * GB + 330 * GB
+    pd.deduct_untracked_weights(330 * GB, key)
+    assert pd.build_credit_bytes() == 0
+    assert pd.headroom_bytes() == 120 * GB - 10 * GB - 9 * GB
 
 
 def test_streamed_credit_union_cap_clamps(monkeypatch):

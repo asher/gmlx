@@ -256,3 +256,38 @@ def test_generator_scheme_is_kept_without_an_env_window(monkeypatch):
     rg = _rg()
     assert skv.resolve_for_load(rg, "m").single.scheme == "uniform"
     assert rg.kv_quant_scheme == "uniform"
+
+
+def test_config_head_dim_prefers_the_cache_dims():
+    """An explicit head_dim wins; an MLA config yields the dim a group
+    must divide for both keys (nope + rope) and values; a plain config
+    falls back to hidden // heads."""
+    def cfg(**kw):
+        return SimpleNamespace(config=SimpleNamespace(**kw))
+
+    assert skv._config_head_dim(cfg(head_dim=64, hidden_size=7168,
+                                    num_attention_heads=64)) == 64
+    # Kimi-K2.7 / DeepSeek-V3: hidden // heads is 112, the cache is not.
+    assert skv._config_head_dim(cfg(hidden_size=7168, num_attention_heads=64,
+                                    qk_nope_head_dim=128, qk_rope_head_dim=64,
+                                    v_head_dim=128)) == 64
+    assert skv._config_head_dim(cfg(hidden_size=4096,
+                                    num_attention_heads=32)) == 128
+    assert skv._config_head_dim(cfg()) is None
+
+
+def test_mla_attention_declines_to_fp16(monkeypatch):
+    """mlx-lm MLA attention (DeepSeek-V3, Kimi-K2) reads the latent cache
+    by matmul, so a kv_bits profile drops to fp16 with the reason, not a
+    head_dim refusal."""
+    monkeypatch.setenv("KV_BITS", "8")
+    rg = _rg()
+    rg.model.config = SimpleNamespace(
+        model_type="deepseek_v3", num_hidden_layers=4, hidden_size=7168,
+        num_attention_heads=64, qk_nope_head_dim=128, qk_rope_head_dim=64,
+        v_head_dim=128)
+    rg.model.layers = [SimpleNamespace(self_attn=SimpleNamespace(
+        kv_a_proj_with_mqa=object())) for _ in range(4)]
+    pol = skv.resolve_for_load(rg, "kimi")
+    assert pol.single.verdict == "dropped" and pol.batched.verdict == "dropped"
+    assert "deepseek_v3 attention reads the latent cache" in pol.single.reason

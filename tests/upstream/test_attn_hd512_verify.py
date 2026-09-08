@@ -12,6 +12,15 @@ KL = 4096
 SCALE = D**-0.5
 
 
+
+def _stock_sdpa():
+    """The stock kernel, even when an earlier test left the hd512 wrapper
+    installed on mx.fast: pinning _orig_sdpa to the wrapper itself makes
+    the fallback recurse into the wrapper (an exponential hang under the
+    chunked-prefill tile loop)."""
+    fn = mx.fast.scaled_dot_product_attention
+    return getattr(fn, "_gmlx_orig_sdpa", fn)
+
 def _rand(qL, kL=KL, hq=HQ, hkv=HKV, d=D):
     q = mx.random.normal((1, hq, qL, d)).astype(mx.bfloat16)
     k = mx.random.normal((1, hkv, kL, d)).astype(mx.bfloat16)
@@ -38,7 +47,7 @@ def test_chunked_prefill_causal_with_cached_prefix(qL, kL, monkeypatch):
     # kL > qL is chunk 2+ of a chunked prefill into an accumulating cache:
     # every query row's causal horizon is offset by the cached prefix.
     monkeypatch.setattr(
-        attn_hd512, "_orig_sdpa", mx.fast.scaled_dot_product_attention)
+        attn_hd512, "_orig_sdpa", _stock_sdpa())
     q, k, v = _rand(qL, kL=kL)
     out = attn_hd512._chunked_prefill(q, k, v, SCALE, "causal", tile=32)
     ref = _ref(q, k, v, True)
@@ -54,7 +63,7 @@ def test_chunked_prefill_unmasked_stays_unmasked(d, qL, monkeypatch):
     # muse-glimmer ViT, hd 96) attends to every key from every query row;
     # treating None as "causal" silently halved its receptive field.
     monkeypatch.setattr(
-        attn_hd512, "_orig_sdpa", mx.fast.scaled_dot_product_attention)
+        attn_hd512, "_orig_sdpa", _stock_sdpa())
     scale = d**-0.5
     q, k, v = _rand(qL, kL=qL, hq=16, hkv=16, d=d)
     out = attn_hd512._chunked_prefill(q, k, v, scale, None, tile=32)
@@ -70,7 +79,7 @@ def test_chunked_prefill_unmasked_stays_unmasked(d, qL, monkeypatch):
 def test_chunked_prefill_block_diagonal_mask(monkeypatch):
     # the ViT's window attention: a non-causal array mask, sliced per tile
     monkeypatch.setattr(
-        attn_hd512, "_orig_sdpa", mx.fast.scaled_dot_product_attention)
+        attn_hd512, "_orig_sdpa", _stock_sdpa())
     qL, d = 96, 96
     q, k, v = _rand(qL, kL=qL, hq=16, hkv=16, d=d)
     seg = mx.arange(qL) // 32

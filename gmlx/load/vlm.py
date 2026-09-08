@@ -81,6 +81,19 @@ def resolve_vlm_model_type(llm_arch: str, mm_meta: dict) -> str:
         # projector onto the glm5next hybrid text tower. Both halves are
         # vendored (gmlx.models.glm5_next.vlm_model); mlx-vlm has no class.
         return "glm5_next"
+    if proj == "deepseek4v":
+        # DeepSeek-V4-Flash-Vision-Exp: a native-resolution DeepSeek ViT
+        # (2-D rope, RMSNorm, SwiGLU, bidirectional per image) + a 3x3
+        # unfold aligner onto the deepseek4 text tower, which carries the
+        # image-token router bias and the in-block attention. Both halves
+        # are vendored (gmlx.models.deepseek_v4.vlm_model); mlx-vlm's
+        # deepseek_v4 module is text-only, so the container registers under
+        # its own model_type.
+        if llm_arch != "deepseek4":
+            raise UnsupportedVLMError(
+                f"mmproj projector 'deepseek4v' on LLM arch {llm_arch!r} is "
+                "not supported (only DeepSeek-V4 text GGUFs, arch 'deepseek4')")
+        return "deepseek_v4_vl"
     if proj == "kimik25":
         # Moonshot Kimi-K2.5/K2.7: a MoonViT tower (SigLIP-so400m shape, 2-D
         # RoPE + a learned position grid that interpolates to the image) and
@@ -707,6 +720,38 @@ _GLM5NEXTV_TOP_MAP = {
 }
 
 
+# DeepSeek-V4-Flash-Vision-Exp (deepseek4v): the DeepSeek ViT + 3x3 unfold
+# aligner, mapped onto the vendored gmlx.models.deepseek_v4.vision tower. The
+# converter split the fused wqkv and w1 (llama.cpp PR 28133), so q/k/v and
+# gate/up arrive as separate tensors; the patch embed is a 14x14 conv stored
+# [out, C, ph, pw] that the tower applies as a Linear over the
+# (C, ph, pw)-flattened patch.
+_DEEPSEEK4V_BLK_SUBMAP = {
+    "attn_q": "attn.q_proj",
+    "attn_k": "attn.k_proj",
+    "attn_v": "attn.v_proj",
+    "attn_out": "attn.out_proj",
+    "ln1": "norm1",
+    "ln2": "norm2",
+    "ffn_gate": "mlp.gate_proj",
+    "ffn_up": "mlp.up_proj",
+    "ffn_down": "mlp.down_proj",
+}
+_DEEPSEEK4V_TOP_MAP = {
+    "v.patch_embd.bias": "vision_tower.patch_embed.proj.bias",
+    "v.post_ln.weight": "vision_tower.norm.weight",
+    "mm.1.weight": "vision_tower.aligner.w1.weight",
+    "mm.1.bias": "vision_tower.aligner.w1.bias",
+    "mm.2.weight": "vision_tower.aligner.w2.weight",
+    "mm.2.bias": "vision_tower.aligner.w2.bias",
+    # Learned sentinel embeddings for the START / PAD / NEWLINE / END slots.
+    "v.token_embd.img_start": "image_start",
+    "v.token_embd.img_pad": "image_pad",
+    "v.image_newline": "image_newline",
+    "v.token_embd.img_end": "image_end",
+}
+
+
 def _qwen35_patch_embed_conv3d(w0: mx.array, w1: mx.array) -> mx.array:
     """Two temporal patch-conv slices -> one MLX Conv3d weight.
 
@@ -896,6 +941,33 @@ def remap_vision_arrays(
             bid, rest = m.group(1), m.group(2)
             sub, _, leaf = rest.rpartition(".")  # leaf = weight | bias
             tgt = _GLM5NEXTV_BLK_SUBMAP.get(sub)
+            if tgt is None:
+                skipped.append(name)
+                continue
+            out[f"vision_tower.blocks.{bid}.{tgt}.{leaf}"] = arr
+        return out, skipped, vis_kqmeta
+
+    if model_type == "deepseek_v4_vl":
+        for name, arr in arrays.items():
+            if name.endswith(".scales") or name.endswith(".biases"):
+                continue
+            if name == "v.patch_embd.weight":
+                # Conv [out, C, ph, pw] -> Linear [out, C*ph*pw]; the
+                # processor flattens patches in the same (C, ph, pw) order.
+                out["vision_tower.patch_embed.proj.weight"] = arr.reshape(
+                    arr.shape[0], -1)
+                continue
+            hit = _DEEPSEEK4V_TOP_MAP.get(name)
+            if hit is not None:
+                out[hit] = arr
+                continue
+            m = _VISION_BLK_RE.match(name)
+            if m is None:
+                skipped.append(name)
+                continue
+            bid, rest = m.group(1), m.group(2)
+            sub, _, leaf = rest.rpartition(".")  # leaf = weight | bias
+            tgt = _DEEPSEEK4V_BLK_SUBMAP.get(sub)
             if tgt is None:
                 skipped.append(name)
                 continue
@@ -1415,6 +1487,65 @@ def _synthesize_glm5next_vlm_config(
     return config
 
 
+# DeepSeek-V4-Flash-Vision-Exp image placeholder (fullwidth bars, as the
+# chat template emits it once per image).
+DEEPSEEK4V_IMAGE_TOKEN = "<\uff5cdeepseek_image\uff5c>"
+DEEPSEEK4V_IMAGE_TOKEN_ID = 129264
+
+
+def _synthesize_deepseek4v_vlm_config(
+    text_config: dict, mm_meta: dict, llm_meta: dict,
+) -> dict:
+    """DeepSeek-V4-Flash-Vision-Exp VLM config: the deepseek4 text synth plus
+    the DeepSeek ViT read from ``clip.vision.*``.
+
+    Constants pinned with their source (llama.cpp PR 28133 clip.cpp,
+    ``PROJECTOR_TYPE_DEEPSEEK4V``, and the checkpoint's inference args):
+    rope theta 10000, the 384-token image budget and the 8:1 width cap. The
+    aligner's downsample ratio and the minimum pixel count are GGUF fields."""
+    from gmlx.models.deepseek_v4.image_block import N_BLOCK_TYPES
+
+    vision_config: dict = {
+        "model_type": "deepseek_v4_vl",
+        "depth": _mm_int(mm_meta, "clip.vision.block_count"),
+        "hidden_size": _mm_int(mm_meta, "clip.vision.embedding_length"),
+        "intermediate_size": _mm_int(mm_meta, "clip.vision.feed_forward_length"),
+        "num_heads": _mm_int(mm_meta, "clip.vision.attention.head_count"),
+        "patch_size": _mm_int(mm_meta, "clip.vision.patch_size"),
+        "in_channels": 3,
+        "out_hidden_size": _mm_int(mm_meta, "clip.vision.projection_dim"),
+        "rope_theta": 10000.0,
+        "max_n_token": 384,
+        "max_wh_ratio": 8,
+    }
+    ratio = _mm(mm_meta, "clip.vision.projector.scale_factor")
+    vision_config["downsample_ratio"] = int(ratio) if ratio is not None else 3
+    min_pixels = _mm(mm_meta, "clip.vision.image_min_pixels")
+    vision_config["min_pixels"] = (
+        int(min_pixels) if min_pixels is not None else 147456)
+    eps = _mm(mm_meta, "clip.vision.attention.layer_norm_epsilon")
+    if eps is not None:
+        vision_config["rms_norm_eps"] = float(eps)
+
+    vocab = int(text_config.get("vocab_size", 129280))
+    media_ids = [vocab + t for t in range(N_BLOCK_TYPES)]
+    # The serve engine reads the config off the language model: mirror the
+    # expanded-stream media ids onto the text config (a ModelArgs field).
+    text_config["media_token_ids"] = list(media_ids)
+    config: dict = {
+        "model_type": "deepseek_v4_vl",
+        "text_config": text_config,
+        "vision_config": vision_config,
+        "vocab_size": vocab,
+        "media_token_ids": media_ids,
+    }
+    img_id = _gguf_token_id(llm_meta, DEEPSEEK4V_IMAGE_TOKEN)
+    config["image_token_id"] = (
+        DEEPSEEK4V_IMAGE_TOKEN_ID if img_id is None else img_id)
+    config["image_token_index"] = config["image_token_id"]
+    return config
+
+
 def synthesize_vlm_config(
     model_type: str, llm_meta: dict, llm_shapes: dict, mm_meta: dict,
     *, mm_tensor_names: set[str] | None = None,
@@ -1440,6 +1571,9 @@ def synthesize_vlm_config(
     if model_type == "glm5_next":
         return _synthesize_glm5next_vlm_config(
             text_config, mm_meta, llm_meta, mm_shapes)
+
+    if model_type == "deepseek_v4_vl":
+        return _synthesize_deepseek4v_vlm_config(text_config, mm_meta, llm_meta)
 
     if model_type == "gemma4":
         standardize = "v.std_scale" in names and "v.std_bias" in names
@@ -1629,7 +1763,8 @@ def build_vlm_model(config_dict: dict):
 
 # GGUF-only processor synthesis (image processor + tokenizer + chat template)
 
-def _synthesize_vlm_processor(model_type: str, tokenizer, mm_meta: dict):
+def _synthesize_vlm_processor(model_type: str, tokenizer, mm_meta: dict,
+                              config: dict | None = None):
     """Build an mlx-vlm processor from the GGUFs alone - no HF download.
 
     Pixel-preprocessing params come straight from the mmproj's ``clip.vision.*``
@@ -1657,6 +1792,8 @@ def _synthesize_vlm_processor(model_type: str, tokenizer, mm_meta: dict):
         return _synthesize_muse_glimmer_processor(tokenizer, mm_meta)
     if model_type == "glm5_next":
         return _synthesize_glm5next_processor(tokenizer, mm_meta)
+    if model_type == "deepseek_v4_vl":
+        return _synthesize_deepseek4v_processor(tokenizer, mm_meta, config or {})
     if model_type == "kimi_k25":
         return _synthesize_kimi_k25_processor(tokenizer, mm_meta)
     if model_type != "gemma4":
@@ -2539,6 +2676,216 @@ def _synthesize_glm5next_processor(tokenizer, mm_meta: dict):
     return _attach_streaming_helpers(processor, tokenizer)
 
 
+class _DeepseekV4VGgufImageProcessor(ImageProcessingMixin):
+    """Torch-free DeepSeek-V4-Flash-Vision-Exp image preprocessing (numpy +
+    PIL only), a port of the checkpoint's ``inference/image_processor.py``
+    ``load_image``: cap the width at ``max_wh_ratio`` heights, upscale a
+    below-minimum image by the sqrt area ratio, align both edges up to the
+    patch size, ``safe_resize`` the grid into the 384-token block budget
+    (``resize_geometry``), then either stretch (a source at or past the
+    ratio cap) or aspect-pad on a (127, 127, 127) canvas, both BICUBIC, and
+    normalize with the mmproj mean / std. Patches flatten in (C, ph, pw)
+    order, the order the tower's patch embed expects.
+
+    Returns ``pixel_values`` [N_patches, C*ph*pw] for all images stacked in
+    order and ``image_meta`` [n_img, 4] = (n_vit_h, n_vit_w, n_llm_h,
+    n_llm_w), which the model and the processor's block expansion read."""
+
+    model_input_names = ["pixel_values", "image_meta"]
+
+    def __init__(self, image_mean, image_std, patch_size=14,
+                 downsample_ratio=3, max_n_token=384, max_wh_ratio=8,
+                 min_pixels=147456):
+        super().__init__()
+        self.image_mean = list(image_mean)
+        self.image_std = list(image_std)
+        self.patch_size = int(patch_size)
+        self.downsample_ratio = int(downsample_ratio)
+        self.max_n_token = int(max_n_token)
+        self.max_wh_ratio = int(max_wh_ratio)
+        self.min_pixels = int(min_pixels)
+
+    def geometry(self, width: int, height: int):
+        from gmlx.models.deepseek_v4.image_block import resize_geometry
+        return resize_geometry(
+            width, height, patch_size=self.patch_size,
+            downsample_ratio=self.downsample_ratio,
+            max_n_token=self.max_n_token, max_wh_ratio=self.max_wh_ratio,
+            min_pixels=self.min_pixels)
+
+    def _one(self, img):
+        import numpy as np
+        from PIL import Image, ImageOps
+        if not isinstance(img, Image.Image):
+            img = Image.fromarray(np.asarray(img))
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        best_w, best_h, n_vit_h, n_vit_w, n_llm_h, n_llm_w, stretch = (
+            self.geometry(img.width, img.height))
+        if stretch:
+            image = img.resize((best_w, best_h), Image.Resampling.BICUBIC)
+        else:
+            image = ImageOps.pad(img, (best_w, best_h),
+                                 method=Image.Resampling.BICUBIC,
+                                 color=(127, 127, 127))
+        x = np.asarray(image, dtype=np.float32).transpose(2, 0, 1) / 255.0
+        mean = np.array(self.image_mean, dtype=np.float32)[:, None, None]
+        std = np.array(self.image_std, dtype=np.float32)[:, None, None]
+        x = (x - mean) / std                                   # [C, H, W]
+        p = self.patch_size
+        c = x.shape[0]
+        patches = x.reshape(c, n_vit_h, p, n_vit_w, p)
+        patches = patches.transpose(1, 3, 0, 2, 4)             # (h, w, c, ph, pw)
+        patches = patches.reshape(n_vit_h * n_vit_w, c * p * p)
+        return patches, (n_vit_h, n_vit_w, n_llm_h, n_llm_w)
+
+    def __call__(self, images, **kwargs):
+        import numpy as np
+        flat = _PixtralGgufImageProcessor._flatten(images)
+        vecs, metas = [], []
+        for img in flat:
+            v, meta = self._one(img)
+            vecs.append(v)
+            metas.append(meta)
+        return {
+            "pixel_values": np.concatenate(vecs, axis=0),
+            "image_meta": np.array(metas, dtype=np.int64).reshape(-1, 4),
+        }
+
+
+def _synthesize_deepseek4v_processor(tokenizer, mm_meta: dict, config: dict):
+    """Build the DeepSeek-V4-Flash-Vision-Exp processor from the GGUFs alone.
+
+    The chat template writes one ``<|deepseek_image|>`` placeholder per
+    image. The reference (``prepare_vl_inputs``) replaces it with the
+    image's token block, ids past the vocab (vocab_size + block type): lead
+    PADs to align START, the aligner grid as IMAGE / NEWLINE rows in the
+    interleaved layout, PADs, END (``build_image_block``, start position =
+    the prompt length so far). The block offsets ride along as
+    ``image_spans``, a Python list of absolute [start, end) pairs the text
+    tower reads host-side; it is set on the feature after ``to_mlx`` so it
+    never becomes an array (the batch engine shape-sniffs arrays)."""
+    import numpy as np
+    from transformers.feature_extraction_utils import BatchFeature
+    from transformers.processing_utils import ProcessorMixin
+
+    from mlx_vlm.models.base import to_mlx
+
+    from gmlx.models.deepseek_v4.image_block import build_image_block
+
+    patch_size = _mm_int(mm_meta, "clip.vision.patch_size")
+    ratio = _mm(mm_meta, "clip.vision.projector.scale_factor")
+    min_pixels = _mm(mm_meta, "clip.vision.image_min_pixels")
+    image_mean = _mm_floats(mm_meta, "clip.vision.image_mean") or [0.5, 0.5, 0.5]
+    image_std = _mm_floats(mm_meta, "clip.vision.image_std") or [0.5, 0.5, 0.5]
+    if len(image_mean) == 1:
+        image_mean = image_mean * 3
+    if len(image_std) == 1:
+        image_std = image_std * 3
+    vocab_size = int(config.get("vocab_size") or 129280)
+    image_token_id = int(config.get("image_token_id") or DEEPSEEK4V_IMAGE_TOKEN_ID)
+
+    image_processor = _DeepseekV4VGgufImageProcessor(
+        image_mean=image_mean, image_std=image_std, patch_size=patch_size,
+        downsample_ratio=int(ratio) if ratio is not None else 3,
+        min_pixels=int(min_pixels) if min_pixels is not None else 147456)
+
+    class DeepseekV4VProcessor(ProcessorMixin):
+        attributes = ["image_processor", "tokenizer"]
+        image_processor_class = "AutoImageProcessor"
+        tokenizer_class = "AutoTokenizer"
+
+        image_token = DEEPSEEK4V_IMAGE_TOKEN
+        image_token_id = None       # set below
+        vocab_size = None
+
+        def __call__(self, images=None, text=None, **kwargs):
+            if text is None and images is None:
+                raise ValueError("You must provide either text or images.")
+            if isinstance(text, str):
+                text = [text]
+
+            image_inputs = {}
+            metas = []
+            if images is not None:
+                if not isinstance(images, (list, tuple)):
+                    images = [images]
+                image_inputs = self.image_processor(images)
+                metas = [tuple(int(v) for v in row)
+                         for row in image_inputs["image_meta"]]
+
+            kwargs.pop("return_tensors", None)
+            data = dict(image_inputs)
+            spans = []
+            if text is not None:
+                bos = getattr(self.tokenizer, "bos_token", None)
+                if bos and all(t.startswith(bos) for t in text):
+                    # The template already emits BOS; never add a second.
+                    kwargs.setdefault("add_special_tokens", False)
+                enc = self.tokenizer(text, **kwargs)
+                rows = [[int(t) for t in row] for row in enc["input_ids"]]
+                if metas and len(rows) != 1:
+                    raise ValueError(
+                        "deepseek_v4_vl image prompts run single-row")
+                if metas:
+                    rows[0], spans = self._expand(rows[0], metas)
+                if len({len(r) for r in rows}) == 1:
+                    data["input_ids"] = np.array(rows, dtype=np.int64)
+                    data["attention_mask"] = np.ones_like(data["input_ids"])
+                else:
+                    data.update(enc)
+            feature = BatchFeature(data=to_mlx(data))
+            if spans:
+                feature["image_spans"] = spans
+            return feature
+
+        def _expand(self, ids, metas):
+            out, spans, index = [], [], 0
+            for tok in ids:
+                if tok != self.image_token_id:
+                    out.append(tok)
+                    continue
+                if index >= len(metas):
+                    raise ValueError(
+                        f"{index + 1} image placeholders but {len(metas)} "
+                        "images")
+                _n_vit_h, _n_vit_w, n_llm_h, n_llm_w = metas[index]
+                index += 1
+                types, _perm = build_image_block(n_llm_h, n_llm_w, len(out))
+                spans.append([len(out), len(out) + len(types)])
+                out.extend(self.vocab_size + int(t) for t in types)
+            if index != len(metas):
+                raise ValueError(
+                    f"{index} image placeholders but {len(metas)} images")
+            return out, spans
+
+        def batch_decode(self, *args, **kwargs):
+            return self.tokenizer.batch_decode(*args, **kwargs)
+
+        def decode(self, *args, **kwargs):
+            return self.tokenizer.decode(*args, **kwargs)
+
+        @property
+        def model_input_names(self):
+            return list(dict.fromkeys(
+                list(self.tokenizer.model_input_names)
+                + list(self.image_processor.model_input_names)))
+
+    DeepseekV4VProcessor.image_token_id = image_token_id
+    DeepseekV4VProcessor.vocab_size = vocab_size
+    processor = DeepseekV4VProcessor(
+        image_processor=image_processor, tokenizer=tokenizer,
+        chat_template=getattr(tokenizer, "chat_template", None))
+
+    # mlx-vlm's message formatter is a closed table; without a row the image
+    # part never reaches the template's placeholder emission.
+    import mlx_vlm.prompt_utils as _prompt_utils
+    _prompt_utils.MODEL_CONFIG.setdefault(
+        "deepseek_v4_vl", _prompt_utils.MessageFormat.LIST_WITH_IMAGE_FIRST)
+
+    return _attach_streaming_helpers(processor, tokenizer)
+
+
 def _swap_spec_language_model(model, model_type: str, *, log) -> None:
     """Replace ``model.language_model`` with the spec-capable class the text
     MTP path builds (``_vlm_spec_language_model``), constructed from the
@@ -2646,6 +2993,10 @@ def load_vlm_model(
         # Likewise vendored (text tower, ViT and wrapper all in-repo).
         import gmlx.models.glm5_next.vlm_model as glm5_next_vlm_model
         glm5_next_vlm_model.ensure_registered()
+    elif model_type == "deepseek_v4_vl":
+        # Likewise vendored; registers past mlx-vlm's text-only deepseek_v4.
+        import gmlx.models.deepseek_v4.vlm_model as deepseek_v4_vlm_model
+        deepseek_v4_vlm_model.ensure_registered()
     with_audio = bool(mm_meta.get("clip.has_audio_encoder"))
     _log(f"[vlm] model_type={model_type} audio={with_audio}")
     if model_type in ("qwen3_5", "qwen3_5_moe"):
@@ -2729,7 +3080,11 @@ def load_vlm_model(
     #    codec and stay native. The remap already produced final mlx-vlm names
     #    (text under [thinker.]language_model.model.*, vision/audio under their
     #    towers), so model.sanitize must not run - it would re-prefix text keys.
-    _install_and_load(model, hf_weights, hf_kquant_meta, log=_log, sanitize=False,
+    # deepseek_v4_vl: the container's sanitize applies the text tower's
+    # transforms (kquant scale placeholders, wo_a 2D->3D) under
+    # language_model.*, which the text path gets from sanitize=True.
+    _install_and_load(model, hf_weights, hf_kquant_meta, log=_log,
+                      sanitize=(model_type == "deepseek_v4_vl"),
                       no_alias=owned_names,
                       fp32_keep=_FP32_KEEP_BY_MODEL_TYPE.get(model_type, ()),
                       f16_keep=_F16_KEEP_BY_MODEL_TYPE.get(model_type, ()),
@@ -2770,7 +3125,8 @@ def load_vlm_model(
     else:
         from .tokenizer import load_tokenizer_from_gguf
         tokenizer = load_tokenizer_from_gguf(llm_meta, llm_arch)
-        processor = _synthesize_vlm_processor(model_type, tokenizer, mm_meta)
+        processor = _synthesize_vlm_processor(
+            model_type, tokenizer, mm_meta, config=config)
         mtp_tokenizer = tokenizer
         _log("[vlm] processor: synthesized from GGUF (no download)")
     if return_tokenizer:

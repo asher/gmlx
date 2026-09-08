@@ -723,9 +723,11 @@ the feeder paths that are otherwise on by default (`prefill_feeder`
 everywhere, `decode_feeder` on `stream: experts` entries only - it needs the
 every-token layers on GPU): staged expert prefill straight from the GGUF, and decode from a
 wired, popularity-managed GPU expert arena. The arena yields under system
-memory pressure - it shrinks, keeping its most popular experts, and regrows
-once pressure clears - so a `stream: experts` entry coexists with other models loading
-on the same server (`GMLX_DECODE_PRESSURE=0` pins it). Both keys are
+memory pressure and to the memory governor. It shrinks and keeps its most
+popular experts. It regrows once pressure clears. A `stream: experts`
+entry therefore coexists with other models loading on the same server.
+`GMLX_DECODE_PRESSURE=0` pins it against pressure. The governor still
+shrinks it before it sheds a request. Both keys are
 load-affecting. See
 [streaming.md](streaming.md) for what they
 do and when to turn them off.
@@ -1311,7 +1313,17 @@ and store counts surface on the authed `GET /v1/metrics`.
 Several models stay resident at once: pinned models plus an LRU pool bounded
 by the weight-byte budget (`server.budget_gb`, default 0.8x the GPU
 recommended working set). Each entry's footprint is its on-disk GGUF size
-(zero-copy resident weight bytes).
+(zero-copy resident weight bytes). A `stream: experts` entry is priced at its
+every-token weights plus its decode arena and its prefill ring. The routed
+experts stay on disk. The arena fills what the ceiling leaves after the
+ring, the KV room and the host floor, so a streamed model alone can use the
+whole budget. The load gate keeps the ring and KV room a resident streamed
+model has not filled, so a second model must fit beside them. To keep a
+second model resident beside it, cap the arena with `GMLX_DECODE_ARENA_GB`
+so both fit `budget_gb`. The streamed load
+lowers the MLX wired limit for the rest of the process, so a resident dense
+model runs unwired from then on. A raised limit wires every live buffer,
+the streamed model's file views included.
 
 - Idle TTL: `server.defaults.ttl_s` (overridable per model) idle-unloads a
   non-pinned model after it goes unused that long. The reaper only tears
@@ -1393,6 +1405,7 @@ the key.
 | `queue` | `waiting`, `cap`, `eta_s`, `rejections`, `last_reject_reason` | The waiting census again, the cap it is judged against, and the drain estimate in seconds a client would get as `Retry-After` right now (`0` with nothing waiting; the same formula: waiting x mean tokens per request / aggregate decode rate, clamped 2-60 s). |
 | `requests[]` | `id`, `uid`, `model`, `state`, `position`, `prompt_tokens`, `generated`, `max_tokens`, `elapsed_s`, `ttft_s`, `decode_tok_s`, `cache {tier, warm_tokens}`, `speculative {rounds, accepted, drafted, accept_rate}` | One row per request the serve path knows about, queued rows first in queue order. `state` is `queued` (server queue or engine-side unadmitted; `position` is the place in line), `prefill`, or `decode`. `cache.tier` is the prefix-cache hit the row got (`exact`, `block`, or gmlx's own `ckpt` / `anchor` restores; `miss`; `hit` when only the warm-token count is known) and `warm_tokens` how many prompt tokens it reused. `speculative` is the drafter's acceptance since the row started (exact at batch width 1, shared across the batch otherwise) and `null` without a drafter. Rows come from each engine's tick, refreshed at most four times a second per engine and merged across resident models (`position` is the place in that model's queue); an idle engine contributes nothing. Drafted models (`draft_gguf` / `speculative: true`) report rows like any other; their `speculative` numbers are the drafter's per-generation round tally, which is exact at batch width 1 and shared across a wider speculative batch. |
 | `governor` | `band`, counters | The memory governor's band and shed history; see the `GMLX_GOVERNOR` / `GMLX_GOV_*` rows in [cli.md](cli.md#environment-variables). |
+| `memory` | `active_bytes`, `cache_bytes`, `headroom_bytes`, `arena_bytes`, `arena_nominal_bytes`, `kv_room_bytes`, `arena_hits`, `arena_lookups` | MLX's active and cached bytes and the headroom the admission gate reads. The arena fields appear for a streaming model: the decode arena's bytes now, its sized capacity, and the KV room the arena leaves under the governor ceiling (`GMLX_STREAM_KV_CTX`). A gap between the first two is a pressure or governor shrink, or a lend to the prefill ring. `arena_hits` over `arena_lookups` is the arena hit rate since load. It rises as the arena warms. |
 | `capacity` | `max_ctx` by width, `max_width_at_depth`, byte budgets | The boot capacity table (`GMLX_OVERCOMMIT=1` disables its ceilings); absent for an HF fall-through load. Priced per cache entry: growing attention KV at the resolved `kv_bits` width, sliding windows at their cap, the fixed recurrent state of hybrid models (gated DeltaNet, Mamba2, KDA) once per sequence. |
 | `rates` | `decode_tok_s`, `decode_streams`, `prefill_tok_s_recent`, `decode_tok_s_recent`, `decode_tok_s_lifetime` | The aggregate decode rate right now (the sum over the rows in `requests[]` that are decoding) and how many streams it is spread over; the mean prefill and per-stream decode rates over the last eight completed requests (what the dry-run's `est_ttft_s` is computed from); the lifetime mean decode rate. |
 

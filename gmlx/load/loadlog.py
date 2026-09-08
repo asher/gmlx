@@ -205,6 +205,20 @@ class Capture:
 
 
 @contextmanager
+def quiet():
+    """A quiet session for header-only pricing outside a load (validate,
+    doctor). Reuses an active session."""
+    if _STATE.get() is not None:
+        yield
+        return
+    tok = _STATE.set(_State(verbose=False))
+    try:
+        yield
+    finally:
+        _STATE.reset(tok)
+
+
+@contextmanager
 def capture(path: str):
     """``load_ui`` for a load running off the tty (chat's background load):
     quiet session, no spinner, summary/stage handed back on the yielded

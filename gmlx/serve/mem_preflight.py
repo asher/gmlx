@@ -333,12 +333,15 @@ def prompt_kv_bytes(costs, tokens: int) -> float:
 
 
 def available_drained_bytes():
-    """Working set minus zero-copy weights minus the admission reserve:
-    what a lone request could hold with the batch drained. MLX-tracked
-    weight allocations are not subtracted, which only admits more."""
+    """Working set minus zero-copy weights, minus a streaming model's
+    decode arena, minus the admission reserve: what a lone request could
+    hold with the batch drained. The arena is MLX-tracked, sized at
+    install and never drained. Other MLX-tracked weight allocations are
+    not subtracted, which only admits more."""
     import mlx.core as mx
 
     from gmlx.gen.prefill_decay import untracked_weight_bytes
+    from gmlx.stream.installs import live_arena_bytes
     from .memory import admit_reserve_bytes
 
     try:
@@ -347,7 +350,8 @@ def available_drained_bytes():
         return None
     if ws <= 0:
         return None
-    return ws - untracked_weight_bytes() - admit_reserve_bytes(ws)
+    return (ws - untracked_weight_bytes() - live_arena_bytes()
+            - admit_reserve_bytes(ws))
 
 
 def _need_bytes(model, costs, prompt_tokens: int, gen_tokens: int = 0):

@@ -1736,6 +1736,11 @@ def _run_vlm(args) -> int:
     # its experts.
     _apply_placement(args, getattr(model, "language_model", model))
     print_family_note(args)
+    # mlx-vlm's fixed-step prefill loop cannot be steered per chunk; the
+    # language model's chunked_prefill_policy reads the step from here to
+    # keep media token blocks whole (see gmlx.gen.media_spans).
+    from gmlx.gen.media_spans import stamp_prefill_step
+    stamp_prefill_step(model, args.prefill_step_size)
 
     from mlx_vlm import generate
     from mlx_vlm.prompt_utils import apply_chat_template

@@ -104,21 +104,24 @@ python tests/e2e/run_server_e2e.py
 
 `tests/e2e/run_capacity_e2e.py` drives the capacity-facing surface against a
 live server on a tiny GGUF (decode width 2, queue cap 3, six concurrent
-streams): `/health?ready=1` flipping to 503 under load, `/v1/metrics`
+streams; `--stream` serves an over-RAM MoE with `stream: experts`): `/health?ready=1` flipping to 503 under load, `/v1/metrics`
 `concurrency` / `queue` / `requests[]` agreeing with the batch, the Prometheus
 rendering, the scoped `/v1/cache/reset`, the dry-run estimate and the
 capacity plan, and an explicit unload of the preloaded model. Exit 0 on
 pass; no judge.
 
-`tests/e2e/run_residency_switch_e2e.py --primary ID=PATH[:spec] --second
-ID=PATH[:spec|:draft=PATH]`: two models that cannot both be resident in
+`tests/e2e/run_residency_switch_e2e.py --primary ID=PATH[:spec|:stream]
+--second ID=PATH[:spec|:draft=PATH|:stream]`: two models that cannot both be resident in
 one server. Asserts the load gate's typed 503 while the preloaded primary
 is held, the explicit unload that frees it, load-by-request, a burst on
 the second model with the first refused while it is busy, and the LRU
 switch in both directions once idle, with `/v1/estimate` and
-`/v1/capacity/plan` tracking the resident model throughout.
+`/v1/capacity/plan` tracking the resident model throughout. The burst
+must outlast the 20 s sampling window, so a fast second model needs
+`--max-tokens 600` or more. A `:stream` primary beside a dense second
+model walks the same surface with the streamed model's priced footprint.
 
-`tests/e2e/run_capacity_soak_e2e.py --models ID=PATH[:spec|:draft=PATH]...
+`tests/e2e/run_capacity_soak_e2e.py --models ID=PATH[:spec|:draft=PATH|:stream]...
 --cycles N --cycle-minutes M --clients K --out DIR`: seeded chaos for N
 cycles against one server - cold / warm / sibling prompts, growing
 sessions (answers appended verbatim, compaction rewrites), aborted
@@ -147,6 +150,38 @@ stats on the drafted models' rows, the warm cache tier on a repeated prompt,
 a scoped reset that leaves another model's streams alone, unload plus
 reload-by-request of a secondary model, Prometheus labels for every model,
 and a green governor throughout. About three minutes; exit 0 on pass.
+A `:stream` entry serves that model with `stream: experts`. Kimi-K2.7 UD-Q2
+beside a 0.6B, with `--rounds 1 --streams 5 --width 2 --max-tokens 200`, is
+the issue #49 check: the arena stays under the governor ceiling while a
+second model loads and streams beside it.
+
+Run `tests/e2e/memguard.py` beside any streaming e2e run. It samples
+memory twice a second and kills the servers before the box swaps under
+a wired arena, which is a watchdog panic, and its log is the timeline.
+
+`tests/e2e/run_stream_e2e.py` runs a streamed model beside the rest of
+the box, one server per phase (`--phases cycles warmth occupied
+coresident coload`). `cycles` loads, unloads and reloads the model three times:
+wired memory returns near its pre-load value, the arena and the priced
+footprint come back at the same size, the server process holds no more
+after each unload, and the first `[stream] memory budget:` line matches
+the fit planner. `warmth` sends a series of requests and reads
+`memory.arena_hits` over `arena_lookups`: the hit rate rises as the
+arena fills. Then `memhog.py` wires memory from another process while a
+stream decodes: reclaimable falls under the kernel floor, the arena
+steps down by about one step and never collapses, no row is shed, and
+the arena regrows on the next decode when the box has room for a step.
+`occupied` wires memory before the server boots: the arena sizes down
+by about that amount and the floor does not trip. `coresident` serves
+the streamed model beside a dense one with `--arena-gb`: alternating
+requests evict neither and `resident_bytes` is the sum of the priced
+footprints. `coload` loads the streamed model while the dense model
+decodes a long stream, requests the dense model while the streamed
+model decodes, and again during a streamed reload. Every stream
+completes with no shed and no Metal out-of-memory error, and the log
+shows the load lowered the wired limit the dense generator raised. The
+dense stream must outlast the streamed load (`--coload-tokens`). Each
+phase costs 5 to 15 minutes on Kimi-K2.7 UD-Q2. Exit 0 on pass.
 
 `tests/e2e/run_apc_disk_e2e.py` exercises disk-backed APC prefix reuse across
 server restarts the same way: real server, real GGUF, standalone.

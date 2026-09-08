@@ -1080,3 +1080,13 @@ def test_model_classification_carries_general_name_for_family_refinement():
 
     from gmlx.gen.profiles import detect_family
     assert detect_family(c.arch, c.name) == "kimi-k2"
+
+
+def test_supported_main_arch_with_backbone_field_is_model():
+    """Vision-Exp LLM GGUFs (and any llama.cpp DeepSeek-V4 reconversion)
+    carry deepseek4.embedding_length_out; a supported main arch is a model,
+    the backbone-field probe is for unknown drafter archs only."""
+    c = _classify({"general.architecture": "deepseek4",
+                   "deepseek4.embedding_length_out": 16384},
+                  "DeepSeek-V4-Flash-Vision-Exp-UD-IQ3_XXS-00001-of-00004.gguf")
+    assert c.kind == "model"

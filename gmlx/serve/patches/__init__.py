@@ -233,9 +233,16 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     # it found at install time.
     from gmlx.cache.apc_qsa import install_qsa_apc_support
     install_qsa_apc_support()
+    # Media guard reads config-declared media ids (expanded image blocks).
+    from gmlx.cache.apc_media import install_media_token_ids
+    install_media_token_ids()
     install_safe_kv_quantization()
     install_pooled_prompt_kv_quant()
     install_pooled_prefill_batch_gate()
+    # Before the load-time prefill decay wrap so this runs inside it and
+    # sees the decayed step (order matters for the block extension).
+    from gmlx.gen.media_spans import install_span_aware_prompt_step
+    install_span_aware_prompt_step()
     # Before the model loads, so the cascade stamp wrapper (installed at load
     # time) wraps this and both survive.
     install_batched_cachelist_admission()

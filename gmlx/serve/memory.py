@@ -300,8 +300,10 @@ def project_admission(gen, candidates):
     against measured headroom.
 
     Returns ``(projected, headroom, parts)`` with parts a human-readable
-    breakdown, or None when there is no measured basis to project (fresh
-    model, empty batch, probe failure): the gate must admit then.
+    breakdown, or None when there is no basis to project (no boot table
+    and no measured batch, probe failure): the gate must admit then. A
+    fresh model prices from the boot table's rates until the first batch
+    is measured.
     ``candidates`` are pending-queue tuples (uid, prompt, max_tokens, ...).
     """
     import mlx.core as mx
@@ -310,6 +312,10 @@ def project_admission(gen, candidates):
 
     update_kv_rates(gen)
     rates = getattr(gen, "_kq_admit_kv_rates", None)
+    if not rates:
+        from .capacity import boot_kv_rates
+
+        rates = boot_kv_rates(getattr(gen, "model", None))
     if not rates:
         return None
     head = headroom_bytes()

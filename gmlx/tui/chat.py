@@ -3935,6 +3935,10 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 end_token=state.thinking_end_token,
             )
             set_finish_key_target(tbp)
+            # The fixed-step prefill loop reads its step from this stamp
+            # through chunked_prefill_policy (media blocks stay whole).
+            from gmlx.gen.media_spans import stamp_prefill_step
+            stamp_prefill_step(model, kv_kwargs.get("prefill_step_size"))
             try:
                 reply, _canceled = _stream_reply(
                     vlm_stream(

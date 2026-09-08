@@ -101,12 +101,15 @@ def _collect_cache_leaves(prompt_cache: List[Any]) -> List[Any]:
     return leaves
 
 
-class DeepseekV4SpecLM(v4.Model):
-    """Vendored V4 ``Model`` + the ``speculative_*`` hooks the owned MTP
-    engine probes on the target's ``language_model``."""
+class DeepseekV4SpecHooks:
+    """The ``speculative_*`` hooks the owned MTP engine probes on its
+    target, plus the mlx-vlm ``language_model`` call contract. Mixed into
+    both spec targets - the text-only ``DeepseekV4SpecLM`` and the VLM
+    container's ``LanguageModel`` (gmlx.models.deepseek_v4.vlm_model) -
+    which share the attribute layout the hooks read (``self.model``
+    backbone, ``self.lm_head``, ``self._dspark_capture``)."""
 
-    def __init__(self, config):
-        super().__init__(config)
+    def _init_spec_hooks(self) -> None:
         # The verify rollback path needs the rotating undo log on the class.
         ensure_rollback_attached()
         # Set by the DSpark loader: tuple of trunk layer ids whose hc-mean
@@ -141,14 +144,20 @@ class DeepseekV4SpecLM(v4.Model):
         n_to_process: Optional[int] = None,
         return_hidden: bool = False,
         return_shared_kv: bool = False,
+        mask: Optional[mx.array] = None,
+        image_spans=None,
         **kwargs,
     ):
         # `inputs` is mlx-vlm's LanguageModel parameter name -- its chunked
         # prefill calls language_model(inputs=ids, inputs_embeds=..., ...) by
         # keyword. V4 needs the token ids regardless of inputs_embeds (hash
-        # MoE routing + embedding happen inside the backbone), so the embeds
-        # are ignored. shared_kv is never used (the drafter owns its KV).
-        del inputs_embeds, n_to_process, kwargs
+        # MoE routing happens inside the backbone); the embeds, when given,
+        # replace the token embedding (the VLM container's spliced image
+        # features) and ``image_spans`` marks the image blocks. The backbone
+        # builds its own window mask. shared_kv is never used (the drafter
+        # owns its KV).
+        del n_to_process, mask, kwargs
+        fwd = dict(input_embeddings=inputs_embeds, image_spans=image_spans)
         want_hidden = return_hidden or return_shared_kv
         if want_hidden and self._dspark_capture is not None:
             out, h_raw, caps = self.model(
@@ -156,12 +165,13 @@ class DeepseekV4SpecLM(v4.Model):
                 cache,
                 return_raw_hidden=True,
                 capture_layers=self._dspark_capture,
+                **fwd,
             )
             return _SpecOutput(
                 logits=self.lm_head(out),
                 hidden_states=[self._dspark_pack(h_raw, caps)],
             )
-        out, h_raw = self.model(inputs, cache, return_raw_hidden=True)
+        out, h_raw = self.model(inputs, cache, return_raw_hidden=True, **fwd)
         logits = self.lm_head(out)
         if not want_hidden:
             # mlx-vlm's AR engine calls model.language_model(...) directly
@@ -240,6 +250,15 @@ class DeepseekV4SpecLM(v4.Model):
                     f"({rejected}) refused after is_trimmable() -- cache "
                     f"state is now inconsistent"
                 )
+
+
+class DeepseekV4SpecLM(DeepseekV4SpecHooks, v4.Model):
+    """Vendored V4 ``Model`` + the ``speculative_*`` hooks the owned MTP
+    engine probes on the target's ``language_model``."""
+
+    def __init__(self, config):
+        super().__init__(config)
+        self._init_spec_hooks()
 
 
 class DeepseekV4MTPDrafter(nn.Module):
@@ -442,6 +461,10 @@ class DeepseekV4MTPDrafter(nn.Module):
         shifted = mx.concatenate(
             [input_ids[:, n - h_len + 1 :].astype(token_dtype), bonus], axis=1
         )
+        # Image-block ids (Vision-Exp) sit past the vocab; the head only
+        # ever seeds on text, so clamp them to 0 for the embedding gather.
+        vocab = int(self.config.text.vocab_size)
+        shifted = mx.where(shifted >= vocab, mx.zeros_like(shifted), shifted)
         hid = hidden[:, n_hidden - h_len :]
         h = self._forward(shifted, hid)
         self._set_seed(h[:, -1:], sampler, greedy)

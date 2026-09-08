@@ -410,10 +410,11 @@ def hf_list_dir(repo: str, path: str, revision: str = "main", *,
     return [(e.get("path", ""), e.get("type", ""), e.get("size", 0)) for e in data]
 
 
-def fetch_header(url: str, *, get=None,
-                 initial: int = 4 * 1024 * 1024,
-                 max_bytes: int = 128 * 1024 * 1024) -> HeaderReport:
-    """Range-read a growing header prefix until the tensor-info table parses.
+def fetch_header_bytes(url: str, *, get=None,
+                       initial: int = 4 * 1024 * 1024,
+                       max_bytes: int = 128 * 1024 * 1024) -> tuple[bytes, int | None]:
+    """Range-read a growing header prefix until the tensor-info table
+    parses. Returns ``(prefix, total_size_or_None)``.
 
     ``get`` defaults to :func:`http_get_prefix`, resolved at call time so a test
     can monkeypatch the module attribute."""
@@ -423,9 +424,8 @@ def fetch_header(url: str, *, get=None,
     while True:
         buf, total = get(url, size)
         try:
-            report = classify_header(buf)
-            report.total_bytes = total
-            return report
+            _parse_header(buf)
+            return buf, total
         except _NeedMore:
             if len(buf) < size:                  # server returned EOF: file < size
                 raise RemoteError(
@@ -436,3 +436,14 @@ def fetch_header(url: str, *, get=None,
                     f"GGUF header exceeds the {max_bytes // (1024 * 1024)} MB "
                     f"range-read cap; pass a larger --max-mb")
             size = min(size * 4, max_bytes)
+
+
+def fetch_header(url: str, *, get=None,
+                 initial: int = 4 * 1024 * 1024,
+                 max_bytes: int = 128 * 1024 * 1024) -> HeaderReport:
+    """The codec report of a remote GGUF, from its header prefix alone."""
+    buf, total = fetch_header_bytes(url, get=get, initial=initial,
+                                    max_bytes=max_bytes)
+    report = classify_header(buf)
+    report.total_bytes = total
+    return report

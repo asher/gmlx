@@ -1790,6 +1790,10 @@ ARCH_PRIORITY_OVERRIDES: dict[str, list[tuple[re.Pattern, str | None, str]]] = {
          "model.layers.{bid}.ffn.gate.weight", "passthrough"),
         (re.compile(r"^blk\.(\d+)\.exp_probs_b\.bias$"),
          "model.layers.{bid}.ffn.gate.e_score_correction_bias", "passthrough"),
+        # Vision-Exp conversions add a second correction bias, applied to
+        # image-block tokens only (every layer, hash layers included).
+        (re.compile(r"^blk\.(\d+)\.exp_probs_b_vl\.bias$"),
+         "model.layers.{bid}.ffn.gate.e_score_correction_bias_vl", "passthrough"),
         (re.compile(r"^blk\.(\d+)\.ffn_gate_tid2eid\.weight$"),
          "model.layers.{bid}.ffn.gate.tid2eid", "passthrough"),
         # Routed experts (pre-stacked [n_experts, ...]) + shared expert.

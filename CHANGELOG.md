@@ -8,6 +8,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- DeepSeek-V4-Flash-Vision-Exp loads with its `deepseek4v` mmproj: image
+  turns on `run`, `chat` and `serve`; text turns unchanged.
 - `--kv-quant-scheme kvarn` (server `kv_quant_scheme: kvarn`): a second
   KV-cache quantization scheme, Huawei's KVarN (arXiv:2606.03458) in the
   beellama.cpp record format (MIT, see THIRD_PARTY_NOTICES.md). Widths
@@ -27,6 +29,81 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `quantized_kv_start` as a per-model server load key is applied to that
   model; upstream read it once from the process environment at server
   start.
+- A request admitted into a live MTP batch under `--kv-bits` failed with
+  `type object 'QuantizedKVCache' has no attribute 'merge'`: the injected
+  row's B=1 packed cache lifted through a class merge it does not have. It
+  now recovers to fp16 rows, the lift preemption already used.
+- `gmlx discover` listed a DeepSeek-V4 GGUF carrying `embedding_length_out`
+  as an assistant drafter.
+
+## [0.4.10] - 2026-09-07
+
+### Added
+
+- A streaming fit planner. `gmlx validate` prints a `streaming:` block for
+  a MoE file: the every-token weights by group, the routed experts, the
+  prefill ring, and this machine's ceiling, KV room, decode arena and
+  verdict. `--json` carries it under `stream`. `gmlx doctor` reports the
+  plan for each `stream: experts` entry. docs/streaming.md explains the
+  rule and the levers.
+- `/v1/metrics` `memory` reports `arena_bytes`, `arena_nominal_bytes`,
+  `kv_room_bytes`, `arena_hits` and `arena_lookups` for a streaming model.
+
+### Fixed
+
+- Streaming models on `gmlx serve` shed the first request with `governor
+  red` (#49). The decode arena and the prefill ring were sized from a RAM
+  fraction the governor never saw. The arena now takes what the governor's
+  ceiling leaves after the every-token weights, a KV room priced for
+  `GMLX_STREAM_KV_CTX` tokens (default 32768), the ring's own room and a
+  host floor (`GMLX_DECODE_RAM_FLOOR_GB`). It registers with the governor,
+  which shrinks it before it sheds a request and lets it regrow. The
+  capacity table, the memory preflight and admission charge it.
+  `GMLX_DECODE_ARENA_RAM_FRAC` has no default now and caps the ceiling when
+  set; `GMLX_DECODE_KV_RESERVE_GB` replaces the priced room. Requires
+  mlx-kquant 0.4.7, whose arena returns its pages to the kernel on release.
+- The governor's kernel floor took the whole decode arena for a small dip,
+  and a shrunk arena never regrew. A sub-floor sample now reclaims the
+  deficit plus half a floor, a step maps onto what is left above the
+  floor, and regrow reads the reclaimable measure.
+  `governor.kernel_reclaimable_bytes` in `/v1/metrics` samples the kernel
+  at idle.
+- Residency priced a `stream: experts` entry at its file size, so any
+  second model evicted it. The entry now counts its every-token weights,
+  decode arena and prefill ring, the load gate keeps the ring and KV room
+  a resident stream has not filled, and a streaming load over the
+  residency budget beside pinned or busy models defers with the typed 503
+  instead of taking a live generation's room.
+- A streaming model loading beside a resident model failed with a Metal
+  out-of-memory error: the resident generator had left the MLX wired
+  limit raised, and the load's walk wired the file's pages. The limit is
+  lowered before the walk. The governor also read the routed experts as
+  live memory until the first request; the pool credits them from the load.
+- A long prompt after the first decode on a streaming model could push the
+  machine into swap under the wired arena. The prefill ring keeps its own
+  room for the process lifetime instead of borrowing from the arena, ring
+  reads bypass the page cache (`GMLX_PREFILL_NOCACHE=0` restores buffered
+  reads), and arena layers and ring slots wire at allocation. A ring the
+  ceiling cannot hold is not built; prefill uses page-cache prefetch and
+  the load says why.
+- The serve process no longer forks. The APC exact-cache lookup with a disk
+  tier shelled out to `vm_stat` on every request, and a fork of a process
+  with Metal-mapped buffers copies them before the exec, the wired arena
+  included. The read is in-process now, and the arena, ring and pinned
+  weights are `VM_INHERIT_NONE`, so a child maps none of them.
+- A build that failed after the stock load left the model behind the
+  exception, and the next load deferred on negative headroom. The pool
+  tears a failed build down and logs it; the preload names the failure.
+- `kv_bits` on MLA models (DeepSeek-V3, Kimi-K2.7) was refused with a head
+  dim no cache holds, and past that check failed at the first token: the
+  mlx-lm MLA attention cannot read a quantized cache. The policy drops
+  `kv_bits` to fp16 on that attention with the reason in the `[kv]` line.
+
+## [0.4.9] - 2026-09-06
+
+### Fixed
+
+- Streaming models size the decode arena to 0.6 of physical RAM again.
 - Capacity planning priced every layer of a hybrid model as growing fp16
   KV. The boot table, `/v1/estimate`, the memory preflight and the APC
   pool budget now price recurrent layers (gated DeltaNet, Mamba2, KDA) as
@@ -37,10 +114,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The boot capacity table was absent for sharded MLA models (GLM-5.3-Flash,
   Kimi-K2.7): the header synth read tensor shapes from the first shard only
   and could not derive the MLA head dims. It now reads every shard.
-- A request admitted into a live MTP batch under `--kv-bits` failed with
-  `type object 'QuantizedKVCache' has no attribute 'merge'`: the injected
-  row's B=1 packed cache lifted through a class merge it does not have. It
-  now recovers to fp16 rows, the lift preemption already used.
 
 ## [0.4.8] - 2026-09-02
 

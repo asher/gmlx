@@ -26,6 +26,7 @@ live server. Scenarios are grouped into tiers:
 | `discovery` | `--models-dir` header-only scan serves derived ids |
 | `vlm` | gemma-4-E2B + mmproj describes an image |
 | `mtp` | gemma-4-E2B + assistant drafter (speculative) stays coherent; lossless-greedy spec == base |
+| `stream` | an over-RAM MoE served with `stream: experts`: five short prompts, then the decode arena and KV room in `/v1/metrics`, a green governor, no shed; the same model with an 8-bit KV cache (needle recall), with the APC disk tier (a resend adopts the cache), and with a drafter when one is on disk |
 
 A scenario whose required models aren't present under the models root is **skipped**,
 not failed.
@@ -78,6 +79,9 @@ python tests/e2e/run_server_e2e.py --tiers core,kv,cache --out ./e2e-out
 # Skip the LLM judge (floor checks only — faster, fully deterministic).
 python tests/e2e/run_server_e2e.py --no-judge
 
+# The streamed-MoE tier alone. One server, one over-RAM model, short prompts.
+python tests/e2e/run_server_e2e.py --tiers stream --no-judge
+
 # Re-grade a prior run's responses with the judge, without re-launching servers.
 python tests/e2e/run_server_e2e.py --judge-only ./e2e-out/report.json
 ```
@@ -92,9 +96,32 @@ The VLM tier uses a real photo (`assets/cats.jpg`) by default, which actually ex
 the vision encoder; a synthesized shapes PNG is only a last-resort backstop if no real
 image resolves.
 
+## Memory guard
+
+A streaming server wires most of RAM. When the rest of the box then goes
+to swap, the kernel has nothing to reclaim and the watchdog panics. Run
+`memguard.py` beside a streaming e2e run:
+
+```bash
+python tests/e2e/memguard.py --verbose --log ~/.cache/gmlx/e2e/memguard.log &
+```
+
+It samples memory twice a second and SIGKILLs the servers and harnesses
+when the compressor grows past 12 GB over its start value, or free RAM
+is under 3 GB with swap in use. The verbose log holds the timeline a
+panic would otherwise take with it.
+
+To see what the server was doing when the guard fired, start it with a
+`sitecustomize.py` on `PYTHONPATH` that registers `faulthandler` on
+SIGUSR1 (`faulthandler.register(signal.SIGUSR1, file=..., all_threads=True)`)
+and send the signal from a sampler when free RAM drops. `py-spy` needs
+root on macOS and `sample` reads nothing from a process in a fork; the
+in-process dump names the frame, a fork included.
+
 ## Output
 
-Under `--out` (or a temp dir printed at the end):
+Under `--out` (default `~/.cache/gmlx/e2e/<stamp>`, printed at the start;
+not a temp dir, so a run that panics the box leaves its logs):
 
 - `report.md` — human-readable: summary, per-tier roll-up, a Failures section, and a
   per-scenario breakdown (post-checks, each request's floor/anchor/judge verdicts, a
@@ -116,6 +143,18 @@ the assistant drafter GGUF). The small dense models (Qwen3-0.6B Q4/Q8, gemma-3-1
 only the structural tiers (residency LRU/TTL, discovery, the HF-gate negative) — they
 need distinct small sizes for eviction. The judge prefers a larger coherent model
 (gemma-4-12B) and falls back to the small ones.
+
+The `stream` tier takes the `streaming` role (Kimi-K2.7 UD-Q2, else GLM-5.3-Flash UD-Q2).
+The fit planner reads the headers first. A model that fits in RAM on this box does not
+stream, so the tier skips it and `--list` says why. `stream_spec` needs a streaming model
+with an MTP head or a sibling drafter; `--list` says when none is on disk.
+
+`run_stream_e2e.py` runs the streamed model beside the rest of the box, one server per
+phase: load/unload/reload cycles (wired memory and the priced footprint return, the
+budget line matches the planner), arena warmth and a wired-memory transient from another
+process (`memhog.py`), a box that is already occupied at load, co-residency beside a
+dense model with a capped arena, and a load beside a model that is decoding. See
+`docs/testing.md`.
 
 A scenario whose models aren't present is **skipped**, so the harness runs on a partial
 library — the structural + small-model tiers light up as soon as the public models are on

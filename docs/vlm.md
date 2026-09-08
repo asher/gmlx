@@ -57,6 +57,7 @@ families that share one. An unsupported pairing fails loudly at load with both n
 | gemma-4 unified | `gemma4uv` | gemma-4-12B (encoder-free unified embedder) |
 | Muse Glimmer | `muse-glimmer` + `muse-glimmer` | Muse-Glimmer-30B |
 | Kimi K2.5 / K2.7 | `kimik25` + `deepseek2` | Kimi-K2.5, Kimi-K2.7-Code |
+| DeepSeek-V4-Flash-Vision-Exp | `deepseek4v` + `deepseek4` | DeepSeek-V4-Flash-Vision-Exp (unsloth UD) |
 
 Muse Glimmer's vision tower and image processor are implemented in gmlx. Neither
 mlx-vlm nor the installed transformers ships the family, so the preprocessing
@@ -126,3 +127,21 @@ consumer.
 - Qwen3-Omni multimodal generation rides mlx-vlm's `qwen3_omni_moe` path, which we
   have found unreliable in stock mlx-vlm. Treat vision/audio input on Omni as
   experimental. Text generation on the Omni thinker tower is solid.
+- DeepSeek-V4-Flash-Vision-Exp:
+  - Image turns run one request at a time and need unquantized KV;
+    `--kv-bits` applies to text turns only.
+  - Each image expands to a block of up to 384 tokens that prefills in one
+    chunk. A chunk boundary that would cut a block moves to the block edge.
+  - Prefix caching keys on the expanded blocks. A conversation that repeats
+    its earlier image turns verbatim hits the cache; one that re-renders
+    them re-prefills from the first changed block.
+  - Text output is not token-for-token comparable with the 0731 text
+    release (rms eps 1e-20 vs 1e-6).
+  - The 0731 DSpark sidecar pairs as a text-turn drafter via `--draft-gguf`.
+    Measure its acceptance; it was trained on the 0731 trunk.
+  - llama.cpp attends a block's lead pads bidirectionally; gmlx follows the
+    reference and keeps them causal.
+- The serve chat endpoint renders every image of a conversation on its last
+  user message (stock mlx-vlm rendering, every VLM), so a follow-up turn
+  after an image turn re-prefills from the moved block. `chat` pins each
+  image to its own turn and keeps the prefix.

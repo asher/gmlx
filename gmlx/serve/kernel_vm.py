@@ -85,6 +85,7 @@ def snapshot() -> dict | None:
         return None
     return {
         "free": st.free_count * _PAGE,
+        "inactive": st.inactive_count * _PAGE,
         "purgeable": st.purgeable_count * _PAGE,
         "speculative": st.speculative_count * _PAGE,
         "filebacked": st.external_page_count * _PAGE,
@@ -102,6 +103,17 @@ def reclaimable_bytes() -> int | None:
     if s is None:
         return None
     return s["free"] + s["purgeable"] + s["speculative"] + s["filebacked"]
+
+
+def available_bytes() -> int | None:
+    """free + inactive, what mlx-vlm's ``_free_ram_bytes`` parses out of
+    ``vm_stat``, read in process. A fork beside a Metal-mapped buffer
+    copies the buffer before the exec, so the serve process never shells
+    out for this."""
+    s = snapshot()
+    if s is None:
+        return None
+    return s["free"] + s["inactive"]
 
 
 def wired_bytes() -> int | None:
@@ -126,9 +138,12 @@ def selfcheck() -> str | None:
             _disabled = "host_statistics64 unavailable"
             return _disabled
         try:
+            # close_fds=False with an absolute path is posix_spawn: no
+            # fork, so nothing Metal-mapped is copied.
             ref = int(subprocess.run(
-                ["sysctl", "-n", "vm.page_free_count"],
-                capture_output=True, text=True, timeout=5).stdout) * _PAGE
+                ["/usr/sbin/sysctl", "-n", "vm.page_free_count"],
+                capture_output=True, text=True, timeout=5,
+                close_fds=False).stdout) * _PAGE
         except Exception as e:
             _disabled = f"sysctl cross-check failed: {e}"
             return _disabled

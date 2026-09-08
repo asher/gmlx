@@ -9,6 +9,7 @@ needs.
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 import mlx.core as mx
@@ -25,7 +26,7 @@ from gmlx.upstream.gdn_patches import (
     _patch_gated_delta_tiled_v,
     _patch_mlxvlm_gated_delta_tiled_v,
 )
-from gmlx.load.gguf_meta import first_nonzero_int, read_int
+from gmlx.load.gguf_meta import first_nonzero_int, read_int, read_string
 from gmlx.load.loader import (
     _FP32_KEEP_BY_MODEL_TYPE,
     _MTP_TARGET_HOOKS,
@@ -620,6 +621,53 @@ def remap_deepseek4_mtp_arrays(
     return hf_weights, hf_kquant_meta, stats
 
 
+_DRAFTER_NAME_NOISE = ("dspark", "dflash", "mtp", "drafter", "nextn",
+                       "sidecar", "support", "assistant")
+
+
+def _checkpoint_slug(name: str, *, drafter: bool = False) -> str:
+    """Lowercase alnum slug of a GGUF general.name; a drafter's name drops
+    the words that describe the drafter rather than its checkpoint."""
+    words = re.findall(r"[a-z0-9]+", name.lower())
+    if drafter:
+        words = [w for w in words if w not in _DRAFTER_NAME_NOISE]
+    return "".join(words)
+
+
+def note_cross_checkpoint_drafter(draft_gguf_path: str, d_meta: dict,
+                                  target_gguf_path: str | None, *,
+                                  log=loadlog.verbose_print) -> bool:
+    """Warn when a drafter's declared checkpoint is not the target's.
+
+    Pairing is decided by arch and geometry (the loader validates
+    target_layers / block_size / embedding_length), and a same-arch drafter
+    trained against another checkpoint drafts correctly: verify guarantees
+    the output. What it does not carry over is the acceptance rate, so
+    say so once, at the point the pairing is decided (covers --draft-gguf
+    and the autodetected companion alike). Returns True when noted."""
+    d_name = read_string(d_meta, "general.name") or ""
+    if not d_name or not target_gguf_path:
+        return False
+    try:
+        from gmlx.load.discovery import header_meta
+        t_name = (header_meta(target_gguf_path) or {}).get("name") or ""
+    except Exception:
+        return False
+    if not t_name:
+        return False
+    d_slug = _checkpoint_slug(d_name, drafter=True)
+    t_slug = _checkpoint_slug(t_name)
+    if not d_slug or not t_slug or d_slug in t_slug or t_slug in d_slug:
+        return False
+    loadlog.warn(
+        f"[mtp] drafter {os.path.basename(draft_gguf_path)} declares "
+        f"general.name {d_name!r}; the target is {t_name!r}. A drafter "
+        "trained against another checkpoint of this arch drafts correctly "
+        "(verify guarantees the output) but its acceptance rate does not "
+        "carry over: measure it on this target.")
+    return True
+
+
 def _load_deepseek4_mtp_drafter(
     draft_gguf_path: str,
     target,
@@ -627,6 +675,7 @@ def _load_deepseek4_mtp_drafter(
     *,
     zero_copy: bool = True,
     log=loadlog.verbose_print,
+    target_gguf_path: str | None = None,
 ):
     """Build + load + bind the DeepSeek-V4-Flash MTP drafter from its
     companion GGUF (arch ``deepseek4_mtp_support``, one full V4 block +
@@ -638,6 +687,7 @@ def _load_deepseek4_mtp_drafter(
     arrays, kquant_meta, d_arch, _meta, _shapes = load_gguf_wire_bytes(
         draft_gguf_path, zero_copy=zero_copy
     )
+    note_cross_checkpoint_drafter(draft_gguf_path, _meta, target_gguf_path, log=log)
     if d_arch == "dflash":
         container = dflash_container(arrays)
         if container != "dspark":
@@ -1598,13 +1648,14 @@ def _resolve_companion_drafter(model_type: str | None, gguf_path: str, *, log):
 
 
 def _load_assistant_drafter(draft_gguf_path: str, model, text_config_dict: dict,
-                            *, zero_copy: bool, log):
+                            *, zero_copy: bool, log, target_gguf_path=None):
     """Kind-dispatched companion (``--draft-gguf``) loader, shared by the
     text and VLM paths so every drafter shape routes identically on both."""
     kind = _assistant_kind(text_config_dict.get("model_type"), draft_gguf_path)
     if kind == "deepseek4":
         return _load_deepseek4_mtp_drafter(
-            draft_gguf_path, model, text_config_dict, zero_copy=zero_copy, log=log
+            draft_gguf_path, model, text_config_dict, zero_copy=zero_copy, log=log,
+            target_gguf_path=target_gguf_path,
         )
     if kind == "qwen4exp":
         return _load_qwen4exp_mtp_drafter(
@@ -1733,7 +1784,8 @@ def load_mtp_model(
         hf_weights,
         hf_kquant_meta,
         log=_log,
-        sanitize=(_mt in ("deepseek_v4", "hy_v3", "glm5_next")),
+        sanitize=(_mt in ("deepseek_v4", "deepseek_v4_vl", "hy_v3",
+                          "glm5_next")),
         no_alias=owned_names,
         fp32_keep=_FP32_KEEP_BY_MODEL_TYPE.get(_mt, ()),
         source_key=weights_source_key(*pf.shards),
@@ -1758,7 +1810,8 @@ def load_mtp_model(
                  f"{os.path.basename(draft_gguf_path)} (pass --native-mtp to "
                  f"use the head)")
         drafter = _load_assistant_drafter(
-            draft_gguf_path, model, config_dict, zero_copy=zero_copy, log=_log
+            draft_gguf_path, model, config_dict, zero_copy=zero_copy, log=_log,
+            target_gguf_path=gguf_path,
         )
     else:
         drafter = _load_mtp_drafter(
@@ -1962,7 +2015,8 @@ def load_vlm_mtp_model(
         tc = dict(text_config)
         tc.setdefault("model_type", text_model_type)
         drafter = _load_assistant_drafter(
-            draft_gguf_path, model, tc, zero_copy=zero_copy, log=_log
+            draft_gguf_path, model, tc, zero_copy=zero_copy, log=_log,
+            target_gguf_path=gguf_path,
         )
     else:
         # Native head: load_vlm_model already loaded the target but discards

@@ -20,7 +20,7 @@ step:
   without loading it; ``/v1/capacity/plan`` names the resident model.
 
 Usage: python tests/e2e/run_residency_switch_e2e.py \\
-           --primary ID=PATH[:spec] --second ID=PATH[:spec|:draft=PATH]
+           --primary ID=PATH[:spec|:stream] --second ID=PATH[:spec|:draft=PATH|:stream]
 Exit 0 on pass, 1 on any failed check, 2 when a model is missing.
 """
 from __future__ import annotations
@@ -62,6 +62,8 @@ def write_cfg(path: str, models: list, primary: str) -> None:
                 f.write("    speculative: true\n")
             elif extra.startswith("draft="):
                 f.write(f"    draft_gguf: {os.path.expanduser(extra[6:])}\n")
+            elif extra == "stream":
+                f.write("    stream: experts\n")
 
 
 def stream_one(base: str, model: str, idx: int, max_tokens: int, out: list) -> None:
@@ -112,8 +114,8 @@ def chat(c: Client, model: str, max_tokens: int = 24, timeout: float = 1800.0):
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--primary", required=True, help="ID=PATH[:spec] - preloaded and held")
-    ap.add_argument("--second", required=True, help="ID=PATH[:spec|:draft=PATH]")
+    ap.add_argument("--primary", required=True, help="ID=PATH[:spec|:stream] - preloaded and held")
+    ap.add_argument("--second", required=True, help="ID=PATH[:spec|:draft=PATH|:stream]")
     ap.add_argument("--width", type=int, default=4)
     ap.add_argument("--cap", type=int, default=6)
     ap.add_argument("--streams", type=int, default=6)

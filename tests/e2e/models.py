@@ -65,6 +65,25 @@ _CANDIDATES = {
         "Qwen3.6-27B-uncensored-heretic-v2-Native-MTP-Preserved-GGUF/"
         "Qwen3.6-27B-mmproj-BF16.gguf",
     ],
+    # over-RAM MoE for the stream tier; the first shard names a split file
+    "kimi_k27_q2": [
+        "unsloth__Kimi-K2.7-Code-GGUF/UD-Q2_K_XL/"
+        "Kimi-K2.7-Code-UD-Q2_K_XL-00001-of-00008.gguf",
+    ],
+    "glm53_flash_q2": [
+        "unsloth__GLM-5.3-Flash-GGUF/UD-Q2_K_XL/"
+        "GLM-5.3-Flash-UD-Q2_K_XL-00001-of-00004.gguf",
+    ],
+    # DeepSeek-V4-Flash-Vision-Exp pair (103 GB, single-row image turns):
+    # the block-expansion VLM path. Last vlm fallback, and the target of the
+    # dsv4-vision scenarios when present.
+    "dsv4_vision": [
+        "unsloth__DeepSeek-V4-Flash-Vision-Exp-GGUF/UD-IQ3_XXS/"
+        "DeepSeek-V4-Flash-Vision-Exp-UD-IQ3_XXS-00001-of-00004.gguf",
+    ],
+    "dsv4_vision_mmproj": [
+        "unsloth__DeepSeek-V4-Flash-Vision-Exp-GGUF/mmproj-BF16.gguf",
+    ],
 }
 
 # Canonical download source per handle: an ``hf:<org>/<repo>/<file>`` ref whose
@@ -88,6 +107,10 @@ _SOURCES = {
     "qwen35_9b_mtp": "hf:unsloth/Qwen3.5-9B-MTP-GGUF/Qwen3.5-9B-Q6_K.gguf",
     "qwen36_27b": None,
     "qwen36_27b_mmproj": None,
+    "kimi_k27_q2": "hf:unsloth/Kimi-K2.7-Code-GGUF/UD-Q2_K_XL/"
+    "Kimi-K2.7-Code-UD-Q2_K_XL-00001-of-00008.gguf",
+    "glm53_flash_q2": "hf:unsloth/GLM-5.3-Flash-GGUF/UD-Q2_K_XL/"
+    "GLM-5.3-Flash-UD-Q2_K_XL-00001-of-00004.gguf",
 }
 
 # Preference order for the default LLM judge (a bigger, coherent model judges
@@ -100,7 +123,9 @@ _JUDGE_PREFERENCE = ["gemma4_12b", "gemma4_e2b", "qwen3_0_6b_q8", "qwen3_0_6b_q4
 # baseline weakness, which masks the regression the tier looks for.
 _ROLES = {
     "judged": [("gemma4_e2b",), ("gemma4_12b",), ("qwen3_0_6b_q8",)],
-    "vlm": [("gemma4_e2b", "gemma4_e2b_mmproj"), ("qwen36_27b", "qwen36_27b_mmproj")],
+    "vlm": [("gemma4_e2b", "gemma4_e2b_mmproj"), ("qwen36_27b", "qwen36_27b_mmproj"),
+            ("dsv4_vision", "dsv4_vision_mmproj")],
+    "vlm_dsv4": [("dsv4_vision", "dsv4_vision_mmproj")],
     "mtp_pair": [
         ("gemma4_e2b", "gemma4_e2b_assistant"),
         ("gemma4_12b", "gemma4_12b_assistant"),
@@ -108,6 +133,9 @@ _ROLES = {
     "mtp_native": [("qwen35_9b_mtp",), ("qwen36_27b",)],
     # A third small model, distinct from the two qwen3-0.6b quants.
     "lru_small": [("gemma3_1b",), ("falcon_h1_0_5b",)],
+    # Over-RAM MoE models. The stream tier keeps the first one the planner
+    # says streams on this box (a model that fits in RAM never streams).
+    "streaming": [("kimi_k27_q2",), ("glm53_flash_q2",)],
 }
 
 
@@ -159,6 +187,10 @@ class ModelRegistry:
 
     def role_paths(self, name: str) -> tuple:
         return tuple(self.require(h) for h in self.role(name))
+
+    def role_groups(self, name: str) -> list:
+        """Every candidate group of the role, in preference order."""
+        return [tuple(g) for g in _ROLES.get(name, [])]
 
     def role_is_preferred(self, name: str) -> bool:
         """False when the role fell back to a stand-in."""
