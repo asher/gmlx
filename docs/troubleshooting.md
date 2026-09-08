@@ -139,7 +139,7 @@ Set `HF_TOKEN` in the environment to a token with access to the repo, then rerun
 Symptom: the whole machine turns sluggish while a model runs, or loads abort.
 
 The weights plus KV cache exceed comfortable RAM. Check the arithmetic in
-[getting-started.md](getting-started.md#will-it-fit): quantize the KV cache
+[performance.md](performance.md#memory-and-the-kv-cache): quantize the KV cache
 (`--kv-bits 8`), cap it (`--max-kv-size`), pick a smaller quant, or for over-budget
 MoE models use `--stream-cpu` (or `--stream-experts` for long-context work with a
 quantized KV cache; see
@@ -154,3 +154,23 @@ under `~/.cache/gmlx/`. Each completed request logs one line with the model,
 token counts, and timing, which is usually enough to see what was slow.
 `gmlx status` reports the process, `gmlx ps` the resident models, and
 `gmlx serve --print-config` the fully resolved config the server would run with.
+
+## Where things live on disk
+
+| Path | Contents |
+|------|----------|
+| `~/.config/gmlx/gmlx.yaml` | your config |
+| `~/.config/gmlx/` | client configs written by `gmlx launch` |
+| `~/.cache/gmlx/` | server runfiles and logs, chat history, the GGUF header cache |
+| `~/.cache/gmlx/apc/` | the on-disk prompt cache, when enabled |
+| `~/.cache/gmlx/talk/` | wake-word and voice-activity models, fetched on the first `talk` |
+| `~/.local/share/gmlx/chats/` | saved chat sessions |
+| `~/.local/share/gmlx/assistant-memory.db` | the assistant's long-term memory; served assistants get `assistant-<id>.db` beside it |
+| `~/Library/Application Support/gmlx/` | the menu bar app bundle |
+| `~/Library/LaunchAgents/com.gmlx.*.plist` | the login items written by `gmlx service install` |
+| `~/.open-webui/` | Open WebUI's chat history |
+| your model directories | the GGUFs; `pull` writes here |
+
+To remove gmlx completely, run `gmlx service uninstall` if you installed the
+login item, delete the directories above and the models you pulled, and
+uninstall the `gmlx` and `mlx-kquant` packages the way you installed them.

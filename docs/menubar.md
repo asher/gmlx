@@ -15,8 +15,8 @@ posts a macOS notification (an intentional stop or restart does not). A backgrou
 `gmlx serve` raises it for you on a macOS GUI session, so you rarely run it by hand.
 Disable that with `--no-menubar` or `server.menubar: false`. To keep it (and the
 server) across reboots, install it as a login item with `gmlx service install`
-([getting-started](getting-started.md#run-it-at-login)) - that also makes macOS
-permission prompts attribute to gmlx instead of your terminal.
+(see [gmlx service](cli.md#gmlx-service)). That also makes macOS permission
+prompts attribute to gmlx instead of your terminal.
 
 "Edit config" opens the server's YAML in a floating editor panel. Validate runs
 the draft through the server's own config parser, so the verdict - a typo'd key,
