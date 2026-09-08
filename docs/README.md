@@ -8,27 +8,32 @@ right document for the task at hand.
 
 | Task | Read |
 |------|------|
-| Learn what GGUF files, quants, and the KV cache are | [getting-started.md](getting-started.md), and its [glossary](getting-started.md#glossary) |
+| Learn what GGUF files, quants, and the KV cache are | [getting-started.md](getting-started.md), and the [glossary](glossary.md) |
 | Install and chat with a first model | [getting-started.md](getting-started.md) |
 | Switch over from llama.cpp, Ollama, or LM Studio | [migrating.md](migrating.md) |
 | Chat in your browser instead of a terminal | [getting-started.md](getting-started.md#chat-in-your-browser) |
 | Know whether a model fits your Mac | [getting-started.md](getting-started.md#pick-a-model-for-your-mac) |
 | Use Claude Code, opencode, goose, or Open WebUI on a local model | [launch.md](launch.md) |
 | Stand up the server and write its config | [getting-started.md](getting-started.md#set-up-the-server), then [server-config.md](server-config.md) |
+| Call the server over HTTP | [api.md](api.md) |
+| Add speech, embeddings or reranking to the server | [services.md](services.md) |
+| Use the chat REPL's commands, sessions and themes | [chat.md](chat.md) |
+| Control the server from the menu bar | [menubar.md](menubar.md) |
 | Talk to a model by voice | [talk.md](talk.md) |
 | Give a model tools and long-term memory | [assistant.md](assistant.md) |
 | Build a local RAG pipeline (embeddings + rerank) | [rag.md](rag.md) |
 | Run a vision or audio-input model | [vlm.md](vlm.md) |
 | Fine-tune with LoRA on a quantized base | [lora.md](lora.md) |
-| Serve one base with several LoRA adapters | [adapter-serving.md](adapter-serving.md) |
+| Serve one base with several LoRA adapters | [lora.md](lora.md#serving-one-base-with-many-adapters) |
 | Make it faster | [performance.md](performance.md) |
 | See the numbers behind the performance claims | [benchmarks.md](benchmarks.md) |
 | Run a MoE model bigger than RAM | [streaming.md](streaming.md) |
 | Fix something that broke | run `gmlx doctor`, then [troubleshooting.md](troubleshooting.md) |
-| Look up a flag or config key | [cli.md](cli.md), [server-config.md](server-config.md) |
+| Look up a flag, config key or environment variable | [cli.md](cli.md), [server-config.md](server-config.md), [env-vars.md](env-vars.md) |
 | Load and generate from your own Python | [python.md](python.md) |
 | Check whether an architecture is supported | [arch-coverage.md](arch-coverage.md) |
-| Add support for a new architecture | [adding-architectures.md](adding-architectures.md) |
+| Add support for a new architecture | [internals/adding-architectures.md](internals/adding-architectures.md) |
+| Read how the runtime works | [internals/README.md](internals/README.md) |
 | Find your way around the source tree | the package table in [CONTRIBUTING.md](../CONTRIBUTING.md#things-to-know-before-you-patch) |
 
 ## Start here
@@ -70,9 +75,9 @@ what.
 
 [lora.md](lora.md) trains a LoRA adapter directly on a quantized GGUF base with
 `gmlx train`, saves it as a GGUF adapter, and applies it live at load; adapters
-interoperate with llama.cpp. [adapter-serving.md](adapter-serving.md) serves one
-base with several adapters as separate model ids on a single loaded model, with
-mid-conversation switching in the chat client.
+interoperate with llama.cpp. Its serving half covers one base with several
+adapters as separate model ids on a single loaded model, with mid-conversation
+switching in the chat client.
 
 [performance.md](performance.md) explains what actually determines speed on Apple
 Silicon and what each lever buys: quant choice (uniform K-quant files decode
@@ -100,9 +105,11 @@ hit, each with the diagnostic and the fix.
 [cli.md](cli.md) documents every verb and flag of the `gmlx` command, one section
 per verb, with the semantics that do not fit in `--help`.
 
-[server-config.md](server-config.md) is the full server reference: the YAML config
-file and every key in it, all HTTP endpoints, API capabilities (tools, structured
-output, logprobs, vision), model residency, and the speech and embedding services.
+[server-config.md](server-config.md) is the YAML config reference: every key,
+precedence, profiles, and model residency. [api.md](api.md) covers the HTTP
+endpoints and request features (tools, structured output, logprobs, vision),
+[services.md](services.md) the speech, embedding and rerank services, and
+[env-vars.md](env-vars.md) every environment variable.
 
 [python.md](python.md) documents the stable Python surface: `load_model`,
 `generate`, `bench`, preflight and its errors, and the mlx-lm server bridge.
@@ -113,23 +120,30 @@ script; do not edit it by hand.
 
 ## Internals and contributing
 
-[serving-architecture.md](serving-architecture.md) explains how the pieces
+[internals/serving-architecture.md](internals/serving-architecture.md) explains how the pieces
 compose: loader, engine, batching, and the HTTP layers.
 
-[speculative-batching.md](speculative-batching.md) covers how speculative
+[internals/speculative-batching.md](internals/speculative-batching.md) covers how speculative
 decoding and continuous batching run together: the two decode loops, the
 width cap, and the preempt + resume transitions between them.
 
-[adding-architectures.md](adding-architectures.md) is what adding a model
+[internals/adding-architectures.md](internals/adding-architectures.md) is what adding a model
 family involves and the acceptance gate an architecture clears to be listed
 as supported.
 
-[testing.md](testing.md) describes the test tiers, the end-to-end harnesses, and
+[internals/testing.md](internals/testing.md) describes the test tiers, the end-to-end harnesses, and
 the manual voice-loop pass.
 
-[upstream-upgrades.md](upstream-upgrades.md) is the maintainer's guide to
+[internals/upstream-upgrades.md](internals/upstream-upgrades.md) is the maintainer's guide to
 bumping the pinned mlx-vlm/mlx-lm/mlx versions: the seam contract, the canary
 script, and the qualification steps.
+
+[internals/prompt-cache.md](internals/prompt-cache.md) covers the prompt cache
+tiers and counters, [internals/streaming-measurements.md](internals/streaming-measurements.md)
+the case studies behind the streaming guide, and
+[internals/debug-switches.md](internals/debug-switches.md) the environment
+variables for isolating defects. [internals/README.md](internals/README.md)
+indexes them.
 
 [CONTRIBUTING.md](../CONTRIBUTING.md) has the development setup and expectations
 for pull requests; [CHANGELOG.md](../CHANGELOG.md) records what shipped when.

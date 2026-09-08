@@ -47,7 +47,7 @@ at any local or `hf:` GGUF ref. Encoder options exist too: `embeddinggemma-gguf`
 (EmbeddingGemma from a GGUF) and several mlx-embeddings safetensors encoders
 (`embeddinggemma`, `arctic-l`, `nomic-embed`, `bge-m3`). The full alias tables with
 dimensions and context windows:
-[server-config.md](server-config.md#text-embeddings-embeddings).
+[server-config.md](services.md#text-embeddings-embeddings).
 
 The reranker is a Qwen3-Reranker GGUF: a causal LM fine-tuned to answer yes or no to
 "does this document satisfy this query", scored as the probability of yes. Aliases

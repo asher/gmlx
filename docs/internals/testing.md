@@ -89,7 +89,7 @@ have in one run; drop `-k` to do so.
 config features, fires a prompt suite at each live server, and grades every response (floor
 checks + an LLM-as-judge). It loads models and needs the GPU, so it is not part of the
 pytest suite. Its own guide (tiers, grading, model bootstrap, output format) lives in
-[`tests/e2e/README.md`](../tests/e2e/README.md). Quick start:
+[`tests/e2e/README.md`](../../tests/e2e/README.md). Quick start:
 
 ```sh
 # no models on disk yet? print copy-paste pull commands for the harness's models

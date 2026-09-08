@@ -2,7 +2,7 @@
 
 What it takes for a new model family to become a supported architecture, and
 the acceptance gate every family clears before its row appears in the
-[coverage matrix](arch-coverage.md).
+[coverage matrix](../arch-coverage.md).
 
 Precondition: a GGUF arch needs a model class for its `model_type`. That class
 normally comes from the installed mlx-lm or mlx-vlm, and gmlx supplies only the
@@ -39,7 +39,7 @@ Hybrids and exotic layouts (SSM mixes, MLA attention, MoE variants with biased
 projections, fused expert tensors, new float formats) are real engineering
 with real debugging time. Don't judge the work by the shortest case. Vision
 and audio towers are a parallel track with the same gate philosophy
-([vlm.md](vlm.md) lists what's supported).
+([vlm.md](../vlm.md) lists what's supported).
 
 ## Why the gate is strict
 

@@ -1169,7 +1169,7 @@ def test_master_kill_switch_cascades():
 
 
 def test_spec_apc_master_disable_noops_store(monkeypatch):
-    """docs/server-config.md: GMLX_SPEC_APC=0 turns every speculative cache
+    """docs/internals/prompt-cache.md: GMLX_SPEC_APC=0 turns every speculative cache
     layer off at once. Behavioral sibling of the flag-cascade test: drive the
     real owned-prefill APC entrypoint against a real APCManager with the master
     switch off and assert nothing is armed or stored; the switched-on control

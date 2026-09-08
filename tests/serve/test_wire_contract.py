@@ -374,7 +374,7 @@ def test_chat_nonstream_wire_shape(wire):
     _assert_no_nulls(body["timings"], "$.timings")
 
 
-# 3. Anthropic surface (docs/serving-architecture.md:138 - ANTHROPIC_BASE_URL
+# 3. Anthropic surface (docs/internals/serving-architecture.md - ANTHROPIC_BASE_URL
 #    / Claude Code target /v1/messages)
 def test_messages_wire_shape(wire):
     r = wire.client.post("/v1/messages", json={
@@ -604,8 +604,8 @@ def test_stream_content_identical_with_keepalive(wire, monkeypatch):
     assert _deltas(r_plain.text) == _deltas(r_ka.text)
 
 
-# 7. tool-call extraction (docs/serving-architecture.md:121 "Tool calls are
-#    extracted"; docs/server-config.md:912-918). The parser is inferred from
+# 7. tool-call extraction (docs/internals/serving-architecture.md "Tool calls are
+#    extracted"; docs/api.md, tool calling). The parser is inferred from
 #    the processor chat template (gemma4 markers here), and the REAL
 #    process_tool_calls parses the generated markup.
 def test_chat_tool_calls_shape(wire):
@@ -629,8 +629,8 @@ def test_chat_tool_calls_shape(wire):
     assert json.loads(call["function"]["arguments"]) == {"tz": "UTC"}
 
 
-# 8. response_format (docs/server-config.md:939-948). json_schema -> 200.
-#    DOC MISMATCH: docs/server-config.md:946 says `"json_object"` "is rejected
+# 8. response_format (docs/api.md, structured output). json_schema -> 200.
+#    DOC MISMATCH: docs/api.md says `"json_object"` "is rejected
 #    with `Unsupported response_format type`", but mlx-vlm now maps it to a
 #    permissive object schema (mlx_vlm/server/app.py:250-251,
 #    _extract_response_format_schema: `("json_object", "object") ->
@@ -669,7 +669,7 @@ def test_unknown_openai_params_tolerated(wire):
     assert r.json()["choices"][0]["message"]["content"] == DEFAULT_TEXT
 
 
-# 10. /v1/metrics: resident_models[] enrichment (docs/server-config.md:870) +
+# 10. /v1/metrics: resident_models[] enrichment (docs/api.md, metrics) +
 #     per-request timing fields in the envelope after a completed request
 def test_metrics_resident_models_and_timings(wire):
     class _FakePool:
@@ -716,7 +716,7 @@ def test_models_endpoint_over_http(wire):
     assert whisper["stt"] is True
 
 
-# 12. @profile sampling reaches generation over the wire (server-config.md
+# 12. @profile sampling reaches generation over the wire (api.md
 #     `id@profile` addressing + install_gen_args_profile_injection)
 def test_profile_sampling_reaches_generation_over_wire(wire):
     r = wire.client.post("/v1/chat/completions",

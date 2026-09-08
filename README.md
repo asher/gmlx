@@ -123,7 +123,7 @@ is the full walkthrough, from install to a configured server with a
 connected client, including model picks per machine size and the extras
 table. New to GGUF files, quants, or the KV cache? It introduces them as you
 go, and its
-[glossary](https://github.com/asher/gmlx/blob/main/docs/getting-started.md#glossary)
+[glossary](https://github.com/asher/gmlx/blob/main/docs/glossary.md)
 defines the vocabulary used throughout these docs.
 
 ## What you get
@@ -353,7 +353,7 @@ another variant.
 Vision-language models load as a K-quant LLM GGUF paired with its float `mmproj`
 GGUF: supported families and caveats in the [VLM guide](https://github.com/asher/gmlx/blob/main/docs/vlm.md). Want a family
 that is missing? What it takes is in the
-[adding-architectures guide](https://github.com/asher/gmlx/blob/main/docs/adding-architectures.md).
+[adding-architectures guide](https://github.com/asher/gmlx/blob/main/docs/internals/adding-architectures.md).
 
 ## How it works
 
@@ -389,7 +389,7 @@ flowchart TB
 ```
 
 Serving-side mechanics (engine, batching, and the HTTP layers):
-[docs/serving-architecture.md](https://github.com/asher/gmlx/blob/main/docs/serving-architecture.md).
+[docs/serving-architecture.md](https://github.com/asher/gmlx/blob/main/docs/internals/serving-architecture.md).
 
 ## Python API
 
@@ -449,19 +449,19 @@ Reference:
 
 Internals and contributing:
 
-- [docs/serving-architecture.md](https://github.com/asher/gmlx/blob/main/docs/serving-architecture.md): how the loader,
+- [docs/serving-architecture.md](https://github.com/asher/gmlx/blob/main/docs/internals/serving-architecture.md): how the loader,
   engine, and HTTP layers compose.
-- [docs/adding-architectures.md](https://github.com/asher/gmlx/blob/main/docs/adding-architectures.md): what adding a
+- [docs/adding-architectures.md](https://github.com/asher/gmlx/blob/main/docs/internals/adding-architectures.md): what adding a
   family involves and the acceptance gate that defines supported.
-- [docs/testing.md](https://github.com/asher/gmlx/blob/main/docs/testing.md): the three test tiers and the e2e harnesses.
+- [docs/testing.md](https://github.com/asher/gmlx/blob/main/docs/internals/testing.md): the three test tiers and the e2e harnesses.
 - [CONTRIBUTING.md](https://github.com/asher/gmlx/blob/main/CONTRIBUTING.md) and [CHANGELOG.md](https://github.com/asher/gmlx/blob/main/CHANGELOG.md).
 
 ## Contributing
 
 PRs welcome. Dev setup, test tiers, and the seam-patch ground rules are in
 [CONTRIBUTING.md](https://github.com/asher/gmlx/blob/main/CONTRIBUTING.md); the test suite guide is
-[docs/testing.md](https://github.com/asher/gmlx/blob/main/docs/testing.md). New architectures:
-[docs/adding-architectures.md](https://github.com/asher/gmlx/blob/main/docs/adding-architectures.md).
+[docs/testing.md](https://github.com/asher/gmlx/blob/main/docs/internals/testing.md). New architectures:
+[docs/adding-architectures.md](https://github.com/asher/gmlx/blob/main/docs/internals/adding-architectures.md).
 
 ## Acknowledgments
 

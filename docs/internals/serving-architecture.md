@@ -5,7 +5,7 @@ compatible with the OpenAI and Anthropic APIs. Behind a small multi-model
 residency layer it composes three pieces: the gmlx loader, a serving engine
 and FastAPI app derived from `mlx-vlm`, and tool parsers from `mlx-lm`.
 The config surface, start modes, and endpoints are documented in
-[server-config.md](server-config.md). This page covers the mechanics underneath.
+[server-config.md](../server-config.md). This page covers the mechanics underneath.
 
 The path from a GGUF file on disk to a client response:
 
@@ -111,7 +111,7 @@ flowchart TD
    attention. Speculative decoding (draft model / MTP) is optional and runs
    gmlx's own verify round, which keeps APC available (upstream disables
    it under a draft model). See
-   [server-config.md](server-config.md#speculative-decoding--the-prompt-cache).
+   [server-config.md](../server-config.md#speculative-decoding--the-prompt-cache).
 
 4. HTTP layer (`mlx-vlm` FastAPI app): exposes OpenAI Chat Completions
    (`/v1/chat/completions`), OpenAI Responses (`/v1/responses`), and Anthropic
@@ -124,13 +124,85 @@ flowchart TD
    `~/.cache/gmlx/header-meta.json`), then server defaults, matched rules,
    the model's profile or a request `@intent`, per-model overrides, and finally
    the request's own fields. `server.family_defaults: false` removes the family
-   layer. See the [Precedence section of server-config.md](server-config.md#precedence).
+   layer. See the [Precedence section of server-config.md](../server-config.md#precedence).
    Served assistant ids (`server.assistants:`) sit in front of this layer: a
    chat-completions request to one runs the built-in MCP tool loop on a worker
    thread, each round re-entering the server as an ordinary loopback client, so
    profiles, speculative decoding, and batching apply per round
-   ([assistant.md](assistant.md#served-assistants)).
+   ([assistant.md](../assistant.md#served-assistants)).
 
 5. Clients: any OpenAI- or Anthropic-compatible client. Pointing
    `ANTHROPIC_BASE_URL` at the `/v1/messages` endpoint lets Anthropic-API tools (for
    example Claude Code) drive a local GGUF model.
+
+---
+
+## Config-server architecture
+
+gmlx is an adoption layer: it installs late-bound monkeypatches over
+mlx-vlm's seams (dashed edges) and leaves the stock app, batching engine, and
+protocol handlers untouched. Loads route to the gmlx loader, which reads
+GGUF wire bytes via mlx-kquant's C++ reader and swaps model leaves to `kq.*`
+K-quant kernels. The stock engine executes those kernels in its own forward
+pass; there is no engine fork.
+
+```mermaid
+flowchart TB
+  client["HTTP client (OpenAI / Anthropic)"]
+
+  subgraph mlxvlm["mlx-vlm server (unmodified)"]
+    direction LR
+    routes["app routes + handlers"]
+    engine["BatchGenerator + MTP"]
+  end
+
+  subgraph gguf["gmlx (adoption layer)"]
+    direction LR
+    cfg["config + discovery"] --> res["residency<br/>LRU + TTL"] --> srv["serving<br/>resolver + bridge"] --> loader["loader + vlm"]
+  end
+
+  subgraph core["mlx-kquant (shared core)"]
+    direction LR
+    rd["load_gguf<br/>C++ reader"]
+    kq["kq.* Metal kernels"]
+  end
+
+  disk[("GGUF files")]
+
+  client --> routes
+  routes -. patched seams .-> res
+  routes --> engine
+  loader --> rd --> disk
+  loader --> kq
+  engine --> kq
+```
+
+```mermaid
+sequenceDiagram
+  participant C as Client
+  participant A as mlx-vlm app
+  participant R as residency pool
+  participant S as serving (resolver + bridge)
+  participant L as loader + kquant swap
+  participant E as BatchGenerator (kq.* kernels)
+  C->>A: POST /v1/chat (model "id@profile")
+  A->>R: get_cached_model(id)   [patched]
+  R->>S: resolve_request_model(id@profile)
+  S-->>R: abspath + ResolvedModel; set _active_spec
+  alt resident (cache_key incl load_signature)
+    R-->>A: model, processor, config
+  else cold build
+    R->>R: set load-param + APC env window
+    R->>S: load_model_resources(path)   [patched]
+    S->>L: load_model / load_mtp_model / load_vlm
+    L-->>S: model (leaves = kq.* modules)
+    S-->>R: model, processor, config
+  end
+  A->>A: _build_gen_args seeds sampling from the active profile   [patched]
+  A->>E: generate(...)
+  E-->>C: stream tokens
+```
+
+For the bridge/residency mechanics (how the path-keyed companion registries
+and the context-aware runtime proxy work), see
+[serving-architecture.md](serving-architecture.md).

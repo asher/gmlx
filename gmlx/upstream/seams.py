@@ -18,7 +18,7 @@ shape error at MoE prefill). This module makes the contract explicit:
   newer than the qualified set warn once.
 
 On a deliberate upstream bump: re-audit the drifted seams, then
-``python -m gmlx.upstream.seams --regen`` (see docs/upstream-upgrades.md).
+``python -m gmlx.upstream.seams --regen`` (see docs/internals/upstream-upgrades.md).
 """
 from __future__ import annotations
 
@@ -654,7 +654,7 @@ def check_upstream_versions(quiet: bool = False) -> list[str]:
         if qual and found_t > _parse_version(qual):
             warnings.append(
                 f"[versions] {pkg} {found} is newer than the qualified "
-                f"{qual}; untested - see docs/upstream-upgrades.md")
+                f"{qual}; untested - see docs/internals/upstream-upgrades.md")
     if errors:
         raise RuntimeError(
             "unsupported upstream package versions:\n  " + "\n  ".join(errors))

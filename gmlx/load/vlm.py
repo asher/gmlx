@@ -218,7 +218,7 @@ def _llava_vision_name(name: str) -> str | None:
 # norms, patch conv, projector are faithful); it has no clean loader-side inverse
 # and llama.cpp's own mtmd shows the same degradation. The remap below is correct
 # - GGUF *vision* quality is just capped until a re-converted mmproj appears.
-# See docs/vlm.md "Known upstream conversion defects".
+# See docs/vlm.md, the known GGUF defects section.
 _PIXTRAL_BLK_SUBMAP = {
     "attn_q": "attention.q_proj",
     "attn_k": "attention.k_proj",

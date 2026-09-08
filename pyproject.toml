@@ -29,7 +29,7 @@ classifiers = [
 # runtime and warns on versions newer than the qualified set - a stale venv
 # resolves these constraints only once, so the pip pin alone can't catch it.
 # mlx / mlx-lm / mlx-vlm move in lockstep with the exact mlx-vlm pin; bump them
-# together per docs/upstream-upgrades.md.
+# together per docs/internals/upstream-upgrades.md.
 dependencies = [
     "mlx-kquant>=0.4.7,<0.5",  # 0.4.7: mmap arena, a release returns its pages
     "mlx-lm>=0.31",

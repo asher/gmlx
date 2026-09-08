@@ -41,9 +41,8 @@ after the drain, not instead of it. Contract per path and owner:
                     The guard still drains and stamps, but the site
                     must let the re-raise propagate.
 
-The drain, in the measured order (docs/oom-protection-plan.md,
-Verified ground truth): commit and synchronize the ambient default
-stream first (auto-key and aux subgraphs live there; synchronizing
+The drain, in the measured order (pinned by the eval guard tests):
+commit and synchronize the ambient default stream first (auto-key and aux subgraphs live there; synchronizing
 the thrower first commits an unsatisfiable cross-stream fence wait,
 GPU timeout, abort, measured 21/21 on 0.31.2), then synchronize every
 registered stream this thread can reach. On mlx 0.32.1 the upstream

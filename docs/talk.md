@@ -38,7 +38,7 @@ together. macOS asks for microphone permission once, and the prompt names
 your *terminal* (Terminal, iTerm2, your IDE), not gmlx, because macOS grants
 the mic to the app you launched from. Allow it. (Voice sessions started from
 the menu-bar login item are the exception: those prompt as "gmlx" - see
-[menu-bar voice sessions](#menu-bar-voice-sessions).) If it was denied,
+[menu-bar voice sessions](menubar.md#voice-sessions).) If it was denied,
 nothing is stuck: re-enable in System Settings > Privacy & Security >
 Microphone ([troubleshooting](troubleshooting.md#the-mic-never-works-in-talk)).
 
@@ -244,83 +244,8 @@ tool-name prefixing, the degrade-to-warning behavior when a tool server or the
 
 ## Menu bar voice sessions
 
-When the tracked server advertises STT and TTS, the macOS menu bar app
-(`gmlx launch menubar`, raised automatically by a background `serve`) shows a
-"Talk to <model>" item, named after `talk.model` or the server's default model.
-Clicking it starts a voice session inside the menu bar app, no terminal window.
-The bar icon changes to show the state (a microphone while listening, a thought
-bubble while the model thinks, a speaker while it talks, a muted-speaker while
-the mic is off), and the menu offers Stop speaking, Mute mic, and End voice
-chat. Show transcript opens a floating panel with the running conversation
-text. A Volume slider under the session controls scales the voice (and the
-chimes) relative to the system output volume. It applies mid-sentence while
-dragging, and the setting persists across sessions. Mic input has no gain
-control on purpose: software input gain would shift the endpointing and
-wake-word thresholds and clip loud speech. Use the macOS Sound settings input
-level instead.
-
-All settings come from the YAML `talk:` block. Push-to-talk and text modes fall
-back to wake mode, since there is no keyboard. A "Talk in a terminal" item opens
-`gmlx talk` in iTerm2 when it is running, otherwise the default terminal handler.
-No AppleScript is involved, so there is no automation-permission popup.
-
-Starting a voice session (either surface) holds its model resident on the
-server for the session's lifetime - loaded and warmed up front, exempt from
-the idle reaper, released (not evicted) when the session ends - so an open
-mic never sits in front of an unloaded model.
-
-### Tap-to-talk hotkey
-
-The menu bar can bind a global tap-to-talk combo that works from any app:
-a "Tap-to-talk with Globe + Space" toggle (Space pressed while the Globe/fn
-key is held). Firing it always drives toward an open mic, whatever the
-session is doing: no session running starts one; idle opens the mic (wake
-chime); tapping again while listening dismisses; mid-capture it ends the
-utterance immediately; and while the assistant is transcribing, thinking,
-or speaking it barges in and listens. A tap while muted unmutes first -
-pressing the key is explicit intent to talk.
-
-Keyboards without a Globe key (most non-Apple desktop keyboards) pick a
-different modifier - `gmlx init` asks for it in the voice-chat step, or set
-it in the config's `talk:` block:
-
-```yaml
-talk:
-  push_to_talk_modifier: globe   # or: right-command | right-option | control
-```
-
-The menu item shows whichever combo is active. The right-side variants are
-deliberate - left Cmd+Space is Spotlight and left Option+Space is a common
-launcher bind, while the right-side keys are nearly always free.
-
-The hotkey swallows the Space keystroke so a space is not typed into the
-focused app, which requires an active event tap - *Accessibility*
-permission, requested only when you first enable the hotkey (never at
-launch). While armed, every keystroke in the login session passes through
-the tap (the overhead is small, and the menu bar process does no
-inference). Holding Globe as a modifier suppresses macOS's own Globe-key
-action, so your "Press Globe key to" setting (emoji, dictation, input
-source) keeps working for bare presses - nothing to reconfigure.
-
-(A bare double-press of Globe was considered and dropped. Current macOS
-routes the solo Globe press to the system shortcut handler without posting
-an event that session event taps can see - only raw HID sees it - so
-double-press stays available for the system's own dictation shortcut.)
-
-The choice persists across launches. On startup the app re-arms it only
-after a silent permission check. If the grant is missing (denied, or
-silently dropped by an app-stub re-sign after an interpreter upgrade), a
-"not active - needs permission" note appears under the toggle and nothing
-prompts until you flip it again. Granting access in System Settings while
-the bar is running is picked up within a few seconds and the hotkey arms
-itself. If arming still fails right after a grant (some macOS versions bind
-TCC grants only to a freshly launched process), the app says to quit and
-reopen the menu bar.
-
-Permission prompts attribute to "gmlx" when the bar runs as the launchd
-login item (`gmlx service install`). A bar launched from a terminal
-(`gmlx launch menubar`) runs under the terminal's TCC identity instead, so
-grants then attach to the terminal app, not gmlx.
+The menu bar app can run a voice session without a terminal, and can bind a
+tap-to-talk hotkey. Both are described in [menubar.md](menubar.md#voice-sessions).
 
 ## Remote server and scripting
 
@@ -364,4 +289,4 @@ filters these with a minimum-speech and energy floor before transcription and a
 known-ghost check after, so noise does not become a turn.
 
 Contributors: the manual smoke checklist for this loop lives in
-[testing.md](testing.md#voice-loop-manual-pass).
+[testing.md](internals/testing.md#voice-loop-manual-pass).

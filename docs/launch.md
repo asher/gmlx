@@ -206,47 +206,10 @@ chat-only server keeps Open WebUI's built-in browser audio untouched.
 Add `WEBUI_AUTH=false` to its environment for a no-login single-user setup (fresh
 `DATA_DIR` only).
 
-## The menu bar app: `launch menubar`
+## The menu bar app
 
-`gmlx launch menubar` puts a small macOS status-bar item up for a backgrounded
-server: up/down state (the dot fills in while requests are generating or queued),
-the resident models (size, default/pinned/kept markers, an eviction countdown on
-idle ones; click one to unload it), reload-config, restart, stop, copy-URL, and
-open-logs, all over the existing HTTP endpoints. If a tracked server dies, it
-posts a macOS notification (an intentional stop or restart does not). A background
-`gmlx serve` raises it for you on a macOS GUI session, so you rarely run it by hand.
-Disable that with `--no-menubar` or `server.menubar: false`. To keep it (and the
-server) across reboots, install it as a login item with `gmlx service install`
-([getting-started](getting-started.md#run-it-at-login)) - that also makes macOS
-permission prompts attribute to gmlx instead of your terminal.
-
-"Edit config" opens the server's YAML in a floating editor panel. Validate runs
-the draft through the server's own config parser, so the verdict - a typo'd key,
-a bad value, a model path that doesn't resolve - is exactly what `gmlx serve`
-would say, caught before the server ever sees the file. Save writes atomically
-and refuses (once) if the file changed on disk while you were editing; Save &
-Reload validates first, then saves and triggers the running server's config
-reload in one step. Open in Editor hands the file to your default text editor
-instead. The item is there whenever the bar knows a config: the tracked
-server's own file or, with everything stopped, the default config location.
-Fixing the config is usually why you are there.
-
-Like `serve`, it detaches by default. Pass `-f` / `--foreground` to run the event
-loop in place, and `--stop` to quit a detached monitor from the CLI. One menu bar
-per machine, deduplicated via a pidfile: a second `serve` on any port, or a manual
-`launch menubar`, is a no-op. With no explicit target it tracks the primary server
-(the single managed one, else `127.0.0.1:8080`), following it as servers come and
-go. Pass `--url`, `--host`, or `--port` to pin it to one.
-
-It reads the API key from the managed server's own `server.api_key`, or takes
-`--api-key` for a server whose config it cannot see. A key-protected server it has no
-key for shows as up with a key-required note, never as down. macOS only (it needs
-`rumps`, a default dependency there). On Linux or over SSH it prints a one-line
-notice. `--interval S` sets the poll interval (default 4 seconds).
-
-When the tracked server also advertises STT and TTS, the menu gains a voice-chat
-item that runs a full talk session inside the menu bar app, no terminal needed. See
-[talk.md](talk.md#menu-bar-voice-sessions).
+A background `gmlx serve` raises a macOS status-bar item for the server.
+What it shows and how to control it: [menubar.md](menubar.md).
 
 ## Troubleshooting
 

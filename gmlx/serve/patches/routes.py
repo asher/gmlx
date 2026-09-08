@@ -183,7 +183,7 @@ def install_auto_docs_removal() -> None:
     ``/redoc``) - the OpenAI-compatible API itself is untouched. The generated
     schema is mlx-vlm's, not this server's: after the route surgery here it
     describes endpoints that don't exist and misses the ones that do. A 404 is
-    honest; the real surface is documented in docs/server-config.md."""
+    honest; the real surface is documented in docs/api.md."""
     app = importlib.import_module("mlx_vlm.server.app").app
     _remove_routes(app, "/openapi.json", "/docs", "/docs/oauth2-redirect",
                    "/redoc")

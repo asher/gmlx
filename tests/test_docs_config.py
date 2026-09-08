@@ -102,8 +102,25 @@ def test_load_keys_documented():
     ticks = _param_reference_ticks()
     missing = set(config.LOAD_ENV) - ticks
     assert not missing, f"load keys missing from the docs: {sorted(missing)}"
-    missing_env = set(config.LOAD_ENV.values()) - ticks
-    assert not missing_env, f"load env vars missing: {sorted(missing_env)}"
+
+
+_ENV_DOC = Path(__file__).resolve().parent.parent / "docs" / "env-vars.md"
+
+
+def _env_names() -> set:
+    return (set(config.LOAD_ENV.values()) | set(config.CACHE_ENV.values())
+            | set(config.CACHE_DISK_ENV.values()))
+
+
+def test_env_names_owned_by_env_vars_doc():
+    """The env names behind the load and cache keys live in docs/env-vars.md
+    and nowhere in docs/server-config.md: one owner per fact."""
+    env_ticks = set(re.findall(r"`([A-Z_0-9]+)`", _ENV_DOC.read_text()))
+    missing = _env_names() - env_ticks
+    assert not missing, f"env vars missing from env-vars.md: {sorted(missing)}"
+    doc = _DOC.read_text()
+    leaked = {n for n in _env_names() if re.search(rf"\b{n}\b", doc)}
+    assert not leaked, f"env names must not appear in server-config.md: {sorted(leaked)}"
 
 
 def test_cache_keys_documented():
@@ -120,6 +137,34 @@ def test_builtin_intents_documented():
     doc = _DOC.read_text()
     for name in fp.BUILTIN_INTENTS:
         assert f"@{name}" in doc, f"intent @{name} not documented"
+
+
+# --- yaml blocks in the split-out references must still parse ---
+
+_PARSE_DOCS = ["api.md", "services.md", "chat.md", "menubar.md", "env-vars.md"]
+
+
+@pytest.mark.parametrize("name", _PARSE_DOCS)
+def test_split_docs_yaml_parses(name):
+    path = _DOC.parent / name
+    assert path.is_file(), f"missing {path}"
+    for block in _FENCE.findall(path.read_text()):
+        doc = yaml.safe_load(block)
+        assert doc is None or isinstance(doc, (dict, list))
+
+
+@pytest.mark.parametrize("name,min_blocks", [("chat.md", 1), ("menubar.md", 1)])
+def test_client_docs_examples_build_cleanly(name, min_blocks):
+    """chat.md (theme/themes) and menubar.md (talk.push_to_talk_modifier) hold
+    top-level config keys, so their examples go through build_config too."""
+    blocks = _FENCE.findall((_DOC.parent / name).read_text())
+    assert len(blocks) >= min_blocks, f"{name} yaml examples missing - doc drifted"
+    for block in blocks:
+        doc = yaml.safe_load(block)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            cfg = config.build_config(doc)
+        assert isinstance(cfg, config.ServerCfg)
 
 
 # --- docs/talk.md: its YAML examples are full configs and must build too ---

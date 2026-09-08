@@ -82,7 +82,7 @@ id to switch operating point (`"model": "qwen3.6-27b@coding"`).
 |------|------------|--------------|
 | init | `gmlx init (--models-dir DIR \| --from-hf-cache) [--out FILE] [-r] [--force]` | Discover GGUFs (streaming scan progress) from a directory and/or the local hf cache (`--from-hf-cache` writes portable `hf:` entries and sets `server.hf_cache`) and write a starter YAML to `--out` (default `~/.config/gmlx/gmlx.yaml`). A bare `gmlx init` on a terminal runs the guided wizard. The flag-driven path needs `--models-dir` (or `--from-hf-cache`), and `--no-interactive` skips the wizard. Refuses to overwrite without `--force`. An empty dir is fine; it writes a valid zero-model config. |
 | sync-models | `gmlx sync-models [--config FILE] [--models-dir DIR] [--from-hf-cache] [--no-recursive] [--dry-run]` | Reconcile an existing config's `models:` with disk (and, with `--from-hf-cache` or `hf_cache: true`, the hf cache): keep configured models that still exist (comments/edits preserved), drop ones whose file is gone / no longer cached, add newly-discovered GGUFs. Default config unless `--config`. Scans recursively by default. |
-| launch | `gmlx launch <harness> [options]` | Point an external coding harness / agent runtime (opencode / pi / omp / hermes / goose / claude-code), chat TUI (aichat / elia), or web app (open-webui) at a server (auto-starting one if down) and exec it. See [launch a coding harness](#launch-a-coding-harness). |
+| launch | `gmlx launch <harness> [options]` | Point an external coding harness / agent runtime (opencode / pi / omp / hermes / goose / claude-code), chat TUI (aichat / elia), or web app (open-webui) at a server (auto-starting one if down) and exec it. See [launch a coding harness](launch.md). |
 | --config | `gmlx serve --config FILE` | Serve a YAML config (named models + profiles). Enables `POST /v1/reload`. |
 | --models-dir | `gmlx serve --models-dir DIR [--hf-cache] [--recursive]` | Serve a header-only discovery scan of a directory (in-memory config). |
 | positional | `gmlx serve model.gguf [--mmproj/--draft-gguf/--speculative ...]` | Serve a single model (pinned), id derived from the filename. |
@@ -613,7 +613,7 @@ models:
 
 Per-model keys: `path` (required), `profile`, `family`, `profiles`, `mmproj`,
 `draft_gguf`, `native_mtp`, `adapter` (ids on one `path` that differ only in
-`adapter` share one resident entry; see [adapter-serving.md](adapter-serving.md)), `stream`, `moe_experts`, `moe_expert_mass`,
+`adapter` share one resident entry; see [lora.md](lora.md#serving-one-base-with-many-adapters)), `stream`, `moe_experts`, `moe_expert_mass`,
 `moe_miss_shed`, `moe_layer_shed`, `moe_prestage`, `prefill_feeder`,
 `decode_feeder`, `speculative`, `speculative_width_cap`, `overrides`
 (`{sampling, load, cache, system, chat_template, chat_template_kwargs,
@@ -640,7 +640,7 @@ rather than running slowly.
 A batch that grows past the cap converts to plain decode with the drafter
 left loaded, and once it drains back to the cap it re-arms and speculates
 again (a capture round rebuilds the drafter state; mechanics in
-[speculative-batching.md](speculative-batching.md)). `GMLX_MTP_WIDTH_CAP`
+[speculative-batching.md](internals/speculative-batching.md)). `GMLX_MTP_WIDTH_CAP`
 overrides every model at once (set it to `0` to measure a model uncapped) and
 `--speculative-width-cap` does the same from the CLI. `GMLX_MTP_PREEMPT=0`
 and `GMLX_MTP_RESUME=0` disable the batching transitions themselves (a lone
@@ -913,33 +913,6 @@ flowchart LR
 
 ---
 
-## Addressing a model in a request
-
-```jsonc
-{"model": "qwen3.6-27b"}                                 // the model's configured profile (else family base)
-{"model": "qwen3.6-27b@coding"}                          // a built-in intent, resolved per the model's family
-{"model": "qwen3.6-27b@qwen-coder"}                      // inline user profile (beats model.profile)
-{"model": "coder"}                                        // an alias (here: qwen3.6-27b@qwen-coder)
-{"model": "qwen3.6-27b", "profile": "coding",            // profile field (needs extra_body in the OpenAI SDK)
- "temperature": 0.1}                                      //   + an explicit field that wins over the profile
-```
-
-The `@profile` suffix is split on the last `@`, and only treated as a profile
-when it names a known one (a user profile or, with `family_defaults` on, a
-built-in intent), so an hf-style `org/model@rev` or an id containing
-`@`-like text stays intact. An unknown id returns 404 (listing available
-ids); an unknown profile returns 400 (listing valid profiles, built-ins
-included). An empty/missing `model` uses `server.defaults.model`, else the
-sole model, else 400.
-
-The same addressing works in the CLI: `gmlx run <id-or-path>@coding`,
-`gmlx run <id> --profile coding`, and identically for `chat`. A bare-path
-`run`/`chat` (no config) still gets its family's base defaults. An explicit
-sampling flag always wins, and `--no-family-defaults` (or
-`GMLX_NO_FAMILY_DEFAULTS=1`) opts a run out entirely.
-
----
-
 ## Param key reference
 
 ### Sampling keys (`sampling:`)
@@ -1013,15 +986,16 @@ native support; a per-request field still wins over the profile):
 
 Applied at model-build time through a transient env window in the residency
 pool, so each model loads with its own params without leaking to co-resident
-models. Each maps 1:1 to the env var mlx-vlm reads at build:
+models. Each maps 1:1 to an mlx-vlm environment variable, listed in
+[env-vars.md](env-vars.md#load-and-cache-keys):
 
-| key | env var |
-|-----|---------|
-| `kv_bits` | `KV_BITS` |
-| `kv_group_size` | `KV_GROUP_SIZE` |
-| `kv_quant_scheme` | `KV_QUANT_SCHEME` |
-| `max_kv_size` | `MAX_KV_SIZE` |
-| `quantized_kv_start` | `QUANTIZED_KV_START` |
+| key |
+|-----|
+| `kv_bits` |
+| `kv_group_size` |
+| `kv_quant_scheme` |
+| `max_kv_size` |
+| `quantized_kv_start` |
 
 > `prefill_step_size` is a server-level key, not a `load:` key: the engine
 > reads it per request, after the per-model load window has closed, so a
@@ -1059,21 +1033,24 @@ The same pools serve speculative (MTP)
 requests too; see
 [Speculative decoding & the prompt cache](#speculative-decoding--the-prompt-cache).
 
-| key | env var |
-|-----|---------|
-| `enabled` | `APC_ENABLED` |
-| `block_size` | `APC_BLOCK_SIZE` |
-| `num_blocks` | `APC_NUM_BLOCKS` |
-| `exact_entries` | `APC_EXACT_CACHE_ENTRIES` |
-| `hash` | `APC_HASH` |
+| key |
+|-----|
+| `enabled` |
+| `block_size` |
+| `num_blocks` |
+| `exact_entries` |
+| `hash` |
 
-| `disk.` key | env var |
-|-------------|---------|
-| `path` | `APC_DISK_PATH` |
-| `max_gb` | `APC_DISK_MAX_GB` |
-| `workers` | `APC_DISK_WORKERS` |
-| `read_mode` | `APC_DISK_READ_MODE` |
-| `namespace` | `APC_DISK_NAMESPACE` |
+| `disk.` key |
+|-------------|
+| `path` |
+| `max_gb` |
+| `workers` |
+| `read_mode` |
+| `namespace` |
+
+The environment variable behind each key is listed in
+[env-vars.md](env-vars.md#load-and-cache-keys).
 
 > Worst-case APC disk use is about `disk.max_gb x N_models` (the cap is per
 > namespace, and we namespace per model).
@@ -1100,52 +1077,6 @@ requests too; see
 false}`); `--disk-cache` swaps the `disk` value for the SSD tier
 (`disk: {path: ~/.cache/gmlx/apc, max_gb: 50}`). A config without a
 `cache:` block leaves APC off.
-
-### Which tier serves which architecture
-
-APC routes each model by its cache shape, once, at load; the server logs
-the routing (`APC tier: ...`) so a silent mis-route is visible. Reuse
-works on every family - the tiers differ in storage layout, not in
-whether hits happen:
-
-| Cache shape | Example archs | Tier |
-|-------------|---------------|------|
-| plain KV, dense or MoE | llama, qwen2/3, qwen3moe, glm4(-moe), deepseek2/v3, phi3, granite, hunyuan, minimax-m2, gemma2 | block |
-| hybrid GDN (recurrent + KV layers) | qwen3.5/3.6 (incl. MoE), qwen3-next, kimi-k3, nemotron-h, granitemoehybrid | ckpt |
-| sliding-window attention | gemma3, gemma-4 (incl. E4B/3n), gpt-oss, SWA llama | ckpt |
-| CacheList / pure recurrent | falcon-h1, mamba2, rwkv7, plamo2, deepseek-v3.2, deepseek4 | exact |
-| MSA indexer armed | minimax-m3 indexer GGUFs | none (loud log; the indexless GGUF serves via the block tier) |
-
-### Checkpoint-tier counters
-
-`GET /v1/cache/stats` carries the `ckpt_*` fields for every model, but
-they only move on checkpoint-tier architectures (the hybrid/SWA rows
-above) -- all-zero on a block- or exact-tier model is normal, not a
-fault. On ckpt-tier models they answer one question: is prefix reuse
-working? Read reuse health from `ckpt_*`, not from ratios built on the
-stock fields: checkpoint lookups bump the shared `lookups_hit` /
-`matched_tokens` on success but record nothing on a miss, and the
-token totals include window snapshots that can never be shared, so
-aggregate hit rates skew on these models. (`disk_writes` counts write
-operations: one per exact-format entry -- checkpoint skeletons and
-drafter sidecars included -- and one per block for block shards.)
-
-| Field | What it tells you |
-|-------|-------------------|
-| `ckpt_stores` | Prefixes saved for reuse. On a ckpt-tier model, stuck at zero after a few requests means nothing is being cached; the server logs a one-time warning when that happens. |
-| `ckpt_hits`, `ckpt_matched_tokens` | Requests that warm-started from a saved prefix, and the prompt tokens they skipped. This is the value the tier delivers: on a repeat-heavy workload, matched tokens should approach total prompt tokens. |
-| `ckpt_declines` | Saves the server skipped, grouped by reason (the same reason strings appear in the server log). Occasional entries are normal; every request piling into one reason means reuse is off for that traffic shape - include this map when filing an issue. |
-| `ckpt_missed_adoptions` | Requests that matched a saved prefix but could not use it. Stays 0 in healthy operation; growth is a bug signal and trips a one-time warning. |
-| `ckpt_pool_evictions` | Saved prefixes discarded to make room for new ones. Normal on long sessions, fastest on sliding-window models (gemma-family), whose snapshots are large and cannot be deduplicated. Raise `num_blocks` if you want deeper history to stay warm. |
-| `ckpt_skeleton_writes` | Saves mirrored to the disk tier for warm restarts. Zero with `disk` on means a restart will start cold. |
-| `sidecar_writes` | Draft-model cache entries saved next to their target entries (speculative decoding only). |
-| `retire_fallback_full` | Finished requests whose generated tokens were saved in the slower whole-sequence form because no cheaper snapshot was available. Occasional is fine. |
-
-The server also watches for a dead tier and warns once per model:
-`GMLX_APC_CKPT_TRIPWIRE` (default 5) completed requests with zero stores,
-or that many unusable matches with zero hits. Either warning means prefix
-reuse is not working for that model - file an issue with the
-`/v1/cache/stats` snapshot.
 
 An unknown key inside `sampling:` / `load:` / `cache:` (a typo like
 `temprature:`) is warned about loudly at load rather than silently dropped.
@@ -1236,34 +1167,6 @@ and store counts surface on the authed `GET /v1/metrics`.
 > re-prefilling, which is what every server pays there. A template
 > property, not a gmlx one.
 
-| Variable | Meaning |
-|----------|---------|
-| `GMLX_SPEC_APC` | `0` turns every speculative cache layer off at once: lookups, stores, sidecar, checkpoint tier. The master switch. |
-| `GMLX_SPEC_APC_RETIRE` | `0` turns off just the retirement store. |
-| `GMLX_SPEC_APC_SIDECAR` | `0` turns off just the drafter-KV sidecar. |
-| `GMLX_SPEC_APC_CKPT` | `0` turns off just the hybrid checkpoint tier (exact full clones return). |
-| `GMLX_SPEC_APC_ENTRIES` | Prefix-layer LRU entries (default `4`). |
-| `GMLX_SPEC_APC_SIDECAR_ENTRIES` | Drafter-sidecar LRU entries (default `8`). |
-| `GMLX_SPEC_APC_BUDGET_MB` | Byte budget for the in-memory prefix layer, in MB (default `8192`). |
-| `GMLX_SPEC_APC_SIDECAR_BUDGET_MB` | Byte budget for the drafter-sidecar LRU, in MB (default `512`). |
-| `GMLX_APC_STORE_EVAL_CHUNK` | Blocks evaluated per step in the post-prefill store (default `32`); bounds the prefill-thread stall on long prompts. |
-| `GMLX_APC_CKPT_INTERVAL` | Prefill checkpoint interval in tokens (default `4096`, snapped to the chunk grid; `0` = final checkpoint only). |
-| `GMLX_APC_CKPT_REPLAY` | `0` disables the replay checkpoint (identical resends prefill cold again). |
-| `GMLX_APC_CKPT_REPLAY_MIN` | Minimum prompt tokens before a replay checkpoint is saved on recurrent (GDN) models (default `1024`; short prompts re-prefill cheaply and are not worth the >100 MB state snapshot). |
-| `GMLX_APC_CKPT_TURN` | `0` disables the turn checkpoint (next-turn reuse falls back to the interval grid). |
-| `GMLX_APC_CKPT_SYS` | `0` disables the system-prompt anchor on both tiers (sibling requests sharing a system prompt prefill the shared prefix cold; on hybrid models they also fall back to the interval grid). |
-| `GMLX_APC_CKPT_SYS_MIN` | Minimum tokens of shared system prefix before an anchor is saved (default `256`; raised to `GMLX_APC_CKPT_REPLAY_MIN` on recurrent models). A shorter shared prefix re-prefills in milliseconds and is not worth a record. |
-| `GMLX_APC_ANCHOR_ENTRIES` | Exact-tier anchor LRU entries (default `4`). Exact-mode models (deepseek-v4-class pooling stacks) keep their system-prompt anchors here as whole-prefix clones, out of reach of the count-capped upstream exact LRU that every request's own store would churn. |
-| `GMLX_APC_ANCHOR_BUDGET_MB` | Byte budget for the exact-tier anchor LRU, in MB (default `4096`). A deep shared prefix on a pooling stack clones to GBs; newest always survives. |
-| `GMLX_APC_CKPT_TRIPWIRE` | Requests before the dead-tier tripwires warn (default `5`; `0` silences both). |
-| `GMLX_APC_CKPT_RECORDS` | Checkpoint-record LRU entries (default `32`). |
-| `GMLX_APC_CKPT_BUDGET_MB` | Byte budget for checkpoint-record payload (recurrent states + KV tails), in MB (default `4096`). A GDN record can carry >100 MB of state and each request saves several checkpoints, so expect resident memory to grow toward this budget on hybrid models under sustained multi-turn traffic; lower it if 4 GB of cache is too much for your machine. |
-| `GMLX_APC_DECODE_CKPT` | Decode-time snapshot interval in generated tokens on hybrid models, anchored to the prompt end (default `512`; `0` off; widens automatically with context). |
-| `GMLX_APC_RETIRE_LCP` | `0` keys retirement on the forwarded ids instead of the predicted next-turn render (also disables decode-time snapshots, which key on the prediction). |
-| `GMLX_APC_FRESH_WAIT_MS` | Hold ceiling for the freshness admission gate, in ms (default `500`; `0` disables the gate). Sibling requests that arrive together admit one formation apart instead of together and cold: the first request prefills and stores the shared prefix, and the held siblings then admit warm. A sibling held past the ceiling admits cold. |
-| `GMLX_APC_FRESH_MIN` | Minimum uncovered shared-prefix tokens before the gate holds a sibling (default `256`). Below the floor the duplicate prefill costs less than the wait. |
-| `GMLX_FAITHFUL_HISTORY` | `0` restores mlx-vlm's stock chat-history rebuild, which drops `reasoning_content` from non-tool assistant messages before the template sees it (see `chat_template_kwargs`). |
-
 ---
 
 ## Residency & auto-unload
@@ -1304,132 +1207,7 @@ mmproj, drafter, speculative, chat template) is two distinct resident
 entries. Sampling/system/ttl differences do not fork an entry; the chat
 template does, because it is baked into the tokenizer at load.
 
-### Environment variables
-
-The residency layer reads a few operator overrides from the environment:
-
-| Variable | Meaning |
-|----------|---------|
-| `MLX_VLM_RESIDENT_BUDGET_GB` | Resident weight-byte budget in GB. Consulted when neither `--budget-gb` nor `server.budget_gb` sets one; otherwise the flag/config value wins. |
-| `MLX_VLM_MAX_RESIDENT_MODELS` | Secondary cap on resident model count. Same precedence: a fallback below `--max-models` / `server.max_models`. |
-| `MLX_VLM_PINNED_MODELS` | Comma-separated model paths to pin; unioned with `--pin` and `pin: true` entries, so it always adds pins. |
-| `MLX_VLM_RESIDENT_TTL_DISABLE` | `1`/`true`/`yes`/`on` disables the idle-TTL reaper entirely (LRU-under-pressure still applies). |
-| `MLX_VLM_RESIDENT_TTL_TICK` | Reaper wake-up interval in seconds (default `30`). |
-
----
-
-## Operational endpoints
-
-The standard generation and listing routes work: `/v1/chat/completions`,
-`/v1/messages` (Anthropic), `/v1/responses`, `/v1/models`, `/health`. gmlx
-adds a minimal classic `POST /v1/completions` text route (single string
-prompt, `n=1`; see the table). Added to those: `POST /unload`,
-`POST /v1/reload`, and `POST /v1/audio/transcriptions` /
-`POST /v1/audio/speech` / `POST /v1/embeddings` when STT / TTS / embeddings
-is enabled. These are the config-server overrides and additions:
-
-| Endpoint | Behaviour |
-|----------|-----------|
-| `GET /v1/models`, `GET /models` | Configured/discovered ids + alias presets, each with `resident` / `pinned` / `speculative` / `vlm` / `profile` / `default` markers, plus `context_length` (the GGUF's trained context) and `max_context_at_width_1` (what the capacity table says fits at width 1; only for the model the table was derived from, else `null`). `gmlx launch pi` writes the smaller of the two as pi's `contextWindow`. Never the HF cache. |
-| `GET /health` | Liveness only: `{"status": "healthy", "pid": N}`, no model/adapter paths, no context fields. The one route api-key auth exempts, so the liveness body deliberately leaks nothing. `?ready=1` adds a readiness verdict - deliberately a little more than liveness (a coarse busy/not-busy and a throughput-derived wait hint, which is all a keyless caller can learn; the numbers behind it stay on the authed metrics): 200 with `"ready": true`, or 503 with `"ready": false`, a one-word `reason` (`pressure` when the governor is orange/red, `queue` when requests are waiting for a slot, `busy` when every resident model's engine is at its decode width) and a `Retry-After` header from the same drain estimate a queue-cap 503 carries. Still keyless; see [Capacity and live-request metrics](#capacity-and-live-request-metrics). |
-| `GET /v1/metrics`, `GET /metrics` | The stock runtime snapshot (under its `server` key) enriched with `resident_models[]`, the memory governor, the capacity table, `concurrency`, `queue`, and the live `requests[]` view; see [Capacity and live-request metrics](#capacity-and-live-request-metrics). Authed like every other endpoint; what `gmlx ps` reads. `?format=prometheus` (or `Accept: text/plain` / an OpenMetrics `Accept`) renders the same snapshot as Prometheus text (`gmlx_*` gauges and `*_total` counters; lists of models become `model`-labelled series, the capacity tables `width`/`depth`-labelled ones, `governor.band` a `band`-labelled indicator plus `gmlx_governor_band_level` 0-3). |
-| `POST /v1/completions` | Classic OpenAI text completions, no chat template applied. Scope: a single string `prompt`, `n=1`; supports `max_tokens`, `temperature`, `top_p`, `seed`, `stop`, `stream` (SSE with a final `[DONE]`), plus `profile` and the other shared sampling extras. List / token-array prompts, `n > 1`, `echo`, `suffix`, and `best_of > 1` are rejected with a 400. |
-| `POST /v1/messages/count_tokens` | (stock) Anthropic-style token counting: same body shape as `/v1/messages`, returns `{"input_tokens": N}` after applying the chat template. |
-| `GET /v1/cache/stats` | Automatic Prefix Cache statistics, or `{"enabled": false}` when APC is off. On checkpoint-tier models (hybrid/SWA archs) the snapshot carries the `ckpt_*` counter family beside the stock fields; see [Checkpoint-tier counters](#checkpoint-tier-counters). |
-| `POST /v1/cache/reset` | Clears the Automatic Prefix Cache. With no body, every resident model's (the stock handler reached only the request context's manager); `{"model": "<id>"}` clears one resident model's. Returns `{"enabled", "status": "cleared" \| "no_cache", "models": [ids cleared]}`; 404 `unknown_model` / `not_resident` for a bad id. The disk tier's files are untouched, as before. |
-| `POST /v1/images/generations`, `POST /v1/images/edits` | (stock mlx-vlm routes) not usable with GGUF text models - they require an MLX image-generation checkpoint, which gmlx does not serve; a request against a configured GGUF fails with an error. |
-| `POST /unload` | `{"model": "<id>"}` evicts just that resident entry (also clearing any keep mark); an empty body clears the whole pool. An explicit unload outranks the preload's lifetime hold (that hold guards against implicit eviction, not the operator), so the preloaded primary unloads too; a model with in-flight streams still answers 409. A model unloaded this way and later reloaded by request has no lifetime hold - it is TTL/LRU-managed like any other until a `/v1/reload` with `preload` re-pins it. |
-| `POST /v1/estimate` | Dry-run admission: the same body as `/v1/chat/completions`, answered with the numbers instead of a generation (`prompt_tokens`, `warm_tokens`, `need_bytes`, `fits_now`, `fits_drained`, `est_ttft_s`, ...). `"dry_run": true` on `/v1/chat/completions` returns the same estimate (that form goes through the queue cap; this route does not). See [Capacity and live-request metrics](#capacity-and-live-request-metrics). |
-| `GET /v1/capacity/plan?width=W&depth=D` | The fan-out policy: can `W` streams run at `D` tokens each (`ok`, from the capacity table), and may they start now (`admit_now`, from the governor band, the waiting census and the free decode slots), with `reason`. |
-| `POST /v1/keep` | `{"model": "<id>", "warm": true}` keeps a model resident through the idle-TTL reaper (still LRU-evictable; the keep tier above), and by default background-loads it so it is hot before the first request. `gmlx launch --model <id>` fires this once the server is up, and a `gmlx talk` / menu-bar voice session holds its model this way for the session's lifetime. `{"model": "<id>", "keep": false}` releases the hold without evicting; `/unload` releases and evicts. |
-| `POST /v1/reload` | (config mode only) re-reads the config and re-registers models, keeping warm entries whose load signature is unchanged. In non-config modes it returns 200 with `{"status": "unsupported"}`. `SIGHUP` triggers the same reload; see [Reloading the config](#reloading-the-config). |
-| `POST /v1/audio/transcriptions` | (only with `server.stt:` / `--stt`) OpenAI-compatible speech-to-text; see below. |
-| `POST /v1/audio/translations` | (only with `server.stt:` / `--stt`) OpenAI-compatible audio translation: any-language audio to English, same model; see below. |
-| `POST /v1/audio/speech` | (only with `server.tts:` / `--tts`) OpenAI-compatible text-to-speech; see below. |
-| `POST /v1/embeddings` | (only with `server.embeddings:` / `--embeddings`) OpenAI-compatible text embeddings; see below. |
-| `POST /v1/rerank` | (only with `server.rerank:` / `--rerank`) Cohere/Jina-shaped reranking; see below. Also served at `/rerank`. |
-
-### Capacity and live-request metrics
-
-`GET /v1/metrics` carries, under `server`, everything a load balancer or a
-harness that fans out subagents needs to size its work to the server. All
-of it is read-only and cheap (the poll is on the request log's silent
-list); the keyless `GET /health?ready=1` gives the coarse yes/no without
-the key.
-
-| Section | Fields | Meaning |
-|---|---|---|
-| `concurrency` | `decode_batch`, `queue_cap`, `in_flight`, `waiting` | The effective decode width (`GMLX_DECODE_BATCH`, bounded by the capacity frontier), the waiting-queue cap, streams generating now (each resident entry's `in_flight`: its busy refcount minus the process-lifetime hold the primary preload keeps, so an idle server reads 0), and requests waiting for a slot (every resident engine's server queue plus its unadmitted prompts, summed). Each resident model decodes on its own engine with its own width, so `in_flight` is server-wide while `resident_models[].in_flight` is the per-model number to compare against `decode_batch`. |
-| `queue` | `waiting`, `cap`, `eta_s`, `rejections`, `last_reject_reason` | The waiting census again, the cap it is judged against, and the drain estimate in seconds a client would get as `Retry-After` right now (`0` with nothing waiting; the same formula: waiting x mean tokens per request / aggregate decode rate, clamped 2-60 s). |
-| `requests[]` | `id`, `uid`, `model`, `state`, `position`, `prompt_tokens`, `generated`, `max_tokens`, `elapsed_s`, `ttft_s`, `decode_tok_s`, `cache {tier, warm_tokens}`, `speculative {rounds, accepted, drafted, accept_rate}` | One row per request the serve path knows about, queued rows first in queue order. `state` is `queued` (server queue or engine-side unadmitted; `position` is the place in line), `prefill`, or `decode`. `cache.tier` is the prefix-cache hit the row got (`exact`, `block`, or gmlx's own `ckpt` / `anchor` restores; `miss`; `hit` when only the warm-token count is known) and `warm_tokens` how many prompt tokens it reused. `speculative` is the drafter's acceptance since the row started (exact at batch width 1, shared across the batch otherwise) and `null` without a drafter. Rows come from each engine's tick, refreshed at most four times a second per engine and merged across resident models (`position` is the place in that model's queue); an idle engine contributes nothing. Drafted models (`draft_gguf` / `speculative: true`) report rows like any other; their `speculative` numbers are the drafter's per-generation round tally, which is exact at batch width 1 and shared across a wider speculative batch. |
-| `governor` | `band`, counters | The memory governor's band and shed history; see the `GMLX_GOVERNOR` / `GMLX_GOV_*` rows in [cli.md](cli.md#environment-variables). |
-| `memory` | `active_bytes`, `cache_bytes`, `headroom_bytes`, `arena_bytes`, `arena_nominal_bytes`, `kv_room_bytes`, `arena_hits`, `arena_lookups` | MLX's active and cached bytes and the headroom the admission gate reads. The arena fields appear for a streaming model: the decode arena's bytes now, its sized capacity, and the KV room the arena leaves under the governor ceiling (`GMLX_STREAM_KV_CTX`). A gap between the first two is a pressure or governor shrink, or a lend to the prefill ring. `arena_hits` over `arena_lookups` is the arena hit rate since load. It rises as the arena warms. |
-| `capacity` | `max_ctx` by width, `max_width_at_depth`, byte budgets | The boot capacity table (`GMLX_OVERCOMMIT=1` disables its ceilings); absent for an HF fall-through load. Priced per cache entry: growing attention KV at the resolved `kv_bits` width, sliding windows at their cap, the fixed recurrent state of hybrid models (gated DeltaNet, Mamba2, KDA) once per sequence. |
-| `rates` | `decode_tok_s`, `decode_streams`, `prefill_tok_s_recent`, `decode_tok_s_recent`, `decode_tok_s_lifetime` | The aggregate decode rate right now (the sum over the rows in `requests[]` that are decoding) and how many streams it is spread over; the mean prefill and per-stream decode rates over the last eight completed requests (what the dry-run's `est_ttft_s` is computed from); the lifetime mean decode rate. |
-
-The sections are independent: a server without a capacity table (an HF
-fall-through load) omits `capacity` and everything else still appears;
-any probe failure inside a section leaves that section's live fields
-`null` rather than failing the snapshot.
-
-**Asking before sending.** Two routes turn the same numbers into
-answers a dispatcher can act on without a refused request:
-
-- `POST /v1/estimate` (or `"dry_run": true` on `/v1/chat/completions`)
-  takes a chat-completions body and returns, for a resident model:
-  `prompt_tokens` (the rendered prompt, tokenized the way the request
-  would be), `warm_tokens` and `cache_tier` (how much of the prefix the
-  prefix cache already holds, and the deepest tier holding it: the block
-  chain, the exact index, or a pinned checkpoint record on `ckpt`-tier
-  models - the request itself restores by the runtime's own precedence; which
-  server holds your prefix, and how much of it, is the routing signal
-  across machines), `need_bytes` (the prompt's KV plus the prefill
-  transient, plus `max_tokens` when the body pins one - exactly what the
-  memory preflight prices), `avail_now_bytes` / `fits_now` (against the
-  live headroom) and `avail_drained_bytes` / `fits_drained` (against the
-  working set with the batch drained: the preflight's own refusal line),
-  `context_ok` against `context_limit` (`context_limit_source` says
-  whether that is the configured `max_kv_size` or, with nothing
-  configured, the GGUF's trained context), and `est_ttft_s`
-  (queue drain plus the cold suffix at the recent prefill rate). A model
-  that is not resident answers `resident: false` with null fits - the
-  dry-run never loads a model. Requests carrying images / audio / video
-  render but are not priced (`media: true`), matching the preflight.
-- A chat request for a model the load gate cannot admit right now (its
-  weights would fit the box, but not next to what is resident and
-  pinned or busy, or not without pushing the kernel under the governor's
-  reclaimable floor while other processes hold the rest) answers `503`
-  with `{"error": {"type": "model_load_deferred", ...}}`, the gate's
-  numbers in the message, and `Retry-After`. The gate judges the load
-  against the serve ceiling (working set less margin and kernel reserve,
-  the same ceiling request admission uses) and against the kernel's own
-  reclaimable count, so a load that would Metal-OOM in the weight warm
-  is refused before it starts. Memory the kernel is still returning (an
-  unload or eviction a moment earlier) is waited for, up to 3 s, before
-  a load is deferred. Explicitly `POST /unload` the resident model, or
-  retry once its streams drain and the pool can evict it.
-- `GET /v1/capacity/plan?width=W&depth=D` evaluates the fan-out policy
-  where the numbers live: `ok` when the capacity table holds `W` streams
-  at `D` tokens each (`max_context_at_width` is read at the smallest
-  tabulated width >= `W`, so it is conservative between rows), and
-  `admit_now` when, on top of that, the governor is not orange/red,
-  nothing is waiting, and at least `W` decode slots are free (one under
-  yellow). `reason` names the first condition that fails. Without a
-  table (an HF fall-through load, or `GMLX_OVERCOMMIT=1`) `ok` is null
-  and only the timing is judged.
-
-The Prometheus rendering (`?format=prometheus`) flattens these to
-`gmlx_concurrency_in_flight`, `gmlx_queue_eta_s`,
-`gmlx_governor_band{band="green"} 1`, `gmlx_capacity_max_ctx{width="8"}`,
-`gmlx_resident_models_busy{model="<id>",profile="default"}` (`model`
-is the configured `id[@profile]` whose request built the entry; the
-`profile` label - adapter basename, model kind and/or a short hash of
-the load signature, `default` for a bare single-model launch - keeps
-two entries backing one GGUF as distinct series; both are fixed for the
-entry's lifetime) and so on; `requests[]` is high-cardinality and contributes only
-`gmlx_requests_count`.
-
-### Reloading the config
+## Reloading the config
 
 In `--config` mode (and a bare start that found a default config) the YAML
 can be re-read without a restart: `POST /v1/reload`, or send `SIGHUP` to the
@@ -1453,469 +1231,6 @@ server is never signalled.
 
 ---
 
-## API capabilities
-
-The protocol surface is inherited from mlx-vlm (gmlx swaps the model layer,
-not the handlers), so the engine's request features work unchanged on GGUF
-models.
-
-The context window comes from the GGUF's own metadata; there is no
-server-side override or per-request context knob. (`GMLX_ROPE_FACTORS`
-exists as an expert escape hatch for models with mis-declared RoPE scaling -
-see the environment-variable appendix in [cli.md](cli.md).)
-
-A few request features worth knowing about:
-
-### Tool / function calling
-
-OpenAI `tools` + `tool_calls` on `/v1/chat/completions`, and Anthropic
-`tools` / `tool_use` blocks on `/v1/messages`. The
-tool-call parser is inferred from the model's chat template
-(`mlx_lm.tool_parsers`, plus mlx-vlm's own additions, e.g. gemma4's
-`<|tool_call>` format): a model whose template defines a tool-call syntax
-gets parsing automatically, nothing to configure. Streaming works too: a
-parsed call ends the stream with `finish_reason: "tool_calls"`.
-
-`tool_choice` is honest but limited:
-
-- `"none"` (and Anthropic `{"type": "none"}`) is enforced server-side: the
-  tools are stripped before the chat template runs, so the model never sees
-  them and cannot emit a call.
-- `"auto"` is the default behaviour - the model decides.
-- `"required"` and named-function forms (Anthropic `{"type": "any"}` /
-  `{"type": "tool", ...}`) are forwarded to the chat template as a plain
-  template variable and honored only if that template implements them; there
-  is no grammar-level enforcement, so clients must not rely on them for
-  routing. When a forced call was requested and the output parsed zero tool
-  calls, the server logs one warning naming the mismatch.
-
-This is the client-side-loop shape: the server parses the calls, the client
-executes them and sends results back. To run the loop server-side instead --
-config-allowlisted MCP tools, no client loop at all -- serve an assistant id
-(`server.assistants:`, [assistant.md](assistant.md#served-assistants)).
-
-```sh
-curl localhost:8080/v1/chat/completions -d '{
-  "model": "qwen3.6-27b",
-  "messages": [{"role": "user", "content": "Weather in Paris?"}],
-  "tools": [{"type": "function", "function": {
-    "name": "get_weather",
-    "parameters": {"type": "object",
-                   "properties": {"city": {"type": "string"}},
-                   "required": ["city"]}}}]
-}'
-```
-
-### Parameter support
-
-The request schemas accept unknown fields, so nothing is ever rejected just
-for being present - but a parameter the server accepts and then never reads
-is worse than an error. Two guardrails:
-
-- **honored** parameters change the response; **ignored** parameters are
-  accepted and skipped. Every ignored parameter a request sets draws one
-  `warning` line in the server log naming it.
-- The table is kept in lockstep with the allowlists the warning uses
-  (`gmlx/serve/patches/api_contract.py`); a test cross-checks the two, so
-  they cannot drift.
-
-The standard sampling parameters (`max_tokens` / `max_output_tokens`,
-`temperature`, `top_p`, `top_k`, `min_p`, `top_n_sigma`, `p_less`,
-`typical_p`, `repetition_penalty`, `presence_penalty`, `frequency_penalty`
-and their `*_context_size` companions, `enable_thinking`,
-`thinking_budget`, and the OpenAI standard `reasoning` /
-`reasoning_effort` controls) are honored on all three generation
-dialects. The rest:
-
-| Parameter | `/v1/chat/completions` | `/v1/responses` | `/v1/messages` | Notes |
-|-----------|------------------------|-----------------|----------------|-------|
-| `n` | ignored | ignored | ignored | always one choice; `n > 1` on `/v1/completions` is a 400 |
-| `user` | ignored | ignored | ignored | no per-user accounting |
-| `parallel_tool_calls` | ignored | ignored | ignored | the template decides how many calls to emit |
-| `tool_choice` | none/auto enforced | template-dependent | none/auto enforced | `required`/named forms are template-dependent; see above |
-| `metadata` | ignored | ignored | ignored | accepted for Anthropic compatibility, never read |
-| `output_config` | ignored | ignored | honored | Anthropic `json_schema` format maps onto structured output |
-| `logit_bias` | honored | honored | honored | token-id keyed |
-| `seed` | honored | honored | honored | per-request sampling seed |
-| `presence_penalty` | honored | honored | honored | |
-| `frequency_penalty` | honored | honored | honored | |
-| `stream_options` | honored | ignored | ignored | `include_usage` adds the final usage chunk (chat + `/v1/completions`) |
-| `timings_per_token` | honored | ignored | ignored | streamed chat chunks carry `timings.predicted_n`, the exact cumulative output-token count (llama.cpp convention) |
-| `response_format` | honored | honored | honored | `json_schema` / `json_object`; unknown types are rejected (see below) |
-| `logprobs` | honored | ignored | ignored | chat-only; `/v1/completions` never returns logprobs |
-| `top_logprobs` | honored | ignored | ignored | capped by `TOP_LOGPROBS_K` (below) |
-| `stop` | honored | ignored | ignored | chat + `/v1/completions`; Anthropic uses `stop_sequences` |
-| `stop_sequences` | ignored | ignored | honored | the Anthropic-native spelling |
-| `chat_template_kwargs` | honored | honored | honored | extra template variables, request wins over profile |
-| `profile` | honored | honored | honored | sampling/system profile by name ([profiles](#profiles-sampling-profiles-and-built-in-intents)) |
-| `xtc_probability` | honored | honored | honored | XTC sampling (with `xtc_threshold`) |
-
-`echo`, `suffix`, `best_of > 1`, and list / token-array prompts on
-`/v1/completions` are **rejected** with a 400 and a message naming the
-limit.
-
-### Structured output
-
-`response_format: {"type": "json_schema", ...}` gives grammar-constrained
-decoding: the model cannot emit tokens that violate the schema. The backing
-engine is [llguidance](https://github.com/guidance-ai/llguidance), a declared
-mlx-vlm dependency installed with the base package; nothing separate to
-install. The Anthropic endpoint maps an `output_config` of type `json_schema`
-to the same machinery. Two honest caveats:
-
-- `"type": "json_schema"` constrains to your schema; `"json_object"` is
-  accepted and constrained to a permissive object grammar (valid JSON, no
-  particular shape). Unknown types are rejected with
-  `Unsupported response_format type`.
-- Not available on speculative/MTP models. The engine rejects per-request
-  logits processors there (the same restriction as XTC above), so such a
-  request errors.
-
-A malformed schema (or one llguidance can't compile) is rejected with a `400`
-before generation, not a `500`. The first structured request per model pays a
-one-time llguidance tokenizer build (~1.5 s on a 150k vocab), cached for the
-process lifetime.
-
-```sh
-curl localhost:8080/v1/chat/completions -d '{
-  "model": "qwen3.6-27b",
-  "messages": [{"role": "user", "content": "Name a city and its population."}],
-  "response_format": {"type": "json_schema", "json_schema": {"schema": {
-    "type": "object",
-    "properties": {"city": {"type": "string"},
-                   "population": {"type": "integer"}},
-    "required": ["city", "population"]}}}
-}'
-```
-
-### Logprobs
-
-`logprobs: true` returns each generated token's logprob; `top_logprobs: N`
-asks for the N most likely alternatives per token. The alternatives are
-capped by a server-side env var, `TOP_LOGPROBS_K` (0-20; 20 is OpenAI's own
-cap), whose default is `0`. A request with `top_logprobs` still succeeds, but
-the alternatives lists stay empty until the server is started with the cap
-raised. It is an mlx-vlm engine env var (there is no config key):
-
-```sh
-TOP_LOGPROBS_K=5 gmlx serve --config ~/.config/gmlx/gmlx.yaml
-```
-
-### Vision messages
-
-OpenAI `image_url` content parts work against a VLM entry: a model configured
-with `mmproj:` (or served with `--mmproj`). The url can be an `http(s)://`
-URL or a base64 `data:` URI (`"url": "data:image/jpeg;base64,<...>"`).
-
-```sh
-curl localhost:8080/v1/chat/completions -d '{
-  "model": "gemma-e4b-vlm",
-  "messages": [{"role": "user", "content": [
-    {"type": "text", "text": "What is in this image?"},
-    {"type": "image_url", "image_url": {"url": "https://example.com/cat.jpg"}}
-  ]}]
-}'
-```
-
----
-
-## Speech-to-text (`stt:`)
-
-Setting `server.stt:` (or passing `--stt` in any serve mode) adds an
-OpenAI-compatible `POST /v1/audio/transcriptions` endpoint backed by
-[mlx-whisper](https://pypi.org/project/mlx-whisper/). It needs the optional
-extra, `pip install 'gmlx[stt]'`, plus `ffmpeg` on PATH for audio
-decoding. Whisper checkpoints are not GGUFs (whisper.cpp uses its own ggml
-container), so this is the one model kind the server loads in MLX format
-rather than from a GGUF.
-
-```yaml
-server:
-  stt: whisper-turbo    # or: whisper-turbo-q4 | an HF repo id | a local model dir | true
-```
-
-The value is an alias, an HF repo in MLX-whisper format, or a local converted
-model directory (`true` means the default alias). Aliases:
-
-| Alias | Repo | Notes |
-|-------|------|-------|
-| `whisper-turbo` | `mlx-community/whisper-large-v3-turbo` | default; large-v3 quality, ~6x faster, fp16 ~1.6 GB |
-| `whisper-turbo-q4` | `mlx-community/whisper-large-v3-turbo-q4` | 4-bit, ~600 MB |
-| `whisper-large` | `mlx-community/whisper-large-v3-mlx` | full large-v3 |
-| `whisper-medium` / `-small` / `-base` / `-tiny` | `mlx-community/whisper-<size>-mlx` (tiny: `whisper-tiny`) | smaller/faster |
-
-Want full precision instead of a q4 (or vice versa)? Name the exact repo:
-`stt: mlx-community/whisper-large-v3-turbo` is the fp16 turbo.
-
-The Whisper model is pre-warmed in the background at startup (best-effort,
-falling back to a lazy first-request load), then cached in-process. It is
-tiny next to a resident LLM and does not count against `budget_gb`. Requests
-follow the OpenAI shape (`multipart/form-data` with `file`, plus optional
-`model`, `language`, `prompt`, `temperature`,
-`response_format: json|text|verbose_json|srt|vtt`):
-
-```sh
-curl localhost:8080/v1/audio/transcriptions -F file=@clip.ogg -F model=whisper-1
-```
-
-Send `model=whisper-1` (or omit it); the conventional OpenAI name maps to the
-configured model, and `/v1/models` advertises a `whisper-1` entry when STT is
-on. Any other requested model is refused: clients can't make the server pull
-arbitrary repos. Note that the configured `stt:` model itself is fetched from
-Hugging Face on first use when it isn't already local; naming it in the
-config is the opt-in. The LLM-side no-HF policy (below) is unchanged.
-Transcriptions run serialized with each other in a worker thread,
-interleaving with (not blocking) batched LLM decode.
-
-The same `stt:` model also serves `POST /v1/audio/translations`: Whisper's
-built-in `translate` task, which takes any-language audio and returns English
-text. Same multipart request (minus `language`, which the OpenAI translations
-endpoint doesn't take):
-
-```sh
-curl localhost:8080/v1/audio/translations -F file=@japanese.ogg -F model=whisper-1
-```
-
----
-
-## Text-to-speech (`tts:`)
-
-Setting `server.tts:` (or passing `--tts` in any serve mode) adds an
-OpenAI-compatible `POST /v1/audio/speech` endpoint backed by
-[mlx-audio](https://pypi.org/project/mlx-audio/). It needs the optional
-extra, `pip install 'gmlx[tts]'`, plus `ffmpeg` on PATH for non-WAV
-formats (WAV encodes via miniaudio). Like Whisper, TTS checkpoints are not
-GGUFs, so this is loaded in MLX format rather than from a GGUF.
-
-```yaml
-server:
-  tts: kokoro    # or: kokoro-8bit | qwen3-tts | an HF repo id | a local model dir | true
-```
-
-The value is an alias, an HF repo in MLX-audio format, or a local converted
-model directory (`true` means the default alias). Aliases:
-
-| Alias | Repo | Notes |
-|-------|------|-------|
-| `kokoro` | `mlx-community/Kokoro-82M-bf16` | default; 82M, ~24 kHz, Apache, 54 voices |
-| `kokoro-8bit` / `kokoro-4bit` | `mlx-community/Kokoro-82M-8bit` / `-4bit` | smaller |
-| `qwen3-tts` | `mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit` | larger, multilingual, named voices |
-| `qwen3-tts-small` | `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16` | smaller Qwen3-TTS |
-
-The model is pre-warmed in the background at startup (best-effort, falling
-back to a lazy first-request load), then cached in-process. Requests follow
-the OpenAI shape (a JSON body with `input`, plus optional `model`, `voice`,
-`speed` (0.25-4.0), and `response_format: mp3|wav|flac|opus|pcm`, default
-`mp3`):
-
-```sh
-curl localhost:8080/v1/audio/speech -H 'content-type: application/json' \
-  -d '{"model":"tts-1","input":"Hello from MLX.","voice":"af_heart"}' -o out.mp3
-```
-
-Send `model=tts-1` (or `tts-1-hd`, or omit it); the conventional OpenAI names
-map to the configured model, and `/v1/models` advertises a `tts-1` entry when
-TTS is on. Any other requested model is refused. `voice` defaults to Kokoro's
-`af_heart`. Synthesis runs serialized with each other in a worker thread,
-interleaving with (not blocking) batched LLM decode.
-`gmlx launch open-webui` wires the chat app's read-aloud (and mic STT) to
-this endpoint when the server advertises it. The voice is pinned to
-`af_heart` because Open WebUI's default (`alloy`) is an OpenAI voice Kokoro
-rejects; a non-Kokoro `--tts` model needs `AUDIO_TTS_VOICE` overridden to one
-of its own voices.
-
-When TTS is configured the server also answers `GET /v1/audio/voices` with
-the configured model's voice names (Kokoro-style repos enumerate their
-`voices/` directory once the model is local; qwen3-tts models return their
-named-speaker set; unknown models return an empty list):
-
-```sh
-curl localhost:8080/v1/audio/voices
-# {"model": "mlx-community/Kokoro-82M-bf16", "voices": ["af_alloy", ...], "default": "af_heart"}
-```
-
-This is what `gmlx talk`'s `/voice` command lists from; clients treat a 404
-(older server, or no TTS) as "no listing" and pass voice names through blind.
-
----
-
-## Voice chat (`talk:`)
-
-With both `stt:` and `tts:` configured, `gmlx talk` runs a hands-free
-voice-chat loop against this server: wake word, VAD endpointing, whisper STT,
-replies spoken sentence-by-sentence as they stream. Its settings live in a
-top-level `talk:` block of this same YAML (it configures the client, not the
-server, so it is not under `server:`). Setup, the full key table, flags, and
-latency tuning: [talk.md](talk.md).
-
----
-
-## Chat themes (`theme:` / `themes:`)
-
-Like `talk:`, these configure a client - `gmlx chat` - not the server. A
-top-level `theme:` names the theme every chat starts with (`--theme` and
-`/theme` still override), and `themes:` defines custom themes usable anywhere
-a built-in is:
-
-```yaml
-theme: my-black
-
-themes:
-  my-black:                        # a user name shadows a built-in
-    extends: dark                  # unspecified slots inherit from here (default dark)
-    thinking: {italic: true, fg16: 94}
-    heading:  {bold: true, rgb: "#88c0d0"}   # rgb: "#rrggbb" or [r, g, b]
-    stat:     {fg16: 90}
-    code_theme: nord               # pygments style for rich code fences
-```
-
-Slots: `thinking`, `heading`, `bold`, `italic`, `inline_code`, `code_block`,
-`code_border`, `bullet`, `blockquote`, `link`, `hr`, `stat`, `info`, `error`.
-Style keys per slot: `bold`, `dim`, `italic`, `underline` (booleans), `fg16`
-(an ANSI code 30-37/90-97, follows the terminal palette), `rgb` (truecolor
-with automatic 256-color fallback; wins over `fg16` on capable terminals).
-Meta keys: `extends`, `code_theme`, `code_theme_cb`, `ptk_toolbar`. The
-colorblind modifier (`--colorblind` / `/theme NAME cb`) applies to user themes
-the same way it does to built-ins. A malformed theme definition prints a
-warning at chat startup and is skipped; the rest still register.
-
----
-
-## Text embeddings (`embeddings:`)
-
-Setting `server.embeddings:` (or passing `--embeddings` in any serve mode)
-adds an OpenAI-compatible `POST /v1/embeddings` endpoint. The point of the
-endpoint is to give Open WebUI (and other OpenAI clients) a local RAG
-embedder: `gmlx launch open-webui` points the chat app's document-RAG here,
-so nothing is downloaded from HuggingFace at its boot.
-
-Three backends, chosen by what the value points at (none needs an optional
-extra):
-
-- GGUF decoder-LM embedder: a `*.gguf` path, an
-  `hf:<org>/<repo>/<file>.gguf` ref, or a `qwen3-embed-*` alias
-  (Qwen3-Embedding `0.6b`/`4b`/`8b`). These are the Qwen3 dense decoder
-  trunk plus last-token (EOS) pooling and an L2-norm, so the runtime loads
-  them like any other GGUF. They carry the model's full (32k-40k) context,
-  so long documents embed without truncation.
-- GGUF encoder: `embeddinggemma-gguf`, an EmbeddingGemma GGUF run as a
-  bidirectional sentence encoder (mean-pool + dense head) on this runtime's
-  own loader.
-- mlx-embeddings safetensors encoder: Gemma3 / XLM-RoBERTa / ModernBERT
-  encoders via
-  [mlx-embeddings](https://pypi.org/project/mlx-embeddings/), a core
-  dependency. Aliases below.
-
-```yaml
-server:
-  embeddings: qwen3-embed-0.6b                  # the default: a GGUF decoder-LM embedder
-  # embeddings: hf:Qwen/Qwen3-Embedding-4B-GGUF/Qwen3-Embedding-4B-Q6_K.gguf   # a specific rung
-  # embeddings: ~/models/Qwen3-Embedding-4B.Q6_K.gguf   # a local GGUF
-  # embeddings: embeddinggemma-gguf             # EmbeddingGemma encoder from a GGUF
-  # embeddings: embeddinggemma                  # EmbeddingGemma encoder from safetensors
-```
-
-The value is a GGUF ref, an alias, an HF repo in MLX-embeddings format, or a
-local converted model directory (`true` means the default alias). A bare
-alias resolves to the default rung shown below; the `gmlx init` wizard
-offers a quant follow-up to pick another rung and writes its concrete ref.
-Presets:
-
-GGUF embedders (dim = vector width, ctx = max input tokens):
-
-| Alias | Repo (default rung) | dim / ctx | Notes |
-|-------|--------------------|-----------|-------|
-| `qwen3-embed-0.6b` | `Qwen/Qwen3-Embedding-0.6B-GGUF` (Q8_0) | 1024 / 32k | default; decoder-LM, small/fast/multilingual; ~0.6 GB |
-| `qwen3-embed-4b` | `Qwen/Qwen3-Embedding-4B-GGUF` (Q8_0) | 2560 / 40k | decoder-LM, higher retrieval quality; ~4.3 GB |
-| `qwen3-embed-8b` | `Qwen/Qwen3-Embedding-8B-GGUF` (Q8_0) | 4096 / 40k | decoder-LM, best of the family; ~8 GB, largest index |
-| `embeddinggemma-gguf` | `ggml-org/embeddinggemma-300M-GGUF` (Q8_0) | 768 / 2k | encoder (mean-pool + dense head), tiny multilingual (Google); ~0.3 GB |
-
-(The bare `qwen3-embed` is a back-compat alias for `qwen3-embed-0.6b`.)
-
-mlx-embeddings safetensors encoders (default rung `8bit`):
-
-| Alias | Repo | dim / ctx | Notes |
-|-------|------|-----------|-------|
-| `embeddinggemma` | `mlx-community/embeddinggemma-300m-8bit` | 768 / 2k | tiny, strong multilingual (Google); ~0.3 GB |
-| `arctic-l` | `mlx-community/snowflake-arctic-embed-l-v2.0-8bit` | 1024 / 8k | multilingual long-context (XLM-RoBERTa) |
-| `nomic-embed` | `mlx-community/nomicai-modernbert-embed-base-8bit` | 768 / 8k | popular long-context English (ModernBERT) |
-| `bge-m3` | `mlx-community/bge-m3-mlx-8bit` | 1024 / 8k | multilingual long-context (XLM-RoBERTa) |
-
-Picking by family: the GGUF Qwen3-Embedding tier carries the longest context.
-`0.6b` is the best size/quality trade for most RAG; step up to `4b`/`8b` for
-higher retrieval quality at a larger index and more RAM. The encoder tier is
-for when you specifically want one of those models (e.g. `embeddinggemma`
-for a tiny multilingual footprint).
-
-The model is pre-warmed in the background at startup (best-effort, falling
-back to a lazy first-request load), then cached in-process, kept separate
-from the chat residency pool so a RAG re-index and chat never evict each
-other. Requests follow the OpenAI shape (a JSON body with `input`, a string
-or list of strings, plus optional `model` and
-`encoding_format: float|base64`, default `float`):
-
-```sh
-curl localhost:8080/v1/embeddings -H 'content-type: application/json' \
-  -d '{"model":"text-embedding-3-small","input":["hello","world"]}'
-```
-
-Send `model=text-embedding-3-small` (or `-3-large` / `-ada-002`, or omit it);
-the conventional OpenAI names map to the configured model, and `/v1/models`
-advertises a `text-embedding-3-small` entry when embeddings are on. Any other
-requested model is refused. Vectors are L2-normalized (mean-pooled by the
-encoder backend, last-token/EOS pooled by the GGUF decoder-LM backend).
-Embedding passes run serialized with each other in a worker thread,
-interleaving with (not blocking) batched LLM decode. To point Open WebUI's
-RAG here: `RAG_EMBEDDING_ENGINE=openai`, `RAG_OPENAI_API_BASE_URL=<server>/v1`,
-`RAG_EMBEDDING_MODEL=text-embedding-3-small`, which is exactly what
-`gmlx launch open-webui` sets for you.
-
-## Reranking (`rerank:`)
-
-Setting `server.rerank:` (or `--rerank` in any serve mode) adds a
-Cohere/Jina-shaped `POST /v1/rerank` (also `/rerank`): the second RAG stage.
-A vector search returns a coarse top-N, the reranker re-scores those
-documents jointly against the query, and the best few go to the model. Open
-WebUI calls it as an external reranker.
-
-The model is a Qwen3-Reranker GGUF: a Qwen3 causal LM fine-tuned to answer
-"yes" or "no" to whether a document satisfies a query, so the runtime loads
-it like any other GGUF, no extra needed. The relevance score is the
-probability it assigns "yes" over "no" (`sigmoid(yes - no)`). (BGE/Jina BERT
-cross-encoders, which llama.cpp reranks via a classifier head, are not
-mlx-lm arches and are out of scope.)
-
-```yaml
-server:
-  rerank: qwen3-rerank-0.6b                      # the default: a Qwen3-Reranker GGUF
-  # rerank: hf:mradermacher/Qwen3-Reranker-4B-GGUF/Qwen3-Reranker-4B.Q6_K.gguf   # a specific rung
-  # rerank: ~/models/Qwen3-Reranker-4B.Q6_K.gguf   # a local GGUF
-```
-
-The value is a `qwen3-rerank-*` alias (`0.6b`/`4b`/`8b`, default rung
-`Q8_0`), a `*.gguf` path, or an `hf:<org>/<repo>/<file>.gguf` ref. The
-reranker is independent of the embedder, but `gmlx init` defaults its quant
-to the embedder's chosen rung. The request is the Cohere/Jina shape (`query`,
-`documents` as strings or `{"text": ...}` objects, and optional `top_n`,
-`instruction`, `return_documents`); the response is `results` (sorted
-best-first, each with `index` + `relevance_score`), plus `model` and `usage`:
-
-```sh
-curl localhost:8080/v1/rerank -H 'content-type: application/json' \
-  -d '{"query":"how do I cancel?","documents":["Billing FAQ ...","Setup guide ..."]}'
-```
-
-The server serves one configured reranker (the request `model` is echoed but
-never selects a different one). Scoring is one model forward per document,
-serialized in a worker thread, interleaving with batched LLM decode.
-`gmlx launch open-webui` points Open WebUI's external reranker here
-automatically when the server advertises `rerank` via `/v1/models` (it sets
-`RAG_RERANKING_ENGINE=external`, `RAG_EXTERNAL_RERANKER_URL=<server>/v1/rerank`,
-`RAG_RERANKING_MODEL=reranker`, and enables hybrid search, which is when
-reranking runs).
-
----
-
 ## Hugging Face policy
 
 By default the server makes no Hugging Face access. A request `model` that
@@ -1935,84 +1250,3 @@ for you (and set `server.hf_cache: true`). To fetch a model into the cache,
 use the normal `huggingface-cli download` (or just `gmlx pull` it into a
 `model_dirs` folder).
 
----
-
-## Launch a coding harness
-
-`gmlx launch <client>` points an external tool (claude-code, opencode, pi,
-omp, hermes, goose, aichat, elia, open-webui) at a gmlx server, writing
-the tool's native config without touching your dotfiles and auto-starting
-the server if it is down. Per-client details, flags, and troubleshooting:
-[launch.md](launch.md).
-
----
-
-## Architecture
-
-gmlx is an adoption layer: it installs late-bound monkeypatches over
-mlx-vlm's seams (dashed edges) and leaves the stock app, batching engine, and
-protocol handlers untouched. Loads route to the gmlx loader, which reads
-GGUF wire bytes via mlx-kquant's C++ reader and swaps model leaves to `kq.*`
-K-quant kernels. The stock engine executes those kernels in its own forward
-pass; there is no engine fork.
-
-```mermaid
-flowchart TB
-  client["HTTP client (OpenAI / Anthropic)"]
-
-  subgraph mlxvlm["mlx-vlm server (unmodified)"]
-    direction LR
-    routes["app routes + handlers"]
-    engine["BatchGenerator + MTP"]
-  end
-
-  subgraph gguf["gmlx (adoption layer)"]
-    direction LR
-    cfg["config + discovery"] --> res["residency<br/>LRU + TTL"] --> srv["serving<br/>resolver + bridge"] --> loader["loader + vlm"]
-  end
-
-  subgraph core["mlx-kquant (shared core)"]
-    direction LR
-    rd["load_gguf<br/>C++ reader"]
-    kq["kq.* Metal kernels"]
-  end
-
-  disk[("GGUF files")]
-
-  client --> routes
-  routes -. patched seams .-> res
-  routes --> engine
-  loader --> rd --> disk
-  loader --> kq
-  engine --> kq
-```
-
-```mermaid
-sequenceDiagram
-  participant C as Client
-  participant A as mlx-vlm app
-  participant R as residency pool
-  participant S as serving (resolver + bridge)
-  participant L as loader + kquant swap
-  participant E as BatchGenerator (kq.* kernels)
-  C->>A: POST /v1/chat (model "id@profile")
-  A->>R: get_cached_model(id)   [patched]
-  R->>S: resolve_request_model(id@profile)
-  S-->>R: abspath + ResolvedModel; set _active_spec
-  alt resident (cache_key incl load_signature)
-    R-->>A: model, processor, config
-  else cold build
-    R->>R: set load-param + APC env window
-    R->>S: load_model_resources(path)   [patched]
-    S->>L: load_model / load_mtp_model / load_vlm
-    L-->>S: model (leaves = kq.* modules)
-    S-->>R: model, processor, config
-  end
-  A->>A: _build_gen_args seeds sampling from the active profile   [patched]
-  A->>E: generate(...)
-  E-->>C: stream tokens
-```
-
-For the bridge/residency mechanics (how the path-keyed companion registries
-and the context-aware runtime proxy work), see
-[serving-architecture.md](serving-architecture.md).

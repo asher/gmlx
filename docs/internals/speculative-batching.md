@@ -5,9 +5,9 @@ two decode loops, the batch-width cap, and the preempt + resume mechanics
 that move requests between them without interrupting any token stream.
 
 For what speculation is and how to enable it, see
-[performance.md](performance.md#mtp-speculative-decoding). For the width-cap
+[performance.md](../performance.md#mtp-speculative-decoding). For the width-cap
 config key, see
-[server-config.md](server-config.md#speculative_width_cap).
+[server-config.md](../server-config.md#speculative_width_cap).
 
 ## The two decode loops
 

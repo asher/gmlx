@@ -7,7 +7,7 @@ context, the docs under [`docs/`](docs/) are the source of truth.
 
 `mlx-kquant` is on PyPI with prebuilt arm64 wheels for Python 3.10-3.14 on
 macOS 26+. Older macOS builds it from source, which needs the Xcode Command
-Line Tools. It pins `mlx==0.31.2` itself, so nothing else needs pinning. Dev
+Line Tools. It pins `mlx==0.32.1` itself, so nothing else needs pinning. Dev
 setup is a venv, a clone, and an editable install:
 
 ```sh
@@ -21,7 +21,7 @@ Linux, which is enough for the default test tier.
 
 ## Tests
 
-Three tiers (full guide: [docs/testing.md](docs/testing.md)):
+Three tiers (full guide: [docs/internals/testing.md](docs/internals/testing.md)):
 
 ```sh
 pytest                                   # CPU logic tests: no models, runs anywhere
@@ -36,7 +36,7 @@ and must keep `scripts/check-coverage.py --check --strict` green with
 `docs/arch-coverage.md` regenerated. Short-prompt parity is not sufficient:
 attention bugs only surface at depth.
 What adding an architecture involves, and the full acceptance gate:
-[docs/adding-architectures.md](docs/adding-architectures.md).
+[docs/internals/adding-architectures.md](docs/internals/adding-architectures.md).
 
 ## Lint
 
@@ -85,14 +85,15 @@ pre-commit install   # optional: runs the same check on each commit
 
 ## Commit style
 
-A single line, no body: `(topic): short imperative summary`, e.g.
-`(arch): add falcon-h1`, `(server): fix XTC 400 on bare-int eos_token_ids`.
-The topic is parenthesized and names one top-level feature; pick from the
-established set so history stays greppable:
+A single line, no body: `type(scope): short lowercase summary`, e.g.
+`feat(arch): add falcon-h1`, `fix(server): XTC 400 on bare-int eos_token_ids`.
+The type is one of `feat`, `fix`, `perf`, `docs`, `test`, `chore`; the scope
+names one subsystem and comes from the established set so history stays
+greppable:
 
 `arch`, `loader`, `server`, `cli`, `chat`, `mtp`, `adapter`, `train`,
-`stream` (formerly `cpu-moe`), `vlm`, `manage`, `launch`, `config`, `bench`,
-`tests`, `docs`, `release`, `hygiene`.
+`stream`, `vlm`, `manage`, `launch`, `config`, `bench`, `tests`, `docs`,
+`release`, `hygiene`.
 
 Keep everything on the subject line, no extended body. A revert is
-`(topic): revert <what>`.
+`chore(scope): revert <what>`.

@@ -301,125 +301,8 @@ load, and any local-load flag does the same. An explicit GGUF path always
 loads the file on disk - if the running server serves that same file, a
 note points at the served id. Chat never auto-starts a server this way.
 
-`/exit` (or Ctrl-D) quits, `/reset` restarts the conversation, `/help` lists
-every command. The terminal is upgraded on top:
-
-- Line editing and history: arrow keys, Ctrl-A/E, and up-arrow history
-  persisted across sessions (`$XDG_CACHE_HOME/gmlx/chat_history[.ptk]`).
-  `--no-history` keeps the session ephemeral; `/history [on|off|clear]`
-  controls it at runtime.
-- Upgraded editor: with `pip install 'gmlx[chat]'` (prompt_toolkit),
-  completion menus pop as you type a `/command`, history offers fish-style
-  ghost suggestions (accept with the right-arrow key), a bottom toolbar shows
-  the live sampling settings, staged-block count, context fill, and the last
-  reply's tok/s, multi-line paste is handled cleanly, and Alt-Enter inserts a
-  newline without submitting (Shift-Enter too, in terminals that send
-  `ESC CR` for it: iTerm2, VS Code, Windows Terminal). Without it, readline
-  provides line editing and Tab completion.
-- Runtime sampling: `/temp` `/top-p` `/top-k` `/min-p` `/max-tokens`
-  `/xtc-probability` `/xtc-threshold` `/repetition-penalty`
-  `/repetition-context-size` `/presence-penalty` `/frequency-penalty <value>`
-  adjust the next reply; `/sampling` shows current values (`/max-tokens 0`
-  removes the per-reply cap - replies then run until the model stops). All
-  are also startup flags, so a model card's full sampling recommendation fits
-  on the command line.
-- `/retry` and `/undo` regenerate the last reply or remove the last exchange
-  entirely. Both rewind the persistent KV cache to the turn's checkpoint (no
-  re-prefill), restore the pre-turn state (system prompt, media markers), and
-  work after an Esc-canceled reply. A rotating cache (`--max-kv-size`) that
-  has wrapped its window can't rewind; `/reset` then.
-- `/model` and `/stats` print the loaded model's card (arch, params, codecs,
-  size, context, drafter, adapter) and the running session totals (turns,
-  tokens, average tok/s, MTP acceptance). In server mode `/model` lists the
-  served ids and `/model <id>` switches the id the next turn is sent to,
-  keeping the transcript: the server re-reads the conversation under the
-  new id, so a base and its adapters (which share one loaded model) can be
-  compared mid-conversation. Tab completes the served ids.
-- `/system [text|off]` shows or sets the system prompt at runtime (setting
-  restarts the conversation).
-- `/thinking [on|off|adaptive|default]` flips the model's own reasoning
-  switch per turn, mapped onto its template spelling (`default` restores the
-  template's default; same mapping as `--thinking`).
-- `/thinking-budget [N|off]` caps a thinking model's reasoning tokens per
-  reply, adjustable mid-session.
-- `/copy` copies the last answer to the clipboard, thinking stripped
-  (pbcopy / xclip / wl-copy, falling back to the OSC 52 terminal escape).
-- `/load <file>` prefills the next prompt from a text file (edit it, then
-  Enter sends it). Tab completes `/command` names, `/history` and
-  `/reasoning` arguments, and file paths after `/load`, `/image`, `/audio`,
-  and `/!`.
-- `/! <command>` runs a shell command and stages its output (fenced block
-  with a `$ command` header and an `[exit N in T]` footer) so it is attached
-  to your next message; your question and the evidence land in one turn. The
-  prompt shows `(+n) >> ` while blocks are staged, and several `/!` stack.
-  Enter on an empty prompt sends them alone; `/drop` discards. Long output is
-  middle-truncated (about 16 KB kept), stdin is `/dev/null` so interactive
-  commands can't wedge the REPL, and Ctrl-C interrupts the command, not the
-  session.
-- Multimodal (`--mmproj <projector.gguf>`): `/image <file>` and
-  `/audio <file>` stage media for the next message exactly like `/!` stages
-  text, and dragging a file from Finder into the terminal also works; the
-  pasted path is recognized and staged. Media markers stay pinned to the turn
-  that sent them, so follow-ups reference earlier images correctly. VLM turns
-  re-prefill the conversation each time; the KV-cached fast path is text-only
-  for now.
-- MTP speculative decoding (auto for native heads; `--no-mtp` to disable): a
-  native-head model (qwen3.5/3.6/3.8 `nextn`) drafts and verifies multiple
-  tokens per step for a decode speedup; gemma4 and muse-glimmer need a
-  `--draft-gguf` assistant, and a DFlash 2 `--draft-gguf` drafter serves
-  qwen3.8 and muse-glimmer (`--native-mtp` keeps the head). The reply streams the same way and ends with the same `tok/s`
-  stat, and the persistent KV cache is reused across turns exactly like the
-  text path. Not combinable with `--adapter` / `--stream-*`. Sampling is
-  temperature/top-p/top-k/min-p only; the MTP verify walk has no penalty/bias
-  hooks, so the other `/` sampling commands don't apply on this path.
-  - VLM + MTP: a `--mmproj` VLM with a drafter (a `--draft-gguf` assistant
-    for gemma4 or muse-glimmer, or a native `nextn` head for qwen3.5/3.6)
-    keeps MTP on for text-only turns (the fast path above) while `/image` /
-    `/audio` turns fall back to the plain VLM stream. The first media turn
-    upgrades the session to the VLM path for the rest of the conversation,
-    since the text tokenizer can't render a history that holds image markers.
-    The prior text turns are carried into that re-prefill so nothing is lost.
-- Reasoning display: for thinking models (Qwen3/DeepSeek-R1/GLM `<think>`,
-  gpt-oss harmony channels, Gemma `<|channel>thought`, Muse Glimmer's ATEM
-  `to=self` channel), the chain-of-thought is stripped of its control markers
-  and streamed in the theme's thinking style (italic bright blue under the
-  default `dark` theme) inside a gutter-framed block that closes with a payoff
-  line showing how long the model thought and how many tokens it spent; the
-  final answer follows in normal weight. `--reasoning hide` collapses the
-  reasoning to a single live spinner that resolves to the same payoff, so you
-  see it working without reading it. Ctrl-O toggles expand and collapse live during a reply (and
-  persists as the default for the next). `--reasoning raw` / `/reasoning raw`
-  passes everything through verbatim (the old behavior, for when a model's
-  markers segment oddly). The stored conversation keeps the raw text in every
-  mode, so display never changes what the model sees next turn.
-- Markdown rendering: replies render as styled markdown while they stream.
-  Completed blocks are printed permanently (native scrollback intact) and
-  only the in-progress block repaints in place. `rich` mode (default when
-  `rich` is installed on a color terminal) adds tables and syntax-highlighted
-  code fences; `lite` is a zero-dependency ANSI fallback; `plain` is raw text
-  (and the automatic non-TTY/`NO_COLOR` behavior). `--render` sets the mode,
-  `/render` switches it live; `--reasoning raw` bypasses rendering entirely.
-- Color themes: `--theme` / `/theme NAME [cb]` pick a palette: `dark`
-  (default; follows the terminal's own colors), `light`, `dark-hc`
-  (high-contrast), `nord`, `dracula`, `solarized-dark`, `gruvbox`. The `cb`
-  modifier (or `--colorblind`) swaps every accent onto the colorblind-safe
-  Okabe-Ito palette and works with all themes. A top-level `theme:` in
-  `gmlx.yaml` sets the default, and a `themes:` section defines custom
-  palettes (see [server-config.md](server-config.md#chat-themes-theme--themes)).
-- Session persistence: every chat autosaves after each turn (schema-v1 JSON
-  under `$XDG_DATA_HOME/gmlx/chats`; `--no-autosave` opts out, and
-  `/reset` rotates to a fresh file so old conversations survive). `/save
-  [name]` saves explicitly, `/sessions` lists what's stored, `/load-session
-  <name|N>` restores one (settings and transcript immediately; the KV replay
-  is deferred, and the history prefills with your next message), and
-  `--resume` picks up the model's latest session at startup. `/export
-  [file.md]` writes a markdown transcript with thinking in collapsed
-  `<details>` blocks.
-- `/reset` / `/clear` restart the conversation; `/clear` also wipes the
-  screen.
-- Esc or Ctrl-C during a reply cancels it and returns to the prompt (the
-  partial reply stays in the KV cache; `/retry` regenerates it, `/reset`
-  clears it). Ctrl-C at an idle prompt, Ctrl-D, `/exit`, or `/quit` exits.
+The REPL's slash commands, sessions and rendering are described in
+[chat.md](chat.md).
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -582,10 +465,10 @@ gmlx serve Qwen3.6-27B-Q4_K_S.gguf --speculative
 | `--max-tokens N` | Server default max completion tokens. |
 | `--ignore-eos` | Never stop on EOS; decode every request to `max_tokens` (forced-length throughput benchmarking; mirrors llama-server `--ignore-eos`). Also via `GMLX_IGNORE_EOS=1`. |
 | `--no-auth` | Serve a non-loopback bind without an API key: an explicit opt-out (config: `server.no_auth: true`) for setups that authenticate in front (mTLS, reverse proxy). Loopback binds never need it. |
-| `--stt [MODEL]` | Speech-to-text: serve `POST /v1/audio/transcriptions` via mlx-whisper (`pip install 'gmlx[stt]'`, ffmpeg on PATH). MODEL = an alias (`whisper-turbo`, `whisper-turbo-q4`, `whisper-large/medium/small/base/tiny`), any MLX-whisper HF repo, or a local dir. Bare `--stt` uses `whisper-turbo`. Overrides config `server.stt:`; see [server-config.md](server-config.md#speech-to-text-stt). |
-| `--tts [MODEL]` | Text-to-speech: serve `POST /v1/audio/speech` via mlx-audio (`pip install 'gmlx[tts]'`, ffmpeg on PATH for non-wav). MODEL = an alias (`kokoro`, `kokoro-8bit/4bit`, `qwen3-tts`), any MLX-audio HF repo, or a local dir. Bare `--tts` uses `kokoro`. Overrides config `server.tts:`; see [server-config.md](server-config.md#text-to-speech-tts). |
-| `--embeddings [MODEL]` | Text embeddings: serve `POST /v1/embeddings` (no extra needed; mlx-embeddings is a core dependency). Bare `--embeddings` uses `qwen3-embed-0.6b`; the MODEL forms are listed below the table. This is the local RAG embedder `gmlx launch open-webui` points at. Overrides config `server.embeddings:`; see [server-config.md](server-config.md#text-embeddings-embeddings). |
-| `--rerank [MODEL]` | Reranking: serve `POST /v1/rerank` (Cohere/Jina shape) from a Qwen3-Reranker GGUF (no extra needed). MODEL = an alias (`qwen3-rerank-0.6b`/`-4b`/`-8b`), a `*.gguf`, or `hf:.../*.gguf`. Bare `--rerank` uses `qwen3-rerank-0.6b`. This is the RAG second stage `gmlx launch open-webui` points at. Overrides config `server.rerank:`; see [server-config.md](server-config.md#reranking-rerank). |
+| `--stt [MODEL]` | Speech-to-text: serve `POST /v1/audio/transcriptions` via mlx-whisper (`pip install 'gmlx[stt]'`, ffmpeg on PATH). MODEL = an alias (`whisper-turbo`, `whisper-turbo-q4`, `whisper-large/medium/small/base/tiny`), any MLX-whisper HF repo, or a local dir. Bare `--stt` uses `whisper-turbo`. Overrides config `server.stt:`; see [server-config.md](services.md#speech-to-text-stt). |
+| `--tts [MODEL]` | Text-to-speech: serve `POST /v1/audio/speech` via mlx-audio (`pip install 'gmlx[tts]'`, ffmpeg on PATH for non-wav). MODEL = an alias (`kokoro`, `kokoro-8bit/4bit`, `qwen3-tts`), any MLX-audio HF repo, or a local dir. Bare `--tts` uses `kokoro`. Overrides config `server.tts:`; see [server-config.md](services.md#text-to-speech-tts). |
+| `--embeddings [MODEL]` | Text embeddings: serve `POST /v1/embeddings` (no extra needed; mlx-embeddings is a core dependency). Bare `--embeddings` uses `qwen3-embed-0.6b`; the MODEL forms are listed below the table. This is the local RAG embedder `gmlx launch open-webui` points at. Overrides config `server.embeddings:`; see [server-config.md](services.md#text-embeddings-embeddings). |
+| `--rerank [MODEL]` | Reranking: serve `POST /v1/rerank` (Cohere/Jina shape) from a Qwen3-Reranker GGUF (no extra needed). MODEL = an alias (`qwen3-rerank-0.6b`/`-4b`/`-8b`), a `*.gguf`, or `hf:.../*.gguf`. Bare `--rerank` uses `qwen3-rerank-0.6b`. This is the RAG second stage `gmlx launch open-webui` points at. Overrides config `server.rerank:`; see [server-config.md](services.md#reranking-rerank). |
 
 For `--embeddings MODEL`, MODEL is either a GGUF embedder (decoder-LM alias
 `qwen3-embed-0.6b`/`-4b`/`-8b`, encoder alias `embeddinggemma-gguf`, a
@@ -840,7 +723,7 @@ raises it automatically on a macOS GUI session (disable with `--no-menubar` or
 `server.menubar: false`); `gmlx launch menubar --stop` quits a detached
 monitor from the CLI.
 Flags, targeting, and details:
-[launch.md](launch.md#the-menu-bar-app-launch-menubar).
+[launch.md](menubar.md).
 
 ---
 
@@ -1238,72 +1121,7 @@ installed version and your config. It completes:
 No regeneration is needed after an upgrade; re-running the script only
 matters if you move where it's installed.
 
----
-
-## Environment variables
-
-When the same setting is reachable more than one way, the precedence is
-**flag > config key > environment variable** - a flag you typed always wins,
-and a config key beats an exported env var. The named exception:
-`GMLX_CACHE_LIMIT_GB` wins over the `server.cache_limit_gb` config key, so a
-benchmark run can pin the MLX buffer-cache limit without editing the config
-(see [server-config.md](server-config.md)).
-
-This is the supported set:
-
-| Variable | Meaning |
-|----------|---------|
-| `GMLX_STREAM_GPU_TOKENS` | `--stream-experts` prefill staging threshold: offloaded expert calls with at least this many tokens run on the GPU stream (same zero-copy buffers; prefill is a GEMM workload the CPU loses badly). Default `32`; `0` keeps every expert call on CPU (conservative for models far larger than RAM). |
-| `GMLX_STREAM_PREFETCH=0` | Disable sequential expert prefetch for streaming-mode (over-wired-budget) `--stream-cpu` / `--stream-experts` models. Default on: prefill-sized expert calls advise the kernel (`F_RDADVISE`) two layers ahead and pace the lazy graph per layer, reading expert stacks at sequential bandwidth instead of demand-faulting. |
-| `GMLX_DECODE_ARENA_GB` | Decode-feeder arena size override in GB (see `--decode-feeder`). Default: what the memory ceiling leaves after the every-token weights, the KV room and the prefill ring, clamped to the memory reclaimable at load. The ceiling is the serve governor's: Metal's recommended working set less the margin, never closer to physical RAM than `GMLX_GOV_RESERVE_GB` (see [streaming.md](streaming.md#how-big-a-model-can-this-box-stream)). The prefill ring keeps its own room under the ceiling, and a host floor (`GMLX_DECODE_RAM_FLOOR_GB`) stays free under it for the rest of the box. `GMLX_DECODE_ARENA_RAM_FRAC` caps the ceiling at a fraction of physical RAM when set. It has no default. |
-| `GMLX_STREAM_KV_CTX` | Tokens of KV cache the decode arena leaves room for (default `32768`, capped at the trained context). The cost per token comes from the GGUF header. The room also holds the prefill score transient and the admission reserve. At decode it is the serve governor's headroom. Raise it for deep prompts. Raise `GMLX_STREAM_KV_WIDTH` (default `1`) for concurrent streams. Both cost arena slots. The load log prints the budget as `[stream] memory budget:`. |
-| `GMLX_PREFILL_NOCACHE=0` | Prefill ring reads go through the page cache again. Default off: a ring pass reads every routed expert once, and through the cache it evicts the rest of the box for pages it never reads again. |
-| `GMLX_DECODE_KV_RESERVE_GB` | Replace the priced KV room with a flat reserve in GB. Also the fallback (`8`) when the header cannot be priced. |
-| `GMLX_ARENA_STAGE_MAX_TOKENS` | Largest expert call served router-aware (decode-feeder arena or partial ring staging) instead of whole-layer staging. Default `64`; above it a chunk routes to nearly every expert anyway. |
-| `GMLX_ARENA_SPLIT_MAX_TOKENS` | Largest expert call the decode arena serves by token-splitting when its routed union exceeds the arena's slots (a chat-turn prefill after decode, or a wide speculative verify batch). Halves recurse until each piece fits, keeping reads on the arena's read pool instead of the CPU page-cache gather. Default `256`; `0` disables. |
-| `GMLX_DECODE_PRESSURE` | Set `0` to keep the decode-feeder arena at its sized capacity regardless of system memory pressure. Default on: the arena shrinks (keeping its most popular experts) when the kernel reports pressure and regrows once pressure clears and reclaimable RAM returns. |
-| `GMLX_GOVERNOR=0` | Disable the runtime memory governor (default on). Band and shed counters, the kernel reclaimable sample, and the armed floor show at `/v1/metrics`. |
-| `GMLX_GOV_KERNEL_FLOOR_GB` | Kernel reclaimable floor in GB (free + purgeable + speculative + file-backed pages, read from the kernel every governed tick). Below it the governor goes red at once. A first dip reclaims the deficit plus half a floor from the registered caches (a decode arena steps down by a quarter). A collapse reclaims all of them. Then it clears the MLX buffer cache, and fails the largest request if that did not clear the floor. Prefix-cache block stores stop at the same floor while a governor is installed. Default: the lower of `4` and 10% of RAM; `0` disables. This is the counter that predicts a free-page freeze; MLX cannot see it because its buffer cache reads as free inside the process and wired to the kernel. |
-| `GMLX_GOV_RESERVE_GB` | Bytes left to the kernel and every other process: the ceiling on the server's tracked memory is the lower of Metal's recommended working set less the margin and physical RAM minus this reserve. Default `max(8, 10% of RAM)`. |
-| `GMLX_GPU_KEEPWARM=0` | Disable GPU keep-warm (default on for streamed installs; see `--gpu-keepwarm`). |
-| `GMLX_GPU_RESIDENT=0` | Skip wiring the every-token (non-expert) weights into the Metal residency set on streamed installs (default on: command buffers otherwise re-wire those pages on every use). |
-| `GMLX_KEEPWARM_IDLE_S` | Seconds without streamed-decode activity before the keep-warm heartbeat parks (default `1`; `0` beats continuously). |
-| `GMLX_DECODE_LOOKAHEAD=0` | Disable lookahead expert prestage on the decode feeder. Default on: each MoE layer runs the *next* MoE layer's router on its own input (the residual moves little between adjacent sublayers, so recall is far above previous-token reuse) and pre-reads the predicted arena misses while the current layer computes. Lossless - predictions move bytes, never routing. `GMLX_DECODE_LOOKAHEAD_K` caps the ranked predictions considered per call (default `6`); `GMLX_DECODE_LOOKAHEAD_WORKERS` sizes the dedicated read pool (default `6`); `GMLX_DECODE_LOOKAHEAD_NORM` picks the prediction input (`ratio` default, `raw` skips the norm-gain rescale); `GMLX_DECODE_LOOKAHEAD_MIN_P` sets the per-rank reliability floor below which a prediction rank stops being submitted (default `0.5`); `GMLX_DECODE_LOOKAHEAD_CANCEL=0` keeps unrouted predictions reading to completion instead of cancelling the unstarted ones at settle; `GMLX_DECODE_LOOKAHEAD_IOPOL=0` runs the read pool at default disk-I/O priority instead of the utility tier. |
-| `GMLX_DECODE_LOOKAHEAD_PROBE` | Lossless recall probe for the lookahead predictor: records predicted-vs-actual routing per layer (plus a previous-token baseline) and prints a table at exit, issuing no reads. Worth a run on a new model family to see whether the prestage pays there. |
-| `GMLX_DECODE_RAM_FLOOR_GB` | Host floor in GB kept free for the rest of the box when the decode arena is sized: under the memory ceiling, against the RAM reclaimable at load, and on every pressure-driven regrow. Default: 5% of RAM, at least `4`. `GMLX_DECODE_PAGECACHE_GB` adds to it. |
-| `GMLX_DECODE_PAGECACHE_GB` | Page-cache reserve inside the decode-arena RAM floor (default `2.5`). Buffered read paths (prefill feeder, CPU-mmap fallback) collapse when the cache is starved; the floor also clamps an oversized `GMLX_DECODE_ARENA_GB` (`GMLX_DECODE_ARENA_FORCE=1` restores the unclamped override). |
-| `GMLX_CACHE_LIMIT_GB` | MLX buffer-cache limit for `serve`, in GiB (wins over `server.cache_limit_gb`). Negative or `off`/`none`/`unlimited` forces an unbounded cache; `0` disables buffer caching. See [performance.md](performance.md). |
-| `GMLX_NATIVE_FP` | Layout for MXFP4/NVFP4 expert tensors: `wire` (zero-copy GGUF wire bytes, loads in seconds), `packed` (eager repack into MLX's layout), or the default `auto` (wire when a streaming placement is requested or the file nears the wired budget). See [streaming.md](streaming.md). |
-| `GMLX_ROPE_FACTORS=0` | Expert escape hatch for rope scaling: disables the `rope_freqs` factors patch that rebuilds Llama-3.1-style per-dim rope scaling from GGUF metadata. Set `0` only to rule the patch out when debugging long-context degradation. |
-| `GMLX_CASCADE_SDPA=0` | Disable the shared-prefix cascade decode route. Default on: concurrent streams that share a prompt-cached prefix read it once per step for the whole batch instead of once per stream. Exact; see [performance.md](performance.md#serving-concurrent-requests). |
-| `GMLX_CASCADE_MIN_P` | Smallest shared-prefix token length the cascade route claims (default `1024`). |
-| `GMLX_SPARSE_ATTN=1` | Enable top-k sparse attention for deep decode (lossy, default off): past `GMLX_SPARSE_MIN_S` tokens each step attends only the best-scoring KV pages within the `GMLX_SPARSE_K` budget, making attention cost depth-flat. See [performance.md](performance.md#sparse-attention-at-depth-opt-in). |
-| `GMLX_SPARSE_K` | Sparse-attention kept-token budget (default `2048`). |
-| `GMLX_SPARSE_MIN_S` | Depth in tokens where sparse attention engages (default `8192`). |
-| `GMLX_SPARSE_ARCHS` | Extra architecture modules the sparse route may claim, comma-separated (for running a quality gate on a new arch). Default: only quality-gated archs (llama-family) are ever claimed. |
-| `GMLX_FUSED_GDN=0` | Disable the fused gated-delta Metal kernels used by the Qwen3.5/3.6 hybrid architectures. The fusion is a numerics-affecting runtime patch; set `0` first when debugging those archs to rule it out. |
-| `GMLX_QWEN_OWNED=0` | Build qwen3.5/3.6 text MTP targets on genuinely stock mlx-vlm classes instead of the owned forwards. The only install the fallback keeps is the tiled-V rebind (GGUF weight-order correctness); it loses every performance patch (fused GDN kernels, ragged decode kernels, verify fold, batched-verify SDPA, bf16 verify GEMV) and the two stock defects the owned path fixes come back: left-padded single-row batches attend their pad tokens, and an empty-sequence row in batched serve crashes (the old guard patch no longer installs). Multimodal MTP targets (LLM GGUF + mmproj) never take this flag's path: their trees are always built stock by mlx-vlm construction and always run the full patched regime. Read at load; a debugging A/B, not a tuning knob. |
-| `GMLX_GEMMA_OWNED=0` | Build gemma4 text MTP targets on the stock mlx-vlm classes instead of the owned mask builder and attention. The fallback keeps the full patch regime (nosync mask/offset bodies, hd512 batched row route), so numerics are unchanged either way; the owned classes carry the same semantics natively. Multimodal targets (LLM GGUF + mmproj) are always built stock by mlx-vlm construction and always run the patched regime. Read at load; a debugging A/B, not a tuning knob. |
-| `GMLX_NO_FAMILY_DEFAULTS` | Disable the family model-card sampling defaults on bare-path `run` / `chat` (same as `--no-family-defaults`). |
-| `GMLX_DRAFT_BLOCK_SIZE` | MTP draft tokens per round for `serve` (same as `--draft-block-size`). |
-| `GMLX_MTP_WIDTH_CAP` | `serve`: run MTP only while at most this many requests decode together (`0` = uncapped; same as `--speculative-width-cap`). Overrides every model's `speculative_width_cap`; read per round, so a live server can be re-gated for an A/B. Drafters limited to one sequence clamp it. |
-| `GMLX_IGNORE_EOS=1` | `serve`: never stop on EOS; decode every request to `max_tokens` (same as `--ignore-eos`; forced-length throughput benchmarking). |
-| `GMLX_API_KEY` | Client-side default key for `ps` (sent to `/v1/metrics`) when `--api-key` isn't passed. Not a `serve` source; the server reads its key only from `server.api_key` in the config. |
-| `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` | Hugging Face auth for `validate` / `pull` on gated or private repos. |
-| `XDG_CACHE_HOME` | Where `chat` keeps its prompt history (`$XDG_CACHE_HOME/gmlx/chat_history[.ptk]`), and where backgrounded servers keep their runfiles and logs (`$XDG_CACHE_HOME/gmlx/`). |
-
-`PREFILL_STEP_SIZE` (no `GMLX_` prefix) is upstream mlx-vlm's own variable -
-the serve prefill chunk size; prefer `--prefill-step-size` or
-`server.prefill_step_size`. Server-side switches for the speculative prompt
-cache (`GMLX_SPEC_APC*`) and logprobs (`TOP_LOGPROBS_K`) are documented in
-the [server config reference](server-config.md).
-
-Anything not in this table (or in the server config reference's tables) is
-internal and unstable - it may change meaning or disappear between releases.
 
 ---
 
-See also: the [server config reference](server-config.md) (config surface,
-start modes, endpoints, architecture diagrams) and the
-[serving architecture deep-dive](serving-architecture.md) (the mlx-vlm
-adoption mechanics).
+Environment variables are listed in [env-vars.md](env-vars.md).

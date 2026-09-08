@@ -159,7 +159,7 @@ batch-width cap: speculation runs while the live batch is narrow, the batch
 decodes plain past the cap, and speculation resumes once it drains back
 under it. A lone speculating stream likewise yields to arriving requests
 instead of making them wait. The transition mechanics are in
-[speculative-batching.md](speculative-batching.md).
+[speculative-batching.md](internals/speculative-batching.md).
 
 Where the trade turns depends on the drafter and on whether the target routes
 experts. A native head verified by a dense hybrid-attention target keeps
@@ -265,7 +265,7 @@ checkpoint records; pure-recurrent and CacheList archs reuse verbatim
 snapshots.
 
 What reuse to expect, per family (tier routing:
-[server-config.md](server-config.md#which-tier-serves-which-architecture)):
+[server-config.md](internals/prompt-cache.md#which-tier-serves-which-architecture)):
 
 - **Dense / plain-KV MoE** (block tier): any shared prefix reuses at
   16-token block granularity - identical resends, shared system prompts,
@@ -505,7 +505,7 @@ is wired: the process reads it as free while the kernel counts it against
 its free pages, which is how a small model at long context can still walk
 the box into a freeze. The runtime governor backs this up by sampling the
 kernel's reclaimable pages every tick and going red below a floor
-(`GMLX_GOV_KERNEL_FLOOR_GB`); see [cli.md](cli.md#environment-variables).
+(`GMLX_GOV_KERNEL_FLOOR_GB`); see [cli.md](env-vars.md).
 
 Override it explicitly when needed: the `server.cache_limit_gb` config key or
 the `GMLX_CACHE_LIMIT_GB` env (env wins). A GiB value pins the limit
