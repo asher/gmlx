@@ -268,8 +268,8 @@ request is cancelled, logged as failed, and recorded as `last_error` in
 `stochastic_mtp` keeps the exact sampling distribution but is not
 token-identical to a non-speculative run; greedy requests are unaffected.
 It is applied at startup, so a reload does not change it. The measured gain
-is in [performance.md](performance.md#stochastic-acceptance-opt-in).
-`gpu_keepwarm` is described in [streaming.md](streaming.md#gpu-keep-warm---gpu-keepwarm).
+is in [performance.md](performance.md#stochastic-acceptance).
+`gpu_keepwarm` is described in [streaming.md](streaming.md#the-lossless-levers).
 
 ### Services
 

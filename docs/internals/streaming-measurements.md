@@ -278,3 +278,42 @@ generation broke outright. As on GLM-5.2, dropped mass degraded what
 the pages drew long before it corrupted what they wrote. Certifying a
 level means rendering the artifact, and ranking neighboring levels
 takes more samples than one.
+
+## Lossless lever measurements
+
+The numbers behind the lossless levers table in
+[streaming.md](../streaming.md#the-lossless-levers). All are alternated A/B
+medians unless noted.
+
+| Lever | Model and machine | Without | With |
+|-------|-------------------|---------|------|
+| prefill feeder, short prompt | MiniMax-M2 Q5_K_M 162 GB, M3 Max 128 GB, 53-token prompt | 19.4 s to first token | 11.4 s |
+| decode feeder | same model and box, 512-token generation | 2.4 tok/s page cache, 3.0 tok/s `--stream-cpu` | 4.0 tok/s average, 4.7 steady at 90% arena hits |
+| arena token split, second-turn prefill | Kimi-K3 UD-IQ2_XXS, M5 Max 128 GB, 48-token turn | 0.25 tok/s | 2.13 tok/s |
+| weight pin | Kimi-K3 UD-IQ2_XXS 662 GB, 62 GB every-token set, M5 Max 128 GB | 0.10 tok/s decode, 0.62 prefill | 0.38 decode, 0.97 prefill |
+| pin excludes converted tensors | HY4-preview, F32 output head held as bf16 | 22.6 GB pinned | 19.7 GB pinned, 3.5% fewer expert bytes per token |
+| GPU keep-warm | GLM-5.2 UD-IQ3_XXS, arena 70 GB, miss shed 0.85, lookahead off | 2.51 tok/s | 3.64 tok/s |
+| GPU keep-warm | Hunyuan3 IQ4_XS, layer shed 0.10 with miss shed 0.90 | 4.01 tok/s | 5.29 tok/s |
+| streamable lookup table | Qwen4-Exp Q6 169 GB, short context | 8.4 tok/s, 106 GB wired | 12.6 to 13.4 tok/s, 54 GB wired, converging at 16k depth |
+
+Lookahead prestage recall of the next layer's actual top-k is about 78% on
+GLM-5.2 at 8 experts and MiniMax-M3 at 4, against about 35% for reusing the
+previous token's routing. `GMLX_DECODE_LOOKAHEAD_PROBE=1` prints the per-layer
+recall table at exit without issuing reads, the check worth running on a new
+model family.
+
+Keep-warm does not change stall time or arena hit rate, because the disk does
+the same work; the win is clock residency. With the heartbeat alone on an idle
+M5 Max, GPU power went from 199 mW to 287 mW while active residency went from
+58% to 99.8% at the 338 MHz floor. The real cost is holding the decode-level
+clock through the gaps, which scales with the workload. When a streamed
+model's per-token time is dominated by the eval and sync bucket rather than
+stalls, which `GMLX_DECODE_PHASE_STATS=1` prints, clock sag is the candidate
+and keep-warm is the cheap test.
+
+Weight pinning matters because without it the every-token weights are plain
+file-backed pages that the kernel evicts between uses on a box at its
+free-page floor. Each token then re-faults the whole set, which saturates the
+SSD before the experts read a byte and shows as compute time rather than
+stall time. The symptom is a decode rate stuck near every-token bytes divided
+by SSD bandwidth whatever the arena hit rate.

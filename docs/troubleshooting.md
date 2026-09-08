@@ -1,13 +1,30 @@
 # Troubleshooting
 
-Start with `gmlx doctor`: it checks the runtime, config, model paths,
-background server, and optional services in one pass, and names the fix for
-anything it flags ([reference](cli.md#gmlx-doctor)).
+This page is for when something breaks. It lists the failures new setups hit,
+each with the symptom, the cause and the fix, plus where the logs and files
+live. Client-launch problems, such as a tool that will not connect, are under
+[launch.md](launch.md#troubleshooting).
 
-The rest of this page covers the failures new setups actually hit, with the
-diagnostic and the fix. Client-launch problems (a tool will not connect or
-install) live in [launch.md](launch.md#troubleshooting). Everything below is
-the runtime and server.
+Start with `gmlx doctor`. It checks the runtime, config, model paths,
+background server and optional services in one pass, and names the fix for
+anything it flags ([gmlx doctor](cli.md#gmlx-doctor)).
+
+| Symptom | Section |
+|---------|---------|
+| the install fails on macOS before 26 | [The install fails compiling the Metal kernels](#the-install-fails-compiling-the-metal-kernels) |
+| the command vanished in a new terminal | [gmlx: command not found in a new terminal](#gmlx-command-not-found-in-a-new-terminal) |
+| a download stopped or the disk filled | [A download was interrupted or the disk filled](#a-download-was-interrupted-or-the-disk-filled) |
+| a load or validate names an unsupported codec | [A file refuses to load: unsupported codec](#a-file-refuses-to-load-unsupported-codec) |
+| a configured model is not listed | [A configured model is missing from /v1/models](#a-configured-model-is-missing-from-v1models) |
+| transcription or talk complains about ffmpeg | [Whisper fails: ffmpeg not found](#whisper-fails-ffmpeg-not-found) |
+| talk never hears you | [The mic never works in talk](#the-mic-never-works-in-talk) |
+| serve cannot bind its port | [Port 8080 is already in use](#port-8080-is-already-in-use) |
+| the first request takes many seconds | [The first request after startup is slow](#the-first-request-after-startup-is-slow) |
+| a request gets 403 hf_access_disabled | [Requests fail with 403 hf_access_disabled](#requests-fail-with-403-hf_access_disabled) |
+| Hugging Face answers 401 or 403 | [A gated or private repo will not download](#a-gated-or-private-repo-will-not-download) |
+| the machine swaps or the server dies | [Memory pressure: swapping, beachballs, or a dying server](#memory-pressure-swapping-beachballs-or-a-dying-server) |
+| you need the logs and the resolved config | [Where the evidence lives](#where-the-evidence-lives) |
+| you want to find or remove what gmlx wrote | [Where things live on disk](#where-things-live-on-disk) |
 
 ## The install fails compiling the Metal kernels
 
@@ -31,7 +48,7 @@ arrive as a prebuilt wheel.
 Symptom: `gmlx` worked yesterday; a fresh terminal says
 `command not found: gmlx` (so `gmlx doctor` is unavailable too).
 
-Nothing is broken - this happens with the plain-venv install route: gmlx
+Nothing is broken. This happens with the plain-venv install route: gmlx
 lives in the Python venv you installed it into, and each new terminal starts
 with that venv inactive. Run `source <install dir>/.venv/bin/activate` (the
 directory from the [install step](getting-started.md#install)) and the
@@ -75,7 +92,7 @@ with no restart: requests for the id work again and it re-appears in
 `/v1/models`. If the file is gone for
 good, `gmlx sync-models` reconciles the config in one pass: dead entries
 drop, new files register, your comments and hand-edits survive. A missing
-`server.embeddings` / `server.rerank` GGUF behaves the same way - the service
+`server.embeddings` or `server.rerank` GGUF behaves the same way: the service
 is disabled with a log warning and de-listed from `/v1/models` while chat
 keeps serving.
 

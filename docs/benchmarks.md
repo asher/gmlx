@@ -12,14 +12,14 @@ is reproducible with the bundled harness in [bench/](../bench/).
 
 ## Fleet at a glance
 
-**Throughput speedup vs KV depth** (gmlx / reference engine, every model):
+Throughput speedup vs KV depth (gmlx / reference engine, every model):
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/perf/fleet-ratio-dark.svg">
   <img src="assets/perf/fleet-ratio.svg" alt="fleet throughput speedup vs KV depth">
 </picture>
 
-**Speculative (MTP) decode lift vs KV depth** (own-baseline, per model):
+Speculative (MTP) decode lift vs KV depth (own-baseline, per model):
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/perf/mtp-lift-dark.svg">
@@ -34,20 +34,23 @@ same sampler, and the same chat prompts on both engines.
 
 | | |
 |---|---|
-| **Hardware** | Apple M5 Max, 128 GB unified memory (MacBook Pro) |
-| **gmlx** | `0.1.0` (fleet default) |
-| **mlx-kquant** | `0.3.5` (K-quant + perf kernels; fleet default) |
-| **llama.cpp** | `b9967` |
-| **Build overrides** | models rebenched on newer releases carry their own builds; see Model provenance |
-| **DeepSeek-V4-Flash reference** | ds4-server (antirez's dwarfstar) @ `b030961`, ignore-eos patched |
-| **Dates** | 2026-07-05 .. 2026-08-29 |
-| **Prompt corpus** | HuggingFaceH4/ultrachat_200k:train_sft (chat template applied) |
-| **Sampling** | temperature 0.6, top-p 0.95, top-k 20, seed 1234 (coupled RNG across engines) |
-| **Speculative draft** | MTP @ 3 draft tokens (native/preserved MTP head, or gemma-4's companion drafter) |
-| **Aggregation** | 4 requests/cell x 2 thermal-alternated rounds, median reported |
-| **Thermal protocol** | cool to <=50 C between arms, 20s baseline cooldown, 1 warmup request |
-| **Decode metric** | median decode tok/s over full-length samples (>=150 output tokens) |
-| **Prefill metric** | median prefill tok/s over all successful samples |
+| Hardware | Apple M5 Max, 128 GB unified memory (MacBook Pro) |
+| gmlx | `0.1.0` (fleet default) |
+| mlx-kquant | `0.3.5` (K-quant + perf kernels; fleet default) |
+| llama.cpp | `b9967` |
+| Build overrides | models rebenched on newer releases carry their own builds; see Model provenance |
+| DeepSeek-V4-Flash reference | ds4-server (antirez's dwarfstar) @ `b030961`, ignore-eos patched |
+| Dates | 2026-07-05 .. 2026-08-29 |
+| Prompt corpus | HuggingFaceH4/ultrachat_200k:train_sft (chat template applied) |
+| Sampling | temperature 0.6, top-p 0.95, top-k 20, seed 1234 (coupled RNG across engines) |
+| Speculative draft | MTP @ 3 draft tokens (native/preserved MTP head, or gemma-4's companion drafter) |
+| Aggregation | 4 requests/cell x 2 thermal-alternated rounds, median reported |
+| Thermal protocol | cool to <=50 C between arms, 20s baseline cooldown, 1 warmup request |
+| Decode metric | median decode tok/s over full-length samples (>=150 output tokens) |
+| Prefill metric | median prefill tok/s over all successful samples |
+
+MTP@N in the tables means speculative decoding with N draft tokens per
+round on both engines; the baseline column is the same server with it off.
 
 ## Model provenance
 
@@ -297,7 +300,7 @@ ladders cell by cell).
 
 ## DeepSeek-V4-Flash (reference engine: ds4-server)
 
-This model's comparison engine is **ds4-server** (antirez's
+This model's comparison engine is ds4-server (antirez's
 dwarfstar DeepSeek-V4 server, ignore-eos patched), not llama.cpp --
 llama.cpp has no DeepSeek-V4-Flash path. Ratios below are
 gmlx / ds4-server.

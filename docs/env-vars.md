@@ -100,7 +100,7 @@ a live server can be re-gated for an A/B without a restart.
 | `GMLX_NATIVE_FP` | Layout for MXFP4/NVFP4 expert tensors: `wire` (zero-copy GGUF wire bytes, loads in seconds), `packed` (eager repack into MLX's layout), or the default `auto` (wire when a streaming placement is requested or the file nears the wired budget). See [streaming.md](streaming.md). |
 | `GMLX_CASCADE_SDPA=0` | Disable the shared-prefix cascade decode route. Default on: concurrent streams that share a prompt-cached prefix read it once per step for the whole batch instead of once per stream. Exact; see [performance.md](performance.md#serving-concurrent-requests). |
 | `GMLX_CASCADE_MIN_P` | Smallest shared-prefix token length the cascade route claims (default `1024`). |
-| `GMLX_SPARSE_ATTN=1` | Enable top-k sparse attention for deep decode (lossy, default off): past `GMLX_SPARSE_MIN_S` tokens each step attends only the best-scoring KV pages within the `GMLX_SPARSE_K` budget, making attention cost depth-flat. See [performance.md](performance.md#sparse-attention-at-depth-opt-in). |
+| `GMLX_SPARSE_ATTN=1` | Enable top-k sparse attention for deep decode (lossy, default off): past `GMLX_SPARSE_MIN_S` tokens each step attends only the best-scoring KV pages within the `GMLX_SPARSE_K` budget, making attention cost depth-flat. See [performance.md](performance.md#sparse-attention-at-depth). |
 | `GMLX_SPARSE_K` | Sparse-attention kept-token budget (default `2048`). |
 | `GMLX_SPARSE_MIN_S` | Depth in tokens where sparse attention engages (default `8192`). |
 | `GMLX_NO_FAMILY_DEFAULTS` | Disable the family model-card sampling defaults on bare-path `run` / `chat` (same as `--no-family-defaults`). |

@@ -1,26 +1,33 @@
-# Voice chat: `gmlx talk`
+# Voice chat
 
-Hands-free voice chat with any model your server serves: say the wake phrase, speak,
-and the reply is spoken back as it streams. `talk` is a client of the gmlx
-server. The whole loop runs against the existing OpenAI-compatible endpoints (mic to
-wake word to endpointing, `/v1/audio/transcriptions` for speech-to-text, a streamed
-`/v1/chat/completions` turn, sentence-buffered `/v1/audio/speech` back out), so the
-speech models and the LLM share one Metal device under the server's arbitration.
+This guide is for talking to a served model by voice with `gmlx talk`: say
+the wake phrase, speak, and the reply is spoken back as it streams. It covers
+setup, a worked example, the listening modes, the in-session keys, the config
+block, and what sets the latency.
 
-Expect about 1.3 to 2.2 seconds from the end of your speech to the first spoken
-audio. The [latency section](#latency-and-interruption) breaks that down and shows
-what tuning can and cannot buy.
+`talk` is a client of the gmlx server. The whole loop runs against the
+server's own endpoints, transcription in, a streamed chat turn, and speech
+out sentence by sentence, so the speech models and the language model share
+one GPU under the server's arbitration. Expect 1.3 to 2.2 seconds from the
+end of your speech to the first spoken audio.
 
-## Quick setup
+- [Setup](#setup)
+- [Worked example](#worked-example)
+- [Modes](#modes)
+- [Keys and slash commands](#keys-and-slash-commands)
+- [The assistant by voice](#the-assistant-by-voice)
+- [Configuration reference](#configuration-reference)
+- [Remote server and scripting](#remote-server-and-scripting)
+- [Latency and interruption](#latency-and-interruption)
+
+## Setup
 
 ```sh
-pip install 'gmlx[talk]'    # client audio + wake word, includes server STT/TTS deps
-brew install ffmpeg             # Whisper's audio decoding
+uv tool install "gmlx[talk]"     # or: pip install "gmlx[talk]"
+brew install ffmpeg              # audio decoding for Whisper
 ```
 
-The `talk` extra runs on any supported Python, 3.11 through 3.14.
-
-The server needs both audio services in its config:
+The server needs both speech services in its config:
 
 ```yaml
 server:
@@ -28,34 +35,31 @@ server:
   tts: kokoro
 ```
 
-`gmlx init` offers both, and adds a voice-chat step (voice, wake phrase, listen
-mode) whenever you configure the two together. If something is missing at startup,
-`gmlx talk` prints the exact lines to add.
+`gmlx init` offers both and adds a voice-chat step, for the voice, wake
+phrase and listen mode, whenever you configure the two together. If
+something is missing at startup, `gmlx talk` prints the exact lines to add.
+The services themselves are described in [services.md](services.md).
 
-On first run, two small files download into `~/.cache/gmlx/talk/`: the
-sherpa-onnx keyword-spotting bundle and the silero voice-activity model, a few MB
-together. macOS asks for microphone permission once, and the prompt names
-your *terminal* (Terminal, iTerm2, your IDE), not gmlx, because macOS grants
-the mic to the app you launched from. Allow it. (Voice sessions started from
-the menu-bar login item are the exception: those prompt as "gmlx" - see
-[menu-bar voice sessions](menubar.md#voice-sessions).) If it was denied,
-nothing is stuck: re-enable in System Settings > Privacy & Security >
+On first run two small files download into `~/.cache/gmlx/talk/`, the
+keyword-spotting bundle and the voice-activity model, a few MB together.
+macOS then asks for microphone permission once. The prompt names your
+terminal rather than gmlx, because macOS grants the mic to the app you
+launched from; allow it. Voice sessions started from the
+[menu bar](menubar.md#voice-sessions) prompt as gmlx instead. If the prompt
+was denied, re-enable it under System Settings, Privacy and Security,
 Microphone ([troubleshooting](troubleshooting.md#the-mic-never-works-in-talk)).
 
-## Worked example: voice chat from zero
+## Worked example
 
-Starting from a machine with a config and one served model (see
-[getting-started.md](getting-started.md) to get there):
+Starting from a machine with a config and one served model:
 
 ```sh
-pip install 'gmlx[talk]'
-brew install ffmpeg
-gmlx init            # rerun the wizard; add STT + TTS and take the voice-chat step
+gmlx init            # rerun the wizard; add STT and TTS and take the voice-chat step
 gmlx talk
 ```
 
-`talk` starts the server if it is down, waits for it, checks the audio services, and
-listens. A session looks like this:
+`talk` starts the server if it is down, waits for it, checks the speech
+services, and listens:
 
 ```text
 listening for "hey assistant"  (say it; a rising chime confirms)
@@ -65,9 +69,8 @@ that the cat might actually learn it.
 listening for "hey assistant"
 ```
 
-Useful while it runs: Space stops the assistant mid-sentence, and typing at any
-time sends a text message instead of speaking. The full set is in
-[keys and slash commands](#keys-and-slash-commands). Try voices live:
+Space stops the assistant mid-sentence, and typing at any time sends a text
+message instead of speaking. Try voices live:
 
 ```text
 /voice            # list the server's voices
@@ -75,34 +78,53 @@ time sends a text message instead of speaking. The full set is in
 /wake okay computer
 ```
 
-The wake phrase is plain text, no training: the keyword spotter is an
+The wake phrase is plain text with no training: the keyword spotter is an
 open-vocabulary transducer, so any phrase is spelled into tokens at startup.
-Continuous listening costs well under one percent of one CPU core. If the wake
-engine is not installed, `talk` degrades to open-mic mode with a pip hint rather
-than failing.
+Continuous listening costs well under one percent of a CPU core. If the wake
+engine is not installed, `talk` falls back to open-mic mode with an install
+hint.
 
-## Worked example: the assistant
+## Modes
 
-`talk.brain: assistant` upgrades the turn engine from plain chat to the built-in
-[assistant](assistant.md). The model can call tools mid-turn (the standard OpenAI
-tool loop, run against this same server), and the conversation gains long-term
-memory. Tools come from MCP servers you configure; memory is a local store built
-on the server's own embeddings. This section is the voice-flavored tour.
-[assistant.md](assistant.md) is the full reference, and the same engine also
-drives `gmlx chat --assistant` and served assistant ids.
+| Mode | Mic behavior |
+|------|--------------|
+| `wake` (default) | listens for the wake phrase, then captures one utterance; the phrase also interrupts a reply in progress |
+| `vad` | open mic: any speech starts a turn |
+| `ptt` | push-to-talk: Space starts and ends a capture |
+| `text` | no mic: a typed prompt whose replies are still spoken |
 
-This example wires two MCP servers that run locally with no API keys: the reference
-filesystem server (needs Node) and the reference fetch server (needs uv). It also
-enables memory, which requires the server to have `embeddings:` configured
-(`rerank:` is optional but improves recall ordering).
+## Keys and slash commands
 
-Install the extras:
+While running, Space stops speech or drives push-to-talk, Esc cancels the
+current turn, `m` mutes the mic, and `q` quits. Typing any printable
+character drops into line input.
+
+| Command | Effect |
+|---------|--------|
+| `/voice [name]` | list the server's voices, or switch |
+| `/speed <0.25-4>` | speech speed |
+| `/mode wake|vad|ptt|text` | switch listening mode |
+| `/wake [phrase]` | show or change the wake phrase |
+| `/mute` | toggle the mic |
+| `/system <prompt>` | set the spoken persona |
+| `/reset` | clear the conversation |
+| `/memory` | list stored memories; `forget ID` and `clear` manage them (assistant brain only) |
+| `/devices` | list audio devices |
+| `/help`, `/quit` | |
+
+## The assistant by voice
+
+`talk.brain: assistant` upgrades the turn engine from plain chat to the
+built-in [assistant](assistant.md): the model can call tools mid-turn and the
+conversation gains long-term memory. Tools come from MCP servers you
+configure, and memory is a local store built on the server's own embeddings.
+This example wires two MCP servers that run locally with no API keys, the
+reference filesystem server (needs Node) and the reference fetch server
+(needs uv), and turns memory on, which needs `embeddings:` on the server:
 
 ```sh
-pip install 'gmlx[talk,assistant]'   # adds the MCP SDK
+uv tool install "gmlx[talk,assistant]"     # or: pip install "gmlx[talk,assistant]"
 ```
-
-The complete config:
 
 ```yaml
 server:
@@ -132,15 +154,9 @@ assistant:
     enabled: true
 ```
 
-Tool calling needs a model that is competent at it. The config's Qwen3.6-27B is
-the recommended class ([model picks](assistant.md#the-tool-loop)). Then:
-
-```sh
-gmlx talk
-```
-
-A representative session (tool activity appears in the status line; only the answer
-is spoken):
+Tool calling needs a model that is competent at it; Qwen3.6-27B is the
+recommended class. A session then looks like this, with tool activity in the
+status line and only the answer spoken:
 
 ```text
 listening for "hey assistant"
@@ -150,63 +166,29 @@ you: which of my notes mentions the tax deadline?
 assistant: Your note taxes-2026.md mentions it. The filing deadline you
 wrote down is April 15th, with the extension window to October 15th.
 
-you: fetch the MLX github page and tell me what the latest release says.
-  using fetch
-assistant: The latest release listed is 0.31.2. The notes highlight new
-fast attention paths and several quantization fixes.
-
 you: remember that my sister Ana's birthday is March 12th.
 assistant: Noted. Ana's birthday is March 12th.
 ```
 
-Quit, relaunch `gmlx talk` later, and ask:
+Quit, relaunch later, ask when your sister's birthday is, and the assistant
+answers from memory. What it stored is a distilled fact, not a transcript,
+extracted in the background after the turn so it adds no latency. The store
+is shared with `gmlx chat --assistant`, and `/memory` inspects it from inside
+a session. The rules, the on-disk location and the security model are in
+[assistant.md](assistant.md#memory).
 
-```text
-you: when is my sister's birthday?
-assistant: Ana's birthday is March 12th.
-```
-
-What got stored is a distilled fact ("sister Ana, birthday March 12"), not a
-transcript. The distillation runs in the background after each turn, off the
-voice path, so it adds no latency. The rules (at most three durable facts,
-restatement replaces) are in [assistant.md#memory](assistant.md#memory).
-
-Two honest caveats. Tool rounds cost time - a model turn plus the call, each -
-so multi-tool answers are noticeably slower than plain chat. And a barge-in
-still interrupts cleanly: the loop commits what you heard and never leaves a
+Two things to know. Tool rounds cost time, a model turn plus the call each,
+so multi-tool answers are slower than plain chat. And a barge-in still
+interrupts cleanly: the loop commits what you heard and never leaves a
 half-finished tool round in the history.
-
-`/memory` inspects and edits the store from inside a session
-([keys and slash commands](#keys-and-slash-commands)). The menu-bar voice
-session exposes the same store through its "Show memory" and "Clear memory"
-items. The store is shared with `gmlx chat --assistant` - details and the
-on-disk location in [assistant.md#memory](assistant.md#memory).
-
-## Modes
-
-| Mode | Mic behavior |
-|------|--------------|
-| `wake` (default) | Listens for the wake phrase, then captures one utterance. The phrase also interrupts a reply in progress ([details](#latency-and-interruption)). |
-| `vad` | Open mic. Any speech starts a turn. |
-| `ptt` | Push-to-talk. Space starts and ends a capture. |
-| `text` | No mic. A typed REPL whose replies are still spoken. |
-
-## Keys and slash commands
-
-While running: Space stops speech (barge-in) or drives push-to-talk, Esc cancels the
-current turn, `m` mutes the mic, `q` quits. Typing any printable character drops
-into line input. Commands: `/voice [name]` (bare `/voice` lists the server's
-voices), `/speed <0.25-4>`, `/mode wake|vad|ptt|text`, `/wake [phrase]`, `/mute`,
-`/system <prompt>`, `/reset` (clear the conversation), `/memory` (list stored
-memories; `forget ID` and `clear` manage them), `/devices`, `/help`, `/quit`.
 
 ## Configuration reference
 
-Everything lives in a top-level `talk:` block of the same YAML the server reads. It
-configures the client, so it is not under `server:`. Most keys have a flag mirror
-(`vad.pre_roll_ms` and `push_to_talk_modifier` are config-only). Precedence is
-defaults, then YAML, then flags. `--list-devices` and `--list-voices`
-enumerate the device and voice values.
+Everything lives in a top-level `talk:` block of the same YAML the server
+reads. It configures the client, so it is not under `server:`. Most keys have
+a flag mirror under [gmlx talk](cli.md#gmlx-talk); `vad.pre_roll_ms` and
+`push_to_talk_modifier` are config-only. Precedence is defaults, then YAML,
+then flags.
 
 ```yaml
 talk:
@@ -227,66 +209,53 @@ talk:
     pre_roll_ms: 400            # audio kept from before speech onset
   input_device: null            # sounddevice name substring or index
   output_device: null
-  chime: true                   # earcons on wake and turn end
+  chime: true                   # sounds on wake and turn end
   brain: chat                   # chat | assistant
 ```
 
-## Assistant reference
-
-The assistant itself -- the top-level `assistant:` block with tool servers,
-memory settings, and their defaults -- is documented in
-[assistant.md](assistant.md). It is shared with `gmlx chat --assistant` and
-`server.assistants`, so it does not live under `talk:`. Talk uses it whenever
-`talk.brain: assistant` is set, and everything there applies as-is: MCP
-tool-name prefixing, the degrade-to-warning behavior when a tool server or the
-`[assistant]` extra is missing, and the memory lifecycle
-([assistant.md#memory](assistant.md#memory)).
-
-## Menu bar voice sessions
-
-The menu bar app can run a voice session without a terminal, and can bind a
-tap-to-talk hotkey. Both are described in [menubar.md](menubar.md#voice-sessions).
+The menu bar app runs the same loop without a terminal, and can bind a
+tap-to-talk hotkey; both are in [menubar.md](menubar.md#voice-sessions).
 
 ## Remote server and scripting
 
-`--base-url http://host:8080/v1` (with `--api-key` if the server has one) points the
-client at a server elsewhere. STT and TTS then run on that machine. Only the mic and
-speaker are local. Without `--base-url`, `talk` targets the managed local server and
-starts it when down (`--no-start` disables that).
+`--base-url http://host:8080/v1`, with `--api-key` if the server has one,
+points the client at a server elsewhere. Speech-to-text and text-to-speech
+then run on that machine; only the mic and speaker are local. Without
+`--base-url`, `talk` targets the managed local server and starts it when down
+(`--no-start` disables that).
 
-`--once` runs a single ask-and-answer exchange and exits, skipping the wake gate.
-Useful for scripting and for smoke-testing a setup.
+`--once` runs a single ask-and-answer exchange and exits, skipping the wake
+gate, which suits scripting and smoke-testing a setup.
 
 ## Latency and interruption
 
-End of speech to first audio is typically 1.3 to 2.2 seconds: the endpointer's
-silence hangover (550 ms), Whisper turbo (roughly 300 to 500 ms), the LLM's first
-sentence, and Kokoro synthesis (roughly 150 to 300 ms). Replies are chunked at
-sentence boundaries and synthesized one sentence ahead of playback, so long answers
-speak continuously. Tuning options: `vad.silence_ms` down to about 400 trades a
-snappier turn for more mid-sentence cutoffs, `whisper-turbo-q4` shaves the STT step,
-and a short `max_tokens` (e.g. 512) keeps answers conversational.
+End of speech to first audio is typically 1.3 to 2.2 seconds, made of the
+endpointer's silence hangover (550 ms), Whisper turbo (300 to 500 ms), the
+model's first sentence, and Kokoro synthesis (150 to 300 ms). Replies are
+chunked at sentence boundaries and synthesized one sentence ahead of
+playback, so long answers speak continuously.
+
+| Tuning | Trade |
+|--------|-------|
+| `vad.silence_ms` down to about 400 | a snappier turn against more mid-sentence cutoffs |
+| `stt: whisper-turbo-q4` | shaves the transcription step |
+| `max_tokens` around 512 | keeps answers conversational |
 
 In wake mode the wake phrase itself barges in: the keyword spotter stays live
-while the assistant transcribes, thinks, and speaks, so saying the wake phrase
-mid-reply stops playback, cancels the turn, and opens the mic for the next
-utterance. Saying just a stop phrase after that ("stop", "cancel", "never
-mind", and the like) acknowledges and goes back to sleep instead of starting a
-turn -- so "<wake phrase>, stop" kills a long reply by voice. Space and Esc do
-the same from the keyboard, and stop playback within about 150 ms.
+while the assistant transcribes, thinks and speaks, so saying the phrase
+mid-reply stops playback, cancels the turn and opens the mic. A stop phrase
+after it ("stop", "cancel", "never mind") acknowledges and goes back to sleep
+instead of starting a turn. Space and Esc do the same from the keyboard
+within about 150 ms.
 
 Only wake-phrase scoring runs during a reply. Full transcription of the open
-mic stays gated (playback would otherwise be re-transcribed), so `vad` and
-`ptt` modes remain half-duplex, keyboard-interrupt only. One caveat: there is
-no protection against the assistant *speaking* the wake phrase -- if a reply
-quotes it aloud, the spotter hears it through the speakers and the assistant
-interrupts itself. Pick a wake phrase it is unlikely to say. Full acoustic echo
-cancellation, which would fix that and allow talking over the assistant in any
-mode, needs the OS voice-processing audio unit and is on the roadmap.
+mic stays gated, since playback would otherwise be re-transcribed, so `vad`
+and `ptt` modes are half-duplex and keyboard-interrupt only. There is no
+protection against the assistant speaking the wake phrase: if a reply quotes
+it aloud, the spotter hears it through the speakers. Pick a phrase the model
+is unlikely to say. Whisper's stock hallucinations on silence and noise are
+filtered by a minimum-speech and energy floor before transcription and a
+known-phrase check after, so noise does not become a turn.
 
-Whisper hallucinates stock phrases ("thank you") on silence and noise. `talk`
-filters these with a minimum-speech and energy floor before transcription and a
-known-ghost check after, so noise does not become a turn.
-
-Contributors: the manual smoke checklist for this loop lives in
-[testing.md](internals/testing.md#voice-loop-manual-pass).
+Contributors: the manual smoke checklist for this loop is in
+[internals/testing.md](internals/testing.md#voice-loop-manual-pass).

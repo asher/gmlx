@@ -1,10 +1,10 @@
 # Connect coding agents and chat apps
 
-`gmlx launch <client>` points an external tool at a gmlx server and runs it:
-a coding harness (pi, opencode, omp, claude-code), an agent runtime (hermes, goose),
-a terminal chat client (aichat, elia), or the Open WebUI browser app. It probes the
-server, writes the tool's native configuration without touching your own dotfiles,
-and execs the tool. If no server is answering, it starts one in the background first.
+This guide is for pointing an external tool at your server: a coding
+harness, an agent runtime, a terminal chat client or the Open WebUI browser
+app. `gmlx launch <client>` probes the server, writes the tool's native
+configuration without touching your own dotfiles, and runs the tool. If no
+server is answering, it starts one first.
 
 ```sh
 gmlx launch pi --model qwen3.6-27b            # pi on a local model
@@ -12,84 +12,97 @@ gmlx launch opencode                          # uses the server's default model
 gmlx launch open-webui                        # browser chat app on :3000
 ```
 
-launch never installs the tool itself. If the binary is not on PATH, it prints an
-install hint and exits. The full flag table and exit codes are in the
-[CLI reference](cli.md#gmlx-launch).
+launch never installs the tool itself. If the binary is not on PATH, it
+prints an install hint and exits. The flag table and exit codes are under
+[gmlx launch](cli.md#gmlx-launch).
+
+- [How a launch works](#how-a-launch-works)
+- [Starting the server automatically](#starting-the-server-automatically)
+- [Choosing the model](#choosing-the-model)
+- [Authentication](#authentication)
+- [The clients](#the-clients)
+- [Troubleshooting](#troubleshooting)
 
 ## How a launch works
 
-1. Probe. launch checks `/health` and `/v1/models` on the target server. Aliases and
-   the default-model marker come straight from `/v1/models`, so served ids and
-   profile presets are pickable inside menu-driven tools.
-2. Configure. There are three styles, chosen per client:
-   - Injection style (opencode, hermes, aichat, elia). launch writes a config under
-     the gmlx namespace, `~/.config/gmlx/` by default, and points the tool at
-     it through the tool's own mechanism (an environment variable such as
-     `OPENCODE_CONFIG`). Your own config for that tool is never read or written.
-   - Merge style (pi, omp, goose). These tools have no config-injection mechanism, so
-     launch merges a provider block into the tool's own file. Existing providers,
-     roles, and extensions are preserved, and launch refuses to overwrite a file it
-     cannot parse.
-   - Environment style (claude-code, open-webui). No config file at all; everything
-     travels in the exec environment.
+1. Probe. launch checks `/health` and `/v1/models`. Served ids, aliases and
+   the default-model marker come from `/v1/models`, so they are pickable
+   inside menu-driven tools.
+2. Configure. Each client is wired in one of three styles, listed in the
+   table below. Injection writes a config under `~/.config/gmlx/` and points
+   the tool at it through the tool's own mechanism, so your own config for
+   that tool is never read or written. Merge adds a provider block to the
+   tool's own file, preserving existing providers, and refuses to overwrite a
+   file it cannot parse. Environment passes everything in the exec
+   environment with no file at all.
 3. Exec. The tool replaces the launch process, connected to your server.
 
-`--config-only` writes the configuration and prints the run command instead of
-exec'ing, which is useful for inspection or for wiring the tool into scripts.
+`--config-only` writes the configuration and prints the run command instead
+of running the tool, for inspection or scripting.
+
+| Client | What it is | Style | Where the config goes |
+|--------|------------|-------|-----------------------|
+| claude-code | Anthropic Claude Code | environment | `ANTHROPIC_*` variables |
+| opencode | coding harness | injection | `~/.config/gmlx/opencode.json` via `OPENCODE_CONFIG` |
+| pi | coding harness | merge | `~/.pi/agent/models.json` and `settings.json` |
+| omp | oh-my-pi, a coding harness | merge | `~/.omp/agent/models.yml` and `config.yml` |
+| hermes | NousResearch hermes-agent | injection | `~/.config/gmlx/hermes-config.yaml` via `HERMES_CONFIG` |
+| goose | Block's agent runtime | merge plus environment | `~/.config/goose/config.yaml` |
+| aichat | terminal chat client with tools | injection | `~/.config/gmlx/aichat/` via `AICHAT_CONFIG_DIR` |
+| elia | terminal chat TUI | injection | `~/.config/gmlx/elia-xdg` via `XDG_CONFIG_HOME` |
+| open-webui | browser chat app | environment | `OPENAI_API_BASE_URL` and friends |
 
 ## Starting the server automatically
 
-If no server answers at the target endpoint, launch starts one in the background from
-the first config found in a default location (`./gmlx.yaml`,
-`~/.config/gmlx/gmlx.yaml`, `~/.gmlx.yaml`), then polls with a spinner
-until it responds.
+If no server answers, launch starts one in the background from the first
+config in a [default location](server-config.md#default-config-locations)
+and polls until it responds. When that config preloads a model, because it
+pins one, names a default, or holds exactly one, the server loads the
+weights before binding its port, and the spinner names the model while it
+loads. When nothing is preloaded, the server answers in about a second and
+the model loads on the first request, which makes that first turn slower.
 
-When that config preloads a model (it pins one, `server.defaults.model` names
-one, or contains exactly one), the server loads those weights before binding
-its port. The spinner
-names the model and its on-disk size while it loads, and the model is hot for the
-tool's first turn. When nothing is preloaded, the server answers in about a second
-and the model loads lazily on the first request, which makes that first turn slower.
-
-There is no fixed timeout. Only the server process dying is a hard failure. Press
-Ctrl-C to stop waiting (the server keeps starting in the background). With no config
+There is no fixed timeout: only the server process dying is a failure.
+Ctrl-C stops waiting while the server keeps starting. With no config
 anywhere, launch prints `gmlx init` guidance and starts nothing.
 
-- `--no-start` never auto-starts; launch errors if the server is down.
-- `--start-timeout SECONDS` caps the readiness wait (default `0`, meaning wait as
-  long as the server process lives). Set it for non-interactive use where Ctrl-C is
-  not available.
-- An explicit `--base-url` is never auto-started: launch either reaches that server
-  or errors, and it reads no config for a server that is already answering. This
-  keeps a stray project-local `./gmlx.yaml` from silently redirecting the session
-  or supplying an unexpected API key.
+- `--no-start` never auto-starts, and launch errors if the server is down.
+- `--start-timeout SECONDS` caps the wait, for non-interactive use.
+- An explicit `--base-url` is never auto-started and reads no config, so a
+  stray project-local config cannot redirect the session or supply an
+  unexpected key.
 
 ## Choosing the model
 
-`--model ID` picks which served model the tool uses. Without it, the tool gets the
-server's default-marked model. The id half is validated against the served list. An
-`id@profile` form (`--model qwen3.6-27b@coding`) runs every request from the tool at
-that profile's sampling, validated by the server.
+`--model ID` picks which served model the tool uses; without it, the tool
+gets the server's default. An `id@profile` form such as
+`--model qwen3.6-27b@coding` runs every request from the tool at that
+profile's sampling, and the id is validated against the served list.
 
-When you pass `--model`, launch also asks the server to keep that model resident
-through its idle-TTL reaper, so a long coding session's model is not idle-unloaded
-mid-use (which would force a cold reload on the next turn). This is not a full pin:
-under memory pressure the pool can still evict it. The request is fire-and-forget:
-the server warm-loads in the background while the tool execs. `gmlx ps` shows the
-model as `kept`, and `POST /unload {model}` releases it. Pass `--no-keep` to opt out.
+When you pass `--model`, launch also asks the server to keep that model
+resident through the idle timeout, so a long session's model is not unloaded
+mid-use. This is not a pin: under memory pressure the pool can still evict
+it. `gmlx ps` shows the model as kept, `POST /unload` releases it, and
+`--no-keep` opts out.
+
+To give a coding agent the coding intent and keep it warm:
+
+1. Serve a tool-competent model; Qwen3.6-27B is the recommended class.
+2. Run `gmlx launch claude-code --model qwen3.6-27b@coding`.
+3. Leave the session open; the model stays kept until it ends.
 
 ## Authentication
 
-`--api-key KEY` passes the same key the server runs with (its `server.api_key`).
-launch carries it into each tool's configuration in that tool's native slot:
+`--api-key KEY` passes the key the server runs with, and launch carries it
+into each tool's native slot:
 
 | Client | Where the key goes |
 |--------|--------------------|
 | opencode | `options.apiKey` in the injected config |
 | pi | `apiKey` in the merged provider block |
-| omp | no API-key slot ([omp](#omp-oh-my-pi)) |
+| omp | no API-key slot; configure its auth manually, launch prints a note |
 | hermes | `providers.custom.api_key` in the injected config |
-| goose | `OPENAI_API_KEY` in the exec environment only ([goose](#goose)) |
+| goose | `OPENAI_API_KEY` in the exec environment only, never the YAML |
 | claude-code | `ANTHROPIC_AUTH_TOKEN` in the exec environment |
 | aichat, elia | `api_key` in the injected config |
 | open-webui | `OPENAI_API_KEY` in the exec environment only |
@@ -98,133 +111,91 @@ launch carries it into each tool's configuration in that tool's native slot:
 
 ### claude-code
 
-Anthropic Claude Code, driven over the server's Anthropic surface (`/v1/messages`).
-Pure environment injection; it never touches `~/.claude`. The `claude` binary must be
-on PATH. launch exports:
+Driven over the server's Anthropic surface. launch exports
+`ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL` and `ANTHROPIC_SMALL_FAST_MODEL`,
+and `ANTHROPIC_AUTH_TOKEN` (a placeholder when the server has no auth). A
+model is required: pass `--model` or set `server.defaults.model`. An
+inherited `ANTHROPIC_API_KEY` is dropped so the injected token wins, and
+`~/.claude` is never touched.
 
-- `ANTHROPIC_BASE_URL`: the server root. Claude Code appends `/v1/messages` itself.
-- `ANTHROPIC_MODEL` and `ANTHROPIC_SMALL_FAST_MODEL`: the model to use. Required:
-  pass `--model` or set `server.defaults.model` in the server config.
-- `ANTHROPIC_AUTH_TOKEN`: the `--api-key` value, or a placeholder when the server has
-  no auth. An inherited `ANTHROPIC_API_KEY` is dropped from the exec environment so
-  the injected token wins.
-
-Claude Code on local models is prefill-heavy: it sends a very long system prompt
-(tens of thousands of tokens) and frequently rewrites its request prefix through
-context compaction and tool-result injection. KV-prefix reuse across requests is
-therefore limited, and turn latency is dominated by prompt processing. Serve with the prompt
-cache enabled (`cache:` in the config, see
-[server-config.md](server-config.md#cache-keys)) to soften repeated prefixes,
-and prefer a model and machine with strong prefill throughput.
+Claude Code is prefill-heavy: it sends a very long system prompt and often
+rewrites its request prefix through compaction and tool results, so turn
+latency is dominated by prompt processing. Serve with the
+[prompt cache](performance.md#the-prompt-cache) on and prefer a model and
+machine with strong prefill throughput.
 
 ### opencode
 
-Injection style: launch writes `~/.config/gmlx/opencode.json` and points opencode
-at it via `OPENCODE_CONFIG`. The default model lands in the top-level `model` key.
+The default model lands in the injected file's top-level `model` key.
 
 ### pi
 
-Merge style: launch merges the provider into `~/.pi/agent/models.json` and
-`~/.pi/agent/settings.json`, setting `defaultProvider` and `defaultModel`.
+launch sets `defaultProvider` and `defaultModel` in the merged files.
 
-### omp (oh-my-pi)
+### omp
 
-Merge style: launch merges into `~/.omp/agent/models.yml` and
-`~/.omp/agent/config.yml`, setting `modelRoles.default`. omp's provider registry has
-no API-key slot, so on a key-protected server configure its auth manually (launch
-prints a note).
+launch sets `modelRoles.default`. omp's provider registry has no API-key
+slot.
 
 ### hermes
 
-NousResearch hermes-agent. Injection style: launch writes
-`~/.config/gmlx/hermes-config.yaml` (your `~/.hermes/config.yaml` merged with the
-gmlx provider block) and injects it via `HERMES_CONFIG` plus `CUSTOM_BASE_URL`.
-A model is required (`inference.model`).
-
-hermes refuses models with less than 64k context at startup, so serve it a model
-whose context window is at least 64k tokens. The window comes from the model's GGUF
-metadata and is not configurable server-side. The `max_kv_size` load key caps only
-the rolling KV cache, not the advertised window.
+The injected file is your own `~/.hermes/config.yaml` merged with the gmlx
+provider block, injected with `HERMES_CONFIG` plus `CUSTOM_BASE_URL`. A model
+is required. hermes refuses models with less than 64k context at startup, and
+the window comes from the GGUF metadata, so serve it a model whose trained
+context is at least 64k tokens.
 
 ### goose
 
-Block's goose. Merge style: launch merges the non-secret pointer keys into
-`~/.config/goose/config.yaml` (existing keys preserved) and also exports the same
-values as environment variables at exec, which take precedence in goose. A model is
-required (`GOOSE_MODEL`). The API key travels as `OPENAI_API_KEY` in the exec
-environment only. It is never written into the YAML, where it could clobber a real
-OpenAI credential.
+launch merges the non-secret pointer keys into goose's own file and also
+exports them as environment variables, which take precedence in goose. A
+model is required.
 
 ### aichat
 
-sigoden/aichat, a chat-focused terminal REPL with tools and agents (not a coding
-harness). Injection style: launch writes a `config.yaml` with an `openai-compatible`
-client under `~/.config/gmlx/aichat/` and injects it via
-`AICHAT_CONFIG_DIR`. Every served id is flagged
-`supports_function_calling`, so aichat's tools and agents work against the server's
-tool-call surface. Actual tool execution still needs aichat's `llm-functions`
-installed.
+Every served id is flagged as supporting function calling, so aichat's tools
+and agents work against the server's tool-call surface. Tool execution still
+needs aichat's `llm-functions` installed.
 
 ### elia
 
-darrenburns/elia, a chat TUI (not a coding harness). Injection style: launch writes a
-fresh `config.toml` under `~/.config/gmlx/elia-xdg` and injects it via
-`XDG_CONFIG_HOME`. Each served id becomes an
-OpenAI-compatible litellm model. Requires elia 1.x or newer (older builds ignore
-custom endpoints). Upgrade with `pipx upgrade elia-chat`.
+Each served id becomes an OpenAI-compatible litellm model. Requires elia 1.x
+or newer; upgrade with `pipx upgrade elia-chat`.
 
 ### open-webui
 
-Open WebUI is a browser chat app, itself a web server, so this launch starts a second
-service rather than a terminal client. Install it separately:
-`pipx install open-webui --python python3.12` (it needs Python 3.11 or 3.12, not
-3.13).
+Open WebUI is a browser chat app and itself a web server, so this launch
+starts a second service rather than a terminal client. Install it
+separately with `pipx install open-webui --python python3.12`; it needs
+Python 3.11 or 3.12.
 
-Environment style, no config file: launch exports `OPENAI_API_BASE_URL`,
-`OPENAI_API_KEY`, `ENABLE_OLLAMA_API=false`, and `DATA_DIR`, runs it on port 3000,
-and prints the URL to open. The port is passed as `serve --port`, since
-`open-webui serve` ignores the `PORT` variable and would otherwise collide with
-the gmlx server on 8080 (if the gmlx server itself is bound to 3000, Open WebUI
-bumps to 3001). Chat history and its sqlite database land at `DATA_DIR` on the
-host filesystem (default `~/.open-webui`; `--config-path` overrides), not in a
-Docker volume.
+launch exports the base URL and key, disables the Ollama API, sets
+`DATA_DIR`, runs it on port 3000 (3001 if the gmlx server holds 3000), and
+prints the URL. Chat history lands in `~/.open-webui` on the host, or at
+`--config-path`. Add `WEBUI_AUTH=false` to its environment for a no-login
+single-user setup on a fresh data directory.
 
-launch points Open WebUI's document-RAG embedder back at the gmlx server
-(`RAG_EMBEDDING_ENGINE=openai`) instead of the default local HuggingFace download, so
-it boots cleanly without fetching or caching an embedder. Chat works immediately. Run
-the server with `--embeddings` and document RAG works too (see [rag.md](rag.md)). If the
-server also advertises a reranker (started with `--rerank`), launch turns on Open WebUI's
-hybrid search and points its external reranker at the server's `/v1/rerank`
-(`RAG_RERANKING_ENGINE=external`). Reranking only runs under hybrid search.
+The wiring is capability-gated on what the server advertises:
 
-Audio is capability-gated: when the server advertises STT and TTS in `/v1/models`
-(run it with `--stt` / `--tts`), launch also wires Open WebUI's audio engines
-(`AUDIO_STT_ENGINE=openai`, `AUDIO_TTS_ENGINE=openai`) at the server's `/v1/audio/*`
-endpoints, defaulting the read-aloud voice to a Kokoro-valid one (`af_heart`). A
-chat-only server keeps Open WebUI's built-in browser audio untouched.
-
-Add `WEBUI_AUTH=false` to its environment for a no-login single-user setup (fresh
-`DATA_DIR` only).
-
-## The menu bar app
-
-A background `gmlx serve` raises a macOS status-bar item for the server.
-What it shows and how to control it: [menubar.md](menubar.md).
+| Server runs | Open WebUI gets |
+|-------------|-----------------|
+| chat only | chat, with its document embedder pointed at this server so it boots without downloading one |
+| `embeddings` | document RAG ([rag.md](rag.md)) |
+| `rerank` as well | hybrid search with the external reranker at `/v1/rerank` |
+| `stt` and `tts` | audio engines at the server's `/v1/audio/*` endpoints, with a Kokoro voice as the default |
 
 ## Troubleshooting
 
-- "command not found" for the tool: launch does not install clients. Follow the
-  install hint it prints, then rerun.
+- `command not found` for the tool: launch does not install clients. Follow
+  the install hint it prints, then rerun.
 - Exit code 2 and an init hint: no config exists in a default location. Run
-  `gmlx init`, or pass `--base-url` at an already-running server.
-- The tool connects but completions fail with 401: the server has `server.api_key`
-  set. Rerun launch with `--api-key <the same key>`.
-- hermes exits at startup complaining about context length: the served model's
-  window is under 64k tokens. Pick a larger-context model.
-- elia starts but shows no local models: the installed elia is older than 1.x.
-  `pipx upgrade elia-chat`.
-- open-webui fails to install or start: check the pipx Python version; it must be
-  3.11 or 3.12.
-- First turn is slow: nothing was preloaded, so the model loaded on the first
-  request. Set `server.defaults.model` in the config, or pass `--model`, so the
-  auto-start loads it before binding the port.
+  `gmlx init`, or pass `--base-url` for an already-running server.
+- The tool connects but completions fail with 401: the server has an API
+  key. Rerun launch with `--api-key` and the same key.
+- hermes exits at startup complaining about context length: the served
+  model's window is under 64k tokens. Pick a larger-context model.
+- elia starts but shows no local models: the installed elia is older than
+  1.x.
+- open-webui fails to install or start: check the pipx Python version.
+- The first turn is slow: nothing was preloaded. Set `server.defaults.model`
+  or pass `--model` so the auto-start loads it before binding the port.
