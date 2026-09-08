@@ -14,7 +14,7 @@ server is in [server-config.md](server-config.md).
 
 To call the API with tools and structured output:
 
-1. Serve a tool-competent model and note its id from `gmlx list`.
+1. Serve a model that supports tool calling and note its id from `gmlx list`.
 2. Send `tools` on `/v1/chat/completions` as in [Tool calling](#tool-calling)
    and execute the calls the reply carries.
 3. Add `response_format` as in [Structured output](#structured-output) when
@@ -28,7 +28,7 @@ To call the API with tools and structured output:
 {"model": "qwen3.6-27b@qwen-coder"}                      // inline user profile (beats model.profile)
 {"model": "coder"}                                        // an alias (here: qwen3.6-27b@qwen-coder)
 {"model": "qwen3.6-27b", "profile": "coding",            // profile field (needs extra_body in the OpenAI SDK)
- "temperature": 0.1}                                      //   + an explicit field that wins over the profile
+ "temperature": 0.1}                                      //   + an explicit field that overrides the profile
 ```
 
 The `@profile` suffix is split on the last `@` and only treated as a profile
@@ -81,7 +81,7 @@ every engine is at its decode width) and a `Retry-After` header.
 `suffix` and `best_of > 1` are rejected with a 400. The stock image
 generation routes are not usable with GGUF models.
 
-An explicit `/unload` outranks the preload's lifetime hold, so a preloaded
+An explicit `/unload` overrides the preload's lifetime hold, so a preloaded
 model unloads too, and a model reloaded by request afterward is managed like
 any other until a reload with `preload` re-pins it. `/v1/keep` is what
 `gmlx launch --model` and voice sessions call; the kept model stays
@@ -93,17 +93,17 @@ LRU-evictable under memory pressure. `/v1/reload` returns
 
 `GET /v1/metrics` carries, under `server`, what a load balancer or a harness
 that fans out subagents needs to size its work. All of it is read-only and
-cheap. The keyless `GET /health?ready=1` gives the coarse yes or no without
+fast to read. The keyless `GET /health?ready=1` gives the coarse yes or no without
 the key.
 
 | Section | Fields | Meaning |
 |---|---|---|
 | `concurrency` | `decode_batch`, `queue_cap`, `in_flight`, `waiting` | the decode width, the waiting-queue cap, streams generating now, and requests waiting for a slot, summed across resident models |
-| `queue` | `waiting`, `cap`, `eta_s`, `rejections`, `last_reject_reason` | the waiting count, the cap it is judged against, and the drain estimate a client would get as `Retry-After` right now |
+| `queue` | `waiting`, `cap`, `eta_s`, `rejections`, `last_reject_reason` | the waiting count, the cap it is judged against, and the drain estimate a client would receive as `Retry-After` now |
 | `requests[]` | `id`, `model`, `state`, `position`, `prompt_tokens`, `generated`, `max_tokens`, `elapsed_s`, `ttft_s`, `decode_tok_s`, `cache`, `speculative` | one row per request, queued rows first; `state` is `queued`, `prefill` or `decode` |
 | `resident_models[]` | per model: `in_flight`, `pinned`, `kept`, bytes | the per-model number to compare against `decode_batch`, since each model decodes on its own engine |
 | `governor` | `band`, counters | the memory governor's band and shed history |
-| `memory` | `active_bytes`, `cache_bytes`, `headroom_bytes`, arena fields | MLX's active and cached bytes, the headroom the admission gate reads, and for a streamed model the arena's bytes, capacity and hit rate |
+| `memory` | `active_bytes`, `cache_bytes`, `headroom_bytes`, arena fields | MLX's active and cached bytes, the free memory the admission gate reads, and for a streamed model the arena's bytes, capacity and hit rate |
 | `capacity` | `max_ctx` by width, `max_width_at_depth`, byte budgets | the boot capacity table; absent for a Hugging Face fall-through load |
 | `rates` | `decode_tok_s`, `decode_streams`, `prefill_tok_s_recent`, `decode_tok_s_recent`, `decode_tok_s_lifetime` | the aggregate decode rate now and its stream count, the recent means over the last eight requests, and the lifetime mean |
 
@@ -115,7 +115,7 @@ without a drafter. Rows refresh at most four times a second per engine. The
 sections are independent: a probe failure inside one leaves its live fields
 `null` rather than failing the snapshot.
 
-Two routes turn the same numbers into answers a dispatcher can act on before
+Two routes use the same numbers to tell a dispatcher whether to proceed before
 sending a request.
 
 `POST /v1/estimate` takes a chat-completions body and returns, for a resident
@@ -123,15 +123,15 @@ model, `prompt_tokens`, `warm_tokens` and `cache_tier` (how much of the prefix
 the cache already holds and on which tier, which is the routing signal across
 machines), `need_bytes` (the prompt's KV plus the prefill transient, plus
 `max_tokens` when the body pins one), `fits_now` and `fits_drained` against
-the live headroom and the drained working set, `context_ok` against
+the current free memory and the drained working set, `context_ok` against
 `context_limit`, and `est_ttft_s`. A model that is not resident answers
 `resident: false`; the dry run never loads a model. Media requests render but
-are not priced. `"dry_run": true` on `/v1/chat/completions` returns the same
+are not estimated. `"dry_run": true` on `/v1/chat/completions` returns the same
 estimate through the queue cap.
 
 `GET /v1/capacity/plan?width=W&depth=D` answers `ok` when the capacity table
 holds `W` streams at `D` tokens each, read conservatively at the smallest
-tabulated width at or above `W`, and `admit_now` when on top of that the
+tabulated width at or above `W`, and `admit_now` when additionally the
 governor is not orange or red, nothing is waiting, and at least `W` decode
 slots are free. `reason` names the first condition that fails.
 
@@ -139,7 +139,7 @@ A chat request for a model the load gate cannot admit right now, because its
 weights would not fit beside what is resident and busy or would push the
 kernel under the governor's floor, answers 503 with an error of type
 `model_load_deferred`, the gate's numbers in the message, and `Retry-After`.
-Memory the kernel is still returning from an unload a moment earlier is
+Memory the kernel is still returning from an unload shortly before is
 waited for, up to 3 seconds, before a load is deferred.
 
 The Prometheus rendering flattens these to gauges such as
@@ -153,7 +153,7 @@ and contributes only its count.
 The protocol surface is inherited from mlx-vlm, since gmlx swaps the model
 layer rather than the handlers, so the engine's request features work
 unchanged on GGUF models. The context window comes from the GGUF's own
-metadata; there is no server-side override or per-request context knob.
+metadata; there is no server-side override or per-request context setting.
 
 ### Tool calling
 
@@ -192,7 +192,7 @@ curl localhost:8080/v1/chat/completions -d '{
 
 The request schemas accept unknown fields, so nothing is rejected for being
 present. A honored parameter changes the response; an ignored one is
-accepted and skipped, and every ignored parameter a request sets draws one
+accepted and skipped, and every ignored parameter a request sets produces one
 warning line in the server log naming it. The table is cross-checked by a
 test against the allowlists the warning uses.
 
@@ -222,7 +222,7 @@ controls) are honored on all three generation dialects. The rest:
 | `top_logprobs` | honored | ignored | ignored | capped by `TOP_LOGPROBS_K` (below) |
 | `stop` | honored | ignored | ignored | chat + `/v1/completions`; Anthropic uses `stop_sequences` |
 | `stop_sequences` | ignored | ignored | honored | the Anthropic-native spelling |
-| `chat_template_kwargs` | honored | honored | honored | extra template variables, request wins over profile |
+| `chat_template_kwargs` | honored | honored | honored | extra template variables, request overrides profile |
 | `profile` | honored | honored | honored | sampling/system profile by name ([profiles](server-config.md#profiles)) |
 | `xtc_probability` | honored | honored | honored | XTC sampling (with `xtc_threshold`) |
 
@@ -235,11 +235,11 @@ controls) are honored on all three generation dialects. The rest:
 decoding: the model cannot emit tokens that violate the schema. The backing
 engine is [llguidance](https://github.com/guidance-ai/llguidance), installed
 with the base package. The Anthropic endpoint maps an `output_config` of type
-`json_schema` to the same machinery. `"json_object"` is accepted and
+`json_schema` to the same engine. `"json_object"` is accepted and
 constrained to a permissive object grammar; unknown types are rejected.
 
 A malformed schema is rejected with a 400 before generation. The first
-structured request per model pays a one-time tokenizer build of about 1.5 s,
+structured request per model runs a one-time tokenizer build of about 1.5 s,
 cached for the process lifetime. Structured output is not available on
 speculative models, since the engine rejects per-request logits processors
 there, and such a request errors.
@@ -292,7 +292,7 @@ curl localhost:8080/v1/chat/completions -d '{
 | a model cannot be loaded beside what is resident | 503 of type `model_load_deferred` with `Retry-After` | |
 | a streaming request is silent, as during a long prefill | an SSE comment line every 15 seconds so read timeouts do not drop the connection | `GMLX_SSE_KEEPALIVE_S` |
 
-The memory preflight prices prompt KV at the model's per-token cost plus the
+The memory preflight estimates prompt KV at the model's per-token size plus the
 prefill transient, against the working set with the batch drained.
 `max_tokens` counts only when the request pins it explicitly, and media
 requests are not estimated. Decode concurrency defaults to 8 requests per

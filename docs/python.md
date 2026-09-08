@@ -4,10 +4,10 @@ The CLI is the primary interface. This page is for embedding gmlx in your
 own Python. The stable surface is exactly what the package root exports
 (`gmlx.__all__`), and all of it is documented here.
 
-Exports resolve lazily: `import gmlx` is instant and never touches MLX, so
+Exports resolve lazily: `import gmlx` returns immediately and never imports MLX, so
 it is safe in tooling that only inspects metadata. The MLX and kernel-extension
-import cost is paid at first use, and a broken runtime environment fails at
-that point with a message naming the missing piece.
+import happens at first use, and a broken runtime environment fails at
+that point with a message naming the missing component.
 
 ## Load a model
 
@@ -19,8 +19,8 @@ model, config, tokenizer = load_model("model.gguf")
 
 Returns `(model, config, tokenizer)`: a stock mlx-lm `Model` with quantized
 leaves swapped for `KQuant*` modules, the config dict synthesized from the GGUF
-metadata, and the tokenizer. The model drives normally under `mlx_lm.generate`
-and `mlx_lm.stream_generate`, so it drops into code written for ordinary mlx-lm
+metadata, and the tokenizer. The model runs normally under `mlx_lm.generate`
+and `mlx_lm.stream_generate`, so it works in code written for ordinary mlx-lm
 checkpoints. Sharded files (`-00001-of-000NN.gguf`) are discovered from any one
 shard's path.
 
@@ -87,7 +87,7 @@ Long prompts and thinking models:
 | `prefill_step_size` | model-aware | Prefill chunk width; the default follows the deployed choice per model. |
 | `prefill_progress` | `False` | Show a stderr spinner during a long prefill (TTY only; cleared before the first token). |
 | `thinking_budget` | `None` | Cap reasoning tokens: after roughly N thinking tokens a `</think>` is forced so the model answers. No-op when the model never opens a `<think>` block. |
-| `thinking_start_token` / `thinking_end_token` | `None` | Reasoning markers for a model whose spelling is not detected from its tokenizer or template; the end tag is the one the budget forces. |
+| `thinking_start_token` / `thinking_end_token` | `None` | Reasoning markers for a model whose markers are not detected from its tokenizer or template; the end tag is the one the budget forces. |
 | `verbose` | `False` | Stream text and timing to stdout while generating. |
 
 ## Benchmark
@@ -125,8 +125,8 @@ pf.arch, pf.shards, pf.codec_histogram, pf.n_tensors, pf.n_params
 `preflight(gguf_path, arch=None)` validates a GGUF before committing to a
 load: it discovers shards, histograms the tensor codecs, refuses unsupported
 ones by name, and gates on the architecture. It reads only the GGUF header, so
-it stays cheap on multi-GB files. `load_model` runs it internally. Call it
-yourself to vet a file first (the CLI equivalent is `gmlx validate`).
+it stays fast on multi-GB files. `load_model` runs it internally. Call it
+yourself to check a file first (the CLI equivalent is `gmlx validate`).
 
 Failures raise one of two exceptions, from `preflight` or `load_model` alike:
 
@@ -153,9 +153,9 @@ tokenizer = load_tokenizer_from_gguf(reader, arch)
 
 `load_tokenizer_from_gguf(meta, arch, *, chat_template_override=None)` builds
 an HF fast tokenizer purely from the GGUF's embedded vocab/merges/scores
-metadata, the same synthesis `load_model` runs internally, without paying
+metadata, the same synthesis `load_model` runs internally, without running
 the model load. `detect_arch(reader)` reads `general.architecture` from the
-header. Both read only GGUF metadata, so they stay cheap on multi-GB files.
+header. Both read only GGUF metadata, so they stay fast on multi-GB files.
 
 Use these when a tool needs the tokenizer before deciding whether to load
 weights at all: eval harnesses doing tokenizer parity checks (mlx-kld's
@@ -173,10 +173,10 @@ install_gguf_bridge()
 ```
 
 Idempotently patches `mlx_lm.server.ModelProvider` so any `*.gguf` model path
-loads through `load_model`; non-GGUF paths fall through untouched, so one
+loads through `load_model`; non-GGUF paths pass through unchanged, so one
 `mlx_lm.server` process can mix GGUF and ordinary MLX checkpoints. GGUF
 requests are pinned to mlx-lm's validated sequential path (no batching), and
-adapters and draft models are not wired on this route. Use it to add GGUF
+adapters and draft models are not supported on this route. Use it to add GGUF
 support to an existing `mlx_lm.server` deployment. `gmlx serve` is the
 full-featured server.
 
@@ -188,14 +188,14 @@ here). Each stores the GGUF file bytes directly as a `uint8` `weight` and
 dispatches through the `mlx_kquant` Metal kernels on a stock `mlx` wheel, so
 dequantization happens inside the kernel, never as a separate materialized
 pass. `install_kquant_modules(model, hf_kquant_meta)` is the swap step itself:
-it walks a constructed model's leaf modules and replaces each one whose weight
+it iterates over a constructed model's leaf modules and replaces each one whose weight
 carries a codec. It is arch-generic, driven entirely by codec strings, and
-exported for building custom loaders on top.
+exported for building custom loaders.
 
 ## Beyond the stable surface
 
-Deeper modules are importable but internal: the VLM loader, embeddings and
+Other modules are importable but internal: the VLM loader, embeddings and
 rerank, the CPU-offload paths, the server. Their signatures change without
 notice, and `generate` additionally accepts experimental parameters that are
-left undocumented here on purpose. If you need an internal piece as a public API,
+intentionally undocumented here. If you need an internal piece as a public API,
 open an issue.

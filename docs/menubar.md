@@ -1,6 +1,6 @@
 # The menu bar app
 
-`gmlx launch menubar` runs a macOS status-bar item that watches a server.
+`gmlx launch menubar` runs a macOS status-bar item that monitors a server.
 This page covers what it shows, how it starts and stops, its config editor,
 and its voice session with the tap-to-talk hotkey.
 
@@ -11,11 +11,11 @@ generating or queued, and the resident models with their size, their
 default, pinned or kept markers and an eviction countdown on idle ones.
 Clicking a model unloads it. The menu offers reload config, restart, stop,
 copy URL and open logs, all over the server's own endpoints. If a tracked
-server dies it posts a macOS notification; an intentional stop or restart
+server exits unexpectedly it posts a macOS notification; an intentional stop or restart
 does not.
 
-A background `gmlx serve` raises the item for you on a macOS desktop, so you
-rarely run it by hand. `--no-menubar` or `server.menubar: false` disables
+A background `gmlx serve` starts the item for you on a macOS desktop, so you
+rarely run it manually. `--no-menubar` or `server.menubar: false` disables
 that. To keep it and the server across reboots, install them as a login item
 with `gmlx service install` ([gmlx service](cli.md#gmlx-service)), which
 also makes macOS permission prompts attribute to gmlx instead of your
@@ -24,8 +24,8 @@ terminal.
 Like `serve`, it detaches by default; `--foreground` runs the event loop in
 place and `--stop` quits a detached item. One item runs per machine, so a
 second `serve` or a manual launch is a no-op. With no explicit target it
-tracks the primary server, following it as servers come and go, and `--url`,
-`--host` or `--port` pins it to one. It reads the API key from the managed
+tracks the primary server, following it as servers start and stop, and `--url`,
+`--host` or `--port` restricts it to one. It reads the API key from the managed
 server's config, or takes `--api-key` for a server whose config it cannot
 see; a key-protected server it has no key for shows as up with a
 key-required note. The flags are under
@@ -35,11 +35,11 @@ key-required note. The flags are under
 
 "Edit config" opens the server's YAML in a floating editor panel. Validate
 runs the draft through the server's own config parser, so the verdict is
-exactly what `gmlx serve` would say, caught before the server sees the file.
+exactly what `gmlx serve` would say, caught before the server reads the file.
 Save writes atomically and refuses once if the file changed on disk while
 you were editing. Save and Reload validates, saves and triggers the running
-server's reload in one step, and Open in Editor hands the file to your
-default text editor instead. The item is there whenever the bar knows a
+server's reload in one step, and Open in Editor opens the file in your
+default text editor instead. The item appears whenever the menu bar has a
 config.
 
 ## Voice sessions
@@ -62,20 +62,20 @@ a terminal" item opens `gmlx talk` in iTerm2 when it is running, otherwise
 the default terminal handler, with no AppleScript involved.
 
 Starting a voice session from either surface holds its model resident on the
-server for the session's lifetime, loaded and warmed up front and exempt from
-the idle timeout, so an open mic never sits in front of an unloaded model.
+server for the session's lifetime, loaded and warmed up in advance and exempt from
+the idle timeout, so the mic is never open while the model is unloaded.
 The hold is released, not evicted, when the session ends.
 
 ### Tap-to-talk hotkey
 
 The menu bar can bind a global tap-to-talk combo that works from any app,
-Space pressed while the Globe key is held. Firing it always drives toward an
-open mic, whatever the session is doing: with no session running it starts
+Space pressed while the Globe key is held. Pressing it always leads to an
+open mic, whatever the session state: with no session running it starts
 one, idle opens the mic, tapping again while listening dismisses, mid-capture
 it ends the utterance, and while the assistant is transcribing, thinking or
 speaking it barges in and listens. A tap while muted unmutes first.
 
-Keyboards without a Globe key pick a different modifier. `gmlx init` asks
+On keyboards without a Globe key, choose a different modifier. `gmlx init` asks
 for it in the voice-chat step, or set it in the config:
 
 ```yaml
@@ -84,11 +84,11 @@ talk:
 ```
 
 The right-side variants are offered because left Cmd+Space is Spotlight and
-left Option+Space is a common launcher bind. Holding Globe as a modifier
+left Option+Space is a common launcher binding. Holding Globe as a modifier
 suppresses macOS's own Globe-key action only for the combo, so your "Press
 Globe key to" setting keeps working for bare presses.
 
-Swallowing the Space keystroke, so that no space lands in the
+Suppressing the Space keystroke, so that no space is typed into the
 focused app, requires an active event tap and therefore Accessibility
 permission, requested only when you first enable the hotkey. While armed,
 every keystroke in the login session passes through the tap; the overhead is
@@ -96,10 +96,10 @@ small and the menu bar process does no inference.
 
 The choice persists across launches. On startup the app re-arms it only after
 a silent permission check. If the grant is missing, a "needs permission" note
-appears under the toggle and nothing prompts until you flip it again.
-Granting access in System Settings while the bar is running is picked up
+appears under the toggle and nothing prompts until you toggle it again.
+Granting access in System Settings while the bar is running is detected
 within a few seconds. If arming still fails right after a grant, the app says
 to quit and reopen the menu bar, since some macOS versions bind grants only
 to a freshly launched process. Permission prompts attribute to gmlx when the
 bar runs as the login item; a bar launched from a terminal runs under the
-terminal's identity, so grants then attach to the terminal app.
+terminal's identity, so grants then apply to the terminal app.

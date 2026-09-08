@@ -1,7 +1,7 @@
 # Contributing
 
 Thanks for considering a contribution. This page covers the mechanics; for design
-context, the docs under [`docs/`](docs/) are the source of truth.
+context, the docs under [`docs/`](docs/) are authoritative.
 
 ## Dev setup
 
@@ -29,12 +29,12 @@ KQUANT_TEST_GGUF_DIR=~/llm/gguf pytest   # + numerical parity vs real GGUFs (add
 python tests/e2e/run_server_e2e.py       # server end-to-end harness (GPU)
 ```
 
-A PR should keep `pytest` (the default tier) green. If your change touches
+A PR should keep `pytest` (the default tier) passing. If your change touches
 loading/numerics, say which integration tests you ran and on which model. New
 architectures need a greedy token-parity check against llama.cpp at long context,
-and must keep `scripts/check-coverage.py --check --strict` green with
+and must keep `scripts/check-coverage.py --check --strict` passing with
 `docs/arch-coverage.md` regenerated. Short-prompt parity is not sufficient:
-attention bugs only surface at depth.
+attention bugs only appear at depth.
 What adding an architecture involves, and the full acceptance gate:
 [docs/internals/adding-architectures.md](docs/internals/adding-architectures.md).
 
@@ -47,21 +47,21 @@ pre-commit install   # optional: runs the same check on each commit
 
 ## Things to know before you patch
 
-- Seam patches are version-fragile by design. The serving stack adopts mlx-vlm's
+- Seam patches are version-fragile by design. The serving stack uses mlx-vlm's
   FastAPI app + batching engine by patching late-bound seams (`gmlx/serve/bridge_vlm.py`,
   `gmlx/serve/residency.py`, `gmlx/serve/patches/`), and the loader patches a few
   mlx-lm classes at load time. `gmlx/serve/bridge_lm.py` separately patches `mlx_lm.server`'s
   `ModelProvider._load` (the sequential mlx-lm server, not mlx-vlm). Every patch
-  carries a guard or version tripwire that fails loudly.
+  has a guard or version check that raises an error.
   Keep that property: a new patch must be idempotent and must raise (not silently
   no-op) when the upstream surface it expects has changed. The `mlx-vlm` upper
   bound in `pyproject.toml` is bumped on purpose, after re-running the server
   tests against the new version.
-- One module per concern: tensor-name remap lives in `gmlx/load/remap.py`,
+- One module per concern: tensor-name remap is in `gmlx/load/remap.py`,
   config synthesis in `gmlx/load/config_synth.py`, arch metadata in
   `gmlx/load/arch_table.py`. A new architecture usually touches exactly those
   three plus a parity test.
-- The package tree maps subsystems; tests mirror it under `tests/`:
+- The package tree follows subsystems; tests mirror it under `tests/`:
 
   | Package | Concern |
   |---------|---------|
@@ -78,7 +78,7 @@ pre-commit install   # optional: runs the same check on each commit
   | `gmlx/talk/` | voice client: audio I/O and hotkey |
   | `gmlx/assistant/` | tool-loop assistant brain and its MCP surface |
 
-  Cross-cutting leaves (`config.py`, `envflags.py`, `eval_guard.py`,
+  Cross-cutting modules (`config.py`, `envflags.py`, `eval_guard.py`,
   `textfmt.py`, `spinner.py`) stay at the `gmlx/` top level.
 - Error messages name the fix. Follow the existing style: say what was
   expected, what was found, and what the user (or upgrader) should do.

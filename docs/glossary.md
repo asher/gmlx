@@ -11,7 +11,7 @@ See [streaming.md](streaming.md).
 Barge-in. Speaking over the assistant while it is talking. In voice chat
 the reply stops and the new utterance is taken.
 
-Context and depth. Everything the model is currently considering, measured
+Context and depth. Everything currently in the model's input, measured
 in tokens: the conversation so far, pasted files, and the reply in
 progress. Depth is how many tokens are already there, and it is the x axis
 of every benchmark chart because attention cost grows with it.
@@ -38,7 +38,7 @@ Because most experts are idle on any token, a MoE bigger than RAM can still
 run by streaming experts from disk.
 
 Feeder. The two paths that move expert weights for a streamed model. The
-prefill feeder stages each layer's experts straight from the GGUF into
+prefill feeder stages each layer's experts directly from the GGUF into
 GPU-visible slots, and the decode feeder serves decode from the arena.
 
 GGUF. The single-file model format the open-model ecosystem publishes on
@@ -47,8 +47,8 @@ split into numbered shards that gmlx treats as one file. gmlx runs GGUFs
 exactly as published, with no conversion.
 
 Governor. The runtime memory watchdog in the server. It watches the
-kernel's free pages and shrinks the caches it knows about, the arena first,
-before the box swaps. Its state shows at `/v1/metrics`.
+kernel's free pages and shrinks its registered caches, the arena first,
+before the machine swaps. Its state shows at `/v1/metrics`.
 
 Hugging Face. The site the open-model ecosystem publishes on. The
 `hf:org/repo/file.gguf` references in these docs point there, and
@@ -60,13 +60,13 @@ config. A profile is a named bundle of settings you write in the server
 config. Both are selected the same way, `model@NAME` or `--profile NAME`.
 
 Keep, pin and idle. The three states of a resident model. A pinned model is
-never unloaded. A kept model survives the idle timeout but yields under
+never unloaded. A kept model is exempt from the idle timeout but is unloaded under
 memory pressure; `gmlx launch` and voice sessions keep their model. An idle
 model unloads after `ttl_s` seconds without a request.
 
-KV cache. The model's working memory for the context, kept in RAM beside
+KV cache. The model's stored attention state for the context, kept in RAM beside
 the weights. It grows with context length, which is why a model whose file
-barely fits leaves no room for long conversations. `--kv-bits 8` compresses
+barely fits leaves no memory for long conversations. `--kv-bits 8` compresses
 it.
 
 K-quant and IQ. The two families of GGUF quantization. K-quants such as
@@ -75,10 +75,10 @@ learned codebooks for the smallest files. Both are more accurate per byte
 than a plain affine quantization.
 
 MCP. The Model Context Protocol, a standard way for a model to call tools
-provided by separate programs. The built-in assistant speaks it.
+provided by separate programs. The built-in assistant supports it.
 
 mmproj. A companion GGUF holding a vision or audio tower. Paired with its
-language model GGUF it makes a model that sees or hears. See
+language model GGUF it makes a model that accepts image or audio input. See
 [vlm.md](vlm.md).
 
 Preflight. The checks the loader runs before reading any tensor bytes: the
@@ -89,7 +89,7 @@ Prefill and decode. The two phases of answering. Prefill reads the prompt,
 all at once, and decode generates the reply one token at a time. The two
 have different speeds and are reported separately.
 
-Prestage. Reading experts the router is predicted to want before it asks,
+Prestage. Reading experts the router is predicted to select before the router runs,
 so the read overlaps compute. It moves bytes only; routing is never
 changed.
 
@@ -99,7 +99,7 @@ conversation so far, skips prefilling the shared part. mlx-vlm calls it
 APC, and its keys are in [server-config.md](server-config.md#cache-keys).
 
 Quant. A compressed build of a model. The suffix on a GGUF name says
-roughly how many bits each weight keeps, so Q4 files are smaller and
+roughly the number of bits per weight, so Q4 files are smaller and
 slightly lossier and Q6 or Q8 bigger and closer to the original.
 
 Resident. A model that is loaded and ready to answer. Several stay resident
@@ -110,7 +110,7 @@ on a streamed model, one layer at a time.
 
 Speculative decoding and MTP. A drafter proposes several tokens and the full
 model verifies them in one step, giving the same output with fewer full
-passes. MTP, multi-token prediction, is the form where the draft head ships
+passes. MTP, multi-token prediction, is the form where the draft head is included
 inside the model's own GGUF, and gmlx turns it on automatically.
 
 Streaming placements. The two ways to run a model bigger than memory.
@@ -119,7 +119,7 @@ and streams the routed experts from disk. `stream: cpu` runs the whole
 model on the CPU from the page cache.
 
 Thinking model. A model trained to reason before answering, streaming that
-work inside markers such as `<think>`. The chat client shows it under a
+text inside markers such as `<think>`. The chat client shows it under a
 label by default.
 
 Token. The unit models read and write, about three quarters of an English

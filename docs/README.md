@@ -4,10 +4,10 @@ gmlx runs GGUF models on Apple Silicon: one command to chat, serve, connect
 an agent or talk by voice. This index groups every page by what you want to
 do; the [project README](../README.md) is the overview.
 
-Start with [getting-started.md](getting-started.md), which takes you from
+Start with [getting-started.md](getting-started.md), which covers everything from
 install to a served model with a client connected. Look things up in
 [cli.md](cli.md) for flags, [server-config.md](server-config.md) for config
-keys and [api.md](api.md) for the HTTP surface. The
+keys and [api.md](api.md) for the HTTP API. The
 [glossary](glossary.md) defines the terms the rest of the docs use.
 
 ## Learn
@@ -16,13 +16,13 @@ keys and [api.md](api.md) for the HTTP surface. The
 |------|----------|
 | [getting-started.md](getting-started.md) | install, a first model, model picks per machine size, the server, a client |
 | [glossary.md](glossary.md) | the terms these docs use, from GGUF and quant to arena and governor |
-| [migrating.md](migrating.md) | what carries over from llama.cpp, Ollama and LM Studio, and what maps to what |
+| [migrating.md](migrating.md) | what transfers from llama.cpp, Ollama and LM Studio, and what maps to what |
 
 ## Do
 
 | Task | Page |
 |------|------|
-| give Claude Code or another coding agent a local model and keep it warm | [launch.md](launch.md) |
+| give Claude Code or another coding agent a local model and keep it resident | [launch.md](launch.md) |
 | use the chat REPL's commands, sessions and themes | [chat.md](chat.md) |
 | control the server from the menu bar | [menubar.md](menubar.md) |
 | talk to a model by voice | [talk.md](talk.md) |
@@ -31,7 +31,7 @@ keys and [api.md](api.md) for the HTTP surface. The
 | run a vision or audio model | [vlm.md](vlm.md) |
 | fine-tune with LoRA and serve several adapters on one base | [lora.md](lora.md) |
 | run a 200B MoE on a 64 GB Mac and pick a lossy setting | [streaming.md](streaming.md) |
-| make it faster and know what each lever costs | [performance.md](performance.md) |
+| make it faster and know what each setting costs | [performance.md](performance.md) |
 | fix something that broke | `gmlx doctor`, then [troubleshooting.md](troubleshooting.md) |
 
 ## Reference
@@ -55,4 +55,4 @@ keys and [api.md](api.md) for the HTTP surface. The
 | [internals/README.md](internals/README.md) | the serving architecture, speculative batching, the prompt cache, testing, upstream upgrades, debug switches |
 
 [CONTRIBUTING.md](../CONTRIBUTING.md) has the development setup and
-[CHANGELOG.md](../CHANGELOG.md) records what shipped when.
+[CHANGELOG.md](../CHANGELOG.md) records what was released when.

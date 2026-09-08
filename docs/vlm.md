@@ -47,9 +47,9 @@ pairing fails at load with both names.
 | Family | Projector and arch | Examples | Notes |
 |--------|--------------------|----------|-------|
 | LLaVA-1.5 | `has_llava_projector` | llava-1.5-7B | pass `--hf-source llava-hf/llava-1.5-7b-hf`; the image processor is not in the GGUF |
-| Pixtral | `pixtral` | Mistral-Small-3.x, Pixtral-12B | vision quality capped by a conversion defect, see below |
+| Pixtral | `pixtral` | Mistral-Small-3.x, Pixtral-12B | vision quality limited by a conversion defect, see below |
 | Qwen3.5 and 3.6 | `qwen3vl_merger` with `qwen35` or `qwen35moe` | Qwen3.5-VL-9B, Qwen3.6-VL | |
-| Qwen3-Omni | `qwen3vl_merger` with `qwen3vlmoe` | Qwen3-Omni | vision and audio; treat as experimental, text on the thinker tower is solid |
+| Qwen3-Omni | `qwen3vl_merger` with `qwen3vlmoe` | Qwen3-Omni | vision and audio; treat as experimental, text on the thinker tower is reliable |
 | gemma-4 omni | `gemma4v`, `gemma4a` | gemma-4-E2B, E4B | vision and audio |
 | gemma-4 unified | `gemma4uv` | gemma-4-12B | encoder-free unified embedder |
 | Muse Glimmer | `muse-glimmer` | Muse-Glimmer-30B | vision tower and processor implemented in gmlx; no `--hf-source` needed |
@@ -57,7 +57,7 @@ pairing fails at load with both names.
 | DeepSeek-V4-Flash-Vision-Exp | `deepseek4v` with `deepseek4` | the unsloth UD builds | see the notes below |
 
 Qwen2-VL and Qwen2.5-VL companions (`qwen2vl_merger`) are not supported yet;
-the load fails up front with the family named. On LLaVA the loader reports
+the load fails immediately with the family named. On LLaVA the loader reports
 two unfilled `post_layernorm` parameters, which is expected: the conversion
 omits them and LLaVA never uses them.
 
@@ -86,11 +86,11 @@ and keeps the prefix.
 ## Known GGUF defects
 
 Some community companion files are mis-converted upstream, independent of
-this loader. The tell is that llama.cpp's own multimodal CLI produces the same
+this loader. The sign is that llama.cpp's own multimodal CLI produces the same
 degraded output from the same file while the native weights of the same
 checkpoint render correctly.
 
-Pixtral companions carry mangled vision attention q and k projections from a
-RoPE layout mismatch in the conversion. There is no clean loader-side inverse,
-so GGUF Pixtral vision quality is capped until a re-converted companion
+Pixtral companions carry corrupted vision attention q and k projections from a
+RoPE layout mismatch in the conversion. There is no exact loader-side inverse,
+so GGUF Pixtral vision quality is limited until a re-converted companion
 appears. The text tower is unaffected.

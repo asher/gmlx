@@ -28,12 +28,12 @@ model directory (`true` means the default alias). Aliases:
 | `whisper-large` | `mlx-community/whisper-large-v3-mlx` | full large-v3 |
 | `whisper-medium` / `-small` / `-base` / `-tiny` | `mlx-community/whisper-<size>-mlx` (tiny: `whisper-tiny`) | smaller/faster |
 
-Want full precision instead of a q4 (or vice versa)? Name the exact repo:
+For full precision instead of a q4 (or vice versa), name the exact repo:
 `stt: mlx-community/whisper-large-v3-turbo` is the fp16 turbo.
 
 The Whisper model is pre-warmed in the background at startup (best-effort,
 falling back to a lazy first-request load), then cached in-process. It is
-tiny next to a resident LLM and does not count against `budget_gb`. Requests
+small compared to a resident LLM and does not count against `budget_gb`. Requests
 follow the OpenAI shape (`multipart/form-data` with `file`, plus optional
 `model`, `language`, `prompt`, `temperature`,
 `response_format: json|text|verbose_json|srt|vtt`):
@@ -44,9 +44,9 @@ curl localhost:8080/v1/audio/transcriptions -F file=@clip.ogg -F model=whisper-1
 
 Send `model=whisper-1` (or omit it); the conventional OpenAI name maps to the
 configured model, and `/v1/models` advertises a `whisper-1` entry when STT is
-on. Any other requested model is refused: clients can't make the server pull
+on. Any other requested model is refused: clients cannot make the server download
 arbitrary repos. Note that the configured `stt:` model itself is fetched from
-Hugging Face on first use when it isn't already local; naming it in the
+Hugging Face on first use when it is not already local; naming it in the
 config is the opt-in. The LLM-side no-HF policy (below) is unchanged.
 Transcriptions run serialized with each other in a worker thread,
 interleaving with (not blocking) batched LLM decode.
@@ -54,7 +54,7 @@ interleaving with (not blocking) batched LLM decode.
 The same `stt:` model also serves `POST /v1/audio/translations`: Whisper's
 built-in `translate` task, which takes any-language audio and returns English
 text. Same multipart request (minus `language`, which the OpenAI translations
-endpoint doesn't take):
+endpoint does not take):
 
 ```sh
 curl localhost:8080/v1/audio/translations -F file=@japanese.ogg -F model=whisper-1
@@ -102,7 +102,7 @@ map to the configured model, and `/v1/models` advertises a `tts-1` entry when
 TTS is on. Any other requested model is refused. `voice` defaults to Kokoro's
 `af_heart`. Synthesis runs serialized with each other in a worker thread,
 interleaving with (not blocking) batched LLM decode.
-`gmlx launch open-webui` wires the chat app's read-aloud (and mic STT) to
+`gmlx launch open-webui` configures the chat app's read-aloud (and mic STT) to use
 this endpoint when the server advertises it. The voice is pinned to
 `af_heart` because Open WebUI's default (`alloy`) is an OpenAI voice Kokoro
 rejects; a non-Kokoro `--tts` model needs `AUDIO_TTS_VOICE` overridden to one
@@ -119,19 +119,19 @@ curl localhost:8080/v1/audio/voices
 ```
 
 This is what `gmlx talk`'s `/voice` command lists from; clients treat a 404
-(older server, or no TTS) as "no listing" and pass voice names through blind.
+(older server, or no TTS) as "no listing" and pass voice names through unchecked.
 
 ---
 
 ## Text embeddings (`embeddings:`)
 
 Setting `server.embeddings:` (or passing `--embeddings` in any serve mode)
-adds an OpenAI-compatible `POST /v1/embeddings` endpoint. The point of the
+adds an OpenAI-compatible `POST /v1/embeddings` endpoint. The purpose of the
 endpoint is to give Open WebUI (and other OpenAI clients) a local RAG
-embedder: `gmlx launch open-webui` points the chat app's document-RAG here,
+embedder: `gmlx launch open-webui` configures the chat app's document-RAG to use it,
 so nothing is downloaded from HuggingFace at its boot.
 
-Three backends, chosen by what the value points at (none needs an optional
+Three backends, chosen by the form of the value (none needs an optional
 extra):
 
 - GGUF decoder-LM embedder: a `*.gguf` path, an
@@ -151,7 +151,7 @@ extra):
 ```yaml
 server:
   embeddings: qwen3-embed-0.6b                  # the default: a GGUF decoder-LM embedder
-  # embeddings: hf:Qwen/Qwen3-Embedding-4B-GGUF/Qwen3-Embedding-4B-Q6_K.gguf   # a specific rung
+  # embeddings: hf:Qwen/Qwen3-Embedding-4B-GGUF/Qwen3-Embedding-4B-Q6_K.gguf   # a specific quant
   # embeddings: ~/models/Qwen3-Embedding-4B.Q6_K.gguf   # a local GGUF
   # embeddings: embeddinggemma-gguf             # EmbeddingGemma encoder from a GGUF
   # embeddings: embeddinggemma                  # EmbeddingGemma encoder from safetensors
@@ -159,35 +159,35 @@ server:
 
 The value is a GGUF ref, an alias, an HF repo in MLX-embeddings format, or a
 local converted model directory (`true` means the default alias). A bare
-alias resolves to the default rung shown below; the `gmlx init` wizard
-offers a quant follow-up to pick another rung and writes its concrete ref.
+alias resolves to the default quant shown below; the `gmlx init` wizard
+offers a quant follow-up to pick another quant and writes its concrete ref.
 Presets:
 
 GGUF embedders (dim = vector width, ctx = max input tokens):
 
-| Alias | Repo (default rung) | dim / ctx | Notes |
+| Alias | Repo (default quant) | dim / ctx | Notes |
 |-------|--------------------|-----------|-------|
 | `qwen3-embed-0.6b` | `Qwen/Qwen3-Embedding-0.6B-GGUF` (Q8_0) | 1024 / 32k | default; decoder-LM, small/fast/multilingual; ~0.6 GB |
 | `qwen3-embed-4b` | `Qwen/Qwen3-Embedding-4B-GGUF` (Q8_0) | 2560 / 40k | decoder-LM, higher retrieval quality; ~4.3 GB |
-| `qwen3-embed-8b` | `Qwen/Qwen3-Embedding-8B-GGUF` (Q8_0) | 4096 / 40k | decoder-LM, best of the family; ~8 GB, largest index |
-| `embeddinggemma-gguf` | `ggml-org/embeddinggemma-300M-GGUF` (Q8_0) | 768 / 2k | encoder (mean-pool + dense head), tiny multilingual (Google); ~0.3 GB |
+| `qwen3-embed-8b` | `Qwen/Qwen3-Embedding-8B-GGUF` (Q8_0) | 4096 / 40k | decoder-LM, highest quality of the family; ~8 GB, largest index |
+| `embeddinggemma-gguf` | `ggml-org/embeddinggemma-300M-GGUF` (Q8_0) | 768 / 2k | encoder (mean-pool + dense head), small multilingual (Google); ~0.3 GB |
 
 (The bare `qwen3-embed` is a back-compat alias for `qwen3-embed-0.6b`.)
 
-mlx-embeddings safetensors encoders (default rung `8bit`):
+mlx-embeddings safetensors encoders (default quant `8bit`):
 
 | Alias | Repo | dim / ctx | Notes |
 |-------|------|-----------|-------|
-| `embeddinggemma` | `mlx-community/embeddinggemma-300m-8bit` | 768 / 2k | tiny, strong multilingual (Google); ~0.3 GB |
+| `embeddinggemma` | `mlx-community/embeddinggemma-300m-8bit` | 768 / 2k | small, high-quality multilingual (Google); ~0.3 GB |
 | `arctic-l` | `mlx-community/snowflake-arctic-embed-l-v2.0-8bit` | 1024 / 8k | multilingual long-context (XLM-RoBERTa) |
-| `nomic-embed` | `mlx-community/nomicai-modernbert-embed-base-8bit` | 768 / 8k | popular long-context English (ModernBERT) |
+| `nomic-embed` | `mlx-community/nomicai-modernbert-embed-base-8bit` | 768 / 8k | widely used long-context English (ModernBERT) |
 | `bge-m3` | `mlx-community/bge-m3-mlx-8bit` | 1024 / 8k | multilingual long-context (XLM-RoBERTa) |
 
-Picking by family: the GGUF Qwen3-Embedding tier carries the longest context.
-`0.6b` is the best size/quality trade for most RAG; step up to `4b`/`8b` for
+Picking by family: the GGUF Qwen3-Embedding tier has the longest context.
+`0.6b` has the best size-to-quality ratio for most RAG; use `4b`/`8b` for
 higher retrieval quality at a larger index and more RAM. The encoder tier is
 for when you specifically want one of those models (e.g. `embeddinggemma`
-for a tiny multilingual footprint).
+for a small multilingual model with low memory use).
 
 The model is pre-warmed in the background at startup (best-effort, falling
 back to a lazy first-request load), then cached in-process, kept separate
@@ -207,17 +207,17 @@ advertises a `text-embedding-3-small` entry when embeddings are on. Any other
 requested model is refused. Vectors are L2-normalized (mean-pooled by the
 encoder backend, last-token/EOS pooled by the GGUF decoder-LM backend).
 Embedding passes run serialized with each other in a worker thread,
-interleaving with (not blocking) batched LLM decode. To point Open WebUI's
-RAG here: `RAG_EMBEDDING_ENGINE=openai`, `RAG_OPENAI_API_BASE_URL=<server>/v1`,
-`RAG_EMBEDDING_MODEL=text-embedding-3-small`, which is exactly what
-`gmlx launch open-webui` sets for you.
+interleaving with (not blocking) batched LLM decode. To configure Open WebUI's
+RAG to use it: `RAG_EMBEDDING_ENGINE=openai`, `RAG_OPENAI_API_BASE_URL=<server>/v1`,
+`RAG_EMBEDDING_MODEL=text-embedding-3-small`, which is what
+`gmlx launch open-webui` sets.
 
 ## Reranking (`rerank:`)
 
 Setting `server.rerank:` (or `--rerank` in any serve mode) adds a
 Cohere/Jina-shaped `POST /v1/rerank` (also `/rerank`): the second RAG stage.
 A vector search returns a coarse top-N, the reranker re-scores those
-documents jointly against the query, and the best few go to the model. Open
+documents jointly against the query, and the highest-scored few are sent to the model. Open
 WebUI calls it as an external reranker.
 
 The model is a Qwen3-Reranker GGUF: a Qwen3 causal LM fine-tuned to answer
@@ -230,14 +230,14 @@ mlx-lm arches and are out of scope.)
 ```yaml
 server:
   rerank: qwen3-rerank-0.6b                      # the default: a Qwen3-Reranker GGUF
-  # rerank: hf:mradermacher/Qwen3-Reranker-4B-GGUF/Qwen3-Reranker-4B.Q6_K.gguf   # a specific rung
+  # rerank: hf:mradermacher/Qwen3-Reranker-4B-GGUF/Qwen3-Reranker-4B.Q6_K.gguf   # a specific quant
   # rerank: ~/models/Qwen3-Reranker-4B.Q6_K.gguf   # a local GGUF
 ```
 
-Its value is a `qwen3-rerank-*` alias (`0.6b`/`4b`/`8b`, default rung
+Its value is a `qwen3-rerank-*` alias (`0.6b`/`4b`/`8b`, default quant
 `Q8_0`), a `*.gguf` path, or an `hf:<org>/<repo>/<file>.gguf` ref. The
 reranker is independent of the embedder, but `gmlx init` defaults its quant
-to the embedder's chosen rung. The request is the Cohere/Jina shape (`query`,
+to the embedder's chosen quant. The request is the Cohere/Jina shape (`query`,
 `documents` as strings or `{"text": ...}` objects, and optional `top_n`,
 `instruction`, `return_documents`); the response is `results` (sorted
 best-first, each with `index` + `relevance_score`), plus `model` and `usage`:
@@ -250,7 +250,7 @@ curl localhost:8080/v1/rerank -H 'content-type: application/json' \
 The server serves one configured reranker (the request `model` is echoed but
 never selects a different one). Scoring is one model forward per document,
 serialized in a worker thread, interleaving with batched LLM decode.
-`gmlx launch open-webui` points Open WebUI's external reranker here
+`gmlx launch open-webui` configures Open WebUI's external reranker to use it
 automatically when the server advertises `rerank` via `/v1/models` (it sets
 `RAG_RERANKING_ENGINE=external`, `RAG_EXTERNAL_RERANKER_URL=<server>/v1/rerank`,
 `RAG_RERANKING_MODEL=reranker`, and enables hybrid search, which is when

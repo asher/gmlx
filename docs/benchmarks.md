@@ -3,14 +3,14 @@
 Single-stream (concurrency 1) server throughput of gmlx against
 llama.cpp on the same GGUF across the fleet, at KV depths from 512 to
 200k+ tokens. Prefill is faster on every model at every measured
-depth; above 4k depth decode is too, and the gap widens as context
+depth; above 4k depth decode is too, and the gap grows as context
 deepens. Speculative decode (MTP) is measured where a
 native/preserved MTP head exists.
 
 Machine-readable data: [benchmarks.json](benchmarks.json). Any cell
 is reproducible with the bundled harness in [bench/](../bench/).
 
-## Fleet at a glance
+## Fleet summary
 
 Throughput speedup vs KV depth (gmlx / reference engine, every model):
 
@@ -38,7 +38,7 @@ same sampler, and the same chat prompts on both engines.
 | gmlx | `0.1.0` (fleet default) |
 | mlx-kquant | `0.3.5` (K-quant + perf kernels; fleet default) |
 | llama.cpp | `b9967` |
-| Build overrides | models rebenched on newer releases carry their own builds; see Model provenance |
+| Build overrides | models rebenched on newer releases list their own builds; see Model provenance |
 | DeepSeek-V4-Flash reference | ds4-server (antirez's dwarfstar) @ `b030961`, ignore-eos patched |
 | Dates | 2026-07-05 .. 2026-08-29 |
 | Prompt corpus | HuggingFaceH4/ultrachat_200k:train_sft (chat template applied) |
@@ -57,10 +57,10 @@ round on both engines; the baseline column is the same server with it off.
 Chart labels are sanitized (abliterated community builds render as the
 base model); this table is the weight mapping for reproduction.
 Builds is what each model's rows were measured on: models are
-rebenched independently, so a newer build on one row says nothing
-about the others. Measured is the date of the newest run still
-contributing cells to the row (partial reruns fold onto older
-ladders cell by cell).
+rebenched independently, so a newer build on one row does not apply
+to the others. Measured is the date of the newest run still
+contributing cells to the row (partial reruns replace cells of older
+depth series one by one).
 
 | Model | GGUF file | Source | MTP | Builds | Measured |
 |---|---|---|---|---|---|

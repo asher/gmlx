@@ -28,7 +28,7 @@ modified, so the output is the base with its existing quantization error plus
 the exact adapter delta in full precision. Merging would force a
 requantization of the adapted weights.
 
-If you have the full-precision model and the memory to spare, fine-tune that
+If you have the full-precision model and enough memory, fine-tune that
 and quantize afterward. Training on the quant is for when the quant is all
 you can fit.
 
@@ -47,7 +47,7 @@ Face dataset id, in any format mlx-lm's LoRA trainer accepts: chat records
 records suit an instruct base, since the trainer applies the base's own chat
 template. The example dataset,
 [GPT007/pirate_speak](https://huggingface.co/datasets/GPT007/pirate_speak),
-ships 100 turns as Llama-3-formatted text, so a short script re-emits them as
+contains 100 turns as Llama-3-formatted text, so a short script re-emits them as
 chat records. It needs the `datasets` package, which gmlx does not install:
 
 ```python
@@ -78,9 +78,9 @@ gmlx train Qwen3-0.6B-Q8_0.gguf --data ./pirate-data \
 ```
 
 Train loss should fall steadily. With only 90 examples, stop around 150
-iterations; pushing further overfits, validation loss climbs and greedy
-decoding can fall into loops. `--num-layers` and `--rank` trade capacity for
-memory, and the defaults of 8 layers at rank 8 are a sensible start. The
+iterations; training longer overfits, validation loss rises and greedy
+decoding can repeat. `--num-layers` and `--rank` trade capacity for
+memory, and the defaults of 8 layers at rank 8 are a reasonable starting point. The
 walkthrough targets a dense base; on a MoE base the default adaptation keys
 are untested. The flag table is under [gmlx train](cli.md#gmlx-train).
 
@@ -93,8 +93,8 @@ gmlx serve Qwen3-0.6B-Q8_0.gguf --adapter pirate-lora.gguf
 ```
 
 Qwen3 is a thinking model, so `run` emits a `<think>` block first. The pirate
-data has no thinking, so the adapted model thinks briefly and gets straight
-to the arrr.
+data has no thinking, so the adapted model thinks briefly and then answers
+in pirate speech.
 
 The single-model `serve` form registers the adapted model under the
 file-derived id and the bare base as `<id>-base` on the same loaded model, so
@@ -137,7 +137,7 @@ Everything that changes how the model is loaded must agree across the group:
 same `path`, same `context_length`, same `speculative`, and so on. An id that
 differs in more than `adapter:` becomes its own entry with its own copy of
 the weights, so keep the group's other keys identical or inherit them from a
-profile. The footprint shows as a single entry under `resident_models` on
+profile. The memory use shows as a single entry under `resident_models` on
 `GET /v1/metrics`, and `curl localhost:8080/v1/models` lists all three ids.
 
 There is nothing adapter-specific in the API. Each request names an id, and
@@ -175,7 +175,7 @@ Adapters interact with two other features:
 
 The sorted adapter set is part of what identifies the loaded model. Adding an
 id with a new adapter and reloading the config builds a new entry while the
-old one ages out, so plan for both footprints being briefly resident, or
+old one is evicted after its idle time, so plan for both copies being briefly resident, or
 restart instead of reloading when the base is large.
 
 Serving base and adapters together at the low cost above needs an mlx-kquant

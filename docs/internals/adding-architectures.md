@@ -1,6 +1,6 @@
 # Adding a GGUF architecture
 
-What it takes for a new model family to become a supported architecture, and
+What is required for a new model family to become a supported architecture, and
 the acceptance gate every family clears before its row appears in the
 [coverage matrix](../arch-coverage.md).
 
@@ -9,21 +9,21 @@ normally comes from the installed mlx-lm or mlx-vlm, and gmlx supplies only the
 tensor map and the config.
 
 A few families have no upstream class at all (kimi-k3, muse-glimmer). gmlx
-vendors the model math for those, in its own module, grafted into the upstream
-namespace so a later upstream implementation wins. Vendoring is the exception.
-It is worth the cost only when the family is otherwise unreachable, and it adds
+vendors the model math for those, in its own module, inserted into the upstream
+namespace so a later upstream implementation takes precedence. Vendoring is the exception.
+It is justified only when the family cannot otherwise be supported, and it adds
 two obligations: numeric parity against llama.cpp, and a collision check that
-reports the graft once upstream ships its own class.
+reports the collision once upstream publishes its own class.
 
-## The shape of the work
+## What the work involves
 
 The engine is architecture-generic and data-driven: the load pipeline and the
-module-swap machinery are never edited per arch. A new family adds:
+module-swap code are never edited per arch. A new family adds:
 
 - a tensor-name map from the GGUF's naming to the mlx-lm model class's
   parameter paths,
 - a config synthesizer that reconstructs the exact `ModelArgs` the model class
-  wants from the GGUF's key-value metadata (and, where the metadata is lossy,
+  expects from the GGUF's key-value metadata (and, where the metadata is lossy,
   from tensor shapes),
 - an architecture-table row that the CLI, preflight, and coverage matrix
   derive from,
@@ -33,21 +33,21 @@ it diverge: per-tensor remap overrides, wire-byte transforms for fused or
 permuted weight layouts, occasionally a new module class or a
 tokenizer-classifier branch.
 
-That last list is where the effort lives, and it varies widely. A clean
-Llama-layout family can resolve with near-zero per-arch code in an afternoon.
+That last list is where most of the effort goes, and it varies widely. A clean
+Llama-layout family can be supported with near-zero per-arch code in a few hours.
 Hybrids and exotic layouts (SSM mixes, MLA attention, MoE variants with biased
-projections, fused expert tensors, new float formats) are real engineering
-with real debugging time. Don't judge the work by the shortest case. Vision
-and audio towers are a parallel track with the same gate philosophy
-([vlm.md](../vlm.md) lists what's supported).
+projections, fused expert tensors, new float formats) take significant engineering
+and debugging time. Do not estimate the work from the simplest case. Vision
+and audio towers are a separate track with the same gate rules
+([vlm.md](../vlm.md) lists what is supported).
 
 ## Why the gate is strict
 
 The characteristic failure modes of a mis-ported architecture are silent. A
-wrong rope layout or a bias landing on a quantized weight slot still produces
-fluent, plausible text on short prompts; the damage only surfaces deep into a
+wrong rope layout or a bias assigned to a quantized weight slot still produces
+fluent, plausible text on short prompts; the error only appears far into a
 long context. That is why fluent generation does not count as done, and why
-the parity bar sits at 16k tokens. The same standard cuts the other way too:
+the parity requirement is 16k tokens. The same standard also applies in reverse:
 when every public GGUF of a family is broken upstream, the loader gates the
 family off by name with the reason (the current `gemma3n` case) rather than
 load cleanly into wrong weights.
@@ -66,25 +66,25 @@ An architecture is done when:
   greedy-decoded, agrees as text with llama.cpp on the same file. Short-prompt
   parity is necessary but not sufficient: rope, KV-cache, GQA-layout, and
   permute bugs only surface at depth. Prepend BOS for `add_bos_token=True` archs
-  and match llama.cpp's prompt token count, so a tokenization delta isn't
+  and match llama.cpp's prompt token count, so a tokenization delta is not
   misread as a model bug. If the installed mlx-lm has a known context limitation
   for the family (e.g. a missing sliding-window implementation), cap the
   comparison window and document it in the arch notes.
 - Degeneration check: `test_long_decode_integrity`. A long EOS-suppressed
   greedy decode with every token id in range, every step's logprob finite, and
-  no single-token spam. Semantic looping on a tiny model is expected. NaNs and
+  no single-token repetition. Semantic looping on a tiny model is expected. NaNs and
   out-of-range ids are not.
 - Bench sanity: prefill/decode throughput on one real model, compared
   against llama.cpp on the same file. A large unexplained deficit is usually a
-  contiguity or layout bug, not "MLX being slow."
+  contiguity or layout bug, not MLX itself.
 - Route check at depth: run a >=16k-context decode (and an MTP round if the
   family has a draft head) with `GMLX_SDPA_DEBUG=1` and confirm attention
-  lands on a fused route (`gqa_decode`/`fa_decode`/`fa_verify`/`verify_gemm`/
+  uses a fused route (`gqa_decode`/`fa_decode`/`fa_verify`/`verify_gemm`/
   `sdpa_vector`), not `stock`. A new family's head geometry (head_dim, GQA
-  ratio, verify fold width) can silently miss every eligibility gate and pay a
+  ratio, verify fold width) can silently miss every eligibility gate and incur a
   materialized-scores penalty that only shows at depth. `GMLX_ROUTE_LOG=1`
   prints per-route call counts at exit; a one-shot warning also fires if a
-  verify-shaped causal call at depth falls to stock. For MTP families, check
+  verify-shaped causal call at depth falls back to stock. For MTP families, check
   the verify branch with `GMLX_MTP_DEBUG=1` (`[mtp] verify branch: ...`).
   Serve perf claims must be certified in the actual server process (the
   round profile works there: `GMLX_ROUND_PROFILE=1` +
@@ -116,7 +116,7 @@ The tiers these tests run in, and how to select a GGUF-gated tier, are in
 
 ## Requesting or contributing a family
 
-Missing a family you care about? Open an issue with a link to the GGUF (or its
+To request a family, open an issue with a link to the GGUF (or its
 Hugging Face repo) and the model's `general.architecture` string;
 `gmlx validate <ref>` prints it without downloading the file. Contributions
 are welcome: a new-architecture PR is expected to pass the acceptance gate

@@ -24,7 +24,7 @@ server:
 The default GGUFs, about 0.6 GB each, resolve from your local Hugging Face
 cache only, so fetch them first with `gmlx pull`. A server that starts
 without them disables the endpoint until the file is present. Both services
-warm in the background at startup, live outside the chat residency pool so a
+load in the background at startup, are outside the chat residency pool so a
 re-index and chat never evict each other, and run in a worker thread that
 interleaves with batched chat decode.
 
@@ -32,7 +32,7 @@ interleaves with batched chat decode.
 
 The default embedder is a Qwen3-Embedding GGUF run as a decoder embedder with
 last-token pooling, so it loads like any other GGUF and carries the model's
-full 32k context: long documents embed without truncation. Step up to
+full 32k context: long documents embed without truncation. Use
 `qwen3-embed-4b` or `-8b` for better retrieval at a bigger index, or point
 the key at any local or `hf:` GGUF. Encoder options exist too, including
 EmbeddingGemma from a GGUF and several safetensors encoders that download
@@ -103,7 +103,7 @@ indices and scores only. An optional `instruction` overrides the default
 query instruction. Scoring is one model forward per document, so keep the
 candidate list to a vector search's shortlist of tens, not thousands.
 
-## Wire up Open WebUI
+## Configure Open WebUI
 
 `gmlx launch open-webui` points Open WebUI's document embedder at this
 server, points its external reranker here when the server advertises one,
@@ -120,4 +120,4 @@ built-in assistant's long-term memory embeds remembered facts through this
 same endpoint and reorders recall through `/v1/rerank`
 ([assistant.md](assistant.md#memory)). To give the assistant retrieval over
 your own documents as a tool it can call, add a vector-store MCP server
-([tool recipes](assistant.md#tool-recipes)).
+([tool examples](assistant.md#tool-examples)).

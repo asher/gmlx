@@ -1,6 +1,6 @@
 # Internals
 
-How gmlx works under the hood, for contributors. Users start at
+How gmlx works internally, for contributors. Users start at
 [../README.md](../README.md).
 
 | Page | Contains |
@@ -11,5 +11,5 @@ How gmlx works under the hood, for contributors. Users start at
 | [adding-architectures.md](adding-architectures.md) | what adding a model family involves and the acceptance gate |
 | [testing.md](testing.md) | test tiers, GPU-gated invocations, the end-to-end harnesses |
 | [upstream-upgrades.md](upstream-upgrades.md) | bumping the pinned mlx-vlm, mlx-lm and mlx versions |
-| [streaming-measurements.md](streaming-measurements.md) | the case studies behind the streaming guide's lossy-lever table |
+| [streaming-measurements.md](streaming-measurements.md) | the case studies behind the streaming guide's lossy settings table |
 | [debug-switches.md](debug-switches.md) | environment variables for isolating defects |

@@ -1,11 +1,11 @@
 # Serving architecture
 
-How the gmlx server turns a loaded GGUF into a continuously batched HTTP
+How the gmlx server serves a loaded GGUF as a continuously batched HTTP
 server, for contributors. The config surface and endpoints are documented in
 [server-config.md](../server-config.md) and [api.md](../api.md); this page
-covers the mechanics underneath.
+covers the implementation.
 
-gmlx is an adoption layer. It installs late-bound patches over a small set of
+gmlx is a thin patch layer over stock mlx-vlm. It installs late-bound patches over a small set of
 mlx-vlm seams and leaves the stock app, batching engine and protocol handlers
 untouched. Loads route to the gmlx loader, which reads GGUF bytes through
 mlx-kquant's C++ reader and swaps model leaves for K-quant kernels. The stock
@@ -83,36 +83,36 @@ flowchart TD
 The loader, `gmlx.load_model`, parses the GGUF bytes, remaps tensor names to
 the Hugging Face layout, synthesizes the config and tokenizer including the
 chat template, builds the stock model class, and swaps the quantized leaves
-for K-quant modules. A VLM adds a second file carrying the vision or audio
+for K-quant modules. A VLM adds a second file containing the vision or audio
 tower. The output is a model, config and tokenizer triple with no safetensors
 round-trip.
 
 An adapter wraps a text model in mlx-vlm's text-only model class, which
 exposes the embedding and language-model interface the engine expects, and
 attaches stopping criteria to the tokenizer. VLM models are wrapped in their
-mlx-vlm class instead. Wrapped models live in a residency pool of pinned and
+mlx-vlm class instead. Wrapped models are held in a residency pool of pinned and
 LRU entries that owns the single process-wide wired limit.
 
 The engine is mlx-vlm's batch generator: continuous batching over a ragged
-KV cache, fed embeddings that the request path precomputes. Prefix reuse is
+KV cache, given embeddings that the request path precomputes. Prefix reuse is
 the prompt cache manager, which picks a tier per architecture
 ([prompt-cache.md](prompt-cache.md)). Speculative decoding runs gmlx's own
 verify round, which keeps the prompt cache available under a drafter
 ([speculative-batching.md](speculative-batching.md)).
 
-Above the engine sits mlx-vlm's FastAPI app: OpenAI chat completions, OpenAI
+Above the engine is mlx-vlm's FastAPI app: OpenAI chat completions, OpenAI
 Responses and Anthropic Messages, each with streaming. Tool calls are
 extracted from the raw token stream by mlx-lm's tool parsers, selected from
-the model's chat template, and re-emitted in each protocol's shape. Each
+the model's chat template, and re-emitted in each protocol's format. Each
 request's sampling parameters resolve through the config precedence chain
 before generation, from the family's model-card defaults up to the request's
 own fields ([Precedence](../server-config.md#precedence)). Served assistant
-ids sit in front of this layer: a request to one runs the tool loop on a
+ids are handled in front of this layer: a request to one runs the tool loop on a
 worker thread, each round re-entering the server as an ordinary loopback
 client ([served assistants](../assistant.md#served-assistants)).
 
-Clients are anything that speaks either API. Pointing `ANTHROPIC_BASE_URL`
-at the server lets Anthropic-API tools such as Claude Code drive a local
+Clients are anything that implements either API. Pointing `ANTHROPIC_BASE_URL`
+at the server lets Anthropic-API tools such as Claude Code use a local
 model.
 
 ## The request path through the seams

@@ -16,7 +16,7 @@ GPU kernel is dispatched, so it runs anywhere, including CI. It covers the
 remap tables, config and tokenizer synthesis, the arch gate, weight
 transforms, preflight, the config loader, the family sampling profiles,
 discovery, the serving id layer, residency, the server patches and the chat
-client, where `tests/tui/test_chat_e2e.py` drives the real multi-turn loop
+client, where `tests/tui/test_chat_e2e.py` runs the real multi-turn loop
 with the model layer faked.
 
 ```sh
@@ -24,8 +24,8 @@ pytest                       # whole suite; GGUF-gated tests skip
 pytest tests/test_config.py  # one module
 ```
 
-Set `KQUANT_FORCE_CPU=1` on a box with no usable Metal GPU to keep the few
-tests that touch array ops off the GPU path. The doc tests
+Set `KQUANT_FORCE_CPU=1` on a machine with no usable Metal GPU to keep the few
+tests that use array ops off the GPU path. The doc tests
 (`tests/test_docs_*.py`) and `scripts/check-docs.py` are part of this tier.
 
 ## GGUF-gated integration tests
@@ -38,7 +38,7 @@ enough to exercise a path.
 
 | Module | Extra gate | What it checks |
 |--------|------------|----------------|
-| `tests/gen/test_batch_parity.py` | | batched decode is faithful to single-stream |
+| `tests/gen/test_batch_parity.py` | | batched decode matches single-stream |
 | `tests/gen/test_long_context.py` | | long-decode integrity at 16k or more: in-range ids, finite logprobs, no single-token collapse |
 | `tests/gen/test_long_context.py::test_long_prefill_parity` | `KQUANT_LLAMACPP_BIN` | long-prefill greedy output agrees with llama.cpp |
 | `tests/spec/test_mtp.py` (one case) | | a native-head MTP GGUF's drafter has full remap coverage |
@@ -54,7 +54,7 @@ KQUANT_TEST_GGUF_DIR=~/models KQUANT_LONGCTX_TOKENS=4096 \
   pytest tests/gen/test_long_context.py::test_long_decode_integrity -k gemma3
 ```
 
-| Knob | Effect |
+| Setting | Effect |
 |------|--------|
 | `-k <arch>` | restrict to one architecture; without it the suite sweeps every arch present |
 | `KQUANT_LONGCTX_TOKENS=4096` | shrink the long-context length from the 16384 default |
@@ -74,7 +74,7 @@ KQUANT_TEST_GGUF_DIR=~/llm/gguf-test GMLX_TEST_BIG_GGUFS=1 \
 
 `tests/e2e/` holds standalone scripts that launch the real server, load
 models on the GPU, and grade the results. They are not part of the pytest
-suite, though `tests/test_e2e_harness_smoke.py` pins every harness's imports
+suite, though `tests/test_e2e_harness_smoke.py` checks every harness's imports
 and argument tree in CI. Each harness is described, with its tiers, grading
 and model bootstrap, in [tests/e2e/README.md](../../tests/e2e/README.md).
 
@@ -85,7 +85,7 @@ and model bootstrap, in [tests/e2e/README.md](../../tests/e2e/README.md).
 | `run_residency_switch_e2e.py` | two models that cannot both be resident |
 | `run_stream_e2e.py` | a streamed model through load cycles, memory pressure and coresidency; run `memguard.py` beside it |
 | `run_apc_disk_e2e.py`, `run_apc_depth_e2e.py` | prompt-cache reuse across restarts and at depth, per tier |
-| `run_lora_e2e.py` | prep, train, serve base and adapter, assert the voice took |
+| `run_lora_e2e.py` | prep, train, serve base and adapter, assert the adapter changed the output style |
 | `run_chat_pty_e2e.py` | the chat client in a real pseudo-terminal |
 
 ```sh
@@ -96,11 +96,11 @@ python tests/e2e/run_server_e2e.py                # full run; writes report.md a
 
 ## Voice loop manual pass
 
-A manual checklist after touching the `gmlx talk` loop. Nothing here is
+A manual checklist after changing the `gmlx talk` loop. Nothing here is
 covered by unit tests, which fake audio and HTTP:
 
 1. Server down, `gmlx talk`: autostarts, capability check passes, prompt appears.
-2. Wake phrase, question, spoken reply; stopwatch end-of-speech to first audio.
+2. Wake phrase, question, spoken reply; time end-of-speech to first audio.
 3. Space mid-reply stops speech quickly; the next wake still works.
 4. `/voice` switch, to a Kokoro preset and, if configured, a qwen3-tts speaker.
 5. A long multi-sentence answer plays without gaps or underruns.

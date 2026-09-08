@@ -39,11 +39,11 @@ stateDiagram-v2
 ## Preempting a scalar generation
 
 The scalar loop has no injection boundary; its speed comes from not being a
-batch. Making a prefilled request wait for the incumbent to finish is wrong
-on both axes: the waiter's time to first token stretches to the incumbent's
-remaining generation, and aggregate throughput loses too, because a single
+batch. Making a prefilled request wait for the running request to finish is worse
+on both measures: the waiter's time to first token grows to the running request's
+remaining generation, and aggregate throughput drops too, because a single
 speculating stream is slower than the same hardware decoding several streams
-plain. So when waiters queue against a live scalar generation the server
+plain. So when waiters queue behind a live scalar generation the server
 preempts it:
 
 1. The scalar generator closes at its verify-round boundary. Its cleanup
@@ -51,14 +51,14 @@ preempts it:
    next undelivered token, the round's bonus token, has no KV entry yet.
 2. The generation is rebuilt as a batch-loop generator restarting from that
    bonus token with its real emitted count, but unarmed: no drafter state,
-   no captured hidden state. Single-sequence caches are lifted to their batch
-   classes on the way.
+   no captured hidden state. Single-sequence caches are converted to their batch
+   classes during the rebuild.
 3. The rebuilt loop's first injection drain admits the waiters. If the new
    width exceeds the cap the batch decodes plain, which any second stream
    does under a cap of 1; otherwise the batch arms itself with a capture
    round and keeps speculating at the new width.
 
-Meanwhile the incumbent's stream continues without a gap. Its rate steps down from
+Meanwhile the running request's stream continues without a gap. Its rate drops from
 solo speculative to shared plain while the batch is wide, and total tokens
 per second across streams goes up.
 
@@ -78,13 +78,13 @@ fresh captures rather than reusing per-row state:
    emits one token per row at plain-decode cost.
 3. The drafter is reset and cold-started from the capture. Drafters that
    teacher-force a prompt seed from target hidden state accept the one-token
-   capture and ramp back over the next rounds; shared-KV drafters get their
+   capture and recover acceptance over the next rounds; shared-KV drafters get their
    view re-set through the same round tail every armed round uses.
 4. Subsequent rounds speculate normally at the drained width.
 
-Rows within a small remaining-budget threshold are not worth the capture
-cost and finish plain. A new admission landing in the same round wins over a
-pending resume: the injection drain runs first and re-trips the gate, so a
+Rows with fewer remaining tokens than a small threshold skip the capture
+and finish plain. A new admission in the same round takes precedence over a
+pending resume: the injection drain runs first and re-triggers the gate, so a
 batch never arms over the cap.
 
 ## Semantics
@@ -94,8 +94,8 @@ batch never arms over the cap.
   before capturing. Nothing is skipped, re-emitted or re-sampled.
 - A preempted request decodes under batch-loop semantics for the rest of its
   generation, including after the batch drains to a single row: greedy
-  drafting rather than coupled sampling, which costs a few points of
-  acceptance at temperature. The next request starts scalar again.
+  drafting rather than coupled sampling, which lowers acceptance by a few points
+  at temperature. The next request starts scalar again.
 - A preempted request drops its prompt-cache retirement context, so its
   prefix is not offered back to the cache when it finishes. Waiters and later
   requests retire normally.

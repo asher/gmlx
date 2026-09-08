@@ -97,7 +97,7 @@ hint.
 
 While running, Space stops speech or drives push-to-talk, Esc cancels the
 current turn, `m` mutes the mic, and `q` quits. Typing any printable
-character drops into line input.
+character switches to line input.
 
 | Command | Effect |
 |---------|--------|
@@ -114,11 +114,11 @@ character drops into line input.
 
 ## The assistant by voice
 
-`talk.brain: assistant` upgrades the turn engine from plain chat to the
+`talk.brain: assistant` switches the turn engine from plain chat to the
 built-in [assistant](assistant.md): the model can call tools mid-turn and the
 conversation gains long-term memory. Tools come from MCP servers you
 configure, and memory is a local store built on the server's own embeddings.
-This example wires two MCP servers that run locally with no API keys, the
+This example configures two MCP servers that run locally with no API keys, the
 reference filesystem server (needs Node) and the reference fetch server
 (needs uv), and turns memory on, which needs `embeddings:` on the server:
 
@@ -171,7 +171,7 @@ assistant: Noted. Ana's birthday is March 12th.
 ```
 
 Quit, relaunch later, ask when your sister's birthday is, and the assistant
-answers from memory. What it stored is a distilled fact, not a transcript,
+answers from memory. What it stored is an extracted fact, not a transcript,
 extracted in the background after the turn so it adds no latency. The store
 is shared with `gmlx chat --assistant`, and `/memory` inspects it from inside
 a session. The rules, the on-disk location and the security model are in
@@ -179,14 +179,14 @@ a session. The rules, the on-disk location and the security model are in
 
 Two things to know. Tool rounds cost time, a model turn plus the call each,
 so multi-tool answers are slower than plain chat. And a barge-in still
-interrupts cleanly: the loop commits what you heard and never leaves a
+is handled correctly: the loop commits what you heard and never leaves a
 half-finished tool round in the history.
 
 ## Configuration reference
 
-Everything lives in a top-level `talk:` block of the same YAML the server
+Every key is in a top-level `talk:` block of the same YAML the server
 reads. It configures the client, so it is not under `server:`. Most keys have
-a flag mirror under [gmlx talk](cli.md#gmlx-talk); `vad.pre_roll_ms` and
+a matching flag under [gmlx talk](cli.md#gmlx-talk); `vad.pre_roll_ms` and
 `push_to_talk_modifier` are config-only. Precedence is defaults, then YAML,
 then flags.
 
@@ -237,14 +237,14 @@ playback, so long answers speak continuously.
 
 | Tuning | Trade |
 |--------|-------|
-| `vad.silence_ms` down to about 400 | a snappier turn against more mid-sentence cutoffs |
-| `stt: whisper-turbo-q4` | shaves the transcription step |
-| `max_tokens` around 512 | keeps answers conversational |
+| `vad.silence_ms` down to about 400 | a faster turn at the cost of more mid-sentence cutoffs |
+| `stt: whisper-turbo-q4` | shortens the transcription step |
+| `max_tokens` around 512 | keeps answers short |
 
-In wake mode the wake phrase itself barges in: the keyword spotter stays live
+In wake mode the wake phrase itself interrupts a reply: the keyword spotter stays live
 while the assistant transcribes, thinks and speaks, so saying the phrase
 mid-reply stops playback, cancels the turn and opens the mic. A stop phrase
-after it ("stop", "cancel", "never mind") acknowledges and goes back to sleep
+after it ("stop", "cancel", "never mind") acknowledges and returns to waiting for the wake phrase
 instead of starting a turn. Space and Esc do the same from the keyboard
 within about 150 ms.
 
@@ -252,8 +252,8 @@ Only wake-phrase scoring runs during a reply. Full transcription of the open
 mic stays gated, since playback would otherwise be re-transcribed, so `vad`
 and `ptt` modes are half-duplex and keyboard-interrupt only. There is no
 protection against the assistant speaking the wake phrase: if a reply quotes
-it aloud, the spotter hears it through the speakers. Pick a phrase the model
-is unlikely to say. Whisper's stock hallucinations on silence and noise are
+it aloud, the spotter detects it through the speakers. Pick a phrase the model
+is unlikely to say. Whisper's known hallucinations on silence and noise are
 filtered by a minimum-speech and energy floor before transcription and a
 known-phrase check after, so noise does not become a turn.
 

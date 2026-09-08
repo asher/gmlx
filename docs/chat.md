@@ -22,7 +22,7 @@ The flags are under [gmlx chat](cli.md#gmlx-chat).
 | `/system [text|off]` | show or set the system prompt, which restarts the conversation |
 | `/retry`, `/undo` | regenerate the last reply, or remove the last exchange |
 | `/temp`, `/top-p`, `/top-k`, `/min-p`, `/max-tokens` and the other sampling commands | adjust the next reply; `/sampling` shows the current values |
-| `/thinking [on|off|adaptive|default]` | flip the model's own reasoning switch per turn |
+| `/thinking [on|off|adaptive|default]` | toggle the model's own reasoning per turn |
 | `/thinking-budget [N|off]` | cap a thinking model's reasoning tokens per reply |
 | `/reasoning show|hide|raw` | how thinking is displayed |
 | `/render rich|lite|plain` | the markdown renderer |
@@ -44,11 +44,11 @@ clears it.
 
 Arrow keys, Ctrl-A and Ctrl-E edit the line, and up-arrow history persists
 across sessions under `$XDG_CACHE_HOME/gmlx/`. `--no-history` keeps a
-session ephemeral. With the `chat` extra installed, completion menus pop as
+session ephemeral. With the `chat` extra installed, completion menus appear as
 you type a command, history offers ghost suggestions accepted with the
 right-arrow key, a bottom toolbar shows the live sampling settings, staged
 blocks, context fill and the last reply's speed, multi-line paste is handled
-cleanly, and Alt-Enter inserts a newline without submitting. Without the
+correctly, and Alt-Enter inserts a newline without submitting. Without the
 extra, readline provides line editing and Tab completion.
 
 Tab completes command names, the arguments of `/history` and `/reasoning`,
@@ -69,17 +69,17 @@ preset ([profiles](server-config.md#profiles)).
 `/retry` and `/undo` rewind the persistent KV cache to the turn's
 checkpoint, so nothing re-prefills, restore the pre-turn state including
 the system prompt and media markers, and work after a cancelled reply. A
-rotating cache that has wrapped its window cannot rewind; `/reset` then.
+rotating cache that has wrapped its window cannot rewind; use `/reset` instead.
 
 Every chat autosaves after each turn as JSON under
 `$XDG_DATA_HOME/gmlx/chats`, and `/reset` rotates to a fresh file so old
-conversations survive. `--no-autosave` opts out. `/load-session` restores
+conversations are preserved. `--no-autosave` opts out. `/load-session` restores
 settings and transcript at once, with the KV replay deferred to your next
-message, and `--resume` picks up the model's latest session at startup.
+message, and `--resume` resumes the model's latest session at startup.
 `/export` writes a markdown transcript with thinking in collapsed blocks.
 
 In server mode, `/model` lists the served ids and `/model <id>` switches the
-id the next turn goes to while keeping the transcript. The server re-reads
+id the next turn is sent to while keeping the transcript. The server re-reads
 the conversation under the new id, so a base and its adapters, which share
 one loaded model, can be compared mid-conversation
 ([lora.md](lora.md#serving-one-base-with-many-adapters)).
@@ -88,15 +88,15 @@ one loaded model, can be compared mid-conversation
 
 `/! <command>` runs a shell command and stages its output as a fenced block
 with the command as header and the exit status as footer, attached to your
-next message so your question and the evidence land in one turn. The prompt
-shows `(+n) >> ` while blocks are staged, several stack, Enter on an empty
+next message so your question and the output are sent in one turn. The prompt
+shows `(+n) >> ` while blocks are staged, several can be staged at once, Enter on an empty
 prompt sends them alone, and `/drop` discards them. Long output is
 middle-truncated at about 16 KB, stdin is closed so interactive commands
-cannot wedge the client, and Ctrl-C interrupts the command, not the session.
+cannot block the client, and Ctrl-C interrupts the command, not the session.
 
 With `--mmproj`, `/image` and `/audio` stage media the same way, and
 dragging a file from Finder into the terminal also works. Media markers stay
-pinned to the turn that sent them, so follow-ups reference earlier images
+attached to the turn that sent them, so follow-ups reference earlier images
 correctly. Media turns re-prefill the conversation each time; the KV-cached
 fast path is text-only. On a model with a drafter, text-only turns keep
 speculative decoding on and media turns fall back to the plain stream
@@ -106,12 +106,12 @@ speculative decoding on and media turns fall back to the plain stream
 
 For thinking models the chain of thought is stripped of its control markers
 and streamed in the theme's thinking style inside a framed block that closes
-with a line showing how long the model thought and how many tokens it spent.
+with a line showing how long the model thought and how many tokens it used.
 `--reasoning hide` drops the thinking and prints only the answer, and
 `--reasoning raw` passes everything through verbatim, for when a model's
-markers segment oddly. Ctrl-O toggles expand and collapse live during a reply.
+markers segment incorrectly. Ctrl-O toggles expand and collapse live during a reply.
 The stored conversation keeps the raw text in every mode, so display never
-changes what the model sees next turn.
+changes what the model receives next turn.
 
 Replies render as styled markdown while they stream. Completed blocks are
 printed permanently with native scrollback intact, and only the in-progress
@@ -124,7 +124,7 @@ Speculative decoding is on automatically for models with a native head, and
 `--draft-gguf` pairs a companion drafter; the reply streams the same way and
 the KV cache is reused across turns exactly like the plain path
 ([performance.md](performance.md#mtp-speculative-decoding)). On that path
-sampling is temperature, top-p, top-k and min-p only, since the verify walk
+sampling is temperature, top-p, top-k and min-p only, since the verify step
 has no penalty or bias hooks.
 
 ## Themes
@@ -154,7 +154,7 @@ themes:
 | Key | Values |
 |-----|--------|
 | slots | `thinking`, `heading`, `bold`, `italic`, `inline_code`, `code_block`, `code_border`, `bullet`, `blockquote`, `link`, `hr`, `stat`, `info`, `error` |
-| style keys per slot | `bold`, `dim`, `italic`, `underline` (booleans); `fg16` (ANSI code 30-37 or 90-97); `rgb` (truecolor, 256-color fallback, wins over `fg16`) |
+| style keys per slot | `bold`, `dim`, `italic`, `underline` (booleans); `fg16` (ANSI code 30-37 or 90-97); `rgb` (truecolor, 256-color fallback, overrides `fg16`) |
 | meta keys | `extends`, `code_theme`, `code_theme_cb`, `ptk_toolbar` |
 
 A malformed theme definition prints a warning at chat startup and is
