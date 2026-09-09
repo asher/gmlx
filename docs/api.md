@@ -68,7 +68,12 @@ All routes except `/health` require the API key when one is set.
 Each entry carries `resident`, `pinned`, `speculative`, `vlm`, `profile` and
 `default` markers and the GGUF's trained `context_length`. It also carries
 `max_context_at_width_1` from the capacity table for the model it was
-derived from. The Hugging Face cache is never listed.
+derived from. A resident model with KV quantization configured adds a
+`kv_quant` object: `scheme`, `bits`, `group_size`, `layers_quantized`,
+`layers_fp16`, a `verdict` of `full`, `partial`, `dropped` or `error`, and
+`verdict_batched` for a speculative model, which runs fp16 KV while batched.
+Under kvarn it also carries `value_bits` and `tail_tokens`. The Hugging Face
+cache is never listed.
 
 `GET /health` returns only `{"status": "healthy", "pid": N}` and is the only
 route the API key exempts. Adding `?ready=1` gives a coarse readiness

@@ -32,12 +32,11 @@ explain when to use it.
 `gmlx help <verb>` or `gmlx <verb> --help`. `run` and `chat` also take
 `--help-all` for their full flag set. `gmlx ls` is an alias for `gmlx list`.
 
-Settings that exist as a flag, a config key and an environment variable are
-resolved flag first, then config key, then environment. The config keys are in
-[server-config.md](server-config.md) and the variables in
-[env-vars.md](env-vars.md). Sampling flags you leave unset take the model's
-family defaults, listed in
-[server-config.md](server-config.md#family-defaults).
+Many settings exist as a flag, a config key and an environment variable.
+How they combine is under [Precedence](server-config.md#precedence) in the
+config reference, and the variables are in [env-vars.md](env-vars.md).
+Sampling flags you leave unset take the model's
+[family defaults](server-config.md#family-defaults).
 
 ## gmlx init
 
@@ -71,7 +70,7 @@ gmlx init --from-hf-cache                  # models already in the Hugging Face 
 | `--default-model ID` | none | the model used when a request omits one |
 | `--port N` | `8080` | the port to write |
 | `--idle-ttl SECONDS` | `900` | idle seconds before a model unloads. `none` keeps models resident |
-| `--request-timeout DURATION` | `30m` in the written file | fail the request when no token arrives for this long, such as `10m` or `1h`. `none` waits forever |
+| `--request-timeout DURATION` | unset, and the server applies `30m` | fail the request when no token arrives for this long, such as `10m` or `1h`. `none` waits forever |
 | `--no-reload` | off | do not signal a running server to re-read the file |
 
 Auto-named ids carry the quant in compact form, such as `qwen3-0.6b-q4`, and
@@ -95,10 +94,6 @@ gmlx serve --models-dir ~/models --recursive
 gmlx serve model-Q4_K_M.gguf                # one model, id from the filename
 gmlx serve model.gguf --mmproj mmproj.gguf  # one vision model
 ```
-
-The single-model settings apply to a positional GGUF only, because in config
-mode each of them is a per-model key in
-[server-config.md](server-config.md#models).
 
 These flags say where the models come from:
 
@@ -124,7 +119,8 @@ These flags control the process and its lifecycle:
 | `--log-level LEVEL` | `info` | `critical`, `error`, `warning`, `info`, `debug` or `trace` |
 | `--start-timeout S` | `40` | seconds a background start waits for readiness before returning |
 
-These flags set memory and scheduling. Each is also a `server` key:
+These flags set memory and scheduling. Most are also `server` keys in the
+config, where the same settings apply to a config-mode server:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -138,7 +134,8 @@ These flags set memory and scheduling. Each is also a `server` key:
 | `--prefill-tick-ms MS` | `500` | wall-clock budget for each prefill chunk while streams decode. `0` never halves |
 | `--ignore-eos` | off | decode each request to `max_tokens`, for throughput benchmarks |
 
-These are the single-model settings. Each is also a per-model key:
+These settings apply to a positional GGUF only. In config mode the same
+things are per-model keys under [models](server-config.md#models):
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -186,10 +183,12 @@ in [services.md](services.md):
 | `--embeddings [MODEL]` | off | embeddings at `POST /v1/embeddings`. Bare is `qwen3-embed-0.6b`. No extra is needed |
 | `--rerank [MODEL]` | off | reranking at `POST /v1/rerank`. Bare is `qwen3-rerank-0.6b`. No extra is needed |
 
-The API key is read from `server.api_key` in the config and nowhere else,
-which lets the lifecycle tools and the menu bar read the same file. Each
-completed request logs a line with the endpoint, model, token counts and
-timing:
+There is no `--api-key` flag on `serve`. The key lives in the config, as
+[bind and auth](server-config.md#bind-and-auth) explains, so that the
+lifecycle tools and the menu bar can read the same file.
+
+Each completed request logs a line with the endpoint, model, token counts
+and timing:
 
 ```text
 [req] 2026-06-15 16:07:42 /chat/completions qwen3-0.6b prompt=19 gen=3 ttft=0.47s prefill=45t/s decode=172.6t/s total=0.51s
@@ -248,10 +247,11 @@ are filtered out of it.
 ## gmlx service
 
 Installs a launchd login item on macOS. By default the item is the menu bar
-app, which starts the server at login unless `--no-autostart` is set, and
-macOS then attributes permission prompts to gmlx instead of to your
-terminal. `install` takes the `serve` flags, and the server it starts now is
-the one it starts again at each login.
+app, which starts the server at login unless `--no-autostart` is set. A
+server run this way gets its own identity, so macOS attributes permission
+prompts to gmlx instead of to your terminal. `install` takes the `serve`
+flags, and the server it starts now is the one it starts again at each
+login.
 
 ```sh
 gmlx service install --config ~/.config/gmlx/gmlx.yaml
@@ -351,7 +351,7 @@ These flags control memory:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--max-kv-size N` | none | cap the KV cache with a rotating window above it. Under kvarn the window quantizes. Under affine it is refused with `--kv-bits` |
+| `--max-kv-size N` | none | cap the KV cache with a rotating window. Combines with kvarn but not with affine `--kv-bits` |
 | `--kv-bits N` | off | quantize the KV cache to 2, 3, 4, 6 or 8 bits affine, or to 2, 3, 4, 5, 6 or 8 under kvarn, default 6 |
 | `--kv-group-size N` | `64` | affine quantization group size |
 | `--kv-quant-scheme {uniform,kvarn}` | `uniform` | `kvarn` is variance-normalized quantization, [performance.md](performance.md#kv-cache-quantization) |
@@ -360,12 +360,13 @@ These flags control memory:
 | `--prefill-step-size N` | `2048`, `8192` when streaming | prefill chunk size |
 | `--dtype {auto,bfloat16,float16}` | `auto` | activation width. `auto` is float16 on M1 and M2 |
 
-Under kvarn the first 128 tokens and the newest `--kv-tail-tokens` tokens
-stay fp16, so a `--max-kv-size` window must hold that sink, the tail and a
-128-token record, which is 384 tokens at tail 0 and 1280 at the default
-tail. Smaller windows exit 2, as does a width outside the scheme's list.
-When the scheme declines a model, `run` prints the reason and runs fp16 KV,
-and the VLM media path always keeps fp16.
+Under kvarn the first 128 tokens of the cache and the newest
+`--kv-tail-tokens` tokens stay fp16, and the quantized part between them is
+stored in 128-token blocks. A `--max-kv-size` window therefore has to hold
+at least 384 tokens with a zero tail, or 1280 at the default tail, and a
+smaller window exits 2, as does a width outside the scheme's list. When
+kvarn declines a model, `run` prints the reason and runs fp16 KV. The VLM
+media path always keeps fp16.
 
 These flags control loading:
 
@@ -404,13 +405,13 @@ These flags control speculative decoding, which
 | `--stochastic-mtp` | off | accept sampled drafts by rejection sampling. More accepted, not token-identical |
 
 Speculation honors `--temp`, `--top-p`, `--top-k`, `--min-p` and
-`--system-prompt`, and a flag it cannot honor, such as `--stop`, a penalty,
-`--logit-bias` or `--max-kv-size`, is dropped with a warning. Pass
-`--no-mtp` to decode on the plain path, which honors all flags. `--kv-bits`
-and `--kv-quant-scheme kvarn` apply on the MTP path and quantize the layers
-`serve` quantizes, although kvarn declines a sliding-window stack under MTP
-and an architecture whose drafter reads the target KV. The `[kv]` line gives
-the reason.
+`--system-prompt`. A flag it cannot honor, such as `--stop`, a penalty,
+`--logit-bias` or `--max-kv-size`, is dropped with a warning, and
+`--no-mtp` decodes on the plain path, which honors everything. KV
+quantization works on the speculative path and quantizes the same layers
+`serve` would. The exceptions are kvarn on a sliding-window stack and on an
+architecture whose drafter reads the target KV. There kvarn declines, and
+the `[kv]` line gives the reason.
 
 These flags stream a model bigger than memory, which
 [streaming.md](streaming.md) describes:
@@ -442,8 +443,8 @@ These flags inspect and benchmark:
 | `--bench-temp T` | `0` | temperature for speculative bench runs |
 | `--bench-chat-dataset DATASET` | synthetic | a Hugging Face chat dataset for bench prompts, `id` or `id:split` |
 
-Exit code 0 means success, 1 that the file cannot load, 2 a usage or file
-error and 130 an interrupt.
+Exit codes: 0 success, 1 the file cannot load, 2 a usage or file error,
+130 interrupted.
 
 ## gmlx chat
 
@@ -506,20 +507,21 @@ These flags control display and sessions:
 | `--resume [NAME]` | off | resume a saved session. Bare is this model's latest |
 | `-v`, `--verbose` | off | full load diagnostics |
 
-Loading, memory, multimodal, speculation and streaming take the same flags as
-[`gmlx run`](#gmlx-run): `--arch`, `--hf-source`, `--chat-template`,
-`--no-chat-template`, `--no-remap`, `--no-zero-copy`, `--adapter`,
-`--max-kv-size`, `--kv-bits`, `--kv-group-size`, `--kv-quant-scheme`,
-`--kv-tail-tokens`, `--quantized-kv-start`, `--prefill-step-size`, `--dtype`,
-`--mmproj`, `--resize-shape`, `--speculative`, `--mtp`, `--no-speculative`,
-`--no-mtp`, `--draft-gguf`, `--native-mtp`, `--draft-block-size`,
-`--stochastic-mtp`, `--stream-experts`, `--stream-cpu`, `--stream-fast-disk`,
-`--prefill-feeder`, `--no-prefill-feeder`, `--decode-feeder`,
-`--no-decode-feeder`, `--gpu-keepwarm`, `--moe-experts`, `--moe-expert-mass`,
-`--moe-expert-probe`, `--moe-miss-shed`, `--moe-layer-shed` and
-`--moe-prestage`. Local-load flags do not apply in the server modes. A base
-model with no chat template refuses to start until you pass one with
-`--chat-template` or send turns verbatim with `--no-chat-template`.
+A local load takes the same flags as [`gmlx run`](#gmlx-run), with the
+same meanings, so they are not repeated here:
+
+| Group | Flags shared with `run` |
+|-------|-------------------------|
+| loading | `--arch`, `--hf-source`, `--chat-template`, `--no-chat-template`, `--no-remap`, `--no-zero-copy`, `--adapter` |
+| memory | `--max-kv-size`, `--kv-bits`, `--kv-group-size`, `--kv-quant-scheme`, `--kv-tail-tokens`, `--quantized-kv-start`, `--prefill-step-size`, `--dtype` |
+| multimodal | `--mmproj`, `--resize-shape` |
+| speculation | `--speculative`, `--mtp`, `--no-speculative`, `--no-mtp`, `--draft-gguf`, `--native-mtp`, `--draft-block-size`, `--stochastic-mtp` |
+| streaming | `--stream-experts`, `--stream-cpu`, `--stream-fast-disk`, `--prefill-feeder`, `--no-prefill-feeder`, `--decode-feeder`, `--no-decode-feeder`, `--gpu-keepwarm` |
+| lossy streaming | `--moe-experts`, `--moe-expert-mass`, `--moe-expert-probe`, `--moe-miss-shed`, `--moe-layer-shed`, `--moe-prestage` |
+
+None of them applies when the chat is a server client. A base model with no
+chat template refuses to start until you pass one with `--chat-template` or
+send turns verbatim with `--no-chat-template`.
 
 ## gmlx launch
 
@@ -550,9 +552,9 @@ gmlx launch omp --config-only
 | `--start-timeout S` | unbounded | cap the auto-start wait |
 | `--no-keep` | off | do not keep `--model` resident |
 
-Exit code 0 means the tool ran or the server is ready, 1 that the server is
-unreachable or died, 2 no config or a malformed one and 130 an interrupt
-during the start wait.
+Exit codes: 0 the tool ran or the server is ready, 1 the server is
+unreachable or died, 2 no config or a malformed one, 130 interrupted during
+the start wait.
 
 ### launch menubar
 
@@ -585,7 +587,7 @@ gmlx pull hf:org/gemma-3-27b-GGUF/gemma-3-27b-Q4_K_M.gguf mmproj-F16.gguf
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `refs`, positional | required | `hf:<org>/<repo>/<file.gguf>[@rev]` or a URL. Later bare filenames resolve in the first ref's repo |
-| `--to DIR`, `--out DIR` | the first `model_dirs` root | download here, without the `<org>__<repo>` nesting |
+| `--to DIR`, `--out DIR` | the first `model_dirs` root | download into this directory instead, with no repo subfolder |
 | `--config FILE` | the first default location | the config to read `model_dirs` from |
 | `--force` | off | download even when the header check or the disk-space check fails |
 | `--no-register` | off | do not add the file to the config |
@@ -593,11 +595,11 @@ gmlx pull hf:org/gemma-3-27b-GGUF/gemma-3-27b-Q4_K_M.gguf mmproj-F16.gguf
 | `--max-mb N` | `128` | cap the header range read |
 | `--json` | off | emit each verdict as JSON before downloading |
 
-Downloads nest under `<dir>/<org>__<repo>/` so that a model's siblings stay
-together, and an interrupted download resumes from its `.part` file. Before
-starting, `pull` checks that the volume has space for all the shards. Set
-`HF_TOKEN` for gated repositories. A model that will not fit this Mac's RAM
-still downloads, with a note.
+Inside a `model_dirs` root, downloads nest under `<org>__<repo>/` so that a
+model's siblings stay together. An interrupted download resumes from its
+`.part` file, and before starting, `pull` checks that the volume has space
+for all the shards. Set `HF_TOKEN` for gated repositories. A model that
+will not fit this Mac's RAM still downloads, with a note.
 
 ## gmlx validate
 
@@ -633,17 +635,18 @@ gmlx validate https://huggingface.co/unsloth/Qwen3.6-27B-GGUF/blob/main/Qwen3.6-
 
 A split model is checked across all its shards, because a codec used by a
 single tensor can appear only in a later shard. Projector GGUFs are
-recognized as companions and are not checked as models. Exit code 0 means
-loadable, 1 not loadable and 2 that the reference could not be resolved or
-read.
+recognized as companions and are not checked as models.
+
+Exit codes: 0 loadable, 1 not loadable, 2 the reference could not be
+resolved or read.
 
 ## gmlx rm
 
-Deletes a model's GGUF files, its partial-download files and its companions,
-and removes the entry from the config. A file another model still references
-is kept. Aliases to the removed id are dropped, and the default model is
-cleared when it named it. Before anything is deleted, the plan is printed
-and confirmed.
+Deletes a model's GGUF files, its partial-download files and its
+companions, and removes the entry from the config. A file another model
+still references is kept. Aliases to the removed id are dropped, and if the
+removed id was the default model, the default is cleared. Before anything
+is deleted, the plan is printed and confirmed.
 
 ```sh
 gmlx rm old-model
@@ -660,8 +663,8 @@ gmlx rm old-model --keep-files
 | `--json` | off | emit the result as JSON. Needs `--yes` |
 | `--no-reload` | off | do not signal a running server to re-read the file |
 
-Exit code 0 means removed, 1 declined or a file that could not be deleted and
-2 an unknown id or no config.
+Exit codes: 0 removed, 1 declined or a file could not be deleted, 2 an
+unknown id or no config.
 
 ## gmlx sync-models
 
@@ -693,7 +696,8 @@ cache is unreadable, is kept and reported instead of dropped.
 
 Shows the models resident in a running server from its `/v1/metrics`
 snapshot, with the id, size, idle time, TTL, pinned state and path of each.
-A keyed server needs the key passed with `--api-key`.
+A keyed server needs the key, from `--api-key` or the `GMLX_API_KEY`
+variable.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -815,7 +819,7 @@ gmlx doctor --deep
 | `--deep` | off | also read each configured model's header |
 | `--json` | off | emit JSON |
 
-Exit code 0 means nothing failed, 1 that a check failed and 2 a usage error.
+Exit codes: 0 nothing failed, 1 a check failed, 2 a usage error.
 
 ## gmlx completion
 
