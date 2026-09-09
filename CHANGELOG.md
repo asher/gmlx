@@ -26,6 +26,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The prefill gate+up expert concat is built only when live memory plus the
+  copy leaves `GMLX_MOE_GATEUP_CONCAT_HEADROOM_GB` (default 8) under the
+  memory ceiling. On a 109 GB model with a native MTP head the target's and
+  the drafter's copies (3 GB) left the governor 1-2 GB of headroom and every
+  speculative request was shed; the plain arm lost 1.4 GB for one layer's
+  halved gather launches.
 - `quantized_kv_start` as a per-model server load key is applied to that
   model; upstream read it once from the process environment at server
   start.

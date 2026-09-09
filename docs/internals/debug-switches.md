@@ -18,6 +18,9 @@ call. The user-facing variables are in [env-vars.md](../env-vars.md).
 | `GMLX_FUSED_GDN=0` | Disable the fused gated-delta Metal kernels the Qwen3.5 and 3.6 hybrids use. The fusion affects numerics, so set this first when debugging those archs. |
 | `GMLX_QWEN_OWNED=0` | Build Qwen3.5 and 3.6 text MTP targets on stock mlx-vlm classes. Disables all performance patches and restores two stock defects. Multimodal targets ignore it. |
 | `GMLX_GEMMA_OWNED=0` | Build gemma-4 text MTP targets on stock mlx-vlm classes. Numerics are unchanged either way. Multimodal targets ignore it. |
+| `GMLX_MOE_GATEUP_CONCAT=0` | Disable the prefill gate and up expert concat, which runs one gather over the concatenated wire bytes at the cost of a second resident copy of them. |
+| `GMLX_MOE_GATEUP_CONCAT_MAX_MB` | Cap in MB on the concat copies the install builds, default `2048`. Layers are stamped in order until the cap is reached. |
+| `GMLX_MOE_GATEUP_CONCAT_HEADROOM_GB` | Room left under the memory ceiling after a concat copy, default `8`. A copy that would not fit is skipped and logged. `0` turns the check off. |
 | `GMLX_SDPA_DEBUG=1` | Log which attention route each layer took, so a wrong route on a new architecture shows in the log. |
 | `GMLX_ROUTE_LOG=1` | Print per-route attention call counts at process exit. |
 | `GMLX_MTP_DEBUG=1` | Log the MTP verify branch per round. |

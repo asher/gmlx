@@ -43,7 +43,7 @@ from mlx_kquant.nn import (
 from .native_fp import NATIVE_FP_CODECS, NATIVE_FP_GEOMETRY
 import gmlx.lora_rows as lora_rows
 from .dtypes import activation_dtype
-from gmlx.envflags import env_bool, env_int
+from gmlx.envflags import env_bool, env_float, env_int
 from .transforms import qk_permute_wire
 
 _SWITCH_TYPES = None
@@ -143,6 +143,14 @@ _FUSED_MOE_GLUE_ENABLED = True
 # GMLX_MOE_GATEUP_CONCAT=0 disables (skips the install-time concat too).
 _GATEUP_CONCAT_ENABLED = env_bool("GMLX_MOE_GATEUP_CONCAT", True)
 _GATEUP_CONCAT_MAX_MB = env_int("GMLX_MOE_GATEUP_CONCAT_MAX_MB", 2048)
+# The copy is built at the first sorted-prefill call, when the weights are
+# resident and the live memory is known. It must leave this much room under
+# the memory ceiling (the serve governor's ceiling, see gmlx.serve.capacity)
+# for prefill transients; a model that already sits near the ceiling keeps
+# that room instead of a second copy of one layer's experts. 0 disables the
+# check (the install budget alone decides).
+_GATEUP_CONCAT_HEADROOM_GB = env_float("GMLX_MOE_GATEUP_CONCAT_HEADROOM_GB", 8.0)
+_GATEUP_SKIP_LOGGED = False
 
 
 def _kq_fused_device_ok(*mods) -> bool:
@@ -684,6 +692,9 @@ def _make_fused_kquant(base_cls, caps):
             if gu is None:
                 if not getattr(self, "_kq_gate_up_pending", False):
                     return None
+                if not _gateup_concat_fits(self):
+                    object.__setattr__(self, "_kq_gate_up_pending", False)
+                    return None
                 gu = _build_gateup_concat(self)
                 object.__setattr__(self, "_kq_gate_up", gu)
                 object.__setattr__(self, "_kq_gate_up_pending", False)
@@ -755,6 +766,43 @@ def _install_gateup_concat(m, budget_bytes) -> int:
         return budget_bytes
     object.__setattr__(m, "_kq_gate_up_pending", True)
     return budget_bytes - cost
+
+
+def _memory_ceiling_bytes():
+    """The memory ceiling the concat copy is judged against: the serve
+    governor's (Metal's recommended working set less the margin, never
+    closer to physical RAM than the kernel reserve). None when unreadable."""
+    try:
+        from gmlx.serve.capacity import working_budget_bytes
+        return working_budget_bytes()
+    except Exception:
+        return None
+
+
+def _gateup_concat_fits(m) -> bool:
+    """Build-time check for the concat copy: live memory plus the copy must
+    leave _GATEUP_CONCAT_HEADROOM_GB under the ceiling. Logged once per
+    process when it refuses, with the numbers."""
+    global _GATEUP_SKIP_LOGGED
+    if _GATEUP_CONCAT_HEADROOM_GB <= 0:
+        return True
+    ceiling = _memory_ceiling_bytes()
+    if ceiling is None:
+        return True
+    cost = m.gate_proj.weight.nbytes + m.up_proj.weight.nbytes
+    active = mx.get_active_memory()
+    room = _GATEUP_CONCAT_HEADROOM_GB * 1e9
+    if active + cost + room <= ceiling:
+        return True
+    if not _GATEUP_SKIP_LOGGED:
+        _GATEUP_SKIP_LOGGED = True
+        import logging
+        logging.getLogger(__name__).info(
+            "[moe] gate+up concat skipped: %.1f GB live + %.2f GB copy leaves "
+            "less than %.1f GB under the %.1f GB ceiling "
+            "(GMLX_MOE_GATEUP_CONCAT_HEADROOM_GB)",
+            active / 1e9, cost / 1e9, _GATEUP_CONCAT_HEADROOM_GB, ceiling / 1e9)
+    return False
 
 
 def _build_gateup_concat(m):
