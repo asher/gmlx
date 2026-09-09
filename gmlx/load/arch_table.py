@@ -105,17 +105,17 @@ _FAMILY_NOTES = {
 # as the caveat column of docs/arch-coverage.md; `notes` above is the
 # implementation record and is not rendered.
 _CAVEATS = {
-    "deepseek2": "DeepSeek-V2 (softmax gating) is not supported.",
-    "deepseek4": "Not a llama.cpp conversion; the parity reference is the ds4 engine.",
+    "deepseek2": "DeepSeek-V2, with softmax gating, is not supported.",
+    "deepseek4": "Not a llama.cpp conversion. The parity reference is the ds4 engine.",
     "gemma2": "Pass hf_source for 27B. Output matches the reference only within the 4096 window.",
     "gemma3": "Pass hf_source for 27B.",
     "phi3": "Pass hf_source for the 128K long-context variants.",
-    "hy_v3": "Early GGUFs with arch hy-v3 (dash) are not mapped; reconvert.",
+    "hy_v3": "Early GGUFs whose arch is hy-v3 with a dash are not mapped. Reconvert them.",
     "hyv4": "No MTP head in the GGUF, so no speculative decoding. --kv-bits is refused.",
     "qwen4exp": "The MTP head needs the companion GGUF next to the target or --draft-gguf.",
     "kimi-k3": "The hybrid cache cannot trim, so chat re-prefills on trim.",
     "glm5next": "The hybrid cache cannot trim, so chat re-prefills on trim.",
-    "minimax-m3": "Indexless GGUFs run dense: exact to 2048 tokens, degrading beyond.",
+    "minimax-m3": "Indexless GGUFs run dense, exact to 2048 tokens and degrading beyond.",
 }
 
 

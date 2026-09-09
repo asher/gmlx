@@ -91,19 +91,20 @@ def render_md(rows) -> str:
         "no `hf_source`.",
         "",
         "A GGUF loads when gmlx maps its `general.architecture` to a model type "
-        "that has a model class in an installed backend package (mlx-lm for most, "
-        "mlx-vlm or mlx-embeddings for a few) and a config synthesizer exists for "
-        "the architecture. Without a synthesizer, pass `hf_source` to supply a "
-        "config.json. The status column says which case applies:",
+        "that has a model class in an installed backend package and a config "
+        "synthesizer exists for the architecture. The backend is mlx-lm for most "
+        "architectures and mlx-vlm or mlx-embeddings for a few. Without a "
+        "synthesizer, pass `hf_source` to supply a config.json. The status column "
+        "says which case applies:",
         "",
         "| Status | Meaning |",
         "|--------|---------|",
         "| loadable | model class and synthesizer both present |",
-        "| needs synth (hf_source) | model class present, no synthesizer: pass `hf_source` |",
+        "| needs synth (hf_source) | model class present and no synthesizer, so pass `hf_source` |",
         "| needs mlx-lm (or another backend) | the installed backend package has no model class for it |",
-        "| disabled (no known-good GGUF) | code complete, but every available GGUF is broken at conversion, so the load gate refuses it |",
+        "| disabled (no known-good GGUF) | code complete, but each available GGUF is broken at conversion, so the load gate refuses it |",
         "",
-        "The caveat column names the one limit a user is likely to hit. "
+        "The caveat column names the limit a user is most likely to hit. "
         "An empty cell means none is known.",
         "",
         "| GGUF arch | family | backend | status | caveat |",

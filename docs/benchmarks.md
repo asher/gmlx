@@ -1,25 +1,25 @@
 # gmlx fleet serve-bench
 
-Single-stream (concurrency 1) server throughput of gmlx against
-llama.cpp on the same GGUF across the fleet, at KV depths from 512 to
-200k+ tokens. Prefill is faster on every model at every measured
-depth; above 4k depth decode is too, and the gap grows as context
-deepens. Speculative decode (MTP) is measured where a
-native/preserved MTP head exists.
+Single-stream server throughput of gmlx against llama.cpp on the
+same GGUF across the fleet, at concurrency 1 and at KV depths from
+512 to 200k+ tokens. Prefill is faster on all models at all measured
+depths. Above 4k depth decode is faster too, and the gap grows as
+context deepens. Speculative decode, MTP, is measured where a native
+or preserved MTP head exists.
 
-Machine-readable data: [benchmarks.json](benchmarks.json). Any cell
-is reproducible with the bundled harness in [bench/](../bench/).
+The machine-readable data is in [benchmarks.json](benchmarks.json).
+Any cell is reproducible with the bundled harness in [bench/](../bench/).
 
 ## Fleet summary
 
-Throughput speedup vs KV depth (gmlx / reference engine, every model):
+Throughput speedup vs KV depth, gmlx over the reference engine, for all models:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/perf/fleet-ratio-dark.svg">
   <img src="assets/perf/fleet-ratio.svg" alt="fleet throughput speedup vs KV depth">
 </picture>
 
-Speculative (MTP) decode lift vs KV depth (own-baseline, per model):
+Speculative decode lift vs KV depth, each model against its own baseline:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/perf/mtp-lift-dark.svg">
@@ -28,17 +28,17 @@ Speculative (MTP) decode lift vs KV depth (own-baseline, per model):
 
 ## Methodology
 
-All numbers are single-stream (concurrency 1) server throughput,
-gmlx vs the reference engine, measured with the same GGUF weights,
-same sampler, and the same chat prompts on both engines.
+All numbers are single-stream server throughput at concurrency 1,
+gmlx against the reference engine, measured with the same GGUF weights,
+the same sampler and the same chat prompts on both engines.
 
 | | |
 |---|---|
 | Hardware | Apple M5 Max, 128 GB unified memory (MacBook Pro) |
 | gmlx | `0.1.0` (fleet default) |
-| mlx-kquant | `0.3.5` (K-quant + perf kernels; fleet default) |
+| mlx-kquant | `0.3.5` (fleet default), K-quant and perf kernels |
 | llama.cpp | `b9967` |
-| Build overrides | models rebenched on newer releases list their own builds; see Model provenance |
+| Build overrides | models rebenched on newer releases list their own builds under Model provenance |
 | DeepSeek-V4-Flash reference | ds4-server (antirez's dwarfstar) @ `b030961`, ignore-eos patched |
 | Dates | 2026-07-05 .. 2026-08-29 |
 | Prompt corpus | HuggingFaceH4/ultrachat_200k:train_sft (chat template applied) |
@@ -49,18 +49,19 @@ same sampler, and the same chat prompts on both engines.
 | Decode metric | median decode tok/s over full-length samples (>=150 output tokens) |
 | Prefill metric | median prefill tok/s over all successful samples |
 
-MTP@N in the tables means speculative decoding with N draft tokens per
-round on both engines; the baseline column is the same server with it off.
+MTP@N in the tables means speculative decoding with N draft tokens in
+each round on both engines. The baseline column is the same server with
+it off.
 
 ## Model provenance
 
-Chart labels are sanitized (abliterated community builds render as the
-base model); this table is the weight mapping for reproduction.
-Builds is what each model's rows were measured on: models are
+Chart labels are sanitized, so abliterated community builds render as
+the base model. This table is the weight mapping for reproduction.
+Builds is what each model's rows were measured on. Models are
 rebenched independently, so a newer build on one row does not apply
 to the others. Measured is the date of the newest run still
-contributing cells to the row (partial reruns replace cells of older
-depth series one by one).
+contributing cells to the row, since partial reruns replace cells of
+older depth series one by one.
 
 | Model | GGUF file | Source | MTP | Builds | Measured |
 |---|---|---|---|---|---|
