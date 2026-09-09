@@ -8,8 +8,8 @@ runs while debugging. User-facing variables are in [../env-vars.md](../env-vars.
 | Variable | Meaning |
 |----------|---------|
 | `GMLX_KVARN=0` | Disable `--kv-quant-scheme kvarn` at cache build. The scheme is dropped with that reason and the model runs fp16 KV. |
-| `GMLX_KVARN_SDPA=0` | Route kvarn decode through the materialize path instead of the fused record kernels. Differs at fp16 rounding only; set first when debugging kvarn. |
-| `GMLX_KVARN_FA=0` | Keep kvarn MTP verify rounds on the vector decode kernel instead of the matrix-unit kernel. Same numerics to fp16 rounding; widths above 4 materialize. |
+| `GMLX_KVARN_SDPA=0` | Route kvarn decode through the materialize path instead of the fused record kernels. Differs at fp16 rounding only. Set this first when debugging kvarn. |
+| `GMLX_KVARN_FA=0` | Keep kvarn MTP verify rounds on the vector decode kernel instead of the matrix-unit kernel. Same numerics to fp16 rounding. Widths above 4 materialize. |
 | `GMLX_DECODE_LOOKAHEAD_PROBE=1` | Record predicted versus actual expert routing per layer and print the recall table at exit, issuing no reads. Run it on a new model family. |
 | `GMLX_ROPE_FACTORS=0` | Disable the patch that rebuilds Llama-3.1-style per-dimension rope scaling from GGUF metadata. Set only to rule it out when debugging long context. |
 | `GMLX_SPARSE_ARCHS` | Extra architecture modules the sparse attention route may apply to, comma separated, for a quality gate on a new arch. The default is the llama family only. |
