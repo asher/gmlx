@@ -1,15 +1,15 @@
 # Voice chat
 
-This guide is for talking to a served model by voice with `gmlx talk`. You say
-the wake phrase and speak. The reply is spoken back as it streams. This guide
-covers setup, a worked example, the listening modes, the in-session keys, the
-config block and what sets the latency.
+This guide is for talking to a served model by voice with `gmlx talk`. You
+say the wake phrase and speak, and the reply is spoken back as it streams.
+It covers setup, a worked example, the listening modes, the in-session keys,
+the config block and what sets the latency.
 
-`talk` is a client of the gmlx server. The whole loop runs against the
-server's endpoints. Transcription goes in, a chat turn streams back and speech
-comes out sentence by sentence. The speech models and the language model
-therefore share a GPU under the server's arbitration. Expect 1.3 to 2.2
-seconds from the end of your speech to the first spoken audio.
+`talk` is a client of the gmlx server, and the whole loop runs against the
+server's endpoints: transcription goes in, a chat turn streams back and
+speech comes out sentence by sentence. The speech models and the language
+model therefore share a GPU under the server's arbitration. Expect 1.3 to
+2.2 seconds from the end of your speech to the first spoken audio.
 
 - [Setup](#setup)
 - [Worked example](#worked-example)
@@ -40,13 +40,14 @@ phrase and listen mode, whenever you configure the two together. If
 something is missing at startup, `gmlx talk` prints the exact lines to add.
 The services themselves are described in [services.md](services.md).
 
-On first run two small files download into `~/.cache/gmlx/talk/`. They are the
-keyword-spotting bundle and the voice-activity model, a few MB together. macOS
-then asks for microphone permission once. Allow it. The prompt names your
-terminal instead of gmlx, because macOS grants the mic to the app you launched
-from. Voice sessions started from the [menu bar](menubar.md#voice-sessions)
-prompt as gmlx instead. If the prompt was denied, re-enable it under System
-Settings, Privacy and Security, Microphone.
+On first run two small files download into `~/.cache/gmlx/talk/`, the
+keyword-spotting bundle and the voice-activity model, a few MB together.
+macOS then asks for microphone permission once, and you should allow it. The
+prompt names your terminal instead of gmlx, because macOS grants the mic to
+the app you launched from, whereas voice sessions started from the
+[menu bar](menubar.md#voice-sessions) prompt as gmlx. If the prompt was
+denied, re-enable it under System Settings, Privacy and Security,
+Microphone.
 [troubleshooting.md](troubleshooting.md#the-mic-never-works-in-talk) has the
 steps.
 
@@ -79,11 +80,11 @@ message instead of speaking. Try voices live:
 /wake okay computer
 ```
 
-The wake phrase is plain text with no training. Because the keyword spotter is
-an open-vocabulary transducer, any phrase is spelled into tokens at startup.
-Continuous listening costs well under one percent of a CPU core. If the wake
-engine is not installed, `talk` falls back to open-mic mode with an install
-hint.
+The wake phrase is plain text with no training, because the keyword spotter
+is an open-vocabulary transducer and any phrase is spelled into tokens at
+startup. Continuous listening costs well under one percent of a CPU core. If
+the wake engine is not installed, `talk` falls back to open-mic mode with an
+install hint.
 
 ## Modes
 
@@ -116,12 +117,13 @@ switches to line input.
 ## The assistant by voice
 
 `talk.brain: assistant` switches the turn engine from plain chat to the
-built-in [assistant](assistant.md). The model can then call tools mid-turn,
-and the conversation gains long-term memory. Tools come from MCP servers you
-configure. Memory is a local store built on the server's embeddings. This
-example configures two MCP servers that run locally with no API keys and turns
-memory on. The reference filesystem server needs Node, the reference fetch
-server needs uv and memory needs `embeddings:` on the server:
+built-in [assistant](assistant.md), so the model can call tools mid-turn and
+the conversation gains long-term memory. Tools come from MCP servers you
+configure, while memory is a local store built on the server's embeddings.
+This example configures two MCP servers that run locally with no API keys
+and turns memory on. The reference filesystem server needs Node, the
+reference fetch server needs uv and memory needs `embeddings:` on the
+server:
 
 ```sh
 uv tool install "gmlx[talk,assistant]"     # or: pip install "gmlx[talk,assistant]"
@@ -171,25 +173,25 @@ you: remember that my sister Ana's birthday is March 12th.
 assistant: Noted. Ana's birthday is March 12th.
 ```
 
-Quit, relaunch later and ask when your sister's birthday is. The assistant
-answers from memory. What it stored is an extracted fact, not a transcript.
-Extraction runs in the background after the turn and adds no latency. The
-store is shared with `gmlx chat --assistant`. `/memory` inspects it from
-inside a session. For the rules, the on-disk location and the security model,
-read [assistant.md](assistant.md#memory).
+Quit, relaunch later and ask when your sister's birthday is, and the
+assistant answers from memory. What it stored is an extracted fact rather
+than a transcript, and extraction runs in the background after the turn, so
+it adds no latency. The store is shared with `gmlx chat --assistant`, and
+`/memory` inspects it from inside a session. For the rules, the on-disk
+location and the security model, read [assistant.md](assistant.md#memory).
 
-Tool rounds cost time, a model turn plus the call for each round. Multi-tool
-answers are slower than plain chat. A barge-in during a tool round is still
-handled correctly. The loop commits what you heard and never leaves a
-half-finished tool round in the history.
+Tool rounds cost time, a model turn plus the call for each round, so
+multi-tool answers are slower than plain chat. A barge-in during a tool
+round is still handled correctly: the loop commits what you heard and never
+leaves a half-finished tool round in the history.
 
 ## Configuration reference
 
 All keys sit in a top-level `talk:` block of the YAML the server reads. The
-block configures the client and is therefore not under `server:`. Most keys
-have a matching flag under [gmlx talk](cli.md#gmlx-talk). `vad.pre_roll_ms`
-and `push_to_talk_modifier` are config-only. Precedence is defaults, then
-YAML, then flags.
+block configures the client, which is why it is not under `server:`. Most
+keys have a matching flag under [gmlx talk](cli.md#gmlx-talk), although
+`vad.pre_roll_ms` and `push_to_talk_modifier` are config-only. Precedence
+is defaults, then YAML, then flags.
 
 ```yaml
 talk:
@@ -220,17 +222,17 @@ terminal and can bind a tap-to-talk hotkey.
 ## Remote server and scripting
 
 `--base-url http://host:8080/v1`, with `--api-key` if the server has one,
-points the client at a server elsewhere. Speech-to-text and text-to-speech
-then run on that machine. Only the mic and speaker are local. Without
-`--base-url`, `talk` targets the managed local server and starts it when
-down. `--no-start` disables that.
+points the client at a server elsewhere, so speech-to-text and
+text-to-speech run on that machine and only the mic and speaker are local.
+Without `--base-url`, `talk` targets the managed local server and starts it
+when down, unless `--no-start` disables that.
 
 `--once` runs a single ask-and-answer exchange and exits, skipping the wake
 gate, which suits scripting and smoke-testing a setup.
 
 ## Latency and interruption
 
-End of speech to first audio is typically 1.3 to 2.2 seconds. That is the
+End of speech to first audio is typically 1.3 to 2.2 seconds, which is the
 sum of the endpointer's 550 ms silence hangover, 300 to 500 ms of Whisper
 turbo, the model's first sentence and 150 to 300 ms of Kokoro synthesis.
 Replies are chunked at sentence boundaries and synthesized a sentence ahead
@@ -242,21 +244,22 @@ of playback, which keeps long answers speaking continuously.
 | `stt: whisper-turbo-q4` | shortens the transcription step |
 | `max_tokens` around 512 | keeps answers short |
 
-In wake mode the wake phrase itself interrupts a reply. The keyword
+In wake mode the wake phrase itself interrupts a reply, because the keyword
 spotter stays live while the assistant transcribes, thinks and speaks.
 Saying the phrase mid-reply stops playback, cancels the turn and opens the
-mic. A stop phrase after it, such as "stop", "cancel" or "never mind",
+mic, and a stop phrase after it, such as "stop", "cancel" or "never mind",
 acknowledges and returns to waiting for the wake phrase instead of starting
 a turn. Space and Esc do the same from the keyboard within about 150 ms.
 
-Only wake-phrase scoring runs during a reply. Full transcription of the open
-mic stays gated, since playback would otherwise be re-transcribed. `vad` and
-`ptt` modes are therefore half-duplex and keyboard-interrupt only. There is no
-protection against the assistant speaking the wake phrase. If a reply quotes
-it aloud, the spotter detects it through the speakers. Pick a phrase the model
-is unlikely to say. Whisper's known hallucinations on silence and noise are
-filtered by a minimum-speech and energy floor before transcription and a
-known-phrase check after. Noise does not become a turn.
+Only wake-phrase scoring runs during a reply, and full transcription of the
+open mic stays gated, since playback would otherwise be re-transcribed.
+`vad` and `ptt` modes are therefore half-duplex and keyboard-interrupt only.
+There is no protection against the assistant speaking the wake phrase: if a
+reply quotes it aloud, the spotter detects it through the speakers, so pick
+a phrase the model is unlikely to say. Whisper's known hallucinations on
+silence and noise are filtered by a minimum-speech and energy floor before
+transcription and a known-phrase check after, so noise does not become a
+turn.
 
 The manual smoke checklist for this loop, for contributors, is in
 [internals/testing.md](internals/testing.md#voice-loop-manual-pass).

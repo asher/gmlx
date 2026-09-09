@@ -16,19 +16,20 @@ the fit rule, the lossless settings and the lossy ones.
 
 ## What to expect
 
-A [MoE](glossary.md) model activates only a few experts for each token, which
-makes the working set of a token a small fraction of the file. gmlx keeps the
-parts that all tokens read in memory and streams the routed experts from disk.
-That is what lets a 200B-class model run on a 64 GB machine.
+A [MoE](glossary.md) model activates only a few experts for each token,
+which makes the working set of a token a small fraction of the file. gmlx
+keeps the parts that all tokens read in memory and streams the routed
+experts from disk, which is what lets a 200B-class model run on a 64 GB
+machine.
 
-Decode is then bound by the SSD and the CPU, not the GPU. Single-digit
-tokens per second is normal. A model that fits in memory runs several times
-faster on the normal GPU path. Streaming is a capacity feature for the
-over-budget case, not a speed feature.
+Decode is then bound by the SSD and the CPU rather than the GPU, and
+single-digit tokens per second is normal. A model that fits in memory runs
+several times faster on the normal GPU path, so streaming is a capacity
+feature for the over-budget case, not a speed feature.
 
-Keep the GGUF on the internal SSD. Misses are served at the drive's random
-read latency. An external drive works, but decode is slower in proportion
-to its latency.
+Keep the GGUF on the internal SSD, because misses are served at the drive's
+random read latency. An external drive works, but decode is slower in
+proportion to its latency.
 
 Measured numbers in this guide come from a 14-inch M5 Max MacBook Pro with
 128 GB, unless another machine is named. The hardware note under
@@ -51,12 +52,12 @@ models:
     overrides: {load: {kv_bits: 8}}
 ```
 
-The load maps the file instead of reading it. Generation starts within seconds
-whatever the size. Decode starts at the disk's demand rate and improves over
-the first few dozen tokens. That is the time the expert arena, the wired
-region that holds the most used experts, takes to fill. The decode feeder's
-exit line, printed by `run` and `chat` under `-v` and always in server logs,
-shows the hit rate a session reached.
+The load maps the file instead of reading it, so generation starts within
+seconds whatever the size. Decode starts at the disk's demand rate and
+improves over the first few dozen tokens, which is the time the expert
+arena, the wired region that holds the most used experts, takes to fill. The
+decode feeder's exit line, printed by `run` and `chat` under `-v` and always
+in server logs, shows the hit rate a session reached.
 
 `gmlx validate <file>` says whether this Mac can stream a given file and how
 big its arena would be. A quantized KV cache, `--kv-bits 8`, is the usual
@@ -86,19 +87,18 @@ process to the CPU device, so it does not mix with GPU-resident models.
 
 ## How big a model can this machine stream
 
-The file size does not set the limit. What sets it is the every-token
-weights.
+The file size does not set the limit. The every-token weights do.
 
-A MoE GGUF holds two kinds of tensors. The routed experts are read a few at a
-time for each token. They stream from disk. Their size sets the decode speed
-but not the fit. The every-token weights are read by all tokens. They stay
-resident, namely attention, shared experts, dense layers, routers, norms,
-embeddings and the output head.
+A MoE GGUF holds two kinds of tensors. The routed experts are read a few at
+a time for each token and stream from disk, so their size sets the decode
+speed but not the fit. The every-token weights, which are attention, shared
+experts, dense layers, routers, norms, embeddings and the output head, are
+read by all tokens and stay resident.
 
-The memory [governor](glossary.md) enforces a ceiling on tracked memory. That
-ceiling is Metal's recommended working set less 5%. It never comes closer to
-physical RAM than a reserve of 8 GB or 10% of RAM, whichever is larger. Four
-things share it, in this order:
+The memory [governor](glossary.md) enforces a ceiling on tracked memory,
+which is Metal's recommended working set less 5%, and it never comes closer
+to physical RAM than a reserve of 8 GB or 10% of RAM, whichever is larger.
+Four things share it, in this order:
 
 1. The every-token weights.
 2. The KV room. It holds the KV cache for 32768 tokens by default, capped at
@@ -118,9 +118,9 @@ KV room fit under the ceiling. Everything else only changes the speed.
 
 ### The ceiling by machine size
 
-Default working sets are two thirds of RAM below 36 GB and three quarters from
-36 GB up. Sizes are decimal GB. The KV room floor is the transient plus the
-admission reserve with no KV cache in it yet.
+Default working sets are two thirds of RAM below 36 GB and three quarters
+from 36 GB up, and sizes are decimal GB. The KV room floor is the transient
+plus the admission reserve with no KV cache in it yet.
 
 | RAM | Working set | Ceiling | KV room floor | Left for weights and KV cache |
 |---|---|---|---|---|
@@ -136,8 +136,8 @@ admission reserve with no KV cache in it yet.
 | 256 | 206.2 | 195.9 | 20.6 | 175.2 |
 | 512 | 412.3 | 391.7 | 41.2 | 350.5 |
 
-`sudo sysctl iogpu.wired_limit_mb=<MB>` raises the working set. The reserve
-still keeps 8 GB or 10% unavailable.
+`sudo sysctl iogpu.wired_limit_mb=<MB>` raises the working set, although the
+reserve still keeps 8 GB or 10% unavailable.
 
 ### A worked example
 
@@ -151,18 +151,18 @@ Kimi-K3 UD-Q2_K_XL is an 861 GB file whose every-token weights are 62.2 GB:
 | recurrent (KDA) layers | 6.9 |
 | embeddings and output head | 2.4 |
 
-The routed experts are 799 GB, 896 experts in each of 92 layers with 16 read
-for each token. On a default 128 GB machine the ceiling is 97.9 GB and the KV
-room 11.7 GB, leaving 24 GB. The 22.7 GB ring fits and the host floor takes
-the rest, which leaves no arena. So the model streams. Decode reads each
-expert through the page cache. On a 512 GB machine the arena is 234 GB, or 29%
-of the experts.
+The routed experts are 799 GB, 896 experts in each of 92 layers with 16
+read for each token. On a default 128 GB machine the ceiling is 97.9 GB and
+the KV room 11.7 GB, leaving 24 GB, of which the 22.7 GB ring fits and the
+host floor takes the rest, so there is no arena. The model streams, but
+decode reads each expert through the page cache. On a 512 GB machine the
+arena is 234 GB, or 29% of the experts.
 
-The quant of the experts does not change the fit. UD-Q4_K_XL is a 1.5 TB file
-with the same 62.2 GB of every-token weights, so it streams on the same
-machines. It decodes slower, because the arena holds a smaller share of a
-larger expert set. UD-Q8_K_XL has 114.7 GB of every-token weights and fits
-under no ceiling below 192 GB.
+The quant of the experts does not change the fit. UD-Q4_K_XL is a 1.5 TB
+file with the same 62.2 GB of every-token weights, so it streams on the same
+machines, although it decodes slower because the arena holds a smaller share
+of a larger expert set. UD-Q8_K_XL has 114.7 GB of every-token weights and
+fits under no ceiling below 192 GB.
 
 ### What changes the limit
 
@@ -189,15 +189,16 @@ Face with a header read for each shard:
     => streams, but no decode arena (0.0 GB left after the ring and the host floor), decode runs from the page cache; expect slow decode
 ```
 
-`gmlx validate --json` carries the same numbers under `stream`, and `gmlx
-doctor` adds a clause for each streamed entry to its memory row. A load prints
-the live budget as `[stream] memory budget:`. That line includes the
-reclaimable-RAM clamp, which is why its arena can be smaller than the plan's.
+`gmlx validate --json` carries the same numbers under `stream`, and
+`gmlx doctor` adds a clause for each streamed entry to its memory row. A
+load prints the live budget as `[stream] memory budget:`, and because that
+line includes the reclaimable-RAM clamp its arena can be smaller than the
+plan's.
 
 ## The lossless settings
 
 These are on by default on all streamed models and change no output. Each
-has a flag or env switch for measurement. The switches are listed in
+has a flag or env switch for measurement, listed in
 [env-vars.md](env-vars.md#runtime).
 
 | Setting | What it does | Off switch |
@@ -216,33 +217,33 @@ evict the rest of the machine's page cache for pages it never reads again.
 
 The decode feeder's arena starts empty and converges within a few dozen
 tokens. Under memory pressure from another model or a build it shrinks,
-keeping its most routed experts. It grows again when the pressure ends.
-Multi-token expert calls whose routed set exceeds the arena, such as the next
-chat turn's prefill, are split along the token axis and served from the arena
-rather than falling back to a page-cache gather.
+keeping its most routed experts, and grows again when the pressure ends.
+Multi-token expert calls whose routed set exceeds the arena, such as the
+next chat turn's prefill, are split along the token axis and served from the
+arena rather than falling back to a page-cache gather.
 
-Lookahead prestage keeps its reads off the demand path. They are submitted
-only after the current layer's demand misses finish. Reads run at utility disk
-priority. A gate in each layer stops submitting prediction ranks that measure
-unreliable. Predictions the router then does not route to are cancelled before
-they reach the disk.
+Lookahead prestage keeps its reads off the demand path: they are submitted
+only after the current layer's demand misses finish and run at utility disk
+priority. A gate in each layer stops submitting prediction ranks that
+measure unreliable, and predictions the router then does not route to are
+cancelled before they reach the disk.
 
-GPU keep-warm matters because streamed decode alternates sub-millisecond GPU
-bursts with host and disk gaps. The GPU drops to idle clocks in each gap. A
-heartbeat costs power only while decoding and stops after a second of
-inactivity. On battery, turn it off. It gains nothing on a model that fits in
-RAM.
+GPU keep-warm matters because streamed decode alternates sub-millisecond
+GPU bursts with host and disk gaps, and the GPU drops to idle clocks in each
+gap. The heartbeat costs power only while decoding and stops after a second
+of inactivity. Turn it off on battery, and note that it gains nothing on a
+model that fits in RAM.
 
 Weight pinning is skipped, with a printed reason, when the every-token set
 would exceed 60% of RAM. A tensor the loader converts at load is left out
 of the pin, since the runtime reads a converted copy instead of the file
 bytes.
 
-Two more properties matter to operators. A fork of a process holding a
-wired arena would copy it. The arena, ring and pinned weights are therefore
-marked not to be inherited. Spawn nothing from a streaming server. When a
-larger-than-RAM model is released, at exit or at unload on a running
-server, its page cache is released with it.
+Two more properties matter to operators. Because a fork of a process
+holding a wired arena would copy it, the arena, ring and pinned weights are
+marked not to be inherited, so spawn nothing from a streaming server. When a
+larger-than-RAM model is released, at exit or at unload on a running server,
+its page cache is released with it.
 
 Native-fp expert tensors, MXFP4 and NVFP4 as in gpt-oss and DeepSeek-V4-Flash
 Q4_K_XL quants, are streamed in the same way. Over budget they are served as
@@ -257,15 +258,15 @@ taken on, are in
 ## The lossy settings
 
 Four settings trade a bounded amount of output quality for decode speed.
-None is on by default. Absent flags and absent config keys mean lossless
-routing. All act on decode only and on streamed layers only.
+None is on by default, so absent flags and absent config keys mean lossless
+routing. All of them act on decode only and on streamed layers only.
 
 A streamed decode token has three costs. Experts that miss the arena are
-read from disk at demand latency, which dominates when the hit rate is low.
-Those already in the arena cost only a small gather. Each streamed MoE
-layer has a fixed overhead of kernel launches and a host sync that does not
-shrink when fewer experts are routed. The settings each reduce a different
-cost.
+read from disk at demand latency, which dominates when the hit rate is low,
+while those already in the arena cost only a small gather. Each streamed MoE
+layer also has a fixed overhead of kernel launches and a host sync that does
+not shrink when fewer experts are routed. The settings each reduce a
+different cost.
 
 | Setting | Flag | Config key | Reduces | Notes |
 |-------|------|------------|------|-------|
@@ -275,14 +276,15 @@ cost.
 | keeper prestage | `--moe-prestage keepers` | `moe_prestage: keepers` | residual stalls | applies the miss-shed policy a layer earlier in lookahead. Has no quality parameter and needs miss shed |
 | layer shed | `--moe-layer-shed P` | `moe_layer_shed: P` | per-layer overhead | skips a layer's routed experts with probability P on each token. The shared expert still runs |
 
-The two router-side settings combine. `--moe-experts 6 --moe-expert-mass 0.9`
+The two router-side settings combine, so `--moe-experts 6 --moe-expert-mass 0.9`
 caps at 6, then drops within the 6. How much expert mass saves is a property
-of the router. On a concentrated router most reads disappear for a few percent
-of dropped mass, while on a flat router it saves almost nothing. Measure
-instead of guessing. `--moe-expert-probe` runs the trained routing losslessly
-and prints, for each candidate P, the experts kept and the mass dropped,
-decode and prefill separately. Size P against the decode column. The probe is
-CLI-only. Run it once before fixing a value in a config.
+of the router: on a concentrated router most reads disappear for a few
+percent of dropped mass, while on a flat router it saves almost nothing.
+Measure instead of guessing. `--moe-expert-probe` runs the trained routing
+losslessly and prints, for each candidate P, the experts kept and the mass
+dropped, decode and prefill separately, and P should be sized against the
+decode column. The probe is CLI-only, so run it once before fixing a value
+in a config.
 
 Which setting to use depends on a measurement:
 
@@ -304,19 +306,19 @@ Settings that passed on the models they were measured on:
 | Kimi-K3 UD-Q2_K_XL | `moe_miss_shed: 0.65` to `0.80` | working pages throughout, with content drift growing as P falls. 0.60 broke code |
 
 Quality degrades in a consistent order as settings tighten. Multi-step
-arithmetic breaks first, well before coherence or code. Combined settings add
-their losses at the same threshold. Dropped mass degrades content before form.
-Certify a setting by rendering its output beside a lossless run at the same
-seed and your deployment sampling. The case studies, sample galleries and the
-certification procedure are in
+arithmetic breaks first, well before coherence or code, combined settings
+add their losses at the same threshold, and dropped mass degrades content
+before form. Certify a setting by rendering its output beside a lossless run
+at the same seed and your deployment sampling. The case studies, sample
+galleries and the certification procedure are in
 [internals/streaming-measurements.md](internals/streaming-measurements.md).
 
 ## Serving a streamed model
 
 Send a single request at a time to a server that streams a model. The
 wired-memory refresh, lookahead and the GPU-side token path all switch off
-when a decode step holds more than one token. A second concurrent request
-therefore puts both on the slow path. The arena's hit rate falls. Prefill is
+when a decode step holds more than one token, so a second concurrent request
+puts both on the slow path and the arena's hit rate falls. Prefill is
 unaffected.
 
 In a config the feeder opt-outs are `prefill_feeder: false` and
@@ -326,10 +328,11 @@ model keys in the settings table. All of them are listed under
 
 ## Residency of a streamed model
 
-A streamed entry counts against the budget as its every-token weights plus its
-arena and its prefill ring. The routed experts stay on disk. Because the arena
-fills what the ceiling leaves, a streamed model alone can use the whole
-budget. To keep a second model resident beside it, cap the arena with the
-`GMLX_DECODE_ARENA_GB` row in [env-vars.md](env-vars.md#runtime) so both fit
-`budget_gb`. The streamed load lowers the wired limit for the rest of the
-process. A resident dense model runs unwired from then on.
+A streamed entry counts against the budget as its every-token weights plus
+its arena and its prefill ring, while the routed experts stay on disk.
+Because the arena fills what the ceiling leaves, a streamed model alone can
+use the whole budget, so to keep a second model resident beside it, cap the
+arena with the `GMLX_DECODE_ARENA_GB` row in
+[env-vars.md](env-vars.md#runtime) so that both fit `budget_gb`. The
+streamed load lowers the wired limit for the rest of the process, and a
+resident dense model runs unwired from then on.

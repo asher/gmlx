@@ -3,7 +3,7 @@
 This guide is for giving a model tools and long-term memory. gmlx has a
 built-in assistant, a bounded tool loop with memory, wrapped around the
 server's chat completions. Configure it once in a top-level `assistant:`
-block. It is then available from three surfaces.
+block and it is available from three surfaces.
 
 | Surface | How | Tools run |
 |---------|-----|-----------|
@@ -12,11 +12,11 @@ block. It is then available from three surfaces.
 | API | served assistant ids under `server.assistants:` | on the server host |
 
 It is a lightweight assistant, not an autonomous agent. Each turn runs a
-bounded tool loop and ends when the model answers. Nothing keeps working in
-the background afterward. It is built for short tasks such as looking
+bounded tool loop and ends when the model answers, and nothing keeps working
+in the background afterward. It is built for short tasks such as looking
 something up, chaining a few tool calls, writing a note or remembering a
-fact. The coding agents that `gmlx launch` connects have loops of their
-own and use this server for inference only.
+fact. The coding agents that `gmlx launch` connects have loops of their own
+and use this server for inference only.
 
 - [The tool loop](#the-tool-loop)
 - [The assistant block](#the-assistant-block)
@@ -36,12 +36,12 @@ uv tool install "gmlx[assistant]"     # or: pip install "gmlx[assistant]"
 
 A turn is the standard OpenAI tool loop, run as a client of the server's
 chat completions endpoint. The user text goes out with the configured tools
-attached. If the model answers with tool calls instead of prose, the
-assistant executes them and sends the results back. This repeats until the
-model answers. Up to `max_tool_rounds` rounds may call tools. Then a final
-tool-less request forces an answer, so a model that keeps calling tools
-cannot loop forever. A failed call comes back to the model as an error
-string it can retry. Completed rounds stay in the history so later turns
+attached, and if the model answers with tool calls instead of prose, the
+assistant executes them and sends the results back, repeating until the
+model answers. Up to `max_tool_rounds` rounds may call tools, after which a
+final tool-less request forces an answer, so a model that keeps calling
+tools cannot loop forever. A failed call comes back to the model as an error
+string it can retry, and completed rounds stay in the history so later turns
 can build on them.
 
 Each round is an ordinary chat-completion request. Whatever the server
@@ -50,8 +50,8 @@ the prompt cache, applies to assistant rounds too. A round costs a model
 turn plus the tool call, so multi-tool answers are slower than plain chat.
 
 Tool calling needs a model that is competent at it. The Qwen3.6-27B class
-is suitable on a 48 GB or larger machine. Qwen3.5-9B is the smallest usable
-model on 32 GB, with more tool-call errors.
+is suitable on a 48 GB or larger machine, while Qwen3.5-9B is the smallest
+usable model on 32 GB, with more tool-call errors.
 
 ## The assistant block
 
@@ -80,15 +80,15 @@ assistant:                    # the built-in tool-loop assistant used by talk,
 model to call tools provided by separate programs. Each `mcp:` entry is either
 a stdio server, where `command` is the argv to spawn plus an optional `env`
 map, or a streamable-HTTP endpoint given as `url`. Tool-name collisions across
-servers get a server-name prefix. An MCP server that fails to start produces a
-warning instead of blocking the loop. A missing `assistant` extra does the
-same with an install hint. Each stdio server's stderr goes to a log for that
-server at `~/.cache/gmlx/mcp-<name>.log`.
+servers get a server-name prefix. An MCP server that fails to start
+produces a warning instead of blocking the loop, and a missing `assistant`
+extra does the same with an install hint. Each stdio server's stderr goes to
+a log for that server at `~/.cache/gmlx/mcp-<name>.log`.
 
 A stdio tool server runs with a minimal environment of `HOME`, `PATH`,
-`SHELL`, `TERM`, `USER` and `LOGNAME`. `env:` adds to that. Nothing else from
-your shell is inherited. A token set in your environment never reaches
-third-party tool code unless you pass it.
+`SHELL`, `TERM`, `USER` and `LOGNAME`, plus whatever `env:` adds. Nothing
+else from your shell is inherited, so a token set in your environment never
+reaches third-party tool code unless you pass it.
 
 ## Tool examples
 
@@ -111,7 +111,7 @@ assistant:
 
 If you already run [SearXNG](https://docs.searxng.org), point the assistant
 at it for aggregated results that stay local. The instance must allow the
-JSON format. Add `json` to `search.formats` in its settings.
+JSON format, which means adding `json` to `search.formats` in its settings.
 
 ```yaml
 assistant:
@@ -148,41 +148,41 @@ assistant:
       env: {QDRANT_LOCAL_PATH: ~/vectors, COLLECTION_NAME: notes}
 ```
 
-Memory, described in the next section, is automatic and personal. It
-holds distilled facts about you, recalled each turn. A retrieval tool is
-explicit and operates on documents. The model decides when to search over
-what you loaded. For document RAG in a chat UI instead of through the
-assistant, see [rag.md](rag.md).
+Memory, described in the next section, is automatic and personal: it holds
+distilled facts about you, recalled each turn. A retrieval tool is explicit
+and operates on documents, and the model decides when to search over what
+you loaded. For document RAG in a chat UI instead of through the assistant,
+see [rag.md](rag.md).
 
 ## Memory
 
 Memory is a local retrieval store over the server's endpoints. Facts are
-embedded through `/v1/embeddings` into a sqlite file. Each turn recalls the
-closest ones, reordered by `/v1/rerank` when configured. It injects them as
-transient context that never lengthens the chat history. Without
+embedded through `/v1/embeddings` into a sqlite file, and each turn recalls
+the closest ones, reordered by `/v1/rerank` when configured, and injects
+them as transient context that never lengthens the chat history. Without
 `server.embeddings:` the assistant still runs, memoryless, after a warning.
 
-What gets stored is an extracted fact such as "sister Ana, birthday March 12",
-not a transcript. After each turn a background request asks the chat model to
-reduce the exchange to at most three durable facts, or none. Small talk stores
-nothing. A new fact that restates an existing one replaces it. `extract:
-false` stores raw exchanges instead. Old rows expire at startup after
-`ttl_days`. `max_items` caps the store, evicting the never-recalled oldest
-rows first.
+What gets stored is an extracted fact such as "sister Ana, birthday March
+12", not a transcript. After each turn a background request asks the chat
+model to reduce the exchange to at most three durable facts, or none, so
+small talk stores nothing, and a new fact that restates an existing one
+replaces it. `extract: false` stores raw exchanges instead. Old rows expire
+at startup after `ttl_days`, and `max_items` caps the store, evicting the
+never-recalled oldest rows first.
 
-The store is shared between the voice and text surfaces. What you tell the
-assistant in `gmlx talk` it remembers in `gmlx chat --assistant`. Inside
+The store is shared between the voice and text surfaces, so what you tell
+the assistant in `gmlx talk` it remembers in `gmlx chat --assistant`. Inside
 either, `/memory` lists the stored facts with their ids, `/memory forget ID`
 removes one and `/memory clear yes` removes them all. The file sits at
-`~/.local/share/gmlx/assistant-memory.db`. Served assistants that enable
+`~/.local/share/gmlx/assistant-memory.db`, and served assistants that enable
 memory get a separate store for each id beside it.
 
 ## Text chat
 
 `gmlx chat --assistant` switches the chat client's turn engine from a local
-model load to the assistant on the managed server, auto-started if down. The
-positional argument is a served model id, or omitted for the server's
-default. A file path is refused, since the server owns the model. Tool
+model load to the assistant on the managed server, auto-started if down.
+The positional argument is a served model id, or omitted for the server's
+default, and a file path is refused since the server owns the model. Tool
 activity appears as transient status lines while the answer streams.
 
 ```sh
@@ -190,12 +190,12 @@ gmlx chat --assistant                 # server default model
 gmlx chat qwen3.6-27b --assistant     # a specific served model
 ```
 
-The terminal experience is unchanged. Rendering, themes, history, sessions and
-`/system` all work, `/retry` and `/undo` rewind whole tool rounds. `/memory`
-is added. Sampling flags forward to the server on each round once you set
-them. Flags that only make sense for a local load are rejected or ignored with
-a note. `/image`, `/audio` and the thinking budget are not available in this
-mode. [chat.md](chat.md) describes the client.
+The terminal experience is unchanged: rendering, themes, history, sessions
+and `/system` all work, `/retry` and `/undo` rewind whole tool rounds, and
+`/memory` is added. Sampling flags forward to the server on each round once
+you set them, while flags that only make sense for a local load are rejected
+or ignored with a note. `/image`, `/audio` and the thinking budget are not
+available in this mode. [chat.md](chat.md) describes the client.
 
 ## Served assistants
 
@@ -242,20 +242,21 @@ The routing contract for a request to `/v1/chat/completions`:
 | any other id | untouched |
 | assistant id on `/v1/responses` or `/v1/messages` | 400, assistant models are chat-completions only |
 
-Reported usage sums completion tokens across all rounds. Prompt tokens are the
-final round's. Concurrent assistant turns are capped at 4 on a server. A
-request over the cap gets an immediate 429. `stop` sequences forward to each
-round. Non-streaming turns cannot be cancelled by client disconnect, while a
-stream-path cancel takes effect at the next delta or tool boundary.
+Reported usage sums completion tokens across all rounds, while prompt
+tokens are the final round's. Concurrent assistant turns are capped at 4 on
+a server, and a request over the cap gets an immediate 429. `stop` sequences
+forward to each round. Non-streaming turns cannot be cancelled by client
+disconnect, while a stream-path cancel takes effect at the next delta or
+tool boundary.
 
 ## Security
 
-`gmlx talk` and `gmlx chat --assistant` execute tools on your local machine,
-as you, which is the trust domain of any local CLI tool. A served
+`gmlx talk` and `gmlx chat --assistant` execute tools on your local
+machine, as you, which is the trust domain of any local CLI tool. A served
 assistant executes tools on the server host, reachable by anything that can
-reach the server. On the default loopback bind that is still your machine.
-Beyond loopback it means anyone with the API key can trigger tool execution
-on the host. The protections are:
+reach the server. On the default loopback bind that is still your machine,
+but beyond loopback it means anyone with the API key can trigger tool
+execution on the host. The protections are:
 
 - Tools come only from the config. A request cannot supply MCP servers or
   redefine tools. A `tools` array in the request switches the server loop off.
@@ -270,5 +271,5 @@ on the host. The protections are:
   each one's tool scope.
 
 Memory on a served assistant is a single store shared by all clients of
-that id. That is acceptable for a personal server and unsuitable for
-anything multi-user, which is why it defaults off.
+that id, which is acceptable for a personal server and unsuitable for
+anything multi-user, and is why it defaults off.
