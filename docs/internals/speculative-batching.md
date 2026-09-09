@@ -18,11 +18,11 @@ targets and gives the highest acceptance rate. It is the fastest path and the
 common case.
 
 The batch loop serves two or more. It tracks a bonus token, KV offset,
-budget and finished flag for each row. It drafts greedily, since coupled RNG
-does not extend across rows. It also checks the per-model width cap. A batch
-wider than the cap decodes plain, because verification widens each row's
-weight reads and past the measured width the batch is faster without
-drafting. New requests join between verify rounds. The loop drains an
+budget and finished flag for each row. Drafting is greedy, since coupled
+RNG does not extend across rows. The loop also checks the per-model width
+cap. A batch wider than the cap decodes plain, because verification widens
+each row's weight reads and past the measured width the batch is faster
+without drafting. New requests join between verify rounds. The loop drains an
 injection queue, extends the target KV cache and the drafter with the new
 rows, and re-checks the cap.
 
@@ -47,7 +47,7 @@ several streams plain. When waiters queue behind a live scalar generation the
 server therefore preempts it:
 
 1. The scalar generator closes at its verify-round boundary. Its cleanup
-   rolls the target KV cache back to exactly the delivered tokens, so the
+   rolls the target KV cache back to exactly the delivered tokens. The
    next undelivered token, the round's bonus token, has no KV entry yet.
 2. The generation is rebuilt as a batch-loop generator restarting from that
    bonus token with its real emitted count, but unarmed. It has no drafter
@@ -66,12 +66,12 @@ total tokens per second across streams goes up.
 
 A batch gated to plain decode re-arms when finishing rows bring it back under
 the cap. Re-arming needs fresh hidden state and shared KV for each surviving
-row, so the resume path re-runs the generator's cold-start sequence on fresh
-captures instead of reusing per-row state:
+row. The resume path therefore re-runs the generator's cold-start sequence
+on fresh captures instead of reusing per-row state:
 
 1. The loop first finishes consuming its plain-decode double buffer. Gated
    rounds dispatch the next round's forward before reading this round's
-   tokens, and that step has already appended its KV, so one more plain round
+   tokens, and that step has already appended its KV. One more plain round
    runs without dispatching a successor.
 2. The next round is a capture round, a one-position verify forward of each
    row's pending bonus token with hidden-state and shared-KV capture on. It
@@ -84,8 +84,8 @@ captures instead of reusing per-row state:
 
 Rows with fewer remaining tokens than a small threshold skip the capture
 and finish plain. A new admission in the same round takes precedence over a
-pending resume. The injection drain runs first and re-triggers the gate, so a
-batch never arms over the cap.
+pending resume. The injection drain runs first and re-triggers the gate, and
+a batch never arms over the cap.
 
 ## What the transitions guarantee
 
@@ -96,7 +96,7 @@ batch never arms over the cap.
   generation, including after the batch drains to a single row. It drafts
   greedily instead of with coupled sampling, which lowers acceptance by a few
   points at temperature. The next request starts scalar again.
-- A preempted request drops its prompt-cache retirement context, so its
+- A preempted request drops its prompt-cache retirement context, and its
   prefix is not offered back to the cache when it finishes. Waiters and later
   requests retire normally.
 - The capture round emits at plain-decode rate. The speculative speedup

@@ -28,9 +28,9 @@ when to use it.
 | [`gmlx doctor`](#gmlx-doctor) | check the runtime, config, models and services |
 | [`gmlx completion`](#gmlx-completion) | print a shell completion script |
 
-`gmlx --version` prints the version. `gmlx help <verb>` and `gmlx <verb>
---help` print a verb's options, and `run` and `chat` also take `--help-all`
-for their full flag set. `gmlx ls` is an alias for `gmlx list`.
+`gmlx --version` prints the version. A verb's options come from
+`gmlx help <verb>` or `gmlx <verb> --help`, and `run` and `chat` also take
+`--help-all` for their full flag set. `gmlx ls` is an alias for `gmlx list`.
 
 Settings that exist as a flag, a config key and an environment variable are
 resolved flag first, then config key, then environment. The config keys are
@@ -84,8 +84,8 @@ writes is described in [server-config.md](server-config.md).
 
 ## gmlx serve
 
-Runs the server. It detaches by default and returns at once, so the same
-shell can then run `gmlx launch`. Pass `--foreground` to stay attached. A
+Runs the server. It detaches by default and returns at once, which lets the
+same shell run `gmlx launch` next. Pass `--foreground` to stay attached. A
 background server keeps a runfile and a log under `~/.cache/gmlx/` and, on a
 macOS desktop session, raises the [menu bar app](menubar.md).
 
@@ -186,8 +186,8 @@ in [services.md](services.md):
 | `--embeddings [MODEL]` | off | embeddings at `POST /v1/embeddings`. Bare is `qwen3-embed-0.6b`, and no extra is needed |
 | `--rerank [MODEL]` | off | reranking at `POST /v1/rerank`. Bare is `qwen3-rerank-0.6b`, and no extra is needed |
 
-The API key is read from `server.api_key` in the config and nowhere else, so
-the lifecycle tools and the menu bar can read the same file. Each completed
+The API key is read from `server.api_key` in the config and nowhere else,
+which lets the lifecycle tools and the menu bar read the same file. Each completed
 request logs a line with the endpoint, model, token counts and timing:
 
 ```text
@@ -210,7 +210,7 @@ stale runfiles found during the check are cleared and reported.
 ## gmlx status
 
 Prints a background server's pid, uptime, URL, log path and how it is
-managed. It uses `/health`, so it needs no API key. Stale runfiles are listed
+managed. It uses `/health` and needs no API key. Stale runfiles are listed
 with the reason and their age.
 
 | Flag | Default | Meaning |
@@ -270,10 +270,10 @@ gmlx service uninstall
 | `--headless` | off | install a server-only agent with no menu bar, for machines without a desktop session |
 | `--keepalive`, `--no-keepalive` | on | with `--headless`, restart the server when it crashes |
 
-The server stays an ordinary background process, so a server you stop stays
-stopped until the next login. A headless server is stopped with `service
-uninstall` and not with `stop`. The two modes cannot share a host and port.
-The menu bar side is described in [menubar.md](menubar.md).
+The server stays an ordinary background process, and a server you stop
+stays stopped until the next login. A headless server is stopped with
+`service uninstall` and not with `stop`. The two modes cannot share a host
+and port. For the menu bar side, read [menubar.md](menubar.md).
 
 ## gmlx list
 
@@ -361,8 +361,8 @@ These flags control memory:
 Under kvarn the first 128 tokens and the newest `--kv-tail-tokens` tokens
 stay fp16. A `--max-kv-size` window must hold that sink, the tail and a
 128-token record, which is 384 tokens at tail 0 and 1280 at the default
-tail. A smaller window exits 2. A width outside the scheme's list exits 2. A
-model the scheme declines prints the reason and runs fp16 KV. The VLM media
+tail. A smaller window exits 2, and so does a width outside the scheme's list.
+When the scheme declines a model, `run` prints the reason and runs fp16 KV. The VLM media
 path always keeps fp16.
 
 These flags control loading:
@@ -600,7 +600,7 @@ still downloads, with a note.
 ## gmlx validate
 
 Reports whether a GGUF will load, from the header alone. A remote reference
-is range-read, so the check reads a few megabytes and not the whole file.
+is range-read, and the check reads a few megabytes and not the whole file.
 The report names the architecture, the quant codecs, the total size across
 shards, whether it fits this Mac's RAM, and for a MoE model the streaming
 plan.
@@ -630,8 +630,8 @@ gmlx validate https://huggingface.co/unsloth/Qwen3.6-27B-GGUF/blob/main/Qwen3.6-
 | `--json` | off | emit the verdict as JSON |
 
 A split model is checked across all its shards, because a codec used by a
-single tensor can appear only in a later shard. A projector GGUF is
-recognized as a companion and not checked as a model. Exit code 0 means
+single tensor can appear only in a later shard. Projector GGUFs are
+recognized as companions and not checked as models. Exit code 0 means
 loadable, 1 not loadable, and 2 that the reference could not be resolved or
 read.
 
@@ -723,7 +723,7 @@ gmlx profiles qwen3.6-27b
 
 Voice chat with a served model. Say the wake phrase, speak, and the reply
 streams back as speech. It is a client of the server's speech and chat
-endpoints, so the server needs `stt` and `tts` configured. Setup, the
+endpoints, and the server needs `stt` and `tts` configured. Setup, the
 config block and the in-session keys are in [talk.md](talk.md).
 
 ```sh
@@ -762,8 +762,8 @@ gmlx talk --once
 ## gmlx train
 
 Trains a LoRA adapter on a quantized GGUF base and writes it as a GGUF
-adapter. The base stays quantized throughout, so a model that does not fit
-in fp16 can still be fine-tuned. The walkthrough is in [lora.md](lora.md).
+adapter. The base stays quantized throughout, and a model that does not fit
+in fp16 can still be fine-tuned. For the walkthrough, read [lora.md](lora.md).
 
 ```sh
 gmlx train base-Q8_0.gguf --data ./my-data --adapter-out my-lora.gguf
@@ -798,8 +798,8 @@ in the formats mlx-lm's trainer accepts.
 Checks everything a working setup needs and prints a PASS, WARN or FAIL
 line for each check, with the fix named. It covers the runtime and kernels,
 the config, each configured model's files, background servers, RAM against
-each model's size, disk space and the Hugging Face token. It never accesses
-the network.
+each model's size, disk space and the Hugging Face token, and it never
+accesses the network.
 
 ```sh
 gmlx doctor

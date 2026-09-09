@@ -6,9 +6,9 @@
 The fastest way to run GGUF models on Apple Silicon.
 
 gmlx is a local inference platform. Chat with an open model in the terminal
-or your browser, serve it over OpenAI and Anthropic compatible APIs, connect
-your coding agent to it, talk to it by voice, build a local RAG stack on it,
-and fine-tune it with LoRA.
+or your browser, and serve it over OpenAI and Anthropic compatible APIs.
+Connect your coding agent to it, talk to it by voice, build a local RAG stack
+on it, and fine-tune it with LoRA.
 
 It runs the community's K-quant and IQ-quant GGUF builds exactly as
 published. At equal file size those are the most accurate open quant formats.
@@ -31,7 +31,7 @@ Higher is faster. Depth is the number of tokens already in the context. The
 per-model charts and the method are in
 [benchmarks.md](https://github.com/asher/gmlx/blob/main/docs/benchmarks.md).
 
-![gmlx chat: a 27B model answering through a running server, with live tokens per second](https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/demo.gif)
+![gmlx chat with a 27B model answering through a running server, with live tokens per second](https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/demo.gif)
 
 This recording, at true speed, shows a 27B model resident in a local server
 answering at 46 tokens per second.
@@ -77,11 +77,11 @@ Upgrade with `uv tool upgrade gmlx`. Removing gmlx is described in
 ## Set up with gmlx init
 
 `gmlx init` finds your GGUF files, names them, and writes the config that
-every other command reads. Run with no arguments, it opens a wizard. The
+the other commands read. Run with no arguments, it opens a wizard. The
 wizard scans the folders you name, including an LM Studio library or a
-Hugging Face cache, lets you rename ids and set a default, offers the on-disk
-prompt cache and the speech, embedding and rerank services, and writes
-`~/.config/gmlx/gmlx.yaml`.
+Hugging Face cache, and lets you rename ids and set a default. It offers
+the on-disk prompt cache and the speech, embedding and rerank services, then
+writes `~/.config/gmlx/gmlx.yaml`.
 
 ```sh
 gmlx init                 # the wizard
@@ -91,7 +91,7 @@ gmlx launch pi            # connect a coding agent to the server
 ```
 
 After that, every command takes a model id in place of a path. Each wizard
-choice also has a flag, so `gmlx init --models-dir ~/models` writes the
+choice also has a flag, and `gmlx init --models-dir ~/models` writes the
 config without asking questions. The
 [getting-started guide](https://github.com/asher/gmlx/blob/main/docs/getting-started.md)
 is the full walkthrough.
@@ -100,17 +100,17 @@ is the full walkthrough.
 
 ### Run and chat
 
-`run` generates, benchmarks or prints the load plan of one file. `chat` is a
-multi-turn terminal client with markdown rendering, sessions, live sampling
-changes and image input. Sampling defaults come from each model family's
+`run` generates, benchmarks or prints the load plan of one file. For
+conversation, `chat` is a multi-turn terminal client with markdown
+rendering, sessions, live sampling changes and image input. Sampling defaults come from each model family's
 card, and `@intents` such as `model.gguf@creative` switch them per call. The
 flags are listed in [cli.md](https://github.com/asher/gmlx/blob/main/docs/cli.md).
 
 ### Find and download models
 
 `validate` reads only a remote file's header to say whether it will load and
-fit, and lists the quants in a repo. `pull` downloads sharded files, resumes
-an interrupted download, and registers the file in your config.
+fit, and lists the quants in a repo. Then `pull` downloads sharded files,
+resumes an interrupted download, and registers the file in your config.
 [getting-started.md](https://github.com/asher/gmlx/blob/main/docs/getting-started.md#pick-a-model-for-your-mac)
 suggests models per machine size.
 
@@ -155,7 +155,7 @@ describe.
 
 ### Fine-tune with LoRA
 
-`train` fine-tunes through the quantized matmul, so a model too large for
+`train` fine-tunes through the quantized matmul, and a model too large for
 memory in fp16 still trains. It writes the adapter as a GGUF that llama.cpp
 reads too. `--adapter` applies it at run, chat or serve, and one base can
 serve several adapters at once. The guide is
@@ -163,7 +163,7 @@ serve several adapters at once. The guide is
 
 ## Performance
 
-gmlx and llama.cpp run the same file, so the comparison is direct. On an M5
+gmlx and llama.cpp run the same file, which makes the comparison direct. On an M5
 Max, gmlx prefills faster on every model in the fleet at every depth. With
 speculative decoding on both engines it also decodes faster at every depth.
 DeepSeek-V4-Flash is compared against ds4-server, since llama.cpp cannot run

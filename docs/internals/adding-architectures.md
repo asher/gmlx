@@ -18,9 +18,9 @@ upstream publishes its own class.
 
 ## What the work involves
 
-The engine is architecture-generic and data-driven. The load pipeline and
-the module-swap code are never edited per arch. A new family adds three
-things:
+The engine is architecture-generic and data-driven, and neither the load
+pipeline nor the module-swap code is edited per arch. A new family adds
+three things:
 
 - a tensor-name map from the GGUF's naming to the mlx-lm model class's
   parameter paths,
@@ -71,7 +71,7 @@ An architecture is done when all of the following pass.
   same file. Short-prompt parity is necessary but not sufficient, because
   rope, KV-cache, GQA-layout and permute bugs only surface at depth. Prepend
   BOS for archs with `add_bos_token=True` and match llama.cpp's prompt token
-  count, so a tokenization delta is not misread as a model bug. If the
+  count. Otherwise a tokenization delta is misread as a model bug. If the
   installed mlx-lm has a known context limitation for the family, such as a
   missing sliding-window implementation, cap the comparison window and
   document it in the arch notes.

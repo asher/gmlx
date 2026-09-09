@@ -15,7 +15,7 @@ change meaning or disappear between releases.
 
 These are upstream mlx-vlm variables. gmlx sets them for each model from
 the `load:` and `cache:` blocks of the config, described in
-[server-config.md](server-config.md#param-key-reference), so a config key
+[server-config.md](server-config.md#param-key-reference), and a config key
 is the normal way to set them. Exporting one applies it to all models the
 process loads.
 
@@ -81,7 +81,7 @@ so a live server can be reconfigured for an A/B without a restart.
 
 Streaming, memory-governor and kernel-route switches. The mechanisms are
 explained in [streaming.md](streaming.md) and
-[performance.md](performance.md). The rows say what each variable
+[performance.md](performance.md). Each row says what its variable
 changes.
 
 | Variable | Meaning |

@@ -2,7 +2,7 @@
 
 This guide takes five steps in order. You install gmlx, generate once, pick
 a model that suits your Mac, set up the server, and connect a client to it.
-Each step ends in a usable result, so stop at any step once your needs are
+Each step ends in a usable result. Stop at any step once your needs are
 met.
 
 - [What you need](#what-you-need)
@@ -98,11 +98,11 @@ The same file also runs as an interactive chat:
 gmlx chat Qwen3-0.6B-Q4_K_M.gguf
 ```
 
-The conversation keeps its KV cache between turns, so each turn reads only
+The conversation keeps its KV cache between turns, and each turn reads only
 the new message. Type `/help` inside for the commands. Esc cancels a reply
 and `/exit` quits. [chat.md](chat.md) describes the commands.
 
-Sampling defaults come from the model family's card, so a bare `run` or
+Sampling defaults come from the model family's card, and a bare `run` or
 `chat` already uses the settings the model's authors recommend. Intents
 such as `@coding` and `@creative` switch to the card's other operating
 points on any model, as in `gmlx run model.gguf@creative`. `gmlx profiles`
@@ -151,7 +151,7 @@ arguments, it opens a wizard. The wizard scans your model folders, lets you
 rename ids and set a default, offers the on-disk prompt cache and the
 speech, embedding and rerank services, and asks about idle unload. It
 previews the file before writing it to `~/.config/gmlx/gmlx.yaml`. Each
-choice has a flag, so `gmlx init --models-dir ~/models` writes the config
+choice has a flag, and `gmlx init --models-dir ~/models` writes the config
 with no questions.
 
 ```sh

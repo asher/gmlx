@@ -62,10 +62,10 @@ the loader reports two unfilled `post_layernorm` parameters. That is
 expected, because the conversion omits them and LLaVA never uses them.
 
 DeepSeek-V4-Flash-Vision-Exp has a few extra properties. Image turns run a
-single request at a time and need an unquantized KV cache, so `--kv-bits`
+single request at a time and need an unquantized KV cache, and `--kv-bits`
 applies to text turns only. Each image expands to a block of up to 384
 tokens that prefills in a single chunk. The prompt cache keys on those
-blocks, so a conversation that repeats its earlier image turns verbatim
+blocks, and a conversation that repeats its earlier image turns verbatim
 hits the cache. Its text output is not token-for-token comparable with the
 text-only release.
 
@@ -79,9 +79,9 @@ text-only release.
 | `--adapter` | refused, because live LoRA is text-path only |
 
 The bare language model GGUF still loads and runs as a plain text model
-without its companion. The serve chat endpoint renders all images of a
-conversation on its last user message, so a follow-up turn after an image
-turn re-prefills from the moved block. `chat` pins each image to the turn
+without its companion. Because the serve chat endpoint renders all images
+of a conversation on its last user message, a follow-up turn after an
+image turn re-prefills from the moved block. `chat` pins each image to the turn
 that sent it and keeps the prefix.
 
 ## Known GGUF defects
@@ -92,6 +92,6 @@ degraded output from the same file, while the native weights of the same
 checkpoint render correctly.
 
 Pixtral companions carry corrupted vision attention q and k projections from a
-RoPE layout mismatch in the conversion. There is no exact loader-side inverse,
-so GGUF Pixtral vision quality is limited until a re-converted companion
-appears. The text tower is unaffected.
+RoPE layout mismatch in the conversion. There is no exact loader-side
+inverse, and GGUF Pixtral vision quality is limited until a re-converted
+companion appears. The text tower is unaffected.

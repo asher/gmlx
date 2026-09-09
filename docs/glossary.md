@@ -27,12 +27,12 @@ GGUF.
 Endpointing. Deciding that an utterance has ended, from trailing silence.
 The voice chat settings for it are in [talk.md](talk.md).
 
-Every-token layers. The parts of a MoE model that run on every token:
-attention, norms, routers and shared experts. Streaming keeps them on the
-GPU and streams only the routed experts.
+Every-token layers. The parts of a MoE model that run on every token, which
+are attention, norms, routers and shared experts. Streaming keeps them on
+the GPU and streams only the routed experts.
 
 Expert and MoE. A mixture-of-experts model is built from many small
-sub-networks. Each token activates a few of them, so decode costs only what
+sub-networks. Each token activates a few of them, and decode costs only what
 the active fraction costs. The `A3B` in `35B-A3B` means 3B active parameters.
 Because most experts are idle on any token, a MoE bigger than RAM can still
 run by streaming experts from disk.
@@ -89,9 +89,9 @@ Prefill and decode. The two phases of answering. Prefill reads the prompt,
 all at once, and decode generates the reply one token at a time. The two
 have different speeds and are reported separately.
 
-Prestage. Reading experts the router is predicted to select before the router runs,
-so the read overlaps compute. It moves bytes only and never changes
-routing.
+Prestage. Reading experts the router is predicted to select before the
+router runs, which overlaps the read with compute. It moves bytes only and
+never changes routing.
 
 Prompt cache. The server's store of prefilled prefixes. A request that
 shares a prefix with an earlier one, such as a system prompt or the
@@ -99,8 +99,8 @@ conversation so far, skips prefilling the shared part. mlx-vlm calls it
 APC, and its keys are in [server-config.md](server-config.md#cache-keys).
 
 Quant. A compressed build of a model. The suffix on a GGUF name says
-roughly the number of bits per weight, so Q4 files are smaller and
-slightly lossier and Q6 or Q8 bigger and closer to the original.
+roughly the number of bits per weight. Q4 files are smaller and slightly
+lossier, and Q6 or Q8 are bigger and closer to the original.
 
 Resident. A model that is loaded and ready to answer. Several stay resident
 at once within the server's budget, and `gmlx ps` lists them.
@@ -126,5 +126,5 @@ Token. The unit models read and write, about three quarters of an English
 word on average. Speeds are quoted in tokens per second.
 
 Wired memory. Memory the GPU has pinned so the kernel cannot page it out.
-Weights and the arena are wired, so the server budgets them against the
+Weights and the arena are wired, and the server budgets them against the
 machine's working set instead of its total RAM.

@@ -24,8 +24,8 @@ scripts/upstream_canary.sh
 
 This builds a disposable venv with this checkout plus the latest mlx-vlm and
 runs the seam check. A pass means the release is likely a safe bump, still
-to be qualified by the procedure below. A failure lists each changed symbol
-and the gmlx site that uses it.
+to be qualified by the procedure below. On failure it lists each changed
+symbol and the gmlx site that uses it.
 
 ## Bump procedure
 

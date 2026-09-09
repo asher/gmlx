@@ -14,8 +14,8 @@ stop, copy URL and open logs, all through the server's endpoints. If a
 tracked server exits unexpectedly the item posts a macOS notification. An
 intentional stop or restart does not.
 
-A background `gmlx serve` starts the item on a macOS desktop, so you rarely
-run it manually. `--no-menubar` or `server.menubar: false` disables that.
+A background `gmlx serve` starts the item on a macOS desktop, and you
+rarely run it manually. `--no-menubar` or `server.menubar: false` disables that.
 To keep the item and the server across reboots, install them as a login
 item with [gmlx service install](cli.md#gmlx-service). Running as a login
 item also makes macOS permission prompts attribute to gmlx instead of your
@@ -23,7 +23,7 @@ terminal.
 
 Like `serve`, the item detaches by default. `--foreground` runs the event
 loop in place, and `--stop` quits a detached item. Only one item runs on a
-machine, so a second `serve` or a manual launch is a no-op. With no explicit
+machine. A second `serve` or a manual launch is a no-op. With no explicit
 target it tracks the primary server, following it as servers start and
 stop. `--url`, `--host` or `--port` restricts it to one server. It reads
 the API key from the managed server's config, or takes `--api-key` for a
@@ -34,7 +34,7 @@ shows as up with a key-required note. The flags are listed under
 ## Editing the config
 
 "Edit config" opens the server's YAML in a floating editor panel. Validate
-runs the draft through the server's config parser, so the verdict is what
+runs the draft through the server's config parser, and the verdict is what
 `gmlx serve` would say, before the server reads the file. Save writes
 atomically. It refuses once if the file changed on disk while you were
 editing. Save and Reload validates, saves and triggers the running server's
@@ -63,7 +63,7 @@ is involved.
 
 Starting a voice session from either surface holds its model resident on
 the server for the session's lifetime. The model is loaded and warmed up in
-advance and exempt from the idle timeout, so the mic is never open while
+advance and exempt from the idle timeout, and the mic is never open while
 the model is unloaded. When the session ends the hold is released and the
 model is not evicted.
 
@@ -87,10 +87,10 @@ talk:
 
 The right-side variants are offered because left Cmd+Space is Spotlight and
 left Option+Space is a common launcher binding. Holding Globe as a modifier
-suppresses macOS's own Globe-key action only for the combo, so your "Press
+suppresses macOS's own Globe-key action only for the combo. Your "Press
 Globe key to" setting keeps working for bare presses.
 
-Suppressing the Space keystroke, so that no space is typed into the
+Suppressing the Space keystroke, which stops a space being typed into the
 focused app, requires an active event tap and therefore Accessibility
 permission. The permission is requested only when you first enable the
 hotkey. While armed, all keystrokes in the login session pass through the
@@ -104,4 +104,4 @@ within a few seconds. If arming still fails right after a grant, the app says
 to quit and reopen the menu bar, since some macOS versions bind grants only
 to a freshly launched process. Permission prompts attribute to gmlx when
 the bar runs as the login item. A bar launched from a terminal runs under
-the terminal's identity, so grants then apply to the terminal app.
+the terminal's identity, and grants then apply to the terminal app.

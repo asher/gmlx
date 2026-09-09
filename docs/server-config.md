@@ -33,8 +33,8 @@ gmlx serve --models-dir ~/models    # scan a folder every start, no file written
 ```
 
 A request names a model by the id `gmlx init` printed, and `gmlx list` shows
-the ids again later. Auto-named ids carry the quant tag, so a folder with two
-quants of one model gets `qwen3.6-27b-q4` and `qwen3.6-27b-q6`.
+the ids again later. Auto-named ids carry the quant tag. A folder with two
+quants of a model gets `qwen3.6-27b-q4` and `qwen3.6-27b-q6`.
 
 ```sh
 curl localhost:8080/v1/chat/completions -d '{
@@ -43,8 +43,8 @@ curl localhost:8080/v1/chat/completions -d '{
 }'
 ```
 
-Sampling defaults come from the model's family card, so a fresh config needs
-no sampling section. Append `@coding`, `@instruct`, `@creative` or
+Sampling defaults come from the model's family card, and a fresh config
+needs no sampling section. Append `@coding`, `@instruct`, `@creative` or
 `@reasoning-low`, `@reasoning-medium`, `@reasoning-high`, `@reasoning-max` to
 any id to switch operating point, as in `"model": "qwen3.6-27b@coding"`. The
 [Family defaults](#family-defaults) table at the end lists what each intent
@@ -57,7 +57,7 @@ token. The [bind and auth](#bind-and-auth) table has the details.
 ## Config file locations
 
 A bare `gmlx serve` searches three locations and takes the first that exists.
-A project-local file is searched first so a repository can override your
+The project-local file comes first so a repository can override your
 user-level config.
 
 ### Default config locations
@@ -96,9 +96,9 @@ A config is a mapping with these top-level keys, all optional:
 ## Precedence
 
 A request's effective settings are merged from these layers, lowest first.
-Each layer only fills what the layers above it leave unset, so a profile's
-`temperature` applies to a request that omits `temperature` and is overridden by
-one that sends it.
+Each layer only fills what the layers above it leave unset. A profile's
+`temperature` therefore applies to a request that omits `temperature` and
+is overridden by one that sends it.
 
 | Layer | Set where | Wins over |
 |-------|-----------|-----------|
@@ -117,9 +117,9 @@ its name is the profile selected for the request.
 
 Two settings follow the precedence order but bind at different times. A
 profile's `system` is injected only when the request carries no system
-message. A profile's `chat_template` is applied to the tokenizer at load. Two
-ids on the same file with different templates are therefore two resident
-copies, and a request cannot change the template.
+message. Its `chat_template` is applied to the tokenizer at load. Two ids on
+the same file with different templates are therefore two resident copies,
+and a request cannot change the template.
 
 Some settings can also be set by a `serve` flag or an environment variable.
 When more than one is set, this is the order:
@@ -130,14 +130,14 @@ When more than one is set, this is the order:
 | config key | at start and on reload | this server process |
 | environment variable | at start, some on each request | each gmlx process in that shell |
 
-The flag is used first, then the config key, then the environment. The
-exception is the MLX buffer-cache limit, where the environment variable
+The flag is used first, then the config key, then the environment. One
+exception exists, the MLX buffer-cache limit, where the environment variable
 overrides `server.cache_limit_gb` so a benchmark can pin it without editing
-the file. The variables are listed in [env-vars.md](env-vars.md).
+the file. All the variables are listed in [env-vars.md](env-vars.md).
 
 ## server
 
-Settings for the process itself. Everything here has a default, so a config
+Settings for the process itself. Everything here has a default. A config
 with no `server:` block runs a loopback server on port 8080 with the prompt
 cache off.
 
@@ -167,15 +167,15 @@ With `api_key` set, clients send `Authorization: Bearer <key>` or
 `x-api-key: <key>`. The config is the only place the server reads its key
 from. There is no `serve --api-key` flag and no environment fallback. The
 client tools `ps`, `status`, `launch` and `menubar` take `--api-key` to
-present one. `/health` remains unauthenticated and returns liveness only, so
-probes and `launch` keep working against a keyed server. `OPTIONS` requests
-are also exempt, because browsers send CORS preflights without credentials.
+present one. `/health` remains unauthenticated and returns liveness only, which keeps
+probes and `launch` working against a keyed server. Browsers send CORS
+preflights without credentials, and `OPTIONS` requests are exempt as well.
 
 Two checks protect a local server from browser-borne attacks. On a loopback
 bind, a request whose `Host` header is not a loopback name gets 403, which
-blocks DNS rebinding. CORS answers with a literal `*` and no credentials, so
-a page cannot reuse a cookie session. Auth is header based, so real clients
-are unaffected.
+blocks DNS rebinding. CORS answers with a literal `*` and no credentials, which stops a page from
+reusing a cookie session. Real clients are unaffected, because auth is
+header based.
 
 ### Paths
 
@@ -214,7 +214,7 @@ when named under `models`.
 How pinned, kept and idle models share the budget is in
 [Residency](#residency). The buffer cache is the pool of freed GPU buffers
 MLX keeps for reuse. Left unbounded it can hold tens of GB the kernel counts
-as wired, so the server always bounds it. When to change the cap is in
+as wired, which is why the server always bounds it. When to change the cap is in
 [performance.md](performance.md#the-mlx-buffer-cache-at-deep-context).
 
 ### Scheduling
@@ -252,10 +252,11 @@ single chunk, by halving chunks until their predicted time fits the budget.
 Neither has an effect when nothing is decoding. The measured effects are in
 [performance.md](performance.md#serving-concurrent-requests).
 
-`token_queue_timeout_s` triggers mainly on a long prefill that has not produced
-its first token, such as a big prompt on an over-RAM model. A timed-out
-request is cancelled, logged as failed, and recorded as `last_error` in
-`/v1/metrics`. A streaming client receives a final error event.
+`token_queue_timeout_s` triggers mainly on a long prefill that has not
+produced its first token, such as a big prompt on an over-RAM model. A
+timed-out request is cancelled, logged as failed, and recorded as
+`last_error` in `/v1/metrics`. Streaming clients receive a final error
+event.
 
 ### Features
 
@@ -268,7 +269,7 @@ request is cancelled, logged as failed, and recorded as `last_error` in
 
 `stochastic_mtp` keeps the exact sampling distribution but is not
 token-identical to a non-speculative run. Greedy requests are unaffected.
-It is applied at startup, so a reload does not change it. The measured gain
+It is applied at startup, and a reload does not change it. The measured gain
 is in [performance.md](performance.md#stochastic-acceptance), and
 `gpu_keepwarm` is described in
 [streaming.md](streaming.md#the-lossless-settings).
@@ -289,7 +290,7 @@ request shapes are in [services.md](services.md). A service whose file is
 missing is disabled with a warning instead of failing startup.
 
 Served assistants are pseudo-models that answer through the built-in tool
-loop on the server, so a thin client gets tools without a loop of its own.
+loop on the server. A thin client gets tools without a loop of its own.
 Their tools run on the server host. A non-loopback bind with assistants
 configured therefore refuses to start unless `assistant_allow_remote` is
 set, and a remote-exposed assistant must declare an `mcp` scope. The
@@ -298,8 +299,8 @@ contract is in [assistant.md](assistant.md#served-assistants).
 ### Cache
 
 `server.cache` is the base of the prompt cache settings, and profiles and
-models override it. `gmlx init` writes `cache: {enabled: true, disk: false}`.
-A config with no `cache` block leaves the prompt cache off. The keys are in
+models override it. `gmlx init` writes `cache: {enabled: true, disk: false}`,
+and a config with no `cache` block leaves the prompt cache off. The keys are in
 [Cache keys](#cache-keys).
 
 ## profiles
@@ -362,7 +363,7 @@ at load, it is part of the resident identity described under
 `chat_template_kwargs` is for template flags a model exposes. The flag that
 matters most is `preserve_thinking` on Qwen3.6 and recent Gemma templates,
 which keeps prior-turn `<think>` blocks in the rendered prompt. Agent loops
-depend on the model seeing its prior reasoning, so set it there. A request
+depend on the model seeing its prior reasoning. Set it there. A request
 may send the field as well, and request keys win.
 
 ```yaml
@@ -383,8 +384,8 @@ reasoning controls differently:
 | gpt-oss | `reasoning_effort` | `low`, `medium`, `high`. Reasoning cannot be disabled |
 
 The two keys are mapped onto the serving model's variable name on each
-request by inspecting its template, so a single profile applies across
-models. An explicit `chat_template_kwargs` entry passes through verbatim and
+request by inspecting its template, which lets a single profile apply
+across models. An explicit `chat_template_kwargs` entry passes through verbatim and
 overrides the profile. On `run` and `chat` the controls are `--thinking` and
 `--reasoning-effort`.
 
@@ -399,10 +400,10 @@ profiles:
 ### Overriding a built-in
 
 There are three levels, from global to most specific. A user profile named
-after an intent replaces that intent everywhere. A profile with
-`extends: coding` inherits the intent as resolved for each family and
-overrides only what it sets. A model's `profiles` block changes what a named
-profile means for that model alone, as described under [models](#models).
+after an intent replaces that intent everywhere. One with `extends: coding`
+inherits the intent as resolved for each family and overrides only what it
+sets. Finally, a model's `profiles` block changes what a named profile means
+for that model alone, as described under [models](#models).
 
 ```yaml
 profiles:
@@ -481,8 +482,7 @@ The streaming keys and the four lossy settings are explained in
 [streaming.md](streaming.md), including how to size a setting before serving
 with it. Each requires `stream`, is validated at load, and creates a separate
 resident copy as described under [Residency](#residency). `stream: cpu`
-moves the whole process to the CPU device, so it suits a single-model
-server. A speculative entry refuses both `stream` values, and a VLM refuses
+moves the whole process to the CPU device and suits a single-model server. A speculative entry refuses both `stream` values, and a VLM refuses
 `stream: cpu`. The old key `cpu_moe` still parses as an alias for `stream`
 and warns.
 
@@ -500,8 +500,8 @@ stream and much with several. Each drafter carries a measured default, and
 this key overrides it. `null` takes the default, which is uncapped for a
 native head on a dense Qwen target, `2` for the Gemma assistant drafter, and
 `1` for any routed-expert target and for the Hy3 and DeepSeek-V4 drafters.
-`0` turns the cap off, and `N` speculates only while at most N requests
-decode together. A drafter that handles a single sequence clamps any larger
+Setting `0` turns the cap off, and `N` speculates only while at most N
+requests decode together. A drafter that handles a single sequence clamps any larger
 value.
 
 A batch that grows past the cap converts to plain decode with the drafter
@@ -528,7 +528,7 @@ exist. All of that is checked at load.
 ## discover
 
 An opt-in scan that registers each GGUF under a directory without listing
-them. The scan reads headers only, so it does no tensor I/O.
+them. The scan reads headers only and does no tensor I/O.
 
 ```yaml
 discover:
@@ -546,9 +546,9 @@ discover:
 | `speculative` | `auto` | `auto` and `true` enable speculation on models with an MTP head, `false` never |
 
 A sibling assistant drafter pairs in as `draft_gguf` when its architecture,
-hidden size and filename agree with the target. A drafter whose header names
-its base model pairs with that model wherever it was found, and never with a
-different one. A streamed model gets no drafter.
+hidden size and filename agree with the target. When a drafter's header
+names its base model, it pairs with that model wherever it was found, and
+never with a different one. Streamed models get no drafter.
 
 Ids derive from filenames. The shard suffix, the quant tag and the kind
 markers `mmproj`, `assistant`, `draft` and `mtp` are stripped, and the rest
@@ -598,8 +598,8 @@ reduction order shifts logits at float tolerance.
 `thinking_budget` is enabled whenever it is set. It takes effect once the
 model opens a thinking block, whether the template pre-fills it or the model
 generates it. On speculative models the close happens at a round boundary,
-so the cap can overshoot by a draft block, and it is dropped for requests
-that decode in a batch or after a preempt. Speculative models with a
+which lets the cap overshoot by a draft block. The cap is dropped for
+requests that decode in a batch or after a preempt. Speculative models with a
 separate drafter reject the key. The two token keys override the markers
 everywhere the server needs them, and a family card sets them when a model
 formats its markers differently. All three apply to `run` and `chat` through
@@ -613,7 +613,7 @@ the config overlay.
 ### Load keys
 
 Applied at model build through an environment window opened for that
-model, so each model loads with separate values. Each key maps to an mlx-vlm
+model, which gives each model separate values. Each key maps to an mlx-vlm
 environment variable listed in [env-vars.md](env-vars.md#load-and-cache-keys).
 
 | Key | Default | Meaning |
@@ -637,16 +637,16 @@ width outside the scheme's list, a malformed `kv_tail_tokens`, or split key
 and value widths under `uniform`. Speculative models quantize at batch size
 1 and run fp16 KV while batched, reported as `verdict_batched`.
 
-`kv_quant_scheme: kvarn` runs the policy above over the stack it covers.
-`kv_bits` picks the width and `kv_tail_tokens` the fp16 tail. Split key and
+`kv_quant_scheme: kvarn` runs the policy above over the stack it covers,
+with `kv_bits` picking the width and `kv_tail_tokens` the fp16 tail. Split key and
 value widths are set server-wide through the environment, as
 [env-vars.md](env-vars.md#load-and-cache-keys) lists. Which layers convert
 and which architectures decline is in
 [performance.md](performance.md#kv-cache-quantization). A model where no
 layer converts runs fp16 KV with a logged reason, never a silent affine
 fallback. On the server `max_kv_size` only caps the request context budget
-and builds no rotating window, so the window-plus-kvarn composition of
-`run` and `chat` has no server equivalent. A native-MTP drafter declines a
+and builds no rotating window. The window-plus-kvarn composition of `run`
+and `chat` has no server equivalent. A native-MTP drafter declines a
 mixed window-plus-kvarn stack whole at batch size 1. Admission counts a
 kvarn layer at its record width, rounded up to the 4096-token slab the cache
 grows in, plus the fp16 sink and tail buffers, which are resident from the
@@ -659,8 +659,8 @@ them on each request after the load window has closed. Set them under
 ### Cache keys
 
 The prompt cache, which mlx-vlm calls APC, and its optional SSD tier. The
-keys are server-level, and a profile or a model can override them. The
-environment variable behind each key is listed in
+keys are server-level, and a profile or a model can override them. For the
+environment variable behind each key, read
 [env-vars.md](env-vars.md#load-and-cache-keys).
 
 | Key | Default | Meaning |
@@ -682,14 +682,14 @@ environment variable behind each key is listed in
 
 The shared pool holds `num_blocks` times `block_size` tokens for all cached
 prefixes together, and a single long request can fill it. A full pool
-evicts the oldest prefixes instead of failing, so reuse depth shrinks to
+evicts the oldest prefixes instead of failing, and reuse depth shrinks to
 what fits. Size it at expected prompt tokens times concurrent
 conversations, divided by `block_size`. Sliding-window models also use about
-`window / block_size` blocks for each checkpoint, so allow extra there.
+`window / block_size` blocks for each checkpoint. Allow extra there.
 Raising the count uses only metadata memory until blocks are stored.
 
 `exact_entries` sizes the in-memory pool hybrid and recurrent architectures
-use instead of blocks. Each entry is a full prompt-cache clone, so raising
+use instead of blocks. Each entry is a full prompt-cache clone, and raising
 it trades memory for reuse. The default of 4 keeps a third conversation
 from evicting the first.
 
@@ -804,8 +804,8 @@ weights map from the file without a copy. Four states govern the pool.
 | idle | any request | `ttl_s` seconds pass with no request, or the budget needs the room |
 | preloaded | `defaults.preload` | as idle, after the first request |
 
-The idle reaper only unloads a model whose batch worker has drained, so a
-model is never unloaded mid-generation. A kept model stays resident through
+The idle reaper only unloads a model whose batch worker has drained. No
+model is unloaded mid-generation. A kept model stays resident through
 a coding session's idle periods without reserving budget. `{"keep": false}`
 releases it and `POST /unload` evicts it.
 
@@ -821,7 +821,7 @@ second copy. How a streamed model is counted against the budget is in
 A server started from a config file re-reads it on `POST /v1/reload` or
 `SIGHUP`. The file is parsed again, the model registry rebuilt, and resident
 models whose load settings are unchanged stay loaded. A config with no
-models serves, so you can start empty and add models by reloading.
+models serves, which lets you start empty and add models by reloading.
 
 `gmlx init` and `gmlx sync-models` signal the reload automatically. After
 rewriting the config, each signals a running server started from that file,
@@ -835,8 +835,8 @@ settings until it is evicted or unloaded.
 ## Family defaults
 
 The built-in sampling for each family and the intents each family defines.
-The first column is the family, the second the GGUF architectures it
-covers, and the last the intents, each with what it changes from the base.
+Column one is the family, column two the GGUF architectures it covers, and
+the last column the intents, each with what it changes from the base.
 `gmlx profiles` prints this table from the running code, and
 `gmlx profiles <id>` shows a single model fully resolved.
 
@@ -865,7 +865,7 @@ The `default` row is the fallback for unknown architectures. On gpt-oss the
 reasoning intents set `reasoning_effort`, which the harmony template renders.
 Kimi's set `thinking_effort` with `low`, `high` and `max` and no medium
 point. Muse's set `reasoning_strength`. The Qwen `@instruct` intents also
-set `enable_thinking: false`. The Kimi and Muse rows set their thinking
-markers because those models use different marker strings. The values are
-cited to the model cards in `gmlx/gen/profiles.py`, and the test suite
+set `enable_thinking: false`. Kimi and Muse also set their thinking
+markers, because those models use different marker strings. Each value is
+cited to the model card in `gmlx/gen/profiles.py`, and the test suite
 asserts this table matches the code.

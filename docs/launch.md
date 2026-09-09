@@ -26,8 +26,8 @@ prints an install hint and exits. The flag table and exit codes are under
 ## How a launch works
 
 1. Probe. launch checks `/health` and `/v1/models`. Served ids, aliases and
-   the default-model marker come from `/v1/models`, so they are selectable
-   inside menu-driven tools.
+   the default-model marker come from `/v1/models`, which makes them
+   selectable inside menu-driven tools.
 2. Configure. Each client is configured in one of three styles, listed in
    the table that follows. Injection writes a config under
    `~/.config/gmlx/` and points the tool at it through the tool's mechanism
@@ -69,9 +69,9 @@ anywhere, launch prints `gmlx init` guidance and starts nothing.
 
 - `--no-start` never auto-starts, and launch errors if the server is not running.
 - `--start-timeout SECONDS` caps the wait, for non-interactive use.
-- An explicit `--base-url` is never auto-started and reads no config, so a
-  project-local config cannot redirect the session or supply an unexpected
-  key.
+- An explicit `--base-url` is never auto-started and reads no config. A
+  project-local config therefore cannot redirect the session or supply an
+  unexpected key.
 
 ## Choosing the model
 
@@ -81,7 +81,7 @@ gets the server's default. An `id@profile` form such as
 profile's sampling. The id is validated against the served list.
 
 When you pass `--model`, launch also asks the server to keep that model
-resident through the idle timeout, so a long session's model is not
+resident through the idle timeout, and a long session's model is not
 unloaded during the session. This is not a pin, and under memory pressure
 the pool can still evict it. `gmlx ps` shows the model as kept.
 `POST /unload` releases it, and `--no-keep` opts out.
@@ -116,12 +116,12 @@ to each tool's native setting:
 Claude Code uses the server's Anthropic API. launch exports
 `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL` and
 `ANTHROPIC_AUTH_TOKEN`. The token is a placeholder when the server has no
-auth. A model is required, so pass `--model` or set
+auth. A model is required. Pass `--model` or set
 `server.defaults.model`. An inherited `ANTHROPIC_API_KEY` is dropped so the
 injected token takes effect. `~/.claude` is never modified.
 
 Claude Code is prefill-heavy. It sends a very long system prompt and often
-rewrites its request prefix through compaction and tool results, so prompt
+rewrites its request prefix through compaction and tool results, and prompt
 processing dominates turn latency. Serve with the
 [prompt cache](performance.md#the-prompt-cache) on, and prefer a model and
 machine with strong prefill throughput.
@@ -144,7 +144,7 @@ slot.
 The injected file is your `~/.hermes/config.yaml` merged with the gmlx
 provider block, passed through `HERMES_CONFIG` plus `CUSTOM_BASE_URL`. A
 model is required. hermes refuses models with less than 64k context at
-startup. The window comes from the GGUF metadata, so give it a model whose
+startup. The window comes from the GGUF metadata. Give it a model whose
 trained context is at least 64k tokens.
 
 ### goose
@@ -155,7 +155,7 @@ goose. A model is required.
 
 ### aichat
 
-Each served id is flagged as supporting function calling, so aichat's tools
+Each served id is flagged as supporting function calling, and aichat's tools
 and agents work against the server's tool-call surface. Tool execution still
 needs aichat's `llm-functions` installed.
 
@@ -166,8 +166,8 @@ newer is required. Upgrade with `pipx upgrade elia-chat`.
 
 ### open-webui
 
-Open WebUI is a browser chat app and a web server in its own right, so
-this launch starts a second service instead of a terminal client. Install
+Open WebUI is a browser chat app and a web server of its own. This launch
+therefore starts a second service instead of a terminal client. Install
 it separately with `pipx install open-webui --python python3.12`. It needs
 Python 3.11 or 3.12.
 
@@ -190,7 +190,7 @@ The configuration depends on which services the server reports:
 ## Troubleshooting
 
 - `command not found` for the tool means the client is not installed.
-  launch does not install clients, so follow the install hint it prints,
+  launch does not install clients. Follow the install hint it prints,
   then rerun.
 - Exit code 2 with an init hint means no config exists in a default
   location. Run `gmlx init`, or pass `--base-url` for an already-running

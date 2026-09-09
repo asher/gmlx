@@ -80,8 +80,9 @@ message instead of speaking. Try voices live:
 /wake okay computer
 ```
 
-The wake phrase is plain text with no training. The keyword spotter is an
-open-vocabulary transducer, so any phrase is spelled into tokens at startup.
+The wake phrase is plain text with no training. Because the keyword spotter
+is an open-vocabulary transducer, any phrase is spelled into tokens at
+startup.
 Continuous listening costs well under one percent of a CPU core. If the wake
 engine is not installed, `talk` falls back to open-mic mode with an install
 hint.
@@ -175,12 +176,12 @@ assistant: Noted. Ana's birthday is March 12th.
 
 Quit, relaunch later, and ask when your sister's birthday is. The
 assistant answers from memory. What it stored is an extracted fact, not a
-transcript. The extraction runs in the background after the turn, so it
-adds no latency. The store is shared with `gmlx chat --assistant`, and
-`/memory` inspects it from inside a session. The rules, the on-disk
-location and the security model are in [assistant.md](assistant.md#memory).
+transcript. Extraction runs in the background after the turn and adds no
+latency. The store is shared with `gmlx chat --assistant`, and `/memory`
+inspects it from inside a session. For the rules, the on-disk location and
+the security model, read [assistant.md](assistant.md#memory).
 
-Tool rounds cost time, a model turn plus the call for each round, so
+Tool rounds cost time, a model turn plus the call for each round, and
 multi-tool answers are slower than plain chat. A barge-in during a tool
 round is still handled correctly. The loop commits what you heard and never
 leaves a half-finished tool round in the history.
@@ -188,7 +189,7 @@ leaves a half-finished tool round in the history.
 ## Configuration reference
 
 All keys sit in a top-level `talk:` block of the YAML the server reads.
-The block configures the client, so it is not under `server:`. Most keys
+The block configures the client and is therefore not under `server:`. Most keys
 have a matching flag under [gmlx talk](cli.md#gmlx-talk).
 `vad.pre_roll_ms` and `push_to_talk_modifier` are config-only. Precedence
 is defaults, then YAML, then flags.
@@ -236,7 +237,7 @@ End of speech to first audio is typically 1.3 to 2.2 seconds. That is the
 sum of the endpointer's 550 ms silence hangover, 300 to 500 ms of Whisper
 turbo, the model's first sentence, and 150 to 300 ms of Kokoro synthesis.
 Replies are chunked at sentence boundaries and synthesized a sentence ahead
-of playback, so long answers speak continuously.
+of playback, which keeps long answers speaking continuously.
 
 | Tuning | Trade |
 |--------|-------|
@@ -245,8 +246,8 @@ of playback, so long answers speak continuously.
 | `max_tokens` around 512 | keeps answers short |
 
 In wake mode the wake phrase itself interrupts a reply. The keyword
-spotter stays live while the assistant transcribes, thinks and speaks, so
-saying the phrase mid-reply stops playback, cancels the turn and opens the
+spotter stays live while the assistant transcribes, thinks and speaks.
+Saying the phrase mid-reply stops playback, cancels the turn and opens the
 mic. A stop phrase after it, such as "stop", "cancel" or "never mind",
 acknowledges and returns to waiting for the wake phrase instead of starting
 a turn. Space and Esc do the same from the keyboard within about 150 ms.
@@ -256,9 +257,9 @@ open mic stays gated, since playback would otherwise be re-transcribed.
 `vad` and `ptt` modes are therefore half-duplex and keyboard-interrupt
 only. There is no protection against the assistant speaking the wake
 phrase. If a reply quotes it aloud, the spotter detects it through the
-speakers, so pick a phrase the model is unlikely to say. Whisper's known
+speakers. Pick a phrase the model is unlikely to say. Whisper's known
 hallucinations on silence and noise are filtered by a minimum-speech and
-energy floor before transcription and a known-phrase check after, so noise
+energy floor before transcription and a known-phrase check after, and noise
 does not become a turn.
 
 The manual smoke checklist for this loop, for contributors, is in

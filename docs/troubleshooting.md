@@ -38,7 +38,7 @@ shaders compile with `xcrun metal`, which the Command Line Tools do not
 include. Install Xcode, select it with
 `sudo xcode-select -s /Applications/Xcode.app`, and re-run the pip
 install. Recent Xcode versions fetch the Metal toolchain as a separate
-download, so run `xcodebuild -downloadComponent MetalToolchain` once. If
+download. Run `xcodebuild -downloadComponent MetalToolchain` once. If
 the build still fails after a macOS upgrade, update Xcode so its SDK
 matches, and try again. On macOS 26.2 and newer none of this applies,
 because the kernels install as a prebuilt wheel.
@@ -46,7 +46,7 @@ because the kernels install as a prebuilt wheel.
 ## `gmlx: command not found` in a new terminal
 
 `gmlx` worked in an earlier terminal, but a new terminal says
-`command not found: gmlx`, so `gmlx doctor` is unavailable too.
+`command not found: gmlx`, and `gmlx doctor` is unavailable too.
 
 Nothing is broken. This happens with the plain-venv install route. gmlx is
 installed in the Python venv you chose, and each new terminal starts with
@@ -74,7 +74,7 @@ network drop or a Hugging Face error, is also safe to re-run.
 `validate`, `pull`, or a load fails and names a tensor codec.
 
 The K-quant, legacy, and IQ families all have kernels in gmlx, as does the
-structured-ternary `STQ1_0`, so this is rare. It means the file uses an
+structured-ternary `STQ1_0`, which makes this rare. It means the file uses an
 uncommon type with no kernel, such as the plain ternary `TQ1_0` and
 `TQ2_0` types. The refusal names the unsupported codec and what is
 supported. Pick a different quant from the same repo.
@@ -88,8 +88,8 @@ An id from your config is not listed, or requesting it returns a 404 with
 type `model_file_missing`. `gmlx logs` shows
 `[server] skipping model '<id>'` at the last startup or reload.
 
-The entry's GGUF is gone from disk, deleted, moved or renamed, so the
-server skipped it and kept serving everything else. Restore the file and
+The entry's GGUF is gone from disk, deleted, moved or renamed. The server
+skipped it and kept serving everything else. Restore the file and
 the server recovers with no restart. Requests for the id work again and it
 re-appears in `/v1/models`. If the file is permanently gone,
 `gmlx sync-models` reconciles the config in one pass. Entries for missing
@@ -133,7 +133,7 @@ another port with `--port 8081`.
 The server answered immediately, but the first chat completion took many
 seconds.
 
-Nothing was preloaded, so the first request included the model load. Set
+Nothing was preloaded, and the first request included the model load. Set
 `server.defaults.model: <id>` in the config, pin a model, or pass `--model`
 to `gmlx launch`. The auto-start path then loads the weights before binding
 the port, and the first turn does not wait for a load. A slow first turn on

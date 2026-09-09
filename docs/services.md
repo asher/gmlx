@@ -51,7 +51,7 @@ curl localhost:8080/v1/audio/transcriptions -F file=@clip.ogg -F model=whisper-1
 
 Send `model=whisper-1` or omit it. The conventional OpenAI name maps to the
 configured model, and `/v1/models` advertises a `whisper-1` entry when STT
-is on. Any other requested model is refused, so clients cannot make the
+is on. Any other requested model is refused, and clients cannot make the
 server download arbitrary repos. The configured `stt:` model itself is
 fetched from Hugging Face on first use when it is not already local. Naming
 it in the config is the opt-in, and the no-download policy for chat models
@@ -148,7 +148,7 @@ The form of the value picks one of three backends.
 - A GGUF decoder embedder. The value is a `*.gguf` path, an
   `hf:<org>/<repo>/<file>.gguf` ref, or a `qwen3-embed-*` alias for
   Qwen3-Embedding `0.6b`, `4b` or `8b`. These are the Qwen3 dense decoder
-  trunk plus last-token pooling and an L2 norm, so the runtime loads them
+  trunk plus last-token pooling and an L2 norm, and the runtime loads them
   like any other GGUF. They carry the model's full 32k to 40k context, so
   long documents embed without truncation.
 - A GGUF encoder. `embeddinggemma-gguf` runs an EmbeddingGemma GGUF as a
@@ -203,7 +203,7 @@ small multilingual model with low memory use.
 
 The model is warmed in the background at startup and then cached
 in-process. If the warm-up fails, the first request loads it. It is kept
-separate from the chat residency pool, so a RAG re-index and chat never
+separate from the chat residency pool, and a RAG re-index and chat never
 evict each other. Requests follow the OpenAI shape, a JSON body with
 `input` as a string or a list of strings, plus the optional fields `model`
 and `encoding_format`. `encoding_format` takes `float`, the default, or

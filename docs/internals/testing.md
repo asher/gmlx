@@ -12,7 +12,7 @@ interpreter that has gmlx and mlx-kquant installed for all of them.
 ## CPU logic tests
 
 The CPU tier runs on synthetic inputs. No model is loaded and no GPU kernel
-is dispatched, so it runs anywhere, including CI. It covers the remap
+is dispatched, and it runs anywhere, including CI. It covers the remap
 tables, config and tokenizer synthesis, the arch gate, weight transforms,
 preflight, the config loader, the family sampling profiles, discovery, the
 serving id layer, residency, the server patches and the chat client. For the
@@ -33,7 +33,7 @@ few tests that use array ops off the GPU path. The doc tests under
 These assert numerical correctness against real weights and stay skipped
 until `KQUANT_TEST_GGUF_DIR` points at a GGUF library. The directory is
 searched recursively, each test selects a model by architecture from the
-GGUF header, and any arch you do not have skips, so one small model is
+GGUF header, and any arch you do not have skips. One small model is
 enough to exercise a path.
 
 | Module | Extra gate | What it checks |
@@ -62,8 +62,8 @@ KQUANT_TEST_GGUF_DIR=~/models KQUANT_LONGCTX_TOKENS=4096 \
 | `-m integration` | only the marker-carrying parity modules |
 
 Before a release, run the engagement gate with the big rows enabled. CI has
-no GGUFs, so this is the one check that proves a real served model engages
-its cache tier:
+no GGUFs, which makes this the one check that proves a real served model
+engages its cache tier:
 
 ```sh
 KQUANT_TEST_GGUF_DIR=~/llm/gguf-test GMLX_TEST_BIG_GGUFS=1 \
@@ -97,7 +97,7 @@ python tests/e2e/run_server_e2e.py                # full run, writes report.md a
 ## Voice loop manual pass
 
 A manual checklist after changing the `gmlx talk` loop. The unit tests fake
-audio and HTTP, so none of this is covered by them.
+audio and HTTP and cover none of this.
 
 1. With the server down, `gmlx talk` autostarts it, the capability check
    passes and the prompt appears.

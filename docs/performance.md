@@ -18,12 +18,12 @@ speculative decoding, or serving more than one client.
 ## What determines speed
 
 Single-stream decode is memory-bandwidth-bound. Each token reads the model's
-active weights once, so tokens per second is roughly bandwidth divided by
-active bytes. That has three practical consequences. Smaller quants decode
-faster when nothing else limits them. MoE models read only the routed
-experts for a token, so they decode at the speed of small models with the
-quality of large ones. Chips with more memory bandwidth are faster in
-proportion, independent of anything gmlx does.
+active weights once, which makes tokens per second roughly bandwidth divided
+by active bytes. That has three practical consequences. Smaller quants
+decode faster when nothing else limits them. MoE models read only the routed
+experts for a token and decode at the speed of small models with the quality
+of large ones. Chips with more memory bandwidth are faster in proportion,
+independent of anything gmlx does.
 
 Prefill, the prompt processing, is compute-bound instead. It benefits from
 GPU compute and batching more than from small weights. Long-context work
@@ -59,7 +59,7 @@ gmlx run model.gguf --bench-depths "0,4096,16384"
 `--bench-runs 3` reports the best run at each length, which matters on
 laptops. Sustained runs throttle, and the best run keeps a thermally
 degraded repeat from lowering the number. In back-to-back comparisons the
-second arm still runs on a hotter chip, so let the machine cool between arms
+second arm still runs on a hotter chip. Let the machine cool between arms
 you intend to compare.
 
 The period before a rested machine throttles is long and depends on the
@@ -126,8 +126,8 @@ Mixed files decode measurably slower. At single-stream decode, each layer's
 slowest matmul sets the token time, and the promoted float and Q8_0 tensors
 run slower than the K-quant kernels. In our M5 Max measurements, switching
 from the mixed UD build to a uniform Q6_K of the same model sped decode up
-64% on the dense Qwen3.6-27B and 15% on the MoE Qwen3.6-35B-A3B, with equal
-or better output quality.
+64% on the dense Qwen3.6-27B and 15% on the MoE Qwen3.6-35B-A3B. Output
+quality was equal or better.
 
 The practical rules:
 
@@ -153,8 +153,8 @@ the per-model `native_mtp: true`, forces the head.
 Gains depend on acceptance rate and context depth. Speculation roughly
 doubles dense-model decode at short context, still gives 1.4x to 1.8x
 through 110k tokens, and 1.2x to 1.4x at 200k. MoE models gain less. On
-some of them the gain becomes a loss at depth, so benchmark before enabling
-it there. The per-model speedup curves are in [benchmarks.md](benchmarks.md).
+some of them the gain becomes a loss at depth. Benchmark before enabling it
+there. The per-model speedup curves are in [benchmarks.md](benchmarks.md).
 Predictable text such as code accepts more drafts than freeform prose.
 Measure your own model and workload:
 
@@ -168,9 +168,9 @@ decodes and much more once several do. The server handles this with a
 per-model width cap. Speculation runs while the live batch is narrow, the
 batch decodes plain past the cap, and speculation resumes once it drains.
 The default cap depends on the drafter and on whether the target routes
-experts. The per-model `speculative_width_cap` key overrides it, as
-described in [server-config.md](server-config.md#speculative_width_cap).
-The transition mechanics are in
+experts. A per-model `speculative_width_cap` key overrides it, as described
+in [server-config.md](server-config.md#speculative_width_cap). For the
+transition mechanics, read
 [internals/speculative-batching.md](internals/speculative-batching.md).
 
 Quantizing the KV cache shifts the target's verify logits away from the draft
@@ -183,14 +183,14 @@ if memory forces quantization.
 [DFlash 2](https://inco.ai/blog/dflash2/) is a block-diffusion drafter with
 checkpoints for Qwen3.8-27B and Muse-Glimmer-30B. One drafter forward
 proposes a whole block of tokens and the target verifies the block in one
-pass, so a round costs one small forward plus one verify instead of one verify
-per drafted token.
+pass. A round therefore costs one small forward plus one verify instead of
+a verify for each drafted token.
 
 Pair it with `--draft-gguf`, or let `gmlx discover` do it. A DFlash 2 header
-declares its base model, so discovery pairs it across directories. The
-drafted depth defaults to the checkpoint's trained block, 8 on Qwen3.8 and
-16 on Muse Glimmer, and `--draft-block-size` lowers it. The drafter is
-single-stream, so the server width cap is 1.
+declares its base model, which lets discovery pair it across directories.
+The drafted depth defaults to the checkpoint's trained block, 8 on Qwen3.8
+and 16 on Muse Glimmer, and `--draft-block-size` lowers it. Because the
+drafter is single-stream, the server width cap is 1.
 
 Acceptance is exact-match by default. Greedy output is token-identical to
 plain decoding and sampled output follows the target's sampler.
@@ -206,8 +206,8 @@ zero that is also a limit. A draft cannot match a sampled token more often
 than the target's probabilities allow. `--stochastic-mtp`, or
 `stochastic_mtp: true` in the server config, removes the limit with
 rejection sampling. Drafts are sampled and accepted with probability
-`min(1, p/q)`. This preserves the sampling distribution exactly, so output
-remains a true sample from the distribution plain decoding samples from.
+`min(1, p/q)`. This preserves the sampling distribution exactly. Output remains a true
+sample from the distribution plain decoding samples from.
 Tokens are no longer bit-identical to a non-speculative run. Greedy requests
 are unaffected.
 
@@ -219,7 +219,7 @@ you sample and want throughput.
 ## The prompt cache
 
 The server keeps a cross-request [prompt cache](glossary.md). A request
-whose prefix was seen before skips prefill for the cached span. A repeated
+whose prefix was seen before skips prefill for the cached span. Resending a
 32k-token prefix reduces tens of seconds of prompt processing to a
 sub-second time-to-first-token. This is the largest speedup for agent
 workloads, which resend a large, mostly stable system prompt each turn.
@@ -246,9 +246,9 @@ entries than RAM would. Turn it on with `gmlx init --disk-cache` or the
 are in [server-config.md](server-config.md#cache-keys), and hit and store
 counts are reported on `GET /v1/metrics`.
 
-Thinking templates that strip prior-turn `<think>` blocks from the re-rendered
-history diverge right after the assistant header, so a full-length entry for
-the reply can never match. The server keys the stored entry on the predicted
+Thinking templates that strip prior-turn `<think>` blocks from the
+re-rendered history diverge right after the assistant header. A full-length
+entry for the reply can therefore never match. The server keys the stored entry on the predicted
 next-turn render instead, and what follows the divergence re-prefills, as it
 does on every server. That is a template property.
 
@@ -264,12 +264,12 @@ speculative-only layers. All are on by default.
   disk fills the prompt cache before prefill, including warm restarts from the
   SSD tier.
 - Retirement. At request finish the whole sequence, prompt plus reply, is
-  stored back, so the next turn of a conversation warm-starts past the whole
-  of this one.
-- Drafter sidecar. A native MTP head keeps a separate KV. A warm target
-  paired with a drafter whose KV is empty decodes at degraded acceptance
-  until that KV is rebuilt. A small sidecar entry saves the drafter's KV
-  beside the target's so a warm hit restores both.
+  stored back. The next turn of a conversation then warm-starts past the
+  whole of this one.
+- Drafter sidecar. A native MTP head keeps a separate KV. When a warm target
+  is paired with a drafter whose KV is empty, it decodes at degraded
+  acceptance until that KV is rebuilt. To avoid that, a small sidecar entry
+  saves the drafter's KV beside the target's so a warm hit restores both.
 - Checkpoints. Hybrid models save restore points piecewise along a prefill and
   while generating, plus targeted ones at the end of the system prompt, one
   token before the prompt end, and at the predicted next-turn boundary. The
@@ -283,8 +283,8 @@ The design and the triage switches are in
 
 The server decodes all active streams as a single batch. Decode is
 bandwidth-bound and the batched step reads the weights once for all
-streams, so aggregate throughput rises with client count while each stream
-loses less than its proportional share. On an M5 Max with Qwen3.6-35B-A3B
+streams. Aggregate throughput therefore rises with client count while each
+stream loses less than its proportional share. On an M5 Max with Qwen3.6-35B-A3B
 Q6_K, three streams give 1.3x to 1.7x the aggregate of one. The ratio falls
 as context grows, because attention work is done separately for each
 stream.
@@ -302,18 +302,18 @@ narrows the decode batch. Two settings cover the two symptoms:
 | a stream that pauses | `server.prefill_tick_ms` | `500` | halves each chunk until its predicted wall time fits the budget. Set `0` for batch jobs where only aggregate throughput matters |
 
 Paced admission bounds a waiter's time-to-first-token at twice its unpaced
-prefill. Prefill runs at full speed whenever nothing is decoding, so
-single-client serving is unaffected under any setting. In our serve
+prefill. Prefill runs at full speed whenever nothing is decoding, which
+leaves single-client serving unaffected under any setting. In our serve
 benchmarks a second client arriving at 14k tokens slowed the live stream to
 4% of its decode rate under strict alternation. Paced, it kept 80%, with the
 second client's time-to-first-token unchanged. Both keys are documented
-under [Scheduling](server-config.md#scheduling). Both are read live, so a
-running server can be retuned.
+under [Scheduling](server-config.md#scheduling) and both are read live, so
+a running server can be retuned.
 
 Pacing decides how admissions share GPU time. The speculative width cap
-decides which decode mode each batch runs in. The prompt cache is the
-largest admission saving of all. A warm prefix skips its prefill entirely,
-so agent sessions that resend a cached history admit at almost no cost.
+decides which decode mode each batch runs in. Larger than either is the
+prompt cache. A warm prefix skips its prefill entirely, and agent sessions
+that resend a cached history admit at almost no cost.
 
 Concurrent streams often share a prefix, whether a common system prompt or
 histories restored from the cache. The server detects the sharing from the
@@ -373,8 +373,8 @@ these.
 Settings, lowest cost first:
 
 - A quantized KV cache. `--kv-bits 8` roughly halves the cache at nearly no
-  quality cost. `--kv-quant-scheme kvarn` gives that fidelity at 6 bits in
-  about half the fp16 cache and stays usable down to 4.
+  quality cost, and `--kv-quant-scheme kvarn` gives that fidelity at 6 bits
+  in about half the fp16 cache and stays usable down to 4.
   [KV cache quantization](#kv-cache-quantization) says what each scheme
   does, which models gain from it, and what the fidelity data shows.
   Server-side these are the [load keys](server-config.md#load-keys). With
@@ -416,23 +416,23 @@ environment, as [env-vars.md](env-vars.md#load-and-cache-keys) lists. Each
 outlier channels over the whole slice. K and V are stored in 128-token
 records. Before rounding, each record is scaled along both axes by 16
 alternating row and column normalizations in log space, a Sinkhorn
-iteration, so that no token and no channel dominates the code range. Three
-fp16 axis vectors in each record undo the scaling on read. The first 128
+iteration, after which no token and no channel dominates the code range.
+Three fp16 axis vectors in each record undo the scaling on read. The first 128
 tokens, the attention sink, and the newest `--kv-tail-tokens` tokens, 1024
 by default, stay fp16. A record is sealed once the tail has moved past it.
 Decode and MTP verify read the records in the mlx-kquant kernels and merge
 the fp16 tail through a single softmax. The prompt cache stores records on
-its exact and checkpoint tiers. The scheme needs mlx-kquant 0.4.6 or later.
-On an older build it is dropped with a printed reason and the model runs
-fp16 KV.
+its exact and checkpoint tiers. mlx-kquant 0.4.6 or later is required. On
+an older build the scheme is dropped with a printed reason and the model
+runs fp16 KV.
 
 Which layers quantize is decided by cache shape, not model name. Growing
 attention KV quantizes, except the last layer of a deep stack, which stays
 fp16 under either scheme. Recurrent state and sliding windows stay fp16,
 with a single exception. A `--max-kv-size` window on `run` and `chat`
 quantizes under kvarn and is refused under affine. kvarn accepts head_dim
-128, 256 and 512 only, so head_dim-64 layers, as in gpt-oss and falcon-h1,
-are affine only. MLA architectures such as deepseek4, glm5_next and kimi-k3
+128, 256 and 512 only, which leaves head_dim-64 layers, as in gpt-oss and
+falcon-h1, affine only. MLA architectures such as deepseek4, glm5_next and kimi-k3
 keep K and V in a single latent store. kvarn declines them, and affine packs
 the pooled latents when stored. The VLM media path keeps fp16. A declined
 model prints the reason and runs fp16.
@@ -455,9 +455,9 @@ load in advance. Both are in
 
 The fidelity measure is teacher-forced logit KLD against an fp16 cache on
 wikitext, from `scripts/kld_harness.py`, on two legs. The prefill leg
-scores chunked prefill logits. The decode leg scores token by token from
-full prefill depth. KLD is in nats, and lower is better. The median is the
-typical position. The decode p99 is the worst hundredth, where a quantizer's
+scores chunked prefill logits, and the decode leg scores token by token
+from full prefill depth. KLD is in nats, and lower is better. Median is the
+typical position. Decode p99 is the worst hundredth, where a quantizer's
 outliers show. Decode top-1 is the share of generated positions whose argmax
 matches the fp16 cache.
 
@@ -518,8 +518,8 @@ Nemotron-3.5-Lightning-30B-A3B, 16k context, Mamba2 hybrid, head_dim 128:
 <!-- /kld-tables -->
 
 At a matched width kvarn beats the affine cache on both legs at each width
-below 8, by 3 to 5x on the decode median at 2 to 4 bits, and the two
-converge at 8. kvarn at 6 bits falls between the affine 6 and 8 bit caches
+below 8, by 3 to 5x on the decode median at 2 to 4 bits. The two converge
+at 8. kvarn at 6 bits falls between the affine 6 and 8 bit caches
 on the 9B and matches affine 8 on the 27B, in three quarters of the 8-bit
 record's bytes. At 32k its decode median can trail affine 8 by a few percent
 while its p99 and top-1 stay ahead. The split width k6 v5 keeps kvarn 6's
@@ -533,16 +533,16 @@ next-token distribution moved, which is what sampling at temperature draws
 from, and it keeps scoring positions whose argmax never changed. The p99
 bounds the outliers. A single badly wrong position can change a reasoning
 chain or a tool call, and a long generation feeds its own errors back in.
-A cache with a lower p99 therefore drifts less over a thousand tokens even
+Over a thousand tokens, a cache with a lower p99 therefore drifts less even
 when its median is not the lowest. When two caches differ by a few percent
-on one measure, take the one with the lower p99 and the higher top-1. When
-a width gains 2x or more on the median, the gain shows in all measures. The
+on one measure, take the one with the lower p99 and the higher top-1. A
+width that gains 2x or more on the median gains on all measures. The
 ranking does not follow width across schemes. kvarn at 2 bits matches
 affine at 3 on decode median and is within a point of it on top-1, ahead on
-the 9B and behind on Qwen3.8-27B. kvarn at 4 cuts affine 4's decode median
-to a third while matching or beating it on top-1. The corpus is wikitext
-under teacher forcing, so the tables rank caches against each other and do
-not predict a task score.
+the 9B and behind on Qwen3.8-27B. At 4 bits kvarn cuts affine 4's decode
+median to a third while matching or beating it on top-1. The corpus is
+wikitext under teacher forcing. The tables therefore rank caches against
+each other and do not predict a task score.
 
 TurboQuant, mlx-vlm's scheme, is not offered. The harness has a `turboN`
 arm, and measured on the same models and legs it falls between the other
@@ -552,9 +552,10 @@ and behind kvarn at each width on all measures. At mlx-vlm's recommended
 kvarn 4's, and at 6 bits 2x kvarn 6's, with equal or lower top-1 at each.
 
 Decode speed depends on how much of a step the KV read is. On GDN hybrids
-and gemma-4 all three caches are within run-to-run spread. On a KV-bound
-dense stack, Qwen3-0.6B Q8 with 27 of 28 layers quantized, kvarn 6 decodes
-at 0.81x fp16 and 0.69x affine 8 at 16k, and 0.98x and 0.75x at 32k. Prefill
+and gemma-4 all three caches are within run-to-run spread. A KV-bound dense
+stack is different. On Qwen3-0.6B Q8 with 27 of 28 layers quantized, kvarn
+6 decodes at 0.81x fp16 and 0.69x affine 8 at 16k, and 0.98x and 0.75x at
+32k. Prefill
 is within 10% of both. Native MTP composes at batch size 1. Verify rounds
 attend the records on the matrix-unit verify kernels at about a decode
 step's cost. At head_dim 256 with 8 queries for each KV head at 16k, that
@@ -587,14 +588,14 @@ MLX keeps freed GPU buffers in a wired reuse pool. Deep-context serving of a
 near-RAM-size model retains multi-gigabyte prefill transients in that pool,
 and the accumulated wired memory can exhaust free pages. The failure is a
 system freeze, not an error, because the process reads the pool as free
-while the kernel counts it as wired. The server therefore always bounds the
-pool and logs a `[serve] MLX cache limit:` line. The bound is a quarter of
-the remaining slack when the biggest configured model uses more than about
-60% of the working set, and otherwise 5% of the working set, clamped to 4 to
-12 GiB. The runtime governor adds a second check by sampling the kernel's
-reclaimable pages each tick.
+while the kernel counts it as wired. For that reason the server always
+bounds the pool and logs a `[serve] MLX cache limit:` line. When the biggest
+configured model uses more than about 60% of the working set, the bound is
+a quarter of the remaining slack. Otherwise it is 5% of the working set.
+Either way it is clamped to 4 to 12 GiB. A second check comes from the
+runtime governor, which samples the kernel's reclaimable pages each tick.
 
 Override it with `server.cache_limit_gb` when needed. A value pins the
-limit in GiB, which benchmarks should do for reproducibility. A negative
-value forces an unbounded pool, and `0` disables buffer caching. The env
+limit in GiB, which benchmarks should do for reproducibility. Negative
+forces an unbounded pool, and `0` disables buffer caching. The env
 form is the `GMLX_CACHE_LIMIT_GB` row in [env-vars.md](env-vars.md#runtime).

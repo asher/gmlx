@@ -37,7 +37,7 @@ The flags are under [gmlx chat](cli.md#gmlx-chat).
 | `/memory` | inspect the [assistant's memory](assistant.md#memory) when running with `--assistant` |
 
 Esc or Ctrl-C during a reply cancels it and returns to the prompt. The
-partial reply stays in the KV cache, so `/retry` regenerates it and `/reset`
+partial reply stays in the KV cache. `/retry` regenerates it and `/reset`
 clears it.
 
 ## Editing and history
@@ -58,8 +58,8 @@ file paths after `/load`, `/image`, `/audio` and `/!`, and served ids after
 ## Sampling at runtime
 
 Sampling commands adjust the next reply. Each one is also a startup flag,
-so a model card's full sampling recommendation fits on the command line.
-`/max-tokens 0` removes the cap on reply length, so replies run until the
+and a model card's full sampling recommendation fits on the command line.
+`/max-tokens 0` removes the cap on reply length, and replies run until the
 model stops. Bare `run` and `chat` already start from the model family's
 card defaults. An `@intent` suffix on the model switches to another
 [preset](server-config.md#profiles).
@@ -67,18 +67,18 @@ card defaults. An `@intent` suffix on the model switches to another
 ## Undo, retry and sessions
 
 `/retry` and `/undo` rewind the persistent KV cache to the turn's
-checkpoint, so nothing re-prefills. They restore the pre-turn state,
+checkpoint. Nothing re-prefills. They restore the pre-turn state,
 including the system prompt and media markers, and they work after a
 cancelled reply. A rotating cache that has wrapped its window cannot rewind
 past the evicted boundary. In that case the next message re-prefills, or
 you can use `/reset`.
 
 A chat autosaves after each turn as JSON under `$XDG_DATA_HOME/gmlx/chats`.
-`/reset` rotates to a fresh file, so old conversations are preserved, and
-`--no-autosave` opts out. `/load-session` restores settings and transcript
-at once, with the KV replay deferred to your next message. `--resume`
-resumes the model's latest session at startup. `/export` writes a markdown
-transcript with thinking in collapsed blocks.
+`/reset` rotates to a fresh file, which preserves old conversations, and
+`--no-autosave` opts out. To restore settings and transcript at once, use
+`/load-session`, which defers the KV replay to your next message. At
+startup, `--resume` resumes the model's latest session. A markdown
+transcript with thinking in collapsed blocks comes from `/export`.
 
 In server mode, `/model` lists the served ids. `/model <id>` switches the
 id the next turn is sent to while keeping the transcript. The server
@@ -90,8 +90,8 @@ and its adapters mid-conversation, since they share a loaded model, as
 
 `/! <command>` runs a shell command and stages its output as a fenced
 block, with the command as header and the exit status as footer. The block
-is attached to your next message, so your question and the output are sent
-in a single turn. The prompt shows `(+n) >> ` while blocks are staged.
+is attached to your next message, and your question and the output are sent
+in a single turn. While blocks are staged the prompt shows `(+n) >> `.
 Several can be staged at once. Enter on an empty prompt sends them alone,
 and `/drop` discards them. Long output is middle-truncated at about 16 KB.
 stdin is closed so interactive commands cannot block the client. Ctrl-C
@@ -99,9 +99,9 @@ interrupts the command, not the session.
 
 With `--mmproj`, `/image` and `/audio` stage media in the same way.
 Dragging a file from Finder into the terminal also works. Media markers
-stay attached to the turn that sent them, so follow-ups reference earlier
-images correctly. Media turns re-prefill the conversation each time,
-because the KV-cached fast path is text-only. On a model with a drafter,
+stay attached to the turn that sent them, and follow-ups reference earlier
+images correctly. Because the KV-cached fast path is text-only, media
+turns re-prefill the conversation each time. On a model with a drafter,
 text-only turns keep speculative decoding on and media turns fall back to
 the plain stream. [vlm.md](vlm.md) covers multimodal models.
 
@@ -111,16 +111,16 @@ For thinking models, the chain of thought is stripped of its control
 markers and streamed in the theme's thinking style inside a framed block.
 The block closes with a line showing how long the model thought and how
 many tokens it used. `--reasoning hide` drops the thinking and prints only
-the answer. `--reasoning raw` passes everything through verbatim, for when
-a model's markers segment incorrectly. Ctrl-O toggles expand and collapse
+the answer, and `--reasoning raw` passes everything through verbatim, for
+when a model's markers segment incorrectly. Ctrl-O toggles expand and collapse
 live during a reply. The stored conversation keeps the raw text in all
-modes, so display never changes what the model receives next turn.
+modes, and display never changes what the model receives next turn.
 
 Replies render as styled markdown while they stream. Completed blocks are
 printed permanently with native scrollback intact. Only the in-progress
 block repaints in place. `rich` mode is the default on a color terminal
 with `rich` installed and adds tables and syntax-highlighted code fences.
-`lite` is a zero-dependency ANSI fallback. `plain` is raw text, and the
+`lite` is a zero-dependency ANSI fallback, and `plain` is raw text, the
 automatic choice on a non-TTY or under `NO_COLOR`.
 
 [Speculative decoding](performance.md#mtp-speculative-decoding) is on
@@ -133,14 +133,14 @@ penalty or bias hooks.
 ## Themes
 
 `--theme` and `/theme NAME [cb]` pick a palette from `dark`, `light`,
-`dark-hc`, `nord`, `dracula`, `solarized-dark` and `gruvbox`. `dark` is the
-default and follows the terminal's colors. The `cb` modifier, or
+`dark-hc`, `nord`, `dracula`, `solarized-dark` and `gruvbox`. Of these, `dark` is
+the default and follows the terminal's colors. The `cb` modifier, or
 `--colorblind`, swaps the accents onto the colorblind-safe Okabe-Ito
 palette and works with all themes.
 
 Two top-level config keys configure the client, not the server. `theme:`
-names the theme each chat starts with. `themes:` defines custom themes,
-usable anywhere a built-in one is:
+names the theme each chat starts with, and `themes:` defines custom
+themes, usable anywhere a built-in one is:
 
 ```yaml
 theme: my-black

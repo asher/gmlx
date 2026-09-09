@@ -46,9 +46,9 @@ included, and one for each block of a block shard.
 
 The server also checks for a tier that is not storing or hitting, and warns
 once per model. The check fires after `GMLX_APC_CKPT_TRIPWIRE` completed
-requests with zero stores, or that many unusable matches with zero hits. The
-default is 5. Either warning means prefix reuse is not working for that
-model. File an issue with the `/v1/cache/stats` snapshot.
+requests with zero stores, or that many unusable matches with zero hits,
+with a default of 5. Either warning means prefix reuse is not working for
+that model. File an issue with the `/v1/cache/stats` snapshot.
 
 ## Under kvarn KV
 
@@ -57,7 +57,7 @@ tier, since the 16-token block tier cannot split kvarn's 128-token records.
 Checkpoint-shaped stacks keep full checkpoint-tier reuse and store kvarn
 records. Those are the hybrid-GDN and sliding-window families in the reuse
 table whose attention head_dim is 128, 256 or 512. The attention payload
-lives inline in the record and not in pool blocks, so
+lives inline in the record and not in pool blocks. As a result
 `GMLX_APC_CKPT_BUDGET_MB` bounds the tier's memory and `APC_NUM_BLOCKS`
 matters little. Entries and disk skeletons are keyed to the kvarn width and
 tail. A config change or a restart that switches between stock and kvarn

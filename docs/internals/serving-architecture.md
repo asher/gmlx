@@ -80,12 +80,12 @@ flowchart TD
 
 ## Components
 
-The loader, `gmlx.load_model`, parses the GGUF bytes, remaps tensor names to
-the Hugging Face layout, synthesizes the config and tokenizer including the
-chat template, builds the stock model class, and swaps the quantized leaves
-for K-quant modules. A VLM adds a second file containing the vision or audio
-tower. The output is a model, config and tokenizer triple with no safetensors
-round-trip.
+The loader, `gmlx.load_model`, parses the GGUF bytes and remaps tensor names
+to the Hugging Face layout. It synthesizes the config and tokenizer,
+including the chat template, builds the stock model class, and swaps the
+quantized leaves for K-quant modules. A VLM adds a second file containing
+the vision or audio tower. The output is a model, config and tokenizer
+triple with no safetensors round-trip.
 
 An adapter wraps a text model in mlx-vlm's text-only model class, which
 exposes the embedding and language-model interface the engine expects, and

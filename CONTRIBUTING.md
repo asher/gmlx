@@ -7,8 +7,8 @@ design context, the docs under [docs/](docs/) are authoritative.
 
 `mlx-kquant` is on PyPI with prebuilt arm64 wheels for Python 3.10-3.14 on
 macOS 26.2+. Older macOS builds it from source, which needs full Xcode with
-its Metal toolchain. It pins `mlx==0.32.1` itself, so nothing else needs pinning. Dev
-setup is a venv, a clone, and an editable install:
+its Metal toolchain. It pins `mlx==0.32.1`, and nothing else needs pinning.
+Dev setup is a venv, a clone, and an editable install:
 
 ```sh
 python3 -m venv .venv && source .venv/bin/activate
@@ -52,8 +52,8 @@ pre-commit install   # optional, runs the same check on each commit
 - Seam patches are version-fragile by design. The serving stack uses
   mlx-vlm's FastAPI app and batching engine by patching late-bound seams in
   `gmlx/serve/bridge_vlm.py`, `gmlx/serve/residency.py` and
-  `gmlx/serve/patches/`. The loader patches a few mlx-lm classes at load
-  time. `gmlx/serve/bridge_lm.py` separately patches the
+  `gmlx/serve/patches/`. At load time the loader patches a few mlx-lm
+  classes. `gmlx/serve/bridge_lm.py` separately patches the
   `ModelProvider._load` of `mlx_lm.server`, the sequential mlx-lm server.
   Each patch has a guard or version check that raises an error. Keep that
   property. A new patch must be idempotent and must raise, never silently
@@ -93,8 +93,9 @@ A commit message is a single line with no body, in the form
 `type(scope): short lowercase summary`. Examples are
 `feat(arch): add falcon-h1` and
 `fix(server): XTC 400 on bare-int eos_token_ids`. The type is one of
-`feat`, `fix`, `perf`, `docs`, `test` and `chore`. The scope names a
-subsystem and comes from the established set so history stays greppable:
+`feat`, `fix`, `perf`, `docs`, `test` and `chore`. A scope names a
+subsystem and comes from the established set, which keeps history
+greppable:
 
 `arch`, `loader`, `server`, `cli`, `chat`, `mtp`, `adapter`, `train`,
 `stream`, `vlm`, `manage`, `launch`, `config`, `bench`, `tests`, `docs`,

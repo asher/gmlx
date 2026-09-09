@@ -22,17 +22,17 @@ server:
 ```
 
 The default GGUFs, about 0.6 GB each, resolve from your local Hugging Face
-cache only, so fetch them first with `gmlx pull`. A server that starts
+cache only. Fetch them first with `gmlx pull`. A server that starts
 without them disables the endpoint until the file is present. Both services
 load in the background at startup. They sit outside the chat residency
-pool, so a re-index and chat never evict each other, and they run in a
+pool, where a re-index and chat never evict each other, and they run in a
 worker thread that interleaves with batched chat decode.
 
 ## Choosing the models
 
 The default embedder is a Qwen3-Embedding GGUF run as a decoder embedder
 with last-token pooling. It loads like any other GGUF and carries the
-model's full 32k context, so long documents embed without truncation. Use
+model's full 32k context, and long documents embed without truncation. Use
 `qwen3-embed-4b` or `-8b` for better retrieval at a bigger index, or point
 the key at any local or `hf:` GGUF. Encoder options exist too, including
 EmbeddingGemma from a GGUF and several safetensors encoders that download
@@ -40,7 +40,7 @@ once on a cache miss. The alias tables with dimensions and context windows
 are under [Text embeddings](services.md#text-embeddings-embeddings).
 
 The reranker is a Qwen3-Reranker GGUF, a causal model fine-tuned to answer
-yes or no to "does this document satisfy this query". The score is the
+yes or no to "does this document satisfy this query". Its score is the
 probability of yes. Aliases are `qwen3-rerank-0.6b`, `-4b` and `-8b`, or
 any GGUF ref. [Reranking](services.md#reranking-rerank) has the details.
 
@@ -97,11 +97,12 @@ curl localhost:8080/v1/rerank -H 'content-type: application/json' \
 }
 ```
 
-`documents` entries may also be `{"text": ...}` objects. `return_documents`
-defaults to true, so each result echoes its document. Set it false for
-indices and scores only. An optional `instruction` overrides the default
-query instruction. Scoring runs a model forward for each document, so keep
-the candidate list to a vector search's shortlist of tens, not thousands.
+`documents` entries may also be `{"text": ...}` objects. Because
+`return_documents` defaults to true, each result echoes its document. Set
+it false for indices and scores only. An optional `instruction` overrides
+the default query instruction. Scoring runs a model forward for each
+document. Keep the candidate list to a vector search's shortlist of tens,
+not thousands.
 
 ## Configure Open WebUI
 

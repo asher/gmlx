@@ -1,12 +1,12 @@
 # Migrating from llama.cpp, Ollama or LM Studio
 
-gmlx runs the same GGUF files those tools use, so the models themselves are reused
-with no conversion. This page maps the rest. It lists what transfers
+gmlx runs the same GGUF files those tools use, and the models themselves
+are reused with no conversion. This page maps the rest. It lists what transfers
 directly, what has a different name, and what is different by design.
 
 ## Coming from llama.cpp
 
-`gmlx run model.gguf` is the equivalent of `llama-cli -m model.gguf`.
+`gmlx run model.gguf` is the equivalent of `llama-cli -m model.gguf`, and
 `gmlx serve model.gguf` is the equivalent of `llama-server`, on the same
 default port 8080.
 
@@ -27,15 +27,15 @@ default port 8080.
 | `--lora adapter` | `--adapter adapter.gguf` | [lora.md](lora.md) covers adapter interoperation in both directions |
 
 `/v1/completions` accepts a single string prompt and returns a single
-choice. `/v1/chat/completions` is the primary route. Anthropic Messages and
+choice, and `/v1/chat/completions` is the primary route. Anthropic Messages and
 OpenAI Responses run on the same port, as [api.md](api.md) describes.
 
 ## Coming from Ollama
 
 Any GGUF file on disk can be reused. Ollama's model store and API do not.
 
-- Ollama's library is stored as sha-named blobs, not `.gguf` files, so it cannot
-  be used directly. Re-download the models you use with `gmlx pull`.
+- Ollama's library is stored as sha-named blobs, not `.gguf` files, and it
+  cannot be used directly. Re-download the models you use with `gmlx pull`.
   `gmlx validate hf:<org>/<repo>` lists the available quants first.
 - gmlx implements the OpenAI, Anthropic and OpenAI Responses APIs, not the
   Ollama API. Clients configured for an OpenAI-compatible endpoint work

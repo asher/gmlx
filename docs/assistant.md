@@ -87,7 +87,7 @@ stderr goes to a log for that server at `~/.cache/gmlx/mcp-<name>.log`.
 
 A stdio tool server runs with a minimal environment of `HOME`, `PATH`,
 `SHELL`, `TERM`, `USER` and `LOGNAME`. `env:` adds to that. Nothing else
-from your shell is inherited, so a token set in your environment never
+from your shell is inherited, and a token set in your environment never
 reaches third-party tool code unless you pass it.
 
 ## Tool examples
@@ -111,7 +111,7 @@ assistant:
 
 If you already run [SearXNG](https://docs.searxng.org), point the assistant
 at it for aggregated results that stay local. The instance must allow the
-JSON format, so add `json` to `search.formats` in its settings.
+JSON format. Add `json` to `search.formats` in its settings.
 
 ```yaml
 assistant:
@@ -164,14 +164,14 @@ as transient context that never lengthens the chat history. Without
 
 What gets stored is an extracted fact such as "sister Ana, birthday March
 12", not a transcript. After each turn a background request asks the chat
-model to reduce the exchange to at most three durable facts, or none, so
+model to reduce the exchange to at most three durable facts, or none, and
 small talk stores nothing. A new fact that restates an existing one
-replaces it. `extract: false` stores raw exchanges instead. `ttl_days`
-expires old rows at startup. `max_items` caps the store, evicting the
+replaces it. `extract: false` stores raw exchanges instead. Old rows expire
+at startup after `ttl_days`, and `max_items` caps the store, evicting the
 never-recalled oldest rows first.
 
-The store is shared between the voice and text surfaces, so what you tell
-the assistant in `gmlx talk` it remembers in `gmlx chat --assistant`. Inside
+The store is shared between the voice and text surfaces. What you tell the
+assistant in `gmlx talk` it remembers in `gmlx chat --assistant`. Inside
 either, `/memory` lists the stored facts with their ids, `/memory forget ID`
 removes one, and `/memory clear yes` removes them all. The file sits at
 `~/.local/share/gmlx/assistant-memory.db`. Served assistants that enable
@@ -273,4 +273,4 @@ on the host. The protections are:
 
 Memory on a served assistant is a single store shared by all clients of
 that id. That is acceptable for a personal server and unsuitable for
-anything multi-user, so it defaults off.
+anything multi-user, which is why it defaults off.

@@ -32,10 +32,10 @@ To call the API with tools and structured output:
 ```
 
 The `@profile` suffix is split on the last `@` and only treated as a profile
-when it names a known one, so an id containing `@`-like text stays intact.
-An unknown id returns 404 listing the available ids. An unknown profile
-returns 400 listing the valid ones. An empty `model` uses the server's
-default model, else the sole model, else 400. The same addressing works on
+when it names a known one, which keeps an id containing `@`-like text
+intact. An unknown id returns 404 listing the available ids, and an unknown
+profile returns 400 listing the valid ones. With `model` empty, the server
+uses its default model, else the sole model, else returns 400. The same addressing works on
 the CLI, as `gmlx run <id-or-path>@coding` or `--profile coding`.
 
 ## Endpoints
@@ -64,15 +64,15 @@ ones. All routes except `/health` require the API key when one is set.
 | `POST /v1/embeddings` | text embeddings, with `embeddings` configured |
 | `POST /v1/rerank` | reranking, with `rerank` configured, also at `/rerank` |
 
-`GET /v1/models` lists configured and discovered ids plus alias presets, each
-with `resident`, `pinned`, `speculative`, `vlm`, `profile` and `default`
-markers, the GGUF's trained `context_length`, and `max_context_at_width_1`
-from the capacity table for the model it was derived from. The Hugging Face
-cache is never listed.
+`GET /v1/models` lists configured and discovered ids plus alias presets.
+Each entry carries `resident`, `pinned`, `speculative`, `vlm`, `profile` and
+`default` markers and the GGUF's trained `context_length`. It also carries
+`max_context_at_width_1` from the capacity table for the model it was
+derived from. The Hugging Face cache is never listed.
 
 `GET /health` returns only `{"status": "healthy", "pid": N}` and is the
-only route the API key exempts. `?ready=1` adds a coarse readiness verdict.
-It is 200 with `"ready": true`, or 503 with a one-word `reason` and a
+only route the API key exempts. Adding `?ready=1` gives a coarse readiness verdict,
+either 200 with `"ready": true` or 503 with a one-word `reason` and a
 `Retry-After` header. The reason is `pressure` when the governor is orange
 or red, `queue` when requests are waiting, and `busy` when all engines are
 at their decode width.
@@ -82,7 +82,7 @@ at their decode width.
 `suffix` and `best_of > 1` are rejected with a 400. The stock image
 generation routes are not usable with GGUF models.
 
-An explicit `/unload` overrides the preload's lifetime hold, so a
+An explicit `/unload` overrides the preload's lifetime hold, and a
 preloaded model unloads too. A model reloaded by request afterward is
 managed like any other until a reload with `preload` re-pins it.
 `/v1/keep` is what `gmlx launch --model` and voice sessions call. The kept
@@ -105,7 +105,7 @@ no.
 | `resident_models[]` | for each model, `in_flight`, `pinned`, `kept` and bytes | the number for each model to compare against `decode_batch`, since each model decodes on a separate engine |
 | `governor` | `band`, counters | the memory governor's band and shed history |
 | `memory` | `active_bytes`, `cache_bytes`, `headroom_bytes`, arena fields | MLX's active and cached bytes, the free memory the admission gate reads, and for a streamed model the arena's bytes, capacity and hit rate |
-| `capacity` | `max_ctx` by width, `max_width_at_depth`, byte budgets | the boot capacity table; absent for a Hugging Face fall-through load |
+| `capacity` | `max_ctx` by width, `max_width_at_depth`, byte budgets | the boot capacity table, absent for a Hugging Face fall-through load |
 | `rates` | `decode_tok_s`, `decode_streams`, `prefill_tok_s_recent`, `decode_tok_s_recent`, `decode_tok_s_lifetime` | the aggregate decode rate now and its stream count, the recent means over the last eight requests, and the lifetime mean |
 
 A request row's `cache` holds the tier its prefix hit, one of `exact`,
@@ -125,7 +125,7 @@ estimate for a resident model. `prompt_tokens`, `warm_tokens` and
 which tier, which is the routing signal across machines. `need_bytes` is
 the prompt's KV plus the prefill transient, plus `max_tokens` when the body
 pins one. `fits_now` and `fits_drained` judge that against the current free
-memory and the drained working set. `context_ok` judges it against
+memory and the drained working set, while `context_ok` judges it against
 `context_limit`, and `est_ttft_s` estimates the time to first token. A
 model that is not resident answers `resident: false`. The dry run never
 loads a model. Media requests render but are not estimated.
@@ -141,7 +141,7 @@ condition that fails.
 
 The load gate refuses a chat request for a model whose weights would not
 fit beside what is resident and busy, or would push the kernel under the
-governor's floor. The answer is 503 with an error of type
+governor's floor. Such a request gets 503 with an error of type
 `model_load_deferred`, the gate's numbers in the message, and
 `Retry-After`. Memory the kernel is still returning from a recent unload is
 waited for, up to 3 seconds, before a load is deferred.
@@ -156,15 +156,14 @@ and contributes only its count.
 
 The protocol surface is inherited from mlx-vlm, since gmlx swaps the model
 layer and not the handlers. The engine's request features therefore work
-unchanged on GGUF models. The context window comes from the GGUF's
-metadata. There is no server-side override or request-level context
-setting.
+unchanged on GGUF models. Context windows come from the GGUF's metadata,
+with no server-side override or request-level context setting.
 
 ### Tool calling
 
 OpenAI `tools` and `tool_calls` on `/v1/chat/completions`, and Anthropic
 `tools` and `tool_use` blocks on `/v1/messages`. The parser is inferred from
-the model's chat template, so a model whose template defines a tool-call
+the model's chat template. A model whose template defines a tool-call
 syntax gets parsing with nothing to configure. Streaming works too. A
 parsed call ends the stream with `finish_reason: "tool_calls"`.
 
@@ -195,8 +194,8 @@ curl localhost:8080/v1/chat/completions -d '{
 
 ### Parameter support
 
-The request schemas accept unknown fields, so nothing is rejected for being
-present. A honored parameter changes the response. An ignored one is
+The request schemas accept unknown fields, and nothing is rejected for
+being present. A honored parameter changes the response. An ignored one is
 accepted and skipped, and each ignored parameter a request sets produces a
 warning line in the server log naming it. A test cross-checks the table
 against the allowlists the warning uses.
@@ -239,8 +238,8 @@ OpenAI `reasoning` and `reasoning_effort` controls. The rest:
 `response_format: {"type": "json_schema", ...}` gives grammar-constrained
 decoding. The model cannot emit tokens that violate the schema. The backing
 engine is [llguidance](https://github.com/guidance-ai/llguidance), installed
-with the base package. The Anthropic endpoint maps an `output_config` of type
-`json_schema` to the same engine. `"json_object"` is accepted and
+with the base package. On the Anthropic endpoint an `output_config` of type
+`json_schema` maps to the same engine. `"json_object"` is accepted and
 constrained to a permissive object grammar. Unknown types are rejected.
 
 A malformed schema is rejected with a 400 before generation. The first
@@ -263,11 +262,11 @@ curl localhost:8080/v1/chat/completions -d '{
 
 ### Logprobs
 
-`logprobs: true` returns each generated token's logprob. `top_logprobs: N`
-asks for the N most likely alternatives for each token. The alternatives
-are capped by the server-side `TOP_LOGPROBS_K` variable, 0 to 20, with a
-default of 0. The lists therefore stay empty until the server is started
-with the cap raised. It is an engine variable with no config key:
+`logprobs: true` returns each generated token's logprob, and
+`top_logprobs: N` asks for the N most likely alternatives for each token.
+The alternatives are capped by the server-side `TOP_LOGPROBS_K` variable, 0
+to 20, with a default of 0. Until the server is started with the cap raised,
+the lists stay empty. It is an engine variable with no config key:
 
 ```sh
 TOP_LOGPROBS_K=5 gmlx serve --config ~/.config/gmlx/gmlx.yaml

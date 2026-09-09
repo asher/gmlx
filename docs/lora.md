@@ -2,8 +2,8 @@
 
 This guide is for fine-tuning a GGUF model without converting it, and for
 serving a base model under several adapters. The first half trains an
-adapter with `gmlx train`. The second serves a base with many adapters as
-separate model ids.
+adapter with `gmlx train`, and the second serves a base with many adapters
+as separate model ids.
 
 - [Why train on the quant](#why-train-on-the-quant)
 - [Train an adapter](#train-an-adapter)
@@ -16,14 +16,14 @@ separate model ids.
 
 `gmlx train` fine-tunes a K-quant GGUF base as it is and writes the adapter
 as a small GGUF file. `run`, `chat` and `serve` attach it live at load with
-`--adapter`, so a base serves any number of adapted variants, each an
+`--adapter`, and a base serves any number of adapted variants, each an
 exact delta on the unmodified quantized weights.
 
 Two properties make this worth using over the usual convert, fine-tune and
 requantize cycle. The frozen base stays in its K-quant codec during
 training, with the adapter's gradient flowing through the quantized matmul.
-There is no float copy of the base and no optimizer state for it, so you
-can fine-tune a model you could not hold in fp16. At inference the base
+There is no float copy of the base and no optimizer state for it, which
+lets you fine-tune a model you could not hold in fp16. At inference the base
 bytes are never modified. The output is the base with its existing
 quantization error plus the exact adapter delta in full precision. Merging
 would force a requantization of the adapted weights.
@@ -47,9 +47,9 @@ formats are chat records of the `{"messages": [...]}` shape, prompt and
 completion pairs, or plain text. Chat records suit an instruct base, since
 the trainer applies the base's chat template. The example dataset,
 [GPT007/pirate_speak](https://huggingface.co/datasets/GPT007/pirate_speak),
-contains 100 turns as Llama-3-formatted text, so a short script re-emits
-them as chat records. The script needs the `datasets` package, which gmlx
-does not install:
+contains 100 turns as Llama-3-formatted text. A short script re-emits them
+as chat records. It needs the `datasets` package, which gmlx does not
+install:
 
 ```python
 # prep_pirate.py
@@ -93,13 +93,13 @@ gmlx run Qwen3-0.6B-Q8_0.gguf --prompt "What's the weather like today?"    # the
 gmlx serve Qwen3-0.6B-Q8_0.gguf --adapter pirate-lora.gguf
 ```
 
-Qwen3 is a thinking model, so `run` emits a `<think>` block first. The pirate
-data has no thinking, so the adapted model thinks briefly and then answers
-in pirate speech.
+Qwen3 is a thinking model, and `run` emits a `<think>` block first. The
+pirate data has no thinking. The adapted model thinks briefly and then
+answers in pirate speech.
 
 The single-model `serve` form registers the adapted model under the
-file-derived id and the bare base as `<id>-base` on the same loaded model, so
-both are addressable without a config.
+file-derived id and the bare base as `<id>-base` on the same loaded model.
+Both are addressable without a config.
 
 ## Serving one base with many adapters
 
@@ -138,8 +138,8 @@ models:
 Everything that changes how the model is loaded must agree across the
 group, including `path`, `context_length` and `speculative`. An id that
 differs in more than `adapter:` becomes a separate entry with a separate
-copy of the weights, so keep the group's other keys identical or inherit
-them from a profile. The memory use shows as a single entry under
+copy of the weights. Keep the group's other keys identical or inherit them
+from a profile. The memory use shows as a single entry under
 `resident_models` on `GET /v1/metrics`. `curl localhost:8080/v1/models`
 lists all three ids.
 

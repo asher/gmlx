@@ -17,7 +17,7 @@ Max MacBook Pro with 128 GB. Both used `--stream-experts` at streaming
 defaults, on the lossless path. The prompt is the one-shot canvas-animation
 prompt that the lossy-setting comparisons also use. Each screenshot links to
 the generated page, committed beside it in `docs/assets/perf/`. GitHub shows
-the page source, so download one to watch the animation.
+the page source. Download one to watch the animation.
 
 | | |
 |---|---|
@@ -46,13 +46,13 @@ asserts, multi-step arithmetic and length control, plus a repetition check.
 | the pair softened to 0.07 / 0.93 | +2-4% | clean |
 | `moe_expert_mass: 0.90` | ~0%, alone or stacked | clean |
 
-Those are sustained-regime medians. As the note on rested machines under
-[Measuring](../performance.md#measuring) describes, a 14-inch machine started
-at idle temperature ran the same arms 15-25% faster for its first twenty
-minutes, with the baseline at 5.0 tok/s and the pair at 5.6 or better.
+Those are sustained-regime medians. A 14-inch machine started at idle
+temperature ran the same arms 15-25% faster for its first twenty minutes,
+with the baseline at 5.0 tok/s and the pair at 5.6 or better. The note on
+rested machines under [Measuring](../performance.md#measuring) explains why.
 Moving the pair to less aggressive values keeps its quality margin but not
 its speed. Miss-shed's speedup falls steeply as P rises. At 0.93 it sheds
-only a third of the experts it sheds at 0.90, so the less aggressive pair
+only a third of the experts it sheds at 0.90, and the less aggressive pair
 gained a few percent where the full pair gained +13. The quality boundary
 near these values is real. In single long-generation checks at this model
 card's temperature of 0.9, the pair at 0.09/0.91 emitted a stray token into
@@ -63,7 +63,7 @@ or accept an occasional stray token, get the larger speedups.
 
 That ordering is specific to this model. With a flat router, expert-mass had
 no low-mass experts to drop. At a 92% hit rate, misses were rare enough that
-the per-layer overhead was the constant cost, so layer-shed gained more. The
+the per-layer overhead was the constant cost, and layer-shed gained more. The
 two shed settings combined because they cut disjoint costs, and +8% and +4%
 multiply to roughly the observed +13%. On a concentrated-router model with a
 high hit rate the probe shows the reverse, most reads removed for a few
@@ -75,9 +75,9 @@ MiniMax-M3 is the low-hit-rate end of the range. It is a 4-of-128-expert
 MoE, streamed as a 264 GB Q4_K_M file on the same 128 GB machine with the
 decode arena at about an 87% hit rate. The method is the alternated A/B
 above, with decode-only medians over 512-token generations. A layer stalls
-when any one of its four routed experts misses, so at 87% per-expert
-residency roughly half of all token-layer calls stall, and the miss-targeted
-setting gains more.
+when any one of its four routed experts misses. At 87% per-expert residency
+roughly half of all token-layer calls stall, and the miss-targeted setting
+gains more.
 
 | setting | decode | disk stall time |
 |---|---|---|
@@ -104,7 +104,7 @@ This point changes routing width. GLM-5.2 is a 282 GB UD-IQ3_XXS file with
 256 experts routed top-8 under sigmoid gating. It streams on the same machine
 at a per-expert hit rate near 88%, higher than M3's, yet stalls more. A layer
 stalls when any of eight routed experts miss, not four. At hit rate h the
-stall odds are `1 - h^k`, so k = 8 roughly doubles them at the same h. That
+stall odds are `1 - h^k`, and k = 8 roughly doubles them at the same h. That
 amplification works in both directions, since each point of hit rate
 miss-shed recovers is worth about twice as much. The same setting therefore
 measured stronger here, +16.5% decode at P=0.80 with stalls halved and +10.7%
@@ -118,8 +118,8 @@ stray tokens, valid markup and working code, but the page it drew was
 missing its subject. It showed a sky with no road and no car, on a prompt
 asking for a car on a road. The lossless run at the same seed drew the full
 scene, and so did P=0.85. Dropped gate mass degrades content before it
-degrades form, so a shed level cannot be certified by scanning the output
-for corruption. Render the artifact and look at it, at deploy sampling
+degrades form. A shed level cannot be certified by scanning the output for
+corruption. Render the artifact and look at it, at deploy sampling
 settings, against a lossless run at the same seed. Miss-shed's safe range
 depends on the architecture. Re-gate it whenever routing width or gating
 changes.
@@ -150,7 +150,7 @@ mechanism columns as a trend and not as a controlled sweep. Two results are
 still clear. Shedding raised the hit rate of the remaining experts, because
 the arena stops loading and evicting experts that would be dropped anyway.
 That is the self-reinforcement miss-shed relies on. The speedup for each
-step is also non-linear, as on the other models. The step from lossless to
+step is also non-linear, as on the other models. Going from lossless to
 0.80 gained little in this sample, while 0.70 and 0.65 returned +16% and
 +21%.
 
@@ -185,7 +185,7 @@ The procedure is repeatable on any model:
 3. Generate something long, 10k tokens or more, and scan it for stray tokens.
    A per-token error rate too small to appear in a short check still accumulates.
 4. Render the artifact and compare it with the lossless run. Dropped gate
-   mass degrades content before form, so a page can be valid and complete
+   mass degrades content before form, and a page can be valid and complete
    with its subject missing.
 5. Leave margin on each stacked setting, since their effects add up against
    a single quality threshold. Re-gate whenever routing width or gating
@@ -193,7 +193,7 @@ The procedure is repeatable on any model:
 
 ## One prompt, four settings
 
-The quality loss is easier to see than to score. The one-shot prompt asks
+The quality loss is easier to see than to score. This one-shot prompt asks
 for a single-file HTML canvas animation of a car driving through parallax
 scenery. It ran once for each setting on the same Hy3 IQ4_XS build, at the
 model card's temperature of 0.9 with low reasoning effort, and each
@@ -226,20 +226,21 @@ temperature. Read them as an illustration, not a certification.
 | <a href="../assets/perf/lossy-hy3-shed-0.10-0.90.html"><img src="../assets/perf/lossy-hy3-shed-0.10-0.90.png" alt="layer-shed 0.10 with miss-shed 0.90: flatter, darker scene with simpler shapes"></a><br>`moe_layer_shed 0.10` + `moe_miss_shed 0.90`, top-p 0.95. 11.1k tokens at 3.6 tok/s. | <a href="../assets/perf/lossy-hy3-shed-0.20-0.80.html"><img src="../assets/perf/lossy-hy3-shed-0.20-0.80.png" alt="layer-shed 0.20 with miss-shed 0.80: black page, the script crashed on a stray token"></a><br>`moe_layer_shed 0.20` + `moe_miss_shed 0.80`, top-p 1.0. 10.0k tokens at 4.2 tok/s. |
 
 The scene simplifies as the settings become more aggressive, well before
-anything breaks. The first three pages ran clean. The black frame is the
-past-the-threshold symptom on a real run. That page failed on its first
-stray token, a bullet character where an operator belonged, with CJK
+anything breaks. All of the first three pages ran clean. The black frame
+is the past-the-threshold symptom on a real run. That page failed on its
+first stray token, a bullet character where an operator belonged, with CJK
 characters spliced into two identifiers further down the file. The middle
 setting also shows the sampling interaction described under Hy3. Its page
 was generated clean at top-p 0.95, while the same setting sampled
 untruncated put one wrong-script token into an 11k-token run. The tok/s
 figures are whole-run averages of these single generations at different
-lengths, not controlled A/B numbers. The Hy3 table is the measured
-comparison. Each screenshot links to its generated page.
+lengths, not controlled A/B numbers. For the measured comparison, read the
+Hy3 table. Each screenshot links to its generated page.
 
-The sampling interaction can also be used to advantage. The full pair was
-rerun once on the same prompt and build with lower-temperature sampling, at
-temperature 0.6 and top-p 0.95 instead of the model card's 0.9:
+The sampling interaction can also be used to advantage. Here the full pair
+was rerun once on the same prompt and build with lower-temperature
+sampling, at temperature 0.6 and top-p 0.95 instead of the model card's
+0.9:
 
 <a href="../assets/perf/lossy-hy3-shed-0.10-0.90-cool.html"><img src="../assets/perf/lossy-hy3-shed-0.10-0.90-cool.png" alt="layer-shed 0.10 with miss-shed 0.90 at temperature 0.6: layered sunset scene with a red car, lampposts, treeline, and the sun setting behind the hills"></a><br>`moe_layer_shed 0.10` + `moe_miss_shed 0.90`, temperature 0.6, top-p 0.95. 10.2k tokens at 3.8 tok/s.
 
@@ -252,8 +253,8 @@ the card's temperature loses most of the speedup instead.
 
 ## One prompt, four shed levels: Kimi-K3
 
-The same comparison at the most over-budget end of the range. The four
-Kimi-K3 settings measured above each ran the same prompt once to completion
+The same comparison at the most over-budget end of the range. Each of the
+four Kimi-K3 settings measured above ran the same prompt once to completion
 at temperature 1.0. Screenshots link to the generated pages as before.
 
 | | |
@@ -265,13 +266,13 @@ All four pages ran as generated, with valid markup, a working animation
 loop and no stray tokens. What varies is the scene, and not monotonically.
 The lossless page drew the cohesive film-grain dusk. At 0.80 the scene is
 clean and bright, but the car body has small geometry glitches and the
-lighting is the flattest of the set. At 0.70 the composition is complete but
-the tone mapping overshot. The page renders far darker than its palette
+lighting is the flattest of the set. The 0.70 composition is complete but
+the tone mapping overshot. That page renders far darker than its palette
 intends, and the foreground trees reduce to blurred dark masses. At 0.65 the
 sky and landscape are the richest of the four while the car is the most
 damaged subject, with oversized featureless wheels and a stray light streak
 across the body. Between 0.65 and 0.80 the flaws differ in kind, not in
-degree, so a single sample for each setting cannot rank adjacent levels.
+degree, and a single sample for each setting cannot rank adjacent levels.
 What it can show is that all three are above the quality threshold. That
 threshold is one step further down at 0.60, where a code generation broke
 outright. As on GLM-5.2, dropped mass degraded what the pages drew long
