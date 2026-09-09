@@ -44,12 +44,16 @@ fp16/bf16 only today.
 """
 from __future__ import annotations
 
+import logging
+
 import mlx.core as mx
 
 from gmlx.envflags import env_bool, env_int
 
 _installed_route = False
 _installed_stamp = False
+_log = logging.getLogger(__name__)
+
 _CLAIMS = [0]
 _STAMPS = [0]
 _SEEN_B = set()
@@ -135,6 +139,11 @@ def _debug_decline(reason, **kw):
 
 def _claim(queries, keys, values, cache, scale, mask, sinks):
     """Cascade output for a claimable stamped decode call, else None."""
+    if getattr(cache, "kv_quant_scheme", None) == "kvarn":
+        # kvarn record groups have no per-token wire the cascade split can
+        # address; the kvarn SDPA route owns these calls.
+        _debug_decline("kvarn", cache=type(cache).__name__)
+        return None
     info = getattr(cache, "_gmlx_cascade", None)
     if info is None:
         _debug_decline("no-stamp", B=queries.shape[0],
@@ -408,10 +417,18 @@ def carry_stamp(src, dst):
     _mask_stamp_on_filter(dst)
 
 
+_KVARN_STAMP_NOTED = [False]
+
+
 def _stamp_caches(caches, rows):
     """Stamp every layer cache with the batch's shared token prefix.
     rows: per-row packed token bytes, cache row order. No-op when the
     common prefix is empty."""
+    if any(getattr(c, "kv_quant_scheme", None) == "kvarn" for c in caches):
+        if not _KVARN_STAMP_NOTED[0]:
+            _KVARN_STAMP_NOTED[0] = True
+            _log.info("cascade decode inactive under kvarn KV")
+        return False
     P = _lcp_rows(rows)
     if P <= 0:
         return False

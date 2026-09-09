@@ -358,6 +358,11 @@ def install_safe_kv_quantization() -> None:
         scheme = kwargs.get(
             "kv_quant_scheme",
             getattr(vlm_common, "DEFAULT_KV_QUANT_SCHEME", None))
+        if scheme == "kvarn":
+            # kvarn converts at cache construction (kvarn_serve); the
+            # mid-stream affine pass must never touch a kvarn-scheme
+            # stack, converted or (declined) fp16.
+            return
         if turbo_on is not None and turbo_on(kv_bits, scheme):
             return stock(prompt_cache, quantized_kv_start, kv_group_size,
                          kv_bits, **kwargs)
@@ -454,6 +459,23 @@ def _is_batched_cache(c) -> bool:
     return hasattr(c, "left_padding")
 
 
+def _kvarn_batch_merge(c):
+    """The batch merge for a single-stream kvarn cache, or None.
+
+    Kvarn keeps merge on the batch class alone, so a scalar
+    KVarNKVCache -- which the ckpt tier installs into a B=1 batch --
+    answers no to the ``type(c).merge`` probe and reaches ``extend``
+    unlifted. A second concurrent request then kills every row in
+    flight with AttributeError. The rotating subclass is excluded by
+    exact type, as the merge itself is.
+    """
+    try:
+        from .kvarn_cache import BatchKVarNKVCache, KVarNKVCache
+    except Exception:
+        return None
+    return BatchKVarNKVCache.merge if type(c) is KVarNKVCache else None
+
+
 def install_batched_cachelist_admission() -> None:
     """Stop re-merging an already-batched CacheList on admission.
 
@@ -483,7 +505,7 @@ def install_batched_cachelist_admission() -> None:
     def _promote(c):
         if _is_batched_cache(c):
             return c
-        merge = getattr(type(c), "merge", None)
+        merge = getattr(type(c), "merge", None) or _kvarn_batch_merge(c)
         return merge([c]) if merge is not None else c
 
     def _extend_cache(cache_a, cache_b):
@@ -552,14 +574,24 @@ def install_pooled_prompt_kv_quant() -> None:
                                           resolve_kv_quant_policy)
 
         group = int(kwargs.get("kv_group_size") or 64)
+        scheme = kwargs.get("kv_quant_scheme")
+        shape = {}
+        if scheme == "kvarn":
+            # The load-time verdict declines by model shape (MLA, head
+            # dim); the pooled path must not pack what it declined.
+            from gmlx.cache.kvarn_cache import kvarn_unsupported
+
+            shape["scheme_reason"] = kvarn_unsupported(model)
         # The batch was built with kv_bits stripped, so only pooled
         # packing engages. Failures degrade to fp16 pools, never a
-        # failed request.
+        # failed request. The scheme rides along so a kvarn boot reports
+        # its own width and never prints an affine engagement line.
         try:
             policy = resolve_kv_quant_policy(
                 self.prompt_cache, kv_bits=bits, kv_group_size=group,
-                quantized_kv_start=0, can_quantize_kv=False,
-                no_kv_reason="pooled path packs pools only; KV stays fp16")
+                quantized_kv_start=0, can_quantize_kv=False, scheme=scheme,
+                no_kv_reason="pooled path packs pools only; KV stays fp16",
+                **shape)
             if policy.verdict not in ("full", "partial"):
                 _skip_note("kv_bits=%s: %s; pools stay fp16", bits,
                            policy.reason)

@@ -129,7 +129,13 @@ class HyV3SpecLM(hy.Model):
         if rejected <= 0:
             return
         refused = [
-            type(c).__name__ for c in prompt_cache if not c.is_trimmable()
+            type(c).__name__
+            for c in prompt_cache
+            if not (
+                c._can_trim(rejected)
+                if hasattr(c, "_can_trim")
+                else c.is_trimmable()
+            )
         ]
         if refused:
             raise RuntimeError(

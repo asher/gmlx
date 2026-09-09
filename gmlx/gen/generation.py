@@ -134,6 +134,159 @@ def _verbose_emitter(prompt, tokenizer, reasoning):
     return write, (lambda: None)
 
 
+def resolve_kvarn_policy(model, kv_bits, kv_tail_tokens, rotating_window,
+                         stack, *, mode="single", mtp=False, value_bits=None,
+                         quantized_kv_start=0):
+    """The kvarn policy for one built stack, with the model-shape decline
+    resolved. The single entry point CLI, chat and the MTP paths share."""
+    from gmlx.cache.kv_policy import resolve_kv_quant_policy
+    from gmlx.cache.kvarn_cache import kvarn_resolve_kwargs
+
+    return resolve_kv_quant_policy(
+        stack, mode=mode, mtp=mtp, quantized_kv_start=quantized_kv_start,
+        **kvarn_resolve_kwargs(model, kv_bits, value_bits, kv_tail_tokens,
+                               rotating_window))
+
+
+def convert_kvarn_cache(model, prompt_cache, kv_bits, kv_tail_tokens,
+                        rotating_window=None, quantized_kv_start=0):
+    """Resolve the kvarn policy for one freshly built stack and apply it.
+    Returns the policy; its verdict tells the caller what happened. The
+    chat REPL rebuilds a cache per turn and re-resolves here, so every
+    turn gets the same layer selection as the load-time banner."""
+    policy = resolve_kvarn_policy(
+        model, kv_bits, kv_tail_tokens, rotating_window, prompt_cache,
+        quantized_kv_start=quantized_kv_start,
+    )
+    from gmlx.cache.kv_policy import quantize_stack
+
+    quantize_stack(prompt_cache, policy)
+    return policy
+
+
+def setup_kvarn_cache(
+    model, kv_bits, kv_tail_tokens, max_kv_size, out=None, make_cache=None,
+    quantized_kv_start=0,
+):
+    """Build the model's prompt cache with kvarn KV on every layer the
+    policy takes, printing the [kv] banner. Returns the cache list, or
+    None (with a warning) when the scheme cannot apply to this model;
+    a width, tail or window the scheme rejects exits 2 like the affine
+    path. ``make_cache`` overrides the stock cache builder (the MTP
+    paths build via mlx-vlm's)."""
+    from gmlx.cache.kv_policy import kv_line
+    from gmlx.cache.kvarn_cache import kvarn_rotating_window
+
+    out = out if out is not None else sys.stderr
+    window = (
+        None if make_cache is not None else kvarn_rotating_window(model, max_kv_size)
+    )
+    if make_cache is not None:
+        prompt_cache = make_cache()
+    else:
+        from mlx_lm.models.cache import make_prompt_cache as _mpc
+
+        prompt_cache = _mpc(model, max_kv_size=max_kv_size)
+    policy = convert_kvarn_cache(
+        model, prompt_cache, kv_bits, kv_tail_tokens, window,
+        quantized_kv_start=quantized_kv_start,
+    )
+    if policy.verdict == "error":
+        print(kv_line(None, policy), file=out)
+        raise SystemExit(2)
+    if policy.verdict not in ("full", "partial"):
+        print(f"warning: --kv-quant-scheme kvarn dropped: {policy.reason}",
+              file=out)
+        return None
+    print(kv_line(None, policy), file=out)
+    return prompt_cache
+
+
+# The fused kvarn verify route (matrix-unit FA kernels) covers blocks up to
+# this query width; wider blocks fall back to a full materialize per round.
+_KVARN_VERIFY_QL = 8
+
+
+def setup_kvarn_mtp_cache(model, drafter, kv_bits, kv_tail_tokens, block, out=None):
+    """setup_kvarn_cache for the MTP target. Declines drafters that read the
+    target KV back (kvarn records are not raw K/V; ``uses_shared_kv`` defaults
+    True so unknown drafters decline conservatively) and sliding-window
+    target stacks (serve's rule), warns when the verify width (block plus
+    the bonus row) exceeds the fused route, and builds via mlx-vlm's cache
+    maker so the arch's own make_cache hook applies. Returns the cache list
+    or None."""
+    out = out if out is not None else sys.stderr
+    if getattr(drafter, "uses_shared_kv", True):
+        print(
+            "warning: --kv-quant-scheme kvarn dropped: this drafter reads "
+            "the target KV back (kvarn records are not raw K/V)",
+            file=out,
+        )
+        return None
+    from mlx_vlm.models import cache as _cache
+
+    from gmlx.cache.kvarn_cache import kvarn_mtp_window_decline
+    from gmlx.spec.helpers import _resolve_block_total
+
+    lm = model.language_model if hasattr(model, "language_model") else model
+    built = _cache.make_prompt_cache(lm)
+    decline = kvarn_mtp_window_decline(built)
+    if decline is not None:
+        print(f"warning: --kv-quant-scheme kvarn dropped: {decline}", file=out)
+        return None
+    prompt_cache = setup_kvarn_cache(
+        model, kv_bits, kv_tail_tokens, None, out=out, make_cache=lambda: built
+    )
+    width = _resolve_block_total(drafter, block) + 1
+    if prompt_cache is not None and width > _KVARN_VERIFY_QL:
+        print(
+            f"warning: verify width {width} (block {width - 1} + 1) exceeds "
+            f"the fused kvarn route ({_KVARN_VERIFY_QL}); verify rounds fall "
+            "back to materialized attention",
+            file=out,
+        )
+    if prompt_cache is not None:
+        harden_mtp_rollback(model)
+        if lm is not model:
+            harden_mtp_rollback(lm)
+    return prompt_cache
+
+
+def harden_mtp_rollback(obj) -> None:
+    """Instance-wrap ``rollback_speculative_cache`` with a trim pre-check:
+    every ``_can_trim``-aware cache must accept the full trim before the
+    stock body mutates any. Upstream rollbacks (qwen3_5, gemma4) ignore
+    ``trim`` returns, so a cache that refused would silently desync layer
+    offsets; the guard turns that into a loud error. Idempotent."""
+    fn = getattr(obj, "rollback_speculative_cache", None)
+    if fn is None or getattr(fn, "_gmlx_kvarn_guard", False):
+        return
+
+    def _guarded(caches, gdn_states, accepted, block_size):
+        if isinstance(accepted, int):
+            max_a = accepted
+        elif hasattr(accepted, "tolist"):
+            max_a = max(int(a) for a in accepted.reshape(-1).tolist())
+        else:
+            max_a = max(int(a) for a in accepted)
+        trim = int(block_size) - max_a - 1
+        if trim > 0:
+            refused = [
+                type(c).__name__
+                for c in caches
+                if c is not None and hasattr(c, "_can_trim") and not c._can_trim(trim)
+            ]
+            if refused:
+                raise RuntimeError(
+                    f"MTP rollback: {', '.join(refused)} refuse trim({trim}); "
+                    "aborting before a partial rollback desyncs layer offsets"
+                )
+        return fn(caches, gdn_states, accepted, block_size)
+
+    _guarded._gmlx_kvarn_guard = True
+    obj.rollback_speculative_cache = _guarded
+
+
 def generate(
     model,
     tokenizer,
@@ -158,6 +311,8 @@ def generate(
     kv_bits: int | None = None,
     kv_group_size: int = 64,
     quantized_kv_start: int = 0,
+    kv_quant_scheme: str | None = None,
+    kv_tail_tokens: int = 1024,
     prefill_step_size: int | None = None,
     thinking_budget: int | None = None,
     thinking_start_token: str | None = None,
@@ -285,7 +440,24 @@ def generate(
         )
 
     prompt_cache = None
-    if kv_bits is not None:
+    if (kv_quant_scheme or "uniform").lower() == "kvarn":
+        if inject_critique is not None or (over_generation and over_generation > 0):
+            # The over-generation runner builds its own per-pass caches and
+            # never sees a pre-armed prompt cache.
+            print(
+                "warning: --kv-quant-scheme kvarn dropped: over-generation/"
+                "critique passes rebuild their own fp16 KV cache",
+                file=sys.stderr,
+            )
+        else:
+            prompt_cache = setup_kvarn_cache(
+                model, kv_bits, kv_tail_tokens, max_kv_size,
+                quantized_kv_start=quantized_kv_start,
+            )
+        # Handled here whatever the outcome: the affine policy path must
+        # never touch a kvarn stack.
+        kv_bits = None
+    elif kv_bits is not None:
         # Resolve on the constructed stack. A bare make_cache probe
         # misses what max_kv_size builds.
         from mlx_lm.models.cache import make_prompt_cache as _mpc
@@ -295,7 +467,7 @@ def generate(
         prompt_cache = _mpc(model, max_kv_size=max_kv_size)
         policy = resolve_and_report(
             prompt_cache, kv_bits=kv_bits, kv_group_size=kv_group_size,
-            quantized_kv_start=quantized_kv_start,
+            quantized_kv_start=quantized_kv_start, scheme=kv_quant_scheme,
             max_kv_size=max_kv_size)
         if policy.verdict == "dropped":
             prompt_cache = None
@@ -656,18 +828,19 @@ def _generate_over(
     return pre_text + over_text
 
 
-def _chunked_prefill_cache(lm, input_ids, chunk):
-    """Populate a fresh prompt cache by prefilling ``input_ids[:, :-1]`` in
-    ``chunk``-token steps, leaving the trailing token for the caller's capture
-    forward. Bounds each expert-gather forward to a width proven free of the
-    single-shot MoE gather memory bug. The drafter's shared K/V is read back from
-    this (fully populated) cache, so chunking is loss-free. Returns the cache."""
+def _chunked_prefill_cache(lm, input_ids, chunk, cache=None):
+    """Populate a fresh prompt cache (or the given empty one) by prefilling
+    ``input_ids[:, :-1]`` in ``chunk``-token steps, leaving the trailing token
+    for the caller's capture forward. Bounds each expert-gather forward to a
+    width proven free of the single-shot MoE gather memory bug. The drafter's
+    shared K/V is read back from this (fully populated) cache, so chunking is
+    loss-free. Returns the cache."""
     from mlx_vlm.models import cache as _cache
 
     for attr in ("_position_ids", "_rope_deltas"):
         if hasattr(lm, attr):
             setattr(lm, attr, None)
-    c = _cache.make_prompt_cache(lm)
+    c = cache if cache is not None else _cache.make_prompt_cache(lm)
     n_total = input_ids.shape[1]
     i = 0
     while i < n_total - 1:
@@ -726,6 +899,8 @@ def _generate_speculative(
     reasoning: str | None = None,
     kv_bits: int | None = None,
     kv_group_size: int = 64,
+    kv_quant_scheme: str | None = None,
+    kv_tail_tokens: int = 1024,
     thinking_budget: int | None = None,
     thinking_start_token: str | None = None,
     thinking_end_token: str | None = None,
@@ -757,11 +932,22 @@ def _generate_speculative(
             system_prompt=system_prompt, template_kwargs=template_kwargs,
             verbose=verbose, reasoning=reasoning,
             kv_bits=kv_bits, kv_group_size=kv_group_size,
+            kv_quant_scheme=kv_quant_scheme,
+            kv_tail_tokens=kv_tail_tokens,
             thinking_budget=thinking_budget,
             thinking_start_token=thinking_start_token,
             thinking_end_token=thinking_end_token,
         )
 
+    kvarn_cache = None
+    if kv_quant_scheme == "kvarn":
+        block_note = draft_block_size or int(getattr(drafter.config, "block_size", 3))
+        kvarn_cache = setup_kvarn_mtp_cache(
+            model, drafter, kv_bits, kv_tail_tokens, block_note
+        )
+        # kvarn owns the width request; a declined scheme means fp16, not
+        # a silent fall-through to another quantization.
+        kv_bits = None
     if kv_bits is not None:
         # The stock mlx-vlm round has no KV-quantization hook and the models
         # routed here (gemma4/qwen3.x drafters) have no pooled caches.
@@ -842,10 +1028,10 @@ def _generate_speculative(
     # only the trailing token so no single expert-gather forward exceeds the safe
     # width. Short prompts prefill in one already-safe forward. The pre-prefill
     # wall time is inside the first-token window, so prefill_tps stays correct.
-    feed, prompt_cache = input_ids, None
+    feed, prompt_cache = input_ids, kvarn_cache
     if input_ids.shape[1] > _PREFILL_CHUNK:
         prompt_cache = _chunked_prefill_cache(
-            model.language_model, input_ids, _PREFILL_CHUNK
+            model.language_model, input_ids, _PREFILL_CHUNK, cache=kvarn_cache
         )
         feed = input_ids[:, -1:]
     for tok, _logprobs in generate_step(
@@ -924,6 +1110,8 @@ def generate_speculative_owned(
     reasoning: str | None = None,
     kv_bits: int | None = None,
     kv_group_size: int = 64,
+    kv_quant_scheme: str | None = None,
+    kv_tail_tokens: int = 1024,
     thinking_budget: int | None = None,
     thinking_start_token: str | None = None,
     thinking_end_token: str | None = None,
@@ -980,7 +1168,16 @@ def generate_speculative_owned(
     eos_ids = set(getattr(tokenizer, "eos_token_ids", None) or [tokenizer.eos_token_id])
 
     lm = model.language_model if hasattr(model, "language_model") else model
-    prompt_cache = _cache.make_prompt_cache(lm)
+    prompt_cache = None
+    if kv_quant_scheme == "kvarn":
+        prompt_cache = setup_kvarn_mtp_cache(
+            model, drafter, kv_bits, kv_tail_tokens, block
+        )
+        # kvarn owns the width request; a declined scheme means fp16, not
+        # a silent fall-through to the pooled packing.
+        kv_bits = None
+    if prompt_cache is None:
+        prompt_cache = _cache.make_prompt_cache(lm)
     if kv_bits is not None:
         # Owned rounds take the layers serve takes; the stock walks
         # decline. No later converter runs here, so convert now.
@@ -990,7 +1187,8 @@ def generate_speculative_owned(
         decline = mtp_kv_decline(lm)
         policy = resolve_and_report(
             prompt_cache, kv_bits=kv_bits, kv_group_size=kv_group_size,
-            mtp=True, can_quantize_kv=decline is None, no_kv_reason=decline)
+            mtp=True, scheme=kv_quant_scheme,
+            can_quantize_kv=decline is None, no_kv_reason=decline)
         quantize_stack(prompt_cache, policy)
 
     detok = tokenizer.detokenizer

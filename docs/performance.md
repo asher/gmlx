@@ -35,7 +35,7 @@ the KV cache and attention. Each setting below addresses one of these regimes.
 | a uniform K-quant file | up to 64% faster decode than a mixed file of the same model | none | the file you download, see [Choosing a quant](#choosing-a-quant-for-speed) |
 | speculative decoding | 1.1x to 2x decode, identical output | memory for the drafter, less gain at high concurrency | automatic on models with a head; `--draft-gguf` or `speculative:` otherwise |
 | the prompt cache | skips prefill for any prefix seen before | RAM or SSD for the entries | on by default; `cache:` keys add the SSD tier |
-| a quantized KV cache | halves or quarters cache memory | fewer accepted drafts with speculation on, small quality cost at 4 bits | `--kv-bits`, load key `kv_bits` |
+| a quantized KV cache | halves to quarters cache memory | fewer accepted drafts with speculation on, a small quality cost at 4 bits | `--kv-bits` or `--kv-quant-scheme kvarn`; load keys `kv_bits`, `kv_quant_scheme` |
 | admission pacing | keeps live streams decoding while a long prompt is admitted | slower admission of the new request | `server.decode_prefill_ratio`, default `auto` |
 | sparse attention | depth-flat attention cost past 8k tokens | lossy, opt-in, llama-family only | `GMLX_SPARSE_ATTN=1` |
 | streaming | runs a MoE bigger than RAM | single-digit tokens per second | [streaming.md](streaming.md) |
@@ -228,7 +228,9 @@ cannot be rolled back:
 
 Sliding-window models under `--speculative` keep no record of generated
 tokens, so their next-turn reuse comes from the prefill boundaries alone and
-the reply re-prefills.
+the reply re-prefills. Under kvarn KV the routing is the same except that
+dense models use the exact tier, since the block tier cannot split kvarn's
+128-token records.
 
 The optional SSD tier (`gmlx init --disk-cache`, or the `cache:` block in the
 config) persists entries across restarts and holds more entries than fit in RAM
@@ -357,13 +359,19 @@ accounts for all of these.
 
 Settings, lowest cost first:
 
-- `--kv-bits 8` roughly halves the cache at nearly no quality cost, and
-  `--kv-bits 4` roughly quarters it with a small cost at long range.
-  `--quantized-kv-start` keeps the first stretch of context in full precision.
+- A quantized KV cache. `--kv-bits 8` roughly halves the cache at nearly no
+  quality cost; `--kv-quant-scheme kvarn` gives that fidelity at 6 bits in
+  about half the fp16 cache and stays usable down to 4.
+  [KV cache quantization](#kv-cache-quantization) below says what each scheme
+  does, which models gain from it, and what the fidelity data shows.
   Server-side these are the [load keys](server-config.md#load-keys). With
   speculation on, quantized KV also costs draft acceptance.
 - `--max-kv-size` caps the cache as a rolling window, dropping the oldest
-  context.
+  context. On `run` and `chat` the window quantizes under kvarn once the cap
+  is at least the kvarn minimum ([cli.md](cli.md#gmlx-run)); plain
+  `--kv-bits` cannot quantize a rotating window and is refused at start. The
+  server's `max_kv_size` only caps the request context budget and builds no
+  rotating window.
 - `--prefill-step-size` shrinks the 2048-token prefill chunk to cap peak
   memory further, at some prefill-throughput cost.
 
@@ -374,6 +382,184 @@ of total memory. gmlx handles the over-budget MoE case itself
 high-RAM Mac, the limit can be raised at your own risk with
 `sudo sysctl iogpu.wired_limit_mb=<MB>`. It resets at reboot; leave the OS
 several GB unallocated.
+
+### KV cache quantization
+
+Two schemes shrink the cache. One policy decides both layer by layer, prints
+one `[kv]` line, and reports the result as `kv_quant` on `GET /v1/models`.
+
+Affine quantization, `--kv-bits N` or the `kv_bits` load key, is mlx-lm's
+QuantizedKVCache. Each token's K and V rows are split into groups of
+`--kv-group-size` values, 64 by default, and each group stores N-bit codes
+plus an fp16 scale and bias. Widths are 2, 3, 4, 6 and 8.
+`--quantized-kv-start` keeps the first stretch of the context in fp16.
+
+KVarN, `--kv-quant-scheme kvarn` or `kv_quant_scheme: kvarn`, is
+variance-normalized quantization. `--kv-bits` picks the width, 6 by default
+from 2, 3, 4, 5, 6 and 8; split key and value widths are set through the
+environment ([env-vars.md](env-vars.md#load-and-cache-keys)). Every 128-value
+slice of a head is rotated by a Hadamard transform, which spreads outlier
+channels over the whole slice. K and V are stored in 128-token records. Before
+rounding, each record is scaled along both axes by 16 alternating row and
+column normalizations in log space (a Sinkhorn iteration), so that no token
+and no channel dominates the code range, and three fp16 axis vectors per
+record undo the scaling on read. The first 128 tokens (the attention sink) and
+the newest `--kv-tail-tokens` tokens, 1024 by default, stay fp16, and a record
+is sealed once the tail has moved past it. Decode and MTP verify read the
+records in the mlx-kquant kernels and merge the fp16 tail through one
+softmax. The prompt cache stores records on its exact and checkpoint tiers.
+The scheme needs mlx-kquant 0.4.6 or later; on an older build it is dropped
+with a printed reason and the model runs fp16 KV.
+
+Which layers quantize is decided by cache shape, not model name. Growing
+attention KV quantizes, except the last layer of a deep stack, which stays
+fp16 under either scheme. Recurrent state and sliding windows stay fp16, with
+one exception: a `--max-kv-size` window on `run` and `chat` quantizes under
+kvarn and is refused under affine. kvarn accepts head_dim 128, 256 and 512
+only, so head_dim-64 layers (gpt-oss, falcon-h1) are affine only. MLA
+architectures (deepseek4, glm5_next, kimi-k3) keep K and V in one latent
+store: kvarn declines them, and affine packs the pooled latents when stored.
+The VLM media path keeps fp16. A declined model prints the reason and runs
+fp16.
+
+Quantization saves memory in proportion to how much of the cache grows with
+context, and loses fidelity in proportion to how many layers it touches. The
+cache shape decides both:
+
+| Cache shape | Families | fp16 cache at 32k | What to use |
+|---|---|---|---|
+| dense full attention on every layer | llama, Mistral, Qwen3 dense | 4 to 8 GB for an 8B to 32B model | `--kv-bits 8`, or kvarn at 6 for the same fidelity in less memory; kvarn at 4 when memory is the limit |
+| hybrid recurrent, one attention layer in four | Qwen3.5/3.6/3.8, Nemotron-H, Falcon-H1, Granite 4 | about 2 GB at 27B plus a fixed recurrent state | only when the context budget is the limit, 64k and up; the fidelity cost is small, since three layers in four never quantize |
+| sliding-window mix | gemma-4 | the window layers stop growing at the window | a small saving: only the global layers quantize |
+| MLA latent | DeepSeek-V4, GLM-5.3, Kimi-K2 and K3 | already compressed by the architecture | affine only; it packs the latent pools when stored, and kvarn declines |
+| head_dim 64 | gpt-oss | small per token | affine only |
+
+`/status` reports the live cache size and `POST /v1/estimate` estimates a load
+in advance ([api.md](api.md#capacity-and-live-request-metrics)).
+
+The fidelity measure is teacher-forced logit KLD against an fp16 cache on
+wikitext, from `scripts/kld_harness.py`, on two legs: prefill (chunked prefill
+logits) and decode (token by token from full prefill depth). KLD is in nats,
+lower is better. The median is the typical position. The decode p99 is the
+worst hundredth, where a quantizer's outliers show. Decode top-1 is the share
+of generated positions whose argmax matches the fp16 cache.
+
+<!-- kld-tables -->
+Qwen3.5-9B Q4_K_M, 16k context (head_dim 256, 7 of 32 layers quantized):
+
+| cache | prefill median | decode median | decode p99 | decode top-1 |
+|---|---|---|---|---|
+| affine 2 | 0.02778 | 0.02745 | 0.5596 | 89.0% |
+| kvarn 2 | 0.01503 | 0.00612 | 0.2301 | 94.7% |
+| affine 3 | 0.00648 | 0.00606 | 0.1057 | 94.3% |
+| kvarn 3 | 0.00291 | 0.00139 | 0.0313 | 97.4% |
+| affine 4 | 0.00190 | 0.00183 | 0.0276 | 96.9% |
+| kvarn 4 | 0.00117 | 0.00060 | 0.0071 | 98.3% |
+| kvarn 5 | 0.00055 | 0.00029 | 0.0042 | 98.2% |
+| kvarn k6 v5 | 0.00046 | 0.00028 | 0.0039 | 98.6% |
+| affine 6 | 0.00046 | 0.00038 | 0.0045 | 98.7% |
+| kvarn 6 | 0.00036 | 0.00027 | 0.0036 | 98.7% |
+| affine 8 | 0.00029 | 0.00020 | 0.0027 | 98.7% |
+| kvarn 8 | 0.00027 | 0.00020 | 0.0030 | 99.2% |
+
+Qwen3.8-27B Q6_K_XL, 16k context (head_dim 256, 15 of 65 layers quantized):
+
+| cache | prefill median | decode median | decode p99 | decode top-1 |
+|---|---|---|---|---|
+| affine 2 | 0.01975 | 0.02314 | 0.4697 | 90.3% |
+| kvarn 2 | 0.01009 | 0.00491 | 0.1280 | 95.1% |
+| affine 3 | 0.00383 | 0.00419 | 0.1034 | 96.1% |
+| kvarn 3 | 0.00212 | 0.00113 | 0.0318 | 97.3% |
+| affine 4 | 0.00138 | 0.00136 | 0.0268 | 97.5% |
+| kvarn 4 | 0.00084 | 0.00045 | 0.0078 | 97.4% |
+| kvarn 5 | 0.00041 | 0.00025 | 0.0039 | 98.4% |
+| kvarn k6 v5 | 0.00034 | 0.00019 | 0.0039 | 98.5% |
+| affine 6 | 0.00033 | 0.00030 | 0.0055 | 98.7% |
+| kvarn 6 | 0.00027 | 0.00019 | 0.0030 | 98.8% |
+| affine 8 | 0.00023 | 0.00019 | 0.0032 | 98.7% |
+| kvarn 8 | 0.00021 | 0.00015 | 0.0037 | 98.9% |
+
+Qwen3.8-27B Q6_K_XL, 32k context:
+
+| cache | prefill median | decode median | decode p99 | decode top-1 |
+|---|---|---|---|---|
+| affine 4 | 0.00162 | 0.00205 | 0.0176 | 97.6% |
+| kvarn 4 | 0.00104 | 0.00070 | 0.0068 | 98.1% |
+| affine 6 | 0.00039 | 0.00049 | 0.0037 | 98.5% |
+| kvarn 6 | 0.00033 | 0.00032 | 0.0027 | 99.4% |
+| affine 8 | 0.00027 | 0.00030 | 0.0038 | 98.8% |
+| kvarn 8 | 0.00026 | 0.00028 | 0.0026 | 99.0% |
+
+Nemotron-3.5-Lightning-30B-A3B, 16k context (Mamba2 hybrid, head_dim 128):
+
+| cache | prefill median | decode median | decode p99 | decode top-1 |
+|---|---|---|---|---|
+| kvarn 4 | 0.00270 | 0.00163 | 0.0508 | 98.1% |
+| kvarn 6 | 0.00125 | 0.00103 | 0.0266 | 98.8% |
+| affine 8 | 0.00123 | 0.00094 | 0.0335 | 98.2% |
+| kvarn 8 | 0.00111 | 0.00095 | 0.0298 | 98.6% |
+<!-- /kld-tables -->
+
+At a matched width kvarn beats the affine cache on both legs at every width
+below 8, by 3 to 5x on the decode median at 2 to 4 bits, and the two converge
+at 8. kvarn at 6 bits falls between the affine 6 and 8 bit caches on the 9B
+and matches affine 8 on the 27B, in three quarters of the 8-bit record's
+bytes. At 32k its decode median can trail affine 8 by a few percent while its
+p99 and top-1 stay ahead. The split width k6 v5 keeps kvarn 6's median with
+kvarn 5's p99 and top-1, for the bytes in between. Widths 2 and 3 are for
+experiments. The decode leg is the one a long generation accumulates.
+
+Top-1 is closest to what a greedy or low-temperature user sees: the share of
+tokens that come out identical. Median KLD measures how far the whole
+next-token distribution moved, which is what sampling at temperature draws
+from, and it keeps scoring positions whose argmax never changed. The p99
+bounds the outliers: one badly wrong position can change a reasoning chain or
+a tool call, and a long generation feeds its own errors back in, so a cache
+with a lower p99 drifts less over a thousand tokens even when its median is
+not the lowest. When two caches differ by a few percent on one measure, take
+the one with the lower p99 and the higher top-1. When a width gains 2x or
+more on the median, the gain shows in every measure. The ranking does not
+follow width across schemes: kvarn at 2 bits matches affine at 3 on decode
+median and is within a point of it on top-1 (ahead on the 9B, behind on
+Qwen3.8-27B), and kvarn at 4 cuts affine 4's decode median to a third while
+matching or beating it on top-1. The corpus is wikitext under teacher forcing,
+so the tables rank caches against each other and do not predict a task score.
+
+TurboQuant, mlx-vlm's scheme, is not offered. Measured on the same models and
+legs (the harness has a `turboN` arm), it falls between the other two: ahead
+of affine at 2 and 3 bits, level at 4, behind at 6 and 8, and behind kvarn at
+every width on every measure. At mlx-vlm's recommended 3.5-bit setting its
+decode median is 2.5x kvarn 3's, at 4 bits about 3x kvarn 4's, and at 6 bits
+2x kvarn 6's, with equal or lower top-1 at each.
+
+Decode speed depends on how much of a step the KV read is. On GDN hybrids and
+gemma-4 all three caches are within run-to-run spread. On a KV-bound dense
+stack (Qwen3-0.6B Q8, 27 of 28 layers quantized) kvarn 6 decodes at 0.81x
+fp16 and 0.69x affine 8 at 16k, and 0.98x and 0.75x at 32k. Prefill is within
+10% of both. Native MTP composes at batch size 1: verify rounds attend the
+records on the matrix-unit verify kernels at about a decode step's cost
+(head_dim 256, 8 queries per KV head, 16k: 1.0 ms per layer and round against
+0.9 for decode). Choose kvarn for memory and fidelity, and affine for peak
+decode speed on a KV-bound dense model. The split-width variable is in
+[env-vars.md](env-vars.md#runtime) and the debug switches in
+[internals/debug-switches.md](internals/debug-switches.md).
+
+KVarN is the method of Muller, Bich, Boretti, Chang, Zhuang and Cavigelli at
+Huawei, "KVarN: Variance-Normalized KV-Cache Quantization Mitigates Error
+Accumulation in Reasoning Tasks",
+[arXiv:2606.03458](https://arxiv.org/abs/2606.03458), with a reference vLLM
+implementation at [huawei-csl/KVarN](https://github.com/huawei-csl/KVarN)
+(Apache-2.0; no code from it is used here). gmlx's cache is an MLX
+implementation that follows the record format of
+[beellama.cpp](https://github.com/Anbeeld/beellama.cpp) (Anbeeld, MIT), the
+llama.cpp fork that first brought the method to GGUF inference: the `kvarnN`
+width names, the fp16 precision tail and `--kv-tail-tokens` are beellama's,
+and the mlx-kquant kernels are checked against fixtures generated from its
+CPU reference. Notices are in
+[THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md). TurboQuant is the scheme
+of Zandieh, Daliri, Hadian and Mirrokni
+([arXiv:2504.19874](https://arxiv.org/abs/2504.19874)), shipped by mlx-vlm
+under its own `turboquant` scheme name, which gmlx does not accept.
 
 ### The MLX buffer cache at deep context
 

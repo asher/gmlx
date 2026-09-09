@@ -24,6 +24,7 @@ model the process loads.
 | `KV_BITS` | `load.kv_bits` |
 | `KV_GROUP_SIZE` | `load.kv_group_size` |
 | `KV_QUANT_SCHEME` | `load.kv_quant_scheme` |
+| `KV_TAIL_TOKENS` | `load.kv_tail_tokens` |
 | `MAX_KV_SIZE` | `load.max_kv_size` |
 | `QUANTIZED_KV_START` | `load.quantized_kv_start` |
 | `APC_ENABLED` | `cache.enabled` |
@@ -37,6 +38,8 @@ model the process loads.
 | `APC_DISK_READ_MODE` | `cache.disk.read_mode` |
 | `APC_DISK_NAMESPACE` | `cache.disk.namespace` |
 
+`KV_KEY_BITS` and `KV_VALUE_BITS` set split key and value widths for kvarn
+KV server-wide; they have no config key and override `GMLX_KVARN_BITS`.
 `PREFILL_STEP_SIZE` is likewise mlx-vlm's own variable for the prefill chunk
 size; prefer `--prefill-step-size` or `server.prefill_step_size`.
 `TOP_LOGPROBS_K` caps the `top_logprobs` a request may ask for
@@ -90,6 +93,7 @@ changes.
 | `GMLX_DECODE_ARENA_FORCE=1` | Honor an oversized `GMLX_DECODE_ARENA_GB` instead of clamping it to the host floor. |
 | `GMLX_STREAM_KV_CTX` | Tokens of KV cache the arena leaves room for (default `32768`, capped at the trained context). Raise it for deep prompts. |
 | `GMLX_STREAM_KV_WIDTH` | Concurrent streams the KV room is sized for (default `1`). Each uses arena slots. |
+| `GMLX_KVARN_BITS` | Split key and value widths for kvarn KV in `k6v5` form; overrides the width `kv_bits` gives both. A value not of that form is ignored with a warning. |
 | `GMLX_DECODE_KV_RESERVE_GB` | Replace the estimated KV room with a flat reserve in GB; also the fallback of `8` when the KV size cannot be computed from the header. |
 | `GMLX_PREFILL_NOCACHE=0` | Route prefill ring reads through the page cache again. Default off, since a ring pass reads each expert once. |
 | `GMLX_ARENA_STAGE_MAX_TOKENS` | Largest expert call served router-aware instead of by whole-layer staging (default `64`). |

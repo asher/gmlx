@@ -67,6 +67,48 @@ def test_kv_bits_lower_the_cost():
     assert mp.kv_layer_costs(DENSE, bytes_per_elem=1.0)[0][1] == 1024.0
 
 
+def test_regions_price_fixed_fp16_buffers():
+    """kvarn allocates its fp16 sink, horizon and tail buffers at the
+    first token, so they are charged in full at any context length."""
+    costs = mp.kv_layer_costs(DENSE, per_layer_bpe=[1.0] * 4,
+                              per_layer_regions=[((1664, 2.0),)] * 4)
+    assert costs[:4] == [(None, 1024.0)] * 4
+    assert costs[4:] == [(1664, 2048.0)] * 4
+    assert all(isinstance(w, mp.FixedRows) for w, _ in costs[4:])
+    fixed = 4 * 2048.0 * 1664
+    assert mp.prompt_kv_bytes(costs, 100_000) == 4 * 1024.0 * 100_000 + fixed
+    assert mp.prompt_kv_bytes(costs, 10) == 4 * 1024.0 * 10 + fixed
+    assert mp.prompt_kv_bytes(costs, 0) == 0
+    assert mp.per_token_bytes(costs) == 4 * 1024.0
+
+
+def test_regions_ignore_the_layer_window():
+    # A windowed layer's fixed buffers are still allocated in full.
+    costs = mp.kv_layer_costs(TYPED, per_layer_regions=[((1664, 2.0),)] * 2)
+    assert [w for w, _ in costs] == [128, None, 1664, 1664]
+
+
+def test_steps_charge_the_slab_ceiling():
+    """kvarn record codes are allocated in 4096-token slabs: one token
+    pays for a slab, token 4097 for two. Windowed layers keep their cap."""
+    costs = mp.kv_layer_costs(TYPED, per_layer_bpe=[1.0, 1.0],
+                              per_layer_steps=[4096, 4096])
+    assert [w for w, _ in costs] == [128, 4096]
+    assert isinstance(costs[1][0], mp.StepTokens)
+    assert not isinstance(costs[0][0], mp.StepTokens)
+    assert mp.prompt_kv_bytes(costs[1:], 1) == 256.0 * 4096
+    assert mp.prompt_kv_bytes(costs[1:], 4096) == 256.0 * 4096
+    assert mp.prompt_kv_bytes(costs[1:], 4097) == 256.0 * 8192
+    assert mp.per_token_bytes(costs) == 512.0
+    assert (mp.kv_layer_costs(DENSE, per_layer_steps=[4096])
+            == mp.kv_layer_costs(DENSE))
+
+
+def test_region_length_mismatch_is_ignored():
+    assert (mp.kv_layer_costs(DENSE, per_layer_regions=[((16, 2.0),)])
+            == mp.kv_layer_costs(DENSE))
+
+
 def test_unprobeable_geometry_is_none():
     assert mp.kv_layer_costs(SimpleNamespace(config=None)) is None
     assert mp.kv_layer_costs(_model(num_hidden_layers=4)) is None
@@ -200,6 +242,37 @@ def test_mtp_policy_batched_prices_fp16():
     # fp16 when batched, so admission prices the batched mode.
     rg = _stamp_policy(_rg(DENSE, kv_bits=8.0), mtp=True)
     assert mp._policy_costs(rg, DENSE) == [(None, 2048.0)] * 4
+
+
+def test_mtp_kvarn_policy_charges_the_b1_residue():
+    # Batching drops kvarn under MTP, so growth prices fp16; the B=1
+    # stack still holds each converted layer's fp16 rows and one code
+    # slab from the first token.
+    from mlx_vlm.models.cache import KVCache
+
+    from gmlx.cache.kv_policy import (kvarn_bytes_per_element,
+                                      kvarn_fixed_tokens,
+                                      resolve_kv_quant_policy)
+    from gmlx.serve.kv_policy import RG_ATTR, ServeKvPolicy
+
+    model = _model(num_hidden_layers=4, num_attention_heads=8,
+                   num_key_value_heads=8, head_dim=128)
+    rg = _rg(model, kv_bits=6.0)
+    kw = dict(scheme="kvarn", kv_bits=6, mtp=True, head_dim=128)
+    pol = ServeKvPolicy(
+        resolve_kv_quant_policy([KVCache() for _ in range(4)],
+                                mode="single", **kw),
+        resolve_kv_quant_policy([KVCache() for _ in range(4)],
+                                mode="batched", **kw))
+    assert pol.single.verdict == "full" and pol.batched.verdict == "dropped"
+    setattr(rg, RG_ATTR, pol)
+    costs = mp._policy_costs(rg, model)
+    elems = 2 * 8 * 128
+    assert costs[:4] == [(None, elems * 2.0)] * 4
+    rows = (kvarn_fixed_tokens(1024), elems * 2.0)
+    slab = (4096, elems * kvarn_bytes_per_element(6))
+    assert costs[4:] == [rows, slab] * 3
+    assert all(isinstance(w, mp.FixedRows) for w, _ in costs[4:])
 
 
 def test_policy_layer_count_mismatch_falls_back():

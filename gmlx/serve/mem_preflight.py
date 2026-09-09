@@ -85,8 +85,13 @@ def _layer_windows(c, layers):
 
 class FixedRows(int):
     """Cost-entry window for a buffer allocated in full at the first
-    token (a recurrent layer's state): every row is charged however
-    short the context."""
+    token (a recurrent layer's state; kvarn's fp16 sink, horizon and
+    tail): every row is charged however short the context."""
+
+
+class StepTokens(int):
+    """Cost-entry window for storage allocated in slabs of this many
+    tokens (kvarn record codes): charged at the slab ceiling."""
 
 
 def span_tokens(window, tokens: int) -> int:
@@ -97,6 +102,9 @@ def span_tokens(window, tokens: int) -> int:
         return tokens
     if isinstance(window, FixedRows):
         return int(window)
+    if isinstance(window, StepTokens):
+        step = int(window)
+        return -(-tokens // step) * step
     return min(tokens, int(window))
 
 
@@ -233,6 +241,7 @@ def stack_geometry(model, stack):
 
 
 def kv_layer_costs(model, bytes_per_elem: float = 2.0, per_layer_bpe=None,
+                   per_layer_regions=None, per_layer_steps=None,
                    geometry=None):
     """Cost entries ``(window_or_None, bytes_per_token)`` for the model's
     cache stack, or None when the geometry cannot be read: one entry per
@@ -240,16 +249,25 @@ def kv_layer_costs(model, bytes_per_elem: float = 2.0, per_layer_bpe=None,
     entry per recurrent state. Admit-side throughout: MLA prices the
     compressed latent, a configured sliding window caps every layer it
     could apply to. ``geometry`` (from stack_geometry) replaces the
-    config's layer pattern; ``per_layer_bpe`` (from the KV policy) prices
-    each entry's storage exactly and must match the geometry length or it
-    is ignored."""
+    config's layer pattern. Per geometry entry: ``per_layer_bpe`` (from
+    the KV policy) prices the storage exactly; ``per_layer_steps`` marks
+    entries whose storage grows in slabs (StepTokens windows); and
+    ``per_layer_regions`` appends the fixed-size buffers a scheme holds
+    beside the per-token record -- kvarn's fp16 sink, horizon and tail
+    -- each as a FixedRows entry after the stack entries. All three must
+    match the geometry length or they are ignored."""
     c = _lm_config(model)
     if geometry is None:
         geometry = config_geometry(c)
     if not geometry:
         return None
-    if per_layer_bpe is not None and len(per_layer_bpe) != len(geometry):
+    n = len(geometry)
+    if per_layer_bpe is not None and len(per_layer_bpe) != n:
         per_layer_bpe = None
+    if per_layer_regions is not None and len(per_layer_regions) != n:
+        per_layer_regions = None
+    if per_layer_steps is not None and len(per_layer_steps) != n:
+        per_layer_steps = None
 
     def bpe(i):
         return per_layer_bpe[i] if per_layer_bpe is not None else bytes_per_elem
@@ -272,9 +290,16 @@ def kv_layer_costs(model, bytes_per_elem: float = 2.0, per_layer_bpe=None,
     costs = []
     for i, g in enumerate(geometry):
         if g.attn:
-            costs.append((g.window, elems * bpe(i)))
+            w = g.window
+            step = per_layer_steps[i] if per_layer_steps is not None else 0
+            if w is None and step:
+                w = StepTokens(step)
+            costs.append((w, elems * bpe(i)))
         if g.state:
             costs.append((FixedRows(1), float(g.state)))
+    for regions in per_layer_regions or ():
+        for rows, region_bpe in regions:
+            costs.append((FixedRows(rows), elems * region_bpe))
     return costs
 
 
@@ -283,7 +308,8 @@ def _policy_costs(rg, model):
     over the stack the policy was resolved on. Without a policy, or when
     the stack cannot be probed, pricing stays uniform fp16 over the
     config's geometry."""
-    from .kv_policy import _probe_stack, pricing_vector
+    from .kv_policy import (_probe_stack, pricing_vector, region_vector,
+                            step_vector)
 
     geometry = None
     try:
@@ -295,8 +321,11 @@ def _policy_costs(rg, model):
         geometry = config_geometry(_lm_config(model))
     if not geometry:
         return None
-    return kv_layer_costs(model, 2.0, per_layer_bpe=pricing_vector(
-        rg, len(geometry)), geometry=geometry)
+    n = len(geometry)
+    return kv_layer_costs(model, 2.0, per_layer_bpe=pricing_vector(rg, n),
+                          per_layer_regions=region_vector(rg, n),
+                          per_layer_steps=step_vector(rg, n),
+                          geometry=geometry)
 
 
 def prompt_kv_bytes(costs, tokens: int) -> float:

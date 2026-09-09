@@ -611,19 +611,38 @@ listed in [env-vars.md](env-vars.md#load-and-cache-keys).
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `kv_bits` | `null` | quantize the KV cache to 2, 3, 4, 6 or 8 bits |
-| `kv_group_size` | `64` | quantization group size |
-| `kv_quant_scheme` | `uniform` | the only accepted scheme |
-| `max_kv_size` | `null` | cap the KV cache at this many tokens |
-| `quantized_kv_start` | `0` | tokens kept unquantized at the start of the cache |
+| `kv_bits` | `null` | quantize the KV cache: 2, 3, 4, 6 or 8 bits affine; 2, 3, 4, 5, 6 or 8 under kvarn, default 6 |
+| `kv_group_size` | `64` | affine quantization group size |
+| `kv_quant_scheme` | `uniform` | `uniform` (affine) or `kvarn` (variance-normalized); any other value is refused at parse |
+| `kv_tail_tokens` | `1024` | under kvarn, the newest tokens kept fp16; a multiple of 128 |
+| `max_kv_size` | `null` | cap the request context budget at this many tokens |
+| `quantized_kv_start` | `0` | tokens kept unquantized at the start of the cache; not applied under kvarn |
 
 With `kv_bits` set, the policy is applied layer by layer at load and logged
 as one `[kv]` line: growing attention KV quantizes except the last layer of a
 deep stack, sliding windows and recurrent state stay fp16, and pooled caches
 are packed when stored. `/v1/models` reports the outcome per resident model as
-`kv_quant` with a verdict of `full`, `partial`, `dropped` or `error`.
-Speculative models quantize at batch size 1 and run fp16 KV while batched,
-reported as `verdict_batched`.
+`kv_quant` (`scheme`, `bits`, `group_size`, `layers_quantized`, `layers_fp16`,
+`verdict`, `verdict_batched`, and under kvarn `value_bits` and `tail_tokens`)
+with a verdict of `full`, `partial`, `dropped` or `error`. `error` means the
+load failed, for a width outside the scheme's list, a malformed
+`kv_tail_tokens`, or split key and value widths under `uniform`. Speculative
+models quantize at batch size 1 and run fp16 KV while batched, reported as
+`verdict_batched`.
+
+`kv_quant_scheme: kvarn` runs the same policy over the same stack. `kv_bits`
+picks the width and `kv_tail_tokens` the fp16 tail. Split key and value widths
+are set server-wide through the environment
+([env-vars.md](env-vars.md#load-and-cache-keys)). Which layers convert and
+which architectures decline is in
+[performance.md](performance.md#kv-cache-quantization); a model where no layer
+converts runs fp16 KV with one logged reason, never a silent affine fallback.
+On the server `max_kv_size` only caps the request context budget and builds no
+rotating window, so the window-plus-kvarn composition of `run` and `chat` has
+no server equivalent. A native-MTP drafter declines a mixed window-plus-kvarn
+stack whole at batch size 1. Admission counts a kvarn layer at its record
+width, rounded up to the 4096-token slab the cache grows in, plus the fp16
+sink and tail buffers, which are resident from the first token.
 
 `prefill_step_size` and `dtype` are not load keys, because the engine reads
 them per request after the load window has closed. Set them under

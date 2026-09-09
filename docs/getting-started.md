@@ -119,7 +119,7 @@ everyday context lengths.
 
 In a long session the cache can grow as large as the weights. The per-token
 arithmetic, the families that use less memory than it suggests, and the
-`--kv-bits` flag are in
+`--kv-bits` and `--kv-quant-scheme` flags are in
 [performance.md](performance.md#memory-and-the-kv-cache). A MoE model larger
 than RAM can still run by streaming its experts from disk; the fit calculation is
 different and [streaming.md](streaming.md) has it.

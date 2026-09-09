@@ -51,6 +51,21 @@ or that many unusable matches with zero hits. Either warning means prefix
 reuse is not working for that model. File an issue with the
 `/v1/cache/stats` snapshot.
 
+## Under kvarn KV
+
+Tier routing is the same as under fp16 KV, with one change: dense models use
+the exact tier, since the 16-token block tier cannot split kvarn's 128-token
+records. Checkpoint-shaped stacks (every hybrid-GDN and sliding-window family
+in the reuse table, when the attention head_dim is 128, 256 or 512) keep full
+checkpoint-tier reuse and store kvarn records. The attention payload is inline
+in the record rather than in pool blocks, so `GMLX_APC_CKPT_BUDGET_MB` bounds
+the tier's memory and `APC_NUM_BLOCKS` matters little. Entries and disk
+skeletons are keyed to the kvarn width and tail, so a config change or a
+restart that switches between stock and kvarn misses instead of reading a
+stale format. Cascade shared-prefix decode is off under kvarn and logs that
+once. Speculative rollback into a sealed record reopens it from its codes,
+one lossy round trip; rows still in the fp16 tail roll back exactly.
+
 ## Environment switches
 
 | Variable | Meaning |

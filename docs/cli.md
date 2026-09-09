@@ -350,12 +350,20 @@ Memory:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--max-kv-size N` | none | cap the KV cache; a rotating cache is used above it |
-| `--kv-bits N` | off | quantize the KV cache to 2, 3, 4, 6 or 8 bits; not with `--max-kv-size` |
-| `--kv-group-size N` | `64` | quantization group size |
-| `--quantized-kv-start N` | `0` | tokens kept unquantized at the start of the cache |
+| `--max-kv-size N` | none | cap the KV cache; a rotating cache is used above it. Under kvarn the window quantizes; under affine it is refused with `--kv-bits` |
+| `--kv-bits N` | off | quantize the KV cache: 2, 3, 4, 6 or 8 bits affine; 2, 3, 4, 5, 6 or 8 under kvarn, default 6 |
+| `--kv-group-size N` | `64` | affine quantization group size |
+| `--kv-quant-scheme {uniform,kvarn}` | `uniform` | `kvarn` is variance-normalized quantization, [performance.md](performance.md#kv-cache-quantization) |
+| `--kv-tail-tokens N` | `1024` | under kvarn, the newest N tokens stay fp16; a multiple of 128, `0` disables |
+| `--quantized-kv-start N` | `0` | tokens kept unquantized at the start of the cache; not applied under kvarn |
 | `--prefill-step-size N` | `2048`, `8192` when streaming | prefill chunk size |
 | `--dtype {auto,bfloat16,float16}` | `auto` | activation width; `auto` is float16 on M1 and M2 |
+
+Under kvarn the first 128 tokens and the newest `--kv-tail-tokens` tokens stay
+fp16. A `--max-kv-size` window must hold that sink, the tail and one 128-token
+record: 384 tokens at tail 0 and 1280 at the default tail, or `run` exits 2. A
+width outside the scheme's list exits 2. A model the scheme declines prints the
+reason and runs fp16 KV. The VLM media path always keeps fp16.
 
 Loading:
 
@@ -396,7 +404,11 @@ Speculative decoding, described in
 Speculation honors `--temp`, `--top-p`, `--top-k`, `--min-p` and
 `--system-prompt`. A flag it cannot honor, such as `--stop`, a penalty,
 `--logit-bias` or `--max-kv-size`, is dropped with a warning; pass
-`--no-mtp` to decode on the plain path, which honors every flag.
+`--no-mtp` to decode on the plain path, which honors every flag. `--kv-bits`
+and `--kv-quant-scheme kvarn` apply on the MTP path and quantize the same
+layers `serve` does; kvarn also declines a sliding-window stack under MTP and
+an architecture whose drafter reads the target KV. The `[kv]` line gives the
+reason.
 
 Streaming a model bigger than memory, described in
 [streaming.md](streaming.md):
@@ -495,7 +507,8 @@ Display and sessions:
 Loading, memory, multimodal, speculation and streaming take the same flags
 as [`gmlx run`](#gmlx-run): `--arch`, `--hf-source`, `--chat-template`,
 `--no-chat-template`, `--no-remap`, `--no-zero-copy`, `--adapter`,
-`--max-kv-size`, `--kv-bits`, `--kv-group-size`, `--quantized-kv-start`,
+`--max-kv-size`, `--kv-bits`, `--kv-group-size`, `--kv-quant-scheme`,
+`--kv-tail-tokens`, `--quantized-kv-start`,
 `--prefill-step-size`, `--dtype`, `--mmproj`, `--resize-shape`,
 `--speculative`, `--mtp`, `--no-speculative`, `--no-mtp`, `--draft-gguf`,
 `--native-mtp`, `--draft-block-size`, `--stochastic-mtp`, `--stream-experts`,

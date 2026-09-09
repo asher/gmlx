@@ -69,7 +69,8 @@ preset ([profiles](server-config.md#profiles)).
 `/retry` and `/undo` rewind the persistent KV cache to the turn's
 checkpoint, so nothing re-prefills, restore the pre-turn state including
 the system prompt and media markers, and work after a cancelled reply. A
-rotating cache that has wrapped its window cannot rewind; use `/reset` instead.
+rotating cache that has wrapped its window cannot rewind past the evicted
+boundary; the next message re-prefills, or use `/reset`.
 
 Every chat autosaves after each turn as JSON under
 `$XDG_DATA_HOME/gmlx/chats`, and `/reset` rotates to a fresh file so old

@@ -66,8 +66,8 @@ model unloads after `ttl_s` seconds without a request.
 
 KV cache. The model's stored attention state for the context, kept in RAM beside
 the weights. It grows with context length, which is why a model whose file
-barely fits leaves no memory for long conversations. `--kv-bits 8` compresses
-it.
+barely fits leaves no memory for long conversations. `--kv-bits 8` or
+`--kv-quant-scheme kvarn` compresses it.
 
 K-quant and IQ. The two families of GGUF quantization. K-quants such as
 `Q4_K_M` group weights with per-block scales; IQ quants such as `IQ2_M` use
