@@ -188,6 +188,7 @@ status` reports the process, `gmlx ps` the resident models and `gmlx serve
 | `~/.open-webui/` | Open WebUI's chat history |
 | your model directories | the GGUFs, where `pull` writes |
 
-To remove gmlx completely, run `gmlx service uninstall` if you installed the
-login item, delete the directories in the table and the models you pulled and
-uninstall the `gmlx` and `mlx-kquant` packages the way you installed them.
+To remove gmlx completely, first run `gmlx service uninstall` if you installed
+the login item. Then delete the directories in the table and the models you
+pulled, and uninstall the `gmlx` and `mlx-kquant` packages the way you
+installed them.

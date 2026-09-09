@@ -12,7 +12,7 @@ interpreter that has gmlx and mlx-kquant installed for all of them.
 ## CPU logic tests
 
 The CPU tier runs on synthetic inputs. No model is loaded and no GPU kernel is
-dispatched. It runs anywhere, including CI, and covers the remap tables,
+dispatched. It runs anywhere, including CI. Covered are the remap tables,
 config and tokenizer synthesis, the arch gate, weight transforms, preflight,
 the config loader, the family sampling profiles, discovery, the serving id
 layer, residency, the server patches and the chat client. For the chat client,

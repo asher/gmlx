@@ -17,12 +17,12 @@ from gmlx import load_model
 model, config, tokenizer = load_model("model.gguf")
 ```
 
-The return value is `(model, config, tokenizer)`, where the model is a stock
-mlx-lm `Model` with quantized leaves swapped for `KQuant*` modules, the config
-is the dict synthesized from the GGUF metadata and the tokenizer is built from
-the same metadata. Under `mlx_lm.generate` and `mlx_lm.stream_generate` the
-model runs normally, in code written for ordinary mlx-lm checkpoints. Sharded
-files, named `-00001-of-000NN.gguf`, are discovered from any shard's path.
+The return value is `(model, config, tokenizer)`. Here the model is a stock
+mlx-lm `Model` with quantized leaves swapped for `KQuant*` modules, while the
+config and tokenizer are both synthesized from the GGUF metadata. Under
+`mlx_lm.generate` and `mlx_lm.stream_generate` the model runs normally, in
+code written for ordinary mlx-lm checkpoints. Sharded files, named
+`-00001-of-000NN.gguf`, are discovered from any shard's path.
 
 | Kwarg | Default | Meaning |
 |---|---|---|
