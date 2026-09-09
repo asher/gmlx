@@ -23,7 +23,8 @@ norm outputs to bf16 between ops, so results agree to bf16 noise, not
 bit-exactly.
 
 Only the plain decode shape is fused (T == 1, no ssm mask, no per-row
-lengths). ``GMLX_KDA_FUSED=0`` disables the route.
+lengths); a caller may chain the step over a short block (glm5_next MTP
+verify) by passing ``max_t``. ``GMLX_KDA_FUSED=0`` disables the route.
 """
 
 import os
@@ -166,12 +167,12 @@ def _kernel():
     return _KERNEL
 
 
-def fused_ok(x, mask, cache) -> bool:
+def fused_ok(x, mask, cache, max_t: int = 1) -> bool:
     return (
         _ENABLED
         and cache is not None
         and mask is None
-        and x.shape[1] == 1
+        and x.shape[1] <= max_t
         and getattr(cache, "lengths", None) is None
         and mx.default_device() == mx.gpu
         and mx.metal.is_available()

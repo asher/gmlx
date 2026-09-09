@@ -25,6 +25,7 @@ from gmlx.models.glm5_next.mtp import (
     Glm5NextSpecLM,
 )
 
+import gmlx.models.glm5_next.model as glm5_model
 from test_glm5_next import _tiny_args
 
 PREFILL_CHUNK = 8
@@ -96,12 +97,17 @@ def _assert_states_close(a, b, atol):
 # prompt + 3 kept tokens ends at offsets 6, 12, 15, 17 (mod 4 = 2, 0, 3, 1),
 # and 9 / 12 / 14 also push total keys past the tiny n_select = 11 so the
 # verify forward itself runs with sparse selection engaged.
+@pytest.mark.parametrize("kda_fused_max_t", [8, 0])
 @pytest.mark.parametrize("prompt_len", [3, 9, 12, 14])
-def test_verify_rollback_matches_prefix_forward(prompt_len):
+def test_verify_rollback_matches_prefix_forward(
+        monkeypatch, prompt_len, kda_fused_max_t):
     """A verify block of 4 followed by rollback to accepted = 2 (3 kept)
     leaves every cache leaf (KDA conv tails + fp32 recurrent state, MLA
     latent KV, pool cache) equal to a clean forward over prompt + the 3
-    kept tokens, and the next decode step's logits agree."""
+    kept tokens, and the next decode step's logits agree. Both KDA verify
+    routes: the chained fused kernels (state kept per token) and the op
+    chain (sink replay)."""
+    monkeypatch.setattr(glm5_model, "_KDA_FUSED_MAX_T", kda_fused_max_t)
     lm = _build_lm()
     args = lm.args
     vocab = args.vocab_size

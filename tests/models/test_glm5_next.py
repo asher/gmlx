@@ -183,6 +183,34 @@ def _np_rms(x, eps):
     return x / np.sqrt((x ** 2).mean(-1, keepdims=True) + eps)
 
 
+@pytest.mark.parametrize("width", [1, 2, 3])
+def test_kda_chained_fused_step_matches_op_chain(monkeypatch, width):
+    """A cached step of `width` tokens through the chained fused kernels
+    (GMLX_GLM5_KDA_FUSED_MAX_T) matches the eager op chain: the layer
+    output, the conv tails and the recurrent state."""
+    args = _tiny_args()
+    model = _random_model(args, seed=7)
+    attn = model.layers[0].self_attn
+    mx.random.seed(21)
+    prompt = mx.random.normal((1, 5, args.hidden_size)) * 0.5
+    step = mx.random.normal((1, width, args.hidden_size)) * 0.5
+
+    def run(max_t):
+        monkeypatch.setattr(glm5_model, "_KDA_FUSED_MAX_T", max_t)
+        cache = glm5_model.ArraysCache(size=4)
+        attn(prompt, cache=cache)
+        y = attn(step, cache=cache)
+        mx.eval(y, *[cache[i] for i in range(4)])
+        return y, [cache[i] for i in range(4)]
+
+    y_ref, st_ref = run(0)
+    y_fused, st_fused = run(8)
+    assert float(mx.abs(y_fused - y_ref).max()) < 2e-2
+    for a, b in zip(st_fused, st_ref):
+        assert a.shape == b.shape
+        assert float(mx.abs(a.astype(mx.float32) - b.astype(mx.float32)).max()) < 2e-2
+
+
 def test_kda_layer_matches_naive_reference():
     # End-to-end KDA layer vs a step-loop reference implementing the
     # llama.cpp semantics: causal depthwise conv then silu, l2-normalized

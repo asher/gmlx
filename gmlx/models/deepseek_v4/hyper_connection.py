@@ -335,7 +335,8 @@ class HyperConnection(nn.Module):
                 and (self.fn.shape[1] // self.hc_mult) % 1024 == 0
             )
             self._m1_ok = ok
-        return ok and not self.training and x.shape[0] * x.shape[1] == 1
+        return (ok and not self.training
+                and x.shape[0] * x.shape[1] <= _HC_M1_MAX_ROWS)
 
     def _collapse_m1(self, x, mixes_raw, ssq, norm_weight):
         B, L, H, D = x.shape
@@ -474,11 +475,16 @@ def hc_expand(x, residual, post, comb):
 #   sinkhorn_collapse_m1: existing kernel + deferred rms factor + the
 #                      sublayer RMSNorm folded into the output pass
 #   expand_m1:         post/comb expand as one elementwise kernel
-# Gated by GMLX_HC_M1_FUSED (default on); any other width or device uses
-# the original path. fp reduction order differs from the eager front, so
+# Gated by GMLX_HC_M1_FUSED (default on) and GMLX_HC_M1_MAX_ROWS (default
+# 8: decode steps and MTP verify blocks); wider steps or another device
+# use the original path. fp reduction order differs from the eager front, so
 # outputs match to rounding, not bit-exactly.
 
 _HC_M1_ENABLED = os.environ.get("GMLX_HC_M1_FUSED", "1") != "0"
+# Widest step (rows = batch x tokens) that takes the fused route. The
+# kernels are one threadgroup per row and read fn in full per row, which
+# suits a decode step or an MTP verify block, not a prefill chunk.
+_HC_M1_MAX_ROWS = int(os.environ.get("GMLX_HC_M1_MAX_ROWS", "8"))
 
 
 def _make_hc_front_reduce_kernel():

@@ -86,6 +86,10 @@ _ABSORBED_PREFILL = os.environ.get("GMLX_GLM5_ABSORBED_PREFILL", "0") == "1"
 # chunk-sized L; an MTP verify (L = 2..8) through it cost 19 ms per
 # forward at 512 keys.
 _ABSORBED_MAX_L = int(os.environ.get("GMLX_GLM5_ABSORBED_MAX_L", "16"))
+# Widest step the KDA layers run as chained fused decode kernels (one
+# per token, the intermediate states kept for rollback). MTP verify
+# blocks are 2 tokens; wider steps take the op chain and the sink replay.
+_KDA_FUSED_MAX_T = int(os.environ.get("GMLX_GLM5_KDA_FUSED_MAX_T", "8"))
 _SPARSE_GATHER = os.environ.get("GMLX_GLM5_SPARSE_GATHER", "1") != "0"
 
 
@@ -764,10 +768,17 @@ class Glm5NextMLAAttention(nn.Module):
             # its own tail: no host sync, unlike the block route below.
             latent_d = _dequantized(latent_all, kv_cache)
             q_n = self.embed_q(q)
+            # A spill (a query handed pools its block-mates completed) needs
+            # fewer than select_k visible pools for the block's first query;
+            # past that depth no mask is needed, and a maskless single-query
+            # call keeps the fused hd512 attention route (an array mask
+            # sends it to the materialized fallback).
+            spill = (L > 1 and (offset + 1) // self._kpool
+                     < self.indexer.select_k)
             outs = []
             for j in range(L):
                 kv_g, gmask = self._sparse_decode_keys(
-                    latent_d, sel_pools[:, j], offset + j, B, spill=L > 1)
+                    latent_d, sel_pools[:, j], offset + j, B, spill=spill)
                 outs.append(scaled_dot_product_attention(
                     q_n[:, :, j:j + 1], kv_g, kv_g, cache=None,
                     scale=self.scale, mask=gmask))
@@ -904,26 +915,42 @@ class Glm5NextDeltaAttention(nn.Module):
                 "inputs": x, "mask": mask,
             })
 
-        if (self._can_kernel and gdn_sink is None
-                and kda_fused.fused_ok(x, mask, cache)):
-            # Plain decode step: one dispatch from the projections to the
-            # gated output (conv, norms, decay, delta rule, out-norm).
-            y, q_state, k_state, v_state, ssm_state = kda_fused.kda_decode_fused(
-                self.q_proj(x), self.k_proj(x), self.v_proj(x),
-                q_state, k_state, v_state,
-                self.q_conv.conv.weight, self.k_conv.conv.weight,
-                self.v_conv.conv.weight,
-                self.f_b_proj(self.f_a_proj(x)), self.dt_bias, self.a_folded,
-                self.b_proj(x), self.g_b_proj(self.g_a_proj(x)),
-                ssm_state, self.o_norm.weight,
-                lb=self.gate_lower_bound, scale=self.scale, l2_eps=1e-6,
-                norm_eps=self.o_norm.eps, num_heads=self.num_heads,
-                head_dim=self.head_dim, conv_kernel=self.conv_kernel)
-            cache[0] = q_state
-            cache[1] = k_state
-            cache[2] = v_state
-            cache[3] = ssm_state
+        if (self._can_kernel
+                and kda_fused.fused_ok(x, mask, cache, max_t=_KDA_FUSED_MAX_T)):
+            # Decode step, or an MTP verify block of T tokens: the
+            # projections run once at M = T, then one fused dispatch per
+            # token (conv, norms, decay, delta rule, out-norm) chained
+            # through the recurrent state. The state after every token is
+            # kept on the sink, so a rollback restores the accepted
+            # prefix's state directly instead of replaying the layer.
+            xq, xk, xv = self.q_proj(x), self.k_proj(x), self.v_proj(x)
+            a_raw = self.f_b_proj(self.f_a_proj(x))
+            b_logit = self.b_proj(x)
+            gate = self.g_b_proj(self.g_a_proj(x))
+            states = [(q_state, k_state, v_state, ssm_state)]
+            ys = []
+            for t in range(T):
+                sl = slice(t, t + 1)
+                q_state, k_state, v_state, ssm_state = states[-1]
+                y, q_state, k_state, v_state, ssm_state = kda_fused.kda_decode_fused(
+                    xq[:, sl], xk[:, sl], xv[:, sl],
+                    q_state, k_state, v_state,
+                    self.q_conv.conv.weight, self.k_conv.conv.weight,
+                    self.v_conv.conv.weight,
+                    a_raw[:, sl], self.dt_bias, self.a_folded,
+                    b_logit[:, sl], gate[:, sl],
+                    ssm_state, self.o_norm.weight,
+                    lb=self.gate_lower_bound, scale=self.scale, l2_eps=1e-6,
+                    norm_eps=self.o_norm.eps, num_heads=self.num_heads,
+                    head_dim=self.head_dim, conv_kernel=self.conv_kernel)
+                ys.append(y)
+                states.append((q_state, k_state, v_state, ssm_state))
+            if gdn_sink is not None:
+                gdn_sink[-1]["states"] = states
+            for i, v in enumerate(states[-1]):
+                cache[i] = v
             cache.advance(T)
+            y = ys[0] if T == 1 else mx.concatenate(ys, axis=1)
             return self.o_proj(y.astype(dtype))
 
         q_conv, q_state = self.q_conv(self.q_proj(x), q_state, mask, lengths)
@@ -977,11 +1004,18 @@ class Glm5NextDeltaAttention(nn.Module):
 def rollback_verify_sink(sink: list, n: int) -> None:
     """Rewind the KDA caches after an MTP verify forward over S positions
     to the state after its first ``n`` (the accepted prefix): restore the
-    recorded pre-verify conv tails + recurrent state, then replay the layer
-    over the accepted prefix. O(n <= block) per layer; the KV/pool leaves
-    are trimmed by the caller."""
+    state kept after the n-th verify token (fused route), or restore the
+    recorded pre-verify conv tails + recurrent state and replay the layer
+    over the accepted prefix (op chain). O(n <= block) per layer; the
+    KV/pool leaves are trimmed by the caller."""
     for e in sink:
         cache = e["cache"]
+        states = e.get("states")
+        if states is not None:
+            # Fused route: the state after each verify token was kept.
+            for i, v in enumerate(states[n]):
+                cache[i] = v
+            continue
         for i, v in enumerate(e["pre"]):
             cache[i] = v
         mask = e["mask"]

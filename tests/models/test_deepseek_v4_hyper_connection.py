@@ -121,3 +121,62 @@ def test_hc_expand_collapse_matches_pair(dtype, length):
     )
     assert mx.abs(post2 - ref_post2).max().item() < 3e-3
     assert mx.abs(comb2 - ref_comb2).max().item() < 3e-3
+
+
+@pytest.mark.parametrize("length", [2, 5, 8])
+def test_fused_front_matches_reference_over_short_block(length):
+    """The fused front (front_reduce + sinkhorn collapse with the folded
+    RMSNorm) applies to steps up to GMLX_HC_M1_MAX_ROWS rows, not only
+    the single decode row: an MTP verify block matches the eager module
+    plus the norm, and the expand-fused front matches expand + front."""
+    import gmlx.models.deepseek_v4.hyper_connection as hcm
+
+    # The fused front needs a hidden size that is a multiple of 1024.
+    cfg = _Cfg()
+    cfg.hidden_size = 1024
+    mx.random.seed(31)
+    hc = HyperConnection(cfg)
+    hc.eval()  # the fused route is inference-only; modules start in training mode
+    mix_rows = (2 + cfg.hc_mult) * cfg.hc_mult
+    hc.fn = (
+        mx.random.normal((mix_rows, cfg.hc_mult * cfg.hidden_size)) * 0.02
+    ).astype(mx.float32)
+    hc.base = (mx.random.normal((mix_rows,)) * 0.5).astype(mx.float32)
+    hc.scale = mx.array([1.1, 0.9, 1.3], dtype=mx.float32)
+    w = (mx.random.normal((cfg.hidden_size,)) * 0.1 + 1.0).astype(mx.bfloat16)
+    x = (
+        mx.random.normal((1, length, cfg.hc_mult, cfg.hidden_size)) * 1.7
+    ).astype(mx.bfloat16)
+    if not hc.m1_fused_ok(x):
+        pytest.skip("fused hyper-connection front unavailable here")
+    assert not hc.m1_fused_ok(
+        mx.zeros((1, hcm._HC_M1_MAX_ROWS + 1, cfg.hc_mult, cfg.hidden_size),
+                 dtype=mx.bfloat16))
+
+    normed, post, comb = hc.fused_m1(x, w)
+    ref_collapsed, ref_post, ref_comb = _reference(
+        x, hc.fn, hc.base, hc.scale, cfg)
+    ref_normed = mx.fast.rms_norm(ref_collapsed, w, cfg.rms_norm_eps)
+    mx.eval(normed, post, comb, ref_normed, ref_post, ref_comb)
+    assert normed.shape == ref_normed.shape == (1, length, cfg.hidden_size)
+    assert mx.abs(normed.astype(mx.float32)
+                  - ref_normed.astype(mx.float32)).max().item() < 1e-1
+    assert mx.abs(post - ref_post).max().item() < 3e-3
+    assert mx.abs(comb - ref_comb).max().item() < 3e-3
+
+    x_sub = (mx.random.normal((1, length, cfg.hidden_size)) * 1.7).astype(
+        mx.bfloat16)
+    h, (normed2, post2, comb2) = hc.fused_m1_expand(
+        (x_sub, x, post, comb), w)
+    # The kernel is bit-identical to the M=1 eager expand (one fp32 pass,
+    # one cast); the generic hc_expand rounds per op and sits a bf16 ulp
+    # or two away even at one row.
+    ref_h = hcm.hc_expand_m1(x_sub, x, post, comb)
+    ref_normed2, ref_post2, ref_comb2 = hc.fused_m1(ref_h, w)
+    mx.eval(h, normed2, post2, comb2, ref_h, ref_normed2, ref_post2,
+            ref_comb2)
+    assert mx.array_equal(h, ref_h)
+    assert mx.abs(normed2.astype(mx.float32)
+                  - ref_normed2.astype(mx.float32)).max().item() < 1e-1
+    assert mx.abs(post2 - ref_post2).max().item() < 3e-3
+    assert mx.abs(comb2 - ref_comb2).max().item() < 3e-3

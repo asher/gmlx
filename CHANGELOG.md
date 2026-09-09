@@ -40,6 +40,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   layers in the absorbed form like a decode step; the naive route expanded
   the latent into per-head K and V over every visible key and cost 19 ms
   per verify at 512 keys. `GMLX_GLM5_ABSORBED_MAX_L` sets the band.
+- GLM-5.3-Flash MTP verify forwards run the KDA layers as chained fused
+  decode kernels (one per verify token) instead of the op chain, and a
+  rollback restores the kept per-token state instead of replaying the
+  layer. `GMLX_GLM5_KDA_FUSED_MAX_T` sets the band.
+- Hyper-connected models run the fused per-row hyper-connection kernels
+  for steps up to 8 rows (MTP verify blocks), not only the single decode
+  row. `GMLX_HC_M1_MAX_ROWS` sets the band.
 - `quantized_kv_start` as a per-model server load key is applied to that
   model; upstream read it once from the process environment at server
   start.
