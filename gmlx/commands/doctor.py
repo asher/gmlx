@@ -58,7 +58,12 @@ def check_kernels() -> dict:
         return _check("kernels", "WARN",
                       "missing " + ", ".join(missing)
                       + " (falls back to MLX's default SDPA)")
-    return _check("kernels", "PASS", "sdpa_vector, sdpa_decode_gqa")
+    if not hasattr(mlx_kquant, "sdpa_decode_gqa_kvarn"):
+        return _check("kernels", "WARN",
+                      "missing sdpa_decode_gqa_kvarn "
+                      "(--kv-quant-scheme kvarn unavailable)")
+    return _check("kernels", "PASS",
+                  "sdpa_vector, sdpa_decode_gqa, sdpa_decode_gqa_kvarn")
 
 
 def check_config(config_path):

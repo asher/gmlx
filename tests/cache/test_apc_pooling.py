@@ -460,6 +460,39 @@ def test_pooled_prompt_kv_quant_arms_b1(monkeypatch, capsys):
     assert "[kv] kv_bits=8 group=32" in out and "pooled at rest" in out
 
 
+def test_pooled_prompt_kv_quant_kvarn_follows_the_shape_decline(
+        monkeypatch, capsys, caplog):
+    # The load verdict declines kvarn by model shape (MLA, head dim);
+    # the pooled path must not pack under a kvarn label what it declined.
+    import gmlx.cache.kvarn_cache as kc
+
+    ppb = _install_on_fake(monkeypatch)
+    monkeypatch.setattr(kc, "kvarn_unsupported",
+                        lambda model: "MLA latent KV cache")
+    m = _V4ish()
+    with caplog.at_level("WARNING", logger="gmlx.cache.apc_pooling"):
+        ppb(model=m, input_ids=[[1]], kv_bits=6, kv_group_size=32,
+            kv_quant_scheme="kvarn")
+    assert not m.comp.is_quantized
+    assert "[kv]" not in capsys.readouterr().out
+    assert "MLA latent KV cache" in caplog.text
+
+
+def test_pooled_prompt_kv_quant_kvarn_packs_pools_at_the_group(
+        monkeypatch, capsys):
+    import gmlx.cache.kvarn_cache as kc
+
+    ppb = _install_on_fake(monkeypatch)
+    monkeypatch.setattr(kc, "kvarn_unsupported", lambda model: None)
+    m = _V4ish()
+    ppb(model=m, input_ids=[[1]], kv_bits=6, kv_group_size=32,
+        kv_quant_scheme="kvarn")
+    assert m.comp.is_quantized and m.comp._qgroup == 32
+    assert not m.idx.is_quantized
+    out = capsys.readouterr().out
+    assert "[kv] kvarn6" in out and "pooled at rest" in out
+
+
 def test_pooled_prompt_kv_quant_batch_and_mtp_stay_fp16(monkeypatch):
     ppb = _install_on_fake(monkeypatch)
     m = _V4ish()

@@ -193,3 +193,43 @@ def _no_live_server(monkeypatch):
     import gmlx.commands.launch as _launch
     monkeypatch.setattr(_launch, "_server_ready",
                         lambda base_url, api_key=None: False)
+
+
+def pytest_runtest_setup(item):
+    if item.get_closest_marker("needs_kvarn_ops") is None:
+        return
+    from gmlx.cache import kvarn_sdpa
+
+    reason = kvarn_sdpa._probe()
+    if reason:
+        pytest.skip(f"kvarn ops unavailable: {reason}")
+
+
+@pytest.fixture
+def kvarn_ops_ok(monkeypatch):
+    """kvarn eligibility without the Metal kernels: the resolver reads the
+    ops probe, and the env knobs start clear."""
+    from gmlx.cache import kvarn_sdpa
+
+    monkeypatch.setattr(kvarn_sdpa, "_probe_result", (None,))
+    for k in ("GMLX_KVARN", "GMLX_KVARN_BITS", "KV_BITS", "KV_TAIL_TOKENS",
+              "KV_QUANT_SCHEME"):
+        monkeypatch.delenv(k, raising=False)
+
+
+@pytest.fixture
+def kvarn_apc_arms(monkeypatch):
+    """install_kvarn_apc for one test: the mlx_vlm.apc arms it rebinds are
+    pinned first, so the wrap does not outlive the test."""
+    apc = pytest.importorskip("mlx_vlm.apc")
+    from gmlx.cache import kvarn_apc
+
+    for name in ("_cache_entry_supports_exact_apc", "_merge_exact_cache_entries",
+                 "_clone_cache_entry_for_apc", "_safetensors_dtype_info",
+                 "model_apc_mode"):
+        monkeypatch.setattr(apc, name, getattr(apc, name))
+    for name in ("_snapshot_exact_cache_entry", "_load_exact_cache_entry"):
+        monkeypatch.setattr(apc.DiskBlockStore, name,
+                            getattr(apc.DiskBlockStore, name))
+    monkeypatch.setattr(apc, kvarn_apc._FLAG, False, raising=False)
+    kvarn_apc.install_kvarn_apc()

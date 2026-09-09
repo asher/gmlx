@@ -88,3 +88,67 @@ def test_family_routing_pinned(family, factory, mode, ckpt, tags):
     got_tags = tuple(got_tags) if got_tags is not None else None
     assert got_tags == tags, (
         f"{family}: layout tags moved to {got_tags} (pinned {tags})")
+
+
+KVARN_TAG = "kvarn:6:6:1024"
+
+
+def _kvarn_gdn():
+    from gmlx.cache.kvarn_cache import KVarNKVCache
+    out = []
+    for kind in ("kvarn", "arr", "arr", "kvarn", "arr"):
+        out.append(KVarNKVCache() if kind == "kvarn"
+                   else _cache.ArraysCache(size=2))
+    return out
+
+
+def _kvarn_swa():
+    from gmlx.cache.kvarn_cache import KVarNKVCache
+    out = []
+    for kind in ("kvarn", "rot", "rot", "kvarn", "rot"):
+        out.append(KVarNKVCache() if kind == "kvarn"
+                   else _cache.RotatingKVCache(max_size=32))
+    return out
+
+
+def _kvarn_three_kind():
+    from gmlx.cache.kvarn_cache import KVarNKVCache
+    return [KVarNKVCache(), _cache.RotatingKVCache(max_size=32),
+            _cache.ArraysCache(size=2), KVarNKVCache(),
+            _cache.ArraysCache(size=2)]
+
+
+# The three-kind (plamo2-shaped) row is validated by these unit rows
+# only -- stage-6 live validation runs kvarn+arr and kvarn+rot, so the
+# first live plamo2-shaped model is the one that finds anything the unit
+# rows missed.
+KVARN_FAMILIES = [
+    ("kvarn-gdn", _kvarn_gdn, True,
+     (KVARN_TAG, "arr", "arr", KVARN_TAG, "arr")),
+    ("kvarn-swa", _kvarn_swa, True,
+     (KVARN_TAG, "rot:32:0", "rot:32:0", KVARN_TAG, "rot:32:0")),
+    ("kvarn-gdn-swa", _kvarn_three_kind, True,
+     (KVARN_TAG, "rot:32:0", "arr", KVARN_TAG, "arr")),
+]
+
+
+@pytest.mark.parametrize(
+    "family,factory,ckpt,tags",
+    KVARN_FAMILIES, ids=[f[0] for f in KVARN_FAMILIES])
+def test_kvarn_family_routing_pinned(kvarn_apc_arms, family, factory, ckpt, tags):
+    # Production truth needs the kvarn arms installed (serve installs
+    # them at boot): the model_apc_mode wrap resolves kvarn stacks to
+    # "exact"; bare upstream would say None.
+
+    from mlx_vlm import apc
+
+    model = SimpleNamespace(make_cache=factory)
+    got_mode = apc.model_apc_mode(model)
+    assert got_mode == "exact", (
+        f"{family}: model_apc_mode moved to {got_mode!r}")
+    stack = factory()
+    assert ckpt_supported(stack) == ckpt, (
+        f"{family}: ckpt_supported flipped to {not ckpt}")
+    got_tags = tuple(ckpt_layout(stack) or ()) or None
+    assert got_tags == tags, (
+        f"{family}: layout tags moved to {got_tags} (pinned {tags})")

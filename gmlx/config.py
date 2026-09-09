@@ -42,6 +42,7 @@ from typing import Any
 import yaml
 
 import gmlx.gen.profiles as _family_profiles
+from .cache.kv_policy import SCHEMES as KV_QUANT_SCHEMES
 from .envflags import env_bool
 
 # Canonical key sets / env mappings
@@ -63,6 +64,7 @@ LOAD_ENV = {
     "kv_bits": "KV_BITS",
     "kv_group_size": "KV_GROUP_SIZE",
     "kv_quant_scheme": "KV_QUANT_SCHEME",
+    "kv_tail_tokens": "KV_TAIL_TOKENS",
     "max_kv_size": "MAX_KV_SIZE",
     "quantized_kv_start": "QUANTIZED_KV_START",
 }
@@ -74,9 +76,10 @@ LOAD_ENV = {
 # nothing said about it.
 SERVER_DTYPES = ("auto", "bfloat16", "bf16", "float16", "fp16")
 
-# Accepted `load.kv_quant_scheme` values. Only uniform affine is
-# certified. Other values are refused at parse time.
-KV_QUANT_SCHEMES = ("uniform",)
+# Accepted `load.kv_quant_scheme` values come from the policy resolver
+# that implements them (KV_QUANT_SCHEMES, imported above). Other values
+# are refused at parse time: an unchecked one reaches mlx-vlm and builds
+# caches no gmlx path can read.
 
 # APC prompt-cache (+ SSD disk tier) key -> env var (mlx-vlm apc.from_env). The disk
 # sub-block maps to APC_DISK_*; the namespace defaults to the model path downstream.
@@ -936,13 +939,15 @@ def resolve_model(
         reasoning_effort = ov["reasoning_effort"]
 
     scheme = load.get("kv_quant_scheme")
-    if (scheme is not None
-            and str(scheme).strip().lower() not in KV_QUANT_SCHEMES):
-        # An unchecked value reaches mlx-vlm and builds caches no
-        # gmlx path can read.
-        raise ConfigError(
-            f"load.kv_quant_scheme must be one of "
-            f"{', '.join(KV_QUANT_SCHEMES)} (got {scheme!r})")
+    if scheme is not None:
+        norm = str(scheme).strip().lower()
+        if norm not in KV_QUANT_SCHEMES:
+            # An unchecked value reaches mlx-vlm and builds caches no
+            # gmlx path can read.
+            raise ConfigError(
+                f"load.kv_quant_scheme must be one of "
+                f"{', '.join(KV_QUANT_SCHEMES)} (got {scheme!r})")
+        load["kv_quant_scheme"] = norm
 
     ttl_s = model.ttl_s if model.ttl_s is not None else cfg.defaults.ttl_s
     return ResolvedModel(

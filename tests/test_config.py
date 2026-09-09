@@ -1999,6 +1999,17 @@ def test_kv_quant_scheme_uniform_accepted():
     assert r.load["kv_quant_scheme"] == "uniform"
 
 
+def test_kv_quant_scheme_normalized():
+    # Downstream readers compare the scheme by identity; a mixed-case
+    # config value must not reach them as written.
+    doc = _doc()
+    doc["models"]["m-bare"]["overrides"] = {
+        "load": {"kv_bits": 6, "kv_quant_scheme": " KVarN "}}
+    cfg = build_config(doc)
+    r = resolve_model("m-bare", cfg)
+    assert r.load["kv_quant_scheme"] == "kvarn"
+
+
 def test_kv_quant_scheme_turbo_refused():
     # An unchecked value reaches mlx-vlm and builds caches no gmlx
     # path can read.

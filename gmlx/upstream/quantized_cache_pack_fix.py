@@ -43,13 +43,15 @@ def _packed_words(dim: int, group_size: int, bits: int, dtype) -> int:
     return got
 
 
-def _seed(cache, keys, values) -> None:
+def _seed(cache, keys, values, rows_used: int) -> None:
     import mlx.core as mx
 
     B, n_kv_heads, num_steps, k_dim = keys.shape
     v_dim = values.shape[-1]
     step = cache.step
     rows = (step + num_steps - 1) // step * step
+    if rows < rows_used + num_steps:
+        return
     shape = (B, n_kv_heads, rows)
 
     def alloc(dim):
@@ -63,14 +65,14 @@ def _seed(cache, keys, values) -> None:
     cache.keys, cache.values = alloc(k_dim), alloc(v_dim)
 
 
-def _wrap(cls):
+def _wrap(cls, offset_attr: str):
     stock = cls.update_and_fetch
     if getattr(stock, _INSTALLED, False):
         return False
 
     def update_and_fetch(self, keys, values):
         if self.keys is None:
-            _seed(self, keys, values)
+            _seed(self, keys, values, int(getattr(self, offset_attr, 0) or 0))
         return stock(self, keys, values)
 
     setattr(update_and_fetch, _INSTALLED, True)
@@ -85,13 +87,13 @@ def install_quantized_cache_pack_fix() -> bool:
         return False
     from mlx_vlm.models.cache import BatchQuantizedKVCache, QuantizedKVCache
 
-    done = _wrap(QuantizedKVCache)
-    done |= _wrap(BatchQuantizedKVCache)
+    done = _wrap(QuantizedKVCache, "offset")
+    done |= _wrap(BatchQuantizedKVCache, "_idx")
     try:
         from mlx_lm.models.cache import QuantizedKVCache as LmQuantizedKVCache
 
         if LmQuantizedKVCache is not QuantizedKVCache:
-            done |= _wrap(LmQuantizedKVCache)
+            done |= _wrap(LmQuantizedKVCache, "offset")
     except ImportError:
         pass
     return done

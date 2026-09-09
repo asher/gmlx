@@ -165,6 +165,26 @@ def test_warm_tokens_probes_and_releases():
     assert est._warm_tokens(None, [1, 2, 3], 0) == (0, None)
 
 
+def test_warm_tokens_salts_the_exact_probe():
+    seen = []
+
+    class _Mgr:
+        _exact_extra_salt = 5
+
+        def lookup_prefix(self, ids, extra_hash=0):
+            return [], 0
+
+        def release(self, blocks):
+            pass
+
+        def find_exact_prefix(self, ids, extra_hash=0):
+            seen.append(extra_hash)
+            return (0xabc, 700) if extra_hash == 3 ^ 5 else None
+
+    assert est._warm_tokens(_Mgr(), list(range(1000)), 3) == (700, "exact")
+    assert seen == [3 ^ 5]
+
+
 def test_estimate_validation_and_non_resident():
     serving.register_resolved_models(build_config(
         {"models": {"q": {"path": "/abs/q.gguf"}}}))
@@ -488,6 +508,53 @@ def test_ckpt_peek_reports_deepest_pinned_record_without_assembly():
     model = SimpleNamespace(_kq_apc_ckpt_layout=("kv", "arr"))
     assert est._warm_tokens(man, ids, 0, model) == (64, "ckpt")
     assert est._warm_tokens(man, ids, 0, None) == (16, "block")
+
+
+def test_ckpt_estimate_probe_signs_with_the_kvarn_layout():
+    """Live kvarn requests sign records with the converted stack's tags;
+    the estimate holds no stack, so its probe retags the stock probe from
+    the stamped policy. An unretagged probe misses every kvarn record."""
+    import threading
+    from collections import OrderedDict
+
+    from gmlx.cache.snapshot import _CkptRecord
+
+    class _Man:
+        block_size = 16
+        lock = threading.RLock()
+        _kq_ckpt_gen = 0
+        lookup_prefix = staticmethod(lambda ids, extra_hash=0: ([], 0))
+        release = staticmethod(lambda blocks: None)
+        find_exact_prefix = staticmethod(lambda ids, extra_hash=0: None)
+
+    man = _Man()
+    ids = list(range(100, 200))
+    live = ("kvarn:6:5:1024", "kvarn:6:5:1024", "kv", "arr")
+    rec = _CkptRecord(ids=tuple(ids[:64]), extra_hash=0, p=64,
+                      kind="boundary", layout=live)
+    man._kq_ckpt_records = OrderedDict({(rec.ids, 0): rec})
+
+    plan = lambda q: SimpleNamespace(quantize=q)  # noqa: E731
+    single = SimpleNamespace(
+        scheme="kvarn", verdict="partial", bits=6, value_bits=5,
+        tail_tokens=1024,
+        per_layer=(plan(True), plan(True), plan(False), plan(False)))
+    stock = ("kv", "kv", "kv", "arr")
+    kvarn = SimpleNamespace(_kq_apc_ckpt_layout=stock,
+                            _gmlx_kv_policy=SimpleNamespace(single=single))
+    assert est._warm_tokens(man, ids, 0, kvarn) == (64, "ckpt")
+
+    affine = SimpleNamespace(
+        _kq_apc_ckpt_layout=stock,
+        _gmlx_kv_policy=SimpleNamespace(single=SimpleNamespace(
+            scheme="uniform", verdict="full", bits=8, value_bits=None,
+            tail_tokens=None, per_layer=(plan(True),) * 4)))
+    assert est._warm_tokens(man, ids, 0, affine) == (0, None)   # other layout
+    rec_kv = _CkptRecord(ids=tuple(ids[:48]), extra_hash=0, p=48,
+                         kind="boundary", layout=stock)
+    man._kq_ckpt_records[(rec_kv.ids, 0)] = rec_kv
+    assert est._warm_tokens(man, ids, 0, affine) == (48, "ckpt")
+    assert est._warm_tokens(man, ids, 0, kvarn) == (64, "ckpt")
 
 
 def test_exact_peek_reads_the_in_memory_exact_tier():
