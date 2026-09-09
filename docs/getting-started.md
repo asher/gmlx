@@ -1,7 +1,7 @@
 # Getting started
 
 This guide takes five steps in order. You install gmlx, generate once, pick
-a model that suits your Mac, set up the server, and connect a client to it.
+a model that suits your Mac, set up the server and connect a client to it.
 Each step ends in a usable result. Stop at any step once your needs are
 met.
 
@@ -13,7 +13,8 @@ met.
 - [Talk to it over HTTP](#talk-to-it-over-http)
 - [Connect a client](#connect-a-client)
 - [Chat in your browser](#chat-in-your-browser)
-- [Voice, login items and what comes next](#voice-login-items-and-what-comes-next)
+- [Voice, login items and what comes
+  next](#voice-login-items-and-what-comes-next)
 
 ## What you need
 
@@ -24,11 +25,12 @@ met.
   enough. Recent Xcode fetches the toolchain with
   `xcodebuild -downloadComponent MetalToolchain`.
 - Python 3.11 or newer. Installing with uv or pipx fetches one for you.
-- Disk space for models, and [Homebrew](https://brew.sh) if you want voice.
+- Disk space for models, plus [Homebrew](https://brew.sh) if you want voice.
 
-A running model needs memory for the weights, roughly the GGUF file size,
-and for the KV cache, which grows with the length of the conversation. [Pick a model for your Mac](#pick-a-model-for-your-mac) has
-suggestions per machine size.
+A running model needs memory for the weights, roughly the GGUF file size, and
+for the KV cache, which grows with the length of the conversation. [Pick a
+model for your Mac](#pick-a-model-for-your-mac) has suggestions per machine
+size.
 
 ## Install
 
@@ -37,16 +39,15 @@ uv tool install "gmlx[all]"      # or: pip install "gmlx[all]"
 brew install ffmpeg              # voice and non-wav audio only
 ```
 
-uv puts the `gmlx` command on your PATH in an isolated environment and
-fetches a suitable Python for it. Install [uv](https://docs.astral.sh/uv/)
-with `brew install uv`. pipx behaves the same way. Upgrade later with
-`uv tool upgrade gmlx`. The pip form installs into a venv you manage, and
-the command then exists only while that venv is active. A
-`command not found: gmlx` in a new terminal usually means the venv is not
-active.
+uv puts the `gmlx` command on your PATH in an isolated environment and fetches
+a suitable Python for it. Install [uv](https://docs.astral.sh/uv/) with `brew
+install uv`. pipx behaves the same way. Upgrade later with `uv tool upgrade
+gmlx`. The pip form installs into a venv you manage, where the command exists
+only while that venv is active. A `command not found: gmlx` in a new terminal
+usually means the venv is not active.
 
-`[all]` turns on all optional features. The core install already serves,
-loads vision models, embeds and runs the menu bar. The extras are few:
+`[all]` turns on all optional features. The core install already serves, loads
+vision models, embeds and runs the menu bar, which leaves few extras:
 
 | Extra | Adds |
 |-------|------|
@@ -88,9 +89,9 @@ gmlx pull hf:unsloth/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q4_K_M.gguf --to .
 gmlx run Qwen3-0.6B-Q4_K_M.gguf --prompt "Explain entropy in one paragraph."
 ```
 
-You see a one-line load summary, the reply, and a closing line with prompt
-and generation speed in tokens per second. This model is 0.4 GB and exists
-to verify the install, not for its quality.
+You see a one-line load summary, the reply and a closing line with prompt and
+generation speed in tokens per second. This model is 0.4 GB and exists to
+verify the install, not for its quality.
 
 The same file also runs as an interactive chat:
 
@@ -98,15 +99,14 @@ The same file also runs as an interactive chat:
 gmlx chat Qwen3-0.6B-Q4_K_M.gguf
 ```
 
-The conversation keeps its KV cache between turns, and each turn reads only
-the new message. Type `/help` inside for the commands. Esc cancels a reply
-and `/exit` quits. [chat.md](chat.md) describes the commands.
+The conversation keeps its KV cache between turns. Each turn reads only the
+new message. Type `/help` inside for the commands. Esc cancels a reply and
+`/exit` quits. [chat.md](chat.md) describes the commands.
 
-Sampling defaults come from the model family's card, and a bare `run` or
-`chat` already uses the settings the model's authors recommend. Intents
-such as `@coding` and `@creative` switch to the card's other operating
-points on any model, as in `gmlx run model.gguf@creative`. `gmlx profiles`
-prints the table.
+Sampling defaults come from the model family's card. A bare `run` or `chat`
+already uses the settings the model's authors recommend. Intents such as
+`@coding` and `@creative` switch to the card's other operating points on any
+model, as in `gmlx run model.gguf@creative`. `gmlx profiles` prints the table.
 
 ## Pick a model for your Mac
 
@@ -123,7 +123,7 @@ everyday context lengths.
 | 96 GB and up | Qwen3.6-35B-A3B, Q6_K, or gpt-oss-120b, 63 GB | MoE models: big-model quality at small-model decode speed |
 
 In a long session the cache can grow as large as the weights. The per-token
-arithmetic, the families that use less memory than it suggests, and the
+arithmetic, the families that use less memory than it suggests and the
 `--kv-bits` and `--kv-quant-scheme` flags are in
 [performance.md](performance.md#memory-and-the-kv-cache). A MoE model larger
 than RAM can still run by streaming its experts from disk.
@@ -136,23 +136,21 @@ gmlx validate hf:unsloth/Qwen3.6-27B-GGUF          # lists every quant with a fi
 gmlx pull hf:unsloth/Qwen3.6-27B-GGUF/Qwen3.6-27B-Q6_K.gguf --to ~/models
 ```
 
-`validate` downloads only the header, a few megabytes, and names the codec
-when a file cannot load. `--to` is needed
-only until a config exists. After that a bare `pull` writes files to your
-model directory and registers them. Set `HF_TOKEN` for gated repositories.
-An existing LM Studio model library serves as-is.
-[migrating.md](migrating.md) lists what transfers from llama.cpp and
+`validate` downloads only the header, a few megabytes. It names the codec when
+a file cannot load. `--to` is needed only until a config exists. After that a
+bare `pull` writes files to your model directory and registers them. Set
+`HF_TOKEN` for gated repositories. An existing LM Studio model library serves
+as-is. [migrating.md](migrating.md) lists what transfers from llama.cpp and
 Ollama.
 
 ## Set up the server
 
 `gmlx init` writes the config that all other commands read. Run with no
 arguments, it opens a wizard. The wizard scans your model folders, lets you
-rename ids and set a default, offers the on-disk prompt cache and the
-speech, embedding and rerank services, and asks about idle unload. It
-previews the file before writing it to `~/.config/gmlx/gmlx.yaml`. Each
-choice has a flag, and `gmlx init --models-dir ~/models` writes the config
-with no questions.
+rename ids and set a default, offers the on-disk prompt cache and the speech,
+embedding and rerank services and asks about idle unload. It previews the file
+before writing it to `~/.config/gmlx/gmlx.yaml`. Each choice has a flag. `gmlx
+init --models-dir ~/models` writes the config with no questions.
 
 ```sh
 gmlx init
@@ -163,12 +161,12 @@ gmlx logs -n 20 -f    # follow the log
 gmlx stop
 ```
 
-The file has a `server` block, a `models` block with an entry for each
-model, and optional `profiles`, `rules` and `aliases`. Optional keys appear
-as commented hints with their defaults.
-[server-config.md](server-config.md) is the reference. `serve` runs in the
-background so you keep your shell. On a macOS desktop it also starts a small
-[menu bar app](menubar.md) showing what is resident.
+The file has a `server` block, a `models` block with an entry for each model
+and optional `profiles`, `rules` and `aliases`. Optional keys appear as
+commented hints with their defaults. [server-config.md](server-config.md) is
+the reference. `serve` runs in the background so you keep your shell. On a
+macOS desktop it also starts a small [menu bar app](menubar.md) showing what
+is resident.
 
 ## Talk to it over HTTP
 
@@ -183,9 +181,9 @@ curl localhost:8080/v1/chat/completions -d '{
 }'
 ```
 
-Add `"stream": true` for server-sent events, and `@coding` or another intent
-to the id to switch sampling per request. From Python the standard OpenAI
-client works unchanged:
+Add `"stream": true` for server-sent events. Append `@coding` or another
+intent to the id to switch sampling for a request. From Python the standard
+OpenAI client works unchanged:
 
 ```python
 from openai import OpenAI
@@ -203,38 +201,36 @@ this API. [api.md](api.md) has the endpoints and request formats.
 
 ## Connect a client
 
-`gmlx launch` configures an external tool to use your server and starts the server
-first if it is not running:
+`gmlx launch` configures an external tool to use your server and starts the
+server first if it is not running:
 
 ```sh
 gmlx launch pi --model qwen3.6-27b
 ```
 
 It adds a provider block for your server to pi's own settings, keeping the
-providers already there, waits for the model to load, and runs `pi`. The
-same one-liner works for Claude Code, opencode, omp, hermes, goose, aichat,
-elia and Open WebUI. [launch.md](launch.md) covers each.
+providers already there, waits for the model to load and runs `pi`. The same
+one-liner works for Claude Code, opencode, omp, hermes, goose, aichat, elia
+and Open WebUI. [launch.md](launch.md) covers each.
 
 ## Chat in your browser
 
-Open WebUI is a ChatGPT-style browser app that can use your server. It is
-a separate program with a separate install. `gmlx launch open-webui` starts
-your server if needed, configures the app to use it, and prints the URL.
-Chat works at once. Document upload and voice become available when the
-server also runs embeddings and speech.
-[launch.md](launch.md#open-webui) has the install and the single-user
-setup.
+Open WebUI is a ChatGPT-style browser app that can use your server. It is a
+separate program with a separate install. `gmlx launch open-webui` starts your
+server if needed, configures the app to use it and prints the URL. Chat works
+at once. Document upload and voice become available when the server also runs
+embeddings and speech. [launch.md](launch.md#open-webui) has the install and
+the single-user setup.
 
 ## Voice, login items and what comes next
 
 With the `talk` extra and speech services configured, `gmlx talk` is a
-hands-free voice loop. You say the wake phrase and ask, and the reply is
-spoken as it streams. [talk.md](talk.md) covers it. `gmlx service install`
-keeps the server and the menu bar running from login, as
-[menubar.md](menubar.md) describes.
+hands-free voice loop. You say the wake phrase and ask. The reply is spoken as
+it streams. [talk.md](talk.md) covers it. `gmlx service install` keeps the
+server and the menu bar running from login, as [menubar.md](menubar.md)
+describes.
 
-When something fails, `gmlx doctor` checks the runtime, config, model
-paths and services in one pass. [troubleshooting.md](troubleshooting.md)
-lists the failures common in new setups, where each file is on disk, and
-how to remove gmlx completely. [README.md](README.md) indexes the rest of
-the docs.
+When something fails, `gmlx doctor` checks the runtime, config, model paths
+and services in one pass. [troubleshooting.md](troubleshooting.md) lists the
+failures common in new setups, where each file is on disk and how to remove
+gmlx completely. [README.md](README.md) indexes the rest of the docs.

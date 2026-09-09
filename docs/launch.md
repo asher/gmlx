@@ -1,10 +1,10 @@
 # Connect coding agents and chat apps
 
-This guide covers configuring an external tool to use your server. The
-tool can be a coding harness, an agent runtime, a terminal chat client or
-the Open WebUI browser app. `gmlx launch <client>` probes the server,
-writes the tool's native configuration without modifying your dotfiles,
-and runs the tool. If no server is answering, it starts one first.
+This guide covers configuring an external tool to use your server. The tool
+can be a coding harness, an agent runtime, a terminal chat client or the Open
+WebUI browser app. `gmlx launch <client>` probes the server, writes the tool's
+native configuration without modifying your dotfiles and runs the tool. If no
+server is answering, it starts one first.
 
 ```sh
 gmlx launch pi --model qwen3.6-27b            # pi on a local model
@@ -28,13 +28,13 @@ prints an install hint and exits. The flag table and exit codes are under
 1. Probe. launch checks `/health` and `/v1/models`. Served ids, aliases and
    the default-model marker come from `/v1/models`, which makes them
    selectable inside menu-driven tools.
-2. Configure. Each client is configured in one of three styles, listed in
-   the table that follows. Injection writes a config under
-   `~/.config/gmlx/` and points the tool at it through the tool's mechanism
-   for that, so your config for the tool is never read or written. Merge
-   adds a provider block to the tool's file, preserves existing providers,
-   and refuses to overwrite a file it cannot parse. Environment passes
-   everything in the exec environment with no file at all.
+2. Configure. Each client is configured in one of three styles, listed in the
+   table that follows. Injection writes a config under `~/.config/gmlx/` and
+   points the tool at it through the tool's mechanism for that, so your config
+   for the tool is never read or written. Merge adds a provider block to the
+   tool's file, preserves existing providers and refuses to overwrite a file
+   it cannot parse. Environment passes everything in the exec environment with
+   no file at all.
 3. Exec. The tool replaces the launch process, connected to your server.
 
 `--config-only` writes the configuration and prints the run command instead
@@ -55,19 +55,18 @@ of running the tool, for inspection or scripting.
 ## Starting the server automatically
 
 If no server answers, launch starts one in the background from the first
-config in a [default location](server-config.md#default-config-locations)
-and polls until it responds. When that config preloads a model, because it
-pins one, names a default, or holds exactly one, the server loads the
-weights before binding its port, and the spinner names the model while it
-loads. When nothing is preloaded, the server answers in about a second and
-the model loads on the first request, which makes that first turn slower.
+config in a [default location](server-config.md#default-config-locations) and
+polls until it responds. When that config preloads a model, because it pins
+one, names a default or holds exactly one, the server loads the weights before
+binding its port. The spinner names the model while it loads. When nothing is
+preloaded, the server answers in about a second and the model loads on the
+first request, which makes that first turn slower.
 
 There is no fixed timeout. Only the server process exiting counts as a
-failure.
-Ctrl-C stops waiting while the server keeps starting. With no config
+failure. Ctrl-C stops waiting while the server keeps starting. With no config
 anywhere, launch prints `gmlx init` guidance and starts nothing.
 
-- `--no-start` never auto-starts, and launch errors if the server is not running.
+- `--no-start` never auto-starts. launch errors if the server is not running.
 - `--start-timeout SECONDS` caps the wait, for non-interactive use.
 - An explicit `--base-url` is never auto-started and reads no config. A
   project-local config therefore cannot redirect the session or supply an
@@ -81,10 +80,10 @@ gets the server's default. An `id@profile` form such as
 profile's sampling. The id is validated against the served list.
 
 When you pass `--model`, launch also asks the server to keep that model
-resident through the idle timeout, and a long session's model is not
-unloaded during the session. This is not a pin, and under memory pressure
-the pool can still evict it. `gmlx ps` shows the model as kept.
-`POST /unload` releases it, and `--no-keep` opts out.
+resident through the idle timeout. A long session's model is not unloaded
+during the session. This is not a pin. Under memory pressure the pool can
+still evict it. `gmlx ps` shows the model as kept. `POST /unload` releases it.
+`--no-keep` opts out.
 
 To give a coding agent the coding intent and keep it resident:
 
@@ -95,8 +94,8 @@ To give a coding agent the coding intent and keep it resident:
 
 ## Authentication
 
-`--api-key KEY` passes the key the server runs with, and launch writes it
-to each tool's native setting:
+`--api-key KEY` passes the key the server runs with. launch writes it to each
+tool's native setting:
 
 | Client | Where the key goes |
 |--------|--------------------|
@@ -121,10 +120,10 @@ auth. A model is required. Pass `--model` or set
 injected token takes effect. `~/.claude` is never modified.
 
 Claude Code is prefill-heavy. It sends a very long system prompt and often
-rewrites its request prefix through compaction and tool results, and prompt
-processing dominates turn latency. Serve with the
-[prompt cache](performance.md#the-prompt-cache) on, and prefer a model and
-machine with strong prefill throughput.
+rewrites its request prefix through compaction and tool results. Prompt
+processing dominates turn latency. Serve with the [prompt
+cache](performance.md#the-prompt-cache) on. Prefer a model and machine with
+strong prefill throughput.
 
 ### opencode
 
@@ -155,9 +154,9 @@ goose. A model is required.
 
 ### aichat
 
-Each served id is flagged as supporting function calling, and aichat's tools
-and agents work against the server's tool-call surface. Tool execution still
-needs aichat's `llm-functions` installed.
+Each served id is flagged as supporting function calling, which lets aichat's
+tools and agents work against the server's tool-call surface. Tool execution
+still needs aichat's `llm-functions` installed.
 
 ### elia
 
@@ -171,11 +170,10 @@ therefore starts a second service instead of a terminal client. Install
 it separately with `pipx install open-webui --python python3.12`. It needs
 Python 3.11 or 3.12.
 
-launch exports the base URL and key, disables the Ollama API, sets
-`DATA_DIR`, runs the app on port 3000, and prints the URL. It uses port
-3001 when the gmlx server holds 3000. Chat history is stored in
-`~/.open-webui` on the host, or at
-`--config-path`. Add `WEBUI_AUTH=false` to its environment for a no-login
+launch exports the base URL and key, disables the Ollama API, sets `DATA_DIR`,
+runs the app on port 3000 and prints the URL. It uses port 3001 when the gmlx
+server holds 3000. Chat history is stored in `~/.open-webui` on the host, or
+at `--config-path`. Add `WEBUI_AUTH=false` to its environment for a no-login
 single-user setup on a fresh data directory.
 
 The configuration depends on which services the server reports:

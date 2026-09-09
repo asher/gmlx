@@ -7,8 +7,8 @@ design context, the docs under [docs/](docs/) are authoritative.
 
 `mlx-kquant` is on PyPI with prebuilt arm64 wheels for Python 3.10-3.14 on
 macOS 26.2+. Older macOS builds it from source, which needs full Xcode with
-its Metal toolchain. It pins `mlx==0.32.1`, and nothing else needs pinning.
-Dev setup is a venv, a clone, and an editable install:
+its Metal toolchain. It pins `mlx==0.32.1`. Nothing else needs pinning. Dev
+setup is a venv, a clone and an editable install:
 
 ```sh
 python3 -m venv .venv && source .venv/bin/activate
@@ -33,7 +33,7 @@ python tests/e2e/run_server_e2e.py       # server end-to-end harness, needs the 
 A PR should keep the default `pytest` tier passing. If your change touches
 loading or numerics, say which integration tests you ran and on which
 model. New architectures need a greedy token-parity check against llama.cpp
-at long context, and must keep `scripts/check-coverage.py --check --strict`
+at long context. They must keep `scripts/check-coverage.py --check --strict`
 passing with `docs/arch-coverage.md` regenerated. Short-prompt parity is
 not sufficient, because attention bugs only appear at depth.
 [docs/internals/adding-architectures.md](docs/internals/adding-architectures.md)
@@ -61,10 +61,10 @@ pre-commit install   # optional, runs the same check on each commit
   upper bound in `pyproject.toml` is bumped on purpose, after re-running
   the server tests against the new version.
 - Each concern has a module. Tensor-name remap is in `gmlx/load/remap.py`,
-  config synthesis in `gmlx/load/config_synth.py`, and arch metadata in
-  `gmlx/load/arch_table.py`. A new architecture usually touches exactly
-  those three plus a parity test.
-- The package tree follows subsystems, and tests mirror it under `tests/`:
+  config synthesis in `gmlx/load/config_synth.py` and arch metadata in
+  `gmlx/load/arch_table.py`. A new architecture usually touches exactly those
+  three plus a parity test.
+- The package tree follows subsystems. Tests mirror it under `tests/`:
 
   | Package | Concern |
   |---------|---------|
@@ -85,7 +85,7 @@ pre-commit install   # optional, runs the same check on each commit
   `eval_guard.py`, `textfmt.py` and `spinner.py` stay at the `gmlx/` top
   level.
 - Error messages name the fix. Follow the existing style. Say what was
-  expected, what was found, and what the user or upgrader should do.
+  expected, what was found and what the user or upgrader should do.
 
 ## Commit style
 

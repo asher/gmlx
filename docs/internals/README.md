@@ -5,7 +5,7 @@ How gmlx works internally, for contributors. Users start at
 
 | Page | Contains |
 |------|----------|
-| [serving-architecture.md](serving-architecture.md) | how the loader, engine, batching and HTTP layers compose, and the config-server call graph |
+| [serving-architecture.md](serving-architecture.md) | how the loader, engine, batching and HTTP layers compose, plus the config-server call graph |
 | [speculative-batching.md](speculative-batching.md) | how speculative decoding and continuous batching run together |
 | [prompt-cache.md](prompt-cache.md) | prompt cache tiers per architecture, reuse counters, environment switches |
 | [adding-architectures.md](adding-architectures.md) | what adding a model family involves and the acceptance gate |

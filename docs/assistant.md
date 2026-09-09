@@ -3,7 +3,7 @@
 This guide is for giving a model tools and long-term memory. gmlx has a
 built-in assistant, a bounded tool loop with memory, wrapped around the
 server's chat completions. Configure it once in a top-level `assistant:`
-block, and it is available from three surfaces.
+block. It is then available from three surfaces.
 
 | Surface | How | Tools run |
 |---------|-----|-----------|
@@ -77,28 +77,28 @@ assistant:                    # the built-in tool-loop assistant used by talk,
 ```
 
 [MCP](glossary.md), the Model Context Protocol, is the standard way for a
-model to call tools provided by separate programs. Each `mcp:` entry is
-either a stdio server, where `command` is the argv to spawn plus an optional
-`env` map, or a streamable-HTTP endpoint given as `url`. Tool-name
-collisions across servers get a server-name prefix. An MCP server that
-fails to start produces a warning instead of blocking the loop. A missing
-`assistant` extra does the same with an install hint. A stdio server's
-stderr goes to a log for that server at `~/.cache/gmlx/mcp-<name>.log`.
+model to call tools provided by separate programs. Each `mcp:` entry is either
+a stdio server, where `command` is the argv to spawn plus an optional `env`
+map, or a streamable-HTTP endpoint given as `url`. Tool-name collisions across
+servers get a server-name prefix. An MCP server that fails to start produces a
+warning instead of blocking the loop. A missing `assistant` extra does the
+same with an install hint. Each stdio server's stderr goes to a log for that
+server at `~/.cache/gmlx/mcp-<name>.log`.
 
 A stdio tool server runs with a minimal environment of `HOME`, `PATH`,
-`SHELL`, `TERM`, `USER` and `LOGNAME`. `env:` adds to that. Nothing else
-from your shell is inherited, and a token set in your environment never
-reaches third-party tool code unless you pass it.
+`SHELL`, `TERM`, `USER` and `LOGNAME`. `env:` adds to that. Nothing else from
+your shell is inherited. A token set in your environment never reaches
+third-party tool code unless you pass it.
 
 ## Tool examples
 
-Any stdio or streamable-HTTP MCP server is configured the same way. These need no
-further setup.
+Any stdio or streamable-HTTP MCP server is configured the same way. These need
+no further setup.
 
 ### Web search without an API key
 
-DuckDuckGo's search endpoint is keyless, and this community server wraps it
-with a search tool plus a page fetcher:
+DuckDuckGo's search endpoint is keyless. This community server wraps it with a
+search tool plus a page fetcher:
 
 ```yaml
 assistant:
@@ -123,8 +123,8 @@ assistant:
 
 ### Web search with an API key
 
-Brave's official server returns richer results on a free-tier key, and shows
-how `env:` is used:
+Brave's official server returns richer results on a free-tier key. It also
+shows how `env:` is used:
 
 ```yaml
 assistant:
@@ -158,22 +158,22 @@ assistant, see [rag.md](rag.md).
 
 Memory is a local retrieval store over the server's endpoints. Facts are
 embedded through `/v1/embeddings` into a sqlite file. Each turn recalls the
-closest ones, reordered by `/v1/rerank` when configured, and injects them
-as transient context that never lengthens the chat history. Without
+closest ones, reordered by `/v1/rerank` when configured. It injects them as
+transient context that never lengthens the chat history. Without
 `server.embeddings:` the assistant still runs, memoryless, after a warning.
 
-What gets stored is an extracted fact such as "sister Ana, birthday March
-12", not a transcript. After each turn a background request asks the chat
-model to reduce the exchange to at most three durable facts, or none, and
-small talk stores nothing. A new fact that restates an existing one
-replaces it. `extract: false` stores raw exchanges instead. Old rows expire
-at startup after `ttl_days`, and `max_items` caps the store, evicting the
-never-recalled oldest rows first.
+What gets stored is an extracted fact such as "sister Ana, birthday March 12",
+not a transcript. After each turn a background request asks the chat model to
+reduce the exchange to at most three durable facts, or none. Small talk stores
+nothing. A new fact that restates an existing one replaces it. `extract:
+false` stores raw exchanges instead. Old rows expire at startup after
+`ttl_days`. `max_items` caps the store, evicting the never-recalled oldest
+rows first.
 
 The store is shared between the voice and text surfaces. What you tell the
 assistant in `gmlx talk` it remembers in `gmlx chat --assistant`. Inside
 either, `/memory` lists the stored facts with their ids, `/memory forget ID`
-removes one, and `/memory clear yes` removes them all. The file sits at
+removes one and `/memory clear yes` removes them all. The file sits at
 `~/.local/share/gmlx/assistant-memory.db`. Served assistants that enable
 memory get a separate store for each id beside it.
 
@@ -190,12 +190,12 @@ gmlx chat --assistant                 # server default model
 gmlx chat qwen3.6-27b --assistant     # a specific served model
 ```
 
-The terminal experience is unchanged. Rendering, themes, history, sessions
-and `/system` all work, `/retry` and `/undo` rewind whole tool rounds, and
-`/memory` is added. Sampling flags forward to the server on each round once
-you set them. Flags that only make sense for a local load are rejected or
-ignored with a note. `/image`, `/audio` and the thinking budget are not
-available in this mode. [chat.md](chat.md) describes the client.
+The terminal experience is unchanged. Rendering, themes, history, sessions and
+`/system` all work, `/retry` and `/undo` rewind whole tool rounds. `/memory`
+is added. Sampling flags forward to the server on each round once you set
+them. Flags that only make sense for a local load are rejected or ignored with
+a note. `/image`, `/audio` and the thinking budget are not available in this
+mode. [chat.md](chat.md) describes the client.
 
 ## Served assistants
 
@@ -242,12 +242,11 @@ The routing contract for a request to `/v1/chat/completions`:
 | any other id | untouched |
 | assistant id on `/v1/responses` or `/v1/messages` | 400, assistant models are chat-completions only |
 
-Reported usage sums completion tokens across all rounds. Prompt tokens are
-the final round's. Concurrent assistant turns are capped at 4 on a server,
-and a request over the cap gets an immediate 429. A `stop` sequence
-forwards to each round. A non-streaming turn cannot be cancelled by client
-disconnect. A stream-path cancel takes effect at the next delta or tool
-boundary.
+Reported usage sums completion tokens across all rounds. Prompt tokens are the
+final round's. Concurrent assistant turns are capped at 4 on a server. A
+request over the cap gets an immediate 429. `stop` sequences forward to each
+round. Non-streaming turns cannot be cancelled by client disconnect, while a
+stream-path cancel takes effect at the next delta or tool boundary.
 
 ## Security
 
@@ -259,8 +258,7 @@ Beyond loopback it means anyone with the API key can trigger tool execution
 on the host. The protections are:
 
 - Tools come only from the config. A request cannot supply MCP servers or
-  redefine tools, and a `tools` array in the request switches the server
-  loop off.
+  redefine tools. A `tools` array in the request switches the server loop off.
 - A non-loopback bind with `server.assistants` configured refuses to start
   unless `server.assistant_allow_remote: true`, in addition to the rule that a
   non-loopback bind requires an API key.

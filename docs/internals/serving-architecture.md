@@ -81,14 +81,14 @@ flowchart TD
 ## Components
 
 The loader, `gmlx.load_model`, parses the GGUF bytes and remaps tensor names
-to the Hugging Face layout. It synthesizes the config and tokenizer,
-including the chat template, builds the stock model class, and swaps the
-quantized leaves for K-quant modules. A VLM adds a second file containing
-the vision or audio tower. The output is a model, config and tokenizer
-triple with no safetensors round-trip.
+to the Hugging Face layout. It synthesizes the config and tokenizer, including
+the chat template, builds the stock model class and swaps the quantized leaves
+for K-quant modules. A VLM adds a second file containing the vision or audio
+tower. The output is a model, config and tokenizer triple with no safetensors
+round-trip.
 
 An adapter wraps a text model in mlx-vlm's text-only model class, which
-exposes the embedding and language-model interface the engine expects, and
+exposes the embedding and language-model interface the engine expects. It also
 attaches stopping criteria to the tokenizer. VLM models are wrapped in their
 mlx-vlm class instead. Wrapped models are held in a residency pool of pinned
 and LRU entries that owns the single process-wide wired limit.
@@ -103,13 +103,14 @@ verify round, which keeps the prompt cache available under a drafter
 Above the engine is mlx-vlm's FastAPI app, which serves OpenAI chat
 completions, OpenAI Responses and Anthropic Messages, each with streaming.
 Tool calls are extracted from the raw token stream by mlx-lm's tool parsers,
-selected from the model's chat template, and re-emitted in each protocol's
+selected from the model's chat template and re-emitted in each protocol's
 format. Each request's sampling parameters resolve through the config
 precedence chain before generation, from the family's model-card defaults up
 to the request's own fields ([Precedence](../server-config.md#precedence)).
-Served assistant ids are handled in front of this layer. A request to one
-runs the tool loop on a worker thread, and each round re-enters the server as
-an ordinary loopback client ([served assistants](../assistant.md#served-assistants)).
+Served assistant ids are handled in front of this layer. A request to one runs
+the tool loop on a worker thread. Each round re-enters the server as an
+ordinary loopback client ([served
+assistants](../assistant.md#served-assistants)).
 
 Clients are anything that implements either API. Pointing `ANTHROPIC_BASE_URL`
 at the server lets Anthropic-API tools such as Claude Code use a local
@@ -144,6 +145,6 @@ sequenceDiagram
 ```
 
 The patched seams are the residency lookup, the load call and the generation
-argument builder. Everything between them is stock. The seam inventory, and
-the procedure for moving it to a new upstream release, are in
+argument builder. Everything between them is stock. The seam inventory and the
+procedure for moving it to a new upstream release are in
 [upstream-upgrades.md](upstream-upgrades.md).

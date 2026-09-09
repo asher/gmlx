@@ -16,7 +16,7 @@ terms the rest of the docs use.
 |------|----------|
 | [getting-started.md](getting-started.md) | install, a first model, model picks per machine size, the server, a client |
 | [glossary.md](glossary.md) | the terms these docs use, from GGUF and quant to arena and governor |
-| [migrating.md](migrating.md) | what transfers from llama.cpp, Ollama and LM Studio, and what maps to what |
+| [migrating.md](migrating.md) | what transfers from llama.cpp, Ollama and LM Studio and what maps to what |
 
 ## Do
 

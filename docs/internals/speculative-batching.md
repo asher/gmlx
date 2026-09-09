@@ -1,8 +1,8 @@
 # Speculative decoding under continuous batching
 
 How the server runs speculative decoding and continuous batching together.
-This page covers the two decode loops, the width cap, and the transitions
-that move a request between them without interrupting its token stream. What
+This page covers the two decode loops, the width cap and the transitions that
+move a request between them without interrupting its token stream. What
 speculation is and how to enable it are in
 [performance.md](../performance.md#mtp-speculative-decoding). The cap key is
 in [server-config.md](../server-config.md#speculative_width_cap).
@@ -17,14 +17,14 @@ streams stay coupled, which lets sampled drafts be accepted against sampled
 targets and gives the highest acceptance rate. It is the fastest path and the
 common case.
 
-The batch loop serves two or more. It tracks a bonus token, KV offset,
-budget and finished flag for each row. Drafting is greedy, since coupled
-RNG does not extend across rows. The loop also checks the per-model width
-cap. A batch wider than the cap decodes plain, because verification widens
-each row's weight reads and past the measured width the batch is faster
-without drafting. New requests join between verify rounds. The loop drains an
-injection queue, extends the target KV cache and the drafter with the new
-rows, and re-checks the cap.
+The batch loop serves two or more. It tracks a bonus token, KV offset, budget
+and finished flag for each row. Drafting is greedy, since coupled RNG does not
+extend across rows. The loop also checks the per-model width cap. A batch
+wider than the cap decodes plain, because verification widens each row's
+weight reads and past the measured width the batch is faster without drafting.
+New requests join between verify rounds. The loop drains an injection queue,
+extends the target KV cache and the drafter with the new rows and re-checks
+the cap.
 
 ```mermaid
 stateDiagram-v2
@@ -41,10 +41,10 @@ stateDiagram-v2
 The scalar loop has no injection boundary. Its speed comes from not being a
 batch. Making a prefilled request wait for the running request to finish is
 worse on both measures. The waiter's time to first token grows to the running
-request's remaining generation, and aggregate throughput drops as well,
-because a single speculating stream is slower than the same hardware decoding
-several streams plain. When waiters queue behind a live scalar generation the
-server therefore preempts it:
+request's remaining generation. Aggregate throughput drops as well, because a
+single speculating stream is slower than the same hardware decoding several
+streams plain. When waiters queue behind a live scalar generation the server
+therefore preempts it:
 
 1. The scalar generator closes at its verify-round boundary. Its cleanup
    rolls the target KV cache back to exactly the delivered tokens. The
@@ -58,9 +58,9 @@ server therefore preempts it:
    does under a cap of 1. Otherwise the batch arms itself with a capture
    round and keeps speculating at the new width.
 
-Meanwhile the running request's stream continues without a gap. Its rate
-drops from solo speculative to shared plain while the batch is wide, and
-total tokens per second across streams goes up.
+Meanwhile the running request's stream continues without a gap. Its rate drops
+from solo speculative to shared plain while the batch is wide. Total tokens
+per second across streams goes up.
 
 ## Re-arming a drained batch
 
@@ -69,9 +69,7 @@ the cap. Re-arming needs fresh hidden state and shared KV for each surviving
 row. The resume path therefore re-runs the generator's cold-start sequence
 on fresh captures instead of reusing per-row state:
 
-1. The loop first finishes consuming its plain-decode double buffer. Gated
-   rounds dispatch the next round's forward before reading this round's
-   tokens, and that step has already appended its KV. One more plain round
+1. The loop first finishes consuming its plain-decode double buffer. Gated rounds dispatch the next round's forward before reading this round's tokens. That step has already appended its KV. One more plain round
    runs without dispatching a successor.
 2. The next round is a capture round, a one-position verify forward of each
    row's pending bonus token with hidden-state and shared-KV capture on. It
@@ -82,10 +80,10 @@ on fresh captures instead of reusing per-row state:
    get their view re-set through the round tail that armed rounds use.
 4. Subsequent rounds speculate normally at the drained width.
 
-Rows with fewer remaining tokens than a small threshold skip the capture
-and finish plain. A new admission in the same round takes precedence over a
-pending resume. The injection drain runs first and re-triggers the gate, and
-a batch never arms over the cap.
+Rows with fewer remaining tokens than a small threshold skip the capture and
+finish plain. A new admission in the same round takes precedence over a
+pending resume. The injection drain runs first and re-triggers the gate, which
+keeps a batch from arming over the cap.
 
 ## What the transitions guarantee
 
@@ -96,8 +94,7 @@ a batch never arms over the cap.
   generation, including after the batch drains to a single row. It drafts
   greedily instead of with coupled sampling, which lowers acceptance by a few
   points at temperature. The next request starts scalar again.
-- A preempted request drops its prompt-cache retirement context, and its
-  prefix is not offered back to the cache when it finishes. Waiters and later
+- A preempted request drops its prompt-cache retirement context. Its prefix is not offered back to the cache when it finishes. Waiters and later
   requests retire normally.
 - The capture round emits at plain-decode rate. The speculative speedup
   returns on the round after.

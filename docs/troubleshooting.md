@@ -1,13 +1,13 @@
 # Troubleshooting
 
-This page is for when something breaks. It lists the failures common in new setups,
-each with the symptom, the cause and the fix, plus where the logs and files
-are. Client-launch problems, such as a tool that will not connect, are under
-[launch.md](launch.md#troubleshooting).
+This page is for when something breaks. It lists the failures common in new
+setups, each with the symptom, the cause and the fix, plus where the logs and
+files are. Client-launch problems, such as a tool that will not connect, are
+under [launch.md](launch.md#troubleshooting).
 
-Start with [gmlx doctor](cli.md#gmlx-doctor). It checks the runtime,
-config, model paths, background server and optional services in one pass,
-and names the fix for anything it flags.
+Start with [gmlx doctor](cli.md#gmlx-doctor). It checks the runtime, config,
+model paths, background server and optional services in one pass. Anything it
+flags comes with the fix named.
 
 | Symptom | Section |
 |---------|---------|
@@ -32,30 +32,28 @@ On macOS versions before 26.2, `pip install` fails partway through
 building `mlx-kquant`. Typical messages are a compiler or SDK error, or
 `cannot execute tool 'metal'`.
 
-On older macOS the kernels build from source, and the build needs full
-Xcode. The C++ parts compile with the Command Line Tools, but the Metal
-shaders compile with `xcrun metal`, which the Command Line Tools do not
-include. Install Xcode, select it with
-`sudo xcode-select -s /Applications/Xcode.app`, and re-run the pip
-install. Recent Xcode versions fetch the Metal toolchain as a separate
-download. Run `xcodebuild -downloadComponent MetalToolchain` once. If
-the build still fails after a macOS upgrade, update Xcode so its SDK
-matches, and try again. On macOS 26.2 and newer none of this applies,
-because the kernels install as a prebuilt wheel.
+On older macOS the kernels build from source. That build needs full Xcode. The
+C++ parts compile with the Command Line Tools, but the Metal shaders compile
+with `xcrun metal`, which the Command Line Tools do not include. Install
+Xcode, select it with `sudo xcode-select -s /Applications/Xcode.app` and
+re-run the pip install. Recent Xcode versions fetch the Metal toolchain as a
+separate download. Run `xcodebuild -downloadComponent MetalToolchain` once. If
+the build still fails after a macOS upgrade, update Xcode so its SDK matches
+and try again. On macOS 26.2 and newer none of this applies, because the
+kernels install as a prebuilt wheel.
 
 ## `gmlx: command not found` in a new terminal
 
-`gmlx` worked in an earlier terminal, but a new terminal says
-`command not found: gmlx`, and `gmlx doctor` is unavailable too.
+`gmlx` worked in an earlier terminal, but a new terminal says `command not
+found: gmlx`. That leaves `gmlx doctor` unavailable too.
 
 Nothing is broken. This happens with the plain-venv install route. gmlx is
-installed in the Python venv you chose, and each new terminal starts with
-that venv inactive. Run `source <install dir>/.venv/bin/activate`, using
-the directory from the [install step](getting-started.md#install), and the
-command is available again. A background server or menu-bar app keeps
-running either way. Only the terminal command needs the venv. An install
-via `uv tool install` or pipx stays on PATH in all terminals and never has
-this problem.
+installed in the Python venv you chose. Each new terminal starts with that
+venv inactive. Run `source <install dir>/.venv/bin/activate`, using the
+directory from the [install step](getting-started.md#install). The command is
+available again. A background server or menu-bar app keeps running either way.
+Only the terminal command needs the venv. An install via `uv tool install` or
+pipx stays on PATH in all terminals and never has this problem.
 
 ## A download was interrupted or the disk filled
 
@@ -73,7 +71,7 @@ network drop or a Hugging Face error, is also safe to re-run.
 
 `validate`, `pull`, or a load fails and names a tensor codec.
 
-The K-quant, legacy, and IQ families all have kernels in gmlx, as does the
+The K-quant, legacy and IQ families all have kernels in gmlx, as does the
 structured-ternary `STQ1_0`, which makes this rare. It means the file uses an
 uncommon type with no kernel, such as the plain ternary `TQ1_0` and
 `TQ2_0` types. The refusal names the unsupported codec and what is
@@ -84,39 +82,38 @@ without downloading. Uniform K-quant files also
 
 ## A configured model is missing from /v1/models
 
-An id from your config is not listed, or requesting it returns a 404 with
-type `model_file_missing`. `gmlx logs` shows
-`[server] skipping model '<id>'` at the last startup or reload.
+An id from your config is not listed, or requesting it returns a 404 with type
+`model_file_missing`. `gmlx logs` shows `[server] skipping model '<id>'` at
+the last startup or reload.
 
-The entry's GGUF is gone from disk, deleted, moved or renamed. The server
-skipped it and kept serving everything else. Restore the file and
-the server recovers with no restart. Requests for the id work again and it
-re-appears in `/v1/models`. If the file is permanently gone,
-`gmlx sync-models` reconciles the config in one pass. Entries for missing
-files are removed, new files are registered, and your comments and
-hand-edits are preserved. A missing `server.embeddings` or `server.rerank`
-GGUF behaves the same way. The service is disabled with a log warning and
-de-listed from `/v1/models` while chat keeps serving.
+The entry's GGUF is gone from disk, deleted, moved or renamed. So the server
+skipped it and kept serving everything else. Restore the file and the server
+recovers with no restart. Requests for the id work again and it re-appears in
+`/v1/models`. If the file is permanently gone, `gmlx sync-models` reconciles
+the config in one pass. Entries for missing files are removed, new files are
+registered and your comments and hand-edits are preserved. A missing
+`server.embeddings` or `server.rerank` GGUF behaves the same way. The service
+is disabled with a log warning and de-listed from `/v1/models` while chat
+keeps serving.
 
 ## Whisper fails because ffmpeg is not found
 
-`/v1/audio/transcriptions` errors, or `gmlx talk` fails its capability
-check, and the message mentions ffmpeg.
+`/v1/audio/transcriptions` errors, or `gmlx talk` fails its capability check.
+The message mentions ffmpeg.
 
-Whisper decodes input audio through ffmpeg, and TTS needs it for non-wav
-output formats. Run `brew install ffmpeg`, then restart the server.
+Whisper decodes input audio through ffmpeg. TTS needs it for non-wav output
+formats. Run `brew install ffmpeg`, then restart the server.
 
 ## The mic never works in talk
 
-`gmlx talk` runs but never receives your speech, and no macOS permission
-prompt ever appeared.
+`gmlx talk` runs but never receives your speech. No macOS permission prompt
+ever appeared.
 
-macOS grants microphone access to each app through TCC, keyed to the
-terminal you ran `talk` from. Check System Settings, Privacy and Security,
-Microphone, and enable your terminal, whether Terminal.app, iTerm2 or your
-IDE. If the prompt was dismissed long ago, toggling the entry off and on
-triggers a new prompt. `gmlx talk --list-devices` shows whether an input
-device is visible at all.
+macOS grants microphone access to each app through TCC, keyed to the terminal
+you ran `talk` from. Check System Settings, Privacy and Security, Microphone.
+Enable your terminal, whether Terminal.app, iTerm2 or your IDE. If the prompt
+was dismissed long ago, toggling the entry off and on triggers a new prompt.
+`gmlx talk --list-devices` shows whether an input device is visible at all.
 
 ## Port 8080 is already in use
 
@@ -133,20 +130,20 @@ another port with `--port 8081`.
 The server answered immediately, but the first chat completion took many
 seconds.
 
-Nothing was preloaded, and the first request included the model load. Set
-`server.defaults.model: <id>` in the config, pin a model, or pass `--model`
-to `gmlx launch`. The auto-start path then loads the weights before binding
-the port, and the first turn does not wait for a load. A slow first turn on
-a very long prompt is a different case. That is prefill, not loading, and
-the [prompt cache](performance.md#the-prompt-cache) covers it.
+Nothing was preloaded. The first request included the model load. Set
+`server.defaults.model: <id>` in the config, pin a model, or pass `--model` to
+`gmlx launch`. The auto-start path then loads the weights before binding the
+port. No first turn then waits for a load. A slow first turn on a very
+long prompt is a different case. That is prefill, not loading. The [prompt
+cache](performance.md#the-prompt-cache) covers it.
 
 ## Requests fail with 403 hf_access_disabled
 
 An API request names a model and gets a 403 with `hf_access_disabled`.
 
-The request's `model` is neither a configured id nor a local file, and this
-server never downloads on a request. Use an id from `gmlx list`, or add the
-model to the config with `gmlx pull` followed by `gmlx sync-models`.
+The request's `model` is neither a configured id nor a local file. This server
+never downloads on a request. Use an id from `gmlx list`, or add the model to
+the config with `gmlx pull` followed by `gmlx sync-models`.
 
 ## A gated or private repo will not download
 
@@ -169,12 +166,11 @@ for long-context work with a quantized KV cache, as
 
 ## Where the logs are
 
-`gmlx logs -n 100` prints the managed server's log, and `-f` follows it.
-The files are under `~/.cache/gmlx/`. Each completed request logs a line
-with the model, token counts, and timing, which is usually enough to see
-what was slow.
-`gmlx status` reports the process, `gmlx ps` the resident models, and
-`gmlx serve --print-config` the fully resolved config the server would run with.
+`gmlx logs -n 100` prints the managed server's log. `-f` follows it. The files
+are under `~/.cache/gmlx/`. Each completed request logs a line with the model,
+token counts and timing, which is usually enough to see what was slow. `gmlx
+status` reports the process, `gmlx ps` the resident models and `gmlx serve
+--print-config` the fully resolved config the server would run with.
 
 ## Where files are on disk
 
@@ -193,5 +189,5 @@ what was slow.
 | your model directories | the GGUFs, where `pull` writes |
 
 To remove gmlx completely, run `gmlx service uninstall` if you installed the
-login item, delete the directories in the table and the models you pulled, and
+login item, delete the directories in the table and the models you pulled and
 uninstall the `gmlx` and `mlx-kquant` packages the way you installed them.

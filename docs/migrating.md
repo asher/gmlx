@@ -1,14 +1,13 @@
 # Migrating from llama.cpp, Ollama or LM Studio
 
-gmlx runs the same GGUF files those tools use, and the models themselves
-are reused with no conversion. This page maps the rest. It lists what transfers
-directly, what has a different name, and what is different by design.
+gmlx runs the same GGUF files those tools use. The models themselves are
+reused with no conversion. This page maps the rest. It lists what transfers
+directly, what has a different name and what is different by design.
 
 ## Coming from llama.cpp
 
 `gmlx run model.gguf` is the equivalent of `llama-cli -m model.gguf`, and
-`gmlx serve model.gguf` is the equivalent of `llama-server`, on the same
-default port 8080.
+`gmlx serve model.gguf` of `llama-server`, on the same default port 8080.
 
 | llama.cpp | gmlx | Notes |
 |-----------|------|-------|
@@ -26,15 +25,15 @@ default port 8080.
 | `--parallel N` | none | continuous batching admits requests automatically, and `--budget-gb` bounds residency |
 | `--lora adapter` | `--adapter adapter.gguf` | [lora.md](lora.md) covers adapter interoperation in both directions |
 
-`/v1/completions` accepts a single string prompt and returns a single
-choice, and `/v1/chat/completions` is the primary route. Anthropic Messages and
-OpenAI Responses run on the same port, as [api.md](api.md) describes.
+`/v1/completions` accepts a single string prompt and returns a single choice.
+The primary route is `/v1/chat/completions`. Anthropic Messages and OpenAI
+Responses run on the same port, as [api.md](api.md) describes.
 
 ## Coming from Ollama
 
 Any GGUF file on disk can be reused. Ollama's model store and API do not.
 
-- Ollama's library is stored as sha-named blobs, not `.gguf` files, and it
+- Ollama's library is stored as sha-named blobs, not `.gguf` files, which
   cannot be used directly. Re-download the models you use with `gmlx pull`.
   `gmlx validate hf:<org>/<repo>` lists the available quants first.
 - gmlx implements the OpenAI, Anthropic and OpenAI Responses APIs, not the
@@ -43,11 +42,11 @@ Any GGUF file on disk can be reused. Ollama's model store and API do not.
   port 8080.
 - Modelfile parameters map onto the config in
   [server-config.md](server-config.md). `num_predict` is the server's
-  `max_tokens` default, sampling keys are set for each model or in
-  `profiles:`, and `SYSTEM` becomes `system:`.
-- Keep-alive and unload behavior is the
-  [residency system](server-config.md#residency), with an idle timeout, LRU
-  eviction under a byte budget, and `pin` for always-resident models.
+  `max_tokens` default, sampling keys are set for each model or in `profiles:`
+  and `SYSTEM` becomes `system:`.
+- Keep-alive and unload behavior is the [residency
+  system](server-config.md#residency), with an idle timeout, LRU eviction
+  under a byte budget and `pin` for always-resident models.
 
 ## Coming from LM Studio
 

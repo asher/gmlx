@@ -1,9 +1,9 @@
 # HTTP API
 
-The endpoints `gmlx serve` exposes, how a request names a model, and which
+The endpoints `gmlx serve` exposes, how a request names a model and which
 request fields each protocol honors. It is for anyone writing a client or
-putting the server behind a load balancer. The YAML that configures the
-server is in [server-config.md](server-config.md).
+putting the server behind a load balancer. The YAML that configures the server
+is in [server-config.md](server-config.md).
 
 - [Addressing a model in a request](#addressing-a-model-in-a-request)
 - [Endpoints](#endpoints)
@@ -32,16 +32,16 @@ To call the API with tools and structured output:
 ```
 
 The `@profile` suffix is split on the last `@` and only treated as a profile
-when it names a known one, which keeps an id containing `@`-like text
-intact. An unknown id returns 404 listing the available ids, and an unknown
-profile returns 400 listing the valid ones. With `model` empty, the server
-uses its default model, else the sole model, else returns 400. The same addressing works on
-the CLI, as `gmlx run <id-or-path>@coding` or `--profile coding`.
+when it names a known one, which keeps an id containing `@`-like text intact.
+An unknown id returns 404 listing the available ids, while an unknown profile
+returns 400 listing the valid ones. With `model` empty, the server uses its
+default model, else the sole model, else returns 400. The same addressing
+works on the CLI, as `gmlx run <id-or-path>@coding` or `--profile coding`.
 
 ## Endpoints
 
-The standard generation and listing routes work, and gmlx adds operational
-ones. All routes except `/health` require the API key when one is set.
+The standard generation and listing routes work. gmlx adds operational ones.
+All routes except `/health` require the API key when one is set.
 
 | Endpoint | Purpose |
 |----------|---------|
@@ -51,7 +51,7 @@ ones. All routes except `/health` require the API key when one is set.
 | `POST /v1/completions` | classic text completions, with a single string prompt, a single choice and no chat template |
 | `GET /v1/models` | configured ids and aliases with their markers, also at `/models` |
 | `GET /health` | liveness. `?ready=1` adds a readiness verdict |
-| `GET /v1/metrics` | the runtime snapshot described in the next section, also at `/metrics`, and as Prometheus text with `?format=prometheus` |
+| `GET /v1/metrics` | the runtime snapshot described in the next section, also at `/metrics` and as Prometheus text with `?format=prometheus` |
 | `POST /v1/estimate` | dry-run admission for a chat body, described in the next section |
 | `GET /v1/capacity/plan` | can `width` streams run at `depth` tokens each, and may they start now |
 | `GET /v1/cache/stats` | prompt cache statistics, or `{"enabled": false}` |
@@ -70,25 +70,25 @@ Each entry carries `resident`, `pinned`, `speculative`, `vlm`, `profile` and
 `max_context_at_width_1` from the capacity table for the model it was
 derived from. The Hugging Face cache is never listed.
 
-`GET /health` returns only `{"status": "healthy", "pid": N}` and is the
-only route the API key exempts. Adding `?ready=1` gives a coarse readiness verdict,
+`GET /health` returns only `{"status": "healthy", "pid": N}` and is the only
+route the API key exempts. Adding `?ready=1` gives a coarse readiness verdict,
 either 200 with `"ready": true` or 503 with a one-word `reason` and a
-`Retry-After` header. The reason is `pressure` when the governor is orange
-or red, `queue` when requests are waiting, and `busy` when all engines are
-at their decode width.
+`Retry-After` header. The reason is `pressure` when the governor is orange or
+red, `queue` when requests are waiting and `busy` when all engines are at
+their decode width.
 
 `POST /v1/completions` supports `max_tokens`, `temperature`, `top_p`, `seed`,
 `stop`, `stream` and `profile`. List or token-array prompts, `n > 1`, `echo`,
 `suffix` and `best_of > 1` are rejected with a 400. The stock image
 generation routes are not usable with GGUF models.
 
-An explicit `/unload` overrides the preload's lifetime hold, and a
-preloaded model unloads too. A model reloaded by request afterward is
-managed like any other until a reload with `preload` re-pins it.
-`/v1/keep` is what `gmlx launch --model` and voice sessions call. The kept
-model stays LRU-evictable under memory pressure. `/v1/reload` returns
-`{"status": "unsupported"}` outside config mode, as
-[Reloading the config](server-config.md#reloading-the-config) explains.
+An explicit `/unload` overrides the preload's lifetime hold. A preloaded model
+unloads too. If it is reloaded by request afterward, it is managed like any
+other until a reload with `preload` re-pins it. `/v1/keep` is what `gmlx
+launch --model` and voice sessions call. The kept model stays LRU-evictable
+under memory pressure. `/v1/reload` returns `{"status": "unsupported"}`
+outside config mode, as [Reloading the
+config](server-config.md#reloading-the-config) explains.
 
 ## Capacity and live-request metrics
 
@@ -99,8 +99,8 @@ no.
 
 | Section | Fields | Meaning |
 |---|---|---|
-| `concurrency` | `decode_batch`, `queue_cap`, `in_flight`, `waiting` | the decode width, the waiting-queue cap, streams generating now, and requests waiting for a slot, summed across resident models |
-| `queue` | `waiting`, `cap`, `eta_s`, `rejections`, `last_reject_reason` | the waiting count, the cap it is judged against, and the drain estimate a client would receive as `Retry-After` now |
+| `concurrency` | `decode_batch`, `queue_cap`, `in_flight`, `waiting` | the decode width, the waiting-queue cap, streams generating now and requests waiting for a slot, summed across resident models |
+| `queue` | `waiting`, `cap`, `eta_s`, `rejections`, `last_reject_reason` | the waiting count, the cap it is judged against and the drain estimate a client would receive as `Retry-After` now |
 | `requests[]` | `id`, `model`, `state`, `position`, `prompt_tokens`, `generated`, `max_tokens`, `elapsed_s`, `ttft_s`, `decode_tok_s`, `cache`, `speculative` | a row for each request, queued rows first. `state` is `queued`, `prefill` or `decode` |
 | `resident_models[]` | for each model, `in_flight`, `pinned`, `kept` and bytes | the number for each model to compare against `decode_batch`, since each model decodes on a separate engine |
 | `governor` | `band`, counters | the memory governor's band and shed history |
@@ -109,7 +109,7 @@ no.
 | `rates` | `decode_tok_s`, `decode_streams`, `prefill_tok_s_recent`, `decode_tok_s_recent`, `decode_tok_s_lifetime` | the aggregate decode rate now and its stream count, the recent means over the last eight requests, and the lifetime mean |
 
 A request row's `cache` holds the tier its prefix hit, one of `exact`,
-`block`, `ckpt`, `anchor` and `miss`, and the `warm_tokens` it reused. Its
+`block`, `ckpt`, `anchor` and `miss`, plus the `warm_tokens` it reused. Its
 `speculative` field holds the drafter's rounds, drafted and accepted counts
 and accept rate, exact at batch width 1 and shared across a wider batch, or
 `null` without a drafter. Rows refresh at most four times a second on each
@@ -120,52 +120,50 @@ Two routes use the same numbers to tell a dispatcher whether to proceed before
 sending a request.
 
 `POST /v1/estimate` takes a chat-completions body and returns an admission
-estimate for a resident model. `prompt_tokens`, `warm_tokens` and
-`cache_tier` say how much of the prefix the cache already holds and on
-which tier, which is the routing signal across machines. `need_bytes` is
-the prompt's KV plus the prefill transient, plus `max_tokens` when the body
-pins one. `fits_now` and `fits_drained` judge that against the current free
-memory and the drained working set, while `context_ok` judges it against
-`context_limit`, and `est_ttft_s` estimates the time to first token. A
-model that is not resident answers `resident: false`. The dry run never
-loads a model. Media requests render but are not estimated.
-`"dry_run": true` on `/v1/chat/completions` returns the same estimate
-through the queue cap.
+estimate for a resident model. `prompt_tokens`, `warm_tokens` and `cache_tier`
+say how much of the prefix the cache already holds and on which tier, which is
+the routing signal across machines. `need_bytes` is the prompt's KV plus the
+prefill transient, plus `max_tokens` when the body pins one. `fits_now` and
+`fits_drained` judge that against the current free memory and the drained
+working set, while `context_ok` judges it against `context_limit`.
+`est_ttft_s` estimates the time to first token. A model that is not resident
+answers `resident: false`. The dry run never loads a model. Media requests
+render but are not estimated. `"dry_run": true` on `/v1/chat/completions`
+returns the same estimate through the queue cap.
 
-`GET /v1/capacity/plan?width=W&depth=D` answers `ok` when the capacity
-table holds `W` streams at `D` tokens each. The table is read
-conservatively, at the smallest tabulated width at or above `W`. It answers
-`admit_now` when in addition the governor is not orange or red, nothing is
-waiting, and at least `W` decode slots are free. `reason` names the first
-condition that fails.
+`GET /v1/capacity/plan?width=W&depth=D` answers `ok` when the capacity table
+holds `W` streams at `D` tokens each. The table is read conservatively, at the
+smallest tabulated width at or above `W`. It answers `admit_now` when in
+addition the governor is not orange or red, nothing is waiting and at least
+`W` decode slots are free. `reason` names the first condition that fails.
 
-The load gate refuses a chat request for a model whose weights would not
-fit beside what is resident and busy, or would push the kernel under the
+The load gate refuses a chat request for a model whose weights would not fit
+beside what is resident and busy, or would push the kernel under the
 governor's floor. Such a request gets 503 with an error of type
-`model_load_deferred`, the gate's numbers in the message, and
-`Retry-After`. Memory the kernel is still returning from a recent unload is
-waited for, up to 3 seconds, before a load is deferred.
+`model_load_deferred`, the gate's numbers in the message and a `Retry-After`
+header. Memory the kernel is still returning from a recent unload is waited
+for, up to 3 seconds, before a load is deferred.
 
 The Prometheus rendering flattens these to gauges such as
 `gmlx_concurrency_in_flight`, `gmlx_queue_eta_s`, `gmlx_governor_band` with a
-`band` label, `gmlx_capacity_max_ctx` with a `width` label, and per-model
-series with `model` and `profile` labels. `requests[]` is high-cardinality
-and contributes only its count.
+`band` label, `gmlx_capacity_max_ctx` with a `width` label and per-model
+series with `model` and `profile` labels. `requests[]` is high-cardinality and
+contributes only its count.
 
 ## API capabilities
 
 The protocol surface is inherited from mlx-vlm, since gmlx swaps the model
-layer and not the handlers. The engine's request features therefore work
-unchanged on GGUF models. Context windows come from the GGUF's metadata,
-with no server-side override or request-level context setting.
+layer and not the handlers. Its request features therefore work unchanged on
+GGUF models. Context windows come from the GGUF's metadata, with no
+server-side override or request-level context setting.
 
 ### Tool calling
 
-OpenAI `tools` and `tool_calls` on `/v1/chat/completions`, and Anthropic
-`tools` and `tool_use` blocks on `/v1/messages`. The parser is inferred from
-the model's chat template. A model whose template defines a tool-call
-syntax gets parsing with nothing to configure. Streaming works too. A
-parsed call ends the stream with `finish_reason: "tool_calls"`.
+OpenAI `tools` and `tool_calls` on `/v1/chat/completions`, Anthropic `tools`
+and `tool_use` blocks on `/v1/messages`. The parser is inferred from the
+model's chat template. A model whose template defines a tool-call syntax gets
+parsing with nothing to configure. Streaming works too. A parsed call ends the
+stream with `finish_reason: "tool_calls"`.
 
 `tool_choice` is enforced where it can be:
 
@@ -175,10 +173,10 @@ parsed call ends the stream with `finish_reason: "tool_calls"`.
 | `auto` | the default. The model decides |
 | `required` and named-function forms | forwarded to the template as a variable and honored only if the template implements them. The server logs a warning when a forced call produced no call |
 
-This is the client-side loop. The server parses the calls, and the client
-executes them and sends results back. To run the loop server-side with
-config-allowlisted MCP tools, serve an
-[assistant id](assistant.md#served-assistants).
+This is the client-side loop. The server parses the calls, the client executes
+them and sends results back. To run the loop server-side with
+config-allowlisted MCP tools, serve an [assistant
+id](assistant.md#served-assistants).
 
 ```sh
 curl localhost:8080/v1/chat/completions -d '{
@@ -194,18 +192,18 @@ curl localhost:8080/v1/chat/completions -d '{
 
 ### Parameter support
 
-The request schemas accept unknown fields, and nothing is rejected for
-being present. A honored parameter changes the response. An ignored one is
-accepted and skipped, and each ignored parameter a request sets produces a
-warning line in the server log naming it. A test cross-checks the table
-against the allowlists the warning uses.
+The request schemas accept unknown fields. Nothing is rejected for being
+present. A honored parameter changes the response. An ignored one is accepted
+and skipped. Each ignored parameter a request sets produces a warning line in
+the server log naming it. A test cross-checks the table against the allowlists
+the warning uses.
 
-The standard sampling parameters are honored on all three generation
-dialects. They are `max_tokens` and `max_output_tokens`, `temperature`,
-`top_p`, `top_k`, `min_p`, `top_n_sigma`, `p_less`, `typical_p`,
-`repetition_penalty`, `presence_penalty`, `frequency_penalty` and their
-`*_context_size` companions, `enable_thinking`, `thinking_budget`, and the
-OpenAI `reasoning` and `reasoning_effort` controls. The rest:
+The standard sampling parameters are honored on all three generation dialects.
+They are `max_tokens` and `max_output_tokens`, `temperature`, `top_p`,
+`top_k`, `min_p`, `top_n_sigma`, `p_less`, `typical_p`, `repetition_penalty`,
+`presence_penalty`, `frequency_penalty` and their `*_context_size` companions,
+`enable_thinking`, `thinking_budget` and the OpenAI `reasoning` and
+`reasoning_effort` controls. The rest:
 
 | Parameter | `/v1/chat/completions` | `/v1/responses` | `/v1/messages` | Notes |
 |-----------|------------------------|-----------------|----------------|-------|
@@ -230,14 +228,14 @@ OpenAI `reasoning` and `reasoning_effort` controls. The rest:
 | `profile` | honored | honored | honored | a sampling and system [profile](server-config.md#profiles) by name |
 | `xtc_probability` | honored | honored | honored | XTC sampling, with `xtc_threshold` |
 
-`echo`, `suffix`, `best_of > 1`, and list or token-array prompts on
+`echo`, `suffix`, `best_of > 1` and list or token-array prompts on
 `/v1/completions` are rejected with a 400 naming the limit.
 
 ### Structured output
 
 `response_format: {"type": "json_schema", ...}` gives grammar-constrained
-decoding. The model cannot emit tokens that violate the schema. The backing
-engine is [llguidance](https://github.com/guidance-ai/llguidance), installed
+decoding. The model cannot emit tokens that violate the schema. Enforcement
+comes from [llguidance](https://github.com/guidance-ai/llguidance), installed
 with the base package. On the Anthropic endpoint an `output_config` of type
 `json_schema` maps to the same engine. `"json_object"` is accepted and
 constrained to a permissive object grammar. Unknown types are rejected.
@@ -262,11 +260,11 @@ curl localhost:8080/v1/chat/completions -d '{
 
 ### Logprobs
 
-`logprobs: true` returns each generated token's logprob, and
-`top_logprobs: N` asks for the N most likely alternatives for each token.
-The alternatives are capped by the server-side `TOP_LOGPROBS_K` variable, 0
-to 20, with a default of 0. Until the server is started with the cap raised,
-the lists stay empty. It is an engine variable with no config key:
+`logprobs: true` returns each generated token's logprob. `top_logprobs: N`
+asks for the N most likely alternatives for each token. The alternatives are
+capped by the server-side `TOP_LOGPROBS_K` variable, 0 to 20, with a default
+of 0. Until the server is started with the cap raised, the lists stay empty.
+It is an engine variable with no config key:
 
 ```sh
 TOP_LOGPROBS_K=5 gmlx serve --config ~/.config/gmlx/gmlx.yaml
@@ -308,7 +306,6 @@ under [Server](env-vars.md#server).
 
 By default the server makes no Hugging Face access. A request `model` that is
 neither a local GGUF nor a configured id is refused with a 403 of type
-`hf_access_disabled` instead of triggering a download. With
-`server.hf_cache: true` a named repo id resolves from the local cache only,
-still never the network, and cached models are addressable only when named
-in `models:`.
+`hf_access_disabled` instead of triggering a download. With `server.hf_cache:
+true` a named repo id resolves from the local cache only, still never the
+network. Cached models are addressable only when named in `models:`.

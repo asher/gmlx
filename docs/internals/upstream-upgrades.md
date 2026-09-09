@@ -11,7 +11,7 @@ Three checks enforce the pin:
 | Layer | Where | What it does |
 |-------|-------|--------------|
 | exact pin | `pyproject.toml` | `mlx-vlm==X.Y.Z`. mlx and mlx-lm are pinned together, with a minimum version so source installs resolve |
-| seam contract | `tests/upstream/test_upstream_seams.py` | every patched symbol is pinned to a source fingerprint, and drift fails CI naming the seam |
+| seam contract | `tests/upstream/test_upstream_seams.py` | every patched symbol is pinned to a source fingerprint. Drift fails CI naming the seam |
 | runtime gate | `check_upstream_versions`, at CLI entry | versions below the minimum refuse to run with an upgrade message, newer than the qualified set warns. `gmlx doctor` is exempt |
 
 ## Watching upstream releases
@@ -55,7 +55,7 @@ symbol and the gmlx site that uses it.
 
 5. Live smoke tests with models on disk. Serve Qwen3.6-35B-A3B with MTP for
    prefill and decode, serve gemma-4-12B dense with a warm prompt-cache hit,
-   run gpt-oss-20b MXFP4, serve deepseek-v4, and take one `gmlx talk` turn.
+   run gpt-oss-20b MXFP4, serve deepseek-v4 and take one `gmlx talk` turn.
 
 6. The env-gated integration tests:
 
@@ -71,8 +71,8 @@ symbol and the gmlx site that uses it.
 
 Any new patch or deep import of upstream internals gets a row in `SEAMS` in
 the same change, then a regen. A seam that correctness or a hard feature
-dependency relies on sets `critical=True`, and its installer must raise when
-the seam is missing. Optional accelerations warn once and fall back.
+dependency relies on sets `critical=True`. Its installer must raise when the
+seam is missing. Optional accelerations warn once and fall back.
 
 KV-cache classes have two origins since mlx-vlm 0.6.4 vendored its own. The
 rules for isinstance checks and construction are in the docstring of

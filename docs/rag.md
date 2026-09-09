@@ -22,22 +22,22 @@ server:
 ```
 
 The default GGUFs, about 0.6 GB each, resolve from your local Hugging Face
-cache only. Fetch them first with `gmlx pull`. A server that starts
-without them disables the endpoint until the file is present. Both services
-load in the background at startup. They sit outside the chat residency
-pool, where a re-index and chat never evict each other, and they run in a
-worker thread that interleaves with batched chat decode.
+cache only. Fetch them first with `gmlx pull`. A server that starts without
+them disables the endpoint until the file is present. Both services load in
+the background at startup. They sit outside the chat residency pool, where a
+re-index and chat never evict each other. Both run in a worker thread that
+interleaves with batched chat decode.
 
 ## Choosing the models
 
-The default embedder is a Qwen3-Embedding GGUF run as a decoder embedder
-with last-token pooling. It loads like any other GGUF and carries the
-model's full 32k context, and long documents embed without truncation. Use
-`qwen3-embed-4b` or `-8b` for better retrieval at a bigger index, or point
-the key at any local or `hf:` GGUF. Encoder options exist too, including
-EmbeddingGemma from a GGUF and several safetensors encoders that download
-once on a cache miss. The alias tables with dimensions and context windows
-are under [Text embeddings](services.md#text-embeddings-embeddings).
+The default embedder is a Qwen3-Embedding GGUF run as a decoder embedder with
+last-token pooling. It loads like any other GGUF and carries the model's full
+32k context. Long documents embed without truncation. Use `qwen3-embed-4b` or
+`-8b` for better retrieval at a bigger index, or point the key at any local or
+`hf:` GGUF. Encoder options exist too, including EmbeddingGemma from a GGUF
+and several safetensors encoders that download once on a cache miss. The alias
+tables with dimensions and context windows are under [Text
+embeddings](services.md#text-embeddings-embeddings).
 
 The reranker is a Qwen3-Reranker GGUF, a causal model fine-tuned to answer
 yes or no to "does this document satisfy this query". Its score is the
@@ -46,8 +46,8 @@ any GGUF ref. [Reranking](services.md#reranking-rerank) has the details.
 
 ## The embeddings endpoint
 
-The endpoint has the OpenAI shape. `input` is a string or a list of
-strings, and vectors come back L2-normalized:
+The endpoint has the OpenAI shape. `input` is a string or a list of strings.
+Vectors come back L2-normalized:
 
 ```sh
 curl localhost:8080/v1/embeddings -H 'content-type: application/json' \
@@ -66,16 +66,16 @@ curl localhost:8080/v1/embeddings -H 'content-type: application/json' \
 }
 ```
 
-The conventional OpenAI model names all map to the configured model, and the
-field can be omitted. Any other requested model is refused, never silently
+The conventional OpenAI model names all map to the configured model. It can
+also be omitted. Any other requested model is refused, never silently
 substituted. The response echoes the name you requested. An optional
 `encoding_format` selects `float`, the default, or `base64`.
 
 ## The rerank endpoint
 
-`POST /v1/rerank`, also served at `/rerank`, has the Cohere and Jina
-shape. Send the query and the candidate documents, and get back indices
-sorted best-first with relevance scores:
+`POST /v1/rerank`, also served at `/rerank`, has the Cohere and Jina shape.
+Send the query and the candidate documents to get back indices sorted
+best-first with relevance scores:
 
 ```sh
 curl localhost:8080/v1/rerank -H 'content-type: application/json' \
@@ -106,12 +106,11 @@ not thousands.
 
 ## Configure Open WebUI
 
-`gmlx launch open-webui` points Open WebUI's document embedder at this
-server, points its external reranker here when the server advertises one,
-and enables the hybrid search mode that reranking requires. Upload documents
-in Open WebUI and query them. Indexing and retrieval happen against your
-server. The variables it sets are listed under
-[open-webui](launch.md#open-webui).
+`gmlx launch open-webui` points Open WebUI's document embedder at this server,
+points its external reranker here when the server advertises one and enables
+the hybrid search mode that reranking requires. Upload documents in Open WebUI
+and query them. Indexing and retrieval happen against your server. The
+variables it sets are listed under [open-webui](launch.md#open-webui).
 
 ## Other consumers
 
