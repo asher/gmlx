@@ -36,6 +36,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   conv input until the chunk ends: the conv output is tied to its cache
   state so the state slice evaluates with the conv. Peak transient at a
   2048-token chunk drops by about 3.4 GB on GLM-5.3-Flash (34 KDA layers).
+- GLM-5.3-Flash MTP verify forwards (2 to 8 query tokens) run the MLA
+  layers in the absorbed form like a decode step; the naive route expanded
+  the latent into per-head K and V over every visible key and cost 19 ms
+  per verify at 512 keys. `GMLX_GLM5_ABSORBED_MAX_L` sets the band.
 - `quantized_kv_start` as a per-model server load key is applied to that
   model; upstream read it once from the process environment at server
   start.

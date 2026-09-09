@@ -258,10 +258,35 @@ def test_mla_absorbed_matches_naive_prefill(monkeypatch):
     x = mx.random.normal((1, 7, args.hidden_size)) * 0.5
     mask = mx.tril(mx.ones((7, 7), dtype=mx.bool_))
 
+    monkeypatch.setattr(glm5_model, "_ABSORBED_MAX_L", 0)
     naive = np.array(attn(x, mask=mask), dtype=np.float32)
     monkeypatch.setattr(glm5_model, "_ABSORBED_PREFILL", True)
     absorbed = np.array(attn(x, mask=mask), dtype=np.float32)
     np.testing.assert_allclose(absorbed, naive, rtol=2e-3, atol=2e-3)
+
+
+def test_mla_small_l_step_takes_absorbed_form(monkeypatch):
+    # An MTP verify is a 2..8 token forward on a warm cache. Under
+    # _ABSORBED_MAX_L it takes the absorbed MQA form (decode's route)
+    # instead of expanding the latent to per-head K/V over every key;
+    # both give the same logits up to rounding order.
+    args = _tiny_args()
+    model = _random_model(args, seed=5)
+    prompt = [3, 9, 27, 40, 11, 5, 33, 60, 2, 17, 8, 21, 14, 6, 30, 1,
+              19, 42, 7, 12]
+    verify = [22, 35, 4]
+
+    def run(max_l):
+        monkeypatch.setattr(glm5_model, "_ABSORBED_MAX_L", max_l)
+        cache = model.make_cache()
+        mx.eval(model(mx.array([prompt]), cache=cache))
+        out = model(mx.array([verify]), cache=cache)
+        mx.eval(out)
+        return np.array(out[0], dtype=np.float32)
+
+    naive = run(0)
+    absorbed = run(16)
+    np.testing.assert_allclose(absorbed, naive, rtol=2e-2, atol=2e-2)
 
 
 def test_indexer_dense_bypass_thresholds():
@@ -405,6 +430,33 @@ def test_sparse_decode_gather_matches_masked_path():
             np.array(oa[0, 0], dtype=np.float32),
             np.array(ob[0, 0], dtype=np.float32),
             rtol=2e-3, atol=2e-3, err_msg=f"decode step {step}")
+
+
+@pytest.mark.parametrize("width", [2, 3, 4])
+def test_sparse_verify_gather_matches_masked_path(width):
+    # An MTP verify forward (2..4 queries on a warm sparse cache) takes
+    # the per-query decode gather; it must match the masked application
+    # for every query row, across the q % 4 residues the block straddles.
+    args = _tiny_args()
+    a = _random_model(args, seed=23)
+    b = _random_model(args, seed=23)
+    for layer in b.model.layers:
+        if not layer.is_linear:
+            layer.self_attn._decode_gather = False
+
+    toks = [3, 9, 27, 40, 11, 5, 33, 60, 2, 17, 44, 8, 19, 52, 6]  # T=15
+    ca, cb = a.make_cache(), b.make_cache()
+    mx.eval(a(mx.array([toks]), cache=ca), b(mx.array([toks]), cache=cb))
+    verify = [7, 21, 42, 13, 30, 6, 25, 1]
+    for start in range(0, 8 - width + 1, width):
+        blk = verify[start:start + width]
+        oa = a(mx.array([blk]), cache=ca)
+        ob = b(mx.array([blk]), cache=cb)
+        mx.eval(oa, ob)
+        np.testing.assert_allclose(
+            np.array(oa[0], dtype=np.float32),
+            np.array(ob[0], dtype=np.float32),
+            rtol=2e-3, atol=2e-3, err_msg=f"verify block at {start}")
 
 
 def test_streamed_absorbed_attention_matches_sdpa(monkeypatch):

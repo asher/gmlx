@@ -80,6 +80,12 @@ from gmlx.models.kimi_k3 import ShortConv1d, _kda_decay_lb
 _MOE_MIX_SCORES = os.environ.get("GMLX_GLM5_MOE_MIX", "1") != "0"
 _SPARSE_DISABLE = os.environ.get("GMLX_GLM5_SPARSE_DISABLE", "0") == "1"
 _ABSORBED_PREFILL = os.environ.get("GMLX_GLM5_ABSORBED_PREFILL", "0") == "1"
+# Query counts up to this take the absorbed MQA form like a decode step.
+# The naive route below expands the latent into per-head K and V over
+# every visible key (64 x S x 256 x 2), which pays for itself only at
+# chunk-sized L; an MTP verify (L = 2..8) through it cost 19 ms per
+# forward at 512 keys.
+_ABSORBED_MAX_L = int(os.environ.get("GMLX_GLM5_ABSORBED_MAX_L", "16"))
 _SPARSE_GATHER = os.environ.get("GMLX_GLM5_SPARSE_GATHER", "1") != "0"
 
 
@@ -552,6 +558,38 @@ class Glm5NextMLAAttention(nn.Module):
         # path instead of the latent gather (same function).
         self._decode_gather = True
 
+    def _sparse_decode_keys(self, latent_d, sel, q_abs: int, B: int,
+                            spill: bool = False):
+        """Latent rows one query attends: its selected pools expanded
+        ``kpool`` wide plus the partial tail up to ``q_abs``, and a bool
+        mask over those columns when ``spill`` is set. A lone decode
+        query sees every pool in the cache; a query inside a verify block
+        can be handed pools its later block-mates completed (a spill:
+        fewer visible pools than select_k), which the mask hides the way
+        the masked path's causal term does."""
+        r = self._kpool
+        tail_start = (q_abs + 1) // r * r
+        tok = (sel[..., None] * r + mx.arange(r)).reshape(B, -1)
+        gmask = None
+        if spill:
+            keep = mx.broadcast_to(
+                (sel < tail_start // r)[..., None], sel.shape + (r,)
+            ).reshape(B, -1)
+            tok = mx.minimum(tok, latent_d.shape[2] - 1)
+        if q_abs >= tail_start:
+            tail = mx.broadcast_to(
+                mx.arange(tail_start, q_abs + 1)[None],
+                (B, q_abs + 1 - tail_start))
+            tok = mx.concatenate([tok, tail], axis=1)
+            if spill:
+                keep = mx.concatenate(
+                    [keep, mx.ones(tail.shape, dtype=mx.bool_)], axis=1)
+        if spill:
+            gmask = keep[:, None, None, :]
+        kv_g = mx.take_along_axis(
+            latent_d[:, 0], tok[..., None], axis=1)[:, None]
+        return kv_g, gmask
+
     def _gathered_sparse_prefill(
         self, q_n, latent_d, sel_pools, offset: int, L: int, S: int
     ) -> mx.array:
@@ -717,26 +755,23 @@ class Glm5NextMLAAttention(nn.Module):
         q = q.reshape(B, L, self.num_heads, self.q_head_dim).transpose(
             0, 2, 1, 3)
 
-        if (sel_pools is not None and L == 1 and isinstance(offset, int)
-                and self._decode_gather):
+        if (sel_pools is not None and L <= _ABSORBED_MAX_L
+                and isinstance(offset, int) and self._decode_gather):
             # Sparse decode: gather the selected latents + the tail rows and
             # run absorbed MQA over them. Every gathered row is a complete
-            # visible pool member or the tail, so no mask is needed.
+            # visible pool member or the tail, so no mask is needed. An MTP
+            # verify (L = 2..8) is L such steps, one gather per query with
+            # its own tail: no host sync, unlike the block route below.
             latent_d = _dequantized(latent_all, kv_cache)
-            r = self._kpool
-            tok = (sel_pools[..., None] * r + mx.arange(r)).reshape(B, -1)
-            q_abs = offset  # this token's absolute position
-            tail_start = (q_abs + 1) // r * r
-            if q_abs >= tail_start:
-                tail = mx.broadcast_to(
-                    mx.arange(tail_start, q_abs + 1)[None],
-                    (B, q_abs + 1 - tail_start))
-                tok = mx.concatenate([tok, tail], axis=1)
-            kv_g = mx.take_along_axis(
-                latent_d[:, 0], tok[..., None], axis=1)[:, None]
             q_n = self.embed_q(q)
-            out = scaled_dot_product_attention(
-                q_n, kv_g, kv_g, cache=None, scale=self.scale, mask=None)
+            outs = []
+            for j in range(L):
+                kv_g, gmask = self._sparse_decode_keys(
+                    latent_d, sel_pools[:, j], offset + j, B, spill=L > 1)
+                outs.append(scaled_dot_product_attention(
+                    q_n[:, :, j:j + 1], kv_g, kv_g, cache=None,
+                    scale=self.scale, mask=gmask))
+            out = outs[0] if L == 1 else mx.concatenate(outs, axis=2)
             out = self.unembed_out(out)
         elif sel_pools is not None:
             # Sparse prefill/chunk: gathered keys past the streaming
@@ -755,7 +790,7 @@ class Glm5NextMLAAttention(nn.Module):
                 out = _streamed_absorbed_attention(
                     q_n, latent_d, smask, self.scale)
                 out = self.unembed_out(out)
-            elif _ABSORBED_PREFILL:
+            elif _ABSORBED_PREFILL or L <= _ABSORBED_MAX_L:
                 smask = self._sparse_mask(sel_pools, offset, L, S)[:, None]
                 q_n = self.embed_q(q)
                 out = scaled_dot_product_attention(
@@ -785,7 +820,7 @@ class Glm5NextMLAAttention(nn.Module):
                     mask is not None and mask.ndim == 3) else mask,
                 self.scale)
             out = self.unembed_out(out)
-        elif _ABSORBED_PREFILL:
+        elif _ABSORBED_PREFILL or L <= _ABSORBED_MAX_L:
             q_n = self.embed_q(q)
             out = scaled_dot_product_attention(
                 q_n, latent_all, latent_all, cache=kv_cache, scale=self.scale,
