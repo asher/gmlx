@@ -1,16 +1,17 @@
 # Prompt cache internals
 
-How the prompt cache tiers are chosen per architecture, the counters that show
-whether reuse is working and the environment switches that tune or disable
-each layer. This page is for contributors. Operators read
-[performance.md](../performance.md#the-prompt-cache). Upstream calls the cache
-APC. The switches use that name.
+How the prompt cache tiers are chosen per architecture, the counters that
+show whether reuse is working and the environment switches that tune or
+disable each layer. This page is for contributors, while operators read
+[performance.md](../performance.md#the-prompt-cache). Upstream calls the
+cache APC, and the switches use that name.
 
 ## Which tier serves which architecture
 
-The cache routes each model by its cache shape once, at load. Logging the
-routing as `APC tier:` makes a silent mis-route visible. Reuse works on all
-families. The tiers differ in storage layout, not in whether hits happen.
+The cache routes each model by its cache shape once, at load, and logs the
+routing as `APC tier:` so that a silent mis-route is visible. Reuse works
+on all families, because the tiers differ in storage layout rather than in
+whether hits happen.
 
 | Cache shape | Example archs | Tier |
 |-------------|---------------|------|
@@ -23,14 +24,15 @@ families. The tiers differ in storage layout, not in whether hits happen.
 ## Checkpoint-tier counters
 
 `GET /v1/cache/stats` carries the `ckpt_*` fields for each model, but they
-only change on checkpoint-tier architectures. All-zero on a block-tier or
-exact-tier model is normal. On checkpoint-tier models they answer whether
-prefix reuse is working. Judge reuse from these fields and not from ratios
-built on the stock ones. Checkpoint lookups increment the shared hit counters
-on success but record nothing on a miss. The token totals include window
-snapshots that can never be shared. `disk_writes` counts write operations, one
-for each exact-format entry, checkpoint skeletons and drafter sidecars
-included, plus one for each block of a block shard.
+only change on checkpoint-tier architectures, so all-zero on a block-tier
+or exact-tier model is normal. On checkpoint-tier models they answer
+whether prefix reuse is working, and reuse should be judged from these
+fields rather than from ratios built on the stock ones, because checkpoint
+lookups increment the shared hit counters on success but record nothing on
+a miss, and the token totals include window snapshots that can never be
+shared. `disk_writes` counts write operations, one for each exact-format
+entry, checkpoint skeletons and drafter sidecars included, plus one for
+each block of a block shard.
 
 | Field | What it tells you |
 |-------|-------------------|
@@ -44,25 +46,25 @@ included, plus one for each block of a block shard.
 | `retire_fallback_full` | Finished requests whose generated tokens were saved in the slower whole-sequence form because no smaller snapshot was available. Occasional entries are normal. |
 
 The server also checks for a tier that is not storing or hitting and warns
-once per model. It fires after `GMLX_APC_CKPT_TRIPWIRE` completed requests
-with zero stores, or that many unusable matches with zero hits, with a default
-of 5. Either warning means prefix reuse is not working for that model. File an
+once per model, after `GMLX_APC_CKPT_TRIPWIRE` completed requests with zero
+stores, or that many unusable matches with zero hits, with a default of 5.
+Either warning means prefix reuse is not working for that model, so file an
 issue with the `/v1/cache/stats` snapshot.
 
 ## Under kvarn KV
 
-Tier routing matches fp16 KV with one change. Dense models use the exact
+Tier routing matches fp16 KV with one change: dense models use the exact
 tier, since the 16-token block tier cannot split kvarn's 128-token records.
-Checkpoint-shaped stacks keep full checkpoint-tier reuse and store kvarn
-records. Those are the hybrid-GDN and sliding-window families in the reuse
-table whose attention head_dim is 128, 256 or 512. The attention payload
-lives inline in the record and not in pool blocks. As a result
+Checkpoint-shaped stacks, which are the hybrid-GDN and sliding-window
+families in the reuse table whose attention head_dim is 128, 256 or 512,
+keep full checkpoint-tier reuse and store kvarn records. The attention
+payload lives inline in the record and not in pool blocks, so
 `GMLX_APC_CKPT_BUDGET_MB` bounds the tier's memory and `APC_NUM_BLOCKS`
 matters little. Entries and disk skeletons are keyed to the kvarn width and
-tail. A config change or a restart that switches between stock and kvarn
-therefore misses instead of reading a stale format. Cascade shared-prefix
-decode is off under kvarn and logs that once. Speculative rollback into a
-sealed record reopens it from its codes, one lossy round trip. Rows still in
+tail, so a config change or a restart that switches between stock and kvarn
+misses instead of reading a stale format. Cascade shared-prefix decode is
+off under kvarn and logs that once. Speculative rollback into a sealed
+record reopens it from its codes, one lossy round trip, while rows still in
 the fp16 tail roll back exactly.
 
 ## Environment switches

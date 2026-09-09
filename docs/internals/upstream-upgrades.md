@@ -1,10 +1,10 @@
 # Upgrading mlx-vlm, mlx-lm and mlx
 
 gmlx patches about thirty private symbols across mlx-vlm and mlx-lm and
-deep-imports model internals. The inventory is in `gmlx/upstream/seams.py`.
-That surface is safe only under the exact mlx-vlm pin in `pyproject.toml`,
-because upstream point releases change it. This page is the maintainer's
-procedure for changing the pin.
+deep-imports model internals, with the inventory in
+`gmlx/upstream/seams.py`. That surface is safe only under the exact mlx-vlm
+pin in `pyproject.toml`, because upstream point releases change it. This
+page is the maintainer's procedure for changing the pin.
 
 Three checks enforce the pin:
 
@@ -22,10 +22,10 @@ When mlx-vlm or mlx-lm publishes a release:
 scripts/upstream_canary.sh
 ```
 
-This builds a disposable venv with this checkout plus the latest mlx-vlm and
-runs the seam check. A pass means the release is likely a safe bump, still
-to be qualified by the procedure below. On failure it lists each changed
-symbol and the gmlx site that uses it.
+This builds a disposable venv with this checkout plus the latest mlx-vlm
+and runs the seam check. A pass means the release is likely a safe bump,
+still to be qualified by the procedure below, while a failure lists each
+changed symbol and the gmlx site that uses it.
 
 ## Bump procedure
 
@@ -69,10 +69,11 @@ symbol and the gmlx site that uses it.
 
 ## Adding a new seam
 
-Any new patch or deep import of upstream internals gets a row in `SEAMS` in
-the same change, then a regen. A seam that correctness or a hard feature
-dependency relies on sets `critical=True`. Its installer must raise when the
-seam is missing. Optional accelerations warn once and fall back.
+Any new patch or deep import of upstream internals gets a row in `SEAMS`
+in the same change, then a regen. A seam that correctness or a hard feature
+dependency relies on sets `critical=True`, and its installer must raise
+when the seam is missing, whereas optional accelerations warn once and fall
+back.
 
 KV-cache classes have two origins since mlx-vlm 0.6.4 vendored its own. The
 rules for isinstance checks and construction are in the docstring of

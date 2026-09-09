@@ -4,22 +4,23 @@ What is required for a new model family to become a supported architecture,
 plus the acceptance gate a family clears before its row appears in the
 [coverage matrix](../arch-coverage.md).
 
-A GGUF arch first needs a model class for its `model_type`. That class
-normally comes from the installed mlx-lm or mlx-vlm. gmlx supplies only the
+A GGUF arch first needs a model class for its `model_type`, which normally
+comes from the installed mlx-lm or mlx-vlm, so gmlx supplies only the
 tensor map and the config.
 
 A few families, kimi-k3 and muse-glimmer among them, have no upstream class at
 all. gmlx vendors the model math for those in its own module, inserted into
 the upstream namespace so a later upstream implementation takes precedence.
-Vendoring is the exception. It is justified only when the family cannot
-otherwise be supported, since it adds two obligations. The vendored math must
-match llama.cpp numerically. A collision check must report once upstream
-publishes its own class.
+Vendoring is the exception, justified only when the family cannot
+otherwise be supported, because it adds two obligations: the vendored math
+must match llama.cpp numerically, and a collision check must report once
+upstream publishes its own class.
 
 ## What the work involves
 
-The engine is architecture-generic and data-driven. Neither the load pipeline
-nor the module-swap code is edited per arch. A new family adds three things:
+The engine is architecture-generic and data-driven, so neither the load
+pipeline nor the module-swap code is edited per arch. A new family adds
+three things:
 
 - a tensor-name map from the GGUF's naming to the mlx-lm model class's
   parameter paths,
@@ -34,24 +35,25 @@ make it diverge. Those are per-tensor remap overrides, wire-byte transforms
 for fused or permuted weight layouts and occasionally a new module class or a
 tokenizer-classifier branch.
 
-That last list is where most of the effort goes. It varies widely. A clean
-Llama-layout family can be supported with almost no per-arch code in a few
-hours. Hybrids and exotic layouts take significant engineering and debugging
-time. SSM mixes, MLA attention, MoE variants with biased projections, fused
-expert tensors and new float formats all fall in that group. Do not estimate
-the work from the simplest case. Vision and audio towers are a separate track
-with the same gate rules. [vlm.md](../vlm.md) lists what is supported.
+That last list is where most of the effort goes, and it varies widely. A
+clean Llama-layout family can be supported with almost no per-arch code in
+a few hours, while hybrids and exotic layouts, such as SSM mixes, MLA
+attention, MoE variants with biased projections, fused expert tensors and
+new float formats, take significant engineering and debugging time. Do not
+estimate the work from the simplest case. Vision and audio towers are a
+separate track with the same gate rules, and [vlm.md](../vlm.md) lists what
+is supported.
 
 ## Why the gate is strict
 
-The characteristic failure modes of a mis-ported architecture are silent. A
-wrong rope layout or a bias assigned to a quantized weight slot still produces
-fluent, plausible text on short prompts. The error only appears far into a
-long context. That is why fluent generation does not count as done and why the
-parity requirement is 16k tokens. The standard also applies in reverse. When
-every public GGUF of a family is broken upstream, as with `gemma3n` today, the
-loader gates the family off by name with the reason instead of loading cleanly
-into wrong weights.
+The characteristic failure modes of a mis-ported architecture are silent.
+A wrong rope layout or a bias assigned to a quantized weight slot still
+produces fluent, plausible text on short prompts, and the error only
+appears far into a long context, which is why fluent generation does not
+count as done and why the parity requirement is 16k tokens. The standard
+also applies in reverse: when every public GGUF of a family is broken
+upstream, as with `gemma3n` today, the loader gates the family off by name
+with the reason instead of loading cleanly into wrong weights.
 
 ## The acceptance gate
 
@@ -115,8 +117,8 @@ The tiers these tests run in and how to select a GGUF-gated tier are in
 
 ## Requesting or contributing a family
 
-To request a family, open an issue with a link to the GGUF or its Hugging Face
-repo and the model's `general.architecture` string. `gmlx validate <ref>`
-prints that string without downloading the file. Contributions are welcome. A
-new-architecture PR is expected to pass the acceptance gate, add a
-config-synth fixture test and regenerate the coverage matrix.
+To request a family, open an issue with a link to the GGUF or its Hugging
+Face repo and the model's `general.architecture` string, which
+`gmlx validate <ref>` prints without downloading the file. Contributions
+are welcome, and a new-architecture PR is expected to pass the acceptance
+gate, add a config-synth fixture test and regenerate the coverage matrix.

@@ -14,17 +14,17 @@ width.
 
 The scalar loop serves one decoding request. Draft and target sampler RNG
 streams stay coupled, which lets sampled drafts be accepted against sampled
-targets and gives the highest acceptance rate. It is the fastest path and the
-common case.
+targets and gives the highest acceptance rate, so it is the fastest path
+and the common case.
 
-The batch loop serves two or more. It tracks a bonus token, KV offset, budget
-and finished flag for each row. Drafting is greedy, since coupled RNG does not
-extend across rows. The loop also checks the per-model width cap. A batch
-wider than the cap decodes plain, because verification widens each row's
-weight reads and past the measured width the batch is faster without drafting.
-New requests join between verify rounds. The loop drains an injection queue,
-extends the target KV cache and the drafter with the new rows and re-checks
-the cap.
+The batch loop serves two or more, tracking a bonus token, KV offset,
+budget and finished flag for each row. Drafting is greedy, since coupled
+RNG does not extend across rows. The loop also checks the per-model width
+cap, and a batch wider than the cap decodes plain, because verification
+widens each row's weight reads and past the measured width the batch is
+faster without drafting. New requests join between verify rounds, when the
+loop drains an injection queue, extends the target KV cache and the drafter
+with the new rows and re-checks the cap.
 
 ```mermaid
 stateDiagram-v2
@@ -38,12 +38,13 @@ stateDiagram-v2
 
 ## Preempting a scalar generation
 
-The scalar loop has no injection boundary. Its speed comes from not being a
-batch. Making a prefilled request wait for the running request to finish is
-worse on both measures. The waiter's time to first token grows to the running
-request's remaining generation. Aggregate throughput drops as well, because a
-single speculating stream is slower than the same hardware decoding several
-streams plain. When waiters queue behind a live scalar generation the server
+The scalar loop has no injection boundary, because its speed comes from
+not being a batch. Making a prefilled request wait for the running request
+to finish is worse on both measures: the waiter's time to first token grows
+to the running request's remaining generation, and aggregate throughput
+drops as well, because a single speculating stream is slower than the same
+hardware decoding several streams plain. When waiters queue behind a live
+scalar generation the server
 therefore preempts it:
 
 1. The scalar generator closes at its verify-round boundary. Its cleanup
@@ -58,16 +59,16 @@ therefore preempts it:
    does under a cap of 1. Otherwise the batch arms itself with a capture
    round and keeps speculating at the new width.
 
-Meanwhile the running request's stream continues without a gap. Its rate drops
-from solo speculative to shared plain while the batch is wide. Total tokens
-per second across streams goes up.
+Meanwhile the running request's stream continues without a gap. Its rate
+drops from solo speculative to shared plain while the batch is wide, but
+total tokens per second across streams goes up.
 
 ## Re-arming a drained batch
 
-A batch gated to plain decode re-arms when finishing rows bring it back under
-the cap. Re-arming needs fresh hidden state and shared KV for each surviving
-row. The resume path therefore re-runs the generator's cold-start sequence
-on fresh captures instead of reusing per-row state:
+A batch gated to plain decode re-arms when finishing rows bring it back
+under the cap. Because re-arming needs fresh hidden state and shared KV for
+each surviving row, the resume path re-runs the generator's cold-start
+sequence on fresh captures instead of reusing per-row state:
 
 1. The loop first finishes consuming its plain-decode double buffer. Gated rounds dispatch the next round's forward before reading this round's tokens. That step has already appended its KV. One more plain round
    runs without dispatching a successor.
@@ -80,10 +81,10 @@ on fresh captures instead of reusing per-row state:
    get their view re-set through the round tail that armed rounds use.
 4. Subsequent rounds speculate normally at the drained width.
 
-Rows with fewer remaining tokens than a small threshold skip the capture and
-finish plain. A new admission in the same round takes precedence over a
-pending resume. The injection drain runs first and re-triggers the gate, which
-keeps a batch from arming over the cap.
+Rows with fewer remaining tokens than a small threshold skip the capture
+and finish plain. A new admission in the same round takes precedence over a
+pending resume, because the injection drain runs first and re-triggers the
+gate, which keeps a batch from arming over the cap.
 
 ## What the transitions guarantee
 

@@ -11,11 +11,11 @@ interpreter that has gmlx and mlx-kquant installed for all of them.
 
 ## CPU logic tests
 
-The CPU tier runs on synthetic inputs. No model is loaded and no GPU kernel is
-dispatched. It runs anywhere, including CI. Covered are the remap tables,
-config and tokenizer synthesis, the arch gate, weight transforms, preflight,
-the config loader, the family sampling profiles, discovery, the serving id
-layer, residency, the server patches and the chat client. For the chat client,
+The CPU tier runs on synthetic inputs, with no model loaded and no GPU
+kernel dispatched, so it runs anywhere, including CI. It covers the remap
+tables, config and tokenizer synthesis, the arch gate, weight transforms,
+preflight, the config loader, the family sampling profiles, discovery, the
+serving id layer, residency, the server patches and the chat client, where
 `tests/tui/test_chat_e2e.py` runs the real multi-turn loop with the model
 layer faked.
 
@@ -30,11 +30,11 @@ few tests that use array ops off the GPU path. The doc tests under
 
 ## GGUF-gated integration tests
 
-These assert numerical correctness against real weights and stay skipped until
-`KQUANT_TEST_GGUF_DIR` points at a GGUF library. The directory is searched
-recursively, each test selects a model by architecture from the GGUF header
-and any arch you do not have skips. One small model is enough to exercise a
-path.
+These assert numerical correctness against real weights and stay skipped
+until `KQUANT_TEST_GGUF_DIR` points at a GGUF library. The directory is
+searched recursively, each test selects a model by architecture from the
+GGUF header, and any arch you do not have skips, so one small model is
+enough to exercise a path.
 
 | Module | Extra gate | What it checks |
 |--------|------------|----------------|
@@ -72,11 +72,12 @@ KQUANT_TEST_GGUF_DIR=~/llm/gguf-test GMLX_TEST_BIG_GGUFS=1 \
 
 ## Server end-to-end harnesses
 
-`tests/e2e/` holds standalone scripts that launch the real server, load models
-on the GPU and grade the results. They are not part of the pytest suite,
-though `tests/test_e2e_harness_smoke.py` checks every harness's imports and
-argument tree in CI. Each harness is described, with its tiers, grading and
-model bootstrap, in [tests/e2e/README.md](../../tests/e2e/README.md).
+`tests/e2e/` holds standalone scripts that launch the real server, load
+models on the GPU and grade the results. They are not part of the pytest
+suite, although `tests/test_e2e_harness_smoke.py` checks every harness's
+imports and argument tree in CI. Each harness is described, with its tiers,
+grading and model bootstrap, in
+[tests/e2e/README.md](../../tests/e2e/README.md).
 
 | Harness | Exercises |
 |---------|-----------|
