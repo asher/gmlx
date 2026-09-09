@@ -808,3 +808,54 @@ def test_moe_gate_cpu_device_keeps_compiled_select():
         mx.eval(inds, w)
     assert inds.shape == (1, 3, gate.top_k)
     assert bool(mx.isfinite(w).all())
+
+
+@pytest.mark.parametrize("length", [1, 2, 4])
+def test_indexer_decode_route_agrees_with_inline(monkeypatch, length):
+    """Decode-width steps score through mlx-kquant's fused scorer and
+    radix top-k; the selected pool set must match the inline f32
+    argpartition up to pools inside the bf16 rounding of the threshold."""
+    import gmlx.models.glm5_next.model as glm5_model
+
+    if not glm5_model._indexer_decode_available():
+        pytest.skip("mlx-kquant decode indexer unavailable here")
+    args = _tiny_args()
+    args.hidden_size = 256
+    args.q_lora_rank = 64
+    args.index_n_heads = 32
+    args.index_head_dim = 128
+    args.index_topk = 2048
+    args.index_kpool = 4
+    mx.random.seed(17)
+    idx = Glm5NextIndexer(args)
+    idx.set_dtype(mx.bfloat16)
+    from mlx.utils import tree_flatten, tree_unflatten
+    params = [(k, (mx.random.normal(v.shape) * 0.2).astype(v.dtype))
+              for k, v in tree_flatten(idx.parameters())]
+    idx.update(tree_unflatten(params))
+    idx.weights_proj.weight = idx.weights_proj.weight.astype(mx.float32)
+    mx.eval(idx.parameters())
+
+    T = 2400  # 600 complete pools, past the 512-pool selection width
+    x = (mx.random.normal((1, T, args.hidden_size)) * 0.5).astype(mx.bfloat16)
+    qr = (mx.random.normal((1, T, args.q_lora_rank)) * 0.5).astype(mx.bfloat16)
+    xs = (mx.random.normal((1, length, args.hidden_size)) * 0.5).astype(mx.bfloat16)
+    qs = (mx.random.normal((1, length, args.q_lora_rank)) * 0.5).astype(mx.bfloat16)
+
+    sels = {}
+    for arm in ("kq", "inline"):
+        monkeypatch.setitem(glm5_model._INDEXER_DECODE_STATE, "ok",
+                            arm == "kq")
+        pool = PoolingCache(4, lookback=False)
+        assert idx(x, qr, pool, 0, T) is not None      # prefill, inline (L > 4)
+        sel = idx(xs, qs, pool, T, T + length)
+        mx.eval(sel)
+        # a kernel error flips the state off and falls back inline, which
+        # would make the arms trivially equal
+        assert glm5_model._INDEXER_DECODE_STATE["ok"] is (arm == "kq")
+        sels[arm] = np.array(sel)[0]
+    assert sels["kq"].shape == sels["inline"].shape == (length, idx.select_k)
+    for j in range(length):
+        a, b = set(sels["kq"][j].tolist()), set(sels["inline"][j].tolist())
+        assert len(a) == idx.select_k
+        assert len(a & b) >= idx.select_k - 8, f"row {j}: {idx.select_k - len(a & b)} differ"

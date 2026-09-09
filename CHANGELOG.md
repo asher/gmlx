@@ -44,6 +44,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   decode kernels (one per verify token) instead of the op chain, and a
   rollback restores the kept per-token state instead of replaying the
   layer. `GMLX_GLM5_KDA_FUSED_MAX_T` sets the band.
+- GLM-5.3-Flash decode steps (1 to 4 query tokens) score the DSA indexer
+  through mlx-kquant's fused decode scorer and radix top-k instead of the
+  inline fp32 matmul chain and argpartition, about 1 ms a step off the
+  critical path past 2048 keys. `GMLX_GLM5_INDEXER_DECODE=0` restores
+  the inline scoring.
 - Hyper-connected models run the fused per-row hyper-connection kernels
   for steps up to 8 rows (MTP verify blocks), not only the single decode
   row. `GMLX_HC_M1_MAX_ROWS` sets the band.

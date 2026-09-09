@@ -91,6 +91,30 @@ _ABSORBED_MAX_L = int(os.environ.get("GMLX_GLM5_ABSORBED_MAX_L", "16"))
 # blocks are 2 tokens; wider steps take the op chain and the sink replay.
 _KDA_FUSED_MAX_T = int(os.environ.get("GMLX_GLM5_KDA_FUSED_MAX_T", "8"))
 _SPARSE_GATHER = os.environ.get("GMLX_GLM5_SPARSE_GATHER", "1") != "0"
+# Decode-width indexer scoring through mlx-kquant's fused scorer and
+# radix top-k (one dispatch each) instead of the inline per-head f32
+# matmul, head reduction, mask and argpartition. Steps of 1 to 4 queries.
+_INDEXER_DECODE = os.environ.get("GMLX_GLM5_INDEXER_DECODE", "1") != "0"
+_INDEXER_DECODE_STATE = {"ok": None}
+
+
+def _indexer_decode_available() -> bool:
+    """One-time probe for mlx-kquant's decode indexer pair; Metal only,
+    permanently off for the process after a kernel error."""
+    ok = _INDEXER_DECODE_STATE["ok"]
+    if ok is None:
+        ok = _INDEXER_DECODE and mx.default_device() == mx.gpu
+        if ok:
+            try:
+                import mlx_kquant as kq
+
+                ok = (mx.metal.is_available()
+                      and hasattr(kq, "dsa_indexer_score_decode")
+                      and hasattr(kq, "dsa_topk_indices"))
+            except Exception:  # noqa: BLE001 - optional dependency
+                ok = False
+        _INDEXER_DECODE_STATE["ok"] = ok
+    return ok and _INDEXER_DECODE and mx.default_device() == mx.gpu
 
 
 def ensure_registered() -> None:
@@ -401,6 +425,29 @@ class Glm5NextIndexer(nn.Module):
         # on them) and a bf16 head gate moves logits enough to flip
         # near-tied pools; the weight tensor itself is kept fp32.
         w = (x.astype(mx.float32) @ self.weights_proj.weight.T) * self._w_scale
+
+        if (L <= 4 and isinstance(offset, int) and self.select_k in (512, 2048)
+                and self.head_dim == 128 and self.n_heads in (32, 64)
+                and q.dtype in (mx.float16, mx.bfloat16)
+                and _indexer_decode_available()):
+            # Fused scorer: relu per head, the f32 head weights, pooled
+            # visibility p < (offset + j + 1) // kpool baked in (every pool
+            # visible to a lone query), then a radix top-k with
+            # deterministic ties. The scores round to the query dtype
+            # before the select, so pools within that rounding of the
+            # threshold can swap against the inline f32 argpartition.
+            try:
+                import mlx_kquant as kq
+
+                scores = kq.dsa_indexer_score_decode(
+                    q, pooled.astype(q.dtype), w, offset, self.kpool)
+                return kq.dsa_topk_indices(
+                    scores, self.select_k, bucketed=True)[:, 0]
+            except Exception as exc:  # noqa: BLE001 - inline fallback
+                _INDEXER_DECODE_STATE["ok"] = False
+                print(f"[glm5_next] kquant indexer decode disabled for this "
+                      f"process after error (inline scoring active): {exc!r}",
+                      file=sys.stderr)
 
         if pool_cache is not None:
             pmask = pool_cache.make_mask(L, offset)
