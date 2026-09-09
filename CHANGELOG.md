@@ -32,6 +32,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the drafter's copies (3 GB) left the governor 1-2 GB of headroom and every
   speculative request was shed; the plain arm lost 1.4 GB for one layer's
   halved gather launches.
+- KDA prefill (GLM-5.3-Flash, Kimi-K3) no longer holds every layer's short
+  conv input until the chunk ends: the conv output is tied to its cache
+  state so the state slice evaluates with the conv. Peak transient at a
+  2048-token chunk drops by about 3.4 GB on GLM-5.3-Flash (34 KDA layers).
 - `quantized_kv_start` as a per-model server load key is applied to that
   model; upstream read it once from the process environment at server
   start.

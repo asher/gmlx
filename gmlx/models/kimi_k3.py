@@ -347,6 +347,13 @@ class ShortConv1d(nn.Module):
             new_state = mx.take_along_axis(conv_input, positions, axis=1)
         else:
             new_state = mx.contiguous(conv_input[:, -n_keep:, :])
+        # mx.eval builds its tape breadth-first from the roots, so an array
+        # only the cache reads (this state) evaluates after the whole chunk
+        # graph, and conv_input stays allocated until then: 34 layers x 3
+        # convs x 33 MB at the 2048-token chunk. Tying the output to the
+        # state evaluates both where the conv runs and frees conv_input
+        # there. The Depends primitive launches nothing.
+        (out,) = mx.depends([out], [new_state])
         return out, new_state
 
 
