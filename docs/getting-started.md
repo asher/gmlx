@@ -18,7 +18,7 @@ are met.
 ## What you need
 
 - An Apple Silicon Mac, any M-series chip.
-- macOS 26 or newer, recommended. The Metal kernels then install as a
+- macOS 26.2 or newer, recommended. The Metal kernels then install as a
   prebuilt wheel. On older versions the install compiles them, which needs
   full Xcode with its Metal toolchain; the Command Line Tools alone are not
   enough, and recent Xcode fetches the toolchain with
@@ -201,7 +201,7 @@ this API. [api.md](api.md) has the endpoints and request formats.
 first if it is not running:
 
 ```sh
-gmlx launch claude-code --model qwen3.6-27b
+gmlx launch pi --model qwen3.6-27b
 ```
 
 It exports the base URL and model Claude Code needs, waits for the model to

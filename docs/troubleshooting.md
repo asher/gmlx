@@ -40,7 +40,7 @@ include. Install Xcode, select it
 install. Recent Xcode versions fetch the Metal toolchain as a separate
 download: run `xcodebuild -downloadComponent MetalToolchain` once. If the
 build still fails after a macOS upgrade, update Xcode so its SDK matches,
-and try again. On macOS 26 and newer none of this applies: the kernels
+and try again. On macOS 26.2 and newer none of this applies: the kernels
 install as a prebuilt wheel.
 
 ## `gmlx: command not found` in a new terminal

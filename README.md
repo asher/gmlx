@@ -8,7 +8,7 @@ The fastest way to run GGUF models on Apple Silicon.
 gmlx is a local inference platform. Chat with an open model in the terminal
 or your browser, serve it over OpenAI and Anthropic compatible APIs, connect
 your coding agent to it, talk to it by voice, build a local RAG stack on it,
-and fine-tune it with LoRA. One command, entirely on your Mac.
+and fine-tune it with LoRA.
 
 It runs the community's K-quant and IQ-quant GGUF builds exactly as
 published. At equal file size those are the most accurate open quant formats, and
@@ -17,7 +17,10 @@ supplies the Metal kernels that run them natively on Apple's
 [MLX](https://github.com/ml-explore/mlx) framework. On the same file, gmlx
 benchmarks faster than llama.cpp, and the gap is widest at the long contexts
 that coding agents and long sessions use. A mixture-of-experts model
-bigger than RAM still runs, streaming its experts from disk.
+bigger than RAM still runs, streaming its experts from disk. Coming from
+llama.cpp, Ollama or LM Studio,
+[migrating.md](https://github.com/asher/gmlx/blob/main/docs/migrating.md)
+says what transfers.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/asher/gmlx/main/docs/assets/perf/fleet-ratio-dark.svg">
@@ -35,10 +38,15 @@ Recorded at true speed.
 
 ## Quickstart
 
-You need an Apple Silicon Mac. macOS 26 or newer is recommended, because the
-Metal kernels then install as a prebuilt wheel; older versions build them
-from source, which needs full Xcode with its Metal toolchain
+You need an Apple Silicon Mac; Intel Macs and Linux are not supported.
+macOS 26.2 or newer is recommended, because the Metal kernels then install
+as a prebuilt wheel; older versions build them from source, which needs full
+Xcode with its Metal toolchain
 ([troubleshooting](https://github.com/asher/gmlx/blob/main/docs/troubleshooting.md#the-install-fails-compiling-the-metal-kernels)).
+Python 3.11 or newer; uv fetches one. A model needs memory for roughly its
+file size plus the conversation's KV cache, and
+[getting-started.md](https://github.com/asher/gmlx/blob/main/docs/getting-started.md#pick-a-model-for-your-mac)
+has suggestions per machine size.
 
 ```sh
 uv tool install "gmlx[all]"     # or: pip install "gmlx[all]" into a venv you manage
@@ -56,9 +64,14 @@ gmlx stop
 ```
 
 Any local `.gguf` runs, chats or serves this way with no other setup. The
-served id comes from the filename. `gmlx[all]` turns on every optional
-feature; the core install already serves, loads vision models, embeds and runs the
-menu bar, so `gmlx[chat]` omits only voice and the assistant.
+served id is the filename with its quant tag dropped, `qwen3-0.6b` here; ids
+that `gmlx init` assigns keep the tag. `--to .` downloads into the current
+directory; once a config exists, `pull` writes to your model directory and
+registers the file. `gmlx[all]` turns on every optional feature; the core
+install already serves, loads vision models, embeds and runs the menu bar,
+so `gmlx[chat]` omits only voice and the assistant. Upgrade with
+`uv tool upgrade gmlx`; removing gmlx is described in
+[troubleshooting.md](https://github.com/asher/gmlx/blob/main/docs/troubleshooting.md#where-files-are-on-disk).
 
 ## Set up with gmlx init
 
@@ -134,7 +147,8 @@ and one base can serve several adapters at once.
 
 gmlx and llama.cpp run the same file, so the comparison is direct. On an M5
 Max, gmlx prefills faster on every model in the fleet at every depth, and
-with speculative decoding on both engines decodes faster at every depth. Absolute
+with speculative decoding on both engines decodes faster at every depth
+(DeepSeek-V4-Flash is compared against ds4-server, which llama.cpp lacks). Absolute
 numbers scale with the machine's memory bandwidth; measure your own with
 `gmlx run model.gguf --bench 128,512,2048`.
 
@@ -175,7 +189,7 @@ family is described in
 ## Python API
 
 ```python
-from gmlx import load_model, generate, bench
+from gmlx import load_model, generate
 
 model, config, tokenizer = load_model("model.gguf")
 print(generate(model, tokenizer, "Explain entropy.", max_tokens=128))
@@ -191,6 +205,9 @@ bridge, is in [python.md](https://github.com/asher/gmlx/blob/main/docs/python.md
 - [cli.md](https://github.com/asher/gmlx/blob/main/docs/cli.md): every verb and flag.
 - [server-config.md](https://github.com/asher/gmlx/blob/main/docs/server-config.md): every key of the YAML config.
 - [api.md](https://github.com/asher/gmlx/blob/main/docs/api.md): the endpoints and request features.
+- [troubleshooting.md](https://github.com/asher/gmlx/blob/main/docs/troubleshooting.md): `gmlx doctor` first, then the common failures, where files are on disk, and how to remove gmlx.
+- [migrating.md](https://github.com/asher/gmlx/blob/main/docs/migrating.md): what transfers from llama.cpp, Ollama and LM Studio.
+- [glossary.md](https://github.com/asher/gmlx/blob/main/docs/glossary.md): the terms the docs use, from GGUF and quant to prefill and depth.
 - [docs/README.md](https://github.com/asher/gmlx/blob/main/docs/README.md): the full index, grouped by what you want to do.
 
 ## Contributing

@@ -88,7 +88,7 @@ it. `gmlx ps` shows the model as kept, `POST /unload` releases it, and
 To give a coding agent the coding intent and keep it resident:
 
 1. Serve a model with tool-calling support; Qwen3.6-27B is the recommended size.
-2. Run `gmlx launch claude-code --model qwen3.6-27b@coding`.
+2. Run `gmlx launch pi --model qwen3.6-27b@coding`.
 3. Leave the session open; the model stays kept until it ends.
 
 ## Authentication
