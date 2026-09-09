@@ -1,14 +1,14 @@
 # gmlx documentation
 
-gmlx runs GGUF models on Apple Silicon: one command to chat, serve, connect
-an agent or talk by voice. This index groups every page by what you want to
-do; the [project README](../README.md) is the overview.
+gmlx runs GGUF models on Apple Silicon. A single command chats, serves,
+connects an agent or talks by voice. This index groups the pages by what
+you want to do. The [project README](../README.md) is the overview.
 
-Start with [getting-started.md](getting-started.md), which covers everything from
-install to a served model with a client connected. Look things up in
-[cli.md](cli.md) for flags, [server-config.md](server-config.md) for config
-keys and [api.md](api.md) for the HTTP API. The
-[glossary](glossary.md) defines the terms the rest of the docs use.
+Start with [getting-started.md](getting-started.md), which takes you from
+install to a served model with a client connected. Look up flags in
+[cli.md](cli.md), config keys in [server-config.md](server-config.md) and
+the HTTP API in [api.md](api.md). The [glossary](glossary.md) defines the
+terms the rest of the docs use.
 
 ## Learn
 
@@ -38,11 +38,11 @@ keys and [api.md](api.md) for the HTTP API. The
 
 | Page | Contains |
 |------|----------|
-| [cli.md](cli.md) | every verb and flag, with defaults and exit codes |
-| [server-config.md](server-config.md) | every key of the YAML config, precedence, profiles, residency |
+| [cli.md](cli.md) | each verb and flag, with defaults and exit codes |
+| [server-config.md](server-config.md) | each key of the YAML config, precedence, profiles, residency |
 | [api.md](api.md) | endpoints, addressing a model, tools, structured output, logprobs, vision, limits |
 | [services.md](services.md) | the speech-to-text, text-to-speech, embeddings and rerank services |
-| [env-vars.md](env-vars.md) | every environment variable a user can set |
+| [env-vars.md](env-vars.md) | the environment variables a user can set |
 | [python.md](python.md) | the Python API: load, generate, bench, preflight |
 | [arch-coverage.md](arch-coverage.md) | the generated table of supported architectures and their caveats |
 | [benchmarks.md](benchmarks.md) | the generated scorecard against llama.cpp, with method |

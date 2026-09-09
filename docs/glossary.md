@@ -11,14 +11,14 @@ See [streaming.md](streaming.md).
 Barge-in. Speaking over the assistant while it is talking. In voice chat
 the reply stops and the new utterance is taken.
 
-Context and depth. Everything currently in the model's input, measured
-in tokens: the conversation so far, pasted files, and the reply in
-progress. Depth is how many tokens are already there, and it is the x axis
-of every benchmark chart because attention cost grows with it.
+Context and depth. Everything currently in the model's input, measured in
+tokens. That includes the conversation so far, pasted files, and the reply
+in progress. Depth is how many tokens are already there. It is the x axis
+of the benchmark charts because attention cost grows with it.
 
 Codec. The GGUF quantization type of one tensor, such as `Q4_K` or
-`IQ2_XXS`. A file mixes codecs across tensors, and every codec in a file
-must have a kernel for the file to load.
+`IQ2_XXS`. A file mixes codecs across tensors. Each codec in a file needs a
+kernel for the file to load.
 
 Drafter. The small predictor speculative decoding uses to propose tokens.
 It is either a head inside the model's own GGUF or a separate companion
@@ -32,8 +32,8 @@ attention, norms, routers and shared experts. Streaming keeps them on the
 GPU and streams only the routed experts.
 
 Expert and MoE. A mixture-of-experts model is built from many small
-sub-networks, of which each token activates a few, so decode costs what the
-active fraction costs. The `A3B` in `35B-A3B` means 3B active parameters.
+sub-networks. Each token activates a few of them, so decode costs only what
+the active fraction costs. The `A3B` in `35B-A3B` means 3B active parameters.
 Because most experts are idle on any token, a MoE bigger than RAM can still
 run by streaming experts from disk.
 
@@ -42,8 +42,8 @@ prefill feeder stages each layer's experts directly from the GGUF into
 GPU-visible slots, and the decode feeder serves decode from the arena.
 
 GGUF. The single-file model format the open-model ecosystem publishes on
-Hugging Face. One file is one ready-to-run model, and a very large model is
-split into numbered shards that gmlx treats as one file. gmlx runs GGUFs
+Hugging Face. A file is a ready-to-run model. A very large model is split
+into numbered shards, which gmlx treats as a single file. gmlx runs GGUFs
 exactly as published, with no conversion.
 
 Governor. The runtime memory watchdog in the server. It watches the
@@ -61,7 +61,7 @@ config. Both are selected the same way, `model@NAME` or `--profile NAME`.
 
 Keep, pin and idle. The three states of a resident model. A pinned model is
 never unloaded. A kept model is exempt from the idle timeout but is unloaded under
-memory pressure; `gmlx launch` and voice sessions keep their model. An idle
+memory pressure. `gmlx launch` and voice sessions keep their model. An idle
 model unloads after `ttl_s` seconds without a request.
 
 KV cache. The model's stored attention state for the context, kept in RAM beside
@@ -70,7 +70,7 @@ barely fits leaves no memory for long conversations. `--kv-bits 8` or
 `--kv-quant-scheme kvarn` compresses it.
 
 K-quant and IQ. The two families of GGUF quantization. K-quants such as
-`Q4_K_M` group weights with per-block scales; IQ quants such as `IQ2_M` use
+`Q4_K_M` group weights with per-block scales. IQ quants such as `IQ2_M` use
 learned codebooks for the smallest files. Both are more accurate per byte
 than a plain affine quantization.
 
@@ -81,17 +81,17 @@ mmproj. A companion GGUF holding a vision or audio tower. Paired with its
 language model GGUF it makes a model that accepts image or audio input. See
 [vlm.md](vlm.md).
 
-Preflight. The checks the loader runs before reading any tensor bytes: the
-architecture gate and every tensor's codec. A file that fails preflight is
-refused with the reason.
+Preflight. The checks the loader runs before reading any tensor bytes. They
+cover the architecture gate and the codec of each tensor. A file that fails
+preflight is refused with the reason.
 
 Prefill and decode. The two phases of answering. Prefill reads the prompt,
 all at once, and decode generates the reply one token at a time. The two
 have different speeds and are reported separately.
 
 Prestage. Reading experts the router is predicted to select before the router runs,
-so the read overlaps compute. It moves bytes only; routing is never
-changed.
+so the read overlaps compute. It moves bytes only and never changes
+routing.
 
 Prompt cache. The server's store of prefilled prefixes. A request that
 shares a prefix with an earlier one, such as a system prompt or the
@@ -126,5 +126,5 @@ Token. The unit models read and write, about three quarters of an English
 word on average. Speeds are quoted in tokens per second.
 
 Wired memory. Memory the GPU has pinned so the kernel cannot page it out.
-Weights and the arena are wired, which is why the server budgets them
-against the machine's working set rather than its total RAM.
+Weights and the arena are wired, so the server budgets them against the
+machine's working set instead of its total RAM.
